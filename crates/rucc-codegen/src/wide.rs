@@ -317,6 +317,7 @@ fn understood(opcode: Opcode) -> bool {
             | Opcode::Jump
             | Opcode::BrIf
             | Opcode::InlineAsm
+            | Opcode::RegisterValue
     )
 }
 
@@ -372,6 +373,11 @@ fn can_split(
     }
     if matches!(data.opcode, Opcode::SIToFP | Opcode::UIToFP | Opcode::FPToSI | Opcode::FPToUI)
         && converted(func, inst).and_then(|format| conversion(width, data.opcode, format)).is_none()
+    {
+        return false;
+    }
+    if data.opcode == Opcode::RegisterValue
+        && !matches!(data.extra, Extra::Symbol(name) if width.half == 32 && next_register(names.resolve(name)).is_some())
     {
         return false;
     }
@@ -723,6 +729,7 @@ fn rewrite(
     let takes = func[data.args].iter().any(|&value| width.is_wide(func[value].ty));
     match data.opcode {
         Opcode::IConst if produces => constant(func, width, halves, inst),
+        Opcode::RegisterValue if produces => register_pair(func, names, width, halves, inst),
         Opcode::Load if produces => load(func, width, halves, inst),
         Opcode::Store if takes => store(func, width, halves, inst),
         Opcode::Add | Opcode::Sub if produces => carried(func, width, halves, inst, data.opcode),
@@ -772,6 +779,69 @@ fn constant(func: &mut Func, width: Width, halves: &mut Halves, inst: Inst) {
     let low = ahead_const(func, width, inst, low);
     let high = ahead_const(func, width, inst, high);
     replace(func, halves, inst, low, high);
+}
+
+/// A `long long` local register variable read where it is declared, which is the register it
+/// names and the one after it. See [`next_register`].
+fn register_pair(
+    func: &mut Func,
+    names: &mut Interner,
+    width: Width,
+    halves: &mut Halves,
+    inst: Inst,
+) {
+    let Extra::Symbol(name) = func[inst].extra else { return };
+    let Some(after) = next_register(names.resolve(name)) else { return };
+    let after = names.intern(&after);
+    let opcode = Opcode::RegisterValue;
+    let low = InstData { extra: Extra::Symbol(name), ..InstData::new(opcode) };
+    let low = written(func, inst, low, width.half());
+    let high = InstData { extra: Extra::Symbol(after), ..InstData::new(opcode) };
+    let high = written(func, inst, high, width.half());
+    replace(func, halves, inst, low, high);
+}
+
+/// The register gcc puts the high half of an i386 `long long` in, given the one its low half is
+/// named in, spelled the way that one was.
+///
+/// gcc numbers the registers `eax`, `edx`, `ecx`, `ebx`, `esi`, `edi`, and a value two registers
+/// wide takes the one it is given and the next. That is how the kernel hands `__put_user_8` its
+/// value in `edx:eax` with `register u64 val asm("%eax")`, and how `__get_user_8` gives one back
+/// in `ecx:edx` with `asm("%edx")`.
+fn next_register(name: &str) -> Option<String> {
+    let (percent, bare) = match name.strip_prefix('%') {
+        Some(bare) => ("%", bare),
+        None => ("", name),
+    };
+    let next = match bare {
+        "eax" => "edx",
+        "edx" => "ecx",
+        "ecx" => "ebx",
+        "ebx" => "esi",
+        "esi" => "edi",
+        _ => return None,
+    };
+    Some(format!("{percent}{next}"))
+}
+
+/// The constraint for the high half of an i386 pair whose low half is written `letters`, when that
+/// names one register: a letter for one, or a register in braces, which is how the front end writes
+/// a local register variable. See [`next_register`].
+fn high_letters(letters: &str) -> Option<String> {
+    if let Some(start) = letters.find('{') {
+        let end = start + letters[start..].find('}')?;
+        let next = next_register(&letters[start + 1..end])?;
+        return Some(format!("{}{{{next}}}{}", &letters[..start], &letters[end + 1..]));
+    }
+    let next = match letters {
+        "a" => "d",
+        "d" => "c",
+        "c" => "b",
+        "b" => "S",
+        "S" => "D",
+        _ => return None,
+    };
+    Some(next.to_owned())
 }
 
 /// The bits of a float as an integer, which is the float stored to a slot of its own and the two
@@ -1682,6 +1752,9 @@ fn paired(func: &Func, names: &Interner, width: Width, inst: Inst) -> Option<(St
                 if letters == "A" {
                     written.push(format!("{prefix}a"));
                     written.push(format!("{prefix}d"));
+                } else if let Some(high) = high_letters(letters) {
+                    written.push((*text).to_owned());
+                    written.push(format!("{prefix}{high}"));
                 } else if !mentions(template, index) {
                     written.push((*text).to_owned());
                     written.push((*text).to_owned());
