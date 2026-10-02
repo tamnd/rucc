@@ -364,7 +364,8 @@ impl Object {
                 Datum::Scalar { ty, value } => Piece::Scalar { ty, value: module[value] },
                 // The address of a name this module knows, with nothing added to it.
                 Datum::Addr(reloc)
-                    if module[reloc].addend == 0 && module.lookup(module[reloc].symbol).is_some() =>
+                    if module[reloc].addend == 0
+                        && module.lookup(module[reloc].symbol).is_some() =>
                 {
                     Piece::Address { symbol: module[reloc].symbol, size: datum.size(module) }
                 }
