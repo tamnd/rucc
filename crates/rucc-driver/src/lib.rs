@@ -759,6 +759,8 @@ pub fn parse_args(args: &[String]) -> Result<Action, CliError> {
         .find_map(|arg| arg.strip_prefix("--target="))
         .and_then(|target| target.parse::<Triple>().ok())
         .map_or(opts.target.arch, |target| target.arch);
+    // Either x86, since `-m32` on an x86-64 target only changes the machine once the loop is done.
+    let x86 = matches!(arch, rucc_target::Arch::X86_64 | rucc_target::Arch::X86);
     // `-fmin-function-alignment=`, which is weighed after the loop against what
     // `-falign-functions` said, in whichever order the two came.
     let mut min_function_align: Option<u32> = None;
@@ -2278,25 +2280,23 @@ pub fn parse_args(args: &[String]) -> Result<Action, CliError> {
             // Where the canary is read from. gcc's default on x86-64 is `%fs:40`, where glibc keeps
             // it, and a kernel moves it into its own per CPU block behind `%gs`, at offset 40 up to
             // 6.12 and at the symbol `__ref_stack_chk_guard` from 6.13 on. `global` is a plain
-            // variable named `__stack_chk_guard`, and then the other three are not read.
-            "-mstack-protector-guard=tls" if arch == rucc_target::Arch::X86_64 => {
+            // variable named `__stack_chk_guard`, and then the other three are not read. On i386
+            // the default is `%gs:20`, and an SMP kernel reads `%fs:__stack_chk_guard`, which is
+            // its per CPU copy.
+            "-mstack-protector-guard=tls" if x86 => {
                 guard_global = false;
             }
-            "-mstack-protector-guard=global" if arch == rucc_target::Arch::X86_64 => {
+            "-mstack-protector-guard=global" if x86 => {
                 guard_global = true;
             }
-            _ if arch == rucc_target::Arch::X86_64
-                && arg.starts_with("-mstack-protector-guard-reg=") =>
-            {
+            _ if x86 && arg.starts_with("-mstack-protector-guard-reg=") => {
                 guard_reg = Some(match &arg["-mstack-protector-guard-reg=".len()..] {
                     "fs" => rucc_target::Segment::Fs,
                     "gs" => rucc_target::Segment::Gs,
                     _ => return Err(err(format!("{arg}: the register is fs or gs"))),
                 });
             }
-            _ if arch == rucc_target::Arch::X86_64
-                && arg.starts_with("-mstack-protector-guard-offset=") =>
-            {
+            _ if x86 && arg.starts_with("-mstack-protector-guard-offset=") => {
                 let text = &arg["-mstack-protector-guard-offset=".len()..];
                 // gcc reads it as C reads a number, so `0x28` is 40 too.
                 let (sign, digits) = text.strip_prefix('-').map_or((1, text), |rest| (-1, rest));
@@ -2309,9 +2309,7 @@ pub fn parse_args(args: &[String]) -> Result<Action, CliError> {
                     err(format!("{arg}: the offset is a number that fits in 32 bits"))
                 })?);
             }
-            _ if arch == rucc_target::Arch::X86_64
-                && arg.starts_with("-mstack-protector-guard-symbol=") =>
-            {
+            _ if x86 && arg.starts_with("-mstack-protector-guard-symbol=") => {
                 let name = &arg["-mstack-protector-guard-symbol=".len()..];
                 if name.is_empty() {
                     return Err(err(format!("{arg}: the symbol has a name")));
@@ -2931,19 +2929,35 @@ pub fn parse_args(args: &[String]) -> Result<Action, CliError> {
     let kernel = opts.code_model == rucc_target::CodeModel::Kernel;
     let moved =
         guard_global || guard_reg.is_some() || guard_offset.is_some() || guard_symbol.is_some();
-    if (moved || kernel) && opts.target.arch == rucc_target::Arch::X86_64 {
+    let i386 = opts.target.arch == rucc_target::Arch::X86;
+    // A global guard in i386 position independent code is reached through `%ebx`, which the check
+    // in the epilogue runs after putting back. Nothing builds that, the kernel included, so it is
+    // refused rather than written wrong. A symbol read through a segment is not: gcc writes its
+    // address into the instruction whatever the position independence, and the kernel's probe
+    // for `%fs` runs with the compiler's default, which is PIE.
+    if i386 && opts.pic != Pic::Absolute && guard_global {
+        return Err(err(
+            "-mstack-protector-guard=global is not supported in i386 position independent code"
+                .to_owned(),
+        ));
+    }
+    if (moved || kernel) && opts.target.arch == rucc_target::Arch::X86_64 || moved && i386 {
         let table = opts.pic == Pic::Library;
-        let fail = "__stack_chk_fail";
-        let reg = if kernel { rucc_target::Segment::Gs } else { rucc_target::Segment::Fs };
+        // The local copy in i386 position independent code, for the reason given below.
+        let local = i386 && opts.pic != Pic::Absolute;
+        let fail = if local { "__stack_chk_fail_local" } else { "__stack_chk_fail" };
+        let reg = if kernel || i386 { rucc_target::Segment::Gs } else { rucc_target::Segment::Fs };
         let reg = guard_reg.unwrap_or(reg);
         opts.guard = Some(if guard_global {
             let symbol = Some("__stack_chk_guard");
             rucc_target::Guard { segment: None, symbol, table, at: 0, fail }
         } else if let Some(name) = guard_symbol {
             let symbol = Some(&*Box::leak(name.to_owned().into_boxed_str()));
+            let table = table && !i386;
             rucc_target::Guard { segment: Some(reg), symbol, table, at: 0, fail }
         } else {
-            rucc_target::Guard::in_segment(reg, guard_offset.unwrap_or(40))
+            let at = guard_offset.unwrap_or(if i386 { 20 } else { 40 });
+            rucc_target::Guard { fail, ..rucc_target::Guard::in_segment(reg, at) }
         });
     }
     // i386 position independent code calls the hidden copy of the failure routine that the C
@@ -8850,6 +8864,45 @@ mod tests {
             let said = refused(&[KERNEL_X86, bad, "-c", "a.c"]);
             assert!(said.starts_with(bad), "{said}");
         }
+    }
+
+    /// An i386 kernel built for SMP reads its canary at `%fs:__stack_chk_guard`, one built without
+    /// SMP reads the plain global, and `gcc-x86_32-has-stack-protector.sh` looks for the `%fs` in
+    /// the first. The default place on i386 is `%gs:20`, so an offset alone stays behind `%gs`.
+    #[test]
+    fn an_i386_kernel_can_move_the_canary() {
+        use rucc_target::{Guard, Segment};
+
+        let guard = |more: &[&str]| {
+            let line =
+                [&["--target=x86_64-unknown-linux-gnu", "-m32", "-fno-pic", "-c", "a.c"], more]
+                    .concat();
+            compile(&line).0.guard
+        };
+        assert_eq!(guard(&[]), None);
+        let smp =
+            ["-mstack-protector-guard-reg=fs", "-mstack-protector-guard-symbol=__stack_chk_guard"];
+        let got = guard(&smp).expect("the guard moved");
+        assert_eq!(
+            (got.segment, got.symbol, got.table, got.fail),
+            (Some(Segment::Fs), Some("__stack_chk_guard"), false, "__stack_chk_fail")
+        );
+        let global = guard(&["-mstack-protector-guard=global"]).expect("the guard moved");
+        assert_eq!((global.segment, global.symbol), (None, Some("__stack_chk_guard")));
+        let offset = ["-mstack-protector-guard-offset=24"];
+        assert_eq!(guard(&offset), Some(Guard::in_segment(Segment::Gs, 24)));
+
+        let line = ["--target=i686-unknown-linux-gnu", "-fPIC", "-mstack-protector-guard=global"];
+        let said = refused(&[&line[..], &["-c", "a.c"]].concat());
+        assert!(said.contains("i386 position independent code"), "{said}");
+        // The kernel's probe runs with the default, which is PIE, and gcc puts the symbol in the
+        // instruction there too.
+        let line = ["--target=i686-unknown-linux-gnu", "-fPIC", "-c", "a.c"];
+        let got = compile(&[&line[..], &smp[..]].concat()).0.guard.expect("the guard moved");
+        assert_eq!(
+            (got.segment, got.symbol, got.table, got.fail),
+            (Some(Segment::Fs), Some("__stack_chk_guard"), false, "__stack_chk_fail_local")
+        );
     }
 
     /// tamnd/rucc#2282. The last choice written wins, and one gcc does not have is refused.
