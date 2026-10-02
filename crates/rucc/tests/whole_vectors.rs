@@ -147,3 +147,66 @@ fn a_whole_vector_operator_without_sse_goes_a_lane_at_a_time() {
     }
     let _ = std::fs::remove_dir_all(&dir);
 }
+
+/// `_mm_loadu_si128` and `_mm_storeu_si128` at an address that is not a multiple of sixteen,
+/// which is zstd's `ZSTD_copy16` word for word. The vector crosses the call in one xmm register,
+/// so the read and the write are each one sixteen byte move, and the aligned form of that move
+/// faults here where the unaligned one does not.
+const UNALIGNED: &str = r"
+#include <emmintrin.h>
+
+__attribute__((noinline)) static void copy16(void *dst, const void *src) {
+  _mm_storeu_si128((__m128i *)dst, _mm_loadu_si128((const __m128i *)src));
+}
+
+int main(void) {
+  unsigned char a[64], b[64];
+  for (int i = 0; i < 64; i++) {
+    a[i] = (unsigned char)i;
+    b[i] = 0;
+  }
+  copy16(b + 3, a + 5);
+  copy16(b + 33, a + 17);
+  for (int i = 0; i < 16; i++)
+    if (b[3 + i] != 5 + i || b[33 + i] != 17 + i)
+      return 1 + i;
+  return b[2] != 0 || b[19] != 0;
+}
+";
+
+#[cfg(all(target_os = "linux", target_arch = "x86_64"))]
+#[test]
+fn a_vector_read_and_written_through_an_unaligned_pointer_does_not_fault() {
+    let dir = dir("unaligned");
+    std::fs::write(dir.join("a.c"), UNALIGNED).expect("the fixture can be written");
+    for level in ["-O0", "-O1", "-O2"] {
+        let (ok, said) = run(&dir, &[level, "a.c", "-o", "prog"]);
+        assert!(ok, "{level}: {said}");
+        let out = Command::new(dir.join("prog")).output().expect("what was linked can be run");
+        assert_eq!(out.status.code(), Some(0), "{level}: a check failed or the copy faulted");
+    }
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// The same copy read as assembly, which is where the aligned move would show on any host.
+#[test]
+fn a_vector_read_and_written_through_an_unaligned_pointer_uses_the_unaligned_move() {
+    let dir = dir("unaligned-asm");
+    std::fs::write(dir.join("a.c"), UNALIGNED).expect("the fixture can be written");
+    for level in ["-O0", "-O2"] {
+        let (ok, said) =
+            run(&dir, &["--target=x86_64-unknown-linux-gnu", level, "-S", "a.c", "-o", "a.s"]);
+        assert!(ok, "{level}: {said}");
+        let asm = std::fs::read_to_string(dir.join("a.s")).expect("a.s was written");
+        let body = asm.split("copy16:").nth(1).expect("copy16 is in the listing");
+        let body = body.split("ret").next().expect("copy16 returns");
+        assert!(body.contains("movdqu"), "{level}: no movdqu in\n{body}");
+        for line in body.lines().filter(|line| line.contains("movaps")) {
+            assert!(
+                line.contains("(%rsp)") || line.contains("(%rbp)"),
+                "{level}: {line} in\n{body}"
+            );
+        }
+    }
+    let _ = std::fs::remove_dir_all(&dir);
+}

@@ -2050,8 +2050,8 @@ mod tests {
                 .expect("every instruction has a rule");
 
         let text = mir::print_func(&out, &names, &REGS);
-        assert!(text.contains("x64.movaps_rm"), "{text}");
-        assert!(text.contains("x64.movaps_mr"), "{text}");
+        assert!(text.contains("x64.movdqu_rm"), "{text}");
+        assert!(text.contains("x64.movdqu_mr"), "{text}");
         assert!(text.contains("x64.arg_val_f128"), "{text}");
         assert!(text.contains("x64.ret_val_f128"), "{text}");
         // In the vector file and not the general purpose one, which is where the two eightbytes
