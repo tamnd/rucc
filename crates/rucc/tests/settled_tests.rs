@@ -100,3 +100,13 @@ fn a_bit_tested_once_is_not_tested_again() {
     let listing = asm("bit", source);
     assert!(!listing.contains("call\twarn"), "the warning is still there:\n{listing}");
 }
+
+/// A field read above a branch and again in one arm of it is read once. The two addresses are two
+/// values, one per block, so the loads are matched on where they point rather than on the address.
+#[test]
+fn a_field_read_again_below_a_branch_is_read_once() {
+    let source = "struct s { int a, b; };\n\
+        int f(struct s *p, int c) { int x = p->b; if (c) return x + p->b * 3; return x; }\n";
+    let listing = asm("field", source);
+    assert_eq!(listing.matches("4(%rdi)").count(), 1, "the field is read twice:\n{listing}");
+}

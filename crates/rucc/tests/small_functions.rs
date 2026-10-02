@@ -95,3 +95,25 @@ fn an_asm_written_inline_weighs_one() {
     assert_eq!(calls(&asm("inline", &["-O2"], &source("inline")), "mark"), 0);
     assert_eq!(calls(&asm("plain", &["-O2"], &source("volatile")), "mark"), 2);
 }
+
+/// Each call is one and one for each argument and for a result something reads, so three calls,
+/// a load and a test are over the limit, as `call_netdevice_notifiers_info` is in the kernel.
+#[test]
+fn a_call_weighs_its_arguments_too() {
+    let source = "struct net { int chain; };\n\
+        struct dev { struct net *net; };\n\
+        struct info { struct dev *dev; };\n\
+        int locked(void);\n\
+        void trap(void *, const char *, int);\n\
+        int chain_call(int *, unsigned long, struct info *);\n\
+        extern int global_chain;\n\
+        int notify(unsigned long val, struct info *info) {\n\
+            struct net *net = info->dev->net;\n\
+            if (__builtin_expect(!locked(), 0)) trap(0, \"f\", 1);\n\
+            int ret = chain_call(&net->chain, val, info);\n\
+            if (ret & 0x8000) return ret;\n\
+            return chain_call(&global_chain, val, info);\n\
+        }\n\
+        int use(struct info *i) { return notify(2, i) + 1; }\n";
+    assert_eq!(calls(&asm("args", &["-O2"], source), "notify"), 1);
+}

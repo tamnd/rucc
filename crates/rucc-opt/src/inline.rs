@@ -1007,7 +1007,8 @@ fn folded_size(
                 _ => false,
             };
             if !costless {
-                work += weighed.map_or(1, |names| weight(func, inst, names));
+                let read = data.results().any(|result| readers.contains_key(&result));
+                work += weighed.map_or(1, |names| weight(func, inst, names, read));
             }
         }
     }
@@ -1015,17 +1016,27 @@ fn folded_size(
 }
 
 /// What gcc's `estimate_num_insns` charges for an instruction when it weighs a body by size, for
-/// the two kinds where that is not one.
+/// the kinds where that is not one.
 ///
-/// A switch is two for each label, the default included and a run of cases that go to the same
+/// A call is one, or three through a pointer, and one more for each argument passed and for the
+/// result when something reads it, since each of those is a move to gcc. `call_netdevice_notifiers_info`
+/// in net/core/dev.c is three calls, a load and a test, which is twenty eight to gcc and stays a
+/// call in its thirty callers. A switch is two for each label, the default included and a run of cases that go to the same
 /// place counted once, since gcc expects a compare and a branch for each. An `asm` is one for each
 /// line of its template, a `;` ending a line as much as a newline does, and one at most when it is
 /// written `asm inline`, which is what the kernel writes for the ones that only add to a section.
 /// `nl80211_chan_width_to_mhz` in net/wireless/chan.c is a switch of ten labels and two such
 /// annotations, which is thirty one to gcc and too large to copy without being asked.
-fn weight(func: &Func, inst: Inst, names: &Interner) -> usize {
+fn weight(func: &Func, inst: Inst, names: &Interner, read: bool) -> usize {
     let data = &func[inst];
     match (data.opcode, data.extra) {
+        (Opcode::Call | Opcode::CallIndirect | Opcode::TailCall, Extra::Call(at)) => {
+            let through = data.opcode == Opcode::CallIndirect
+                || (data.opcode == Opcode::TailCall && func[at].callee.is_none());
+            let passed = func[data.args].len() - usize::from(through);
+            let call = if through { 3 } else { 1 };
+            call + passed + usize::from(read)
+        }
         (Opcode::Switch, Extra::Switch(at)) => {
             let info = func[at];
             let targets = &func[info.targets];
