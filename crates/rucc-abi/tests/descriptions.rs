@@ -25,8 +25,8 @@ use rucc_abi::abis::{
     for_convention, for_target,
 };
 use rucc_abi::{
-    AbiDescription, Arg, Banks, Cleanup, Convention, Format, Narrow, Pass, ReturnPointer, Rule,
-    Scalar, Scalars, Short, Slot, StackArgs, Test, Travel, Variadic, pieces, record,
+    AbiDescription, Arg, Banks, BitInts, Cleanup, Convention, Format, Narrow, Pass, ReturnPointer,
+    Rule, Scalar, Scalars, Short, Slot, StackArgs, Test, Travel, Variadic, pieces, record,
 };
 use rucc_tuple::{TARGETS, TargetEntry};
 
@@ -361,6 +361,7 @@ static S390X_ELF: AbiDescription = AbiDescription {
     variadic: Variadic::SameAsFixed,
     stack_args: StackArgs::RegisterSized,
     narrow: Narrow::Unspecified,
+    bit_ints: BitInts::Untaught,
     cleanup: Cleanup::Caller,
 };
 

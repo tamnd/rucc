@@ -38,18 +38,32 @@
 //! count that is a constant is already in range and is left alone, which is what every shift a C
 //! program writes at these widths turns out to be.
 //!
-//! # What it does not do
+//! # What crosses the boundary
 //!
-//! A function whose signature has one of these widths in it, a call that passes or returns one,
-//! and anything else that touches one is left exactly as it was, and the selector then refuses the
-//! function by name the way it does today. The reason is the boundary rather than the arithmetic:
-//! the psABI says a `_BitInt(40)` argument arrives extended, and which extension it is depends on
-//! whether the type was signed, which is a fact the IR deliberately does not carry because the
-//! signedness of an integer lives on the operation there and not on the type. That belongs in the
-//! ABI lowering, where the C type is still in hand. `tamnd/rucc#425` is the issue for it.
+//! A parameter, a return value and an argument of a call are agreed with code this compilation is
+//! not looking at, and the agreement is the ABI's rather than this file's. Where the ABI says the
+//! bits above a `_BitInt` in its register are anything, which is [`BitInts::SpareBits`] and the
+//! x86-64 psABI, the agreement is the one this pass already keeps: the value crosses in the
+//! register that holds it, the side that sends it owes nothing above its own bits, and the side
+//! that receives it reads only those. So the signatures are widened with everything else and
+//! nothing is shaped on the way across. gcc 16.2.0 keeps the same agreement from its side, which
+//! is what makes the two compilers' halves of one call agree.
+//!
+//! Where the ABI has not been taught, which is every other one today, a function with one of
+//! these widths at its own boundary or at a call's is left exactly as it was, and the selector
+//! refuses it by name. RISC-V extends a `_BitInt` to the whole register and AAPCS64 has a section
+//! of its own for it, and neither is the answer above. `tamnd/rucc#425` is the issue for them.
+//!
+//! A `_BitInt` wider than sixty four bits reaches here at a boundary only on those ABIs as well.
+//! The x86-64 psABI passes one as a structure of `long`s, which is a question about the C type and
+//! is answered in `rucc-lower`, so what this pass sees there is two `i64`s and not an `i65`.
 
 use rucc_base::Idx;
-use rucc_ir::{Def, Extra, Flags, Func, Imm, Inst, InstData, IntPred, Opcode, Type, Value};
+use rucc_ir::{
+    CallInfo, Def, Extra, Flags, Func, Imm, Inst, InstData, IntPred, Opcode, Param, Signature,
+    Type, Value,
+};
+use rucc_target::{BitInts, CallRegs};
 
 /// The width a value of this type is kept in, and [`None`] when the machine has one already.
 ///
@@ -120,7 +134,10 @@ fn understood(opcode: Opcode) -> bool {
 /// something at such a width is reached by an instruction this does not understand, which is the
 /// second half of why the answer is a boolean. Leaving it alone is what makes the selector's
 /// refusal the thing a user sees, rather than a rewrite that guessed.
-pub fn integers(func: &mut Func) -> bool {
+///
+/// `conv` is the convention of the function, through which the convention of each call it makes
+/// is found, and it is what says whether a width may cross either boundary.
+pub fn integers(func: &mut Func, conv: &CallRegs) -> bool {
     let narrow: Vec<Option<u32>> = func
         .values()
         .map(|value| container(func[value].ty).map(|_| func[value].ty.bits()))
@@ -128,12 +145,13 @@ pub fn integers(func: &mut Func) -> bool {
     if narrow.iter().all(Option::is_none) {
         return false;
     }
-    if !every_width_is_one_the_signature_has(func) {
+    if !every_crossing_is_taught(func, conv) {
         return false;
     }
 
     let insts: Vec<Inst> = func.blocks().flat_map(|block| func.insts(block)).collect();
-    if !insts.iter().all(|&inst| touches_nothing_it_does_not_understand(func, &narrow, inst)) {
+    if !insts.iter().all(|&inst| touches_nothing_it_does_not_understand(func, &narrow, conv, inst))
+    {
         return false;
     }
 
@@ -153,35 +171,102 @@ pub fn integers(func: &mut Func) -> bool {
             constant(func, &narrow, inst);
         }
     }
-    for inst in insts {
+    for &inst in &insts {
         rewrite(func, &narrow, inst);
+    }
+    // The signatures last, since nothing above reads them. A call is given a signature of its own
+    // rather than having the one it names changed in place, because a signature can be named by
+    // more than one call and the function's own is the first of them.
+    let own = widened(func.signature());
+    func.set_signature(own);
+    for inst in insts {
+        let Extra::Call(info) = func[inst].extra else { continue };
+        let call = func[info];
+        if !crosses(&func[call.signature]) {
+            continue;
+        }
+        let wide = widened(&func[call.signature]);
+        let signature = func.add_signature(wide);
+        func[inst].extra = Extra::Call(func.add_call(CallInfo { signature, ..call }));
     }
     true
 }
 
-/// Whether nothing at one of these widths crosses the function's own boundary.
+/// The same signature with every width the machine has no register for put into the one that
+/// holds it.
+fn widened(signature: &Signature) -> Signature {
+    let widen = |param: &Param| match container(param.ty) {
+        Some(held) => Param { ty: Type::int(held), ..*param },
+        None => *param,
+    };
+    Signature {
+        params: signature.params.iter().map(widen).collect(),
+        returns: signature.returns.iter().map(widen).collect(),
+        ..signature.clone()
+    }
+}
+
+/// Whether a signature has one of these widths among what it takes or gives back.
+fn crosses(signature: &Signature) -> bool {
+    signature
+        .params
+        .iter()
+        .chain(signature.returns.iter())
+        .any(|param| container(param.ty).is_some())
+}
+
+/// Whether a value at one of these widths may cross a boundary made with this signature.
 ///
-/// A parameter and a return value are the two places a width is agreed with something this
-/// compilation is not looking at, so a width the ABI has not been taught is a width this pass
-/// leaves for the ABI to be taught about. The entry block's parameters are asked as well as the
-/// signature's, because they are the same list said twice and this pass would rather notice the
-/// day they stop being.
-fn every_width_is_one_the_signature_has(func: &Func) -> bool {
-    let signature = func.signature();
-    let crossing = signature.params.iter().chain(signature.returns.iter());
-    if crossing.map(|param| param.ty).any(|ty| container(ty).is_some()) {
+/// The signature names its own convention, and a function of one convention calls functions of
+/// the other, so it is that convention's ABI that is asked. A convention the platform does not
+/// have is one nothing is known about.
+fn taught(signature: &Signature, conv: &CallRegs) -> bool {
+    conv.under(signature.convention).is_some_and(|conv| conv.abi.bit_ints == BitInts::SpareBits)
+}
+
+/// Whether every one of these widths at a boundary is at one whose ABI has been taught.
+///
+/// The function's own signature and every signature its calls name are the places a width is
+/// agreed with something this compilation is not looking at. The entry block's parameters are
+/// asked as well as the signature's, because they are the same list said twice and this pass
+/// would rather notice the day they stop being.
+fn every_crossing_is_taught(func: &Func, conv: &CallRegs) -> bool {
+    if !func.signatures().all(|signature| !crosses(signature) || taught(signature, conv)) {
         return false;
     }
     let Some(entry) = func.entry() else { return true };
-    func[entry].params.iter().all(|&value| container(func[value].ty).is_none())
+    taught(func.signature(), conv)
+        || func[entry].params.iter().all(|&value| container(func[value].ty).is_none())
 }
 
 /// Whether every value at one of these widths that this instruction touches is one it can handle.
-fn touches_nothing_it_does_not_understand(func: &Func, narrow: &[Option<u32>], inst: Inst) -> bool {
+///
+/// A return, a call and a `va_arg` are a boundary rather than arithmetic, and are understood where
+/// the ABI of the signature they cross has been taught. A call is asked about its own signature rather than
+/// being covered by [`every_crossing_is_taught`], because an argument past a `...` is at a width
+/// no signature names.
+fn touches_nothing_it_does_not_understand(
+    func: &Func,
+    narrow: &[Option<u32>],
+    conv: &CallRegs,
+    inst: Inst,
+) -> bool {
     let data = &func[inst];
     let touched = results(func, inst).any(|value| at(narrow, value).is_some())
         || func[data.args].iter().any(|&value| at(narrow, value).is_some());
-    !touched || understood(data.opcode)
+    if !touched || understood(data.opcode) {
+        return true;
+    }
+    match (data.opcode, data.extra) {
+        // What comes off a variable argument list crossed a call to get there, and it is read
+        // as the register or the word it travelled in, with whatever the caller left above it.
+        // The list was made under the function's own convention, so that is the one asked.
+        (Opcode::Return | Opcode::VaArg, _) => taught(func.signature(), conv),
+        (Opcode::Call | Opcode::CallIndirect | Opcode::TailCall, Extra::Call(info)) => {
+            taught(&func[func[info].signature], conv)
+        }
+        _ => false,
+    }
 }
 
 /// The narrow width a value had before it was widened, and [`None`] for one that was never narrow.
@@ -471,6 +556,7 @@ fn becomes(func: &mut Func, inst: Inst, opcode: Opcode, args: &[Value]) {
 mod tests {
     use rucc_base::Interner;
     use rucc_ir::{Builder, Flags, Func, IntPred, Module, Opcode, Signature, Type};
+    use rucc_target::x86_64::{SYSV, WIN64};
     use rucc_target::{Arch, Env, Os, TargetInfo, Triple};
 
     use super::{container, integers};
@@ -528,7 +614,7 @@ mod tests {
         let answer = build.unary(Opcode::Trunc, wide, Type::int(32));
         build.ret(&[answer]);
 
-        assert!(integers(&mut func), "there is a width to widen");
+        assert!(integers(&mut func, &SYSV), "there is a width to widen");
         let text = printed(&func, &mut names);
         assert!(!text.contains("i40"), "no forty bit value is left: {text}");
         // The widening became the mask, because both widths are held in the same register and
@@ -560,7 +646,7 @@ mod tests {
         let answer = build.unary(Opcode::Trunc, shifted, Type::int(32));
         build.ret(&[answer]);
 
-        assert!(integers(&mut func), "there is a width to widen");
+        assert!(integers(&mut func, &SYSV), "there is a width to widen");
         let text = printed(&func, &mut names);
         assert!(!text.contains("i40"), "no forty bit value is left: {text}");
         // A shift up by twenty four and back down, which is what putting the sign of a forty bit
@@ -589,7 +675,7 @@ mod tests {
             let answer = build.unary(Opcode::ZExt, same, Type::int(32));
             build.ret(&[answer]);
 
-            assert!(integers(&mut func), "there is a width to widen");
+            assert!(integers(&mut func, &SYSV), "there is a width to widen");
             let text = printed(&func, &mut names);
             assert!(!text.contains("i33"), "no thirty three bit value is left: {text}");
             assert_eq!(text.matches(" = and ").count(), 1, "{pred:?} masks once: {text}");
@@ -617,7 +703,7 @@ mod tests {
         let answer = build.unary(Opcode::ZExt, negative, Type::int(32));
         build.ret(&[answer]);
 
-        assert!(integers(&mut func), "there is a width to widen");
+        assert!(integers(&mut func, &SYSV), "there is a width to widen");
         let text = printed(&func, &mut names);
         assert!(!text.contains("i65"), "no sixty five bit value is left: {text}");
         assert!(text.contains("sext.i128"), "the widening is to the pair: {text}");
@@ -644,7 +730,7 @@ mod tests {
             let answer = build.unary(Opcode::Trunc, back, Type::int(32));
             build.ret(&[answer]);
 
-            assert!(integers(&mut func), "{to:?} is understood");
+            assert!(integers(&mut func, &SYSV), "{to:?} is understood");
             let text = printed(&func, &mut names);
             assert!(!text.contains("i40"), "no forty bit value is left: {text}");
             assert_eq!(
@@ -655,22 +741,52 @@ mod tests {
         }
     }
 
-    #[test]
-    fn a_width_that_crosses_the_boundary_is_left_for_the_abi() {
-        let mut names = Interner::new();
+    /// `_BitInt(40) f(_BitInt(40) x) { return g(x) + 1; }`, with `g` defined somewhere else.
+    fn crossing(names: &mut Interner) -> Func {
         let narrow = Type::int(40);
-        let mut func = Func::new(
-            names.intern("f"),
-            Signature::new().with_params(&[narrow]).with_returns(&[narrow]),
-        );
+        let signature = Signature::new().with_params(&[narrow]).with_returns(&[narrow]);
+        let mut func = Func::new(names.intern("f"), signature.clone());
+        let g = func.add_signature(signature);
+        let callee = names.intern("g");
         let entry = func.create_block();
         let x = func.append_param(entry, narrow);
+        let call = Builder::new(&mut func, entry).call(callee, g, &[x]);
+        let got = func[call].results().next().expect("the call gives back a value");
         let mut build = Builder::new(&mut func, entry);
         let one = build.iconst(narrow, 1);
-        let sum = build.binary(Opcode::Add, x, one, Flags::NONE);
+        let sum = build.binary(Opcode::Add, got, one, Flags::NONE);
         build.ret(&[sum]);
+        func
+    }
 
-        assert!(!integers(&mut func), "a parameter at that width is not this pass's to move");
+    /// On x86-64 the bits above a `_BitInt` in its register are anything both ways, which is the
+    /// agreement this pass keeps already, so the signatures are widened with everything else and
+    /// nothing is shaped on the way across.
+    #[test]
+    fn a_width_that_crosses_a_boundary_crosses_in_its_register_where_the_abi_says_so() {
+        let mut names = Interner::new();
+        let mut func = crossing(&mut names);
+        assert!(integers(&mut func, &SYSV), "the psABI has been taught");
+        let text = printed(&func, &mut names);
+        assert!(!text.contains("i40"), "no forty bit value is left: {text}");
+        let own = func.signature();
+        assert_eq!(own.params[0].ty, Type::int(64), "the parameter is held in a register");
+        assert_eq!(own.returns[0].ty, Type::int(64), "and so is what comes back");
+        assert!(
+            func.signatures()
+                .skip(1)
+                .any(|sig| sig.params.first().is_some_and(|param| param.ty == Type::int(64))),
+            "the call is made with the widened signature: {text}"
+        );
+        assert!(!text.contains(" = and "), "nothing is shaped on the way across: {text}");
+    }
+
+    /// Windows has not been taught, so the function is left for the selector to refuse.
+    #[test]
+    fn a_width_that_crosses_a_boundary_the_abi_was_not_taught_is_left_alone() {
+        let mut names = Interner::new();
+        let mut func = crossing(&mut names);
+        assert!(!integers(&mut func, &WIN64), "a boundary nobody taught this is not its to move");
         let text = printed(&func, &mut names);
         assert!(text.contains("i40"), "the function is exactly as it was: {text}");
     }
@@ -688,7 +804,7 @@ mod tests {
         let answer = build.unary(Opcode::Trunc, counted, Type::int(32));
         build.ret(&[answer]);
 
-        assert!(!integers(&mut func), "an opcode this has not thought about stops it");
+        assert!(!integers(&mut func, &SYSV), "an opcode this has not thought about stops it");
         let text = printed(&func, &mut names);
         assert!(text.contains("i40"), "the function is exactly as it was: {text}");
     }
@@ -701,6 +817,6 @@ mod tests {
         let value = build.iconst(Type::int(32), 3);
         build.ret(&[value]);
 
-        assert!(!integers(&mut func), "there is nothing to widen");
+        assert!(!integers(&mut func, &SYSV), "there is nothing to widen");
     }
 }

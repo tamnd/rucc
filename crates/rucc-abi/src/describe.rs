@@ -75,6 +75,8 @@ pub struct AbiDescription {
     pub stack_args: StackArgs,
     /// What an integer narrower than an `int` has above it in the register it travels in.
     pub narrow: Narrow,
+    /// What a `_BitInt` of a width no register has holds above it in the register it travels in.
+    pub bit_ints: BitInts,
     /// Who takes the arguments in the argument area off the stack once the call is over.
     pub cleanup: Cleanup,
 }
@@ -259,6 +261,23 @@ pub enum Narrow {
     /// `ret`, trusting the caller to have cleared bits 8 to 31, and its caller of a function
     /// returning `unsigned char` compares all of `w0` without clearing them itself.
     ToInt,
+}
+
+/// What the bits above a `_BitInt` narrower than its register are when it travels in one.
+///
+/// A separate question from [`Narrow`], because the documents answer it separately. RISC-V
+/// leaves the bits above a `char` alone and extends a `_BitInt(N)` to the whole register, and
+/// AAPCS64 has a `_BitInt` section of its own that is not the one for `char`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum BitInts {
+    /// Anything, both ways. The side that receives the value reads only its own bits, and the
+    /// side that sends it owes nothing above them. The x86-64 psABI, and gcc 16.2.0 does what it
+    /// says: its callee of `f(unsigned _BitInt(37))` masks the argument before it divides, and its
+    /// caller of a function returning `_BitInt(7)` reads only the low seven bits of `al`.
+    SpareBits,
+    /// The rule has not been taught here, so a function with one at its boundary is refused by
+    /// name rather than compiled to an agreement nobody checked. tamnd/rucc#425 is the issue.
+    Untaught,
 }
 
 /// How arguments that did not get a register sit in the argument area.
