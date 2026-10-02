@@ -612,6 +612,25 @@ impl<'a> Ranges<'a> {
                 let counted = args.first().map_or(width, |&arg| self.func[arg].ty.bits());
                 Range::between(0, u128::from(counted), width)
             }
+            // Either arm, each narrowed by what the condition says on its side. `min(count, 66)`
+            // is a select of `count` where `count < 66` holds and of 66 where it does not, so it
+            // is `[0, 66]`. That is what lets the kernel's `copy_from_user` of a clamped length
+            // drop its `WARN_ON_ONCE(bytes > INT_MAX)`, as gcc's ranges drop it.
+            Opcode::Select => {
+                let (Some(&cond), Some(block)) = (args.first(), block) else {
+                    return Range::of(ty);
+                };
+                let depth = self.options.logical_depth;
+                let arm = |this: &mut Self, index: usize, taken: bool| {
+                    let range = operand(this, index);
+                    let fact = args
+                        .get(index)
+                        .and_then(|&arg| this.condition_fact(cond, taken, arg, block, depth));
+                    fact.map_or(range, |fact| range.intersect(fact))
+                };
+                let (a, b) = (arm(self, 1, true), arm(self, 2, false));
+                if a.width() != b.width() { Range::of(ty) } else { a.union(b) }
+            }
             _ => Range::of(ty),
         }
     }
@@ -852,10 +871,42 @@ impl<'a> Ranges<'a> {
         if depth == 0 || known.is_full() {
             return None;
         }
+        // A parameter of a block only one block jumps to is the value that block passes, which
+        // is how an inlined body hands back what it returned until the graph is cleaned up.
+        if let Def::Param { block: to, index } = self.func[subject].def {
+            let [from] = self.cfg.predecessors(to) else { return None };
+            let arg = argument(self.func, *from, to, index as usize)?;
+            return self.carry_back(arg, known, value, block, depth - 1);
+        }
         let Def::Result { inst, .. } = self.func[subject].def else { return None };
         let data = self.func[inst];
         let args: Vec<Value> = self.func[data.args].to_vec();
         let (&left, right) = (args.first()?, args.get(1).copied());
+        // An `and` with a constant and a truncation say nothing about an interval of their
+        // operand, only about some of its bits: the ones the mask keeps, or the low ones. That is
+        // still enough for the same test made again to be settled. `netmem_is_net_iov` is `n & 1`,
+        // and `skb_frag_page` tests it and then calls `netmem_to_page`, which tests it again under
+        // a `WARN_ON_ONCE` that gcc's ranges see can never fire.
+        let kept = match data.opcode {
+            Opcode::And => match (right.and_then(|right| self.constant(right)), right) {
+                (Some(mask), _) => Some((left, mask)),
+                (None, Some(right)) => self.constant(left).map(|mask| (right, mask)),
+                (None, None) => None,
+            },
+            Opcode::Trunc => Some((left, crate::range::Bits::unknown(known.width()).max())),
+            _ => None,
+        };
+        if let Some((operand, mask)) = kept {
+            let width = self.func[operand].ty.bits();
+            let bits = known.bits();
+            let fixed = mask & bits.known(known.width());
+            if fixed == 0 {
+                return None;
+            }
+            let bits = crate::range::Bits::from_parts(bits.value() & fixed, !fixed, width);
+            let back = Range::full(width).narrow(bits);
+            return self.carry_back(operand, back, value, block, depth - 1);
+        }
         let steps: Vec<(Value, Undo, Option<Value>)> = match data.opcode {
             // Addition is the same undo both ways round, since either operand is the result less
             // the other one. Subtraction is not, and section 10.4's inverse for its right operand
@@ -1129,6 +1180,54 @@ mod tests {
         assert_eq!(bounds(ranges.of(counted)), Some((0, 32)));
         assert!(ranges.of(squared).is_full());
         assert_eq!(ranges.counts().losses(), vec![(Opcode::Mul, 1)]);
+    }
+
+    /// `x < 66 ? x : 66` is `min(x, 66)`, which for an unsigned `x` is `[0, 66]`, and each arm is
+    /// narrowed by the condition on its own side only.
+    #[test]
+    fn a_select_is_either_arm_narrowed_by_its_condition() {
+        let (mut func, args, blocks) = shape(1, 1);
+        let mut build = Builder::new(&mut func, blocks[0]);
+        let limit = build.iconst(I32, 66);
+        let below = build.icmp(IntPred::Ult, args[0], limit);
+        let least = build.select(below, args[0], limit);
+        let above = build.icmp(IntPred::Ugt, args[0], limit);
+        let either = build.select(above, args[0], limit);
+        build.ret(&[]);
+        let asked = Asked::new(func);
+        let mut ranges = asked.ranges();
+        assert_eq!(bounds(ranges.of(least)), Some((0, 66)));
+        assert!(!ranges.of(either).signed_bounds().is_some_and(|(_, most)| most <= 66));
+    }
+
+    /// `(int)(x & 1)` tested once, handed through a block parameter the way an inlined body
+    /// returns it, settles the same test made again from `x` on the edge where it was false.
+    #[test]
+    fn a_masked_bit_tested_once_is_known_on_the_edge_after() {
+        let mut names = Interner::new();
+        let wide = Type::int(64);
+        let mut func = Func::new(names.intern("f"), Signature::new().with_params(&[wide]));
+        let blocks: Vec<Block> = (0..4).map(|_| func.create_block()).collect();
+        let x = func.append_param(blocks[0], wide);
+        let passed = func.append_param(blocks[1], I32);
+        let mut build = Builder::new(&mut func, blocks[0]);
+        let one = build.iconst(wide, 1);
+        let low = build.binary(Opcode::And, x, one, Flags::NONE);
+        let bit = build.unary(Opcode::Trunc, low, I32);
+        build.jump(blocks[1], &[bit]);
+        let mut build = Builder::new(&mut func, blocks[1]);
+        let zero = build.iconst(I32, 0);
+        let set = build.icmp(IntPred::Ne, passed, zero);
+        build.br_if(set, blocks[2], &[], blocks[3], &[]);
+        Builder::new(&mut func, blocks[2]).ret(&[]);
+        let mut build = Builder::new(&mut func, blocks[3]);
+        let one = build.iconst(wide, 1);
+        let again = build.binary(Opcode::And, x, one, Flags::NONE);
+        let again = build.unary(Opcode::Trunc, again, I32);
+        build.ret(&[]);
+        let asked = Asked::new(func);
+        let mut ranges = asked.ranges();
+        assert_eq!(ranges.at(again, blocks[3]).singleton(), Some(0));
     }
 
     /// `if (x < bound)` on a parameter, with the two arms in blocks one and two.

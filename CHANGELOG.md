@@ -11,6 +11,7 @@ All notable changes are recorded here. The format follows [Keep a Changelog](htt
 
 ### Changed
 
+- The value ranges now see through a `select`, with each arm narrowed by what the condition says on its side, so `min(count, 66)` is `[0, 66]`. They also carry what a test of `x & mask` or of a truncated `x` says about the bits of `x`, and follow a block parameter back to the one value passed to it. In the kernel this drops the `WARN_ON_ONCE(bytes > INT_MAX)` in a `copy_from_user` of a clamped length, and the second test of `netmem_is_net_iov` that `skb_frag_page` makes through `netmem_to_page`, as gcc drops both. On the x86-64 defconfig build the differences from gcc go from 956 to 917.
 - A `long long` shifted by a constant on i386, or an `__int128` on x86-64, is the two halves moved by that much. Before, it went through the shift by a variable, which tests the count and picks an answer with a `cmov`, so `x >> 32` was eleven instructions where it is now the high half and none.
 - The simplifier makes the rule matcher's two lists once per run rather than for every table and plan it tries on every instruction, which takes about 3% off an optimized build of jtckdint when it goes through the portable code rather than `<stdckdint.h>` (#2649).
 - Lowering reads the arguments of each rule into a list it reuses and hands the operands to the builder without copying them into another, which takes about 1% off a build of jtckdint at `-O0` and about 0.5% at `-O2` when it goes through the portable code rather than `<stdckdint.h>` (#2658).
