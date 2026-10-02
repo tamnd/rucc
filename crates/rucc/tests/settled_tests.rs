@@ -110,3 +110,32 @@ fn a_field_read_again_below_a_branch_is_read_once() {
     let listing = asm("field", source);
     assert_eq!(listing.matches("4(%rdi)").count(), 1, "the field is read twice:\n{listing}");
 }
+
+/// `__schedstats_from_dl_se` returns `NULL` for a server and `&dl_task_of(dl_se)->stats`
+/// otherwise, and its caller tests the pointer and calls `dl_task_of` again. Both `BUG_ON`s test
+/// a bit the code above already found clear, once straight after the test and once past the join
+/// on the pointer.
+#[test]
+fn a_bit_tested_before_a_join_is_still_known_after_it() {
+    let source = "struct se { unsigned long long rt; unsigned int thr : 1, srv : 1, def : 1; };\n\
+        struct stats { long w; };\n\
+        struct task { long pad[8]; struct stats st; long more[4]; struct se dl; };\n\
+        extern int stats_on;\n\
+        void wait_start(struct task *p, struct stats *s);\n\
+        static inline int dl_server(struct se *se) { return se->srv; }\n\
+        static inline struct task *task_of(struct se *se) {\n\
+            if (__builtin_expect(dl_server(se), 0)) __builtin_trap();\n\
+            return (struct task *)((char *)se - __builtin_offsetof(struct task, dl));\n\
+        }\n\
+        static inline __attribute__((always_inline)) struct stats *from(struct se *se) {\n\
+            if (!stats_on) return 0;\n\
+            if (dl_server(se)) return 0;\n\
+            return &task_of(se)->st;\n\
+        }\n\
+        void f(struct se *se) {\n\
+            struct stats *s = from(se);\n\
+            if (s) wait_start(task_of(se), s);\n\
+        }\n";
+    let listing = asm("join", source);
+    assert!(!listing.contains("ud2"), "a trap is still there:\n{listing}");
+}

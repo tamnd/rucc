@@ -1215,9 +1215,24 @@ fn compared(func: &Func, value: Value, subst: &Bindings) -> Option<bool> {
     }
     let Extra::IntPred(pred) = data.extra else { return None };
     let args = &func[data.args];
-    let (lhs, ty) = constant(func, resolve(subst, *args.first()?))?;
-    let (rhs, _) = constant(func, resolve(subst, *args.get(1)?))?;
+    let (lhs, ty) = numbered(func, resolve(subst, *args.first()?))?;
+    let (rhs, _) = numbered(func, resolve(subst, *args.get(1)?))?;
     Some(crate::fold::compare(pred, lhs, rhs, ty))
+}
+
+/// The constant this value is, or the constant a pointer made from one is, which is how a null
+/// pointer is written. An inlined function returning `NULL` on some paths hands the caller a
+/// block parameter that is that pointer along those edges, and `if (p)` in the caller is decided
+/// on each of them. `__schedstats_from_dl_se` in kernel/sched/deadline.c is that shape.
+fn numbered(func: &Func, value: Value) -> Option<(Imm, Type)> {
+    if let Some(found) = constant(func, value) {
+        return Some(found);
+    }
+    let Def::Result { inst, .. } = func[value].def else { return None };
+    if func[inst].opcode != Opcode::IntToPtr {
+        return None;
+    }
+    constant(func, *func[func[inst].args].first()?)
 }
 
 #[cfg(test)]
