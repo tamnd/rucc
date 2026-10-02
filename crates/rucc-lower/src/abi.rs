@@ -26,7 +26,7 @@ use rucc_ir::{Abi, Drains, Float, Param, Signature, Type};
 use rucc_target::{
     Arg, Call, Convention, Kind, Narrow, Pass, Piece, Scalar, Shape, Slot, TargetInfo,
 };
-use rucc_tuple::Arch;
+use rucc_tuple::{Arch, Os};
 use rucc_types::{ArrayLen, TypeId, TypeKind, Types, float_format, layout};
 
 use crate::repr;
@@ -418,6 +418,9 @@ pub(crate) fn shape(types: &Types, target: &TargetInfo, ty: TypeId) -> Option<Sh
     if matches!(types.kind(id), TypeKind::Void) {
         return Some(Shaped::Void);
     }
+    if let Some(chunks) = chunks(types, target, id) {
+        return Some(chunks);
+    }
     if let Some(scalar) = scalar(types, target, id) {
         return Some(Shaped::Scalar(scalar));
     }
@@ -433,6 +436,39 @@ pub(crate) fn shape(types: &Types, target: &TargetInfo, ty: TypeId) -> Option<Sh
     pieces.dedup();
     let complex = matches!(types.kind(id), TypeKind::Complex(_));
     Some(Shaped::Aggregate { size, align, pieces, complex })
+}
+
+/// A `_BitInt` wider than a register, as the x86-64 psABI reads it, and [`None`] for anything
+/// else.
+///
+/// The psABI says a `_BitInt(N)` wider than sixty four bits is classified as if it were a
+/// structure of `long`s, as many as it takes. That is not the rule an `__int128` has, though the
+/// two are the same size up to a hundred and twenty eight bits: the `_BitInt` is aligned to eight
+/// rather than sixteen, so when it does not get its pair of registers it sits in the argument
+/// area at the next eight byte boundary rather than the next sixteen. gcc 16.2.0 agrees, with
+/// `_Alignof(_BitInt(65))` and `_Alignof(_BitInt(128))` both eight. Asked as a scalar, the
+/// classification would give it the `__int128` answer, so it is asked as the structure instead,
+/// and the walk then splits the value into its words on the way out and joins them on the way
+/// in, which it already does for a scalar that travels in pieces.
+///
+/// Only on x86-64 outside Windows. Windows passes anything over eight bytes as the address of a
+/// copy whatever it is, and the other machines have rules of their own that tamnd/rucc#425 has
+/// not been taught yet.
+fn chunks(types: &Types, target: &TargetInfo, id: TypeId) -> Option<Shaped> {
+    if !matches!(types.kind(id), TypeKind::BitInt { .. })
+        || target.tuple.arch() != Arch::X86_64
+        || target.tuple.os() == Os::Windows
+    {
+        return None;
+    }
+    let size = repr::size_of(types, target, id);
+    if size <= 8 {
+        return None;
+    }
+    let word = Scalar { kind: Kind::Integer, size: 8, align: 8 };
+    let pieces = (0..size / 8).map(|at| Piece { offset: at * 8, scalar: word }).collect();
+    let align = u64::from(repr::align_of(types, target, id));
+    Some(Shaped::Aggregate { size, align, pieces, complex: false })
 }
 
 /// The scalar a C type is, and [`None`] for a type that is not one.
@@ -686,6 +722,34 @@ mod tests {
         let planned = plan(&types, &target, Convention::Target, types.void(), &[mixed], &[], false)
             .expect("a plan");
         assert_eq!(planned.args[0].types, vec![Type::float(Float::F64), Type::int(64)]);
+    }
+
+    /// A `_BitInt` wider than a register is a structure of `long`s to the x86-64 psABI, so it
+    /// travels as two words both ways, and once the registers are gone it goes to the argument
+    /// area aligned to eight, where an `__int128` would be aligned to sixteen. gcc 16.2.0 says
+    /// `_Alignof(_BitInt(128))` is eight. AArch64 has not been taught this and keeps the scalar.
+    #[test]
+    fn a_bit_int_wider_than_a_register_on_x86_64_is_a_structure_of_words() {
+        let mut types = Types::new();
+        let x86 = target("x86_64-unknown-linux-gnu");
+        let b65 = types.bit_int(true, 65);
+        let b128 = types.bit_int(true, 128);
+        let words = vec![Type::int(64), Type::int(64)];
+        let planned =
+            plan(&types, &x86, Convention::Target, b65, &[b65], &[], false).expect("a plan");
+        assert_eq!(planned.args[0].types, words);
+        assert_eq!(planned.ret.types, words);
+        let long = types.int(IntKind::Long);
+        let mut params = vec![long; 6];
+        params.push(b128);
+        let planned = plan(&types, &x86, Convention::Target, types.void(), &params, &[], false)
+            .expect("a plan");
+        assert!(matches!(planned.args[6].pass, Pass::Memory), "the registers are gone");
+        assert_eq!(planned.args[6].align, 8, "and it is aligned as a structure of words");
+        let arm = target("aarch64-unknown-linux-gnu");
+        let planned =
+            plan(&types, &arm, Convention::Target, b65, &[b65], &[], false).expect("a plan");
+        assert_eq!(planned.args[0].types, vec![Type::int(65)]);
     }
 
     #[test]

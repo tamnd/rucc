@@ -1714,10 +1714,9 @@ impl<'u> Body<'_, 'u> {
                 let values: Vec<Value> =
                     types.iter().map(|ty| self.func.append_param(entry, *ty)).collect();
                 // A scalar that arrived as the bits of something else, which is a floating point
-                // parameter of a variadic function on Windows on AArch64, in an x register.
-                if let Some(ir) = repr::value_type(self.types(), self.target(), travel.ty)
-                    .filter(|ir| ir.is_float())
-                {
+                // parameter of a variadic function on Windows on AArch64, in an x register, and a
+                // `_BitInt` wider than a register on x86-64, in the words it is classified as.
+                if let Some(ir) = repr::value_type(self.types(), self.target(), travel.ty) {
                     let value = self.joined(&values, travel, ir, span);
                     let value = self.coerce(value, travel.ty, ty, span);
                     match local {
@@ -2219,13 +2218,17 @@ impl<'u> Body<'_, 'u> {
     /// An integer two registers wide is read as the object form and then loaded, because where it
     /// is has the rules of a pair of words rather than of a scalar: both halves in registers or
     /// both in the argument area, and there on a boundary of its own size. The object form is the
-    /// walk that already knows both, and [`abi::va_slots`] is what tells it this is a pair.
+    /// walk that already knows both, and [`abi::va_slots`] is what tells it this is a pair. It is
+    /// the size that is asked rather than the width, because a `_BitInt(65)` is a pair too: sixteen
+    /// bytes of which sixty five bits are the value, aligned to eight on x86-64 where an
+    /// `__int128` is aligned to sixteen, and the object form reads that alignment off the type.
     fn va_arg(&mut self, list: ExprId, ty: TypeId, span: Span) -> Option<Value> {
         let result = repr::value_type(self.types(), self.target(), ty)?;
-        if result.is_int() && result.bits() == 2 * self.target().pointer_width {
+        let size = repr::size_of(self.types(), self.target(), ty);
+        if result.is_int() && size * 8 == 2 * u64::from(self.target().pointer_width) {
             let at = self.va_object(list, ty, span);
             let info = MemInfo {
-                size: u64::from(result.bits() / 8),
+                size,
                 align: repr::align_of(self.types(), self.target(), ty),
                 order: MemOrder::NotAtomic,
                 tbaa: None,
@@ -9209,10 +9212,10 @@ impl<'u> Body<'_, 'u> {
                     values.push(value);
                 }
                 // A scalar that travels as the bits of something else, which is a floating point
-                // argument of a variadic function on Windows on AArch64, in an x register.
+                // argument of a variadic function on Windows on AArch64, in an x register, and a
+                // `_BitInt` wider than a register on x86-64, in the words it is classified as.
                 Pass::Pieces(_)
-                    if repr::value_type(self.types(), self.target(), tast[arg].ty)
-                        .is_some_and(|ir| ir.is_float()) =>
+                    if repr::value_type(self.types(), self.target(), tast[arg].ty).is_some() =>
                 {
                     let value = self.value(arg);
                     let slots = self.split(value, travel, span);
@@ -9262,6 +9265,18 @@ impl<'u> Body<'_, 'u> {
                 // The object's own bytes go in the argument area, which is what `byval` on the
                 // parameter says and what the backend does, so what travels is where they are.
                 Pass::Memory => {
+                    let ty = tast[arg].ty;
+                    // A scalar that goes there, which is a `_BitInt` wider than a register on
+                    // x86-64 once the pair of registers is gone. It is a value and may be no
+                    // object at all, so it is written somewhere first.
+                    if repr::value_type(self.types(), self.target(), ty).is_some() {
+                        let value = self.value(arg);
+                        let copy = self.scratch(travel.size, travel.align, span);
+                        let info = self.access(ty);
+                        self.build(span).store(value, copy, info, Flags::NONE);
+                        values.push(copy);
+                        continue;
+                    }
                     let place = self.place(arg);
                     let addr = self.address_of(place, span);
                     values.push(addr);

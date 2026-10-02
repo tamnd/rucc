@@ -51,8 +51,8 @@
 use rucc_tuple::{Arch, Env, Os, TargetTuple};
 
 use crate::describe::{
-    AbiDescription, Banks, Cleanup, Narrow, ReturnPointer, Rule, Scalars, Short, StackArgs, Test,
-    Travel, Variadic,
+    AbiDescription, Banks, BitInts, Cleanup, Narrow, ReturnPointer, Rule, Scalars, Short,
+    StackArgs, Test, Travel, Variadic,
 };
 use crate::shape::Format;
 
@@ -96,6 +96,7 @@ pub static SYSV_AMD64: AbiDescription = AbiDescription {
     variadic: Variadic::SameAsFixed,
     stack_args: StackArgs::RegisterSized,
     narrow: Narrow::Unspecified,
+    bit_ints: BitInts::SpareBits,
     cleanup: Cleanup::Caller,
 };
 
@@ -133,6 +134,7 @@ const AAPCS64_BASE: AbiDescription = AbiDescription {
     variadic: Variadic::SameAsFixed,
     stack_args: StackArgs::RegisterSized,
     narrow: Narrow::Unspecified,
+    bit_ints: BitInts::Untaught,
     cleanup: Cleanup::Caller,
 };
 
@@ -181,6 +183,7 @@ pub static DARWIN_ARM64: AbiDescription = AbiDescription {
     variadic: Variadic::AlwaysMemory,
     stack_args: StackArgs::Packed,
     narrow: Narrow::ToInt,
+    bit_ints: BitInts::Untaught,
     cleanup: Cleanup::Caller,
     ..AAPCS64_BASE
 };
@@ -264,6 +267,7 @@ pub static WIN64: AbiDescription = AbiDescription {
     variadic: Variadic::BothBanks,
     stack_args: StackArgs::RegisterSized,
     narrow: Narrow::Unspecified,
+    bit_ints: BitInts::Untaught,
     cleanup: Cleanup::Caller,
 };
 
@@ -311,6 +315,7 @@ pub static RISCV_LP64D: AbiDescription = AbiDescription {
     variadic: Variadic::SameAsFixed,
     stack_args: StackArgs::RegisterSized,
     narrow: Narrow::Unspecified,
+    bit_ints: BitInts::Untaught,
     cleanup: Cleanup::Caller,
 };
 
@@ -369,6 +374,7 @@ pub static I386_SYSV: AbiDescription = AbiDescription {
     variadic: Variadic::SameAsFixed,
     stack_args: StackArgs::RegisterSized,
     narrow: Narrow::Unspecified,
+    bit_ints: BitInts::Untaught,
     cleanup: Cleanup::Caller,
 };
 
@@ -414,6 +420,7 @@ pub static I386_MINGW: AbiDescription = AbiDescription {
     variadic: Variadic::SameAsFixed,
     stack_args: StackArgs::RegisterSized,
     narrow: Narrow::Unspecified,
+    bit_ints: BitInts::Untaught,
     cleanup: Cleanup::Caller,
 };
 

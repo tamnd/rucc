@@ -306,7 +306,7 @@ impl Step {
             Self::Decimals => decimal::calls(func, names, conv.abi),
             Self::HalfFloats => half::calls(func, names, conv.abi),
             Self::Halves => return wide::halves(func, names, conv),
-            Self::Widths => return widths::integers(func),
+            Self::Widths => return widths::integers(func, conv),
             Self::Divisions => divide::divisions(func, goal, conv.word * 8),
             Self::Bytes => expand::bytes(func),
             Self::Counts => expand::counts(func),
