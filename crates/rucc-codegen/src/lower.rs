@@ -7486,11 +7486,12 @@ impl<'a> Lowering<'a> {
         let mut found: Vec<Option<Match<Term>>> = (0..insts.len()).map(|_| None).collect();
         let mut plans: Vec<Option<Plan>> = vec![None; insts.len()];
         let mut folded: Vec<Inst> = Vec::new();
+        let mut left = Vec::with_capacity(16);
         for (index, &inst) in insts.iter().enumerate().rev() {
             if folded.contains(&inst) {
                 continue;
             }
-            if let Some((plan, matched)) = self.select(inst, refused) {
+            if let Some((plan, matched)) = self.select(inst, refused, &mut left) {
                 folded.extend(self.folds(inst, plan));
                 found[index] = Some(matched);
                 plans[index] = Some(plan);
@@ -7545,15 +7546,20 @@ impl<'a> Lowering<'a> {
     /// `spec/10-backend.md` asks for: a plan that offers more to the matcher is tried before one
     /// that offers less.
     ///
-    /// The matcher's two stacks are made once here and handed to every plan. An instruction with
-    /// several plans tries them in turn, and each try used to make its own.
-    fn select(&self, inst: Inst, refused: &Set<Value>) -> Option<(Plan, Match<Term>)> {
-        let mut left = Vec::with_capacity(16);
+    /// The matcher's two stacks are made once and handed to every plan. An instruction with
+    /// several plans tries them in turn, and each try used to make its own. `left` is the one that
+    /// is only scratch, so it is the caller's, and a block hands the same one to every instruction
+    /// in it.
+    fn select(
+        &self,
+        inst: Inst,
+        refused: &Set<Value>,
+        left: &mut Vec<Term>,
+    ) -> Option<(Plan, Match<Term>)> {
         let mut bindings = Vec::with_capacity(8);
         for plan in self.plans(inst, refused) {
             let terms = Terms::new(self.source, inst, plan, self.address_bits());
-            if let Some(rule) =
-                self.selector.table.find_in(&terms, Term::Root, &mut left, &mut bindings)
+            if let Some(rule) = self.selector.table.find_in(&terms, Term::Root, left, &mut bindings)
             {
                 return Some((plan, Match { rule, bindings }));
             }
@@ -7629,17 +7635,16 @@ impl<'a> Lowering<'a> {
     /// way, and an operand shown as the instruction that computed it is one no rule could have
     /// matched without taking that instruction, because the plan offered the matcher nothing
     /// else to call it.
-    fn folds(&self, inst: Inst, plan: Plan) -> Vec<Inst> {
+    fn folds(&self, inst: Inst, plan: Plan) -> impl Iterator<Item = Inst> {
         let args = &self.source[self.source[inst].args];
         args.iter()
             .take(MAX_ARGS)
             .enumerate()
-            .filter(|&(index, _)| plan[index] == Shown::Expand)
-            .filter_map(|(_, &arg)| match self.source[arg].def {
+            .filter(move |&(index, _)| plan[index] == Shown::Expand)
+            .filter_map(move |(_, &arg)| match self.source[arg].def {
                 Def::Result { inst, .. } => Some(inst),
                 Def::Param { .. } => None,
             })
-            .collect()
     }
 
     /// What the IR instruction said about itself that the machine instruction has to keep saying.
@@ -7910,7 +7915,7 @@ impl<'a> Lowering<'a> {
                 // the block, and the operands of the rule that writes one are the number and
                 // nothing else.
                 let matched = self
-                    .select(inst, &Set::default())
+                    .select(inst, &Set::default(), &mut Vec::new())
                     .map(|(_, matched)| matched)
                     .ok_or_else(|| self.unsupported(inst))?;
                 self.emit(inst, &matched)?;
