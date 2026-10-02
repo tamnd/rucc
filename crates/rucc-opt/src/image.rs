@@ -69,8 +69,23 @@
 //! spell in the order the datalayout puts them, which is where the byte order does have to be
 //! asked about and is the only place it is.
 //!
-//! The address of another symbol answers nothing, because a relocation has no value until the
-//! link. Neither does an access that crosses from one piece of the image into the next, since
+//! The address of another symbol answers that symbol's address, for a load of a pointer that reads
+//! exactly the relocation and no more, and only where the address is the symbol itself rather than
+//! a distance past it. The value is not known until the link, but a `global_addr` of the same name
+//! is the same value then, and that is all the load needs. A table of operations is what this is
+//! for: `split_ops.add (vq, ...)` in drivers/virtio/virtio_ring.c reads a member of a `static
+//! const` structure, and gcc calls `virtqueue_add_split` there directly and then inlines it.
+//!
+//! # A call through an address that is a name
+//!
+//! A call through a pointer that turns out to be the address of a function is a call to that
+//! function. This is where that is decided too, since a call through a member of a table only
+//! becomes one once the load above has been answered. The call is only rewritten when the
+//! function's own signature is the one the call was made with, so a call through a pointer cast
+//! to some other type stays what it was. A call made directly is one the inliner can copy, and in
+//! the kernel it is a `call` rather than a call to a retpoline thunk.
+//!
+//! Neither does an access that crosses from one piece of the image into the next, since
 //! bytes spanning two of them are not a scalar either one holds, and neither does a `volatile`
 //! access or an atomic one, whose whole point is that the access happens.
 
@@ -79,7 +94,8 @@ use std::collections::hash_map::Entry;
 use rucc_base::Symbol;
 use rucc_base::hash::Map;
 use rucc_ir::{
-    Block, Datum, Def, Extra, Flags, Func, Imm, Inst, MemOrder, Module, Opcode, Pic, Type, Value,
+    Block, Datum, Def, Extra, Flags, Func, Imm, Inst, MemOrder, Module, Opcode, Pic, Signature,
+    SymbolRef, Type, Value,
 };
 
 use crate::extents::vouched;
@@ -87,6 +103,12 @@ use crate::{Analyses, Analysis, Fuel, Pass, Preserved, Stats};
 
 /// Recorded once for each load that became a constant.
 const FOLDED: &str = "load from a read only object folded to what it was initialized to";
+
+/// Recorded once for each load of a pointer that became the name it was initialized to.
+const NAMED: &str = "load from a read only object folded to the address it was initialized to";
+
+/// Recorded once for each call through a pointer that became a call by name.
+const DIRECT: &str = "call through the address of a function made a direct call";
 
 /// Recorded for a load that would have folded if there had been fuel for it.
 const NO_FUEL: &str = "load from a read only object not folded, the pass ran out of fuel";
@@ -121,28 +143,96 @@ impl Pass for Image {
         if images.is_empty() {
             return stats;
         }
-        let blocks: Vec<Block> = func.blocks().collect();
-        for block in blocks {
-            let insts: Vec<Inst> = func.insts(block).collect();
-            for inst in insts {
-                let Some((opcode, imm)) = answer(func, inst, images) else { continue };
-                if !fuel.take() {
-                    // Out of fuel, which is a request to stop transforming rather than to stop
-                    // looking, per `crate::fold`.
-                    stats.missed(NO_FUEL);
-                    continue;
-                }
-                let at = func.add_imm(imm);
-                let data = &mut func[inst];
-                data.opcode = opcode;
-                data.flags = Flags::NONE;
-                data.args = rucc_ir::ValueList::EMPTY;
-                data.extra = Extra::Imm(at);
-                stats.optimized(FOLDED);
-            }
-        }
+        settle(func, images, fuel, &mut stats);
         stats
     }
+}
+
+/// Answers every load in the function the images can answer, and then makes every call through
+/// the address of a function a call to it.
+///
+/// The pass, and also what [`crate::inline`] runs on each function before it looks at its calls,
+/// since gcc's early passes have folded these by the time it decides what to inline.
+pub(crate) fn settle(func: &mut Func, images: &Images, fuel: &mut Fuel, stats: &mut Stats) {
+    let blocks: Vec<Block> = func.blocks().collect();
+    for &block in &blocks {
+        let insts: Vec<Inst> = func.insts(block).collect();
+        for inst in insts {
+            let Some(found) = answer(func, inst, images) else { continue };
+            if !fuel.take() {
+                // Out of fuel, which is a request to stop transforming rather than to stop
+                // looking, per `crate::fold`.
+                stats.missed(NO_FUEL);
+                continue;
+            }
+            let extra = match found {
+                Found::Constant(opcode, imm) => {
+                    stats.optimized(FOLDED);
+                    let at = func.add_imm(imm);
+                    func[inst].opcode = opcode;
+                    Extra::Imm(at)
+                }
+                Found::Address(name) => {
+                    stats.optimized(NAMED);
+                    func[inst].opcode = Opcode::GlobalAddr;
+                    Extra::Symbol(name)
+                }
+            };
+            let data = &mut func[inst];
+            data.flags = Flags::NONE;
+            data.args = rucc_ir::ValueList::EMPTY;
+            data.extra = extra;
+        }
+    }
+    for &block in &blocks {
+        let insts: Vec<Inst> = func.insts(block).collect();
+        for inst in insts {
+            let Some(name) = direct(func, inst, images) else { continue };
+            if !fuel.take() {
+                stats.missed(NO_FUEL);
+                continue;
+            }
+            let Extra::Call(info) = func[inst].extra else { continue };
+            let args = func[func[inst].args][1..].to_vec();
+            let args = func.push_values(&args);
+            let mut call = func[info];
+            call.callee = Some(name);
+            let at = func.add_call(call);
+            let data = &mut func[inst];
+            if data.opcode == Opcode::CallIndirect {
+                data.opcode = Opcode::Call;
+            }
+            data.args = args;
+            data.extra = Extra::Call(at);
+            stats.optimized(DIRECT);
+        }
+    }
+}
+
+/// The function a call through a pointer reaches, when the pointer is its address and the call
+/// was made with its signature.
+fn direct(func: &Func, inst: Inst, images: &Images) -> Option<Symbol> {
+    let data = &func[inst];
+    let Extra::Call(info) = data.extra else { return None };
+    let through = data.opcode == Opcode::CallIndirect
+        || (data.opcode == Opcode::TailCall && func[info].callee.is_none());
+    if !through {
+        return None;
+    }
+    let Def::Result { inst: made, .. } = func[*func[data.args].first()?].def else { return None };
+    if func[made].opcode != Opcode::GlobalAddr {
+        return None;
+    }
+    let Extra::Symbol(name) = func[made].extra else { return None };
+    (images.signatures.get(&name)? == &func[func[info].signature]).then_some(name)
+}
+
+/// What a load reads, as an instruction that can stand where it is.
+enum Found {
+    /// A number, written with this opcode.
+    Constant(Opcode, Imm),
+    /// The address of this symbol.
+    Address(Symbol),
 }
 
 /// The initial image of every global in a module that a load can be answered out of.
@@ -157,6 +247,11 @@ pub struct Images {
     objects: Map<Symbol, Option<Object>>,
     /// Which end of a number the target puts first, which only the literal bytes need.
     little_endian: bool,
+    /// How many bytes a pointer is, which a `ptr` does not say itself.
+    pointer: u64,
+    /// The signature of every function the module defines or declares, which is what a call
+    /// through the address of one has to have been made with to become a call to it.
+    signatures: Map<Symbol, Signature>,
 }
 
 impl Images {
@@ -180,7 +275,17 @@ impl Images {
                 }
             }
         }
-        Self { objects, little_endian: module.datalayout.little_endian }
+        let signatures = module
+            .funcs()
+            .map(|id| (module[id].name, module[id].signature().clone()))
+            .filter(|&(name, _)| matches!(module.lookup(name), Some(SymbolRef::Func(_))))
+            .collect();
+        Self {
+            objects,
+            little_endian: module.datalayout.little_endian,
+            pointer: u64::from(module.datalayout.pointer_bits.div_ceil(8)),
+            signatures,
+        }
     }
 
     /// Whether that name is read only data this module defines and nothing else can replace.
@@ -195,14 +300,31 @@ impl Images {
     /// Whether there is anything here to answer a load with.
     #[must_use]
     pub fn is_empty(&self) -> bool {
-        self.objects.is_empty()
+        self.objects.is_empty() && self.signatures.is_empty()
     }
 
     /// The value of type `ty` that lies `offset` bytes into the image of that global.
     #[must_use]
     pub fn read(&self, name: Symbol, ty: Type, offset: u64) -> Option<Imm> {
-        let object = self.objects.get(&name)?.as_ref()?;
         let size = u64::from(ty.bits().div_ceil(8));
+        let (piece, into) = self.piece(name, offset, size)?;
+        piece.read(ty, into, size, self.little_endian)
+    }
+
+    /// The symbol whose address lies `offset` bytes into the image of that global, for a read of
+    /// a pointer that is exactly the address.
+    #[must_use]
+    pub fn address(&self, name: Symbol, offset: u64) -> Option<Symbol> {
+        match self.piece(name, offset, self.pointer)? {
+            (&Piece::Address { symbol, size }, 0) if size == self.pointer => Some(symbol),
+            _ => None,
+        }
+    }
+
+    /// The piece of that global an access of `size` bytes at `offset` reads, and how far into it
+    /// the access starts.
+    fn piece(&self, name: Symbol, offset: u64, size: u64) -> Option<(&Piece, u64)> {
+        let object = self.objects.get(&name)?.as_ref()?;
         let end = offset.checked_add(size)?;
         if size == 0 || end > object.size {
             return None;
@@ -213,8 +335,7 @@ impl Images {
             if at + width > offset {
                 // The piece the access starts in, and the only one it may read, so an access
                 // reaching past the end of this one is an access this cannot answer.
-                return (at + width >= end)
-                    .then(|| piece.read(ty, offset - at, size, self.little_endian))?;
+                return (at + width >= end).then_some((piece, offset - at));
             }
             at += width;
         }
@@ -241,6 +362,12 @@ impl Object {
                 Datum::Zero(bytes) => Piece::Zero(bytes),
                 Datum::Bytes(range) => Piece::Bytes(module[range].to_vec()),
                 Datum::Scalar { ty, value } => Piece::Scalar { ty, value: module[value] },
+                // The address of a name this module knows, with nothing added to it.
+                Datum::Addr(reloc)
+                    if module[reloc].addend == 0 && module.lookup(module[reloc].symbol).is_some() =>
+                {
+                    Piece::Address { symbol: module[reloc].symbol, size: datum.size(module) }
+                }
                 // Kept rather than dropped, so that what follows it is still at the offset it is
                 // at. What it holds is an address the linker has not written yet.
                 Datum::Addr(_) | Datum::Away(_) | Datum::Apart { .. } => {
@@ -261,6 +388,8 @@ enum Piece {
     Bytes(Vec<u8>),
     /// One scalar of that type holding that value.
     Scalar { ty: Type, value: Imm },
+    /// The address of that symbol, in that many bytes.
+    Address { symbol: Symbol, size: u64 },
     /// That many bytes whose value this cannot say.
     Opaque(u64),
 }
@@ -269,7 +398,7 @@ impl Piece {
     /// How many bytes of the image it is.
     fn size(&self) -> u64 {
         match self {
-            Self::Zero(bytes) | Self::Opaque(bytes) => *bytes,
+            Self::Zero(bytes) | Self::Opaque(bytes) | Self::Address { size: bytes, .. } => *bytes,
             Self::Bytes(bytes) => bytes.len() as u64,
             Self::Scalar { ty, .. } => u64::from(ty.bits().div_ceil(8)) * u64::from(ty.lanes()),
         }
@@ -295,7 +424,7 @@ impl Piece {
             }
             // A relocation is a promise the linker has not kept yet, so there is no number here to
             // read at all. This is where `&other` written into an initializer stops.
-            Self::Opaque(_) => None,
+            Self::Address { .. } | Self::Opaque(_) => None,
         }
     }
 }
@@ -305,7 +434,7 @@ impl Piece {
 /// The opcode comes back with the value because a constant of an integer type and a constant of a
 /// floating point type are two different instructions, and which one to write is decided by the
 /// type of the load rather than by what the image turned out to hold.
-fn answer(func: &Func, inst: Inst, images: &Images) -> Option<(Opcode, Imm)> {
+fn answer(func: &Func, inst: Inst, images: &Images) -> Option<Found> {
     let data = &func[inst];
     if data.opcode != Opcode::Load || data.results != 1 || data.flags.intersects(Flags::KEEP) {
         return None;
@@ -318,7 +447,7 @@ fn answer(func: &Func, inst: Inst, images: &Images) -> Option<(Opcode, Imm)> {
     // A vector constant is a `splat` rather than an `iconst`, which is the reason `crate::fold`
     // gives for leaving one alone, and there is a second reason on top of it here: the image would
     // have to be read a lane at a time and every lane would have to agree.
-    if !ty.is_scalar() || !(ty.is_int() || ty.is_float()) {
+    if !ty.is_scalar() || !(ty.is_int() || ty.is_float() || ty.is_ptr()) {
         return None;
     }
     let (base, offset) = address(func, *func[data.args].first()?)?;
@@ -327,8 +456,12 @@ fn answer(func: &Func, inst: Inst, images: &Images) -> Option<(Opcode, Imm)> {
         return None;
     }
     let Extra::Symbol(name) = func[made].extra else { return None };
-    let imm = images.read(name, ty, u64::try_from(offset).ok()?)?;
-    Some((if ty.is_int() { Opcode::IConst } else { Opcode::FConst }, imm))
+    let offset = u64::try_from(offset).ok()?;
+    if ty.is_ptr() {
+        return images.address(name, offset).map(Found::Address);
+    }
+    let imm = images.read(name, ty, offset)?;
+    Some(Found::Constant(if ty.is_int() { Opcode::IConst } else { Opcode::FConst }, imm))
 }
 
 /// The address this value is, as something it was computed from and a distance in bytes from it.
