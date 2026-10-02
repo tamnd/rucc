@@ -3,7 +3,7 @@
 target triple = "x86_64-unknown-linux-gnu"
 target datalayout = "e-p:64:64-i64:64-f80:128-S128"
 
-global @by_value : bytes 8 = { zero 8 }, align 4, linkage(external)
+global @by_value : bytes 8 = { zero 8 }, align 8, linkage(external)
 global @by_pointer : bytes 8 = { zero 8 }, align 8, linkage(external)
 global @constant : bytes 4 = { zero 4 }, align 4, linkage(external), constant
 global @changing : bytes 4 = { zero 4 }, align 4, linkage(external)
@@ -14,7 +14,7 @@ global @shared : bytes 4 = { zero 4 }, align 4, linkage(external)
 global @narrow : bytes 2 = { zero 2 }, align 2, linkage(external)
 global @very_wide : bytes 16 = { zero 16 }, align 8, linkage(external)
 global @held : bytes 8 = { zero 8 }, align 8, linkage(external)
-global @grid : bytes 24 = { zero 24 }, align 4, linkage(external)
+global @grid : bytes 24 = { zero 24 }, align 16, linkage(external)
 global @unsized : bytes 1 = { zero 1 }, align 1, linkage(external)
 global @single : bytes 4 = { zero 4 }, align 4, linkage(external)
 global @twice : bytes 8 = { zero 8 }, align 8, linkage(external)
