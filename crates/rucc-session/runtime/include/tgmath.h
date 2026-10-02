@@ -1,16 +1,17 @@
 /* tgmath.h, the type generic maths macros.
  *
  * Apple's copy is written for clang, with every function declared again under
- * `__attribute__((overloadable))`, which rucc does not have. Meson's C99 check includes it, so a
- * meson build of Postgres on macOS stopped before it started. On Apple targets the macros are
- * written here with `_Generic` instead. The type is that of the arguments added together, so the
- * usual arithmetic conversions pick it, an integer argument counts as `double`, and a complex one
- * picks the complex function.
+ * `__attribute__((overloadable))`, which rucc does not have, and mingw-w64 ships none at all,
+ * since gcc brings its own. Meson's C99 check includes it, so a meson build of Postgres on macOS
+ * or Windows stopped before it started. On those targets the macros are written here with
+ * `_Generic` instead. The type is that of the arguments added together, so the usual arithmetic
+ * conversions pick it, an integer argument counts as `double`, and a complex one picks the
+ * complex function.
  *
  * Anywhere else the library's own header is used, which already does what its compiler needs.
  */
 
-#if !defined(__APPLE__)
+#if !defined(__APPLE__) && !defined(_WIN32)
 
 #include_next <tgmath.h>
 

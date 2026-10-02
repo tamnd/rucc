@@ -1,6 +1,6 @@
-//! `<tgmath.h>` on Apple targets is rucc's own, written with `_Generic`, since Apple's copy needs
-//! clang's `overloadable` attribute. Meson's C99 check includes it, and a meson build of Postgres
-//! on macOS stopped there. Each macro has to reach the function a type generic call names: the
+//! `<tgmath.h>` on Apple and Windows targets is rucc's own, written with `_Generic`, since Apple's
+//! copy needs clang's `overloadable` attribute and mingw-w64 has none. Meson's C99 check includes
+//! it, and a meson build of Postgres on macOS or Windows stopped there. Each macro has to reach the function a type generic call names: the
 //! real one for the argument's type, `double` for an integer, and the complex one for a complex
 //! argument. Elsewhere the library's header is the one used.
 //!
@@ -92,20 +92,37 @@ float h(float x, int n) { return ldexp(x, n); }
 double i(double _Complex x) { return creal(x); }
 ";
 
+/// The functions the calls in `CALLS` have to reach, in order.
+const WANTED: [&str; 9] =
+    ["sinf", "sin", "sinl", "csin", "cpowf", "cabsf", "fmaxl", "ldexpf", "creal"];
+
+/// The calls in a listing, each as the instruction and its operand with single spaces.
+fn calls(text: &str, instruction: &str) -> Vec<String> {
+    text.lines()
+        .map(|line| line.split_whitespace().collect::<Vec<_>>().join(" "))
+        .filter(|line| line.starts_with(&format!("{instruction} ")))
+        .collect()
+}
+
 #[test]
 fn each_macro_calls_the_function_for_its_arguments_type_on_apple_targets() {
     let dir = directory("apple", &[("math.h", MATH), ("complex.h", COMPLEX)]);
     let text = listing(&dir, "aarch64-apple-darwin", CALLS);
     let _ = std::fs::remove_dir_all(&dir);
-    let calls: Vec<String> = text
-        .lines()
-        .map(|line| line.split_whitespace().collect::<Vec<_>>().join(" "))
-        .filter(|line| line.starts_with("bl "))
-        .collect();
-    for want in
-        ["_sinf", "_sin", "_sinl", "_csin", "_cpowf", "_cabsf", "_fmaxl", "_ldexpf", "_creal"]
-    {
-        assert!(calls.contains(&format!("bl {want}")), "no call to {want} in {calls:#?}");
+    let calls = calls(&text, "bl");
+    for want in WANTED {
+        assert!(calls.contains(&format!("bl _{want}")), "no call to {want} in {calls:#?}");
+    }
+}
+
+#[test]
+fn each_macro_calls_the_function_for_its_arguments_type_on_windows() {
+    let dir = directory("windows", &[("math.h", MATH), ("complex.h", COMPLEX)]);
+    let text = listing(&dir, "x86_64-windows-gnu", CALLS);
+    let _ = std::fs::remove_dir_all(&dir);
+    let calls = calls(&text, "call");
+    for want in WANTED {
+        assert!(calls.contains(&format!("call {want}")), "no call to {want} in {calls:#?}");
     }
 }
 
