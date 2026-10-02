@@ -1,4 +1,4 @@
-//! Two instructions in a block that compute the same thing from the same things are one value.
+//! Two instructions computing the same thing, the first dominating the second, are one value.
 //!
 //! Design: `spec/optimizer/16-gvn-and-pre.md` section 16.1. This is the other half of that
 //! document, the half [`crate::load`] deliberately did not do. Section 16.2 is candid that value
@@ -14,18 +14,33 @@
 //! address and the load's address have one name it cannot forward a store to the load that reads it
 //! straight back, which is the shape it was written for. Giving them one name is this.
 //!
-//! # Block local, and why that is the whole of it
+//! # Block local first, and then down the dominator tree
 //!
 //! One table per block, thrown away at the end of it. Inside a block an earlier instruction
 //! dominates a later one because there is no other way to reach the later one, so program order is
-//! the whole of the dominance question and there is no dominator tree here.
+//! the whole of the dominance question there.
 //!
-//! The version over the dominator tree finds strictly more, and section 16.1 is where the argument
-//! for not writing it lives: under arms B and C of the e-graph experiment, hash-consing gives the
-//! acyclic case for nothing, and what is left over is the cyclic case, which wants Tarjan's
-//! algorithm over the SSA graph and belongs after the e-graph is built rather than before it. What
-//! is wanted before that exists is the part that makes the address of one subscript one value, and
-//! both halves of a subscript are in the block the subscript is in.
+//! Beside it is a second table for the whole function, holding what each computation with operands
+//! was found in and the block it was found in, and a computation a block above has already made is
+//! taken from there when that block dominates this one. The blocks are walked in reverse postorder,
+//! so a dominator is always seen before what it dominates. A constant operand is compared there as
+//! the first value of that constant in the function, because each block has its own `iconst`, and
+//! an add of the one in each block is one add.
+//!
+//! Three things stay block local. A constant, and anything made of constants alone such as a null
+//! pointer, because shared between blocks it is a register held across them where the code
+//! generator would have written an immediate. An address, for the same reason: the code generator
+//! folds one into the load or store that uses it, and [`crate::reload`] matches loads on where they
+//! point rather than on the address value, so it does not need the two to be one. And the calls,
+//! whose answer for a `pure` callee is good only until memory is written, which is counted per
+//! block.
+//!
+//! What this is for is the kernel's helpers. `dl_task_of` in kernel/sched/deadline.c tests a bit
+//! of the entity with `BUG_ON`, and the caller tested the same bit a block above. Once
+//! [`crate::reload`] has made the two loads one, the shift, the mask and the test on it are the
+//! same three instructions in two blocks, and only when they are one value does the range pass see
+//! that the `BUG_ON` cannot fire. So the pipeline runs this a second time after the loads are
+//! merged, and gcc's value numbering being over the dominator tree is why gcc drops that `BUG_ON`.
 //!
 //! # What counts as the same thing
 //!
@@ -65,8 +80,8 @@
 //! payload being on an opcode that has effects anyway.
 //!
 //! Division is on the allowed list and that is deliberate. Removing the second of two identical
-//! divisions is safe for a reason that is only true block locally: the first one is in the same
-//! block, so it has already run, and if it was going to trap the second one was never reached.
+//! divisions is safe because the first one dominates it, in the same block or a block above, so it
+//! has already run, and if it was going to trap the second one was never reached.
 //!
 //! # Calls
 //!
@@ -98,17 +113,17 @@
 //!
 //! # What it does not do
 //!
-//! Nothing crosses a block boundary, no instruction moves, and the only thing that goes through
-//! memory is the write count that a `pure` call's answer is keyed on. A
-//! duplicate is removed where it stands and its readers are pointed at the first one, which is
+//! No instruction moves, and the only thing that goes through memory is the write count that a
+//! `pure` call's answer is keyed on. A duplicate is removed where it stands and its readers are pointed at the first one, which is
 //! always above it. That means a computation in two arms of a branch stays in two arms: hoisting it
 //! to the common predecessor is [`crate::hoist`], and it wants the profitability question this pass
 //! does not ask.
 
 use rucc_base::Symbol;
-use rucc_base::hash::Map;
-use rucc_ir::{Block, Extra, Flags, FloatPred, Func, Inst, IntPred, Opcode, Sig, Type, Value};
+use rucc_base::hash::{Map, Set};
+use rucc_ir::{Block, Def, Extra, Flags, FloatPred, Func, Inst, IntPred, Opcode, Sig, Type, Value};
 
+use crate::cfg::Cfg;
 use crate::purity::{Callee, Facts};
 use crate::uses::substitute;
 use crate::{Analyses, Analysis, Fuel, Pass, Preserved, Stats};
@@ -118,6 +133,9 @@ const ADDRESS: &str = "address removed, an earlier one in the block computes the
 
 /// Recorded for any other removed duplicate.
 const MERGED: &str = "instruction removed, an earlier one in the block computes the same thing";
+
+/// Recorded for a duplicate of something computed in a block above this one.
+const ACROSS: &str = "instruction removed, a block above computes the same thing";
 
 /// Recorded for a removed call, which is what the purity analysis bought this pass.
 const CALLED: &str = "call removed, an earlier call in the block computes the same thing";
@@ -141,7 +159,7 @@ impl Pass for Number {
     }
 
     fn describe(&self) -> &'static str {
-        "two instructions in a block computing the same thing from the same things are one value"
+        "two instructions computing the same thing from the same things, the first dominating the second, are one value"
     }
 
     fn preserves(&self) -> Preserved {
@@ -159,7 +177,26 @@ impl Pass for Number {
         let mut stats = Stats::new();
         let mut decided = Decided { same: Map::default(), gone: Vec::new() };
 
-        for block in func.blocks().collect::<Vec<Block>>() {
+        // The blocks with a dominator before the blocks it dominates, so an instruction found in
+        // `across` is always above the one looking it up. A block nothing reaches comes last and
+        // only ever uses its own table, because dominance says nothing useful about it.
+        let cfg = Cfg::new(func);
+        let dom = an.dominators(func);
+        let order: Vec<Block> = cfg.reverse_postorder().collect();
+        let reached: Set<Block> = order.iter().copied().collect();
+        let blocks: Vec<Block> = order
+            .into_iter()
+            .chain(func.blocks().filter(|block| !reached.contains(block)))
+            .collect();
+        // What each value computed with operands has been found in, with the block it was in, for
+        // finding the same thing again in a block below it. A constant is never here, and nor is
+        // an address, for the reason the module documentation gives.
+        let mut across: Map<Key, Vec<(Block, Value)>> = Map::default();
+        // The first value of each constant in the function, which is what a constant operand is
+        // compared as in `across`. Two blocks each have their own `iconst 8`, and an add of
+        // the one in each block is the same add.
+        let mut constants: Map<Key, Value> = Map::default();
+        for block in blocks {
             let mut seen: Map<Key, Value> = Map::default();
             // The signature is beside the result rather than in the key, because a signature is
             // pushed per call site and never interned, so two calls written the same way have two
@@ -192,14 +229,38 @@ impl Pass for Number {
                     memory += 1;
                 }
                 let Some((key, result)) = key(func, &decided.same, inst) else { continue };
-                match seen.get(&key) {
-                    Some(&first) => {
-                        let why = if is_address(func[inst].opcode) { ADDRESS } else { MERGED };
-                        decided.take(fuel, &mut stats, inst, result, first, why);
-                    }
-                    None => {
-                        seen.insert(key, result);
-                    }
+                if let Some(&first) = seen.get(&key) {
+                    let why = if is_address(func[inst].opcode) { ADDRESS } else { MERGED };
+                    decided.take(fuel, &mut stats, inst, result, first, why);
+                    continue;
+                }
+                seen.insert(key, result);
+                if key.args[0].is_none() {
+                    constants.entry(key).or_insert(result);
+                    continue;
+                }
+                // A computation of constants alone is a constant too, a null pointer being the
+                // usual one, and one shared between blocks is a register held across them where
+                // the code generator would have written an immediate.
+                let constant = |arg: &Option<Value>| {
+                    arg.is_none_or(|arg| match func[arg].def {
+                        Def::Result { inst, .. } => func[func[inst].args].is_empty(),
+                        _ => false,
+                    })
+                };
+                if is_address(key.opcode)
+                    || !reached.contains(&block)
+                    || key.args.iter().all(constant)
+                {
+                    continue;
+                }
+                let wide = widened(func, &constants, key);
+                let earlier = across.get(&wide).and_then(|found| {
+                    found.iter().find(|&&(at, _)| dom.dominates(at, block)).map(|&(_, first)| first)
+                });
+                match earlier {
+                    Some(first) => decided.take(fuel, &mut stats, inst, result, first, ACROSS),
+                    None => across.entry(wide).or_default().push((block, result)),
                 }
             }
         }
@@ -382,6 +443,25 @@ fn key(func: &Func, same: &Map<Value, Value>, inst: Inst) -> Option<(Key, Value)
         args[..2].sort_unstable();
     }
     Some((Key { opcode: data.opcode, flags: data.flags, ty: func[result].ty, tag, args }, result))
+}
+
+/// The key as `across` compares it, which is with each constant operand read as the first value
+/// of that constant in the function rather than as the one in this block.
+fn widened(func: &Func, constants: &Map<Key, Value>, mut key: Key) -> Key {
+    for slot in &mut key.args {
+        let Some(arg) = *slot else { continue };
+        let Def::Result { inst, .. } = func[arg].def else { continue };
+        if !func[func[inst].args].is_empty() {
+            continue;
+        }
+        if let Some((constant, _)) = self::key(func, &Map::default(), inst) {
+            *slot = Some(constants.get(&constant).copied().unwrap_or(arg));
+        }
+    }
+    if key.opcode.is_commutative() && key.args[2].is_none() {
+        key.args[..2].sort_unstable();
+    }
+    key
 }
 
 /// What a call computes, the signature it computes it under, and where its answer is.
@@ -630,20 +710,44 @@ mod tests {
     }
 
     #[test]
-    fn what_one_block_computes_does_not_reach_the_next_one() {
+    fn what_a_block_computes_reaches_the_blocks_it_dominates() {
         let (mut func, entry) = blank();
         let next = func.create_block();
         let mut build = Builder::new(&mut func, entry);
-        let left = build.iconst(Type::int(64), 3);
+        let address = local(&mut build);
+        let left = build.unary(Opcode::PtrToInt, address, Type::int(64));
         let right = build.iconst(Type::int(64), 5);
         let first = build.binary(Opcode::Add, left, right, Flags::NONE);
         build.jump(next, &[]);
         let mut build = Builder::new(&mut func, next);
-        let second = build.binary(Opcode::Add, left, right, Flags::NONE);
+        let five = build.iconst(Type::int(64), 5);
+        let second = build.binary(Opcode::Add, left, five, Flags::NONE);
         build.ret(&[first, second]);
 
-        // The first add dominates the second and the version over the dominator tree takes it.
-        // Section 16.1 is where the argument for this being enough for now lives.
+        // The second add is of the same value and another `iconst 5`, which is the same add.
+        let stats = run(&mut func);
+        assert!(stats.changed());
+        assert_eq!(count(&func, Opcode::Add), 1);
+    }
+
+    #[test]
+    fn what_one_arm_computes_does_not_reach_the_other() {
+        let (mut func, entry) = blank();
+        let (yes, no) = (func.create_block(), func.create_block());
+        let mut build = Builder::new(&mut func, entry);
+        let address = local(&mut build);
+        let left = build.unary(Opcode::PtrToInt, address, Type::int(64));
+        let right = build.iconst(Type::int(64), 5);
+        let test = build.icmp(IntPred::Eq, left, right);
+        build.br_if(test, yes, &[], no, &[]);
+        let mut build = Builder::new(&mut func, yes);
+        let first = build.binary(Opcode::Add, left, right, Flags::NONE);
+        build.ret(&[first, first]);
+        let mut build = Builder::new(&mut func, no);
+        let second = build.binary(Opcode::Add, left, right, Flags::NONE);
+        build.ret(&[second, second]);
+
+        // Neither arm runs before the other, so each keeps its own.
         let stats = run(&mut func);
         assert!(!stats.changed());
         assert_eq!(count(&func, Opcode::Add), 2);
