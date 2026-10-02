@@ -1285,6 +1285,11 @@ fn shifted(func: &mut Func, width: Width, halves: &mut Halves, inst: Inst, opcod
     let (Some(&(a_low, a_high)), Some(&(count, _))) = (halves.get(&a), halves.get(&b)) else {
         return;
     };
+    if let Some(count) = known(func, count) {
+        let (low, high) = shifted_by(func, width, inst, opcode, (a_low, a_high), count);
+        replace(func, halves, inst, low, high);
+        return;
+    }
     let top = ahead_const(func, width, inst, i128::from(width.half - 1));
     let places = ahead(func, width, inst, Opcode::And, &[count, top]);
     let back = ahead(func, width, inst, Opcode::Sub, &[top, places]);
@@ -1321,6 +1326,65 @@ fn shifted(func: &mut Func, width: Width, halves: &mut Halves, inst: Inst, opcod
         (low, high)
     };
     replace(func, halves, inst, low, high);
+}
+
+/// A shift by a count the program wrote as a number, which is the two halves moved by that much
+/// and nothing to choose between at run time.
+///
+/// `x >> 32` on i386 is the high half of `x` and no instructions at all, and the kernel writes it
+/// everywhere a `u64` is taken apart, so the general shift above, which tests the count and picks
+/// one of two answers with a `cmov`, is not what such a line should cost. A count past the width is
+/// undefined and is taken modulo it, which is what the machine's own shift does with one.
+fn shifted_by(
+    func: &mut Func,
+    width: Width,
+    inst: Inst,
+    opcode: Opcode,
+    (low, high): (Value, Value),
+    count: u128,
+) -> (Value, Value) {
+    let half = width.half;
+    let count = u32::try_from(count % u128::from(2 * half)).unwrap_or(0);
+    let by = |func: &mut Func, op: Opcode, value: Value, places: u32| {
+        if places == 0 {
+            return value;
+        }
+        let places = ahead_const(func, width, inst, i128::from(places));
+        ahead(func, width, inst, op, &[value, places])
+    };
+    if count == 0 {
+        return (low, high);
+    }
+    if count >= half {
+        let over = count - half;
+        return match opcode {
+            Opcode::Shl => (ahead_const(func, width, inst, 0), by(func, Opcode::Shl, low, over)),
+            Opcode::AShr => {
+                let sign = by(func, Opcode::AShr, high, half - 1);
+                (by(func, Opcode::AShr, high, over), sign)
+            }
+            _ => (by(func, Opcode::LShr, high, over), ahead_const(func, width, inst, 0)),
+        };
+    }
+    if opcode == Opcode::Shl {
+        let moved = by(func, Opcode::Shl, high, count);
+        let across = by(func, Opcode::LShr, low, half - count);
+        let high = ahead(func, width, inst, Opcode::Or, &[moved, across]);
+        (by(func, Opcode::Shl, low, count), high)
+    } else {
+        let moved = by(func, Opcode::LShr, low, count);
+        let across = by(func, Opcode::Shl, high, half - count);
+        let low = ahead(func, width, inst, Opcode::Or, &[moved, across]);
+        (low, by(func, opcode, high, count))
+    }
+}
+
+/// The bits of a half that is a constant, which is what [`constant`] makes of every wide one.
+fn known(func: &Func, value: Value) -> Option<u128> {
+    let Def::Result { inst, .. } = func[value].def else { return None };
+    let data = func[inst];
+    let Extra::Imm(imm) = data.extra else { return None };
+    (data.opcode == Opcode::IConst).then(|| func[imm].unsigned())
 }
 
 /// An `and`, an `or` or an `xor`, which is the same operation on each half and nothing between
