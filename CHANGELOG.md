@@ -25,6 +25,7 @@ All notable changes are recorded here. The format follows [Keep a Changelog](htt
 
 ### Fixed
 
+- A `long long` local register variable on i386, such as the kernel's `register u64 val asm("%eax")` in `put_user`, is the named register and the one gcc numbers after it, so `__put_user_8` gets `edx:eax` and `__get_user_8` gives back `ecx:edx`.
 - A `long long` handed to an i386 `asm` under a letter other than `A`, in a template that never names it, is now two operands, one for each half. The kernel's `__iter_div_u64_rem` and `OPTIMIZER_HIDE_VAR` write that, and the functions using them were refused.
 - An enumerator wider than `long` is now taken where `long` is 32 bits, as on i386 and Windows. The bound is `long long`, which is what gcc means by `uintmax_t` there, and the enumeration is then represented in `long long` or `unsigned long long`. The i386 kernel's `perf_event.h` and `bpf.h` were refused in every file that included them.
 - A `q` output in i386 inline assembly no longer lands in `esi` when the statement takes `eax`, `ebx`, `ecx` and `edx` itself. It shares a register with an input the way gcc does, so the kernel's `cmpxchg8b` with `CC_OUT(e)` assembles.
