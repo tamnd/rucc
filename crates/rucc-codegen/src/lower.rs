@@ -5968,12 +5968,14 @@ impl<'a> Lowering<'a> {
                         }
                         if let x86_64::Piece::Reg { reg, .. } | x86_64::Piece::Implicit { reg } =
                             *piece
-                            && desc.class == self.gpr
-                            && conv.int_args.contains(&reg)
-                            && bound(list, reg, desc.role).is_none()
-                            && !passed.contains(&reg)
                         {
-                            passed.push(reg);
+                            if desc.class == self.gpr
+                                && conv.int_args.contains(&reg)
+                                && bound(list, reg, desc.role).is_none()
+                                && !passed.contains(&reg)
+                            {
+                                passed.push(reg);
+                            }
                         }
                         let index = match *piece {
                             x86_64::Piece::Operand { index, .. } => index,

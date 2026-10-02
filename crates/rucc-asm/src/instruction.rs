@@ -231,12 +231,13 @@ const STANDING: i64 = 0x1000_0000;
 pub(crate) fn one_in(word: &str, args: &[String], mode: Mode) -> Result<Written, String> {
     // `imul $3, %eax` is gas's short way of writing `imul $3, %eax, %eax`, the register both
     // multiplied and written.
-    if word.starts_with("imul")
-        && let [number, register] = args
-        && number.trim().starts_with('$')
-        && register.trim().starts_with('%')
-    {
-        return one_in(word, &[number.clone(), register.clone(), register.clone()], mode);
+    if let [number, register] = args {
+        if word.starts_with("imul")
+            && number.trim().starts_with('$')
+            && register.trim().starts_with('%')
+        {
+            return one_in(word, &[number.clone(), register.clone(), register.clone()], mode);
+        }
     }
     if mode == Mode::Bits32 {
         // Thirty two bit registers are the only ones an i386 address is made of, so there is no

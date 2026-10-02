@@ -3252,23 +3252,23 @@ decl #0 x : int object external static defined
     /// `return *(const __m128i_u *)__p;`. Two things had to be right for that to come out as the
     /// unaligned read it is. The dereference has to keep the typedef, which is what the test above
     /// covers, and then the return has to read the object as aligned as the object is rather than
-    /// as aligned as the type it is being returned as: a vector comes back in registers on this
-    /// ABI, so the sixteen bytes are read as two pieces of eight and the ABI's own alignment is
-    /// what lays the two pieces out rather than what either read may claim.
+    /// as aligned as the type it is being returned as: a vector comes back in one xmm register on
+    /// this ABI, so the sixteen bytes are one read, and that read may claim no more than the one
+    /// byte the typedef left the object, which is what makes it `movups` rather than `movaps`.
     #[test]
-    fn a_vector_read_through_a_typedef_that_lowered_its_alignment_comes_back_a_piece_at_a_time() {
+    fn a_vector_read_through_a_typedef_that_lowered_its_alignment_is_read_as_unaligned() {
         let prefix = concat!(
             "typedef long long v2di __attribute__((__vector_size__(16)));\n",
             "typedef long long v2di_u __attribute__((__vector_size__(16), __aligned__(1)));\n",
         );
         let loaded =
             body(&format!("{prefix}v2di f(const void *p) {{ return *(const v2di_u *)p; }}"));
-        assert_eq!(loaded.matches("align 1\n").count(), 2, "{loaded}");
+        assert_eq!(loaded.matches("align 1\n").count(), 1, "{loaded}");
         assert!(!loaded.contains("align 16"), "{loaded}");
         // The store side, which travels as a copy into whatever the pointer names and so carries
         // one number for both ends of it.
         let stored = body(&format!("{prefix}void f(void *p, v2di b) {{ *(v2di_u *)p = b; }}"));
-        assert!(stored.contains("memcpy %0, %3, size 16, align 1"), "{stored}");
+        assert!(stored.contains("memcpy %0, %2, size 16, align 1"), "{stored}");
         // And the aligned spelling of the same two, which is where sixteen is the right answer.
         let aligned =
             body(&format!("{prefix}v2di f(const void *p) {{ return *(const v2di *)p; }}"));
