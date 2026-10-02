@@ -915,13 +915,14 @@ impl TargetInfo {
     ///
     /// The stack pointer is the other one, on both machines. Nothing hands it out and nothing
     /// writes it behind the program's back, and the Linux kernel declares `current_stack_pointer`
-    /// as `rsp` or `sp` this way, to read it and to hand it to the `asm` statements that make a
+    /// as `rsp`, `esp` or `sp` this way, to read it and to hand it to the `asm` statements that make a
     /// call so that the call is made from a frame that is set up.
     #[must_use]
     pub fn keeps_register_for_the_program(&self, name: &str) -> bool {
         match self.tuple.arch() {
             tuple::Arch::Aarch64 => matches!(name, "x18" | "sp"),
             tuple::Arch::X86_64 => name == "rsp",
+            tuple::Arch::X86 => name == "esp",
             _ => false,
         }
     }

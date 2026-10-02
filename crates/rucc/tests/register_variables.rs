@@ -36,9 +36,14 @@ fn fixture(what: &str, source: &str) -> PathBuf {
 
 /// What the compiler says about that source, and whether it finished.
 fn run(what: &str, source: &str) -> (bool, String, String) {
+    run_on(TARGET, what, source)
+}
+
+/// The same for another target.
+fn run_on(target: &str, what: &str, source: &str) -> (bool, String, String) {
     let path = fixture(what, source);
     let out = Command::new(env!("CARGO_BIN_EXE_rucc"))
-        .arg(format!("--target={TARGET}"))
+        .arg(format!("--target={target}"))
         .args(["-S", "-o", "-"])
         .arg(&path)
         .output()
@@ -176,4 +181,17 @@ fn an_asm_output_kept_in_the_stack_pointer_is_the_stack_pointer_in_the_template(
     let copied = text.lines().any(|line| line.contains("movq\t%rsp, ") && !line.ends_with("%rbp"));
     assert!(!copied, "the stack pointer was copied for the operand:\n{text}");
     assert!(text.contains("movq\t%rbx, %rcx") || text.contains("movq\t%rdi, %rcx"), "{text}");
+}
+
+#[test]
+fn the_stack_pointer_on_i386_is_esp() {
+    // `_ASM_SP` is `esp` there, so the i386 kernel's `current_stack_pointer` names that, and it
+    // is read and handed to an `asm` the way `rsp` is.
+    let source = "register unsigned long sp asm (\"esp\");\nvoid g(void);\n\
+                  unsigned long f(void) { return sp; }\n\
+                  void h(void) { asm volatile (\"call g\" : \"+r\" (sp) :: \"memory\"); }\n";
+    let (ok, text, said) = run_on("i686-unknown-linux-gnu", "sp-i386", source);
+    assert!(ok, "the compiler refused the fixture:\n{said}");
+    assert!(text.contains("movl\t%esp, %eax"), "the stack pointer was not read:\n{text}");
+    assert!(text.contains("call g"), "{text}");
 }

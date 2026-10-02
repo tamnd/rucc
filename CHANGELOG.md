@@ -25,6 +25,7 @@ All notable changes are recorded here. The format follows [Keep a Changelog](htt
 
 ### Fixed
 
+- A file-scope `register` variable in `esp` is now taken on i386, as `rsp` is on x86-64. The i386 kernel declares `current_stack_pointer` that way in `asm/asm.h`, and every kernel file stopped on it.
 - The i386 kernel's `-msoft-float`, `-mno-sse`, `-mno-mmx`, `-mno-sse2`, `-mno-3dnow` and `-mno-avx` are now taken. The extensions are already off on i386, and `-msoft-float` refuses a function with a float in it, since every float there is on the x87 stack. Turning an extension on for i386 is refused with a message that says why.
 - The driver now accepts `-Wa,--32` on i386 and `-Wa,-mtune=generic32` and the other i386 and generic names on x86. The i386 kernel passes both to gas. The other word size is still refused, now with a message that points at `-m32` or `-m64`.
 - `-mpreferred-stack-boundary=2` is accepted on i386, including with `-m32` on an x86-64 target, which is how the 32-bit kernel is built. The range is checked after `-m32` has picked the machine, 2 to 12 on i386 and 3 to 12 on x86-64.

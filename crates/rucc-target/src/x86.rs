@@ -715,7 +715,12 @@ mod tests {
         assert_eq!(SYSV.aligned_to(4).trusted_align, 4);
         for regs in [&MINGW32, &MINGW32_STDCALL, &MINGW32_FASTCALL, &MSVC32, &MSVC32_STDCALL] {
             assert_eq!(regs.trusted_align, 8, "{}", regs.abi.name);
-            assert_eq!(regs.aligned_to(32).trusted_align, 8, "{}: Windows still promises four", regs.abi.name);
+            assert_eq!(
+                regs.aligned_to(32).trusted_align,
+                8,
+                "{}: Windows still promises four",
+                regs.abi.name
+            );
             assert_eq!(regs.aligned_to(4).trusted_align, 4, "{}", regs.abi.name);
         }
     }
