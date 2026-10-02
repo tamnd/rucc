@@ -715,7 +715,7 @@ impl<'a> Eval<'a> {
             BinaryOp::Div | BinaryOp::Rem if right == 0 => {
                 // A warning and not an error, because that is what gcc calls it, and then no
                 // value, because there is not one. The caller adds what the context calls it.
-                self.warn(expr, "division by zero", "E0521");
+                self.warn(expr, "division by zero", "E0812");
                 return Err(NotConstant { at: expr, poisoned: false });
             }
             BinaryOp::Add | BinaryOp::Sub | BinaryOp::Mul | BinaryOp::Div | BinaryOp::Rem => {
@@ -891,14 +891,14 @@ impl<'a> Eval<'a> {
                     // The same warning the real division gets, and then no value, for the
                     // reason [`Self::int_binary`] gives there. The larger half being zero is
                     // both halves being zero, which is the whole of the divisor being zero.
-                    self.warn(expr, "division by zero", "E0521");
+                    self.warn(expr, "division by zero", "E0812");
                     return Err(NotConstant { at: expr, poisoned: false });
                 }
                 let m = BinaryOp::Mul;
                 let ratio = at(op, small, large);
                 let below = at(BinaryOp::Add, at(m, small, ratio), large);
                 if below == 0 {
-                    self.warn(expr, "division by zero", "E0521");
+                    self.warn(expr, "division by zero", "E0812");
                     return Err(NotConstant { at: expr, poisoned: false });
                 }
                 let scaled_other = at(m, other, ratio);

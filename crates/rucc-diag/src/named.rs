@@ -69,6 +69,7 @@ const OPTIONS: &[(&str, &str)] = &[
     ("E0798", "pragmas"),
     ("E0808", "long-long"),
     ("E0809", "declaration-after-statement"),
+    ("E0812", "div-by-zero"),
     ("W0331", "cpp"),
     ("W0333", "invalid-memory-model"),
     ("W0334", "expansion-to-defined"),
@@ -436,6 +437,8 @@ mod tests {
         assert_eq!(option_of("E0769"), Some("prio-ctor-dtor"));
         assert_eq!(option_of("E0768"), Some("compare-distinct-pointer-types"));
         assert_eq!(option_of("E0517"), None);
+        assert_eq!(option_of("E0812"), Some("div-by-zero"));
+        assert_eq!(option_of("E0521"), None);
     }
 
     #[test]
