@@ -612,8 +612,8 @@ fn replace(func: &mut Func, solved: &Solved, fuel: &mut Fuel, stats: &mut Stats)
 /// says `alloca` plus 8 is still a multiple of 8.
 fn low_sum(a: Bits, b: Bits, width: u32) -> Bits {
     let known = (a.unknown_bits() | b.unknown_bits()).trailing_zeros().min(width);
-    let all = if width >= 128 { u128::MAX } else { (1u128 << width) - 1 };
-    let low = if known >= 128 { u128::MAX } else { (1u128 << known) - 1 };
+    let all = if width >= u128::BITS { u128::MAX } else { (1u128 << width) - 1 };
+    let low = if known >= u128::BITS { u128::MAX } else { (1u128 << known) - 1 };
     Bits::from_parts(a.value().wrapping_add(b.value()) & low, all & !low, width)
 }
 
