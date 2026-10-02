@@ -861,7 +861,7 @@ fn bounds_a_lifetime(func: &Func, inst: Inst) -> bool {
 /// document 30 split the loop on it, so the cost model is encoding a pass interaction rather than a
 /// price. Anything touching memory is expensive because, as GCC puts it, hoisting memory references
 /// out should almost surely be a win.
-fn cost(func: &Func, inst: Inst) -> u32 {
+pub(crate) fn cost(func: &Func, inst: Inst) -> u32 {
     match func[inst].opcode {
         // Worked out again wherever it is wanted, so there is nothing to move. The address of a
         // symbol is in here with the constants because that is what it is on the only target there

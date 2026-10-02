@@ -4,6 +4,10 @@ All notable changes are recorded here. The format follows [Keep a Changelog](htt
 
 ## Unreleased
 
+### Added
+
+- A new pass, `gcm`, runs from `-O2` up and moves a computation with no effects down to the latest block in front of everything that reads it, and up out of a loop that does not change it, never into a loop (#2413). `int t = a * b + 7; if (c) return g(t);` now multiplies only on the path that calls `g`.
+
 ### Changed
 
 - The simplifier makes the rule matcher's two lists once per run rather than for every table and plan it tries on every instruction, which takes about 3% off an optimized build of jtckdint when it goes through the portable code rather than `<stdckdint.h>` (#2649).
