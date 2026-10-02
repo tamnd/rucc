@@ -466,6 +466,7 @@ pub fn compile(opts: &Options, name: &str, fs: &dyn FileSystem) -> Compiled {
                             // clang's, which keeps it always.
                             reorder: opts.opt_level.runs_optimizer()
                                 && sess.target.object_format != rucc_target::ObjectFormat::MachO,
+                            isa: opts.isa,
                             read: &mut read,
                         },
                     );

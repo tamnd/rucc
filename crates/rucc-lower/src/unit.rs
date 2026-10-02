@@ -270,6 +270,14 @@ pub struct Context<'a> {
     /// Whether the objects are laid out newest first, which is what gcc does when it optimizes.
     /// See `Module::reverse_globals`.
     pub reorder: bool,
+    /// The extensions the command line builds for, which a function's own `target` attribute
+    /// stands in place of.
+    ///
+    /// Only read to say whether an operator over a whole vector may be one vector instruction,
+    /// which on x86-64 needs SSE2. Under `-mno-sse` or `-mgeneral-regs-only` there is no register
+    /// to hold the vector in, and the lanes go through memory one at a time the way they did
+    /// before. See `Body::whole_vector`.
+    pub isa: rucc_target::Isa,
     /// How a file named by a `.incbin` in an `asm` at file scope is read, given the name as the
     /// template wrote it and handing back either the bytes or what went wrong.
     ///
@@ -303,6 +311,7 @@ impl fmt::Debug for Context<'_> {
             .field("in_place", &self.in_place)
             .field("fixed_x18", &self.fixed_x18)
             .field("reorder", &self.reorder)
+            .field("isa", &self.isa)
             .finish_non_exhaustive()
     }
 }
@@ -379,6 +388,7 @@ pub fn lower(name: &str, cx: Context<'_>) -> Lowered {
         in_place,
         fixed_x18,
         reorder,
+        isa,
         read,
     } = cx;
     let module = Module::new(names.intern(name), target);
@@ -409,6 +419,7 @@ pub fn lower(name: &str, cx: Context<'_>) -> Lowered {
         in_place,
         fixed_x18,
         reorder,
+        isa,
         read,
         module,
         diagnostics: Vec::new(),
@@ -480,6 +491,8 @@ pub(crate) struct Unit<'a> {
     fixed_x18: bool,
     /// Whether the objects are laid out newest first. See [`Context::reorder`].
     reorder: bool,
+    /// The extensions the command line builds for. See [`Context::isa`].
+    pub(crate) isa: rucc_target::Isa,
     /// How a file a `.incbin` names is read. See [`Context::read`].
     read: &'a mut dyn FnMut(&str) -> Result<Vec<u8>, String>,
     pub(crate) module: Module,

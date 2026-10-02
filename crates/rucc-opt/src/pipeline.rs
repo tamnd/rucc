@@ -1008,7 +1008,8 @@ pub fn run(module: &mut Module, names: &mut Interner, opts: &Options) -> Report 
     // only for a run with a pass that asks, since the empty one answers `May` and every pass here
     // is correct against that.
     let outside = if passes.iter().any(|pass| READS_OUTSIDE.contains(&pass.name())) {
-        Arc::new(outside::Outside::of(module))
+        let sse2 = rucc_target::Feature::named("sse2").is_some_and(|it| opts.isa.has(it));
+        Arc::new(outside::Outside::of(module).with_vectors(sse2))
     } else {
         Arc::default()
     };
