@@ -64,7 +64,9 @@ use rucc_ir::{Func, Opcode};
 use rucc_target::CallRegs;
 
 use crate::switch::{Force, Lowered};
-use crate::{decimal, divide, expand, forks, half, quad, retry, switch, varargs, wide, widths};
+use crate::{
+    decimal, divide, eight, expand, forks, half, quad, retry, switch, varargs, wide, widths,
+};
 
 /// One member of the group.
 ///
@@ -321,8 +323,11 @@ impl Step {
         let (goal, force, tables, cmov) = switching;
         match self {
             Self::Switches => switched.extend(switch::lowered(func, goal, force, tables)),
-            Self::Retries => retry::loops(func),
-            Self::Orderings => expand::orderings(func, conv.word, conv.total_store_order),
+            Self::Retries => retry::loops(func, conv.word),
+            Self::Orderings => {
+                expand::orderings(func, conv.word, conv.total_store_order);
+                eight::pairs(func, names, conv.word);
+            }
             Self::Overflows => expand::overflows(func),
             Self::Decimals => decimal::calls(func, names, conv.abi),
             Self::HalfFloats => half::calls(func, names, conv.abi),
