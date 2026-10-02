@@ -4,6 +4,10 @@ All notable changes are recorded here. The format follows [Keep a Changelog](htt
 
 ## Unreleased
 
+### Changed
+
+- A value range is merged straight into its own three pairs when its intervals are already in order, rather than through lists made to be sorted, which takes about 2.6% off an optimized build of jtckdint when it goes through the portable code rather than `<stdckdint.h>` (#2669).
+
 ## 0.18.10
 
 A patch release, and the one that reaches crates.io in place of 0.18.9, whose release run stopped on the gate. A `_BitInt` of any width now crosses a call on x86-64 Linux where gcc 16 puts it, and an eight or sixteen byte vector crosses in one xmm register, read and written with the unaligned move so `_mm_loadu_si128` works on any address, so code built by rucc and code built by gcc agree at the boundary for both. 32 bit x86 gets a lot closer to what the kernel needs: `-m32`, `-m64` and `-m16`, `-march=` for the processors without `cmov`, `-mregparm=` and `regparm(n)`, `-freg-struct-return`, inline assembly, the 64 bit bit counts and the stack protector guard flags. Besides those, `#pragma GCC poison`, `GCC warning`, `GCC error` and `message` are said, `-Wunknown-pragmas` is implemented, `-finline-small-functions` is on at `-O2`, the `gcm` pass is new, the assembler reads `.code16`, and the register allocator, scheduler, frame layout, instruction selection and simplifier are a little faster.
