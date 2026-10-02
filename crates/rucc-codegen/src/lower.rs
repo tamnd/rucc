@@ -1233,6 +1233,10 @@ struct Lowering<'a> {
     /// The register the global offset table's address is in, in i386 position independent code,
     /// once something in the function has asked for it. See [`Self::table_base`].
     got: Option<mir::Reg>,
+    /// Lists [`Read::regs`] has finished with, kept for the next one. Every machine instruction a
+    /// rule builds reads its arguments into one, and a term inside another or an address is read
+    /// into one of its own while the outer one is still open, so this is a few lists and not one.
+    spare: Vec<Vec<mir::Reg>>,
 }
 
 /// What a `va_start` in a variadic function writes into the list it is given.
@@ -1373,6 +1377,7 @@ impl<'a> Lowering<'a> {
             effectless: Vec::new(),
             heads: Map::default(),
             got: None,
+            spare: Vec::new(),
         }
     }
 
@@ -7886,7 +7891,7 @@ impl<'a> Lowering<'a> {
         };
         let (opcode, descs) = self.head(inst, head)?;
 
-        let mut read = Read::default();
+        let mut read = self.reading();
         let mut at = at + 1;
         for _ in 0..*arity {
             at = self.read(inst, pieces, at, bindings, &mut read)?;
@@ -7901,12 +7906,14 @@ impl<'a> Lowering<'a> {
         // registers the machine destroys on the way, which are fresh because nothing else is in
         // them and nothing reads them. An instruction that writes nothing at all is one whose
         // whole purpose is its effect, which is what a store is, and there is no result to put
-        // anywhere.
-        let mut regs = Vec::new();
+        // anywhere. The second and later are rare, so they have a list of their own that is
+        // usually left empty.
+        let mut first = None;
+        let mut rest = Vec::new();
         if writes > 0 {
             // A term inside another computes a step rather than the result, into a register only
             // the term around it reads.
-            let first = match outermost {
+            let reg = match outermost {
                 true => {
                     let result =
                         self.source[inst].first_result.ok_or_else(|| self.unsupported(inst))?;
@@ -7914,19 +7921,18 @@ impl<'a> Lowering<'a> {
                 }
                 false => self.out.new_vreg(descs[0].class),
             };
-            regs.push(first);
+            first = Some(reg);
             // The rest are the registers the machine destroys on the way, and the class each is in
             // is the one the instruction's description gives it rather than a guess, so that an
             // instruction that wrecks a register in the other file says so.
-            regs.extend(descs[1..writes].iter().map(|desc| self.out.new_vreg(desc.class)));
+            rest.extend(descs[1..writes].iter().map(|desc| self.out.new_vreg(desc.class)));
         } else if !outermost || self.source[inst].first_result.is_some() {
             // A rule that throws away a value the IR gave a name to would leave every reader of
             // that name with nothing to read, so it is a rule this and the target disagree about.
             // So is a term inside another that writes nothing for the one around it to read.
             return Err(self.unsupported(inst));
         }
-        let written = regs.first().copied();
-        regs.extend(read.regs.iter().copied());
+        let regs = first.into_iter().chain(rest).chain(read.regs.iter().copied());
 
         let block = self.at.expect("a block is being filled");
         let (span, flags) = (self.source.span(inst), self.carried(inst));
@@ -7949,7 +7955,21 @@ impl<'a> Lowering<'a> {
             build = build.imm(imm);
         }
         build.finish();
-        Ok((at, written))
+        self.done_reading(read);
+        Ok((at, first))
+    }
+
+    /// A [`Read`] with nothing in it yet, in a list an earlier one finished with when there is one.
+    fn reading(&mut self) -> Read {
+        Read { regs: self.spare.pop().unwrap_or_default(), imm: None, mem: None }
+    }
+
+    /// Gives back the list a [`Read`] was using. One given up on halfway, because the rule could
+    /// not be built, is dropped instead, which only costs the next one an allocation.
+    fn done_reading(&mut self, read: Read) {
+        let mut regs = read.regs;
+        regs.clear();
+        self.spare.push(regs);
     }
 
     /// The machine opcode a rule's head names, and the operands the target says it has.
@@ -8031,12 +8051,13 @@ impl<'a> Lowering<'a> {
             }
             Some(Piece::App { head, arity }) => {
                 let kind = (self.selector.address)(head).ok_or_else(|| self.unsupported(inst))?;
-                let mut inner = Read::default();
+                let mut inner = self.reading();
                 let mut next = at + 1;
                 for _ in 0..*arity {
                     next = self.read(inst, pieces, next, bindings, &mut inner)?;
                 }
                 let mem = address(kind, &inner, self.gpr).ok_or_else(|| self.unsupported(inst))?;
+                self.done_reading(inner);
                 out.mem = Some(mem);
                 Ok(next)
             }
