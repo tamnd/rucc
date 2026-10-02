@@ -107,7 +107,7 @@
 use rucc_base::hash::Map;
 use rucc_ir::{Block, Extra, Flags, Func, Inst, Opcode, Restrict, Type, Value};
 
-use crate::alias::{Access, origin};
+use crate::alias::{Access, Origin, origin};
 use crate::memssa::{Clobber, Step, Walk};
 use crate::uses::substitute;
 use crate::{Analyses, Analysis, Fuel, Pass, Preserved, Stats, memssa};
@@ -184,13 +184,15 @@ impl Pass for RedundantLoad {
             let mut walk = Walk::new(body, an.outside()).knowing(an.modref());
             // One entry per address read at a version of memory, holding the block the first load
             // of it was in and the value that load is known to be equal to.
-            let mut seen: Map<(Value, Value, Type), (Block, Value)> = Map::default();
+            let mut seen: Map<(Value, Place, Type), (Block, Value)> = Map::default();
             for block in func.blocks().collect::<Vec<Block>>() {
                 for inst in func.insts(block).collect::<Vec<Inst>>() {
                     let Some((result, ty)) = reads(func, inst) else {
                         continue;
                     };
-                    let key = func.mem_in(inst).map(|mem| (mem, func[func[inst].args][0], ty));
+                    let key = func
+                        .mem_in(inst)
+                        .map(|mem| (mem, Place::of(func, func[func[inst].args][0]), ty));
                     let found = match walk.clobber_with(inst, &mut |reference, def| {
                         through(body, reference, def).map_or(Step::Stop, Step::Retry)
                     }) {
@@ -330,6 +332,34 @@ fn through(func: &Func, reference: &Access, inst: Inst) -> Option<Access> {
     })
 }
 
+/// Where a load reads, as two loads can be equal on.
+///
+/// The address itself is not enough. [`crate::number`] only makes two computations of one address
+/// one value inside a block, so a field tested in one block and read again in a block below it is
+/// two `ptr_add`s of the same pointer and the same constant, which are two values. That is every
+/// `BUG_ON` in an inlined helper that tests a field its caller already tested, `dl_task_of` in
+/// kernel/sched/deadline.c being the one written most often. So the address is followed back to
+/// where it came from and how far past that it is, and two addresses that agree on both are the
+/// same place.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+enum Place {
+    /// So many bytes past where this came from.
+    At(Origin, i64),
+    /// An address whose distance from where it came from is not a constant, which is only ever
+    /// the same place as itself.
+    Address(Value),
+}
+
+impl Place {
+    /// Where this address points.
+    fn of(func: &Func, address: Value) -> Self {
+        match origin(func, address) {
+            (from, Some(offset)) => Self::At(from, offset),
+            (_, None) => Self::Address(address),
+        }
+    }
+}
+
 /// What there is to put in place of a load, and where it came from.
 enum Found {
     /// The store the walk arrived at wrote this.
@@ -346,8 +376,8 @@ enum Found {
 /// forwarded and there is nothing left to record, or it is not, and then neither block dominates
 /// the other and keeping the one already there is as good as swapping it.
 fn remember(
-    seen: &mut Map<(Value, Value, Type), (Block, Value)>,
-    key: Option<(Value, Value, Type)>,
+    seen: &mut Map<(Value, Place, Type), (Block, Value)>,
+    key: Option<(Value, Place, Type)>,
     block: Block,
     value: Value,
 ) {
