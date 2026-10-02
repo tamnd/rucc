@@ -25,6 +25,7 @@ All notable changes are recorded here. The format follows [Keep a Changelog](htt
 
 ### Fixed
 
+- An enumerator wider than `long` is now taken where `long` is 32 bits, as on i386 and Windows. The bound is `long long`, which is what gcc means by `uintmax_t` there, and the enumeration is then represented in `long long` or `unsigned long long`. The i386 kernel's `perf_event.h` and `bpf.h` were refused in every file that included them.
 - A `q` output in i386 inline assembly no longer lands in `esi` when the statement takes `eax`, `ebx`, `ecx` and `edx` itself. It shares a register with an input the way gcc does, so the kernel's `cmpxchg8b` with `CC_OUT(e)` assembles.
 - A file-scope `register` variable in `esp` is now taken on i386, as `rsp` is on x86-64. The i386 kernel declares `current_stack_pointer` that way in `asm/asm.h`, and every kernel file stopped on it.
 - The i386 kernel's `-msoft-float`, `-mno-sse`, `-mno-mmx`, `-mno-sse2`, `-mno-3dnow` and `-mno-avx` are now taken. The extensions are already off on i386, and `-msoft-float` refuses a function with a float in it, since every float there is on the x87 stack. Turning an extension on for i386 is refused with a message that says why.
