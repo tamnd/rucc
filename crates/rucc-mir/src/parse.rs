@@ -269,6 +269,9 @@ impl<'a> Parser<'a, '_> {
         if self.eat_word("commutes") {
             flags = flags.with(Flags::COMMUTES);
         }
+        if self.eat_word("plt") {
+            flags = flags.with(Flags::PLT);
+        }
 
         let mut inst = PendingInst {
             opcode,
@@ -415,7 +418,9 @@ impl<'a> Parser<'a, '_> {
         let mut mem = PendingMem { scale: 1, ..PendingMem::default() };
         // Written in front of everything else, and a bare word where every other part of an
         // address starts with a sigil or a digit, so one look is enough to know it is there.
-        mem.reach = if self.eat_word("got") {
+        mem.reach = if self.eat_word("gotoff") {
+            Reach::GotOff
+        } else if self.eat_word("got") {
             Reach::Table
         } else if self.eat_word("thread") {
             Reach::Thread
@@ -1008,6 +1013,38 @@ block0(%0:gpr, %1:gpr):
 mfunc @take {
 block0:
     %0:gpr = x64.mov_rm [thread @away]
+    x64.ret
+}
+",
+        );
+    }
+
+    #[test]
+    fn an_address_counted_from_the_global_offset_table_round_trips() {
+        // i386 position independent code, which has the table's address in a register and reaches
+        // a name in its own image as a distance from it. The word says which relocation, and a
+        // distance read as an address is somewhere near the front of memory.
+        round_trip(
+            "\
+mfunc @near {
+block0(%0:gpr, %1:gpr):
+    %2:gpr = x64.lea_32 [gotoff @s + %0]
+    %3:gpr = x64.mov_rm_32 [gotoff @arr + %0 + %1*4 + 8]
+    x64.ret
+}
+",
+        );
+    }
+
+    #[test]
+    fn a_call_through_the_procedure_linkage_table_round_trips() {
+        // The other half of the same code: nothing but the flag says the call goes through the
+        // table's entry for the name, and the entry is what reads the table's address.
+        round_trip(
+            "\
+mfunc @far {
+block0:
+    x64.call plt @strlen
     x64.ret
 }
 ",

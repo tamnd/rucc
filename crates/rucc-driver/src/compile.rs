@@ -988,14 +988,17 @@ fn optimize(
 /// leaves a DLL by an export table the linker is handed. Neither has an object writer here yet, so
 /// what this does is decline to say the ELF answer about them.
 ///
-/// `-fno-pic` reaches the back end on x86-64 ELF only, which is the one row that writes anything
-/// different for it (tamnd/rucc#2276). Everywhere else the position independent executable's code
+/// `-fno-pic` reaches the back end on x86-64 and i386 ELF only, which are the rows that write
+/// anything different for it (tamnd/rucc#2276, and #2247 for i386, whose position independent code
+/// keeps the table's address in a register the other code does not need). Everywhere else the position independent executable's code
 /// is what it gets, and that is still right for a link that is not position independent: it reads
 /// some names out of a table the linker then has to build, which costs a load and is correct.
 fn replaceable(target: &TargetInfo, opts: &Options) -> IrPic {
     match (target.tuple.os().object_format(), opts.pic) {
         (Some(ObjectFormat::Elf), Pic::Library) => IrPic::Library,
-        (Some(ObjectFormat::Elf), Pic::Absolute) if target.tuple.arch() == Arch::X86_64 => {
+        (Some(ObjectFormat::Elf), Pic::Absolute)
+            if matches!(target.tuple.arch(), Arch::X86_64 | Arch::X86) =>
+        {
             IrPic::Absolute
         }
         _ => IrPic::Executable,
@@ -1206,8 +1209,23 @@ fn generate(
     //
     // Only x86-64 copies a variable into the executable for a reference from the instruction
     // pointer, so on the other machines a variable this file only declares is read from the table.
-    let copies = target.tuple.arch() == Arch::X86_64;
-    let elsewhere = Elsewhere::of(module, replaceable(target, opts), target.object_format, copies);
+    //
+    // i386 copies too, but only in an executable that is not position independent: its position
+    // independent code reads a variable another object defines out of a slot, which is what gcc
+    // writes there. That code reaches every name from the table's address in a register, since
+    // i386 has no addressing relative to the instruction pointer. See tamnd/rucc#2247.
+    let pic = replaceable(target, opts);
+    let i386 = target.tuple.arch() == Arch::X86;
+    let copies = target.tuple.arch() == Arch::X86_64 || (i386 && pic == IrPic::Absolute);
+    let elsewhere = Elsewhere::of(module, pic, target.object_format, copies);
+    let elsewhere = if i386
+        && pic != IrPic::Absolute
+        && target.tuple.os().object_format() == Some(ObjectFormat::Elf)
+    {
+        elsewhere.based_on_table(module)
+    } else {
+        elsewhere
+    };
 
     // A function written `cold` goes in `.text.unlikely` with the cold parts of the others, which
     // is gcc's `default_function_section`, and so does a `static` function only those call. Only
@@ -1279,6 +1297,11 @@ fn generate(
                 flags.speculation,
                 names,
             ));
+            // And the routine i386 position independent code finds the global offset table with,
+            // for the same reason. See `rucc_codegen::thunks::pc_thunk`.
+            if elsewhere.based() {
+                globals.file_asm.extend(rucc_codegen::thunks::pc_thunk(&funcs, names));
+            }
             // The pointer each variable this file reads and only declares is reached through on
             // COFF, which is a variable of this file's all the same. Asked for after the loop
             // rather than before it, because the loop is what optimized the functions, and a read
@@ -11987,5 +12010,44 @@ away:
         assert_eq!(at.get(&0), Some(&0));
         assert_eq!(out.len(), 1);
         assert_eq!(out[0].over, Vec::new());
+    }
+
+    #[test]
+    fn i386_position_independent_code_reaches_everything_through_the_global_offset_table() {
+        let source = concat!(
+            "static int s;\n",
+            "extern int e;\n",
+            "int ext(int);\n",
+            "static int near(int x) { return x + 1; }\n",
+            "int f(int i) { return s + e + ext(i) + near(i); }\n",
+        );
+        for pic in [Pic::Executable, Pic::Library] {
+            let mut opts = options();
+            opts.target = "i686-linux-gnu".parse::<Triple>().unwrap();
+            opts.emit = EmitKind::Asm;
+            opts.pic = pic;
+            let result = run(&opts, source);
+            assert_eq!(result.messages, Vec::<String>::new(), "{pic:?}");
+            let text = result.text();
+            for wanted in [
+                "call\t__x86.get_pc_thunk.bx",
+                "addl\t$_GLOBAL_OFFSET_TABLE_, %ebx",
+                "s@GOTOFF(%ebx)",
+                "e@GOT(%ebx)",
+                "call\text@PLT",
+                ".hidden __x86.get_pc_thunk.bx",
+            ] {
+                assert!(text.contains(wanted), "no {wanted} under {pic:?} in:\n{text}");
+            }
+        }
+        let mut opts = options();
+        opts.target = "i686-linux-gnu".parse::<Triple>().unwrap();
+        opts.emit = EmitKind::Asm;
+        opts.pic = Pic::Absolute;
+        let result = run(&opts, source);
+        assert_eq!(result.messages, Vec::<String>::new());
+        let text = result.text();
+        assert!(!text.contains("get_pc_thunk") && !text.contains("@GOT"), "{text}");
+        assert!(!text.contains("@PLT"), "{text}");
     }
 }

@@ -81,6 +81,8 @@ pub struct Elsewhere {
     indexed: bool,
     imported: Set<Symbol>,
     referred: Set<Symbol>,
+    based: bool,
+    defined: Set<Symbol>,
 }
 
 /// Which pointer a name on COFF is reached through, when it is reached through one.
@@ -342,6 +344,40 @@ impl Elsewhere {
             .map(|id| module[id].name)
             .filter(|name| names.contains(name) && read.contains(name))
             .collect()
+    }
+
+    /// The same set for i386 position independent code, which reaches every name from the global
+    /// offset table's address in a register, since the machine has no addressing relative to the
+    /// instruction pointer. The driver says so for i386 ELF whenever the code is not `-fno-pic`.
+    ///
+    /// Which functions this module defines is kept alongside, because a call to anything else goes
+    /// through the procedure linkage table, and on i386 that is a call that needs the table's
+    /// address in `%ebx`. See [`Self::linked`].
+    #[must_use]
+    pub fn based_on_table(mut self, module: &Module) -> Self {
+        self.based = true;
+        self.defined = module
+            .funcs()
+            .filter(|&id| !module[id].is_declaration())
+            .map(|id| module[id].name)
+            .collect();
+        self
+    }
+
+    /// Whether every name is reached from the global offset table's address in a register, which
+    /// is i386 position independent code. See [`Self::based_on_table`].
+    #[must_use]
+    pub const fn based(&self) -> bool {
+        self.based
+    }
+
+    /// Whether a call to that name goes through the procedure linkage table, which is a call to a
+    /// name this file does not define or one the link may replace, in i386 position independent
+    /// code. A call to the runtime's own routines is one of them, since the names are not in the
+    /// module at all. Never on any other target, whose calls need nothing said about them.
+    #[must_use]
+    pub fn linked(&self, name: Symbol) -> bool {
+        self.based && (self.holds(name) || !self.defined.contains(&name))
     }
 
     /// Whether that name is a variable every thread has its own copy of.
