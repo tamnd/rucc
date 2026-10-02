@@ -26,7 +26,9 @@
 
 use object::RelocationFlags;
 use object::pe;
-use object::write::{Object as Writer, Symbol, SymbolFlags, SymbolKind, SymbolScope, SymbolSection};
+use object::write::{
+    Object as Writer, Symbol, SymbolFlags, SymbolKind, SymbolScope, SymbolSection,
+};
 use rucc_target::aarch64::Fixup;
 
 use crate::section::Reference;
@@ -302,7 +304,10 @@ pub(crate) fn marker(obj: &mut Writer<'_>) {
         scope: SymbolScope::Compilation,
         weak: false,
         section: SymbolSection::Absolute,
-        flags: SymbolFlags::Coff { typ: pe::SymbolType(0), storage_class: pe::IMAGE_SYM_CLASS_STATIC },
+        flags: SymbolFlags::Coff {
+            typ: pe::SymbolType(0),
+            storage_class: pe::IMAGE_SYM_CLASS_STATIC,
+        },
     });
 }
 
