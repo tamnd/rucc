@@ -107,11 +107,6 @@ A patch release, and the one that reaches crates.io in place of 0.18.9, whose re
 - A sixteen byte vector read or written through a pointer that is not sixteen byte aligned, as `_mm_loadu_si128` and `_mm_storeu_si128` do, uses `movups` rather than `movaps` on x86-64, so it no longer faults. Since a vector crosses a call in one xmm register (#1140) these became one sixteen byte move, and the move was the aligned one, which broke zstd and postgres built at `-O0`.
 - An i386 Windows object now carries `@feat.00` with bit 0 set, the way clang and MSVC write it, so `lld-link /safeseh` links it rather than refusing it as not safe for SafeSEH. The `-S` listing says it too, with the `.set @feat.00, 1` line clang writes. rucc installs no exception handlers on i386, so the empty handler list the bit stands for is true of every object it writes.
 
-### Fixed
-
-- A vector of eight or sixteen bytes crosses a call on x86-64 in one xmm register, as the System V psABI says and as gcc does, rather than in general purpose registers lane by lane, so a function built by rucc and a caller built by gcc agree about a `__m128` or a `vector_size(8)` argument and result, including one inside a structure or passed through `...` (#1140).
-- A `double` or a `float` spilled on x86-64 now takes a stack slot of eight or four bytes and is saved with `movsd` or `movss`, where it took a sixteen byte slot written with `movaps` (#2206). Only a value that fills the vector register, such as a 16 byte vector, keeps sixteen. The reduced `weigh` from the issue goes from 96 bytes to 48 (gcc 14 takes 64).
-
 ## 0.18.9
 
 A patch release for the kernel nightly. Every x86_64 tinyconfig row from 5.10 to 6.18 broke on something in a shared header: an `asm` input tied to an output by name, `%P` on a memory operand, `aligned` given an enumerator, `call *pv_ops+16`, a `BUILD_BUG` behind a small external function gcc inlines, and on 5.10 no `stdarg.h` under `-nostdinc`. All of those are fixed. Besides them, this release adds `#pragma GCC diagnostic`, the `adce` and `reassoc` passes, and gcc's placement of `__func__` and of functions only cold code calls.
