@@ -133,7 +133,7 @@ pub fn write(module: &Module, target: TargetTuple) -> Result<Vec<u8>, Error> {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Decoration {
     /// `GetProcAddress@8` is imported as `GetProcAddress`, which is what a system DLL exports and
-    /// what `-k` asks for. This is what [`write`] writes.
+    /// what `-k` asks for. This is what [`write()`] writes.
     Cut,
     /// `f@8` is imported as `f@8`, which is what a DLL that gcc linked without `--kill-at` exports
     /// and what dlltool writes without `-k`. The symbol is `_f@8` either way, so a caller that left
@@ -141,11 +141,11 @@ pub enum Decoration {
     Kept,
 }
 
-/// [`write`], with the choice it makes about an i386 `@N` given rather than assumed.
+/// [`write()`], with the choice it makes about an i386 `@N` given rather than assumed.
 ///
 /// # Errors
 ///
-/// As for [`write`].
+/// As for [`write()`].
 pub fn write_as(
     module: &Module,
     target: TargetTuple,
