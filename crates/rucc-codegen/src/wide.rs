@@ -1629,9 +1629,15 @@ fn site(func: &Func, inst: Inst) -> Option<(Signature, bool)> {
 /// the two numbers of its halves. The template's numbers move with the operands, and a reference to
 /// the pair is to its low half, which is the register GCC prints for it too.
 ///
-/// Nothing for a wide operand under any other constraint, and for every width but i386's, since
-/// sixty four bit `A` is one register rather than two and a pair in any other letter has nowhere
-/// to be.
+/// A wide operand under any other constraint is two operands under that constraint when the
+/// template never names it, which is what an empty template that only hides a value from the
+/// optimizer is. The kernel's `__iter_div_u64_rem` writes `asm("" : "+rm"(dividend))` over a
+/// `u64`, and `OPTIMIZER_HIDE_VAR` does the same with `"=r"` and `"0"`. Where it is placed does
+/// not matter to a template that does not read it, only that both halves go through it.
+///
+/// Nothing for a wide operand the template names under any other letter, and for every width but
+/// i386's, since sixty four bit `A` is one register rather than two and a pair the template spells
+/// has no one register to be spelled as.
 fn paired(func: &Func, names: &Interner, width: Width, inst: Inst) -> Option<(String, String)> {
     let Extra::Asm(asm) = func[inst].extra else { return None };
     let asm = func[asm];
@@ -1654,6 +1660,7 @@ fn paired(func: &Func, names: &Interner, width: Width, inst: Inst) -> Option<(St
         moved.push(next);
         next += if is_pair { 2 } else { 1 };
     }
+    let template = names.resolve(asm.template);
     let mut written = Vec::with_capacity(next);
     for (index, (operand, text)) in list.iter().zip(&texts).enumerate() {
         let letters = text.trim_start_matches(['=', '+', '&']);
@@ -1672,11 +1679,15 @@ fn paired(func: &Func, names: &Interner, width: Width, inst: Inst) -> Option<(St
                 }
             }
             None if pair[index] => {
-                if letters != "A" {
+                if letters == "A" {
+                    written.push(format!("{prefix}a"));
+                    written.push(format!("{prefix}d"));
+                } else if !mentions(template, index) {
+                    written.push((*text).to_owned());
+                    written.push((*text).to_owned());
+                } else {
                     return None;
                 }
-                written.push(format!("{prefix}a"));
-                written.push(format!("{prefix}d"));
             }
             None => written.push((*text).to_owned()),
         }
@@ -1684,8 +1695,38 @@ fn paired(func: &Func, names: &Interner, width: Width, inst: Inst) -> Option<(St
     if !pair.contains(&true) {
         return None;
     }
-    let template = renumber(names.resolve(asm.template), &moved, next - list.len());
+    let template = renumber(template, &moved, next - list.len());
     Some((written.join(","), template))
+}
+
+/// Whether a template names operand `index`, with or without a modifier letter.
+fn mentions(template: &str, index: usize) -> bool {
+    let bytes = template.as_bytes();
+    let mut at = 0;
+    while at < bytes.len() {
+        if bytes[at] != b'%' {
+            at += 1;
+            continue;
+        }
+        at += 1;
+        if bytes.get(at) == Some(&b'%') {
+            at += 1;
+            continue;
+        }
+        if bytes.get(at).is_some_and(u8::is_ascii_alphabetic)
+            && bytes.get(at + 1).is_some_and(u8::is_ascii_digit)
+        {
+            at += 1;
+        }
+        let start = at;
+        while bytes.get(at).is_some_and(u8::is_ascii_digit) {
+            at += 1;
+        }
+        if template[start..at].parse::<usize>().ok() == Some(index) {
+            return true;
+        }
+    }
+    false
 }
 
 /// A template with each operand number moved to where [`paired`] put that operand.
