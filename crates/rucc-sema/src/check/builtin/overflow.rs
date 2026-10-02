@@ -96,6 +96,9 @@ pub(in crate::check) struct Asked {
 /// width arrives there as adds, multiplies and comparisons it already knows how to split. There is
 /// nothing above it, which is why a call wanting one more bit than this is done a different way
 /// rather than at a wider type.
+///
+/// That is on a target with a 64-bit word. gcc has no 128-bit integer where the word is 32 bits,
+/// and the back end splits nothing wider than two words there, so the limit is 64 bits instead.
 const LIMIT: u32 = 128;
 
 /// Which of the six a name is, if it is one of them.
@@ -116,7 +119,7 @@ pub(in crate::check) fn operation(spelled: &str) -> Option<Asked> {
 /// limit, and that gets the unsigned type at the limit, which is not wide enough to hold the
 /// signed side of it. Whether the shape that comes back holds every operand is a question the walk
 /// to the IR asks again, because that walk is where the answer changes what gets written.
-fn common(shapes: [IntegerInfo; 3]) -> IntegerInfo {
+fn common(shapes: [IntegerInfo; 3], limit: u32) -> IntegerInfo {
     let signed = shapes.iter().any(|shape| shape.signed);
     let needed = shapes
         .iter()
@@ -131,13 +134,13 @@ fn common(shapes: [IntegerInfo; 3]) -> IntegerInfo {
     } else if needed <= 64 {
         64
     } else {
-        LIMIT
+        limit
     };
     // Past the limit only because of the bit an unsigned operand costs once the arithmetic is
     // signed, so every type in the call is within the limit and it is the sign that has nowhere to
     // go. Unsigned at the limit holds the operand that pushed it there, which is the better half of
     // a bad choice, and the sign of the rest is carried outside the type instead.
-    IntegerInfo::new(signed && needed <= LIMIT, width)
+    IntegerInfo::new(signed && needed <= limit, width)
 }
 
 impl Checker<'_> {
@@ -173,7 +176,8 @@ impl Checker<'_> {
             };
             *slot = shape;
         }
-        let at = self.widest(common(found));
+        let limit = if self.cx.target.pointer_width == 64 { LIMIT } else { 64 };
+        let at = self.widest(common(found, limit));
         let ty = self.types.boolean();
         // Left, right, destination, in that order, which is the order they were written in and the
         // order every walk over the node reads them back in.
@@ -229,9 +233,9 @@ mod tests {
     #[test]
     fn three_unsigned_types_are_done_unsigned_at_the_widest_of_them() {
         let all = [shape(false, 32), shape(false, 32), shape(false, 32)];
-        assert_eq!(common(all), shape(false, 32));
+        assert_eq!(common(all, LIMIT), shape(false, 32));
         let mixed = [shape(false, 8), shape(false, 64), shape(false, 16)];
-        assert_eq!(common(mixed), shape(false, 64));
+        assert_eq!(common(mixed, LIMIT), shape(false, 64));
     }
 
     /// One signed type anywhere in the call makes the arithmetic signed, including when it is the
@@ -239,9 +243,9 @@ mod tests {
     #[test]
     fn one_signed_type_anywhere_makes_the_arithmetic_signed() {
         let operand = [shape(true, 32), shape(false, 32), shape(false, 32)];
-        assert_eq!(common(operand), shape(true, 64));
+        assert_eq!(common(operand, LIMIT), shape(true, 64));
         let destination = [shape(false, 16), shape(false, 16), shape(true, 16)];
-        assert_eq!(common(destination), shape(true, 32));
+        assert_eq!(common(destination, LIMIT), shape(true, 32));
     }
 
     /// An unsigned type in signed arithmetic costs a bit, which is what pushes a call written with
@@ -249,9 +253,9 @@ mod tests {
     #[test]
     fn an_unsigned_type_costs_a_bit_once_the_arithmetic_is_signed() {
         let just_over = [shape(false, 32), shape(true, 8), shape(true, 8)];
-        assert_eq!(common(just_over), shape(true, 64));
+        assert_eq!(common(just_over, LIMIT), shape(true, 64));
         let still_under = [shape(false, 31), shape(true, 8), shape(true, 8)];
-        assert_eq!(common(still_under), shape(true, 32));
+        assert_eq!(common(still_under, LIMIT), shape(true, 32));
     }
 
     /// Nothing narrow is done narrowly. Three `char` operands are added at thirty two bits, which
@@ -260,7 +264,7 @@ mod tests {
     #[test]
     fn a_narrow_call_is_still_done_at_thirty_two_bits() {
         let narrow = [shape(true, 8), shape(true, 8), shape(true, 8)];
-        assert_eq!(common(narrow), shape(true, 32));
+        assert_eq!(common(narrow, LIMIT), shape(true, 32));
     }
 
     /// A signed operand next to the widest unsigned type there is has nowhere left to go.
@@ -273,9 +277,20 @@ mod tests {
     #[test]
     fn a_call_needing_one_bit_more_than_the_widest_type_is_done_unsigned() {
         let mixed = [shape(false, LIMIT), shape(true, 32), shape(true, LIMIT)];
-        assert_eq!(common(mixed), shape(false, LIMIT));
+        assert_eq!(common(mixed, LIMIT), shape(false, LIMIT));
         let destination = [shape(true, LIMIT), shape(true, LIMIT), shape(false, LIMIT)];
-        assert_eq!(common(destination), shape(false, LIMIT));
+        assert_eq!(common(destination, LIMIT), shape(false, LIMIT));
+    }
+
+    /// On a 32-bit target the limit is 64 bits, and a signed operand beside an unsigned 64-bit
+    /// one is the exact case there. The kernel's `grow_buffers` checks a `sector_t` times a size
+    /// into a `loff_t`, which is that shape on i386.
+    #[test]
+    fn the_limit_on_a_target_without_a_wider_type_is_sixty_four() {
+        let mixed = [shape(false, 64), shape(false, 64), shape(true, 64)];
+        assert_eq!(common(mixed, 64), shape(false, 64));
+        let signed = [shape(true, 64), shape(true, 32), shape(true, 64)];
+        assert_eq!(common(signed, 64), shape(true, 64));
     }
 
     /// The same three unsigned types, which is the case above without the signed operand. It gets
@@ -285,7 +300,7 @@ mod tests {
     #[test]
     fn the_same_widths_unsigned_throughout_are_the_ordinary_case() {
         let wide = [shape(false, LIMIT), shape(false, LIMIT), shape(false, LIMIT)];
-        assert_eq!(common(wide), shape(false, LIMIT));
+        assert_eq!(common(wide, LIMIT), shape(false, LIMIT));
     }
 
     /// A wide operand is done at its own width now, rather than being refused for having one.
@@ -295,9 +310,9 @@ mod tests {
     #[test]
     fn a_wide_operand_is_done_at_its_own_width() {
         let wide = [shape(true, 128), shape(true, 32), shape(true, 32)];
-        assert_eq!(common(wide), shape(true, 128));
+        assert_eq!(common(wide, LIMIT), shape(true, 128));
         let pushed = [shape(false, 64), shape(true, 8), shape(true, 8)];
-        assert_eq!(common(pushed), shape(true, 128));
+        assert_eq!(common(pushed, LIMIT), shape(true, 128));
     }
 
     /// A name outside the family asks for nothing, including the neighbouring builtins that are
