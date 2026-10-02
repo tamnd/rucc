@@ -125,3 +125,25 @@ fn a_whole_vector_operator_is_one_instruction() {
     }
     let _ = std::fs::remove_dir_all(&dir);
 }
+
+/// Without SSE there is no register to hold a vector in, so the operators stay a lane at a time
+/// through memory and the function still compiles, the way it does under gcc.
+#[test]
+fn a_whole_vector_operator_without_sse_goes_a_lane_at_a_time() {
+    let dir = dir("nosse");
+    let program = "typedef int v4si __attribute__((vector_size(16)));\n\
+                   void add(v4si *a, v4si *b) { *a = *a + *b; *a ^= *b; }\n";
+    std::fs::write(dir.join("a.c"), program).expect("the fixture can be written");
+    for flag in ["-mno-sse", "-mgeneral-regs-only"] {
+        for level in ["-O0", "-O2"] {
+            let (ok, said) = run(
+                &dir,
+                &["--target=x86_64-unknown-linux-gnu", flag, level, "-S", "a.c", "-o", "a.s"],
+            );
+            assert!(ok, "{flag} {level}: {said}");
+            let asm = std::fs::read_to_string(dir.join("a.s")).expect("a.s was written");
+            assert!(!asm.contains("xmm"), "{flag} {level}: a vector register in\n{asm}");
+        }
+    }
+    let _ = std::fs::remove_dir_all(&dir);
+}

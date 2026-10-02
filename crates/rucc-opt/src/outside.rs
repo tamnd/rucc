@@ -22,6 +22,9 @@
 //! The data layout, which is two words and is there because the width of a pointer is the target's
 //! answer rather than the type's.
 //!
+//! And whether the vector registers are there to keep a value in, which is not on the module at all
+//! but on the command line, and is here so that `crate::sroa` can ask it the same way.
+//!
 //! # Why a copy and not a borrow
 //!
 //! The same argument `crate::image` makes, and the pipeline does the same thing with the result: one
@@ -64,6 +67,9 @@ pub struct Outside {
     parents: Vec<Option<Meta>>,
     /// What the module was built assuming, or nothing when this was built without a module.
     layout: Option<DataLayout>,
+    /// Whether a sixteen byte vector of four `int` or two `long` may be a value. See
+    /// [`Self::with_vectors`].
+    vectors: bool,
 }
 
 impl Outside {
@@ -82,7 +88,21 @@ impl Outside {
         }
         // In the order the module has them, so a node's own index is where its parent sits here.
         let parents = module.metadata().map(|node| module[node].parent()).collect();
-        Self { names, parents, layout: Some(module.datalayout) }
+        Self { names, parents, layout: Some(module.datalayout), vectors: false }
+    }
+
+    /// The same facts, saying the module is built for an x86-64 with SSE2, where the back end
+    /// keeps a vector of four `int` or two `long` in a register and reads and writes its lanes.
+    /// Nothing else does yet, and `-mno-sse` takes the registers away, so false is the default.
+    #[must_use]
+    pub fn with_vectors(self, vectors: bool) -> Self {
+        Self { vectors, ..self }
+    }
+
+    /// Whether a vector of four `int` or two `long` may be a value rather than bytes in memory.
+    #[must_use]
+    pub fn vectors(&self) -> bool {
+        self.vectors && self.pointer_bytes() == Some(8)
     }
 
     /// Whether this symbol is a name for an object no other name in the module also names.

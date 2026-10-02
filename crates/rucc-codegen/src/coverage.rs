@@ -76,7 +76,6 @@ use crate::term;
 /// unimplemented builtin first. The one is the remainder of two floats, which a program writes
 /// with an operator and which is a call to the maths library rather than an instruction.
 pub static GAPS: &[(Opcode, &str, &str)] = &[
-    (Opcode::Splat, "a vector, and no rule is written about a lane count", "tamnd/rucc#200"),
     (
         Opcode::TargetIntrinsic,
         "the same, since what needs one is a vector builtin",

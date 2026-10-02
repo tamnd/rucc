@@ -158,6 +158,7 @@ pub static HAND: &[(Opcode, &str)] = &[
     (Opcode::ExtractLane, "`crate::lower`, as a `pshufd` and a move out of the vector file"),
     (Opcode::InsertLane, "`crate::lower`, as a move into the vector file and a merge"),
     (Opcode::Shuffle, "`crate::lower`, as one `pshufd`"),
+    (Opcode::Splat, "`crate::lower`, as a move into the vector file and a `pshufd`"),
     // Stopping, which is built here because it computes nothing for a rule to have a pattern for
     // and because what makes it right is the operating system rather than any bitvector.
     (Opcode::Trap, "`crate::lower`, as the `ud2` the program stops on"),

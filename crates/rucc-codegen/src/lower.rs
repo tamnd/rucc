@@ -1895,7 +1895,7 @@ impl<'a> Lowering<'a> {
                 // lane is a number beside the instruction and a pattern matches on an opcode and a
                 // type. What each one is on this machine is a `pshufd` with that number in its
                 // byte and the move between the files the lane needs.
-                Opcode::ExtractLane | Opcode::InsertLane | Opcode::Shuffle
+                Opcode::ExtractLane | Opcode::InsertLane | Opcode::Shuffle | Opcode::Splat
                     if !self.on_aarch64() =>
                 {
                     self.lanes(inst)?;
@@ -4352,7 +4352,8 @@ impl<'a> Lowering<'a> {
         whole(self.source[arg].ty) && whole(self.source[result].ty)
     }
 
-    /// One `extractlane`, `insertlane` or `shuffle` on a vector of four `int` or two `long`.
+    /// One `extractlane`, `insertlane`, `shuffle` or `splat` on a vector of four `int` or two
+    /// `long`.
     ///
     /// Everything here is built around `pshufd`, which writes each of the four lanes of one
     /// register with whichever lane of another its byte names. A lane is read by bringing it down
@@ -4361,13 +4362,17 @@ impl<'a> Lowering<'a> {
     /// value into a vector register and merging its low lane in: `movss` and `movsd` take the low
     /// lane of their second operand and keep the rest of the first, and `punpcklqdq` puts the low
     /// half of the second in the high half of the first. An `int` lane other than zero is swapped
-    /// down to zero for the merge and back up after it, since the swap is its own inverse.
+    /// down to zero for the merge and back up after it, since the swap is its own inverse. A splat
+    /// is the value moved across and its low lane copied to every other one.
     fn lanes(&mut self, inst: Inst) -> Result<(), Unsupported> {
         let data = &self.source[inst];
         let opcode = data.opcode;
         let extra = data.extra;
         let args: Vec<Value> = self.source[data.args].to_vec();
         let result = data.first_result.ok_or_else(|| self.unsupported(inst))?;
+        if opcode == Opcode::Splat {
+            return self.splat(inst, extra, result);
+        }
         let from = self.source[*args.first().ok_or_else(|| self.unsupported(inst))?].ty;
         let quad = match crate::term::vector_slot(from) {
             Some(0) => false,
@@ -4405,14 +4410,17 @@ impl<'a> Lowering<'a> {
                 self.out.set_width(across, 16);
                 let moved = self.named(if quad { "movq_to_xmm" } else { "movd_to_xmm" });
                 self.out.build(block, moved).at(span).def(across, sse).uses(scalar, gpr).finish();
+                // Two address, so the answer is said to reuse the first source: the machine writes
+                // the merge over the register it keeps the other lanes of, and without the
+                // constraint the allocator is free to put the answer somewhere else and lose them.
                 let merge = |this: &mut Self, name: &str, into: mir::Reg, low: mir::Reg| {
                     let opcode = this.named(name);
                     this.out
                         .build(block, opcode)
                         .at(span)
-                        .def(into, sse)
-                        .uses(low, sse)
-                        .uses(across, sse)
+                        .operand(mir::Operand::write(into, sse).with(Constraint::Reuse(1)))
+                        .operand(mir::Operand::read(low, sse))
+                        .operand(mir::Operand::read(across, sse))
                         .finish();
                 };
                 let into = self.new_reg(result);
@@ -4444,8 +4452,41 @@ impl<'a> Lowering<'a> {
                 let shuffled = shuffled(self, vector, picks);
                 self.regs[result.index()] = Some(shuffled);
             }
+
             _ => return Err(self.unsupported(inst)),
         }
+        Ok(())
+    }
+
+    /// A `splat`, which is the constant put in a general purpose register, moved across and copied
+    /// from the low lane to the others. A zero is the move alone, since `movd` and `movq` clear
+    /// the lanes above the one they write.
+    fn splat(&mut self, inst: Inst, extra: Extra, result: Value) -> Result<(), Unsupported> {
+        let Extra::Imm(imm) = extra else { return Err(self.unsupported(inst)) };
+        let quad = match crate::term::vector_slot(self.source[result].ty) {
+            Some(0) => false,
+            Some(1) => true,
+            _ => return Err(self.unsupported(inst)),
+        };
+        let bits = self.source[imm].bits();
+        let lane = if quad { bits as u64 as i64 } else { i64::from(bits as u32 as i32) };
+        let (sse, gpr) = (self.conv.sse_class, self.gpr);
+        let span = self.source.span(inst);
+        let block = self.at.expect("a block is being filled");
+        let held = self.out.new_vreg(gpr);
+        let put = self.named(if quad { "mov_ri_64" } else { "mov_ri_32" });
+        self.out.build(block, put).at(span).def(held, gpr).imm(lane).finish();
+        let moved = self.named(if quad { "movq_to_xmm" } else { "movd_to_xmm" });
+        if lane == 0 {
+            let into = self.new_reg(result);
+            self.out.build(block, moved).at(span).def(into, sse).uses(held, gpr).finish();
+            return Ok(());
+        }
+        let across = self.out.new_vreg(sse);
+        self.out.set_width(across, 16);
+        self.out.build(block, moved).at(span).def(across, sse).uses(held, gpr).finish();
+        let into = self.new_reg(result);
+        self.pshufd(inst, into, across, if quad { [0, 1, 0, 1] } else { [0, 0, 0, 0] });
         Ok(())
     }
 

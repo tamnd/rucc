@@ -4516,6 +4516,12 @@ impl<'u> Body<'_, 'u> {
         if self.target().tuple.arch() != Arch::X86_64 || counts != lane {
             return false;
         }
+        // The vector has to have a register to be in, which `-mno-sse` takes away. A function's
+        // own `target` attribute says what it is built for in place of the command line.
+        let isa = self.func.target.unwrap_or(self.unit.isa);
+        if !rucc_target::Feature::named("sse2").is_some_and(|sse2| isa.has(sse2)) {
+            return false;
+        }
         let one = self.value_type(lane, span);
         if !one.is_int() || !matches!((one.bits(), lanes), (32, 4) | (64, 2)) {
             return false;

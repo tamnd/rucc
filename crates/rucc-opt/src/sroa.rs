@@ -33,6 +33,20 @@
 //!
 //! One local at a time, looking at the function afresh each time, because the loads and stores a
 //! copy between two locals turns into are what makes the second one a candidate.
+//!
+//! # A vector
+//!
+//! A local of sixteen bytes that is read or written whole as a vector of four `int` or two `long`
+//! is one piece of that vector type rather than bytes cut at every lane, on a target where the
+//! back end keeps such a vector in a register. That is x86-64 with SSE2, and the module facts say
+//! whether this build is one. A read of four or eight bytes at a lane is an `extractlane`, and a
+//! write of one is an `insertlane`, which reads the vector the way a store of part of a piece
+//! would. A copy of the whole sixteen bytes is a load or a store of the vector. Anything else
+//! keeps the local in memory, as a narrower lane or a lane read across two would.
+//!
+//! This is what `<emmintrin.h>` code looks like after inlining: every intrinsic is a vector
+//! operator on copies of its operands, or a walk over the lanes of one, and tamnd/rucc#2320 is the
+//! vector going back and forth through memory between each of them.
 
 use rucc_base::hash::{Map, Set};
 use rucc_cost::heuristics::{SRA_MAX_BYTES, SRA_MAX_PIECES};
@@ -100,6 +114,7 @@ impl Pass for Sroa {
         let target = Target {
             pointer: an.outside().pointer_bytes(),
             little: an.outside().little_endian() == Some(true),
+            vectors: an.outside().vectors() && an.outside().little_endian() == Some(true),
         };
         let an = &*an;
         let cfg = an.cfg(func);
@@ -154,6 +169,8 @@ struct Target {
     pointer: Option<u64>,
     /// Whether the byte at the lowest address is the low byte of an integer.
     little: bool,
+    /// Whether a vector of four `int` or two `long` may be one value, see the module docs.
+    vectors: bool,
 }
 
 /// The analyses the rewrite reads, none of which it changes.
@@ -353,6 +370,8 @@ impl Use {
 struct Plan {
     alloca: Inst,
     pieces: Vec<Piece>,
+    /// Whether the one piece is a vector whose lanes the narrower accesses read and write.
+    vector: bool,
     /// Every load, store and bulk operation on it, in reverse postorder.
     uses: Vec<(Inst, Use)>,
     /// Every `ptr_add` into it, which go once nothing reads them.
@@ -414,8 +433,10 @@ fn plan(
             None => return Ok(None),
         }
     }
-    let pieces = pieces(&uses, target)?;
-    Ok(Some(Plan { alloca, pieces, uses, derived, ends }))
+    let vector =
+        uses.iter().any(|(_, found)| found.scalar().is_some_and(|(.., ty)| ty.is_vector()));
+    let pieces = if vector { whole(&uses, size)? } else { pieces(&uses, target)? };
+    Ok(Some(Plan { alloca, pieces, vector, uses, derived, ends }))
 }
 
 /// Every instruction that might name an address into the local, in reverse postorder and in order
@@ -509,7 +530,7 @@ fn access(
                 return Ok(None);
             };
             let ty = func[result].ty;
-            let Some(width) = width(ty, target.pointer) else {
+            let Some(width) = width(ty, target) else {
                 return Err(WIDTH);
             };
             if start + width > size {
@@ -522,7 +543,7 @@ fn access(
                 return Ok(None);
             };
             let ty = func[value].ty;
-            let Some(width) = width(ty, target.pointer) else {
+            let Some(width) = width(ty, target) else {
                 return Err(WIDTH);
             };
             if start + width > size {
@@ -575,12 +596,12 @@ fn bulk(func: &Func, inst: Inst, offsets: &Map<Value, u64>, size: u64) -> Option
 }
 
 /// How many bytes a value of the type is in memory, for the types the pass splits.
-fn width(ty: Type, pointer: Option<u64>) -> Option<u64> {
+fn width(ty: Type, target: Target) -> Option<u64> {
     if ty.is_vector() {
-        return None;
+        return (target.vectors && rucc_ir::term::vector_slot(ty).is_some()).then_some(16);
     }
     if ty.is_ptr() {
-        return pointer;
+        return target.pointer;
     }
     let bits = ty.bits();
     let whole = (ty.is_int() && matches!(bits, 8 | 16 | 32 | 64))
@@ -601,6 +622,29 @@ fn convertible(from: Type, to: Type, pointer: Option<u64>) -> bool {
     let punned = (from.is_int() && to.is_float() || from.is_float() && to.is_int())
         && from.bits() == to.bits();
     from == to || address(from, to) || address(to, from) || punned
+}
+
+/// The one vector piece of a local that is read or written whole as a vector, or why it has to
+/// stay in memory.
+fn whole(uses: &[(Inst, Use)], size: u64) -> Result<Vec<Piece>, &'static str> {
+    let mut ty = None;
+    for (_, found) in uses {
+        let (at, width) = found.range();
+        match found.scalar() {
+            Some((_, _, it)) if it.is_vector() => {
+                ty.get_or_insert(it);
+            }
+            Some((..)) if matches!(width, 4 | 8) && at % width == 0 => {}
+            Some(_) => return Err(OVERLAP),
+            None if at == 0 && width == size => {}
+            None => return Err(OVERLAP),
+        }
+    }
+    let ty = ty.expect("a vector access is why this was asked");
+    if size != 16 {
+        return Err(OVERLAP);
+    }
+    Ok(vec![Piece { at: 0, size, ty }])
 }
 
 /// The pieces the accesses cut the local into, or why it cannot be cut.
@@ -732,7 +776,7 @@ impl<'a> Rewrite<'a> {
     fn mask(&self, at: u64, size: u64) -> u64 {
         let mut mask = 0;
         for (index, piece) in self.plan.pieces.iter().enumerate() {
-            if piece.within(at, size) {
+            if piece.within(at, size) || self.plan.vector && piece.meets(at, size) {
                 mask |= 1 << index;
             }
         }
@@ -764,9 +808,12 @@ impl<'a> Rewrite<'a> {
             for (_, found) in &self.plan.uses[start..end] {
                 let (at, size) = found.range();
                 let mask = self.mask(at, size);
-                if found.reads() {
+                // A lane written is the rest of the vector read first.
+                let lane = self.plan.vector && size < 16 && !found.reads();
+                if found.reads() || lane {
                     up |= mask & !written;
-                } else {
+                }
+                if !found.reads() {
                     written |= mask;
                 }
             }
@@ -928,6 +975,9 @@ impl<'a> Rewrite<'a> {
         current: &mut Current,
         forward: &mut Map<Value, Value>,
     ) {
+        if self.plan.vector && self.lane(func, inst, found, current, forward) {
+            return;
+        }
         match found {
             Use::Load { at, size, ty } => {
                 let result = func[inst].first_result.expect("a load produces its value");
@@ -985,6 +1035,67 @@ impl<'a> Rewrite<'a> {
         }
     }
 
+    /// One access to a vector piece that is not a copy of the whole of it, or false for a copy,
+    /// which the plain way does.
+    fn lane(
+        &mut self,
+        func: &mut Func,
+        inst: Inst,
+        found: Use,
+        current: &mut Current,
+        forward: &mut Map<Value, Value>,
+    ) -> bool {
+        let whole = self.plan.pieces[0].ty;
+        // The vector as lanes of the access's width, and which lane the access is.
+        let shape = |at: u64, size: u64| {
+            let lanes = u32::try_from(16 / size).expect("a lane is four or eight bytes");
+            let lane = u8::try_from(at / size).expect("a lane of a sixteen byte vector");
+            (Type::vector(integer(size), lanes), lane)
+        };
+        match found {
+            Use::Load { at, size, ty } => {
+                let result = func[inst].first_result.expect("a load produces its value");
+                let value = self.value(func, 0, &current.values);
+                let read = if size == 16 {
+                    convert(func, inst, value, whole, ty)
+                } else {
+                    let (lanes, lane) = shape(at, size);
+                    let vector = convert(func, inst, value, whole, lanes);
+                    let args = func.push_values(&[vector]);
+                    let data = InstData {
+                        args,
+                        extra: Extra::Lane(lane),
+                        ..InstData::new(Opcode::ExtractLane)
+                    };
+                    let one = emit(func, inst, data, integer(size));
+                    convert(func, inst, one, integer(size), ty)
+                };
+                forward.insert(result, read);
+            }
+            Use::Store { at, size, ty, value } => {
+                let written = if size == 16 {
+                    convert(func, inst, value, ty, whole)
+                } else {
+                    let (lanes, lane) = shape(at, size);
+                    let before = self.value(func, 0, &current.values);
+                    let vector = convert(func, inst, before, whole, lanes);
+                    let one = convert(func, inst, value, ty, integer(size));
+                    let args = func.push_values(&[vector, one]);
+                    let data = InstData {
+                        args,
+                        extra: Extra::Lane(lane),
+                        ..InstData::new(Opcode::InsertLane)
+                    };
+                    let after = emit(func, inst, data, lanes);
+                    convert(func, inst, after, lanes, whole)
+                };
+                current.set(0, written);
+            }
+            Use::Fill { .. } | Use::CopyIn { .. } | Use::CopyOut { .. } => return false,
+        }
+        true
+    }
+
     /// The value a piece has here, which is zero where nothing wrote it.
     fn value(&mut self, func: &mut Func, k: usize, current: &[Option<Value>]) -> Value {
         match current[k] {
@@ -1005,6 +1116,13 @@ impl<'a> Rewrite<'a> {
     /// The piece with every byte set to `byte`, which is what a `memset` leaves in it.
     fn pattern(&self, func: &mut Func, before: Inst, piece: Piece, byte: u8) -> Value {
         let bits = (0..piece.size).fold(0u128, |bits, _| bits << 8 | u128::from(byte));
+        if piece.ty.is_vector() {
+            // Every byte the same, so every lane is the low one.
+            let lane = piece.ty.lane();
+            let at = func.add_imm(Imm::int(i128::from_ne_bytes(bits.to_ne_bytes()), lane));
+            let data = InstData { extra: Extra::Imm(at), ..InstData::new(Opcode::Splat) };
+            return emit(func, before, data, piece.ty);
+        }
         if piece.ty.is_float() {
             let at = func.add_imm(Imm::from_bits(bits));
             let data = InstData { extra: Extra::Imm(at), ..InstData::new(Opcode::FConst) };
@@ -1223,10 +1341,19 @@ target datalayout = \"e-p:64:64-i64:64-f80:128-S128\"
     /// strength of these tests is: a parameter without its arguments, a load left reading a
     /// removed address or a conversion of the wrong width are all things the verifier refuses.
     fn with(text: &str, fuel: &mut Fuel) -> (Module, Stats) {
+        built(text, fuel, false)
+    }
+
+    /// The same on a build with the vector registers, which is what lets a vector be a value.
+    fn on_sse2(text: &str) -> (Module, Stats) {
+        built(text, &mut Fuel::unlimited(), true)
+    }
+
+    fn built(text: &str, fuel: &mut Fuel, vectors: bool) -> (Module, Stats) {
         let mut names = Interner::new();
         let mut module = parse(text, &mut names).expect("the text parses");
         let id = module.funcs().last().expect("one function");
-        let outside = Arc::new(Outside::of(&module));
+        let outside = Arc::new(Outside::of(&module).with_vectors(vectors));
         let mut an = crate::machine::fixtures::analyses().about(outside);
         let stats = Sroa.run(&mut module[id], &mut an, fuel);
         if let Err(errors) = verify_func(&module, &module[id], &names) {
@@ -1541,6 +1668,96 @@ block2:
         let func = body(&module);
         assert_eq!(count_of(func, Opcode::Load), 0);
         assert_eq!(params(func, 2), 1);
+    }
+
+    /// `_mm_add_epi32` and `_mm_cvtsi128_si32` after inlining: a copy of an argument added to
+    /// itself as a whole vector, one lane replaced, and one lane read back.
+    const LANES: &str = "block0(%0: ptr, %1: i32):
+    %2 = alloca, size 16, align 16
+    memcpy %2, %0, size 16, align 16
+    %3 = load.i32x4 %2, align 4
+    %4 = add %3, %3
+    store %4 -> %2, align 4
+    %5 = iconst.i64 8
+    %6 = ptr_add %2, %5
+    store %1 -> %6, align 4
+    %7 = iconst.i64 4
+    %8 = ptr_add %2, %7
+    %9 = load.i32 %8, align 4
+    %10 = load.i64x2 %2, align 4
+    store %10 -> %0, align 16
+    return %9
+";
+
+    #[test]
+    fn a_vector_read_and_written_by_lane_becomes_one_value() {
+        let (module, stats) = on_sse2(&wrap("(ptr, i32) -> i32", LANES));
+        assert_eq!(stats.count(Kind::Optimized, SCALARIZED), 1);
+        let func = body(&module);
+        assert_eq!(count_of(func, Opcode::Alloca), 0);
+        assert_eq!(count_of(func, Opcode::InsertLane), 1);
+        assert_eq!(count_of(func, Opcode::ExtractLane), 1);
+        // The copy in is the one load left and the store of the other shape the one store.
+        assert_eq!(count_of(func, Opcode::Load), 1);
+        assert_eq!(count_of(func, Opcode::Store), 1);
+    }
+
+    #[test]
+    fn a_vector_stays_in_memory_without_the_vector_registers() {
+        let (module, stats) = run(&wrap("(ptr, i32) -> i32", LANES));
+        assert_eq!(stats.count(Kind::Missed, WIDTH), 1);
+        assert_eq!(count_of(body(&module), Opcode::Alloca), 1);
+    }
+
+    #[test]
+    fn a_byte_of_a_vector_keeps_it_in_memory() {
+        let text = wrap(
+            "(ptr) -> i8",
+            "block0(%0: ptr):
+    %1 = alloca, size 16, align 16
+    memcpy %1, %0, size 16, align 16
+    %2 = load.i32x4 %1, align 4
+    %3 = add %2, %2
+    store %3 -> %1, align 4
+    %4 = load.i8 %1, align 1
+    return %4
+",
+        );
+        let (module, stats) = on_sse2(&text);
+        assert_eq!(stats.count(Kind::Missed, OVERLAP), 1);
+        assert_eq!(count_of(body(&module), Opcode::Alloca), 1);
+    }
+
+    #[test]
+    fn a_vector_built_lane_by_lane_round_a_loop_starts_from_a_zero_splat() {
+        // `__answer[__i] = ...` in a loop the unroller has not been to, with the vector carried
+        // round it.
+        let text = wrap(
+            "(i32) -> i32",
+            "block0(%0: i32):
+    %1 = alloca, size 16, align 16
+    %2 = iconst.i64 4
+    %3 = ptr_add %1, %2
+    jump block1
+
+block1:
+    store %0 -> %3, align 4
+    %4 = load.i32x4 %1, align 4
+    %5 = add %4, %4
+    store %5 -> %1, align 4
+    %6 = load.i32 %1, align 4
+    %7 = icmp slt %6, %0
+    br_if %7, block1, block2
+
+block2:
+    return %6
+",
+        );
+        let (module, stats) = on_sse2(&text);
+        assert_eq!(stats.count(Kind::Optimized, SCALARIZED), 1);
+        let func = body(&module);
+        assert_eq!(count_of(func, Opcode::Splat), 1);
+        assert_eq!(params(func, 1), 1);
     }
 
     #[test]

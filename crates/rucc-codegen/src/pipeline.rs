@@ -2008,6 +2008,13 @@ mod tests {
         ] {
             assert!(text.contains(inst), "{inst} in {text}");
         }
+        // The merges write over their first source, and the allocator only keeps the two in one
+        // register when it is told to.
+        for line in text.lines() {
+            if ["movss_rr", "movsd_rr", "punpcklqdq_rr"].iter().any(|it| line.contains(*it)) {
+                assert!(line.contains("(reuse 1)"), "{line} in {text}");
+            }
+        }
     }
 
     /// The same journey at the format the machine only moves, which is the whole of what it can do
