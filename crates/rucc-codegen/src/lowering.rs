@@ -119,6 +119,17 @@ pub enum Step {
     /// in a hundred and twenty eight, which is still not a width the machine has, so this goes
     /// ahead of the splitting below and a `_BitInt(65)` reaches it as a `__int128` does.
     Widths,
+    /// A byte reversal, as the halving run of swaps it is.
+    ///
+    /// Above the splitting, so a `__builtin_bswap64` on a 32 bit machine becomes shifts and masks
+    /// at sixty four bits that the splitting then takes in halves. The splitting has no rule for
+    /// the reversal itself, and run the other way round the masks came out at a width nothing
+    /// below could lower.
+    Bytes,
+    /// A leading zero, trailing zero or set bit count, as the arithmetic that answers it.
+    ///
+    /// Above the splitting for the reason the byte reversal is.
+    Counts,
     /// An integer wider than a register, as the two halves of one.
     ///
     /// Below the width legalisation and not part of it, because the two go in opposite
@@ -131,10 +142,6 @@ pub enum Step {
     /// Below the widths, so every division it sees is at a width the machine has, and a widening
     /// the step above wrote in front of one is a range it can read like any other.
     Divisions,
-    /// A byte reversal, as the halving run of swaps it is.
-    Bytes,
-    /// A leading zero, trailing zero or set bit count, as the arithmetic that answers it.
-    Counts,
     /// Anything at all at the quad float format, as a call to the routine for it.
     ///
     /// Above the float rewriting rather than part of it, because the two are written about
@@ -166,10 +173,10 @@ impl Step {
         Self::Decimals,
         Self::HalfFloats,
         Self::Widths,
-        Self::Halves,
-        Self::Divisions,
         Self::Bytes,
         Self::Counts,
+        Self::Halves,
+        Self::Divisions,
         Self::Quads,
         Self::Floats,
         Self::Bulk,
@@ -596,10 +603,12 @@ mod tests {
                 // The widths first, because a sixty five bit integer is held in a hundred and
                 // twenty eight and that is a width the splitting after it is for.
                 "widths",
-                "halves",
-                "divisions",
+                // Ahead of the splitting, which has no rule for either and splits what they
+                // become instead.
                 "bytes",
                 "counts",
+                "halves",
+                "divisions",
                 "quads",
                 "floats",
                 "bulk",

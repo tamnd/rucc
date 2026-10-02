@@ -18,6 +18,7 @@ All notable changes are recorded here. The format follows [Keep a Changelog](htt
 
 ### Fixed
 
+- `__builtin_popcountll`, `__builtin_clzll`, `__builtin_ctzll`, `__builtin_ffsll`, `__builtin_parityll`, `__builtin_clrsbll` and `__builtin_bswap64` compile on i386, where each was refused with "no rule lowers `lshr.i64`". The byte reversal and the counts are now written out before a 64 bit value is split into two registers rather than after.
 - `-freg-struct-return` on i386, which the kernel passes beside `-mregparm=3`, brings a structure of one, two, four or eight bytes back in `eax` and `edx` as gcc does, where it used to be written through the hidden pointer and a `pte_t` returned by gcc built code was read from nowhere. `-fpcc-struct-return` turns it off.
 - An i386 Windows object now carries `@feat.00` with bit 0 set, the way clang and MSVC write it, so `lld-link /safeseh` links it rather than refusing it as not safe for SafeSEH. The `-S` listing says it too, with the `.set @feat.00, 1` line clang writes. rucc installs no exception handlers on i386, so the empty handler list the bit stands for is true of every object it writes.
 
