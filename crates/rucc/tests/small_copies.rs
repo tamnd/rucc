@@ -72,6 +72,25 @@ void m24(void *d, const void *s) { memmove(d, s, 24); }
     }
 }
 
+/// `read_header` from tamnd/rucc#2298. The copy into `h` is an operation rather than a call, and
+/// once it is, scalar replacement takes `h` out of memory, so what is left is the load from `rec`
+/// and the call through `out`, which is gcc's two instructions.
+#[test]
+fn a_local_filled_by_a_small_copy_stays_off_the_stack() {
+    let source = "\
+void read_header(const char *rec, void (*out)(unsigned)) {
+    unsigned h;
+    memcpy(&h, rec, sizeof(h));
+    out(h);
+}
+";
+    let text = asm("header", &["-O2"], source);
+    let header = body(&text, "read_header");
+    assert!(!header.contains("memcpy"), "{header}");
+    assert!(!header.contains("%rsp"), "{header}");
+    assert!(header.contains("(%rdi), %edi"), "{header}");
+}
+
 #[test]
 fn a_longer_one_is_still_a_call() {
     let source = "\

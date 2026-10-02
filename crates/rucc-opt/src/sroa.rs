@@ -1843,4 +1843,29 @@ block2:
         assert_eq!(stats.count(Kind::Missed, NO_FUEL), 1);
         assert_eq!(count_of(body(&module), Opcode::Alloca), 1);
     }
+
+    #[test]
+    fn a_local_filled_by_one_copy_from_outside_becomes_a_load() {
+        // `read_header` from tamnd/rucc#2298: `memcpy(&h, rec, sizeof(h))` and then `h` read
+        // whole. The copy is the only write, so the local goes and the read is a load from `rec`.
+        let text = wrap(
+            "(ptr, ptr)",
+            "block0(%0: ptr, %1: ptr):
+    %2 = alloca, size 4, align 4
+    %3 = iconst.i64 4
+    memcpy %2, %0, size 4, align 1
+    %4 = load.i32 %2, align 4, tbaa !1
+    call_indirect %1(%4) : (i32)
+    lifetime_end %2
+    return
+",
+        ) + "!0 = tbaa \"char\", offset 0\n!1 = tbaa \"int\", parent !0, offset 0\n";
+        let (module, stats) = run(&text);
+        assert_eq!(stats.count(Kind::Optimized, SCALARIZED), 1, "{stats:?}");
+        let func = body(&module);
+        for opcode in [Opcode::Alloca, Opcode::Memcpy] {
+            assert_eq!(count_of(func, opcode), 0, "{} is left", opcode.name());
+        }
+        assert_eq!(count_of(func, Opcode::Load), 1);
+    }
 }
