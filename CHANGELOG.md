@@ -23,6 +23,7 @@ All notable changes are recorded here. The format follows [Keep a Changelog](htt
 
 ### Fixed
 
+- The i386 kernel's `-msoft-float`, `-mno-sse`, `-mno-mmx`, `-mno-sse2`, `-mno-3dnow` and `-mno-avx` are now taken. The extensions are already off on i386, and `-msoft-float` refuses a function with a float in it, since every float there is on the x87 stack. Turning an extension on for i386 is refused with a message that says why.
 - The driver now accepts `-Wa,--32` on i386 and `-Wa,-mtune=generic32` and the other i386 and generic names on x86. The i386 kernel passes both to gas. The other word size is still refused, now with a message that points at `-m32` or `-m64`.
 - `-mpreferred-stack-boundary=2` is accepted on i386, including with `-m32` on an x86-64 target, which is how the 32-bit kernel is built. The range is checked after `-m32` has picked the machine, 2 to 12 on i386 and 3 to 12 on x86-64.
 - An i686 Windows function with a sixteen byte local or spill realigns its stack with `and $-16, %esp` (#2072). Windows only promises four byte alignment at entry, and a callback from a DLL Microsoft's compiler built arrives on four, so the `movaps` to a vector spill could fault. A frame with a `double` is not realigned, since an eight byte value off its alignment is only slower, which is what gcc does for mingw-w64 with SSE. Calls still keep the stack on sixteen. A frame with a variable length array still counts on sixteen at entry.

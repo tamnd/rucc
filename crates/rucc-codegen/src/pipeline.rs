@@ -705,7 +705,9 @@ pub fn compile_recording(
     // none, or a function with nothing in it that needs one, and taking both away here is what
     // keeps a value from reaching for them all the same.
     let vectors = flags.vector && !saves_all;
-    lower::off_registers(source, vectors, flags.x87 && !saves_all, flags.x87_return)?;
+    let x87 = flags.x87 && !saves_all;
+    let stacked = machine.conv.word == 4;
+    lower::off_registers(source, vectors, x87, flags.x87_return, stacked)?;
     let lowered =
         lower::func_for(source, names, machine.selector, machine.conv, elsewhere, flags.debug)?;
     recording.fired.merge(&lowered.fired);

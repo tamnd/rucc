@@ -730,6 +730,7 @@ pub fn parse_args(args: &[String]) -> Result<Action, CliError> {
     // decide that neither means anything. See `rucc_target::isa`.
     let mut isa = rucc_target::Choices::new();
     let mut isa_flag: Option<&str> = None;
+    let mut isa_on: Option<&str> = None;
     let mut march: Option<&str> = None;
     // What `-fexceptions` and `-fno-exceptions` last said, if either was written. It is kept apart
     // from the field because `-fnon-call-exceptions` turns exceptions on only when neither was,
@@ -2247,14 +2248,15 @@ pub fn parse_args(args: &[String]) -> Result<Action, CliError> {
             // the i386 kernel sets to 2. The range depends on the machine, and `-m32` only settles
             // that after the loop, so it is checked there. Only on x86, where gcc has the flag.
             _ if x86 && arg.starts_with("-mpreferred-stack-boundary=") => boundary = Some(arg),
-            // The x87 stack, which is where `long double` is on x86-64. The kernel turns it off
-            // along with the vector registers. `-msoft-float` is the older spelling, and on this
-            // machine gcc means the same by it. Where a `float` is returned when there is no x87
-            // is only a question once there is none, so `-mno-fp-ret-in-387` is taken then.
-            "-mno-80387" | "-msoft-float" if arch == rucc_target::Arch::X86_64 => x87 = false,
-            "-m80387" | "-mhard-float" if arch == rucc_target::Arch::X86_64 => x87 = true,
-            "-mno-fp-ret-in-387" if arch == rucc_target::Arch::X86_64 => fp_ret_in_387 = false,
-            "-mfp-ret-in-387" if arch == rucc_target::Arch::X86_64 => fp_ret_in_387 = true,
+            // The x87 stack, which is where `long double` is on x86-64 and every float is on i386.
+            // The kernel turns it off along with the vector registers, with `-mno-80387` on x86-64
+            // and `-msoft-float`, the older spelling, on i386. Where a `float` is returned when
+            // there is no x87 is only a question once there is none, so `-mno-fp-ret-in-387` is
+            // taken then.
+            "-mno-80387" | "-msoft-float" if x86 => x87 = false,
+            "-m80387" | "-mhard-float" if x86 => x87 = true,
+            "-mno-fp-ret-in-387" if x86 => fp_ret_in_387 = false,
+            "-mfp-ret-in-387" if x86 => fp_ret_in_387 = true,
             // Nothing but the general purpose registers, which on x86-64 is the vector
             // extensions and the x87 stack all turned off at once, and on AArch64 is the FP and
             // SIMD registers. A function with a `float` in it is then refused, as gcc refuses it.
@@ -2533,6 +2535,9 @@ pub fn parse_args(args: &[String]) -> Result<Action, CliError> {
                 }
                 isa.read(&arg["-m".len()..]).map_err(|_| err(format!("unknown option `{arg}`")))?;
                 isa_flag.get_or_insert(arg);
+                if on {
+                    isa_on.get_or_insert(arg);
+                }
             }
             // Which processor in the family to build for. What it decides is the extensions of
             // the instruction set the unit may assume, which is the macros, on x86-64 and, for
@@ -2849,9 +2854,10 @@ pub fn parse_args(args: &[String]) -> Result<Action, CliError> {
     link.daz_ftz = daz_ftz;
     // The extensions, now that the target is known. On x86-64 the processor supplies whatever no
     // flag said. On AArch64 `-march=` alone says them, with its `+crc` and the rest, and nowhere
-    // else is there any to have. Off x86-64 a flag naming one of its extensions is gcc's unknown
+    // else is there any to have. Off x86 a flag naming one of its extensions is gcc's unknown
     // option too, so it is refused the same way it would have been had it not looked like an x86
-    // flag.
+    // flag. On i386 every one of them is already off, which is what the kernel's `-mno-sse` and
+    // the rest ask for, and turning one on is refused, since there is no code here that uses it.
     match opts.target.arch {
         rucc_target::Arch::X86_64 => {
             let base = match march {
@@ -2864,7 +2870,14 @@ pub fn parse_args(args: &[String]) -> Result<Action, CliError> {
             opts.isa = isa.over(base);
         }
         rucc_target::Arch::Aarch64 | rucc_target::Arch::Riscv64 | rucc_target::Arch::X86 => {
-            if let Some(flag) = isa_flag {
+            if opts.target.arch == rucc_target::Arch::X86 {
+                if let Some(flag) = isa_on {
+                    return Err(err(format!(
+                        "{flag}: this compiler builds i386 code with no extensions to the \
+                         instruction set, so one can only be turned off"
+                    )));
+                }
+            } else if let Some(flag) = isa_flag {
                 return Err(err(format!("unknown option `{flag}`")));
             }
             opts.isa = match (opts.target.arch, march) {
@@ -8865,6 +8878,13 @@ mod tests {
         // `-mno-80387` is an x86 flag, and gcc for AArch64 does not know it.
         let said = refused(&[KERNEL_ARM64, "-mno-80387", "-c", "a.c"]);
         assert!(said.contains("unknown option"), "{said}");
+        // What the i386 kernel passes. Every extension is already off there, and the x87 stack
+        // is where every float is, so `-msoft-float` leaves a float nowhere to be.
+        let i386 = [KERNEL_X86, "-m32", "-fno-pic", "-msoft-float", "-mno-sse", "-mno-mmx"];
+        let i386 = [&i386[..], &["-mno-sse2", "-mno-3dnow", "-mno-avx"]].concat();
+        assert_eq!(files(&i386), (true, false));
+        let said = refused(&[KERNEL_X86, "-m32", "-msse2", "-c", "a.c"]);
+        assert!(said.contains("-msse2: this compiler builds i386 code"), "{said}");
     }
 
     /// The canary moved to where a kernel keeps it, which is `%gs:40` up to 6.12 and a symbol read
