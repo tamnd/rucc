@@ -3857,7 +3857,7 @@ impl<'a> Lowering<'a> {
     ///
     /// Every `switch` that reaches here is one `crate::switch` left behind on purpose: it has
     /// already checked the value is inside the table and taken the lowest case off it, so the
-    /// operand is a 64 bit index, the cases are the values from zero up with gaps where the
+    /// operand is an index a word wide, the cases are the values from zero up with gaps where the
     /// program had no case, and the default is only where those gaps go. What is written is the
     /// shape gcc writes for the same statement in position independent code:
     ///
@@ -3878,7 +3878,7 @@ impl<'a> Lowering<'a> {
         let Extra::Switch(info) = data.extra else { return Err(self.unsupported(inst)) };
         let &index = self.source[data.args].first().ok_or_else(|| self.unsupported(inst))?;
         let ty = self.source[index].ty;
-        if ty != Type::int(u64::BITS) {
+        if ty != Type::int(self.conv.word * 8) {
             return Err(self.unsupported(inst));
         }
         let cases = self.source[self.source[info].cases].to_vec();

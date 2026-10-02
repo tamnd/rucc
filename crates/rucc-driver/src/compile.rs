@@ -1098,7 +1098,11 @@ fn generate(
         stack_clash: opts.stack_clash,
         landing: opts.control.branch(),
         speculation: opts.speculation,
-        jump_tables: opts.jump_tables,
+        // Not in i386 position independent code, whose table would be found with an absolute
+        // `lea` that the place the code is loaded at does not move. The EFI stub is built that way
+        // and runs wherever the firmware put it, and a bit test or a search needs no address.
+        jump_tables: opts.jump_tables
+            && !(target.tuple.arch() == Arch::X86 && replaceable(target, opts) != IrPic::Absolute),
         cmov: opts.cmov,
         profile: match profile {
             None => pipeline::Profile::No,

@@ -322,7 +322,9 @@ impl Step {
     ) -> bool {
         let (goal, force, tables, cmov) = switching;
         match self {
-            Self::Switches => switched.extend(switch::lowered(func, goal, force, tables)),
+            Self::Switches => {
+                switched.extend(switch::lowered(func, goal, force, tables, conv.word * 8))
+            }
             Self::Retries => retry::loops(func, conv.word),
             Self::Orderings => {
                 expand::orderings(func, conv.word, conv.total_store_order);
