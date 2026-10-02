@@ -12,6 +12,7 @@ All notable changes are recorded here. The format follows [Keep a Changelog](htt
 ### Changed
 
 - The simplifier makes the rule matcher's two lists once per run rather than for every table and plan it tries on every instruction, which takes about 3% off an optimized build of jtckdint when it goes through the portable code rather than `<stdckdint.h>` (#2649).
+- Lowering reads the arguments of each rule into a list it reuses and hands the operands to the builder without copying them into another, which takes about 1% off a build of jtckdint at `-O0` and about 0.5% at `-O2` when it goes through the portable code rather than `<stdckdint.h>` (#2658).
 
 ### Fixed
 
