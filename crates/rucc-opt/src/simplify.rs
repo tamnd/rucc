@@ -424,6 +424,9 @@ impl Pass for Simplify {
             Some(result) => uses[result.index()] == 0,
             None => false,
         };
+        // The matcher's two stacks, made once for the whole run. See [`identity`].
+        let mut stacks =
+            (Vec::with_capacity(16), Match { rule: 0, bindings: Vec::with_capacity(8) });
         for block in func.blocks().collect::<Vec<Block>>() {
             for inst in func.insts(block).collect::<Vec<Inst>>() {
                 if dead(func, inst) {
@@ -478,7 +481,9 @@ impl Pass for Simplify {
                     stats.optimized(LANE);
                     continue;
                 }
-                let Some((rewrite, pattern)) = identity(func, inst, address) else { continue };
+                let Some((rewrite, pattern)) = identity(func, inst, address, &mut stacks) else {
+                    continue;
+                };
                 if !fuel.take() {
                     stats.missed(NO_FUEL_RULE);
                     continue;
@@ -589,14 +594,28 @@ struct Nested {
 /// The plans are tried in order and the first that matches wins. A plan is how the operands are
 /// shown rather than what they are, so trying three of them is three walks over a trie, each of
 /// which fails in its first node or two when the instruction is not one any rule is about.
-fn identity(func: &Func, inst: Inst, address: u32) -> Option<(Rewrite, &'static str)> {
+///
+/// `stacks` is the matcher's scratch and what it bound, handed in rather than made here. This is
+/// asked about every instruction for every table and every plan, and nearly all of those find
+/// nothing, so making two new lists for each was two allocations for nothing every time.
+fn identity(
+    func: &Func,
+    inst: Inst,
+    address: u32,
+    stacks: &mut (Vec<Term>, Match<Term>),
+) -> Option<(Rewrite, &'static str)> {
     let result = func[inst].first_result?;
+    let (left, found) = stacks;
     for (table, plan) in
         TABLES.into_iter().flat_map(|(table, plans)| plans.iter().map(move |&plan| (table, plan)))
     {
         let terms = Terms::new(func, inst, plan, address);
-        let Some(found) = table.find(&terms, Term::Root) else { continue };
-        let rule = table.rule(&found);
+        let Some(rule) = table.find_in(&terms, Term::Root, left, &mut found.bindings) else {
+            continue;
+        };
+        found.rule = rule;
+        let found = &*found;
+        let rule = table.rule(found);
         let rewrite = match rule.replacement {
             // A value the pattern bound, which is a register because that is the only thing a
             // `value.iN` binds.
@@ -624,7 +643,7 @@ fn identity(func: &Func, inst: Inst, address: u32) -> Option<(Rewrite, &'static 
             // An instruction the rule writes, which this one becomes. That is the third shape and
             // the last one. What is under it, when the rule wrote something deeper than one
             // instruction, is built in front of it.
-            pieces => match built(pieces, &found, &matched(&terms, &found)) {
+            pieces => match built(pieces, found, &matched(&terms, found)) {
                 // Something built under the instruction is built at the width its head names,
                 // which is a scalar, so the rule is not one about a vector whatever it matched.
                 Some(rewrite) if nests(&rewrite) && func[result].ty.is_vector() => continue,
