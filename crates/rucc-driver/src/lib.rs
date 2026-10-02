@@ -776,6 +776,8 @@ pub fn parse_args(args: &[String]) -> Result<Action, CliError> {
     let mut guard_reg: Option<rucc_target::Segment> = None;
     let mut guard_offset: Option<i32> = None;
     let mut guard_symbol: Option<&str> = None;
+    // `-mpreferred-stack-boundary=`, weighed once the machine is settled.
+    let mut boundary: Option<&str> = None;
 
     let mut i = 0;
     while i < args.len() {
@@ -2241,21 +2243,10 @@ pub fn parse_args(args: &[String]) -> Result<Action, CliError> {
                     })?;
             }
             // The boundary the stack pointer is kept on at a call, as a power of two, which the
-            // x86-64 kernel sets to 3 because interrupt entry leaves its stack on eight bytes.
-            // gcc's range is 3 to 12, with the vector registers or without them. The kernel's
-            // display code is built with `-msse` and a boundary of 3, and a frame with a sixteen
-            // byte vector in it is then aligned by the prologue, the same as a local that asks
-            // for more than the boundary. Only on x86-64, where gcc has the flag at all.
-            _ if arch == rucc_target::Arch::X86_64
-                && arg.starts_with("-mpreferred-stack-boundary=") =>
-            {
-                let text = &arg["-mpreferred-stack-boundary=".len()..];
-                let power = text.parse::<u32>().ok().filter(|power| (3..=12).contains(power));
-                let power = power.ok_or_else(|| {
-                    err(format!("{arg}: the boundary is a power of two between 3 and 12"))
-                })?;
-                opts.stack_boundary = Some(1 << power);
-            }
+            // x86-64 kernel sets to 3 because interrupt entry leaves its stack on eight bytes, and
+            // the i386 kernel sets to 2. The range depends on the machine, and `-m32` only settles
+            // that after the loop, so it is checked there. Only on x86, where gcc has the flag.
+            _ if x86 && arg.starts_with("-mpreferred-stack-boundary=") => boundary = Some(arg),
             // The x87 stack, which is where `long double` is on x86-64. The kernel turns it off
             // along with the vector registers. `-msoft-float` is the older spelling, and on this
             // machine gcc means the same by it. Where a `float` is returned when there is no x87
@@ -2720,6 +2711,21 @@ pub fn parse_args(args: &[String]) -> Result<Action, CliError> {
                 }
             }
         }
+    }
+
+    // The stack boundary against the machine. gcc's range is 3 to 12 on x86-64, with the vector
+    // registers or without them, and 2 to 12 on i386, where the psABI only promises four bytes.
+    // The kernel's display code is built with `-msse` and a boundary of 3, and a frame with a
+    // sixteen byte vector in it is then aligned by the prologue, the same as a local that asks for
+    // more than the boundary.
+    if let Some(arg) = boundary {
+        let least = if opts.target.arch == rucc_target::Arch::X86 { 2 } else { 3 };
+        let text = &arg["-mpreferred-stack-boundary=".len()..];
+        let power = text.parse::<u32>().ok().filter(|power| (least..=12).contains(power));
+        let power = power.ok_or_else(|| {
+            err(format!("{arg}: the boundary is a power of two between {least} and 12"))
+        })?;
+        opts.stack_boundary = Some(1 << power);
     }
 
     // The registers against the machine, settled now that the machine is. gcc takes 0 to 3 on 32
@@ -8782,11 +8788,12 @@ mod tests {
         assert!(!compile(&[KERNEL_ARM64, "-fno-jump-tables", "-c", "a.c"]).0.jump_tables);
     }
 
-    /// The boundary is a power of two, as gcc spells it, and only on x86-64, where gcc has the
-    /// flag. 3 is the kernel's, and it is taken with the vector registers on as well as off,
+    /// The boundary is a power of two, as gcc spells it, and only on x86, where gcc has the flag.
+    /// The least is 3 on x86-64 and 2 on i386, which is what the 32 bit kernel passes. 3 is the
+    /// x86-64 kernel's, and it is taken with the vector registers on as well as off,
     /// since the kernel's display code turns SSE back on and keeps the boundary.
     #[test]
-    fn the_preferred_stack_boundary_is_a_power_of_two_on_x86_64() {
+    fn the_preferred_stack_boundary_is_a_power_of_two_on_x86() {
         let boundary = |flag: &str| compile(&[KERNEL_X86, flag, "-c", "a.c"]).0.stack_boundary;
         assert_eq!(compile(&[KERNEL_X86, "-c", "a.c"]).0.stack_boundary, None);
         assert_eq!(boundary("-mpreferred-stack-boundary=4"), Some(16));
@@ -8801,6 +8808,16 @@ mod tests {
         assert_eq!(compile(&eight).0.stack_boundary, Some(8));
         let eight = [KERNEL_X86, "-mno-sse", "-mpreferred-stack-boundary=3", "-c", "a.c"];
         assert_eq!(compile(&eight).0.stack_boundary, Some(8));
+        let i386 = |more: &[&str]| {
+            let mut line = vec![KERNEL_X86, "-m32", "-fno-pic"];
+            line.extend_from_slice(more);
+            line.extend_from_slice(&["-c", "a.c"]);
+            compile(&line).0.stack_boundary
+        };
+        assert_eq!(i386(&["-mpreferred-stack-boundary=2"]), Some(4));
+        assert_eq!(i386(&["-mpreferred-stack-boundary=2", "-m32"]), Some(4));
+        let low = refused(&[KERNEL_X86, "-m32", "-mpreferred-stack-boundary=1", "-c", "a.c"]);
+        assert!(low.contains("between 2 and 12"), "{low}");
         let arm = refused(&[KERNEL_ARM64, "-mpreferred-stack-boundary=4", "-c", "a.c"]);
         assert!(arm.contains("unknown option"), "{arm}");
     }
