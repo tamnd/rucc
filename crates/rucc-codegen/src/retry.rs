@@ -69,42 +69,88 @@
 //! such width, and until that is worked out the refusal in `lower.rs` is the honest answer.
 
 use rucc_ir::{
-    Block, Builder, Extra, Flags, Func, Inst, IntPred, MemInfo, MemOrder, Opcode, RmwOp, Type,
-    Value,
+    Block, Builder, Extra, Flags, Func, Inst, InstData, IntPred, MemInfo, MemOrder, Opcode, RmwOp,
+    Type, Value,
 };
 
 /// Rewrites every read modify write this machine has no instruction for into a loop around the
 /// compare and exchange, and leaves the rest of them alone.
 ///
+/// `word` is how many bytes a register holds. A value wider than that has no instruction for any
+/// operation, so on i386 an exchange or an add of a `long long` is a loop as well, and so is a
+/// store of one, which is an exchange whose answer nobody reads. What the loop's compare and
+/// exchange becomes there is `crate::eight`'s business.
+///
 /// The function is changed in place. It gains two blocks and loses one instruction for each one
 /// rewritten, and every function without one of these is untouched.
-pub fn loops(func: &mut Func) {
+pub fn loops(func: &mut Func, word: u32) {
+    let stores: Vec<Inst> = func
+        .blocks()
+        .flat_map(|block| func.insts(block))
+        .filter(|&inst| wide_store(func, inst, word))
+        .collect();
+    for inst in stores {
+        exchanged(func, inst);
+    }
     let found: Vec<Inst> = func
         .blocks()
         .flat_map(|block| func.insts(block))
-        .filter(|&inst| wanted(func, inst))
+        .filter(|&inst| wanted(func, inst, word))
         .collect();
     for inst in found {
-        rewrite(func, inst);
+        rewrite(func, inst, word);
     }
+}
+
+/// Whether the value is an integer wider than a register, up to the sixty four bits a compare and
+/// exchange of two registers covers.
+fn wide(ty: Type, word: u32) -> bool {
+    ty.is_int() && ty.lanes() == 1 && ty.bits() > word * 8 && ty.bits() <= 64
+}
+
+/// Whether this is an ordered store of an integer wider than a register.
+fn wide_store(func: &Func, inst: Inst, word: u32) -> bool {
+    if func[inst].opcode != Opcode::AtomicStore {
+        return false;
+    }
+    func[func[inst].args].first().is_some_and(|&value| wide(func[value].ty, word))
+}
+
+/// A store as the exchange that puts the same value there, with its answer left unread.
+fn exchanged(func: &mut Func, inst: Inst) {
+    let Extra::Mem(mem) = func[inst].extra else { return };
+    let [value, addr] = func[func[inst].args] else { return };
+    let ty = func[value].ty;
+    let args = func.push_values(&[addr, value]);
+    let data = InstData {
+        args,
+        flags: func[inst].flags,
+        extra: Extra::Rmw(RmwOp::Xchg, mem),
+        ..InstData::new(Opcode::AtomicRmw)
+    };
+    let span = func.span(inst);
+    let made = func.create_inst(data, &[ty], span);
+    func.insert_before(made, inst);
+    func.remove_inst(inst);
 }
 
 /// Whether this instruction is one of the ones with no instruction behind it.
 ///
-/// The three the machine has are left as they are, and so is anything whose value is not an integer
-/// at a width the machine compares and exchanges at, which is what the two floating operations are.
-fn wanted(func: &Func, inst: Inst) -> bool {
+/// The three the machine has are left as they are unless the value is wider than a register, and
+/// so is anything whose value is not an integer at a width the machine compares and exchanges at,
+/// which is what the two floating operations are.
+fn wanted(func: &Func, inst: Inst, word: u32) -> bool {
     let Extra::Rmw(op, _) = func[inst].extra else { return false };
-    if matches!(op, RmwOp::Xchg | RmwOp::Add | RmwOp::Sub) {
-        return false;
-    }
     let Some(old) = func[inst].first_result else { return false };
     let ty = func[old].ty;
+    if matches!(op, RmwOp::Xchg | RmwOp::Add | RmwOp::Sub) && !wide(ty, word) {
+        return false;
+    }
     ty.is_int() && matches!(ty.bits(), 8 | 16 | 32 | 64)
 }
 
 /// One read modify write, as the three blocks the loop is.
-fn rewrite(func: &mut Func, inst: Inst) {
+fn rewrite(func: &mut Func, inst: Inst, word: u32) {
     let head = func.block_of(inst).expect("the instruction is in a block");
     let span = func.span(inst);
     let Extra::Rmw(op, mem) = func[inst].extra else { return };
@@ -133,8 +179,16 @@ fn rewrite(func: &mut Func, inst: Inst) {
     // Relaxed, because what makes the whole of this indivisible is the compare and exchange and a
     // stronger load in front of it would be a barrier bought twice. The read is not the moment the
     // operation happens; the exchange that agrees with it is.
+    //
+    // A value wider than a register has no load that reads it in one go, and needs none: the read
+    // is only a guess at what the exchange will find, and a guess torn in half fails the compare
+    // and goes round again with what was really there.
     let mut build = Builder::new(func, head).at(span);
-    let first = build.atomic_load(ty, addr, MemInfo { order: MemOrder::Relaxed, ..info }, flags);
+    let first = if wide(ty, word) {
+        build.load(ty, addr, MemInfo { order: MemOrder::NotAtomic, ..info }, flags)
+    } else {
+        build.atomic_load(ty, addr, MemInfo { order: MemOrder::Relaxed, ..info }, flags)
+    };
     build.jump(spin, &[first]);
 
     let mut build = Builder::new(func, spin).at(span);
@@ -163,7 +217,11 @@ fn compute(build: &mut Builder<'_>, op: RmwOp, seen: Value, operand: Value, ty: 
         RmwOp::SMin => return pick(build, IntPred::Slt, seen, operand),
         RmwOp::UMax => return pick(build, IntPred::Ugt, seen, operand),
         RmwOp::UMin => return pick(build, IntPred::Ult, seen, operand),
-        _ => unreachable!("the operations with an instruction never reach this pass"),
+        // These three only reach here wider than a register.
+        RmwOp::Xchg => return operand,
+        RmwOp::Add => Opcode::Add,
+        RmwOp::Sub => Opcode::Sub,
+        _ => unreachable!("a floating operation never reaches this pass"),
     };
     let answer = build.binary(opcode, seen, operand, Flags::NONE);
     if op != RmwOp::Nand {
@@ -281,7 +339,7 @@ mod tests {
     fn an_operation_with_no_instruction_becomes_a_loop() {
         for op in [RmwOp::And, RmwOp::Nand, RmwOp::Or, RmwOp::Xor] {
             let (mut names, mut func) = built(op, Type::int(32));
-            loops(&mut func);
+            loops(&mut func, 8);
             verified(&func, &mut names);
 
             let text = printed(&func, &mut names);
@@ -301,7 +359,7 @@ mod tests {
     #[test]
     fn the_loop_answers_the_value_that_was_there_before() {
         let (mut names, mut func) = built(RmwOp::Or, Type::int(32));
-        loops(&mut func);
+        loops(&mut func, 8);
 
         let exchange = only(&func, Opcode::Cmpxchg);
         let expected = func[func[exchange].args][1];
@@ -324,7 +382,7 @@ mod tests {
     #[test]
     fn a_use_below_the_loop_reads_the_block_parameter() {
         let (mut names, mut func) = built(RmwOp::Xor, Type::int(32));
-        loops(&mut func);
+        loops(&mut func, 8);
 
         let ret = only(&func, Opcode::Return);
         let block = func.block_of(ret).expect("the return is in a block");
@@ -341,7 +399,7 @@ mod tests {
     fn a_maximum_or_a_minimum_is_a_compare_and_a_select() {
         for op in [RmwOp::SMax, RmwOp::SMin, RmwOp::UMax, RmwOp::UMin] {
             let (mut names, mut func) = built(op, Type::int(64));
-            loops(&mut func);
+            loops(&mut func, 8);
             verified(&func, &mut names);
 
             let kinds = opcodes(&func);
@@ -361,15 +419,50 @@ mod tests {
     fn what_has_an_instruction_and_what_has_no_width_are_left_alone() {
         for op in [RmwOp::Xchg, RmwOp::Add, RmwOp::Sub] {
             let (_, mut func) = built(op, Type::int(32));
-            loops(&mut func);
+            loops(&mut func, 8);
             assert_eq!(func.blocks().count(), 1, "{op:?} has an instruction");
             assert!(opcodes(&func).contains(&Opcode::AtomicRmw), "{op:?}");
         }
         for op in [RmwOp::FAdd, RmwOp::FSub] {
             let (_, mut func) = built(op, Type::float(Float::F64));
-            loops(&mut func);
+            loops(&mut func, 8);
             assert_eq!(func.blocks().count(), 1, "{op:?} has no width to carry it");
             assert!(opcodes(&func).contains(&Opcode::AtomicRmw), "{op:?}");
         }
+    }
+
+    /// On a machine with four byte registers a `long long` has no instruction for any operation,
+    /// so an exchange and an add are loops too, and the guess the loop starts from is a plain load
+    /// since there is no ordered one of eight bytes to make.
+    #[test]
+    fn everything_wider_than_a_register_is_a_loop() {
+        for op in [RmwOp::Xchg, RmwOp::Add, RmwOp::Sub] {
+            let (mut names, mut func) = built(op, Type::int(64));
+            loops(&mut func, 4);
+            assert_eq!(func.blocks().count(), 3, "{op:?}");
+            let ops = opcodes(&func);
+            assert!(!ops.contains(&Opcode::AtomicRmw), "{op:?}");
+            assert!(ops.contains(&Opcode::Load) && ops.contains(&Opcode::Cmpxchg), "{op:?}");
+            verified(&func, &mut names);
+        }
+    }
+
+    /// An ordered store of eight bytes there is the same loop, as an exchange nobody reads.
+    #[test]
+    fn a_store_wider_than_a_register_is_an_exchange_loop() {
+        let mut names = Interner::new();
+        let i64 = Type::int(64);
+        let signature = Signature::new().with_params(&[Type::PTR, i64]);
+        let mut func = Func::new(names.intern("put"), signature);
+        let entry = func.create_block();
+        let addr = func.append_param(entry, Type::PTR);
+        let value = func.append_param(entry, i64);
+        let mut build = Builder::new(&mut func, entry);
+        build.atomic_store(value, addr, info(8), Flags::NONE);
+        build.ret(&[]);
+        loops(&mut func, 4);
+        let ops = opcodes(&func);
+        assert!(!ops.contains(&Opcode::AtomicStore) && ops.contains(&Opcode::Cmpxchg), "{ops:?}");
+        verified(&func, &mut names);
     }
 }

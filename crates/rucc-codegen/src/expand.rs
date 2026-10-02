@@ -1733,7 +1733,13 @@ pub(crate) fn ahead(
 }
 
 /// The same for a comparison, which carries the predicate and produces one bit.
-fn ahead_cmp(func: &mut Func, inst: Inst, opcode: Opcode, extra: Extra, args: &[Value]) -> Value {
+pub(crate) fn ahead_cmp(
+    func: &mut Func,
+    inst: Inst,
+    opcode: Opcode,
+    extra: Extra,
+    args: &[Value],
+) -> Value {
     let args = func.push_values(args);
     written(func, inst, InstData { args, extra, ..InstData::new(opcode) }, Type::I1)
 }
