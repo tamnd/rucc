@@ -27,6 +27,7 @@ All notable changes are recorded here. The format follows [Keep a Changelog](htt
 
 ### Fixed
 
+- `__builtin_mul_overflow` and its kin on i386 with a signed and an unsigned `long long` are checked at 64 bits, since i386 has no `__int128` to widen into; fs/buffer.c no longer stops on a 128 bit `zext`.
 - An i386 `q` output, such as the `=@cce` flag output the kernel's `CC_SET` writes, shares a register with a plain register input when the inputs fill all four registers with a low byte, as gcc does. It used to land in `esi` and come out as `sete %sil`, which i386 has no encoding for.
 - `#warning` in a system header is said, as gcc says it there, rather than dropped with the header's other warnings.
 - A `long long` named ahead of the `...` on i386 is passed and received as two words in place, at a call and in a definition, so the kernel's `__ext4_error` with its `__u64` block number compiles. Every ext4 function that reports an error used to be refused with an `iconst.i64` or `load.i64` nothing lowered.
