@@ -2928,11 +2928,9 @@ mod tests {
     #[test]
     fn gcc_warning_and_error_are_said_here_and_not_passed_on() {
         let mut run = Run::new();
-        let text = run.go(
-            "#pragma GCC warning \"care\\tful\"\n#pragma GCC error \"stop\"\n\
+        let text = run.go("#pragma GCC warning \"care\\tful\"\n#pragma GCC error \"stop\"\n\
              #pragma message \"m\"\n_Pragma(\"GCC warning \\\"op\\\"\")\n\
-             #pragma GCC warning 42\nint x;\n",
-        );
+             #pragma GCC warning 42\nint x;\n");
         assert_eq!(text, "#pragma message \"m\" int x;");
         assert_eq!(
             run.severities(),
