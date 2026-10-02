@@ -153,6 +153,10 @@ pub struct Preprocessor {
     /// by different relative paths is listed twice. Naming a file once is what the flag means,
     /// and a duplicate prerequisite means nothing to `make` either way.
     dep_ids: Set<PathBuf>,
+    /// The names `#pragma GCC poison` took away. Any later appearance of one in the file is an
+    /// error, while one a macro defined earlier writes is not, which is why this is checked
+    /// on the lines as they are read rather than on what the expander produces.
+    poisoned: Set<Symbol>,
 }
 
 impl Preprocessor {
@@ -421,6 +425,11 @@ impl Preprocessor {
                     }
                 }
                 reader.line(cx.interner, &mut body);
+                // The poison line itself is exempt, since naming a poisoned name again is how
+                // a second header says the same thing and gcc lets it.
+                if was_live && !self.is_poison(&body, cx.interner, names) {
+                    self.check_poisoned(&body[1..], None, cx.interner);
+                }
                 let opens =
                     matches!(scan, Scan::Start).then(|| guard_opener(&body, names)).flatten();
                 let alternative = is_alternative(body.first().and_then(ident_of), names);
@@ -459,10 +468,28 @@ impl Preprocessor {
                     if operator {
                         self.flush(&mut text, out, cx, names);
                     }
+                    self.check_poisoned(std::slice::from_ref(&first), None, cx.interner);
+                    self.check_poisoned(&body, None, cx.interner);
                     text.push(Tok::new(first));
                     text.extend(body.iter().copied().map(Tok::new));
                     if operator {
+                        // A `_Pragma("GCC poison x")` poisons the rest of its own line too,
+                        // which was checked before the pragma had done anything.
+                        let before = self.poisoned.clone();
                         self.flush(&mut text, out, cx, names);
+                        if self.poisoned.len() > before.len() {
+                            let line: Vec<PpToken> =
+                                std::iter::once(first).chain(body.iter().copied()).collect();
+                            let after = line
+                                .iter()
+                                .position(|t| self.is_pragma_operator(ident_of(t), names))
+                                .map_or(line.len(), |at| at + 4);
+                            self.check_poisoned(
+                                &line[after.min(line.len())..],
+                                Some(&before),
+                                cx.interner,
+                            );
+                        }
                     }
                 }
                 // A token outside the guard is a token that would be produced twice.
@@ -607,6 +634,7 @@ impl Preprocessor {
                 self.pragma_once(rest[0].span);
             } else if !self.macro_stack_pragma(rest, hash, interner, names)
                 && !self.message_pragma(rest, None, interner, names)
+                && !self.poison_pragma(rest, None, interner)
             {
                 self.pass_through(body, hash, out);
             }
@@ -720,6 +748,72 @@ impl Preprocessor {
             Diagnostic::warning(text, span).with_code("W0335")
         });
         true
+    }
+
+    /// Whether a directive line is `#pragma GCC poison`.
+    fn is_poison(&self, body: &[PpToken], interner: &Interner, names: &Names) -> bool {
+        let [pragma, gcc, word, ..] = body else { return false };
+        ident_of(pragma) == Some(names.pragma) && is_poison_words(gcc, word, interner)
+    }
+
+    /// Carries out `#pragma GCC poison a b c`, or says it is not one.
+    ///
+    /// Like gcc this phase consumes the line, so it is not in what `-E` prints.
+    ///
+    /// Each name is added to the set every later line is checked against. A name that is a
+    /// macro loses its definition, with a warning, because gcc does both: a macro defined
+    /// before the poison and expanding to the name still works, and one that is the name does
+    /// not. Anything but an identifier is an error that ends the line, and the names before it
+    /// stay poisoned.
+    fn poison_pragma(&mut self, rest: &[PpToken], at: Option<Span>, interner: &Interner) -> bool {
+        let [gcc, word, names @ ..] = rest else { return false };
+        if !is_poison_words(gcc, word, interner) {
+            return false;
+        }
+        for token in names {
+            let Some(name) = ident_of(token) else {
+                self.invalid_pragma("GCC poison", at.unwrap_or(token.span));
+                return true;
+            };
+            if !self.poisoned.insert(name) {
+                continue;
+            }
+            if self.macros.undef(name).is_some() {
+                self.diagnostics.push(
+                    Diagnostic::warning(
+                        format!("poisoning existing macro `{}`", interner.resolve(name)),
+                        at.unwrap_or(token.span),
+                    )
+                    .with_code("W0336"),
+                );
+            }
+        }
+        true
+    }
+
+    /// Reports every poisoned identifier among `tokens`, leaving out names that were already
+    /// poisoned in `old` when that is given.
+    fn check_poisoned(
+        &mut self,
+        tokens: &[PpToken],
+        old: Option<&Set<Symbol>>,
+        interner: &Interner,
+    ) {
+        if self.poisoned.is_empty() {
+            return;
+        }
+        for token in tokens {
+            let Some(name) = ident_of(token) else { continue };
+            if self.poisoned.contains(&name) && !old.is_some_and(|old| old.contains(&name)) {
+                self.diagnostics.push(
+                    Diagnostic::error(
+                        format!("attempt to use poisoned `{}`", interner.resolve(name)),
+                        token.span,
+                    )
+                    .with_code("E0811"),
+                );
+            }
+        }
     }
 
     fn invalid_pragma(&mut self, word: &str, at: Span) {
@@ -1739,6 +1833,7 @@ impl Preprocessor {
         // other way to say it: a `#pragma` line cannot come out of a macro body.
         if self.macro_stack_pragma(&tokens, span, interner, names)
             || self.message_pragma(&tokens, Some(span), interner, names)
+            || self.poison_pragma(&tokens, Some(span), interner)
         {
             return;
         }
@@ -1890,6 +1985,12 @@ fn is_known(name: Option<Symbol>, names: &Names) -> bool {
 }
 
 /// Whether this token opens a directive line.
+/// Whether `gcc` and `word` are the `GCC poison` a poison pragma starts with.
+fn is_poison_words(gcc: &PpToken, word: &PpToken, interner: &Interner) -> bool {
+    let spelled = |token: &PpToken| ident_of(token).map(|name| interner.resolve(name));
+    spelled(gcc) == Some("GCC") && spelled(word) == Some("poison")
+}
+
 fn is_directive(tok: PpToken) -> bool {
     tok.flags.has(TokenFlags::START_OF_LINE) && tok.punct() == Some(Punct::Hash)
 }
@@ -2939,6 +3040,31 @@ mod tests {
         assert_eq!(
             run.messages(),
             ["care\tful", "stop", "op", "invalid `#pragma GCC warning` directive"]
+        );
+    }
+
+    #[test]
+    fn a_poisoned_name_is_an_error_where_the_file_writes_it_and_not_where_a_macro_does() {
+        let mut run = Run::new();
+        let text = run.go(
+            "#define OLD strcpy\n#define GONE 1\n#pragma GCC poison memcpy strcpy GONE\n\
+             #pragma GCC poison memcpy\n#pragma GCC poison 42 strcat\nOLD memcpy GONE strcat\n\
+             #ifdef strcpy\n#endif\n#if 0\nmemcpy\n#endif\n\
+             _Pragma(\"GCC poison late\") late late\nlate\n",
+        );
+        assert_eq!(text, "strcpy memcpy GONE strcat late late late");
+        assert_eq!(
+            run.messages(),
+            [
+                "poisoning existing macro `GONE`",
+                "invalid `#pragma GCC poison` directive",
+                "attempt to use poisoned `memcpy`",
+                "attempt to use poisoned `GONE`",
+                "attempt to use poisoned `strcpy`",
+                "attempt to use poisoned `late`",
+                "attempt to use poisoned `late`",
+                "attempt to use poisoned `late`",
+            ]
         );
     }
 

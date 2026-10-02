@@ -6,6 +6,7 @@ All notable changes are recorded here. The format follows [Keep a Changelog](htt
 
 ### Added
 
+- `#pragma GCC poison` is implemented, as in gcc 13. Every later use of a poisoned name the file writes is an error, "attempt to use poisoned `memcpy`" (E0811), in text, in a `#define` body, in `#ifdef`, `#undef` and `defined`, and in the rest of the line after a `_Pragma` that poisons it, while a macro defined before the pragma may still expand to the name. Poisoning a macro undefines it with the warning "poisoning existing macro" (W0336), which answers to no option, and anything but an identifier is an invalid `#pragma GCC poison` (E0672). The pragma is consumed, so `-E` no longer prints it. Before, it was taken without doing anything.
 - A new pass, `gcm`, runs from `-O2` up and moves a computation with no effects down to the latest block in front of everything that reads it, and up out of a loop that does not change it, never into a loop (#2413). `int t = a * b + 7; if (c) return g(t);` now multiplies only on the path that calls `g`.
 
 ### Changed
