@@ -869,7 +869,18 @@ impl Unit<'_> {
         };
         let symbol = self.symbol_of(decl);
         let size = repr::size_of(self.types, self.target, ty);
-        let align = alignment.unwrap_or_else(|| repr::align_of(self.types, self.target, ty));
+        let align = match alignment {
+            Some(align) => align,
+            None => {
+                let natural = repr::align_of(self.types, self.target, ty);
+                if state == Definition::Declared {
+                    natural
+                } else {
+                    let thread = duration == StorageDuration::Thread;
+                    repr::static_align(self.types, self.target, ty, natural, thread)
+                }
+            }
+        };
         let mut global = Global::new(symbol, size, align);
         global.linkage = self.told(decl, linkage);
         // A tentative definition counts as one, because it is one: `int x;` at file scope puts a

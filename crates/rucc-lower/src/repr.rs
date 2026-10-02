@@ -300,6 +300,48 @@ pub(crate) fn local_align(types: &Types, target: &TargetInfo, id: TypeId, align:
     if size_of(types, target, id) >= WIDE_ENOUGH { raised } else { align }
 }
 
+/// How aligned an object with static storage that this file defines is, which on x86 is more than
+/// its type asks for once it is long enough. This is `ix86_data_alignment` under gcc's default
+/// `-malign-data=compat`.
+///
+/// An array, structure or union of 32 bytes or more is aligned to 32, one of a word or more to a
+/// word, and on x86-64 one of 16 bytes or more to 16. gcc does this at every level and for a
+/// common symbol too. It does not when the declaration asked for an alignment of its own, which
+/// the caller checks, and a thread-local only gets it up to a word, because every thread pays for
+/// the padding. The kernel is where it shows: `struct tracepoint` is 72 bytes, so gcc lays the
+/// `__tracepoints` section out 96 bytes apart, and its name strings 8 apart.
+///
+/// Mach-O is left alone, since the compiler a Mach-O target is compared with is clang, which has
+/// no such rule.
+#[must_use]
+pub(crate) fn static_align(
+    types: &Types,
+    target: &TargetInfo,
+    id: TypeId,
+    align: u32,
+    thread: bool,
+) -> u32 {
+    let x86 = matches!(target.tuple.arch(), rucc_tuple::Arch::X86_64 | rucc_tuple::Arch::X86);
+    if !x86 || target.object_format == rucc_target::ObjectFormat::MachO {
+        return align;
+    }
+    let aggregate =
+        matches!(types.kind(types.canonical(id)), TypeKind::Array { .. } | TypeKind::Record(_));
+    if !aggregate || is_variable_length(types, id) {
+        return align;
+    }
+    let size = size_of(types, target, id);
+    let word = u64::from(target.pointer_width / 8);
+    let wanted = match size {
+        32.. => 32,
+        _ if target.pointer_width == 64 && size >= 16 => 16,
+        _ if size >= word => word,
+        _ => return align,
+    };
+    let wanted = if thread { wanted.min(word) } else { wanted };
+    align.max(u32::try_from(wanted).unwrap_or(align))
+}
+
 /// The integer type a pointer is as wide as, which is what an address arrives as when it is not
 /// yet an address.
 #[must_use]

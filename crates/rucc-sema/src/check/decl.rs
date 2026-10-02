@@ -1326,7 +1326,10 @@ impl Checker<'_> {
     /// which is the diagnostic [`Self::alignment`] gives it, and gcc's attribute below it is
     /// ignored without a word: the attribute raises an alignment and never lowers one. So one
     /// below what the type already has is not an error here and is not an override either, and
-    /// the declaration keeps the alignment it would have had.
+    /// the declaration keeps the alignment it would have had. It is still an alignment the
+    /// declaration asked for, which is what stops gcc raising a static object past it on x86, so
+    /// for an object it comes back as the type's own alignment rather than as nothing. A function
+    /// has no such raise, and its own alignment is the target's rather than its type's.
     ///
     /// Written on the specifiers it is shared with the declarators beside this one, and written
     /// after the declarator it is this declaration's alone. Either place asks for the same thing,
@@ -1336,7 +1339,11 @@ impl Checker<'_> {
         let on_item = self.packing(item).align;
         let asked = [on_specs, on_item].into_iter().flatten().max()?;
         let natural = layout(&self.types, ty, self.cx.target).map_or(1, |l| l.align);
-        (i128::from(asked) > i128::from(natural)).then_some(asked)
+        if i128::from(asked) > i128::from(natural) {
+            return Some(asked);
+        }
+        let function = matches!(self.types.kind(self.types.canonical(ty)), TypeKind::Function(_));
+        if function { None } else { u32::try_from(natural).ok() }
     }
 
     /// What `alignas` asked for, folded and checked against what the type already has.
