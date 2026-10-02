@@ -70,6 +70,11 @@ impl TargetInfo {
             Convention::Target if self.regparm > 0 => Convention::Regparm(self.regparm),
             other => other,
         };
+        // Under `-freg-struct-return` the descriptions are the ones the unit's registers carry,
+        // since the table of conventions says nothing about the flag.
+        if self.reg_struct_return {
+            return self.call_regs?.under(convention).map(|regs| regs.abi.call());
+        }
         abis::for_convention(self.tuple, convention).map(AbiDescription::call)
     }
 }

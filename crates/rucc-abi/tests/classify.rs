@@ -11,8 +11,8 @@
 //! than a constant.
 
 use rucc_abi::abis::{
-    AAPCS64, DARWIN_ARM64, I386_MINGW, I386_MSVC, I386_SYSV, RISCV_LP64D, SYSV_AMD64, WIN64,
-    WINDOWS_ARM64,
+    AAPCS64, DARWIN_ARM64, I386_MINGW, I386_MSVC, I386_SYSV, I386_SYSV_REG_STRUCT, RISCV_LP64D,
+    SYSV_AMD64, WIN64, WINDOWS_ARM64,
 };
 use rucc_abi::{Arg, Call, Format, Kind, Pass, Piece, Scalar, Shape, Slot, pieces, record};
 
@@ -741,6 +741,22 @@ fn i386_returns_an_aggregate_of_any_size_in_memory() {
 
     let large = pieces(&[int(8), int(8), int(8), int(8)]);
     assert_eq!(i386().returns(&Arg::Aggregate(record(&large))), Pass::Reference);
+}
+
+#[test]
+fn i386_under_reg_struct_return_brings_back_the_sizes_with_an_integer_mode_in_registers() {
+    let mut reg = I386_SYSV_REG_STRUCT.call();
+    let four = pieces(&[int(4)]);
+    assert_eq!(reg.returns(&Arg::Aggregate(record(&four))), Pass::Pieces(vec![gpr(0, 4)]));
+    let eight = pieces(&[int(4), int(4)]);
+    assert_eq!(
+        reg.returns(&Arg::Aggregate(record(&eight))),
+        Pass::Pieces(vec![gpr(0, 4), gpr(4, 4)])
+    );
+    let twelve = pieces(&[int(4), int(4), int(4)]);
+    assert_eq!(reg.returns(&Arg::Aggregate(record(&twelve))), Pass::Reference);
+    // The arguments are the psABI's still.
+    assert_eq!(reg.argument(&Arg::Aggregate(record(&four))), Pass::Memory);
 }
 
 #[test]

@@ -109,10 +109,6 @@ pub(crate) const TABLE: &[Row] = &[
     ),
     same("-fallow-store-data-races", "it permits what no pass here does"),
     same(
-        "-freg-struct-return",
-        "the psABI of every target here already returns a small structure in registers",
-    ),
-    same(
         "-fzero-init-padding-bits=all",
         "an automatic object whose initializer does not cover every byte, padding and the rest of \
          a union included, is zeroed whole before its members are stored, which is the most any \

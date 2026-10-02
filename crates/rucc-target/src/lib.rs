@@ -777,6 +777,9 @@ pub struct TargetInfo {
     /// [`TargetInfo::call_regs`] is the registers that go with it, and
     /// [`TargetInfo::convention_for`] is what a function type's convention comes to under it.
     pub regparm: u8,
+    /// Whether a small structure comes back in registers, which is what `-freg-struct-return` says
+    /// on 32 bit x86 and what the kernel builds with there. See [`TargetInfo::with_reg_struct_return`].
+    pub reg_struct_return: bool,
     /// How long this machine's instructions take, or `None` for an architecture with no backend.
     ///
     /// [`None`] rather than a model of a machine nobody measured, for the reason the two fields
@@ -1106,6 +1109,7 @@ impl TargetInfo {
             regs,
             call_regs,
             regparm: 0,
+            reg_struct_return: false,
             timing,
         }
     }
@@ -1118,9 +1122,26 @@ impl TargetInfo {
         if self.tuple.arch() != tuple::Arch::X86 || self.tuple.os() == tuple::Os::Windows {
             return (registers == 0).then_some(self);
         }
-        self.call_regs = Some(x86::regparm(registers)?);
+        self.call_regs = Some(x86::regparm(registers, self.reg_struct_return)?);
         self.regparm = registers;
         Some(self)
+    }
+
+    /// The same target with a structure of one, two, four or eight bytes returned in registers,
+    /// which is `-freg-struct-return`, or through memory, which is `-fpcc-struct-return`.
+    ///
+    /// Only i386 System V changes. Every other target's ABI already says where a small structure
+    /// comes back and gcc takes the flag there without doing anything, which this does too.
+    #[must_use]
+    pub fn with_reg_struct_return(mut self, in_registers: bool) -> Self {
+        if self.tuple.arch() != tuple::Arch::X86 || self.tuple.os() == tuple::Os::Windows {
+            return self;
+        }
+        if let Some(regs) = x86::regparm(self.regparm, in_registers) {
+            self.call_regs = Some(regs);
+            self.reg_struct_return = in_registers;
+        }
+        self
     }
 
     /// The convention a function of this type is called with, given what its type says and
@@ -1688,7 +1709,8 @@ mod tests {
         let target = |triple: &str| TargetInfo::new(triple.parse().expect("a triple"));
         let unit = target("i686-unknown-linux-gnu").with_regparm(3).expect("i386 has the flag");
         assert_eq!(unit.regparm, 3);
-        assert!(std::ptr::eq(unit.call_regs.expect("i386"), x86::regparm(3).expect("three")));
+        let three = x86::regparm(3, false).expect("three");
+        assert!(std::ptr::eq(unit.call_regs.expect("i386"), three));
         assert_eq!(unit.convention_for(Convention::Target, false), Convention::Target);
         assert_eq!(unit.convention_for(Convention::Regparm(3), false), Convention::Target);
         assert_eq!(unit.convention_for(Convention::Regparm(0), false), Convention::Regparm(0));

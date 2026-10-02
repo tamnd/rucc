@@ -403,6 +403,50 @@ pub static I386_SYSV_REGPARM: [AbiDescription; 3] = [
     regparm("i386 SysV regparm(3)", 3),
 ];
 
+/// [`I386_SYSV`] under `-freg-struct-return`, which the Linux kernel builds every 32 bit unit
+/// with.
+///
+/// Only the return value changes, and it changes to gcc's rule, which is the one mingw-w64 has by
+/// default and [`I386_MINGW`] spells out: a structure of one, two, four or eight bytes comes back
+/// in `al`, `ax`, `eax` or `edx:eax`, one whose only member is a `float` or a `double` comes back in
+/// `st(0)`, and every other size still comes back through the hidden first argument. Those are the
+/// sizes gcc gives an integer mode, and the rule is gcc's for anything with a mode of its own. A
+/// one word structure is what `pte_t` and `pgd_t` are on a 32 bit kernel without PAE, so getting
+/// this wrong breaks the calls between a unit built by rucc and one built by gcc everywhere a
+/// page table is touched.
+pub static I386_SYSV_REG_STRUCT: AbiDescription = AbiDescription {
+    name: "i386 SysV -freg-struct-return",
+    returns: &REG_STRUCT_RETURNS,
+    ..I386_SYSV
+};
+
+/// [`I386_SYSV_REGPARM`] under `-freg-struct-return`, which is the kernel's pair of flags.
+pub static I386_SYSV_REGPARM_REG_STRUCT: [AbiDescription; 3] = [
+    AbiDescription {
+        name: "i386 SysV regparm(1) -freg-struct-return",
+        returns: &REG_STRUCT_RETURNS,
+        ..regparm("", 1)
+    },
+    AbiDescription {
+        name: "i386 SysV regparm(2) -freg-struct-return",
+        returns: &REG_STRUCT_RETURNS,
+        ..regparm("", 2)
+    },
+    AbiDescription {
+        name: "i386 SysV regparm(3) -freg-struct-return",
+        returns: &REG_STRUCT_RETURNS,
+        ..regparm("", 3)
+    },
+];
+
+/// Where a value comes back under `-freg-struct-return`. See [`I386_SYSV_REG_STRUCT`].
+static REG_STRUCT_RETURNS: [Rule; 4] = [
+    Rule::new(Test::Empty, Travel::Ignore),
+    Rule::new(Test::LoneFloat, Travel::AsFound),
+    Rule::new(Test::SizeOneOf(&[1, 2, 4, 8]), Travel::AsIntegers),
+    Rule::new(Test::Anything, Travel::ByReference),
+];
+
 /// How a structure travels under [`I386_SYSV_REGPARM`].
 static REGPARM_ARGUMENTS: [Rule; 3] = [
     Rule::new(Test::Empty, Travel::Ignore),
@@ -673,6 +717,10 @@ pub static DESCRIBED: &[&AbiDescription] = &[
     &I386_SYSV_REGPARM[0],
     &I386_SYSV_REGPARM[1],
     &I386_SYSV_REGPARM[2],
+    &I386_SYSV_REG_STRUCT,
+    &I386_SYSV_REGPARM_REG_STRUCT[0],
+    &I386_SYSV_REGPARM_REG_STRUCT[1],
+    &I386_SYSV_REGPARM_REG_STRUCT[2],
     &I386_MINGW,
     &I386_MSVC,
     &I386_MINGW_STDCALL,

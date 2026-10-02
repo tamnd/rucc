@@ -784,6 +784,10 @@ pub fn parse_args(args: &[String]) -> Result<Action, CliError> {
             // The flags the kernel's build passes that nothing below answers, and a few that
             // something below would answer without saying which issue is about them. First, so
             // that the table's answer is the one given. See `kbuild`.
+            // Where a structure of one, two, four or eight bytes comes back, which only i386
+            // System V has a choice about. The kernel builds every 32 bit unit with the first.
+            "-freg-struct-return" => opts.reg_struct_return = true,
+            "-fpcc-struct-return" => opts.reg_struct_return = false,
             _ if kbuild::row(arg, arch).is_some() => {
                 let Some(row) = kbuild::row(arg, arch) else { continue };
                 if let kbuild::Answer::Refused(why, issue) = row.answer {
@@ -8647,7 +8651,6 @@ mod tests {
             "-fno-partial-inlining",
             "-fmerge-constants",
             "-fno-allow-store-data-races",
-            "-freg-struct-return",
             "-fzero-init-padding-bits=all",
             "-fno-stack-check",
             "-fno-dwarf2-cfi-asm",

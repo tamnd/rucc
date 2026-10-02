@@ -18,6 +18,7 @@ All notable changes are recorded here. The format follows [Keep a Changelog](htt
 
 ### Fixed
 
+- `-freg-struct-return` on i386, which the kernel passes beside `-mregparm=3`, brings a structure of one, two, four or eight bytes back in `eax` and `edx` as gcc does, where it used to be written through the hidden pointer and a `pte_t` returned by gcc built code was read from nowhere. `-fpcc-struct-return` turns it off.
 - An i386 Windows object now carries `@feat.00` with bit 0 set, the way clang and MSVC write it, so `lld-link /safeseh` links it rather than refusing it as not safe for SafeSEH. The `-S` listing says it too, with the `.set @feat.00, 1` line clang writes. rucc installs no exception handlers on i386, so the empty handler list the bit stands for is true of every object it writes.
 
 ## 0.18.10
