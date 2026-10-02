@@ -3404,6 +3404,28 @@ mod tests {
         assert!(file.section_by_name(".eh_frame").is_none());
     }
 
+    /// Every i386 Windows object says it is safe for SafeSEH, which is bit 0 of an absolute local
+    /// `@feat.00`, so that `lld-link /safeseh` takes it. An x86-64 one has no such list to be on.
+    #[test]
+    fn an_i386_windows_object_says_it_is_safe_for_safeseh() {
+        let write_for = |target: &TargetInfo| {
+            write(&calling("puts"), &Data::default(), &[], target, Output::default(), &Info::default())
+                .expect("an object")
+        };
+        let bytes = write_for(&i386_windows());
+        let file = object::File::parse(&bytes[..]).expect("a readable object");
+        let feat = file.symbol_by_name("@feat.00").expect("the feature symbol");
+        // The reader gives an absolute COFF symbol no address, so the value is read as written.
+        let coff = object::read::coff::CoffFile::<&[u8]>::parse(&bytes[..]).expect("COFF");
+        let raw = coff.symbol_by_name("@feat.00").expect("the feature symbol");
+        assert_eq!(object::read::coff::Symbol::value(raw.coff_symbol()), 1);
+        assert_eq!(feat.section(), object::SymbolSection::Absolute);
+        assert!(feat.is_local());
+        let bytes = write_for(&windows());
+        let file = object::File::parse(&bytes[..]).expect("a readable object");
+        assert!(file.symbol_by_name("@feat.00").is_none());
+    }
+
     /// No relocation of this machine holds eight bytes or reaches through a table, so a file
     /// asking for one is refused rather than written with some other number in the type.
     #[test]

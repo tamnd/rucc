@@ -647,7 +647,12 @@ impl Directives {
             // What lets the linker throw away a function nothing calls, which it cannot do
             // without being told that the boundaries between them are real.
             Directives::MachO => out.push_str("\t.subsections_via_symbols\n"),
-            Directives::Coff | Directives::CoffI386 => {}
+            // Bit 0 of `@feat.00` says the file installs no exception handler the image's SafeSEH
+            // table would have to list, which is true of everything this compiler writes, and
+            // without it `lld-link /safeseh` refuses the file. clang writes the same line. See
+            // `rucc_object`'s COFF writer, which does the same for an object it writes directly.
+            Directives::CoffI386 => out.push_str("\t.set\t@feat.00, 1\n"),
+            Directives::Coff => {}
         }
     }
 
@@ -1026,6 +1031,16 @@ mod tests {
                 "\t.section\t.note.GNU-stack,\"\",@progbits",
             ]
         );
+    }
+
+    #[test]
+    fn an_i386_coff_file_says_it_is_safe_for_safeseh() {
+        let mut out = String::new();
+        Directives::CoffI386.end(&mut out, Property::default(), None);
+        assert_eq!(out, "\t.set\t@feat.00, 1\n");
+        let mut out = String::new();
+        Directives::Coff.end(&mut out, Property::default(), None);
+        assert!(out.is_empty(), "x86-64 has no SafeSEH: {out}");
     }
 
     #[test]

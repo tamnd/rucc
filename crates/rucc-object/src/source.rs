@@ -649,11 +649,17 @@ pub fn assembled_described(
             Held::Common { size, align } => (SymbolSection::Common, align, size),
             Held::Undefined => (SymbolSection::Undefined, 0, 0),
         };
+        // A local number on COFF is a static symbol, which is what gas and clang write for a `.set`
+        // such as `@feat.00`. The writer underneath would make it a label otherwise.
+        let kind = match (flavour, name.at, name.sort) {
+            (Flavour::Coff, Held::Absolute(_), Sort::Untyped) => SymbolKind::Data,
+            _ => flavour.sort(name.sort, name.binding),
+        };
         let id = obj.add_symbol(Symbol {
             name: name.name.clone().into_bytes(),
             value,
             size,
-            kind: flavour.sort(name.sort, name.binding),
+            kind,
             scope: crate::file::scope_of(name.binding),
             weak: name.binding == Binding::Weak,
             section,
@@ -1191,6 +1197,41 @@ mod tests {
         let sym = file.symbols().find(|s| s.name() == Ok("size_of_it")).expect("the symbol");
         assert_eq!(sym.address(), 25);
         assert_eq!(sym.section(), object::SymbolSection::Absolute, "it is not in any section");
+    }
+
+    /// `@feat.00` as the i386 COFF listing sets it, which has to come out static the way clang
+    /// writes it rather than as a label.
+    #[test]
+    fn a_local_set_on_coff_is_a_static_number() {
+        let input = Assembled {
+            parts: vec![part(".text", vec![0xc3])],
+            names: vec![Name {
+                name: "@feat.00".to_owned(),
+                at: Held::Absolute(1),
+                size: 0,
+                sort: Sort::Untyped,
+                binding: Binding::Local,
+                visibility: Visibility::Default,
+            }],
+            subsections: false,
+        };
+        let bytes = assembled(&input, &windows()).expect("an object");
+        let file = object::File::parse(&bytes[..]).expect("a readable object");
+        let sym = file.symbols().find(|s| s.name() == Ok("@feat.00")).expect("the symbol");
+        // The reader gives an absolute COFF symbol no address, so the value is read as written.
+        let coff = object::read::coff::CoffFile::<&[u8]>::parse(&bytes[..]).expect("COFF");
+        let raw = coff.symbol_by_name("@feat.00").expect("the symbol");
+        assert_eq!(object::read::coff::Symbol::value(raw.coff_symbol()), 1);
+        assert_eq!(sym.section(), object::SymbolSection::Absolute);
+        assert!(sym.is_local());
+        assert!(
+            matches!(
+                sym.flags(),
+                SymbolFlags::Coff { storage_class: pe::IMAGE_SYM_CLASS_STATIC, .. }
+            ),
+            "{:?}",
+            sym.flags()
+        );
     }
 
     #[test]
