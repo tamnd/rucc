@@ -332,39 +332,42 @@ impl Range {
     #[must_use]
     pub fn from_pairs(pairs: &[(u128, u128)], width: u32) -> Self {
         let width = clamp(width);
-        let mut sorted: Vec<(u128, u128)> = pairs
+        let masked = pairs
             .iter()
-            .map(|&(lo, hi)| (lo & mask(width), hi & mask(width)))
-            .filter(|&(lo, hi)| lo <= hi)
-            .collect();
+            .map(move |&(lo, hi)| (lo & mask(width), hi & mask(width)))
+            .filter(|&(lo, hi)| lo <= hi);
+        // Intervals that are in order already, which is what [`Range::narrow`] and anything
+        // built from a range's own pairs hand over, are merged as they come rather than copied
+        // into a list to be sorted first.
+        if masked.clone().is_sorted() {
+            return Self::merged(masked, width);
+        }
+        let mut sorted: Vec<(u128, u128)> = masked.collect();
         sorted.sort_unstable();
+        Self::merged(sorted.into_iter(), width)
+    }
 
-        // Merge what overlaps or touches. Two intervals that touch are one interval, and leaving
-        // them apart would spend a pair on a boundary that says nothing.
-        let mut merged: Vec<(u128, u128)> = Vec::with_capacity(sorted.len());
+    /// The range of intervals that are in bounds and in order.
+    fn merged(sorted: impl Iterator<Item = (u128, u128)>, width: u32) -> Self {
+        let mut range = Self::empty(width);
+        let mut count: usize = 0;
         for (lo, hi) in sorted {
-            match merged.last_mut() {
-                Some(last) if lo <= last.1.saturating_add(1) => last.1 = last.1.max(hi),
-                _ => merged.push((lo, hi)),
+            match count.checked_sub(1) {
+                // Merge what overlaps or touches. Two intervals that touch are one interval, and
+                // leaving them apart would spend a pair on a boundary that says nothing. And when
+                // there are too many, the tail becomes its hull. The tail rather than the head
+                // because the intervals are sorted, so this keeps the low bound exact and gives
+                // up the shape in the middle, which is the half a consumer asks about less often.
+                Some(last) if lo <= range.pairs[last].1.saturating_add(1) || count == PAIRS => {
+                    range.pairs[last].1 = range.pairs[last].1.max(hi);
+                }
+                _ => {
+                    range.pairs[count] = (lo, hi);
+                    count += 1;
+                }
             }
         }
-
-        // Too many, so the tail becomes its hull. The tail rather than the head because the
-        // intervals are sorted, so this keeps the low bound exact and gives up the shape in the
-        // middle, which is the half a consumer asks about less often.
-        if merged.len() > PAIRS {
-            let tail = merged.get(PAIRS - 1..).unwrap_or_default().to_vec();
-            let lo = tail.iter().map(|pair| pair.0).min().unwrap_or(0);
-            let hi = tail.iter().map(|pair| pair.1).max().unwrap_or(0);
-            merged.truncate(PAIRS - 1);
-            merged.push((lo, hi));
-        }
-
-        let mut range = Self::empty(width);
-        for (index, &pair) in merged.iter().enumerate() {
-            range.pairs[index] = pair;
-        }
-        range.count = u8::try_from(merged.len().min(PAIRS)).unwrap_or(0);
+        range.count = u8::try_from(count).unwrap_or(0);
         range.bits = range.bits_of_pairs();
         range
     }
@@ -393,7 +396,10 @@ impl Range {
             zeros if zeros == 0 || zeros >= self.width => 1,
             zeros => 1u128 << zeros,
         };
-        let kept: Vec<(u128, u128)> = self
+        // At most as many as there were, so they fit where the range keeps its own.
+        let mut kept = [(0, 0); PAIRS];
+        let mut count = 0;
+        for pair in self
             .pairs()
             .iter()
             .map(|&(lo, hi)| (lo.max(low), hi.min(high)))
@@ -402,9 +408,12 @@ impl Range {
                 Some((lo.checked_add(step - 1)? & !(step - 1), hi & !(step - 1)))
             })
             .filter(|&(lo, hi)| lo <= hi)
-            .collect();
+        {
+            kept[count] = pair;
+            count += 1;
+        }
 
-        let mut range = Self::from_pairs(&kept, self.width);
+        let mut range = Self::from_pairs(&kept[..count], self.width);
         range.bits = match range.bits.meet(bits) {
             Some(bits) => bits,
             None => return Self::empty(self.width),
