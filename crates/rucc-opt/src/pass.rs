@@ -137,6 +137,7 @@ pub static PASSES: &[&dyn Pass] = &[
     &crate::coalesce::Coalesce,
     &crate::sink::Sink,
     &crate::dead_plane::DeadPlane,
+    &crate::lanes::Lanes,
 ];
 
 /// The pass with this name, if there is one.

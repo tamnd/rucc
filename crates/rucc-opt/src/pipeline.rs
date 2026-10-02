@@ -43,8 +43,8 @@ use rucc_target::{Isa, TargetInfo};
 
 use crate::{
     Analyses, CallGraph, Fuel, Gates, Machine, Pass, Preserved, Stats, adce, constant_p, dce, dse,
-    extents, heap, image, inline, ipasra, ipcp, libcall, load, loop_idiom, modref, nofree, number,
-    objsize, outside, params, pass, purity, readonly, reload, sroa,
+    extents, heap, image, inline, ipasra, ipcp, lanes, libcall, load, loop_idiom, modref, nofree,
+    number, objsize, outside, params, pass, purity, readonly, reload, sroa,
 };
 
 /// The passes that read a summary [`nofree::annotate`], [`extents::annotate`],
@@ -75,7 +75,7 @@ const READS_SUMMARIES: &[&str] = &[
 /// document 17 both want one, and neither is written. A pass left off here builds its oracle on an
 /// empty table, which answers `May` to every question it would have used the module for, so what
 /// forgetting a name costs is a missed optimization rather than a wrong answer.
-const READS_OUTSIDE: &[&str] = &[load::NAME, reload::NAME, sroa::NAME, dse::NAME];
+const READS_OUTSIDE: &[&str] = &[load::NAME, reload::NAME, sroa::NAME, dse::NAME, lanes::NAME];
 
 /// Which passes ask what a call is allowed to do.
 ///
@@ -341,7 +341,9 @@ const O1: &[&str] = &[
 /// counter, and an address the first run cannot put a number on keeps the local in memory. Once
 /// the loop is copied out the counter is a chain of additions to a constant, `fold` turns each
 /// address into a constant offset, and the second run takes the local. An SSE2 salsa20/8 went
-/// from 3.62s to 1.27s on that, with all 32 of its locals gone (tamnd/rucc#2320).
+/// from 3.62s to 1.27s on that, with all 32 of its locals gone (tamnd/rucc#2320). What the second
+/// run leaves of each shift is a vector built a lane at a time, and `lanes` straight after it turns
+/// that back into one shift of the whole vector.
 ///
 /// `canon` and `licm` run a second time after `split`, and that pair is the only thing here that
 /// looks at what `split` wrote. A guard goes in the preheader of the loop being split, which for an
@@ -394,6 +396,7 @@ const O2: &[&str] = &[
     "simplify-cfg",
     "fold",
     "sroa",
+    "lanes",
     "number",
     "load-forward",
     "redundant-load",
@@ -449,6 +452,7 @@ const O3: &[&str] = &[
     "simplify-cfg",
     "fold",
     "sroa",
+    "lanes",
     "number",
     "load-forward",
     "redundant-load",

@@ -49,9 +49,10 @@ use Form::{
     ConvertToVec, ConvertVec, CpuId, CtrlX87, DivQuo, DivRem, DivWide, Exchange, Jcc, Jmp, JmpAway,
     JmpReg, Landing, Lea, Literal, Load, LoadImm, LoadVec, Move, MoveVec, MulHigh, MulWide, Nop,
     Pop, PopX87, Prefetch, Push, PushX87, Ret, RetPop, RetVal, RetVal2, RetVal2Vec, RetValVec, Rmw,
-    Search, Set, ShiftCl, ShiftRi, ShuffleVec, Spin, Store, StoreImm, StoreVec, StrCompare,
-    StrCompareRep, StrLoad, StrMove, StrMoveRep, StrScan, StrScanRep, StrStore, StrStoreRep, Swap,
-    SwapHalves, Template, Test, TestCmov, TestRi, Trap, UnaryM, UnaryR, UnaryX87,
+    Search, Set, ShiftCl, ShiftRi, ShiftVec, ShuffleVec, Spin, Store, StoreImm, StoreVec,
+    StrCompare, StrCompareRep, StrLoad, StrMove, StrMoveRep, StrScan, StrScanRep, StrStore,
+    StrStoreRep, Swap, SwapHalves, Template, Test, TestCmov, TestRi, Trap, UnaryM, UnaryR,
+    UnaryX87,
 };
 
 /// The operand vector one machine instruction has.
@@ -773,6 +774,10 @@ pub enum Form {
     /// `pshufd`. [`Form::MoveVec`]'s two operands and a byte beside them, and not two-address:
     /// the destination is written whole and the source is only read.
     ShuffleVec,
+    /// Every lane of a vector register shifted by the same constant, which is `pslld` and its
+    /// family. Two address, like [`Form::AluVec`], since the shift is written over the register it
+    /// reads, and the count is a byte beside it the way [`Form::ShuffleVec`]'s order is.
+    ShiftVec,
     /// The value a function gives back, when it goes back in a vector register.
     ///
     /// [`Form::RetVal`] in the other class. It encodes to nothing for the same reason and exists
@@ -1158,6 +1163,8 @@ static POP: [OperandDesc; 1] = [OperandDesc::write(GPR)];
 static LEAVE: [OperandDesc; 0] = [];
 static VEC_TO_VEC: [OperandDesc; 2] = [OperandDesc::write(XMM), OperandDesc::read(XMM)];
 static LOAD_VEC: [OperandDesc; 1] = [OperandDesc::write(XMM)];
+static SHIFT_VEC: [OperandDesc; 2] =
+    [OperandDesc::write(XMM).with(Constraint::Reuse(1)), OperandDesc::read(XMM)];
 static STORE_VEC: [OperandDesc; 1] = [OperandDesc::read(XMM)];
 // The same shape as `TWO_ADDRESS_RR` in the other class, and separate for the same reason the
 // three moves above are separate from the ones over them.
@@ -1276,6 +1283,7 @@ impl Form {
             StoreVec => &STORE_VEC,
             AluVec => &TWO_ADDRESS_VEC,
             ShuffleVec => &VEC_TO_VEC,
+            ShiftVec => &SHIFT_VEC,
             RetValVec => &RET_VAL_VEC,
             RetVal2Vec => &RET_VAL_2_VEC,
             ArgValVec => &ARG_VAL_VEC,
@@ -1308,6 +1316,7 @@ impl Form {
                 | StoreImm
                 | RetPop
                 | ShuffleVec
+                | ShiftVec
         )
     }
 
@@ -2397,6 +2406,13 @@ pub static INSTS: &[(&str, Form)] = &[
     ("movss_rr", AluVec),
     ("movsd_rr", AluVec),
     ("pshufd_ri", ShuffleVec),
+    // Every lane shifted by one count: left, right with zeros and right with the sign, on four
+    // `int`, and left and right with zeros on two `long`, which has no arithmetic shift.
+    ("pslld_ri", ShiftVec),
+    ("psrld_ri", ShiftVec),
+    ("psrad_ri", ShiftVec),
+    ("psllq_ri", ShiftVec),
+    ("psrlq_ri", ShiftVec),
     // The conversions, which are the instructions that cross between the two register files and
     // the two float formats. Ten of them, which is one for each pair of things a C program is
     // allowed to convert between here: the two formats in both directions, and each format with a
@@ -2594,7 +2610,7 @@ mod tests {
         // Every head in the model file, which is what the rule set may write and what
         // `rucc-verify` has an answer for. The two lists are checked against each other by
         // `rucc-codegen`, which is the crate that can read the rule set.
-        assert_eq!(described, 778);
+        assert_eq!(described, 783);
     }
 
     #[test]

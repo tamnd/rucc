@@ -604,6 +604,9 @@ fn width(ty: Type, target: Target) -> Option<u64> {
     if ty.is_vector() {
         return (target.vectors && rucc_ir::term::vector_slot(ty).is_some()).then_some(16);
     }
+    if is_quad(ty) {
+        return target.vectors.then_some(16);
+    }
     if ty.is_ptr() {
         return target.pointer;
     }
@@ -611,6 +614,13 @@ fn width(ty: Type, target: Target) -> Option<u64> {
     let whole = (ty.is_int() && matches!(bits, 8 | 16 | 32 | 64))
         || (ty.is_float() && matches!(bits, 16 | 32 | 64));
     whole.then_some(u64::from(bits / 8))
+}
+
+/// Whether the type is the sixteen byte float, which is how a function hands an `__m128i` in and
+/// out on x86-64 and so how `<emmintrin.h>` copies one whole. It is only ever a copy of a vector
+/// piece here, see [`whole`].
+fn is_quad(ty: Type) -> bool {
+    ty == Type::float(rucc_ir::Float::F128)
 }
 
 /// The integer type that many bytes wide.
@@ -638,6 +648,9 @@ fn whole(uses: &[(Inst, Use)], size: u64) -> Result<Vec<Piece>, &'static str> {
             Some((_, _, it)) if it.is_vector() => {
                 ty.get_or_insert(it);
             }
+            // The vector copied whole as the float the calling convention passes it as, which
+            // is the same register and so only a bitcast away.
+            Some((_, _, it)) if is_quad(it) && at == 0 && width == size => {}
             Some((..)) if matches!(width, 4 | 8) && at % width == 0 => {}
             Some(_) => return Err(OVERLAP),
             None if at == 0 && width == size => {}
@@ -655,6 +668,10 @@ fn whole(uses: &[(Inst, Use)], size: u64) -> Result<Vec<Piece>, &'static str> {
 fn pieces(uses: &[(Inst, Use)], target: Target) -> Result<Vec<Piece>, &'static str> {
     let scalars: Vec<(u64, u64, Type)> =
         uses.iter().filter_map(|(_, found)| found.scalar()).collect();
+    // A sixteen byte float on its own is a `__float128`, which is not what this is for.
+    if scalars.iter().any(|&(.., ty)| is_quad(ty)) {
+        return Err(OVERLAP);
+    }
     let mut cuts: Vec<u64> = scalars.iter().flat_map(|&(at, size, _)| [at, at + size]).collect();
     cuts.sort_unstable();
     cuts.dedup();
@@ -1762,6 +1779,52 @@ block2:
         let func = body(&module);
         assert_eq!(count_of(func, Opcode::Splat), 1);
         assert_eq!(params(func, 1), 1);
+    }
+
+    /// `_mm_slli_epi32` after inlining: the vector comes in and goes out as the sixteen byte float
+    /// a function passes it as, and is shifted a lane at a time in between.
+    #[test]
+    fn a_vector_copied_as_the_quad_float_becomes_one_value() {
+        let text = wrap(
+            "(f128) -> f128",
+            "block0(%0: f128):
+    %1 = alloca, size 16, align 16
+    store %0 -> %1, align 16
+    %2 = load.i32x4 %1, align 16
+    %3 = add %2, %2
+    store %3 -> %1, align 16
+    %4 = iconst.i64 4
+    %5 = ptr_add %1, %4
+    %6 = load.i32 %5, align 4
+    store %6 -> %1, align 4
+    %7 = load.f128 %1, align 16
+    return %7
+",
+        );
+        let (module, stats) = on_sse2(&text);
+        assert_eq!(stats.count(Kind::Optimized, SCALARIZED), 1);
+        let func = body(&module);
+        assert_eq!(count_of(func, Opcode::Alloca), 0);
+        assert_eq!(count_of(func, Opcode::Load), 0);
+        assert_eq!(count_of(func, Opcode::Store), 0);
+        assert_eq!(count_of(func, Opcode::InsertLane), 1);
+        assert_eq!(count_of(func, Opcode::ExtractLane), 1);
+    }
+
+    /// A `__float128` local is not a vector and stays where it is.
+    #[test]
+    fn a_quad_float_on_its_own_stays_in_memory() {
+        let text = wrap(
+            "(f128) -> f128",
+            "block0(%0: f128):
+    %1 = alloca, size 16, align 16
+    store %0 -> %1, align 16
+    %2 = load.f128 %1, align 16
+    return %2
+",
+        );
+        let (module, _) = on_sse2(&text);
+        assert_eq!(count_of(body(&module), Opcode::Alloca), 1);
     }
 
     #[test]

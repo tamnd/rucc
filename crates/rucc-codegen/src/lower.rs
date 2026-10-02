@@ -1901,6 +1901,14 @@ impl<'a> Lowering<'a> {
                     self.lanes(inst)?;
                     continue;
                 }
+                // Every lane shifted by one constant count, for the same reason: the count is a
+                // number beside the instruction.
+                Opcode::Shl | Opcode::LShr | Opcode::AShr
+                    if !self.on_aarch64() && self.shifted_by_splat(inst).is_some() =>
+                {
+                    self.vector_shift(inst)?;
+                    continue;
+                }
                 // The same sixteen bytes seen as another shape of vector, which is no instruction:
                 // both are in one vector register and the lanes are only how the next instruction
                 // reads it.
@@ -4350,8 +4358,12 @@ impl<'a> Lowering<'a> {
         let (Some(&arg), Some(result)) = (self.source[data.args].first(), data.first_result) else {
             return false;
         };
+        // The sixteen byte float is how a vector goes in and out of a function, and is held in the
+        // same register, so it is one more shape of the same bytes.
+        let quad = |ty: Type| ty == Type::float(rucc_ir::Float::F128);
         let whole = |ty: Type| crate::term::vector_slot(ty).is_some();
-        whole(self.source[arg].ty) && whole(self.source[result].ty)
+        let (from, to) = (self.source[arg].ty, self.source[result].ty);
+        whole(from) && (whole(to) || quad(to)) || quad(from) && whole(to)
     }
 
     /// One `extractlane`, `insertlane`, `shuffle` or `splat` on a vector of four `int` or two
@@ -4489,6 +4501,64 @@ impl<'a> Lowering<'a> {
         self.out.build(block, moved).at(span).def(across, sse).uses(held, gpr).finish();
         let into = self.new_reg(result);
         self.pshufd(inst, into, across, if quad { [0, 1, 0, 1] } else { [0, 0, 0, 0] });
+        Ok(())
+    }
+
+    /// The count a shift of a vector of four `int` or two `long` moves every lane by, when it is
+    /// the same constant in every lane and less than the width of a lane.
+    ///
+    /// A count as wide as the lane or wider is left alone, because C gives no answer for it and
+    /// the instruction gives zero, so there is nothing to agree with.
+    fn shifted_by_splat(&self, inst: Inst) -> Option<u8> {
+        let data = &self.source[inst];
+        let result = data.first_result?;
+        let bits = match crate::term::vector_slot(self.source[result].ty)? {
+            0 => 32,
+            1 => 64,
+            _ => return None,
+        };
+        let &[_, count] = &self.source[data.args] else { return None };
+        let Def::Result { inst: made, .. } = self.source[count].def else { return None };
+        let made = &self.source[made];
+        let Extra::Imm(imm) = made.extra else { return None };
+        if made.opcode != Opcode::Splat {
+            return None;
+        }
+        let by = self.source[imm].bits();
+        (by < bits).then(|| u8::try_from(by).ok()).flatten()
+    }
+
+    /// A shift of every lane by a constant, which is one `pslld`, `psrld`, `psrad`, `psllq` or
+    /// `psrlq` with the count in its byte. There is no arithmetic shift of a `long` lane before
+    /// AVX-512, so that one is refused.
+    fn vector_shift(&mut self, inst: Inst) -> Result<(), Unsupported> {
+        let by = self.shifted_by_splat(inst).ok_or_else(|| self.unsupported(inst))?;
+        let data = &self.source[inst];
+        let opcode = data.opcode;
+        let source = self.source[data.args][0];
+        let result = data.first_result.ok_or_else(|| self.unsupported(inst))?;
+        let quad = crate::term::vector_slot(self.source[result].ty) == Some(1);
+        let name = match (opcode, quad) {
+            (Opcode::Shl, false) => "pslld_ri",
+            (Opcode::LShr, false) => "psrld_ri",
+            (Opcode::AShr, false) => "psrad_ri",
+            (Opcode::Shl, true) => "psllq_ri",
+            (Opcode::LShr, true) => "psrlq_ri",
+            _ => return Err(self.unsupported(inst)),
+        };
+        let sse = self.conv.sse_class;
+        let span = self.source.span(inst);
+        let block = self.at.expect("a block is being filled");
+        let from = self.reg_of(source)?;
+        let into = self.new_reg(result);
+        let opcode = self.named(name);
+        self.out
+            .build(block, opcode)
+            .at(span)
+            .operand(mir::Operand::write(into, sse).with(Constraint::Reuse(1)))
+            .operand(mir::Operand::read(from, sse))
+            .imm(i64::from(by))
+            .finish();
         Ok(())
     }
 
