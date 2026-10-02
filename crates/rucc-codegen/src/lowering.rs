@@ -64,7 +64,7 @@ use rucc_ir::{Func, Opcode};
 use rucc_target::CallRegs;
 
 use crate::switch::{Force, Lowered};
-use crate::{decimal, divide, expand, half, quad, retry, switch, varargs, wide, widths};
+use crate::{decimal, divide, expand, forks, half, quad, retry, switch, varargs, wide, widths};
 
 /// One member of the group.
 ///
@@ -161,6 +161,11 @@ pub enum Step {
     Rounds,
     /// A variable argument list, as spec 10.7's split describes.
     Varargs,
+    /// A select on a machine with no conditional move, as a branch.
+    ///
+    /// Last, because the splitting of a `long long` and the float rewriting both write selects,
+    /// and on a machine before the Pentium Pro every one of them is an instruction it lacks.
+    Forks,
 }
 
 impl Step {
@@ -182,6 +187,7 @@ impl Step {
         Self::Bulk,
         Self::Rounds,
         Self::Varargs,
+        Self::Forks,
     ];
 
     /// What it is called in a dump.
@@ -204,6 +210,7 @@ impl Step {
             Self::Bulk => "bulk",
             Self::Rounds => "rounds",
             Self::Varargs => "varargs",
+            Self::Forks => "forks",
         }
     }
 
@@ -227,6 +234,7 @@ impl Step {
             Self::Bulk => "a bulk copy or fill",
             Self::Rounds => "a stack allocation whose size is not a multiple of the alignment",
             Self::Varargs => "a variable argument list",
+            Self::Forks => "a select with no conditional move",
         }
     }
 
@@ -271,6 +279,7 @@ impl Step {
             ],
             Self::Bulk => &[Opcode::Memcpy, Opcode::Memset, Opcode::Memmove],
             Self::Varargs => &[Opcode::VaArg, Opcode::VaObject, Opcode::VaCopy, Opcode::VaEnd],
+            Self::Forks => &[Opcode::Select],
         }
     }
 
@@ -294,17 +303,18 @@ impl Step {
     /// Only the two that [`Step::whole_function`] names ever answer `false`, because they are the
     /// only two that know. The rest work instruction by instruction and are not asked.
     ///
-    /// `switching` is the level's goal, the shape `-Zswitch=` forced and whether a jump table may
-    /// be written at all, and what the `switch` lowering says it did goes into `switched`.
+    /// `switching` is the level's goal, the shape `-Zswitch=` forced, whether a jump table may
+    /// be written at all and whether the machine has a conditional move, and what the `switch`
+    /// lowering says it did goes into `switched`.
     fn run(
         self,
         func: &mut Func,
         names: &mut Interner,
         conv: &CallRegs,
-        switching: (Goal, Option<Force>, bool),
+        switching: (Goal, Option<Force>, bool, bool),
         switched: &mut Vec<Lowered>,
     ) -> bool {
-        let (goal, force, tables) = switching;
+        let (goal, force, tables, cmov) = switching;
         match self {
             Self::Switches => switched.extend(switch::lowered(func, goal, force, tables)),
             Self::Retries => retry::loops(func),
@@ -322,6 +332,8 @@ impl Step {
             Self::Bulk => expand::bulk(func, names, conv.word, conv.unaligned),
             Self::Rounds => expand::rounds(func, conv.stack_align),
             Self::Varargs => varargs::lists(func, conv),
+            Self::Forks if !cmov => forks::branches(func),
+            Self::Forks => {}
         }
         true
     }
@@ -505,12 +517,13 @@ impl Lowerings {
 ///
 /// `switching` is three things the `switch` lowering reads: whether the level asked for small code,
 /// which decides when a table is worth writing, the shape `-Zswitch=` forced on it, if any, and
-/// whether a table may be written at all, which `-fno-jump-tables` says it may not.
+/// whether a table may be written at all, which `-fno-jump-tables` says it may not. The fourth is
+/// whether the machine has a conditional move, which only an i386 before the Pentium Pro lacks.
 pub fn group(
     func: &mut Func,
     names: &mut Interner,
     conv: &CallRegs,
-    switching: (Goal, Option<Force>, bool),
+    switching: (Goal, Option<Force>, bool, bool),
     counting: bool,
 ) -> Ran {
     let mut ran = Ran::default();
@@ -576,7 +589,7 @@ mod tests {
     }
 
     fn run(func: &mut Func, names: &mut Interner) -> Ran {
-        group(func, names, &x86_64::SYSV, (Goal::Speed, None, true), true)
+        group(func, names, &x86_64::SYSV, (Goal::Speed, None, true, true), true)
     }
 
     fn i32() -> Type {
@@ -614,6 +627,8 @@ mod tests {
                 "bulk",
                 "rounds",
                 "varargs",
+                // Last, since the splitting and the float rewriting both write selects.
+                "forks",
             ]
         );
     }
@@ -661,7 +676,8 @@ mod tests {
             let swapped = build.unary(Opcode::Bswap, args[0], i32());
             build.ret(&[swapped]);
         });
-        let ran = group(&mut func, &mut names, &aarch64::AAPCS64, (Goal::Speed, None, true), true);
+        let ran =
+            group(&mut func, &mut names, &aarch64::AAPCS64, (Goal::Speed, None, true, true), true);
         let did = ran.of(Step::Bytes);
         assert_eq!(did.found, 1);
         assert_eq!(did.left, 0);
@@ -746,7 +762,13 @@ mod tests {
             // A byte reversal is the one construct here x86-64 has an instruction for, so it is
             // asked of a machine that does not.
             let ran = if *step == Step::Bytes {
-                group(&mut func, &mut names, &aarch64::AAPCS64, (Goal::Speed, None, true), true)
+                group(
+                    &mut func,
+                    &mut names,
+                    &aarch64::AAPCS64,
+                    (Goal::Speed, None, true, true),
+                    true,
+                )
             } else {
                 run(&mut func, &mut names)
             };
@@ -836,14 +858,16 @@ mod tests {
             build.ret(&[ones]);
         };
         let (mut names, mut func) = one(&[i32()], &[i32()], build);
-        let quiet = group(&mut func, &mut names, &x86_64::SYSV, (Goal::Speed, None, true), false);
+        let quiet =
+            group(&mut func, &mut names, &x86_64::SYSV, (Goal::Speed, None, true, true), false);
         assert!(quiet.did.is_empty(), "nothing was counted");
         assert_eq!(super::tally(&func, Step::Counts), (super::tally(&func, Step::Counts).0, 0));
 
         // The same function through the counting path comes out the same size, so what the flag
         // changes is what was written down and not what was done.
         let (mut names, mut func) = one(&[i32()], &[i32()], build);
-        let loud = group(&mut func, &mut names, &x86_64::SYSV, (Goal::Speed, None, true), true);
+        let loud =
+            group(&mut func, &mut names, &x86_64::SYSV, (Goal::Speed, None, true, true), true);
         assert_eq!(loud.of(Step::Counts).left, 0);
         assert_eq!(
             loud.did.last().expect("thirteen of them").after,

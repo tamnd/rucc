@@ -19,6 +19,7 @@ All notable changes are recorded here. The format follows [Keep a Changelog](htt
 
 ### Fixed
 
+- `-march=` on i386 now drops `cmov` for the processors gcc gives none, which are `i386`, `i486`, `i586`, `pentium`, `pentium-mmx`, `lakemont`, `k6`, `k6-2`, `k6-3`, `winchip-c6`, `winchip2` and `c3`. A select becomes a branch there, so a kernel built with `CONFIG_M486`, `CONFIG_M586` or `CONFIG_MK6` no longer hits an invalid opcode on the processor it was built for.
 - The `-mstack-protector-guard` flags work on i386, where they were refused as unknown options. That made `gcc-x86_32-has-stack-protector.sh` fail and left a 32 bit kernel without `CONFIG_STACKPROTECTOR`. An SMP kernel now reads its canary at `%fs:__stack_chk_guard`, as gcc does.
 - `__builtin_popcountll`, `__builtin_clzll`, `__builtin_ctzll`, `__builtin_ffsll`, `__builtin_parityll`, `__builtin_clrsbll` and `__builtin_bswap64` compile on i386, where each was refused with "no rule lowers `lshr.i64`". The byte reversal and the counts are now written out before a 64 bit value is split into two registers rather than after.
 - `-freg-struct-return` on i386, which the kernel passes beside `-mregparm=3`, brings a structure of one, two, four or eight bytes back in `eax` and `edx` as gcc does, where it used to be written through the hidden pointer and a `pte_t` returned by gcc built code was read from nowhere. `-fpcc-struct-return` turns it off.

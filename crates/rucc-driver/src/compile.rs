@@ -1099,6 +1099,7 @@ fn generate(
         landing: opts.control.branch(),
         speculation: opts.speculation,
         jump_tables: opts.jump_tables,
+        cmov: opts.cmov,
         profile: match profile {
             None => pipeline::Profile::No,
             Some(true) => pipeline::Profile::Early,

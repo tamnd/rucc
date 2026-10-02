@@ -410,6 +410,9 @@ pub struct Flags {
     /// through a table is an indirect jump, which a retpoline build pays a thunk for and an IBT
     /// build has to land on a pad for. See [`crate::switch::lowered`].
     pub jump_tables: bool,
+    /// Whether the machine has a conditional move. Off only for an i386 `-march=` that names a
+    /// processor before the Pentium Pro, where a select is a branch. See [`crate::forks`].
+    pub cmov: bool,
     /// Whether every function calls a profiler on the way in, which `-pg` asks for.
     pub profile: Profile,
     /// What else is done with that call: listed in `__mcount_loc` for `-mrecord-mcount`, and
@@ -508,6 +511,7 @@ impl Default for Flags {
             landing: false,
             speculation: Speculation::default(),
             jump_tables: true,
+            cmov: true,
             profile: Profile::No,
             mcount: Mcount::default(),
             patch: Room::default(),
@@ -653,7 +657,7 @@ pub fn compile_recording(
     // than as a dozen lines here. What is in the group and what the order between its members is
     // for are both in `crate::lowering`, which is where a new lowering is added.
     let counting = recording.lowerings.wanted();
-    let switching = (flags.goal, flags.switch, flags.jump_tables);
+    let switching = (flags.goal, flags.switch, flags.jump_tables, flags.cmov);
     let ran = lowering::group(source, names, machine.conv, switching, counting);
     if !ran.switches.is_empty() {
         let called = names.resolve(source.name).to_owned();

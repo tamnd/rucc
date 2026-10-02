@@ -2224,6 +2224,10 @@ pub struct Options {
     /// On by default. The kernel turns it off beside the thunks, because a jump through a table is
     /// an indirect branch and a table is read with no thunk in the way.
     pub jump_tables: bool,
+    /// Whether the machine has a conditional move, which every x86-64 has and an i386 has from
+    /// the Pentium Pro on. `-march=i486`, `-march=i586`, `-march=k6` and the rest of what came
+    /// before it turn it off, and then a select is a branch, as gcc writes it.
+    pub cmov: bool,
     /// What an automatic object with no initializer starts out holding, from
     /// `-ftrivial-auto-var-init=`. `None` is `uninitialized`, which is the default, and otherwise
     /// the byte every byte of it is, zero for `zero` and `0xfe` for `pattern`.
@@ -2752,6 +2756,7 @@ impl Options {
             control: Control::default(),
             speculation: Speculation::default(),
             jump_tables: true,
+            cmov: true,
             auto_var_init: None,
             profile: false,
             hook: Hook::default(),
