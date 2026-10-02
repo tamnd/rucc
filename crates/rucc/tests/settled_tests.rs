@@ -139,3 +139,54 @@ fn a_bit_tested_before_a_join_is_still_known_after_it() {
     let listing = asm("join", source);
     assert!(!listing.contains("ud2"), "a trap is still there:\n{listing}");
 }
+
+/// `tso_build_data` calls `skb_frag_address`, which calls `skb_frag_page` twice. Once the first
+/// call's warning is gone the second read of the `netmem` repeats the first, and only when the two
+/// are one value does the second test go too.
+#[test]
+fn a_field_read_again_after_a_warning_goes_is_read_once() {
+    let source = "struct frag { unsigned long netmem; unsigned int len, off; };\n\
+        struct tso { int idx; int size; char *data; };\n\
+        void warn(void);\n\
+        static inline int is_iov(unsigned long n) { return n & 1UL; }\n\
+        static inline void *to_page(unsigned long n) {\n\
+            if (__builtin_expect(!!is_iov(n), 0)) { warn(); return 0; }\n\
+            return (void *)n;\n\
+        }\n\
+        static inline void *frag_page(const struct frag *f) {\n\
+            if (is_iov(f->netmem)) return 0;\n\
+            return to_page(f->netmem);\n\
+        }\n\
+        static inline void *frag_address(const struct frag *f) {\n\
+            if (!frag_page(f)) return 0;\n\
+            return (char *)frag_page(f) + f->off;\n\
+        }\n\
+        void build(struct frag *frags, struct tso *t, int size) {\n\
+            t->size -= size;\n\
+            if (t->size == 0) {\n\
+                struct frag *f = &frags[t->idx];\n\
+                t->size = f->len;\n\
+                t->data = frag_address(f);\n\
+                t->idx++;\n\
+            }\n\
+        }\n";
+    let listing = asm("again", source);
+    assert!(!listing.contains("call\twarn"), "the warning is still there:\n{listing}");
+}
+
+/// `misc_open` returns early when it found no `fops`, and `replace_fops` then makes
+/// `BUG_ON(!(file->f_op = new_fops))` about the pointer it just found was not null. The two nulls
+/// are two constants, so the test below only matches the one above when they are read as one.
+#[test]
+fn a_pointer_found_not_null_is_not_tested_again() {
+    let source = "struct file { const void *f_op; };\n\
+        void put(void);\n\
+        int f(struct file *file, const void *nf) {\n\
+            if (!nf) return -19;\n\
+            put();\n\
+            if (!(file->f_op = nf)) __builtin_trap();\n\
+            return 0;\n\
+        }\n";
+    let listing = asm("null", source);
+    assert!(!listing.contains("ud2"), "the trap is still there:\n{listing}");
+}

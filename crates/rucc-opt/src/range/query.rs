@@ -374,7 +374,7 @@ impl<'a> Ranges<'a> {
     /// the cost of a relational oracle goes and that one step pays for most of it.
     pub fn relation(&mut self, a: Value, b: Value, block: Block) -> Option<IntPred> {
         let facts = self.facts(block).clone();
-        if let Some(direct) = read(&facts, a, b) {
+        if let Some(direct) = read(self.func, &facts, a, b) {
             return Some(direct);
         }
         for step in &facts {
@@ -382,8 +382,8 @@ impl<'a> Ranges<'a> {
                 if middle == a || middle == b {
                     continue;
                 }
-                let composed = read(&facts, a, middle)
-                    .zip(read(&facts, middle, b))
+                let composed = read(self.func, &facts, a, middle)
+                    .zip(read(self.func, &facts, middle, b))
                     .and_then(|(first, second)| compose(first, second));
                 if composed.is_some() {
                     return composed;
@@ -1017,16 +1017,41 @@ fn argument(func: &Func, pred: Block, block: Block, index: usize) -> Option<Valu
 }
 
 /// The recorded relation between these two values, read in the order asked.
-fn read(facts: &[Relation], a: Value, b: Value) -> Option<IntPred> {
+fn read(func: &Func, facts: &[Relation], a: Value, b: Value) -> Option<IntPred> {
+    let same = |x: Value, y: Value| {
+        x == y || literal(func, x).is_some_and(|k| literal(func, y) == Some(k))
+    };
     facts.iter().rev().find_map(|fact| {
-        if fact.left == a && fact.right == b {
+        if same(fact.left, a) && same(fact.right, b) {
             Some(fact.pred)
-        } else if fact.left == b && fact.right == a {
+        } else if same(fact.left, b) && same(fact.right, a) {
             Some(fact.pred.swapped())
         } else {
             None
         }
     })
+}
+
+/// The type and bits of a constant, so that two of them written in different places are one
+/// operand to the relations.
+///
+/// Nothing merges constants, so the null a pointer was tested against above and the null it is
+/// tested against again below are two values. Without this `p != NULL` on a dominating edge says
+/// nothing about the second `p == NULL`, and that is the `BUG_ON(!p)` a kernel helper makes about
+/// a pointer its caller already checked.
+fn literal(func: &Func, value: Value) -> Option<(rucc_ir::Type, u128)> {
+    let Def::Result { inst, .. } = func[value].def else { return None };
+    match func[inst].opcode {
+        Opcode::IConst => {
+            let Extra::Imm(at) = func[inst].extra else { return None };
+            Some((func[value].ty, func[at].unsigned()))
+        }
+        Opcode::IntToPtr => {
+            let &inner = func[func[inst].args].first()?;
+            literal(func, inner).map(|(_, bits)| (func[value].ty, bits))
+        }
+        _ => None,
+    }
 }
 
 /// Which of less, equal and greater a predicate allows.
