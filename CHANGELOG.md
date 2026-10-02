@@ -17,6 +17,10 @@ All notable changes are recorded here. The format follows [Keep a Changelog](htt
 
 - The assembler reads `.code16` and `.code16gcc`, the real mode code under `arch/x86/realmode`. For 6.12's realmode `.S` files, and for gcc's `-m16` output for its C files, it writes the same bytes and relocations gas does: the operand and address size prefixes turned round, an address that is only a name in two bytes with `R_386_16`, jumps and calls in two bytes with `R_386_PC16` when the target is elsewhere, and gas's sixteen bit padding. `imul $n, %reg` is also read as the three operand form.
 
+### Fixed
+
+- A vector of eight or sixteen bytes crosses a call on x86-64 in one xmm register, as the System V psABI says and as gcc does, rather than in general purpose registers lane by lane, so a function built by rucc and a caller built by gcc agree about a `__m128` or a `vector_size(8)` argument and result, including one inside a structure or passed through `...` (#1140).
+
 ## 0.18.9
 
 A patch release for the kernel nightly. Every x86_64 tinyconfig row from 5.10 to 6.18 broke on something in a shared header: an `asm` input tied to an output by name, `%P` on a memory operand, `aligned` given an enumerator, `call *pv_ops+16`, a `BUILD_BUG` behind a small external function gcc inlines, and on 5.10 no `stdarg.h` under `-nostdinc`. All of those are fixed. Besides them, this release adds `#pragma GCC diagnostic`, the `adce` and `reassoc` passes, and gcc's placement of `__func__` and of functions only cold code calls.

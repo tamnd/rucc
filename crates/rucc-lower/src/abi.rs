@@ -21,10 +21,12 @@
 //! the classification is one pass over one call, the return value first, and everything that
 //! wants to know the outcome reads what that pass wrote down.
 
+use rucc_base::float::Format;
 use rucc_ir::{Abi, Drains, Float, Param, Signature, Type};
 use rucc_target::{
     Arg, Call, Convention, Kind, Narrow, Pass, Piece, Scalar, Shape, Slot, TargetInfo,
 };
+use rucc_tuple::Arch;
 use rucc_types::{ArrayLen, TypeId, TypeKind, Types, float_format, layout};
 
 use crate::repr;
@@ -465,13 +467,47 @@ impl Flatten<'_> {
         self.capped && self.pieces.len() >= ENOUGH
     }
 
+    /// A vector an ABI reads as one value rather than as its lanes, and [`None`] for any other
+    /// type.
+    ///
+    /// On x86-64 a vector of eight or sixteen bytes is one value. The psABI gives the eight byte
+    /// ones, `__m64` and its kind, the class SSE whatever the lanes are, and the sixteen byte
+    /// ones, `__m128` and its kind, SSE and then SSEUP, which is one xmm register for the whole
+    /// of it. So it is one floating point piece of its own size, which is exactly the shape a
+    /// `_Float128` already has and already travels in one register for, and the classification
+    /// needs nothing new. gcc 16.2.0 puts a `vector_size(8)` of one `long` in xmm0 and a
+    /// `struct { v2f a; int b; }` in xmm0 and rdi, which is this rule read both ways.
+    ///
+    /// A narrower vector is left to its lanes, which makes it INTEGER, and gcc 16.2.0 agrees: a
+    /// `vector_size(4)` of `char` arrives in edi. A wider one is over sixteen bytes and goes to
+    /// memory whatever its pieces say. Windows x64 passes an aggregate by its size alone, so the
+    /// piece it is made of changes nothing there. Other machines still take a vector apart into
+    /// lanes, which on AArch64 is not where gcc puts a short vector either, and that half of
+    /// tamnd/rucc#1140 is still open.
+    fn whole_vector(&self, id: TypeId) -> Option<Scalar> {
+        if !matches!(self.types.kind(id), TypeKind::Vector { .. })
+            || self.target.tuple.arch() != Arch::X86_64
+        {
+            return None;
+        }
+        let size = repr::size_of(self.types, self.target, id);
+        let format = match size {
+            8 => Format::Double,
+            16 => Format::Quad,
+            _ => return None,
+        };
+        let align = u64::from(repr::align_of(self.types, self.target, id));
+        Some(Scalar { kind: Kind::Float(format), size, align })
+    }
+
     /// Everything in one type, at its offset from the start of the object.
     fn push(&mut self, ty: TypeId, at: u64) -> Option<()> {
         if self.full() {
             return Some(());
         }
         let id = self.types.canonical(ty);
-        if let Some(scalar) = scalar(self.types, self.target, id) {
+        if let Some(scalar) = scalar(self.types, self.target, id).or_else(|| self.whole_vector(id))
+        {
             self.pieces.push(Piece { offset: at, scalar });
             return Some(());
         }
@@ -484,11 +520,8 @@ impl Flatten<'_> {
                 self.pieces.push(Piece { offset: at, scalar });
                 self.pieces.push(Piece { offset: at + scalar.size, scalar });
             }
-            // A vector comes apart into its lanes the way an array of them would. That is not
-            // the class the psABI gives it, which is SSE on x86-64 and a vector register
-            // elsewhere, so a vector crossing a translation unit boundary is passed somewhere
-            // GCC would not look. Every use inside one unit agrees with itself, which is what
-            // holds until the registers land in `tamnd/rucc#200`.
+            // A vector [`Flatten::whole_vector`] did not take comes apart into its lanes the
+            // way an array of them would.
             TypeKind::Vector { elem, len } => {
                 let stride = repr::size_of(self.types, self.target, elem);
                 for index in 0..u64::from(len) {
@@ -619,6 +652,40 @@ mod tests {
         assert_eq!(plan.ret.types, vec![Type::int(64), Type::float(Float::F64)]);
         assert!(!plan.returns_through_memory());
         assert_eq!(plan.signature.params.len(), 2);
+    }
+
+    /// tamnd/rucc#1140. A sixteen byte vector is SSE and SSEUP on x86-64, one xmm register going
+    /// in and coming back, whatever its lanes are, and an eight byte one is SSE even when its
+    /// lane is a `long`. A vector inside a structure is classified with the rest of it, so
+    /// `struct { v2f a; int b; }` is one xmm register and one general purpose register. A four
+    /// byte vector stays INTEGER, which is where gcc 16.2.0 puts it too.
+    #[test]
+    fn a_vector_on_x86_64_is_one_vector_register_whatever_its_lanes_are() {
+        let mut types = Types::new();
+        let target = target("x86_64-unknown-linux-gnu");
+        let int = types.int(IntKind::Int);
+        let long = types.int(IntKind::Long);
+        let char_ty = types.int(IntKind::Char);
+        let float = types.float(FloatKind::Float);
+        let v4i = types.vector(int, 4);
+        let v1l = types.vector(long, 1);
+        let v2f = types.vector(float, 2);
+        let v4c = types.vector(char_ty, 4);
+        let quad = vec![Type::float(Float::F128)];
+        let double = vec![Type::float(Float::F64)];
+        for (ty, want) in [(v4i, &quad), (v1l, &double), (v2f, &double)] {
+            let planned =
+                plan(&types, &target, Convention::Target, ty, &[ty], &[], false).expect("a plan");
+            assert_eq!(&planned.args[0].types, want);
+            assert_eq!(&planned.ret.types, want);
+        }
+        let planned =
+            plan(&types, &target, Convention::Target, v4c, &[v4c], &[], false).expect("a plan");
+        assert_eq!(planned.args[0].types, vec![Type::int(32)]);
+        let mixed = record(&mut types, &target, &[v2f, int]);
+        let planned = plan(&types, &target, Convention::Target, types.void(), &[mixed], &[], false)
+            .expect("a plan");
+        assert_eq!(planned.args[0].types, vec![Type::float(Float::F64), Type::int(64)]);
     }
 
     #[test]
