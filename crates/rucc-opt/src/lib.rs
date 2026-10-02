@@ -103,6 +103,7 @@
 pub mod adce;
 pub mod alias;
 pub mod analysis;
+pub mod bswap;
 pub mod callgraph;
 pub mod canon;
 pub mod cfg;
