@@ -962,6 +962,11 @@ fn binary_head(opcode: Opcode, ty: Type, address: u32) -> Option<&'static str> {
         };
         return Some(names[at]);
     }
+    // A byte swap of one byte is the byte, so there is nothing to name below two.
+    if opcode == Opcode::Bswap {
+        let names = [None, Some("bswap.i16"), Some("bswap.i32"), Some("bswap.i64")];
+        return names[slot(ty, address)?];
+    }
     // A high multiply is only ever the width of a register, which is where a division by a
     // constant asks for one, so it has a name for each width a register is rather than four.
     if matches!(opcode, Opcode::UMulHigh | Opcode::SMulHigh) {
@@ -1422,6 +1427,17 @@ mod tests {
         assert_eq!(names, once, "the sweep lists a name twice");
         assert!(names.contains(&(Opcode::Add, "add.i64")));
         assert!(names.contains(&(Opcode::PtrAdd, "add.i64")));
+    }
+
+    /// A byte swap is named at the three widths that have more than one byte and not at the one
+    /// that does not, so a rule for one is a rule an instruction can reach.
+    #[test]
+    fn a_byte_swap_is_named_at_every_width_with_two_bytes_or_more() {
+        let names = heads();
+        for name in ["bswap.i16", "bswap.i32", "bswap.i64"] {
+            assert!(names.contains(&(Opcode::Bswap, name)), "{name}");
+        }
+        assert!(!names.iter().any(|&(_, name)| name == "bswap.i8"));
     }
 
     /// A width nothing is written at contributes nothing, which is what makes the sweep safe to

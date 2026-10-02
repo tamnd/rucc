@@ -641,23 +641,24 @@ fn half_the_range(width: u32) -> i128 {
     }
 }
 
-/// Rewrites every byte swap into the shifts and masks that are one, and leaves the rest alone.
+/// Rewrites every byte swap the machine has no instruction for into the shifts and masks that are
+/// one, and leaves the rest alone.
 ///
-/// A byte swap is a rule on a machine that has the instruction and this everywhere else, and until
-/// `x64.bswap` is a term the model knows about, this is what x86-64 gets too. That is tamnd/rucc#307
-/// and the whole of what is left of it: what is written below is correct at every width and slower
-/// than the one instruction, which is the trade `spec/10-backend.md` section 10.3 says the fast path
-/// makes everywhere.
+/// A byte swap is a rule on a machine that has the instruction and this everywhere else. `kept` is
+/// the widths the target's rules select one at, which is [`rucc_target::CallRegs::byte_swaps`], so
+/// on x86-64 every width stays one instruction and on a target with no rule yet every width comes
+/// here. What is written below is correct at every width and slower than the one instruction, which
+/// is the trade `spec/10-backend.md` section 10.3 says the fast path makes everywhere.
 ///
 /// It is here rather than in the front end because the masks are worked out from the width, and
 /// arithmetic on a value a pattern matched is the one thing the rule language deliberately cannot
 /// do. It is here rather than in the walk to the IR because a byte swap is one instruction in the
-/// IR and should stay one for as long as anything is reading the IR, so that the day the rule
-/// exists nothing above the backend has to change.
-pub fn bytes(func: &mut Func) {
+/// IR and should stay one for as long as anything is reading the IR, which is what let the rules
+/// arrive without anything above the backend changing.
+pub fn bytes(func: &mut Func, kept: &[u32]) {
     let found: Vec<Inst> = func.blocks().flat_map(|block| func.insts(block)).collect();
     for inst in found {
-        if func[inst].opcode == Opcode::Bswap {
+        if func[inst].opcode == Opcode::Bswap && !kept.contains(&produced(func, inst).bits()) {
             swap(func, inst);
         }
     }
@@ -2483,7 +2484,7 @@ mod tests {
     #[test]
     fn a_two_byte_swap_is_one_exchange_of_neighbouring_bytes() {
         let (mut names, mut func) = swapping(16);
-        bytes(&mut func);
+        bytes(&mut func, &[]);
 
         let text = printed(&func, &mut names);
         assert!(!text.contains("bswap"), "the instruction is gone: {text}");
@@ -2499,7 +2500,7 @@ mod tests {
     fn a_wider_swap_is_the_same_exchange_once_per_halving() {
         for (width, steps) in [(16u32, 1usize), (32, 2), (64, 3)] {
             let (mut names, mut func) = swapping(width);
-            bytes(&mut func);
+            bytes(&mut func, &[]);
             let text = printed(&func, &mut names);
             assert_eq!(text.matches("shl").count(), steps, "at {width}: {text}");
             assert_eq!(text.matches("lshr").count(), steps, "at {width}: {text}");
@@ -2513,7 +2514,7 @@ mod tests {
     #[test]
     fn the_shift_counts_are_the_group_width_halving_as_it_goes() {
         let (mut names, mut func) = swapping(64);
-        bytes(&mut func);
+        bytes(&mut func, &[]);
         let text = printed(&func, &mut names);
         for count in ["iconst.i64 32", "iconst.i64 16", "iconst.i64 8"] {
             assert!(text.contains(count), "{count} is a step: {text}");
@@ -2525,7 +2526,7 @@ mod tests {
     #[test]
     fn what_a_byte_swap_becomes_is_ir_that_verifies() {
         let (mut names, mut func) = swapping(32);
-        bytes(&mut func);
+        bytes(&mut func, &[]);
         let module = Module::new(names.intern("b.c"), &target());
         rucc_ir::verify_func(&module, &func, &names).expect("the rewrite builds valid IR");
     }
@@ -2538,8 +2539,24 @@ mod tests {
             build.ret(&[args[0]]);
         });
         let before = printed(&func, &mut names);
-        bytes(&mut func);
+        bytes(&mut func, &[]);
         assert_eq!(printed(&func, &mut names), before);
+    }
+
+    /// A width the target swaps in one instruction is left for the rule that picks it, and one it
+    /// does not is still written out, so a target that has only the narrow ones gets both.
+    #[test]
+    fn a_swap_of_a_width_the_target_keeps_is_left_as_it_was() {
+        let (mut names, mut func) = swapping(32);
+        let before = printed(&func, &mut names);
+        bytes(&mut func, &[16, 32]);
+        assert_eq!(printed(&func, &mut names), before);
+
+        let (mut names, mut func) = swapping(64);
+        bytes(&mut func, &[16, 32]);
+        let text = printed(&func, &mut names);
+        assert!(!text.contains("bswap"), "{text}");
+        assert_eq!(text.matches("shl").count(), 3, "{text}");
     }
 
     /// A function whose body is one bit count of the given opcode and width.

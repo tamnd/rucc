@@ -305,6 +305,12 @@
 (semantics (trunc.i32.i1 v) (extract 0 0 v))
 (semantics (trunc.i64.i1 v) (extract 0 0 v))
 
+;; A byte reversal. The byte at the bottom ends at the top, which is the one reading of
+;; `bswap` there is, at every width that is a whole number of bytes above one.
+(semantics (bswap.i16 v) (concat (extract 7 0 v) (extract 15 8 v)))
+(semantics (bswap.i32 v) (concat (extract 7 0 v) (concat (extract 15 8 v) (concat (extract 23 16 v) (extract 31 24 v)))))
+(semantics (bswap.i64 v) (concat (extract 7 0 v) (concat (extract 15 8 v) (concat (extract 23 16 v) (concat (extract 31 24 v) (concat (extract 39 32 v) (concat (extract 47 40 v) (concat (extract 55 48 v) (extract 63 56 v)))))))))
+
 ;; Giving a value back, and branching on one.
 ;;
 ;; The two terms here that compute nothing. What a rule for either can claim is that the value

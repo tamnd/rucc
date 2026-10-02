@@ -1391,8 +1391,8 @@ mod tests {
         let i32 = Type::int(32);
         let (mut names, mut source, block, args) = blank(&[i32]);
         let mut build = Builder::new(&mut source, block);
-        let swapped = build.unary(Opcode::Bswap, args[0], i32);
-        build.ret(&[swapped]);
+        let ones = build.unary(Opcode::Ctpop, args[0], i32);
+        build.ret(&[ones]);
 
         let mut lowerings = Lowerings::asked(true);
         compile_recording(
@@ -1416,9 +1416,9 @@ mod tests {
         for step in lowering::Step::GROUP {
             assert!(listing.contains(step.name()), "{} did not run: {listing}", step.name());
         }
-        // The byte reversal went through the group rather than reaching the selector, which has no
+        // The bit count went through the group rather than reaching the selector, which has no
         // rule for one.
-        assert!(listing.contains("bytes"), "{listing}");
+        assert!(listing.contains("counts"), "{listing}");
         assert!(!listing.contains("left 1"), "something the group answers for survived: {listing}");
     }
 

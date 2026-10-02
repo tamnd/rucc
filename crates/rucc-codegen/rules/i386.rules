@@ -264,6 +264,16 @@
       (x64.not_r_32 x)
       (spec (= (bvxor x -1) (result))))
 
+;; Byte reversals. Two widths are `bswap` and the sixteen bit one is a rotate by eight, which
+;; is the same answer and the instruction gcc writes for it.
+(rule (lower (bswap.i16 (value.i16 x)))
+      (x64.rol_ri_16 x 8)
+      (spec (= (concat (extract 7 0 x) (extract 15 8 x)) (result))))
+
+(rule (lower (bswap.i32 (value.i32 x)))
+      (x64.bswap_32 x)
+      (spec (= (concat (extract 7 0 x) (concat (extract 15 8 x) (concat (extract 23 16 x) (extract 31 24 x)))) (result))))
+
 ;; Division and remainder. A division at sixty four bits is a call to `__divdi3` and its
 ;; relatives, which `crate::wide` writes before selection, so the widest one here is thirty two
 ;; bits.
