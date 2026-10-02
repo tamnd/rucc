@@ -7175,7 +7175,13 @@ impl<'a> Lowering<'a> {
         // registers the parameters are bound through are [`rucc_target::CallRegs::homed`], and
         // the prologue [`crate::finish`] writes takes the bytes before it saves anything.
         let variadic = self.source.signature().variadic;
-        let foreign = self.source.signature().convention != Convention::Target;
+        // A `regparm` count is the same platform's convention with fewer or more registers, and a
+        // variadic function under `-mregparm` is always `regparm(0)`, so its list is the
+        // platform's own and is not foreign.
+        let foreign = !matches!(
+            self.source.signature().convention,
+            Convention::Target | Convention::Regparm(_)
+        );
         let homes = variadic && !foreign && self.conv.home > 0;
         let conv = if homes { self.conv.homed() } else { *self.conv };
         if homes {

@@ -12,6 +12,15 @@ int after(int a, int b, long long c, int d) { return d; }
 __attribute__((regparm(0))) int linkage(int a, int b) { return b; }
 int listed(int n, ...) { return n; }
 struct big made(int x) { struct big b = {{x, x, x, x}}; return b; }
+int second(int n, ...)
+{
+    __builtin_va_list ap;
+    __builtin_va_start(ap, n);
+    __builtin_va_arg(ap, int);
+    int b = __builtin_va_arg(ap, int);
+    __builtin_va_end(ap);
+    return b;
+}
 ";
 
 /// The listing of each function, by name.
@@ -101,4 +110,12 @@ fn a_count_above_three_or_a_machine_without_the_flag_is_refused() {
     assert!(!ok && said.contains("is for x86"), "{said}");
     let (ok, said) = run(&["--target=x86_64-unknown-linux-gnu", "-mregparm=3"]);
     assert!(ok && said.contains("ignored in 64 bit mode"), "{said}");
+}
+
+/// A variadic function is `regparm(0)` whatever the unit's count is, and its `va_list` is the
+/// plain i386 one: the address of the word past `n`, which is where the caller left the rest.
+#[test]
+fn a_variadic_function_reads_its_list_off_the_stack_under_regparm() {
+    let bodies = bodies(&["-mregparm=3"]);
+    assert!(body(&bodies, "second").contains("leal\t12(%esp), %eax"), "{bodies:?}");
 }
