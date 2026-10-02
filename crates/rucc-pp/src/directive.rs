@@ -605,7 +605,9 @@ impl Preprocessor {
             // migrate later.
             if rest.len() == 1 && ident_of(&rest[0]) == Some(names.once) {
                 self.pragma_once(rest[0].span);
-            } else if !self.macro_stack_pragma(rest, hash, interner, names) {
+            } else if !self.macro_stack_pragma(rest, hash, interner, names)
+                && !self.message_pragma(rest, None, interner, names)
+            {
                 self.pass_through(body, hash, out);
             }
         } else if name == Some(names.include) || name == Some(names.include_next) {
@@ -671,6 +673,52 @@ impl Preprocessor {
         } else {
             self.macros.pop_macro(name);
         }
+        true
+    }
+
+    /// Answers `#pragma GCC warning "text"` and `#pragma GCC error "text"`, or says it is not one.
+    ///
+    /// They are `#warning` and `#error` that a macro can write through `_Pragma`, which is how
+    /// glibc's `__glibc_macro_warning` warns about a deprecated macro, and like gcc this phase
+    /// says them and keeps them out of the output. The text is the string with its escapes read,
+    /// and anything after it is ignored, as gcc ignores it. Anything but a plain string literal
+    /// where the text goes is an error. The warning answers to no option, so `-Wno-cpp` leaves
+    /// it, as in gcc, while `-w` and `-Werror` do to it what they do to any warning.
+    ///
+    /// `at` is where to report a line that came out of a `_Pragma`, whose tokens point into the
+    /// string rather than at anything in the file.
+    fn message_pragma(
+        &mut self,
+        rest: &[PpToken],
+        at: Option<Span>,
+        interner: &Interner,
+        names: &Names,
+    ) -> bool {
+        let [gcc, word, after @ ..] = rest else { return false };
+        if ident_of(gcc).map(|name| interner.resolve(name)) != Some("GCC") {
+            return false;
+        }
+        let fatal = match ident_of(word) {
+            Some(name) if name == names.error => true,
+            Some(name) if name == names.warning => false,
+            _ => return false,
+        };
+        let text = after
+            .first()
+            .filter(|token| token.kind == PpTokenKind::StringLit)
+            .and_then(|token| plain_text(interner.resolve(token.value?)));
+        let span = at.unwrap_or_else(|| {
+            after.first().map_or(Span::empty_at(word.span.hi), |token| token.span)
+        });
+        let Some(text) = text else {
+            self.invalid_pragma(if fatal { "GCC error" } else { "GCC warning" }, span);
+            return true;
+        };
+        self.diagnostics.push(if fatal {
+            Diagnostic::error(text, span).with_code("E0810")
+        } else {
+            Diagnostic::warning(text, span).with_code("W0335")
+        });
         true
     }
 
@@ -1689,7 +1737,9 @@ impl Preprocessor {
         // `_Pragma("push_macro(\"X\")")` is the same pragma written the other way, and the two
         // spellings have to mean the same thing because a macro that wants to save a name has no
         // other way to say it: a `#pragma` line cannot come out of a macro body.
-        if self.macro_stack_pragma(&tokens, span, interner, names) {
+        if self.macro_stack_pragma(&tokens, span, interner, names)
+            || self.message_pragma(&tokens, Some(span), interner, names)
+        {
             return;
         }
         out.push(Tok::synthetic(
@@ -1941,6 +1991,58 @@ fn destringize(literal: &str) -> String {
         }
     }
     out
+}
+
+/// What a plain string literal says, its escapes read, or `None` for one with a prefix.
+///
+/// A `\x` or octal escape that is not a whole character in UTF-8 comes out as the replacement
+/// character, since this is text for a person to read rather than bytes for the object.
+fn plain_text(literal: &str) -> Option<String> {
+    let body = literal.strip_prefix('"')?.strip_suffix('"')?;
+    let mut bytes = Vec::with_capacity(body.len());
+    let mut chars = body.chars().peekable();
+    while let Some(c) = chars.next() {
+        if c != '\\' {
+            let mut buf = [0; 4];
+            bytes.extend_from_slice(c.encode_utf8(&mut buf).as_bytes());
+            continue;
+        }
+        let Some(escape) = chars.next() else { break };
+        let byte = match escape {
+            'n' => b'\n',
+            't' => b'\t',
+            'r' => b'\r',
+            'a' => 0x07,
+            'b' => 0x08,
+            'f' => 0x0c,
+            'v' => 0x0b,
+            'e' | 'E' => 0x1b,
+            'x' => {
+                let mut value = 0u32;
+                while let Some(digit) = chars.peek().and_then(|c| c.to_digit(16)) {
+                    value = value.wrapping_mul(16).wrapping_add(digit);
+                    chars.next();
+                }
+                value as u8
+            }
+            '0'..='7' => {
+                let mut value = escape.to_digit(8).unwrap_or(0);
+                for _ in 0..2 {
+                    let Some(digit) = chars.peek().and_then(|c| c.to_digit(8)) else { break };
+                    value = value * 8 + digit;
+                    chars.next();
+                }
+                value as u8
+            }
+            other => {
+                let mut buf = [0; 4];
+                bytes.extend_from_slice(other.encode_utf8(&mut buf).as_bytes());
+                continue;
+            }
+        };
+        bytes.push(byte);
+    }
+    Some(String::from_utf8_lossy(&bytes).into_owned())
 }
 
 /// The parenthesised operand of a `__has_*` operator, and where the line carries on.
@@ -2819,6 +2921,27 @@ mod tests {
     #[test]
     fn a_pragma_passes_through_unchanged() {
         assert_eq!(clean("#pragma pack(1)\nint x;\n"), "#pragma pack(1) int x;");
+    }
+
+    /// `#pragma GCC warning` and `#pragma GCC error` are said here and kept out of the output,
+    /// written either way, as gcc's `-E` keeps them out. `#pragma message` is the parser's.
+    #[test]
+    fn gcc_warning_and_error_are_said_here_and_not_passed_on() {
+        let mut run = Run::new();
+        let text = run.go(
+            "#pragma GCC warning \"care\\tful\"\n#pragma GCC error \"stop\"\n\
+             #pragma message \"m\"\n_Pragma(\"GCC warning \\\"op\\\"\")\n\
+             #pragma GCC warning 42\nint x;\n",
+        );
+        assert_eq!(text, "#pragma message \"m\" int x;");
+        assert_eq!(
+            run.severities(),
+            vec![Severity::Warning, Severity::Error, Severity::Warning, Severity::Error]
+        );
+        assert_eq!(
+            run.messages(),
+            ["care\tful", "stop", "op", "invalid `#pragma GCC warning` directive"]
+        );
     }
 
     /// glibc indents a directive inside a nest of conditionals, one space per level, so
