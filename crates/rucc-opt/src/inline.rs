@@ -975,8 +975,9 @@ fn folded_size(
             }
             // What costs nothing in the copy without being a constant: a conversion between
             // registers, a constant offset the memory access takes as part of its address, a local
-            // of a fixed size, and the return, which becomes a jump to where the call was. gcc
-            // counts these as nothing too, the return as eliminated by inlining.
+            // of a fixed size, the return, which becomes a jump to where the call was, and a
+            // `__builtin_expect`, which is only a weight on the branch. gcc counts these as nothing
+            // too, the return as eliminated by inlining.
             let costless = match data.opcode {
                 Opcode::Trunc
                 | Opcode::SExt
@@ -1000,8 +1001,9 @@ fn folded_size(
                         })
                 }
                 Opcode::ICmp => only(data.results().next(), &|opcode, at| {
-                    matches!((opcode, at), (Opcode::BrIf, 0))
+                    matches!((opcode, at), (Opcode::BrIf | Opcode::Expect, 0))
                 }),
+                Opcode::Expect => true,
                 Opcode::Alloca => args.is_empty(),
                 Opcode::Return | Opcode::LifetimeEnd => true,
                 _ => false,

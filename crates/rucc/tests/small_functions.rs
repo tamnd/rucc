@@ -117,3 +117,23 @@ fn a_call_weighs_its_arguments_too() {
         int use(struct info *i) { return notify(2, i) + 1; }\n";
     assert_eq!(calls(&asm("args", &["-O2"], source), "notify"), 1);
 }
+
+/// `__builtin_expect` is only a weight on the branch and costs nothing, and neither does the test
+/// it wraps. `encode_nops` in fs/nfs/nfs4xdr.c is a `WARN_ON_ONCE` and a store, which gcc copies
+/// into each of its fifty callers.
+#[test]
+fn an_expected_test_costs_what_the_branch_does() {
+    let source = "struct hdr { int status; unsigned int nops; unsigned int *nops_p; };\n\
+        static void nops(struct hdr *h) {\n\
+            if (__builtin_expect(!!(h->nops > 8), 0)) {\n\
+                asm volatile(\"1: nop\\n\\t.pushsection .a; .long 1b - .; .popsection\");\n\
+                asm inline volatile(\"ud2\\n\\t.pushsection .b\\n\\t.popsection\");\n\
+                asm volatile(\"2: nop\\n\\t.pushsection .a; .long 2b - .; .popsection\");\n\
+            }\n\
+            *h->nops_p = __builtin_bswap32(h->nops);\n\
+        }\n\
+        void a(struct hdr *h) { nops(h); h->status = 0; }\n\
+        void b(struct hdr *h) { nops(h); h->status = 0; }\n\
+        void c(struct hdr *h) { nops(h); h->status = 0; }\n";
+    assert_eq!(calls(&asm("expect", &["-O2"], source), "nops"), 0);
+}
