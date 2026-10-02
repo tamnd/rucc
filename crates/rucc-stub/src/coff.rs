@@ -123,6 +123,34 @@ use std::collections::BTreeSet;
 /// Every failure is the description or the target being wrong rather than the writing going wrong,
 /// and all of them are found before the first byte. See [`Error`].
 pub fn write(module: &Module, target: TargetTuple) -> Result<Vec<u8>, Error> {
+    write_as(module, target, Decoration::Cut)
+}
+
+/// What an i386 import record asks the DLL for when the `.def` names a function with its `@N`.
+///
+/// The choice `dlltool -k` makes. Nothing else changes with it, and on every other machine there is
+/// no decoration for it to be about.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Decoration {
+    /// `GetProcAddress@8` is imported as `GetProcAddress`, which is what a system DLL exports and
+    /// what `-k` asks for. This is what [`write`] writes.
+    Cut,
+    /// `f@8` is imported as `f@8`, which is what a DLL that gcc linked without `--kill-at` exports
+    /// and what dlltool writes without `-k`. The symbol is `_f@8` either way, so a caller that left
+    /// the `@N` out still fails to link rather than calling with the wrong stack size.
+    Kept,
+}
+
+/// [`write`], with the choice it makes about an i386 `@N` given rather than assumed.
+///
+/// # Errors
+///
+/// As for [`write`].
+pub fn write_as(
+    module: &Module,
+    target: TargetTuple,
+    decoration: Decoration,
+) -> Result<Vec<u8>, Error> {
     if target.object_format() != ObjectFormat::Coff {
         return Err(Error::NotCoff {
             target: target.to_canonical_string(),
@@ -169,7 +197,7 @@ pub fn write(module: &Module, target: TargetTuple) -> Result<Vec<u8>, Error> {
         }
         let symbol = symbol(&export.name, lead);
         check(export, &symbol)?;
-        match kind(export, &symbol, lead) {
+        match kind(export, &symbol, lead, decoration) {
             Some(kind) => {
                 claimed.push((looked_for(kind, &symbol).to_owned(), symbol.clone()));
                 members.push(short(machine, &dll, export, &symbol, kind));
@@ -373,8 +401,8 @@ fn check(export: &Export, symbol: &str) -> Result<(), Error> {
 ///
 /// The last block is what `dlltool -k` does, which is what mingw-w64 asks for when it builds its own
 /// import libraries. A mangled name is left alone, which is the one case where a name holding an `@`
-/// is not a stack size.
-fn kind(export: &Export, symbol: &str, lead: &str) -> Option<u16> {
+/// is not a stack size. [`Decoration::Kept`] skips the cut, which is what dlltool does without `-k`.
+fn kind(export: &Export, symbol: &str, lead: &str, decoration: Decoration) -> Option<u16> {
     if export.noname {
         return Some(ORDINAL);
     }
@@ -394,7 +422,11 @@ fn kind(export: &Export, symbol: &str, lead: &str) -> Option<u16> {
     if !i386 || symbol.starts_with('?') {
         return Some(NAME);
     }
-    if symbol.match_indices('@').any(|(at, _)| at > 0) {
+    // Without `-k` the stack size stays in the name the DLL is asked for, and only the prefix comes
+    // off, which is the rule below for any name with an underscore in front. `@f@8` has none and
+    // is asked for as it is. Both are `getNameType` in LLVM with nothing renamed first.
+    let cut = decoration == Decoration::Cut;
+    if cut && symbol.match_indices('@').any(|(at, _)| at > 0) {
         // `GetProcAddress@8` in the file, `_GetProcAddress@8` defined, `GetProcAddress` looked for.
         return Some(UNDECORATE);
     }
@@ -842,6 +874,40 @@ renamed == realname
         for member in &members[5..] {
             assert_eq!(u16::from_le_bytes([member.2[6], member.2[7]]), 0x014c);
         }
+    }
+
+    /// What dlltool writes without `-k`: the symbol is `_f@8` as before, and the DLL is asked for
+    /// `f@8`, the name with only its prefix off. A fastcall name has no prefix to take off.
+    #[test]
+    fn without_k_the_dll_is_asked_for_the_name_with_its_stack_size() {
+        let text = "LIBRARY m.dll\nEXPORTS\nordinary\nf@8\n@g@12\n";
+        let module = def::read(text).unwrap();
+        let archive = write_as(&module, target("i686-windows-gnu"), Decoration::Kept).unwrap();
+        let kept = members(&archive);
+        let kind = |member: &Vec<u8>| u16::from_le_bytes([member[18], member[19]]);
+        let strings = |member: &Vec<u8>| {
+            String::from_utf8_lossy(&member[20..]).trim_end_matches('\0').replace('\0', " ")
+        };
+        assert_eq!(kind(&kept[5].2), NOPREFIX << 2);
+        assert_eq!(strings(&kept[5].2), "_ordinary m.dll");
+        assert_eq!(kind(&kept[6].2), NOPREFIX << 2);
+        assert_eq!(strings(&kept[6].2), "_f@8 m.dll");
+        assert_eq!(looked_for(NOPREFIX, "_f@8"), "f@8");
+        assert_eq!(kind(&kept[7].2), NAME << 2);
+        assert_eq!(strings(&kept[7].2), "@g@12 m.dll");
+
+        // With `-k` only the stdcall name changes.
+        let cut = write(&module, target("i686-windows-gnu")).unwrap();
+        let cut = members(&cut);
+        assert_eq!(kind(&cut[5].2), NOPREFIX << 2);
+        assert_eq!(kind(&cut[6].2), UNDECORATE << 2);
+        assert_eq!(kind(&cut[7].2), UNDECORATE << 2);
+        // And x86-64 has nothing to decide.
+        let wide = def::read(text).unwrap();
+        assert_eq!(
+            write_as(&wide, target("x86_64-windows-gnu"), Decoration::Kept).unwrap(),
+            write(&wide, target("x86_64-windows-gnu")).unwrap()
+        );
     }
 
     #[test]

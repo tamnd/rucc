@@ -30,14 +30,16 @@
 //! a build that looks for `<host>-dlltool` on the path finds. With the second, what comes before
 //! `-dlltool` is the target when no `-m` says otherwise, which is how a prefixed GNU tool behaves.
 //!
-//! # Where this is stricter than GNU dlltool
+//! # `-k` on i386
 //!
-//! On i386 without `-k`. The writer always makes the record that asks the DLL for the undecorated
-//! name, so `GetProcAddress@8` in the file is imported as `GetProcAddress`, which is what `-k` means
-//! and what every mingw-w64 build asks for. Without `-k` GNU dlltool asks the DLL for
-//! `GetProcAddress@8`, which no system DLL exports, so reading a missing `-k` as a present one would
-//! be a quiet difference in the library and it is refused instead. On every other machine there is
-//! no decoration and `-k` changes nothing, so it is taken either way.
+//! With `-k`, `GetProcAddress@8` in the file is imported as `GetProcAddress`, which is what a system
+//! DLL exports and what every mingw-w64 build asks for. Without it the DLL is asked for `f@8`, which
+//! is what a DLL that gcc linked without `--kill-at` exports, and both dlltools do the same. The
+//! symbol a program links against is `_f@8` either way, so a caller that left the `@N` out fails to
+//! link. See [`rucc_stub::coff::Decoration`]. On every other machine there is no decoration and `-k`
+//! changes nothing.
+//!
+//! # Where this is stricter than GNU dlltool
 //!
 //! A `-D` name with no dot in it. Both dlltools write such a name as it is, and a `LIBRARY` line with
 //! no dot gets `.dll` added, which is the rule [`rucc_stub::def::Module::dll`] applies. Rather than
@@ -46,7 +48,8 @@
 
 use std::io::Write;
 
-use rucc_tuple::{Arch, Os, TargetTuple};
+use rucc_stub::coff::Decoration;
+use rucc_tuple::{Os, TargetTuple};
 
 /// What `rucc --dlltool --help` prints.
 const USAGE: &str = "\
@@ -60,7 +63,7 @@ options:
   -d, --input-def <file>   the module definition file to read
   -l, --output-lib <file>  the import library to write
   -D, --dllname <name>     the DLL to import from, instead of the file's LIBRARY line
-  -k, --kill-at            import an i386 name without its @N, which i386 requires here
+  -k, --kill-at            import an i386 name without its @N, as a system DLL exports it
   -S, --as <prog>, --as-flags <flags>   taken and ignored, since no assembler is run
   -h, --help               print this message and exit
 ";
@@ -220,12 +223,6 @@ fn build(program: &str, request: &Request) -> Result<(String, Vec<u8>), String> 
                 .to_owned()
         })?,
     };
-    if target.arch() == Arch::X86 && !request.kill_at {
-        return Err("an i386 import library needs -k here. Without it GNU dlltool asks the DLL \
-                    for each name with its @N, which is not what a system DLL exports, and this \
-                    dlltool only writes the library -k asks for"
-            .to_owned());
-    }
     let input = request.input.as_deref().ok_or("no -d, so there is no .def file to read")?;
     let output =
         request.output.as_deref().ok_or("no -l, so there is nowhere to write the library")?;
@@ -251,7 +248,9 @@ fn build(program: &str, request: &Request) -> Result<(String, Vec<u8>), String> 
         }
         module.library.clone_from(dll);
     }
-    let bytes = rucc_stub::coff::write(&module, target).map_err(|e| format!("{input}: {e}"))?;
+    let decoration = if request.kill_at { Decoration::Cut } else { Decoration::Kept };
+    let bytes = rucc_stub::coff::write_as(&module, target, decoration)
+        .map_err(|e| format!("{input}: {e}"))?;
     Ok((output.to_owned(), bytes))
 }
 
@@ -297,6 +296,7 @@ pub fn run(program: &str, args: &[String]) -> i32 {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use rucc_tuple::Arch;
 
     fn args(s: &[&str]) -> Vec<String> {
         s.iter().map(|x| (*x).to_owned()).collect()
@@ -417,6 +417,28 @@ mod tests {
         std::fs::remove_dir_all(&dir).unwrap();
     }
 
+    /// Without `-k` the DLL is asked for the name with its `@N`, which is what a DLL gcc linked
+    /// without `--kill-at` exports, and the symbol is still the decorated one.
+    #[test]
+    fn an_i386_library_without_k_keeps_the_stack_size_in_the_imported_name() {
+        let dir = scratch("kept");
+        let def = dir.join("m.def");
+        let text = "LIBRARY m.dll\nEXPORTS\nf@8\n";
+        std::fs::write(&def, text).unwrap();
+        let request = Request {
+            machine: Some("i386".to_owned()),
+            input: Some(def.display().to_string()),
+            output: Some("unused.a".to_owned()),
+            ..Request::default()
+        };
+        let (_, bytes) = build("rucc", &request).unwrap();
+        let module = rucc_stub::def::read(text).unwrap();
+        let target = "i686-windows-gnu".parse().unwrap();
+        assert_eq!(bytes, rucc_stub::coff::write_as(&module, target, Decoration::Kept).unwrap());
+        assert_ne!(bytes, rucc_stub::coff::write(&module, target).unwrap(), "-k would cut it");
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
     #[test]
     fn a_dll_name_on_the_command_line_replaces_the_one_in_the_file() {
         let dir = scratch("dllname");
@@ -444,8 +466,6 @@ mod tests {
         let request = |line: &[&str]| parse(&args(line)).unwrap();
         let why = build("rucc", &request(&["-d", "x.def", "-l", "x.a"])).unwrap_err();
         assert!(why.contains("no -m"), "{why}");
-        let why = build("rucc", &request(&["-m", "i386", "-d", "x.def", "-l", "x.a"])).unwrap_err();
-        assert!(why.contains("-k"), "{why}");
         let why = build("x86_64-w64-mingw32-dlltool", &request(&["-l", "x.a"])).unwrap_err();
         assert!(why.contains("no -d"), "{why}");
         let why = build("rucc", &request(&["-m", "arm64", "-d", "x.def"])).unwrap_err();
