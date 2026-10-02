@@ -493,6 +493,7 @@ fn bytes_pinned(
         clobbered.contains(&(reg, gpr)) || pins.iter().flatten().any(|&(at, _)| at == reg)
     };
     if BYTE_REGS.iter().any(|&reg| !taken(reg, pins)) {
+        shared_with_input(pins, list, constraints, &outputs, &taken, gpr);
         return;
     }
     // The ones only an input is pinned to, which a late output may share. An input tied to an
@@ -517,6 +518,55 @@ fn bytes_pinned(
         .collect();
     for (index, reg) in outputs.into_iter().zip(shareable) {
         pins[index] = Some((reg, gpr));
+    }
+}
+
+/// Puts each `q` output in a register with a low byte together with an input, when the operands
+/// that have to be in a register outnumber the registers with a low byte that are left.
+///
+/// The flag output `CC_SET(e)` is a `"=q"` written with `sete`, and a comparison of four values in
+/// registers fills `eax` to `edx` with inputs. The output then went to the scratch register, and
+/// `sete %sil` is not an instruction i386 has. An output not written early may share a register
+/// with an input, which is what gcc does, so the output and an input that only asks for a register
+/// are pinned to the same free register.
+fn shared_with_input(
+    pins: &mut [Option<(PhysReg, RegClass)>],
+    list: &[AsmOperand<'_>],
+    constraints: &str,
+    outputs: &[usize],
+    taken: &dyn Fn(PhysReg, &[Option<(PhysReg, RegClass)>]) -> bool,
+    gpr: RegClass,
+) {
+    let entries: Vec<&str> = constraints.split(',').collect();
+    let in_register = |index: usize, pins: &[Option<(PhysReg, RegClass)>]| {
+        let operand = &list[index];
+        pins[index].is_none()
+            && !operand.memory
+            && !operand.immediate
+            && operand.tied.is_none()
+            && (operand.result.is_some() || operand.value.is_some())
+    };
+    // An input that asks for any register and nothing else, so one with a low byte will do.
+    let plain = |index: usize| {
+        let entry = entries.get(index).copied().unwrap_or("");
+        list[index].role == rucc_ir::AsmRole::Input
+            && entry.chars().any(|c| matches!(c, 'r' | 'q' | 'Q'))
+            && entry.chars().all(|c| matches!(c, 'r' | 'q' | 'Q' | '%'))
+    };
+    for &output in outputs {
+        let free: Vec<PhysReg> =
+            BYTE_REGS.iter().copied().filter(|&reg| !taken(reg, pins)).collect();
+        let wanted = (0..list.len()).filter(|&index| in_register(index, pins)).count();
+        if wanted <= free.len() {
+            return;
+        }
+        let Some(&reg) = free.first() else { return };
+        let Some(input) = (0..list.len()).find(|&index| in_register(index, pins) && plain(index))
+        else {
+            return;
+        };
+        pins[output] = Some((reg, gpr));
+        pins[input] = Some((reg, gpr));
     }
 }
 
