@@ -72,6 +72,10 @@ const OVERLAP: &str = "local kept in memory, two accesses to it overlap without 
 /// A piece is read as a type it cannot become.
 const MISMATCH: &str = "local kept in memory, a piece of it is read as a type it cannot become";
 
+/// The bytes of one vector register, which is the size of a local this pass keeps in a register
+/// as a vector. A narrower access to it is a lane, and nothing is wider.
+const WHOLE: u64 = 16; // not a threshold: sixteen bytes is one xmm register, not a tuned limit.
+
 /// An access is a vector, a long double or an integer that is not a whole number of bytes.
 const WIDTH: &str = "local kept in memory, an access to it has a width the pass does not split";
 
@@ -641,7 +645,7 @@ fn whole(uses: &[(Inst, Use)], size: u64) -> Result<Vec<Piece>, &'static str> {
         }
     }
     let ty = ty.expect("a vector access is why this was asked");
-    if size != 16 {
+    if size != WHOLE {
         return Err(OVERLAP);
     }
     Ok(vec![Piece { at: 0, size, ty }])
@@ -809,7 +813,7 @@ impl<'a> Rewrite<'a> {
                 let (at, size) = found.range();
                 let mask = self.mask(at, size);
                 // A lane written is the rest of the vector read first.
-                let lane = self.plan.vector && size < 16 && !found.reads();
+                let lane = self.plan.vector && size < WHOLE && !found.reads();
                 if found.reads() || lane {
                     up |= mask & !written;
                 }
@@ -1056,7 +1060,7 @@ impl<'a> Rewrite<'a> {
             Use::Load { at, size, ty } => {
                 let result = func[inst].first_result.expect("a load produces its value");
                 let value = self.value(func, 0, &current.values);
-                let read = if size == 16 {
+                let read = if size == WHOLE {
                     convert(func, inst, value, whole, ty)
                 } else {
                     let (lanes, lane) = shape(at, size);
@@ -1073,7 +1077,7 @@ impl<'a> Rewrite<'a> {
                 forward.insert(result, read);
             }
             Use::Store { at, size, ty, value } => {
-                let written = if size == 16 {
+                let written = if size == WHOLE {
                     convert(func, inst, value, ty, whole)
                 } else {
                     let (lanes, lane) = shape(at, size);

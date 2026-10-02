@@ -142,7 +142,7 @@ fn stacked(word: &str, args: &[String], gcc: bool) -> Option<Result<Written, Str
         "popal" => Ok(Written { bytes: vec![0x61], holes: Vec::new() }),
         _ => one_in(if bare.is_empty() { long } else { bare }, args, Mode::Bits32),
     };
-    if wide && let Ok(written) = &mut written {
+    if let (true, Ok(written)) = (wide, &mut written) {
         if let Err(why) = crate::source::prefixed(written, 0x66) {
             return Some(Err(why));
         }

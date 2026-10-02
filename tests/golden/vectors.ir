@@ -5,7 +5,7 @@ target datalayout = "e-p:64:64-i64:64-f80:128-S128"
 
 global @table : bytes 16 = { i32 1, i32 2, i32 3, i32 4 }, align 8, linkage(external)
 
-func @built() -> i64, linkage(external) {
+func @built() -> f64, linkage(external) {
 block0:
     %0 = alloca, size 8, align 8
     %1 = alloca, size 8, align 8
@@ -16,12 +16,12 @@ block0:
     %5 = iconst.i32 2
     store %5 -> %4, align 4, tbaa !1
     memcpy %1, %0, size 8, align 8
-    %6 = load.i64 %1, align 8
+    %6 = load.f64 %1, align 8
     return %6
 }
 
-func @arithmetic(i64, i64) -> i64, linkage(external) {
-block0(%0: i64, %1: i64):
+func @arithmetic(f64, f64) -> f64, linkage(external) {
+block0(%0: f64, %1: f64):
     %2 = alloca, size 8, align 8
     %3 = alloca, size 8, align 8
     %4 = alloca, size 8, align 8
@@ -41,12 +41,12 @@ block0(%0: i64, %1: i64):
     %15 = iconst.i64 4
     %16 = ptr_add %2, %15
     store %14 -> %16, align 4, tbaa !1
-    %17 = load.i64 %2, align 8
+    %17 = load.f64 %2, align 8
     return %17
 }
 
-func @broadcast(i64, i32) -> i64, linkage(external) {
-block0(%0: i64, %1: i32):
+func @broadcast(f64, i32) -> f64, linkage(external) {
+block0(%0: f64, %1: i32):
     %2 = alloca, size 8, align 8
     %3 = alloca, size 8, align 8
     %4 = alloca, size 8, align 8
@@ -69,12 +69,12 @@ block0(%0: i64, %1: i32):
     %17 = iconst.i64 4
     %18 = ptr_add %3, %17
     store %16 -> %18, align 4, tbaa !1
-    %19 = load.i64 %3, align 8
+    %19 = load.f64 %3, align 8
     return %19
 }
 
-func @compound(i64, i64) -> i64, linkage(external) {
-block0(%0: i64, %1: i64):
+func @compound(f64, f64) -> f64, linkage(external) {
+block0(%0: f64, %1: f64):
     %2 = alloca, size 8, align 8
     %3 = alloca, size 8, align 8
     store %0 -> %2, align 8
@@ -93,7 +93,7 @@ block0(%0: i64, %1: i64):
     %14 = iconst.i64 4
     %15 = ptr_add %2, %14
     store %13 -> %15, align 4, tbaa !1
-    %16 = load.i64 %2, align 8
+    %16 = load.f64 %2, align 8
     return %16
 }
 
@@ -116,8 +116,8 @@ block0(%0: f64):
     return %11
 }
 
-func @flipped(i64) -> i64, linkage(external) {
-block0(%0: i64):
+func @flipped(f64) -> f64, linkage(external) {
+block0(%0: f64):
     %1 = alloca, size 8, align 8
     %2 = alloca, size 8, align 8
     store %0 -> %2, align 8
@@ -133,12 +133,12 @@ block0(%0: i64):
     %11 = iconst.i64 4
     %12 = ptr_add %1, %11
     store %10 -> %12, align 4, tbaa !1
-    %13 = load.i64 %1, align 8
+    %13 = load.f64 %1, align 8
     return %13
 }
 
-func @stepped(i64) -> i64, linkage(external) {
-block0(%0: i64):
+func @stepped(f64) -> f64, linkage(external) {
+block0(%0: f64):
     %1 = alloca, size 8, align 8
     %2 = alloca, size 8, align 8
     store %0 -> %2, align 8
@@ -179,7 +179,7 @@ block0(%0: i64):
     %31 = iconst.i64 4
     %32 = ptr_add %2, %31
     store %30 -> %32, align 4, tbaa !1
-    %33 = load.i64 %1, align 8
+    %33 = load.f64 %1, align 8
     return %33
 }
 
@@ -234,8 +234,8 @@ block0(%0: i32, %1: i32):
     return %23
 }
 
-func @lane(i64, i32) -> i32, linkage(external) {
-block0(%0: i64, %1: i32):
+func @lane(f64, i32) -> i32, linkage(external) {
+block0(%0: f64, %1: i32):
     %2 = alloca, size 8, align 8
     store %0 -> %2, align 8
     %3 = sext.i64 %1
@@ -246,8 +246,8 @@ block0(%0: i64, %1: i32):
     return %7
 }
 
-func @written(i64, i32, i32) -> i64, linkage(external) {
-block0(%0: i64, %1: i32, %2: i32):
+func @written(f64, i32, i32) -> f64, linkage(external) {
+block0(%0: f64, %1: i32, %2: i32):
     %3 = alloca, size 8, align 8
     store %0 -> %3, align 8
     %4 = iconst.i32 0
@@ -278,12 +278,12 @@ block0(%0: i64, %1: i32, %2: i32):
     %26 = ptr_add %3, %25
     %27 = iconst.i32 7
     store %27 -> %26, align 4, tbaa !1
-    %28 = load.i64 %3, align 8
+    %28 = load.f64 %3, align 8
     return %28
 }
 
-func @shifted(i64, i64) -> i64, linkage(external) {
-block0(%0: i64, %1: i64):
+func @shifted(f64, f64) -> f64, linkage(external) {
+block0(%0: f64, %1: f64):
     %2 = alloca, size 8, align 8
     %3 = alloca, size 8, align 8
     %4 = alloca, size 8, align 8
@@ -317,12 +317,12 @@ block0(%0: i64, %1: i64):
     %27 = iconst.i64 4
     %28 = ptr_add %2, %27
     store %26 -> %28, align 4, tbaa !1
-    %29 = load.i64 %2, align 8
+    %29 = load.f64 %2, align 8
     return %29
 }
 
-func @scaled(i64) -> i64, linkage(external) {
-block0(%0: i64):
+func @scaled(f64) -> f64, linkage(external) {
+block0(%0: f64):
     %1 = alloca, size 8, align 8
     %2 = alloca, size 8, align 8
     %3 = alloca, size 8, align 8
@@ -346,12 +346,12 @@ block0(%0: i64):
     %17 = iconst.i64 4
     %18 = ptr_add %2, %17
     store %16 -> %18, align 4, tbaa !1
-    %19 = load.i64 %2, align 8
+    %19 = load.f64 %2, align 8
     return %19
 }
 
-func @compared(i64, i64) -> i64, linkage(external) {
-block0(%0: i64, %1: i64):
+func @compared(f64, f64) -> f64, linkage(external) {
+block0(%0: f64, %1: f64):
     %2 = alloca, size 8, align 8
     %3 = alloca, size 8, align 8
     %4 = alloca, size 8, align 8
@@ -377,11 +377,11 @@ block0(%0: i64, %1: i64):
     %21 = iconst.i64 4
     %22 = ptr_add %2, %21
     store %20 -> %22, align 4, tbaa !1
-    %23 = load.i64 %2, align 8
+    %23 = load.f64 %2, align 8
     return %23
 }
 
-func @compared_floats(f64, f64) -> i64, linkage(external) {
+func @compared_floats(f64, f64) -> f64, linkage(external) {
 block0(%0: f64, %1: f64):
     %2 = alloca, size 8, align 8
     %3 = alloca, size 8, align 8
@@ -408,12 +408,12 @@ block0(%0: f64, %1: f64):
     %21 = iconst.i64 4
     %22 = ptr_add %2, %21
     store %20 -> %22, align 4, tbaa !1
-    %23 = load.i64 %2, align 8
+    %23 = load.f64 %2, align 8
     return %23
 }
 
-func @selected(i64, i64) -> i64, linkage(external) {
-block0(%0: i64, %1: i64):
+func @selected(f64, f64) -> f64, linkage(external) {
+block0(%0: f64, %1: f64):
     %2 = alloca, size 8, align 8
     %3 = alloca, size 8, align 8
     %4 = alloca, size 8, align 8
@@ -454,7 +454,7 @@ block0(%0: i64, %1: i64):
     %34 = iconst.i64 4
     %35 = ptr_add %3, %34
     store %33 -> %35, align 4, tbaa !1
-    %36 = load.i64 %3, align 8
+    %36 = load.f64 %3, align 8
     return %36
 }
 
@@ -491,7 +491,7 @@ block0(%0: i32, %1: i32):
     return %25
 }
 
-func @literal() -> i64, linkage(external) {
+func @literal() -> f64, linkage(external) {
 block0:
     %0 = alloca, size 8, align 8
     %1 = iconst.i32 5
@@ -500,22 +500,22 @@ block0:
     %3 = ptr_add %0, %2
     %4 = iconst.i32 6
     store %4 -> %3, align 4, tbaa !1
-    %5 = load.i64 %0, align 8
+    %5 = load.f64 %0, align 8
     return %5
 }
 
-func @reinterpreted(f64) -> i64, linkage(external) {
+func @reinterpreted(f64) -> f64, linkage(external) {
 block0(%0: f64):
     %1 = alloca, size 8, align 8
     %2 = alloca, size 8, align 8
     store %0 -> %2, align 8
     memcpy %1, %2, size 8, align 8
-    %3 = load.i64 %1, align 8
+    %3 = load.f64 %1, align 8
     return %3
 }
 
-func @as_one(i64) -> i64, linkage(external) {
-block0(%0: i64):
+func @as_one(f64) -> i64, linkage(external) {
+block0(%0: f64):
     %1 = alloca, size 8, align 8
     store %0 -> %1, align 8
     %2 = load.i64 %1, align 8, tbaa !4
