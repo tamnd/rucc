@@ -875,6 +875,11 @@ fn become_instruction(
     let kept = carried(func, inst, opcode, &lhs, &rhs);
     let lhs = defined(func, inst, ty, lhs);
     let rhs = defined(func, inst, ty, rhs);
+    let (lhs, rhs) = if opcode == Opcode::ICmp {
+        (addressed(func, inst, lhs, rhs), addressed(func, inst, rhs, lhs))
+    } else {
+        (lhs, rhs)
+    };
     let args = func.push_values(&[lhs, rhs]);
     let data = &mut func[inst];
     data.opcode = opcode;
@@ -950,6 +955,25 @@ fn carried(func: &Func, inst: Inst, now: Opcode, lhs: &Operand, rhs: &Operand) -
         }
         _ => Flags::NONE,
     }
+}
+
+/// An operand of a comparison made a pointer when the other operand is one.
+///
+/// The term view reads a pointer as an integer of the address width and sees through an
+/// `inttoptr` of a constant, which is how `p == NULL` matches the rules about comparing with zero.
+/// A rule that writes a new bound then builds it as an `iconst`, so `p < (char *)-1` comes out as a
+/// pointer compared with an `i64`, which the verifier refuses. The bound is put back behind an
+/// `inttoptr` here, and a comparison of two integers or two pointers is left as it was.
+fn addressed(func: &mut Func, before: Inst, value: Value, other: Value) -> Value {
+    if !func[other].ty.is_ptr() || !func[value].ty.is_int() {
+        return value;
+    }
+    let args = func.push_values(&[value]);
+    let data = InstData { args, ..InstData::new(Opcode::IntToPtr) };
+    let span = func.span(before);
+    let cast = func.create_inst(data, &[Type::PTR], span);
+    func.insert_before(cast, before);
+    func[cast].first_result.expect("one result was asked for")
 }
 
 /// Turns an instruction into the conversion a rule says computes the same thing.
@@ -3054,6 +3078,35 @@ mod tests {
             assert_eq!(func[inst].opcode, opcode, "{by}");
             assert_eq!(func[inst].flags, kept, "{by}, {flags:?}, constant on the left {left}");
         }
+    }
+
+    /// The function the pass leaves is still one the verifier accepts when the comparison is of a
+    /// pointer, not only when it is of integers.
+    #[test]
+    fn a_pointer_compared_with_the_last_address_stays_a_pointer_comparison() {
+        // `p < (char *)-1` is `p != (char *)-1`, and the bound the rule writes has to be a pointer
+        // again, since the term view read the one it matched through the `inttoptr`.
+        let target = TargetInfo::new(Triple::new(Arch::X86_64, Os::Linux, Env::Gnu));
+        let mut names = Interner::new();
+        let name = names.intern("f");
+        let signature = Signature::new().with_params(&[Type::PTR]).with_returns(&[Type::int(1)]);
+        let mut func = Func::new(name, signature);
+        let block = func.create_block();
+        let mut module = Module::new(names.intern("test.c"), &target);
+        let p = func.append_param(block, Type::PTR);
+        let mut build = Builder::new(&mut func, block);
+        let ones = build.iconst(Type::int(64), -1);
+        let last = build.unary(Opcode::IntToPtr, ones, Type::PTR);
+        let below = build.icmp(IntPred::Ult, p, last);
+        build.ret(&[below]);
+        assert!(simplify(&mut func));
+        let answer = returned(&func, block);
+        assert_eq!(came_from(&func, answer), (Opcode::ICmp, Extra::IntPred(IntPred::Ne)));
+        let bound = operands(&func, answer)[1];
+        assert_eq!(func[bound].ty, Type::PTR);
+        assert_eq!(came_from(&func, bound).0, Opcode::IntToPtr);
+        module.add_func(func);
+        rucc_ir::verify(&module, &names).expect("the pass left the function verifiable");
     }
 
     #[test]
