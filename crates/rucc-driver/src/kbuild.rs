@@ -257,7 +257,9 @@ pub(crate) const TABLE: &[Row] = &[
 
 impl Row {
     fn covers(&self, arg: &str, arch: Arch) -> bool {
-        if self.arch.is_some_and(|only| only != arch) {
+        // The x86 rows are the same for both word sizes, since `-m32` turns one into the other.
+        let family = |arch| if arch == Arch::X86 { Arch::X86_64 } else { arch };
+        if self.arch.is_some_and(|only| family(only) != family(arch)) {
             return false;
         }
         match self.flag.strip_suffix('*') {

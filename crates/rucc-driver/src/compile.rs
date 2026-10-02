@@ -1331,7 +1331,7 @@ fn generate(
     match opts.emit {
         EmitKind::Asm => {
             rucc_asm::print(&funcs, &globals, &aliases, names, target, unwind, output(opts, target))
-                .map(Artifact::Text)
+                .map(|listing| Artifact::Text(sixteen(opts, listing)))
                 .map_err(refused)
         }
         // An executable is an object as far as this gets: one is what each file of a link
@@ -1348,7 +1348,7 @@ fn generate(
                     unwind,
                     output(opts, target),
                 );
-                *assembly = Some(listing.map_err(refused)?);
+                *assembly = Some(sixteen(opts, listing.map_err(refused)?));
             }
             // A template kept as text has no bytes until an assembler reads it. Most are read on
             // their own where they are, but one may jump to a label another statement's text
@@ -1380,6 +1380,7 @@ fn generate(
                 let listing =
                     print(&funcs, &globals, &aliases, names, target, unwind, output(opts, target))
                         .map_err(refused)?;
+                let listing = sixteen(opts, listing);
                 let arch = target.tuple.arch();
                 let flags = rucc_asm::Flags {
                     fatal_warnings: opts.asm_fatal_warnings,
@@ -2023,6 +2024,13 @@ fn interned(files: &mut Vec<String>, name: String) -> usize {
 /// that the two output paths are handed the same thing and cannot come to disagree about what is
 /// in a file.
 ///
+/// A listing as `-m16` wants it: the 32 bit code with `.code16gcc` in front, which is what gcc
+/// writes at the top of every file it compiles that way. The assembler then gives each instruction
+/// the prefixes that make it do in real mode what it would have done in protected mode.
+fn sixteen(opts: &Options, listing: String) -> String {
+    if opts.sixteen { format!("\t.code16gcc\n{listing}") } else { listing }
+}
+
 /// The feature word is empty on a machine whose bits these are not. It is the x86 one, and a target
 /// that wanted its control flow checked would want a property of its own with a key of its own, so
 /// writing this one there would be recording something untrue rather than recording nothing.
