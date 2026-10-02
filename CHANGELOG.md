@@ -23,6 +23,7 @@ All notable changes are recorded here. The format follows [Keep a Changelog](htt
 
 ### Fixed
 
+- The driver now accepts `-Wa,--32` on i386 and `-Wa,-mtune=generic32` and the other i386 and generic names on x86. The i386 kernel passes both to gas. The other word size is still refused, now with a message that points at `-m32` or `-m64`.
 - `-mpreferred-stack-boundary=2` is accepted on i386, including with `-m32` on an x86-64 target, which is how the 32-bit kernel is built. The range is checked after `-m32` has picked the machine, 2 to 12 on i386 and 3 to 12 on x86-64.
 - A `long long` divided or taken modulo by a power of two on i386 is shifts at every level, as in gcc, instead of a call to `__divdi3`, `__moddi3`, `__udivdi3` or `__umoddi3`, which the kernel does not link. At `-O0` a divisor written as `-8` or `1LL << 32` is now seen as the constant it is.
 - `-march=` on i386 now drops `cmov` for the processors gcc gives none, which are `i386`, `i486`, `i586`, `pentium`, `pentium-mmx`, `lakemont`, `k6`, `k6-2`, `k6-3`, `winchip-c6`, `winchip2` and `c3`. A select becomes a branch there, so a kernel built with `CONFIG_M486`, `CONFIG_M586` or `CONFIG_MK6` no longer hits an invalid opcode on the processor it was built for.

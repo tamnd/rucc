@@ -4537,7 +4537,8 @@ struct Assembler {
 /// why each entry is on it.
 fn assembler_words(words: &[(String, String)], target: Triple) -> Result<Assembler, CliError> {
     let mut out = Assembler::default();
-    let x86 = target.arch == rucc_target::Arch::X86_64;
+    let i386 = target.arch == rucc_target::Arch::X86;
+    let x86 = i386 || target.arch == rucc_target::Arch::X86_64;
     let aarch64 = target.arch == rucc_target::Arch::Aarch64;
     let mut words = words.iter();
     while let Some((word, from)) = words.next() {
@@ -4552,15 +4553,24 @@ fn assembler_words(words: &[(String, String)], target: Triple) -> Result<Assembl
             // The note gas writes on x86 with the instruction sets and features a file used. This
             // compiler never writes it, so asking for it not to be written asks for what happens.
             "-mx86-used-note=no" if x86 => {}
-            // The word size gas assembles for. Every x86 target this compiler has is 64 bit, so
-            // `--64` is what it does and `--32` is a machine it has no encoder for.
-            "--64" if x86 => {}
-            "--32" if x86 => {
+            // The word size gas assembles for, which is the machine the target already is. The
+            // other one is a different target, which `-m32` or `-m64` is how to ask for.
+            "--64" if x86 && !i386 => {}
+            "--32" if i386 => {}
+            "--32" | "--64" if x86 => {
                 return Err(refuse(
-                    "this compiler assembles only 64 bit x86, and 32 bit code would need an \
-                     assembler for the i386 encodings, which it does not have",
+                    "the assembler inside this compiler assembles for the target, so the other \
+                     word size is `-m32` or `-m64` on the compiler's own command line",
                 ));
             }
+            // The processor gas picks the padding between instructions for. Every name here is
+            // padded with instructions that every one of them runs, which on i386 are gas's own
+            // `generic32` ones and on x86-64 its long nops, so a name it knows changes nothing.
+            // The i386 kernel passes `generic32` so that padding stays valid on a 486.
+            _ if x86
+                && word.strip_prefix("-mtune=").is_some_and(|name| {
+                    matches!(name, "generic32" | "generic64" | "i386" | "i486" | "i586" | "i686")
+                }) => {}
             // The data model gas assembles for on AArch64, where LP64 is the only one this compiler
             // has.
             "-mabi=lp64" if aarch64 => {}
@@ -8238,6 +8248,9 @@ mod tests {
             compile(&[x86, word, "-c", "a.c"]);
         }
         compile(&[x86, "-Xassembler", "--noexecstack", "-c", "a.c"]);
+        for word in ["-Wa,--32", "-Wa,-mtune=generic32", "-Wa,-mtune=i486"] {
+            compile(&[x86, "-m32", "-fno-pic", word, "-c", "a.c"]);
+        }
         for word in ["-Wa,-march=armv8.5-a", "-Wa,-march=armv8.4-a+crc", "-Wa,-mabi=lp64"] {
             compile(&[arm, word, "-c", "a.c"]);
         }
@@ -8252,8 +8265,9 @@ mod tests {
         // each of these has to fail or the kernel switches on something the output does not have.
         let x86 = "--target=x86_64-unknown-linux-gnu";
         let arm = "--target=aarch64-unknown-linux-gnu";
-        let cases: [(&[&str], &str); 10] = [
+        let cases: [(&[&str], &str); 11] = [
             (&[x86, "-Wa,--32"], "`--32`"),
+            (&[x86, "-Wa,-mtune=bogus"], "`-mtune=bogus`"),
             (&[arm, "-Wa,--64"], "`--64`"),
             (&[arm, "-Wa,-mx86-used-note=no"], "`-mx86-used-note=no`"),
             (&[x86, "-Wa,-mx86-used-note=yes"], "`-mx86-used-note=yes`"),
