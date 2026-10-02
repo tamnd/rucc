@@ -328,6 +328,22 @@ pub fn run(
     pic: Pic,
     auto: bool,
 ) -> Vec<(FuncId, Stats)> {
+    // A call through a member of a `static const` table of operations, or through a pointer that
+    // can only be one function, is a call to that function by the time gcc decides what to inline,
+    // since its early passes have folded the load and the call. So it is here too, before any of
+    // the calls are counted. See [`crate::image`].
+    if limit.is_some() {
+        let images = crate::image::Images::of(module, pic);
+        if !images.is_empty() {
+            for id in module.funcs().collect::<Vec<FuncId>>() {
+                if !module[id].is_declaration() {
+                    let mut stats = Stats::new();
+                    let mut fuel = crate::Fuel::unlimited();
+                    crate::image::settle(&mut module[id], &images, &mut fuel, &mut stats);
+                }
+            }
+        }
+    }
     let once = if limit.is_some() && once { called_once(module) } else { Set::default() };
     let wanted: Map<Symbol, (FuncId, Kind)> = module
         .funcs()
