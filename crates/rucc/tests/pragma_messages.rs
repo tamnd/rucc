@@ -105,7 +105,9 @@ fn each_line_is_said_the_way_gcc_says_it() {
         "{text}"
     );
     assert_eq!(lines(&text, "error"), [5, 9, 10], "{text}");
-    assert!(said(&text, "error").iter().all(|m| m == "invalid `#pragma GCC warning` directive [E0672]"));
+    assert!(
+        said(&text, "error").iter().all(|m| m == "invalid `#pragma GCC warning` directive [E0672]")
+    );
 }
 
 /// `#pragma GCC error` stops the build with its text.
