@@ -32,8 +32,10 @@
 //! the runtime. So a register is thirty two bits and a division at thirty two is written the way
 //! gcc writes it, with a high multiply at that width, the same as the sixty four bit one above at
 //! half the width. A division narrower than a register is left as a `div` there, since C only
-//! writes one after the `narrow` pass has shortened it, and one wider than a register is the
-//! runtime's already.
+//! writes one after the `narrow` pass has shortened it. One wider than a register is the runtime's
+//! unless the divisor is a power of two or the division is exact, which need no high multiply:
+//! those are written at their own width ahead of the splitting, which then takes the shifts or the
+//! multiply in halves, so a `long long` divided by four is no `__divdi3` on i386, as with gcc.
 //!
 //! # What the dividend is known to hold
 //!
@@ -69,12 +71,14 @@ use crate::expand::{ahead, ahead_const, becomes};
 /// Rewrites every division and remainder by a constant that [`program_at`] has an answer for, on a
 /// machine whose registers are `register` bits wide.
 pub fn divisions(func: &mut Func, goal: Goal, register: u32) {
-    if matches!(goal, Goal::Size) {
-        return;
-    }
     let found: Vec<Inst> = func.blocks().flat_map(|block| func.insts(block)).collect();
     for inst in found {
         let Some(division) = division(func, inst) else { continue };
+        // Smaller code is the division instruction, but a division wider than a register has no
+        // instruction and the call it would become is to a runtime a kernel does not link.
+        if matches!(goal, Goal::Size) && division.width <= register {
+            continue;
+        }
         let Some(program) = program_at(division, register) else { continue };
         write(func, inst, &program);
     }
@@ -202,7 +206,14 @@ pub fn program_at(division: Division, register: u32) -> Option<Program> {
     if !matches!(width, 8 | 16 | 32 | 64) || matches!(divisor, 0 | 1) || (signed && divisor == -1) {
         return None;
     }
-    if !matches!(register, 32 | 64) || width > register {
+    if !matches!(register, 32 | 64) {
+        return None;
+    }
+    // Wider than a register, only what needs no high multiply: a power of two is shifts and an
+    // exact division is a multiply at the division's width, and the splitting below takes either
+    // in halves. Anything else there is the runtime's, as it is for gcc.
+    let size = divisor.unsigned_abs();
+    if width > register && !(exact && !remainder) && !size.is_power_of_two() {
         return None;
     }
     let mut program = Program::new(width, register);
@@ -210,7 +221,6 @@ pub fn program_at(division: Division, register: u32) -> Option<Program> {
         exactly(&mut program, signed, divisor);
         return Some(program);
     }
-    let size = divisor.unsigned_abs();
     match range {
         Range::Unsigned(bits) => {
             let quotient = unsigned(&mut program, size, bits)?;
@@ -484,13 +494,57 @@ fn division(func: &Func, inst: Inst) -> Option<Division> {
 }
 
 /// The immediate a value is, if it is a constant.
+///
+/// Arithmetic on constants counts too. Without the optimizer to fold it, `x / 2` on a `long long`
+/// is a division by the `int` two made wider, `x / -8` subtracts eight from zero and `x / (1LL <<
+/// 32)` shifts, and each is the same division as the folded one. Nothing deeper than a few steps is
+/// followed, which is more than a constant expression in a kernel header ever is.
 fn constant(func: &Func, value: Value) -> Option<Imm> {
+    folded(func, value, 8)
+}
+
+/// [`constant`], at most `depth` instructions down.
+fn folded(func: &Func, value: Value, depth: u32) -> Option<Imm> {
     let Def::Result { inst, .. } = func[value].def else { return None };
-    if func[inst].opcode != Opcode::IConst {
+    let ty = func[value].ty;
+    let opcode = func[inst].opcode;
+    if opcode == Opcode::IConst {
+        let Extra::Imm(imm) = func[inst].extra else { return None };
+        return Some(func[imm]);
+    }
+    if depth == 0 || !ty.is_int() || ty.lanes() != 1 {
         return None;
     }
-    let Extra::Imm(imm) = func[inst].extra else { return None };
-    Some(func[imm])
+    let args = &func[func[inst].args];
+    let at = |n: usize| -> Option<(Imm, Type)> {
+        let &arg = args.get(n)?;
+        Some((folded(func, arg, depth - 1)?, func[arg].ty))
+    };
+    let bits = ty.bits();
+    let wide = match opcode {
+        Opcode::SExt => {
+            let (a, from) = at(0)?;
+            a.signed(from)
+        }
+        Opcode::ZExt | Opcode::Trunc => i128::try_from(at(0)?.0.unsigned()).ok()?,
+        Opcode::Add | Opcode::Sub | Opcode::Mul | Opcode::And | Opcode::Or | Opcode::Xor => {
+            let (a, b) = (at(0)?.0.signed(ty), at(1)?.0.signed(ty));
+            match opcode {
+                Opcode::Add => a.wrapping_add(b),
+                Opcode::Sub => a.wrapping_sub(b),
+                Opcode::Mul => a.wrapping_mul(b),
+                Opcode::And => a & b,
+                Opcode::Or => a | b,
+                _ => a ^ b,
+            }
+        }
+        Opcode::Shl => {
+            let shift = u32::try_from(at(1)?.0.unsigned()).ok().filter(|&n| n < bits)?;
+            at(0)?.0.signed(ty) << shift
+        }
+        _ => return None,
+    };
+    Some(Imm::int(wide, ty))
 }
 
 /// What the dividend holds, from the widening it came out of if it came out of one.

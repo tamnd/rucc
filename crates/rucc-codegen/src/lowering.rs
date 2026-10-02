@@ -130,6 +130,15 @@ pub enum Step {
     ///
     /// Above the splitting for the reason the byte reversal is.
     Counts,
+    /// A division or remainder by a constant, as a multiply by its reciprocal and a shift.
+    ///
+    /// Below the widths, so every division it sees is at a width the machine has, and a widening
+    /// the step above wrote in front of one is a range it can read like any other.
+    ///
+    /// Above the splitting, so that a power of two or an exact division wider than a register,
+    /// which is shifts or a multiply at its own width, is split with everything else rather than
+    /// becoming the call the splitting writes for a division.
+    Divisions,
     /// An integer wider than a register, as the two halves of one.
     ///
     /// Below the width legalisation and not part of it, because the two go in opposite
@@ -137,11 +146,6 @@ pub enum Step {
     /// hundred and twenty eight becomes two of sixty four here. Neither step touches a value at
     /// the other's width, so a function holding both is one each of them still works on.
     Halves,
-    /// A division or remainder by a constant, as a multiply by its reciprocal and a shift.
-    ///
-    /// Below the widths, so every division it sees is at a width the machine has, and a widening
-    /// the step above wrote in front of one is a range it can read like any other.
-    Divisions,
     /// Anything at all at the quad float format, as a call to the routine for it.
     ///
     /// Above the float rewriting rather than part of it, because the two are written about
@@ -180,8 +184,8 @@ impl Step {
         Self::Widths,
         Self::Bytes,
         Self::Counts,
-        Self::Halves,
         Self::Divisions,
+        Self::Halves,
         Self::Quads,
         Self::Floats,
         Self::Bulk,
@@ -620,8 +624,10 @@ mod tests {
                 // become instead.
                 "bytes",
                 "counts",
-                "halves",
+                // Ahead of the splitting, so a division by a power of two wider than a register is
+                // shifts the splitting takes in halves rather than a call it writes.
                 "divisions",
+                "halves",
                 "quads",
                 "floats",
                 "bulk",
