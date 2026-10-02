@@ -178,6 +178,7 @@ pub static SYSV: CallRegs = CallRegs {
     // Sixteen, which is what the psABI has said since gcc started assuming it, and what glibc's
     // own vector code on this target counts on.
     stack_align: 16,
+    trusted_align: 16,
     return_address: 4,
     word: 4,
     total_store_order: true,
@@ -371,9 +372,10 @@ pub static SYSV_PIC: CallRegs = CallRegs { int_order: &SYSV_PIC_INT_ORDER, ..SYS
 /// one, two, four or eight bytes comes back in registers, and the caller pops the address of a
 /// result returned through memory.
 ///
-/// Sixteen byte alignment at a call is what gcc for this target keeps and assumes, and a vector it
-/// spills lands on a sixteen byte boundary of a frame it never realigns, so a function of this
-/// compiler can count on the same when a gcc function calls it.
+/// Sixteen byte alignment at a call is what gcc for this target keeps, and so does this compiler.
+/// What a function counts on at entry is less, because Windows only promises four and a callback
+/// from a DLL Microsoft's compiler built arrives on four. A frame with a sixteen byte spill or local
+/// realigns itself, as gcc's does with SSE on. See [`CallRegs::trusted_align`].
 ///
 /// There is no canary and no profiling hook for the reasons [`crate::x86_64::WIN64`] gives, and a
 /// frame larger than a page is reached through mingw's routine for it, which leaves the stack
@@ -386,6 +388,7 @@ pub static MINGW32: CallRegs = CallRegs {
     // and that is the same symbol libgcc defines for x86-64 where no underscore is added.
     chkstk: Some(Chkstk { name: "__chkstk_ms", size: EAX, shift: 0, moves: false }),
     conventions: Conventions(&MINGW32_CONVENTIONS),
+    trusted_align: 8,
     ..SYSV
 };
 
@@ -697,12 +700,24 @@ mod tests {
             assert_eq!(regs.x87_returns, SYSV.x87_returns, "{}", abi.name);
             assert_eq!(regs.int_saved, SYSV.int_saved, "{}", abi.name);
             assert_eq!(regs.stack_align, 16, "{}", abi.name);
+            assert_eq!(regs.trusted_align, 8, "{}: Windows promises four", abi.name);
             assert!(regs.guard.is_none() && regs.trace.is_none(), "{}", abi.name);
         }
         let mingw = MINGW32.chkstk.expect("mingw's routine");
         assert_eq!((mingw.name, mingw.size, mingw.moves), ("__chkstk_ms", EAX, false));
         let msvc = MSVC32.chkstk.expect("Microsoft's routine");
         assert_eq!((msvc.name, msvc.size, msvc.moves), ("_chkstk", EAX, true));
+    }
+
+    #[test]
+    fn a_stack_boundary_moves_what_a_function_counts_on_only_where_it_matched() {
+        assert_eq!(SYSV.aligned_to(32).trusted_align, 32, "a caller is held to the new boundary");
+        assert_eq!(SYSV.aligned_to(4).trusted_align, 4);
+        for regs in [&MINGW32, &MINGW32_STDCALL, &MINGW32_FASTCALL, &MSVC32, &MSVC32_STDCALL] {
+            assert_eq!(regs.trusted_align, 8, "{}", regs.abi.name);
+            assert_eq!(regs.aligned_to(32).trusted_align, 8, "{}: Windows still promises four", regs.abi.name);
+            assert_eq!(regs.aligned_to(4).trusted_align, 4, "{}", regs.abi.name);
+        }
     }
 
     #[test]
