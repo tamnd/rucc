@@ -546,15 +546,14 @@ fn full(word: &str, args: &[String], mode: Mode) -> Result<Written, String> {
 /// opcodes that pushed them on thirty two bits are not instructions on sixty four.
 fn segmented(word: &str, operands: &[Operand], mode: Mode) -> Result<Option<Written>, String> {
     let [Operand::Seg(segment)] = operands else { return Ok(None) };
+    if mode == Mode::Bits32 {
+        return stacked_i386(word, *segment).transpose();
+    }
     let way = match word {
         "push" | "pushq" => "pushq",
         "pop" | "popq" => "popq",
         _ => return Ok(None),
     };
-    // Thirty two bit mode has all six under other names, and none of them is written yet.
-    if mode == Mode::Bits32 {
-        return Err(format!("'{word} %{}' is not written for i386 yet", segment.name()));
-    }
     if !matches!(segment, Segment::Fs | Segment::Gs) {
         return Err(format!(
             "'{word} %{}' is not an instruction in long mode, which pushes and pops fs and gs only",
@@ -565,6 +564,45 @@ fn segmented(word: &str, operands: &[Operand], mode: Mode) -> Result<Option<Writ
     let mnemonic = format!("{way} %{}", segment.name());
     encode_masked(&mnemonic, &[], Opmask::default(), &mut bytes).map_err(|why| why.to_string())?;
     Ok(Some(Written { bytes, holes: Vec::new() }))
+}
+
+/// A push or a pop of a segment register in thirty two bit mode, where all six are pushed and
+/// every one but `cs` is popped. `es`, `cs`, `ss` and `ds` each have a byte of their own from the
+/// 8086, and `fs` and `gs` came with the 386 behind `0f`. A `w` suffix moves a word rather than a
+/// doubleword, which is the operand size prefix in front. The kernel's `SAVE_ALL` pushes `fs`,
+/// `es` and `ds` into `pt_regs` and `RESTORE_REGS` pops them back.
+fn stacked_i386(word: &str, segment: Segment) -> Option<Result<Written, String>> {
+    let (push, narrow) = match word {
+        "push" | "pushl" => (true, false),
+        "pushw" => (true, true),
+        "pop" | "popl" => (false, false),
+        "popw" => (false, true),
+        _ => return None,
+    };
+    let code: &[u8] = match (segment, push) {
+        (Segment::Es, true) => &[0x06],
+        (Segment::Es, false) => &[0x07],
+        (Segment::Cs, true) => &[0x0e],
+        (Segment::Cs, false) => {
+            return Some(Err(format!(
+                "'{word} %cs' is not an instruction, since cs is not popped"
+            )));
+        }
+        (Segment::Ss, true) => &[0x16],
+        (Segment::Ss, false) => &[0x17],
+        (Segment::Ds, true) => &[0x1e],
+        (Segment::Ds, false) => &[0x1f],
+        (Segment::Fs, true) => &[0x0f, 0xa0],
+        (Segment::Fs, false) => &[0x0f, 0xa1],
+        (Segment::Gs, true) => &[0x0f, 0xa8],
+        (Segment::Gs, false) => &[0x0f, 0xa9],
+    };
+    let mut bytes = Vec::with_capacity(3);
+    if narrow {
+        bytes.push(0x66);
+    }
+    bytes.extend_from_slice(code);
+    Some(Ok(Written { bytes, holes: Vec::new() }))
 }
 
 /// Whether the operand is the general purpose register of that number and width.
@@ -1668,6 +1706,34 @@ mod tests {
         one(word, &args)
             .err()
             .unwrap_or_else(|| panic!("'{line}' was read and should not have been"))
+    }
+
+    /// The six segment registers pushed and popped on i386, which `SAVE_ALL` and `RESTORE_REGS`
+    /// in the kernel's `entry_32.S` write, with the bytes gas gives each.
+    #[test]
+    fn i386_pushes_and_pops_every_segment_register() {
+        let lines: &[(&str, &[u8])] = &[
+            ("pushl %es", &[0x06]),
+            ("popl %es", &[0x07]),
+            ("push %cs", &[0x0e]),
+            ("pushl %ss", &[0x16]),
+            ("popl %ss", &[0x17]),
+            ("pushl %ds", &[0x1e]),
+            ("pop %ds", &[0x1f]),
+            ("pushl %fs", &[0x0f, 0xa0]),
+            ("popl %fs", &[0x0f, 0xa1]),
+            ("pushl %gs", &[0x0f, 0xa8]),
+            ("popl %gs", &[0x0f, 0xa9]),
+            ("pushw %fs", &[0x66, 0x0f, 0xa0]),
+            ("popw %ds", &[0x66, 0x1f]),
+        ];
+        for &(line, want) in lines {
+            let (word, rest) = line.split_once(' ').unwrap();
+            let written = one_in(word, &[rest.to_owned()], Mode::Bits32)
+                .unwrap_or_else(|why| panic!("{line}: {why}"));
+            assert_eq!(written.bytes, want, "{line}");
+        }
+        assert!(one_in("popl", &["%cs".to_owned()], Mode::Bits32).is_err());
     }
 
     #[test]

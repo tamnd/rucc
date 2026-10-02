@@ -26,6 +26,7 @@ All notable changes are recorded here. The format follows [Keep a Changelog](htt
 
 ### Fixed
 
+- The i386 assembler pushes and pops `%es`, `%cs`, `%ss`, `%ds`, `%fs` and `%gs`, with or without an `l` or `w` suffix, which the kernel's `SAVE_ALL` and `RESTORE_REGS` in `entry_32.S` write. The bytes match gas.
 - A division by zero is now `-Wdiv-by-zero` with a code of its own, E0812, so `#pragma GCC diagnostic ignored "-Wdiv-by-zero"` silences it. It used to share E0521 with implicit declarations and answer to no option, which made the kernel's deliberate `return 1/0;` in lib/math/div64.c fatal under `CONFIG_WERROR`.
 - A `long long` local register variable on i386, such as the kernel's `register u64 val asm("%eax")` in `put_user`, is the named register and the one gcc numbers after it, so `__put_user_8` gets `edx:eax` and `__get_user_8` gives back `ecx:edx`.
 - A `long long` handed to an i386 `asm` under a letter other than `A`, in a template that never names it, is now two operands, one for each half. The kernel's `__iter_div_u64_rem` and `OPTIMIZER_HIDE_VAR` write that, and the functions using them were refused.
