@@ -6,6 +6,7 @@ All notable changes are recorded here. The format follows [Keep a Changelog](htt
 
 ### Added
 
+- `#pragma GCC system_header` is implemented, as in gcc 13. The rest of the header it is in, from the pragma's line, is a system header: its warnings go unsaid unless `-Wsystem-headers` asks, a header it includes is one too, and a macro it defines is quiet where it is used. In the main file it is ignored with "`#pragma system_header` ignored outside include file" (W0337), which answers to no option. The line is consumed, as gcc consumes it. Before, it was taken without doing anything.
 - A `long long` that `__atomic` or `__sync` touches on i386 compiles to `lock cmpxchg8b`, as gcc does on a Pentium or later. This covers compare and exchange, ordered loads and stores, exchange, and every fetch-and-op, at every level and under PIC. Before, each of these was refused with "no rule lowers a `cmpxchg` producing a `i64`".
 - `rucc --dlltool -m i386` writes an import library without `-k` too (#2072). The program still links against the decorated name, `_f@8` for a stdcall `f@8` in the `.def` file, so a declaration that leaves out the `@N` is a link error. Without `-k` the DLL is asked for `f@8`, which is what a DLL gcc linked without `--kill-at` exports. With `-k` it is asked for `f`, as before. `rucc-stub` has the choice as `coff::write_as` with `Decoration::Kept` or `Decoration::Cut`. Each import member is byte for byte the one `llvm-dlltool` 18 writes for the same command line.
 - `simplify` no longer leaves a pointer compared with an `i64` when an edge of type rule rewrites a comparison against a constant address such as `p < (char *)-1`. The new bound is put back behind an `inttoptr`, so `-Zverify-each` is clean on SQLite at `-O2` and `-O3` again.
@@ -26,6 +27,7 @@ All notable changes are recorded here. The format follows [Keep a Changelog](htt
 
 ### Fixed
 
+- `#warning` in a system header is said, as gcc says it there, rather than dropped with the header's other warnings.
 - The i386 assembler pushes and pops `%es`, `%cs`, `%ss`, `%ds`, `%fs` and `%gs`, with or without an `l` or `w` suffix, which the kernel's `SAVE_ALL` and `RESTORE_REGS` in `entry_32.S` write. The bytes match gas.
 - A division by zero is now `-Wdiv-by-zero` with a code of its own, E0812, so `#pragma GCC diagnostic ignored "-Wdiv-by-zero"` silences it. It used to share E0521 with implicit declarations and answer to no option, which made the kernel's deliberate `return 1/0;` in lib/math/div64.c fatal under `CONFIG_WERROR`.
 - A `long long` local register variable on i386, such as the kernel's `register u64 val asm("%eax")` in `put_user`, is the named register and the one gcc numbers after it, so `__put_user_8` gets `edx:eax` and `__get_user_8` gives back `ecx:edx`.

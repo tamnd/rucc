@@ -123,7 +123,7 @@ const QUIET: &[(&str, &str)] = &[
 /// The warnings that answer to no option and are not pedantic either, so `-pedantic-errors`
 /// leaves them warnings, as gcc 13 does: `#pragma once` in the main file, and the text of a
 /// `#pragma GCC warning`.
-const PLAIN: &[&str] = &["W0332", "W0335", "W0336"];
+const PLAIN: &[&str] = &["W0332", "W0335", "W0336", "W0337"];
 
 /// The gcc option that controls the warning with this code, if it has one.
 pub fn option_of(code: &str) -> Option<&'static str> {

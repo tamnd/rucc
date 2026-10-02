@@ -18,7 +18,7 @@ use std::path::{Path, PathBuf};
 
 use rucc_base::hash::{Map, Set};
 use rucc_base::{Interner, Symbol};
-use rucc_diag::{Diagnostic, FileId, SourceMapFull, Span};
+use rucc_diag::{Diagnostic, FileId, SourceMap, SourceMapFull, Span};
 use rucc_gnu::Kind;
 use rucc_lex::{Options, PpToken, PpTokenKind, Punct, TokenFlags, tokenize};
 use rucc_session::{Found, IncludeForm, PrefixMap, Preinclude};
@@ -632,7 +632,8 @@ impl Preprocessor {
             // migrate later.
             if rest.len() == 1 && ident_of(&rest[0]) == Some(names.once) {
                 self.pragma_once(rest[0].span);
-            } else if !self.macro_stack_pragma(rest, hash, interner, names)
+            } else if !self.system_header_pragma(rest, hash, cx.sources, interner)
+                && !self.macro_stack_pragma(rest, hash, interner, names)
                 && !self.message_pragma(rest, None, interner, names)
                 && !self.poison_pragma(rest, None, interner)
             {
@@ -747,6 +748,39 @@ impl Preprocessor {
         } else {
             Diagnostic::warning(text, span).with_code("W0335")
         });
+        true
+    }
+
+    /// Answers `#pragma GCC system_header`, or says it is not one.
+    ///
+    /// The rest of the header it is in, from the line of the pragma, is a system header from
+    /// then on: its warnings go unsaid, a header it includes is one too, and a macro it defines
+    /// is quiet where it is used, as for a header found in a system directory. In the main file
+    /// gcc ignores it with a warning that answers to no option. Either way the line is consumed,
+    /// as gcc consumes it. What follows the word is not looked at, as there.
+    fn system_header_pragma(
+        &mut self,
+        rest: &[PpToken],
+        hash: Span,
+        sources: &mut SourceMap,
+        interner: &Interner,
+    ) -> bool {
+        let [gcc, word, ..] = rest else { return false };
+        let spelled = |token: &PpToken| ident_of(token).map(|name| interner.resolve(name));
+        if spelled(gcc) != Some("GCC") || spelled(word) != Some("system_header") {
+            return false;
+        }
+        if self.stack.len() <= 1 {
+            self.diagnostics.push(
+                Diagnostic::warning(
+                    "`#pragma system_header` ignored outside include file",
+                    word.span,
+                )
+                .with_code("W0337"),
+            );
+        } else if let Some(file) = sources.lookup_file(hash.lo) {
+            sources.mark_system_from(file, hash.lo);
+        }
         true
     }
 
