@@ -33,6 +33,7 @@ A patch release, and the one that reaches crates.io in place of 0.18.9, whose re
 
 ### Fixed
 
+- `va_start` works in a variadic function under `-mregparm`. Such a function is `regparm(0)`, and lowering took any convention but the default as foreign and set up no list, so every `printk` style function in a 32 bit kernel unit was refused.
 - A `_BitInt` of a width no register has can be a parameter, a return value, a call argument and a `va_arg` on x86-64 Linux, where it used to stop code generation with E0653 (#425). It travels in the register that holds it with nothing promised above its own bits, which is what the psABI says and what gcc 16 does from its side. A `_BitInt` wider than sixty four bits travels as two words aligned to eight, so it lands where gcc puts it when it goes on the stack, which is not where an `__int128` goes. Other targets still refuse it by name until their own rules are written.
 - A vector of eight or sixteen bytes crosses a call on x86-64 in one xmm register, as the System V psABI says and as gcc does, rather than in general purpose registers lane by lane, so a function built by rucc and a caller built by gcc agree about a `__m128` or a `vector_size(8)` argument and result, including one inside a structure or passed through `...` (#1140).
 - `-pedantic-errors` no longer makes an error of `#pragma once` in the main file, which gcc 13 leaves a warning since it answers to no option and is not pedantic.
