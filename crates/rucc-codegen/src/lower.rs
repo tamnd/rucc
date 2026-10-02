@@ -1952,7 +1952,9 @@ impl<'a> Lowering<'a> {
                         self.spelled(inst)?;
                         continue;
                     }
-                    if !std::ptr::eq(self.selector.shapes, &x86_64::MACHINE) {
+                    if !std::ptr::eq(self.selector.shapes, &x86_64::MACHINE)
+                        && !std::ptr::eq(self.selector.shapes, &rucc_target::x86::MACHINE)
+                    {
                         return Err(self.unsupported(inst));
                     }
                     if self.touches_x87(inst) {
@@ -4896,7 +4898,10 @@ impl<'a> Lowering<'a> {
         // So does an `asm goto` with instructions in it, whose jumps go to blocks the layout has
         // not placed yet and so are written as text the listing fills in. See [`Self::kept`].
         let clobbers = self.names.resolve(info.clobbers);
-        if goto || clobbers.split(',').any(|entry| vector_named(entry).is_some()) {
+        // On i386 every template is kept, since the reader below is x86-64's and would take a
+        // template's registers for the sixty four bit ones.
+        let i386 = std::ptr::eq(self.selector.shapes, &rucc_target::x86::MACHINE);
+        if goto || i386 || clobbers.split(',').any(|entry| vector_named(entry).is_some()) {
             return self.kept(inst, &template, &list, &widths, &memory);
         }
         let steps = if template.trim().is_empty() {
