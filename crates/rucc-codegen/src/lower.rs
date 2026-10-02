@@ -280,6 +280,11 @@ impl Off {
 /// It reads the values rather than the types the program declared. A structure with a `double` in
 /// it is copied as bytes and asks for no vector register, which is what gcc does too.
 ///
+/// `stacked` is whether every float is on the x87 stack, which is i386, where there are no vector
+/// registers to keep one in. The kernel there takes the stack away with `-msoft-float`, and gcc
+/// would then call the library for every float, which a kernel does not link, so refusing the
+/// function is the same build failing sooner.
+///
 /// `x87_return` is `-mno-fp-ret-in-387` read the other way round. The kernel's display code turns
 /// the x87 stack back on with `-mhard-float` and leaves that flag in place, so a `long double` may
 /// be computed with and not returned, and gcc refuses only a function that returns one.
@@ -292,10 +297,12 @@ pub fn off_registers(
     vector: bool,
     x87: bool,
     x87_return: bool,
+    stacked: bool,
 ) -> Result<(), Unsupported> {
     if vector && x87 && x87_return {
         return Ok(());
     }
+    let on_x87 = |ty: Type| on_x87(ty) || (stacked && ty.is_scalar() && ty.is_float());
     let signature = source.signature();
     for ret in &signature.returns {
         if x87 && !x87_return && on_x87(ret.ty) {
