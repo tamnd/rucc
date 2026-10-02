@@ -122,6 +122,7 @@ pub mod frequency;
 pub mod frontier;
 pub mod fuel;
 pub mod gate;
+pub mod gcm;
 pub mod header_copy;
 pub mod heap;
 pub mod hoist;

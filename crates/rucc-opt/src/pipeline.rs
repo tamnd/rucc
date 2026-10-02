@@ -418,6 +418,7 @@ const O2: &[&str] = &[
     "coalesce",
     "plane-sink",
     "dce",
+    "gcm",
     "loop-delete",
     "adce",
 ];
@@ -473,6 +474,7 @@ const O3: &[&str] = &[
     "coalesce",
     "plane-sink",
     "dce",
+    "gcm",
     "loop-delete",
     "adce",
 ];
