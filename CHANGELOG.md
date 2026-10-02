@@ -17,6 +17,7 @@ All notable changes are recorded here. The format follows [Keep a Changelog](htt
 
 ### Fixed
 
+- A sixteen byte vector read or written through a type aligned to less than sixteen bytes is `movups` on x86-64 and i386, so `_mm_loadu_si128` and `_mm_storeu_si128` work at any address again. Since 0.18.10 such a vector has been a value in one xmm register, and its reads and writes were `movaps`, which faults on an address that is not a multiple of sixteen. Postgres initdb segfaulted this way, in the radix tree search in `tidstore.c`. A spill still uses `movaps`, since the frame aligns its own slots.
 - An i386 Windows object now carries `@feat.00` with bit 0 set, the way clang and MSVC write it, so `lld-link /safeseh` links it rather than refusing it as not safe for SafeSEH. The `-S` listing says it too, with the `.set @feat.00, 1` line clang writes. rucc installs no exception handlers on i386, so the empty handler list the bit stands for is true of every object it writes.
 
 ## 0.18.10

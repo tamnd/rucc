@@ -2372,6 +2372,9 @@ pub static INSTS: &[(&str, Form)] = &[
     ("movaps_rr", MoveVec),
     ("movaps_rm", LoadVec),
     ("movaps_mr", StoreVec),
+    // A program's own read and write of a whole register's value, which may not be aligned.
+    ("movups_rm", LoadVec),
+    ("movups_mr", StoreVec),
     // Reading one value out of memory and writing one back, which is the same two shapes as the
     // spill and the reload above and a different instruction: those move a whole register because
     // a spill slot holds whatever was in it, and these move exactly the width of the value because

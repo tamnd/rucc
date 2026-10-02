@@ -766,15 +766,20 @@ mod tests {
     ///
     /// A prologue, an epilogue, a copy, a spill and a reload are not in the program. They are what
     /// the allocator's answer costs, so they are written after it, by `crate::finish` reading
-    /// `x86_64::FRAME`. Six of the names that describes are already reachable from a rule, since a
-    /// prologue taking its frame is a subtraction and a spill is a store, and those are not here:
-    /// this is only the ones nothing else can reach.
+    /// `x86_64::FRAME`. Four of the names that describes are already reachable from a rule, since a
+    /// prologue taking its frame is a subtraction and a spill of a word is a store, and those are
+    /// not here: this is only the ones nothing else can reach.
     const FRAME: &[&str] = &[
         "push_64",
         "pop_64",
         "ret",
         "mov_rr_64",
         "movaps_rr",
+        // The spill and the reload of a vector register. A program's own read and write of a
+        // whole register's value is `movups`, since that value may not be aligned, and only the
+        // frame knows its slot is.
+        "movaps_rm",
+        "movaps_mr",
         // The touch a probing prologue puts on each page as it reaches it, the landing pad a
         // prologue opens with, and the byte that does nothing which one reserves room with. All
         // three are written by a frame and none on a command line that did not ask for it.
@@ -917,10 +922,10 @@ mod tests {
         // And the two an interrupt handler's frame writes, options for the same reason again.
         written.extend(frame.iret);
         written.extend(frame.clear_direction);
-        // What is left after the ones a rule already reaches, which are the loads and the stores of
-        // both register files, since those are the same instructions a program's own reads and
-        // writes of memory are. The vector pair joined them with the rules for a quad float, and a
-        // spill of one is now the same instruction as a program reading a `_Float128` variable.
+        // What is left after the ones a rule already reaches, which are the load and the store of
+        // a word, since those are the same instructions a program's own reads and writes of memory
+        // are. The vector pair is not, because a program's read of a whole vector register's value
+        // may not be aligned and a spill slot always is.
         written.retain(|opcode| !heads().contains(&format!("{PREFIX}{opcode}").as_str()));
         assert_eq!(written, FRAME);
     }

@@ -961,7 +961,7 @@
                (result))))
 
 (rule (lower (load.f128 (value.i32 a)))
-      (x64.movaps_rm (amode_base a))
+      (x64.movups_rm (amode_base a))
       (spec (= (float_from_bits 128
                        (concat (select (mem) (bvadd a 15)) (select (mem) (bvadd a 14))
                                (select (mem) (bvadd a 13)) (select (mem) (bvadd a 12))
@@ -974,7 +974,7 @@
                (result))))
 
 (rule (lower (load.f128 (add.i32 (value.i32 a) (iconst.i32 k))))
-      (x64.movaps_rm (amode_base_offset a k))
+      (x64.movups_rm (amode_base_offset a k))
       (spec (= (float_from_bits 128
                        (concat (select (mem) (bvadd (bvadd a k) 15)) (select (mem) (bvadd (bvadd a k) 14))
                                (select (mem) (bvadd (bvadd a k) 13)) (select (mem) (bvadd (bvadd a k) 12))
@@ -987,7 +987,7 @@
                (result))))
 
 (rule (lower (store.f128 (value.f128 v) (value.i32 a)))
-      (x64.movaps_mr (amode_base a) v)
+      (x64.movups_mr (amode_base a) v)
       (spec (= (store (store (store (store (store (store (store (store (store (store (store (store (store (store (store (store (mem)
                              a (extract 7 0 (bits_from_float 128 v)))
                              (bvadd a 1) (extract 15 8 (bits_from_float 128 v)))
@@ -1008,7 +1008,7 @@
                (result))))
 
 (rule (lower (store.f128 (value.f128 v) (add.i32 (value.i32 a) (iconst.i32 k))))
-      (x64.movaps_mr (amode_base_offset a k) v)
+      (x64.movups_mr (amode_base_offset a k) v)
       (spec (= (store (store (store (store (store (store (store (store (store (store (store (store (store (store (store (store (mem)
                              (bvadd a k) (extract 7 0 (bits_from_float 128 v)))
                              (bvadd (bvadd a k) 1) (extract 15 8 (bits_from_float 128 v)))
