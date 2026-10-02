@@ -4,6 +4,10 @@ All notable changes are recorded here. The format follows [Keep a Changelog](htt
 
 ## Unreleased
 
+### Changed
+
+- The simplifier makes the rule matcher's two lists once per run rather than for every table and plan it tries on every instruction, which takes about 3% off an optimized build of jtckdint when it goes through the portable code rather than `<stdckdint.h>` (#2649).
+
 ## 0.18.10
 
 A patch release, and the one that reaches crates.io in place of 0.18.9, whose release run stopped on the gate. A `_BitInt` of any width now crosses a call on x86-64 Linux where gcc 16 puts it, and an eight or sixteen byte vector crosses in one xmm register, so code built by rucc and code built by gcc agree at the boundary for both. On 32 bit x86, `-m32`, `-m64` and `-m16` pick the machine as gcc does and `-mregparm=` and `regparm(n)` pass the first words in registers. The pragmas `GCC warning`, `GCC error` and `message` are said, `-Wunknown-pragmas` is implemented, `-finline-small-functions` is on at `-O2`, the assembler reads `.code16`, `sccp` follows the alignment of addresses, and the register allocator, scheduler, frame layout and instruction selection are a little faster.
