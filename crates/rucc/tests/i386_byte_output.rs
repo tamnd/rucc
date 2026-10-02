@@ -23,13 +23,33 @@ int g(unsigned long long *p, unsigned long long o, unsigned long long n) {
 }
 ";
 
+/// Four inputs that only ask for a register, which fill the four with a low byte before the
+/// output is placed, as a comparison of four values does.
+const FOUR: &str = "\
+_Bool t(long a, long b, long c, long d, long *p) {
+  _Bool r;
+  asm(\"cmpl %1,%2\" : \"=@cce\"(r) : \"r\"(a), \"r\"(b), \"r\"(c), \"r\"(d));
+  *p = a + b + c + d;
+  return r;
+}
+";
+
 fn listing(level: &str) -> String {
-    let dir = std::env::temp_dir().join(format!("rucc-i386-byte-{}{level}", std::process::id()));
+    listing_of(SOURCE, level)
+}
+
+fn listing_of(source: &str, level: &str) -> String {
+    let dir = std::env::temp_dir().join(format!(
+        "rucc-i386-byte-{}{}",
+        std::process::id(),
+        level.replace(' ', "")
+    ));
     std::fs::create_dir_all(&dir).expect("a temporary directory can be created");
     let path = dir.join("one.c");
-    std::fs::write(&path, SOURCE).expect("the fixture can be written");
+    std::fs::write(&path, source).expect("the fixture can be written");
     let out = Command::new(env!("CARGO_BIN_EXE_rucc"))
-        .args(["--target=i686-unknown-linux-gnu", "-fno-pic", level, "-S", "-o", "-"])
+        .args(["--target=i686-unknown-linux-gnu", "-fno-pic", "-S", "-o", "-"])
+        .args(level.split_whitespace())
         .arg(&path)
         .output()
         .expect("the compiler is built before its own tests run");
@@ -49,5 +69,17 @@ fn the_byte_output_shares_a_register_with_an_input() {
             text.contains(&format!("{name} %bl")) || text.contains(&format!("{name} %cl"))
         };
         assert!(set("setz") && set("sete"), "{level}:\n{text}");
+    }
+}
+
+#[test]
+fn the_byte_output_shares_with_an_input_when_inputs_fill_the_four() {
+    for level in ["-O0", "-O2"] {
+        for regparm in ["-mregparm=0", "-mregparm=3"] {
+            let text = listing_of(FOUR, &format!("{level} {regparm}"));
+            for byteless in ["%sil", "%dil", "%bpl", "%spl"] {
+                assert!(!text.contains(byteless), "{level} {regparm}: {byteless}:\n{text}");
+            }
+        }
     }
 }
