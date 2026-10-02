@@ -29,6 +29,7 @@ All notable changes are recorded here. The format follows [Keep a Changelog](htt
 
 ### Fixed
 
+- The backtracking allocator no longer takes a register an instruction insists on as a hint when the class does not hand it out; an i386 `"S"` operand used to keep its value in `esi` from the start, where reloads wrote over it, and the EFI stub's `efi_stub_entry` lost `boot_params`.
 - A `switch` on i386 builds its bit test masks and jump table index in a 32 bit word, and position independent i386 code writes no jump table; the EFI stub's `memparse` and `vsnprintf` no longer stop on a `zext.i32.i64`.
 - An i386 `q` output whose value is kept on the stack is written to a register with a low byte rather than through `esi`; fs/buffer.c no longer stops on `setne %sil`.
 - `__builtin_mul_overflow` and its kin on i386 with a signed and an unsigned `long long` are checked at 64 bits, since i386 has no `__int128` to widen into; fs/buffer.c no longer stops on a 128 bit `zext`.
