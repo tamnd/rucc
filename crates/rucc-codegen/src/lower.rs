@@ -529,6 +529,10 @@ fn bytes_pinned(
 /// `sete %sil` is not an instruction i386 has. An output not written early may share a register
 /// with an input, which is what gcc does, so the output and an input that only asks for a register
 /// are pinned to the same free register.
+///
+/// When there is room the output is still pinned, to the first free register with a low byte. An
+/// output the allocator keeps on the stack is otherwise written through the scratch register,
+/// which is `esi`, and fs/buffer.c reads `buffer_uptodate` into one of those.
 fn shared_with_input(
     pins: &mut [Option<(PhysReg, RegClass)>],
     list: &[AsmOperand<'_>],
@@ -557,10 +561,11 @@ fn shared_with_input(
         let free: Vec<PhysReg> =
             BYTE_REGS.iter().copied().filter(|&reg| !taken(reg, pins)).collect();
         let wanted = (0..list.len()).filter(|&index| in_register(index, pins)).count();
-        if wanted <= free.len() {
-            return;
-        }
         let Some(&reg) = free.first() else { return };
+        if wanted <= free.len() {
+            pins[output] = Some((reg, gpr));
+            continue;
+        }
         let Some(input) = (0..list.len()).find(|&index| in_register(index, pins) && plain(index))
         else {
             return;
