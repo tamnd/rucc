@@ -16,10 +16,10 @@ fn fixture() -> PathBuf {
         (
             "h.h",
             "int before = 1 << 40;\n#pragma GCC system_header\nint after = 1 << 40;\n\
-             #warning said\n#define BIG (1 << 40)\n#include \"inner.h\"\n",
+             #warning said\n#include \"inner.h\"\n",
         ),
         ("inner.h", "int inner = 1 << 40;\n"),
-        ("m.c", "#include \"h.h\"\n#pragma GCC system_header\nint big = BIG;\n"),
+        ("m.c", "#include \"h.h\"\n#pragma GCC system_header\nint big = 1 << 40;\n"),
     ];
     for (name, text) in files {
         std::fs::write(dir.join(name), text).expect("the fixture can be written");
@@ -64,6 +64,7 @@ fn the_rest_of_the_header_is_quiet_and_the_main_file_is_told_the_pragma_does_not
             format!("h.h:1: {shift}"),
             "h.h:4: said".to_owned(),
             "m.c:2: `#pragma system_header` ignored outside include file".to_owned(),
+            format!("m.c:3: {shift}"),
         ]
     );
     assert_eq!(

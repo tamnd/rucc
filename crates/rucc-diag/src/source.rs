@@ -603,8 +603,7 @@ pub fn dropped(
     if diag.severity != Severity::Warning {
         return false;
     }
-    !warnings
-        || (!system_headers && diag.code != Some("W0331") && sources.is_system(diag.span.lo))
+    !warnings || (!system_headers && diag.code != Some("W0331") && sources.is_system(diag.span.lo))
 }
 
 #[cfg(test)]
