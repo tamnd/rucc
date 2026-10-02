@@ -2868,6 +2868,27 @@ pub fn parse_args(args: &[String]) -> Result<Action, CliError> {
                 },
                 _ => rucc_target::Isa::NONE,
             };
+            // The processors gcc gives no `cmov`, which came with the Pentium Pro. A kernel built
+            // for one of them is one that machine has to be able to run.
+            if opts.target.arch == rucc_target::Arch::X86 {
+                opts.cmov = !march.is_some_and(|name| {
+                    matches!(
+                        name,
+                        "i386"
+                            | "i486"
+                            | "i586"
+                            | "pentium"
+                            | "pentium-mmx"
+                            | "lakemont"
+                            | "k6"
+                            | "k6-2"
+                            | "k6-3"
+                            | "winchip-c6"
+                            | "winchip2"
+                            | "c3"
+                    )
+                });
+            }
         }
     }
     // The register files, now that the extensions are known. On x86-64 the vector registers are
