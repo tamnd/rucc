@@ -3409,8 +3409,15 @@ mod tests {
     #[test]
     fn an_i386_windows_object_says_it_is_safe_for_safeseh() {
         let write_for = |target: &TargetInfo| {
-            write(&calling("puts"), &Data::default(), &[], target, Output::default(), &Info::default())
-                .expect("an object")
+            write(
+                &calling("puts"),
+                &Data::default(),
+                &[],
+                target,
+                Output::default(),
+                &Info::default(),
+            )
+            .expect("an object")
         };
         let bytes = write_for(&i386_windows());
         let file = object::File::parse(&bytes[..]).expect("a readable object");
