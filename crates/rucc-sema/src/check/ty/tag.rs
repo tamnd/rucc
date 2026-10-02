@@ -932,10 +932,18 @@ impl Checker<'_> {
         let low = values.iter().map(|&(_, value, _)| value).min().unwrap_or(0);
         let high = values.iter().map(|&(_, value, _)| value).max().unwrap_or(0);
         let candidates: &[IntKind] = match (low >= 0, short || self.cx.short_enums) {
-            (true, false) => &[IntKind::UInt, IntKind::ULong],
-            (false, false) => &[IntKind::Int, IntKind::Long],
-            (true, true) => &[IntKind::UChar, IntKind::UShort, IntKind::UInt, IntKind::ULong],
-            (false, true) => &[IntKind::SChar, IntKind::Short, IntKind::Int, IntKind::Long],
+            (true, false) => &[IntKind::UInt, IntKind::ULong, IntKind::ULongLong],
+            (false, false) => &[IntKind::Int, IntKind::Long, IntKind::LongLong],
+            (true, true) => &[
+                IntKind::UChar,
+                IntKind::UShort,
+                IntKind::UInt,
+                IntKind::ULong,
+                IntKind::ULongLong,
+            ],
+            (false, true) => {
+                &[IntKind::SChar, IntKind::Short, IntKind::Int, IntKind::Long, IntKind::LongLong]
+            }
         };
         let mut chosen = self.types.int(candidates[candidates.len() - 1]);
         for &kind in candidates {
@@ -959,8 +967,11 @@ impl Checker<'_> {
             };
             return bounds(info);
         }
-        let signed = self.types.int(IntKind::Long);
-        let unsigned = self.types.int(IntKind::ULong);
+        // `long long` rather than `long`, which is the same width on an LP64 target and half of it on
+        // i386 and on Windows, where gcc still takes a sixty four bit enumerator. The i386 kernel's
+        // `perf_event.h` has `(__u64)-32` in one.
+        let signed = self.types.int(IntKind::LongLong);
+        let unsigned = self.types.int(IntKind::ULongLong);
         let low = match integer_info(&self.types, signed, self.cx.target) {
             Some(info) => bounds(info).0,
             None => i128::MIN,
