@@ -307,7 +307,12 @@ impl fmt::Debug for AttrSet {
 /// A function declared with `__attribute__((returns_twice))` is one as well, whatever it is called,
 /// and [`AttrSet::RETURNS_TWICE`] on its declaration is how that is known. The list is still here
 /// for a program that declares `setjmp` itself without the attribute, which gcc also allows.
-const TWICE: &[&str] = &["setjmp", "sigsetjmp", "savectx", "vfork", "getcontext"];
+///
+/// `_setjmp3` and `_setjmpex` are Microsoft's, which `setjmp` becomes on i386 and on x86-64 and
+/// AArch64 with `<setjmpex.h>`. Microsoft's headers declare them without any attribute, since its
+/// compiler knows them by name, so this has to as well.
+const TWICE: &[&str] =
+    &["setjmp", "sigsetjmp", "savectx", "vfork", "getcontext", "setjmp3", "setjmpex"];
 
 /// Whether a function by that name comes back more than once from a call however it was declared,
 /// so glibc's `__sigsetjmp` and `_setjmp` are and `longjmp` is not.
@@ -423,7 +428,10 @@ mod tests {
         for name in ["setjmp", "_setjmp", "__sigsetjmp", "sigsetjmp", "vfork", "getcontext"] {
             assert!(twice_by_name(name), "{name}");
         }
-        for name in ["longjmp", "siglongjmp", "setjmp_buf", "fork"] {
+        for name in ["_setjmp3", "_setjmpex"] {
+            assert!(twice_by_name(name), "{name}: Microsoft's");
+        }
+        for name in ["longjmp", "siglongjmp", "setjmp_buf", "fork", "_longjmpex"] {
             assert!(!twice_by_name(name), "{name}");
         }
     }

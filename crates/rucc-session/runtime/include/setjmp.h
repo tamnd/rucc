@@ -10,6 +10,13 @@
  * unless `_INC_SETJMPEX` says `<setjmpex.h>` has taken the name, so that is said for the length of
  * the include, and `_setjmp` is declared here with the two it has.
  *
+ * On i386 Microsoft's header spells it `_setjmp(buf)` as well, but cl.exe and clang call
+ * `_setjmp3(buf, 0)` for it instead: the C runtime's `longjmp` on i386 reads what `_setjmp3`
+ * recorded about the exception handlers that were registered, and the count after the buffer says
+ * how many more words follow for a function with handlers of its own, of which this compiler has
+ * none. mingw-w64's header makes the same call on i386, `_setjmp3((BUF), NULL)`. So this does
+ * the same after Microsoft's header, and declares `_setjmp3`, which that header does not.
+ *
  * Anywhere else the name belongs to the library, which already does what its compiler needs.
  */
 
@@ -25,4 +32,11 @@
 #undef _INC_SETJMPEX
 int __cdecl _setjmp(jmp_buf, void *) __attribute__((__returns_twice__));
 #define setjmp(buf) _setjmp((buf), __builtin_frame_address(0))
+#endif
+
+#if defined(_MSC_VER) && defined(_M_IX86) && !defined(__RUCC_SETJMP3_H) && defined(_INC_SETJMP)
+#define __RUCC_SETJMP3_H
+int __cdecl _setjmp3(jmp_buf, int, ...) __attribute__((__returns_twice__));
+#undef setjmp
+#define setjmp(buf) _setjmp3((buf), 0)
 #endif
