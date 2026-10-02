@@ -174,6 +174,12 @@ const O0: &[&str] = &["expect", "simplify-cfg"];
 /// leaves is a jump where a branch was and a block nothing reaches, and `simplify-cfg` is the pass
 /// that takes those out, so it has to run before it rather than after.
 ///
+/// From `-O2` up it runs a second time, after the redundant loads are one value. A loop that
+/// tests `i < t->num_targets` and then calls `dm_table_get_target`, whose `BUG_ON` tests
+/// `i >= t->num_targets`, reads the field twice, and until the two reads are one the ranges see
+/// two different values and the `BUG_ON` stays. gcc's value numbering runs before its last range
+/// pass for the same reason. The `simplify-cfg` after `ivopts` takes out what this leaves.
+///
 /// `canon` is where document 26's loop pipeline opens, so it goes after the value level passes and
 /// before the cleanup. It gives every loop a preheader, one latch, exits of its own and loop closed
 /// form, which is what lets the loop passes that follow it write `insert at the end of the
@@ -407,6 +413,7 @@ const O2: &[&str] = &[
     "fold",
     "simplify",
     "phiopt",
+    "prune",
     "hoist",
     "plane-sink",
     "split",
@@ -464,6 +471,7 @@ const O3: &[&str] = &[
     "fold",
     "simplify",
     "phiopt",
+    "prune",
     "hoist",
     "plane-sink",
     "split",
