@@ -141,7 +141,11 @@ pub struct SourceFile {
     /// whether a warning about something in it is worth printing: the person compiling cannot fix
     /// a header they did not write, so gcc says nothing about one unless `-Wsystem-headers` asks,
     /// and a project built with warnings as errors stops dead without that rule.
-    pub is_system: bool,
+    ///
+    /// Held as the position the system part starts at, which is the file's start for a file
+    /// found in a system directory and the line of the pragma for a header that says
+    /// `#pragma GCC system_header` partway down, as gcc has it.
+    pub system_from: Option<BytePos>,
     bytes: SourceBytes,
     /// Absolute offset of the first byte of each line. Built on first use, because most files
     /// in a build are never the subject of a diagnostic.
@@ -410,7 +414,7 @@ impl SourceMap {
             start,
             end,
             included_from,
-            is_system: false,
+            system_from: None,
             bytes,
             lines: OnceLock::new(),
             presumed: Vec::new(),
@@ -424,7 +428,16 @@ impl SourceMap {
     /// are about where the bytes came from and only one caller out of all of them knows the
     /// answer to this: the preprocessor, which did the search that found the file.
     pub fn mark_system(&mut self, id: FileId) {
-        self.files[id.index()].is_system = true;
+        let start = self.files[id.index()].start;
+        self.mark_system_from(id, start);
+    }
+
+    /// Records that `id` is a system header from `pos` to its end, which is what
+    /// `#pragma GCC system_header` says about the header it is in. An earlier start already
+    /// recorded stays.
+    pub fn mark_system_from(&mut self, id: FileId, pos: BytePos) {
+        let file = &mut self.files[id.index()];
+        file.system_from = Some(file.system_from.map_or(pos, |from| from.min(pos)));
     }
 
     /// Whether `pos` is in a file that came with the machine.
@@ -432,7 +445,7 @@ impl SourceMap {
     /// False for a position in no file, because a diagnostic nobody can point at is one nothing
     /// should be suppressing.
     pub fn is_system(&self, pos: BytePos) -> bool {
-        self.lookup_file(pos).is_some_and(|id| self.file(id).is_system)
+        self.lookup_file(pos).is_some_and(|id| self.file(id).system_from.is_some_and(|f| pos >= f))
     }
 
     /// Every file, in the order they were added.
@@ -574,7 +587,9 @@ impl SourceMap {
 /// `-Werror` the alternative is a build that stops on a line nobody in the project typed.
 ///
 /// An error is never dropped by either, whatever file it is in. A header that does not compile is
-/// still a translation unit that does not compile.
+/// still a translation unit that does not compile. Nor is `#warning` (W0331) dropped for being in
+/// a system header, because gcc says it there too: a header warns that way on purpose, about the
+/// way it is being used.
 ///
 /// This is asked in three places, which are the compiler, the preprocessor and the session, and it
 /// is one function rather than three copies because the two rules have to agree about which one
@@ -588,7 +603,7 @@ pub fn dropped(
     if diag.severity != Severity::Warning {
         return false;
     }
-    !warnings || (!system_headers && sources.is_system(diag.span.lo))
+    !warnings || (!system_headers && diag.code != Some("W0331") && sources.is_system(diag.span.lo))
 }
 
 #[cfg(test)]
@@ -627,6 +642,27 @@ mod tests {
 
         // A position in no file is nobody's header, so nothing about it is suppressed.
         assert!(!map.is_system(Span::DUMMY.lo));
+
+        // `#warning` is said wherever it is written.
+        let asked = Diagnostic::warning("asked for", here(ids[1])).with_code("W0331");
+        assert!(!dropped(&asked, &map, true, false));
+        assert!(dropped(&asked, &map, false, false));
+    }
+
+    #[test]
+    fn a_header_can_become_a_system_header_partway_down() {
+        let (mut map, ids) = map_with(&[("a.c", "ab"), ("h.h", "cdef")]);
+        let start = map.file(ids[1]).start;
+        map.mark_system_from(ids[1], start + 2);
+        assert!(!map.is_system(start + 1));
+        assert!(map.is_system(start + 2));
+        assert!(map.is_system(start + 3));
+        // A later pragma in the same header does not take back what an earlier one gave.
+        map.mark_system_from(ids[1], start + 3);
+        assert!(map.is_system(start + 2));
+        map.mark_system(ids[1]);
+        assert!(map.is_system(start));
+        assert!(!map.is_system(map.file(ids[0]).start + 1));
     }
 
     #[test]
