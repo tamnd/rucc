@@ -2930,13 +2930,14 @@ pub fn parse_args(args: &[String]) -> Result<Action, CliError> {
     let moved =
         guard_global || guard_reg.is_some() || guard_offset.is_some() || guard_symbol.is_some();
     let i386 = opts.target.arch == rucc_target::Arch::X86;
-    // A guard at a symbol in i386 position independent code is reached through `%ebx`, which the
-    // check in the epilogue runs after putting back. Nothing builds that, the kernel included, so
-    // it is refused rather than written wrong.
-    if i386 && opts.pic != Pic::Absolute && (guard_global || guard_symbol.is_some()) {
+    // A global guard in i386 position independent code is reached through `%ebx`, which the check
+    // in the epilogue runs after putting back. Nothing builds that, the kernel included, so it is
+    // refused rather than written wrong. A symbol read through a segment is not: gcc writes its
+    // address into the instruction whatever the position independence, and the kernel's probe
+    // for `%fs` runs with the compiler's default, which is PIE.
+    if i386 && opts.pic != Pic::Absolute && guard_global {
         return Err(err(
-            "a stack protector guard at a symbol is not supported in i386 position independent \
-             code"
+            "-mstack-protector-guard=global is not supported in i386 position independent code"
                 .to_owned(),
         ));
     }
@@ -2952,6 +2953,7 @@ pub fn parse_args(args: &[String]) -> Result<Action, CliError> {
             rucc_target::Guard { segment: None, symbol, table, at: 0, fail }
         } else if let Some(name) = guard_symbol {
             let symbol = Some(&*Box::leak(name.to_owned().into_boxed_str()));
+            let table = table && !i386;
             rucc_target::Guard { segment: Some(reg), symbol, table, at: 0, fail }
         } else {
             let at = guard_offset.unwrap_or(if i386 { 20 } else { 40 });
@@ -8893,6 +8895,14 @@ mod tests {
         let line = ["--target=i686-unknown-linux-gnu", "-fPIC", "-mstack-protector-guard=global"];
         let said = refused(&[&line[..], &["-c", "a.c"]].concat());
         assert!(said.contains("i386 position independent code"), "{said}");
+        // The kernel's probe runs with the default, which is PIE, and gcc puts the symbol in the
+        // instruction there too.
+        let line = ["--target=i686-unknown-linux-gnu", "-fPIC", "-c", "a.c"];
+        let got = compile(&[&line[..], &smp[..]].concat()).0.guard.expect("the guard moved");
+        assert_eq!(
+            (got.segment, got.symbol, got.table, got.fail),
+            (Some(Segment::Fs), Some("__stack_chk_guard"), false, "__stack_chk_fail_local")
+        );
     }
 
     /// tamnd/rucc#2282. The last choice written wins, and one gcc does not have is refused.
