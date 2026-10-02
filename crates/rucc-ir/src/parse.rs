@@ -523,6 +523,13 @@ impl<'a, 'n> Parser<'a, 'n> {
             signature.convention = Convention::Stdcall;
         } else if self.eat("fastcall") {
             signature.convention = Convention::Fastcall;
+        } else if self.eat("regparm(") {
+            let Some(registers) = (0..=3u8).find(|registers| self.eat(&registers.to_string()))
+            else {
+                return self.fail("a regparm count from 0 to 3 was expected");
+            };
+            self.expect(")")?;
+            signature.convention = Convention::Regparm(registers);
         }
         self.expect("(")?;
         if !self.eat(")") {

@@ -316,6 +316,10 @@ impl<'a> Printer<'a> {
     pub fn func(&mut self, func: &Func) {
         self.number(func);
         let _ = write!(self.out, "func @{}", self.names.resolve(func.name));
+        // Apart from the name, which would otherwise run on into the convention's word.
+        if func.signature().convention.attribute().is_some() {
+            self.out.push(' ');
+        }
         self.signature(func.signature());
         self.linkage(func.linkage, func.visibility);
         self.dll(func.dll);

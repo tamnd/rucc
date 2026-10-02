@@ -2529,6 +2529,10 @@ pub struct Options {
     /// `.code16gcc`: code that runs in real mode with 32 bit operands and a 32 bit stack, the way
     /// the kernel's boot and real mode trampoline are built.
     pub sixteen: bool,
+    /// How many words of a function's arguments go in registers, from `-mregparm=`, which only
+    /// 32 bit x86 has and the driver refuses anywhere else. See
+    /// [`rucc_target::TargetInfo::with_regparm`].
+    pub regparm: u8,
     /// Whether the object says what made it, which `-fno-ident` turns off. See
     /// `rucc_object::Output::ident`.
     pub ident: bool,
@@ -2792,6 +2796,7 @@ impl Options {
             asm_fatal_warnings: false,
             asm_noexecstack: false,
             sixteen: false,
+            regparm: 0,
             ident: true,
             msc: MscVersion::default(),
             ms_dll_runtime: false,
@@ -2888,6 +2893,10 @@ impl Session {
     /// back end.
     pub fn new(opts: Options) -> Self {
         let mut target = TargetInfo::new(opts.target);
+        if opts.regparm > 0 {
+            // A count the target cannot take was refused by the driver.
+            target = target.clone().with_regparm(opts.regparm).unwrap_or(target);
+        }
         if let Some(version) = opts.os_version {
             target.tuple = target.tuple.with_os_version(version);
         }

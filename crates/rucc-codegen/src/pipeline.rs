@@ -275,14 +275,18 @@ impl Machine {
     /// and a scratch register has to be one it does not owe.
     ///
     /// The boundary the stack is kept on is the command line's rather than the convention's, so the
-    /// answer keeps the boundary this machine has, and it keeps the vector registers out of the
-    /// arguments if this machine does. See [`rucc_target::CallRegs::aligned_to`] and
-    /// [`rucc_target::CallRegs::without_vectors`].
+    /// answer keeps the boundary this machine has, it keeps the vector registers out of the
+    /// arguments if this machine does, and its canary is where this machine's is. See
+    /// [`rucc_target::CallRegs::aligned_to`], [`rucc_target::CallRegs::without_vectors`] and
+    /// [`rucc_target::CallRegs::guarded_by`].
     #[must_use]
     pub fn under(&self, convention: rucc_target::Convention) -> Option<Self> {
         let mut conv = self.conv.under(convention)?.aligned_to(self.conv.stack_align);
         if self.conv.sse_args.is_empty() {
             conv = conv.without_vectors();
+        }
+        if let Some(guard) = self.conv.guard {
+            conv = conv.guarded_by(guard);
         }
         if std::ptr::eq(self.selector, &select::aarch64::SELECTOR) {
             Some(Self::aarch64(conv))

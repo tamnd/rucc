@@ -209,15 +209,6 @@ pub(crate) const TABLE: &[Row] = &[
             "it turns off APX, and nothing here uses the APX registers or instructions",
         ),
     ),
-    only(
-        X86,
-        refused(
-            "-mregparm=*",
-            "it is about passing a 32 bit x86 function's arguments in registers, and there is no \
-             32 bit x86 target here",
-            None,
-        ),
-    ),
     // AArch64.
     only(
         A64,

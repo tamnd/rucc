@@ -678,6 +678,9 @@ pub fn parse_args(args: &[String]) -> Result<Action, CliError> {
     let mut pinned: Option<TargetTuple> = None;
     // `-m64`, `-m32` or `-m16`, the last of them on the line.
     let mut word: Option<&str> = None;
+    // What `-mregparm=` last said, weighed after the loop against the machine the word size and
+    // `--target=` settle on.
+    let mut regparm: Option<&str> = None;
     let mut min_version: Option<rucc_tuple::Version> = None;
     // The first flag that only an Apple linker understands, for the refusal after the loop when the
     // target is not Apple, and what `-arch` asked for, which is checked against the target there.
@@ -2515,6 +2518,9 @@ pub fn parse_args(args: &[String]) -> Result<Action, CliError> {
             // weighed after the loop, because `--target=` may come after it and the last one of
             // each is the one that counts.
             "-m64" | "-m32" | "-m16" | "-mx32" => word = Some(arg),
+            // How many words of each function's arguments go in registers on 32 bit x86, which the
+            // kernel builds every 32 bit unit with. See `rucc_target::TargetInfo::with_regparm`.
+            _ if arg.starts_with("-mregparm=") => regparm = Some(arg),
             // One extension of the x86-64 instruction set, on or off, which is `-msse4.2` and its
             // relatives. Only the ones this compiler has the intrinsics for may be turned on for a
             // whole unit, because what turning one on does here is define the macro, and a macro
@@ -2711,6 +2717,28 @@ pub fn parse_args(args: &[String]) -> Result<Action, CliError> {
                     )));
                 }
             }
+        }
+    }
+
+    // The registers against the machine, settled now that the machine is. gcc takes 0 to 3 on 32
+    // bit x86, says the flag does nothing on x86-64, and has no such flag anywhere else.
+    if let Some(arg) = regparm {
+        use rucc_target::Arch;
+        let count = &arg["-mregparm=".len()..];
+        match opts.target.arch {
+            Arch::X86 => {
+                let registers = count
+                    .parse::<u8>()
+                    .ok()
+                    .filter(|&registers| registers <= 3)
+                    .ok_or_else(|| err(format!("{arg} is not between 0 and 3")))?;
+                if rucc_target::TargetInfo::new(opts.target).with_regparm(registers).is_none() {
+                    return Err(err(format!("{arg} is not supported on {}", opts.target)));
+                }
+                opts.regparm = registers;
+            }
+            Arch::X86_64 => notes.push("-mregparm is ignored in 64 bit mode".to_owned()),
+            _ => return Err(err(format!("{arg} is for x86, and {} is not", opts.target))),
         }
     }
 
