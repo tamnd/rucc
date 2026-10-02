@@ -775,6 +775,11 @@ mod tests {
         "ret",
         "mov_rr_64",
         "movaps_rr",
+        // The aligned load and store of a whole vector register, which only a spill writes now.
+        // A program's own sixteen byte access is `movdqu`, because its address need not be
+        // aligned and a slot the frame made always is.
+        "movaps_rm",
+        "movaps_mr",
         // The touch a probing prologue puts on each page as it reaches it, the landing pad a
         // prologue opens with, and the byte that does nothing which one reserves room with. All
         // three are written by a frame and none on a command line that did not ask for it.
@@ -919,8 +924,8 @@ mod tests {
         written.extend(frame.clear_direction);
         // What is left after the ones a rule already reaches, which are the loads and the stores of
         // both register files, since those are the same instructions a program's own reads and
-        // writes of memory are. The vector pair joined them with the rules for a quad float, and a
-        // spill of one is now the same instruction as a program reading a `_Float128` variable.
+        // writes of memory are. The vector pair is not among them: a program's sixteen byte access
+        // is the unaligned move, and only a spill is the aligned one.
         written.retain(|opcode| !heads().contains(&format!("{PREFIX}{opcode}").as_str()));
         assert_eq!(written, FRAME);
     }
