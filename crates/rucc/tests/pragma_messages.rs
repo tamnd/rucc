@@ -33,13 +33,21 @@ fn lines(said: &str, severity: &str) -> Vec<u32> {
         .collect()
 }
 
-/// The messages of the diagnostics of `severity`, with the position taken off.
+/// The messages of the diagnostics of `severity`, with the position taken off, in the order of
+/// the lines they are about. The preprocessor's come out before the parser's, where gcc, which
+/// does both in one pass, has them by line.
 fn said(out: &str, severity: &str) -> Vec<String> {
     let marker = format!(": {severity}: ");
-    out.lines()
+    let mut said: Vec<(u32, String)> = out
+        .lines()
         .filter(|line| line.starts_with("<stdin>:"))
-        .filter_map(|line| line.split_once(&marker).map(|(_, rest)| rest.to_owned()))
-        .collect()
+        .filter_map(|line| {
+            let (at, rest) = line.split_once(&marker)?;
+            Some((at.split(':').nth(1)?.parse().ok()?, rest.to_owned()))
+        })
+        .collect();
+    said.sort_by_key(|&(line, _)| line);
+    said.into_iter().map(|(_, message)| message).collect()
 }
 
 const LINES: &str = "\
@@ -78,7 +86,9 @@ fn each_line_is_said_the_way_gcc_says_it() {
         ],
         "{text}"
     );
-    assert_eq!(lines(&text, "warning"), [4, 6, 7, 8, 11, 12, 14, 15], "{text}");
+    let mut warned = lines(&text, "warning");
+    warned.sort_unstable();
+    assert_eq!(warned, [4, 6, 7, 8, 11, 12, 14, 15], "{text}");
     let expected = "expected a string after `#pragma message` [E0798]";
     assert_eq!(
         said(&text, "warning"),
