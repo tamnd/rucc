@@ -1467,17 +1467,19 @@
 
 ;; Reading sixteen bytes of float out of memory and writing them back.
 ;;
-;; The same four rules again at the format that fills a whole vector register. `movaps` is the
-;; instruction because the value is the register rather than part of it, which is also why this
-;; is the one format where the access a program wrote and the spill the allocator writes are the
-;; same opcode. At the two narrower formats they are different opcodes on purpose, since a spill
-;; moves a whole register and an access moves only the value.
+;; The same four rules again at the format that fills a whole vector register, with the unaligned
+;; move. The value is the register rather than part of it, so this is the one format where the
+;; access a program wrote and the spill the allocator writes move the same sixteen bytes, but they
+;; are not the same opcode: the spill goes to a slot the frame aligned to sixteen and keeps
+;; `movaps`, and this does not.
 ;;
-;; The aligned form and not `movups`, because every access a C program can write here is aligned:
-;; an object of this type is sixteen byte aligned, which is what the psABI says and what
-;; `crates/rucc-abi/src/layout.rs` gives it, and the frame gives a local of it the same alignment.
-;; The model says nothing about alignment either way, so what makes this the right instruction is
-;; the language rule above it rather than anything the proof checks.
+;; A `__float128` or `long double` object is sixteen byte aligned, but this format is also what a
+;; sixteen byte vector is read and written as since it started crossing calls in one xmm register,
+;; and `_mm_loadu_si128` is a read of one through a type aligned to one byte, from wherever the
+;; program's pointer points. `movaps` there faults, which is what zstd's `ZSTD_copy16` and the
+;; vector helpers in postgres hit. `movdqu` costs nothing over the aligned form when the address
+;; is aligned on every machine this targets, which is the same reason the integer vector rules
+;; below use it, and the model says nothing about alignment either way.
 
 ;; And the half, which is two bytes into the low lane of a vector register. `pinsrw` is the only
 ;; instruction at this baseline that reads sixteen bits into one, and it is what gcc writes here
@@ -1500,7 +1502,7 @@
                (result))))
 
 (rule (lower (load.f128 (value.i64 a)))
-      (x64.movaps_rm (amode_base a))
+      (x64.movdqu_rm (amode_base a))
       (spec (= (float_from_bits 128
                        (concat (select (mem) (bvadd a 15)) (select (mem) (bvadd a 14))
                                (select (mem) (bvadd a 13)) (select (mem) (bvadd a 12))
@@ -1514,7 +1516,7 @@
 
 (rule (lower (load.f128 (add.i64 (value.i64 a) (iconst.i64 k))))
       (if (= k (sign_extend 32 64 (extract 31 0 k))))
-      (x64.movaps_rm (amode_base_offset a k))
+      (x64.movdqu_rm (amode_base_offset a k))
       (spec (= (float_from_bits 128
                        (concat (select (mem) (bvadd (bvadd a k) 15)) (select (mem) (bvadd (bvadd a k) 14))
                                (select (mem) (bvadd (bvadd a k) 13)) (select (mem) (bvadd (bvadd a k) 12))
@@ -1527,7 +1529,7 @@
                (result))))
 
 (rule (lower (store.f128 (value.f128 v) (value.i64 a)))
-      (x64.movaps_mr (amode_base a) v)
+      (x64.movdqu_mr (amode_base a) v)
       (spec (= (store (store (store (store (store (store (store (store (store (store (store (store (store (store (store (store (mem)
                              a (extract 7 0 (bits_from_float 128 v)))
                              (bvadd a 1) (extract 15 8 (bits_from_float 128 v)))
@@ -1549,7 +1551,7 @@
 
 (rule (lower (store.f128 (value.f128 v) (add.i64 (value.i64 a) (iconst.i64 k))))
       (if (= k (sign_extend 32 64 (extract 31 0 k))))
-      (x64.movaps_mr (amode_base_offset a k) v)
+      (x64.movdqu_mr (amode_base_offset a k) v)
       (spec (= (store (store (store (store (store (store (store (store (store (store (store (store (store (store (store (store (mem)
                              (bvadd a k) (extract 7 0 (bits_from_float 128 v)))
                              (bvadd (bvadd a k) 1) (extract 15 8 (bits_from_float 128 v)))
