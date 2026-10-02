@@ -155,7 +155,7 @@ pub const LINEAR: usize = 32;
 /// `goal` is whether the level asked for small code, which decides how dense a stretch has to be
 /// and how many clusters it needs before it is a table. See `JUMP_TABLE_GROWTH_FOR_SIZE`.
 pub fn switches(func: &mut Func, goal: Goal) {
-    let _ = lowered(func, goal, None, true);
+    let _ = lowered(func, goal, None, true, u64::BITS);
 }
 
 /// The same, with a shape forced on every `switch` when `force` names one, answering what each
@@ -165,14 +165,24 @@ pub fn switches(func: &mut Func, goal: Goal) {
 /// `-Zswitch=table` forced: the kernel asks for that because a jump through a table is an indirect
 /// branch, and one of those has no thunk to go through. A bit test is still allowed, since it
 /// branches to a block it names, and gcc writes them under the same flag.
+///
+/// `word` is how many bits the machine's registers hold, which is what a table's index and a bit
+/// test's mask are computed in. It is 32 on i386, where a mask in an `i64` is a pair of registers
+/// and a shift of one by a register is not something the halves are split into.
 #[must_use]
-pub fn lowered(func: &mut Func, goal: Goal, force: Option<Force>, tables: bool) -> Vec<Lowered> {
+pub fn lowered(
+    func: &mut Func,
+    goal: Goal,
+    force: Option<Force>,
+    tables: bool,
+    word: u32,
+) -> Vec<Lowered> {
     let found: Vec<Inst> = func
         .blocks()
         .filter_map(|block| func.terminator(block))
         .filter(|&inst| func[inst].opcode == Opcode::Switch)
         .collect();
-    found.into_iter().filter_map(|inst| lower(func, inst, goal, force, tables)).collect()
+    found.into_iter().filter_map(|inst| lower(func, inst, goal, force, tables, word)).collect()
 }
 
 /// A shape forced on every `switch`, which is what `-Zswitch=` asks for.
@@ -270,6 +280,7 @@ fn lower(
     goal: Goal,
     force: Option<Force>,
     allowed: bool,
+    word: u32,
 ) -> Option<Lowered> {
     let block = func.block_of(inst).expect("a terminator is in a block");
     let span = func.span(inst);
@@ -287,9 +298,9 @@ fn lower(
     let hot = hottest(&arms).map(|at| (cases.remove(at).signed(ty), arms.remove(at)));
     let found = clusters(func, &cases, &arms, ty);
     let clusters = match force {
-        None if allowed => group(func, tables(func, found, ty, goal)),
-        None => group(func, found),
-        Some(Force::Table) if allowed => forced(found, ty),
+        None if allowed => group(func, tables(func, found, ty, goal, word), word),
+        None => group(func, found, word),
+        Some(Force::Table) if allowed => forced(found, ty, word),
         Some(Force::Table | Force::Tree | Force::Walk) => found,
     };
     let leaf = match force {
@@ -309,7 +320,7 @@ fn lower(
     // Before anything is written, because the builder appends and the `switch` is where the
     // appending has to happen.
     func.remove_inst(inst);
-    let of = Lowering { value, ty, default, span };
+    let of = Lowering { value, ty, default, span, word: Type::int(word) };
     let rest = match hot {
         Some((case, call)) => peel(func, &of, block, case, call),
         None => block,
@@ -320,9 +331,9 @@ fn lower(
 
 /// Every cluster as one table, which is what `-Zswitch=table` asks for, or the clusters as they
 /// were when their span is wider than [`FORCED_CELLS`] or the operand wider than a word.
-fn forced(clusters: Vec<Cluster>, ty: Type) -> Vec<Cluster> {
+fn forced(clusters: Vec<Cluster>, ty: Type, word: u32) -> Vec<Cluster> {
     let (Some(first), Some(last)) = (clusters.first(), clusters.last()) else { return clusters };
-    if ty.bits() == 0 || ty.bits() > u64::BITS || last.high() - first.low() >= FORCED_CELLS {
+    if ty.bits() == 0 || ty.bits() > word || last.high() - first.low() >= FORCED_CELLS {
         return clusters;
     }
     vec![table(&clusters)]
@@ -371,6 +382,8 @@ struct Lowering {
     default: BlockCall,
     /// The source location of the `switch`, which everything written for it takes.
     span: Span,
+    /// The machine's word, which a table's index and a bit test's masks are computed in.
+    word: Type,
 }
 
 /// A stretch of case values that one test separates from the rest of them.
@@ -494,14 +507,14 @@ const JUMP_TABLE_GROWTH_FOR_SIZE: i128 = 3;
 /// values once there are enough of them, and after it the single values a table wants would
 /// already be gone into masks. Only on an operand a word wide or narrower, since the index a
 /// table is read with is a word and a wider operand does not fit in one.
-fn tables(func: &Func, clusters: Vec<Cluster>, ty: Type, goal: Goal) -> Vec<Cluster> {
-    if ty.bits() == 0 || ty.bits() > u64::BITS {
+fn tables(func: &Func, clusters: Vec<Cluster>, ty: Type, goal: Goal, word: u32) -> Vec<Cluster> {
+    if ty.bits() == 0 || ty.bits() > word {
         return clusters;
     }
     let mut out: Vec<Cluster> = Vec::with_capacity(clusters.len());
     let mut at = 0;
     while at < clusters.len() {
-        match dense(func, &clusters[at..], goal) {
+        match dense(func, &clusters[at..], goal, word) {
             Some(end) => {
                 out.push(table(&clusters[at..at + end]));
                 at += end;
@@ -529,7 +542,7 @@ fn tables(func: &Func, clusters: Vec<Cluster>, ty: Type, goal: Goal) -> Vec<Clus
 ///
 /// The scan stops once the span is wider than every cluster left could pay for even if each were
 /// a run, since the span only grows and the count cannot catch it after that.
-fn dense(func: &Func, clusters: &[Cluster], goal: Goal) -> Option<usize> {
+fn dense(func: &Func, clusters: &[Cluster], goal: Goal, word: u32) -> Option<usize> {
     let (growth, least) = match goal {
         Goal::Speed => (JUMP_TABLE_GROWTH, JUMP_TABLE_MIN_TARGETS),
         Goal::Size => (JUMP_TABLE_GROWTH_FOR_SIZE, JUMP_TABLE_MIN_TARGETS_FOR_SIZE),
@@ -559,7 +572,7 @@ fn dense(func: &Func, clusters: &[Cluster], goal: Goal) -> Option<usize> {
         if span > growth * most {
             break;
         }
-        let masks = span <= WORD && places.len() <= BIT_TEST_TARGETS;
+        let masks = span <= i128::from(word) && places.len() <= BIT_TEST_TARGETS;
         if index + 1 >= least && span <= growth * compares && !masks {
             best = Some(index + 1);
         }
@@ -596,9 +609,8 @@ fn table(stretch: &[Cluster]) -> Cluster {
 /// This is a correctness bound and not a tuning one, which is what section 24.6 asks it to be.
 /// `1 << (x - low)` is undefined once `x - low` reaches the width of the word being shifted, so a
 /// group is only ever formed inside this span and the range check in front of the shift is what
-/// makes the shift amount stay there. Sixty four because the mask is held in an `i64`, which every
-/// target this compiler has can shift by a register.
-const WORD: i128 = 64;
+/// makes the shift amount stay there. The word is the machine's, which [`lowered`] is told: the mask
+/// is held in a register and shifted by one, and an `i64` on i386 is two of them.
 
 /// How many more case values a group needs than it has destinations before a bit test is worth
 /// writing.
@@ -677,11 +689,11 @@ fn same(func: &Func, a: BlockCall, b: BlockCall) -> bool {
 /// values it holds, so folding it into a mask replaces two instructions with two instructions and
 /// spends a word of the span doing it. That is a loss on the run and a loss on whatever the span
 /// would otherwise have reached.
-fn group(func: &Func, clusters: Vec<Cluster>) -> Vec<Cluster> {
+fn group(func: &Func, clusters: Vec<Cluster>, word: u32) -> Vec<Cluster> {
     let mut out: Vec<Cluster> = Vec::with_capacity(clusters.len());
     let mut at = 0;
     while at < clusters.len() {
-        let reach = reach(&clusters, at);
+        let reach = reach(&clusters, at, word);
         match bits(func, &clusters[at..at + reach]) {
             Some(cluster) => {
                 out.push(cluster);
@@ -697,11 +709,11 @@ fn group(func: &Func, clusters: Vec<Cluster>) -> Vec<Cluster> {
 }
 
 /// How many single values starting here sit inside one word of the first of them.
-fn reach(clusters: &[Cluster], at: usize) -> usize {
+fn reach(clusters: &[Cluster], at: usize, word: u32) -> usize {
     let Cluster::One { value: first, .. } = clusters[at] else { return 0 };
     let mut reach = 0;
     while let Some(Cluster::One { value, .. }) = clusters.get(at + reach) {
-        if value - first >= WORD {
+        if value - first >= i128::from(word) {
             break;
         }
         reach += 1;
@@ -883,9 +895,8 @@ fn looked_up(
     // In a word, because that is what an address is added up in. The range check above is what
     // makes widening without the sign the right widening: what gets here is between zero and the
     // width, read unsigned.
-    let word = Type::int(u64::BITS);
     let mut build = Builder::new(func, inside).at(of.span);
-    let index = if of.ty == word { base } else { build.unary(Opcode::ZExt, base, word) };
+    let index = in_word(&mut build, of, base);
     build.switch(index, default, &cases);
 
     for (call, block) in hops {
@@ -961,14 +972,14 @@ fn scattered(
 
     // In a word, because that is the width the masks are and what the top of the range needs for a
     // bit of its own. The range check above is what makes this shift amount a legal one.
-    let word = Type::int(u64::BITS);
+    let word = of.word;
     let mut build = Builder::new(func, inside).at(of.span);
-    let amount = if of.ty == word { base } else { build.unary(Opcode::ZExt, base, word) };
+    let amount = in_word(&mut build, of, base);
     let one = build.iconst(word, 1);
     let bit = build.binary(Opcode::Shl, one, amount, Flags::default());
 
     for (index, &(mask, call)) in arms[..tests].iter().enumerate() {
-        let want = build.iconst(word, i128::from(mask as i64));
+        let want = build.iconst(word, signed_mask(mask, word.bits()));
         let hit = build.binary(Opcode::And, bit, want, Flags::default());
         let none = build.iconst(word, 0);
         let matched = build.icmp(IntPred::Ne, hit, none);
@@ -979,6 +990,27 @@ fn scattered(
         if !last {
             build = Builder::new(func, blocks[index + 1]).at(of.span);
         }
+    }
+}
+
+/// `x - low` in the machine's word, once the range check has shown it is below the width of the
+/// stretch. Widened without the sign from a narrower operand, and cut down from a wider one, which
+/// keeps every bit a value that got past the check has.
+fn in_word(build: &mut Builder<'_>, of: &Lowering, base: Value) -> Value {
+    match of.ty.bits().cmp(&of.word.bits()) {
+        std::cmp::Ordering::Equal => base,
+        std::cmp::Ordering::Less => build.unary(Opcode::ZExt, base, of.word),
+        std::cmp::Ordering::Greater => build.unary(Opcode::Trunc, base, of.word),
+    }
+}
+
+/// A mask as the signed constant of a word that many bits wide.
+fn signed_mask(mask: u64, bits: u32) -> i128 {
+    if bits >= u64::BITS {
+        i128::from(mask as i64)
+    } else {
+        let shift = u64::BITS - bits;
+        i128::from(((mask << shift) as i64) >> shift)
     }
 }
 
@@ -1197,7 +1229,7 @@ mod tests {
     fn forcing(cases: &[i128], force: Force) -> Lowered {
         let arms: Vec<usize> = (0..cases.len()).collect();
         let mut built = built(cases);
-        let said = lowered(&mut built.func, Goal::Speed, Some(force), true);
+        let said = lowered(&mut built.func, Goal::Speed, Some(force), true, u64::BITS);
         lands(&mut built, cases, &arms, &around(cases, Type::int(32)), Type::int(32));
         assert_eq!(said.len(), 1);
         said[0]
@@ -1227,7 +1259,7 @@ mod tests {
         let arms: Vec<usize> = (0..dense.len()).collect();
         for force in [None, Some(Force::Table)] {
             let mut built = built(&dense);
-            let said = lowered(&mut built.func, Goal::Speed, force, false);
+            let said = lowered(&mut built.func, Goal::Speed, force, false, u64::BITS);
             lands(&mut built, &dense, &arms, &around(&dense, Type::int(32)), Type::int(32));
             assert_eq!((said[0].tables, said[0].shape()), (0, "tree"), "{force:?}");
         }
@@ -1237,7 +1269,7 @@ mod tests {
     fn what_a_switch_became_is_said_in_one_line() {
         let dense: Vec<i128> = (0..40).collect();
         let mut built = built(&dense);
-        let said = lowered(&mut built.func, Goal::Speed, None, true);
+        let said = lowered(&mut built.func, Goal::Speed, None, true, u64::BITS);
         assert_eq!(
             said.iter().map(Lowered::describe).collect::<Vec<_>>(),
             ["switch of 40 cases lowered as a table; clusters 1, tables 1, bit tests 0"]
