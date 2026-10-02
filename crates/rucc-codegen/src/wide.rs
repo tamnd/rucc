@@ -547,6 +547,13 @@ fn plan(signature: &Signature, conv: &CallRegs, width: Width) -> Option<Vec<Slot
     if !moved {
         return Some(meant.into_iter().map(|(slot, _, _)| slot).collect());
     }
+    // Where every word of the call is in the argument area, in the order the parameters are
+    // written, the halves stay where the whole was and in front of whatever follows, so a variadic
+    // signature is the same call split. That is i386, where the kernel's `__ext4_error` takes a
+    // `__u64` block number ahead of its format.
+    if signature.variadic && in_order(&meant) {
+        return Some(meant.into_iter().map(|(slot, _, _)| slot).collect());
+    }
     if signature.variadic || conv.shared_positions {
         return None;
     }
@@ -607,6 +614,18 @@ fn plan(signature: &Signature, conv: &CallRegs, width: Width) -> Option<Vec<Slot
         slots.push(slot);
     }
     Some(slots)
+}
+
+/// Whether every slot is in the argument area, each further up it than the one before.
+fn in_order(meant: &[(Slot, Param, Where)]) -> bool {
+    let mut last = None;
+    meant.iter().all(|(_, _, at)| match *at {
+        Where::Stack(up) if last.is_none_or(|last| up > last) => {
+            last = Some(up);
+            true
+        }
+        _ => false,
+    })
 }
 
 /// Where the next parameter goes, asked the way [`crate::abi::entry`] asks.
