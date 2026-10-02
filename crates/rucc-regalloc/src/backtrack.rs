@@ -263,9 +263,17 @@ fn placed(
         // instruction takes the register without a move. Clear is asked over the hull, and it
         // turned a parameter read before an early return that calls away from the register it
         // arrived in and into a saved one, which is a push, a move and a pop nobody needed.
+        // Only a register the class hands out. An instruction may insist on one of the scratch
+        // registers, which is what an i386 `"S"` operand does with `esi`, and that is a move in
+        // front of the instruction. Taking it as a hint put the whole value in the scratch, where
+        // the first reload of anything else wrote over it.
+        let order = env.order(value.class);
+        let handed = |list: &[PhysReg]| -> Vec<PhysReg> {
+            list.iter().copied().filter(|at| order.contains(at)).collect()
+        };
         let chosen = state
             .coalesced(value, &reused[number])
-            .or_else(|| state.hinted(value, &hints[number], Want::Allowed))
+            .or_else(|| state.hinted(value, &handed(&hints[number]), Want::Allowed))
             .or_else(|| {
                 let partners = passed[number].iter().chain(&received[number]);
                 let partners: Vec<PhysReg> =
@@ -278,8 +286,8 @@ fn placed(
                 let source = reuses[number].and_then(|reuse| reuse.source.number());
                 ties.extend(source.and_then(|source| usize::try_from(source).ok()));
                 ties.retain(|&tie| state.at[tie].is_none() && values[tie].is_some());
-                let tied = ties.iter().flat_map(|&tie| hints[tie].iter());
-                let wanted: Vec<PhysReg> = tied.chain(env.order(value.class)).copied().collect();
+                let tied = ties.iter().flat_map(|&tie| handed(&hints[tie]));
+                let wanted: Vec<PhysReg> = tied.chain(order.iter().copied()).collect();
                 state.together(value, &ties, &wanted)
             })
             .or_else(|| state.hinted(value, env.order(value.class), Want::Allowed));
