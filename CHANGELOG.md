@@ -7,6 +7,7 @@ All notable changes are recorded here. The format follows [Keep a Changelog](htt
 ### Changed
 
 - The backtracking register allocator keeps what it was told about each register for the value it is placing, since it asks about the same registers several times for one value, which takes about 1.6% off an optimized build of jtckdint when it goes through the portable code rather than `<stdckdint.h>` (#2631).
+- The instruction scheduler keeps the dependence edges of a run in one list rather than a list per instruction, and the readers of each register in one chain rather than a list per register, which takes about 1% off an optimized build of jtckdint when it goes through the portable code rather than `<stdckdint.h>` (#2634).
 
 ### Added
 
