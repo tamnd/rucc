@@ -339,7 +339,7 @@ fn fit(mut wants: Vec<Want>, locals: usize, slots: usize, mut budget: usize) -> 
                 cells[cell].size = cells[cell].size.max(size);
                 cells[cell].align = cells[cell].align.max(align);
                 let held = busy[cell].take().unwrap_or_default();
-                busy[cell] = Some(merged(held.into_iter().chain(area.into_iter().flatten())));
+                busy[cell] = Some(union(&held, area.as_deref().unwrap_or_default()));
                 cell
             }
             None => {
@@ -1027,6 +1027,33 @@ fn merged(pieces: impl IntoIterator<Item = Range>) -> Vec<Range> {
         }
     }
     merged
+}
+
+/// What [`merged`] makes of two lists it made, without sorting them again.
+///
+/// A cell's list is joined this way every time something goes in it, and sorting the whole of it
+/// each time made every join cost more than the last. Both lists are in order, so taking the earlier
+/// front each time is the order a sort would have put them in.
+fn union(one: &[Range], two: &[Range]) -> Vec<Range> {
+    let mut out: Vec<Range> = Vec::with_capacity(one.len() + two.len());
+    let (mut mine, mut theirs) = (0, 0);
+    while mine < one.len() || theirs < two.len() {
+        let first = theirs == two.len()
+            || (mine < one.len()
+                && (one[mine].start, one[mine].end) <= (two[theirs].start, two[theirs].end));
+        let piece = if first {
+            mine += 1;
+            one[mine - 1]
+        } else {
+            theirs += 1;
+            two[theirs - 1]
+        };
+        match out.last_mut() {
+            Some(last) if piece.start <= last.end => last.end = last.end.max(piece.end),
+            _ => out.push(piece),
+        }
+    }
+    out
 }
 
 /// Whether two stretches of a function are both wanted anywhere, which is what stops two things
