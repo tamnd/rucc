@@ -7,6 +7,7 @@ All notable changes are recorded here. The format follows [Keep a Changelog](htt
 ### Added
 
 - `rucc --dlltool -m i386` writes an import library without `-k` too (#2072). The program still links against the decorated name, `_f@8` for a stdcall `f@8` in the `.def` file, so a declaration that leaves out the `@N` is a link error. Without `-k` the DLL is asked for `f@8`, which is what a DLL gcc linked without `--kill-at` exports. With `-k` it is asked for `f`, as before. `rucc-stub` has the choice as `coff::write_as` with `Decoration::Kept` or `Decoration::Cut`. Each import member is byte for byte the one `llvm-dlltool` 18 writes for the same command line.
+- `simplify` no longer leaves a pointer compared with an `i64` when an edge of type rule rewrites a comparison against a constant address such as `p < (char *)-1`. The new bound is put back behind an `inttoptr`, so `-Zverify-each` is clean on SQLite at `-O2` and `-O3` again.
 
 ### Changed
 
