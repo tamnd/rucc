@@ -25,6 +25,7 @@ All notable changes are recorded here. The format follows [Keep a Changelog](htt
 
 ### Fixed
 
+- A `q` output in i386 inline assembly no longer lands in `esi` when the statement takes `eax`, `ebx`, `ecx` and `edx` itself. It shares a register with an input the way gcc does, so the kernel's `cmpxchg8b` with `CC_OUT(e)` assembles.
 - A file-scope `register` variable in `esp` is now taken on i386, as `rsp` is on x86-64. The i386 kernel declares `current_stack_pointer` that way in `asm/asm.h`, and every kernel file stopped on it.
 - The i386 kernel's `-msoft-float`, `-mno-sse`, `-mno-mmx`, `-mno-sse2`, `-mno-3dnow` and `-mno-avx` are now taken. The extensions are already off on i386, and `-msoft-float` refuses a function with a float in it, since every float there is on the x87 stack. Turning an extension on for i386 is refused with a message that says why.
 - The driver now accepts `-Wa,--32` on i386 and `-Wa,-mtune=generic32` and the other i386 and generic names on x86. The i386 kernel passes both to gas. The other word size is still refused, now with a message that points at `-m32` or `-m64`.

@@ -450,6 +450,76 @@ fn pinned(operand: &AsmOperand<'_>) -> Option<PhysReg> {
     }
 }
 
+/// The registers i386 can name the low byte of, which are the only ones a `q` operand may be in.
+const BYTE_REGS: [PhysReg; 4] =
+    [rucc_target::x86::EAX, rucc_target::x86::EBX, rucc_target::x86::ECX, rucc_target::x86::EDX];
+
+/// Pins an i386 `q` output that would otherwise have no register with a low byte to go in.
+///
+/// The allocator hands out only the four registers with a low byte on i386, since `esi` and `edi`
+/// are held back as scratch, so a `q` operand normally lands in one of them. It cannot when the
+/// statement takes all four itself, which is the kernel's `__arch_cmpxchg64`: `cmpxchg8b` wants
+/// `edx:eax` and `ecx:ebx`, and the flag output `CC_OUT(e)` is a `"=q"` written with `sete`. The
+/// output then went to the scratch register the allocator reloads through, and `sete %sil` is not
+/// an instruction i386 has. gcc puts it in `ebx` or `ecx`, since an output not written early may
+/// share a register with an input, and this pins it to one of those the same way. Only when no
+/// register with a low byte is left untouched, so a statement with room keeps the allocator's
+/// choice.
+fn bytes_pinned(
+    pins: &mut [Option<(PhysReg, RegClass)>],
+    list: &[AsmOperand<'_>],
+    constraints: &str,
+    clobbered: &[(PhysReg, RegClass)],
+    gpr: RegClass,
+) {
+    let wants_byte = |entry: &str| entry.contains('q') || entry.contains('Q');
+    let outputs: Vec<usize> = list
+        .iter()
+        .zip(constraints.split(','))
+        .enumerate()
+        .filter(|(index, (operand, entry))| {
+            operand.result.is_some()
+                && !operand.early
+                && !operand.memory
+                && pins[*index].is_none()
+                && wants_byte(entry)
+        })
+        .map(|(index, _)| index)
+        .collect();
+    if outputs.is_empty() {
+        return;
+    }
+    let taken = |reg: PhysReg, pins: &[Option<(PhysReg, RegClass)>]| {
+        clobbered.contains(&(reg, gpr)) || pins.iter().flatten().any(|&(at, _)| at == reg)
+    };
+    if BYTE_REGS.iter().any(|&reg| !taken(reg, pins)) {
+        return;
+    }
+    // The ones only an input is pinned to, which a late output may share. An input tied to an
+    // output is that output's register, and so is not one of these.
+    let shareable: Vec<PhysReg> = BYTE_REGS
+        .iter()
+        .copied()
+        .filter(|&reg| {
+            !clobbered.contains(&(reg, gpr))
+                && list.iter().zip(pins.iter()).all(|(operand, pin)| match pin {
+                    Some((at, _)) if *at == reg => {
+                        operand.result.is_none()
+                            && !list.iter().any(|other| {
+                                other.tied.is_some_and(|tied| {
+                                    list.get(tied).is_some_and(|out| pinned(out) == Some(reg))
+                                })
+                            })
+                    }
+                    _ => true,
+                })
+        })
+        .collect();
+    for (index, reg) in outputs.into_iter().zip(shareable) {
+        pins[index] = Some((reg, gpr));
+    }
+}
+
 /// Whether a constraint says nothing but what it says on every machine.
 ///
 /// [`AsmOperands::read`] gives the x86 meaning to every letter it knows, and most of the letters
@@ -5339,7 +5409,11 @@ impl<'a> Lowering<'a> {
                 }
             }
         }
-        let pins: Vec<_> = list.iter().map(|operand| self.pinned_here(operand)).collect();
+        let mut pins: Vec<_> = list.iter().map(|operand| self.pinned_here(operand)).collect();
+        if !a64 && self.conv.word == 4 {
+            let constraints = self.names.resolve(self.source[asm].constraints).to_string();
+            bytes_pinned(&mut pins, list, &constraints, &clobbered, self.gpr);
+        }
         // The operand in memory that is the instruction's own memory operand, which is one in this
         // function's frame when there is one, since that is spelled from the stack pointer rather
         // than from a register the text might write. Every other one on x86 is read through the
