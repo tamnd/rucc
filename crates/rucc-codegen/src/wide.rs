@@ -100,8 +100,8 @@
 use rucc_base::Interner;
 use rucc_base::hash::{Map, Set};
 use rucc_ir::{
-    Abi, Block, BlockCall, CallInfo, Def, Extra, Flags, Float, Func, Imm, Inst, InstData, IntPred,
-    MemInfo, MemOrder, Opcode, Param, Restrict, Signature, Type, Value,
+    Abi, AsmInfo, AsmOperands, Block, BlockCall, CallInfo, Def, Extra, Flags, Float, Func, Imm,
+    Inst, InstData, IntPred, MemInfo, MemOrder, Opcode, Param, Restrict, Signature, Type, Value,
 };
 use rucc_target::{AbiDescription, CallRegs, Convention, Places, Variadic, Where};
 
@@ -195,7 +195,11 @@ fn halves_at(func: &mut Func, names: &mut Interner, conv: &CallRegs, width: Widt
     }
     let insts: Vec<Inst> = walk(func).into_iter().flat_map(|block| func.insts(block)).collect();
     let order: Map<Inst, usize> = insts.iter().enumerate().map(|(at, &inst)| (inst, at)).collect();
-    if !insts.iter().enumerate().all(|(at, &inst)| can_split(func, conv, width, &order, at, inst)) {
+    if !insts
+        .iter()
+        .enumerate()
+        .all(|(at, &inst)| can_split(func, names, conv, width, &order, at, inst))
+    {
         return false;
     }
     let Some(arriving) = plan(func.signature(), conv, width) else { return false };
@@ -312,6 +316,7 @@ fn understood(opcode: Opcode) -> bool {
             | Opcode::Return
             | Opcode::Jump
             | Opcode::BrIf
+            | Opcode::InlineAsm
     )
 }
 
@@ -321,6 +326,7 @@ fn understood(opcode: Opcode) -> bool {
 /// wide, which in a function that has one at all is still most of them.
 fn can_split(
     func: &Func,
+    names: &Interner,
     conv: &CallRegs,
     width: Width,
     order: &Map<Inst, usize>,
@@ -367,6 +373,9 @@ fn can_split(
     if matches!(data.opcode, Opcode::SIToFP | Opcode::UIToFP | Opcode::FPToSI | Opcode::FPToUI)
         && converted(func, inst).and_then(|format| conversion(width, data.opcode, format)).is_none()
     {
+        return false;
+    }
+    if data.opcode == Opcode::InlineAsm && paired(func, names, width, inst).is_none() {
         return false;
     }
     // Splitting an argument makes two of them, and which parameter an argument stands for is how a
@@ -743,6 +752,9 @@ fn rewrite(
         }
         Opcode::Call | Opcode::CallIndirect if produces || takes => {
             call(func, width, conv, halves, forward, inst);
+        }
+        Opcode::InlineAsm if produces || takes => {
+            assembly(func, names, width, halves, forward, inst);
         }
         Opcode::Return if takes => flatten(func, halves, inst),
         Opcode::Jump | Opcode::BrIf => edges(func, halves, inst),
@@ -1544,6 +1556,153 @@ fn site(func: &Func, inst: Inst) -> Option<(Signature, bool)> {
     Some((whole, variadic))
 }
 
+/// An assembly statement's constraints and template once each operand written `A` is two.
+///
+/// `A` is the pair `edx:eax` on i386, which is where `rdtsc` leaves its count and where
+/// `cmpxchg8b` wants the value it compares, and a `long long` in it is the one wide value an
+/// assembly statement can be handed. So an `"=A"` output becomes `"=a"` for the low half and `"=d"`
+/// for the high one, an input becomes `"a"` and `"d"`, and a number matching such an output becomes
+/// the two numbers of its halves. The template's numbers move with the operands, and a reference to
+/// the pair is to its low half, which is the register GCC prints for it too.
+///
+/// Nothing for a wide operand under any other constraint, and for every width but i386's, since
+/// sixty four bit `A` is one register rather than two and a pair in any other letter has nowhere
+/// to be.
+fn paired(func: &Func, names: &Interner, width: Width, inst: Inst) -> Option<(String, String)> {
+    let Extra::Asm(asm) = func[inst].extra else { return None };
+    let asm = func[asm];
+    if width.half != 32 {
+        return None;
+    }
+    let constraints = names.resolve(asm.constraints);
+    let results: Vec<Value> = func[inst].results().collect();
+    let operands = AsmOperands::read(constraints, &results, &func[func[inst].args])?;
+    let wide = |value: Option<Value>| value.is_some_and(|value| width.is_wide(func[value].ty));
+    let texts: Vec<&str> =
+        if constraints.is_empty() { Vec::new() } else { constraints.split(',').collect() };
+    let list: Vec<_> = operands.iter().copied().collect();
+    let pair: Vec<bool> =
+        list.iter().map(|operand| wide(operand.result) || wide(operand.value)).collect();
+    // Where each operand is counted from now, which is one further along for every pair before it.
+    let mut moved = Vec::with_capacity(list.len());
+    let mut next = 0;
+    for &is_pair in &pair {
+        moved.push(next);
+        next += if is_pair { 2 } else { 1 };
+    }
+    let mut written = Vec::with_capacity(next);
+    for (index, (operand, text)) in list.iter().zip(&texts).enumerate() {
+        let letters = text.trim_start_matches(['=', '+', '&']);
+        let prefix = &text[..text.len() - letters.len()];
+        match operand.tied {
+            Some(tied) => {
+                // A number matching a pair is a pair of numbers, and one matching anything else
+                // keeps matching it wherever it went. A narrow value matching a pair has half a
+                // place to be in and is left alone.
+                if pair[tied] != pair[index] || letters.parse::<usize>().ok() != Some(tied) {
+                    return None;
+                }
+                written.push(format!("{prefix}{}", moved[tied]));
+                if pair[index] {
+                    written.push(format!("{prefix}{}", moved[tied] + 1));
+                }
+            }
+            None if pair[index] => {
+                if letters != "A" {
+                    return None;
+                }
+                written.push(format!("{prefix}a"));
+                written.push(format!("{prefix}d"));
+            }
+            None => written.push((*text).to_owned()),
+        }
+    }
+    if !pair.contains(&true) {
+        return None;
+    }
+    let template = renumber(names.resolve(asm.template), &moved, next - list.len());
+    Some((written.join(","), template))
+}
+
+/// A template with each operand number moved to where [`paired`] put that operand.
+///
+/// A number is a `%` with at most one modifier letter between it and the digits. A number past
+/// the operands is one of `asm goto`'s labels, which come after them and so move by however many
+/// operands there now are more of.
+fn renumber(template: &str, moved: &[usize], more: usize) -> String {
+    let chars: Vec<char> = template.chars().collect();
+    let mut out = String::with_capacity(template.len());
+    let mut index = 0;
+    while index < chars.len() {
+        let ch = chars[index];
+        out.push(ch);
+        index += 1;
+        if ch != '%' {
+            continue;
+        }
+        if chars.get(index) == Some(&'%') {
+            out.push('%');
+            index += 1;
+            continue;
+        }
+        if chars.get(index).is_some_and(char::is_ascii_alphabetic)
+            && chars.get(index + 1).is_some_and(char::is_ascii_digit)
+        {
+            out.push(chars[index]);
+            index += 1;
+        }
+        let start = index;
+        while chars.get(index).is_some_and(char::is_ascii_digit) {
+            index += 1;
+        }
+        if start == index {
+            continue;
+        }
+        let number: usize = chars[start..index].iter().collect::<String>().parse().unwrap_or(0);
+        let number = moved.get(number).copied().unwrap_or(number + more);
+        out.push_str(&number.to_string());
+    }
+    out
+}
+
+/// An assembly statement with each `long long` written `A` as the two registers it is in.
+fn assembly(
+    func: &mut Func,
+    names: &mut Interner,
+    width: Width,
+    halves: &mut Halves,
+    forward: &mut Map<Value, Value>,
+    inst: Inst,
+) {
+    let Some((constraints, template)) = paired(func, names, width, inst) else { return };
+    let data = func[inst];
+    let Extra::Asm(asm) = data.extra else { return };
+    let asm = func[asm];
+    let constraints = names.intern(&constraints);
+    let template = names.intern(&template);
+    let extra = Extra::Asm(func.add_asm(AsmInfo { template, constraints, ..asm }));
+    let args = spread(&func[data.args], halves);
+    let results: Vec<Type> = data
+        .results()
+        .map(|value| func[value].ty)
+        .flat_map(|ty| if width.is_wide(ty) { vec![width.half(), width.half()] } else { vec![ty] })
+        .collect();
+    let args = func.push_values(&args);
+    let span = func.span(inst);
+    let made = func.create_inst(InstData { args, extra, ..data }, &results, span);
+    func.insert_before(made, inst);
+    let mut fresh = func[made].results();
+    for old in data.results() {
+        if width.is_wide(func[old].ty) {
+            let (Some(low), Some(high)) = (fresh.next(), fresh.next()) else { return };
+            halves.insert(old, (low, high));
+        } else if let Some(again) = fresh.next() {
+            forward.insert(old, again);
+        }
+    }
+    func.remove_inst(inst);
+}
+
 /// A `return`, whose operands are the values the signature says and so are halves now.
 fn flatten(func: &mut Func, halves: &Halves, inst: Inst) {
     let args = spread(&func[func[inst].args], halves);
@@ -1720,7 +1879,18 @@ mod tests {
     use rucc_target::x86_64::{MINGW64, SYSV};
     use rucc_target::{Arch, Env, Os, TargetInfo, Triple};
 
-    use super::{Def, Extra, IntPred, MemInfo, Opcode, halves};
+    use super::{Def, Extra, IntPred, MemInfo, Opcode, halves, renumber};
+
+    /// A pair is two operands now, so every number after it is one further on, a modifier stays
+    /// with its number, `%%` is left alone, and a label past the operands moves too.
+    #[test]
+    fn a_template_s_numbers_follow_the_operands_a_pair_pushed_along() {
+        let moved = [0, 2, 3];
+        assert_eq!(renumber("lock; cmpxchg8b %1", &moved, 1), "lock; cmpxchg8b %2");
+        assert_eq!(renumber("mov %k0,%%eax; add %b2,%w1", &moved, 1), "mov %k0,%%eax; add %b3,%w2");
+        assert_eq!(renumber("jmp %l3", &moved, 1), "jmp %l4");
+        assert_eq!(renumber("%%1 %=", &moved, 1), "%%1 %=");
+    }
 
     /// The width of a register on the target every test here but the last few builds for.
     const HALF: u32 = 64;
