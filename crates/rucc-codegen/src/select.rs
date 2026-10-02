@@ -140,6 +140,16 @@ pub struct Teb {
 /// movq  (%arr,%idx,8), %blk
 /// leaq  x@SECREL32(%blk), %x
 /// ```
+///
+/// i386 is the same walk at four bytes a pointer, from `%fs:44`, which is what gcc and clang write
+/// for `i686-w64-mingw32`:
+///
+/// ```text
+/// movl  __tls_index, %idx
+/// movl  %fs:44, %arr
+/// movl  (%arr,%idx,4), %blk
+/// leal  _x@SECREL32(%blk), %x
+/// ```
 #[derive(Debug)]
 pub struct Indexed {
     /// A 32-bit load, zero extended, which reads `_tls_index`.
@@ -151,6 +161,8 @@ pub struct Indexed {
     pub segment: Segment,
     /// The same.
     pub at: i32,
+    /// How wide a pointer in the array is, which is what the index is scaled by.
+    pub scale: u8,
     /// The instruction that adds an offset to a register, which takes the variable's offset in its
     /// section as its displacement.
     pub add: &'static str,
