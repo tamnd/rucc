@@ -183,7 +183,7 @@ fn plain(form: Form) -> Timing {
         // number this family has had since it stopped having separate adders and multipliers.
         // Divides are overridden in `slow`.
         AluVec => (4, Unit::Float),
-        MoveVec | ShuffleVec => (1, Unit::Float),
+        MoveVec | ShuffleVec | ShiftVec => (1, Unit::Float),
         LoadVec => (1 + LOAD, Unit::Load),
         StoreVec => (1, Unit::Store),
         // The conversions, which are the slowest instructions on this side that are not divides:

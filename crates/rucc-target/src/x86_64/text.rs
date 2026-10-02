@@ -1342,6 +1342,11 @@ static TEXT: &[(&str, &[Written])] = &[
     ("movss_rr", &[spell("movss", &[Xmm(2), Xmm(0)])]),
     ("movsd_rr", &[spell("movsd", &[Xmm(2), Xmm(0)])]),
     ("pshufd_ri", &[spell("pshufd", &[Imm, Xmm(1), Xmm(0)])]),
+    ("pslld_ri", &[spell("pslld", &[Imm, Xmm(0)])]),
+    ("psrld_ri", &[spell("psrld", &[Imm, Xmm(0)])]),
+    ("psrad_ri", &[spell("psrad", &[Imm, Xmm(0)])]),
+    ("psllq_ri", &[spell("psllq", &[Imm, Xmm(0)])]),
+    ("psrlq_ri", &[spell("psrlq", &[Imm, Xmm(0)])]),
     // The conversions, which are the instructions with one argument from each file. The
     // destination is the operand at zero and the source is the one at one, the way every other
     // conversion here is written, and the assembler order puts the source first.
