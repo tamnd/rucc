@@ -14,7 +14,9 @@
 //! then the straightening, then merging, each once. Running the four to a fixed point would cost a
 //! walk of the function for every pass over it and buy back a case nobody has: what merging leaves
 //! behind is a bigger block, and a bigger block does not make a branch foldable that was not
-//! foldable before. The pipeline runs this pass more than once anyway, so the second chance is a
+//! foldable before. A parameter step three takes away is different, because when it was a
+//! constant the branch reading it is now a branch on a constant, so step two runs once more after
+//! that and only then. The pipeline runs this pass more than once anyway, so the second chance is a
 //! pass boundary away rather than a loop away, and that is a chance the pass manager can count and
 //! print.
 //!
@@ -246,25 +248,8 @@ impl Pass for SimplifyCfg {
         // reaches is a branch nothing executes, and folding one would spend fuel on a change
         // nobody can see and charge the two steps below for walking blocks that are not there.
         sweep(func, an, &mut stats);
-        let mut folded = undefault(func, fuel, &mut stats);
-        // Nothing bound, because this step asks where a branch goes whichever way control arrived
-        // at it. Binding a block's parameters to one edge's arguments is the question
-        // [`crate::thread`] asks, and it is a different question with a different answer.
-        let unbound = Bindings::default();
-        for block in func.blocks().collect::<Vec<Block>>() {
-            let Some(term) = func.terminator(block) else { continue };
-            let Some(taken) = taken(func, term, &unbound) else { continue };
-            if !fuel.take() {
-                // Out of fuel stops the transforming and not the looking, the same way the other
-                // passes treat it, so that the walk is the same walk at every fuel setting.
-                stats.missed(NO_FUEL);
-                continue;
-            }
-            jump_to(func, term, taken);
-            stats.optimized(FOLDED);
-            folded = true;
-        }
-        if folded {
+        let undefaulted = undefault(func, fuel, &mut stats);
+        if fold_branches(func, fuel, &mut stats) || undefaulted {
             // The second sweep section 21.4 folds into step two. The cache is holding answers
             // about the function as it was a moment ago, and the manager clears it after the pass
             // returns, which is too late for the pass itself.
@@ -303,9 +288,40 @@ impl Pass for SimplifyCfg {
             // Once, for every parameter every merge bound, rather than a walk of the function per
             // block merged.
             uses::substitute(func, &forward);
+            // A parameter that was the same value every way in can have been a constant, and a
+            // branch on it is now a branch on that constant. This is the one case where the order
+            // above leaves a branch behind that step two would have folded, and when it is the
+            // last time the pipeline runs this pass nothing else takes it out.
+            if fold_branches(func, fuel, &mut stats) {
+                an.clear();
+                sweep(func, an, &mut stats);
+            }
         }
         stats
     }
+}
+
+/// Step two, a branch that only ever goes one way becomes a jump. Says whether any did.
+fn fold_branches(func: &mut Func, fuel: &mut Fuel, stats: &mut Stats) -> bool {
+    let mut folded = false;
+    // Nothing bound, because this step asks where a branch goes whichever way control arrived at
+    // it. Binding a block's parameters to one edge's arguments is the question [`crate::thread`]
+    // asks, and it is a different question with a different answer.
+    let unbound = Bindings::default();
+    for block in func.blocks().collect::<Vec<Block>>() {
+        let Some(term) = func.terminator(block) else { continue };
+        let Some(taken) = taken(func, term, &unbound) else { continue };
+        if !fuel.take() {
+            // Out of fuel stops the transforming and not the looking, the same way the other
+            // passes treat it, so that the walk is the same walk at every fuel setting.
+            stats.missed(NO_FUEL);
+            continue;
+        }
+        jump_to(func, term, taken);
+        stats.optimized(FOLDED);
+        folded = true;
+    }
+    folded
 }
 
 /// Ends every block at the first place control cannot get past, and says whether any changed.
@@ -1331,6 +1347,49 @@ mod tests {
         assert_eq!(lives_in(&func, taken), Some(0));
         assert_eq!(lives_in(&func, other), None);
         assert_eq!(blocks(&func), [0]);
+    }
+
+    #[test]
+    fn a_branch_on_a_parameter_that_was_a_constant_every_way_in_is_folded_in_the_same_run() {
+        // The shape `__mas_set_range` leaves in `regcache_maple_drop` in
+        // drivers/base/regmap/regcache-maple.c, once `mas_reset` has stored the state its warning
+        // reads. The two arms only jump, so step three takes them out, and then the join is
+        // handed the same constant both ways in and the branch below it reads that constant.
+        let text = "\
+; ModuleID = 't.c'
+; format 0
+target triple = \"x86_64-unknown-linux-gnu\"
+target datalayout = \"e-p:64:64-i64:64-f80:128-S128\"
+func @warn(), linkage(external);
+func @f(i1), linkage(external) {
+block0(%0: i1):
+    %1 = iconst.i1 0
+    br_if %0, block1, block2
+block1:
+    jump block3(%1)
+block2:
+    jump block3(%1)
+block3(%2: i1):
+    br_if %2, block4, block5
+block4:
+    call @warn() : ()
+    jump block5
+block5:
+    return
+}
+";
+        let mut names = Interner::new();
+        let mut module = rucc_ir::parse(text, &mut names).expect("the fixture parses");
+        let id = module.funcs().last().expect("there is a function");
+        let stats = simplify(&mut module[id]);
+        let func = &module[id];
+        let calls = func
+            .blocks()
+            .flat_map(|block| func.insts(block))
+            .filter(|&inst| func[inst].opcode == Opcode::Call)
+            .count();
+        assert_eq!(calls, 0, "{}", rucc_ir::print(&module, &names));
+        assert!(stats.count(Kind::Optimized, super::FOLDED) >= 1);
     }
 
     #[test]
