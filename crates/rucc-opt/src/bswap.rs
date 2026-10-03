@@ -138,8 +138,11 @@ fn root(func: &Func, inst: Inst) -> bool {
 /// fits in a register.
 fn bytes_of(ty: Type) -> Option<usize> {
     let bits = ty.bits();
-    (ty.is_int() && ty.is_scalar() && bits % 8 == 0 && (8..=64).contains(&bits))
-        .then_some(bits as usize / 8)
+    // A byte is eight bits and the widest register is sixty four, which are facts about the
+    // machine rather than limits anyone tuned, so they are spelled as the widths they are.
+    let whole = bits % u8::BITS == 0;
+    (ty.is_int() && ty.is_scalar() && whole && (u8::BITS..=u64::BITS).contains(&bits))
+        .then_some((bits / u8::BITS) as usize)
 }
 
 /// Where the bytes of a tree come from.
