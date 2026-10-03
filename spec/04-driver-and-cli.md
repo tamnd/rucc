@@ -331,7 +331,9 @@ kbuild passes some gcc flags on every compile and probes others with `cc-option`
 
 The flags that are taken or refused without doing anything are one table in `crates/rucc-driver/src/kbuild.rs`, read before any other arm of the parser, and a test checks that every flag in it is written in this section. A row can be for one architecture, and on any other the flag is left to the rest of the parser, which usually means an unknown option, as it is in gcc. A flag written with a `*` at the end covers every flag that starts with what comes before the `*` and that a more particular row does not answer, so `-fstack-check=*` is every value of `-fstack-check`.
 
-The `-W` flags the kernel passes are the rule in section 4.1: a name gcc 16 knows is taken and one it does not know is refused, from the list in `crates/rucc-driver/data/gcc-warnings.txt`. So the clang names kbuild probes for clang builds, `-Wthread-safety` and `-Werror=unknown-warning-option` among them, are refused the way gcc refuses them, and `cc-disable-warning` gets gcc's answers.
+The `-W` flags the kernel passes are the rule in section 4.1: a name gcc 16 knows is taken and one it does not know is refused, from the list in `crates/rucc-driver/data/gcc-warnings.txt`. So the clang names kbuild probes for clang builds, `-Wthread-safety` and `-Werror=unknown-warning-option` among them, are refused the way gcc refuses them, and `cc-disable-warning` gets gcc's answers. Under `-fgnuc-version=` of 14 or older a name gcc 14.2 does not know is refused as well, from `crates/rucc-driver/data/gcc-warnings-after-14.txt`, because kbuild keeps `-Wno-unterminated-string-initialization` when the probe of the positive form passes and gcc 14 fails that probe.
+
+A row of the table can name the gcc release that added its flag, and under `-fgnuc-version=` of an older release the flag is an unknown option, as it is to that gcc, wherever on the line the claim is. `-fzero-init-padding-bits=` came with gcc 15 and `-fdiagnostics-show-context` with gcc 16. Without the claim, which is gcc 16, every row is taken.
 
 Honored, by doing what gcc does:
 
