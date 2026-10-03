@@ -282,7 +282,8 @@ impl Readers {
 ///
 /// Every block has to be on the dominator tree, which a block nothing reaches is not, and every
 /// edge has to be one a parameter can be passed along, which an indirect branch and a call that
-/// unwinds to a pad are not. A function on the memory chain is left alone because the loads and
+/// unwinds to a pad are not. An `asm goto` is one, since its labels are blocks with arguments like
+/// any other branch's. A function on the memory chain is left alone because the loads and
 /// stores the pass writes would have to be threaded onto it.
 fn shaped(func: &Func, cfg: &Cfg, entry: Block) -> bool {
     if !cfg.predecessors(entry).is_empty() {
@@ -305,6 +306,7 @@ fn shaped(func: &Func, cfg: &Cfg, entry: Block) -> bool {
                         | Opcode::Switch
                         | Opcode::Return
                         | Opcode::Unreachable
+                        | Opcode::InlineAsm
                 );
                 if !plain {
                     return false;
@@ -1558,6 +1560,36 @@ block3:
         for opcode in [Opcode::Alloca, Opcode::Load, Opcode::Store, Opcode::LifetimeEnd] {
             assert_eq!(count_of(func, opcode), 0, "{} is left", opcode.name());
         }
+    }
+
+    #[test]
+    fn a_local_is_carried_along_the_edges_of_an_asm_goto() {
+        // The kernel's static branch is an `asm goto`, and it is in nearly every function that
+        // has a tracepoint. The local is written on one side of it and read where the two meet.
+        let text = wrap(
+            "(i32) -> i32",
+            "block0(%0: i32):
+    %1 = alloca, size 4, align 4
+    store %0 -> %1, align 4
+    inline_asm.volatile \"jmp %l0\", \"\", \"\"(), labels [block1, block2]
+
+block1:
+    %2 = iconst.i32 1
+    store %2 -> %1, align 4
+    jump block2
+
+block2:
+    %3 = load.i32 %1, align 4
+    return %3
+",
+        );
+        let (module, stats) = run(&text);
+        assert_eq!(stats.count(Kind::Optimized, SCALARIZED), 1);
+        let func = body(&module);
+        for opcode in [Opcode::Alloca, Opcode::Load, Opcode::Store] {
+            assert_eq!(count_of(func, opcode), 0, "{} is left", opcode.name());
+        }
+        assert_eq!(params(func, 2), 1);
     }
 
     #[test]
