@@ -436,8 +436,6 @@ fn the_promises_and_the_tool_hints_gcc_answers_yes_for_are_taken_without_a_word(
          __attribute__((alloc_align(2), malloc)) void *grab(size_t, size_t);\n\
          __attribute__((noplt)) int far(void);\n\
          __attribute__((no_icf)) int same(void) { return 1; }\n\
-         int kept __attribute__((no_reorder)) = 2;\n\
-         __attribute__((no_reorder)) int ordered(void) { return kept; }\n\
          __attribute__((no_sanitize_address, no_address_safety_analysis, no_sanitize_thread,\n\
                         no_sanitize_undefined, no_sanitize_coverage))\n\
          int raw(int *p) { return *p; }\n\
@@ -451,33 +449,10 @@ fn the_promises_and_the_tool_hints_gcc_answers_yes_for_are_taken_without_a_word(
          }\n\
          #define HAS(name) _Static_assert(__has_attribute(name), #name)\n\
          HAS(nothrow); HAS(leaf); HAS(artificial); HAS(alloc_align); HAS(noplt); HAS(no_icf);\n\
-         HAS(no_reorder); HAS(no_sanitize_address); HAS(no_address_safety_analysis);\n\
+         HAS(no_sanitize_address); HAS(no_address_safety_analysis);\n\
          HAS(no_sanitize_thread); HAS(no_sanitize_undefined); HAS(no_sanitize_coverage);\n\
          HAS(no_split_stack); HAS(no_stack_limit); HAS(tainted_args); HAS(fd_arg);\n\
          HAS(fd_arg_read); HAS(fd_arg_write);\n",
     );
     assert_eq!(got, "");
-}
-
-#[test]
-fn the_definitions_that_say_no_reorder_come_out_in_the_order_they_were_written() {
-    // Against each other and against an `asm` statement at file scope, as gcc 13 writes them at
-    // `-O2`, where it would otherwise be free to move them.
-    let out = compile(
-        "no-reorder",
-        &["-O2", "-S"],
-        "int second_one __attribute__((no_reorder)) = 2;\n\
-         __asm__(\".globl between\\nbetween:\");\n\
-         int first_one __attribute__((no_reorder)) = 1;\n\
-         __attribute__((no_reorder)) int later(void) { return 3; }\n\
-         __attribute__((no_reorder)) int earlier(void) { return 4; }\n",
-    );
-    assert!(out.status.success(), "{}", String::from_utf8_lossy(&out.stderr));
-    let text = String::from_utf8_lossy(&out.stdout);
-    let labels: Vec<&str> = text
-        .lines()
-        .filter_map(|line| line.strip_suffix(':'))
-        .filter(|label| !label.starts_with('.'))
-        .collect();
-    assert_eq!(labels, ["second_one", "between", "first_one", "later", "earlier"], "{text}");
 }

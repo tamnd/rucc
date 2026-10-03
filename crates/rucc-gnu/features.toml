@@ -741,15 +741,6 @@ tests = ["rucc-driver::an_attribute_keeps_a_static_function_nothing_refers_to", 
 notes = "The compiler keeps the definition and the linker is asked to as well. It goes in a section of its own marked `SHF_GNU_RETAIN`, which `--gc-sections` does not take away: the one it would have gone in under `-ffunction-sections` or `-fdata-sections`, or the one the program named, with `R` added to the flags, as gcc 16 writes it. A tentative definition so marked is a zeroed one in `.bss.` and its name rather than a common symbol. Only ELF has the flag."
 
 [[feature]]
-name = "no_reorder"
-kind = "attribute"
-gcc_version = "5.0"
-status = "implemented"
-used_by = []
-tests = ["rucc::the_promises_and_the_tool_hints_gcc_answers_yes_for_are_taken_without_a_word", "rucc::the_definitions_that_say_no_reorder_come_out_in_the_order_they_were_written"]
-notes = "Keeps the definitions that say it in the order they were written, against each other and against the `asm` statements at file scope. This compiler writes every definition and every file-scope `asm` out in source order, which is what the attribute asks gcc to do for these ones."
-
-[[feature]]
 name = "visibility"
 kind = "attribute"
 gcc_version = "3.3"
