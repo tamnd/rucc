@@ -5,6 +5,7 @@
 //! 32 bit build each turned into an undefined symbol at the final link.
 
 use std::process::Command;
+use std::sync::atomic::{AtomicUsize, Ordering};
 
 const SOURCE: &str = "\
 typedef long long s64;
@@ -19,7 +20,13 @@ u64 rest(u64 a) { return a % (1ULL << 35); }
 ";
 
 fn listing(level: &str) -> String {
-    let dir = std::env::temp_dir().join(format!("rucc-i386-divide-{}-{level}", std::process::id()));
+    // The tests in this file run on threads of one process and ask for the same levels, so the
+    // process id and the level alone would give two of them the same directory, and one could
+    // remove it while the other was still compiling the file in it.
+    static NEXT: AtomicUsize = AtomicUsize::new(0);
+    let n = NEXT.fetch_add(1, Ordering::Relaxed);
+    let dir =
+        std::env::temp_dir().join(format!("rucc-i386-divide-{}-{level}-{n}", std::process::id()));
     std::fs::create_dir_all(&dir).expect("a temporary directory can be created");
     let path = dir.join("one.c");
     std::fs::write(&path, SOURCE).expect("the fixture can be written");
