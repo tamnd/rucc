@@ -161,3 +161,21 @@ fn the_default_dialect_is_the_claimed_releases() {
     assert_eq!(stdc(&["-fgnuc-version=15.1.0"]), (Some("202311L".to_owned()), false));
     assert_eq!(stdc(&["-fgnuc-version=4.9.4", "-std=gnu11"]), (Some("201112L".to_owned()), false));
 }
+
+/// `CC_HAS_MULTIDIMENSIONAL_NONSTRING`, which init/Kconfig sets when this compiles under `-Werror`.
+/// gcc 14 warns that it ignores `nonstring` on an array of arrays and gcc 15 takes it, so the
+/// answer follows the release claimed. A pointer to anything but a character type is warned about
+/// whatever the release.
+#[test]
+fn nonstring_on_an_array_of_arrays_follows_the_claimed_release() {
+    let probe = "char tag[][4] __attribute__((__nonstring__)) = { };\n";
+    let asked = |claim: &str, input: &str| {
+        run(&[claim, "-Werror", "-x", "c", "-", "-c", "-o", "/dev/null"], input).0
+    };
+    assert!(!asked("-fgnuc-version=14.2.0", probe), "gcc 14 warns");
+    assert!(asked("-fgnuc-version=15.1.0", probe), "gcc 15 takes it");
+    assert!(asked("-fgnuc-version=14.2.0", "char tag[4] __attribute__((nonstring));\n"));
+    assert!(asked("-fgnuc-version=14.2.0", "struct s { char *p __attribute__((nonstring)); };\n"));
+    let pointer = "struct s { int *p __attribute__((nonstring)); };\n";
+    assert!(!asked("-fgnuc-version=16", pointer), "an int pointer is never a string");
+}

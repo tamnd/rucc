@@ -15,6 +15,7 @@ All notable changes are recorded here. The format follows [Keep a Changelog](htt
 
 ### Changed
 
+- `__attribute__((nonstring))` on something that is not a character array or a pointer to a character gets gcc's `-Wattributes` warning that it was ignored, on a variable and on a member. An array of character arrays takes it when `-fgnuc-version=` is 15 or newer, as in gcc 15, and is warned about under an older claim. The kernel's `CONFIG_CC_HAS_MULTIDIMENSIONAL_NONSTRING` now comes out the same as with the gcc being claimed.
 - `-Wa,-mrelax-relocations=no` is honored on x86: every read of the global offset table gets `R_X86_64_GOTPCREL` or `R_386_GOT32`, as gas writes it, from C and from assembly. It was refused, so the kernel's decompressor was built without it.
 - `-march=native` is refused when the machine running rucc is not the target's, as a cross gcc refuses it, rather than building for the baseline. The kernel's `CONFIG_CC_HAS_MARCH_NATIVE` now comes out the same as with the cross gcc.
 - Under `-fgnuc-version=` of 14 or older, `-fzero-init-padding-bits=`, `-fdiagnostics-show-context` and the `-W` names gcc 14.2 does not know are unknown options, as they are to gcc 14, wherever on the line the claim is. A kernel built with a gcc 14 persona now gets the command line the gcc 14 build gets.

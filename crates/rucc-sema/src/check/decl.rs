@@ -909,6 +909,9 @@ impl Checker<'_> {
         let merged = self.tast[id].ty;
         self.record_alloc_size(id, &[specs.attrs, item.attrs], kind, merged);
         self.annotate_decl(id, &[specs.attrs, item.attrs]);
+        if kind == DeclKind::Object {
+            self.check_nonstring(&[specs.attrs, item.attrs], merged);
+        }
         self.read_advice(id, &[specs.attrs, item.attrs]);
         // An initializer that did not work out leaves the object without a size, and saying so
         // a second time helps nobody, so what it did decides whether the size is asked about.
