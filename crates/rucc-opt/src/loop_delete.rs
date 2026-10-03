@@ -98,9 +98,9 @@
 //!
 //! A loop with no count [`crate::scev`] can write may still be one that goes round once for each
 //! bit of a value, and then how many times it goes round is `ctpop`, `ctlz` or `cttz` of what the
-//! value came in as. [`walk`] recognises those and says which, and what such a loop hands over is
+//! value came in as. `walk` recognises those and says which, and what such a loop hands over is
 //! worked out from that count the same way it is from any other. It is done only where the count
-//! is one instruction on the machine the function is built for, and [`walk`] says why.
+//! is one instruction on the machine the function is built for, and `walk` says why.
 //!
 //! # What it does
 //!
