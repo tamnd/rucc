@@ -92,6 +92,21 @@ impl PragmaOptions {
     pub const NONE: PragmaOptions = PragmaOptions { target: None, optimize: None };
 }
 
+/// What the pragmas in effect where a record's body closed ask of it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub struct RecordPragmas {
+    /// The `#pragma pack`, in bytes.
+    pub pack: Option<u32>,
+    /// The `#pragma scalar_storage_order`, true for big-endian and false for little-endian, and
+    /// nothing for `default` and for a file that does not write the line.
+    pub order: Option<bool>,
+}
+
+impl RecordPragmas {
+    /// Neither, which is what a record nobody wrote a line ahead of has.
+    pub const NONE: RecordPragmas = RecordPragmas { pack: None, order: None };
+}
+
 impl DeclSpecs {
     /// A specifier list with nothing in it, which is what the parser starts from.
     #[must_use]
@@ -266,9 +281,9 @@ pub enum TypeSpec {
         fields: Option<MemberList>,
         /// Attributes on the tag itself, which GCC allows both before and after the body.
         attrs: AttrList,
-        /// The `#pragma pack` in effect where the body closed, in bytes, which is not written
-        /// on the declaration and which nothing else in the tree can recover.
-        pack: Option<u32>,
+        /// The pragmas in effect where the body closed, which are not written on the declaration
+        /// and which nothing else in the tree can recover.
+        pragmas: RecordPragmas,
     },
     /// `enum`, with C23's optional underlying type.
     Enum {

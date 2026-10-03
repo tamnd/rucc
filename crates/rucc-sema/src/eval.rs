@@ -1862,7 +1862,7 @@ mod tests {
                 tag,
                 fields,
                 attrs: AttrList::EMPTY,
-                pack: None,
+                pragmas: ast::RecordPragmas::NONE,
             };
             specs
         }

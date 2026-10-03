@@ -76,6 +76,7 @@ mod expr;
 mod extname;
 mod init;
 mod options;
+mod order;
 mod pack;
 mod spec;
 mod stmt;

@@ -307,8 +307,8 @@ impl Checker<'_> {
                     self.int()
                 }
             },
-            TypeSpec::Record { kind, tag, fields, attrs, pack } => {
-                self.record_spec(kind, tag, fields, attrs, pack, span)
+            TypeSpec::Record { kind, tag, fields, attrs, pragmas } => {
+                self.record_spec(kind, tag, fields, attrs, pragmas, span)
             }
             TypeSpec::Enum { tag, enumerators, underlying, attrs } => {
                 self.enum_spec(tag, enumerators, underlying, attrs, span)
@@ -691,7 +691,7 @@ impl Checker<'_> {
         tag: Option<Symbol>,
         fields: Option<ast::MemberList>,
         attrs: ast::AttrList,
-        pack: Option<u32>,
+        pragmas: ast::RecordPragmas,
         span: Span,
     ) -> TypeId {
         let (kind, tag_kind) = match kind {
@@ -717,7 +717,7 @@ impl Checker<'_> {
         // declare a second one inside it.
         let (id, ty, again) = self.record_defined(kind, tag, tag_kind, span);
         self.built.defined.insert(ty);
-        self.record_body(id, kind, members, attrs, pack, span);
+        self.record_body(id, kind, members, attrs, pragmas, span);
         self.read_deprecated_tag(ty, attrs, span);
         match again {
             Some(first) => self.redefined(first, ty, span),
@@ -2154,7 +2154,7 @@ mod tests {
                 tag: Some(tag),
                 fields: None,
                 attrs: rucc_ast::AttrList::EMPTY,
-                pack: None,
+                pragmas: ast::RecordPragmas::NONE,
             },
             Quals::NONE,
         );
@@ -2480,7 +2480,7 @@ mod tests {
             tag: Some(tag),
             fields: None,
             attrs: rucc_ast::AttrList::EMPTY,
-            pack: None,
+            pragmas: ast::RecordPragmas::NONE,
         };
         let structure = fixture.specs(record(ast::RecordKind::Struct), Quals::NONE);
         let onion = fixture.specs(record(ast::RecordKind::Union), Quals::NONE);
@@ -2510,7 +2510,7 @@ mod tests {
                     tag: None,
                     fields: None,
                     attrs: rucc_ast::AttrList::EMPTY,
-                    pack: None,
+                    pragmas: ast::RecordPragmas::NONE,
                 },
                 Quals::NONE,
             )

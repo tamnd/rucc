@@ -4,6 +4,10 @@ All notable changes are recorded here. The format follows [Keep a Changelog](htt
 
 ## Unreleased
 
+### Added
+
+- `#pragma scalar_storage_order` is read, as in gcc 13 (#8). Every `struct` and `union` whose body closes after a `big-endian` line stores its scalars big-endian, as if it had the attribute, `little-endian` and `default` put the target's order back, and a record that writes the attribute keeps its own. gcc reads only the first word, so `big` is taken as well. A line with no word or another one gets gcc's `-Wpragmas` warning and is ignored (E0798). Before, the line was taken without a word and did nothing.
+
 ### Fixed
 
 - `-fprofile-dir=` on a Windows host puts the `.gcda` name under the directory. The whole path is folded into one name with its backslashes turned to `#` and the drive's colon to `~`, as gcc does on a DOS file system, where only the forward slashes were folded before and the name stayed absolute, so the directory was dropped. `arc_counters` passes on Windows again, and its tests compare against the working directory the compiler sees rather than the `\\?\` path `canonicalize` gives.

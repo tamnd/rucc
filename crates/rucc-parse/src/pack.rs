@@ -51,6 +51,8 @@ pub(crate) struct Packs {
     /// What `#pragma GCC target` and `optimize` have in effect, for the same reason, read by
     /// `options.rs`.
     pub(crate) options: crate::options::Options,
+    /// What `#pragma scalar_storage_order` has in effect, set by `order.rs`, true for big-endian.
+    pub(crate) order: Option<bool>,
 }
 
 /// The alignments `#pragma pack` takes, which is what both GCC and MSVC accept.
@@ -79,10 +81,11 @@ enum Action {
 /// The pragmas gcc 13 takes without a word under `-Wunknown-pragmas` that this one has nothing to
 /// do with, besides the ones read here. `once`, `push_macro` and `pop_macro` never get this far,
 /// since the preprocessor answers them.
-const PRAGMAS: &[&str] = &["endregion", "region", "scalar_storage_order"];
+const PRAGMAS: &[&str] = &["endregion", "region"];
 
 /// The same for what follows `#pragma GCC`, of which `visibility.rs` reads `visibility`,
-/// `diagnostic.rs` reads `diagnostic` and `options.rs` reads the five about options. gcc calls `novector` and any other word unknown.
+/// `diagnostic.rs` reads `diagnostic` and `options.rs` reads the five about options. gcc calls
+/// `novector` and any other word unknown.
 const GCC_PRAGMAS: &[&str] = &[
     "dependency",
     "diagnostic",
@@ -166,9 +169,10 @@ impl Parser<'_> {
         self.errors.push(Diagnostic::new(Severity::Note, note, word));
     }
 
-    /// One `#pragma` line. A `pack` and a `message` are read here, a `comment`,
-    /// `GCC visibility`, `GCC diagnostic` and the `GCC` options elsewhere, the other pragmas gcc knows are taken without a word, and
-    /// anything else is ignored with gcc's warning under `-Wunknown-pragmas`.
+    /// One `#pragma` line. A `pack` and a `message` are read here, a `comment`, `GCC visibility`,
+    /// `GCC diagnostic`, `scalar_storage_order` and the `GCC` options elsewhere, the other pragmas
+    /// gcc knows are taken without a word, and anything else is ignored with gcc's warning under
+    /// `-Wunknown-pragmas`.
     fn pack_line(&mut self, line: &[Token], span: Span) {
         let words = [0, 1].map(|at| {
             line.get(at).and_then(|token| token.ident()).map(|name| self.cx.interner.resolve(name))
@@ -179,6 +183,7 @@ impl Parser<'_> {
             [Some("message"), _] => return self.message_line(line),
             [Some("weak"), _] => return self.weak_line(line),
             [Some("redefine_extname"), _] => return self.extname_line(line),
+            [Some("scalar_storage_order"), _] => return self.order_line(line),
             [
                 Some("GCC"),
                 Some("target" | "optimize" | "push_options" | "pop_options" | "reset_options"),

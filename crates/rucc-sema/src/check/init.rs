@@ -1420,8 +1420,13 @@ mod tests {
         fn tag(&mut self, kind: RecordKind, tag: &str) -> DeclSpecs {
             let tag = Some(self.name(tag));
             let mut specs = DeclSpecs::empty(Span::DUMMY);
-            specs.ty =
-                TypeSpec::Record { kind, tag, fields: None, attrs: AttrList::EMPTY, pack: None };
+            specs.ty = TypeSpec::Record {
+                kind,
+                tag,
+                fields: None,
+                attrs: AttrList::EMPTY,
+                pragmas: ast::RecordPragmas::NONE,
+            };
             specs
         }
 
@@ -1430,7 +1435,13 @@ mod tests {
             let tag = tag.map(|tag| self.name(tag));
             let fields = Some(self.ast.add_member_list(members));
             let mut specs = DeclSpecs::empty(Span::DUMMY);
-            specs.ty = TypeSpec::Record { kind, tag, fields, attrs: AttrList::EMPTY, pack: None };
+            specs.ty = TypeSpec::Record {
+                kind,
+                tag,
+                fields,
+                attrs: AttrList::EMPTY,
+                pragmas: ast::RecordPragmas::NONE,
+            };
             specs
         }
 
