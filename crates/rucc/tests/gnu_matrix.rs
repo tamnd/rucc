@@ -220,7 +220,11 @@ fn said_with(what: &str, flags: &[&str], source: &str) -> String {
 
 /// The `printf` calls gcc 16 has something to say about, one of each kind, beside ones it does
 /// not.
-const PRINTF: &str = "#include <stdio.h>\n\
+///
+/// `printf` and `scanf` are declared rather than taken from `stdio.h`, since the fixtures are
+/// built for x86-64 Linux and a machine without that sysroot, the macOS runner, has no
+/// `stdio.h` for it. Their formats are checked by name, as in gcc, so the declaration is enough.
+const PRINTF: &str = "int printf(const char *, ...);\n\
      #include <stddef.h>\n\
      void f(int i, long l, double d, float g, void *v, char *s, size_t z, unsigned char *u) {\n\
          printf(\"%ld\\n\", i);\n\
@@ -278,7 +282,7 @@ fn a_scanf_format_is_checked_against_the_pointers_it_writes_through() {
     let got = said_with(
         "format-scanf",
         &["-Wall"],
-        "#include <stdio.h>\n\
+        "int scanf(const char *, ...);\n\
          void f(int *i, long *l, float *g, double *d, const char *c, char *s, unsigned *u) {\n\
              scanf(\"%d %ld %f %lf %u %d %s %5[a-z] %*d\", i, l, g, d, i, u, s, s);\n\
              scanf(\"%ld\", i);\n\

@@ -94,7 +94,7 @@
 //! A `memcpy` of a known size out of one of these objects becomes stores of what the image holds
 //! there, with one fill in front when the object has more than a few zero bytes in that range.
 //! Every byte has to be answered for this to happen, so a piece of a scalar or an address with
-//! something added to it leaves the copy as it is. [`spelled`] says why the kernel needs it.
+//! something added to it leaves the copy as it is. `spelled` says why the kernel needs it.
 
 use std::collections::hash_map::Entry;
 
