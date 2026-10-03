@@ -2622,11 +2622,14 @@ impl Reader {
         // this is only what the directive itself says.
         self.syms[sym].sort = Sort::Object;
         if local {
-            let was = self.here;
+            let (was, before) = (self.here, self.before);
             if self.macho {
                 self.apple_section("__DATA", "__bss", None, &[])?;
             } else {
+                // gas's `bss_alloc` puts it in subsection one, so every local common comes after
+                // whatever the file put in `.bss` itself, wherever in the file the line was.
                 self.section(".bss", Shape::of(".bss"));
+                self.subsection(1);
             }
             let part = &mut self.parts[self.here];
             part.align = part.align.max(align);
@@ -2640,7 +2643,10 @@ impl Reader {
             self.syms[sym].at = Held::In { part: at, offset };
             self.syms[sym].size = size;
             self.syms[sym].binding = Binding::Local;
-            self.go(was);
+            // Back where the file was, with `.previous` where it was too, since gas moves there
+            // and back without a word to the section stack.
+            self.here = was;
+            self.before = before;
         } else {
             self.syms[sym].at = Held::Common { size, align };
             self.syms[sym].size = size;
@@ -6116,6 +6122,21 @@ _tls$tlv$init:
         let out = assembled("\t.local mine\n\t.comm mine, 8, 8\n");
         assert_eq!(name(&out, "mine").binding, Binding::Local);
         assert!(matches!(name(&out, "mine").at, Held::In { .. }));
+    }
+
+    /// gas gives local commons the room after everything the file put in `.bss` itself, wherever
+    /// the line was, which is how gcc's `static char stack[4096]` lands after the variables it
+    /// writes out in `.bss` in arch/x86/kernel/acpi/sleep.c.
+    #[test]
+    fn a_local_common_comes_after_what_the_file_put_in_bss() {
+        let out = assembled(
+            "\t.text\n\t.local stack\n\t.comm stack,4096,32\n\tret\n\t.bss\nflags:\n\t.zero 9\n",
+        );
+        let Held::In { part, offset } = name(&out, "stack").at else { panic!("not in a section") };
+        assert_eq!(out.parts[part].name, ".bss");
+        assert_eq!(offset, 32);
+        assert_eq!(name(&out, "flags").at, Held::In { part, offset: 0 });
+        assert_eq!(out.parts[part].size, 32 + 4096);
     }
 
     #[test]
