@@ -45,6 +45,7 @@ use rucc_tuple::Arch;
 /// What an instruction says about the place in it that names something, under a name that does not
 /// collide with the [`Sort`] an ELF symbol has.
 use crate::instruction::Sort as Reach;
+use crate::lines::{self, Lines};
 use crate::unwind::{Named, Prologue, Seh};
 
 mod macros;
@@ -539,6 +540,8 @@ struct Reader {
     noexecstack: bool,
     /// The macros defined so far and the conditionals and repetitions that are open.
     macros: macros::Macros,
+    /// What `.file` with a number and `.loc` said, for the line table. See [`crate::lines`].
+    lines: Lines,
     line: usize,
 }
 
@@ -770,7 +773,8 @@ impl Reader {
         // that asked for `@PLT` to the linker, since the name may be taken from another object.
         let stub =
             self.i386 && written.holes.first().is_some_and(|hole| hole.sort == Reach::Branch);
-        let jump = short.is_some() && !stub;
+        let relaxed = short.is_some();
+        let jump = relaxed && !stub;
         if let Some(short) = short {
             if !self.long.contains(&self.branches) {
                 branch = Some(self.branches);
@@ -783,8 +787,13 @@ impl Reader {
         }
         let part = self.here;
         let at = self.at();
+        self.row()?;
         self.put(&written.bytes)?;
         let end = at + written.bytes.len() as u64;
+        // A jump that may grow is a piece of its own in gas, which matters to the line table.
+        if relaxed {
+            self.lines.variable(part, at + 1, end);
+        }
         let slot = if self.i386 {
             slot_i386(&written.bytes)
         } else {
@@ -1521,12 +1530,19 @@ impl Reader {
                 if args.is_empty() || args.len() > 2 {
                     return Err(self.bad(&format!(".{word} wants a size and an optional fill")));
                 }
+                let guessed = self.guessed.len();
                 let size = self.size(&args[0])?;
                 let fill = match args.get(1) {
                     Some(arg) => self.byte(arg)?,
                     None => 0,
                 };
+                let at = self.at();
                 self.pad(size, fill)?;
+                // A size that rests on a guess is one gas could not work out yet either, and it
+                // makes such a `.skip` a piece of its own.
+                if self.guessed.len() > guessed {
+                    self.lines.variable(self.here, at, at + size);
+                }
             }
             "fill" => {
                 // The middle operand is the width of one item and the last is its value, and the
@@ -1580,6 +1596,7 @@ impl Reader {
                 } else {
                     self.pad(to - at, fill)?;
                 }
+                self.lines.variable(self.here, at, to.max(at));
             }
 
             "globl" | "global" => self.bind(&args, Binding::Global)?,
@@ -1647,15 +1664,18 @@ impl Reader {
                 let what = args.first().map_or("", |arg| arg.trim());
                 if what.starts_with('"') {
                     self.files.push(unquoted(what));
+                } else if !what.is_empty() {
+                    self.numbered_file(rest)?;
                 }
             }
+            "loc" => self.loc(rest)?,
 
             // Said for a debugger or a reader and holding nothing a link depends on. Passed over
             // rather than refused, because a file that carries them is otherwise readable and
             // refusing would turn a note into a failure.
             "ident" if self.elf() => self.ident(&args)?,
-            "ident" | "loc" | "loc_mark_labels" | "version" | "arch" | "arch_extension"
-            | "att_syntax" | "intel_syntax" => {}
+            "ident" | "loc_mark_labels" | "version" | "arch" | "arch_extension" | "att_syntax"
+            | "intel_syntax" => {}
             "code32" | "code64" if !self.aarch64 => {
                 self.code = Some(if word == "code32" { Mode::Bits32 } else { Mode::Bits64 });
                 self.sixteen = None;
@@ -1831,6 +1851,9 @@ impl Reader {
         }
         for described in &mut self.prologues {
             place(&mut described.part, &mut described.start);
+        }
+        for row in self.lines.rows_mut() {
+            place(&mut row.part, &mut row.at);
         }
         let sums = self.fixups.iter_mut().map(|fixup| &mut fixup.sum);
         let sums = sums.chain(self.sets.iter_mut().map(|(_, sum, _)| sum));
@@ -2445,6 +2468,9 @@ impl Reader {
         };
         let need = padding(at, boundary, most);
         self.aligns.push(Aligned { part: self.here, at, boundary, most, need });
+        if boundary > 1 {
+            self.lines.variable(self.here, at, at + need);
+        }
         if need == 0 && most.is_some_and(|most| padding(at, boundary, None) > most) {
             return Ok(());
         }
@@ -2948,6 +2974,7 @@ impl Reader {
             return Err(self.bad("a '.seh_proc' that is never ended"));
         }
         self.join_subsections();
+        self.line_table()?;
         self.unwind_table();
         self.seh_table()?;
         self.resolve_sets()?;
@@ -3053,6 +3080,195 @@ impl Reader {
             });
         }
         Ok(Ok(Assembled { parts, names, subsections: self.subsections }))
+    }
+
+    /// `.file 1 "dir" "name" md5 0x...`, which puts a file in the line table. The directory and the
+    /// sum may each be left out.
+    fn numbered_file(&mut self, rest: &str) -> Result<(), Trouble> {
+        let words = words(rest).map_err(|why| self.bad(&why))?;
+        let Some((first, words)) = words.split_first() else {
+            return Err(self.bad(".file with nothing after it"));
+        };
+        let number = self.number(first)?;
+        let number = self.count(number)?;
+        let mut quoted = Vec::new();
+        let mut words = words.iter();
+        let mut md5 = None;
+        while let Some(word) = words.next() {
+            if word.starts_with('"') && quoted.len() < 2 {
+                quoted.push(self.string(word)?);
+            } else if word == "md5" {
+                let sum = words.next().and_then(|sum| wide(sum));
+                let Some(sum) = sum else {
+                    return Err(self.bad("md5 wants a 128 bit number after it"));
+                };
+                md5 = Some(sum.to_be_bytes());
+            } else {
+                return Err(self.bad(&format!("'{word}' after .file, which is not a name or md5")));
+            }
+        }
+        let (dir, name) = match quoted.len() {
+            1 => (None, quoted.remove(0)),
+            2 => {
+                let name = quoted.remove(1);
+                (Some(quoted.remove(0)), name)
+            }
+            _ => return Err(self.bad(".file with a number and no name")),
+        };
+        self.lines.file(number, dir, name, md5).map_err(|why| self.bad(&why))
+    }
+
+    /// `.loc file line [column] [what else]`, which says the instructions from here on came from
+    /// that line, until the next `.loc`.
+    fn loc(&mut self, rest: &str) -> Result<(), Trouble> {
+        // A `.loc` that no instruction came after is a row where the next one starts.
+        self.row()?;
+        let words = words(rest).map_err(|why| self.bad(&why))?;
+        let [file, line, words @ ..] = words.as_slice() else {
+            return Err(self.bad(".loc wants a file and a line"));
+        };
+        let file = self.number(file)?;
+        let file = self.count(file)?;
+        let line = self.number(line)?;
+        let line = self.count(line)?;
+        let mut words = words.iter().peekable();
+        let mut loc = std::mem::take(&mut self.lines.current);
+        loc.file = file;
+        loc.line = line;
+        loc.discriminator = 0;
+        if let Some(column) = words.next_if(|word| word.starts_with(|c: char| c.is_ascii_digit())) {
+            let column = self.number(column)?;
+            loc.column = self.count(column)?;
+        }
+        while let Some(word) = words.next() {
+            let mut value = |what: &str| match words.next() {
+                Some(value) => Ok(value.clone()),
+                None => Err(format!("{what} wants a value after it")),
+            };
+            match word.as_str() {
+                "basic_block" => loc.basic_block = true,
+                "prologue_end" => loc.prologue_end = true,
+                "epilogue_begin" => loc.epilogue_begin = true,
+                "is_stmt" | "isa" | "discriminator" => {
+                    let text = value(word).map_err(|why| self.bad(&why))?;
+                    let number = self.number(&text)?;
+                    let number = self.count(number)?;
+                    match word.as_str() {
+                        "is_stmt" if number > 1 => {
+                            return Err(self.bad("is_stmt value not 0 or 1"));
+                        }
+                        "is_stmt" => loc.stmt = number == 1,
+                        "isa" => loc.isa = number,
+                        _ => loc.discriminator = number,
+                    }
+                }
+                "view" => {
+                    let text = value(word).map_err(|why| self.bad(&why))?;
+                    // A number only says the view there is zero, and `-0` makes it so.
+                    let reset = text == "-0";
+                    if !reset && text.starts_with(|c: char| c.is_ascii_digit()) {
+                        if self.number(&text)? != 0 {
+                            return Err(self.bad("numeric view can only be asserted to zero"));
+                        }
+                        loc.view = Some(String::new());
+                    } else if reset {
+                        loc.view = Some(String::new());
+                        loc.reset = true;
+                    } else {
+                        loc.view = Some(text);
+                    }
+                }
+                _ => {
+                    let what = format!("unknown .loc sub-directive `{word}'");
+                    return Err(self.bad(&what));
+                }
+            }
+        }
+        let immediate = loc.view.is_some();
+        self.lines.current = loc;
+        self.lines.waiting = true;
+        self.lines.seen = true;
+        if immediate {
+            self.row()?;
+        }
+        Ok(())
+    }
+
+    /// The row the last `.loc` is waiting to make, here, if there is one, with the name of its view
+    /// set to the view's number.
+    fn row(&mut self) -> Result<(), Trouble> {
+        let shape = self.parts[self.here].shape;
+        let code = shape.exec && shape.alloc && (shape.bits || !self.elf());
+        let at = self.at();
+        if let Some((name, view)) = self.lines.row(self.here, at, code) {
+            if !name.is_empty() {
+                let sym = self.sym(&name);
+                self.syms[sym].at = Held::Absolute(view);
+            }
+        }
+        Ok(())
+    }
+
+    /// The line table, into `.debug_line`, with the names of the files and directories it uses on
+    /// the end of `.debug_line_str`.
+    ///
+    /// gas writes it when the file has a `.debug_info` with something in it, which is gcc's under
+    /// `-g`, and leaves `.debug_line` alone when the file wrote one itself and said no `.loc`. Both
+    /// at once is a mistake gas refuses. Only for x86 ELF, which is all gcc's output this reads is.
+    fn line_table(&mut self) -> Result<(), Trouble> {
+        if !self.elf() || self.aarch64 {
+            return Ok(());
+        }
+        let size = |name: &str| self.named.get(name).map_or(0, |&at| self.parts[at].size);
+        if size(".debug_info") == 0 {
+            return Ok(());
+        }
+        if size(".debug_line") != 0 {
+            if self.lines.any_rows() && self.lines.seen {
+                return Err(self.bad("duplicate .debug_line sections"));
+            }
+            return Ok(());
+        }
+        let address = if self.i386 { 4 } else { 8 };
+        let parts = &self.parts;
+        let table =
+            self.lines.table(address, |part| parts[part].size).map_err(|why| self.bad(&why))?;
+        let here = self.here;
+        let mut strings = 0;
+        if !table.strings.is_empty() {
+            let shape = Shape { bits: true, merge: 1, strings: true, ..Shape::default() };
+            self.section(".debug_line_str", shape);
+            strings = self.at();
+            self.put(&table.strings)?;
+        }
+        self.section(".debug_line", Shape { bits: true, ..Shape::default() });
+        let (part, start) = (self.here, self.at());
+        self.put(&table.bytes)?;
+        let text = self.named.get(".debug_line_str").copied();
+        for (n, hole) in table.holes.iter().enumerate() {
+            let (to, offset) = match hole.to {
+                lines::To::Code { part, at } => (part, at),
+                lines::To::Text(at) => (text.unwrap_or(part), strings + at as u64),
+            };
+            let name = format!("\u{1}line{n}");
+            let sym = self.sym(&name);
+            self.syms[sym].at = Held::In { part: to, offset };
+            self.fixups.push(Fixup {
+                part,
+                at: start + hole.at as u64,
+                width: hole.width,
+                sum: Sum { constant: 0, terms: vec![Term { coeff: 1, what: What::Symbol(name) }] },
+                reach: Reach::Near,
+                slot: Reference::Got,
+                branch: None,
+                jump: false,
+                field: None,
+                leb: None,
+                line: self.line,
+            });
+        }
+        self.go(here);
+        Ok(())
     }
 
     /// The unwind table the frame rules describe, as a section of its own.
@@ -4608,6 +4824,44 @@ fn counted(number: &str, nth: usize) -> String {
 }
 
 /// The text with its quotes taken off, if it had any.
+/// The words of a directive split at spaces, with a quoted string kept whole however many spaces
+/// are in it, quotes and all.
+fn words(text: &str) -> Result<Vec<String>, String> {
+    let mut words = Vec::new();
+    let mut chars = text.trim().chars().peekable();
+    while let Some(&c) = chars.peek() {
+        if c.is_whitespace() || c == ',' {
+            chars.next();
+            continue;
+        }
+        let mut word = String::new();
+        if c == '"' {
+            word.push(c);
+            chars.next();
+            loop {
+                match chars.next() {
+                    Some('\\') => {
+                        word.push('\\');
+                        word.extend(chars.next());
+                    }
+                    Some('"') => {
+                        word.push('"');
+                        break;
+                    }
+                    Some(c) => word.push(c),
+                    None => return Err("a string that is never closed".to_owned()),
+                }
+            }
+        } else {
+            while let Some(c) = chars.next_if(|c| !c.is_whitespace() && *c != '"') {
+                word.push(c);
+            }
+        }
+        words.push(word);
+    }
+    Ok(words)
+}
+
 fn unquoted(text: &str) -> String {
     text.strip_prefix('"').and_then(|rest| rest.strip_suffix('"')).unwrap_or(text).to_owned()
 }
@@ -4856,6 +5110,39 @@ mod tests {
         assert!(twice.unwrap_err().why.contains("defined twice"));
         let bare = read(".text\na:\n.symver a, x\n", Arch::X86_64);
         assert!(bare.unwrap_err().why.contains("no '@'"));
+    }
+
+    /// gcc's `-g` output leaves the line table to the assembler: `.file` and `.loc` say where each
+    /// instruction came from, and the table goes in the empty `.debug_line` gcc names. The bytes
+    /// are the ones gas 2.44 writes for the same file, view numbers and all.
+    #[test]
+    fn file_and_loc_make_the_line_table_gas_makes() {
+        let file = assembled(concat!(
+            ".file 0 \"/w\" \"/s/a.c\"\n.file 1 \"/s/a.c\"\n.text\nf:\n",
+            ".loc 1 3 1 view -0\n.loc 1 4 5 view .LVU1\nnop\n.loc 1 20 2 is_stmt 0\nret\n",
+            ".section .debug_info,\"\",@progbits\n.long 0\n.byte .LVU1\n",
+            ".section .debug_line,\"\",@progbits\n",
+        ));
+        let part = |name: &str| file.parts.iter().find(|part| part.name == name).unwrap();
+        #[rustfmt::skip]
+        let table = [
+            0x52, 0, 0, 0, 5, 0, 8, 0, 0x2e, 0, 0, 0, 1, 1, 1, 0xfb,
+            0x0e, 0x0d, 0, 1, 1, 1, 1, 0, 0, 0, 1, 0, 0, 1, 1, 1,
+            0x1f, 2, 0, 0, 0, 0, 0, 0, 0, 0, 2, 1, 0x1f, 2, 0x0f, 2,
+            0, 0, 0, 0, 1, 0, 0, 0, 0, 1, 5, 1, 0, 9, 2, 0,
+            0, 0, 0, 0, 0, 0, 0, 0x14, 5, 5, 0x13, 5, 2, 6, 3, 0x10,
+            0x20, 2, 1, 0, 1, 1,
+        ];
+        assert_eq!(part(".debug_line").bytes, table);
+        assert_eq!(part(".debug_line_str").bytes, b"/w\0/s\0a.c\0a.c\0");
+        assert_eq!(part(".debug_info").bytes, [0, 0, 0, 0, 1], "the second row is view one");
+        let holes: Vec<usize> = part(".debug_line").relocs.iter().map(|reloc| reloc.at).collect();
+        assert_eq!(holes, [0x22, 0x26, 0x30, 0x35, 0x3f]);
+
+        let twice = ".file 1 \"a.c\"\n.file 1 \"b.c\"\n";
+        assert!(read(twice, Arch::X86_64).unwrap_err().why.contains("already occupied"));
+        let unknown = ".file 1 \"a.c\"\n.loc 1 1 frob\n";
+        assert!(read(unknown, Arch::X86_64).unwrap_err().why.contains("frob"));
     }
 
     /// The shape of the kernel's la57toggle.S, which drops to thirty two bits in the middle of
