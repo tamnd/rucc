@@ -18,9 +18,12 @@ u64 hide(u64 x) { __asm__ (\"\" : \"=r\" (x) : \"0\" (x)); return x + 1; }
 u64 seen(u64 x) { asm volatile(\"\" : : \"r\"(x)); asm volatile(\"\" : \"+g\"(x)); return x; }
 ";
 
-fn build(level: &str, source: &str) -> std::process::Output {
-    let dir =
-        std::env::temp_dir().join(format!("rucc-i386-wide-asm-{}{level}", std::process::id()));
+/// Builds `source` at `level` in a directory of its own. `case` names the test, because the tests
+/// run in parallel in one process and two of them building at `-O2` would otherwise share a
+/// directory, and whichever finished first took the other's file away before it was compiled.
+fn build(case: &str, level: &str, source: &str) -> std::process::Output {
+    let dir = std::env::temp_dir()
+        .join(format!("rucc-i386-wide-asm-{}-{case}{level}", std::process::id()));
     std::fs::create_dir_all(&dir).expect("a temporary directory can be created");
     let path = dir.join("one.c");
     std::fs::write(&path, source).expect("the fixture can be written");
@@ -36,7 +39,7 @@ fn build(level: &str, source: &str) -> std::process::Output {
 #[test]
 fn a_wide_operand_the_template_does_not_name_is_two_operands() {
     for level in ["-O0", "-O2"] {
-        let out = build(level, SOURCE);
+        let out = build("unnamed", level, SOURCE);
         assert!(out.status.success(), "{level}: {}", String::from_utf8_lossy(&out.stderr));
     }
 }
@@ -45,6 +48,6 @@ fn a_wide_operand_the_template_does_not_name_is_two_operands() {
 fn a_wide_operand_the_template_names_is_still_refused() {
     let source =
         "unsigned long long f(unsigned long long x) { asm(\"incl %0\" : \"+r\"(x)); return x; }\n";
-    let out = build("-O2", source);
+    let out = build("named", "-O2", source);
     assert!(!out.status.success());
 }
