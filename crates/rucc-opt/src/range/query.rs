@@ -101,6 +101,12 @@ const RELATIONS: usize = 16;
 /// how many cases a switch may have.
 const EXCLUSIONS: usize = PAIRS + 1;
 
+/// How many joins deep a walk asks what came in along every edge, one join inside another.
+const JOINS: u32 = 2;
+
+/// The most edges a join may have for the walk to ask what came in along each of them.
+const JOIN_EDGES: usize = 4;
+
 /// How many branches on something else one walk passes before it gives up, so that a query in a
 /// function that is one long chain of tests is not a walk to the top of it every time.
 const PASSED: u32 = 64;
@@ -281,6 +287,9 @@ pub struct Ranges<'a> {
     /// so the second walk does not follow the same edge back to the first. What is worked out
     /// under it is not cached, because it is less than the walk would find on its own.
     equating: bool,
+    /// How many joins deep the walk is, counting each one it went through to ask what came in
+    /// along every edge. See [`Ranges::joined`].
+    joins: u32,
     /// The loop tree, built the first time a header parameter is asked about.
     ///
     /// A function with no loop in it never builds one, which is most of the functions in a C
@@ -313,6 +322,7 @@ impl<'a> Ranges<'a> {
             spent: 0,
             scratch: Map::default(),
             equating: false,
+            joins: 0,
             loops: None,
             given: None,
         }
@@ -843,6 +853,9 @@ impl<'a> Ranges<'a> {
         let (mut steps, mut passed) = (0, 0);
         let mut equal = Vec::new();
         while steps < self.options.recompute_depth && passed < PASSED && Some(cursor) != stop {
+            if let Some(found) = self.joined(value, cursor) {
+                range = range.intersect(found);
+            }
             let Some(parent) = self.dom.immediate_dominator(cursor) else { break };
             // Only a branch can say anything, so a block that just jumps on is free. Without
             // this a chain of empty blocks that lowering leaves behind a statement expression
@@ -907,6 +920,55 @@ impl<'a> Ranges<'a> {
             }
         }
         range
+    }
+
+    /// What a value can be on entry to a join, from what each edge into it says.
+    ///
+    /// The dominating branches say nothing at a join that the ways into it reached by different
+    /// tests, and the edges themselves say everything. arch/x86/kernel/jump_label.c has
+    /// `BUG_ON(insn.length != 2 && insn.length != 5)` and then switches on the length, so the
+    /// block after the check is reached once on `length == 2` and once on `length == 5`, and gcc
+    /// knows the switch's default cannot run. Each edge's fact is narrowed by what is known at the
+    /// end of the block it leaves, and the answer is the union of them.
+    ///
+    /// Only for a join of at most [`JOIN_EDGES`] edges every one of which says something, since one
+    /// that says nothing makes the union the whole type, and only [`JOINS`] joins deep, since each
+    /// one is a walk for every edge. An edge from a block the join dominates comes round a loop,
+    /// and what it carries depends on the answer being worked out, so a join with one is left.
+    fn joined(&mut self, value: Value, block: Block) -> Option<Range> {
+        let preds = self.cfg.predecessors(block);
+        if self.joins >= JOINS || preds.len() < 2 || preds.len() > JOIN_EDGES {
+            return None;
+        }
+        let preds = preds.to_vec();
+        if preds.iter().any(|&pred| pred == block || self.dom.dominates(block, pred)) {
+            return None;
+        }
+        let mut facts = Vec::with_capacity(preds.len());
+        for &pred in &preds {
+            let term = self.func.terminator(pred)?;
+            let &tested = self.func[self.func[term].args].first()?;
+            if !self.mentions(tested, value, self.options.logical_depth) {
+                return None;
+            }
+            facts.push(self.edge_fact(pred, block, value)?);
+        }
+        self.joins += 1;
+        let mut union: Option<Range> = None;
+        for (pred, fact) in preds.into_iter().zip(facts) {
+            let above = self.refined(value, pred);
+            let came = if above.width() == fact.width() { above.intersect(fact) } else { fact };
+            union = Some(match union {
+                Some(sofar) if sofar.width() == came.width() => sofar.union(came),
+                Some(_) => {
+                    self.joins -= 1;
+                    return None;
+                }
+                None => came,
+            });
+        }
+        self.joins -= 1;
+        union
     }
 
     /// The value an edge says this one is equal to, when the branch is on an `icmp eq` and the
@@ -1948,6 +2010,54 @@ mod tests {
         let mut ranges = asked.ranges();
         assert_eq!(bounds(ranges.at(args[1], blocks[3])), Some((7, 7)));
         assert_eq!(bounds(ranges.at(args[1], blocks[1])), bounds(Range::of(I32)));
+    }
+
+    #[test]
+    fn a_join_reached_by_different_tests_is_what_each_edge_into_it_says() {
+        // `if (x != 2 && x != 5) bug(); if (x == 2) ... else ...`, where the join after the check
+        // is reached once on `x == 2` and once on `x == 5`, so the else arm knows `x` is 5. That
+        // is arch/x86/kernel/jump_label.c, where gcc drops the `BUG` in the switch default.
+        let (mut func, args, blocks) = shape(1, 6);
+        let x = args[0];
+        let mut build = Builder::new(&mut func, blocks[0]);
+        let two = build.iconst(I32, 2);
+        let is_two = build.icmp(IntPred::Eq, x, two);
+        build.br_if(is_two, blocks[2], &[], blocks[1], &[]);
+        let mut build = Builder::new(&mut func, blocks[1]);
+        let five = build.iconst(I32, 5);
+        let not_five = build.icmp(IntPred::Ne, x, five);
+        build.br_if(not_five, blocks[5], &[], blocks[2], &[]);
+        let mut build = Builder::new(&mut func, blocks[2]);
+        let two = build.iconst(I32, 2);
+        let again = build.icmp(IntPred::Eq, x, two);
+        build.br_if(again, blocks[3], &[], blocks[4], &[]);
+        Builder::new(&mut func, blocks[3]).ret(&[]);
+        Builder::new(&mut func, blocks[4]).ret(&[]);
+        Builder::new(&mut func, blocks[5]).ret(&[]);
+        let asked = Asked::new(func);
+        let mut ranges = asked.ranges();
+        assert_eq!(ranges.at(x, blocks[2]).list(4), Some(vec![2, 5]));
+        assert_eq!(ranges.at(x, blocks[4]).singleton(), Some(5));
+        assert_eq!(ranges.at(x, blocks[3]).singleton(), Some(2));
+    }
+
+    #[test]
+    fn a_join_one_edge_into_which_says_nothing_is_the_whole_type() {
+        // The same join, with the second way in coming from a block that tests something else.
+        let (mut func, args, blocks) = shape(2, 4);
+        let (x, y) = (args[0], args[1]);
+        let mut build = Builder::new(&mut func, blocks[0]);
+        let two = build.iconst(I32, 2);
+        let is_two = build.icmp(IntPred::Eq, x, two);
+        build.br_if(is_two, blocks[2], &[], blocks[1], &[]);
+        let mut build = Builder::new(&mut func, blocks[1]);
+        let zero = build.iconst(I32, 0);
+        let other = build.icmp(IntPred::Eq, y, zero);
+        build.br_if(other, blocks[2], &[], blocks[3], &[]);
+        Builder::new(&mut func, blocks[2]).ret(&[]);
+        Builder::new(&mut func, blocks[3]).ret(&[]);
+        let asked = Asked::new(func);
+        assert!(asked.ranges().at(x, blocks[2]).is_full());
     }
 
     #[test]
