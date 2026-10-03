@@ -106,7 +106,6 @@ use rucc_ir::{
 use rucc_target::{AbiDescription, CallRegs, Convention, Places, Variadic, Where};
 
 use crate::capability;
-use crate::expand;
 
 /// The width a register is on the target being compiled for, which is the width of each half and
 /// the one fact everything else this pass writes down follows from.
@@ -987,13 +986,15 @@ fn carried(func: &mut Func, width: Width, halves: &mut Halves, inst: Inst, opcod
 /// of a product are the same bits either way. The sign only matters to the bits that are being
 /// thrown away.
 ///
-/// The carry out of the low halves is the high half of their product. When the halves are thirty
-/// two bits, which is a `long long` on i386, that is `umulh`, the one operand `mull` that division by
-/// a constant already uses, and the whole multiply is the low product, that `mull`, and two `imull`s for
-/// the cross products. At sixty four bits [`crate::expand`] still writes it out as long
-/// multiplication one level further down, the way it does for the overflow builtins, which is four
-/// multiplies of thirty two bit pieces where one instruction would do, and `tamnd/rucc#309` is the
-/// rule that would make that one instruction as well.
+/// The carry out of the low halves is the high half of their product, which is `umulh`: the one
+/// operand `mulq` on x86-64, `umulh` on AArch64 and `mull` on i386, where the halves are a
+/// `long long`'s thirty two bits.
+///
+/// A cross product against a high half that is zero is zero and is left out. When both operands
+/// are a half widened the same way, which is what `(unsigned __int128)a * b` and `(__int128)a * b`
+/// are once [`extend`] has split them, the cross products are the whole of the difference between
+/// `umulh` and `smulh` and nothing else. So the high half is the one instruction, and the product
+/// is the two halves of one `mulq` or one `imulq`, which is what gcc writes.
 fn multiply(func: &mut Func, width: Width, halves: &mut Halves, inst: Inst) {
     let args = func[func[inst].args].to_vec();
     let [a, b] = args[..] else { return };
@@ -1001,16 +1002,40 @@ fn multiply(func: &mut Func, width: Width, halves: &mut Halves, inst: Inst) {
         return;
     };
     let low = ahead(func, width, inst, Opcode::Mul, &[a_low, b_low]);
-    let carried = if width.half == 32 {
-        ahead(func, width, inst, Opcode::UMulHigh, &[a_low, b_low])
-    } else {
-        expand::high_half(func, inst, a_low, b_low, false, width.half())
+    let high = match (widened(func, width, a_low, a_high), widened(func, width, b_low, b_high)) {
+        (Some(false), Some(false)) => ahead(func, width, inst, Opcode::UMulHigh, &[a_low, b_low]),
+        (Some(true), Some(true)) => ahead(func, width, inst, Opcode::SMulHigh, &[a_low, b_low]),
+        _ => {
+            let mut high = ahead(func, width, inst, Opcode::UMulHigh, &[a_low, b_low]);
+            for (left, right) in [(a_low, b_high), (a_high, b_low)] {
+                if known(func, left) == Some(0) || known(func, right) == Some(0) {
+                    continue;
+                }
+                let cross = ahead(func, width, inst, Opcode::Mul, &[left, right]);
+                high = ahead(func, width, inst, Opcode::Add, &[high, cross]);
+            }
+            high
+        }
     };
-    let cross = ahead(func, width, inst, Opcode::Mul, &[a_low, b_high]);
-    let other = ahead(func, width, inst, Opcode::Mul, &[a_high, b_low]);
-    let high = ahead(func, width, inst, Opcode::Add, &[carried, cross]);
-    let high = ahead(func, width, inst, Opcode::Add, &[high, other]);
     replace(func, halves, inst, low, high);
+}
+
+/// Whether a wide value is its low half widened, and if so whether with its sign.
+///
+/// The two shapes are the ones [`extend`] writes: a high half that is the constant zero, and a high
+/// half that is the low one shifted right arithmetically by one less than its width. Anything else
+/// is a value whose high half says something of its own, and the answer is nothing.
+fn widened(func: &Func, width: Width, low: Value, high: Value) -> Option<bool> {
+    if known(func, high) == Some(0) {
+        return Some(false);
+    }
+    let Def::Result { inst, .. } = func[high].def else { return None };
+    let data = func[inst];
+    let [of, by] = func[data.args][..] else { return None };
+    let sign = data.opcode == Opcode::AShr
+        && of == low
+        && known(func, by) == Some(u128::from(width.half - 1));
+    sign.then_some(true)
 }
 
 /// A divide or a remainder, as a call to the routine in the compiler runtime that works it out.
@@ -2311,7 +2336,50 @@ mod tests {
         assert!(halves(&mut func, &mut names, &SYSV), "there is a width to split");
         let text = printed(&func, &mut names);
         assert!(!text.contains("i128"), "nothing that wide is left: {text}");
-        assert_eq!(text.matches(" = mul ").count(), 7, "three and the carry's four: {text}");
+        assert_eq!(text.matches(" = mul ").count(), 3, "the low halves and two crosses: {text}");
+        assert_eq!(text.matches(" = umulh ").count(), 1, "and one for the carry: {text}");
+    }
+
+    /// The multiply of two halves widened the same way is the low product and one high multiply of
+    /// that sign, with no cross product, which is one `mulq` or one `imulq`.
+    #[test]
+    fn a_widening_multiply_is_one_multiply_and_its_high_half() {
+        for (opcode, high) in [(Opcode::ZExt, " = umulh "), (Opcode::SExt, " = smulh ")] {
+            let mut names = Interner::new();
+            let half = Type::int(HALF);
+            let (mut func, entry, params) = shell(&mut names, &[half, half], &[wide()]);
+            let mut build = Builder::new(&mut func, entry);
+            let a = build.unary(opcode, params[0], wide());
+            let b = build.unary(opcode, params[1], wide());
+            let product = build.binary(Opcode::Mul, a, b, Flags::NONE);
+            build.ret(&[product]);
+
+            assert!(halves(&mut func, &mut names, &SYSV), "there is a width to split");
+            let text = printed(&func, &mut names);
+            assert!(!text.contains("i128"), "nothing that wide is left: {text}");
+            assert_eq!(text.matches(" = mul ").count(), 1, "the low product alone: {text}");
+            assert_eq!(text.matches(high).count(), 1, "and its high half: {text}");
+            assert_eq!(text.matches(" = add ").count(), 0, "no cross product: {text}");
+        }
+    }
+
+    /// A widened half against a wide value drops the cross product with the zero half, and keeps
+    /// the other one, since the wide value's high half is something of its own.
+    #[test]
+    fn a_zero_high_half_drops_its_cross_product() {
+        let mut names = Interner::new();
+        let half = Type::int(HALF);
+        let (mut func, entry, params) = shell(&mut names, &[half, wide()], &[wide()]);
+        let mut build = Builder::new(&mut func, entry);
+        let a = build.unary(Opcode::ZExt, params[0], wide());
+        let product = build.binary(Opcode::Mul, a, params[1], Flags::NONE);
+        build.ret(&[product]);
+
+        assert!(halves(&mut func, &mut names, &SYSV), "there is a width to split");
+        let text = printed(&func, &mut names);
+        assert_eq!(text.matches(" = mul ").count(), 2, "the low product and one cross: {text}");
+        assert_eq!(text.matches(" = umulh ").count(), 1, "and the carry: {text}");
+        assert_eq!(text.matches(" = smulh ").count(), 0, "nothing signed: {text}");
     }
 
     /// Each of the four divisions becomes a call to the routine of that name in the runtime.
