@@ -20,6 +20,7 @@ Each entry says what was run, on what, and what the difference was. A divergence
 | `cargo xtask abi-differential --target x86_64-windows-gnu`, nine builds | under Wine on x86-64 Linux, and natively on a `windows-2025` runner, in CI | rucc and MinGW GCC agree about the Microsoft x64 convention, and the native run is the one that settles anything Wine might be hiding |
 | `tests/sqlite/windows.sh`, SQLite's veryquick suite built by rucc and by MinGW GCC | under Wine on x86-64 Linux, nightly | rung 1 for `x86_64-windows-gnu`: nothing fails in rucc's build that passes in MinGW GCC's |
 | `ARCH=aarch64 tests/sqlite/windows.sh`, the same suite built by rucc and by llvm-mingw's clang | natively on the `windows-11-arm` runner, nightly | rung 1 for `aarch64-windows-gnu`: nothing fails in rucc's build that passes in clang's |
+| `tests/rung0/run.sh rucc i686-linux-gnu`, the c-testsuite single-exec programs at `-O0` and `-O2` | x86-64 Linux hardware, in CI, running the 32-bit programs directly | rung 0 for `i686-linux-gnu`, with nothing emulated |
 | `bin/run-corpus` in tamnd/rucc-cross | four musl rows under qemu, and the runner's own row on hardware | the reference and the emulator agree about the corpus there |
 | `bin/run-abi-signatures` in tamnd/rucc-cross | the same rows | the signature corpus is a program that runs, on those architectures |
 
@@ -54,6 +55,12 @@ The android rows have no bionic available. What the reference ships is bionic's 
 The Darwin and Windows rows need a different kind of emulator than qemu user mode, which runs Linux binaries. The Darwin rows run on the machine they were built for, when that machine is a mac. `x86_64-windows-gnu` runs in two places on every pull request: natively on a `windows-2025` runner, and under Wine on Linux. Wine is not an emulator but a second implementation of the Windows API, so a program that passes under Wine and fails on Windows is a Wine or C runtime difference rather than a compiler bug, and the native job is the one that settles it. The two jobs also have to write the same objects byte for byte. The other Windows rows are compiled and not run yet.
 
 `loongarch64-linux-gnu` is the row that will stay emulated the longest. Document 04.6 records that the hardware is not purchasable outside China, so unless that changes it is a qemu-only target permanently, and its entry in this document is the whole of its evidence rather than a supplement to hardware.
+
+## i686-linux-gnu
+
+**Rung 0 runs on hardware, because an x86-64 kernel runs i386 programs itself.** The CI job links against Ubuntu's i386 cross packages, `libc6-dev-i386-cross` for the link and `libc6-i386` for the loader, so this row has the glibc runtime the other glibc rows are waiting on. The CPU is a 64-bit one in compatibility mode rather than a real i686, so an instruction an older i686 lacks, SSE2 being the one rucc uses, is not caught here.
+
+**Each program is built under the GNU dialect of the standard its tags name.** rucc defaults to C23, where `int (*f)()` takes no arguments, so 00209 does not compile there, and gcc agrees. `-std=c89` refuses the `//` comment in 00201 even though it is tagged c89, and so does gcc, which is why the dialect is the GNU one. Nothing is excluded.
 
 ## x86_64-windows-gnu
 

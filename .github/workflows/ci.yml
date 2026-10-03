@@ -493,6 +493,25 @@ jobs:
       - name: run the programs
         run: tests/qemu/run.sh "$PWD/target/release/rucc" aarch64-linux-gnu
 
+  # Rung 0 for i686-linux-gnu. An x86_64 Linux kernel runs 32-bit programs directly, so nothing is
+  # emulated here: rucc builds the c-testsuite programs against Ubuntu's i386 cross libc and they
+  # run on the runner itself, with the exclusions in tests/rung0/exclude-i686-linux-gnu.txt.
+  i686:
+    name: i686 linux rung 0
+    needs: quick
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v7.0.1
+      - uses: Swatinem/rust-cache@v2.9.2
+      - name: install the i386 libc and lld
+        run: |
+          sudo apt-get update || echo "at least one apt source is unhappy, carrying on"
+          sudo apt-get install -y gcc-i686-linux-gnu libc6-dev-i386-cross libc6-i386 lib32gcc-s1 lld-19
+      - name: build rucc
+        run: cargo build --release --bin rucc
+      - name: run rung 0
+        run: tests/rung0/run.sh "$PWD/target/release/rucc" i686-linux-gnu
+
   # The barriers and atomics PostgreSQL is built on, run on AArch64 hardware. The qemu job above
   # cannot do this, because an emulated machine is only ever as weak as the x86 host under it, and
   # most of what AArch64 is allowed to reorder x86 never does. Each litmus test in tests/litmus runs
@@ -920,7 +939,7 @@ jobs:
   ci:
     name: ci
     if: always()
-    needs: [quick, test, docs, solver, msrv, determinism, disasm, stubs, implib, wine, qemu, litmus, windows, windows-objects, safety, accounting, audit, differential, abi-differential, postgres]
+    needs: [quick, test, docs, solver, msrv, determinism, disasm, stubs, implib, wine, qemu, i686, litmus, windows, windows-objects, safety, accounting, audit, differential, abi-differential, postgres]
     runs-on: ubuntu-24.04
     steps:
       - name: fail if anything upstream failed
