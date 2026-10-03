@@ -292,6 +292,8 @@ impl Checker<'_> {
         let alignment = alignment.max(self.attribute_alignment(specs.attrs, AttrList::EMPTY, ty));
         // `section` and `used` beside a star, which are the declaration's, as in [`Self::starred`].
         let starred = self.starred(declarator);
+        // What is said about calling the function beside a star, which is the declaration's too.
+        let beside = self.called_beside(&starred);
         let gnu_inline = self.gnu_inlined(specs.attrs);
         // Checked and not kept, since nothing reads a format string yet. The specifiers only, for
         // the reason `retained` below reads them only.
@@ -332,17 +334,20 @@ impl Checker<'_> {
             // only. `_Noreturn` is a specifier wherever it is written, and the attribute on a
             // definition goes on the specifiers as well since there is no declarator to hang it
             // off, so between them the two places cover everything a definition can say.
-            noreturn: specs.func.has(FuncSpecs::NORETURN) || self.never_returns(specs.attrs),
+            noreturn: specs.func.has(FuncSpecs::NORETURN)
+                || self.never_returns(specs.attrs)
+                || beside.noreturn,
             // The specifiers only, for the reason `noreturn` above reads them only. This is the
             // usual place for it: a naked function is written where its body is, since the body is
             // the only part of it the compiler is being asked to keep.
             naked: self.is_naked(specs.attrs),
             // The specifiers only, for the reason `noreturn` above reads them only.
-            twice: self.returns_twice(specs.attrs),
+            twice: self.returns_twice(specs.attrs) || beside.twice,
             // The specifiers only, for the reason `noreturn` above reads them only. glibc writes
             // `__fortify_function` in front of the definition, which is here.
             inlining: self
                 .inlining(specs.attrs)
+                .then(beside.inlining)
                 .then(self.pragma_optimize(specs.options))
                 .with(DeclFlags::DECLARED_INLINE, specs.func.has(FuncSpecs::INLINE))
                 | self.handler(&[specs.attrs], ty, self.is_naked(specs.attrs)),
@@ -355,7 +360,7 @@ impl Checker<'_> {
             // The analysis that reads the body keeps its own answer somewhere else, so the two
             // cannot quietly overwrite each other, and where they disagree the written one
             // stands, which is what gcc does.
-            effects: self.promised_effects(specs.attrs),
+            effects: self.promised_effects(specs.attrs).and(beside.effects),
             // The specifiers only, for the reason the two above read them only: a definition has
             // no declarator to write an attribute after, so a definition that says anything says
             // it there.
@@ -738,6 +743,12 @@ impl Checker<'_> {
         self.format_archetypes(item.attrs);
         // `section` and `used` beside a star, which are the declaration's, as in [`Self::starred`].
         let starred = self.starred(item.declarator);
+        // What is said about calling a function beside a star. Only a function takes it, since on
+        // a pointer to one gcc says the attribute is ignored rather than giving it to the object.
+        let beside = match kind {
+            DeclKind::Function => self.called_beside(&starred),
+            _ => Beside::default(),
+        };
         // One string with two readings, so one call answers both and the string is looked at once.
         let (asm_label, register) = self.declared_asm(item, &specs, duration, name, span);
         // Read from both places for the reason `retained` below is.
@@ -793,18 +804,22 @@ impl Checker<'_> {
             // declaration's alone, and either place asks for the same thing.
             noreturn: specs.func.has(FuncSpecs::NORETURN)
                 || self.never_returns(specs.attrs)
-                || self.never_returns(item.attrs),
+                || self.never_returns(item.attrs)
+                || beside.noreturn,
             // Both places, for the reason `noreturn` above reads both. A declaration is not where
             // a program usually writes this one, since the definition is, but a header that
             // declares an interrupt handler and defines it elsewhere writes it here.
             naked: self.is_naked(specs.attrs) || self.is_naked(item.attrs),
             // Both places, for the reason `noreturn` above reads both. glibc writes it after the
             // declarator, as `extern int setjmp (jmp_buf __env) __THROWNL __returns_twice;`.
-            twice: self.returns_twice(specs.attrs) || self.returns_twice(item.attrs),
+            twice: self.returns_twice(specs.attrs)
+                || self.returns_twice(item.attrs)
+                || beside.twice,
             // Both places, for the reason `noreturn` above reads both.
             // And what `#pragma GCC optimize` has in effect, on a function only.
             inlining: self
                 .inlining(specs.attrs)
+                .then(beside.inlining)
                 .then(self.inlining(item.attrs))
                 .then(self.pragma_optimize(if kind == DeclKind::Function {
                     specs.options
@@ -824,7 +839,10 @@ impl Checker<'_> {
             // `__attribute__((pure)) int look(const int *);` puts it on the specifiers and
             // one writing `int look(const int *) __attribute__((pure));` puts it after the
             // declarator, and both spellings are common in the same header.
-            effects: self.promised_effects(specs.attrs).and(self.promised_effects(item.attrs)),
+            effects: self
+                .promised_effects(specs.attrs)
+                .and(self.promised_effects(item.attrs))
+                .and(beside.effects),
             // Both places, for the reason `retained` above reads both.
             visibility: self
                 .seen(specs.attrs)
@@ -950,6 +968,25 @@ impl Checker<'_> {
                 _ => None,
             })
             .collect()
+    }
+
+    /// What the attributes beside the stars of a function's declarator say about calling it.
+    ///
+    /// gcc reads an attribute only a declaration can carry as the declaration's wherever in the
+    /// declarator it was written, which is [`Self::starred`]'s rule, and the attributes about how
+    /// the function is called are among those. So `void *__attribute__((noinline)) f(void)` is a
+    /// function that is never inlined, the way `__attribute__((noinline)) void *f(void)` is, and
+    /// gcc's torture suite writes it that way in `20010122-1.c`. Read here rather than at each
+    /// field so that the two places a function is declared read the same four things.
+    fn called_beside(&mut self, starred: &[AttrList]) -> Beside {
+        let mut beside = Beside::default();
+        for &attrs in starred {
+            beside.inlining = beside.inlining.then(self.inlining(attrs));
+            beside.noreturn |= self.never_returns(attrs);
+            beside.twice |= self.returns_twice(attrs);
+            beside.effects = beside.effects.and(self.promised_effects(attrs));
+        }
+        beside
     }
 
     fn typedef(
@@ -2160,6 +2197,20 @@ fn stronger(a: Definition, b: Definition) -> Definition {
         Definition::Defined => 2,
     };
     if rank(a) >= rank(b) { a } else { b }
+}
+
+/// What the attributes beside a function declarator's stars say about calling it, as
+/// [`Checker::called_beside`] reads them.
+#[derive(Debug, Clone, Copy, Default)]
+struct Beside {
+    /// `noinline`, `always_inline`, `cold`, `hot` and the rest [`Checker::inlining`] reads.
+    inlining: DeclFlags,
+    /// `noreturn`.
+    noreturn: bool,
+    /// `returns_twice`.
+    twice: bool,
+    /// `pure` or `const`.
+    effects: Effects,
 }
 
 #[cfg(test)]
