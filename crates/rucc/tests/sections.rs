@@ -411,3 +411,48 @@ int init_module(void) __attribute__((copy(initfn), alias(\"initfn\")));
     assert!(!text.contains(".hidden\tb"), "{text}");
     assert!(text.contains("init_module"), "{text}");
 }
+
+/// The section directive the definition of that label sits under in a listing.
+fn under<'a>(text: &'a str, label: &str) -> &'a str {
+    let lines: Vec<&str> = text.lines().collect();
+    let at = lines
+        .iter()
+        .position(|line| *line == format!("{label}:"))
+        .unwrap_or_else(|| panic!("{label} is defined in\n{text}"));
+    lines[..at]
+        .iter()
+        .rev()
+        .map(|line| line.trim())
+        .find(|line| line.starts_with(".section") || *line == ".data" || *line == ".bss")
+        .unwrap_or_else(|| panic!("{label} is under a section in\n{text}"))
+}
+
+/// Where gcc 14 puts each of these at `-O2 -fno-pie` on x86-64 Linux. A constant of nothing but
+/// zeros is read only data and not zeroed space, and so is a `static` that nothing writes and
+/// whose address only reaches loads. One that is written, or whose address goes to a call, stays
+/// in `.data`, and at `-O0` nothing is promoted.
+#[test]
+fn a_constant_of_zeros_and_a_static_nothing_writes_are_read_only_data() {
+    let source = "\
+struct ops { int (*f)(void); int g; };
+const struct ops empty_ops;
+static const char *names[] = { \"a\", \"b\" };
+static int counter = 5;
+static int escaped[2] = { 1, 2 };
+void take(int *);
+const char *name(int i) { return names[i & 1]; }
+int bump(void) { take(escaped); return counter++; }
+";
+    let dir = fixture("readonly", source);
+    let optimized = String::from_utf8(run(&dir, LINUX, &["-S", "-O2", "-fno-pie"], "one.s"))
+        .expect("a listing is text");
+    let plain = String::from_utf8(run(&dir, LINUX, &["-S", "-O0", "-fno-pie"], "zero.s"))
+        .expect("a listing is text");
+    let _ = std::fs::remove_dir_all(&dir);
+    assert_eq!(under(&optimized, "empty_ops"), ".section\t.rodata");
+    assert_eq!(under(&optimized, "names"), ".section\t.rodata");
+    assert_eq!(under(&optimized, "counter"), ".data");
+    assert_eq!(under(&optimized, "escaped"), ".data");
+    assert_eq!(under(&plain, "empty_ops"), ".section\t.rodata");
+    assert_eq!(under(&plain, "names"), ".data");
+}

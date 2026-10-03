@@ -1387,6 +1387,7 @@ pub fn run(module: &mut Module, names: &mut Interner, opts: &Options) -> Report 
     // Not at `-O0`, where nothing took a call away and gcc keeps what the source calls.
     if opts.level != OptLevel::O0 {
         inline::drop_unreferenced(module);
+        inline::read_only(module);
     }
     report
 }
