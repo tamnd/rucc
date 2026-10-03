@@ -113,3 +113,22 @@ fn the_vector_salsa_core_agrees_with_the_scalar_one() {
     }
     let _ = std::fs::remove_dir_all(&dir);
 }
+
+/// At `-O2` the core has no stack traffic left, and a shift by a constant is the count in the
+/// instruction's byte with no splat of it built beside it for nothing to read.
+#[cfg(all(target_os = "linux", target_arch = "x86_64"))]
+#[test]
+fn the_vector_salsa_core_stays_in_registers() {
+    let dir = dir("asm");
+    std::fs::write(dir.join("a.c"), PROGRAM).expect("the fixture can be written");
+    let (ok, said) = run(&dir, &["-O2", "-S", "a.c", "-o", "a.s"]);
+    assert!(ok, "{said}");
+    let asm = std::fs::read_to_string(dir.join("a.s")).expect("the assembly was written");
+    let start = asm.find("\nsalsa8:").expect("the core is in the output");
+    let end = asm[start..].find(".size\tsalsa8").map_or(asm.len(), |at| start + at);
+    let core = &asm[start..end];
+    assert!(!core.contains("(%rsp)") && !core.contains("(%rbp)"), "{core}");
+    assert!(!core.contains("pshufd\t$0,"), "{core}");
+    assert_eq!(core.matches("pslld").count(), 32, "{core}");
+    let _ = std::fs::remove_dir_all(&dir);
+}
