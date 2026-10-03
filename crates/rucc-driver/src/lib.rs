@@ -2150,6 +2150,9 @@ pub fn parse_args(args: &[String]) -> Result<Action, CliError> {
             // half that is built.
             "-fipa-sra" => opts.passes.push((rucc_opt::ipasra::NAME.to_owned(), true)),
             "-fno-ipa-sra" => opts.passes.push((rucc_opt::ipasra::NAME.to_owned(), false)),
+            // The range every caller passes, which is a module at a time for the same reason.
+            "-fipa-vrp" => opts.passes.push((rucc_opt::ipvrp::NAME.to_owned(), true)),
+            "-fno-ipa-vrp" => opts.passes.push((rucc_opt::ipvrp::NAME.to_owned(), false)),
             // And the printf family fold, which is a module at a time for the same reason and so is
             // not a `rucc_opt::Pass` either. gcc has no flag of its own for this one, since
             // `-fno-builtin` already turns it off along with everything else the standard names

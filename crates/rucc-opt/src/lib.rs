@@ -132,6 +132,7 @@ pub mod inline;
 pub mod ipa;
 pub mod ipasra;
 pub mod ipcp;
+pub mod ipvrp;
 pub mod ivopts;
 pub mod lanes;
 pub mod libcall;
