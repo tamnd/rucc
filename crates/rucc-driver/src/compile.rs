@@ -562,6 +562,14 @@ pub fn compile(opts: &Options, name: &str, fs: &dyn FileSystem) -> Compiled {
                             artifact =
                                 Artifact::Text(rucc_ir::print(&lowered.module, &sess.interner));
                         } else {
+                            // What `-flto` keeps for the link, printed before the back end
+                            // starts changing the module for itself. See `crate::lto`.
+                            let kept = keeps_module(opts).then(|| {
+                                crate::lto::keep(
+                                    &rucc_ir::print(&lowered.module, &sess.interner),
+                                    opts,
+                                )
+                            });
                             // The back end, which is every pass after the IR and which is
                             // where a construct nothing has a rule for is finally noticed.
                             let made = clock.time("generate", || {
@@ -581,7 +589,14 @@ pub fn compile(opts: &Options, name: &str, fs: &dyn FileSystem) -> Compiled {
                                 )
                             });
                             match made {
-                                Ok(made) => artifact = made,
+                                Ok(mut made) => {
+                                    if let (Artifact::Object { bytes, .. }, Some(kept)) =
+                                        (&mut made, kept)
+                                    {
+                                        rucc_object::attach(bytes, crate::lto::SECTION, &kept);
+                                    }
+                                    artifact = made;
+                                }
                                 Err(complaints) => diagnostics.extend(complaints),
                             }
                         }
@@ -1015,6 +1030,18 @@ fn replaceable(target: &TargetInfo, opts: &Options) -> IrPic {
         }
         _ => IrPic::Executable,
     }
+}
+
+/// Whether the object keeps its module for the link, which is what `-flto` asks for. Asked before
+/// the back end, and only an object is given it.
+///
+/// Not when the build puts memory safety checks or arc counters in. The back end turns each check
+/// into a call through a table it is handed beside the module, and the counters are written out
+/// by code the module does not hold, so a link that generated either again from the module alone
+/// would get them wrong. Their objects link the code they hold, which is the program without the
+/// work across files and nothing worse.
+fn keeps_module(opts: &Options) -> bool {
+    opts.lto.requested && !opts.safety.instruments() && opts.profile_data.counts.is_none()
 }
 
 /// Where the file being generated came from, which is what the debug information is about.

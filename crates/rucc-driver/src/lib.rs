@@ -39,6 +39,7 @@ pub mod install;
 mod kbuild;
 pub mod library;
 pub mod link;
+pub mod lto;
 mod map;
 pub mod msvc;
 mod notice;
@@ -261,7 +262,7 @@ options:
   -fdisable-<pass>[=<funcs>], -fenable-<pass>[=<funcs>]   run a pass on some functions only
   -g -g0 -gdwarf-5, -fno-omit-frame-pointer, -mno-red-zone   debug info, frame pointer, red zone
   -gz[=none|zlib|zlib-gnu] -gno-split-dwarf   compress the debug sections, zlib when bare
-  -flto[=auto|jobserver|<n>] -fno-lto -ffat-lto-objects   read, and not done yet
+  -flto[=auto|jobserver|<n>] -fno-lto -ffat-lto-objects   keep the module in the object, not read at link time yet
   -fprofile-use[=<path>] -fprofile-dir=<dir> --coverage   read, and counted for gcov
   -f[no-]stack-protector[-strong|-all|-explicit], -f[no-]stack-clash-protection, -fcf-protection=<edges>
   -ffunction-sections -fdata-sections   a section per function or variable, for --gc-sections
@@ -1746,8 +1747,9 @@ pub fn parse_args(args: &[String]) -> Result<Action, CliError> {
                 opts.prefix_map.profile.push(old, new);
             }
             // A whole optimization rather than a flag, and the family is taken rather than
-            // refused because of what ignoring it does. There is none of it here yet, so a build
-            // that asks for it gets a program that is correct and slower than it could have been,
+            // refused because of what ignoring it does. The link does not read the module an
+            // object keeps yet (see `crate::lto`), so a build that asks for it gets a program
+            // that is correct and slower than it could have been,
             // which is what section 4.1 means by a hint about speed and what every compilation at
             // `-O0` already is. The objects settle the rest of the argument: gcc's `-flto` object
             // holds the bytecode and no machine code at all, and every object here holds the code,
