@@ -879,6 +879,10 @@ fn shorter(bytes: &mut Vec<u8>, operands: &[Operand], mode: Mode) {
         at += 1;
     }
     let (Some(&code), Some(&modrm)) = (bytes.get(at), bytes.get(at + 1)) else { return };
+    if code == 0x87 && modrm >= 0xC0 {
+        swapped(bytes, at, modrm, mode);
+        return;
+    }
     let digit = (modrm >> 3) & 7;
     if matches!(code, 0xC0 | 0xC1)
         && operands.first() == Some(&Operand::Imm(1))
@@ -900,6 +904,35 @@ fn shorter(bytes: &mut Vec<u8>, operands: &[Operand], mode: Mode) {
     };
     bytes[at] = short;
     bytes.remove(at + 1);
+}
+
+/// An `xchg` of two registers one of which is the accumulator, written as `90` plus the other
+/// one, which is the form gas picks.
+///
+/// `at` is where the `87` is, behind the operand size prefix and the REX byte. `xchg %rax, %rax`
+/// is `90` with nothing in front of it, as gas writes it. The one left alone is `xchg %eax, %eax`
+/// in long mode, which clears the top of `rax` where `90` does nothing, so gas keeps `87 c0`.
+fn swapped(bytes: &mut Vec<u8>, at: usize, modrm: u8, mode: Mode) {
+    let rex = bytes[..at].iter().find_map(|&byte| mode.rex(byte)).unwrap_or(0);
+    let reg = (modrm >> 3) & 7 | if rex & 0b0100 != 0 { 8 } else { 0 };
+    let rm = modrm & 7 | if rex & 0b0001 != 0 { 8 } else { 0 };
+    let other = match (reg, rm) {
+        (0, other) | (other, 0) => other,
+        _ => return,
+    };
+    let wide = rex & 0b1000 != 0;
+    let sized = bytes[..at].contains(&0x66);
+    if other == 0 && mode == Mode::Bits64 && !wide && !sized {
+        return;
+    }
+    let mut short: Vec<u8> =
+        bytes[..at].iter().copied().filter(|&b| mode.rex(b).is_none()).collect();
+    let rex = if wide && other != 0 { 0b1000 } else { 0 } | if other >= 8 { 0b0001 } else { 0 };
+    if rex != 0 {
+        short.push(0x40 | rex);
+    }
+    short.push(0x90 + (other & 7));
+    *bytes = short;
 }
 
 /// A branch whose distance is counted from its own first byte, written with that distance in it.
@@ -1917,6 +1950,28 @@ mod tests {
     }
 
     #[test]
+    fn an_exchange_with_the_accumulator_is_the_one_byte_form_gas_picks() {
+        let bytes32 = |line: &str| {
+            let (word, rest) = line.split_once(' ').unwrap();
+            one_in(word, &crate::source::split(rest, ','), Mode::Bits32).unwrap().bytes
+        };
+        assert_eq!(bytes("xchg %rdx, %rax"), [0x48, 0x92]);
+        assert_eq!(bytes("xchg %rax, %rdx"), [0x48, 0x92]);
+        assert_eq!(bytes("xchg %ecx, %eax"), [0x91]);
+        assert_eq!(bytes("xchg %ax, %cx"), [0x66, 0x91]);
+        assert_eq!(bytes("xchg %r9, %rax"), [0x49, 0x91]);
+        assert_eq!(bytes("xchg %r8d, %eax"), [0x41, 0x90]);
+        assert_eq!(bytes("xchg %r8w, %ax"), [0x66, 0x41, 0x90]);
+        assert_eq!(bytes("xchg %rax, %rax"), [0x90]);
+        assert_eq!(bytes("xchg %ax, %ax"), [0x66, 0x90]);
+        assert_eq!(bytes("xchg %eax, %eax"), [0x87, 0xc0]);
+        assert_eq!(bytes("xchg %r8d, %r8d"), [0x45, 0x87, 0xc0]);
+        assert_eq!(bytes("xchg %ecx, %edx"), [0x87, 0xca]);
+        assert_eq!(bytes32("xchg %eax, %eax"), [0x90]);
+        assert_eq!(bytes32("xchg %ax, %dx"), [0x66, 0x92]);
+    }
+
+    #[test]
     fn lar_and_lsl_read_a_selector_into_a_wider_register() {
         // What GNU as 2.44 writes for each, which has no REX.W for the second.
         assert_eq!(bytes("lar %ax, %eax"), [0x0f, 0x02, 0xc0]);
@@ -2891,8 +2946,10 @@ mod tests {
     }
 
     /// The system instructions a kernel writes by hand, each against the bytes llvm-mc writes for
-    /// the same line, except `int $3`, which gas writes as the two byte form and llvm-mc as `int3`.
-    /// This follows gas.
+    /// the same line, except where gas writes something else, and this follows gas. That is `int
+    /// $3`, which gas writes as the two byte form and llvm-mc as `int3`, and `sldt`, `str` and a
+    /// segment register moved to or from a sixty four bit register, which gas writes without
+    /// `REX.W`.
     #[test]
     fn the_system_instructions_a_kernel_writes_come_out_as_gas_and_llvm_write_them() {
         let lines: &[(&str, &[u8])] = &[
@@ -2910,7 +2967,7 @@ mod tests {
             ("mov %r10, %dr1", &[0x41, 0x0f, 0x23, 0xca]),
             ("mov %ds, %eax", &[0x8c, 0xd8]),
             ("mov %ds, %ax", &[0x66, 0x8c, 0xd8]),
-            ("mov %ds, %rax", &[0x48, 0x8c, 0xd8]),
+            ("mov %ds, %rax", &[0x8c, 0xd8]),
             ("movl %ds, %eax", &[0x8c, 0xd8]),
             ("mov %es, %ecx", &[0x8c, 0xc1]),
             ("mov %ss, %eax", &[0x8c, 0xd0]),
@@ -2920,7 +2977,7 @@ mod tests {
             ("mov %eax, %ds", &[0x8e, 0xd8]),
             ("mov %ax, %ds", &[0x8e, 0xd8]),
             ("movl %eax, %ds", &[0x8e, 0xd8]),
-            ("mov %rax, %ss", &[0x48, 0x8e, 0xd0]),
+            ("mov %rax, %ss", &[0x8e, 0xd0]),
             ("mov %r8d, %gs", &[0x41, 0x8e, 0xe8]),
             ("movw %ax, %es", &[0x8e, 0xc0]),
             ("mov %ds, (%rax)", &[0x8c, 0x18]),
