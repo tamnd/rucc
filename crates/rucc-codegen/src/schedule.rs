@@ -240,24 +240,28 @@ pub fn insts(
     let mut done = Scheduled::default();
     let stack = (Reg::physical(stack.0), stack.1);
     let mut known = Known { timing, machine, flags, names, stack, seen: Map::default() };
+    let mut scratch = Scratch::default();
+    let (mut was, mut now, mut run) = (Vec::new(), Vec::new(), Vec::new());
     for block in blocks {
-        let was: Vec<Inst> = func.insts(block).collect();
+        was.clear();
+        was.extend(func.insts(block));
         if was.len() < 3 {
             continue;
         }
-        let mut now: Vec<Inst> = Vec::with_capacity(was.len());
-        let mut run: Vec<Inst> = Vec::new();
+        now.clear();
+        run.clear();
         let last = was.last().copied();
         for &inst in &was {
             if Some(inst) == last || pinned.contains(&inst) || known.of(func, inst).barrier {
-                done.runs += usize::from(order(func, &run, &mut known, accurate, &mut now));
+                let ordered = order(func, &run, &mut known, accurate, &mut now, &mut scratch);
+                done.runs += usize::from(ordered);
                 run.clear();
                 now.push(inst);
             } else {
                 run.push(inst);
             }
         }
-        done.runs += usize::from(order(func, &run, &mut known, accurate, &mut now));
+        done.runs += usize::from(order(func, &run, &mut known, accurate, &mut now, &mut scratch));
         let moved = was.iter().zip(&now).filter(|(before, after)| before != after).count();
         if moved == 0 {
             continue;
@@ -338,14 +342,37 @@ fn order(
     known: &mut Known<'_>,
     accurate: bool,
     into: &mut Vec<Inst>,
+    scratch: &mut Scratch,
 ) -> bool {
     if run.len() < 2 || run.len() > LONGEST {
         into.extend_from_slice(run);
         return false;
     }
-    let graph = graph(func, run, known);
-    into.extend(list(&graph, known.timing, accurate).into_iter().map(|at| run[at]));
+    graph(func, run, known, scratch);
+    list(scratch, known.timing, accurate);
+    into.extend(scratch.out.iter().map(|&at| run[at]));
     true
+}
+
+/// The lists and maps one run is scheduled with, kept from one run to the next.
+///
+/// A block is cut into runs at every barrier, and building each run's graph and choosing its order
+/// in lists and maps of its own was a dozen allocations a run.
+#[derive(Default)]
+struct Scratch {
+    facts: Vec<Facts>,
+    found: Vec<(usize, usize, u32)>,
+    wrote: Map<Place, usize>,
+    read: Map<Place, usize>,
+    readers: Vec<(usize, Option<usize>)>,
+    read_flags: Vec<usize>,
+    seen: Set<Place>,
+    graph: Graph,
+    preds: Vec<usize>,
+    when: Vec<u32>,
+    used: Map<Unit, u32>,
+    /// The order chosen for the last run, as positions into it.
+    out: Vec<usize>,
 }
 
 /// One instruction of a run, and everything the choosing needs to know about it.
@@ -368,7 +395,7 @@ struct Node {
 }
 
 /// The dependence graph of one run.
-#[derive(Debug)]
+#[derive(Debug, Default)]
 struct Graph {
     nodes: Vec<Node>,
     /// The instructions that may not start before another, and how long each has to wait, with
@@ -388,36 +415,38 @@ impl Graph {
     }
 }
 
-/// Builds the dependence graph of one run.
-fn graph(func: &Func, run: &[Inst], known: &mut Known<'_>) -> Graph {
-    let facts: Vec<Facts> = run.iter().map(|&inst| known.of(func, inst)).collect();
-    let costs: Vec<Timing> =
-        facts.iter().map(|facts| facts.timing.expect("a barrier otherwise")).collect();
-    let mut nodes: Vec<Node> = costs
-        .iter()
-        .map(|&timing| Node { timing, succs: 0..0, preds: 0, height: 0, growth: 0 })
-        .collect();
+/// Builds the dependence graph of one run into `scratch.graph`.
+fn graph(func: &Func, run: &[Inst], known: &mut Known<'_>, scratch: &mut Scratch) {
+    let Scratch { facts, found, wrote, read, readers, read_flags, seen, graph, .. } = scratch;
+    facts.clear();
+    facts.extend(run.iter().map(|&inst| known.of(func, inst)));
+    let nodes = &mut graph.nodes;
+    nodes.clear();
+    nodes.extend(facts.iter().map(|facts| {
+        let timing = facts.timing.expect("a barrier otherwise");
+        Node { timing, succs: 0..0, preds: 0, height: 0, growth: 0 }
+    }));
     // Every edge as it is found, as where it is from, where it goes and the wait. They are found
     // one instruction at a time, as the edges into it, so `since` is where the ones into the
     // instruction being looked at start.
-    let mut found: Vec<(usize, usize, u32)> = Vec::new();
+    found.clear();
 
     // The last instruction to write each register, and every instruction to read one since. The
     // condition state is the same two questions with nowhere to keep the register's number, since
     // it is not an operand on a machine that has one.
-    let mut wrote: Map<Place, usize> = Map::default();
+    wrote.clear();
     // The readers of a register are a chain through `readers`, newest first, from where `read`
     // says it starts.
-    let mut read: Map<Place, usize> = Map::default();
-    let mut readers: Vec<(usize, Option<usize>)> = Vec::new();
+    read.clear();
+    readers.clear();
     let mut wrote_flags: Option<usize> = None;
-    let mut read_flags: Vec<usize> = Vec::new();
+    read_flags.clear();
     let mut touched: Option<usize> = None;
 
     for (at, &inst) in run.iter().enumerate() {
         let facts = facts[at];
         let since = found.len();
-        let mut edge = |from: usize, wait: u32| join(&mut found, since, from, at, wait);
+        let mut edge = |from: usize, wait: u32| join(found, since, from, at, wait);
 
         // Reads before writes, because an instruction whose destination is one of its own sources
         // is on both lists and the write it does is not one its own read has to wait for.
@@ -425,7 +454,7 @@ fn graph(func: &Func, run: &[Inst], known: &mut Known<'_>) -> Graph {
             if operand.role == Role::Use {
                 let place = (operand.reg, operand.class);
                 if let Some(before) = wrote.get(&place) {
-                    edge(*before, costs[*before].latency);
+                    edge(*before, nodes[*before].timing.latency);
                 }
                 let next = read.insert(place, readers.len());
                 readers.push((at, next));
@@ -433,7 +462,7 @@ fn graph(func: &Func, run: &[Inst], known: &mut Known<'_>) -> Graph {
         }
         if facts.reads_flags {
             if let Some(before) = wrote_flags {
-                edge(before, costs[before].latency);
+                edge(before, nodes[before].timing.latency);
             }
             read_flags.push(at);
         }
@@ -441,7 +470,7 @@ fn graph(func: &Func, run: &[Inst], known: &mut Known<'_>) -> Graph {
             if operand.role.is_def() {
                 let place = (operand.reg, operand.class);
                 if let Some(before) = wrote.insert(place, at) {
-                    edge(before, after(&costs, before));
+                    edge(before, after(nodes, before));
                 }
                 let mut next = read.remove(&place);
                 while let Some(link) = next {
@@ -455,7 +484,7 @@ fn graph(func: &Func, run: &[Inst], known: &mut Known<'_>) -> Graph {
         }
         if facts.writes_flags {
             if let Some(before) = wrote_flags.replace(at) {
-                edge(before, after(&costs, before));
+                edge(before, after(nodes, before));
             }
             for before in read_flags.drain(..) {
                 if before != at {
@@ -477,25 +506,25 @@ fn graph(func: &Func, run: &[Inst], known: &mut Known<'_>) -> Graph {
 
     // Each instruction's edges side by side, in the order they were found, which is the order of
     // where they go. Counted first and then put in place, rather than sorted.
-    for &(from, to, _) in &found {
+    for &(from, to, _) in found.iter() {
         nodes[from].succs.end += 1;
         nodes[to].preds += 1;
     }
     let mut start = 0;
-    for node in &mut nodes {
+    for node in nodes.iter_mut() {
         let count = node.succs.len();
         node.succs = start..start;
         start += count;
     }
-    let mut edges = vec![(0, 0); found.len()];
-    for &(from, to, wait) in &found {
+    let edges = &mut graph.edges;
+    edges.clear();
+    edges.resize(found.len(), (0, 0));
+    for &(from, to, wait) in found.iter() {
         edges[nodes[from].succs.end] = (to, wait);
         nodes[from].succs.end += 1;
     }
-    let mut graph = Graph { nodes, edges };
-    heights(&mut graph);
-    growth(func, run, &mut graph.nodes);
-    graph
+    heights(graph);
+    growth(func, run, &mut graph.nodes, seen);
 }
 
 /// Says that the second instruction may not start until that many cycles after the first.
@@ -524,8 +553,8 @@ fn join(found: &mut Vec<(usize, usize, u32)>, since: usize, from: usize, to: usi
 /// opens with an instruction per argument saying which register the argument is already in, each of
 /// them writes a register the real work then writes again, and charging a cycle for that held every
 /// first use of an argument one cycle behind where it could have been.
-fn after(costs: &[Timing], before: usize) -> u32 {
-    costs[before].latency.min(1)
+fn after(nodes: &[Node], before: usize) -> u32 {
+    nodes[before].timing.latency.min(1)
 }
 
 /// The longest path from each instruction to the end of the run.
@@ -549,8 +578,8 @@ fn heights(graph: &mut Graph) {
 /// instruction that reads it gives a register back. One that writes a register takes one. The
 /// difference is what criterion two compares, and what it is really asking is whether an
 /// instruction is doing work or making something that will have to be kept until later.
-fn growth(func: &Func, run: &[Inst], nodes: &mut [Node]) {
-    let mut seen: Set<Place> = Set::default();
+fn growth(func: &Func, run: &[Inst], nodes: &mut [Node], seen: &mut Set<Place>) {
+    seen.clear();
     for (at, &inst) in run.iter().enumerate().rev() {
         for operand in &func[func[inst].operands] {
             if operand.role == Role::Use && seen.insert((operand.reg, operand.class)) {
@@ -584,22 +613,25 @@ struct Pick {
     at: usize,
 }
 
-/// Chooses an order, as positions into the run.
-fn list(graph: &Graph, timing: &TimingInsts, accurate: bool) -> Vec<usize> {
+/// Chooses an order for the graph in `scratch`, as positions into the run, into `scratch.out`.
+fn list(scratch: &mut Scratch, timing: &TimingInsts, accurate: bool) {
+    let Scratch { graph, preds, when, used, out, .. } = scratch;
     let nodes = &graph.nodes;
-    let mut preds: Vec<usize> = nodes.iter().map(|node| node.preds).collect();
-    let mut when: Vec<u32> = vec![0; nodes.len()];
+    preds.clear();
+    preds.extend(nodes.iter().map(|node| node.preds));
+    when.clear();
+    when.resize(nodes.len(), 0);
     let mut ready: BTreeSet<usize> = (0..nodes.len()).filter(|&at| preds[at] == 0).collect();
-    let mut out: Vec<usize> = Vec::with_capacity(nodes.len());
+    out.clear();
     let mut cycle = 0;
-    let mut used: Map<Unit, u32> = Map::default();
+    used.clear();
     let mut issued = 0;
     let mut last: Option<usize> = None;
 
     while !ready.is_empty() {
         let mut best: Option<Pick> = None;
         for &at in ready.iter().take(READY) {
-            if when[at] > cycle || (accurate && !fits(nodes[at].timing.unit, &used, issued, timing))
+            if when[at] > cycle || (accurate && !fits(nodes[at].timing.unit, used, issued, timing))
             {
                 continue;
             }
@@ -639,7 +671,6 @@ fn list(graph: &Graph, timing: &TimingInsts, accurate: bool) -> Vec<usize> {
             }
         }
     }
-    out
 }
 
 /// Whether the machine has room this cycle for an instruction on that unit.
