@@ -75,6 +75,7 @@ mod diagnostic;
 mod expr;
 mod extname;
 mod init;
+mod options;
 mod pack;
 mod spec;
 mod stmt;

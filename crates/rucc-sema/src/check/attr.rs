@@ -38,7 +38,7 @@
 //! not this module's to complain about, since the same list is written on declarations that
 //! have no layout at all.
 
-use rucc_ast::{AlignSpec, AttrArg, AttrList, AttrSyntax, Attribute};
+use rucc_ast::{AlignSpec, AttrArg, AttrList, AttrSyntax, Attribute, PragmaOptions};
 use rucc_base::Symbol;
 use rucc_base::float::Format;
 use rucc_diag::{Diagnostic, Span};
@@ -1507,39 +1507,31 @@ impl Checker<'_> {
                     flags |= DeclFlags::INDIRECT_KEEP;
                 }
                 "zero_call_used_regs" => flags |= self.zero_choice(attr),
-                // An option is written with or without its `-f`. `no-stack-protector` here is
-                // what the kernel's `__nostackprotector` was before gcc 11 had the attribute, and
-                // what it still falls back to on a compiler that says it does not have it.
                 "optimize" => {
                     for option in self.optimize_options(attr) {
-                        match option.trim_start_matches('-').trim_start_matches('f') {
-                            "no-strict-aliasing" => flags |= DeclFlags::NO_STRICT_ALIASING,
-                            "no-stack-protector" => {
-                                flags = flags.then(DeclFlags::NO_STACK_PROTECTOR);
-                            }
-                            // `-O0` for this one function, which is the level a function can be
-                            // held to on its own: the passes that run at `-O0` are a subset of
-                            // the ones at every other level, so the pipeline can leave the rest
-                            // out for one body without anything else in the unit noticing. A
-                            // higher level than the unit's would mean running passes the unit
-                            // never asked for, and those levels are accepted and ignored.
-                            "O0" => flags |= DeclFlags::OPTIMIZE_NONE,
-                            // The two options the kernel writes on a function that change what the
-                            // body is allowed to become rather than how fast it is. `wrapv` is
-                            // `-fwrapv` for the one body, and the other is what keeps a
-                            // freestanding `memset` from being compiled into a call to itself.
-                            "wrapv" => flags |= DeclFlags::WRAPV,
-                            "no-tree-loop-distribute-patterns" => {
-                                flags |= DeclFlags::NO_LOOP_IDIOM;
-                            }
-                            _ => {}
-                        }
+                        flags = optimizing(flags, &option);
                     }
                 }
                 _ => {}
             }
         }
         flags
+    }
+
+    /// What `#pragma GCC optimize` has in effect over a function, as the bits its options set.
+    ///
+    /// gcc reads a function's own `optimize` attribute on top of the line's options, so where the
+    /// two disagree the attribute wins, which is why the caller puts these after it.
+    pub(in crate::check) fn pragma_optimize(&self, pragma: PragmaOptions) -> DeclFlags {
+        let Some(id) = pragma.optimize else { return DeclFlags::NONE };
+        let text = self.pragma_text(id);
+        text.split(',').fold(DeclFlags::NONE, |flags, option| optimizing(flags, option.trim()))
+    }
+
+    /// The options a `#pragma GCC target` or `optimize` line left, which the parser wrote as one
+    /// plain string with commas between them.
+    fn pragma_text(&self, id: rucc_ast::StrId) -> String {
+        self.ast[id].elements.iter().filter_map(|&unit| char::from_u32(unit)).collect()
     }
 
     /// What an attribute list says about which DLL the name is in, as [`DeclFlags::DLLIMPORT`] and
@@ -1637,7 +1629,12 @@ impl Checker<'_> {
     /// The `bool` beside the extensions is whether the function may use the x87 stack, which is
     /// the unit's answer unless an x86-64 string said `80387`, `no-80387` or `general-regs-only`.
     /// See [`Target::x87`].
-    pub(in crate::check) fn targeted(&mut self, lists: &[AttrList]) -> Option<(Isa, bool)> {
+    pub(in crate::check) fn targeted(
+        &mut self,
+        lists: &[AttrList],
+        pragma: PragmaOptions,
+        span: Span,
+    ) -> Option<(Isa, bool)> {
         let x86 = match self.cx.target.tuple.arch().as_str() {
             "x86_64" => true,
             "aarch64" => false,
@@ -1647,6 +1644,28 @@ impl Checker<'_> {
         let mut target = Target::new();
         let mut arm = self.cx.isa;
         let (mut said, mut refused) = (false, false);
+        // What `#pragma GCC target` has in effect goes ahead of the attribute's strings, which is
+        // where gcc puts it. A name in it gcc does not know is refused once, the way gcc refuses
+        // the line once, and the lines are then left out rather than the function refused.
+        if let Some(id) = pragma.target {
+            let text = self.pragma_text(id);
+            let read = if x86 {
+                target.read(&text)
+            } else {
+                arm = arm.aarch64_target(&text);
+                Ok(())
+            };
+            match read {
+                Ok(()) => said = true,
+                Err(why) => {
+                    let what = why.to_string();
+                    if self.refused_pragmas.insert(what.clone()) {
+                        self.report(Diagnostic::error(what, span).with_code("E0720"));
+                    }
+                    (target, arm) = (Target::new(), self.cx.isa);
+                }
+            }
+        }
         for &list in lists {
             for &attr in &ast[list] {
                 if attr.namespace.is_some_and(|ns| self.text(ns) != "gnu")
@@ -2276,4 +2295,29 @@ impl Checker<'_> {
         }
         u32::try_from(requested).ok()
     }
+}
+
+/// What one option of an `optimize` attribute or a `#pragma GCC optimize` line adds to `flags`.
+///
+/// An option is written with or without its `-f`. `no-stack-protector` here is what the kernel's
+/// `__nostackprotector` was before gcc 11 had the attribute, and what it still falls back to on a
+/// compiler that says it does not have it.
+fn optimizing(mut flags: DeclFlags, option: &str) -> DeclFlags {
+    match option.trim_start_matches('-').trim_start_matches('f') {
+        "no-strict-aliasing" => flags |= DeclFlags::NO_STRICT_ALIASING,
+        "no-stack-protector" => flags = flags.then(DeclFlags::NO_STACK_PROTECTOR),
+        // `-O0` for this one function, which is the level a function can be held to on its own:
+        // the passes that run at `-O0` are a subset of the ones at every other level, so the
+        // pipeline can leave the rest out for one body without anything else in the unit
+        // noticing. A higher level than the unit's would mean running passes the unit never asked
+        // for, and those levels are accepted and ignored.
+        "O0" => flags |= DeclFlags::OPTIMIZE_NONE,
+        // The two options the kernel writes on a function that change what the body is allowed to
+        // become rather than how fast it is. `wrapv` is `-fwrapv` for the one body, and the other
+        // is what keeps a freestanding `memset` from being compiled into a call to itself.
+        "wrapv" => flags |= DeclFlags::WRAPV,
+        "no-tree-loop-distribute-patterns" => flags |= DeclFlags::NO_LOOP_IDIOM,
+        _ => {}
+    }
+    flags
 }

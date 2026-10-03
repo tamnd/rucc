@@ -84,8 +84,8 @@ pub use crate::init::{Designator, Init, InitId, InitItem};
 pub use crate::print::{Printer, print};
 pub use crate::spec::{
     AlignSpec, Basic, Builtin, BuiltinError, BuiltinSet, Complexity, DeclSpecs, DeclSpecsId,
-    Deduction, FuncSpecs, PushedVisibility, Quals, RecordKind, Scalar, StorageClass, TypeSpec,
-    TypeofArg,
+    Deduction, FuncSpecs, PragmaOptions, PushedVisibility, Quals, RecordKind, Scalar, StorageClass,
+    TypeSpec, TypeofArg,
 };
 pub use crate::stmt::{ForInit, Stmt, StmtId};
 
