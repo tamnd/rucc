@@ -1041,10 +1041,10 @@ notes = "A value an initializer list gives a member of a marked structure by pos
 name = "common"
 kind = "attribute"
 gcc_version = "2.0"
-status = "partial"
+status = "implemented"
 used_by = []
 tests = ["rucc::common_puts_a_tentative_definition_in_the_common_block_under_fno_common", "rucc::common_and_nocommon_together_keep_the_one_gcc_applies_first"]
-notes = "A tentative definition written `common` goes in the common block under `-fno-common`, and the last declaration of the name that is not `extern` says whether it does, as in gcc 13. `weak`, `section` and an initializer keep it out. Written with `nocommon`, the one gcc applies first stands and the other is ignored with its warning. Not yet for a thread-local object, which gcc puts in `.tls_common` and this compiler defines, nor for a `static` one, which stays in `.bss` and links the same."
+notes = "A tentative definition written `common` goes in the common block under `-fno-common`, and the last declaration of the name that is not `extern` says whether it does, as in gcc 13. `weak`, `section` and an initializer keep it out. Written with `nocommon`, the one gcc applies first stands and the other is ignored with its warning. A `static` one stays in `.bss`, which links the same as gcc's local common block. One difference from gcc: a thread-local object is still defined, where gcc puts it in `.tls_common`."
 
 [[feature]]
 name = "nocommon"
