@@ -33,7 +33,9 @@ use rucc_base::Symbol;
 use rucc_base::hash::Map;
 use rucc_diag::{Diagnostic, Span};
 use rucc_gnu::Kind;
-use rucc_types::{ArrayLen, FieldDecl, RecordId, TypeId, TypeKind, is_array, is_integer, layout};
+use rucc_types::{
+    ArrayLen, FieldDecl, IntKind, RecordId, TypeId, TypeKind, is_array, is_integer, layout,
+};
 
 use crate::check::Checker;
 use crate::check::attr::BIGGEST_ALIGNMENT;
@@ -87,6 +89,44 @@ const FLAGGED: [(&str, DeclFlags); 6] = [
 ];
 
 impl Checker<'_> {
+    /// Warns about a `nonstring` written on an object or a member of a type gcc does not take it
+    /// on, with gcc's words. gcc takes it on an array of a character type and on a pointer to
+    /// one, and from gcc 15 on an array of such arrays too, which is the case that matters: the
+    /// kernel's `CC_HAS_MULTIDIMENSIONAL_NONSTRING` compiles `char tag[][4] __nonstring` under
+    /// `-Werror`, so a build claiming gcc 14 has to warn there or it is configured differently.
+    pub(in crate::check) fn check_nonstring(&mut self, lists: &[AttrList], ty: TypeId) {
+        let written = lists.iter().flat_map(|&list| self.ast[list].iter().copied());
+        let Some(attr) = written.into_iter().find(|attr| self.is_named(attr, "nonstring")) else {
+            return;
+        };
+        if self.takes_nonstring(ty) {
+            return;
+        }
+        let what = format!("'nonstring' attribute ignored on objects of type '{}'", self.spell(ty));
+        self.report(Diagnostic::warning(what, attr.span).with_code("E0708"));
+    }
+
+    /// Whether `nonstring` means something on an object of this type.
+    fn takes_nonstring(&self, ty: TypeId) -> bool {
+        let character = |ty: TypeId| {
+            let ty = self.types.canonical(ty);
+            matches!(
+                self.types.kind(ty),
+                TypeKind::Int(IntKind::Char | IntKind::SChar | IntKind::UChar)
+            )
+        };
+        match self.types.kind(self.types.canonical(ty)) {
+            TypeKind::Pointer(to) => character(to),
+            TypeKind::Array { elem, .. } => {
+                character(elem)
+                    || (self.cx.gnuc >= 15
+                        && is_array(&self.types, elem)
+                        && self.takes_nonstring(elem))
+            }
+            _ => false,
+        }
+    }
+
     /// Keeps the lists a declaration was written with, beside those of its earlier declarations.
     pub(in crate::check) fn annotate_decl(&mut self, decl: DeclId, lists: &[AttrList]) {
         let kept = self.annotations.decls.entry(decl).or_default();
@@ -122,6 +162,7 @@ impl Checker<'_> {
             let Some(lists) = self.annotations.members.get(&(record, name)).copied() else {
                 continue;
             };
+            self.check_nonstring(&lists, decl.ty);
             let written = lists.iter().flat_map(|&list| self.ast[list].iter().copied());
             let asked: Vec<Attribute> =
                 written.filter(|attr| self.is_named(attr, "counted_by")).collect();

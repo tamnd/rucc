@@ -139,6 +139,10 @@ pub struct Context<'a> {
     /// check that an `interrupt` handler touches no register it does not save. See
     /// `check/attr.rs`.
     pub x87: bool,
+    /// The major release of gcc claimed, which is `__GNUC__`, for the few rules that changed
+    /// between releases. `nonstring` on an array of arrays is one: gcc 15 started taking it, and
+    /// the kernel finds out which gcc it has by compiling one under `-Werror`.
+    pub gnuc: u32,
 }
 
 impl<'a> Context<'a> {
@@ -163,6 +167,7 @@ impl<'a> Context<'a> {
             trapping_math: true,
             isa: if target.tuple.arch().as_str() == "x86_64" { Isa::baseline() } else { Isa::NONE },
             x87: true,
+            gnuc: 16,
         }
     }
 

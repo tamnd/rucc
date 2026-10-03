@@ -356,6 +356,7 @@ pub fn compile(opts: &Options, name: &str, fs: &dyn FileSystem) -> Compiled {
                 trapping_math: opts.trapping_math,
                 isa: opts.isa,
                 x87: opts.x87,
+                gnuc: opts.gnuc.major,
             },
         );
         checker.check_unit();
