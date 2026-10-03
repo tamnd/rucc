@@ -6,6 +6,7 @@ All notable changes are recorded here. The format follows [Keep a Changelog](htt
 
 ### Changed
 
+- `__builtin_object_size` follows an address read back out of a local it was stored in once, which is what a `__free (kfree)` variable is, since its cleanup takes the address and keeps it in memory. In the kernel this answers the size of keyboard.c's diacritical buffers the way gcc does, and the `INT_MAX` warning in `check_copy_size` goes away with it.
 - From `-O2` an integer parameter of a function only this file can call carries the range its callers pass it, which is gcc's `-fipa-vrp`, so a test in the body that no call can reach folds away. In the kernel this takes the `INT_MAX` warning out of evdev's `str_to_user`, whose three callers all pass `_IOC_SIZE (cmd)`. `-fno-ipa-vrp` turns it off.
 - The instruction scheduler keeps the lists and maps it builds each run's graph and order in from one run to the next, rather than making them again for every stretch between barriers, which takes about 0.3% off an optimized build of jtckdint when it goes through the portable code rather than `<stdckdint.h>` (#2714).
 - The x86-64 encoder looks an instruction's encoding up by the kinds of its arguments kept on the stack, rather than in a list made for every instruction it writes, which takes about 0.5% off a build of jtckdint at `-O0` and about 0.2% at `-O2` when it goes through the portable code rather than `<stdckdint.h>` (#2717).
