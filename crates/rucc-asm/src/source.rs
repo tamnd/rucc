@@ -38,7 +38,7 @@ use rucc_object::{
 };
 use rucc_target::aarch64::{self, AAPCS64};
 use rucc_target::x86;
-use rucc_target::x86_64::{Mode, SYSV, Width, gpr_named, nops_in};
+use rucc_target::x86_64::{Mode, SYSV, Width, gpr_named, nops, nops_i386};
 use rucc_target::{CallRegs, ObjectFormat};
 use rucc_tuple::Arch;
 
@@ -445,6 +445,9 @@ struct Reader {
     /// labels in one piece are a fixed distance apart as soon as both are down. See
     /// [`Reader::fixed_now`].
     pieces: Map<usize, usize>,
+    /// The sections whose last line was data rather than an instruction, which gas pads in front
+    /// of with a one byte no-op before the long ones. See [`Reader::align`].
+    after_data: Set<usize>,
     fixups: Vec<Fixup>,
     /// `.set` and `.equ`, as the symbol they name and the expression they were given.
     sets: Vec<(usize, Sum, usize)>,
@@ -790,6 +793,11 @@ impl Reader {
         (piece.is_some() && net == 0).then_some(value)
     }
 
+    /// The section a part is, which is itself unless it is a numbered subsection of another.
+    fn section_of(&self, part: usize) -> usize {
+        self.subs.get(&part).map_or(part, |&(parent, _)| parent)
+    }
+
     /// The mode the next instruction is read in: what `.code32` or `.code64` last said, and
     /// otherwise the one the file's machine runs in.
     fn mode(&self) -> Mode {
@@ -813,6 +821,7 @@ impl Reader {
     /// `prefixes` are the bytes of any prefix the line wrote in front of the mnemonic, which go in
     /// among the ones the instruction already has in the order gas puts them.
     fn instruction(&mut self, word: &str, rest: &str, prefixes: &[u8]) -> Result<(), Trouble> {
+        self.after_data.remove(&self.section_of(self.here));
         let mut args = if rest.is_empty() { Vec::new() } else { split(rest, ',') };
         for arg in &mut args {
             if let Some(value) = self.fixed_now(arg) {
@@ -1531,6 +1540,9 @@ impl Reader {
     #[allow(clippy::too_many_lines)]
     fn directive(&mut self, word: &str, rest: &str) -> Result<(), Trouble> {
         let args = split(rest, ',');
+        if DATA.contains(&word) {
+            self.after_data.insert(self.section_of(self.here));
+        }
         match word {
             "text" | "data" | "bss" | "rodata" | "const" | "cstring" | "const_data"
                 if self.macho =>
@@ -1938,8 +1950,10 @@ impl Reader {
                     for _ in 0..need / 4 {
                         whole.bytes.extend_from_slice(&A64_NOP.to_le_bytes());
                     }
+                } else if exec && self.i386 {
+                    nops_i386(mode, need, &mut whole.bytes);
                 } else if exec {
-                    nops_in(mode, need, &mut whole.bytes);
+                    nops(need, &mut whole.bytes);
                 } else {
                     whole.bytes.resize(whole.bytes.len() + need, 0);
                 }
@@ -2625,8 +2639,9 @@ impl Reader {
             // Not one byte at a time, which is what gas does as well: the padding in front of a
             // loop is fallen into, and a few long nops are fewer instructions than many short ones.
             // On AArch64 the no-op is a word, and padding that is not a whole number of words is
-            // zeros up to the next one, which nothing can be walking through. Thirty two bit code
-            // has no-ops of its own, which `nops_in` knows.
+            // zeros up to the next one, which nothing can be walking through. An i386 object has
+            // no-ops of its own, which `nops_i386` knows, and gas pads with those or with x86-64's
+            // by the machine the object is for, whatever `.code32` or `.code64` said.
             None if exec && self.aarch64 => {
                 let mut bytes = vec![0u8; (need % 4) as usize];
                 for _ in 0..need / 4 {
@@ -2636,11 +2651,20 @@ impl Reader {
             }
             None if exec => {
                 let mut bytes = Vec::new();
-                let need = usize::try_from(need).unwrap_or(usize::MAX);
+                let mut need = usize::try_from(need).unwrap_or(usize::MAX);
+                // After data, gas starts with a `nop` of one byte, so that a byte of the data that
+                // looks like a prefix runs into that and not into the long no-op after it. The
+                // section remembers this across alignments and across switching away and back.
+                if need > 0 && self.after_data.contains(&self.section_of(self.here)) {
+                    bytes.push(0x90);
+                    need -= 1;
+                }
                 if self.sixteen.is_some() {
                     crate::sixteen::nops(need, &mut bytes);
+                } else if self.i386 {
+                    nops_i386(self.mode(), need, &mut bytes);
                 } else {
-                    nops_in(self.mode(), need, &mut bytes);
+                    nops(need, &mut bytes);
                 }
                 self.put(&bytes)
             }
@@ -4488,6 +4512,14 @@ pub(crate) fn constant(text: &str) -> Option<i64> {
     parser.whole().ok()?.flat()
 }
 
+/// The directives that write data, after which gas pads code differently. See
+/// [`Reader::after_data`].
+const DATA: &[&str] = &[
+    "byte", "short", "word", "hword", "value", "2byte", "long", "int", "4byte", "quad", "8byte",
+    "xword", "dword", "octa", "uleb128", "sleb128", "ascii", "asciz", "string", "incbin", "space",
+    "skip", "zero", "fill",
+];
+
 /// One expression, being read.
 struct Parser<'a> {
     text: &'a str,
@@ -5959,8 +5991,9 @@ _tls$tlv$init:
         assert_eq!(bytes(&data, ".data"), vec![1, 0x90, 0x90, 0x90]);
     }
 
-    /// i386 code is padded with the `lea` forms gas writes there, not x86-64's `nopl`, and so is
-    /// x86-64 code after `.code32`.
+    /// i386 code is padded with the `lea` forms gas writes there, not x86-64's `nopl`. gas picks the
+    /// forms by the machine the object is for, so x86-64 code after `.code32` still gets `nopl`,
+    /// and i386 code after `.code64` gets the `lea` forms with a REX.W.
     #[test]
     fn padding_in_thirty_two_bit_code_is_what_gas_writes_for_i386() {
         let out = read("\t.text\n\tret\n\t.p2align 4\n\tret\n", Arch::X86).unwrap();
@@ -5970,9 +6003,27 @@ _tls$tlv$init:
         let out = read("\t.text\n\tret\n\t.p2align 2\n\tret\n", Arch::X86).unwrap();
         assert_eq!(bytes(&out, ".text"), [0xc3, 0x8d, 0x76, 0x00, 0xc3]);
         let code32 = assembled("\t.text\n\t.code32\n\tret\n\t.p2align 2\n\tret\n");
-        assert_eq!(bytes(&code32, ".text"), [0xc3, 0x8d, 0x76, 0x00, 0xc3]);
+        assert_eq!(bytes(&code32, ".text"), [0xc3, 0x0f, 0x1f, 0x00, 0xc3]);
+        let code64 = read("\t.text\n\t.code64\n\tret\n\t.p2align 2\n\tret\n", Arch::X86).unwrap();
+        assert_eq!(bytes(&code64, ".text"), [0xc3, 0x48, 0x89, 0xf6, 0xc3]);
         let long = assembled("\t.text\n\tret\n\t.p2align 2\n\tret\n");
         assert_eq!(bytes(&long, ".text"), [0xc3, 0x0f, 0x1f, 0x00, 0xc3]);
+    }
+
+    /// Padding after data starts with a one byte `nop`, as gas 2.42 writes it, and the section
+    /// remembers the data across an alignment and a switch to another section and back. An
+    /// instruction in between is padding as usual.
+    #[test]
+    fn padding_after_data_starts_with_a_one_byte_nop() {
+        let read = assembled(concat!(
+            "\t.section .a,\"ax\"\n\tret\n\t.byte 0xc3\n\t.p2align 3\n",
+            "\t.section .b,\"ax\"\n\tret\n\t.skip 1, 0x90\n\t.section .z,\"ax\"\n\tnop\n",
+            "\t.section .b,\"ax\"\n\t.p2align 2\n\t.p2align 3\n",
+            "\t.section .c,\"ax\"\n\t.byte 0xc3\n\tret\n\t.p2align 3\n",
+        ));
+        assert_eq!(bytes(&read, ".a"), [0xc3, 0xc3, 0x90, 0x0f, 0x1f, 0x44, 0x00, 0x00]);
+        assert_eq!(bytes(&read, ".b"), [0xc3, 0x90, 0x90, 0x90, 0x90, 0x0f, 0x1f, 0x00]);
+        assert_eq!(bytes(&read, ".c"), [0xc3, 0xc3, 0x66, 0x0f, 0x1f, 0x44, 0x00, 0x00]);
     }
 
     #[test]
