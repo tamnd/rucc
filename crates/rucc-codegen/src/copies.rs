@@ -177,6 +177,7 @@ pub fn clean(
     machine: &MachineInsts,
     frame: &FrameInsts,
     conv: &CallRegs,
+    framed: bool,
     names: &mut Interner,
 ) -> Cleaned {
     let blocks: Vec<Block> = func.blocks().collect();
@@ -224,7 +225,7 @@ pub fn clean(
                     continue;
                 }
                 let Some(reg) = operand.reg.phys() else { continue };
-                addressing |= addresses(conv, operand.class, reg);
+                addressing |= addresses(conv, framed, operand.class, reg);
                 holds.wrote(operand.class, Place::Reg(reg));
             }
             if addressing {
@@ -239,8 +240,11 @@ pub fn clean(
 }
 
 /// Whether that register is one the frame is addressed through, so writing it moves every slot.
-fn addresses(conv: &CallRegs, class: RegClass, reg: PhysReg) -> bool {
-    class == conv.int_class && (reg == conv.stack_pointer || reg == conv.frame_pointer)
+///
+/// The frame pointer only in a frame that keeps one. Elsewhere it is a register the allocator
+/// handed out like any other, and a write of it is a value arriving. tamnd/rucc#2777.
+fn addresses(conv: &CallRegs, framed: bool, class: RegClass, reg: PhysReg) -> bool {
+    class == conv.int_class && (reg == conv.stack_pointer || (framed && reg == conv.frame_pointer))
 }
 
 /// The two registers a copy would be written between, where this edit is a load out of the frame
@@ -365,7 +369,7 @@ mod tests {
 
     /// The pass, with the one target these tests are written against.
     fn clean(func: &mut Func, moves: &Moves, names: &mut Interner) -> Cleaned {
-        super::clean(func, moves, &MACHINE, &FRAME, &SYSV, names)
+        super::clean(func, moves, &MACHINE, &FRAME, &SYSV, true, names)
     }
 
     /// How many moves went, for a test about the half that removes.

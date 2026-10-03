@@ -100,6 +100,10 @@ pub struct Machine {
     pub selector: &'static Selector,
     /// What the allocator may hand out, and what it holds back.
     pub env: Env,
+    /// The same with the frame pointer offered last, for a function that keeps none, on a machine
+    /// where that register can hold anything the others can. `None` where it cannot. See
+    /// [`frame::keeps_frame_pointer`].
+    pub spare: Option<Env>,
 }
 
 /// The scratch registers held back from the allocator on x86-64.
@@ -168,6 +172,17 @@ impl Machine {
         // on SysV, and taking the last two that are left lands on `xmm14` and `xmm15` there and on
         // `xmm4` and `xmm5` on Windows, neither of which any argument travels in.
         let (sse_order, sse_scratch) = held_back(conv);
+        let env = |order: &[PhysReg]| {
+            Env::new().with(x86_64::GPR, order, &SCRATCH).with(
+                x86_64::XMM,
+                &sse_order,
+                &sse_scratch,
+            )
+        };
+        // The frame pointer last, so a function only reaches for it once every other register is
+        // in use, which is also the only time the push and the pop it costs are worth paying.
+        // tamnd/rucc#2777.
+        let spared: Vec<PhysReg> = order.iter().copied().chain([conv.frame_pointer]).collect();
         Self {
             conv,
             file: x86_64::REGS,
@@ -179,11 +194,8 @@ impl Machine {
             timing: &x86_64::TIMING,
             short: &x86_64::SHORT,
             selector: &select::x86_64::SELECTOR,
-            env: Env::new().with(x86_64::GPR, &order, &SCRATCH).with(
-                x86_64::XMM,
-                &sse_order,
-                &sse_scratch,
-            ),
+            env: env(&order),
+            spare: Some(env(&spared)),
         }
     }
 
@@ -215,6 +227,7 @@ impl Machine {
                 &fp_order,
                 &fp_scratch,
             ),
+            spare: None,
         }
     }
 
@@ -245,6 +258,9 @@ impl Machine {
                 &sse_order,
                 &sse_scratch,
             ),
+            // Not on this machine. The four registers it allocates are the four with a byte form,
+            // and `ebp` has none.
+            spare: None,
         }
     }
 
@@ -965,8 +981,15 @@ pub fn compile_recording(
     // write, and the backtracking allocator is free to leave it in a register the first arm writes.
     let allocator = if alone { Allocator::Single } else { flags.allocator };
     let called = names.resolve(func.name).to_owned();
-    let allocation =
-        rucc_regalloc::run_with(&mut func, &machine.env, &called, flags.verify, allocator);
+    // One more register in a function that will keep no frame pointer, which is asked of the parts
+    // of the frame the allocator cannot change. Not in a naked function, which has no prologue to
+    // save it in, nor in one that saves every register, which has a list of its own to save.
+    let spare = machine
+        .spare
+        .as_ref()
+        .filter(|_| !naked && !saves_all && !frame::keeps_frame_pointer(&layout));
+    let env = spare.unwrap_or(&machine.env);
+    let allocation = rucc_regalloc::run_with(&mut func, env, &called, flags.verify, allocator);
     recording.pressure.record(&called, Cost::of(&allocation));
 
     // After allocation, because the largest area in most frames is the spill slots and nothing
@@ -1002,6 +1025,12 @@ pub fn compile_recording(
         layout = Layout { leaf: false, ..layout };
         frame = Frame::of(&func, &allocation, &layout);
     }
+    // The register was handed out on the promise that it would not be one, and a frame pointer set
+    // up over a value the allocator put there is a wrong program rather than a slow one.
+    assert!(
+        spare.is_none() || !frame.frame_pointer(),
+        "a function given the frame pointer to allocate kept one"
+    );
     // The one thing a naked function cannot be given. Everything else the attribute asks for is
     // something left out, and leaving something out always works; bytes are the one thing the body
     // may want that only a prologue provides. A local, a spilled value and the arguments of a call
@@ -1092,7 +1121,8 @@ pub fn compile_recording(
     // decisions of the allocator and what stands between the two is settled by the function they
     // both went into. Before the layout, because the layout is where the instruction sequence
     // stops being something a pass may edit.
-    copies::clean(&mut func, &moves, machine.shapes, machine.insts, machine.conv, names);
+    let pointer = frame.frame_pointer();
+    copies::clean(&mut func, &moves, machine.shapes, machine.insts, machine.conv, pointer, names);
 
     // After the moves are cleaned up, since that pass follows what the scratch registers hold, and
     // before the schedule, which should see the extra `add` as the instruction it is.
