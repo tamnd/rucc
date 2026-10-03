@@ -271,7 +271,8 @@ fn offered(object: &[u8]) -> Vec<String> {
 /// mingw's `___chkstk_ms` everywhere else, and on ARM64 `__chkstk` for both runtimes. On i386 those
 /// are the C names `_chkstk` and `__chkstk_ms` with cdecl's underscore in front. Each object offers
 /// the one name its row's prologues call and not the other, since an msvc program linking mingw's
-/// routine would still be missing its own.
+/// routine would still be missing its own. The i386 mingw object also has libgcc's `_alloca` and
+/// `__chkstk`, which are not the name the other row calls.
 #[test]
 fn the_runtime_defines_the_routine_under_the_name_each_row_calls() {
     let source = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../runtime/builtins/chkstk.S");
@@ -311,6 +312,13 @@ fn the_runtime_defines_the_routine_under_the_name_each_row_calls() {
         // objects call.
         if target == "i686-pc-windows-msvc" {
             assert!(names.iter().any(|name| name == "__alloca_probe"), "{target}: {names:?}");
+        }
+        // mingw's i386 runtime has the routine that moves the stack pointer as well, under
+        // libgcc's names, because a mingw-w64 CRT built by clang calls `_alloca` for a large frame.
+        if target == "i686-w64-windows-gnu" {
+            for name in ["__alloca", "___chkstk"] {
+                assert!(names.iter().any(|offered| offered == name), "{name}: {names:?}");
+            }
         }
         assert!(names.iter().any(|name| name == wanted), "{target}: {names:?}");
         assert!(!names.iter().any(|name| name == other), "{target}: {names:?}");

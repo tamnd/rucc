@@ -37,6 +37,7 @@ All notable changes are recorded here. The format follows [Keep a Changelog](htt
 
 ### Fixed
 
+- An i686-windows-gnu program links against the pinned mingw-w64 sysroot (#2072). That CRT was built by clang and calls `_alloca` for a large frame, in its runtime relocator among other places, and the builtins runtime only had `__chkstk_ms`, so lld stopped on an undefined `__alloca`. The i386 mingw runtime now also has the probe that moves the stack pointer, as `_alloca` and `__chkstk`, which are libgcc's and compiler-rt's names for it. The msvc row's `_chkstk` and `_alloca_probe` are the same code.
 - A `double` or a `float` spilled on x86-64 now takes a stack slot of eight or four bytes and is saved with `movsd` or `movss`, where it took a sixteen byte slot written with `movaps` (#2206). Only a value that fills the vector register, such as a 16 byte vector, keeps sixteen. The reduced `weigh` from the issue goes from 96 bytes to 48 (gcc 14 takes 64).
 - An i386 `q` asm input whose value is kept on the stack, such as the kernel's `writeb` in the i915 driver's `gen5_write8`, is read straight into a register with a low byte instead of through `esi`, where `movb %sil` is not an instruction i386 has.
 - The i386 assembler wraps a displacement up to four gigabytes either way in the four bytes of an address, so `-0xC0000000(%edi)` in head_32.S is the address gas writes instead of an error.
