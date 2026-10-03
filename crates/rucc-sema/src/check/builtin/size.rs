@@ -198,8 +198,12 @@ impl Checker<'_> {
         // argument is in front of the walk. Only where lowering the address does nothing a
         // program could notice, since the pointer is not evaluated, and never in a static
         // initializer, which has to be a constant by the time this is done. A pointer read out of
-        // a global or a parameter came from somewhere the IR cannot see either, so it is answered
-        // here and now, which is what lets a `_chk` call over one be the plain call at `-O0`.
+        // a global came from somewhere the IR cannot see either, so it is answered here and now,
+        // and so is one read out of a parameter at `-O0`, which is what lets a `_chk` call over
+        // one be the plain call there. Above that a parameter waits, because once the function is
+        // inlined the IR can see what the caller passed, and that is when gcc answers it:
+        // `check_copy_size` inside `copy_from_user` asks about its `addr` and gets the size of
+        // the buffer the caller of the caller passed.
         if answer.is_none() && self.body.is_some() && self.quiet(address) && self.local(address) {
             // The dynamic spelling is carried down as a third bit, because the IR is where an
             // answer computed while the program runs can be built, and only that spelling may
@@ -378,7 +382,7 @@ impl Checker<'_> {
                 let decl = &self.tast[id];
                 decl.kind == DeclKind::Object
                     && decl.duration == StorageDuration::Automatic
-                    && !self.is_parameter(id)
+                    && (self.cx.optimizing || !self.is_parameter(id))
             }
             ExprKind::Cast(inner) | ExprKind::Convert { operand: inner, .. } => self.local(inner),
             ExprKind::Binary { lhs, rhs, .. } => self.local(lhs) || self.local(rhs),

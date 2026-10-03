@@ -1171,8 +1171,12 @@ impl Pool {
             Vec::new()
         };
         let mut grows = 0;
+        let unread = unread(callee);
         for inst in callee.blocks().flat_map(|block| callee.insts(block)) {
             if callee[inst].opcode != Opcode::Alloca || !callee[inst].args.is_empty() {
+                continue;
+            }
+            if callee[inst].first_result.is_some_and(|value| unread.contains(&value)) {
                 continue;
             }
             let Extra::Mem(mem) = callee[inst].extra else { continue };
@@ -1249,14 +1253,48 @@ fn size(func: &Func) -> usize {
 /// time this counts them, since the lowering shares them, and so are the slots of bodies spliced
 /// in earlier, see [`Pool`], so the sum is close to what the frame will be.
 fn frame(func: &Func) -> u64 {
+    let unread = unread(func);
     func.blocks()
         .flat_map(|block| func.insts(block))
         .filter(|&inst| func[inst].opcode == Opcode::Alloca && func[inst].args.is_empty())
+        .filter(|&inst| !func[inst].first_result.is_some_and(|value| unread.contains(&value)))
         .filter_map(|inst| match func[inst].extra {
             Extra::Mem(mem) => Some(func[mem].size),
             _ => None,
         })
         .sum()
+}
+
+/// The locals nothing ever reads, which gcc has deleted by the time it measures a frame.
+///
+/// A local whose address is only written through, marked dead, or compared is one gcc's early
+/// passes fold the compare of and then remove. That is the pair `typecheck()` declares only to
+/// write `(void)(&__dummy == &__dummy2)`, and under `-ftrivial-auto-var-init=zero` each of them
+/// is also cleared. Counted, they are 16 bytes that push `io_handle_query_entry` past the 100
+/// bytes `-fconserve-stack` allows, and gcc inlines it and settles a `WARN_ON_ONCE` with the
+/// object size it then knows.
+fn unread(func: &Func) -> Set<Value> {
+    let mut locals: Set<Value> = func
+        .blocks()
+        .flat_map(|block| func.insts(block))
+        .filter(|&inst| func[inst].opcode == Opcode::Alloca && func[inst].args.is_empty())
+        .filter_map(|inst| func[inst].first_result)
+        .collect();
+    for inst in func.blocks().flat_map(|block| func.insts(block)) {
+        let data = &func[inst];
+        for (at, arg) in func[data.args].iter().enumerate() {
+            let harmless = match data.opcode {
+                Opcode::Store => at == 1,
+                Opcode::Memset => at == 0,
+                Opcode::LifetimeEnd | Opcode::ICmp => true,
+                _ => false,
+            };
+            if !harmless {
+                locals.remove(arg);
+            }
+        }
+    }
+    locals
 }
 
 /// Whether a caller whose own locals came to `own` bytes, and whose locals come to `now` bytes with
@@ -2853,7 +2891,11 @@ block0(%0: i32):
             if size == 0 {
                 String::new()
             } else {
-                format!("    %{number} = alloca, size {size}, align 16\n")
+                // Its address kept somewhere, since a local nothing reads is one gcc has deleted
+                // before it measures.
+                format!(
+                    "    %{number} = alloca, size {size}, align 16\n    store %{number} -> %{number}, align 16\n"
+                )
             }
         };
         ONCE.replace("linkage(internal) {", &format!("linkage(internal){attrs} {{"))
@@ -2921,6 +2963,14 @@ block0(%0: i32):
         assert!(conserved(&framed(4096, 1024, "")).contains("call @scale"));
         assert!(!conserved(&framed(96, 0, "")).contains("call @scale"));
         assert!(!conserved(&framed(400, 1024, "")).contains("call @scale"));
+        // A local only written and compared, the pair `typecheck()` declares, is not in the frame
+        // gcc measures, so the same 256 bytes with nothing reading them go in.
+        let unread = framed(256, 0, "").replace(
+            "    store %5 -> %5, align 16\n",
+            "    %6 = icmp eq %5, %5\n    memset %5, %0, size 8, align 16\n",
+        );
+        assert!(unread.contains("memset %5"), "{unread}");
+        assert!(!conserved(&unread).contains("call @scale"));
     }
 
     /// `always_inline` is a promise and the frame does not change that.

@@ -343,6 +343,7 @@ pub fn compile(opts: &Options, name: &str, fs: &dyn FileSystem) -> Compiled {
                 permissive: opts.permissive,
                 gnu89_inline: opts.gnu89_inline,
                 strict_flex_arrays: opts.strict_flex_arrays,
+                optimizing: opts.opt_level.runs_optimizer(),
                 error_limit: opts.error_limit as usize,
                 // A freestanding program has no C library, so a name that is the library's
                 // everywhere else is the program's own here and means whatever it defined.
