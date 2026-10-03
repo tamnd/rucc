@@ -77,9 +77,9 @@
 use std::collections::BTreeMap;
 
 use rucc_base::hash::{Map, Set};
-use rucc_ir::{Block, Def, Extra, Func, Inst, IntPred, Opcode, Value};
+use rucc_ir::{Block, Def, Extra, Flags, Func, Inst, IntPred, Opcode, Value};
 
-use super::ops::{self, Truth, Undo};
+use super::ops::{self, Checked, Truth, Undo};
 use super::{PAIRS, Range};
 use crate::cfg::Cfg;
 use crate::dom::Dominators;
@@ -637,6 +637,40 @@ impl<'a> Ranges<'a> {
                 };
                 self.assuming(apply, flags)
             }
+            // The overflow builtins: the value is the plain wrapping operation, and the flag is
+            // settled when the operands' bounds say the true answer always or never fits.
+            Opcode::SAddOverflow
+            | Opcode::UAddOverflow
+            | Opcode::SSubOverflow
+            | Opcode::USubOverflow
+            | Opcode::SMulOverflow
+            | Opcode::UMulOverflow => {
+                let (a, b) = (operand(self, 0), operand(self, 1));
+                if a.width() != b.width() {
+                    return Range::of(ty);
+                }
+                let (op, signed) = match data.opcode {
+                    Opcode::SAddOverflow => (Checked::Add, true),
+                    Opcode::UAddOverflow => (Checked::Add, false),
+                    Opcode::SSubOverflow => (Checked::Sub, true),
+                    Opcode::USubOverflow => (Checked::Sub, false),
+                    Opcode::SMulOverflow => (Checked::Mul, true),
+                    _ => (Checked::Mul, false),
+                };
+                match self.func[value].def {
+                    Def::Result { index: 0, .. } if a.width() == width => match op {
+                        Checked::Add => ops::add(a, b, Flags::NONE),
+                        Checked::Sub => ops::sub(a, b, Flags::NONE),
+                        Checked::Mul => ops::mul(a, b, Flags::NONE),
+                    },
+                    Def::Result { index: 1, .. } => match ops::overflows(op, signed, a, b) {
+                        Truth::Always => Range::exactly(1, width),
+                        Truth::Never => Range::exactly(0, width),
+                        Truth::Either => Range::of(ty),
+                    },
+                    _ => Range::of(ty),
+                }
+            }
             Opcode::Trunc => ops::trunc(operand(self, 0), width),
             Opcode::ZExt => ops::zext(operand(self, 0), width),
             Opcode::SExt => ops::sext(operand(self, 0), width),
@@ -674,6 +708,13 @@ impl<'a> Ranges<'a> {
                         .and_then(|&arg| this.condition_fact(cond, taken, arg, block, depth));
                     fact.map_or(range, |fact| range.intersect(fact))
                 };
+                // A condition the ranges settle picks its arm, which is how the saturating
+                // `size_add` of two sizes that cannot overflow loses its all-ones arm.
+                match operand(self, 0).singleton() {
+                    Some(1) => return arm(self, 1, true),
+                    Some(0) => return arm(self, 2, false),
+                    _ => {}
+                }
                 let (a, b) = (arm(self, 1, true), arm(self, 2, false));
                 if a.width() != b.width() { Range::of(ty) } else { a.union(b) }
             }
@@ -726,8 +767,8 @@ impl<'a> Ranges<'a> {
                 };
                 let bit = Range::exactly(bit, width);
                 out = out.union(match opcode {
-                    Opcode::Add => ops::add(side, bit, rucc_ir::Flags::NONE),
-                    _ => ops::sub(side, bit, rucc_ir::Flags::NONE),
+                    Opcode::Add => ops::add(side, bit, Flags::NONE),
+                    _ => ops::sub(side, bit, Flags::NONE),
                 });
             }
             return Some(out);
@@ -741,13 +782,9 @@ impl<'a> Ranges<'a> {
     /// somewhere upstream. It also says a range that is only true because the program would
     /// otherwise be undefined has to be visible, and the difference between the two answers here
     /// is exactly that range.
-    fn assuming(
-        &mut self,
-        apply: impl Fn(rucc_ir::Flags) -> Range,
-        flags: rucc_ir::Flags,
-    ) -> Range {
+    fn assuming(&mut self, apply: impl Fn(Flags) -> Range, flags: Flags) -> Range {
         let range = apply(flags);
-        if !flags.is_empty() && range != apply(rucc_ir::Flags::NONE) {
+        if !flags.is_empty() && range != apply(Flags::NONE) {
             self.counts.assumed += 1;
         }
         range
@@ -1793,6 +1830,29 @@ mod tests {
         let asked = Asked::new(func);
         let mut ranges = asked.ranges();
         assert_eq!(ranges.at(result, then).unsigned_bounds(), Some((0, 8190)));
+    }
+
+    #[test]
+    fn a_saturating_size_of_a_clamped_count_cannot_saturate() {
+        // `size_add(16, size_mul(n, 8))` with `n` below 64, which is the probe copy in
+        // `__io_uring_register`. Neither builtin can overflow, so the all-ones arm is dead and the
+        // size is at most 16 + 63 * 8.
+        let (func, n, then, _) = guarded(IntPred::Ult, 64);
+        let mut func = func;
+        let (flag, size) = {
+            let mut build = Builder::new(&mut func, then);
+            let eight = build.iconst(I32, 8);
+            let (product, wrapped) = build.checked(Opcode::UMulOverflow, n, eight);
+            let header = build.iconst(I32, 16);
+            let (sum, carried) = build.checked(Opcode::UAddOverflow, header, product);
+            let ones = build.iconst(I32, -1);
+            let size = build.select(carried, ones, sum);
+            (wrapped, size)
+        };
+        let asked = Asked::new(func);
+        let mut ranges = asked.ranges();
+        assert_eq!(ranges.at(flag, then).singleton(), Some(0));
+        assert_eq!(ranges.at(size, then).unsigned_bounds(), Some((16, 16 + 63 * 8)));
     }
 
     #[test]

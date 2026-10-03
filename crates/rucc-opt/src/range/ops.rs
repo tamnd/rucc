@@ -3,8 +3,8 @@
 //! Design: `spec/optimizer/10-value-ranges.md`, sections 10.4 and 10.7. Section 10.4 calls this a
 //! table with an entry per opcode, and says the M4 subset is addition, subtraction,
 //! multiplication, the bitwise operations, the shifts, the comparisons, truncation, sign and zero
-//! extension, and negation. Not division, not remainder, not the overflow builtins, not the
-//! intrinsics: those are cheap to add later against the same tests and expensive to get subtly
+//! extension, and negation. The overflow builtins came later, and only their flag: [`overflows`].
+//! Not division, not remainder, not the intrinsics: those are cheap to add later against the same tests and expensive to get subtly
 //! wrong now.
 //!
 //! # Forwards and backwards
@@ -65,6 +65,78 @@ pub enum Truth {
     Never,
     /// The ranges do not settle it.
     Either,
+}
+
+/// Which arithmetic an overflow builtin checks.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Checked {
+    /// `__builtin_add_overflow`.
+    Add,
+    /// `__builtin_sub_overflow`.
+    Sub,
+    /// `__builtin_mul_overflow`.
+    Mul,
+}
+
+/// Whether an overflow builtin's flag is settled, read off the bounds of its operands.
+///
+/// The wrapped value is the plain operation with no flags, so it is not worked out here. The flag
+/// is the part worth having: `size_mul(n, 8)` with `n` already clamped to 60 cannot overflow, and
+/// once the flag is known to be clear the saturating select it feeds folds away, and the
+/// `WARN_ON_ONCE(bytes > INT_MAX)` after it goes with it.
+///
+/// # Panics
+///
+/// Panics if the operands are of different widths.
+#[must_use]
+pub fn overflows(op: Checked, signed: bool, a: Range, b: Range) -> Truth {
+    assert_eq!(a.width(), b.width(), "these are ranges of different widths");
+    let width = a.width();
+    // Each window is the operation done in the integers across the hulls, which is exact at the
+    // corners for all three, and an integer too wide to hold it settles nothing.
+    let (never, always) = if signed {
+        let (Some((al, ah)), Some((bl, bh))) = (a.signed_bounds(), b.signed_bounds()) else {
+            return Truth::Either;
+        };
+        let (min, max) = signed_limits(width);
+        let window = match op {
+            Checked::Add => al.checked_add(bl).zip(ah.checked_add(bh)),
+            Checked::Sub => al.checked_sub(bh).zip(ah.checked_sub(bl)),
+            Checked::Mul => [(al, bl), (al, bh), (ah, bl), (ah, bh)]
+                .into_iter()
+                .map(|(x, y)| x.checked_mul(y))
+                .collect::<Option<Vec<i128>>>()
+                .map(|corners| {
+                    let least = corners.iter().copied().min().expect("four corners");
+                    (least, corners.into_iter().max().expect("four corners"))
+                }),
+        };
+        let Some((lo, hi)) = window else { return Truth::Either };
+        (lo >= min && hi <= max, hi < min || lo > max)
+    } else {
+        let (Some((al, ah)), Some((bl, bh))) = (a.unsigned_bounds(), b.unsigned_bounds()) else {
+            return Truth::Either;
+        };
+        let top = mask(width);
+        match op {
+            Checked::Add => (
+                ah.checked_add(bh).is_some_and(|hi| hi <= top),
+                al.checked_add(bl).is_none_or(|lo| lo > top),
+            ),
+            Checked::Sub => (al >= bh, ah < bl),
+            Checked::Mul => (
+                ah.checked_mul(bh).is_some_and(|hi| hi <= top),
+                al.checked_mul(bl).is_none_or(|lo| lo > top),
+            ),
+        }
+    };
+    if never {
+        Truth::Never
+    } else if always {
+        Truth::Always
+    } else {
+        Truth::Either
+    }
 }
 
 /// The sum, modulo the width, and narrowed by whatever the flags promise.
@@ -671,7 +743,7 @@ fn coarse(a: Range, low: u32, width: u32, kind: Kind) -> Range {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::range::signed;
+    use crate::range::{signed, signed_limits};
 
     /// An operation run the way round the inverse claims to undo.
     type Forwards = Box<dyn Fn(u128, u128) -> u128>;
@@ -711,6 +783,57 @@ mod tests {
     /// The values a range says it holds.
     fn held(range: Range) -> Vec<u128> {
         (0..=mask(range.width())).filter(|&value| range.contains(value)).collect()
+    }
+
+    #[test]
+    fn an_overflow_flag_is_only_settled_when_every_pairing_agrees() {
+        let ranges = all();
+        let (min, max) = signed_limits(W);
+        for op in [Checked::Add, Checked::Sub, Checked::Mul] {
+            for signed_too in [false, true] {
+                for &a in &ranges {
+                    for &b in &ranges {
+                        let wrapped = |x: u128, y: u128| {
+                            let exact = if signed_too {
+                                let (x, y) = (signed(x, W), signed(y, W));
+                                let exact = match op {
+                                    Checked::Add => x + y,
+                                    Checked::Sub => x - y,
+                                    Checked::Mul => x * y,
+                                };
+                                return exact < min || exact > max;
+                            } else {
+                                match op {
+                                    Checked::Add => x.checked_add(y),
+                                    Checked::Sub => x.checked_sub(y),
+                                    Checked::Mul => x.checked_mul(y),
+                                }
+                            };
+                            exact.is_none_or(|exact| exact > mask(W))
+                        };
+                        let seen: Vec<bool> = held(a)
+                            .into_iter()
+                            .flat_map(|x| held(b).into_iter().map(move |y| (x, y)))
+                            .map(|(x, y)| wrapped(x, y))
+                            .collect();
+                        match overflows(op, signed_too, a, b) {
+                            Truth::Never => assert!(
+                                !seen.contains(&true),
+                                "{op:?} signed {signed_too} of {a:?} and {b:?} can overflow"
+                            ),
+                            Truth::Always => assert!(
+                                !seen.contains(&false),
+                                "{op:?} signed {signed_too} of {a:?} and {b:?} can fit"
+                            ),
+                            Truth::Either => {}
+                        }
+                        if a.singleton().is_some() && b.singleton().is_some() {
+                            assert_ne!(overflows(op, signed_too, a, b), Truth::Either);
+                        }
+                    }
+                }
+            }
+        }
     }
 
     /// The result holds every value the operation can produce, and where the operands were one
