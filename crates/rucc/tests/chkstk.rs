@@ -267,8 +267,9 @@ fn offered(object: &[u8]) -> Vec<String> {
 /// The routine a large frame calls is in our own runtime under the name each runtime gives it.
 ///
 /// `runtime/builtins/chkstk.S` is one file for every Windows row, and which routine it assembles
-/// to is up to the macros of the row: on x86-64 `__chkstk` where `_MSC_VER` is defined and mingw's
-/// `___chkstk_ms` everywhere else, and on ARM64 `__chkstk` for both runtimes. Each object offers
+/// to is up to the macros of the row: on x86-64 and i386 `__chkstk` where `_MSC_VER` is defined and
+/// mingw's `___chkstk_ms` everywhere else, and on ARM64 `__chkstk` for both runtimes. On i386 those
+/// are the C names `_chkstk` and `__chkstk_ms` with cdecl's underscore in front. Each object offers
 /// the one name its row's prologues call and not the other, since an msvc program linking mingw's
 /// routine would still be missing its own.
 #[test]
@@ -279,6 +280,8 @@ fn the_runtime_defines_the_routine_under_the_name_each_row_calls() {
         (MINGW, "___chkstk_ms", "__chkstk"),
         (ARM64_MSVC, "__chkstk", "___chkstk_ms"),
         (ARM64_MINGW, "__chkstk", "___chkstk_ms"),
+        ("i686-pc-windows-msvc", "__chkstk", "___chkstk_ms"),
+        ("i686-w64-windows-gnu", "___chkstk_ms", "__chkstk"),
     ] {
         let dir = std::env::temp_dir().join(format!("rucc-chkstk-{}-{target}", std::process::id()));
         std::fs::create_dir_all(&dir).expect("a temporary directory can be created");
@@ -297,9 +300,18 @@ fn the_runtime_defines_the_routine_under_the_name_each_row_calls() {
         // The machine the header names, which for the two ARM64 rows is the arm of the file
         // written for them rather than an x86 one.
         let machine = u16::from_le_bytes([object[0], object[1]]);
-        let arm = target.starts_with("aarch64");
-        assert_eq!(machine, if arm { 0xaa64 } else { 0x8664 }, "{target}");
+        let want = match target.split('-').next() {
+            Some("aarch64") => 0xaa64,
+            Some("i686") => 0x014c,
+            _ => 0x8664,
+        };
+        assert_eq!(machine, want, "{target}");
         let names = offered(&object);
+        // Microsoft's i386 CRT has the same routine under a second name, which is what its own
+        // objects call.
+        if target == "i686-pc-windows-msvc" {
+            assert!(names.iter().any(|name| name == "__alloca_probe"), "{target}: {names:?}");
+        }
         assert!(names.iter().any(|name| name == wanted), "{target}: {names:?}");
         assert!(!names.iter().any(|name| name == other), "{target}: {names:?}");
     }

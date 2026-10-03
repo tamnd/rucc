@@ -124,4 +124,77 @@ __chkstk:
 	.section	.drectve,"yni"
 	.ascii	" -exclude-symbols:__chkstk"
 
+#elif defined(__i386__) && defined(_WIN32) && defined(_MSC_VER)
+
+/* Microsoft's i386 routine, `_chkstk` in C and so `__chkstk` here, with `_alloca_probe` as a
+ * second name for it, which is what Microsoft's CRT calls the same code. Unlike every other routine
+ * in this file it moves the stack pointer itself: the size arrives in `eax`, the routine comes back
+ * with the stack pointer that much lower, and the caller subtracts nothing afterwards. Only `eax`
+ * is the routine's to change, and it comes back holding the size as it went in. This is the walk
+ * compiler-rt's `chkstk2.S` does, which reads each page rather than writing it. */
+
+	.text
+	.globl	__chkstk
+	.globl	__alloca_probe
+__chkstk:
+__alloca_probe:
+	pushl	%ecx
+	cmpl	$0x1000, %eax
+	/* Where the frame starts, which is the stack pointer the caller had before the call. The
+	   return address and the saved `ecx` are above the stack pointer here. */
+	leal	8(%esp), %ecx
+	jb	.Lmsvc32_rest
+.Lmsvc32_page:
+	subl	$0x1000, %ecx
+	testl	%ecx, (%ecx)
+	subl	$0x1000, %eax
+	cmpl	$0x1000, %eax
+	ja	.Lmsvc32_page
+.Lmsvc32_rest:
+	subl	%eax, %ecx
+	testl	%ecx, (%ecx)
+	/* Where the return address is, and then the new stack with the return address on it. What is
+	   left in `eax` once the new stack pointer is taken off is the size the caller asked for. */
+	leal	4(%esp), %eax
+	movl	%ecx, %esp
+	movl	-4(%eax), %ecx
+	pushl	(%eax)
+	subl	%esp, %eax
+	ret
+
+#elif defined(__i386__) && defined(_WIN32)
+
+/* mingw's i386 routine, `__chkstk_ms` in C and so `___chkstk_ms` here, with the contract of the
+ * x86-64 one above: the size arrives in `eax`, every register comes back as it went in, and the
+ * caller subtracts the size from the stack pointer afterwards. It is libgcc's walk at four bytes a
+ * word. */
+
+	.text
+	.globl	___chkstk_ms
+___chkstk_ms:
+	pushl	%ecx
+	pushl	%eax
+	cmpl	$0x1000, %eax
+	/* Where the frame starts. The return address and the two registers just saved are above the
+	   stack pointer, which is what the twelve counts. */
+	leal	12(%esp), %ecx
+	jb	.Lmingw32_rest
+.Lmingw32_page:
+	subl	$0x1000, %ecx
+	orl	$0x0, (%ecx)
+	subl	$0x1000, %eax
+	cmpl	$0x1000, %eax
+	ja	.Lmingw32_page
+.Lmingw32_rest:
+	subl	%eax, %ecx
+	orl	$0x0, (%ecx)
+	popl	%eax
+	popl	%ecx
+	ret
+
+/* Kept out of the export table of a DLL for the same reason as the x86-64 one. The linker puts
+   the underscore of an i386 name back on itself, so the option names the C name, as clang's does. */
+	.section	.drectve,"yni"
+	.ascii	" -exclude-symbols:__chkstk_ms"
+
 #endif

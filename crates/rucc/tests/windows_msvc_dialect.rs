@@ -187,6 +187,34 @@ fn the_intrinsics_do_what_msvc_does_with_them() {
     assert!(ok && said.is_empty(), "{said}");
 }
 
+/// What Microsoft's `<malloc.h>` declares `_alloca` as. Its C runtime has no function of the
+/// name, so the call has to become stack, as cl.exe makes it.
+const ALLOCA: &str = "\
+#include <stddef.h>
+void *__cdecl _alloca(size_t);
+void use(void *);
+void f(int n) { use(_alloca(n)); }
+";
+
+#[test]
+fn on_the_msvc_rows_alloca_with_microsofts_underscore_is_stack_and_not_a_call() {
+    for target in [MSVC, "--target=i686-windows-msvc"] {
+        for flags in [&[][..], &["-fno-builtin"][..]] {
+            let mut all = vec![target, "-S", "-o", "-"];
+            all.extend_from_slice(flags);
+            let (ok, asm, said) = run("alloca", &all, ALLOCA);
+            assert!(ok, "{target} {flags:?}: {said}");
+            assert!(!asm.contains("_alloca"), "{target} {flags:?}: a call to nothing:\n{asm}");
+            assert!(asm.contains("use"), "{target} {flags:?}: {asm}");
+        }
+    }
+    // mingw-w64's header makes the name `__builtin_alloca` itself, so a program that declares a
+    // function of its own by it gets that function.
+    let (ok, asm, said) = run("alloca-mingw", &[MINGW, "-S", "-o", "-"], ALLOCA);
+    assert!(ok, "{said}");
+    assert!(asm.contains("call\t_alloca"), "{asm}");
+}
+
 #[test]
 fn on_the_mingw_row_the_msvc_words_are_what_the_headers_make_them() {
     // No keywords and no intrinsics: `__declspec` and `__cdecl` come from the predefined macros,

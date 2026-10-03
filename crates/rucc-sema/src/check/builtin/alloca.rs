@@ -34,6 +34,14 @@
 //! that depends on it: it declares `extern void *alloca (__SIZE_TYPE__)`, calls it, and would fail
 //! to link against a C library that has no such function.
 //!
+//! # `_alloca` on the MSVC rows
+//!
+//! Microsoft's `<malloc.h>` declares `_alloca` as a function and makes `alloca` a macro for it, and
+//! there is no function of that name in its C runtime to call: cl.exe and clang expand it inline.
+//! So on an MSVC row `_alloca` is a plain name too, declared with the same type, and `-fno-builtin`
+//! leaves it alone, since a call would have nothing to reach. On a mingw row it is left alone,
+//! since mingw-w64's `<malloc.h>` already makes it `__builtin_alloca`.
+//!
 //! # Why this is answered after the call is checked
 //!
 //! The same reason `check/builtin/thread.rs` is. The row carries `void *(size_t)`, so the call has
@@ -53,6 +61,9 @@ const NAME: &str = "__builtin_alloca";
 
 /// The plain spelling, which means this only where the program has left it to the library.
 const PLAIN: &str = "alloca";
+
+/// Microsoft's spelling, which is a plain spelling on the MSVC rows.
+const MICROSOFT: &str = "_alloca";
 
 impl Checker<'_> {
     /// The node a call to either spelling becomes, if the call is one.
@@ -76,7 +87,9 @@ impl Checker<'_> {
         let name = function?;
         let spelled = self.text(name);
         if spelled != NAME {
-            if spelled != PLAIN || !self.cx.means_the_library(spelled) {
+            let msvc = self.cx.target.tuple.env().as_str() == "msvc";
+            let plain = spelled == PLAIN && self.cx.means_the_library(spelled);
+            if !plain && !(msvc && spelled == MICROSOFT) {
                 return None;
             }
             let size = self.size_type();
