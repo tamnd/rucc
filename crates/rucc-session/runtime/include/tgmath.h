@@ -21,28 +21,29 @@
 #include <math.h>
 #include <complex.h>
 
-/* By the type of an expression, a real function or the complex one. */
-#define __rucc_tg_rc(e, f) _Generic((e), \
-	float: f##f, \
-	long double: f##l, \
-	_Complex float: c##f##f, \
-	_Complex double: c##f, \
-	_Complex long double: c##f##l, \
-	default: f)
+/* By the type of an expression, a real function or the complex one. The function is __fn and
+   not f, since f##f would paste the argument to itself. */
+#define __rucc_tg_rc(e, __fn) _Generic((e), \
+	float: __fn##f, \
+	long double: __fn##l, \
+	_Complex float: c##__fn##f, \
+	_Complex double: c##__fn, \
+	_Complex long double: c##__fn##l, \
+	default: __fn)
 
 /* By the type of an expression, a real function only. */
-#define __rucc_tg_r(e, f) _Generic((e), \
-	float: f##f, \
-	long double: f##l, \
-	default: f)
+#define __rucc_tg_r(e, __fn) _Generic((e), \
+	float: __fn##f, \
+	long double: __fn##l, \
+	default: __fn)
 
 /* By the type of an expression, a complex function only. */
-#define __rucc_tg_c(e, f) _Generic((e), \
-	float: f##f, \
-	long double: f##l, \
-	_Complex float: f##f, \
-	_Complex long double: f##l, \
-	default: f)
+#define __rucc_tg_c(e, __fn) _Generic((e), \
+	float: __fn##f, \
+	long double: __fn##l, \
+	_Complex float: __fn##f, \
+	_Complex long double: __fn##l, \
+	default: __fn)
 
 #undef acos
 #undef asin
