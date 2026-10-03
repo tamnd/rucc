@@ -178,6 +178,13 @@ fn main() {
                                 continue;
                             }
                         }
+                        // A segment override on its own, like the `cs` that
+                        // `-mindirect-branch-cs-prefix` puts in front of a call, is a prefix of
+                        // whatever comes next to a decoder that reads the listing as one run of
+                        // bytes, which llvm-mc does, so it is left out.
+                        if matches!(bytes[..], [0x26 | 0x2e | 0x36 | 0x3e | 0x64 | 0x65]) {
+                            continue;
+                        }
                         let hex: Vec<String> =
                             bytes.iter().map(|byte| format!("{byte:02x}")).collect();
                         let written = match text.is_empty() {
