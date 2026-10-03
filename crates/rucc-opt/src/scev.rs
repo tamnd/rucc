@@ -791,7 +791,11 @@ impl<'a> Scev<'a> {
         let found = exits.into_iter().find_map(|from| {
             let test = self.test_at(id, from)?;
             let step = test.chrec.step.as_number()?;
-            (test.each && bounded_by_its_test(test.pred, step)).then_some(test.chrec)
+            // Unsigned tests only. What is held is read through a zero extension, and a signed
+            // counter kept below its limit can still start out negative, which zero extends to a
+            // large number.
+            let unsigned = matches!(test.pred, IntPred::Ult | IntPred::Ugt);
+            (test.each && unsigned && bounded_by_its_test(test.pred, step)).then_some(test.chrec)
         });
         self.held.insert(id, found);
         self.known.remove(&id);
@@ -1295,11 +1299,15 @@ fn solve(chrec: Chrec, limit: Invariant, pred: IntPred) -> Option<Bound> {
 /// its type makes that last step the one that wraps. And the test has to run on every iteration
 /// that goes round, or the counter can be stepped by a path that never asks it anything.
 ///
-/// Nothing is claimed here about a signed counter, which needs no help: a signed counter that would
-/// wrap is a program with undefined behaviour in it and [`Assumption::StrictOverflow`] is where
-/// that is recorded.
+/// A signed counter is held the same way, and that matters under `-fwrapv` and
+/// `-fno-strict-overflow`, which take `nsw` off every increment. Then the `int i` of every
+/// `for (i = 0; i < 4; i++)` has no promise on it, the count rests on this assumption, and a loop
+/// that runs four times is one unroll cannot count. libsodium builds that way, and the loop each
+/// lane wise intrinsic in `<emmintrin.h>` is written as stayed a loop in its scrypt core. The
+/// counter is at the limit before it is past it here too, and the limit is a number of the type,
+/// so it is never past the largest one.
 fn bounded_by_its_test(pred: IntPred, step: i128) -> bool {
-    matches!((pred, step), (IntPred::Ult, 1) | (IntPred::Ugt, -1))
+    matches!((pred, step), (IntPred::Ult | IntPred::Slt, 1) | (IntPred::Ugt | IntPred::Sgt, -1))
 }
 
 /// Whether this sequence stays behind one the exit test already keeps inside its type.
@@ -2119,6 +2127,25 @@ mod tests {
         let found = bound(&it.func).expect("it is counted");
         assert_eq!(found.assumptions(), &[]);
         assert_eq!(found.proven(), Some(Count::Exact(100)));
+    }
+
+    #[test]
+    fn a_signed_counter_without_its_promise_is_held_by_its_own_test() {
+        // `for (int i = 0; i < 4; i++)` under `-fwrapv`, which leaves the increment without `nsw`.
+        let it = counted(Type::int(32), 0, 4, 1, IntPred::Slt, Flags::NONE);
+        let found = bound(&it.func).expect("it is counted");
+        assert_eq!(found.assumptions(), &[Assumption::StrictOverflow]);
+        assert_eq!(found.under_undefined_overflow(), Some(Count::Exact(4)));
+        let down = counted(Type::int(32), 4, 0, -1, IntPred::Sgt, Flags::NONE);
+        let found = bound(&down.func).expect("it is counted");
+        assert_eq!(found.under_undefined_overflow(), Some(Count::Exact(4)));
+    }
+
+    #[test]
+    fn a_signed_counter_reaching_its_limit_inclusively_still_needs_the_promise() {
+        let it = counted(Type::int(32), 0, 100, 1, IntPred::Sle, Flags::NONE);
+        let found = bound(&it.func).expect("it is counted");
+        assert_eq!(found.under_undefined_overflow(), None);
     }
 
     #[test]

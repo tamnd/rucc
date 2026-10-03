@@ -1340,6 +1340,16 @@ mod tests {
     ///
     /// Separate because the promise is the one thing here the pass reads through `crate::scev`
     /// rather than off the instruction, so a test that takes it away is testing something else.
+    /// The exit test of a counter that promises `flags`.
+    ///
+    /// A counter with no `nsw` is how a test asks for one that may wrap, and under `<` a counter
+    /// stepping by one cannot: it is at the limit before it is past it, see
+    /// `scev::bounded_by_its_test`. So without the promise the test is `<=`, which lets the
+    /// counter be stepped once more past a limit that could be the top of its type.
+    fn test_for(flags: Flags) -> IntPred {
+        if flags.contains(Flags::NSW) { IntPred::Slt } else { IntPred::Sle }
+    }
+
     fn promising(
         trips: i128,
         step: i128,
@@ -1368,7 +1378,7 @@ mod tests {
         let one = build.iconst(Type::int(64), 1);
         let next = build.binary(Opcode::Add, counter, one, flags);
         let limit = build.iconst(Type::int(64), trips);
-        let again = build.icmp(IntPred::Slt, next, limit);
+        let again = build.icmp(test_for(flags), next, limit);
         build.br_if(again, head, &[next], done, &[]);
         Builder::new(&mut func, done).ret(&[]);
         (names, func, vec![entry, head, done])
@@ -1500,7 +1510,8 @@ mod tests {
 
     #[test]
     fn a_loop_whose_counter_promises_nothing_keeps_its_check() {
-        // The same loop with the `nsw` taken off the increment, which is what `-fwrapv` produces.
+        // The same loop with the `nsw` taken off the increment, which is what `-fwrapv` produces,
+        // and an inclusive test, which unlike the strict one does not hold the counter on its own.
         // Then the counter can wrap, the count rests on it not wrapping, and nothing in the IR says
         // it will not, so the count is refused rather than assumed. This is the difference between
         // the one assumption `counted` accepts and the one it does not.
@@ -1789,7 +1800,7 @@ mod tests {
         // between a loop whose trip count is an expression with a condition attached and a loop
         // whose trip count nothing anywhere has. Both used to come out under the second remark and
         // they are not the same piece of work.
-        let (_, mut func, _) = unknown(Type::int(32), IntPred::Slt, Flags::NONE, Opcode::SExt);
+        let (_, mut func, _) = unknown(Type::int(32), IntPred::Sle, Flags::NONE, Opcode::SExt);
         let stats = hoisted(&mut func);
         assert!(!stats.changed());
         assert_eq!(stats.count(Kind::Missed, crate::trip::RESTS_ON_NO_WRAP), 1);
@@ -2546,7 +2557,7 @@ mod tests {
     /// ```
     ///
     /// `flags` is what the inner counter's increment promises, which is how a test makes the inner
-    /// loop one the analysis cannot count.
+    /// loop one the analysis cannot count. See [`test_for`].
     fn nest(
         rows: i128,
         cols: i128,
@@ -2599,7 +2610,7 @@ mod tests {
         let one = build.iconst(Type::int(64), 1);
         let next = build.binary(Opcode::Add, row, one, flags);
         let limit = build.iconst(Type::int(64), rows);
-        let again = build.icmp(IntPred::Slt, next, limit);
+        let again = build.icmp(test_for(flags), next, limit);
         build.br_if(again, inner, &[next], latch, &[]);
 
         let mut build = Builder::new(&mut func, latch);
