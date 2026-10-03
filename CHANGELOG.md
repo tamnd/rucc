@@ -12,6 +12,7 @@ All notable changes are recorded here. The format follows [Keep a Changelog](htt
 
 ### Changed
 
+- The inliner takes a `static` function called once only after the small functions around it are in, the order gcc uses. A small `static inline` helper called from several places is measured before the one large function it calls is folded into it, so the helper goes into each caller and the large function stays out of line. kernel/locking/semaphore.o now has the two tracepoints of `__down_common` in each of `__down` and its siblings, as gcc builds it.
 - A static that is only written through a cast of its address to an integer and back, the way `__this_cpu_write` reaches a `__seg_gs` store, now counts as write-only and is dropped with its stores. Doing anything else to the integer, such as adding a per-cpu offset, still keeps the object. In the 7.2.8 defconfig build this removes the `.data..percpu` section that rucc alone emitted in kernel/kprobes.o.
 
 - A `memcpy` of a known size out of a read only object whose initializer is all known becomes stores of what the object holds, with one fill of zero in front when there is a run of zeros worth it. gcc folds such a copy into the constructor, so copying a whole `__initconst` structure leaves nothing reading the object and it is dropped. In the 7.2.8 defconfig build this removes the `.init.rodata` section that rucc alone emitted in sound/core/hrtimer.o and arch/x86/events/amd/iommu.o.

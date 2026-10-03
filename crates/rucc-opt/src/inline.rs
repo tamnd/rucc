@@ -79,7 +79,10 @@
 //! an alias naming it. `used`, `noinline`, `optnone` and `naked` each keep it a call. So does a call
 //! more than `max-inline-functions-called-once-loop-depth` loops deep, which is 6, as it does in
 //! gcc. `-fno-inline` turns this off with the declared half, which is what gcc does, and
-//! `-fno-inline-functions-called-once` turns it off alone.
+//! `-fno-inline-functions-called-once` turns it off alone. It is a second round over the module,
+//! after every other kind of call is in and with the calls counted again, because that is when gcc
+//! takes it, and a function that a smaller one calls once is called once per copy of the smaller
+//! one by then.
 //!
 //! A body that takes the address of one of its own labels is copied with the label, so each copy
 //! has an address of its own, which is what gcc does and what `990208-1.c` checks. A body that
@@ -344,53 +347,65 @@ pub fn run(
             }
         }
     }
-    let once = if limit.is_some() && once { called_once(module) } else { Set::default() };
-    let wanted: Map<Symbol, (FuncId, Kind)> = module
-        .funcs()
-        .filter(|&id| !module[id].is_declaration())
-        .filter_map(|id| {
-            let func = &module[id];
-            let set = func.attrs.set;
-            let kind = if set.contains(AttrSet::ALWAYS_INLINE) {
-                Kind::Always
-            } else if limit.is_none()
-                || set.without(
-                    AttrSet::NOINLINE | AttrSet::OPTNONE | AttrSet::NAKED | AttrSet::INTERRUPT,
-                ) != set
-            {
-                return None;
-            } else if func.linkage == Linkage::Internal
-                && !set.contains(AttrSet::USED)
-                && once.contains(&func.name)
-            {
-                Kind::Once
-            } else if set.contains(AttrSet::INLINE_HINT) {
-                Kind::Hinted
-            } else if func.linkage == Linkage::Internal
-                && !set.contains(AttrSet::USED)
-                && !asked(func).is_empty()
-            {
-                Kind::Asks
-            } else if small(func) && trusted(func, pic) {
-                Kind::Small
-            } else if auto && trusted(func, pic) {
-                Kind::Auto
-            } else {
-                return None;
-            };
-            Some((func.name, (id, kind)))
-        })
-        .collect();
+    // Which kind of call each function is inlined by, given the names called once.
+    let classify = |module: &Module, once: &Set<Symbol>| -> Map<Symbol, (FuncId, Kind)> {
+        module
+            .funcs()
+            .filter(|&id| !module[id].is_declaration())
+            .filter_map(|id| {
+                let func = &module[id];
+                let set = func.attrs.set;
+                let kind = if set.contains(AttrSet::ALWAYS_INLINE) {
+                    Kind::Always
+                } else if limit.is_none()
+                    || set.without(
+                        AttrSet::NOINLINE | AttrSet::OPTNONE | AttrSet::NAKED | AttrSet::INTERRUPT,
+                    ) != set
+                {
+                    return None;
+                } else if func.linkage == Linkage::Internal
+                    && !set.contains(AttrSet::USED)
+                    && once.contains(&func.name)
+                {
+                    Kind::Once
+                } else if set.contains(AttrSet::INLINE_HINT) {
+                    Kind::Hinted
+                } else if func.linkage == Linkage::Internal
+                    && !set.contains(AttrSet::USED)
+                    && !asked(func).is_empty()
+                {
+                    Kind::Asks
+                } else if small(func) && trusted(func, pic) {
+                    Kind::Small
+                } else if auto && trusted(func, pic) {
+                    Kind::Auto
+                } else {
+                    return None;
+                };
+                Some((func.name, (id, kind)))
+            })
+            .collect()
+    };
+    // Two rounds, in the order gcc takes them. The first is everything but the called once rule,
+    // and the second is that rule over the calls the first left, counted again. gcc inlines a
+    // function called once only after the small functions are in, so a `static inline` helper
+    // called from four places is measured before the one large function it calls is folded into
+    // it, and once it is in all four that function is called four times and stays out of line.
+    // kernel/locking/semaphore.c is that shape: `__down_common` holds two tracepoints and a call
+    // to `___down_common`, and gcc has the tracepoints in each of `__down` and its siblings.
+    let mut wanted = classify(module, &Set::default());
     let mut done = Vec::new();
-    if !wanted.is_empty() {
-        let convention = Convention::of(module);
-        let mut state = Map::default();
-        let limit = limit.map_or(0, |limit| usize::try_from(limit).unwrap_or(usize::MAX));
+    let convention = Convention::of(module);
+    let most = limit.map_or(0, |limit| usize::try_from(limit).unwrap_or(usize::MAX));
+    let round = |module: &mut Module, wanted: &Map<Symbol, (FuncId, Kind)>, done: &mut Vec<_>| {
+        if wanted.is_empty() {
+            return;
+        }
         let (calls, cold, elsewhere) = callers(module);
         let how = How {
-            wanted: &wanted,
+            wanted,
             convention,
-            limit,
+            limit: most,
             isa,
             names,
             growth,
@@ -399,9 +414,19 @@ pub fn run(
             cold: &cold,
             elsewhere: &elsewhere,
         };
+        let mut state = Map::default();
         for id in module.funcs().collect::<Vec<FuncId>>() {
-            settle(module, id, &how, &mut state, &mut done);
+            settle(module, id, &how, &mut state, done);
         }
+    };
+    round(module, &wanted, &mut done);
+    if limit.is_some() && once {
+        let mut second = classify(module, &called_once(module));
+        second.retain(|_, &mut (_, kind)| kind == Kind::Once);
+        round(module, &second, &mut done);
+        wanted.extend(second);
+    }
+    if !wanted.is_empty() {
         let (calls, elsewhere) = references(module);
         for &(id, kind) in wanted.values() {
             let func = &module[id];
