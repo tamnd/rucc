@@ -282,7 +282,7 @@ fn placed(
             })
             .or_else(|| state.swapped(value, &seconds[number]))
             .or_else(|| {
-                let mut ties = reused[number].clone();
+                let mut ties = reused[number].to_vec();
                 let source = reuses[number].and_then(|reuse| reuse.source.number());
                 ties.extend(source.and_then(|source| usize::try_from(source).ok()));
                 ties.retain(|&tie| state.at[tie].is_none() && values[tie].is_some());
@@ -615,7 +615,7 @@ impl<'a> State<'a, '_> {
     /// tie apart though the register one of them is in stayed free for the other, because the other
     /// was placed first and had nothing yet to follow. Every move meets more ties than it breaks, so
     /// this ends.
-    fn settle(&mut self, reused: &[Vec<usize>], passed: &[Vec<Reg>], received: &[Vec<Reg>]) {
+    fn settle(&mut self, reused: &Answers, passed: &[Vec<Reg>], received: &[Vec<Reg>]) {
         let mut moved = true;
         while moved && self.work <= self.budget {
             moved = false;
@@ -741,31 +741,62 @@ fn received(func: &Func) -> Vec<Vec<Reg>> {
     received
 }
 
-/// For each value, the answers of two address instructions that reuse it as their first source.
-fn reused(reuses: &[Option<Reuse>]) -> Vec<Vec<usize>> {
-    let mut reused = vec![Vec::new(); reuses.len()];
-    for (answer, reuse) in reuses.iter().enumerate() {
-        let Some(reuse) = reuse else { continue };
-        let number = reuse.source.number().and_then(|number| usize::try_from(number).ok());
-        if let Some(answers) = number.and_then(|number| reused.get_mut(number)) {
-            answers.push(answer);
+/// Lists of answers by value, in one buffer, with where each value's list starts in it.
+///
+/// Most values have no list at all, and a list of its own for each one that does was one
+/// allocation per value for every function the allocator placed.
+struct Answers {
+    starts: Vec<usize>,
+    all: Vec<usize>,
+}
+
+impl std::ops::Index<usize> for Answers {
+    type Output = [usize];
+
+    fn index(&self, number: usize) -> &[usize] {
+        &self.all[self.starts[number]..self.starts[number + 1]]
+    }
+}
+
+/// For each value, the answers of the instructions whose reuse `of` names it, in order.
+fn answers(reuses: &[Option<Reuse>], of: impl Fn(Reuse) -> Option<Reg>) -> Answers {
+    let number = |reuse: &Option<Reuse>| {
+        let reg = reuse.and_then(&of)?;
+        let number = usize::try_from(reg.number()?).ok()?;
+        (number < reuses.len()).then_some(number)
+    };
+    // Counted first, then each count turned into where its list ends, and the answers put in from
+    // the back so that each end comes down to where its list starts.
+    let mut starts = vec![0; reuses.len() + 1];
+    for reuse in reuses {
+        if let Some(number) = number(reuse) {
+            starts[number] += 1;
         }
     }
-    reused
+    let mut total = 0;
+    for start in &mut starts {
+        total += *start;
+        *start = total;
+    }
+    let mut all = vec![0; total];
+    for (answer, reuse) in reuses.iter().enumerate().rev() {
+        if let Some(number) = number(reuse) {
+            starts[number] -= 1;
+            all[starts[number]] = answer;
+        }
+    }
+    Answers { starts, all }
+}
+
+/// For each value, the answers of two address instructions that reuse it as their first source.
+fn reused(reuses: &[Option<Reuse>]) -> Answers {
+    answers(reuses, |reuse| Some(reuse.source))
 }
 
 /// The answers that could be written over each value as the second source of an instruction that
 /// reads its sources either way round.
-fn seconds(reuses: &[Option<Reuse>]) -> Vec<Vec<usize>> {
-    let mut seconds = vec![Vec::new(); reuses.len()];
-    for (answer, reuse) in reuses.iter().enumerate() {
-        let Some(second) = reuse.and_then(|reuse| reuse.second) else { continue };
-        let number = second.number().and_then(|number| usize::try_from(number).ok());
-        if let Some(answers) = number.and_then(|number| seconds.get_mut(number)) {
-            answers.push(answer);
-        }
-    }
-    seconds
+fn seconds(reuses: &[Option<Reuse>]) -> Answers {
+    answers(reuses, |reuse| reuse.second)
 }
 
 fn index(reg: Reg) -> usize {
