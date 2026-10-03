@@ -1399,8 +1399,9 @@ struct Lowering<'a> {
     unwinding: Map<Inst, mir::Inst>,
     /// What each IR instruction with no effects was built as, when all of it went into one block.
     /// Something that reads the value can spell it without a register, as a kept `asm` template
-    /// spells a name, and then what was built for it is read by nothing. See [`Self::unread`].
-    effectless: Vec<Vec<mir::Inst>>,
+    /// spells a name, and then what was built for it is read by nothing. Every group in one list,
+    /// with where each one starts and ends in it. See [`Self::unread`].
+    effectless: (Vec<mir::Inst>, Vec<(usize, usize)>),
     /// The machine opcode each head a rule builds is and the operands it has, by where the head's
     /// name is in the rule table. See [`Self::head`].
     heads: Map<(usize, usize), (mir::Opcode, &'static [OperandDesc])>,
@@ -1548,7 +1549,7 @@ impl<'a> Lowering<'a> {
             marks: Map::default(),
             frame_slots: Map::default(),
             unwinding: Map::default(),
-            effectless: Vec::new(),
+            effectless: (Vec::new(), Vec::new()),
             heads: Map::default(),
             got: None,
             spare: Vec::new(),
@@ -1611,9 +1612,10 @@ impl<'a> Lowering<'a> {
             None => self.out.insts(at).next(),
         };
         let Some(first) = first else { return };
-        let built: Vec<mir::Inst> =
-            std::iter::successors(Some(first), |&one| self.out.next_inst(one)).collect();
-        self.effectless.push(built);
+        let (insts, groups) = &mut self.effectless;
+        let start = insts.len();
+        insts.extend(std::iter::successors(Some(first), |&one| self.out.next_inst(one)));
+        groups.push((start, insts.len()));
     }
 
     /// Takes out what was built for an IR instruction with no effects when nothing reads it.
@@ -1663,13 +1665,16 @@ impl<'a> Lowering<'a> {
                 .chain(stack.dynamic.iter().chain(&stack.grown).copied())
                 .collect();
             let mut gone = false;
-            for built in &mut self.effectless {
+            let mut own: Map<mir::Reg, usize> = Map::default();
+            let (insts, groups) = &mut self.effectless;
+            for group in groups.iter_mut() {
+                let built = &insts[group.0..group.1];
                 if built.is_empty() || built.iter().any(|inst| marked.contains(inst)) {
                     continue;
                 }
                 // What the group reads of itself, the `addq` reading what the `movq` wrote, does
                 // not keep it.
-                let mut own: Map<mir::Reg, usize> = Map::default();
+                own.clear();
                 for &inst in built.iter() {
                     for operand in &self.out[self.out[inst].operands] {
                         if operand.role == Role::Use {
@@ -1690,9 +1695,10 @@ impl<'a> Lowering<'a> {
                     self.out[self.out[inst].operands].iter().any(|it| it.role != Role::Use)
                 });
                 if dead && writes {
-                    for inst in built.drain(..) {
+                    for &inst in built {
                         self.out.remove_inst(inst);
                     }
+                    group.1 = group.0;
                     gone = true;
                 }
             }
