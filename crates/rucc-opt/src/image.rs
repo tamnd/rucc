@@ -94,7 +94,7 @@
 //! A `memcpy` of a known size out of one of these objects becomes stores of what the image holds
 //! there, with one fill in front when the object has more than a few zero bytes in that range.
 //! Every byte has to be answered for this to happen, so a piece of a scalar or an address with
-//! something added to it leaves the copy as it is. [`spelled`] says why the kernel needs it.
+//! something added to it leaves the copy as it is. `spelled` says why the kernel needs it.
 
 use std::collections::hash_map::Entry;
 
@@ -213,7 +213,7 @@ pub(crate) fn settle(func: &mut Func, images: &Images, fuel: &mut Fuel, stats: &
                 stats.missed(NO_FUEL);
                 continue;
             }
-            unroll(func, inst, &writes);
+            unroll(func, inst, &writes, images.pointer);
             stats.optimized(COPIED);
         }
     }
@@ -294,8 +294,9 @@ fn spelled(func: &Func, inst: Inst, images: &Images) -> Option<Vec<Write>> {
 }
 
 /// Puts the stores in place of the copy, behind one fill of zero when the object has a run of
-/// zero bytes worth one.
-fn unroll(func: &mut Func, inst: Inst, writes: &[Write]) {
+/// zero bytes worth one. `word` is how many bytes an address takes, which is the widest store
+/// and the width of the distance each one is moved by.
+fn unroll(func: &mut Func, inst: Inst, writes: &[Write], word: u64) {
     let bulk = func.bulk(inst).expect("only a copy is spelled out");
     let Extra::Mem(info) = func[inst].extra else { unreachable!("a copy carries its payload") };
     let (size, align) = (func[info].size, func[info].align);
@@ -317,7 +318,7 @@ fn unroll(func: &mut Func, inst: Inst, writes: &[Write]) {
         let (value, width) = match write {
             Write::Zero(bytes) => {
                 if !filled {
-                    zeros(func, inst, to, at, bytes, align);
+                    zeros(func, inst, to, at, bytes, align, word);
                 }
                 at += bytes;
                 continue;
@@ -329,32 +330,45 @@ fn unroll(func: &mut Func, inst: Inst, writes: &[Write]) {
                 (emit(func, inst, data, Type::PTR), width)
             }
         };
-        put(func, inst, value, to, at, width, align);
+        put(func, inst, value, to, at, width, align, word);
         at += width;
     }
     func.remove_inst(inst);
 }
 
-/// Stores of zero over that many bytes, eight at a time while there are eight.
-fn zeros(func: &mut Func, before: Inst, to: Value, mut at: u64, bytes: u64, align: u32) {
+/// Stores of zero over that many bytes, a word at a time while there is a word.
+fn zeros(func: &mut Func, before: Inst, to: Value, mut at: u64, bytes: u64, align: u32, word: u64) {
     let end = at + bytes;
     while at < end {
-        let width = [8, 4, 2, 1].into_iter().find(|&width| at + width <= end).unwrap_or(1);
+        let width = widest(word, end - at);
         let ty = Type::int(u32::try_from(width * 8).unwrap_or(8));
         let value = constant(func, before, ty, Opcode::IConst, Imm::int(0, ty));
-        put(func, before, value, to, at, width, align);
+        put(func, before, value, to, at, width, align, word);
         at += width;
     }
 }
 
 /// A plain store of that value, `at` bytes past `to`.
-fn put(func: &mut Func, before: Inst, value: Value, to: Value, at: u64, width: u64, align: u32) {
+///
+/// The distance is an integer as wide as an address, since a 64-bit one is a value i386 has no
+/// instruction to add to an address.
+#[allow(clippy::too_many_arguments)]
+fn put(
+    func: &mut Func,
+    before: Inst,
+    value: Value,
+    to: Value,
+    at: u64,
+    width: u64,
+    align: u32,
+    word: u64,
+) {
     let address = if at == 0 {
         to
     } else {
         let step = i128::from(at);
-        let step =
-            constant(func, before, Type::int(64), Opcode::IConst, Imm::int(step, Type::int(64)));
+        let ty = Type::int(u32::try_from(word * 8).unwrap_or(64));
+        let step = constant(func, before, ty, Opcode::IConst, Imm::int(step, ty));
         let args = func.push_values(&[to, step]);
         emit(func, before, InstData { args, ..InstData::new(Opcode::PtrAdd) }, Type::PTR)
     };
@@ -374,6 +388,11 @@ fn put(func: &mut Func, before: Inst, value: Value, to: Value, at: u64, width: u
 fn constant(func: &mut Func, before: Inst, ty: Type, opcode: Opcode, imm: Imm) -> Value {
     let at = func.add_imm(imm);
     emit(func, before, InstData { extra: Extra::Imm(at), ..InstData::new(opcode) }, ty)
+}
+
+/// The widest store, no wider than a word, that fits in what is left.
+fn widest(word: u64, left: u64) -> u64 {
+    [8, 4, 2, 1].into_iter().find(|&width| width <= word && width <= left).unwrap_or(1)
 }
 
 /// Puts an instruction in front of another one and gives back the value it produces.
@@ -532,7 +551,11 @@ impl Images {
                     _ => writes.push(Write::Zero(to - from)),
                 },
                 Piece::Scalar { ty, value } => {
+                    // An integer wider than an address is one i386 has no store for.
                     let fits = whole && ty.is_scalar() && matches!(ty.bits(), 8 | 16 | 32 | 64);
+                    if ty.is_int() && u64::from(ty.bits()) > self.pointer * 8 {
+                        return None;
+                    }
                     if !fits || !(ty.is_int() || ty.is_float()) {
                         return None;
                     }
@@ -542,7 +565,7 @@ impl Images {
                 Piece::Bytes(bytes) => {
                     let mut from = from;
                     while from < to {
-                        let step = [8, 4, 2, 1].into_iter().find(|&step| from + step <= to)?;
+                        let step = widest(self.pointer, to - from);
                         let into = usize::try_from(from - (at - width)).ok()?;
                         let run = &bytes[into..into + usize::try_from(step).ok()?];
                         let ty = Type::int(u32::try_from(step * 8).ok()?);
@@ -760,8 +783,13 @@ mod tests {
     /// The size comes from the data rather than from the caller, so that a test saying what is in
     /// the object does not also have to say how long it is and cannot say the two differently.
     fn images(build: impl Fn(&mut Module) -> Vec<Datum>) -> (Interner, Images) {
+        images_on("x86_64-unknown-linux-gnu", build)
+    }
+
+    /// The same, for a module built for that target.
+    fn images_on(triple: &str, build: impl Fn(&mut Module) -> Vec<Datum>) -> (Interner, Images) {
         let mut names = Interner::new();
-        let target = TargetInfo::new("x86_64-unknown-linux-gnu".parse::<Triple>().unwrap());
+        let target = TargetInfo::new(triple.parse::<Triple>().unwrap());
         let mut module = Module::new(names.intern("t.c"), &target);
         let data = build(&mut module);
         let size = data.iter().map(|datum| datum.size(&module)).sum();
@@ -777,6 +805,41 @@ mod tests {
     /// What a load of that type from that offset into `g` reads.
     fn read(names: &mut Interner, images: &Images, ty: Type, offset: u64) -> Option<Imm> {
         images.read(names.intern("g"), ty, offset)
+    }
+
+    /// A copy of a wide string on i386 is spelled four bytes at a time, since an eight byte store
+    /// is one it has no instruction for. c-testsuite 00220, a `wchar_t` array initialized from a
+    /// literal, did not compile at `-O2` before.
+    #[test]
+    fn a_copy_on_i386_is_spelled_a_word_at_a_time() {
+        let (mut names, narrow) = images_on("i686-unknown-linux-gnu", |module| {
+            vec![Datum::Bytes(module.push_bytes(b"h\0\0\0i\0\0\0\0\0\0\0"))]
+        });
+        let writes = narrow.spell(names.intern("g"), 0, 12).expect("every byte is known");
+        let widths: Vec<u64> = writes
+            .iter()
+            .map(|write| match write {
+                super::Write::Number(width, ..) | super::Write::Name(width, _) => *width,
+                super::Write::Zero(bytes) => *bytes,
+            })
+            .collect();
+        assert_eq!(widths, [4, 4, 4]);
+        let (mut names, wide) =
+            images(|module| vec![Datum::Bytes(module.push_bytes(b"h\0\0\0i\0\0\0\0\0\0\0"))]);
+        let writes = wide.spell(names.intern("g"), 0, 12).expect("every byte is known");
+        assert_eq!(writes.len(), 2, "eight and then four on x86-64, {writes:?}");
+    }
+
+    /// A `long long` in the object leaves the copy alone on i386, which has no 64-bit store.
+    #[test]
+    fn a_copy_on_i386_of_a_long_long_stays_a_copy() {
+        let (mut names, images) = images_on("i686-unknown-linux-gnu", |module| {
+            vec![Datum::Scalar {
+                ty: Type::int(64),
+                value: module.add_imm(Imm::int(7, Type::int(64))),
+            }]
+        });
+        assert_eq!(images.spell(names.intern("g"), 0, 8), None);
     }
 
     /// The four bytes of `10, 20, 30, 40` as an `int` array is written, which is the case the
