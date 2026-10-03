@@ -764,6 +764,61 @@ pub fn compile_ir(opts: &Options, name: &str, fs: &dyn FileSystem) -> Compiled {
     }
 }
 
+/// The object a `-flto` link makes out of the modules its objects kept: the modules joined into
+/// one, that one through the optimizer, and the result through the back end. See `crate::lto`,
+/// which decides which objects take part and what `opts` says.
+///
+/// There is no debug information in what comes out, because the types and the scopes it is
+/// written from are the front end's and stay in each unit's own compilation.
+///
+/// # Errors
+///
+/// When the modules do not join, or the joined module does not get through the verifier, the
+/// optimizer or the back end. Each object still holds its own code, so the link goes on with
+/// those instead.
+pub(crate) fn joined(opts: &Options, units: &[rucc_lto::Unit<'_>]) -> Result<Vec<u8>, String> {
+    let flat = |diags: Vec<Diagnostic>| {
+        diags.iter().map(|diag| diag.message.as_str()).collect::<Vec<_>>().join("; ")
+    };
+    let mut sess = Session::new(opts.clone());
+    let mut module = rucc_lto::join(units, opts.isa, &mut sess.interner)?;
+    if let Err(errors) = rucc_ir::verify(&module, &sess.interner) {
+        let errors: Vec<String> = errors.iter().map(ToString::to_string).collect();
+        return Err(format!("the joined module is not valid IR, {}", errors.join("; ")));
+    }
+    let name = "ld-temp.o";
+    optimize(
+        &mut module,
+        &mut sess.interner,
+        &sess.target,
+        opts,
+        name,
+        &mut Vec::new(),
+        &mut String::new(),
+    )
+    .map_err(flat)?;
+    let meaning = crate::shapes::Meaning::default();
+    let made = generate(
+        &mut module,
+        &mut sess.interner,
+        &sess.target,
+        opts,
+        &mut Recording {
+            fired: &mut Fired::new(),
+            pressure: &mut Pressure::new(),
+            lowerings: &mut Lowerings::new(),
+            stack: &mut StackUsage::new(),
+        },
+        &mut None,
+        Origin { map: &sess.sources, name, meaning: &meaning },
+    )
+    .map_err(flat)?;
+    match made {
+        Artifact::Object { bytes, .. } => Ok(bytes),
+        _ => Err("the back end made no object".to_string()),
+    }
+}
+
 /// Puts the memory safety checks in and redirects the calls that cross the boundary, when
 /// `-fsafety=` asked for them.
 ///

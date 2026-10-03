@@ -9,9 +9,19 @@
 //! and what `--emit=ir` prints. A few lines in front of the module say what the command line
 //! decided that the module does not: which compiler wrote it, whether the code had to be position
 //! independent, and which extensions the unit was built for.
+//!
+//! The link reads them back. Every object on its line that kept a module this version wrote gives
+//! way to one object made from all of those modules joined, optimized as one unit and generated
+//! again, and the linker is handed that one in the place of the first of them. An object in an
+//! archive is not read, and neither is one another version wrote, so those link the code they
+//! hold, as does every object when anything about the join goes wrong.
 
-use rucc_session::{Options, Pic};
+use std::path::Path;
+
+use rucc_session::{EmitKind, OptLevel, Options, Pic, Safety, SaveTemps};
 use rucc_target::Isa;
+
+use crate::link::Item;
 
 /// The section the module goes in.
 pub const SECTION: &str = ".rucc.lto";
@@ -95,6 +105,81 @@ pub fn read(bytes: &[u8]) -> Result<Kept<'_>, String> {
         isa: isa.ok_or_else(|| "the module does not say what it was built for".to_string())?,
         module,
     })
+}
+
+/// The link's line with the objects that kept a module replaced by one object made from all of
+/// them, written into `dir`, or nothing when fewer than two objects kept one and there is nothing
+/// to join.
+///
+/// The code is generated at the link's `-O` level, and at `-O2` when the link line has none,
+/// which is what lld does too. It is position independent when the link makes a library or any
+/// unit was compiled to be.
+///
+/// # Errors
+///
+/// When the modules do not join or the joined one does not compile, which the caller reports and
+/// then links the objects as they are.
+pub(crate) fn link(
+    opts: &Options,
+    shared: bool,
+    items: &[Item],
+    dir: &Path,
+) -> Result<Option<Vec<Item>>, String> {
+    let mut objects = Vec::new();
+    for (at, item) in items.iter().enumerate() {
+        let Item::File(path) = item else { continue };
+        // A file that is not there is the linker's to report, in its own words.
+        let Ok(bytes) = std::fs::read(path) else { continue };
+        if kept(&bytes).is_some() {
+            objects.push((at, path.as_str(), bytes));
+        }
+    }
+    let mut units = Vec::with_capacity(objects.len());
+    let mut taken = Vec::with_capacity(objects.len());
+    let mut pics = Vec::with_capacity(objects.len());
+    for (at, path, bytes) in &objects {
+        // An object another version wrote, or one whose section does not read, links its code.
+        let Some(Ok(unit)) = kept(bytes).map(read) else { continue };
+        if unit.version != crate::VERSION {
+            continue;
+        }
+        units.push(rucc_lto::Unit { name: path, module: unit.module, isa: unit.isa });
+        taken.push(*at);
+        pics.push(unit.pic);
+    }
+    if units.len() < 2 {
+        return Ok(None);
+    }
+
+    let mut opts = opts.clone();
+    opts.pic = if shared || pics.contains(&Pic::Library) {
+        Pic::Library
+    } else if pics.contains(&Pic::Executable) {
+        Pic::Executable
+    } else {
+        Pic::Absolute
+    };
+    if !opts.opt_level.runs_optimizer() {
+        opts.opt_level = OptLevel::O2;
+    }
+    opts.emit = EmitKind::Object;
+    opts.debug_info = false;
+    opts.save_temps = SaveTemps::No;
+    opts.safety = Safety::Off;
+    opts.profile_data.counts = None;
+    let bytes = crate::compile::joined(&opts, &units)?;
+    let out = dir.join("lto.o").display().to_string();
+    std::fs::write(&out, bytes).map_err(|e| format!("{out}: {e}"))?;
+
+    let mut line = Vec::with_capacity(items.len() + 1 - taken.len());
+    for (at, item) in items.iter().enumerate() {
+        if Some(&at) == taken.first() {
+            line.push(Item::File(out.clone()));
+        } else if !taken.contains(&at) {
+            line.push(item.clone());
+        }
+    }
+    Ok(Some(line))
 }
 
 #[cfg(test)]
