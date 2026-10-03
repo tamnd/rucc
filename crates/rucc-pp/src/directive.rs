@@ -781,7 +781,8 @@ impl Preprocessor {
             _ => return,
         };
         let Some((before, now)) = self.targets.apply(line) else { return };
-        let (was, is): (Set<String>, Set<String>) = (before.macros().collect(), now.macros().collect());
+        let (was, is): (Set<String>, Set<String>) =
+            (before.macros().collect(), now.macros().collect());
         for gone in was.difference(&is) {
             self.macros.undef(interner.intern(gone));
         }
