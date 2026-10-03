@@ -385,3 +385,25 @@ fn a_static_that_is_read_or_written_through_volatile_is_kept() {
     assert!(listing.contains("kept:"), "the read object went:\n{listing}");
     assert!(listing.contains("loud"), "the volatile store went:\n{listing}");
 }
+
+#[test]
+fn a_copy_of_a_const_structure_is_stores_of_what_it_holds() {
+    let source = "struct t;\n\
+        struct hw { unsigned flags; unsigned long res, ticks; int (*open)(struct t *); char name[6]; };\n\
+        int o(struct t *);\n\
+        static const struct hw hw0 __attribute__((section(\".init.rodata\"))) = { .flags = 3, .open = o, .name = \"timer\" };\n\
+        void init(struct hw *to) { *to = hw0; }\n";
+    let listing = asm_with("const-copy", source, &["-fno-pic"]);
+    assert!(!listing.contains("hw0"), "the object stayed:\n{listing}");
+    assert!(listing.contains("o(%rip)") || listing.contains("$o"), "the address went:\n{listing}");
+}
+
+#[test]
+fn a_copy_of_a_const_structure_holding_an_address_past_a_name_is_still_a_copy() {
+    let source = "extern char buf[16];\n\
+        struct s { char *at; long n; };\n\
+        static const struct s s0 = { buf + 4, 7 };\n\
+        void init(struct s *to) { *to = s0; }\n";
+    let listing = asm_with("const-copy-away", source, &["-fno-pic"]);
+    assert!(listing.contains("s0"), "the object went:\n{listing}");
+}

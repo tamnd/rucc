@@ -88,14 +88,21 @@
 //! Neither does an access that crosses from one piece of the image into the next, since
 //! bytes spanning two of them are not a scalar either one holds, and neither does a `volatile`
 //! access or an atomic one, whose whole point is that the access happens.
+//!
+//! # A copy out of the image
+//!
+//! A `memcpy` of a known size out of one of these objects becomes stores of what the image holds
+//! there, with one fill in front when the object has more than a few zero bytes in that range.
+//! Every byte has to be answered for this to happen, so a piece of a scalar or an address with
+//! something added to it leaves the copy as it is. [`spelled`] says why the kernel needs it.
 
 use std::collections::hash_map::Entry;
 
 use rucc_base::Symbol;
 use rucc_base::hash::Map;
 use rucc_ir::{
-    Block, Datum, Def, Extra, Flags, Func, Imm, Inst, MemOrder, Module, Opcode, Pic, Signature,
-    SymbolRef, Type, Value,
+    Block, Datum, Def, Extra, Flags, Func, Imm, Inst, InstData, MemInfo, MemOrder, Module, Opcode,
+    Pic, Restrict, Signature, SymbolRef, Type, Value,
 };
 
 use crate::extents::vouched;
@@ -109,6 +116,15 @@ const NAMED: &str = "load from a read only object folded to the address it was i
 
 /// Recorded once for each call through a pointer that became a call by name.
 const DIRECT: &str = "call through the address of a function made a direct call";
+
+/// Recorded once for each copy out of a read only object that became stores of what it holds.
+const COPIED: &str = "copy out of a read only object made stores of what it was initialized to";
+
+/// The most bytes a copy out of a read only object is spelled out for.
+const LONGEST: u64 = 512;
+
+/// The most stores a copy is spelled out as, not counting the fill that clears it first.
+const MOST: usize = 24;
 
 /// Recorded for a load that would have folded if there had been fuel for it.
 const NO_FUEL: &str = "load from a read only object not folded, the pass ran out of fuel";
@@ -187,6 +203,18 @@ pub(crate) fn settle(func: &mut Func, images: &Images, fuel: &mut Fuel, stats: &
     for &block in &blocks {
         let insts: Vec<Inst> = func.insts(block).collect();
         for inst in insts {
+            let Some(writes) = spelled(func, inst, images) else { continue };
+            if !fuel.take() {
+                stats.missed(NO_FUEL);
+                continue;
+            }
+            unroll(func, inst, &writes);
+            stats.optimized(COPIED);
+        }
+    }
+    for &block in &blocks {
+        let insts: Vec<Inst> = func.insts(block).collect();
+        for inst in insts {
             let Some(name) = direct(func, inst, images) else { continue };
             if !fuel.take() {
                 stats.missed(NO_FUEL);
@@ -206,6 +234,160 @@ pub(crate) fn settle(func: &mut Func, images: &Images, fuel: &mut Fuel, stats: &
             data.extra = Extra::Call(at);
             stats.optimized(DIRECT);
         }
+    }
+}
+
+/// One store a copy out of a read only object comes to, at that many bytes past where it goes.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Write {
+    /// The object is zero there for that many bytes, which the fill in front writes.
+    Zero(u64),
+    /// A number of that type, written with that opcode.
+    Number(u64, Type, Opcode, Imm),
+    /// The address of that symbol.
+    Name(u64, Symbol),
+}
+
+/// What a copy out of a read only object writes, when the image answers every byte of it.
+///
+/// `hrtimer_hw` in sound/core/hrtimer.c and `iommu_pmu` in arch/x86/events/amd/iommu.c are
+/// `__initconst` structures copied whole into an object the driver allocates, and the copy is all
+/// that reads them. gcc folds the copy into the constructor the object was initialized with and
+/// stores that, which leaves nothing reading the object and drops it with its `.init.rodata`.
+/// rucc copied the bytes out of it, so the object stayed.
+///
+/// Every byte has to be answered. A number that is not where a piece of the image starts, or not
+/// as wide as one, is a piece of a scalar and leaves the copy alone, and so does a relocation
+/// with something added to it.
+fn spelled(func: &Func, inst: Inst, images: &Images) -> Option<Vec<Write>> {
+    let data = &func[inst];
+    if !matches!(data.opcode, Opcode::Memcpy | Opcode::Memmove)
+        || data.flags.intersects(Flags::KEEP)
+        || func.carries_mem(inst)
+    {
+        return None;
+    }
+    let Extra::Mem(info) = data.extra else { return None };
+    let bulk = func.bulk(inst)?;
+    if bulk.length.is_some() || func[info].order != MemOrder::NotAtomic {
+        return None;
+    }
+    let size = func[info].size;
+    if size == 0 || size > LONGEST {
+        return None;
+    }
+    let (base, offset) = address(func, bulk.with)?;
+    let Def::Result { inst: made, .. } = func[base].def else { return None };
+    if func[made].opcode != Opcode::GlobalAddr {
+        return None;
+    }
+    let Extra::Symbol(name) = func[made].extra else { return None };
+    let offset = u64::try_from(offset).ok()?;
+    let writes = images.spell(name, offset, size)?;
+    let stores = writes.iter().filter(|write| !matches!(write, Write::Zero(_))).count();
+    (stores <= MOST).then_some(writes)
+}
+
+/// Puts the stores in place of the copy, behind one fill of zero when the object has a run of
+/// zero bytes worth one.
+fn unroll(func: &mut Func, inst: Inst, writes: &[Write]) {
+    let bulk = func.bulk(inst).expect("only a copy is spelled out");
+    let Extra::Mem(info) = func[inst].extra else { unreachable!("a copy carries its payload") };
+    let (size, align) = (func[info].size, func[info].align);
+    let to = bulk.to;
+    let zero: u64 =
+        writes.iter().map(|write| if let Write::Zero(bytes) = write { *bytes } else { 0 }).sum();
+    let filled = zero > 16;
+    if filled {
+        let byte = constant(func, inst, Type::int(8), Opcode::IConst, Imm::int(0, Type::int(8)));
+        let mem = func.add_mem(MemInfo { size, align, ..plain(align) });
+        let args = func.push_values(&[to, byte]);
+        let fill = InstData { args, extra: Extra::Mem(mem), ..InstData::new(Opcode::Memset) };
+        let span = func.span(inst);
+        let fill = func.create_inst(fill, &[], span);
+        func.insert_before(fill, inst);
+    }
+    let mut at = 0u64;
+    for &write in writes {
+        let (value, width) = match write {
+            Write::Zero(bytes) => {
+                if !filled {
+                    zeros(func, inst, to, at, bytes, align);
+                }
+                at += bytes;
+                continue;
+            }
+            Write::Number(width, ty, opcode, imm) => (constant(func, inst, ty, opcode, imm), width),
+            Write::Name(width, name) => {
+                let data =
+                    InstData { extra: Extra::Symbol(name), ..InstData::new(Opcode::GlobalAddr) };
+                (emit(func, inst, data, Type::PTR), width)
+            }
+        };
+        put(func, inst, value, to, at, width, align);
+        at += width;
+    }
+    func.remove_inst(inst);
+}
+
+/// Stores of zero over that many bytes, eight at a time while there are eight.
+fn zeros(func: &mut Func, before: Inst, to: Value, mut at: u64, bytes: u64, align: u32) {
+    let end = at + bytes;
+    while at < end {
+        let width = [8, 4, 2, 1].into_iter().find(|&width| at + width <= end).unwrap_or(1);
+        let ty = Type::int(u32::try_from(width * 8).unwrap_or(8));
+        let value = constant(func, before, ty, Opcode::IConst, Imm::int(0, ty));
+        put(func, before, value, to, at, width, align);
+        at += width;
+    }
+}
+
+/// A plain store of that value, `at` bytes past `to`.
+fn put(func: &mut Func, before: Inst, value: Value, to: Value, at: u64, width: u64, align: u32) {
+    let address = if at == 0 {
+        to
+    } else {
+        let step = i128::from(at);
+        let step =
+            constant(func, before, Type::int(64), Opcode::IConst, Imm::int(step, Type::int(64)));
+        let args = func.push_values(&[to, step]);
+        emit(func, before, InstData { args, ..InstData::new(Opcode::PtrAdd) }, Type::PTR)
+    };
+    // What the copy promised for its start, for as far as it reaches this far in.
+    let known =
+        if at == 0 { u64::from(align) } else { u64::from(align).min(1 << at.trailing_zeros()) };
+    let align = u32::try_from(known.min(width)).unwrap_or(1);
+    let mem = func.add_mem(plain(align));
+    let args = func.push_values(&[value, address]);
+    let data = InstData { args, extra: Extra::Mem(mem), ..InstData::new(Opcode::Store) };
+    let span = func.span(before);
+    let store = func.create_inst(data, &[], span);
+    func.insert_before(store, before);
+}
+
+/// A constant of that type, put in front of `before`.
+fn constant(func: &mut Func, before: Inst, ty: Type, opcode: Opcode, imm: Imm) -> Value {
+    let at = func.add_imm(imm);
+    emit(func, before, InstData { extra: Extra::Imm(at), ..InstData::new(opcode) }, ty)
+}
+
+/// Puts an instruction in front of another one and gives back the value it produces.
+fn emit(func: &mut Func, before: Inst, data: InstData, ty: Type) -> Value {
+    let span = func.span(before);
+    let inst = func.create_inst(data, &[ty], span);
+    func.insert_before(inst, before);
+    func[inst].first_result.expect("one result was asked for")
+}
+
+/// What an ordinary access with nothing known about it carries.
+const fn plain(align: u32) -> MemInfo {
+    MemInfo {
+        size: 0,
+        align,
+        order: MemOrder::NotAtomic,
+        tbaa: None,
+        owns: 0,
+        restrict: Restrict::NONE,
     }
 }
 
@@ -319,6 +501,58 @@ impl Images {
             (&Piece::Address { symbol, size }, 0) if size == self.pointer => Some(symbol),
             _ => None,
         }
+    }
+
+    /// What `size` bytes at `offset` into the image of that global are, as the stores that would
+    /// write them, or nothing when some of them are bytes this cannot say.
+    fn spell(&self, name: Symbol, offset: u64, size: u64) -> Option<Vec<Write>> {
+        let object = self.objects.get(&name)?.as_ref()?;
+        let end = offset.checked_add(size)?;
+        if end > object.size {
+            return None;
+        }
+        let mut writes = Vec::new();
+        let mut at = 0u64;
+        for piece in &object.pieces {
+            let width = piece.size();
+            let (from, to) = (at.max(offset), (at + width).min(end));
+            let whole = from == at && to == at + width;
+            at += width;
+            if from >= to {
+                continue;
+            }
+            match piece {
+                Piece::Zero(_) => match writes.last_mut() {
+                    Some(Write::Zero(bytes)) => *bytes += to - from,
+                    _ => writes.push(Write::Zero(to - from)),
+                },
+                Piece::Scalar { ty, value } => {
+                    let fits = whole && ty.is_scalar() && matches!(ty.bits(), 8 | 16 | 32 | 64);
+                    if !fits || !(ty.is_int() || ty.is_float()) {
+                        return None;
+                    }
+                    let opcode = if ty.is_int() { Opcode::IConst } else { Opcode::FConst };
+                    writes.push(Write::Number(width, *ty, opcode, *value));
+                }
+                Piece::Bytes(bytes) => {
+                    let mut from = from;
+                    while from < to {
+                        let step = [8, 4, 2, 1].into_iter().find(|&step| from + step <= to)?;
+                        let into = usize::try_from(from - (at - width)).ok()?;
+                        let run = &bytes[into..into + usize::try_from(step).ok()?];
+                        let ty = Type::int(u32::try_from(step * 8).ok()?);
+                        let value = Imm::int(assemble(run, self.little_endian) as i128, ty);
+                        writes.push(Write::Number(step, ty, Opcode::IConst, value));
+                        from += step;
+                    }
+                }
+                Piece::Address { symbol, size } if whole && *size == self.pointer => {
+                    writes.push(Write::Name(*size, *symbol));
+                }
+                Piece::Address { .. } | Piece::Opaque(_) => return None,
+            }
+        }
+        Some(writes)
     }
 
     /// The piece of that global an access of `size` bytes at `offset` reads, and how far into it

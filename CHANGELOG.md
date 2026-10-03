@@ -12,6 +12,8 @@ All notable changes are recorded here. The format follows [Keep a Changelog](htt
 
 ### Changed
 
+- A `memcpy` of a known size out of a read only object whose initializer is all known becomes stores of what the object holds, with one fill of zero in front when there is a run of zeros worth it. gcc folds such a copy into the constructor, so copying a whole `__initconst` structure leaves nothing reading the object and it is dropped. In the 7.2.8 defconfig build this removes the `.init.rodata` section that rucc alone emitted in sound/core/hrtimer.o and arch/x86/events/amd/iommu.o.
+
 - A static that the program only ever stores to is dropped along with the stores, the way gcc drops it. Its address may reach a store directly or through a field offset, and anything else that takes the address keeps the object, as does a volatile or atomic store. In the 7.2.8 defconfig build this removes the `.data..ro_after_init` section that rucc alone emitted in fs/file_table.o, fs/namei.o, mm/util.o and ipc/msgutil.o, where `__filp_cache`, `__names_cache` and the bucket pointers are only read back through `runtime_const_ptr`.
 
 - A test on a value divided or shifted right by a constant now bounds the value itself, so a size worked out as `(size - 20) / 4` and checked against a limit is known not to wrap when it is doubled. This is how gcc drops the `WARN_ON(new_sz < PRIOMAP_MIN_SZ)` in netprio's `extend_netdev_table`, and rucc now drops it too.
