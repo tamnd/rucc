@@ -115,6 +115,9 @@ pub fn instruction(
 ) -> Legal {
     let list = func[inst].operands;
     let mut operands: Vec<Operand> = func[list].to_vec();
+    if in_place(assignment, &mut operands) {
+        return Legal { operands, before: Vec::new(), after: Vec::new() };
+    }
     let mut before = Moves::new();
     let mut after = Moves::new();
     let mut taken = Taken::new();
@@ -542,6 +545,30 @@ impl<'a> Scratch<'a> {
     fn finish(self) -> (Moves, Moves) {
         (self.saves, self.restores)
     }
+}
+
+/// Rewrites the operands to their registers when every one is already where the instruction wants
+/// it, which is most instructions, and says whether it did. Then nothing is moved and nothing is
+/// borrowed, and the lists the rest of [`instruction`] works with are never made.
+fn in_place(assignment: &Assignment, operands: &mut [Operand]) -> bool {
+    let at = |operand: &Operand| match place(assignment, operand.reg) {
+        Place::Reg(at) => Some(at),
+        Place::Slot(_) => None,
+    };
+    let settled = operands.iter().all(|operand| match (at(operand), operand.constraint) {
+        (Some(at), Constraint::Fixed(fixed)) => at == fixed,
+        (Some(_), Constraint::Reuse(other)) => at(&operands[usize::from(other)]) == at(operand),
+        (Some(_), _) => true,
+        (None, _) => false,
+    });
+    if settled {
+        for operand in operands.iter_mut() {
+            if let Some(at) = at(operand) {
+                operand.reg = Reg::physical(at);
+            }
+        }
+    }
+    settled
 }
 
 /// Files a move in front of the instruction or behind it, and turns it round for a value the
