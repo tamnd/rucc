@@ -34,6 +34,7 @@ All notable changes are recorded here. The format follows [Keep a Changelog](htt
 - The redundant load pass visits blocks in reverse postorder and keeps one earlier load for each branch arm, so a load reuses one from a block above it even when an inlined body was laid out before the test that guards it. `skb_frag_page` read `frag->netmem` three times in `skb_gro_reset_offset`, and the `WARN_ON_ONCE` in `netmem_to_page` it already tested for is now gone from gro.c, filter.c and tcp.c.
 - A local is not what one of the function's arguments points at, even after its address got out, since the caller had the argument before the local existed. A store into a local array no longer stops a load through a parameter being reused, which removes the `cfg80211_get_chandef_type` warning from `ieee80211_tdls_ch_sw_tmpl_get`.
 - An edge that proves `a == b` lets a range question about `b` below it use what is known about `a` there, so a switch on one of two widths already checked equal knows the case the other switch took. This removes the same warning from `__ieee80211_channel_switch`.
+- A `static` function that asks `__builtin_constant_p` about arithmetic on a parameter, and not only about the parameter itself, is inlined at a call that passes a constant, as gcc does. fs/super.c has `super_wake` ask through `hweight32` about `flag & SUPER_WAKE_FLAGS`, and every caller passes a constant flag, so gcc inlines it into all four and both of its warnings fold away. rucc kept it out of line and its fs/super.o had two `__bug_table` entries gcc's does not.
 
 ## 0.18.12
 

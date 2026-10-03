@@ -140,3 +140,43 @@ fn asking_about_what_a_pointer_points_at_reads_nothing_through_it() {
     }
     let _ = std::fs::remove_dir_all(&dir);
 }
+
+/// A `static` function that asks about arithmetic on a parameter is inlined where the call passes
+/// a constant, as one that asks about the parameter itself is. This is `super_wake` in fs/super.c,
+/// which asks through `hweight32` about `flag & SUPER_WAKE_FLAGS` and is called with a constant
+/// flag from four places. gcc inlines all four and both warnings fold away, so its fs/super.o has
+/// no `__bug_table` entry for them.
+#[test]
+fn a_question_about_arithmetic_on_a_parameter_inlines_a_call_passing_a_constant() {
+    let dir = std::env::temp_dir().join(format!("rucc-constant-p-wake-{}", std::process::id()));
+    std::fs::create_dir_all(&dir).expect("a temporary directory can be created");
+    let source = r#"
+void warned(void);
+void wake_up(unsigned *);
+struct sb { unsigned flags; };
+#define F (1u | 2u | 4u)
+static inline unsigned arch_hw(unsigned w) { unsigned r; __asm__("popcnt %1, %0" : "=r"(r) : "r"(w)); return r; }
+#define hw(w) (__builtin_constant_p(w) ? (unsigned)__builtin_popcount(w) : arch_hw(w))
+static void wake(struct sb *sb, unsigned flag) {
+    if (flag & ~F) warned();
+    if (hw(flag & F) > 1) warned();
+    __atomic_store_n(&sb->flags, sb->flags | flag, __ATOMIC_RELEASE);
+    wake_up(&sb->flags);
+}
+void a(struct sb *s) { wake(s, 1); }
+void b(struct sb *s) { wake(s, 2); }
+void c(struct sb *s) { wake(s, 4); }
+void d(struct sb *s) { wake(s, 1); }
+"#;
+    std::fs::write(dir.join("one.c"), source).expect("the fixture can be written");
+    let done = Command::new(env!("CARGO_BIN_EXE_rucc"))
+        .args(["--target=x86_64-unknown-linux-gnu", "-O2", "-S", "-o", "-"])
+        .arg(dir.join("one.c"))
+        .output()
+        .expect("the compiler is built before its own tests run");
+    let _ = std::fs::remove_dir_all(&dir);
+    assert!(done.status.success(), "{}", String::from_utf8_lossy(&done.stderr));
+    let listing = String::from_utf8_lossy(&done.stdout);
+    assert!(!listing.contains("warned"), "a warning survived:\n{listing}");
+    assert!(!listing.contains("\nwake:"), "the function stayed out of line:\n{listing}");
+}
