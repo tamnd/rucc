@@ -343,6 +343,7 @@ impl Checker<'_> {
             // `__fortify_function` in front of the definition, which is here.
             inlining: self
                 .inlining(specs.attrs)
+                .then(self.pragma_optimize(specs.options))
                 .with(DeclFlags::DECLARED_INLINE, specs.func.has(FuncSpecs::INLINE))
                 | self.handler(&[specs.attrs], ty, self.is_naked(specs.attrs)),
             // The specifiers only, for the reason `noreturn` above reads them only. What a
@@ -401,7 +402,7 @@ impl Checker<'_> {
         // A cloned function is built once for each version, and its `target` attribute, which
         // gcc drops with a warning, says nothing.
         let cloned = self.cloned(&[specs.attrs], DeclKind::Function);
-        let targeted = if cloned.is_some() { None } else { self.targeted(&[specs.attrs]) };
+        let targeted = if cloned.is_some() { None } else { self.targeted(&[specs.attrs], specs.options, span) };
         if let Some(versions) = cloned {
             self.tast.record_versions(id, versions);
         }
@@ -797,9 +798,15 @@ impl Checker<'_> {
             // declarator, as `extern int setjmp (jmp_buf __env) __THROWNL __returns_twice;`.
             twice: self.returns_twice(specs.attrs) || self.returns_twice(item.attrs),
             // Both places, for the reason `noreturn` above reads both.
+            // And what `#pragma GCC optimize` has in effect, on a function only.
             inlining: self
                 .inlining(specs.attrs)
                 .then(self.inlining(item.attrs))
+                .then(self.pragma_optimize(if kind == DeclKind::Function {
+                    specs.options
+                } else {
+                    ast::PragmaOptions::NONE
+                }))
                 .with(DeclFlags::DECLARED_INLINE, specs.func.has(FuncSpecs::INLINE))
                 | self.handler(
                     &[specs.attrs, item.attrs],
@@ -868,7 +875,7 @@ impl Checker<'_> {
         if let Some(versions) = cloned {
             self.tast.record_versions(id, versions);
         } else if kind == DeclKind::Function {
-            if let Some((isa, _)) = self.targeted(&[specs.attrs, item.attrs]) {
+            if let Some((isa, _)) = self.targeted(&[specs.attrs, item.attrs], specs.options, span) {
                 self.tast.record_target(id, isa);
             }
         }

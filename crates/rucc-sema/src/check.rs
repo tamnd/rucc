@@ -357,6 +357,9 @@ pub struct Checker<'a> {
     /// keyword is remembered. A global register variable is not in it: that is the GNU extension
     /// with its own rules, in `declared_asm`.
     pub(in crate::check) registers: rucc_base::hash::Set<DeclId>,
+    /// What has been said about a name in `#pragma GCC target` gcc does not know, which every
+    /// function after the line carries and which is said once, as gcc says it once.
+    pub(in crate::check) refused_pragmas: rucc_base::hash::Set<String>,
 }
 
 impl<'a> Checker<'a> {
@@ -384,6 +387,7 @@ impl<'a> Checker<'a> {
             answered_late: rucc_base::hash::Set::default(),
             out_of_sight: rucc_base::hash::Map::default(),
             registers: rucc_base::hash::Set::default(),
+            refused_pragmas: rucc_base::hash::Set::default(),
         };
         checker.declare_type_names();
         checker

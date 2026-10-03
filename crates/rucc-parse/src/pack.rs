@@ -48,6 +48,9 @@ pub(crate) struct Packs {
     /// What `#pragma GCC visibility push` lines are open, innermost last. It lives here because
     /// this is what walks the lines, and `visibility.rs` reads it.
     pub(crate) visibility: Vec<rucc_ast::PushedVisibility>,
+    /// What `#pragma GCC target` and `optimize` have in effect, for the same reason, read by
+    /// `options.rs`.
+    pub(crate) options: crate::options::Options,
 }
 
 /// The alignments `#pragma pack` takes, which is what both GCC and MSVC accept.
@@ -78,8 +81,8 @@ enum Action {
 /// since the preprocessor answers them.
 const PRAGMAS: &[&str] = &["endregion", "region", "scalar_storage_order"];
 
-/// The same for what follows `#pragma GCC`, of which `visibility.rs` reads `visibility` and
-/// `diagnostic.rs` reads `diagnostic`. gcc calls `novector` and any other word unknown.
+/// The same for what follows `#pragma GCC`, of which `visibility.rs` reads `visibility`,
+/// `diagnostic.rs` reads `diagnostic` and `options.rs` reads the five about options. gcc calls `novector` and any other word unknown.
 const GCC_PRAGMAS: &[&str] = &[
     "dependency",
     "diagnostic",
@@ -164,7 +167,7 @@ impl Parser<'_> {
     }
 
     /// One `#pragma` line. A `pack` and a `message` are read here, a `comment`,
-    /// `GCC visibility` and `GCC diagnostic` elsewhere, the other pragmas gcc knows are taken without a word, and
+    /// `GCC visibility`, `GCC diagnostic` and the `GCC` options elsewhere, the other pragmas gcc knows are taken without a word, and
     /// anything else is ignored with gcc's warning under `-Wunknown-pragmas`.
     fn pack_line(&mut self, line: &[Token], span: Span) {
         let words = [0, 1].map(|at| {
@@ -176,6 +179,10 @@ impl Parser<'_> {
             [Some("message"), _] => return self.message_line(line),
             [Some("weak"), _] => return self.weak_line(line),
             [Some("redefine_extname"), _] => return self.extname_line(line),
+            [
+                Some("GCC"),
+                Some("target" | "optimize" | "push_options" | "pop_options" | "reset_options"),
+            ] => return self.options_line(line),
             [Some("GCC"), Some(word)] if GCC_PRAGMAS.contains(&word) => {
                 return self.visibility_line(&line[1..], span);
             }

@@ -15,7 +15,7 @@
 use rucc_base::Symbol;
 use rucc_diag::Span;
 
-use crate::ast::{AttrList, EnumeratorList, MemberList};
+use crate::ast::{AttrList, EnumeratorList, MemberList, StrId};
 use crate::decl::TypeNameId;
 use crate::expr::ExprId;
 
@@ -48,6 +48,9 @@ pub struct DeclSpecs {
     /// What `#pragma GCC visibility push` left in effect where the declaration starts, which
     /// is what the declaration gets when no attribute on it says otherwise.
     pub pushed: Option<PushedVisibility>,
+    /// What `#pragma GCC target` and `#pragma GCC optimize` left in effect where the declaration
+    /// starts, which a function gets ahead of whatever its own attributes say.
+    pub options: PragmaOptions,
     /// From the first specifier to the last.
     pub span: Span,
 }
@@ -70,6 +73,25 @@ pub enum PushedVisibility {
     Protected,
 }
 
+/// What `#pragma GCC target` and `#pragma GCC optimize` have in effect, each as the strings the
+/// lines gave joined with commas, which is how an attribute would write the same list.
+///
+/// The lines add up: a second `target` adds its options to the first one's, and only
+/// `pop_options` and `reset_options` take any away. A function declared while one is in effect
+/// is built as if it had been written with the attribute, and an object is not affected.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub struct PragmaOptions {
+    /// The options of the `target` lines, if any added one.
+    pub target: Option<StrId>,
+    /// The options of the `optimize` lines, a number already spelled as the level it stands for.
+    pub optimize: Option<StrId>,
+}
+
+impl PragmaOptions {
+    /// Neither, which is what a file without the lines has everywhere.
+    pub const NONE: PragmaOptions = PragmaOptions { target: None, optimize: None };
+}
+
 impl DeclSpecs {
     /// A specifier list with nothing in it, which is what the parser starts from.
     #[must_use]
@@ -84,6 +106,7 @@ impl DeclSpecs {
             align: None,
             attrs: AttrList::EMPTY,
             pushed: None,
+            options: PragmaOptions::NONE,
             span,
         }
     }
