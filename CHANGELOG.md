@@ -4,6 +4,10 @@ All notable changes are recorded here. The format follows [Keep a Changelog](htt
 
 ## Unreleased
 
+## 0.18.12
+
+A patch release. A link with `-flto` now optimizes across files: each object keeps its module, and the link joins them and optimizes the result. `#pragma GCC target`, `optimize`, `push_options`, `pop_options` and `reset_options` are read, and the extension macros follow the target line. `popcount`, `clz` and `ctz` are one instruction each where the function is built for them, and the back end lowers bit reversal, float remainder and fused multiply add. Two gcc-torture programs that broke at -O1 and above are fixed: an attribute written beside the `*` of a return type now applies to the function, and scalar replacement leaves alone a function that uses `__builtin_setjmp`. Instruction selection is no longer quadratic in the size of a block.
+
 ### Added
 
 - `#pragma GCC target`, `optimize`, `push_options`, `pop_options` and `reset_options` are read, as in gcc 13 (#8). A function declared while a `target` or `optimize` line is in effect is built as if it had the attribute, the line's strings ahead of its own, so a function under `#pragma GCC target("crc32")` may call `_mm_crc32_u32` without a flag, and one declared under the line keeps it when it is defined after the `pop_options`. The lines add up, `push_options` saves what is in effect, `pop_options` puts it back and `reset_options` empties it. A line gcc cannot read gets its `-Wpragmas` warning in its words and is ignored (E0798), one with something after the strings is refused (E0813), and a name gcc does not know is refused once (E0720). Before, all five were taken without a word and did nothing.
