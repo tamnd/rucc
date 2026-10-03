@@ -18,6 +18,7 @@ All notable changes are recorded here. The format follows [Keep a Changelog](htt
 ### Fixed
 
 - On i686 Windows a structure holding a `double`, which is eight byte aligned there, is passed at the next four bytes of the argument area, as gcc, clang and MSVC pass it. rucc put it at the next eight, so a call such as `g(1, y)` left four bytes of padding that a `va_arg` of the structure read as its first field. c-testsuite 00204 printed garbage for its HFA double lines under Wine because of it.
+- An ELF object rucc writes itself no longer has a symbol for each label a computed goto jumps to. The table's relocations name the text section and the label's offset, the way gas writes a reference to a `.L` name, so `.Llbl.0` and the rest stay out of `.symtab`. `perf` had been reading them as function starts and put most of Postgres's expression interpreter under `.Llbl.8` and its neighbours instead of `ExecInterpExpr` (#1994).
 
 ## 0.18.11
 
