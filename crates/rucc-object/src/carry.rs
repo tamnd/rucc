@@ -175,6 +175,7 @@ pub fn carried<'a>(object: &'a [u8], name: &str) -> Option<&'a [u8]> {
 #[cfg(test)]
 mod tests {
     use super::{attach, carried};
+    use object::elf;
     use object::write::{Object, Relocation, StandardSection, Symbol, SymbolSection};
     use object::{
         Architecture, BinaryFormat, Endianness, Object as _, ObjectSection as _, ObjectSymbol as _,
@@ -183,7 +184,7 @@ mod tests {
 
     /// A small object with a function in it that calls another, so that there is a symbol table,
     /// a relocation section pointing at it by index and a table of names to move.
-    fn object(architecture: Architecture, call: u32) -> Vec<u8> {
+    fn object(architecture: Architecture, call: elf::RelocationType) -> Vec<u8> {
         let mut obj = Object::new(BinaryFormat::Elf, architecture, Endianness::Little);
         let text = obj.section_id(StandardSection::Text);
         let at = obj.append_section_data(text, &[0xe8, 0, 0, 0, 0, 0xc3], 16);
@@ -241,9 +242,9 @@ mod tests {
     #[test]
     fn a_section_put_in_is_read_back_and_nothing_else_moves() {
         for (architecture, call) in [
-            (Architecture::X86_64, object::elf::R_X86_64_PLT32),
-            (Architecture::I386, object::elf::R_386_PC32),
-            (Architecture::Aarch64, object::elf::R_AARCH64_CALL26),
+            (Architecture::X86_64, elf::R_X86_64_PLT32),
+            (Architecture::I386, elf::R_386_PC32),
+            (Architecture::Aarch64, elf::R_AARCH64_CALL26),
         ] {
             let before = object(architecture, call);
             let mut after = before.clone();
@@ -263,8 +264,14 @@ mod tests {
             let file = object::File::parse(&*after).unwrap();
             let section = file.section_by_name(".rucc.lto").unwrap();
             assert_eq!(section.kind(), SectionKind::Other, "{architecture:?}: not loaded");
-            let SectionFlags::Elf { sh_flags } = section.flags() else { panic!("not ELF") };
-            assert_eq!(sh_flags, u64::from(object::elf::SHF_EXCLUDE));
+            let SectionFlags::Elf { sh_type, sh_flags } = section.flags() else {
+                panic!("not ELF")
+            };
+            assert_eq!(
+                (sh_type, sh_flags),
+                (elf::SHT_PROGBITS, elf::SHF_EXCLUDE),
+                "{architecture:?}"
+            );
         }
     }
 
@@ -281,7 +288,7 @@ mod tests {
 
         // Nor is anything read out of a file that is not an object, or of one cut short.
         assert_eq!(carried(b"!<arch>\n", ".rucc.lto"), None);
-        let mut whole = object(Architecture::X86_64, object::elf::R_X86_64_PLT32);
+        let mut whole = object(Architecture::X86_64, elf::R_X86_64_PLT32);
         assert!(attach(&mut whole, ".rucc.lto", b"the module"));
         for len in [0, 4, 16, 64, whole.len() / 2, whole.len() - 1] {
             assert_eq!(carried(&whole[..len], ".rucc.lto"), None, "{len} bytes");
