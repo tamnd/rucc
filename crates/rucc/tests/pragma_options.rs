@@ -36,7 +36,8 @@ fn said(out: &Output) -> Vec<String> {
             let row = parts.next()?.parse().ok()?;
             let col = parts.next()?.parse().ok()?;
             let rest = parts.next()?.trim();
-            let rest = rest.split(" [").next()?.to_owned();
+            // The code goes, and a message may have a bracket of its own.
+            let rest = rest.rsplit_once(" [").map_or(rest, |(message, _)| message).to_owned();
             Some((row, col, rest))
         })
         .filter(|(_, _, rest)| !rest.starts_with("note:") && !rest.starts_with("help:"))
