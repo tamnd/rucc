@@ -373,17 +373,25 @@ impl<'a> Ranges<'a> {
     /// intermediate value. Not the transitive closure: section 10.3 says computing that is where
     /// the cost of a relational oracle goes and that one step pays for most of it.
     pub fn relation(&mut self, a: Value, b: Value, block: Block) -> Option<IntPred> {
-        let facts = self.facts(block).clone();
-        if let Some(direct) = read(self.func, &facts, a, b) {
+        // Every side keyed once here, since a read compares what is asked with every fact and the
+        // one step below reads them all again for each middle value.
+        let func = self.func;
+        let facts: Vec<(Relation, Key, Key)> = self
+            .facts(block)
+            .iter()
+            .map(|&fact| (fact, key(func, fact.left), key(func, fact.right)))
+            .collect();
+        let (key_a, key_b) = (key(func, a), key(func, b));
+        if let Some(direct) = read(&facts, key_a, key_b) {
             return Some(direct);
         }
-        for step in &facts {
-            for middle in [step.left, step.right] {
+        for &(step, left, right) in &facts {
+            for (middle, key_middle) in [(step.left, left), (step.right, right)] {
                 if middle == a || middle == b {
                     continue;
                 }
-                let composed = read(self.func, &facts, a, middle)
-                    .zip(read(self.func, &facts, middle, b))
+                let composed = read(&facts, key_a, key_middle)
+                    .zip(read(&facts, key_middle, key_b))
                     .and_then(|(first, second)| compose(first, second));
                 if composed.is_some() {
                     return composed;
@@ -1022,20 +1030,32 @@ fn argument(func: &Func, pred: Block, block: Block, index: usize) -> Option<Valu
     found
 }
 
-/// The recorded relation between these two values, read in the order asked.
-fn read(func: &Func, facts: &[Relation], a: Value, b: Value) -> Option<IntPred> {
-    let same = |x: Value, y: Value| {
-        x == y || literal(func, x).is_some_and(|k| literal(func, y) == Some(k))
-    };
-    facts.iter().rev().find_map(|fact| {
-        if same(fact.left, a) && same(fact.right, b) {
+/// The recorded relation between these two values, read in the order asked, from facts with
+/// both sides keyed.
+fn read(facts: &[(Relation, Key, Key)], a: Key, b: Key) -> Option<IntPred> {
+    facts.iter().rev().find_map(|&(fact, left, right)| {
+        if left == a && right == b {
             Some(fact.pred)
-        } else if same(fact.left, b) && same(fact.right, a) {
+        } else if left == b && right == a {
             Some(fact.pred.swapped())
         } else {
             None
         }
     })
+}
+
+/// A value as the relations compare it: a constant by its type and bits, anything else by itself.
+///
+/// Two values are one operand when they are the same value or the same constant, and keying each
+/// once is that test without working out whether a value is a constant again for every fact.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum Key {
+    Literal(rucc_ir::Type, u128),
+    Value(Value),
+}
+
+fn key(func: &Func, value: Value) -> Key {
+    literal(func, value).map_or(Key::Value(value), |(ty, bits)| Key::Literal(ty, bits))
 }
 
 /// The type and bits of a constant, so that two of them written in different places are one
