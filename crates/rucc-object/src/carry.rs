@@ -221,10 +221,16 @@ mod tests {
         obj.write().expect("the object is written")
     }
 
+    /// A section's name and contents.
+    type Section = (String, Vec<u8>);
+
+    /// A symbol's name and the index of the section it is in.
+    type Named = (String, Option<usize>);
+
     /// What `object` reads in a file: each section's name and contents, and each symbol's name and
     /// section index, which is everything adding a section must leave as it was. The table of
     /// names is the one section that does change, and its contents are the names read here.
-    fn read(bytes: &[u8]) -> (Vec<(String, Vec<u8>)>, Vec<(String, Option<usize>)>, usize) {
+    fn read(bytes: &[u8]) -> (Vec<Section>, Vec<Named>, usize) {
         let file = object::File::parse(bytes).expect("the file still parses");
         let sections = file
             .sections()
