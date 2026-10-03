@@ -825,6 +825,9 @@ fn platform(d: &mut Defs, target: &TargetInfo, opts: &Predef) {
     // target here, since all three assemble in a syntax that does not mark registers, and
     // defined anyway for the same reason as the line above: it is used inside a stringize.
     d.set("__REGISTER_PREFIX__", "");
+    // That `#pragma redefine_extname` is read, which a header asks before it writes one rather
+    // than an `__asm__` label on each declaration. gcc defines it on every target.
+    d.set("__PRAGMA_REDEFINE_EXTNAME", "1");
 
     // Position independent code is the default on the ELF targets and on Apple's, which is
     // what a distribution build expects. The value 2 is GCC's for `-fPIC` rather than `-fpic`.
@@ -1997,6 +2000,7 @@ mod tests {
             "#define __GNUC_WIDE_EXECUTION_CHARSET_NAME \"UTF-32LE\"",
             "#define __GXX_ABI_VERSION 1021",
             "#define __REGISTER_PREFIX__ ",
+            "#define __PRAGMA_REDEFINE_EXTNAME 1",
             "#define __FINITE_MATH_ONLY__ 0",
             "#define __GCC_IEC_559 2",
             "#define __GCC_IEC_559_COMPLEX 2",

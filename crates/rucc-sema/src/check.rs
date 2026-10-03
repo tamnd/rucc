@@ -74,6 +74,7 @@ mod builtin;
 mod clones;
 mod decl;
 mod expr;
+mod extname;
 mod format;
 mod init;
 mod stmt;
