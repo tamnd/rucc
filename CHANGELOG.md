@@ -33,6 +33,7 @@ A patch release. A link with `-flto` now optimizes across files: each object kee
 - `x + (y - x)` and `(y - x) + x` simplify to `y`, and simplify uses what it already rewrote while it is still running, so a compare on the result folds in the same run.
 - A block parameter that arrives as the same constant every way in, each edge with its own copy of it, is replaced by that constant. Two inlined `return NULL` paths meeting is the common case, and it removes the `fsverity` warnings from fs/buffer.c and fs/ext4/readpage.c.
 - An add or subtract of a flag made from a comparison is split on that comparison, so `x - (x >= 4096)` under `x < 8192` stays in range where taking the whole of each side would wrap. The range oracle also keeps what it learned inside one question, for that question only, so a deep walk no longer asks the same thing again until the budget is spent. Together they remove the copy size warning in `vcs_read`.
+- The redundant load pass visits blocks in reverse postorder and keeps one earlier load for each branch arm, so a load reuses one from a block above it even when an inlined body was laid out before the test that guards it. `skb_frag_page` read `frag->netmem` three times in `skb_gro_reset_offset`, and the `WARN_ON_ONCE` in `netmem_to_page` it already tested for is now gone from gro.c, filter.c and tcp.c.
 
 ### Fixed
 

@@ -108,6 +108,7 @@ use rucc_base::hash::Map;
 use rucc_ir::{Block, Extra, Flags, Func, Inst, Opcode, Restrict, Type, Value};
 
 use crate::alias::{Access, Origin, origin};
+use crate::dom::Dominators;
 use crate::memssa::{Clobber, Step, Walk};
 use crate::uses::substitute;
 use crate::{Analyses, Analysis, Fuel, Pass, Preserved, Stats, memssa};
@@ -182,10 +183,14 @@ impl Pass for RedundantLoad {
             let body: &Func = func;
             let dom = an.dominators(body);
             let mut walk = Walk::new(body, an.outside()).knowing(an.modref());
-            // One entry per address read at a version of memory, holding the block the first load
-            // of it was in and the value that load is known to be equal to.
-            let mut seen: Map<(Value, Place, Type), (Block, Value)> = Map::default();
-            for block in func.blocks().collect::<Vec<Block>>() {
+            // Each address read at a version of memory, with every block a load of it was in that
+            // no earlier one dominates and the value that load is known to be equal to. Reverse
+            // postorder puts a block after every block that dominates it, which layout order does
+            // not: an inlined body laid out before the test that guards it would otherwise take
+            // the key first and leave every load below the test without the one above it.
+            let mut seen: Seen = Map::default();
+            let order: Vec<Block> = an.cfg(body).reverse_postorder().collect();
+            for block in order {
                 for inst in func.insts(block).collect::<Vec<Inst>>() {
                     let Some((result, ty)) = reads(func, inst) else {
                         continue;
@@ -214,9 +219,9 @@ impl Pass for RedundantLoad {
                     // have to compute and this does: two arms of the same branch share a version of
                     // memory and neither of them runs before the other.
                     let found = match found {
-                        Found::Kept(reason) => match key.and_then(|key| seen.get(&key)) {
-                            Some(&(at, value)) if dom.dominates(at, block) => Found::Earlier(value),
-                            _ => Found::Kept(reason),
+                        Found::Kept(reason) => match earlier(&seen, key, dom, block) {
+                            Some(value) => Found::Earlier(value),
+                            None => Found::Kept(reason),
                         },
                         taken => taken,
                     };
@@ -227,7 +232,7 @@ impl Pass for RedundantLoad {
                             if let Some(reason) = reason {
                                 stats.missed(reason);
                             }
-                            remember(&mut seen, key, block, result);
+                            remember(&mut seen, key, dom, block, result);
                             continue;
                         }
                     };
@@ -236,13 +241,13 @@ impl Pass for RedundantLoad {
                         // the walk goes on and the count of what could have gone is the same at
                         // every setting, which is what makes a bisection over it monotonic.
                         stats.missed(NO_FUEL);
-                        remember(&mut seen, key, block, result);
+                        remember(&mut seen, key, dom, block, result);
                         continue;
                     }
                     forward.insert(result, value);
                     gone.push(inst);
                     stats.optimized(why);
-                    remember(&mut seen, key, block, value);
+                    remember(&mut seen, key, dom, block, value);
                 }
             }
             let counts = walk.counts();
@@ -370,20 +375,40 @@ enum Found {
     Kept(Option<&'static str>),
 }
 
+/// Each address read at a version of memory, with the blocks loads of it were in and their values.
+type Seen = Map<(Value, Place, Type), Vec<(Block, Value)>>;
+
 /// Records what a load of this address at this version of memory is equal to.
 ///
-/// The first one of a key wins. A second one is either dominated by the first, in which case it was
-/// forwarded and there is nothing left to record, or it is not, and then neither block dominates
-/// the other and keeping the one already there is as good as swapping it.
+/// A load an earlier one dominates was forwarded from it, so there is nothing new to record. One
+/// that no earlier one dominates is kept beside them, because the blocks it dominates are not the
+/// ones theirs do: the two arms of a branch each read the same address at the same version and
+/// each answers only for what is below it.
 fn remember(
-    seen: &mut Map<(Value, Place, Type), (Block, Value)>,
+    seen: &mut Seen,
     key: Option<(Value, Place, Type)>,
+    dom: &Dominators,
     block: Block,
     value: Value,
 ) {
     if let Some(key) = key {
-        seen.entry(key).or_insert((block, value));
+        let found = seen.entry(key).or_default();
+        if !found.iter().any(|&(at, _)| dom.dominates(at, block)) {
+            found.push((block, value));
+        }
     }
+}
+
+/// The value an earlier load of this address at this version of memory had, from a block that
+/// dominates this one.
+fn earlier(
+    seen: &Seen,
+    key: Option<(Value, Place, Type)>,
+    dom: &Dominators,
+    block: Block,
+) -> Option<Value> {
+    let found = seen.get(&key?)?;
+    found.iter().find(|&&(at, _)| dom.dominates(at, block)).map(|&(_, value)| value)
 }
 
 /// Recorded as a note: how many walks were made.
@@ -818,6 +843,36 @@ block3(%4: i32):
         let (module, stats) = run(&text);
         assert!(!stats.changed());
         assert_eq!(count_of(one(&module), Opcode::Load), 2);
+    }
+
+    #[test]
+    fn a_block_laid_out_above_the_load_that_dominates_it_still_reuses_it() {
+        // An inlined body ends up laid out before the test that guards it, as `skb_frag_page`
+        // does in `skb_gro_reset_offset`. Block one is only reached through block two, so its
+        // load is block two's, wherever the blocks were put.
+        let text = wrap(
+            "(ptr, i1) -> i32",
+            "block0(%0: ptr, %1: i1):
+    br_if %1, block2, block3
+
+block1:
+    %2 = load.i32 %0, align 4
+    return %2
+
+block2:
+    %3 = load.i32 %0, align 4
+    %4 = iconst.i32 0
+    %5 = icmp ne %3, %4
+    br_if %5, block1, block3
+
+block3:
+    %6 = iconst.i32 0
+    return %6
+",
+        );
+        let (module, stats) = run(&text);
+        assert_eq!(stats.count(crate::stats::Kind::Optimized, REUSED), 1);
+        assert_eq!(count_of(one(&module), Opcode::Load), 1);
     }
 
     #[test]
