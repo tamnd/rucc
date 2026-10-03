@@ -1025,6 +1025,14 @@ pub fn run(module: &mut Module, names: &mut Interner, opts: &Options) -> Report 
     // module. Only when the run has that pass in it, since it is a copy of the module's read only
     // data and nothing else would ever look at it.
     let images = if passes.iter().any(|pass| pass.name() == image::NAME) {
+        // A `static` nothing writes is read only from here on, so its loads fold to what it was
+        // initialized to and the object can go once nothing reads it, as gcc's do once its IPA
+        // has marked them. `fonts` in lib/fonts/fonts.c and `symtab_key_params` in
+        // security/selinux/ss/symtab.c are gone from gcc's objects for that reason. It is asked
+        // again at the end, where the passes have taken away stores that never run.
+        if opts.level != OptLevel::O0 {
+            inline::read_only(module);
+        }
         Arc::new(image::Images::of(module, opts.interposition))
     } else {
         Arc::default()

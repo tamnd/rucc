@@ -198,6 +198,24 @@ pub(crate) fn settle(func: &mut Func, images: &Images, fuel: &mut Fuel, stats: &
                     func[inst].opcode = Opcode::GlobalAddr;
                     Extra::Symbol(name)
                 }
+                Found::Number(name) => {
+                    stats.optimized(NAMED);
+                    let data = InstData {
+                        extra: Extra::Symbol(name),
+                        ..InstData::new(Opcode::GlobalAddr)
+                    };
+                    let span = func.span(inst);
+                    let made = func.create_inst(data, &[Type::PTR], span);
+                    func.insert_before(made, inst);
+                    let Some(address) = func[made].results().next() else { continue };
+                    let args = func.push_values(&[address]);
+                    let data = &mut func[inst];
+                    data.opcode = Opcode::PtrToInt;
+                    data.flags = Flags::NONE;
+                    data.extra = Extra::None;
+                    data.args = args;
+                    continue;
+                }
             };
             let data = &mut func[inst];
             data.flags = Flags::NONE;
@@ -439,6 +457,8 @@ enum Found {
     Constant(Opcode, Imm),
     /// The address of this symbol.
     Address(Symbol),
+    /// The address of this symbol, read as an integer as wide as a pointer.
+    Number(Symbol),
 }
 
 /// The initial image of every global in a module that a load can be answered out of.
@@ -722,6 +742,15 @@ fn answer(func: &Func, inst: Inst, images: &Images) -> Option<Found> {
     let offset = u64::try_from(offset).ok()?;
     if ty.is_ptr() {
         return images.address(name, offset).map(Found::Address);
+    }
+    // A structure of pointers passed by value is read a word at a time as integers, since that is
+    // the class the ABI gives it, so a word holding an address is answered with the address made
+    // a number. `hashtab_insert` is handed `symtab_key_params` that way in
+    // security/selinux/ss/symtab.c, and gcc passes the two function addresses as immediates.
+    if ty.is_int() && u64::from(ty.bits()) == images.pointer * 8 {
+        if let Some(symbol) = images.address(name, offset) {
+            return Some(Found::Number(symbol));
+        }
     }
     let imm = images.read(name, ty, offset)?;
     Some(Found::Constant(if ty.is_int() { Opcode::IConst } else { Opcode::FConst }, imm))
