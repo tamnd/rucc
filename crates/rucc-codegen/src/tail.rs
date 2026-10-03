@@ -11,9 +11,10 @@
 //! # Three places
 //!
 //! [`mark`] works on the IR, before selection. It turns a call whose results are exactly what the
-//! block returns next into a `tail_call`, which ends the block the way a `return` did, and
-//! it turns down the whole function when the callee could see something of the caller's frame. Its
-//! answer is what [`refusal`] says, a reason rather than a no.
+//! block returns next, or hands to a block that only returns them, into a `tail_call`, which ends
+//! the block the way a `return` did, and it turns down the whole function when the callee could
+//! see something of the caller's frame. Its answer is what [`refusal`] says, a reason rather than
+//! a no.
 //!
 //! [`crate::lower`] builds a `tail_call` as the call and the return it stands for, and writes the
 //! call down as a [`Tail`] when the convention put every argument in a register. A call that needs
@@ -44,7 +45,7 @@
 //! analysis would let through, which costs a few calls and nothing else.
 
 use rucc_base::{Interner, Symbol};
-use rucc_ir::{Abi, AttrSet, Extra, Func, Inst, Opcode, Value};
+use rucc_ir::{Abi, AttrSet, Block, Extra, Func, Inst, Opcode, Value};
 use rucc_mir as mir;
 use rucc_target::{BranchInsts, FrameInsts, RegClass};
 
@@ -141,28 +142,67 @@ pub fn mark(func: &mut Func, names: &Interner, elsewhere: &Elsewhere) -> usize {
     }
     let blocks: Vec<_> = func.blocks().collect();
     let mut marked = 0;
+    let mut left = Vec::new();
     for block in blocks {
         let insts: Vec<Inst> = func.insts(block).collect();
         let [.., call, ret] = insts[..] else { continue };
-        if !in_tail_position(func, call, ret) {
+        let Some(returned) = returned(func, ret) else { continue };
+        if !in_tail_position(func, call, &returned) {
             continue;
         }
+        left.extend(func.successors(ret).map(|target| target.block));
         func.remove_inst(ret);
         func[call].opcode = Opcode::TailCall;
         marked += 1;
     }
+    // A return every arm jumped to and none does now is a block whose parameters nothing hands
+    // anything, so it goes rather than reaching selection that way.
+    let reached: Vec<Block> = func
+        .blocks()
+        .filter_map(|block| func.insts(block).last())
+        .flat_map(|last| func.successors(last).map(|target| target.block))
+        .collect();
+    left.sort_unstable();
+    left.dedup();
+    for block in left.into_iter().filter(|block| !reached.contains(block)) {
+        func.remove_block(block);
+    }
     marked
 }
 
-/// Whether that call, straight in front of that instruction, is one the caller could jump to.
+/// What the function gives back when that instruction ends its block, or `None` when it does not
+/// end the function.
 ///
-/// A call to a name or through a pointer, and the `return` gives back the call's results, in
-/// order, and nothing else, and the two signatures say the same about them, so the callee leaves the answer where the
-/// caller's caller looks and in the form it expects.
-fn in_tail_position(func: &Func, call: Inst, ret: Inst) -> bool {
-    if func[ret].opcode != Opcode::Return {
-        return false;
+/// That is a `return`, or a jump to a block that does nothing but return what it was handed, in
+/// the order it was handed it. The second is how `if (x) return f(a); return g(b);` comes out of
+/// the front end, with both arms jumping to one return, and how `r = f(a)` in each arm of an `if`
+/// does once the variable is a block parameter.
+fn returned(func: &Func, ret: Inst) -> Option<Vec<Value>> {
+    match func[ret].opcode {
+        Opcode::Return => Some(func[func[ret].args].to_vec()),
+        Opcode::Jump => {
+            let [target] = func.successors(ret).collect::<Vec<_>>()[..] else { return None };
+            let mut insts = func.insts(target.block);
+            let (Some(only), None) = (insts.next(), insts.next()) else { return None };
+            let passed = &func[target.args];
+            let same = func[only].opcode == Opcode::Return
+                && func[func[only].args] == func[target.block].params[..];
+            same.then(|| passed.to_vec())
+        }
+        _ => None,
     }
+}
+
+/// Whether that call, at the end of its block, is one the caller could jump to when the function
+/// then gives back what `returned` holds.
+///
+/// A call to a name or through a pointer, and what is given back is the call's results, in order,
+/// and nothing else, and the two signatures say the same about them, so the callee leaves the
+/// answer where the caller's caller looks and in the form it expects. A function that gives back
+/// nothing can also drop what the callee gives back, when that is in an integer register, where
+/// the caller's caller does not look. One on the x87 stack would be left there for a caller that
+/// expects the stack empty.
+fn in_tail_position(func: &Func, call: Inst, returned: &[Value]) -> bool {
     let Extra::Call(info) = func[call].extra else { return false };
     let info = func[info];
     // A `call` names its callee and a `call_indirect` never does, and a `tail_call` tells the two
@@ -172,8 +212,12 @@ fn in_tail_position(func: &Func, call: Inst, ret: Inst) -> bool {
         Opcode::CallIndirect if info.callee.is_none() => (),
         _ => return false,
     }
+    let callee = &func[info.signature];
+    let dropped = returned.is_empty()
+        && func.signature().returns.is_empty()
+        && callee.returns.iter().all(|param| param.ty.is_int() || param.ty.is_ptr());
     let results: Vec<Value> = func[call].results().collect();
-    if func[func[ret].args] != results[..] {
+    if returned != results[..] && !dropped {
         return false;
     }
     // And the two are of one convention. A jump leaves the callee to return straight to this
@@ -186,10 +230,9 @@ fn in_tail_position(func: &Func, call: Inst, ret: Inst) -> bool {
     // Nor is one whose callee takes the arguments off the stack, which is i386 `stdcall` and
     // `fastcall`. The callee returns with `ret $n` for its own arguments, where this function's
     // caller wants this function's taken off, and the two are the same number only by chance.
-    let callee = &func[info.signature];
     callee.convention == func.signature().convention
         && !callee.convention.callee_pops()
-        && callee.returns == func.signature().returns
+        && (dropped || callee.returns == func.signature().returns)
 }
 
 /// Turns each [`Tail`] that can be into the epilogue and a jump, and says how many it turned.
@@ -287,7 +330,8 @@ fn ending(func: &mir::Func, tail: &Tail, ret: mir::Opcode) -> Option<(mir::Inst,
 mod tests {
     use rucc_base::Interner;
     use rucc_ir::{
-        Block, Builder, CallInfo, Extra, Flags, Func, InstData, Opcode, Signature, Type, Value,
+        Block, Builder, CallInfo, Extra, Flags, Float, Func, InstData, Opcode, Signature, Type,
+        Value,
     };
 
     use super::{comes_back, mark, refusal};
@@ -374,6 +418,77 @@ mod tests {
         assert_eq!(mark(&mut func, &names, &Elsewhere::default()), 1);
         assert_eq!(opcodes(&func), [Opcode::TailCall]);
         assert_eq!(func[func[call].args], [address, arg]);
+    }
+
+    /// `int f(int a) { int r = g(a); return r; }` the way the front end writes an `if` with a
+    /// return in each arm: the call jumps to a block that returns what it is handed.
+    fn joined(names: &mut Interner, work: bool) -> Func {
+        let i32 = Type::int(32);
+        let mut func =
+            Func::new(names.intern("f"), Signature::new().with_params(&[i32]).with_returns(&[i32]));
+        let block = func.create_block();
+        let arg = func.append_param(block, i32);
+        let join = func.create_block();
+        let param = func.append_param(join, i32);
+        let sig = func.add_signature(Signature::new().with_params(&[i32]).with_returns(&[i32]));
+        let callee = names.intern("g");
+        let call = Builder::new(&mut func, block).call(callee, sig, &[arg]);
+        let got = func[call].first_result.expect("an integer comes back");
+        Builder::new(&mut func, block).jump(join, &[got]);
+        let answer = if work {
+            Builder::new(&mut func, join).binary(Opcode::Add, param, param, Flags::default())
+        } else {
+            param
+        };
+        Builder::new(&mut func, join).ret(&[answer]);
+        func
+    }
+
+    #[test]
+    fn a_call_that_jumps_to_a_return_of_its_answer_becomes_a_tail_call() {
+        let mut names = Interner::new();
+        let mut func = joined(&mut names, false);
+        assert_eq!(mark(&mut func, &names, &Elsewhere::default()), 1);
+        assert_eq!(opcodes(&func), [Opcode::TailCall]);
+    }
+
+    #[test]
+    fn a_call_that_jumps_to_work_on_its_answer_stays_a_call() {
+        let mut names = Interner::new();
+        let mut func = joined(&mut names, true);
+        assert_eq!(mark(&mut func, &names, &Elsewhere::default()), 0);
+        assert_eq!(opcodes(&func), [Opcode::Call, Opcode::Jump, Opcode::Add, Opcode::Return]);
+    }
+
+    /// `void f(int a) { g(a); }`, with `g` giving back what `back` is.
+    fn dropping(names: &mut Interner, back: Type) -> Func {
+        let i32 = Type::int(32);
+        let mut func = Func::new(names.intern("f"), Signature::new().with_params(&[i32]));
+        let block = func.create_block();
+        let arg = func.append_param(block, i32);
+        let sig = func.add_signature(Signature::new().with_params(&[i32]).with_returns(&[back]));
+        let callee = names.intern("g");
+        Builder::new(&mut func, block).call(callee, sig, &[arg]);
+        Builder::new(&mut func, block).ret(&[]);
+        func
+    }
+
+    #[test]
+    fn a_void_function_drops_an_integer_answer_and_jumps() {
+        let mut names = Interner::new();
+        let mut func = dropping(&mut names, Type::int(32));
+        assert_eq!(mark(&mut func, &names, &Elsewhere::default()), 1);
+        assert_eq!(opcodes(&func), [Opcode::TailCall]);
+    }
+
+    /// On i386 a `double` comes back on the x87 stack, and a jump would leave it there for a
+    /// caller that expects the stack empty.
+    #[test]
+    fn a_void_function_keeps_the_call_when_the_answer_is_a_float() {
+        let mut names = Interner::new();
+        let mut func = dropping(&mut names, Type::float(Float::F64));
+        assert_eq!(mark(&mut func, &names, &Elsewhere::default()), 0);
+        assert_eq!(opcodes(&func), [Opcode::Call, Opcode::Return]);
     }
 
     #[test]
