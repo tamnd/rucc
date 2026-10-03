@@ -217,7 +217,7 @@ fn in_tail_position(func: &Func, call: Inst, returned: &[Value]) -> bool {
         && func.signature().returns.is_empty()
         && callee.returns.iter().all(|param| param.ty.is_int() || param.ty.is_ptr());
     let results: Vec<Value> = func[call].results().collect();
-    if returned != results[..] && !dropped {
+    if returned != results.as_slice() && !dropped {
         return false;
     }
     // And the two are of one convention. A jump leaves the callee to return straight to this
