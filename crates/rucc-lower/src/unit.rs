@@ -1808,7 +1808,9 @@ impl Unit<'_> {
         }
         for id in self.module.funcs() {
             let func = &mut self.module[id];
-            if func.is_declaration() && func.linkage == IrLinkage::Weak && !used.contains(&func.name)
+            if func.is_declaration()
+                && func.linkage == IrLinkage::Weak
+                && !used.contains(&func.name)
             {
                 func.linkage = IrLinkage::External;
             }
