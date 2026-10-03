@@ -200,7 +200,7 @@ fn a_vector_read_and_written_through_an_unaligned_pointer_uses_the_unaligned_mov
         let asm = std::fs::read_to_string(dir.join("a.s")).expect("a.s was written");
         let body = asm.split("copy16:").nth(1).expect("copy16 is in the listing");
         let body = body.split("ret").next().expect("copy16 returns");
-        assert!(body.contains("movdqu"), "{level}: no movdqu in\n{body}");
+        assert!(body.contains("movups"), "{level}: no movups in\n{body}");
         for line in body.lines().filter(|line| line.contains("movaps")) {
             assert!(
                 line.contains("(%rsp)") || line.contains("(%rbp)"),

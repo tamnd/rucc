@@ -1315,6 +1315,8 @@ static TEXT: &[(&str, &[Written])] = &[
     ("movaps_rr", &[spell("movaps", &[Xmm(1), Xmm(0)])]),
     ("movaps_rm", &[spell("movaps", &[Mem, Xmm(0)])]),
     ("movaps_mr", &[spell("movaps", &[Xmm(0), Mem])]),
+    ("movups_rm", &[spell("movups", &[Mem, Xmm(0)])]),
+    ("movups_mr", &[spell("movups", &[Xmm(0), Mem])]),
     ("movss_rm", &[spell("movss", &[Mem, Xmm(0)])]),
     ("movsd_rm", &[spell("movsd", &[Mem, Xmm(0)])]),
     ("movss_mr", &[spell("movss", &[Xmm(0), Mem])]),

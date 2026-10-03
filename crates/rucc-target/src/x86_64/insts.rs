@@ -2372,6 +2372,10 @@ pub static INSTS: &[(&str, Form)] = &[
     ("movaps_rr", MoveVec),
     ("movaps_rm", LoadVec),
     ("movaps_mr", StoreVec),
+    // The same two moves without the alignment check, for a sixteen byte float or vector the
+    // program reads or writes through a pointer of its own, which need not be aligned.
+    ("movups_rm", LoadVec),
+    ("movups_mr", StoreVec),
     // Reading one value out of memory and writing one back, which is the same two shapes as the
     // spill and the reload above and a different instruction: those move a whole register because
     // a spill slot holds whatever was in it, and these move exactly the width of the value because
@@ -2610,7 +2614,7 @@ mod tests {
         // Every head in the model file, which is what the rule set may write and what
         // `rucc-verify` has an answer for. The two lists are checked against each other by
         // `rucc-codegen`, which is the crate that can read the rule set.
-        assert_eq!(described, 783);
+        assert_eq!(described, 785);
     }
 
     #[test]
