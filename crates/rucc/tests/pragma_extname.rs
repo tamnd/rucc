@@ -86,14 +86,19 @@ int h(void) { return 3; }
 int use(void) { return before() + after() + var + lab() + same() + st() + iv; }
 ");
 
-    assert_eq!(said, ["9:9: warning: `#pragma redefine_extname` ignored due to conflict with previous rename"]);
+    assert_eq!(
+        said,
+        ["9:9: warning: `#pragma redefine_extname` ignored due to conflict with previous rename"]
+    );
     for call in ["newb", "newa", "explicit", "tgt", "st", "nused", "ninner"] {
         assert!(text.contains(&format!("\tcall\t{call}")), "{call}: {text}");
     }
     for name in ["newv", "niv", "k"] {
         assert!(text.contains(&format!("\t.globl\t{name}\n")), "{name}: {text}");
     }
-    for gone in ["before", "after", "\tvar", "\tused", "\tinner", "\tiv", "\th\n", "newn", "newl", "news"] {
+    for gone in
+        ["before", "after", "\tvar", "\tused", "\tinner", "\tiv", "\th\n", "newn", "newl", "news"]
+    {
         assert!(!text.contains(gone), "{gone:?}: {text}");
     }
 }

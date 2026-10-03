@@ -33,9 +33,10 @@ impl Parser<'_> {
     /// One `#pragma redefine_extname` line, the word `redefine_extname` included.
     pub(crate) fn extname_line(&mut self, line: &[Token]) {
         let word = line[0].span;
-        let (Some(old), Some(new)) =
-            (line.get(1).and_then(|token| token.ident()), line.get(2).and_then(|token| token.ident()))
-        else {
+        let (Some(old), Some(new)) = (
+            line.get(1).and_then(|token| token.ident()),
+            line.get(2).and_then(|token| token.ident()),
+        ) else {
             return self.warn("E0798", "malformed `#pragma redefine_extname`, ignored", word);
         };
         if line.len() > 3 {
