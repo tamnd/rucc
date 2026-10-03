@@ -473,3 +473,37 @@ fn a_function_called_once_is_inlined_after_the_small_functions_around_it() {
         "the tracepoint is not in each caller:\n{listing}"
     );
 }
+
+#[test]
+fn a_function_no_larger_than_a_call_is_inlined_before_its_own_calls_are() {
+    let source = "extern int key;\n\
+        struct probe { void (*fn)(void *, void *, int); void *data; };\n\
+        extern struct probe *probes;\n\
+        extern int online(int);\n\
+        extern int cpu;\n\
+        static inline void trace_lock(void *mm, int write) {\n\
+            if (__builtin_expect(key, 0) && online(cpu)) {\n\
+                struct probe *it = probes;\n\
+                if (it) it->fn(it->data, mm, write);\n\
+                if (it && it[1].fn) it[1].fn(it[1].data, mm, write);\n\
+                if (it && it[2].fn) it[2].fn(it[2].data, mm, write);\n\
+            }\n\
+        }\n\
+        void do_trace_lock(void *mm, int write) { trace_lock(mm, write); }\n\
+        static inline void lock_trace(void *mm, int write) {\n\
+            if (__builtin_expect(key, 0)) do_trace_lock(mm, write);\n\
+        }\n\
+        void lock_read(void *mm) { lock_trace(mm, 0); }\n\
+        void lock_write(void *mm) { lock_trace(mm, 1); }\n";
+    let listing = asm("early-small", source);
+    let body = |name: &str| {
+        let start = listing.find(&format!("\n{name}:")).expect("the function is in the listing");
+        let end = listing[start..].find("\t.size").map_or(listing.len(), |end| start + end);
+        listing[start..end].to_owned()
+    };
+    for caller in ["lock_read", "lock_write"] {
+        let body = body(caller);
+        assert!(!body.contains("call\tdo_trace_lock"), "the one line function stayed a call:\n{body}");
+        assert!(body.contains("call\tonline"), "the tracepoint is not in the caller:\n{body}");
+    }
+}

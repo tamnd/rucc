@@ -393,7 +393,7 @@ pub fn run(
     // it, and once it is in all four that function is called four times and stays out of line.
     // kernel/locking/semaphore.c is that shape: `__down_common` holds two tracepoints and a call
     // to `___down_common`, and gcc has the tracepoints in each of `__down` and its siblings.
-    let mut wanted = classify(module, &Set::default());
+    let wanted = classify(module, &Set::default());
     let mut done = Vec::new();
     let convention = Convention::of(module);
     let most = limit.map_or(0, |limit| usize::try_from(limit).unwrap_or(usize::MAX));
@@ -419,6 +419,18 @@ pub fn run(
             settle(module, id, &how, &mut state, done);
         }
     };
+    // gcc's early inliner goes first, taking each call to a function no larger than the call while
+    // that function is still the few lines it was written as, before anything is inlined into it.
+    // What the body calls is then a call in the caller, and measured there. In mm/mmap_lock.c,
+    // `__mmap_lock_trace_start_locking` calls `__mmap_lock_do_trace_start_locking`, which is one
+    // line calling a tracepoint, and gcc has the tracepoint in each caller, each one an entry in
+    // `__jump_table`. Settled first, that one line is the whole tracepoint and far larger than a
+    // call.
+    let mut small = wanted.clone();
+    small.retain(|_, &mut (_, kind)| kind == Kind::Small);
+    round(module, &small, &mut done);
+    let mut wanted = small;
+    wanted.extend(classify(module, &Set::default()));
     round(module, &wanted, &mut done);
     if limit.is_some() && once {
         let mut second = classify(module, &called_once(module));
