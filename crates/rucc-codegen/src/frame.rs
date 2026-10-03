@@ -957,6 +957,31 @@ fn width(layout: &Layout<'_>, class: RegClass) -> u32 {
     bits.div_ceil(8).max(layout.conv.word).next_power_of_two()
 }
 
+/// Whether a function laid out this way keeps a frame pointer, asked before there is an allocation.
+///
+/// The answer [`Frame::of`] arrives at, worked out from the parts of it the allocator cannot
+/// change, so that a function which will keep none can be handed the register to allocate. The
+/// one input that is not known up front is how widely aligned the spill slots are, and that is
+/// bounded by the width of a whole register of each class a value can be spilled from, which is
+/// what a slot is at its widest. tamnd/rucc#2777.
+#[must_use]
+pub fn keeps_frame_pointer(layout: &Layout<'_>) -> bool {
+    let conv = layout.conv;
+    let saved = layout.vectors && !conv.sse_saved.is_empty();
+    let vector = conv.sse_kept.map_or_else(|| width(layout, conv.sse_class), u32::from);
+    let most = layout
+        .locals
+        .iter()
+        .map(|local| local.align)
+        .chain([width(layout, conv.int_class), width(layout, conv.sse_class)])
+        .chain(saved.then_some(vector))
+        .fold(conv.word, u32::max);
+    layout.frame_pointer
+        || layout.grows
+        || (!layout.leaf && conv.link.is_some())
+        || most > conv.trusted_align.min(conv.stack_align)
+}
+
 /// How many bytes each of an allocation's spill slots takes on the stack.
 ///
 /// The same question the width of one register class is, asked of a whole allocation at once, and
@@ -1168,6 +1193,28 @@ mod tests {
         assert_eq!(named(dropped.saved_int()), ["rbp"]);
         assert_eq!(named(kept.saved_int()), Vec::<&str>::new());
         assert!(kept.frame_pointer());
+    }
+
+    #[test]
+    fn whether_a_frame_pointer_is_kept_is_known_before_the_allocator_runs() {
+        let (func, allocation) = pressure(&SYSV, 6, 2);
+        let base = Layout::new(&SYSV, REGS);
+        let wide = [Local { size: 32, align: 32 }];
+        let narrow = [Local { size: 16, align: 16 }];
+        let layouts = [
+            (base, false),
+            (Layout { locals: &narrow, ..base }, false),
+            (Layout { leaf: false, ..base }, false),
+            (Layout { frame_pointer: true, ..base }, true),
+            (Layout { grows: true, red_zone: false, ..base }, true),
+            (Layout { locals: &wide, ..base }, true),
+        ];
+        // What is asked before allocation is what the frame says once there is one, for every
+        // reason a frame keeps one and for the near misses of each. tamnd/rucc#2777.
+        for (at, (layout, kept)) in layouts.into_iter().enumerate() {
+            assert_eq!(keeps_frame_pointer(&layout), kept, "layout {at}");
+            assert_eq!(Frame::of(&func, &allocation, &layout).frame_pointer(), kept, "layout {at}");
+        }
     }
 
     #[test]

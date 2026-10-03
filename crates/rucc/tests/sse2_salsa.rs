@@ -221,3 +221,34 @@ fn the_scalar_salsa_core_rotates_and_copies_without_a_call() {
     assert!(!core.contains("memcpy"), "{core}");
     let _ = std::fs::remove_dir_all(&dir);
 }
+
+/// The scalar core has sixteen words and a temporary live across its loop, which is more than the
+/// twelve registers there are without the frame pointer, so at `-O2` it takes `rbp` as well and
+/// gives the same answer. Asked to keep a frame pointer it does not, and still gives the same
+/// answer. tamnd/rucc#2777.
+#[cfg(all(target_os = "linux", target_arch = "x86_64"))]
+#[test]
+fn the_scalar_salsa_core_takes_the_frame_pointer_when_it_keeps_none() {
+    let dir = dir("spare");
+    std::fs::write(dir.join("s.c"), SCALAR).expect("the fixture can be written");
+    let core = |flags: &[&str]| {
+        let mut args = vec!["-O2", "-fno-strict-overflow"];
+        args.extend_from_slice(flags);
+        let (ok, said) = run(&dir, &[&args[..], &["s.c", "-o", "s"]].concat());
+        assert!(ok, "{flags:?}: {said}");
+        let out = Command::new(dir.join("s")).output().expect("what was linked can be run");
+        let (ok, said) = run(&dir, &[&args[..], &["-S", "s.c", "-o", "s.s"]].concat());
+        assert!(ok, "{flags:?}: {said}");
+        let asm = std::fs::read_to_string(dir.join("s.s")).expect("the assembly was written");
+        let start = asm.find("\nsalsa20_8:").expect("the core is in the output");
+        let end = asm[start..].find(".size\tsalsa20_8").map_or(asm.len(), |at| start + at);
+        (out.status.code(), asm[start..end].to_owned())
+    };
+    let (spared, free) = core(&[]);
+    let (kept, framed) = core(&["-fno-omit-frame-pointer"]);
+    assert_eq!(spared, kept, "the two builds disagree");
+    assert!(free.contains("pushq\t%rbp") && free.contains("%ebp"), "{free}");
+    assert!(!free.contains("movq\t%rsp, %rbp"), "{free}");
+    assert!(framed.contains("movq\t%rsp, %rbp") && !framed.contains("%ebp"), "{framed}");
+    let _ = std::fs::remove_dir_all(&dir);
+}
