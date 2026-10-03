@@ -4,6 +4,10 @@ All notable changes are recorded here. The format follows [Keep a Changelog](htt
 
 ## Unreleased
 
+### Fixed
+
+- Each second name for a function or a variable, from `alias` or a `.set`, is written just after what it names, as gcc does, rather than all together at the end. modpost reads a module's device tables in symbol table order, so the order of `.modinfo` aliases now matches a gcc build.
+
 ## 0.19.1
 
 A patch release on the way to K2, the kernel's objects and link. The assembler now writes every `.S` unit and every gcc `-S` output of the x86-64 defconfig kernel byte for byte the same as gas 2.44, all 3042 of them in the kernel-asm corpus. On the way it gained `.debug_frame`, gas's section flags, gas's first round of relaxation, its `.eh_frame` padding, its local commons and its code padding, and the last instructions it refused in the kernel.

@@ -625,8 +625,21 @@ pub fn write(
     // only thing it does not take from what it points at: the target of one may be a `static` and
     // the alias of it may not be. Before the loop below rather than after it, because a reference
     // to the new name is a reference to something this file defines and would otherwise be added
-    // as a name this file wants from somewhere else.
-    for alias in aliases {
+    // as a name this file wants from somewhere else. In the order of what they name, as gcc writes
+    // each one just after its target, and the kernel's modpost reads device tables in that order.
+    // An alias of an alias comes last, once the name it points at is here.
+    let written: BTreeMap<&str, usize> = text
+        .funcs
+        .iter()
+        .map(|func| func.name.as_str())
+        .chain(data.objects.iter().map(|object| object.name.as_str()))
+        .enumerate()
+        .map(|(at, name)| (name, at))
+        .collect();
+    let mut by_target: Vec<&Alias> = aliases.iter().collect();
+    by_target
+        .sort_by_key(|alias| written.get(alias.target.as_str()).copied().unwrap_or(usize::MAX));
+    for alias in by_target {
         let Some(&id) = symbols.get(&alias.target) else {
             let why =
                 format!("'{}' is aliased to '{}', which is not here", alias.name, alias.target);
@@ -2693,6 +2706,40 @@ mod tests {
         assert!(b.is_global(), "and the name given to it was not");
         // Four bytes of image and not eight, since an alias is a name and not a copy.
         assert_eq!(file.section_by_name(".data").expect("a data section").size(), 4);
+    }
+
+    #[test]
+    fn second_names_are_written_in_the_order_of_what_they_name() {
+        let data = Data {
+            apart: Vec::new(),
+            exports: Vec::new(),
+            weak: Vec::new(),
+            objects: vec![variable("a", Place::Written), variable("b", Place::Written)],
+        };
+        let alias = |name: &str, target: &str| Alias {
+            name: name.to_owned(),
+            target: target.to_owned(),
+            binding: Binding::Global,
+            visibility: Visibility::Default,
+            ifunc: false,
+        };
+        let aliases = [alias("for_b", "b"), alias("for_a", "a")];
+        let bytes = write(
+            &Text::default(),
+            &data,
+            &aliases,
+            &target(),
+            Output::default(),
+            &Info::default(),
+        )
+        .expect("an object");
+        let file = object::File::parse(&bytes[..]).expect("a readable object");
+        let names: Vec<_> = file
+            .symbols()
+            .filter_map(|s| s.name().ok())
+            .filter(|name| name.starts_with("for_"))
+            .collect();
+        assert_eq!(names, ["for_a", "for_b"]);
     }
 
     #[test]
