@@ -246,7 +246,7 @@ impl Checker<'_> {
         kind: RecordKind,
         members: ast::MemberList,
         attrs: ast::AttrList,
-        pack: Option<u32>,
+        pragmas: ast::RecordPragmas,
         span: Span,
     ) {
         // Read before the members are, because `aligned(n)` folds an expression and the members
@@ -305,7 +305,7 @@ impl Checker<'_> {
         let options = RecordOptions {
             packed: packing.packed,
             align: packing.align.map(u64::from),
-            pack: pack.map(u64::from),
+            pack: pragmas.pack.map(u64::from),
             bit_fields,
         };
         let laid_out = match layout_record(&self.types, kind, &decls, &options, self.cx.target) {
@@ -331,8 +331,10 @@ impl Checker<'_> {
         // nothing about where they sit: the record is the size and the alignment it would be
         // without the attribute and so is every member of it. Measured against gcc 16.2.0 on
         // x86-64 over both of the shapes that could have said otherwise, an ordinary member and a
-        // run of bit-fields.
-        if self.storage_order(attrs) == Some(self.cx.target.little_endian) {
+        // run of bit-fields. The record's own attribute wins over the `#pragma scalar_storage_order`
+        // in effect, as in gcc.
+        let order = self.storage_order(attrs).or(pragmas.order);
+        if order == Some(self.cx.target.little_endian) {
             self.types.make_reverse_order(id);
         }
         if self.may_alias(attrs) {
@@ -1056,7 +1058,7 @@ mod tests {
         let tag = tag.map(|text| fixture.name(text));
         let fields = Some(fixture.ast.add_member_list(members));
         fixture.specs(
-            TypeSpec::Record { kind, tag, fields, attrs: ast::AttrList::EMPTY, pack: None },
+            TypeSpec::Record { kind, tag, fields, attrs: ast::AttrList::EMPTY, pragmas: ast::RecordPragmas::NONE },
             Quals::NONE,
         )
     }
@@ -1239,7 +1241,7 @@ mod tests {
                 tag: Some(tag),
                 fields: None,
                 attrs: ast::AttrList::EMPTY,
-                pack: None,
+                pragmas: ast::RecordPragmas::NONE,
             },
             Quals::NONE,
         );
@@ -1421,7 +1423,7 @@ mod tests {
                 tag: Some(tag),
                 fields: None,
                 attrs: ast::AttrList::EMPTY,
-                pack: None,
+                pragmas: ast::RecordPragmas::NONE,
             },
             Quals::NONE,
         );
@@ -1605,7 +1607,7 @@ mod tests {
                 tag: Some(tag),
                 fields: None,
                 attrs: ast::AttrList::EMPTY,
-                pack: None,
+                pragmas: ast::RecordPragmas::NONE,
             },
             Quals::NONE,
         );

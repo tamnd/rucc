@@ -22,7 +22,8 @@
 use rucc_ast::{
     AlignSpec, AttrArg, AttrArgList, AttrList, AttrSyntax, Attribute, Builtin, BuiltinError,
     BuiltinSet, DeclSpecs, DeclSpecsId, Deduction, Enumerator, EnumeratorList, ExprId, Field,
-    FuncSpecs, Member, MemberList, Quals, RecordKind, StorageClass, StrId, TypeSpec, TypeofArg,
+    FuncSpecs, Member, MemberList, Quals, RecordKind, RecordPragmas, StorageClass, StrId, TypeSpec,
+    TypeofArg,
 };
 use rucc_base::Symbol;
 use rucc_diag::Span;
@@ -1016,7 +1017,10 @@ impl Parser<'_> {
         // one in effect, and read even when there is no body, since reading a line is also what
         // complains about a malformed one and those complaints belong in source order.
         let in_effect = self.pack_in_effect();
-        let pack = if fields.is_some() { in_effect } else { None };
+        let pragmas = match fields {
+            Some(_) => RecordPragmas { pack: in_effect, order: self.packs.order },
+            None => RecordPragmas::NONE,
+        };
         // GCC takes attributes after the closing brace as well, which is where `packed` is
         // usually written, and they appertain to the same tag as the ones before it. With no
         // brace they are left to the specifiers and belong to the declaration, which is how the
@@ -1025,7 +1029,7 @@ impl Parser<'_> {
             self.collect_attributes(&mut attrs);
         }
         let attrs = self.ast.add_attr_list(&attrs);
-        TypeSpec::Record { kind, tag, fields, attrs, pack }
+        TypeSpec::Record { kind, tag, fields, attrs, pragmas }
     }
 
     /// The `{ ... }` of a struct or union.
