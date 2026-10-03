@@ -4439,7 +4439,19 @@ pub fn encode_masked_in(
     if mode == Mode::Bits32 && ONLY64.contains(&mnemonic) {
         return Err(Error::Wide { mnemonic: mnemonic.to_owned() });
     }
-    let args: Vec<Kind> = values.iter().map(|value| value.kind()).collect();
+    // On the stack, since this is asked once for every instruction written and almost none has
+    // more than four arguments. A list is made only for one that does, and for the error.
+    let mut few = [Kind::Imm; 4];
+    let many: Vec<Kind>;
+    let args: &[Kind] = if values.len() <= few.len() {
+        for (kind, value) in few.iter_mut().zip(values) {
+            *kind = value.kind();
+        }
+        &few[..values.len()]
+    } else {
+        many = values.iter().map(|value| value.kind()).collect();
+        &many
+    };
     let imm = values
         .iter()
         .find_map(|value| match value {
@@ -4447,14 +4459,14 @@ pub fn encode_masked_in(
             _ => None,
         })
         .unwrap_or(0);
-    let Some(row) = encoding_in(mode, mnemonic, &args, imm) else {
+    let Some(row) = encoding_in(mode, mnemonic, args, imm) else {
         // Which of the two it is says something different to whoever reads it. An instruction
         // with no row at all is a hole in this description, and one whose rows are all too narrow
         // is a lowering that produced a constant the instruction it chose cannot hold.
-        return Err(if rows_in(mode, mnemonic, &args).next().is_some() {
+        return Err(if rows_in(mode, mnemonic, args).next().is_some() {
             Error::Immediate { mnemonic: mnemonic.to_owned(), imm }
         } else {
-            Error::Unwritten { mnemonic: mnemonic.to_owned(), args }
+            Error::Unwritten { mnemonic: mnemonic.to_owned(), args: args.to_vec() }
         });
     };
     let row = widened(mode, row, values, mask).unwrap_or(row);
