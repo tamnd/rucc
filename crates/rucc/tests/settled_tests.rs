@@ -251,3 +251,34 @@ fn a_length_one_caller_does_not_bound_is_still_tested() {
     let listing = asm("ipvrp-open", source);
     assert!(listing.contains("ud2"), "the test went:\n{listing}");
 }
+
+#[test]
+fn an_object_size_through_a_cleanup_variable_is_answered() {
+    // keyboard.c's vt_do_kdgkbdiacr: the buffer is a `__free (kfree)` variable, so the cleanup
+    // takes its address and it stays a slot, and the size the allocator was asked for is what
+    // keeps `check_copy_size` from testing the length against `INT_MAX`.
+    let source = "typedef unsigned long size_t;\n\
+        void *km(size_t n, size_t s) __attribute__((alloc_size(1, 2)));\n\
+        void kfree(const void *);\n\
+        void over(int, unsigned long);\n\
+        unsigned long raw(void *to, const void *from, unsigned long n);\n\
+        static inline void free_it(void *p) { void *q = *(void **)p; if (q) kfree(q); }\n\
+        static inline __attribute__((always_inline)) int check(const void *addr, size_t n) {\n\
+            int sz = __builtin_object_size(addr, 0);\n\
+            if (__builtin_expect(sz >= 0 && sz < n, 0)) { over(sz, n); return 0; }\n\
+            if (__builtin_expect(n > 0x7fffffff, 0)) __builtin_trap();\n\
+            return 1;\n\
+        }\n\
+        extern unsigned int size;\n\
+        int f(void *u) {\n\
+            int i, n;\n\
+            char __attribute__((cleanup(free_it))) *buf = km(256, 3);\n\
+            if (!buf) return -12;\n\
+            n = size;\n\
+            for (i = 0; i < n; i++) buf[i] = i;\n\
+            if (check(buf, n * 3UL) && raw(u, buf, n * 3UL)) return -14;\n\
+            return 0;\n\
+        }\n";
+    let listing = asm("cleanup-objsize", source);
+    assert!(!listing.contains("ud2"), "the test is still there:\n{listing}");
+}

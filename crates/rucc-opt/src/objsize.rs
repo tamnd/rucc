@@ -53,6 +53,7 @@ use rucc_ir::{
 };
 
 use crate::Cfg;
+use crate::dom::Dominators;
 use crate::extents::vouched;
 
 /// How far a walk goes before it gives up, which is a chain of block parameters and `ptr_add`
@@ -77,7 +78,8 @@ pub fn answer(module: &mut Module, pic: Pic, look: bool) -> usize {
         let look = look && !module[id].attrs.set.contains(AttrSet::OPTNONE);
         let answers: Vec<(Inst, Answer)> = {
             let func = &module[id];
-            let walk = Walk { module, func, cfg: &Cfg::new(func), pic };
+            let cfg = Cfg::new(func);
+            let walk = Walk { module, func, cfg: &cfg, dom: &Dominators::new(&cfg), pic };
             asked
                 .iter()
                 .map(|&inst| {
@@ -209,6 +211,7 @@ struct Walk<'a> {
     module: &'a Module,
     func: &'a Func,
     cfg: &'a Cfg,
+    dom: &'a Dominators,
     pic: Pic,
 }
 
@@ -293,6 +296,13 @@ impl Walk<'_> {
                         }
                         Ok(Some(global.size))
                     }
+                    // An address read back out of a local it was put in once, which is what a
+                    // `__free (kfree)` variable is: the cleanup takes its address, so it stays a
+                    // slot rather than becoming a value, and the question is asked of the load.
+                    Opcode::Load => {
+                        let put = self.only_store(*args.first().ok_or(())?, inst).ok_or(())?;
+                        self.left(put, largest, depth, on)
+                    }
                     // What an allocator gave back, where the attribute on it says which arguments
                     // are the size and each of them is a constant here.
                     Opcode::Call => {
@@ -310,6 +320,47 @@ impl Walk<'_> {
                 }
             }
         }
+    }
+
+    /// The one value ever stored in a fixed local this load reads, when that is all the load can
+    /// read.
+    ///
+    /// The slot is only loaded from, stored to and has its lifetime marked, so nothing else can
+    /// write it or hand its address on. There is one store, of the type the load reads, and it
+    /// comes before the load on every way to it. The load then reads what that store put there
+    /// the last time it ran, and a walk of the stored value answers for every time it ran.
+    fn only_store(&self, slot: Value, load: Inst) -> Option<Value> {
+        let Def::Result { inst: made, .. } = self.func[slot].def else { return None };
+        if self.func[made].opcode != Opcode::Alloca || !self.func[self.func[made].args].is_empty() {
+            return None;
+        }
+        let mut store = None;
+        for inst in self.func.blocks().flat_map(|block| self.func.insts(block)) {
+            let data = &self.func[inst];
+            for (at, &arg) in self.func[data.args].iter().enumerate() {
+                if arg != slot {
+                    continue;
+                }
+                match (data.opcode, at) {
+                    (Opcode::Load, 0) | (Opcode::LifetimeEnd, _) => {}
+                    (Opcode::Store, 1) if store.is_none() => store = Some(inst),
+                    _ => return None,
+                }
+            }
+        }
+        let store = store?;
+        let put = self.func[self.func[store].args][0];
+        let read = self.func[load].first_result?;
+        if self.func[put].ty != self.func[read].ty {
+            return None;
+        }
+        let (from, to) = (self.func.block_of(store)?, self.func.block_of(load)?);
+        let before = if from == to {
+            self.func.insts(from).find(|&inst| inst == store || inst == load) == Some(store)
+        } else {
+            self.dom.dominates(from, to)
+        };
+        before.then_some(put)
     }
 
     /// The `alloc_size` of the function a call names, with the arguments of the call, for a direct
@@ -469,6 +520,36 @@ block0(%0: i64):
         let text = rucc_ir::print(&module, &names);
         assert!(text.contains("icmp ugt %0, "), "{text}");
         assert!(text.contains("= sub %0, "), "{text}");
+    }
+
+    /// An allocator's result put in a local once and read back is what the allocator gave, which
+    /// is the shape a `__free (kfree)` variable has. A second store, or the slot's address going
+    /// anywhere but a load or a store, and it is not known.
+    #[test]
+    fn an_address_read_back_out_of_a_local_it_was_put_in_once_is_followed() {
+        let body = |extra: &str| {
+            format!(
+                "
+func @my(i64) -> ptr, linkage(external), attrs(alloc_size=1);
+func @keep(ptr), linkage(external);
+
+func @f(i64), linkage(external) {{
+block0(%0: i64):
+    %1 = alloca, size 8, align 8
+    %2 = iconst.i64 768
+    %3 = call @my(%2) : (i64) -> ptr
+    store %3 -> %1, align 8
+{extra}    %4 = load.ptr %1, align 8
+    %5 = object_size.i64 %4, kind 0
+    call @use(%5) : (i64)
+    return
+}}
+"
+            )
+        };
+        assert_eq!(answers(&body(""), true), [768, 768]);
+        assert_eq!(answers(&body("    store %3 -> %1, align 8\n"), true), [768, -1]);
+        assert_eq!(answers(&body("    call @keep(%1) : (ptr)\n"), true), [768, -1]);
     }
 
     /// A pointer chosen by a branch between a local and a global has the larger of what the two
