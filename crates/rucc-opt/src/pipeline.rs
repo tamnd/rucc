@@ -43,8 +43,8 @@ use rucc_target::{Isa, TargetInfo};
 
 use crate::{
     Analyses, CallGraph, Fuel, Gates, Machine, Pass, Preserved, Stats, adce, constant_p, dce, dse,
-    extents, heap, image, inline, ipasra, ipcp, lanes, libcall, load, loop_idiom, modref, nofree,
-    number, objsize, outside, params, pass, purity, readonly, reload, sroa,
+    extents, heap, image, inline, ipasra, ipcp, ipvrp, lanes, libcall, load, loop_idiom, modref,
+    nofree, number, objsize, outside, params, pass, purity, readonly, reload, sroa,
 };
 
 /// The passes that read a summary [`nofree::annotate`], [`extents::annotate`],
@@ -1103,7 +1103,10 @@ pub fn run(module: &mut Module, names: &mut Interner, opts: &Options) -> Report 
     // One graph for all four, because building it is a walk over the module and none of them adds
     // an edge to it. The two transformations take edges away, by leaving a call nothing reaches or
     // an address nothing hands out, and a graph that still holds those is the conservative one.
-    let graph = (wants_purity || wants_modref || wants_ipcp || wants_ipasra)
+    // And gcc's `-fipa-vrp`, from `-O2` where gcc turns it on, which is the range every caller
+    // passes an integer parameter written onto it.
+    let wants_ipvrp = !matches!(opts.level, OptLevel::O0 | OptLevel::O1) && opts.wants(ipvrp::NAME);
+    let graph = (wants_purity || wants_modref || wants_ipcp || wants_ipasra || wants_ipvrp)
         .then(|| CallGraph::of(module, opts.interposition));
     // Before the two below rather than after them, because it is the one of the three that changes
     // a body, and an answer worked out from a body should be worked out from the body the passes
@@ -1171,6 +1174,13 @@ pub fn run(module: &mut Module, names: &mut Interner, opts: &Options) -> Report 
         if let Some(left) = allowance.get_mut(ipasra::NAME) {
             *left -= fuel.spent();
         }
+    }
+    // After both of those, since a parameter either of them took out is one nothing needs a range
+    // for, and a body ipcp rewrote passes its callees what the rewrite left.
+    if let (true, Some(graph)) = (wants_ipvrp, graph.as_ref()) {
+        let started = Instant::now();
+        ipvrp::annotate(module, graph);
+        report.took(ipvrp::NAME, started.elapsed());
     }
     let purity = match (wants_purity, graph.as_ref()) {
         (true, Some(graph)) => {

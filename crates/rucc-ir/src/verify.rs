@@ -49,7 +49,7 @@ use crate::inst::{
     Abi, Block, CallInfo, Def, Inst, MetaNode, Param, PlaneNode, Signature, VaInfo, Value,
 };
 use crate::module::{Alias, AliasKind, DataLayout, Datum, Global, Module, SymbolRef};
-use crate::{Extra, Float, MemOrder, Meta, Opcode, PrefetchHint, Type};
+use crate::{Extra, Facts, Float, MemOrder, Meta, Opcode, PrefetchHint, Type};
 
 /// One thing wrong with a module.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -930,6 +930,22 @@ impl<'a> Verifier<'a> {
     fn facts(&mut self, func: &'a Func, doms: &Doms, layout: &Layout) {
         for (value, facts) in func.known() {
             let ty = func[value].ty;
+            if let Some((lo, hi)) = facts.range {
+                // The one fact about an integer, so it is the one that may stand on an integer
+                // and the one that may not stand on anything else.
+                let fits = |end: u128| ty.bits() >= 128 || end >> ty.bits() == 0;
+                if !ty.is_int() {
+                    self.error(format!("%{} is said to be in a range and it is {ty}", value.raw()));
+                } else if !fits(lo) || !fits(hi) {
+                    self.error(format!(
+                        "%{} is said to be between {lo} and {hi} and it is {ty}",
+                        value.raw()
+                    ));
+                }
+                if (Facts { range: None, ..facts }).is_empty() {
+                    continue;
+                }
+            }
             if !ty.is_ptr() {
                 self.error(format!("%{} is said to be a pointer and it is {ty}", value.raw()));
             }
@@ -3768,6 +3784,19 @@ facts:
 ",
         );
         reports(&text, "%0 is said to be a pointer and it is i32");
+    }
+
+    #[test]
+    fn a_range_stands_on_an_integer_that_can_hold_it() {
+        let body = |ty: &str, fact: &str| {
+            format!("block0(%0: {ty}):\n    return %0\n\nfacts:\n    %0 = {fact}\n")
+        };
+        let held = wrap("(i32) -> i32", &body("i32", "!range(4294967295, 4)"));
+        assert_eq!(errors(&held), Vec::<String>::new());
+        let pointer = wrap("(ptr) -> ptr", &body("ptr", "!range(0, 4)"));
+        reports(&pointer, "%0 is said to be in a range and it is ptr");
+        let wide = wrap("(i8) -> i8", &body("i8", "!range(0, 256)"));
+        reports(&wide, "%0 is said to be between 0 and 256 and it is i8");
     }
 
     #[test]

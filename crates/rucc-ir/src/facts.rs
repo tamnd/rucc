@@ -7,7 +7,9 @@
 //! of a pass with its own opinions.
 //!
 //! There are four of them and a value carries any combination, including none, which is what
-//! every value in a function compiled without `-fsafety` carries. They live in a side table on
+//! every value in a function compiled without `-fsafety` carries. A fifth is about an integer
+//! rather than a pointer, which is the range every caller of a function passes it, and it is here
+//! because it is the same kind of thing: a promise established in one place and read in another. They live in a side table on
 //! [`Func`](crate::Func) rather than in the value itself, so a module with no safety in it is the
 //! same module it was before this existed.
 
@@ -30,16 +32,25 @@ pub struct Facts {
     pub align: Option<u32>,
     /// Whether the storage the pointer points into is known live here, which is `!live`.
     pub live: bool,
+    /// The bit patterns an integer is known to be between, inclusive, which is `!range(lo, hi)`.
+    ///
+    /// Read unsigned, and wrapping when the low end is above the high one, so a signed interval
+    /// such as `[-1, 4]` is written as the two ends' bit patterns and stays one interval.
+    pub range: Option<(u128, u128)>,
 }
 
 impl Facts {
     /// Nothing known, which is what every value has until something establishes otherwise.
-    pub const NONE: Self = Self { bounds: None, init: None, align: None, live: false };
+    pub const NONE: Self = Self { bounds: None, init: None, align: None, live: false, range: None };
 
     /// Whether nothing at all is known, which is when there is nothing to print.
     #[must_use]
     pub const fn is_empty(self) -> bool {
-        self.bounds.is_none() && self.init.is_none() && self.align.is_none() && !self.live
+        self.bounds.is_none()
+            && self.init.is_none()
+            && self.align.is_none()
+            && !self.live
+            && self.range.is_none()
     }
 }
 
@@ -86,6 +97,10 @@ impl fmt::Display for Facts {
             sep(f)?;
             write!(f, "!aligned({align})")?;
         }
+        if let Some((lo, hi)) = self.range {
+            sep(f)?;
+            write!(f, "!range({lo}, {hi})")?;
+        }
         Ok(())
     }
 }
@@ -108,6 +123,7 @@ mod tests {
             init: Some(16),
             align: Some(8),
             live: true,
+            range: None,
         };
         assert!(!facts.is_empty());
         assert_eq!(facts.to_string(), "!bounds(%3, %4), !live, !init(16), !aligned(8)");
@@ -117,5 +133,9 @@ mod tests {
     fn one_fact_on_its_own_carries_no_separator() {
         assert_eq!(Facts { live: true, ..Facts::NONE }.to_string(), "!live");
         assert_eq!(Facts { align: Some(4), ..Facts::NONE }.to_string(), "!aligned(4)");
+        assert_eq!(
+            Facts { range: Some((0, 16383)), ..Facts::NONE }.to_string(),
+            "!range(0, 16383)"
+        );
     }
 }

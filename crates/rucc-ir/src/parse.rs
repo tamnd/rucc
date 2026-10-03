@@ -110,11 +110,12 @@ struct PendingFacts {
     init: Option<u64>,
     align: Option<u32>,
     live: bool,
+    range: Option<(u128, u128)>,
 }
 
 impl PendingFacts {
     fn new(line: u32, value: u32) -> Self {
-        Self { line, value, bounds: None, init: None, align: None, live: false }
+        Self { line, value, bounds: None, init: None, align: None, live: false, range: None }
     }
 }
 
@@ -771,6 +772,14 @@ impl<'a, 'n> Parser<'a, 'n> {
                     facts.align = Some(self.u32()?);
                     self.expect(")")?;
                 }
+                "range" => {
+                    self.expect("(")?;
+                    let lo = self.u128()?;
+                    self.expect(",")?;
+                    let hi = self.u128()?;
+                    self.expect(")")?;
+                    facts.range = Some((lo, hi));
+                }
                 other => return self.fail(format!("`{other}` is not a fact")),
             }
             if !self.eat(",") {
@@ -1306,6 +1315,7 @@ impl<'a, 'n> Parser<'a, 'n> {
                     init: pending.init,
                     align: pending.align,
                     live: pending.live,
+                    range: pending.range,
                 },
             );
         }
@@ -1715,6 +1725,14 @@ impl<'a, 'n> Parser<'a, 'n> {
         match parse_u64(word) {
             Some(number) => Ok(number),
             None => self.fail(format!("`{word}` is not a number")),
+        }
+    }
+
+    fn u128(&mut self) -> Result<u128, ParseError> {
+        let word = self.word();
+        match word.parse::<u128>() {
+            Ok(number) => Ok(number),
+            Err(_) => self.fail(format!("`{word}` is not a number")),
         }
     }
 
@@ -2310,6 +2328,15 @@ global @b : bytes 8 = {{ apart.4 @.Llbl.0 from @.Llbl.1, apart.4 @.Llbl.2 + 1 fr
              block0(%0: ptr):\n    return\n\nfacts:\n    %0 = !sorted\n}}\n"
         );
         assert_eq!(error(&text), "line 11: `sorted` is not a fact");
+    }
+
+    #[test]
+    fn a_range_reads_back_the_way_it_was_written() {
+        let text = format!(
+            "{HEADER}\nfunc @f(i32) -> i32, linkage(internal) {{\n\
+             block0(%0: i32):\n    return %0\n\nfacts:\n    %0 = !range(4294967295, 16383)\n}}\n"
+        );
+        assert_eq!(round_trip(&text), text);
     }
 
     #[test]

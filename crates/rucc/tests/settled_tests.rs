@@ -217,3 +217,37 @@ fn an_object_size_through_a_parameter_is_answered_after_inlining() {
     let listing = asm("objsize", source);
     assert!(!listing.contains("ud2"), "the trap is still there:\n{listing}");
 }
+
+#[test]
+fn a_length_every_caller_keeps_small_is_not_tested_against_int_max() {
+    // evdev's str_to_user, called three times with `_IOC_SIZE (cmd)`, which is at most 16383, and
+    // testing what it was given against `INT_MAX` the way `check_copy_size` does.
+    let source = "unsigned long cp(void *d, const char *s, unsigned long n);\n\
+        static __attribute__((noinline)) int to_user(const char *s, unsigned n, void *d) {\n\
+            if (__builtin_expect(n > 0x7fffffff, 0)) __builtin_trap();\n\
+            return cp(d, s, n);\n\
+        }\n\
+        int f(unsigned cmd, void *d, const char *a, const char *b) {\n\
+            if (cmd & 1) return to_user(a, (cmd >> 16) & 0x3fff, d);\n\
+            if (cmd & 2) return to_user(b, (cmd >> 16) & 0x3fff, d);\n\
+            return 0;\n\
+        }\n";
+    let listing = asm("ipvrp", source);
+    assert!(!listing.contains("ud2"), "the test is still there:\n{listing}");
+}
+
+#[test]
+fn a_length_one_caller_does_not_bound_is_still_tested() {
+    let source = "unsigned long cp(void *d, const char *s, unsigned long n);\n\
+        static __attribute__((noinline)) int to_user(const char *s, unsigned n, void *d) {\n\
+            if (__builtin_expect(n > 0x7fffffff, 0)) __builtin_trap();\n\
+            return cp(d, s, n);\n\
+        }\n\
+        int f(unsigned cmd, void *d, const char *a, const char *b) {\n\
+            if (cmd & 1) return to_user(a, (cmd >> 16) & 0x3fff, d);\n\
+            if (cmd & 2) return to_user(b, cmd, d);\n\
+            return 0;\n\
+        }\n";
+    let listing = asm("ipvrp-open", source);
+    assert!(listing.contains("ud2"), "the test went:\n{listing}");
+}

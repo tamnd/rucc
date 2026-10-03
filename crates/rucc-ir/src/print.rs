@@ -414,6 +414,10 @@ impl<'a> Printer<'a> {
                 comma(&mut self.out);
                 let _ = write!(self.out, "!aligned({align})");
             }
+            if let Some((lo, hi)) = facts.range {
+                comma(&mut self.out);
+                let _ = write!(self.out, "!range({lo}, {hi})");
+            }
             self.out.push('\n');
         }
     }
@@ -1196,6 +1200,7 @@ mod tests {
                 init: Some(4),
                 align: Some(8),
                 live: true,
+                range: None,
             },
         );
         func.set_facts(derived, Facts { align: Some(4), ..Facts::NONE });

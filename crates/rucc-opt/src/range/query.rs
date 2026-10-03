@@ -451,7 +451,13 @@ impl<'a> Ranges<'a> {
     fn of_param(&mut self, value: Value, block: Block, index: u32) -> Range {
         let ty = self.func[value].ty;
         if self.cfg.entry() == Some(block) {
-            return Range::of(ty);
+            // What every caller passes, when the callers are all known and `crate::params` wrote
+            // it down. Nothing at all otherwise, since a caller outside the module can pass
+            // anything.
+            return match self.func.facts(value).range {
+                Some((lo, hi)) => Range::between(lo, hi, ty.bits()),
+                None => Range::of(ty),
+            };
         }
         let preds: Vec<Block> = self.cfg.predecessors(block).to_vec();
         if preds.is_empty() {
