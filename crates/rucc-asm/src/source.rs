@@ -477,6 +477,9 @@ struct Reader {
     /// asking the linker, the way `.lcomm` does. Every name is local until something says
     /// otherwise, so the binding alone cannot tell these apart.
     said_local: Set<usize>,
+    /// The local commons given room in each part, by name and alignment, in the order the file
+    /// wrote them. See [`Reader::join_subsections`].
+    pooled: Map<usize, Vec<(usize, u64)>>,
     /// The function whose frame rules are being read, between `.cfi_startproc` and `.cfi_endproc`.
     frame: Option<Frame>,
     /// Every function that has had its frame rules read, in the order the file wrote them.
@@ -1796,6 +1799,44 @@ impl Reader {
         self.before = if self.here == was { before } else { Some(was) };
     }
 
+    /// The local commons of a subsection that holds nothing else, given room at the end of the
+    /// section they belong to, as gas gives it them.
+    ///
+    /// gas lays out every subsection one after another and aligns each common where it lands, so
+    /// one that only needs a byte goes straight after the last thing in `.bss`, and the next one
+    /// is aligned from there. Moving the subsection whole, at the alignment of the most aligned
+    /// thing in it, would leave a gap in front of the first. mpparse.c has four bytes of its own
+    /// in `.bss` and then a common byte and a common word, which gas puts at 4 and 8, and a block
+    /// moved whole put them at 8 and 16. Nothing is in such a subsection but room, so there are
+    /// no bytes to move and nothing else in it counts from where it starts.
+    fn pool(&mut self, parent: usize, sub: usize) -> bool {
+        if self.parts[parent].shape.bits {
+            return false;
+        }
+        let Some(pooled) = self.pooled.remove(&sub) else { return false };
+        // Only when the commons are all there is, which is when laying them out again from zero
+        // comes to what the subsection already is.
+        let mut end = 0u64;
+        for &(sym, align) in &pooled {
+            end = end.next_multiple_of(align) + self.syms[sym].size;
+        }
+        if end != self.parts[sub].size {
+            return false;
+        }
+        let mut end = self.parts[parent].size;
+        for (sym, align) in pooled {
+            let offset = end.next_multiple_of(align);
+            self.syms[sym].at = Held::In { part: parent, offset };
+            end = offset + self.syms[sym].size;
+        }
+        let align = self.parts[sub].align;
+        let whole = &mut self.parts[parent];
+        whole.size = end;
+        whole.align = whole.align.max(align);
+        self.parts[sub].size = 0;
+        true
+    }
+
     /// Every subsection behind the section it is part of, in the order of their numbers, and every
     /// place that pointed into one moved to where it went.
     ///
@@ -1817,6 +1858,9 @@ impl Reader {
             let taken = std::mem::take(&mut self.parts[sub].bytes);
             let relocs = std::mem::take(&mut self.parts[sub].relocs);
             let (size, align) = (self.parts[sub].size, self.parts[sub].align.max(1));
+            if self.pool(parent, sub) {
+                continue;
+            }
             let exec = self.parts[parent].shape.exec;
             let whole = &mut self.parts[parent];
             let start = whole.size.next_multiple_of(align);
@@ -2656,6 +2700,7 @@ impl Reader {
             self.syms[sym].at = Held::In { part: at, offset };
             self.syms[sym].size = size;
             self.syms[sym].binding = Binding::Local;
+            self.pooled.entry(at).or_default().push((sym, align));
             // Back where the file was, with `.previous` where it was too, since gas moves there
             // and back without a word to the section stack.
             self.here = was;
@@ -6182,6 +6227,20 @@ _tls$tlv$init:
         assert_eq!(offset, 32);
         assert_eq!(name(&out, "flags").at, Held::In { part, offset: 0 });
         assert_eq!(out.parts[part].size, 32 + 4096);
+    }
+
+    /// mpparse.c's `.bss`, where gas puts a common byte straight after the four bytes the file
+    /// wrote and aligns the common word after it from there.
+    #[test]
+    fn a_local_common_is_aligned_where_it_lands() {
+        let out = assembled(
+            "\t.bss\n\t.align 4\nmine:\n\t.zero 4\n\t.data\n\t.local found\n\t.comm \
+             found,1,1\n\t.local base\n\t.comm base,8,8\n",
+        );
+        let Held::In { part, offset } = name(&out, "found").at else { panic!("not in a section") };
+        assert_eq!(offset, 4);
+        assert_eq!(name(&out, "base").at, Held::In { part, offset: 8 });
+        assert_eq!((out.parts[part].size, out.parts[part].align), (16, 8));
     }
 
     #[test]
