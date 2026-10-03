@@ -812,10 +812,10 @@ mod tests {
     /// literal, did not compile at `-O2` before.
     #[test]
     fn a_copy_on_i386_is_spelled_a_word_at_a_time() {
-        let (mut names, images) = images_on("i686-unknown-linux-gnu", |module| {
+        let (mut names, narrow) = images_on("i686-unknown-linux-gnu", |module| {
             vec![Datum::Bytes(module.push_bytes(b"h\0\0\0i\0\0\0\0\0\0\0"))]
         });
-        let writes = images.spell(names.intern("g"), 0, 12).expect("every byte is known");
+        let writes = narrow.spell(names.intern("g"), 0, 12).expect("every byte is known");
         let widths: Vec<u64> = writes
             .iter()
             .map(|write| match write {
@@ -824,9 +824,9 @@ mod tests {
             })
             .collect();
         assert_eq!(widths, [4, 4, 4]);
-        let (mut names, images) =
+        let (mut names, wide) =
             images(|module| vec![Datum::Bytes(module.push_bytes(b"h\0\0\0i\0\0\0\0\0\0\0"))]);
-        let writes = images.spell(names.intern("g"), 0, 12).expect("every byte is known");
+        let writes = wide.spell(names.intern("g"), 0, 12).expect("every byte is known");
         assert_eq!(writes.len(), 2, "eight and then four on x86-64, {writes:?}");
     }
 
