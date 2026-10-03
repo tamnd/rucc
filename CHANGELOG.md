@@ -4,24 +4,15 @@ All notable changes are recorded here. The format follows [Keep a Changelog](htt
 
 ## Unreleased
 
+### Added
+
+- A CI job runs rung 0 for i686-linux-gnu on every pull request (#2247). `tests/rung0/run.sh` builds each c-testsuite single-exec program with rucc at `-O0` and `-O2`, links it against Ubuntu's i386 cross libc, and runs it on the x86_64 runner, where a 32-bit program runs directly with nothing emulated. Each program is built under the GNU dialect of the standard its tags name. A program can be left out only in `tests/rung0/exclude-<triple>.txt` and only with an issue number, and an excluded program that passes fails the run. i686-linux-gnu moves to tier 3 in `docs/TARGETS.md`.
+
 ### Changed
 
 - `__builtin_object_size` follows an address read back out of a local it was stored in once, which is what a `__free (kfree)` variable is, since its cleanup takes the address and keeps it in memory. In the kernel this answers the size of keyboard.c's diacritical buffers the way gcc does, and the `INT_MAX` warning in `check_copy_size` goes away with it.
 - From `-O2` an integer parameter of a function only this file can call carries the range its callers pass it, which is gcc's `-fipa-vrp`, so a test in the body that no call can reach folds away. In the kernel this takes the `INT_MAX` warning out of evdev's `str_to_user`, whose three callers all pass `_IOC_SIZE (cmd)`. `-fno-ipa-vrp` turns it off.
-- The instruction scheduler keeps the lists and maps it builds each run's graph and order in from one run to the next, rather than making them again for every stretch between barriers, which takes about 0.3% off an optimized build of jtckdint when it goes through the portable code rather than `<stdckdint.h>` (#2714).
-- The x86-64 encoder looks an instruction's encoding up by the kinds of its arguments kept on the stack, rather than in a list made for every instruction it writes, which takes about 0.5% off a build of jtckdint at `-O0` and about 0.2% at `-O2` when it goes through the portable code rather than `<stdckdint.h>` (#2717).
 - `lifetimes::settle` keeps who reads each value and which blocks come before each block in one list each rather than one per value and block, and reuses what it walks with, which takes about 0.2% off an optimized build of jtckdint when it goes through the portable code rather than `<stdckdint.h>` (#2725).
-
-### Added
-
-- A thread-local variable works on i686 Windows (#2072). It is reached the way gcc and clang reach it for `i686-w64-mingw32`: `__tls_index`, the array of `.tls` copies at `%fs:44`, four bytes a pointer, and the variable's `@SECREL32` offset, which the i386 assembler now reads and writes as `IMAGE_REL_I386_SECREL`. Before, the compile was refused.
-- The assembler takes `jecxz` in 32 and 64 bit code and `jcxz` in 32 bit code, which arch/x86/power/hibernate_asm_32.S uses to skip `cr4` on old CPUs.
-
-### Fixed
-
-- An i386 `q` asm input whose value is kept on the stack, such as the kernel's `writeb` in the i915 driver's `gen5_write8`, is read straight into a register with a low byte instead of through `esi`, where `movb %sil` is not an instruction i386 has.
-- The i386 assembler wraps a displacement up to four gigabytes either way in the four bytes of an address, so `-0xC0000000(%edi)` in head_32.S is the address gas writes instead of an error.
-- The assembler reads an address that is arithmetic starting with a bracket, such as `%fs:(gdt_page + (26 * 8)) + 4` in the i386 kernel's `CHECK_AND_APPLY_ESPFIX`, as a displacement instead of refusing it.
 
 ## 0.18.10
 
@@ -29,7 +20,8 @@ A patch release, and the one that reaches crates.io in place of 0.18.9, whose re
 
 ### Added
 
-- A CI job runs rung 0 for i686-linux-gnu on every pull request (#2247). `tests/rung0/run.sh` builds each c-testsuite single-exec program with rucc at `-O0` and `-O2`, links it against Ubuntu's i386 cross libc, and runs it on the x86_64 runner, where a 32-bit program runs directly with nothing emulated. Each program is built under the GNU dialect of the standard its tags name. A program can be left out only in `tests/rung0/exclude-<triple>.txt` and only with an issue number, and an excluded program that passes fails the run. i686-linux-gnu moves to tier 3 in `docs/TARGETS.md`.
+- A thread-local variable works on i686 Windows (#2072). It is reached the way gcc and clang reach it for `i686-w64-mingw32`: `__tls_index`, the array of `.tls` copies at `%fs:44`, four bytes a pointer, and the variable's `@SECREL32` offset, which the i386 assembler now reads and writes as `IMAGE_REL_I386_SECREL`. Before, the compile was refused.
+- The assembler takes `jecxz` in 32 and 64 bit code and `jcxz` in 32 bit code, which arch/x86/power/hibernate_asm_32.S uses to skip `cr4` on old CPUs.
 - `#pragma GCC system_header` is implemented, as in gcc 13. The rest of the header it is in, from the pragma's line, is a system header: its warnings go unsaid unless `-Wsystem-headers` asks, a header it includes is one too, and a macro it defines is quiet where it is used. In the main file it is ignored with "`#pragma system_header` ignored outside include file" (W0337), which answers to no option. The line is consumed, as gcc consumes it. Before, it was taken without doing anything.
 - A `long long` that `__atomic` or `__sync` touches on i386 compiles to `lock cmpxchg8b`, as gcc does on a Pentium or later. This covers compare and exchange, ordered loads and stores, exchange, and every fetch-and-op, at every level and under PIC. Before, each of these was refused with "no rule lowers a `cmpxchg` producing a `i64`".
 - `rucc --dlltool -m i386` writes an import library without `-k` too (#2072). The program still links against the decorated name, `_f@8` for a stdcall `f@8` in the `.def` file, so a declaration that leaves out the `@N` is a link error. Without `-k` the DLL is asked for `f@8`, which is what a DLL gcc linked without `--kill-at` exports. With `-k` it is asked for `f`, as before. `rucc-stub` has the choice as `coff::write_as` with `Decoration::Kept` or `Decoration::Cut`. Each import member is byte for byte the one `llvm-dlltool` 18 writes for the same command line.
@@ -50,6 +42,8 @@ A patch release, and the one that reaches crates.io in place of 0.18.9, whose re
 
 ### Changed
 
+- The instruction scheduler keeps the lists and maps it builds each run's graph and order in from one run to the next, rather than making them again for every stretch between barriers, which takes about 0.3% off an optimized build of jtckdint when it goes through the portable code rather than `<stdckdint.h>` (#2714).
+- The x86-64 encoder looks an instruction's encoding up by the kinds of its arguments kept on the stack, rather than in a list made for every instruction it writes, which takes about 0.5% off a build of jtckdint at `-O0` and about 0.2% at `-O2` when it goes through the portable code rather than `<stdckdint.h>` (#2717).
 - Above `-O0` a `__builtin_object_size` about a parameter is answered after inlining rather than in the checker, so `check_copy_size` inside `copy_from_user` sees the buffer the caller passed, the way gcc sees it. The inliner also leaves out of a frame the locals nothing reads, such as the pair `typecheck()` declares only to compare their addresses, since gcc has deleted those before it measures. Together they let `io_handle_query_entry` inline into `io_query` under `-fconserve-stack` and drop its `WARN_ON_ONCE(bytes > INT_MAX)`. On the x86-64 defconfig build of 7.2.8 the kernel table differences against gcc go from 674 to 654.
 - A pointer a dominating branch found not null is known not null below it, so `BUG_ON(!p)` in an inlined helper goes when its caller already checked `p`. The two nulls are two constants in the IR, and the relations now read equal constants as one operand. Loads made redundant by the late `prune` are also merged again before `hoist`, which removes the second `skb_frag_page` test in `tso_build_data`. On the x86-64 defconfig build of 7.2.8 the `__bug_table` entries go from 36405 to 36240 (gcc has 36285) and the kernel table differences against gcc go from 690 to 674.
 - On x86 an object with static storage that the file defines is aligned the way gcc aligns it under its default `-malign-data=compat`: an array, structure or union of 32 bytes or more to 32, one of 16 bytes or more to 16 on x86-64, and one of a word or more to a word. A thread-local is raised no further than a word, and an alignment the declaration asked for is kept, including an `aligned` attribute below the type's own alignment. The kernel's `struct tracepoint` is 72 bytes, so the `__tracepoints` and `__tracepoints_strings` sections now have gcc's layout. On the x86-64 defconfig build of 7.2.8 the kernel table differences against gcc go from 861 to 690.
@@ -77,6 +71,9 @@ A patch release, and the one that reaches crates.io in place of 0.18.9, whose re
 
 ### Fixed
 
+- An i386 `q` asm input whose value is kept on the stack, such as the kernel's `writeb` in the i915 driver's `gen5_write8`, is read straight into a register with a low byte instead of through `esi`, where `movb %sil` is not an instruction i386 has.
+- The i386 assembler wraps a displacement up to four gigabytes either way in the four bytes of an address, so `-0xC0000000(%edi)` in head_32.S is the address gas writes instead of an error.
+- The assembler reads an address that is arithmetic starting with a bracket, such as `%fs:(gdt_page + (26 * 8)) + 4` in the i386 kernel's `CHECK_AND_APPLY_ESPFIX`, as a displacement instead of refusing it.
 - An i386 address that takes up to four gigabytes off a name, such as the kernel's `__pa` of a static in doublefault_32.c, is written wrapped in its four bytes instead of being refused by the object writer.
 - An i386 inline asm that names `esi`, `edi`, `eax` and `ecx` and has a fifth operand on the stack, such as `strncat` in the kernel's string_32.c, no longer panics the register allocator. A register one of the inputs only passes through on its way to a fixed register is borrowed to read the fifth operand in.
 - The backtracking allocator no longer takes a register an instruction insists on as a hint when the class does not hand it out; an i386 `"S"` operand used to keep its value in `esi` from the start, where reloads wrote over it, and the EFI stub's `efi_stub_entry` lost `boot_params`.
