@@ -91,40 +91,77 @@ fn fixed(func: &Func, value: Value) -> bool {
 struct Graph {
     /// The instructions reading each value, a terminator counted once for each argument it hands a
     /// block, along with which parameter of which block that argument becomes.
-    readers: Map<Value, Vec<(Inst, Option<Value>)>>,
+    readers: Lists<(Inst, Option<Value>)>,
     /// The blocks that jump to each block.
-    preds: Map<Block, Vec<Block>>,
+    preds: Lists<Block>,
     /// Where each instruction is in its block, counting from the top.
     places: Map<Inst, usize>,
 }
 
 impl Graph {
     fn of(func: &Func) -> Self {
-        let mut readers: Map<Value, Vec<(Inst, Option<Value>)>> = Map::default();
-        let mut preds: Map<Block, Vec<Block>> = Map::default();
+        let mut readers = Vec::new();
+        let mut preds = Vec::new();
         let mut places: Map<Inst, usize> = Map::default();
         for block in func.blocks() {
             for (place, inst) in func.insts(block).enumerate() {
                 places.insert(inst, place);
                 for &arg in &func[func[inst].args] {
-                    readers.entry(arg).or_default().push((inst, None));
+                    readers.push((arg.index(), (inst, None)));
                 }
             }
             let Some(term) = func.terminator(block) else { continue };
             for call in func.successors(term) {
-                preds.entry(call.block).or_default().push(block);
+                preds.push((call.block.index(), block));
                 let params = &func[call.block].params;
                 for (&arg, &param) in func[call.args].iter().zip(params) {
-                    readers.entry(arg).or_default().push((term, Some(param)));
+                    readers.push((arg.index(), (term, Some(param))));
                 }
             }
         }
-        Self { readers, preds, places }
+        Self { readers: Lists::of(readers), preds: Lists::of(preds), places }
     }
 
     /// Whether one instruction comes before another in the block they are both in.
     fn before(&self, first: Inst, second: Inst) -> bool {
         self.places.get(&first) < self.places.get(&second)
+    }
+}
+
+/// Lists by index, side by side in one buffer, with where each one starts in it.
+///
+/// A list of its own for every value read and every block jumped to was an allocation each, for
+/// every function with an end in it.
+struct Lists<T> {
+    starts: Vec<usize>,
+    all: Vec<T>,
+}
+
+impl<T: Copy> Lists<T> {
+    /// Each item under its index, in the order the items came.
+    fn of(mut pairs: Vec<(usize, T)>) -> Self {
+        // Stable, so each list keeps the order its items came in.
+        pairs.sort_by_key(|&(at, _)| at);
+        let len = pairs.last().map_or(0, |&(at, _)| at + 1);
+        let mut starts = vec![0; len + 1];
+        for &(at, _) in &pairs {
+            starts[at] += 1;
+        }
+        let mut total = 0;
+        for start in &mut starts {
+            let count = *start;
+            *start = total;
+            total += count;
+        }
+        Self { starts, all: pairs.into_iter().map(|(_, item)| item).collect() }
+    }
+
+    /// The list under one index, which is empty when nothing was put there.
+    fn get(&self, at: usize) -> &[T] {
+        match (self.starts.get(at), self.starts.get(at + 1)) {
+            (Some(&start), Some(&end)) => &self.all[start..end],
+            _ => &[],
+        }
     }
 }
 
@@ -148,20 +185,12 @@ fn crosses(
     let mut seen: Set<Value> = std::iter::once(slot).collect();
     let mut queue = vec![slot];
     while let Some(value) = queue.pop() {
-        for &(inst, param) in graph.readers.get(&value).map(Vec::as_slice).unwrap_or_default() {
+        for &(inst, param) in graph.readers.get(value.index()) {
             *budget = budget.checked_sub(1)?;
-            let next: Vec<Value> = match param {
-                Some(param) => vec![param],
-                None if matches!(
-                    func[inst].opcode,
-                    Opcode::Load | Opcode::Call | Opcode::CallIndirect
-                ) =>
-                {
-                    Vec::new()
-                }
-                None => func[inst].results().collect(),
-            };
-            for next in next {
+            let skipped = param.is_some()
+                || matches!(func[inst].opcode, Opcode::Load | Opcode::Call | Opcode::CallIndirect);
+            let results = (!skipped).then(|| func[inst].results()).into_iter().flatten();
+            for next in param.into_iter().chain(results) {
                 if !func[next].ty.is_mem() && seen.insert(next) {
                     derived.push(next);
                     queue.push(next);
@@ -170,9 +199,10 @@ fn crosses(
         }
     }
 
+    let (mut into, mut walk) = (Set::default(), Vec::new());
     for value in derived {
         for &end in ends {
-            if live_at(func, graph, value, end, budget)? {
+            if live_at(func, graph, value, end, budget, (&mut into, &mut walk))? {
                 return Some(true);
             }
         }
@@ -182,7 +212,18 @@ fn crosses(
 
 /// Whether a value is live at an instruction: defined on some path to it and read on some path
 /// from it.
-fn live_at(func: &Func, graph: &Graph, value: Value, at: Inst, budget: &mut usize) -> Option<bool> {
+///
+/// `scratch` is the set of blocks the value is live into and the blocks still to walk, which the
+/// caller keeps from one question to the next.
+fn live_at(
+    func: &Func,
+    graph: &Graph,
+    value: Value,
+    at: Inst,
+    budget: &mut usize,
+    scratch: (&mut Set<Block>, &mut Vec<Block>),
+) -> Option<bool> {
+    let (into, walk) = scratch;
     let Some(here) = func.block_of(at) else { return Some(false) };
     let (home, defined_before) = match func[value].def {
         Def::Result { inst, .. } => {
@@ -194,10 +235,10 @@ fn live_at(func: &Func, graph: &Graph, value: Value, at: Inst, budget: &mut usiz
     let Some(home) = home else { return Some(false) };
 
     // The blocks the value is live into, found by walking up from every read to the definition.
-    let mut into: Set<Block> = Set::default();
+    into.clear();
     let mut read_after = false;
-    let mut walk: Vec<Block> = Vec::new();
-    for &(reader, param) in graph.readers.get(&value).map(Vec::as_slice).unwrap_or_default() {
+    walk.clear();
+    for &(reader, param) in graph.readers.get(value.index()) {
         *budget = budget.checked_sub(1)?;
         let Some(block) = func.block_of(reader) else { continue };
         // A block argument is read at the bottom of the block handing it over, and so is every
@@ -216,7 +257,7 @@ fn live_at(func: &Func, graph: &Graph, value: Value, at: Inst, budget: &mut usiz
         if !into.insert(block) {
             continue;
         }
-        for &pred in graph.preds.get(&block).map(Vec::as_slice).unwrap_or_default() {
+        for &pred in graph.preds.get(block.index()) {
             if pred != home {
                 walk.push(pred);
             }
