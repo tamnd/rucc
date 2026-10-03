@@ -1130,10 +1130,10 @@ impl Reader {
                 if word == "cfi_rel_offset" {
                     offset -= frame.cfa;
                 }
-                if offset >= 0 || offset % self.conv().word as i32 != 0 {
+                if offset % self.conv().word as i32 != 0 {
                     return Err(bad(
-                        "a register saved somewhere that is not a whole slot below the end of the \
-                         frame, which is the only place this writes a rule for",
+                        "a register saved somewhere that is not a whole number of slots from the \
+                         end of the frame, which is the only place this writes a rule for",
                     ));
                 }
                 CfiOp::Offset { reg: self.dwarf(&reg)?, offset }
@@ -1423,6 +1423,19 @@ impl Reader {
             });
         }
         let name = text.strip_prefix('%').unwrap_or(text);
+        // The flags and the six segment registers, which a signal frame says are in the
+        // `sigcontext` it points into. gas's numbers, which are the psABI's for each machine.
+        let other = match (name, self.i386) {
+            ("eflags", true) => Some(9),
+            ("rflags", false) => Some(49),
+            _ => ["es", "cs", "ss", "ds", "fs", "gs"]
+                .iter()
+                .position(|&segment| segment == name)
+                .map(|at| at as u16 + if self.i386 { 40 } else { 50 }),
+        };
+        if let Some(number) = other {
+            return Ok(number);
+        }
         // The eight thirty two bit registers and `eip`, in i386's own numbering, which is not the
         // order x86-64 gave the same registers.
         if self.i386 {
@@ -3925,15 +3938,15 @@ impl Reader {
                     // Four bytes or eight, and eight only from a directive, since no instruction
                     // counts eight bytes of distance. `.quad key - .` is how the kernel's jump
                     // label table says where each key is. Two is a jump or a call in sixteen bit
-                    // code.
+                    // code, or a `.word`, and one is a `.byte`, which the boot header has in front
+                    // of everything else.
                     let wide = fixup.width == 8 && fixup.reach == Reach::Near;
-                    let short = fixup.width == 2
-                        && self.i386
-                        && matches!(fixup.reach, Reach::Branch | Reach::Plain);
-                    if fixup.width != 4 && !wide && !short {
+                    let short = fixup.width == 2;
+                    let tiny = fixup.width == 1;
+                    if fixup.width != 4 && !wide && !short && !tiny {
                         return Err(bad(format!(
-                            "a distance written into {} bytes, and four and eight are the only \
-                             widths a relocation says one at",
+                            "a distance written into {} bytes, and one, two, four and eight are \
+                             the only widths a relocation says one at",
                             fixup.width
                         )));
                     }
@@ -3962,6 +3975,8 @@ impl Reader {
                         Reference::AwayWide
                     } else if short {
                         Reference::Short
+                    } else if tiny {
+                        Reference::Tiny
                     } else if fixup.reach == Reach::Branch && !near {
                         Reference::Call
                     } else {
@@ -7250,6 +7265,18 @@ g:
         );
     }
 
+    /// A distance to another section in one byte and in two, which the kernel's boot header writes
+    /// for the short jump it spells out a byte at a time. gas asks for `R_X86_64_PC8` and
+    /// `R_X86_64_PC16`, with the same addends as here.
+    #[test]
+    fn a_distance_in_one_byte_or_two_is_a_relocation_too() {
+        let read = assembled("\t.text\n\t.byte f-1f\n1:\n\t.word f-.\n\t.data\nf:\n");
+        assert_eq!(
+            relocs(&read, ".text"),
+            [(0, "f", Reference::Tiny, -1), (1, "f", Reference::Short, 0)]
+        );
+    }
+
     /// A global name in the same section is one another object may take the place of. gas leaves
     /// a call to it to the linker and works a jump to it out, unless the jump asked for the stub,
     /// in which case it is long and a relocation.
@@ -7387,6 +7414,26 @@ g:
         assert_eq!(table.align, 4);
         assert!(i386_refused("f:\n\t.cfi_startproc\n\t.cfi_offset %rbp, -8\n").contains("rbp"));
         assert!(i386_refused("f:\n\t.cfi_startproc\n\t.cfi_offset %ebp, -6\n").contains("slot"));
+    }
+
+    /// The registers a signal frame says are in the `sigcontext`, which is above the end of the
+    /// frame and has the segment registers and the flags in it as well. The vdso's i386 signal
+    /// return says so for every register. The bytes are the ones gas 2.42 writes.
+    #[test]
+    fn a_signal_frame_names_segment_registers_saved_above_the_frame() {
+        let read = i386(concat!(
+            "f:\n\t.cfi_startproc\n\tnop\n\t.cfi_offset es, 8\n\t.cfi_offset eflags, 64\n",
+            "\t.cfi_offset %ds, -8\n\tud2a\n\t.cfi_endproc\n",
+        ));
+        #[rustfmt::skip]
+        let gas = [
+            0x14, 0, 0, 0, 0, 0, 0, 0, 0x01, 0x7a, 0x52, 0x00, 0x01, 0x7c, 0x08, 0x01,
+            0x1b, 0x0c, 0x04, 0x04, 0x88, 0x01, 0, 0, 0x18, 0, 0, 0, 0x1c, 0, 0, 0,
+            0, 0, 0, 0, 0x03, 0, 0, 0, 0x00, 0x41, 0x11, 0x28, 0x7e, 0x11, 0x09, 0x70,
+            0xab, 0x02, 0, 0,
+        ];
+        assert_eq!(bytes(&read, ".eh_frame"), gas);
+        assert_eq!(bytes(&read, ".text"), [0x90, 0x0f, 0x0b]);
     }
 
     /// The i386 thread-local suffixes, in either case, in an address, a number and a data

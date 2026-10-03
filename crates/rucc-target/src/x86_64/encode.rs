@@ -1497,6 +1497,14 @@ static ENCODINGS: &[Encoding] = &[
     third("sarxq", &RRR, SingleQuad, Map::Escape38, &[0xF7], 0, pair(1, 2)),
     third("shrxl", &RRR, Double, Map::Escape38, &[0xF7], 0, pair(1, 2)),
     third("shrxq", &RRR, DoubleQuad, Map::Escape38, &[0xF7], 0, pair(1, 2)),
+    // The value being shifted can be in memory as well, which the addressing byte says the same
+    // way. gcc reads it from there when it shifts something on the stack, as zstd's decoder does.
+    third("shlxl", &RMR, Word, Map::Escape38, &[0xF7], 0, pair(1, 2)),
+    third("shlxq", &RMR, WordQuad, Map::Escape38, &[0xF7], 0, pair(1, 2)),
+    third("sarxl", &RMR, Single, Map::Escape38, &[0xF7], 0, pair(1, 2)),
+    third("sarxq", &RMR, SingleQuad, Map::Escape38, &[0xF7], 0, pair(1, 2)),
+    third("shrxl", &RMR, Double, Map::Escape38, &[0xF7], 0, pair(1, 2)),
+    third("shrxq", &RMR, DoubleQuad, Map::Escape38, &[0xF7], 0, pair(1, 2)),
     // The comparison, which is the eighth of the ones that share an opcode column and is written
     // the same way round as the subtraction it is.
     bytes("cmpb", &RR, Byte, &[0x38], pair(1, 0), NO_IMM),
