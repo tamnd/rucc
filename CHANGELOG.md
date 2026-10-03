@@ -10,6 +10,7 @@ All notable changes are recorded here. The format follows [Keep a Changelog](htt
 
 ### Fixed
 
+- The assembler pads each record in an ELF `.eh_frame` to four bytes and only the last one to a pointer, as gas does, where it used to pad every record to eight. The vdso's `vfutex.c` and `vclock_gettime.c` now come out the same size as gas's.
 - The assembler lays out gas's first round of relaxation, where a label in a section gas has not reached yet is worth only its place in its own piece. A count like `.skip -((744f-743f) > 0) * (744f-743f)` in an alternative can come out as zero on that round, a jump that looks far then grows, and gas never shrinks it again. `entry_64.S` now matches gas byte for byte.
 - The assembler writes `xchg` of a register with the accumulator as the one byte `90` plus the register, and a segment register moved to or from a sixty four bit register without `REX.W`, as gas does. And `. = expr` moves the place on as `.org` does rather than making a symbol called `.`.
 - The assembler writes `pushw $label` and a bare `push $label` in sixteen bit code with a two byte number and a sixteen bit relocation, as gas does, rather than a byte. And `lsl`, `lar`, `str` and `sldt` into a sixty four bit register no longer carry `REX.W`, which binutils stopped writing for them.

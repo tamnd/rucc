@@ -191,7 +191,7 @@ pub(crate) fn table(
         return Ok(Unwind::default());
     }
     match format {
-        ObjectFormat::Elf => Ok(dwarf(funcs, rows, conv, named, begins)),
+        ObjectFormat::Elf => Ok(dwarf(funcs, rows, conv, named, begins, true)),
         ObjectFormat::Coff => windows(funcs, rows, conv),
         // The same DWARF records, in `__TEXT,__eh_frame`, which ld64 reads and turns into the
         // compact table the unwinder searches, one entry per function that points back at its
@@ -209,7 +209,7 @@ pub(crate) fn table(
         ObjectFormat::MachO => {
             let bare: Vec<Extent> =
                 funcs.iter().map(|func| Extent { landings: Vec::new(), ..func.clone() }).collect();
-            Ok(dwarf(&bare, rows, conv, &[], begins))
+            Ok(dwarf(&bare, rows, conv, &[], begins, false))
         }
         // Nothing, because a WebAssembly module is not a stack a table would describe. A table
         // under a name its linker does not know is a section nothing ever looks at, which is worse
@@ -271,9 +271,19 @@ fn dwarf(
     conv: &CallRegs,
     named: &[Option<Named>],
     begins: &[Begins],
+    elf: bool,
 ) -> Unwind {
     let mut table = Table::new(conv, false);
+    // gas pads every header and record in `.eh_frame` to four bytes, and only the last record out
+    // to a pointer, so the section ends on its alignment. ld64 wants every record a pointer long.
+    let word = table.align;
+    if elf {
+        table.align = word.min(4);
+    }
     for (at, (func, rows)) in funcs.iter().zip(rows).enumerate() {
+        if at + 1 == funcs.len() {
+            table.align = word;
+        }
         let said = named.get(at).and_then(Option::as_ref);
         let begins = begins.get(at).copied().unwrap_or_default();
         let (first, rest) = leading(conv, begins, rows);
@@ -362,7 +372,8 @@ struct Table {
     cie: usize,
     /// What a saved register's offset is divided by before it is written.
     slot: i64,
-    /// What every record is padded out to, which is the pointer width.
+    /// What the next record is padded out to, counted from the start of the table, which is the
+    /// pointer width or four bytes. See [`dwarf`].
     ///
     /// The length in front of a record already makes it possible to skip one without understanding
     /// it, so the padding is not what makes the table readable. It is what keeps the next record's
@@ -756,7 +767,7 @@ impl Table {
     /// The length does not count itself, which is what lets a reader that does not understand a
     /// record skip it by reading four bytes and adding.
     fn pad(&mut self, start: usize) {
-        while (self.out.bytes.len() - start) % self.align != 0 {
+        while self.out.bytes.len() % self.align != 0 {
             self.out.bytes.push(NOP);
         }
         let len = u32::try_from(self.out.bytes.len() - start - 4).expect("a record this size");

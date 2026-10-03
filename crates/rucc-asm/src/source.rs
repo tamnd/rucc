@@ -7687,6 +7687,25 @@ nop
         );
     }
 
+    /// gas pads each record in `.eh_frame` to four bytes and only the last one to eight, so two
+    /// short functions take sixty four bytes rather than seventy two. The bytes are the ones gas
+    /// 2.44 writes for the vdso's `vfutex.c`.
+    #[test]
+    fn frame_records_are_padded_to_four_bytes_and_the_last_to_eight() {
+        let out = assembled(concat!(
+            "f:\n\t.cfi_startproc\n\tmovl %esi, %eax\n\tret\n\t.cfi_endproc\n",
+            "g:\n\t.cfi_startproc\n\tmovl %esi, %eax\n\tret\n\t.cfi_endproc\n",
+        ));
+        #[rustfmt::skip]
+        let gas = [
+            0x14, 0, 0, 0, 0, 0, 0, 0, 0x01, 0x7a, 0x52, 0x00, 0x01, 0x78, 0x10, 0x01,
+            0x1b, 0x0c, 0x07, 0x08, 0x90, 0x01, 0, 0, 0x10, 0, 0, 0, 0x1c, 0, 0, 0,
+            0, 0, 0, 0, 0x03, 0, 0, 0, 0, 0, 0, 0, 0x10, 0, 0, 0,
+            0x30, 0, 0, 0, 0, 0, 0, 0, 0x03, 0, 0, 0, 0, 0, 0, 0,
+        ];
+        assert_eq!(bytes(&out, ".eh_frame"), gas);
+    }
+
     /// The call frame table on i386 counts in words of four, keeps the return address in column
     /// eight, and numbers the registers the way i386 does, which puts `%ebp` at five and `%ebx` at
     /// three. The bytes are the ones gas 2.42 writes for the same lines.
