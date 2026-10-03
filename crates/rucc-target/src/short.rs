@@ -71,10 +71,28 @@
 //! is why the entry names the two opcodes and the pass looks at the mode: a description cannot say
 //! which addressing modes an instruction will turn out to have.
 //!
+//! The sixth thing described here is a copy and an addition written as one address computation.
+//! An addition on this machine writes its answer over its first source, so when that source is
+//! still wanted afterwards the allocator copies it first and adds into the copy:
+//!
+//! ```text
+//!   movq %rcx, %rdi
+//!   addl %eax, %edi
+//! ```
+//!
+//! An address computation takes two registers and a constant and writes a third, so `leal
+//! (%rcx,%rax), %edi` is the pair in one instruction, and it is what gcc writes. It is not free in
+//! the same way the increment is not: the addition writes the condition state and the address
+//! computation does not, so the pass has to find nothing reading what the addition left. It also
+//! has to find the copy, which the allocator may have put a few instructions in front, so the entry
+//! names the copies it may take as well as the addition. tamnd/rucc#2789 is the issue.
+//!
 //! It is here rather than in the pass for the reason [`crate::FlagInsts`] and
 //! [`crate::BranchInsts`] are here. The pass is in a pipeline crate and `spec/10-backend.md`
 //! section 10.8 says a pipeline crate holds no target-specific code, so what the pass knows about
 //! a machine arrives as a description rather than as a name it says out loud.
+
+use crate::PhysReg;
 
 /// The shorter spellings this target has.
 #[derive(Debug)]
@@ -96,6 +114,12 @@ pub struct ShortInsts {
     /// Every instruction that works out an address and keeps it, and the move that says the same
     /// thing when the address is one register and nothing else.
     pub copying: &'static [Copied],
+    /// Every two address addition that a copy of its first source in front of it can be folded
+    /// into, and the address computation that does the copy and the addition in one.
+    pub spreading: &'static [Spread],
+    /// The registers an addressing mode cannot take as an index, which an address computation this
+    /// writes has to put in the base instead.
+    pub unindexed: &'static [PhysReg],
 }
 
 impl ShortInsts {
@@ -138,6 +162,12 @@ impl ShortInsts {
     #[must_use]
     pub fn copied(&self, name: &str) -> Option<&'static str> {
         self.copying.iter().find(|entry| entry.name == name).map(|entry| entry.into)
+    }
+
+    /// The address computation that does a copy and the addition of that name in one.
+    #[must_use]
+    pub fn spread(&self, name: &str) -> Option<&'static Spread> {
+        self.spreading.iter().find(|entry| entry.name == name)
     }
 
     /// Whether the instruction of that name is one of the shorter ones that leaves the carry alone.
@@ -245,4 +275,32 @@ pub struct Copied {
     /// The opcode that moves one register into another, which writes the register the first one
     /// wrote and reads the one its addressing mode named.
     pub into: &'static str,
+}
+
+/// One two address addition, and the address computation that does it and the copy in front of it.
+///
+/// The addition reads its first source out of the register it writes, so where that source is still
+/// wanted the allocator copies it into the register first. The address computation reads both
+/// sources where they are and writes a third register, so the copy and the addition become one
+/// instruction that names the source the copy read rather than the register it wrote.
+///
+/// Both say the same thing about the register and not about the condition state. The addition
+/// writes it and the address computation leaves it alone, so the pass takes this only where nothing
+/// reads what the addition left, which is the question the exclusive or asks too.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Spread {
+    /// The addition, which takes a second register or a constant.
+    pub name: &'static str,
+    /// The copies that may stand in front of it. A copy narrower than the addition is not one of
+    /// them, since what it clears is a part of the register the addition would have read.
+    pub copies: &'static [&'static str],
+    /// The address computation, which writes the same number of bits the addition did.
+    pub into: &'static str,
+    /// What the constant is multiplied by on its way into the address, which is minus one for a
+    /// subtraction and one for an addition.
+    pub sign: i64,
+    /// How many bits of the sum the address computation keeps. A constant that does not fit the
+    /// address is taken modulo this when it is no more than thirty two, since the bits above are
+    /// ones the instruction does not keep.
+    pub bits: u32,
 }

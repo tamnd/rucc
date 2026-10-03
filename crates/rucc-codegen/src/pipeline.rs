@@ -1163,7 +1163,20 @@ pub fn compile_recording(
     // read. Running in front would see writes the output does not have and turn down rewrites that
     // are allowed. Nothing here moves an instruction or changes a block, so being behind the
     // layout's freeze costs it nothing.
-    shorten::shorter(&mut func, machine.short, machine.flags, machine.shapes, names, flags.goal);
+    //
+    // The allocator's moves are the copies it may take out, and the record of which they are is the
+    // one the cleanup above read. A function never hands out an id twice, so an instruction a pass
+    // in between wrote is one the record does not know rather than one it knows as something else.
+    let allocated = |inst| moves.at(inst).is_some();
+    shorten::shorter(
+        &mut func,
+        machine.short,
+        machine.flags,
+        machine.shapes,
+        names,
+        flags.goal,
+        &allocated,
+    );
 
     // After every pass that writes or rewrites an instruction over the registers it was given, so
     // that the byte an instruction names is the one it ends up with. i386 only: see
