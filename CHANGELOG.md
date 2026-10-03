@@ -4,6 +4,10 @@ All notable changes are recorded here. The format follows [Keep a Changelog](htt
 
 ## Unreleased
 
+### Changed
+
+- The instruction scheduler keeps the lists and maps it builds each run's graph and order in from one run to the next, rather than making them again for every stretch between barriers, which takes about 0.3% off an optimized build of jtckdint when it goes through the portable code rather than `<stdckdint.h>` (#2714).
+
 ### Added
 
 - The assembler takes `jecxz` in 32 and 64 bit code and `jcxz` in 32 bit code, which arch/x86/power/hibernate_asm_32.S uses to skip `cr4` on old CPUs.
