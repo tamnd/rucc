@@ -8,6 +8,10 @@ All notable changes are recorded here. The format follows [Keep a Changelog](htt
 
 - The assembler writes `.debug_frame` when `.cfi_sections .debug_frame` asks for it, where it used to write no frame rules at all. The kernel's boot code under `arch/x86/boot` asks for exactly that, and the section now comes out byte for byte the same as gas's on both 64 bit and 16 bit code, with the same relocations.
 
+### Fixed
+
+- The assembler takes `lcallw` and `ljmpw` through memory, which arch/x86/boot/pm.c writes as `lcallw *%0` to call the real mode switch hook, and under `.code16gcc` a plain `lcall` is thirty two bits wide as gas makes it, since it pushes a return address on gcc's thirty two bit stack. Before, `lcallw *mem` was refused and a plain `lcall` was always sixteen bits.
+
 ## 0.19.0
 
 The W6 release, for 32-bit Windows. i686-windows-gnu is tier 3: the c-testsuite single-exec programs build and run at `-O0` and `-O2`, all 440 runs, natively on a `windows-2025` runner through WoW64 and under Wine 11 on Linux. On x86-64 Windows a function no longer ends in a call to a function that does not return, which ended a `longjmp` through that frame, and `-fprofile-dir=` works on a Windows host. The test matrix now passes on Windows again and runs every test binary even after one fails. Outside Windows, the assembler writes the line table from `.file` and `.loc`, a loop that counts bits becomes one `ctpop`, `ctlz` or `cttz`, `#pragma scalar_storage_order` and seventeen more gcc attributes are read, and the range oracle answers more of the questions the kernel's `-Werror` builds ask.

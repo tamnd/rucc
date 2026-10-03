@@ -66,6 +66,9 @@ fn sized(word: &str, args: &[String], gcc: bool) -> Result<Written, String> {
     };
     let word = match (word, register) {
         ("ljmp", _) => "ljmpw",
+        // A far call pushes a return address, so in gcc's code it pushes one the width of its
+        // thirty two bit stack, as gas does. A far jump pushes nothing and stays at sixteen.
+        ("lcall", _) if gcc => "lcalll",
         ("lcall", _) => "lcallw",
         // A register says how wide it is, and anything else pushed in gcc's code is a word of its
         // thirty two bit stack.
@@ -431,6 +434,9 @@ mod tests {
             ("inl (%dx),%eax", "66ed"),
             ("cli", "fa"),
             ("ljmpl $0x10,$0x20", "66ea200000001000"),
+            ("lcall $0x10,$0x20", "9a20001000"),
+            ("lcallw *(%esi)", "67ff1e"),
+            ("lcalll *(%esi)", "6766ff1e"),
             ("orl $0x60000000,%edx", "6681ca00000060"),
             ("andl $0x0ff00f00,%eax", "6625000ff00f"),
             ("movl 4(%esp),%eax", "67668b442404"),
@@ -450,6 +456,11 @@ mod tests {
             ("leave", "66c9"),
             ("pushf", "669c"),
             ("push $0", "666a00"),
+            ("lcall $0x10,$0x20", "669a200000001000"),
+            ("lcall *(%esi)", "6766ff1e"),
+            ("lcallw *(%esi)", "67ff1e"),
+            ("ljmp $0x10,$0x20", "ea20001000"),
+            ("ljmpw *(%esi)", "67ff2e"),
         ] {
             assert_eq!(hex(line, true), bytes, "{line}");
         }

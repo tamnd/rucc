@@ -2103,7 +2103,10 @@ static ENCODINGS: &[Encoding] = &[
     takes("lretq", &I, Fits::Word, Quad, &[0xCA], NO_MODRM, ImmSize::Iw),
     // The far jump and call through memory, which read a segment and an address from it. Four
     // bytes of address without `REX.W` and eight with it, and gas takes the name with no letter
-    // for the first.
+    // for the first. Two bytes with the operand size prefix, which is what the kernel's sixteen
+    // bit boot code writes to call the real mode switch hook in arch/x86/boot/pm.c.
+    bytes("ljmpw", &M, Word, &[0xFF], ext(0, 5), NO_IMM),
+    bytes("lcallw", &M, Word, &[0xFF], ext(0, 3), NO_IMM),
     bytes("ljmp", &M, Long, &[0xFF], ext(0, 5), NO_IMM),
     bytes("ljmpl", &M, Long, &[0xFF], ext(0, 5), NO_IMM),
     bytes("ljmpq", &M, Quad, &[0xFF], ext(0, 5), NO_IMM),
