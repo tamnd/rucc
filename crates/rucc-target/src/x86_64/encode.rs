@@ -2281,9 +2281,9 @@ static ENCODINGS: &[Encoding] = &[
     // A segment register moved to and from a general purpose one or memory. Reading one into a
     // register writes as much of the register as the letter says, so that direction has a prefix
     // per width. Loading one reads a word whatever the letter is, and gas writes no prefix for a
-    // `movw` into one, nor for a store of one to memory. A sixty four bit register carries
-    // `REX.W` in both directions, which changes nothing about what is loaded and is what the
-    // other assemblers write for it.
+    // `movw` into one, nor for a store of one to memory. A sixty four bit register carries no
+    // `REX.W` in either direction, which changes nothing about what is moved and is what gas
+    // writes for it. See [`unwidened`].
     bytes("movw", &SEG_R, Word, &[0x8C], pair(1, 0), NO_IMM),
     bytes("movl", &SEG_R, Long, &[0x8C], pair(1, 0), NO_IMM),
     bytes("movq", &SEG_R, Quad, &[0x8C], pair(1, 0), NO_IMM),
@@ -4389,9 +4389,15 @@ impl std::error::Error for Error {}
 /// The bit of a REX byte that says the operands are sixty four bits.
 const REX_W: u8 = 0b1000;
 /// The rows whose sixty four bit register gas writes without `REX.W`. The limit, the access
-/// rights and the two selectors come out the same either way, and binutils stopped writing the
-/// bit for them, so the kernel's objects do not have it.
+/// rights and the two selectors come out the same either way, and so does a segment register
+/// moved to or from a general purpose one, and binutils stopped writing the bit for all of them,
+/// so the kernel's objects do not have it.
 const UNWIDENED: [&str; 4] = ["larq", "lslq", "sldtq", "strq"];
+
+/// Whether that row is one of [`UNWIDENED`] or a move of a segment register.
+fn unwidened(row: &Encoding) -> bool {
+    UNWIDENED.contains(&row.mnemonic) || row.args == SEG_R || row.args == R_SEG
+}
 /// The bit that carries the top of the register beside the addressing byte.
 const REX_R: u8 = 0b0100;
 /// The bit that carries the top of an index register.
@@ -4824,7 +4830,7 @@ impl Writer<'_> {
         if let Some(prefix) = self.row.size.prefix() {
             out.push(prefix);
         }
-        let wide = self.row.size.wide() && !UNWIDENED.contains(&self.row.mnemonic);
+        let wide = self.row.size.wide() && !unwidened(self.row);
         let rex = if wide { self.rex | REX_W } else { self.rex };
         if rex != 0 || (self.forced && !self.banned) {
             out.push(0x40 | rex);
@@ -6506,7 +6512,7 @@ mod tests {
         let gs = Value::Seg(Segment::Gs);
         assert_eq!(hex("movl", &[ds, long(RAX)]), "8c d8");
         assert_eq!(hex("movw", &[ds, word(RAX)]), "66 8c d8");
-        assert_eq!(hex("movq", &[ds, quad(RAX)]), "48 8c d8");
+        assert_eq!(hex("movq", &[ds, quad(RAX)]), "8c d8");
         assert_eq!(hex("movl", &[gs, long(R8)]), "41 8c e8");
         assert_eq!(hex("movw", &[word(RAX), Value::Seg(Segment::Es)]), "8e c0");
         let at = Value::Mem(Addr { base: Some(RAX), scale: 1, ..Addr::default() });

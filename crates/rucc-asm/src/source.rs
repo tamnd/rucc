@@ -673,6 +673,10 @@ impl Reader {
             None => (text, ""),
         };
         if let Some((name, what)) = assigned(text) {
+            // Setting the place itself is `.org` in gas, and makes no symbol called `.`.
+            if name == "." {
+                return self.directive("org", what);
+            }
             return self.assign(name, what);
         }
         if let Some(directive) = word.strip_prefix('.') {
@@ -7255,6 +7259,15 @@ g:
             bytes(&out, ".text"),
             [0x90, 0x90, 0xcc, 0xcc, 0, 0, 0, 0, 1, 0x90, 0x90, 0x90, 0x90, 0, 0, 0, 0, 7]
         );
+    }
+
+    /// `. = there` moves the place on as `.org` does, which is how the kernel lays out its kexec
+    /// exception vectors, and makes no symbol called `.`.
+    #[test]
+    fn setting_the_place_is_an_org() {
+        let out = assembled("v: nop\n . = v + 4\n.byte 1\n");
+        assert_eq!(bytes(&out, ".text"), [0x90, 0, 0, 0, 1]);
+        assert!(out.names.iter().all(|name| name.name != "."));
     }
 
     /// Eight bytes of distance to a place in another section, the way the kernel's jump table
