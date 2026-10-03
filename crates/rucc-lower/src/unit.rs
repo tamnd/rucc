@@ -616,6 +616,7 @@ impl Unit<'_> {
             }
         }
         self.weak_references();
+        self.unused_weak();
         for index in 0..self.aliases.len() {
             self.alias(self.aliases[index]);
         }
@@ -1785,6 +1786,41 @@ impl Unit<'_> {
             Linkage::External if self.tast[decl].flags.contains(DeclFlags::WEAK) => IrLinkage::Weak,
             Linkage::External => IrLinkage::External,
             Linkage::Internal | Linkage::None => IrLinkage::Internal,
+        }
+    }
+
+    /// A weak declaration nothing in the file names is an ordinary one, so nothing is written for
+    /// it.
+    ///
+    /// gcc writes `.weak` for an undefined name only when the file refers to it, whether the name
+    /// was made weak by the attribute or by `#pragma weak`, and a header that marks every hook it
+    /// offers is a header most files that include it use none of. What counts as a reference is
+    /// what [`Unit::weak_references`] counts, by symbol rather than by declaration since a name
+    /// may be declared more than once, and a second name's target counts too.
+    fn unused_weak(&mut self) {
+        let tast = self.tast;
+        let named: Vec<DeclId> = self.named.iter().copied().collect();
+        let mut used: Set<Symbol> = self.aliased.clone();
+        for decl in named {
+            if tast[decl].kind != DeclKind::Type {
+                used.insert(self.symbol_of(decl));
+            }
+        }
+        for id in self.module.funcs() {
+            let func = &mut self.module[id];
+            if func.is_declaration() && func.linkage == IrLinkage::Weak && !used.contains(&func.name)
+            {
+                func.linkage = IrLinkage::External;
+            }
+        }
+        for id in self.module.globals() {
+            let global = &mut self.module[id];
+            if global.is_declaration()
+                && global.linkage == IrLinkage::Weak
+                && !used.contains(&global.name)
+            {
+                global.linkage = IrLinkage::External;
+            }
         }
     }
 

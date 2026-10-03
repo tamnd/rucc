@@ -6,6 +6,7 @@ All notable changes are recorded here. The format follows [Keep a Changelog](htt
 
 ### Added
 
+- `#pragma weak name` and `#pragma weak name = target` are implemented, as in gcc 13. The name is weak whether the pragma comes before its declaration or after it, so a definition is a weak definition, a tentative one is a weak definition rather than a common block, and a reference to an external is a weak reference. With a target the name is a weak second name for it, written `.weak` and `.set`, whether or not the file declared the name. A name with internal linkage is refused with "weak declaration of 'x' must be public" (E0711), and a target nothing defines is refused with "'a' is aliased to undefined symbol 'b'" (E0697). A line that names nothing is ignored with "malformed `#pragma weak`, ignored", and words after the name are warned about with "junk at end of `#pragma weak`", both under `-Wpragmas` (E0798). Before, the line was taken without doing anything.
 - A CI job runs rung 0 for i686-linux-gnu on every pull request (#2247). `tests/rung0/run.sh` builds each c-testsuite single-exec program with rucc at `-O0` and `-O2`, links it against Ubuntu's i386 cross libc, and runs it on the x86_64 runner, where a 32-bit program runs directly with nothing emulated. Each program is built under the GNU dialect of the standard its tags name. A program can be left out only in `tests/rung0/exclude-<triple>.txt` and only with an issue number, and an excluded program that passes fails the run. i686-linux-gnu moves to tier 3 in `docs/TARGETS.md`.
 
 ### Changed
