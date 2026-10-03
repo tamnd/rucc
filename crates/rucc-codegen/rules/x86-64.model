@@ -189,6 +189,10 @@
 (semantics (x64.rol_ri_16 l r)
            (bvor (bvshl l (bvurem (bvand r 31) 16))
                  (bvlshr l (bvsub 16 (bvurem (bvand r 31) 16)))))
+(semantics (x64.rol_ri_32 l r)
+           (bvor (bvshl l (bvand r 31)) (bvlshr l (bvsub 32 (bvand r 31)))))
+(semantics (x64.rol_ri_64 l r)
+           (bvor (bvshl l (bvand r 63)) (bvlshr l (bvsub 64 (bvand r 63)))))
 
 ;; The three counts. Each one answers the width of its operand for a zero, which is where these
 ;; part from `bsf` and `bsr`: those leave the destination as it was for a zero, or say nothing

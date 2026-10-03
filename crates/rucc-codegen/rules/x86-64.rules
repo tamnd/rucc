@@ -387,6 +387,31 @@
       (x64.not_r_64 x)
       (spec (= (bvxor x -1) (result))))
 
+;; Rotates. C has no rotate and spells one as two shifts in opposite directions whose counts
+;; add up to the width, joined by an or, which is what every hash and cipher written in it does.
+;; gcc puts the three back together as one `rol`, and so does this, in either order of the or.
+;; The count is the left shift's, since a rotate right by one count is a rotate left by the other.
+
+(rule (lower (or.i32 (shl.i32 (value.i32 x) (iconst.i32 k)) (lshr.i32 (value.i32 x) (iconst.i32 j))))
+      (if (and (and (> k 0) (< k 32)) (= (+ k j) 32)))
+      (x64.rol_ri_32 x k)
+      (spec (= (bvor (bvshl x k) (bvlshr x j)) (result))))
+
+(rule (lower (or.i32 (lshr.i32 (value.i32 x) (iconst.i32 j)) (shl.i32 (value.i32 x) (iconst.i32 k))))
+      (if (and (and (> k 0) (< k 32)) (= (+ k j) 32)))
+      (x64.rol_ri_32 x k)
+      (spec (= (bvor (bvlshr x j) (bvshl x k)) (result))))
+
+(rule (lower (or.i64 (shl.i64 (value.i64 x) (iconst.i64 k)) (lshr.i64 (value.i64 x) (iconst.i64 j))))
+      (if (and (and (> k 0) (< k 64)) (= (+ k j) 64)))
+      (x64.rol_ri_64 x k)
+      (spec (= (bvor (bvshl x k) (bvlshr x j)) (result))))
+
+(rule (lower (or.i64 (lshr.i64 (value.i64 x) (iconst.i64 j)) (shl.i64 (value.i64 x) (iconst.i64 k))))
+      (if (and (and (> k 0) (< k 64)) (= (+ k j) 64)))
+      (x64.rol_ri_64 x k)
+      (spec (= (bvor (bvlshr x j) (bvshl x k)) (result))))
+
 ;; Byte reversals. Two widths are `bswap` and the sixteen bit one is a rotate by eight, which
 ;; is the same answer and the instruction gcc writes for it.
 (rule (lower (bswap.i16 (value.i16 x)))

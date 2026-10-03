@@ -1076,7 +1076,16 @@ pub fn run(module: &mut Module, names: &mut Interner, opts: &Options) -> Report 
             (None, None) => Fuel::unlimited(),
         };
         let started = Instant::now();
-        let folded = libcall::fold(module, names, &opts.no_builtin, opts.interposition, &mut fuel);
+        let mut folded =
+            libcall::fold(module, names, &opts.no_builtin, opts.interposition, &mut fuel);
+        let written =
+            libcall::write_out(module, names, &opts.no_builtin, opts.interposition, &mut fuel);
+        for (id, stats) in written {
+            match folded.iter_mut().find(|(at, _)| *at == id) {
+                Some((_, have)) => have.merge(&stats),
+                None => folded.push((id, stats)),
+            }
+        }
         report.took(libcall::NAME, started.elapsed());
         for (id, stats) in folded {
             if opts.verify {

@@ -49,7 +49,7 @@
 //! vector going back and forth through memory between each of them.
 
 use rucc_base::hash::{Map, Set};
-use rucc_cost::heuristics::{SRA_MAX_BYTES, SRA_MAX_PIECES};
+use rucc_cost::heuristics::{SRA_MAX_BYTES, SRA_MAX_PIECES, SRA_MAX_WORD_PIECES};
 use rucc_ir::{
     Block, BlockCall, DataLayout, Extra, Flags, Func, Imm, Inst, InstData, MemInfo, MemOrder,
     Opcode, Restrict, Type, Value,
@@ -90,6 +90,10 @@ const WIDEST_FILLER: u64 = 8;
 
 // The renaming keeps the pieces a block reads and writes as the bits of one word.
 const _: () = assert!(SRA_MAX_PIECES <= u64::BITS);
+const _: () = assert!(SRA_MAX_WORD_PIECES <= u64::BITS);
+
+/// The narrowest piece that counts against [`SRA_MAX_WORD_PIECES`] rather than [`SRA_MAX_PIECES`].
+const WORD: u64 = 4; // not a threshold: four bytes is a 32 bit register, not a tuned limit.
 
 /// The pass.
 #[derive(Debug)]
@@ -799,7 +803,12 @@ fn pieces(uses: &[(Inst, Use)], target: Target) -> Result<Vec<Piece>, &'static s
         }
     }
     let bytes: u64 = pieces.iter().map(|piece| piece.size).sum();
-    if pieces.len() > SRA_MAX_PIECES as usize || bytes > u64::from(SRA_MAX_BYTES) {
+    let most = if pieces.iter().all(|piece| piece.size >= WORD) {
+        SRA_MAX_WORD_PIECES
+    } else {
+        SRA_MAX_PIECES
+    };
+    if pieces.len() > most as usize || bytes > u64::from(SRA_MAX_BYTES) {
         return Err(TOO_BIG);
     }
     Ok(pieces)
@@ -1687,6 +1696,52 @@ block2:
         // One load, of the one piece anything reads, four bytes into the source.
         assert_eq!(count_of(func, Opcode::Load), 1);
         assert_eq!(count_of(func, Opcode::PtrAdd), 1);
+    }
+
+    /// A local copied in whole and then read a piece at a time at each of `count` places, `width`
+    /// bytes apart, with what was read added up.
+    fn read_piecewise(count: u64, width: u64) -> String {
+        let ty = format!("i{}", width * 8);
+        let mut body = format!(
+            "block0(%0: ptr):\n    %1 = alloca, size {size}, align 16\n    memcpy %1, %0, size {size}, align 4\n",
+            size = count * width
+        );
+        let mut next = 2;
+        let mut sum = None;
+        for index in 0..count {
+            body += &format!("    %{next} = iconst.i64 {}\n", index * width);
+            body += &format!("    %{} = ptr_add %1, %{next}\n", next + 1);
+            body += &format!("    %{} = load.{ty} %{}, align 1\n", next + 2, next + 1);
+            let read = next + 2;
+            next += 3;
+            if let Some(total) = sum {
+                body += &format!("    %{next} = add %{total}, %{read}\n");
+                sum = Some(next);
+                next += 1;
+            } else {
+                sum = Some(read);
+            }
+        }
+        body += &format!("    return %{}\n", sum.expect("something was read"));
+        wrap(&format!("(ptr) -> {ty}"), &body)
+    }
+
+    #[test]
+    fn sixteen_words_read_by_constant_index_become_values() {
+        // libsodium's scalar salsa20/8 core from tamnd/rucc#2765, whose `uint32_t x[16]` is copied
+        // in and then read and written word by word.
+        let (module, stats) = run(&read_piecewise(16, 4));
+        assert_eq!(stats.count(Kind::Optimized, SCALARIZED), 1);
+        assert_eq!(count_of(body(&module), Opcode::Alloca), 0);
+    }
+
+    #[test]
+    fn sixteen_bytes_read_one_at_a_time_stay_in_memory() {
+        // A byte is an eighth of the register it would be given, which is what the cap on pieces
+        // was measured on, and only words get the larger one.
+        let (module, stats) = run(&read_piecewise(16, 1));
+        assert_eq!(stats.count(Kind::Missed, TOO_BIG), 1);
+        assert_eq!(count_of(body(&module), Opcode::Alloca), 1);
     }
 
     #[test]

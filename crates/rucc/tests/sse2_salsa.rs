@@ -138,3 +138,86 @@ fn the_vector_salsa_core_stays_in_registers() {
     }
     let _ = std::fs::remove_dir_all(&dir);
 }
+
+/// The scalar core libsodium's scrypt falls back to where it was built without SSE2, which is
+/// `crypto_pwhash/scryptsalsa208sha256/nosse/pwhash_scryptsalsa208sha256_nosse.c`, with its
+/// `blkcpy` copying a count of sixty four byte blocks. `main` runs it a thousand times and gives
+/// back the low byte of a hash of what it left.
+const SCALAR: &str = r"
+#include <stdint.h>
+#include <stddef.h>
+#include <string.h>
+
+static inline void blkcpy(uint32_t *dest, const uint32_t *src, size_t len) {
+  memcpy(dest, src, len * 64);
+}
+
+static __attribute__((noinline)) void salsa20_8(uint32_t B[16]) {
+  uint32_t x[16];
+  size_t i;
+  blkcpy(x, B, 1);
+  for (i = 0; i < 8; i += 2) {
+#define R(a, b) (((a) << (b)) | ((a) >> (32 - (b))))
+    x[4] ^= R(x[0] + x[12], 7);   x[8] ^= R(x[4] + x[0], 9);
+    x[12] ^= R(x[8] + x[4], 13);  x[0] ^= R(x[12] + x[8], 18);
+    x[9] ^= R(x[5] + x[1], 7);    x[13] ^= R(x[9] + x[5], 9);
+    x[1] ^= R(x[13] + x[9], 13);  x[5] ^= R(x[1] + x[13], 18);
+    x[14] ^= R(x[10] + x[6], 7);  x[2] ^= R(x[14] + x[10], 9);
+    x[6] ^= R(x[2] + x[14], 13);  x[10] ^= R(x[6] + x[2], 18);
+    x[3] ^= R(x[15] + x[11], 7);  x[7] ^= R(x[3] + x[15], 9);
+    x[11] ^= R(x[7] + x[3], 13);  x[15] ^= R(x[11] + x[7], 18);
+    x[1] ^= R(x[0] + x[3], 7);    x[2] ^= R(x[1] + x[0], 9);
+    x[3] ^= R(x[2] + x[1], 13);   x[0] ^= R(x[3] + x[2], 18);
+    x[6] ^= R(x[5] + x[4], 7);    x[7] ^= R(x[6] + x[5], 9);
+    x[4] ^= R(x[7] + x[6], 13);   x[5] ^= R(x[4] + x[7], 18);
+    x[11] ^= R(x[10] + x[9], 7);  x[8] ^= R(x[11] + x[10], 9);
+    x[9] ^= R(x[8] + x[11], 13);  x[10] ^= R(x[9] + x[8], 18);
+    x[12] ^= R(x[15] + x[14], 7); x[13] ^= R(x[12] + x[15], 9);
+    x[14] ^= R(x[13] + x[12], 13); x[15] ^= R(x[14] + x[13], 18);
+#undef R
+  }
+  for (i = 0; i < 16; i++)
+    B[i] += x[i];
+}
+
+int main(void) {
+  uint32_t B[16];
+  for (int i = 0; i < 16; i++)
+    B[i] = 0x9e3779b9u * (i + 1);
+  for (int n = 0; n < 1000; n++)
+    salsa20_8(B);
+  uint32_t h = 0;
+  for (int i = 0; i < 16; i++)
+    h = h * 31 + B[i];
+  return h & 0xff;
+}
+";
+
+/// The scalar core gives the same answer optimised as not, its rotates are `roll`, and the copy
+/// into its local is not a call, which is what lets the local out of memory. Both of those are
+/// tamnd/rucc#2765: the copy's length is a constant only once `blkcpy` is inlined, and the
+/// rotates are two shifts and an or until the selector puts them back together.
+#[cfg(all(target_os = "linux", target_arch = "x86_64"))]
+#[test]
+fn the_scalar_salsa_core_rotates_and_copies_without_a_call() {
+    let dir = dir("scalar");
+    std::fs::write(dir.join("s.c"), SCALAR).expect("the fixture can be written");
+    let mut answers = Vec::new();
+    for level in ["-O0", "-O2"] {
+        let (ok, said) = run(&dir, &[level, "-fno-strict-overflow", "s.c", "-o", "s"]);
+        assert!(ok, "{level}: {said}");
+        let out = Command::new(dir.join("s")).output().expect("what was linked can be run");
+        answers.push(out.status.code());
+    }
+    assert_eq!(answers[0], answers[1], "-O0 and -O2 disagree");
+    let (ok, said) = run(&dir, &["-O2", "-fno-strict-overflow", "-S", "s.c", "-o", "s.s"]);
+    assert!(ok, "{said}");
+    let asm = std::fs::read_to_string(dir.join("s.s")).expect("the assembly was written");
+    let start = asm.find("\nsalsa20_8:").expect("the core is in the output");
+    let end = asm[start..].find(".size\tsalsa20_8").map_or(asm.len(), |at| start + at);
+    let core = &asm[start..end];
+    assert_eq!(core.matches("roll\t$").count(), 32, "{core}");
+    assert!(!core.contains("shrl"), "{core}");
+    assert!(!core.contains("memcpy"), "{core}");
+    let _ = std::fs::remove_dir_all(&dir);
+}
