@@ -101,7 +101,10 @@ fn dllimport_data_and_a_declared_variable_are_read_through_their_pointers() {
 
 #[test]
 fn a_variable_this_file_defines_is_reached_by_its_page_and_offset() {
-    let got = insts("local", "static int here = 3;\nint f(void) { return here; }\n");
+    let got = insts(
+        "local",
+        "static int here = 3;\nint f(void) { return here; }\nvoid g(int v) { here = v; }\n",
+    );
     assert!(
         got.iter().any(|line| line.starts_with("adrp ") && line.ends_with(", here")),
         "{got:#?}"
