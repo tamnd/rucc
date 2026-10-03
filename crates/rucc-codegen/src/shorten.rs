@@ -770,6 +770,10 @@ impl Spread {
 /// those is left as it is. A constant goes in as the number the address adds, negated for a
 /// subtraction, and one that does not fit is left as it is unless the address keeps no more than
 /// thirty two bits, where only the low thirty two bits of it were ever going to count.
+#[expect(
+    clippy::too_many_arguments,
+    reason = "the tables, the block so far and the allocator's mark are each read once"
+)]
 fn spread_form(
     func: &mir::Func,
     short: &ShortInsts,
