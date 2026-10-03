@@ -6,6 +6,7 @@ All notable changes are recorded here. The format follows [Keep a Changelog](htt
 
 ### Fixed
 
+- Constant propagation no longer takes the output of an `asm goto` as a value that has not been set yet. A variable that was either zero or that output could fold to zero and drop the code that used it, which lost the `rseq_trace_ip_fixup` tracepoint in the kernel's `kernel/entry/common.c`.
 - Each second name for a function or a variable, from `alias` or a `.set`, is written just after what it names, as gcc does, rather than all together at the end. modpost reads a module's device tables in symbol table order, so the order of `.modinfo` aliases now matches a gcc build.
 
 ## 0.19.1
