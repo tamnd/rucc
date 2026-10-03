@@ -411,7 +411,8 @@ __attribute__((common)) int weakly __attribute__((weak));
 __attribute__((common)) int set = 1;
 __attribute__((common, section(\"apart\"))) int placed;
 ";
-    let names = ["written", "plain", "later", "first", "kept", "declared", "weakly", "set", "placed"];
+    let names =
+        ["written", "plain", "later", "first", "kept", "declared", "weakly", "set", "placed"];
     let got = ir("common", &["-fno-common"], source);
     assert_eq!(merged(&got, &names), ["written", "later", "kept"], "{got}");
 }

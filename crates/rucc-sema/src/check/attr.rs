@@ -1491,8 +1491,9 @@ impl Checker<'_> {
             };
             if flags.contains(now) && after.contains(other) {
                 let name = self.gnu_name(&attr);
-                let what =
-                    format!("ignoring attribute '{name}' because it conflicts with attribute '{said}'");
+                let what = format!(
+                    "ignoring attribute '{name}' because it conflicts with attribute '{said}'"
+                );
                 self.report(Diagnostic::warning(what, attr.span).with_code("E0703"));
                 flags = flags.with(now, false);
             }
