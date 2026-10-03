@@ -2531,6 +2531,9 @@ pub struct Options {
     /// Whether `-Wa,--noexecstack` was given, which gives a file of assembly the marker that says
     /// its stack is not executable when it did not write one itself.
     pub asm_noexecstack: bool,
+    /// Whether `-Wa,-mrelax-relocations=no` was given, which reads every slot of the global offset
+    /// table through the relocation the linker may not rewrite, as gas does under it.
+    pub asm_keep_slots: bool,
     /// Whether `-m16` was given, which builds for 32 bit x86 and assembles the result as
     /// `.code16gcc`: code that runs in real mode with 32 bit operands and a 32 bit stack, the way
     /// the kernel's boot and real mode trampoline are built.
@@ -2806,6 +2809,7 @@ impl Options {
             gnu_as: GasVersion::default(),
             asm_fatal_warnings: false,
             asm_noexecstack: false,
+            asm_keep_slots: false,
             sixteen: false,
             regparm: 0,
             reg_struct_return: false,

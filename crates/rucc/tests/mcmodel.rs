@@ -112,6 +112,25 @@ const SIGNED: u32 = 11;
 const REFUSED: [u32; 20] =
     [3, 9, 16, 17, 18, 19, 20, 21, 22, 23, 25, 26, 27, 28, 29, 30, 31, 34, 41, 42];
 
+/// `-Wa,-mrelax-relocations=no`, which the kernel's decompressor is built with, turns every read of
+/// the global offset table into `R_X86_64_GOTPCREL`, as gas does, where the default is the
+/// `REX_GOTPCRELX` the linker may rewrite.
+#[test]
+fn a_read_of_the_table_is_kept_when_relaxing_is_off() {
+    let source = "extern int away; int *take(void) { return &away; }\n";
+    for level in ["-O0", "-O2"] {
+        let (ok, object, err) = run("relax", &["-c", "-fPIC", level], source);
+        assert!(ok, "{level}: {err}");
+        assert!(relocation_types(&object).contains(&42), "{level}: no REX_GOTPCRELX");
+        let line = ["-c", "-fPIC", level, "-Wa,-mrelax-relocations=no"];
+        let (ok, object, err) = run("kept", &line, source);
+        assert!(ok, "{level}: {err}");
+        let types = relocation_types(&object);
+        assert!(types.contains(&9), "{level}: no GOTPCREL in {types:?}");
+        assert!(!types.contains(&41) && !types.contains(&42), "{level}: {types:?}");
+    }
+}
+
 /// A kernel model object reaches every name directly, and the addresses it wants as values are
 /// four bytes the machine sign extends.
 #[test]

@@ -57,6 +57,7 @@ pub fn assemble(opts: &Options, name: &str, cpp: bool, fs: &dyn FileSystem) -> C
     let flags = rucc_asm::Flags {
         fatal_warnings: opts.asm_fatal_warnings,
         noexecstack: opts.asm_noexecstack,
+        keep_slots: opts.asm_keep_slots,
     };
     let read = rucc_asm::read_with(&text, target.tuple.arch(), target.object_format, flags);
     let assembled = match read {

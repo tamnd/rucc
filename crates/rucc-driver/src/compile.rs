@@ -1508,6 +1508,7 @@ fn generate(
                 let flags = rucc_asm::Flags {
                     fatal_warnings: opts.asm_fatal_warnings,
                     noexecstack: opts.asm_noexecstack,
+                    keep_slots: opts.asm_keep_slots,
                 };
                 let read = rucc_asm::read_with(&listing, arch, target.object_format, flags)
                     .map_err(|trouble| {
@@ -1550,7 +1551,12 @@ fn generate(
             } else {
                 rucc_object::Info::default()
             };
-            let text = assembled.text;
+            let mut text = assembled.text;
+            if opts.asm_keep_slots {
+                for reloc in &mut text.relocs {
+                    reloc.kind = reloc.kind.kept();
+                }
+            }
             // A format with no writer is a target this compiler is behind on and anything else
             // the writer refused is a bug here, and the two are not the same news to get.
             let bytes =

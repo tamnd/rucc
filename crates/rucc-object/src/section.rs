@@ -973,3 +973,17 @@ pub enum Reference {
     /// its own relocation, and the fixup is already the name of one.
     Field(rucc_target::aarch64::Fixup),
 }
+
+impl Reference {
+    /// The same reference with the linker not allowed to rewrite the instruction, which is what
+    /// gas writes under `-mrelax-relocations=no`: a slot of the global offset table is read through
+    /// the slot whatever the instruction is. Every other reference is itself.
+    #[must_use]
+    pub const fn kept(self) -> Reference {
+        match self {
+            Reference::Got | Reference::GotBare => Reference::GotKept,
+            Reference::Slot => Reference::SlotKept,
+            other => other,
+        }
+    }
+}

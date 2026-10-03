@@ -111,6 +111,9 @@ pub struct Flags {
     /// is not executable when the file did not write one itself. Without it gas writes none, and
     /// neither does this.
     pub noexecstack: bool,
+    /// `-mrelax-relocations=no`, which asks for the relocation of a slot of the global offset table
+    /// that the linker may not rewrite, `R_X86_64_GOTPCREL` and `R_386_GOT32`, in every instruction.
+    pub keep_slots: bool,
 }
 
 /// The same, with what the command line said to the assembler.
@@ -165,8 +168,8 @@ pub fn read_with(
         };
         reader.run(text)?;
         match reader.finish()? {
-            Ok(done) if decorated => return Ok(at_signs_back(done)),
-            Ok(done) => return Ok(done),
+            Ok(done) if decorated => return Ok(kept(at_signs_back(done), flags)),
+            Ok(done) => return Ok(kept(done, flags)),
             Err(again) => {
                 if again.grow.is_empty() {
                     moving += 1;
@@ -183,6 +186,17 @@ pub fn read_with(
             }
         }
     }
+}
+
+/// A file read under [`Flags::keep_slots`], with every slot of the global offset table read through
+/// a relocation the linker leaves alone.
+fn kept(mut done: Assembled, flags: Flags) -> Assembled {
+    if flags.keep_slots {
+        for reloc in done.parts.iter_mut().flat_map(|part| part.relocs.iter_mut()) {
+            reloc.kind = reloc.kind.kept();
+        }
+    }
+    done
 }
 
 /// What an `@` in a name on i386 COFF is read as, which is a run of characters a name may hold and
@@ -5223,6 +5237,20 @@ _tls$tlv$init:
         assert_eq!(relocs[0].addend, -4);
         let out = assembled("\t.text\n\tmovq counter@GOTTPOFF(%rip), %rax\n");
         assert_eq!(out.parts[0].relocs[0].kind, Reference::Thread);
+    }
+
+    /// Under `-mrelax-relocations=no` every read of the table is the plain relocation, the way
+    /// gas writes it, and on i386 the plain one of its own.
+    #[test]
+    fn a_kept_slot_is_never_one_the_linker_may_rewrite() {
+        let flags = Flags { keep_slots: true, ..Flags::default() };
+        let text = "\t.text\n\tmovq f@GOTPCREL(%rip), %rax\n\tcall *g@GOTPCREL(%rip)\n";
+        let out = read_with(text, Arch::X86_64, ObjectFormat::Elf, flags).expect("it reads");
+        let kinds: Vec<_> = out.parts[0].relocs.iter().map(|reloc| reloc.kind).collect();
+        assert_eq!(kinds, [Reference::GotKept, Reference::GotKept]);
+        let text = "\t.text\n\tmovl f@GOT(%ebx), %eax\n";
+        let out = read_with(text, Arch::X86, ObjectFormat::Elf, flags).expect("it reads");
+        assert_eq!(out.parts[0].relocs[0].kind, Reference::SlotKept);
     }
 
     /// Which of the three table relocations an instruction asks for, as gas picks them: the one

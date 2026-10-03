@@ -2968,6 +2968,7 @@ pub fn parse_args(args: &[String]) -> Result<Action, CliError> {
     let assembler = assembler_words(&asm_words, opts.target)?;
     opts.asm_fatal_warnings = assembler.fatal_warnings;
     opts.asm_noexecstack = assembler.noexecstack;
+    opts.asm_keep_slots = assembler.keep_slots;
     // gcc's `finish_options`, read as a table. An executable is what nothing at all means, and
     // what `-fpie` means whatever the other family said, so `-fPIE -fno-pic` is still position
     // independent. A library needs `-fpic` and no `-fpie` after it, and anything else that said
@@ -4620,6 +4621,9 @@ struct Assembler {
     fatal_warnings: bool,
     /// `--noexecstack`, which marks the stack of a file of assembly as not executable.
     noexecstack: bool,
+    /// `-mrelax-relocations=no`, which keeps the linker from rewriting a read of a slot of the
+    /// global offset table.
+    keep_slots: bool,
 }
 
 /// The words of every `-Wa,` and `-Xassembler`, each one honored, taken because it describes what
@@ -4650,6 +4654,11 @@ fn assembler_words(words: &[(String, String)], target: Triple) -> Result<Assembl
             // The note gas writes on x86 with the instruction sets and features a file used. This
             // compiler never writes it, so asking for it not to be written asks for what happens.
             "-mx86-used-note=no" if x86 => {}
+            // Whether the linker may rewrite an instruction that reads a slot of the global offset
+            // table, which gas says with the relocation it picks. The kernel turns it off for the
+            // decompressor, which is linked without anything to relax against.
+            "-mrelax-relocations=no" if x86 => out.keep_slots = true,
+            "-mrelax-relocations=yes" if x86 => out.keep_slots = false,
             // The word size gas assembles for, which is the machine the target already is. The
             // other one is a different target, which `-m32` or `-m64` is how to ask for.
             "--64" if x86 && !i386 => {}
@@ -8372,7 +8381,7 @@ mod tests {
             (&[x86, "-Wa,--gdwarf-4"], "debug information"),
             (&[x86, "-Wa,-march=corei7"], "`-march=corei7`"),
             (&[arm, "-Wa,-march=armv7-a"], "`-march=armv7-a`"),
-            (&[x86, "-Wa,-mrelax-relocations=no"], "`-mrelax-relocations=no`"),
+            (&[arm, "-Wa,-mrelax-relocations=no"], "`-mrelax-relocations=no`"),
             (&[x86, "-Wa,--noexecstack,-isa=foo"], "`-Wa,--noexecstack,-isa=foo`"),
         ];
         for (words, needle) in cases {
