@@ -776,7 +776,7 @@ mod tests {
         "mov_rr_64",
         "movaps_rr",
         // The aligned load and store of a whole vector register, which only a spill writes now.
-        // A program's own sixteen byte access is `movdqu`, because its address need not be
+        // A program's own sixteen byte access is `movups` or `movdqu`, because its address need not be
         // aligned and a slot the frame made always is.
         "movaps_rm",
         "movaps_mr",
