@@ -109,6 +109,7 @@ use rucc_ir::{Block, Extra, Flags, Func, Inst, Opcode, Restrict, Type, Value};
 
 use crate::alias::{Access, Origin, origin};
 use crate::dom::Dominators;
+use crate::loops::Loops;
 use crate::memssa::{Clobber, Step, Walk};
 use crate::uses::substitute;
 use crate::{Analyses, Analysis, Fuel, Pass, Preserved, Stats, memssa};
@@ -182,6 +183,7 @@ impl Pass for RedundantLoad {
             // where a reader has to work out that they are both reads.
             let body: &Func = func;
             let dom = an.dominators(body);
+            let loops = an.loops(body);
             let mut walk = Walk::new(body, an.outside()).knowing(an.modref());
             // Each address read at a version of memory, with every block a load of it was in that
             // no earlier one dominates and the value that load is known to be equal to. Reverse
@@ -219,7 +221,7 @@ impl Pass for RedundantLoad {
                     // have to compute and this does: two arms of the same branch share a version of
                     // memory and neither of them runs before the other.
                     let found = match found {
-                        Found::Kept(reason) => match earlier(&seen, key, dom, block) {
+                        Found::Kept(reason) => match earlier(&seen, key, (dom, loops), block) {
                             Some(value) => Found::Earlier(value),
                             None => Found::Kept(reason),
                         },
@@ -232,7 +234,7 @@ impl Pass for RedundantLoad {
                             if let Some(reason) = reason {
                                 stats.missed(reason);
                             }
-                            remember(&mut seen, key, dom, block, result);
+                            remember(&mut seen, key, (dom, loops), block, result);
                             continue;
                         }
                     };
@@ -241,13 +243,13 @@ impl Pass for RedundantLoad {
                         // the walk goes on and the count of what could have gone is the same at
                         // every setting, which is what makes a bisection over it monotonic.
                         stats.missed(NO_FUEL);
-                        remember(&mut seen, key, dom, block, result);
+                        remember(&mut seen, key, (dom, loops), block, result);
                         continue;
                     }
                     forward.insert(result, value);
                     gone.push(inst);
                     stats.optimized(why);
-                    remember(&mut seen, key, dom, block, value);
+                    remember(&mut seen, key, (dom, loops), block, value);
                 }
             }
             let counts = walk.counts();
@@ -380,35 +382,57 @@ type Seen = Map<(Value, Place, Type), Vec<(Block, Value)>>;
 
 /// Records what a load of this address at this version of memory is equal to.
 ///
-/// A load an earlier one dominates was forwarded from it, so there is nothing new to record. One
-/// that no earlier one dominates is kept beside them, because the blocks it dominates are not the
-/// ones theirs do: the two arms of a branch each read the same address at the same version and
-/// each answers only for what is below it.
+/// A load an earlier one reaches was forwarded from it, so there is nothing new to record. One
+/// that no earlier one reaches is kept beside them, because the blocks it reaches are not the ones
+/// theirs do: the two arms of a branch each read the same address at the same version and each
+/// answers only for what is below it, and a load below a loop answers for what is below it where
+/// the one above the loop does not.
 fn remember(
     seen: &mut Seen,
     key: Option<(Value, Place, Type)>,
-    dom: &Dominators,
+    shape: (&Dominators, &Loops),
     block: Block,
     value: Value,
 ) {
     if let Some(key) = key {
         let found = seen.entry(key).or_default();
-        if !found.iter().any(|&(at, _)| dom.dominates(at, block)) {
+        if !found.iter().any(|&(at, _)| reaches(shape, at, block)) {
             found.push((block, value));
         }
     }
 }
 
 /// The value an earlier load of this address at this version of memory had, from a block that
-/// dominates this one.
+/// reaches this one.
 fn earlier(
     seen: &Seen,
     key: Option<(Value, Place, Type)>,
-    dom: &Dominators,
+    shape: (&Dominators, &Loops),
     block: Block,
 ) -> Option<Value> {
     let found = seen.get(&key?)?;
-    found.iter().find(|&&(at, _)| dom.dominates(at, block)).map(|&(_, value)| value)
+    found.iter().find(|&&(at, _)| reaches(shape, at, block)).map(|&(_, value)| value)
+}
+
+/// Whether a load in `at` may hand its value to a load of the same bytes in `block`.
+///
+/// It has to dominate it, and there must not be a whole loop between them. A loop that holds
+/// neither load and that every way from one to the other goes through is one the value would be
+/// carried across in a register, for every turn of it, to save one load after it. That is a bad
+/// trade where the loop is the busy part of the function: libsodium's salsa20_8 reads its sixteen
+/// words, runs eight rounds over copies of them, and adds them back in, and taking the second
+/// read away kept sixteen more values live through the rounds than there are registers, so all
+/// of them went to the stack in the prologue (tamnd/rucc#2795). A load inside the loop still takes
+/// the value from above it, which reads once where the loop read on every turn.
+fn reaches((dom, loops): (&Dominators, &Loops), at: Block, block: Block) -> bool {
+    dom.dominates(at, block)
+        && !loops.all().any(|id| {
+            let header = loops.header(id);
+            !loops.contains(id, at)
+                && !loops.contains(id, block)
+                && dom.dominates(at, header)
+                && dom.dominates(header, block)
+        })
 }
 
 /// Recorded as a note: how many walks were made.
@@ -686,6 +710,54 @@ block2:
         let (module, stats) = run(&text);
         assert_eq!(stats.count(crate::stats::Kind::Optimized, FORWARDED), 1);
         assert_eq!(count_of(one(&module), Opcode::Load), 0);
+    }
+
+    #[test]
+    fn a_load_below_a_loop_reads_again_rather_than_carry_the_one_above() {
+        // The shape of salsa20_8: the words are read, a loop works on what was read and writes
+        // nothing, and the words are read again below it. Taking the second read away would carry
+        // the first across every turn of the loop.
+        let text = wrap(
+            "(ptr, i1) -> i32",
+            "block0(%0: ptr, %1: i1):
+    %2 = load.i32 %0, align 4
+    jump block1(%2)
+
+block1(%3: i32):
+    %4 = add %3, %3
+    br_if %1, block1(%4), block2
+
+block2:
+    %5 = load.i32 %0, align 4
+    %6 = add %4, %5
+    return %6
+",
+        );
+        let (module, stats) = run(&text);
+        assert_eq!(stats.count(crate::stats::Kind::Optimized, REUSED), 0);
+        assert_eq!(count_of(one(&module), Opcode::Load), 2);
+    }
+
+    #[test]
+    fn a_load_inside_a_loop_still_takes_the_one_above_it() {
+        let text = wrap(
+            "(ptr, i1) -> i32",
+            "block0(%0: ptr, %1: i1):
+    %2 = load.i32 %0, align 4
+    jump block1(%2)
+
+block1(%3: i32):
+    %4 = load.i32 %0, align 4
+    %5 = add %3, %4
+    br_if %1, block1(%5), block2
+
+block2:
+    return %5
+",
+        );
+        let (module, stats) = run(&text);
+        assert_eq!(stats.count(crate::stats::Kind::Optimized, REUSED), 1);
+        assert_eq!(count_of(one(&module), Opcode::Load), 1);
     }
 
     #[test]
