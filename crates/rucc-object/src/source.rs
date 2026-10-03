@@ -182,7 +182,8 @@ impl Shape {
     /// `.text`, `.data` and the rest are names an assembler already knows the flags of, which is
     /// why a program may write `.data` on its own and why `.section .data` without letters is the
     /// same section rather than an unallocated one. A name nothing here knows gets the flags of an
-    /// ordinary allocated writable section, which is what gas does with one.
+    /// ordinary allocated writable section. An ELF `.section` in a file of assembly reads
+    /// [`Shape::unflagged`] instead, which is gas's table.
     #[must_use]
     pub fn of(name: &str) -> Shape {
         let base = Shape { alloc: true, bits: true, ..Shape::default() };
@@ -204,6 +205,43 @@ impl Shape {
                 Shape { alloc: false, bits: true, ..Shape::default() }
             }
             _ => Shape { write: true, ..base },
+        }
+    }
+
+    /// What gas makes a section of this name on ELF when `.section` gives it no letters, and the
+    /// type it gives it when the letters come with no type.
+    ///
+    /// The names are binutils' table of special sections. Most of them hold for the name and for
+    /// any name that adds a dot and more to it, so `.text.foo` is code and `.textfoo` is not, a
+    /// few hold only for the name itself, and `.note` holds for anything that starts with it.
+    /// Everything else is bytes with no flags at all, which is what the kernel's
+    /// `.pushsection .discard.ibt_endbr_noseal` and the like are, and which [`Shape::of`] used to
+    /// make writable data.
+    #[must_use]
+    pub fn unflagged(name: &str) -> Shape {
+        let bits = Shape { bits: true, ..Shape::default() };
+        let family = |head: &str| {
+            name.strip_prefix(head).is_some_and(|rest| rest.is_empty() || rest.starts_with('.'))
+        };
+        let alloc = Shape { alloc: true, ..bits };
+        if family(".text") || name == ".init" || name == ".fini" {
+            Shape { exec: true, ..alloc }
+        } else if family(".data") || name == ".data1" {
+            Shape { write: true, ..alloc }
+        } else if family(".rodata") || name == ".rodata1" {
+            alloc
+        } else if family(".bss") || family(".gnu.linkonce.b") {
+            Shape { write: true, bits: false, ..alloc }
+        } else if family(".tbss") {
+            Shape { write: true, thread: true, bits: false, ..alloc }
+        } else if family(".tdata") {
+            Shape { write: true, thread: true, ..alloc }
+        } else if let Some(array) = Array::of(name) {
+            Shape { write: true, array: Some(array), ..alloc }
+        } else if name.starts_with(".note") && name != ".note.GNU-stack" {
+            Shape { note: true, ..bits }
+        } else {
+            bits
         }
     }
 
@@ -829,6 +867,11 @@ pub fn assembled_described(
     if flavour == Flavour::Elf {
         for part in input.parts.iter().filter(|part| part.shape.merge != 0) {
             entry_size(&mut bytes, &part.name, part.shape.merge);
+        }
+        // A table of function addresses is a run of pointers, and gas says so in its header.
+        let pointer = crate::elf::Headers::read(&bytes).entry_size().1 as u64;
+        for part in input.parts.iter().filter(|part| part.shape.array.is_some()) {
+            entry_size(&mut bytes, &part.name, pointer);
         }
         together_groups(&mut bytes, &together);
         linked(&mut bytes, input, &defined)?;

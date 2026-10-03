@@ -11,6 +11,7 @@ All notable changes are recorded here. The format follows [Keep a Changelog](htt
 ### Fixed
 
 - The assembler takes `lcallw` and `ljmpw` through memory, which arch/x86/boot/pm.c writes as `lcallw *%0` to call the real mode switch hook, and under `.code16gcc` a plain `lcall` is thirty two bits wide as gas makes it, since it pushes a return address on gcc's thirty two bit stack. Before, `lcallw *mem` was refused and a plain `lcall` was always sixteen bits.
+- A `.section` or `.pushsection` in a file of assembly with no flags gets what gas gives its name, which for a name outside gas's short table (`.text`, `.data`, `.rodata`, `.bss`, `.tdata`, `.tbss` and their dotted children, `.init`, `.fini` and the three arrays) is no flags at all. It used to be writable data, so the kernel's `.discard.ibt_endbr_noseal` and `.discard.unwind_hints` were `WA` where gas makes them neither. Flags given with no type keep the type the name implies, so `.section .note.gnu.property,"a"` is `SHT_NOTE` and `.bss.x` with `"aw"` takes no space in the file, and an array section has an entry size of a pointer, as gas writes them. Strings side by side in `.ascii` and `.asciz` are one string, so the kernel's `EXPORT_SYMBOL`, which writes `.ascii "" "\0"`, puts one zero byte in `.export_symbol` where it put the text `" "` and a zero. On the defconfig kernel-asm run these were the first difference in about 2800 of the 3042 units.
 
 ## 0.19.0
 
