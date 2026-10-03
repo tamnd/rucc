@@ -41,7 +41,7 @@ pub struct Selector {
     /// that has the instruction. A count this does not name, or one in a function built for a
     /// processor without the extension, is written out as arithmetic before selection. See
     /// [`crate::expand::counts`].
-    pub counts: &'static [crate::expand::Count],
+    pub counts: &'static [rucc_target::CountInst],
     /// The shape of each opcode, and the prefix a rule file puts in front of one.
     pub shapes: &'static MachineInsts,
     /// What an address constructor in a replacement stands for, or `None` for a name that is not

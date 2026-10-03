@@ -667,13 +667,8 @@ pub fn compile_recording(
     // processor the function is built for has the extension of. A `target` attribute on the
     // function says what it is built for in place of the command line.
     let isa = source.target.unwrap_or(flags.isa);
-    let counts: Vec<crate::expand::Count> = machine
-        .selector
-        .counts
-        .iter()
-        .copied()
-        .filter(|count| rucc_target::Feature::named(count.feature).is_some_and(|it| isa.has(it)))
-        .collect();
+    let counts: Vec<rucc_target::CountInst> =
+        machine.selector.counts.iter().copied().filter(|count| count.on(isa)).collect();
     let ran = lowering::group(source, names, machine.conv, switching, &counts, counting);
     if !ran.switches.is_empty() {
         let called = names.resolve(source.name).to_owned();

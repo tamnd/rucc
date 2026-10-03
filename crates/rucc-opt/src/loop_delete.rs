@@ -94,6 +94,14 @@
 //! [`crate::dce`]'s own notes call that out as a transformation worth having and a different one
 //! from what it does. When there is one, this gate is the thing to reconsider.
 //!
+//! # A loop that counts bits
+//!
+//! A loop with no count [`crate::scev`] can write may still be one that goes round once for each
+//! bit of a value, and then how many times it goes round is `ctpop`, `ctlz` or `cttz` of what the
+//! value came in as. [`walk`] recognises those and says which, and what such a loop hands over is
+//! worked out from that count the same way it is from any other. It is done only where the count
+//! is one instruction on the machine the function is built for, and [`walk`] says why.
+//!
 //! # What it does
 //!
 //! Works out in the preheader whatever the loop was going to leave behind, puts those values where
@@ -109,9 +117,12 @@ use rucc_ir::{Block, Builder, Def, Extra, Func, Inst, InstData, IntPred, Opcode,
 use crate::cfg::Cfg;
 use crate::dom::Dominators;
 use crate::loops::{LoopId, Loops};
+use crate::machine::Machine;
 use crate::purity::Facts;
 use crate::scev::{Assumption, Count, Invariant, Plain, Reading, Scev};
 use crate::{Analyses, Fuel, Pass, Preserved, Stats};
+
+mod walk;
 
 const DELETED: &str = "loop taken out, it comes back and leaves nothing behind";
 const WRITTEN: &str = "what the loop was going to leave behind worked out in front of it instead";
@@ -123,6 +134,9 @@ const NO_FORM: &str =
     "loop left as it was, what it leaves behind is not a thing this can work out in front of it";
 const ENTRIES: &str = "loop left as it was, it is reached somewhere other than at its header";
 const NO_FUEL: &str = "loop left as it was, the pass ran out of fuel";
+const COUNTED: &str = "loop counting the bits of a value replaced by one count in front of it";
+const NO_INSTRUCTION: &str =
+    "loop left as it was, it counts bits and the count is not one instruction on this machine";
 
 /// Section 17's dead code elimination, asked about a loop rather than about an instruction.
 #[derive(Debug)]
@@ -160,6 +174,9 @@ impl Pass for LoopDelete {
                 stats.optimized(WRITTEN);
             }
             stats.optimized(DELETED);
+            if job.walk.is_some() && !job.ends.is_empty() {
+                stats.optimized(COUNTED);
+            }
             an.clear();
             crate::simplify_cfg::sweep(func, an, &mut stats);
         }
@@ -193,6 +210,23 @@ struct Job {
     ends: Vec<(Value, Leaves)>,
     /// Whether the count is only right for a loop that was entered, which is what the clamp is for.
     entered: bool,
+    /// The bits the loop walks, when that is where its count came from rather than from
+    /// [`crate::scev`].
+    walk: Option<walk::Walk>,
+}
+
+/// Where the number of times round came from, which decides how each value is worked out.
+#[derive(Clone, Copy, Debug)]
+enum Times {
+    /// [`crate::scev`]'s count, read the way its exit test read it.
+    Counted {
+        /// The count.
+        count: Count,
+        /// How the exit test read what the count is built on.
+        reading: Reading,
+    },
+    /// A count of the bits of a value, which [`walk::count`] writes in front of the loop.
+    Walked(walk::Walk),
 }
 
 /// What a value the loop defines holds by the time anything outside it looks.
@@ -223,6 +257,19 @@ enum Leaves {
         /// How the exit test read what the count is built on, which is the widening owed.
         reading: Reading,
     },
+    /// `base + step * count`, where the count is one bit count of a value the loop walked.
+    ///
+    /// The count is never negative and never more than the width, so there is no clamp, and the
+    /// walk's offset is already in `base`.
+    Walked {
+        /// The type it evolved in, which is the type the arithmetic is done in.
+        ty: Type,
+        /// What the value holds the first time anything outside could have looked, less one step
+        /// for each the walk's offset takes off the count.
+        base: Invariant,
+        /// How much it goes up by each time round.
+        step: Invariant,
+    },
 }
 
 /// The innermost loop that can go, and what it would take.
@@ -237,6 +284,7 @@ fn plan(
     stats: &mut Stats,
     say: bool,
 ) -> Option<Job> {
+    let machine = an.machine();
     let facts = an.purity();
     let cfg = an.cfg(func);
     let doms = an.dominators(func);
@@ -247,7 +295,7 @@ fn plan(
         if done.contains(&loops.header(id)) {
             continue;
         }
-        match consider(func, cfg, doms, loops, facts, &mut scev, id) {
+        match consider(func, cfg, doms, loops, facts, machine, &mut scev, id) {
             Ok(job) => {
                 let depth = loops.depth(id);
                 if found.as_ref().is_none_or(|(had, _)| depth > *had) {
@@ -262,12 +310,14 @@ fn plan(
 }
 
 /// Whether this loop can go, and why not when it cannot.
+#[allow(clippy::too_many_arguments)]
 fn consider(
     func: &Func,
     cfg: &Cfg,
     doms: &Dominators,
     loops: &Loops,
     facts: &Facts,
+    machine: Machine,
     scev: &mut Scev<'_>,
     id: LoopId,
 ) -> Result<Job, &'static str> {
@@ -306,12 +356,27 @@ fn consider(
     // and nothing in here needs to know how many steps that took. What is not allowed is a loop
     // ending on `!=` whose counter may step past its limit, and that is the one assumption
     // [`crate::scev::Bound::comes_back`] holds back.
-    let bound = scev.bound(id).ok_or(NO_COUNT)?;
-    // Taken here rather than inside [`ending`] because it belongs to the exit test rather than to
-    // any one value the loop hands over, so every one of them owes the same widening.
-    let reading = bound.reading();
-    let entered = bound.assumptions().contains(&Assumption::Entered);
-    let count = bound.comes_back().ok_or(NO_COUNT)?;
+    //
+    // The reading is taken here rather than inside [`ending`] because it belongs to the exit test
+    // rather than to any one value the loop hands over, so every one of them owes the same
+    // widening.
+    let counted = scev.bound(id).and_then(|bound| {
+        let count = bound.comes_back()?;
+        let entered = bound.assumptions().contains(&Assumption::Entered);
+        Some((Times::Counted { count, reading: bound.reading() }, entered))
+    });
+    // A loop with no such count may still count the bits of a value, and that comes back too.
+    let (times, entered) = match counted {
+        Some(counted) => counted,
+        None => {
+            let walk = walk::walk(func, cfg, doms, loops, id, preheader, *only).ok_or(NO_COUNT)?;
+            (Times::Walked(walk), false)
+        }
+    };
+    let walked = match times {
+        Times::Walked(walk) => Some(walk),
+        Times::Counted { .. } => None,
+    };
 
     let term = func.terminator(only.from).ok_or(SHAPE)?;
     let leaving = func.successors(term).find(|call| call.block == only.to).ok_or(SHAPE)?;
@@ -333,14 +398,25 @@ fn consider(
 
     let mut ends = Vec::with_capacity(wanted.len());
     for value in wanted {
-        let end = ending(func, scev, id, value, count, reading).ok_or(NO_FORM)?;
+        let end = ending(func, scev, id, value, times).ok_or(NO_FORM)?;
         debug_assert!(
             names(end).iter().all(|&on| doms.dominates(defined_in(func, on), preheader)),
             "a value the loop does not change is defined outside it and so dominates the preheader"
         );
         ends.push((value, end));
     }
-    Ok(Job { header, preheader, exit: only.to, inside, args, ends, entered })
+    if let Some(walk) = walked {
+        debug_assert!(
+            doms.dominates(defined_in(func, walk.from), preheader),
+            "the value walked is handed to the header by the preheader and so dominates it"
+        );
+        // Only where something reads the count. A loop nobody reads anything out of goes for
+        // nothing whatever the machine has, since it was shown to come back.
+        if !ends.is_empty() && !machine.counts_in_one(func, walk.step.opcode(), walk.bits(func)) {
+            return Err(NO_INSTRUCTION);
+        }
+    }
+    Ok(Job { header, preheader, exit: only.to, inside, args, ends, entered, walk: walked })
 }
 
 /// Every value the loop defines that a block outside it names, in the order they turn up.
@@ -384,8 +460,7 @@ fn ending(
     scev: &mut Scev<'_>,
     id: LoopId,
     value: Value,
-    count: Count,
-    reading: Reading,
+    times: Times,
 ) -> Option<Leaves> {
     let chrec = scev.evolution(id, value).chrec()?;
     // The arithmetic below is integer arithmetic in one lane. A chrec over anything else is not a
@@ -393,6 +468,16 @@ fn ending(
     if !chrec.ty.is_int() || chrec.ty.is_vector() {
         return None;
     }
+    let (count, reading) = match times {
+        Times::Counted { count, reading } => (count, reading),
+        Times::Walked(walk) => {
+            let less = chrec.step.times(Invariant::number(walk.offset()))?;
+            let base = chrec.base.plus(less)?;
+            writable(func, base, chrec.ty)?;
+            writable(func, chrec.step, chrec.ty)?;
+            return Some(Leaves::Walked { ty: chrec.ty, base, step: chrec.step });
+        }
+    };
     match count {
         Count::Exact(trips) => {
             let trips = i128::try_from(trips).ok()?;
@@ -443,6 +528,7 @@ fn names(leaves: Leaves) -> Vec<Value> {
         Leaves::Built { base, step, count, .. } => {
             [on(base), on(step), count.value].into_iter().flatten().collect()
         }
+        Leaves::Walked { base, step, .. } => [on(base), on(step)].into_iter().flatten().collect(),
     }
 }
 
@@ -473,6 +559,15 @@ fn apply(func: &mut Func, job: &Job) -> usize {
                     Some(had) => had,
                     None if job.entered => *times.insert(clamped(func, term, count, reading)),
                     None => *times.insert(widened(func, term, count, reading)),
+                };
+                built(func, term, ty, base, step, all)
+            }
+            Leaves::Walked { ty, base, step } => {
+                let walk =
+                    job.walk.expect("a value worked out from a walk is in a loop that is one");
+                let all = match times {
+                    Some(had) => had,
+                    None => *times.insert(walk::count(func, term, walk)),
                 };
                 built(func, term, ty, base, step, all)
             }
@@ -690,9 +785,11 @@ mod tests {
         Block, Builder, Def, Flags, Func, IntPred, MemInfo, MemOrder, Module, Opcode, Restrict,
         Signature, Type, Value, verify_func,
     };
-    use rucc_target::{TargetInfo, Triple};
+    use rucc_target::{Isa, TargetInfo, Triple};
 
-    use super::{DELETED, EFFECTS, LoopDelete, NO_COUNT, NO_FORM, NO_FUEL, WRITTEN};
+    use super::{
+        COUNTED, DELETED, EFFECTS, LoopDelete, NO_COUNT, NO_FORM, NO_FUEL, NO_INSTRUCTION, WRITTEN,
+    };
     use crate::stats::Kind;
     use crate::{Fuel, Pass, Stats};
 
@@ -1128,5 +1225,192 @@ mod tests {
         let mut func = Func::new(names.intern("f"), Signature::new());
         let stats = delete(&mut func, &mut Fuel::unlimited());
         assert_eq!(stats.count(Kind::Optimized, DELETED), 0);
+    }
+
+    /// What a loop that walks the bits of its argument takes off it each time round.
+    #[derive(Clone, Copy, PartialEq)]
+    enum Bits {
+        /// `x &= x - 1` while `x` is not zero.
+        Lowest,
+        /// `x >>= 1` while `x` is not zero.
+        Down,
+        /// `x <<= 1` while the top bit of `x` is clear.
+        Leading,
+    }
+
+    /// A loop counting the bits of the one argument, in the shape [`crate::header_copy`] leaves
+    /// `while (x) { x &= x - 1; n++; }` in, with the copied tests in front of it.
+    ///
+    /// ```text
+    /// entry(x): nonzero = x != 0; br nonzero -> top(), done(0)    or jump top() with no guard
+    /// top(): high = x & MIN; clear = high == 0; br clear -> pre(), done(0)    or jump pre()
+    /// pre(): jump head(x, 0)
+    /// head(p, c): u = step p; n = c + 1; test = waits u; br test -> head(u, n), out()
+    /// out(): jump done(n)
+    /// done(r): ret r
+    /// ```
+    fn walking(bits: Bits, nonzero: bool, top: bool) -> (Interner, Func) {
+        let mut names = Interner::new();
+        let int = Type::int(32);
+        let signature = Signature::new().with_params(&[int]).with_returns(&[int]);
+        let mut func = Func::new(names.intern("f"), signature);
+        let entry = func.create_block();
+        let above = func.create_block();
+        let pre = func.create_block();
+        let head = func.create_block();
+        let out = func.create_block();
+        let done = func.create_block();
+        let x = func.append_param(entry, int);
+        let p = func.append_param(head, int);
+        let c = func.append_param(head, int);
+        let r = func.append_param(done, int);
+
+        let mut build = Builder::new(&mut func, entry);
+        let zero = build.iconst(int, 0);
+        if nonzero {
+            let test = build.icmp(IntPred::Ne, x, zero);
+            build.br_if(test, above, &[], done, &[zero]);
+        } else {
+            build.jump(above, &[]);
+        }
+        let mut build = Builder::new(&mut func, above);
+        let zero = build.iconst(int, 0);
+        let min = build.iconst(int, i128::from(i32::MIN));
+        if top {
+            let high = build.binary(Opcode::And, x, min, Flags::NONE);
+            let clear = build.icmp(IntPred::Eq, high, zero);
+            build.br_if(clear, pre, &[], done, &[zero]);
+        } else {
+            build.jump(pre, &[]);
+        }
+        let mut build = Builder::new(&mut func, pre);
+        let zero = build.iconst(int, 0);
+        build.jump(head, &[x, zero]);
+
+        let mut build = Builder::new(&mut func, head);
+        let one = build.iconst(int, 1);
+        let zero = build.iconst(int, 0);
+        let (u, test) = match bits {
+            Bits::Lowest => {
+                let less = build.binary(Opcode::Sub, p, one, Flags::NONE);
+                let u = build.binary(Opcode::And, p, less, Flags::NONE);
+                (u, build.icmp(IntPred::Ne, u, zero))
+            }
+            Bits::Down => {
+                let u = build.binary(Opcode::LShr, p, one, Flags::NONE);
+                (u, build.icmp(IntPred::Ne, u, zero))
+            }
+            Bits::Leading => {
+                let u = build.binary(Opcode::Shl, p, one, Flags::NONE);
+                let min = build.iconst(int, i128::from(i32::MIN));
+                let high = build.binary(Opcode::And, u, min, Flags::NONE);
+                (u, build.icmp(IntPred::Eq, high, zero))
+            }
+        };
+        let n = build.binary(Opcode::Add, c, one, Flags::NSW);
+        build.br_if(test, head, &[u, n], out, &[]);
+        Builder::new(&mut func, out).jump(done, &[n]);
+        Builder::new(&mut func, done).ret(&[r]);
+        (names, func)
+    }
+
+    /// Runs the pass with the x86-64 counts, on a processor with those extensions.
+    fn counting(func: &mut Func, isa: &[&str]) -> Stats {
+        let machine = crate::machine::fixtures::machine()
+            .counting(rucc_target::x86_64::COUNTS)
+            .built_for(Isa::of(isa));
+        LoopDelete.run(func, &mut crate::Analyses::new(machine), &mut Fuel::unlimited())
+    }
+
+    /// The `while (x) { x &= x - 1; n++; }` of section 20.4, behind the test `crate::header_copy`
+    /// copied in front of it, comes out as one `ctpop` of what `x` came in as.
+    ///
+    /// The total goes up by one and the test in front said the first test passed, so the count is
+    /// one fewer than `ctpop` and the total one more than the count, and what is handed over is
+    /// the count itself with no arithmetic around it.
+    #[test]
+    fn a_loop_clearing_the_lowest_set_bit_is_a_set_bit_count() {
+        let (mut names, mut func) = walking(Bits::Lowest, true, false);
+        let stats = counting(&mut func, &["popcnt"]);
+        assert_eq!(stats.count(Kind::Optimized, COUNTED), 1);
+        assert_eq!(loops(&func), 0);
+        assert_eq!(tally(&func, Opcode::Ctpop), 1);
+        sound(&func, &mut names);
+        assert_eq!(tally(&func, Opcode::Add) + tally(&func, Opcode::Mul), 0, "nothing around it");
+    }
+
+    /// Section 20.6. Without `popcnt` the count is a dozen instructions and the loop goes round
+    /// once a bit, so it stays, and says why.
+    #[test]
+    fn a_count_the_processor_has_no_instruction_for_leaves_the_loop_alone() {
+        let (mut names, mut func) = walking(Bits::Lowest, true, false);
+        let stats = counting(&mut func, &[]);
+        assert_eq!(stats.count(Kind::Optimized, DELETED), 0);
+        assert_eq!(stats.count(Kind::Missed, NO_INSTRUCTION), 1);
+        assert_eq!(loops(&func), 1);
+        assert_eq!(tally(&func, Opcode::Ctpop), 0);
+        sound(&func, &mut names);
+    }
+
+    /// A `target` attribute says what the function is built for in place of the command line,
+    /// which is the choice the code generator makes too.
+    #[test]
+    fn a_function_built_for_popcnt_counts_on_a_machine_that_is_not() {
+        let (mut names, mut func) = walking(Bits::Lowest, true, false);
+        func.target = Some(Isa::of(&["popcnt"]));
+        let stats = counting(&mut func, &[]);
+        assert_eq!(stats.count(Kind::Optimized, COUNTED), 1);
+        assert_eq!(tally(&func, Opcode::Ctpop), 1);
+        sound(&func, &mut names);
+    }
+
+    /// With nothing in front of it the loop goes round once for a zero, so the count is of what
+    /// one step leaves, worked out in front of the loop, and the total is one more than that.
+    #[test]
+    fn a_loop_with_no_test_in_front_counts_what_one_step_leaves() {
+        let (mut names, mut func) = walking(Bits::Lowest, false, false);
+        let stats = counting(&mut func, &["popcnt"]);
+        assert_eq!(stats.count(Kind::Optimized, COUNTED), 1);
+        assert_eq!(loops(&func), 0);
+        assert_eq!(tally(&func, Opcode::Ctpop), 1);
+        assert_eq!(tally(&func, Opcode::And), 1, "the one step, done once");
+        sound(&func, &mut names);
+    }
+
+    /// `x >>= 1` until nothing is left is how many bits it takes to write `x`, which is the width
+    /// less the leading zeros.
+    #[test]
+    fn a_loop_shifting_right_until_nothing_is_left_is_the_width_less_the_leading_zeros() {
+        let (mut names, mut func) = walking(Bits::Down, true, false);
+        let stats = counting(&mut func, &["lzcnt"]);
+        assert_eq!(stats.count(Kind::Optimized, COUNTED), 1);
+        assert_eq!(loops(&func), 0);
+        assert_eq!(tally(&func, Opcode::Ctlz), 1);
+        assert_eq!(tally(&func, Opcode::Sub), 1, "the width less the count");
+        sound(&func, &mut names);
+    }
+
+    /// `x <<= 1` until the top bit is set never comes back for a zero, so it is taken where both
+    /// tests in front of it say it starts on something that is not zero and has the top bit clear.
+    #[test]
+    fn a_loop_shifting_left_to_the_top_bit_is_the_leading_zeros() {
+        let (mut names, mut func) = walking(Bits::Leading, true, true);
+        let stats = counting(&mut func, &["lzcnt"]);
+        assert_eq!(stats.count(Kind::Optimized, COUNTED), 1);
+        assert_eq!(loops(&func), 0);
+        assert_eq!(tally(&func, Opcode::Ctlz), 1);
+        sound(&func, &mut names);
+    }
+
+    /// Without the copied test in front, the value one step on may be zero for a value that came
+    /// in with only its top bit set, and then the loop never comes back. So it stays.
+    #[test]
+    fn a_loop_shifting_left_with_no_test_in_front_is_left_alone() {
+        let (mut names, mut func) = walking(Bits::Leading, true, false);
+        let stats = counting(&mut func, &["lzcnt"]);
+        assert_eq!(stats.count(Kind::Optimized, DELETED), 0);
+        assert_eq!(stats.count(Kind::Missed, NO_COUNT), 1);
+        assert_eq!(loops(&func), 1);
+        sound(&func, &mut names);
     }
 }

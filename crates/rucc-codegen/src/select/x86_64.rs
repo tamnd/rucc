@@ -20,15 +20,7 @@ include!(concat!(env!("OUT_DIR"), "/x86-64.rs"));
 /// What the lowering asks of x86-64.
 pub static SELECTOR: super::Selector = super::Selector {
     table: &TABLE,
-    counts: &[
-        crate::expand::Count {
-            opcode: rucc_ir::Opcode::Ctpop,
-            feature: "popcnt",
-            widths: &[32, 64],
-        },
-        crate::expand::Count { opcode: rucc_ir::Opcode::Ctlz, feature: "lzcnt", widths: &[32, 64] },
-        crate::expand::Count { opcode: rucc_ir::Opcode::Cttz, feature: "bmi", widths: &[32, 64] },
-    ],
+    counts: rucc_target::x86_64::COUNTS,
     shapes: &rucc_target::x86_64::MACHINE,
     address: rucc_target::x86_64::address,
     frame: &rucc_target::x86_64::FRAME,
