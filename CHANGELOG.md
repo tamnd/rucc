@@ -4,6 +4,10 @@ All notable changes are recorded here. The format follows [Keep a Changelog](htt
 
 ## Unreleased
 
+## 0.19.1
+
+A patch release on the way to K2, the kernel's objects and link. The assembler now writes every `.S` unit and every gcc `-S` output of the x86-64 defconfig kernel byte for byte the same as gas 2.44, all 3042 of them in the kernel-asm corpus. On the way it gained `.debug_frame`, gas's section flags, gas's first round of relaxation, its `.eh_frame` padding, its local commons and its code padding, and the last instructions it refused in the kernel.
+
 ### Added
 
 - The assembler writes `.debug_frame` when `.cfi_sections .debug_frame` asks for it, where it used to write no frame rules at all. The kernel's boot code under `arch/x86/boot` asks for exactly that, and the section now comes out byte for byte the same as gas's on both 64 bit and 16 bit code, with the same relocations.
