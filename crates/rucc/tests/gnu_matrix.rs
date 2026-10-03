@@ -418,3 +418,41 @@ fn the_hints_gcc_answers_yes_for_are_taken_without_a_word() {
     );
     assert_eq!(got, "");
 }
+
+#[test]
+fn the_promises_and_the_tool_hints_gcc_answers_yes_for_are_taken_without_a_word() {
+    // Each of these is a promise gcc may optimize on, a request about a transformation this
+    // compiler never makes, or a word to a tool it does not have: a sanitizer, the analyzer or
+    // the debugger. None of them changes what a correct program does, `__has_attribute` answers
+    // yes for each as gcc 13 does, and they are taken without a word.
+    let got = said(
+        "promises",
+        "#include <stddef.h>\n\
+         __attribute__((nothrow, leaf)) int get(void);\n\
+         __attribute__((__nothrow__, __leaf__)) int get2(void);\n\
+         __attribute__((artificial, always_inline)) static inline int twice(int x) {\n\
+           return 2 * x;\n\
+         }\n\
+         __attribute__((alloc_align(2), malloc)) void *grab(size_t, size_t);\n\
+         __attribute__((noplt)) int far(void);\n\
+         __attribute__((no_icf)) int same(void) { return 1; }\n\
+         __attribute__((no_sanitize_address, no_address_safety_analysis, no_sanitize_thread,\n\
+                        no_sanitize_undefined, no_sanitize_coverage))\n\
+         int raw(int *p) { return *p; }\n\
+         __attribute__((no_split_stack, no_stack_limit)) int deep(int x) {\n\
+           return x ? deep(x - 1) : 0;\n\
+         }\n\
+         __attribute__((tainted_args)) int handle(int cmd);\n\
+         __attribute__((fd_arg(1), fd_arg_read(2), fd_arg_write(3))) int pass(int, int, int);\n\
+         int use(void) {\n\
+           return get() + get2() + twice(far()) + handle(0) + pass(0, 1, 2) + (grab(8, 16) != 0);\n\
+         }\n\
+         #define HAS(name) _Static_assert(__has_attribute(name), #name)\n\
+         HAS(nothrow); HAS(leaf); HAS(artificial); HAS(alloc_align); HAS(noplt); HAS(no_icf);\n\
+         HAS(no_sanitize_address); HAS(no_address_safety_analysis);\n\
+         HAS(no_sanitize_thread); HAS(no_sanitize_undefined); HAS(no_sanitize_coverage);\n\
+         HAS(no_split_stack); HAS(no_stack_limit); HAS(tainted_args); HAS(fd_arg);\n\
+         HAS(fd_arg_read); HAS(fd_arg_write);\n",
+    );
+    assert_eq!(got, "");
+}

@@ -376,6 +376,51 @@ tests = ["tests/accept/attributes-that-ask-for-nothing-this-compiler-does.c"]
 notes = "Says a function is to be left out of the instrumentation the sanitizers named ask for. This compiler refuses `-fsanitize=` for every sanitizer, so nothing is ever instrumented and the promise is kept by doing nothing. When a sanitizer is taken this has to be read."
 
 [[feature]]
+name = "no_sanitize_address"
+kind = "attribute"
+gcc_version = "4.8"
+status = "implemented"
+used_by = ["linux"]
+tests = ["rucc::the_promises_and_the_tool_hints_gcc_answers_yes_for_are_taken_without_a_word"]
+notes = "`no_sanitize` naming `address`, under its older name. This compiler refuses `-fsanitize=` for every sanitizer, so nothing is ever instrumented and the promise is kept by doing nothing. When a sanitizer is taken this has to be read."
+
+[[feature]]
+name = "no_address_safety_analysis"
+kind = "attribute"
+gcc_version = "4.8"
+status = "implemented"
+used_by = []
+tests = ["rucc::the_promises_and_the_tool_hints_gcc_answers_yes_for_are_taken_without_a_word"]
+notes = "The first name `no_sanitize_address` had, still taken by gcc. This compiler refuses `-fsanitize=` for every sanitizer, so nothing is ever instrumented and the promise is kept by doing nothing. When a sanitizer is taken this has to be read."
+
+[[feature]]
+name = "no_sanitize_thread"
+kind = "attribute"
+gcc_version = "5.0"
+status = "implemented"
+used_by = ["linux"]
+tests = ["rucc::the_promises_and_the_tool_hints_gcc_answers_yes_for_are_taken_without_a_word"]
+notes = "`no_sanitize` naming `thread`, under its older name. This compiler refuses `-fsanitize=` for every sanitizer, so nothing is ever instrumented and the promise is kept by doing nothing. When a sanitizer is taken this has to be read."
+
+[[feature]]
+name = "no_sanitize_undefined"
+kind = "attribute"
+gcc_version = "4.9"
+status = "implemented"
+used_by = ["linux"]
+tests = ["rucc::the_promises_and_the_tool_hints_gcc_answers_yes_for_are_taken_without_a_word"]
+notes = "`no_sanitize` naming `undefined`, under its older name. This compiler refuses `-fsanitize=` for every sanitizer, so nothing is ever instrumented and the promise is kept by doing nothing. When a sanitizer is taken this has to be read."
+
+[[feature]]
+name = "no_sanitize_coverage"
+kind = "attribute"
+gcc_version = "12.0"
+status = "implemented"
+used_by = ["linux"]
+tests = ["rucc::the_promises_and_the_tool_hints_gcc_answers_yes_for_are_taken_without_a_word"]
+notes = "Takes a function out of `-fsanitize-coverage=`, which this compiler does not take either, so nothing is ever instrumented. When it is taken this has to be read."
+
+[[feature]]
 name = "naked"
 kind = "attribute"
 gcc_version = "4.7"
@@ -555,6 +600,24 @@ status = "implemented"
 used_by = ["linux"]
 tests = ["rucc::a_function_that_says_no_stack_protector_gets_none_under_any_flag", "rucc-pp::the_kernel_s_compiler_attributes_are_answered_the_way_gcc_answers_them"]
 notes = "The kernel writes it on the code that runs before the canary is set up, where a check on the way out would fail in a function that did nothing wrong. Read on any declaration of the name and wins over every `-fstack-protector` flag."
+
+[[feature]]
+name = "no_split_stack"
+kind = "attribute"
+gcc_version = "4.6"
+status = "implemented"
+used_by = []
+tests = ["rucc::the_promises_and_the_tool_hints_gcc_answers_yes_for_are_taken_without_a_word"]
+notes = "Takes a function out of `-fsplit-stack`, which this compiler does not have, so every function already keeps the one stack it was called on."
+
+[[feature]]
+name = "no_stack_limit"
+kind = "attribute"
+gcc_version = "4.2"
+status = "implemented"
+used_by = []
+tests = ["rucc::the_promises_and_the_tool_hints_gcc_answers_yes_for_are_taken_without_a_word"]
+notes = "Takes a function out of `-fstack-limit-register=` and `-fstack-limit-symbol=`, which this compiler does not have, so no function checks a limit."
 
 [[feature]]
 name = "function_return"
@@ -804,6 +867,60 @@ tests = ["rucc::the_hints_gcc_answers_yes_for_are_taken_without_a_word"]
 notes = "Lets gcc drop a null check on what the function returns. Dropping the attribute keeps the check, which is always correct."
 
 [[feature]]
+name = "alloc_align"
+kind = "attribute"
+gcc_version = "4.9"
+status = "implemented"
+used_by = ["glibc"]
+tests = ["rucc::the_promises_and_the_tool_hints_gcc_answers_yes_for_are_taken_without_a_word"]
+notes = "Says what the argument it names is the alignment of the pointer returned, which glibc writes on `aligned_alloc` and `memalign`. Lets gcc assume the alignment, and dropping it is always correct."
+
+[[feature]]
+name = "leaf"
+kind = "attribute"
+gcc_version = "4.6"
+status = "implemented"
+used_by = ["glibc"]
+tests = ["rucc::the_promises_and_the_tool_hints_gcc_answers_yes_for_are_taken_without_a_word"]
+notes = "Promises that the function does not call back into the unit, which glibc's `__THROW` writes on nearly every function it declares. Lets gcc keep a static variable in a register across the call, and dropping it is always correct."
+
+[[feature]]
+name = "nothrow"
+kind = "attribute"
+gcc_version = "3.3"
+status = "implemented"
+used_by = ["glibc"]
+tests = ["rucc::the_promises_and_the_tool_hints_gcc_answers_yes_for_are_taken_without_a_word"]
+notes = "Promises that the function throws no exception, which glibc's `__THROW` writes beside `leaf`. C has none to throw, and the unwind tables and `cleanup` landing pads are written as if any call might unwind, which is always correct."
+
+[[feature]]
+name = "artificial"
+kind = "attribute"
+gcc_version = "4.3"
+status = "implemented"
+used_by = ["glibc"]
+tests = ["rucc::the_promises_and_the_tool_hints_gcc_answers_yes_for_are_taken_without_a_word"]
+notes = "Asks the debugger to treat an inlined body as the line it was called from, which gcc's intrinsic headers write on every intrinsic and glibc's `_FORTIFY_SOURCE` wrappers write on theirs. It changes only the debug information, which is still correct without it, with the inlined lines named as their own."
+
+[[feature]]
+name = "noplt"
+kind = "attribute"
+gcc_version = "6.0"
+status = "implemented"
+used_by = []
+tests = ["rucc::the_promises_and_the_tool_hints_gcc_answers_yes_for_are_taken_without_a_word"]
+notes = "Asks that a call to the function go through the GOT rather than the PLT. The call through the PLT reaches the same function, so dropping it is always correct."
+
+[[feature]]
+name = "no_icf"
+kind = "attribute"
+gcc_version = "5.0"
+status = "implemented"
+used_by = []
+tests = ["rucc::the_promises_and_the_tool_hints_gcc_answers_yes_for_are_taken_without_a_word"]
+notes = "Keeps a function from being folded into another identical one, and gcc 13 ignores it on an object with its `-Wattributes` warning. This compiler folds no two functions into one, so every function already keeps its own address."
+
+[[feature]]
 name = "warn_unused_result"
 kind = "attribute"
 gcc_version = "3.4"
@@ -829,6 +946,42 @@ status = "implemented"
 used_by = ["glibc"]
 tests = ["rucc::the_hints_gcc_answers_yes_for_are_taken_without_a_word"]
 notes = "Says how a function reads or writes through a pointer parameter, for gcc's warnings about out of bounds and uninitialized reads. None of them is given here and nothing is assumed from it, so taking it changes nothing a correct program does."
+
+[[feature]]
+name = "tainted_args"
+kind = "attribute"
+gcc_version = "12.0"
+status = "implemented"
+used_by = []
+tests = ["rucc::the_promises_and_the_tool_hints_gcc_answers_yes_for_are_taken_without_a_word"]
+notes = "Asks `-fanalyzer` to treat the arguments as attacker controlled. This compiler has no analyzer, so there is nothing to tell."
+
+[[feature]]
+name = "fd_arg"
+kind = "attribute"
+gcc_version = "13.0"
+status = "implemented"
+used_by = []
+tests = ["rucc::the_promises_and_the_tool_hints_gcc_answers_yes_for_are_taken_without_a_word"]
+notes = "Tells `-fanalyzer` the argument is an open file descriptor. This compiler has no analyzer, so there is nothing to tell."
+
+[[feature]]
+name = "fd_arg_read"
+kind = "attribute"
+gcc_version = "13.0"
+status = "implemented"
+used_by = []
+tests = ["rucc::the_promises_and_the_tool_hints_gcc_answers_yes_for_are_taken_without_a_word"]
+notes = "Tells `-fanalyzer` the argument is a file descriptor open for reading. This compiler has no analyzer, so there is nothing to tell."
+
+[[feature]]
+name = "fd_arg_write"
+kind = "attribute"
+gcc_version = "13.0"
+status = "implemented"
+used_by = []
+tests = ["rucc::the_promises_and_the_tool_hints_gcc_answers_yes_for_are_taken_without_a_word"]
+notes = "Tells `-fanalyzer` the argument is a file descriptor open for writing. This compiler has no analyzer, so there is nothing to tell."
 
 [[feature]]
 name = "counted_by"
