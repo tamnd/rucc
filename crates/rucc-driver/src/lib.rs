@@ -4370,13 +4370,26 @@ fn counted<'a>(opts: &'a Options, job: &Job) -> std::borrow::Cow<'a, Options> {
     let path = match &opts.profile_data.dir {
         Some(dir) => {
             let dir = cwd.join(dir);
-            dir.join(full.display().to_string().replace('/', "#")).display().to_string()
+            dir.join(folded(&full.display().to_string())).display().to_string()
         }
         None => full.display().to_string(),
     };
     let mut opts = opts.clone();
     opts.profile_data.counts = Some(path);
     std::borrow::Cow::Owned(opts)
+}
+
+/// A whole path folded into one name for `-fprofile-dir=`, with every separator turned to `#`.
+///
+/// On Windows that is the backslash too, and the colon after the drive letter is turned to `~`,
+/// which is how gcc spells it on a DOS file system. Without that the name is still absolute, and
+/// joining it to the directory gives back the name alone.
+fn folded(path: &str) -> String {
+    if cfg!(windows) {
+        path.replace(['/', '\\'], "#").replacen(':', "~", 1)
+    } else {
+        path.replace('/', "#")
+    }
 }
 
 /// Writes the `.gcno` file `-ftest-coverage` asked for, unless the compilation stopped before
