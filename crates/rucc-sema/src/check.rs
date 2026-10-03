@@ -78,6 +78,7 @@ mod format;
 mod init;
 mod stmt;
 mod ty;
+mod weak;
 
 pub use crate::check::builtin::{library_name, unchecked_name, unimplemented_builtin};
 
