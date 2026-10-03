@@ -889,7 +889,14 @@ impl Checker<'_> {
             return value;
         }
         let args = self.tast.add_expr_refs(&args);
-        let ty = signature.ret;
+        // The value of a call has the unqualified version of the return type, which is C17's
+        // reading of DR 423 and what gcc does: `static const struct S f(void)` returns a
+        // `struct S`, and a qualifier on a value that is not an object says nothing. Keeping it
+        // made `*p = f()` convert the call's value to the unqualified type on the way into the
+        // assignment, and a structure converted that way was not an object lowering could copy
+        // out of, so Csmith's output, which writes `const` on a structure return type often, was
+        // refused with E0519.
+        let ty = self.types.unqualified(signature.ret);
         self.tast.expr(Expr::new(ExprKind::Call { callee, args }, ty, Category::Rvalue), span)
     }
 
