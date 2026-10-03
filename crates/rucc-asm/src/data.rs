@@ -618,7 +618,13 @@ fn place(
     if global.linkage == Linkage::Common {
         return Place::Merged;
     }
-    if !pieces.is_empty() && pieces.iter().all(|piece| matches!(piece, Piece::Zero(_))) {
+    // A constant stays out of the zeroed section even when every byte of it is zero, which is the
+    // rule gcc keeps in bss_initializer_p: what the program promised never to write belongs with
+    // the rest of what it reads only, where a stray store faults.
+    if !global.constant
+        && !pieces.is_empty()
+        && pieces.iter().all(|piece| matches!(piece, Piece::Zero(_)))
+    {
         return Place::Zero;
     }
     if global.constant {
@@ -978,6 +984,19 @@ mod tests {
         assert_eq!(data.objects[0].size, 4096);
         // The point of the section: a program with a large zeroed array is a small file.
         assert!(data.objects[0].bytes.is_empty());
+    }
+
+    #[test]
+    fn a_constant_of_nothing_but_zeros_is_read_only_and_not_zeroed_space() {
+        let mut names = Interner::new();
+        let mut module = module(&mut names);
+        let id = defined(&mut module, &mut names, "x", &[Datum::Zero(64)]);
+        module[id].size = 64;
+        module[id].constant = true;
+        let data =
+            globals(&module, &names, ObjectFormat::Elf).expect("a module of one global").image();
+        assert_eq!(data.objects[0].place, Place::ReadOnly);
+        assert_eq!(data.objects[0].bytes, vec![0; 64]);
     }
 
     #[test]

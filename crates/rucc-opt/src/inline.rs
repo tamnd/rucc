@@ -2374,6 +2374,111 @@ fn write_only(module: &mut Module) {
     }
 }
 
+/// Marks every `static` object that nothing writes as constant, which is what puts it in `.rodata`.
+///
+/// gcc does this at `-O1` and up in `ipa_discover_variable_flags`, for an object no other file can
+/// see, whose every reference is one the compiler can see, whose address is never taken and which
+/// nothing stores to. The kernel has a few of these and gcc's objects keep them with the read only
+/// data: `names_0` and `names_512` in lib/errname.c are tables of strings that only a load indexes,
+/// and `pt_regs_offset` in arch/x86/kernel/perf_regs.c is the same. rucc kept them in `.data`.
+///
+/// Only an object marked droppable is asked about, so one the program asked to keep stays where it
+/// was, and so does one in a section the program named or one that is thread local. Every use of
+/// its address has to be the address of a load, directly or through a `ptr_add` for an element or
+/// a field. An atomic load counts as taking the address, since gcc spells one as a call that is
+/// handed it. A store of any kind keeps the object written, and so does the address going anywhere
+/// else: into a call, an `asm`, a round trip through an integer, another object's initializer, an
+/// alias or a block argument.
+pub fn read_only(module: &mut Module) {
+    let mut candidates: Set<Symbol> = module
+        .globals()
+        .map(|id| &module[id])
+        .filter(|global| {
+            global.droppable
+                && !global.is_declaration()
+                && !global.constant
+                && global.section.is_none()
+                && global.tls.is_none()
+        })
+        .map(|global| global.name)
+        .collect();
+    if candidates.is_empty() {
+        return;
+    }
+    for id in module.globals() {
+        let init = module[id].init.map(|list| &module[list]).unwrap_or_default();
+        for datum in init {
+            if let Datum::Addr(reloc) | Datum::Away(reloc) | Datum::Apart { to: reloc, .. } = *datum
+            {
+                candidates.remove(&module[reloc].symbol);
+            }
+        }
+    }
+    for id in module.aliases() {
+        candidates.remove(&module[id].target);
+    }
+    for id in module.funcs() {
+        let func = &module[id];
+        let mut found: Map<Value, Symbol> = Map::default();
+        loop {
+            let before = found.len();
+            for inst in func.blocks().flat_map(|block| func.insts(block)) {
+                let data = &func[inst];
+                let from = match (data.opcode, data.extra) {
+                    (Opcode::GlobalAddr, Extra::Symbol(name)) if candidates.contains(&name) => {
+                        Some(name)
+                    }
+                    (Opcode::PtrAdd, _) => {
+                        func[data.args].first().and_then(|base| found.get(base).copied())
+                    }
+                    _ => None,
+                };
+                if let (Some(name), Some(result)) = (from, data.results().next()) {
+                    found.insert(result, name);
+                }
+            }
+            if found.len() == before {
+                break;
+            }
+        }
+        for inst in func.blocks().flat_map(|block| func.insts(block)) {
+            let data = &func[inst];
+            match data.extra {
+                Extra::Symbol(name) if data.opcode != Opcode::GlobalAddr => {
+                    candidates.remove(&name);
+                }
+                Extra::Call(info) => {
+                    if let Some(callee) = func[info].callee {
+                        candidates.remove(&callee);
+                    }
+                }
+                _ => {}
+            }
+            let load = data.opcode == Opcode::Load
+                && matches!(data.extra, Extra::Mem(mem) if func[mem].order == MemOrder::NotAtomic);
+            for (at, value) in func[data.args].iter().enumerate() {
+                let Some(name) = found.get(value) else { continue };
+                let fine = (load || data.opcode == Opcode::PtrAdd) && at == 0;
+                if !fine {
+                    candidates.remove(name);
+                }
+            }
+            for call in func.successors(inst) {
+                for value in &func[call.args] {
+                    if let Some(name) = found.get(value) {
+                        candidates.remove(name);
+                    }
+                }
+            }
+        }
+    }
+    for id in module.globals().collect::<Vec<GlobalId>>() {
+        if candidates.contains(&module[id].name) {
+            module[id].constant = true;
+        }
+    }
+}
+
 /// Turns every function that still holds a `va_arg_pack` or a `va_arg_pack_len`, and every one
 /// marked `inline_only`, into a declaration of the same name.
 fn withdraw(module: &mut Module) {
