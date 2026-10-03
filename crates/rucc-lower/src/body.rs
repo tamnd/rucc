@@ -102,6 +102,7 @@ pub(crate) fn lower(unit: &mut Unit<'_>, decl: DeclId, func: &mut Func, plan: &P
         grows: false,
         cleans: false,
         saves: false,
+        guarded: Set::default(),
         hooked: false,
         aligned: Map::default(),
         restrict: Scopes::default(),
@@ -163,10 +164,12 @@ pub(crate) fn lower(unit: &mut Unit<'_>, decl: DeclId, func: &mut Func, plan: &P
     // `no_stack_protector` wins over it, which is how gcc 13 reads a name with both.
     let flags = tast[decl].flags;
     let asked = flags.contains(DeclFlags::STACK_PROTECT) && body.unit.protector != Protector::None;
-    if !flags.contains(DeclFlags::NO_STACK_PROTECTOR)
-        && (asked || protects(&body, &locals, &escaped))
-    {
-        body.func.attrs.set |= AttrSet::STACK_PROTECT;
+    if !flags.contains(DeclFlags::NO_STACK_PROTECTOR) {
+        if asked || protects(&body) {
+            body.func.attrs.set |= AttrSet::STACK_PROTECT;
+        } else {
+            body.guarded = guarded(&body, &locals, &escaped);
+        }
     }
     // And what the command line said about fusing a multiply and an addition, which is a fact about
     // the compilation rather than about this function and is written onto it because the place that
@@ -365,7 +368,7 @@ const fn order_of(order: MemOrder) -> i128 {
     }
 }
 
-/// Whether this function gets a stack protector, which is a question about the locals it declares.
+/// Whether this function gets a stack protector whatever the optimizer does with its locals.
 ///
 /// A canary catches a write that runs off the end of something and keeps going, so what decides is
 /// whether the function has anything to run off the end of. The three answers are gcc's and so are
@@ -382,29 +385,46 @@ const fn order_of(order: MemOrder) -> i128 {
 /// The address taken case is what makes the middle one the one every distribution builds with. A
 /// local whose address escapes is one an overflow can reach through a pointer nothing here can
 /// follow, and the plain flag misses every single one of them.
-fn protects(body: &Body<'_, '_>, locals: &[DeclId], escaped: &Set<DeclId>) -> bool {
-    let want = body.unit.protector;
-    match want {
-        Protector::None | Protector::Explicit => return false,
-        Protector::All => return true,
-        Protector::Buffers | Protector::Strong => {}
+///
+/// The locals are asked about one at a time, in [`guarded`], since a local the optimizer turns into
+/// values is no longer anything to run off the end of.
+fn protects(body: &Body<'_, '_>) -> bool {
+    match body.unit.protector {
+        Protector::None | Protector::Explicit => false,
+        Protector::All => true,
+        // A stack that grows while the function runs is a variably modified type or an `alloca`,
+        // and it is the case the original flag was written for: nothing knows where the top of
+        // one of those is, so nothing can bound a write into it.
+        Protector::Buffers | Protector::Strong => body.grows,
     }
-    // A stack that grows while the function runs is a variably modified type or an `alloca`, and
-    // it is the case the original flag was written for: nothing knows where the top of one of
-    // those is, so nothing can bound a write into it.
-    if body.grows {
-        return true;
+}
+
+/// The locals that give the function a canary if they are still in its frame once it is
+/// optimized, which is what [`Flags::GUARD`] on their slot says.
+///
+/// gcc decides at expansion, after its early passes have turned a structure whose address only
+/// went into an inlined body into values. The kernel's `guard(rcu)()` and the `old` that
+/// `atomic_try_cmpxchg` is handed are that shape, and a function holding only those has no
+/// canary under gcc.
+fn guarded(body: &Body<'_, '_>, locals: &[DeclId], escaped: &Set<DeclId>) -> Set<DeclId> {
+    let want = body.unit.protector;
+    if !matches!(want, Protector::Buffers | Protector::Strong) {
+        return Set::default();
     }
     let types = body.types();
     let target = body.target();
     let tast = body.tast();
-    locals.iter().any(|&local| {
-        let ty = tast[local].ty;
-        match want {
-            Protector::Strong => escaped.contains(&local) || holds_array(types, ty),
-            _ => is_array(types, ty) && repr::size_of(types, target, ty) >= BUFFER,
-        }
-    })
+    locals
+        .iter()
+        .copied()
+        .filter(|&local| {
+            let ty = tast[local].ty;
+            match want {
+                Protector::Strong => escaped.contains(&local) || holds_array(types, ty),
+                _ => is_array(types, ty) && repr::size_of(types, target, ty) >= BUFFER,
+            }
+        })
+        .collect()
 }
 
 /// Whether an object of that type is an array.
@@ -737,6 +757,9 @@ struct Body<'a, 'u> {
     /// Whether anything in the function is a `__builtin_setjmp`, which is what stops a local
     /// being kept in a value rather than in the frame. See [`Body::declare`].
     saves: bool,
+    /// The locals whose slot gives the function a canary while the slot is in its frame. See
+    /// [`guarded`].
+    guarded: Set<DeclId>,
     /// Whether the function calls the profiling hooks, which puts one call in front of the first
     /// statement and one in front of every return. See [`Body::hook`].
     hooked: bool,
@@ -1150,10 +1173,12 @@ impl<'u> Body<'_, 'u> {
             pooled.blocks.push(block);
             self.func.align_mem(mem, align);
             self.func.declare_mem(mem, decl.raw());
+            self.guard(decl, slot);
             self.vars.insert(decl, Local::Slot(slot));
             return;
         }
         let (slot, mem) = self.alloca(size, align, span);
+        self.guard(decl, slot);
         if shares && block != 0 {
             self.nests.pool.push(Pooled { slot, mem, size, blocks: vec![block] });
         }
@@ -1164,6 +1189,17 @@ impl<'u> Body<'_, 'u> {
         // program named.
         self.func.declare_mem(mem, decl.raw());
         self.vars.insert(decl, Local::Slot(slot));
+    }
+
+    /// Marks the slot of a local [`guarded`] picked, which a slot shared with another local keeps
+    /// when either of the two was picked.
+    fn guard(&mut self, decl: DeclId, slot: Value) {
+        if !self.guarded.contains(&decl) {
+            return;
+        }
+        if let Def::Result { inst, .. } = self.func[slot].def {
+            self.func[inst].flags |= Flags::GUARD;
+        }
     }
 
     /// A stack slot of a fixed size, in the entry block where the verifier wants it.

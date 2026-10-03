@@ -1182,7 +1182,13 @@ struct Pool {
 
 impl Pool {
     /// A slot for the callee's `alloca` whose memory is `extra` to take over, when there is one.
-    fn take(&mut self, func: &mut Func, callee: &Func, extra: Extra) -> Option<Value> {
+    fn take(
+        &mut self,
+        func: &mut Func,
+        callee: &Func,
+        extra: Extra,
+        flags: Flags,
+    ) -> Option<Value> {
         let Extra::Mem(mem) = extra else { return None };
         if !self.on {
             return None;
@@ -1196,6 +1202,8 @@ impl Pool {
         *taken = site;
         let Extra::Mem(held) = func[*inst].extra else { return None };
         func.align_mem(held, wanted.align);
+        // A slot that holds a local wanting a canary wants one whichever local is in it.
+        func[*inst].flags |= flags.intersection(Flags::GUARD);
         func[*inst].first_result
     }
 
@@ -1823,7 +1831,7 @@ fn copy(func: &mut Func, call: Inst, callee: &Func, plan: &Plan, pool: &mut Pool
             let types: Vec<Type> = data.results().map(|value| callee[value].ty).collect();
             let shell = InstData { flags: data.flags, ..InstData::new(opcode) };
             let fixed = opcode == Opcode::Alloca && data.args.is_empty();
-            let taken = if fixed { pool.take(func, callee, data.extra) } else { None };
+            let taken = if fixed { pool.take(func, callee, data.extra, data.flags) } else { None };
             if let Some(slot) = taken {
                 let old = data.first_result.expect("an alloca has an address");
                 values.insert(old, slot);

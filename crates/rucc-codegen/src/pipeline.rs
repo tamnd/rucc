@@ -804,7 +804,15 @@ pub fn compile_recording(
     // Not in a naked function, whatever the command line asked of every function. The canary is a
     // word the prologue copies into the frame and the check at the end reads back, so a function
     // with neither has nowhere to put it and nowhere to read it from. gcc leaves one out too.
-    let protect = source.attrs.set.contains(ir::AttrSet::STACK_PROTECT) && !naked;
+    // A local the front end said wants one counts only while its slot is still in the frame, so a
+    // function whose arrays and escaping locals were all turned into values has none, as with gcc.
+    let guarded = || {
+        source.blocks().flat_map(|block| source.insts(block)).any(|inst| {
+            source[inst].opcode == ir::Opcode::Alloca
+                && source[inst].flags.contains(ir::Flags::GUARD)
+        })
+    };
+    let protect = (source.attrs.set.contains(ir::AttrSet::STACK_PROTECT) || guarded()) && !naked;
     let guard = protect.then_some(machine.conv.guard.as_ref()).flatten();
     // Nothing at all on a target with no hook to call, which is the same answer the protector gives
     // on a target with nowhere to keep its word, and the driver refuses the command line over it

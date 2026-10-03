@@ -171,6 +171,15 @@ impl Flags {
     /// its template says, which is what the qualifier is for.
     pub const INLINE: Self = Self(1 << 18);
 
+    /// The local is one `-fstack-protector` puts a canary in front of: an array, something
+    /// holding one, or under `-fstack-protector-strong` anything whose address is taken.
+    ///
+    /// The front end knows which locals those are, and only the code generator knows which of
+    /// them are still in the frame once the optimizer is done. A function gets a canary when one
+    /// of these is, which is when gcc decides too, at expansion, so a local the optimizer turned
+    /// into values takes its canary with it.
+    pub const GUARD: Self = Self(1 << 19);
+
     /// Every flag that tells the optimizer to leave an access exactly where it is.
     pub const KEEP: Self = Self(Self::VOLATILE.0 | Self::SEG_FS.0 | Self::SEG_GS.0);
 
@@ -276,7 +285,8 @@ impl Flags {
             // `ALIGNED` on the bounds check alone, because the alignment conjunct rides on that
             // one and the other two say nothing about where an access starts.
             Opcode::CheckBounds => Self::STATIC.union(Self::HANDED).union(Self::ALIGNED),
-            Opcode::Alloca | Opcode::PtrAdd => Self::NOALIAS,
+            Opcode::Alloca => Self::NOALIAS.union(Self::GUARD),
+            Opcode::PtrAdd => Self::NOALIAS,
             _ => Self::NONE,
         }
     }
@@ -348,6 +358,7 @@ static NAMED: &[(Flags, &str)] = &[
     (Flags::SEG_FS, "seg_fs"),
     (Flags::SEG_GS, "seg_gs"),
     (Flags::INLINE, "inline"),
+    (Flags::GUARD, "guard"),
 ];
 
 /// How strongly an atomic operation is ordered against everything around it.
