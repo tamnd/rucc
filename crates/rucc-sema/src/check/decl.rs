@@ -402,7 +402,11 @@ impl Checker<'_> {
         // A cloned function is built once for each version, and its `target` attribute, which
         // gcc drops with a warning, says nothing.
         let cloned = self.cloned(&[specs.attrs], DeclKind::Function);
-        let targeted = if cloned.is_some() { None } else { self.targeted(&[specs.attrs], specs.options, span) };
+        let targeted = if cloned.is_some() {
+            None
+        } else {
+            self.targeted(&[specs.attrs], specs.options, span)
+        };
         if let Some(versions) = cloned {
             self.tast.record_versions(id, versions);
         }
