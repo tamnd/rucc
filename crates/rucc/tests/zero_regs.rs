@@ -130,7 +130,8 @@ __attribute__((zero_call_used_regs(\"used-gpr-arg\"))) long uga(long a, long b) 
 }
 
 /// A call that became a jump leaves through the callee's `ret`, and a result nobody reads is not
-/// a register the body used.
+/// a register the body used. A function that returns nothing jumps to the call it ends with even
+/// when that call gives something back, so the second half is checked with sibling calls off.
 #[test]
 fn a_tail_call_clears_nothing_and_a_thrown_away_result_is_not_cleared() {
     let source = "long g(long); long tail(long a) { return g(a + 1); } \
@@ -138,6 +139,10 @@ fn a_tail_call_clears_nothing_and_a_thrown_away_result_is_not_cleared() {
     let text = asm("x86_64", "tail", USED, source);
     assert_eq!(body(&text, "tail").last().map(String::as_str), Some("jmp g"), "{text}");
     assert_eq!(cleared(&text, "tail"), Vec::<String>::new(), "{text}");
+    assert_eq!(body(&text, "ign").last().map(String::as_str), Some("jmp g"), "{text}");
+    assert_eq!(cleared(&text, "ign"), Vec::<String>::new(), "{text}");
+    let flags = [USED[0], "-fno-optimize-sibling-calls"];
+    let text = asm("x86_64", "ign", &flags, source);
     assert_eq!(cleared(&text, "ign"), ["edi"], "{text}");
 }
 

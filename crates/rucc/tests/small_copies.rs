@@ -61,7 +61,7 @@ void m24(void *d, const void *s) { memmove(d, s, 24); }
 ";
     for level in ["-O0", "-O2"] {
         let text = asm("small", &[level], source);
-        assert!(!text.contains("call"), "{level}:\n{text}");
+        assert!(!text.contains("call") && !text.contains("jmp\tmem"), "{level}:\n{text}");
         // gcc's plan for thirteen bytes, a word at 0 and a word that overlaps it at 5.
         let c13 = body(&text, "c13");
         assert!(c13.contains("5(%rsi)") && c13.contains("5(%rdi)"), "{level}:\n{c13}");
@@ -91,6 +91,12 @@ void read_header(const char *rec, void (*out)(unsigned)) {
     assert!(header.contains("(%rdi), %edi"), "{header}");
 }
 
+/// Whether the function goes to `name`, by a call or, when that is the last thing a function that
+/// returns nothing does, by a jump the way gcc writes it.
+fn reaches(body: &str, name: &str) -> bool {
+    body.contains(&format!("call\t{name}")) || body.contains(&format!("jmp\t{name}"))
+}
+
 #[test]
 fn a_longer_one_is_still_a_call() {
     let source = "\
@@ -99,9 +105,9 @@ void f4k(void *d) { memset(d, 0, 4096); }
 void cn(void *d, const void *s, size_t n) { memcpy(d, s, n); }
 ";
     let text = asm("long", &["-O2"], source);
-    assert!(body(&text, "c65").contains("call\tmemcpy"), "{text}");
-    assert!(body(&text, "f4k").contains("call\tmemset"), "{text}");
-    assert!(body(&text, "cn").contains("call\tmemcpy"), "{text}");
+    assert!(reaches(body(&text, "c65"), "memcpy"), "{text}");
+    assert!(reaches(body(&text, "f4k"), "memset"), "{text}");
+    assert!(reaches(body(&text, "cn"), "memcpy"), "{text}");
 }
 
 #[test]
@@ -112,13 +118,13 @@ void spelled(void *d, const void *s) { __builtin_memcpy(d, s, 8); }
 void fill(void *d) { memset(d, 0, 8); }
 ";
     let text = asm("nobuiltin", &["-O2", "-fno-builtin"], source);
-    assert!(body(&text, "plain").contains("call\tmemcpy"), "{text}");
-    assert!(!body(&text, "spelled").contains("call"), "{text}");
-    assert!(body(&text, "fill").contains("call\tmemset"), "{text}");
+    assert!(reaches(body(&text, "plain"), "memcpy"), "{text}");
+    assert!(!reaches(body(&text, "spelled"), "memcpy"), "{text}");
+    assert!(reaches(body(&text, "fill"), "memset"), "{text}");
 
     let text = asm("nobuiltin-one", &["-O2", "-fno-builtin-memset"], source);
-    assert!(!body(&text, "plain").contains("call"), "{text}");
-    assert!(body(&text, "fill").contains("call\tmemset"), "{text}");
+    assert!(!reaches(body(&text, "plain"), "memcpy"), "{text}");
+    assert!(reaches(body(&text, "fill"), "memset"), "{text}");
 }
 
 /// Every length from 0 to 64 at four misalignments, with bytes on either side that must not
