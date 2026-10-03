@@ -418,3 +418,66 @@ fn the_hints_gcc_answers_yes_for_are_taken_without_a_word() {
     );
     assert_eq!(got, "");
 }
+
+#[test]
+fn the_promises_and_the_tool_hints_gcc_answers_yes_for_are_taken_without_a_word() {
+    // Each of these is a promise gcc may optimize on, a request about a transformation this
+    // compiler never makes, or a word to a tool it does not have: a sanitizer, the analyzer or
+    // the debugger. None of them changes what a correct program does, `__has_attribute` answers
+    // yes for each as gcc 13 does, and they are taken without a word.
+    let got = said(
+        "promises",
+        "#include <stddef.h>\n\
+         __attribute__((nothrow, leaf)) int get(void);\n\
+         __attribute__((__nothrow__, __leaf__)) int get2(void);\n\
+         __attribute__((artificial, always_inline)) static inline int twice(int x) {\n\
+           return 2 * x;\n\
+         }\n\
+         __attribute__((alloc_align(2), malloc)) void *grab(size_t, size_t);\n\
+         __attribute__((noplt)) int far(void);\n\
+         __attribute__((no_icf)) int same(void) { return 1; }\n\
+         int kept __attribute__((no_reorder)) = 2;\n\
+         __attribute__((no_reorder)) int ordered(void) { return kept; }\n\
+         __attribute__((no_sanitize_address, no_address_safety_analysis, no_sanitize_thread,\n\
+                        no_sanitize_undefined, no_sanitize_coverage))\n\
+         int raw(int *p) { return *p; }\n\
+         __attribute__((no_split_stack, no_stack_limit)) int deep(int x) {\n\
+           return x ? deep(x - 1) : 0;\n\
+         }\n\
+         __attribute__((tainted_args)) int handle(int cmd);\n\
+         __attribute__((fd_arg(1), fd_arg_read(2), fd_arg_write(3))) int pass(int, int, int);\n\
+         int use(void) {\n\
+           return get() + get2() + twice(far()) + handle(0) + pass(0, 1, 2) + (grab(8, 16) != 0);\n\
+         }\n\
+         #define HAS(name) _Static_assert(__has_attribute(name), #name)\n\
+         HAS(nothrow); HAS(leaf); HAS(artificial); HAS(alloc_align); HAS(noplt); HAS(no_icf);\n\
+         HAS(no_reorder); HAS(no_sanitize_address); HAS(no_address_safety_analysis);\n\
+         HAS(no_sanitize_thread); HAS(no_sanitize_undefined); HAS(no_sanitize_coverage);\n\
+         HAS(no_split_stack); HAS(no_stack_limit); HAS(tainted_args); HAS(fd_arg);\n\
+         HAS(fd_arg_read); HAS(fd_arg_write);\n",
+    );
+    assert_eq!(got, "");
+}
+
+#[test]
+fn the_definitions_that_say_no_reorder_come_out_in_the_order_they_were_written() {
+    // Against each other and against an `asm` statement at file scope, as gcc 13 writes them at
+    // `-O2`, where it would otherwise be free to move them.
+    let out = compile(
+        "no-reorder",
+        &["-O2", "-S"],
+        "int second_one __attribute__((no_reorder)) = 2;\n\
+         __asm__(\".globl between\\nbetween:\");\n\
+         int first_one __attribute__((no_reorder)) = 1;\n\
+         __attribute__((no_reorder)) int later(void) { return 3; }\n\
+         __attribute__((no_reorder)) int earlier(void) { return 4; }\n",
+    );
+    assert!(out.status.success(), "{}", String::from_utf8_lossy(&out.stderr));
+    let text = String::from_utf8_lossy(&out.stdout);
+    let labels: Vec<&str> = text
+        .lines()
+        .filter_map(|line| line.strip_suffix(':'))
+        .filter(|label| !label.starts_with('.'))
+        .collect();
+    assert_eq!(labels, ["second_one", "between", "first_one", "later", "earlier"], "{text}");
+}
