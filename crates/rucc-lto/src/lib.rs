@@ -19,7 +19,9 @@
 //! - A name with internal linkage belongs to its unit. Two units can both have a `static` called
 //!   `count`, and every unit has a `.Lstr.0`, so a unit's internal name is renamed when an earlier
 //!   unit already has it or any unit has it with linkage. The first unit to have it keeps it, so a
-//!   program with no clash keeps every name it had.
+//!   program with no clash keeps every name it had. A unit with an `asm` at file scope is the
+//!   exception, since the text may name its `static` and is not read here, so a clash in such a
+//!   unit stops the join rather than renaming.
 //! - A name with linkage is one thing however many units say it. Of a strong definition, a common
 //!   one, a weak or once only one, and a declaration, the module keeps the strongest, and of two
 //!   commons the larger, which is what the linker keeps. Two strong definitions are an error the
@@ -136,6 +138,17 @@ pub fn join(units: &[Unit<'_>], isa: Isa, names: &mut Interner) -> Result<Module
                 let fresh = fresh(name, unit, &mut taken, names);
                 renames[unit].insert(name, fresh);
             }
+        }
+    }
+    // An `asm` at file scope is text this does not read, and it may name a `static` by the name
+    // the unit gave it. Renaming that one would leave the `asm` pointing at another unit's or at
+    // nothing, so a unit with both is not joined.
+    for (unit, module) in alone.iter().enumerate() {
+        if !module.file_asms().is_empty() && !renames[unit].is_empty() {
+            return Err(format!(
+                "{}: an `asm` at file scope may name a local the join renames",
+                units[unit].name
+            ));
         }
     }
 
@@ -465,6 +478,21 @@ func @maybe() -> i32, linkage(external);
         let Some(SymbolRef::Func(put)) = lookup(&module, &mut names, "put") else { panic!() };
         assert_eq!(module[get].target, Some(base));
         assert_eq!(module[put].target, None);
+    }
+
+    #[test]
+    fn a_unit_with_an_asm_at_file_scope_is_joined_only_when_nothing_in_it_is_renamed() {
+        let base = Isa::baseline();
+        let b = format!("module asm \"call count\"\n\n{B}");
+        let error = joined(&[("a.o", A, base), ("b.o", b.as_str(), base)], base).unwrap_err();
+        assert_eq!(error, "b.o: an `asm` at file scope may name a local the join renames");
+
+        // First, its `count` keeps its name and the other unit's is renamed. The `asm` of a unit
+        // with no clash is kept too, after it.
+        let units =
+            [("b.o", b.as_str(), base), ("a.o", A, base), ("c.o", "module asm \"nop\"\n", base)];
+        let (module, names) = joined(&units, base).unwrap();
+        assert_eq!(module.file_asms(), ["call count", "nop"], "{}", print(&module, &names));
     }
 
     #[test]

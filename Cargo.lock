@@ -198,6 +198,7 @@ dependencies = [
  "rucc-ir",
  "rucc-lex",
  "rucc-lower",
+ "rucc-lto",
  "rucc-mir",
  "rucc-object",
  "rucc-opt",

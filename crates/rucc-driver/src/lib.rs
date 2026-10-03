@@ -3996,6 +3996,28 @@ fn link_all(opts: &Options, plan: &Plan, link: &LinkOptions, verbose: bool) -> i
         }
     }
 
+    // What `-flto` asks of the link: the objects that kept their module give way to one object
+    // made from all of them together. One that cannot be made is said, and the objects are linked
+    // as they are, which is the program without the work across files and nothing worse.
+    if opts.lto.requested {
+        let started = std::time::Instant::now();
+        let joined = crate::lto::link(opts, link.shared, &items, &scratch.dir);
+        let mut stderr = std::io::stderr().lock();
+        match joined {
+            Ok(Some(joined)) => items = joined,
+            Ok(None) => {}
+            Err(why) => {
+                let _ = writeln!(
+                    stderr,
+                    "rucc: warning: -flto: {why}, so the objects are linked as they are"
+                );
+            }
+        }
+        if opts.time {
+            say_time("lto", started.elapsed(), &mut stderr);
+        }
+    }
+
     let args = match link::line(opts.target, link, &items, &job.output) {
         Ok(args) => args,
         Err(why) => return complain(why),

@@ -33,6 +33,7 @@ rucc-diag.workspace = true
 rucc-ir.workspace = true
 rucc-lex.workspace = true
 rucc-lower.workspace = true
+rucc-lto.workspace = true
 rucc-mir.workspace = true
 rucc-object.workspace = true
 rucc-opt.workspace = true

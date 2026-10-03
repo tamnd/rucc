@@ -10,6 +10,9 @@
 //! build that passes `-flto` and then runs `ar`, `nm` or a linker that knows nothing of this over
 //! the result gets what it would have got without the flag, and this file holds the compiler to
 //! that on the bytes.
+//!
+//! A link with the flag reads the modules back, joins them and generates one object from the
+//! whole, which is where a function from one file is inlined into another.
 
 use std::path::{Path, PathBuf};
 use std::process::Command;
@@ -146,6 +149,92 @@ fn objects_that_keep_their_module_link_and_run_and_the_program_does_not_hold_it(
         !program.windows(b"rucc-lto".len()).any(|bytes| bytes == b"rucc-lto"),
         "the linker left the module out"
     );
+}
+
+/// Every function a linked 64 bit ELF program has a symbol for, by name, with its address and its
+/// bytes. Read here rather than by `nm` and `objdump`, since what is wanted is two numbers and a
+/// slice and the machine running the tests may not have either.
+#[cfg(all(target_os = "linux", target_arch = "x86_64"))]
+fn functions(elf: &[u8]) -> std::collections::HashMap<String, (u64, Vec<u8>)> {
+    let word =
+        |at: usize, n: usize| (0..n).fold(0u64, |v, i| v | (u64::from(elf[at + i]) << (8 * i)));
+    let (table, count) = (word(0x28, 8) as usize, word(0x3c, 2) as usize);
+    let section = |index: usize| table + index * 64;
+    let mut out = std::collections::HashMap::new();
+    for index in 0..count {
+        let header = section(index);
+        // SHT_SYMTAB, whose link is the section its names are in.
+        if word(header + 4, 4) != 2 {
+            continue;
+        }
+        let names = word(section(word(header + 40, 4) as usize) + 24, 8) as usize;
+        let (start, size) = (word(header + 24, 8) as usize, word(header + 32, 8) as usize);
+        for symbol in (start..start + size).step_by(24) {
+            // STT_FUNC, defined in a section of this file.
+            let home = word(symbol + 6, 2) as usize;
+            if elf[symbol + 4] & 0xf != 2 || home == 0 || home >= count {
+                continue;
+            }
+            let name = names + word(symbol, 4) as usize;
+            let end = elf[name..].iter().position(|&byte| byte == 0).expect("names end");
+            let name = String::from_utf8_lossy(&elf[name..name + end]).into_owned();
+            let home = section(home);
+            let (value, length) = (word(symbol + 8, 8), word(symbol + 16, 8) as usize);
+            let at = (word(home + 24, 8) + value - word(home + 16, 8)) as usize;
+            out.insert(name, (value, elf[at..at + length].to_vec()));
+        }
+    }
+    out
+}
+
+#[cfg(all(target_os = "linux", target_arch = "x86_64"))]
+#[test]
+fn a_link_with_the_flag_inlines_across_files_and_one_without_it_does_not() {
+    let dir = fixture("joined");
+    std::fs::write(
+        dir.join("main.c"),
+        "extern int twice_over(int n);\nint main(void) { return twice_over(7) == 42 ? 0 : 1; }\n",
+    )
+    .expect("the fixture can be written");
+    for (source, object) in
+        [("main.c", "main.o"), ("caller.c", "caller.o"), ("callee.c", "callee.o")]
+    {
+        let (ok, said) = run(&dir, &["-flto"], source, object);
+        assert!(ok, "{source}: {said}");
+    }
+    for (flags, joined) in [(&[][..], false), (&["-flto"][..], true)] {
+        let out = Command::new(env!("CARGO_BIN_EXE_rucc"))
+            .args([TARGET, "-O2"])
+            .args(flags)
+            .arg("-o")
+            .arg(dir.join("program"))
+            .args(["main.o", "caller.o", "callee.o"].map(|object| dir.join(object)))
+            .output()
+            .expect("the compiler is built before its own tests run");
+        let said = String::from_utf8_lossy(&out.stderr);
+        assert!(out.status.success(), "{said}");
+        assert!(said.is_empty(), "the link said something: {said}");
+        let status = Command::new(dir.join("program")).status().expect("the program runs");
+        assert!(status.success(), "{flags:?}: {status}");
+
+        // Whether `main` still calls or jumps to either function of the other two files. Linked
+        // as they are, it calls `twice_over`. Joined, both are inlined into it, and both are
+        // still in the program, since nothing is made internal.
+        let program = std::fs::read(dir.join("program")).expect("the program was written");
+        let functions = functions(&program);
+        let (from, main) = &functions["main"];
+        let reaches = |name: &str| {
+            let (to, _) = functions[name];
+            main.windows(5).enumerate().any(|(at, bytes)| {
+                let offset = i32::from_le_bytes([bytes[1], bytes[2], bytes[3], bytes[4]]);
+                let next = from.wrapping_add(at as u64 + 5);
+                matches!(bytes[0], 0xe8 | 0xe9) && next.wrapping_add_signed(i64::from(offset)) == to
+            })
+        };
+        assert_eq!(reaches("twice_over"), !joined, "{flags:?}");
+        assert!(!reaches("helper"), "{flags:?}");
+    }
+    let _ = std::fs::remove_dir_all(&dir);
 }
 
 #[test]
