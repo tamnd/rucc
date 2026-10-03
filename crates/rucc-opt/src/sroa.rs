@@ -322,6 +322,13 @@ impl Readers {
 /// unwinds to a pad are not. An `asm goto` is one, since its labels are blocks with arguments like
 /// any other branch's. A function on the memory chain is left alone because the loads and
 /// stores the pass writes would have to be threaded onto it.
+///
+/// A function with a `__builtin_setjmp` or a `__builtin_longjmp` in it is left alone too. The
+/// landing after a `setjmp_marker` is reached from the `longjmp`, which is not an edge of the
+/// function, so a value the renaming threads along the edges it can see is the one from before the
+/// save and not the one the local held when the jump was taken. gcc keeps every local of such a
+/// function in its slot across the save for the same reason, and gcc.c-torture/execute/pr60003.c
+/// sets a local in a loop and then jumps back to read it.
 fn shaped(func: &Func, cfg: &Cfg, entry: Block) -> bool {
     if !cfg.predecessors(entry).is_empty() {
         return false;
@@ -331,7 +338,7 @@ fn shaped(func: &Func, cfg: &Cfg, entry: Block) -> bool {
             return false;
         }
         for inst in func.insts(block) {
-            if func.carries_mem(inst) {
+            if func.carries_mem(inst) || func[inst].opcode.is_jump_marker() {
                 return false;
             }
             if func.is_terminator(inst) {
@@ -1456,6 +1463,36 @@ target datalayout = \"e-p:64:64-i64:64-f80:128-S128\"
     fn params(func: &Func, block: usize) -> usize {
         let block = func.blocks().nth(block).expect("that many blocks");
         func[block].params.len()
+    }
+
+    #[test]
+    fn a_local_in_a_function_with_a_builtin_setjmp_stays_in_memory() {
+        // gcc.c-torture/execute/pr60003.c: the local is set after the save and read at the landing
+        // the `longjmp` comes back to, which is not an edge the renaming can see.
+        let text = wrap(
+            "(ptr) -> i32",
+            "block0(%0: ptr):
+    %1 = alloca, size 4, align 4
+    %2 = iconst.i32 0
+    store %2 -> %1, align 4
+    %3 = setjmp_marker.i32 %0
+    %4 = icmp eq %3, %2
+    br_if %4, block1, block2
+
+block1:
+    %5 = iconst.i32 1
+    store %5 -> %1, align 4
+    call @g(%0) : (ptr)
+    jump block2
+
+block2:
+    %6 = load.i32 %1, align 4
+    return %6
+",
+        );
+        let (module, stats) = run(&text);
+        assert_eq!(stats.count(Kind::Optimized, SCALARIZED), 0);
+        assert_eq!(count_of(body(&module), Opcode::Alloca), 1);
     }
 
     #[test]
