@@ -490,6 +490,9 @@ struct Reader {
     /// Whether `.cfi_sections` left the unwind table out, which a file does when it wants the rules
     /// for a debugger only.
     no_unwind: bool,
+    /// Whether `.cfi_sections` asked for the rules in `.debug_frame`, the copy a debugger reads and
+    /// the loader never maps, which the kernel's boot code asks for in place of the unwind table.
+    debugger: bool,
     /// What the file said it was called. Kept apart from the rest because it is not a name anything
     /// refers to, and a file whose own name is also the name of something in it would otherwise be
     /// one symbol where it should be two.
@@ -1048,6 +1051,7 @@ impl Reader {
             }
             "cfi_sections" => {
                 self.no_unwind = !args.iter().any(|arg| arg.trim() == ".eh_frame");
+                self.debugger = args.iter().any(|arg| arg.trim() == ".debug_frame");
                 return Ok(());
             }
             "cfi_endproc"
@@ -3277,7 +3281,13 @@ impl Reader {
     /// every function gcc does. A file of assembly written by hand with none gets no table, the same
     /// as it does from gas.
     fn unwind_table(&mut self) {
-        if self.frames.is_empty() || self.no_unwind {
+        if self.frames.is_empty() {
+            return;
+        }
+        if self.debugger && !self.macho {
+            self.debugger_table();
+        }
+        if self.no_unwind {
             return;
         }
         let funcs: Vec<Extent> = self
@@ -3332,6 +3342,60 @@ impl Reader {
             // A pointer, which is what every record is padded to and what gas aligns it to.
             align: u64::from(conv.word),
             shape,
+            relocs: table.relocs,
+            group: None,
+            link: None,
+        });
+    }
+
+    /// The same rules as `.debug_frame`, for a file whose `.cfi_sections` asked for them there.
+    ///
+    /// Written by the same code that writes the copy for a `-g` build with no unwind table, which
+    /// is the shape gas gives it: a header of version one with no augmentation, and records that
+    /// name their header by its offset in the section and their function by its address, both
+    /// left to the linker. Not loaded, so not allocated, and aligned to a pointer like gas does.
+    fn debugger_table(&mut self) {
+        let funcs: Vec<Extent> = self
+            .frames
+            .iter()
+            .map(|frame| Extent {
+                name: self.syms[frame.sym].name.clone(),
+                start: frame.start as usize,
+                len: frame.len as usize,
+                align: 1,
+                binding: Binding::Local,
+                visibility: Visibility::Default,
+                patch: None,
+                landings: Vec::new(),
+            })
+            .collect();
+        let rows: Vec<_> = self.frames.iter().map(|frame| frame.rows.clone()).collect();
+        let conv = self.conv();
+        let Some(mut table) = crate::unwind::debug_frame(&funcs, &rows, conv, ObjectFormat::Elf)
+        else {
+            return;
+        };
+        for frame in &self.frames {
+            self.relocated.insert(frame.sym);
+        }
+        // A record names its header by the section's own name, which the object writer only knows
+        // as a name something defines. So the front of the section gets a name of its own, one
+        // nothing else can spell, and the writer turns it back into the section as gas has it.
+        let front = self.sym("\u{1}debug_frame");
+        self.syms[front].at = Held::In { part: self.parts.len(), offset: 0 };
+        self.relocated.insert(front);
+        for reloc in &mut table.relocs {
+            if reloc.symbol == table.name {
+                reloc.symbol.clone_from(&self.syms[front].name);
+            }
+        }
+        let size = table.bytes.len() as u64;
+        self.parts.push(Part {
+            name: table.name,
+            bytes: table.bytes,
+            size,
+            align: u64::from(conv.word),
+            shape: Shape { bits: true, ..Shape::default() },
             relocs: table.relocs,
             group: None,
             link: None,
@@ -6522,6 +6586,23 @@ _tls$tlv$init:
         let out =
             assembled("\t.cfi_sections .debug_frame\n\t.cfi_startproc\n\tret\n\t.cfi_endproc\n");
         assert!(out.parts.iter().all(|part| part.name != ".eh_frame"));
+    }
+
+    /// What gas writes for the same text: a header marked by all ones, version one and no
+    /// augmentation, then a record naming the header's offset and the function's address and
+    /// length, padded to a pointer in a section that is not loaded.
+    #[test]
+    fn frame_rules_for_a_debugger_go_in_the_debuggers_copy() {
+        let out =
+            assembled("\t.cfi_sections .debug_frame\n\t.cfi_startproc\n\tret\n\t.cfi_endproc\n");
+        let table = out.parts.iter().find(|part| part.name == ".debug_frame").expect("a table");
+        assert!(!table.shape.alloc);
+        assert_eq!(table.align, 8);
+        assert_eq!(table.bytes.len(), 0x30);
+        assert_eq!(table.bytes[4..10], [0xff, 0xff, 0xff, 0xff, 1, 0]);
+        let holes: Vec<usize> = table.relocs.iter().map(|reloc| reloc.at).collect();
+        assert_eq!(holes, [0x1c, 0x20]);
+        assert_eq!(table.bytes[0x28..0x30], 1u64.to_le_bytes());
     }
 
     #[test]
