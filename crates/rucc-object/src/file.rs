@@ -1313,7 +1313,13 @@ pub(crate) fn relocate(
         };
         let addend = relocation.addend;
         let bits = 8 * width as u32;
-        if addend < -(1i64 << (bits - 1)) || addend >= 1i64 << bits {
+        // An address is four bytes on i386 and wraps there, so taking up to four gigabytes off a
+        // name lands on the same address as adding what is left. The kernel's `__pa` of a static
+        // is the name less `PAGE_OFFSET`, which is 0xC0000000, and that is how doublefault_32.c
+        // fills `cr3`. A narrower field takes what is added to a name only if it fits, as gas has
+        // it.
+        let least = if width == 4 { -(1i64 << bits) } else { -(1i64 << (bits - 1)) };
+        if addend < least || addend >= 1i64 << bits {
             let why =
                 format!("{addend} added to a name, and there are {width} bytes to keep it in");
             return Err(Error::Refused { why });
@@ -3231,6 +3237,40 @@ mod tests {
         .flat_map(|word| word.to_le_bytes())
         .collect();
         assert_eq!(note.data().expect("the bytes"), &want[..]);
+    }
+
+    /// A name less 0xC0000000 in an i386 address wraps to the name plus 0x40000000, which is what
+    /// the kernel's `__pa` of a static comes to. A name less that much in two bytes does not fit.
+    #[test]
+    fn an_i386_address_less_three_gigabytes_wraps_in_its_four_bytes() {
+        let object = |bytes: u8| Object {
+            name: "cr3".to_owned(),
+            bytes: vec![0; usize::from(bytes)],
+            size: u64::from(bytes),
+            align: u64::from(bytes),
+            place: Place::Written,
+            binding: Binding::Global,
+            visibility: Visibility::Default,
+            relocs: vec![Reloc {
+                at: 0,
+                symbol: "swapper_pg_dir".to_owned(),
+                kind: Reference::Address { bytes },
+                addend: -0xC000_0000,
+                after: 0,
+            }],
+        };
+        let data = Data { objects: vec![object(4)], ..Data::default() };
+        let bytes =
+            write(&Text::default(), &data, &[], &i386(), Output::default(), &Info::default())
+                .expect("an object");
+        let file = object::read::elf::ElfFile32::<Endianness>::parse(&bytes[..]).expect("readable");
+        let variable = file.section_by_name(".data").expect("a data section");
+        assert_eq!(variable.data().expect("the bytes"), &0x4000_0000u32.to_le_bytes());
+
+        let data = Data { objects: vec![object(2)], ..Data::default() };
+        let refused =
+            write(&Text::default(), &data, &[], &i386(), Output::default(), &Info::default());
+        assert!(refused.is_err(), "two bytes cannot hold a name less three gigabytes");
     }
 
     /// The debug sections of an i386 file are not compressed even when `-gz` asks, since the addend
