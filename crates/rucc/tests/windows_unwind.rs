@@ -178,3 +178,29 @@ void g(void) { __builtin_longjmp(*stack, 1); }
         assert_eq!(read.section(".xdata"), Some(xdata), "{opt}");
     }
 }
+
+/// A function never ends in a call. The unwinder finds a frame's row by the address its call
+/// returns to, and a call to a function that does not come back, laid out last, returns to the
+/// first byte past the end of the function, which no row of its own covers. `down` is the shape of
+/// the one `tests/exec/windows/jmpbuf.c` failed in at `-O2`, where the `longjmp` was laid out last.
+#[test]
+fn a_call_to_a_function_that_does_not_return_is_not_the_last_instruction() {
+    let dir = dir("trailing");
+    let c = dir.join("one.c");
+    std::fs::write(
+        &c,
+        "__attribute__((noreturn)) void stop(int);\nvoid more(int);\n\
+         void down(int n) { volatile char pad[24]; pad[0] = (char)n; if (n == 0) stop(7 + pad[0]); more(n - 1); }\n",
+    )
+    .expect("the fixture can be written");
+    for opt in ["-O0", "-O2"] {
+        let text = String::from_utf8(compile(&c, &[opt, "-S"])).expect("a listing is text");
+        let body = text.split_once("\t.seh_proc\tdown\n").expect("down is wrapped").1;
+        let body = body.split_once("\t.seh_endproc").expect("and the wrapping ends").0;
+        let last = body.lines().rev().find(|line| line.starts_with('\t')).unwrap_or_default();
+        assert!(!last.starts_with("\tcall"), "{opt}:\n{text}");
+    }
+    let text = String::from_utf8(compile(&c, &["-O2", "-S"])).expect("a listing is text");
+    let _ = std::fs::remove_dir_all(&dir);
+    assert!(text.contains("\tcall\tstop\n\tud2\n"), "{text}");
+}

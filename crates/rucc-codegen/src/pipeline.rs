@@ -61,6 +61,7 @@ use crate::slots::{self, Slots};
 use crate::split;
 use crate::tail;
 use crate::thunks;
+use crate::trailing;
 use crate::usage::{StackUsage, Usage};
 use crate::weights;
 use crate::zero::{self, Zeroing};
@@ -513,6 +514,10 @@ pub struct Flags {
     /// The last of the extensions that change how the zeroing above clears a vector register
     /// that the unit may use, which is AVX or AVX-512F on x86-64. See [`crate::zero::Extension`].
     pub zero_extension: zero::Extension,
+    /// Whether a function whose last instruction is a call gets a trap after it, so that the
+    /// address the call returns to is inside the function. x86-64 Windows asks for it, whose
+    /// unwinder finds a frame's record by that address. See [`crate::trailing`].
+    pub trailing: bool,
 }
 
 impl Default for Flags {
@@ -553,6 +558,7 @@ impl Default for Flags {
             x87_return: true,
             zero: None,
             zero_extension: zero::Extension::Sse,
+            trailing: false,
         }
     }
 }
@@ -1226,6 +1232,12 @@ pub fn compile_recording(
     // longer a return, and after everything else for the reason in [`crate::thunks`]: the thunk a
     // branch goes to is named after the register the allocator gave it.
     thunks::harden(&mut func, machine.insts, speculation, names);
+
+    // After every pass that could leave a call at the end of the function or take one away, the
+    // thunks included, since a call through a thunk is still a call. See [`crate::trailing`].
+    if flags.trailing {
+        trailing::trap(&mut func, machine.selector, machine.shapes, names);
+    }
 
     // Last of all, because a stretch is named by the instructions at either end of it and every
     // pass above is free to take an instruction out or move one. The frame is wanted here as well

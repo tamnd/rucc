@@ -193,6 +193,7 @@ pub mod split;
 pub mod switch;
 pub mod tail;
 pub mod thunks;
+pub mod trailing;
 pub mod usage;
 pub mod varargs;
 pub mod weights;
