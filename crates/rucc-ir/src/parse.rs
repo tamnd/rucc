@@ -33,6 +33,7 @@
 use std::fmt;
 
 use rucc_base::float::Format;
+use rucc_base::hash::{Map, Set};
 use rucc_base::{Idx, Interner, Symbol};
 use rucc_diag::Span;
 use rucc_target::{Convention, Slot, TargetInfo};
@@ -85,6 +86,108 @@ pub fn parse(text: &str, names: &mut Interner) -> Result<Module, ParseError> {
     Parser::new(text, names).module()
 }
 
+/// Several texts read into one module, which is what a link does with the modules its objects
+/// kept.
+///
+/// Each text was written for a module of its own, so three things that were true inside it stop
+/// being true once it sits beside the others. A name that only meant something inside its own
+/// unit, such as a `static` or a string's `.Lstr.0`, can be taken by another unit, so the caller
+/// says what each such name of a text is called in the joined module. A name two units both define
+/// is only kept from one of them, so the caller says which texts' definitions are left out. And
+/// every text numbers its metadata from `!0`, so the nodes are matched by what they say: an
+/// aliasing node with the same name, parent and offset as one already read is that node, which
+/// keeps `int` from two units the same type to the aliasing query and not two types that never
+/// alias.
+///
+/// The metadata of a text is read before its functions, since it comes last and a function's
+/// accesses point into it. That is the printer's order and the only one this reads.
+#[derive(Debug)]
+pub struct Joiner {
+    module: Option<Module>,
+    /// Every node in the module, by what it says.
+    nodes: Map<MetaNode, Meta>,
+}
+
+impl Default for Joiner {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+impl Joiner {
+    /// Nothing read yet.
+    #[must_use]
+    pub fn new() -> Self {
+        Joiner { module: None, nodes: Map::default() }
+    }
+
+    /// Reads one more text in. A symbol `rename` has an entry for goes by that name instead, and
+    /// a function, global or alias whose name, after that, is in `skip` is read and left out.
+    ///
+    /// # Errors
+    ///
+    /// When the text does not read, is for another target than the texts before it, or defines
+    /// a name the module already has and `skip` does not leave out.
+    pub fn read(
+        &mut self,
+        text: &str,
+        names: &mut Interner,
+        rename: &Map<Symbol, Symbol>,
+        skip: &Set<Symbol>,
+    ) -> Result<(), ParseError> {
+        let split = text.find("\n!").map_or(text.len(), |at| at + 1);
+        let (items, metadata) = text.split_at(split);
+
+        let mut head = Parser::new(items, names);
+        let read = head.header()?;
+        let (pos, line) = (head.pos, head.line);
+        if let Some(module) = &self.module {
+            if (module.tuple, module.datalayout) != (read.tuple, read.datalayout) {
+                return Err(ParseError {
+                    line: 3,
+                    message: format!(
+                        "this text is for `{}` and the module it joins is for `{}`",
+                        read.tuple.to_llvm_string(),
+                        module.tuple.to_llvm_string()
+                    ),
+                });
+            }
+        }
+        let module = self.module.get_or_insert(read);
+
+        let mut tail = Parser::new(metadata, names);
+        tail.line = 1 + items.matches('\n').count() as u32;
+        tail.join = Some(Joining { rename, skip, metas: Vec::new(), nodes: &mut self.nodes });
+        tail.items(module)?;
+        let metas = tail.join.map(|join| join.metas).unwrap_or_default();
+
+        let mut body = Parser::new(items, names);
+        (body.pos, body.line) = (pos, line);
+        body.join = Some(Joining { rename, skip, metas, nodes: &mut self.nodes });
+        body.items(module)
+    }
+
+    /// The module so far, or `None` before the first text.
+    pub fn module_mut(&mut self) -> Option<&mut Module> {
+        self.module.as_mut()
+    }
+
+    /// The module, or `None` when no text was read.
+    #[must_use]
+    pub fn finish(self) -> Option<Module> {
+        self.module
+    }
+}
+
+/// What reading a text into a [`Joiner`]'s module needs that reading one on its own does not.
+struct Joining<'n> {
+    rename: &'n Map<Symbol, Symbol>,
+    skip: &'n Set<Symbol>,
+    /// The node each `!n` of the text is in the module, in the text's order.
+    metas: Vec<Meta>,
+    nodes: &'n mut Map<MetaNode, Meta>,
+}
+
 /// Reading one text.
 struct Parser<'a, 'n> {
     text: &'a str,
@@ -94,6 +197,8 @@ struct Parser<'a, 'n> {
     /// The highest metadata node any instruction referred to, so that a reference to one that
     /// is never defined is caught rather than left as an index into nothing.
     meta_used: Option<(u32, u32)>,
+    /// Set when the text is read into a module that holds others.
+    join: Option<Joining<'n>>,
 }
 
 /// A block, read but not yet built.
@@ -201,12 +306,26 @@ enum PendingExtra<'a> {
 
 impl<'a, 'n> Parser<'a, 'n> {
     fn new(text: &'a str, names: &'n mut Interner) -> Self {
-        Parser { text, pos: 0, line: 1, names, meta_used: None }
+        Parser { text, pos: 0, line: 1, names, meta_used: None, join: None }
     }
 
     // The whole module.
 
     fn module(mut self) -> Result<Module, ParseError> {
+        let mut module = self.header()?;
+        self.items(&mut module)?;
+        if let Some((used, line)) = self.meta_used {
+            let count = module.counts().metadata as u32;
+            if used >= count {
+                self.line = line;
+                return self.fail(format!("!{used} is used and never defined"));
+            }
+        }
+        Ok(module)
+    }
+
+    /// The four lines a text starts with, as the empty module they describe.
+    fn header(&mut self) -> Result<Module, ParseError> {
         let name = self.header_name()?;
         self.expect("; format ")?;
         let version = self.u32()?;
@@ -234,7 +353,11 @@ impl<'a, 'n> Parser<'a, 'n> {
         let name = self.names.intern(&name);
         let mut module = Module::new(name, &TargetInfo::for_tuple(tuple));
         module.datalayout = datalayout;
+        Ok(module)
+    }
 
+    /// Everything after the header.
+    fn items(&mut self, module: &mut Module) -> Result<(), ParseError> {
         loop {
             self.skip_blank_lines();
             if self.at_end() {
@@ -253,22 +376,29 @@ impl<'a, 'n> Parser<'a, 'n> {
                     self.end_of_line()?;
                     module.add_file_asm(text);
                 }
-                "global" => self.global(&mut module)?,
-                "alias" | "ifunc" => self.alias(&mut module)?,
-                "func" => self.func(&mut module)?,
-                _ if self.at("!") => self.meta(&mut module)?,
+                "global" => self.global(module)?,
+                "alias" | "ifunc" => self.alias(module)?,
+                "func" => self.func(module)?,
+                _ if self.at("!") => self.meta(module)?,
                 other => return self.fail(format!("`{other}` does not start anything")),
             }
         }
+        Ok(())
+    }
 
-        if let Some((used, line)) = self.meta_used {
-            let count = module.counts().metadata as u32;
-            if used >= count {
-                self.line = line;
-                return self.fail(format!("!{used} is used and never defined"));
-            }
+    /// Whether a function, global or alias of this name is read and then left out, because the
+    /// module it is joining keeps another text's.
+    fn skips(&self, name: Symbol) -> bool {
+        self.join.as_ref().is_some_and(|join| join.skip.contains(&name))
+    }
+
+    /// Turns down a second definition of a name in a joined module, which `Module` would
+    /// otherwise panic on. A text read on its own is the printer's and has none.
+    fn once(&self, module: &Module, name: Symbol) -> Result<(), ParseError> {
+        if self.join.is_some() && module.lookup(name).is_some() {
+            return self.fail(format!("`{}` is defined twice", self.names.resolve(name)));
         }
-        Ok(module)
+        Ok(())
     }
 
     /// The `; ModuleID = 'name'` line, whose name is not quoted the way everything else is.
@@ -289,6 +419,17 @@ impl<'a, 'n> Parser<'a, 'n> {
     fn global(&mut self, module: &mut Module) -> Result<(), ParseError> {
         self.expect("global")?;
         let name = self.symbol()?;
+        if self.skips(name) {
+            // Into a module of its own, so that its image leaves nothing in this one's tables.
+            let mut aside = Module::new(name, &TargetInfo::for_tuple(module.tuple));
+            return self.global_rest(name, &mut aside);
+        }
+        self.once(module, name)?;
+        self.global_rest(name, module)
+    }
+
+    /// A global after its name.
+    fn global_rest(&mut self, name: Symbol, module: &mut Module) -> Result<(), ParseError> {
         self.expect(":")?;
 
         let mut global = Global::new(name, 0, 1);
@@ -419,14 +560,21 @@ impl<'a, 'n> Parser<'a, 'n> {
             }
         }
         self.end_of_line()?;
+        if self.skips(name) {
+            return Ok(());
+        }
+        self.once(module, name)?;
         module.add_alias(alias);
         Ok(())
     }
 
     fn meta(&mut self, module: &mut Module) -> Result<(), ParseError> {
-        let index = self.meta_ref()?;
-        let expected = module.counts().metadata as u32;
-        if index.raw() != expected {
+        let index = self.meta_number()?;
+        let expected = match &self.join {
+            Some(join) => join.metas.len(),
+            None => module.counts().metadata,
+        } as u32;
+        if index != expected {
             return self.fail(format!("metadata is numbered in order and !{expected} comes next"));
         }
         self.expect("=")?;
@@ -464,11 +612,22 @@ impl<'a, 'n> Parser<'a, 'n> {
             }),
             other => return self.fail(format!("`{other}` is not a kind of metadata node")),
         };
-        if node.points_at().is_some_and(|at| at.raw() >= index.raw()) {
+        if self.join.is_none() && node.points_at().is_some_and(|at| at.raw() >= index) {
             return self.fail("a metadata node names one that comes before it");
         }
         self.end_of_line()?;
-        module.add_meta(node);
+        match &mut self.join {
+            // The node the module has that says the same, which is a node of an earlier text or
+            // one this text already gave, or a new one. The parent was matched first, so two
+            // trees that say the same are matched from the root down.
+            Some(join) => {
+                let meta = *join.nodes.entry(node).or_insert_with(|| module.add_meta(node));
+                join.metas.push(meta);
+            }
+            None => {
+                module.add_meta(node);
+            }
+        }
         Ok(())
     }
 
@@ -502,13 +661,16 @@ impl<'a, 'n> Parser<'a, 'n> {
         }
         if self.eat(";") {
             self.end_of_line()?;
-            module.add_func(func);
+        } else {
+            self.expect("{")?;
+            self.end_of_line()?;
+            let parsed = self.body()?;
+            self.build(&mut func, &parsed)?;
+        }
+        if self.skips(name) {
             return Ok(());
         }
-        self.expect("{")?;
-        self.end_of_line()?;
-        let parsed = self.body()?;
-        self.build(&mut func, &parsed)?;
+        self.once(module, name)?;
         module.add_func(func);
         Ok(())
     }
@@ -1629,10 +1791,22 @@ impl<'a, 'n> Parser<'a, 'n> {
         }
     }
 
-    /// A `!n`, remembering it so that one nothing defines is reported.
-    fn meta_ref(&mut self) -> Result<Meta, ParseError> {
+    /// The number of a `!n`, as the text wrote it.
+    fn meta_number(&mut self) -> Result<u32, ParseError> {
         self.expect("!")?;
-        let index = self.u32()?;
+        self.u32()
+    }
+
+    /// A `!n`, remembering it so that one nothing defines is reported, or in a joined module the
+    /// node it turned out to be.
+    fn meta_ref(&mut self) -> Result<Meta, ParseError> {
+        let index = self.meta_number()?;
+        if let Some(join) = &self.join {
+            return match join.metas.get(index as usize) {
+                Some(&meta) => Ok(meta),
+                None => self.fail(format!("!{index} is used and never defined")),
+            };
+        }
         let seen = self.meta_used.is_none_or(|(used, _)| index > used);
         if seen {
             self.meta_used = Some((index, self.line));
@@ -1650,8 +1824,11 @@ impl<'a, 'n> Parser<'a, 'n> {
         if self.pos == start {
             return self.fail("a name was expected");
         }
-        let name = &self.text[start..self.pos];
-        Ok(self.names.intern(name))
+        let name = self.names.intern(&self.text[start..self.pos]);
+        Ok(match &self.join {
+            Some(join) => join.rename.get(&name).copied().unwrap_or(name),
+            None => name,
+        })
     }
 
     /// A quoted string, interned, which is what a section and a template are.
@@ -2695,5 +2872,113 @@ global @x : cap = 0, align 8, linkage(internal)
             };
             assert_eq!(kind, expected, "{}", opcode.name());
         }
+    }
+
+    /// Two units that each have a `static` called `count`, one that calls a function the other
+    /// defines, and the same aliasing types numbered differently.
+    const JOINED_A: &str = "\
+global @count : i32 = 0, align 4, linkage(internal)
+
+func @get() -> i32, linkage(external) {
+block0:
+    %0 = global_addr @count
+    %1 = load.i32 %0, align 4, tbaa !1
+    return %1
+}
+
+func @put(i32) -> i32, linkage(external);
+
+!0 = tbaa \"omnipotent char\", offset 0
+!1 = tbaa \"int\", parent !0, offset 0
+";
+
+    const JOINED_B: &str = "\
+global @count : i32 = 7, align 4, linkage(internal)
+
+func @put(i32) -> i32, linkage(external) {
+block0(%0: i32):
+    %1 = global_addr @count
+    store %0 -> %1, align 4, tbaa !2
+    return %0
+}
+
+!0 = tbaa \"omnipotent char\", offset 0
+!1 = tbaa \"long\", parent !0, offset 0
+!2 = tbaa \"int\", parent !0, offset 0
+";
+
+    fn unit(name: &str, body: &str) -> String {
+        format!("{}\n{body}", HEADER.replace("example.c", name))
+    }
+
+    #[test]
+    fn two_texts_joined_keep_their_own_statics_and_share_their_types() {
+        let mut names = Interner::new();
+        let (put, count) = (names.intern("put"), names.intern("count"));
+        let renamed = names.intern("count.lto.1");
+        let mut joiner = Joiner::new();
+        let skip = Set::from_iter([put]);
+        joiner.read(&unit("a.c", JOINED_A), &mut names, &Map::default(), &skip).unwrap();
+        let rename = Map::from_iter([(count, renamed)]);
+        joiner.read(&unit("b.c", JOINED_B), &mut names, &rename, &Set::default()).unwrap();
+        let module = joiner.finish().expect("two texts were read");
+        let wanted = unit(
+            "a.c",
+            "\
+global @count : i32 = 0, align 4, linkage(internal)
+global @count.lto.1 : i32 = 7, align 4, linkage(internal)
+
+func @get() -> i32, linkage(external) {
+block0:
+    %0 = global_addr @count
+    %1 = load.i32 %0, align 4, tbaa !1
+    return %1
+}
+
+func @put(i32) -> i32, linkage(external) {
+block0(%0: i32):
+    %1 = global_addr @count.lto.1
+    store %0 -> %1, align 4, tbaa !1
+    return %0
+}
+
+!0 = tbaa \"omnipotent char\", offset 0
+!1 = tbaa \"int\", parent !0, offset 0
+!2 = tbaa \"long\", parent !0, offset 0
+",
+        );
+        assert_eq!(print(&module, &names), wanted);
+    }
+
+    #[test]
+    fn a_name_two_texts_define_is_turned_down_unless_one_is_left_out() {
+        let mut names = Interner::new();
+        let mut joiner = Joiner::new();
+        let none = (Map::default(), Set::default());
+        joiner.read(&unit("a.c", JOINED_A), &mut names, &none.0, &none.1).unwrap();
+        let error = joiner.read(&unit("b.c", JOINED_B), &mut names, &none.0, &none.1).unwrap_err();
+        assert!(error.to_string().contains("`count` is defined twice"), "{error}");
+    }
+
+    #[test]
+    fn a_text_for_another_target_is_turned_down() {
+        let mut names = Interner::new();
+        let mut joiner = Joiner::new();
+        let none = (Map::default(), Set::default());
+        joiner.read(&unit("a.c", JOINED_A), &mut names, &none.0, &none.1).unwrap();
+        let other =
+            unit("b.c", JOINED_B).replace("x86_64-unknown-linux-gnu", "aarch64-unknown-linux-gnu");
+        let error = joiner.read(&other, &mut names, &none.0, &none.1).unwrap_err();
+        assert!(error.to_string().contains("aarch64"), "{error}");
+    }
+
+    #[test]
+    fn a_joined_text_that_points_at_a_node_it_does_not_have_is_turned_down() {
+        let mut names = Interner::new();
+        let mut joiner = Joiner::new();
+        let none = (Map::default(), Set::default());
+        let short = unit("a.c", JOINED_A).replace("!1 = tbaa \"int\", parent !0, offset 0\n", "");
+        let error = joiner.read(&short, &mut names, &none.0, &none.1).unwrap_err();
+        assert!(error.to_string().contains("!1 is used and never defined"), "{error}");
     }
 }

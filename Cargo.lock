@@ -260,6 +260,11 @@ dependencies = [
 [[package]]
 name = "rucc-lto"
 version = "0.18.11"
+dependencies = [
+ "rucc-base",
+ "rucc-ir",
+ "rucc-target",
+]
 
 [[package]]
 name = "rucc-mir"

@@ -312,7 +312,7 @@ pub type Meta = Idx<MetaNode>;
 /// Two kinds share the one table and the one numbering, because both of them are the compiler's
 /// interned type universe seen from a different side and a reader chasing a `!3` should not have
 /// to know which table it came out of.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub enum MetaNode {
     /// What aliasing needs: a type, and where it sits in the tree of types.
     Tbaa(TbaaNode),
@@ -368,7 +368,7 @@ impl MetaNode {
 ///
 /// The tree this forms is checked by the verifier, since a cycle in it would make the aliasing
 /// query that walks it not terminate, and the place to find that out is here and not there.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub struct TbaaNode {
     /// What this node is called, which is what the printer writes and the parser reads.
     pub name: Symbol,
@@ -386,7 +386,7 @@ pub struct TbaaNode {
 /// says the plane has beyond the types themselves, and they are why the plane needs a node kind
 /// of its own rather than pointing straight at an aliasing node: there is no aliasing node for
 /// "nobody has stored here yet".
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub enum PlaneNode {
     /// A type, named by the aliasing node that is that type.
     ///
