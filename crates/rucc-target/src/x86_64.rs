@@ -59,6 +59,7 @@ pub use crate::x86_64::timing::{LOAD, MODEL, TIMING};
 
 use crate::bits::BitInsts;
 use crate::branch::{BranchInsts, Fusion, Move};
+use crate::counts::{BitCount, CountInst};
 use crate::flags::{Compare, FlagInsts, Reader, Reads, Zeroing};
 use crate::frame::{ClassMoves, FrameInsts, Probe, SpillMove, Thunks};
 use crate::machine::MachineInsts;
@@ -1550,6 +1551,17 @@ const fn win64(chkstk: Chkstk) -> CallRegs {
         conventions: Conventions::ONLY,
     }
 }
+
+/// The counts x86-64 has an instruction for, which are `popcnt`, `lzcnt` and `tzcnt`.
+///
+/// `tzcnt` is in BMI rather than in an extension of its own. All three answer the width for a
+/// zero, which is what the IR counts answer, and `bsf` and `bsr` are not here because what they
+/// leave for a zero is not the same on every processor (tamnd/rucc#310).
+pub const COUNTS: &[CountInst] = &[
+    CountInst { of: BitCount::Ones, feature: "popcnt", widths: &[32, 64] },
+    CountInst { of: BitCount::LeadingZeros, feature: "lzcnt", widths: &[32, 64] },
+    CountInst { of: BitCount::TrailingZeros, feature: "bmi", widths: &[32, 64] },
+];
 
 #[cfg(test)]
 mod tests {

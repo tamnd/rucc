@@ -61,9 +61,8 @@ use std::fmt::Write as _;
 use rucc_base::Interner;
 use rucc_cost::Goal;
 use rucc_ir::{Func, Opcode};
-use rucc_target::CallRegs;
+use rucc_target::{CallRegs, CountInst};
 
-use crate::expand::Count;
 use crate::switch::{Force, Lowered};
 use crate::{
     decimal, divide, eight, expand, forks, half, maths, quad, retry, switch, varargs, wide, widths,
@@ -330,7 +329,7 @@ impl Step {
         names: &mut Interner,
         conv: &CallRegs,
         switching: (Goal, Option<Force>, bool, bool),
-        counts: &[Count],
+        counts: &[CountInst],
         switched: &mut Vec<Lowered>,
     ) -> bool {
         let (goal, force, tables, cmov) = switching;
@@ -552,7 +551,7 @@ pub fn group(
     names: &mut Interner,
     conv: &CallRegs,
     switching: (Goal, Option<Force>, bool, bool),
-    counts: &[Count],
+    counts: &[CountInst],
     counting: bool,
 ) -> Ran {
     let mut ran = Ran::default();

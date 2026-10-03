@@ -932,7 +932,7 @@ pub fn run(module: &mut Module, names: &mut Interner, opts: &Options) -> Report 
     // The machine, once for the module, because every function in it is compiled for the same
     // target at the same goal. It goes into each function's cache rather than into a parameter of
     // its own, per `crate::machine`.
-    let machine = Machine::of(module, opts.level);
+    let machine = Machine::of(module, opts.level).built_for(opts.isa);
     // What the whole pipeline has left, which every pass draws its own allowance out of and
     // gives the unspent part of back. A pass past the end of it is given nothing rather than
     // skipped, so it still runs, still reports, and still transforms nothing.

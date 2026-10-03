@@ -47,6 +47,7 @@ use rucc_ir::{
     AttrSet, BlockCall, CallInfo, Def, Extra, Flags, FloatPred, Func, Imm, Inst, InstData, IntPred,
     MemInfo, MemOrder, Opcode, Signature, Type, Value,
 };
+use rucc_target::{BitCount, CountInst};
 
 use crate::capability;
 
@@ -766,15 +767,15 @@ fn every(width: u32, step: u32, run: u32) -> i128 {
     mask
 }
 
-/// A bit count that is one instruction on a processor with the extension that has it.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub struct Count {
-    /// The IR instruction it answers.
-    pub opcode: Opcode,
-    /// The extension, by the name `-m` and `__attribute__((target))` give it.
-    pub feature: &'static str,
-    /// The widths in bits a rule selects it at.
-    pub widths: &'static [u32],
+/// Which count an IR instruction is, when it is one.
+#[must_use]
+pub fn bit_count(opcode: Opcode) -> Option<BitCount> {
+    match opcode {
+        Opcode::Ctpop => Some(BitCount::Ones),
+        Opcode::Ctlz => Some(BitCount::LeadingZeros),
+        Opcode::Cttz => Some(BitCount::TrailingZeros),
+        _ => None,
+    }
 }
 
 /// Rewrites every bit count the machine is not left to answer into the arithmetic that is one, and
@@ -793,10 +794,12 @@ pub struct Count {
 /// up what the first one wrote, and it means there is one place that knows how to count bits rather
 /// than three. A search written out as a set bit count is one instruction after all on a processor
 /// that has `popcnt` and not `lzcnt`, since the second sweep keeps the count it became.
-pub fn counts(func: &mut Func, kept: &[Count]) {
+pub fn counts(func: &mut Func, kept: &[CountInst]) {
     let kept = |func: &Func, inst: Inst| {
-        let (opcode, bits) = (func[inst].opcode, produced(func, inst).bits());
-        kept.iter().any(|count| count.opcode == opcode && count.widths.contains(&bits))
+        let bits = produced(func, inst).bits();
+        bit_count(func[inst].opcode).is_some_and(|of| {
+            kept.iter().any(|count| count.of == of && count.widths.contains(&bits))
+        })
     };
     let found: Vec<Inst> = func.blocks().flat_map(|block| func.insts(block)).collect();
     for inst in found {
@@ -1829,12 +1832,12 @@ pub(crate) fn becomes(func: &mut Func, inst: Inst, opcode: Opcode, args: &[Value
 mod tests {
     use rucc_base::Interner;
     use rucc_ir::{Builder, Flags, Float, Func, Module, Opcode, Signature, Type};
-    use rucc_target::{Arch, Env, Os, TargetInfo, Triple};
+    use rucc_target::{Arch, BitCount, CountInst, Env, Os, TargetInfo, Triple};
 
     use rucc_ir::{Extra, InstData, MemInfo, MemOrder, Restrict};
 
     use super::{
-        Count, SMALL, UNROLL, alternating, bulk, bytes, chunks, counts, every, floats, orderings,
+        SMALL, UNROLL, alternating, bulk, bytes, chunks, counts, every, floats, orderings,
         overflows, rounds, spread,
     };
 
@@ -2814,7 +2817,7 @@ mod tests {
     /// as the set bit count it became.
     #[test]
     fn a_count_the_machine_has_an_instruction_for_is_left_for_the_selector() {
-        let popcnt = Count { opcode: Opcode::Ctpop, feature: "popcnt", widths: &[32, 64] };
+        let popcnt = CountInst { of: BitCount::Ones, feature: "popcnt", widths: &[32, 64] };
         for width in [32, 64] {
             let (mut names, mut func) = counting(Opcode::Ctpop, width);
             let before = printed(&func, &mut names);

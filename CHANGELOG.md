@@ -7,6 +7,7 @@ All notable changes are recorded here. The format follows [Keep a Changelog](htt
 ### Added
 
 - `#pragma scalar_storage_order` is read, as in gcc 13 (#8). Every `struct` and `union` whose body closes after a `big-endian` line stores its scalars big-endian, as if it had the attribute, `little-endian` and `default` put the target's order back, and a record that writes the attribute keeps its own. gcc reads only the first word, so `big` is taken as well. A line with no word or another one gets gcc's `-Wpragmas` warning and is ignored (E0798). Before, the line was taken without a word and did nothing.
+- A loop that counts the bits of a value, such as `while (x) { x &= x - 1; n++; }`, is taken out at `-O2` and what it hands over is worked out from one `ctpop`, `ctlz` or `cttz` of the value instead, where that count is one instruction for the function's processor. The four loops are the ones `number_of_iterations_popcount` and its neighbours handle in gcc: clearing the lowest set bit, shifting right until nothing is left, shifting right until the bottom bit is set, and shifting left until the top bit is set. The last two are taken only where a test in front of the loop says the value is not zero. The table of which counts are one instruction moved from the code generator into `rucc-target`, so the pass and the selector read the same one (tamnd/rucc#399).
 
 ### Fixed
 

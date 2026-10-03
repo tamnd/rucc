@@ -49,6 +49,7 @@ pub mod aarch64;
 mod abi;
 mod bits;
 mod branch;
+mod counts;
 mod flags;
 mod frame;
 pub mod isa;
@@ -69,6 +70,7 @@ pub use crate::abi::{
 };
 pub use crate::bits::BitInsts;
 pub use crate::branch::{BranchInsts, Fusion, Move};
+pub use crate::counts::{BitCount, CountInst};
 pub use crate::flags::{Compare, FlagInsts, Reader, Reads, Zeroing};
 pub use crate::frame::{ClassMoves, FrameInsts, Kept, Pair, Probe, SpillMove, Thunks};
 pub use crate::isa::{Choices, Feature, Isa, Target, TargetRefusal};
@@ -787,6 +789,12 @@ pub struct TargetInfo {
     /// were made up. `--print-config` prints [`TimingInsts::model`] off this, which is the first
     /// thing anybody comparing two runs of a benchmark wants to know.
     pub timing: Option<&'static TimingInsts>,
+    /// The bit counts this machine has one instruction for, each with the extension it needs.
+    ///
+    /// Empty for an architecture with no rules for them, which is everything but x86-64 today.
+    /// The code generator writes a count that is not here out as arithmetic, so a pass that would
+    /// put one where there was none reads this first. See [`CountInst`].
+    pub counts: &'static [CountInst],
 }
 
 /// The type a target's `__builtin_va_list` is.
@@ -1112,6 +1120,10 @@ impl TargetInfo {
             regparm: 0,
             reg_struct_return: false,
             timing,
+            counts: match target.arch() {
+                tuple::Arch::X86_64 => x86_64::COUNTS,
+                _ => &[],
+            },
         }
     }
 

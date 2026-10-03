@@ -13,8 +13,9 @@
 //! every `run`. The cache is per function and so is the machine's lifetime as far as a pass is
 //! concerned, and the pipeline builds one for the module and hands out copies.
 //!
-//! It is a copy rather than a borrow because it is two words, a pointer to a table nobody writes
-//! and the goal. A pass that wants both the machine and an analysis out of the same cache would
+//! It is a copy rather than a borrow because it is a few words, a pointer to a table nobody writes,
+//! the goal, and the extensions the module is built for with the target's table of bit counts. A
+//! pass that wants both the machine and an analysis out of the same cache would
 //! otherwise be holding two borrows of it, one of them mutable, which is a fight with the borrow
 //! checker over a value cheaper to copy than to reference.
 //!
@@ -28,14 +29,19 @@
 //! one being compiled for.
 
 use rucc_cost::{CostTable, Cycles, Goal, RegClass, TargetCosts, TuneFlag};
-use rucc_ir::Module;
+use rucc_ir::{Func, Module, Opcode};
 use rucc_session::OptLevel;
+use rucc_target::{BitCount, CountInst, Isa, TargetInfo};
 
 /// The target a pass is compiling for, and which of its two cost tables applies.
 #[derive(Clone, Copy)]
 pub struct Machine {
     costs: Option<&'static dyn TargetCosts>,
     goal: Goal,
+    /// The extensions a function without a `target` attribute of its own is built for.
+    isa: Isa,
+    /// The bit counts the target has one instruction for, which the code generator reads too.
+    counts: &'static [CountInst],
 }
 
 impl Machine {
@@ -47,6 +53,25 @@ impl Machine {
     #[must_use]
     pub fn of(module: &Module, level: OptLevel) -> Self {
         Self::with(rucc_cost::for_tuple(module.tuple), Goal::for_size(level.is_size()))
+            .counting(TargetInfo::for_tuple(module.tuple).counts)
+    }
+
+    /// The same machine with the extensions the module is built for, which is what `-m` and
+    /// `-march=` said.
+    ///
+    /// A separate call because the module does not carry them, the options do. Without it a
+    /// function with no `target` attribute is taken to be built for no extension at all, which is
+    /// the answer that makes no count look cheap.
+    #[must_use]
+    pub const fn built_for(self, isa: Isa) -> Self {
+        Self { isa, ..self }
+    }
+
+    /// The same machine with that table of bit counts, which is what a test that builds one by
+    /// hand wants. [`Machine::of`] takes the target's.
+    #[must_use]
+    pub const fn counting(self, counts: &'static [CountInst]) -> Self {
+        Self { counts, ..self }
     }
 
     /// The machine for costs already in hand.
@@ -56,7 +81,7 @@ impl Machine {
     /// no back end for.
     #[must_use]
     pub const fn with(costs: Option<&'static dyn TargetCosts>, goal: Goal) -> Self {
-        Self { costs, goal }
+        Self { costs, goal, isa: Isa::NONE, counts: &[] }
     }
 
     /// A machine nobody has a cost table for, which is what a test that does not care wants.
@@ -66,7 +91,25 @@ impl Machine {
     /// that does not exist.
     #[must_use]
     pub const fn unknown() -> Self {
-        Self { costs: None, goal: Goal::Speed }
+        Self::with(None, Goal::Speed)
+    }
+
+    /// Whether the code generator selects one instruction for that bit count at that width in
+    /// this function.
+    ///
+    /// The function's own `target` attribute where it has one and the module's extensions where it
+    /// does not, which is the choice the code generator makes, read from the table it reads. A
+    /// count with no instruction behind it is written out as a dozen shifts and masks and a
+    /// multiply, so a pass that would put one where a loop was asks here first.
+    #[must_use]
+    pub fn counts_in_one(self, func: &Func, opcode: Opcode, bits: u32) -> bool {
+        let of = match opcode {
+            Opcode::Ctpop => BitCount::Ones,
+            Opcode::Ctlz => BitCount::LeadingZeros,
+            Opcode::Cttz => BitCount::TrailingZeros,
+            _ => return false,
+        };
+        CountInst::in_one(self.counts, of, bits, func.target.unwrap_or(self.isa))
     }
 
     /// The costs for this target, or nothing for one with no table.
