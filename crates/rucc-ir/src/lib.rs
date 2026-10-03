@@ -64,7 +64,7 @@ pub use module::{
     GlobalId, Linkage, Module, ModuleCounts, Pic, Reloc, SymbolRef, TlsModel, Visibility,
 };
 pub use opcode::{ExtraKind, FloatPred, IntPred, Opcode};
-pub use parse::{ParseError, parse};
+pub use parse::{Joiner, ParseError, parse};
 pub use print::{Printer, print, print_func};
 pub use ty::{Float, Kind, Type};
 pub use verify::{Doms, VerifyError, verify, verify_func};

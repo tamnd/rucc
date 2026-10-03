@@ -4,6 +4,10 @@ All notable changes are recorded here. The format follows [Keep a Changelog](htt
 
 ## Unreleased
 
+### Added
+
+- `rucc-lto` joins the modules a link's objects kept into one module, for `-flto` (#1995). Each unit keeps its own internal names, and one is renamed only where another unit has the same name. A name with linkage keeps the definition the linker would have kept: a strong one, then the larger of two commons, then a weak one, then a declaration, and two strong definitions are left for the linker to report. Aliasing types are matched by name, parent and offset, so `int` is one type in every unit. A function from a unit built for other extensions than the link keeps its unit's set. The link step does not call it yet.
+
 ### Fixed
 
 - On i686 Windows a structure holding a `double`, which is eight byte aligned there, is passed at the next four bytes of the argument area, as gcc, clang and MSVC pass it. rucc put it at the next eight, so a call such as `g(1, y)` left four bytes of padding that a `va_arg` of the structure read as its first field. c-testsuite 00204 printed garbage for its HFA double lines under Wine because of it.
