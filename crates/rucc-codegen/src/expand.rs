@@ -743,22 +743,43 @@ fn every(width: u32, step: u32, run: u32) -> i128 {
     mask
 }
 
-/// Rewrites every bit count into the arithmetic that is one, and leaves the rest alone.
+/// A bit count that is one instruction on a processor with the extension that has it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Count {
+    /// The IR instruction it answers.
+    pub opcode: Opcode,
+    /// The extension, by the name `-m` and `__attribute__((target))` give it.
+    pub feature: &'static str,
+    /// The widths in bits a rule selects it at.
+    pub widths: &'static [u32],
+}
+
+/// Rewrites every bit count the machine is not left to answer into the arithmetic that is one, and
+/// leaves the rest alone.
 ///
-/// Three instructions and no rules, which is tamnd/rucc#310. `popcnt` is one instruction on a
-/// machine that has it and `bsr` and `bsf` are the two searches, and none of the three is a term the
-/// model knows about yet, so what runs today is what runs everywhere. The trade is the one
-/// `spec/10-backend.md` section 10.3 describes and `expand::bytes` above makes for the same reason:
-/// slower than the instruction, right on every target, and built only out of rules the verifier has
-/// already discharged.
+/// `kept` is the counts the selector has a rule for on the processor this function is built for,
+/// which on x86-64 is `popcnt`, `lzcnt` and `tzcnt` where `-mpopcnt`, a `-march=` or a `target`
+/// attribute says the processor has them (tamnd/rucc#310). Everything else is written out here, and
+/// that is every count on a plain x86-64, whose searches `bsr` and `bsf` leave a different answer
+/// for a zero on different processors. The trade is the one `spec/10-backend.md` section 10.3
+/// describes and `expand::bytes` above makes for the same reason: slower than the instruction,
+/// right on every target, and built only out of rules the verifier has already discharged.
 ///
 /// The two searches are rewritten first, into a set bit count and a little arithmetic, and then
 /// every set bit count is rewritten. That is one pass rather than two because the second sweep picks
 /// up what the first one wrote, and it means there is one place that knows how to count bits rather
-/// than three.
-pub fn counts(func: &mut Func) {
+/// than three. A search written out as a set bit count is one instruction after all on a processor
+/// that has `popcnt` and not `lzcnt`, since the second sweep keeps the count it became.
+pub fn counts(func: &mut Func, kept: &[Count]) {
+    let kept = |func: &Func, inst: Inst| {
+        let (opcode, bits) = (func[inst].opcode, produced(func, inst).bits());
+        kept.iter().any(|count| count.opcode == opcode && count.widths.contains(&bits))
+    };
     let found: Vec<Inst> = func.blocks().flat_map(|block| func.insts(block)).collect();
     for inst in found {
+        if kept(func, inst) {
+            continue;
+        }
         match func[inst].opcode {
             Opcode::Ctlz => searched(func, inst, true),
             Opcode::Cttz => searched(func, inst, false),
@@ -767,7 +788,7 @@ pub fn counts(func: &mut Func) {
     }
     let found: Vec<Inst> = func.blocks().flat_map(|block| func.insts(block)).collect();
     for inst in found {
-        if func[inst].opcode == Opcode::Ctpop {
+        if func[inst].opcode == Opcode::Ctpop && !kept(func, inst) {
             counted(func, inst);
         }
     }
@@ -1790,7 +1811,7 @@ mod tests {
     use rucc_ir::{Extra, InstData, MemInfo, MemOrder, Restrict};
 
     use super::{
-        SMALL, UNROLL, alternating, bulk, bytes, chunks, counts, every, floats, orderings,
+        Count, SMALL, UNROLL, alternating, bulk, bytes, chunks, counts, every, floats, orderings,
         overflows, rounds, spread,
     };
 
@@ -2590,7 +2611,7 @@ mod tests {
     #[test]
     fn a_set_bit_count_is_the_halving_sum_and_a_multiply_that_adds_the_bytes() {
         let (mut names, mut func) = counting(Opcode::Ctpop, 32);
-        counts(&mut func);
+        counts(&mut func, &[]);
 
         let text = printed(&func, &mut names);
         assert!(!text.contains("ctpop"), "the instruction is gone: {text}");
@@ -2605,7 +2626,7 @@ mod tests {
     #[test]
     fn a_count_of_one_byte_stops_before_the_multiply() {
         let (mut names, mut func) = counting(Opcode::Ctpop, 8);
-        counts(&mut func);
+        counts(&mut func, &[]);
         let text = printed(&func, &mut names);
         assert!(!text.contains("ctpop"), "{text}");
         assert!(!text.contains(" mul "), "nothing to add together: {text}");
@@ -2616,7 +2637,7 @@ mod tests {
     #[test]
     fn a_leading_zero_count_smears_the_value_down_and_counts_the_complement() {
         let (mut names, mut func) = counting(Opcode::Ctlz, 32);
-        counts(&mut func);
+        counts(&mut func, &[]);
 
         let text = printed(&func, &mut names);
         assert!(!text.contains("ctlz"), "the instruction is gone: {text}");
@@ -2632,7 +2653,7 @@ mod tests {
     #[test]
     fn a_trailing_zero_count_masks_the_bits_below_the_lowest_set_one() {
         let (mut names, mut func) = counting(Opcode::Cttz, 32);
-        counts(&mut func);
+        counts(&mut func, &[]);
 
         let text = printed(&func, &mut names);
         assert!(!text.contains("cttz"), "the instruction is gone: {text}");
@@ -2650,7 +2671,7 @@ mod tests {
         for op in [Opcode::Ctpop, Opcode::Ctlz, Opcode::Cttz] {
             for width in [8u32, 16, 32, 64] {
                 let (mut names, mut func) = counting(op, width);
-                counts(&mut func);
+                counts(&mut func, &[]);
                 let module = Module::new(names.intern("c.c"), &target());
                 rucc_ir::verify_func(&module, &func, &names)
                     .unwrap_or_else(|e| panic!("{op:?} at {width}: {e:?}"));
@@ -2664,8 +2685,32 @@ mod tests {
     #[test]
     fn a_width_the_halving_sum_is_not_written_for_is_left_alone() {
         let (mut names, mut func) = counting(Opcode::Ctpop, 24);
-        counts(&mut func);
+        counts(&mut func, &[]);
         assert!(printed(&func, &mut names).contains("ctpop"), "left as it was");
+    }
+
+    /// A count the selector is left to answer stays as it was, at the widths it is left at and no
+    /// others, and a search written out on a processor that has `popcnt` and not `lzcnt` is left
+    /// as the set bit count it became.
+    #[test]
+    fn a_count_the_machine_has_an_instruction_for_is_left_for_the_selector() {
+        let popcnt = Count { opcode: Opcode::Ctpop, feature: "popcnt", widths: &[32, 64] };
+        for width in [32, 64] {
+            let (mut names, mut func) = counting(Opcode::Ctpop, width);
+            let before = printed(&func, &mut names);
+            counts(&mut func, &[popcnt]);
+            assert_eq!(printed(&func, &mut names), before, "at {width}");
+        }
+        let (mut names, mut func) = counting(Opcode::Ctpop, 16);
+        counts(&mut func, &[popcnt]);
+        assert!(!printed(&func, &mut names).contains("ctpop"), "no rule at sixteen bits");
+
+        let (mut names, mut func) = counting(Opcode::Ctlz, 32);
+        counts(&mut func, &[popcnt]);
+        let text = printed(&func, &mut names);
+        assert!(!text.contains("ctlz"), "the search is written out: {text}");
+        assert_eq!(text.matches("ctpop").count(), 1, "as the count it became: {text}");
+        assert!(!text.contains(" mul "), "which is not written out in turn: {text}");
     }
 
     /// Nothing else is touched, for the same reason the other passes have that test.
@@ -2675,7 +2720,7 @@ mod tests {
             build.ret(&[args[0]]);
         });
         let before = printed(&func, &mut names);
-        counts(&mut func);
+        counts(&mut func, &[]);
         assert_eq!(printed(&func, &mut names), before);
     }
 

@@ -2116,8 +2116,9 @@ pub struct Options {
     ///
     /// What it decides today is the macros, `__SSE4_2__` and the rest, which is how a header or a
     /// configure probe finds out, and which functions a function built for less may call without
-    /// saying so. The code generator emits the baseline whatever this says, so a unit built for
-    /// more runs anywhere and is slower than it could be rather than wrong. On AArch64 it is
+    /// saying so. The code generator reads it for the bit counts, which are `popcnt`, `lzcnt` and
+    /// `tzcnt` where this has them, and emits the baseline for everything else, so a unit built
+    /// for more is slower than it could be rather than wrong. On AArch64 it is
     /// whether `-march=` gave the CRC32 extension, which `__ARM_FEATURE_CRC32` and
     /// `<arm_acle.h>` follow, and every other target's is [`Isa::NONE`]. See `rucc_target::isa`.
     pub isa: Isa,

@@ -212,6 +212,17 @@ pub static AARCH64_NAMES: &[(&str, &str, &str)] = &[
     ),
     ("bswap.i32", "the same", "tamnd/rucc#307"),
     ("bswap.i64", "the same", "tamnd/rucc#307"),
+    (
+        "ctlz.i32",
+        "a bit count, which `expand::counts` writes out as arithmetic before selection on a \
+         machine with no rule for it",
+        "tamnd/rucc#310",
+    ),
+    ("ctlz.i64", "the same", "tamnd/rucc#310"),
+    ("ctpop.i32", "the same", "tamnd/rucc#310"),
+    ("ctpop.i64", "the same", "tamnd/rucc#310"),
+    ("cttz.i32", "the same", "tamnd/rucc#310"),
+    ("cttz.i64", "the same", "tamnd/rucc#310"),
 ];
 
 /// [`NAMES`] for `i386.rules`.
@@ -288,6 +299,17 @@ pub static X86_NAMES: &[(&str, &str, &str)] = &[
     ("sub.i64x2", "the same", "tamnd/rucc#2320"),
     ("xor.i32x4", "the same", "tamnd/rucc#2320"),
     ("xor.i64x2", "the same", "tamnd/rucc#2320"),
+    (
+        "ctlz.i32",
+        "a bit count, which `expand::counts` writes out as arithmetic before selection on a \
+         machine with no rule for it",
+        "tamnd/rucc#310",
+    ),
+    ("ctlz.i64", "the same", "tamnd/rucc#310"),
+    ("ctpop.i32", "the same", "tamnd/rucc#310"),
+    ("ctpop.i64", "the same", "tamnd/rucc#310"),
+    ("cttz.i32", "the same", "tamnd/rucc#310"),
+    ("cttz.i64", "the same", "tamnd/rucc#310"),
 ];
 
 /// The names left for later in the rule file `table` is built from.

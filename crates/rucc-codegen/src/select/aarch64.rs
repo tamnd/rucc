@@ -12,6 +12,7 @@ include!(concat!(env!("OUT_DIR"), "/aarch64.rs"));
 /// What the lowering asks of AArch64.
 pub static SELECTOR: super::Selector = super::Selector {
     table: &TABLE,
+    counts: &[],
     shapes: &rucc_target::aarch64::MACHINE,
     address: rucc_target::aarch64::address,
     frame: &rucc_target::aarch64::FRAME,
