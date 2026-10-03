@@ -10,7 +10,7 @@ use std::process::{Command, Output, Stdio};
 fn run(flags: &[&str], input: &str) -> Output {
     let mut child = Command::new(env!("CARGO_BIN_EXE_rucc"))
         .env("LC_ALL", "C")
-        .args(["--target=x86_64-unknown-linux-gnu", "-std=gnu17", "-S", "-o", "/dev/null"])
+        .args(["--target=x86_64-unknown-linux-gnu", "-std=gnu17", "-S", "-o", "-"])
         .args(flags)
         .args(["-x", "c", "-"])
         .stdin(Stdio::piped())
