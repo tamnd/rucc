@@ -4388,6 +4388,10 @@ impl std::error::Error for Error {}
 
 /// The bit of a REX byte that says the operands are sixty four bits.
 const REX_W: u8 = 0b1000;
+/// The rows whose sixty four bit register gas writes without `REX.W`. The limit, the access
+/// rights and the two selectors come out the same either way, and binutils stopped writing the
+/// bit for them, so the kernel's objects do not have it.
+const UNWIDENED: [&str; 4] = ["larq", "lslq", "sldtq", "strq"];
 /// The bit that carries the top of the register beside the addressing byte.
 const REX_R: u8 = 0b0100;
 /// The bit that carries the top of an index register.
@@ -4820,7 +4824,8 @@ impl Writer<'_> {
         if let Some(prefix) = self.row.size.prefix() {
             out.push(prefix);
         }
-        let rex = if self.row.size.wide() { self.rex | REX_W } else { self.rex };
+        let wide = self.row.size.wide() && !UNWIDENED.contains(&self.row.mnemonic);
+        let rex = if wide { self.rex | REX_W } else { self.rex };
         if rex != 0 || (self.forced && !self.banned) {
             out.push(0x40 | rex);
         }
@@ -6476,6 +6481,17 @@ mod tests {
     /// A control, debug or segment register goes in the field beside the addressing byte, and a
     /// control or debug register past seven reaches it through `REX.R` the way a general purpose
     /// one does. The bytes are llvm-mc's for the same lines.
+    #[test]
+    fn segment_limits_and_selectors_into_a_quad_register_carry_no_rex_w() {
+        assert_eq!(hex("lslq", &[quad(RAX), quad(RAX)]), "0f 03 c0");
+        assert_eq!(hex("larq", &[quad(RCX), quad(RDX)]), "0f 02 d1");
+        assert_eq!(hex("lslq", &[quad(R9), quad(R10)]), "45 0f 03 d1");
+        assert_eq!(hex("strq", &[quad(RAX)]), "0f 00 c8");
+        assert_eq!(hex("strq", &[quad(R9)]), "41 0f 00 c9");
+        assert_eq!(hex("sldtq", &[quad(RAX)]), "0f 00 c0");
+        assert_eq!(hex("smswq", &[quad(RAX)]), "48 0f 01 e0");
+    }
+
     #[test]
     fn a_control_debug_or_segment_register_is_the_register_field_of_the_addressing_byte() {
         let cr = Value::Control;
