@@ -1391,6 +1391,9 @@ struct Lowering<'a> {
     /// is the first one after it once the block has been filled. See
     /// [`rucc_ir::Func::declare_value_from`].
     marks: Map<Block, Vec<Mark>>,
+    /// Each constant splat every reader of which is a vector shift that takes it as the count
+    /// in its byte, so that nothing is written for it. See [`Self::shifted_by_splat`].
+    counts: Set<Inst>,
     /// The frame slot each fixed size `alloca` was given, which is what every reader of its
     /// address writes the address of. See [`Self::local`].
     frame_slots: Map<Value, usize>,
@@ -1547,6 +1550,7 @@ impl<'a> Lowering<'a> {
             applied: None,
             fired: Fired::new(),
             marks: Map::default(),
+            counts: Set::default(),
             frame_slots: Map::default(),
             unwinding: Map::default(),
             effectless: (Vec::new(), Vec::new()),
@@ -1571,6 +1575,7 @@ impl<'a> Lowering<'a> {
                 }
             }
         }
+        self.counts = self.only_counts();
         // Every block before any of them is filled, because a block that jumps forward has to
         // name the block it jumps to and a machine IR block is named by a handle rather than by
         // the IR block it came from.
@@ -1860,7 +1865,7 @@ impl<'a> Lowering<'a> {
                 let at = self.at.unwrap_or(out);
                 reached.push((before, at, self.out.terminator(at)));
             }
-            if folded.contains(&inst) || self.writes_nothing(inst) {
+            if folded.contains(&inst) || self.writes_nothing(inst) || self.counts.contains(&inst) {
                 continue;
             }
             // A call is built from the convention rather than matched, which is why it is the one
@@ -4737,6 +4742,34 @@ impl<'a> Lowering<'a> {
         }
         let by = self.source[imm].bits();
         (by < bits).then(|| u8::try_from(by).ok()).flatten()
+    }
+
+    /// The constant splats only ever read as the count of a shift [`Self::vector_shift`] takes,
+    /// which is a number in the instruction's byte and never a register.
+    fn only_counts(&self) -> Set<Inst> {
+        if self.on_aarch64() {
+            return Set::default();
+        }
+        let mut read: Map<Value, u32> = Map::default();
+        for block in self.source.blocks() {
+            for inst in self.source.insts(block) {
+                let data = &self.source[inst];
+                let shift = matches!(data.opcode, Opcode::Shl | Opcode::LShr | Opcode::AShr);
+                if !shift || self.shifted_by_splat(inst).is_none() {
+                    continue;
+                }
+                if let &[_, count] = &self.source[data.args] {
+                    *read.entry(count).or_default() += 1;
+                }
+            }
+        }
+        read.into_iter()
+            .filter(|&(count, times)| times == self.uses[count.index()])
+            .filter_map(|(count, _)| match self.source[count].def {
+                Def::Result { inst, .. } => Some(inst),
+                _ => None,
+            })
+            .collect()
     }
 
     /// A shift of every lane by a constant, which is one `pslld`, `psrld`, `psrad`, `psllq` or
