@@ -20,6 +20,7 @@ All notable changes are recorded here. The format follows [Keep a Changelog](htt
 ### Added
 
 - The assembler takes the far pointer loads `lss`, `lfs` and `lgs` in their 16, 32 and 64 bit forms. The i386 kernel's `CHECK_AND_APPLY_ESPFIX` in entry_32.S switches stacks with `lss`.
+- `setjmp` on i686-windows-msvc is `_setjmp3(buf, 0)`, the call cl.exe and clang make, rather than the `_setjmp` Microsoft's header names (#2072). `_setjmp3` and `_setjmpex` are known to return twice by name as well, since Microsoft's headers declare them without the attribute. mingw-w64's header already calls `_setjmp3(buf, NULL)` on i386, and that runs under Wine.
 - A thread-local variable works on i686 Windows (#2072). It is reached the way gcc and clang reach it for `i686-w64-mingw32`: `__tls_index`, the array of `.tls` copies at `%fs:44`, four bytes a pointer, and the variable's `@SECREL32` offset, which the i386 assembler now reads and writes as `IMAGE_REL_I386_SECREL`. Before, the compile was refused.
 - The assembler takes `jecxz` in 32 and 64 bit code and `jcxz` in 32 bit code, which arch/x86/power/hibernate_asm_32.S uses to skip `cr4` on old CPUs.
 

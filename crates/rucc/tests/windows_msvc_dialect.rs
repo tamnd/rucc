@@ -210,3 +210,51 @@ fn a_selectany_definition_is_one_the_link_may_find_elsewhere_too() {
     assert!(!asm.contains("\t.globl\tone_copy\n"), "{asm}");
     assert!(asm.contains("\t.globl\tordinary\n"), "{asm}");
 }
+
+/// Enough of Microsoft's `<setjmp.h>` for i386 to see what `setjmp` turns into: the header names it
+/// `_setjmp` and declares it with one parameter and no attribute, since cl.exe knows it by name.
+const MSVC_SETJMP_H: &str = "\
+#ifndef _INC_SETJMP
+#define _INC_SETJMP
+typedef int jmp_buf[16];
+#define setjmp _setjmp
+int __cdecl setjmp(jmp_buf _Buf);
+__declspec(noreturn) void __cdecl longjmp(jmp_buf _Buf, int _Value);
+#endif
+";
+
+/// On i386 `setjmp` is a call to `_setjmp3` with a count of nothing after the buffer, the call cl.exe
+/// and clang make.
+#[test]
+fn on_i386_setjmp_is_setjmp3_with_nothing_after_the_buffer() {
+    let headers = std::env::temp_dir().join(format!("rucc-msvc-{}-setjmp-h", std::process::id()));
+    std::fs::create_dir_all(&headers).expect("a temporary directory can be created");
+    std::fs::write(headers.join("setjmp.h"), MSVC_SETJMP_H).expect("the header can be written");
+    let source = "\
+#include <setjmp.h>
+jmp_buf env;
+int g(void);
+int f(void) {
+    int seen = g();
+    if (setjmp(env))
+        return seen;
+    return 0;
+}
+";
+    let include = headers.to_str().expect("a temporary path is text").to_owned();
+    let (ok, asm, said) = run(
+        "setjmp3",
+        // After the compiler's own headers, where the toolset's are, so that ours is the one
+        // `#include <setjmp.h>` finds and it goes on to this one.
+        &["--target=i686-windows-msvc", "-idirafter", &include, "-O1", "-S", "-o", "-"],
+        source,
+    );
+    let _ = std::fs::remove_dir_all(&headers);
+    assert!(ok, "{said}");
+    assert!(asm.contains("\tcall\t__setjmp3\n"), "{asm}");
+    assert!(!asm.contains("\tcall\t__setjmp\n"), "{asm}");
+    // The count is the second argument, so something goes into the word after the buffer's.
+    let call = asm.find("\tcall\t__setjmp3\n").expect("checked above");
+    let before = &asm[..call];
+    assert!(before.contains(", 4(%esp)\n") || before.contains("\tpushl\t"), "a count: {asm}");
+}
