@@ -5122,18 +5122,53 @@ const NOPS_32: [&[u8]; 8] = [
 /// three of the longest [`NOPS_32`].
 const JUMPED_32: usize = 3 * NOPS_32.len();
 
+/// [`NOPS_32`] grown by a REX.W, so that each writes the whole of `%rsi` back, with `mov %rsi,%rsi`
+/// for three bytes, one for each length from one byte to nine.
+///
+/// What gas 2.42 writes after `.code64` in a file it was told is i386, which is how the kernel
+/// builds the trampoline its real mode code jumps into long mode with. Which table gas pads with
+/// is decided by the machine the object is for, not by the mode the code is in.
+const NOPS_32_IN_64: [&[u8]; 9] = [
+    &[0x90],
+    &[0x66, 0x90],
+    &[0x48, 0x89, 0xf6],
+    &[0x48, 0x8d, 0x76, 0x00],
+    &[0x48, 0x8d, 0x74, 0x26, 0x00],
+    &[0x2e, 0x48, 0x8d, 0x74, 0x26, 0x00],
+    &[0x48, 0x8d, 0xb6, 0x00, 0x00, 0x00, 0x00],
+    &[0x48, 0x8d, 0xb4, 0x26, 0x00, 0x00, 0x00, 0x00],
+    &[0x2e, 0x48, 0x8d, 0xb4, 0x26, 0x00, 0x00, 0x00, 0x00],
+];
+
 /// [`nops`] for code of the given mode.
 ///
 /// In thirty two bit mode a run of `JUMPED_32` bytes or more starts with a jump to its end, two
 /// bytes while the distance fits in one and five after that, and the rest is the same no-ops, as
 /// gas 2.42 writes it.
 pub fn nops_in(mode: Mode, count: usize, out: &mut Vec<u8>) {
-    let table: &[&[u8]] = match mode {
-        Mode::Bits64 => &NOPS,
-        Mode::Bits32 => &NOPS_32,
-    };
+    match mode {
+        Mode::Bits64 => padded(&NOPS, None, count, out),
+        Mode::Bits32 => padded(&NOPS_32, Some(JUMPED_32), count, out),
+    }
+}
+
+/// What gas 2.42 pads code of the given mode with in an object for i386, as against [`nops`],
+/// which is what it pads code of either mode with in an object for x86-64.
+///
+/// Thirty two bit code gets [`NOPS_32`], and sixty four bit code gets [`NOPS_32_IN_64`], which is
+/// jumped over the same way once a run is three of the longest.
+pub fn nops_i386(mode: Mode, count: usize, out: &mut Vec<u8>) {
+    match mode {
+        Mode::Bits32 => padded(&NOPS_32, Some(JUMPED_32), count, out),
+        Mode::Bits64 => padded(&NOPS_32_IN_64, Some(3 * NOPS_32_IN_64.len()), count, out),
+    }
+}
+
+/// `count` bytes of the no-ops in `table`, the longest first, behind a jump to the end when there
+/// are at least `jumped` of them.
+fn padded(table: &[&[u8]], jumped: Option<usize>, count: usize, out: &mut Vec<u8>) {
     let mut left = count;
-    if mode == Mode::Bits32 && left >= JUMPED_32 {
+    if jumped.is_some_and(|jumped| left >= jumped) {
         match u8::try_from(left - 2).ok().filter(|&over| over <= 0x7f) {
             Some(over) => {
                 out.extend_from_slice(&[0xeb, over]);
@@ -6180,6 +6215,38 @@ mod tests {
         let mut plain = Vec::new();
         nops(30, &mut plain);
         assert_eq!(long, plain);
+    }
+
+    /// What gas 2.42 writes with `--32` after `.code64` in front of a `ret` for each length of
+    /// padding, and that thirty two bit code in an i386 object is padded as before.
+    #[test]
+    fn sixty_four_bit_padding_in_an_i386_object_is_the_lea_forms_with_a_rex() {
+        let hex = |mode: Mode, count: usize| {
+            let mut out = Vec::new();
+            nops_i386(mode, count, &mut out);
+            assert_eq!(out.len(), count, "{count} bytes of padding");
+            out.iter().map(|byte| format!("{byte:02x}")).collect::<Vec<_>>().join(" ")
+        };
+        assert_eq!(hex(Mode::Bits64, 3), "48 89 f6");
+        assert_eq!(hex(Mode::Bits64, 9), "2e 48 8d b4 26 00 00 00 00");
+        assert_eq!(hex(Mode::Bits64, 12), "2e 48 8d b4 26 00 00 00 00 48 89 f6");
+        assert_eq!(
+            hex(Mode::Bits64, 24),
+            "2e 48 8d b4 26 00 00 00 00 2e 48 8d b4 26 00 00 00 00 2e 48 8d 74 26 00"
+        );
+        assert!(hex(Mode::Bits64, 26).starts_with("2e 48 "), "{}", hex(Mode::Bits64, 26));
+        assert_eq!(
+            hex(Mode::Bits64, 27),
+            "eb 19 2e 48 8d b4 26 00 00 00 00 2e 48 8d b4 26 00 00 00 00 48 8d b6 00 00 00 00"
+        );
+        for count in 0..=300 {
+            let mut thirty_two = Vec::new();
+            nops_in(Mode::Bits32, count, &mut thirty_two);
+            let mut out = Vec::new();
+            nops_i386(Mode::Bits32, count, &mut out);
+            assert_eq!(out, thirty_two);
+            hex(Mode::Bits64, count);
+        }
     }
 
     /// A vector register named at a length, which is what the AVX-512 rows take.
