@@ -80,9 +80,16 @@
 //! belongs with that rather than here, and a parameter this leaves a constant in the body of is a
 //! parameter nothing reads, so the two compose.
 //!
-//! Not a pointer. A constant address is a `global_addr` rather than an `iconst`, so reading one is
-//! a jump function form of its own, and what it would be worth is mostly what devirtualization
-//! would be worth, which section 34.6 puts outside M4.
+//! A pointer only when it is a number made an address, which is how the front end writes `NULL`.
+//! The kernel passes a null pointer down to a static helper that warns when it is not one, and gcc
+//! reads that zero and the warning goes. Any other constant address is a `global_addr` rather than
+//! an `iconst`, so reading one is a jump function form of its own, and what it would be worth is
+//! mostly what devirtualization would be worth, which section 34.6 puts outside M4.
+//!
+//! A constant can arrive at the call through a block parameter. Two arms that each pass `NULL` to
+//! the block holding the call give it a parameter fed two separate zeros, which is one value in
+//! gcc's SSA, where a constant is not an instruction, and two here. So a parameter of any block but
+//! the entry is read as what every edge into the block passes, when that is one constant.
 //!
 //! Not an aggregate, and no per field answer. `ipa-max-agg-items` at `gcc/params.opt:304` tracks
 //! sixteen fields per parameter and section 34.6's list of what is not built has aggregate
@@ -95,6 +102,7 @@
 use rucc_base::hash::Map;
 use rucc_ir::{Block, Def, Extra, Func, FuncId, Imm, Inst, InstData, Module, Opcode, Type, Value};
 
+use crate::copy::addressed;
 use crate::ipa::{self, Sites};
 use crate::uses::substitute;
 use crate::{CallGraph, Fuel, Stats, fold};
@@ -136,7 +144,8 @@ pub fn propagate(module: &mut Module, graph: &CallGraph, fuel: &mut Fuel) -> Vec
     let mut touched: Vec<FuncId> = Vec::new();
     for _ in 0..SWEEPS {
         let sites = ipa::sites(module, &closed);
-        let known = settle(module, &closed, &order, &sites);
+        let joins = joins(module, &sites);
+        let known = settle(module, &closed, &order, &sites, &joins);
         let changed = rewrite(module, &closed, &sites, &known, fuel, &mut stats);
         if changed.is_empty() {
             break;
@@ -171,6 +180,9 @@ enum Held {
     Nothing,
     /// Every call site that has said anything passed this, with the type it was passed as.
     Number(Imm, Type),
+    /// Every call site that has said anything passed this number made an address, with the type
+    /// the number was before it was one.
+    Address(Imm, Type),
     /// Two call sites disagreed, or one of them passed something this cannot read.
     Anything,
 }
@@ -181,6 +193,7 @@ impl Held {
         match (self, other) {
             (Self::Nothing, it) | (it, Self::Nothing) => it,
             (Self::Number(a, x), Self::Number(b, y)) if a == b && x == y => Self::Number(a, x),
+            (Self::Address(a, x), Self::Address(b, y)) if a == b && x == y => Self::Address(a, x),
             _ => Self::Anything,
         }
     }
@@ -202,6 +215,7 @@ fn settle(
     closed: &[FuncId],
     order: &[Vec<FuncId>],
     sites: &Map<FuncId, Sites>,
+    joins: &Map<FuncId, Map<Value, Held>>,
 ) -> Map<FuncId, Vec<Held>> {
     let mut known: Map<FuncId, Vec<Held>> = closed
         .iter()
@@ -213,7 +227,7 @@ fn settle(
         loop {
             let mut settled = true;
             for &id in part {
-                let now = row(module, sites, &known, id);
+                let now = row(module, sites, joins, &known, id);
                 if known.get(&id) != Some(&now) {
                     known.insert(id, now);
                     settled = false;
@@ -233,6 +247,7 @@ fn settle(
 fn row(
     module: &Module,
     sites: &Map<FuncId, Sites>,
+    joins: &Map<FuncId, Map<Value, Held>>,
     known: &Map<FuncId, Vec<Held>>,
     id: FuncId,
 ) -> Vec<Held> {
@@ -247,7 +262,7 @@ fn row(
             let param = module[id][entry].params[index];
             let ty = module[id][param].ty;
             sites.calls.iter().fold(Held::Nothing, |so_far, &(caller, inst)| {
-                so_far.and(passed(module, known, caller, inst, index, ty))
+                so_far.and(passed(module, joins, known, caller, inst, index, ty))
             })
         })
         .collect()
@@ -261,6 +276,7 @@ fn row(
 /// closed functions for it to be read at all. Everything else is anything.
 fn passed(
     module: &Module,
+    joins: &Map<FuncId, Map<Value, Held>>,
     known: &Map<FuncId, Vec<Held>>,
     caller: FuncId,
     inst: Inst,
@@ -275,12 +291,16 @@ fn passed(
     if func[arg].ty != ty {
         return Held::Anything;
     }
-    if let Some((imm, ty)) = number(func, arg) {
-        return Held::Number(imm, ty);
+    if let Some(held) = reading(func, arg) {
+        return held;
     }
     let Def::Param { block, index: at } = func[arg].def else { return Held::Anything };
     if func.entry() != Some(block) {
-        return Held::Anything;
+        return joins
+            .get(&caller)
+            .and_then(|join| join.get(&arg))
+            .copied()
+            .unwrap_or(Held::Anything);
     }
     match known.get(&caller).and_then(|row| row.get(at as usize)) {
         Some(&held) => held,
@@ -310,6 +330,89 @@ fn number(func: &Func, value: Value) -> Option<(Imm, Type)> {
     (ty.is_scalar() && (ty.is_int() || ty.is_float())).then(|| (func[at], ty))
 }
 
+/// The constant a value is, either kind of [`number`] or a number made an address.
+///
+/// An address only from a number of the same width as an address, so that the `inttoptr` this puts
+/// back in the body is the one the caller had.
+fn reading(func: &Func, value: Value) -> Option<Held> {
+    if let Some((imm, ty)) = number(func, value) {
+        return Some(Held::Number(imm, ty));
+    }
+    let Def::Result { inst, .. } = func[value].def else { return None };
+    if func[inst].opcode != Opcode::IntToPtr || !func[value].ty.is_ptr() {
+        return None;
+    }
+    let &[from] = &func[func[inst].args] else { return None };
+    let (imm, ty) = number(func, from)?;
+    ty.is_int().then_some(Held::Address(imm, ty))
+}
+
+/// The block parameters in each calling function that are one constant on every edge in.
+///
+/// Optimistic, the way the walk over the call graph is: a parameter starts at nothing and only
+/// loses that where an edge passes something else, so a loop handing a parameter back to its own
+/// header unchanged keeps the constant it came in with. The entry block's parameters are the
+/// function's own and are the call graph walk's to answer. A block some `block_addr` names is left
+/// out, because a `goto *p` can arrive at it without any edge saying what it passes.
+fn joins(module: &Module, sites: &Map<FuncId, Sites>) -> Map<FuncId, Map<Value, Held>> {
+    let mut joins: Map<FuncId, Map<Value, Held>> = Map::default();
+    for sites in sites.values() {
+        for &(caller, _) in &sites.calls {
+            joins.entry(caller).or_insert_with(|| joined(&module[caller]));
+        }
+    }
+    joins
+}
+
+/// The block parameters of one function that are one constant on every edge in.
+fn joined(func: &Func) -> Map<Value, Held> {
+    let Some(entry) = func.entry() else { return Map::default() };
+    let taken = addressed(func);
+    let mut held: Map<Value, Held> = Map::default();
+    for block in func.blocks() {
+        if block == entry {
+            continue;
+        }
+        let at = if taken.contains(&block) { Held::Anything } else { Held::Nothing };
+        for &param in &func[block].params {
+            held.insert(param, at);
+        }
+    }
+    if held.is_empty() {
+        return held;
+    }
+    loop {
+        let mut moved = false;
+        for block in func.blocks() {
+            let Some(term) = func.terminator(block) else { continue };
+            for call in func.target_list(term).iter() {
+                let call = &func[call];
+                let params = &func[call.block].params;
+                for (&param, &arg) in params.iter().zip(&func[call.args]) {
+                    let Some(&was) = held.get(&param) else { continue };
+                    let passes = if func[arg].ty == func[param].ty {
+                        reading(func, arg)
+                            .or_else(|| held.get(&arg).copied())
+                            .unwrap_or(Held::Anything)
+                    } else {
+                        Held::Anything
+                    };
+                    let now = was.and(passes);
+                    if now != was {
+                        held.insert(param, now);
+                        moved = true;
+                    }
+                }
+            }
+        }
+        if !moved {
+            break;
+        }
+    }
+    held.retain(|_, held| matches!(held, Held::Number(..) | Held::Address(..)));
+    held
+}
+
 /// Puts the constants into the bodies, and hands back the functions that changed.
 fn rewrite(
     module: &mut Module,
@@ -333,11 +436,15 @@ fn rewrite(
         let read = ipa::operands(func);
         let mut same: Map<Value, Value> = Map::default();
         for (index, &held) in row.iter().enumerate() {
-            let Held::Number(imm, ty) = held else { continue };
             let param = func[entry].params[index];
+            let fits = match held {
+                Held::Number(_, ty) => func[param].ty == ty,
+                Held::Address(..) => func[param].ty.is_ptr(),
+                Held::Nothing | Held::Anything => continue,
+            };
             // A parameter nothing in the body reads. Putting a constant in front of it would be an
             // instruction nobody uses and a line in `-fopt-info` saying something happened.
-            if !read.contains(&param) || func[param].ty != ty {
+            if !read.contains(&param) || !fits {
                 continue;
             }
             if !fuel.take() {
@@ -347,7 +454,7 @@ fn rewrite(
                 stats.entry(id).or_default().missed(NO_FUEL);
                 continue;
             }
-            same.insert(param, constant(func, entry, imm, ty));
+            same.insert(param, constant(func, entry, held, func[param].ty));
             stats.entry(id).or_default().optimized(KNOWN);
         }
         if !same.is_empty() {
@@ -364,7 +471,13 @@ fn rewrite(
 /// below, which is the whole of what the substitution needs of it. It takes the source location of
 /// whatever it went in front of, so that a debugger asked about it lands on the first line of the
 /// function rather than on nothing.
-fn constant(func: &mut Func, entry: Block, imm: Imm, ty: Type) -> Value {
+///
+/// An address is the number and then the `inttoptr` that makes it one, which is what the caller
+/// passed it as.
+fn constant(func: &mut Func, entry: Block, held: Held, param: Type) -> Value {
+    let (Held::Number(imm, ty) | Held::Address(imm, ty)) = held else {
+        unreachable!("only a constant is put in a body")
+    };
     let first = func.insts(entry).next().expect("a block ends in a terminator");
     let span = func.span(first);
     let at = func.add_imm(imm);
@@ -372,7 +485,15 @@ fn constant(func: &mut Func, entry: Block, imm: Imm, ty: Type) -> Value {
     let inst =
         func.create_inst(InstData { extra: Extra::Imm(at), ..InstData::new(opcode) }, &[ty], span);
     func.insert_before(inst, first);
-    func[inst].results().next().expect("one result was asked for")
+    let number = func[inst].results().next().expect("one result was asked for");
+    if !matches!(held, Held::Address(..)) {
+        return number;
+    }
+    let args = func.push_values(&[number]);
+    let cast =
+        func.create_inst(InstData { args, ..InstData::new(Opcode::IntToPtr) }, &[param], span);
+    func.insert_before(cast, first);
+    func[cast].results().next().expect("one result was asked for")
 }
 
 #[cfg(test)]
@@ -681,6 +802,66 @@ mod tests {
         let done = unit.propagate();
         assert_eq!(unit.said(&done, g).count(Kind::Optimized, KNOWN), 1);
         assert_eq!(unit.reads(g, Opcode::FAdd), Some(i128::from(half)));
+    }
+
+    /// A caller that branches on its parameter to two arms, each passing a number made an address
+    /// to the block that calls `g` with it.
+    fn joins_two_addresses(unit: &mut Unit, g: Symbol, left: i128, right: i128) {
+        let name = unit.name("f");
+        let mut func = Func::new(name, Signature::new().with_params(&[INT]));
+        func.linkage = Linkage::External;
+        let entry = func.create_block();
+        let flag = func.append_param(entry, INT);
+        let arms = [func.create_block(), func.create_block()];
+        let join = func.create_block();
+        let at = func.append_param(join, Type::PTR);
+        Builder::new(&mut func, entry).br_if(flag, arms[0], &[], arms[1], &[]);
+        for (arm, number) in arms.into_iter().zip([left, right]) {
+            let mut build = Builder::new(&mut func, arm);
+            let number = build.iconst(Type::int(64), number);
+            let address = build.unary(Opcode::IntToPtr, number, Type::PTR);
+            build.jump(join, &[address]);
+        }
+        let mut build = Builder::new(&mut func, join);
+        call(&mut build, g, &[Type::PTR], &[at]);
+        build.ret(&[]);
+        unit.module.add_func(func);
+    }
+
+    /// Whether anything in that function still reads its own parameter.
+    fn still_reads(unit: &Unit, at: Symbol) -> bool {
+        let id = unit.module.funcs().find(|&id| unit.module[id].name == at);
+        let func = &unit.module[id.expect("the module has a function of that name")];
+        let entry = func.entry().expect("a function with a body");
+        let param = func[entry].params[0];
+        func.blocks()
+            .flat_map(|block| func.insts(block))
+            .any(|inst| func[func[inst].args].contains(&param))
+    }
+
+    #[test]
+    fn a_null_pointer_every_edge_into_the_calling_block_passes_becomes_a_constant() {
+        // The kernel's shape: two arms each pass `NULL` to the block with the call in it, which
+        // is one constant to gcc and two separate `inttoptr` of a zero here.
+        let mut unit = Unit::new();
+        let g = unit.private("g", &[Type::PTR], |build, params| {
+            build.unary(Opcode::PtrToInt, params[0], Type::int(64));
+        });
+        joins_two_addresses(&mut unit, g, 0, 0);
+        let done = unit.propagate();
+        assert_eq!(unit.said(&done, g).count(Kind::Optimized, KNOWN), 1);
+        assert!(!still_reads(&unit, g));
+    }
+
+    #[test]
+    fn two_edges_passing_two_different_addresses_leave_the_parameter_alone() {
+        let mut unit = Unit::new();
+        let g = unit.private("g", &[Type::PTR], |build, params| {
+            build.unary(Opcode::PtrToInt, params[0], Type::int(64));
+        });
+        joins_two_addresses(&mut unit, g, 0, 8);
+        assert!(unit.propagate().is_empty());
+        assert!(still_reads(&unit, g));
     }
 
     #[test]

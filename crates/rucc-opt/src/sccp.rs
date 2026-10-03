@@ -154,7 +154,8 @@ impl Fact {
 /// Whether this pass keeps bits for a value of this type.
 ///
 /// An address is one, for its low bits, which is what says how aligned it is. It is never turned
-/// into a constant, because its high bits are never known. See [`POINTER`].
+/// into a constant, because its high bits are never known, with the one exception of the null
+/// pointer, which is zero at every width. See [`POINTER`].
 fn tracked(ty: Type) -> bool {
     (ty.is_int() && ty.is_scalar()) || ty.is_ptr()
 }
@@ -176,12 +177,26 @@ fn constant(fact: Fact, ty: Type) -> Option<u128> {
 }
 
 /// What may be known of an address, which is its low [`POINTER_KNOWN`] bits and nothing above.
+///
+/// Except for the null pointer. A zero made an address is zero whatever width the target gives an
+/// address, so knowing all of it assumes nothing about the target. It is what a pointer every way
+/// round a loop passes `NULL` to comes out as, and keeping it is what lets a test of that pointer
+/// against `NULL` be read: the kernel's `if (vi && ...)` in front of a warning, where gcc knows `vi`
+/// is null on every path and the warning goes.
 fn address(fact: Fact) -> Fact {
     let Fact::Known(bits) = fact else { return fact };
+    if null(fact) {
+        return fact;
+    }
     let low = (1u128 << POINTER_KNOWN) - 1;
     let all = (1u128 << POINTER) - 1;
     let unknown = bits.unknown_bits() | (all & !low);
     Fact::Known(Bits::from_parts(bits.value() & low, unknown, POINTER))
+}
+
+/// Whether this is the null pointer, every bit known and every one of them zero.
+fn null(fact: Fact) -> bool {
+    matches!(fact, Fact::Known(bits) if bits.unknown_bits() == 0 && bits.value() == 0)
 }
 
 /// What the fixpoint came to, apart from the function so the function can be rewritten with it.
@@ -559,11 +574,17 @@ fn arithmetic(data: &InstData, ranges: &[Range], width: u32) -> Option<Range> {
 fn replace(func: &mut Func, solved: &Solved, fuel: &mut Fuel, stats: &mut Stats) {
     let blocks: Vec<Block> = func.blocks().filter(|block| solved.reached[block.index()]).collect();
     let mut forward = Map::default();
+    let zero = zero(func);
     for block in blocks {
         let params = func[block].params.clone();
         for param in params {
             let ty = func[param].ty;
-            let Some(value) = constant(solved.facts[param.index()], ty) else { continue };
+            let fact = solved.facts[param.index()];
+            let (value, number) = match (constant(fact, ty), zero) {
+                (Some(value), _) => (value, ty),
+                (None, Some(number)) if ty.is_ptr() && null(fact) => (0, number),
+                _ => continue,
+            };
             if !fuel.take() {
                 stats.missed(NO_FUEL);
                 continue;
@@ -572,9 +593,16 @@ fn replace(func: &mut Func, solved: &Solved, fuel: &mut Fuel, stats: &mut Stats)
             let at = func.add_imm(Imm::from_bits(value));
             let data = InstData { extra: Extra::Imm(at), ..InstData::new(Opcode::IConst) };
             let span = func.span(first);
-            let made = func.create_inst(data, &[ty], span);
+            let made = func.create_inst(data, &[number], span);
             func.insert_before(made, first);
-            let result = func[made].results().next().expect("a constant is one value");
+            let mut result = func[made].results().next().expect("a constant is one value");
+            if ty.is_ptr() {
+                let args = func.push_values(&[result]);
+                let data = InstData { args, ..InstData::new(Opcode::IntToPtr) };
+                let cast = func.create_inst(data, &[ty], span);
+                func.insert_before(cast, first);
+                result = func[cast].results().next().expect("a cast is one value");
+            }
             forward.insert(param, result);
             stats.optimized(REPLACED);
         }
@@ -586,7 +614,10 @@ fn replace(func: &mut Func, solved: &Solved, fuel: &mut Fuel, stats: &mut Stats)
             }
             let Some(result) = data.results().next() else { continue };
             let ty = func[result].ty;
-            let Some(value) = constant(solved.facts[result.index()], ty) else { continue };
+            // A null pointer made for a parameter just above is newer than the fixpoint, and is
+            // already what it would be replaced with.
+            let Some(&fact) = solved.facts.get(result.index()) else { continue };
+            let Some(value) = constant(fact, ty) else { continue };
             if !fuel.take() {
                 stats.missed(NO_FUEL);
                 continue;
@@ -603,6 +634,32 @@ fn replace(func: &mut Func, solved: &Solved, fuel: &mut Fuel, stats: &mut Stats)
     if !forward.is_empty() {
         uses::substitute(func, &forward);
     }
+}
+
+/// The integer type the function already makes its null pointers from, if it makes one.
+///
+/// A null pointer put in a parameter's place is a zero and an `inttoptr` of it, and the zero wants
+/// a type. The IR does not say how wide an address is, so the type is the one the front end chose,
+/// read off a null pointer it wrote. A parameter that is null on every way in got that from one of
+/// those, so there is always one to find when there is something to replace.
+fn zero(func: &Func) -> Option<Type> {
+    for block in func.blocks() {
+        for inst in func.insts(block) {
+            if func[inst].opcode != Opcode::IntToPtr {
+                continue;
+            }
+            let &[number] = &func[func[inst].args] else { continue };
+            let rucc_ir::Def::Result { inst: made, .. } = func[number].def else { continue };
+            if func[made].opcode != Opcode::IConst {
+                continue;
+            }
+            let Extra::Imm(at) = func[made].extra else { continue };
+            if func[at].bits() == 0 {
+                return Some(func[number].ty);
+            }
+        }
+    }
+    None
 }
 
 /// What a sum's low bits are, from the low bits both operands have known.
@@ -644,7 +701,8 @@ fn align(func: &mut Func, solved: &Solved, fuel: &mut Fuel, stats: &mut Stats) {
             };
             let mut zeros = u32::MAX;
             for at in addresses {
-                let Fact::Known(bits) = solved.facts[at.index()] else {
+                // A null pointer [`replace`] made is newer than the fixpoint and proves nothing.
+                let Some(&Fact::Known(bits)) = solved.facts.get(at.index()) else {
                     zeros = 0;
                     break;
                 };
@@ -944,6 +1002,57 @@ block0:
 ",
         );
         assert!(out.contains("ptrtoint"), "{out}");
+    }
+
+    #[test]
+    fn a_pointer_that_is_null_every_way_round_a_loop_is_null() {
+        // Two separate nulls, one on the way in and one on the way round, which is what is left
+        // of a pointer nothing in the loop assigns once the inliner has put a `NULL` on each path.
+        let out = solved(
+            "
+func @f(i32) -> i32, linkage(external) {
+block0(%0: i32):
+    %1 = iconst.i64 0
+    %2 = inttoptr.ptr %1
+    jump block1(%2, %0)
+block1(%3: ptr, %4: i32):
+    %5 = iconst.i64 0
+    %6 = inttoptr.ptr %5
+    %7 = icmp ne %3, %6
+    br_if %7, block2, block3
+block2:
+    %8 = load.i32 %3, align 4
+    return %8
+block3:
+    %9 = iconst.i32 1
+    %10 = sub.i32 %4, %9
+    %11 = iconst.i64 0
+    %12 = inttoptr.ptr %11
+    jump block1(%12, %10)
+}
+",
+        );
+        assert!(!out.contains("icmp"), "the test of the pointer is known, {out}");
+        assert!(out.contains("iconst.i1 0\n    br_if"), "{out}");
+    }
+
+    #[test]
+    fn a_pointer_null_on_one_way_in_and_not_the_other_is_not_known() {
+        let out = solved(
+            "
+func @f(i1, ptr) -> i32, linkage(external) {
+block0(%0: i1, %1: ptr):
+    %2 = iconst.i64 0
+    %3 = inttoptr.ptr %2
+    br_if %0, block1(%3), block1(%1)
+block1(%4: ptr):
+    %5 = icmp ne %4, %3
+    %6 = zext.i32 %5
+    return %6
+}
+",
+        );
+        assert!(out.contains("icmp ne %4"), "{out}");
     }
 
     #[test]
