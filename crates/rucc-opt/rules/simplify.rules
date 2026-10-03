@@ -106,6 +106,46 @@
       (iconst.i64 0)
       (spec (= (bvsub x x) (result))))
 
+;; Adding back what was taken away.
+;;
+;; `start + (end - start)` is `end`, whichever side the difference is on. The kernel's
+;; `mmap_action_remap_full` passes `end - start` as a size and `mmap_action_remap` warns if
+;; `start + size` is past `end`, which gcc sees can never be. The difference is still used for
+;; something else, which is why the reassociation pass does not get it: that one only takes a tree
+;; nothing outside it reads.
+;;
+(rule (simplify (add.i8 (value.i8 x) (sub.i8 (value.i8 y) (value.i8 x))))
+      (value.i8 y)
+      (spec (= (bvadd x (bvsub y x)) (result))))
+
+(rule (simplify (add.i16 (value.i16 x) (sub.i16 (value.i16 y) (value.i16 x))))
+      (value.i16 y)
+      (spec (= (bvadd x (bvsub y x)) (result))))
+
+(rule (simplify (add.i32 (value.i32 x) (sub.i32 (value.i32 y) (value.i32 x))))
+      (value.i32 y)
+      (spec (= (bvadd x (bvsub y x)) (result))))
+
+(rule (simplify (add.i64 (value.i64 x) (sub.i64 (value.i64 y) (value.i64 x))))
+      (value.i64 y)
+      (spec (= (bvadd x (bvsub y x)) (result))))
+
+(rule (simplify (add.i8 (sub.i8 (value.i8 y) (value.i8 x)) (value.i8 x)))
+      (value.i8 y)
+      (spec (= (bvadd (bvsub y x) x) (result))))
+
+(rule (simplify (add.i16 (sub.i16 (value.i16 y) (value.i16 x)) (value.i16 x)))
+      (value.i16 y)
+      (spec (= (bvadd (bvsub y x) x) (result))))
+
+(rule (simplify (add.i32 (sub.i32 (value.i32 y) (value.i32 x)) (value.i32 x)))
+      (value.i32 y)
+      (spec (= (bvadd (bvsub y x) x) (result))))
+
+(rule (simplify (add.i64 (sub.i64 (value.i64 y) (value.i64 x)) (value.i64 x)))
+      (value.i64 y)
+      (spec (= (bvadd (bvsub y x) x) (result))))
+
 
 ;; Multiplying and dividing by one, and multiplying by nothing.
 ;;

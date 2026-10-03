@@ -11458,7 +11458,7 @@ int f(int x, int y) {
 ";
         let expected = "\
 block0(%0: i32, %1: i32):
-    %2, %3 = inline_asm.(i32, i32) \"addl %2, %0\", \"=r,+r,r\", \"\"(%1, %0)
+    %2, %3 = inline_asm.(i32, i32).nomem \"addl %2, %0\", \"=r,+r,r\", \"\"(%1, %0)
     %4 = add.nsw %2, %3
     return %4
 ";
@@ -11503,7 +11503,7 @@ away:
         let expected = "\
 block0(%0: i32):
     %1 = iconst.i32 7
-    %2 = inline_asm.volatile \"cbnz %0, %l1\", \"=r,r\", \"\"(%0), labels [block1, block2]
+    %2 = inline_asm.volatile.nomem \"cbnz %0, %l1\", \"=r,r\", \"\"(%0), labels [block1, block2]
 
 block1:
     return %2

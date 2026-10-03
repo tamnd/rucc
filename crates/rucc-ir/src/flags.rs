@@ -180,6 +180,15 @@ impl Flags {
     /// into values takes its canary with it.
     pub const GUARD: Self = Self(1 << 19);
 
+    /// The `asm` reads and writes no memory the program can see: none of its operands is in
+    /// memory and its clobber list does not name `memory`.
+    ///
+    /// That is gcc's reading of such a statement, `volatile` or not, and the kernel is written to
+    /// it. A `WARN_ON` is a `ud2` in an `asm volatile` with nothing in memory, and gcc keeps a value
+    /// it loaded before one in a register after it. A fact the front end states rather than a
+    /// licence, since it is only the clobber list read once while the names are to hand.
+    pub const NOMEM: Self = Self(1 << 20);
+
     /// Every flag that tells the optimizer to leave an access exactly where it is.
     pub const KEEP: Self = Self(Self::VOLATILE.0 | Self::SEG_FS.0 | Self::SEG_GS.0);
 
@@ -267,7 +276,7 @@ impl Flags {
             }
             // The address space on an `asm` is the one its operands in memory are in, and `inline` is
             // the qualifier it was written with.
-            Opcode::InlineAsm => Self::KEEP.union(Self::INLINE),
+            Opcode::InlineAsm => Self::KEEP.union(Self::INLINE).union(Self::NOMEM),
             // On all three spellings of a call, including the indirect one. Nothing works out
             // `nofree` for a call through an address today, and the flag is legal there because
             // what it says is about the functions the call reaches rather than about how the call
@@ -359,6 +368,7 @@ static NAMED: &[(Flags, &str)] = &[
     (Flags::SEG_GS, "seg_gs"),
     (Flags::INLINE, "inline"),
     (Flags::GUARD, "guard"),
+    (Flags::NOMEM, "nomem"),
 ];
 
 /// How strongly an atomic operation is ordered against everything around it.

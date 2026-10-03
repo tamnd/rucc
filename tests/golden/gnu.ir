@@ -287,13 +287,13 @@ block0:
 
 func @add_one(i32) -> i32, linkage(external) {
 block0(%0: i32):
-    %1 = inline_asm "addl $1, %1", "=r,r", ""(%0)
+    %1 = inline_asm.nomem "addl $1, %1", "=r,r", ""(%0)
     return %1
 }
 
 func @twice(i32) -> i32, linkage(external) {
 block0(%0: i32):
-    %1 = inline_asm "addl %0, %0", "+r", ""(%0)
+    %1 = inline_asm.nomem "addl %0, %0", "+r", ""(%0)
     return %1
 }
 
@@ -311,14 +311,14 @@ block0(%0: i64):
     %1 = alloca, size 8, align 8
     store %0 -> %1, align 8
     %2 = load.i64 %1, align 8
-    %3 = inline_asm "", "=r,0", ""(%2)
+    %3 = inline_asm.nomem "", "=r,0", ""(%2)
     return %3
 }
 
 func @out_of_a_register() -> i64, linkage(external) {
 block0:
     %0 = alloca, size 8, align 8
-    %1 = inline_asm.i64 "", "=r", ""()
+    %1 = inline_asm.i64.nomem "", "=r", ""()
     store %1 -> %0, align 8
     %2 = load.i64 %0, align 8
     return %2
@@ -326,14 +326,14 @@ block0:
 
 func @named(i32) -> i32, linkage(external) {
 block0(%0: i32):
-    %1 = inline_asm "movl %1, %0", "=r,r", ""(%0)
+    %1 = inline_asm.nomem "movl %1, %0", "=r,r", ""(%0)
     return %1
 }
 
 func @jumps(i32) -> i32, linkage(external) {
 block0(%0: i32):
     %1 = iconst.i32 7
-    %2 = inline_asm.volatile "cbnz %0, %l1", "=r,r", ""(%0), labels [block1, block2]
+    %2 = inline_asm.volatile.nomem "cbnz %0, %l1", "=r,r", ""(%0), labels [block1, block2]
 
 block1:
     return %2

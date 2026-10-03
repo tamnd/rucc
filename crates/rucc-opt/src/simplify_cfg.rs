@@ -819,12 +819,16 @@ fn straighten(
         if block != entry {
             let drop = redundant(func, block, edges.get(&block), forward);
             let mut taking = Vec::new();
-            for (index, value) in drop {
+            for (index, same) in drop {
                 if !fuel.take() {
                     stats.missed(NO_FUEL_PARAM);
                     starved = true;
                     break;
                 }
+                let value = match same {
+                    Same::Value(value) => value,
+                    Same::Constant(imm, ty) => made(func, block, index, imm, ty),
+                };
                 // Through what an earlier one already decided, the same way merging does, because
                 // a parameter can be redundant on an argument that is on its way somewhere else.
                 let value = uses::chase(forward, value);
@@ -915,12 +919,14 @@ fn redundant(
     block: Block,
     ins: Option<&Vec<(Block, Idx<BlockCall>)>>,
     forward: &Map<Value, Value>,
-) -> Vec<(usize, Value)> {
+) -> Vec<(usize, Same)> {
     let Some(ins) = ins.filter(|ins| !ins.is_empty()) else { return Vec::new() };
     let mut found = Vec::new();
     for (index, &param) in func[block].params.iter().enumerate() {
         let mut only = None;
         let mut agree = true;
+        let mut number = None;
+        let mut numbers = true;
         for &(_, at) in ins {
             let list = func[at].args;
             let Some(&arg) = func[list].get(index) else {
@@ -933,23 +939,61 @@ fn redundant(
             if arg == param {
                 continue;
             }
+            if numbers {
+                let this = numbered(func, arg);
+                numbers = this.is_some() && (number.is_none() || number == this);
+                number = this;
+            }
             match only {
                 None => only = Some(arg),
                 Some(seen) if seen == arg => {}
-                Some(_) => {
-                    agree = false;
-                    break;
-                }
+                Some(_) => agree = false,
+            }
+            if !agree && !numbers {
+                break;
             }
         }
-        if !agree {
-            continue;
-        }
-        if let Some(value) = only {
-            found.push((index, value));
+        match (only, number) {
+            (Some(value), _) if agree => found.push((index, Same::Value(value))),
+            (Some(_), Some((imm, ty))) if numbers => found.push((index, Same::Constant(imm, ty))),
+            _ => {}
         }
     }
     found
+}
+
+/// What a redundant parameter arrives as every way in.
+///
+/// Either one value, or one constant that each edge made for itself. The second is how two inlined
+/// `return NULL` paths meet: each arm has its own `iconst` and its own `inttoptr`, which value
+/// numbering leaves apart on purpose, so the parameter is the same null pointer from every edge
+/// without being the same value. `bh_end_async_read` in fs/buffer.c is that shape, and the test
+/// of the pointer below it is what keeps `fsverity_enqueue_verify_work` and its `WARN_ON` alive.
+enum Same {
+    Value(Value),
+    Constant(Imm, Type),
+}
+
+/// Writes the constant a parameter always arrives as at the top of its block, as an integer or as
+/// the pointer made from one, and gives back the value that stands for it now.
+fn made(func: &mut Func, block: Block, index: usize, imm: Imm, ty: Type) -> Value {
+    let param = func[block].params[index];
+    let wanted = func[param].ty;
+    let first = func.insts(block).next().expect("a block ends in a terminator");
+    let span = func.span(first);
+    let at = func.add_imm(imm);
+    let data = InstData { extra: Extra::Imm(at), ..InstData::new(Opcode::IConst) };
+    let number = func.create_inst(data, &[ty], span);
+    func.insert_before(number, first);
+    let value = func[number].results().next().expect("a constant is one value");
+    if wanted == ty {
+        return value;
+    }
+    let args = func.push_values(&[value]);
+    let data = InstData { args, ..InstData::new(Opcode::IntToPtr) };
+    let pointer = func.create_inst(data, &[wanted], span);
+    func.insert_before(pointer, first);
+    func[pointer].results().next().expect("a conversion is one value")
 }
 
 /// Drops those parameters of a block and the arguments in their places on every edge into it.
@@ -2117,6 +2161,48 @@ block5:
         // arguments than the block takes is one the verifier refuses.
         assert!(carries(&func, 1, 0).is_empty());
         assert!(carries(&func, 2, 0).is_empty());
+    }
+
+    #[test]
+    fn a_null_pointer_each_way_in_made_for_itself_is_one_null_pointer() {
+        // Two inlined `return NULL` paths: each arm has its own zero and its own pointer made of
+        // it, so the parameter is not one value every way in, and it is still always null.
+        let mut func = taking_a_condition();
+        let (_, arms) = arms(&mut func);
+        let join = func.create_block();
+        let param = func.append_param(join, Type::PTR);
+        for arm in arms {
+            let mut build = Builder::new(&mut func, arm);
+            let zero = build.iconst(Type::int(64), 0);
+            let null = build.unary(Opcode::IntToPtr, zero, Type::PTR);
+            build.jump(join, &[null]);
+        }
+        Builder::new(&mut func, join).ret(&[param]);
+        let stats = simplify(&mut func);
+        assert_eq!(stats.count(Kind::Optimized, super::SAME_EVERY_WAY), 1);
+        let join = Block::from_usize(3);
+        assert!(func[join].params.is_empty());
+        let term = func.terminator(join).expect("the join has one");
+        let returned = func[func[term].args][0];
+        assert_eq!(super::numbered(&func, returned).map(|(imm, _)| imm.bits()), Some(0));
+        assert_eq!(lives_in(&func, returned), Some(3));
+    }
+
+    #[test]
+    fn two_different_constants_each_way_in_stay_a_parameter() {
+        let mut func = taking_a_condition();
+        let (_, arms) = arms(&mut func);
+        let join = func.create_block();
+        let param = func.append_param(join, Type::int(32));
+        for (arm, value) in arms.into_iter().zip([1, 2]) {
+            let mut build = Builder::new(&mut func, arm);
+            let constant = build.iconst(Type::int(32), value);
+            build.jump(join, &[constant]);
+        }
+        Builder::new(&mut func, join).ret(&[param]);
+        let stats = simplify(&mut func);
+        assert_eq!(stats.count(Kind::Optimized, super::SAME_EVERY_WAY), 0);
+        assert_eq!(func[Block::from_usize(3)].params.len(), 1);
     }
 
     #[test]

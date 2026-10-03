@@ -77,9 +77,9 @@
 use std::collections::BTreeMap;
 
 use rucc_base::hash::{Map, Set};
-use rucc_ir::{Block, Def, Extra, Func, Inst, IntPred, Opcode, Value};
+use rucc_ir::{Block, Def, Extra, Flags, Func, Inst, IntPred, Opcode, Value};
 
-use super::ops::{self, Truth, Undo};
+use super::ops::{self, Checked, Truth, Undo};
 use super::{PAIRS, Range};
 use crate::cfg::Cfg;
 use crate::dom::Dominators;
@@ -101,6 +101,10 @@ const RELATIONS: usize = 16;
 /// how many cases a switch may have.
 const EXCLUSIONS: usize = PAIRS + 1;
 
+/// How many branches on something else one walk passes before it gives up, so that a query in a
+/// function that is one long chain of tests is not a walk to the top of it every time.
+const PASSED: u32 = 64;
+
 /// The limits, all three of which exist because the thing they bound is otherwise unbounded.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct Options {
@@ -110,7 +114,8 @@ pub struct Options {
     /// GCC's `ranger-logical-depth`, whose default at `gcc/params.opt:998` is also six.
     pub logical_depth: u32,
     /// How many dominating branches one query walks before it stops narrowing. A dominator that
-    /// ends in a plain jump is not counted, since it has nothing to say.
+    /// ends in a plain jump is not counted, since it has nothing to say, and neither is a branch
+    /// on a condition the value is not part of.
     ///
     /// GCC's `ranger-recompute-depth` at `gcc/params.opt:1003` bounds a related walk with the
     /// same default of five. The two are not the same walk, so the number is borrowed and the
@@ -263,6 +268,19 @@ pub struct Ranges<'a> {
     cycles: u64,
     /// How much of [`Options::budget`] has gone.
     spent: u64,
+    /// The answers that leaned on a cycle, kept until the outermost question is answered.
+    ///
+    /// Not caching them is right across questions, since the next one may come into the cycle
+    /// somewhere else and do better. Inside one question it is what spends the budget: each
+    /// value of a loop is worked out again every way the others reach it. `vcs_read` in
+    /// drivers/tty/vt/vc_screen.c ran out after 82 questions and kept a `WARN_ON_ONCE` gcc drops.
+    /// An answer that leaned on a cycle took the whole type where the cycle closed, so it is
+    /// sound wherever it is read again, only perhaps wider than another way round would give.
+    scratch: Map<(Value, Option<Block>), Range>,
+    /// Set while a walk asks about a value an edge said was equal to the one it was asked about,
+    /// so the second walk does not follow the same edge back to the first. What is worked out
+    /// under it is not cached, because it is less than the walk would find on its own.
+    equating: bool,
     /// The loop tree, built the first time a header parameter is asked about.
     ///
     /// A function with no loop in it never builds one, which is most of the functions in a C
@@ -293,6 +311,8 @@ impl<'a> Ranges<'a> {
             active: Set::default(),
             cycles: 0,
             spent: 0,
+            scratch: Map::default(),
+            equating: false,
             loops: None,
             given: None,
         }
@@ -411,6 +431,12 @@ impl<'a> Ranges<'a> {
             self.counts.hits += 1;
             return cached;
         }
+        if self.active.is_empty() {
+            self.scratch.clear();
+        } else if let Some(&kept) = self.scratch.get(&(value, None)) {
+            self.counts.hits += 1;
+            return kept;
+        }
         if !self.active.insert(value) {
             self.cycles += 1;
             return Range::of(ty);
@@ -429,6 +455,8 @@ impl<'a> Ranges<'a> {
         self.active.remove(&value);
         if self.cycles == before {
             self.cache.entry(value).or_default().at_def = Some(range);
+        } else {
+            self.scratch.insert((value, None), range);
         }
         range
     }
@@ -580,7 +608,11 @@ impl<'a> Ranges<'a> {
                     Opcode::Sub => ops::sub(a, b, flags),
                     _ => ops::mul(a, b, flags),
                 };
-                self.assuming(apply, flags)
+                let range = self.assuming(apply, flags);
+                match block.and_then(|block| self.split(data.opcode, &args, block)) {
+                    Some(split) if split.width() == range.width() => range.intersect(split),
+                    _ => range,
+                }
             }
             Opcode::And | Opcode::Or | Opcode::Xor => {
                 let (a, b) = (operand(self, 0), operand(self, 1));
@@ -604,6 +636,40 @@ impl<'a> Ranges<'a> {
                     _ => ops::ashr(a, count, flags),
                 };
                 self.assuming(apply, flags)
+            }
+            // The overflow builtins: the value is the plain wrapping operation, and the flag is
+            // settled when the operands' bounds say the true answer always or never fits.
+            Opcode::SAddOverflow
+            | Opcode::UAddOverflow
+            | Opcode::SSubOverflow
+            | Opcode::USubOverflow
+            | Opcode::SMulOverflow
+            | Opcode::UMulOverflow => {
+                let (a, b) = (operand(self, 0), operand(self, 1));
+                if a.width() != b.width() {
+                    return Range::of(ty);
+                }
+                let (op, signed) = match data.opcode {
+                    Opcode::SAddOverflow => (Checked::Add, true),
+                    Opcode::UAddOverflow => (Checked::Add, false),
+                    Opcode::SSubOverflow => (Checked::Sub, true),
+                    Opcode::USubOverflow => (Checked::Sub, false),
+                    Opcode::SMulOverflow => (Checked::Mul, true),
+                    _ => (Checked::Mul, false),
+                };
+                match self.func[value].def {
+                    Def::Result { index: 0, .. } if a.width() == width => match op {
+                        Checked::Add => ops::add(a, b, Flags::NONE),
+                        Checked::Sub => ops::sub(a, b, Flags::NONE),
+                        Checked::Mul => ops::mul(a, b, Flags::NONE),
+                    },
+                    Def::Result { index: 1, .. } => match ops::overflows(op, signed, a, b) {
+                        Truth::Always => Range::exactly(1, width),
+                        Truth::Never => Range::exactly(0, width),
+                        Truth::Either => Range::of(ty),
+                    },
+                    _ => Range::of(ty),
+                }
             }
             Opcode::Trunc => ops::trunc(operand(self, 0), width),
             Opcode::ZExt => ops::zext(operand(self, 0), width),
@@ -642,11 +708,72 @@ impl<'a> Ranges<'a> {
                         .and_then(|&arg| this.condition_fact(cond, taken, arg, block, depth));
                     fact.map_or(range, |fact| range.intersect(fact))
                 };
+                // A condition the ranges settle picks its arm, which is how the saturating
+                // `size_add` of two sizes that cannot overflow loses its all-ones arm.
+                match operand(self, 0).singleton() {
+                    Some(1) => return arm(self, 1, true),
+                    Some(0) => return arm(self, 2, false),
+                    _ => {}
+                }
                 let (a, b) = (arm(self, 1, true), arm(self, 2, false));
                 if a.width() != b.width() { Range::of(ty) } else { a.union(b) }
             }
             _ => Range::of(ty),
         }
+    }
+
+    /// An add or a subtract of a condition's bit, worked out once for each way the condition went.
+    ///
+    /// `filled - (count >= 4096)` is what phiopt makes of `if (count < 4096) count++; else
+    /// filled--;` in `vcs_read_buf`, and across the whole of `count` it can take 1 from 0 and wrap.
+    /// Where the bit is 1, the condition held and `count` is at least 4096, so nothing wraps. The
+    /// union of the two cases is the range the branches had before phiopt joined them, and it is
+    /// what lets `vcs_read` drop the `WARN_ON_ONCE(bytes > INT_MAX)` gcc drops.
+    fn split(&mut self, opcode: Opcode, args: &[Value], block: Block) -> Option<Range> {
+        let indices: &[usize] = match opcode {
+            Opcode::Add => &[1, 0],
+            Opcode::Sub => &[1],
+            _ => return None,
+        };
+        let depth = self.options.logical_depth;
+        for &index in indices {
+            let (&flag, &other) = (args.get(index)?, args.get(1 - index)?);
+            let Def::Result { inst, .. } = self.func[flag].def else { continue };
+            let data = self.func[inst];
+            let signed = match data.opcode {
+                Opcode::ZExt => false,
+                Opcode::SExt => true,
+                _ => continue,
+            };
+            let Some(&cond) = self.func[data.args].first() else { continue };
+            if self.func[cond].ty.bits() != 1 {
+                continue;
+            }
+            let base = self.refined(other, block);
+            let width = base.width();
+            let mut out = Range::empty(width);
+            for taken in [false, true] {
+                let side = self
+                    .condition_fact(cond, taken, other, block, depth)
+                    .filter(|fact| fact.width() == width)
+                    .map_or(base, |fact| base.intersect(fact));
+                if side.is_empty() {
+                    continue;
+                }
+                let bit = match (taken, signed) {
+                    (false, _) => 0,
+                    (true, false) => 1,
+                    (true, true) => u128::MAX >> (u128::BITS - width),
+                };
+                let bit = Range::exactly(bit, width);
+                out = out.union(match opcode {
+                    Opcode::Add => ops::add(side, bit, Flags::NONE),
+                    _ => ops::sub(side, bit, Flags::NONE),
+                });
+            }
+            return Some(out);
+        }
+        None
     }
 
     /// The operation under the flags it carries, and the count of how much they bought.
@@ -655,13 +782,9 @@ impl<'a> Ranges<'a> {
     /// somewhere upstream. It also says a range that is only true because the program would
     /// otherwise be undefined has to be visible, and the difference between the two answers here
     /// is exactly that range.
-    fn assuming(
-        &mut self,
-        apply: impl Fn(rucc_ir::Flags) -> Range,
-        flags: rucc_ir::Flags,
-    ) -> Range {
+    fn assuming(&mut self, apply: impl Fn(Flags) -> Range, flags: Flags) -> Range {
         let range = apply(flags);
-        if !flags.is_empty() && range != apply(rucc_ir::Flags::NONE) {
+        if !flags.is_empty() && range != apply(Flags::NONE) {
             self.counts.assumed += 1;
         }
         range
@@ -685,13 +808,22 @@ impl<'a> Ranges<'a> {
             self.counts.fallbacks += 1;
             return self.at_def(value);
         }
+        if let Some(&kept) = self.scratch.get(&(value, Some(block))) {
+            self.counts.hits += 1;
+            return kept;
+        }
         let before = self.cycles;
         let range = self.walk(value, block);
+        if self.equating {
+            return range;
+        }
         if self.cycles == before {
             let entry = self.cache.entry(value).or_default();
             if entry.refined.len() < self.options.refinements {
                 entry.refined.insert(block, range);
             }
+        } else if !self.active.is_empty() {
+            self.scratch.insert((value, Some(block)), range);
         }
         range
     }
@@ -705,27 +837,142 @@ impl<'a> Ranges<'a> {
         let mut range = self.at_def(value);
         let stop = defining_block(self.func, value);
         let mut cursor = block;
-        let mut steps = 0;
-        while steps < self.options.recompute_depth && Some(cursor) != stop {
+        let (mut steps, mut passed) = (0, 0);
+        let mut equal = Vec::new();
+        while steps < self.options.recompute_depth && passed < PASSED && Some(cursor) != stop {
             let Some(parent) = self.dom.immediate_dominator(cursor) else { break };
-            if self.cfg.predecessors(cursor) == [parent] {
-                if let Some(fact) = self.edge_fact(parent, cursor, value) {
-                    range = range.intersect(fact);
-                }
-            }
             // Only a branch can say anything, so a block that just jumps on is free. Without
             // this a chain of empty blocks that lowering leaves behind a statement expression
-            // uses up the depth before the walk reaches the test that matters.
-            if self
-                .func
-                .terminator(parent)
-                .is_some_and(|term| matches!(self.func[term].opcode, Opcode::BrIf | Opcode::Switch))
-            {
-                steps += 1;
+            // uses up the depth before the walk reaches the test that matters. A branch on
+            // something the value plays no part in is nearly free too: telling that costs a look
+            // at a few definitions and no ranges, where asking costs a range for each side of the
+            // compare. `raw_send_hdrinc` tests its length against 0xffff and then makes six other
+            // tests before the copy that gcc proves cannot be over `INT_MAX`.
+            let tested = self.func.terminator(parent).and_then(|term| {
+                let data = self.func[term];
+                let branch = matches!(data.opcode, Opcode::BrIf | Opcode::Switch);
+                branch.then(|| self.func[data.args].first().copied()).flatten()
+            });
+            if let Some(tested) = tested {
+                if self.mentions(tested, value, self.options.logical_depth) {
+                    steps += 1;
+                    if self.cfg.predecessors(cursor) == [parent] {
+                        if let Some(fact) = self.edge_fact(parent, cursor, value) {
+                            range = range.intersect(fact);
+                        }
+                        if !self.equating {
+                            equal.extend(self.equal_on_edge(parent, cursor, value));
+                        }
+                    }
+                } else {
+                    passed += 1;
+                }
             }
             cursor = parent;
         }
+        // An edge that said this value is equal to another says it wherever the edge dominates,
+        // so what is known about the other one down here is known about this one too. The fact
+        // the edge itself gave is the other's range up at the edge, and a test further down on
+        // the other one is what this adds. `__ieee80211_channel_switch` returns unless the two
+        // widths are equal, switches on one of them and then on the other.
+        for other in equal {
+            self.equating = true;
+            let found = self.refined(other, block);
+            self.equating = false;
+            if found.width() == range.width() {
+                range = range.intersect(found);
+            }
+        }
+        // A widening made above a test on what it widens learns nothing from the walk, since the
+        // test is on the narrow value and not on this one. Asking for the narrow value down here
+        // and widening that is the same answer the cast would give had it been made below the
+        // test. `ida_alloc_range` widens `bit` for the shift and then tests `bit < 63`.
+        if let Def::Result { inst, .. } = self.func[value].def {
+            let data = self.func[inst];
+            if let (Opcode::ZExt | Opcode::SExt, Some(&narrow)) =
+                (data.opcode, self.func[data.args].first())
+            {
+                let width = range.width();
+                let found = self.refined(narrow, block);
+                let wide = match data.opcode {
+                    Opcode::ZExt => ops::zext(found, width),
+                    _ => ops::sext(found, width),
+                };
+                if wide.width() == width {
+                    range = range.intersect(wide);
+                }
+            }
+        }
         range
+    }
+
+    /// The value an edge says this one is equal to, when the branch is on an `icmp eq` and the
+    /// edge is the one where it holds, or on an `icmp ne` and the edge is the other one.
+    fn equal_on_edge(&self, from: Block, to: Block, value: Value) -> Option<Value> {
+        let term = self.func.terminator(from)?;
+        if self.func[term].opcode != Opcode::BrIf {
+            return None;
+        }
+        let calls: Vec<_> = self.func.successors(term).collect();
+        let (then, other) = (calls.first()?, calls.get(1)?);
+        if then.block == other.block {
+            return None;
+        }
+        let cond = *self.func[self.func[term].args].first()?;
+        let Def::Result { inst, .. } = self.func[cond].def else { return None };
+        let data = self.func[inst];
+        let Extra::IntPred(pred) = data.extra else { return None };
+        let holds = match (data.opcode, pred) {
+            (Opcode::ICmp, IntPred::Eq) => then.block == to,
+            (Opcode::ICmp, IntPred::Ne) => then.block != to,
+            _ => return None,
+        };
+        let (&left, &right) = (self.func[data.args].first()?, self.func[data.args].get(1)?);
+        match (holds, left == value, right == value) {
+            (true, true, false) => Some(right),
+            (true, false, true) => Some(left),
+            _ => None,
+        }
+    }
+
+    /// Whether a condition could say anything about a value, which is whether the value is on
+    /// the chain [`Self::condition_fact`] and [`Self::carry_back`] would walk back along.
+    ///
+    /// It looks at definitions only, so it answers yes more often than the walk finds something,
+    /// and never answers no where the walk would have.
+    fn mentions(&self, from: Value, value: Value, depth: u32) -> bool {
+        if from == value {
+            return true;
+        }
+        if depth == 0 {
+            return false;
+        }
+        match self.func[from].def {
+            Def::Param { block: to, index } => {
+                let [pred] = self.cfg.predecessors(to) else { return false };
+                argument(self.func, *pred, to, index as usize)
+                    .is_some_and(|arg| self.mentions(arg, value, depth - 1))
+            }
+            Def::Result { inst, .. } => {
+                let data = self.func[inst];
+                let walked = matches!(
+                    data.opcode,
+                    Opcode::ICmp
+                        | Opcode::And
+                        | Opcode::Or
+                        | Opcode::Xor
+                        | Opcode::Add
+                        | Opcode::Sub
+                        | Opcode::ZExt
+                        | Opcode::SExt
+                        | Opcode::UDiv
+                        | Opcode::LShr
+                        | Opcode::Trunc
+                );
+                walked
+                    && self.func[data.args].iter().any(|&arg| self.mentions(arg, value, depth - 1))
+            }
+        }
     }
 
     /// What taking the edge from one block to another says about a value, if anything.
@@ -963,7 +1210,7 @@ impl<'a> Ranges<'a> {
                 Some(parent) => self.facts(parent).clone(),
                 None => Vec::new(),
             };
-            if let Some(own) = self.own_relation(block) {
+            for own in self.own_relations(block) {
                 facts.push(own);
                 if facts.len() > RELATIONS {
                     facts.remove(0);
@@ -974,29 +1221,61 @@ impl<'a> Ranges<'a> {
         &self.relations[&block]
     }
 
-    /// The relation the one edge into this block recorded, if it recorded one.
-    fn own_relation(&mut self, block: Block) -> Option<Relation> {
-        let [from] = *self.cfg.predecessors(block) else { return None };
-        let term = self.func.terminator(from)?;
+    /// The relations the one edge into this block recorded.
+    fn own_relations(&mut self, block: Block) -> Vec<Relation> {
+        let mut found = Vec::new();
+        let [from] = *self.cfg.predecessors(block) else { return found };
+        let Some(term) = self.func.terminator(from) else { return found };
         if self.func[term].opcode != Opcode::BrIf {
-            return None;
+            return found;
         }
         let calls: Vec<_> = self.func.successors(term).collect();
-        let (then, other) = (calls.first()?, calls.get(1)?);
+        let (Some(then), Some(other)) = (calls.first(), calls.get(1)) else { return found };
         if then.block == other.block {
-            return None;
+            return found;
         }
         let taken = then.block == block;
-        let cond = *self.func[self.func[term].args].first()?;
-        let Def::Result { inst, .. } = self.func[cond].def else { return None };
-        if self.func[inst].opcode != Opcode::ICmp {
-            return None;
+        if let Some(&cond) = self.func[self.func[term].args].first() {
+            self.relations_of(cond, taken, self.options.logical_depth, &mut found);
         }
-        let Extra::IntPred(pred) = self.func[inst].extra else { return None };
-        let args = &self.func[self.func[inst].args];
-        let (&left, &right) = (args.first()?, args.get(1)?);
-        let pred = if taken { pred } else { pred.inverse() };
-        Some(Relation { left, pred, right })
+        found
+    }
+
+    /// The relations a condition being true, or being false, records.
+    ///
+    /// Both compares hold on the edge where an `and` of them is true, which is how a short
+    /// circuit test reads once it has been made branch free. `dma_resv_add_fence` tests that two
+    /// fences have the same context together with a usage, and then calls
+    /// `dma_fence_is_later`, which warns if the contexts differ.
+    fn relations_of(&self, cond: Value, taken: bool, depth: u32, found: &mut Vec<Relation>) {
+        if depth == 0 {
+            return;
+        }
+        let Def::Result { inst, .. } = self.func[cond].def else { return };
+        let data = self.func[inst];
+        let args = &self.func[data.args];
+        let (Some(&left), Some(&right)) = (args.first(), args.get(1)) else { return };
+        match data.opcode {
+            Opcode::ICmp => {
+                let Extra::IntPred(pred) = data.extra else { return };
+                let pred = if taken { pred } else { pred.inverse() };
+                found.push(Relation { left, pred, right });
+            }
+            Opcode::And | Opcode::Or if taken == (data.opcode == Opcode::And) => {
+                self.relations_of(left, taken, depth - 1, found);
+                self.relations_of(right, taken, depth - 1, found);
+            }
+            Opcode::Xor if self.func[cond].ty.bits() == 1 => {
+                let (cond, other) = match self.constant(right) {
+                    Some(_) => (left, right),
+                    None => (right, left),
+                };
+                if self.constant(other) == Some(1) {
+                    self.relations_of(cond, !taken, depth - 1, found);
+                }
+            }
+            _ => {}
+        }
     }
 
     /// The constant a value is, if it is one.
@@ -1383,6 +1662,29 @@ mod tests {
         assert!(!ranges.at(args[0], blocks[9]).contains(0));
     }
 
+    #[test]
+    fn branches_on_something_else_do_not_use_up_the_walk() {
+        // `if (x > 0xffff) return;` and then eight tests of `y`, which is `raw_send_hdrinc`
+        // checking its length before the header checks. The length is still bounded at the end.
+        let (mut func, args, blocks) = shape(2, 11);
+        let mut build = Builder::new(&mut func, blocks[0]);
+        let limit = build.iconst(I32, 0xffff);
+        let test = build.icmp(IntPred::Ugt, args[0], limit);
+        build.br_if(test, blocks[10], &[], blocks[1], &[]);
+        for index in 1..9 {
+            let mut build = Builder::new(&mut func, blocks[index]);
+            let case = build.iconst(I32, index as i128);
+            let test = build.icmp(IntPred::Eq, args[1], case);
+            build.br_if(test, blocks[10], &[], blocks[index + 1], &[]);
+        }
+        Builder::new(&mut func, blocks[9]).ret(&[]);
+        Builder::new(&mut func, blocks[10]).ret(&[]);
+        let asked = Asked::new(func);
+        let mut ranges = asked.ranges();
+        assert_eq!(ranges.at(args[0], blocks[9]).unsigned_bounds(), Some((0, 0xffff)));
+        assert!(!ranges.at(args[1], blocks[9]).contains(8), "the tests of `y` still count");
+    }
+
     /// `for (counter = start; counter < 100; counter += step)`, with the step's flags as given.
     ///
     /// The counter is the header parameter and the four blocks are the preheader, the header, the
@@ -1532,6 +1834,87 @@ mod tests {
     }
 
     #[test]
+    fn a_flag_taken_off_the_value_it_was_computed_from_is_split_on_the_flag() {
+        // `x - (x >= 4096)` under `x < 8192`, which is what phiopt makes of the ternary in
+        // `vcs_read_buf`. Taken whole the subtraction could wrap below zero, but the one is only
+        // taken off where `x` is at least 4096.
+        let (func, x, then, _) = guarded(IntPred::Ult, 8192);
+        let mut func = func;
+        let result = {
+            let mut build = Builder::new(&mut func, then);
+            let limit = build.iconst(I32, 4096);
+            let test = build.icmp(IntPred::Uge, x, limit);
+            let flag = build.unary(Opcode::ZExt, test, I32);
+            build.binary(Opcode::Sub, x, flag, Flags::NONE)
+        };
+        let asked = Asked::new(func);
+        let mut ranges = asked.ranges();
+        assert_eq!(ranges.at(result, then).unsigned_bounds(), Some((0, 8190)));
+    }
+
+    #[test]
+    fn a_value_widened_above_a_test_on_it_learns_from_the_test() {
+        // `wide = zext bit; if (bit < 63) { ... wide ... }`, the shape `ida_alloc_range` has once
+        // the widening for its shift is hoisted above the test.
+        let (mut func, args, blocks) = shape(1, 3);
+        let mut build = Builder::new(&mut func, blocks[0]);
+        let wide = build.unary(Opcode::ZExt, args[0], Type::int(64));
+        let limit = build.iconst(I32, 63);
+        let test = build.icmp(IntPred::Ult, args[0], limit);
+        build.br_if(test, blocks[1], &[], blocks[2], &[]);
+        Builder::new(&mut func, blocks[1]).ret(&[]);
+        Builder::new(&mut func, blocks[2]).ret(&[]);
+        let asked = Asked::new(func);
+        let mut ranges = asked.ranges();
+        assert_eq!(ranges.at(wide, blocks[1]).unsigned_bounds(), Some((0, 62)));
+        assert_eq!(ranges.at(wide, blocks[2]).unsigned_bounds(), Some((63, 0xffff_ffff)));
+    }
+
+    #[test]
+    fn a_saturating_size_of_a_clamped_count_cannot_saturate() {
+        // `size_add(16, size_mul(n, 8))` with `n` below 64, which is the probe copy in
+        // `__io_uring_register`. Neither builtin can overflow, so the all-ones arm is dead and the
+        // size is at most 16 + 63 * 8.
+        let (func, n, then, _) = guarded(IntPred::Ult, 64);
+        let mut func = func;
+        let (flag, size) = {
+            let mut build = Builder::new(&mut func, then);
+            let eight = build.iconst(I32, 8);
+            let (product, wrapped) = build.checked(Opcode::UMulOverflow, n, eight);
+            let header = build.iconst(I32, 16);
+            let (sum, carried) = build.checked(Opcode::UAddOverflow, header, product);
+            let ones = build.iconst(I32, -1);
+            let size = build.select(carried, ones, sum);
+            (wrapped, size)
+        };
+        let asked = Asked::new(func);
+        let mut ranges = asked.ranges();
+        assert_eq!(ranges.at(flag, then).singleton(), Some(0));
+        assert_eq!(ranges.at(size, then).unsigned_bounds(), Some((16, 16 + 63 * 8)));
+    }
+
+    #[test]
+    fn a_value_an_edge_said_was_equal_to_another_knows_what_is_found_out_about_it_later() {
+        // `if (a != b) return; if (a == 7) { ... }`, where the second test says nothing about `b`
+        // on its own but `b` is `a` everywhere below the first one.
+        let (mut func, args, blocks) = shape(2, 5);
+        let mut build = Builder::new(&mut func, blocks[0]);
+        let differ = build.icmp(IntPred::Ne, args[0], args[1]);
+        build.br_if(differ, blocks[1], &[], blocks[2], &[]);
+        Builder::new(&mut func, blocks[1]).ret(&[]);
+        let mut build = Builder::new(&mut func, blocks[2]);
+        let seven = build.iconst(I32, 7);
+        let test = build.icmp(IntPred::Eq, args[0], seven);
+        build.br_if(test, blocks[3], &[], blocks[4], &[]);
+        Builder::new(&mut func, blocks[3]).ret(&[]);
+        Builder::new(&mut func, blocks[4]).ret(&[]);
+        let asked = Asked::new(func);
+        let mut ranges = asked.ranges();
+        assert_eq!(bounds(ranges.at(args[1], blocks[3])), Some((7, 7)));
+        assert_eq!(bounds(ranges.at(args[1], blocks[1])), bounds(Range::of(I32)));
+    }
+
+    #[test]
     fn a_relation_the_intervals_cannot_see_is_still_known() {
         let (func, a, b, blocks) = related();
         let asked = Asked::new(func);
@@ -1546,6 +1929,25 @@ mod tests {
         assert_eq!(ranges.compare(IntPred::Sge, a, b, blocks[1]), Truth::Never);
         assert_eq!(ranges.compare(IntPred::Ne, a, b, blocks[1]), Truth::Always);
         assert_eq!(ranges.compare(IntPred::Ult, a, b, blocks[1]), Truth::Either);
+    }
+
+    #[test]
+    fn both_sides_of_an_and_are_relations_on_the_edge_where_it_is_true() {
+        // `if (a == b && c < 4)`, made branch free, which is how `dma_resv_add_fence` reads
+        // before it calls the function that warns if `a` and `b` differ.
+        let (mut func, args, blocks) = shape(3, 3);
+        let mut build = Builder::new(&mut func, blocks[0]);
+        let same = build.icmp(IntPred::Eq, args[0], args[1]);
+        let four = build.iconst(I32, 4);
+        let small = build.icmp(IntPred::Ult, args[2], four);
+        let both = build.binary(Opcode::And, same, small, Flags::NONE);
+        build.br_if(both, blocks[1], &[], blocks[2], &[]);
+        Builder::new(&mut func, blocks[1]).ret(&[]);
+        Builder::new(&mut func, blocks[2]).ret(&[]);
+        let asked = Asked::new(func);
+        let mut ranges = asked.ranges();
+        assert_eq!(ranges.compare(IntPred::Ne, args[0], args[1], blocks[1]), Truth::Never);
+        assert_eq!(ranges.compare(IntPred::Ne, args[0], args[1], blocks[2]), Truth::Either);
     }
 
     #[test]
