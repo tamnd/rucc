@@ -583,7 +583,7 @@ fn isa_name(arg: &str) -> Option<(&str, rucc_target::Feature, bool)> {
 ///
 /// Asked of the processor with `cpuid`, through the standard library, and only when the compiler
 /// is running on an x86-64 at all. Anywhere else there is no processor to ask about an x86-64 one,
-/// and gcc on such a machine builds for the baseline, which is what this does. The list is the
+/// and the driver refuses `-march=native` before it gets here, as a cross gcc does. The list is the
 /// extensions whose names are stable in the standard library at this workspace's minimum Rust
 /// version, which covers everything [`rucc_target::Feature::honoured`] says yes to and a good deal
 /// that it does not.
@@ -633,7 +633,7 @@ fn native_isa() -> rucc_target::Isa {
 ///
 /// Only the CRC32 extension, which is the one [`rucc_target::Isa::aarch64_march`] reads, asked
 /// of the processor through the standard library. On any other machine there is nothing to ask,
-/// and the answer is plain Armv8-A.
+/// and the driver refuses `-march=native` before it gets here.
 fn native_aarch64() -> rucc_target::Isa {
     #[cfg(target_arch = "aarch64")]
     {
@@ -2879,6 +2879,27 @@ pub fn parse_args(args: &[String]) -> Result<Action, CliError> {
     // option too, so it is refused the same way it would have been had it not looked like an x86
     // flag. On i386 every one of them is already off, which is what the kernel's `-mno-sse` and
     // the rest ask for, and turning one on is refused, since there is no code here that uses it.
+    //
+    // `-march=native` is the machine running the compiler, so it means something only when that
+    // machine is the target's. Anywhere else gcc is a cross compiler, which has no way to ask the
+    // processor and refuses the value, and the kernel's `CONFIG_CC_HAS_MARCH_NATIVE` is that
+    // answer.
+    let host = if cfg!(target_arch = "x86_64") {
+        Some(rucc_target::Arch::X86_64)
+    } else if cfg!(target_arch = "aarch64") {
+        Some(rucc_target::Arch::Aarch64)
+    } else {
+        None
+    };
+    if march.is_some_and(|name| name.split('+').next() == Some("native"))
+        && host != Some(opts.target.arch)
+        && matches!(opts.target.arch, rucc_target::Arch::X86_64 | rucc_target::Arch::Aarch64)
+    {
+        return Err(err(
+            "bad value `native` for `-march=`: the machine running the compiler is not the \
+             target's, so there is no processor to ask",
+        ));
+    }
     match opts.target.arch {
         rucc_target::Arch::X86_64 => {
             let base = match march {
@@ -9213,6 +9234,22 @@ mod tests {
             let flag = format!("-Werror={name}");
             assert_eq!(refused(&[&flag, "-c", "a.c"]), format!("`{flag}`: no option `-W{name}`"));
         }
+    }
+
+    /// The kernel's `CONFIG_CC_HAS_MARCH_NATIVE` probe, which a cross gcc fails.
+    #[test]
+    fn native_is_refused_where_the_host_is_not_the_target() {
+        let (here, there) = if cfg!(target_arch = "x86_64") {
+            (KERNEL_X86, KERNEL_ARM64)
+        } else {
+            (KERNEL_ARM64, KERNEL_X86)
+        };
+        let why = refused(&[there, "-march=native", "-c", "a.c"]);
+        assert!(why.starts_with("bad value `native` for `-march=`"), "{why}");
+        if cfg!(any(target_arch = "x86_64", target_arch = "aarch64")) {
+            compile(&[here, "-march=native", "-c", "a.c"]);
+        }
+        compile(&[there, "-mtune=native", "-c", "a.c"]);
     }
 
     /// kbuild probes these with `cc-option` and gcc 14 refuses them, so a build claiming gcc 14

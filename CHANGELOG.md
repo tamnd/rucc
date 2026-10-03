@@ -10,6 +10,7 @@ All notable changes are recorded here. The format follows [Keep a Changelog](htt
 
 ### Changed
 
+- `-march=native` is refused when the machine running rucc is not the target's, as a cross gcc refuses it, rather than building for the baseline. The kernel's `CONFIG_CC_HAS_MARCH_NATIVE` now comes out the same as with the cross gcc.
 - Under `-fgnuc-version=` of 14 or older, `-fzero-init-padding-bits=`, `-fdiagnostics-show-context` and the `-W` names gcc 14.2 does not know are unknown options, as they are to gcc 14, wherever on the line the claim is. A kernel built with a gcc 14 persona now gets the command line the gcc 14 build gets.
 - The range walk up the dominator tree no longer counts a branch on a condition the value plays no part in, so a test that matters can be many blocks above the use. `raw_send_hdrinc` checks its length against 0xffff and then makes six other tests before the copy, and the copy's size check now goes as it does with gcc. A branch on `a && b` or `!(a || b)` gives both sides as relations on the edge where it holds, which removes the `dma_fence` warning in `dma_resv_add_fence`.
 - An `asm volatile` with no `"memory"` clobber and no memory operand is marked as not touching memory, as gcc reads it. A load on each side of a `WARN_ON` is now one load, and a load whose memory version is a phi that every way in agrees on is matched as that version.
