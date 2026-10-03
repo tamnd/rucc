@@ -588,6 +588,13 @@ jobs:
         run: |
           PATH="$PATH:$(cygpath -u '${{ steps.msys2.outputs.msys2-location }}')/mingw64/bin"
           cargo xtask abi-differential --target x86_64-windows-gnu
+      # Rung 0 for i686-windows-gnu. The 32-bit programs run under WoW64, so they meet the real
+      # Windows loader and UCRT rather than Wine's.
+      - name: rung 0 for i686-windows-gnu
+        run: |
+          ./target/release/rucc.exe --fetch i686-windows-gnu
+          cargo xtask builtins --target i686-windows-gnu
+          tests/rung0/run.sh "$PWD/target/release/rucc.exe" i686-windows-gnu
 
   # The same programs built by rucc on Windows on Arm, with llvm-mingw's clang for AArch64 as the
   # reference, since MSYS2 has no GCC for it. llvm-mingw also brings the lld that rucc links with.
