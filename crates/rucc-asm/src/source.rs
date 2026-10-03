@@ -385,6 +385,8 @@ struct Frame {
     personality: Option<(u8, String)>,
     /// What `.cfi_lsda` said: where the call site table the routine reads is, the same way.
     lsda: Option<(u8, String)>,
+    /// Whether `.cfi_startproc` said `simple` and whether `.cfi_signal_frame` was written.
+    begins: crate::unwind::Begins,
 }
 
 /// One function's prologue, as `.seh_` directives said it.
@@ -1048,8 +1050,21 @@ impl Reader {
                     remembered: Vec::new(),
                     personality: None,
                     lsda: None,
+                    begins: crate::unwind::Begins {
+                        simple: args.first().is_some_and(|arg| arg.trim() == "simple"),
+                        signal: false,
+                    },
                 };
                 self.frame = Some(frame);
+                return Ok(());
+            }
+            "cfi_signal_frame" => {
+                let Some(frame) = &mut self.frame else {
+                    return Err(
+                        self.bad("a frame rule outside '.cfi_startproc' and '.cfi_endproc'")
+                    );
+                };
+                frame.begins.signal = true;
                 return Ok(());
             }
             "cfi_sections" => {
@@ -3365,12 +3380,17 @@ impl Reader {
         if self.frames.is_empty() {
             return;
         }
+        if !self.no_unwind {
+            self.eh_table();
+        }
+        // After the unwind table, which is the order gas writes the two in.
         if self.debugger && !self.macho {
             self.debugger_table();
         }
-        if self.no_unwind {
-            return;
-        }
+    }
+
+    /// The unwind table, in `.eh_frame` or the Mac's `__eh_frame`.
+    fn eh_table(&mut self) {
         let funcs: Vec<Extent> = self
             .frames
             .iter()
@@ -3396,7 +3416,8 @@ impl Reader {
             .collect();
         let conv = self.conv();
         let format = if self.macho { ObjectFormat::MachO } else { ObjectFormat::Elf };
-        let Ok(table) = crate::unwind::table(&funcs, &rows, conv, format, &named) else {
+        let begins: Vec<_> = self.frames.iter().map(|frame| frame.begins).collect();
+        let Ok(table) = crate::unwind::table(&funcs, &rows, conv, format, &named, &begins) else {
             return;
         };
         for frame in &self.frames {
@@ -3452,7 +3473,9 @@ impl Reader {
             .collect();
         let rows: Vec<_> = self.frames.iter().map(|frame| frame.rows.clone()).collect();
         let conv = self.conv();
-        let Some(mut table) = crate::unwind::debug_frame(&funcs, &rows, conv, ObjectFormat::Elf)
+        let begins: Vec<_> = self.frames.iter().map(|frame| frame.begins).collect();
+        let Some(mut table) =
+            crate::unwind::debug_frame(&funcs, &rows, conv, ObjectFormat::Elf, &begins)
         else {
             return;
         };
@@ -7493,6 +7516,29 @@ g:
         ];
         assert_eq!(bytes(&read, ".eh_frame"), gas);
         assert_eq!(bytes(&read, ".text"), [0x90, 0x0f, 0x0b]);
+    }
+
+    /// A signal frame's rules go in a header of its own, marked `S`, with no state a call leaves
+    /// behind when it said `simple`, and a function after it gets a plain header written just in
+    /// front of its record. The bytes are what gas 2.42 writes, but for the one that says where
+    /// `g` is, which the object writer fills in from the relocation.
+    #[test]
+    fn a_signal_frame_gets_a_header_of_its_own_holding_its_rules() {
+        let read = i386(concat!(
+            "f:\n\t.cfi_startproc simple\n\t.cfi_signal_frame\n\t.cfi_def_cfa esp, 4\n",
+            "\t.cfi_offset eip, 8\n\tnop\n\t.cfi_endproc\n",
+            "g:\n\t.cfi_startproc\n\tnop\n\t.cfi_def_cfa_offset 8\n\tnop\n\t.cfi_endproc\n",
+        ));
+        #[rustfmt::skip]
+        let gas = [
+            0x14, 0, 0, 0, 0, 0, 0, 0, 0x01, 0x7a, 0x52, 0x53, 0x00, 0x01, 0x7c, 0x08,
+            0x01, 0x1b, 0x0c, 0x04, 0x04, 0x11, 0x08, 0x7e, 0x10, 0, 0, 0, 0x1c, 0, 0, 0,
+            0, 0, 0, 0, 0x01, 0, 0, 0, 0, 0, 0, 0, 0x14, 0, 0, 0,
+            0, 0, 0, 0, 0x01, 0x7a, 0x52, 0x00, 0x01, 0x7c, 0x08, 0x01, 0x1b, 0x0c, 0x04, 0x04,
+            0x88, 0x01, 0, 0, 0x10, 0, 0, 0, 0x1c, 0, 0, 0, 0, 0, 0, 0,
+            0x02, 0, 0, 0, 0x00, 0x41, 0x0e, 0x08,
+        ];
+        assert_eq!(bytes(&read, ".eh_frame"), gas);
     }
 
     /// The i386 thread-local suffixes, in either case, in an address, a number and a data

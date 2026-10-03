@@ -127,6 +127,18 @@ pub(crate) struct Named {
     pub(crate) lsda: Option<(u8, String)>,
 }
 
+/// How a file of assembly began one function's rules, with `.cfi_startproc` and
+/// `.cfi_signal_frame`, which is the same for every function the compiler writes.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub(crate) struct Begins {
+    /// `.cfi_startproc simple`, which leaves out the state a call leaves behind, for a function
+    /// nothing called, like the code the kernel returns to from a signal handler.
+    pub(crate) simple: bool,
+    /// `.cfi_signal_frame`, which tells the unwinder the frame was not made by a call, so the
+    /// address it finds is the instruction to resume at rather than the one after a call.
+    pub(crate) signal: bool,
+}
+
 /// How many bytes a pointer in an encoding the table can write takes, which is `None` for one it
 /// cannot.
 ///
@@ -163,20 +175,23 @@ pub(crate) fn pointer_size(encoding: u8, word: u8, indirect: bool) -> Option<u8>
 /// Windows. See [`Error`].
 ///
 /// `named` is what a file of assembly said about each function's personality routine, one entry
-/// per function or none at all, and is only read on ELF. See [`Named`].
+/// per function or none at all, and is only read on ELF. See [`Named`]. `begins` is the same for
+/// how each function's rules began, and none at all is the way a call leaves a frame for every one.
+/// See [`Begins`].
 pub(crate) fn table(
     funcs: &[Extent],
     rows: &[Rows],
     conv: &CallRegs,
     format: ObjectFormat,
     named: &[Option<Named>],
+    begins: &[Begins],
 ) -> Result<Unwind, Error> {
     debug_assert_eq!(funcs.len(), rows.len(), "a record per function");
     if funcs.is_empty() {
         return Ok(Unwind::default());
     }
     match format {
-        ObjectFormat::Elf => Ok(dwarf(funcs, rows, conv, named)),
+        ObjectFormat::Elf => Ok(dwarf(funcs, rows, conv, named, begins)),
         ObjectFormat::Coff => windows(funcs, rows, conv),
         // The same DWARF records, in `__TEXT,__eh_frame`, which ld64 reads and turns into the
         // compact table the unwinder searches, one entry per function that points back at its
@@ -194,7 +209,7 @@ pub(crate) fn table(
         ObjectFormat::MachO => {
             let bare: Vec<Extent> =
                 funcs.iter().map(|func| Extent { landings: Vec::new(), ..func.clone() }).collect();
-            Ok(dwarf(&bare, rows, conv, &[]))
+            Ok(dwarf(&bare, rows, conv, &[], begins))
         }
         // Nothing, because a WebAssembly module is not a stack a table would describe. A table
         // under a name its linker does not know is a section nothing ever looks at, which is worse
@@ -219,15 +234,18 @@ pub(crate) fn debug_frame(
     rows: &[Rows],
     conv: &CallRegs,
     format: ObjectFormat,
+    begins: &[Begins],
 ) -> Option<Chunk> {
     debug_assert_eq!(funcs.len(), rows.len(), "a record per function");
     if funcs.is_empty() || format != ObjectFormat::Elf {
         return None;
     }
     let mut table = Table::new(conv, true);
-    table.header(conv);
-    for (func, rows) in funcs.iter().zip(rows) {
-        table.record(func, rows);
+    for (at, (func, rows)) in funcs.iter().zip(rows).enumerate() {
+        let begins = begins.get(at).copied().unwrap_or_default();
+        let (first, rest) = leading(conv, begins, rows);
+        table.choose(conv, Kind::Plain, None, begins.signal, first);
+        table.record(func, rest);
     }
     Some(Chunk { name: DEBUG_FRAME.to_owned(), bytes: table.out.bytes, relocs: table.out.relocs })
 }
@@ -236,60 +254,98 @@ pub(crate) fn debug_frame(
 /// where their header is.
 const DEBUG_FRAME: &str = ".debug_frame";
 
-/// The table the two formats that read DWARF want: one header, then one record per function.
+/// The table the two formats that read DWARF want: a header, then one record per function that
+/// points back at it.
 ///
-/// A second header, naming the personality routine, when a function has a landing pad, and each
-/// function with one points at that header instead and says where its call site table is. The
-/// header is shared, since what it says is the same for every function, and a function with no
-/// pad keeps pointing at the plain one, which is what gas writes for the same listing.
+/// A header names the personality routine when a function has a landing pad, and each function
+/// with one points at that header instead and says where its call site table is. A function a file
+/// of assembly named a routine for gets a header that names that one. See [`Named`].
 ///
-/// A function a file of assembly named a routine for gets a header that names that one, shared
-/// with every other function that named the same routine the same way, which is also what gas
-/// does. See [`Named`].
-fn dwarf(funcs: &[Extent], rows: &[Rows], conv: &CallRegs, named: &[Option<Named>]) -> Unwind {
+/// A header also holds the rules a function starts with, which are the state a call leaves behind
+/// and then whatever the function says before its first instruction, so two functions share one
+/// only when those are the same too. This is how gas picks them, and each is written just in front
+/// of the first record that needs it, which is also where gas puts it. See [`leading`].
+fn dwarf(
+    funcs: &[Extent],
+    rows: &[Rows],
+    conv: &CallRegs,
+    named: &[Option<Named>],
+    begins: &[Begins],
+) -> Unwind {
     let mut table = Table::new(conv, false);
-    table.header(conv);
-    let plain = table.cie;
-    let personal = funcs.iter().any(|func| !func.landings.is_empty()).then(|| {
-        table.personal_header(conv);
-        table.cie
-    });
-    // Each header written for a routine a file named, by the routine, the encoding it was named
-    // in and the encoding of the call site table, which are what make two headers the same.
-    let mut headers: Vec<(HeaderKey, usize)> = Vec::new();
     for (at, (func, rows)) in funcs.iter().zip(rows).enumerate() {
         let said = named.get(at).and_then(Option::as_ref);
-        match (personal.filter(|_| !func.landings.is_empty()), said) {
-            (Some(cie), _) => {
-                table.cie = cie;
+        let begins = begins.get(at).copied().unwrap_or_default();
+        let (first, rest) = leading(conv, begins, rows);
+        match (func.landings.is_empty(), said) {
+            (false, _) => {
+                table.choose(conv, Kind::Personal, None, begins.signal, first);
                 let lsda = table.call_sites(func);
                 table.lsda = Some(Lsda::At(lsda));
             }
-            (None, Some(said)) => {
+            (true, Some(said)) => {
                 let (encoding, routine) = &said.personality;
                 let key = (*encoding, routine.clone(), said.lsda.as_ref().map(|(lsda, _)| *lsda));
-                table.cie = match headers.iter().find(|(seen, _)| *seen == key) {
-                    Some(&(_, cie)) => cie,
-                    None => {
-                        table.named_header(conv, said);
-                        headers.push((key, table.cie));
-                        table.cie
-                    }
-                };
+                table.choose(conv, Kind::Named(key), Some(said), begins.signal, first);
                 table.lsda = said.lsda.clone().map(|(encoding, name)| Lsda::Named(encoding, name));
             }
-            (None, None) => {
-                table.cie = plain;
+            (true, None) => {
+                table.choose(conv, Kind::Plain, None, begins.signal, first);
                 table.lsda = None;
             }
         }
-        table.record(func, rows);
+        table.record(func, rest);
     }
     table.out
 }
 
+/// The rules a function's header holds rather than its record, and the rows left for the record.
+///
+/// The state a call leaves behind, unless the file said `simple`, and then every row that comes
+/// before the function's first instruction, up to one that puts the state away, since the
+/// unwinder has to read that one in the record to know where to come back to. On x86-64 the frame
+/// ends one word above the stack pointer, because the call pushed a return address, and that
+/// return address is the word below the end. On AArch64 the call pushed nothing and left the
+/// return address in a register, so the frame ends at the stack pointer and there is no slot to
+/// say anything about.
+fn leading<'a>(
+    conv: &CallRegs,
+    begins: Begins,
+    rows: &'a [(usize, CfiOp)],
+) -> (Vec<CfiOp>, &'a [(usize, CfiOp)]) {
+    let mut first = Vec::new();
+    if !begins.simple {
+        let reg = conv
+            .dwarf(conv.int_class, conv.stack_pointer)
+            .expect("the stack pointer has a number in the table beside the register file");
+        let word = i32::try_from(conv.return_address).expect("a word");
+        first.push(CfiOp::DefCfa { reg, offset: word });
+        if word != 0 {
+            first.push(CfiOp::Offset { reg: conv.dwarf_return_address, offset: -word });
+        }
+    }
+    let ahead = rows.iter().take_while(|&&(at, op)| at == 0 && op != CfiOp::RememberState).count();
+    first.extend(rows[..ahead].iter().map(|&(_, op)| op));
+    (first, &rows[ahead..])
+}
+
+/// What a header says about the routine of the functions that point at it.
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum Kind {
+    /// Nothing, for a function with no landing pad.
+    Plain,
+    /// The routine C uses, for a function this crate compiled with a landing pad.
+    Personal,
+    /// The routine a file of assembly named, in the encodings it named it in.
+    Named(HeaderKey),
+}
+
 /// What makes two headers for named routines the same one. See [`dwarf`].
 type HeaderKey = (u8, String, Option<u8>);
+
+/// What makes two headers the same one: the routine, whether the frame is a signal's, and the
+/// rules every function pointing at it starts with.
+type Header = (Kind, bool, Vec<CfiOp>);
 
 /// Where a record's call site table is.
 enum Lsda {
@@ -320,6 +376,8 @@ struct Table {
     /// Where the call site table of the record being written is, when it has one. See
     /// [`Table::call_sites`] and [`Named`].
     lsda: Option<Lsda>,
+    /// Every header written so far, by what it says, and where it is.
+    headers: Vec<(Header, usize)>,
 }
 
 impl Table {
@@ -329,11 +387,35 @@ impl Table {
         // Negative because every slot is below the end of the frame, and dividing by it is what
         // makes the number written for one positive, which is a byte shorter than a signed one.
         let slot = -i64::from(conv.word);
-        Self { out: Unwind::default(), cie: 0, slot, align, debug, lsda: None }
+        Self { out: Unwind::default(), cie: 0, slot, align, debug, lsda: None, headers: Vec::new() }
     }
 
-    /// The header every record in this object points back at.
-    fn header(&mut self, conv: &CallRegs) {
+    /// Points the next record at a header that says what it needs, writing one when none written so
+    /// far does. See [`dwarf`].
+    fn choose(
+        &mut self,
+        conv: &CallRegs,
+        kind: Kind,
+        said: Option<&Named>,
+        signal: bool,
+        first: Vec<CfiOp>,
+    ) {
+        let key = (kind, signal, first);
+        if let Some(&(_, cie)) = self.headers.iter().find(|(seen, _)| *seen == key) {
+            self.cie = cie;
+            return;
+        }
+        let (kind, signal, first) = &key;
+        match (kind, said) {
+            (Kind::Personal, _) => self.personal_header(conv, *signal, first),
+            (Kind::Named(_), Some(said)) => self.named_header(conv, said, *signal, first),
+            _ => self.header(conv, *signal, first),
+        }
+        self.headers.push((key, self.cie));
+    }
+
+    /// The header the records of functions with no routine point back at.
+    fn header(&mut self, conv: &CallRegs, signal: bool, first: &[CfiOp]) {
         let start = self.out.bytes.len();
         self.cie = start;
         self.out.bytes.extend_from_slice(&0u32.to_le_bytes());
@@ -348,7 +430,13 @@ impl Table {
         // know the rest of the string can skip it. `R` says the augmentation holds how a record
         // spells the address of its function. The debugger's copy has none, since a record there
         // spells it the one way DWARF has, as an address the width of a pointer.
-        let augmentation: &[u8] = if self.debug { b"\0" } else { b"zR\0" };
+        // `S` says the frame was made by a signal and not by a call. See [`Begins`].
+        let augmentation: &[u8] = match (self.debug, signal) {
+            (true, false) => b"\0",
+            (true, true) => b"S\0",
+            (false, false) => b"zR\0",
+            (false, true) => b"zRS\0",
+        };
         self.out.bytes.extend_from_slice(augmentation);
         uleb(&mut self.out.bytes, CODE_ALIGN);
         sleb(&mut self.out.bytes, self.slot);
@@ -357,7 +445,7 @@ impl Table {
             uleb(&mut self.out.bytes, 1);
             self.out.bytes.push(PCREL_SDATA4);
         }
-        self.starts(conv, start);
+        self.starts(start, first);
     }
 
     /// The header the records of functions with a landing pad point back at.
@@ -368,13 +456,14 @@ impl Table {
     /// is in a shared library and this section is not written at load time. `L` says each record
     /// has the distance to its call site table in its augmentation. Both are gcc's encodings for
     /// position independent code, which is what everything here is.
-    fn personal_header(&mut self, conv: &CallRegs) {
+    fn personal_header(&mut self, conv: &CallRegs, signal: bool, first: &[CfiOp]) {
         let start = self.out.bytes.len();
         self.cie = start;
         self.out.bytes.extend_from_slice(&0u32.to_le_bytes());
         self.out.bytes.extend_from_slice(&0u32.to_le_bytes());
         self.out.bytes.push(1);
-        self.out.bytes.extend_from_slice(b"zPLR\0");
+        let augmentation: &[u8] = if signal { b"zPLRS\0" } else { b"zPLR\0" };
+        self.out.bytes.extend_from_slice(augmentation);
         uleb(&mut self.out.bytes, CODE_ALIGN);
         sleb(&mut self.out.bytes, self.slot);
         uleb(&mut self.out.bytes, u64::from(conv.dwarf_return_address));
@@ -391,7 +480,7 @@ impl Table {
         self.out.bytes.extend_from_slice(&0u32.to_le_bytes());
         self.out.bytes.push(PCREL_SDATA4);
         self.out.bytes.push(PCREL_SDATA4);
-        self.starts(conv, start);
+        self.starts(start, first);
     }
 
     /// The header the records of functions a file of assembly named a personality routine for
@@ -400,14 +489,19 @@ impl Table {
     /// The same shape as [`Table::personal_header`], with the routine and the encodings the file
     /// gave. `L` is left out when the file named no call site table, and then a record has no
     /// pointer to one either, which is what gas writes for `.cfi_personality` on its own.
-    fn named_header(&mut self, conv: &CallRegs, said: &Named) {
+    fn named_header(&mut self, conv: &CallRegs, said: &Named, signal: bool, first: &[CfiOp]) {
         let start = self.out.bytes.len();
         self.cie = start;
         let word = u8::try_from(self.align).expect("a pointer width");
         self.out.bytes.extend_from_slice(&0u32.to_le_bytes());
         self.out.bytes.extend_from_slice(&0u32.to_le_bytes());
         self.out.bytes.push(1);
-        let augmentation: &[u8] = if said.lsda.is_some() { b"zPLR\0" } else { b"zPR\0" };
+        let augmentation: &[u8] = match (said.lsda.is_some(), signal) {
+            (true, false) => b"zPLR\0",
+            (true, true) => b"zPLRS\0",
+            (false, false) => b"zPR\0",
+            (false, true) => b"zPRS\0",
+        };
         self.out.bytes.extend_from_slice(augmentation);
         uleb(&mut self.out.bytes, CODE_ALIGN);
         sleb(&mut self.out.bytes, self.slot);
@@ -422,7 +516,7 @@ impl Table {
             self.out.bytes.push(*encoding);
         }
         self.out.bytes.push(PCREL_SDATA4);
-        self.starts(conv, start);
+        self.starts(start, first);
     }
 
     /// A pointer to `symbol` in `size` bytes of `encoding`, as zeroes and the relocation that
@@ -468,28 +562,17 @@ impl Table {
         at
     }
 
-    /// What every header ends with: the state a call leaves behind, and the padding.
-    fn starts(&mut self, conv: &CallRegs, start: usize) {
-        // The state a call leaves behind, which is where every function on this machine starts. On
-        // x86-64 the frame ends one word above the stack pointer, because the call pushed a return
-        // address, and that return address is the word below the end. On AArch64 the call pushed
-        // nothing and left the return address in a register, so the frame ends at the stack
-        // pointer and there is no slot to say anything about.
-        let sp = conv
-            .dwarf(conv.int_class, conv.stack_pointer)
-            .expect("the stack pointer has a number in the table beside the register file");
-        self.out.bytes.push(DEF_CFA);
-        uleb(&mut self.out.bytes, u64::from(sp));
-        uleb(&mut self.out.bytes, u64::from(conv.return_address));
-        if conv.return_address != 0 {
-            let below = -i32::try_from(conv.return_address).expect("a word");
-            self.saved(conv.dwarf_return_address, below);
+    /// What every header ends with: the rules every function that points at it starts with, and
+    /// the padding. See [`leading`].
+    fn starts(&mut self, start: usize, first: &[CfiOp]) {
+        for &op in first {
+            self.row(op);
         }
         self.pad(start);
     }
 
     /// One function's record.
-    fn record(&mut self, func: &Extent, rows: &Rows) {
+    fn record(&mut self, func: &Extent, rows: &[(usize, CfiOp)]) {
         let start = self.out.bytes.len();
         self.out.bytes.extend_from_slice(&0u32.to_le_bytes());
         if self.debug {
@@ -1154,14 +1237,14 @@ mod tests {
 
     /// The description one function's rows come out as, with the header and the padding.
     fn info(rows: Rows) -> Vec<u8> {
-        let out = table(&[func("f", 64)], &[rows], &WIN64, ObjectFormat::Coff, &[])
+        let out = table(&[func("f", 64)], &[rows], &WIN64, ObjectFormat::Coff, &[], &[])
             .expect("a prologue this can describe");
         out.info
     }
 
     /// Why a prologue was refused, for a prologue that was.
     fn refused(rows: Rows) -> String {
-        let out = table(&[func("f", 64)], &[rows], &WIN64, ObjectFormat::Coff, &[])
+        let out = table(&[func("f", 64)], &[rows], &WIN64, ObjectFormat::Coff, &[], &[])
             .expect_err("a prologue this cannot describe");
         out.to_string()
     }
@@ -1264,7 +1347,7 @@ mod tests {
     #[test]
     fn every_function_gets_a_row_of_three_places_the_linker_fills_in() {
         let funcs = [func("one", 32), func("two", 48)];
-        let out = table(&funcs, &[Vec::new(), Vec::new()], &WIN64, ObjectFormat::Coff, &[])
+        let out = table(&funcs, &[Vec::new(), Vec::new()], &WIN64, ObjectFormat::Coff, &[], &[])
             .expect("two leaves");
         assert_eq!(out.bytes, vec![0; 24], "three empty fields per function");
         let places: Vec<_> =
@@ -1346,7 +1429,8 @@ mod tests {
     #[test]
     fn a_format_whose_table_is_not_written_yet_gets_no_section() {
         let rows = vec![vec![(1, CfiOp::DefCfaOffset(16))]];
-        let wasm = table(&[func("f", 8)], &rows, &WIN64, ObjectFormat::Wasm, &[]).expect("nothing");
+        let wasm =
+            table(&[func("f", 8)], &rows, &WIN64, ObjectFormat::Wasm, &[], &[]).expect("nothing");
         assert_eq!(wasm, Unwind::default());
     }
 
@@ -1355,12 +1439,12 @@ mod tests {
     #[test]
     fn a_mach_o_table_is_the_dwarf_one_without_a_personality() {
         let rows = vec![vec![(1, CfiOp::DefCfaOffset(16))]];
-        let elf = table(&[func("f", 8)], &rows, &SYSV, ObjectFormat::Elf, &[]).unwrap();
-        let mach = table(&[func("f", 8)], &rows, &SYSV, ObjectFormat::MachO, &[]).unwrap();
+        let elf = table(&[func("f", 8)], &rows, &SYSV, ObjectFormat::Elf, &[], &[]).unwrap();
+        let mach = table(&[func("f", 8)], &rows, &SYSV, ObjectFormat::MachO, &[], &[]).unwrap();
         assert_eq!(mach, elf);
         let mut pad = func("f", 8);
         pad.landings = vec![rucc_object::Site { start: 0, len: 4, pad: 6 }];
-        let mach = table(&[pad], &rows, &SYSV, ObjectFormat::MachO, &[]).unwrap();
+        let mach = table(&[pad], &rows, &SYSV, ObjectFormat::MachO, &[], &[]).unwrap();
         assert_eq!(mach, elf);
     }
 
@@ -1374,7 +1458,7 @@ mod tests {
     fn the_debuggers_copy_spells_the_header_and_the_function_as_addresses() {
         let rows = vec![vec![(1, CfiOp::DefCfaOffset(16))]];
         let frames =
-            debug_frame(&[func("f", 9)], &rows, &SYSV, ObjectFormat::Elf).expect("a table");
+            debug_frame(&[func("f", 9)], &rows, &SYSV, ObjectFormat::Elf, &[]).expect("a table");
         assert_eq!(frames.name, ".debug_frame");
         #[rustfmt::skip]
         let want: &[u8] = &[
@@ -1407,6 +1491,6 @@ mod tests {
     #[test]
     fn the_debuggers_copy_is_only_written_on_elf() {
         let rows = vec![Vec::new()];
-        assert_eq!(debug_frame(&[func("f", 8)], &rows, &WIN64, ObjectFormat::Coff), None);
+        assert_eq!(debug_frame(&[func("f", 8)], &rows, &WIN64, ObjectFormat::Coff, &[]), None);
     }
 }
