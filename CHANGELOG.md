@@ -14,6 +14,7 @@ All notable changes are recorded here. The format follows [Keep a Changelog](htt
 
 ### Fixed
 
+- The i386 assembler wraps a displacement up to four gigabytes either way in the four bytes of an address, so `-0xC0000000(%edi)` in head_32.S is the address gas writes instead of an error.
 - The assembler reads an address that is arithmetic starting with a bracket, such as `%fs:(gdt_page + (26 * 8)) + 4` in the i386 kernel's `CHECK_AND_APPLY_ESPFIX`, as a displacement instead of refusing it.
 
 ## 0.18.10

@@ -1461,10 +1461,18 @@ fn address(text: &str, mode: Mode) -> Result<Operand, String> {
                 named = Some(Named { name: format!("({name}) - ({away})"), addend: value });
             }
             (None, Some(_)) => return Err(format!("'{front}' takes a name away")),
+            // An i386 address wraps in its four bytes, so a number up to four gigabytes either
+            // way is one. `-__PAGE_OFFSET(%edi)` is how head_32.S reaches the physical address of
+            // something it has the virtual one of.
             (None, None) => {
-                addr.disp = i32::try_from(value).map_err(|_| {
-                    format!("'{front}' does not fit in the four bytes of an address")
-                })?;
+                let wraps = mode == Mode::Bits32 && (-(1i64 << 32)..1i64 << 32).contains(&value);
+                addr.disp = if wraps {
+                    value as i32
+                } else {
+                    i32::try_from(value).map_err(|_| {
+                        format!("'{front}' does not fit in the four bytes of an address")
+                    })?
+                };
             }
         }
     }
@@ -1742,6 +1750,24 @@ mod tests {
         assert_eq!(written.holes.len(), 1);
         assert_eq!(written.holes[0].name, "gdt_page");
         assert_eq!((written.holes[0].at, written.holes[0].addend), (2, 212));
+    }
+
+    /// A number that only fits in an i386 address once it wraps, which is head_32.S taking
+    /// `__PAGE_OFFSET` away, with the bytes gas gives it. Sixty four bit code does not wrap, and
+    /// nothing wraps past four gigabytes.
+    #[test]
+    fn i386_wraps_a_displacement_in_four_bytes() {
+        let i386 = |word: &str, args: &[&str]| {
+            let args: Vec<String> = args.iter().map(|&arg| arg.to_owned()).collect();
+            one_in(word, &args, Mode::Bits32)
+        };
+        let written = i386("leal", &["-0xC0000000(%edi)", "%esp"]).expect("read");
+        assert_eq!(written.bytes, [0x8d, 0xa7, 0x00, 0x00, 0x00, 0x40]);
+        let written = i386("movl", &["0xC0000000(%edi)", "%eax"]).expect("read");
+        assert_eq!(written.bytes, [0x8b, 0x87, 0x00, 0x00, 0x00, 0xc0]);
+        assert!(i386("movl", &["0x100000000(%edi)", "%eax"]).is_err());
+        let args = ["0xC0000000(%rdi)".to_owned(), "%eax".to_owned()];
+        assert!(one("movl", &args).is_err(), "sixty four bit code has no wrapping");
     }
 
     /// The six segment registers pushed and popped on i386, which `SAVE_ALL` and `RESTORE_REGS`
