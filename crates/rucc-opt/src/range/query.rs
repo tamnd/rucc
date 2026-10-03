@@ -268,6 +268,15 @@ pub struct Ranges<'a> {
     cycles: u64,
     /// How much of [`Options::budget`] has gone.
     spent: u64,
+    /// The answers that leaned on a cycle, kept until the outermost question is answered.
+    ///
+    /// Not caching them is right across questions, since the next one may come into the cycle
+    /// somewhere else and do better. Inside one question it is what spends the budget: each
+    /// value of a loop is worked out again every way the others reach it. `vcs_read` in
+    /// drivers/tty/vt/vc_screen.c ran out after 82 questions and kept a `WARN_ON_ONCE` gcc drops.
+    /// An answer that leaned on a cycle took the whole type where the cycle closed, so it is
+    /// sound wherever it is read again, only perhaps wider than another way round would give.
+    scratch: Map<(Value, Option<Block>), Range>,
     /// The loop tree, built the first time a header parameter is asked about.
     ///
     /// A function with no loop in it never builds one, which is most of the functions in a C
@@ -298,6 +307,7 @@ impl<'a> Ranges<'a> {
             active: Set::default(),
             cycles: 0,
             spent: 0,
+            scratch: Map::default(),
             loops: None,
             given: None,
         }
@@ -416,6 +426,12 @@ impl<'a> Ranges<'a> {
             self.counts.hits += 1;
             return cached;
         }
+        if self.active.is_empty() {
+            self.scratch.clear();
+        } else if let Some(&kept) = self.scratch.get(&(value, None)) {
+            self.counts.hits += 1;
+            return kept;
+        }
         if !self.active.insert(value) {
             self.cycles += 1;
             return Range::of(ty);
@@ -434,6 +450,8 @@ impl<'a> Ranges<'a> {
         self.active.remove(&value);
         if self.cycles == before {
             self.cache.entry(value).or_default().at_def = Some(range);
+        } else {
+            self.scratch.insert((value, None), range);
         }
         range
     }
@@ -585,7 +603,11 @@ impl<'a> Ranges<'a> {
                     Opcode::Sub => ops::sub(a, b, flags),
                     _ => ops::mul(a, b, flags),
                 };
-                self.assuming(apply, flags)
+                let range = self.assuming(apply, flags);
+                match block.and_then(|block| self.split(data.opcode, &args, block)) {
+                    Some(split) if split.width() == range.width() => range.intersect(split),
+                    _ => range,
+                }
             }
             Opcode::And | Opcode::Or | Opcode::Xor => {
                 let (a, b) = (operand(self, 0), operand(self, 1));
@@ -654,6 +676,60 @@ impl<'a> Ranges<'a> {
         }
     }
 
+    /// An add or a subtract of a condition's bit, worked out once for each way the condition went.
+    ///
+    /// `filled - (count >= 4096)` is what phiopt makes of `if (count < 4096) count++; else
+    /// filled--;` in `vcs_read_buf`, and across the whole of `count` it can take 1 from 0 and wrap.
+    /// Where the bit is 1, the condition held and `count` is at least 4096, so nothing wraps. The
+    /// union of the two cases is the range the branches had before phiopt joined them, and it is
+    /// what lets `vcs_read` drop the `WARN_ON_ONCE(bytes > INT_MAX)` gcc drops.
+    fn split(&mut self, opcode: Opcode, args: &[Value], block: Block) -> Option<Range> {
+        let indices: &[usize] = match opcode {
+            Opcode::Add => &[1, 0],
+            Opcode::Sub => &[1],
+            _ => return None,
+        };
+        let depth = self.options.logical_depth;
+        for &index in indices {
+            let (&flag, &other) = (args.get(index)?, args.get(1 - index)?);
+            let Def::Result { inst, .. } = self.func[flag].def else { continue };
+            let data = self.func[inst];
+            let signed = match data.opcode {
+                Opcode::ZExt => false,
+                Opcode::SExt => true,
+                _ => continue,
+            };
+            let Some(&cond) = self.func[data.args].first() else { continue };
+            if self.func[cond].ty.bits() != 1 {
+                continue;
+            }
+            let base = self.refined(other, block);
+            let width = base.width();
+            let mut out = Range::empty(width);
+            for taken in [false, true] {
+                let side = self
+                    .condition_fact(cond, taken, other, block, depth)
+                    .filter(|fact| fact.width() == width)
+                    .map_or(base, |fact| base.intersect(fact));
+                if side.is_empty() {
+                    continue;
+                }
+                let bit = match (taken, signed) {
+                    (false, _) => 0,
+                    (true, false) => 1,
+                    (true, true) => u128::MAX >> (u128::BITS - width),
+                };
+                let bit = Range::exactly(bit, width);
+                out = out.union(match opcode {
+                    Opcode::Add => ops::add(side, bit, rucc_ir::Flags::NONE),
+                    _ => ops::sub(side, bit, rucc_ir::Flags::NONE),
+                });
+            }
+            return Some(out);
+        }
+        None
+    }
+
     /// The operation under the flags it carries, and the count of how much they bought.
     ///
     /// Section 10.7 says the flag has to be an input to the operation rather than a check
@@ -690,6 +766,10 @@ impl<'a> Ranges<'a> {
             self.counts.fallbacks += 1;
             return self.at_def(value);
         }
+        if let Some(&kept) = self.scratch.get(&(value, Some(block))) {
+            self.counts.hits += 1;
+            return kept;
+        }
         let before = self.cycles;
         let range = self.walk(value, block);
         if self.cycles == before {
@@ -697,6 +777,8 @@ impl<'a> Ranges<'a> {
             if entry.refined.len() < self.options.refinements {
                 entry.refined.insert(block, range);
             }
+        } else if !self.active.is_empty() {
+            self.scratch.insert((value, Some(block)), range);
         }
         range
     }
@@ -1638,6 +1720,25 @@ mod tests {
         Builder::new(&mut func, blocks[2]).jump(blocks[3], &[]);
         Builder::new(&mut func, blocks[3]).ret(&[]);
         (func, args[0], args[1], blocks)
+    }
+
+    #[test]
+    fn a_flag_taken_off_the_value_it_was_computed_from_is_split_on_the_flag() {
+        // `x - (x >= 4096)` under `x < 8192`, which is what phiopt makes of the ternary in
+        // `vcs_read_buf`. Taken whole the subtraction could wrap below zero, but the one is only
+        // taken off where `x` is at least 4096.
+        let (func, x, then, _) = guarded(IntPred::Ult, 8192);
+        let mut func = func;
+        let result = {
+            let mut build = Builder::new(&mut func, then);
+            let limit = build.iconst(I32, 4096);
+            let test = build.icmp(IntPred::Uge, x, limit);
+            let flag = build.unary(Opcode::ZExt, test, I32);
+            build.binary(Opcode::Sub, x, flag, Flags::NONE)
+        };
+        let asked = Asked::new(func);
+        let mut ranges = asked.ranges();
+        assert_eq!(ranges.at(result, then).unsigned_bounds(), Some((0, 8190)));
     }
 
     #[test]
