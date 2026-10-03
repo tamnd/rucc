@@ -341,6 +341,7 @@ impl<'a> Ranges<'a> {
     /// What this value can be where it is defined.
     pub fn of(&mut self, value: Value) -> Range {
         self.counts.queries += 1;
+        self.scratch.clear();
         self.at_def(value)
     }
 
@@ -351,6 +352,7 @@ impl<'a> Ranges<'a> {
     /// answer that ignored the branches it could not see.
     pub fn at(&mut self, value: Value, block: Block) -> Range {
         self.counts.queries += 1;
+        self.scratch.clear();
         self.refined(value, block)
     }
 
@@ -431,10 +433,11 @@ impl<'a> Ranges<'a> {
             self.counts.hits += 1;
             return cached;
         }
-        if self.active.is_empty() {
-            self.scratch.clear();
-        } else if let Some(&kept) = self.scratch.get(&(value, None)) {
+        // A kept answer leaned on a cycle, so whatever is worked out from it did too and must
+        // not be cached past this question either.
+        if let Some(&kept) = self.scratch.get(&(value, None)) {
             self.counts.hits += 1;
+            self.cycles += 1;
             return kept;
         }
         if !self.active.insert(value) {
@@ -810,6 +813,7 @@ impl<'a> Ranges<'a> {
         }
         if let Some(&kept) = self.scratch.get(&(value, Some(block))) {
             self.counts.hits += 1;
+            self.cycles += 1;
             return kept;
         }
         let before = self.cycles;
@@ -1868,6 +1872,39 @@ mod tests {
         let mut ranges = asked.ranges();
         assert_eq!(ranges.at(wide, blocks[1]).unsigned_bounds(), Some((0, 62)));
         assert_eq!(ranges.at(wide, blocks[2]).unsigned_bounds(), Some((63, 0xffff_ffff)));
+    }
+
+    #[test]
+    fn a_size_bounded_through_a_division_cannot_wrap_when_doubled() {
+        // `for (sz = 128;; ) { if ((sz - 20) / 4 > target) break; sz *= 2; if (sz < 128) warn(); }`
+        // with `target` an unsigned int. The test bounds `sz` below 2^34 + 20, so doubling it
+        // cannot wrap and the warning is dead, as gcc finds.
+        let (mut func, args, blocks) = shape(1, 5);
+        let i64t = Type::int(64);
+        let size = func.append_param(blocks[1], i64t);
+        let mut build = Builder::new(&mut func, blocks[0]);
+        let start = build.iconst(i64t, 128);
+        build.jump(blocks[1], &[start]);
+        let mut build = Builder::new(&mut func, blocks[1]);
+        let twenty = build.iconst(i64t, 20);
+        let less = build.binary(Opcode::Sub, size, twenty, Flags::NONE);
+        let two = build.iconst(i64t, 2);
+        let len = build.binary(Opcode::LShr, less, two, Flags::NONE);
+        let wide = build.unary(Opcode::ZExt, args[0], i64t);
+        let over = build.icmp(IntPred::Ugt, len, wide);
+        build.br_if(over, blocks[2], &[], blocks[3], &[]);
+        Builder::new(&mut func, blocks[2]).ret(&[]);
+        let mut build = Builder::new(&mut func, blocks[3]);
+        let doubled = build.binary(Opcode::Add, size, size, Flags::NONE);
+        let floor = build.iconst(i64t, 128);
+        let wrapped = build.icmp(IntPred::Ult, doubled, floor);
+        build.br_if(wrapped, blocks[4], &[], blocks[1], &[doubled]);
+        Builder::new(&mut func, blocks[4]).ret(&[]);
+        let asked = Asked::new(func);
+        let mut ranges = asked.ranges();
+        // In the order the pass that prunes branches asks, which is block by block.
+        assert_eq!(ranges.compare(IntPred::Ugt, len, wide, blocks[1]), Truth::Either);
+        assert_eq!(ranges.compare(IntPred::Ult, doubled, floor, blocks[3]), Truth::Never);
     }
 
     #[test]
