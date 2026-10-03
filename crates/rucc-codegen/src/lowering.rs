@@ -66,7 +66,7 @@ use rucc_target::CallRegs;
 use crate::expand::Count;
 use crate::switch::{Force, Lowered};
 use crate::{
-    decimal, divide, eight, expand, forks, half, quad, retry, switch, varargs, wide, widths,
+    decimal, divide, eight, expand, forks, half, maths, quad, retry, switch, varargs, wide, widths,
 };
 
 /// One member of the group.
@@ -149,6 +149,12 @@ pub enum Step {
     /// hundred and twenty eight becomes two of sixty four here. Neither step touches a value at
     /// the other's width, so a function holding both is one each of them still works on.
     Halves,
+    /// A remainder of two floats or a fused multiply add, as the call to the C library's routine.
+    ///
+    /// Above the quads, so that one at that format becomes `fmodf128` or `fmaf128` here rather than
+    /// reaching a step that has no routine for it in libgcc's set. Below the half floats for the
+    /// same reason in the other direction: what is left of a half by then is not this step's.
+    Maths,
     /// Anything at all at the quad float format, as a call to the routine for it.
     ///
     /// Above the float rewriting rather than part of it, because the two are written about
@@ -189,6 +195,7 @@ impl Step {
         Self::Counts,
         Self::Divisions,
         Self::Halves,
+        Self::Maths,
         Self::Quads,
         Self::Floats,
         Self::Bulk,
@@ -212,6 +219,7 @@ impl Step {
             Self::Divisions => "divisions",
             Self::Bytes => "bytes",
             Self::Counts => "counts",
+            Self::Maths => "maths",
             Self::Quads => "quads",
             Self::Floats => "floats",
             Self::Bulk => "bulk",
@@ -236,6 +244,7 @@ impl Step {
             Self::Divisions => "a division by a constant",
             Self::Bytes => "a byte reversal",
             Self::Counts => "a bit count",
+            Self::Maths => "a float remainder or a fused multiply add",
             Self::Quads => "the quad float format",
             Self::Floats => "a float constant, a negation or a conversion",
             Self::Bulk => "a bulk copy or fill",
@@ -273,8 +282,9 @@ impl Step {
             ],
             Self::Decimals | Self::HalfFloats | Self::Halves | Self::Widths | Self::Rounds => &[],
             Self::Divisions => &[Opcode::SDiv, Opcode::UDiv, Opcode::SRem, Opcode::URem],
-            Self::Bytes => &[Opcode::Bswap],
+            Self::Bytes => &[Opcode::Bswap, Opcode::Bitreverse],
             Self::Counts => &[Opcode::Ctlz, Opcode::Cttz, Opcode::Ctpop],
+            Self::Maths => &[Opcode::FRem, Opcode::Fma],
             Self::Quads => &[],
             Self::Floats => &[
                 Opcode::FConst,
@@ -341,6 +351,7 @@ impl Step {
             Self::Divisions => divide::divisions(func, goal, conv.word * 8),
             Self::Bytes => expand::bytes(func, conv.byte_swaps),
             Self::Counts => expand::counts(func, counts),
+            Self::Maths => maths::calls(func, names, conv.abi),
             Self::Quads => quad::calls(func, names, conv.abi),
             Self::Floats => expand::floats(func, conv.word),
             Self::Bulk => expand::bulk(func, names, conv.word, conv.unaligned),
@@ -642,6 +653,9 @@ mod tests {
                 // shifts the splitting takes in halves rather than a call it writes.
                 "divisions",
                 "halves",
+                // Ahead of the quads, so a remainder of two `_Float128`s is `fmodf128` rather than
+                // an operation the quad step has no libgcc routine for.
+                "maths",
                 "quads",
                 "floats",
                 "bulk",

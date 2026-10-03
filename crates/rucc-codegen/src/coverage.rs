@@ -71,27 +71,18 @@ use crate::term;
 ///
 /// This is the count `spec/15-testing.md` section 15.8 asks for. It is not zero yet and the
 /// spec says it should be, which is the honest reading of where the back end is: every one of
-/// these is a feature nobody has written, and all of them but one are opcodes the front end
-/// cannot produce either, so a program that reaches one of these is a program that reaches an
-/// unimplemented builtin first. The one is the remainder of two floats, which a program writes
-/// with an operator and which is a call to the maths library rather than an instruction.
+/// these is a feature nobody has written, and every one of them is an opcode the front end cannot
+/// produce either, so a program that reaches one of these is a program that reaches an
+/// unimplemented builtin first. The remainder of two floats, the fused multiply add and the bit
+/// reversal used to be here too, and left when [`crate::lowering::Step::Maths`] made the first two
+/// calls to the maths library and [`crate::lowering::Step::Bytes`] carried the byte swap's halving
+/// down to single bits for the third.
 pub static GAPS: &[(Opcode, &str, &str)] = &[
     (
         Opcode::TargetIntrinsic,
-        "the same, since what needs one is a vector builtin",
+        "an operation of the machine's own, which only a vector builtin needs",
         "tamnd/rucc#200",
     ),
-    (
-        Opcode::FRem,
-        "a call to `fmod`, so a link line question as much as a lowering one",
-        "tamnd/rucc#226",
-    ),
-    (
-        Opcode::Fma,
-        "a call or one instruction, depending on what the machine is told it has",
-        "tamnd/rucc#226",
-    ),
-    (Opcode::Bitreverse, "a node nothing writes and nothing lowers", "tamnd/rucc#363"),
     // Memory safety. These are a gap in a different sense from the rest: nothing emits one yet
     // either, since the passes that would are milestones S5 and after, so there is no program the
     // back end can be handed that reaches one. The ones the safety pass lowers are on `HAND`,
