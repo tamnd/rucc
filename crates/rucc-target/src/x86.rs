@@ -446,8 +446,8 @@ static MSVC32_CONVENTIONS: [(Convention, &CallRegs); 3] = [
 // Aligned vector moves for the reason `crate::x86_64` gives. The frame keeps its sixteen byte
 // alignment here too, which [`SYSV`] says the psABI promises.
 static X86_MOVES: [ClassMoves; 2] = [
-    ClassMoves { mov: "mov_rr_32", load: "mov_rm_32", store: "mov_mr_32" },
-    ClassMoves { mov: "movaps_rr", load: "movaps_rm", store: "movaps_mr" },
+    ClassMoves { mov: "mov_rr_32", load: "mov_rm_32", store: "mov_mr_32", narrow: &[] },
+    ClassMoves { mov: "movaps_rr", load: "movaps_rm", store: "movaps_mr", narrow: &[] },
 ];
 
 /// What an i386 prologue, epilogue, spill and reload are made of.

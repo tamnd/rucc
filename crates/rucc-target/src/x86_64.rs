@@ -59,7 +59,7 @@ pub use crate::x86_64::timing::{LOAD, MODEL, TIMING};
 use crate::bits::BitInsts;
 use crate::branch::{BranchInsts, Fusion, Move};
 use crate::flags::{Compare, FlagInsts, Reader, Reads, Zeroing};
-use crate::frame::{ClassMoves, FrameInsts, Probe, Thunks};
+use crate::frame::{ClassMoves, FrameInsts, Probe, SpillMove, Thunks};
 use crate::machine::MachineInsts;
 use crate::operand::OperandDesc;
 use crate::regs::{
@@ -190,9 +190,20 @@ pub const DWARF_RETURN_ADDRESS: u16 = 16;
 // instruction when the address is wrong. That is deliberate: every address a frame produces for
 // one is a multiple of sixteen by construction, so the aligned form is both the fast one and the
 // one that says so out loud if the frame layout ever stops being true.
+//
+// A `float` or a `double` in one is spilled with `movss` or `movsd` instead, into a slot of four
+// or eight bytes, which is what gcc does with them.
 static X86_64_MOVES: [ClassMoves; 2] = [
-    ClassMoves { mov: "mov_rr_64", load: "mov_rm_64", store: "mov_mr_64" },
-    ClassMoves { mov: "movaps_rr", load: "movaps_rm", store: "movaps_mr" },
+    ClassMoves { mov: "mov_rr_64", load: "mov_rm_64", store: "mov_mr_64", narrow: &[] },
+    ClassMoves {
+        mov: "movaps_rr",
+        load: "movaps_rm",
+        store: "movaps_mr",
+        narrow: &[
+            SpillMove { bytes: 4, load: "movss_rm", store: "movss_mr" },
+            SpillMove { bytes: 8, load: "movsd_rm", store: "movsd_mr" },
+        ],
+    },
 ];
 
 /// What an x86-64 prologue, epilogue, spill and reload are made of.

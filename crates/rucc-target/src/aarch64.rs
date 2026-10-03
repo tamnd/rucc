@@ -182,8 +182,8 @@ pub const DWARF_RETURN_ADDRESS: u16 = 30;
 // and reloaded is the one that was spilled. That costs a sixteen byte slot for a `double`, which is
 // what the file's width already asks the frame for.
 static AARCH64_MOVES: [ClassMoves; 2] = [
-    ClassMoves { mov: "mov_rr_64", load: "ldr_64", store: "str_64" },
-    ClassMoves { mov: "mov_rr_f128", load: "ldr_f128", store: "str_f128" },
+    ClassMoves { mov: "mov_rr_64", load: "ldr_64", store: "str_64", narrow: &[] },
+    ClassMoves { mov: "mov_rr_f128", load: "ldr_f128", store: "str_f128", narrow: &[] },
 ];
 
 /// What an AArch64 prologue, epilogue, spill and reload are made of.
