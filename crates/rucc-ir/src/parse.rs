@@ -101,6 +101,7 @@ pub fn parse(text: &str, names: &mut Interner) -> Result<Module, ParseError> {
 ///
 /// The metadata of a text is read before its functions, since it comes last and a function's
 /// accesses point into it. That is the printer's order and the only one this reads.
+#[derive(Debug)]
 pub struct Joiner {
     module: Option<Module>,
     /// Every node in the module, by what it says.
