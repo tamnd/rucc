@@ -17,6 +17,7 @@ All notable changes are recorded here. The format follows [Keep a Changelog](htt
 
 ### Fixed
 
+- Instruction selection no longer takes time that grows with the square of a block. Each block is decided again for every value only some of its readers folded, and every time it matched every instruction again and looked up each one in a list of what had been folded. Now the matches are kept and only the readers of the value put back are matched again, and what was folded is a set. A Csmith program with long straight line functions that took 58 seconds at `-O0` now takes under 3, and the code written is the same.
 - On i686 Windows a structure holding a `double`, which is eight byte aligned there, is passed at the next four bytes of the argument area, as gcc, clang and MSVC pass it. rucc put it at the next eight, so a call such as `g(1, y)` left four bytes of padding that a `va_arg` of the structure read as its first field. c-testsuite 00204 printed garbage for its HFA double lines under Wine because of it.
 
 ## 0.18.11

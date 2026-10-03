@@ -1287,15 +1287,33 @@ pub fn func_for(
 }
 
 /// What the matcher settled on for one block, indexed the way the block's instructions are.
+///
+/// What each instruction matched is not here but in the [`Matched`] the decision was made with,
+/// which outlives the decision: the block is decided again for every value a reader put back, and
+/// the matches are what that does not have to redo.
 struct Decided {
-    /// What each instruction matched, and nothing for one that matched no rule or was folded
-    /// into a later one.
-    found: Vec<Option<Match<Term>>>,
     /// How each instruction showed its operands to the matcher, which is what says what it took.
     plans: Vec<Option<Plan>>,
     /// The instructions some other instruction took, which are the ones with nothing to write.
-    folded: Vec<Inst>,
+    ///
+    /// A set rather than a list, because it is asked about every instruction of the block twice,
+    /// once while it is being filled and once while the block is written. As a list that was a
+    /// walk of everything folded so far for each instruction, which is nothing on a block of ten
+    /// instructions and was half of a compile on a Csmith program with long straight line
+    /// functions, where the walk was made again every time the block was decided again.
+    folded: Set<Inst>,
 }
+
+/// What each instruction of a block matched, kept across the decisions about the block.
+///
+/// An entry is nothing until the instruction is first asked about, and then the rule it matched
+/// and how it showed its operands, or nothing inside for an instruction no rule matched. What an
+/// instruction matches depends on the instruction and on which of its own operands are refused,
+/// and on nothing else, so when a value is refused only its readers are asked again. Asking all
+/// of them again was a whole block of matching for every value put back, which is a cost that
+/// grows with the square of the block, and on a Csmith program with long straight line functions
+/// it was most of a compile at `-O0`.
+type Matched = Vec<Option<Option<(Plan, Match<Term>)>>>;
 
 /// The instruction in front of an assignment that starts a declaration on a value, and the first
 /// machine instruction after it once the block is filled.
@@ -1845,12 +1863,25 @@ impl<'a> Lowering<'a> {
         // for all of them, and taking it away from those readers changes what they match.
         let insts: Vec<Inst> = self.source.insts(block).collect();
         let mut refused: Set<Value> = Set::default();
-        let mut decided = self.decide(&insts, &refused);
+        let mut matched: Matched = (0..insts.len()).map(|_| None).collect();
+        let mut decided = self.decide(&insts, &refused, &mut matched);
         while let Some(value) = self.left_alive(&insts, &decided.plans) {
             refused.insert(value);
-            decided = self.decide(&insts, &refused);
+            for (&inst, entry) in insts.iter().zip(&mut matched) {
+                if self.source[self.source[inst].args].contains(&value) {
+                    *entry = None;
+                }
+            }
+            decided = self.decide(&insts, &refused, &mut matched);
         }
-        let Decided { found, folded, .. } = decided;
+        let Decided { plans, folded } = decided;
+        // An entry for an instruction that was folded in the last decision may be left over from
+        // an earlier one, which is why the plan is what says whether it counts.
+        let found: Vec<Option<Match<Term>>> = matched
+            .into_iter()
+            .zip(&plans)
+            .map(|(entry, plan)| plan.and(entry.flatten()).map(|(_, found)| found))
+            .collect();
 
         // Where each assignment in this block that starts a declaration on a value is, as the
         // machine instruction in front of the place its IR instruction left off, or the block
@@ -7879,22 +7910,24 @@ impl<'a> Lowering<'a> {
     /// Backwards, because an instruction that has been folded into a later one does not get to
     /// fold anything into itself: the rule that took it only reached one level down, so what is
     /// under it is not in the term the matcher saw and cannot be replaced.
-    fn decide(&self, insts: &[Inst], refused: &Set<Value>) -> Decided {
-        let mut found: Vec<Option<Match<Term>>> = (0..insts.len()).map(|_| None).collect();
+    ///
+    /// What an instruction matched is looked up in `matched` and asked of the matcher only when it
+    /// is not there yet, which is what the caller's emptying an entry asks for.
+    fn decide(&self, insts: &[Inst], refused: &Set<Value>, matched: &mut Matched) -> Decided {
         let mut plans: Vec<Option<Plan>> = vec![None; insts.len()];
-        let mut folded: Vec<Inst> = Vec::new();
+        let mut folded: Set<Inst> = Set::default();
         let mut left = Vec::with_capacity(16);
         for (index, &inst) in insts.iter().enumerate().rev() {
             if folded.contains(&inst) {
                 continue;
             }
-            if let Some((plan, matched)) = self.select(inst, refused, &mut left) {
+            let entry = matched[index].get_or_insert_with(|| self.select(inst, refused, &mut left));
+            if let Some((plan, _)) = *entry {
                 folded.extend(self.folds(inst, plan));
-                found[index] = Some(matched);
                 plans[index] = Some(plan);
             }
         }
-        Decided { found, plans, folded }
+        Decided { plans, folded }
     }
 
     /// A value some of its readers took and some of them did not, which is the one case folding
