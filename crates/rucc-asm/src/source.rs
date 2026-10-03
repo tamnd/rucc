@@ -1882,16 +1882,24 @@ impl Reader {
         if name.is_empty() {
             return Err(self.bad(".section with no name"));
         }
-        // No flags means the name decides, which is what makes `.section .text` the same section as
-        // `.text` rather than an unallocated one that happens to share its name.
-        let mut shape = Shape::of(&name);
         if self.coff {
-            return self.coff_section(&name, shape, args);
+            return self.coff_section(&name, Shape::of(&name), args);
         }
+        // No flags means the name decides, which is what makes `.section .text` the same section as
+        // `.text` rather than an unallocated one that happens to share its name. A name gas has no
+        // entry for gets no flags. Letters with no type keep the type the name gives, so
+        // `.note.gnu.property` with `"a"` is still a note. See [`Shape::unflagged`].
+        let named = Shape::unflagged(&name);
+        let mut shape = named;
         let (mut merge, mut strings, mut grouped, mut linked) = (false, false, false, false);
         if let Some(flags) = args.get(1) {
             let letters = unquoted(flags.trim());
-            shape = Shape { bits: true, ..Shape::default() };
+            shape = Shape {
+                bits: named.bits,
+                note: named.note,
+                array: named.array,
+                ..Shape::default()
+            };
             for letter in letters.chars() {
                 match letter {
                     'a' => shape.alloc = true,
@@ -1923,7 +1931,10 @@ impl Reader {
             let kind = kind.trim().trim_start_matches(['@', '%']);
             let kind = unquoted(kind);
             match kind.as_str() {
-                "progbits" => shape.bits = true,
+                "progbits" => {
+                    shape.bits = true;
+                    shape.note = false;
+                }
                 "nobits" => shape.bits = false,
                 "init_array" => shape.array = Some(Array::Init),
                 "fini_array" => shape.array = Some(Array::Fini),
@@ -2378,7 +2389,12 @@ impl Reader {
     /// `.ascii` and the two that add the terminator.
     fn text_bytes(&mut self, args: &[String], terminated: bool) -> Result<(), Trouble> {
         for arg in args {
-            let mut bytes = self.string(arg.trim())?;
+            // Strings next to each other are one string, as gas reads them, so `"a" "b"` is `ab`
+            // and `.asciz` ends it once. The kernel's `EXPORT_SYMBOL` writes `.ascii "" "\0"`.
+            let mut bytes = Vec::new();
+            for piece in adjacent(arg.trim()) {
+                bytes.extend(self.string(piece)?);
+            }
             if terminated {
                 bytes.push(0);
             }
@@ -4887,7 +4903,29 @@ fn counted(number: &str, nth: usize) -> String {
     format!("{number}\u{1}{nth}")
 }
 
-/// The text with its quotes taken off, if it had any.
+/// The quoted strings `arg` is made of when it is nothing but quoted strings with blanks between,
+/// each with its quotes, or `arg` itself when it is anything else.
+fn adjacent(arg: &str) -> Vec<&str> {
+    let mut pieces = Vec::new();
+    let mut rest = arg;
+    while let Some(after) = rest.strip_prefix('"') {
+        let mut escaped = false;
+        let Some(end) = after.char_indices().find_map(|(at, c)| {
+            let closes = c == '"' && !escaped;
+            escaped = c == '\\' && !escaped;
+            closes.then_some(at)
+        }) else {
+            return vec![arg];
+        };
+        pieces.push(&rest[..end + 2]);
+        rest = after[end + 1..].trim_start();
+    }
+    if pieces.is_empty() || !rest.is_empty() {
+        return vec![arg];
+    }
+    pieces
+}
+
 /// The words of a directive split at spaces, with a quoted string kept whole however many spaces
 /// are in it, quotes and all.
 fn words(text: &str) -> Result<Vec<String>, String> {
@@ -4926,6 +4964,7 @@ fn words(text: &str) -> Result<Vec<String>, String> {
     Ok(words)
 }
 
+/// The text with its quotes taken off, if it had any.
 fn unquoted(text: &str) -> String {
     text.strip_prefix('"').and_then(|rest| rest.strip_suffix('"')).unwrap_or(text).to_owned()
 }
@@ -6586,6 +6625,35 @@ _tls$tlv$init:
         let out =
             assembled("\t.cfi_sections .debug_frame\n\t.cfi_startproc\n\tret\n\t.cfi_endproc\n");
         assert!(out.parts.iter().all(|part| part.name != ".eh_frame"));
+    }
+
+    /// gas's table of names: a name it has no entry for gets no flags, a dotted child of one it
+    /// has gets that one's, and a note stays a note when letters come with no type.
+    #[test]
+    fn a_section_with_no_letters_gets_what_gas_gives_its_name() {
+        let out = assembled(
+            "\t.pushsection .discard.x\n\t.long 1\n\t.popsection\n\t.section .text.y\n\tret\n\t.section \
+             .note.gnu.property,\"a\"\n\t.long 4\n\t.section .bss.z,\"aw\"\n\t.zero 4\n\t.section \
+             .init.text\n\t.section .data..percpu\n",
+        );
+        let shape = |name: &str| out.parts.iter().find(|part| part.name == name).expect(name).shape;
+        assert_eq!(shape(".discard.x"), Shape { bits: true, ..Shape::default() });
+        assert!(shape(".text.y").exec && shape(".text.y").alloc);
+        let note = shape(".note.gnu.property");
+        assert!(note.note && note.alloc && !note.write);
+        assert!(!shape(".bss.z").bits);
+        assert_eq!(shape(".init.text"), Shape { bits: true, ..Shape::default() });
+        assert!(shape(".data..percpu").write);
+    }
+
+    /// `"a" "b"` is one string, as gas reads it, and `.asciz` ends it once.
+    #[test]
+    fn strings_side_by_side_are_one_string() {
+        let out = assembled(
+            "\t.data\n\t.asciz \"a\" \"b\", \"c\"\n\t.ascii \"\" \"\\0\"\n\t.ascii \"q\\\"\" \"r\"\n",
+        );
+        let data = out.parts.iter().find(|part| part.name == ".data").expect("data");
+        assert_eq!(data.bytes, b"ab\0c\0\0q\"r");
     }
 
     /// What gas writes for the same text: a header marked by all ones, version one and no
