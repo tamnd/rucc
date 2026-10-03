@@ -244,12 +244,13 @@ fn a_target_whose_protector_is_a_different_mechanism_refuses_the_flag() {
 /// canary, so the call cannot become a jump. The frame is not a leaf's, because a protected one
 /// never is, and leaving the call alone is right. This used to trip an assertion in the back end
 /// that expected every tail call in a leaf to have become a jump, and the kernel's
-/// `kmalloc_array_noprof` was the function that found it.
+/// `kmalloc_array_noprof` was the function that found it. The canary is asked for by name, since
+/// `bytes` becomes a value at `-O2` and would otherwise take it away.
 #[test]
 fn a_tail_call_in_a_protected_function_stays_a_call_before_the_check() {
     let source = "\
 void *alloc(unsigned long size);
-void *alloc_array(unsigned long n, unsigned long size) {
+__attribute__((stack_protect)) void *alloc_array(unsigned long n, unsigned long size) {
     unsigned long bytes;
     if (__builtin_mul_overflow(n, size, &bytes))
         return 0;
@@ -264,4 +265,43 @@ void *alloc_array(unsigned long n, unsigned long size) {
     };
     assert!(at("call\talloc") < at("__stack_chk_fail"), "{text}");
     assert!(!text.contains("jmp\talloc"), "{text}");
+}
+
+/// A local that only gave the function its canary because of what the optimizer could not yet see
+/// stops giving it one when the optimizer makes it a value.
+///
+/// gcc decides at expansion, after inlining and scalar replacement have run, so `gone` has no
+/// canary there at `-O2` while `kept`, whose address goes somewhere nothing can follow, and `buf`,
+/// whose array stays in the frame, both do. At `-O0` all three keep their locals in memory and all
+/// three are protected. The kernel's `guard(rcu)()` and the `old` that `atomic_try_cmpxchg` is
+/// handed are the shape of `gone`, and `mm/mmap_lock.o` had five functions with a canary gcc does
+/// not give them.
+#[test]
+fn a_local_the_optimizer_turns_into_a_value_takes_its_canary_with_it() {
+    let source = "\
+void use(void *);
+static inline void put(int *p) { *p += 1; }
+int gone(int x) { int n = x; put(&n); return n; }
+int kept(int x) { int n = x; use(&n); return n; }
+int buf(void) { char b[16]; use(b); return 0; }
+";
+    let text = asm("gone", &["-O2", "-fstack-protector-strong"], source);
+    assert_eq!(protected(&text), ["kept", "buf"], "{text}");
+    let text = asm("gone-o0", &["-O0", "-fstack-protector-strong"], source);
+    assert_eq!(protected(&text), ["gone", "kept", "buf"], "{text}");
+}
+
+/// A function that asked for its canary, or that protects everything, keeps it even when every
+/// local it had has become a value.
+#[test]
+fn a_canary_that_was_asked_for_does_not_go_with_the_locals() {
+    let source = "\
+static inline void put(int *p) { *p += 1; }
+__attribute__((stack_protect)) int asked(int x) { int n = x; put(&n); return n; }
+int gone(int x) { int n = x; put(&n); return n; }
+";
+    let text = asm("asked", &["-O2", "-fstack-protector-strong"], source);
+    assert_eq!(protected(&text), ["asked"], "{text}");
+    let text = asm("asked-all", &["-O2", "-fstack-protector-all"], source);
+    assert_eq!(protected(&text), ["asked", "gone"], "{text}");
 }
