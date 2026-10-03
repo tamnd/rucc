@@ -521,6 +521,9 @@ fn bytes_pinned(
     }
 }
 
+/// The register each operand of an `asm` statement is pinned to, by operand.
+type Pins = [Option<(PhysReg, RegClass)>];
+
 /// Puts each `q` output in a register with a low byte together with an input, when the operands
 /// that have to be in a register outnumber the registers with a low byte that are left.
 ///
@@ -538,7 +541,7 @@ fn shared_with_input(
     list: &[AsmOperand<'_>],
     constraints: &str,
     outputs: &[usize],
-    taken: &dyn Fn(PhysReg, &[Option<(PhysReg, RegClass)>]) -> bool,
+    taken: &dyn Fn(PhysReg, &Pins) -> bool,
     gpr: RegClass,
 ) {
     let entries: Vec<&str> = constraints.split(',').collect();

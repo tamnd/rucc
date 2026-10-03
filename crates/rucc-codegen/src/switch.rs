@@ -604,14 +604,6 @@ fn table(stretch: &[Cluster]) -> Cluster {
     Cluster::Table { low, high, arms }
 }
 
-/// The widest span of values one bit test covers, which is the width of the word its mask lives in.
-///
-/// This is a correctness bound and not a tuning one, which is what section 24.6 asks it to be.
-/// `1 << (x - low)` is undefined once `x - low` reaches the width of the word being shifted, so a
-/// group is only ever formed inside this span and the range check in front of the shift is what
-/// makes the shift amount stay there. The word is the machine's, which [`lowered`] is told: the mask
-/// is held in a register and shifted by one, and an `i64` on i386 is two of them.
-
 /// How many more case values a group needs than it has destinations before a bit test is worth
 /// writing.
 ///
@@ -709,6 +701,13 @@ fn group(func: &Func, clusters: Vec<Cluster>, word: u32) -> Vec<Cluster> {
 }
 
 /// How many single values starting here sit inside one word of the first of them.
+///
+/// A word is the widest span one bit test covers, since that is the width of the word its mask
+/// lives in. This is a correctness bound and not a tuning one, which is what section 24.6 asks it
+/// to be. `1 << (x - low)` is undefined once `x - low` reaches the width of the word being shifted,
+/// so a group is only ever formed inside this span and the range check in front of the shift is
+/// what makes the shift amount stay there. The word is the machine's, which [`lowered`] is told:
+/// the mask is held in a register and shifted by one, and an `i64` on i386 is two of them.
 fn reach(clusters: &[Cluster], at: usize, word: u32) -> usize {
     let Cluster::One { value: first, .. } = clusters[at] else { return 0 };
     let mut reach = 0;
