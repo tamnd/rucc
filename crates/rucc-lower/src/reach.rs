@@ -488,13 +488,17 @@ impl<'a> Decide<'a> {
                     effects.extend(rest);
                     return Some((effects, answer));
                 }
+                // The left side is not known, so the right side runs only on the path where the
+                // left side does not end the chain. If the right side has effects of its own,
+                // listing them after the left side would run them on every path, and `a || (g--
+                // || 1)` would decrement `g` even when `a` is true. Only a right side with
+                // nothing left to run, whose answer is the one that ends the chain, lets the
+                // whole condition be decided with the left side as its only effect.
                 let (rest, answer) = self.condition(rhs)?;
-                if answer != ends {
+                if answer != ends || !rest.is_empty() {
                     return None;
                 }
-                let mut effects = vec![lhs];
-                effects.extend(rest);
-                Some((effects, ends))
+                Some((vec![lhs], ends))
             }
             _ => None,
         }

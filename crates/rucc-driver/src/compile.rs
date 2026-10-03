@@ -10383,6 +10383,27 @@ block2(%7: i1):
         assert_eq!(text, expected);
     }
 
+    /// A condition whose answer is known even though its left side is not still runs the right
+    /// side only on the path where the left side leaves the answer open.
+    ///
+    /// `a || (g-- || 1)` is true whatever `a` is, and so is the `if` it controls, but `g` goes down
+    /// only when `a` is zero. Folding the condition used to keep the decrement as an effect to run
+    /// before the arm and put it on every path, which a Csmith program caught as a global one lower
+    /// than gcc left it. The same goes for `&&` with a right side that is known false.
+    #[test]
+    fn the_effects_of_a_decided_right_side_still_wait_for_the_left_side() {
+        for source in [
+            "int g;\nint f(int a) { if (a || (g-- || 1)) return 1; return 0; }\n",
+            "int g;\nint f(int b) { if (b == 0 && (g-- && 0)) return 1; return 0; }\n",
+        ] {
+            let text = body(source);
+            let branch =
+                text.find("br_if").unwrap_or_else(|| panic!("a branch on the left side: {text}"));
+            let store = text.find("store").unwrap_or_else(|| panic!("the decrement: {text}"));
+            assert!(branch < store, "the decrement is behind the branch:\n{source}\n{text}");
+        }
+    }
+
     #[test]
     fn code_after_a_return_is_not_built_and_does_not_leave_an_empty_block_behind() {
         let text = body("int f(int a) { if (a) return 1; else return 2; return 3; }\n");
