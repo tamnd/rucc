@@ -1058,7 +1058,13 @@ mod tests {
         let tag = tag.map(|text| fixture.name(text));
         let fields = Some(fixture.ast.add_member_list(members));
         fixture.specs(
-            TypeSpec::Record { kind, tag, fields, attrs: ast::AttrList::EMPTY, pragmas: ast::RecordPragmas::NONE },
+            TypeSpec::Record {
+                kind,
+                tag,
+                fields,
+                attrs: ast::AttrList::EMPTY,
+                pragmas: ast::RecordPragmas::NONE,
+            },
             Quals::NONE,
         )
     }
