@@ -655,11 +655,22 @@ fn half_the_range(width: u32) -> i128 {
 /// do. It is here rather than in the walk to the IR because a byte swap is one instruction in the
 /// IR and should stay one for as long as anything is reading the IR, which is what let the rules
 /// arrive without anything above the backend changing.
+///
+/// A bit reversal comes here at every width on every target, since no target has a rule for one
+/// yet. It is the same run of exchanges as a byte swap carried on past the byte down to single bits,
+/// so it is the same code with a different place to stop. Nothing in the front end writes one today,
+/// but the IR has the opcode and a selector that met one would refuse the function, and three more
+/// rounds of shifts and masks is a small price for that never happening.
 pub fn bytes(func: &mut Func, kept: &[u32]) {
     let found: Vec<Inst> = func.blocks().flat_map(|block| func.insts(block)).collect();
     for inst in found {
-        if func[inst].opcode == Opcode::Bswap && !kept.contains(&produced(func, inst).bits()) {
-            swap(func, inst);
+        match func[inst].opcode {
+            Opcode::Bswap if !kept.contains(&produced(func, inst).bits()) => {
+                swap(func, inst, u8::BITS);
+            }
+            // The smallest group a bit reversal exchanges is one bit.
+            Opcode::Bitreverse => swap(func, inst, 1),
+            _ => {}
         }
     }
 }
@@ -677,22 +688,34 @@ pub fn bytes(func: &mut Func, kept: &[u32]) {
 /// every width above two, since the cost there grows with the number of bytes rather than with the
 /// logarithm of it.
 ///
-/// A width that is not a whole number of bytes is left alone. The verifier does not allow one, and
-/// silently reversing something else would be worse than the instruction surviving to a selector
-/// that has no rule for it and says so.
-fn swap(func: &mut Func, inst: Inst) {
+/// `lowest` is the smallest group exchanged, which is a byte for a byte swap and a single bit for a
+/// bit reversal. The rounds below a byte are the same five instructions with narrower masks, so a
+/// bit reversal at sixty four bits is six rounds where a byte swap is three.
+///
+/// A width the halving does not come out even on is left alone. That is a width that is not a whole
+/// number of `lowest` groups, or one that halves past `lowest` without landing on it, or one that
+/// is no wider than one group so there is nothing to exchange. The verifier allows none of these at
+/// the sizes C has, and silently reversing something else would be worse than the instruction
+/// surviving to a selector that has no rule for it and says so.
+fn swap(func: &mut Func, inst: Inst, lowest: u32) {
     let ty = produced(func, inst);
     let Some(&arg) = func[func[inst].args].first() else { return };
-    if !ty.is_int() || !ty.is_scalar() || ty.bits() < 16 || ty.bits() % 8 != 0 {
+    let bits = ty.bits();
+    if !ty.is_int() || !ty.is_scalar() || bits <= lowest || bits % lowest != 0 {
+        return;
+    }
+    // The number of groups has to be a power of two for every round to split whole groups in half
+    // and for the last round to be the one at `lowest`.
+    if !(bits / lowest).is_power_of_two() {
         return;
     }
 
     let mut value = arg;
-    let mut group = ty.bits() / 2;
-    while group >= 8 {
+    let mut group = bits / 2;
+    while group >= lowest {
         // The pattern that keeps every other run of `group` bits, counting the run at the bottom as
         // the first one kept. It is what says which half of each pair moves up and which moves down.
-        let mask = alternating(ty.bits(), group);
+        let mask = alternating(bits, group);
         let keep = ahead_const(func, inst, Imm::int(mask, ty), ty);
         let count = ahead_const(func, inst, Imm::int(i128::from(group), ty), ty);
         let low = ahead(func, inst, Opcode::And, &[value, keep], ty);
@@ -701,7 +724,7 @@ fn swap(func: &mut Func, inst: Inst) {
         let high = ahead(func, inst, Opcode::And, &[down, keep], ty);
         // The last step of the last round is the instruction itself, so the value everything
         // downstream already reads is the answer and nothing has to be substituted.
-        if group == 8 {
+        if group == lowest {
             becomes(func, inst, Opcode::Or, &[up, high]);
             return;
         }
@@ -2556,6 +2579,103 @@ mod tests {
         bytes(&mut func, &[]);
         let module = Module::new(names.intern("b.c"), &target());
         rucc_ir::verify_func(&module, &func, &names).expect("the rewrite builds valid IR");
+    }
+
+    /// A function whose body is one bit reversal of the given width.
+    fn reversing(width: u32) -> (Interner, Func) {
+        let ty = Type::int(width);
+        one(&[ty], &[ty], |build, args| {
+            let r = build.unary(Opcode::Bitreverse, args[0], ty);
+            build.ret(&[r]);
+        })
+    }
+
+    /// The rounds [`swap`] writes, done here on a plain number, so the masks and shift counts can
+    /// be checked against the standard library's answer without anything that runs IR.
+    ///
+    /// Each round is the five instructions the pass writes: keep the even groups and move them up,
+    /// move everything down and keep the even groups of that, and put the two together.
+    fn halved(value: u128, width: u32, lowest: u32) -> u128 {
+        let all = u128::MAX >> (u128::BITS - width);
+        let mut value = value & all;
+        let mut group = width / 2;
+        while group >= lowest {
+            let keep = alternating(width, group) as u128;
+            value = (((value & keep) << group) | ((value >> group) & keep)) & all;
+            group /= 2;
+        }
+        value
+    }
+
+    /// The halving is a reversal at every width C has, down to bytes for a byte swap and down to
+    /// single bits for a bit reversal. The samples are a few patterns with every byte different, so
+    /// a round that moved a group to the wrong place could not land on the right answer by luck.
+    #[test]
+    fn the_rounds_are_the_reversal_the_standard_library_computes() {
+        let samples =
+            [0u64, 1, 0x8000_0000_0000_0000, 0x0123_4567_89ab_cdef, 0xdead_beef_f00d_cafe];
+        for sample in samples {
+            let byte = u8::BITS;
+            assert_eq!(halved(sample.into(), 8, 1), (sample as u8).reverse_bits().into());
+            assert_eq!(halved(sample.into(), 16, 1), (sample as u16).reverse_bits().into());
+            assert_eq!(halved(sample.into(), 32, 1), (sample as u32).reverse_bits().into());
+            assert_eq!(halved(sample.into(), 64, 1), sample.reverse_bits().into());
+            assert_eq!(halved(sample.into(), 16, byte), (sample as u16).swap_bytes().into());
+            assert_eq!(halved(sample.into(), 32, byte), (sample as u32).swap_bytes().into());
+            assert_eq!(halved(sample.into(), 64, byte), sample.swap_bytes().into());
+            let wide = (u128::from(sample) << 64) | u128::from(!sample);
+            assert_eq!(halved(wide, 128, 1), wide.reverse_bits());
+            assert_eq!(halved(wide, 128, byte), wide.swap_bytes());
+        }
+    }
+
+    /// A bit reversal is the byte swap's rounds and then three more, at four bits, two and one, so
+    /// it is one round per halving all the way down and the count is the logarithm of the width.
+    #[test]
+    fn a_bit_reversal_is_one_exchange_per_halving_down_to_a_bit() {
+        for (width, steps) in [(8u32, 3usize), (16, 4), (32, 5), (64, 6)] {
+            let (mut names, mut func) = reversing(width);
+            bytes(&mut func, &[]);
+            let text = printed(&func, &mut names);
+            assert!(!text.contains("bitreverse"), "the instruction is gone at {width}: {text}");
+            assert_eq!(text.matches("shl").count(), steps, "at {width}: {text}");
+            assert_eq!(text.matches("lshr").count(), steps, "at {width}: {text}");
+            assert_eq!(text.matches(" or ").count(), steps, "at {width}: {text}");
+        }
+    }
+
+    /// The last three masks are the ones a reader would write by hand for a bit reversal, which is
+    /// the quickest check that the rounds below a byte use the same pattern as the ones above it.
+    #[test]
+    fn a_bit_reversal_ends_on_the_nibble_pair_and_bit_masks() {
+        let (mut names, mut func) = reversing(32);
+        bytes(&mut func, &[]);
+        let text = printed(&func, &mut names);
+        for mask in [0x0f0f_0f0f_i128, 0x3333_3333, 0x5555_5555] {
+            assert!(text.contains(&format!("iconst.i32 {mask}")), "{mask:#x} is a mask: {text}");
+        }
+    }
+
+    /// A target that keeps a byte swap at some width does not keep a bit reversal with it, since
+    /// no target has a rule for one, so the list the byte swap reads is not consulted.
+    #[test]
+    fn a_bit_reversal_is_rewritten_whatever_widths_keep_a_byte_swap() {
+        let (mut names, mut func) = reversing(32);
+        bytes(&mut func, &[16, 32, 64]);
+        let text = printed(&func, &mut names);
+        assert!(!text.contains("bitreverse"), "{text}");
+    }
+
+    /// The same verifier check as the byte swap's, at the narrowest width where every round is
+    /// below a byte.
+    #[test]
+    fn what_a_bit_reversal_becomes_is_ir_that_verifies() {
+        for width in [8, 64] {
+            let (mut names, mut func) = reversing(width);
+            bytes(&mut func, &[]);
+            let module = Module::new(names.intern("b.c"), &target());
+            rucc_ir::verify_func(&module, &func, &names).expect("the rewrite builds valid IR");
+        }
     }
 
     /// Nothing else is touched, which matters because this runs over every function in the program
