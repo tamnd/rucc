@@ -696,8 +696,27 @@ fn shift(a: Range, count: Range, flags: Flags, kind: Kind) -> Range {
             range
         }
         // Too many counts to walk, so what is left is the part of the answer that holds for every
-        // count in the range at once.
-        None => coarse(a, low as u32, width, kind),
+        // count in the range at once, and the ends when no count can push a bit off the top.
+        None => {
+            let range = coarse(a, low as u32, width, kind);
+            match (a.unsigned_bounds(), count.unsigned_bounds()) {
+                (Some((lo, hi)), Some((_, most))) if most < u128::from(width) => {
+                    let (low, most) = (low as u32, most as u32);
+                    match kind {
+                        // `1 << bit` with `bit < 63` is at most `1 << 62`, which is what lets
+                        // `xa_mk_value(1UL << bit)` in `ida_alloc_range` drop its `WARN_ON`.
+                        Kind::Left if most == 0 || hi >> (width - most) == 0 => {
+                            range.intersect(Range::between(lo << low, hi << most, width))
+                        }
+                        Kind::Logical => {
+                            range.intersect(Range::between(lo >> most, hi >> low, width))
+                        }
+                        _ => range,
+                    }
+                }
+                _ => range,
+            }
+        }
     }
 }
 
@@ -1071,6 +1090,33 @@ mod tests {
             lshr(Range::full(32), wide, Flags::NONE).unsigned_bounds(),
             Some((0, 0x0fff_ffff))
         );
+    }
+
+    #[test]
+    fn a_wide_shift_that_cannot_wrap_keeps_its_ends() {
+        // `1UL << bit` under `bit < 63`, which is the value `ida_alloc_range` hands to
+        // `xa_mk_value`, and which is never negative.
+        let one = Range::exactly(1, 64);
+        let below = Range::between(0, 62, 64);
+        assert_eq!(shl(one, below, Flags::NONE).unsigned_bounds(), Some((1, 1 << 62)));
+        assert!(shl(one, Range::between(0, 63, 64), Flags::NONE).contains(1 << 63));
+        assert_eq!(
+            lshr(Range::between(0x100, 0x1000, 32), Range::between(0, 20, 32), Flags::NONE)
+                .unsigned_bounds(),
+            Some((0, 0x1000))
+        );
+        // Every value and every count in a few windows, at a width wide enough to take this way.
+        for (lo, hi) in [(1u128, 3u128), (5, 9), (0x7f, 0x81), (0xffff, 0x1_0001)] {
+            let a = Range::between(lo, hi, 32);
+            let counts = Range::between(0, 20, 32);
+            let (left, right) = (shl(a, counts, Flags::NONE), lshr(a, counts, Flags::NONE));
+            for x in lo..=hi {
+                for at in 0..=20 {
+                    assert!(left.contains((x << at) & mask(32)), "{x:#x} << {at} lost");
+                    assert!(right.contains(x >> at), "{x:#x} >> {at} lost");
+                }
+            }
+        }
     }
 
     #[test]

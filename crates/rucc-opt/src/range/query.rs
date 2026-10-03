@@ -883,6 +883,26 @@ impl<'a> Ranges<'a> {
                 range = range.intersect(found);
             }
         }
+        // A widening made above a test on what it widens learns nothing from the walk, since the
+        // test is on the narrow value and not on this one. Asking for the narrow value down here
+        // and widening that is the same answer the cast would give had it been made below the
+        // test. `ida_alloc_range` widens `bit` for the shift and then tests `bit < 63`.
+        if let Def::Result { inst, .. } = self.func[value].def {
+            let data = self.func[inst];
+            if let (Opcode::ZExt | Opcode::SExt, Some(&narrow)) =
+                (data.opcode, self.func[data.args].first())
+            {
+                let width = range.width();
+                let found = self.refined(narrow, block);
+                let wide = match data.opcode {
+                    Opcode::ZExt => ops::zext(found, width),
+                    _ => ops::sext(found, width),
+                };
+                if wide.width() == width {
+                    range = range.intersect(wide);
+                }
+            }
+        }
         range
     }
 
@@ -1830,6 +1850,24 @@ mod tests {
         let asked = Asked::new(func);
         let mut ranges = asked.ranges();
         assert_eq!(ranges.at(result, then).unsigned_bounds(), Some((0, 8190)));
+    }
+
+    #[test]
+    fn a_value_widened_above_a_test_on_it_learns_from_the_test() {
+        // `wide = zext bit; if (bit < 63) { ... wide ... }`, the shape `ida_alloc_range` has once
+        // the widening for its shift is hoisted above the test.
+        let (mut func, args, blocks) = shape(1, 3);
+        let mut build = Builder::new(&mut func, blocks[0]);
+        let wide = build.unary(Opcode::ZExt, args[0], Type::int(64));
+        let limit = build.iconst(I32, 63);
+        let test = build.icmp(IntPred::Ult, args[0], limit);
+        build.br_if(test, blocks[1], &[], blocks[2], &[]);
+        Builder::new(&mut func, blocks[1]).ret(&[]);
+        Builder::new(&mut func, blocks[2]).ret(&[]);
+        let asked = Asked::new(func);
+        let mut ranges = asked.ranges();
+        assert_eq!(ranges.at(wide, blocks[1]).unsigned_bounds(), Some((0, 62)));
+        assert_eq!(ranges.at(wide, blocks[2]).unsigned_bounds(), Some((63, 0xffff_ffff)));
     }
 
     #[test]
