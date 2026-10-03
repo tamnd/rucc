@@ -2191,9 +2191,12 @@ pub fn drop_unreferenced(module: &mut Module) {
 /// `.data..ro_after_init` at all, and rucc's had the section with the object in it.
 ///
 /// Only an object marked droppable is asked about, and only when every use of its address is the
-/// address of a store, directly or through a `ptr_add` for a field. A volatile or atomic store
-/// keeps it, and so does the address going anywhere else: into a load, a call, an `asm`, another
-/// object's initializer or a block argument.
+/// address of a store, directly or through a `ptr_add` for a field. A round trip through an
+/// integer counts as the same address, because that is how a per-cpu write reaches its `__seg_gs`
+/// store. `kprobe_instance` in kernel/kprobes.c is only ever written by `__this_cpu_write`, and
+/// gcc folds the cast away and drops the object. Anything done to the integer on the way is a
+/// read. A volatile or atomic store keeps the object, and so does the address going anywhere
+/// else: into a load, a call, an `asm`, another object's initializer or a block argument.
 fn write_only(module: &mut Module) {
     let mut candidates: Set<Symbol> = module
         .globals()
@@ -2231,7 +2234,7 @@ fn write_only(module: &mut Module) {
                     (Opcode::GlobalAddr, Extra::Symbol(name)) if candidates.contains(&name) => {
                         Some(name)
                     }
-                    (Opcode::PtrAdd, _) => {
+                    (Opcode::PtrAdd | Opcode::PtrToInt | Opcode::IntToPtr, _) => {
                         func[data.args].first().and_then(|base| found.get(base).copied())
                     }
                     _ => None,
@@ -2262,11 +2265,13 @@ fn write_only(module: &mut Module) {
                 candidates.remove(&callee);
             }
             let plain = data.opcode == Opcode::Store
-                && !data.flags.intersects(Flags::KEEP)
+                && !data.flags.contains(Flags::VOLATILE)
                 && matches!(data.extra, Extra::Mem(mem) if func[mem].order == MemOrder::NotAtomic);
             for (at, value) in func[data.args].iter().enumerate() {
                 let Some(name) = found.get(value) else { continue };
-                let fine = (plain && at == 1) || (data.opcode == Opcode::PtrAdd && at == 0);
+                let step =
+                    matches!(data.opcode, Opcode::PtrAdd | Opcode::PtrToInt | Opcode::IntToPtr);
+                let fine = (plain && at == 1) || (step && at == 0);
                 if !fine {
                     candidates.remove(name);
                 }

@@ -407,3 +407,27 @@ fn a_copy_of_a_const_structure_holding_an_address_past_a_name_is_still_a_copy() 
     let listing = asm_with("const-copy-away", source, &["-fno-pic"]);
     assert!(listing.contains("s0"), "the object went:\n{listing}");
 }
+
+#[test]
+fn a_per_cpu_static_only_written_through_its_segment_is_dropped() {
+    let source = "struct kp;\n\
+        static struct kp *inst __attribute__((section(\".data..percpu\")));\n\
+        static inline void set(struct kp *p) { *(struct kp * __seg_gs *)(unsigned long)&inst = p; }\n\
+        void use(struct kp *p) { set(p); set(0); }\n";
+    let listing = asm_with("percpu-write", source, &["-fno-pic"]);
+    assert!(!listing.contains("inst"), "the object stayed:\n{listing}");
+    assert!(!listing.contains("%gs:"), "the stores stayed:\n{listing}");
+}
+
+#[test]
+fn a_per_cpu_static_read_or_reached_through_an_offset_is_kept() {
+    let source = "static int seen __attribute__((section(\".data..percpu\")));\n\
+        static int other __attribute__((section(\".data..percpu\")));\n\
+        extern unsigned long off[4];\n\
+        void put(int v) { *(int __seg_gs *)(unsigned long)&seen = v; }\n\
+        int get(void) { return *(int __seg_gs *)(unsigned long)&seen; }\n\
+        void far(int cpu, int v) { *(int *)((unsigned long)&other + off[cpu]) = v; }\n";
+    let listing = asm_with("percpu-read", source, &["-fno-pic"]);
+    assert!(listing.contains("seen:"), "the read object went:\n{listing}");
+    assert!(listing.contains("other:"), "the object written through an offset went:\n{listing}");
+}
