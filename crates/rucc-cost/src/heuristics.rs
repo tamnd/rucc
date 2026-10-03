@@ -234,6 +234,16 @@ pub const SRA_MAX_BYTES: u32 = 128;
 /// instructions than keeping the vectors in memory. At eight the same programs run 5% fewer.
 pub const SRA_MAX_PIECES: u32 = 8;
 
+/// The same where every piece is four bytes or more, which is an array of words the program
+/// indexes by constants rather than a vector cut into its bytes.
+///
+/// Sixteen is the general purpose registers x86-64 has. The eight above is about bytes: the
+/// `lfind8` vectors were sixteen of them each, and a byte in a register of its own is a register
+/// spent on an eighth of what it holds. A word is what a register holds anyway. libsodium's scalar
+/// salsa20/8 core keeps a `uint32_t x[16]` it reads and writes by constant index in a loop, and gcc
+/// 16 keeps it in registers. Held in memory it ran 1.3 times as long as gcc's (tamnd/rucc#2765).
+pub const SRA_MAX_WORD_PIECES: u32 = 16;
+
 /// How many instructions a loop header may hold and still be worth copying, per section 26.6.
 ///
 /// GCC's `max-loop-header-insns`, `Init(20)` at `gcc/params.opt:690`. The copy is what turns a
@@ -810,6 +820,14 @@ pub const ALL: &[Constant] = &[
     Constant {
         name: "SRA_MAX_PIECES",
         value: 8,
+        unit: "pieces",
+        document: "18.2",
+        gcc: "sra-max-propagations",
+        provenance: Provenance::Chosen,
+    },
+    Constant {
+        name: "SRA_MAX_WORD_PIECES",
+        value: 16,
         unit: "pieces",
         document: "18.2",
         gcc: "sra-max-propagations",

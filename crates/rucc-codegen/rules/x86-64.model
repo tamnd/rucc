@@ -189,6 +189,10 @@
 (semantics (x64.rol_ri_16 l r)
            (bvor (bvshl l (bvurem (bvand r 31) 16))
                  (bvlshr l (bvsub 16 (bvurem (bvand r 31) 16)))))
+(semantics (x64.rol_ri_32 l r)
+           (bvor (bvshl l (bvand r 31)) (bvlshr l (bvsub 32 (bvand r 31)))))
+(semantics (x64.rol_ri_64 l r)
+           (bvor (bvshl l (bvand r 63)) (bvlshr l (bvsub 64 (bvand r 63)))))
 
 ;; Division. Both quotient and remainder come out of one instruction, and which of the two
 ;; a rule wants is which register it reads afterwards, so they are two heads here.

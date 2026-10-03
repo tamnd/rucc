@@ -147,6 +147,12 @@ const CHAIN: u32 = 12;
 /// a copy, so that is a round each. Rounds stop as soon as one finds nothing to do.
 const ROUNDS: u32 = 8;
 
+/// The most bytes a `memcpy`, `memset` or `memmove` of a constant length is written out for rather
+/// than called, which is the bound the frontend holds a length the source wrote as a constant to.
+/// A length that only became one once a call was inlined, as `memcpy(d, s, n * 64)` with `n` one
+/// does, gets the same treatment here.
+const SMALL: u64 = 64;
+
 /// The names a fold may leave behind, sorted.
 const REPLACEMENTS: [&str; 16] = [
     "__memcpy_chk",
@@ -195,7 +201,7 @@ const UNCHECKED: [&str; 18] = [
 ];
 
 /// The names a fold reads, sorted.
-const SOURCES: [&str; 55] = [
+const SOURCES: [&str; 57] = [
     "__fprintf_chk",
     "__memcpy_chk",
     "__memmove_chk",
@@ -224,8 +230,10 @@ const SOURCES: [&str; 55] = [
     "index",
     "memchr",
     "memcmp",
+    "memcpy",
     "memmove",
     "mempcpy",
+    "memset",
     "nearbyint",
     "printf",
     "printf_unlocked",
@@ -298,6 +306,17 @@ enum Plan {
         /// The `float` the argument was widened from.
         arg: Value,
     },
+    /// The IR's own copy, fill or move of a known number of bytes, answering the destination.
+    Bulk {
+        /// `memcpy`, `memset` or `memmove`.
+        opcode: Opcode,
+        /// The destination.
+        into: Value,
+        /// The source, or the byte a fill writes.
+        with: Value,
+        /// How many bytes.
+        size: u64,
+    },
 }
 
 impl Plan {
@@ -308,6 +327,11 @@ impl Plan {
         }
         let answer = match self {
             Plan::Drop | Plan::Unchecked { .. } => None,
+            Plan::Bulk { into, with, .. } => {
+                *into = renamed.get(into).copied().unwrap_or(*into);
+                *with = renamed.get(with).copied().unwrap_or(*with);
+                None
+            }
             Plan::Narrow { arg, .. } => {
                 *arg = renamed.get(arg).copied().unwrap_or(*arg);
                 None
@@ -553,6 +577,34 @@ pub fn fold(
     pic: Pic,
     fuel: &mut Fuel,
 ) -> Vec<(FuncId, Stats)> {
+    visit(module, names, no_builtin, pic, fuel, false)
+}
+
+/// Writes out every `memcpy`, `memset` and `memmove` of a small known length as the IR's own copy,
+/// fill or move. See [`Site::bulk`].
+///
+/// Separate from [`fold`] and run after it, because a fold leaves a `memcpy` behind as the call it
+/// is, and that call is what the fold's own tests and the rounds inside it read. What is left once
+/// the folds are done is what this writes out.
+pub fn write_out(
+    module: &mut Module,
+    names: &mut Interner,
+    no_builtin: &[String],
+    pic: Pic,
+    fuel: &mut Fuel,
+) -> Vec<(FuncId, Stats)> {
+    visit(module, names, no_builtin, pic, fuel, true)
+}
+
+/// [`fold`] or [`write_out`], as `small` says.
+fn visit(
+    module: &mut Module,
+    names: &mut Interner,
+    no_builtin: &[String],
+    pic: Pic,
+    fuel: &mut Fuel,
+    small: bool,
+) -> Vec<(FuncId, Stats)> {
     let shapes = Shapes::of(module, names);
     // What each symbol was called in the source, for the declarations where the two differ. A call
     // names a symbol, and a symbol an assembler name replaced says nothing about which library
@@ -609,6 +661,7 @@ pub fn fold(
                     names,
                     no_builtin,
                     pic,
+                    small,
                 };
                 site.survey(fuel, &mut stats)
             };
@@ -670,6 +723,9 @@ struct Site<'a> {
     no_builtin: &'a [String],
     /// Which definitions something else may replace at load time.
     pic: Pic,
+    /// Whether this is [`write_out`] rather than [`fold`], which looks at nothing but the three
+    /// bulk calls.
+    small: bool,
 }
 
 impl Site<'_> {
@@ -689,6 +745,7 @@ impl Site<'_> {
                     Plan::Swap { .. } => "call to the library folded",
                     Plan::Unchecked { .. } => "checking call whose check cannot fail made plain",
                     Plan::Narrow { .. } => "rounding of a widened float done in float",
+                    Plan::Bulk { .. } => "call to the library of a small known size written out",
                 });
                 plans.push((inst, plan));
             }
@@ -709,6 +766,14 @@ impl Site<'_> {
         let ignored = data.results().all(|result| self.counts[result.index()] == 0);
         let name = self.called(inst)?;
         let args: Vec<Value> = self.func[data.args].to_vec();
+        if self.small {
+            return match name {
+                "memcpy" => self.bulk(inst, Opcode::Memcpy, &args),
+                "memset" => self.bulk(inst, Opcode::Memset, &args),
+                "memmove" => self.bulk(inst, Opcode::Memmove, &args),
+                _ => None,
+            };
+        }
         // The locked and the unlocked spellings take the same arguments and differ only in how far
         // the fold may go, so they are an arm each with a flag rather than two bodies.
         match name {
@@ -1568,6 +1633,41 @@ impl Site<'_> {
         apart.then(|| self.copy(dest, source, count))?
     }
 
+    /// A `memcpy`, `memset` or `memmove` whose length is a constant of at most [`SMALL`], as the
+    /// IR's own copy, fill or move, which is what the frontend builds where the source wrote the
+    /// length as a constant. One the source worked out, as a helper taking a count of blocks does,
+    /// is a constant only once the helper is inlined, and until it is written out the bytes it
+    /// moves are a call [`crate::sroa`] cannot see through, so the local it fills stays in memory.
+    ///
+    /// The callee has to be the library's under its own name, since a declaration that renamed the
+    /// symbol is a function the program chose, and the call has to unwind nowhere, since the IR's
+    /// copy has no edge to a landing pad. The answer is the destination or nothing at all.
+    fn bulk(&self, inst: Inst, opcode: Opcode, args: &[Value]) -> Option<Plan> {
+        let data = &self.func[inst];
+        let Extra::Call(at) = data.extra else { return None };
+        let callee = self.func[at].callee?;
+        if self.standard.contains_key(&callee)
+            || self.func.unwinds_to_pad(inst)
+            || (data.results().next().is_some() && !self.places(data))
+        {
+            return None;
+        }
+        let [into, with, count] = *args else { return None };
+        let source = if opcode == Opcode::Memset {
+            self.func[with].ty.is_int()
+        } else {
+            self.func[with].ty == Type::PTR
+        };
+        if self.func[into].ty != Type::PTR || !source {
+            return None;
+        }
+        let size = u64::try_from(self.count(count)?).ok().filter(|&size| size <= SMALL)?;
+        if size == 0 {
+            return Some(Plan::Answer(Answer::Along(into, 0)));
+        }
+        Some(Plan::Bulk { opcode, into, with, size })
+    }
+
     /// `strncpy` that copies nothing, which answers its destination, and `strncpy` whose count is
     /// no more than the source's length and its terminator, which pads with nothing and is a
     /// `memcpy` of the count. A longer count pads the rest with zeros and is left as a call.
@@ -2128,6 +2228,40 @@ fn apply(
             let value = func[wide].results().next().expect("a conversion is one value");
             let forward: Map<_, _> = [(old, value)].into_iter().collect();
             uses::substitute(func, &forward);
+            func.remove_inst(inst);
+            return forward;
+        }
+        Plan::Bulk { opcode, into, with, size } => {
+            let func = &mut module[id];
+            let span = func.span(inst);
+            // A fill passes an `int` and the IR's fill takes the byte, which is the low eight bits.
+            let with = if opcode == Opcode::Memset && func[with].ty != Type::int(8) {
+                let args = func.push_values(&[with]);
+                let data = InstData { args, ..InstData::new(Opcode::Trunc) };
+                let made = func.create_inst(data, &[Type::int(8)], span);
+                func.insert_before(made, inst);
+                func[made].results().next().expect("a conversion is one value")
+            } else {
+                with
+            };
+            let info = MemInfo {
+                size,
+                align: 1,
+                order: MemOrder::NotAtomic,
+                tbaa: None,
+                owns: 0,
+                restrict: Restrict::NONE,
+            };
+            let mem = func.add_mem(info);
+            let args = func.push_values(&[into, with]);
+            let data = InstData { args, extra: Extra::Mem(mem), ..InstData::new(opcode) };
+            let made = func.create_inst(data, &[], span);
+            func.insert_before(made, inst);
+            let forward: Map<Value, Value> =
+                func[inst].results().map(|result| (result, into)).collect();
+            if !forward.is_empty() {
+                uses::substitute(func, &forward);
+            }
             func.remove_inst(inst);
             return forward;
         }
@@ -3125,6 +3259,75 @@ block0:
         assert!(!out.contains("call @strlen("), "{out}");
         assert!(out.contains("iconst.i64 11"), "{out}");
         assert!(out.contains("iconst.i64 5"), "the world on its own, {out}");
+    }
+
+    /// The module that text is, written out by [`write_out`] and checked by the verifier.
+    fn written(body: &str) -> String {
+        let mut names = Interner::new();
+        let text = format!("{HEAD}{body}");
+        let mut module = rucc_ir::parse(&text, &mut names).expect("the fixture parses");
+        write_out(&mut module, &mut names, &[], Pic::Executable, &mut Fuel::unlimited());
+        if let Err(errors) = rucc_ir::verify(&module, &names) {
+            panic!("the pass left invalid IR, {errors:?}\n{}", rucc_ir::print(&module, &names));
+        }
+        rucc_ir::print(&module, &names)
+    }
+
+    /// `memcpy(x, B, len * 64)` from libsodium's `blkcpy`, once `len` is one, is the IR's copy of
+    /// sixty four bytes, which is what lets the local it fills come out of memory. A fill takes the
+    /// low byte of its `int`, and the answer is the destination.
+    #[test]
+    fn a_copy_whose_length_worked_out_small_is_written_out() {
+        let out = written(
+            r#"
+func @memcpy(ptr, ptr, i64) -> ptr, linkage(external);
+func @memset(ptr, i32, i64) -> ptr, linkage(external);
+func @use(ptr), linkage(external);
+
+func @g(ptr, i32), linkage(external) {
+block0(%0: ptr, %1: i32):
+    %2 = alloca, size 64, align 16
+    %3 = iconst.i64 1
+    %4 = iconst.i64 64
+    %5 = mul %3, %4
+    %6 = call @memcpy(%2, %0, %5) : (ptr, ptr, i64) -> ptr
+    %7 = iconst.i64 8
+    %8 = call @memset(%2, %1, %7) : (ptr, i32, i64) -> ptr
+    call @use(%8) : (ptr)
+    return
+}
+"#,
+        );
+        assert!(out.contains("memcpy %2, %0, size 64"), "{out}");
+        assert!(out.contains("trunc.i8 %1"), "{out}");
+        assert!(out.contains("memset %2, "), "{out}");
+        assert!(out.contains("call @use(%2)"), "the answer is the destination, {out}");
+        assert!(!out.contains("call @mem"), "{out}");
+    }
+
+    /// A length past [`SMALL`], one nothing knows, and a callee renamed onto another symbol all
+    /// leave the call alone.
+    #[test]
+    fn a_copy_too_long_unknown_or_renamed_stays_a_call() {
+        let out = written(
+            r#"
+func @memcpy(ptr, ptr, i64) -> ptr, linkage(external);
+func @my_memset(ptr, i32, i64) -> ptr, linkage(external), spelled "memset";
+
+func @g(ptr, ptr, i64), linkage(external) {
+block0(%0: ptr, %1: ptr, %2: i64):
+    %3 = iconst.i64 65
+    %4 = call @memcpy(%0, %1, %3) : (ptr, ptr, i64) -> ptr
+    %5 = call @memcpy(%0, %1, %2) : (ptr, ptr, i64) -> ptr
+    %6 = iconst.i32 0
+    %7 = iconst.i64 8
+    %8 = call @my_memset(%0, %6, %7) : (ptr, i32, i64) -> ptr
+    return
+}
+"#,
+        );
+        assert_eq!(out.matches("call @memcpy(").count(), 2, "{out}");
+        assert!(out.contains("call @my_memset("), "{out}");
     }
 
     /// `memmove` is `memcpy` where the two sides cannot overlap and the destination where it moves
