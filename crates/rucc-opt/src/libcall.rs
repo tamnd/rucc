@@ -634,8 +634,17 @@ fn visit(
         // a predecessor list per block, which is a cost worth not paying over a module whose
         // functions print nothing.
         // Nor in a body `optimize ("O0")` holds to that level, which is not one gcc folds at.
+        //
+        // And nothing is written out in a function marked `no_builtin`, which is the backend's
+        // rule in `expand::bulk` held here too. The mark says a `memcpy`, `memset` or `memmove`
+        // in the body means whatever function has the name, and `-fsafety` sets it on every
+        // function of a unit that defines one of the three, because the copy has to go through
+        // the instrumented body or the bytes it writes are never marked as written and the next
+        // read of them is reported. Writing the call out as the IR's own copy skips that body
+        // just as the backend's moves would.
         if module[id].is_declaration()
             || module[id].attrs.set.contains(AttrSet::OPTNONE)
+            || (small && module[id].attrs.set.contains(AttrSet::NO_BUILTIN))
             || library.contains(&module[id].name)
             || !mentions(&module[id], names, &standard)
         {
@@ -3328,6 +3337,28 @@ block0(%0: ptr, %1: ptr, %2: i64):
         );
         assert_eq!(out.matches("call @memcpy(").count(), 2, "{out}");
         assert!(out.contains("call @my_memset("), "{out}");
+    }
+
+    /// A function marked `no_builtin` keeps its small copy a call, because the mark says the name
+    /// is not the library's. `-fsafety` marks every function of a program that defines its own
+    /// `memcpy`, and the copy written out skipped that body, so the bytes it copied were never
+    /// marked as written and the read after it was reported.
+    #[test]
+    fn a_copy_in_a_function_marked_no_builtin_stays_a_call() {
+        let out = written(
+            r#"
+func @memcpy(ptr, ptr, i64) -> ptr, linkage(external);
+
+func @g(ptr, ptr), linkage(external), attrs(no_builtin) {
+block0(%0: ptr, %1: ptr):
+    %2 = iconst.i64 16
+    %3 = call @memcpy(%0, %1, %2) : (ptr, ptr, i64) -> ptr
+    return
+}
+"#,
+        );
+        assert!(out.contains("call @memcpy("), "{out}");
+        assert!(!out.contains("memcpy %0"), "{out}");
     }
 
     /// `memmove` is `memcpy` where the two sides cannot overlap and the destination where it moves

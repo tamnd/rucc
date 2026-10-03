@@ -11,6 +11,7 @@ All notable changes are recorded here. The format follows [Keep a Changelog](htt
 
 ### Fixed
 
+- Under `-fsafety`, a program that defines its own `memcpy`, `memset` or `memmove` keeps a small constant call to it a call again at `-O1` and up. The step #2776 added to the optimizer, which writes such a call out as the IR's own copy, did not look at the `no_builtin` mark `-fsafety` puts on every function of that program, so the copy skipped the instrumented body and the next read of the bytes it wrote was reported. This was `a-program-that-defines-memcpy-itself` failing the release gate's accounting step.
 - `-fprofile-dir=` on a Windows host puts the `.gcda` name under the directory. The whole path is folded into one name with its backslashes turned to `#` and the drive's colon to `~`, as gcc does on a DOS file system, where only the forward slashes were folded before and the name stayed absolute, so the directory was dropped. `arc_counters` passes on Windows again, and its tests compare against the working directory the compiler sees rather than the `\\?\` path `canonicalize` gives.
 
 ### Changed
