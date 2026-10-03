@@ -3914,6 +3914,14 @@ static ENCODINGS: &[Encoding] = &[
     },
     avx("vpblendd", &IVVV, Word, Map::Escape3A, &[0x02], Some(2), pair(1, 3)),
     avx("vpblendd", &IMVV, Word, Map::Escape3A, &[0x02], Some(2), pair(1, 3)),
+    // The same blend by an immediate over floats, doubles and words. libsodium's sandy2x ladder
+    // is written with the first.
+    avx("vblendps", &IVVV, Word, Map::Escape3A, &[0x0C], Some(2), pair(1, 3)),
+    avx("vblendps", &IMVV, Word, Map::Escape3A, &[0x0C], Some(2), pair(1, 3)),
+    avx("vblendpd", &IVVV, Word, Map::Escape3A, &[0x0D], Some(2), pair(1, 3)),
+    avx("vblendpd", &IMVV, Word, Map::Escape3A, &[0x0D], Some(2), pair(1, 3)),
+    avx("vpblendw", &IVVV, Word, Map::Escape3A, &[0x0E], Some(2), pair(1, 3)),
+    avx("vpblendw", &IMVV, Word, Map::Escape3A, &[0x0E], Some(2), pair(1, 3)),
     avx("vinserti128", &IVVV, Word, Map::Escape3A, &[0x38], Some(2), pair(1, 3)),
     avx("vinserti128", &IMVV, Word, Map::Escape3A, &[0x38], Some(2), pair(1, 3)),
     avx("vinsertf128", &IVVV, Word, Map::Escape3A, &[0x18], Some(2), pair(1, 3)),
