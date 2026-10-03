@@ -585,6 +585,10 @@ pub struct Encoding {
 
 /// One row of the table below, for an instruction that carries no immediate or that carries one
 /// of any size at all.
+///
+/// A row whose immediate is one byte only takes a number that byte can hold, by gas's rule in
+/// [`Fits::Byte`], the same as [`avx`] and [`evex`] rows. Without that `pshufd $1000` was written
+/// as `pshufd $0xe8`, which is not what was asked for and which every other assembler refuses.
 const fn bytes(
     mnemonic: &'static str,
     args: &'static [Kind],
@@ -596,7 +600,7 @@ const fn bytes(
     Encoding {
         mnemonic,
         args,
-        fits: Fits::Any,
+        fits: if matches!(imm, ImmSize::Ib) { Fits::Byte } else { Fits::Any },
         size,
         opcode,
         fields,
@@ -5991,6 +5995,12 @@ mod tests {
         assert_eq!(hex("cvtsi2sdq", &[Value::Mem(at), x(0)]), "f2 48 0f 2a 07");
         assert_eq!(hex("comisd", &[x(1), x(0)]), "66 0f 2f c1");
         assert_eq!(hex("pshufd", &[Value::Imm(78), x(0), x(10)]), "66 44 0f 70 d0 4e");
+        // A byte holds the order of the four lanes, so a number no byte holds is refused rather
+        // than cut down to its low eight bits.
+        let mut out = Vec::new();
+        assert!(encode("pshufd", &[Value::Imm(1000), x(1), x(0)], &mut out).is_err());
+        assert!(encode("shufps", &[Value::Imm(0x1_2345_6789), x(1), x(0)], &mut out).is_err());
+        assert_eq!(hex("pshufd", &[Value::Imm(-1), x(1), x(0)]), "66 0f 70 c1 ff");
         assert_eq!(hex("punpckldq", &[x(1), x(0)]), "66 0f 62 c1");
         assert_eq!(hex("xorpd", &[x(1), x(1)]), "66 0f 57 c9");
         assert_eq!(hex("movhps", &[Value::Mem(from), x(1)]), "0f 16 0e");
