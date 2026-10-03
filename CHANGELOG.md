@@ -13,6 +13,20 @@ All notable changes are recorded here. The format follows [Keep a Changelog](htt
 - `__builtin_object_size` follows an address read back out of a local it was stored in once, which is what a `__free (kfree)` variable is, since its cleanup takes the address and keeps it in memory. In the kernel this answers the size of keyboard.c's diacritical buffers the way gcc does, and the `INT_MAX` warning in `check_copy_size` goes away with it.
 - From `-O2` an integer parameter of a function only this file can call carries the range its callers pass it, which is gcc's `-fipa-vrp`, so a test in the body that no call can reach folds away. In the kernel this takes the `INT_MAX` warning out of evdev's `str_to_user`, whose three callers all pass `_IOC_SIZE (cmd)`. `-fno-ipa-vrp` turns it off.
 - `lifetimes::settle` keeps who reads each value and which blocks come before each block in one list each rather than one per value and block, and reuses what it walks with, which takes about 0.2% off an optimized build of jtckdint when it goes through the portable code rather than `<stdckdint.h>` (#2725).
+- The instruction scheduler keeps the lists and maps it builds each run's graph and order in from one run to the next, rather than making them again for every stretch between barriers, which takes about 0.3% off an optimized build of jtckdint when it goes through the portable code rather than `<stdckdint.h>` (#2714).
+- The x86-64 encoder looks an instruction's encoding up by the kinds of its arguments kept on the stack, rather than in a list made for every instruction it writes, which takes about 0.5% off a build of jtckdint at `-O0` and about 0.2% at `-O2` when it goes through the portable code rather than `<stdckdint.h>` (#2717).
+
+### Added
+
+- The assembler takes the far pointer loads `lss`, `lfs` and `lgs` in their 16, 32 and 64 bit forms. The i386 kernel's `CHECK_AND_APPLY_ESPFIX` in entry_32.S switches stacks with `lss`.
+- A thread-local variable works on i686 Windows (#2072). It is reached the way gcc and clang reach it for `i686-w64-mingw32`: `__tls_index`, the array of `.tls` copies at `%fs:44`, four bytes a pointer, and the variable's `@SECREL32` offset, which the i386 assembler now reads and writes as `IMAGE_REL_I386_SECREL`. Before, the compile was refused.
+- The assembler takes `jecxz` in 32 and 64 bit code and `jcxz` in 32 bit code, which arch/x86/power/hibernate_asm_32.S uses to skip `cr4` on old CPUs.
+
+### Fixed
+
+- An i386 `q` asm input whose value is kept on the stack, such as the kernel's `writeb` in the i915 driver's `gen5_write8`, is read straight into a register with a low byte instead of through `esi`, where `movb %sil` is not an instruction i386 has.
+- The i386 assembler wraps a displacement up to four gigabytes either way in the four bytes of an address, so `-0xC0000000(%edi)` in head_32.S is the address gas writes instead of an error.
+- The assembler reads an address that is arithmetic starting with a bracket, such as `%fs:(gdt_page + (26 * 8)) + 4` in the i386 kernel's `CHECK_AND_APPLY_ESPFIX`, as a displacement instead of refusing it.
 
 ## 0.18.10
 

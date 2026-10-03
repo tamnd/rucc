@@ -1825,6 +1825,18 @@ static ENCODINGS: &[Encoding] = &[
     // compiler has no use for because a pointer here is sixty four bits wide and which hand written
     // code uses as an addition that does not touch the flags.
     bytes("leal", &MR, Long, &[0x8D], pair(0, 1), NO_IMM),
+    // A far pointer loaded from memory, the offset into the register and the two bytes behind it
+    // into the segment register the mnemonic names. The i386 kernel's `CHECK_AND_APPLY_ESPFIX`
+    // moves to the espfix stack with `lss`.
+    bytes("lssw", &MR, Word, &[0x0F, 0xB2], pair(0, 1), NO_IMM),
+    bytes("lssl", &MR, Long, &[0x0F, 0xB2], pair(0, 1), NO_IMM),
+    bytes("lssq", &MR, Quad, &[0x0F, 0xB2], pair(0, 1), NO_IMM),
+    bytes("lfsw", &MR, Word, &[0x0F, 0xB4], pair(0, 1), NO_IMM),
+    bytes("lfsl", &MR, Long, &[0x0F, 0xB4], pair(0, 1), NO_IMM),
+    bytes("lfsq", &MR, Quad, &[0x0F, 0xB4], pair(0, 1), NO_IMM),
+    bytes("lgsw", &MR, Word, &[0x0F, 0xB5], pair(0, 1), NO_IMM),
+    bytes("lgsl", &MR, Long, &[0x0F, 0xB5], pair(0, 1), NO_IMM),
+    bytes("lgsq", &MR, Quad, &[0x0F, 0xB5], pair(0, 1), NO_IMM),
     // Reading and writing memory, which are one opcode apart and are the same instruction with
     // the two ends swapped.
     bytes("movb", &MR, Byte, &[0x8A], pair(0, 1), NO_IMM),
@@ -6548,5 +6560,17 @@ mod tests {
             encode_in(Mode::Bits32, mnemonic, &[long(reg)], &mut out).expect("a one byte form");
             assert_eq!(Mode::Bits32.counted(out[0]), Some((mnemonic, reg)));
         }
+    }
+
+    /// The far pointer loads, with the bytes gas gives each. `lss 4(%esp), %esp` is how the i386
+    /// kernel moves to its espfix stack.
+    #[test]
+    fn a_far_pointer_is_loaded_into_a_segment_and_a_register() {
+        let at = Addr { base: Some(RBX), disp: 8, ..Addr::default() };
+        assert_eq!(hex("lssl", &[Value::Mem(at), long(RSP)]), "0f b2 63 08");
+        assert_eq!(hex("lssw", &[Value::Mem(at), word(RSP)]), "66 0f b2 63 08");
+        assert_eq!(hex("lssq", &[Value::Mem(at), quad(RSP)]), "48 0f b2 63 08");
+        assert_eq!(hex("lfsl", &[Value::Mem(at), long(RCX)]), "0f b4 4b 08");
+        assert_eq!(hex("lgsq", &[Value::Mem(at), quad(R8)]), "4c 0f b5 43 08");
     }
 }
