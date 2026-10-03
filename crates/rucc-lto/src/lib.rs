@@ -158,7 +158,9 @@ pub fn join(units: &[Unit<'_>], isa: Isa, names: &mut Interner) -> Result<Module
         joiner
             .read(unit.module, names, &renames[index], &skips[index])
             .map_err(|e| format!("{}: {e}", unit.name))?;
-        let module = joiner.module_mut().expect("a text was just read");
+        let Some(module) = joiner.module_mut() else {
+            return Err(format!("{}: the module did not read", unit.name));
+        };
         if unit.isa != isa {
             for id in module.funcs().skip(before) {
                 let func = &mut module[id];
