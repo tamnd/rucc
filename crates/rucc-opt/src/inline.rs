@@ -805,23 +805,69 @@ fn settle(
 }
 
 /// The parameters of a body that it asks `__builtin_constant_p` about, by position.
+///
+/// The question may be about arithmetic on parameters rather than one of them, since what it asks
+/// about is often a macro's argument. fs/super.c has `super_wake` ask, through `hweight32`, about
+/// `flag & SUPER_WAKE_FLAGS`, and every caller passes a constant flag, so gcc inlines it and the
+/// two warnings it checks the flag with fold away. Each parameter such a value is made of counts,
+/// as long as the rest of it is constants.
 fn asked(func: &Func) -> Vec<usize> {
     let Some(entry) = func.entry() else { return Vec::new() };
-    let mut asked: Vec<usize> = func
-        .blocks()
-        .flat_map(|block| func.insts(block))
-        .filter(|&inst| func[inst].opcode == Opcode::IsConstant)
-        .filter_map(|inst| {
-            let &value = func[func[inst].args].first()?;
-            match func[value].def {
-                Def::Param { block, index } if block == entry => usize::try_from(index).ok(),
-                _ => None,
-            }
-        })
-        .collect();
+    let mut asked: Vec<usize> = Vec::new();
+    for inst in func.blocks().flat_map(|block| func.insts(block)) {
+        if func[inst].opcode != Opcode::IsConstant {
+            continue;
+        }
+        let Some(&value) = func[func[inst].args].first() else { continue };
+        let mut found = Vec::new();
+        // Constants alone ask about nothing a caller passes, and fold without any help.
+        if made_of_params(func, entry, value, ASKED_DEPTH, &mut found) {
+            asked.extend(found);
+        }
+    }
     asked.sort_unstable();
     asked.dedup();
     asked
+}
+
+/// Whether that value is the entry block's parameters and constants put together by arithmetic
+/// that folds, adding the positions of the parameters it reads to `found`, which stays empty for a
+/// value of constants alone.
+fn made_of_params(
+    func: &Func,
+    entry: Block,
+    value: Value,
+    depth: u32,
+    found: &mut Vec<usize>,
+) -> bool {
+    match func[value].def {
+        Def::Param { block, index } if block == entry => {
+            usize::try_from(index).map(|at| found.push(at)).is_ok()
+        }
+        Def::Result { inst, .. } if depth > 0 => {
+            let data = &func[inst];
+            match data.opcode {
+                Opcode::IConst => true,
+                Opcode::And
+                | Opcode::Or
+                | Opcode::Xor
+                | Opcode::Add
+                | Opcode::Sub
+                | Opcode::Mul
+                | Opcode::Shl
+                | Opcode::LShr
+                | Opcode::AShr
+                | Opcode::ICmp
+                | Opcode::Trunc
+                | Opcode::SExt
+                | Opcode::ZExt => func[data.args]
+                    .iter()
+                    .all(|&arg| made_of_params(func, entry, arg, depth - 1, found)),
+                _ => false,
+            }
+        }
+        _ => false,
+    }
 }
 
 /// How many instructions a body has that are still work once the parameters it asks
