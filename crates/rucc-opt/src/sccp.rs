@@ -347,6 +347,12 @@ impl<'a> Solver<'a> {
     /// Looks at one instruction in a reachable block.
     fn visit(&mut self, inst: Inst) {
         if self.func.is_terminator(inst) {
+            // An asm goto is a terminator with outputs, and they come from the asm, which nothing
+            // here can see into.
+            let results: Vec<Value> = self.func[inst].results().collect();
+            for value in results {
+                self.learn(value, nothing(self.func[value].ty));
+            }
             self.branch(inst);
             return;
         }
@@ -1072,6 +1078,40 @@ block1(%3: ptr):
 ",
         );
         assert!(out.contains("load.i32 %3, align 4"), "{out}");
+    }
+
+    #[test]
+    fn what_an_asm_goto_writes_is_not_known() {
+        // The output comes from the asm, so the test on it after the join has to stay.
+        let out = solved(
+            r#"
+func @mark(i64), linkage(external);
+
+func @f(ptr, i64) -> i32, linkage(external) {
+block0(%0: ptr, %1: i64):
+    %2 = inline_asm.i64.volatile "1: movq %1,%0", "=r,m", ""(%0), labels [block1, block2]
+block1:
+    %3 = iconst.i64 10
+    %4 = icmp uge %1, %3
+    br_if %4, block3(%3), block3(%2)
+block2:
+    %5 = iconst.i32 0
+    return %5
+block3(%6: i64):
+    %7 = iconst.i64 0
+    %8 = icmp ne %6, %7
+    br_if %8, block4, block5
+block4:
+    call @mark(%6) : (i64)
+    jump block5
+block5:
+    %9 = iconst.i32 1
+    return %9
+}
+"#,
+        );
+        assert!(out.contains("call @mark"), "{out}");
+        assert!(out.contains("icmp ne"), "{out}");
     }
 
     #[test]
