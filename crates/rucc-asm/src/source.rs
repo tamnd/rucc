@@ -3024,6 +3024,7 @@ impl Reader {
                 reloc.symbol.clone_from(renamed);
             }
         }
+        self.last_settings();
         self.leaders()?;
         let marker = ".note.GNU-stack";
         if self.noexecstack && self.elf() && !self.parts.iter().any(|part| part.name == marker) {
@@ -3594,6 +3595,35 @@ impl Reader {
             }
             if alias.size == 0 {
                 alias.size = size;
+            }
+        }
+    }
+
+    /// The value a name set more than once is written to the table with, which is the last one.
+    ///
+    /// A setting after the first is its own entry, so that a line between the two reads the value
+    /// the name had then (see [`Reader::assign`]), and that left the first value under the name.
+    /// gas copies the symbol when it is set again and the copy is what keeps the old value, so the
+    /// name in its table has the last one. The kernel's crypto code counts with `.set i, i+1` round
+    /// a `.rept`, and every one of those units had `i` at 0 where gas has the count. A name a
+    /// relocation points at is left as it is, since the relocation was written against the value
+    /// it had then.
+    fn last_settings(&mut self) {
+        let relocated: Set<&str> = self
+            .parts
+            .iter()
+            .flat_map(|part| part.relocs.iter().map(|reloc| reloc.symbol.as_str()))
+            .collect();
+        for (name, last) in &self.current {
+            if name == last || relocated.contains(name.as_str()) {
+                continue;
+            }
+            let (Some(&first), Some(&last)) = (self.known.get(name), self.known.get(last)) else {
+                continue;
+            };
+            let placed = |at: Held| matches!(at, Held::In { .. } | Held::Absolute(_));
+            if placed(self.syms[first].at) && placed(self.syms[last].at) {
+                self.syms[first].at = self.syms[last].at;
             }
         }
     }
@@ -6601,6 +6631,17 @@ _tls$tlv$init:
             "\t.data\n\t.byte early\n\tearly = 3\n\tx = 1\n\t.byte x\n\tx = x + 1\n\t.byte x\n",
         );
         assert_eq!(bytes(&out, ".data"), vec![3, 1, 2]);
+    }
+
+    #[test]
+    fn a_name_set_twice_is_in_the_table_with_the_last_value() {
+        let out = assembled(
+            "\t.text\n\t.set i, 0\n\t.rept 3\n\taddl $i, %eax\n\t.set i, i+1\n\t.endr\n\t.globl \
+             level\n\t.set level, 2\n\t.set level, 5\n",
+        );
+        assert_eq!(name(&out, "i").at, Held::Absolute(3));
+        assert_eq!(name(&out, "level").at, Held::Absolute(5));
+        assert_eq!(name(&out, "level").binding, Binding::Global);
     }
 
     #[test]
