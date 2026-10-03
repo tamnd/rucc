@@ -581,7 +581,7 @@ pub fn fold(
 }
 
 /// Writes out every `memcpy`, `memset` and `memmove` of a small known length as the IR's own copy,
-/// fill or move. See [`Site::bulk`].
+/// fill or move. See `Site::bulk`.
 ///
 /// Separate from [`fold`] and run after it, because a fold leaves a `memcpy` behind as the call it
 /// is, and that call is what the fold's own tests and the rounds inside it read. What is left once
