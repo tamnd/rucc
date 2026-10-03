@@ -78,12 +78,14 @@ mod pack;
 mod spec;
 mod stmt;
 mod visibility;
+mod weak;
 
 pub use crate::comment::Comment;
 pub use crate::cursor::{Cursor, MAX_LOOKAHEAD, Mark};
 pub use crate::parser::{Context, MAX_NESTING, Parsed, Parser};
 pub use crate::recover::{Poison, push_about, skip_past_declaration, skip_to_statement_end};
 pub use crate::scope::{IdentKind, Scopes, TagKind};
+pub use crate::weak::WeakPragma;
 
 /// Parses a translation unit.
 ///

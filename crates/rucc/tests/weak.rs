@@ -175,3 +175,25 @@ fn a_static_name_has_nothing_to_give_way_to_and_is_told_so() {
     assert!(said.contains("E0711"), "{said}");
     assert!(said.contains("must be public"), "{said}");
 }
+
+/// A hook nobody in the file uses is not written at all, as gcc writes nothing for one.
+///
+/// A header that offers a hook is included by files that never call it, and a `.weak` in each
+/// of those would put a weak undefined name in every object for nothing.
+#[test]
+fn a_hook_nobody_uses_is_not_written() {
+    let text = asm(
+        "unused",
+        "\
+__attribute__((weak)) extern int nobody_calls(int x);
+__attribute__((weak)) extern int nobody_reads;
+extern int __attribute__((weak)) read_by_table;
+int *table[] = { &read_by_table };
+",
+    );
+
+    assert!(!text.contains("nobody_calls"), "{text}");
+    assert!(!text.contains("nobody_reads"), "{text}");
+    // A reference from an initializer is a reference all the same.
+    assert!(text.contains("\t.weak\tread_by_table\n"), "{text}");
+}

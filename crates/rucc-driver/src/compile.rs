@@ -325,6 +325,7 @@ pub fn compile(opts: &Options, name: &str, fs: &dyn FileSystem) -> Compiled {
     diagnostics.extend(parsed.diagnostics);
     let comments = parsed.comments;
     let diagnostic_pragmas = parsed.diagnostic_pragmas;
+    let weak_pragmas = parsed.weak_pragmas;
 
     let mut artifact = Artifact::Nothing;
     // Zero when nothing instruments, which is the truthful summary of a file built without
@@ -357,6 +358,11 @@ pub fn compile(opts: &Options, name: &str, fs: &dyn FileSystem) -> Compiled {
             },
         );
         checker.check_unit();
+        // After the whole file, because a `#pragma weak` applies to the name wherever the line
+        // stands relative to its declarations.
+        for pragma in &weak_pragmas {
+            checker.pragma_weak(pragma.name, pragma.target, pragma.span);
+        }
         let checked = checker.finish();
         clock.lap("check");
         if !checked.failed() {

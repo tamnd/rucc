@@ -76,8 +76,7 @@ enum Action {
 /// The pragmas gcc 13 takes without a word under `-Wunknown-pragmas` that this one has nothing to
 /// do with, besides the ones read here. `once`, `push_macro` and `pop_macro` never get this far,
 /// since the preprocessor answers them.
-const PRAGMAS: &[&str] =
-    &["endregion", "redefine_extname", "region", "scalar_storage_order", "weak"];
+const PRAGMAS: &[&str] = &["endregion", "redefine_extname", "region", "scalar_storage_order"];
 
 /// The same for what follows `#pragma GCC`, of which `visibility.rs` reads `visibility` and
 /// `diagnostic.rs` reads `diagnostic`. gcc calls `novector` and any other word unknown.
@@ -175,6 +174,7 @@ impl Parser<'_> {
             [Some("pack"), _] => {}
             [Some("comment"), _] => return self.comment_line(&line[1..], span),
             [Some("message"), _] => return self.message_line(line),
+            [Some("weak"), _] => return self.weak_line(line),
             [Some("GCC"), Some(word)] if GCC_PRAGMAS.contains(&word) => {
                 return self.visibility_line(&line[1..], span);
             }

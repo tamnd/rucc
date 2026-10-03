@@ -72,6 +72,9 @@ pub struct Parsed {
     pub comments: Vec<crate::Comment>,
     /// The unit's `#pragma GCC diagnostic` lines, each with where it was written, in order.
     pub diagnostic_pragmas: Vec<(BytePos, DiagnosticPragma)>,
+    /// The unit's `#pragma weak` lines, in the order they were written, which the checker
+    /// applies by name once it has seen the whole file.
+    pub weak_pragmas: Vec<crate::WeakPragma>,
 }
 
 impl Parsed {
@@ -102,6 +105,8 @@ pub struct Parser<'a> {
     pub(crate) comments: Vec<crate::Comment>,
     /// The `#pragma GCC diagnostic` lines read so far, which is in `diagnostic.rs`.
     pub(crate) diagnostic_pragmas: Vec<(BytePos, DiagnosticPragma)>,
+    /// The `#pragma weak` lines read so far, which is in `weak.rs`.
+    pub(crate) weak_pragmas: Vec<crate::WeakPragma>,
     /// How many `__extension__` keywords are in effect where the cursor is.
     ///
     /// gcc reads the keyword as a promise that what follows uses an extension on purpose, and
@@ -132,6 +137,7 @@ impl<'a> Parser<'a> {
             packs: crate::pack::Packs::default(),
             comments: Vec::new(),
             diagnostic_pragmas: Vec::new(),
+            weak_pragmas: Vec::new(),
             extension: 0,
         }
     }
@@ -144,6 +150,7 @@ impl<'a> Parser<'a> {
             diagnostics: self.errors.finish(),
             comments: self.comments,
             diagnostic_pragmas: self.diagnostic_pragmas,
+            weak_pragmas: self.weak_pragmas,
         }
     }
 
