@@ -82,7 +82,8 @@ enum Action {
 const PRAGMAS: &[&str] = &["endregion", "region", "scalar_storage_order"];
 
 /// The same for what follows `#pragma GCC`, of which `visibility.rs` reads `visibility`,
-/// `diagnostic.rs` reads `diagnostic` and `options.rs` reads the five about options. gcc calls `novector` and any other word unknown.
+/// `diagnostic.rs` reads `diagnostic` and `options.rs` reads the five about options. gcc calls
+/// `novector` and any other word unknown.
 const GCC_PRAGMAS: &[&str] = &[
     "dependency",
     "diagnostic",
@@ -166,9 +167,9 @@ impl Parser<'_> {
         self.errors.push(Diagnostic::new(Severity::Note, note, word));
     }
 
-    /// One `#pragma` line. A `pack` and a `message` are read here, a `comment`,
-    /// `GCC visibility`, `GCC diagnostic` and the `GCC` options elsewhere, the other pragmas gcc knows are taken without a word, and
-    /// anything else is ignored with gcc's warning under `-Wunknown-pragmas`.
+    /// One `#pragma` line. A `pack` and a `message` are read here, a `comment`, `GCC visibility`,
+    /// `GCC diagnostic` and the `GCC` options elsewhere, the other pragmas gcc knows are taken
+    /// without a word, and anything else is ignored with gcc's warning under `-Wunknown-pragmas`.
     fn pack_line(&mut self, line: &[Token], span: Span) {
         let words = [0, 1].map(|at| {
             line.get(at).and_then(|token| token.ident()).map(|name| self.cx.interner.resolve(name))
