@@ -157,7 +157,7 @@ fn a_spilled_vector_keeps_the_whole_register() {
         assert!(!moves.is_empty(), "{level}: spin spills nothing\n{}", lines.join("\n"));
         for line in &moves {
             let narrow = line.starts_with("movsd") || line.starts_with("movss");
-            assert!(!narrow, "{level}: spin spills with {line}");
+            assert!(!narrow, "{level}: spin spills with {line}\n{}", lines.join("\n"));
         }
         // Three vectors over the calls at sixteen bytes each.
         let bytes = frame(&usage, "spin");
