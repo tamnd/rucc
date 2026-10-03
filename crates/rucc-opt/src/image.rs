@@ -126,6 +126,11 @@ const LONGEST: u64 = 512;
 /// The most stores a copy is spelled out as, not counting the fill that clears it first.
 const MOST: usize = 24;
 
+/// How many zero bytes an object has to hold before they are cleared with one fill of the whole
+/// destination rather than written by stores of their own. Sixteen is two eight byte stores,
+/// which is about what the fill costs.
+const FILL_OVER: u64 = 16;
+
 /// Recorded for a load that would have folded if there had been fuel for it.
 const NO_FUEL: &str = "load from a read only object not folded, the pass ran out of fuel";
 
@@ -297,7 +302,7 @@ fn unroll(func: &mut Func, inst: Inst, writes: &[Write]) {
     let to = bulk.to;
     let zero: u64 =
         writes.iter().map(|write| if let Write::Zero(bytes) = write { *bytes } else { 0 }).sum();
-    let filled = zero > 16;
+    let filled = zero > FILL_OVER;
     if filled {
         let byte = constant(func, inst, Type::int(8), Opcode::IConst, Imm::int(0, Type::int(8)));
         let mem = func.add_mem(MemInfo { size, align, ..plain(align) });
