@@ -431,3 +431,45 @@ fn a_per_cpu_static_read_or_reached_through_an_offset_is_kept() {
     assert!(listing.contains("seen:"), "the read object went:\n{listing}");
     assert!(listing.contains("other:"), "the object written through an offset went:\n{listing}");
 }
+
+#[test]
+fn a_function_called_once_is_inlined_after_the_small_functions_around_it() {
+    let checks: String = (0..30)
+        .map(|i| {
+            format!("if (s->at[{}] == state + {i}) s->count = wait(state * {});\n", i % 2, i + 1)
+        })
+        .collect();
+    let source = format!(
+        "extern int key;\n\
+        void begin(void *), end(void *, int);\n\
+        int wait(long);\n\
+        int pending(void);\n\
+        struct sem {{ int count; long at[2]; }};\n\
+        static inline int down_slow(struct sem *s, long state, long timeout) {{\n\
+            for (;;) {{\n\
+                if (pending()) return -4;\n\
+                if (timeout <= 0) return -62;\n\
+                timeout = wait(timeout);\n\
+                {checks}\
+                if (s->at[0] == state) return 0;\n\
+            }}\n\
+        }}\n\
+        static inline int down_common(struct sem *s, long state, long timeout) {{\n\
+            if (__builtin_expect(key, 0)) begin(s);\n\
+            int ret = down_slow(s, state, timeout);\n\
+            if (__builtin_expect(key, 0)) end(s, ret);\n\
+            return ret;\n\
+        }}\n\
+        __attribute__((noinline)) void down(struct sem *s) {{ down_common(s, 2, 1000); }}\n\
+        __attribute__((noinline)) int down_one(struct sem *s) {{ return down_common(s, 1, 1000); }}\n\
+        __attribute__((noinline)) int down_for(struct sem *s, long t) {{ return down_common(s, 2, t); }}\n"
+    );
+    let listing = asm("once-last", &source);
+    assert!(listing.contains("down_slow:"), "the large function went in:\n{listing}");
+    assert!(!listing.contains("down_common:"), "the small function stayed a call:\n{listing}");
+    assert_eq!(
+        listing.matches("call\tbegin").count(),
+        3,
+        "the tracepoint is not in each caller:\n{listing}"
+    );
+}
