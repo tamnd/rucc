@@ -4,6 +4,10 @@ All notable changes are recorded here. The format follows [Keep a Changelog](htt
 
 ## Unreleased
 
+### Fixed
+
+- `-fprofile-dir=` on a Windows host puts the `.gcda` name under the directory. The whole path is folded into one name with its backslashes turned to `#` and the drive's colon to `~`, as gcc does on a DOS file system, where only the forward slashes were folded before and the name stayed absolute, so the directory was dropped. `arc_counters` passes on Windows again, and its tests compare against the working directory the compiler sees rather than the `\\?\` path `canonicalize` gives.
+
 ## 0.18.12
 
 A patch release. A link with `-flto` now optimizes across files: each object keeps its module, and the link joins them and optimizes the result. `#pragma GCC target`, `optimize`, `push_options`, `pop_options` and `reset_options` are read, and the extension macros follow the target line. `popcount`, `clz` and `ctz` are one instruction each where the function is built for them, and the back end lowers bit reversal, float remainder and fused multiply add. Two gcc-torture programs that broke at -O1 and above are fixed: an attribute written beside the `*` of a return type now applies to the function, and scalar replacement leaves alone a function that uses `__builtin_setjmp`. Instruction selection is no longer quadratic in the size of a block.

@@ -13,7 +13,10 @@ fn dir(what: &str) -> PathBuf {
     let dir = std::env::temp_dir().join(format!("rucc-arcs-{}-{what}", std::process::id()));
     let _ = std::fs::remove_dir_all(&dir);
     std::fs::create_dir_all(&dir).expect("a temporary directory can be created");
-    dir.canonicalize().expect("the directory is there")
+    let dir = dir.canonicalize().expect("the directory is there");
+    // On Windows that is a verbatim path, `\\?\C:\...`, and the compiler's working directory is
+    // the same place without the prefix, which is the one it writes into what it makes.
+    PathBuf::from(dir.display().to_string().trim_start_matches(r"\\?\"))
 }
 
 /// Whether the compiler finished, and what it said.
@@ -109,15 +112,16 @@ fn the_record_names_the_counts_file_the_way_gcc_does() {
             "{flags:?}: the object does not name {want}"
         );
     };
-    let base = dir.display().to_string();
+    let full = dir.join("out/x.gcda").display().to_string();
     // Beside the object and absolute, so that the program writes it there from wherever it runs.
-    named(&[], "out/x.o", &format!("{base}/out/x.gcda"));
+    named(&[], "out/x.o", &full);
     // Under the directory, with the whole path folded into one name so that two objects called
-    // `x.o` in different places keep apart.
+    // `x.o` in different places keep apart. On Windows the drive's colon is folded as well.
+    let folded = full.replace(['/', '\\'], "#").replacen(':', "~", 1);
     named(
         &["-fprofile-dir=counts"],
         "out/x.o",
-        &format!("{base}/counts/{}", format!("{base}/out/x.gcda").replace('/', "#")),
+        &dir.join("counts").join(folded).display().to_string(),
     );
     let _ = std::fs::remove_dir_all(&dir);
 }
