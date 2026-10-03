@@ -4,6 +4,10 @@ All notable changes are recorded here. The format follows [Keep a Changelog](htt
 
 ## Unreleased
 
+### Added
+
+- `#pragma scalar_storage_order` is read, as in gcc 13 (#8). Every `struct` and `union` whose body closes after a `big-endian` line stores its scalars big-endian, as if it had the attribute, `little-endian` and `default` put the target's order back, and a record that writes the attribute keeps its own. gcc reads only the first word, so `big` is taken as well. A line with no word or another one gets gcc's `-Wpragmas` warning and is ignored (E0798). Before, the line was taken without a word and did nothing.
+
 ### Fixed
 
 - `-fprofile-dir=` on a Windows host puts the `.gcda` name under the directory. The whole path is folded into one name with its backslashes turned to `#` and the drive's colon to `~`, as gcc does on a DOS file system, where only the forward slashes were folded before and the name stayed absolute, so the directory was dropped. `arc_counters` passes on Windows again, and its tests compare against the working directory the compiler sees rather than the `\\?\` path `canonicalize` gives.
@@ -28,7 +32,6 @@ A patch release. A link with `-flto` now optimizes across files: each object kee
 
 ### Added
 
-- `#pragma scalar_storage_order` is read, as in gcc 13 (#8). Every `struct` and `union` whose body closes after a `big-endian` line stores its scalars big-endian, as if it had the attribute, `little-endian` and `default` put the target's order back, and a record that writes the attribute keeps its own. gcc reads only the first word, so `big` is taken as well. A line with no word or another one gets gcc's `-Wpragmas` warning and is ignored (E0798). Before, the line was taken without a word and did nothing.
 - `#pragma GCC target`, `optimize`, `push_options`, `pop_options` and `reset_options` are read, as in gcc 13 (#8). A function declared while a `target` or `optimize` line is in effect is built as if it had the attribute, the line's strings ahead of its own, so a function under `#pragma GCC target("crc32")` may call `_mm_crc32_u32` without a flag, and one declared under the line keeps it when it is defined after the `pop_options`. The lines add up, `push_options` saves what is in effect, `pop_options` puts it back and `reset_options` empties it. A line gcc cannot read gets its `-Wpragmas` warning in its words and is ignored (E0798), one with something after the strings is refused (E0813), and a name gcc does not know is refused once (E0720). Before, all five were taken without a word and did nothing.
 - The extension macros follow `#pragma GCC target`, as in gcc 13 (#8). `__SSE4_2__` and the rest of what a line turns on are defined from the line on, what it turns off is undefined, and `pop_options` and `reset_options` put back what was in effect before, so code under the line that asks `#ifdef __SSE4_2__` gets the answer the functions around it are built for. A line gcc does not read, or one naming an extension it does not know, moves nothing, and `_Pragma` moves them the same way. Only x86-64 has macros to move.
 - An object compiled with `-flto` keeps its module beside the machine code, in a `.rucc.lto` section the linker leaves out of what it writes, so the link can later optimize across files. The code is still all there, so `ar`, `nm` and a link that does not read the section get the object they would have got without the flag. A function's alignment is now part of the IR's text form so that it survives the trip. Only ELF objects keep the module for now, and builds with `-fsafety=` or arc counters do not keep it (#1995).
