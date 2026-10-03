@@ -15,6 +15,7 @@ All notable changes are recorded here. The format follows [Keep a Changelog](htt
 - `lifetimes::settle` keeps who reads each value and which blocks come before each block in one list each rather than one per value and block, and reuses what it walks with, which takes about 0.2% off an optimized build of jtckdint when it goes through the portable code rather than `<stdckdint.h>` (#2725).
 - The instruction scheduler keeps the lists and maps it builds each run's graph and order in from one run to the next, rather than making them again for every stretch between barriers, which takes about 0.3% off an optimized build of jtckdint when it goes through the portable code rather than `<stdckdint.h>` (#2714).
 - The x86-64 encoder looks an instruction's encoding up by the kinds of its arguments kept on the stack, rather than in a list made for every instruction it writes, which takes about 0.5% off a build of jtckdint at `-O0` and about 0.2% at `-O2` when it goes through the portable code rather than `<stdckdint.h>` (#2717).
+- The value ranges key each side of the relations recorded on dominating edges once per question, rather than working out whether it is a constant again for every fact it is compared with, which takes about 4% off an optimized build of jtckdint when it goes through the portable code rather than `<stdckdint.h>` (#2728).
 
 ### Added
 
