@@ -88,6 +88,7 @@ const ADVANCE_LOC1: u8 = 0x02;
 const ADVANCE_LOC2: u8 = 0x03;
 const ADVANCE_LOC4: u8 = 0x04;
 const OFFSET_EXTENDED: u8 = 0x05;
+const OFFSET_EXTENDED_SF: u8 = 0x11;
 const RESTORE_EXTENDED: u8 = 0x06;
 const REMEMBER_STATE: u8 = 0x0a;
 const RESTORE_STATE: u8 = 0x0b;
@@ -613,8 +614,10 @@ impl Table {
     /// A register that went to a slot, at a distance below the end of the frame.
     ///
     /// The distance is divided by the slot size before it is written, which is what the header's
-    /// data alignment is for and what makes most of these two bytes long. It comes out positive,
-    /// because the alignment is negative and every slot is below the end of the frame.
+    /// data alignment is for and what makes most of these two bytes long. It comes out positive
+    /// for a slot below the end of the frame, because the alignment is negative. A slot above it
+    /// is the one form with a signed distance, as gas writes it. Only a signal frame has one, where
+    /// the kernel's vdso says the registers are in the `sigcontext` the frame points into.
     fn saved(&mut self, reg: u16, offset: i32) {
         let factored = i64::from(offset) / self.slot;
         debug_assert_eq!(
@@ -622,7 +625,12 @@ impl Table {
             i64::from(offset),
             "a slot is a whole number of slots below the end of the frame"
         );
-        let factored = u64::try_from(factored).expect("a slot below the end of the frame");
+        let Ok(factored) = u64::try_from(factored) else {
+            self.out.bytes.push(OFFSET_EXTENDED_SF);
+            uleb(&mut self.out.bytes, u64::from(reg));
+            sleb(&mut self.out.bytes, factored);
+            return;
+        };
         if reg <= SHORT_REG {
             self.out.bytes.push(OFFSET | small(reg));
         } else {

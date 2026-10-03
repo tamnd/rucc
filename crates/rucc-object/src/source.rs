@@ -989,7 +989,11 @@ fn moved(
     }
     let near = matches!(
         reloc.kind,
-        Reference::Data | Reference::Away | Reference::AwayWide | Reference::Short
+        Reference::Data
+            | Reference::Away
+            | Reference::AwayWide
+            | Reference::Short
+            | Reference::Tiny
     );
     let fixed = match reloc.kind {
         Reference::Call

@@ -382,6 +382,9 @@ fn full(word: &str, args: &[String], mode: Mode) -> Result<Written, String> {
     if let Some(written) = segmented(word, &operands, mode)? {
         return Ok(written);
     }
+    if let Some(written) = absolute(word, &operands, mode) {
+        return written;
+    }
     implied(word, &operands)?;
     let predicated = predicated(word);
     let word = match &predicated {
@@ -589,6 +592,59 @@ fn segmented(word: &str, operands: &[Operand], mode: Mode) -> Result<Option<Writ
     let mnemonic = format!("{way} %{}", segment.name());
     encode_masked(&mnemonic, &[], Opmask::default(), &mut bytes).map_err(|why| why.to_string())?;
     Ok(Some(Written { bytes, holes: Vec::new() }))
+}
+
+/// A `movabs` between the accumulator and an address of all eight bytes, written, or nothing for
+/// any other line.
+///
+/// This is the one instruction on x86-64 that carries a whole address, `A0` to `A3` with eight
+/// bytes of it behind the opcode and no addressing byte. The encoder's rows for those opcodes are
+/// the i386 ones, which carry four, so this writes it whole. gcc writes it for a `__seg_gs`
+/// array indexed from a constant, `movabsq __per_cpu_offset-8, %rax` in the scheduler, and gas
+/// asks the linker for the full eight bytes of the address.
+fn absolute(word: &str, operands: &[Operand], mode: Mode) -> Option<Result<Written, String>> {
+    if mode != Mode::Bits64 {
+        return None;
+    }
+    let said = match word {
+        "movabs" => None,
+        "movabsb" => Some(Width::Byte),
+        "movabsw" => Some(Width::Word),
+        "movabsl" => Some(Width::Long),
+        "movabsq" => Some(Width::Quad),
+        _ => return None,
+    };
+    let (store, width, named) = match operands {
+        [Operand::Dest(named), Operand::Reg(reg, width)] if *reg == RAX => (false, *width, named),
+        [Operand::Reg(reg, width), Operand::Dest(named)] if *reg == RAX => (true, *width, named),
+        _ => return None,
+    };
+    if said.is_some_and(|said| said != width) {
+        return Some(Err(format!("'{word}' is not a move of the width of its register")));
+    }
+    let mut bytes = Vec::with_capacity(10);
+    match width {
+        Width::Word => bytes.push(0x66),
+        Width::Quad => bytes.push(0x48),
+        Width::Byte | Width::Long => {}
+    }
+    bytes.push(match (width, store) {
+        (Width::Byte, false) => 0xA0,
+        (_, false) => 0xA1,
+        (Width::Byte, true) => 0xA2,
+        (_, true) => 0xA3,
+    });
+    let at = bytes.len();
+    let mut holes = Vec::new();
+    match number(&named.name) {
+        Ok(value) => bytes.extend_from_slice(&value.wrapping_add(named.addend).to_le_bytes()),
+        Err(_) => {
+            bytes.extend_from_slice(&[0; 8]);
+            let name = named.name.clone();
+            holes.push(Hole { at, width: 8, name, addend: named.addend, sort: Sort::Value });
+        }
+    }
+    Some(Ok(Written { bytes, holes }))
 }
 
 /// A push or a pop of a segment register in thirty two bit mode, where all six are pushed and
@@ -1072,6 +1128,11 @@ fn aliased(word: &str, mode: Mode) -> Option<String> {
             return Some(format!("shl{rest}"));
         }
     }
+    // The old name for the instruction that is undefined on purpose, from before it had another
+    // one beside it. The kernel's vdso ends its i386 signal return with it.
+    if word == "ud2a" {
+        return Some("ud2".to_owned());
+    }
     // A push and a pop move eight bytes in long mode and there is no other width of either, so the
     // letter is not a thing a file has to write and mostly is not written. The letter cannot be
     // worked out from the operands the way every other one is, because an address says nothing
@@ -1282,8 +1343,15 @@ fn operand(text: &str, mode: Mode) -> Result<Operand, String> {
         return Ok(Operand::Dest(Named { name: text.to_owned(), addend: 0 }));
     }
     // Somewhere counted from a name, which is `.+6` as often as it is anything.
-    if let Ok((addend, Some(name))) = parted(text) {
-        return Ok(Operand::Dest(Named { name, addend }));
+    match parted(text) {
+        Ok((addend, Some(name))) => return Ok(Operand::Dest(Named { name, addend })),
+        // A number with a sign, which is an address as much as one without. The kernel reaches
+        // its fixed map that way, `movl %eax, -10497968`, which is the top of the address space
+        // seen from a sign extended thirty two bits.
+        Ok((value, None)) => {
+            return Ok(Operand::Dest(Named { name: value.to_string(), addend: 0 }));
+        }
+        Err(_) => {}
     }
     Err(format!("'{text}' is not an operand this compiler reads"))
 }
@@ -2480,6 +2548,27 @@ mod tests {
         let (word, rest) = line.split_once(char::is_whitespace).unwrap_or((line, ""));
         let args = crate::source::split(rest, ',');
         one(word, &args).unwrap_or_else(|why| panic!("{line}: {why}"))
+    }
+
+    /// Lines gcc 14 writes for the kernel that this used to refuse, with the bytes gas 2.42 writes
+    /// for them: a flagless shift of something in memory, an address below zero, and a `movabs`
+    /// with all eight bytes of an address in it.
+    #[test]
+    fn the_kernels_last_few_lines_are_what_gas_makes_of_them() {
+        assert_eq!(bytes("shlx %rbp, 48(%rsp), %rcx"), [0xc4, 0xe2, 0xd1, 0xf7, 0x4c, 0x24, 0x30]);
+        assert_eq!(bytes("shrx %r8d, (%rdx), %eax"), [0xc4, 0xe2, 0x3b, 0xf7, 0x02]);
+        assert_eq!(bytes("sarx %r9, (%r12), %r10"), [0xc4, 0x42, 0xb2, 0xf7, 0x14, 0x24]);
+        assert_eq!(bytes("movl %eax,-10497968"), [0x89, 0x04, 0x25, 0x50, 0xd0, 0x5f, 0xff]);
+        assert_eq!(bytes("movl -428, %edx"), [0x8b, 0x14, 0x25, 0x54, 0xfe, 0xff, 0xff]);
+        assert_eq!(bytes("movabs 0x1234, %eax"), [0xa1, 0x34, 0x12, 0, 0, 0, 0, 0, 0]);
+        assert_eq!(bytes("ud2a"), [0x0f, 0x0b]);
+        let load = written("movabsq __per_cpu_offset-8, %rax");
+        assert_eq!(load.bytes, [0x48, 0xa1, 0, 0, 0, 0, 0, 0, 0, 0]);
+        let [hole] = load.holes.as_slice() else { panic!("one hole") };
+        assert_eq!((hole.at, hole.width, hole.addend), (2, 8, -8));
+        assert_eq!(hole.name, "__per_cpu_offset");
+        assert_eq!(written("movabsq %rax, x").bytes[..2], [0x48, 0xa3]);
+        assert!(refused("movabsq 8, %eax").contains("width"));
     }
 
     #[test]
