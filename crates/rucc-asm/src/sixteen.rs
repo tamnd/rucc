@@ -78,6 +78,9 @@ fn sized(word: &str, args: &[String], gcc: bool) -> Result<Written, String> {
         ("pop", Some(Width::Word)) => "popw",
         ("push", None) if gcc => "pushl",
         ("pop", None) if gcc => "popl",
+        // Anything else is a word of the sixteen bit stack, and a number pushed is two bytes.
+        ("push", None) => "pushw",
+        ("pop", None) => "popw",
         _ => word,
     };
     let mut written = one_in(word, args, Mode::Bits32)?;
@@ -463,6 +466,15 @@ mod tests {
             ("ljmpw *(%esi)", "67ff2e"),
         ] {
             assert_eq!(hex(line, true), bytes, "{line}");
+        }
+    }
+
+    #[test]
+    fn a_name_pushed_is_a_word_as_gas_writes_it() {
+        for word in ["pushw", "push"] {
+            let written = one_in16(word, &["$later".to_owned()], false).unwrap();
+            assert_eq!(written.bytes, [0x68, 0, 0], "{word}");
+            assert_eq!((written.holes[0].at, written.holes[0].width), (1, 2), "{word}");
         }
     }
 

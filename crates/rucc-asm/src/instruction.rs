@@ -223,6 +223,10 @@ enum Operand {
 /// value is checked against the byte it has once it is known.
 const STANDING: i64 = 0x1000_0000;
 
+/// What the expression stands for when no row holds [`STANDING`], too big for a byte and small
+/// enough for a word.
+const WORD_STANDING: i64 = 0x1000;
+
 /// That instruction, as bytes.
 ///
 /// `word` is the mnemonic as the source spelled it and `args` are its operands in the order it
@@ -411,8 +415,16 @@ fn full(word: &str, args: &[String], mode: Mode) -> Result<Written, String> {
     let (mnemonic, row) = match spelled(word, &operands, &values, mode) {
         Ok(found) => found,
         Err(_) if operands.iter().any(|op| matches!(op, Operand::Expr(_))) => {
-            values = operands.iter().map(|op| value(op, 0)).collect();
-            spelled(word, &operands, &values, mode)?
+            // An instruction of sixteen bits has a row for two bytes, which is the widest a name
+            // may have there, and gas writes the name in those rather than in the byte row.
+            values = operands.iter().map(|op| value(op, WORD_STANDING)).collect();
+            match spelled(word, &operands, &values, mode) {
+                Ok(found) => found,
+                Err(_) => {
+                    values = operands.iter().map(|op| value(op, 0)).collect();
+                    spelled(word, &operands, &values, mode)?
+                }
+            }
         }
         Err(why) => return Err(why),
     };
@@ -2928,14 +2940,14 @@ mod tests {
             ("lldt (%rax)", &[0x0f, 0x00, 0x10]),
             ("sldt %ax", &[0x66, 0x0f, 0x00, 0xc0]),
             ("sldt %eax", &[0x0f, 0x00, 0xc0]),
-            ("sldt %rax", &[0x48, 0x0f, 0x00, 0xc0]),
+            ("sldt %rax", &[0x0f, 0x00, 0xc0]),
             ("sldt (%rax)", &[0x0f, 0x00, 0x00]),
             ("ltr %ax", &[0x0f, 0x00, 0xd8]),
             ("ltr %di", &[0x0f, 0x00, 0xdf]),
             ("ltr (%rax)", &[0x0f, 0x00, 0x18]),
             ("str %ax", &[0x66, 0x0f, 0x00, 0xc8]),
             ("str %eax", &[0x0f, 0x00, 0xc8]),
-            ("str %rax", &[0x48, 0x0f, 0x00, 0xc8]),
+            ("str %rax", &[0x0f, 0x00, 0xc8]),
             ("str (%rax)", &[0x0f, 0x00, 0x08]),
             ("verw (%rax)", &[0x0f, 0x00, 0x28]),
             ("verw %ax", &[0x0f, 0x00, 0xe8]),
