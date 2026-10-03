@@ -6,6 +6,8 @@
 //! than a load or a store, and a function this size is where the allocator has to choose between
 //! registers for them. A merge of one lane that lost the other three only showed up here.
 
+#![cfg(all(target_os = "linux", target_arch = "x86_64"))]
+
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
@@ -100,7 +102,6 @@ int main(void) {
 }
 ";
 
-#[cfg(all(target_os = "linux", target_arch = "x86_64"))]
 #[test]
 fn the_vector_salsa_core_agrees_with_the_scalar_one() {
     let dir = dir("run");
@@ -118,7 +119,6 @@ fn the_vector_salsa_core_agrees_with_the_scalar_one() {
 /// instruction's byte with no splat of it built beside it for nothing to read. The same holds
 /// under `-fno-strict-overflow`, which is how libsodium builds it, and which takes the promise off
 /// the `int` counter of the loop each intrinsic in the header is written as.
-#[cfg(all(target_os = "linux", target_arch = "x86_64"))]
 #[test]
 fn the_vector_salsa_core_stays_in_registers() {
     let dir = dir("asm");

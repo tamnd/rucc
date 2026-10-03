@@ -5113,7 +5113,7 @@ const JUMPED_32: usize = 3 * NOPS_32.len();
 
 /// [`nops`] for code of the given mode.
 ///
-/// In thirty two bit mode a run of [`JUMPED_32`] bytes or more starts with a jump to its end, two
+/// In thirty two bit mode a run of `JUMPED_32` bytes or more starts with a jump to its end, two
 /// bytes while the distance fits in one and five after that, and the rest is the same no-ops, as
 /// gas 2.42 writes it.
 pub fn nops_in(mode: Mode, count: usize, out: &mut Vec<u8>) {
