@@ -1410,8 +1410,12 @@ fn address(text: &str, mode: Mode) -> Result<Operand, String> {
 
     // The registers are in the last pair of brackets, and only when what is in them is registers:
     // `(0*16)(%rsp)` and `(K_table-8)(%rip)` have arithmetic in brackets in front of them, and
-    // `(4*8)` on its own is a displacement with no register at all.
+    // `(4*8)` on its own is a displacement with no register at all. So is an address with no
+    // brackets at its end, which is arithmetic that happens to start with some:
+    // `%fs:(gdt_page + (26 * 8)) + 4` is how the i386 kernel's `CHECK_AND_APPLY_ESPFIX` reads a
+    // byte of a descriptor.
     let (front, inside) = match rest.find('(') {
+        Some(_) if !rest.trim_end().ends_with(')') => (rest.trim(), None),
         Some(_) => {
             let Some(cut) = grouped(rest) else {
                 return Err(format!("'{text}' is not an address this compiler reads"));
@@ -1725,6 +1729,19 @@ mod tests {
         one(word, &args)
             .err()
             .unwrap_or_else(|| panic!("'{line}' was read and should not have been"))
+    }
+
+    /// A displacement that is arithmetic starting with a bracket, which is how
+    /// `CHECK_AND_APPLY_ESPFIX` in the i386 kernel's entry_32.S reads a byte of a descriptor, with
+    /// the bytes gas gives it.
+    #[test]
+    fn i386_reads_arithmetic_that_starts_with_a_bracket() {
+        let args = ["%fs:(gdt_page + (26 * 8)) + 4".to_owned(), "%al".to_owned()];
+        let written = one_in("movb", &args, Mode::Bits32).expect("read");
+        assert_eq!(written.bytes, [0x64, 0xa0, 0, 0, 0, 0]);
+        assert_eq!(written.holes.len(), 1);
+        assert_eq!(written.holes[0].name, "gdt_page");
+        assert_eq!((written.holes[0].at, written.holes[0].addend), (2, 212));
     }
 
     /// The six segment registers pushed and popped on i386, which `SAVE_ALL` and `RESTORE_REGS`
