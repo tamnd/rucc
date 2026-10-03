@@ -692,7 +692,14 @@ pub fn assign(func: &Func, order: &Order, live: &Live, env: &Env) -> Assignment 
 /// How much a register suits an interval.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum Want {
-    /// Nothing insists on it anywhere the range reaches, so taking it costs nobody anything.
+    /// No other value is handed it anywhere the range reaches, and nothing writes it where the
+    /// value is live, so taking it costs nobody anything.
+    ///
+    /// A register an instruction only destroys, which is what a call does to seven of them, is
+    /// clear for a value that is dead there. There is no value of the instruction's own to move
+    /// in, so a loop counter that is passed to a call on the way out may stay in a register the
+    /// call destroys. Counting the clobber over the whole range sent such a value to a callee
+    /// saved register, which is a push and a pop for nothing. tamnd/rucc#2202.
     Clear,
     /// Something insists on it somewhere the range reaches and nowhere the value is live, so taking
     /// it is allowed and may still cost: the instruction that insists wants the register for a
@@ -732,8 +739,9 @@ pub(crate) struct Blocks {
 
 impl Blocks {
     /// Whether an instruction insists on `at` where a value over `area` would be in its way: at any
-    /// point the value's range reaches when the register is wanted clear, and only at a point the
-    /// value is live at when it is merely wanted allowed. The value's own operands never count.
+    /// point the value's range reaches when the register is wanted clear and the instruction wants
+    /// it for a value of its own, and otherwise only at a point the value is live at. The value's
+    /// own operands never count.
     pub(crate) fn insists(
         &self,
         reg: Reg,
@@ -746,7 +754,7 @@ impl Blocks {
         self.over(class, at, range).any(|one| {
             one.by != Some(reg)
                 && one.reaches(self.width(reg))
-                && (want == Want::Clear || area.covers(one.point))
+                && ((want == Want::Clear && one.by.is_some()) || area.covers(one.point))
         })
     }
 
@@ -810,7 +818,7 @@ fn available(
     let insisted = blocked.over(interval.class, at, interval.range).any(|one| {
         one.by != Some(interval.reg)
             && one.reaches(width)
-            && (want == Want::Clear || interval.area.covers(one.point))
+            && ((want == Want::Clear && one.by.is_some()) || interval.area.covers(one.point))
     });
     !taken && !insisted
 }
@@ -1743,10 +1751,11 @@ mod tests {
 
         // Two registers between two values, and a clobber in the arm that takes the first of them.
         // The intervals around both values cover the clobber, since the arm is written between the
-        // two blocks they are live in, and the arm is a hole in both of their areas. So the second
-        // value has `rax` rather than a stack slot: the arm is a block its own path never goes
-        // through. tamnd/rucc#982.
-        assert_eq!(places(&func, &narrow(2)), ["rcx", "rax"]);
+        // two blocks they are live in, and the arm is a hole in both of their areas. So a value has
+        // `rax` rather than a stack slot: the arm is a block its own path never goes through.
+        // tamnd/rucc#982. It is the first value since tamnd/rucc#2202, because a clobber where a
+        // value is dead leaves the register clear for it.
+        assert_eq!(places(&func, &narrow(2)), ["rax", "rcx"]);
 
         let order = Order::of(&func);
         let live = Live::of(&func, &order);
@@ -1868,14 +1877,46 @@ mod tests {
         assert!(crate::check::check(&func, &order, &live, &assignment).is_empty());
     }
 
-    #[test]
-    fn a_register_a_clobber_takes_is_the_last_one_offered_rather_than_the_first() {
-        let func = arms(false);
+    /// The blocks of [`arms`] with no edge from the arm to the tail, where the arm wants `rax` for
+    /// a value of its own rather than destroying it.
+    fn handed_in_the_arm() -> Func {
+        let mut names = Interner::new();
+        let mut func = Func::new(names.intern("f"));
+        let opcode = Opcode::new(names.intern("x64.nop"));
+        let entry = func.create_block();
+        let arm = func.create_block();
+        let tail = func.create_block();
+        let first = func.new_vreg(GPR);
+        let second = func.new_vreg(GPR);
+        let own = func.new_vreg(GPR);
+        func.build(entry, opcode).def(first, GPR).finish();
+        func.build(entry, opcode).def(second, GPR).finish();
+        *func.succs_mut(entry) = vec![BlockCall::to(arm), BlockCall::to(tail)];
+        func.build(arm, opcode).def(own, GPR).finish();
+        func.build(arm, opcode)
+            .operand(Operand::read(own, GPR).with(Constraint::Fixed(RAX)))
+            .finish();
+        func.build(tail, opcode).uses(first, GPR).uses(second, GPR).finish();
+        func
+    }
 
+    #[test]
+    fn a_register_another_value_is_handed_is_the_last_one_offered_rather_than_the_first() {
         // With a register to spare the value takes the spare one. Being allowed a register some
         // instruction insists on is not the same as it being free: the instruction has to be handed
         // it in the end, and what hands it over is a move.
-        assert_eq!(places(&func, &narrow(3)), ["rcx", "rdx"]);
+        let func = handed_in_the_arm();
+        assert_eq!(places(&func, &narrow(3)), ["rcx", "rdx", "rax"]);
+    }
+
+    #[test]
+    fn a_register_a_clobber_takes_is_clear_to_a_value_dead_where_it_is_taken() {
+        let func = arms(false);
+
+        // A clobber hands the register to nobody, so there is nothing to move in and nothing to
+        // pay. The first value takes `rax` though the arm destroys it, since it is dead there, and
+        // neither value needs a register past the third. tamnd/rucc#2202.
+        assert_eq!(places(&func, &narrow(3)), ["rax", "rcx"]);
     }
 
     #[test]
