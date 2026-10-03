@@ -317,6 +317,8 @@ struct Active<'a> {
     /// The pieces of the values in each register, by class and then by register number, which is
     /// what [`available`] asks about.
     pieces: Vec<Vec<Pieces>>,
+    /// The list [`spill_one`] weighs the registers in, kept so a spill does not build a new one.
+    costs: Vec<(usize, PhysReg, usize, Point)>,
 }
 
 impl<'a> Active<'a> {
@@ -870,7 +872,8 @@ fn spill_one<'a>(
     // flight is the same shape as everything else here. The first number is when the earliest of
     // them was given the register, and sorting by it puts the registers in the order the values
     // were given them, which is what settles a tie.
-    let mut costs: Vec<(usize, PhysReg, usize, Point)> = Vec::new();
+    let mut costs = std::mem::take(&mut active.costs);
+    costs.clear();
     for (slot, values) in active.by.iter().enumerate() {
         // A register with a list of its pieces says which values touch the area, which is quicker
         // than asking each value in it when it holds many.
@@ -912,6 +915,7 @@ fn spill_one<'a>(
         })
         .min_by_key(|&&(_, _, count, reach)| (count, Reverse(reach)))
         .map(|&(_, at, _, _)| at);
+    active.costs = costs;
     match chosen {
         Some(at) => {
             active.evict(

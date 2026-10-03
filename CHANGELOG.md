@@ -27,6 +27,7 @@ All notable changes are recorded here. The format follows [Keep a Changelog](htt
 - A `long long` shifted by a constant on i386, or an `__int128` on x86-64, is the two halves moved by that much. Before, it went through the shift by a variable, which tests the count and picks an answer with a `cmov`, so `x >> 32` was eleven instructions where it is now the high half and none.
 - The simplifier makes the rule matcher's two lists once per run rather than for every table and plan it tries on every instruction, which takes about 3% off an optimized build of jtckdint when it goes through the portable code rather than `<stdckdint.h>` (#2649).
 - Lowering reads the arguments of each rule into a list it reuses and hands the operands to the builder without copying them into another, which takes about 1% off a build of jtckdint at `-O0` and about 0.5% at `-O2` when it goes through the portable code rather than `<stdckdint.h>` (#2658).
+- The backtracking register allocator reuses its list of what each register would cost to spill, and keeps the answers that reuse each value in one list rather than one per value, which takes about 0.5% off an optimized build of jtckdint when it goes through the portable code rather than `<stdckdint.h>` (#2703).
 
 ### Fixed
 
