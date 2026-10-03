@@ -482,6 +482,7 @@ pub fn write(
     // The places inside a function that have names of their own, which is where a label whose
     // address an image holds is. After the functions, because the section one goes in is the
     // section of the function it is inside and that is what the walk above worked out.
+    let mut places: Places = BTreeMap::new();
     for label in &text.labels {
         let after = text.funcs.partition_point(|func| func.start <= label.at);
         let Some(index) = after.checked_sub(1) else {
@@ -497,6 +498,15 @@ pub fn write(
         } else {
             (whole, label.at as u64)
         };
+        // On ELF a label is a place and not a symbol, which is what gas makes of a `.L` name: a
+        // reference to it is written against the section with the label's offset added, and the
+        // symbol table has no entry for it. An entry there is one a profiler reads as the start of
+        // a function, and `perf` put most of the time in Postgres's expression interpreter down to
+        // `.Llbl.8` and the labels next to it rather than to `ExecInterpExpr`.
+        if flavour == Flavour::Elf {
+            places.insert(label.name.clone(), (section, at));
+            continue;
+        }
         let id = obj.add_symbol(Symbol {
             name: label.name.clone().into_bytes(),
             value: at,
@@ -603,7 +613,7 @@ pub fn write(
     // less the other, and it is a number only when the section is the same one.
     for apart in &data.apart {
         let (Some(section), offset) = placed[apart.object] else { continue };
-        let value = distance(&obj, &symbols, apart)?;
+        let value = distance(&obj, &symbols, &places, apart)?;
         let bytes = usize::from(apart.bytes);
         let at = usize::try_from(offset).map_err(|why| Error::Refused { why: why.to_string() })?;
         let at = at + apart.at;
@@ -664,7 +674,7 @@ pub fn write(
     let wanted: Vec<&String> =
         relocs().map(|reloc| &reloc.symbol).chain(data.weak.iter()).collect();
     for name in wanted {
-        if symbols.contains_key(name) || tables.contains_key(name) {
+        if symbols.contains_key(name) || tables.contains_key(name) || places.contains_key(name) {
             continue;
         }
         let id = obj.add_symbol(Symbol {
@@ -723,7 +733,7 @@ pub fn write(
             relocate(&mut obj, section, Relocation { offset: at, symbol, addend, flags })?;
             continue;
         }
-        add(&mut obj, section, at, reloc, &symbols, flavour)?;
+        add(&mut obj, section, at, reloc, &symbols, &places, flavour)?;
     }
 
     // The unwind table, if there is one. Its own section rather than part of the text, because it
@@ -897,7 +907,7 @@ pub fn write(
     for (object, &(section, offset)) in data.objects.iter().zip(&placed) {
         let Some(section) = section else { continue };
         for reloc in &object.relocs {
-            add(&mut obj, section, offset + reloc.at as u64, reloc, &symbols, flavour)?;
+            add(&mut obj, section, offset + reloc.at as u64, reloc, &symbols, &places, flavour)?;
         }
     }
 
@@ -931,7 +941,12 @@ pub fn write(
     Ok(bytes)
 }
 
-/// How far one label is from another, from the symbols [`write()`] added for them.
+/// Where each label [`write()`] left out of the symbol table is, by its name: the section it is in
+/// and how far into it.
+type Places = BTreeMap<String, (object::write::SectionId, u64)>;
+
+/// How far one label is from another, from the symbols [`write()`] added for them or from where it
+/// put a label it gave no symbol.
 ///
 /// # Errors
 ///
@@ -940,18 +955,22 @@ pub fn write(
 fn distance(
     obj: &Writer<'_>,
     symbols: &BTreeMap<String, SymbolId>,
+    places: &Places,
     apart: &Apart,
 ) -> Result<i64, Error> {
-    let find = |name: &str| match symbols.get(name) {
-        Some(&id) => Ok(obj.symbol(id)),
-        None => Err(Error::Refused { why: format!("'{name}' is measured from and is not here") }),
+    let find = |name: &str| match (symbols.get(name), places.get(name)) {
+        (Some(&id), _) => Ok((obj.symbol(id).section, obj.symbol(id).value)),
+        (None, Some(&(section, at))) => Ok((SymbolSection::Section(section), at)),
+        (None, None) => {
+            Err(Error::Refused { why: format!("'{name}' is measured from and is not here") })
+        }
     };
     let (to, from) = (find(&apart.to)?, find(&apart.from)?);
-    if to.section != from.section {
+    if to.0 != from.0 {
         let why = format!("'{}' and '{}' are in different sections", apart.to, apart.from);
         return Err(Error::Refused { why });
     }
-    let value = (to.value as i64).wrapping_sub(from.value as i64).wrapping_add(apart.addend);
+    let value = (to.1 as i64).wrapping_sub(from.1 as i64).wrapping_add(apart.addend);
     let bits = u32::from(apart.bytes) * 8;
     if bits < 64 && (value >> (bits - 1)) != 0 && (value >> (bits - 1)) != -1 {
         let why = format!("'{}' is too far from '{}' for {} bytes", apart.to, apart.from, bits / 8);
@@ -1269,16 +1288,18 @@ fn add(
     at: u64,
     reloc: &Reloc,
     symbols: &BTreeMap<String, SymbolId>,
+    places: &Places,
     flavour: Flavour,
 ) -> Result<(), Error> {
     let flags = flavour
         .reloc(obj.architecture(), reloc.kind, reloc.after)
         .ok_or_else(|| Error::Refused { why: format!("no relocation is {:?}", reloc.kind) })?;
-    relocate(
-        obj,
-        section,
-        Relocation { offset: at, symbol: symbols[&reloc.symbol], addend: reloc.addend, flags },
-    )
+    // A label with no symbol of its own is reached through the section it is in.
+    let (symbol, addend) = match places.get(&reloc.symbol) {
+        Some(&(held, offset)) => (obj.section_symbol(held), reloc.addend + offset as i64),
+        None => (symbols[&reloc.symbol], reloc.addend),
+    };
+    relocate(obj, section, Relocation { offset: at, symbol, addend, flags })
 }
 
 /// Add one relocation, with its addend written into the bytes it covers on a machine whose
@@ -2146,6 +2167,37 @@ mod tests {
         assert_eq!(section.relocations().count(), 0);
         let image = section.data().expect("the image");
         assert_eq!(image[..8], [4, 0, 0, 0, 0xfc, 0xff, 0xff, 0xff]);
+    }
+
+    /// A label whose address an image holds, which is what a computed goto's table is. ELF gets
+    /// no symbol for it, as gas writes none for a `.L` name, and the image's relocation is against
+    /// the text with the label's offset added.
+    #[test]
+    fn a_label_an_image_holds_is_not_in_the_symbol_table() {
+        let (text, mut data) = measured();
+        data.apart.clear();
+        data.objects[0].relocs.push(Reloc {
+            at: 0,
+            symbol: ".L1".to_owned(),
+            kind: Reference::Address { bytes: 8 },
+            addend: 0,
+            after: 0,
+        });
+        let bytes = write(&text, &data, &[], &target(), Output::default(), &Info::default())
+            .expect("an object");
+        let file = object::File::parse(&bytes[..]).expect("a readable object");
+        let names: Vec<&str> = file.symbols().filter_map(|symbol| symbol.name().ok()).collect();
+        assert!(names.iter().all(|name| !name.starts_with(".L")), "{names:?}");
+        let section = file.section_by_name(".rodata").expect("a read only section");
+        let relocs: Vec<_> = section.relocations().collect();
+        assert_eq!(relocs.len(), 1);
+        let (_, reloc) = &relocs[0];
+        let object::RelocationTarget::Symbol(index) = reloc.target() else {
+            panic!("a relocation against a symbol, not {reloc:?}");
+        };
+        let symbol = file.symbol_by_index(index).expect("a symbol");
+        assert_eq!(symbol.kind(), SymbolKind::Section);
+        assert_eq!(reloc.addend(), 5);
     }
 
     #[test]
