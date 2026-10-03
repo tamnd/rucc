@@ -10663,6 +10663,21 @@ block0(%0: ptr, %1: i32):
     }
 
     #[test]
+    fn a_structure_returned_under_a_const_return_type_is_copied_out_of_the_call() {
+        // A call's value has the unqualified version of the return type, as C17 reads DR 423
+        // and as gcc does. Sema kept the `const`, so `*p = f(5)` converted the call to the plain
+        // structure on the way into the assignment, lowering had no object for that conversion
+        // and refused it with E0519. Csmith writes `static const struct S1 func_42(...)` often
+        // enough that one seed in two hundred stopped on it.
+        let text = ir(concat!(
+            "struct s { signed a : 23; signed b : 10; };\n",
+            "static const struct s f(int x) { struct s t = { x, x + 1 }; return t; }\n",
+            "void g(struct s *p) { *p = f(5); }\n",
+        ));
+        assert!(text.contains("call"), "{text}");
+    }
+
+    #[test]
     fn a_compound_literal_read_in_a_static_initializer_lays_its_bytes_into_the_image() {
         // C 6.7.11p4 says a compound literal at file scope has static storage duration, which
         // makes it a constant element, and tcc and c-testsuite both write one. Sema used to call
