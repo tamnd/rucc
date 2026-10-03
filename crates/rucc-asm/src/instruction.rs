@@ -239,6 +239,25 @@ pub(crate) fn one_in(word: &str, args: &[String], mode: Mode) -> Result<Written,
             return one_in(word, &[number.clone(), register.clone(), register.clone()], mode);
         }
     }
+    // The jump on a register being zero takes its width from the size of an address, so `jecxz`
+    // is the plain opcode in thirty two bit mode, where `jrcxz` is not an instruction, and the
+    // same opcode behind the address size prefix in sixty four. `hibernate_asm_32.S` copies pages
+    // with one. `jcxz` is the sixteen bit form, which is the prefix in thirty two bit mode.
+    match (word, mode) {
+        ("jecxz", Mode::Bits32) => return full("jrcxz", args, mode),
+        ("jecxz", Mode::Bits64) | ("jcxz", Mode::Bits32) => {
+            let mut written = full("jrcxz", args, mode)?;
+            written.bytes.insert(0, 0x67);
+            for hole in &mut written.holes {
+                hole.at += 1;
+            }
+            return Ok(written);
+        }
+        ("jrcxz", Mode::Bits32) => {
+            return Err("'jrcxz' is a sixty four bit instruction, and i386 has 'jecxz'".to_owned());
+        }
+        _ => {}
+    }
     if mode == Mode::Bits32 {
         // Thirty two bit registers are the only ones an i386 address is made of, so there is no
         // prefix to add, and a sixty four bit one is a register the machine does not have.
@@ -1901,6 +1920,22 @@ mod tests {
             assert_eq!(written.holes[0].width, 4, "{line}");
             assert_eq!(written.holes[0].at, written.bytes.len() - 4, "{line}");
         }
+    }
+
+    #[test]
+    fn jecxz_is_the_jump_on_ecx_in_either_mode() {
+        let there = ["there".to_owned()];
+        let written = one_in("jecxz", &there, Mode::Bits32).expect("read");
+        assert_eq!(written.bytes, vec![0xe3, 0x00]);
+        assert_eq!((written.holes[0].at, written.holes[0].width), (1, 1));
+        assert_eq!(written.holes[0].sort, Sort::Plain);
+        let written = one_in("jcxz", &there, Mode::Bits32).expect("read");
+        assert_eq!(written.bytes, vec![0x67, 0xe3, 0x00]);
+        assert_eq!((written.holes[0].at, written.holes[0].width), (2, 1));
+        let written = one_in("jecxz", &there, Mode::Bits64).expect("read");
+        assert_eq!(written.bytes, vec![0x67, 0xe3, 0x00]);
+        assert_eq!((written.holes[0].at, written.holes[0].width), (2, 1));
+        assert!(one_in("jrcxz", &there, Mode::Bits32).is_err());
     }
 
     #[test]
