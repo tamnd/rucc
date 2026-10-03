@@ -429,6 +429,9 @@ pub enum Undo {
     Zext(u32),
     /// The operand of a sign extension, at the narrower width.
     Sext(u32),
+    /// The left operand of an unsigned division by this constant, which a right shift by a
+    /// constant is too, as a division by that power of two.
+    UDiv(u128),
 }
 
 /// What the operand must have been for the operation to have produced this.
@@ -456,6 +459,21 @@ pub fn backward(undo: Undo, result: Range, other: Range) -> Range {
         // is the intersection coming back empty, and that is the analysis proving a path dead.
         Undo::Zext(from) => trunc(result.intersect(zext(Range::full(from), width)), from),
         Undo::Sext(from) => trunc(result.intersect(sext(Range::full(from), width)), from),
+        // Each quotient q came from anything in `[q * d, q * d + d - 1]`, so an interval of them
+        // came from the interval those ends make. A quotient bigger than any operand divided by
+        // `d` cannot happen, and dropping it first is what keeps the products in range.
+        Undo::UDiv(by) => {
+            if by == 0 {
+                return Range::full(width);
+            }
+            let fits = result.intersect(Range::between(0, mask(width) / by, width));
+            let pairs: Vec<(u128, u128)> = fits
+                .pairs()
+                .iter()
+                .map(|&(lo, hi)| (lo * by, (hi * by).saturating_add(by - 1).min(mask(width))))
+                .collect();
+            Range::from_pairs(&pairs, width)
+        }
     }
 }
 
@@ -1085,6 +1103,21 @@ mod tests {
         // Nothing a sign extension of a byte produces is in here, so the operand cannot exist.
         let impossible = Range::between(0x100, 0x1ff, 32);
         assert!(backward(Undo::Sext(8), impossible, Range::full(32)).is_empty());
+    }
+
+    #[test]
+    fn undoing_a_division_gives_every_operand_that_rounds_into_the_quotient() {
+        // `x / 4` in [2, 5] means x in [8, 23], and nothing more or less.
+        let result = Range::between(2, 5, 8);
+        let got = backward(Undo::UDiv(4), result, Range::full(8));
+        for x in 0..=255u128 {
+            assert_eq!(got.contains(x), (2..=5).contains(&(x / 4)), "{x}");
+        }
+        // A quotient no byte divided by 4 reaches says the operand cannot exist.
+        assert!(backward(Undo::UDiv(4), Range::between(64, 100, 8), Range::full(8)).is_empty());
+        // The last quotient takes the remainders up to the top and no further.
+        let top = backward(Undo::UDiv(3), Range::between(85, 85, 8), Range::full(8));
+        assert_eq!(top.unsigned_bounds(), Some((255, 255)));
     }
 
     /// Whether the comparison holds of these two values at the test width.

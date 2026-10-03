@@ -330,3 +330,34 @@ fn an_object_size_through_kmalloc_array_and_a_cleanup_variable_is_answered() {
     let listing = asm_with("kmalloc-array-cleanup", source, &["-ftrivial-auto-var-init=zero"]);
     assert!(!listing.contains("ud2"), "the test went:\n{listing}");
 }
+
+#[test]
+fn a_size_bounded_through_a_division_does_not_wrap_when_doubled() {
+    let source = "void warn(void);\n\
+        void *kz(unsigned long n);\n\
+        int f(unsigned target, unsigned long *out) {\n\
+            unsigned long sz = 128, len;\n\
+            for (;;) {\n\
+                len = (sz - 20) / 4;\n\
+                if (len > target) break;\n\
+                sz *= 2;\n\
+                if (__builtin_expect(sz < 128, 0)) { warn(); return -28; }\n\
+            }\n\
+            *out = len;\n\
+            return kz(sz) != 0;\n\
+        }\n";
+    let listing = asm("udiv-back", source);
+    assert!(!listing.contains("warn"), "the test went:\n{listing}");
+}
+
+#[test]
+fn a_size_a_division_does_not_bound_is_still_tested() {
+    let source = "void warn(void);\n\
+        int f(unsigned long sz, unsigned long target) {\n\
+            if ((sz - 20) / 4 > target) return 0;\n\
+            if (sz >= 128) if (sz + sz < 128) warn();\n\
+            return 1;\n\
+        }\n";
+    let listing = asm("udiv-open", source);
+    assert!(listing.contains("warn"), "the test went:\n{listing}");
+}

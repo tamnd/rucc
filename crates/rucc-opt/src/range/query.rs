@@ -930,6 +930,14 @@ impl<'a> Ranges<'a> {
             Opcode::Xor => vec![(left, Undo::Xor, right), (right?, Undo::Xor, Some(left))],
             Opcode::ZExt => vec![(left, Undo::Zext(self.func[left].ty.bits()), None)],
             Opcode::SExt => vec![(left, Undo::Sext(self.func[left].ty.bits()), None)],
+            // A length worked out as `(size - header) / 4` and tested against a limit bounds the
+            // size too, which is how gcc sees the doubling loop in `extend_netdev_table` never
+            // wraps and drops its `WARN_ON`.
+            Opcode::UDiv => vec![(left, Undo::UDiv(self.constant(right?)?), None)],
+            Opcode::LShr => match self.constant(right?)? {
+                by if by < u128::from(known.width()) => vec![(left, Undo::UDiv(1 << by), None)],
+                _ => return None,
+            },
             _ => return None,
         };
         for (operand, undo, other) in steps {
