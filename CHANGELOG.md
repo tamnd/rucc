@@ -32,6 +32,7 @@ All notable changes are recorded here. The format follows [Keep a Changelog](htt
 
 ### Fixed
 
+- An i386 address that takes up to four gigabytes off a name, such as the kernel's `__pa` of a static in doublefault_32.c, is written wrapped in its four bytes instead of being refused by the object writer.
 - An i386 inline asm that names `esi`, `edi`, `eax` and `ecx` and has a fifth operand on the stack, such as `strncat` in the kernel's string_32.c, no longer panics the register allocator. A register one of the inputs only passes through on its way to a fixed register is borrowed to read the fifth operand in.
 - The backtracking allocator no longer takes a register an instruction insists on as a hint when the class does not hand it out; an i386 `"S"` operand used to keep its value in `esi` from the start, where reloads wrote over it, and the EFI stub's `efi_stub_entry` lost `boot_params`.
 - A `switch` on i386 builds its bit test masks and jump table index in a 32 bit word, and position independent i386 code writes no jump table; the EFI stub's `memparse` and `vsnprintf` no longer stop on a `zext.i32.i64`.
