@@ -185,7 +185,7 @@ pub const TARGETS: &[TargetEntry] = &[
     },
     TargetEntry {
         tuple: "i686-linux-gnu",
-        tier: Tier::Recognized,
+        tier: Tier::InProgress,
         planned: Tier::SupportedWithEvidence,
         host: Host::No,
         note: "x87 long double is the type here rather than a corner case",

@@ -14,7 +14,7 @@ A tier here does not say whether the evidence behind it came from hardware or fr
 | `aarch64-linux-musl` | 4 | 1 | yes | the pair that proves the libc and the architecture are separate axes |
 | `riscv64-linux-gnu` | 4 | 1 | later | the middle end canary, with no condition codes and no complex addressing |
 | `riscv64-linux-musl` | 4 | 2 | no |  |
-| `i686-linux-gnu` | 4 | 2 | no | x87 long double is the type here rather than a corner case |
+| `i686-linux-gnu` | 3 | 2 | no | x87 long double is the type here rather than a corner case |
 | `armv7-linux-gnueabihf` | 4 | 2 | no | soft, softfp and hard is an ABI, so it is in the tuple |
 | `armv7-linux-musleabihf` | 4 | 2 | no |  |
 | `loongarch64-linux-gnu` | 4 | 2 | no | LP64D only, and r21 is reserved by the psABI and used by Linux as a percpu base |
