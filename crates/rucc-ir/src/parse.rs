@@ -496,6 +496,7 @@ impl<'a, 'n> Parser<'a, 'n> {
                         Err(why) => return self.fail(why),
                     }
                 }
+                "align" => func.align = Some(self.u32()?),
                 other => return self.fail(format!("a function has no `{other}`")),
             }
         }
@@ -2295,6 +2296,20 @@ global @b : bytes 8 = {{ apart.4 @.Llbl.0 from @.Llbl.1, apart.4 @.Llbl.2 + 1 fr
         assert_eq!(round_trip(&text), text);
         let wrong = format!("{HEADER}\nfunc @f(i32) -> i32, target \"sse9\";\n");
         assert!(error(&wrong).ends_with("`sse9` is not an extension"), "{}", error(&wrong));
+    }
+
+    #[test]
+    fn the_alignment_a_function_asked_for_comes_back_as_written() {
+        // What `__attribute__((aligned))` and `-falign-functions=` ask of a function, which a
+        // module read back out of an object for the link has to ask for again.
+        let text = format!(
+            "{HEADER}\nfunc @f(i32) -> i32, linkage(external), align 256 {{\n\
+             block0(%0: i32):\n    return %0\n}}\n"
+        );
+        assert_eq!(round_trip(&text), text);
+        let mut names = Interner::new();
+        let module = parse(&text, &mut names).unwrap();
+        assert_eq!(module.funcs().next().map(|id| module[id].align), Some(Some(256)));
     }
 
     #[test]

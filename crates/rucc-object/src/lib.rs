@@ -73,6 +73,7 @@
 
 #![doc(html_root_url = "https://docs.rs/rucc-object/0.18.11")]
 
+mod carry;
 mod coff;
 mod elf;
 mod file;
@@ -82,6 +83,7 @@ mod source;
 mod zlib;
 mod zstd;
 
+pub use crate::carry::{attach, carried};
 pub use crate::coff::decorate;
 pub use crate::file::{Error, defines, write};
 pub use crate::section::{

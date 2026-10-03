@@ -689,8 +689,9 @@ impl FromStr for Partition {
 /// work here: the IR goes into a section of the object, the driver finds those sections at link
 /// time, merges them into one module and generates code with everything visible.
 ///
-/// None of that exists, so the whole family is read, checked and recorded rather than acted on.
-/// That is a different answer from the one `-gsplit-dwarf` gets in the same specification, and the
+/// The first half of that exists: an object compiled with `-flto` keeps its module beside its
+/// code, in a section the linker leaves out. Nothing reads it at link time yet, so apart from that
+/// the family is read, checked and recorded rather than acted on. That is a different answer from the one `-gsplit-dwarf` gets in the same specification, and the
 /// difference is what ignoring each of them does. Ignoring `-gsplit-dwarf` means a file a build
 /// asked for never appears. Ignoring this means a program that is correct and slower than it could
 /// have been, which is what section 4.1 means by a hint about speed, and which is also what every

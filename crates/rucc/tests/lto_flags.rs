@@ -1,21 +1,15 @@
-//! What the `-flto` family does here, which is nothing, and why that is a different answer from
-//! the one `-gsplit-dwarf` gets two flags away in the same specification.
+//! What the `-flto` family does to an object here, which is to keep the module beside the code.
 //!
-//! Design: `spec/04-driver-and-cli.md` section 4.7, and `spec/09-optimizer.md` for the work it is
-//! waiting on.
+//! Design: `spec/04-driver-and-cli.md` section 4.7, and `spec/09-optimizer.md` section 9.8.
 //!
 //! Link time optimization is the optimizer run once over the whole program rather than once per
-//! file. There is none of it here yet, so the family is read, checked and recorded rather than
-//! acted on, and the case for taking it rather than refusing it rests on two facts that this file
-//! holds the compiler to.
-//!
-//! The first is that ignoring it costs speed and not correctness: a build that asks for it gets
-//! the program it would have got anyway, which is what section 4.1 means by a hint about speed.
-//! The second is about the object. gcc's `-flto` object holds the bytecode and no machine code at
-//! all, which is why it is only useful to a link that knows about it, and every object here holds
-//! the code, which is what `-ffat-lto-objects` asks gcc for. So a build that passes `-flto` to
-//! this compiler gets an object that is more usable than the one it asked for, not a different
-//! one, and the way to say that out loud is to assert it on the bytes.
+//! file, and what it needs from each file is the module rather than the code. gcc's `-flto` object
+//! holds only the module, which is why it is only useful to a link that knows about it. An object
+//! here holds the code as it always has, which is what `-ffat-lto-objects` asks gcc for, and the
+//! module in a section of its own beside it that the linker leaves out of what it writes. So a
+//! build that passes `-flto` and then runs `ar`, `nm` or a linker that knows nothing of this over
+//! the result gets what it would have got without the flag, and this file holds the compiler to
+//! that on the bytes.
 
 use std::path::{Path, PathBuf};
 use std::process::Command;
@@ -74,39 +68,84 @@ fn run(dir: &Path, flags: &[&str], source: &str, object: &str) -> (bool, String)
     (out.status.success(), String::from_utf8_lossy(&out.stderr).into_owned())
 }
 
+/// The spellings that ask for the work, which every one of the family does that names a number of
+/// jobs. The rest are about how the work is done and ask for none of it on their own.
+const ASKING: [&str; 5] = ["-flto", "-flto=auto", "-flto=jobserver", "-flto=1", "-flto=8"];
+
+/// Where the section headers are and how many there are, in a 64 bit ELF header. The two fields
+/// adding a section changes, since the new table goes on the end of the file.
+const TABLE: [std::ops::Range<usize>; 2] = [0x28..0x30, 0x3c..0x3e];
+
 #[test]
-fn every_spelling_that_is_taken_produces_the_object_no_spelling_produces() {
-    // The honest reading of taking a family that has nothing to act on, asserted on the bytes
-    // rather than on the options. The day the optimizer grows a link time half, this is the test
-    // that has to change, and it is written so that it fails rather than passes on that day.
+fn a_spelling_that_asks_keeps_the_module_beside_the_code_it_would_have_written() {
     let dir = fixture("same");
     let (ok, said) = run(&dir, &[], "callee.c", "plain.o");
     assert!(ok, "{said}");
     let plain = std::fs::read(dir.join("plain.o")).expect("the object was written");
-
-    // And it holds machine code, which is the whole difference from what gcc writes here. The
-    // shortest honest check is that the file is not nearly empty, since a slim object is headers
-    // and bytecode with an empty `.text`, and this one is a function with a multiply in it.
+    // It holds machine code, which is the whole difference from what gcc writes here. A slim
+    // object is headers and bytecode with an empty `.text`, and this one is a function with a
+    // multiply in it.
     assert!(plain.len() > 200, "the object holds a compiled function: {} bytes", plain.len());
+    assert_eq!(rucc_driver::lto::kept(&plain), None, "nothing is kept without the flag");
 
     for spelling in TAKEN {
         let (ok, said) = run(&dir, &[spelling], "callee.c", "asked.o");
         assert!(ok, "{spelling}: {said}");
         assert!(said.is_empty(), "{spelling} was taken without comment: {said}");
-        let asked = std::fs::read(dir.join("asked.o")).expect("the object was written");
-        assert_eq!(asked, plain, "{spelling} changed the object");
+        let mut asked = std::fs::read(dir.join("asked.o")).expect("the object was written");
+        if !ASKING.contains(&spelling) {
+            assert_eq!(asked, plain, "{spelling} changed the object");
+            continue;
+        }
+        let kept = rucc_driver::lto::kept(&asked).unwrap_or_else(|| panic!("{spelling} kept it"));
+        let kept = rucc_driver::lto::read(kept).unwrap_or_else(|why| panic!("{spelling}: {why}"));
+        assert_eq!(kept.version, rucc_driver::VERSION);
+        assert!(kept.module.contains("func @helper(i32) -> i32"), "{}", kept.module);
+        // Everything that was there is still there, in the same place. Only the header's word on
+        // where the section headers are and how many changed, since the section is added on the
+        // end with a longer copy of them after it.
+        assert!(asked.len() > plain.len(), "{spelling}");
+        asked.truncate(plain.len());
+        let mut plain = plain.clone();
+        for range in TABLE {
+            asked[range.clone()].fill(0);
+            plain[range].fill(0);
+        }
+        assert_eq!(asked, plain, "{spelling} changed what the object already held");
     }
-
-    // Both files, because the point of the flag is what happens between two of them and the
-    // answer has to be the same for the one that calls as for the one that is called.
-    let (ok, said) = run(&dir, &[], "caller.c", "callerplain.o");
-    assert!(ok, "{said}");
-    let plain = std::fs::read(dir.join("callerplain.o")).expect("the object was written");
-    let (ok, said) = run(&dir, &["-flto=auto"], "caller.c", "callerlto.o");
-    assert!(ok, "{said}");
-    let asked = std::fs::read(dir.join("callerlto.o")).expect("the object was written");
     let _ = std::fs::remove_dir_all(&dir);
-    assert_eq!(asked, plain, "the calling side is the same too");
+}
+
+#[cfg(all(target_os = "linux", target_arch = "x86_64"))]
+#[test]
+fn objects_that_keep_their_module_link_and_run_and_the_program_does_not_hold_it() {
+    let dir = fixture("linked");
+    std::fs::write(
+        dir.join("main.c"),
+        "extern int twice_over(int n);\nint main(void) { return twice_over(7) == 42 ? 0 : 1; }\n",
+    )
+    .expect("the fixture can be written");
+    for (source, object) in
+        [("main.c", "main.o"), ("caller.c", "caller.o"), ("callee.c", "callee.o")]
+    {
+        let (ok, said) = run(&dir, &["-flto"], source, object);
+        assert!(ok, "{source}: {said}");
+    }
+    let out = Command::new(env!("CARGO_BIN_EXE_rucc"))
+        .args([TARGET, "-O2", "-flto", "-o"])
+        .arg(dir.join("program"))
+        .args(["main.o", "caller.o", "callee.o"].map(|object| dir.join(object)))
+        .output()
+        .expect("the compiler is built before its own tests run");
+    assert!(out.status.success(), "{}", String::from_utf8_lossy(&out.stderr));
+    let status = Command::new(dir.join("program")).status().expect("the program runs");
+    assert!(status.success(), "{status}");
+    let program = std::fs::read(dir.join("program")).expect("the program was written");
+    let _ = std::fs::remove_dir_all(&dir);
+    assert!(
+        !program.windows(b"rucc-lto".len()).any(|bytes| bytes == b"rucc-lto"),
+        "the linker left the module out"
+    );
 }
 
 #[test]
