@@ -277,6 +277,10 @@ pub struct Ranges<'a> {
     /// An answer that leaned on a cycle took the whole type where the cycle closed, so it is
     /// sound wherever it is read again, only perhaps wider than another way round would give.
     scratch: Map<(Value, Option<Block>), Range>,
+    /// Set while a walk asks about a value an edge said was equal to the one it was asked about,
+    /// so the second walk does not follow the same edge back to the first. What is worked out
+    /// under it is not cached, because it is less than the walk would find on its own.
+    equating: bool,
     /// The loop tree, built the first time a header parameter is asked about.
     ///
     /// A function with no loop in it never builds one, which is most of the functions in a C
@@ -308,6 +312,7 @@ impl<'a> Ranges<'a> {
             cycles: 0,
             spent: 0,
             scratch: Map::default(),
+            equating: false,
             loops: None,
             given: None,
         }
@@ -772,6 +777,9 @@ impl<'a> Ranges<'a> {
         }
         let before = self.cycles;
         let range = self.walk(value, block);
+        if self.equating {
+            return range;
+        }
         if self.cycles == before {
             let entry = self.cache.entry(value).or_default();
             if entry.refined.len() < self.options.refinements {
@@ -793,6 +801,7 @@ impl<'a> Ranges<'a> {
         let stop = defining_block(self.func, value);
         let mut cursor = block;
         let (mut steps, mut passed) = (0, 0);
+        let mut equal = Vec::new();
         while steps < self.options.recompute_depth && passed < PASSED && Some(cursor) != stop {
             let Some(parent) = self.dom.immediate_dominator(cursor) else { break };
             // Only a branch can say anything, so a block that just jumps on is free. Without
@@ -814,6 +823,9 @@ impl<'a> Ranges<'a> {
                         if let Some(fact) = self.edge_fact(parent, cursor, value) {
                             range = range.intersect(fact);
                         }
+                        if !self.equating {
+                            equal.extend(self.equal_on_edge(parent, cursor, value));
+                        }
                     }
                 } else {
                     passed += 1;
@@ -821,7 +833,49 @@ impl<'a> Ranges<'a> {
             }
             cursor = parent;
         }
+        // An edge that said this value is equal to another says it wherever the edge dominates,
+        // so what is known about the other one down here is known about this one too. The fact
+        // the edge itself gave is the other's range up at the edge, and a test further down on
+        // the other one is what this adds. `__ieee80211_channel_switch` returns unless the two
+        // widths are equal, switches on one of them and then on the other.
+        for other in equal {
+            self.equating = true;
+            let found = self.refined(other, block);
+            self.equating = false;
+            if found.width() == range.width() {
+                range = range.intersect(found);
+            }
+        }
         range
+    }
+
+    /// The value an edge says this one is equal to, when the branch is on an `icmp eq` and the
+    /// edge is the one where it holds, or on an `icmp ne` and the edge is the other one.
+    fn equal_on_edge(&self, from: Block, to: Block, value: Value) -> Option<Value> {
+        let term = self.func.terminator(from)?;
+        if self.func[term].opcode != Opcode::BrIf {
+            return None;
+        }
+        let calls: Vec<_> = self.func.successors(term).collect();
+        let (then, other) = (calls.first()?, calls.get(1)?);
+        if then.block == other.block {
+            return None;
+        }
+        let cond = *self.func[self.func[term].args].first()?;
+        let Def::Result { inst, .. } = self.func[cond].def else { return None };
+        let data = self.func[inst];
+        let Extra::IntPred(pred) = data.extra else { return None };
+        let holds = match (data.opcode, pred) {
+            (Opcode::ICmp, IntPred::Eq) => then.block == to,
+            (Opcode::ICmp, IntPred::Ne) => then.block != to,
+            _ => return None,
+        };
+        let (&left, &right) = (self.func[data.args].first()?, self.func[data.args].get(1)?);
+        match (holds, left == value, right == value) {
+            (true, true, false) => Some(right),
+            (true, false, true) => Some(left),
+            _ => None,
+        }
     }
 
     /// Whether a condition could say anything about a value, which is whether the value is on
@@ -1739,6 +1793,27 @@ mod tests {
         let asked = Asked::new(func);
         let mut ranges = asked.ranges();
         assert_eq!(ranges.at(result, then).unsigned_bounds(), Some((0, 8190)));
+    }
+
+    #[test]
+    fn a_value_an_edge_said_was_equal_to_another_knows_what_is_found_out_about_it_later() {
+        // `if (a != b) return; if (a == 7) { ... }`, where the second test says nothing about `b`
+        // on its own but `b` is `a` everywhere below the first one.
+        let (mut func, args, blocks) = shape(2, 5);
+        let mut build = Builder::new(&mut func, blocks[0]);
+        let differ = build.icmp(IntPred::Ne, args[0], args[1]);
+        build.br_if(differ, blocks[1], &[], blocks[2], &[]);
+        Builder::new(&mut func, blocks[1]).ret(&[]);
+        let mut build = Builder::new(&mut func, blocks[2]);
+        let seven = build.iconst(I32, 7);
+        let test = build.icmp(IntPred::Eq, args[0], seven);
+        build.br_if(test, blocks[3], &[], blocks[4], &[]);
+        Builder::new(&mut func, blocks[3]).ret(&[]);
+        Builder::new(&mut func, blocks[4]).ret(&[]);
+        let asked = Asked::new(func);
+        let mut ranges = asked.ranges();
+        assert_eq!(bounds(ranges.at(args[1], blocks[3])), Some((7, 7)));
+        assert_eq!(bounds(ranges.at(args[1], blocks[1])), bounds(Range::of(I32)));
     }
 
     #[test]

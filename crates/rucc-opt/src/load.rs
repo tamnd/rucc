@@ -488,23 +488,25 @@ mod tests {
     #[test]
     fn a_store_the_oracle_cannot_place_takes_the_table_with_it() {
         let (mut names, mut func, entry) = blank();
-        let elsewhere = func.append_param(entry, Type::PTR);
+        let handed = func.append_param(entry, Type::PTR);
         let mut build = Builder::new(&mut func, entry);
         let slot = local(&mut build);
-        // Handed out, so the local is one somebody else's pointer could be naming.
+        // Handed out, so the local is one somebody else's pointer could be naming. The pointer
+        // read back after the call is one of those, since `g` may have put the address there.
         let signature = build.func().add_signature(Signature::new().with_params(&[Type::PTR]));
         build.call(names.intern("g"), signature, &[slot]);
+        let elsewhere = build.load(Type::PTR, handed, plain(8), Flags::NONE);
         let first = build.load(Type::int(64), slot, plain(8), Flags::NONE);
         build.store(first, elsewhere, plain(8), Flags::NONE);
         let second = build.load(Type::int(64), slot, plain(8), Flags::NONE);
         build.ret(&[first, second]);
 
-        // A pointer handed in is an address the walk cannot follow back to an object, and this
-        // local's address did leave the function, so the escape layer has nothing to say either.
-        // Nothing left says these are two objects, so the store may be to this one.
+        // A pointer read out of memory is an address the walk cannot follow back to an object,
+        // and this local's address did leave the function, so the escape layer has nothing to say
+        // either. Nothing left says these are two objects, so the store may be to this one.
         let stats = run(&mut func);
         assert!(!stats.changed());
-        assert_eq!(loads(&func), 2);
+        assert_eq!(loads(&func), 3);
     }
 
     #[test]

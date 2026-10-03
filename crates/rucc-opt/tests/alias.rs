@@ -200,11 +200,13 @@ impl Truth {
 impl Case {
     fn new(random: &mut Random) -> Self {
         // Parameters 0, 1 and 2 are `restrict` pointers to three objects the caller owns, which
-        // is the promise the analysis is allowed to believe. Parameter 3 is for the local that
-        // escaped, which is the case the escape layer must not disambiguate.
+        // is the promise the analysis is allowed to believe. Pointer 3 is for the local that
+        // escaped, which is the case the escape layer must not disambiguate. It is read back out
+        // of memory rather than passed in, because an argument was the caller's before the local
+        // existed and cannot be pointing at it.
         let points_at = [Object::Hidden(0), Object::Hidden(1), Object::Hidden(2), Object::Local(0)];
 
-        // The first local is the one whose address is handed out, because parameter 3 is for it.
+        // The first local is the one whose address is handed out, because pointer 3 is for it.
         // The rest are decided at random, so the run contains functions where an address left
         // for no reason and functions where none did.
         let mut escapes = [false; LOCALS];
@@ -302,19 +304,22 @@ impl Case {
             .collect();
 
         // The addresses that leave. Writing one out through a parameter is the plainest way for
-        // an address to become something the caller can reach, and it is what makes parameter 3
-        // able to be for the first local.
+        // an address to become something the caller can reach, and reading it back is what makes
+        // pointer 3 able to be for the first local.
         for (index, &local) in locals.iter().enumerate() {
             if self.escapes[index] {
                 build.store(local, incoming[0], mem_of(8, None, Restrict::NONE), Flags::NONE);
             }
         }
+        let mut pointers = incoming.clone();
+        pointers[3] =
+            build.load(Type::PTR, incoming[0], mem_of(8, None, Restrict::NONE), Flags::NONE);
 
         let mut out = Vec::with_capacity(self.accesses.len());
         for plan in &self.accesses {
             let object = self.object(plan);
             let pointer = match plan.base {
-                Base::Param(n) => incoming[n],
+                Base::Param(n) => pointers[n],
                 Base::Local(n) => locals[n],
             };
             let at = build.iconst(Type::int(64), i128::from(plan.offset));

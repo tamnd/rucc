@@ -706,6 +706,16 @@ impl<'a> Alias<'a> {
             return Answer::No(Reason::Escape);
         }
 
+        // Storage this call of the function made is not what one of its arguments points at,
+        // whether or not the address got out later, because the caller had the argument before
+        // the storage existed. `ieee80211_tdls_ch_sw_tmpl_get` fills a local array it hands on and
+        // reads the channel it was passed in between, and the read is the one it made before.
+        if self.fresh_against_argument(a.origin, b.origin)
+            || self.fresh_against_argument(b.origin, a.origin)
+        {
+            return Answer::No(Reason::Distinct);
+        }
+
         if a.restrict.disjoint(b.restrict) {
             return Answer::No(Reason::Restrict);
         }
@@ -733,6 +743,18 @@ impl<'a> Alias<'a> {
             Origin::Local(local) if !self.escapes().escaped(local) => Some(local),
             _ => None,
         }
+    }
+
+    /// Whether the first is a local and the second is an argument the function was called with.
+    ///
+    /// The entry block has no predecessors, so its parameters are the arguments and nothing else.
+    /// A recursive call can be handed a local of the call above it, but that is the storage of
+    /// another call and not this one's.
+    fn fresh_against_argument(&self, local: Origin, other: Origin) -> bool {
+        let (Origin::Local(_), Origin::Unknown(value)) = (local, other) else {
+            return false;
+        };
+        matches!(self.func[value].def, Def::Param { block, .. } if Some(block) == self.func.entry())
     }
 
     /// Whether one of this call's operands is the address of that local.
@@ -1259,16 +1281,16 @@ mod tests {
     }
 
     #[test]
-    fn a_local_whose_address_was_stored_somewhere_is() {
+    fn a_local_is_not_what_an_argument_points_at_even_once_it_has_escaped() {
         let mut names = Interner::new();
         let module = module(&mut names);
-        let mut f = func(&mut names, &[Type::PTR]);
-        let outside = param(&f, 0);
+        let mut f = func(&mut names, &[Type::PTR, Type::PTR]);
+        let (outside, sink) = (param(&f, 0), param(&f, 1));
         let mut build = builder(&mut f);
         let object = local(&mut build, 16);
-        // The address itself is written out through a pointer this function did not make, and
-        // from here anything can reach the object.
-        build.store(object, outside, plain(8), Flags::NONE);
+        // The address gets out, but the caller had both arguments before the local existed, so
+        // neither of them is pointing at it.
+        build.store(object, sink, plain(8), Flags::NONE);
         let read = build.load(Type::int(32), object, plain(4), Flags::NONE);
         build.store(read, outside, plain(4), Flags::NONE);
         build.ret(&[]);
@@ -1277,6 +1299,32 @@ mod tests {
         let mut alias = Alias::new(&f, &outside);
         assert_eq!(alias.escapes().count(), 1);
         let read = first(&f, Opcode::Load);
+        let write = last(&f, Opcode::Store);
+        let a = alias.reads(read).unwrap();
+        let b = alias.writes(write).unwrap();
+        assert_eq!(alias.query(&a, &b), Answer::No(Reason::Distinct));
+    }
+
+    #[test]
+    fn a_local_whose_address_was_stored_somewhere_is() {
+        let mut names = Interner::new();
+        let module = module(&mut names);
+        let mut f = func(&mut names, &[Type::PTR]);
+        let outside = param(&f, 0);
+        let mut build = builder(&mut f);
+        let object = local(&mut build, 16);
+        // The address itself is written out through a pointer this function did not make, and
+        // from here anything can reach the object, a pointer read back out of memory included.
+        build.store(object, outside, plain(8), Flags::NONE);
+        let back = build.load(Type::PTR, outside, plain(8), Flags::NONE);
+        let read = build.load(Type::int(32), object, plain(4), Flags::NONE);
+        build.store(read, back, plain(4), Flags::NONE);
+        build.ret(&[]);
+
+        let outside = Outside::of(&module);
+        let mut alias = Alias::new(&f, &outside);
+        assert_eq!(alias.escapes().count(), 1);
+        let read = last(&f, Opcode::Load);
         let write = last(&f, Opcode::Store);
         let a = alias.reads(read).unwrap();
         let b = alias.writes(write).unwrap();
