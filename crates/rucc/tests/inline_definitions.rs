@@ -220,3 +220,39 @@ int main(void) {
         }
     }
 }
+
+#[test]
+fn noinline_written_beside_the_star_keeps_the_call() {
+    // `void *NOINLINE test4a(char *)` in gcc's `20010122-1.c`, where the attribute sits after the
+    // `*` of the return type. gcc gives an attribute only a declaration can carry to the
+    // declaration wherever it was written, so the call stays a call, and the test depends on it:
+    // `__builtin_return_address (1)` inside a body that was inlined answers for the wrong frame.
+    let source = "\
+void *__attribute__((noinline)) leaf(void) {
+    return __builtin_return_address(0);
+}
+
+void *__attribute__((noinline)) declared(void);
+
+void *call(void) {
+    return leaf();
+}
+
+void *other(void) {
+    return declared();
+}
+
+void *declared(void) {
+    return __builtin_return_address(0);
+}
+";
+    for level in ["-O1", "-O2", "-O3"] {
+        let text = asm("starred-noinline", level, source);
+        let body = text.split("\ncall:\n").nth(1).expect("call is defined");
+        let body = body.split(".size\tcall,").next().unwrap_or(body);
+        assert!(body.contains("leaf"), "{level}: the call to leaf stays:\n{text}");
+        let body = text.split("\nother:\n").nth(1).expect("other is defined");
+        let body = body.split(".size\tother,").next().unwrap_or(body);
+        assert!(body.contains("declared"), "{level}: the call to declared stays:\n{text}");
+    }
+}
