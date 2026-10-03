@@ -4,6 +4,10 @@ All notable changes are recorded here. The format follows [Keep a Changelog](htt
 
 ## Unreleased
 
+### Fixed
+
+- On i686 Windows a structure holding a `double`, which is eight byte aligned there, is passed at the next four bytes of the argument area, as gcc, clang and MSVC pass it. rucc put it at the next eight, so a call such as `g(1, y)` left four bytes of padding that a `va_arg` of the structure read as its first field. c-testsuite 00204 printed garbage for its HFA double lines under Wine because of it.
+
 ## 0.18.11
 
 A patch release. The inliner now works more like gcc's on the kernel: it takes a function no larger than its call first, takes a static function called once only after the small ones around it, and leaves the locals scalar replacement will remove out of the `-fconserve-stack` frame estimate. The stack canary is decided per local after optimization, so a local that became registers no longer costs one. Scalar replacement works in a function with an `asm goto`, a static that is only stored to is dropped, `-fipa-vrp` ranges reach parameters of static functions, `#pragma redefine_extname` and `#pragma weak` are implemented, and dead store elimination ends a local's life where its scope ends. i686 Windows gets thread-locals, stack probes and `_setjmp3`, and the i386 assembler takes `lss`, `lfs`, `lgs`, `jecxz` and the padding gas writes there.

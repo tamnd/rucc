@@ -931,11 +931,18 @@ impl<'a> Places<'a> {
     /// Where the next value is, when it travels in memory whatever is left.
     ///
     /// Every argument area is a run of whole words, so a value narrower than one still takes one
-    /// and a value that is not a whole number of them is rounded up. An alignment wider than a
-    /// word is respected, which is what a sixteen byte aligned structure passed by value needs.
+    /// and a value that is not a whole number of them is rounded up. An alignment of sixteen or
+    /// more is respected, which is what a sixteen byte aligned structure passed by value needs.
+    ///
+    /// An alignment of eight is not, and that only matters on i386, the one target whose word is
+    /// four bytes. A structure holding a `double` is eight byte aligned on Windows, and gcc,
+    /// clang and MSVC all still put it at the next word, so `f(int, struct { double a, b; })`
+    /// has the structure at four bytes into the argument area and not eight. Doing otherwise left
+    /// four bytes of padding the callee's `va_arg` never skipped.
     pub fn on_stack(&mut self, size: u32, align: u32) -> Where {
         let word = self.regs.word;
-        let at = self.stack.next_multiple_of(align.max(word));
+        let align = if align < 16 { word } else { align };
+        let at = self.stack.next_multiple_of(align);
         self.stack = at.saturating_add(size.max(word).next_multiple_of(word));
         Where::Stack(at)
     }

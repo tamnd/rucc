@@ -397,6 +397,29 @@ fn stdcall_and_fastcall_pop_their_arguments_and_say_so_in_the_name() {
     }
 }
 
+/// A structure holding a `double` is eight byte aligned on 32-bit Windows, and it still goes at the
+/// next word of the argument area, as i686-w64-mingw32-gcc has it: `g(1, y)` has `1` at `(%esp)`
+/// and the first word of `y` at `4(%esp)`, with no padding between them. Padding there is what
+/// a `va_arg` of the structure, which steps a word at a time, read as the structure.
+#[test]
+fn an_eight_byte_aligned_structure_goes_at_the_next_word_on_32_bit_windows() {
+    let text = asm(
+        "i686-aligned-struct",
+        WINDOWS_32,
+        "struct h { double a, b; };\n\
+         _Static_assert(_Alignof(struct h) == 8, \"aligned as on Windows\");\n\
+         double g(int n, ...);\n\
+         double c(struct h y) { return g(1, y); }\n",
+    );
+    let c = body(&text, "_c");
+    let at = c.iter().position(|line| line.starts_with("call") && line.contains("_g"));
+    let before = &c[..at.unwrap_or_else(|| panic!("no call to _g: {c:?}"))];
+    for slot in [", 4(%esp)", ", 8(%esp)", ", 12(%esp)", ", 16(%esp)"] {
+        assert!(has(before, &["movl", slot]), "{slot}: {c:?}\n{text}");
+    }
+    assert!(!has(before, &[", 20(%esp)"]), "{c:?}\n{text}");
+}
+
 /// Two of the three on one function is gcc's error, and on 32-bit Linux they are not this
 /// compiler's conventions and are left as they are.
 #[test]
