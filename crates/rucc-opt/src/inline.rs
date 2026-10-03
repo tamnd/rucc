@@ -2144,6 +2144,7 @@ fn targets(
 /// points at call `dax_get_private`, which nothing defines. Only an object marked droppable goes,
 /// and it becomes a declaration rather than leaving the module, as a function does.
 pub fn drop_unreferenced(module: &mut Module) {
+    write_only(module);
     loop {
         let (calls, elsewhere) = references(module);
         let unread: Vec<GlobalId> = module
@@ -2175,6 +2176,130 @@ pub fn drop_unreferenced(module: &mut Module) {
         }
         for id in gone {
             module[id] = declaration(&module[id]);
+        }
+    }
+}
+
+/// Takes out every store to a `static` object that nothing reads, so [`drop_unreferenced`] can
+/// take the object as well.
+///
+/// gcc does this for an object whose address only ever reaches plain stores, and the kernel leans
+/// on it for the caches `runtime_const_ptr` reads. fs/file_table.c keeps `__filp_cache` in
+/// `.data..ro_after_init`, stores the cache into it once, reads it back only to patch the code
+/// that uses it, and from then on every reader takes the address the patch wrote into the code.
+/// Once the store reaches that one read nothing reads the object, gcc's object has no
+/// `.data..ro_after_init` at all, and rucc's had the section with the object in it.
+///
+/// Only an object marked droppable is asked about, and only when every use of its address is the
+/// address of a store, directly or through a `ptr_add` for a field. A volatile or atomic store
+/// keeps it, and so does the address going anywhere else: into a load, a call, an `asm`, another
+/// object's initializer or a block argument.
+fn write_only(module: &mut Module) {
+    let mut candidates: Set<Symbol> = module
+        .globals()
+        .map(|id| &module[id])
+        .filter(|global| global.droppable && !global.is_declaration())
+        .map(|global| global.name)
+        .collect();
+    if candidates.is_empty() {
+        return;
+    }
+    // Named by another object's initializer or by an alias, which is an address that goes
+    // somewhere this cannot follow.
+    for id in module.globals() {
+        let init = module[id].init.map(|list| &module[list]).unwrap_or_default();
+        for datum in init {
+            if let Datum::Addr(reloc) | Datum::Away(reloc) | Datum::Apart { to: reloc, .. } = *datum
+            {
+                candidates.remove(&module[reloc].symbol);
+            }
+        }
+    }
+    for id in module.aliases() {
+        candidates.remove(&module[id].target);
+    }
+    // Which values in each function are an address in a candidate, and of which one.
+    let mut derived: Vec<Map<Value, Symbol>> = Vec::new();
+    for id in module.funcs() {
+        let func = &module[id];
+        let mut found: Map<Value, Symbol> = Map::default();
+        loop {
+            let before = found.len();
+            for inst in func.blocks().flat_map(|block| func.insts(block)) {
+                let data = &func[inst];
+                let from = match (data.opcode, data.extra) {
+                    (Opcode::GlobalAddr, Extra::Symbol(name)) if candidates.contains(&name) => {
+                        Some(name)
+                    }
+                    (Opcode::PtrAdd, _) => {
+                        func[data.args].first().and_then(|base| found.get(base).copied())
+                    }
+                    _ => None,
+                };
+                if let (Some(name), Some(result)) = (from, data.results().next()) {
+                    found.insert(result, name);
+                }
+            }
+            if found.len() == before {
+                break;
+            }
+        }
+        derived.push(found);
+    }
+    // Any use that is not the address of a plain store, or the base of a `ptr_add`, is a read.
+    for (id, found) in module.funcs().zip(&derived) {
+        let func = &module[id];
+        for inst in func.blocks().flat_map(|block| func.insts(block)) {
+            let data = &func[inst];
+            if let Extra::Symbol(name) = data.extra
+                && data.opcode != Opcode::GlobalAddr
+            {
+                candidates.remove(&name);
+            }
+            if let Extra::Call(info) = data.extra
+                && let Some(callee) = func[info].callee
+            {
+                candidates.remove(&callee);
+            }
+            let plain = data.opcode == Opcode::Store
+                && !data.flags.intersects(Flags::KEEP)
+                && matches!(data.extra, Extra::Mem(mem) if func[mem].order == MemOrder::NotAtomic);
+            for (at, value) in func[data.args].iter().enumerate() {
+                let Some(name) = found.get(value) else { continue };
+                let fine = (plain && at == 1) || (data.opcode == Opcode::PtrAdd && at == 0);
+                if !fine {
+                    candidates.remove(name);
+                }
+            }
+            for call in func.successors(inst) {
+                for value in &func[call.args] {
+                    if let Some(name) = found.get(value) {
+                        candidates.remove(name);
+                    }
+                }
+            }
+        }
+    }
+    if candidates.is_empty() {
+        return;
+    }
+    let ids: Vec<FuncId> = module.funcs().collect();
+    for (id, found) in ids.into_iter().zip(derived) {
+        let func = &mut module[id];
+        let mut gone = Vec::new();
+        for inst in func.blocks().flat_map(|block| func.insts(block)) {
+            let data = &func[inst];
+            // The stores into the object, and the addresses that only those stores read.
+            let into = match data.opcode {
+                Opcode::Store => func[data.args].get(1).and_then(|value| found.get(value)),
+                _ => data.results().next().and_then(|result| found.get(&result)),
+            };
+            if into.is_some_and(|name| candidates.contains(name)) {
+                gone.push(inst);
+            }
+        }
+        for inst in gone {
+            func.remove_inst(inst);
         }
     }
 }
