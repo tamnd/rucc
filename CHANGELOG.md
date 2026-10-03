@@ -4,6 +4,10 @@ All notable changes are recorded here. The format follows [Keep a Changelog](htt
 
 ## Unreleased
 
+## 0.19.0
+
+The W6 release, for 32-bit Windows. i686-windows-gnu is tier 3: the c-testsuite single-exec programs build and run at `-O0` and `-O2`, all 440 runs, natively on a `windows-2025` runner through WoW64 and under Wine 11 on Linux. On x86-64 Windows a function no longer ends in a call to a function that does not return, which ended a `longjmp` through that frame, and `-fprofile-dir=` works on a Windows host. The test matrix now passes on Windows again and runs every test binary even after one fails. Outside Windows, the assembler writes the line table from `.file` and `.loc`, a loop that counts bits becomes one `ctpop`, `ctlz` or `cttz`, `#pragma scalar_storage_order` and seventeen more gcc attributes are read, and the range oracle answers more of the questions the kernel's `-Werror` builds ask.
+
 ### Added
 
 - Seventeen more gcc attributes are taken, and `__has_attribute` answers yes for them as gcc 13 does (#8). They are glibc's `nothrow`, `leaf`, `artificial` and `alloc_align`, `noplt` and `no_icf`, the older sanitizer names (`no_sanitize_address`, `no_address_safety_analysis`, `no_sanitize_thread`, `no_sanitize_undefined`) and `no_sanitize_coverage`, `no_split_stack` and `no_stack_limit`, and the analyzer's `tainted_args`, `fd_arg`, `fd_arg_read` and `fd_arg_write`. Each is a promise gcc may optimize on, a request about a transformation this compiler never makes, or a word to a tool it does not have, so taking it without a word is what it asks for. Before, they were taken just as quietly but `__has_attribute` answered no, so a header that asks before writing one took its fallback.
