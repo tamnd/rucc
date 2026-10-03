@@ -30,7 +30,7 @@ use rucc_ir as ir;
 use rucc_mir as mir;
 use rucc_regalloc::assign::Env;
 use rucc_target::{
-    BitInsts, BranchInsts, CallRegs, CodeModel, FlagInsts, FrameInsts, MachineInsts, PhysReg,
+    BitInsts, BranchInsts, CallRegs, CodeModel, FlagInsts, FrameInsts, Isa, MachineInsts, PhysReg,
     RegFile, ShortInsts, Speculation, TargetInfo, TimingInsts, aarch64, x86, x86_64,
 };
 use rucc_tuple::Arch;
@@ -413,6 +413,10 @@ pub struct Flags {
     /// Whether the machine has a conditional move. Off only for an i386 `-march=` that names a
     /// processor before the Pentium Pro, where a select is a branch. See [`crate::forks`].
     pub cmov: bool,
+    /// The extensions a function with no `target` attribute is built for, which `-march=` and the
+    /// `-m` flags say. What reads it is the lowering of the bit counts, which leaves a count for
+    /// the selector where the processor has the instruction for it. See [`crate::expand::counts`].
+    pub isa: Isa,
     /// Whether every function calls a profiler on the way in, which `-pg` asks for.
     pub profile: Profile,
     /// What else is done with that call: listed in `__mcount_loc` for `-mrecord-mcount`, and
@@ -512,6 +516,7 @@ impl Default for Flags {
             speculation: Speculation::default(),
             jump_tables: true,
             cmov: true,
+            isa: Isa::NONE,
             profile: Profile::No,
             mcount: Mcount::default(),
             patch: Room::default(),
@@ -658,7 +663,18 @@ pub fn compile_recording(
     // for are both in `crate::lowering`, which is where a new lowering is added.
     let counting = recording.lowerings.wanted();
     let switching = (flags.goal, flags.switch, flags.jump_tables, flags.cmov);
-    let ran = lowering::group(source, names, machine.conv, switching, counting);
+    // The bit counts the selector is left to answer, which are the ones it has a rule for and the
+    // processor the function is built for has the extension of. A `target` attribute on the
+    // function says what it is built for in place of the command line.
+    let isa = source.target.unwrap_or(flags.isa);
+    let counts: Vec<crate::expand::Count> = machine
+        .selector
+        .counts
+        .iter()
+        .copied()
+        .filter(|count| rucc_target::Feature::named(count.feature).is_some_and(|it| isa.has(it)))
+        .collect();
+    let ran = lowering::group(source, names, machine.conv, switching, &counts, counting);
     if !ran.switches.is_empty() {
         let called = names.resolve(source.name).to_owned();
         recording.lowerings.switched(&called, &ran.switches);
@@ -1889,6 +1905,44 @@ mod tests {
         assert!(text.contains("x64.addss_rr"), "{text}");
         assert!(text.contains("$xmm0"), "{text}");
         assert!(!text.contains("$rax"), "{text}");
+    }
+
+    /// `__builtin_popcount`, `__builtin_clz` and `__builtin_ctz` are one instruction each where the
+    /// processor has it, at both widths, whether the command line or the function's own `target`
+    /// attribute said so, and are never that instruction where it does not.
+    #[test]
+    fn a_bit_count_is_one_instruction_where_the_processor_has_it() {
+        let built = |opcode: Opcode, width: u32, isa: Isa, target: Option<Isa>| {
+            let ty = Type::int(width);
+            let (mut names, mut source, block, args) = blank(&[ty]);
+            source.target = target;
+            let mut build = Builder::new(&mut source, block);
+            let counted = build.unary(opcode, args[0], ty);
+            build.ret(&[counted]);
+            let machine = Machine::x86_64(&SYSV);
+            let flags = Flags { isa, ..Flags::default() };
+            let out = compile(&mut source, &mut names, &machine, &Elsewhere::default(), flags)
+                .expect("a count is an instruction or arithmetic");
+            mir::print_func(&out, &names, &REGS)
+        };
+        for (opcode, feature, inst) in [
+            (Opcode::Ctpop, "popcnt", "x64.popcnt"),
+            (Opcode::Ctlz, "lzcnt", "x64.lzcnt"),
+            (Opcode::Cttz, "bmi", "x64.tzcnt"),
+        ] {
+            let has = Isa::of(&[feature]);
+            for width in [32, 64] {
+                let wanted = format!("{inst}_{width}");
+                let text = built(opcode, width, has, None);
+                assert!(text.contains(&wanted), "{wanted} from the command line: {text}");
+                let text = built(opcode, width, Isa::NONE, Some(has));
+                assert!(text.contains(&wanted), "{wanted} from the attribute: {text}");
+                let text = built(opcode, width, Isa::NONE, None);
+                assert!(!text.contains(inst), "no {inst} on a plain x86-64: {text}");
+                let text = built(opcode, width, has, Some(Isa::NONE));
+                assert!(!text.contains(inst), "nor in a function built for less: {text}");
+            }
+        }
     }
 
     /// A float moved between a register and memory, which is the instruction that decides which

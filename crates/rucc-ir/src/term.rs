@@ -967,6 +967,22 @@ fn binary_head(opcode: Opcode, ty: Type, address: u32) -> Option<&'static str> {
         let names = [None, Some("bswap.i16"), Some("bswap.i32"), Some("bswap.i64")];
         return names[slot(ty, address)?];
     }
+    // A bit count is named at the two widths a register is, which are the widths a machine has an
+    // instruction for. A narrower one is never selected: `rucc_codegen::expand::counts` writes it
+    // out as arithmetic first on every machine, along with any count the machine it is built for
+    // has no instruction for.
+    if matches!(opcode, Opcode::Ctlz | Opcode::Cttz | Opcode::Ctpop) {
+        let names: &[&'static str; 2] = match opcode {
+            Opcode::Ctlz => &["ctlz.i32", "ctlz.i64"],
+            Opcode::Cttz => &["cttz.i32", "cttz.i64"],
+            _ => &["ctpop.i32", "ctpop.i64"],
+        };
+        return match slot(ty, address) {
+            Some(2) => Some(names[0]),
+            Some(3) => Some(names[1]),
+            _ => None,
+        };
+    }
     // A high multiply is only ever the width of a register, which is where a division by a
     // constant asks for one, so it has a name for each width a register is rather than four.
     if matches!(opcode, Opcode::UMulHigh | Opcode::SMulHigh) {
@@ -1438,6 +1454,23 @@ mod tests {
             assert!(names.contains(&(Opcode::Bswap, name)), "{name}");
         }
         assert!(!names.iter().any(|&(_, name)| name == "bswap.i8"));
+    }
+
+    /// The three bit counts are named at thirty two and sixty four bits and at nothing narrower,
+    /// which is where the rules for them are written.
+    #[test]
+    fn a_bit_count_is_named_at_the_two_widths_a_register_is() {
+        let names = heads();
+        for (opcode, op) in
+            [(Opcode::Ctlz, "ctlz"), (Opcode::Cttz, "cttz"), (Opcode::Ctpop, "ctpop")]
+        {
+            for width in [32, 64] {
+                let name = format!("{op}.i{width}");
+                assert!(names.iter().any(|&(at, it)| at == opcode && it == name), "{name}");
+            }
+            assert!(!names.iter().any(|&(at, it)| at == opcode && it.ends_with(".i8")));
+            assert!(!names.iter().any(|&(at, it)| at == opcode && it.ends_with(".i16")));
+        }
     }
 
     /// A width nothing is written at contributes nothing, which is what makes the sweep safe to

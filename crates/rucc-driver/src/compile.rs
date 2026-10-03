@@ -1198,6 +1198,7 @@ fn generate(
         jump_tables: opts.jump_tables
             && !(target.tuple.arch() == Arch::X86 && replaceable(target, opts) != IrPic::Absolute),
         cmov: opts.cmov,
+        isa: opts.isa,
         profile: match profile {
             None => pipeline::Profile::No,
             Some(true) => pipeline::Profile::Early,

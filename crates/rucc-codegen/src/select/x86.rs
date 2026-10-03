@@ -22,6 +22,7 @@ include!(concat!(env!("OUT_DIR"), "/i386.rs"));
 /// the reason `crate::pipeline::X86_SCRATCH` gives.
 pub static SELECTOR: super::Selector = super::Selector {
     table: &TABLE,
+    counts: &[],
     shapes: &rucc_target::x86::MACHINE,
     address: rucc_target::x86_64::address,
     frame: &rucc_target::x86::FRAME,

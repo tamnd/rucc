@@ -1982,10 +1982,11 @@ pub static INSTS: &[(&str, Form)] = &[
     ("low_32", Convert),
     // Finding a bit and counting the zeroes in front of it, which read one register and write
     // another of the same width. A form of their own rather than the conversions above, for the
-    // reason `Form::Search` gives. No rule selects any of them and the reason is
-    // `rucc_codegen::expand`, which builds every bit count out of arithmetic rather than out of
-    // these, so what reaches one today is a program that wrote it in an `asm` template. See
-    // `crate::x86_64::encode` for why the two families are four opcodes and not two.
+    // reason `Form::Search` gives. The counts are selected where the function is built for the
+    // extension that has them, and `rucc_codegen::expand` writes a count out as arithmetic
+    // everywhere else. The two searches are reached only from an `asm` template, since what they
+    // leave for a zero is not the same on every processor. See `crate::x86_64::encode` for why
+    // the two families are four opcodes and not two.
     ("bsf_16", Search),
     ("bsf_32", Search),
     ("bsf_64", Search),
@@ -1996,6 +1997,10 @@ pub static INSTS: &[(&str, Form)] = &[
     ("lzcnt_64", Search),
     ("tzcnt_32", Search),
     ("tzcnt_64", Search),
+    // Counting the bits that are set, which is the third of the family and an extension of its
+    // own.
+    ("popcnt_32", Search),
+    ("popcnt_64", Search),
     // The bytes of a register turned round, at the two widths the machine has a defined answer
     // for. No rule selects either, and the reason is the one the searches have: `rucc_codegen`
     // builds a byte reversal out of shifts and masks so that every target gets the same answer,
@@ -2614,7 +2619,7 @@ mod tests {
         // Every head in the model file, which is what the rule set may write and what
         // `rucc-verify` has an answer for. The two lists are checked against each other by
         // `rucc-codegen`, which is the crate that can read the rule set.
-        assert_eq!(described, 785);
+        assert_eq!(described, 787);
     }
 
     #[test]

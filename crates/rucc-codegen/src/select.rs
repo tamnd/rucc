@@ -37,6 +37,11 @@ use rucc_target::{
 pub struct Selector {
     /// The rules, compiled.
     pub table: &'static Table,
+    /// The bit counts a rule makes one instruction of, each on a processor with the extension
+    /// that has the instruction. A count this does not name, or one in a function built for a
+    /// processor without the extension, is written out as arithmetic before selection. See
+    /// [`crate::expand::counts`].
+    pub counts: &'static [crate::expand::Count],
     /// The shape of each opcode, and the prefix a rule file puts in front of one.
     pub shapes: &'static MachineInsts,
     /// What an address constructor in a replacement stands for, or `None` for a name that is not

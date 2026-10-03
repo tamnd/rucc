@@ -20,6 +20,15 @@ include!(concat!(env!("OUT_DIR"), "/x86-64.rs"));
 /// What the lowering asks of x86-64.
 pub static SELECTOR: super::Selector = super::Selector {
     table: &TABLE,
+    counts: &[
+        crate::expand::Count {
+            opcode: rucc_ir::Opcode::Ctpop,
+            feature: "popcnt",
+            widths: &[32, 64],
+        },
+        crate::expand::Count { opcode: rucc_ir::Opcode::Ctlz, feature: "lzcnt", widths: &[32, 64] },
+        crate::expand::Count { opcode: rucc_ir::Opcode::Cttz, feature: "bmi", widths: &[32, 64] },
+    ],
     shapes: &rucc_target::x86_64::MACHINE,
     address: rucc_target::x86_64::address,
     frame: &rucc_target::x86_64::FRAME,
@@ -524,20 +533,18 @@ mod tests {
     /// These have a source and a destination a rule could have named, the way the conditional moves
     /// above do, and the reason no rule names them is a different one again. It is not that their
     /// meaning comes from the line in front of them: each of these says on its own exactly what it
-    /// computes. It is that [`crate::expand`] already answers the question they answer, out of
-    /// arithmetic every machine has, and it does that because what these do when the source is zero
-    /// is four different things on four families of processor. A rule that selected one would be a
-    /// rule whose answer depends on which machine ran it.
+    /// computes. It is that what these do when the source is zero is not the same on every family
+    /// of processor, so a rule that selected one would be a rule whose answer depends on which
+    /// machine ran it. `lzcnt` and `tzcnt` were here as well until they had rules, since both
+    /// answer the width for a zero on every processor that has them, and [`crate::expand`] answers
+    /// the question with arithmetic on every processor that does not.
     ///
     /// So the only thing that reaches one is a program that wrote the name in a template, which is
     /// what the libraries that were counting bits before there was a builtin for it all do.
     /// `crate::lower` writes them for the reason it writes the three in [`TEMPLATE`], and they are
     /// not on that list because they are not bare: a rule could have named these operands and the
     /// claim that list makes would be false of them.
-    const SEARCH: &[&str] = &[
-        "bsf_16", "bsf_32", "bsf_64", "bsr_16", "bsr_32", "bsr_64", "lzcnt_32", "lzcnt_64",
-        "tzcnt_32", "tzcnt_64",
-    ];
+    const SEARCH: &[&str] = &["bsf_16", "bsf_32", "bsf_64", "bsr_16", "bsr_32", "bsr_64"];
 
     /// The byte reversal a template asks for and nothing else does.
     ///
@@ -1157,7 +1164,9 @@ mod tests {
     /// it as a search, so the list cannot grow an opcode that is something else, and a search this
     /// target grows later cannot be left off the list and quietly go unselected with nobody saying
     /// why. Nothing in the rule set selects one, which is the other half of the reason and is what
-    /// the check above would have caught in any case.
+    /// the check above would have caught in any case. The three counts are the searches a rule
+    /// does select, and they are checked for here so that losing one of those rules is a failure
+    /// with a name on it rather than a count written out as arithmetic again.
     #[test]
     fn every_instruction_exempt_from_a_rule_because_only_a_template_searches_for_a_bit_is_one() {
         let written = heads();
@@ -1172,8 +1181,16 @@ mod tests {
         }
         for &(opcode, form) in x86_64::INSTS {
             if form == x86_64::Form::Search {
-                assert!(SEARCH.contains(&opcode), "{opcode} is a search and is not on the list");
+                let selected = written.contains(&format!("{PREFIX}{opcode}").as_str());
+                assert!(
+                    SEARCH.contains(&opcode) || selected,
+                    "{opcode} is a search no rule selects and is not on the list"
+                );
             }
+        }
+        for opcode in ["popcnt_32", "popcnt_64", "lzcnt_32", "lzcnt_64", "tzcnt_32", "tzcnt_64"] {
+            let name = format!("{PREFIX}{opcode}");
+            assert!(written.contains(&name.as_str()), "no rule selects {opcode}");
         }
     }
 

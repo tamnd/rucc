@@ -929,6 +929,8 @@ static TEXT: &[(&str, &[Written])] = &[
     ("lzcnt_64", &[spell("lzcntq", &[Reg(1, Quad), Reg(0, Quad)])]),
     ("tzcnt_32", &[spell("tzcntl", &[Reg(1, Long), Reg(0, Long)])]),
     ("tzcnt_64", &[spell("tzcntq", &[Reg(1, Quad), Reg(0, Quad)])]),
+    ("popcnt_32", &[spell("popcntl", &[Reg(1, Long), Reg(0, Long)])]),
+    ("popcnt_64", &[spell("popcntq", &[Reg(1, Quad), Reg(0, Quad)])]),
     ("bswap_32", &[spell("bswapl", &[Reg(0, Long)])]),
     ("bswap_64", &[spell("bswapq", &[Reg(0, Quad)])]),
     // The address computation the addressing modes are reached through.

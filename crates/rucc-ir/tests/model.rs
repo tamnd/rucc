@@ -93,6 +93,8 @@ fn a_head_with_no_meaning_here_is_one_whose_meaning_belongs_to_the_target() {
 /// operand that is already computed and sitting in a register, so no opcode is ever called that.
 /// `power_of_two.iN` and `ctz.iN` are arithmetic on the constants a rule matched, which is what a
 /// guard asks about and what a computed replacement works out, and the machine executes neither.
+/// `clz.iN` and `pop.iN` are what the bit counts are written in terms of, beside `ctz.iN`, and
+/// they are built a half at a time, so the narrow ones are there for the wide ones to use.
 /// Everything else in the file is an instruction or a typo.
 #[test]
 fn nothing_here_gives_a_meaning_to_a_head_no_instruction_has() {
@@ -107,7 +109,7 @@ fn nothing_here_gives_a_meaning_to_a_head_no_instruction_has() {
 /// The heads that are not instructions: an operand the rule already has, and the arithmetic the
 /// rule does on the constants it matched.
 fn on_the_matched_constants(head: &str) -> bool {
-    ["value.", "power_of_two.", "ctz."].iter().any(|name| head.starts_with(name))
+    ["value.", "power_of_two.", "ctz.", "clz.", "pop."].iter().any(|name| head.starts_with(name))
 }
 
 /// That arithmetic has a meaning at every width a rule may ask it at.

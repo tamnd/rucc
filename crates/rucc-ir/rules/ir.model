@@ -388,3 +388,55 @@
   (ite (= (extract 31 0 x) 0)
        (+ 32 (zero_extend 32 64 (ctz.i32 (extract 63 32 x))))
        (zero_extend 32 64 (ctz.i32 (extract 31 0 x)))))
+
+;; How many zero bits a number starts with, which is `ctz` read from the other end and written the
+;; same way: if the high half is entirely zero the answer is half the width plus whatever the low
+;; half starts with, and otherwise it is whatever the high half starts with. Zero comes back as the
+;; width here too.
+(semantics (clz.i8 x)
+  (ite (= (extract 7 7 x) 1) 0
+  (ite (= (extract 6 6 x) 1) 1
+  (ite (= (extract 5 5 x) 1) 2
+  (ite (= (extract 4 4 x) 1) 3
+  (ite (= (extract 3 3 x) 1) 4
+  (ite (= (extract 2 2 x) 1) 5
+  (ite (= (extract 1 1 x) 1) 6
+  (ite (= (extract 0 0 x) 1) 7 8)))))))))
+(semantics (clz.i16 x)
+  (ite (= (extract 15 8 x) 0)
+       (+ 8 (zero_extend 8 16 (clz.i8 (extract 7 0 x))))
+       (zero_extend 8 16 (clz.i8 (extract 15 8 x)))))
+(semantics (clz.i32 x)
+  (ite (= (extract 31 16 x) 0)
+       (+ 16 (zero_extend 16 32 (clz.i16 (extract 15 0 x))))
+       (zero_extend 16 32 (clz.i16 (extract 31 16 x)))))
+(semantics (clz.i64 x)
+  (ite (= (extract 63 32 x) 0)
+       (+ 32 (zero_extend 32 64 (clz.i32 (extract 31 0 x))))
+       (zero_extend 32 64 (clz.i32 (extract 63 32 x)))))
+
+;; How many bits are set. At eight bits it is the eight bits added up, and above that it is the
+;; counts of the two halves added up, which cannot carry out of the width since a count is never
+;; more than the width.
+(semantics (pop.i8 x)
+  (bvadd (zero_extend 1 8 (extract 0 0 x)) (bvadd (zero_extend 1 8 (extract 1 1 x)) (bvadd (zero_extend 1 8 (extract 2 2 x)) (bvadd (zero_extend 1 8 (extract 3 3 x)) (bvadd (zero_extend 1 8 (extract 4 4 x)) (bvadd (zero_extend 1 8 (extract 5 5 x)) (bvadd (zero_extend 1 8 (extract 6 6 x)) (zero_extend 1 8 (extract 7 7 x))))))))))
+(semantics (pop.i16 x)
+  (bvadd (zero_extend 8 16 (pop.i8 (extract 15 8 x)))
+         (zero_extend 8 16 (pop.i8 (extract 7 0 x)))))
+(semantics (pop.i32 x)
+  (bvadd (zero_extend 16 32 (pop.i16 (extract 31 16 x)))
+         (zero_extend 16 32 (pop.i16 (extract 15 0 x)))))
+(semantics (pop.i64 x)
+  (bvadd (zero_extend 32 64 (pop.i32 (extract 63 32 x)))
+         (zero_extend 32 64 (pop.i32 (extract 31 0 x)))))
+
+;; The three bit counts the IR has. All three answer the width for a zero, which is more than C
+;; asks of `__builtin_clz` and `__builtin_ctz` and is what `rucc_opt::fold` folds a constant zero
+;; to, so a rule that selects one has to give the same answer there. Only the two widths a register
+;; is, since those are the only ones `rucc_ir::term` names and a narrower count is widened first.
+(semantics (ctlz.i32 x) (clz.i32 x))
+(semantics (ctlz.i64 x) (clz.i64 x))
+(semantics (cttz.i32 x) (ctz.i32 x))
+(semantics (cttz.i64 x) (ctz.i64 x))
+(semantics (ctpop.i32 x) (pop.i32 x))
+(semantics (ctpop.i64 x) (pop.i64 x))

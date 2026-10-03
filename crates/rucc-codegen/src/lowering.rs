@@ -63,6 +63,7 @@ use rucc_cost::Goal;
 use rucc_ir::{Func, Opcode};
 use rucc_target::CallRegs;
 
+use crate::expand::Count;
 use crate::switch::{Force, Lowered};
 use crate::{
     decimal, divide, eight, expand, forks, half, quad, retry, switch, varargs, wide, widths,
@@ -310,14 +311,16 @@ impl Step {
     /// only two that know. The rest work instruction by instruction and are not asked.
     ///
     /// `switching` is the level's goal, the shape `-Zswitch=` forced, whether a jump table may
-    /// be written at all and whether the machine has a conditional move, and what the `switch`
-    /// lowering says it did goes into `switched`.
+    /// be written at all and whether the machine has a conditional move, `counts` is the bit
+    /// counts the selector is left to answer, and what the `switch` lowering says it did goes
+    /// into `switched`.
     fn run(
         self,
         func: &mut Func,
         names: &mut Interner,
         conv: &CallRegs,
         switching: (Goal, Option<Force>, bool, bool),
+        counts: &[Count],
         switched: &mut Vec<Lowered>,
     ) -> bool {
         let (goal, force, tables, cmov) = switching;
@@ -337,7 +340,7 @@ impl Step {
             Self::Widths => return widths::integers(func, conv),
             Self::Divisions => divide::divisions(func, goal, conv.word * 8),
             Self::Bytes => expand::bytes(func, conv.byte_swaps),
-            Self::Counts => expand::counts(func),
+            Self::Counts => expand::counts(func, counts),
             Self::Quads => quad::calls(func, names, conv.abi),
             Self::Floats => expand::floats(func, conv.word),
             Self::Bulk => expand::bulk(func, names, conv.word, conv.unaligned),
@@ -530,21 +533,25 @@ impl Lowerings {
 /// which decides when a table is worth writing, the shape `-Zswitch=` forced on it, if any, and
 /// whether a table may be written at all, which `-fno-jump-tables` says it may not. The fourth is
 /// whether the machine has a conditional move, which only an i386 before the Pentium Pro lacks.
+///
+/// `counts` is the bit counts the selector has a rule for on the processor this function is built
+/// for, which [`expand::counts`] leaves alone. See [`crate::select::Selector::counts`].
 pub fn group(
     func: &mut Func,
     names: &mut Interner,
     conv: &CallRegs,
     switching: (Goal, Option<Force>, bool, bool),
+    counts: &[Count],
     counting: bool,
 ) -> Ran {
     let mut ran = Ran::default();
     for &step in Step::GROUP {
         if !counting {
-            step.run(func, names, conv, switching, &mut ran.switches);
+            step.run(func, names, conv, switching, counts, &mut ran.switches);
             continue;
         }
         let (before, found) = tally(func, step);
-        let did = step.run(func, names, conv, switching, &mut ran.switches);
+        let did = step.run(func, names, conv, switching, counts, &mut ran.switches);
         let (after, left) = tally(func, step);
         ran.did.push(Did { step, found, left, before, after, untouched: !did });
     }
@@ -600,7 +607,7 @@ mod tests {
     }
 
     fn run(func: &mut Func, names: &mut Interner) -> Ran {
-        group(func, names, &x86_64::SYSV, (Goal::Speed, None, true, true), true)
+        group(func, names, &x86_64::SYSV, (Goal::Speed, None, true, true), &[], true)
     }
 
     fn i32() -> Type {
@@ -689,8 +696,14 @@ mod tests {
             let swapped = build.unary(Opcode::Bswap, args[0], i32());
             build.ret(&[swapped]);
         });
-        let ran =
-            group(&mut func, &mut names, &aarch64::AAPCS64, (Goal::Speed, None, true, true), true);
+        let ran = group(
+            &mut func,
+            &mut names,
+            &aarch64::AAPCS64,
+            (Goal::Speed, None, true, true),
+            &[],
+            true,
+        );
         let did = ran.of(Step::Bytes);
         assert_eq!(did.found, 1);
         assert_eq!(did.left, 0);
@@ -724,6 +737,20 @@ mod tests {
         let ran = run(&mut func, &mut names);
         assert_eq!(ran.of(Step::Counts).found, 1);
         assert_eq!(ran.of(Step::Counts).left, 0);
+    }
+
+    /// The same count on a processor with `popcnt`, where the selector answers it with the one
+    /// instruction and the group leaves it there.
+    #[test]
+    fn a_bit_count_the_processor_has_an_instruction_for_survives_the_group() {
+        let (mut names, mut func) = one(&[i32()], &[i32()], |build, args| {
+            let ones = build.unary(Opcode::Ctpop, args[0], i32());
+            build.ret(&[ones]);
+        });
+        let counts = crate::select::x86_64::SELECTOR.counts;
+        let switching = (Goal::Speed, None, true, true);
+        let ran = group(&mut func, &mut names, &x86_64::SYSV, switching, counts, true);
+        assert_eq!((ran.of(Step::Counts).found, ran.of(Step::Counts).left), (1, 1));
     }
 
     /// `double n(double x) { return -x; }`, which is a float rather than an integer and so reaches
@@ -780,6 +807,7 @@ mod tests {
                     &mut names,
                     &aarch64::AAPCS64,
                     (Goal::Speed, None, true, true),
+                    &[],
                     true,
                 )
             } else {
@@ -871,8 +899,14 @@ mod tests {
             build.ret(&[ones]);
         };
         let (mut names, mut func) = one(&[i32()], &[i32()], build);
-        let quiet =
-            group(&mut func, &mut names, &x86_64::SYSV, (Goal::Speed, None, true, true), false);
+        let quiet = group(
+            &mut func,
+            &mut names,
+            &x86_64::SYSV,
+            (Goal::Speed, None, true, true),
+            &[],
+            false,
+        );
         assert!(quiet.did.is_empty(), "nothing was counted");
         assert_eq!(super::tally(&func, Step::Counts), (super::tally(&func, Step::Counts).0, 0));
 
@@ -880,7 +914,7 @@ mod tests {
         // changes is what was written down and not what was done.
         let (mut names, mut func) = one(&[i32()], &[i32()], build);
         let loud =
-            group(&mut func, &mut names, &x86_64::SYSV, (Goal::Speed, None, true, true), true);
+            group(&mut func, &mut names, &x86_64::SYSV, (Goal::Speed, None, true, true), &[], true);
         assert_eq!(loud.of(Step::Counts).left, 0);
         assert_eq!(
             loud.did.last().expect("thirteen of them").after,
