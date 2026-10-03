@@ -433,11 +433,11 @@ impl<'a> Ranges<'a> {
             self.counts.hits += 1;
             return cached;
         }
-        // A kept answer leaned on a cycle, so whatever is worked out from it did too and must
-        // not be cached past this question either.
+        // What is worked out from a kept answer is still cached. It is sound, only perhaps wider
+        // than the next question would find, and not caching it made every later question walk
+        // the whole function again: trace_probe.c took more than five minutes.
         if let Some(&kept) = self.scratch.get(&(value, None)) {
             self.counts.hits += 1;
-            self.cycles += 1;
             return kept;
         }
         if !self.active.insert(value) {
@@ -813,7 +813,6 @@ impl<'a> Ranges<'a> {
         }
         if let Some(&kept) = self.scratch.get(&(value, Some(block))) {
             self.counts.hits += 1;
-            self.cycles += 1;
             return kept;
         }
         let before = self.cycles;
