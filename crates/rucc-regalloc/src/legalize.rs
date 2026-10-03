@@ -135,8 +135,12 @@ pub fn instruction(
     // physical one and loses which of the two it was.
     let mut claimed = Claimed::default();
     for (operand, place) in operands.iter().zip(&places) {
-        if let Place::Reg(at) = *place {
-            claimed.named(operand, at);
+        match (*place, operand.constraint) {
+            (Place::Reg(at), Constraint::Fixed(fixed)) if at != fixed && !operand.role.is_def() => {
+                claimed.passed(operand, at);
+            }
+            (Place::Reg(at), _) => claimed.named(operand, at),
+            _ => {}
         }
         if let Constraint::Fixed(at) = operand.constraint {
             claimed.named(operand, at);
@@ -144,7 +148,15 @@ pub fn instruction(
     }
     let mut scratch = Scratch::new(env, assignment, spare, claimed);
 
-    for (index, operand) in operands.iter_mut().enumerate() {
+    // The operands already in a register go first, so every move that reads a register the
+    // assignment gave out is made before any value is read in off the stack. That is what lets a
+    // register an input only passes through on its way to a fixed one be borrowed: by the time
+    // something is read into it, what was in it has already gone where the instruction wants it.
+    let mut order: Vec<usize> = (0..operands.len()).collect();
+    order.sort_by_key(|&index| matches!(places[index], Place::Slot(_)));
+
+    for index in order {
+        let operand = &mut operands[index];
         let fixed = match operand.constraint {
             Constraint::Fixed(at) => Some(at),
             _ => None,
@@ -357,12 +369,22 @@ struct Claimed {
     reads: Vec<(RegClass, PhysReg)>,
     /// The registers an answer leaves in, with the class each was named in.
     writes: Vec<(RegClass, PhysReg)>,
+    /// The registers a value arrives in only to be moved on to the fixed register an operand asked
+    /// for. They clash the way `reads` do, but one can still be borrowed when nothing else is left,
+    /// since the move out of it is made before anything is read into it.
+    passed: Vec<(RegClass, PhysReg)>,
 }
 
 impl Claimed {
     /// Records a register an operand named, on the side its value travels.
     fn named(&mut self, operand: &Operand, at: PhysReg) {
         self.side_mut(operand.role).push((operand.class, at));
+    }
+
+    /// Records a register a value arrives in and is moved straight out of, into the fixed register
+    /// its operand asked for.
+    fn passed(&mut self, operand: &Operand, at: PhysReg) {
+        self.passed.push((operand.class, at));
     }
 
     /// Records a register nothing may be handed for the rest of the instruction, which is one
@@ -375,12 +397,23 @@ impl Claimed {
     /// Whether handing that register out for a value travelling that way would lose a value.
     fn clashes(&self, role: Role, class: RegClass, at: PhysReg) -> bool {
         self.side(role).contains(&(class, at))
+            || (!role.is_def() && self.passed.contains(&(class, at)))
     }
 
     /// Whether the instruction names that register at all, which is what borrowing has to keep off:
     /// what is borrowed is put back behind the instruction, over anything left there.
     fn names(&self, class: RegClass, at: PhysReg) -> bool {
-        self.reads.contains(&(class, at)) || self.writes.contains(&(class, at))
+        self.reads.contains(&(class, at))
+            || self.writes.contains(&(class, at))
+            || self.passed.contains(&(class, at))
+    }
+
+    /// Whether the instruction names that register only as one a value passes through on its way
+    /// to a fixed register, which is a register borrowing can fall back on.
+    fn passes_through(&self, class: RegClass, at: PhysReg) -> bool {
+        self.passed.contains(&(class, at))
+            && !self.reads.contains(&(class, at))
+            && !self.writes.contains(&(class, at))
     }
 
     /// The list for values travelling that way. The lists are one instruction's long, so a scan
@@ -467,17 +500,22 @@ impl<'a> Scratch<'a> {
     /// allocator gave a value that is live right across the instruction is as good as an idle one,
     /// which is the whole point of putting the contents away first.
     ///
+    /// When every register is claimed, one an input only passes through on its way to the fixed
+    /// register it asked for will do. That is i386 inline assembly naming `esi` and `edi`, which are
+    /// the two held back, and `eax` and `ecx`, with a fifth operand left that can be anywhere:
+    /// `strncat` in arch/x86/lib/string_32.c is one.
+    ///
     /// # Panics
     ///
     /// Panics if the class has no register the instruction has not already claimed, which is an
     /// instruction naming every register of a file at once.
     fn borrow(&mut self, class: RegClass) -> PhysReg {
         let index = usize::from(class.number());
-        let at = *self
-            .env
-            .order(class)
+        let order = self.env.order(class);
+        let at = *order
             .iter()
             .find(|&&reg| !self.claimed.names(class, reg))
+            .or_else(|| order.iter().find(|&&reg| self.claimed.passes_through(class, reg)))
             .expect("an instruction naming every register of its class at once");
 
         if self.borrowed.len() <= index {
