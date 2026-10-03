@@ -97,9 +97,9 @@ use rucc_cost::heuristics::{
     INLINE_LARGE_FRAME_CONSERVE,
 };
 use rucc_ir::{
-    Abi, AsmInfo, AttrSet, Block, BlockCall, BlockCallList, CallInfo, Datum, Def, Drains, Extra,
-    Flags, Float, Func, FuncId, GlobalId, Imm, Inst, InstData, Linkage, MemInfo, MemOrder, Module,
-    Opcode, Pic, Restrict, Signature, SwitchInfo, Type, VaInfo, Value, ValueList,
+    Abi, AsmInfo, AttrSet, Block, BlockCall, BlockCallList, CallInfo, DataLayout, Datum, Def,
+    Drains, Extra, Flags, Float, Func, FuncId, GlobalId, Imm, Inst, InstData, Linkage, MemInfo,
+    MemOrder, Module, Opcode, Pic, Restrict, Signature, SwitchInfo, Type, VaInfo, Value, ValueList,
 };
 use rucc_target::{Isa, TargetInfo};
 
@@ -627,7 +627,7 @@ fn settle(
     state.insert(id, State::Settling);
     // The caller's own locals, before anything is copied into it, which is what the growth of its
     // frame is measured against.
-    let own = frame(&module[id]);
+    let own = frame(&module[id], module.datalayout);
     // The calls as the function was written. A call that arrives inside a body being inlined is
     // one the callee's own settling already had its chance at. A function that asked not to be
     // optimized is left with its calls, except for the ones that are a promise.
@@ -758,7 +758,12 @@ fn settle(
             continue;
         }
         if kind != Kind::Always
-            && !fits(own, frame(&module[id]), pool.growth(&module[callee]), how.growth)
+            && !fits(
+                own,
+                frame(&module[id], module.datalayout),
+                pool.growth(&module[callee], module.datalayout),
+                how.growth,
+            )
         {
             stats.missed(why(InlineFailure::Frame));
             continue;
@@ -1209,14 +1214,14 @@ impl Pool {
 
     /// How many bytes splicing `callee` in would add to the caller's frame, which is its [`frame`]
     /// less the slots it would take over.
-    fn growth(&self, callee: &Func) -> u64 {
+    fn growth(&self, callee: &Func, layout: DataLayout) -> u64 {
         let mut free: Vec<u64> = if self.on {
             self.slots.iter().map(|&(_, size, _)| size).collect()
         } else {
             Vec::new()
         };
         let mut grows = 0;
-        let unread = unread(callee);
+        let unread = gone(callee, layout);
         for inst in callee.blocks().flat_map(|block| callee.insts(block)) {
             if callee[inst].opcode != Opcode::Alloca || !callee[inst].args.is_empty() {
                 continue;
@@ -1297,8 +1302,8 @@ fn size(func: &Func) -> usize {
 /// `estimated_stack_size`. The locals of blocks that never overlap are already one slot by the
 /// time this counts them, since the lowering shares them, and so are the slots of bodies spliced
 /// in earlier, see [`Pool`], so the sum is close to what the frame will be.
-fn frame(func: &Func) -> u64 {
-    let unread = unread(func);
+fn frame(func: &Func, layout: DataLayout) -> u64 {
+    let unread = gone(func, layout);
     func.blocks()
         .flat_map(|block| func.insts(block))
         .filter(|&inst| func[inst].opcode == Opcode::Alloca && func[inst].args.is_empty())
@@ -1308,6 +1313,20 @@ fn frame(func: &Func) -> u64 {
             _ => None,
         })
         .sum()
+}
+
+/// The locals gcc no longer has in memory by the time it measures a frame, which are the ones
+/// nothing reads and the ones its early scalar replacement made values of.
+///
+/// The second kind is what the kernel's tracepoints are made of. `__do_trace_contention_begin` in
+/// `<trace/events/lock.h>` holds a `guard(srcu_fast_notrace)`, a structure whose address only
+/// goes to a destructor that is inlined into it, and gcc's frame for it has nothing in it. Counted,
+/// those bytes put `__mutex_lock_common` past the 100 bytes `-fconserve-stack` allows, and the six
+/// tracepoints in it stayed calls with their static keys out of line.
+fn gone(func: &Func, layout: DataLayout) -> Set<Value> {
+    let mut out = unread(func);
+    out.extend(crate::sroa::scalarizable(func, layout));
+    out
 }
 
 /// The locals nothing ever reads, which gcc has deleted by the time it measures a frame.
@@ -3147,6 +3166,18 @@ block0(%0: i32):
         );
         assert!(unread.contains("memset %5"), "{unread}");
         assert!(!conserved(&unread).contains("call @scale"));
+        // Nor is a local scalar replacement makes values of, which is a `guard()` once its
+        // destructor is inlined. The same 128 bytes, written and read back as two words, go in,
+        // and they stay a call when the address is kept somewhere as well.
+        let scalar = framed(128, 0, "").replace(
+            "    store %5 -> %5, align 16
+",
+            "    %6 = sext.i64 %4\n    store %6 -> %5, align 16\n    %7 = load.i64 %5, align 16\n",
+        );
+        assert!(scalar.contains("load.i64 %5"), "{scalar}");
+        assert!(!conserved(&scalar).contains("call @scale"), "{scalar}");
+        let kept = scalar.replace("    %7 = load", "    store %5 -> %5, align 16\n    %7 = load");
+        assert!(conserved(&kept).contains("call @scale"), "{kept}");
     }
 
     /// `always_inline` is a promise and the frame does not change that.

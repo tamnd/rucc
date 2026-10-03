@@ -51,8 +51,8 @@
 use rucc_base::hash::{Map, Set};
 use rucc_cost::heuristics::{SRA_MAX_BYTES, SRA_MAX_PIECES};
 use rucc_ir::{
-    Block, BlockCall, Extra, Flags, Func, Imm, Inst, InstData, MemInfo, MemOrder, Opcode, Restrict,
-    Type, Value,
+    Block, BlockCall, DataLayout, Extra, Flags, Func, Imm, Inst, InstData, MemInfo, MemOrder,
+    Opcode, Restrict, Type, Value,
 };
 
 use crate::cfg::Cfg;
@@ -164,6 +164,43 @@ impl Pass for Sroa {
         }
         stats
     }
+}
+
+/// The locals of `func` this pass would turn into values, by the address each one's `alloca` makes,
+/// without changing anything.
+///
+/// The inliner asks, because gcc measures the frame a callee adds to its caller after its early
+/// scalar replacement has run on the callee. A `guard()` from `<linux/cleanup.h>` is a structure
+/// whose address only goes to the destructor, and once that is inlined it is two values. A function
+/// whose blocks this pass would not take at all has none, so the inliner counts every one.
+pub(crate) fn scalarizable(func: &Func, layout: DataLayout) -> Set<Value> {
+    let mut out = Set::default();
+    let Some(entry) = func.entry() else {
+        return out;
+    };
+    let cfg = Cfg::new(func);
+    if !shaped(func, &cfg, entry) {
+        return out;
+    }
+    let target = Target {
+        pointer: Some(u64::from(layout.pointer_bits).div_ceil(8)),
+        little: layout.little_endian,
+        vectors: false,
+    };
+    let mut rpo = vec![0; func.counts().blocks];
+    for (rank, block) in cfg.reverse_postorder().enumerate() {
+        rpo[block.index()] = rank;
+    }
+    let mut readers = Readers::new(func);
+    for alloca in func.insts(entry) {
+        if func[alloca].opcode != Opcode::Alloca || !func[func[alloca].args].is_empty() {
+            continue;
+        }
+        if let Ok(Some(_)) = plan(func, &rpo, &mut readers, alloca, target) {
+            out.extend(func[alloca].first_result);
+        }
+    }
+    out
 }
 
 /// What the pass needs to know about the machine.
