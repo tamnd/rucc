@@ -75,3 +75,48 @@ fn a_frame_pointer_asked_for_is_kept_and_put_back_before_the_jump() {
     let jump = f.iter().position(|line| line.starts_with("jmp")).expect("a jump away");
     assert!(pop < jump, "{f:#?}");
 }
+
+/// Each arm assigns a variable and one `return` gives it back, so both calls jump to a block that
+/// only returns, and both are in tail position all the same. Postgres's `print_action` is this
+/// shape. See #2205.
+const JOINED: &str = "int on_true(int); int on_false(int); int report(const char *, ...);
+int join(int x) { int r; if (x > 10) r = on_true(x); else r = on_false(x - 1); return r; }
+void drop(int x) { report(\"%d\", x); }
+";
+
+#[test]
+fn calls_that_meet_at_one_return_both_jump_away() {
+    let text = assembly("join", "x86_64-unknown-linux-gnu", &[], JOINED);
+    let join = body(&text, "join");
+    assert!(join.contains(&"jmp on_true".to_owned()), "{join:#?}");
+    assert!(join.contains(&"jmp on_false".to_owned()), "{join:#?}");
+    assert!(
+        !join.iter().any(|line| line.starts_with("call") || line.contains("%rsp")),
+        "{join:#?}"
+    );
+}
+
+#[test]
+fn a_void_function_drops_what_its_last_call_gives_back_and_jumps() {
+    let text = assembly("drop", "x86_64-unknown-linux-gnu", &[], JOINED);
+    let drop = body(&text, "drop");
+    assert!(drop.contains(&"jmp report".to_owned()), "{drop:#?}");
+    assert!(!drop.iter().any(|line| line.starts_with("call")), "{drop:#?}");
+}
+
+/// On i386 a `double` comes back on the x87 stack, which a jump would leave full for a caller that
+/// expects it empty, so the call stays and the answer is popped.
+#[test]
+fn a_void_function_keeps_a_call_whose_answer_is_on_the_x87_stack() {
+    let source = "double weigh(int); void drop(int x) { weigh(x); }\n";
+    let text = assembly("x87", "i386-unknown-linux-gnu", &[], source);
+    let drop = body(&text, "drop");
+    assert!(
+        drop.iter().any(|line| line.starts_with("call") && line.contains("weigh")),
+        "{drop:#?}"
+    );
+    assert!(
+        !drop.iter().any(|line| line.starts_with("jmp") && line.contains("weigh")),
+        "{drop:#?}"
+    );
+}

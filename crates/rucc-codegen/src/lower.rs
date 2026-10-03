@@ -2435,7 +2435,13 @@ impl<'a> Lowering<'a> {
         if self.out[call].symbol.is_none() {
             self.through_scratch(call);
         }
-        let values: Vec<Value> = self.source[inst].results().collect();
+        // A function that gives back nothing drops what the callee gave back, which
+        // `crate::tail::mark` only lets through when it is in an integer register.
+        let values: Vec<Value> = if self.source.signature().returns.is_empty() {
+            Vec::new()
+        } else {
+            self.source[inst].results().collect()
+        };
         let x87 = self.x87_values(&values);
         self.returned(inst, values)?;
         // Not a call through the procedure linkage table, whose entry reads `%ebx` after the
