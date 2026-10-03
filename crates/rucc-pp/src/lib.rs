@@ -88,6 +88,7 @@ mod expand;
 mod hide;
 mod include;
 mod macros;
+mod options;
 mod predef;
 mod print;
 mod token;

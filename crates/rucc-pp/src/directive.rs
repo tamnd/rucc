@@ -31,7 +31,8 @@ use crate::include::{
     Context, Dependency, Frame, Header, Reader, directory_of, header_from_token,
     header_from_tokens, spelling,
 };
-use crate::macros::{Builtin, MacroTable, parse_define_in};
+use crate::macros::{Builtin, MacroDef, MacroTable, parse_define_in};
+use crate::options::{OptionsLine, TargetLines};
 use crate::predef::{BUILT_IN, COMMAND_LINE, Predef, built_in, command_line};
 use crate::token::Tok;
 
@@ -157,6 +158,9 @@ pub struct Preprocessor {
     /// error, while one a macro defined earlier writes is not, which is why this is checked
     /// on the lines as they are read rather than on what the expander produces.
     poisoned: Set<Symbol>,
+    /// What `#pragma GCC target` lines are in effect, which the extension macros follow. Set up
+    /// by [`Preprocessor::predefine`], which is where the unit's extensions arrive.
+    targets: TargetLines,
 }
 
 impl Preprocessor {
@@ -234,6 +238,8 @@ impl Preprocessor {
         let msvc = Triple::from_tuple(target.tuple)
             .is_some_and(|triple| triple.os == Os::Windows && triple.env == Env::Msvc);
         self.ms_pragma = opts.ms_extensions.unwrap_or(msvc);
+        let x86 = target.tuple.arch().as_str() == "x86_64";
+        self.targets = TargetLines::new(x86.then_some(opts.isa));
         let names = Names::new(cx.interner);
         self.chars = cond::Chars::of(target);
         let file = self.synthetic(BUILT_IN, built_in(target, opts), cx, &names)?;
@@ -637,6 +643,7 @@ impl Preprocessor {
                 && !self.message_pragma(rest, None, interner, names)
                 && !self.poison_pragma(rest, None, interner)
             {
+                self.options_pragma(rest, hash, interner);
                 self.pass_through(body, hash, out);
             }
         } else if name == Some(names.include) || name == Some(names.include_next) {
@@ -749,6 +756,57 @@ impl Preprocessor {
             Diagnostic::warning(text, span).with_code("W0335")
         });
         true
+    }
+
+    /// Moves the extension macros for a `#pragma GCC target`, `push_options`, `pop_options` or
+    /// `reset_options` line, which still goes on to the parser. See `crate::options`.
+    ///
+    /// Only a line gcc reads cleanly is applied, and the parser says what is wrong with the
+    /// others, so a line that is not one is passed over without a word here. A macro the line
+    /// adds is `1`, as on the command line, and is said to have been defined at the line.
+    fn options_pragma(&mut self, rest: &[PpToken], at: Span, interner: &mut Interner) {
+        let spelled = |token: &PpToken| ident_of(token).map(|name| interner.resolve(name));
+        let [gcc, word, after @ ..] = rest else { return };
+        if spelled(gcc) != Some("GCC") {
+            return;
+        }
+        let line = match spelled(word) {
+            Some("push_options") if after.is_empty() => OptionsLine::Push,
+            Some("pop_options") if after.is_empty() => OptionsLine::Pop,
+            Some("reset_options") if after.is_empty() => OptionsLine::Reset,
+            Some("target") => match target_strings(after, interner) {
+                Some(strings) => OptionsLine::Target(strings),
+                None => return,
+            },
+            _ => return,
+        };
+        let Some((before, now)) = self.targets.apply(line) else { return };
+        let (was, is): (Set<String>, Set<String>) = (before.macros().collect(), now.macros().collect());
+        for gone in was.difference(&is) {
+            self.macros.undef(interner.intern(gone));
+        }
+        let one = interner.intern("1");
+        for added in is.difference(&was) {
+            let body = PpToken {
+                kind: PpTokenKind::Number,
+                flags: TokenFlags::EMPTY,
+                value: Some(one),
+                span: at,
+            };
+            let def = MacroDef {
+                name: interner.intern(added),
+                function_like: false,
+                params: Vec::new(),
+                variadic: None,
+                body: vec![body],
+                span: at,
+                builtin: None,
+            };
+            // A program that defined the name itself already has something else for it, and
+            // the line's `1` replaces it the way gcc's does, without a word.
+            self.macros.undef(def.name);
+            self.macros.define(def, interner);
+        }
     }
 
     /// Answers `#pragma GCC system_header`, or says it is not one.
@@ -1871,6 +1929,7 @@ impl Preprocessor {
         {
             return;
         }
+        self.options_pragma(&tokens, span, interner);
         out.push(Tok::synthetic(
             PpTokenKind::Punct(Punct::Hash),
             None,
@@ -2126,6 +2185,28 @@ fn destringize(literal: &str) -> String {
         }
     }
     out
+}
+
+/// The strings of a `#pragma GCC target` line after the word, or `None` for a line gcc does not
+/// read: something other than strings, a `(` that does not close, or anything after them.
+fn target_strings(mut rest: &[PpToken], interner: &Interner) -> Option<Vec<String>> {
+    let open = rest.first().and_then(|token| token.punct()) == Some(Punct::LParen);
+    if open {
+        rest = &rest[1..];
+    }
+    let mut strings = Vec::new();
+    while let Some(token) = rest.first().filter(|token| token.kind == PpTokenKind::StringLit) {
+        strings.push(plain_text(interner.resolve(token.value?))?);
+        rest = &rest[1..];
+        while rest.first().and_then(|token| token.punct()) == Some(Punct::Comma) {
+            rest = &rest[1..];
+        }
+    }
+    if open {
+        (rest.first()?.punct() == Some(Punct::RParen)).then_some(())?;
+        rest = &rest[1..];
+    }
+    (!strings.is_empty() && rest.is_empty()).then_some(strings)
 }
 
 /// What a plain string literal says, its escapes read, or `None` for one with a prefix.
