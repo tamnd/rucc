@@ -52,6 +52,11 @@ use rucc_ir::{
     Pic, SymbolRef, Type, Value,
 };
 
+use std::cell::RefCell;
+
+use rucc_base::hash::{Map, Set};
+use rucc_ir::Block;
+
 use crate::Cfg;
 use crate::dom::Dominators;
 use crate::extents::vouched;
@@ -79,7 +84,22 @@ pub fn answer(module: &mut Module, pic: Pic, look: bool) -> usize {
         let answers: Vec<(Inst, Answer)> = {
             let func = &module[id];
             let cfg = Cfg::new(func);
-            let walk = Walk { module, func, cfg: &cfg, dom: &Dominators::new(&cfg), pic };
+            let dom = Dominators::new(&cfg);
+            let mut walk = Walk {
+                module,
+                func,
+                cfg: &cfg,
+                dom: &dom,
+                pic,
+                live: Set::default(),
+                numbers: RefCell::default(),
+            };
+            // Twice, since the first round reads every store and every way into a block, and
+            // what it rules out can settle a branch the second round reads.
+            for _ in 0..2 {
+                walk.live = walk.live_edges();
+                walk.numbers.borrow_mut().clear();
+            }
             asked
                 .iter()
                 .map(|&inst| {
@@ -163,7 +183,7 @@ fn write(func: &mut Func, inst: Inst, number: i128) {
     let made = func.create_inst(data, &[ty], span);
     func.insert_before(made, inst);
     let value = func[made].results().next().expect("a constant is one value");
-    let forward: rucc_base::hash::Map<_, _> = [(result, value)].into_iter().collect();
+    let forward: Map<_, _> = [(result, value)].into_iter().collect();
     crate::uses::substitute(func, &forward);
     func.remove_inst(inst);
 }
@@ -201,7 +221,7 @@ fn build(func: &mut Func, inst: Inst, running: Running) {
         let args = func.push_values(&[room, left, zero]);
         size = made(func, InstData { args, ..InstData::new(Opcode::Select) }, ty);
     }
-    let forward: rucc_base::hash::Map<_, _> = [(result, size)].into_iter().collect();
+    let forward: Map<_, _> = [(result, size)].into_iter().collect();
     crate::uses::substitute(func, &forward);
     func.remove_inst(inst);
 }
@@ -213,6 +233,13 @@ struct Walk<'a> {
     cfg: &'a Cfg,
     dom: &'a Dominators,
     pic: Pic,
+    /// The edges a branch on something already a constant here does not rule out, or empty
+    /// while that is still being worked out, which counts every edge.
+    live: Set<(Block, Block)>,
+    /// What [`Walk::number`] found for each value it was asked about, so that a condition many
+    /// branches share is worked out once. Emptied whenever `live` changes, since what it found
+    /// rests on that.
+    numbers: RefCell<Map<Value, Option<(Imm, Type)>>>,
 }
 
 /// How many bytes are left in front of an address: `Err` where that is not known, `Ok(None)` where
@@ -240,6 +267,11 @@ impl Walk<'_> {
                 on.push(value);
                 let mut all = Ok(None);
                 for &pred in preds {
+                    // The `return NULL` of an overflow check on a size that does not overflow,
+                    // which `kmalloc_array` has, comes in on an edge that cannot be taken.
+                    if !self.taken(pred, block) {
+                        continue;
+                    }
                     let term = self.func.terminator(pred).ok_or(())?;
                     for call in self.func.successors(term).collect::<Vec<_>>() {
                         if call.block != block {
@@ -263,9 +295,7 @@ impl Walk<'_> {
                     }
                     Opcode::PtrAdd => {
                         let base = *args.first().ok_or(())?;
-                        let (imm, ty) =
-                            crate::fold::evaluated(self.func, *args.get(1).ok_or(())?, 4)
-                                .ok_or(())?;
+                        let (imm, ty) = self.number(*args.get(1).ok_or(())?, 4).ok_or(())?;
                         let step = u64::try_from(imm.signed(ty)).map_err(|_| ())?;
                         match self.left(base, largest, depth, on)? {
                             Some(left) => Ok(Some(left.saturating_sub(step))),
@@ -281,7 +311,7 @@ impl Walk<'_> {
                             Ok(Some(self.func[mem].size))
                         }
                         Some(&count) => {
-                            let (imm, _) = crate::fold::evaluated(self.func, count, 4).ok_or(())?;
+                            let (imm, _) = self.number(count, 4).ok_or(())?;
                             Ok(Some(u64::try_from(imm.unsigned()).map_err(|_| ())?))
                         }
                     },
@@ -309,8 +339,7 @@ impl Walk<'_> {
                         let (alloc, args) = self.allocation(inst).ok_or(())?;
                         let mut size: u64 = 1;
                         for factor in factors(alloc, args).ok_or(())? {
-                            let (imm, ty) =
-                                crate::fold::evaluated(self.func, factor, 4).ok_or(())?;
+                            let (imm, ty) = self.number(factor, 4).ok_or(())?;
                             let factor = u64::try_from(imm.signed(ty)).map_err(|_| ())?;
                             size = size.checked_mul(factor).ok_or(())?;
                         }
@@ -322,19 +351,140 @@ impl Walk<'_> {
         }
     }
 
-    /// The one value ever stored in a fixed local this load reads, when that is all the load can
-    /// read.
+    /// A number this value is whatever way the function runs, worked out the way the fold pass
+    /// would once it got there.
+    ///
+    /// This runs before any of the passes, so it looks further than [`crate::fold::evaluated`]
+    /// does: through a local stored once and read back, and through an overflow checking
+    /// operation on two numbers. `kmalloc_array (256, 3, ...)` is both, a size put into `bytes`
+    /// by `__builtin_mul_overflow` and read back for the call to the allocator.
+    fn number(&self, value: Value, depth: u32) -> Option<(Imm, Type)> {
+        if let Some(found) = crate::fold::constant(self.func, value) {
+            return Some(found);
+        }
+        if let Some(&found) = self.numbers.borrow().get(&value) {
+            return found;
+        }
+        let found = self.worked_out(value, depth);
+        self.numbers.borrow_mut().insert(value, found);
+        found
+    }
+
+    /// [`Walk::number`] for a value that is not a constant itself and was not asked about yet.
+    fn worked_out(&self, value: Value, depth: u32) -> Option<(Imm, Type)> {
+        let next = depth.checked_sub(1)?;
+        let (inst, index) = match self.func[value].def {
+            Def::Result { inst, index } => (inst, index),
+            // The same number on every way in that can be taken, which is how an inlined
+            // `mem_alloc_profiling_enabled ()` hands back its `false`.
+            Def::Param { block, index } => {
+                let mut found = None;
+                for &pred in self.cfg.predecessors(block) {
+                    if !self.taken(pred, block) {
+                        continue;
+                    }
+                    let term = self.func.terminator(pred)?;
+                    for call in self.func.successors(term).collect::<Vec<_>>() {
+                        if call.block != block {
+                            continue;
+                        }
+                        let arg = *self.func[call.args].get(index as usize)?;
+                        let (imm, ty) = self.number(arg, next)?;
+                        if found.is_some_and(|(had, _): (Imm, Type)| had != imm) {
+                            return None;
+                        }
+                        found = Some((imm, ty));
+                    }
+                }
+                return found;
+            }
+        };
+        let data = &self.func[inst];
+        let args = &self.func[data.args];
+        let ty = self.func[value].ty;
+        if !ty.is_int() || !ty.is_scalar() {
+            return None;
+        }
+        match data.opcode {
+            Opcode::Load => self.number(self.only_store(*args.first()?, inst)?, next),
+            Opcode::Expect => self.number(*args.first()?, next),
+            _ if data.results == 2 => {
+                let (a, _) = self.number(*args.first()?, next)?;
+                let (b, _) = self.number(*args.get(1)?, next)?;
+                let at = self.func[data.results().next()?].ty;
+                let (sum, over) = crate::fold::overflowing(data.opcode, a, b, at)?;
+                let found = if index == 0 { sum } else { Imm::from_bits(u128::from(over)) };
+                Some((found, ty))
+            }
+            _ if data.results == 1 => {
+                let found = crate::fold::arithmetic(data, args, ty, &|arg| self.number(arg, next))?;
+                Some((found, ty))
+            }
+            _ => None,
+        }
+    }
+
+    /// Whether the edge can be taken, as far as is known so far.
+    fn taken(&self, from: Block, to: Block) -> bool {
+        self.live.is_empty() || self.live.contains(&(from, to))
+    }
+
+    /// Whether some edge that can be taken comes into the block, or it is the entry.
+    fn reached(&self, block: Block) -> bool {
+        self.func.entry() == Some(block)
+            || self.cfg.predecessors(block).iter().any(|&pred| self.taken(pred, block))
+    }
+
+    /// The edges out of each block the entry reaches, leaving out the one a branch on a number
+    /// does not take.
+    fn live_edges(&self) -> Set<(Block, Block)> {
+        let mut live = Set::default();
+        let Some(entry) = self.func.entry() else { return live };
+        let mut seen: Set<Block> = Set::default();
+        let mut work = vec![entry];
+        seen.insert(entry);
+        while let Some(block) = work.pop() {
+            let Some(term) = self.func.terminator(block) else { continue };
+            let calls: Vec<Block> = self.func.successors(term).map(|call| call.block).collect();
+            let taken = match (self.func[term].opcode, calls.as_slice()) {
+                (Opcode::BrIf, &[then, other]) => {
+                    let cond = self.func[self.func[term].args].first().copied();
+                    match cond.and_then(|cond| self.number(cond, DEPTH)) {
+                        Some((imm, _)) if imm.unsigned() != 0 => vec![then],
+                        Some(_) => vec![other],
+                        None => calls,
+                    }
+                }
+                _ => calls,
+            };
+            for to in taken {
+                live.insert((block, to));
+                if seen.insert(to) {
+                    work.push(to);
+                }
+            }
+        }
+        live
+    }
+
+    /// The value the store that reaches this load put in a fixed local, when that is all the load
+    /// can read.
     ///
     /// The slot is only loaded from, stored to and has its lifetime marked, so nothing else can
-    /// write it or hand its address on. There is one store, of the type the load reads, and it
-    /// comes before the load on every way to it. The load then reads what that store put there
-    /// the last time it ran, and a walk of the stored value answers for every time it ran.
+    /// write it or hand its address on. One store, of the type the load reads, comes before the
+    /// load on every way to it, and no other store can get to the load without passing through
+    /// that one again. The load then reads what that store put there the last time it ran, and a
+    /// walk of the stored value answers for every time it ran.
+    ///
+    /// Other stores are allowed because the inliner gives two inlined bodies one slot when their
+    /// lifetimes do not overlap. keyboard.c's `vt_do_diacrit` has two `__free (kfree)` buffers in
+    /// one slot that way, one in each of two cases of its switch.
     fn only_store(&self, slot: Value, load: Inst) -> Option<Value> {
         let Def::Result { inst: made, .. } = self.func[slot].def else { return None };
         if self.func[made].opcode != Opcode::Alloca || !self.func[self.func[made].args].is_empty() {
             return None;
         }
-        let mut store = None;
+        let mut stores = Vec::new();
         for inst in self.func.blocks().flat_map(|block| self.func.insts(block)) {
             let data = &self.func[inst];
             for (at, &arg) in self.func[data.args].iter().enumerate() {
@@ -342,25 +492,78 @@ impl Walk<'_> {
                     continue;
                 }
                 match (data.opcode, at) {
-                    (Opcode::Load, 0) | (Opcode::LifetimeEnd, _) => {}
-                    (Opcode::Store, 1) if store.is_none() => store = Some(inst),
+                    // A comparison of the address hands it to nobody, and the slot shares its
+                    // address with other inlined locals that a guard's cleanup compares.
+                    (Opcode::Load, 0) | (Opcode::LifetimeEnd | Opcode::ICmp, _) => {}
+                    // A store on a way through the function that cannot be taken never runs.
+                    (Opcode::Store, 1) | (Opcode::Memset, 0)
+                        if !self.reached(self.func.block_of(inst)?) => {}
+                    // `-ftrivial-auto-var-init=zero` clears a local before the program writes
+                    // it, which the kernel builds with. The clearing is a store as well, one this
+                    // walk cannot read, and it is fine for as long as a later one is the one the
+                    // load sees.
+                    (Opcode::Store, 1) | (Opcode::Memset, 0) => stores.push(inst),
                     _ => return None,
                 }
             }
         }
+        // The stores before the load on every way to it are one after another, so the last of
+        // them is the one each of those ways went through most recently.
+        let mut store: Option<Inst> = None;
+        for &each in &stores {
+            if self.precedes(each, load) && store.is_none_or(|had| self.precedes(had, each)) {
+                store = Some(each);
+            }
+        }
         let store = store?;
-        let put = self.func[self.func[store].args][0];
-        let read = self.func[load].first_result?;
-        if self.func[put].ty != self.func[read].ty {
+        if stores.iter().any(|&other| other != store && self.reaches(other, load, store)) {
             return None;
         }
-        let (from, to) = (self.func.block_of(store)?, self.func.block_of(load)?);
-        let before = if from == to {
-            self.func.insts(from).find(|&inst| inst == store || inst == load) == Some(store)
+        if self.func[store].opcode != Opcode::Store {
+            return None;
+        }
+        let put = self.func[self.func[store].args][0];
+        let read = self.func[load].first_result?;
+        (self.func[put].ty == self.func[read].ty).then_some(put)
+    }
+
+    /// Whether one instruction comes before another on every way to the second.
+    fn precedes(&self, first: Inst, then: Inst) -> bool {
+        let (Some(from), Some(to)) = (self.func.block_of(first), self.func.block_of(then)) else {
+            return false;
+        };
+        if from == to {
+            self.func.insts(from).find(|&inst| inst == first || inst == then) == Some(first)
         } else {
             self.dom.dominates(from, to)
+        }
+    }
+
+    /// Whether running on from `from` can get to `to` without going through `through`.
+    fn reaches(&self, from: Inst, to: Inst, through: Inst) -> bool {
+        let Some(start) = self.func.block_of(from) else { return true };
+        // What the rest of a block decides: `Some` when it meets one of the two, `None` when it
+        // runs off the end and the walk goes on into the successors.
+        let scan = |mut insts: Box<dyn Iterator<Item = Inst> + '_>| {
+            insts.find(|&inst| inst == to || inst == through).map(|inst| inst == to)
         };
-        before.then_some(put)
+        let rest = self.func.insts(start).skip_while(move |&inst| inst != from).skip(1);
+        if let Some(found) = scan(Box::new(rest)) {
+            return found;
+        }
+        let mut seen: Set<Block> = Set::default();
+        let mut work: Vec<Block> = self.cfg.successors(start).to_vec();
+        while let Some(block) = work.pop() {
+            if !seen.insert(block) {
+                continue;
+            }
+            match scan(Box::new(self.func.insts(block))) {
+                Some(true) => return true,
+                Some(false) => {}
+                None => work.extend_from_slice(self.cfg.successors(block)),
+            }
+        }
+        false
     }
 
     /// The `alloc_size` of the function a call names, with the arguments of the call, for a direct
@@ -390,7 +593,7 @@ impl Walk<'_> {
         match data.opcode {
             Opcode::PtrAdd => {
                 let args = &self.func[data.args];
-                let (imm, ty) = crate::fold::evaluated(self.func, *args.get(1)?, 4)?;
+                let (imm, ty) = self.number(*args.get(1)?, 4)?;
                 let step = u64::try_from(imm.signed(ty)).ok()?;
                 let mut running = self.running(args[0], size, depth)?;
                 running.offset = running.offset.checked_add(step)?;
@@ -526,7 +729,7 @@ block0(%0: i64):
     /// is the shape a `__free (kfree)` variable has. A second store, or the slot's address going
     /// anywhere but a load or a store, and it is not known.
     #[test]
-    fn an_address_read_back_out_of_a_local_it_was_put_in_once_is_followed() {
+    fn an_address_read_back_out_of_a_local_is_what_the_last_store_put_there() {
         let body = |extra: &str| {
             format!(
                 "
@@ -538,18 +741,109 @@ block0(%0: i64):
     %1 = alloca, size 8, align 8
     %2 = iconst.i64 768
     %3 = call @my(%2) : (i64) -> ptr
+    %4 = iconst.i64 16
+    %5 = call @my(%4) : (i64) -> ptr
     store %3 -> %1, align 8
-{extra}    %4 = load.ptr %1, align 8
-    %5 = object_size.i64 %4, kind 0
-    call @use(%5) : (i64)
+{extra}    %6 = load.ptr %1, align 8
+    %7 = object_size.i64 %6, kind 0
+    call @use(%7) : (i64)
     return
 }}
 "
             )
         };
-        assert_eq!(answers(&body(""), true), [768, 768]);
-        assert_eq!(answers(&body("    store %3 -> %1, align 8\n"), true), [768, -1]);
-        assert_eq!(answers(&body("    call @keep(%1) : (ptr)\n"), true), [768, -1]);
+        assert_eq!(answers(&body(""), true), [768, 16, 768]);
+        // A later store is the one the load reads.
+        assert_eq!(answers(&body("    store %5 -> %1, align 8\n"), true), [768, 16, 16]);
+        assert_eq!(answers(&body("    call @keep(%1) : (ptr)\n"), true), [768, 16, -1]);
+    }
+
+    /// A store on one arm of a branch can be what the load reads, so the store before the branch
+    /// does not answer for it, even though that one comes before the load on every way to it.
+    #[test]
+    fn a_store_that_can_reach_the_load_another_way_leaves_it_unknown() {
+        let body = "
+func @my(i64) -> ptr, linkage(external), attrs(alloc_size=1);
+func @other() -> ptr, linkage(external);
+
+func @f(i1), linkage(external) {
+block0(%0: i1):
+    %1 = alloca, size 8, align 8
+    %2 = iconst.i64 768
+    %3 = call @my(%2) : (i64) -> ptr
+    store %3 -> %1, align 8
+    br_if %0, block1, block2
+
+block1:
+    %4 = call @other() : () -> ptr
+    store %4 -> %1, align 8
+    jump block2
+
+block2:
+    %5 = load.ptr %1, align 8
+    %6 = object_size.i64 %5, kind 0
+    call @use(%6) : (i64)
+    return
+}
+";
+        assert_eq!(answers(body, true), [768, -1]);
+    }
+
+    /// `kmalloc_array` on two constants, inlined twice into one slot for `bytes` that
+    /// `-ftrivial-auto-var-init=zero` clears first. The overflow check cannot fail, so its `NULL`
+    /// is never what comes back, and each load reads the store in front of it.
+    #[test]
+    fn a_size_from_an_overflow_check_through_a_shared_slot_is_followed() {
+        let body = |second: &str| {
+            format!(
+                "
+func @my(i64) -> ptr, linkage(external), attrs(alloc_size=1);
+
+func @f(i32), linkage(external) {{
+block0(%0: i32):
+    %1 = alloca, size 8, align 8
+    %2 = iconst.i64 256
+    %3 = iconst.i64 3
+    %4 = iconst.i8 0
+    %5 = iconst.i32 0
+    %6 = icmp ne %0, %5
+    br_if %6, block1, block4
+
+block1:
+    memset %1, %4, size 8, align 8
+    %7, %8 = umul_overflow.(i64, i1) %2, %3
+    store %7 -> %1, align 8
+    br_if %8, block2, block3
+
+block2:
+    %9 = iconst.i64 0
+    %10 = inttoptr.ptr %9
+    jump block5(%10)
+
+block3:
+    %11 = load.i64 %1, align 8
+    %12 = call @my(%11) : (i64) -> ptr
+    jump block5(%12)
+
+block4:
+    memset %1, %4, size 8, align 8
+    %13 = iconst.i64 {second}
+    store %13 -> %1, align 8
+    %14 = load.i64 %1, align 8
+    %15 = call @my(%14) : (i64) -> ptr
+    %16 = object_size.i64 %15, kind 0
+    call @use(%16) : (i64)
+    return
+
+block5(%17: ptr):
+    %18 = object_size.i64 %17, kind 0
+    call @use(%18) : (i64)
+    return
+}}
+"
+            )
+        };
+        assert_eq!(answers(&body("16"), true), [16, 768]);
     }
 
     /// A pointer chosen by a branch between a local and a global has the larger of what the two

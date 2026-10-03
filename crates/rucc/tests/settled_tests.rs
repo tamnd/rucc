@@ -22,10 +22,16 @@ fn fixture(what: &str, source: &str) -> PathBuf {
 
 /// The assembly the compiler writes for that source at `-O2`.
 fn asm(what: &str, source: &str) -> String {
+    asm_with(what, source, &[])
+}
+
+/// [`asm`] with more flags, for a fixture whose shape needs one the kernel builds with.
+fn asm_with(what: &str, source: &str, flags: &[&str]) -> String {
     let path = fixture(what, source);
     let out = Command::new(env!("CARGO_BIN_EXE_rucc"))
         .arg(format!("--target={TARGET}"))
         .args(["-O2", "-S", "-o", "-"])
+        .args(flags)
         .arg(&path)
         .output()
         .expect("the compiler is built before its own tests run");
@@ -281,4 +287,46 @@ fn an_object_size_through_a_cleanup_variable_is_answered() {
         }\n";
     let listing = asm("cleanup-objsize", source);
     assert!(!listing.contains("ud2"), "the test is still there:\n{listing}");
+}
+
+#[test]
+fn a_size_worked_out_by_an_overflow_check_on_two_constants_is_a_constant() {
+    let source = "void a(unsigned long); void b(unsigned long);\n\
+        static inline __attribute__((always_inline)) void km(unsigned long size) {\n\
+            if (__builtin_constant_p(size)) a(size); else b(size);\n\
+        }\n\
+        void f(void) { unsigned long bytes; if (__builtin_mul_overflow(256ul, 3ul, &bytes)) return; km(bytes); }\n";
+    let listing = asm("mul-overflow-constant", source);
+    assert!(listing.contains("jmp\ta") && !listing.contains("\tb\n"), "the test went:\n{listing}");
+}
+
+#[test]
+fn an_object_size_through_kmalloc_array_and_a_cleanup_variable_is_answered() {
+    let source = "typedef unsigned long size_t;\n\
+        void *kbig(size_t n) __attribute__((alloc_size(1)));\n\
+        void kfree(void *p);\n\
+        void copy_overflow(int, size_t);\n\
+        unsigned long raw_copy(void *to, const void *from, unsigned long n);\n\
+        extern int table_size;\n\
+        static inline void free_it(void *p) { void *q = *(void **)p; if (q) kfree(q); }\n\
+        static inline __attribute__((alloc_size(1, 2))) void *kmalloc_array(size_t n, size_t size) {\n\
+            size_t bytes;\n\
+            if (__builtin_expect(__builtin_mul_overflow(n, size, &bytes), 0)) return 0;\n\
+            return kbig(bytes);\n\
+        }\n\
+        static inline __attribute__((always_inline)) int check(const void *addr, size_t bytes) {\n\
+            int sz = __builtin_object_size(addr, 0);\n\
+            if (sz >= 0 && sz < bytes) { copy_overflow(sz, bytes); return 0; }\n\
+            if (__builtin_expect(bytes > 0x7fffffff, 0)) __builtin_trap();\n\
+            return 1;\n\
+        }\n\
+        int f(void *to) {\n\
+            int n = table_size;\n\
+            char __attribute__((cleanup(free_it))) *dia = kmalloc_array(256, 3);\n\
+            if (!dia) return -12;\n\
+            if (check(dia, n * 3ul)) return raw_copy(to, dia, n * 3ul);\n\
+            return 0;\n\
+        }\n";
+    let listing = asm_with("kmalloc-array-cleanup", source, &["-ftrivial-auto-var-init=zero"]);
+    assert!(!listing.contains("ud2"), "the test went:\n{listing}");
 }

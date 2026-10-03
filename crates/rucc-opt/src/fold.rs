@@ -82,12 +82,13 @@
 
 use rucc_base::Symbol;
 use rucc_base::float::{Float, Status};
+use rucc_base::hash::Map;
 use rucc_ir::{
     Block, Def, Extra, Flags, Func, FuncId, Imm, Inst, InstData, IntPred, Module, Opcode,
     SymbolRef, Type, Value,
 };
 
-use crate::{Analyses, Analysis, Fuel, Pass, Preserved, Stats};
+use crate::{Analyses, Analysis, Fuel, Pass, Preserved, Stats, uses};
 
 /// Recorded once for each instruction that became a constant.
 const FOLDED: &str = "instruction with constant operands folded to a constant";
@@ -134,9 +135,21 @@ impl Pass for Fold {
 pub(crate) fn fold_in(func: &mut Func, fuel: &mut Fuel) -> Stats {
     let blocks: Vec<Block> = func.blocks().collect();
     let mut stats = Stats::new();
+    let mut forward = Map::default();
+    let mut split_up = Vec::new();
     for block in blocks {
         let insts: Vec<Inst> = func.insts(block).collect();
         for inst in insts {
+            if let Some(both) = overflow(func, inst) {
+                if !fuel.take() {
+                    stats.missed(NO_FUEL);
+                    continue;
+                }
+                split(func, inst, both, &mut forward);
+                split_up.push(inst);
+                stats.optimized(FOLDED);
+                continue;
+            }
             let Some(folded) = evaluate(func, inst) else { continue };
             if !fuel.take() {
                 // Out of fuel, which is a request to stop transforming rather than to stop
@@ -150,7 +163,88 @@ pub(crate) fn fold_in(func: &mut Func, fuel: &mut Fuel) -> Stats {
             stats.optimized(FOLDED);
         }
     }
+    if !forward.is_empty() {
+        uses::substitute(func, &forward);
+        // Gone here rather than left for dead code, because `crate::constant_p` runs this until a
+        // round folds nothing, and an operation left behind on two constants would be folded
+        // again every round and keep that from ever happening.
+        for inst in split_up {
+            func.remove_inst(inst);
+        }
+    }
     stats
+}
+
+/// The result and the overflow bit of an overflow checking operation on two constants.
+///
+/// `__builtin_mul_overflow (256, 3, &bytes)` is how the kernel's `kmalloc_array` works out a size,
+/// and gcc folds it to 768 before it asks `__builtin_constant_p` about the size. Left alone the
+/// size is not a constant there, `kmalloc` takes the out of line path, and the object size of
+/// what it returns is lost with it. That is the `WARN_ON_ONCE` gcc drops in keyboard.c's
+/// `vt_do_kdgkbdiacr` and rucc kept.
+fn overflow(func: &Func, inst: Inst) -> Option<(Imm, bool)> {
+    let data = &func[inst];
+    let &[left, right] = &func[data.args] else { return None };
+    let ty = func[data.results().next()?].ty;
+    let (a, _) = constant(func, left)?;
+    let (b, _) = constant(func, right)?;
+    overflowing(data.opcode, a, b, ty)
+}
+
+/// What an overflow checking operation gives for two constants: the wrapped result and whether
+/// the exact one did not fit. `None` for anything that is not one of the six.
+pub(crate) fn overflowing(opcode: Opcode, a: Imm, b: Imm, ty: Type) -> Option<(Imm, bool)> {
+    let signed = match opcode {
+        Opcode::SAddOverflow | Opcode::SSubOverflow | Opcode::SMulOverflow => true,
+        Opcode::UAddOverflow | Opcode::USubOverflow | Opcode::UMulOverflow => false,
+        _ => return None,
+    };
+    if !ty.is_int() || ty.is_vector() {
+        return None;
+    }
+    let width = ty.bits();
+    let fits = if signed {
+        let (a, b) = (a.signed(ty), b.signed(ty));
+        let exact = match opcode {
+            Opcode::SAddOverflow => a.checked_add(b),
+            Opcode::SSubOverflow => a.checked_sub(b),
+            _ => a.checked_mul(b),
+        };
+        exact.is_some_and(|exact| Imm::int(exact, ty).signed(ty) == exact)
+    } else {
+        let (a, b) = (a.unsigned(), b.unsigned());
+        let exact = match opcode {
+            Opcode::UAddOverflow => a.checked_add(b),
+            Opcode::USubOverflow => a.checked_sub(b),
+            _ => a.checked_mul(b),
+        };
+        exact.is_some_and(|exact| width >= 128 || exact >> width == 0)
+    };
+    let (a, b) = (a.unsigned(), b.unsigned());
+    let wrapped = match opcode {
+        Opcode::SAddOverflow | Opcode::UAddOverflow => a.wrapping_add(b),
+        Opcode::SSubOverflow | Opcode::USubOverflow => a.wrapping_sub(b),
+        _ => a.wrapping_mul(b),
+    };
+    Some((Imm::from_bits(wrapped & Imm::int(-1, ty).unsigned()), !fits))
+}
+
+/// Puts two constants in front of a folded overflow operation and points its readers at them.
+///
+/// An instruction with two results has no one constant to become, so unlike the rest of this pass
+/// it is not changed in place, and the caller takes it out once nothing reads it.
+fn split(func: &mut Func, inst: Inst, (sum, over): (Imm, bool), forward: &mut Map<Value, Value>) {
+    let results: Vec<Value> = func[inst].results().collect();
+    let span = func.span(inst);
+    for (result, imm) in results.into_iter().zip([sum, Imm::from_bits(u128::from(over))]) {
+        let ty = func[result].ty;
+        let at = func.add_imm(imm);
+        let data = InstData { extra: Extra::Imm(at), ..InstData::new(Opcode::IConst) };
+        let made = func.create_inst(data, &[ty], span);
+        func.insert_before(made, inst);
+        let value = func[made].results().next().expect("a constant is one value");
+        forward.insert(result, value);
+    }
 }
 
 /// Turns the instruction into the constant it was worked out to be, keeping its result value.
@@ -808,7 +902,8 @@ mod tests {
     use rucc_base::Interner;
     use rucc_base::float::Format;
     use rucc_ir::{
-        Block, Builder, Extra, Flags, Float, Func, IntPred, Module, Opcode, Signature, Type, Value,
+        Block, Builder, Extra, Flags, Float, Func, Imm, IntPred, Module, Opcode, Signature, Type,
+        Value,
     };
     use rucc_target::{Arch, Env, Os, TargetInfo, Triple};
 
@@ -1222,6 +1317,56 @@ mod tests {
                 assert_eq!(value_of(&func, out, Type::int(32)), Some(i128::from(i32::MIN)));
             }
         }
+    }
+
+    #[test]
+    fn a_folded_overflow_check_is_gone_so_the_next_round_has_nothing_to_fold() {
+        // `crate::constant_p` folds round after round until a round changes nothing, and an
+        // operation left behind on its two constants kept every round changing. In the kernel
+        // that left md.c's and netconsole.c's `flush_workqueue` questions to the fallback answer
+        // and the call to `__warn_flushing_systemwide_wq` stayed.
+        let text = "\
+; ModuleID = 't.c'
+; format 0
+target triple = \"x86_64-unknown-linux-gnu\"
+target datalayout = \"e-p:64:64-i64:64-f80:128-S128\"
+func @f() -> i64, linkage(external) {
+block0:
+    %0 = iconst.i64 256
+    %1 = iconst.i64 3
+    %2, %3 = umul_overflow.(i64, i1) %0, %1
+    return %2
+}
+";
+        let mut names = Interner::new();
+        let mut module = rucc_ir::parse(text, &mut names).expect("the fixture parses");
+        let id = module.funcs().last().expect("there is a function");
+        let func = &mut module[id];
+        assert!(super::fold_in(func, &mut Fuel::unlimited()).changed());
+        assert!(!super::fold_in(func, &mut Fuel::unlimited()).changed());
+        let func = &module[id];
+        let left = func.blocks().flat_map(|block| func.insts(block));
+        assert!(left.into_iter().all(|inst| func[inst].opcode != Opcode::UMulOverflow));
+    }
+
+    #[test]
+    fn an_overflow_check_on_two_constants_gives_the_wrapped_result_and_whether_it_wrapped() {
+        let check = |opcode, a: i128, b: i128, bits| {
+            let ty = Type::int(bits);
+            let (sum, over) =
+                super::overflowing(opcode, Imm::int(a, ty), Imm::int(b, ty), ty).unwrap();
+            (sum.signed(ty), over)
+        };
+        assert_eq!(check(Opcode::UMulOverflow, 256, 3, 64), (768, false));
+        assert_eq!(check(Opcode::UMulOverflow, 1 << 32, 1 << 32, 64), (0, true));
+        assert_eq!(check(Opcode::UAddOverflow, 255, 1, 8), (0, true));
+        assert_eq!(check(Opcode::USubOverflow, 1, 2, 8), (-1, true));
+        assert_eq!(check(Opcode::SAddOverflow, 127, 1, 8), (-128, true));
+        assert_eq!(check(Opcode::SSubOverflow, -128, 1, 8), (127, true));
+        assert_eq!(check(Opcode::SMulOverflow, -8, 16, 8), (-128, false));
+        assert_eq!(check(Opcode::SMulOverflow, -1, -128, 8), (-128, true));
+        let ty = Type::int(64);
+        assert!(super::overflowing(Opcode::Add, Imm::int(1, ty), Imm::int(1, ty), ty).is_none());
     }
 
     #[test]
