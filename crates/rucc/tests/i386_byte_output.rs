@@ -9,6 +9,10 @@
 //! scratch register too, which is `esi`. fs/buffer.c reads `buffer_uptodate` that way in
 //! `fsync_buffers_list`. Such an output is now given a register with a low byte whenever one is
 //! free.
+//!
+//! A `q` input kept on the stack was read in through `esi` the same way. The kernel's `writeb` is
+//! one, and the i915 driver's `gen5_write8` keeps the value on the stack across two calls before
+//! it. Such an input is now pinned to a register with a low byte whenever one is free.
 
 use std::process::Command;
 
@@ -62,6 +66,19 @@ int f(struct bh **list, void *l) {
     lock(l);
   }
   return err;
+}
+";
+
+const INPUT: &str = "\
+struct u { char *regs; int off; void *rpm; };
+void dummy(struct u *); void held(void *);
+static inline void writeb(unsigned char val, volatile void *addr) {
+  asm volatile(\"movb %0,%1\" :: \"q\"(val), \"m\"(*(volatile unsigned char *)addr) : \"memory\");
+}
+void f(struct u *u, unsigned reg, unsigned char val) {
+  held(u->rpm);
+  dummy(u);
+  writeb(val, u->regs + u->off + reg);
 }
 ";
 
@@ -120,6 +137,16 @@ fn the_byte_output_shares_with_an_input_when_inputs_fill_the_four() {
 fn a_byte_output_whose_value_is_kept_on_the_stack_is_written_to_a_byte_register() {
     for level in ["-O1", "-O2"] {
         let text = listing_of(SPILLED, &format!("{level} -mregparm=3"));
+        for byteless in ["%sil", "%dil", "%bpl", "%spl"] {
+            assert!(!text.contains(byteless), "{level}: {byteless}:\n{text}");
+        }
+    }
+}
+
+#[test]
+fn a_byte_input_whose_value_is_kept_on_the_stack_is_read_into_a_byte_register() {
+    for level in ["-O0", "-O1", "-O2"] {
+        let text = listing_of(INPUT, &format!("{level} -mregparm=3 -fno-omit-frame-pointer"));
         for byteless in ["%sil", "%dil", "%bpl", "%spl"] {
             assert!(!text.contains(byteless), "{level}: {byteless}:\n{text}");
         }
