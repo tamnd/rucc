@@ -4001,7 +4001,7 @@ fn link_all(opts: &Options, plan: &Plan, link: &LinkOptions, verbose: bool) -> i
     // as they are, which is the program without the work across files and nothing worse.
     if opts.lto.requested {
         let started = std::time::Instant::now();
-        let joined = crate::lto::link(opts, link.shared, &items, &scratch.dir);
+        let joined = lto::link(opts, link.shared, &items, &scratch.dir);
         let mut stderr = std::io::stderr().lock();
         match joined {
             Ok(Some(joined)) => items = joined,
