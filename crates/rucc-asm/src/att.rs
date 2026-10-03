@@ -215,14 +215,25 @@ fn listing(
         writer.out.push_str(writer.directives.text());
         writer.out.push('\n');
     }
+    // Each alias just after what it names, as gcc writes them, and one of an alias just after
+    // that. That is the order the names go into the symbol table in, and the kernel's modpost
+    // reads a file's device tables in that order. One whose target is not here goes last.
+    let mut by_target: Map<&str, Vec<&Alias>> = Map::default();
+    for alias in aliases {
+        by_target.entry(alias.target.as_str()).or_default().push(alias);
+    }
     for func in funcs {
         writer.func(func)?;
+        writer.aliases(&mut by_target, names.resolve(func.name));
     }
     for var in &globals.vars {
         writer.variable(var);
+        writer.aliases(&mut by_target, &var.name);
     }
     for alias in aliases {
-        writer.directives.alias(&mut writer.out, alias);
+        if by_target.contains_key(alias.target.as_str()) {
+            writer.directives.alias(&mut writer.out, alias);
+        }
     }
     // Last, which is where gcc puts them. Each is a name and no bytes, so there is nothing to open
     // a section for and nothing to close.
@@ -776,6 +787,15 @@ impl Writer<'_> {
             CfiOp::RememberState => writeln!(self.out, "\t.cfi_remember_state"),
             CfiOp::RestoreState => writeln!(self.out, "\t.cfi_restore_state"),
         };
+    }
+
+    /// The aliases of `target` that are still to be written, and then those of each of them.
+    fn aliases(&mut self, by_target: &mut Map<&str, Vec<&Alias>>, target: &str) {
+        let Some(named) = by_target.remove(target) else { return };
+        for alias in named {
+            self.directives.alias(&mut self.out, alias);
+            self.aliases(by_target, &alias.name);
+        }
     }
 
     /// One variable: what the assembler is told about it, then its image.
@@ -2036,6 +2056,41 @@ mod tests {
         // Four bytes of image and not sixteen, since three more names for one variable are three
         // more names and not three more variables.
         assert_eq!(text.matches(".long\t1").count(), 1, "{text}");
+    }
+
+    /// gcc writes each alias just after what it names, so the names reach the symbol table in the
+    /// order the targets are written and not the order the aliases were declared in. The kernel's
+    /// modpost reads `MODULE_DEVICE_TABLE` aliases in that order.
+    #[test]
+    fn a_second_name_follows_what_it_names() {
+        let names = Interner::new();
+        let alias = |name: &str, target: &str| Alias {
+            name: name.to_owned(),
+            target: target.to_owned(),
+            binding: Binding::Local,
+            visibility: Visibility::Default,
+            ifunc: false,
+        };
+        let aliases = [alias("for_b", "b"), alias("for_a", "a"), alias("again", "for_a")];
+        let vars = vec![
+            var("a", Place::Written, vec![Piece::Scalar(vec![1, 0, 0, 0])]),
+            var("b", Place::Written, vec![Piece::Scalar(vec![2, 0, 0, 0])]),
+        ];
+        let text = print(
+            &[],
+            &Globals { vars, ..Globals::default() },
+            &aliases,
+            &names,
+            &target(Os::Linux),
+            true,
+            Output::default(),
+        )
+        .expect("a machine with a writer");
+        let at = |line: &str| text.find(line).unwrap_or_else(|| panic!("{line}: {text}"));
+        assert!(at(".long\t1") < at("\t.set\tfor_a,a\n"), "{text}");
+        assert!(at("\t.set\tfor_a,a\n") < at("\t.set\tagain,for_a\n"), "{text}");
+        assert!(at("\t.set\tagain,for_a\n") < at(".long\t2"), "{text}");
+        assert!(at(".long\t2") < at("\t.set\tfor_b,b\n"), "{text}");
     }
 
     /// An ifunc is the one alias that says a type, between the binding and the `.set`, which is
