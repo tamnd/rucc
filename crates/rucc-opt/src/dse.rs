@@ -199,6 +199,12 @@ impl Walk<'_> {
         Some(Store { inst, access, lo, hi, private, bulk })
     }
 
+    /// Whether this is the end of the lifetime of the local the store writes.
+    fn ends(&self, store: &Store, inst: Inst) -> bool {
+        let Origin::Local(_) = store.access.origin else { return false };
+        self.alias.writes(inst).is_some_and(|ended| ended.origin == store.access.origin)
+    }
+
     /// Walks every path from just after the store, which is in this block at this index.
     fn fate(&mut self, store: &Store, home: Block, next: usize) -> Fate {
         let mut needed: Option<(i128, i128)> = None;
@@ -230,6 +236,14 @@ impl Walk<'_> {
                     }
                     // A program never gets here, so nothing is ever read here.
                     Opcode::Unreachable | Opcode::UnreachableHint => {
+                        ended = true;
+                        break;
+                    }
+                    // The local is gone from here on as much as it is after a return, and whoever
+                    // was handed its address may no longer read it. The front end ends every local
+                    // in front of the return, so without this a fill of a buffer before returning
+                    // was kept whenever the buffer had been passed to a call.
+                    Opcode::LifetimeEnd if self.ends(store, inst) => {
                         ended = true;
                         break;
                     }
@@ -300,8 +314,9 @@ impl Walk<'_> {
             ..store.access
         };
         match opcode {
-            // A write reads nothing.
-            Opcode::Store | Opcode::Memset | Opcode::AtomicStore => None,
+            // A write reads nothing, and neither does the end of a local's lifetime, which is a
+            // write of the whole of it that nothing may read back.
+            Opcode::Store | Opcode::Memset | Opcode::AtomicStore | Opcode::LifetimeEnd => None,
             Opcode::Call | Opcode::CallIndirect | Opcode::TailCall => {
                 if self.alias.read_by(&narrowed, inst).is_no() { None } else { live }
             }
@@ -653,6 +668,55 @@ block0(%0: i32):
 "#,
         );
         assert_eq!(stores(&out), 1, "{out}");
+    }
+
+    /// A fill of a local whose address a call was handed earlier is dead when the local's
+    /// lifetime ends after it, which is `memset(k, 0, sizeof k)` in front of a return, and the end
+    /// of another local's lifetime reads nothing of it.
+    #[test]
+    fn a_fill_of_a_local_whose_lifetime_ends_after_it_goes() {
+        let out = cleaned(
+            r#"
+func @use(ptr), linkage(external);
+
+func @f(), linkage(external) {
+block0:
+    %0 = alloca, size 32, align 16
+    %1 = alloca, size 8, align 8
+    call @use(%0) : (ptr)
+    call @use(%1) : (ptr)
+    %2 = iconst.i8 0
+    memset %0, %2, size 32, align 16
+    lifetime_end %1
+    lifetime_end %0
+    call @use(%1) : (ptr)
+    return
+}
+"#,
+        );
+        assert!(!out.contains("memset"), "{out}");
+
+        // The end of the other local is not the end of this one, and the call after it may read
+        // this one through the address it was handed.
+        let out = cleaned(
+            r#"
+func @use(ptr), linkage(external);
+
+func @f(), linkage(external) {
+block0:
+    %0 = alloca, size 32, align 16
+    %1 = alloca, size 8, align 8
+    call @use(%0) : (ptr)
+    %2 = iconst.i8 0
+    memset %0, %2, size 32, align 16
+    lifetime_end %1
+    call @use(%1) : (ptr)
+    lifetime_end %0
+    return
+}
+"#,
+        );
+        assert!(out.contains("memset"), "{out}");
     }
 
     /// `*p = 0` with `p` moving on every trip writes a new word each time. The walk comes round
