@@ -454,6 +454,9 @@ fn pinned(operand: &AsmOperand<'_>) -> Option<PhysReg> {
 const BYTE_REGS: [PhysReg; 4] =
     [rucc_target::x86::EAX, rucc_target::x86::EBX, rucc_target::x86::ECX, rucc_target::x86::EDX];
 
+/// The register each operand of an `asm` statement is pinned to, by operand, where it has one.
+type Pins = [Option<(PhysReg, RegClass)>];
+
 /// Pins an i386 `q` output that would otherwise have no register with a low byte to go in.
 ///
 /// The allocator hands out only the four registers with a low byte on i386, since `esi` and `edi`
@@ -538,7 +541,7 @@ fn shared_with_input(
     list: &[AsmOperand<'_>],
     constraints: &str,
     outputs: &[usize],
-    taken: &dyn Fn(PhysReg, &[Option<(PhysReg, RegClass)>]) -> bool,
+    taken: &dyn Fn(PhysReg, &Pins) -> bool,
     gpr: RegClass,
 ) {
     let entries: Vec<&str> = constraints.split(',').collect();
