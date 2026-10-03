@@ -578,6 +578,45 @@ fn shared_with_input(
     }
 }
 
+/// Pins each i386 `q` input to a register with a low byte that nothing else in the statement has.
+///
+/// An input whose value the allocator keeps on the stack is read in through the scratch register,
+/// which is `esi`, and `movb %sil` is not an instruction i386 has. The kernel's `writeb` is a
+/// `"q"` input written with `movb`, and the i915 driver's `gen5_write8` keeps the value on the stack
+/// across two calls before it. Pinned, the value is read from the stack straight into the
+/// register the input names. An input with nowhere left to go is left to the allocator, which
+/// hands out only registers with a low byte as long as it can.
+fn byte_inputs_pinned(
+    pins: &mut [Option<(PhysReg, RegClass)>],
+    list: &[AsmOperand<'_>],
+    constraints: &str,
+    clobbered: &[(PhysReg, RegClass)],
+    gpr: RegClass,
+) {
+    let entries: Vec<&str> = constraints.split(',').collect();
+    for index in 0..list.len() {
+        let operand = &list[index];
+        let entry = entries.get(index).copied().unwrap_or("");
+        let byte = entry.chars().any(|c| matches!(c, 'q' | 'Q'))
+            && entry.chars().all(|c| matches!(c, 'r' | 'q' | 'Q' | '%'));
+        if operand.role != rucc_ir::AsmRole::Input
+            || operand.value.is_none()
+            || operand.memory
+            || operand.immediate
+            || operand.tied.is_some()
+            || pins[index].is_some()
+            || !byte
+        {
+            continue;
+        }
+        let free = BYTE_REGS.iter().copied().find(|&reg| {
+            !clobbered.contains(&(reg, gpr)) && pins.iter().flatten().all(|&(at, _)| at != reg)
+        });
+        let Some(reg) = free else { return };
+        pins[index] = Some((reg, gpr));
+    }
+}
+
 /// Whether a constraint says nothing but what it says on every machine.
 ///
 /// [`AsmOperands::read`] gives the x86 meaning to every letter it knows, and most of the letters
@@ -5471,6 +5510,7 @@ impl<'a> Lowering<'a> {
         if !a64 && self.conv.word == 4 {
             let constraints = self.names.resolve(self.source[asm].constraints).to_string();
             bytes_pinned(&mut pins, list, &constraints, &clobbered, self.gpr);
+            byte_inputs_pinned(&mut pins, list, &constraints, &clobbered, self.gpr);
         }
         // The operand in memory that is the instruction's own memory operand, which is one in this
         // function's frame when there is one, since that is spelled from the stack pointer rather
