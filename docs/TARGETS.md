@@ -34,7 +34,7 @@ A tier here does not say whether the evidence behind it came from hardware or fr
 | `aarch64-windows-gnu` | 2 | 2 | yes | UCRT on Windows 11 on Arm, with rung 1 run natively on windows-11-arm |
 | `aarch64-windows-msvc` | 4 | 3 | yes |  |
 | `arm64ec-windows-msvc` | 4 | 4 | no | a separate symbol namespace, thunks and hybrid images, declined in document 06.8 |
-| `i686-windows-gnu` | 4 | 3 | no | stdcall, fastcall and thiscall decoration, the only place C has mangling |
+| `i686-windows-gnu` | 3 | 3 | no | stdcall, fastcall and thiscall decoration, the only place C has mangling |
 | `x86_64-freebsd` | 4 | 2 | later | stub libraries, as zig does, and FreeBSD 14 or later |
 | `aarch64-freebsd` | 4 | 2 | later |  |
 | `x86_64-netbsd` | 4 | 3 | no | NetBSD 10.1 or later |

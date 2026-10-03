@@ -327,7 +327,7 @@ pub const TARGETS: &[TargetEntry] = &[
     },
     TargetEntry {
         tuple: "i686-windows-gnu",
-        tier: Tier::Recognized,
+        tier: Tier::InProgress,
         planned: Tier::InProgress,
         host: Host::No,
         note: "stdcall, fastcall and thiscall decoration, the only place C has mangling",
