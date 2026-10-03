@@ -703,6 +703,10 @@ pub fn parse_args(args: &[String]) -> Result<Action, CliError> {
     // Whether `-std=` or `-ansi` said what the dialect is. When neither did, a claimed GCC release
     // decides it after the loop, the way that release's own default did.
     let mut std_given = false;
+    // Each flag that came with a later gcc than some claim could be, with that release and what
+    // gcc says to it. Weighed after the loop, because `-fgnuc-version=` may come after them.
+    // `spec/04-driver-and-cli.md` section 4.12.
+    let mut newer: Vec<(u32, String)> = Vec::new();
     // What `--fetch` named, and whether `--offline` forbade it. Both are weighed after the loop
     // because either can be written after the other.
     let mut fetch: Option<String> = None;
@@ -798,6 +802,9 @@ pub fn parse_args(args: &[String]) -> Result<Action, CliError> {
                 let Some(row) = kbuild::row(arg, arch) else { continue };
                 if let kbuild::Answer::Refused(why, issue) = row.answer {
                     return Err(err(kbuild::refusal(arg, why, issue)));
+                }
+                if row.since > 0 {
+                    newer.push((row.since, format!("unknown option `{arg}`")));
                 }
                 // The one row with something to remember: `x18` is the static chain of a nested
                 // function, which the lowering refuses to build once it has been promised away.
@@ -2654,8 +2661,17 @@ pub fn parse_args(args: &[String]) -> Result<Action, CliError> {
                     if !warnings::known(named) {
                         return Err(err(format!("`{arg}`: no option `-W{named}`")));
                     }
-                } else if !name.is_empty() && !name.starts_with("no-") && !warnings::known(name) {
-                    return Err(err(format!("unknown option `{arg}`")));
+                    if warnings::since(named) > 0 {
+                        let why = format!("`{arg}`: no option `-W{named}`");
+                        newer.push((warnings::since(named), why));
+                    }
+                } else if !name.is_empty() && !name.starts_with("no-") {
+                    if !warnings::known(name) {
+                        return Err(err(format!("unknown option `{arg}`")));
+                    }
+                    if warnings::since(name) > 0 {
+                        newer.push((warnings::since(name), format!("unknown option `{arg}`")));
+                    }
                 }
             }
             // Whether the object says what made it, in `.comment`, as gcc's does.
@@ -3070,6 +3086,13 @@ pub fn parse_args(args: &[String]) -> Result<Action, CliError> {
     // `spec/04-driver-and-cli.md` section 4.6. Only when the claim was written, so the default
     // claim leaves the default dialect alone, and not on an MSVC row, where the claim is
     // `__GNUC__` and nothing else, as it is in clang.
+    // A flag the claimed release did not have yet is an unknown option, as it is to that gcc.
+    // Only when the claim was written, since the default claim is the newest release.
+    if opts.gnuc_given {
+        if let Some((_, why)) = newer.into_iter().find(|(since, _)| opts.gnuc.major < *since) {
+            return Err(err(why));
+        }
+    }
     if !std_given && opts.gnuc_given && opts.target.env != rucc_target::Env::Msvc {
         opts.std = opts.gnuc.default_std();
         opts.gnu_extensions = true;
@@ -9190,5 +9213,30 @@ mod tests {
             let flag = format!("-Werror={name}");
             assert_eq!(refused(&[&flag, "-c", "a.c"]), format!("`{flag}`: no option `-W{name}`"));
         }
+    }
+
+    /// kbuild probes these with `cc-option` and gcc 14 refuses them, so a build claiming gcc 14
+    /// refuses them too, wherever the claim is on the line, and a claim of the release that added
+    /// one takes it.
+    #[test]
+    fn a_flag_newer_than_the_claimed_gcc_is_unknown_to_it() {
+        for flag in [
+            "-fzero-init-padding-bits=all",
+            "-fdiagnostics-show-context=2",
+            "-Wunterminated-string-initialization",
+        ] {
+            let why = format!("unknown option `{flag}`");
+            assert_eq!(refused(&[KERNEL_X86, "-fgnuc-version=14.2.0", flag, "-c", "a.c"]), why);
+            assert_eq!(refused(&[KERNEL_X86, flag, "-fgnuc-version=14", "-c", "a.c"]), why);
+            compile(&[KERNEL_X86, flag, "-fgnuc-version=16.1.0", "-c", "a.c"]);
+        }
+        compile(&[KERNEL_X86, "-fgnuc-version=15", "-fzero-init-padding-bits=all", "-c", "a.c"]);
+        let why = refused(&["-fgnuc-version=15", "-fdiagnostics-show-context", "-c", "a.c"]);
+        assert_eq!(why, "unknown option `-fdiagnostics-show-context`");
+        // gcc takes `-Wno-` of a name it does not know, and kbuild probes the positive form.
+        compile(&["-fgnuc-version=14", "-Wno-unterminated-string-initialization", "-c", "a.c"]);
+        let flag = "-Werror=unterminated-string-initialization";
+        let why = format!("`{flag}`: no option `-Wunterminated-string-initialization`");
+        assert_eq!(refused(&["-fgnuc-version=14", flag, "-c", "a.c"]), why);
     }
 }

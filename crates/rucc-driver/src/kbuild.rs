@@ -16,6 +16,11 @@
 //! A row can be limited to one architecture, and on any other the flag is not in the table at
 //! all, which leaves it to the rest of the parser. That is gcc's arrangement: the `-m` flags of one
 //! back end are unknown options to another.
+//!
+//! A row can also name the gcc release that added its flag, and under `-fgnuc-version=` of an
+//! older one the flag is an unknown option, as it is to that gcc. kbuild probes
+//! `-fzero-init-padding-bits=all` with `cc-option`, so a build claiming gcc 14 has to fail the
+//! probe the way gcc 14 does, or its command line is not the gcc 14 build's.
 
 use rucc_target::Arch;
 
@@ -37,18 +42,26 @@ pub(crate) struct Row {
     /// The one architecture the flag is for, or `None` for all of them.
     pub(crate) arch: Option<Arch>,
     pub(crate) answer: Answer,
+    /// The first gcc major release that has the flag, or 0 for one every release this compiler
+    /// claims to be has.
+    pub(crate) since: u32,
 }
 
 const fn same(flag: &'static str, why: &'static str) -> Row {
-    Row { flag, arch: None, answer: Answer::Same(why) }
+    Row { flag, arch: None, answer: Answer::Same(why), since: 0 }
 }
 
 const fn refused(flag: &'static str, why: &'static str, issue: Option<u32>) -> Row {
-    Row { flag, arch: None, answer: Answer::Refused(why, issue) }
+    Row { flag, arch: None, answer: Answer::Refused(why, issue), since: 0 }
 }
 
 const fn only(arch: Arch, row: Row) -> Row {
     Row { arch: Some(arch), ..row }
+}
+
+/// A row whose flag came with gcc `major`.
+const fn since(major: u32, row: Row) -> Row {
+    Row { since: major, ..row }
 }
 
 const X86: Arch = Arch::X86_64;
@@ -87,8 +100,11 @@ pub(crate) const TABLE: &[Row] = &[
          itself, and the object has the same .eh_frame either way",
     ),
     same("-fno-dwarf2-cfi-asm", "the same flag, and the object is the same either way"),
-    same("-fdiagnostics-show-context", "it decides how much source a diagnostic quotes"),
-    same("-fdiagnostics-show-context=*", "it decides how much source a diagnostic quotes"),
+    since(16, same("-fdiagnostics-show-context", "it decides how much source a diagnostic quotes")),
+    since(
+        16,
+        same("-fdiagnostics-show-context=*", "it decides how much source a diagnostic quotes"),
+    ),
     // Permissions to do something this compiler does not do, or requests for what it does.
     same(
         "-fpartial-inlining",
@@ -108,14 +124,23 @@ pub(crate) const TABLE: &[Row] = &[
          already made",
     ),
     same("-fallow-store-data-races", "it permits what no pass here does"),
-    same(
-        "-fzero-init-padding-bits=all",
-        "an automatic object whose initializer does not cover every byte, padding and the rest of \
-         a union included, is zeroed whole before its members are stored, which is the most any \
-         of the three settings asks",
+    since(
+        15,
+        same(
+            "-fzero-init-padding-bits=all",
+            "an automatic object whose initializer does not cover every byte, padding and the \
+             rest of a union included, is zeroed whole before its members are stored, which is \
+             the most any of the three settings asks",
+        ),
     ),
-    same("-fzero-init-padding-bits=unions", "padding is zeroed, which this setting allows"),
-    same("-fzero-init-padding-bits=standard", "padding is zeroed, which this setting allows"),
+    since(
+        15,
+        same("-fzero-init-padding-bits=unions", "padding is zeroed, which this setting allows"),
+    ),
+    since(
+        15,
+        same("-fzero-init-padding-bits=standard", "padding is zeroed, which this setting allows"),
+    ),
     same(
         "-fzero-initialized-in-bss",
         "it permits putting a variable initialized to zero in .bss, which saves space and changes \

@@ -15,14 +15,28 @@
 //! undocumented classes, with the value after `=` dropped. It includes the C++, Objective-C and
 //! Fortran ones, which gcc accepts on a C compile with a warning and a zero exit status. It lives in
 //! `data/gcc-warnings.txt` beside the command that printed it.
+//!
+//! A build that claims an older gcc with `-fgnuc-version=` gets that gcc's answer instead, so a
+//! name gcc 14 does not know is refused under a claim of 14 or older. Those names are in
+//! `data/gcc-warnings-after-14.txt`, made the same way with gcc 14.2. The kernel is why: it probes
+//! `-Wunterminated-string-initialization` and keeps `-Wno-` of it when the probe passes, so a
+//! build claiming gcc 14 that passes the probe has a different command line from the gcc 14 build.
 
 /// The list itself, kept in `data/gcc-warnings.txt` with the command that made it, so that moving
 /// to a newer gcc is running that command again rather than editing this file.
 const LIST: &str = include_str!("../data/gcc-warnings.txt");
 
-/// Every name in the list, in its order, which is sorted.
+/// The names in the list that gcc 14.2 does not know, kept the same way.
+const AFTER_14: &str = include_str!("../data/gcc-warnings-after-14.txt");
+
+/// Every name in a list, in its order, which is sorted.
+fn read(list: &'static str) -> impl Iterator<Item = &'static str> {
+    list.lines().filter(|line| !line.is_empty() && !line.starts_with('#'))
+}
+
+/// Every name gcc 16 knows.
 fn names() -> impl Iterator<Item = &'static str> {
-    LIST.lines().filter(|line| !line.is_empty() && !line.starts_with('#'))
+    read(LIST)
 }
 
 /// Names gcc takes with a number glued on, such as `-Wlarger-than-100`.
@@ -35,6 +49,14 @@ pub(crate) fn known(name: &str) -> bool {
     names().any(|known| known == name) || PREFIXES.iter().any(|prefix| name.starts_with(prefix))
 }
 
+/// The first gcc major release that knows `-W<name>`, for a name [`known`] says yes to. It is 15
+/// for a name gcc 14.2 does not know, which is the one older release the list was made against,
+/// and 0 for the rest.
+pub(crate) fn since(name: &str) -> u32 {
+    let name = name.split_once('=').map_or(name, |(name, _)| name);
+    if read(AFTER_14).any(|newer| newer == name) { 15 } else { 0 }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -44,6 +66,17 @@ mod tests {
         let names: Vec<&str> = names().collect();
         assert!(names.windows(2).all(|pair| pair[0] < pair[1]), "sorted and without repeats");
         assert!(names.len() > 500, "the whole of gcc's list, not part of it");
+    }
+
+    #[test]
+    fn the_names_gcc_14_lacks_are_sorted_and_all_known_to_gcc_16() {
+        let newer: Vec<&str> = read(AFTER_14).collect();
+        assert!(newer.windows(2).all(|pair| pair[0] < pair[1]), "sorted and without repeats");
+        assert!(newer.iter().all(|name| known(name)), "every one is in the gcc 16 list");
+        assert_eq!(since("unterminated-string-initialization"), 15);
+        assert_eq!(since("header-guard"), 15);
+        assert_eq!(since("all"), 0);
+        assert_eq!(since("format=2"), 0);
     }
 
     #[test]
