@@ -441,6 +441,10 @@ struct Reader {
     /// Which sections have a name pointing into them, so that an empty one that something is
     /// defined in survives and an empty one nothing mentions does not.
     labelled: Set<usize>,
+    /// The piece of its section each label went in, numbered by [`crate::lines::Lines::cuts`]. Two
+    /// labels in one piece are a fixed distance apart as soon as both are down. See
+    /// [`Reader::fixed_now`].
+    pieces: Map<usize, usize>,
     fixups: Vec<Fixup>,
     /// `.set` and `.equ`, as the symbol they name and the expression they were given.
     sets: Vec<(usize, Sum, usize)>,
@@ -744,6 +748,48 @@ impl Reader {
         out
     }
 
+    /// The number an immediate comes to as the line is read, when every place in it is a label this
+    /// pass has already put down in one piece of this section, and the places cancel.
+    ///
+    /// gas works such a difference out as it reads the line, since nothing between the two labels
+    /// can change size, and then picks the short form of the instruction for a number that fits a
+    /// byte. So `subl $(1b - startup_32), %ebp` in the kernel's compressed boot code is three
+    /// bytes and not six. A label further down, or one behind an alignment or a jump that may grow,
+    /// is a distance gas only knows at the end, and gets the long form, as before.
+    fn fixed_now(&mut self, arg: &str) -> Option<i64> {
+        let text = arg.trim().strip_prefix('$')?;
+        if text.contains('@') || constant(text).is_some() {
+            return None;
+        }
+        let here = (self.here, self.at() as i64);
+        let sum = self.expression_at(text, here).ok()?;
+        let (mut value, mut net, mut piece) = (sum.constant, 0, None);
+        for term in &sum.terms {
+            let (offset, at) = match &term.what {
+                What::Here { at, .. } => (*at, self.lines.cuts(self.here)),
+                What::Symbol(name) => {
+                    let sym = *self.known.get(name)?;
+                    match self.syms[sym].at {
+                        Held::Absolute(number) => {
+                            value = value.wrapping_add(term.coeff.wrapping_mul(number as i64));
+                            continue;
+                        }
+                        Held::In { part, offset } if part == self.here => {
+                            (offset as i64, *self.pieces.get(&sym)?)
+                        }
+                        _ => return None,
+                    }
+                }
+            };
+            if *piece.get_or_insert(at) != at {
+                return None;
+            }
+            value = value.wrapping_add(term.coeff.wrapping_mul(offset));
+            net += term.coeff;
+        }
+        (piece.is_some() && net == 0).then_some(value)
+    }
+
     /// The mode the next instruction is read in: what `.code32` or `.code64` last said, and
     /// otherwise the one the file's machine runs in.
     fn mode(&self) -> Mode {
@@ -767,7 +813,12 @@ impl Reader {
     /// `prefixes` are the bytes of any prefix the line wrote in front of the mnemonic, which go in
     /// among the ones the instruction already has in the order gas puts them.
     fn instruction(&mut self, word: &str, rest: &str, prefixes: &[u8]) -> Result<(), Trouble> {
-        let args = if rest.is_empty() { Vec::new() } else { split(rest, ',') };
+        let mut args = if rest.is_empty() { Vec::new() } else { split(rest, ',') };
+        for arg in &mut args {
+            if let Some(value) = self.fixed_now(arg) {
+                *arg = format!("${value}");
+            }
+        }
         let mode = self.mode();
         let mut written = match self.sixteen {
             Some(gcc) => crate::sixteen::one_in16(word, &args, gcc),
@@ -937,6 +988,7 @@ impl Reader {
         }
         self.syms[sym].at = Held::In { part, offset: at };
         self.labelled.insert(part);
+        self.pieces.insert(sym, self.lines.cuts(part));
         Ok(())
     }
 
@@ -7539,6 +7591,27 @@ g:
             0x02, 0, 0, 0, 0x00, 0x41, 0x0e, 0x08,
         ];
         assert_eq!(bytes(&read, ".eh_frame"), gas);
+    }
+
+    /// A distance between two labels already down in one piece of the section is a number by the
+    /// time the line is read, so it gets the short form, and one across a jump that may grow or an
+    /// alignment, or to a label further down, is left to the end and gets the long one. The bytes
+    /// are what gas 2.42 writes.
+    #[test]
+    fn a_distance_already_known_is_a_short_immediate() {
+        let read = i386(concat!(
+            "s:\tnop\nx:\tsubl $(x - s), %ebp\n\tjmp foo\ny:\tsubl $(y - s), %ebp\n",
+            "\tsubl $(x - s), %ebp\n\t.balign 8\nz:\tsubl $(z - y), %ebp\n",
+            "\tsubl $(w - z), %ebp\nw:\tpushl $(w - z)\n\tsubl $(. - z), %eax\n",
+            "\tandl $(w - z + 4), %ecx\nfoo:\tret\n",
+        ));
+        #[rustfmt::skip]
+        let gas = [
+            0x90, 0x83, 0xed, 0x01, 0xeb, 0x1e, 0x81, 0xed, 0x06, 0, 0, 0, 0x83, 0xed, 0x01, 0x90,
+            0x81, 0xed, 0x0a, 0, 0, 0, 0x81, 0xed, 0x0c, 0, 0, 0, 0x6a, 0x0c, 0x83, 0xe8,
+            0x0e, 0x83, 0xe1, 0x10, 0xc3,
+        ];
+        assert_eq!(bytes(&read, ".text"), gas);
     }
 
     /// The i386 thread-local suffixes, in either case, in an address, a number and a data

@@ -388,6 +388,11 @@ impl Lines {
         piece.starts.push(next);
     }
 
+    /// How many times a section has been cut so far, which numbers the piece the next byte goes in.
+    pub(crate) fn cuts(&self, part: usize) -> usize {
+        self.pieces.get(&part).map_or(0, |piece| piece.ends.len())
+    }
+
     /// Every row, for the reader to move when it joins subsections on.
     pub(crate) fn rows_mut(&mut self) -> impl Iterator<Item = &mut Row> {
         self.rows.values_mut().flatten()
