@@ -388,6 +388,11 @@ impl Lines {
         piece.starts.push(next);
     }
 
+    /// Where a piece of a section starts.
+    pub(crate) fn start(&self, part: usize, piece: usize) -> u64 {
+        self.pieces.get(&part).and_then(|pieces| pieces.starts.get(piece)).copied().unwrap_or(0)
+    }
+
     /// How many times a section has been cut so far, which numbers the piece the next byte goes in.
     pub(crate) fn cuts(&self, part: usize) -> usize {
         self.pieces.get(&part).map_or(0, |piece| piece.ends.len())

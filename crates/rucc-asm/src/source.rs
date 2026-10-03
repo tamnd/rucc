@@ -151,7 +151,12 @@ pub fn read_with(
     let mut long = Set::default();
     let mut guesses = Map::default();
     let mut moving = 0;
+    let mut passes = 0;
+    // Whether the passes are still on gas's first round. See [`Reader::first_round`].
+    let mut first_round = true;
+    let mut within = Map::default();
     loop {
+        passes += 1;
         let aarch64 = arch == Arch::Aarch64;
         let i386 = arch == Arch::X86;
         let macho = format == ObjectFormat::MachO;
@@ -159,6 +164,8 @@ pub fn read_with(
         let mut reader = Reader {
             long: long.clone(),
             guesses,
+            first_round: passes > 1 && first_round,
+            within: std::mem::take(&mut within),
             aarch64,
             i386,
             macho,
@@ -172,6 +179,11 @@ pub fn read_with(
             Ok(done) if decorated => return Ok(kept(at_signs_back(done), flags)),
             Ok(done) => return Ok(kept(done, flags)),
             Err(again) => {
+                // The round is over once it grows nothing more, and at once when nothing in it
+                // came out any different from the rounds after.
+                if passes > 1 && (!again.first_round || again.grow.is_empty()) {
+                    first_round = false;
+                }
                 if again.grow.is_empty() {
                     moving += 1;
                     if moving > MOST_PASSES {
@@ -184,6 +196,7 @@ pub fn read_with(
                 }
                 long.extend(again.grow);
                 guesses = again.places;
+                within = again.within;
             }
         }
     }
@@ -296,6 +309,10 @@ struct Again {
     places: Map<String, Held>,
     /// The first line that guessed, for a message about a file that never settles.
     line: usize,
+    /// How far into its piece every label ended up. See [`Reader::first_round`].
+    within: Map<String, u64>,
+    /// Whether a count came out different for being on gas's first round.
+    first_round: bool,
 }
 
 /// One name, while the file is still being read.
@@ -524,6 +541,23 @@ struct Reader {
     /// the padding moves everything after it. gas makes such a `.skip` a piece of variable size and
     /// lays the file out again until nothing moves, and so does this, one whole pass at a time.
     guesses: Map<String, Held>,
+    /// Whether this pass is on gas's first round, which reads a place in a section further down
+    /// the list of sections as how far it is into its piece.
+    ///
+    /// gas lays out one section after another, and then all of them again for as long as anything
+    /// moved. On the first round a section it has not got to yet has every piece of it at zero, so
+    /// a label there is worth only how far it is into its piece. A count that is a distance between
+    /// two such labels comes out right when they are in one piece and wrong when a jump that may
+    /// grow is between them. The kernel's `.skip` for an alternative whose replacement has a jump
+    /// in it is one, and it is padded as nothing on that round. The jumps that round grows stay
+    /// grown, so the file has to go through it too.
+    first_round: bool,
+    /// How far into its piece each label was on the last pass, for [`Reader::first_round`].
+    within: Map<String, u64>,
+    /// Whether [`Reader::first_round`] made any count come out different.
+    first_round_counted: std::cell::Cell<bool>,
+    /// Whether a count is being worked out, which is the only thing [`Reader::first_round`] is for.
+    sizing: bool,
     /// Every place this pass took from [`Reader::guesses`], with the line that took it. A pass is
     /// the answer only when every one of them turns out to be where it was guessed to be.
     guessed: Vec<(String, Held, usize)>,
@@ -2897,6 +2931,14 @@ impl Reader {
     /// which is what gas makes of it: the padding of an alternative whose replacement is shorter
     /// than the original is exactly that, and it comes out as no padding.
     fn size(&mut self, text: &str) -> Result<u64, Trouble> {
+        self.sizing = true;
+        let size = self.sized(text);
+        self.sizing = false;
+        size
+    }
+
+    /// [`Reader::size`], with [`Reader::sizing`] set.
+    fn sized(&mut self, text: &str) -> Result<u64, Trouble> {
         let guessed = self.guessed.len();
         let sum = self.expression(text)?;
         // A sum that is flat may still have come from labels, when an operator in it had to settle
@@ -3026,7 +3068,9 @@ impl Reader {
         let held = if raw { self.named(name).ok()? } else { name.to_owned() };
         if let Some(&sym) = self.known.get(&held) {
             match self.syms[sym].at {
-                at @ (Held::In { .. } | Held::Absolute(_)) => return Some(at),
+                at @ (Held::In { .. } | Held::Absolute(_)) => {
+                    return Some(self.unrelaxed(&held, at));
+                }
                 Held::Common { .. } => return None,
                 Held::Undefined => {
                     if let Some((_, sum, _)) = self.sets.iter().find(|(set, ..)| *set == sym) {
@@ -3051,8 +3095,23 @@ impl Reader {
             .get(&held)
             .copied()
             .unwrap_or(Held::In { part: self.here, offset: self.at() });
+        let seen = self.unrelaxed(&held, guess);
         guessed.push((held, guess));
-        Some(guess)
+        Some(seen)
+    }
+
+    /// A place as a count on [`Reader::first_round`] sees it, which for one in a section further
+    /// down the list is how far it is into its piece.
+    fn unrelaxed(&self, name: &str, at: Held) -> Held {
+        let Held::In { part, offset } = at else { return at };
+        if !self.first_round || !self.sizing || part <= self.here {
+            return at;
+        }
+        let Some(&within) = self.within.get(name) else { return at };
+        if within != offset {
+            self.first_round_counted.set(true);
+        }
+        Held::In { part, offset: within }
     }
 
     /// Whether every place this pass guessed is where the pass put it, which is what makes the pass
@@ -3077,6 +3136,20 @@ impl Reader {
     }
 
     /// Where every name is at the end of this pass, for the next one to guess from.
+    /// How far into its piece every label is. See [`Reader::first_round`].
+    fn within_pieces(&self) -> Map<String, u64> {
+        self.pieces
+            .iter()
+            .filter_map(|(&sym, &piece)| match self.syms[sym].at {
+                Held::In { part, offset } => Some((
+                    self.syms[sym].name.clone(),
+                    offset.saturating_sub(self.lines.start(part, piece)),
+                )),
+                _ => None,
+            })
+            .collect()
+    }
+
     fn places(&self) -> Map<String, Held> {
         self.syms
             .iter()
@@ -3152,6 +3225,7 @@ impl Reader {
         if self.described.is_some() {
             return Err(self.bad("a '.seh_proc' that is never ended"));
         }
+        let within = self.within_pieces();
         self.join_subsections();
         self.line_table()?;
         self.unwind_table();
@@ -3167,9 +3241,10 @@ impl Reader {
         self.copy_attributes();
         self.versions()?;
         let grow = self.too_far()?;
-        if !grow.is_empty() || !held {
+        let first_round = self.first_round_counted.get();
+        if !grow.is_empty() || !held || first_round {
             let line = self.guessed.first().map_or(self.line, |(_, _, line)| *line);
-            return Ok(Err(Again { grow, places: self.places(), line }));
+            return Ok(Err(Again { grow, places: self.places(), line, within, first_round }));
         }
         self.resolve_fixups()?;
         for reloc in self.parts.iter_mut().flat_map(|part| part.relocs.iter_mut()) {
@@ -7215,6 +7290,31 @@ g:
              .pushsection .altinstr_replacement,\"ax\"\n143: nop\n144:\n.popsection\nret\n",
         );
         assert_eq!(bytes(&out, ".text").len(), 19);
+    }
+
+    /// An alternative whose replacement has a jump in it is padded as nothing on gas's first
+    /// round, since the replacement's section is not laid out yet and its two labels are each worth
+    /// how far they are into their own piece. A jump in front of an alignment is judged then, and
+    /// two bytes further back the target is out of reach, so gas grows it and it stays grown though
+    /// with the padding in it would reach. The jump to `elsewhere` keeps the first pass from
+    /// judging the short one at all.
+    #[test]
+    fn a_jump_grown_on_the_first_round_stays_grown() {
+        let out = assembled(
+            ".skip -(((744f-743f)) > 0) * (744f-743f), 0x90
+jmp 1f
+.balign 64
+             .skip 66, 0xcc
+1: jmp elsewhere
+.section .other,\"ax\"
+.Lx: nop
+nop
+             743: jmp .Lx
+744:
+",
+        );
+        let text = bytes(&out, ".text");
+        assert_eq!(text[..7], [0x90, 0x90, 0xe9, 0x7b, 0, 0, 0], "{text:x?}");
     }
 
     /// The operators gas has, with its precedence rather than C's: `|` binds tighter than `+`, a
