@@ -2,6 +2,7 @@
 //! control registers, `cpuid`, and the `long long` in `edx:eax` that `rdtsc` and `cmpxchg8b` use.
 
 use std::process::Command;
+use std::sync::atomic::{AtomicUsize, Ordering};
 
 const SOURCE: &str = "\
 unsigned long cr0(void) { unsigned long v; asm volatile(\"movl %%cr0,%0\" : \"=r\"(v)); return v; }
@@ -22,7 +23,13 @@ unsigned long long tie(unsigned long long x)
 
 /// The listing of each function, by name.
 fn bodies(level: &str) -> Vec<(String, String)> {
-    let dir = std::env::temp_dir().join(format!("rucc-i386-asm-{}-{level}", std::process::id()));
+    // The tests in this file run on threads of one process and ask for the same levels, so the
+    // process id and the level alone would give two of them the same directory, and one could
+    // remove it while the other was still compiling the file in it.
+    static NEXT: AtomicUsize = AtomicUsize::new(0);
+    let n = NEXT.fetch_add(1, Ordering::Relaxed);
+    let dir =
+        std::env::temp_dir().join(format!("rucc-i386-asm-{}-{level}-{n}", std::process::id()));
     std::fs::create_dir_all(&dir).expect("a temporary directory can be created");
     let path = dir.join("one.c");
     std::fs::write(&path, SOURCE).expect("the fixture can be written");
