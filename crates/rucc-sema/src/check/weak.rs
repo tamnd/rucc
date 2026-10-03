@@ -50,7 +50,7 @@ impl Checker<'_> {
     }
 
     /// The file-scope declaration of `name`, including one only a block-scope `extern` made.
-    fn file_scope_decl(&self, name: Symbol) -> Option<DeclId> {
+    pub(super) fn file_scope_decl(&self, name: Symbol) -> Option<DeclId> {
         match self.scopes.lookup(name) {
             Some(Binding::Decl(decl)) if self.tast[decl].linkage != Linkage::None => Some(decl),
             _ => self.out_of_sight.get(&name).copied(),
@@ -102,7 +102,7 @@ impl Checker<'_> {
     }
 
     /// A name as the string an `alias` attribute would have written for it.
-    fn symbol_string(&mut self, name: Symbol) -> StrId {
+    pub(super) fn symbol_string(&mut self, name: Symbol) -> StrId {
         let elements = self.text(name).chars().map(|c| c as u32).collect();
         self.tast.add_string(StringLiteral {
             elements,
