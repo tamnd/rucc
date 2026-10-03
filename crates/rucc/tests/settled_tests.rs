@@ -503,7 +503,10 @@ fn a_function_no_larger_than_a_call_is_inlined_before_its_own_calls_are() {
     };
     for caller in ["lock_read", "lock_write"] {
         let body = body(caller);
-        assert!(!body.contains("call\tdo_trace_lock"), "the one line function stayed a call:\n{body}");
+        assert!(
+            !body.contains("call\tdo_trace_lock"),
+            "the one line function stayed a call:\n{body}"
+        );
         assert!(body.contains("call\tonline"), "the tracepoint is not in the caller:\n{body}");
     }
 }

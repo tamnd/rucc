@@ -2291,15 +2291,16 @@ fn write_only(module: &mut Module) {
         let func = &module[id];
         for inst in func.blocks().flat_map(|block| func.insts(block)) {
             let data = &func[inst];
-            if let Extra::Symbol(name) = data.extra
-                && data.opcode != Opcode::GlobalAddr
-            {
-                candidates.remove(&name);
-            }
-            if let Extra::Call(info) = data.extra
-                && let Some(callee) = func[info].callee
-            {
-                candidates.remove(&callee);
+            match data.extra {
+                Extra::Symbol(name) if data.opcode != Opcode::GlobalAddr => {
+                    candidates.remove(&name);
+                }
+                Extra::Call(info) => {
+                    if let Some(callee) = func[info].callee {
+                        candidates.remove(&callee);
+                    }
+                }
+                _ => {}
             }
             let plain = data.opcode == Opcode::Store
                 && !data.flags.contains(Flags::VOLATILE)

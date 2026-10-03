@@ -12,6 +12,8 @@ All notable changes are recorded here. The format follows [Keep a Changelog](htt
 
 ### Changed
 
+- The inliner takes a function no larger than the call to it before it looks at anything else, the way gcc's early inliner does. A one line global wrapper inside a static inline then disappears before the static inline is sized, so the static inline stays small enough to inline everywhere it is called. In `mm/mmap_lock.o` that took `__jump_table` from 17 entries to 30, which is gcc's count, and over the whole 7.2.8 defconfig build it added 168 entries.
+- Replace the let chains in the inliner's read-only global scan with a `match`, since they need Rust 1.88 and the workspace promises 1.85.
 - The inliner takes a `static` function called once only after the small functions around it are in, the order gcc uses. A small `static inline` helper called from several places is measured before the one large function it calls is folded into it, so the helper goes into each caller and the large function stays out of line. kernel/locking/semaphore.o now has the two tracepoints of `__down_common` in each of `__down` and its siblings, as gcc builds it.
 - A static that is only written through a cast of its address to an integer and back, the way `__this_cpu_write` reaches a `__seg_gs` store, now counts as write-only and is dropped with its stores. Doing anything else to the integer, such as adding a per-cpu offset, still keeps the object. In the 7.2.8 defconfig build this removes the `.data..percpu` section that rucc alone emitted in kernel/kprobes.o.
 
