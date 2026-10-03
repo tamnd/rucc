@@ -437,8 +437,14 @@ fn plan(
             None => return Ok(None),
         }
     }
-    let vector =
-        uses.iter().any(|(_, found)| found.scalar().is_some_and(|(.., ty)| ty.is_vector()));
+    // A vector, or the float `<emmintrin.h>` copies one as next to a lane of it, which is the
+    // header building a vector out of its lanes in memory.
+    let scalar = |pick: fn(u64, Type) -> bool| {
+        uses.iter().any(|(_, found)| found.scalar().is_some_and(|(_, width, ty)| pick(width, ty)))
+    };
+    let vector = scalar(|_, ty| ty.is_vector())
+        || scalar(|_, ty| is_quad(ty))
+            && scalar(|width, ty| !is_quad(ty) && matches!(width, 4 | 8));
     let pieces = if vector { whole(&uses, size)? } else { pieces(&uses, target)? };
     Ok(Some(Plan { alloca, pieces, vector, uses, derived, ends }))
 }
@@ -642,6 +648,7 @@ fn convertible(from: Type, to: Type, pointer: Option<u64>) -> bool {
 /// stay in memory.
 fn whole(uses: &[(Inst, Use)], size: u64) -> Result<Vec<Piece>, &'static str> {
     let mut ty = None;
+    let mut lane = None;
     for (_, found) in uses {
         let (at, width) = found.range();
         match found.scalar() {
@@ -651,13 +658,24 @@ fn whole(uses: &[(Inst, Use)], size: u64) -> Result<Vec<Piece>, &'static str> {
             // The vector copied whole as the float the calling convention passes it as, which
             // is the same register and so only a bitcast away.
             Some((_, _, it)) if is_quad(it) && at == 0 && width == size => {}
-            Some((..)) if matches!(width, 4 | 8) && at % width == 0 => {}
+            Some((..)) if matches!(width, 4 | 8) && at % width == 0 => {
+                lane.get_or_insert(width);
+            }
             Some(_) => return Err(OVERLAP),
             None if at == 0 && width == size => {}
             None => return Err(OVERLAP),
         }
     }
-    let ty = ty.expect("a vector access is why this was asked");
+    // Only the float and lanes of it, so the vector is lanes as wide as the first one.
+    let lanes = |width: u64| {
+        let count = u32::try_from(size / width).expect("a lane is four or eight bytes");
+        Type::vector(integer(width), count)
+    };
+    let ty = match (ty, lane) {
+        (Some(ty), _) => ty,
+        (None, Some(width)) if size == WHOLE => lanes(width),
+        _ => return Err(OVERLAP),
+    };
     if size != WHOLE {
         return Err(OVERLAP);
     }
@@ -668,8 +686,10 @@ fn whole(uses: &[(Inst, Use)], size: u64) -> Result<Vec<Piece>, &'static str> {
 fn pieces(uses: &[(Inst, Use)], target: Target) -> Result<Vec<Piece>, &'static str> {
     let scalars: Vec<(u64, u64, Type)> =
         uses.iter().filter_map(|(_, found)| found.scalar()).collect();
-    // A sixteen byte float on its own is a `__float128`, which is not what this is for.
-    if scalars.iter().any(|&(.., ty)| is_quad(ty)) {
+    // The sixteen byte float is one piece or nothing, since it cannot be put together out of
+    // smaller ones the way an integer can.
+    let quad = scalars.iter().any(|&(.., ty)| is_quad(ty));
+    if quad && scalars.iter().any(|&(at, _, ty)| at != 0 || !is_quad(ty)) {
         return Err(OVERLAP);
     }
     let mut cuts: Vec<u64> = scalars.iter().flat_map(|&(at, size, _)| [at, at + size]).collect();
@@ -1811,9 +1831,9 @@ block2:
         assert_eq!(count_of(func, Opcode::ExtractLane), 1);
     }
 
-    /// A `__float128` local is not a vector and stays where it is.
+    /// A `__float128` local on its own is one piece of that type.
     #[test]
-    fn a_quad_float_on_its_own_stays_in_memory() {
+    fn a_quad_float_on_its_own_becomes_one_value() {
         let text = wrap(
             "(f128) -> f128",
             "block0(%0: f128):
@@ -1823,8 +1843,85 @@ block2:
     return %2
 ",
         );
+        let (module, stats) = on_sse2(&text);
+        assert_eq!(stats.count(Kind::Optimized, SCALARIZED), 1);
+        assert_eq!(count_of(body(&module), Opcode::Alloca), 0);
+    }
+
+    /// Part of a quad float is still a `__float128` someone is looking inside, which stays.
+    #[test]
+    fn half_of_a_quad_float_stays_in_memory() {
+        let text = wrap(
+            "(f128) -> f128",
+            "block0(%0: f128):
+    %1 = alloca, size 16, align 16
+    store %0 -> %1, align 16
+    %2 = load.i8 %1, align 1
+    store %2 -> %1, align 1
+    %3 = load.f128 %1, align 16
+    return %3
+",
+        );
         let (module, _) = on_sse2(&text);
         assert_eq!(count_of(body(&module), Opcode::Alloca), 1);
+    }
+
+    /// `_mm_shuffle_epi32` in the header: the vector stored as the float, its lanes read one at a
+    /// time, written back in another order and the whole read as the float again.
+    #[test]
+    fn lanes_of_a_quad_float_become_one_vector() {
+        let text = wrap(
+            "(f128) -> f128",
+            "block0(%0: f128):
+    %1 = alloca, size 16, align 16
+    %2 = alloca, size 16, align 16
+    store %0 -> %1, align 16
+    %3 = load.i32 %1, align 16
+    %4 = iconst.i64 4
+    %5 = ptr_add %1, %4
+    %6 = load.i32 %5, align 4
+    %7 = iconst.i64 8
+    %8 = ptr_add %1, %7
+    %9 = load.i32 %8, align 8
+    %10 = iconst.i64 12
+    %11 = ptr_add %1, %10
+    %12 = load.i32 %11, align 4
+    store %12 -> %2, align 16
+    %13 = ptr_add %2, %4
+    store %3 -> %13, align 4
+    %14 = ptr_add %2, %7
+    store %6 -> %14, align 8
+    %15 = ptr_add %2, %10
+    store %9 -> %15, align 4
+    %16 = load.f128 %2, align 16
+    return %16
+",
+        );
+        let (module, stats) = on_sse2(&text);
+        assert_eq!(stats.count(Kind::Optimized, SCALARIZED), 2);
+        let func = body(&module);
+        assert_eq!(count_of(func, Opcode::Alloca), 0);
+        assert_eq!(count_of(func, Opcode::ExtractLane), 4);
+        assert_eq!(count_of(func, Opcode::InsertLane), 4);
+    }
+
+    /// The header's copy of a vector through a local, which only ever sees it as the float.
+    #[test]
+    fn a_quad_float_copied_through_stays_out_of_memory() {
+        let text = wrap(
+            "(ptr, ptr)",
+            "block0(%0: ptr, %1: ptr):
+    %2 = alloca, size 16, align 16
+    memcpy %2, %0, size 16, align 16
+    %3 = load.f128 %2, align 16
+    store %3 -> %2, align 16
+    memcpy %1, %2, size 16, align 16
+    return
+",
+        );
+        let (module, stats) = on_sse2(&text);
+        assert_eq!(stats.count(Kind::Optimized, SCALARIZED), 1);
+        assert_eq!(count_of(body(&module), Opcode::Alloca), 0);
     }
 
     #[test]
