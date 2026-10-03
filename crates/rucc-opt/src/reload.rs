@@ -190,8 +190,8 @@ impl Pass for RedundantLoad {
                     let Some((result, ty)) = reads(func, inst) else {
                         continue;
                     };
-                    let key = func
-                        .mem_in(inst)
+                    let key = walk
+                        .settled(inst)
                         .map(|mem| (mem, Place::of(func, func[func[inst].args][0]), ty));
                     let found = match walk.clobber_with(inst, &mut |reference, def| {
                         through(body, reference, def).map_or(Step::Stop, Step::Retry)

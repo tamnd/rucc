@@ -2706,6 +2706,7 @@ impl<'u> Body<'_, 'u> {
         for index in 0..tast[node.clobbers].len() {
             clobbers.push(self.asm_text(tast[node.clobbers][index]));
         }
+        let memory = clobbers.iter().any(|clobber| clobber.trim() == "memory");
         let clobbers = clobbers.join(",");
         let template = self.unit.names.intern(&template);
         let constraints = self.unit.names.intern(&constraints);
@@ -2798,6 +2799,10 @@ impl<'u> Body<'_, 'u> {
         }
         if space.contains(Flags::SEG_FS.union(Flags::SEG_GS)) {
             self.unsupported("an `asm` with operands in memory in two address spaces", span);
+        }
+        let named = tast[node.outputs].iter().chain(&tast[node.inputs]).any(|op| op.memory);
+        if !memory && !named {
+            flags = flags.union(Flags::NOMEM);
         }
         let flags = flags.union(space);
         let inst = self.build(span).inline_asm(info, &args, &results, flags);

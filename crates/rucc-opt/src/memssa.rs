@@ -628,6 +628,90 @@ impl<'a> Walk<'a> {
         answer.unwrap_or(Clobber::NoClobber)
     }
 
+    /// The oldest version of memory this load reads the same bytes at.
+    ///
+    /// The version it was handed, walked back past every def that cannot have written what it
+    /// reads, and through a join when every way into it comes back to the same version. Two loads
+    /// of one address that settle on the same version read the same value when one of them
+    /// dominates the other, for the reason two loads at the same version do: whatever runs
+    /// between that version and either load leaves these bytes alone.
+    ///
+    /// The version handed in when the walk runs out of budget, which is the answer the caller had
+    /// before it asked.
+    pub fn settled(&mut self, load: Inst) -> Option<Value> {
+        let reference = self.alias.reads(load)?;
+        let version = self.func.mem_in(load)?;
+        let mut budget = self.limit;
+        let mut open = Vec::new();
+        Some(self.settle(&reference, version, &mut budget, &mut open))
+    }
+
+    /// One step of [`Self::settled`].
+    ///
+    /// A join that is still being worked out answers itself, and a join drops itself from what
+    /// its ways in answered. So a loop whose body writes nothing relevant settles on the version
+    /// before the loop, and one that writes something stops at its own header, since a way in that
+    /// came back as some other version is a disagreement.
+    fn settle(
+        &mut self,
+        reference: &Access,
+        version: Value,
+        budget: &mut u32,
+        open: &mut Vec<Value>,
+    ) -> Value {
+        let mut version = version;
+        loop {
+            if open.contains(&version) || *budget == 0 {
+                return version;
+            }
+            *budget -= 1;
+            match self.func[version].def {
+                Def::Param { block, index } => {
+                    open.push(version);
+                    let mut agreed = None;
+                    let mut split = false;
+                    let func = self.func;
+                    'preds: for at in 0..self.cfg.predecessors(block).len() {
+                        let pred = self.cfg.predecessors(block)[at];
+                        let Some(terminator) = func.terminator(pred) else { continue };
+                        for call in func.successors(terminator) {
+                            if call.block != block {
+                                continue;
+                            }
+                            let Some(&incoming) = func[call.args].get(index as usize) else {
+                                split = true;
+                                break 'preds;
+                            };
+                            let found = self.settle(reference, incoming, budget, open);
+                            if found == version {
+                                continue;
+                            }
+                            if agreed.is_some_and(|agreed| agreed != found) {
+                                split = true;
+                                break 'preds;
+                            }
+                            agreed = Some(found);
+                        }
+                    }
+                    open.pop();
+                    return match agreed {
+                        Some(agreed) if !split => agreed,
+                        _ => version,
+                    };
+                }
+                Def::Result { inst, .. } => {
+                    if self.func[inst].opcode == Opcode::MemEntry
+                        || self.wrote(reference, inst).is_some()
+                    {
+                        return version;
+                    }
+                    let Some(next) = self.func.mem_in(inst) else { return version };
+                    version = next;
+                }
+            }
+        }
+    }
+
     /// One version of memory, and everything that reaches it.
     ///
     /// `None` means this version has already been accounted for on another path, which is the
@@ -720,6 +804,15 @@ impl<'a> Walk<'a> {
         // Section 9.5, and it is first. Alias analysis says nothing about how many times an
         // access happens and `volatile` constrains that too, so this is a separate bit rather
         // than a strong alias fact, and it is checked before the analysis is asked anything.
+        // An `asm` with nothing in memory and no `memory` clobber is not a write at all, which is
+        // gcc's reading and the reason a load is still good on the far side of a `WARN_ON`.
+        let data = self.func[inst];
+        if data.opcode == Opcode::InlineAsm
+            && data.flags.contains(Flags::NOMEM)
+            && !reference.volatile
+        {
+            return None;
+        }
         if reference.volatile || self.func[inst].flags.intersects(Flags::KEEP) {
             return Some(Clobber::Maybe(inst));
         }

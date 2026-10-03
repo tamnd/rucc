@@ -101,6 +101,10 @@ const RELATIONS: usize = 16;
 /// how many cases a switch may have.
 const EXCLUSIONS: usize = PAIRS + 1;
 
+/// How many branches on something else one walk passes before it gives up, so that a query in a
+/// function that is one long chain of tests is not a walk to the top of it every time.
+const PASSED: u32 = 64;
+
 /// The limits, all three of which exist because the thing they bound is otherwise unbounded.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct Options {
@@ -110,7 +114,8 @@ pub struct Options {
     /// GCC's `ranger-logical-depth`, whose default at `gcc/params.opt:998` is also six.
     pub logical_depth: u32,
     /// How many dominating branches one query walks before it stops narrowing. A dominator that
-    /// ends in a plain jump is not counted, since it has nothing to say.
+    /// ends in a plain jump is not counted, since it has nothing to say, and neither is a branch
+    /// on a condition the value is not part of.
     ///
     /// GCC's `ranger-recompute-depth` at `gcc/params.opt:1003` bounds a related walk with the
     /// same default of five. The two are not the same walk, so the number is borrowed and the
@@ -705,27 +710,76 @@ impl<'a> Ranges<'a> {
         let mut range = self.at_def(value);
         let stop = defining_block(self.func, value);
         let mut cursor = block;
-        let mut steps = 0;
-        while steps < self.options.recompute_depth && Some(cursor) != stop {
+        let (mut steps, mut passed) = (0, 0);
+        while steps < self.options.recompute_depth && passed < PASSED && Some(cursor) != stop {
             let Some(parent) = self.dom.immediate_dominator(cursor) else { break };
-            if self.cfg.predecessors(cursor) == [parent] {
-                if let Some(fact) = self.edge_fact(parent, cursor, value) {
-                    range = range.intersect(fact);
-                }
-            }
             // Only a branch can say anything, so a block that just jumps on is free. Without
             // this a chain of empty blocks that lowering leaves behind a statement expression
-            // uses up the depth before the walk reaches the test that matters.
-            if self
-                .func
-                .terminator(parent)
-                .is_some_and(|term| matches!(self.func[term].opcode, Opcode::BrIf | Opcode::Switch))
-            {
-                steps += 1;
+            // uses up the depth before the walk reaches the test that matters. A branch on
+            // something the value plays no part in is nearly free too: telling that costs a look
+            // at a few definitions and no ranges, where asking costs a range for each side of the
+            // compare. `raw_send_hdrinc` tests its length against 0xffff and then makes six other
+            // tests before the copy that gcc proves cannot be over `INT_MAX`.
+            let tested = self.func.terminator(parent).and_then(|term| {
+                let data = self.func[term];
+                let branch = matches!(data.opcode, Opcode::BrIf | Opcode::Switch);
+                branch.then(|| self.func[data.args].first().copied()).flatten()
+            });
+            if let Some(tested) = tested {
+                if self.mentions(tested, value, self.options.logical_depth) {
+                    steps += 1;
+                    if self.cfg.predecessors(cursor) == [parent] {
+                        if let Some(fact) = self.edge_fact(parent, cursor, value) {
+                            range = range.intersect(fact);
+                        }
+                    }
+                } else {
+                    passed += 1;
+                }
             }
             cursor = parent;
         }
         range
+    }
+
+    /// Whether a condition could say anything about a value, which is whether the value is on
+    /// the chain [`Self::condition_fact`] and [`Self::carry_back`] would walk back along.
+    ///
+    /// It looks at definitions only, so it answers yes more often than the walk finds something,
+    /// and never answers no where the walk would have.
+    fn mentions(&self, from: Value, value: Value, depth: u32) -> bool {
+        if from == value {
+            return true;
+        }
+        if depth == 0 {
+            return false;
+        }
+        match self.func[from].def {
+            Def::Param { block: to, index } => {
+                let [pred] = self.cfg.predecessors(to) else { return false };
+                argument(self.func, *pred, to, index as usize)
+                    .is_some_and(|arg| self.mentions(arg, value, depth - 1))
+            }
+            Def::Result { inst, .. } => {
+                let data = self.func[inst];
+                let walked = matches!(
+                    data.opcode,
+                    Opcode::ICmp
+                        | Opcode::And
+                        | Opcode::Or
+                        | Opcode::Xor
+                        | Opcode::Add
+                        | Opcode::Sub
+                        | Opcode::ZExt
+                        | Opcode::SExt
+                        | Opcode::UDiv
+                        | Opcode::LShr
+                        | Opcode::Trunc
+                );
+                walked
+                    && self.func[data.args].iter().any(|&arg| self.mentions(arg, value, depth - 1))
+            }
+        }
     }
 
     /// What taking the edge from one block to another says about a value, if anything.
@@ -963,7 +1017,7 @@ impl<'a> Ranges<'a> {
                 Some(parent) => self.facts(parent).clone(),
                 None => Vec::new(),
             };
-            if let Some(own) = self.own_relation(block) {
+            for own in self.own_relations(block) {
                 facts.push(own);
                 if facts.len() > RELATIONS {
                     facts.remove(0);
@@ -974,29 +1028,61 @@ impl<'a> Ranges<'a> {
         &self.relations[&block]
     }
 
-    /// The relation the one edge into this block recorded, if it recorded one.
-    fn own_relation(&mut self, block: Block) -> Option<Relation> {
-        let [from] = *self.cfg.predecessors(block) else { return None };
-        let term = self.func.terminator(from)?;
+    /// The relations the one edge into this block recorded.
+    fn own_relations(&mut self, block: Block) -> Vec<Relation> {
+        let mut found = Vec::new();
+        let [from] = *self.cfg.predecessors(block) else { return found };
+        let Some(term) = self.func.terminator(from) else { return found };
         if self.func[term].opcode != Opcode::BrIf {
-            return None;
+            return found;
         }
         let calls: Vec<_> = self.func.successors(term).collect();
-        let (then, other) = (calls.first()?, calls.get(1)?);
+        let (Some(then), Some(other)) = (calls.first(), calls.get(1)) else { return found };
         if then.block == other.block {
-            return None;
+            return found;
         }
         let taken = then.block == block;
-        let cond = *self.func[self.func[term].args].first()?;
-        let Def::Result { inst, .. } = self.func[cond].def else { return None };
-        if self.func[inst].opcode != Opcode::ICmp {
-            return None;
+        if let Some(&cond) = self.func[self.func[term].args].first() {
+            self.relations_of(cond, taken, self.options.logical_depth, &mut found);
         }
-        let Extra::IntPred(pred) = self.func[inst].extra else { return None };
-        let args = &self.func[self.func[inst].args];
-        let (&left, &right) = (args.first()?, args.get(1)?);
-        let pred = if taken { pred } else { pred.inverse() };
-        Some(Relation { left, pred, right })
+        found
+    }
+
+    /// The relations a condition being true, or being false, records.
+    ///
+    /// Both compares hold on the edge where an `and` of them is true, which is how a short
+    /// circuit test reads once it has been made branch free. `dma_resv_add_fence` tests that two
+    /// fences have the same context together with a usage, and then calls
+    /// `dma_fence_is_later`, which warns if the contexts differ.
+    fn relations_of(&self, cond: Value, taken: bool, depth: u32, found: &mut Vec<Relation>) {
+        if depth == 0 {
+            return;
+        }
+        let Def::Result { inst, .. } = self.func[cond].def else { return };
+        let data = self.func[inst];
+        let args = &self.func[data.args];
+        let (Some(&left), Some(&right)) = (args.first(), args.get(1)) else { return };
+        match data.opcode {
+            Opcode::ICmp => {
+                let Extra::IntPred(pred) = data.extra else { return };
+                let pred = if taken { pred } else { pred.inverse() };
+                found.push(Relation { left, pred, right });
+            }
+            Opcode::And | Opcode::Or if taken == (data.opcode == Opcode::And) => {
+                self.relations_of(left, taken, depth - 1, found);
+                self.relations_of(right, taken, depth - 1, found);
+            }
+            Opcode::Xor if self.func[cond].ty.bits() == 1 => {
+                let (cond, other) = match self.constant(right) {
+                    Some(_) => (left, right),
+                    None => (right, left),
+                };
+                if self.constant(other) == Some(1) {
+                    self.relations_of(cond, !taken, depth - 1, found);
+                }
+            }
+            _ => {}
+        }
     }
 
     /// The constant a value is, if it is one.
@@ -1383,6 +1469,29 @@ mod tests {
         assert!(!ranges.at(args[0], blocks[9]).contains(0));
     }
 
+    #[test]
+    fn branches_on_something_else_do_not_use_up_the_walk() {
+        // `if (x > 0xffff) return;` and then eight tests of `y`, which is `raw_send_hdrinc`
+        // checking its length before the header checks. The length is still bounded at the end.
+        let (mut func, args, blocks) = shape(2, 11);
+        let mut build = Builder::new(&mut func, blocks[0]);
+        let limit = build.iconst(I32, 0xffff);
+        let test = build.icmp(IntPred::Ugt, args[0], limit);
+        build.br_if(test, blocks[10], &[], blocks[1], &[]);
+        for index in 1..9 {
+            let mut build = Builder::new(&mut func, blocks[index]);
+            let case = build.iconst(I32, index as i128);
+            let test = build.icmp(IntPred::Eq, args[1], case);
+            build.br_if(test, blocks[10], &[], blocks[index + 1], &[]);
+        }
+        Builder::new(&mut func, blocks[9]).ret(&[]);
+        Builder::new(&mut func, blocks[10]).ret(&[]);
+        let asked = Asked::new(func);
+        let mut ranges = asked.ranges();
+        assert_eq!(ranges.at(args[0], blocks[9]).unsigned_bounds(), Some((0, 0xffff)));
+        assert!(!ranges.at(args[1], blocks[9]).contains(8), "the tests of `y` still count");
+    }
+
     /// `for (counter = start; counter < 100; counter += step)`, with the step's flags as given.
     ///
     /// The counter is the header parameter and the four blocks are the preheader, the header, the
@@ -1546,6 +1655,25 @@ mod tests {
         assert_eq!(ranges.compare(IntPred::Sge, a, b, blocks[1]), Truth::Never);
         assert_eq!(ranges.compare(IntPred::Ne, a, b, blocks[1]), Truth::Always);
         assert_eq!(ranges.compare(IntPred::Ult, a, b, blocks[1]), Truth::Either);
+    }
+
+    #[test]
+    fn both_sides_of_an_and_are_relations_on_the_edge_where_it_is_true() {
+        // `if (a == b && c < 4)`, made branch free, which is how `dma_resv_add_fence` reads
+        // before it calls the function that warns if `a` and `b` differ.
+        let (mut func, args, blocks) = shape(3, 3);
+        let mut build = Builder::new(&mut func, blocks[0]);
+        let same = build.icmp(IntPred::Eq, args[0], args[1]);
+        let four = build.iconst(I32, 4);
+        let small = build.icmp(IntPred::Ult, args[2], four);
+        let both = build.binary(Opcode::And, same, small, Flags::NONE);
+        build.br_if(both, blocks[1], &[], blocks[2], &[]);
+        Builder::new(&mut func, blocks[1]).ret(&[]);
+        Builder::new(&mut func, blocks[2]).ret(&[]);
+        let asked = Asked::new(func);
+        let mut ranges = asked.ranges();
+        assert_eq!(ranges.compare(IntPred::Ne, args[0], args[1], blocks[1]), Truth::Never);
+        assert_eq!(ranges.compare(IntPred::Ne, args[0], args[1], blocks[2]), Truth::Either);
     }
 
     #[test]

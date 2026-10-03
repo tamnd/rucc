@@ -222,7 +222,7 @@ use crate::discharge::constant;
 use crate::rules::{
     Match, Piece, Subject, Table, canonical, compare, identities, select, strength, width,
 };
-use crate::uses::{count, substitute};
+use crate::uses::{chase, count, substitute};
 use crate::{Analyses, Analysis, Fuel, Pass, Preserved, Stats};
 
 /// Recorded once for each negation folded into the comparison under it.
@@ -265,10 +265,25 @@ const NO_FUEL_RULE: &str = "rewrite left alone, the pass ran out of fuel";
 ///
 /// The two with a constant come first, because a rule about a number is the more specific one and
 /// an operand that is not a constant declines it at the first node of the trie. Nothing here
-/// expands an operand into the instruction that computed it, since no tier one identity is about
-/// two instructions at once.
+/// expands an operand into the instruction that computed it, since a strength reduction is never
+/// about two instructions at once.
 const PLANS: [Plan; 3] =
     [[Shown::Reg, Shown::Const, Shown::Reg], [Shown::Const, Shown::Reg, Shown::Reg], PLAIN];
+
+/// How the operands are shown to an identity, which is [`PLANS`] and two more.
+///
+/// The two more expand one operand each, for the identities about adding back a difference,
+/// `x + (y - x)`. Those are about two instructions at once and are still identities, since what is
+/// left is a value the function already has. One operand at a time, because the other one is the
+/// value the difference took away, and a pattern can only say two places are the same value when
+/// both are shown as registers.
+const IDENTITIES: [Plan; 5] = [
+    PLANS[0],
+    PLANS[1],
+    PLAIN,
+    [Shown::Reg, Shown::Expand, Shown::Reg],
+    [Shown::Expand, Shown::Reg, Shown::Reg],
+];
 
 /// How the operands are shown to a canonicalisation, which is the one plan tier three is matched
 /// under.
@@ -352,7 +367,7 @@ const SELECT: [Plan; 3] = [
 /// something to say about and no order in which one of them gets there first. Tier six is the
 /// same: it is the only table about a select.
 const TABLES: [(&Table, &[Plan]); 6] = [
-    (&identities::TABLE, &PLANS),
+    (&identities::TABLE, &IDENTITIES),
     (&strength::TABLE, &PLANS),
     (&width::TABLE, &EXPAND),
     (&compare::TABLE, &COMPARE),
@@ -431,6 +446,14 @@ impl Pass for Simplify {
             for inst in func.insts(block).collect::<Vec<Inst>>() {
                 if dead(func, inst) {
                     continue;
+                }
+                // What an earlier rewrite in this run pointed away from is read as what it points
+                // at now, rather than at the end, so that a rule can fire on what the one before
+                // it left. `start + (end - start) > end` is `end > end` only once the addition is
+                // `end`, and nothing after the second run of this pass would see it.
+                if !forward.is_empty() {
+                    let args = func[inst].args;
+                    func.rewrite(args, |value| chase(&forward, value));
                 }
                 if let Some(flip) = negated_comparison(func, inst) {
                     if !fuel.take() {

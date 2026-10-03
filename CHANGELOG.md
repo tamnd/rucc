@@ -26,6 +26,13 @@ A patch release. A link with `-flto` now optimizes across files: each object kee
 
 - Interprocedural constant propagation reads a null pointer as a constant, so a static function every caller passes `NULL` to gets the `NULL` in its body, as gcc's `-fipa-cp` does. It also reads a call argument that is a block parameter fed the same constant on every edge, which is what two arms each passing `NULL` leave behind. Conditional constant propagation knows a pointer that is null every way round a loop is null, so a test of it against `NULL` is decided. In the kernel this removes the `WARN_ON_ONCE(1)` of the `fsverity` stubs from `fs/ext4/readpage.o` and `fs/buffer.o`, which gcc already removed.
 
+### Changed
+
+- The range walk up the dominator tree no longer counts a branch on a condition the value plays no part in, so a test that matters can be many blocks above the use. `raw_send_hdrinc` checks its length against 0xffff and then makes six other tests before the copy, and the copy's size check now goes as it does with gcc. A branch on `a && b` or `!(a || b)` gives both sides as relations on the edge where it holds, which removes the `dma_fence` warning in `dma_resv_add_fence`.
+- An `asm volatile` with no `"memory"` clobber and no memory operand is marked as not touching memory, as gcc reads it. A load on each side of a `WARN_ON` is now one load, and a load whose memory version is a phi that every way in agrees on is matched as that version.
+- `x + (y - x)` and `(y - x) + x` simplify to `y`, and simplify uses what it already rewrote while it is still running, so a compare on the result folds in the same run.
+- A block parameter that arrives as the same constant every way in, each edge with its own copy of it, is replaced by that constant. Two inlined `return NULL` paths meeting is the common case, and it removes the `fsverity` warnings from fs/buffer.c and fs/ext4/readpage.c.
+
 ### Fixed
 
 - An attribute written beside the `*` of a function's return type, as in `void *__attribute__((noinline)) f(char *)`, now applies to the function, as it does with gcc. rucc read `noinline`, `always_inline`, `noreturn`, `returns_twice` and the effect attributes only from the front of the declaration and ignored them there, so gcc.c-torture/execute/20010122-1.c inlined a function it asked not to and `__builtin_return_address(1)` answered for the wrong frame at `-O1` and above.

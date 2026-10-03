@@ -277,6 +277,11 @@ fn act(func: &Func, inst: Inst) -> Act {
     if !data.opcode.touches_memory() {
         return Act::Ignore;
     }
+    // An `asm` with nothing in memory and no `memory` clobber writes nothing, which is how gcc
+    // reads one too.
+    if data.opcode == Opcode::InlineAsm && data.flags.contains(Flags::NOMEM) {
+        return Act::Ignore;
+    }
     if data.flags.intersects(Flags::KEEP) {
         return Act::Forget;
     }
