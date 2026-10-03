@@ -484,6 +484,14 @@ impl DeclFlags {
     /// [`Self::NO_STRICT_ALIASING`] is.
     pub const NO_LOOP_IDIOM: Self = Self(1 << 33);
 
+    /// `__attribute__((common))` was written, so a tentative definition of the object goes in the
+    /// common block even under `-fno-common`, which is what old code that defines the same object
+    /// in every file that names it asks for. The opposite of [`Self::NO_COMMON`], and never set
+    /// with it: of the two, the one written first stands, and between declarations the last one
+    /// that is not `extern` says which, as it does in gcc. Only ever read off an object with
+    /// static storage.
+    pub const COMMON: Self = Self(1 << 34);
+
     /// Whether `zero_call_used_regs("skip")` was written. See [`Self::ZERO_WIDE`] for why this is
     /// more than the one bit.
     #[must_use]
@@ -518,7 +526,8 @@ impl DeclFlags {
     /// These flags and then `later`'s, where of [`Self::STACK_PROTECT`] and
     /// [`Self::NO_STACK_PROTECTOR`] the one written first stands and the other is dropped. gcc
     /// ignores the second of the two with a warning, and a function it was said on both ways gets
-    /// what it was asked for first.
+    /// what it was asked for first. [`Self::COMMON`] and [`Self::NO_COMMON`] are under the same
+    /// rule.
     #[must_use]
     pub const fn then(self, later: Self) -> Self {
         let mut later = later;
@@ -527,6 +536,12 @@ impl DeclFlags {
         }
         if self.contains(Self::NO_STACK_PROTECTOR) {
             later = later.with(Self::STACK_PROTECT, false);
+        }
+        if self.contains(Self::COMMON) {
+            later = later.with(Self::NO_COMMON, false);
+        }
+        if self.contains(Self::NO_COMMON) {
+            later = later.with(Self::COMMON, false);
         }
         Self(self.0 | later.0)
     }

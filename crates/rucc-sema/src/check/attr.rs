@@ -1467,13 +1467,46 @@ impl Checker<'_> {
         })
     }
 
+    /// [`Self::inlining`] of the attributes on the specifiers of a declaration, when `after` is what
+    /// the ones after its declarator say.
+    ///
+    /// gcc applies the ones after the declarator first, so of `common` and `nocommon` written one
+    /// on each side it is the one after that stands, and the one on the specifiers is ignored with
+    /// the warning it gets when the two are in one list.
+    pub(in crate::check) fn inlining_before(
+        &mut self,
+        attrs: AttrList,
+        after: DeclFlags,
+    ) -> DeclFlags {
+        let mut flags = self.inlining(attrs);
+        let ast = self.ast;
+        for &attr in &ast[attrs] {
+            if attr.namespace.is_some_and(|ns| self.text(ns) != "gnu") {
+                continue;
+            }
+            let (now, other, said) = match self.gnu_name(&attr) {
+                "common" => (DeclFlags::COMMON, DeclFlags::NO_COMMON, "nocommon"),
+                "nocommon" => (DeclFlags::NO_COMMON, DeclFlags::COMMON, "common"),
+                _ => continue,
+            };
+            if flags.contains(now) && after.contains(other) {
+                let name = self.gnu_name(&attr);
+                let what =
+                    format!("ignoring attribute '{name}' because it conflicts with attribute '{said}'");
+                self.report(Diagnostic::warning(what, attr.span).with_code("E0703"));
+                flags = flags.with(now, false);
+            }
+        }
+        flags
+    }
+
     /// What an attribute list says about inlining and about what is written around the body, as
     /// the bits it can set.
     ///
     /// `always_inline`, `noinline`, `no_instrument_function`, `no_stack_protector`,
     /// `stack_protect`, `cold`, `hot`, `function_return("keep")`, `indirect_branch("keep")` and
     /// `zero_call_used_regs`, and the `optimize` options that stand for two of them, and
-    /// `uninitialized`, `nocommon` and `retain`, which are not about inlining but are read in the
+    /// `uninitialized`, `common`, `nocommon` and `retain`, which are not about inlining but are read in the
     /// same two places, under the namespace test [`Self::never_returns`] is under and through the
     /// same unarmouring, so `__always_inline__` in a header and `[[gnu::noinline]]` are both read.
     /// Nothing else in the list is looked at, so the answer is [`DeclFlags::NONE`] for almost every
@@ -1494,7 +1527,22 @@ impl Checker<'_> {
                 "no_stack_protector" => flags = flags.then(DeclFlags::NO_STACK_PROTECTOR),
                 "stack_protect" => flags = flags.then(DeclFlags::STACK_PROTECT),
                 "uninitialized" => flags |= DeclFlags::UNINITIALIZED,
-                "nocommon" => flags |= DeclFlags::NO_COMMON,
+                // The second of the two in one declaration is ignored with gcc's warning.
+                "common" | "nocommon" => {
+                    let (now, other) = match name.as_str() {
+                        "common" => (DeclFlags::COMMON, "nocommon"),
+                        _ => (DeclFlags::NO_COMMON, "common"),
+                    };
+                    let said = flags.then(now);
+                    if !said.contains(now) {
+                        let what = format!(
+                            "ignoring attribute '{name}' because it conflicts with attribute \
+                             '{other}'"
+                        );
+                        self.report(Diagnostic::warning(what, attr.span).with_code("E0703"));
+                    }
+                    flags = said;
+                }
                 "retain" => flags |= DeclFlags::RETAIN,
                 "cold" => flags |= DeclFlags::COLD,
                 "hot" => flags |= DeclFlags::HOT,
