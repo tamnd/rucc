@@ -361,3 +361,27 @@ fn a_size_a_division_does_not_bound_is_still_tested() {
     let listing = asm("udiv-open", source);
     assert!(listing.contains("warn"), "the test went:\n{listing}");
 }
+
+#[test]
+fn a_static_that_is_only_ever_written_is_dropped_with_its_stores() {
+    let source = "void *make(void);\n\
+        void fix(unsigned long);\n\
+        static void *cache __attribute__((section(\".data..ro_after_init\")));\n\
+        static struct { int a, b; } pair;\n\
+        void init(void) { cache = make(); fix((unsigned long)cache); pair.b = 3; }\n";
+    let listing = asm("write-only", source);
+    assert!(!listing.contains("ro_after_init"), "the object stayed:\n{listing}");
+    assert!(!listing.contains("pair"), "the object stayed:\n{listing}");
+    assert!(listing.contains("fix"), "the call went:\n{listing}");
+}
+
+#[test]
+fn a_static_that_is_read_or_written_through_volatile_is_kept() {
+    let source = "static int kept;\n\
+        static int loud;\n\
+        void set(int v) { kept = v; *(volatile int *)&loud = v; }\n\
+        int get(void) { return kept; }\n";
+    let listing = asm("write-read", source);
+    assert!(listing.contains("kept:"), "the read object went:\n{listing}");
+    assert!(listing.contains("loud"), "the volatile store went:\n{listing}");
+}
