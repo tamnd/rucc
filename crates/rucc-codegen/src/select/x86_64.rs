@@ -42,6 +42,7 @@ pub static SELECTOR: super::Selector = super::Selector {
             load: "mov_rm_64",
             segment: rucc_target::Segment::Gs,
             at: 0x58,
+            scale: 8,
             add: "lea_64",
         }),
         teb: None,

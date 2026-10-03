@@ -37,7 +37,16 @@ pub static SELECTOR: super::Selector = super::Selector {
         slot: super::Reach::Mode("mov_rm_32"),
         thread: super::Reach::Mode("mov_rm_32"),
         pointer: super::Pointer::Segment("mov_rm_32", rucc_target::Segment::Gs),
-        indexed: None,
+        // The thread block is in `%fs` on 32-bit Windows, and the array of `.tls` copies is 44
+        // bytes into it. Only a COFF file reaches it. See `crate::elsewhere::Elsewhere::indexed`.
+        indexed: Some(super::Indexed {
+            index: "mov_rm_32",
+            load: "mov_rm_32",
+            segment: rucc_target::Segment::Fs,
+            at: 0x2c,
+            scale: 4,
+            add: "lea_32",
+        }),
         teb: None,
     },
     jumps: &super::Jumps { near: "lea_32", cell: "mov_rm_32", add: "add_rr_32", two_address: true },

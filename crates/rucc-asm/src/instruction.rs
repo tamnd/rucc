@@ -91,6 +91,10 @@ pub(crate) enum Sort {
     /// or a number and `x@tlsgd(,%ebx,1)` in front of a call to `___tls_get_addr`. The bytes hold
     /// what the relocation says and nothing is taken off for where the instruction ends.
     Tls(Tls),
+    /// How far a name is into its section, which is what `_x@SECREL32(%eax)` is on i386 Windows.
+    /// A thread's copy of `.tls` is laid out as the section is, so that is how far the variable
+    /// is into the copy whose address is in the register. `IMAGE_REL_I386_SECREL`.
+    Section,
 }
 
 /// The name in a displacement, and which of the three ways of reaching it the suffix asks for.
@@ -111,7 +115,8 @@ fn reached(named: &str) -> Result<(String, Sort), String> {
 /// The same for i386, where an address is counted from registers and never from the instruction.
 ///
 /// A bare name is the address of the name. `@GOTOFF` and `@GOT` are what gcc writes for position
-/// independent code there, and the rest are the thread-local ones. See [`threaded`].
+/// independent code there, `@SECREL32` is how far into `.tls` a Windows thread-local variable is,
+/// and the rest are the thread-local ones. See [`threaded`].
 fn reached_i386(named: &str) -> Result<(String, Sort), String> {
     let Some((name, how)) = named.split_once('@') else {
         return Ok((named.to_owned(), Sort::Extended));
@@ -119,6 +124,7 @@ fn reached_i386(named: &str) -> Result<(String, Sort), String> {
     match how {
         "GOTOFF" => Ok((name.to_owned(), Sort::Offset)),
         "GOT" => Ok((name.to_owned(), Sort::Slot)),
+        "SECREL32" => Ok((name.to_owned(), Sort::Section)),
         _ => match threaded(how) {
             Some(tls) => Ok((name.to_owned(), Sort::Tls(tls))),
             None => Err(format!(

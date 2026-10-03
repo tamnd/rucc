@@ -133,9 +133,9 @@ pub fn read_with(
     // again, with each label where the last pass put it, until the places stop moving. That has no
     // such guarantee, so it is given a number of passes and a file that is still moving after them
     // is refused rather than read for ever.
-    // i386 COFF has `@` in names, `_Sleep@4` and `@f@8`, and no `@` suffixes to confuse them with,
-    // where everything below reads an `@` as the start of one. So the names are read with the
-    // `@` spelled some other way and given it back at the end.
+    // i386 COFF has `@` in names, `_Sleep@4` and `@f@8`, where everything below reads an `@` as
+    // the start of a suffix. So the names are read with the `@` spelled some other way and given
+    // it back at the end. The one suffix there is `@SECREL32`, which no decoration looks like.
     let decorated = arch == Arch::X86 && format == ObjectFormat::Coff && text.contains('@');
     let spelled;
     let text = if decorated {
@@ -192,13 +192,16 @@ const AT_SIGN: &str = "__rucc_at__";
 /// The file with every `@` outside a string spelled [`AT_SIGN`].
 ///
 /// Only a string keeps its own, since an `@` there is a byte of data rather than a part of a
-/// name, and a comment is left alone as well because nothing reads it.
+/// name, and a comment is left alone as well because nothing reads it. So does the `@` of
+/// `_x@SECREL32(%eax)`, which is how far a thread-local variable is into `.tls` and is a suffix
+/// here as everywhere else. A decoration is digits after the `@`, or a name for `fastcall`'s
+/// leading one, and never that word on its own.
 fn at_signs_out(text: &str) -> String {
     let mut out = String::with_capacity(text.len());
     let mut quoted = false;
     let mut escaped = false;
     let mut comment = false;
-    for ch in text.chars() {
+    for (at, ch) in text.char_indices() {
         match ch {
             '\n' => {
                 comment = false;
@@ -212,7 +215,7 @@ fn at_signs_out(text: &str) -> String {
             }
             '"' if !escaped => quoted = !quoted,
             '#' if !quoted => comment = true,
-            '@' if !quoted => {
+            '@' if !quoted && !secrel(&text[at + 1..]) => {
                 out.push_str(AT_SIGN);
                 continue;
             }
@@ -222,6 +225,15 @@ fn at_signs_out(text: &str) -> String {
         out.push(ch);
     }
     out
+}
+
+/// Whether what follows an `@` is the `SECREL32` suffix and nothing more of a name.
+fn secrel(after: &str) -> bool {
+    after.strip_prefix("SECREL32").is_some_and(|rest| {
+        !rest.starts_with(|ch: char| {
+            ch.is_ascii_alphanumeric() || matches!(ch, '_' | '$' | '.' | '@')
+        })
+    })
 }
 
 /// A file read with [`at_signs_out`], with its names given their `@` back.
@@ -764,7 +776,12 @@ impl Reader {
             let here = (part, at as i64);
             let sum = if matches!(
                 hole.sort,
-                Reach::Value | Reach::Extended | Reach::Offset | Reach::Slot | Reach::Tls(_)
+                Reach::Value
+                    | Reach::Extended
+                    | Reach::Offset
+                    | Reach::Slot
+                    | Reach::Tls(_)
+                    | Reach::Section
             ) {
                 // The number itself, with nothing taken off for where the instruction ends. A name
                 // in an address carries what is added to it apart, and a number carries nothing.
@@ -3427,7 +3444,12 @@ impl Reader {
             // file does not define say, is not a number the linker writes into an instruction.
             let value = matches!(
                 fixup.reach,
-                Reach::Value | Reach::Extended | Reach::Offset | Reach::Slot | Reach::Tls(_)
+                Reach::Value
+                    | Reach::Extended
+                    | Reach::Offset
+                    | Reach::Slot
+                    | Reach::Tls(_)
+                    | Reach::Section
             );
             let named =
                 matches!(residue.left.as_slice(), [Left { coeff: 1, what: What::Symbol(_), .. }]);
@@ -3459,7 +3481,7 @@ impl Reader {
                             .to_owned(),
                     ));
                 }
-                [] if matches!(fixup.reach, Reach::Tls(_)) => {
+                [] if matches!(fixup.reach, Reach::Tls(_) | Reach::Section) => {
                     return Err(bad(
                         "a thread-local suffix on something that comes out as a number, which is \
                          not a variable any thread has"
@@ -3515,6 +3537,7 @@ impl Reader {
                             }
                             Reference::Tls(tls)
                         }
+                        Reach::Section => Reference::Section,
                         _ if self.i386 && name == TABLE => self.front(fixup.width, line)?,
                         Reach::Extended if fixup.width == 4 => Reference::Signed,
                         _ => Reference::Address { bytes: fixup.width },
@@ -6269,6 +6292,28 @@ g:
         assert_eq!(&data.bytes[4..], b"a@b");
         // And nowhere else, where an `@` still says how a name is reached.
         assert!(read_as("\tcall\t_h@12\n", Arch::X86, ObjectFormat::Elf).is_err());
+    }
+
+    /// How far a thread-local variable is into `.tls` on i686 Windows, which is the one `@` that
+    /// is still a suffix on i386 COFF. It sits next to a decorated name and leaves it whole.
+    #[test]
+    fn secrel32_on_i386_coff_is_a_suffix_and_not_part_of_the_name() {
+        let text = "\t.text\n\tleal\t_counter@SECREL32(%eax), %eax\n\
+                    \taddl\t_start@SECREL32(%ecx), %edx\n\tcall\t_f@4\n";
+        let done = match read_as(text, Arch::X86, ObjectFormat::Coff) {
+            Ok(done) => done,
+            Err(trouble) => panic!("line {}: {}", trouble.line, trouble.why),
+        };
+        let text = done.parts.iter().find(|part| part.name == ".text").unwrap();
+        let named: Vec<(&str, Reference)> =
+            text.relocs.iter().map(|reloc| (reloc.symbol.as_str(), reloc.kind)).collect();
+        assert_eq!(named[0], ("_counter", Reference::Section));
+        assert_eq!(named[1], ("_start", Reference::Section));
+        assert_eq!(named[2].0, "_f@4");
+        let names: Vec<&str> = done.names.iter().map(|name| name.name.as_str()).collect();
+        assert!(!names.iter().any(|name| name.contains("SECREL")), "{names:?}");
+        assert!(secrel("SECREL32(%eax)") && secrel("SECREL32"));
+        assert!(!secrel("SECREL32x") && !secrel("4") && !secrel("SECREL"));
     }
 
     /// What gcc writes for a Windows function with a frame pointer, read into the same record the

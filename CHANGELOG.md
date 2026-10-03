@@ -11,6 +11,7 @@ All notable changes are recorded here. The format follows [Keep a Changelog](htt
 
 ### Added
 
+- A thread-local variable works on i686 Windows (#2072). It is reached the way gcc and clang reach it for `i686-w64-mingw32`: `__tls_index`, the array of `.tls` copies at `%fs:44`, four bytes a pointer, and the variable's `@SECREL32` offset, which the i386 assembler now reads and writes as `IMAGE_REL_I386_SECREL`. Before, the compile was refused.
 - The assembler takes `jecxz` in 32 and 64 bit code and `jcxz` in 32 bit code, which arch/x86/power/hibernate_asm_32.S uses to skip `cr4` on old CPUs.
 
 ### Fixed

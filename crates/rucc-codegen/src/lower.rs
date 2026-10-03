@@ -3742,7 +3742,7 @@ impl<'a> Lowering<'a> {
     /// A thread-local variable on Windows, which is four loads and no call.
     ///
     /// `_tls_index` is this image's slot in the array of `.tls` copies the thread block holds at
-    /// `%gs:88`, and the variable is as far into this thread's copy as it is into the section. The
+    /// `%gs:88`, or `%fs:44` on i386, and the variable is as far into this thread's copy as it is into the section. The
     /// C runtime defines the index and the linker writes the offset. See [`crate::select::Indexed`] for
     /// the four instructions, which are the ones gcc writes.
     fn thread_indexed(
@@ -3772,8 +3772,8 @@ impl<'a> Lowering<'a> {
         self.out.build(block, load).at(span).def(array, gpr).mem(at).finish();
 
         let copy = self.out.new_vreg(gpr);
-        let mem =
-            mir::Mem::at(mir::Operand::read(array, gpr)).indexed(mir::Operand::read(slot, gpr), 8);
+        let mem = mir::Mem::at(mir::Operand::read(array, gpr))
+            .indexed(mir::Operand::read(slot, gpr), indexed.scale);
         self.out.build(block, load).at(span).def(copy, gpr).mem(mem).finish();
 
         let reg = self.new_reg(result);
