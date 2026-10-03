@@ -31,6 +31,9 @@ if [ $# -eq 3 ]; then
 else
 	suite=$out/c-testsuite
 	git init -q "$suite"
+	# Git for Windows checks text out with CR LF line ends by default, and the .expected files
+	# are compared byte for byte, so the checkout keeps them as the suite wrote them.
+	git -C "$suite" config core.autocrlf false
 	git -C "$suite" fetch -q --depth 1 https://github.com/c-testsuite/c-testsuite.git "$commit"
 	git -C "$suite" checkout -q FETCH_HEAD
 fi
