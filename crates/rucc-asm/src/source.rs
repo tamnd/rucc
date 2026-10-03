@@ -5639,7 +5639,8 @@ _tls$tlv$init:
     fn incbin_puts_the_bytes_of_a_file_there() {
         let path = std::env::temp_dir().join(format!("rucc-incbin-{}.bin", std::process::id()));
         std::fs::write(&path, b"abcdef").unwrap();
-        let name = path.display();
+        // A string in the source reads a backslash as an escape, and a Windows path is full of them.
+        let name = path.display().to_string().replace('\\', "\\\\");
         let out =
             assembled(&format!("\t.data\n\t.incbin \"{name}\"\n\t.incbin \"{name}\", 2, 3\n"));
         let missing = read(&format!("\t.data\n\t.incbin \"{name}\", 7\n"), Arch::X86_64);

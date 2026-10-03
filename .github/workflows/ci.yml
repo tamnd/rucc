@@ -92,8 +92,10 @@ jobs:
           key: ${{ matrix.profile }}
       - name: cargo build
         run: cargo build --workspace --all-features --profile ${{ matrix.profile }}
+      # Every test binary runs even after one fails, so a run shows all that is broken on a host
+      # rather than the first of it.
       - name: cargo test
-        run: cargo test --workspace --all-features --profile ${{ matrix.profile }}
+        run: cargo test --workspace --all-features --profile ${{ matrix.profile }} --no-fail-fast
       # The M0 exit criterion in spec/17-milestones.md is that this works and is correct on
       # all three hosts, so it is checked rather than assumed.
       - name: rucc --print-config
