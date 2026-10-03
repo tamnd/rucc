@@ -67,7 +67,7 @@ use crate::operand::OperandDesc;
 use crate::regs::{
     CallRegs, Chkstk, ClassInfo, Conventions, Guard, PhysReg, RegClass, RegFile, Segment, Trace,
 };
-use crate::short::{Copied, Narrowed, ShortInsts, Stepped, Tested, Zeroed};
+use crate::short::{Copied, Narrowed, ShortInsts, Spread, Stepped, Tested, Zeroed};
 use rucc_abi::Convention;
 
 /// The general purpose registers.
@@ -670,6 +670,8 @@ pub static SHORT: ShortInsts = ShortInsts {
     testing: &ZERO_COMPARES,
     stepping: &STEPS,
     copying: &BARE_ADDRESSES,
+    spreading: &SPREADS,
+    unindexed: &[RSP],
 };
 
 /// Writing zero into a register without spelling the zero out.
@@ -785,6 +787,46 @@ static STEPS: [Stepped; 16] = [
 /// machine can do a move between registers by renaming and has to do an address computation with an
 /// adder. gcc writes no such address computation anywhere in the SQLite amalgamation.
 static BARE_ADDRESSES: [Copied; 1] = [Copied { name: "lea_64", into: "mov_rr_64" }];
+
+/// A copy and an addition written as the address computation that does both.
+///
+/// `movq %rcx, %rdi` and `addl %eax, %edi` are what the allocator leaves when the first source of
+/// the addition is still wanted after it, and `leal (%rcx,%rax), %edi` is the same sum in one
+/// instruction that writes no condition state. The thirty two bit address computation keeps the
+/// low half of the sum and clears the rest of the register, which is what the thirty two bit
+/// addition does, and it takes the sixty four bit copy because the half of the register the copy
+/// wrote above thirty two bits is a half neither instruction reads. A sixty four bit addition takes
+/// only the sixty four bit copy, since the narrower one clears the half the addition adds.
+///
+/// A subtraction of a constant is the addition of the constant the other way round, which is what
+/// the sign says. Eight and sixteen bits are not here, since the description has no address
+/// computation at either width.
+static SPREADS: [Spread; 6] = [
+    Spread {
+        name: "add_rr_32",
+        copies: &["mov_rr_64", "mov_rr_32"],
+        into: "lea_32",
+        sign: 1,
+        bits: 32,
+    },
+    Spread {
+        name: "add_ri_32",
+        copies: &["mov_rr_64", "mov_rr_32"],
+        into: "lea_32",
+        sign: 1,
+        bits: 32,
+    },
+    Spread {
+        name: "sub_ri_32",
+        copies: &["mov_rr_64", "mov_rr_32"],
+        into: "lea_32",
+        sign: -1,
+        bits: 32,
+    },
+    Spread { name: "add_rr_64", copies: &["mov_rr_64"], into: "lea_64", sign: 1, bits: 64 },
+    Spread { name: "add_ri_64", copies: &["mov_rr_64"], into: "lea_64", sign: 1, bits: 64 },
+    Spread { name: "sub_ri_64", copies: &["mov_rr_64"], into: "lea_64", sign: -1, bits: 64 },
+];
 
 /// Whether the instruction of that name leaves the condition state other than it found it.
 ///

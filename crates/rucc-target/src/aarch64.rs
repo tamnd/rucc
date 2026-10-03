@@ -480,6 +480,8 @@ pub static SHORT: ShortInsts = ShortInsts {
     testing: &[],
     stepping: &[],
     copying: &[],
+    spreading: &[],
+    unindexed: &[],
 };
 
 /// Whether the instruction of that name compares and keeps the answer, all in the one instruction.

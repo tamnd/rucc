@@ -5,7 +5,7 @@
 //! about the back end never learning what it is compiling for, and names three of these as free
 //! before any of that is settled and one as waiting for it.
 //!
-//! Five rewrites. A move of zero into a register becomes an exclusive or of the register with
+//! Six rewrites. A move of zero into a register becomes an exclusive or of the register with
 //! itself: `movl $0, %eax` spells the zero out in four bytes of zero bits and is five bytes, `xorl
 //! %eax, %eax` says it without spelling it and is two. The processor knows the idiom, so the
 //! shorter one is no slower, and this is not a trade of speed for size and does not wait for a size
@@ -44,6 +44,14 @@
 //! registers is a thing the machine can do by renaming, so it is off the critical path, and an
 //! address computation is an addition however small the numbers in it are. gcc writes no address
 //! computation of that shape anywhere in the SQLite amalgamation and rucc wrote 444 of them.
+//!
+//! And a copy followed by an addition into the copy becomes one address computation. The addition
+//! writes its answer over its first source, so where that source is still wanted the allocator
+//! copies it first, and `movq %rcx, %rdi` then `addl %eax, %edi` is what comes out. `leal
+//! (%rcx,%rax), %edi` is the same sum in one instruction, which is what gcc writes, and the salsa
+//! core of libsodium had 48 of these pairs in one function where gcc had 31 address computations.
+//! The address computation writes no condition state, so this waits on the state being dead the way
+//! the exclusive or does. tamnd/rucc#2789 is the issue.
 //!
 //! That fourth one is the only one here that is not free, and it is the only one that reads the
 //! goal. An addition writes the carry and an increment leaves the carry as it found it, so the
@@ -86,8 +94,9 @@
 //! for the reason `compare` is: the layout writes the jump that reads a comparison into the same
 //! block as the comparison, and this is the other pass that has to see that pair whole.
 //!
-//! Nothing here moves an instruction, removes one or changes a block, so running after the freeze
-//! costs nothing. The rewrite is one instruction becoming one instruction in the same place.
+//! Nothing here moves an instruction or changes a block, so running after the freeze costs nothing.
+//! Every rewrite is one instruction becoming one instruction in the same place, and the one that
+//! takes a copy in also takes the copy out, which leaves every instruction around it where it was.
 //!
 //! # What a block boundary is
 //!
@@ -173,6 +182,10 @@ use crate::changes::{self, Changes, Plan};
 /// Rewrites every instruction that has a shorter spelling nothing would notice.
 ///
 /// Gives back how many were rewritten, which the tests read and nothing else does.
+///
+/// `allocated` says which instructions are moves the allocator wrote, which are the only copies the
+/// sixth rewrite takes out. A move a template wrote is one the program asked for by name, and the
+/// listing of the template has to keep it whatever it does.
 pub fn shorter(
     func: &mut mir::Func,
     short: &ShortInsts,
@@ -180,6 +193,7 @@ pub fn shorter(
     machine: &MachineInsts,
     names: &mut Interner,
     goal: Goal,
+    allocated: &dyn Fn(mir::Inst) -> bool,
 ) -> usize {
     // Every name a rewrite could want, before the walk rather than inside it, because the walk
     // holds a name it read out of the interner while it edits the function and interning a new one
@@ -189,6 +203,7 @@ pub fn shorter(
     let wanted = wanted.chain(short.testing.iter().map(|entry| entry.into));
     let wanted = wanted.chain(short.stepping.iter().map(|entry| entry.into));
     let wanted = wanted.chain(short.copying.iter().map(|entry| entry.into));
+    let wanted = wanted.chain(short.spreading.iter().map(|entry| entry.into));
     let opcodes: Vec<(&'static str, mir::Opcode)> = wanted
         .map(|into| (into, mir::Opcode::new(names.intern(&format!("{}{into}", short.prefix)))))
         .collect();
@@ -213,7 +228,13 @@ pub fn shorter(
         // because an instruction that writes the whole state ends the life of both and one that
         // writes everything but the carry ends the life of neither.
         let mut carry = false;
-        for inst in func.insts(block).collect::<Vec<_>>().into_iter().rev() {
+        let insts = func.insts(block).collect::<Vec<_>>();
+        for (at, &inst) in insts.iter().enumerate().rev() {
+            // A copy an addition behind it has taken in, which is gone from the block. It wrote no
+            // condition state, so walking past it is what the walk would have done anyway.
+            if func.block_of(inst).is_none() {
+                continue;
+            }
             // Asked again after each rewrite that is taken, since what stands there then is another
             // instruction and the questions below are about that one.
             let mut known = Known::of(&mut seen, func, short, flags, names, inst);
@@ -257,6 +278,21 @@ pub fn shorter(
             if into.is_some_and(|op| copied(func, &mut counts, machine, names, inst, op)) {
                 took += 1;
                 known = Known::of(&mut seen, func, short, flags, names, inst);
+            }
+            // A copy and the addition behind it, written as one address computation. That writes
+            // no condition state where the addition wrote all of it, so this waits on the state
+            // being dead the way the exclusive or does. It is asked before the step because the one
+            // instruction it leaves is shorter than the copy and the increment together.
+            if free && !live && known.spreading {
+                let before = &insts[..at];
+                let into =
+                    spread_form(func, short, machine, names, &opcodes, before, inst, allocated);
+                if into.is_some_and(|spread| spread.commit(func, &mut counts, names, machine)) {
+                    took += 1;
+                    known = Known::of(&mut seen, func, short, flags, names, inst);
+                    // What stands there now writes no state and the state was already dead, so
+                    // the walk past it is the one it would have taken past the addition.
+                }
             }
             // Adding one with the one in the opcode, which is the only rewrite here that is a
             // trade. It needs the carry to be dead rather than the whole state, since that is the
@@ -382,6 +418,8 @@ struct Known {
     copying: bool,
     /// Whether it has a shorter addition for some number.
     stepping: bool,
+    /// Whether it is an addition a copy in front of it can be folded into.
+    spreading: bool,
     /// Whether the description covers the name at all. See [`opcode`].
     covered: bool,
     /// Whether it reads what it wrote itself. See [`FlagInsts::asks_what_it_reads`].
@@ -412,6 +450,7 @@ impl Known {
                 testing: has(|short, bare| short.tested(bare).is_some()),
                 copying: has(|short, bare| short.copied(bare).is_some()),
                 stepping: has(|short, bare| short.stepping.iter().any(|entry| entry.name == bare)),
+                spreading: has(|short, bare| short.spread(bare).is_some()),
                 covered: name.is_some(),
                 own: name.is_some_and(|name| flags.asks_what_it_reads(name)),
                 reads: name.and_then(|name| flags.reads(name)),
@@ -669,6 +708,182 @@ fn stepped(
     set.commit(func, counts, names, machine).is_ok()
 }
 
+/// How far in front of an addition the copy it takes in may be.
+///
+/// The allocator writes the copy right in front of the instruction that wanted it and the schedule
+/// moves it no further than the instructions it is independent of, which in the salsa core of
+/// libsodium is never more than three. A bound keeps the walk linear in a block of additions whose
+/// copies are all somewhere else.
+const SPREAD: usize = 8;
+
+/// A copy and an addition that are one address computation, found and not yet written.
+struct Spread {
+    /// The copy, which goes.
+    copy: mir::Inst,
+    /// The addition, which becomes the address computation.
+    inst: mir::Inst,
+    /// What it becomes.
+    plan: Plan,
+}
+
+impl Spread {
+    /// Writes the address computation over the addition and takes the copy out.
+    ///
+    /// The copy goes by hand rather than as a removal in the same set. [`Changes`] keeps a removal
+    /// to an instruction whose register nothing reads, which after allocation is a question about a
+    /// physical register the whole function reads somewhere, so it would turn every one of these
+    /// down. What stands for the question here is the walk in [`spread_form`], which found nothing
+    /// between the two reading the register the copy wrote, and the addition was the last reader of
+    /// it, since it writes the register over. The count of reads of the register the copy read is
+    /// one too many afterwards, which only ever makes a later removal wait.
+    fn commit(
+        self,
+        func: &mut mir::Func,
+        counts: &mut changes::Reads,
+        names: &Interner,
+        machine: &MachineInsts,
+    ) -> bool {
+        let mut set = Changes::new();
+        set.rewrite(self.inst, self.plan);
+        if set.commit(func, counts, names, machine).is_err() {
+            return false;
+        }
+        func.remove_inst(self.copy);
+        true
+    }
+}
+
+/// The address computation an addition and the copy in front of it are, when there is a copy and
+/// nothing between the two minds it going.
+///
+/// The addition writes its first source and the copy put what it is adding to there, so the address
+/// computation reads what the copy read in place of the first source and reads the second source or
+/// carries the constant as it did. The allocator leaves the first source naming the register the
+/// copy read rather than the one it wrote, since the two are tied and the copy is what ties them, so
+/// either is taken as the addition reading what the copy put there. What has to hold between the two is that nothing reads or writes
+/// the register the copy wrote, since that register holds something else once the copy goes, and
+/// that nothing writes the register the copy read, since the address computation reads it later than
+/// the copy did. The copy has to be one the allocator wrote, which is what `allocated` says. A call or a name the target does not know ends the search, because what either of
+/// them writes is not all in its operands.
+///
+/// A register the addressing mode cannot take as an index goes in the base, and a sum of two of
+/// those is left as it is. A constant goes in as the number the address adds, negated for a
+/// subtraction, and one that does not fit is left as it is unless the address keeps no more than
+/// thirty two bits, where only the low thirty two bits of it were ever going to count.
+fn spread_form(
+    func: &mir::Func,
+    short: &ShortInsts,
+    machine: &MachineInsts,
+    names: &Interner,
+    opcodes: &[(&'static str, mir::Opcode)],
+    before: &[mir::Inst],
+    inst: mir::Inst,
+    allocated: &dyn Fn(mir::Inst) -> bool,
+) -> Option<Spread> {
+    let name = names.resolve(func[inst].opcode.name()).strip_prefix(short.prefix)?;
+    let entry = short.spread(name)?;
+    let opcode = opcodes.iter().find(|&&(at, _)| at == entry.into).map(|&(_, opcode)| opcode)?;
+    if func[inst].mem.is_some() {
+        return None;
+    }
+    let constant = func[inst].imm.map(|at| func[at].0);
+    let (def, first, second) = match (&func[func[inst].operands], constant) {
+        (&[def, first], Some(_)) => (def, first.reg, None),
+        (&[def, first, second], None) => (def, first.reg, Some(second.reg)),
+        _ => return None,
+    };
+    if !def.role.is_def() || second == Some(def.reg) {
+        return None;
+    }
+    let disp = match constant {
+        Some(value) => displacement(i128::from(value) * i128::from(entry.sign), entry.bits)?,
+        None => 0,
+    };
+    let touches =
+        |operand: &mir::Operand, reg: mir::Reg| operand.reg == reg && operand.class == def.class;
+    // What the instructions between write, which is only known to matter once the copy has said
+    // which register it read.
+    let mut written: Vec<mir::Reg> = Vec::new();
+    let mut found = None;
+    for &at in before.iter().rev().filter(|&&at| func.block_of(at).is_some()).take(SPREAD) {
+        let data = &func[at];
+        let full = names.resolve(data.opcode.name());
+        if machine.calls(full) || !machine.has(full) {
+            return None;
+        }
+        let operands = &func[data.operands];
+        let copy = full.strip_prefix(short.prefix).is_some_and(|bare| entry.copies.contains(&bare));
+        if copy && data.imm.is_none() && data.mem.is_none() && allocated(at) {
+            if let &[to, from] = operands {
+                let shaped = to.role.is_def() && from.role == Role::Use && from.class == def.class;
+                let feeds = first == def.reg || first == from.reg;
+                if shaped && feeds && touches(&to, def.reg) && from.reg != def.reg {
+                    found = Some((at, from.reg));
+                    break;
+                }
+            }
+        }
+        if operands.iter().any(|operand| touches(operand, def.reg)) {
+            return None;
+        }
+        written.extend(
+            operands
+                .iter()
+                .filter(|operand| operand.role.is_def() && operand.class == def.class)
+                .map(|operand| operand.reg),
+        );
+    }
+    let (copy, source) = found?;
+    if written.contains(&source) || func.cfi_after(copy).next().is_some() {
+        return None;
+    }
+    let unindexed = |reg: mir::Reg| reg.phys().is_some_and(|reg| short.unindexed.contains(&reg));
+    let (base, index) = match second {
+        None => (source, None),
+        Some(second) if !unindexed(second) => (source, Some(second)),
+        Some(_) if unindexed(source) => return None,
+        Some(second) => (second, Some(source)),
+    };
+    let bare = machine.bare(names.resolve(opcode.name()));
+    let &[want] = (machine.operands)(bare)? else { return None };
+    if want.class != def.class {
+        return None;
+    }
+    let written = mir::Operand {
+        reg: def.reg,
+        class: want.class,
+        role: want.role,
+        constraint: want.constraint,
+    };
+    let mut operands = vec![written, mir::Operand::read(base, def.class)];
+    operands.extend(index.map(|index| mir::Operand::read(index, def.class)));
+    let amode = mir::Amode {
+        base: Some(1),
+        index: index.map(|_| 2),
+        scale: 1,
+        disp,
+        ..mir::Amode::NOTHING
+    };
+    let plan = Plan { opcode, operands, imm: None, amode: Some(amode), symbol: None };
+    Some(Spread { copy, inst, plan })
+}
+
+/// The number an address adds, for a constant an addition of that many bits carries.
+///
+/// The constant itself where it fits. Where it does not and the addition keeps no more than thirty
+/// two bits, the constant with the same low thirty two bits, which is the same sum in every bit the
+/// instruction keeps.
+fn displacement(value: i128, bits: u32) -> Option<i32> {
+    if let Ok(disp) = i32::try_from(value) {
+        return Some(disp);
+    }
+    if bits > 32 {
+        return None;
+    }
+    let low = value.rem_euclid(1 << 32);
+    i32::try_from(if low >= 1 << 31 { low - (1 << 32) } else { low }).ok()
+}
+
 /// The name this target knows an instruction by, for an instruction that is one of this target's.
 ///
 /// The opcode in machine IR carries the target's prefix, because a function in the middle of being
@@ -705,12 +920,12 @@ mod tests {
 
     /// The pass, over the machine this crate has a backend for, at a level that wanted fast code.
     fn takes(func: &mut mir::Func, names: &mut Interner) -> usize {
-        shorter(func, &SHORT, &FLAGS, &MACHINE, names, Goal::Speed)
+        shorter(func, &SHORT, &FLAGS, &MACHINE, names, Goal::Speed, &|_| true)
     }
 
     /// The same pass at a level that wanted small code, which is the only one that steps.
     fn small(func: &mut mir::Func, names: &mut Interner) -> usize {
-        shorter(func, &SHORT, &FLAGS, &MACHINE, names, Goal::Size)
+        shorter(func, &SHORT, &FLAGS, &MACHINE, names, Goal::Size, &|_| true)
     }
 
     /// What every instruction in a block came to, as opcodes with the target's prefix taken off.
@@ -1377,5 +1592,254 @@ mod tests {
 
         assert_eq!(takes(&mut func, &mut names), 1);
         assert_eq!(shape(&func, &names, block), ["cmp_rr_32", "mov_rr_64", "set_e"]);
+    }
+
+    /// A copy and the addition into it, built the way the allocator leaves them: the copy writes the
+    /// register, and the addition reads it back as its first source and writes it over. A second
+    /// source is a register when `second` is one and a constant otherwise.
+    fn copied_then_added(
+        func: &mut mir::Func,
+        names: &mut Interner,
+        block: mir::Block,
+        (copy, add): (&str, &str),
+        (into, from): (mir::Reg, mir::Reg),
+        second: Result<mir::Reg, i64>,
+    ) -> mir::Inst {
+        let copy = op(names, copy);
+        let add = op(names, add);
+        func.build(block, copy).def(into, GPR).uses(from, GPR).finish();
+        let build = func.build(block, add).operand(reuse(into)).uses(into, GPR);
+        match second {
+            Ok(reg) => build.uses(reg, GPR).finish(),
+            Err(value) => build.imm(value).finish(),
+        }
+    }
+
+    /// The sixth rewrite. A copy of one register into another and an addition of a third register
+    /// into the copy is one address computation that reads the first two where they are, and the
+    /// copy is gone.
+    #[test]
+    fn a_copy_and_an_addition_become_an_address_computation() {
+        for (copy, add, into) in [
+            ("mov_rr_64", "add_rr_32", "lea_32"),
+            ("mov_rr_32", "add_rr_32", "lea_32"),
+            ("mov_rr_64", "add_rr_64", "lea_64"),
+        ] {
+            let (mut names, mut func, block) = empty();
+            let [to, from, second] = [(); 3].map(|()| func.new_vreg(GPR));
+            let inst = copied_then_added(
+                &mut func,
+                &mut names,
+                block,
+                (copy, add),
+                (to, from),
+                Ok(second),
+            );
+
+            assert_eq!(takes(&mut func, &mut names), 1, "{copy} {add}");
+            assert_eq!(shape(&func, &names, block), [into], "{copy} {add}");
+            assert_eq!(regs(&func, inst), [to, from, second], "{copy} {add}");
+            let amode = func[inst].mem.map(|at| func[at]).expect("an address computation");
+            assert_eq!(
+                (amode.base, amode.index, amode.scale, amode.disp),
+                (Some(1), Some(2), 1, 0)
+            );
+            assert!(func[inst].imm.is_none(), "{copy} {add}");
+        }
+    }
+
+    /// The shape the allocator really leaves. The first source of the addition is tied to what it
+    /// writes and the copy is what ties them, so after allocation the first source names the register
+    /// the copy read. That is the same pair and becomes the same address computation. A first source
+    /// naming neither register is an addition of something the copy did not put there.
+    #[test]
+    fn an_addition_naming_what_the_copy_read_is_the_same_pair() {
+        for named in ["copied", "other"] {
+            let (mut names, mut func, block) = empty();
+            let [to, from, second, other] = [(); 4].map(|()| func.new_vreg(GPR));
+            let copy = op(&mut names, "mov_rr_64");
+            let add = op(&mut names, "add_rr_32");
+            let first = if named == "copied" { from } else { other };
+            func.build(block, copy).def(to, GPR).uses(from, GPR).finish();
+            let inst = func
+                .build(block, add)
+                .operand(reuse(to))
+                .uses(first, GPR)
+                .uses(second, GPR)
+                .finish();
+
+            if named == "copied" {
+                assert_eq!(takes(&mut func, &mut names), 1);
+                assert_eq!(shape(&func, &names, block), ["lea_32"]);
+                assert_eq!(regs(&func, inst), [to, from, second]);
+            } else {
+                assert_eq!(takes(&mut func, &mut names), 0);
+                assert_eq!(shape(&func, &names, block), ["mov_rr_64", "add_rr_32"]);
+            }
+        }
+    }
+
+    /// A constant goes in as the number the address adds, and a subtraction of one adds it the other
+    /// way round. The thirty two bit one takes a constant the address cannot hold as the number with
+    /// the same low thirty two bits, which is the only part of the sum it keeps.
+    #[test]
+    fn a_constant_is_the_number_the_address_adds() {
+        let min = i64::from(i32::MIN);
+        for (add, value, into, disp) in [
+            ("add_ri_32", 7, "lea_32", 7),
+            ("add_ri_32", -7, "lea_32", -7),
+            ("sub_ri_32", 7, "lea_32", -7),
+            ("sub_ri_32", min, "lea_32", i32::MIN),
+            ("add_ri_32", 0xffff_ffff, "lea_32", -1),
+            ("add_ri_64", 7, "lea_64", 7),
+            ("sub_ri_64", 7, "lea_64", -7),
+        ] {
+            let (mut names, mut func, block) = empty();
+            let [to, from] = [(); 2].map(|()| func.new_vreg(GPR));
+            let inst = copied_then_added(
+                &mut func,
+                &mut names,
+                block,
+                ("mov_rr_64", add),
+                (to, from),
+                Err(value),
+            );
+
+            assert_eq!(takes(&mut func, &mut names), 1, "{add} {value}");
+            assert_eq!(shape(&func, &names, block), [into], "{add} {value}");
+            assert_eq!(regs(&func, inst), [to, from], "{add} {value}");
+            let amode = func[inst].mem.map(|at| func[at]).expect("an address computation");
+            assert_eq!((amode.base, amode.index, amode.disp), (Some(1), None, disp));
+        }
+    }
+
+    /// A sixty four bit subtraction of the most negative constant adds a number the address cannot
+    /// hold, and every bit of the sum is kept, so there is nothing to write it as.
+    #[test]
+    fn a_constant_a_wide_address_cannot_hold_stays_an_addition() {
+        let (mut names, mut func, block) = empty();
+        let [to, from] = [(); 2].map(|()| func.new_vreg(GPR));
+        let value = i64::from(i32::MIN);
+        let pair = ("mov_rr_64", "sub_ri_64");
+        copied_then_added(&mut func, &mut names, block, pair, (to, from), Err(value));
+
+        assert_eq!(takes(&mut func, &mut names), 0);
+        assert_eq!(shape(&func, &names, block), ["mov_rr_64", "sub_ri_64"]);
+    }
+
+    /// A copy that clears the half of the register a sixty four bit addition reads is not a copy of
+    /// what the addition adds to.
+    #[test]
+    fn a_narrow_copy_is_not_taken_into_a_wide_addition() {
+        let (mut names, mut func, block) = empty();
+        let [to, from, second] = [(); 3].map(|()| func.new_vreg(GPR));
+        let pair = ("mov_rr_32", "add_rr_64");
+        copied_then_added(&mut func, &mut names, block, pair, (to, from), Ok(second));
+
+        assert_eq!(takes(&mut func, &mut names), 0);
+        assert_eq!(shape(&func, &names, block), ["mov_rr_32", "add_rr_64"]);
+    }
+
+    /// The address computation writes no condition state, so a byte reading what the addition left
+    /// keeps the addition and the copy with it.
+    #[test]
+    fn an_addition_whose_state_something_reads_keeps_its_copy() {
+        let (mut names, mut func, block) = empty();
+        let [to, from, second, byte] = [(); 4].map(|()| func.new_vreg(GPR));
+        let pair = ("mov_rr_64", "add_rr_32");
+        copied_then_added(&mut func, &mut names, block, pair, (to, from), Ok(second));
+        let set = op(&mut names, "set_e");
+        func.build(block, set).def(byte, GPR).finish();
+
+        assert_eq!(takes(&mut func, &mut names), 0);
+        assert_eq!(shape(&func, &names, block), ["mov_rr_64", "add_rr_32", "set_e"]);
+    }
+
+    /// Instructions between the two that leave both registers alone are walked past, which is what
+    /// the schedule leaves when it moves the copy up.
+    #[test]
+    fn a_copy_a_few_instructions_up_is_still_taken() {
+        let (mut names, mut func, block) = empty();
+        let [to, from, second, other, value] = [(); 5].map(|()| func.new_vreg(GPR));
+        let copy = op(&mut names, "mov_rr_64");
+        let load = op(&mut names, "mov_rm_64");
+        let add = op(&mut names, "add_rr_32");
+        func.build(block, copy).def(to, GPR).uses(from, GPR).finish();
+        let mem = mir::Mem::at(mir::Operand::read(value, GPR));
+        func.build(block, load).def(other, GPR).mem(mem).finish();
+        let inst =
+            func.build(block, add).operand(reuse(to)).uses(to, GPR).uses(second, GPR).finish();
+
+        assert_eq!(takes(&mut func, &mut names), 1);
+        assert_eq!(shape(&func, &names, block), ["mov_rm_64", "lea_32"]);
+        assert_eq!(regs(&func, inst), [to, from, second]);
+    }
+
+    /// Something between the two that reads the register the copy wrote, or writes the register it
+    /// read, needs the copy where it is. So does a call, which writes registers it does not name.
+    #[test]
+    fn a_copy_something_between_needs_stays() {
+        for between in ["reads the copy", "writes the source", "call"] {
+            let (mut names, mut func, block) = empty();
+            let [to, from, second, other] = [(); 4].map(|()| func.new_vreg(GPR));
+            let copy = op(&mut names, "mov_rr_64");
+            let mov = op(&mut names, "mov_rr_64");
+            let call = op(&mut names, "call");
+            let add = op(&mut names, "add_rr_32");
+            func.build(block, copy).def(to, GPR).uses(from, GPR).finish();
+            match between {
+                "reads the copy" => func.build(block, mov).def(other, GPR).uses(to, GPR).finish(),
+                "writes the source" => {
+                    func.build(block, mov).def(from, GPR).uses(other, GPR).finish()
+                }
+                _ => func.build(block, call).finish(),
+            };
+            func.build(block, add).operand(reuse(to)).uses(to, GPR).uses(second, GPR).finish();
+
+            assert_eq!(takes(&mut func, &mut names), 0, "{between}");
+            assert_eq!(shape(&func, &names, block)[2], "add_rr_32", "{between}");
+        }
+    }
+
+    /// A move the allocator did not write is one a template wrote, which the program asked for by
+    /// name, so it stays and so does the addition behind it.
+    #[test]
+    fn a_copy_the_allocator_did_not_write_stays() {
+        let (mut names, mut func, block) = empty();
+        let [to, from, second] = [(); 3].map(|()| func.new_vreg(GPR));
+        let pair = ("mov_rr_64", "add_rr_64");
+        copied_then_added(&mut func, &mut names, block, pair, (to, from), Ok(second));
+
+        let took =
+            shorter(&mut func, &SHORT, &FLAGS, &MACHINE, &mut names, Goal::Speed, &|_| false);
+        assert_eq!(took, 0);
+        assert_eq!(shape(&func, &names, block), ["mov_rr_64", "add_rr_64"]);
+    }
+
+    /// Every name the table gives is one the target has, and what it becomes takes an address.
+    #[test]
+    fn every_spread_names_instructions_the_target_has() {
+        for entry in SHORT.spreading {
+            for name in [entry.name, entry.into].iter().chain(entry.copies) {
+                assert!(MACHINE.has(name), "{name}");
+            }
+            assert!((MACHINE.takes_mem)(entry.into), "{}", entry.into);
+        }
+    }
+
+    /// The register the addressing mode cannot scale goes in the base, and the copy's source goes in
+    /// the index instead.
+    #[test]
+    fn the_stack_pointer_is_never_the_index() {
+        use rucc_target::x86_64::{RAX, RCX, RSP};
+
+        let (mut names, mut func, block) = empty();
+        let [to, from, second] = [RAX, RCX, RSP].map(mir::Reg::physical);
+        let pair = ("mov_rr_64", "add_rr_64");
+        let inst = copied_then_added(&mut func, &mut names, block, pair, (to, from), Ok(second));
+
+        assert_eq!(takes(&mut func, &mut names), 1);
+        assert_eq!(shape(&func, &names, block), ["lea_64"]);
+        assert_eq!(regs(&func, inst), [to, second, from]);
     }
 }
