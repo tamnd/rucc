@@ -190,3 +190,30 @@ fn a_pointer_found_not_null_is_not_tested_again() {
     let listing = asm("null", source);
     assert!(!listing.contains("ud2"), "the trap is still there:\n{listing}");
 }
+
+/// `check_copy_size` asks `__builtin_object_size` about its `addr`, which in
+/// `io_handle_query_entry` is a parameter. Once that function is inlined into `io_query` the
+/// address is a 48 byte local, a length past it has already returned, and the
+/// `WARN_ON_ONCE(bytes > INT_MAX)` behind that cannot fire. The question has to wait for the
+/// inlining to get that answer.
+#[test]
+fn an_object_size_through_a_parameter_is_answered_after_inlining() {
+    let source = "void over(void);\n\
+        unsigned long cp(void *d, unsigned long n);\n\
+        static inline __attribute__((always_inline)) int check(const void *addr, unsigned long n) {\n\
+            int sz = __builtin_object_size(addr, 0);\n\
+            if (__builtin_expect(sz >= 0 && sz < n, 0)) { over(); return 0; }\n\
+            if (__builtin_expect(n > 0x7fffffff, 0)) __builtin_trap();\n\
+            return 1;\n\
+        }\n\
+        static int entry(char *data, unsigned int n) {\n\
+            if (check(data, n)) return cp(data, n);\n\
+            return -14;\n\
+        }\n\
+        int f(unsigned int n) {\n\
+            char buf[48];\n\
+            return entry(buf, n);\n\
+        }\n";
+    let listing = asm("objsize", source);
+    assert!(!listing.contains("ud2"), "the trap is still there:\n{listing}");
+}
