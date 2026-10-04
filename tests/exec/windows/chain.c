@@ -7,7 +7,8 @@
  * e is the other kind, which keeps what it read across a call and so saves more registers than the
  * frame pointer. rucc points the frame pointer at the bottom of such a frame, and its own link is
  * read from below the return address instead, which is execute/20010122-1.c at -O0. The call is
- * through a pointer so that gcc saves registers for it too. */
+ * through a pointer so that gcc saves registers for it too, and d reads its own addresses after
+ * calling e so that the call is not a jump at -O2. */
 #include <stdio.h>
 
 static void *ret[3], *frame[3], *up[2], *above[2];
@@ -50,9 +51,9 @@ __attribute__((noinline)) static void e(void) {
 }
 
 __attribute__((noinline)) static void d(void) {
+    e();
     ret_d = __builtin_return_address(0);
     frame_d = __builtin_frame_address(0);
-    e();
 }
 
 int main(void) {
