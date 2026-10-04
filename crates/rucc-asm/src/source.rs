@@ -118,7 +118,8 @@ pub struct Flags {
     /// that the linker may not rewrite, `R_X86_64_GOTPCREL` and `R_386_GOT32`, in every instruction.
     pub keep_slots: bool,
     /// A gas before 2.42, which `-fgnu-as-version=` claims, and which pads after data the way it
-    /// pads after an instruction, with no one byte `nop` in front. See [`Reader::after_data`].
+    /// pads after an instruction, with no one byte `nop` in front. The private
+    /// `Reader::after_data` says why.
     pub before_2_42: bool,
 }
 
