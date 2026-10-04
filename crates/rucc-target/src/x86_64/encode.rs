@@ -2826,6 +2826,13 @@ static ENCODINGS: &[Encoding] = &[
     bytes("aeskeygenassist", &IMV, Word, &[0x0F, 0x3A, 0xDF], pair(1, 2), ImmSize::Ib),
     bytes("pclmulqdq", &IVV, Word, &[0x0F, 0x3A, 0x44], pair(1, 2), ImmSize::Ib),
     bytes("pclmulqdq", &IMV, Word, &[0x0F, 0x3A, 0x44], pair(1, 2), ImmSize::Ib),
+    // GFNI without VEX, the same three operations on one register of bytes.
+    bytes("gf2p8mulb", &VV, Word, &[0x0F, 0x38, 0xCF], pair(0, 1), NO_IMM),
+    bytes("gf2p8mulb", &MV, Word, &[0x0F, 0x38, 0xCF], pair(0, 1), NO_IMM),
+    bytes("gf2p8affineqb", &IVV, Word, &[0x0F, 0x3A, 0xCE], pair(1, 2), ImmSize::Ib),
+    bytes("gf2p8affineqb", &IMV, Word, &[0x0F, 0x3A, 0xCE], pair(1, 2), ImmSize::Ib),
+    bytes("gf2p8affineinvqb", &IVV, Word, &[0x0F, 0x3A, 0xCF], pair(1, 2), ImmSize::Ib),
+    bytes("gf2p8affineinvqb", &IMV, Word, &[0x0F, 0x3A, 0xCF], pair(1, 2), ImmSize::Ib),
     // SSE4.1 lanes in and out. The general register or the address is always the one in the low
     // bits of the addressing byte, so for an extract that is the destination.
     bytes("pinsrb", &IRV, Word, &[0x0F, 0x3A, 0x20], pair(1, 2), ImmSize::Ib),
@@ -3362,7 +3369,24 @@ static ENCODINGS: &[Encoding] = &[
     evex("vpcmpgtb", &VVK, Word, &[0x64], pair(0, 2), Evex::new(Map::Escape, false).third(1)),
     evex("vpcmpgtb", &MVK, Word, &[0x64], pair(0, 2), Evex::new(Map::Escape, false).third(1)),
     evex("vpmovm2b", &KV, Single, &[0x28], pair(0, 1), Evex::new(Map::Escape38, false)),
-    // GFNI, which has a VEX form and an EVEX form and writes the wide bit in both.
+    // GFNI, which has a VEX form and an EVEX form. The two affine ones write the wide bit in
+    // both and the multiply writes it in neither. The kernel's AS_GFNI probe is the multiply.
+    evex(
+        "vgf2p8mulb",
+        &VVV,
+        Word,
+        &[0xCF],
+        pair(0, 2),
+        Evex::new(Map::Escape38, false).third(1).or_vex(false),
+    ),
+    evex(
+        "vgf2p8mulb",
+        &MVV,
+        Word,
+        &[0xCF],
+        pair(0, 2),
+        Evex::new(Map::Escape38, false).third(1).or_vex(false),
+    ),
     evex(
         "vgf2p8affineqb",
         &IVVV,
