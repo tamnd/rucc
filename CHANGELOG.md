@@ -6,6 +6,7 @@ All notable changes are recorded here. The format follows [Keep a Changelog](htt
 
 ### Added
 
+- `__attribute__((tls_model("...")))` is read, as in gcc 13 (#8), and `__has_attribute` answers yes for it. glibc writes `initial-exec` on nearly every thread-local variable it has, and that is the sequence this compiler writes for every one, so it gets what it asks for. A variable written with a dynamic model is reached the same way until the `__tls_get_addr` sequence is written (#1104). A wrong argument count or a string that names no model is an error in gcc's words (E0814), and the attribute on anything but a thread-local variable is dropped with gcc's warning (E0703). Before, it was ignored and `__has_attribute` answered no.
 - `__attribute__((common))` puts a tentative definition in the common block under `-fno-common`, as in gcc 13 (#8). The last declaration of the name that is not `extern` says whether it does, and `weak`, `section` and an initializer keep it out. When `common` and `nocommon` are both written, the one gcc applies first stands and the other is ignored with gcc's warning (E0703): the first in one list, the one after the declarator over the one before it, and an earlier declaration over a later one. Before, the attribute was ignored. A thread-local object written `common` is still an ordinary definition, where gcc puts it in `.tls_common`.
 
 ### Fixed

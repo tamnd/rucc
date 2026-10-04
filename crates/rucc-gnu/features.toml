@@ -1056,6 +1056,15 @@ tests = ["rucc::nocommon_keeps_a_tentative_definition_out_of_the_common_block_un
 notes = "A tentative definition written `nocommon` is an ordinary definition under `-fcommon`, where the others go in the common block."
 
 [[feature]]
+name = "tls_model"
+kind = "attribute"
+gcc_version = "3.3"
+status = "implemented"
+used_by = ["glibc"]
+tests = ["rucc::tls_model_is_checked_the_way_gcc_checks_it", "rucc::a_thread_local_written_initial_exec_is_reached_through_the_initial_exec_sequence"]
+notes = "Every thread-local variable is reached through the initial exec sequence, which is what glibc asks for with `attribute_tls_model_ie` and is right wherever `local-exec` is. A variable written with one of the two dynamic models is reached the same way, since the `__tls_get_addr` sequence is not written for any variable yet (issue #1104). Checked as gcc 13 checks it, in its words: the argument count and the string are errors (E0814), and the attribute on anything but a thread-local variable is dropped with a warning (E0703)."
+
+[[feature]]
 name = "nonstring"
 kind = "attribute"
 gcc_version = "8.0"

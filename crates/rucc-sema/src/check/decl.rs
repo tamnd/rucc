@@ -42,6 +42,7 @@ use rucc_types::{compatible, composite, is_complete, is_function, is_void, layou
 use crate::asm::FileAsm;
 use crate::check::Checker;
 use crate::check::stmt::Enclosing;
+use crate::check::tls::Holder;
 use crate::decl::{
     Decl, DeclFlags, DeclId, DeclKind, DeclList, Definition, Effects, Emission, InitList, Linkage,
     Startup, StorageDuration, Visibility,
@@ -428,6 +429,7 @@ impl Checker<'_> {
         let merged = self.tast[id].ty;
         self.record_alloc_size(id, &[specs.attrs], DeclKind::Function, merged);
         self.annotate_decl(id, &[specs.attrs]);
+        self.check_tls_model(&[specs.attrs], Some(name), Holder::NotVariable);
         self.read_advice(id, &[specs.attrs]);
         // Read after the merge, because a declaration above the definition has a say in whether
         // the definition is emitted and the merge is what has settled it.
@@ -913,6 +915,12 @@ impl Checker<'_> {
         if kind == DeclKind::Object {
             self.check_nonstring(&[specs.attrs, item.attrs], merged);
         }
+        let holder = match (kind, duration) {
+            (DeclKind::Object, StorageDuration::Thread) => Holder::Thread,
+            (DeclKind::Object, _) => Holder::NotThread,
+            _ => Holder::NotVariable,
+        };
+        self.check_tls_model(&[specs.attrs, item.attrs], Some(name), holder);
         self.read_advice(id, &[specs.attrs, item.attrs]);
         // An initializer that did not work out leaves the object without a size, and saying so
         // a second time helps nobody, so what it did decides whether the size is asked about.

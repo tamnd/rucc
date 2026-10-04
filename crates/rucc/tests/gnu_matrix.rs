@@ -443,6 +443,64 @@ int twice __attribute__((nocommon)); int twice __attribute__((common));
     assert_eq!(lines_with(&said, "previous declaration here").len(), 1, "{said}");
 }
 
+/// gcc 13's checks and words, in its order: the argument count, then whether the attribute is on a
+/// thread-local variable, which only warns and drops it, and then the string.
+#[test]
+fn tls_model_is_checked_the_way_gcc_checks_it() {
+    let source = "\
+__thread int a __attribute__((tls_model(\"bogus\")));
+int b __attribute__((tls_model(\"initial-exec\")));
+__thread int c __attribute__((tls_model(1)));
+void f(void) __attribute__((tls_model(\"initial-exec\")));
+__thread int d __attribute__((tls_model));
+__thread int g __attribute__((tls_model(\"global-dynamic\", \"x\")));
+int b2 __attribute__((tls_model(\"bogus\")));
+struct s { int x __attribute__((tls_model(\"initial-exec\"))); };
+void k(void) { int l __attribute__((tls_model(\"initial-exec\"))); (void)l; }
+";
+    let out = compile("tls-model-checked", &["-fsyntax-only"], source);
+    let said = String::from_utf8_lossy(&out.stderr);
+    assert!(!out.status.success(), "{said}");
+    let count = |text: &str| lines_with(&said, text).len();
+    let models = "error: 'tls_model' argument must be one of 'local-exec', 'initial-exec', \
+                  'local-dynamic', or 'global-dynamic'";
+    assert_eq!(count(models), 1, "{said}");
+    assert_eq!(count("error: 'tls_model' argument not a string"), 1, "{said}");
+    let arity = "error: wrong number of arguments specified for 'tls_model' attribute";
+    assert_eq!(count(arity), 2, "{said}");
+    assert_eq!(count("expected 1, found 0"), 1, "{said}");
+    assert_eq!(count("expected 1, found 2"), 1, "{said}");
+    let ignored = |why: &str| count(&format!("warning: 'tls_model' attribute ignored because {why}"));
+    assert_eq!(ignored("'b' does not have thread storage duration"), 1, "{said}");
+    assert_eq!(ignored("'b2' does not have thread storage duration"), 1, "{said}");
+    assert_eq!(ignored("'l' does not have thread storage duration"), 1, "{said}");
+    assert_eq!(ignored("'f' is not a variable"), 1, "{said}");
+    assert_eq!(ignored("'x' is not a variable"), 1, "{said}");
+    assert_eq!(count("error:"), 4, "{said}");
+    assert_eq!(count("warning:"), 5, "{said}");
+}
+
+/// Each of the four models is taken without a word, and glibc's `initial-exec` is the sequence
+/// it asks for, reading the offset out of the global offset table.
+#[test]
+fn a_thread_local_written_initial_exec_is_reached_through_the_initial_exec_sequence() {
+    let source = "\
+extern __thread int h __attribute__((tls_model(\"initial-exec\")));
+__thread int e __attribute__((__tls_model__(\"local-exec\")));
+static __thread int i __attribute__((tls_model(\"local-dynamic\")));
+extern __thread int j __attribute__((tls_model(\"global-dynamic\")));
+int use(void) { return h + e + i + j; }
+_Static_assert(__has_attribute(tls_model), \"tls_model\");
+";
+    let out = compile("tls-model-ie", &["-O2", "-S"], source);
+    let said = String::from_utf8_lossy(&out.stderr);
+    assert!(out.status.success(), "{said}");
+    assert_eq!(said, "");
+    let text = String::from_utf8_lossy(&out.stdout);
+    assert!(text.contains("h@gottpoff(%rip)"), "{text}");
+    assert!(!text.contains("__tls_get_addr"), "{text}");
+}
+
 #[test]
 fn nocommon_keeps_a_tentative_definition_out_of_the_common_block_under_fcommon() {
     let got = ir("nocommon", &["-fcommon"], "int merged;\n__attribute__((nocommon)) int alone;\n");
