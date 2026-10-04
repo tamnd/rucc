@@ -123,6 +123,7 @@ pub static PASSES: &[&dyn Pass] = &[
     &crate::licm::LICM,
     &crate::gcm::GCM,
     &crate::number::Number,
+    &crate::cons::Cons,
     &crate::load::LoadForward,
     &crate::reload::RedundantLoad,
     &crate::dse::Dse,

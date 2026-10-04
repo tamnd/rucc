@@ -489,7 +489,7 @@ fn one_result(func: &Func, inst: Inst) -> Option<Value> {
 
 /// Whether this instruction's result is a function of its operands and nothing else, and it costs
 /// something to work out, which is what makes where it is worked out a question.
-fn movable(func: &Func, inst: Inst) -> bool {
+pub(crate) fn movable(func: &Func, inst: Inst) -> bool {
     matches!(
         func[inst].opcode,
         Opcode::Add
