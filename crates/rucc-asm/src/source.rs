@@ -2503,11 +2503,11 @@ impl Reader {
     /// another. A number that can be worked out where it is written is written in as few bytes as
     /// it needs, which is what gas writes. That is every label behind it in this pass, since a pass
     /// lays out each section as it goes and one whose branches do not reach is read again from the
-    /// top. One that cannot, which is a label further on, gets four bytes, since how many it needs
-    /// is not known until the label is reached and the bytes after it have to be put somewhere
-    /// first. LEB128 allows that: every byte but the last says another follows, and the extra ones
-    /// hold zeroes. Four bytes hold twenty eight bits, which is far more than the length of a call
-    /// site table, which is the forward one gcc writes.
+    /// top. One that cannot, which is a label further on, is worked out from where the last pass
+    /// put that label and written in as few bytes as that needs, and the file is read again until
+    /// the places stop moving, as for any other count that looks ahead. gas does the same, so the
+    /// length of a call site table or of a DWARF expression the kernel's vDSO writes by hand comes
+    /// out in one byte where it fits in one.
     fn leb(&mut self, args: &[String], signed: bool) -> Result<(), Trouble> {
         if args.is_empty() {
             return Err(self.bad("a data directive with nothing after it"));
@@ -2531,12 +2531,28 @@ impl Reader {
                 self.put(&bytes)?;
                 continue;
             }
+            // A label further on is where the last pass put it, and the number is written in as
+            // many bytes as that comes to, which the end of the file writes again once the places
+            // stop moving. One that is no distance in a section at all gets the old four bytes and
+            // is refused at the end.
+            let width = match self.absolute(&sum) {
+                Some(guess) => {
+                    let mut bytes = Vec::new();
+                    if signed {
+                        crate::unwind::sleb(&mut bytes, guess);
+                    } else {
+                        crate::unwind::uleb(&mut bytes, u64::try_from(guess).unwrap_or(0));
+                    }
+                    u8::try_from(bytes.len()).expect("ten bytes at most")
+                }
+                None => LEB_ROOM,
+            };
             let (part, at) = (self.here, self.at());
-            self.put(&[0x80, 0x80, 0x80, 0x00])?;
+            self.put(&vec![0; usize::from(width)])?;
             self.fixups.push(Fixup {
                 part,
                 at,
-                width: LEB_ROOM,
+                width,
                 sum,
                 reach: Reach::Near,
                 slot: Reference::Got,
@@ -4282,8 +4298,8 @@ impl Reader {
         Ok(Reference::GotFront)
     }
 
-    /// A LEB128 number that was waiting for a label further on, written into every byte it was
-    /// given. See [`Reader::leb`].
+    /// A LEB128 number that was waiting for a label further on, written into the bytes the pass
+    /// gave it. See [`Reader::leb`].
     ///
     /// It has to come out as a number, since there is no relocation that writes one of these, and
     /// that is so for the distance between two labels in the same section, which is what one is.
@@ -4299,8 +4315,13 @@ impl Reader {
             ));
         }
         let value = residue.constant;
+        if !signed && value < 0 {
+            return Err(bad(format!("{value} is negative and '.uleb128' is unsigned")));
+        }
         let room = 7 * u32::from(fixup.width);
-        let fits = if signed {
+        let fits = if room >= 63 {
+            true
+        } else if signed {
             (-(1i64 << (room - 1))..(1i64 << (room - 1))).contains(&value)
         } else {
             (0..(1i64 << room)).contains(&value)
@@ -5615,12 +5636,34 @@ f:
         let done = assembled(text);
         let table = done.parts.iter().find(|part| part.name == ".gcc_except_table").expect("one");
         // The push is one byte, the call five, and the pop and the return one each.
-        assert_eq!(table.bytes, [0xff, 0xff, 0x01, 0x84, 0x80, 0x80, 0x00, 1, 5, 8, 0]);
+        assert_eq!(table.bytes, [0xff, 0xff, 0x01, 0x04, 1, 5, 8, 0]);
         let frame = done.parts.iter().find(|part| part.name == ".eh_frame").expect("one");
         assert!(frame.bytes.windows(5).any(|at| at == b"zPLR\0"), "{:x?}", frame.bytes);
         let named: Vec<&str> = frame.relocs.iter().map(|reloc| reloc.symbol.as_str()).collect();
         assert!(named.contains(&"DW.ref.__gcc_personality_v0"), "{named:?}");
         assert!(named.contains(&".LLSDA0"), "{named:?}");
+    }
+
+    /// A LEB128 number that counts to a label further on is written in as few bytes as it needs,
+    /// as gas writes it, which is how the vDSO's `sigreturn.S` gets the length of each DWARF
+    /// expression it writes by hand. The bytes are the ones gas 2.40 writes for the same lines.
+    #[test]
+    fn a_leb128_number_ahead_of_its_label_takes_the_bytes_it_needs() {
+        let text = "\t.section .gcc_except_table,\"a\",@progbits
+\t.byte 1
+\t.uleb128 2f-1f
+1:\t.uleb128 3
+\t.byte 1
+2:
+\t.sleb128 1b-2b
+\t.uleb128 4f-3f
+3:\t.fill 200,1,0
+4:
+";
+        let done = assembled(text);
+        let table = done.parts.iter().find(|part| part.name == ".gcc_except_table").expect("one");
+        assert_eq!(table.bytes[..7], [0x01, 0x02, 0x03, 0x01, 0x7e, 0xc8, 0x01]);
+        assert_eq!(table.bytes.len(), 207);
     }
 
     /// A space between a `%` and its register is skipped, as gas skips it, which is how the
