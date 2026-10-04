@@ -335,7 +335,7 @@ fn wrote_memory(func: &Func, facts: &Facts, inst: Inst) -> bool {
 /// Only for the counters, which want the two numbers apart because they answer different
 /// questions. The address count is what feeds [`crate::load`] and is the reason the pass exists.
 /// The other count is whatever else happened to be written twice, which on real C is not much.
-fn is_address(opcode: Opcode) -> bool {
+pub(crate) fn is_address(opcode: Opcode) -> bool {
     matches!(opcode, Opcode::PtrAdd | Opcode::GlobalAddr)
 }
 
@@ -344,9 +344,9 @@ fn is_address(opcode: Opcode) -> bool {
 /// Fixed size and `Copy`, because a hash table entry per pure instruction in the program is enough
 /// work without an allocation for each of them.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
-struct Key {
+pub(crate) struct Key {
     /// Which instruction it is.
-    opcode: Opcode,
+    pub(crate) opcode: Opcode,
     /// What the optimizer was told it may assume about this one, which is not the same question as
     /// what it may assume about another one of the same shape.
     flags: Flags,
@@ -355,7 +355,7 @@ struct Key {
     /// Whatever it carries besides operands, compared by value rather than by where it is stored.
     tag: Tag,
     /// Its operands, resolved, padded with `None`, and put in order if the opcode does not care.
-    args: [Option<Value>; OPERANDS],
+    pub(crate) args: [Option<Value>; OPERANDS],
 }
 
 /// What a call computes, as something two calls can be equal on.
@@ -390,7 +390,7 @@ struct CallKey {
 /// written at two times are two indices, so an equality on the index would answer no to a question
 /// this pass is asking. This is the payload itself for the shapes a pure opcode has.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
-enum Tag {
+pub(crate) enum Tag {
     /// Nothing, which is all of the arithmetic.
     None,
     /// A constant's bits, for `iconst`, `fconst` and `splat`. The immediate table is not interned,
@@ -412,7 +412,7 @@ enum Tag {
 /// either a key of `same`, meaning it is on its way out, or a value in `seen`, meaning it is
 /// staying, and it cannot be both, because a value only enters `same` on a hit and a hit never
 /// touches what the table already holds.
-fn key(func: &Func, same: &Map<Value, Value>, inst: Inst) -> Option<(Key, Value)> {
+pub(crate) fn key(func: &Func, same: &Map<Value, Value>, inst: Inst) -> Option<(Key, Value)> {
     let data = &func[inst];
     if data.opcode.has_effects() || data.opcode == Opcode::MemEntry {
         return None;
@@ -447,7 +447,7 @@ fn key(func: &Func, same: &Map<Value, Value>, inst: Inst) -> Option<(Key, Value)
 
 /// The key as `across` compares it, which is with each constant operand read as the first value
 /// of that constant in the function rather than as the one in this block.
-fn widened(func: &Func, constants: &Map<Key, Value>, mut key: Key) -> Key {
+pub(crate) fn widened(func: &Func, constants: &Map<Key, Value>, mut key: Key) -> Key {
     for slot in &mut key.args {
         let Some(arg) = *slot else { continue };
         let Def::Result { inst, .. } = func[arg].def else { continue };

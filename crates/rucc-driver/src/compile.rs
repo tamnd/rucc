@@ -1003,6 +1003,7 @@ fn optimize(
     settings.isa = opts.isa;
     settings.conserve_stack = opts.conserve_stack;
     settings.stack_reuse = shares_slots(opts);
+    settings.rewriter = rucc_opt::pipeline::Rewriter::from_name(&opts.rewriter).unwrap_or_default();
     settings.fuel = opts.pass_fuel.iter().cloned().collect();
     settings.global_fuel = opts.pass_fuel_global;
     settings.verify |= opts.verify_each;

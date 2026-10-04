@@ -2182,6 +2182,10 @@ pub struct Options {
     ///
     /// `None` is a command line that said neither, and then the level decides.
     pub backtracking: Option<bool>,
+    /// Which rewriter the optimizer runs, by the name `-Zrewriter=` gave it, which the driver has
+    /// checked. Empty when the command line did not say, and then the level's pipeline runs as it
+    /// is written.
+    pub rewriter: String,
     /// Whether two things in a frame that are never both wanted may be the same bytes, from
     /// `-fstack-reuse=`.
     ///
@@ -2755,6 +2759,7 @@ impl Options {
             align_loops: None,
             cycle_accurate_model: None,
             backtracking: None,
+            rewriter: String::new(),
             stack_reuse: None,
             protector: Protector::default(),
             stack_clash: false,

@@ -724,6 +724,14 @@ pub const RANGE_TEST_BIT_INTERVALS: usize = 3;
 /// built from many others, and those were not a dereference the kernel wrote in the source.
 pub const CONSTANT_P_LOAD_DEPTH: usize = 8;
 
+/// How many rewrites in a row one instruction gets when it is built, per section 12.1.
+///
+/// Rewriting at construction applies the rules to what a rule left as well as to what was there,
+/// which is the cascade, and a rule set with a cycle in it would cascade for ever. Section 12.7
+/// asks for a bound. Eight is more than any chain in the rule set needs today, and a cycle stops
+/// at it rather than hanging the compile.
+pub const CONS_CASCADE: u32 = 8;
+
 /// Section 40.12's table, in its order, so a report can print it and a test can check it.
 ///
 /// The point of having the list as data is that "which of our heuristics are guesses" becomes a
@@ -1270,6 +1278,14 @@ pub const ALL: &[Constant] = &[
         value: 8,
         unit: "steps",
         document: "20",
+        gcc: "",
+        provenance: Provenance::Chosen,
+    },
+    Constant {
+        name: "CONS_CASCADE",
+        value: 8,
+        unit: "rewrites",
+        document: "12.1",
         gcc: "",
         provenance: Provenance::Chosen,
     },

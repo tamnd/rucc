@@ -626,6 +626,53 @@ pub const fn for_level(level: OptLevel) -> &'static [&'static str] {
     }
 }
 
+/// Which rewriter runs where a level names one, which is `-Zrewriter=`.
+///
+/// Experiment 7 of `spec/optimizer/42-measurement.md` builds the whole corpus once per arm of
+/// section 12.3 of `spec/optimizer/12-egraph.md` and compares them, and the arms differ in how the
+/// rules are driven and in nothing else. So an arm is not a pipeline of its own. It is the level's
+/// pipeline with the passes that drive the rules swapped for the ones that arm drives them with,
+/// and everything else, the analyses, the loop passes and the code generator, is the same in all
+/// of them.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub enum Rewriter {
+    /// The pipeline as the level writes it.
+    #[default]
+    Default,
+    /// [`crate::cons`] wherever the level names `simplify` or `number`, which is arm B of section
+    /// 12.3: the rules applied as each instruction is reached, one table for the whole function,
+    /// and placement left to `gcm`.
+    Consed,
+}
+
+impl Rewriter {
+    /// Every one of them, in the order `-Zrewriter=` lists them.
+    pub const ALL: [Self; 2] = [Self::Default, Self::Consed];
+
+    /// What `-Zrewriter=` calls it.
+    #[must_use]
+    pub const fn name(self) -> &'static str {
+        match self {
+            Self::Default => "default",
+            Self::Consed => "consed",
+        }
+    }
+
+    /// The one `-Zrewriter=` calls by that name.
+    #[must_use]
+    pub fn from_name(name: &str) -> Option<Self> {
+        Self::ALL.into_iter().find(|it| it.name() == name)
+    }
+
+    /// The pass this arm runs where the level names that one.
+    const fn instead(self, name: &'static str) -> &'static str {
+        match (self, name.as_bytes()) {
+            (Self::Consed, b"simplify" | b"number") => crate::cons::NAME,
+            _ => name,
+        }
+    }
+}
+
 /// Which passes the IR is written out around.
 ///
 /// Empty by default, which is the whole point: a dump is a debugging aid and writing files
@@ -750,6 +797,8 @@ pub struct Options {
     /// Whether bodies spliced into one caller may share the slots they bring with them, which is
     /// `-fstack-reuse=` and on above `-O0`. See [`inline`].
     pub stack_reuse: bool,
+    /// Which rewriter runs where the level names one. See [`Rewriter`].
+    pub rewriter: Rewriter,
 }
 
 impl Default for Options {
@@ -770,6 +819,7 @@ impl Default for Options {
             isa: Isa::NONE,
             conserve_stack: false,
             stack_reuse: false,
+            rewriter: Rewriter::Default,
         }
     }
 }
@@ -787,7 +837,11 @@ impl Options {
     /// place it could go that does not need an ordering rule nobody wrote down is the end.
     #[must_use]
     pub fn chosen(&self) -> Vec<&'static str> {
-        let mut names: Vec<&str> = for_level(self.level).to_vec();
+        let mut names: Vec<&str> =
+            for_level(self.level).iter().map(|&name| self.rewriter.instead(name)).collect();
+        // An arm that runs one pass where the level ran two in a row runs it once there, since
+        // the second run would find what the first left and the first has already looked.
+        names.dedup();
         for (name, on) in &self.toggles {
             let name = name.as_str();
             match *on {
@@ -1801,6 +1855,38 @@ mod tests {
             ["expect", "simplify-cfg", "fold"],
             "a pass the level did not choose is still reachable"
         );
+    }
+
+    #[test]
+    fn the_consed_rewriter_runs_cons_wherever_the_level_runs_simplify_or_number() {
+        for level in [OptLevel::O1, OptLevel::O2, OptLevel::O3, OptLevel::Os, OptLevel::Oz] {
+            let plain = Options::for_level(level).chosen();
+            let opts = Options { rewriter: super::Rewriter::Consed, ..Options::for_level(level) };
+            let consed = opts.chosen();
+            assert!(!consed.contains(&"simplify") && !consed.contains(&"number"), "{consed:?}");
+            assert_eq!(
+                plain.contains(&"simplify") || plain.contains(&"number"),
+                consed.contains(&"cons"),
+                "{level:?}"
+            );
+            let others = |names: &[&str]| -> Vec<String> {
+                names
+                    .iter()
+                    .filter(|name| !matches!(**name, "simplify" | "number" | "cons"))
+                    .map(ToString::to_string)
+                    .collect()
+            };
+            assert_eq!(others(&plain), others(&consed), "only the rewriter changes at {level:?}");
+            assert!(consed.windows(2).all(|pair| pair[0] != pair[1]), "{consed:?}");
+        }
+    }
+
+    #[test]
+    fn a_rewriter_is_found_by_its_name() {
+        for rewriter in super::Rewriter::ALL {
+            assert_eq!(super::Rewriter::from_name(rewriter.name()), Some(rewriter));
+        }
+        assert_eq!(super::Rewriter::from_name("egraph"), None);
     }
 
     #[test]

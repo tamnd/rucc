@@ -408,13 +408,6 @@ impl Pass for Simplify {
 
     fn run(&self, func: &mut Func, an: &mut Analyses, fuel: &mut Fuel) -> Stats {
         let mut stats = Stats::new();
-        // How wide an address is, which is the width the rules see a pointer at. A module that
-        // does not say is one written for a test, and those are all sixty four bit ones.
-        let address = an
-            .outside()
-            .pointer_bytes()
-            .and_then(|bytes| u32::try_from(bytes * 8).ok())
-            .unwrap_or(64);
         // What a rule that produced a value decided, applied to the whole function at the end.
         // Rewriting each one where it is found would be a walk over every instruction for every
         // rewrite, and there is nothing to be gained by it: what a pattern asks about is the
@@ -432,16 +425,11 @@ impl Pass for Simplify {
         // rewrite below only ever removes readers, so a value this says nothing reads is a value
         // nothing reads.
         let uses = count(func);
-        // The edges, for the comparisons a branch in front of them settles. Nothing here adds or
-        // removes an edge, so one built before the walk is the one the walk would build.
-        let cfg = Cfg::new(func);
         let dead = |func: &Func, inst: Inst| match func[inst].first_result {
             Some(result) => uses[result.index()] == 0,
             None => false,
         };
-        // The matcher's two stacks, made once for the whole run. See [`identity`].
-        let mut stacks =
-            (Vec::with_capacity(16), Match { rule: 0, bindings: Vec::with_capacity(8) });
+        let mut finder = Finder::new(func, an);
         for block in func.blocks().collect::<Vec<Block>>() {
             for inst in func.insts(block).collect::<Vec<Inst>>() {
                 if dead(func, inst) {
@@ -455,78 +443,15 @@ impl Pass for Simplify {
                     let args = func[inst].args;
                     func.rewrite(args, |value| chase(&forward, value));
                 }
-                if let Some(flip) = negated_comparison(func, inst) {
-                    if !fuel.take() {
-                        // Out of fuel, which stops the transforming rather than the looking, the
-                        // same way the other two passes treat it. The walk is the same walk at
-                        // every fuel setting, which is what makes bisecting over it monotonic.
-                        stats.missed(NO_FUEL);
-                        continue;
-                    }
-                    become_flipped(func, inst, &flip);
-                    stats.optimized(FLIPPED);
-                    continue;
-                }
-                if let Some(composite) = composite_comparison(func, inst) {
-                    if !fuel.take() {
-                        stats.missed(NO_FUEL_COMPOSITE);
-                        continue;
-                    }
-                    fold_composite(func, inst, composite);
-                    stats.optimized(COMPOSITE);
-                    continue;
-                }
-                if let Some(settled) = magnitude_comparison(func, inst) {
-                    if !fuel.take() {
-                        stats.missed(NO_FUEL_MAGNITUDE);
-                        continue;
-                    }
-                    fold_composite(func, inst, settled);
-                    stats.optimized(MAGNITUDE);
-                    continue;
-                }
-                if let Some(settled) = bounded_comparison(func, &cfg, inst) {
-                    if !fuel.take() {
-                        stats.missed(NO_FUEL_BOUNDED);
-                        continue;
-                    }
-                    fold_composite(func, inst, settled);
-                    stats.optimized(BOUNDED);
-                    continue;
-                }
-                if let Some(lane) = packed_lane(func, inst) {
-                    if !fuel.take() {
-                        stats.missed(NO_FUEL_LANE);
-                        continue;
-                    }
-                    let result = func[inst].first_result.expect("a truncation has a result");
-                    forward.insert(result, lane);
-                    stats.optimized(LANE);
-                    continue;
-                }
-                let Some((rewrite, pattern)) = identity(func, inst, address, &mut stacks) else {
-                    continue;
-                };
+                let Some((found, pattern, no_fuel)) = finder.find(func, inst) else { continue };
                 if !fuel.take() {
-                    stats.missed(NO_FUEL_RULE);
+                    // Out of fuel, which stops the transforming rather than the looking, the same
+                    // way the other two passes treat it. The walk is the same walk at every fuel
+                    // setting, which is what makes bisecting over it monotonic.
+                    stats.missed(no_fuel);
                     continue;
                 }
-                match rewrite {
-                    Rewrite::Value(value) => {
-                        let result = func[inst].first_result.expect("the rule matched a result");
-                        forward.insert(result, value);
-                    }
-                    Rewrite::Constant(number) => become_constant(func, inst, number),
-                    Rewrite::Built { opcode, pred, lhs, rhs } => {
-                        become_instruction(func, inst, opcode, pred, lhs, rhs);
-                    }
-                    Rewrite::Converted { opcode, from } => {
-                        let ty =
-                            func[func[inst].first_result.expect("the rule matched a result")].ty;
-                        let from = defined(func, inst, ty, from);
-                        become_conversion(func, inst, opcode, from);
-                    }
-                }
+                apply(func, inst, found, &mut forward);
                 stats.optimized(pattern);
             }
         }
@@ -537,9 +462,120 @@ impl Pass for Simplify {
     }
 }
 
+/// What one of the rewrites found to do to an instruction, before anything is done to it.
+///
+/// Finding and doing are two steps so that the fuel is asked for in between, and so that
+/// [`crate::cons`] can run the same rewrites as this pass in a walk of its own.
+pub(crate) enum Found {
+    /// A comparison written as a negation, which becomes the opposite comparison.
+    Flip(Flip),
+    /// Two comparisons over one pair of operands, or one a sign or a bound settles.
+    Composite(Composite),
+    /// A lane read back out of a packed pair, which is the value the lane was packed from.
+    Lane(Value),
+    /// What a rule out of `rules/` wrote.
+    Rule(Rewrite),
+}
+
+/// What looking for a rewrite needs, made once for a whole walk rather than once per instruction.
+pub(crate) struct Finder {
+    /// How wide an address is, which is the width the rules see a pointer at.
+    address: u32,
+    /// The edges, for the comparisons a branch in front of them settles.
+    cfg: Cfg,
+    /// The matcher's two stacks. See [`identity`].
+    stacks: (Vec<Term>, Match<Term>),
+}
+
+impl Finder {
+    /// What a walk over this function needs.
+    ///
+    /// The edges are taken once, before the walk, which is right for as long as nothing in the
+    /// walk adds or removes one. Nothing here does, and nothing in [`crate::cons`] does either:
+    /// that pass moves an instruction from one block to another and leaves the edges alone.
+    pub(crate) fn new(func: &Func, an: &Analyses) -> Self {
+        // A module that does not say how wide an address is is one written for a test, and those
+        // are all sixty four bit ones.
+        let address = an
+            .outside()
+            .pointer_bytes()
+            .and_then(|bytes| u32::try_from(bytes * 8).ok())
+            .unwrap_or(64);
+        let stacks = (Vec::with_capacity(16), Match { rule: 0, bindings: Vec::with_capacity(8) });
+        Self { address, cfg: Cfg::new(func), stacks }
+    }
+
+    /// The first rewrite that fires on the instruction, what it is called, and what is said in
+    /// its place when there is no fuel for it.
+    ///
+    /// The hand written ones are tried before the rules, in the order the module documentation
+    /// gives them.
+    pub(crate) fn find(
+        &mut self,
+        func: &Func,
+        inst: Inst,
+    ) -> Option<(Found, &'static str, &'static str)> {
+        if let Some(flip) = negated_comparison(func, inst) {
+            return Some((Found::Flip(flip), FLIPPED, NO_FUEL));
+        }
+        if let Some(composite) = composite_comparison(func, inst) {
+            return Some((Found::Composite(composite), COMPOSITE, NO_FUEL_COMPOSITE));
+        }
+        if let Some(settled) = magnitude_comparison(func, inst) {
+            return Some((Found::Composite(settled), MAGNITUDE, NO_FUEL_MAGNITUDE));
+        }
+        if let Some(settled) = bounded_comparison(func, &self.cfg, inst) {
+            return Some((Found::Composite(settled), BOUNDED, NO_FUEL_BOUNDED));
+        }
+        if let Some(lane) = packed_lane(func, inst) {
+            return Some((Found::Lane(lane), LANE, NO_FUEL_LANE));
+        }
+        let (rewrite, pattern) = identity(func, inst, self.address, &mut self.stacks)?;
+        Some((Found::Rule(rewrite), pattern, NO_FUEL_RULE))
+    }
+}
+
+/// Does what [`Finder::find`] found.
+///
+/// A rewrite to a value the function already has goes in `forward` and the instruction is left
+/// where it is for [`crate::dce`]. Every other one changes the instruction where it stands, so
+/// its result keeps its name and nothing else has to be told. Says which of the two it was, true
+/// for the first.
+pub(crate) fn apply(
+    func: &mut Func,
+    inst: Inst,
+    found: Found,
+    forward: &mut Map<Value, Value>,
+) -> bool {
+    match found {
+        Found::Flip(flip) => become_flipped(func, inst, &flip),
+        Found::Composite(composite) => fold_composite(func, inst, composite),
+        Found::Lane(lane) => {
+            let result = func[inst].first_result.expect("a truncation has a result");
+            forward.insert(result, lane);
+            return true;
+        }
+        Found::Rule(Rewrite::Value(value)) => {
+            let result = func[inst].first_result.expect("the rule matched a result");
+            forward.insert(result, value);
+            return true;
+        }
+        Found::Rule(Rewrite::Constant(number)) => become_constant(func, inst, number),
+        Found::Rule(Rewrite::Built { opcode, pred, lhs, rhs }) => {
+            become_instruction(func, inst, opcode, pred, lhs, rhs);
+        }
+        Found::Rule(Rewrite::Converted { opcode, from }) => {
+            let ty = func[func[inst].first_result.expect("the rule matched a result")].ty;
+            let from = defined(func, inst, ty, from);
+            become_conversion(func, inst, opcode, from);
+        }
+    }
+    false
+}
+
 /// What a rule says an instruction's result is instead.
 #[derive(Clone, Debug, PartialEq, Eq)]
-enum Rewrite {
+pub(crate) enum Rewrite {
     /// A value the function already has, which every reader of the result is pointed at.
     Value(Value),
     /// A number, which the instruction becomes where it stands.
@@ -577,7 +613,7 @@ enum Rewrite {
 
 /// One operand of an instruction a rule writes.
 #[derive(Clone, Debug, PartialEq, Eq)]
-enum Operand {
+pub(crate) enum Operand {
     /// A value the pattern bound.
     Value(Value),
     /// A number the rule wrote, which needs an `iconst` in front of the instruction before it is
@@ -601,7 +637,7 @@ enum Operand {
 
 /// An instruction a rule writes as an operand of another, which has no value until it is built.
 #[derive(Clone, Debug, PartialEq, Eq)]
-struct Nested {
+pub(crate) struct Nested {
     /// What it is.
     opcode: Opcode,
     /// Which comparison it is, when it is one, for the reason [`Rewrite::Built`] gives.

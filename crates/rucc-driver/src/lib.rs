@@ -2504,6 +2504,13 @@ pub fn parse_args(args: &[String]) -> Result<Action, CliError> {
                     _ => return Err(err("-Zregalloc= takes backtracking or single")),
                 };
             }
+            _ if arg.starts_with("-Zrewriter=") => {
+                let name = &arg["-Zrewriter=".len()..];
+                if rucc_opt::pipeline::Rewriter::from_name(name).is_none() {
+                    return Err(err("-Zrewriter= takes default or consed"));
+                }
+                opts.rewriter = name.to_string();
+            }
             _ if arg.starts_with("-Zswitch=") => {
                 let shape = &arg["-Zswitch=".len()..];
                 if rucc_codegen::switch::Force::named(shape).is_none() {
@@ -5021,6 +5028,16 @@ mod tests {
         assert_eq!(plain.register_pressure, None, "nothing is measured unless it was asked for");
 
         assert!(parse_args(&args(&["-Zregister-pressure=", "a.c"])).is_err(), "no file named");
+    }
+
+    /// Which rewriter the optimizer runs, asked for by name.
+    #[test]
+    fn the_rewriter_is_asked_for_by_name() {
+        let (opts, _) = compile(&["-c", "-O2", "-Zrewriter=consed", "a.c"]);
+        assert_eq!(opts.rewriter, "consed");
+        let (plain, _) = compile(&["-c", "-O2", "a.c"]);
+        assert_eq!(plain.rewriter, "", "the level decides unless it was asked for");
+        assert!(parse_args(&args(&["-Zrewriter=egraph", "a.c"])).is_err(), "not one there is");
     }
 
     /// Which register allocator runs, asked for by name, and left to the level when it is not.
