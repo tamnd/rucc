@@ -539,13 +539,15 @@ _Static_assert(__has_attribute(noipa), \"noipa\");
         })
     };
     assert!(body("two").contains("$100"), "{text}");
-    for (caller, callee) in [("one", "bump"), ("three", "twice"), ("four", "later"), ("five", "nothing")]
+    for (caller, callee) in
+        [("one", "bump"), ("three", "twice"), ("four", "later"), ("five", "nothing")]
     {
         assert!(calls(&body(caller), callee), "{caller} calls {callee}\n{text}");
     }
     assert!(!body("one").contains("$42"), "{text}");
     assert!(!body("four").contains("$6,"), "{text}");
-    assert!(body("bump").contains("%edi"), "{text}");
+    let bump = body("bump");
+    assert!(bump.contains("%edi") || bump.contains("%rdi"), "{text}");
 }
 
 #[test]

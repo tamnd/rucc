@@ -74,8 +74,8 @@
 use rucc_base::Symbol;
 use rucc_base::hash::{Map, Set};
 use rucc_ir::{
-    AttrSet, Datum, Def, Extra, Facts, Flags, Func, FuncId, Inst, Linkage, Module, Opcode, Pic, Type,
-    Value,
+    AttrSet, Datum, Def, Extra, Facts, Flags, Func, FuncId, Inst, Linkage, Module, Opcode, Pic,
+    Type, Value,
 };
 
 use crate::discharge::{Fact, about, alive, covers, derives, normal, settled};
