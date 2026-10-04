@@ -1427,8 +1427,25 @@ mod tests {
         assert_eq!(info(rows), want.concat());
     }
 
-    /// The other order, which is refused rather than described. What cannot be said is not the
-    /// pointer but the frame taken after it, which has no row and would come out as a record that
+    /// The other order, in the one shape the record can say, which is the pointer pushed and then
+    /// pointed at where it was pushed with nothing after it. The frame taken afterwards has no row
+    /// and needs no code, since the runtime sets the stack pointer back from the pointer before it
+    /// undoes the push. This is what gcc writes for a function that saves nothing else.
+    #[test]
+    fn a_frame_pointer_pointed_at_its_own_push_is_a_register_at_no_distance() {
+        let rows = vec![
+            (1, CfiOp::DefCfaOffset(16)),
+            (1, CfiOp::Offset { reg: RBP, offset: -16 }),
+            (4, CfiOp::DefCfaRegister(RBP)),
+            (4, CfiOp::RememberState),
+        ];
+        let want = [vec![1, 4, 2, 5], vec![4, SET_FPREG], vec![1, PUSH_NONVOL | (5 << 4)]];
+        assert_eq!(info(rows), want.concat());
+    }
+
+    /// Anything else in that order is refused rather than described. What cannot be said is not
+    /// the pointer but a register saved after it, which sits below the place the record counts
+    /// from, and the frame taken after that, which has no row and would come out as a record that
     /// unwinds to the wrong place.
     #[test]
     fn a_prologue_this_cannot_describe_is_refused_by_name() {
@@ -1436,7 +1453,8 @@ mod tests {
             (1, CfiOp::DefCfaOffset(16)),
             (1, CfiOp::Offset { reg: RBP, offset: -16 }),
             (4, CfiOp::DefCfaRegister(RBP)),
-            (4, CfiOp::RememberState),
+            (5, CfiOp::Offset { reg: RBX, offset: -24 }),
+            (5, CfiOp::RememberState),
         ];
         let why = refused(pointer);
         assert!(why.contains("'f'"), "{why}");

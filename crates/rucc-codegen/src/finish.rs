@@ -2383,30 +2383,28 @@ mod tests {
     }
 
     #[test]
-    fn a_windows_prologue_points_its_frame_pointer_at_the_frame_once_the_frame_is_whole() {
+    fn a_windows_prologue_that_saves_only_the_frame_pointer_points_it_before_the_frame() {
         let (mut func, allocation, mut names) = pressure(&WIN64, 4, 2);
         let base = Layout::new(&WIN64, REGS);
         let layout = Layout { frame_pointer: true, ..base };
         let lines = written(&mut func, &allocation, &layout, &mut names);
 
-        // The other order, which is what every other platform here writes, has no unwind record on
-        // this one: the record counts its slots from where the stack pointer ends the prologue and
-        // gets there by taking a constant off the frame pointer, so a register pushed after the
-        // pointer was established sits below the place the record counts from. Pushing first and
-        // pointing last is the order that has a record, and it leaves the pointer holding a copy of
-        // the stack pointer, so the spills stay where they were and the epilogue counts the frame
-        // back off the pointer rather than moving the pointer into the stack pointer.
+        // The order every other platform here writes, which the record on this one can say when
+        // the pointer is the only register pushed: the pointer is then where the push left the
+        // stack pointer, and that is the place the record counts from. It is what gcc writes for
+        // such a function too, and it keeps the chain of saved frame pointers whole. The spills are
+        // still counted from the stack pointer, and the epilogue puts it back from the pointer.
         assert_eq!(
             added(&lines),
             [
                 "x64.push_64 $rbp",
-                "$rsp = x64.sub_ri_64 $rsp, 16",
                 "$rbp = x64.mov_rr_64 $rsp",
+                "$rsp = x64.sub_ri_64 $rsp, 16",
                 "x64.mov_mr_64 $rdx, [$rsp]",
                 "x64.mov_mr_64 $rdx, [$rsp + 8]",
                 "$rdx = x64.mov_rm_64 [$rsp]",
                 "$rdx = x64.mov_rm_64 [$rsp + 8]",
-                "$rsp = x64.lea_64 [$rbp + 16]",
+                "$rsp = x64.mov_rr_64 $rbp",
                 "$rbp = x64.pop_64",
                 "x64.ret",
             ]
