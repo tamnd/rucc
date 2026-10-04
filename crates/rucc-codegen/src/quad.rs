@@ -498,7 +498,8 @@ fn made(func: &mut Func, inst: Inst, extra: Extra, values: &[Value]) {
 /// no register holds travels as the address of a copy the caller made. That is a rule about a call,
 /// so it applies to a call this pass writes exactly as it applies to one the program wrote, and on
 /// Windows x64 every `_Float128` in and out of these routines is sixteen bytes and therefore an
-/// address. Writing the SysV shape there is not a wrong answer that a test catches, it is a routine
+/// address. A `_Decimal128` is the same sixteen bytes, and [`crate::decimal`] makes its calls
+/// through here too. Writing the SysV shape there is not a wrong answer that a test catches, it is a routine
 /// reading three registers nothing was put in.
 struct Shape {
     /// What each operand is in the signature, which is `ptr` for the ones that became an address.
@@ -523,6 +524,7 @@ fn shaped(
     ty: Type,
 ) -> Shape {
     let mut shape = Shape { params: Vec::new(), values: Vec::new(), out: None };
+    let quad = |ty: Type| quad(ty) || ty.is_scalar() && ty.format() == Some(Float::D128);
     if quad(ty) && abi.scalar_is_by_reference(BYTES) {
         let out = slot(func, inst);
         shape.params.push(Param::with_abi(Type::PTR, Abi::Sret { size: BYTES, align: BITS / 8 }));

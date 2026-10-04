@@ -2619,7 +2619,7 @@ impl<'a> Lowering<'a> {
         let asked = asked.into_iter().chain(std::iter::repeat(Abi::Plain));
         let sret = self.sret().map(|value| (value, Abi::Plain));
         for (value, abi) in sret.into_iter().chain(values.into_iter().zip(asked)) {
-            let ty = self.source[value].ty;
+            let ty = abi::crosses_as(self.source[value].ty, self.conv);
             let at = if crate::term::in_vector_file(ty) { &mut floats } else { &mut ints };
             // Why it cannot come back, and not only that it cannot. A type that travels nowhere
             // says so itself, and a type that travels perfectly well ran out of registers.
@@ -2635,7 +2635,17 @@ impl<'a> Lowering<'a> {
             let descs = self.selector.operands(opcode).ok_or_else(|| self.unsupported(inst))?;
             let [desc] = descs else { return Err(self.unsupported(inst)) };
             let widen = (self.selector.abi.extend)(ty, abi).map(|name| self.names.intern(name));
-            parts.push((self.names.intern(name), self.reg_of(value)?, *desc, widen));
+            let mut reg = self.reg_of(value)?;
+            // A decimal that goes back as a word, out of the vector register it is in.
+            if ty != self.source[value].ty {
+                let word = self.out.new_vreg(self.gpr);
+                let movq = self.named("movq_from_xmm");
+                let block = self.at.expect("a block is being filled");
+                let sse = self.conv.sse_class;
+                self.out.build(block, movq).def(word, self.gpr).uses(reg, sse).finish();
+                reg = word;
+            }
+            parts.push((self.names.intern(name), reg, *desc, widen));
         }
 
         let block = self.at.expect("a block is being filled");

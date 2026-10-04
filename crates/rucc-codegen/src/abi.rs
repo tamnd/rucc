@@ -156,6 +156,50 @@ fn class_of(ty: Type, conv: &CallRegs) -> RegClass {
     if ty.is_float() && !on_the_stack(ty) { conv.sse_class } else { conv.int_class }
 }
 
+/// The type a value crosses a call as, which is its own type but for one case.
+///
+/// That case is a `_Decimal32` or a `_Decimal64` on Windows x64, which lives in a vector register
+/// like any float of its width, because the rule set moves floats by width, and crosses a call in
+/// a general purpose one, because that is where gcc passes it and brings it back. See
+/// `decimal_in_integers` on [`rucc_abi::Scalars`]. So it crosses as a word, and each end moves the
+/// bits between the two files with one `movq`, the same instruction a float the callee has no
+/// prototype for is copied with on its way out. The upper half of the word is whatever the vector
+/// register held and a `_Decimal32` is read from the lower one, as a 32 bit integer would be.
+pub(crate) fn crosses_as(ty: Type, conv: &CallRegs) -> Type {
+    let decimal = ty.is_scalar() && ty.format().is_some_and(rucc_ir::Float::is_decimal);
+    if decimal && ty.bits() <= 64 && conv.abi.scalars.decimal_in_integers {
+        Type::int(64)
+    } else {
+        ty
+    }
+}
+
+/// The `movq` that puts a word's bits into a vector register, which is how a decimal that crossed
+/// as a word is turned back into one. See [`crosses_as`].
+const INTO_VECTOR: &str = "x64.movq_to_xmm";
+
+/// The `movq` the other way, which is how one is turned into a word to cross.
+const OUT_OF_VECTOR: &str = "x64.movq_from_xmm";
+
+/// One `movq` between the two files, defining a fresh register of the class it goes into.
+fn moved(
+    out: &mut mir::Func,
+    block: mir::Block,
+    names: &mut Interner,
+    conv: &CallRegs,
+    from: mir::Reg,
+    into_vector: bool,
+) -> mir::Reg {
+    let (head, from_class, class) = match into_vector {
+        true => (INTO_VECTOR, conv.int_class, conv.sse_class),
+        false => (OUT_OF_VECTOR, conv.sse_class, conv.int_class),
+    };
+    let reg = out.new_vreg(class);
+    let opcode = mir::Opcode::new(names.intern(head));
+    out.build(block, opcode).def(reg, class).uses(from, from_class).finish();
+    reg
+}
+
 /// How many bytes of the argument area a value in the vector file takes.
 ///
 /// Its own width, lanes included, which is what [`Places::float`] wants and is a number that only
@@ -361,7 +405,7 @@ pub fn entry(
             // no position either. The front end only writes one on a convention that has
             // somewhere for it, per `CallRegs::chain`.
             (Abi::Chain, _, Some(chain)) => Where::Reg(chain),
-            _ if ty.is_float() => places.float(float_bytes(ty)),
+            _ if crosses_as(ty, conv).is_float() => places.float(float_bytes(ty)),
             _ => places.integer(int_bytes(ty, conv)),
         };
         if let Some(missing) = refuses(ty, insts) {
@@ -392,6 +436,9 @@ pub fn entry(
     // register no pseudo has named yet, and it stops being true the moment one does. Anything that
     // needs a scratch has to come after all of them, and a load out of the caller's stack needs one
     // for the value it loads.
+    // The decimals that crossed as a word, as the word each arrived in and the register it goes
+    // into, which is a `movq` written once every pseudo has been.
+    let mut words = Vec::new();
     for (index, &(ty, at, _)) in where_from.iter().enumerate() {
         let class = class_of(ty, conv);
         let reg = out.new_vreg(class);
@@ -400,9 +447,17 @@ pub fn entry(
         }
         arrived.regs.push(reg);
         let Where::Reg(arrived_in) = at else { continue };
-        let head = (insts.arg)(ty).ok_or((index, Missing::Width))?;
+        let crossed = crosses_as(ty, conv);
+        let (held, class) = if crossed == ty {
+            (reg, class)
+        } else {
+            let word = out.new_vreg(conv.int_class);
+            words.push((word, reg));
+            (word, conv.int_class)
+        };
+        let head = (insts.arg)(crossed).ok_or((index, Missing::Width))?;
         let opcode = mir::Opcode::new(names.intern(head));
-        let operand = mir::Operand::write(reg, class).with(Constraint::Fixed(arrived_in));
+        let operand = mir::Operand::write(held, class).with(Constraint::Fixed(arrived_in));
         out.build(block, opcode).operand(operand).finish();
         let float = class == conv.sse_class;
         bound.push((arrived_in, float));
@@ -412,6 +467,10 @@ pub fn entry(
     }
     if let Some(area) = save {
         arrived.spare = spare(out, block, conv, insts, names, area, arrived.took, &bound);
+    }
+    for (word, reg) in words {
+        let opcode = mir::Opcode::new(names.intern(INTO_VECTOR));
+        out.build(block, opcode).def(reg, conv.sse_class).uses(word, conv.int_class).finish();
     }
 
     // The stack pointer is written down as the register to read through because it is the one that
@@ -798,7 +857,7 @@ pub fn call(
         let at = if unnamed {
             let bytes = int_bytes(ty, conv);
             places.on_stack(bytes, bytes)
-        } else if ty.is_float() {
+        } else if crosses_as(ty, conv).is_float() {
             places.float(float_bytes(ty))
         } else {
             places.integer(int_bytes(ty, conv))
@@ -808,6 +867,11 @@ pub fn call(
         }
         let class = class_of(ty, conv);
         match at {
+            Where::Reg(at) if crosses_as(ty, conv) != ty => {
+                let word = moved(out, block, names, conv, reg, false);
+                passed.push((word, at, conv.int_class));
+                position += 1;
+            }
             Where::Reg(at) => {
                 if let Some(name) = (insts.extend)(ty, abi) {
                     widen.push((passed.len(), names.intern(name)));
@@ -1030,6 +1094,15 @@ pub fn call(
         build = build.operand(operand);
     }
     build.finish();
+    // And a decimal that came back as a word goes back into the vector register it lives in.
+    let results = results
+        .into_iter()
+        .zip(returns)
+        .map(|(reg, &ty)| match crosses_as(ty, conv) == ty || pops {
+            true => reg,
+            false => moved(out, block, names, conv, reg, true),
+        })
+        .collect();
     Ok(Made { results, outgoing: places.size().max(nested), area: places.size(), late })
 }
 
@@ -1159,7 +1232,7 @@ fn places_back(
         if let Some(missing) = refuses(ty, insts) {
             return Err(refused(missing));
         }
-        let class = class_of(ty, conv);
+        let class = class_of(crosses_as(ty, conv), conv);
         let (file, at) = if class == conv.sse_class {
             (conv.sse_returns, &mut sses)
         } else {

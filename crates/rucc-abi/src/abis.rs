@@ -77,6 +77,7 @@ pub static SYSV_AMD64: AbiDescription = AbiDescription {
         wide_is_by_reference: false,
         wide_integer_returns_in: None,
         wide_integer_in_memory: false,
+        decimal_in_integers: false,
     },
     returns: &[
         Rule::new(Test::Empty, Travel::Ignore),
@@ -115,6 +116,7 @@ const AAPCS64_BASE: AbiDescription = AbiDescription {
         wide_is_by_reference: false,
         wide_integer_returns_in: None,
         wide_integer_in_memory: false,
+        decimal_in_integers: false,
     },
     returns: &[
         Rule::new(Test::Empty, Travel::Ignore),
@@ -242,6 +244,7 @@ pub static WIN64: AbiDescription = AbiDescription {
         wide_is_by_reference: true,
         wide_integer_returns_in: Some(Format::Quad),
         wide_integer_in_memory: false,
+        decimal_in_integers: true,
     },
     returns: &[
         Rule::new(Test::Empty, Travel::Ignore),
@@ -295,6 +298,7 @@ pub static RISCV_LP64D: AbiDescription = AbiDescription {
         wide_is_by_reference: false,
         wide_integer_returns_in: None,
         wide_integer_in_memory: false,
+        decimal_in_integers: false,
     },
     returns: &[
         Rule::new(Test::Empty, Travel::Ignore),
@@ -357,6 +361,7 @@ pub static I386_SYSV: AbiDescription = AbiDescription {
         wide_is_by_reference: false,
         wide_integer_returns_in: None,
         wide_integer_in_memory: false,
+        decimal_in_integers: false,
     },
     returns: &[
         Rule::new(Test::Empty, Travel::Ignore),
@@ -497,6 +502,7 @@ pub static I386_MINGW: AbiDescription = AbiDescription {
         wide_is_by_reference: false,
         wide_integer_returns_in: None,
         wide_integer_in_memory: false,
+        decimal_in_integers: false,
     },
     returns: &[
         Rule::new(Test::Empty, Travel::Ignore),
