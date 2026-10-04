@@ -116,8 +116,9 @@ impl Pass for Sccp {
     fn preserves(&self) -> Preserved {
         // Constants where instructions were and at the top of blocks, and no edge touched. The
         // operands the replaced instructions read are read by fewer things now, which is the
-        // liveness and nothing else.
-        Preserved::ALL.without(Analysis::Liveness)
+        // liveness. A branch whose condition is now a constant, or is compared with one, is also
+        // guessed differently by the predictors, so the frequencies go too.
+        Preserved::ALL.without(Analysis::Liveness).without(Analysis::Frequencies)
     }
 
     fn run(&self, func: &mut Func, _an: &mut Analyses, fuel: &mut Fuel) -> Stats {
