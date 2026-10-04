@@ -5206,6 +5206,87 @@ pub fn nops_i386(mode: Mode, count: usize, out: &mut Vec<u8>) {
     }
 }
 
+/// Which table gas 2.40 pads code with. See [`nops_before_2_42`].
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum OldNops {
+    /// The file ended in `.code16`.
+    Sixteen,
+    /// An object for i386, whatever mode its code is in.
+    I386,
+    /// An object for x86-64, in thirty two or sixty four bit code.
+    X86_64,
+}
+
+/// The sixteen bit no-ops of gas before 2.42, up to four bytes.
+const OLD_NOPS_16: [Option<&[u8]>; 4] = [
+    Some(&[0x90]),
+    Some(&[0x66, 0x90]),
+    Some(&[0x8d, 0x74, 0x00]),
+    Some(&[0x8d, 0xb4, 0x00, 0x00]),
+];
+
+/// The thirty two bit no-ops of gas before 2.42, up to seven bytes and with none of five, so
+/// [`NOPS_32`] without the `cs` prefix.
+const OLD_NOPS_32: [Option<&[u8]>; 7] = [
+    Some(&[0x90]),
+    Some(&[0x66, 0x90]),
+    Some(&[0x8d, 0x76, 0x00]),
+    Some(&[0x8d, 0x74, 0x26, 0x00]),
+    None,
+    Some(&[0x8d, 0xb6, 0x00, 0x00, 0x00, 0x00]),
+    Some(&[0x8d, 0xb4, 0x26, 0x00, 0x00, 0x00, 0x00]),
+];
+
+/// `count` bytes of padding as gas before 2.42 writes it, which is gas 2.40 in the gcc 12 era.
+///
+/// That gas picks the table once for the whole file, by the mode the file ended in and the machine
+/// the object is for, so a file that ends in `.code16` pads its thirty two bit code with sixteen bit
+/// no-ops too. A run longer than two of the longest, or seven for x86-64, starts with a jump to its
+/// end. A length the table has no no-op for is the one below it and a `nop`.
+pub fn nops_before_2_42(table: OldNops, count: usize, out: &mut Vec<u8>) {
+    let x86_64: Vec<Option<&[u8]>> = NOPS.iter().map(|&nop| Some(nop)).collect();
+    let (table, most): (&[Option<&[u8]>], usize) = match table {
+        OldNops::Sixteen => (&OLD_NOPS_16, 2),
+        OldNops::I386 => (&OLD_NOPS_32, 2),
+        OldNops::X86_64 => (&x86_64, 7),
+    };
+    let longest = table.len();
+    let mut left = count;
+    if left / longest > most {
+        match u8::try_from(left - 2).ok().filter(|&over| over <= 0x7f) {
+            Some(over) => {
+                out.extend_from_slice(&[0xeb, over]);
+                left -= 2;
+            }
+            None if longest == OLD_NOPS_16.len() => {
+                out.extend_from_slice(&[0x66, 0xe9]);
+                out.extend_from_slice(&u32::try_from(left - 6).unwrap_or(u32::MAX).to_le_bytes());
+                left -= 6;
+            }
+            None => {
+                out.push(0xe9);
+                out.extend_from_slice(&u32::try_from(left - 5).unwrap_or(u32::MAX).to_le_bytes());
+                left -= 5;
+            }
+        }
+    }
+    // Every table has its longest, and the length below a missing one.
+    let nop = |len: usize| table[len - 1].unwrap_or(&[]);
+    for _ in 0..left / longest {
+        out.extend_from_slice(nop(longest));
+    }
+    match left % longest {
+        0 => {}
+        last => match table[last - 1] {
+            Some(bytes) => out.extend_from_slice(bytes),
+            None => {
+                out.extend_from_slice(nop(last - 1));
+                out.push(0x90);
+            }
+        },
+    }
+}
+
 /// `count` bytes of the no-ops in `table`, the longest first, behind a jump to the end when there
 /// are at least `jumped` of them.
 fn padded(table: &[&[u8]], jumped: Option<usize>, count: usize, out: &mut Vec<u8>) {

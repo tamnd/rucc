@@ -38,7 +38,9 @@ use rucc_object::{
 };
 use rucc_target::aarch64::{self, AAPCS64};
 use rucc_target::x86;
-use rucc_target::x86_64::{Mode, SYSV, Width, gpr_named, nops, nops_i386};
+use rucc_target::x86_64::{
+    Mode, OldNops, SYSV, Width, gpr_named, nops, nops_before_2_42, nops_i386,
+};
 use rucc_target::{CallRegs, ObjectFormat};
 use rucc_tuple::Arch;
 
@@ -591,6 +593,9 @@ struct Reader {
     fatal_warnings: bool,
     /// [`Flags::before_2_42`].
     before_2_42: bool,
+    /// Where each run of padding in code went under [`Flags::before_2_42`], as a piece, how far
+    /// into it and how long, for the end of the file to write once the mode it ends in is known.
+    old_padding: Vec<(usize, u64, usize)>,
     /// See [`Flags::noexecstack`].
     noexecstack: bool,
     /// The macros defined so far and the conditionals and repetitions that are open.
@@ -878,6 +883,9 @@ impl Reader {
             None => crate::instruction::one_in(word, &args, mode),
         }
         .map_err(|why| self.bad(&why))?;
+        if self.before_2_42 && self.sixteen.is_none() && mode == Mode::Bits64 {
+            crate::instruction::widened_before_2_42(word, &args, &mut written);
+        }
         // `jmp .+10` has been given its short form already, where the distance is known.
         let mut branch = None;
         let short = crate::instruction::short(&written).filter(|_| written.holes[0].name != ".");
@@ -2723,7 +2731,11 @@ impl Reader {
                     bytes.push(0x90);
                     need -= 1;
                 }
-                if self.sixteen.is_some() {
+                if self.before_2_42 {
+                    // gas 2.40 picks its no-ops when the file is over. See `old_padding`.
+                    self.old_padding.push((self.here, self.at(), need));
+                    bytes.resize(need, 0x90);
+                } else if self.sixteen.is_some() {
                     crate::sixteen::nops(need, &mut bytes);
                 } else if self.i386 {
                     nops_i386(self.mode(), need, &mut bytes);
@@ -3238,6 +3250,24 @@ impl Reader {
         Trouble { line: self.line, why: why.to_owned() }
     }
 
+    /// The padding gas 2.40 writes in code, which it picks by the mode the file ends in rather than
+    /// the one each run is in, and by the machine the object is for. See [`nops_before_2_42`].
+    fn old_padding(&mut self) {
+        let table = if self.sixteen.is_some() {
+            OldNops::Sixteen
+        } else if self.i386 {
+            OldNops::I386
+        } else {
+            OldNops::X86_64
+        };
+        for &(part, at, need) in &self.old_padding {
+            let mut bytes = Vec::with_capacity(need);
+            nops_before_2_42(table, need, &mut bytes);
+            let at = usize::try_from(at).expect("a place in memory");
+            self.parts[part].bytes[at..at + need].copy_from_slice(&bytes);
+        }
+    }
+
     /// Work out everything that was waiting for the end of the file.
     ///
     /// Or what the next pass has to do differently, when this one is not the answer: the branches
@@ -3252,6 +3282,7 @@ impl Reader {
             return Err(self.bad("a '.seh_proc' that is never ended"));
         }
         let within = self.within_pieces();
+        self.old_padding();
         self.join_subsections();
         self.line_table()?;
         self.unwind_table();
@@ -6156,6 +6187,56 @@ _tls$tlv$init:
         assert_eq!(bytes(&read, ".a"), [0xc3, 0xc3, 0x90, 0x0f, 0x1f, 0x44, 0x00, 0x00]);
         assert_eq!(bytes(&read, ".b"), [0xc3, 0x90, 0x90, 0x90, 0x90, 0x0f, 0x1f, 0x00]);
         assert_eq!(bytes(&read, ".c"), [0xc3, 0xc3, 0x66, 0x0f, 0x1f, 0x44, 0x00, 0x00]);
+    }
+
+    /// gas 2.40 pads with the table for the mode the file ends in and the machine the object is
+    /// for: in an i386 object the old `lea` forms with no `cs` prefix, after `.code16` at the end the
+    /// sixteen bit ones everywhere, and a jump over a long run. The bytes are the ones gas 2.40
+    /// writes for the same lines.
+    #[test]
+    fn padding_before_gas_2_42_is_picked_by_how_the_file_ends() {
+        let old = Flags { before_2_42: true, ..Flags::default() };
+        let text = "\t.section .a,\"ax\"\n\tret\n\t.p2align 4\n\t.section .b,\"ax\"\n\tret\n\t.p2align 5\n";
+        let read = read_with(text, Arch::X86, ObjectFormat::Elf, old).expect("it reads");
+        let mut want = vec![0xc3, 0x8d, 0xb4, 0x26, 0, 0, 0, 0, 0x8d, 0xb4, 0x26, 0, 0, 0, 0, 0x90];
+        assert_eq!(bytes(&read, ".a"), want);
+        want = vec![0xc3, 0xeb, 0x1d];
+        for _ in 0..4 {
+            want.extend_from_slice(&[0x8d, 0xb4, 0x26, 0, 0, 0, 0]);
+        }
+        want.push(0x90);
+        assert_eq!(bytes(&read, ".b"), want);
+
+        let text = "\t.code32\n\tret\n\t.p2align 8\n\t.code16\n\tret\n\t.p2align 3\n";
+        let read = read_with(text, Arch::X86, ObjectFormat::Elf, old).expect("it reads");
+        let code = bytes(&read, ".text");
+        assert_eq!(code[..11], [0xc3, 0x66, 0xe9, 0xf9, 0, 0, 0, 0x8d, 0xb4, 0x00, 0x00]);
+        assert_eq!(code[256..], [0xc3, 0x8d, 0xb4, 0x00, 0x00, 0x8d, 0x74, 0x00]);
+
+        let text = "\tret\n\t.p2align 8\n";
+        let read = read_with(text, Arch::X86_64, ObjectFormat::Elf, old).expect("it reads");
+        let code = bytes(&read, ".text");
+        assert_eq!(code[..8], [0xc3, 0xe9, 0xfa, 0, 0, 0, 0x66, 0x66]);
+    }
+
+    /// gas 2.40 writes `lar` and `lsl` into a sixty four bit register with `REX.W`, and gas 2.42
+    /// leaves it out. The bytes are the ones each writes for the same lines.
+    #[test]
+    fn lsl_into_a_quad_register_has_rex_w_before_gas_2_42() {
+        let text = "\tlsl %rax, %rax\n\tlsl %r9, %r10\n\tlslq (%rax), %rcx\n\tlar %cx, %rbx\n\tlsl %eax, %eax\n";
+        let old = Flags { before_2_42: true, ..Flags::default() };
+        let read = read_with(text, Arch::X86_64, ObjectFormat::Elf, old).expect("it reads");
+        let want = [
+            0x48, 0x0f, 0x03, 0xc0, 0x4d, 0x0f, 0x03, 0xd1, 0x48, 0x0f, 0x03, 0x08, 0x48, 0x0f,
+            0x02, 0xd9, 0x0f, 0x03, 0xc0,
+        ];
+        assert_eq!(bytes(&read, ".text"), want);
+        let read = assembled(text);
+        let want = [
+            0x0f, 0x03, 0xc0, 0x45, 0x0f, 0x03, 0xd1, 0x0f, 0x03, 0x08, 0x0f, 0x02, 0xd9, 0x0f,
+            0x03, 0xc0,
+        ];
+        assert_eq!(bytes(&read, ".text"), want);
     }
 
     /// gas 2.40 pads after data as it pads after an instruction, which is what a kernel built for
