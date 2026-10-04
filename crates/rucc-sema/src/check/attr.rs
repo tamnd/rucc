@@ -222,14 +222,20 @@ impl Checker<'_> {
     /// acts on and what `__has_attribute` answers come out of the same table. A row marked
     /// implemented or partial is read. A row marked unimplemented or rejected, and a name the
     /// table has no row for, come back empty and match nothing, which is what the preprocessor
-    /// answering no has already told the program. `__packed__` is read as `packed`, and an
-    /// attribute in some namespace other than `gnu` is not GCC's and is not read.
+    /// answering no has already told the program. So does a row newer than the gcc the persona
+    /// claims. `__packed__` is read as `packed`, and an attribute in some namespace other than
+    /// `gnu` is not GCC's and is not read.
     pub(in crate::check) fn gnu_name(&self, attr: &Attribute) -> &'static str {
         if attr.namespace.is_some_and(|ns| self.text(ns) != "gnu") {
             return "";
         }
         match rucc_gnu::lookup(Kind::Attribute, self.text(attr.name)) {
-            Some(row) if matches!(row.status, Status::Implemented | Status::Partial) => row.name,
+            Some(row)
+                if matches!(row.status, Status::Implemented | Status::Partial)
+                    && row.is_known_to(self.cx.gnuc) =>
+            {
+                row.name
+            }
             _ => "",
         }
     }
@@ -258,6 +264,18 @@ impl Checker<'_> {
             let Some(row) = rucc_gnu::lookup(Kind::Attribute, self.text(attr.name)) else {
                 continue;
             };
+            // An attribute that came in a later gcc than the persona claims is one that gcc has
+            // never heard of, and it says so under -Wattributes. The kernel's check for
+            // `counted_by` is a compile under -Werror, so the warning is the answer it reads.
+            if !row.is_known_to(self.cx.gnuc) {
+                refused.push(attr.span);
+                let what = match attr.namespace {
+                    Some(_) => format!("'gnu::{}' scoped attribute directive ignored", row.name),
+                    None => format!("'{}' attribute directive ignored", row.name),
+                };
+                self.report(Diagnostic::warning(what, attr.span).with_code("E0703"));
+                continue;
+            }
             // The two attributes about saving the machine are implemented for x86-64 alone, so
             // everywhere else they are what the row would have said before they were. See
             // [`Self::handler`].

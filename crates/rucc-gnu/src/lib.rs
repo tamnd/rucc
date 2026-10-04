@@ -19,17 +19,20 @@
 //! use rucc_gnu::{Kind, Status, Target};
 //!
 //! let linux = Target::new("x86_64", "linux");
-//! assert_eq!(rucc_gnu::has_feature("__has_include", linux), 1);
-//! assert_eq!(rucc_gnu::has_attribute("cleanup", linux), 1);
-//! assert_eq!(rucc_gnu::has_attribute("transparent_union", linux), 1);
-//! assert_eq!(rucc_gnu::has_attribute("no_such_attribute", linux), 0);
+//! assert_eq!(rucc_gnu::has_feature("__has_include", linux, 16), 1);
+//! assert_eq!(rucc_gnu::has_attribute("cleanup", linux, 16), 1);
+//! assert_eq!(rucc_gnu::has_attribute("transparent_union", linux, 16), 1);
+//! assert_eq!(rucc_gnu::has_attribute("no_such_attribute", linux, 16), 0);
 //!
 //! // Some answers are the target's. gcc has the 32-bit conventions on every x86 target and
 //! // the DLL attributes only where there are DLLs.
-//! assert_eq!(rucc_gnu::has_attribute("stdcall", linux), 1);
-//! assert_eq!(rucc_gnu::has_attribute("dllimport", linux), 0);
-//! assert_eq!(rucc_gnu::has_attribute("dllimport", Target::new("x86_64", "windows")), 1);
-//! assert_eq!(rucc_gnu::has_attribute("stdcall", Target::new("aarch64", "linux")), 0);
+//! assert_eq!(rucc_gnu::has_attribute("stdcall", linux, 16), 1);
+//! assert_eq!(rucc_gnu::has_attribute("dllimport", linux, 16), 0);
+//! assert_eq!(rucc_gnu::has_attribute("dllimport", Target::new("x86_64", "windows"), 16), 1);
+//! assert_eq!(rucc_gnu::has_attribute("stdcall", Target::new("aarch64", "linux"), 16), 0);
+//!
+//! // The answer is the one the claimed gcc gives, and gcc 12 has no `counted_by`.
+//! assert_eq!(rucc_gnu::has_attribute("counted_by", linux, 12), 0);
 //!
 //! // The armoured spelling is the same question.
 //! assert_eq!(rucc_gnu::lookup(Kind::Attribute, "__packed__").map(|f| f.name), Some("packed"));
@@ -223,6 +226,18 @@ impl Feature {
     pub fn is_on(&self, target: Target) -> bool {
         self.targets.is_empty() || self.targets.iter().any(|&place| target.is(place))
     }
+
+    /// The major number of the GCC release that introduced it, or zero for a row that names none.
+    pub fn since(&self) -> u32 {
+        self.gcc_version.split('.').next().and_then(|major| major.parse().ok()).unwrap_or(0)
+    }
+
+    /// Whether a compiler claiming to be this GCC release knows the name, which it does not
+    /// when the row came in a later one. A kernel built under `-fgnuc-version=12.2.0` asks
+    /// `__has_attribute(__counted_by__)` and has to hear what gcc 12 says.
+    pub fn is_known_to(&self, gnuc: u32) -> bool {
+        self.since() <= gnuc
+    }
 }
 
 include!(concat!(env!("OUT_DIR"), "/features.rs"));
@@ -247,9 +262,9 @@ pub fn lookup(kind: Kind, name: &str) -> Option<&'static Feature> {
 /// A name the standard also has is answered with the standard's number, as GCC answers it, so
 /// `__has_attribute(fallthrough)` is 202311 rather than one. GCC does that whether or not the name
 /// is also a GNU attribute, so `maybe_unused`, which is only a standard one, is answered too.
-pub fn has_attribute(name: &str, target: Target) -> u32 {
-    match answer(Kind::CAttribute, name, target) {
-        0 => answer(Kind::Attribute, name, target),
+pub fn has_attribute(name: &str, target: Target, gnuc: u32) -> u32 {
+    match answer(Kind::CAttribute, name, target, gnuc) {
+        0 => answer(Kind::Attribute, name, target, gnuc),
         standard => standard,
     }
 }
@@ -260,38 +275,44 @@ pub fn has_attribute(name: &str, target: Target) -> u32 {
 /// the name as a GNU attribute rucc has, and zero otherwise, even for a name the standard also
 /// has. That is gcc 16's answer: `gnu::fallthrough` is one rather than 202311, and
 /// `gnu::nodiscard`, which GCC only has as a standard attribute, is zero.
-pub fn has_gnu_attribute(name: &str, target: Target) -> u32 {
-    u32::from(answer(Kind::Attribute, name, target) != 0)
+pub fn has_gnu_attribute(name: &str, target: Target, gnuc: u32) -> u32 {
+    u32::from(answer(Kind::Attribute, name, target, gnuc) != 0)
 }
 
 /// What `__has_c_attribute(name)` answers, which is the number the standard gives the
 /// attribute rather than one.
-pub fn has_c_attribute(name: &str, target: Target) -> u32 {
-    answer(Kind::CAttribute, name, target)
+pub fn has_c_attribute(name: &str, target: Target, gnuc: u32) -> u32 {
+    answer(Kind::CAttribute, name, target, gnuc)
 }
 
 /// What `__has_builtin(name)` answers.
-pub fn has_builtin(name: &str, target: Target) -> u32 {
-    answer(Kind::Builtin, name, target)
+pub fn has_builtin(name: &str, target: Target, gnuc: u32) -> u32 {
+    answer(Kind::Builtin, name, target, gnuc)
 }
 
 /// What `__has_feature(name)` answers.
-pub fn has_feature(name: &str, target: Target) -> u32 {
-    answer(Kind::Feature, name, target)
+pub fn has_feature(name: &str, target: Target, gnuc: u32) -> u32 {
+    answer(Kind::Feature, name, target, gnuc)
 }
 
 /// What `__has_extension(name)` answers.
 ///
 /// GCC treats the two as the same question and so do we: a feature that is available is
 /// available whether or not the mode it is asked in makes it standard.
-pub fn has_extension(name: &str, target: Target) -> u32 {
-    let extension = answer(Kind::Extension, name, target);
-    if extension == 0 { answer(Kind::Feature, name, target) } else { extension }
+pub fn has_extension(name: &str, target: Target, gnuc: u32) -> u32 {
+    let extension = answer(Kind::Extension, name, target, gnuc);
+    if extension == 0 { answer(Kind::Feature, name, target, gnuc) } else { extension }
 }
 
-fn answer(kind: Kind, name: &str, target: Target) -> u32 {
+fn answer(kind: Kind, name: &str, target: Target, gnuc: u32) -> u32 {
     match lookup(kind, name) {
-        Some(feature) if feature.status.is_available() && feature.is_on(target) => feature.value,
+        Some(feature)
+            if feature.status.is_available()
+                && feature.is_on(target)
+                && feature.is_known_to(gnuc) =>
+        {
+            feature.value
+        }
         _ => 0,
     }
 }
@@ -329,6 +350,9 @@ mod tests {
         assert_eq!(keys, sorted);
     }
 
+    /// The release the table answers for when nothing says otherwise.
+    const GCC: u32 = 16;
+
     const LINUX: Target = Target { places: 1 << Place::X86_64 as u8 | 1 << Place::X86_64Elf as u8 };
 
     #[test]
@@ -340,9 +364,9 @@ mod tests {
 
     #[test]
     fn a_name_that_is_not_in_the_matrix_answers_no() {
-        assert_eq!(has_attribute("nonesuch", LINUX), 0);
-        assert_eq!(has_builtin("__builtin_nonesuch", LINUX), 0);
-        assert_eq!(has_feature("nonesuch", LINUX), 0);
+        assert_eq!(has_attribute("nonesuch", LINUX, GCC), 0);
+        assert_eq!(has_builtin("__builtin_nonesuch", LINUX, GCC), 0);
+        assert_eq!(has_feature("nonesuch", LINUX, GCC), 0);
         assert_eq!(lookup(Kind::Attribute, "nonesuch"), None);
     }
 
@@ -362,7 +386,7 @@ mod tests {
     #[test]
     fn only_an_implemented_row_answers_yes() {
         for feature in FEATURES {
-            let answered = answer(feature.kind, feature.name, LINUX);
+            let answered = answer(feature.kind, feature.name, LINUX, GCC);
             assert_eq!(
                 answered != 0,
                 feature.status == Status::Implemented && feature.value != 0 && feature.is_on(LINUX),
@@ -388,7 +412,7 @@ mod tests {
         }
         let ranges = lookup(Kind::Extension, "case_ranges").expect("in the table");
         assert_eq!(ranges.status, Status::Implemented);
-        assert_eq!(has_extension("case_ranges", LINUX), 0, "gcc 16 does not know the name");
+        assert_eq!(has_extension("case_ranges", LINUX, GCC), 0, "gcc 16 does not know the name");
     }
 
     #[test]
@@ -441,13 +465,26 @@ mod tests {
         }
     }
 
+    /// gcc 12 has never heard of `counted_by`, and a kernel that asks under
+    /// `-fgnuc-version=12.2.0` goes on to build its flexible arrays without it, as it does
+    /// with gcc 12 itself. C23's `noreturn` came in gcc 13 too, and gcc 12 still knows the GNU one.
+    #[test]
+    fn a_name_newer_than_the_claimed_gcc_answers_no() {
+        assert_eq!(has_attribute("__counted_by__", LINUX, 15), 1);
+        assert_eq!(has_attribute("__counted_by__", LINUX, 12), 0);
+        assert_eq!(has_builtin("__builtin_counted_by_ref", LINUX, 14), 0);
+        assert_eq!(has_c_attribute("noreturn", LINUX, 12), 0);
+        assert_eq!(has_attribute("noreturn", LINUX, 12), 1);
+        assert_eq!(lookup(Kind::Attribute, "counted_by").map(Feature::since), Some(15));
+    }
+
     #[test]
     fn a_c_attribute_answers_with_the_number_the_standard_gives_it() {
         let deprecated = lookup(Kind::CAttribute, "deprecated").expect("C23 has it");
         assert_eq!(deprecated.value, 202311);
         // The number C23 gave every one of them in the end, which is what gcc 16 answers.
-        assert_eq!(has_c_attribute("nodiscard", LINUX), 202311);
-        assert_eq!(has_attribute("fallthrough", LINUX), 202311);
+        assert_eq!(has_c_attribute("nodiscard", LINUX, GCC), 202311);
+        assert_eq!(has_attribute("fallthrough", LINUX, GCC), 202311);
         // And it is a different row from the GNU attribute of the same name.
         let gnu = lookup(Kind::Attribute, "deprecated").expect("GCC has it too");
         assert_eq!(gnu.value, 1);
@@ -463,34 +500,34 @@ mod tests {
         let arm = Target::new("aarch64", "linux");
         assert_eq!(LINUX, Target::new("x86_64", "linux"));
         // `cdecl` is what 32-bit x86 does anyway, so it is there too.
-        assert_eq!(has_attribute("cdecl", i686), 1);
-        assert_eq!(has_attribute("regparm", i686), 1);
+        assert_eq!(has_attribute("cdecl", i686, GCC), 1);
+        assert_eq!(has_attribute("regparm", i686, GCC), 1);
         for name in ["cdecl", "stdcall", "fastcall", "thiscall", "regparm"] {
-            assert_eq!(has_attribute(name, LINUX), 1, "{name}");
-            assert_eq!(has_attribute(name, windows), 1, "{name}");
-            assert_eq!(has_attribute(name, arm), 0, "{name}");
+            assert_eq!(has_attribute(name, LINUX, GCC), 1, "{name}");
+            assert_eq!(has_attribute(name, windows, GCC), 1, "{name}");
+            assert_eq!(has_attribute(name, arm, GCC), 0, "{name}");
             // gcc has them on 32-bit x86 too, where they mean something this compiler does
             // not do yet, so the row says x86-64 and the answer there is no. `regparm` is done.
             if name != "cdecl" && name != "regparm" {
-                assert_eq!(has_attribute(name, i686), 0, "{name}");
+                assert_eq!(has_attribute(name, i686, GCC), 0, "{name}");
             }
         }
         for name in ["ms_struct", "gcc_struct", "ms_abi", "sysv_abi"] {
             for target in [LINUX, windows, i686] {
-                assert_eq!(has_attribute(name, target), 1, "{name} on {target:?}");
+                assert_eq!(has_attribute(name, target, GCC), 1, "{name} on {target:?}");
             }
-            assert_eq!(has_attribute(name, arm), 0, "{name}");
+            assert_eq!(has_attribute(name, arm, GCC), 0, "{name}");
         }
         for name in ["dllimport", "dllexport", "selectany"] {
-            assert_eq!(has_attribute(name, LINUX), 0, "{name}");
-            assert_eq!(has_attribute(name, windows), 1, "{name}");
-            assert_eq!(has_attribute(name, Target::new("aarch64", "windows")), 1, "{name}");
+            assert_eq!(has_attribute(name, LINUX, GCC), 0, "{name}");
+            assert_eq!(has_attribute(name, windows, GCC), 1, "{name}");
+            assert_eq!(has_attribute(name, Target::new("aarch64", "windows"), GCC), 1, "{name}");
         }
         for target in [LINUX, windows, arm] {
-            assert_eq!(has_attribute("vectorcall", target), 0, "gcc does not know it");
+            assert_eq!(has_attribute("vectorcall", target, GCC), 0, "gcc does not know it");
         }
-        assert_eq!(has_builtin("__builtin_sponentry", arm), 1);
-        assert_eq!(has_builtin("__builtin_sponentry", LINUX), 0);
+        assert_eq!(has_builtin("__builtin_sponentry", arm, GCC), 1);
+        assert_eq!(has_builtin("__builtin_sponentry", LINUX, GCC), 0);
     }
 
     #[test]
@@ -506,7 +543,7 @@ mod tests {
         let nested = lookup(Kind::Extension, "nested_functions").expect("in the table");
         assert_eq!(nested.status, Status::Implemented);
         assert_eq!(
-            has_extension("nested_functions", Target::new("x86_64", "linux")),
+            has_extension("nested_functions", Target::new("x86_64", "linux"), GCC),
             0,
             "gcc 16 answers 0 for the name"
         );

@@ -112,6 +112,10 @@ pub struct Preprocessor {
     /// where, and this says where we are. Set by [`Preprocessor::predefine`], which is where the
     /// target arrives, and a target that is none of those places until then.
     places: rucc_gnu::Target,
+    /// The GCC release the `__has_*` operators answer for, which is the one `-fgnuc-version=`
+    /// claims, so a name that came in a later release is one they have not heard of. Set by
+    /// [`Preprocessor::predefine`], and every release until then.
+    gnuc: Option<u32>,
     /// Whether `__pragma(...)` is Microsoft's pragma operator here rather than an identifier,
     /// which it is where clang has Microsoft extensions on: the `*-windows-msvc` rows unless
     /// `-fno-ms-extensions` said otherwise, and any row under `-fms-extensions`. Set by
@@ -235,6 +239,7 @@ impl Preprocessor {
     ) -> Result<(), SourceMapFull> {
         self.places =
             rucc_gnu::Target::new(target.tuple.arch().as_str(), target.tuple.os().as_str());
+        self.gnuc = Some(opts.gnuc.major);
         let msvc = Triple::from_tuple(target.tuple)
             .is_some_and(|triple| triple.os == Os::Windows && triple.env == Env::Msvc);
         self.ms_pragma = opts.ms_extensions.unwrap_or(msvc);
@@ -1519,15 +1524,16 @@ impl Preprocessor {
                     return 0;
                 }
                 let places = self.places;
+                let gnuc = self.gnuc.unwrap_or(u32::MAX);
                 match kind {
                     Kind::Attribute | Kind::CAttribute if gnu => {
-                        rucc_gnu::has_gnu_attribute(name, places)
+                        rucc_gnu::has_gnu_attribute(name, places, gnuc)
                     }
-                    Kind::Attribute => rucc_gnu::has_attribute(name, places),
-                    Kind::CAttribute => rucc_gnu::has_c_attribute(name, places),
-                    Kind::Builtin => rucc_gnu::has_builtin(name, places),
-                    Kind::Feature => rucc_gnu::has_feature(name, places),
-                    Kind::Extension => rucc_gnu::has_extension(name, places),
+                    Kind::Attribute => rucc_gnu::has_attribute(name, places, gnuc),
+                    Kind::CAttribute => rucc_gnu::has_c_attribute(name, places, gnuc),
+                    Kind::Builtin => rucc_gnu::has_builtin(name, places, gnuc),
+                    Kind::Feature => rucc_gnu::has_feature(name, places, gnuc),
+                    Kind::Extension => rucc_gnu::has_extension(name, places, gnuc),
                 }
             }
         }
@@ -3717,6 +3723,21 @@ mod tests {
             let mut run = Run::new();
             run.predefine(triple, &Predef::new());
             assert_eq!(run.go(asked), answer, "{triple}");
+        }
+    }
+
+    /// The kernel asks `__has_attribute(__counted_by__)` to decide whether to write it, and under
+    /// `-fgnuc-version=12.2.0` the answer is gcc 12's, which has never heard of it.
+    #[test]
+    fn the_operators_answer_for_the_gcc_the_persona_claims() {
+        let asked = "__has_attribute(__counted_by__) __has_builtin(__builtin_counted_by_ref) \
+                     __has_attribute(packed)\n";
+        for (major, answer) in [(16, "1 1 1"), (15, "1 1 1"), (12, "0 0 1")] {
+            let mut opts = Predef::new();
+            opts.gnuc = rucc_session::GnucVersion { major, minor: 0, patch: 0 };
+            let mut run = Run::new();
+            run.predefine("x86_64-unknown-linux-gnu", &opts);
+            assert_eq!(run.go(asked), answer, "gcc {major}");
         }
     }
 
