@@ -114,6 +114,14 @@
 //! does anything else. The vector saves go at the top of such a frame rather than the bottom,
 //! since the body's view of the frame moves down by up to the alignment and must not reach them.
 //! This was `tamnd/rucc#1422`.
+//!
+//! A frame that saves nothing besides the pointer and does not realign takes the early order on
+//! Windows after all, which is what gcc does there. The record can say that one: the push, then the
+//! pointer set to the stack pointer with nothing in between, and that is the place it counts from.
+//! The frame taken afterwards needs no code, since the runtime puts the stack pointer back from the
+//! pointer before it pops anything. Keeping the early order where it can keeps the chain of saved
+//! frame pointers whole, which is what `__builtin_frame_address` and `__builtin_return_address`
+//! walk above depth zero. This was `tamnd/rucc#2144`.
 
 use rucc_mir::{Constraint, Func};
 use rucc_regalloc::Allocation;
@@ -498,9 +506,12 @@ impl Frame {
             || realign.is_some()
             || layout.grows
             || (!layout.leaf && conv.link.is_some());
-        // Where in the prologue the pointer is established, which is the platform's answer. See
-        // `Late` above.
-        let late = conv.late_frame_pointer;
+        // Where in the prologue the pointer is established, which is the platform's answer when the
+        // frame saves anything besides the pointer itself, and the early order when it does not,
+        // since then there is nothing below the pointer the record would have to count. See `Late`
+        // above.
+        let late = conv.late_frame_pointer
+            && (realign.is_some() || !saved_int.is_empty() || !vectors.is_empty());
 
         // Where the stack pointer sits once the prologue has finished pushing: one return address
         // short of aligned when the function starts, and one push further off for every push. The
