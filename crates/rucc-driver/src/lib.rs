@@ -1067,10 +1067,18 @@ pub fn parse_args(args: &[String]) -> Result<Action, CliError> {
             "-fgnu89-inline" => opts.gnu89_inline = true,
             "-fno-gnu89-inline" => opts.gnu89_inline = false,
             // Which trailing arrays are flexible. The bare spelling is the strictest level, as it
-            // is in gcc, and the kernel passes `=3`.
-            "-fstrict-flex-arrays" => opts.strict_flex_arrays = 3,
-            "-fno-strict-flex-arrays" => opts.strict_flex_arrays = 0,
+            // is in gcc, and the kernel passes `=3`. All three came in gcc 13, and the kernel
+            // probes for them, so a persona before that has to say what gcc 12 says.
+            "-fstrict-flex-arrays" => {
+                opts.strict_flex_arrays = 3;
+                newer.push((13, format!("unknown option `{arg}`")));
+            }
+            "-fno-strict-flex-arrays" => {
+                opts.strict_flex_arrays = 0;
+                newer.push((13, format!("unknown option `{arg}`")));
+            }
             _ if arg.starts_with("-fstrict-flex-arrays=") => {
+                newer.push((13, format!("unknown option `{arg}`")));
                 let text = &arg["-fstrict-flex-arrays=".len()..];
                 let level: u8 = text
                     .parse()
@@ -2353,7 +2361,9 @@ pub fn parse_args(args: &[String]) -> Result<Action, CliError> {
             // difference between the two: the kernel passes this one because ftrace and the call
             // padding it writes need every function on the boundary, the cold ones included. It is
             // put together with `-falign-functions` after the loop, since either may come last.
+            // It came in gcc 14, and the kernel's CC_HAS_MIN_FUNCTION_ALIGNMENT asks.
             _ if arg.starts_with("-fmin-function-alignment=") => {
+                newer.push((14, format!("unknown option `{arg}`")));
                 let text = &arg["-fmin-function-alignment=".len()..];
                 let bytes =
                     function_alignment(text).filter(|_| !text.contains(':')).ok_or_else(|| {
@@ -9277,6 +9287,16 @@ mod tests {
             compile(&[KERNEL_X86, flag, "-fgnuc-version=16.1.0", "-c", "a.c"]);
         }
         compile(&[KERNEL_X86, "-fgnuc-version=15", "-fzero-init-padding-bits=all", "-c", "a.c"]);
+        // gcc 13 brought the flexible array levels, which the kernel probes for on gcc 12.
+        for flag in ["-fstrict-flex-arrays=3", "-fstrict-flex-arrays", "-fno-strict-flex-arrays"] {
+            let why = format!("unknown option `{flag}`");
+            assert_eq!(refused(&[KERNEL_X86, "-fgnuc-version=12.2.0", flag, "-c", "a.c"]), why);
+            compile(&[KERNEL_X86, "-fgnuc-version=13", flag, "-c", "a.c"]);
+        }
+        let flag = "-fmin-function-alignment=16";
+        let why = format!("unknown option `{flag}`");
+        assert_eq!(refused(&[KERNEL_X86, "-fgnuc-version=13.3.0", flag, "-c", "a.c"]), why);
+        compile(&[KERNEL_X86, "-fgnuc-version=14", flag, "-c", "a.c"]);
         let why = refused(&["-fgnuc-version=15", "-fdiagnostics-show-context", "-c", "a.c"]);
         assert_eq!(why, "unknown option `-fdiagnostics-show-context`");
         // gcc takes `-Wno-` of a name it does not know, and kbuild probes the positive form.

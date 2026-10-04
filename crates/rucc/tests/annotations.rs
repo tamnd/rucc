@@ -178,3 +178,29 @@ fn what_gcc_refuses_is_refused() {
         assert!(err.contains(message), "no `{message}` in:\n{err}");
     }
 }
+
+/// gcc 12 has never heard of `counted_by`, and the kernel finds that out by compiling one under
+/// `-Werror`, so under `-fgnuc-version=12.2.0` the attribute is a warning and the operator says no.
+#[test]
+fn a_persona_before_gcc_15_has_no_counted_by() {
+    let source = "struct flex { int count; int array[] __attribute__((__counted_by__(count))); };\n\
+                  int asked = __has_attribute(__counted_by__);\n";
+    let path = fixture("persona", source);
+    let out = Command::new(env!("CARGO_BIN_EXE_rucc"))
+        .args(["--target=x86_64-unknown-linux-gnu", "-fgnuc-version=12.2.0", "-Werror", "-E"])
+        .arg(&path)
+        .output()
+        .expect("the compiler is built before its own tests run");
+    let text = String::from_utf8_lossy(&out.stdout);
+    assert!(text.contains("int asked = 0;"), "gcc 12 answers no:\n{text}");
+    let out = Command::new(env!("CARGO_BIN_EXE_rucc"))
+        .args(["--target=x86_64-unknown-linux-gnu", "-fgnuc-version=12.2.0", "-Werror", "-c"])
+        .args(["-o", "/dev/null"])
+        .arg(&path)
+        .output()
+        .expect("the compiler is built before its own tests run");
+    let _ = std::fs::remove_dir_all(path.parent().expect("the fixture is in a directory"));
+    let err = String::from_utf8_lossy(&out.stderr);
+    assert!(!out.status.success(), "-Werror turns the warning into a refusal");
+    assert!(err.contains("'counted_by' attribute directive ignored"), "{err}");
+}

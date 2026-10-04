@@ -167,7 +167,7 @@ impl Checker<'_> {
             self.check_tls_model(&lists, Some(name), Holder::NotVariable);
             let written = lists.iter().flat_map(|&list| self.ast[list].iter().copied());
             let asked: Vec<Attribute> =
-                written.filter(|attr| self.is_named(attr, "counted_by")).collect();
+                written.filter(|attr| self.gnu_name(attr) == "counted_by").collect();
             for attr in asked {
                 if let Some(counter) = self.counter(attr, fields, at) {
                     self.annotations.counters.insert((record, name), counter);
