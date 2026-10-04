@@ -39,6 +39,7 @@ use rucc_types::{
 
 use crate::check::Checker;
 use crate::check::attr::BIGGEST_ALIGNMENT;
+use crate::check::tls::Holder;
 use crate::decl::{DeclFlags, DeclId};
 use crate::expr::{ExprId, ExprKind};
 use crate::tast::Const;
@@ -163,6 +164,7 @@ impl Checker<'_> {
                 continue;
             };
             self.check_nonstring(&lists, decl.ty);
+            self.check_tls_model(&lists, Some(name), Holder::NotVariable);
             let written = lists.iter().flat_map(|&list| self.ast[list].iter().copied());
             let asked: Vec<Attribute> =
                 written.filter(|attr| self.is_named(attr, "counted_by")).collect();
