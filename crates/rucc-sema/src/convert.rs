@@ -37,6 +37,7 @@
 //! symptom is a whole expression coming out unsigned on the strength of one member's declared
 //! type.
 
+use rucc_ast::UnaryOp;
 use rucc_base::Interner;
 use rucc_base::float::Status;
 use rucc_target::TargetInfo;
@@ -44,6 +45,7 @@ use rucc_types::{TypeId, TypeKind, Types, is_arithmetic, is_floating, is_pointer
 
 use crate::eval::{Eval, bare, int_shape};
 use crate::expr::{Category, Conversion, Expr, ExprId, ExprKind};
+use crate::stmt::{Stmt, StmtId};
 use crate::tast::{Const, Tast};
 
 /// Everything a conversion needs: the tree to write the node into and the table to ask.
@@ -133,21 +135,47 @@ impl Conv<'_> {
     /// The width of the bit-field an expression names, or [`None`] where it names none.
     ///
     /// The width lives on the record rather than on the expression, so this asks the type table
-    /// rather than reading it off the node. Only a member access can be one: a bit-field has no
-    /// address, so there is no other expression that can arrive still being one.
+    /// rather than reading it off the node. Only a member access can be one at the bottom: a
+    /// bit-field has no address, so there is no other expression that can arrive still being one.
     ///
     /// The lvalue conversion is looked through, because most callers read the object before they
     /// know they are about to promote it and the value they are left holding is still as wide as
     /// the field was.
+    ///
+    /// So are the expressions whose value is the bit-field's value with its type unchanged, which
+    /// gcc keeps as narrow as the field: the right side of a comma, an assignment or a compound
+    /// assignment to one, `++` and `--` on one either side, and a statement expression that ends
+    /// with one. With `unsigned a : 23` and `signed b : 19`, gcc and clang both answer `(x, s.a) <
+    /// s.b` and `(s.a = 5) < s.b` in `int`, so a negative `b` is less than `a`. Reading only the
+    /// member there made the comparison unsigned, and a Csmith program that compared `(... ,
+    /// p.f0) < p.f5` that way left a global one lower than gcc did.
     pub fn bit_field_width(&self, expr: ExprId) -> Option<u32> {
         let expr = match self.tast[expr].kind {
             ExprKind::Convert { kind: Conversion::Lvalue, operand } => operand,
+            ExprKind::Comma { rhs, .. } => return self.bit_field_width(rhs),
+            ExprKind::Assign { lhs, .. } => return self.bit_field_width(lhs),
+            ExprKind::Unary {
+                op: UnaryOp::PreInc | UnaryOp::PreDec | UnaryOp::PostInc | UnaryOp::PostDec,
+                operand,
+            } => return self.bit_field_width(operand),
+            ExprKind::StmtExpr(body) => return self.last_bit_field_width(body),
             _ => expr,
         };
         let ExprKind::Member { base, field } = self.tast[expr].kind else { return None };
         let base = self.types.canonical(self.tast[base].ty);
         let TypeKind::Record(record) = self.types.kind(base) else { return None };
         self.types.record_info(record).fields.get(field as usize)?.bits
+    }
+
+    /// The width of the bit-field the last statement of a statement expression names, which is
+    /// the statement expression's value, looking through labels the way its type does.
+    fn last_bit_field_width(&self, stmt: StmtId) -> Option<u32> {
+        match self.tast[stmt] {
+            Stmt::Block(body) => self.last_bit_field_width(*self.tast[body].last()?),
+            Stmt::Label { body, .. } => self.last_bit_field_width(body),
+            Stmt::Expr(value) => self.bit_field_width(value),
+            _ => None,
+        }
     }
 
     /// The usual arithmetic conversions, 6.3.1.8: both operands converted to one type.
@@ -543,6 +571,42 @@ mod tests {
         // Thirty two bit values no longer do.
         let wide = f.conv().promote_bits(full, 32);
         assert_eq!(f.tast[wide].ty, unsigned);
+    }
+
+    #[test]
+    fn a_bit_field_still_promotes_by_its_width_through_a_comma_an_assignment_and_an_increment() {
+        // gcc keeps the field's width on each of these, so `(x, s.a) < s.b` with `unsigned a :
+        // 23` and a negative `signed b : 19` is a comparison in `int` and comes out false. With
+        // the declared type it was a comparison in `unsigned int` and came out true.
+        let mut f = Fixture::new();
+        let unsigned = f.types.int(IntKind::UInt);
+        let int = f.types.int(IntKind::Int);
+        let rvalue = |f: &mut Fixture, kind| {
+            f.tast.expr(Expr::new(kind, unsigned, Category::Rvalue), Span::DUMMY)
+        };
+
+        let first = f.zero(int);
+        let rhs = f.bit_field(unsigned, 23);
+        let comma = rvalue(&mut f, ExprKind::Comma { lhs: first, rhs });
+        let zero = f.zero(unsigned);
+        let lhs = f.bit_field(unsigned, 23);
+        let assign =
+            rvalue(&mut f, ExprKind::Assign { op: None, computation: unsigned, lhs, rhs: zero });
+        let operand = f.bit_field(unsigned, 23);
+        let increment = rvalue(&mut f, ExprKind::Unary { op: UnaryOp::PostInc, operand });
+        // The comma's own left side is not its value, so a field there decides nothing.
+        let ignored = f.bit_field(unsigned, 23);
+        let rhs = f.zero(unsigned);
+        let not_a_field = rvalue(&mut f, ExprKind::Comma { lhs: ignored, rhs });
+
+        for expr in [comma, assign, increment] {
+            assert_eq!(f.conv().bit_field_width(expr), Some(23));
+            let promoted = f.conv().promote(expr);
+            assert_eq!(f.tast[promoted].ty, int, "{}", f.text(expr));
+        }
+        assert_eq!(f.conv().bit_field_width(not_a_field), None);
+        let promoted = f.conv().promote(not_a_field);
+        assert_eq!(f.tast[promoted].ty, unsigned);
     }
 
     #[test]

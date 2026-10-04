@@ -10,6 +10,7 @@ All notable changes are recorded here. The format follows [Keep a Changelog](htt
 
 ### Fixed
 
+- A bit-field reached through a comma, an assignment, a compound assignment, `++` or `--`, or as the last statement of a statement expression promotes by its width as gcc does. With `unsigned a : 23` and a negative `signed b : 19`, `(x, s.a) < s.b` and `(s.a = 5) < s.b` were compared in `unsigned int` and came out true, where gcc compares them in `int`. Csmith seed 6481 found it.
 - Constant propagation no longer takes the output of an `asm goto` as a value that has not been set yet. A variable that was either zero or that output could fold to zero and drop the code that used it, which lost the `rseq_trace_ip_fixup` tracepoint in the kernel's `kernel/entry/common.c`.
 - Each second name for a function or a variable, from `alias` or a `.set`, is written just after what it names, as gcc does, rather than all together at the end. modpost reads a module's device tables in symbol table order, so the order of `.modinfo` aliases now matches a gcc build.
 
