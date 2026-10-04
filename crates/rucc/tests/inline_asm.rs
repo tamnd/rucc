@@ -215,6 +215,20 @@ fn an_address_handed_in_with_p_is_the_register_it_is_in() {
 }
 
 #[test]
+fn the_address_of_a_global_handed_in_with_p_is_the_name_itself() {
+    // 6.1's `this_cpu_read_stable` writes `movq %%gs:%P[var], %[val]` with `"p" (&current_task)`.
+    // gcc takes an address the linker knows as a constant, so `%P` prints the bare name, and the
+    // template used to be refused here because the address went in a register.
+    let source = "extern long current_task;\n\
+                  long f(void) { long v; \
+                  asm (\"movq %%gs:%P[var], %[val]\" : [val] \"=r\" (v) : [var] \"p\" (&current_task)); \
+                  return v; }\n";
+    let text = asm("percpu-stable", source);
+    let body = body(&text, "f");
+    assert!(body.contains("movq %gs:current_task, %"), "{body}");
+}
+
+#[test]
 fn a_template_with_an_instruction_in_it_is_that_instruction() {
     let text = asm("real", "int f(int x) { asm volatile (\"pause\"); return x; }\n");
     let body = body(&text, "f");
