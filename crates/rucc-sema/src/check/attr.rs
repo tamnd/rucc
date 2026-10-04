@@ -1522,7 +1522,7 @@ impl Checker<'_> {
     /// What an attribute list says about inlining and about what is written around the body, as
     /// the bits it can set.
     ///
-    /// `always_inline`, `noinline`, `no_instrument_function`, `no_stack_protector`,
+    /// `always_inline`, `noinline`, `noipa`, `no_instrument_function`, `no_stack_protector`,
     /// `stack_protect`, `cold`, `hot`, `function_return("keep")`, `indirect_branch("keep")` and
     /// `zero_call_used_regs`, and the `optimize` options that stand for two of them, and
     /// `uninitialized`, `common`, `nocommon` and `retain`, which are not about inlining but are read in the
@@ -1541,6 +1541,7 @@ impl Checker<'_> {
             match name.as_str() {
                 "always_inline" => flags |= DeclFlags::ALWAYS_INLINE,
                 "noinline" => flags |= DeclFlags::NOINLINE,
+                "noipa" => flags |= DeclFlags::NOINLINE | DeclFlags::NOIPA,
                 "no_instrument_function" => flags |= DeclFlags::NO_INSTRUMENT,
                 "no_profile_instrument_function" => flags |= DeclFlags::NO_PROFILE,
                 "no_stack_protector" => flags = flags.then(DeclFlags::NO_STACK_PROTECTOR),

@@ -492,6 +492,12 @@ impl DeclFlags {
     /// static storage.
     pub const COMMON: Self = Self(1 << 34);
 
+    /// `__attribute__((noipa))` was written on a declaration of this function, so nothing about a
+    /// call to it is decided from its body. It implies [`Self::NOINLINE`] and wins over
+    /// [`Self::ALWAYS_INLINE`] wherever that is written, as in gcc. Merged the way
+    /// [`Self::NOINLINE`] is.
+    pub const NOIPA: Self = Self(1 << 35);
+
     /// Whether `zero_call_used_regs("skip")` was written. See [`Self::ZERO_WIDE`] for why this is
     /// more than the one bit.
     #[must_use]

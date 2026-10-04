@@ -512,6 +512,15 @@ tests = ["tests/accept/attributes-that-ask-for-nothing-this-compiler-does.c", "r
 notes = "Says gcc may not make a specialised copy of the function. This compiler never makes one, so the promise is kept by doing nothing."
 
 [[feature]]
+name = "noipa"
+kind = "attribute"
+gcc_version = "8.0"
+status = "implemented"
+used_by = ["gcc-torture", "glibc"]
+tests = ["rucc::noipa_keeps_every_call_to_the_function_a_call"]
+notes = "Nothing about a call to the function is decided from its body: it is not inlined, `always_inline` beside it included, no constant or range goes into its parameters or comes back as its answer, and what its body does to memory, purity and its parameters is not used at a call. The call graph treats the body as one it may not trust, which is the gate interposition goes through, so every pass that reads another function's body is held off by the one test. There is no interprocedural register allocation to turn off. One difference from gcc: a `noipa` written on something other than a function, or with an argument, is taken without gcc's warning or error, as `noinline` is."
+
+[[feature]]
 name = "flatten"
 kind = "attribute"
 gcc_version = "4.1"

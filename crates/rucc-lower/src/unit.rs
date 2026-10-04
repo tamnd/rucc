@@ -1098,7 +1098,11 @@ impl Unit<'_> {
         if node.flags.contains(DeclFlags::NO_LOOP_IDIOM) {
             func.attrs.set |= AttrSet::NO_LOOP_IDIOM;
         }
-        if node.flags.contains(DeclFlags::ALWAYS_INLINE) {
+        // `noipa` wins over `always_inline` as gcc has it, which drops `always_inline` with a
+        // warning wherever the two meet, so a call to the function stays a call.
+        if node.flags.contains(DeclFlags::NOIPA) {
+            func.attrs.set |= AttrSet::NOIPA | AttrSet::NOINLINE;
+        } else if node.flags.contains(DeclFlags::ALWAYS_INLINE) {
             func.attrs.set |= AttrSet::ALWAYS_INLINE;
         } else if node.flags.contains(DeclFlags::NOINLINE) {
             func.attrs.set |= AttrSet::NOINLINE;

@@ -121,7 +121,7 @@ impl fmt::Display for Attrs {
 /// A bitset for the same reason [`crate::Flags`] is one, though the pressure is lower here since
 /// there is one of these per function rather than one per instruction.
 #[derive(Clone, Copy, PartialEq, Eq, Default, Hash)]
-pub struct AttrSet(u32);
+pub struct AttrSet(u64);
 
 impl AttrSet {
     /// Nothing set.
@@ -234,10 +234,16 @@ impl AttrSet {
     /// `__attribute__((optimize ("no-tree-loop-distribute-patterns")))`. A body inlined into
     /// another passes it on, since the loop it brings is still the one that asked.
     pub const NO_LOOP_IDIOM: Self = Self(1 << 31);
+    /// Nothing outside this function may be decided from its body, from
+    /// `__attribute__((noipa))`: it is not inlined or specialised, no constant or range is carried
+    /// into it or out of it, and nothing found in its body about memory, purity or its parameters
+    /// is used at a call to it. A call is compiled as a call to a function in another unit. Always
+    /// set with [`Self::NOINLINE`].
+    pub const NOIPA: Self = Self(1 << 32);
 
     /// The underlying bits, for the printer and for hashing.
     #[must_use]
-    pub const fn bits(self) -> u32 {
+    pub const fn bits(self) -> u64 {
         self.0
     }
 
@@ -358,12 +364,14 @@ static NAMED: &[(AttrSet, &str)] = &[
     (AttrSet::RETAIN, "retain"),
     (AttrSet::NO_PROFILE, "no_profile"),
     (AttrSet::NO_LOOP_IDIOM, "no_loop_idiom"),
+    (AttrSet::NOIPA, "noipa"),
 ];
 
 /// The pairs that cannot both be set, with their names for the message.
 static CONFLICTS: &[(AttrSet, AttrSet, &str, &str)] = &[
     (AttrSet::ALWAYS_INLINE, AttrSet::NOINLINE, "always_inline", "noinline"),
     (AttrSet::ALWAYS_INLINE, AttrSet::OPTNONE, "always_inline", "optnone"),
+    (AttrSet::ALWAYS_INLINE, AttrSet::NOIPA, "always_inline", "noipa"),
     (AttrSet::COLD, AttrSet::HOT, "cold", "hot"),
     (AttrSet::READNONE, AttrSet::READONLY, "readnone", "readonly"),
     (AttrSet::NORETURN, AttrSet::WILLRETURN, "noreturn", "willreturn"),
@@ -477,7 +485,7 @@ mod tests {
 
     #[test]
     fn no_two_attributes_share_a_bit() {
-        let mut seen = 0u32;
+        let mut seen = 0u64;
         for &(attr, name) in NAMED {
             assert_eq!(attr.bits().count_ones(), 1, "{name} is not one bit");
             assert_eq!(seen & attr.bits(), 0, "{name} shares a bit");

@@ -502,6 +502,52 @@ _Static_assert(__has_attribute(tls_model), \"tls_model\");
     assert!(!text.contains("__tls_get_addr"), "{text}");
 }
 
+/// `noipa` keeps a call a call: nothing is inlined, no constant goes in for the parameter and
+/// nothing comes back out as the answer, `always_inline` beside it included, and a declaration
+/// that wrote it covers the definition after it. `plain` is the same body without the attribute,
+/// which is folded to the constant, so the test is of the attribute and not of the optimizer.
+#[test]
+fn noipa_keeps_every_call_to_the_function_a_call() {
+    let source = "\
+__attribute__((noipa)) static int bump(int x) { return x + 1; }
+int one(void) { return bump(41); }
+static int plain(int x) { return x + 1; }
+int two(void) { return plain(99); }
+__attribute__((noipa, always_inline)) static inline int twice(int x) { return x * 2; }
+int three(int y) { return twice(y); }
+__attribute__((__noipa__)) static int later(int);
+static int later(int x) { return x - 1; }
+int four(void) { return later(7); }
+[[gnu::noipa]] static void nothing(void) {}
+int five(void) { nothing(); return 5; }
+_Static_assert(__has_attribute(noipa), \"noipa\");
+";
+    let out = compile("noipa", &["-O2", "-S", "-std=gnu23"], source);
+    let said = String::from_utf8_lossy(&out.stderr);
+    assert!(out.status.success(), "{said}");
+    let text = String::from_utf8_lossy(&out.stdout);
+    let body = |name: &str| -> String {
+        let start = text.find(&format!("\n{name}:")).unwrap_or_else(|| panic!("{name}\n{text}"));
+        let rest = &text[start + 1..];
+        let end = rest.find(".size").unwrap_or(rest.len());
+        rest[..end].to_string()
+    };
+    let calls = |body: &str, callee: &str| {
+        body.lines().any(|line| {
+            let line = line.trim();
+            (line.starts_with("call") || line.starts_with("jmp")) && line.ends_with(callee)
+        })
+    };
+    assert!(body("two").contains("$100"), "{text}");
+    for (caller, callee) in [("one", "bump"), ("three", "twice"), ("four", "later"), ("five", "nothing")]
+    {
+        assert!(calls(&body(caller), callee), "{caller} calls {callee}\n{text}");
+    }
+    assert!(!body("one").contains("$42"), "{text}");
+    assert!(!body("four").contains("$6,"), "{text}");
+    assert!(body("bump").contains("%edi"), "{text}");
+}
+
 #[test]
 fn nocommon_keeps_a_tentative_definition_out_of_the_common_block_under_fcommon() {
     let got = ir("nocommon", &["-fcommon"], "int merged;\n__attribute__((nocommon)) int alone;\n");
