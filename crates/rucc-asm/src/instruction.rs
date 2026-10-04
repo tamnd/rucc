@@ -358,6 +358,37 @@ pub(crate) fn addressed(arg: &str, width: Width) -> bool {
 }
 
 /// Whether the byte is one of the six segment prefixes.
+/// `lar` and `lsl` into a sixty four bit register with `REX.W`, as gas before 2.42 writes them,
+/// where the encoder leaves the bit out as later ones do. The limit comes out the same either way,
+/// but the kernel's `GET_PERCPU_BASE` writes `lsl %rax, %rax` and the bytes are what is compared.
+pub(crate) fn widened_before_2_42(word: &str, args: &[String], written: &mut Written) {
+    if !matches!(word, "lar" | "lsl" | "larq" | "lslq") {
+        return;
+    }
+    let quad = args.last().and_then(|arg| gpr_named(arg.trim().trim_start_matches('%')));
+    if !quad.is_some_and(|(_, width)| width == Width::Quad) {
+        return;
+    }
+    let at = written
+        .bytes
+        .iter()
+        .take_while(|&&byte| {
+            segment_prefix(byte) || matches!(byte, 0x66 | 0x67 | 0xF0 | 0xF2 | 0xF3)
+        })
+        .count();
+    match written.bytes.get(at) {
+        Some(rex) if rex & 0xF0 == 0x40 => written.bytes[at] |= 0b1000,
+        _ => {
+            written.bytes.insert(at, 0x48);
+            for hole in &mut written.holes {
+                if hole.at >= at {
+                    hole.at += 1;
+                }
+            }
+        }
+    }
+}
+
 fn segment_prefix(byte: u8) -> bool {
     matches!(byte, 0x26 | 0x2E | 0x36 | 0x3E | 0x64 | 0x65)
 }
