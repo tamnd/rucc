@@ -58,6 +58,7 @@ pub fn assemble(opts: &Options, name: &str, cpp: bool, fs: &dyn FileSystem) -> C
         fatal_warnings: opts.asm_fatal_warnings,
         noexecstack: opts.asm_noexecstack,
         keep_slots: opts.asm_keep_slots,
+        before_2_42: opts.gnu_as < rucc_session::GasVersion { major: 2, minor: 42, patch: 0 },
     };
     let read = rucc_asm::read_with(&text, target.tuple.arch(), target.object_format, flags);
     let assembled = match read {

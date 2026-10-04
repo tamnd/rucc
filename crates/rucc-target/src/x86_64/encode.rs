@@ -1473,6 +1473,13 @@ static ENCODINGS: &[Encoding] = &[
     bytes("shrdw", &RRR, Word, &[0x0F, 0xAD], pair(2, 1), NO_IMM),
     bytes("shrdl", &RRR, Long, &[0x0F, 0xAD], pair(2, 1), NO_IMM),
     bytes("shrdq", &RRR, Quad, &[0x0F, 0xAD], pair(2, 1), NO_IMM),
+    // The count in `cl` left unsaid, which gas takes and gcc 12 writes for a 128 bit shift.
+    bytes("shldw", &RR, Word, &[0x0F, 0xA5], pair(1, 0), NO_IMM),
+    bytes("shldl", &RR, Long, &[0x0F, 0xA5], pair(1, 0), NO_IMM),
+    bytes("shldq", &RR, Quad, &[0x0F, 0xA5], pair(1, 0), NO_IMM),
+    bytes("shrdw", &RR, Word, &[0x0F, 0xAD], pair(1, 0), NO_IMM),
+    bytes("shrdl", &RR, Long, &[0x0F, 0xAD], pair(1, 0), NO_IMM),
+    bytes("shrdq", &RR, Quad, &[0x0F, 0xAD], pair(1, 0), NO_IMM),
     // The three shifts that take their count in any register, which are BMI2 and are the only rows
     // here that are VEX encoded. They exist because the ordinary shift takes its count in `cl` and
     // nowhere else and writes the flags, so a loop shifting by several different amounts spends

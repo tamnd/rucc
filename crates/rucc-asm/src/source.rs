@@ -115,6 +115,9 @@ pub struct Flags {
     /// `-mrelax-relocations=no`, which asks for the relocation of a slot of the global offset table
     /// that the linker may not rewrite, `R_X86_64_GOTPCREL` and `R_386_GOT32`, in every instruction.
     pub keep_slots: bool,
+    /// A gas before 2.42, which `-fgnu-as-version=` claims, and which pads after data the way it
+    /// pads after an instruction, with no one byte `nop` in front. See [`Reader::after_data`].
+    pub before_2_42: bool,
 }
 
 /// The same, with what the command line said to the assembler.
@@ -172,6 +175,7 @@ pub fn read_with(
             coff,
             fatal_warnings: flags.fatal_warnings,
             noexecstack: flags.noexecstack,
+            before_2_42: flags.before_2_42,
             ..Reader::default()
         };
         reader.run(text)?;
@@ -585,6 +589,8 @@ struct Reader {
     subsections: bool,
     /// Whether a warning stops the file, which is `-Wa,--fatal-warnings`.
     fatal_warnings: bool,
+    /// [`Flags::before_2_42`].
+    before_2_42: bool,
     /// See [`Flags::noexecstack`].
     noexecstack: bool,
     /// The macros defined so far and the conditionals and repetitions that are open.
@@ -2693,7 +2699,11 @@ impl Reader {
                 // After data, gas starts with a `nop` of one byte, so that a byte of the data that
                 // looks like a prefix runs into that and not into the long no-op after it. The
                 // section remembers this across alignments and across switching away and back.
-                if need > 0 && self.after_data.contains(&self.section_of(self.here)) {
+                // gas 2.40 does not, and pads after data as it does after code.
+                if need > 0
+                    && !self.before_2_42
+                    && self.after_data.contains(&self.section_of(self.here))
+                {
                     bytes.push(0x90);
                     need -= 1;
                 }
@@ -6103,6 +6113,18 @@ _tls$tlv$init:
         assert_eq!(bytes(&read, ".a"), [0xc3, 0xc3, 0x90, 0x0f, 0x1f, 0x44, 0x00, 0x00]);
         assert_eq!(bytes(&read, ".b"), [0xc3, 0x90, 0x90, 0x90, 0x90, 0x0f, 0x1f, 0x00]);
         assert_eq!(bytes(&read, ".c"), [0xc3, 0xc3, 0x66, 0x0f, 0x1f, 0x44, 0x00, 0x00]);
+    }
+
+    /// gas 2.40 pads after data as it pads after an instruction, which is what a kernel built for
+    /// the E10 era is assembled with.
+    #[test]
+    fn padding_after_data_is_plain_before_gas_2_42() {
+        let text = "\t.section .a,\"ax\"\n\tret\n\t.byte 0xc3\n\t.p2align 3\n\t.p2align 4\n";
+        let old = Flags { before_2_42: true, ..Flags::default() };
+        let read = read_with(text, Arch::X86_64, ObjectFormat::Elf, old).expect("it reads");
+        let mut want = vec![0xc3, 0xc3, 0x66, 0x0f, 0x1f, 0x44, 0x00, 0x00];
+        want.extend_from_slice(&[0x0f, 0x1f, 0x84, 0x00, 0x00, 0x00, 0x00, 0x00]);
+        assert_eq!(bytes(&read, ".a"), want);
     }
 
     #[test]
