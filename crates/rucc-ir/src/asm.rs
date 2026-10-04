@@ -268,11 +268,13 @@ impl<'a> Entry<'a> {
                 // counted here rather than above: it names a pair and the question above is which
                 // one register an operand is in.
                 // `p` is an address, which is a value like any other until something reads what
-                // it points at, and it is kept in a register the same way.
+                // it points at, and it is kept in a register the same way. An address the linker
+                // knows is a constant, as gcc reads it, which is how 6.1's `this_cpu_read_stable`
+                // gets `%gs:current_task` out of `%P[var]` with `"p" (&current_task)`.
                 'r' | 'g' | 'X' | 'i' | 'n' | 's' | 'A' | 'q' | 'Q' | 'f' | 't' | 'u' | 'x'
                 | 'y' | 'v' | 'l' | 'k' | 'h' | 'j' | 'z' | 'w' | 'p' => {
                     register = true;
-                    if matches!(letter, 'g' | 'X' | 'i' | 'n' | 's' | 'z') {
+                    if matches!(letter, 'g' | 'X' | 'i' | 'n' | 's' | 'z' | 'p') {
                         immediate = true;
                         open = true;
                     }
