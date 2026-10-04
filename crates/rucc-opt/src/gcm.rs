@@ -58,16 +58,34 @@
 //! Leaving a loop takes a register for the whole of it. When `pressure` says the loop is already
 //! at the allocatable count, only what `licm` counts as expensive leaves it, which is the rule
 //! section 40.6 gives both passes, and the rest goes no higher than the block it was in.
+//!
+//! Sinking has the same question the other way round. Values worked out in front of a loop and
+//! read only after it can move to the block after the loop, and where that block runs every time
+//! the first one does the move saves no work. What it changes is what is held across the loop: the
+//! values before the moves, and what they read after them. When that takes the loop under the
+//! register count it is a win, since the allocator then has room in the loop it did not have. When
+//! the loop is still full after, something held across it goes on the stack either way, and the
+//! allocator puts all of a value there, every write and read of it, chosen from estimated
+//! frequencies, which for an interpreter's dispatch loop are far off. The moves are then only worth
+//! it when they leave fewer values held across the loop and what they hold in place of them costs
+//! no more to put on the stack, counted the way the allocator counts, than what they free. In
+//! tamnd/rucc#2654 four values read only after a dispatch loop moved past it and held the seed they
+//! were worked out from, which twenty values in front of the loop read as well. The allocator kept
+//! the seed in a register for those reads and put one more of the loop's own values on the stack,
+//! which was 41 more stack accesses in the loop. So before the sinking walk, a plan of it works out
+//! for each loop the moves that pass it without saving work, and the walk leaves them all in front
+//! of a loop they would leave full and not pay for.
 
-use rucc_base::hash::Map;
+use rucc_base::hash::{Map, Set};
 use rucc_cost::heuristics;
 use rucc_ir::{Block, Def, Func, Inst, Opcode, Value};
 
-use crate::dom::Dominators;
-use crate::loops::Loops;
+use crate::dom::{Dominators, PostDominators};
+use crate::frequency::Frequencies;
+use crate::loops::{LoopId, Loops};
 use crate::machine::Machine;
 use crate::phiopt::speculatable;
-use crate::pressure::{Pressure, class_of};
+use crate::pressure::{Class, Pressure, class_of};
 use crate::{Analyses, Analysis, Fuel, Pass, Preserved, Stats, licm, uses};
 
 /// The name the pipelines and `-fno-gcm` use.
@@ -84,6 +102,10 @@ const PRESSURE: &str = "left in the loop, the register holding it would cost mor
 
 /// Recorded for each value that would have moved after the fuel ran out.
 const NO_FUEL: &str = "computation left where it was, the pass ran out of fuel";
+
+/// The remark for a value left in front of a loop that moving it past would save no work in and
+/// would leave out of registers for less than it costs.
+const PAST: &str = "left in front of the loop, moving it past saves nothing and costs registers";
 
 /// Global code motion.
 #[derive(Debug)]
@@ -117,11 +139,14 @@ impl Pass for Gcm {
         let order: Vec<Block> = cfg.reverse_postorder().collect();
         let mut job = Job {
             dom: an.dominators(func),
+            post: an.post_dominators(func),
             loops: an.loops(func),
             pressure: an.pressure(func),
+            freq: an.frequencies(func),
             machine,
             at: Map::default(),
             readers: Map::default(),
+            full: Set::default(),
         };
         job.survey(func, &order);
         for &block in &order {
@@ -130,6 +155,7 @@ impl Pass for Gcm {
                 job.hoist(func, inst, fuel, &mut stats);
             }
         }
+        job.full = job.left_full(func, &order);
         for &block in order.iter().rev() {
             let insts: Vec<Inst> = func.insts(block).collect();
             for &inst in insts.iter().rev() {
@@ -143,13 +169,18 @@ impl Pass for Gcm {
 /// What both walks read.
 struct Job<'a> {
     dom: &'a Dominators,
+    post: &'a PostDominators,
     loops: &'a Loops,
     pressure: &'a Pressure,
+    freq: &'a Frequencies,
     machine: Machine,
     /// The block each reachable instruction is in, kept up to date as instructions move.
     at: Map<Inst, Block>,
     /// The instructions that read each value, once each however many times they read it.
     readers: Map<Value, Vec<Inst>>,
+    /// The loops the sinking walk moves nothing past without saving work, from
+    /// [`Job::left_full`].
+    full: Set<LoopId>,
 }
 
 impl Job<'_> {
@@ -250,33 +281,167 @@ impl Job<'_> {
         stats.optimized(HOISTED);
     }
 
+    /// Where the sinking walk would move an instruction to from where it is now, as the block it is
+    /// in and the block it would go to, or nothing for one that stays.
+    fn sinks(&self, func: &Func, inst: Inst) -> Option<(Block, Block)> {
+        if !movable(func, inst) {
+            return None;
+        }
+        let &here = self.at.get(&inst)?;
+        if self.loops.is_irreducible(here) {
+            return None;
+        }
+        let readers = self.readers.get(&one_result(func, inst)?)?;
+        let mut low: Option<Block> = None;
+        for reader in readers {
+            let &block = self.at.get(reader)?;
+            low = match low {
+                None => Some(block),
+                Some(low) => Some(self.dom.nearest_common_dominator(low, block)?),
+            };
+        }
+        let best = self.pick(low?, here, here)?;
+        (best != here).then_some((here, best))
+    }
+
+    /// The loops a move from `here` down to `best` passes without saving any work: none when `best`
+    /// may be skipped on the way out of the function from `here`, and otherwise the loops a block
+    /// on the dominator tree path from `best` up to `here` is in and `here` is not.
+    fn passes(&self, here: Block, best: Block) -> Vec<LoopId> {
+        let mut passed = Vec::new();
+        if !self.post.post_dominates(best, here) {
+            return passed;
+        }
+        let mut block = best;
+        while block != here {
+            let mut id = self.loops.innermost(block);
+            while let Some(inner) = id {
+                if self.loops.contains(inner, here) {
+                    break;
+                }
+                if !passed.contains(&inner) {
+                    passed.push(inner);
+                }
+                id = self.loops.parent(inner);
+            }
+            let Some(up) = self.dom.immediate_dominator(block) else { break };
+            block = up;
+        }
+        passed
+    }
+
+    /// The loops that the sinking walk, run as it stands, would move values past without saving
+    /// work and leave with no register to spare, for less than the moves cost.
+    ///
+    /// The plan is the walk with the moves written down rather than made. What one loop is left
+    /// holding is then worked out from all the moves that pass it together, because a chain only
+    /// frees a register when the whole of it goes, and many values worked out from one argument
+    /// free many registers for the one that argument then takes.
+    fn left_full(&mut self, func: &Func, order: &[Block]) -> Set<LoopId> {
+        let was = self.at.clone();
+        let mut passing: Map<LoopId, Set<Inst>> = Map::default();
+        for &block in order.iter().rev() {
+            let insts: Vec<Inst> = func.insts(block).collect();
+            for &inst in insts.iter().rev() {
+                let Some((here, best)) = self.sinks(func, inst) else { continue };
+                for id in self.passes(here, best) {
+                    passing.entry(id).or_default().insert(inst);
+                }
+                self.at.insert(inst, best);
+            }
+        }
+        let plan = std::mem::replace(&mut self.at, was);
+        let mut full = Set::default();
+        for (id, moved) in passing {
+            if Class::ALL.into_iter().any(|class| self.not_worth(func, id, &moved, &plan, class)) {
+                full.insert(id);
+            }
+        }
+        full
+    }
+
+    /// Whether moving all of `moved` past a loop leaves it with no register of that bank to spare
+    /// and does not pay for that, where `plan` is where every instruction would be after the moves.
+    ///
+    /// Each value `moved` makes that something outside it reads is no longer held across the loop.
+    /// Each value it reads that it does not make is held across the loop from then on, unless the
+    /// loop or something after it reads it already or the backend works it out again where it is
+    /// read. A full loop puts some of what is held across it on the stack either way, so the moves
+    /// pay when they hold fewer values than they free and the ones they hold cost no more to put
+    /// there than the ones they free.
+    fn not_worth(
+        &self,
+        func: &Func,
+        id: LoopId,
+        moved: &Set<Inst>,
+        plan: &Map<Inst, Block>,
+        class: Class,
+    ) -> bool {
+        let header = self.loops.header(id);
+        let ours = |value: Value| class_of(func[value].ty) == Some(class);
+        let mut freed = 0u32;
+        let mut saved = 0u64;
+        let mut held: Set<Value> = Set::default();
+        for &inst in moved {
+            let Some(value) = one_result(func, inst) else { continue };
+            let readers = self.readers.get(&value).map_or(&[][..], Vec::as_slice);
+            if ours(value) && readers.iter().any(|reader| !moved.contains(reader)) {
+                freed += 1;
+                saved = saved.saturating_add(self.spill(func, value, &self.at));
+            }
+            for &arg in &func[func[inst].args] {
+                if let Def::Result { inst: from, .. } = func[arg].def {
+                    if moved.contains(&from) {
+                        continue;
+                    }
+                }
+                let wanted = self.readers.get(&arg).is_some_and(|readers| {
+                    readers.iter().any(|reader| {
+                        !moved.contains(reader)
+                            && self.at.get(reader).is_some_and(|&at| self.dom.dominates(header, at))
+                    })
+                });
+                if ours(arg) && !wanted && !remade(func, arg) {
+                    held.insert(arg);
+                }
+            }
+        }
+        let room = self.machine.allocatable(class).unwrap_or(0);
+        let now = self.pressure.most_in_loop(self.loops, id, class);
+        let holds = u32::try_from(held.len()).unwrap_or(u32::MAX);
+        let after = (now + holds).saturating_sub(freed);
+        if after < room.saturating_sub(heuristics::LOOP_RESERVED_REGS) {
+            return false;
+        }
+        let costs =
+            held.iter().fold(0u64, |sum, &value| sum.saturating_add(self.spill(func, value, plan)));
+        holds >= freed || costs > saved
+    }
+
+    /// What the allocator counts against putting a value on the stack: the write that makes it and
+    /// each instruction that reads it, each weighed by how often its block runs, with the
+    /// instructions in the blocks `at` says.
+    fn spill(&self, func: &Func, value: Value, at: &Map<Inst, Block>) -> u64 {
+        let weight = |block: Option<Block>| block.map_or(0, |block| self.freq.get(block).raw());
+        let made = match func[value].def {
+            Def::Param { block, .. } => Some(block),
+            Def::Result { inst, .. } => at.get(&inst).copied(),
+        };
+        let readers = self.readers.get(&value).map_or(&[][..], Vec::as_slice);
+        readers
+            .iter()
+            .fold(weight(made), |sum, reader| sum.saturating_add(weight(at.get(reader).copied())))
+    }
+
     /// Moves an instruction down to the latest block in front of all its reads, never into a loop.
     fn sink(&mut self, func: &mut Func, inst: Inst, fuel: &mut Fuel, stats: &mut Stats) {
-        if !movable(func, inst) {
-            return;
-        }
-        let Some(&here) = self.at.get(&inst) else { return };
-        if self.loops.is_irreducible(here) {
+        let Some((here, best)) = self.sinks(func, inst) else { return };
+        if self.passes(here, best).iter().any(|id| self.full.contains(id)) {
+            stats.missed(PAST);
             return;
         }
         let Some(value) = one_result(func, inst) else { return };
         let Some(readers) = self.readers.get(&value) else { return };
-        let mut low: Option<Block> = None;
-        for reader in readers {
-            let Some(&block) = self.at.get(reader) else { return };
-            low = match low {
-                None => Some(block),
-                Some(low) => self.dom.nearest_common_dominator(low, block),
-            };
-            if low.is_none() {
-                return;
-            }
-        }
-        let Some(low) = low else { return };
-        let Some(best) = self.pick(low, here, here) else { return };
-        if best == here {
-            return;
-        }
         let before = func
             .insts(best)
             .find(|other| readers.contains(other))
@@ -303,6 +468,16 @@ impl Job<'_> {
         let room = self.machine.allocatable(class).unwrap_or(0);
         self.pressure.is_tight(self.loops, id, class, room)
     }
+}
+
+/// Whether the backend works a value out again wherever it is read, which is a constant or the
+/// address of a symbol, so that holding it costs no register.
+fn remade(func: &Func, value: Value) -> bool {
+    let Def::Result { inst, .. } = func[value].def else { return false };
+    matches!(
+        func[inst].opcode,
+        Opcode::IConst | Opcode::FConst | Opcode::GlobalAddr | Opcode::BlockAddr
+    )
 }
 
 /// The result of an instruction that has exactly one.
@@ -577,6 +752,120 @@ block2:
         );
         assert_eq!(block_of(&out, "mul"), "block2", "{out}");
         assert_eq!(block_of(&out, "add"), "block1", "{out}");
+    }
+
+    /// A loop that reads `%0` and `wide` more arguments every time round, with `many` values worked
+    /// out from `%1` in front of it that only the return after it reads.
+    fn past(wide: usize, many: usize) -> String {
+        let params = vec!["i64"; wide + 2].join(", ");
+        let named: Vec<String> = (0..wide + 2).map(|n| format!("%{n}: i64")).collect();
+        let first = wide + 2;
+        let made: String = (0..many)
+            .map(|n| {
+                format!(
+                    "    %{} = iconst.i64 {}\n    %{} = mul %1, %{}\n",
+                    first + 2 * n,
+                    n + 3,
+                    first + 2 * n + 1,
+                    first + 2 * n
+                )
+            })
+            .collect();
+        let (zero, total) = (first + 2 * many, first + 2 * many + 1);
+        let body: String = (0..wide)
+            .map(|n| format!("    %{} = add %{}, %{}\n", total + n + 1, total + n, n + 2))
+            .collect();
+        let sum = total + wide;
+        let test = sum + 1;
+        let tail: String = (0..many)
+            .map(|n| {
+                format!(
+                    "    %{} = add %{}, %{}\n",
+                    test + n + 1,
+                    if n == 0 { sum } else { test + n },
+                    first + 2 * n + 1
+                )
+            })
+            .collect();
+        format!(
+            "
+func @f({params}) -> i64, linkage(external) {{
+block0({}):
+{made}    %{zero} = iconst.i64 0
+    jump block1(%{zero})
+
+block1(%{total}: i64):
+{body}    %{test} = icmp slt %{sum}, %0
+    br_if %{test}, block1(%{sum}), block2
+
+block2:
+{tail}    return %{}
+}}
+",
+            named.join(", "),
+            test + many
+        )
+    }
+
+    /// The blocks of every line holding `what`, in order.
+    fn blocks_of(out: &str, what: &str) -> Vec<String> {
+        let mut block = String::new();
+        let mut found = Vec::new();
+        for line in out.lines() {
+            let line = line.trim();
+            if line.starts_with("block") && line.ends_with(':') {
+                block = line.split(['(', ':']).next().unwrap_or_default().to_string();
+            } else if line.contains(what) {
+                found.push(block.clone());
+            }
+        }
+        found
+    }
+
+    #[test]
+    fn a_value_read_only_after_a_loop_with_room_moves_past_it() {
+        let out = moved(&past(1, 1));
+        assert_eq!(blocks_of(&out, "mul"), ["block2"], "{out}");
+    }
+
+    #[test]
+    fn a_value_read_only_after_a_full_loop_stays_in_front_of_it() {
+        // Fourteen arguments read every time round, the count and the total, which is a loop
+        // `licm` calls full. Moving the multiply saves nothing, since the block after the loop runs
+        // whenever the one in front does, and it holds `%1` across the loop in place of the
+        // product, which leaves the loop as full as it was (tamnd/rucc#2654).
+        let out = moved(&past(14, 1));
+        assert_eq!(blocks_of(&out, "mul"), ["block0"], "{out}");
+    }
+
+    #[test]
+    fn values_that_free_a_full_loop_together_move_past_it() {
+        // Eight products of `%1` held across a loop that reads five values of its own is a full
+        // loop. Moving all eight holds `%1` in their place, which leaves room, so they go, though
+        // no one of them would on its own.
+        let out = moved(&past(4, 8));
+        assert_eq!(blocks_of(&out, "mul"), vec!["block2"; 8], "{out}");
+    }
+
+    #[test]
+    fn values_that_cost_more_than_what_they_hold_move_past_a_full_loop() {
+        // Four products of `%1` held across a full loop, and moving them leaves it full. One value
+        // goes on the stack either way, and `%1` with its one write and four reads costs less there
+        // than the four products with a write and a read each, so they go.
+        let out = moved(&past(14, 4));
+        assert_eq!(blocks_of(&out, "mul"), vec!["block2"; 4], "{out}");
+    }
+
+    #[test]
+    fn values_that_hold_a_value_read_often_in_front_stay_in_front_of_a_full_loop() {
+        // The same four products, with eight calls in front of the loop that read `%1` as well.
+        // Moving the products would hold `%1` across the loop, and with its twelve reads it costs
+        // more on the stack than they do, so the allocator would keep it in a register and put a
+        // value the loop reads on the stack instead (tamnd/rucc#2654).
+        let calls = "    call @use(%1) : (i64)\n".repeat(8);
+        let body = past(14, 4).replacen("):\n", &format!("):\n{calls}"), 1);
+        let out = moved(&format!("{body}\nfunc @use(i64), linkage(external);\n"));
+        assert_eq!(blocks_of(&out, "mul"), vec!["block0"; 4], "{out}");
     }
 
     #[test]

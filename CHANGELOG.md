@@ -16,6 +16,7 @@ A patch release on the way to K2, the kernel's objects and link. The assembler n
 ### Added
 
 - The assembler writes `.debug_frame` when `.cfi_sections .debug_frame` asks for it, where it used to write no frame rules at all. The kernel's boot code under `arch/x86/boot` asks for exactly that, and the section now comes out byte for byte the same as gas's on both 64 bit and 16 bit code, with the same relocations.
+- `gcm` leaves a value read only after a loop in front of it when moving it past would leave the loop with no register to spare and would not pay for that, which is when the moves past the loop hold as many values across it as they free, or what they hold costs more to put on the stack, counted the way the allocator counts, than what they free. The 24 value dispatch loop of `interpreter-dispatch` in tamnd/rucc-corpus with 32 opcodes ran 7150 more instructions with `gcm` than without it and now runs the same, and the one with 8 opcodes keeps what `gcm` saves it (#2654).
 
 ### Fixed
 
