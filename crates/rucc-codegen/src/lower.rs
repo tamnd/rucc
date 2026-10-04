@@ -166,18 +166,15 @@ const X87_BYTES: u32 = 16;
 /// block with more of them than this has nowhere to put the ninth.
 const X87_DEPTH: usize = 8;
 
-/// How far into the buffer of a `__builtin_setjmp` each of the four words it writes is.
+/// How far into the buffer of a `__builtin_setjmp` each of the three words it writes is.
 ///
-/// The first three are gcc's, measured against gcc 16.2.0 on x86-64 at `-O0`: the frame pointer,
-/// the address control comes back to, and the stack pointer, in that order. The fourth is this
-/// compiler's own. gcc has no word for the answer because it writes a second block that sets the
-/// answer to one and is arrived at from the restore, and this writes the answer through memory
-/// instead, for the reason [`Lowering::saves_place`] gives.
-///
-/// None of the four is an interface. The buffer is the program's memory and its five words are
-/// the front end's promise about how much of it there is, but nothing except the matching restore
-/// ever reads a word of it, and a buffer written by one compiler was never going to be one another
-/// compiler could come back through.
+/// They are gcc's, measured against gcc 16.2.0 on x86-64 at `-O0`: the frame pointer, the address
+/// control comes back to, and the stack pointer, in that order, and nothing else is written or
+/// read. The three are an interface. Postgres on MinGW-w64 defines `sigsetjmp` as
+/// `__builtin_setjmp`, so an extension built by one compiler saves a place that a server built by
+/// another comes back to, and the other way round. A fourth word of this compiler's own, which it
+/// had once, crashed the gcc built server on every error raised inside a `PG_TRY` of a module
+/// rucc built, and hung the rucc built one the other way round.
 const JUMP_FRAME: i32 = 0;
 
 /// Where the address control comes back to is. See [`JUMP_FRAME`].
@@ -186,18 +183,15 @@ const JUMP_PC: i32 = 8;
 /// Where the stack pointer is. See [`JUMP_FRAME`].
 const JUMP_STACK: i32 = 16;
 
-/// Where the address of the word the answer arrives in is. See [`JUMP_FRAME`].
-const JUMP_ANSWER: i32 = 24;
-
 /// How many bytes the word a `__builtin_setjmp` answers with takes in the frame, and what it is
 /// aligned to, which are the same number because it is one machine word.
 const JUMP_WORD: u32 = 8;
 
 /// How many registers the restore needs to hold things in while it puts the frame back.
 ///
-/// Four, and every one of them is a register nothing else in the function may be in, which is why
+/// Three, and every one of them is a register nothing else in the function may be in, which is why
 /// they are counted here rather than asked for one at a time. See [`Lowering::comes_back`].
-const JUMP_REGS: usize = 4;
+const JUMP_REGS: usize = 3;
 
 /// How many bytes the block `__builtin_apply_args` answers takes, which is a word for where the
 /// arguments in memory are, a word of nothing and then the register save area of a variadic
@@ -4019,8 +4013,7 @@ impl<'a> Lowering<'a> {
     /// `__builtin_setjmp`, which writes down where the function is so that a `__builtin_longjmp`
     /// somewhere else can bring control back here, and answers zero on the way past.
     ///
-    /// Four words of the buffer, the three gcc writes and one of this compiler's own, and then the
-    /// block ends: everything after the save in the IR block is put into a new machine IR block,
+    /// The three words of the buffer gcc writes, and then the block ends: everything after the save in the IR block is put into a new machine IR block,
     /// and the address of that block is what went into the buffer. That is the whole reason the
     /// block is split here. An address points at a label, a machine IR block is the only thing in
     /// this representation that has one, and a save is in the middle of a block rather than at the
@@ -4028,18 +4021,19 @@ impl<'a> Lowering<'a> {
     ///
     /// # How the answer gets back
     ///
-    /// Through the frame rather than through a register. The save writes a zero into a word of its
-    /// own frame, puts the address of that word in the buffer, and the new block reads the word
-    /// back. The restore writes a one through the address it finds in the buffer before it goes.
-    /// So one load answers zero on the way past and one on the way back, and neither path has to
-    /// agree with the other about a register.
+    /// Through the frame rather than through a register, and without the restore's help. The save
+    /// writes a zero into a word of its own frame, and the new block reads the word back and then
+    /// writes a one into it. Control passes the save once each time it runs, and the zero is
+    /// written just before, so the first arrival in the new block reads zero and every later one
+    /// is a restore and reads one. The restore writes nothing, which is what lets it be gcc's
+    /// restore, or this compiler's restore coming back to a place gcc saved.
     ///
-    /// gcc does it the other way round, with a second block that sets the answer to one and is
-    /// what the restore arrives at. That block is one nothing in the function jumps to, and a
-    /// machine IR whose blocks are walked from the entry has nowhere to put such a thing: the
-    /// allocator lays a function out in the line it is going to be emitted in, and a block no edge
-    /// reaches is not in that line. The word in the frame costs eight bytes of stack and one load,
-    /// and it needs nothing said anywhere about a block arrived at from outside.
+    /// gcc does it another way, with a second block that sets the answer to one and is what the
+    /// restore arrives at. That block is one nothing in the function jumps to, and a machine IR
+    /// whose blocks are walked from the entry has nowhere to put such a thing: the allocator lays a
+    /// function out in the line it is going to be emitted in, and a block no edge reaches is not in
+    /// that line. The word in the frame costs eight bytes of stack, a load and a store, and it
+    /// needs nothing said anywhere about a block arrived at from outside.
     ///
     /// # What the allocator is told
     ///
@@ -4077,10 +4071,8 @@ impl<'a> Lowering<'a> {
         let made = self.out.build(at, store).at(span).uses(zero, gpr).mem(mem).finish();
         self.stack.addresses.push((made, answer));
 
-        // The four words: where that word is, where control comes back to, and the two registers
-        // the restore puts back.
-        let found = self.frame_address(at, answer);
-        self.write_word(at, span, store, found, buf, JUMP_ANSWER);
+        // The three words: where control comes back to, and the two registers the restore puts
+        // back.
         let pc = self.out.new_vreg(gpr);
         let mem = self.counted_from_table(mir::Mem::block(back));
         self.out.build(at, lea).at(span).def(pc, gpr).mem(mem).finish();
@@ -4106,6 +4098,13 @@ impl<'a> Lowering<'a> {
         let mem = self.frame_mem();
         let made = self.out.build(back, load).at(span).def(reg, gpr).mem(mem).finish();
         self.stack.addresses.push((made, answer));
+
+        // And the one the next arrival reads, which can only be a restore.
+        let one = self.out.new_vreg(gpr);
+        self.out.build(back, put).at(span).def(one, gpr).imm(1).finish();
+        let mem = self.frame_mem();
+        let made = self.out.build(back, store).at(span).uses(one, gpr).mem(mem).finish();
+        self.stack.addresses.push((made, answer));
         Ok(())
     }
 
@@ -4119,9 +4118,10 @@ impl<'a> Lowering<'a> {
     /// register named outright is a register nothing reloads into and nothing else is in, which is
     /// the only way to hold something across that moment.
     ///
-    /// Four of them because that is how many things are in the air at once: where to go, the frame
-    /// pointer to put back, the one the matching save is to answer with, and one register used
-    /// twice, first for the address that one is written through and then for the stack pointer.
+    /// Three of them because that is how many things are in the air at once: where to go, and the
+    /// frame pointer and the stack pointer to put back. Nothing is written through the buffer or
+    /// into the frame control comes back to, because the save may have been gcc's, which keeps
+    /// nothing there to write to. See [`Lowering::saves_place`].
     ///
     /// Nothing after this in the block is reached. The marker is not a terminator, for the reason
     /// `spec/08-ir.md` gives, so the block goes on and whatever the front end wrote after it is
@@ -4135,9 +4135,7 @@ impl<'a> Lowering<'a> {
         let gpr = self.gpr;
         let moves = self.selector.frame.moves(gpr).expect("a class the target says how to move");
         let load = self.named(moves.load);
-        let store = self.named(moves.store);
         let mov = self.named(moves.mov);
-        let put = self.named(self.selector.frame.imm);
         let jump = self.named(self.selector.branch.indirect);
 
         let held = self.jump_regs();
@@ -4147,20 +4145,11 @@ impl<'a> Lowering<'a> {
         let pc = mir::Reg::physical(held[0]);
         let frame = mir::Reg::physical(held[1]);
         let spare = mir::Reg::physical(held[2]);
-        let one = mir::Reg::physical(held[3]);
 
         self.read_word(at, span, load, pc, buf, JUMP_PC);
         self.read_word(at, span, load, frame, buf, JUMP_FRAME);
-        self.read_word(at, span, load, spare, buf, JUMP_ANSWER);
 
-        // What the matching save answers with, written through the address that came out of the
-        // buffer, because the word it goes in is in the other function's frame and this one has no
-        // way of knowing where that is.
-        self.out.build(at, put).at(span).def(one, gpr).imm(1).finish();
-        let mem = mir::Mem::at(mir::Operand::read(spare, gpr));
-        self.out.build(at, store).at(span).uses(one, gpr).mem(mem).finish();
-
-        // The stack last of the four, so that the register the buffer is reached through is done
+        // The stack last of the three, so that the register the buffer is reached through is done
         // with before the stack it may have been spilled to stops being this function's.
         self.read_word(at, span, load, spare, buf, JUMP_STACK);
         let stack = mir::Reg::physical(self.conv.stack_pointer);

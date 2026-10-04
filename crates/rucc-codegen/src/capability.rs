@@ -177,11 +177,11 @@ pub static HAND: &[(Opcode, &str)] = &[
     // first of them ends the block it was written in, which no rule can do.
     (
         Opcode::SetjmpMarker,
-        "`crate::lower`, as the four words it writes and the block the restore comes back to",
+        "`crate::lower`, as the three words it writes and the block the restore comes back to",
     ),
     (
         Opcode::LongjmpMarker,
-        "`crate::lower`, as the four words read back, the frame put back and the jump",
+        "`crate::lower`, as the three words read back, the frame put back and the jump",
     ),
     // The pair that sends an unwind to a landing pad. The first is no instruction at all: the
     // edge it names is written into the call site table rather than into the code, which is what
