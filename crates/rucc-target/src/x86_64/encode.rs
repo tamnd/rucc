@@ -5166,7 +5166,7 @@ pub fn nops_in(mode: Mode, count: usize, out: &mut Vec<u8>) {
 /// What gas 2.42 pads code of the given mode with in an object for i386, as against [`nops`],
 /// which is what it pads code of either mode with in an object for x86-64.
 ///
-/// Thirty two bit code gets [`NOPS_32`], and sixty four bit code gets [`NOPS_32_IN_64`], which is
+/// Thirty two bit code gets `NOPS_32`, and sixty four bit code gets `NOPS_32_IN_64`, which is
 /// jumped over the same way once a run is three of the longest.
 pub fn nops_i386(mode: Mode, count: usize, out: &mut Vec<u8>) {
     match mode {
