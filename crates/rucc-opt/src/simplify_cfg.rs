@@ -447,6 +447,15 @@ pub(crate) fn taken(func: &Func, term: Inst, subst: &Bindings) -> Option<BlockCa
             if let Some(call) = one_place(func, &func[targets]) {
                 return Some(call);
             }
+            // The first target is the one taken when the condition is one, which is what
+            // `Builder::br_if` writes and what the printer reads back. A known condition goes
+            // first, even when the arm it picks is a dead end. `do { BUG(); } while (0);` ends
+            // its body in an asm and `__builtin_unreachable()` in 6.1, and the test after it is
+            // a zero whose false arm is the dead end. Taking the other arm there made the body
+            // a loop, a `jmp` back to the `ud2` that objtool reports as unreachable.
+            if let Some(bit) = known(func, arg, subst) {
+                return func[targets].get(usize::from(!bit)).copied();
+            }
             // An arm that goes where control never arrives is an arm the program promised is
             // never taken, which is how `if (x) __builtin_unreachable();` says what `x` is.
             if let [then, otherwise] = func[targets] {
@@ -456,10 +465,7 @@ pub(crate) fn taken(func: &Func, term: Inst, subst: &Bindings) -> Option<BlockCa
                     _ => {}
                 }
             }
-            // The first target is the one taken when the condition is one, which is what
-            // `Builder::br_if` writes and what the printer reads back.
-            let arm = usize::from(!known(func, arg, subst)?);
-            func[targets].get(arm).copied()
+            None
         }
         Opcode::Switch => {
             let Extra::Switch(at) = data.extra else { return None };
@@ -1434,6 +1440,42 @@ block5:
             .count();
         assert_eq!(calls, 0, "{}", rucc_ir::print(&module, &names));
         assert!(stats.count(Kind::Optimized, super::FOLDED) >= 1);
+    }
+
+    #[test]
+    fn a_known_condition_wins_over_an_arm_that_is_a_dead_end() {
+        // `do { asm("ud2"); } while (0); __builtin_unreachable();` with the hint already cut to
+        // a block of its own. The test is a zero, so it leaves the loop for the dead end, and
+        // reading the dead end as the arm never taken would make the body jump to itself.
+        let text = "\
+; ModuleID = 't.c'
+; format 0
+target triple = \"x86_64-unknown-linux-gnu\"
+target datalayout = \"e-p:64:64-i64:64-f80:128-S128\"
+
+func @f() {
+block0:
+    jump block1
+block1:
+    inline_asm.volatile.nomem \"ud2\", \"\", \"\"()
+    %0 = iconst.i1 0
+    br_if %0, block1, block2
+block2:
+    unreachable
+}
+";
+        let mut names = Interner::new();
+        let mut module = rucc_ir::parse(text, &mut names).expect("the fixture parses");
+        let id = module.funcs().last().expect("there is a function");
+        simplify(&mut module[id]);
+        let func = &module[id];
+        let printed = rucc_ir::print(&module, &names);
+        let looped = func.blocks().any(|block| {
+            func.terminator(block)
+                .is_some_and(|term| func.successors(term).any(|to| to.block == block))
+        });
+        assert!(!looped, "{printed}");
+        assert!(printed.contains("unreachable"), "{printed}");
     }
 
     #[test]
