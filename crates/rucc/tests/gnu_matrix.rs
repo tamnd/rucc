@@ -470,7 +470,8 @@ void k(void) { int l __attribute__((tls_model(\"initial-exec\"))); (void)l; }
     assert_eq!(count(arity), 2, "{said}");
     assert_eq!(count("expected 1, found 0"), 1, "{said}");
     assert_eq!(count("expected 1, found 2"), 1, "{said}");
-    let ignored = |why: &str| count(&format!("warning: 'tls_model' attribute ignored because {why}"));
+    let ignored =
+        |why: &str| count(&format!("warning: 'tls_model' attribute ignored because {why}"));
     assert_eq!(ignored("'b' does not have thread storage duration"), 1, "{said}");
     assert_eq!(ignored("'b2' does not have thread storage duration"), 1, "{said}");
     assert_eq!(ignored("'l' does not have thread storage duration"), 1, "{said}");
@@ -497,7 +498,7 @@ _Static_assert(__has_attribute(tls_model), \"tls_model\");
     assert!(out.status.success(), "{said}");
     assert_eq!(said, "");
     let text = String::from_utf8_lossy(&out.stdout);
-    assert!(text.contains("h@gottpoff(%rip)"), "{text}");
+    assert!(text.contains("h@GOTTPOFF(%rip)"), "{text}");
     assert!(!text.contains("__tls_get_addr"), "{text}");
 }
 

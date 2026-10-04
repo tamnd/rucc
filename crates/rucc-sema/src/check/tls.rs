@@ -45,8 +45,9 @@ impl Checker<'_> {
         name: Option<Symbol>,
         holder: Holder,
     ) {
+        let ast = self.ast;
         for &list in lists {
-            for attr in self.ast[list].to_vec() {
+            for &attr in &ast[list] {
                 if attr.namespace.is_some_and(|ns| self.text(ns) != "gnu")
                     || rucc_gnu::unarmour(self.text(attr.name)) != "tls_model"
                 {
@@ -79,7 +80,9 @@ impl Checker<'_> {
                         match self.tast[checked].kind {
                             ExprKind::Str(id) if self.tast[id].encoding == Encoding::Plain => {
                                 let units = &self.tast[id].elements;
-                                Some(units.iter().filter_map(|&unit| char::from_u32(unit)).collect())
+                                Some(
+                                    units.iter().filter_map(|&unit| char::from_u32(unit)).collect(),
+                                )
                             }
                             _ => None,
                         }
