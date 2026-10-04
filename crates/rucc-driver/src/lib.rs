@@ -2167,6 +2167,9 @@ pub fn parse_args(args: &[String]) -> Result<Action, CliError> {
             // half that is built.
             "-fipa-sra" => opts.passes.push((rucc_opt::ipasra::NAME.to_owned(), true)),
             "-fno-ipa-sra" => opts.passes.push((rucc_opt::ipasra::NAME.to_owned(), false)),
+            // Which functions never come back, which gcc keeps in its pure and const discovery.
+            "-fipa-pure-const" => opts.passes.push((rucc_opt::noreturn::NAME.to_owned(), true)),
+            "-fno-ipa-pure-const" => opts.passes.push((rucc_opt::noreturn::NAME.to_owned(), false)),
             // The range every caller passes, which is a module at a time for the same reason.
             "-fipa-vrp" => opts.passes.push((rucc_opt::ipvrp::NAME.to_owned(), true)),
             "-fno-ipa-vrp" => opts.passes.push((rucc_opt::ipvrp::NAME.to_owned(), false)),
