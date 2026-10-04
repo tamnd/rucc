@@ -114,6 +114,14 @@
 //! does anything else. The vector saves go at the top of such a frame rather than the bottom,
 //! since the body's view of the frame moves down by up to the alignment and must not reach them.
 //! This was `tamnd/rucc#1422`.
+//!
+//! A frame that saves nothing besides the pointer and does not realign takes the early order on
+//! Windows after all, which is what gcc does there. The record can say that one: the push, then the
+//! pointer set to the stack pointer with nothing in between, and that is the place it counts from.
+//! The frame taken afterwards needs no code, since the runtime puts the stack pointer back from the
+//! pointer before it pops anything. Keeping the early order where it can keeps the chain of saved
+//! frame pointers whole, which is what `__builtin_frame_address` and `__builtin_return_address`
+//! walk above depth zero. This was `tamnd/rucc#2144`.
 
 use rucc_mir::{Constraint, Func};
 use rucc_regalloc::Allocation;
@@ -498,9 +506,12 @@ impl Frame {
             || realign.is_some()
             || layout.grows
             || (!layout.leaf && conv.link.is_some());
-        // Where in the prologue the pointer is established, which is the platform's answer. See
-        // `Late` above.
-        let late = conv.late_frame_pointer;
+        // Where in the prologue the pointer is established, which is the platform's answer when the
+        // frame saves anything besides the pointer itself, and the early order when it does not,
+        // since then there is nothing below the pointer the record would have to count. See `Late`
+        // above.
+        let late = conv.late_frame_pointer
+            && (realign.is_some() || !saved_int.is_empty() || !vectors.is_empty());
 
         // Where the stack pointer sits once the prologue has finished pushing: one return address
         // short of aligned when the function starts, and one push further off for every push. The
@@ -1381,16 +1392,18 @@ mod tests {
 
     #[test]
     fn a_windows_frame_pointer_is_established_after_the_frame_rather_than_before_it() {
-        let (func, allocation) = pressure(&WIN64, 4, 2);
+        let (func, allocation) = pressure(&WIN64, 9, 8);
         let base = Layout::new(&WIN64, REGS);
         let kept = Frame::of(&func, &allocation, &Layout { frame_pointer: true, ..base });
         let dropped = Frame::of(&func, &allocation, &base);
 
-        // The unwind record that platform reads cannot describe the other order, so the prologue
-        // pushes, takes the frame and only then points the pointer at it. What that buys is that
+        // The unwind record that platform reads cannot describe the other order once something is
+        // saved besides the pointer, so the prologue pushes, takes the frame and only then points
+        // the pointer at it. What that buys is that
         // the pointer holds what the stack pointer holds, so a frame with one and a frame without
         // one are the same frame with the same numbers in it.
         assert!(kept.frame_pointer());
+        assert!(!kept.saved_int().is_empty());
         assert!(kept.late());
         assert!(!dropped.frame_pointer());
         assert_eq!(kept.size(), dropped.size());
@@ -1399,8 +1412,25 @@ mod tests {
     }
 
     #[test]
-    fn a_windows_frame_that_grows_keeps_the_numbers_it_had_and_changes_the_register() {
+    fn a_windows_frame_that_saves_only_the_pointer_establishes_it_before_the_frame() {
         let (func, allocation) = pressure(&WIN64, 4, 2);
+        let base = Layout::new(&WIN64, REGS);
+        let there = Layout { leaf: false, frame_pointer: true, ..base };
+        let kept = Frame::of(&func, &allocation, &there);
+        let grown = Frame::of(&func, &allocation, &Layout { grows: true, ..there });
+
+        // With nothing pushed below the pointer the record can describe the early order, which is
+        // what gcc writes here and what keeps the chain of saved frame pointers whole. A frame that
+        // grows then counts from the pointer the way it does everywhere else, from the caller's
+        // stack two words above it.
+        assert!(kept.saved_int().is_empty());
+        assert!(!kept.late() && !grown.late());
+        assert_eq!(grown.incoming(), Incoming::from_frame(16));
+    }
+
+    #[test]
+    fn a_windows_frame_that_grows_keeps_the_numbers_it_had_and_changes_the_register() {
+        let (func, allocation) = pressure(&WIN64, 9, 8);
         let base = Layout::new(&WIN64, REGS);
         let there = Layout { leaf: false, frame_pointer: true, ..base };
         let still = Frame::of(&func, &allocation, &there);

@@ -204,3 +204,34 @@ fn a_call_to_a_function_that_does_not_return_is_not_the_last_instruction() {
     let _ = std::fs::remove_dir_all(&dir);
     assert!(text.contains("\tcall\tstop\n\tud2\n"), "{text}");
 }
+
+/// A function that saves nothing besides the frame pointer points it at where it pushed it before
+/// it takes the frame, as gcc does, so the saved frame pointers make the chain that
+/// `__builtin_return_address` walks above depth zero. The record says the frame register is where
+/// the push left the stack pointer, at no distance, and the listing says the same in gcc's words
+/// and assembles to the same record. tamnd/rucc#2144.
+#[test]
+fn a_frame_that_saves_only_the_pointer_points_it_before_taking_the_frame() {
+    let source =
+        "void more(void);\nvoid *up(void) { more(); return __builtin_return_address(1); }\n";
+    for opt in ["-O0", "-O2"] {
+        let dir = dir(&format!("chain{opt}"));
+        let c = dir.join("one.c");
+        std::fs::write(&c, source).expect("the fixture can be written");
+        let listing = compile(&c, &[opt, "-S"]);
+        let direct = Coff { bytes: compile(&c, &[opt, "-c"]) };
+        let s = dir.join("one.s");
+        std::fs::write(&s, &listing).expect("the listing can be written");
+        let read = Coff { bytes: compile(&s, &["-c"]) };
+        let _ = std::fs::remove_dir_all(&dir);
+        let text = String::from_utf8(listing).expect("a listing is text");
+        let early =
+            "\tpushq\t%rbp\n\t.seh_pushreg\t%rbp\n\tmovq\t%rsp, %rbp\n\t.seh_setframe\t%rbp, 0\n";
+        assert!(text.contains(early), "{opt}:\n{text}");
+        // The version and the prologue's length, then two codes, then the frame register in the low
+        // four bits with nothing above them for the distance.
+        let xdata = direct.section(".xdata").expect("a direct object has descriptions");
+        assert_eq!(read.section(".xdata"), Some(xdata), "{opt}");
+        assert_eq!((xdata[2], xdata[3]), (2, 5), "{opt}:\n{text}");
+    }
+}

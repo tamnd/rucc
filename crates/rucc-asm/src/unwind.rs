@@ -1030,14 +1030,29 @@ pub(crate) fn prologue(
             {
                 steps.push((at, Step::Frame));
             }
-            // The other order, which is the pointer established before the frame is taken. What
-            // cannot be said is not the pointer itself but what this compiler does after
-            // establishing it: the registers it saves next sit below the place the codes would count
-            // from, and the frame it takes afterwards has no row at all, since from there on the
-            // rules are counted from the pointer and the stack pointer moving no longer changes
-            // them. A record without the frame in it is a record that unwinds to the wrong place, so
-            // it is refused instead. Nothing this compiler writes for Windows arrives here any more,
-            // since a realigned frame takes the late order too, so this is the backstop.
+            // The other order, which is the pointer established before the frame is taken, in the
+            // one shape a record can say: the pointer pushed, then pointed at where it was pushed,
+            // and nothing after that the rows would describe. The pointer is then the stack pointer
+            // as the push left it, so it is the place the codes count from, at no distance at all.
+            // The frame taken afterwards has no row and needs no code, since the runtime sets the
+            // stack pointer back from the pointer before it undoes the push. This is the frame of a
+            // function that saves nothing else, which keeps the chain of frame pointers whole.
+            [(_, CfiOp::DefCfaRegister(reg))]
+                if Some(*reg) == pointer
+                    && rest.is_empty()
+                    && below == 2 * word
+                    && matches!(steps[..], [(_, Step::Push(pushed))] if Some(pushed) == pointer) =>
+            {
+                steps.push((at, Step::Frame));
+            }
+            // Anything else in that order. What cannot be said is not the pointer itself but what
+            // this compiler does after establishing it: the registers it saves next sit below the
+            // place the codes would count from, and the frame it takes afterwards has no row at
+            // all, since from there on the rules are counted from the pointer and the stack pointer
+            // moving no longer changes them. A record without the frame in it is a record that
+            // unwinds to the wrong place, so it is refused instead. Nothing this compiler writes
+            // for Windows arrives here, since a frame that saves more takes the late order, so this
+            // is the backstop.
             [(_, CfiOp::DefCfaRegister(_))] => {
                 let why = "a frame pointer established before the frame is taken";
                 return Err(frame(func, why.to_owned()));
@@ -1412,8 +1427,25 @@ mod tests {
         assert_eq!(info(rows), want.concat());
     }
 
-    /// The other order, which is refused rather than described. What cannot be said is not the
-    /// pointer but the frame taken after it, which has no row and would come out as a record that
+    /// The other order, in the one shape the record can say, which is the pointer pushed and then
+    /// pointed at where it was pushed with nothing after it. The frame taken afterwards has no row
+    /// and needs no code, since the runtime sets the stack pointer back from the pointer before it
+    /// undoes the push. This is what gcc writes for a function that saves nothing else.
+    #[test]
+    fn a_frame_pointer_pointed_at_its_own_push_is_a_register_at_no_distance() {
+        let rows = vec![
+            (1, CfiOp::DefCfaOffset(16)),
+            (1, CfiOp::Offset { reg: RBP, offset: -16 }),
+            (4, CfiOp::DefCfaRegister(RBP)),
+            (4, CfiOp::RememberState),
+        ];
+        let want = [vec![1, 4, 2, 5], vec![4, SET_FPREG], vec![1, PUSH_NONVOL | (5 << 4)]];
+        assert_eq!(info(rows), want.concat());
+    }
+
+    /// Anything else in that order is refused rather than described. What cannot be said is not
+    /// the pointer but a register saved after it, which sits below the place the record counts
+    /// from, and the frame taken after that, which has no row and would come out as a record that
     /// unwinds to the wrong place.
     #[test]
     fn a_prologue_this_cannot_describe_is_refused_by_name() {
@@ -1421,7 +1453,8 @@ mod tests {
             (1, CfiOp::DefCfaOffset(16)),
             (1, CfiOp::Offset { reg: RBP, offset: -16 }),
             (4, CfiOp::DefCfaRegister(RBP)),
-            (4, CfiOp::RememberState),
+            (5, CfiOp::Offset { reg: RBX, offset: -24 }),
+            (5, CfiOp::RememberState),
         ];
         let why = refused(pointer);
         assert!(why.contains("'f'"), "{why}");

@@ -466,9 +466,11 @@ pub struct CallRegs {
     ///
     /// What it costs is the chain: the frame pointer holds a copy of the body's stack pointer
     /// rather than the address of the caller's copy of itself, so the words that used to lead from
-    /// one frame to the next no longer do. Nothing on this platform walks that chain. Unwinding
-    /// reads the table, there is no profiler's hook that reads the pointer, and gcc gives the chain
-    /// up on the same functions for the same reason.
+    /// one frame to the next no longer do. Unwinding reads the table rather than the chain, and gcc
+    /// gives the chain up on the same functions for the same reason. A frame that saves nothing
+    /// besides the pointer and does not force an alignment keeps the early order even here, as it
+    /// does with gcc, since the record can say that one, and that is the frame the chain is walked
+    /// through by `__builtin_return_address` above depth zero.
     pub late_frame_pointer: bool,
     /// Whether every prologue has to be one the ARM64 Windows unwind codes can describe.
     ///
