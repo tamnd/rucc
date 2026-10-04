@@ -117,6 +117,9 @@ pub struct LinkOptions {
     /// and `/usr/<multiarch>/lib`, and gcc's own files for that target under
     /// `/usr/lib/gcc-cross/<multiarch>`. [`distro_cross`] reads it. A field for the reason
     /// [`LinkOptions::cache`] is one, and [`None`] in a test is a machine with no such packages.
+    ///
+    /// On Windows it is the tree the `gcc.exe` on the path is in, which is MSYS2's `/ucrt64` and
+    /// has gcc's files under `lib/gcc` the way `/usr` does. See [`usr`].
     pub usr: Option<PathBuf>,
     /// `-static`.
     pub is_static: bool,
@@ -607,6 +610,41 @@ fn mingw_gcc(target: Triple, opts: &LinkOptions, sysroot: &Sysroot) -> Option<Pa
     newest_first(&dir).into_iter().next()
 }
 
+/// Where this machine keeps its packages, which is `/usr` everywhere but Windows.
+///
+/// Windows has no such place, and what [`LinkOptions::usr`] is read for there is the mingw-w64 gcc,
+/// so it is the parent of the first directory on the path with a `gcc.exe` in it. `/usr` when
+/// there is none, which names nothing on Windows and so finds nothing.
+#[must_use]
+pub fn usr() -> PathBuf {
+    let usr = PathBuf::from("/usr");
+    if !cfg!(windows) {
+        return usr;
+    }
+    let Some(path) = std::env::var_os("PATH") else { return usr };
+    std::env::split_paths(&path)
+        .find(|dir| dir.join("gcc.exe").is_file())
+        .and_then(|dir| dir.parent().map(Path::to_path_buf))
+        .unwrap_or(usr)
+}
+
+/// gcc's `libgcc.a` for a mingw-w64 target, for the decimal floating point routines.
+///
+/// The named tree's own when it has a gcc in it, and otherwise the one a distribution's mingw-w64
+/// gcc installed under `<usr>/lib/gcc/<arch>-w64-mingw32/<version>`, which is the same archive a
+/// gcc for the target on this machine would link. Debian names those versions `13-posix` and `13-win32`
+/// and the two hold the same `libgcc.a`. Nothing when there is no gcc for the target anywhere.
+fn mingw_libgcc(target: Triple, opts: &LinkOptions, gcc: Option<&Path>) -> Option<PathBuf> {
+    if target.os != Os::Windows || target.env != Env::Gnu {
+        return None;
+    }
+    let host = opts.usr.as_deref().map(|usr| {
+        newest_first(&usr.join("lib/gcc").join(format!("{}-w64-mingw32", target.arch.as_str())))
+    });
+    let dirs = gcc.map(Path::to_path_buf).into_iter().chain(host.into_iter().flatten());
+    dirs.map(|dir| dir.join("libgcc.a")).find(|path| path.is_file())
+}
+
 /// A tree a distribution's cross packages installed for a Linux target that is not this machine.
 ///
 /// What `apt install gcc-aarch64-linux-gnu` leaves behind: the C library's headers and files under
@@ -776,6 +814,7 @@ fn cross_line(
         });
     }
     let gcc = mingw_gcc(target, opts, sysroot);
+    let libgcc = mingw_libgcc(target, opts, gcc.as_deref());
     let invocation = argv::Invocation {
         inputs: &inputs,
         output: Some(&output),
@@ -791,6 +830,7 @@ fn cross_line(
         unicode: opts.unicode,
         crt: opts.crt,
         gcc: gcc.as_deref(),
+        libgcc: libgcc.as_deref(),
     };
     argv::argv(target.tuple(), sysroot, &invocation)
         .map_err(|why| Error::Cross { why: why.to_string() })
@@ -3228,7 +3268,8 @@ mod tests {
         assert!(at("a.o") < at(&shown(lib.join("libmingw32.a"))), "{args:?}");
         assert!(args.contains(&shown(lib.join("libmsvcrt.a"))), "{args:?}");
         assert_eq!(args.last(), Some(&shown(newest.join("crtend.o"))), "{args:?}");
-        assert!(args[args.len() - 2].ends_with("librucc_builtins.a"), "{args:?}");
+        assert_eq!(args[args.len() - 2], shown(newest.join("libgcc.a")), "{args:?}");
+        assert!(args[args.len() - 3].ends_with("librucc_builtins.a"), "{args:?}");
         // GNU ld reads the import libraries MSYS2 built for it, so it is looked for as well.
         assert!(order(target, &opts).contains(&"x86_64-w64-mingw32-ld".to_owned()));
         assert_eq!(search_dirs(&opts, target), [lib.clone(), newest]);
@@ -3245,5 +3286,27 @@ mod tests {
         assert!(!fetched.iter().any(|arg| arg.contains("crtbegin")), "{fetched:?}");
         assert!(!fetched.iter().any(|arg| arg.starts_with(&shown(tree.clone()))), "{fetched:?}");
         let _ = fs::remove_dir_all(&tree);
+    }
+
+    #[test]
+    fn a_fetched_mingw_tree_takes_libgcc_from_the_mingw_gcc_on_this_machine() {
+        // What Debian's gcc-mingw-w64 leaves under /usr, two thread models of one version. The
+        // fetched tree has no gcc in it, and this is where the decimal routines come from then.
+        // tamnd/rucc#2145.
+        let usr = std::env::temp_dir().join(format!("rucc-link-mingw-usr-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&usr);
+        let gcc = usr.join("lib/gcc/x86_64-w64-mingw32");
+        for version in ["13-posix", "13-win32"] {
+            fs::create_dir_all(gcc.join(version)).expect("a scratch gcc");
+            fs::write(gcc.join(version).join("libgcc.a"), b"").expect("a file of gcc's");
+        }
+        let target = Triple::new(Arch::X86_64, Os::Windows, Env::Gnu);
+        let opts = LinkOptions { usr: Some(usr.clone()), ..cached() };
+        let libgcc = mingw_libgcc(target, &opts, None).expect("the host's mingw-w64 gcc");
+        assert!(libgcc.starts_with(&gcc) && libgcc.ends_with("libgcc.a"), "{libgcc:?}");
+        // A machine with no mingw-w64 gcc has none to give, and a Linux target never asks.
+        assert!(mingw_libgcc(target, &cached(), None).is_none());
+        assert!(mingw_libgcc(linux(), &opts, None).is_none());
+        let _ = fs::remove_dir_all(&usr);
     }
 }

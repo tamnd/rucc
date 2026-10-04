@@ -672,9 +672,11 @@ pub struct TargetInfo {
     pub has_float128: bool,
     /// Whether the target has `_Decimal32`, `_Decimal64` and `_Decimal128`.
     ///
-    /// Only x86-64 Linux today. gcc has the three types on more rows than that, but a decimal is
-    /// a call into libgcc for everything but a move, and the only encoding the back end names
-    /// routines for is the binary integer one x86 uses. PowerPC and s390x use the densely packed
+    /// Only x86-64 Linux and x86-64 mingw-w64 today. gcc has the three types on more rows than
+    /// that, but a decimal is a call into libgcc for everything but a move, and the only encoding
+    /// the back end names routines for is the binary integer one x86 uses. mingw-w64 gcc uses the
+    /// same encoding and the same routines, and passes the two narrow types in general purpose
+    /// registers. Microsoft's compiler has no decimal types, so the msvc row does not either. PowerPC and s390x use the densely packed
     /// encoding and are a different set of routines, and the other rows are untested, so a
     /// program that writes one there is told the type is not available rather than handed code
     /// nobody has run.
@@ -1090,8 +1092,9 @@ impl TargetInfo {
             has_float16: has_float16(target),
             has_float128: has_float128(target),
             has_decimal_float: matches!(
-                (target.arch(), target.os()),
-                (tuple::Arch::X86_64, tuple::Os::Linux)
+                (target.arch(), target.os(), target.env()),
+                (tuple::Arch::X86_64, tuple::Os::Linux, _)
+                    | (tuple::Arch::X86_64, tuple::Os::Windows, tuple::Env::Gnu)
             ),
             wchar_width: bits(layout.wchar_size),
             wchar_is_signed: layout.wchar_is_signed,
@@ -1660,9 +1663,10 @@ mod tests {
     }
 
     #[test]
-    fn the_decimal_types_are_on_the_one_row_the_back_end_calls_routines_for() {
+    fn the_decimal_types_are_on_the_rows_the_back_end_calls_routines_for() {
         let of = |tuple: &str| TargetInfo::for_tuple(tuple.parse().expect("a row in the table"));
         assert!(of("x86_64-linux-gnu").has_decimal_float);
+        assert!(of("x86_64-pc-windows-gnu").has_decimal_float);
         for tuple in ["aarch64-linux-gnu", "x86_64-pc-windows-msvc", "aarch64-apple-darwin"] {
             assert!(!of(tuple).has_decimal_float, "{tuple}");
         }

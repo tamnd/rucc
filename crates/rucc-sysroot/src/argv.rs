@@ -132,6 +132,14 @@ pub struct Invocation<'a> {
     /// one beside them. [`LinkLine::mingw`] leaves both files off a fetched tree, which has no gcc
     /// in it, and nothing on any other target reads this. tamnd/rucc#2573.
     pub gcc: Option<&'a Path>,
+    /// gcc's `libgcc.a` for the target, which goes on after ours.
+    ///
+    /// For what we have not written, which on a mingw-w64 target is the decimal floating point
+    /// arithmetic, `__bid_adddd3` and the rest of it. After ours so that ours answers for anything
+    /// both have, and only what is still undefined by then is taken from it. The driver finds it in
+    /// the named tree's gcc directory or in a mingw-w64 gcc installed on this machine, and when
+    /// there is neither a program using `_Decimal64` fails to link by those names. tamnd/rucc#2145.
+    pub libgcc: Option<&'a Path>,
 }
 
 /// A target, or a combination of a target and a mode, that has no line here.
@@ -594,6 +602,7 @@ fn libraries(line: &LinkLine, options: &Invocation<'_>) -> Vec<PathBuf> {
     if options.no_builtins_lib {
         libraries.retain(|path| path.file_name().is_none_or(|name| name != BUILTINS));
     }
+    libraries.extend(options.libgcc.map(Path::to_path_buf));
     libraries
 }
 

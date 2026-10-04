@@ -347,6 +347,7 @@ static S390X_ELF: AbiDescription = AbiDescription {
         wide_is_by_reference: false,
         wide_integer_returns_in: None,
         wide_integer_in_memory: false,
+        decimal_in_integers: false,
     },
     returns: &[
         Rule::new(Test::Empty, Travel::Ignore),

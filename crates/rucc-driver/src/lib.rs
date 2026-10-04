@@ -3073,7 +3073,7 @@ pub fn parse_args(args: &[String]) -> Result<Action, CliError> {
     link.cache = Some(cache::dir());
     // And where a distribution's cross packages would have put a tree for the target, which is only
     // read when the target is not this machine and there is no sysroot of ours for it.
-    link.usr = Some(PathBuf::from("/usr"));
+    link.usr = Some(link::usr());
     // And the ten field spelling of the target, because the release on it decides two things the
     // three field one cannot say: whether a target that is this architecture is still a cross
     // compile, and which directory under the cache it is against. After the loop because the last

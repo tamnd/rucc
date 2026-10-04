@@ -192,6 +192,15 @@ pub struct Scalars {
     /// rather than in ecx. gcc and Microsoft's compiler agree on both halves. False everywhere
     /// else, where a wide integer takes registers when there are enough of them.
     pub wide_integer_in_memory: bool,
+    /// Whether a decimal float a general purpose register holds travels in one, going in and
+    /// coming back.
+    ///
+    /// True on Windows x64, where the vector registers are for a `float` and a `double` and
+    /// nothing else of their size: gcc passes a `_Decimal32` and a `_Decimal64` at their position
+    /// in `rcx`, `rdx`, `r8` or `r9` and brings one back in `rax`. A `_Decimal128` is sixteen
+    /// bytes, which [`Scalars::wide_is_by_reference`] already answers for. False everywhere else,
+    /// where a decimal goes where a binary float of its width goes.
+    pub decimal_in_integers: bool,
 }
 
 /// Where the address of a return value that comes back in memory travels.
