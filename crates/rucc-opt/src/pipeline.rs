@@ -1066,6 +1066,12 @@ pub fn run(module: &mut Module, names: &mut Interner, opts: &Options) -> Report 
     if opts.level != OptLevel::O0 {
         crate::fold::addresses(module);
     }
+    // And which functions never come back, which gcc's `ipa-pure-const` works out from `-O1` up.
+    // Before the passes, since what it leaves is a hint after each call and `simplify_cfg` is what
+    // ends the block there. See [`crate::noreturn`].
+    if opts.level != OptLevel::O0 && opts.wants(crate::noreturn::NAME) {
+        crate::noreturn::annotate(module, opts.interposition);
+    }
     // The same for `__builtin_constant_p`, but only at `-O0`, where every question is answered
     // zero the way gcc answers it there. Above that the question waits for `constant-p` in the
     // list, which is after the folding that can turn the value into a constant.

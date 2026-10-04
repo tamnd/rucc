@@ -149,6 +149,7 @@ pub mod modref;
 pub mod narrow;
 pub mod nests;
 pub mod nofree;
+pub mod noreturn;
 pub mod number;
 pub mod objsize;
 pub mod optinfo;

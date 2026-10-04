@@ -17,6 +17,7 @@ All notable changes are recorded here. The format follows [Keep a Changelog](htt
 
 ### Fixed
 
+- A function that can never return, such as a `static` one that ends in `BUG()`, is now marked `noreturn` from `-O1` up the way gcc's `ipa-pure-const` does it, and a call to it ends the block. Linux 6.1's `skb_put` had a `jmp` after `call skb_panic` that objtool reported as unreachable. `-fno-ipa-pure-const` turns it off.
 - A branch on a known condition is folded by the condition before an arm that is a dead end is read as never taken. `do { asm("ud2"); } while (0); __builtin_unreachable();`, which is BUG() in Linux 6.1, used to become a loop with a `jmp` after the `ud2` that objtool reports as an unreachable instruction.
 - An inline asm `"p"` operand that is the address of a global is now the link-time constant gcc sees, so `%P` prints the bare name and `%a` the rip-relative form. Linux 6.1's `this_cpu_read_stable` hands in `"p" (&current_task)` and was refused in 569 units.
 - `__builtin_return_address` and `__builtin_frame_address` above depth zero, and `__builtin_return_address(0)`, are right on x86_64-windows-gnu in a function that saves more registers than `%rbp` (#2144). Such a function points `%rbp` at the bottom of its frame, so its own link is now read from the two words below the return address rather than through `%rbp`. gcc's `execute/20010122-1.c` passes at -O0 there now, where rucc keeps a value in `%rbx` across a call.
