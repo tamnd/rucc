@@ -20,6 +20,10 @@
 //!   typedef name in a type, a tag written without a body, a member reached with `.` or `->`, and
 //!   an enumerator in an expression. Defining the tag is not a use and neither is `sizeof` of an
 //!   object of the type. A typedef gets no note, as in gcc.
+//! * `unavailable`, from gcc 12, is `deprecated` made an error: said at the same uses, in the
+//!   same words with `unavailable` for `deprecated`, and with no option that turns it off. It
+//!   outranks `deprecated` whichever of the two came first, on one declaration or across several,
+//!   and the message said is then only ever one `unavailable` gave.
 //! * `warn_unused_result` is said of a call whose value an expression statement, the step of a
 //!   `for` or the left side of a comma throws away, and a cast to `void` does not keep it quiet,
 //!   since the attribute is for the answer a program must not ignore even on purpose. gcc says
@@ -57,6 +61,9 @@ use crate::stmt::Stmt;
 /// The code of the `deprecated` warning, which answers to `-Wdeprecated-declarations`.
 pub(in crate::check) const DEPRECATED: &str = "E0770";
 
+/// The code of the `unavailable` error.
+const UNAVAILABLE: &str = "E0815";
+
 /// The code of the two unused result warnings, which answer to `-Wunused-result`.
 pub(in crate::check) const UNUSED_RESULT: &str = "E0771";
 
@@ -69,9 +76,8 @@ const DESIGNATED_INIT: &str = "E0790";
 /// What the declarations of a name asked to have said about a use of it.
 #[derive(Debug, Default)]
 pub(in crate::check) struct Advice {
-    /// The names some declaration marked `deprecated`, with the message the last one to give a
-    /// message gave.
-    deprecated: Map<DeclId, Option<String>>,
+    /// The names some declaration marked `deprecated` or `unavailable`, with what is to be said.
+    deprecated: Map<DeclId, Notice>,
     /// The functions some declaration marked `warn_unused_result`.
     unused_result: Set<DeclId>,
     /// The functions some declaration marked `[[nodiscard]]`, with its message.
@@ -87,7 +93,7 @@ pub(in crate::check) struct Advice {
     /// Typedef names marked `deprecated`, by the name and the type. A plain typedef is bound to
     /// the type it names rather than to a type of its own, so the type alone would mark `int`
     /// along with it.
-    typedefs: Map<(Symbol, TypeId), Option<String>>,
+    typedefs: Map<(Symbol, TypeId), Notice>,
     /// Structures, unions and enumerations marked `deprecated`, by the type their tag names.
     tags: Map<TypeId, Marked>,
     /// Members marked `deprecated`, by the record they are directly in and their name.
@@ -97,11 +103,33 @@ pub(in crate::check) struct Advice {
     enumerators: Map<(Symbol, i128, TypeId), Marked>,
 }
 
+/// What `deprecated` and `unavailable` asked to have said at a use of a name.
+#[derive(Debug, Clone, Default)]
+struct Notice {
+    /// The message to say after the name, if one was given.
+    message: Option<String>,
+    /// Whether `unavailable` was written, which makes a use an error.
+    unavailable: bool,
+}
+
+impl Notice {
+    /// Takes one more `deprecated` or `unavailable` into what is to be said. `unavailable`
+    /// outranks `deprecated` and drops the message that one gave, and between two of the same
+    /// rank the last message given is the one kept, which is gcc's rule.
+    fn hear(&mut self, message: Option<String>, unavailable: bool) {
+        if unavailable && !self.unavailable {
+            *self = Self { message, unavailable };
+        } else if unavailable == self.unavailable && message.is_some() {
+            self.message = message;
+        }
+    }
+}
+
 /// What `deprecated` said about a name that has no declaration of its own to point the note at.
 #[derive(Debug, Clone)]
 struct Marked {
-    /// The message it was given, if it was given one.
-    message: Option<String>,
+    /// What is to be said.
+    notice: Notice,
     /// Where the name was declared, for the note.
     at: Span,
 }
@@ -110,6 +138,7 @@ struct Marked {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum Which {
     Deprecated,
+    Unavailable,
     UnusedResult,
     Nodiscard,
     Format,
@@ -130,12 +159,10 @@ impl Checker<'_> {
             for attr in written {
                 let Some(which) = self.which(&attr) else { continue };
                 match which {
-                    Which::Deprecated => {
+                    Which::Deprecated | Which::Unavailable => {
                         let message = self.advice_message(attr);
-                        let kept = self.advice.deprecated.entry(decl).or_default();
-                        if message.is_some() || kept.is_none() {
-                            *kept = message;
-                        }
+                        let unavailable = which == Which::Unavailable;
+                        self.advice.deprecated.entry(decl).or_default().hear(message, unavailable);
                     }
                     Which::UnusedResult => {
                         self.advice.unused_result.insert(decl);
@@ -182,6 +209,8 @@ impl Checker<'_> {
     /// row `__has_attribute` has told the program is not done.
     ///
     /// `deprecated` is both GCC's attribute and the standard's, so it is read in either spelling.
+    /// `unavailable` is only GCC's, and only from gcc 12, so a persona claiming an older one has
+    /// it said as unknown and not read, as [`Self::gnu_name`] has it.
     /// `nodiscard` is only the standard's, and gcc does not know `__attribute__((nodiscard))` in C,
     /// so it is read only as `[[nodiscard]]`. `warn_unused_result` is only GCC's.
     fn which(&self, attr: &Attribute) -> Option<Which> {
@@ -197,6 +226,7 @@ impl Checker<'_> {
         }
         let which = match name {
             "deprecated" => Which::Deprecated,
+            "unavailable" if gnu => Which::Unavailable,
             "warn_unused_result" if gnu => Which::UnusedResult,
             "nodiscard" if standard => Which::Nodiscard,
             "format" if gnu => Which::Format,
@@ -205,7 +235,8 @@ impl Checker<'_> {
             _ => return None,
         };
         let row = rucc_gnu::lookup(kind, name)?;
-        matches!(row.status, Status::Implemented | Status::Partial).then_some(which)
+        let read = matches!(row.status, Status::Implemented | Status::Partial);
+        (read && (standard || row.is_known_to(self.cx.gnuc))).then_some(which)
     }
 
     /// Whether an attribute list on a structure says `designated_init`, read through the matrix
@@ -280,7 +311,7 @@ impl Checker<'_> {
         }
     }
 
-    /// The message `deprecated("...")` or `[[nodiscard("...")]]` was given, if it was given one
+    /// The message `deprecated("...")`, `unavailable("...")` or `[[nodiscard("...")]]` was given, if it was given one
     /// that is a plain string.
     ///
     /// gcc refuses anything else as the argument, and the refusal is not this module's: what is
@@ -300,28 +331,28 @@ impl Checker<'_> {
         Some(text.trim_end_matches('\0').to_owned())
     }
 
-    /// Says that a name marked `deprecated` was used, where it was used.
+    /// Says that a name marked `deprecated` or `unavailable` was used, where it was used.
     pub(in crate::check) fn heed_deprecated(&mut self, decl: DeclId, span: Span) {
-        let Some(message) = self.advice.deprecated.get(&decl).cloned() else { return };
+        let Some(notice) = self.advice.deprecated.get(&decl).cloned() else { return };
         let Some(name) = self.tast[decl].name else { return };
         let at = self.tast.decl_span(decl);
-        self.say_deprecated(name, message, span, Some(at));
+        self.say_deprecated(name, notice, span, Some(at));
     }
 
-    /// What `deprecated` asked of a name that is not a declaration, and nothing when it was not
-    /// written. The last message given is the one kept, as for a declaration.
-    fn deprecation(&mut self, lists: &[AttrList]) -> Option<Option<String>> {
-        let mut found = None;
+    /// What `deprecated` and `unavailable` asked of a name that is not a declaration, and nothing
+    /// when neither was written, kept by the rule a declaration's are.
+    fn deprecation(&mut self, lists: &[AttrList]) -> Option<Notice> {
+        let mut found: Option<Notice> = None;
         for &list in lists {
             let written = self.ast[list].to_vec();
             for attr in written {
-                if self.which(&attr) != Some(Which::Deprecated) {
-                    continue;
-                }
+                let unavailable = match self.which(&attr) {
+                    Some(Which::Deprecated) => false,
+                    Some(Which::Unavailable) => true,
+                    _ => continue,
+                };
                 let message = self.advice_message(attr);
-                if message.is_some() || found.is_none() {
-                    found = Some(message);
-                }
+                found.get_or_insert_default().hear(message, unavailable);
             }
         }
         found
@@ -334,15 +365,15 @@ impl Checker<'_> {
         ty: TypeId,
         lists: &[AttrList],
     ) {
-        if let Some(message) = self.deprecation(lists) {
-            self.advice.typedefs.insert((name, ty), message);
+        if let Some(notice) = self.deprecation(lists) {
+            self.advice.typedefs.insert((name, ty), notice);
         }
     }
 
     /// Reads `deprecated` off the list a structure, union or enumeration was defined with.
     pub(in crate::check) fn read_deprecated_tag(&mut self, ty: TypeId, attrs: AttrList, at: Span) {
-        if let Some(message) = self.deprecation(&[attrs]) {
-            self.advice.tags.insert(ty, Marked { message, at });
+        if let Some(notice) = self.deprecation(&[attrs]) {
+            self.advice.tags.insert(ty, Marked { notice, at });
         }
     }
 
@@ -354,8 +385,8 @@ impl Checker<'_> {
         lists: &[AttrList],
         at: Span,
     ) {
-        if let Some(message) = self.deprecation(lists) {
-            self.advice.members.insert((record, name), Marked { message, at });
+        if let Some(notice) = self.deprecation(lists) {
+            self.advice.members.insert((record, name), Marked { notice, at });
         }
     }
 
@@ -368,8 +399,8 @@ impl Checker<'_> {
         attrs: AttrList,
         at: Span,
     ) {
-        if let Some(message) = self.deprecation(&[attrs]) {
-            self.advice.enumerators.insert((name, value, ty), Marked { message, at });
+        if let Some(notice) = self.deprecation(&[attrs]) {
+            self.advice.enumerators.insert((name, value, ty), Marked { notice, at });
         }
     }
 
@@ -380,8 +411,8 @@ impl Checker<'_> {
         ty: TypeId,
         span: Span,
     ) {
-        if let Some(message) = self.advice.typedefs.get(&(name, ty)).cloned() {
-            self.say_deprecated(name, message, span, None);
+        if let Some(notice) = self.advice.typedefs.get(&(name, ty)).cloned() {
+            self.say_deprecated(name, notice, span, None);
         }
     }
 
@@ -393,8 +424,8 @@ impl Checker<'_> {
         span: Span,
     ) {
         let Some(name) = name else { return };
-        if let Some(Marked { message, at }) = self.advice.tags.get(&ty).cloned() {
-            self.say_deprecated(name, message, span, Some(at));
+        if let Some(Marked { notice, at }) = self.advice.tags.get(&ty).cloned() {
+            self.say_deprecated(name, notice, span, Some(at));
         }
     }
 
@@ -405,8 +436,8 @@ impl Checker<'_> {
         name: Symbol,
         span: Span,
     ) {
-        if let Some(Marked { message, at }) = self.advice.members.get(&(record, name)).cloned() {
-            self.say_deprecated(name, message, span, Some(at));
+        if let Some(Marked { notice, at }) = self.advice.members.get(&(record, name)).cloned() {
+            self.say_deprecated(name, notice, span, Some(at));
         }
     }
 
@@ -419,25 +450,25 @@ impl Checker<'_> {
         span: Span,
     ) {
         let key = (name, value, ty);
-        if let Some(Marked { message, at }) = self.advice.enumerators.get(&key).cloned() {
-            self.say_deprecated(name, message, span, Some(at));
+        if let Some(Marked { notice, at }) = self.advice.enumerators.get(&key).cloned() {
+            self.say_deprecated(name, notice, span, Some(at));
         }
     }
 
-    /// The warning itself, in gcc's words, with the note where there is one to give.
-    fn say_deprecated(
-        &mut self,
-        name: Symbol,
-        message: Option<String>,
-        span: Span,
-        declared: Option<Span>,
-    ) {
+    /// The warning itself, or the error for `unavailable`, in gcc's words, with the note where
+    /// there is one to give.
+    fn say_deprecated(&mut self, name: Symbol, notice: Notice, span: Span, declared: Option<Span>) {
         let name = self.text(name).to_owned();
-        let what = match message {
-            Some(message) => format!("'{name}' is deprecated: {message}"),
-            None => format!("'{name}' is deprecated"),
+        let state = if notice.unavailable { "unavailable" } else { "deprecated" };
+        let what = match notice.message {
+            Some(message) => format!("'{name}' is {state}: {message}"),
+            None => format!("'{name}' is {state}"),
         };
-        let mut said = Diagnostic::warning(what, span).with_code(DEPRECATED);
+        let mut said = if notice.unavailable {
+            Diagnostic::error(what, span).with_code(UNAVAILABLE)
+        } else {
+            Diagnostic::warning(what, span).with_code(DEPRECATED)
+        };
         if let Some(at) = declared {
             said = said.note("declared here", at);
         }
