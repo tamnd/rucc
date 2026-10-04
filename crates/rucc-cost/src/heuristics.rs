@@ -732,6 +732,14 @@ pub const CONSTANT_P_LOAD_DEPTH: usize = 8;
 /// at it rather than hanging the compile.
 pub const CONS_CASCADE: u32 = 8;
 
+/// How many times the conventional rewriter runs `simplify` over a function before it stops.
+///
+/// Arm A of section 12.3 applies the rules to a bounded fixpoint, which is how a peephole pass that
+/// walks in layout order finds what one rule left for another after the walk went past it. A run
+/// that changes nothing ends it sooner. Four is two more than the second run any chain in the rule
+/// set has been seen to need, and a rule set with a cycle in it stops at it.
+pub const SIMPLIFY_ROUNDS: u32 = 4;
+
 /// Section 40.12's table, in its order, so a report can print it and a test can check it.
 ///
 /// The point of having the list as data is that "which of our heuristics are guesses" becomes a
@@ -1286,6 +1294,14 @@ pub const ALL: &[Constant] = &[
         value: 8,
         unit: "rewrites",
         document: "12.1",
+        gcc: "",
+        provenance: Provenance::Chosen,
+    },
+    Constant {
+        name: "SIMPLIFY_ROUNDS",
+        value: 4,
+        unit: "runs",
+        document: "12.3",
         gcc: "",
         provenance: Provenance::Chosen,
     },

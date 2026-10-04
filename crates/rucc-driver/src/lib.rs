@@ -2507,7 +2507,7 @@ pub fn parse_args(args: &[String]) -> Result<Action, CliError> {
             _ if arg.starts_with("-Zrewriter=") => {
                 let name = &arg["-Zrewriter=".len()..];
                 if rucc_opt::pipeline::Rewriter::from_name(name).is_none() {
-                    return Err(err("-Zrewriter= takes default or consed"));
+                    return Err(err("-Zrewriter= takes default, consed or classical"));
                 }
                 opts.rewriter = name.to_string();
             }
@@ -5035,6 +5035,8 @@ mod tests {
     fn the_rewriter_is_asked_for_by_name() {
         let (opts, _) = compile(&["-c", "-O2", "-Zrewriter=consed", "a.c"]);
         assert_eq!(opts.rewriter, "consed");
+        let (opts, _) = compile(&["-c", "-O2", "-Zrewriter=classical", "a.c"]);
+        assert_eq!(opts.rewriter, "classical");
         let (plain, _) = compile(&["-c", "-O2", "a.c"]);
         assert_eq!(plain.rewriter, "", "the level decides unless it was asked for");
         assert!(parse_args(&args(&["-Zrewriter=egraph", "a.c"])).is_err(), "not one there is");

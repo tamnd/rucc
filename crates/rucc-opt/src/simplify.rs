@@ -379,6 +379,50 @@ const TABLES: [(&Table, &[Plan]); 6] = [
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct Simplify;
 
+/// What [`Fixpoint`] is called, which is what the conventional rewriter runs in place of
+/// `simplify`.
+pub const FIXPOINT: &str = "simplify-fixpoint";
+
+/// [`Simplify`] run again until a run changes nothing, or [`SIMPLIFY_ROUNDS`] times.
+///
+/// Arm A of section 12.3 of `spec/optimizer/12-egraph.md`, the way every peephole pass is driven.
+/// One run walks the blocks in layout order, and a rule that fires on what an earlier rule left
+/// only sees it when the earlier rule fired earlier in the walk. A block laid out before the block
+/// that computes what it reads has been walked by the time that value is rewritten, and only the
+/// next run finds what that left. The bound is what stops a rule set with a cycle in it running
+/// for ever.
+///
+/// [`SIMPLIFY_ROUNDS`]: rucc_cost::heuristics::SIMPLIFY_ROUNDS
+#[derive(Debug)]
+pub struct Fixpoint;
+
+impl Pass for Fixpoint {
+    fn name(&self) -> &'static str {
+        FIXPOINT
+    }
+
+    fn describe(&self) -> &'static str {
+        "simplify, run again until a run changes nothing"
+    }
+
+    fn preserves(&self) -> Preserved {
+        // Whatever one run preserves, since this is nothing but runs of it.
+        Simplify.preserves()
+    }
+
+    fn run(&self, func: &mut Func, an: &mut Analyses, fuel: &mut Fuel) -> Stats {
+        let mut stats = Stats::new();
+        for _ in 0..rucc_cost::heuristics::SIMPLIFY_ROUNDS {
+            let round = Simplify.run(func, an, fuel);
+            stats.merge(&round);
+            if !round.changed() {
+                break;
+            }
+        }
+        stats
+    }
+}
+
 impl Pass for Simplify {
     fn name(&self) -> &'static str {
         "simplify"
@@ -1849,7 +1893,10 @@ mod tests {
     };
     use crate::rules::Piece;
     use crate::stats::Kind;
-    use crate::{Fuel, Pass, simplify::Simplify};
+    use crate::{
+        Fuel, Pass,
+        simplify::{Fixpoint, Simplify},
+    };
 
     /// A function with one block, ready to have instructions appended to it.
     fn blank() -> (Interner, Func, Block) {
@@ -1905,6 +1952,38 @@ mod tests {
         assert_eq!(data.opcode, Opcode::IConst, "not a constant");
         let Extra::Imm(at) = data.extra else { panic!("a constant with no number") };
         func[at].signed(func[value].ty)
+    }
+
+    /// A rule that fires on what another rule left after the walk went past it, which one run of
+    /// [`Simplify`] misses and [`Fixpoint`] does not.
+    #[test]
+    fn a_rule_that_fires_on_what_a_rule_left_behind_the_walk_fires_on_the_next_run() {
+        // The block that reads the multiply is laid out before the block that computes it, so the
+        // walk reaches `m - x` while `m` is still a multiply by one. It is `x` once the walk gets
+        // there, and only another walk sees `x - x`.
+        let fixture = || {
+            let i32 = Type::int(32);
+            let (_, mut func, entry) = one_block(i32);
+            let x = func.append_param(entry, i32);
+            let reads = func.create_block();
+            let computes = func.create_block();
+            Builder::new(&mut func, entry).jump(computes, &[]);
+            let mut build = Builder::new(&mut func, computes);
+            let one = build.iconst(i32, 1);
+            let m = build.binary(Opcode::Mul, x, one, Flags::NONE);
+            build.jump(reads, &[]);
+            let mut build = Builder::new(&mut func, reads);
+            let difference = build.binary(Opcode::Sub, m, x, Flags::NONE);
+            build.ret(&[difference]);
+            (func, reads)
+        };
+        let (mut once, reads) = fixture();
+        assert!(simplify(&mut once));
+        assert_eq!(came_from(&once, returned(&once, reads)).0, Opcode::Sub, "one walk saw it");
+        let (mut settled, reads) = fixture();
+        let analyses = &mut crate::machine::fixtures::analyses();
+        assert!(Fixpoint.run(&mut settled, analyses, &mut Fuel::unlimited()).changed());
+        assert_eq!(number(&settled, returned(&settled, reads)), 0);
     }
 
     /// Every rule in every table leaves one of the four shapes the pass knows how to apply.
