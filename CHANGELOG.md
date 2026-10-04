@@ -11,6 +11,7 @@ All notable changes are recorded here. The format follows [Keep a Changelog](htt
 ### Fixed
 
 - Constant propagation no longer takes the output of an `asm goto` as a value that has not been set yet. A variable that was either zero or that output could fold to zero and drop the code that used it, which lost the `rseq_trace_ip_fixup` tracepoint in the kernel's `kernel/entry/common.c`.
+- `__builtin_return_address` and `__builtin_frame_address` above depth zero find the right frame on x86_64-windows-gnu (#2144). A function that saves nothing besides `%rbp` and does not realign now points `%rbp` at the frame before it takes the frame, as gcc does there, so the chain of saved frame pointers is whole again. The SEH record says the same with `.seh_setframe %rbp, 0` right after the push. A function that saves more still sets `%rbp` after the frame, since the record cannot describe the other order.
 - Each second name for a function or a variable, from `alias` or a `.set`, is written just after what it names, as gcc does, rather than all together at the end. modpost reads a module's device tables in symbol table order, so the order of `.modinfo` aliases now matches a gcc build.
 
 ## 0.19.1
