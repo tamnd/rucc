@@ -643,11 +643,15 @@ pub enum Rewriter {
     /// 12.3: the rules applied as each instruction is reached, one table for the whole function,
     /// and placement left to `gcm`.
     Consed,
+    /// [`crate::simplify::Fixpoint`] wherever the level names `simplify`, and no `gcm`, which is
+    /// arm A of section 12.3: the rules to a bounded fixpoint, then value numbering and loop
+    /// invariant code motion where the level already runs them, and nothing placed globally.
+    Classical,
 }
 
 impl Rewriter {
     /// Every one of them, in the order `-Zrewriter=` lists them.
-    pub const ALL: [Self; 2] = [Self::Default, Self::Consed];
+    pub const ALL: [Self; 3] = [Self::Default, Self::Consed, Self::Classical];
 
     /// What `-Zrewriter=` calls it.
     #[must_use]
@@ -655,6 +659,7 @@ impl Rewriter {
         match self {
             Self::Default => "default",
             Self::Consed => "consed",
+            Self::Classical => "classical",
         }
     }
 
@@ -664,11 +669,13 @@ impl Rewriter {
         Self::ALL.into_iter().find(|it| it.name() == name)
     }
 
-    /// The pass this arm runs where the level names that one.
-    const fn instead(self, name: &'static str) -> &'static str {
+    /// The pass this arm runs where the level names that one, if it runs one there at all.
+    const fn instead(self, name: &'static str) -> Option<&'static str> {
         match (self, name.as_bytes()) {
-            (Self::Consed, b"simplify" | b"number") => crate::cons::NAME,
-            _ => name,
+            (Self::Consed, b"simplify" | b"number") => Some(crate::cons::NAME),
+            (Self::Classical, b"simplify") => Some(crate::simplify::FIXPOINT),
+            (Self::Classical, b"gcm") => None,
+            _ => Some(name),
         }
     }
 }
@@ -838,7 +845,7 @@ impl Options {
     #[must_use]
     pub fn chosen(&self) -> Vec<&'static str> {
         let mut names: Vec<&str> =
-            for_level(self.level).iter().map(|&name| self.rewriter.instead(name)).collect();
+            for_level(self.level).iter().filter_map(|&name| self.rewriter.instead(name)).collect();
         // An arm that runs one pass where the level ran two in a row runs it once there, since
         // the second run would find what the first left and the first has already looked.
         names.dedup();
@@ -1878,6 +1885,40 @@ mod tests {
             };
             assert_eq!(others(&plain), others(&consed), "only the rewriter changes at {level:?}");
             assert!(consed.windows(2).all(|pair| pair[0] != pair[1]), "{consed:?}");
+        }
+    }
+
+    #[test]
+    fn the_classical_rewriter_runs_the_rules_to_a_fixpoint_and_places_nothing() {
+        for level in [OptLevel::O1, OptLevel::O2, OptLevel::O3, OptLevel::Os, OptLevel::Oz] {
+            let plain = Options::for_level(level).chosen();
+            let opts =
+                Options { rewriter: super::Rewriter::Classical, ..Options::for_level(level) };
+            let classical = opts.chosen();
+            assert!(!classical.contains(&"simplify") && !classical.contains(&"gcm"), "{level:?}");
+            assert_eq!(
+                plain.contains(&"simplify"),
+                classical.contains(&crate::simplify::FIXPOINT),
+                "{level:?}"
+            );
+            assert_eq!(
+                plain.contains(&"number"),
+                classical.contains(&"number"),
+                "value numbering stays where the level runs it at {level:?}"
+            );
+            let others = |names: &[&str]| -> Vec<String> {
+                names
+                    .iter()
+                    .filter(|name| !matches!(**name, "simplify" | "simplify-fixpoint" | "gcm"))
+                    .map(ToString::to_string)
+                    .collect()
+            };
+            assert_eq!(
+                others(&plain),
+                others(&classical),
+                "only the rewriter changes at {level:?}"
+            );
+            assert!(classical.windows(2).all(|pair| pair[0] != pair[1]), "{classical:?}");
         }
     }
 
