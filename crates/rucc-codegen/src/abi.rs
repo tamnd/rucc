@@ -382,6 +382,9 @@ pub fn entry(
     };
     let mut arrived =
         Arrived { regs: Vec::with_capacity(params.len()), took, beyond, ..Arrived::default() };
+    // The registers the named parameters arrived in, each with its file, since a register number
+    // only means something within one: `xmm1` and `rcx` are both register one.
+    let mut bound = Vec::new();
 
     // Every pseudo first and everything else after, which is not a preference. A pseudo says a
     // register holds an argument and defines nothing before it, so as far as the allocator can see
@@ -401,12 +404,14 @@ pub fn entry(
         let opcode = mir::Opcode::new(names.intern(head));
         let operand = mir::Operand::write(reg, class).with(Constraint::Fixed(arrived_in));
         out.build(block, opcode).operand(operand).finish();
-        if let Some(slot) = save.and_then(|area| slot_of(conv, area, arrived_in)) {
+        let float = class == conv.sse_class;
+        bound.push((arrived_in, float));
+        if let Some(slot) = save.and_then(|area| slot_of(conv, area, arrived_in, float)) {
             arrived.named.push((index, slot));
         }
     }
     if let Some(area) = save {
-        arrived.spare = spare(out, block, conv, insts, names, area, arrived.took);
+        arrived.spare = spare(out, block, conv, insts, names, area, arrived.took, &bound);
     }
 
     // The stack pointer is written down as the register to read through because it is the one that
@@ -439,12 +444,13 @@ pub fn entry(
 
 /// How far up a save area the slot of an argument register is, or nothing for a register the area
 /// has no slot for, which is the one a convention passes the address of a result in.
-fn slot_of(conv: &CallRegs, area: Area, reg: PhysReg) -> Option<u32> {
-    let files = [(false, conv.int_args), (true, conv.sse_args)];
-    files.into_iter().find_map(|(float, file)| {
-        let at = u32::try_from(file.iter().position(|&it| it == reg)?).ok()?;
-        (at < area.holds(float)).then(|| area.starts_at(float) + at * area.stride(float))
-    })
+///
+/// Looked for in the one file the register is in. A register is a number within its file, so
+/// `xmm1` looked for among the general purpose ones would be found as `rcx` and take its slot.
+fn slot_of(conv: &CallRegs, area: Area, reg: PhysReg, float: bool) -> Option<u32> {
+    let file = if float { conv.sse_args } else { conv.int_args };
+    let at = u32::try_from(file.iter().position(|&it| it == reg)?).ok()?;
+    (at < area.holds(float)).then(|| area.starts_at(float) + at * area.stride(float))
 }
 
 /// Binds the argument registers no parameter the signature names took, which are the ones the
@@ -459,6 +465,12 @@ fn slot_of(conv: &CallRegs, area: Area, reg: PhysReg) -> Option<u32> {
 /// of either kind steps the one counter. A file the area holds no slots of is skipped entirely,
 /// which is the vector file on the second kind: a variadic float travels in the general purpose
 /// register at its position as well, so the copy the walk reads is already the one being spilled.
+///
+/// Except when the area holds both files on a convention that counts them as one, which is the one
+/// `__builtin_apply_args` asks for on Windows x64. There every register no named parameter arrived
+/// in is spare, whatever position the walk reached, since a `double` first leaves `rcx` unused and
+/// the block has a slot for it all the same.
+#[allow(clippy::too_many_arguments)]
 fn spare(
     out: &mut mir::Func,
     block: mir::Block,
@@ -467,10 +479,16 @@ fn spare(
     names: &mut Interner,
     area: Area,
     took: (usize, usize),
+    bound: &[(PhysReg, bool)],
 ) -> Vec<(mir::Reg, RegClass, u32)> {
     let word = Type::int(64);
     let double = Type::float(rucc_ir::Float::F64);
-    let reached = |own: usize| if conv.shared_positions { took.0 + took.1 } else { own };
+    let every = conv.shared_positions && area.holds(true) > 0;
+    let reached = |own: usize| match (every, conv.shared_positions) {
+        (true, _) => 0,
+        (false, true) => took.0 + took.1,
+        (false, false) => own,
+    };
     let files = [
         (conv.int_args, reached(took.0), word, false),
         (conv.sse_args, reached(took.1), double, true),
@@ -481,6 +499,9 @@ fn spare(
         let Some(head) = (insts.arg)(ty) else { continue };
         let class = class_of(ty, conv);
         for (index, &arrived_in) in regs.iter().enumerate().take(held).skip(taken) {
+            if every && bound.contains(&(arrived_in, float)) {
+                continue;
+            }
             let reg = out.new_vreg(class);
             let opcode = mir::Opcode::new(names.intern(head));
             let operand = mir::Operand::write(reg, class).with(Constraint::Fixed(arrived_in));

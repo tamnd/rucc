@@ -204,6 +204,18 @@ const APPLY_REGS: u32 = 16;
 /// How many bytes the block `__builtin_apply` answers takes, which is two words and two vectors.
 const APPLY_BACK: u32 = 48;
 
+/// How many bytes the block `__builtin_apply_args` answers takes on Windows x64, which is a word
+/// for where the arguments in memory are, the four general purpose argument registers in an order
+/// of gcc's and the four vector ones. See [`Lowering::save_arguments`].
+const APPLY_ARGS_WINDOWS: u32 = 112;
+
+/// Where in that block each of `rcx`, `rdx`, `r8` and `r9` is, which is not in order: gcc lays the
+/// block out by register number, and `rdx` is a lower one than `rcx` there.
+const APPLY_WORDS_WINDOWS: [u32; 4] = [16, 8, 96, 104];
+
+/// Where in that block `xmm0` is, with the other three after it sixteen bytes apart.
+const APPLY_VECTORS_WINDOWS: u32 = 32;
+
 /// How many bytes a value passes through on its way between a register and the x87 stack.
 ///
 /// Eight, because the widest thing that crosses is a `double` or a sixty four bit integer, and
@@ -7511,7 +7523,10 @@ impl<'a> Lowering<'a> {
         let registerless = conv.int_args.is_empty() && conv.sse_args.is_empty();
         let in_memory = self.conv.abi.variadic == Variadic::AlwaysMemory || registerless;
         let applies = self.saves_arguments();
-        let area = (variadic && !in_memory || applies).then(|| varargs::Area::of(&conv));
+        let area = (variadic && !in_memory || applies).then(|| match applies {
+            true => varargs::Area::every(&conv),
+            false => varargs::Area::of(&conv),
+        });
         let arrived =
             abi::entry(&mut self.out, out, &types, &conv, self.selector.abi, self.names, area)
                 .map_err(|(index, missing)| Unsupported::Argument { index, missing })?;
@@ -7627,7 +7642,9 @@ impl<'a> Lowering<'a> {
             let head =
                 (self.selector.abi.store)(Type::int(64)).expect("a store of a whole register");
             let store = mir::Opcode::new(self.names.intern(head));
-            for &(reg, class, at) in &arrived.spare {
+            // Only the general purpose ones, since a function that also holds
+            // `__builtin_apply_args` was handed the vector ones too and keeps those in its block.
+            for &(reg, class, at) in arrived.spare.iter().filter(|spare| spare.1 == self.gpr) {
                 let sp = mir::Operand::read(mir::Reg::physical(self.conv.stack_pointer), self.gpr);
                 let made =
                     self.out.build(out, store).uses(reg, class).mem(mir::Mem::at(sp)).finish();
@@ -7680,11 +7697,12 @@ impl<'a> Lowering<'a> {
     /// Whether the function holds a `__builtin_apply_args`, on a convention this can save the
     /// arguments of.
     ///
-    /// Only the one that keeps the two register files apart and saves them the way a SysV list
-    /// does, since the block is that layout with one word in front of it. On any other the call is
-    /// refused where it stands, which is [`Self::apply_args`] finding nothing saved.
+    /// The one that keeps the two register files apart and saves them the way a SysV list does,
+    /// since the block is that layout with one word in front of it, and Windows x64, whose block
+    /// is gcc's for that convention. On any other the call is refused where it stands, which is
+    /// [`Self::apply_args`] finding nothing saved.
     fn saves_arguments(&self) -> bool {
-        if self.conv.list != VaList::SysV || self.conv.shared_positions {
+        if !self.applies_sysv() && !self.applies_windows() {
             return false;
         }
         let source = self.source;
@@ -7711,9 +7729,35 @@ impl<'a> Lowering<'a> {
     /// written and not only the ones no parameter took: the one a parameter arrived in is written
     /// from the register the parameter was bound to, which holds it untouched because nothing has
     /// run yet, and the rest from the pseudos the walk made for them.
+    ///
+    /// Windows x64 has a block of its own, which is gcc's for that convention:
+    ///
+    /// ```text
+    ///   0        where the arguments that came in memory are, which is the shadow space
+    ///   8        rdx
+    ///   16       rcx
+    ///   32..96   xmm0 to xmm3, sixteen bytes each
+    ///   96       r8
+    ///   104      r9
+    /// ```
+    ///
+    /// Both files are in it, the way they are in the SysV one, since a callee that names a
+    /// `double` first was handed it in `xmm0` and not in `rcx`. The walk was given both files to
+    /// bind for that reason, see [`varargs::Area::every`], and what is left is moving each slot of
+    /// that area to where gcc has the register.
     fn save_arguments(&mut self, out: mir::Block, arrived: &abi::Arrived) {
+        let windows = self.applies_windows();
+        let size = if windows { APPLY_ARGS_WINDOWS } else { APPLY_ARGS };
+        let area = varargs::Area::every(self.conv);
+        let into = |at: u32| match windows {
+            true if at < area.floats_at => {
+                APPLY_WORDS_WINDOWS[usize::try_from(at / 8).unwrap_or(0)]
+            }
+            true => APPLY_VECTORS_WINDOWS + at - area.floats_at,
+            false => at + APPLY_REGS,
+        };
         let applied = self.stack.locals.len();
-        self.stack.locals.push(Local { size: APPLY_ARGS, align: varargs::VECTOR_SLOT });
+        self.stack.locals.push(Local { size, align: varargs::VECTOR_SLOT });
         self.applied = Some(applied);
         let base = self.frame_address(out, applied);
         let overflow = self.overflow(out, 0, Span::DUMMY);
@@ -7733,10 +7777,21 @@ impl<'a> Lowering<'a> {
                 if class == self.gpr { Type::int(64) } else { Type::float(rucc_ir::Float::F128) };
             let head = (self.selector.abi.store)(ty).expect("a store of a whole register");
             let store = mir::Opcode::new(self.names.intern(head));
-            let up = i32::try_from(at + APPLY_REGS).expect("a block of under two gigabytes");
+            let up = i32::try_from(into(at)).expect("a block of under two gigabytes");
             let mem = mir::Mem::at(mir::Operand::read(base, self.gpr)).plus(up);
             self.out.build(out, store).uses(reg, class).mem(mem).finish();
         }
+    }
+
+    /// Whether the function's convention is the SysV one a block of [`APPLY_ARGS`] is laid out for.
+    fn applies_sysv(&self) -> bool {
+        self.conv.list == VaList::SysV && !self.conv.shared_positions
+    }
+
+    /// Whether it is Windows x64, on Windows or written `ms_abi` elsewhere, which is the one
+    /// convention that counts the two files as one run and has a caller leave shadow space.
+    fn applies_windows(&self) -> bool {
+        self.conv.shared_positions && self.conv.shadow > 0
     }
 
     /// One `__builtin_apply_args`, which is the address of the block the prologue wrote.
@@ -7763,8 +7818,19 @@ impl<'a> Lowering<'a> {
     /// they are written into a block of this function's frame whose address is the answer: the two
     /// words at 0 and 8 and the two vectors at 16 and 32. An eighty bit value comes back on the x87
     /// stack and is not in it, which is the one thing gcc's block holds that this one does not.
+    ///
+    /// Windows x64 is the same call made out of gcc's block for it, four words and four vectors,
+    /// and the convention it is made under is that one with its files counted apart and no shadow
+    /// space. Counted apart, the four words go in `rcx` to `r9` and the four vectors in `xmm0` to
+    /// `xmm3` rather than one or the other at each position, which is every register the callee
+    /// could read an argument from. And with no shadow space the object goes at the bottom of the
+    /// outgoing area, over the shadow space, which is where gcc copies those bytes: they start
+    /// with the callee's own shadow space, so the arguments past the fourth land thirty two bytes
+    /// up where it reads them. The frame keeps at least the shadow space for its calls whatever
+    /// this one asks for. What comes back is `rax` at 0 and `xmm0` at 16, as gcc has them.
     fn apply(&mut self, inst: Inst) -> Result<(), Unsupported> {
-        if self.conv.list != VaList::SysV || self.conv.shared_positions {
+        let windows = self.applies_windows();
+        if !self.applies_sysv() && !windows {
             return Err(self.unsupported(inst));
         }
         let values: Vec<Value> = self.source[self.source[inst].args].to_vec();
@@ -7793,12 +7859,22 @@ impl<'a> Lowering<'a> {
         let sse = self.conv.sse_class;
         let gpr = self.gpr;
         let mut args = Vec::with_capacity(15);
-        for (float, ty, head, class) in
-            [(false, word, load_word, gpr), (true, vector, load_vector, sse)]
-        {
-            for index in 0..area.holds(float) {
-                let at = APPLY_REGS + area.starts_at(float) + index * area.stride(float);
-                args.push(read(ty, head, class, at));
+        if windows {
+            for at in APPLY_WORDS_WINDOWS {
+                args.push(read(word, load_word, gpr, at));
+            }
+            for index in 0..4 {
+                let at = APPLY_VECTORS_WINDOWS + index * varargs::VECTOR_SLOT;
+                args.push(read(vector, load_vector, sse, at));
+            }
+        } else {
+            for (float, ty, head, class) in
+                [(false, word, load_word, gpr), (true, vector, load_vector, sse)]
+            {
+                for index in 0..area.holds(float) {
+                    let at = APPLY_REGS + area.starts_at(float) + index * area.stride(float);
+                    args.push(read(ty, head, class, at));
+                }
             }
         }
         if size > 0 {
@@ -7807,24 +7883,28 @@ impl<'a> Lowering<'a> {
                 Abi::ByVal { size: u64::from(size), align: 8, drains: rucc_ir::Drains::Nothing };
             args.push(abi::Passing { abi: object, ..memory });
         }
-        let returns = [word, word, vector, vector];
+        let returns: &[Type] =
+            if windows { &[word, vector] } else { &[word, word, vector, vector] };
         let what = abi::Calling {
             callee: abi::Callee::Through(function),
             args: &args,
-            returns: &returns,
+            returns,
             variadic: true,
             named: args.len(),
             at: span,
             linked: None,
         };
-        let made = abi::call(&mut self.out, block, &what, self.conv, self.selector.abi, self.names)
+        let apart = CallRegs { shared_positions: false, shadow: 0, ..*self.conv };
+        let conv = if windows { &apart } else { self.conv };
+        let made = abi::call(&mut self.out, block, &what, conv, self.selector.abi, self.names)
             .map_err(|refused| Unsupported::Call { inst, refused })?;
         self.stack.call(made.outgoing);
 
         let back = self.stack.locals.len();
         self.stack.locals.push(Local { size: APPLY_BACK, align: varargs::VECTOR_SLOT });
         let base = self.frame_address(block, back);
-        for ((&reg, ty), at) in made.results.iter().zip(returns).zip([0, 8, 16, 32]) {
+        let places: &[i32] = if windows { &[0, 16] } else { &[0, 8, 16, 32] };
+        for ((&reg, &ty), &at) in made.results.iter().zip(returns).zip(places) {
             let class = if ty == word { gpr } else { sse };
             let head = (self.selector.abi.store)(ty).expect("a store of a whole register");
             let store = mir::Opcode::new(self.names.intern(head));
