@@ -168,6 +168,18 @@ impl Area {
         }
     }
 
+    /// The area with both files in it whatever the convention counts, which is the first shape
+    /// even on a convention that would have the second.
+    ///
+    /// A list never walks this one. It is what a function holding `__builtin_apply_args` binds its
+    /// registers through on Windows x64, because there the block it answers keeps a copy of every
+    /// vector argument register as well, and a float the signature names arrived in its vector
+    /// register and nowhere else.
+    #[must_use]
+    pub fn every(conv: &CallRegs) -> Self {
+        Self::of(&CallRegs { shared_positions: false, ..*conv })
+    }
+
     /// How far apart two of a file's slots are.
     #[must_use]
     pub fn stride(self, float: bool) -> u32 {

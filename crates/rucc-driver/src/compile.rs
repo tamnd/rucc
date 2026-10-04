@@ -9429,6 +9429,30 @@ float through_a_union(union u *p) { p->i = 1; return p->f; }\n";
         );
     }
 
+    /// Windows x64 has both too, with the block gcc lays out for that convention: four words and
+    /// four vectors saved on the way in, the vector ones as well even though a variadic callee
+    /// reads only the words, and all eight loaded back for the call.
+    #[test]
+    fn the_arguments_are_saved_and_passed_on_on_windows_as_well() {
+        let mut opts = options();
+        opts.target = "x86_64-pc-windows-gnu".parse::<Triple>().unwrap();
+        opts.emit = EmitKind::MirFinal;
+        let source = concat!(
+            "void *f(double a, int b) { (void)a; (void)b; return __builtin_apply_args(); }\n",
+            "void *g(void *args, void (*h)()) { return __builtin_apply(h, args, 40); }\n",
+        );
+        let result = run(&opts, source);
+        assert_eq!(result.messages, Vec::<String>::new());
+        let text = result.text();
+        let (saved, applied) = text.split_once("mfunc @g").expect("both functions");
+        assert!(saved.matches("x64.movaps_mr").count() >= 4, "{saved}");
+        for reg in ["$rdx", "$r8", "$r9", "$xmm0", "$xmm1", "$xmm2", "$xmm3"] {
+            assert!(saved.contains(reg), "{reg} is not saved in\n{saved}");
+        }
+        assert!(applied.matches("x64.mov_rm_64").count() >= 4, "{applied}");
+        assert!(applied.matches("x64.movaps_rm").count() >= 4, "{applied}");
+    }
+
     /// A shuffle whose operands gcc would refuse is refused, in gcc's words.
     #[test]
     fn a_shuffle_refuses_what_gcc_refuses() {

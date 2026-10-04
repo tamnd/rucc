@@ -2665,8 +2665,8 @@ gcc_version = "2.0"
 status = "implemented"
 signature = ""
 used_by = []
-tests = ["rucc-sema::both_names_are_rows_of_the_table_and_are_answered_not_called", "rucc-driver::the_arguments_a_function_was_called_with_are_saved_on_the_way_in"]
-notes = "The address of a block holding the address of the arguments that came in memory and then every argument register as it was on the way in, the six general purpose ones and the eight vector ones at sixteen bytes each. The back end writes it in the prologue, which is the one place those registers still hold what the caller put there, and only on x86-64 SysV. A function holding one is never inlined and its parameters are never taken apart or replaced by constants, since either would change what the registers hold."
+tests = ["rucc-sema::both_names_are_rows_of_the_table_and_are_answered_not_called", "rucc-driver::the_arguments_a_function_was_called_with_are_saved_on_the_way_in", "rucc-driver::the_arguments_are_saved_and_passed_on_on_windows_as_well"]
+notes = "The address of a block holding the address of the arguments that came in memory and then every argument register as it was on the way in, the six general purpose ones and the eight vector ones at sixteen bytes each. The back end writes it in the prologue, which is the one place those registers still hold what the caller put there, on x86-64 SysV and on Windows x64, where the block is gcc's for that convention: the shadow space at 0, rdx at 8, rcx at 16, xmm0 to xmm3 from 32, r8 at 96 and r9 at 104. A function holding one is never inlined and its parameters are never taken apart or replaced by constants, since either would change what the registers hold."
 
 [[feature]]
 name = "__builtin_apply"
@@ -2675,8 +2675,8 @@ gcc_version = "2.0"
 status = "implemented"
 signature = ""
 used_by = []
-tests = ["rucc-sema::both_names_are_rows_of_the_table_and_are_answered_not_called", "rucc-driver::a_call_built_from_saved_arguments_loads_every_argument_register"]
-notes = "A call to the function in the first argument with every argument register loaded from the block __builtin_apply_args answered, and the number of bytes the third argument says copied from where the arguments in memory were to where the callee will look for them. The answer is the address of a block holding rax, rdx, xmm0 and xmm1 as the callee left them. The size has to be a constant, where gcc also takes one that is only known when the program runs, because the bytes go in the area at the bottom of the frame and how big that is has to be known when the frame is laid out. __builtin_return, which gives the block back as the answer of the function it is in, is not here yet."
+tests = ["rucc-sema::both_names_are_rows_of_the_table_and_are_answered_not_called", "rucc-driver::a_call_built_from_saved_arguments_loads_every_argument_register", "rucc-driver::the_arguments_are_saved_and_passed_on_on_windows_as_well"]
+notes = "A call to the function in the first argument with every argument register loaded from the block __builtin_apply_args answered, and the number of bytes the third argument says copied from where the arguments in memory were to where the callee will look for them. The answer is the address of a block holding rax, rdx, xmm0 and xmm1 as the callee left them, or on Windows x64 rax at 0 and xmm0 at 16. The size has to be a constant, where gcc also takes one that is only known when the program runs, because the bytes go in the area at the bottom of the frame and how big that is has to be known when the frame is laid out. __builtin_return, which gives the block back as the answer of the function it is in, is not here yet."
 
 # The three that name a half of a complex value. These carry a signature because the call is
 # checked against it the way an ordinary call is, and then answered rather than left behind: the
