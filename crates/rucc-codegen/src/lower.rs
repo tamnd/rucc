@@ -4340,17 +4340,39 @@ impl<'a> Lowering<'a> {
         // wrote after that.
         let reg = self.new_reg(result);
         let mut base = mir::Reg::physical(self.conv.frame_pointer);
+        // On Windows x64 a function that pushes more than the frame pointer points it at the bottom
+        // of its frame, after the pushes, because that is the order the unwind record can describe.
+        // The frame pointer is then not where the caller's was saved, and the return address is not
+        // a word above it. Both are a fixed distance below where the caller's arguments start, since
+        // the frame pointer is always the first thing pushed, so this function's own link is read
+        // from there, the way an argument in memory is, and the rest of the walk is the chain as
+        // usual. Only the first link can be like this: a caller that does not keep its frame pointer
+        // where its callee can find it has no chain for the walk to follow, which is gcc's rule too.
+        let late = self.conv.shadow > 0 && !self.on_aarch64();
+        let word = i32::try_from(self.conv.word).expect("a word of a few bytes");
+        let own = |this: &mut Self, below: i32, into: mir::Reg| {
+            let sp = mir::Operand::read(mir::Reg::physical(this.conv.stack_pointer), this.gpr);
+            let at = mir::Mem::at(sp).plus(-below);
+            let made = this.out.build(block, load).at(span).def(into, this.gpr).mem(at).finish();
+            this.stack.arguments.push((made, 0));
+        };
         for link in 0..depth {
             // The last load of a walk that is looking for a frame writes the answer itself, which
             // is what keeps a walk of so many links that many instructions and not one more.
             let ends_here = link + 1 == depth && !returning;
             let next = if ends_here { reg } else { self.out.new_vreg(self.gpr) };
-            let at = mir::Mem::at(mir::Operand::read(base, self.gpr));
-            self.out.build(block, load).at(span).def(next, self.gpr).mem(at).finish();
+            if late && link == 0 {
+                own(self, 2 * word, next);
+            } else {
+                let at = mir::Mem::at(mir::Operand::read(base, self.gpr));
+                self.out.build(block, load).at(span).def(next, self.gpr).mem(at).finish();
+            }
             base = next;
         }
 
-        if returning {
+        if returning && late && depth == 0 {
+            own(self, word, reg);
+        } else if returning {
             let up = i32::try_from(self.conv.return_address).expect("a word above the frame");
             let at = mir::Mem::at(mir::Operand::read(base, self.gpr)).plus(up);
             self.out.build(block, load).at(span).def(reg, self.gpr).mem(at).finish();
