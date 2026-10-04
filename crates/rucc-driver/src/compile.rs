@@ -9460,6 +9460,28 @@ float through_a_union(union u *p) { p->i = 1; return p->f; }\n";
         assert!(applied.matches("x64.movaps_rm").count() >= 4, "{applied}");
     }
 
+    /// A `_Decimal64` crosses a call in an integer register on Windows x64, by position, and comes
+    /// back in `%rax`, which is where gcc puts it there. tamnd/rucc#2145.
+    #[test]
+    fn a_narrow_decimal_crosses_a_call_in_an_integer_register_on_windows() {
+        let mut opts = options();
+        opts.target = "x86_64-pc-windows-gnu".parse::<Triple>().unwrap();
+        opts.emit = EmitKind::MirFinal;
+        let source = concat!(
+            "_Decimal64 f(int i, _Decimal64 d) { (void)i; return d + d; }\n",
+            "_Decimal64 g(_Decimal64 d);\n",
+            "_Decimal64 h(void) { return g(1.5DD) + 1; }\n",
+        );
+        let result = run(&opts, source);
+        assert_eq!(result.messages, Vec::<String>::new());
+        let text = result.text();
+        let (callee, caller) = text.split_once("mfunc @h").expect("both functions");
+        assert!(callee.contains("$rdx") && callee.contains("$rax"), "{callee}");
+        assert!(callee.contains("x64.movq_to_xmm"), "{callee}");
+        assert!(callee.contains("x64.movq_from_xmm"), "{callee}");
+        assert!(caller.contains("$rcx") && caller.contains("$rax"), "{caller}");
+    }
+
     /// A shuffle whose operands gcc would refuse is refused, in gcc's words.
     #[test]
     fn a_shuffle_refuses_what_gcc_refuses() {
