@@ -14,6 +14,7 @@ tests/
   abi-signatures/  one generated program whose two halves are compiled separately      M6.5
   link-lines/  the recorded cross linker command line, one file per target             M7
   exec/        programs with a known exit status or output, run on every target        M3
+  exec/across/ one program whose two halves two compilers build, both ways round       PG6
   rung0/       the c-testsuite runner for rung 0 of the target ladder, and the
                exclusions for each target it runs on                                  W6
   litmus/      memory model litmus tests for PostgreSQL's barriers and atomics, run on

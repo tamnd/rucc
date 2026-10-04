@@ -8790,14 +8790,14 @@ float through_a_union(union u *p) { p->i = 1; return p->f; }\n";
 
     /// What the save writes and where it leaves control, which is a new block.
     ///
-    /// Four words: the frame pointer, the address to come back to, the stack pointer, and the
-    /// address of the word the answer arrives in, which is this compiler's own and is why the
-    /// block after the save opens with a load. The frame pointer is kept although the function
-    /// asked for nothing and calls nothing, since the epilogue has to find the caller's frame
-    /// after control has come back, and the frame is grown although there is one word in it,
-    /// since a function control comes back into cannot use the red zone.
+    /// gcc's three words and no more: the frame pointer, the address to come back to, and the
+    /// stack pointer. The block after the save opens with a load of the answer and then writes a
+    /// one where it was read from, for the restore that comes next. The frame pointer is kept
+    /// although the function asked for nothing and calls nothing, since the epilogue has to find
+    /// the caller's frame after control has come back, and the frame is grown although there is one
+    /// word in it, since a function control comes back into cannot use the red zone.
     #[test]
-    fn the_save_writes_four_words_and_carries_on_in_a_new_block() {
+    fn the_save_writes_gccs_three_words_and_carries_on_in_a_new_block() {
         let text =
             asm(concat!("void *buf[5];\n", "int f(void) { return __builtin_setjmp(buf); }\n",));
         let body = text.split_once("\nf:\n").expect("the function").1;
@@ -8807,8 +8807,12 @@ float through_a_union(union u *p) { p->i = 1; return p->f; }\n";
         assert!(body.contains("\tmovq\t%rsp, 16(%rax)\n"), "the stack pointer: {text}");
         assert!(body.contains("\tleaq\t.Lf_1(%rip), %rcx\n"), "where to come back to: {text}");
         assert!(body.contains("\tmovq\t%rcx, 8(%rax)\n"), "and that goes in the buffer: {text}");
+        assert!(!body.contains("24(%rax)"), "no fourth word: {text}");
         let back = body.split_once(".Lf_1:\n").expect("the block control comes back to").1;
         assert!(back.starts_with("\tmovq\t(%rsp), %rax\n"), "the answer is read back: {text}");
+        let rest = back.split_once("\n").expect("more than the load").1;
+        assert!(rest.contains("$1, "), "a one for the next arrival: {text}");
+        assert!(rest.contains(", (%rsp)\n"), "written where the answer was read: {text}");
     }
 
     /// Nothing stays in a register across the save, which is said with a write of every one of
@@ -8845,6 +8849,7 @@ float through_a_union(union u *p) { p->i = 1; return p->f; }\n";
             assert_eq!(result.messages, Vec::<String>::new(), "expected this to compile");
             let text = result.text().to_owned();
             let jump = text.find("\tjmp\t*%").unwrap_or_else(|| panic!("an indirect jump: {text}"));
+            assert!(!text.contains("24("), "no fourth word is read at {level:?}: {text}");
             let stack = text.find(", %rsp\n").unwrap_or_else(|| panic!("the stack back: {text}"));
             let frame = text.find(", %rbp\n").unwrap_or_else(|| panic!("the frame back: {text}"));
             assert!(stack < jump, "the stack goes back first at {level:?}: {text}");

@@ -403,6 +403,13 @@ jobs:
           WINEDEBUG: -all
           WINEPREFIX: ${{ runner.temp }}/wine
         run: tests/exec/windows/run.sh "$PWD/target/release/rucc --target=x86_64-windows-gnu" /usr/lib/wine/wine64
+      # __builtin_setjmp in one compiler's half of a program and __builtin_longjmp in the other's,
+      # both ways round, which is how Postgres's server and its extensions meet on MinGW-w64.
+      - name: the builtin setjmp pair across rucc and MinGW GCC
+        env:
+          WINEDEBUG: -all
+          WINEPREFIX: ${{ runner.temp }}/wine
+        run: tests/exec/across/run.sh "$PWD/target/release/rucc --target=x86_64-windows-gnu" x86_64-w64-mingw32-gcc /usr/lib/wine/wine64
       # Layer 6 of spec/cross-compile/14-testing.md for this row: the signature corpus with rucc
       # on one side of every call and MinGW GCC on the other, both ways round, run under Wine.
       - name: the differential abi against MinGW GCC
