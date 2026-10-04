@@ -533,10 +533,12 @@ impl CallGraph {
 /// may never run. An ordinary external definition can be replaced at load time by `LD_PRELOAD` or by
 /// an earlier object in the search order, which is what `Pic::replaceable` answers, and
 /// `-fno-semantic-interposition` and `-fvisibility=hidden` are the two ways a build says it will not
-/// happen.
+/// happen. `noipa` is the source saying so: the body is compiled, and nothing about a call to it is
+/// decided from what is in it, as if it were in another unit.
 pub(crate) fn trusted(func: &Func, pic: Pic) -> bool {
     !matches!(func.linkage, Linkage::Weak | Linkage::Common)
         && !pic.replaceable(func.linkage, func.visibility)
+        && !func.attrs.set.contains(AttrSet::NOIPA)
 }
 
 #[cfg(test)]

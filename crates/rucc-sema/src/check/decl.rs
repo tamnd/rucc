@@ -1511,6 +1511,7 @@ impl Checker<'_> {
             taken = &[
                 DeclFlags::RETAIN,
                 DeclFlags::NOINLINE,
+                DeclFlags::NOIPA,
                 DeclFlags::NO_STRICT_ALIASING,
                 DeclFlags::OPTIMIZE_NONE,
                 DeclFlags::WRAPV,

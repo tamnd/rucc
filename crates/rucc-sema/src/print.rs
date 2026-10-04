@@ -184,6 +184,9 @@ impl<'a> Printer<'a> {
         if node.flags.contains(DeclFlags::NOINLINE) {
             head.push_str(" noinline");
         }
+        if node.flags.contains(DeclFlags::NOIPA) {
+            head.push_str(" noipa");
+        }
         if node.flags.contains(DeclFlags::NO_STRICT_ALIASING) {
             head.push_str(" no_strict_aliasing");
         }

@@ -139,7 +139,9 @@
 
 use rucc_base::hash::{Map, Set};
 use rucc_base::{Interner, Symbol};
-use rucc_ir::{Block, Def, Extra, Flags, Func, FuncId, Inst, Linkage, Module, Opcode, Pic, Value};
+use rucc_ir::{
+    AttrSet, Block, Def, Extra, Flags, Func, FuncId, Inst, Linkage, Module, Opcode, Pic, Value,
+};
 
 use crate::cfg::Cfg;
 use crate::copy;
@@ -422,10 +424,12 @@ fn called(func: &Func, inst: Inst) -> Option<Symbol> {
 /// find another definition of first, so this body is not the one that runs however plainly it is
 /// written here, and `pic` is what carries that. A `static` is never such a name and neither is one
 /// marked hidden or protected, which is the same rule the code generator uses to decide which
-/// addresses go through the table and is why it is the same method.
+/// addresses go through the table and is why it is the same method. `noipa` asks for a body to be
+/// read as one that may not run, which is [`crate::callgraph::trusted`]'s rule too.
 fn trusted(func: &Func, pic: Pic) -> bool {
     !matches!(func.linkage, Linkage::Weak | Linkage::Common)
         && !pic.replaceable(func.linkage, func.visibility)
+        && !func.attrs.set.contains(AttrSet::NOIPA)
 }
 
 /// Which parameters each value in a body may be built out of.

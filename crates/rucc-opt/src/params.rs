@@ -74,7 +74,8 @@
 use rucc_base::Symbol;
 use rucc_base::hash::{Map, Set};
 use rucc_ir::{
-    Datum, Def, Extra, Facts, Flags, Func, FuncId, Inst, Linkage, Module, Opcode, Pic, Type, Value,
+    AttrSet, Datum, Def, Extra, Facts, Flags, Func, FuncId, Inst, Linkage, Module, Opcode, Pic,
+    Type, Value,
 };
 
 use crate::discharge::{Fact, about, alive, covers, derives, normal, settled};
@@ -92,9 +93,11 @@ pub fn annotate(module: &mut Module, pic: Pic) -> usize {
         .funcs()
         .filter(|&id| {
             let func = &module[id];
+            // `noipa` keeps what the callers know out of the body as well as the other way.
             !func.is_declaration()
                 && func.linkage == Linkage::Internal
                 && !reachable.contains(&func.name)
+                && !func.attrs.set.contains(AttrSet::NOIPA)
         })
         .collect();
     if closed.is_empty() {

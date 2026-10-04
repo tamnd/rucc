@@ -355,7 +355,10 @@ pub fn run(
             .filter_map(|id| {
                 let func = &module[id];
                 let set = func.attrs.set;
-                let kind = if set.contains(AttrSet::ALWAYS_INLINE) {
+                // `noipa` is never inlined, whatever else was written.
+                let kind = if set.contains(AttrSet::NOIPA) {
+                    return None;
+                } else if set.contains(AttrSet::ALWAYS_INLINE) {
                     Kind::Always
                 } else if limit.is_none()
                     || set.without(
