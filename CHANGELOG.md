@@ -4,6 +4,10 @@ All notable changes are recorded here. The format follows [Keep a Changelog](htt
 
 ## Unreleased
 
+## 0.20.0
+
+The minor release for the -O0 gate milestone (#392), whose last two items closed this week. The full `cargo xtask ci` passes, and ten thousand Csmith programs at `-O0` agree with gcc 16 at `-O0` with no wrong answers and nothing rucc refused to build. The two runs before that each found one miscompilation, and both are fixed below: a decided condition running its right side's effects on every path, and a bit-field reached through a comma promoting by its declared type rather than its width. The 0.19.1 tag never published, because its verify step stopped on a docs link that #2835 has since fixed, so its entries reach crates.io for the first time with this release.
+
 ### Added
 
 - `__attribute__((noipa))` keeps every call to the function a call, as in gcc 8 and later (#8), and `__has_attribute` answers yes for it. The gcc testsuite and glibc's tests write it on a function so that what a test measures is the function and not what the optimizer worked out from it. The body is not inlined, `always_inline` beside it included, no constant or range goes into its parameters or comes back as its answer, and nothing its body shows about memory, purity or its parameters is used where it is called. The call graph treats a `noipa` body as one it may not trust, the same gate an interposable definition goes through, so the interprocedural passes are held off by one test rather than one each. `noipa` written on something other than a function, or with an argument, is taken without gcc's warning or error, as `noinline` is.
