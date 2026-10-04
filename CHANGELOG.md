@@ -4,6 +4,10 @@ All notable changes are recorded here. The format follows [Keep a Changelog](htt
 
 ## Unreleased
 
+### Added
+
+- `__attribute__((common))` puts a tentative definition in the common block under `-fno-common`, as in gcc 13 (#8). The last declaration of the name that is not `extern` says whether it does, and `weak`, `section` and an initializer keep it out. When `common` and `nocommon` are both written, the one gcc applies first stands and the other is ignored with gcc's warning (E0703): the first in one list, the one after the declarator over the one before it, and an earlier declaration over a later one. Before, the attribute was ignored. A thread-local object written `common` is still an ordinary definition, where gcc puts it in `.tls_common`.
+
 ### Fixed
 
 - Constant propagation no longer takes the output of an `asm goto` as a value that has not been set yet. A variable that was either zero or that output could fold to zero and drop the code that used it, which lost the `rseq_trace_ip_fixup` tracepoint in the kernel's `kernel/entry/common.c`.

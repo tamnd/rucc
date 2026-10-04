@@ -772,6 +772,7 @@ impl Checker<'_> {
         // And it is a declaration, not the tentative definition `static int v;` would be without
         // it, since there is no object of its own here to lay out.
         let state = if weakref.is_some() { Definition::Declared } else { state };
+        let after = self.inlining(item.attrs);
         let mut declared = Declared {
             name,
             ty,
@@ -818,9 +819,9 @@ impl Checker<'_> {
             // Both places, for the reason `noreturn` above reads both.
             // And what `#pragma GCC optimize` has in effect, on a function only.
             inlining: self
-                .inlining(specs.attrs)
+                .inlining_before(specs.attrs, after)
                 .then(beside.inlining)
-                .then(self.inlining(item.attrs))
+                .then(after)
                 .then(self.pragma_optimize(if kind == DeclKind::Function {
                     specs.options
                 } else {
@@ -1644,6 +1645,32 @@ impl Checker<'_> {
         // rule: a prototype that says `always_inline` and a definition that does not is a
         // function gcc inlines.
         flags = flags.then(declared.inlining);
+        // `common` and `nocommon` are the exception, since they are about where the object is
+        // put and the definition is what puts it. The last declaration that is not `extern` says
+        // which, so `int x; int x __attribute__((common));` is in the common block and the same
+        // two the other way round is not, and an `extern` in between changes nothing, all of
+        // which is gcc 13's reading. One that contradicts what came before is ignored with gcc's
+        // warning, and then says no more than a plain declaration does.
+        let commons = [(DeclFlags::COMMON, "common"), (DeclFlags::NO_COMMON, "nocommon")];
+        let mut said = declared.inlining;
+        for (now, before) in [(commons[0], commons[1]), (commons[1], commons[0])] {
+            if said.contains(now.0) && node.flags.contains(before.0) {
+                let what = format!(
+                    "ignoring attribute '{}' because it conflicts with attribute '{}'",
+                    now.1, before.1
+                );
+                self.report(
+                    Diagnostic::warning(what, declared.span)
+                        .with_code("E0703")
+                        .note("previous declaration here", self.tast.decl_span(previous)),
+                );
+                said = said.with(now.0, false);
+            }
+        }
+        let decides = if declared.state == Definition::Declared { node.flags } else { said };
+        for (flag, _) in commons {
+            flags = flags.with(flag, decides.contains(flag));
+        }
         // One declaration saying it is enough, for the reason `weak` below is under that rule:
         // the header says where the name lives and the file that defines it need not repeat it.
         flags |= declared.dll;

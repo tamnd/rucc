@@ -384,6 +384,65 @@ fn a_designated_init_structure_given_a_value_by_position_is_said_by_default() {
     assert_eq!(String::from_utf8_lossy(&quiet.stderr), "");
 }
 
+/// Which of `names` are offered to the linker to merge, in IR the compiler wrote.
+fn merged<'a>(ir: &str, names: &[&'a str]) -> Vec<&'a str> {
+    let line = |name: &str| {
+        ir.lines()
+            .find(|line| line.contains(&format!("@{name} ")) || line.contains(&format!("@{name}:")))
+            .unwrap_or_else(|| panic!("no global {name} in\n{ir}"))
+            .to_owned()
+    };
+    names.iter().copied().filter(|name| line(name).contains("common")).collect()
+}
+
+/// gcc 13's answers: `common` puts a tentative definition in the common block whatever the command
+/// line says, the last declaration of the name that is not `extern` says whether it does, and
+/// `weak`, an initializer and a section of its own keep it out.
+#[test]
+fn common_puts_a_tentative_definition_in_the_common_block_under_fno_common() {
+    let source = "\
+__attribute__((common)) int written;
+int plain;
+int later; int later __attribute__((common));
+int first __attribute__((common)); int first;
+int kept __attribute__((common)); extern int kept;
+extern int declared __attribute__((common)); int declared;
+__attribute__((common)) int weakly __attribute__((weak));
+__attribute__((common)) int set = 1;
+__attribute__((common, section(\"apart\"))) int placed;
+";
+    let names =
+        ["written", "plain", "later", "first", "kept", "declared", "weakly", "set", "placed"];
+    let got = ir("common", &["-fno-common"], source);
+    assert_eq!(merged(&got, &names), ["written", "later", "kept"], "{got}");
+}
+
+/// Of `common` and `nocommon` the one gcc applies first stands and the other is ignored with its
+/// warning: the first in a list, the one after the declarator over the one before it, and the
+/// earlier declaration over the later one, which then says no more than a plain one would.
+#[test]
+fn common_and_nocommon_together_keep_the_one_gcc_applies_first() {
+    let source = "\
+int listed __attribute__((common, nocommon));
+__attribute__((common)) int around __attribute__((nocommon));
+int twice __attribute__((nocommon)); int twice __attribute__((common));
+";
+    let out = compile("common-nocommon", &["-O0", "--emit=ir", "-fcommon"], source);
+    let said = String::from_utf8_lossy(&out.stderr);
+    assert!(out.status.success(), "{said}");
+    let got = String::from_utf8_lossy(&out.stdout);
+    assert_eq!(merged(&got, &["listed", "around", "twice"]), ["listed", "twice"], "{got}");
+    let ignored = |now: &str, before: &str| {
+        let line = format!(
+            "warning: ignoring attribute '{now}' because it conflicts with attribute '{before}'"
+        );
+        lines_with(&said, &line).len()
+    };
+    assert_eq!(ignored("nocommon", "common"), 1, "{said}");
+    assert_eq!(ignored("common", "nocommon"), 2, "{said}");
+    assert_eq!(lines_with(&said, "previous declaration here").len(), 1, "{said}");
+}
+
 #[test]
 fn nocommon_keeps_a_tentative_definition_out_of_the_common_block_under_fcommon() {
     let got = ir("nocommon", &["-fcommon"], "int merged;\n__attribute__((nocommon)) int alone;\n");

@@ -909,10 +909,15 @@ impl Unit<'_> {
         // the plain case is: a thread-local one has to be a copy per thread, a weak or internal
         // one is not the linker's to merge, and one the program put in a section of its own is in
         // that section, which is gcc's answer too. And one written `nocommon` is the program saying
-        // this object is not to be merged whatever the command line says, and one written
-        // `retain` goes in a section of its own, which gcc gives it rather than merging it.
-        if self.common
-            && !node.flags.contains(DeclFlags::NO_COMMON)
+        // this object is not to be merged whatever the command line says, one written `common`
+        // says the opposite, and one written `retain` goes in a section of its own, which gcc
+        // gives it rather than merging it.
+        let common = if self.common {
+            !node.flags.contains(DeclFlags::NO_COMMON)
+        } else {
+            node.flags.contains(DeclFlags::COMMON)
+        };
+        if common
             && state == Definition::Tentative
             && global.linkage == IrLinkage::External
             && global.tls.is_none()
