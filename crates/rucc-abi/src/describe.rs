@@ -402,6 +402,13 @@ pub enum Test {
     /// edx:eax. A second member of any kind, even another `float`, turns it back into an
     /// ordinary eight byte structure.
     LoneFloat,
+    /// Exactly one scalar of any kind that fills the aggregate, however deeply it is wrapped.
+    ///
+    /// The wasm rule, which clang calls a single element structure. `struct { long long v; }`
+    /// travels as the `long long` it holds, and `struct { char c; }` as the `char`. A second
+    /// member, padding after the one member, or a `_Complex` of any kind turns it back into an
+    /// aggregate, which on wasm travels as the address of a copy.
+    SingleScalar,
     /// A `_Complex float` and nothing else, which is not the same as a structure of two floats.
     ///
     /// The i386 SysV return rule gcc and libgcc follow. Every structure comes back in memory there,
