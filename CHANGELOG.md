@@ -4,6 +4,10 @@ All notable changes are recorded here. The format follows [Keep a Changelog](htt
 
 ## Unreleased
 
+## 0.24.4
+
+The release gate passes again, so this is the first release since 0.21.0 to publish its archives. It carries `rangeswitch`, the switch clustering in its own crate, `rucc-legalize`, a value sent ahead to the stack that can still sit in a register a call destroys, and the other changes merged since 0.24.3.
+
 ### Added
 
 - A new pass, `rangeswitch`, turns a branch on comparisons of one value against constants that are too far apart for one bit test into a `switch` on the value, at `-O2` and `-O3` (#2987). It runs just before `rangetest` and takes the chains `rangetest` could only write as one test per interval, all run every time. PostgreSQL's `IsSharedRelation` is three chains of object ids between 1213 and 6303, and each is now a `switch` that the switch lowering makes a few comparisons and a bit test, which is what gcc and clang do. A chain is rewritten when the lowering would make fewer clusters of it than it has intervals, the rule gcc's `if-to-switch` pass uses.
