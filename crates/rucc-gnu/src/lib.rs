@@ -504,18 +504,17 @@ mod tests {
         let arm = Target::new("aarch64", "linux");
         assert_eq!(LINUX, Target::new("x86_64", "linux"));
         // `cdecl` is what 32-bit x86 does anyway, so it is there too.
-        assert_eq!(has_attribute("cdecl", i686, GCC), 1);
-        assert_eq!(has_attribute("regparm", i686, GCC), 1);
+        for name in ["cdecl", "stdcall", "fastcall", "regparm"] {
+            assert_eq!(has_attribute(name, i686, GCC), 1, "{name}");
+        }
         for name in ["cdecl", "stdcall", "fastcall", "thiscall", "regparm"] {
             assert_eq!(has_attribute(name, LINUX, GCC), 1, "{name}");
             assert_eq!(has_attribute(name, windows, GCC), 1, "{name}");
             assert_eq!(has_attribute(name, arm, GCC), 0, "{name}");
-            // gcc has them on 32-bit x86 too, where they mean something this compiler does
-            // not do yet, so the row says x86-64 and the answer there is no. `regparm` is done.
-            if name != "cdecl" && name != "regparm" {
-                assert_eq!(has_attribute(name, i686, GCC), 0, "{name}");
-            }
         }
+        // gcc has it on 32-bit x86 too, where it means something this compiler does not do
+        // yet, so the row says x86-64 and the answer there is no.
+        assert_eq!(has_attribute("thiscall", i686, GCC), 0);
         for name in ["ms_struct", "gcc_struct", "ms_abi", "sysv_abi"] {
             for target in [LINUX, windows, i686] {
                 assert_eq!(has_attribute(name, target, GCC), 1, "{name} on {target:?}");

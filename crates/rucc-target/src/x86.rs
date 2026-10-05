@@ -233,21 +233,37 @@ macro_rules! regparm {
 /// ordinary function of that unit with three registers. The default's own list has no entry for
 /// [`Convention::Target`], so that it is the set the command line adjusted rather than the one
 /// written here; every other member's list leads back to it.
+///
+/// `stdcall` and `fastcall` are in every family too, since gcc keeps both outside Windows. The
+/// first is the unit's own count of registers with the callee popping and the second names its own
+/// two registers, so each family has one of each, and both lead back to the family's list.
 macro_rules! family {
-    ($regs:ident, $own:ident, $foreign:ident, $default:expr) => {
-        static $own: [(Convention, &CallRegs); 4] = [
+    ($regs:ident, $own:ident, $foreign:ident, $default:expr, $stdcall:ident, $fastcall:ident) => {
+        static $own: [(Convention, &CallRegs); 6] = [
             (Convention::Regparm(0), &$regs[0]),
             (Convention::Regparm(1), &$regs[1]),
             (Convention::Regparm(2), &$regs[2]),
             (Convention::Regparm(3), &$regs[3]),
+            (Convention::Stdcall, &$stdcall),
+            (Convention::Fastcall, &$fastcall),
         ];
-        static $foreign: [(Convention, &CallRegs); 5] = [
+        static $foreign: [(Convention, &CallRegs); 7] = [
             (Convention::Target, $default),
             (Convention::Regparm(0), &$regs[0]),
             (Convention::Regparm(1), &$regs[1]),
             (Convention::Regparm(2), &$regs[2]),
             (Convention::Regparm(3), &$regs[3]),
+            (Convention::Stdcall, &$stdcall),
+            (Convention::Fastcall, &$fastcall),
         ];
+    };
+}
+
+/// A member of a family whose callee pops, with the description and argument registers given and
+/// the family's list of conventions, which is what a call it makes is looked up in.
+macro_rules! pops {
+    ($base:ident, $abi:expr, $args:ident, $conventions:ident) => {
+        CallRegs { abi: &$abi, int_args: &$args, conventions: Conventions(&$conventions), ..$base }
     };
 }
 
@@ -256,7 +272,11 @@ static REGPARM_0: [&CallRegs; 4] = [&SYSV, &REGPARM_0_1, &REGPARM_0_2, &REGPARM_
 static REGPARM_0_1: CallRegs = regparm!(SYSV, I386_SYSV_REGPARM, 1, REGPARM_1_ARGS, FOREIGN_0);
 static REGPARM_0_2: CallRegs = regparm!(SYSV, I386_SYSV_REGPARM, 2, REGPARM_2_ARGS, FOREIGN_0);
 static REGPARM_0_3: CallRegs = regparm!(SYSV, I386_SYSV_REGPARM, 3, REGPARM_3_ARGS, FOREIGN_0);
-family!(REGPARM_0, OWN_0, FOREIGN_0, &SYSV);
+static REGPARM_0_STDCALL: CallRegs =
+    pops!(SYSV, rucc_abi::abis::I386_SYSV_STDCALL, SYSV_INT_ARGS, FOREIGN_0);
+static REGPARM_0_FASTCALL: CallRegs =
+    pops!(SYSV, rucc_abi::abis::I386_SYSV_FASTCALL, FASTCALL_INT_ARGS, FOREIGN_0);
+family!(REGPARM_0, OWN_0, FOREIGN_0, &SYSV, REGPARM_0_STDCALL, REGPARM_0_FASTCALL);
 
 /// The family of a unit built with `-mregparm=1`.
 static REGPARM_1: [&CallRegs; 4] = [&REGPARM_1_0, &REGPARM_1_1, &REGPARM_1_2, &REGPARM_1_3];
@@ -264,7 +284,11 @@ static REGPARM_1_0: CallRegs = regparm!(SYSV, 0, FOREIGN_1);
 static REGPARM_1_1: CallRegs = regparm!(SYSV, I386_SYSV_REGPARM, 1, REGPARM_1_ARGS, OWN_1);
 static REGPARM_1_2: CallRegs = regparm!(SYSV, I386_SYSV_REGPARM, 2, REGPARM_2_ARGS, FOREIGN_1);
 static REGPARM_1_3: CallRegs = regparm!(SYSV, I386_SYSV_REGPARM, 3, REGPARM_3_ARGS, FOREIGN_1);
-family!(REGPARM_1, OWN_1, FOREIGN_1, &REGPARM_1_1);
+static REGPARM_1_STDCALL: CallRegs =
+    pops!(SYSV, rucc_abi::abis::I386_SYSV_REGPARM_STDCALL[0], REGPARM_1_ARGS, FOREIGN_1);
+static REGPARM_1_FASTCALL: CallRegs =
+    pops!(SYSV, rucc_abi::abis::I386_SYSV_FASTCALL, FASTCALL_INT_ARGS, FOREIGN_1);
+family!(REGPARM_1, OWN_1, FOREIGN_1, &REGPARM_1_1, REGPARM_1_STDCALL, REGPARM_1_FASTCALL);
 
 /// The family of a unit built with `-mregparm=2`.
 static REGPARM_2: [&CallRegs; 4] = [&REGPARM_2_0, &REGPARM_2_1, &REGPARM_2_2, &REGPARM_2_3];
@@ -272,7 +296,11 @@ static REGPARM_2_0: CallRegs = regparm!(SYSV, 0, FOREIGN_2);
 static REGPARM_2_1: CallRegs = regparm!(SYSV, I386_SYSV_REGPARM, 1, REGPARM_1_ARGS, FOREIGN_2);
 static REGPARM_2_2: CallRegs = regparm!(SYSV, I386_SYSV_REGPARM, 2, REGPARM_2_ARGS, OWN_2);
 static REGPARM_2_3: CallRegs = regparm!(SYSV, I386_SYSV_REGPARM, 3, REGPARM_3_ARGS, FOREIGN_2);
-family!(REGPARM_2, OWN_2, FOREIGN_2, &REGPARM_2_2);
+static REGPARM_2_STDCALL: CallRegs =
+    pops!(SYSV, rucc_abi::abis::I386_SYSV_REGPARM_STDCALL[1], REGPARM_2_ARGS, FOREIGN_2);
+static REGPARM_2_FASTCALL: CallRegs =
+    pops!(SYSV, rucc_abi::abis::I386_SYSV_FASTCALL, FASTCALL_INT_ARGS, FOREIGN_2);
+family!(REGPARM_2, OWN_2, FOREIGN_2, &REGPARM_2_2, REGPARM_2_STDCALL, REGPARM_2_FASTCALL);
 
 /// The family of a unit built with `-mregparm=3`, which is every 32 bit x86 Linux kernel.
 static REGPARM_3: [&CallRegs; 4] = [&REGPARM_3_0, &REGPARM_3_1, &REGPARM_3_2, &REGPARM_3_3];
@@ -280,7 +308,11 @@ static REGPARM_3_0: CallRegs = regparm!(SYSV, 0, FOREIGN_3);
 static REGPARM_3_1: CallRegs = regparm!(SYSV, I386_SYSV_REGPARM, 1, REGPARM_1_ARGS, FOREIGN_3);
 static REGPARM_3_2: CallRegs = regparm!(SYSV, I386_SYSV_REGPARM, 2, REGPARM_2_ARGS, FOREIGN_3);
 static REGPARM_3_3: CallRegs = regparm!(SYSV, I386_SYSV_REGPARM, 3, REGPARM_3_ARGS, OWN_3);
-family!(REGPARM_3, OWN_3, FOREIGN_3, &REGPARM_3_3);
+static REGPARM_3_STDCALL: CallRegs =
+    pops!(SYSV, rucc_abi::abis::I386_SYSV_REGPARM_STDCALL[2], REGPARM_3_ARGS, FOREIGN_3);
+static REGPARM_3_FASTCALL: CallRegs =
+    pops!(SYSV, rucc_abi::abis::I386_SYSV_FASTCALL, FASTCALL_INT_ARGS, FOREIGN_3);
+family!(REGPARM_3, OWN_3, FOREIGN_3, &REGPARM_3_3, REGPARM_3_STDCALL, REGPARM_3_FASTCALL);
 
 /// [`SYSV`] under `-freg-struct-return`, which returns a structure of one, two, four or eight bytes
 /// in registers. See [`rucc_abi::abis::I386_SYSV_REG_STRUCT`].
@@ -299,7 +331,22 @@ static REG_STRUCT_0_2: CallRegs =
     regparm!(SYSV_REG, I386_SYSV_REGPARM_REG_STRUCT, 2, REGPARM_2_ARGS, REG_FOREIGN_0);
 static REG_STRUCT_0_3: CallRegs =
     regparm!(SYSV_REG, I386_SYSV_REGPARM_REG_STRUCT, 3, REGPARM_3_ARGS, REG_FOREIGN_0);
-family!(REG_STRUCT_0, REG_OWN_0, REG_FOREIGN_0, &SYSV_REG);
+static REG_STRUCT_0_STDCALL: CallRegs =
+    pops!(SYSV_REG, rucc_abi::abis::I386_SYSV_REG_STRUCT_STDCALL, SYSV_INT_ARGS, REG_FOREIGN_0);
+static REG_STRUCT_0_FASTCALL: CallRegs = pops!(
+    SYSV_REG,
+    rucc_abi::abis::I386_SYSV_REG_STRUCT_FASTCALL,
+    FASTCALL_INT_ARGS,
+    REG_FOREIGN_0
+);
+family!(
+    REG_STRUCT_0,
+    REG_OWN_0,
+    REG_FOREIGN_0,
+    &SYSV_REG,
+    REG_STRUCT_0_STDCALL,
+    REG_STRUCT_0_FASTCALL
+);
 
 /// Under `-freg-struct-return`, the family of a unit built with `-mregparm=1`.
 static REG_STRUCT_1: [&CallRegs; 4] =
@@ -311,7 +358,26 @@ static REG_STRUCT_1_2: CallRegs =
     regparm!(SYSV_REG, I386_SYSV_REGPARM_REG_STRUCT, 2, REGPARM_2_ARGS, REG_FOREIGN_1);
 static REG_STRUCT_1_3: CallRegs =
     regparm!(SYSV_REG, I386_SYSV_REGPARM_REG_STRUCT, 3, REGPARM_3_ARGS, REG_FOREIGN_1);
-family!(REG_STRUCT_1, REG_OWN_1, REG_FOREIGN_1, &REG_STRUCT_1_1);
+static REG_STRUCT_1_STDCALL: CallRegs = pops!(
+    SYSV_REG,
+    rucc_abi::abis::I386_SYSV_REGPARM_REG_STRUCT_STDCALL[0],
+    REGPARM_1_ARGS,
+    REG_FOREIGN_1
+);
+static REG_STRUCT_1_FASTCALL: CallRegs = pops!(
+    SYSV_REG,
+    rucc_abi::abis::I386_SYSV_REG_STRUCT_FASTCALL,
+    FASTCALL_INT_ARGS,
+    REG_FOREIGN_1
+);
+family!(
+    REG_STRUCT_1,
+    REG_OWN_1,
+    REG_FOREIGN_1,
+    &REG_STRUCT_1_1,
+    REG_STRUCT_1_STDCALL,
+    REG_STRUCT_1_FASTCALL
+);
 
 /// Under `-freg-struct-return`, the family of a unit built with `-mregparm=2`.
 static REG_STRUCT_2: [&CallRegs; 4] =
@@ -323,7 +389,26 @@ static REG_STRUCT_2_2: CallRegs =
     regparm!(SYSV_REG, I386_SYSV_REGPARM_REG_STRUCT, 2, REGPARM_2_ARGS, REG_OWN_2);
 static REG_STRUCT_2_3: CallRegs =
     regparm!(SYSV_REG, I386_SYSV_REGPARM_REG_STRUCT, 3, REGPARM_3_ARGS, REG_FOREIGN_2);
-family!(REG_STRUCT_2, REG_OWN_2, REG_FOREIGN_2, &REG_STRUCT_2_2);
+static REG_STRUCT_2_STDCALL: CallRegs = pops!(
+    SYSV_REG,
+    rucc_abi::abis::I386_SYSV_REGPARM_REG_STRUCT_STDCALL[1],
+    REGPARM_2_ARGS,
+    REG_FOREIGN_2
+);
+static REG_STRUCT_2_FASTCALL: CallRegs = pops!(
+    SYSV_REG,
+    rucc_abi::abis::I386_SYSV_REG_STRUCT_FASTCALL,
+    FASTCALL_INT_ARGS,
+    REG_FOREIGN_2
+);
+family!(
+    REG_STRUCT_2,
+    REG_OWN_2,
+    REG_FOREIGN_2,
+    &REG_STRUCT_2_2,
+    REG_STRUCT_2_STDCALL,
+    REG_STRUCT_2_FASTCALL
+);
 
 /// Under `-freg-struct-return`, the family of a unit built with `-mregparm=3`, which is every 32 bit x86 Linux kernel.
 static REG_STRUCT_3: [&CallRegs; 4] =
@@ -335,7 +420,26 @@ static REG_STRUCT_3_2: CallRegs =
     regparm!(SYSV_REG, I386_SYSV_REGPARM_REG_STRUCT, 2, REGPARM_2_ARGS, REG_FOREIGN_3);
 static REG_STRUCT_3_3: CallRegs =
     regparm!(SYSV_REG, I386_SYSV_REGPARM_REG_STRUCT, 3, REGPARM_3_ARGS, REG_OWN_3);
-family!(REG_STRUCT_3, REG_OWN_3, REG_FOREIGN_3, &REG_STRUCT_3_3);
+static REG_STRUCT_3_STDCALL: CallRegs = pops!(
+    SYSV_REG,
+    rucc_abi::abis::I386_SYSV_REGPARM_REG_STRUCT_STDCALL[2],
+    REGPARM_3_ARGS,
+    REG_FOREIGN_3
+);
+static REG_STRUCT_3_FASTCALL: CallRegs = pops!(
+    SYSV_REG,
+    rucc_abi::abis::I386_SYSV_REG_STRUCT_FASTCALL,
+    FASTCALL_INT_ARGS,
+    REG_FOREIGN_3
+);
+family!(
+    REG_STRUCT_3,
+    REG_OWN_3,
+    REG_FOREIGN_3,
+    &REG_STRUCT_3_3,
+    REG_STRUCT_3_STDCALL,
+    REG_STRUCT_3_FASTCALL
+);
 
 /// The convention of a unit on i386 System V built with `-mregparm=registers`, and with
 /// `-freg-struct-return` when `struct_in_registers` is set, which is [`SYSV`] or [`SYSV_REG`]
@@ -745,7 +849,33 @@ mod tests {
             assert_eq!(regs.abi.cleanup, rucc_abi::Cleanup::Caller);
             assert_eq!(fastcall.chkstk, regs.chkstk);
         }
-        assert!(SYSV.under(Convention::Stdcall).is_none(), "Linux ignores the attribute");
+    }
+
+    #[test]
+    fn linux_has_stdcall_and_fastcall_too_and_stdcall_keeps_the_units_registers() {
+        // gcc keeps both conventions outside Windows. `stdcall` there is whatever the unit's own
+        // convention is with the callee popping, so under `-mregparm=3` it has three registers,
+        // and `fastcall` has ecx and edx whatever the unit says. Measured with i686-linux-gnu-gcc 13.
+        for reg_struct in [false, true] {
+            for own in 0..=3u8 {
+                let unit = regparm(own, reg_struct).expect("0 to 3 are counts");
+                let stdcall = unit.under(Convention::Stdcall).expect("stdcall");
+                let fastcall = unit.under(Convention::Fastcall).expect("fastcall");
+                assert_eq!(stdcall.int_args, unit.int_args, "regparm {own}");
+                assert_eq!(fastcall.int_args, [ECX, EDX]);
+                assert_eq!(stdcall.abi.cleanup, rucc_abi::Cleanup::Callee);
+                assert_eq!(fastcall.abi.cleanup, rucc_abi::Cleanup::Callee);
+                assert_eq!(unit.abi.cleanup, rucc_abi::Cleanup::Caller);
+                // The return rule is the unit's, which is what `-freg-struct-return` changes.
+                assert_eq!(stdcall.abi.returns, unit.abi.returns);
+                assert_eq!(fastcall.abi.returns, unit.abi.returns);
+                // And a call either of them makes is planned in the unit's family.
+                for from in [stdcall, fastcall] {
+                    assert!(std::ptr::eq(from.under(Convention::Target).expect("own"), unit));
+                    assert!(std::ptr::eq(from.under(Convention::Stdcall).expect("again"), stdcall));
+                }
+            }
+        }
     }
 
     #[test]

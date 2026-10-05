@@ -31,10 +31,16 @@ fn fixture(what: &str, source: &str) -> PathBuf {
 
 /// The compiler run on that source for that target, writing assembly to its standard output.
 fn run(what: &str, target: &str, source: &str) -> Output {
+    run_with(what, target, &[], source)
+}
+
+/// [`run`] with more options on the command line.
+fn run_with(what: &str, target: &str, flags: &[&str], source: &str) -> Output {
     let path = fixture(what, source);
     let out = Command::new(env!("CARGO_BIN_EXE_rucc"))
         .arg(format!("--target={target}"))
         .args(["-O2", "-S", "-o", "-"])
+        .args(flags)
         .arg(&path)
         .output()
         .expect("the compiler is built before its own tests run");
@@ -44,7 +50,12 @@ fn run(what: &str, target: &str, source: &str) -> Output {
 
 /// The listing, from a fixture the compiler has to accept.
 fn asm(what: &str, target: &str, source: &str) -> String {
-    let out = run(what, target, source);
+    asm_with(what, target, &[], source)
+}
+
+/// [`asm`] with more options on the command line.
+fn asm_with(what: &str, target: &str, flags: &[&str], source: &str) -> String {
+    let out = run_with(what, target, flags, source);
     assert!(
         out.status.success(),
         "the compiler refused the fixture:\n{}",
@@ -420,8 +431,7 @@ fn an_eight_byte_aligned_structure_goes_at_the_next_word_on_32_bit_windows() {
     assert!(!has(before, &[", 20(%esp)"]), "{c:?}\n{text}");
 }
 
-/// Two of the three on one function is gcc's error, and on 32-bit Linux they are not this
-/// compiler's conventions and are left as they are.
+/// Two of the three on one function is gcc's error.
 #[test]
 fn two_32_bit_conventions_on_one_function_are_refused() {
     let (ok, said) =
@@ -431,4 +441,88 @@ fn two_32_bit_conventions_on_one_function_are_refused() {
     let (ok, said) =
         diagnose("i686-cdecl", WINDOWS_32, "__attribute__((cdecl)) int f(int);\nint f(int);\n");
     assert!(ok && said.is_empty(), "{said}");
+}
+
+/// 32-bit Linux, where gcc keeps `stdcall` and `fastcall` as well.
+const LINUX_32: &str = "i686-linux-gnu";
+
+/// `stdcall` and `fastcall` on i386 Linux, as i686-linux-gnu-gcc 13 has them: the callee pops
+/// with `ret $n`, `fastcall` passes the first two small integers in `ecx` and `edx`, a structure
+/// comes back through an address that is counted in `n` with the arguments, and no name is
+/// decorated, since that is a Windows thing.
+#[test]
+fn stdcall_and_fastcall_pop_their_arguments_on_linux_too() {
+    let text = asm(
+        "i686-linux-conventions",
+        LINUX_32,
+        "struct q { int a[4]; };\n\
+         __attribute__((stdcall, noinline)) int s(int a, int b) { return a - b; }\n\
+         __attribute__((fastcall, noinline)) int f(int a, int b, int c) { return a - b - c; }\n\
+         __attribute__((stdcall, noinline)) struct q r(int a, int b) { struct q x = {{a, b}}; return x; }\n\
+         __attribute__((cdecl, noinline)) int c(int a) { return a; }\n\
+         int g(void) { return s(1, 2) + f(3, 4, 5) + r(6, 7).a[1] + c(8); }\n",
+    );
+    let s = body(&text, "s");
+    assert!(has(&s, &["ret", "$8"]), "{s:?}\n{text}");
+    let f = body(&text, "f");
+    assert!(has(&f, &["ret", "$4"]), "{f:?}\n{text}");
+    assert!(has(&f, &["%ecx"]) && has(&f, &["%edx"]), "{f:?}");
+    let r = body(&text, "r");
+    assert!(has(&r, &["ret", "$12"]), "{r:?}\n{text}");
+    let c = body(&text, "c");
+    assert!(c.contains(&"ret"), "{c:?}\n{text}");
+    let g = body(&text, "g");
+    for callee in ["s", "f", "r", "c"] {
+        assert!(g.iter().any(|line| *line == format!("call\t{callee}")), "{callee}: {g:?}");
+    }
+    assert!(has(&g, &["$3", "%ecx"]) && has(&g, &["$4", "%edx"]), "{g:?}");
+}
+
+/// Under `-mregparm=3` a `stdcall` function has the unit's three registers and pops whatever is
+/// left on the stack, which for three integers is nothing, and `fastcall` keeps its own two.
+#[test]
+fn stdcall_takes_the_units_registers_under_mregparm() {
+    let text = asm_with(
+        "i686-linux-regparm-stdcall",
+        LINUX_32,
+        &["-mregparm=3"],
+        "__attribute__((stdcall, noinline)) int s(int a, int b, int c, int d) { return a - b - c - d; }\n\
+         __attribute__((fastcall, noinline)) int f(int a, int b, int c) { return a - b - c; }\n\
+         int g(void) { return s(1, 2, 3, 4) + f(5, 6, 7); }\n",
+    );
+    let s = body(&text, "s");
+    assert!(has(&s, &["ret", "$4"]), "{s:?}\n{text}");
+    let f = body(&text, "f");
+    assert!(has(&f, &["ret", "$4"]), "{f:?}\n{text}");
+    let g = body(&text, "g");
+    assert!(has(&g, &["$1", "%eax"]) && has(&g, &["$2", "%edx"]), "{g:?}");
+    assert!(has(&g, &["$3", "%ecx"]), "{g:?}");
+    assert!(has(&g, &["$5", "%ecx"]) && has(&g, &["$6", "%edx"]), "{g:?}");
+}
+
+/// `fastcall` with `regparm` is gcc's error. `stdcall` with `regparm` is a convention gcc has,
+/// and the one this compiler has is the count the unit gives it, so another count is refused
+/// rather than compiled as the wrong convention.
+#[test]
+fn regparm_goes_with_stdcall_and_not_with_fastcall() {
+    let (ok, said) = diagnose(
+        "i686-fastcall-regparm",
+        LINUX_32,
+        "__attribute__((fastcall, regparm(2))) int f(int, int);\n",
+    );
+    assert!(!ok, "{said}");
+    assert!(said.contains("fastcall and regparm attributes are not compatible"), "{said}");
+    let (ok, said) = diagnose(
+        "i686-stdcall-regparm",
+        LINUX_32,
+        "__attribute__((regparm(2), stdcall)) int f(int, int);\n",
+    );
+    assert!(!ok && said.contains("E0519"), "{said}");
+    let out = run_with(
+        "i686-stdcall-regparm-own",
+        LINUX_32,
+        &["-mregparm=2"],
+        "__attribute__((regparm(2), stdcall)) int f(int a, int b) { return a + b; }\n",
+    );
+    assert!(out.status.success(), "{}", String::from_utf8_lossy(&out.stderr));
 }

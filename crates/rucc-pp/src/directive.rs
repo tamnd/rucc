@@ -3688,8 +3688,7 @@ mod tests {
 
     /// gcc 16's answers for the 32-bit conventions, `ms_struct` and the DLL attributes, which
     /// depend on the target: measured on x86-64 Linux, with `-m32`, with mingw-w64 gcc and with
-    /// AArch64 gcc. The conventions on 32-bit x86 are the one place this is no where gcc says
-    /// yes, because there they change the call and this compiler does not change it yet.
+    /// AArch64 gcc.
     #[test]
     fn the_answers_for_the_x86_and_windows_attributes_are_the_targets() {
         let asked = "__has_attribute(stdcall) __has_attribute(__cdecl__) \
@@ -3699,7 +3698,7 @@ mod tests {
         for (triple, answer) in [
             ("x86_64-unknown-linux-gnu", "1 1 1 1 1 0 0 0"),
             ("x86_64-w64-windows-gnu", "1 1 1 1 1 1 1 0"),
-            ("i686-unknown-linux-gnu", "0 1 0 1 1 0 0 0"),
+            ("i686-unknown-linux-gnu", "1 1 1 1 1 0 0 0"),
             ("aarch64-unknown-linux-gnu", "0 0 0 0 0 0 0 0"),
             ("aarch64-w64-windows-gnu", "0 0 0 1 1 1 1 0"),
         ] {

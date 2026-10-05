@@ -480,6 +480,87 @@ const fn regparm(name: &'static str, registers: u32) -> AbiDescription {
     }
 }
 
+/// i386 System V `stdcall`, which gcc keeps outside Windows too: [`I386_SYSV`] with the callee
+/// taking the argument area off the stack with `ret $n`.
+///
+/// The address a structure comes back through is the first word of that area and is counted in
+/// `n` with the rest, so a function returning one ends in `ret $4` and more rather than in the
+/// `ret $4` cdecl has. A unit built with `-mregparm=` gives a `stdcall` function its registers as
+/// well, which is [`I386_SYSV_REGPARM_STDCALL`].
+pub static I386_SYSV_STDCALL: AbiDescription = AbiDescription {
+    name: "i386 SysV stdcall",
+    return_pointer: ReturnPointer::FirstArgument,
+    cleanup: Cleanup::Callee,
+    ..I386_SYSV
+};
+
+/// [`I386_SYSV_REGPARM`] for a `stdcall` function: the same registers, and the callee takes what
+/// is left in the argument area off the stack. When nothing is left that is a plain `ret`.
+pub static I386_SYSV_REGPARM_STDCALL: [AbiDescription; 3] = [
+    AbiDescription {
+        name: "i386 SysV stdcall regparm(1)",
+        cleanup: Cleanup::Callee,
+        ..regparm("", 1)
+    },
+    AbiDescription {
+        name: "i386 SysV stdcall regparm(2)",
+        cleanup: Cleanup::Callee,
+        ..regparm("", 2)
+    },
+    AbiDescription {
+        name: "i386 SysV stdcall regparm(3)",
+        cleanup: Cleanup::Callee,
+        ..regparm("", 3)
+    },
+];
+
+/// [`I386_SYSV_STDCALL`] under `-freg-struct-return`.
+pub static I386_SYSV_REG_STRUCT_STDCALL: AbiDescription = AbiDescription {
+    name: "i386 SysV stdcall -freg-struct-return",
+    returns: &REG_STRUCT_RETURNS,
+    ..I386_SYSV_STDCALL
+};
+
+/// [`I386_SYSV_REGPARM_STDCALL`] under `-freg-struct-return`.
+pub static I386_SYSV_REGPARM_REG_STRUCT_STDCALL: [AbiDescription; 3] = [
+    AbiDescription {
+        name: "i386 SysV stdcall regparm(1) -freg-struct-return",
+        returns: &REG_STRUCT_RETURNS,
+        ..I386_SYSV_REGPARM_STDCALL[0]
+    },
+    AbiDescription {
+        name: "i386 SysV stdcall regparm(2) -freg-struct-return",
+        returns: &REG_STRUCT_RETURNS,
+        ..I386_SYSV_REGPARM_STDCALL[1]
+    },
+    AbiDescription {
+        name: "i386 SysV stdcall regparm(3) -freg-struct-return",
+        returns: &REG_STRUCT_RETURNS,
+        ..I386_SYSV_REGPARM_STDCALL[2]
+    },
+];
+
+/// i386 System V `fastcall`, which is [`I386_MINGW_FASTCALL`]'s arguments with [`I386_SYSV`]'s
+/// return value.
+///
+/// The first two integers or pointers of a word or less are in ecx and edx, a `double` is on the
+/// stack and leaves the registers to the integers after it, and a `long long` or a structure is
+/// on the stack and takes the registers with it, all as i686-linux-gnu-gcc 13 has it. A structure
+/// comes back through an address in ecx whatever its size, which `-freg-struct-return` changes as
+/// it does for cdecl, and `-mregparm=` changes nothing, since `fastcall` names its own registers.
+pub static I386_SYSV_FASTCALL: AbiDescription = AbiDescription {
+    name: "i386 SysV fastcall",
+    returns: I386_SYSV.returns,
+    ..I386_MINGW_FASTCALL
+};
+
+/// [`I386_SYSV_FASTCALL`] under `-freg-struct-return`.
+pub static I386_SYSV_REG_STRUCT_FASTCALL: AbiDescription = AbiDescription {
+    name: "i386 SysV fastcall -freg-struct-return",
+    returns: &REG_STRUCT_RETURNS,
+    ..I386_MINGW_FASTCALL
+};
+
 /// i686 Windows as mingw-w64 has it, with gcc or clang.
 ///
 /// Arguments are what they are on i386 SysV: every one of them in the argument area, in source
@@ -624,9 +705,11 @@ pub enum Convention {
     Ms,
     /// SysV AMD64, on an x86-64 target that is Windows.
     Sysv,
-    /// `stdcall` on 32-bit Windows: cdecl's arguments with the callee taking them off the stack.
+    /// `stdcall` on 32-bit x86: cdecl's arguments with the callee taking them off the stack.
+    /// Outside Windows that is the unit's own convention with the callee popping, so under
+    /// `-mregparm=` the first words are in registers here too.
     Stdcall,
-    /// `fastcall` on 32-bit Windows: `stdcall` with the first two small integers in ecx and edx.
+    /// `fastcall` on 32-bit x86: `stdcall` with the first two small integers in ecx and edx.
     Fastcall,
     /// gcc's `regparm(n)` on 32-bit x86 outside Windows, with the first `n` words of arguments in
     /// eax, edx and ecx. `regparm(0)` is the plain convention, and is a convention of its own only
@@ -659,7 +742,8 @@ impl Convention {
     /// The one the target already follows comes back as [`Convention::Target`], which is the
     /// whole of the normalising the paragraph on the type promises. Only x86-64 has the pair, and
     /// gcc knows neither name anywhere else. `stdcall`, `fastcall` and `cdecl` are answered on
-    /// 32-bit Windows, the one target here that has them.
+    /// 32-bit x86, Linux as well as Windows, since gcc keeps both conventions on both. `cdecl` is
+    /// the target's own on both, and under `-mregparm=` it keeps the registers, as gcc's does.
     #[must_use]
     pub fn asked(target: TargetTuple, name: &str) -> Option<Self> {
         let windows = target.os() == Os::Windows;
@@ -668,15 +752,16 @@ impl Convention {
             (Arch::X86_64, "ms_abi") => Some(Self::Ms),
             (Arch::X86_64, "sysv_abi") if windows => Some(Self::Sysv),
             (Arch::X86_64, "sysv_abi") => Some(Self::Target),
-            (Arch::X86, "stdcall") if windows => Some(Self::Stdcall),
-            (Arch::X86, "fastcall") if windows => Some(Self::Fastcall),
-            (Arch::X86, "cdecl") if windows => Some(Self::Target),
+            (Arch::X86, "stdcall") => Some(Self::Stdcall),
+            (Arch::X86, "fastcall") => Some(Self::Fastcall),
+            (Arch::X86, "cdecl") => Some(Self::Target),
             _ => None,
         }
     }
 
-    /// Whether this is one of the 32-bit Windows conventions whose callee takes the arguments
-    /// off the stack, which is also what decorates a function's name with how many bytes that is.
+    /// Whether this is one of the 32-bit x86 conventions whose callee takes the arguments off the
+    /// stack, which on Windows is also what decorates a function's name with how many bytes that
+    /// is.
     #[must_use]
     pub const fn callee_pops(self) -> bool {
         matches!(self, Self::Stdcall | Self::Fastcall)
@@ -734,7 +819,9 @@ pub static WASM32_BASIC_C: AbiDescription = AbiDescription {
 
 /// The ABI a function of that convention follows on this target, which is [`for_target`] for the
 /// target's own, the other description on x86-64 for the other one, and the `stdcall` or
-/// `fastcall` description of the same runtime on 32-bit Windows.
+/// `fastcall` description of the same runtime on 32-bit x86. Outside Windows that is the one for a
+/// unit with no `-mregparm=` and no `-freg-struct-return`, and the others are reached through the
+/// registers of the unit, which `rucc_target::TargetInfo::call_under` asks instead.
 ///
 /// Only the passing half of the ABI changes. What a type is stays the target's, so a `long double`
 /// is still the eighty bit x87 format in sixteen bytes in an `ms_abi` function on Linux, and the
@@ -758,6 +845,8 @@ pub fn for_convention(
                 (_, true) => &I386_MSVC_FASTCALL,
             })
         }
+        (Convention::Stdcall, Arch::X86) => Some(&I386_SYSV_STDCALL),
+        (Convention::Fastcall, Arch::X86) => Some(&I386_SYSV_FASTCALL),
         (Convention::Regparm(0), Arch::X86) if target.os() != Os::Windows => Some(&I386_SYSV),
         (Convention::Regparm(n @ 1..=3), Arch::X86) if target.os() != Os::Windows => {
             Some(&I386_SYSV_REGPARM[usize::from(n) - 1])
@@ -782,6 +871,16 @@ pub static DESCRIBED: &[&AbiDescription] = &[
     &I386_SYSV_REGPARM_REG_STRUCT[0],
     &I386_SYSV_REGPARM_REG_STRUCT[1],
     &I386_SYSV_REGPARM_REG_STRUCT[2],
+    &I386_SYSV_STDCALL,
+    &I386_SYSV_REGPARM_STDCALL[0],
+    &I386_SYSV_REGPARM_STDCALL[1],
+    &I386_SYSV_REGPARM_STDCALL[2],
+    &I386_SYSV_REG_STRUCT_STDCALL,
+    &I386_SYSV_REGPARM_REG_STRUCT_STDCALL[0],
+    &I386_SYSV_REGPARM_REG_STRUCT_STDCALL[1],
+    &I386_SYSV_REGPARM_REG_STRUCT_STDCALL[2],
+    &I386_SYSV_FASTCALL,
+    &I386_SYSV_REG_STRUCT_FASTCALL,
     &I386_MINGW,
     &I386_MSVC,
     &I386_MINGW_STDCALL,

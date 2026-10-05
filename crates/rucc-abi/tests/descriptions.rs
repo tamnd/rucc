@@ -21,8 +21,8 @@
 
 use rucc_abi::abis::{
     AAPCS64, DESCRIBED, I386_MINGW, I386_MINGW_FASTCALL, I386_MINGW_STDCALL, I386_MSVC,
-    I386_MSVC_FASTCALL, I386_MSVC_STDCALL, I386_SYSV, SYSV_AMD64, WIN64, WINDOWS_ARM64,
-    for_convention, for_target,
+    I386_MSVC_FASTCALL, I386_MSVC_STDCALL, I386_SYSV, I386_SYSV_FASTCALL, I386_SYSV_STDCALL,
+    SYSV_AMD64, WIN64, WINDOWS_ARM64, for_convention, for_target,
 };
 use rucc_abi::{
     AbiDescription, Arg, Banks, BitInts, Cleanup, Convention, Format, Narrow, Pass, ReturnPointer,
@@ -251,7 +251,7 @@ fn the_other_x86_64_convention_is_the_other_description_and_nothing_else_has_one
 }
 
 #[test]
-fn thirty_two_bit_windows_has_stdcall_and_fastcall_and_nothing_else_does() {
+fn thirty_two_bit_x86_has_stdcall_and_fastcall_and_nothing_else_does() {
     let parse = |triple: &str| triple.parse().expect("a row in the target table");
     let (mingw, msvc, linux) = (
         parse("i686-pc-windows-gnu"),
@@ -264,27 +264,35 @@ fn thirty_two_bit_windows_has_stdcall_and_fastcall_and_nothing_else_does() {
         assert_eq!(Convention::asked(target, "cdecl"), Some(Convention::Target));
         assert_eq!(Convention::asked(target, "ms_abi"), None);
     }
-    assert_eq!(Convention::asked(linux, "stdcall"), None);
+    // gcc keeps both on i386 Linux too, and `cdecl` there is the unit's own convention.
+    assert_eq!(Convention::asked(linux, "stdcall"), Some(Convention::Stdcall));
+    assert_eq!(Convention::asked(linux, "fastcall"), Some(Convention::Fastcall));
+    assert_eq!(Convention::asked(linux, "cdecl"), Some(Convention::Target));
     let x86_64 = parse("x86_64-pc-windows-gnu");
     assert_eq!(Convention::asked(x86_64, "stdcall"), None);
-    assert!(for_convention(linux, Convention::Stdcall).is_none());
     assert!(for_convention(x86_64, Convention::Fastcall).is_none());
     let described = |target, convention| for_convention(target, convention).expect("described");
     assert!(std::ptr::eq(described(mingw, Convention::Stdcall), &I386_MINGW_STDCALL));
     assert!(std::ptr::eq(described(mingw, Convention::Fastcall), &I386_MINGW_FASTCALL));
     assert!(std::ptr::eq(described(msvc, Convention::Stdcall), &I386_MSVC_STDCALL));
     assert!(std::ptr::eq(described(msvc, Convention::Fastcall), &I386_MSVC_FASTCALL));
+    assert!(std::ptr::eq(described(linux, Convention::Stdcall), &I386_SYSV_STDCALL));
+    assert!(std::ptr::eq(described(linux, Convention::Fastcall), &I386_SYSV_FASTCALL));
     // The callee cleans up on both and on nothing else, and what comes back where is cdecl's.
     for abi in DESCRIBED {
-        let pops =
-            [&I386_MINGW_STDCALL, &I386_MINGW_FASTCALL, &I386_MSVC_STDCALL, &I386_MSVC_FASTCALL]
-                .iter()
-                .any(|callee| std::ptr::eq(*callee, *abi));
+        let pops = abi.name.contains("stdcall") || abi.name.contains("fastcall");
         let cleanup = if pops { Cleanup::Callee } else { Cleanup::Caller };
         assert_eq!(abi.cleanup, cleanup, "{}", abi.name);
     }
     assert_eq!(I386_MINGW_STDCALL.returns, I386_MINGW.returns);
     assert_eq!(I386_MSVC_FASTCALL.returns, I386_MSVC.returns);
+    assert_eq!(I386_SYSV_STDCALL.returns, I386_SYSV.returns);
+    assert_eq!(I386_SYSV_FASTCALL.returns, I386_SYSV.returns);
+    // On Linux a structure's address is popped with the rest of the arguments, so `ret $n`
+    // counts it, where cdecl there pops it alone.
+    assert_eq!(I386_SYSV_STDCALL.return_pointer, ReturnPointer::FirstArgument);
+    assert_eq!(I386_SYSV.return_pointer, ReturnPointer::FirstArgumentPopped);
+    assert_eq!(I386_SYSV_FASTCALL.arguments, I386_MINGW_FASTCALL.arguments);
     assert!(Convention::Stdcall.callee_pops() && Convention::Fastcall.callee_pops());
     assert!(!Convention::Target.callee_pops() && !Convention::Ms.callee_pops());
 }
