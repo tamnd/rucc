@@ -77,6 +77,9 @@ pub(in crate::check) struct Packing {
 /// that does not exist.
 pub(in crate::check) const BIGGEST_ALIGNMENT: u32 = 16;
 
+/// What `alias` says of an argument that is not a string, which `weakref` shares.
+const ALIAS_STRING: &str = "'alias' requires a string naming the symbol to alias";
+
 /// The attributes that keep a definition nothing in the file refers to.
 ///
 /// Every one of them says that something outside what the compiler can see reaches the
@@ -668,10 +671,120 @@ impl Checker<'_> {
                 continue;
             }
             if self.gnu_name(&attr) == "alias" {
-                return self.alias_argument(attr);
+                return self.alias_argument(attr, ALIAS_STRING);
             }
         }
         None
+    }
+
+    /// The resolver an `ifunc` attribute names, once gcc's rules about where one may be written
+    /// have been checked.
+    ///
+    /// `ifunc("resolver")` makes the function's own name an indirect function: the symbol is
+    /// typed `@gnu_indirect_function` and set to the resolver, and the dynamic linker calls the
+    /// resolver once and binds every call to the function it hands back. That is an alias with
+    /// another symbol type, so the name goes where `alias` puts its target and the declaration is
+    /// marked as the one kind of alias that is not a second name for the same code. Whether the
+    /// resolver is defined is settled with the aliases, and what it returns once the file is
+    /// checked, by [`Self::check_resolvers`].
+    ///
+    /// The number of arguments is refused first, on whatever it is written on, and the attribute
+    /// is ignored with gcc's warning on anything but a function at file scope. Only ELF has the
+    /// symbol type, so on a COFF or Mach-O target the function would have no body at all, and it
+    /// is refused in gcc's words. `lists` are the specifiers' attributes and the declarator's.
+    pub(in crate::check) fn resolver(
+        &mut self,
+        lists: &[AttrList],
+        kind: DeclKind,
+        span: Span,
+    ) -> Option<StrId> {
+        let ast = self.ast;
+        let attr = lists
+            .iter()
+            .flat_map(|&list| ast[list].iter().copied())
+            .find(|attr| self.gnu_name(attr) == "ifunc")?;
+        let args = ast[attr.args].len();
+        if args != 1 {
+            let what = "wrong number of arguments specified for 'ifunc' attribute";
+            let note = format!("expected 1, found {args}");
+            let refused = Diagnostic::error(what, attr.span).with_code("E0819");
+            self.report(refused.note(note, attr.span));
+            return None;
+        }
+        if kind != DeclKind::Function || !self.scopes.at_file_scope() {
+            let what = "'ifunc' attribute ignored";
+            self.report(Diagnostic::warning(what, attr.span).with_code("E0703"));
+            return None;
+        }
+        let resolver = self.alias_argument(attr, "attribute 'ifunc' argument not a string")?;
+        if self.cx.target.object_format != ObjectFormat::Elf {
+            let what = "'ifunc' is not supported on this target";
+            let note = "only an ELF object has a symbol type for a function a resolver picks";
+            self.report(Diagnostic::error(what, span).with_code("E0821").note(note, attr.span));
+            return None;
+        }
+        Some(resolver)
+    }
+
+    /// What every `ifunc` in the file names, checked against the function it stands for once
+    /// the whole file is known, since the resolver may be defined below the declaration.
+    ///
+    /// gcc's rule is about what the resolver returns. Something that is not a pointer is not an
+    /// address the dynamic linker could bind a call to, and is refused. A pointer to another
+    /// function type, or to an object, is a call that would go wrong at run time and is warned
+    /// about under `-Wattribute-alias`, and `void *` is what glibc's resolvers return and is
+    /// taken as it is. A resolver that is an object is refused as an alias between a function
+    /// and a variable. A resolver the file never declares is left to the aliases, which report a
+    /// target that is not defined.
+    pub(crate) fn check_resolvers(&mut self) {
+        let mut ifuncs = self.tast.ifuncs();
+        ifuncs.sort_by_key(|decl| decl.index());
+        for decl in ifuncs {
+            let node = self.tast[decl].clone();
+            let Some(written) = node.alias else { continue };
+            let spelling: String = self.tast[written]
+                .elements
+                .iter()
+                .filter_map(|&unit| char::from_u32(unit))
+                .collect();
+            let Some(resolver) = self.cx.names.find(&spelling) else { continue };
+            let Some(found) = self.file_scope_decl(resolver) else { continue };
+            let at = self.tast.decl_span(decl);
+            let there = self.tast.decl_span(found);
+            let name = node.name.map_or("", |name| self.text(name)).to_owned();
+            let target = self.tast[found].clone();
+            if target.kind != DeclKind::Function {
+                let what = format!("'{name}' alias between function and variable is not supported");
+                let refused = Diagnostic::error(what, at).with_code("E0821");
+                self.report(refused.note("aliased declaration here", there));
+                continue;
+            }
+            let declared = self.types.canonical(target.ty);
+            let TypeKind::Function(signature) = self.types.kind(declared) else { continue };
+            let returned = self.types.signature(signature).ret;
+            let wanted = self.types.pointer(node.ty);
+            let wanted_spelled = self.spell(wanted);
+            let note = "resolver indirect function declared here";
+            match rucc_types::pointee(&self.types, returned) {
+                None => {
+                    let what =
+                        format!("'ifunc' resolver for '{name}' must return '{wanted_spelled}'");
+                    let refused = Diagnostic::error(what, there).with_code("E0821");
+                    self.report(refused.note(note, at));
+                }
+                Some(pointee) => {
+                    if rucc_types::is_void(&self.types, pointee)
+                        || rucc_types::compatible(&self.types, pointee, node.ty)
+                    {
+                        continue;
+                    }
+                    let what =
+                        format!("'ifunc' resolver for '{name}' should return '{wanted_spelled}'");
+                    let warned = Diagnostic::warning(what, there).with_code("E0820");
+                    self.report(warned.note(note, at));
+                }
+            }
+        }
     }
 
     /// The symbol a `weakref` attribute makes this declaration a weak reference to, once gcc's
@@ -747,7 +860,7 @@ impl Checker<'_> {
         // the declaration is then an ordinary one, which is what is left once gcc has said so.
         let own = match self.ast[attr.args].first() {
             None => None,
-            Some(_) => Some(self.alias_argument(attr)?),
+            Some(_) => Some(self.alias_argument(attr, ALIAS_STRING)?),
         };
         if (own.is_some() && alias.is_some()) || initialized {
             let what = format!("'{spelled}' defined both normally and as 'alias' attribute");
@@ -768,9 +881,11 @@ impl Checker<'_> {
     }
 
     /// The string one `alias` was written with, and nothing when it was not written with one.
-    fn alias_argument(&mut self, attr: Attribute) -> Option<StrId> {
+    ///
+    /// `what` is the sentence for an argument that is not a string, which `ifunc` words as gcc
+    /// does and `alias` as this compiler always has.
+    fn alias_argument(&mut self, attr: Attribute, what: &str) -> Option<StrId> {
         let args = self.ast[attr.args].to_vec();
-        let what = "'alias' requires a string naming the symbol to alias";
         let expr = match args.first() {
             Some(AttrArg::Expr(expr)) => *expr,
             // `alias` written bare, and `alias(foo)` where `foo` is not an expression, which the
@@ -789,7 +904,8 @@ impl Checker<'_> {
         // A symbol is bytes, and a wide literal holds code units rather than bytes, so there is
         // nothing an assembler could be handed. `asm` refuses one for the same reason.
         if self.tast[id].encoding != Encoding::Plain {
-            let wide = "wide string literal in 'alias'";
+            let named = self.gnu_name(&attr);
+            let wide = format!("wide string literal in '{named}'");
             self.report(Diagnostic::error(wide, attr.span).with_code("E0696"));
             return None;
         }

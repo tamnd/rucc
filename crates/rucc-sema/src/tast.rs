@@ -210,6 +210,7 @@ pub struct Tast {
     function_names: Set<StrId>,
     alloc_sizes: Map<DeclId, AllocSize>,
     patchable: Map<DeclId, (u32, u32)>,
+    ifuncs: Set<DeclId>,
     defined_at: Map<DeclId, Span>,
     notices: Map<DeclId, Notices>,
     asms: Vec<Asm>,
@@ -517,6 +518,28 @@ impl Tast {
     #[must_use]
     pub fn patchable(&self, decl: DeclId) -> Option<(u32, u32)> {
         self.patchable.get(&decl).copied()
+    }
+
+    /// Records that the second name this function's `alias` is for is its resolver, which
+    /// `__attribute__((ifunc("resolver")))` says: the symbol is an indirect function, and what
+    /// the dynamic linker binds a call to is whatever the resolver hands back.
+    ///
+    /// A set beside the tree for the reason [`Tast::record_alloc_size`] is a map: a few libraries'
+    /// string functions are the writers, and the declaration's own `alias` already holds the name.
+    pub fn record_ifunc(&mut self, decl: DeclId) {
+        self.ifuncs.insert(decl);
+    }
+
+    /// Whether this declaration's `alias` names a resolver rather than a definition.
+    #[must_use]
+    pub fn is_ifunc(&self, decl: DeclId) -> bool {
+        self.ifuncs.contains(&decl)
+    }
+
+    /// Every declaration whose `alias` names a resolver, in no particular order.
+    #[must_use]
+    pub fn ifuncs(&self) -> Vec<DeclId> {
+        self.ifuncs.iter().copied().collect()
     }
 
     /// The arguments an `alloc_size` attribute named on this function, and nothing for almost

@@ -399,6 +399,15 @@ impl Checker<'_> {
         };
         let id = self.merge(declared);
         self.record_section(id, section);
+        // A function `ifunc` made an indirect function has its body in whatever the resolver
+        // picks, so a body here defines it a second time, which is what gcc calls it, whether the
+        // attribute is on this definition or on a declaration above it.
+        let resolver = self.resolver(&[specs.attrs], DeclKind::Function, span);
+        if resolver.is_some() || self.tast.is_ifunc(id) {
+            let what = format!("redefinition of '{}'", self.text(name));
+            let note = "the 'ifunc' attribute already defines it as an indirect function";
+            self.report(Diagnostic::error(what, span).with_code("E0821").note(note, span));
+        }
         // The return type's name, kept for the debug information the way an object's is below.
         if let Some((name, of)) = spelled {
             self.tast.record_spelling(id, name, of);
@@ -773,6 +782,20 @@ impl Checker<'_> {
             Some(target) => (Some(target), None),
             None => (asm_label, alias),
         };
+        // An indirect function is an alias whose target is the resolver, so the name goes where
+        // the alias's does and the declaration is marked once it has an id. One declaration that
+        // asks for both is gcc's error about a name defined twice. See [`Checker::resolver`].
+        let resolver = self.resolver(&[specs.attrs, item.attrs], kind, span);
+        let (alias, ifunc) = match (alias, resolver) {
+            (Some(_), Some(_)) => {
+                let spelled = self.text(name).to_owned();
+                let what = format!("'{spelled}' defined both normally and as 'alias' attribute");
+                self.report(Diagnostic::error(what, span).with_code("E0783"));
+                (alias, false)
+            }
+            (None, Some(_)) if weakref.is_none() => (resolver, true),
+            _ => (alias, false),
+        };
         // And it is a declaration, not the tentative definition `static int v;` would be without
         // it, since there is no object of its own here to lay out.
         let state = if weakref.is_some() { Definition::Declared } else { state };
@@ -911,6 +934,9 @@ impl Checker<'_> {
         self.record_notices(id, &[specs.attrs, item.attrs], kind);
         self.cf_checked(&[specs.attrs, item.attrs], kind);
         self.record_patchable(id, &[specs.attrs, item.attrs], kind);
+        if ifunc {
+            self.tast.record_ifunc(id);
+        }
         // Both places, for the reason `noreturn` above reads both. glibc writes it after the
         // declarator, as `extern void *malloc (size_t __size) __attr_alloc_size ((1));`.
         let merged = self.tast[id].ty;
@@ -1028,6 +1054,7 @@ impl Checker<'_> {
         }
         // A typedef is not a function, whatever type it names.
         self.cf_checked(&[specs.attrs, item.attrs], DeclKind::Type);
+        self.resolver(&[specs.attrs, item.attrs], DeclKind::Type, span);
         if item.init.is_some() {
             let spelled = self.text(name).to_owned();
             self.report(

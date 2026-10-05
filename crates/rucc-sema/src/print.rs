@@ -144,7 +144,8 @@ impl<'a> Printer<'a> {
             head.push_str(&format!(" register {}", self.tast[register].spell()));
         }
         if let Some(target) = node.alias {
-            head.push_str(&format!(" alias {}", self.tast[target].spell()));
+            let word = if self.tast.is_ifunc(id) { "ifunc" } else { "alias" };
+            head.push_str(&format!(" {word} {}", self.tast[target].spell()));
         }
         // Only the reading that changes what is emitted is written, since the other two both mean
         // that the definition is emitted and telling them apart is the merge's business.

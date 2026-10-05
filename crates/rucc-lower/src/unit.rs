@@ -1506,6 +1506,20 @@ impl Unit<'_> {
             return;
         }
         let mut alias = Alias::new(name, target);
+        // `ifunc` names the resolver rather than the code, and only a function is one. An object
+        // under the resolver's name is gcc's error about a function aliased to a variable, which
+        // the checker has said where it could see the object and is said here where only the
+        // symbols could, a name given with `__asm__` being the one way to get there.
+        if self.tast.is_ifunc(decl) {
+            if !matches!(self.module.lookup(target), Some(SymbolRef::Func(_))) {
+                let spelled = self.names.resolve(name).to_owned();
+                let what =
+                    format!("'{spelled}' alias between function and variable is not supported");
+                self.diagnostics.push(Diagnostic::error(what, span).with_code("E0821"));
+                return;
+            }
+            alias.kind = AliasKind::IFunc;
+        }
         alias.linkage = self.told(decl, self.tast[decl].linkage);
         // Its own answer, because the attribute is written on the alias and an alias is a symbol
         // of its own. `weak, alias, visibility("hidden")` is a name a library keeps to itself
