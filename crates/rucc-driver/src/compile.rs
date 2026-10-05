@@ -1040,7 +1040,7 @@ fn optimize(
 
 /// Runs the back end over every function in `module` and writes what came out.
 ///
-/// One machine function per definition in the module, in the order the module holds them, every
+/// One machine function per definition in the module, in the order gcc would write them, every
 /// register physical and every frame offset a constant. A declaration has no body and is skipped,
 /// because there is nothing in it to compile.
 ///
@@ -1341,10 +1341,9 @@ fn generate(
     let unlikely = if heat { rucc_opt::unlikely::functions(module) } else { Default::default() };
     let mut funcs = Vec::new();
     let mut complaints = Vec::new();
-    for id in module.funcs() {
-        if module[id].is_declaration() {
-            continue;
-        }
+    // The order gcc writes them in, which objtool reads. See `rucc_opt::expand`.
+    let reorder = opts.toplevel_reorder.unwrap_or_else(|| opts.opt_level.runs_optimizer());
+    for id in rucc_opt::expand::order(module, reorder) {
         let func = &mut module[id];
         if func.section.is_none() && unlikely.contains(&id) {
             let section = if opts.function_sections {
@@ -4211,6 +4210,35 @@ decl #0 x : int object external static defined
         let first = text.find("mfunc @a").expect("the first function");
         let second = text.find("mfunc @b").expect("the second function");
         assert!(first < second, "{text}");
+    }
+
+    /// The order the bodies are written in and not the order the names are declared in, at
+    /// `-O0`, and gcc's callees ahead of their callers above it. The names are 6.12's
+    /// init/main.c, where `poking_init` is weak, declared in a header and replaced by the one in
+    /// arch/x86/mm/init.c, and objtool reports its code when the link leaves it ahead of every
+    /// symbol in `.init.text`.
+    #[test]
+    fn the_bodies_come_out_in_the_order_gcc_writes_them() {
+        let source = "void poking_init(void);\nint later(int);\n\
+            static int set_reset_devices(char *s) { return *s; }\n\
+            int (*setup)(char *) = set_reset_devices;\n\
+            __attribute__((weak)) void poking_init(void) { }\n\
+            int start(char *s) { poking_init(); return later(*s) + set_reset_devices(s); }\n\
+            __attribute__((noinline)) int later(int x) { return x * 3; }\n";
+        let order = |level| {
+            let mut opts = options();
+            opts.emit = EmitKind::Asm;
+            opts.opt_level = level;
+            let result = run(&opts, source);
+            assert_eq!(result.messages, Vec::<String>::new());
+            let text = result.text().to_owned();
+            text.lines()
+                .filter_map(|line| line.strip_prefix("\t.type\t")?.strip_suffix(", @function"))
+                .collect::<Vec<_>>()
+                .join(" ")
+        };
+        assert_eq!(order(rucc_session::OptLevel::O0), "set_reset_devices poking_init start later");
+        assert_eq!(order(rucc_session::OptLevel::O2), "set_reset_devices poking_init later start");
     }
 
     /// The target reaches the back end, so the same C is different instructions on Windows.

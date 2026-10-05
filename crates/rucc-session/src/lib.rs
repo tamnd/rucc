@@ -2139,6 +2139,11 @@ pub struct Options {
     /// `-freorder-functions` and its `-fno-` form. `None` is a command line that said neither, and
     /// then it is on from `-O2`, the size levels included, which is where gcc turns it on.
     pub reorder_functions: Option<bool>,
+    /// Whether the functions are written in the order gcc's `-ftoplevel-reorder` writes them,
+    /// callees ahead of their callers where that can be done, rather than in the order the source
+    /// wrote them, from `-ftoplevel-reorder` and its `-fno-` form. `None` is a command line that
+    /// said neither, and then it is on from `-O1`, which is where gcc turns it on.
+    pub toplevel_reorder: Option<bool>,
     /// Whether the instructions of a block are put in the order the machine finishes soonest, from
     /// `-fschedule-insns2` and `-fno-schedule-insns2`.
     ///
@@ -2754,6 +2759,7 @@ impl Options {
             reorder_blocks: None,
             partition_blocks: None,
             reorder_functions: None,
+            toplevel_reorder: None,
             schedule_insns: None,
             sibling_calls: None,
             align_loops: None,
