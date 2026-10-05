@@ -68,6 +68,9 @@ pub const CLASSES: &str = "e-classes";
 /// form cheaper.
 const EXTRACTED: &str = "value read as an older form of it, which costs less than the newest";
 
+/// Recorded with how many forms were kept for instruction selection, per [`Func::add_form`].
+pub const KEPT: &str = "forms kept for instruction selection";
+
 /// Recorded once when the rules stop because the function spent its budget.
 const SPENT: &str = "rewrite rules stopped, the function spent its e-graph budget";
 
@@ -233,6 +236,7 @@ impl Classes {
         let mut cost: Map<Value, Cost> = Map::default();
         let mut chosen: Map<Value, Value> = Map::default();
         let mut visited: Set<Value> = Set::default();
+        let mut kept = 0_u32;
         for &block in order {
             for inst in func.insts(block).collect::<Vec<Inst>>() {
                 let Some(result) = func[inst].first_result else { continue };
@@ -269,6 +273,15 @@ impl Classes {
                 if best != newest {
                     stats.optimized(EXTRACTED);
                 }
+                // The members not extracted are what section 12.3's third arm keeps, which is
+                // every instruction in the class but the one read. Whether one may stand in for
+                // the value is asked when selection reads it, since passes run in between.
+                for &member in candidates {
+                    let Def::Result { inst: made, .. } = func[member].def else { continue };
+                    if member != best && func[made].opcode != Opcode::IConst {
+                        kept += u32::from(func.add_form(best, made));
+                    }
+                }
                 for form in
                     std::iter::once(result).chain(forms.get(&result).into_iter().flatten().copied())
                 {
@@ -278,6 +291,7 @@ impl Classes {
                 }
             }
         }
+        stats.record(Kind::Note, KEPT, kept);
         if !chosen.is_empty() {
             substitute(func, &chosen);
         }
@@ -499,6 +513,12 @@ block0(%0: i32, %1: i32):
     /// two members no rule would have put together and so to say which one wins, and the
     /// extraction run with the x86-64 costs.
     fn extract(body: &str) -> (String, crate::Stats) {
+        let (module, names, stats) = extracted(body);
+        (rucc_ir::print(&module, &names), stats)
+    }
+
+    /// What [`extract`] prints, as the module.
+    fn extracted(body: &str) -> (rucc_ir::Module, Interner, crate::Stats) {
         let mut names = Interner::new();
         let text = format!("{HEAD}{body}");
         let mut module = rucc_ir::parse(&text, &mut names).expect("the fixture parses");
@@ -517,7 +537,7 @@ block0(%0: i32, %1: i32):
         let table = rucc_cost::for_arch(Arch::X86_64).map(|costs| costs.table(Goal::Speed));
         let mut stats = crate::Stats::new();
         classes.extract(func, dom, table, &order, &Map::default(), &mut stats);
-        (rucc_ir::print(&module, &names), stats)
+        (module, names, stats)
     }
 
     #[test]
@@ -526,6 +546,18 @@ block0(%0: i32, %1: i32):
         let (out, stats) = extract(ABOVE);
         assert!(out.contains("= sub %2, %2"), "{out}");
         assert_eq!(stats.count(Kind::Optimized, super::EXTRACTED), 1);
+    }
+
+    #[test]
+    fn the_members_not_extracted_are_kept_for_selection() {
+        // The multiply is read as the add, and selection may still ask for the multiply.
+        let (module, _, stats) = extracted(ABOVE);
+        let func = &module[module.funcs().next().expect("one function")];
+        let entry = func.entry().expect("a body");
+        let insts: Vec<_> = func.insts(entry).collect();
+        let add = func[insts[0]].first_result.expect("the add has a result");
+        assert_eq!(func.forms(add).collect::<Vec<_>>(), [insts[1]]);
+        assert_eq!(stats.count(Kind::Note, super::KEPT), 1);
     }
 
     #[test]

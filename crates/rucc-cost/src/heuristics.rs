@@ -740,6 +740,14 @@ pub const CONS_CASCADE: u32 = 8;
 /// the largest function in rucc-corpus or SQLite has instructions.
 pub const EGRAPH_NODES: u32 = 65_536;
 
+/// How many forms of one operand instruction selection offers the matcher, besides the one the
+/// rewriter extracted.
+///
+/// Section 12.3's third arm keeps the e-classes alive into selection, and every form offered is
+/// another walk of the rule trie for every plan the operand is part of. Two is what the address
+/// and the comparison cases need, and the average class in rucc-corpus holds fewer than that.
+pub const SELECT_FORMS: u32 = 2;
+
 /// How many times the conventional rewriter runs `simplify` over a function before it stops.
 ///
 /// Arm A of section 12.3 applies the rules to a bounded fixpoint, which is how a peephole pass that
@@ -1310,6 +1318,14 @@ pub const ALL: &[Constant] = &[
         value: 65_536,
         unit: "forms",
         document: "12.7",
+        gcc: "",
+        provenance: Provenance::Chosen,
+    },
+    Constant {
+        name: "SELECT_FORMS",
+        value: 2,
+        unit: "forms",
+        document: "12.3",
         gcc: "",
         provenance: Provenance::Chosen,
     },

@@ -79,6 +79,7 @@ use std::fmt;
 
 use rucc_base::hash::{Map, Set};
 use rucc_base::{Interner, Symbol};
+use rucc_cost::heuristics;
 use rucc_diag::Span;
 use rucc_ir::{
     Abi, AsmOperand, AsmOperands, AttrSet, Block, Def, Extra, Flags, FloatPred, Func, Inst,
@@ -1320,6 +1321,19 @@ struct Decided {
 /// grows with the square of the block, and on a Csmith program with long straight line functions
 /// it was most of a compile at `-O0`.
 type Matched = Vec<Option<Option<(Plan, Match<Term>)>>>;
+
+/// How many other forms of one operand the selector shows the matcher, per
+/// [`heuristics::SELECT_FORMS`].
+const FORMS: usize = heuristics::SELECT_FORMS as usize;
+
+/// Whether an operand shown this way is one a match takes, so that the instruction computing it
+/// has nothing left to write once every reader has taken it.
+///
+/// A form takes the instruction that really computes the operand, not the form, since the form is
+/// not in the function and computes the same thing.
+fn takes(shown: Shown) -> bool {
+    matches!(shown, Shown::Expand | Shown::Form(_))
+}
 
 /// The instruction in front of an assignment that starts a declaration on a value, and the first
 /// machine instruction after it once the block is filled.
@@ -8064,7 +8078,7 @@ impl<'a> Lowering<'a> {
             let Some(plan) = plan else { continue };
             let args = &self.source[self.source[inst].args];
             for (index, &arg) in args.iter().take(MAX_ARGS).enumerate() {
-                if plan[index] == Shown::Expand {
+                if takes(plan[index]) {
                     *taken.entry(arg).or_default() += 1;
                 }
             }
@@ -8073,7 +8087,7 @@ impl<'a> Lowering<'a> {
             let Some(plan) = plan else { continue };
             let args = &self.source[self.source[inst].args];
             for (index, &arg) in args.iter().take(MAX_ARGS).enumerate() {
-                if plan[index] == Shown::Expand && taken[&arg] < self.uses[arg.index()] {
+                if takes(plan[index]) && taken[&arg] < self.uses[arg.index()] {
                     return Some(arg);
                 }
             }
@@ -8114,15 +8128,24 @@ impl<'a> Lowering<'a> {
     /// changing slowest. The plans are counted out rather than collected, because this is asked
     /// for every instruction that is selected and the lists it used to build were an allocation
     /// or two per operand.
+    ///
+    /// An operand that may be shown as the instruction that computed it may also be shown as any
+    /// other form of it the e-graph arm kept, which is section 12.3's third arm. The forms come
+    /// after the instruction itself, so a rule that takes what the rewriter extracted is still the
+    /// one that fires, and a form is only reached when nothing takes the extracted one.
     fn plans(&self, inst: Inst, refused: &Set<Value>) -> impl Iterator<Item = Plan> {
         let args = &self.source[self.source[inst].args];
-        let mut ways = [[Shown::Reg; 3]; MAX_ARGS];
+        let mut ways = [[Shown::Reg; 3 + FORMS]; MAX_ARGS];
         let mut counts = [1; MAX_ARGS];
         for (index, &arg) in args.iter().enumerate().take(MAX_ARGS) {
             let mut count = 0;
             if self.foldable(inst, arg, refused) {
                 ways[index][count] = Shown::Expand;
                 count += 1;
+                for form in (0..FORMS).zip(self.source.forms(arg)).map(|(form, _)| form) {
+                    ways[index][count] = Shown::Form(u8::try_from(form).unwrap_or(u8::MAX));
+                    count += 1;
+                }
             }
             if Terms::new(self.source, inst, PLAIN, self.address_bits()).constant(arg).is_some() {
                 ways[index][count] = Shown::Const;
@@ -8181,7 +8204,7 @@ impl<'a> Lowering<'a> {
         args.iter()
             .take(MAX_ARGS)
             .enumerate()
-            .filter(move |&(index, _)| plan[index] == Shown::Expand)
+            .filter(move |&(index, _)| takes(plan[index]))
             .filter_map(move |(_, &arg)| match self.source[arg].def {
                 Def::Result { inst, .. } => Some(inst),
                 Def::Param { .. } => None,
@@ -9042,6 +9065,83 @@ mod tests {
             "mfunc @f {\nblock0:\n    %0:gpr($rdi) = x64.arg_val_32\n    \
              %1:gpr($rsi) = x64.arg_val_64\n    x64.mov_mr_32 %0, [%1]\n}\n"
         );
+    }
+
+    /// A form the e-graph arm kept, made the way it makes one: an instruction that reads what it
+    /// reads and is not in any block.
+    fn form(func: &mut Func, value: Value, opcode: Opcode, reads: &[Value]) {
+        let ty = func[value].ty;
+        let args = func.push_values(reads);
+        let made = func.create_inst(InstData { args, ..InstData::new(opcode) }, &[ty], Span::DUMMY);
+        assert!(func.add_form(value, made));
+    }
+
+    #[test]
+    fn an_access_takes_the_form_of_its_address_the_class_holds_when_the_extracted_one_does_not_fold()
+     {
+        let i64 = Type::int(64);
+        let (mut names, mut func, block, args) = blank(&[i64]);
+        let mut build = Builder::new(&mut func, block);
+        let eight = build.iconst(i64, 8);
+        let field = build.binary(Opcode::Or, args[0], eight, Flags::default());
+        build.load(i64, field, plain(), Flags::default());
+
+        // The address was extracted as an `or` of a constant, which is an addition of it when the
+        // low bits of the base are known to be clear, and an access has a rule for an addition and
+        // none for an `or`. So the `or` is written and the access reads what it wrote.
+        let alone = lower(&mut names, &func);
+        assert!(alone.contains("x64.or_"), "{alone}");
+        assert!(alone.contains("x64.mov_rm_64 [%1]"), "{alone}");
+
+        // With the addition in the class the access takes that, and the `or` is never written.
+        form(&mut func, field, Opcode::Add, &[args[0], eight]);
+        assert_eq!(
+            lower(&mut names, &func),
+            "mfunc @f {\nblock0:\n    %0:gpr($rdi) = x64.arg_val_64\n    \
+             %1:gpr = x64.mov_rm_64 [%0 + 8]\n}\n"
+        );
+    }
+
+    #[test]
+    fn a_comparison_against_zero_takes_the_difference_the_class_holds() {
+        let i64 = Type::int(64);
+        let (mut names, mut func, block, args) = blank(&[i64]);
+        let mut build = Builder::new(&mut func, block);
+        let less = build.iconst(i64, -5);
+        let five = build.iconst(i64, 5);
+        let zero = build.iconst(i64, 0);
+        let moved = build.binary(Opcode::Add, args[0], less, Flags::default());
+        build.icmp(rucc_ir::IntPred::Eq, moved, zero);
+
+        // Extracted as an addition of minus five, which the comparison has no rule to take, so
+        // the addition is written and compared against zero.
+        let alone = lower(&mut names, &func);
+        assert!(alone.contains("x64.add_ri_64"), "{alone}");
+        assert!(alone.contains("x64.cmp_set_e_ri_64 %1, 0"), "{alone}");
+
+        // The class holds the subtraction of five, and a comparison against zero of a difference
+        // is the comparison of the two things subtracted, which is one instruction.
+        form(&mut func, moved, Opcode::Sub, &[args[0], five]);
+        let text = lower(&mut names, &func);
+        assert!(!text.contains("x64.add_ri_64"), "{text}");
+        assert!(text.contains("x64.cmp_set_e_ri_64 %0, 5"), "{text}");
+    }
+
+    #[test]
+    fn a_form_is_not_taken_when_the_extracted_one_folds() {
+        let i64 = Type::int(64);
+        let (mut names, mut func, block, args) = blank(&[i64]);
+        let mut build = Builder::new(&mut func, block);
+        let twelve = build.iconst(i64, 12);
+        let field = build.binary(Opcode::Add, args[0], twelve, Flags::default());
+        build.load(i64, field, plain(), Flags::default());
+        let alone = lower(&mut names, &func);
+
+        // An `or` in the class changes nothing, because the extracted form is offered first and
+        // the access already has a rule for it.
+        form(&mut func, field, Opcode::Or, &[args[0], twelve]);
+        assert_eq!(lower(&mut names, &func), alone);
+        assert!(alone.contains("[%0 + 12]"), "{alone}");
     }
 
     #[test]

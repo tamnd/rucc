@@ -178,6 +178,9 @@ pub struct Func {
     /// Where each instruction some start is after was when a pass took it out, as the block and
     /// the instruction in front of it. See [`Func::start_place`].
     gone: Map<Inst, (Block, Option<Inst>)>,
+    /// Other instructions that compute a value, for instruction selection to choose from. See
+    /// [`Func::forms`].
+    forms: Map<Value, Vec<Inst>>,
 
     first_block: Option<Block>,
     last_block: Option<Block>,
@@ -231,6 +234,7 @@ impl Func {
             unplaced: Map::default(),
             arg_groups: Map::default(),
             gone: Map::default(),
+            forms: Map::default(),
             first_block: None,
             last_block: None,
         }
@@ -963,6 +967,65 @@ impl Func {
     /// Every value something is known about, in value order.
     pub fn known(&self) -> impl Iterator<Item = (Value, Facts)> + '_ {
         self.facts.iter().copied()
+    }
+
+    /// Records that an instruction computes the same value as the one that does, for instruction
+    /// selection to choose from.
+    ///
+    /// Section 12.3 of `spec/optimizer/12-egraph.md` names this the classes kept alive into
+    /// selection. The e-graph arm of the rewriter puts one form of each value in the function, and
+    /// the other members of its class are instructions nothing reads any more, which `dce` takes
+    /// out. This keeps them where selection can ask for them. Nothing reads one as an instruction
+    /// of the function, and neither the verifier nor the text sees the table.
+    ///
+    /// Says whether the form is new, since the same one may be found from more than one value.
+    pub fn add_form(&mut self, value: Value, form: Inst) -> bool {
+        let forms = self.forms.entry(value).or_default();
+        let new = !forms.contains(&form);
+        if new {
+            forms.push(form);
+        }
+        new
+    }
+
+    /// The instructions recorded as computing the value that may still stand in for it.
+    ///
+    /// A form stands in when it has the value's type, writes one result and no memory, and reads
+    /// nothing but constants and what the instruction that computes the value reads. Those operands
+    /// are in registers where the value is computed, so a reader that takes the form rather than
+    /// the value reads nothing that was not going to be there anyway. It is also what keeps a form
+    /// right after a later pass changed the function: a pass that renames what the value is
+    /// computed from or retypes the value leaves a form that no longer passes, and it is left out
+    /// rather than believed.
+    pub fn forms(&self, value: Value) -> impl Iterator<Item = Inst> + use<'_> {
+        let def = match self.values[value.index()].def {
+            Def::Result { inst, .. } => Some(inst),
+            Def::Param { .. } => None,
+        };
+        let recorded = def.and_then(|_| self.forms.get(&value));
+        recorded
+            .into_iter()
+            .flatten()
+            .copied()
+            .filter(move |&form| def.is_some_and(|def| self.stands_in(value, def, form)))
+    }
+
+    /// Whether a recorded form of a value may be read in its place, per [`Func::forms`].
+    fn stands_in(&self, value: Value, def: Inst, form: Inst) -> bool {
+        let data = &self.insts[form.index()];
+        if form == def || data.results != 1 || self.carries_mem(form) {
+            return false;
+        }
+        let Some(result) = data.first_result else { return false };
+        if self.values[result.index()].ty != self.values[value.index()].ty {
+            return false;
+        }
+        let reads = &self[self.insts[def.index()].args];
+        let constant = |arg: Value| match self.values[arg.index()].def {
+            Def::Result { inst, .. } => self.insts[inst.index()].opcode == Opcode::IConst,
+            Def::Param { .. } => false,
+        };
+        self[data.args].iter().all(|&arg| reads.contains(&arg) || constant(arg))
     }
 
     /// Gives a block a name of its own, which is how an image written before the program runs
@@ -1948,6 +2011,30 @@ mod tests {
         b.ret(&[result]);
 
         (func, entry, header, exit)
+    }
+
+    #[test]
+    fn a_form_is_offered_only_while_it_reads_what_the_value_is_computed_from() {
+        let (mut func, _, header, _) = sum();
+        let insts: Vec<Inst> = func.insts(header).collect();
+        let next = func[insts[1]].first_result.expect("the add has a result");
+        let reads = func[func[insts[1]].args].to_vec();
+        let acc = func[func[insts[2]].args][0];
+        let form = |func: &mut Func, ty: Type, args: &[Value]| {
+            let args = func.push_values(args);
+            func.create_inst(InstData { args, ..InstData::new(Opcode::Add) }, &[ty], Span::DUMMY)
+        };
+        // `1 + i` reads what `i + 1` does. `acc + 1` reads something it does not, and a form at
+        // another width is not the value.
+        let swapped = form(&mut func, Type::int(32), &[reads[1], reads[0]]);
+        let elsewhere = form(&mut func, Type::int(32), &[acc, reads[1]]);
+        let wider = form(&mut func, Type::int(64), &[reads[0], reads[1]]);
+        for made in [swapped, elsewhere, wider] {
+            assert!(func.add_form(next, made));
+        }
+        assert!(!func.add_form(next, swapped));
+        assert_eq!(func.forms(next).collect::<Vec<_>>(), [swapped]);
+        assert_eq!(func.forms(acc).count(), 0);
     }
 
     #[test]
