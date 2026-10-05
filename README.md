@@ -63,6 +63,12 @@ The twelve milestones are in [`spec/17-milestones.md`](spec/17-milestones.md) an
 
 Every tagged release publishes prebuilt binaries for Linux, macOS and Windows on [the releases page](https://github.com/tamnd/rucc/releases), each with a SHA-256 file and a build provenance attestation you can check with `gh attestation verify`.
 
+Each release also has `rucc-wasm32-wasip1.wasm`, which is rucc built as a WebAssembly module. It runs in Wasmtime, Node or another WASI engine, and it writes the same object bytes as native rucc for every target. It cannot link, because a wasm module cannot start another program, so compile with `-c` and link outside it. The module looks for its cache at `/.cache/rucc`, so give it the native cache there:
+
+```
+wasmtime run --dir=. --dir=$HOME/.cache/rucc::/.cache/rucc rucc-wasm32-wasip1.wasm --target=x86_64-linux-musl -O2 -c app.c
+```
+
 From the registry, if you already have a Rust toolchain:
 
 ```

@@ -47,7 +47,7 @@ A tier here does not say whether the evidence behind it came from hardware or fr
 | `i686-none` | 3 | 2 | no | capped at its architecture's tier, per the note at the top of this module |
 | `armv7-none-eabi` | 3 | 2 | no | soft float, because a bare metal core may have no FPU |
 | `armv7m-none-eabi` | 3 | 2 | no | Thumb only, and the smallest target in the table |
-| `wasm32-wasip1` | 4 | 2 | later | one linear memory, no signals, and structured control flow |
+| `wasm32-wasip1` | 4 | 2 | yes | one linear memory, no signals, and structured control flow |
 | `wasm32-wasip3` | 4 | 3 | no | a different ABI from p1 and p2, with the stack pointer and TLS base in a context |
 | `wasm32-none` | 4 | 2 | no | freestanding wasm, which is the second back end without the libc question |
 

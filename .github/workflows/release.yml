@@ -202,6 +202,54 @@ jobs:
           if-no-files-found: error
           retention-days: 7
 
+  # rucc as a WebAssembly module, for Wasmtime, Node and a browser (#2862). It is one file and not
+  # an archive, because a module cannot start a linker and so has no use for the builtins. The
+  # name has no version in it, so that a link to the latest release always names the same file.
+  # The check compiles a small program to an x86_64-linux-musl object inside Wasmtime, which needs
+  # no sysroot because the program includes nothing.
+  wasm:
+    name: build rucc as a wasm module
+    needs: verify
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v7.0.1
+      - name: add the target
+        run: rustup target add wasm32-wasip1
+      - uses: Swatinem/rust-cache@v2.9.2
+        with:
+          key: wasm32-wasip1
+      - name: build
+        run: cargo build --release --bin rucc --target wasm32-wasip1
+      - name: install Wasmtime
+        run: |
+          set -euo pipefail
+          curl -sSfL -o wasmtime.tar.xz https://github.com/bytecodealliance/wasmtime/releases/download/v49.0.1/wasmtime-v49.0.1-x86_64-linux.tar.xz
+          echo "c71f7e0d30a92e418f0d17db7c6d8f6664c1ad764340a1278678f4209deab534  wasmtime.tar.xz" | sha256sum -c -
+          tar -xJf wasmtime.tar.xz
+          echo "$PWD/wasmtime-v49.0.1-x86_64-linux" >> "$GITHUB_PATH"
+      - name: compile an object inside Wasmtime
+        run: |
+          set -euo pipefail
+          module=target/wasm32-wasip1/release/rucc.wasm
+          mkdir check
+          printf 'int twice(int x) { return 2 * x; }\n' > check/twice.c
+          (cd check && wasmtime run --dir=. "../$module" --target=x86_64-linux-musl -O2 -c twice.c)
+          file check/twice.o
+          file check/twice.o | grep -q 'ELF 64-bit LSB relocatable, x86-64'
+      - name: package
+        run: |
+          set -euo pipefail
+          mkdir dist
+          cp target/wasm32-wasip1/release/rucc.wasm dist/rucc-wasm32-wasip1.wasm
+          (cd dist && sha256sum rucc-wasm32-wasip1.wasm > rucc-wasm32-wasip1.wasm.sha256)
+          ls -l dist
+      - uses: actions/upload-artifact@v7.0.1
+        with:
+          name: dist-wasm32-wasip1
+          path: dist
+          if-no-files-found: error
+          retention-days: 7
+
   # What a release user does first, done with the archive they would download: unpack it on a
   # clean Linux machine, fetch the Windows sysroot, and link hello world with nothing but
   # `--target`. lld comes from `apt install lld-19`, which is what the compiler tells an Ubuntu
@@ -232,7 +280,7 @@ jobs:
 
   publish:
     name: publish
-    needs: [build, smoke]
+    needs: [build, smoke, wasm]
     runs-on: ubuntu-24.04
     permissions:
       contents: write
@@ -254,6 +302,7 @@ jobs:
           subject-path: |
             dist/*.tar.gz
             dist/*.zip
+            dist/*.wasm
       # The release notes are the changelog section, written by hand, rather than a list of
       # commit subjects. GitHub's generated list of merged pull requests is appended after it
       # for anyone who wants the detail.
