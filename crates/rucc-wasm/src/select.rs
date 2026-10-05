@@ -9,7 +9,8 @@ use rucc_base::hash::Map;
 use rucc_base::rules::Piece;
 use rucc_ir::term::{PLAIN, Term, Terms};
 use rucc_ir::{
-    Abi, Block, Def, Extra, FloatPred, Func, FuncId, Inst, IntPred, Opcode, RmwOp, Type, Value,
+    Abi, AsmOperands, Block, Def, Extra, FloatPred, Func, FuncId, Inst, IntPred, Opcode, RmwOp,
+    Type, Value,
 };
 use rucc_object::wasm::{FuncType, Function, RelocKind, ValType};
 use rucc_target::wasm::Feature;
@@ -560,6 +561,10 @@ impl Lower<'_, '_> {
             }
             Opcode::TailCall => self.call(term, true),
             Opcode::IndirectBr => self.indirect(x, term),
+            Opcode::InlineAsm => {
+                self.asm(term)?;
+                self.branch(x, 0)
+            }
             other => Err(format!("the terminator {} is not translated yet", other.name())),
         }
     }
@@ -1417,20 +1422,26 @@ impl Lower<'_, '_> {
             Opcode::SetjmpMarker | Opcode::LongjmpMarker => {
                 return Err("`__builtin_setjmp` and `__builtin_longjmp` are not translated".into());
             }
-            Opcode::InlineAsm => self.barrier(inst)?,
+            Opcode::InlineAsm => self.asm(inst)?,
             other => return Err(format!("the instruction {} is not translated yet", other.name())),
         }
         Ok(())
     }
 
-    /// Inline assembly, of which rucc takes only the compiler barrier on wasm.
+    /// Inline assembly, of which rucc takes only the form with a blank template on wasm.
     ///
-    /// An `asm` with a blank template, no operands, no labels and no clobber other than `memory`
-    /// and `cc` only keeps the loads and stores around it on their side of it. This translation
-    /// keeps each load and store where the IR has it, in order, so the barrier is no code, as with
-    /// clang. `__atomic_signal_fence` is such an `asm`. clang also reads wasm instructions in the
-    /// template, and rucc does not, so any other `asm` is refused.
-    fn barrier(&self, inst: Inst) -> Result<()> {
+    /// An `asm` with a blank template is no code, as with clang, and what it says is about the
+    /// values around it. A clobber of `memory` keeps the loads and stores on their side of it,
+    /// and this translation keeps each load and store where the IR has it, in order. An input is
+    /// read by nothing. An output in a register gets the value that it shares its place with: its
+    /// own value for `+`, or the value of the input with its number. An output that nothing is
+    /// tied to has no value that the program can know, and it gets zero. An output in memory is
+    /// an address, and the memory is not changed. `__atomic_signal_fence` and the
+    /// `asm ("" : "+r" (x))` that a program uses to hide a value from the optimizer are both such
+    /// an `asm`. The labels of an `asm goto` are not taken, so control goes to its first target,
+    /// which [`Self::body`] writes. clang also reads wasm instructions in the template, and rucc
+    /// does not, so any other `asm` is refused.
+    fn asm(&mut self, inst: Inst) -> Result<()> {
         let func = self.func;
         let Extra::Asm(asm) = func[inst].extra else {
             return Err("an inline_asm instruction has no assembly".into());
@@ -1438,21 +1449,56 @@ impl Lower<'_, '_> {
         let info = func[asm];
         let names = self.unit.names;
         let blank = names.resolve(info.template).trim().is_empty();
-        let operands = !self.args(inst).is_empty()
-            || !self.results(inst).is_empty()
-            || !names.resolve(info.constraints).is_empty()
-            || !func[info.targets].is_empty();
         let clobbers = names
             .resolve(info.clobbers)
             .split(',')
             .all(|clobber| matches!(clobber.trim(), "" | "memory" | "cc"));
-        if blank && !operands && clobbers {
+        if !blank || !clobbers {
+            return Err("inline assembly on wasm is refused, except an `asm` with an empty \
+                        template and no clobber other than \"memory\" and \"cc\""
+                .into());
+        }
+        let constraints = names.resolve(info.constraints);
+        let results = self.results(inst);
+        let args = self.args(inst);
+        let Some(operands) = AsmOperands::read(constraints, &results, &args) else {
+            return Err(format!("the constraints \"{constraints}\" of an `asm` on wasm"));
+        };
+        for (index, operand) in operands.iter().enumerate() {
+            let Some(result) = operand.result else { continue };
+            match operands.tied_to(index) {
+                Some(value) => {
+                    let (from, to) = (self.ty(value), self.ty(result));
+                    self.push(value)?;
+                    if is_pair(from) != is_pair(to) || valtype(from)? != valtype(to)? {
+                        let ints = !is_pair(from) && from.is_int() && to.is_int();
+                        if !ints {
+                            return Err(format!("an `asm` output of type {to} tied to {from}"));
+                        }
+                        self.resize(self.wide(value), self.wide(result), false);
+                    }
+                }
+                None => self.zero(self.ty(result))?,
+            }
+            self.set(result);
+        }
+        Ok(())
+    }
+
+    /// Push the zero of `ty`, which is two values for a pair.
+    fn zero(&mut self, ty: Type) -> Result<()> {
+        if is_pair(ty) {
+            self.code.i64_const(0);
+            self.code.i64_const(0);
             return Ok(());
         }
-        Err("inline assembly on wasm is refused, except an `asm` with an empty template, no \
-             operands and no clobber other than \"memory\" and \"cc\", which is a compiler \
-             barrier"
-            .into())
+        match valtype(ty)? {
+            ValType::I32 => self.code.i32_const(0),
+            ValType::I64 => self.code.i64_const(0),
+            ValType::F32 => self.code.f32_const(0),
+            _ => self.code.f64_const(0),
+        }
+        Ok(())
     }
 
     /// Select an instruction by the rule of `rules/wasm32.rules` that matches it, if one does.

@@ -48,8 +48,8 @@
 //! a `longjmp` can come out of is in a `try_table` that catches the exception that `longjmp`
 //! throws. [`prepare`] changes the IR for that before the translation. See the `sjlj` module.
 //!
-//! What this refuses, with a message that names the function: a vector, inline assembly other
-//! than a compiler barrier, `__builtin_setjmp`, a function other than `setjmp` that returns twice,
+//! What this refuses, with a message that names the function: a vector, inline assembly with a
+//! template that is not blank, `__builtin_setjmp`, a function other than `setjmp` that returns twice,
 //! unwinding to a cleanup with `-fexceptions`, an alias, and the instructions of the memory safety
 //! monitor. Each of these is a later step of #2864 or of the milestones after it. A graph of blocks that is not reducible is not
 //! refused: a dispatch node makes it reducible. A computed `goto` is not refused either: the

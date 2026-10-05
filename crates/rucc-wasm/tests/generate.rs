@@ -1041,3 +1041,96 @@ fn a_local_of_size_zero_needs_no_frame() {
         assert_eq!(status, 0);
     }
 }
+
+/// Each form of an `asm` with a blank template that rucc takes on wasm, which is the C below at
+/// `-O0`. An output tied to an input gets the input, an output that nothing is tied to gets zero,
+/// an output in memory keeps its value, and an `asm goto` goes to its first target. `main` exits
+/// with 7 + 30 + 0 + 4 + 2, which is 43.
+///
+/// ```c
+/// int tied(int x) { int t; __asm__("" : "=r"(t) : "0"(x)); return t; }
+/// long long both(long long x) { __asm__ volatile("" : "+r"(x)); return x; }
+/// int none(void) { int t; __asm__("" : "=r"(t)); return t; }
+/// int mem(int x) { __asm__ volatile("" : "+m"(x) : : "memory"); return x; }
+/// int jump(int x) { __asm__ goto("" : : : : out); return x + 1; out: return 0; }
+/// int main(void) { return tied(7) + (int)both(30) + none() + mem(4) + jump(1); }
+/// ```
+const ASM: &str = r#"; ModuleID = 't.c'
+; format 0
+target triple = "wasm32-unknown-wasip1"
+target datalayout = "e-p:32:32-i64:64-S128"
+
+func @tied(i32) -> i32, linkage(external) {
+block0(%0: i32):
+    %1 = inline_asm.nomem "", "=r,0", ""(%0)
+    return %1
+}
+
+func @both(i64) -> i64, linkage(external) {
+block0(%0: i64):
+    %1 = inline_asm.volatile.nomem "", "+r", ""(%0)
+    return %1
+}
+
+func @none() -> i32, linkage(external) {
+block0:
+    %0 = inline_asm.i32.nomem "", "=r", ""()
+    return %0
+}
+
+func @mem(i32) -> i32, linkage(external) {
+block0(%0: i32):
+    %1 = alloca, size 4, align 4
+    store %0 -> %1, align 4, tbaa !1
+    inline_asm.volatile "", "+m", "memory"(%1)
+    %2 = load.i32 %1, align 4, tbaa !1
+    return %2
+}
+
+func @jump(i32) -> i32, linkage(external) {
+block0(%0: i32):
+    inline_asm.volatile.nomem "", "", ""(), labels [block1, block2]
+
+block1:
+    %1 = iconst.i32 1
+    %2 = add.nsw %0, %1
+    return %2
+
+block2:
+    %3 = iconst.i32 0
+    return %3
+}
+
+func @main() -> i32, linkage(external) {
+block0:
+    %0 = iconst.i32 7
+    %1 = call @tied(%0) : (i32) -> i32
+    %2 = iconst.i32 30
+    %3 = sext.i64 %2
+    %4 = call @both(%3) : (i64) -> i64
+    %5 = trunc.i32 %4
+    %6 = add.nsw %1, %5
+    %7 = call @none() : () -> i32
+    %8 = add.nsw %6, %7
+    %9 = iconst.i32 4
+    %10 = call @mem(%9) : (i32) -> i32
+    %11 = add.nsw %8, %10
+    %12 = iconst.i32 1
+    %13 = call @jump(%12) : (i32) -> i32
+    %14 = add.nsw %11, %13
+    return %14
+}
+
+!0 = tbaa "char", offset 0
+!1 = tbaa "int", parent !0, offset 0
+"#;
+
+#[test]
+fn an_asm_with_a_blank_template_is_no_code() {
+    // The `asm goto` is a terminator, and it is a branch to the block of its first target.
+    let text = assembly(ASM);
+    assert!(text.contains("i32.const\t1\n"), "{text}");
+    if let Some(status) = link_and_run("asm", ASM) {
+        assert_eq!(status, 43);
+    }
+}
