@@ -500,7 +500,25 @@ pub(crate) const PROJECTS: &[Project] = &[
         // thirty files would not link. `ZSTD_TRACE=0` is zstd's own way of saying to compile
         // without the hooks and stood in for the attribute until tamnd/rucc#1414 was done. The row
         // now builds what zstd builds.
-        defines: &["ZSTD_DISABLE_ASM=1"],
+        //
+        // The other two are a declared exemption in the sense of section 12.6 of
+        // spec/safe-memory/12-corpus-and-evidence.md, bucket five, and they are written here
+        // rather than as markers in zstd's source because zstd already has the switch. On any
+        // GCC-like compiler `lib/common/mem.h` and the bundled `xxhash.h` pick their access method
+        // 1, which reads and writes unaligned words through an `aligned(1)` typedef of the word
+        // type, and both headers say in their own comments that this depends on a compiler
+        // extension and that method 0, a `memcpy` to and from a local, is the portable one. The
+        // trouble with method 1 is not the alignment. It is that a word written as one type is
+        // later read as another: the Huffman table is filled eight bytes at a time through
+        // `MEM_write64` and decoded two bytes at a time as `U16`, and literals written through
+        // `MEM_write16` are copied to the output and hashed through `XXH_read64`. Both are reads
+        // the effective type rule forbids, document 09 section 9.1 says the type plane holds the
+        // program to that rule, and the replay of tamnd/rucc#1499 reported them on 225 inputs of
+        // the OSS-Fuzz corpus. zstd knows what it chose and chose it for speed, so this is the
+        // construct C forbids that the project does deliberately, and the same fifteen inputs
+        // built with method 0 report nothing of either kind. What is measured here is zstd's own
+        // portable code, and the two names stay in this list where anyone counting can see them.
+        defines: &["ZSTD_DISABLE_ASM=1", "MEM_FORCE_MEMORY_ACCESS=0", "XXH_FORCE_MEMORY_ACCESS=0"],
         configure: None,
         known: &[],
         pending: Some(
