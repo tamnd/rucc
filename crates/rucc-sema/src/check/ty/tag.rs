@@ -60,6 +60,7 @@ use rucc_types::{
 
 use super::{MEMBER, Subject};
 use crate::check::Checker;
+use crate::decl::StorageDuration;
 use crate::scope::{Binding, Tag, TagKind};
 
 /// What the tag of a definition turned out to be.
@@ -302,6 +303,8 @@ impl Checker<'_> {
                 self.read_deprecated_member(id, name, &[field.attrs, specs], at);
             }
             self.member_warn_alignment(field, &decl, at, &mut asked);
+            let specs = self.ast[field.specs].attrs;
+            self.record_symver(None, &[field.attrs, specs], StorageDuration::Static, at);
             fields.push((decl, at));
         }
         self.check_flexible(kind, &mut fields);

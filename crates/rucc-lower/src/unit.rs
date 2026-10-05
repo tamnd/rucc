@@ -632,6 +632,7 @@ impl Unit<'_> {
         for index in 0..self.aliases.len() {
             self.alias(self.aliases[index]);
         }
+        self.symvers();
         for index in 0..self.sets.len() {
             let (set, span) = self.sets[index].clone();
             self.equated(&set, span);
@@ -1620,6 +1621,94 @@ impl Unit<'_> {
             };
         }
         self.module.add_alias_over(alias);
+    }
+
+    /// The versioned names `__attribute__((symver("name@node")))` asked for, each a second name
+    /// spelled with its version, which is what a `.symver` in an `asm` makes and is made the same
+    /// way. See [`Self::equated`].
+    ///
+    /// gcc's rules first, in gcc's words and in its order. One version asked for twice is refused
+    /// on each declaration but the last, which is the one that keeps it. What is versioned has to
+    /// be defined here, which a declaration nothing refers to need not be, since gcc never looks
+    /// at one, and an inline definition this unit does not emit is let go the same way. It must
+    /// not be common, a copy the linker picks one of, or a weakref, and it must be public, with
+    /// default visibility.
+    fn symvers(&mut self) {
+        let tast = self.tast;
+        let asked = tast.symvers();
+        let mut last: Map<&str, Span> = Map::default();
+        for (_, names) in &asked {
+            for (name, span) in names {
+                last.insert(name.as_str(), *span);
+            }
+        }
+        let mut kept: Set<&str> = Set::default();
+        for (decl, names) in asked.iter().rev() {
+            let decl = *decl;
+            let mut refused = None;
+            for (name, span) in names.iter().rev() {
+                if !kept.insert(name.as_str()) {
+                    refused = Some((*span, last[name.as_str()]));
+                }
+            }
+            if let Some((span, there)) = refused {
+                let what = "duplicate definition of a symbol version";
+                let note = "same version was previously defined here";
+                let refused = Diagnostic::error(what, span).with_code("E0830");
+                self.diagnostics.push(refused.note(note, there));
+                continue;
+            }
+            let node = &tast[decl];
+            if node.kind == DeclKind::Function && !node.inline.emits() {
+                continue;
+            }
+            let span = names[0].1;
+            let symbol = self.symbol_of(decl);
+            let (linkage, visibility, defined) = match self.module.lookup(symbol) {
+                Some(SymbolRef::Func(id)) => {
+                    let func = &self.module[id];
+                    (func.linkage, func.visibility, !func.is_declaration())
+                }
+                Some(SymbolRef::Global(id)) => {
+                    let global = &self.module[id];
+                    let common = global.linkage == IrLinkage::Common;
+                    (global.linkage, global.visibility, common || global.init.is_some())
+                }
+                Some(SymbolRef::Alias(id)) => {
+                    (self.module[id].linkage, self.module[id].visibility, true)
+                }
+                None => (IrLinkage::External, IrVisibility::Default, false),
+            };
+            let weakref = node.flags.contains(DeclFlags::WEAKREF);
+            let what = if !defined || weakref {
+                if !self.named.contains(&decl) {
+                    continue;
+                }
+                "symbol needs to be defined to have a version"
+            } else if linkage == IrLinkage::Common {
+                "common symbol cannot be versioned"
+            } else if linkage == IrLinkage::LinkOnce {
+                "comdat symbol cannot be versioned"
+            } else if linkage == IrLinkage::Internal || node.linkage != Linkage::External {
+                "versioned symbol must be public"
+            } else if visibility != IrVisibility::Default {
+                "versioned symbol must have default visibility"
+            } else {
+                let target = self.names.resolve(symbol).to_owned();
+                for (name, _) in names {
+                    let set = directives::Set {
+                        name: name.clone(),
+                        target: target.clone(),
+                        linkage,
+                        visibility,
+                        versioned: true,
+                    };
+                    self.equated(&set, span);
+                }
+                continue;
+            };
+            self.diagnostics.push(Diagnostic::error(what, span).with_code("E0830"));
+        }
     }
 
     /// Whether there is no address for a second name to be at, reporting why when there is not.

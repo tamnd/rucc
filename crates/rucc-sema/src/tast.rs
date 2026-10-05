@@ -227,6 +227,7 @@ pub struct Tast {
     ifuncs: Set<DeclId>,
     fentry_names: Map<DeclId, StrId>,
     fentry_sections: Map<DeclId, StrId>,
+    symvers: Map<DeclId, Vec<(String, Span)>>,
     defined_at: Map<DeclId, Span>,
     notices: Map<DeclId, Notices>,
     asms: Vec<Asm>,
@@ -578,6 +579,31 @@ impl Tast {
     #[must_use]
     pub fn fentry_section(&self, decl: DeclId) -> Option<StrId> {
         self.fentry_sections.get(&decl).copied()
+    }
+
+    /// Records the versioned names `__attribute__((symver("name@node")))` asked for on one
+    /// declaration of this function or object, with where that declaration is. A name an earlier
+    /// declaration already asked for is the same request again and is not recorded twice, which
+    /// is how gcc merges the attributes of two declarations. Two of them on one declaration are
+    /// both kept, so that the second is reported as the duplicate gcc reports.
+    pub fn record_symvers(&mut self, decl: DeclId, names: Vec<String>, span: Span) {
+        let recorded = self.symvers.entry(decl).or_default();
+        let earlier = recorded.len();
+        for name in names {
+            if !recorded[..earlier].iter().any(|(already, _)| *already == name) {
+                recorded.push((name, span));
+            }
+        }
+    }
+
+    /// Every declaration that asked for a versioned name, in the order they were declared, with
+    /// the names and where each was asked for.
+    #[must_use]
+    pub fn symvers(&self) -> Vec<(DeclId, Vec<(String, Span)>)> {
+        let mut symvers: Vec<_> =
+            self.symvers.iter().map(|(&decl, names)| (decl, names.clone())).collect();
+        symvers.sort_by_key(|(decl, _)| decl.index());
+        symvers
     }
 
     /// Records that the second name this function's `alias` is for is its resolver, which
