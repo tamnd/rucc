@@ -253,6 +253,13 @@ pub(crate) fn replay() -> Result<()> {
                 here.abs_diff(then)
             );
         }
+        if let Some(jobs) = jobs() {
+            println!(
+                "{}: {jobs} drivers at once, each over a run of the corpus in the order one driver \
+                 would take it, so the alarm is wall clock time on a busier machine.",
+                target.project
+            );
+        }
         let work = build(target, project, &source)?;
         let out = run(&work, &corpus)?;
         read(target, &out, &mut problems);
@@ -281,6 +288,15 @@ fn corpus(target: &Target) -> Option<PathBuf> {
     let said = std::env::var_os(target.variable)?;
     let path = PathBuf::from(said);
     path.is_dir().then_some(path)
+}
+
+/// How many drivers the script runs at once, when somebody asked for more than one.
+///
+/// The script reads the same variable and is what acts on it. This only says so, because a run
+/// whose timeouts went up with its parallelism should say why on the line above the count.
+fn jobs() -> Option<usize> {
+    let said = std::env::var("RUCC_REPLAY_JOBS").ok()?;
+    said.trim().parse::<usize>().ok().filter(|&jobs| jobs > 1)
 }
 
 /// How many files are in a corpus, for the line that says what is about to be run.
@@ -384,6 +400,19 @@ fn files(target: &Target, project: &Project, source: &Path) -> Vec<(PathBuf, Str
 /// Where it links to is [`linked`] rather than a path written here, because the task reads the
 /// program back afterwards to see whether a line table arrived in it and the two have to be the
 /// same program.
+///
+/// `RUCC_REPLAY_JOBS` above one cuts the corpus into that many parts and runs one driver on each at
+/// the same time, because the driver takes one input at a time and a corpus of eight thousand
+/// images at ten a minute is the better part of a day on a machine with cores to spare. The parts
+/// are runs of the corpus in the order the driver sorts it, which is `strcmp` order and so
+/// `LC_ALL=C sort`, so the logs put back together part after part are the log one driver would
+/// have written, and [`read`] cannot tell the two apart. The only thing that differs is a
+/// `<<<replayed>>>` line per part rather than one, and nothing reads that line. Each part's log
+/// sits in `parts` beside the program and can be watched while it fills, in place of the `tee`.
+/// The list of inputs is the driver's rule written in shell: regular files, through a link if
+/// there is one, and nothing whose name starts with a dot. The driver's alarm is wall clock time,
+/// so a machine running more parts than it has idle cores will see more inputs run out of time,
+/// which is why the default is one.
 fn script(target: &Target, project: &Project) -> String {
     let stems: Vec<String> =
         files(target, project, Path::new("")).into_iter().map(|(_, stem)| stem).collect();
@@ -397,8 +426,34 @@ out={out}
 mkdir -p \"$out\"
 RUCC_SAFETY_ON_ERROR=continue
 export RUCC_SAFETY_ON_ERROR
+jobs=${{RUCC_REPLAY_JOBS:-1}}
 if gcc -no-pie {objects} safe-rt.a {libraries} -o \"$out/run\" >\"$out/link.log\" 2>&1; then
-    {{ \"$out/run\" \"$1\" 2>&1; printf '<<<status %s>>>\\n' \"$?\"; }} | tee \"$out/out.log\"
+    if [ \"$jobs\" -gt 1 ] 2>/dev/null; then
+        corpus=$(cd \"$1\" && pwd)
+        rm -rf \"$out/parts\"
+        mkdir -p \"$out/parts\"
+        (cd \"$corpus\" && find -L . -maxdepth 1 -type f ! -name '.*') | sed 's|^\\./||' \\
+            | LC_ALL=C sort >\"$out/parts/all\"
+        split -n l/\"$jobs\" -d -a 3 \"$out/parts/all\" \"$out/parts/\"
+        for part in \"$out\"/parts/[0-9][0-9][0-9]; do
+            [ -s \"$part\" ] || continue
+            mkdir \"$part.in\"
+            while IFS= read -r name; do ln -s \"$corpus/$name\" \"$part.in/$name\"; done <\"$part\"
+            {{ \"$out/run\" \"$part.in\" >\"$part.log\" 2>&1; echo \"$?\" >\"$part.status\"; }} &
+        done
+        wait
+        status=0
+        : >\"$out/out.log\"
+        for part in \"$out\"/parts/[0-9][0-9][0-9]; do
+            [ -s \"$part\" ] || continue
+            cat \"$part.log\" >>\"$out/out.log\"
+            [ \"$(cat \"$part.status\")\" = 0 ] || status=$(cat \"$part.status\")
+        done
+        printf '<<<status %s>>>\\n' \"$status\" >>\"$out/out.log\"
+        cat \"$out/out.log\"
+    else
+        {{ \"$out/run\" \"$1\" 2>&1; printf '<<<status %s>>>\\n' \"$?\"; }} | tee \"$out/out.log\"
+    fi
 else
     cat \"$out/link.log\"
     printf '<<<status nolink>>>\\n'
@@ -748,5 +803,43 @@ mod tests {
         let took = split(&out);
         assert_eq!(took.len(), 1);
         assert_eq!(took[0].said, vec![(2, None)]);
+    }
+
+    /// Two parts' logs put back together read as one driver's log over the same inputs.
+    ///
+    /// What sharding changes in the output is a `<<<replayed>>>` line at the end of every part
+    /// rather than one at the end of the whole, so the line between two parts is the one place the
+    /// reader could go wrong, by folding it into the input before it or by losing the input after.
+    #[test]
+    fn logs_from_parts_read_as_one_log() {
+        let first = format!(
+            "<<<input aaa>>>\n{BANNER}\n  judgement J1, an access\n  2 bytes at 0x1\n<<<ended \
+             0>>>\n<<<input bbb>>>\n<<<ended timeout>>>\n<<<replayed 2>>>\n"
+        );
+        let second = "<<<input ccc>>>\n<<<ended 0>>>\n<<<replayed 1>>>\n<<<status 0>>>\n";
+        let took = split(&format!("{first}{second}"));
+        let names: Vec<&str> = took.iter().map(|one| one.name.as_str()).collect();
+        assert_eq!(names, ["aaa", "bbb", "ccc"]);
+        assert_eq!(took[0].said, vec![(1, Some(2))]);
+        assert!(took[1].timed);
+        assert!(took[2].said.is_empty() && !took[2].killed && !took[2].timed);
+    }
+
+    /// The script lists a corpus the way the driver does, so that the parts are runs of the order
+    /// one driver would have taken and the log put back together is that driver's log.
+    #[test]
+    fn the_script_cuts_the_corpus_in_the_drivers_order() {
+        let target = &TARGETS[0];
+        let script = script(target, row(target).expect("a row"));
+        assert!(script.contains("jobs=${RUCC_REPLAY_JOBS:-1}"));
+        assert!(script.contains("find -L . -maxdepth 1 -type f ! -name '.*'"));
+        assert!(script.contains("LC_ALL=C sort"));
+        assert!(script.contains("split -n l/"));
+        let driver =
+            std::fs::read_to_string(root().join("tests").join("replay").join("a-replay-driver.c"))
+                .expect("the driver");
+        assert!(driver.contains("strcmp(*(const char *const *)a"));
+        assert!(driver.contains("entry->d_name[0] == '.'"));
+        assert!(driver.contains("S_ISREG"));
     }
 }
