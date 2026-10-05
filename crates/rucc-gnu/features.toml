@@ -841,6 +841,15 @@ tests = ["rucc-types::a_function_without_a_landing_pad_is_another_type", "rucc-t
 notes = "A function type without a landing pad under `-fcf-protection=branch` or `full`. A function of the type opens without `endbr64`, and a call or a tail jump through a pointer to one carries the `notrack` prefix, in the listing and in the object the compiler writes itself. It lands where `ms_abi` does: in the specifiers, after the declarator, beside the star of a pointer or in a typedef, one level down a pointer and no further. It is part of the type, as it is to gcc: a declaration each way is `conflicting types` and a pointer of one assigned to a pointer of the other is an incompatible pointer, spelled `void (__attribute__((nocf_check)) *)(void)`. On something that is not a function it is warned about and dropped, an argument is refused with `E0816`, and without `-fcf-protection` it is ignored with gcc's warning. A label whose address is taken keeps its pad. Written beside `cf_check` it wins, as in gcc."
 
 [[feature]]
+name = "patchable_function_entry"
+kind = "attribute"
+gcc_version = "8.0"
+status = "implemented"
+used_by = ["linux"]
+tests = ["rucc::the_attribute_takes_the_place_of_the_flag_for_one_function", "rucc::the_attribute_is_checked_in_gcc_s_words", "rucc-ir::the_room_a_function_asked_a_patcher_for_comes_back_as_written"]
+notes = "The room one function opens with for a patcher, in place of what `-fpatchable-function-entry=` asks of every function: `N` instructions that do nothing, `M` of them in front of the label, recorded in `__patchable_function_entries` as the flag's are. `(0, 0)` takes the room away, which is the kernel's `notrace`. The last declaration to say it counts, the definition's or an earlier one's, and the second of two on one declaration over the first, as in gcc 13. It goes through the IR's text, so a module read back for the link keeps it. The wrong number of arguments is refused with `E0818`, an argument that is not a constant from 0 to 65535 drops it with gcc's warning, and an `M` larger than `N` is warned about and taken as 0. On a variable or a type it is dropped without a word, as gcc does, and on a target whose objects are not ELF it is dropped too."
+
+[[feature]]
 name = "cf_check"
 kind = "attribute"
 gcc_version = "8.0"

@@ -656,6 +656,14 @@ impl<'a, 'n> Parser<'a, 'n> {
                     }
                 }
                 "align" => func.align = Some(self.u32()?),
+                "patchable" => {
+                    self.expect("(")?;
+                    let total = self.u32()?;
+                    self.expect(",")?;
+                    let before = self.u32()?;
+                    self.expect(")")?;
+                    func.patchable = Some((total, before));
+                }
                 other => return self.fail(format!("a function has no `{other}`")),
             }
         }
@@ -2487,6 +2495,23 @@ global @b : bytes 8 = {{ apart.4 @.Llbl.0 from @.Llbl.1, apart.4 @.Llbl.2 + 1 fr
         let mut names = Interner::new();
         let module = parse(&text, &mut names).unwrap();
         assert_eq!(module.funcs().next().map(|id| module[id].align), Some(Some(256)));
+    }
+
+    #[test]
+    fn the_room_a_function_asked_a_patcher_for_comes_back_as_written() {
+        // What `__attribute__((patchable_function_entry(3, 1)))` asks of one function, which a
+        // module read back for the link has to ask for again, `(0, 0)` included.
+        for room in ["(3, 1)", "(0, 0)"] {
+            let text = format!(
+                "{HEADER}\nfunc @f(i32) -> i32, linkage(external), patchable{room} {{\n\
+                 block0(%0: i32):\n    return %0\n}}\n"
+            );
+            assert_eq!(round_trip(&text), text);
+        }
+        let mut names = Interner::new();
+        let text = format!("{HEADER}\nfunc @f(), patchable(3, 1);\n");
+        let module = parse(&text, &mut names).unwrap();
+        assert_eq!(module.funcs().next().map(|id| module[id].patchable), Some(Some((3, 1))));
     }
 
     #[test]

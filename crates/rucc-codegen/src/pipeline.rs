@@ -1107,10 +1107,15 @@ pub fn compile_recording(
     // target that does not, rather than a run of something longer: the flag counts bytes, and a
     // patcher writing over the room starts at its front and wants every byte in it to be a place
     // it could have started at.
-    let pad = flags.patch.any().then_some(machine.insts.pad).flatten().map(|name| Padding {
+    // What `patchable_function_entry` on the function said, in place of the command line.
+    let room = source.patchable.map_or(flags.patch, |(total, before)| Room {
+        after: total.saturating_sub(before),
+        before,
+    });
+    let pad = room.any().then_some(machine.insts.pad).flatten().map(|name| Padding {
         name,
-        before: flags.patch.before,
-        after: flags.patch.after,
+        before: room.before,
+        after: room.after,
     });
     // The pad at the top of the function is left out of one whose type says `nocf_check`, and
     // under `-mmanual-endbr` out of every one that does not say `cf_check`. The pads at its

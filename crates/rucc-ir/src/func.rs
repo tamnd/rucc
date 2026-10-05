@@ -94,6 +94,11 @@ pub struct Func {
     /// a multiple of two hundred and fifty six is at one, and one asked for less than the target's
     /// own alignment keeps the target's.
     pub align: Option<u32>,
+    /// How many instructions that do nothing it opens with for a patcher, and how many of them
+    /// are in front of its label, from `__attribute__((patchable_function_entry(N, M)))`, in place
+    /// of what `-fpatchable-function-entry=` asks of every function. `None` for one that leaves
+    /// it to the command line, and `(0, 0)` for one that asked for no room at all.
+    pub patchable: Option<(u32, u32)>,
     /// What is true of the whole function, which is what a caller reads when it wants to know
     /// what a call to it does without looking inside.
     pub attrs: Attrs,
@@ -203,6 +208,7 @@ impl Func {
             dll: Dll::Default,
             section: None,
             align: None,
+            patchable: None,
             attrs: Attrs::NONE,
             target: None,
             declared: Span::DUMMY,

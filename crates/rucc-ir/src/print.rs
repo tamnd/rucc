@@ -338,6 +338,9 @@ impl<'a> Printer<'a> {
         if let Some(align) = func.align {
             let _ = write!(self.out, ", align {align}");
         }
+        if let Some((total, before)) = func.patchable {
+            let _ = write!(self.out, ", patchable({total}, {before})");
+        }
         if func.is_declaration() {
             self.out.push_str(";\n");
             return;

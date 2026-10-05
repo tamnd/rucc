@@ -209,6 +209,7 @@ pub struct Tast {
     sections: Map<DeclId, StrId>,
     function_names: Set<StrId>,
     alloc_sizes: Map<DeclId, AllocSize>,
+    patchable: Map<DeclId, (u32, u32)>,
     defined_at: Map<DeclId, Span>,
     notices: Map<DeclId, Notices>,
     asms: Vec<Asm>,
@@ -498,6 +499,24 @@ impl Tast {
     /// of the declaration in sight at the call.
     pub fn record_alloc_size(&mut self, decl: DeclId, alloc: AllocSize) {
         self.alloc_sizes.insert(decl, alloc);
+    }
+
+    /// Records the room `__attribute__((patchable_function_entry(N, M)))` asked a function to open
+    /// with, as the total and the part of it in front of the label, the way the attribute and
+    /// `-fpatchable-function-entry=` write them.
+    ///
+    /// A map beside the tree for the reason [`Tast::record_alloc_size`] is one: the kernel's
+    /// `notrace` is the usual writer. A later declaration replaces what an earlier one said, and
+    /// the second of two on one declaration the first, which is what gcc does.
+    pub fn record_patchable(&mut self, decl: DeclId, total: u32, before: u32) {
+        self.patchable.insert(decl, (total, before));
+    }
+
+    /// The total and the part in front of the label a `patchable_function_entry` attribute asked
+    /// this function for, and nothing when the command line decides.
+    #[must_use]
+    pub fn patchable(&self, decl: DeclId) -> Option<(u32, u32)> {
+        self.patchable.get(&decl).copied()
     }
 
     /// The arguments an `alloc_size` attribute named on this function, and nothing for almost

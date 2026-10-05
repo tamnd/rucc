@@ -1141,6 +1141,87 @@ impl Checker<'_> {
         }
     }
 
+    /// Records the room a `patchable_function_entry` in the lists asks a function to open with,
+    /// in place of what `-fpatchable-function-entry=` asks of every function.
+    ///
+    /// What is refused is what gcc 13 refuses, in its words: the wrong number of arguments is an
+    /// error, and an argument that is not a constant from 0 to 65535 drops the attribute with a
+    /// warning. A part in front of the label larger than the total is warned about and taken as
+    /// none, which is what gcc writes. gcc says nothing about the attribute on a variable or a
+    /// type and neither is this, and it is dropped there. So is it on a target whose objects are
+    /// not ELF, which has no section to list the room in, the reason the flag is refused there.
+    pub(in crate::check) fn record_patchable(
+        &mut self,
+        decl: DeclId,
+        lists: &[AttrList],
+        kind: DeclKind,
+    ) {
+        let ast = self.ast;
+        for &attrs in lists {
+            for &attr in &ast[attrs] {
+                if self.gnu_name(&attr) != "patchable_function_entry" {
+                    continue;
+                }
+                let Some((total, before)) = self.patchable_argument(attr) else { continue };
+                if kind == DeclKind::Function && self.cx.target.object_format == ObjectFormat::Elf {
+                    self.tast.record_patchable(decl, total, before);
+                }
+            }
+        }
+    }
+
+    /// The total and the part in front of the label one `patchable_function_entry` asks for, or
+    /// nothing where gcc refuses it or drops it.
+    fn patchable_argument(&mut self, attr: Attribute) -> Option<(u32, u32)> {
+        let args = self.ast[attr.args].to_vec();
+        if args.is_empty() || args.len() > 2 {
+            let what =
+                "wrong number of arguments specified for 'patchable_function_entry' attribute";
+            let note = format!("expected between 1 and 2, found {}", args.len());
+            let refused = Diagnostic::error(what, attr.span).with_code("E0818");
+            self.report(refused.note(note, attr.span));
+            return None;
+        }
+        let mut counts = [0u32; 2];
+        for (count, arg) in counts.iter_mut().zip(args) {
+            let (value, spelled) = match arg {
+                AttrArg::Ident(name) => (None, Some(self.text(name).to_owned())),
+                AttrArg::Expr(expr) => {
+                    let named = match self.ast[expr] {
+                        rucc_ast::Expr::Name(name) => Some(self.text(name).to_owned()),
+                        _ => None,
+                    };
+                    let value = self.expr(expr);
+                    let folded = self.eval_integer(value).ok();
+                    (folded, named.or_else(|| folded.map(|n| n.to_string())))
+                }
+            };
+            let quoted = spelled.map_or_else(String::new, |spelled| format!(" '{spelled}'"));
+            let what = match value {
+                Some(n) if n > 65535 => {
+                    format!("'patchable_function_entry' attribute argument{quoted} exceeds 65535")
+                }
+                Some(n) if n >= 0 => {
+                    *count = u32::try_from(n).unwrap_or_default();
+                    continue;
+                }
+                _ => format!(
+                    "'patchable_function_entry' attribute argument{quoted} is not an integer \
+                     constant"
+                ),
+            };
+            self.report(Diagnostic::warning(what, attr.span).with_code("E0703"));
+            return None;
+        }
+        let [total, before] = counts;
+        if before > total {
+            let what = format!("patchable function entry {before} exceeds size {total}");
+            self.report(Diagnostic::warning(what, attr.span).with_code("E0703"));
+            return Some((total, 0));
+        }
+        Some((total, before))
+    }
+
     /// The argument numbers one `alloc_size` names, or nothing where gcc drops or refuses it.
     fn alloc_size_argument(
         &mut self,
