@@ -9,6 +9,7 @@ use std::path::{Path, PathBuf};
 use std::process::Command;
 
 use rucc_base::Interner;
+use rucc_object::wasm::{HIDDEN, SymbolKind, WEAK};
 use rucc_target::wasm::{Cpu, Feature, Features};
 
 /// A loop with block parameters, a switch with three cases and a default, and a `main` with a
@@ -1219,5 +1220,95 @@ fn a_switch_on_128_bits_tests_both_halves() {
     assert_eq!(text.matches("i64.eq").count(), 6, "{text}");
     if let Some(status) = link_and_run("switch128", SWITCH128) {
         assert_eq!(status, 57);
+    }
+}
+
+/// A second name of a variable and two of a static function, one of them weak, which is the C
+/// below at `-O1`. With one argument, `main` exits with 24.
+///
+/// ```c
+/// int a[4] = {1, 2, 3, 4};
+/// extern int b[4] __attribute__((alias("a")));
+/// static int f(int x) { return x + 1; }
+/// int g(int) __attribute__((alias("f")));
+/// int w(int) __attribute__((weak, alias("f")));
+/// int (*p)(int) = &w;
+/// int main(int argc, char **argv) { b[1] = 20; return g(a[1]) + p(argc) + (&g == &f); }
+/// ```
+const ALIASES: &str = r#"; ModuleID = 't.c'
+; format 0
+target triple = "wasm32-unknown-wasip1"
+target datalayout = "e-p:32:32-i64:64-S128"
+
+global @p : bytes 4 = { addr.4 @w }, align 4, linkage(external)
+global @a : bytes 16 = { i32 1, i32 2, i32 3, i32 4 }, align 4, linkage(external)
+
+alias @b = @a, linkage(external)
+alias @g = @f, linkage(external)
+alias @w = @f, linkage(weak)
+
+func @f(i32) -> i32, linkage(internal) {
+block0(%0: i32):
+    %1 = iconst.i32 1
+    %2 = add.nsw %0, %1
+    return %2
+}
+
+func @main(i32, ptr) -> i32, linkage(external) {
+block0(%0: i32, %1: ptr):
+    %2 = global_addr @b
+    %3 = iconst.i32 4
+    %4 = ptr_add %2, %3
+    %5 = iconst.i32 20
+    store %5 -> %4, align 4
+    %6 = global_addr @a
+    %7 = ptr_add %6, %3
+    %8 = load.i32 %7, align 4
+    %9 = call @g(%8) : (i32) -> i32
+    %10 = global_addr @p
+    %11 = load %10, align 4
+    %12 = call_indirect %11(%0) : (i32) -> i32
+    %13 = add.nsw %9, %12
+    %14 = global_addr @g
+    %15 = global_addr @f
+    %16 = icmp eq %14, %15
+    %17 = zext.i32 %16
+    %18 = add.nsw %13, %17
+    return %18
+}
+"#;
+
+/// A second name of a function is a symbol with the index of the function and the flags of its
+/// own linkage, and a second name of a variable is a data symbol at the place of the variable,
+/// as clang writes them. The text sets each second name of a function after the code.
+#[test]
+fn an_alias_is_a_second_symbol_for_the_same_function_or_place() {
+    let mut names = Interner::new();
+    let module = rucc_ir::parse(ALIASES, &mut names).expect("the IR parses");
+    let object = rucc_wasm::translate(&module, &names, Cpu::Lime1.features()).unwrap();
+    let symbol = |name: &str| {
+        let index = object.symbols.iter().position(|s| s.name == name).unwrap();
+        (u32::try_from(index).unwrap(), &object.symbols[index])
+    };
+    let (f, _) = symbol("f");
+    for (name, flags) in [("g", HIDDEN), ("w", WEAK | HIDDEN)] {
+        let (index, alias) = symbol(name);
+        assert!(object.aliases.contains(&(index, f)), "{name}");
+        assert_eq!(alias.flags, flags, "{name}");
+    }
+    let (_, a) = symbol("a");
+    let (_, b) = symbol("b");
+    assert!(matches!(a.kind, SymbolKind::Data { place: Some(_) }));
+    assert_eq!(a.kind, b.kind);
+
+    let written = rucc_object::wasm::write(&object).unwrap();
+    assert_eq!(written.defines, ["__main_argc_argv", "p", "a", "b", "g", "w"]);
+    let listing = rucc_wasm::assembly(&object).unwrap();
+    assert!(listing.contains("\n\t.weak\tw\n\t.type\tw,@function\nw = f\n"), "{listing}");
+
+    for assembled in [false, true] {
+        if let Some(status) = link_and_run_as("aliases", ALIASES, assembled) {
+            assert_eq!(status, 24, "assembled: {assembled}");
+        }
     }
 }

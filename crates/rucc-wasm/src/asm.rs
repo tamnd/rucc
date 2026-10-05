@@ -52,6 +52,7 @@ pub(crate) fn print(object: &Module) -> Result<String, (String, String)> {
     for (index, segment) in object.segments.iter().enumerate() {
         printer.segment(index, segment);
     }
+    printer.aliases();
     printer.trailer();
     Ok(printer.out)
 }
@@ -244,6 +245,10 @@ impl Printer<'_> {
         self.object.functions.iter().any(|f| f.symbol == symbol)
     }
 
+    fn is_alias(&self, symbol: u32) -> bool {
+        self.object.aliases.iter().any(|&(alias, _)| alias == symbol)
+    }
+
     /// The types of the globals and the table, and the signature of every function, before any
     /// code names them, with the module and field of an import that is not the default one.
     fn declarations(&mut self) {
@@ -262,6 +267,7 @@ impl Printer<'_> {
                     self.line(&format!(".tagtype\t{name} {}", params.join(", ")));
                 }
                 SymbolKind::Function { ty, import } => {
+                    let index = u32::try_from(index).expect("fewer than 2^32 symbols");
                     let signature = Self::signature(&object.types[*ty as usize]);
                     self.line(&format!(".functype\t{name} {signature}"));
                     if let Some(import) = import {
@@ -269,8 +275,9 @@ impl Printer<'_> {
                         self.line(&format!(".import_module\t{name}, \"{module}\""));
                         self.line(&format!(".import_name\t{name}, \"{field}\""));
                     }
-                    let index = u32::try_from(index).expect("fewer than 2^32 symbols");
-                    if !self.defines(index) {
+                    // A second name of a function says its binding where it is set, after the
+                    // code.
+                    if !self.defines(index) && !self.is_alias(index) {
                         self.binding(name, symbol.flags, false);
                     }
                 }
@@ -772,6 +779,18 @@ impl Printer<'_> {
             }
             self.line(&format!(".ascii\t\"{text}\""));
             at = end;
+        }
+    }
+
+    /// Each second name of a function, set to the function, as clang writes the `alias`
+    /// attribute.
+    fn aliases(&mut self) {
+        let object = self.object;
+        for &(alias, target) in &object.aliases {
+            let symbol = &object.symbols[alias as usize];
+            self.binding(&symbol.name, symbol.flags, true);
+            self.line(&format!(".type\t{},@function", symbol.name));
+            let _ = writeln!(self.out, "{} = {}", symbol.name, self.name(target));
         }
     }
 

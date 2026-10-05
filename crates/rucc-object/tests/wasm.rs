@@ -236,6 +236,32 @@ fn a_fixup_that_names_the_wrong_kind_of_symbol_is_an_error() {
     assert!(matches!(wasm::write(&m), Err(wasm::Error::Definition { .. })));
 }
 
+/// A second name of a function is defined when the function that it names is defined in the
+/// object, and it is an error when it names an import or data, or when it is listed twice.
+#[test]
+fn an_alias_is_defined_only_by_a_function_that_the_object_defines() {
+    let index = |m: &Module, name: &str| {
+        u32::try_from(m.symbols.iter().position(|s| s.name == name).unwrap()).unwrap()
+    };
+    let with_alias = |target: &str, twice: bool| {
+        let mut m = program();
+        let ty = m.intern(FuncType { params: vec![ValType::I32], results: vec![ValType::I32] });
+        let hello = m.symbol("hello", SymbolKind::Function { ty, import: None }, HIDDEN);
+        let target = index(&m, target);
+        m.aliases.push((hello, target));
+        if twice {
+            m.aliases.push((hello, target));
+        }
+        wasm::write(&m)
+    };
+    let written = with_alias("greet", false).unwrap();
+    assert!(written.defines.iter().any(|name| name == "hello"));
+    for (target, twice) in [("puts", false), ("msg", false), ("greet", true)] {
+        let refused = matches!(with_alias(target, twice), Err(wasm::Error::Alias { .. }));
+        assert!(refused, "{target}");
+    }
+}
+
 #[test]
 fn the_padded_forms_read_back_as_their_values() {
     for value in [0u32, 1, 127, 128, 0xffff_ffff] {

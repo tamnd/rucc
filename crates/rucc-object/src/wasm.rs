@@ -262,6 +262,12 @@ pub struct Module {
     pub types: Vec<FuncType>,
     pub symbols: Vec<Symbol>,
     pub functions: Vec<Function>,
+    /// The function symbols that are second names of a function in this object, each as the
+    /// symbol of the second name and the symbol of the function. This is the `alias` attribute of
+    /// GCC on a function. The two symbols have the same function index, and each one keeps its
+    /// own name and flags. A data symbol needs no entry here, because a second name of a variable
+    /// is a data symbol with the same place.
+    pub aliases: Vec<(u32, u32)>,
     pub segments: Vec<Segment>,
     /// The constructors, as a priority and a symbol index. 65535 is the priority of one that gave
     /// none.
@@ -312,6 +318,9 @@ pub enum Error {
     Definition { symbol: u32 },
     /// A data symbol is outside its segment.
     Place { symbol: u32 },
+    /// An alias is not a function symbol, is defined twice, or names a function that this object
+    /// does not define.
+    Alias { symbol: u32 },
 }
 
 impl fmt::Display for Error {
@@ -331,6 +340,9 @@ impl fmt::Display for Error {
                 write!(f, "symbol {symbol} is not a function that one definition names")
             }
             Error::Place { symbol } => write!(f, "symbol {symbol} is outside its segment"),
+            Error::Alias { symbol } => {
+                write!(f, "symbol {symbol} is not a second name of a function that is defined here")
+            }
         }
     }
 }
@@ -439,6 +451,19 @@ impl Layout {
             }
             defined[index] = true;
         }
+        // An alias is defined when the function that it names is defined, by a definition or by
+        // an alias that comes before it in the list.
+        for &(alias, target) in &module.aliases {
+            let is_function = matches!(
+                module.symbols.get(alias as usize).map(|s| &s.kind),
+                Some(SymbolKind::Function { .. })
+            );
+            let named = defined.get(target as usize) == Some(&true);
+            if !is_function || defined[alias as usize] || !named {
+                return Err(Error::Alias { symbol: alias });
+            }
+            defined[alias as usize] = true;
+        }
 
         // The imported functions come first in the index space, in symbol order, then the
         // definitions in the order they are written.
@@ -453,6 +478,9 @@ impl Layout {
         for f in &module.functions {
             function[f.symbol as usize] = Some(next);
             next += 1;
+        }
+        for &(alias, target) in &module.aliases {
+            function[alias as usize] = function[target as usize];
         }
 
         // Globals, tables and tags each have their own index space, in symbol order.
