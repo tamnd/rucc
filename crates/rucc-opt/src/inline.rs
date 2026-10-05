@@ -1467,6 +1467,15 @@ fn unread(func: &Func) -> Set<Value> {
                 locals.remove(arg);
             }
         }
+        // A local handed to another block is read there under another name, which is how a
+        // pointer that walks a buffer starts out. `asyncQueueProcessPageEntries` in Postgres's
+        // `async.c` does nothing else with its 8192 byte page, and leaving it out of the frame let
+        // the page into `asyncQueueReadAllNotifications`, whose own frame gcc keeps at 80 bytes.
+        for call in func.successors(inst) {
+            for arg in &func[call.args] {
+                locals.remove(arg);
+            }
+        }
     }
     locals
 }
@@ -3403,6 +3412,20 @@ block0(%0: i32):
         assert!(said.contains("stack frame growth limit reached"), "{said}");
         let (out, _) = inlined_with(&framed(4096, 256, ""), Some(70), true);
         assert!(out.contains("call @scale"), "{out}");
+    }
+
+    /// A local whose only use is as an argument to another block, which is a pointer that starts at
+    /// a buffer and walks it, is in the frame like any other, so a large one stays a call.
+    #[test]
+    fn a_local_handed_to_another_block_counts_against_the_frame() {
+        let fixture = framed(4096, 0, "").replace(
+            "    store %5 -> %5, align 16\n    return %4",
+            "    jump block1(%5)\n\nblock1(%6: ptr):\n    store %6 -> %6, align 16\n    return %4",
+        );
+        assert!(fixture.contains("jump block1(%5)"), "{fixture}");
+        let (out, said) = inlined_with(&fixture, Some(70), true);
+        assert!(out.contains("call @scale"), "{out}");
+        assert!(said.contains("stack frame growth limit reached"), "{said}");
     }
 
     /// Small locals always go in, and so do large ones in a caller whose own are large enough.
