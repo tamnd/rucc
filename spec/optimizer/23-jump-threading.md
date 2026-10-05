@@ -156,6 +156,8 @@ by giving up on them. So rucc's rule is stronger than GCC's: **a thread that wou
 irreducible loop is not performed, at any optimization level.** Not scored down, not permitted with
 a warning. Refused.
 
+A region that is irreducible already is a different case. A thread that copies nothing takes a block out of a path that was there before, so it makes no new cycle, and the region already has more than one way in. rucc allows that thread inside such a region and still refuses a copy there. This matters for an interpreter written with a computed `goto`, where every block the dispatch reaches is in one irreducible region and a refusal would leave every branch in every handler unthreaded.
+
 The second loop interaction: threading through a loop header can convert a rotated loop back into an
 unrotated one, or destroy the single-latch property document 07.3 requires. So threading must run
 either entirely before loop canonicalization or with the loop forest available and the canonical

@@ -109,15 +109,20 @@
 //! regions instead. So the rule here is stronger than GCC's, where it is one input to a cost model:
 //! a thread that would do it is refused, at every level. A predecessor that is a latch is refused
 //! too, because moving a latch's edge is how the single latch property document 07.3 wants stops
-//! being true. And a block already in an irreducible region is left alone entirely, since the loop
-//! forest has given up on it and the two checks above would be reading an answer nobody stands
-//! behind.
+//! being true. And a copy is never made in an irreducible region, since the loop forest has given up
+//! on it and the two checks above would be reading an answer nobody stands behind.
 //!
 //! Without a copy no new cycle can appear. The new edge from A goes where the edge out of B went, so
 //! a path along it is a path that was already there with B taken out of the middle. With one the
 //! same is true of the path through the copy, which is B's path with B's test taken out, so loops
 //! can still only be destroyed. The loop forest is rebuilt after each thread anyway, which is what
 //! keeps the next decision honest.
+//!
+//! That is also why a thread without a copy is allowed in an irreducible region. The region already
+//! has more than one way in, no loop pass looks inside it, and the loops the forest does describe
+//! are still held to the two checks. This is where an interpreter written with a computed `goto`
+//! lives: every block it dispatches to is in one region, and refusing there meant that an `||` in a
+//! handler was worked out as a truth value and then tested, on every step.
 //!
 //! # Which level this runs at
 //!
@@ -304,7 +309,7 @@ impl Pass for Thread {
                         }
                     }
                 };
-                if !allowed(an.loops(func), from, call.block) {
+                if !allowed(an.loops(func), from, call.block, free.is_none()) {
                     stats.missed(WOULD_BREAK_A_LOOP);
                     continue;
                 }
@@ -851,14 +856,22 @@ fn defined_in(func: &Func, value: Value) -> Option<Block> {
     }
 }
 
-/// Whether the loop structure survives pointing this edge at that block.
+/// Whether the loop structure survives pointing this edge at that block, with or without a copy.
 ///
 /// Section 23.5, and every answer of `false` is a refusal rather than a cost. Entering a loop
-/// anywhere but at its header makes the loop irreducible, moving a latch's edge is how the single
-/// latch property stops holding, and a block the forest has already given up on is one there is no
-/// useful answer about.
-fn allowed(loops: &Loops, from: Block, into: Block) -> bool {
-    if loops.is_irreducible(from) || loops.is_irreducible(into) {
+/// anywhere but at its header makes the loop irreducible, and moving a latch's edge is how the
+/// single latch property stops holding.
+///
+/// A block the forest has already given up on is refused only for a copy. A thread that copies
+/// nothing takes a block out of a path that was already there, so it makes no cycle, and a region
+/// that is irreducible already has more than one way in and is left alone by every loop pass. What
+/// is left to break is the loops the forest does stand behind, and the two checks below are about
+/// exactly those. A copy is a new block in a region nobody has described, which is a question
+/// this does not answer. The case that matters is a computed `goto`: every block an interpreter
+/// dispatches to is in one irreducible region, so without this no branch in any of its handlers
+/// was ever threaded.
+fn allowed(loops: &Loops, from: Block, into: Block, copies: bool) -> bool {
+    if copies && (loops.is_irreducible(from) || loops.is_irreducible(into)) {
         return false;
     }
     if loops.all().any(|id| loops.latches(id).contains(&from)) {
@@ -1678,6 +1691,85 @@ mod tests {
         let stats = thread(&mut func);
         assert_eq!(stats.count(Kind::Optimized, super::THREADED), 1);
         assert_eq!(goes_to(&func, 0), vec![2]);
+    }
+
+    /// A region with two ways in, which is what the dispatch of a computed `goto` makes.
+    ///
+    /// Block 0 is the entry and goes to block 1 or to block 3 on its parameter. Block 1 jumps to
+    /// block 2 carrying a constant true, block 2 tests what it was given and goes to block 3 or to
+    /// block 4, and block 3 goes back to block 1 or out to block 4. So 1, 2 and 3 are a cycle the
+    /// entry reaches at two places, and the forest calls all three irreducible.
+    fn two_way_region() -> Func {
+        let mut names = Interner::new();
+        let signature = Signature::new().with_params(&[Type::int(1)]);
+        let mut func = Func::new(names.intern("f"), signature);
+        let entry = func.create_block();
+        let cond = func.append_param(entry, Type::int(1));
+        let first = func.create_block();
+        let test = func.create_block();
+        let param = func.append_param(test, Type::int(1));
+        let second = func.create_block();
+        let out = func.create_block();
+
+        let mut build = Builder::new(&mut func, entry);
+        build.br_if(cond, first, &[], second, &[]);
+        let mut build = Builder::new(&mut func, first);
+        let yes = build.iconst(Type::int(1), 1);
+        build.jump(test, &[yes]);
+        let mut build = Builder::new(&mut func, test);
+        build.br_if(param, second, &[], out, &[]);
+        let mut build = Builder::new(&mut func, second);
+        build.br_if(cond, first, &[], out, &[]);
+        let mut build = Builder::new(&mut func, out);
+        build.ret(&[]);
+        func
+    }
+
+    #[test]
+    fn a_thread_that_copies_nothing_is_allowed_in_an_irreducible_region() {
+        let mut func = two_way_region();
+        let region = crate::machine::fixtures::analyses().loops(&func).irreducible().to_vec();
+        assert_eq!(region, [Block::from_usize(1), Block::from_usize(2), Block::from_usize(3)]);
+        let stats = thread(&mut func);
+        assert_eq!(stats.count(Kind::Optimized, super::THREADED), 1);
+        assert_eq!(stats.count(Kind::Missed, super::WOULD_BREAK_A_LOOP), 0);
+        assert_eq!(goes_to(&func, 1), vec![3]);
+    }
+
+    #[test]
+    fn a_copy_is_still_refused_in_an_irreducible_region() {
+        // The same region with a number worked out in block 2 and carried to block 3, so the
+        // thread needs a copy of block 2 to work the number out on the way.
+        let mut names = Interner::new();
+        let signature = Signature::new().with_params(&[Type::int(1)]);
+        let mut func = Func::new(names.intern("f"), signature);
+        let entry = func.create_block();
+        let cond = func.append_param(entry, Type::int(1));
+        let first = func.create_block();
+        let test = func.create_block();
+        let param = func.append_param(test, Type::int(1));
+        let second = func.create_block();
+        func.append_param(second, Type::int(32));
+        let out = func.create_block();
+
+        let mut build = Builder::new(&mut func, entry);
+        let zero = build.iconst(Type::int(32), 0);
+        build.br_if(cond, first, &[], second, &[zero]);
+        let mut build = Builder::new(&mut func, first);
+        let yes = build.iconst(Type::int(1), 1);
+        build.jump(test, &[yes]);
+        let mut build = Builder::new(&mut func, test);
+        let seven = build.iconst(Type::int(32), 7);
+        build.br_if(param, second, &[seven], out, &[]);
+        let mut build = Builder::new(&mut func, second);
+        build.br_if(cond, first, &[], out, &[]);
+        let mut build = Builder::new(&mut func, out);
+        build.ret(&[]);
+
+        let stats = copying(&mut func);
+        assert_eq!(stats.count(Kind::Optimized, super::COPIED), 0);
+        assert_eq!(stats.count(Kind::Missed, super::WOULD_BREAK_A_LOOP), 1);
+        assert_eq!(goes_to(&func, 1), vec![2]);
     }
 
     #[test]
