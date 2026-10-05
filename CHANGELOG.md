@@ -6,7 +6,12 @@ All notable changes are recorded here. The format follows [Keep a Changelog](htt
 
 ### Added
 
+- `-S` works on the wasm rows (#2864). The text is the assembly dialect of LLVM that clang 23 from wasi-sdk 34 writes and reads: `.functype`, `.local`, `.globaltype`, `.tabletype`, the section and symbol directives of the wasm object format, `end_block`, `end_loop` and `end_if`, and a typed `select`. rucc prints it from the same object model that `-c` encodes, so the two cannot disagree, and `-save-temps` keeps it. clang assembles the text of each of the 1531 programs of rucc-corpus that rucc compiles, at `-O0`, at `-O2` and with `-mcpu=mvp`, into an object with the same code, data and symbols as the object of `rucc -c`, and each linked module gives the expected output. A float constant that is a NaN with a payload of its own is the one exception: the assembler has no text for it, so `-S` writes the bits as an integer constant and a `reinterpret`, which gives the same value. Before, `-S` on a wasm row was refused with E0653.
 - The wasm backend translates a computed `goto`, as clang 23 from wasi-sdk 34 does (#2864). The address of a label is a small number, from one in block order in each function, and `goto *p` is a `br_table` on it, which is what LLVM's `IndirectBrExpandPass` does. A table of label addresses in a variable holds the numbers, and `&&to - &&from` holds the difference, so `goto *(&&base + table[i])` works too. An address that is not a label of the `goto` traps with `unreachable`. Before, a function with `&&label` or `goto *` was refused. The 26 computed `goto` programs of rucc-corpus now run under Wasmtime with the expected output.
+
+### Fixed
+
+- A wasm object that takes the address of a function and has no `call_indirect` now imports `__indirect_function_table`, as the object from clang does (#2864). clang imports the table and keeps it for each relocation to a slot in the table, on each target that has the long form of `call_indirect`. Before, rucc made the table only for a call through a pointer, so the object from `rucc -c` and the object that clang assembled from `rucc -S` had different symbols. With `-mcpu=mvp` there is still no table, as with clang.
 
 ## 0.22.2
 

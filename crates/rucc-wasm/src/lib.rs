@@ -9,7 +9,9 @@
 //! object of the form that `wasm-ld` reads, which is the form clang writes: one function for each
 //! defined function, one data segment for each defined variable, a symbol table, relocations, and
 //! the custom sections `producers` and `target_features`. An object that this writes links with
-//! `wasm-ld` against the wasi-sdk sysroot and runs under Wasmtime.
+//! `wasm-ld` against the wasi-sdk sysroot and runs under Wasmtime. The `-S` text is printed from
+//! the same object, in the assembly dialect of LLVM, and clang assembles it back into an object
+//! with the same code, data and symbols. See the `asm` module.
 //!
 //! The translation is direct. Each value of the IR gets a local of its own, each instruction
 //! reads its operands with `local.get` and writes its result with `local.set`, and constants are
@@ -48,6 +50,7 @@
 
 #![doc(html_root_url = "https://docs.rs/rucc-wasm/0.22.2")]
 
+mod asm;
 mod emit;
 mod irreducible;
 mod select;
@@ -97,6 +100,47 @@ impl std::error::Error for Refusal {}
 ///
 /// When the module has 2^32 data segments or more, which a module under 4 GiB cannot have.
 pub fn generate(module: &Module, names: &Interner, features: Features) -> Result<Written, Refusal> {
+    write(&translate(module, names, features)?)
+}
+
+/// The bytes of the object that [`translate`] gave.
+///
+/// # Errors
+///
+/// A [`Refusal`] when the object names a symbol or a type that is not in it, which is a mistake in
+/// the translation.
+pub fn write(object: &wasm::Module) -> Result<Written, Refusal> {
+    wasm::write(object).map_err(|error| Refusal {
+        function: None,
+        why: format!("the object is not valid, {error}"),
+    })
+}
+
+/// The `-S` text of the object that [`translate`] gave, in the assembly dialect of LLVM. The text
+/// comes from the same object that [`write()`] encodes. See the `asm` module.
+///
+/// # Errors
+///
+/// A [`Refusal`] that names the function whose body the printer cannot decode, which is a mistake
+/// in the translation or in the printer.
+pub fn assembly(object: &wasm::Module) -> Result<String, Refusal> {
+    asm::print(object).map_err(|(function, why)| Refusal { function: Some(function), why })
+}
+
+/// The object model of `module`, which [`write()`] encodes and [`assembly`] prints.
+///
+/// # Errors
+///
+/// A [`Refusal`] for the first part of the module that this back end does not translate yet.
+///
+/// # Panics
+///
+/// When the module has 2^32 data segments or more, which a module under 4 GiB cannot have.
+pub fn translate(
+    module: &Module,
+    names: &Interner,
+    features: Features,
+) -> Result<wasm::Module, Refusal> {
     let unit_wide = |why: String| Refusal { function: None, why };
     if module.aliases().next().is_some() {
         return Err(unit_wide("an alias is not written for wasm yet".into()));
@@ -170,7 +214,7 @@ pub fn generate(module: &Module, names: &Interner, features: Features) -> Result
         language: None,
         processed_by: vec![("rucc".into(), env!("CARGO_PKG_VERSION").into())],
     };
-    wasm::write(&unit.out).map_err(|error| unit_wide(format!("the object is not valid, {error}")))
+    Ok(unit.out)
 }
 
 /// The segment that the data symbol `name` points at.
@@ -278,7 +322,15 @@ impl Unit<'_> {
     /// table for a function and a place in memory for data.
     pub(crate) fn address(&mut self, symbol: Symbol) -> Result<(bool, u32), String> {
         match self.ir.lookup(symbol) {
-            Some(SymbolRef::Func(_)) => Ok((true, self.function(symbol)?.0)),
+            Some(SymbolRef::Func(_)) => {
+                // A slot in the table is an address only when the module has the table. On a
+                // target with the long form of `call_indirect`, the object writer of LLVM imports
+                // `__indirect_function_table` and keeps it for each relocation to a slot, also in
+                // a module that has no `call_indirect`. rucc does the same, so that its object and
+                // the object that clang makes from its `-S` text have the same symbols.
+                self.table();
+                Ok((true, self.function(symbol)?.0))
+            }
             Some(SymbolRef::Global(_)) | None => {
                 let name = self.name(symbol);
                 if let Some(&found) = self.data.get(&name) {
