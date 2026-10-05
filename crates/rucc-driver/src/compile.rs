@@ -397,7 +397,13 @@ pub fn compile(opts: &Options, name: &str, fs: &dyn FileSystem) -> Compiled {
                 EmitKind::MirFinal | EmitKind::SafetySummary if opts.target.arch.is_wasm() => {
                     diagnostics.push(no_wasm_backend(opts.target));
                 }
+                // The tree form is a stage of the wasm back end, and a native target has no such
+                // stage to print.
+                EmitKind::WasmTree if !opts.target.arch.is_wasm() => {
+                    diagnostics.push(no_wasm_tree(opts.target));
+                }
                 EmitKind::Ir
+                | EmitKind::WasmTree
                 | EmitKind::MirFinal
                 | EmitKind::Asm
                 | EmitKind::Object
@@ -1140,6 +1146,9 @@ fn generate(
     // the reason the native listing is printed from the functions about to be encoded.
     if opts.target.arch.is_wasm() {
         let refused = |refusal: rucc_wasm::Refusal| vec![unsupported(&refusal.to_string())];
+        if matches!(opts.emit, EmitKind::WasmTree) {
+            return rucc_wasm::tree(module, names, opts.wasm).map(Artifact::Text).map_err(refused);
+        }
         let object = rucc_wasm::translate(module, names, opts.wasm).map_err(refused)?;
         if matches!(opts.emit, EmitKind::Asm) {
             return rucc_wasm::assembly(&object).map(Artifact::Text).map_err(refused);
@@ -2259,10 +2268,22 @@ fn no_wasm_backend(target: Triple) -> Diagnostic {
     )
     .with_code("E0653")
     .note(
-        "a link, -c, -S, an archive, --emit=ir, -fsyntax-only and -E work for this target; the \
-         rest is tamnd/rucc#2864",
+        "a link, -c, -S, an archive, --emit=ir, --emit=wasm-tree, -fsyntax-only and -E work for this \
+         target; the rest is tamnd/rucc#2864",
         Span::DUMMY,
     )
+}
+
+/// The refusal of `--emit=wasm-tree` for a target that is not wasm.
+fn no_wasm_tree(target: Triple) -> Diagnostic {
+    Diagnostic::error(
+        format!(
+            "--emit=wasm-tree prints a stage of the wasm backend, and {} is not a wasm target",
+            target.tuple().to_canonical_string()
+        ),
+        Span::DUMMY,
+    )
+    .note("use --target=wasm32-wasip1, or --emit=mir-final for a native target", Span::DUMMY)
 }
 
 /// A diagnostic about a program this compiler is not finished enough to compile.
@@ -4377,6 +4398,12 @@ decl #0 x : int object external static defined
         assert!(!listing.failed(), "{:?}", listing.messages);
         assert!(listing.text().contains("f:\n\t.functype\tf (i32, i32, i64) -> ()\n"));
         assert!(listing.text().contains("\tend_function\n"), "{}", listing.text());
+        // The tree form names each parameter by its value in the IR, the hidden one too.
+        opts.emit = EmitKind::WasmTree;
+        let tree = run(&opts, source);
+        assert!(!tree.failed(), "{:?}", tree.messages);
+        let head = "function f (i32, i32, i64) -> ()\n  param 0 i32 %0\n  param 1 i32 %1\n";
+        assert!(tree.text().starts_with(head), "{}", tree.text());
         opts.emit = EmitKind::MirFinal;
         let result = run(&opts, source);
         assert!(result.failed());
@@ -4385,6 +4412,18 @@ decl #0 x : int object external static defined
             "{:?}",
             result.messages
         );
+        assert!(result.text().is_empty());
+    }
+
+    /// The tree form is a stage of the wasm back end, and a native target refuses it.
+    #[test]
+    fn a_native_target_refuses_the_wasm_tree_form() {
+        let mut opts = options();
+        opts.emit = EmitKind::WasmTree;
+        opts.target = "aarch64-unknown-linux-gnu".parse::<Triple>().unwrap();
+        let result = run(&opts, "int f(int a) { return a; }\n");
+        assert!(result.failed());
+        assert!(result.messages[0].contains("is not a wasm target"), "{:?}", result.messages);
         assert!(result.text().is_empty());
     }
 

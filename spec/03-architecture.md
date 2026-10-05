@@ -17,6 +17,8 @@ source bytes
   → [rucc-object]   ELF / Mach-O / COFF               -c
 ```
 
+A wasm target leaves this line after `rucc-opt`. `rucc-wasm` reads the optimized IR and has no MIR, so `--emit=mir` and `--emit=mir-final` have no meaning there. Its own form is `--emit=wasm-tree`, which is the code of each function as the backend structured it, with each local named by its IR value and each construct marked with its IR block. `-S` prints the object that `-c` writes, in the assembly dialect of LLVM.
+
 The `--emit=` flags are not a debugging afterthought bolted on later. They are the reason the compiler is testable: a bug is localized by bisecting the stage at which the textual form first looks wrong, and every stage's parser means a hand-written or fuzzer-generated input can be injected at any point. Document 15 depends on this entirely.
 
 Two properties are enforced by CI. **Round-trip**: parsing the textual form of stage N and re-printing it produces byte-identical output. **Injection**: feeding a stage's printed output back into stage N+1 produces the same result as running the pipeline straight through. Without the second property the textual forms drift into being lossy approximations of the real data structures, which is how this idea usually dies.

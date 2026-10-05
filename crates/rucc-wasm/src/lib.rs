@@ -11,7 +11,8 @@
 //! the custom sections `producers` and `target_features`. An object that this writes links with
 //! `wasm-ld` against the wasi-sdk sysroot and runs under Wasmtime. The `-S` text is printed from
 //! the same object, in the assembly dialect of LLVM, and clang assembles it back into an object
-//! with the same code, data and symbols. See the `asm` module.
+//! with the same code, data and symbols. See the `asm` module. [`tree()`] prints the same code with
+//! the names of the IR, for a person who reads the structure that the translation chose.
 //!
 //! The translation is direct. Each value of the IR gets a local of its own, each instruction
 //! reads its operands with `local.get` and writes its result with `local.set`, and constants are
@@ -141,6 +142,32 @@ pub fn translate(
     names: &Interner,
     features: Features,
 ) -> Result<wasm::Module, Refusal> {
+    Ok(translate_with(module, names, features, false)?.0)
+}
+
+/// The tree form of `module`, which is `--emit=wasm-tree`: the code of each function as the
+/// structuring stage made it, with each construct indented and marked with the IR block that it
+/// comes from, and each local named by the IR value that it holds, as `--emit=ir` names it. The
+/// code is the code of the object, decoded from its bytes, so the form shows what the object
+/// does and not a plan of it.
+///
+/// # Errors
+///
+/// A [`Refusal`] for the first part of the module that this back end does not translate yet, or
+/// for a body that the printer cannot decode.
+pub fn tree(module: &Module, names: &Interner, features: Features) -> Result<String, Refusal> {
+    let (object, notes) = translate_with(module, names, features, true)?;
+    asm::tree(&object, &notes).map_err(|(function, why)| Refusal { function: Some(function), why })
+}
+
+/// The object model of `module`, and the notes of the tree form for each function when `notes`
+/// is set.
+fn translate_with(
+    module: &Module,
+    names: &Interner,
+    features: Features,
+    notes: bool,
+) -> Result<(wasm::Module, Vec<Notes>), Refusal> {
     let unit_wide = |why: String| Refusal { function: None, why };
     if module.aliases().next().is_some() {
         return Err(unit_wide("an alias is not written for wasm yet".into()));
@@ -155,6 +182,7 @@ pub fn translate(
         labels: Map::default(),
         stack_pointer: None,
         table: None,
+        notes: notes.then(Vec::new),
     };
 
     // Every definition gets its symbol first, so that a reference from a function or from data
@@ -214,7 +242,7 @@ pub fn translate(
         language: None,
         processed_by: vec![("rucc".into(), env!("CARGO_PKG_VERSION").into())],
     };
-    Ok(unit.out)
+    Ok((unit.out, unit.notes.unwrap_or_default()))
 }
 
 /// The segment that the data symbol `name` points at.
@@ -254,6 +282,19 @@ pub(crate) struct Unit<'a> {
     labels: Map<Symbol, u32>,
     stack_pointer: Option<u32>,
     table: Option<u32>,
+    /// The notes of the tree form, one for each function in the order of the object, when the
+    /// tree form is asked for.
+    pub(crate) notes: Option<Vec<Notes>>,
+}
+
+/// What the tree form says about one function beside its code. See [`tree()`].
+#[derive(Default)]
+pub(crate) struct Notes {
+    /// A note and the offset in the body of the instruction that it is written beside.
+    pub(crate) marks: Vec<(usize, String)>,
+    /// The name of each local that holds an IR value, which is the name that `--emit=ir` gives
+    /// the value, and of each local that the translation adds for itself.
+    pub(crate) locals: Map<u32, String>,
 }
 
 impl Unit<'_> {

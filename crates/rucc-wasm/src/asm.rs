@@ -23,9 +23,15 @@
 //!    `i32.const` or `i64.const` of its bits and a `reinterpret`. That gives the same value with
 //!    the same bits and is the one place where the code that the text assembles to is not the code
 //!    in the object.
+//!
+//! The tree form of `--emit=wasm-tree` is printed by the same decoder. It is not for an assembler,
+//! so it indents each construct, and it writes the notes that the translation kept: the IR block
+//! where the code of each block starts, the block that follows each `block`, the target of each
+//! branch out of a construct, and the IR value in each local.
 
 use std::fmt::Write as _;
 
+use crate::Notes;
 use rucc_object::wasm::{
     EXPORTED, FuncType, Function, HIDDEN, LOCAL, Module, NO_STRIP, RETAIN, RelocKind, STRINGS,
     Segment, SymbolKind, ValType, WEAK,
@@ -49,6 +55,23 @@ pub(crate) fn print(object: &Module) -> Result<String, (String, String)> {
     printer.trailer();
     Ok(printer.out)
 }
+
+/// The tree form of `object`, with the notes that the translation wrote for each function. See
+/// [`crate::tree`].
+///
+/// # Errors
+///
+/// The name of the function and the reason, when a body has bytes that this does not decode.
+pub(crate) fn tree(object: &Module, notes: &[Notes]) -> Result<String, (String, String)> {
+    let mut printer = Printer { object, out: String::new() };
+    for (function, notes) in object.functions.iter().zip(notes) {
+        printer.tree(function, notes).map_err(|why| (printer.name(function.symbol), why))?;
+    }
+    Ok(printer.out)
+}
+
+/// The column at which the tree form writes a note.
+const NOTE: usize = 40;
 
 /// Where a construct that an `end` closes came from.
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -303,6 +326,58 @@ impl Printer<'_> {
         }
         if body.at != function.code.len() {
             return Err("there are bytes after the `end` of the body".into());
+        }
+        self.out.push('\n');
+        Ok(())
+    }
+
+    /// One function in the tree form: the signature, each local with the IR value that it holds,
+    /// and the body with one more indent in each construct and the notes beside the instructions.
+    fn tree(&mut self, function: &Function, notes: &Notes) -> Result<(), String> {
+        let object = self.object;
+        let symbol = &object.symbols[function.symbol as usize];
+        let SymbolKind::Function { ty, .. } = symbol.kind else {
+            return Err("the symbol of a definition is not a function".into());
+        };
+        let ty = &object.types[ty as usize];
+        let _ = writeln!(self.out, "function {} {}", symbol.name, Self::signature(ty));
+        let mut locals = ty.params.clone();
+        for &(count, ty) in &function.locals {
+            locals.extend(std::iter::repeat_n(ty, count as usize));
+        }
+        for (index, local) in locals.iter().enumerate() {
+            let kind = if index < ty.params.len() { "param" } else { "local" };
+            let _ = write!(self.out, "  {kind} {index} {local}");
+            if let Some(name) = u32::try_from(index).ok().and_then(|i| notes.locals.get(&i)) {
+                let _ = write!(self.out, " {name}");
+            }
+            self.out.push('\n');
+        }
+        let mut body = Body { function, at: 0, locals, stack: Vec::new(), frames: Vec::new() };
+        let result = ty.results.first().copied();
+        body.frames.push(Frame { kind: Kind::Function, height: 0, result, dead: false });
+        let mut marks = notes.marks.iter().peekable();
+        while !body.frames.is_empty() {
+            let start = body.at;
+            let before = body.frames.len();
+            let text = self.instruction(&mut body)?;
+            let mut depth = before.min(body.frames.len());
+            if text == "else" {
+                depth -= 1;
+            }
+            let mut line = format!("{}{}", "  ".repeat(depth), named(&text, notes));
+            let mut said = Vec::new();
+            while let Some((_, note)) = marks.next_if(|&&(at, _)| at <= start) {
+                said.push(note.as_str());
+            }
+            if !said.is_empty() {
+                let width = line.chars().count();
+                line.push_str(&" ".repeat(NOTE.saturating_sub(width).max(1)));
+                line.push_str("; ");
+                line.push_str(&said.join(", "));
+            }
+            self.out.push_str(&line);
+            self.out.push('\n');
         }
         self.out.push('\n');
         Ok(())
@@ -687,6 +762,17 @@ impl Printer<'_> {
 }
 
 /// The type a numeric instruction gives, which is the type in front of the dot of its name.
+/// The text of an instruction in the tree form: a space after the name, and the name of the
+/// local in place of its number when the local holds an IR value.
+fn named(text: &str, notes: &Notes) -> String {
+    let Some((op, operand)) = text.split_once('\t') else { return text.to_owned() };
+    let local = op.starts_with("local.").then(|| operand.parse::<u32>().ok()).flatten();
+    match local.and_then(|index| notes.locals.get(&index)) {
+        Some(name) => format!("{op} {name}"),
+        None => format!("{op} {operand}"),
+    }
+}
+
 fn result_of(name: &str) -> ValType {
     match &name[..3] {
         "i64" => ValType::I64,

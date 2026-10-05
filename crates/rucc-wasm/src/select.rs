@@ -15,7 +15,7 @@ use rucc_target::wasm::Feature;
 use crate::emit::{self, Code};
 use crate::irreducible::Node;
 use crate::structure::Shape;
-use crate::{Unit, functype, is_pair, label_numbers, valtype};
+use crate::{Notes, Unit, functype, is_pair, label_numbers, valtype};
 
 mod pair;
 
@@ -140,6 +140,7 @@ pub(crate) fn function(unit: &mut Unit<'_>, id: FuncId, symbol: u32) -> Result<F
     let func = &unit.ir[id];
     let export = func.wasm.export.map(|name| unit.names.resolve(name).to_owned());
     let shape = Shape::of(func)?;
+    let unit_notes = unit.notes.is_some();
     let ty = functype(func.signature())?;
     let params = u32::try_from(ty.params.len()).expect("fewer than 2^32 parameters");
     let mut lower = Lower {
@@ -157,7 +158,12 @@ pub(crate) fn function(unit: &mut Unit<'_>, id: FuncId, symbol: u32) -> Result<F
         va: func.signature().variadic.then(|| params - 1),
         returns: !ty.results.is_empty(),
         sret: func.signature().returns.iter().any(|ret| is_pair(ret.ty)),
+        annotate: None,
     };
+    if unit_notes {
+        let (values, blocks) = rucc_ir::numbers(func);
+        lower.annotate = Some(Annotate { notes: Notes::default(), values, blocks });
+    }
     lower.assign()?;
     lower.labels = (0..lower.shape.dispatches).map(|_| lower.new_local(ValType::I32)).collect();
     lower.plan()?;
@@ -169,6 +175,10 @@ pub(crate) fn function(unit: &mut Unit<'_>, id: FuncId, symbol: u32) -> Result<F
         lower.code.op(emit::UNREACHABLE);
     }
     lower.code.op(emit::END);
+    lower.name_locals();
+    if let (Some(notes), Some(annotate)) = (lower.unit.notes.as_mut(), lower.annotate.take()) {
+        notes.push(annotate.notes);
+    }
 
     let mut locals: Vec<(u32, ValType)> = Vec::new();
     for &ty in &lower.locals {
@@ -202,9 +212,61 @@ struct Lower<'u, 'a> {
     returns: bool,
     /// Whether the function returns a pair, through the address in its parameter 0.
     sret: bool,
+    /// The notes of the tree form, when it is asked for.
+    annotate: Option<Annotate>,
+}
+
+/// The notes of the tree form for one function, and the numbers that the text of the IR gives
+/// its values and blocks, which the notes use as names.
+struct Annotate {
+    notes: Notes,
+    values: Vec<u32>,
+    blocks: Vec<u32>,
 }
 
 impl Lower<'_, '_> {
+    /// Write a note beside the next instruction, for the tree form. `text` gets the name of the
+    /// node at `x`, which is the name of its IR block or of its dispatch node.
+    fn mark(&mut self, x: usize, text: impl FnOnce(String) -> String) {
+        let at = self.code.bytes.len();
+        let node = self.shape.order[x];
+        let Some(annotate) = self.annotate.as_mut() else { return };
+        let name = match node {
+            Node::Block(block) => format!("block{}", annotate.blocks[block.index()]),
+            Node::Dispatch(label) => format!("dispatch{label}"),
+        };
+        annotate.notes.marks.push((at, text(name)));
+    }
+
+    /// Give each local that holds an IR value the name of the value, for the tree form. A pair
+    /// is two locals, the low half and the high half.
+    fn name_locals(&mut self) {
+        let Some(annotate) = self.annotate.as_mut() else { return };
+        let locals = &mut annotate.notes.locals;
+        for (&value, &local) in &self.local {
+            let name = format!("%{}", annotate.values[value.index()]);
+            if is_pair(self.func[value].ty) {
+                locals.insert(local, format!("{name}.lo"));
+                locals.insert(local + 1, format!("{name}.hi"));
+            } else {
+                locals.insert(local, name);
+            }
+        }
+        for (index, &local) in self.labels.iter().enumerate() {
+            locals.insert(local, format!("label{index}"));
+        }
+        if self.sret {
+            locals.insert(0, "sret".into());
+        }
+        if let Some(va) = self.va {
+            locals.insert(va, "va".into());
+        }
+        if let (Some(fp), Some(base)) = (self.frame.fp, self.frame.base) {
+            locals.insert(fp, "frame".into());
+            locals.insert(base, "entry_sp".into());
+        }
+    }
+
     /// The blocks of the function that are reached, in the order of the structure.
     fn blocks(&self) -> Vec<Block> {
         let blocks = self.shape.order.iter().filter_map(|&node| match node {
@@ -360,6 +422,7 @@ impl Lower<'_, '_> {
             self.shape.children[x].iter().copied().filter(|&c| self.shape.merge[c]).collect();
         merges.reverse();
         if self.shape.loop_header[x] {
+            self.mark(x, |name| format!("loop of {name}"));
             self.code.open(emit::LOOP, None);
             self.context.push(Ctx::Loop(x));
             self.within(x, &merges)?;
@@ -373,6 +436,7 @@ impl Lower<'_, '_> {
 
     fn within(&mut self, x: usize, merges: &[usize]) -> Result<()> {
         let Some((&y, rest)) = merges.split_first() else { return self.body(x) };
+        self.mark(y, |name| format!("{name} follows"));
         self.code.open(emit::BLOCK, None);
         self.context.push(Ctx::Follow(y));
         self.within(x, rest)?;
@@ -414,10 +478,12 @@ impl Lower<'_, '_> {
         }
         let to = edge.to;
         if self.shape.is_backward(x, to) {
+            self.mark(to, |name| format!("back to {name}"));
             let depth = self.depth(Ctx::Loop(to));
             self.code.br(depth);
             Ok(())
         } else if self.shape.merge[to] {
+            self.mark(to, |name| format!("out to {name}"));
             let depth = self.depth(Ctx::Follow(to));
             self.code.br(depth);
             Ok(())
@@ -427,6 +493,7 @@ impl Lower<'_, '_> {
     }
 
     fn body(&mut self, x: usize) -> Result<()> {
+        self.mark(x, |name| name);
         let func = self.func;
         let block = match self.shape.order[x] {
             Node::Block(block) => block,

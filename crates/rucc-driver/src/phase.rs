@@ -440,6 +440,7 @@ pub fn last_phase(emit: EmitKind) -> Phase {
         | EmitKind::Tast
         | EmitKind::Ir
         | EmitKind::MirFinal
+        | EmitKind::WasmTree
         | EmitKind::SafetySummary
         | EmitKind::TypeGranules
         | EmitKind::SyntaxOnly => Phase::Compile,
@@ -571,6 +572,7 @@ fn suffix_for(phase: Phase, opts: &Options) -> &'static str {
             EmitKind::Tast => "tast",
             EmitKind::Ir => "ir",
             EmitKind::MirFinal => "mir",
+            EmitKind::WasmTree => "wasm-tree",
             // Two extensions rather than one, because the content is JSON and a tool that reads
             // JSON should be able to tell by looking, and because `a.json` next to `a.c` says
             // nothing about which of a build's several JSON files it is.
@@ -1281,6 +1283,7 @@ mod tests {
             EmitKind::Tast,
             EmitKind::Ir,
             EmitKind::MirFinal,
+            EmitKind::WasmTree,
             EmitKind::SafetySummary,
             EmitKind::TypeGranules,
         ] {
@@ -1297,6 +1300,7 @@ mod tests {
             (EmitKind::Tast, "a.tast"),
             (EmitKind::Ir, "a.ir"),
             (EmitKind::MirFinal, "a.mir"),
+            (EmitKind::WasmTree, "a.wasm-tree"),
             (EmitKind::SafetySummary, "a.safety.json"),
             (EmitKind::TypeGranules, "a.granules.txt"),
         ] {
