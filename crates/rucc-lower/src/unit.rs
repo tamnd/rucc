@@ -1078,6 +1078,11 @@ impl Unit<'_> {
         if twice {
             func.attrs.set |= AttrSet::RETURNS_TWICE;
         }
+        // A fact about the type, which leaves the landing pad out of the prologue. See
+        // `rucc_codegen::pipeline`.
+        if self.untracked(ty) {
+            func.attrs.set |= AttrSet::NOCF;
+        }
         // And the other one, for the same reason. What a call to `strtol` reads belongs to
         // `strtol`, and the purity analysis answers opaque for everything it cannot see a body
         // for, so a unit that only declares the function gets nothing out of it unless the
@@ -2016,6 +2021,18 @@ impl Unit<'_> {
                 None
             }
         }
+    }
+
+    /// Whether a function, or the function a pointer points at, is of a type written
+    /// `__attribute__((nocf_check))`: the function has no landing pad and a call through a
+    /// pointer to it carries `rucc_ir::Flags::NOTRACK`.
+    pub(crate) fn untracked(&self, ty: TypeId) -> bool {
+        let canonical = self.types.canonical(ty);
+        let canonical = match self.types.kind(canonical) {
+            TypeKind::Pointer(pointee) => self.types.canonical(pointee),
+            _ => canonical,
+        };
+        matches!(self.types.kind(canonical), TypeKind::Function(id) if self.types.signature(id).nocf)
     }
 
     /// The plan, or what stopped it, said to nobody.

@@ -286,6 +286,7 @@ impl Checker<'_> {
             variadic,
             prototyped: true,
             convention: rucc_target::Convention::Target,
+            nocf: false,
         }))
     }
 

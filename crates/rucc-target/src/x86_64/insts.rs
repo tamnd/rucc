@@ -2097,6 +2097,9 @@ pub static INSTS: &[(&str, Form)] = &[
     // that is the whole of why there are two names here rather than one.
     ("call", Call),
     ("call_reg", Call),
+    // The same call with `notrack` in front, which is a different instruction to the assembler
+    // and the same call to everything here.
+    ("call_reg_notrack", Call),
     // The same call sent to a retpoline thunk, with and without the code segment override in
     // front of it. What `-mindirect-branch=thunk-extern` rewrites `call_reg` into once the
     // registers are settled, keeping every operand, so they are calls for the same reason.
@@ -2228,6 +2231,7 @@ pub static INSTS: &[(&str, Form)] = &[
     // front of it and the machine reads a different opcode byte, and both come from the target
     // being a register rather than a place in the program.
     ("jmp_reg", JmpReg),
+    ("jmp_reg_notrack", JmpReg),
     // The same jump sent to a retpoline thunk, which is what `jmp_reg` becomes under
     // `-mindirect-branch=thunk-extern`. It keeps the one operand and every successor, since the
     // thunk goes where the register says and the register is still the address.
@@ -2619,7 +2623,7 @@ mod tests {
         // Every head in the model file, which is what the rule set may write and what
         // `rucc-verify` has an answer for. The two lists are checked against each other by
         // `rucc-codegen`, which is the crate that can read the rule set.
-        assert_eq!(described, 787);
+        assert_eq!(described, 789);
     }
 
     #[test]

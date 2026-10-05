@@ -251,11 +251,16 @@ pub fn jumps(
     let ret = mir::Opcode::new(names.intern(&format!("{}{}", insts.prefix, insts.ret)));
     let away = mir::Opcode::new(names.intern(&format!("{}{away}", insts.prefix)));
     let through = mir::Opcode::new(names.intern(&format!("{}{}", branch.prefix, branch.indirect)));
+    // The same jump with the `notrack` prefix, for a call that had it. The name is the one
+    // `crate::lower` gives the call, the plain one's with `_notrack` after it.
+    let untracked =
+        mir::Opcode::new(names.intern(&format!("{}{}_notrack", branch.prefix, branch.indirect)));
     let mut jumped = 0;
     for tail in tails {
         let Some((last, callee)) = ending(func, tail, ret) else { continue };
         let span = func.span(tail.call);
         let operands = func[func[tail.call].operands].to_vec();
+        let notrack = names.resolve(func[tail.call].opcode.name()).ends_with("_notrack");
         func.remove_inst(tail.call);
         for &pseudo in &tail.returns {
             func.remove_inst(pseudo);
@@ -271,7 +276,7 @@ pub fn jumps(
             // and it is all the jump reads.
             Callee::Through => {
                 let address = operands[mir::defs(&operands)];
-                func[last].opcode = through;
+                func[last].opcode = if notrack { untracked } else { through };
                 func[last].symbol = None;
                 func[last].operands =
                     func.push_operands(&[mir::Operand::read(address.reg, address.class)]);

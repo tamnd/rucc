@@ -144,6 +144,10 @@ pub struct Context<'a> {
     /// between releases. `nonstring` on an array of arrays is one: gcc 15 started taking it, and
     /// the kernel finds out which gcc it has by compiling one under `-Werror`.
     pub gnuc: u32,
+    /// Whether every function opens with a landing pad, which is `-fcf-protection=branch` or
+    /// `full`. Read by `nocf_check`, which gcc ignores with a warning when there are no pads for
+    /// it to leave out. See `check/attr.rs`.
+    pub landing_pads: bool,
 }
 
 impl<'a> Context<'a> {
@@ -169,6 +173,7 @@ impl<'a> Context<'a> {
             isa: if target.tuple.arch().as_str() == "x86_64" { Isa::baseline() } else { Isa::NONE },
             x87: true,
             gnuc: 16,
+            landing_pads: false,
         }
     }
 

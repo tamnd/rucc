@@ -189,6 +189,17 @@ impl Flags {
     /// licence, since it is only the clobber list read once while the names are to hand.
     pub const NOMEM: Self = Self(1 << 20);
 
+    /// A call through an address that the processor is told not to check the landing of, which
+    /// x86 writes as the `notrack` prefix, from a pointer to a function of a
+    /// `__attribute__((nocf_check))` type.
+    ///
+    /// A fact about the type the call was made through rather than a licence, and the one flag
+    /// the code generator reads from a call. Legal on all three spellings because a pass that
+    /// works out where a call through an address goes turns it into a direct call without looking
+    /// at its flags, and a direct call reaches its callee without an indirect branch, so there the
+    /// flag says nothing.
+    pub const NOTRACK: Self = Self(1 << 21);
+
     /// Every flag that tells the optimizer to leave an access exactly where it is.
     pub const KEEP: Self = Self(Self::VOLATILE.0 | Self::SEG_FS.0 | Self::SEG_GS.0);
 
@@ -286,8 +297,10 @@ impl Flags {
             // the call names and the other two spellings do not name one. A tail call is left out
             // for a second reason as well: its result leaves the function, so there is nothing here
             // that could ever be inside it.
-            Opcode::Call => Self::NOFREE.union(Self::HEAP),
-            Opcode::TailCall | Opcode::CallIndirect => Self::NOFREE,
+            //
+            // `NOTRACK` is on all three, which its own comment says why.
+            Opcode::Call => Self::NOFREE.union(Self::HEAP).union(Self::NOTRACK),
+            Opcode::TailCall | Opcode::CallIndirect => Self::NOFREE.union(Self::NOTRACK),
             // On the three checks `rucc-safety` emits and on nothing else. What they say is about
             // the bytes a check names, so an instruction that names no bytes has no room for them.
             Opcode::CheckLive | Opcode::CheckDeriv => Self::STATIC.union(Self::HANDED),
@@ -369,6 +382,7 @@ static NAMED: &[(Flags, &str)] = &[
     (Flags::INLINE, "inline"),
     (Flags::GUARD, "guard"),
     (Flags::NOMEM, "nomem"),
+    (Flags::NOTRACK, "notrack"),
 ];
 
 /// How strongly an atomic operation is ordered against everything around it.

@@ -240,6 +240,11 @@ impl AttrSet {
     /// is used at a call to it. A call is compiled as a call to a function in another unit. Always
     /// set with [`Self::NOINLINE`].
     pub const NOIPA: Self = Self(1 << 32);
+    /// The function does not open with a landing pad under `-fcf-protection=branch`, from a type
+    /// written `__attribute__((nocf_check))`. Only a call through a pointer of that type, which
+    /// carries [`crate::Flags::NOTRACK`], or a direct call may reach it. A label whose address is
+    /// taken in it still has its pad, since that is a different branch.
+    pub const NOCF: Self = Self(1 << 33);
 
     /// The underlying bits, for the printer and for hashing.
     #[must_use]
@@ -365,6 +370,7 @@ static NAMED: &[(AttrSet, &str)] = &[
     (AttrSet::NO_PROFILE, "no_profile"),
     (AttrSet::NO_LOOP_IDIOM, "no_loop_idiom"),
     (AttrSet::NOIPA, "noipa"),
+    (AttrSet::NOCF, "nocf"),
 ];
 
 /// The pairs that cannot both be set, with their names for the message.

@@ -569,6 +569,11 @@ mod tests {
     /// call is still the rule that picked it, and the thunk is only where the branch is sent.
     const THUNKS: &[&str] = &["call_thunk", "call_thunk_cs", "jmp_thunk", "jmp_thunk_cs", "int3"];
 
+    /// The call and the jump through an address with the `notrack` prefix. `crate::lower` renames
+    /// a `call_reg` it already built when the IR call says so, and `crate::tail` makes the jump of
+    /// one, so neither is an answer to a term.
+    const NOTRACK: &[&str] = &["call_reg_notrack", "jmp_reg_notrack"];
+
     /// The registers cleared in front of a `ret` under `-fzero-call-used-regs=` and the
     /// `zero_call_used_regs` attribute.
     ///
@@ -1064,7 +1069,7 @@ mod tests {
             if LABELS.contains(&opcode) || STOP.contains(&opcode) || CELL.contains(&opcode) {
                 continue;
             }
-            if I386.contains(&opcode) {
+            if I386.contains(&opcode) || NOTRACK.contains(&opcode) {
                 continue;
             }
             let head = format!("{PREFIX}{opcode}");

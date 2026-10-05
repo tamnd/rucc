@@ -608,4 +608,14 @@ pub struct FunctionType {
     /// neither does `sysv_abi` anywhere else, and a type that never met an attribute is the same
     /// type as one that met the attribute naming the target's convention.
     pub convention: Convention,
+    /// Whether an indirect call to it goes without the processor checking where it lands, from
+    /// `__attribute__((nocf_check))`.
+    ///
+    /// Under `-fcf-protection=branch` every function opens with a landing pad and an indirect
+    /// branch that arrives anywhere else faults. One of these has no pad, and a call through a
+    /// pointer to one carries the `notrack` prefix, which tells the processor not to look. The two
+    /// halves only work together, so gcc makes the attribute part of the type: a declaration
+    /// each way is `conflicting types` and a pointer of one assigned to a pointer of the other is
+    /// an incompatible pointer, exactly as with [`Self::convention`].
+    pub nocf: bool,
 }

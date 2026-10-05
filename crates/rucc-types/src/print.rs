@@ -178,12 +178,21 @@ impl Speller<'_> {
         match self.types.kind(pointee) {
             TypeKind::Array { .. } => declarator = format!("({declarator})"),
             // A function of a convention the target does not call its own says so in front of
-            // the `*`, which is the one place gcc writes it in a type name.
+            // the `*`, which is the one place gcc writes it in a type name, and so does one
+            // without a landing pad. gcc writes `nocf_check` there and nowhere else, so a
+            // function's own type does not show it.
             TypeKind::Function(function) => {
-                let attribute = self.types.signature(function).convention.attribute();
-                declarator = match attribute {
-                    Some(name) => format!("(__attribute__(({name})) {declarator})"),
-                    None => format!("({declarator})"),
+                let signature = self.types.signature(function);
+                let names: Vec<&str> = signature
+                    .convention
+                    .attribute()
+                    .into_iter()
+                    .chain(signature.nocf.then_some("nocf_check"))
+                    .collect();
+                declarator = if names.is_empty() {
+                    format!("({declarator})")
+                } else {
+                    format!("(__attribute__(({})) {declarator})", names.join(", "))
                 };
                 convention_written = true;
             }
@@ -359,6 +368,7 @@ mod tests {
             variadic: false,
             prototyped: true,
             convention: rucc_target::Convention::Target,
+            nocf: false,
         };
         let function = types.function(signature);
         let pointer = types.pointer(function);
@@ -379,6 +389,7 @@ mod tests {
             variadic: false,
             prototyped: true,
             convention: rucc_target::Convention::Ms,
+            nocf: false,
         };
         let native = FunctionType { convention: rucc_target::Convention::Target, ..ms.clone() };
         let ms = types.function(ms);
@@ -389,6 +400,42 @@ mod tests {
         assert_eq!(spell(&types, &names, to_ms), "int (__attribute__((ms_abi)) *)(int)");
         assert_eq!(declare(&types, &names, ms, f), "int __attribute__((ms_abi)) f(int)");
         assert_eq!(declare(&types, &names, native, f), "int f(int)");
+    }
+
+    /// gcc 13's spelling of a pointer to a function without a landing pad, which is in front of
+    /// the `*` with the convention and nowhere else: its `conflicting types` message writes the
+    /// function's own type as `void(void)`.
+    #[test]
+    fn a_function_without_a_landing_pad_says_so_in_front_of_the_star() {
+        let (mut types, mut names) = fixture();
+        let void = types.void();
+        let plain = FunctionType {
+            ret: void,
+            params: Vec::new(),
+            variadic: false,
+            prototyped: true,
+            convention: rucc_target::Convention::Target,
+            nocf: false,
+        };
+        let untracked = FunctionType { nocf: true, ..plain.clone() };
+        let both = FunctionType { convention: rucc_target::Convention::Ms, ..untracked.clone() };
+        let (plain, untracked) = (types.function(plain), types.function(untracked));
+        let both = types.function(both);
+        assert_ne!(plain, untracked, "the attribute is part of the type");
+        let to_untracked = types.pointer(untracked);
+        let twice = types.pointer(to_untracked);
+        let to_both = types.pointer(both);
+        let f = names.intern("f");
+        assert_eq!(
+            spell(&types, &names, to_untracked),
+            "void (__attribute__((nocf_check)) *)(void)"
+        );
+        assert_eq!(spell(&types, &names, twice), "void (__attribute__((nocf_check)) **)(void)");
+        assert_eq!(
+            spell(&types, &names, to_both),
+            "void (__attribute__((ms_abi, nocf_check)) *)(void)"
+        );
+        assert_eq!(declare(&types, &names, untracked, f), "void f(void)");
     }
 
     #[test]
@@ -413,6 +460,7 @@ mod tests {
             variadic: false,
             prototyped: true,
             convention: rucc_target::Convention::Target,
+            nocf: false,
         };
         let function = types.function(takes_an_int.clone());
         let to_int = types.pointer(int);
@@ -457,6 +505,7 @@ mod tests {
             variadic: false,
             prototyped: true,
             convention: rucc_target::Convention::Target,
+            nocf: false,
         };
         let old = FunctionType {
             ret: int,
@@ -464,6 +513,7 @@ mod tests {
             variadic: false,
             prototyped: false,
             convention: rucc_target::Convention::Target,
+            nocf: false,
         };
         let prototyped = types.function(prototyped);
         let old = types.function(old);
@@ -484,6 +534,7 @@ mod tests {
             variadic: true,
             prototyped: true,
             convention: rucc_target::Convention::Target,
+            nocf: false,
         };
         let function = types.function(signature);
         let pointer = types.pointer(function);

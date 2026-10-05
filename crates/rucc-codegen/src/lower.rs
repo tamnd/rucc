@@ -2292,6 +2292,7 @@ impl<'a> Lowering<'a> {
         let info = self.source[info];
         // A `tail_call` that names nobody is one through a pointer, per `crate::tail`.
         let indirect = data.opcode == Opcode::CallIndirect || info.callee.is_none();
+        let untracked = indirect && data.flags.contains(Flags::NOTRACK);
 
         let values: Vec<Value> = self.source[data.args].to_vec();
         let callee = if indirect {
@@ -2392,6 +2393,15 @@ impl<'a> Lowering<'a> {
             .map_err(|refused| Unsupported::Call { inst, refused })?;
         self.crossed += 1;
         self.passed_late(&late);
+        // Through a pointer to a function without a landing pad, which the processor is told not
+        // to check with the `notrack` prefix. A target that has the prefix names the call with it
+        // as the plain one's name with `_notrack` after it, and only x86 types carry the flag.
+        if untracked {
+            let call = self.out.terminator(block).expect("the call just built");
+            let plain = self.names.resolve(self.out[call].opcode.name());
+            let name = format!("{plain}_notrack");
+            self.out[call].opcode = mir::Opcode::new(self.names.intern(&name));
+        }
         if self.source.unwinds_to_pad(inst) {
             let call = self.out.terminator(block).expect("the call just built");
             self.unwinding.insert(inst, call);

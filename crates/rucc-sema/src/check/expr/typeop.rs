@@ -2165,6 +2165,7 @@ mod tests {
             variadic: false,
             prototyped: true,
             convention: rucc_target::Convention::Target,
+            nocf: false,
         };
         let function = c.types.function(signature);
         let record = tagged(&mut c, tag, &[]);
@@ -2488,6 +2489,7 @@ mod tests {
             variadic: false,
             prototyped: true,
             convention: rucc_target::Convention::Target,
+            nocf: false,
         };
         let ty = c.types.function(signature);
         c.declare_object(fname, ty, Span::DUMMY);

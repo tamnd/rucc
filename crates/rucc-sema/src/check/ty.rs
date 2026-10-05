@@ -1146,6 +1146,7 @@ impl Checker<'_> {
             variadic,
             prototyped,
             convention: rucc_target::Convention::Target,
+            nocf: false,
         })
     }
 
