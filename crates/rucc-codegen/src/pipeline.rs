@@ -105,6 +105,11 @@ pub struct Machine {
     /// where that register can hold anything the others can. `None` where it cannot. See
     /// [`frame::keeps_frame_pointer`].
     pub spare: Option<Env>,
+    /// [`Machine::env`] and [`Machine::spare`], in that order, with the general purpose scratch
+    /// registers handed out as well, for a function that turns out not to need them. `None` on a
+    /// machine whose scratch registers are ones the callee would have to save. See
+    /// [`rucc_regalloc::run_either`].
+    pub wide: Option<[Env; 2]>,
 }
 
 /// The scratch registers held back from the allocator on x86-64.
@@ -184,6 +189,14 @@ impl Machine {
         // in use, which is also the only time the push and the pop it costs are worth paying.
         // tamnd/rucc#2777.
         let spared: Vec<PhysReg> = order.iter().copied().chain([conv.frame_pointer]).collect();
+        // Every register the convention hands out, `r10` and `r11` where it put them, which is
+        // ahead of the ones a call preserves. tamnd/rucc#1994.
+        let wide = |order: &[PhysReg]| {
+            Env::new().with(x86_64::GPR, order, &[]).with(x86_64::XMM, &sse_order, &sse_scratch)
+        };
+        let every: Vec<PhysReg> = conv.int_order.to_vec();
+        let spared_every: Vec<PhysReg> =
+            every.iter().copied().chain([conv.frame_pointer]).collect();
         Self {
             conv,
             file: x86_64::REGS,
@@ -197,6 +210,7 @@ impl Machine {
             selector: &select::x86_64::SELECTOR,
             env: env(&order),
             spare: Some(env(&spared)),
+            wide: Some([wide(&every), wide(&spared_every)]),
         }
     }
 
@@ -229,6 +243,7 @@ impl Machine {
                 &fp_scratch,
             ),
             spare: None,
+            wide: None,
         }
     }
 
@@ -262,6 +277,8 @@ impl Machine {
             // Not on this machine. The four registers it allocates are the four with a byte form,
             // and `ebp` has none.
             spare: None,
+            // Nor this. Its scratch registers are two a call preserves.
+            wide: None,
         }
     }
 
@@ -1018,7 +1035,22 @@ pub fn compile_recording(
         .as_ref()
         .filter(|_| !naked && !saves_all && !frame::keeps_frame_pointer(&layout));
     let env = spare.unwrap_or(&machine.env);
-    let allocation = rucc_regalloc::run_with(&mut func, env, &called, flags.verify, allocator);
+    // The scratch registers handed out too, where nothing after allocation writes into one while a
+    // value may be in it. The protector's check writes into one at every return, and the walk over
+    // the pages of a frame that grows writes into one in the middle of the body. The rest of what
+    // this file puts in a scratch register goes in the prologue, before anything the allocator
+    // placed is live.
+    let wide = machine
+        .wide
+        .as_ref()
+        .filter(|_| !naked && !saves_all && !layout.grows && guard.is_none())
+        .map(|[plain, spared]| if spare.is_some() { spared } else { plain });
+    let allocation = match wide {
+        Some(wide) => {
+            rucc_regalloc::run_either(&mut func, wide, env, &called, flags.verify, allocator)
+        }
+        None => rucc_regalloc::run_with(&mut func, env, &called, flags.verify, allocator),
+    };
     recording.pressure.record(&called, Cost::of(&allocation));
 
     // After allocation, because the largest area in most frames is the spill slots and nothing

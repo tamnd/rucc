@@ -249,17 +249,28 @@ fn edge(assignment: &Assignment, env: &Env, params: &[Param], args: &[Reg], at: 
     for class in classes {
         // One class at a time, because a scratch register is per class and a value never crosses
         // from one to another on an edge.
-        let parallel: Vec<Move<Place>> = params
+        //
+        // A class with no scratch register is one [`fits`] said goes round in no cycle, so the
+        // ordering never reaches for the place it is given to break one with, and that place is
+        // nothing rather than a register.
+        let parallel: Vec<Move<Option<Place>>> = params
             .iter()
             .zip(args)
             .filter(|(param, _)| param.class == class)
-            .map(|(param, &arg)| Move::new(place(assignment, param.reg), place(assignment, arg)))
+            .map(|(param, &arg)| {
+                Move::new(Some(place(assignment, param.reg)), Some(place(assignment, arg)))
+            })
             .collect();
         let scratch = env.scratch(class);
-        let cycle = *scratch
-            .first()
-            .expect("a class whose values are passed on an edge and which has no scratch register");
-        for mov in moves::sequence(&parallel, Place::Reg(cycle)) {
+        let cycle = scratch.first().map(|&reg| Place::Reg(reg));
+        for mov in moves::sequence(&parallel, cycle) {
+            let (Some(to), Some(from)) = (mov.to, mov.from) else {
+                panic!(
+                    "a class whose values go round in a cycle on an edge and which has no scratch \
+                     register"
+                )
+            };
+            let mov = Move::new(to, from);
             match (mov.to, mov.from) {
                 // No machine here moves one piece of memory into another, so the value goes
                 // through a register, and it is a second scratch rather than the one the ordering
@@ -277,6 +288,56 @@ fn edge(assignment: &Assignment, env: &Env, params: &[Param], args: &[Reg], at: 
         }
     }
     edits
+}
+
+/// Whether the rewrite can write an assignment down with no more than the scratch registers `env`
+/// holds back.
+///
+/// Only a class that holds none back can fail. A value of that class on the stack has nowhere to
+/// be read into at an instruction that wants it, and an edge whose moves of that class go round in
+/// a cycle has nowhere to keep one value while the others move. Those are the only two things the
+/// rewrite takes a scratch register for, so an assignment with neither is one it never asks for one
+/// in. A slot a value waits in around a call is not either of them, since the value is in its
+/// register on both sides and the moves are between that register and the slot.
+#[must_use]
+pub fn fits(func: &Func, assignment: &Assignment, env: &Env) -> bool {
+    let bare = |class: RegClass| env.scratch(class).is_empty();
+    let slots = assignment.slots();
+    let stacked = assignment.placed().any(|(_, at)| match at {
+        Place::Slot(slot) => usize::try_from(slot)
+            .ok()
+            .and_then(|slot| slots.get(slot))
+            .is_some_and(|&class| bare(class)),
+        Place::Reg(_) => false,
+    });
+    if stacked {
+        return false;
+    }
+    for block in func.blocks() {
+        for call in &func[block].succs {
+            let params = &func[call.block].params;
+            let mut classes: Vec<RegClass> =
+                params.iter().map(|param| param.class).filter(|&class| bare(class)).collect();
+            classes.sort_unstable();
+            classes.dedup();
+            for class in classes {
+                // The ordering is given a place that is not one to break a cycle with, so a move
+                // out of it in what comes back is where it would have taken a scratch register.
+                let parallel: Vec<Move<Option<Place>>> = params
+                    .iter()
+                    .zip(&call.args)
+                    .filter(|(param, _)| param.class == class)
+                    .map(|(param, &arg)| {
+                        Move::new(Some(place(assignment, param.reg)), Some(place(assignment, arg)))
+                    })
+                    .collect();
+                if moves::sequence(&parallel, None).iter().any(|mov| mov.from.is_none()) {
+                    return false;
+                }
+            }
+        }
+    }
+    true
 }
 
 /// How many edges arrive in each block.

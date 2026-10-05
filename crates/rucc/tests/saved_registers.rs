@@ -69,3 +69,27 @@ fn a_loop_that_leaves_through_a_call_pushes_nothing() {
         assert!(!body.iter().any(|line| line.starts_with("push")), "{name}: {body:#?}");
     }
 }
+
+/// A leaf with more values live at once than there are registers a call destroys, less the two
+/// that used to be held back for scratch.
+///
+/// Nothing in it spills, so neither `r10` nor `r11` is ever wanted for reading a value off the
+/// stack, and both are handed out ahead of any register the function would have to save. It used
+/// to push `rbx`, `r12` and `r13` and leave the two empty.
+const LEAF: &str = "long f(long a, long b, long c, long *p)
+{
+	long x = p[0], y = p[1], z = p[2], w = p[3];
+	return (a * x + b * y) ^ (c * z + w * a) ^ (x + y + z + w) ^ (a + b + c);
+}
+";
+
+#[test]
+fn a_leaf_short_of_registers_takes_the_scratch_pair_before_pushing_anything() {
+    let text = assembly("leaf", LEAF);
+    let body = body(&text, "f");
+    assert!(!body.is_empty(), "f is in the listing:\n{text}");
+    let uses = |reg: &str| body.iter().any(|line| line.contains(reg));
+    assert!(uses("%r10") && uses("%r11"), "{body:#?}");
+    let pushes = body.iter().filter(|line| line.starts_with("push")).count();
+    assert!(pushes <= 1, "{body:#?}");
+}
