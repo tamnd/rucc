@@ -70,6 +70,7 @@
 mod asm;
 mod emit;
 mod irreducible;
+mod libcall;
 mod rules;
 mod select;
 mod sjlj;
@@ -89,6 +90,7 @@ use rucc_object::wasm::{
 };
 use rucc_target::wasm::{Feature, Features};
 
+pub use libcall::bulk;
 pub use sjlj::prepare;
 
 /// What a translation is asked for.

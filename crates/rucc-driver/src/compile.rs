@@ -1151,6 +1151,10 @@ fn generate(
     if opts.target.arch.is_wasm() {
         let refused = |refusal: rucc_wasm::Refusal| vec![unsupported(&refusal.to_string())];
         rucc_wasm::prepare(module, names).map_err(refused)?;
+        // A call to `memcpy`, `memmove` or `memset` is `memory.copy` or `memory.fill` where the
+        // target has them, as clang writes it. Before `tail::mark`, so that such a call in tail
+        // position is the instruction and not a `return_call` to the library.
+        rucc_wasm::bulk(module, names, opts.wasm);
         // A bit-field wider than 32 bits is arithmetic at a width that wasm has no type for, as on
         // the other targets. The same pass puts each such value into an `i64`.
         for id in module.funcs() {

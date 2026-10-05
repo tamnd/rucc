@@ -1988,22 +1988,15 @@ impl Lower<'_, '_> {
     /// the C library when it does not.
     fn bulk(&mut self, inst: Inst, args: &[Value]) -> Result<()> {
         let opcode = self.func[inst].opcode;
-        let mem = self.mem_info(inst);
-        let align = mem.map_or(1, |m| m.align).max(1);
-        let size = match args.get(2) {
-            Some(&len) => self.constant(len).map(|n| n as u64),
-            None => mem.map(|m| m.size),
-        };
-        if let Some(size @ ..=64) = size {
-            if opcode == Opcode::Memset {
-                if let Some(byte) = self.constant(args[1]) {
-                    return self.fill_short(args[0], (byte & 0xff) as u8, size as u32, align);
+        let (size, align) = self.bulk_size(inst, args);
+        if self.short_bulk(inst, args) {
+            let size = size.unwrap_or(0) as u32;
+            return match self.constant(args[1]) {
+                Some(byte) if opcode == Opcode::Memset => {
+                    self.fill_short(args[0], (byte & 0xff) as u8, size, align)
                 }
-            } else if opcode == Opcode::Memcpy
-                || size <= 8 && size.is_power_of_two() && u64::from(align) >= size
-            {
-                return self.copy_short(args[0], args[1], size as u32, align);
-            }
+                _ => self.copy_short(args[0], args[1], size, align),
+            };
         }
         self.push(args[0])?;
         if opcode == Opcode::Memset {
@@ -2037,6 +2030,30 @@ impl Lower<'_, '_> {
             self.code.op(emit::DROP);
         }
         Ok(())
+    }
+
+    /// The size of a bulk operation when it is known, and the alignment of its addresses.
+    fn bulk_size(&self, inst: Inst, args: &[Value]) -> (Option<u64>, u32) {
+        let mem = self.mem_info(inst);
+        let align = mem.map_or(1, |m| m.align).max(1);
+        let size = match args.get(2) {
+            Some(&len) => self.constant(len).map(|n| n as u64),
+            None => mem.map(|m| m.size),
+        };
+        (size, align)
+    }
+
+    /// Whether [`Self::bulk`] writes a bulk operation as loads and stores, which push the
+    /// addresses once for each piece. That is a copy or a fill of a known size of at most 64
+    /// bytes, when the fill has a constant byte and the move is one piece.
+    pub(super) fn short_bulk(&self, inst: Inst, args: &[Value]) -> bool {
+        let (size, align) = self.bulk_size(inst, args);
+        let Some(size @ ..=64) = size else { return false };
+        match self.func[inst].opcode {
+            Opcode::Memset => self.constant(args[1]).is_some(),
+            Opcode::Memcpy => true,
+            _ => size <= 8 && size.is_power_of_two() && u64::from(align) >= size,
+        }
     }
 
     /// The widest piece of a short copy at offset `at` with `left` bytes to go.

@@ -352,6 +352,11 @@ impl Lower<'_, '_> {
             | Opcode::Expect
             | Opcode::Store => all(Place::Any),
             Opcode::Load if !data.flags.contains(Flags::VOLATILE) => all(Place::Any),
+            // A short copy or fill is loads and stores that push the addresses again for each
+            // piece, and the other ones push each operand once.
+            Opcode::Memcpy | Opcode::Memmove | Opcode::Memset if !self.short_bulk(inst, &args) => {
+                all(Place::Any)
+            }
             // The other predicates push an operand twice or not at all.
             Opcode::FCmp => match data.extra {
                 Extra::FloatPred(

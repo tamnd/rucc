@@ -4,6 +4,10 @@ All notable changes are recorded here. The format follows [Keep a Changelog](htt
 
 ## Unreleased
 
+### Changed
+
+- On wasm with the bulk memory feature, which is the default, a call to `memcpy` or `memmove` is `memory.copy` and a call to `memset` is `memory.fill`, as clang writes them (#2866). The engine runs each one as one native copy or fill, and the C library does the work in wasm code. A copy or a fill of a small constant length is loads and stores. A function marked `no_builtin`, which `-fno-builtin` and `-fsafety` mark, keeps the calls, and so does a unit that defines one of the three functions. The SQLite shell at `-O2` goes from 1,816,667 bytes to 1,805,063, and it makes no call to the three functions.
+
 ## 0.24.2
 
 More of WA4, wasm code at `-O2` that is close to clang in size and speed (#2866). A value with more than one use is written at its first use with a `local.tee`, and a constant address offset goes in the offset field of a load or a store. The SQLite shell at `-O2` goes from 1,952,890 bytes to 1,816,667, which is 0.2% smaller than the shell that clang from wasi-sdk 34 builds, so the size criterion of WA4 is met.
