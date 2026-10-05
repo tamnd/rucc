@@ -135,12 +135,20 @@
 //! the description names for moving a register of that class, so it is an instruction the target
 //! has by where the name came from rather than by a lookup afterwards.
 //!
+//! # A copy of a register into itself
+//!
+//! One more thing goes here, and it is not one of the allocator's moves: a copy a pass in front of
+//! the allocator wrote, whose two ends the allocator then gave one register. [`itself`] takes those
+//! out, and it needs none of the above to do it. The instruction is the one the target names for
+//! moving a whole register of the class, it reads the register it writes, and so what it writes is
+//! what is there by its operands alone.
+//!
 //! # What it does not do
 //!
 //! Nothing is propagated. A read of a register that another register is known to equal stays a
-//! read of the register it names. The two things this does are both to one of the allocator's own
-//! moves and to nothing else, for the reason the rest of this is built on: what makes an edit here
-//! safe is that the allocator wrote the instruction and owns the slot, and an instruction a
+//! read of the register it names. The two things [`clean`] does are both to one of the allocator's
+//! own moves and to nothing else, for the reason the rest of this is built on: what makes an edit
+//! there safe is that the allocator wrote the instruction and owns the slot, and an instruction a
 //! lowering rule wrote is neither.
 //!
 //! Nothing crosses a block, on either half.
@@ -237,6 +245,60 @@ pub fn clean(
         }
     }
     cleaned
+}
+
+/// Takes out every copy of a register into itself, and gives back how many it took out.
+///
+/// The allocator never writes one of these, since a move between two places that are the same
+/// place is one it leaves out, but a pass in front of it can. [`crate::split::indirect`] writes a
+/// copy of each value a computed `goto` carries into a register of its own, in front of the jump,
+/// and the allocator then hands that register the one the value was in already, because the value
+/// dies at the copy. What is left is `movq %rax, %rax` for every value an interpreter's dispatch
+/// carries, in front of every jump of the dispatch, which is most of the instructions such a loop
+/// runs that are not the loop's own. tamnd/rucc#1994.
+///
+/// Only the instruction the target names for moving a register of a class is taken, and only
+/// where it reads and writes the one register of that class. That instruction moves the whole of
+/// the register on every target here, so writing a register with what it holds changes nothing.
+/// A narrower move is left alone even with both ends the same, because on x86-64 `movl %eax, %eax`
+/// clears the top half and a program may be counting on it.
+///
+/// This is not the reasoning the allocator's own moves are taken out on. Nothing is known about
+/// what any register holds, nothing is read out of the frame, and a copy that writes what is there
+/// by its operands alone needs no record of where it came from to be safe to take out.
+pub fn itself(func: &mut Func, frame: &FrameInsts, names: &mut Interner) -> usize {
+    // The move of each class by the number of the class, asked once per class rather than by name
+    // for every instruction.
+    let mut movs: Map<u8, Option<Opcode>> = Map::default();
+    let mut gone: Vec<Inst> = Vec::new();
+    for block in func.blocks() {
+        for inst in func.insts(block) {
+            if func[inst].mem.is_some() {
+                continue;
+            }
+            let [to, from] = &func[func[inst].operands] else { continue };
+            let same = to.role.is_def()
+                && !from.role.is_def()
+                && to.class == from.class
+                && to.reg.phys().is_some()
+                && to.reg == from.reg;
+            if !same {
+                continue;
+            }
+            let class = to.class;
+            let mov = *movs.entry(class.number()).or_insert_with(|| {
+                let moves = frame.moves(class)?;
+                Some(Opcode::new(names.intern(&format!("{}{}", frame.prefix, moves.mov))))
+            });
+            if mov == Some(func[inst].opcode) {
+                gone.push(inst);
+            }
+        }
+    }
+    for &inst in &gone {
+        func.remove_inst(inst);
+    }
+    gone.len()
 }
 
 /// Whether that register is one the frame is addressed through, so writing it moves every slot.
@@ -785,5 +847,42 @@ mod tests {
 
         assert_eq!(gone(&mut func, &moves, &mut names), 0);
         assert_eq!(left(&func, block), 3);
+    }
+
+    /// The copy a computed `goto` leaves in front of its jump once the allocator has given both of
+    /// its ends one register. It is not one of the allocator's moves, and it goes anyway.
+    #[test]
+    fn a_copy_of_a_register_into_itself_goes_without_being_one_of_the_allocators_moves() {
+        let (mut names, mut func, block) = empty();
+        copy(&mut func, &mut names, block, RAX, RAX);
+        let kept = add(&mut func, &mut names, block, RAX, RAX);
+
+        assert_eq!(super::itself(&mut func, &FRAME, &mut names), 1);
+        assert_eq!(func.insts(block).collect::<Vec<_>>(), vec![kept]);
+    }
+
+    /// The same for the other class, whose copy is a different instruction.
+    #[test]
+    fn a_copy_of_a_vector_register_into_itself_goes() {
+        let (mut names, mut func, block) = empty();
+        let movaps = op(&mut names, "movaps_rr");
+        let xmm = Reg::physical(PhysReg::new(3));
+        func.build(block, movaps).def(xmm, XMM).uses(xmm, XMM).finish();
+
+        assert_eq!(super::itself(&mut func, &FRAME, &mut names), 1);
+        assert_eq!(left(&func, block), 0);
+    }
+
+    /// A copy between two registers is a copy, and a narrower copy of a register into itself
+    /// clears the top half of it, so neither is nothing.
+    #[test]
+    fn a_copy_between_two_registers_and_a_narrower_one_into_itself_stay() {
+        let (mut names, mut func, block) = empty();
+        copy(&mut func, &mut names, block, RAX, R10);
+        let movl = op(&mut names, "mov_rr_32");
+        func.build(block, movl).def(Reg::physical(RAX), GPR).uses(Reg::physical(RAX), GPR).finish();
+
+        assert_eq!(super::itself(&mut func, &FRAME, &mut names), 0);
+        assert_eq!(left(&func, block), 2);
     }
 }

@@ -30,6 +30,7 @@ All notable changes are recorded here. The format follows [Keep a Changelog](htt
 
 ### Changed
 
+- A computed `goto` no longer copies each value it carries into the register the value is in already (#1994). The copies that put those values in one register per value in front of the jump were left as `movq %rax, %rax` on x86-64 and `mov x0, x0` on AArch64 once the allocator gave both ends one register, which was 12 instructions in front of the 4 jumps of a small stack machine and about 60 in an interpreter shaped like PostgreSQL's `ExecInterpExpr`. A copy of a whole register into itself is now taken out after allocation.
 - At `-O1` and above, a value that would go to the stack only because a call destroys every register left for it now stays in one of those registers, stored in front of the call and loaded back behind it, when that costs less than the stack would (#1177). The case is a loop that reads the value in every turn and makes the call now and then, like the `strlen` call that the tuple deforming loop of PostgreSQL makes for a `cstring` column. Before, each such value was loaded from the stack at every read in the loop while the registers the call destroys sat empty.
 
 ### Fixed
