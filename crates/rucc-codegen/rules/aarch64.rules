@@ -494,8 +494,9 @@
 
 ;; Bit counts. The leading zeros are `clz` and the trailing ones are `clz` of the value with its bits
 ;; turned round by `rbit`, which is what gcc writes. Both are in the base architecture, so every
-;; function reaches these. The set bits are counted only in a vector register here, and are written
-;; out as arithmetic until they have a rule of their own.
+;; function reaches these. The set bits are counted only in a vector register here, so a function
+;; built with `-mgeneral-regs-only` has that count written out as arithmetic and never reaches the
+;; last two.
 
 (rule (lower (ctlz.i32 (value.i32 x)))
       (a64.clz_r_32 x)
@@ -512,6 +513,14 @@
 (rule (lower (cttz.i64 (value.i64 x)))
       (a64.clz_r_64 (a64.rbit_r_64 x))
       (spec (= (ctz.i64 x) (result))))
+
+(rule (lower (ctpop.i32 (value.i32 x)))
+      (a64.cnt_32 x)
+      (spec (= (pop.i32 x) (result))))
+
+(rule (lower (ctpop.i64 (value.i64 x)))
+      (a64.cnt_64 x)
+      (spec (= (pop.i64 x) (result))))
 
 ;; Comparisons. Each is a compare and the `cset` behind it, one term for the reason the x86-64 file
 ;; gives: the flags between the two are not a value. The IR's ten predicates are the machine's ten

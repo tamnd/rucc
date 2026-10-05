@@ -80,6 +80,14 @@ dac00041	rbit x1, x2	rbit_r_64
 5ac00841	rev w1, w2	rev_r_32
 dac00c41	rev x1, x2	rev_r_64
 5ac00441	rev16 w1, w2	rev16_r_32
+1e270062	fmov s2, w3	cnt_32
+4e205842	cnt v2.16b, v2.16b	cnt_32
+4e31b842	addv b2, v2.16b	cnt_32
+1e260041	fmov w1, s2	cnt_32
+9e670062	fmov d2, x3	cnt_64
+4e205842	cnt v2.16b, v2.16b	cnt_64
+4e31b842	addv b2, v2.16b	cnt_64
+1e260041	fmov w1, s2	cnt_64
 13001c41	sxtb w1, w2	sxtb_16
 13001c41	sxtb w1, w2	sxtb_32
 93401c41	sxtb x1, w2	sxtb_64

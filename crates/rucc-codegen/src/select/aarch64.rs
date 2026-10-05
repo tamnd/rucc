@@ -273,15 +273,17 @@ mod tests {
         }
     }
 
-    /// A byte swap is `rev`, and both zero counts end in `clz`, the trailing one counting the
-    /// value turned round by `rbit`.
+    /// A byte swap is `rev`, both zero counts end in `clz`, the trailing one counting the value
+    /// turned round by `rbit`, and the set bits are counted in a vector register.
     #[test]
     fn a_byte_swap_and_the_zero_counts_are_the_instructions_the_architecture_has() {
         let mut terms = Terms::default();
         for width in ["i32", "i64"] {
             let x = terms.value(width, "v0");
             let bits = &width[1..];
-            for (ir, inst) in [("bswap", "rev_r"), ("ctlz", "clz_r"), ("cttz", "clz_r")] {
+            let pairs =
+                [("bswap", "rev_r"), ("ctlz", "clz_r"), ("cttz", "clz_r"), ("ctpop", "cnt")];
+            for (ir, inst) in pairs {
                 let term = terms.app(&format!("{ir}.{width}"), &[x]);
                 let want = format!("a64.{inst}_{bits}");
                 assert_eq!(selects(&terms, term), Some(want.as_str()), "{ir}.{width}");
