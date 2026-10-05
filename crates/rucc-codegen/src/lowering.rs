@@ -699,14 +699,16 @@ mod tests {
         assert_eq!(ordered, Step::GROUP);
     }
 
-    /// `unsigned b(unsigned x) { return __builtin_bswap32(x); }`, which is one of the constructs
+    /// `uint16_t b(uint16_t x) { return __builtin_bswap16(x); }`, which is one of the constructs
     /// in the list and therefore one the group owes an answer for.
     ///
-    /// On AArch64, which has no rule for one yet, so the group builds it out of shifts and masks.
+    /// On AArch64, which has `rev` at thirty two and sixty four bits and no rule at sixteen, so the
+    /// group builds it out of shifts and masks.
     #[test]
     fn a_byte_reversal_does_not_survive_the_group() {
-        let (mut names, mut func) = one(&[i32()], &[i32()], |build, args| {
-            let swapped = build.unary(Opcode::Bswap, args[0], i32());
+        let i16 = Type::int(16);
+        let (mut names, mut func) = one(&[i16], &[i16], |build, args| {
+            let swapped = build.unary(Opcode::Bswap, args[0], i16);
             build.ret(&[swapped]);
         });
         let ran = group(
@@ -813,7 +815,7 @@ mod tests {
                 continue;
             };
             // A byte reversal is the one construct here x86-64 has an instruction for, so it is
-            // asked of a machine that does not.
+            // asked at sixteen bits of a machine that has none there.
             let ran = if *step == Step::Bytes {
                 group(
                     &mut func,
@@ -837,12 +839,13 @@ mod tests {
     /// rather than an opcode, one rewrites an operand and takes nothing out, and the variable
     /// argument list needs a whole calling convention around it to be worth building here.
     fn holding(step: Step) -> Option<(Interner, Func)> {
+        let i16 = Type::int(16);
         let i32 = i32();
         let i64 = Type::int(64);
         let f64 = Type::float(Float::F64);
         Some(match step {
-            Step::Bytes => one(&[i32], &[i32], |build, args| {
-                let swapped = build.unary(Opcode::Bswap, args[0], i32);
+            Step::Bytes => one(&[i16], &[i16], |build, args| {
+                let swapped = build.unary(Opcode::Bswap, args[0], i16);
                 build.ret(&[swapped]);
             }),
             Step::Counts => one(&[i32], &[i32], |build, args| {

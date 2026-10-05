@@ -1422,6 +1422,39 @@ mod tests {
         assert!(text.contains("a64.add_rr_32"), "{text}");
     }
 
+    /// A byte swap and the two zero counts are `rev`, `clz`, and `rbit` then `clz` on any AArch64,
+    /// at both widths, with nothing written out around them.
+    #[test]
+    fn an_aarch64_byte_swap_or_zero_count_is_the_instruction_for_it() {
+        for (opcode, wanted) in [
+            (Opcode::Bswap, &["a64.rev_r"][..]),
+            (Opcode::Ctlz, &["a64.clz_r"][..]),
+            (Opcode::Cttz, &["a64.rbit_r", "a64.clz_r"][..]),
+        ] {
+            for width in [32, 64] {
+                let ty = Type::int(width);
+                let (mut names, mut source, block, args) = blank(&[ty]);
+                let mut build = Builder::new(&mut source, block);
+                let done = build.unary(opcode, args[0], ty);
+                build.ret(&[done]);
+                let machine = Machine::aarch64(&aarch64::AAPCS64);
+                let out = compile(
+                    &mut source,
+                    &mut names,
+                    &machine,
+                    &Elsewhere::default(),
+                    Flags::default(),
+                )
+                .expect("every instruction has a rule");
+                let text = mir::print_func(&out, &names, &aarch64::REGS);
+                for inst in wanted {
+                    assert!(text.contains(&format!("{inst}_{width}")), "{inst}_{width}: {text}");
+                }
+                assert!(!text.contains("lsr") && !text.contains("mul"), "written out: {text}");
+            }
+        }
+    }
+
     #[test]
     fn a_function_comes_out_with_no_virtual_register_left_in_it() {
         let i32 = Type::int(32);

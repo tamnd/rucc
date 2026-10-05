@@ -552,8 +552,8 @@ pub struct CallRegs {
     ///
     /// Sixteen, thirty two and sixty four on x86-64, where the two wider ones are `bswap` and the
     /// narrow one is a rotate by eight. Sixteen and thirty two on i386, where a sixty four bit value
-    /// is two registers. None yet on AArch64, where `rev` and `rev16` are waiting on their rules. A
-    /// reversal at any other width is built out of shifts and masks before selection.
+    /// is two registers. Thirty two and sixty four on AArch64, which are `rev`. A reversal at any
+    /// other width is built out of shifts and masks before selection.
     pub byte_swaps: &'static [u32],
     /// How far one push moves the stack pointer.
     ///

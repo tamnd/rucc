@@ -10,6 +10,11 @@
 //! table is a fact about the target, it is here for the reason [`crate::BitInsts`] is, and both
 //! read it.
 //!
+//! A count can be in the base architecture rather than in an extension, which is how AArch64 has
+//! both of its: `clz` for the leading zeros, and `rbit` then `clz` for the trailing ones, which is two
+//! instructions and still a long way short of the arithmetic. Those have no feature to name and are
+//! on everywhere.
+//!
 //! It names the counts without the IR, since this crate sits below it, and each reader says which
 //! of its instructions is which count.
 
@@ -31,7 +36,8 @@ pub enum BitCount {
 pub struct CountInst {
     /// The count it answers.
     pub of: BitCount,
-    /// The extension, by the name `-m` and `__attribute__((target))` give it.
+    /// The extension, by the name `-m` and `__attribute__((target))` give it, or empty for an
+    /// instruction every processor of the architecture has.
     pub feature: &'static str,
     /// The widths in bits a rule selects it at.
     pub widths: &'static [u32],
@@ -41,7 +47,7 @@ impl CountInst {
     /// Whether a processor with those extensions has it.
     #[must_use]
     pub fn on(self, isa: Isa) -> bool {
-        Feature::named(self.feature).is_some_and(|it| isa.has(it))
+        self.feature.is_empty() || Feature::named(self.feature).is_some_and(|it| isa.has(it))
     }
 
     /// Whether one of `table` is that count at that width on a processor with those extensions.

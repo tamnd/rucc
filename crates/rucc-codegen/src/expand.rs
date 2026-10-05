@@ -783,8 +783,9 @@ pub fn bit_count(opcode: Opcode) -> Option<BitCount> {
 ///
 /// `kept` is the counts the selector has a rule for on the processor this function is built for,
 /// which on x86-64 is `popcnt`, `lzcnt` and `tzcnt` where `-mpopcnt`, a `-march=` or a `target`
-/// attribute says the processor has them (tamnd/rucc#310). Everything else is written out here, and
-/// that is every count on a plain x86-64, whose searches `bsr` and `bsf` leave a different answer
+/// attribute says the processor has them (tamnd/rucc#310), and on AArch64 is `clz`, alone for the
+/// leading zeros and after `rbit` for the trailing ones, on every processor. Everything else is
+/// written out here, and that is every count on a plain x86-64, whose searches `bsr` and `bsf` leave a different answer
 /// for a zero on different processors. The trade is the one `spec/10-backend.md` section 10.3
 /// describes and `expand::bytes` above makes for the same reason: slower than the instruction,
 /// right on every target, and built only out of rules the verifier has already discharged.

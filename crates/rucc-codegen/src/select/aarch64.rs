@@ -12,7 +12,7 @@ include!(concat!(env!("OUT_DIR"), "/aarch64.rs"));
 /// What the lowering asks of AArch64.
 pub static SELECTOR: super::Selector = super::Selector {
     table: &TABLE,
-    counts: &[],
+    counts: rucc_target::aarch64::COUNTS,
     shapes: &rucc_target::aarch64::MACHINE,
     address: rucc_target::aarch64::address,
     frame: &rucc_target::aarch64::FRAME,
@@ -270,6 +270,22 @@ mod tests {
             let term = terms.app(&format!("icmp_{ir}.i1"), &[x, y]);
             let want = format!("a64.cmp_set_{cc}_64");
             assert_eq!(selects(&terms, term), Some(want.as_str()));
+        }
+    }
+
+    /// A byte swap is `rev`, and both zero counts end in `clz`, the trailing one counting the
+    /// value turned round by `rbit`.
+    #[test]
+    fn a_byte_swap_and_the_zero_counts_are_the_instructions_the_architecture_has() {
+        let mut terms = Terms::default();
+        for width in ["i32", "i64"] {
+            let x = terms.value(width, "v0");
+            let bits = &width[1..];
+            for (ir, inst) in [("bswap", "rev_r"), ("ctlz", "clz_r"), ("cttz", "clz_r")] {
+                let term = terms.app(&format!("{ir}.{width}"), &[x]);
+                let want = format!("a64.{inst}_{bits}");
+                assert_eq!(selects(&terms, term), Some(want.as_str()), "{ir}.{width}");
+            }
         }
     }
 

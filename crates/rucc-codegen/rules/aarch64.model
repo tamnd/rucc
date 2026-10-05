@@ -80,6 +80,43 @@
 (semantics (a64.asr_rr_32 l r) (bvashr l (bvand r 31)))
 (semantics (a64.asr_rr_64 l r) (bvashr l (bvand r 63)))
 
+;; Turning a register round. `rev` reverses the bytes, which is the IR's `bswap`, and `rbit`
+;; reverses the bits, written out here a bit at a time with the lowest bit of the operand ending up
+;; highest in the result.
+(semantics (a64.rev_r_32 v) (concat (extract 7 0 v) (concat (extract 15 8 v) (concat (extract 23 16 v) (extract 31 24 v)))))
+(semantics (a64.rev_r_64 v) (concat (extract 7 0 v) (concat (extract 15 8 v) (concat (extract 23 16 v) (concat (extract 31 24 v) (concat (extract 39 32 v) (concat (extract 47 40 v) (concat (extract 55 48 v) (extract 63 56 v)))))))))
+(semantics (a64.rbit_r_32 v)
+  (concat (extract 0 0 v) (concat (extract 1 1 v) (concat (extract 2 2 v) (concat (extract 3 3 v)
+  (concat (extract 4 4 v) (concat (extract 5 5 v) (concat (extract 6 6 v) (concat (extract 7 7 v)
+  (concat (extract 8 8 v) (concat (extract 9 9 v) (concat (extract 10 10 v) (concat (extract 11 11 v)
+  (concat (extract 12 12 v) (concat (extract 13 13 v) (concat (extract 14 14 v) (concat (extract 15 15 v)
+  (concat (extract 16 16 v) (concat (extract 17 17 v) (concat (extract 18 18 v) (concat (extract 19 19 v)
+  (concat (extract 20 20 v) (concat (extract 21 21 v) (concat (extract 22 22 v) (concat (extract 23 23 v)
+  (concat (extract 24 24 v) (concat (extract 25 25 v) (concat (extract 26 26 v) (concat (extract 27 27 v)
+  (concat (extract 28 28 v) (concat (extract 29 29 v) (concat (extract 30 30 v) (extract 31 31 v)))))))))))))))))))))))))))))))))
+(semantics (a64.rbit_r_64 v)
+  (concat (extract 0 0 v) (concat (extract 1 1 v) (concat (extract 2 2 v) (concat (extract 3 3 v)
+  (concat (extract 4 4 v) (concat (extract 5 5 v) (concat (extract 6 6 v) (concat (extract 7 7 v)
+  (concat (extract 8 8 v) (concat (extract 9 9 v) (concat (extract 10 10 v) (concat (extract 11 11 v)
+  (concat (extract 12 12 v) (concat (extract 13 13 v) (concat (extract 14 14 v) (concat (extract 15 15 v)
+  (concat (extract 16 16 v) (concat (extract 17 17 v) (concat (extract 18 18 v) (concat (extract 19 19 v)
+  (concat (extract 20 20 v) (concat (extract 21 21 v) (concat (extract 22 22 v) (concat (extract 23 23 v)
+  (concat (extract 24 24 v) (concat (extract 25 25 v) (concat (extract 26 26 v) (concat (extract 27 27 v)
+  (concat (extract 28 28 v) (concat (extract 29 29 v) (concat (extract 30 30 v) (concat (extract 31 31 v)
+  (concat (extract 32 32 v) (concat (extract 33 33 v) (concat (extract 34 34 v) (concat (extract 35 35 v)
+  (concat (extract 36 36 v) (concat (extract 37 37 v) (concat (extract 38 38 v) (concat (extract 39 39 v)
+  (concat (extract 40 40 v) (concat (extract 41 41 v) (concat (extract 42 42 v) (concat (extract 43 43 v)
+  (concat (extract 44 44 v) (concat (extract 45 45 v) (concat (extract 46 46 v) (concat (extract 47 47 v)
+  (concat (extract 48 48 v) (concat (extract 49 49 v) (concat (extract 50 50 v) (concat (extract 51 51 v)
+  (concat (extract 52 52 v) (concat (extract 53 53 v) (concat (extract 54 54 v) (concat (extract 55 55 v)
+  (concat (extract 56 56 v) (concat (extract 57 57 v) (concat (extract 58 58 v) (concat (extract 59 59 v)
+  (concat (extract 60 60 v) (concat (extract 61 61 v) (concat (extract 62 62 v) (extract 63 63 v)))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))
+
+;; The leading zeros, which `clz` counts as the width for a zero, the answer the IR's count gives.
+;; The trailing zeros have no instruction of their own and are `clz` of the bits turned round.
+(semantics (a64.clz_r_32 v) (clz.i32 v))
+(semantics (a64.clz_r_64 v) (clz.i64 v))
+
 ;; A compare and the `cset` behind it, which leaves a one or a zero in the whole register. The
 ;; condition codes are the architecture's names: `lo`, `ls`, `hi` and `hs` are the unsigned ones.
 (semantics (a64.cmp_set_eq_32 l r) (ite (= l r) 1 0))
