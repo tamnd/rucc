@@ -19,12 +19,6 @@ pr22061-4 all #2943
 pr51447 all #2943
 pr71494 all #2943
 
-# __builtin_setjmp and __builtin_longjmp.
-built-in-setjmp all #2944
-pr60003 all #2944
-pr64242 all #2944
-pr84521 all #2944
-
 # wasi-libc has no tmpnam, and a call through a pointer of another type traps.
 fprintf-2 all #2946
 printf-2 all #2946

@@ -52,12 +52,12 @@
 //! function, and the second name of a variable is a data symbol at the place of the variable.
 //!
 //! What this refuses, with a message that names the function: a vector, inline assembly with a
-//! template that is not blank, `__builtin_setjmp`, a function other than `setjmp` that returns
-//! twice, unwinding to a cleanup with `-fexceptions`, an `ifunc`, and the instructions of the
-//! memory safety monitor. Each of these is a later step of #2864 or of the milestones after it,
-//! except the `ifunc`, which wasm does not have. A graph of blocks that is not reducible is not
-//! refused: a dispatch node makes it reducible. A computed `goto` is not refused either: the
-//! address of a label is a small number, and the `goto` is a `br_table` on it, as in LLVM.
+//! template that is not blank, a function other than `setjmp` that returns twice, unwinding to a
+//! cleanup with `-fexceptions`, an `ifunc`, and the instructions of the memory safety monitor. Each
+//! of these is a later step of #2864 or of the milestones after it, except the `ifunc`, which wasm
+//! does not have. A graph of blocks that is not reducible is not refused: a dispatch node makes it
+//! reducible. A computed `goto` is not refused either: the address of a label is a small number,
+//! and the `goto` is a `br_table` on it, as in LLVM.
 //!
 //! Every crate in the workspace is published, and publishing implies a promise. This one is
 //! tier 3: its Rust API is explicitly unstable and will change without a major version bump.
