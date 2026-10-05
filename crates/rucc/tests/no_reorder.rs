@@ -67,7 +67,7 @@ const UNITS: &str = "__attribute__((no_reorder)) int a1 = 1;\n\
     [[gnu::no_reorder]] const int r1 = 1;\n\
     const int r2 = 2;\n\
     __attribute__((no_reorder)) const int r3 = 3;\n\
-    extern int r4 __attribute__((no_reorder));\n\
+    extern const int r4 __attribute__((no_reorder));\n\
     const int r4 = 4;\n\
     int f1(void) { return a2; }\n\
     __attribute__((no_reorder)) int f2(void) { return a1; }\n\
