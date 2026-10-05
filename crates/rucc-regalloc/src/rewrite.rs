@@ -249,17 +249,28 @@ fn edge(assignment: &Assignment, env: &Env, params: &[Param], args: &[Reg], at: 
     for class in classes {
         // One class at a time, because a scratch register is per class and a value never crosses
         // from one to another on an edge.
-        let parallel: Vec<Move<Place>> = params
+        //
+        // A class with no scratch register is one [`fits`] said goes round in no cycle, so the
+        // ordering never reaches for the place it is given to break one with, and that place is
+        // nothing rather than a register.
+        let parallel: Vec<Move<Option<Place>>> = params
             .iter()
             .zip(args)
             .filter(|(param, _)| param.class == class)
-            .map(|(param, &arg)| Move::new(place(assignment, param.reg), place(assignment, arg)))
+            .map(|(param, &arg)| {
+                Move::new(Some(place(assignment, param.reg)), Some(place(assignment, arg)))
+            })
             .collect();
         let scratch = env.scratch(class);
-        let cycle = *scratch
-            .first()
-            .expect("a class whose values are passed on an edge and which has no scratch register");
-        for mov in moves::sequence(&parallel, Place::Reg(cycle)) {
+        let cycle = scratch.first().map(|&reg| Place::Reg(reg));
+        for mov in moves::sequence(&parallel, cycle) {
+            let (Some(to), Some(from)) = (mov.to, mov.from) else {
+                panic!(
+                    "a class whose values go round in a cycle on an edge and which has no scratch \
+                     register"
+                )
+            };
+            let mov = Move::new(to, from);
             match (mov.to, mov.from) {
                 // No machine here moves one piece of memory into another, so the value goes
                 // through a register, and it is a second scratch rather than the one the ordering

@@ -341,6 +341,34 @@ mod tests {
     }
 
     #[test]
+    fn a_value_carried_round_a_loop_is_allocated_with_the_scratch_registers_given_out() {
+        let mut names = Interner::new();
+        let mut func = Func::new(names.intern("f"));
+        let opcode = Opcode::new(names.intern("x64.nop"));
+        let head = func.create_block();
+        let body = func.create_block();
+        let first = func.new_vreg(GPR);
+        func.build(head, opcode).def(first, GPR).finish();
+        let carried = func.append_param(body, GPR);
+        *func.succs_mut(head) = vec![BlockCall::with(body, vec![first])];
+        let next = func.new_vreg(GPR);
+        func.build(body, opcode).def(next, GPR).uses(carried, GPR).finish();
+        *func.succs_mut(body) = vec![BlockCall::with(body, vec![next])];
+
+        // One value on each edge goes round in no cycle, so the answer with nothing held back is
+        // the one written, and writing the edge has no scratch register to ask for.
+        let wide = assign::Env::new().with(GPR, &SYSV.int_order[..2], &[]);
+        let env = assign::Env::new().with(GPR, &SYSV.int_order[..1], &SYSV.int_order[1..3]);
+        let allocation = run_either(&mut func, &wide, &env, "test", true, Allocator::Single);
+
+        assert_eq!(allocation.assignment.spilled(), 0);
+        for value in [first, carried, next] {
+            let place = allocation.assignment.place(value);
+            assert!(matches!(place, Some(assign::Place::Reg(_))), "{allocation:?}");
+        }
+    }
+
+    #[test]
     fn a_value_a_loop_reads_is_put_away_around_the_call_the_loop_seldom_makes() {
         let mut names = Interner::new();
         let mut func = Func::new(names.intern("f"));
