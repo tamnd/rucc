@@ -28,7 +28,7 @@ long big(long a, long b, long c, long d, long e, long f, long g) {
     long s = 0;
     for (long i = 0; i < g; i++) s += a * b + c * d + e * f + i;
     bottom();
-    return s;
+    return s + a;
 }
 ";
 
