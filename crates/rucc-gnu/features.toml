@@ -838,7 +838,17 @@ status = "implemented"
 targets = ["x86-64", "x86"]
 used_by = ["linux"]
 tests = ["rucc-types::a_function_without_a_landing_pad_is_another_type", "rucc-types::a_function_without_a_landing_pad_says_so_in_front_of_the_star", "rucc::nocf_check_leaves_out_the_landing_pad_and_calls_through_a_pointer_with_notrack", "rucc::nocf_check_is_checked_and_kept_in_the_type_in_gcc_s_words"]
-notes = "A function type without a landing pad under `-fcf-protection=branch` or `full`. A function of the type opens without `endbr64`, and a call or a tail jump through a pointer to one carries the `notrack` prefix, in the listing and in the object the compiler writes itself. It lands where `ms_abi` does: in the specifiers, after the declarator, beside the star of a pointer or in a typedef, one level down a pointer and no further. It is part of the type, as it is to gcc: a declaration each way is `conflicting types` and a pointer of one assigned to a pointer of the other is an incompatible pointer, spelled `void (__attribute__((nocf_check)) *)(void)`. On something that is not a function it is warned about and dropped, an argument is refused with `E0816`, and without `-fcf-protection` it is ignored with gcc's warning. A label whose address is taken keeps its pad. `cf_check` and `-mmanual-endbr` are not here yet."
+notes = "A function type without a landing pad under `-fcf-protection=branch` or `full`. A function of the type opens without `endbr64`, and a call or a tail jump through a pointer to one carries the `notrack` prefix, in the listing and in the object the compiler writes itself. It lands where `ms_abi` does: in the specifiers, after the declarator, beside the star of a pointer or in a typedef, one level down a pointer and no further. It is part of the type, as it is to gcc: a declaration each way is `conflicting types` and a pointer of one assigned to a pointer of the other is an incompatible pointer, spelled `void (__attribute__((nocf_check)) *)(void)`. On something that is not a function it is warned about and dropped, an argument is refused with `E0816`, and without `-fcf-protection` it is ignored with gcc's warning. A label whose address is taken keeps its pad. Written beside `cf_check` it wins, as in gcc."
+
+[[feature]]
+name = "cf_check"
+kind = "attribute"
+gcc_version = "8.0"
+status = "implemented"
+targets = ["x86-64", "x86"]
+used_by = []
+tests = ["rucc::cf_check_under_manual_endbr_is_the_only_function_with_a_landing_pad", "rucc::cf_check_is_checked_in_gcc_s_words"]
+notes = "The function opens with a landing pad under `-fcf-protection=branch` and `-mmanual-endbr`, which leaves `endbr64` or `endbr32` out of every function that does not say `cf_check`, the ones whose address is taken included. The pads at labels whose address is taken stay either way, and `nocf_check` on the type wins over it. It is a declaration's attribute rather than the type's, merged across declarations as `noinline` is, so a prototype that says it covers a definition that does not and the other way round. Without `-mmanual-endbr` it changes nothing, and without `-fcf-protection` nothing is said. On a variable or a typedef it is warned about in gcc's words, and an argument is refused with `E0817`."
 
 [[feature]]
 name = "warning"

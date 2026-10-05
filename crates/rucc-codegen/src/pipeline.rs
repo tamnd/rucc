@@ -420,6 +420,9 @@ pub struct Flags {
     /// `-fcf-protection=branch` asks for. That is every function, and every label of a function
     /// whose address the program took.
     pub landing: bool,
+    /// Whether the pad at the top of a function is only written in one that asks for it with
+    /// `cf_check`, which `-mmanual-endbr` says. The pads at labels are not affected.
+    pub manual_endbr: bool,
     /// What the x86 speculation hardening flags ask of indirect branches and returns. See
     /// [`crate::thunks`].
     pub speculation: Speculation,
@@ -534,6 +537,7 @@ impl Default for Flags {
             code_model: CodeModel::Small,
             stack_clash: false,
             landing: false,
+            manual_endbr: false,
             speculation: Speculation::default(),
             jump_tables: true,
             cmov: true,
@@ -1108,9 +1112,11 @@ pub fn compile_recording(
         before: flags.patch.before,
         after: flags.patch.after,
     });
-    // The pad at the top of the function is left out of one whose type says `nocf_check`. The
-    // pads at its labels stay, since a computed `goto` is a different branch.
-    let entry = landing.filter(|_| !source.attrs.set.contains(ir::AttrSet::NOCF));
+    // The pad at the top of the function is left out of one whose type says `nocf_check`, and
+    // under `-mmanual-endbr` out of every one that does not say `cf_check`. The pads at its
+    // labels stay, since a computed `goto` is a different branch.
+    let asked = !flags.manual_endbr || source.attrs.set.contains(ir::AttrSet::CF_CHECK);
+    let entry = landing.filter(|_| asked && !source.attrs.set.contains(ir::AttrSet::NOCF));
     let convention = Convention {
         protect,
         probe,

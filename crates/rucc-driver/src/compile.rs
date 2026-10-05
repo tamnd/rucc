@@ -1207,6 +1207,7 @@ fn generate(
         zero_extension: zero_extension(opts.isa),
         stack_clash: opts.stack_clash,
         landing: opts.control.branch(),
+        manual_endbr: opts.manual_endbr,
         speculation: opts.speculation,
         // Not in i386 position independent code, whose table would be found with an absolute
         // `lea` that the place the code is loaded at does not move. The EFI stub is built that way

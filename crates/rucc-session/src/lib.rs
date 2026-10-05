@@ -2227,6 +2227,10 @@ pub struct Options {
     /// See [`Control`]. Off by default, which is gcc's default on these targets, and on again in
     /// every distribution's global flags for the same reason the stack protector is.
     pub control: Control,
+    /// Whether only a function written `cf_check` opens with a landing pad, from
+    /// `-mmanual-endbr`. x86 only, which the driver checks, and off by default as in gcc. Labels
+    /// whose address is taken keep theirs either way.
+    pub manual_endbr: bool,
     /// Which indirect branches and returns are rewritten against speculative execution, from
     /// `-mindirect-branch=`, `-mindirect-branch-cs-prefix`, `-mfunction-return=` and
     /// `-mharden-sls=`. x86-64 only, which the driver checks. tamnd/rucc#2280.
@@ -2775,6 +2779,7 @@ impl Options {
             protector: Protector::default(),
             stack_clash: false,
             control: Control::default(),
+            manual_endbr: false,
             speculation: Speculation::default(),
             jump_tables: true,
             cmov: true,

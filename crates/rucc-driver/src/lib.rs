@@ -2430,6 +2430,11 @@ pub fn parse_args(args: &[String]) -> Result<Action, CliError> {
             "-mno-indirect-branch-cs-prefix" if arch == rucc_target::Arch::X86_64 => {
                 opts.speculation.padded = false;
             }
+            // Only a function that says `cf_check` opens with a landing pad, which is how a
+            // program that knows every function it takes the address of keeps the rest from being
+            // somewhere an indirect branch may land. x86 only, as in gcc.
+            "-mmanual-endbr" if x86 => opts.manual_endbr = true,
+            "-mno-manual-endbr" if x86 => opts.manual_endbr = false,
             _ if arch == rucc_target::Arch::X86_64 && arg.starts_with("-mharden-sls=") => {
                 let (after_return, after_jump) = match &arg["-mharden-sls=".len()..] {
                     "none" => (false, false),
@@ -7106,6 +7111,14 @@ mod tests {
         assert_eq!(opts.control, Control::None);
         let (opts, _) = compile(&["-c", "-fno-cf-protection", "-fcf-protection=branch", "a.c"]);
         assert_eq!(opts.control, Control::Branch, "the last one wins either way round");
+
+        // Which functions open with a pad is a second question, asked apart from the first, and
+        // gcc takes it on a command line that asked for no pads at all.
+        assert!(!opts.manual_endbr);
+        let (opts, _) = compile(&[KERNEL_X86, "-c", "-mmanual-endbr", "a.c"]);
+        assert!(opts.manual_endbr);
+        let (opts, _) = compile(&[KERNEL_X86, "-c", "-mmanual-endbr", "-mno-manual-endbr", "a.c"]);
+        assert!(!opts.manual_endbr, "the last one wins");
     }
 
     /// The profiler is asked for by two spellings, and where its hook goes by two more.
@@ -9262,6 +9275,7 @@ mod tests {
             (KERNEL_ARM64, "-mindirect-branch=thunk-extern"),
             (KERNEL_ARM64, "-mfunction-return=thunk-extern"),
             (KERNEL_ARM64, "-mindirect-branch-cs-prefix"),
+            (KERNEL_ARM64, "-mmanual-endbr"),
         ] {
             assert_eq!(refused(&[target, flag, "-c", "a.c"]), format!("unknown option `{flag}`"));
         }

@@ -695,6 +695,99 @@ void calls(void) { p1(); }
     assert!(!text.contains("notrack") && !text.contains("endbr64"), "{text}");
 }
 
+/// `cf_check` under `-fcf-protection=branch -mmanual-endbr`, measured against gcc 13: only a
+/// function that says it opens with `endbr64`, whichever of its declarations said it, and a
+/// static function whose address is taken is left without one like the rest. `nocf_check` beside
+/// it wins, and the pads at labels whose address is taken stay. Without `-mmanual-endbr` the
+/// attribute changes nothing.
+#[test]
+fn cf_check_under_manual_endbr_is_the_only_function_with_a_landing_pad() {
+    let source = "\
+void plain(void) {}
+static void hidden(void) {}
+void (*taken)(void) = hidden;
+__attribute__((cf_check)) void checked(void) {}
+void declared(void) __attribute__((__cf_check__));
+void declared(void) {}
+void later(void);
+__attribute__((cf_check)) void later(void) {}
+__attribute__((cf_check, nocf_check)) void both(void) {}
+int jump(int x) { static void *t[] = { &&a, &&b }; goto *t[x]; a: return 1; b: return 2; }
+_Static_assert(__has_attribute(cf_check), \"cf_check\");
+";
+    let pads = |what: &str, flags: &[&str]| -> Vec<(&'static str, usize)> {
+        let out = compile(what, flags, source);
+        let said = String::from_utf8_lossy(&out.stderr);
+        assert!(out.status.success() && said.is_empty(), "{said}");
+        let text = String::from_utf8_lossy(&out.stdout).into_owned();
+        ["plain", "hidden", "checked", "declared", "later", "both", "jump"]
+            .into_iter()
+            .map(|name| {
+                let start =
+                    text.find(&format!("\n{name}:")).unwrap_or_else(|| panic!("{name}\n{text}"));
+                let rest = &text[start + 1..];
+                let end = rest.find(".size").unwrap_or(rest.len());
+                (name, rest[..end].lines().filter(|l| l.trim() == "endbr64").count())
+            })
+            .collect()
+    };
+    let manual = pads("cf-check-manual", &["-S", "-fcf-protection=branch", "-mmanual-endbr"]);
+    let want = [
+        ("plain", 0),
+        ("hidden", 0),
+        ("checked", 1),
+        ("declared", 1),
+        ("later", 1),
+        ("both", 0),
+        ("jump", 2),
+    ];
+    assert_eq!(manual, want);
+    let every = pads("cf-check-every", &["-S", "-fcf-protection=branch"]);
+    let want = [
+        ("plain", 1),
+        ("hidden", 1),
+        ("checked", 1),
+        ("declared", 1),
+        ("later", 1),
+        ("both", 0),
+        ("jump", 3),
+    ];
+    assert_eq!(every, want);
+    let none = pads("cf-check-none", &["-S", "-mmanual-endbr"]);
+    assert!(none.iter().all(|&(_, count)| count == 0), "{none:?}");
+}
+
+/// What gcc 13 says about `cf_check` on something that is not a function and with an argument.
+/// A function that says it is taken without a word, with `-fcf-protection` or without it.
+#[test]
+fn cf_check_is_checked_in_gcc_s_words() {
+    let source = "\
+int v __attribute__((cf_check));
+typedef void fn(void) __attribute__((cf_check));
+void (*p)(void) __attribute__((cf_check));
+__attribute__((cf_check(1))) void counted(void);
+__attribute__((cf_check)) void fine(void) {}
+";
+    let out = compile("cf-check-said", &["-S"], source);
+    let said = String::from_utf8_lossy(&out.stderr);
+    assert!(!out.status.success(), "{said}");
+    let expected = [
+        (1, "warning: 'cf_check' attribute only applies to functions"),
+        (2, "warning: 'cf_check' attribute only applies to functions"),
+        (3, "warning: 'cf_check' attribute only applies to functions"),
+        (4, "error: wrong number of arguments specified for 'cf_check' attribute"),
+    ];
+    for (line, what) in expected {
+        let at = format!(".c:{line}:");
+        assert!(
+            said.lines().any(|said| said.contains(&at) && said.contains(what)),
+            "missing {what:?} on line {line} in\n{said}"
+        );
+    }
+    assert_eq!(said.matches("expected 0, found 1").count(), 1, "{said}");
+    assert!(!said.contains(".c:5:"), "{said}");
+}
+
 #[test]
 fn nocommon_keeps_a_tentative_definition_out_of_the_common_block_under_fcommon() {
     let got = ir("nocommon", &["-fcommon"], "int merged;\n__attribute__((nocommon)) int alone;\n");
