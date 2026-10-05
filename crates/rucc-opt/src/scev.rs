@@ -835,8 +835,8 @@ impl<'a> Scev<'a> {
 
     /// The value as an expression that does not change inside the loop, if it is one.
     fn invariant(&self, id: LoopId, value: Value) -> Option<Invariant> {
-        if let Some((imm, ty)) = constant(self.func, value) {
-            return Some(Invariant::number(imm.signed(ty)));
+        if let Some(number) = number(self.func, value, 0) {
+            return Some(Invariant::number(number));
         }
         // A constant is invariant wherever it sits, which is why it is asked about first. Anything
         // else has to be defined outside the loop.
@@ -1495,6 +1495,37 @@ fn constant(func: &Func, value: Value) -> Option<(Imm, Type)> {
     ty.is_int().then(|| (func[at], ty))
 }
 
+/// The number a value is, when it is a constant or arithmetic on constants.
+///
+/// Loop rotation copies the test of a header in front of the loop with the first value of the
+/// counter put in, so a counter that starts at what `i + 1` was on the first trip starts at
+/// `add 0, 1`, and nothing folds that before `crate::unroll` asks how many times the loop runs.
+/// Read as the value it is, the start is a symbol, and the count comes out symbolic, which is not a
+/// count. The arithmetic wraps in the type of the value, as the instructions do.
+fn number(func: &Func, value: Value, depth: u32) -> Option<i128> {
+    if let Some((imm, ty)) = constant(func, value) {
+        return Some(imm.signed(ty));
+    }
+    if depth >= STEP_LIMIT {
+        return None;
+    }
+    let Def::Result { inst, .. } = func[value].def else { return None };
+    let ty = func[value].ty;
+    if !ty.is_int() {
+        return None;
+    }
+    let args = &func[func[inst].args];
+    let (&lhs, &rhs) = (args.first()?, args.get(1)?);
+    let (lhs, rhs) = (number(func, lhs, depth + 1)?, number(func, rhs, depth + 1)?);
+    let wide = match func[inst].opcode {
+        Opcode::Add => lhs.wrapping_add(rhs),
+        Opcode::Sub => lhs.wrapping_sub(rhs),
+        Opcode::Mul => lhs.wrapping_mul(rhs),
+        _ => return None,
+    };
+    Some(Imm::int(wide, ty).signed(ty))
+}
+
 /// The global whose address a value is, if it is one.
 fn symbol(func: &Func, value: Value) -> Option<Symbol> {
     let Def::Result { inst, .. } = func[value].def else { return None };
@@ -1946,6 +1977,42 @@ mod tests {
         // Signed overflow being undefined still is, which is what `-fwrapv` would withdraw.
         assert_eq!(assumptions, [Assumption::StrictOverflow]);
         assert_eq!(found.proven(), None);
+    }
+
+    #[test]
+    fn a_loop_that_starts_at_a_sum_of_constants_nothing_folded_is_still_counted() {
+        // What a rotated loop whose counter went round as `i + 1` starts at, before anything folds
+        // it. Read as a value rather than as three, the count was a symbol and unroll gave up.
+        let ty = Type::int(32);
+        let mut names = Interner::new();
+        let mut func = Func::new(names.intern("f"), Signature::new());
+        let entry = func.create_block();
+        let header = func.create_block();
+        let body = func.create_block();
+        let exit = func.create_block();
+        let counter = func.append_param(header, ty);
+
+        let mut build = Builder::new(&mut func, entry);
+        let one = build.iconst(ty, 1);
+        let two = build.iconst(ty, 2);
+        let start = build.binary(Opcode::Add, one, two, Flags::NSW);
+        build.jump(header, &[start]);
+
+        let mut build = Builder::new(&mut func, header);
+        let limit = build.iconst(ty, 100);
+        let test = build.icmp(IntPred::Slt, counter, limit);
+        build.br_if(test, body, &[], exit, &[]);
+
+        let mut build = Builder::new(&mut func, body);
+        let by = build.iconst(ty, 1);
+        let next = build.binary(Opcode::Add, counter, by, Flags::NSW);
+        build.jump(header, &[next]);
+        Builder::new(&mut func, exit).ret(&[]);
+
+        let chrec = evolution(&func, counter).chrec().expect("the counter evolves");
+        assert_eq!(chrec.base, Invariant::number(3));
+        let (count, _) = bound(&func).expect("it is counted").parts();
+        assert_eq!(count, Count::Exact(97));
     }
 
     #[test]
