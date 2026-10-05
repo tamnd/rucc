@@ -1604,6 +1604,12 @@ pub fn parse_args(args: &[String]) -> Result<Action, CliError> {
             // collected apart from `opts` and why `-lm` on a `-c` line is a note rather than an
             // error: it is a thing said to a linker that is not going to run.
             "-static" => link.is_static = true,
+            // A static program that moves itself to wherever it is loaded, which is both at once.
+            // The kernel's exec selftests build their load address checks with it.
+            "-static-pie" => {
+                link.is_static = true;
+                link.pie = Some(true);
+            }
             "-shared" => link.shared = true,
             "-r" => link.relocatable = true,
             "-pie" => link.pie = Some(true),
@@ -7500,6 +7506,8 @@ mod tests {
         ]);
         assert!(link.is_static);
         assert!(link.no_startfiles);
+        let (both, _) = linking(&["-static-pie", "a.c"]);
+        assert!(both.is_static && both.pie == Some(true));
         assert!(link.export_dynamic);
         assert!(link.strip);
         assert_eq!(link.use_ld.as_deref(), Some("mold"));

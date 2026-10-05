@@ -1358,6 +1358,10 @@ fn line_for(
     let pie = opts.pie.unwrap_or(!opts.is_static && !opts.shared);
     if opts.shared {
         args.push("-shared".to_owned());
+    } else if opts.is_static && pie {
+        // gcc's line for `-static-pie`: no loader, and relocations the program applies to itself
+        // at start, which it can only do if none of them is in its text.
+        args.extend(["-static", "-pie", "--no-dynamic-linker", "-z", "text"].map(str::to_owned));
     } else if opts.is_static {
         args.push("-static".to_owned());
     } else if pie {
@@ -1691,6 +1695,8 @@ fn startfile(opts: &LinkOptions, pie: bool) -> Option<&'static str> {
         None
     } else if opts.profile {
         Some(if pie && opts.is_static { "grcrt1.o" } else { "gcrt1.o" })
+    } else if pie && opts.is_static {
+        Some("rcrt1.o")
     } else if pie {
         Some("Scrt1.o")
     } else {
@@ -2228,6 +2234,18 @@ mod tests {
         let args = line(linux(), &opts, &one("a.o"), "a.out").expect("a line");
         assert!(args.contains(&"-static".to_owned()), "{args:?}");
         assert!(!args.contains(&"-dynamic-linker".to_owned()), "{args:?}");
+    }
+
+    /// `-static-pie` is gcc's line for it: static, position independent, no loader, and the start
+    /// file that applies the program's relocations to itself.
+    #[test]
+    fn a_static_program_that_moves_relocates_itself() {
+        let opts = LinkOptions { is_static: true, pie: Some(true), ..LinkOptions::default() };
+        let args = line(linux(), &opts, &one("a.o"), "a.out").expect("a line");
+        let at = args.iter().position(|arg| arg == "-static").expect("-static");
+        assert_eq!(args[at..at + 5], ["-static", "-pie", "--no-dynamic-linker", "-z", "text"]);
+        assert!(!args.contains(&"-dynamic-linker".to_owned()), "{args:?}");
+        assert_eq!(startfile(&opts, true), Some("rcrt1.o"));
     }
 
     #[test]
