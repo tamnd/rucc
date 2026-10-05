@@ -4,6 +4,10 @@ All notable changes are recorded here. The format follows [Keep a Changelog](htt
 
 ## Unreleased
 
+### Changed
+
+- At `-O1` and above, the wasm backend keeps a value with one use in its own block on the operand stack, with no local, when the instruction that makes the value can move to the use (#2866). This is stackify, the first step of WA4. A load does not move past a store or a call, a call does not move past a load, a store or a trap, and a call does not move into one edge of a branch. The SQLite shell at `-O2` goes from 2,651,549 bytes to 2,002,778, and the shell that clang from wasi-sdk 34 builds is 1,820,595 bytes. `-O0` is as before.
+
 ## 0.24.0
 
 The release for WA3, the hard C on wasm (#2865). rucc now builds nested functions, `__builtin_setjmp` and `__builtin_longjmp`, the `alias` attribute, and a `main` with one or three parameters for wasm32-wasip1. CI builds the SQLite shell with rucc at `-O0` and `-O2` and holds its output under Wasmtime and Node to the output of the shell that clang from wasi-sdk 34 builds. The execute tests of the GCC 16 torture suite give 3516 passed, 0 failed, 104 skipped and 20 excluded under Wasmtime, and each excluded program names an open issue.

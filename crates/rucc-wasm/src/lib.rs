@@ -16,11 +16,13 @@
 //!
 //! The translation is direct. Each value of the IR gets a local of its own, each instruction
 //! reads its operands with `local.get` and writes its result with `local.set`, and constants are
-//! written where they are used. The graph of blocks becomes `block`, `loop` and `if` by the
+//! written where they are used. When [`Options::optimize`] is set, a value with one use in its own
+//! block stays on the operand stack and has no local, where the instruction that makes it can move
+//! to its use. See the `stackify` module of the selector. The graph of blocks becomes `block`, `loop` and `if` by the
 //! algorithm of Ramsey, "Beyond Relooper" (ICFP 2022), and the arguments of a branch are written
 //! to the parameters of its target as a parallel copy just before the branch. There is no
-//! register allocation of locals, no folding of an address into the offset of a load, and no use
-//! of the operand stack across instructions. Those come in WA4.
+//! register allocation of locals and no folding of an address into the offset of a load. Those
+//! come later in WA4.
 //!
 //! The integer arithmetic, the shifts, the divisions, the comparisons, `select`, the changes of
 //! width and the float arithmetic are selected by the rules of `rules/wasm32.rules`, each of
@@ -89,6 +91,24 @@ use rucc_target::wasm::{Feature, Features};
 
 pub use sjlj::prepare;
 
+/// What a translation is asked for.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Options {
+    /// The instructions that the code can use.
+    pub features: Features,
+    /// Whether the code is made smaller and faster where that does not change what it does, as
+    /// `-O1` and above ask. Now that is the values that stay on the operand stack, which is
+    /// section 8.2 of the WebAssembly notes.
+    pub optimize: bool,
+}
+
+impl From<Features> for Options {
+    /// The options of `-O0` with `features`.
+    fn from(features: Features) -> Self {
+        Options { features, optimize: false }
+    }
+}
+
 /// Why a module could not be translated. Each one is a part of C that this back end does not
 /// translate yet, and not a mistake in the program.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -111,8 +131,8 @@ impl fmt::Display for Refusal {
 
 impl std::error::Error for Refusal {}
 
-/// Translate `module` into a relocatable wasm object, with the instructions that `features`
-/// allows.
+/// Translate `module` into a relocatable wasm object, with the instructions and the optimization
+/// that `options` asks for.
 ///
 /// # Errors
 ///
@@ -121,8 +141,12 @@ impl std::error::Error for Refusal {}
 /// # Panics
 ///
 /// When the module has 2^32 data segments or more, which a module under 4 GiB cannot have.
-pub fn generate(module: &Module, names: &Interner, features: Features) -> Result<Written, Refusal> {
-    write(&translate(module, names, features)?)
+pub fn generate(
+    module: &Module,
+    names: &Interner,
+    options: impl Into<Options>,
+) -> Result<Written, Refusal> {
+    write(&translate(module, names, options)?)
 }
 
 /// The bytes of the object that [`translate`] gave.
@@ -162,9 +186,9 @@ pub fn assembly(object: &wasm::Module) -> Result<String, Refusal> {
 pub fn translate(
     module: &Module,
     names: &Interner,
-    features: Features,
+    options: impl Into<Options>,
 ) -> Result<wasm::Module, Refusal> {
-    Ok(translate_with(module, names, features, false)?.0)
+    Ok(translate_with(module, names, options.into(), false)?.0)
 }
 
 /// The tree form of `module`, which is `--emit=wasm-tree`: the code of each function as the
@@ -177,8 +201,12 @@ pub fn translate(
 ///
 /// A [`Refusal`] for the first part of the module that this back end does not translate yet, or
 /// for a body that the printer cannot decode.
-pub fn tree(module: &Module, names: &Interner, features: Features) -> Result<String, Refusal> {
-    let (object, notes) = translate_with(module, names, features, true)?;
+pub fn tree(
+    module: &Module,
+    names: &Interner,
+    options: impl Into<Options>,
+) -> Result<String, Refusal> {
+    let (object, notes) = translate_with(module, names, options.into(), true)?;
     asm::tree(&object, &notes).map_err(|(function, why)| Refusal { function: Some(function), why })
 }
 
@@ -187,14 +215,16 @@ pub fn tree(module: &Module, names: &Interner, features: Features) -> Result<Str
 fn translate_with(
     module: &Module,
     names: &Interner,
-    features: Features,
+    options: Options,
     notes: bool,
 ) -> Result<(wasm::Module, Vec<Notes>), Refusal> {
     let unit_wide = |why: String| Refusal { function: None, why };
+    let features = options.features;
     let mut unit = Unit {
         ir: module,
         names,
         features,
+        optimize: options.optimize,
         out: wasm::Module::default(),
         functions: Map::default(),
         data: Map::default(),
@@ -432,6 +462,8 @@ pub(crate) struct Unit<'a> {
     pub(crate) ir: &'a Module,
     pub(crate) names: &'a Interner,
     pub(crate) features: Features,
+    /// Whether the values with one use stay on the operand stack. See [`Options::optimize`].
+    pub(crate) optimize: bool,
     pub(crate) out: wasm::Module,
     /// The function symbols, by the name in the object.
     functions: Map<String, (u32, u32)>,

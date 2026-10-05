@@ -1170,10 +1170,12 @@ fn generate(
                 }
             }
         }
+        let wasm =
+            rucc_wasm::Options { features: opts.wasm, optimize: opts.opt_level.runs_optimizer() };
         if matches!(opts.emit, EmitKind::WasmTree) {
-            return rucc_wasm::tree(module, names, opts.wasm).map(Artifact::Text).map_err(refused);
+            return rucc_wasm::tree(module, names, wasm).map(Artifact::Text).map_err(refused);
         }
-        let object = rucc_wasm::translate(module, names, opts.wasm).map_err(refused)?;
+        let object = rucc_wasm::translate(module, names, wasm).map_err(refused)?;
         if matches!(opts.emit, EmitKind::Asm) {
             return rucc_wasm::assembly(&object).map(Artifact::Text).map_err(refused);
         }

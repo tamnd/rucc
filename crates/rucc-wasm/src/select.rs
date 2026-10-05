@@ -5,7 +5,7 @@
 //! conventions that it keeps: a local for each value, constants written where they are used, and
 //! narrow integers with undefined upper bits.
 
-use rucc_base::hash::Map;
+use rucc_base::hash::{Map, Set};
 use rucc_base::rules::Piece;
 use rucc_ir::term::{PLAIN, Term, Terms};
 use rucc_ir::{
@@ -23,6 +23,7 @@ use crate::{Notes, Unit, functype, is_pair, valtype};
 
 mod builtin;
 mod pair;
+mod stackify;
 
 type Result<T> = std::result::Result<T, String>;
 
@@ -165,10 +166,16 @@ pub(crate) fn function(unit: &mut Unit<'_>, id: FuncId, symbol: u32) -> Result<F
         returns: !ty.results.is_empty(),
         sret: func.signature().returns.iter().any(|ret| is_pair(ret.ty)),
         annotate: None,
+        stacked: Set::default(),
+        moved: Set::default(),
+        pushed: Set::default(),
     };
     if unit_notes {
         let (values, blocks) = rucc_ir::numbers(func);
         lower.annotate = Some(Annotate { notes: Notes::default(), values, blocks });
+    }
+    if lower.unit.optimize {
+        (lower.stacked, lower.moved) = lower.stackify();
     }
     lower.assign()?;
     lower.labels = (0..lower.shape.dispatches).map(|_| lower.new_local(ValType::I32)).collect();
@@ -220,6 +227,12 @@ struct Lower<'u, 'a> {
     sret: bool,
     /// The notes of the tree form, when it is asked for.
     annotate: Option<Annotate>,
+    /// The values that stay on the operand stack, and the instructions that make them, which are
+    /// written where the value is pushed. See `stackify.rs`.
+    stacked: Set<Value>,
+    moved: Set<Inst>,
+    /// The values of `stacked` that are pushed already.
+    pushed: Set<Value>,
 }
 
 /// The notes of the tree form for one function, and the numbers that the text of the IR gives
@@ -326,7 +339,7 @@ impl Lower<'_, '_> {
                 }
                 for value in func[inst].results() {
                     let ty = func[value].ty;
-                    if ty.is_mem() || ty.is_void() {
+                    if ty.is_mem() || ty.is_void() || self.stacked.contains(&value) {
                         continue;
                     }
                     let local = self.local_for(ty)?;
@@ -510,7 +523,9 @@ impl Lower<'_, '_> {
         };
         let caught = self.caught(term);
         for inst in func.insts(block) {
-            if inst != term && caught.is_none_or(|(call, unwound)| inst != call && inst != unwound)
+            if inst != term
+                && !self.moved.contains(&inst)
+                && caught.is_none_or(|(call, unwound)| inst != call && inst != unwound)
             {
                 self.inst(inst)?;
             }
@@ -829,8 +844,11 @@ impl Lower<'_, '_> {
     }
 
     /// Take a value off the operand stack into its local, or into its two locals for a pair,
-    /// whose high half is on top.
+    /// whose high half is on top. A value that stays on the stack stays there.
     fn set(&mut self, value: Value) {
+        if self.stacked.contains(&value) {
+            return;
+        }
         let local = self.local[&value];
         if is_pair(self.ty(value)) {
             self.code.local_set(local + 1);
@@ -867,8 +885,9 @@ impl Lower<'_, '_> {
         }
     }
 
-    /// Put a value on the operand stack. A constant is written here, and anything else is read
-    /// from its local. A pair is two values, the low half first.
+    /// Put a value on the operand stack. A constant is written here, a value that stays on the
+    /// stack is written here by the code of its instruction, and anything else is read from its
+    /// local. A pair is two values, the low half first.
     fn push(&mut self, value: Value) -> Result<()> {
         if is_pair(self.ty(value)) {
             self.push_half(value, false)?;
@@ -909,6 +928,12 @@ impl Lower<'_, '_> {
                         self.func.successors(inst).next().ok_or("a block_addr names no block")?;
                     self.code.i32_const(self.numbers[&call.block] as i32);
                     return Ok(());
+                }
+                _ if self.stacked.contains(&value) => {
+                    if !self.pushed.insert(value) {
+                        return Err("a value that stays on the stack is pushed twice".into());
+                    }
+                    return self.inst(inst);
                 }
                 _ => {}
             }
