@@ -168,6 +168,17 @@ const O0: &[&str] = &["expect", "simplify-cfg"];
 /// by a test of the result is two conditional moves when `phiopt` sees it first, and two branches
 /// and three more saved registers when the copy does. The corpus `clamp` shapes found that.
 ///
+/// From `-O2` up `thread` runs a second time, straight after the `simplify-cfg` that follows the
+/// unroller, which is section 23.5's late instance. The early one sees the function as inlining
+/// left it, and an inline function that returns `a && b` arrives as a truth value carried through
+/// a chain of blocks that only jump, one for each `return` and each join the callee had. The edge
+/// that carries a constant `false` into that chain decides the caller's test of the result, but
+/// the block it arrives at is a jump and not the test, so the early instance asks nothing of it.
+/// `simplify-cfg` takes the chain out, and after it the edge arrives at the test itself. Without
+/// the second run the truth value is worked out with a `set` and tested again on every path into
+/// the test, constant or not. It is the instance that copies nothing, so it costs one walk over the
+/// blocks and cannot grow the function.
+///
 /// `prune` is between `phiopt` and `simplify-cfg` and both sides of that are load bearing. It reads
 /// document 10's ranges off the graph to find a branch that can only go one way and a switch case
 /// nothing can reach, so it has to run after the two passes that change the graph most. What it
@@ -401,6 +412,7 @@ const O2: &[&str] = &[
     "licm",
     "unroll",
     "simplify-cfg",
+    "thread",
     "fold",
     "sroa",
     "lanes",
@@ -465,6 +477,7 @@ const O3: &[&str] = &[
     "licm",
     "unroll",
     "simplify-cfg",
+    "thread",
     "fold",
     "sroa",
     "lanes",

@@ -5567,6 +5567,20 @@ decl #0 x : int object external static defined
         assert!(!text.contains("call\tlink_error"), "{text}");
     }
 
+    /// An inline function that returns `a && b`, tested by its caller. The `false` that the first
+    /// half returns reaches the caller's test through the blocks inlining left behind, and only
+    /// the second `thread` sees the edge arrive at the test itself. Without it the answer is a byte
+    /// that `setbe` writes and `testb` reads straight back, on every path through `f`.
+    #[test]
+    fn an_inline_and_that_the_caller_tests_is_branched_on_and_not_written_down() {
+        let text = optimized(concat!(
+            "extern int other(unsigned *p);\n",
+            "static inline _Bool small(const unsigned *p, _Bool c) { return c && *p <= 127; }\n",
+            "int f(unsigned *p, _Bool c) { if (small(p, c)) return *p; return other(p); }\n",
+        ));
+        assert!(!text.contains("\tset"), "{text}");
+    }
+
     /// A cast between a pointer and an integer as wide as one, which is every one C writes here.
     #[test]
     fn a_cast_between_a_pointer_and_an_integer_leaves_the_value_where_it_is() {

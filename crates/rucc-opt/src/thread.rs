@@ -132,11 +132,13 @@
 //! not come from it costs the same as an empty one, which is nothing. [`COPY`] runs at `-O1` and
 //! above, as GCC's `-fthread-jumps` does.
 //!
-//! Once, and not to a fixed point. Threading enables threading, and section 23.7 says the answer to
-//! that is a fixed number of instances rather than a loop, because threading is the pass where
-//! adversarial input is easiest to construct. Section 23.5 asks for two instances at `-O2`, an early
-//! one and a late one after the loop pipeline and SCCP. There is one here, in the early position.
-//! The late one wants the passes that are not written yet.
+//! Not to a fixed point. Threading enables threading, and section 23.7 says the answer to that is a
+//! fixed number of instances rather than a loop, because threading is the pass where adversarial
+//! input is easiest to construct. Section 23.5 asks for two instances at `-O2`, an early one and a
+//! late one after the loop pipeline and SCCP. The early position has both of these, one on each side
+//! of `phiopt`. The
+//! late one is [`FREE`] again, after the `simplify-cfg` that follows the unroller, and
+//! `crate::pipeline` says what it finds that the early one cannot.
 //!
 //! # What it counts
 //!
