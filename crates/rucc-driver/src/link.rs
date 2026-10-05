@@ -825,10 +825,9 @@ fn cross_line(
     // is a file nothing puts there, so every cross link either failed at the linker or quietly ran
     // against somebody else's `libgcc` copied in under the name. tamnd/rucc#1514.
     let ours = builtins_archive(target, &opts.prefixes);
-    // Not yet on wasm, where the archive cannot be built until the back end compiles `__int128`
-    // and `long double`, which is a later step of tamnd/rucc#2864. The line goes without it, and
-    // a program that needs one of its functions fails at the link by that name.
-    if ours.is_none() && opts.wants_runtime() && !opts.no_builtins_lib && !target.arch.is_wasm() {
+    // On wasm too, where it takes the place of `libclang_rt.builtins.a` on clang's line and holds
+    // the `long double` arithmetic and the `__int128` multiply and shifts that the back end calls.
+    if ours.is_none() && opts.wants_runtime() && !opts.no_builtins_lib {
         // Said here rather than left to the linker, which on a Windows target says `___chkstk_ms`
         // is undefined and names mingw-w64's objects as the callers, and on a musl one says
         // `__udivti3` is. Neither of those is a person's first guess at a missing archive.
@@ -2780,13 +2779,17 @@ mod tests {
         assert!(why.contains(&target.tuple().to_canonical_string()), "{why}");
     }
 
-    /// A WASI command is linked by wasm-ld against the fetched wasi-libc, and the line needs no
-    /// runtime of ours yet, because none can be built for wasm until the back end compiles
-    /// `__int128` and `long double`.
+    /// A WASI command is linked by wasm-ld against the fetched wasi-libc, and our runtime comes
+    /// after `libc.a`, where clang puts compiler-rt. Without our runtime the link is refused with
+    /// the command that builds it.
     #[test]
     fn a_wasi_program_is_linked_by_wasm_ld_against_the_fetched_wasi_libc() {
         let target = Triple::new(Arch::Wasm32, Os::Wasi(rucc_target::Preview::P1), Env::None);
-        let opts = LinkOptions { cache: Some(PathBuf::from("/cache")), ..LinkOptions::default() };
+        let bare = LinkOptions { cache: Some(PathBuf::from("/cache")), ..LinkOptions::default() };
+        let error = line(target, &bare, &one("a.o"), "a.wasm").expect_err("no runtime");
+        let Error::Cross { why } = &error else { panic!("{error:?}") };
+        assert!(why.contains("cargo xtask builtins --target=wasm32-wasip1"), "{why}");
+        let opts = cached();
         assert_eq!(order(target, &opts), ["wasm-ld"]);
         let lib = a_sysroot(target).lib();
         let args = line(target, &opts, &one("a.o"), "a.wasm").expect("a line");
@@ -2796,7 +2799,9 @@ mod tests {
             args.iter().position(|arg| *arg == path).unwrap_or_else(|| panic!("{file} {args:?}"))
         };
         let object = args.iter().position(|arg| arg == "a.o").expect("the object");
+        let ours = args.iter().position(|arg| arg.ends_with("librucc_builtins.a")).expect("ours");
         assert!(at("crt1-command.o") < object && object < at("libc.a"), "{args:?}");
+        assert!(at("libc.a") < ours, "{args:?}");
         // No flag of an ELF linker, which wasm-ld would refuse, and `-gz` is not asked of it.
         let gz = LinkOptions { compress: Compress::Zlib, ..opts.clone() };
         let args = line(target, &gz, &one("a.o"), "a.wasm").expect("a line");

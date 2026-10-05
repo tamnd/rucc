@@ -58,14 +58,18 @@ fi
 # is UCRT, whose printf reads a long double as the eight bytes of a double where mingw's long
 # double is the x87 one, so the %Lf lines come out wrong unless the program uses mingw's own
 # printf, which is what __USE_MINGW_ANSI_STDIO asks for. MinGW GCC prints the same wrong lines
-# without it.
+# without it. On wasi, printf in wasi-libc formats a long double only when the program is linked
+# with -lc-printscan-long-double, and otherwise it stops the program with a message that names the
+# flag. clang needs the same flag.
 suffix=
 defines=
+libraries=
 case $triple in
 *-windows-*) suffix=.exe ;;
 esac
 case $triple in
 *-windows-gnu*) defines=-D__USE_MINGW_ANSI_STDIO=1 ;;
+wasm32-wasi*) libraries=-lc-printscan-long-double ;;
 esac
 
 excluded() {
@@ -86,7 +90,7 @@ for source in "$cases"/*.c; do
 	for level in 0 2; do
 		binary=$out/$name-O$level$suffix
 		result=ok
-		if ! $rucc --target="$triple" -std=$std $defines -O$level -o "$binary" "$source" -lm >"$out/build.log" 2>&1; then
+		if ! $rucc --target="$triple" -std=$std $defines -O$level -o "$binary" "$source" $libraries -lm >"$out/build.log" 2>&1; then
 			result='did not build'
 		elif ! ${RUNNER:-} "$binary" >"$binary.raw" 2>"$binary.err"; then
 			result='exited nonzero'

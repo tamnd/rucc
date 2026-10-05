@@ -99,7 +99,7 @@ jobs:
     needs: verify
     runs-on: ubuntu-24.04
     env:
-      TARGETS: x86_64-linux-gnu x86_64-linux-musl aarch64-linux-gnu aarch64-linux-musl x86_64-windows-gnu aarch64-macos
+      TARGETS: x86_64-linux-gnu x86_64-linux-musl aarch64-linux-gnu aarch64-linux-musl x86_64-windows-gnu aarch64-macos wasm32-wasip1 wasm32-none
     steps:
       - uses: actions/checkout@v7.0.1
       - uses: Swatinem/rust-cache@v2.9.2
