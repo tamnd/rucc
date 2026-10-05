@@ -1434,3 +1434,85 @@ fn a_main_with_one_or_three_parameters_gets_a_caller_with_two() {
         }
     }
 }
+
+/// A load before a store, and a call before a load. The C of `f` is below at `-O1`, and `h` is
+/// the same with the call first.
+///
+/// ```c
+/// int g(int);
+/// int f(int *p, int *q, int n) { int x = *p; *q = n; return x * n + g(n); }
+/// ```
+const STACKED: &str = r#"; ModuleID = 't.c'
+; format 0
+target triple = "wasm32-unknown-wasip1"
+target datalayout = "e-p:32:32-i64:64-S128"
+
+func @g(i32) -> i32, linkage(external);
+
+func @f(ptr, ptr, i32) -> i32, linkage(external) {
+block0(%0: ptr, %1: ptr, %2: i32):
+    %3 = load.i32 %0, align 4
+    store %2 -> %1, align 4
+    %4 = mul.nsw %3, %2
+    %5 = call @g(%2) : (i32) -> i32
+    %6 = add.nsw %4, %5
+    return %6
+}
+
+func @h(ptr, i32) -> i32, linkage(external) {
+block0(%0: ptr, %1: i32):
+    %2 = call @g(%1) : (i32) -> i32
+    %3 = load.i32 %0, align 4
+    %4 = add.nsw %2, %3
+    return %4
+}
+"#;
+
+/// The body of `name` in the `-S` text of `text`, at `-O2` when `optimize` is set and at `-O0`
+/// when it is not.
+fn body_of(text: &str, name: &str, optimize: bool) -> String {
+    let mut names = Interner::new();
+    let module = rucc_ir::parse(text, &mut names).expect("the IR parses");
+    let options = rucc_wasm::Options { features: Cpu::Lime1.features(), optimize };
+    let object = rucc_wasm::translate(&module, &names, options).unwrap();
+    let listing = rucc_wasm::assembly(&object).unwrap();
+    let start = listing.find(&format!("\n{name}:\n")).expect("the function is in the listing");
+    let end = start + listing[start..].find("end_function").expect("the function ends");
+    listing[start..end].to_owned()
+}
+
+/// With optimization, a value with one use in its block stays on the operand stack where its
+/// instruction can move to the use. The load does not move past the store, and the call does not
+/// move past the load. The multiplication moves past the call, and the call moves to the add,
+/// with nothing between. Without optimization, each value has a local.
+#[test]
+fn a_value_with_one_use_stays_on_the_stack_when_its_instruction_can_move() {
+    let f = body_of(STACKED, "f", true);
+    let code: Vec<&str> = f.lines().skip(3).map(str::trim).filter(|l| !l.is_empty()).collect();
+    assert_eq!(
+        code,
+        [
+            ".local\ti32",
+            "local.get\t0",
+            "i32.load\t0",
+            "local.set\t3",
+            "local.get\t1",
+            "local.get\t2",
+            "i32.store\t0",
+            "local.get\t3",
+            "local.get\t2",
+            "i32.mul",
+            "local.get\t2",
+            "call\tg",
+            "i32.add",
+            "return",
+            "unreachable",
+        ],
+        "{f}"
+    );
+    let h = body_of(STACKED, "h", true);
+    assert!(h.contains("call\tg\n\tlocal.set\t2\n"), "{h}");
+    assert!(h.contains("i32.load\t0\n\ti32.add\n\treturn\n"), "{h}");
+    let f = body_of(STACKED, "f", false);
+    assert_eq!(f.matches("local.set").count(), 4, "{f}");
+}

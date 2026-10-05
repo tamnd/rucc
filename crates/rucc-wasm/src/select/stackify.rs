@@ -1,0 +1,370 @@
+//! Stackify: the values that stay on the operand stack and have no local.
+//!
+//! This is section 8.2 of the WebAssembly notes. A value that has one use, in the block that
+//! makes it, needs no local when its instruction can move down to the place where the use pushes
+//! it. The selector then writes the instruction there, as one node of an expression tree, and the
+//! `local.set` and the `local.get` go away. LLVM's `WebAssemblyRegStackify` makes the same trees.
+//!
+//! Each instruction of a tree moves down to the root of the tree, which is the instruction that
+//! keeps its place, so it is checked against all the instructions between its place and the root.
+//! An instruction that moves into the tree of a root further on is counted there as if it stayed
+//! in place, which can only refuse more. A pure instruction that cannot trap moves past anything,
+//! because its operands are locals that nothing writes again in the block. A load, and a division
+//! or a conversion that can trap, does not move past an instruction that writes memory or has
+//! another effect. A call does not move past an instruction that reads memory, writes it, has an
+//! effect or can trap. Two instructions of one tree can change their order, when the use pushes
+//! its operands in an order that is not the order of the IR, and the check of the first one
+//! against the second one covers that.
+//!
+//! Only the instructions whose code pushes each operand once take part, as a user and as an
+//! instruction that moves, so the code of a moved instruction is written once. A call does not
+//! move to a use that is written only on one path, which is an argument of one edge of a `br_if`,
+//! or to a use that comes after the epilogue or after the buffer of the extra arguments of a
+//! variadic call is written. A block whose branch takes the `longjmp` of a call is left as it is,
+//! because its call is written in a `try_table`. See `sjlj.rs`.
+
+use rucc_base::hash::{Map, Set};
+use rucc_ir::{Extra, Flags, FloatPred, Inst, Opcode, Value};
+
+use super::{Lower, builtin};
+use crate::{functype, is_pair};
+
+/// The deepest tree, which keeps the recursion of the selector small on a long chain of
+/// arithmetic.
+const DEPTH: u32 = 64;
+
+/// How many instructions before a position of a block do what a moved instruction cannot pass.
+#[derive(Clone, Copy, Default)]
+struct Counts {
+    /// Write memory, call, or have another effect.
+    effect: u32,
+    /// Read memory.
+    reads: u32,
+    /// Can trap.
+    traps: u32,
+}
+
+/// How an instruction can move.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum Kind {
+    /// Pure, and cannot trap.
+    Pure,
+    /// Reads memory or can trap, and has no other effect.
+    Read,
+    /// A call.
+    Call,
+}
+
+/// The facts about one block that the choice of each tree reads.
+struct Tree<'a> {
+    /// The position of each instruction in the block.
+    at: &'a Map<Inst, usize>,
+    /// The counts before each position.
+    before: &'a [Counts],
+    /// How many times each value of the function is used.
+    uses: &'a Map<Value, u32>,
+}
+
+/// Whether the code of an instruction with this opcode has no effect, reads no memory and cannot
+/// trap, when its operands and results are not pairs.
+fn pure(opcode: Opcode) -> bool {
+    matches!(
+        opcode,
+        Opcode::Add
+            | Opcode::Sub
+            | Opcode::Mul
+            | Opcode::And
+            | Opcode::Or
+            | Opcode::Xor
+            | Opcode::Shl
+            | Opcode::AShr
+            | Opcode::LShr
+            | Opcode::UMulHigh
+            | Opcode::SMulHigh
+            | Opcode::FAdd
+            | Opcode::FSub
+            | Opcode::FMul
+            | Opcode::FDiv
+            | Opcode::FNeg
+            | Opcode::ICmp
+            | Opcode::FCmp
+            | Opcode::Select
+            | Opcode::Trunc
+            | Opcode::SExt
+            | Opcode::ZExt
+            | Opcode::FPTrunc
+            | Opcode::FPExt
+            | Opcode::Bitcast
+            | Opcode::SIToFP
+            | Opcode::UIToFP
+            | Opcode::PtrToInt
+            | Opcode::IntToPtr
+            | Opcode::PtrAdd
+            | Opcode::Ctlz
+            | Opcode::Cttz
+            | Opcode::Ctpop
+            | Opcode::Expect
+            | Opcode::IConst
+            | Opcode::FConst
+            | Opcode::GlobalAddr
+            | Opcode::BlockAddr
+            | Opcode::LifetimeEnd
+            | Opcode::MemEntry
+            | Opcode::Prefetch
+    )
+}
+
+impl Lower<'_, '_> {
+    /// The values that are written where they are used, and their instructions.
+    pub(super) fn stackify(&self) -> (Set<Value>, Set<Inst>) {
+        let func = self.func;
+        let mut uses: Map<Value, u32> = Map::default();
+        for block in func.blocks() {
+            for inst in func.insts(block) {
+                for &value in &func[func[inst].args] {
+                    *uses.entry(value).or_default() += 1;
+                }
+                for call in func.successors(inst) {
+                    for &value in &func[call.args] {
+                        *uses.entry(value).or_default() += 1;
+                    }
+                }
+            }
+        }
+        let mut stacked = Set::default();
+        let mut moved = Set::default();
+        for block in self.blocks() {
+            let Some(term) = func.terminator(block) else { continue };
+            if self.caught(term).is_some() {
+                continue;
+            }
+            let insts: Vec<Inst> = func.insts(block).collect();
+            let at: Map<Inst, usize> =
+                insts.iter().enumerate().map(|(i, &inst)| (inst, i)).collect();
+            // The counts before each position, so that the count between two positions is one
+            // subtraction.
+            let mut before = vec![Counts::default(); insts.len() + 1];
+            for (i, &inst) in insts.iter().enumerate() {
+                let (effect, reads, traps) = self.effects(inst);
+                before[i + 1] = Counts {
+                    effect: before[i].effect + u32::from(effect),
+                    reads: before[i].reads + u32::from(reads),
+                    traps: before[i].traps + u32::from(traps),
+                };
+            }
+            let tree = Tree { at: &at, before: &before, uses: &uses };
+            // From the end, so that an instruction is a root only when no root after it took it.
+            for (root, &inst) in insts.iter().enumerate().rev() {
+                if !moved.contains(&inst) {
+                    self.take(inst, root, 0, &tree, &mut stacked, &mut moved);
+                }
+            }
+        }
+        (stacked, moved)
+    }
+
+    /// Put in the tree of the root at position `root` each operand of `user` that can move there,
+    /// and then the operands of each one that moves.
+    fn take(
+        &self,
+        user: Inst,
+        root: usize,
+        depth: u32,
+        tree: &Tree<'_>,
+        stacked: &mut Set<Value>,
+        moved: &mut Set<Inst>,
+    ) {
+        if depth >= DEPTH {
+            return;
+        }
+        for (value, calls) in self.operands(user) {
+            let Some((def, _)) = self.def(value) else { continue };
+            let Some(&from) = tree.at.get(&def) else { continue };
+            if from >= root || tree.uses.get(&value) != Some(&1) || moved.contains(&def) {
+                continue;
+            }
+            let Some(kind) = self.movable(def) else { continue };
+            if (kind == Kind::Call && !calls) || self.results(def).as_slice() != [value] {
+                continue;
+            }
+            let (low, high) = (tree.before[from + 1], tree.before[root]);
+            let free = match kind {
+                Kind::Pure => true,
+                Kind::Read => high.effect == low.effect,
+                Kind::Call => {
+                    high.effect == low.effect && high.reads == low.reads && high.traps == low.traps
+                }
+            };
+            if free {
+                stacked.insert(value);
+                moved.insert(def);
+                self.take(def, root, depth + 1, tree, stacked, moved);
+            }
+        }
+    }
+
+    /// The operands that the code of `inst` pushes once each, in any order, and for each one
+    /// whether a call can move there. Nothing for an instruction whose code does something else
+    /// with its operands.
+    fn operands(&self, inst: Inst) -> Vec<(Value, bool)> {
+        let func = self.func;
+        let data = &func[inst];
+        let args = self.args(inst);
+        let all = |calls: bool| args.iter().map(|&v| (v, calls)).collect::<Vec<_>>();
+        let pairs = args.iter().chain(&self.results(inst)).any(|&v| is_pair(self.ty(v)));
+        match data.opcode {
+            Opcode::Call | Opcode::CallIndirect if !self.builtin_call(inst) => {
+                let Extra::Call(info) = data.extra else { return Vec::new() };
+                let info = func[info];
+                let sig = &func[info.signature];
+                if !sig.variadic {
+                    return all(true);
+                }
+                // The extra arguments are stored in the buffer of the frame one by one, and the
+                // address of an indirect call is pushed after them, so a call there would write
+                // over the buffer.
+                let skip = usize::from(info.callee.is_none());
+                let fixed = skip + sig.params.iter().filter(|p| !p.ty.is_mem()).count();
+                args.iter().enumerate().map(|(i, &v)| (v, i >= skip && i < fixed)).collect()
+            }
+            _ if pairs => Vec::new(),
+            Opcode::Add
+            | Opcode::Sub
+            | Opcode::Mul
+            | Opcode::And
+            | Opcode::Or
+            | Opcode::Xor
+            | Opcode::Shl
+            | Opcode::SDiv
+            | Opcode::SRem
+            | Opcode::AShr
+            | Opcode::UDiv
+            | Opcode::URem
+            | Opcode::LShr
+            | Opcode::UMulHigh
+            | Opcode::SMulHigh
+            | Opcode::FAdd
+            | Opcode::FSub
+            | Opcode::FMul
+            | Opcode::FDiv
+            | Opcode::FNeg
+            | Opcode::ICmp
+            | Opcode::Select
+            | Opcode::Trunc
+            | Opcode::SExt
+            | Opcode::ZExt
+            | Opcode::FPTrunc
+            | Opcode::FPExt
+            | Opcode::Bitcast
+            | Opcode::FPToSI
+            | Opcode::FPToUI
+            | Opcode::SIToFP
+            | Opcode::UIToFP
+            | Opcode::PtrToInt
+            | Opcode::IntToPtr
+            | Opcode::PtrAdd
+            | Opcode::Ctlz
+            | Opcode::Cttz
+            | Opcode::Ctpop
+            | Opcode::Expect
+            | Opcode::Store => all(true),
+            Opcode::Load if !data.flags.contains(Flags::VOLATILE) => all(true),
+            // The other predicates push an operand twice or not at all.
+            Opcode::FCmp => match data.extra {
+                Extra::FloatPred(
+                    FloatPred::Oeq
+                    | FloatPred::Ogt
+                    | FloatPred::Oge
+                    | FloatPred::Olt
+                    | FloatPred::Ole
+                    | FloatPred::Une
+                    | FloatPred::Ugt
+                    | FloatPred::Uge
+                    | FloatPred::Ult
+                    | FloatPred::Ule,
+                ) => all(true),
+                _ => Vec::new(),
+            },
+            // The epilogue gives the frame back before the values are pushed, and a call there
+            // would put its frame on top of what this function still reads.
+            Opcode::Return if !self.sret => all(false),
+            // The arguments of the edges of a `br_if` are pushed only when the edge is taken, so a
+            // call there would not be made on the other edge.
+            Opcode::BrIf | Opcode::Jump => {
+                let mut out = Vec::new();
+                if data.opcode == Opcode::BrIf {
+                    out.push((args[0], true));
+                }
+                let calls = data.opcode == Opcode::Jump;
+                for call in func.successors(inst) {
+                    let params = &func[call.block].params;
+                    for (&arg, &param) in func[call.args].iter().zip(params) {
+                        if !func[param].ty.is_mem() && arg != param {
+                            out.push((arg, calls));
+                        }
+                    }
+                }
+                out
+            }
+            _ => Vec::new(),
+        }
+    }
+
+    /// How `inst` can move when its value is an operand of another instruction, or nothing when
+    /// it cannot.
+    fn movable(&self, inst: Inst) -> Option<Kind> {
+        let data = &self.func[inst];
+        if self.operands(inst).is_empty() {
+            // Only a fixed `alloca` has no operands and moves. Its address is in the frame, which
+            // stays where it is until the function returns.
+            let fixed = data.opcode == Opcode::Alloca && self.args(inst).is_empty();
+            return fixed.then_some(Kind::Pure);
+        }
+        match data.opcode {
+            Opcode::SDiv
+            | Opcode::SRem
+            | Opcode::UDiv
+            | Opcode::URem
+            | Opcode::FPToSI
+            | Opcode::FPToUI
+            | Opcode::Load => Some(Kind::Read),
+            Opcode::Call | Opcode::CallIndirect => {
+                let Extra::Call(info) = data.extra else { return None };
+                let sig = &self.func[self.func[info].signature];
+                let one = functype(sig).is_ok_and(|ty| ty.results.len() == 1);
+                one.then_some(Kind::Call)
+            }
+            Opcode::Store | Opcode::Return | Opcode::BrIf | Opcode::Jump => None,
+            _ => Some(Kind::Pure),
+        }
+    }
+
+    /// Whether `inst` has an effect, reads memory, and can trap, as a moved instruction sees it.
+    /// An instruction that this does not know has an effect.
+    fn effects(&self, inst: Inst) -> (bool, bool, bool) {
+        let data = &self.func[inst];
+        let args = self.args(inst);
+        let pairs = args.iter().chain(&self.results(inst)).any(|&v| is_pair(self.ty(v)));
+        match data.opcode {
+            _ if pairs => (true, true, true),
+            Opcode::Alloca if args.is_empty() => (false, false, false),
+            Opcode::SDiv
+            | Opcode::SRem
+            | Opcode::UDiv
+            | Opcode::URem
+            | Opcode::FPToSI
+            | Opcode::FPToUI => (false, false, true),
+            Opcode::Load if !data.flags.contains(Flags::VOLATILE) => (false, true, true),
+            opcode if pure(opcode) => (false, false, false),
+            _ => (true, true, true),
+        }
+    }
+
+    /// Whether `inst` is a call that the selector writes as a builtin of clang, whose code can
+    /// push an operand more than once.
+    fn builtin_call(&self, inst: Inst) -> bool {
+        let Extra::Call(info) = self.func[inst].extra else { return false };
+        let callee = self.func[info].callee;
+        callee.is_some_and(|name| builtin::is_builtin(self.unit.names.resolve(name)))
+    }
+}
