@@ -1550,6 +1550,60 @@ fn a_value_with_more_uses_is_written_at_the_first_one_with_a_tee() {
     assert_eq!(f.matches("local.tee").count(), 0, "{f}");
 }
 
+/// Three reads of a structure, which is the C below, and the same reads with a `ptr_add` that
+/// has no `nuw` and with one that goes back.
+///
+/// ```c
+/// struct s { int a, b, c; };
+/// int f(struct s *p) { p->c = p->a; return p->b; }
+/// ```
+const FOLDED: &str = r#"; ModuleID = 't.c'
+; format 0
+target triple = "wasm32-unknown-wasip1"
+target datalayout = "e-p:32:32-i64:64-S128"
+
+func @f(ptr) -> i32, linkage(external) {
+block0(%0: ptr):
+    %1 = load.i32 %0, align 4
+    %2 = iconst.i32 8
+    %3 = ptr_add.nuw %0, %2
+    store %1 -> %3, align 4
+    %4 = iconst.i32 4
+    %5 = ptr_add.nuw %0, %4
+    %6 = load.i32 %5, align 4
+    return %6
+}
+
+func @g(ptr) -> i32, linkage(external) {
+block0(%0: ptr):
+    %1 = iconst.i32 4
+    %2 = ptr_add %0, %1
+    %3 = load.i32 %2, align 4
+    %4 = iconst.i32 -4
+    %5 = ptr_add.nuw %0, %4
+    %6 = load.i32 %5, align 4
+    %7 = add %3, %6
+    return %7
+}
+"#;
+
+/// With optimization, a load or a store whose address is a `ptr_add` with `nuw` of a constant
+/// that is not negative puts the constant in its offset field, and the `ptr_add` is not written.
+/// A `ptr_add` with no `nuw`, or with a negative constant, stays an `i32.add`.
+#[test]
+fn a_constant_offset_with_nuw_goes_in_the_offset_field() {
+    let f = body_of(FOLDED, "f", true);
+    assert!(f.contains("local.get\t0\n\tlocal.get\t0\n\ti32.load\t0\n\ti32.store\t8\n"), "{f}");
+    assert!(f.contains("local.get\t0\n\ti32.load\t4\n"), "{f}");
+    assert!(!f.contains("i32.add"), "{f}");
+    let g = body_of(FOLDED, "g", true);
+    assert_eq!(g.matches("i32.add").count(), 3, "{g}");
+    assert!(!g.contains("i32.load\t4") && !g.contains("i32.load\t4294967292"), "{g}");
+    let f = body_of(FOLDED, "f", false);
+    assert!(f.contains("i32.store\t0\n") && f.contains("i32.load\t0\n"), "{f}");
+    assert!(!f.contains("i32.load\t4") && !f.contains("i32.store\t8"), "{f}");
+}
+
 /// A loop with two ways out, which is the C below at `-O1`.
 ///
 /// ```c
