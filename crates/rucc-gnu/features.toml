@@ -1349,6 +1349,281 @@ notes = "The field that a function declared and not defined is imported under, i
 # The C23 standard attributes, which `__has_c_attribute` answers with the number the standard
 # gives them rather than with 1.
 
+
+[[feature]]
+name = "__builtin_wasm_memory_size"
+kind = "builtin"
+gcc_version = "none"
+status = "implemented"
+targets = ["wasm"]
+signature = "size_t(int)"
+used_by = ["wasi-sdk"]
+tests = ["rucc::the_scalar_wasm_builtins_are_one_instruction_each", "rucc::the_wasm_builtins_are_unknown_on_the_other_rows"]
+notes = "The number of 64 KiB pages of the memory, which is `memory.size 0`, as in clang 23. The argument is the index of the memory and must be the constant 0, because a module of these rows has one memory. Written in place of the call by `crates/rucc-wasm/src/select/builtin.rs`."
+
+[[feature]]
+name = "__builtin_wasm_memory_grow"
+kind = "builtin"
+gcc_version = "none"
+status = "implemented"
+targets = ["wasm"]
+signature = "size_t(int, size_t)"
+used_by = ["wasi-sdk"]
+tests = ["rucc::the_scalar_wasm_builtins_are_one_instruction_each", "rucc::the_wasm_builtins_are_unknown_on_the_other_rows"]
+notes = "Grows the memory by the number of pages given and answers the old number of pages, or `(size_t)-1` when the engine refuses, which is `memory.grow 0`, as in clang 23. The first argument must be the constant 0. Written in place as `__builtin_wasm_memory_size` is."
+
+[[feature]]
+name = "__builtin_wasm_min_f32"
+kind = "builtin"
+gcc_version = "none"
+status = "implemented"
+targets = ["wasm"]
+signature = "float(float, float)"
+used_by = ["wasi-sdk"]
+tests = ["rucc::the_scalar_wasm_builtins_are_one_instruction_each", "rucc::the_wasm_builtins_are_unknown_on_the_other_rows"]
+notes = "`f32.min`, as in clang 23. The answer is NaN when either operand is NaN, and -0 is less than +0, so this is not C `fmin`. Written in place as `__builtin_wasm_memory_size` is."
+
+[[feature]]
+name = "__builtin_wasm_max_f32"
+kind = "builtin"
+gcc_version = "none"
+status = "implemented"
+targets = ["wasm"]
+signature = "float(float, float)"
+used_by = ["wasi-sdk"]
+tests = ["rucc::the_scalar_wasm_builtins_are_one_instruction_each", "rucc::the_wasm_builtins_are_unknown_on_the_other_rows"]
+notes = "`f32.max`, as in clang 23. The answer is NaN when either operand is NaN, and -0 is less than +0, so this is not C `fmax`. Written in place as `__builtin_wasm_memory_size` is."
+
+[[feature]]
+name = "__builtin_wasm_min_f64"
+kind = "builtin"
+gcc_version = "none"
+status = "implemented"
+targets = ["wasm"]
+signature = "double(double, double)"
+used_by = ["wasi-sdk"]
+tests = ["rucc::the_scalar_wasm_builtins_are_one_instruction_each", "rucc::the_wasm_builtins_are_unknown_on_the_other_rows"]
+notes = "`f64.min`, as in clang 23. The answer is NaN when either operand is NaN, and -0 is less than +0, so this is not C `fmin`. Written in place as `__builtin_wasm_memory_size` is."
+
+[[feature]]
+name = "__builtin_wasm_max_f64"
+kind = "builtin"
+gcc_version = "none"
+status = "implemented"
+targets = ["wasm"]
+signature = "double(double, double)"
+used_by = ["wasi-sdk"]
+tests = ["rucc::the_scalar_wasm_builtins_are_one_instruction_each", "rucc::the_wasm_builtins_are_unknown_on_the_other_rows"]
+notes = "`f64.max`, as in clang 23. The answer is NaN when either operand is NaN, and -0 is less than +0, so this is not C `fmax`. Written in place as `__builtin_wasm_memory_size` is."
+
+[[feature]]
+name = "__builtin_wasm_trunc_s_i32_f32"
+kind = "builtin"
+gcc_version = "none"
+status = "implemented"
+targets = ["wasm"]
+signature = "int(float)"
+used_by = ["wasi-sdk"]
+tests = ["rucc::the_scalar_wasm_builtins_are_one_instruction_each", "rucc::the_wasm_builtins_are_unknown_on_the_other_rows"]
+notes = "`i32.trunc_f32_s`, as in clang 23, which traps on NaN and on a value out of range. The type of the answer is signed for the unsigned forms too, as in clang. Written in place as `__builtin_wasm_memory_size` is."
+
+[[feature]]
+name = "__builtin_wasm_trunc_u_i32_f32"
+kind = "builtin"
+gcc_version = "none"
+status = "implemented"
+targets = ["wasm"]
+signature = "int(float)"
+used_by = ["wasi-sdk"]
+tests = ["rucc::the_scalar_wasm_builtins_are_one_instruction_each", "rucc::the_wasm_builtins_are_unknown_on_the_other_rows"]
+notes = "`i32.trunc_f32_u`, as in clang 23, which traps on NaN and on a value out of range. The type of the answer is signed for the unsigned forms too, as in clang. Written in place as `__builtin_wasm_memory_size` is."
+
+[[feature]]
+name = "__builtin_wasm_trunc_s_i32_f64"
+kind = "builtin"
+gcc_version = "none"
+status = "implemented"
+targets = ["wasm"]
+signature = "int(double)"
+used_by = ["wasi-sdk"]
+tests = ["rucc::the_scalar_wasm_builtins_are_one_instruction_each", "rucc::the_wasm_builtins_are_unknown_on_the_other_rows"]
+notes = "`i32.trunc_f64_s`, as in clang 23, which traps on NaN and on a value out of range. The type of the answer is signed for the unsigned forms too, as in clang. Written in place as `__builtin_wasm_memory_size` is."
+
+[[feature]]
+name = "__builtin_wasm_trunc_u_i32_f64"
+kind = "builtin"
+gcc_version = "none"
+status = "implemented"
+targets = ["wasm"]
+signature = "int(double)"
+used_by = ["wasi-sdk"]
+tests = ["rucc::the_scalar_wasm_builtins_are_one_instruction_each", "rucc::the_wasm_builtins_are_unknown_on_the_other_rows"]
+notes = "`i32.trunc_f64_u`, as in clang 23, which traps on NaN and on a value out of range. The type of the answer is signed for the unsigned forms too, as in clang. Written in place as `__builtin_wasm_memory_size` is."
+
+[[feature]]
+name = "__builtin_wasm_trunc_s_i64_f32"
+kind = "builtin"
+gcc_version = "none"
+status = "implemented"
+targets = ["wasm"]
+signature = "long long(float)"
+used_by = ["wasi-sdk"]
+tests = ["rucc::the_scalar_wasm_builtins_are_one_instruction_each", "rucc::the_wasm_builtins_are_unknown_on_the_other_rows"]
+notes = "`i64.trunc_f32_s`, as in clang 23, which traps on NaN and on a value out of range. The type of the answer is signed for the unsigned forms too, as in clang. Written in place as `__builtin_wasm_memory_size` is."
+
+[[feature]]
+name = "__builtin_wasm_trunc_u_i64_f32"
+kind = "builtin"
+gcc_version = "none"
+status = "implemented"
+targets = ["wasm"]
+signature = "long long(float)"
+used_by = ["wasi-sdk"]
+tests = ["rucc::the_scalar_wasm_builtins_are_one_instruction_each", "rucc::the_wasm_builtins_are_unknown_on_the_other_rows"]
+notes = "`i64.trunc_f32_u`, as in clang 23, which traps on NaN and on a value out of range. The type of the answer is signed for the unsigned forms too, as in clang. Written in place as `__builtin_wasm_memory_size` is."
+
+[[feature]]
+name = "__builtin_wasm_trunc_s_i64_f64"
+kind = "builtin"
+gcc_version = "none"
+status = "implemented"
+targets = ["wasm"]
+signature = "long long(double)"
+used_by = ["wasi-sdk"]
+tests = ["rucc::the_scalar_wasm_builtins_are_one_instruction_each", "rucc::the_wasm_builtins_are_unknown_on_the_other_rows"]
+notes = "`i64.trunc_f64_s`, as in clang 23, which traps on NaN and on a value out of range. The type of the answer is signed for the unsigned forms too, as in clang. Written in place as `__builtin_wasm_memory_size` is."
+
+[[feature]]
+name = "__builtin_wasm_trunc_u_i64_f64"
+kind = "builtin"
+gcc_version = "none"
+status = "implemented"
+targets = ["wasm"]
+signature = "long long(double)"
+used_by = ["wasi-sdk"]
+tests = ["rucc::the_scalar_wasm_builtins_are_one_instruction_each", "rucc::the_wasm_builtins_are_unknown_on_the_other_rows"]
+notes = "`i64.trunc_f64_u`, as in clang 23, which traps on NaN and on a value out of range. The type of the answer is signed for the unsigned forms too, as in clang. Written in place as `__builtin_wasm_memory_size` is."
+
+[[feature]]
+name = "__builtin_wasm_trunc_saturate_s_i32_f32"
+kind = "builtin"
+gcc_version = "none"
+status = "implemented"
+targets = ["wasm"]
+signature = "int(float)"
+used_by = ["wasi-sdk"]
+tests = ["rucc::the_scalar_wasm_builtins_are_one_instruction_each", "rucc::the_wasm_builtins_are_unknown_on_the_other_rows"]
+notes = "`i32.trunc_sat_f32_s`, as in clang 23, which gives the nearest value of the type for a value out of range and 0 for NaN. It needs the feature `nontrapping-fptoint`, and without it rucc refuses the call in clang's words. The type of the answer is signed for the unsigned forms too, as in clang. Written in place as `__builtin_wasm_memory_size` is."
+
+[[feature]]
+name = "__builtin_wasm_trunc_saturate_u_i32_f32"
+kind = "builtin"
+gcc_version = "none"
+status = "implemented"
+targets = ["wasm"]
+signature = "int(float)"
+used_by = ["wasi-sdk"]
+tests = ["rucc::the_scalar_wasm_builtins_are_one_instruction_each", "rucc::the_wasm_builtins_are_unknown_on_the_other_rows"]
+notes = "`i32.trunc_sat_f32_u`, as in clang 23, which gives the nearest value of the type for a value out of range and 0 for NaN. It needs the feature `nontrapping-fptoint`, and without it rucc refuses the call in clang's words. The type of the answer is signed for the unsigned forms too, as in clang. Written in place as `__builtin_wasm_memory_size` is."
+
+[[feature]]
+name = "__builtin_wasm_trunc_saturate_s_i32_f64"
+kind = "builtin"
+gcc_version = "none"
+status = "implemented"
+targets = ["wasm"]
+signature = "int(double)"
+used_by = ["wasi-sdk"]
+tests = ["rucc::the_scalar_wasm_builtins_are_one_instruction_each", "rucc::the_wasm_builtins_are_unknown_on_the_other_rows"]
+notes = "`i32.trunc_sat_f64_s`, as in clang 23, which gives the nearest value of the type for a value out of range and 0 for NaN. It needs the feature `nontrapping-fptoint`, and without it rucc refuses the call in clang's words. The type of the answer is signed for the unsigned forms too, as in clang. Written in place as `__builtin_wasm_memory_size` is."
+
+[[feature]]
+name = "__builtin_wasm_trunc_saturate_u_i32_f64"
+kind = "builtin"
+gcc_version = "none"
+status = "implemented"
+targets = ["wasm"]
+signature = "int(double)"
+used_by = ["wasi-sdk"]
+tests = ["rucc::the_scalar_wasm_builtins_are_one_instruction_each", "rucc::the_wasm_builtins_are_unknown_on_the_other_rows"]
+notes = "`i32.trunc_sat_f64_u`, as in clang 23, which gives the nearest value of the type for a value out of range and 0 for NaN. It needs the feature `nontrapping-fptoint`, and without it rucc refuses the call in clang's words. The type of the answer is signed for the unsigned forms too, as in clang. Written in place as `__builtin_wasm_memory_size` is."
+
+[[feature]]
+name = "__builtin_wasm_trunc_saturate_s_i64_f32"
+kind = "builtin"
+gcc_version = "none"
+status = "implemented"
+targets = ["wasm"]
+signature = "long long(float)"
+used_by = ["wasi-sdk"]
+tests = ["rucc::the_scalar_wasm_builtins_are_one_instruction_each", "rucc::the_wasm_builtins_are_unknown_on_the_other_rows"]
+notes = "`i64.trunc_sat_f32_s`, as in clang 23, which gives the nearest value of the type for a value out of range and 0 for NaN. It needs the feature `nontrapping-fptoint`, and without it rucc refuses the call in clang's words. The type of the answer is signed for the unsigned forms too, as in clang. Written in place as `__builtin_wasm_memory_size` is."
+
+[[feature]]
+name = "__builtin_wasm_trunc_saturate_u_i64_f32"
+kind = "builtin"
+gcc_version = "none"
+status = "implemented"
+targets = ["wasm"]
+signature = "long long(float)"
+used_by = ["wasi-sdk"]
+tests = ["rucc::the_scalar_wasm_builtins_are_one_instruction_each", "rucc::the_wasm_builtins_are_unknown_on_the_other_rows"]
+notes = "`i64.trunc_sat_f32_u`, as in clang 23, which gives the nearest value of the type for a value out of range and 0 for NaN. It needs the feature `nontrapping-fptoint`, and without it rucc refuses the call in clang's words. The type of the answer is signed for the unsigned forms too, as in clang. Written in place as `__builtin_wasm_memory_size` is."
+
+[[feature]]
+name = "__builtin_wasm_trunc_saturate_s_i64_f64"
+kind = "builtin"
+gcc_version = "none"
+status = "implemented"
+targets = ["wasm"]
+signature = "long long(double)"
+used_by = ["wasi-sdk"]
+tests = ["rucc::the_scalar_wasm_builtins_are_one_instruction_each", "rucc::the_wasm_builtins_are_unknown_on_the_other_rows"]
+notes = "`i64.trunc_sat_f64_s`, as in clang 23, which gives the nearest value of the type for a value out of range and 0 for NaN. It needs the feature `nontrapping-fptoint`, and without it rucc refuses the call in clang's words. The type of the answer is signed for the unsigned forms too, as in clang. Written in place as `__builtin_wasm_memory_size` is."
+
+[[feature]]
+name = "__builtin_wasm_trunc_saturate_u_i64_f64"
+kind = "builtin"
+gcc_version = "none"
+status = "implemented"
+targets = ["wasm"]
+signature = "long long(double)"
+used_by = ["wasi-sdk"]
+tests = ["rucc::the_scalar_wasm_builtins_are_one_instruction_each", "rucc::the_wasm_builtins_are_unknown_on_the_other_rows"]
+notes = "`i64.trunc_sat_f64_u`, as in clang 23, which gives the nearest value of the type for a value out of range and 0 for NaN. It needs the feature `nontrapping-fptoint`, and without it rucc refuses the call in clang's words. The type of the answer is signed for the unsigned forms too, as in clang. Written in place as `__builtin_wasm_memory_size` is."
+
+[[feature]]
+name = "__builtin_wasm_tls_base"
+kind = "builtin"
+gcc_version = "none"
+status = "implemented"
+targets = ["wasm"]
+signature = "void *(void)"
+used_by = ["wasi-sdk"]
+tests = ["rucc::the_scalar_wasm_builtins_are_one_instruction_each", "rucc::the_wasm_builtins_are_unknown_on_the_other_rows"]
+notes = "The address of the thread-local block of the running thread, which is `global.get __tls_base`, as in clang 23. `wasm-ld` defines the global. Written in place as `__builtin_wasm_memory_size` is."
+
+[[feature]]
+name = "__builtin_wasm_tls_size"
+kind = "builtin"
+gcc_version = "none"
+status = "implemented"
+targets = ["wasm"]
+signature = "size_t(void)"
+used_by = ["wasi-sdk"]
+tests = ["rucc::the_scalar_wasm_builtins_are_one_instruction_each", "rucc::the_wasm_builtins_are_unknown_on_the_other_rows"]
+notes = "The size of the thread-local block, which is `global.get __tls_size` of an immutable global that `wasm-ld` defines, as in clang 23. Written in place as `__builtin_wasm_memory_size` is."
+
+[[feature]]
+name = "__builtin_wasm_tls_align"
+kind = "builtin"
+gcc_version = "none"
+status = "implemented"
+targets = ["wasm"]
+signature = "size_t(void)"
+used_by = ["wasi-sdk"]
+tests = ["rucc::the_scalar_wasm_builtins_are_one_instruction_each", "rucc::the_wasm_builtins_are_unknown_on_the_other_rows"]
+notes = "The alignment of the thread-local block, which is `global.get __tls_align` of an immutable global that `wasm-ld` defines, as in clang 23. Written in place as `__builtin_wasm_memory_size` is."
 [[feature]]
 name = "deprecated"
 kind = "c-attribute"

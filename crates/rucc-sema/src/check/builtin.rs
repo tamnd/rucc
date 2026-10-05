@@ -181,6 +181,15 @@ impl Checker<'_> {
         if feature.signature.is_empty() {
             return None;
         }
+        // gcc has no wasm target, so on any other row the `__builtin_wasm_*` names are names that
+        // gcc 16 has never heard of. It says that the declaration is implicit, and `__has_builtin`
+        // already answers 0 there. `__builtin_sponentry` is on one target too, but clang refuses it
+        // in its own words in `check/builtin/entry.rs`, so the test is for the wasm rows alone.
+        let tuple = &self.cx.target.tuple;
+        let here = rucc_gnu::Target::new(tuple.arch().as_str(), tuple.os().as_str());
+        if feature.targets == [rucc_gnu::Place::Wasm] && !feature.is_on(here) {
+            return None;
+        }
         let ty = self.signature_type(feature.signature)?;
         let decl = self.tast.decl(
             Decl {

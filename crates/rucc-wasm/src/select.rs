@@ -20,6 +20,7 @@ use crate::rules;
 use crate::structure::Shape;
 use crate::{Notes, Unit, functype, is_pair, label_numbers, valtype};
 
+mod builtin;
 mod pair;
 
 type Result<T> = std::result::Result<T, String>;
@@ -1639,6 +1640,22 @@ impl Lower<'_, '_> {
             && !info.callee.is_some_and(defined)
         {
             return Err("a call to `setjmp` that `rucc_wasm::prepare` did not change".into());
+        }
+        if let Some(name) = callee.filter(|&name| builtin::is_builtin(name)) {
+            if !info.callee.is_some_and(defined) {
+                let args = self.args(inst);
+                self.builtin(name, &args)?;
+                if tail {
+                    self.epilogue();
+                    self.code.op(emit::RETURN);
+                } else {
+                    match self.results(inst).first() {
+                        Some(&result) => self.set(result),
+                        None => self.code.op(emit::DROP),
+                    }
+                }
+                return Ok(());
+            }
         }
         let sig = &func[info.signature];
         let args = self.args(inst);
