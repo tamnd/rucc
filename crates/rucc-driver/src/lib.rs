@@ -1100,6 +1100,8 @@ pub fn parse_args(args: &[String]) -> Result<Action, CliError> {
             "-fno-reorder-blocks-and-partition" => opts.partition_blocks = Some(false),
             "-freorder-functions" => opts.reorder_functions = Some(true),
             "-fno-reorder-functions" => opts.reorder_functions = Some(false),
+            "-ftoplevel-reorder" => opts.toplevel_reorder = Some(true),
+            "-fno-toplevel-reorder" => opts.toplevel_reorder = Some(false),
             // gcc's name for the scheduler that runs after the registers are handed out, which is
             // the only one rucc has: see `schedule_insns` in `rucc_session`. gcc also takes
             // `-fschedule-insns` for the pass before allocation, and reading that one as this would

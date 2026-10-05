@@ -679,6 +679,10 @@ pub struct Module {
     /// What the unit asks the linker for, as the options a COFF linker reads out of `.drectve`.
     /// See [`Module::add_linker_option`].
     linker_options: Vec<String>,
+
+    /// The functions whose bodies the source wrote, in the order it wrote them. See
+    /// [`Module::wrote`].
+    written: Vec<FuncId>,
 }
 
 impl Module {
@@ -700,6 +704,7 @@ impl Module {
             symbols: Map::default(),
             file_asm: Vec::new(),
             linker_options: Vec::new(),
+            written: Vec::new(),
         }
     }
 
@@ -809,6 +814,39 @@ impl Module {
         let declared = matches!(self.lookup(name), Some(SymbolRef::Func(id))
             if self[id].attrs.set.contains(AttrSet::RETURNS_TWICE));
         declared || twice_by_name(names.resolve(name))
+    }
+
+    /// Says the source wrote this function's body next.
+    ///
+    /// The order a function was added in is the order it was first declared, because a definition
+    /// takes the place of the declaration it completes. gcc writes the bodies in the order they
+    /// were written instead, which is the order objtool and anything else reading the object next
+    /// to gcc's expects, so the lowering says it here as each body arrives.
+    pub fn wrote(&mut self, id: FuncId) {
+        self.written.push(id);
+    }
+
+    /// The functions [`Module::wrote`] was told of, in the order it was told.
+    #[must_use]
+    pub fn written(&self) -> &[FuncId] {
+        &self.written
+    }
+
+    /// Every function with a body, in the order the source wrote them.
+    ///
+    /// A body nobody said was written, which is one a pass made, comes after those in the order it
+    /// was added. A module read back from text says nothing and gets the order it holds them in.
+    #[must_use]
+    pub fn in_written_order(&self) -> Vec<FuncId> {
+        let mut seen = vec![false; self.funcs.len()];
+        let mut order = Vec::new();
+        for id in self.written.iter().copied().chain(self.funcs()) {
+            if !seen[id.index()] && !self[id].is_declaration() {
+                seen[id.index()] = true;
+                order.push(id);
+            }
+        }
+        order
     }
 
     /// Every function, in the order they were added.

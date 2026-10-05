@@ -10,6 +10,7 @@ All notable changes are recorded here. The format follows [Keep a Changelog](htt
 
 ### Fixed
 
+- Functions are written into the object in the order gcc writes them. At `-O0` that is the order the bodies were written rather than the order the names were first declared, and from `-O1` up it is the order `-ftoplevel-reorder` gives, which puts a callee ahead of its callers. A weak function declared in a header and defined early in its file came out first in `.init.text`, and once another object replaced it objtool reported its code as unreachable, which was the last two warnings on Linux 6.12 defconfig. `-ftoplevel-reorder` and `-fno-toplevel-reorder` are read.
 - `scev` reads arithmetic on constants as the number it is, so a loop whose counter starts at `add 0, 1` that nothing folded yet is counted. Loop rotation leaves one when the value going round is `i + 1`, and `-Zrewriter=consed` makes that common: the bubble sort in rucc-corpus kept its inner loop, `unroll` could not count it, and `sroa` could not take the array apart.
 
 ## 0.20.0

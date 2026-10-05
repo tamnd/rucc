@@ -428,6 +428,7 @@ pub fn lower(name: &str, cx: Context<'_>) -> Lowered {
         statics: Map::default(),
         labels: Map::default(),
         done: Set::default(),
+        bodies: Vec::new(),
         aliases: Vec::new(),
         sets: Vec::new(),
         aliased: Set::default(),
@@ -516,6 +517,11 @@ pub(crate) struct Unit<'a> {
     labels: Map<LabelId, Symbol>,
     /// What has been emitted, because a redeclaration is the same declaration seen twice.
     done: Set<DeclId>,
+    /// The functions lowered with a body, by the statement the body is and the symbol it went
+    /// under. The statements were made as the source was read, so sorting by them is the order
+    /// the bodies were written in, which is not the order the walk reaches them: that is the order
+    /// of the first declaration, and a prototype at the top of a file puts a function first.
+    bodies: Vec<(rucc_sema::StmtId, Symbol)>,
     /// The declarations that are a second name for something rather than a thing of their own,
     /// in the order the file made them.
     ///
@@ -613,6 +619,12 @@ impl Unit<'_> {
                 // A name for a type is only in the tree at block scope and nothing is emitted
                 // for one.
                 DeclKind::Type => {}
+            }
+        }
+        self.bodies.sort_by_key(|&(body, _)| body.index());
+        for index in 0..self.bodies.len() {
+            if let Some(SymbolRef::Func(id)) = self.module.lookup(self.bodies[index].1) {
+                self.module.wrote(id);
             }
         }
         self.weak_references();
@@ -1246,6 +1258,9 @@ impl Unit<'_> {
                 self.starts.push(Start { func: name, before: false, priority, span });
             }
         }
+        if let Some(body) = body {
+            self.bodies.push((body, name));
+        }
         self.place_func(func);
     }
 
@@ -1333,6 +1348,9 @@ impl Unit<'_> {
             self.aliasing &= !self.tast[decl].flags.contains(DeclFlags::NO_STRICT_ALIASING);
             body::lower(self, decl, &mut clone, plan);
             self.aliasing = strict;
+            if let Some(body) = self.tast[decl].body {
+                self.bodies.push((body, name));
+            }
             self.place_func(clone);
             let test = version.test.map(|(object, word, bit)| {
                 (self.libgcc_object(object.symbol(), object.size()), word, bit)
@@ -1382,6 +1400,9 @@ impl Unit<'_> {
         }
         let chosen = chosen.expect("a cloned function has a default version");
         build.ret(&[chosen]);
+        if let Some(body) = self.tast[decl].body {
+            self.bodies.push((body, chooser.name));
+        }
         self.place_func(chooser);
         let name = func.name;
         let alias = Alias {
