@@ -2455,7 +2455,7 @@ mod tests {
         let source = "#include <stdarg.h>\n#ifdef va_copy\nint copied;\n#endif\n";
         for (gnu, there) in [(true, true), (false, false)] {
             let mut opts = freestanding();
-            opts.std = rucc_session::Std::C89;
+            opts.std = Std::C89;
             opts.gnu_extensions = gnu;
             let result = run(&opts, source);
             assert_eq!(result.messages, Vec::<String>::new());
