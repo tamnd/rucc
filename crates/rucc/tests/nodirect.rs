@@ -149,7 +149,7 @@ fn notes(text: &str) -> Vec<String> {
 
 #[test]
 fn the_file_says_it_needs_names_reached_indirectly() {
-    for (target, align) in [(X86_64, 8), (I686, 4)] {
+    for (target, align) in [(X86_64, 8u32), (I686, 4)] {
         let mut wanted = vec![format!("\t.p2align\t{}", align.trailing_zeros())];
         wanted.extend(needed(align));
         for level in ["-O0", "-O2"] {
@@ -279,12 +279,7 @@ fn nodirect_extern_access_is_checked_in_gcc_s_words() {
         ("static int v __attribute__((nodirect_extern_access));\n", public, 0, 1),
         ("__attribute__((nodirect_extern_access)) static int v;\n", public, 0, 1),
         ("static void f(void) __attribute__((nodirect_extern_access));\n", public, 0, 1),
-        (
-            "__attribute__((nodirect_extern_access)) static void f(void) {}\n",
-            public,
-            0,
-            1,
-        ),
+        ("__attribute__((nodirect_extern_access)) static void f(void) {}\n", public, 0, 1),
         (
             "void g(void) { int l __attribute__((nodirect_extern_access)); (void)l; }\n",
             public,

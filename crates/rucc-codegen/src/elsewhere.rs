@@ -339,10 +339,12 @@ impl Elsewhere {
             );
         let used = module.funcs().flat_map(|id| {
             let func = &module[id];
-            func.blocks().flat_map(|block| func.insts(block)).filter_map(|inst| match func[inst].extra {
-                Extra::Call(info) => func[info].callee,
-                Extra::Symbol(name) => Some(name),
-                _ => None,
+            func.blocks().flat_map(|block| func.insts(block)).filter_map(|inst| {
+                match func[inst].extra {
+                    Extra::Call(info) => func[info].callee,
+                    Extra::Symbol(name) => Some(name),
+                    _ => None,
+                }
             })
         });
         let held = module.globals().flat_map(|id| {
