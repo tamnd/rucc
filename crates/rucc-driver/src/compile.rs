@@ -8227,6 +8227,32 @@ float through_a_union(union u *p) { p->i = 1; return p->f; }\n";
         }
     }
 
+    /// A `bool` goes through every atomic name as the byte it is stored in, since no instruction
+    /// works on one bit. Linux's kselftest harness does `__sync_bool_compare_and_swap` on a `bool`
+    /// in shared memory, and every user_events test on 6.12 failed to build without this.
+    #[test]
+    fn an_atomic_on_a_bool_is_an_atomic_on_its_byte() {
+        let names = [
+            "int f(_Bool *p) { return __sync_bool_compare_and_swap(p, 0, 1); }\n",
+            "_Bool f(_Bool *p) { return __sync_val_compare_and_swap(p, 0, 1); }\n",
+            "_Bool f(_Bool *p) { _Bool e = 0; return __atomic_compare_exchange_n(p, &e, 1, 0, 5, 5); }\n",
+        ];
+        for source in names {
+            let text = asm(source);
+            assert!(text.contains("cmpxchgb\t"), "{source}: {text}");
+        }
+        for source in [
+            "_Bool f(_Bool *p) { return __atomic_exchange_n(p, 1, 5); }\n",
+            "_Bool f(_Bool *p) { return __sync_lock_test_and_set(p, 1); }\n",
+        ] {
+            let text = asm(source);
+            assert!(text.contains("xchgb\t"), "{source}: {text}");
+        }
+        // `b ^= v` on an `_Atomic _Bool` is the loop, at the byte.
+        let text = asm("_Atomic _Bool b;\n_Bool f(_Bool v) { return b ^= v; }\n");
+        assert!(text.contains("cmpxchgb\t"), "{text}");
+    }
+
     /// A read modify write is one IR instruction, and a name that asks for the value afterwards is
     /// that instruction and one more operation.
     ///
