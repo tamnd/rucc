@@ -2161,14 +2161,19 @@ impl Checker<'_> {
     /// ignored, and so does this.
     ///
     /// `nocf_check` is a function type attribute too and lands where a convention does, so it is
-    /// read here as well, after the convention. See [`Self::untracked`].
+    /// read here as well, after the convention. See [`Self::untracked`]. So is `indirect_return`,
+    /// last, which is [`FunctionType::indirect_return`].
     pub(in crate::check) fn convened(&mut self, ty: TypeId, attrs: AttrList) -> TypeId {
         let ty = match self.convention_in(attrs) {
             Some((convention, name, span)) => self.with_convention(ty, convention, &name, span),
             None => ty,
         };
-        match self.nocf_in(attrs) {
+        let ty = match self.nocf_in(attrs) {
             Some(span) => self.without_landing_pad(ty, span),
+            None => ty,
+        };
+        match self.flag_in(attrs, "indirect_return", "E0823") {
+            Some(span) => self.returning_by_jump(ty, span),
             None => ty,
         }
     }
@@ -2198,6 +2203,12 @@ impl Checker<'_> {
                 _ => self.not_a_function("nocf_check", span),
             }
         }
+        if let Some(span) = self.flag_in(attrs, "indirect_return", "E0823") {
+            match self.types.kind(self.types.canonical(pointee)) {
+                TypeKind::Function(function) => pointee = self.jumping_back(function),
+                _ => self.not_a_function("indirect_return", span),
+            }
+        }
         pointee
     }
 
@@ -2207,19 +2218,25 @@ impl Checker<'_> {
     /// Read on x86 alone, which is the one family with landing pads and the `notrack` prefix, and
     /// the one gcc knows the attribute on.
     fn nocf_in(&mut self, attrs: AttrList) -> Option<Span> {
+        self.flag_in(attrs, "nocf_check", "E0816")
+    }
+
+    /// Where an attribute list says `name`, an x86 function type attribute that takes nothing,
+    /// after refusing each one written with arguments in gcc's words, under `code`.
+    fn flag_in(&mut self, attrs: AttrList, name: &str, code: &'static str) -> Option<Span> {
         if !matches!(self.cx.target.tuple.arch().as_str(), "x86_64" | "i686") {
             return None;
         }
         let ast = self.ast;
         let mut asked = None;
         for &attr in &ast[attrs] {
-            if self.gnu_name(&attr) != "nocf_check" {
+            if self.gnu_name(&attr) != name {
                 continue;
             }
             let count = self.ast[attr.args].len();
             if count > 0 {
-                let what = "wrong number of arguments specified for 'nocf_check' attribute";
-                let refused = Diagnostic::error(what, attr.span).with_code("E0816");
+                let what = format!("wrong number of arguments specified for '{name}' attribute");
+                let refused = Diagnostic::error(what, attr.span).with_code(code);
                 self.report(refused.note(format!("expected 0, found {count}"), attr.span));
                 continue;
             }
@@ -2346,6 +2363,39 @@ impl Checker<'_> {
                 ty
             }
         }
+    }
+
+    /// The type with its function, or the function it points at, made one whose call can come
+    /// back by a jump, as [`Self::without_landing_pad`] does for `nocf_check`. Anything else is
+    /// left as it is with gcc's warning, which is the one diagnostic: gcc reads the attribute
+    /// without `-fcf-protection` in silence, though it then does nothing.
+    fn returning_by_jump(&mut self, ty: TypeId, span: Span) -> TypeId {
+        let canonical = self.types.canonical(ty);
+        match self.types.kind(canonical) {
+            TypeKind::Function(function) => self.jumping_back(function),
+            TypeKind::Pointer(pointee) => {
+                let pointee = self.types.canonical(pointee);
+                let TypeKind::Function(function) = self.types.kind(pointee) else {
+                    self.not_a_function("indirect_return", span);
+                    return ty;
+                };
+                let function = self.jumping_back(function);
+                let quals = self.types.quals(canonical);
+                let pointer = self.types.pointer(function);
+                self.types.qualified(pointer, quals)
+            }
+            _ => {
+                self.not_a_function("indirect_return", span);
+                ty
+            }
+        }
+    }
+
+    /// The same function type with [`FunctionType::indirect_return`] set.
+    fn jumping_back(&mut self, function: FunctionId) -> TypeId {
+        let current = self.types.signature(function);
+        let signature = FunctionType { indirect_return: true, ..current.clone() };
+        self.types.function(signature)
     }
 
     /// The same function type without a landing pad, or nothing where the type stays as written.

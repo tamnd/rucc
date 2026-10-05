@@ -394,6 +394,16 @@ fn composite_function(types: &mut Types, left: &FunctionType, right: &FunctionTy
     };
     // The two conventions are the same one, since the types would not be compatible otherwise,
     // and so is whether there is a landing pad.
+    // A call that can come back by a jump is one whichever declaration said so.
     let (convention, nocf) = (left.convention, left.nocf);
-    types.function(FunctionType { ret, params, variadic, prototyped, convention, nocf })
+    let indirect_return = left.indirect_return || right.indirect_return;
+    types.function(FunctionType {
+        ret,
+        params,
+        variadic,
+        prototyped,
+        convention,
+        nocf,
+        indirect_return,
+    })
 }

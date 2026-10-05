@@ -249,6 +249,10 @@ impl AttrSet {
     /// `-mmanual-endbr` leaves the rest without one, from `__attribute__((cf_check))`.
     /// [`Self::NOCF`] wins over it, as in gcc.
     pub const CF_CHECK: Self = Self(1 << 34);
+    /// The function's own type is `__attribute__((indirect_return))`. Under
+    /// `-fcf-protection=full` that lets it make a tail call to another such function, which
+    /// would otherwise come back past it by a jump with no landing pad to meet it.
+    pub const INDIRECT_RETURN: Self = Self(1 << 35);
 
     /// The underlying bits, for the printer and for hashing.
     #[must_use]
@@ -376,6 +380,7 @@ static NAMED: &[(AttrSet, &str)] = &[
     (AttrSet::NOIPA, "noipa"),
     (AttrSet::NOCF, "nocf"),
     (AttrSet::CF_CHECK, "cf_check"),
+    (AttrSet::INDIRECT_RETURN, "indirect_return"),
 ];
 
 /// The pairs that cannot both be set, with their names for the message.

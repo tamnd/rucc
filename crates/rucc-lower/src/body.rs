@@ -9417,6 +9417,9 @@ impl<'u> Body<'_, 'u> {
                 )
             }
         };
+        if self.unit.returns_by_jump(ty) {
+            self.func[inst].flags = self.func[inst].flags.union(Flags::INDIRECT_RETURN);
+        }
         self.landing_pad(span);
         // A call that does not come back is where the block stops, and it says so the same way
         // `__builtin_unreachable()` does, with a promise the optimizer turns into the end of the

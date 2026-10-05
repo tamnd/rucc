@@ -128,15 +128,30 @@ pub fn comes_back(func: &Func, names: &Interner, elsewhere: &Elsewhere) -> bool 
 
 /// Whether that call is to one of the names [`rucc_ir::twice_by_name`] knows or to a function
 /// declared to be like them.
-fn twice(func: &Func, inst: Inst, names: &Interner, elsewhere: &Elsewhere) -> bool {
+pub(crate) fn twice(func: &Func, inst: Inst, names: &Interner, elsewhere: &Elsewhere) -> bool {
     let Extra::Call(info) = func[inst].extra else { return false };
     let Some(callee) = func[info].callee else { return false };
     elsewhere.twice(callee) || rucc_ir::twice_by_name(names.resolve(callee))
 }
 
+/// Whether that call can come back by an indirect jump rather than a `ret`, because the type it
+/// was made through or its callee's said `indirect_return`.
+pub(crate) fn jumps_back(func: &Func, inst: Inst, elsewhere: &Elsewhere) -> bool {
+    if func[inst].flags.contains(rucc_ir::Flags::INDIRECT_RETURN) {
+        return true;
+    }
+    let Extra::Call(info) = func[inst].extra else { return false };
+    func[info].callee.is_some_and(|callee| elsewhere.jumps_back(callee))
+}
+
 /// Turns every call in tail position into a `tail_call`, unless [`refusal`] has a reason not to,
 /// and says how many it turned.
-pub fn mark(func: &mut Func, names: &Interner, elsewhere: &Elsewhere) -> usize {
+///
+/// `guarded` is `-fcf-protection=full` in a function whose own type is not `indirect_return`.
+/// There a call that can come back by a jump stays a call, as in gcc: the jump would land in
+/// this function's caller, past a call that has no landing pad after it, since that caller did
+/// not know.
+pub fn mark(func: &mut Func, names: &Interner, elsewhere: &Elsewhere, guarded: bool) -> usize {
     if refusal(func, names, elsewhere).is_some() {
         return 0;
     }
@@ -148,6 +163,9 @@ pub fn mark(func: &mut Func, names: &Interner, elsewhere: &Elsewhere) -> usize {
         let [.., call, ret] = insts[..] else { continue };
         let Some(returned) = returned(func, ret) else { continue };
         if !in_tail_position(func, call, &returned) {
+            continue;
+        }
+        if guarded && jumps_back(func, call, elsewhere) {
             continue;
         }
         left.extend(func.successors(ret).map(|target| target.block));
@@ -382,7 +400,7 @@ mod tests {
     fn a_call_to_the_other_convention_stays_a_call() {
         let mut names = Interner::new();
         let mut func = caller_of(&mut names, rucc_target::Convention::Ms, |_, _, got| got);
-        assert_eq!(mark(&mut func, &names, &Elsewhere::default()), 0);
+        assert_eq!(mark(&mut func, &names, &Elsewhere::default(), false), 0);
         assert_eq!(opcodes(&func), [Opcode::Call, Opcode::Return]);
     }
 
@@ -390,8 +408,23 @@ mod tests {
     fn a_call_whose_answer_is_returned_becomes_a_tail_call() {
         let mut names = Interner::new();
         let mut func = caller(&mut names, |_, _, got| got);
-        assert_eq!(mark(&mut func, &names, &Elsewhere::default()), 1);
+        assert_eq!(mark(&mut func, &names, &Elsewhere::default(), false), 1);
         assert_eq!(opcodes(&func), [Opcode::TailCall]);
+    }
+
+    /// Under `-fcf-protection=full` a call that can come back by a jump stays a call, and is a
+    /// tail call again without the guard.
+    #[test]
+    fn a_call_that_comes_back_by_a_jump_stays_a_call_when_guarded() {
+        let mut names = Interner::new();
+        let mut func = caller(&mut names, |_, _, got| got);
+        let call = func.blocks().flat_map(|block| func.insts(block)).next().expect("the call");
+        func[call].flags = rucc_ir::Flags::INDIRECT_RETURN;
+        assert_eq!(mark(&mut func, &names, &Elsewhere::default(), true), 0);
+        assert_eq!(mark(&mut func, &names, &Elsewhere::default(), false), 1);
+        // And a plain call is a tail call under the guard as well.
+        let mut func = caller(&mut names, |_, _, got| got);
+        assert_eq!(mark(&mut func, &names, &Elsewhere::default(), true), 1);
     }
 
     /// `int f(int (*g)(int), int a) { return g(a); }` is a tail call too, one that names nobody
@@ -420,7 +453,7 @@ mod tests {
         let got = func[call].first_result.expect("an integer comes back");
         Builder::new(&mut func, block).ret(&[got]);
 
-        assert_eq!(mark(&mut func, &names, &Elsewhere::default()), 1);
+        assert_eq!(mark(&mut func, &names, &Elsewhere::default(), false), 1);
         assert_eq!(opcodes(&func), [Opcode::TailCall]);
         assert_eq!(func[func[call].args], [address, arg]);
     }
@@ -453,7 +486,7 @@ mod tests {
     fn a_call_that_jumps_to_a_return_of_its_answer_becomes_a_tail_call() {
         let mut names = Interner::new();
         let mut func = joined(&mut names, false);
-        assert_eq!(mark(&mut func, &names, &Elsewhere::default()), 1);
+        assert_eq!(mark(&mut func, &names, &Elsewhere::default(), false), 1);
         assert_eq!(opcodes(&func), [Opcode::TailCall]);
     }
 
@@ -461,7 +494,7 @@ mod tests {
     fn a_call_that_jumps_to_work_on_its_answer_stays_a_call() {
         let mut names = Interner::new();
         let mut func = joined(&mut names, true);
-        assert_eq!(mark(&mut func, &names, &Elsewhere::default()), 0);
+        assert_eq!(mark(&mut func, &names, &Elsewhere::default(), false), 0);
         assert_eq!(opcodes(&func), [Opcode::Call, Opcode::Jump, Opcode::Add, Opcode::Return]);
     }
 
@@ -482,7 +515,7 @@ mod tests {
     fn a_void_function_drops_an_integer_answer_and_jumps() {
         let mut names = Interner::new();
         let mut func = dropping(&mut names, Type::int(32));
-        assert_eq!(mark(&mut func, &names, &Elsewhere::default()), 1);
+        assert_eq!(mark(&mut func, &names, &Elsewhere::default(), false), 1);
         assert_eq!(opcodes(&func), [Opcode::TailCall]);
     }
 
@@ -492,7 +525,7 @@ mod tests {
     fn a_void_function_keeps_the_call_when_the_answer_is_a_float() {
         let mut names = Interner::new();
         let mut func = dropping(&mut names, Type::float(Float::F64));
-        assert_eq!(mark(&mut func, &names, &Elsewhere::default()), 0);
+        assert_eq!(mark(&mut func, &names, &Elsewhere::default(), false), 0);
         assert_eq!(opcodes(&func), [Opcode::Call, Opcode::Return]);
     }
 
@@ -502,7 +535,7 @@ mod tests {
         let mut func = caller(&mut names, |func, block, got| {
             Builder::new(func, block).binary(Opcode::Add, got, got, Flags::default())
         });
-        assert_eq!(mark(&mut func, &names, &Elsewhere::default()), 0);
+        assert_eq!(mark(&mut func, &names, &Elsewhere::default(), false), 0);
         assert_eq!(opcodes(&func), [Opcode::Call, Opcode::Add, Opcode::Return]);
     }
 
@@ -517,7 +550,7 @@ mod tests {
             refusal(&func, &names, &Elsewhere::default()),
             Some("a local lives in the frame")
         );
-        assert_eq!(mark(&mut func, &names, &Elsewhere::default()), 0);
+        assert_eq!(mark(&mut func, &names, &Elsewhere::default(), false), 0);
     }
 
     #[test]
@@ -533,7 +566,7 @@ mod tests {
             refusal(&func, &names, &Elsewhere::default()),
             Some("the function calls something that comes back twice")
         );
-        assert_eq!(mark(&mut func, &names, &Elsewhere::default()), 0);
+        assert_eq!(mark(&mut func, &names, &Elsewhere::default(), false), 0);
     }
 
     #[test]

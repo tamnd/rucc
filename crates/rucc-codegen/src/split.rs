@@ -283,6 +283,29 @@ pub fn indirect(
     entries.len()
 }
 
+/// Puts a landing pad right after every call that says it can come back by a jump, with
+/// [`mir::Flags::LANDS`], and gives back how many it wrote. Nothing without a pad to write, which
+/// is the same option [`pads`] reads.
+pub fn after_calls(
+    func: &mut mir::Func,
+    frame: &FrameInsts,
+    landing: Option<&'static str>,
+    names: &mut Interner,
+) -> usize {
+    let Some(name) = landing else { return 0 };
+    let opcode = mir::Opcode::new(names.intern(&format!("{}{name}", frame.prefix)));
+    let calls: Vec<mir::Inst> = func
+        .blocks()
+        .flat_map(|block| func.insts(block))
+        .filter(|&inst| func[inst].flags.contains(mir::Flags::LANDS))
+        .collect();
+    for &call in &calls {
+        let pad = func.build_loose(opcode).finish();
+        func.insert_after(call, pad);
+    }
+    calls.len()
+}
+
 /// Puts a landing pad at the front of every block whose address is taken, and gives back how many
 /// it wrote.
 ///

@@ -841,6 +841,16 @@ tests = ["rucc-types::a_function_without_a_landing_pad_is_another_type", "rucc-t
 notes = "A function type without a landing pad under `-fcf-protection=branch` or `full`. A function of the type opens without `endbr64`, and a call or a tail jump through a pointer to one carries the `notrack` prefix, in the listing and in the object the compiler writes itself. It lands where `ms_abi` does: in the specifiers, after the declarator, beside the star of a pointer or in a typedef, one level down a pointer and no further. It is part of the type, as it is to gcc: a declaration each way is `conflicting types` and a pointer of one assigned to a pointer of the other is an incompatible pointer, spelled `void (__attribute__((nocf_check)) *)(void)`. On something that is not a function it is warned about and dropped, an argument is refused with `E0816`, and without `-fcf-protection` it is ignored with gcc's warning. A label whose address is taken keeps its pad. Written beside `cf_check` it wins, as in gcc."
 
 [[feature]]
+name = "indirect_return"
+kind = "attribute"
+gcc_version = "9.0"
+status = "implemented"
+targets = ["x86-64", "x86"]
+used_by = ["glibc"]
+tests = ["rucc-types::a_function_that_returns_by_a_jump_is_the_same_type", "rucc-ir::indirect_return_goes_on_a_call_and_nowhere_else", "rucc-codegen::a_call_that_comes_back_by_a_jump_stays_a_call_when_guarded", "rucc::a_call_that_can_come_back_by_a_jump_is_followed_by_a_landing_pad", "rucc::the_callee_s_own_type_counts_and_an_old_style_declaration_does_not", "rucc::full_keeps_a_tail_call_to_one_as_a_call", "rucc::the_attribute_is_checked_in_gcc_s_words", "rucc::the_object_has_the_pad_after_the_call"]
+notes = "A function type whose function can come back by an indirect jump, as `swapcontext` does. Under `-fcf-protection=branch` or `full` each call to one is followed by `endbr64` or `endbr32`, whether it is called by name, through a pointer, a typedef or a member, in the listing and in the object the compiler writes itself, and `-mmanual-endbr` leaves the pads in. The callee's own declaration counts too, so a call through a plain pointer the optimizer saw the target of has its pad, while a declaration without a prototype has none, as in gcc. A call to `setjmp` or another `returns_twice` function gets the same pad, which gcc gives it and rucc did not before. A tail call to one stays a jump under `branch`, and under `full` it is a call with its pad unless the caller has the attribute too. It lands where `nocf_check` does, but it is not a difference between types: a declaration each way and a pointer of one taken for the other are said nothing about, and the composite keeps it. On something that is not a function it is warned about in gcc's words and dropped, and an argument is refused with `E0823`."
+
+[[feature]]
 name = "patchable_function_entry"
 kind = "attribute"
 gcc_version = "8.0"

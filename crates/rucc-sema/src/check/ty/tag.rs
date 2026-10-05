@@ -483,7 +483,11 @@ impl Checker<'_> {
         let node = self.ast[declarator];
         let span = if node.name.is_some() { node.name_span } else { field.span };
         let subject = Subject { name: node.name, span };
-        Some((self.build_type(field.specs, declarator, MEMBER), subject))
+        let ty = self.build_type(field.specs, declarator, MEMBER);
+        // `int (*hook)(void) __attribute__((indirect_return));`, where a function type attribute
+        // is written after the declarator and belongs to the function the member points at, as
+        // it does on a declaration.
+        Some((self.convened(ty, field.attrs), subject))
     }
 
     /// Whether a member written with no declarator is an anonymous one, whose members are reached

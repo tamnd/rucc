@@ -618,4 +618,12 @@ pub struct FunctionType {
     /// each way is `conflicting types` and a pointer of one assigned to a pointer of the other is
     /// an incompatible pointer, exactly as with [`Self::convention`].
     pub nocf: bool,
+    /// Whether a call to it can come back by an indirect jump rather than a `ret`, from
+    /// `__attribute__((indirect_return))`.
+    ///
+    /// Under `-fcf-protection=branch` the caller then opens a landing pad right after each call,
+    /// as after `setjmp`, since that is where the jump lands. It changes no call and no body, so
+    /// unlike [`Self::nocf`] it is not a difference between types: gcc takes a pointer of one
+    /// for a pointer of the other in silence, and a composite keeps it if either had it.
+    pub indirect_return: bool,
 }

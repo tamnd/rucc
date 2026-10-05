@@ -2307,6 +2307,10 @@ impl<'a> Lowering<'a> {
         // A `tail_call` that names nobody is one through a pointer, per `crate::tail`.
         let indirect = data.opcode == Opcode::CallIndirect || info.callee.is_none();
         let untracked = indirect && data.flags.contains(Flags::NOTRACK);
+        // Whether control can come back after it by a jump, which is where a landing pad goes.
+        // See `crate::split::after_calls`.
+        let lands = crate::tail::jumps_back(self.source, inst, self.elsewhere)
+            || crate::tail::twice(self.source, inst, &*self.names, self.elsewhere);
 
         let values: Vec<Value> = self.source[data.args].to_vec();
         let callee = if indirect {
@@ -2415,6 +2419,10 @@ impl<'a> Lowering<'a> {
             let plain = self.names.resolve(self.out[call].opcode.name());
             let name = format!("{plain}_notrack");
             self.out[call].opcode = mir::Opcode::new(self.names.intern(&name));
+        }
+        if lands {
+            let call = self.out.terminator(block).expect("the call just built");
+            self.out[call].flags = self.out[call].flags.with(mir::Flags::LANDS);
         }
         if self.source.unwinds_to_pad(inst) {
             let call = self.out.terminator(block).expect("the call just built");

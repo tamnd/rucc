@@ -1091,6 +1091,12 @@ impl Unit<'_> {
         if self.untracked(ty) {
             func.attrs.set |= AttrSet::NOCF;
         }
+        // And one about how a call to it comes back, which every call carries on its own, but
+        // which a tail call out of this function reads off the function itself. See
+        // `rucc_codegen::tail`.
+        if self.returns_by_jump(ty) {
+            func.attrs.set |= AttrSet::INDIRECT_RETURN;
+        }
         // And the one that asks for the pad when `-mmanual-endbr` leaves it out of the rest.
         if node.flags.contains(DeclFlags::CF_CHECK) {
             func.attrs.set |= AttrSet::CF_CHECK;
@@ -2082,6 +2088,23 @@ impl Unit<'_> {
             _ => canonical,
         };
         matches!(self.types.kind(canonical), TypeKind::Function(id) if self.types.signature(id).nocf)
+    }
+
+    /// Whether a call through `ty`, a function or a pointer to one, can come back by a jump, from
+    /// `__attribute__((indirect_return))`: the call carries `rucc_ir::Flags::INDIRECT_RETURN` and
+    /// a function of the type `rucc_ir::AttrSet::INDIRECT_RETURN`. Only a prototype says so, since
+    /// gcc reads the attribute off the argument types and `()` has none.
+    pub(crate) fn returns_by_jump(&self, ty: TypeId) -> bool {
+        let canonical = self.types.canonical(ty);
+        let canonical = match self.types.kind(canonical) {
+            TypeKind::Pointer(pointee) => self.types.canonical(pointee),
+            _ => canonical,
+        };
+        matches!(
+            self.types.kind(canonical),
+            TypeKind::Function(id)
+                if self.types.signature(id).indirect_return && self.types.signature(id).prototyped
+        )
     }
 
     /// The plan, or what stopped it, said to nobody.

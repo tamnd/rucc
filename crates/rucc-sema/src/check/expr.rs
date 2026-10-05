@@ -319,6 +319,7 @@ impl Checker<'_> {
                     prototyped: false,
                     convention: rucc_target::Convention::Target,
                     nocf: false,
+                    indirect_return: false,
                 })
             }
         };
@@ -2946,6 +2947,7 @@ mod tests {
             prototyped: true,
             convention: rucc_target::Convention::Target,
             nocf: false,
+            indirect_return: false,
         };
         let function = c.types.function(signature);
         c.declare_object(g, function, Span::DUMMY);
@@ -2977,6 +2979,7 @@ mod tests {
             prototyped: true,
             convention: rucc_target::Convention::Target,
             nocf: false,
+            indirect_return: false,
         };
         let function = c.types.function(signature);
         c.declare_object(g, function, Span::DUMMY);
@@ -3018,6 +3021,7 @@ mod tests {
             prototyped: true,
             convention: rucc_target::Convention::Target,
             nocf: false,
+            indirect_return: false,
         };
         let function = c.types.function(signature);
         c.declare_object(g, function, Span::DUMMY);

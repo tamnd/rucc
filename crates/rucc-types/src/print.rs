@@ -369,6 +369,7 @@ mod tests {
             prototyped: true,
             convention: rucc_target::Convention::Target,
             nocf: false,
+            indirect_return: false,
         };
         let function = types.function(signature);
         let pointer = types.pointer(function);
@@ -390,6 +391,7 @@ mod tests {
             prototyped: true,
             convention: rucc_target::Convention::Ms,
             nocf: false,
+            indirect_return: false,
         };
         let native = FunctionType { convention: rucc_target::Convention::Target, ..ms.clone() };
         let ms = types.function(ms);
@@ -416,6 +418,7 @@ mod tests {
             prototyped: true,
             convention: rucc_target::Convention::Target,
             nocf: false,
+            indirect_return: false,
         };
         let untracked = FunctionType { nocf: true, ..plain.clone() };
         let both = FunctionType { convention: rucc_target::Convention::Ms, ..untracked.clone() };
@@ -461,6 +464,7 @@ mod tests {
             prototyped: true,
             convention: rucc_target::Convention::Target,
             nocf: false,
+            indirect_return: false,
         };
         let function = types.function(takes_an_int.clone());
         let to_int = types.pointer(int);
@@ -506,6 +510,7 @@ mod tests {
             prototyped: true,
             convention: rucc_target::Convention::Target,
             nocf: false,
+            indirect_return: false,
         };
         let old = FunctionType {
             ret: int,
@@ -514,6 +519,7 @@ mod tests {
             prototyped: false,
             convention: rucc_target::Convention::Target,
             nocf: false,
+            indirect_return: false,
         };
         let prototyped = types.function(prototyped);
         let old = types.function(old);
@@ -535,6 +541,7 @@ mod tests {
             prototyped: true,
             convention: rucc_target::Convention::Target,
             nocf: false,
+            indirect_return: false,
         };
         let function = types.function(signature);
         let pointer = types.pointer(function);

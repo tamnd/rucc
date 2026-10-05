@@ -200,6 +200,13 @@ impl Flags {
     /// flag says nothing.
     pub const NOTRACK: Self = Self(1 << 21);
 
+    /// A call to a function of an `__attribute__((indirect_return))` type, which can come back by
+    /// an indirect jump rather than a `ret`, so that under `-fcf-protection=branch` the code
+    /// generator opens a landing pad right after it. Legal on all three spellings for the reason
+    /// [`Self::NOTRACK`] is, and kept when a call through an address becomes a direct one, since
+    /// how the callee comes back does not depend on how it was reached.
+    pub const INDIRECT_RETURN: Self = Self(1 << 22);
+
     /// Every flag that tells the optimizer to leave an access exactly where it is.
     pub const KEEP: Self = Self(Self::VOLATILE.0 | Self::SEG_FS.0 | Self::SEG_GS.0);
 
@@ -299,8 +306,12 @@ impl Flags {
             // that could ever be inside it.
             //
             // `NOTRACK` is on all three, which its own comment says why.
-            Opcode::Call => Self::NOFREE.union(Self::HEAP).union(Self::NOTRACK),
-            Opcode::TailCall | Opcode::CallIndirect => Self::NOFREE.union(Self::NOTRACK),
+            Opcode::Call => {
+                Self::NOFREE.union(Self::HEAP).union(Self::NOTRACK).union(Self::INDIRECT_RETURN)
+            }
+            Opcode::TailCall | Opcode::CallIndirect => {
+                Self::NOFREE.union(Self::NOTRACK).union(Self::INDIRECT_RETURN)
+            }
             // On the three checks `rucc-safety` emits and on nothing else. What they say is about
             // the bytes a check names, so an instruction that names no bytes has no room for them.
             Opcode::CheckLive | Opcode::CheckDeriv => Self::STATIC.union(Self::HANDED),
@@ -383,6 +394,7 @@ static NAMED: &[(Flags, &str)] = &[
     (Flags::GUARD, "guard"),
     (Flags::NOMEM, "nomem"),
     (Flags::NOTRACK, "notrack"),
+    (Flags::INDIRECT_RETURN, "indirect_return"),
 ];
 
 /// How strongly an atomic operation is ordered against everything around it.
@@ -833,6 +845,16 @@ mod tests {
         // It is a fact rather than a licence, so it is not part of what `-ffast-math` grants and
         // it is not something a rewrite over arithmetic could carry onto a call.
         assert!(!Flags::FAST.contains(Flags::NOFREE));
+    }
+
+    #[test]
+    fn indirect_return_goes_on_a_call_and_nowhere_else() {
+        for opcode in Opcode::all() {
+            let call = matches!(opcode, Opcode::Call | Opcode::TailCall | Opcode::CallIndirect);
+            assert_eq!(Flags::legal_on(opcode).contains(Flags::INDIRECT_RETURN), call, "{opcode}");
+        }
+        assert_eq!(Flags::from_name("indirect_return"), Some(Flags::INDIRECT_RETURN));
+        assert_eq!(Flags::INDIRECT_RETURN.union(Flags::NOTRACK).to_string(), ".notrack.indirect_return");
     }
 
     #[test]

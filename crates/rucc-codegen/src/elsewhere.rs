@@ -76,6 +76,7 @@ pub struct Elsewhere {
     names: Set<Symbol>,
     threads: Set<Symbol>,
     twice: Set<Symbol>,
+    jumps_back: Set<Symbol>,
     cold: Set<Symbol>,
     described: bool,
     indexed: bool,
@@ -141,6 +142,11 @@ impl Elsewhere {
             .filter(|&id| module[id].attrs.set.contains(AttrSet::RETURNS_TWICE))
             .map(|id| module[id].name)
             .collect();
+        let jumps_back = module
+            .funcs()
+            .filter(|&id| module[id].attrs.set.contains(AttrSet::INDIRECT_RETURN))
+            .map(|id| module[id].name)
+            .collect();
         let cold = module
             .funcs()
             .filter(|&id| module[id].attrs.set.contains(AttrSet::COLD))
@@ -152,6 +158,7 @@ impl Elsewhere {
         Self {
             threads,
             twice,
+            jumps_back,
             cold,
             described,
             indexed,
@@ -401,6 +408,15 @@ impl Elsewhere {
     #[must_use]
     pub fn twice(&self, name: Symbol) -> bool {
         self.twice.contains(&name)
+    }
+
+    /// Whether a call to that name may come back by a jump rather than a `ret`, because its type
+    /// said `indirect_return`. The call says so itself when it was made through that type, and
+    /// this is for one that was not: a call through a pointer the optimizer found the target of,
+    /// or one made before the declaration that said it, which gcc also reads off the callee.
+    #[must_use]
+    pub fn jumps_back(&self, name: Symbol) -> bool {
+        self.jumps_back.contains(&name)
     }
 
     /// Whether a declaration of that name said `cold`, which is a promise that a call to it is
