@@ -224,8 +224,21 @@ fn the_address_of_a_global_handed_in_with_p_is_the_name_itself() {
                   asm (\"movq %%gs:%P[var], %[val]\" : [val] \"=r\" (v) : [var] \"p\" (&current_task)); \
                   return v; }\n";
     let text = asm("percpu-stable", source);
-    let body = body(&text, "f");
-    assert!(body.contains("movq %gs:current_task, %"), "{body}");
+    assert!(body(&text, "f").contains("movq %gs:current_task, %"), "{text}");
+    // The same without SMP, where there is no segment and the template is `movq %P[var], %[val]`.
+    // That is a load from `current_task` and not its address, which moved as a constant booted to
+    // a page fault in vdso/vma.c. With no modifier the address is the constant it is.
+    let source = "extern long current_task;\n\
+                  long get(void) { long v; \
+                  asm (\"movq %P[var], %[val]\" : [val] \"=r\" (v) : [var] \"p\" (&current_task)); \
+                  return v; }\n\
+                  long addr(void) { long v; asm (\"movq %1, %0\" : \"=r\" (v) : \"i\" (&current_task)); \
+                  return v; }\n";
+    let (ok, text, said) =
+        run_with("percpu-stable-up", source, &["-O2", "-mcmodel=kernel", "-fno-PIE"]);
+    assert!(ok, "the compiler refused the fixture:\n{said}");
+    assert!(body(&text, "get").contains("movq current_task, %rax"), "{text}");
+    assert!(body(&text, "addr").contains("$current_task"), "{text}");
 }
 
 #[test]

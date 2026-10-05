@@ -733,6 +733,37 @@ fn calls_out(template: &str) -> bool {
         .any(|word| matches!(word, "call" | "callq" | "calll" | "callw"))
 }
 
+/// Whether a template writes `%P` on an operand that is spelled as a constant, which `constant`
+/// says of a value.
+///
+/// For a constant `%P` is the constant without its `$`, so `movq %P1, %0` on `"p" (&current_task)`
+/// is a load from `current_task` and not its address. Linux 6.1's `this_cpu_read_stable` reads
+/// `current` that way on a kernel without SMP. The reader of templates takes `%P1` to be `%1`,
+/// which is right only for an operand in a register, so a template like this is kept as text.
+fn bare_constant(
+    template: &str,
+    list: &[AsmOperand<'_>],
+    constant: impl Fn(Value) -> bool,
+) -> bool {
+    let mut rest = template;
+    while let Some(at) = rest.find('%') {
+        let after = &rest[at + 1..];
+        if let Some(escaped) = after.strip_prefix('%') {
+            rest = escaped;
+            continue;
+        }
+        rest = after;
+        let Some(digits) = after.strip_prefix('P') else { continue };
+        let end = digits.len() - digits.trim_start_matches(|c: char| c.is_ascii_digit()).len();
+        let Ok(index) = digits[..end].parse::<usize>() else { continue };
+        let Some(operand) = list.get(index) else { continue };
+        if operand.immediate && !operand.memory && operand.value.is_some_and(&constant) {
+            return true;
+        }
+    }
+    false
+}
+
 fn vector_named(entry: &str) -> Option<PhysReg> {
     let entry = entry.trim().trim_matches('"');
     let entry = entry.strip_prefix('%').unwrap_or(entry);
@@ -5317,7 +5348,11 @@ impl<'a> Lowering<'a> {
         // On i386 every template is kept, since the reader below is x86-64's and would take a
         // template's registers for the sixty four bit ones.
         let i386 = std::ptr::eq(self.selector.shapes, &rucc_target::x86::MACHINE);
-        if goto || i386 || clobbers.split(',').any(|entry| vector_named(entry).is_some()) {
+        if goto
+            || i386
+            || clobbers.split(',').any(|entry| vector_named(entry).is_some())
+            || bare_constant(&template, &list, |value| self.named_address(value).is_some())
+        {
             return self.kept(inst, &template, &list, &widths, &memory);
         }
         let steps = if template.trim().is_empty() {
