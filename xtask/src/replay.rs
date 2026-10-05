@@ -325,8 +325,9 @@ const TARGETS: &[Target] = &[
                       byte a sample when a lossless image has a precision below 8 and then calls \
                       tj3Decompress16 anyway, since it only tests for 8 and 12, and \
                       jpeg_read_scanlines rejects the precision before any row is written. So \
-                      nothing is written through the pointers, and the fuzzer never decodes a \
-                      lossless image of precision 2 to 7 or 9 to 11. tamnd/rucc#1499.",
+                      nothing is written through the pointers, and this target never decodes a \
+                      lossless image of precision 2 to 7 or 9 to 11, though the 8 bit ones still \
+                      reach decompress_libjpeg_fuzzer through the libjpeg API. tamnd/rucc#1499.",
             },
         ],
     },
