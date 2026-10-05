@@ -200,6 +200,31 @@ __attribute__((destructor(200))) void teardown(void) {}
 }
 
 #[test]
+fn a_wasm_file_lists_its_constructors_by_priority_and_registers_its_destructors() {
+    let text = asm(
+        "wasm",
+        "wasm32-wasip1",
+        "\
+__attribute__((constructor(200))) void first(void) {}
+__attribute__((constructor)) void second(void) {}
+__attribute__((destructor)) void teardown(void) {}
+",
+    );
+    // A wasm object lists its constructors in the `linking` section, each with a priority, and
+    // the text writes each one as an entry in `.init_array`, as clang does. A constructor with no
+    // number has the priority 65535, which is the plain section.
+    let entry = |section: &str, name: &str| {
+        format!("\t.section\t{section},\"\",@\n\t.p2align\t2, 0x0\n\t.int32\t{name}\n")
+    };
+    assert!(text.contains(&entry(".init_array.200", "first")), "{text}");
+    assert!(text.contains(&entry(".init_array", "second")), "{text}");
+    // wasm has no run-down list either, so the destructor is registered from a constructor, as
+    // on COFF.
+    assert!(text.contains("\t.int32\t__rucc_atexit.teardown\n"), "{text}");
+    assert!(text.contains("\tcall\tatexit\n"), "{text}");
+}
+
+#[test]
 fn a_destructor_is_refused_on_darwin_which_has_nowhere_to_put_one() {
     // Refused rather than dropped. The whole point of the attribute is that something else calls
     // the function, and a program that quietly does not get its call has no way of noticing until
