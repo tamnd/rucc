@@ -4,6 +4,10 @@ All notable changes are recorded here. The format follows [Keep a Changelog](htt
 
 ## Unreleased
 
+## 0.22.1
+
+A patch release in WA2 (#2864), the third step of the WebAssembly plan. `-c` writes a wasm object for the four wasm rows, and `wasm-ld` links it with wasi-libc. Of the 1544 programs in rucc-corpus that are one file with no extra flags, 1490 run under Wasmtime with the expected output, and none gives a wrong answer. The link line, `-S` and node splitting come in the next releases of WA2.
+
 ### Changed
 
 - Open question one in `spec/19-open-questions.md`, whether the ægraph carries from a Wasm JIT to an AOT C compiler, is answered no by experiment 7, and section 12.9 of `spec/optimizer/12-egraph.md` has the measurement. Over the 3271 cases of rucc-corpus at `-O2` and `-O3` and over SQLite, the hash-consed rewriter retires 0.001% fewer instructions than the classical arm and the e-graph retires 0.0002% more than the hash-consed rewriter, where section 12.3 asks for 1% and 0.5%, and they cost 4.5% and 5.8% more compile time than the default pipeline. So the default pipeline ships unchanged, and `-Zrewriter=classical`, `consed` and `egraph` stay off by default so the experiment can be run again as the rule set grows. The report, per arm and per facet, is in rucc-corpus under `experiments/07-rewriters`. (#2832)
