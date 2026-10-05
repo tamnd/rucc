@@ -419,7 +419,7 @@ mod tests {
         let mut names = Interner::new();
         let mut func = caller(&mut names, |_, _, got| got);
         let call = func.blocks().flat_map(|block| func.insts(block)).next().expect("the call");
-        func[call].flags = rucc_ir::Flags::INDIRECT_RETURN;
+        func[call].flags = Flags::INDIRECT_RETURN;
         assert_eq!(mark(&mut func, &names, &Elsewhere::default(), true), 0);
         assert_eq!(mark(&mut func, &names, &Elsewhere::default(), false), 1);
         // And a plain call is a tail call under the guard as well.

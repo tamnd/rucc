@@ -63,13 +63,14 @@ fn body<'a>(text: &'a str, name: &str) -> Vec<&'a str> {
         .collect()
 }
 
-/// What follows each call in that function: the next instruction, or nothing at the end.
+/// What follows each call in that function: the next instruction, or nothing at the end. The
+/// call i386 makes for its own address in position-independent code is not one of them.
 fn after_calls<'a>(text: &'a str, name: &str) -> Vec<&'a str> {
     let lines = body(text, name);
     lines
         .iter()
         .enumerate()
-        .filter(|(_, line)| line.starts_with("call"))
+        .filter(|(_, line)| line.starts_with("call") && !line.contains("__x86.get_pc_thunk"))
         .map(|(at, _)| lines.get(at + 1).copied().unwrap_or(""))
         .collect()
 }
@@ -98,7 +99,11 @@ const NAMES: [&str; 6] = ["direct", "typed", "starred", "after", "member", "save
 
 #[test]
 fn a_call_that_can_come_back_by_a_jump_is_followed_by_a_landing_pad() {
-    for flags in [&["-fcf-protection=branch"][..], &["-fcf-protection=full"], &["-mmanual-endbr", "-fcf-protection=branch"]] {
+    for flags in [
+        &["-fcf-protection=branch"][..],
+        &["-fcf-protection=full"],
+        &["-mmanual-endbr", "-fcf-protection=branch"],
+    ] {
         let text = listing("pads", flags, CALLS);
         for name in NAMES {
             assert_eq!(after_calls(&text, name), ["endbr64"], "{flags:?} {name}:\n{text}");
@@ -110,7 +115,8 @@ fn a_call_that_can_come_back_by_a_jump_is_followed_by_a_landing_pad() {
         assert!(!text.contains("endbr64"), "{flags:?}:\n{text}");
     }
     // i386 has the same pad, under its own name.
-    let (ok, text, err) = assembly("i686", "i686-unknown-linux-gnu", &["-fcf-protection=branch"], CALLS);
+    let (ok, text, err) =
+        assembly("i686", "i686-unknown-linux-gnu", &["-fcf-protection=branch"], CALLS);
     assert!(ok, "{err}");
     for name in NAMES {
         assert_eq!(after_calls(&text, name), ["endbr32"], "{name}:\n{text}");
@@ -119,14 +125,15 @@ fn a_call_that_can_come_back_by_a_jump_is_followed_by_a_landing_pad() {
 
 /// gcc reads the attribute off the callee as well as off the type the call was made through,
 /// so a call through a plain pointer the optimizer saw the target of has its pad, and a
-/// declaration without a prototype has nothing to read it off.
+/// declaration without a prototype has nothing to read it off. That is `int k()` before C23,
+/// which gcc 13 defaults to.
 #[test]
 fn the_callee_s_own_type_counts_and_an_old_style_declaration_does_not() {
     let source = "int j(void) __attribute__((indirect_return));\n\
         int k() __attribute__((indirect_return));\n\
         int seen(void) { int (*q)(void) = j; return q() + 1; }\n\
         int old(void) { return k() + 1; }\n";
-    let text = listing("callee", &["-fcf-protection=branch"], source);
+    let text = listing("callee", &["-std=gnu17", "-fcf-protection=branch"], source);
     assert_eq!(after_calls(&text, "seen"), ["endbr64"], "{text}");
     assert_ne!(after_calls(&text, "old"), ["endbr64"], "{text}");
 }
@@ -201,9 +208,7 @@ fn the_object_has_the_pad_after_the_call() {
     let bytes = std::fs::read(dir.join("a.o")).expect("the object was written");
     let _ = std::fs::remove_dir_all(&dir);
     let endbr = [0xf3, 0x0f, 0x1e, 0xfa];
-    let after_direct = bytes
-        .windows(9)
-        .filter(|window| window[0] == 0xe8 && window[5..] == endbr)
-        .count();
+    let after_direct =
+        bytes.windows(9).filter(|window| window[0] == 0xe8 && window[5..] == endbr).count();
     assert!(after_direct >= 2, "j and setjmp are called directly, found {after_direct}");
 }

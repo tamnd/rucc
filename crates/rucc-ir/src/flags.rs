@@ -854,7 +854,10 @@ mod tests {
             assert_eq!(Flags::legal_on(opcode).contains(Flags::INDIRECT_RETURN), call, "{opcode}");
         }
         assert_eq!(Flags::from_name("indirect_return"), Some(Flags::INDIRECT_RETURN));
-        assert_eq!(Flags::INDIRECT_RETURN.union(Flags::NOTRACK).to_string(), ".notrack.indirect_return");
+        assert_eq!(
+            Flags::INDIRECT_RETURN.union(Flags::NOTRACK).to_string(),
+            ".notrack.indirect_return"
+        );
     }
 
     #[test]
