@@ -28,6 +28,10 @@
 //! then writes the instruction at that use and a `local.tee` after it, and the other uses read the
 //! local. This is not done for a use that is written only on one path, because then the local is
 //! not written on the other path.
+//!
+//! The uses are counted as the code pushes the operands, so a load or a store whose address is
+//! folded into its offset field uses the base address and not the `ptr_add`. A `ptr_add` that is
+//! left with no use is not written at all.
 
 use rucc_base::hash::{Map, Set};
 use rucc_ir::{Extra, Flags, FloatPred, Inst, Opcode, Value};
@@ -153,7 +157,7 @@ impl Lower<'_, '_> {
         let mut uses: Map<Value, u32> = Map::default();
         for block in func.blocks() {
             for inst in func.insts(block) {
-                for &value in &func[func[inst].args] {
+                for value in self.inputs(inst) {
                     *uses.entry(value).or_default() += 1;
                 }
                 for call in func.successors(inst) {
@@ -164,6 +168,27 @@ impl Lower<'_, '_> {
             }
         }
         let mut trees = Trees::default();
+        // The `ptr_add` instructions with no use, and then the ones that they were the only use of.
+        let mut dead: Vec<Inst> = func
+            .blocks()
+            .flat_map(|block| func.insts(block))
+            .filter(|&inst| func[inst].opcode == Opcode::PtrAdd)
+            .filter(|&inst| self.results(inst).iter().all(|v| uses.get(v).is_none_or(|&n| n == 0)))
+            .collect();
+        while let Some(inst) = dead.pop() {
+            if !trees.moved.insert(inst) {
+                continue;
+            }
+            trees.stacked.extend(self.results(inst));
+            for value in self.inputs(inst) {
+                let Some(count) = uses.get_mut(&value) else { continue };
+                *count -= 1;
+                let Some((def, _)) = self.def(value) else { continue };
+                if *count == 0 && func[def].opcode == Opcode::PtrAdd {
+                    dead.push(def);
+                }
+            }
+        }
         for block in self.blocks() {
             let Some(term) = func.terminator(block) else { continue };
             if self.caught(term).is_some() {
@@ -185,8 +210,11 @@ impl Lower<'_, '_> {
             }
             let mut seen: Map<Value, Vec<usize>> = Map::default();
             for (i, &inst) in insts.iter().enumerate() {
-                let edges = func.successors(inst).flat_map(|call| func[call.args].iter());
-                for &value in func[func[inst].args].iter().chain(edges) {
+                if trees.moved.contains(&inst) {
+                    continue;
+                }
+                let edges = func.successors(inst).flat_map(|call| func[call.args].iter().copied());
+                for value in self.inputs(inst).into_iter().chain(edges) {
                     seen.entry(value).or_default().push(i);
                 }
             }
@@ -263,7 +291,7 @@ impl Lower<'_, '_> {
     fn operands(&self, inst: Inst) -> Vec<(Value, Place)> {
         let func = self.func;
         let data = &func[inst];
-        let args = self.args(inst);
+        let args = self.inputs(inst);
         let all = |place: Place| args.iter().map(|&v| (v, place)).collect::<Vec<_>>();
         let pairs = args.iter().chain(&self.results(inst)).any(|&v| is_pair(self.ty(v)));
         match data.opcode {

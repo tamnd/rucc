@@ -6,6 +6,7 @@ All notable changes are recorded here. The format follows [Keep a Changelog](htt
 
 ### Changed
 
+- At `-O1` and above, a wasm load or store whose address is a `ptr_add` with `nuw` of a constant that is not negative puts the constant in its offset field, and a `ptr_add` that is then not used is not written (#2866). A chain of such `ptr_add` instructions folds into one offset. The SQLite shell at `-O2` goes from 1,923,305 bytes to 1,816,667, which is 0.2% smaller than the shell that clang from wasi-sdk 34 builds.
 - Lowering sets `nuw` on a `ptr_add` that moves an address forward by a constant number of bytes inside its object, as for a member of a structure, for `p[3]` and for `p++` (#2866). C does not let such an address leave its object, so the add does not wrap. `-fwrapv-pointer` stops the flag. The IR now allows `nuw` on `ptr_add`, and the text form is `ptr_add.nuw`.
 
 ### Changed

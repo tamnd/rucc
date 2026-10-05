@@ -9,8 +9,8 @@ use rucc_base::hash::{Map, Set};
 use rucc_base::rules::Piece;
 use rucc_ir::term::{PLAIN, Term, Terms};
 use rucc_ir::{
-    Abi, AsmOperands, Block, Def, Extra, FloatPred, Func, FuncId, Inst, IntPred, Opcode, RmwOp,
-    Type, Value,
+    Abi, AsmOperands, Block, Def, Extra, Flags, FloatPred, Func, FuncId, Inst, IntPred, Opcode,
+    RmwOp, Type, Value,
 };
 use rucc_object::wasm::{FuncType, Function, RelocKind, ValType};
 use rucc_target::wasm::Feature;
@@ -879,6 +879,58 @@ impl Lower<'_, '_> {
         func[func[inst].args].iter().copied().filter(|&v| !func[v].ty.is_mem()).collect()
     }
 
+    /// The operands of `inst` as its code pushes them, which are its arguments except that a load
+    /// or a store with a folded address pushes the base address. See [`Self::folded`].
+    fn inputs(&self, inst: Inst) -> Vec<Value> {
+        let mut args = self.args(inst);
+        if let Some((at, base, _)) = self.folded(inst) {
+            args[at] = base;
+        }
+        args
+    }
+
+    /// The index of the address among the arguments of a load or a store, the base address that
+    /// the code pushes for it, and the number that goes in the offset field of the access, when
+    /// the address is a constant number of bytes past the base. Only a `ptr_add` with `nuw` and a
+    /// constant that is not negative is folded, because the engine adds the offset field with no
+    /// wrap, and `nuw` says that the add of the IR does not wrap either. This is done only at
+    /// `-O1` and above, as clang does it.
+    fn folded(&self, inst: Inst) -> Option<(usize, Value, u32)> {
+        let func = self.func;
+        let at = match func[inst].opcode {
+            Opcode::Load => 0,
+            Opcode::Store => 1,
+            _ => return None,
+        };
+        if !self.unit.optimize {
+            return None;
+        }
+        let args = self.args(inst);
+        if args.iter().chain(&self.results(inst)).any(|&v| is_pair(self.ty(v))) {
+            return None;
+        }
+        let mut base = *args.get(at)?;
+        let mut offset = 0u64;
+        while let Some((def, _)) = self.def(base) {
+            let data = &func[def];
+            let &[from, by] = &func[data.args] else { break };
+            if data.opcode != Opcode::PtrAdd || !data.flags.contains(Flags::NUW) {
+                break;
+            }
+            let Some(bits) = self.constant(by) else { break };
+            let width = self.ty(by).bits();
+            if width == 0 || width > 64 || bits >> (width - 1) & 1 == 1 {
+                break;
+            }
+            match offset.checked_add(bits as u64) {
+                Some(total) if total <= u64::from(u32::MAX) => offset = total,
+                _ => break,
+            }
+            base = from;
+        }
+        (offset != 0).then_some((at, base, offset as u32))
+    }
+
     fn results(&self, inst: Inst) -> Vec<Value> {
         let func = self.func;
         func[inst].results().filter(|&v| !func[v].ty.is_mem() && !func[v].ty.is_void()).collect()
@@ -1335,21 +1387,23 @@ impl Lower<'_, '_> {
                 let ty = self.ty(results[0]);
                 let (op, natural) = load_op(ty)?;
                 let align = self.mem_info(inst).map_or(natural, |m| m.align);
-                self.push(arg(0))?;
-                self.code.mem(op, align_field(align, natural), 0);
+                let (address, offset) = self.folded(inst).map_or((arg(0), 0), |(_, b, o)| (b, o));
+                self.push(address)?;
+                self.code.mem(op, align_field(align, natural), offset);
                 self.set(results[0]);
             }
             Opcode::Store | Opcode::AtomicStore => {
                 let ty = self.ty(arg(0));
                 let (op, natural) = store_op(ty)?;
                 let align = self.mem_info(inst).map_or(natural, |m| m.align);
-                self.push(arg(1))?;
+                let (address, offset) = self.folded(inst).map_or((arg(1), 0), |(_, b, o)| (b, o));
+                self.push(address)?;
                 if self.narrow(arg(0)) == Some(1) {
                     self.push_z(arg(0))?
                 } else {
                     self.push(arg(0))?
                 }
-                self.code.mem(op, align_field(align, natural), 0);
+                self.code.mem(op, align_field(align, natural), offset);
             }
             Opcode::Alloca => {
                 if let Some(&offset) = self.frame.slots.get(&inst) {
