@@ -636,10 +636,13 @@ impl Unit<'_> {
             let (set, span) = self.sets[index].clone();
             self.equated(&set, span);
         }
-        self.startups();
+        // The entries of the constructors go after the turn, so that they keep the order that
+        // `startups` sorts them to. gcc writes them as it writes each function and not as a
+        // variable, so its turn of the variables does not reach them.
         if self.reorder {
             self.module.reverse_globals(written);
         }
+        self.startups();
     }
 
     /// The `asm` written at file scope, read into the globals they define.

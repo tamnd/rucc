@@ -15,6 +15,7 @@ All notable changes are recorded here. The format follows [Keep a Changelog](htt
 
 ### Fixed
 
+- Two constructors or two destructors of one priority in one file now run in the order of the file at `-O1` and above, as with gcc. rucc writes the variables of an optimized unit newest first, as gcc does, and that turn also reached the entries of `.init_array` and `.fini_array`, so `-O2` ran them in the reverse order. gcc writes those entries as it writes each function, so its turn does not reach them, and rucc now writes them after the turn.
 - A shift of an `i8` or `i16` value by a count that is not a constant now takes the count modulo the width, as the IR says (#2864). Before, the wasm backend masked the count to the bits of its type, so an `i8` shift by 8 gave 0 in place of the value.
 - A wasm object that takes the address of a function and has no `call_indirect` now imports `__indirect_function_table`, as the object from clang does (#2864). clang imports the table and keeps it for each relocation to a slot in the table, on each target that has the long form of `call_indirect`. Before, rucc made the table only for a call through a pointer, so the object from `rucc -c` and the object that clang assembled from `rucc -S` had different symbols. With `-mcpu=mvp` there is still no table, as with clang.
 
