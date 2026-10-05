@@ -23,8 +23,8 @@
 //! than from block frequency. No scheduling, and the redundant moves a coalescer would take out
 //! are still in the output.
 
-use rucc_base::{Interner, Symbol};
 use rucc_base::hash::Map;
+use rucc_base::{Interner, Symbol};
 use rucc_cost::Goal;
 use rucc_ir as ir;
 use rucc_mir as mir;

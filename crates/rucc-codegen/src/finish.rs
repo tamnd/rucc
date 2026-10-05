@@ -66,8 +66,8 @@
 //! `spec/10-backend.md` section 10.8 as it applies to the one pass that would otherwise be full
 //! of `x64.` by hand.
 
-use rucc_base::{Interner, Symbol};
 use rucc_base::hash::Map;
+use rucc_base::{Interner, Symbol};
 use rucc_diag::Span;
 use rucc_mir::{Block, BlockCall, CfiOp, Func, Inst, Mem, Opcode, Operand, Patch, Reg, Role};
 use rucc_regalloc::Allocation;

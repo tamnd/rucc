@@ -2288,7 +2288,8 @@ impl Checker<'_> {
                 }
                 let args = ast[attr.args].to_vec();
                 if args.len() != 1 {
-                    let what = format!("wrong number of arguments specified for '{name}' attribute");
+                    let what =
+                        format!("wrong number of arguments specified for '{name}' attribute");
                     let note = format!("expected 1, found {}", args.len());
                     let refused = Diagnostic::error(what, attr.span).with_code("E0822");
                     self.report(refused.note(note, attr.span));

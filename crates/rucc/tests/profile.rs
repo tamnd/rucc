@@ -466,16 +466,25 @@ __attribute__((fentry_name(\"c\"), fentry_name(\"d\"))) int g(int x) { return x;
 fn the_names_are_checked_in_gcc_s_words() {
     for (source, said) in [
         ("int v __attribute__((fentry_name(\"h\")));\n", "'fentry_name' attribute ignored"),
-        ("typedef void t(void) __attribute__((fentry_section(\"s\")));\n", "'fentry_section' attribute ignored"),
+        (
+            "typedef void t(void) __attribute__((fentry_section(\"s\")));\n",
+            "'fentry_section' attribute ignored",
+        ),
         ("__attribute__((fentry_name(1))) void f(void) {}\n", "'fentry_name' attribute ignored"),
-        ("__attribute__((fentry_section(\"\"))) void f(void) {}\n", "'fentry_section' attribute ignored"),
+        (
+            "__attribute__((fentry_section(\"\"))) void f(void) {}\n",
+            "'fentry_section' attribute ignored",
+        ),
     ] {
         let (ok, _, err) = run("warned", TARGET, &["-pg"], source);
         assert!(ok, "{source}\n{err}");
         assert!(err.contains(said), "{source}\nwanted {said:?}, got:\n{err}");
     }
     for (source, said) in [
-        ("__attribute__((fentry_name)) void f(void) {}\n", "wrong number of arguments specified for 'fentry_name' attribute"),
+        (
+            "__attribute__((fentry_name)) void f(void) {}\n",
+            "wrong number of arguments specified for 'fentry_name' attribute",
+        ),
         ("__attribute__((fentry_section(\"a\", \"b\"))) void f(void) {}\n", "expected 1, found 2"),
     ] {
         let (ok, _, err) = run("refused", TARGET, &["-pg"], source);
