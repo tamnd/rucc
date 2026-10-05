@@ -8942,6 +8942,72 @@ float through_a_union(union u *p) { p->i = 1; return p->f; }\n";
         each_spill_slot_written_once(&across(declared, "save_here"));
     }
 
+    /// A tuple deforming loop puts a value away around its `strlen` call rather than reading it from
+    /// the stack in every turn.
+    ///
+    /// The loop carries more values across the call than there are callee saved registers, and the
+    /// call is made only for a `cstring` column. The values the spill phase picked went to the
+    /// stack without being offered a register the call destroys, so `r9` sat unused through the
+    /// whole function while the tuple pointer was loaded from the stack at every column. That is
+    /// `tts_buffer_heap_getsomeattrs` in Postgres, which tops the analytic profile.
+    #[test]
+    fn a_deforming_loop_puts_a_value_away_around_its_strlen_call() {
+        let source = concat!(
+            "typedef long int64_t;\n",
+            "unsigned long strlen(const char *);\n",
+            "typedef struct { int off; short len; char byval; char align; } Att;\n",
+            "typedef struct { const Att *att; const char *data; int hoff; unsigned char bits[8];\n",
+            "  int natts; int64_t *values; char *isnull; int flags; int off; } Slot;\n",
+            "void deform(Slot *s) {\n",
+            "  const Att *att = s->att;\n",
+            "  const char *tp = s->data + s->hoff;\n",
+            "  const unsigned char *bp = s->bits;\n",
+            "  int hasnulls = s->flags & 1;\n",
+            "  int natts = s->natts;\n",
+            "  int64_t *values = s->values;\n",
+            "  char *isnull = s->isnull;\n",
+            "  int off = 0;\n",
+            "  for (int i = 0; i < natts; i++) {\n",
+            "    const Att *a = &att[i];\n",
+            "    if (hasnulls && !(bp[i >> 3] & (1 << (i & 7)))) {\n",
+            "      values[i] = 0;\n",
+            "      isnull[i] = 1;\n",
+            "      continue;\n",
+            "    }\n",
+            "    isnull[i] = 0;\n",
+            "    if (a->len > 0) {\n",
+            "      off = (off + a->align - 1) & ~(a->align - 1);\n",
+            "      values[i] = a->byval ? *(const int *) (tp + off) : (long) (tp + off);\n",
+            "      off += a->len;\n",
+            "    } else if (a->len == -1) {\n",
+            "      values[i] = (long) (tp + off);\n",
+            "      off += *(const int *) (tp + off);\n",
+            "    } else {\n",
+            "      values[i] = (long) (tp + off);\n",
+            "      off += strlen(tp + off) + 1;\n",
+            "    }\n",
+            "  }\n",
+            "  s->off = off;\n",
+            "}\n",
+        );
+        let text = optimized(source);
+        let lines: Vec<&str> = text.lines().collect();
+        let call =
+            lines.iter().position(|line| line.starts_with("\tcall\tstrlen")).expect("a call");
+        let stored: Vec<&str> = lines[..call]
+            .iter()
+            .rev()
+            .take_while(|line| line.starts_with("\tmovq\t%") && line.ends_with("(%rsp)"))
+            .filter_map(|line| line.strip_prefix("\tmovq\t"))
+            .collect();
+        assert!(!stored.is_empty(), "nothing put away in front of the call:\n{text}");
+        for store in stored {
+            let (reg, slot) = store.split_once(", ").expect("a store");
+            let load = format!("\tmovq\t{slot}, {reg}");
+            assert!(lines[call + 1..].contains(&load.as_str()), "{load} behind the call:\n{text}");
+        }
+    }
+
     /// A value set before `setjmp` and read after the `longjmp` keeps its slot to itself, at `-O0`
     /// and at `-O2`, when it has one.
     ///
