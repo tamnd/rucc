@@ -82,8 +82,8 @@ use rucc_ir::{
     SymbolRef, Type,
 };
 use rucc_object::wasm::{
-    self, EXPORTED, FuncType, HIDDEN, Import, LOCAL, NO_STRIP, Place, Producers, RETAIN, RelocKind,
-    Segment, SymbolKind, ValType, WEAK, Written,
+    self, EXPORTED, Fixup, FuncType, HIDDEN, Import, LOCAL, NO_STRIP, Place, Producers, RETAIN,
+    RelocKind, Segment, SymbolKind, ValType, WEAK, Written,
 };
 use rucc_target::wasm::{Feature, Features};
 
@@ -293,6 +293,12 @@ fn translate_with(
         })?;
         unit.out.functions.push(function);
     }
+    if let Some(function) = main_caller(&mut unit).map_err(&unit_wide)? {
+        unit.out.functions.push(function);
+        if let Some(notes) = &mut unit.notes {
+            notes.push(Notes::default());
+        }
+    }
 
     // A `try_table` needs exception handling, and `libsetjmp` is built with reference types too,
     // so an object that catches a `longjmp` says both, as clang's does.
@@ -310,6 +316,58 @@ fn translate_with(
         processed_by: vec![("rucc".into(), env!("CARGO_PKG_VERSION").into())],
     };
     Ok((unit.out, unit.notes.unwrap_or_default()))
+}
+
+/// The function `__main_argc_argv` that the start code of wasi-libc calls, when the `main` of the
+/// unit takes one parameter or three. The start code calls it with the count of the arguments
+/// and the vector of the arguments, and it calls `main` with the count, then the vector, then the
+/// environment from `__wasilibc_get_environ`, as many of them as `main` takes. A `main` that
+/// gives nothing back gives 0. clang keeps the name `main` for such a `main` and gives it no
+/// caller, so its program traps when it starts.
+fn main_caller(unit: &mut Unit<'_>) -> Result<Option<wasm::Function>, String> {
+    let module = unit.ir;
+    let main = module.funcs().find(|&id| {
+        let func = &module[id];
+        !func.is_declaration() && unit.names.resolve(func.name) == "main"
+    });
+    let Some(main) = main else { return Ok(None) };
+    let ty = functype(module[main].signature())?;
+    let words = |types: &[ValType]| types.iter().all(|&t| t == ValType::I32);
+    let fits = matches!(ty.params.len(), 1 | 3) && words(&ty.params) && ty.results.len() <= 1;
+    if !fits || !words(&ty.results) {
+        return Ok(None);
+    }
+
+    let (called, _) = unit.function(module[main].name)?;
+    let start = FuncType { params: vec![ValType::I32, ValType::I32], results: vec![ValType::I32] };
+    let start = unit.out.intern(start);
+    let kind = SymbolKind::Function { ty: start, import: None };
+    let symbol = unit.out.symbol("__main_argc_argv", kind, HIDDEN);
+    unit.functions.insert("__main_argc_argv".to_owned(), (symbol, start));
+
+    let mut code = Vec::new();
+    let mut fixups = Vec::new();
+    let mut call = |code: &mut Vec<u8>, target: u32| {
+        code.push(0x10);
+        let at = u32::try_from(code.len()).expect("a short body");
+        fixups.push(Fixup { at, kind: RelocKind::FunctionIndexLeb, target, addend: 0 });
+        code.extend_from_slice(&wasm::uleb_padded(0));
+    };
+    // local.get 0, and local.get 1 and a call for the environment when `main` takes three.
+    code.extend_from_slice(&[0x20, 0x00]);
+    if ty.params.len() == 3 {
+        code.extend_from_slice(&[0x20, 0x01]);
+        let environ = FuncType { params: Vec::new(), results: vec![ValType::I32] };
+        let (environ, _) = unit.libcall("__wasilibc_get_environ", environ);
+        call(&mut code, environ);
+    }
+    call(&mut code, called);
+    if ty.results.is_empty() {
+        // i32.const 0
+        code.extend_from_slice(&[0x41, 0x00]);
+    }
+    code.push(0x0b);
+    Ok(Some(wasm::Function { symbol, code, fixups, ..wasm::Function::default() }))
 }
 
 /// The priority of the constructor that `global` is the entry of, or nothing for a variable.
@@ -409,12 +467,17 @@ impl Unit<'_> {
     ///
     /// `main` is the one name that changes. The start code of wasi-libc calls `__main_void` when
     /// the program's `main` takes no arguments and `__main_argc_argv` when it takes two, and
-    /// clang gives `main` the one of those two names that fits.
+    /// clang gives `main` the one of those two names that fits. A `main` with another number of
+    /// parameters keeps its name, and [`main_caller`] gives the start code a function to call.
     pub(crate) fn name(&self, symbol: Symbol) -> String {
         let name = self.names.resolve(symbol);
         if let ("main", Some(SymbolRef::Func(id))) = (name, self.ir.lookup(symbol)) {
             let params = self.ir[id].signature().params.iter().filter(|p| !p.ty.is_mem()).count();
-            return if params == 0 { "__main_void" } else { "__main_argc_argv" }.to_owned();
+            match params {
+                0 => return "__main_void".to_owned(),
+                2 => return "__main_argc_argv".to_owned(),
+                _ => {}
+            }
         }
         name.to_owned()
     }
@@ -634,7 +697,7 @@ impl Unit<'_> {
                         RelocKind::MemoryAddrI32
                     };
                     let at = u32::try_from(bytes.len()).expect("a segment under 4 GiB");
-                    fixups.push(wasm::Fixup { at, kind, target, addend });
+                    fixups.push(Fixup { at, kind, target, addend });
                     bytes.extend_from_slice(&[0; 4]);
                     zero = false;
                 }
