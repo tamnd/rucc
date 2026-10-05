@@ -103,6 +103,24 @@
 //! backwards, or the whole replay had to be built again with something that would say. It is built
 //! with `-g` now, the linked program is left where it was run from, and the task says where it is
 //! and checks that a line table really arrived rather than assuming it. Part of tamnd/rucc#1558.
+//!
+//! # Triage
+//!
+//! Every distinct report a corpus produces goes into one of the five buckets of
+//! `spec/safe-memory/12-corpus-and-evidence.md` section 12.6, and each row carries that as data in
+//! [`Target::triaged`]: the shape, the bucket, and the reason a person gave after reading the
+//! source line behind it. A run is held to that list. A shape that is not on it fails the task,
+//! since it is a report nobody has read. A shape in bucket 2, 3 or 4 fails it as well even though it
+//! is listed, because those are bugs in this compiler and the spec makes them release blocking, so
+//! the entry is a label on a failure rather than a way to make one go away. A listed shape that did
+//! not arrive is said and is not a failure, because a person replaying a slice of a corpus, or a
+//! corpus that has moved since its pin, should expect to miss some.
+//!
+//! A shape is what the reader can tell apart, which is the judgement and the width of the access.
+//! That is coarser than a source line, and a second site with the same judgement and the same width
+//! would pass as the first. The descriptor does not carry a site yet, so this is the finest key
+//! there is, and the line table every build carries is how a person checks that the inputs behind a
+//! listed shape are still at the site its entry was written about.
 
 use std::path::{Path, PathBuf};
 use std::process::Command;
@@ -138,6 +156,66 @@ struct Target {
     /// long way is the first sign of it. The task prints the pin beside what it actually found and
     /// carries on, since nothing here controls what Google publishes.
     pinned: (&'static str, usize),
+    /// Every shape this corpus is known to produce, triaged.
+    ///
+    /// An empty list is a claim too, which is that any report at all from this corpus is new.
+    triaged: &'static [Triaged],
+}
+
+/// One shape a corpus is known to produce, which of document 12.6's buckets it is in, and why.
+struct Triaged {
+    /// The judgement, so `1` for J1.
+    judgement: u32,
+    /// The width of the access in bytes, or nothing for a report about a pointer rather than an
+    /// access, which is how J2 comes out.
+    bytes: Option<u32>,
+    /// The bucket a person put it in after reading the source line behind it.
+    bucket: Bucket,
+    /// What the line does and why that puts it in the bucket, with the issue the argument is on.
+    why: &'static str,
+}
+
+/// The five buckets of `spec/safe-memory/12-corpus-and-evidence.md` section 12.6, and no sixth.
+///
+/// All five are here though only some are on any list, because an empty bucket is the state the
+/// spec hopes for and not a reason to stop being able to say the name of it. Buckets 2 to 4 in
+/// particular are bugs in this compiler, which get fixed rather than listed for long.
+#[allow(dead_code, reason = "a bucket nothing is in yet is still one of the five")]
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+enum Bucket {
+    /// A real bug in the project, with what upstream said about it.
+    ///
+    /// The spec asks for the answer to be recorded and says a rejection is the more informative of
+    /// the two, because it usually means the model is wrong. So the field is the answer as it
+    /// stands, including that nobody has asked yet.
+    Project { upstream: &'static str },
+    /// A false positive because the model in document 04 does not match what C permits.
+    Model,
+    /// A false positive because the instrumentation or the runtime is wrong.
+    Implementation,
+    /// A false positive because a boundary in document 10's table is declared wrong.
+    Boundary,
+    /// A construct C forbids that the project does on purpose, declared and counted.
+    Exemption,
+}
+
+impl Bucket {
+    /// The bucket's number in section 12.6.
+    fn number(self) -> usize {
+        match self {
+            Bucket::Project { .. } => 1,
+            Bucket::Model => 2,
+            Bucket::Implementation => 3,
+            Bucket::Boundary => 4,
+            Bucket::Exemption => 5,
+        }
+    }
+
+    /// Whether a shape in this bucket is a bug in this compiler, which the spec makes release
+    /// blocking whether or not somebody has written it down.
+    fn ours(self) -> bool {
+        matches!(self, Bucket::Model | Bucket::Implementation | Bucket::Boundary)
+    }
 }
 
 /// The targets, in the order they are run.
@@ -149,6 +227,7 @@ const TARGETS: &[Target] = &[
         upstream: "brotli_decode_fuzzer",
         corpus: "https://storage.googleapis.com/brotli-backup.clusterfuzz-external.appspot.com/corpus/libFuzzer/brotli_decode_fuzzer/public.zip",
         pinned: ("2026-09-19", 4421),
+        triaged: &[],
     },
     Target {
         project: "zlib",
@@ -157,6 +236,7 @@ const TARGETS: &[Target] = &[
         upstream: "zlib_uncompress_fuzzer",
         corpus: "https://storage.googleapis.com/zlib-backup.clusterfuzz-external.appspot.com/corpus/libFuzzer/zlib_uncompress_fuzzer/public.zip",
         pinned: ("2026-09-21", 1551),
+        triaged: &[],
     },
     Target {
         project: "sqlite",
@@ -165,6 +245,18 @@ const TARGETS: &[Target] = &[
         upstream: "ossfuzz",
         corpus: "https://storage.googleapis.com/sqlite3-backup.clusterfuzz-external.appspot.com/corpus/libFuzzer/sqlite3_ossfuzz/public.zip",
         pinned: ("2026-09-21", 22578),
+        triaged: &[Triaged {
+            judgement: 1,
+            bytes: Some(8),
+            bucket: Bucket::Project { upstream: "not reported yet" },
+            why: "OP_Insert at sqlite3.c:102412 copies z and n out of a register nothing wrote. \
+                  During VACUUM the transfer optimisation runs OP_RowCell and then OP_Insert with \
+                  OPFLAG_PREFORMAT, OP_RowCell fills the btree's preformat buffer rather than the \
+                  register, and initMemArray only ever set the register's flags. The value is \
+                  dead, since OP_SeekEnd leaves seekResult at -1 and the branch that would use it \
+                  is guarded by info.nSize != 0, but it is a read of a value nobody wrote all the \
+                  same. tamnd/rucc#1542.",
+        }],
     },
     Target {
         project: "lua",
@@ -173,6 +265,7 @@ const TARGETS: &[Target] = &[
         upstream: "fuzz_lua",
         corpus: "https://storage.googleapis.com/lua-backup.clusterfuzz-external.appspot.com/corpus/libFuzzer/lua_fuzz_lua/public.zip",
         pinned: ("2026-09-21", 18693),
+        triaged: &[],
     },
     Target {
         project: "zstd",
@@ -181,6 +274,19 @@ const TARGETS: &[Target] = &[
         upstream: "simple_decompress",
         corpus: "https://storage.googleapis.com/zstd-backup.clusterfuzz-external.appspot.com/corpus/libFuzzer/zstd_simple_decompress/public.zip",
         pinned: ("2026-09-21", 17310),
+        triaged: &[Triaged {
+            judgement: 2,
+            bytes: None,
+            bucket: Bucket::Project { upstream: "not reported yet" },
+            why: "pointers zstd's decoder computes outside the buffer they were derived from, at \
+                  about ten sites led by the sequence loop of ZSTD_decompressSequences_body, then \
+                  BIT_initDStream, ZSTD_overlapCopy8 and HUF_DecompressFastArgs_init. C leaves \
+                  that arithmetic undefined, and every input behind it decodes to the right \
+                  answer, which makes this the evidence question 12 of \
+                  spec/safe-memory/17-open-questions.md asks for. The census of sites is on \
+                  tamnd/rucc#1499. The two J1 shapes this corpus also had are bucket 5, and the \
+                  zstd row of the libraries table builds them away as a declared exemption.",
+        }],
     },
     Target {
         project: "libjpeg-turbo",
@@ -189,6 +295,9 @@ const TARGETS: &[Target] = &[
         upstream: "libjpeg_turbo_fuzzer",
         corpus: "https://storage.googleapis.com/libjpeg-turbo-backup.clusterfuzz-external.appspot.com/corpus/libFuzzer/libjpeg-turbo_libjpeg_turbo_fuzzer/public.zip",
         pinned: ("2026-10-05", 7899),
+        // The full replay of this corpus is still being read on tamnd/rucc#1499, so nothing is on
+        // the list yet and every shape it reports fails until somebody has put it in a bucket.
+        triaged: &[],
     },
 ];
 
@@ -552,9 +661,7 @@ struct Took {
 /// or did not say, a library that dies on an input from its own corpus is either a bug in the
 /// library or a bug in this compiler, and both are worth stopping for.
 ///
-/// The reports are counted and printed and are not yet held to anything, which is the triage box of
-/// tamnd/rucc#1499. Holding them to a list before they have been read one at a time would be
-/// writing down whatever today's build happens to say.
+/// The reports are counted, printed and held to the row's triage list by [`held`].
 fn read(target: &Target, out: &str, problems: &mut Vec<String>) {
     if out.contains("<<<status nolink>>>") {
         problems.push(format!("{}: did not link\n{}", target.project, indent(out.trim_end())));
@@ -596,14 +703,17 @@ fn read(target: &Target, out: &str, problems: &mut Vec<String>) {
             None => "with no access width, so it is about a pointer rather than a read or a write"
                 .to_owned(),
         };
-        println!("{}: J{judgement} {width}, {seen} inputs, first at {first}", target.project);
-    }
-    if !shapes.is_empty() {
+        let bucket = match listed(target, *judgement, *bytes).map(|entry| entry.bucket) {
+            Some(Bucket::Project { upstream }) => format!("bucket 1, upstream: {upstream}"),
+            Some(bucket) => format!("bucket {}", bucket.number()),
+            None => "not triaged".to_owned(),
+        };
         println!(
-            "{}: none of that is held to a list yet, which is the triage box of tamnd/rucc#1499.",
+            "{}: J{judgement} {width}, {seen} inputs, first at {first}, {bucket}",
             target.project
         );
     }
+    held(target, &shapes, problems);
 
     for one in died {
         problems.push(format!(
@@ -613,6 +723,69 @@ fn read(target: &Target, out: &str, problems: &mut Vec<String>) {
             one.name,
             one.ended.unwrap_or(0)
         ));
+    }
+}
+
+/// The entry on a row's triage list for one shape, if there is one.
+fn listed(target: &Target, judgement: u32, bytes: Option<u32>) -> Option<&'static Triaged> {
+    target.triaged.iter().find(|entry| entry.judgement == judgement && entry.bytes == bytes)
+}
+
+/// A shape in a sentence, short enough to sit in the middle of one.
+fn shape(judgement: u32, bytes: Option<u32>) -> String {
+    match bytes {
+        Some(bytes) => format!("J{judgement} over {bytes} bytes"),
+        None => format!("J{judgement} with no access width"),
+    }
+}
+
+/// Holds a run's shapes to the row's triage list and prints how many fell in each bucket.
+///
+/// A shape on no list is a problem, because it is a report nobody has read. A listed shape in
+/// bucket 2, 3 or 4 is a problem as well, because those are bugs in this compiler. A listed shape
+/// that did not arrive is said and nothing more, since a slice of a corpus or a corpus that has
+/// moved since its pin can explain it, and the count beside the pin already says which.
+fn held(target: &Target, shapes: &[(u32, Option<u32>, String, usize)], problems: &mut Vec<String>) {
+    let mut buckets = [0_usize; 5];
+    for (judgement, bytes, first, seen) in shapes {
+        let what = shape(*judgement, *bytes);
+        match listed(target, *judgement, *bytes) {
+            None => problems.push(format!(
+                "{}: {what} on {seen} inputs, first at {first}, is on no list. It is a report \
+                 nobody has read yet, so it goes into one of the five buckets of section 12.6 of \
+                 spec/safe-memory/12-corpus-and-evidence.md and onto the row before this passes.",
+                target.project
+            )),
+            Some(entry) => {
+                buckets[entry.bucket.number() - 1] += 1;
+                if entry.bucket.ours() {
+                    problems.push(format!(
+                        "{}: {what} on {seen} inputs is bucket {}, which is a bug in this \
+                         compiler and release blocking. {}",
+                        target.project,
+                        entry.bucket.number(),
+                        entry.why
+                    ));
+                }
+            }
+        }
+    }
+    for entry in target.triaged {
+        if !shapes.iter().any(|(j, b, _, _)| *j == entry.judgement && *b == entry.bytes) {
+            println!(
+                "{}: {} is on the list and did not arrive this time.",
+                target.project,
+                shape(entry.judgement, entry.bytes)
+            );
+        }
+    }
+    if !shapes.is_empty() {
+        let counts: Vec<String> = buckets
+            .iter()
+            .enumerate()
+            .map(|(at, count)| format!("{count} in {}", at + 1))
+            .collect();
+        println!("{}: shapes by bucket, {}", target.project, counts.join(", "));
     }
 }
 
@@ -841,5 +1014,64 @@ mod tests {
         assert!(driver.contains("strcmp(*(const char *const *)a"));
         assert!(driver.contains("entry->d_name[0] == '.'"));
         assert!(driver.contains("S_ISREG"));
+    }
+
+    /// Every entry on a triage list is one shape once, says why, and names the issue the argument
+    /// is on, since a reason nobody can follow back to its evidence is a suppression with a comment.
+    #[test]
+    fn every_triaged_shape_is_listed_once_with_a_reason() {
+        for target in TARGETS {
+            for (at, entry) in target.triaged.iter().enumerate() {
+                let what = shape(entry.judgement, entry.bytes);
+                assert!(entry.why.contains("tamnd/rucc#"), "{} {what}", target.project);
+                let again = target.triaged[at + 1..]
+                    .iter()
+                    .any(|other| other.judgement == entry.judgement && other.bytes == entry.bytes);
+                assert!(!again, "{} {what} twice", target.project);
+            }
+        }
+    }
+
+    /// A shape on no list fails, a listed shape in a bucket that is ours fails, a listed bucket 1
+    /// shape passes, and a listed shape that did not arrive is not a failure.
+    #[test]
+    fn a_run_is_held_to_its_triage_list() {
+        const ROW: Target = Target {
+            project: "row",
+            harness: "",
+            variable: "",
+            upstream: "",
+            corpus: "",
+            pinned: ("", 0),
+            triaged: &[
+                Triaged {
+                    judgement: 1,
+                    bytes: Some(8),
+                    bucket: Bucket::Project { upstream: "not reported yet" },
+                    why: "a dead read. tamnd/rucc#1.",
+                },
+                Triaged {
+                    judgement: 1,
+                    bytes: Some(4),
+                    bucket: Bucket::Implementation,
+                    why: "a wrong check. tamnd/rucc#2.",
+                },
+                Triaged {
+                    judgement: 2,
+                    bytes: None,
+                    bucket: Bucket::Exemption,
+                    why: "declared. tamnd/rucc#3.",
+                },
+            ],
+        };
+        let mut problems = Vec::new();
+        held(&ROW, &[(1, Some(8), "aaa".to_owned(), 3)], &mut problems);
+        assert!(problems.is_empty(), "{problems:?}");
+        held(&ROW, &[(1, Some(2), "bbb".to_owned(), 1)], &mut problems);
+        assert_eq!(problems.len(), 1);
+        assert!(problems[0].contains("J1 over 2 bytes on 1 inputs, first at bbb, is on no list"));
+        held(&ROW, &[(1, Some(4), "ccc".to_owned(), 1)], &mut problems);
+        assert_eq!(problems.len(), 2);
+        assert!(problems[1].contains("bucket 3"), "{}", problems[1]);
     }
 }
