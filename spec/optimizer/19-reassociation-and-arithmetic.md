@@ -141,6 +141,8 @@ shift is undefined. Document 10's ranges supply that, and where they do not, the
 not made. This is the sort of thing that is correct by construction if the range query is consulted
 and a silent wrong-code bug if the width is assumed.
 
+A set spread wider than one word gets no bit test from this, and written as one test per interval it runs every test on every call. When that set decides a branch and nothing else, `rangeswitch` turns the branch into a `switch` on the value with a case for each value of the set, and the switch lowering of document 24 picks the binary search and the bit tests. That is what gcc's `if-to-switch` pass does with an `if` chain, and it is done under gcc's rule: only when the lowering would make fewer clusters than there are intervals, so that some word holds two intervals or more. A set with more than `RANGE_SWITCH_CASES` values is not spelled out case by case, unless the values outside it are few enough, and then those are the cases and they go to the other arm.
+
 ## 19.5 Division and the rest of math-opts
 
 `gcc/tree-ssa-math-opts.cc` covers a family of transformations that share only the property of being

@@ -4,6 +4,10 @@ All notable changes are recorded here. The format follows [Keep a Changelog](htt
 
 ## Unreleased
 
+### Added
+
+- A new pass, `rangeswitch`, turns a branch on comparisons of one value against constants that are too far apart for one bit test into a `switch` on the value, at `-O2` and `-O3` (#2987). It runs just before `rangetest` and takes the chains `rangetest` could only write as one test per interval, all run every time. PostgreSQL's `IsSharedRelation` is three chains of object ids between 1213 and 6303, and each is now a `switch` that the switch lowering makes a few comparisons and a bit test, which is what gcc and clang do. A chain is rewritten when the lowering would make fewer clusters of it than it has intervals, the rule gcc's `if-to-switch` pass uses.
+
 ## 0.24.2
 
 More of WA4, wasm code at `-O2` that is close to clang in size and speed (#2866). A value with more than one use is written at its first use with a `local.tee`, and a constant address offset goes in the offset field of a load or a store. The SQLite shell at `-O2` goes from 1,952,890 bytes to 1,816,667, which is 0.2% smaller than the shell that clang from wasi-sdk 34 builds, so the size criterion of WA4 is met.

@@ -132,6 +132,7 @@ pub static PASSES: &[&dyn Pass] = &[
     &crate::bswap::BSWAP,
     &crate::unroll::Unroll,
     &crate::loop_delete::LoopDelete,
+    &crate::rangeswitch::RangeSwitch,
     &crate::rangetest::RangeTest,
     &crate::loop_idiom::LoopIdiom,
     &crate::adce::Adce,

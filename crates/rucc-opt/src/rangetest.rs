@@ -117,7 +117,7 @@ impl Pass for RangeTest {
 
 /// Removes every instruction in the list that nothing uses any more, over and over until none is
 /// left, since an instruction can be the last user of another in the list.
-fn sweep(func: &mut Func, mut dead: Vec<Inst>) {
+pub(crate) fn sweep(func: &mut Func, mut dead: Vec<Inst>) {
     let mut uses = count(func);
     loop {
         let before = dead.len();
@@ -232,14 +232,14 @@ impl Tree {
 
 /// Reads a bit as a set of values of one integer, looking through the comparisons and trees of
 /// them that nothing else uses.
-struct Read<'a> {
-    func: &'a Func,
-    uses: &'a [u32],
-    block: Block,
+pub(crate) struct Read<'a> {
+    pub(crate) func: &'a Func,
+    pub(crate) uses: &'a [u32],
+    pub(crate) block: Block,
     /// The instructions the set was read through, which go when the tree is rewritten.
-    consumed: Vec<Inst>,
+    pub(crate) consumed: Vec<Inst>,
     /// How many comparisons the set was read from.
-    compares: u32,
+    pub(crate) compares: u32,
 }
 
 impl Read<'_> {
@@ -247,7 +247,7 @@ impl Read<'_> {
     ///
     /// A comparison something else also reads is read all the same and stays for that reader,
     /// while an `and` or an `or` under it is read only when this is its one use.
-    fn set(&mut self, bit: Value) -> Option<(Value, Vec<(u64, u64)>)> {
+    pub(crate) fn set(&mut self, bit: Value) -> Option<(Value, Vec<(u64, u64)>)> {
         let func = self.func;
         let Def::Result { inst, .. } = func[bit].def else { return None };
         if func.block_of(inst) != Some(self.block) || func[bit].ty != Type::I1 {
@@ -473,7 +473,7 @@ fn bit_test(
 }
 
 /// The largest unsigned value of the type.
-fn max(ty: Type) -> u64 {
+pub(crate) fn max(ty: Type) -> u64 {
     u64::MAX >> (64 - ty.bits())
 }
 
@@ -530,7 +530,7 @@ fn union(one: &[(u64, u64)], two: &[(u64, u64)]) -> Vec<(u64, u64)> {
 }
 
 /// The values up to `top` in none of the intervals, which must be sorted and apart.
-fn complement(set: &[(u64, u64)], top: u64) -> Vec<(u64, u64)> {
+pub(crate) fn complement(set: &[(u64, u64)], top: u64) -> Vec<(u64, u64)> {
     let mut out = Vec::new();
     let mut next = Some(0u64);
     for &(from, to) in set {

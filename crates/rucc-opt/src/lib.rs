@@ -166,6 +166,7 @@ pub mod profile;
 pub mod prune;
 pub mod purity;
 pub mod range;
+pub mod rangeswitch;
 pub mod rangetest;
 pub mod readonly;
 pub mod reassoc;
