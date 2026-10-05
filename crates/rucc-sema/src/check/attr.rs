@@ -1175,7 +1175,8 @@ impl Checker<'_> {
     fn patchable_argument(&mut self, attr: Attribute) -> Option<(u32, u32)> {
         let args = self.ast[attr.args].to_vec();
         if args.is_empty() || args.len() > 2 {
-            let what = "wrong number of arguments specified for 'patchable_function_entry' attribute";
+            let what =
+                "wrong number of arguments specified for 'patchable_function_entry' attribute";
             let note = format!("expected between 1 and 2, found {}", args.len());
             let refused = Diagnostic::error(what, attr.span).with_code("E0818");
             self.report(refused.note(note, attr.span));
@@ -1197,9 +1198,9 @@ impl Checker<'_> {
             };
             let quoted = spelled.map_or_else(String::new, |spelled| format!(" '{spelled}'"));
             let what = match value {
-                Some(n) if n > 65535 => format!(
-                    "'patchable_function_entry' attribute argument{quoted} exceeds 65535"
-                ),
+                Some(n) if n > 65535 => {
+                    format!("'patchable_function_entry' attribute argument{quoted} exceeds 65535")
+                }
                 Some(n) if n >= 0 => {
                     *count = u32::try_from(n).unwrap_or_default();
                     continue;

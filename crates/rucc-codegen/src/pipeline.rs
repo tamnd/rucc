@@ -1108,9 +1108,10 @@ pub fn compile_recording(
     // patcher writing over the room starts at its front and wants every byte in it to be a place
     // it could have started at.
     // What `patchable_function_entry` on the function said, in place of the command line.
-    let room = source
-        .patchable
-        .map_or(flags.patch, |(total, before)| Room { after: total.saturating_sub(before), before });
+    let room = source.patchable.map_or(flags.patch, |(total, before)| Room {
+        after: total.saturating_sub(before),
+        before,
+    });
     let pad = room.any().then_some(machine.insts.pad).flatten().map(|name| Padding {
         name,
         before: room.before,

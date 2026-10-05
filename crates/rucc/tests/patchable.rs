@@ -310,9 +310,15 @@ void (*p)(void) __attribute__((patchable_function_entry(1)));
     let (ok, text, said) = run("said", TARGET, &[], source);
     assert!(ok, "{said}");
     let expected = [
-        (3, "warning: 'patchable_function_entry' attribute argument 'n' is not an integer constant"),
+        (
+            3,
+            "warning: 'patchable_function_entry' attribute argument 'n' is not an integer constant",
+        ),
         (4, "warning: 'patchable_function_entry' attribute argument"),
-        (5, "warning: 'patchable_function_entry' attribute argument '-1' is not an integer constant"),
+        (
+            5,
+            "warning: 'patchable_function_entry' attribute argument '-1' is not an integer constant",
+        ),
         (6, "warning: 'patchable_function_entry' attribute argument '70000' exceeds 65535"),
         (7, "warning: patchable function entry 2 exceeds size 1"),
     ];
@@ -337,7 +343,8 @@ __attribute__((patchable_function_entry())) void none(void) {}
 ";
     let (ok, _, said) = run("refused", TARGET, &[], source);
     assert!(!ok, "{said}");
-    let what = "error: wrong number of arguments specified for 'patchable_function_entry' attribute";
+    let what =
+        "error: wrong number of arguments specified for 'patchable_function_entry' attribute";
     for (line, found) in [(1, 3), (2, 0)] {
         let at = format!(".c:{line}:");
         assert!(said.lines().any(|l| l.contains(&at) && l.contains(what)), "{line}\n{said}");
