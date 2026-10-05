@@ -48,10 +48,14 @@
 //! a `longjmp` can come out of is in a `try_table` that catches the exception that `longjmp`
 //! throws. [`prepare`] changes the IR for that before the translation. See the `sjlj` module.
 //!
+//! An alias is a second symbol, as in clang. The second name of a function has the index of the
+//! function, and the second name of a variable is a data symbol at the place of the variable.
+//!
 //! What this refuses, with a message that names the function: a vector, inline assembly with a
-//! template that is not blank, `__builtin_setjmp`, a function other than `setjmp` that returns twice,
-//! unwinding to a cleanup with `-fexceptions`, an alias, and the instructions of the memory safety
-//! monitor. Each of these is a later step of #2864 or of the milestones after it. A graph of blocks that is not reducible is not
+//! template that is not blank, `__builtin_setjmp`, a function other than `setjmp` that returns
+//! twice, unwinding to a cleanup with `-fexceptions`, an `ifunc`, and the instructions of the
+//! memory safety monitor. Each of these is a later step of #2864 or of the milestones after it,
+//! except the `ifunc`, which wasm does not have. A graph of blocks that is not reducible is not
 //! refused: a dispatch node makes it reducible. A computed `goto` is not refused either: the
 //! address of a label is a small number, and the `goto` is a `br_table` on it, as in LLVM.
 //!
@@ -74,7 +78,8 @@ use std::fmt;
 use rucc_base::hash::Map;
 use rucc_base::{Interner, Symbol};
 use rucc_ir::{
-    Abi, Block, Datum, Func, FuncId, Linkage, Module, Opcode, Signature, SymbolRef, Type,
+    Abi, AliasId, AliasKind, Block, Datum, Func, FuncId, Linkage, Module, Opcode, Signature,
+    SymbolRef, Type,
 };
 use rucc_object::wasm::{
     self, EXPORTED, FuncType, HIDDEN, Import, LOCAL, NO_STRIP, Place, Producers, RETAIN, RelocKind,
@@ -186,9 +191,6 @@ fn translate_with(
     notes: bool,
 ) -> Result<(wasm::Module, Vec<Notes>), Refusal> {
     let unit_wide = |why: String| Refusal { function: None, why };
-    if module.aliases().next().is_some() {
-        return Err(unit_wide("an alias is not written for wasm yet".into()));
-    }
     let mut unit = Unit {
         ir: module,
         names,
@@ -245,6 +247,35 @@ fn translate_with(
         unit.data.insert(name.clone(), symbol);
         unit.out.segments.push(Segment::default());
         variables.push((id, name));
+    }
+
+    // A second name of a variable is a data symbol at the place of the variable, and a second
+    // name of a function is a function symbol with the index of the function, which is what
+    // clang writes for the `alias` attribute. The data symbols come before the initial values
+    // and the code, which can refer to them by the second name.
+    for id in module.aliases() {
+        let alias = &module[id];
+        let name = names.resolve(alias.name).to_owned();
+        match unit.root(id).map_err(&unit_wide)? {
+            SymbolRef::Global(global) => {
+                let target = names.resolve(module[global].name);
+                let place = match unit.data.get(target).map(|&s| &unit.out.symbols[s as usize].kind)
+                {
+                    Some(&SymbolKind::Data { place: Some(place) }) => place,
+                    _ => {
+                        return Err(unit_wide(format!(
+                            "`{name}` is an alias of `{target}`, which is not a variable that this unit defines"
+                        )));
+                    }
+                };
+                let kind = SymbolKind::Data { place: Some(place) };
+                let symbol = unit.out.symbol(name.clone(), kind, flags(alias.linkage));
+                unit.data.insert(name, symbol);
+            }
+            _ => {
+                unit.function(alias.name).map_err(&unit_wide)?;
+            }
+        }
     }
 
     for (id, name) in variables {
@@ -398,11 +429,32 @@ impl Unit<'_> {
         if let Some(&found) = self.functions.get(&name) {
             return Ok(found);
         }
-        let Some(SymbolRef::Func(id)) = self.ir.lookup(symbol) else {
-            return Err(format!("`{name}` is called and is not a function of this unit"));
+        let (id, alias) = match self.ir.lookup(symbol) {
+            Some(SymbolRef::Func(id)) => (id, None),
+            Some(SymbolRef::Alias(alias)) => match self.root(alias)? {
+                SymbolRef::Func(id) => (id, Some(alias)),
+                _ => return Err(format!("`{name}` is called and is a second name of a variable")),
+            },
+            _ => return Err(format!("`{name}` is called and is not a function of this unit")),
         };
         let func = &self.ir[id];
         let ty = self.out.intern(functype(func.signature())?);
+        if let Some(alias) = alias {
+            // The second name of a function has the type and the index of the function, and the
+            // flags of its own linkage.
+            if func.is_declaration() {
+                let target = self.names.resolve(func.name);
+                return Err(format!(
+                    "`{name}` is an alias of `{target}`, which is not a function that this unit defines"
+                ));
+            }
+            let target = self.function(func.name)?.0;
+            let kind = SymbolKind::Function { ty, import: None };
+            let index = self.out.symbol(name.clone(), kind, flags(self.ir[alias].linkage));
+            self.out.aliases.push((index, target));
+            self.functions.insert(name, (index, ty));
+            return Ok((index, ty));
+        }
         // A definition that `export_name` names is exported and kept, and a declaration that
         // `import_module` or `import_name` names is imported from there, which are the flags and
         // the import that clang writes.
@@ -438,30 +490,51 @@ impl Unit<'_> {
     /// The relocation and the symbol of the address of `symbol`, which is a slot in the function
     /// table for a function and a place in memory for data.
     pub(crate) fn address(&mut self, symbol: Symbol) -> Result<(bool, u32), String> {
-        match self.ir.lookup(symbol) {
-            Some(SymbolRef::Func(_)) => {
-                // A slot in the table is an address only when the module has the table. On a
-                // target with the long form of `call_indirect`, the object writer of LLVM imports
-                // `__indirect_function_table` and keeps it for each relocation to a slot, also in
-                // a module that has no `call_indirect`. rucc does the same, so that its object and
-                // the object that clang makes from its `-S` text have the same symbols.
-                self.table();
-                Ok((true, self.function(symbol)?.0))
-            }
-            Some(SymbolRef::Global(_)) | None => {
-                let name = self.name(symbol);
-                if let Some(&found) = self.data.get(&name) {
-                    return Ok((false, found));
-                }
-                let index = self.out.symbol(name.clone(), SymbolKind::Data { place: None }, 0);
-                self.data.insert(name, index);
-                Ok((false, index))
-            }
-            Some(SymbolRef::Alias(_)) => Err(format!(
-                "`{}` is an alias, which is not written for wasm yet",
-                self.name(symbol)
-            )),
+        let function = match self.ir.lookup(symbol) {
+            Some(SymbolRef::Func(_)) => true,
+            Some(SymbolRef::Alias(alias)) => matches!(self.root(alias)?, SymbolRef::Func(_)),
+            Some(SymbolRef::Global(_)) | None => false,
+        };
+        if function {
+            // A slot in the table is an address only when the module has the table. On a target
+            // with the long form of `call_indirect`, the object writer of LLVM imports
+            // `__indirect_function_table` and keeps it for each relocation to a slot, also in a
+            // module that has no `call_indirect`. rucc does the same, so that its object and the
+            // object that clang makes from its `-S` text have the same symbols.
+            self.table();
+            return Ok((true, self.function(symbol)?.0));
         }
+        let name = self.name(symbol);
+        if let Some(&found) = self.data.get(&name) {
+            return Ok((false, found));
+        }
+        let index = self.out.symbol(name.clone(), SymbolKind::Data { place: None }, 0);
+        self.data.insert(name, index);
+        Ok((false, index))
+    }
+
+    /// The function or the variable that the alias `id` names, past any alias that it names.
+    /// wasm has no `ifunc`, because a module cannot choose its code when it starts, and clang
+    /// refuses it on wasm too.
+    fn root(&self, mut id: AliasId) -> Result<SymbolRef, String> {
+        let name = self.names.resolve(self.ir[id].name);
+        for _ in self.ir.aliases() {
+            let alias = &self.ir[id];
+            if alias.kind == AliasKind::IFunc {
+                return Err(format!("`{name}` is an ifunc, which wasm does not have"));
+            }
+            match self.ir.lookup(alias.target) {
+                Some(SymbolRef::Alias(next)) => id = next,
+                Some(found) => return Ok(found),
+                None => {
+                    let target = self.names.resolve(alias.target);
+                    return Err(format!(
+                        "`{name}` is an alias of `{target}`, which this unit does not have"
+                    ));
+                }
+            }
+        }
+        Err(format!("`{name}` is an alias of itself"))
     }
 
     /// The global `__stack_pointer`, which the linker defines.

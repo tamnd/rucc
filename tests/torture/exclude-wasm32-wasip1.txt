@@ -25,10 +25,8 @@ pr60003 all #2944
 pr64242 all #2944
 pr84521 all #2944
 
-# The alias attribute.
-alias-2 all #2945
-alias-3 all #2945
-alias-4 all #2945
+# A main with one parameter.
+alias-4 all #2975
 
 # wasi-libc has no tmpnam, and a call through a pointer of another type traps.
 fprintf-2 all #2946
