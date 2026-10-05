@@ -1727,6 +1727,7 @@ fn placed(
             binding: rucc_object::Binding::Global,
             visibility: rucc_object::Visibility::Default,
             patch: None,
+            hooked: 0,
             landings: Vec::new(),
         });
         lines.push(rows);
@@ -12357,6 +12358,7 @@ away:
             binding: rucc_object::Binding::Global,
             visibility: rucc_object::Visibility::Default,
             patch: None,
+            hooked: 0,
             landings: Vec::new(),
         }
     }

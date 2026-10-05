@@ -1169,6 +1169,11 @@ impl Unit<'_> {
         if node.flags.contains(DeclFlags::NO_REORDER) {
             func.attrs.set |= AttrSet::NO_REORDER;
         }
+        // And the one that has it open with what a hot patcher writes over. See
+        // `rucc_asm::hook`.
+        if node.flags.contains(DeclFlags::MS_HOOK) {
+            func.attrs.set |= AttrSet::MS_HOOK;
+        }
         // And the other one, for the same reason. What a call to `strtol` reads belongs to
         // `strtol`, and the purity analysis answers opaque for everything it cannot see a body
         // for, so a unit that only declares the function gets nothing out of it unless the

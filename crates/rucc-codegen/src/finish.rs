@@ -192,6 +192,11 @@ pub struct Convention<'a> {
     /// What room this function opens with for a patcher, or `None` in one that was promised none,
     /// which is every function on a command line that did not ask.
     pub pad: Option<Padding>,
+    /// Whether the function opens with the i386 bytes `ms_hook_prologue` writes, which push the
+    /// caller's frame pointer and point it at the stack, so that the prologue has to take it back
+    /// off before it builds a frame of its own. The bytes themselves are written by whatever lays
+    /// the function down, and on x86-64 they leave nothing to take off.
+    pub hooked: bool,
 }
 
 /// The furthest below the frame pointer an ARM64 Windows unwind code can say the stack pointer
@@ -203,7 +208,16 @@ impl<'a> Convention<'a> {
     /// call to a profiler and no room for a patcher, which is most of them.
     #[must_use]
     pub fn new(regs: &'a CallRegs, insts: &'a FrameInsts) -> Self {
-        Self { regs, insts, protect: None, probe: None, landing: None, trace: None, pad: None }
+        Self {
+            regs,
+            insts,
+            protect: None,
+            probe: None,
+            landing: None,
+            trace: None,
+            pad: None,
+            hooked: false,
+        }
     }
 }
 
@@ -257,7 +271,7 @@ pub fn finish(
     convention: Convention<'_>,
     names: &mut Interner,
 ) -> Moves {
-    let Convention { regs: conv, insts, protect, probe, landing, trace, pad } = convention;
+    let Convention { regs: conv, insts, protect, probe, landing, trace, pad, hooked } = convention;
     let entry = func.entry().expect("a function with a block in it");
 
     // Before anything is written, because these are instructions the lowering already put in the
@@ -350,6 +364,7 @@ pub fn finish(
         landing,
         trace.filter(|_| !bare),
         pad.filter(|_| !bare),
+        hooked && !bare,
     );
     for &inst in prologue.iter().rev() {
         writer.func.prepend_inst(entry, inst);
@@ -590,6 +605,7 @@ impl Writer<'_> {
         landing: Option<&'static str>,
         trace: Option<Tracing>,
         pad: Option<Padding>,
+        hooked: bool,
     ) -> Vec<Inst> {
         let sp = self.conv.stack_pointer;
         let fp = self.conv.frame_pointer;
@@ -606,6 +622,14 @@ impl Writer<'_> {
         if let Some(name) = landing {
             let opcode = self.opcode(name);
             let inst = self.func.build_loose(opcode).finish();
+            out.push(inst);
+            quiet.push(inst);
+        }
+        // The caller's frame pointer, which the bytes in front of the pad pushed, back where it
+        // was. Nothing is described for it, since the unwinder is told nothing about those bytes
+        // either, which is gcc's table too: the rows say what the function does from here.
+        if hooked {
+            let inst = self.pop(fp);
             out.push(inst);
             quiet.push(inst);
         }

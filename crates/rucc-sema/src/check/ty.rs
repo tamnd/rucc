@@ -1209,6 +1209,7 @@ impl Checker<'_> {
                 self.check_parameter_storage(specs, declarator.name, span);
                 self.no_reordered(&[ast[specs].attrs, param.attrs], false);
                 self.strict_flex_refused(&[ast[specs].attrs, param.attrs], declarator.name);
+                self.ms_hooked(&[ast[specs].attrs, param.attrs], false);
             }
 
             // The type the function has and the type the object has are two different types,

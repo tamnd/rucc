@@ -1160,6 +1160,9 @@ pub fn compile_recording(
         landing: entry,
         trace,
         pad,
+        // Only i386's bytes push anything. See `rucc_asm::hook`.
+        hooked: source.attrs.set.contains(ir::AttrSet::MS_HOOK)
+            && std::ptr::eq(machine.insts, &x86::FRAME),
         ..Convention::new(machine.conv, machine.insts)
     };
     let moves = finish(&mut func, &allocation, &frame, &stack, convention, names);

@@ -925,6 +925,16 @@ tests = ["rucc::a_member_s_own_level_takes_the_place_of_the_command_line_s", "ru
 notes = "The level a trailing array member is measured at by `__builtin_object_size` and `__builtin_dynamic_object_size` through a pointer, in place of the one `-fstrict-flex-arrays` set, stricter or looser: zero takes any trailing array as one the program may allocate more of, one takes `[0]`, `[1]` and `[]`, two takes `[0]` and `[]`, and three takes only `[]`, as gcc 13 measures them. On a variable, a function, a typedef or a parameter, on a member that is not an array, with a level outside 0 to 3 or an argument that is not an integer constant, and with other than one argument, it is refused with gcc's errors and `E0833`. Under a persona older than gcc 13 it is a name gcc has never heard of. A member with no name is not read."
 
 [[feature]]
+name = "ms_hook_prologue"
+kind = "attribute"
+gcc_version = "4.5"
+status = "implemented"
+targets = ["x86-64", "x86"]
+used_by = ["wine"]
+tests = ["rucc::a_hooked_function_opens_with_the_bytes_gcc_writes", "rucc::the_object_has_the_same_bytes", "rucc::ms_hook_prologue_is_checked_in_gcc_s_words"]
+notes = "The function opens with the bytes a Windows hot patcher writes a short jump over, `lea 0(%rsp), %rsp` with a four byte displacement on x86-64 and `mov %edi, %edi; push %ebp; mov %esp, %ebp` on i386, and has 32 or 16 bytes of `int3` in front of its label for the long jump, as gcc writes them, in the listing and in the object the compiler writes itself. They come ahead of the landing pad, as in gcc. On i386 the frame pointer the bytes pushed is popped straight after them and the prologue builds its own, which is what gcc does when it keeps no frame pointer and what it does here at every level, where gcc at `-O0` builds its frame on them. A naked function gets the bytes and nothing after them, as in gcc. One declaration saying it is enough, as with `noinline`. On anything but a function, a pointer to one or a typedef of a function type included, it is ignored with gcc's warning, and an argument is refused with `E0834`."
+
+[[feature]]
 name = "fentry_name"
 kind = "attribute"
 gcc_version = "9.0"
