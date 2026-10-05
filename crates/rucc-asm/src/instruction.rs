@@ -297,12 +297,14 @@ pub(crate) fn one_in(word: &str, args: &[String], mode: Mode) -> Result<Written,
 /// the opcode, the offset and then two bytes of segment.
 ///
 /// The encoder has no row with two immediates, so this is written here. Only thirty two bit code
-/// has it, which the kernel switches to with `.code32` to leave long mode and come back.
+/// has it, which the kernel switches to with `.code32` to leave long mode and come back. gas takes
+/// `jmp` and `call` with two operands as the same thing, which is how the x86 selftests' thunks.S
+/// writes its way back to long mode.
 fn far(word: &str, args: &[String], mode: Mode) -> Option<Result<Written, String>> {
     let (opcode, width) = match word {
-        "ljmp" | "ljmpl" => (0xEA, 4),
+        "ljmp" | "ljmpl" | "jmp" => (0xEA, 4),
         "ljmpw" => (0xEA, 2),
-        "lcall" | "lcalll" => (0x9A, 4),
+        "lcall" | "lcalll" | "call" => (0x9A, 4),
         "lcallw" => (0x9A, 2),
         _ => return None,
     };
