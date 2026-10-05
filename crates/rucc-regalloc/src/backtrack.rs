@@ -68,6 +68,11 @@
 //! across every point that is over rather than by which one the queue met last. Neither wins
 //! everywhere, so both are costed.
 //!
+//! A value sent ahead still gets the offer described next, once every other value has a register.
+//! Before it did not, so where the second try won, a value the tuple deforming loop reads in every
+//! turn stayed on the stack while a register the `strlen` call destroys sat unused all through the
+//! function.
+//!
 //! # Putting a value away around a call
 //!
 //! A value wanted on the far side of a call cannot be in a register the call destroys, so it has
@@ -268,10 +273,15 @@ fn placed(
     };
     let mut assignment = Assignment::empty(count);
     let mut lost = vec![0u32; count];
+    let mut sent = Vec::new();
     while let Some((_, Reverse(number))) = queue.pop() {
         let Some(value) = values[number] else { continue };
-        if forced.contains(&value.reg) || early.contains(&value.reg) {
+        if forced.contains(&value.reg) {
             assignment.spill(value.reg, value.class);
+            continue;
+        }
+        if early.contains(&value.reg) {
+            sent.push(value);
             continue;
         }
         assert!(
@@ -350,6 +360,26 @@ fn placed(
         if state.work > state.budget {
             return None;
         }
+    }
+    // A value sent ahead is one the stack was going to take anyway, but the stack is only the
+    // cheaper answer where the value is read more often than the calls it is wanted across are
+    // made. So once every other value has its register, each is offered one that only a call is in
+    // the way of, the most expensive to keep on the stack first, which is what a value that lost
+    // its register in the queue is offered too. Nothing is evicted for one here, since what is left
+    // is a register nothing else wanted.
+    sent.sort_by_key(|value| Reverse(costs[index(value.reg)]));
+    for value in sent {
+        let spilled = costs[index(value.reg)];
+        match state.saved(func, value, env.order(value.class), spilled, &saveable) {
+            Some((at, insts)) => {
+                state.take(value, at);
+                state.saves[index(value.reg)] = insts;
+            }
+            None => assignment.spill(value.reg, value.class),
+        }
+    }
+    if state.work > state.budget {
+        return None;
     }
     state.settle(&reused, &passed, &received);
     if state.work > state.budget {
@@ -919,7 +949,7 @@ fn index(reg: Reg) -> usize {
 mod tests {
     use rucc_base::Interner;
     use rucc_mir::{BlockCall, Constraint, Flags, Opcode, Operand, Param};
-    use rucc_target::x86_64::{GPR, REGS, SYSV};
+    use rucc_target::x86_64::{GPR, RAX, RCX, REGS, SYSV};
 
     use super::*;
     use crate::check;
@@ -1002,6 +1032,47 @@ mod tests {
         assert!(problems.is_empty(), "{}", check::report(&problems));
         assert_eq!(named(assignment.place(once)), "slot");
         assert_eq!(assignment.spilled(), 1);
+    }
+
+    /// A value sent ahead is put away around a call the loop seldom makes, as one that lost its
+    /// register in the queue is, rather than read from the stack in every turn.
+    #[test]
+    fn a_value_sent_ahead_is_put_away_around_the_call_the_loop_seldom_makes() {
+        let mut names = Interner::new();
+        let mut func = Func::new(names.intern("f"));
+        let opcode = Opcode::new(names.intern("x64.nop"));
+        let [entry, head, cold, skip, latch, back, out] = [(); 7].map(|()| func.create_block());
+        let step = func.new_vreg(GPR);
+        func.build(entry, opcode).def(step, GPR).finish();
+        *func.succs_mut(entry) = vec![BlockCall::to(head)];
+        func.build(head, opcode).uses(step, GPR).finish();
+        *func.succs_mut(head) = vec![BlockCall::to(cold), BlockCall::to(skip)];
+        // A call, as far as the allocator can tell: both registers it hands out are destroyed.
+        let call = func
+            .build(cold, opcode)
+            .operand(Operand::write(Reg::physical(RAX), GPR))
+            .operand(Operand::write(Reg::physical(RCX), GPR))
+            .finish();
+        *func.succs_mut(cold) = vec![BlockCall::to(latch)];
+        *func.succs_mut(skip) = vec![BlockCall::to(latch)];
+        func.build(latch, opcode).uses(step, GPR).finish();
+        *func.succs_mut(latch) = vec![BlockCall::to(back), BlockCall::to(out)];
+        *func.succs_mut(back) = vec![BlockCall::to(head)];
+        func.build(out, opcode).uses(step, GPR).finish();
+        for (block, often) in [(head, 100), (skip, 99), (latch, 100), (back, 99)] {
+            func.set_weight(block, rucc_mir::Weight::parts(often * rucc_mir::Weight::SCALE));
+        }
+
+        let env = narrow(2);
+        let order = Order::of(&func);
+        let live = Live::of(&func, &order);
+        let assignment = placed(&func, &order, &live, &env, BUDGET, &[step]).expect("in budget");
+        let problems = check::check(&func, &order, &live, &assignment);
+        assert!(problems.is_empty(), "{}", check::report(&problems));
+        assert_ne!(named(assignment.place(step)), "slot");
+        let saves = assignment.saves();
+        assert_eq!(saves.len(), 1);
+        assert_eq!((saves[0].reg, saves[0].inst), (step, call));
     }
 
     #[test]
@@ -1240,7 +1311,7 @@ mod tests {
         func.build(block, opcode).def(kept, GPR).finish();
         func.build(block, opcode).def(passed, GPR).finish();
         func.build(block, opcode)
-            .operand(Operand::read(passed, GPR).with(Constraint::Fixed(rucc_target::x86_64::RAX)))
+            .operand(Operand::read(passed, GPR).with(Constraint::Fixed(RAX)))
             .finish();
         func.build(block, opcode).uses(kept, GPR).finish();
 
@@ -1356,8 +1427,8 @@ mod tests {
         func.build(block, opcode).def(value, GPR).finish();
         for _ in 0..calls {
             func.build(block, opcode)
-                .operand(Operand::write(Reg::physical(rucc_target::x86_64::RAX), GPR))
-                .operand(Operand::write(Reg::physical(rucc_target::x86_64::RCX), GPR))
+                .operand(Operand::write(Reg::physical(RAX), GPR))
+                .operand(Operand::write(Reg::physical(RCX), GPR))
                 .finish();
         }
         for _ in 0..reads {
