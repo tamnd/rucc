@@ -715,10 +715,16 @@ __attribute__((cf_check, nocf_check)) void both(void) {}
 int jump(int x) { static void *t[] = { &&a, &&b }; goto *t[x]; a: return 1; b: return 2; }
 _Static_assert(__has_attribute(cf_check), \"cf_check\");
 ";
+    // Without `-fcf-protection` the one thing said is gcc's warning about `nocf_check`.
     let pads = |what: &str, flags: &[&str]| -> Vec<(&'static str, usize)> {
         let out = compile(what, flags, source);
         let said = String::from_utf8_lossy(&out.stderr);
-        assert!(out.status.success() && said.is_empty(), "{said}");
+        let ignored = "'nocf_check' attribute ignored";
+        let quiet = flags.iter().any(|flag| flag.starts_with("-fcf-protection"));
+        assert!(out.status.success(), "{said}");
+        let told = said.lines().filter(|l| l.contains("warning:") || l.contains("error:"));
+        assert_eq!(told.count(), usize::from(!quiet), "{said}");
+        assert!(quiet || said.contains(ignored), "{said}");
         let text = String::from_utf8_lossy(&out.stdout).into_owned();
         ["plain", "hidden", "checked", "declared", "later", "both", "jump"]
             .into_iter()
