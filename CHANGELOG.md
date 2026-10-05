@@ -13,6 +13,10 @@ All notable changes are recorded here. The format follows [Keep a Changelog](htt
 - `__attribute__((fentry_name("hook")))` and `__attribute__((fentry_section("section")))` name the function a profiled function's hook calls and the section its address is listed in, in place of `__fentry__` or `mcount` and `__mcount_loc`, on x86-64 as in gcc 9 and later (#8). `-mfentry-name=` and `-mfentry-section=` do the same for every function that did not say. The section is listed in whether or not `-mrecord-mcount` was given, and the object writer makes one section per name.
 - `__attribute__((indirect_return))` marks a function type whose function can come back by an indirect jump, on x86-64 and i386 as in gcc 9 and later (#8). Under `-fcf-protection=branch` or `full` each call to one is followed by a landing pad, `endbr64` or `endbr32`, whether the call is by name, through a pointer, a typedef or a member. Under `full` a tail call to one stays a call unless the caller has the attribute too. A call to `setjmp` or another `returns_twice` function now gets the same pad, as in gcc; before, it had none.
 
+### Changed
+
+- At `-O1` and above, a value that would go to the stack only because a call destroys every register left for it now stays in one of those registers, stored in front of the call and loaded back behind it, when that costs less than the stack would (#1177). The case is a loop that reads the value in every turn and makes the call now and then, like the `strlen` call that the tuple deforming loop of PostgreSQL makes for a `cstring` column. Before, each such value was loaded from the stack at every read in the loop while the registers the call destroys sat empty.
+
 ### Fixed
 
 - A shift of an `i8` or `i16` value by a count that is not a constant now takes the count modulo the width, as the IR says (#2864). Before, the wasm backend masked the count to the bits of its type, so an `i8` shift by 8 gave 0 in place of the value.

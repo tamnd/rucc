@@ -54,7 +54,7 @@
 //! Huffman encoder took over five minutes to build with the safety checks under `-Zverify-each`
 //! that way, against under three seconds without it.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::fmt;
 
 use rucc_mir::{Constraint, Func, Inst, Reg, Role};
@@ -305,6 +305,10 @@ fn instructions(
     // The values in each register, in the order they were given, since a value anywhere else can
     // never be in the way of an instruction that wants that register.
     let mut held: HashMap<PhysReg, Vec<Value<'_>>> = HashMap::new();
+    // The instructions each value is put away around, which may destroy its register and nothing
+    // else of what it insists on.
+    let saved: HashSet<(Reg, Inst)> =
+        assignment.saves().iter().map(|save| (save.reg, save.inst)).collect();
     for value in values {
         if let Place::Reg(at) = value.place {
             held.entry(at).or_default().push(*value);
@@ -344,6 +348,13 @@ fn instructions(
                     let width = func.width(value.reg);
                     let under = |above| width.is_some_and(|width| width <= above);
                     if matches!(operand.constraint, Constraint::Above(above) if under(above)) {
+                        continue;
+                    }
+                    // A register the instruction destroys and hands to no value, with the value in
+                    // it put away in front of the instruction and brought back behind it. Where the
+                    // instruction reads is still the value's, so this is only the write.
+                    let destroyed = operand.role == Role::Def && operand.reg.phys().is_some();
+                    if destroyed && saved.contains(&(value.reg, inst)) {
                         continue;
                     }
                     // The interval around a value covers blocks the value never reaches, so what
