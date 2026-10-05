@@ -95,7 +95,7 @@ const KEPT: &str = "int counter __attribute__((noinit));\n\
     int *use(int i) {\n\
         static int kept __attribute__((persistent)) = 7;\n\
         static int lost __attribute__((noinit));\n\
-        return i ? &kept : i > 1 ? &lost : &hidden;\n\
+        return i > 1 ? &lost : i ? &kept : &hidden;\n\
     }\n";
 
 const NOINIT: &str = "\t.section\t.noinit,\"aw\",@nobits";
