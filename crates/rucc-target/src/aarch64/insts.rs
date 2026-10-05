@@ -43,8 +43,8 @@ use Form::{
     CmpSetI, CompareSwap, Convert, Csel, FAlu, FCmp, FCmpSet, FConvert, FMove, FUnary, FetchOp,
     FpToInt, Insert, IntToFp, Jcc, Jump, JumpAway, JumpReg, Lea, Load, LoadFp, LoadImm, Move,
     MulAdd, Nop, Pop, PopPair, Prefetch, Probe, Push, PushPair, Release, Ret, RetVal, RetVal2,
-    RetVal2Fp, RetVal3Fp, RetVal4Fp, RetValFp, Select, Set, Store, StoreFp, Swap, Template, Test,
-    Trap, Unary,
+    RetVal2Fp, RetVal3Fp, RetVal4Fp, RetValFp, Select, Set, SetBits, Store, StoreFp, Swap,
+    Template, Test, Trap, Unary,
 };
 
 /// The operand vector one machine instruction has.
@@ -64,6 +64,14 @@ pub enum Form {
     MulAdd,
     /// A destination and one source.
     Unary,
+    /// The set bits of a general register counted in a vector register, which writes the count to
+    /// a general register and a vector register on the way.
+    ///
+    /// The base architecture has `cnt` only for the bytes of a vector register, so the source is
+    /// moved across, its bytes are counted and added there, and the sum is moved back. The vector
+    /// register is written after the source is read, so the two may share nothing that matters:
+    /// they are in different files.
+    SetBits,
     /// A destination and one source that it widens, which copies the low bits of the source.
     Convert,
     /// A destination and a copy of one source.
@@ -229,6 +237,8 @@ static TWO_FP_TO_FP: [OperandDesc; 3] =
     [OperandDesc::write(FPR), OperandDesc::read(FPR), OperandDesc::read(FPR)];
 static GPR_TO_FP: [OperandDesc; 2] = [OperandDesc::write(FPR), OperandDesc::read(GPR)];
 static FP_TO_GPR: [OperandDesc; 2] = [OperandDesc::write(GPR), OperandDesc::read(FPR)];
+static SET_BITS: [OperandDesc; 3] =
+    [OperandDesc::write(GPR), OperandDesc::write(FPR), OperandDesc::read(GPR)];
 static TWO_FP_READ: [OperandDesc; 2] = [OperandDesc::read(FPR), OperandDesc::read(FPR)];
 static TWO_FP_TO_ONE: [OperandDesc; 3] =
     [OperandDesc::write(GPR), OperandDesc::read(FPR), OperandDesc::read(FPR)];
@@ -289,6 +299,7 @@ impl Form {
             FAlu => &TWO_FP_TO_FP,
             IntToFp => &GPR_TO_FP,
             FpToInt => &FP_TO_GPR,
+            SetBits => &SET_BITS,
             FCmp => &TWO_FP_READ,
             FCmpSet => &TWO_FP_TO_ONE,
             RetVal => &RET_VAL,
@@ -431,6 +442,9 @@ pub static INSTS: &[(&str, Form)] = &[
     ("rev_r_32", Unary),
     ("rev_r_64", Unary),
     ("rev16_r_32", Unary),
+    // The set bits, which are counted a byte at a time in a vector register. See `Form::SetBits`.
+    ("cnt_32", SetBits),
+    ("cnt_64", SetBits),
     // Widening. Each reads the low bits of its source and agrees with it about every one of them,
     // which is what `copies_low` asks.
     ("sxtb_16", Convert),

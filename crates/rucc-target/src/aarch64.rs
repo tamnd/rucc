@@ -861,15 +861,29 @@ const fn aapcs64(
     }
 }
 
-/// The counts AArch64 has an instruction for, both in the base architecture.
+/// The counts AArch64 has an instruction for, all three in the base architecture.
 ///
 /// `clz` is the leading zeros, and the trailing ones are `rbit` and then `clz`, which is what gcc
-/// writes. Both answer the width for a zero, as the IR counts do. The set bits are not here: the
-/// base architecture counts them only in a vector register, with `cnt` and `addv`, and that is
-/// still waiting on its rule (tamnd/rucc#310).
+/// writes. Both answer the width for a zero, as the IR counts do. The set bits are counted only in
+/// a vector register, so that count is a move across, `cnt` on the bytes, `addv` to add them and a
+/// move back, which is also what gcc writes, and a function built with `-mgeneral-regs-only` has
+/// it written out instead (tamnd/rucc#310).
 pub const COUNTS: &[CountInst] = &[
-    CountInst { of: BitCount::LeadingZeros, feature: "", widths: &[32, 64], guarded: false },
-    CountInst { of: BitCount::TrailingZeros, feature: "", widths: &[32, 64], guarded: false },
+    CountInst {
+        of: BitCount::LeadingZeros,
+        feature: "",
+        widths: &[32, 64],
+        guarded: false,
+        vector: false,
+    },
+    CountInst {
+        of: BitCount::TrailingZeros,
+        feature: "",
+        widths: &[32, 64],
+        guarded: false,
+        vector: false,
+    },
+    CountInst { of: BitCount::Ones, feature: "", widths: &[32, 64], guarded: false, vector: true },
 ];
 
 #[cfg(test)]

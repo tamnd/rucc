@@ -104,6 +104,9 @@ fn plain(form: Form) -> Timing {
         // the machine and the conversion rounds on the way, which the guide prices the same.
         IntToFp => (3, Unit::Float),
         FpToInt => (3, Unit::Float),
+        // The set bits: a move across, the byte count, the sum across the bytes and a move back,
+        // each waiting for the one before it.
+        SetBits => (10, Unit::Float),
         FCmp => (2, Unit::Float),
         // The comparison, then the `cset` that reads what it left, which is back on the integer
         // side and a cycle more.

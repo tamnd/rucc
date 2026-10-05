@@ -1605,11 +1605,41 @@ const fn win64(chkstk: Chkstk) -> CallRegs {
 /// count is kept for the plain rule and never written as the choice, so the guarded one is what
 /// a plain x86-64 gets in place of the arithmetic.
 pub const COUNTS: &[CountInst] = &[
-    CountInst { of: BitCount::Ones, feature: "popcnt", widths: &[32, 64], guarded: false },
-    CountInst { of: BitCount::LeadingZeros, feature: "lzcnt", widths: &[32, 64], guarded: false },
-    CountInst { of: BitCount::TrailingZeros, feature: "bmi", widths: &[32, 64], guarded: false },
-    CountInst { of: BitCount::LeadingZeros, feature: "", widths: &[32, 64], guarded: true },
-    CountInst { of: BitCount::TrailingZeros, feature: "", widths: &[32, 64], guarded: true },
+    CountInst {
+        of: BitCount::Ones,
+        feature: "popcnt",
+        widths: &[32, 64],
+        guarded: false,
+        vector: false,
+    },
+    CountInst {
+        of: BitCount::LeadingZeros,
+        feature: "lzcnt",
+        widths: &[32, 64],
+        guarded: false,
+        vector: false,
+    },
+    CountInst {
+        of: BitCount::TrailingZeros,
+        feature: "bmi",
+        widths: &[32, 64],
+        guarded: false,
+        vector: false,
+    },
+    CountInst {
+        of: BitCount::LeadingZeros,
+        feature: "",
+        widths: &[32, 64],
+        guarded: true,
+        vector: false,
+    },
+    CountInst {
+        of: BitCount::TrailingZeros,
+        feature: "",
+        widths: &[32, 64],
+        guarded: true,
+        vector: false,
+    },
 ];
 
 #[cfg(test)]

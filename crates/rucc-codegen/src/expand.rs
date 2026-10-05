@@ -2887,8 +2887,13 @@ mod tests {
     /// as the set bit count it became.
     #[test]
     fn a_count_the_machine_has_an_instruction_for_is_left_for_the_selector() {
-        let popcnt =
-            CountInst { of: BitCount::Ones, feature: "popcnt", widths: &[32, 64], guarded: false };
+        let popcnt = CountInst {
+            of: BitCount::Ones,
+            feature: "popcnt",
+            widths: &[32, 64],
+            guarded: false,
+            vector: false,
+        };
         for width in [32, 64] {
             let (mut names, mut func) = counting(Opcode::Ctpop, width);
             let before = printed(&func, &mut names);
@@ -2911,7 +2916,8 @@ mod tests {
     /// for anything else, with the count still there to be selected and nothing written out.
     #[test]
     fn a_guarded_count_becomes_the_choice_that_answers_the_width_for_a_zero() {
-        let guarded = |of| CountInst { of, feature: "", widths: &[32, 64], guarded: true };
+        let guarded =
+            |of| CountInst { of, feature: "", widths: &[32, 64], guarded: true, vector: false };
         let kept = [guarded(BitCount::LeadingZeros), guarded(BitCount::TrailingZeros)];
         for (op, name) in [(Opcode::Ctlz, "ctlz"), (Opcode::Cttz, "cttz")] {
             for width in [32, 64] {

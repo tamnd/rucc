@@ -22,6 +22,13 @@
 //! choice, so a guarded count is three or four instructions: much better than the arithmetic, and
 //! not one instruction, which is why the loop deletion pass does not count it as one.
 //!
+//! And a count can go through a vector register, which is how AArch64 counts the set bits: the
+//! base architecture has `cnt` only for the bytes of a vector register, so the count is a move
+//! across, `cnt`, an `addv` that adds the bytes and a move back. A function built with
+//! `-mgeneral-regs-only` may not touch those registers, so the code generator leaves such a count
+//! to its rule only where the function may, and the loop deletion pass does not count it as one
+//! instruction either.
+//!
 //! It names the counts without the IR, since this crate sits below it, and each reader says which
 //! of its instructions is which count.
 
@@ -39,7 +46,7 @@ pub enum BitCount {
 }
 
 /// A bit count that is one instruction on a processor with the extension that has it, or a short
-/// sequence where it is guarded.
+/// sequence where it is guarded or goes through a vector register.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub struct CountInst {
     /// The count it answers.
@@ -52,6 +59,9 @@ pub struct CountInst {
     /// Whether a rule takes it only under the choice that answers the width for a zero, which the
     /// code generator writes the count as before selection.
     pub guarded: bool,
+    /// Whether it goes through a vector register, which a function may not use when it is built
+    /// with `-mgeneral-regs-only`.
+    pub vector: bool,
 }
 
 impl CountInst {
@@ -62,11 +72,15 @@ impl CountInst {
     }
 
     /// Whether one of `table` is that count at that width on a processor with those extensions,
-    /// as one instruction rather than a guarded sequence.
+    /// as one instruction rather than a guarded sequence or a trip through a vector register.
     #[must_use]
     pub fn in_one(table: &[CountInst], of: BitCount, bits: u32, isa: Isa) -> bool {
         table.iter().any(|count| {
-            count.of == of && !count.guarded && count.widths.contains(&bits) && count.on(isa)
+            count.of == of
+                && !count.guarded
+                && !count.vector
+                && count.widths.contains(&bits)
+                && count.on(isa)
         })
     }
 }

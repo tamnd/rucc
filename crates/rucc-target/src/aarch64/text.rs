@@ -38,7 +38,7 @@ use Arg::{
     Page, Pop, Push, Reg, Scaled, SecrelHi, SecrelLo, Symbol, Teb, Thread, Through, TlsPage,
     TlsSlot, TprelHi, TprelLo, Vector,
 };
-use Scalar::{D, Q, S};
+use Scalar::{B, D, Q, S};
 use Width::{W, X};
 
 /// One argument of one instruction.
@@ -240,6 +240,27 @@ static TEXT: &[(&str, &[Written])] = &[
     ("rev_r_32", &[spell("rev", &[Reg(0, W), Reg(1, W)])]),
     ("rev_r_64", &[spell("rev", &[Reg(0, X), Reg(1, X)])]),
     ("rev16_r_32", &[spell("rev16", &[Reg(0, W), Reg(1, W)])]),
+    // The set bits, counted a byte at a time in a vector register and added across it. The move
+    // in clears the rest of the vector register, so counting all sixteen bytes counts only the
+    // source, and the sum is at most sixty four, so the move back of the low word is the count.
+    (
+        "cnt_32",
+        &[
+            spell("fmov", &[Fp(1, S), Reg(2, W)]),
+            spell("cnt", &[Vector(1), Vector(1)]),
+            spell("addv", &[Fp(1, B), Vector(1)]),
+            spell("fmov", &[Reg(0, W), Fp(1, S)]),
+        ],
+    ),
+    (
+        "cnt_64",
+        &[
+            spell("fmov", &[Fp(1, D), Reg(2, X)]),
+            spell("cnt", &[Vector(1), Vector(1)]),
+            spell("addv", &[Fp(1, B), Vector(1)]),
+            spell("fmov", &[Reg(0, W), Fp(1, S)]),
+        ],
+    ),
     // Widening. Each reads the low bits of its source and agrees with it about every one of them,
     // which is what `copies_low` asks.
     // A value of eight or sixteen bits lives in a W register, so widening to sixteen bits is the

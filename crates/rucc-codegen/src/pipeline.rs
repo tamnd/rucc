@@ -705,14 +705,17 @@ pub fn compile_recording(
     // The bit counts the selector is left to answer, which are the ones it has a rule for and the
     // processor the function is built for has the extension of. A `target` attribute on the
     // function says what it is built for in place of the command line. A guarded count needs the
-    // conditional move its rule ends in, so a machine without one writes the count out instead.
+    // conditional move its rule ends in, and a count through a vector register needs the vector
+    // registers, so a function without either writes that count out instead.
     let isa = source.target.unwrap_or(flags.isa);
     let counts: Vec<rucc_target::CountInst> = machine
         .selector
         .counts
         .iter()
         .copied()
-        .filter(|count| count.on(isa) && (flags.cmov || !count.guarded))
+        .filter(|count| {
+            count.on(isa) && (flags.cmov || !count.guarded) && (flags.vector || !count.vector)
+        })
         .collect();
     let ran = lowering::group(source, names, machine.conv, switching, &counts, counting);
     if !ran.switches.is_empty() {
@@ -1434,13 +1437,15 @@ mod tests {
     }
 
     /// A byte swap and the two zero counts are `rev`, `clz`, and `rbit` then `clz` on any AArch64,
-    /// at both widths, with nothing written out around them.
+    /// at both widths, with nothing written out around them, and the set bits are the count
+    /// through a vector register.
     #[test]
     fn an_aarch64_byte_swap_or_zero_count_is_the_instruction_for_it() {
         for (opcode, wanted) in [
             (Opcode::Bswap, &["a64.rev_r"][..]),
             (Opcode::Ctlz, &["a64.clz_r"][..]),
             (Opcode::Cttz, &["a64.rbit_r", "a64.clz_r"][..]),
+            (Opcode::Ctpop, &["a64.cnt"][..]),
         ] {
             for width in [32, 64] {
                 let ty = Type::int(width);
@@ -1463,6 +1468,25 @@ mod tests {
                 }
                 assert!(!text.contains("lsr") && !text.contains("mul"), "written out: {text}");
             }
+        }
+    }
+
+    /// The set bit count on AArch64 goes through a vector register, so a function that may not
+    /// use one, which is what `-mgeneral-regs-only` says, has the count written out instead.
+    #[test]
+    fn an_aarch64_set_bit_count_stays_out_of_the_vector_registers_when_told_to() {
+        for width in [32, 64] {
+            let ty = Type::int(width);
+            let (mut names, mut source, block, args) = blank(&[ty]);
+            let mut build = Builder::new(&mut source, block);
+            let ones = build.unary(Opcode::Ctpop, args[0], ty);
+            build.ret(&[ones]);
+            let machine = Machine::aarch64(&aarch64::AAPCS64);
+            let flags = Flags { vector: false, ..Flags::default() };
+            let out = compile(&mut source, &mut names, &machine, &Elsewhere::default(), flags)
+                .expect("a count is arithmetic without the vector registers");
+            let text = mir::print_func(&out, &names, &aarch64::REGS);
+            assert!(!text.contains("a64.cnt"), "a vector register was used: {text}");
         }
     }
 

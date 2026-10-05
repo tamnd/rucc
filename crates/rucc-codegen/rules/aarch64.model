@@ -117,6 +117,11 @@
 (semantics (a64.clz_r_32 v) (clz.i32 v))
 (semantics (a64.clz_r_64 v) (clz.i64 v))
 
+;; The set bits, which the base architecture counts in a vector register: the move across, `cnt` on
+;; the bytes, `addv` across them and the move back. The bytes the move across clears count nothing.
+(semantics (a64.cnt_32 v) (pop.i32 v))
+(semantics (a64.cnt_64 v) (pop.i64 v))
+
 ;; A compare and the `cset` behind it, which leaves a one or a zero in the whole register. The
 ;; condition codes are the architecture's names: `lo`, `ls`, `hi` and `hs` are the unsigned ones.
 (semantics (a64.cmp_set_eq_32 l r) (ite (= l r) 1 0))
