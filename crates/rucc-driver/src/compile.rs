@@ -392,11 +392,9 @@ pub fn compile(opts: &Options, name: &str, fs: &dyn FileSystem) -> Compiled {
                     ));
                 }
                 // A wasm unit is lowered and optimized like any other. The wasm back end of
-                // #2864 writes an object, which is also what an archive and a link take, and
-                // the other outputs past the checker wait for it.
-                EmitKind::MirFinal | EmitKind::Asm | EmitKind::SafetySummary
-                    if opts.target.arch.is_wasm() =>
-                {
+                // #2864 writes an object and its `-S` text, and an archive and a link take the
+                // object. It has no machine IR, and the safety summary waits for the monitor.
+                EmitKind::MirFinal | EmitKind::SafetySummary if opts.target.arch.is_wasm() => {
                     diagnostics.push(no_wasm_backend(opts.target));
                 }
                 EmitKind::Ir
@@ -1137,12 +1135,20 @@ fn generate(
     origin: Origin<'_>,
 ) -> Result<Artifact, Vec<Diagnostic>> {
     // A wasm object comes from its own back end, which reads the IR as it is and has no machine
-    // description, no register allocator and no assembler to share with the others.
+    // description, no register allocator and no assembler to share with the others. The listing
+    // of `-S` and of `-save-temps` is printed from the object that is about to be written, for
+    // the reason the native listing is printed from the functions about to be encoded.
     if opts.target.arch.is_wasm() {
-        return match rucc_wasm::generate(module, names, opts.wasm) {
-            Ok(written) => Ok(Artifact::Object { bytes: written.bytes, defines: written.defines }),
-            Err(refusal) => Err(vec![unsupported(&refusal.to_string())]),
-        };
+        let refused = |refusal: rucc_wasm::Refusal| vec![unsupported(&refusal.to_string())];
+        let object = rucc_wasm::translate(module, names, opts.wasm).map_err(refused)?;
+        if matches!(opts.emit, EmitKind::Asm) {
+            return rucc_wasm::assembly(&object).map(Artifact::Text).map_err(refused);
+        }
+        if opts.save_temps.wanted() {
+            *assembly = Some(rucc_wasm::assembly(&object).map_err(refused)?);
+        }
+        let written = rucc_wasm::write(&object).map_err(refused)?;
+        return Ok(Artifact::Object { bytes: written.bytes, defines: written.defines });
     }
     let Some(machine) = Machine::for_target(target) else {
         return Err(vec![unsupported(&format!(
@@ -2245,15 +2251,16 @@ fn refused(why: rucc_asm::Error) -> Vec<Diagnostic> {
 fn no_wasm_backend(target: Triple) -> Diagnostic {
     Diagnostic::error(
         format!(
-            "the wasm backend writes only objects so far, so rucc cannot give this output for {}",
+            "the wasm backend writes only objects and assembly so far, so rucc cannot give this \
+             output for {}",
             target.tuple().to_canonical_string()
         ),
         Span::DUMMY,
     )
     .with_code("E0653")
     .note(
-        "a link, -c, an archive, --emit=ir, -fsyntax-only and -E work for this target; the rest \
-         is tamnd/rucc#2864",
+        "a link, -c, -S, an archive, --emit=ir, -fsyntax-only and -E work for this target; the \
+         rest is tamnd/rucc#2864",
         Span::DUMMY,
     )
 }
@@ -4336,8 +4343,8 @@ decl #0 x : int object external static defined
     }
 
     /// A wasm target reads, checks and lowers the program, and the wasm back end writes the
-    /// object. The outputs that need the other back ends are refused with the issue that brings
-    /// them.
+    /// object and its text. The outputs that need the other back ends are refused with the issue
+    /// that brings them.
     #[test]
     fn a_wasm_target_lowers_the_program_and_writes_an_object() {
         let source = "struct p { int x, y; };\nstruct p f(struct p a, long long b) { return a; }\n";
@@ -4364,17 +4371,21 @@ decl #0 x : int object external static defined
         };
         assert_eq!(&bytes[..8], b"\0asm\x01\0\0\0");
         assert_eq!(defines, &["f".to_owned()]);
-        for emit in [EmitKind::MirFinal, EmitKind::Asm] {
-            opts.emit = emit;
-            let result = run(&opts, source);
-            assert!(result.failed(), "{emit:?}");
-            assert!(
-                result.messages[0].contains("the wasm backend writes only objects"),
-                "{emit:?}: {:?}",
-                result.messages
-            );
-            assert!(result.text().is_empty(), "{emit:?}");
-        }
+        // `-S` is the same object as text, in the dialect that clang writes.
+        opts.emit = EmitKind::Asm;
+        let listing = run(&opts, source);
+        assert!(!listing.failed(), "{:?}", listing.messages);
+        assert!(listing.text().contains("f:\n\t.functype\tf (i32, i32, i64) -> ()\n"));
+        assert!(listing.text().contains("\tend_function\n"), "{}", listing.text());
+        opts.emit = EmitKind::MirFinal;
+        let result = run(&opts, source);
+        assert!(result.failed());
+        assert!(
+            result.messages[0].contains("the wasm backend writes only objects and assembly"),
+            "{:?}",
+            result.messages
+        );
+        assert!(result.text().is_empty());
     }
 
     /// AArch64 is written as its own assembly, with a function that calls keeping its return

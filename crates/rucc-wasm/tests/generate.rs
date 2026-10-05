@@ -105,6 +105,14 @@ fn object(text: &str) -> Result<rucc_object::wasm::Written, rucc_wasm::Refusal> 
     rucc_wasm::generate(&module, &names, Cpu::Lime1.features())
 }
 
+/// The `-S` text of the object for `text`.
+fn assembly(text: &str) -> String {
+    let mut names = Interner::new();
+    let module = rucc_ir::parse(text, &mut names).expect("the IR parses");
+    let object = rucc_wasm::translate(&module, &names, Cpu::Lime1.features()).unwrap();
+    rucc_wasm::assembly(&object).unwrap()
+}
+
 #[test]
 fn the_object_defines_each_function_and_renames_main() {
     let written = object(PROGRAM).unwrap();
@@ -345,6 +353,12 @@ fn run(program: &Path, args: &[&std::ffi::OsStr]) -> std::process::Output {
 /// when `wasm-tools` is on `PATH`, and run the module under Wasmtime. The exit status, or nothing
 /// when this machine has no wasi-sdk or no Wasmtime.
 fn link_and_run(name: &str, text: &str) -> Option<i32> {
+    link_and_run_as(name, text, false)
+}
+
+/// [`link_and_run`], with the object that clang assembles from the `-S` text in place of the one
+/// that rucc writes when `assembled` is set.
+fn link_and_run_as(name: &str, text: &str, assembled: bool) -> Option<i32> {
     let Some(sdk) = sdk() else {
         eprintln!("WASI_SDK_PATH is not set, so the object was not linked");
         return None;
@@ -353,7 +367,21 @@ fn link_and_run(name: &str, text: &str) -> Option<i32> {
         std::env::temp_dir().join(format!("rucc-wasm-generate-{}-{name}", std::process::id()));
     std::fs::create_dir_all(&dir).unwrap();
     let object_file = dir.join("a.o");
-    std::fs::write(&object_file, object(text).unwrap().bytes).unwrap();
+    if assembled {
+        let listing = dir.join("a.s");
+        std::fs::write(&listing, assembly(text)).unwrap();
+        let args: Vec<&std::ffi::OsStr> = vec![
+            "--target=wasm32-wasip1".as_ref(),
+            "-mcpu=lime1".as_ref(),
+            "-c".as_ref(),
+            listing.as_os_str(),
+            "-o".as_ref(),
+            object_file.as_os_str(),
+        ];
+        run(&sdk.join("bin/clang"), &args);
+    } else {
+        std::fs::write(&object_file, object(text).unwrap().bytes).unwrap();
+    }
 
     let lib = sdk.join("share/wasi-sysroot/lib/wasm32-wasip1");
     let module = dir.join("a.wasm");
@@ -409,5 +437,52 @@ fn the_halves_of_an_int128_carry_into_each_other() {
 fn a_computed_goto_arrives_at_the_label_that_the_table_names() {
     if let Some(status) = link_and_run("threaded", THREADED) {
         assert_eq!(status, 22);
+    }
+}
+
+/// The text closes each construct with the `end` that names it, gives each `select` its type and
+/// declares each function before a `call` names it, which are the three things that clang's
+/// assembler asks of the text and that the binary does not say.
+#[test]
+fn the_text_closes_each_construct_with_the_end_that_names_it() {
+    for (name, text) in [("program", PROGRAM), ("twisted", TWISTED), ("threaded", THREADED)] {
+        let listing = assembly(text);
+        let count = |word: &str| listing.lines().filter(|l| l.trim_start() == word).count();
+        let opened = |word: &str| {
+            let prefix = format!("{word}\t");
+            listing
+                .lines()
+                .filter(|l| l.trim_start() == word || l.trim_start().starts_with(&prefix))
+                .count()
+        };
+        assert_eq!(opened("block"), count("end_block"), "{name}: {listing}");
+        assert_eq!(opened("loop"), count("end_loop"), "{name}: {listing}");
+        assert_eq!(opened("if"), count("end_if"), "{name}: {listing}");
+        assert_eq!(count("end_function"), listing.matches(",@function").count(), "{name}");
+        assert_eq!(count("end"), 0, "{name}: {listing}");
+        assert_eq!(count("select"), 0, "{name}: {listing}");
+        for line in listing.lines() {
+            if let Some(callee) = line.strip_prefix("\tcall\t") {
+                let declared = format!("\t.functype\t{callee} (");
+                let at = listing.find(&declared).unwrap_or(usize::MAX);
+                assert!(at < listing.find(line).unwrap(), "{name}: `{callee}` is not declared");
+            }
+        }
+    }
+    assert!(assembly(THREADED).contains("\tbr_table\t{"));
+}
+
+/// clang assembles the text into an object that links and does what the object of rucc does.
+#[test]
+fn the_text_assembles_to_a_module_that_does_the_same() {
+    for (name, text, status) in [
+        ("program", PROGRAM, 17),
+        ("twisted", TWISTED, 90),
+        ("threaded", THREADED, 22),
+        ("wide", WIDE, 123),
+    ] {
+        if let Some(got) = link_and_run_as(&format!("{name}-s"), text, true) {
+            assert_eq!(got, status, "{name}");
+        }
     }
 }

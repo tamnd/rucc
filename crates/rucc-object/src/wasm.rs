@@ -337,7 +337,7 @@ impl fmt::Display for Error {
 
 impl std::error::Error for Error {}
 
-/// What [`write`] gives: the bytes, and the names a linker can find in them.
+/// What [`write()`] gives: the bytes, and the names a linker can find in them.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Written {
     pub bytes: Vec<u8>,
@@ -813,40 +813,10 @@ pub fn write(module: &Module) -> Result<Written, Error> {
         custom(&mut out, label, &payload);
     }
 
-    let producers = &module.producers;
-    let fields: Vec<(&str, Vec<(&str, &str)>)> = [
-        ("language", producers.language.iter().map(|l| (l.as_str(), "")).collect::<Vec<_>>()),
-        (
-            "processed-by",
-            producers.processed_by.iter().map(|(n, v)| (n.as_str(), v.as_str())).collect(),
-        ),
-    ]
-    .into_iter()
-    .filter(|(_, values)| !values.is_empty())
-    .collect();
-    if !fields.is_empty() {
-        let mut payload = Vec::new();
-        uleb(&mut payload, len32(fields.len()));
-        for (field, values) in fields {
-            name(&mut payload, field);
-            uleb(&mut payload, len32(values.len()));
-            for (value, version) in values {
-                name(&mut payload, value);
-                name(&mut payload, version);
-            }
-        }
+    if let Some(payload) = producers(&module.producers) {
         custom(&mut out, "producers", &payload);
     }
-
-    if !module.features.is_empty() || !module.disallowed.is_empty() {
-        let mut payload = Vec::new();
-        uleb(&mut payload, len32(module.features.len() + module.disallowed.len()));
-        for (prefix, list) in [(b'+', &module.features), (b'-', &module.disallowed)] {
-            for feature in list {
-                payload.push(prefix);
-                name(&mut payload, feature);
-            }
-        }
+    if let Some(payload) = target_features(module) {
         custom(&mut out, "target_features", &payload);
     }
 
@@ -858,6 +828,54 @@ pub fn write(module: &Module) -> Result<Written, Error> {
         .map(|(_, s)| s.name.clone())
         .collect();
     Ok(Written { bytes: out, defines })
+}
+
+/// The payload of the `producers` section, or nothing when there is nothing to say. The `-S` text
+/// writes the same bytes into a custom section, so the two outputs cannot disagree about it.
+#[must_use]
+pub fn producers(producers: &Producers) -> Option<Vec<u8>> {
+    let fields: Vec<(&str, Vec<(&str, &str)>)> = [
+        ("language", producers.language.iter().map(|l| (l.as_str(), "")).collect::<Vec<_>>()),
+        (
+            "processed-by",
+            producers.processed_by.iter().map(|(n, v)| (n.as_str(), v.as_str())).collect(),
+        ),
+    ]
+    .into_iter()
+    .filter(|(_, values)| !values.is_empty())
+    .collect();
+    if fields.is_empty() {
+        return None;
+    }
+    let mut payload = Vec::new();
+    uleb(&mut payload, len32(fields.len()));
+    for (field, values) in fields {
+        name(&mut payload, field);
+        uleb(&mut payload, len32(values.len()));
+        for (value, version) in values {
+            name(&mut payload, value);
+            name(&mut payload, version);
+        }
+    }
+    Some(payload)
+}
+
+/// The payload of the `target_features` section, or nothing when the module names no feature.
+/// The `-S` text writes these bytes too.
+#[must_use]
+pub fn target_features(module: &Module) -> Option<Vec<u8>> {
+    if module.features.is_empty() && module.disallowed.is_empty() {
+        return None;
+    }
+    let mut payload = Vec::new();
+    uleb(&mut payload, len32(module.features.len() + module.disallowed.len()));
+    for (prefix, list) in [(b'+', &module.features), (b'-', &module.disallowed)] {
+        for feature in list {
+            payload.push(prefix);
+            name(&mut payload, feature);
+        }
+    }
+    Some(payload)
 }
 
 /// The payload of the `linking` section: the version, then the symbol table, the segment names
