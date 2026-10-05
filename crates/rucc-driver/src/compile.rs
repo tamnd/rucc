@@ -6146,6 +6146,29 @@ decl #0 x : int object external static defined
         assert!(said.contains("only available on x86-64"), "{said}");
     }
 
+    /// The flags register is read and written with a push and a pop where the call was, which is
+    /// what the x86 selftests' helpers.h asks for around a system call. The stack pointer steps
+    /// over the red zone first, so a leaf keeping something there does not lose it to the push.
+    #[test]
+    fn the_flags_register_is_a_push_and_a_pop_in_place() {
+        let read = "unsigned long long f(void) { return __builtin_ia32_readeflags_u64(); }\n";
+        let text = asm(read);
+        assert!(text.contains("lea -128(%rsp), %rsp\n\tpushfq\n\tpopq %rax\n"), "{text}");
+        assert!(!text.contains("\tcall\t"), "{text}");
+        let write = "void f(unsigned long long v) { __builtin_ia32_writeeflags_u64(v | 0x100); }\n";
+        let text = asm(write);
+        assert!(text.contains("\tpopfq\n"), "{text}");
+        assert!(!text.contains("\tcall\t"), "{text}");
+        let object = obj(read);
+        assert!(!object.windows(9).any(|w| w == b"readeflag"), "an undefined name");
+
+        let mut opts = options();
+        opts.emit = EmitKind::Asm;
+        opts.target = "aarch64-unknown-linux-gnu".parse::<Triple>().unwrap();
+        let said = run(&opts, read).messages.join("\n");
+        assert!(said.contains("only available on x86_64"), "{said}");
+    }
+
     /// `__builtin_cpu_supports` is a load of the word the feature's bit is in and an `and` with
     /// the bit, and the answer is the bit where it stands, which is gcc 16.2.0's lowering.
     ///

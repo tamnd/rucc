@@ -3776,6 +3776,46 @@ tests = ["rucc-driver::the_time_stamp_counter_is_the_instruction_in_place"]
 notes = "The counter as rdtsc gives it, waiting for earlier instructions first, with the processor's TSC_AUX stored through the pointer. In place as rdtsc is, in check/builtin/tsc.rs."
 
 [[feature]]
+name = "__builtin_ia32_readeflags_u64"
+kind = "builtin"
+gcc_version = "4.9"
+status = "implemented"
+signature = "unsigned long long(void)"
+used_by = ["linux"]
+tests = ["rucc-driver::the_flags_register_is_a_push_and_a_pop_in_place"]
+notes = "The flags register, read with pushfq and a pop where the call was, in check/builtin/eflags.rs. The stack pointer steps over the red zone first, since the back end does not know an asm pushes. x86-64 only."
+
+[[feature]]
+name = "__builtin_ia32_writeeflags_u64"
+kind = "builtin"
+gcc_version = "4.9"
+status = "implemented"
+signature = "void(unsigned long long)"
+used_by = ["linux"]
+tests = ["rucc-driver::the_flags_register_is_a_push_and_a_pop_in_place"]
+notes = "The flags register, written with a push and popfq where the call was, as the read is. x86-64 only."
+
+[[feature]]
+name = "__builtin_ia32_readeflags_u32"
+kind = "builtin"
+gcc_version = "4.9"
+status = "implemented"
+signature = "unsigned int(void)"
+used_by = ["linux"]
+tests = ["rucc-driver::the_flags_register_is_a_push_and_a_pop_in_place"]
+notes = "The flags register, read with pushfl and a pop where the call was. i386 only."
+
+[[feature]]
+name = "__builtin_ia32_writeeflags_u32"
+kind = "builtin"
+gcc_version = "4.9"
+status = "implemented"
+signature = "void(unsigned int)"
+used_by = ["linux"]
+tests = ["rucc-driver::the_flags_register_is_a_push_and_a_pop_in_place"]
+notes = "The flags register, written with a push and popfl where the call was. i386 only."
+
+[[feature]]
 name = "__sync_fetch_and_add"
 kind = "builtin"
 gcc_version = "4.1"

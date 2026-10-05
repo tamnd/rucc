@@ -322,6 +322,7 @@ impl Reach<'_> {
             | ExprKind::ThreadPointer
             | ExprKind::SpEntry
             | ExprKind::TimeStamp { aux: None }
+            | ExprKind::Eflags { value: None }
             | ExprKind::CpuModel { .. }
             | ExprKind::ApplyArgs => {}
             ExprKind::Apply { function, args, .. } => {
@@ -356,6 +357,7 @@ impl Reach<'_> {
             | ExprKind::ConstantP { value: base }
             | ExprKind::Jump { buffer: base, .. }
             | ExprKind::TimeStamp { aux: Some(base) }
+            | ExprKind::Eflags { value: Some(base) }
             | ExprKind::ByteSwap { operand: base }
             | ExprKind::BitCount { operand: base, .. }
             | ExprKind::Unary { operand: base, .. } => self.expr(base),

@@ -832,6 +832,11 @@ impl Checker<'_> {
         if let Some(value) = self.time_stamp_builtin(function, &args, signature.ret, span) {
             return value;
         }
+        // The flags register, read or written with a push and a pop where the call was. In
+        // `check/builtin/eflags.rs`.
+        if let Some(value) = self.eflags_builtin(function, &args, signature.ret, span) {
+            return value;
+        }
         // The absolute value family, whose plain names are the C library's and whose meaning the
         // compiler is allowed to know. In `check/builtin/abs.rs`, with why the declaration is
         // looked at as well as the name.

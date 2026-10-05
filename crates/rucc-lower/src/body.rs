@@ -2886,6 +2886,40 @@ impl<'u> Body<'_, 'u> {
         self.build(span).binary(Opcode::Or, high, low, Flags::NONE)
     }
 
+    /// A read of the flags register, or a write of `value` to it: a push of the flags and a pop
+    /// into a register, or a push of the register and a pop into the flags, which is what gcc
+    /// writes for them.
+    ///
+    /// gcc also knows the push moves the stack pointer, and takes the red zone away from the
+    /// function. An `asm` does not tell the back end that, so on x86-64 the stack pointer is first
+    /// taken past the 128 bytes of the zone with `lea`, which leaves the flags alone, and put
+    /// back after. i386 has no red zone.
+    fn eflags(&mut self, value: Option<Value>, ty: TypeId, span: Span) -> Option<Value> {
+        let template = match (self.target().tuple.arch() == Arch::X86_64, value.is_some()) {
+            (true, false) => "lea -128(%%rsp), %%rsp\n\tpushfq\n\tpopq %0\n\tlea 128(%%rsp), %%rsp",
+            (true, true) => "lea -128(%%rsp), %%rsp\n\tpushq %0\n\tpopfq\n\tlea 128(%%rsp), %%rsp",
+            (false, false) => "pushfl\n\tpopl %0",
+            (false, true) => "pushl %0\n\tpopfl",
+        };
+        let info = AsmInfo {
+            template: self.unit.names.intern(template),
+            constraints: self.unit.names.intern(if value.is_some() { "r" } else { "=r" }),
+            clobbers: self.unit.names.intern(if value.is_some() { "cc" } else { "" }),
+            targets: rucc_ir::BlockCallList::EMPTY,
+        };
+        match value {
+            None => {
+                let into = self.value_type(ty, span);
+                let inst = self.build(span).inline_asm(info, &[], &[into], Flags::VOLATILE);
+                self.func[inst].results().next()
+            }
+            Some(value) => {
+                self.build(span).inline_asm(info, &[value], &[], Flags::VOLATILE);
+                None
+            }
+        }
+    }
+
     /// The machine register an operand of an assembly statement is kept in, for an operand that
     /// names a local declared to be in one.
     ///
@@ -6108,6 +6142,11 @@ impl<'u> Body<'_, 'u> {
                 let aux = aux.map(|aux| self.place(aux));
                 let into = self.value_type(ty, span);
                 Some(self.time_stamp(aux, into, span))
+            }
+            // The flags register, through the stack, since nothing moves it to a register.
+            ExprKind::Eflags { value } => {
+                let value = value.map(|value| self.value(value));
+                self.eflags(value, ty, span)
             }
             // One word of what libgcc found out about the processor, read where libgcc keeps it and
             // tested. The object is declared on the way, so that a unit that never wrote a
@@ -10070,6 +10109,7 @@ impl<'a> Scan<'a> {
             | ExprKind::ThreadPointer
             | ExprKind::SpEntry
             | ExprKind::TimeStamp { aux: None }
+            | ExprKind::Eflags { value: None }
             | ExprKind::CpuModel { .. }
             | ExprKind::ApplyArgs => {}
             ExprKind::Apply { function, args, .. } => {
@@ -10091,6 +10131,7 @@ impl<'a> Scan<'a> {
             | ExprKind::Prefetch { address: base, .. }
             | ExprKind::ObjectSize { address: base, .. }
             | ExprKind::TimeStamp { aux: Some(base) }
+            | ExprKind::Eflags { value: Some(base) }
             | ExprKind::ConstantP { value: base } => {
                 self.expr(base);
             }
