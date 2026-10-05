@@ -10198,9 +10198,9 @@ mod tests {
         assert_eq!(
             mir::print_func(&lowered.func, &names, &REGS),
             "mfunc @f {\nblock0:\n    %0:gpr = x64.lea_64 [$rsp]\n    \
-             %1:gpr = x64.mov_ri_32 9\n    x64.mov_mr_32 %1, [%0]\n    \
-             %2:gpr = x64.lea_64 [$rsp]\n    %3:gpr = x64.mov_rm_32 [%2]\n    \
-             x64.ret_val_32 %3($rax)\n}\n"
+             x64.mov_mi_32 [%0], 9\n    \
+             %1:gpr = x64.lea_64 [$rsp]\n    %2:gpr = x64.mov_rm_32 [%1]\n    \
+             x64.ret_val_32 %2($rax)\n}\n"
         );
     }
 

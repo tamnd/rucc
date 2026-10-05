@@ -8441,15 +8441,10 @@ float through_a_union(union u *p) { p->i = 1; return p->f; }\n";
         // gives away.
         let text = asm("int f(int *p, int v) { return __sync_lock_test_and_set(p, v); }\n");
         assert!(text.contains("xchgl\t%esi, (%rdi)"), "{text}");
-        // The zero goes through a register on the way, which is where every constant this
-        // compiler stores goes: gcc writes the one instruction because it has a store that takes an
-        // immediate and no rule here does. That is a rule this rule set is missing rather than
-        // anything about the builtin, and it is the same two instructions a plain `*p = 0` makes.
-        // The register gets its zero from an exclusive or with itself rather than from a move of a
-        // zero, which is `rucc_codegen::shorten` writing the shorter of the two spellings.
+        // The zero is carried in the store, as gcc writes it, which is the same one instruction a
+        // plain `*p = 0` makes.
         let text = asm("void f(int *p) { __sync_lock_release(p); }\n");
-        assert!(text.contains("xorl\t%eax, %eax"), "{text}");
-        assert!(text.contains("movl\t%eax, (%rdi)"), "{text}");
+        assert!(text.contains("movl\t$0, (%rdi)"), "{text}");
         assert!(!text.contains("mfence"), "a release store needs no barrier here: {text}");
     }
 
