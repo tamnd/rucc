@@ -743,6 +743,9 @@ pub fn parse_args(args: &[String]) -> Result<Action, CliError> {
     let mut pie: Option<bool> = None;
     let mut output = None;
     let mut link = LinkOptions::default();
+    // Whether `-static-pie` was written, which is the one way to ask for a static program that
+    // moves itself. `-static` with `-pie` is not that, and is weighed after the loop.
+    let mut static_pie = false;
     let mut query: Option<Query> = None;
     // `--version`, answered after the loop because the banner names the GCC release claimed and
     // `-fgnuc-version=` may come after it.
@@ -1613,6 +1616,7 @@ pub fn parse_args(args: &[String]) -> Result<Action, CliError> {
             "-static-pie" => {
                 link.is_static = true;
                 link.pie = Some(true);
+                static_pie = true;
             }
             "-shared" => link.shared = true,
             "-r" => link.relocatable = true,
@@ -2847,6 +2851,14 @@ pub fn parse_args(args: &[String]) -> Result<Action, CliError> {
             }
             _ => inputs.push(Input { path: arg.to_owned(), forced, role: Role::File }),
         }
+    }
+
+    // gcc takes `-static` over `-pie`, in either order: the start file is `crt1.o` and the linker
+    // is not told `-pie`, so the program is static and loaded where it was linked. Linux 5.15's
+    // exec selftests link their load address checks with `-pie -static` and a 2 MiB page, and a
+    // static PIE there is placed by a kernel that does not align it to that page yet.
+    if link.is_static && !static_pie && link.pie == Some(true) {
+        link.pie = Some(false);
     }
 
     // The word size against the target. On x86 the other size is the other machine, as it is for
@@ -7519,6 +7531,10 @@ mod tests {
         assert!(link.no_startfiles);
         let (both, _) = linking(&["-static-pie", "a.c"]);
         assert!(both.is_static && both.pie == Some(true));
+        for line in [["-pie", "-static", "a.c"], ["-static", "-pie", "a.c"]] {
+            let (plain, _) = linking(&line);
+            assert!(plain.is_static && plain.pie == Some(false), "{line:?}");
+        }
         assert!(link.export_dynamic);
         assert!(link.strip);
         assert_eq!(link.use_ld.as_deref(), Some("mold"));
