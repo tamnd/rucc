@@ -4272,13 +4272,9 @@ fn archive_all(opts: &Options, plan: &Plan) -> i32 {
         ObjectFormat::Elf => rucc_archive::Flavour::Gnu,
         ObjectFormat::Coff => rucc_archive::Flavour::Coff,
         ObjectFormat::MachO => rucc_archive::Flavour::Bsd,
-        // Wasm has no archives of its own at all.
-        format @ ObjectFormat::Wasm => {
-            return complain(format!(
-                "there is no archive format for {} objects in this compiler yet",
-                format.as_str()
-            ));
-        }
+        // Wasm has no archive format of its own. wasm-ld reads the GNU one with its symbol index,
+        // which is what `llvm-ar` writes for wasm members too.
+        ObjectFormat::Wasm => rucc_archive::Flavour::Gnu,
     };
 
     let fs = OsFileSystem::new();
@@ -4993,17 +4989,7 @@ pub fn run(args: &[String]) -> i32 {
 /// fail at the link with a page of undefined `__rucc_check_` names. Saying so before the link
 /// is kinder until the port is done. Only the link is refused: an object or a listing built
 /// with the checks in is still what was asked for, and is what a test of the instrumentation reads.
-///
-/// A wasm target is the other case. The wasm back end writes an object, and the link line for
-/// wasi-libc is a later step of #2864, so the refusal says to use `-c` and link with `wasm-ld`.
 fn unlinkable(opts: &Options) -> Option<String> {
-    if opts.target.arch.is_wasm() {
-        return Some(format!(
-            "rucc cannot link for {} yet. -c writes the object, and wasm-ld links it; the link \
-             line is tamnd/rucc#2864",
-            opts.target.tuple().to_canonical_string()
-        ));
-    }
     (opts.safety.instruments() && opts.target.os == rucc_target::Os::Windows).then(|| {
         format!(
             "-fsafety={}: the checked modes are not available on a Windows target yet, because \
@@ -6254,16 +6240,13 @@ mod tests {
         assert_eq!(unlinkable(&opts), None);
     }
 
-    /// A wasm target has no link line yet, so a link is refused before anything is compiled, and
-    /// the refusal names what still works.
+    /// A wasm target links, so nothing about it is refused before the compilation. What a row
+    /// cannot link yet, a component or a shared library, is said by the line itself.
     #[test]
-    fn a_wasm_target_is_refused_at_the_link() {
-        for target in ["wasm32-wasip1", "wasm32-wasip2", "wasm32-wasip3", "wasm32-unknown-unknown"]
-        {
+    fn a_wasm_target_is_not_refused_before_the_link() {
+        for target in ["wasm32-wasip1", "wasm32-wasip2", "wasm32-unknown-unknown"] {
             let (opts, _) = compile(&[&format!("--target={target}"), "a.c"]);
-            let why = unlinkable(&opts).expect("a refusal");
-            assert!(why.starts_with("rucc cannot link for wasm32"), "{why}");
-            assert!(why.contains("-c writes the object"), "{why}");
+            assert_eq!(unlinkable(&opts), None, "{target}");
         }
     }
 

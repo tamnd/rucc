@@ -182,6 +182,8 @@ fn the_cases_of_section_8_2_are_that_many_different_lines() {
     // The format decides rather than the environment, because `gnu` means mingw-w64 here and glibc
     // one line above.
     assert_eq!(libc(target("aarch64-windows-msvc")), Libc::Import);
+    assert_eq!(libc(target("wasm32-wasip1")), Libc::Archive);
+    assert_eq!(libc(target("wasm32-none")), Libc::None);
 
     // And a freestanding line is our runtime and nothing else, with no start files at either end,
     // because the files that would be there come from a libc this target does not have.

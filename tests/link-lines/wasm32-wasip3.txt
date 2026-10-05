@@ -5,16 +5,16 @@ loader    none
 sysroot   <cache>/sysroots/wasm32-wasip3
 
 [static]
-  refused: there is no cross link line for wasm32-wasip3 yet, because its object format is wasm and that linker takes a different line rather than a different spelling of this one
+  refused: wasm32-wasip3 is linked into a component by wasm-component-ld, and rucc does not write that line yet (tamnd/rucc#2868). -c writes the object, and wasm32-wasip1 links now
 
 [static-pie]
-  refused: there is no cross link line for wasm32-wasip3 yet, because its object format is wasm and that linker takes a different line rather than a different spelling of this one
+  refused: wasm32-wasip3 is linked into a component by wasm-component-ld, and rucc does not write that line yet (tamnd/rucc#2868). -c writes the object, and wasm32-wasip1 links now
 
 [dynamic]
-  refused: there is no cross link line for wasm32-wasip3 yet, because its object format is wasm and that linker takes a different line rather than a different spelling of this one
+  refused: wasm32-wasip3 is linked into a component by wasm-component-ld, and rucc does not write that line yet (tamnd/rucc#2868). -c writes the object, and wasm32-wasip1 links now
 
 [dynamic-no-pie]
-  refused: there is no cross link line for wasm32-wasip3 yet, because its object format is wasm and that linker takes a different line rather than a different spelling of this one
+  refused: wasm32-wasip3 is linked into a component by wasm-component-ld, and rucc does not write that line yet (tamnd/rucc#2868). -c writes the object, and wasm32-wasip1 links now
 
 [shared]
-  refused: there is no cross link line for wasm32-wasip3 yet, because its object format is wasm and that linker takes a different line rather than a different spelling of this one
+  refused: shared libraries on wasm (dylink.0) are not supported yet, so wasm32-wasip3 cannot be linked with -shared. A module that the host calls into is -mexec-model=reactor

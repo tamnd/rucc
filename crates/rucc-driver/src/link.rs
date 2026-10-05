@@ -363,6 +363,17 @@ impl std::fmt::Display for Error {
         match self {
             Error::NoLinker { tried } => {
                 write!(f, "no linker was found; tried {}", tried.join(", "))?;
+                // wasm first, because wasm-ld is an lld too and the sentence below is about the
+                // floor for windows-gnu, which wasm does not have.
+                if tried.iter().any(|name| name == "wasm-ld") {
+                    return write!(
+                        f,
+                        ". wasm-ld comes with lld: {}. wasi-sdk has one in its bin directory, \
+                         which rucc finds when WASI_SDK_PATH names it. `rucc --fetch` installs \
+                         the C library and not a linker",
+                        lld_advice()
+                    );
+                }
                 // Only when lld was one of the names, because that is the linker every cross
                 // target here is linked with and the one there is a single answer for.
                 if tried.iter().any(|name| is_lld(name)) {
@@ -445,6 +456,11 @@ pub fn order(target: Triple, opts: &LinkOptions) -> Vec<String> {
     if let Some(named) = &opts.use_ld {
         // A name rather than a path, so `-fuse-ld=mold` finds a `mold` that is not `ld.mold`.
         return vec![format!("ld.{named}"), named.clone()];
+    }
+    // One linker writes wasm. It is lld under the name that selects its wasm flavour, and
+    // `ld.lld` would read the same line as ELF and fail on the first object.
+    if target.arch.is_wasm() {
+        return vec!["wasm-ld".to_owned()];
     }
     // Apple's `ld` and lld's Mach-O flavour, and nothing from the list below. mold and `ld.lld` write
     // ELF, and a Mac with Homebrew's llvm on its `PATH` has an `ld.lld` that would take the line and
@@ -809,7 +825,10 @@ fn cross_line(
     // is a file nothing puts there, so every cross link either failed at the linker or quietly ran
     // against somebody else's `libgcc` copied in under the name. tamnd/rucc#1514.
     let ours = builtins_archive(target, &opts.prefixes);
-    if ours.is_none() && opts.wants_runtime() && !opts.no_builtins_lib {
+    // Not yet on wasm, where the archive cannot be built until the back end compiles `__int128`
+    // and `long double`, which is a later step of tamnd/rucc#2864. The line goes without it, and
+    // a program that needs one of its functions fails at the link by that name.
+    if ours.is_none() && opts.wants_runtime() && !opts.no_builtins_lib && !target.arch.is_wasm() {
         // Said here rather than left to the linker, which on a Windows target says `___chkstk_ms`
         // is undefined and names mingw-w64's objects as the callers, and on a musl one says
         // `__udivti3` is. Neither of those is a person's first guess at a missing archive.
@@ -840,6 +859,7 @@ fn cross_line(
         gui: opts.gui,
         unicode: opts.unicode,
         crt: opts.crt,
+        reactor: opts.reactor,
         gcc: gcc.as_deref(),
         libgcc: libgcc.as_deref(),
     };
@@ -885,8 +905,11 @@ pub fn preflight(target: Triple, opts: &LinkOptions) -> Result<(), Error> {
     cross_line(target, &shape, &[], "a.out", &sysroot)?;
     // The library directory rather than the root, because the root of a cache directory that has
     // been created and never populated is there and holds nothing. Section 11.6's rule is that
-    // suitable is checked and not assumed, and this is the cheapest form of that.
-    if !sysroot.lib().is_dir() {
+    // suitable is checked and not assumed, and this is the cheapest form of that. wasm32-none is
+    // the one line that reads nothing from a sysroot, so it needs none.
+    let reads_nothing = target.arch.is_wasm()
+        && rucc_sysroot::link::libc(target_tuple(target, opts)) == rucc_sysroot::link::Libc::None;
+    if !sysroot.lib().is_dir() && !reads_nothing {
         let tuple = target_tuple(target, opts).to_canonical_string();
         return Err(Error::Sysroot {
             dir: sysroot.root().display().to_string(),
@@ -992,7 +1015,14 @@ pub fn find(target: Triple, opts: &LinkOptions) -> Result<Linker, Error> {
         return Err(Error::NoProcesses);
     }
     let tried = order(target, opts);
-    let places = lld_dirs(Path::new("/"), std::env::var_os("ProgramFiles").map(PathBuf::from));
+    let mut places = lld_dirs(Path::new("/"), std::env::var_os("ProgramFiles").map(PathBuf::from));
+    // The wasi-sdk that WASI_SDK_PATH names, after PATH and before the other places, which is the
+    // variable that the CMake toolchain file of wasi-sdk and most build scripts for it read.
+    if target.arch.is_wasm() {
+        if let Some(sdk) = std::env::var_os("WASI_SDK_PATH").filter(|sdk| !sdk.is_empty()) {
+            places.insert(0, PathBuf::from(sdk).join("bin"));
+        }
+    }
     // The first linker [`suitable`] turned down, which is the answer when nothing after it is any
     // better. Ubuntu 24.04 has lld 18 on PATH and lld 19 under /usr/lib/llvm-19/bin once somebody
     // installs `lld-19`, and the second is the one to use without asking them to change PATH.
@@ -1096,7 +1126,7 @@ fn spellings(path: &Path, exts: &[String]) -> Vec<PathBuf> {
 
 /// Whether a name is one of the spellings lld is installed under.
 fn is_lld(name: &str) -> bool {
-    matches!(name, "ld.lld" | "ld64.lld" | "lld" | "lld-link")
+    matches!(name, "ld.lld" | "ld64.lld" | "lld" | "lld-link" | "wasm-ld")
 }
 
 /// Where lld is installed without being on `PATH`, newest first where a version is in the name.
@@ -1262,7 +1292,7 @@ pub fn line(
     // `-gz` on a link, which gcc hands to the linker so the output keeps its debug sections
     // compressed too. Only an ELF linker has the option, and on the others the sections are left
     // as the objects had them, which is what the object writer does on those formats as well.
-    if !matches!(target.os, Os::Darwin | Os::Windows) {
+    if !matches!(target.os, Os::Darwin | Os::Windows) && !target.arch.is_wasm() {
         match opts.compress {
             Compress::None => {}
             how => args.push(format!("--compress-debug-sections={how}")),
@@ -2748,6 +2778,36 @@ mod tests {
             .expect_err("no line for that format");
         let Error::Cross { why } = &error else { panic!("{error:?}") };
         assert!(why.contains(&target.tuple().to_canonical_string()), "{why}");
+    }
+
+    /// A WASI command is linked by wasm-ld against the fetched wasi-libc, and the line needs no
+    /// runtime of ours yet, because none can be built for wasm until the back end compiles
+    /// `__int128` and `long double`.
+    #[test]
+    fn a_wasi_program_is_linked_by_wasm_ld_against_the_fetched_wasi_libc() {
+        let target = Triple::new(Arch::Wasm32, Os::Wasi(rucc_target::Preview::P1), Env::None);
+        let opts = LinkOptions { cache: Some(PathBuf::from("/cache")), ..LinkOptions::default() };
+        assert_eq!(order(target, &opts), ["wasm-ld"]);
+        let lib = a_sysroot(target).lib();
+        let args = line(target, &opts, &one("a.o"), "a.wasm").expect("a line");
+        assert_eq!(args[..4], ["-o", "a.wasm", "-m", "wasm32"]);
+        let at = |file: &str| {
+            let path = lib.join(file).display().to_string();
+            args.iter().position(|arg| *arg == path).unwrap_or_else(|| panic!("{file} {args:?}"))
+        };
+        let object = args.iter().position(|arg| arg == "a.o").expect("the object");
+        assert!(at("crt1-command.o") < object && object < at("libc.a"), "{args:?}");
+        // No flag of an ELF linker, which wasm-ld would refuse, and `-gz` is not asked of it.
+        let gz = LinkOptions { compress: Compress::Zlib, ..opts.clone() };
+        let args = line(target, &gz, &one("a.o"), "a.wasm").expect("a line");
+        assert!(!args.iter().any(|arg| arg.starts_with("--compress") || arg == "-z"), "{args:?}");
+
+        let reactor = LinkOptions { reactor: true, ..opts.clone() };
+        let args = line(target, &reactor, &one("a.o"), "a.wasm").expect("a line");
+        assert!(args.windows(2).any(|pair| pair == ["--entry", "_initialize"]), "{args:?}");
+
+        let missing = Error::NoLinker { tried: order(target, &opts) };
+        assert!(missing.to_string().contains("WASI_SDK_PATH"), "{missing}");
     }
 
     #[test]

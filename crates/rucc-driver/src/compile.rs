@@ -392,12 +392,9 @@ pub fn compile(opts: &Options, name: &str, fs: &dyn FileSystem) -> Compiled {
                     ));
                 }
                 // A wasm unit is lowered and optimized like any other. The wasm back end of
-                // #2864 writes an object, and the other outputs past the checker wait for it.
-                EmitKind::MirFinal
-                | EmitKind::Asm
-                | EmitKind::Archive
-                | EmitKind::Executable
-                | EmitKind::SafetySummary
+                // #2864 writes an object, which is also what an archive and a link take, and
+                // the other outputs past the checker wait for it.
+                EmitKind::MirFinal | EmitKind::Asm | EmitKind::SafetySummary
                     if opts.target.arch.is_wasm() =>
                 {
                     diagnostics.push(no_wasm_backend(opts.target));
@@ -2248,14 +2245,15 @@ fn refused(why: rucc_asm::Error) -> Vec<Diagnostic> {
 fn no_wasm_backend(target: Triple) -> Diagnostic {
     Diagnostic::error(
         format!(
-            "the wasm backend writes only an object so far, so rucc cannot give this output for {}",
+            "the wasm backend writes only objects so far, so rucc cannot give this output for {}",
             target.tuple().to_canonical_string()
         ),
         Span::DUMMY,
     )
     .with_code("E0653")
     .note(
-        "-c, --emit=ir, -fsyntax-only and -E work for this target; the rest is tamnd/rucc#2864",
+        "a link, -c, an archive, --emit=ir, -fsyntax-only and -E work for this target; the rest \
+         is tamnd/rucc#2864",
         Span::DUMMY,
     )
 }
@@ -4371,7 +4369,7 @@ decl #0 x : int object external static defined
             let result = run(&opts, source);
             assert!(result.failed(), "{emit:?}");
             assert!(
-                result.messages[0].contains("the wasm backend writes only an object"),
+                result.messages[0].contains("the wasm backend writes only objects"),
                 "{emit:?}: {:?}",
                 result.messages
             );

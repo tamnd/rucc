@@ -4,6 +4,10 @@ All notable changes are recorded here. The format follows [Keep a Changelog](htt
 
 ## Unreleased
 
+### Added
+
+- rucc links a program for `wasm32-wasip1` and `wasm32-none` with `wasm-ld`, which is the line that clang 23 from wasi-sdk 34 writes (#2864). A command starts with `crt1-command.o` from the sysroot that `rucc --fetch` installs and ends with its `libc.a`. `-mexec-model=reactor` starts with `crt1-reactor.o` and enters at `_initialize`, and `wasm32-none` has no C library and gets `--no-entry` when no entry is given. rucc finds `wasm-ld` by `-fuse-ld=`, then on `PATH`, then in `$WASI_SDK_PATH/bin`, then where the other lld tools are, and the message when it finds none names all of them. `--emit=archive` writes a GNU archive of wasm objects, which `wasm-ld` reads. `-shared` is refused, because rucc does not write `dylink.0` yet, and `wasm32-wasip2` and `wasm32-wasip3` are refused at the link with the issue that adds `wasm-component-ld` (#2868). `-c` and `--emit=ir` work for all four rows as before.
+
 ## 0.22.1
 
 A patch release in WA2 (#2864), the third step of the WebAssembly plan. `-c` writes a wasm object for the four wasm rows, and `wasm-ld` links it with wasi-libc. Of the 1544 programs in rucc-corpus that are one file with no extra flags, 1490 run under Wasmtime with the expected output, and none gives a wrong answer. The link line, `-S` and node splitting come in the next releases of WA2.
