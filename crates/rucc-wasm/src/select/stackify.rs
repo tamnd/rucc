@@ -96,9 +96,15 @@ pub(super) struct Trees {
     /// The values with more than one use that are written at their first use with a `local.tee`,
     /// and the root of the tree of that use.
     pub(super) teed: Map<Value, Inst>,
+    /// The instruction that takes each value of `teed` off the stack after the `local.tee`, and
+    /// so does not read its local.
+    pub(super) takers: Map<Value, Inst>,
     /// The instructions that make the values of `stacked` and `teed`, which are written where
     /// the value is pushed.
     pub(super) moved: Set<Inst>,
+    /// The root of the tree of each instruction of `moved` that is written, which is where the
+    /// code reads its operands.
+    pub(super) roots: Map<Inst, Inst>,
 }
 
 /// Whether the code of an instruction with this opcode has no effect, reads no memory and cannot
@@ -278,11 +284,18 @@ impl Lower<'_, '_> {
                     trees.stacked.insert(value);
                 } else {
                     trees.teed.insert(value, top);
+                    trees.takers.insert(value, user);
                 }
                 trees.moved.insert(def);
+                trees.roots.insert(def, top);
                 self.take(def, top, root, depth + 1, tree, trees);
             }
         }
+    }
+
+    /// Whether the code of `inst` pushes each operand once before it writes its results.
+    pub(super) fn pushes_once(&self, inst: Inst) -> bool {
+        !self.operands(inst).is_empty()
     }
 
     /// The operands that the code of `inst` pushes once each, in any order, and for each one what

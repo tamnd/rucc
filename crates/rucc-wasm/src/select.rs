@@ -22,6 +22,7 @@ use crate::structure::Shape;
 use crate::{Notes, Unit, functype, is_pair, valtype};
 
 mod builtin;
+mod color;
 mod pair;
 mod stackify;
 
@@ -179,7 +180,11 @@ pub(crate) fn function(unit: &mut Unit<'_>, id: FuncId, symbol: u32) -> Result<F
     if lower.unit.optimize {
         lower.trees = lower.stackify();
     }
-    lower.assign()?;
+    if lower.unit.optimize {
+        lower.color()?;
+    } else {
+        lower.assign()?;
+    }
     lower.labels = (0..lower.shape.dispatches).map(|_| lower.new_local(ValType::I32)).collect();
     lower.plan()?;
     lower.prologue();
@@ -480,13 +485,7 @@ impl Lower<'_, '_> {
         let func = self.func;
         if let Node::Block(block) = self.shape.order[x] {
             let term = func.terminator(block).ok_or("a block has no terminator")?;
-            let call = func.successors(term).nth(index).ok_or("an edge with no target")?;
-            let pairs: Vec<(Value, Value)> = func[call.args]
-                .iter()
-                .copied()
-                .zip(func[call.block].params.iter().copied())
-                .filter(|&(arg, param)| !func[param].ty.is_mem() && arg != param)
-                .collect();
+            let pairs = self.copies(term, index)?;
             for &(arg, _) in &pairs {
                 self.push(arg)?;
             }
@@ -613,6 +612,27 @@ impl Lower<'_, '_> {
         self.branch(x, other)
     }
 
+    /// The arguments of the edge `index` of `term` that the edge copies, each with the parameter
+    /// that it goes to. An argument that is its parameter, or that has the local of its parameter
+    /// and is read from it, needs no copy. A value written with `local.tee` is in its local at the
+    /// edge, because stackify does not move a value to an edge.
+    fn copies(&self, term: Inst, index: usize) -> Result<Vec<(Value, Value)>> {
+        let func = self.func;
+        let call = func.successors(term).nth(index).ok_or("an edge with no target")?;
+        let same = |arg: Value, param: Value| {
+            arg == param
+                || !self.trees.stacked.contains(&arg)
+                    && !is_pair(self.ty(arg))
+                    && self.local.get(&arg).is_some_and(|l| self.local.get(&param) == Some(l))
+        };
+        Ok(func[call.args]
+            .iter()
+            .copied()
+            .zip(func[call.block].params.iter().copied())
+            .filter(|&(arg, param)| !func[param].ty.is_mem() && !same(arg, param))
+            .collect())
+    }
+
     /// The depth of the `br` that the edge `index` of the block at `x` is, when the edge is only
     /// that: it writes no parameter and no label, and it goes back to a loop or out to a block
     /// that follows.
@@ -620,12 +640,7 @@ impl Lower<'_, '_> {
         let func = self.func;
         let Node::Block(block) = self.shape.order[x] else { return Ok(None) };
         let term = func.terminator(block).ok_or("a block has no terminator")?;
-        let call = func.successors(term).nth(index).ok_or("an edge with no target")?;
-        let params = &func[call.block].params;
-        let copies = func[call.args]
-            .iter()
-            .zip(params)
-            .any(|(&arg, &param)| !func[param].ty.is_mem() && arg != param);
+        let copies = !self.copies(term, index)?.is_empty();
         let edge = &self.shape.edges[x][index];
         if copies || !edge.labels.is_empty() {
             return Ok(None);
