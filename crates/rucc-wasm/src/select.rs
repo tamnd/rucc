@@ -536,18 +536,7 @@ impl Lower<'_, '_> {
                 let (call, _) = caught.expect("checked just above");
                 self.catch(x, term, call)
             }
-            Opcode::BrIf => {
-                let cond = self.args(term)[0];
-                self.push_z(cond)?;
-                self.code.open(emit::IF, None);
-                self.context.push(Ctx::Other);
-                self.branch(x, 0)?;
-                self.code.op(emit::ELSE);
-                self.branch(x, 1)?;
-                self.context.pop();
-                self.code.op(emit::END);
-                Ok(())
-            }
+            Opcode::BrIf => self.br_if(x, term),
             Opcode::Switch => self.switch(x, term),
             Opcode::Return if self.sret => {
                 self.epilogue();
@@ -582,6 +571,66 @@ impl Lower<'_, '_> {
             }
             other => Err(format!("the terminator {} is not translated yet", other.name())),
         }
+    }
+
+    /// A two-way branch. An edge that is only a `br` is a `br_if`, on the condition or on its
+    /// negation, and the other edge comes after it. When neither edge is only a `br`, the first one
+    /// is in an `if` with no `else` and the second one comes after the `if`. The code of an edge
+    /// always ends in a branch, a `return` or an `unreachable`, so nothing comes out of the end of
+    /// the `if`, and that is what clang writes.
+    fn br_if(&mut self, x: usize, term: Inst) -> Result<()> {
+        let cond = self.args(term)[0];
+        self.push_z(cond)?;
+        let (taken, other) = match (self.plain(x, 0)?, self.plain(x, 1)?) {
+            (Some(depth), _) => (Some(depth), 1),
+            (None, Some(depth)) => {
+                self.code.op(emit::I32_EQZ);
+                (Some(depth), 0)
+            }
+            (None, None) => (None, 1),
+        };
+        match taken {
+            Some(depth) => {
+                let to = self.shape.edges[x][1 - other].to;
+                let way = if self.shape.is_backward(x, to) { "back" } else { "out" };
+                self.mark(to, |name| format!("{way} to {name}"));
+                self.code.br_if(depth);
+            }
+            None => {
+                self.code.open(emit::IF, None);
+                self.context.push(Ctx::Other);
+                self.branch(x, 0)?;
+                self.context.pop();
+                self.code.op(emit::END);
+            }
+        }
+        self.branch(x, other)
+    }
+
+    /// The depth of the `br` that the edge `index` of the block at `x` is, when the edge is only
+    /// that: it writes no parameter and no label, and it goes back to a loop or out to a block
+    /// that follows.
+    fn plain(&self, x: usize, index: usize) -> Result<Option<u32>> {
+        let func = self.func;
+        let Node::Block(block) = self.shape.order[x] else { return Ok(None) };
+        let term = func.terminator(block).ok_or("a block has no terminator")?;
+        let call = func.successors(term).nth(index).ok_or("an edge with no target")?;
+        let params = &func[call.block].params;
+        let copies = func[call.args]
+            .iter()
+            .zip(params)
+            .any(|(&arg, &param)| !func[param].ty.is_mem() && arg != param);
+        let edge = &self.shape.edges[x][index];
+        if copies || !edge.labels.is_empty() {
+            return Ok(None);
+        }
+        Ok(if self.shape.is_backward(x, edge.to) {
+            Some(self.depth(Ctx::Loop(edge.to)))
+        } else if self.shape.merge[edge.to] {
+            Some(self.depth(Ctx::Follow(edge.to)))
+        } else {
+            None
+        })
     }
 
     /// The call and the `unwound` before the `br_if` `term`, when the branch is the edge that a
