@@ -4,6 +4,10 @@ All notable changes are recorded here. The format follows [Keep a Changelog](htt
 
 ## Unreleased
 
+### Added
+
+- A new pass, `rangeswitch`, turns a branch on comparisons of one value against constants that are too far apart for one bit test into a `switch` on the value, at `-O2` and `-O3` (#2987). It runs just before `rangetest` and takes the chains `rangetest` could only write as one test per interval, all run every time. PostgreSQL's `IsSharedRelation` is three chains of object ids between 1213 and 6303, and each is now a `switch` that the switch lowering makes a few comparisons and a bit test, which is what gcc and clang do. A chain is rewritten when the lowering would make fewer clusters of it than it has intervals, the rule gcc's `if-to-switch` pass uses.
+
 ### Changed
 
 - At `-O1` and above, scalar replacement of aggregates splits a local whose accesses include a `bool`, which the front end loads and stores as an `i1`, and keeps the `bool` in a register (#2989). Before this a `bool isnull;` handed to an inlined `index_getattr` or `heap_getattr` stayed on the stack, so `_bt_compare` and the other tuple walks in PostgreSQL stored and reloaded the flag on every attribute. A struct with a `bool` field set to zero and then read is split too. A `bool` read back as a `char` still keeps the local in memory.
