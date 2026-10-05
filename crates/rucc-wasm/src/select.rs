@@ -1327,10 +1327,42 @@ impl Lower<'_, '_> {
             Opcode::SetjmpMarker | Opcode::LongjmpMarker | Opcode::Unwound | Opcode::Landing => {
                 return Err("setjmp, longjmp and unwinding are not translated yet".into());
             }
-            Opcode::InlineAsm => return Err("inline assembly has no meaning on wasm".into()),
+            Opcode::InlineAsm => self.barrier(inst)?,
             other => return Err(format!("the instruction {} is not translated yet", other.name())),
         }
         Ok(())
+    }
+
+    /// Inline assembly, of which rucc takes only the compiler barrier on wasm.
+    ///
+    /// An `asm` with a blank template, no operands, no labels and no clobber other than `memory`
+    /// and `cc` only keeps the loads and stores around it on their side of it. This translation
+    /// keeps each load and store where the IR has it, in order, so the barrier is no code, as with
+    /// clang. `__atomic_signal_fence` is such an `asm`. clang also reads wasm instructions in the
+    /// template, and rucc does not, so any other `asm` is refused.
+    fn barrier(&self, inst: Inst) -> Result<()> {
+        let func = self.func;
+        let Extra::Asm(asm) = func[inst].extra else {
+            return Err("an inline_asm instruction has no assembly".into());
+        };
+        let info = func[asm];
+        let names = self.unit.names;
+        let blank = names.resolve(info.template).trim().is_empty();
+        let operands = !self.args(inst).is_empty()
+            || !self.results(inst).is_empty()
+            || !names.resolve(info.constraints).is_empty()
+            || !func[info.targets].is_empty();
+        let clobbers = names
+            .resolve(info.clobbers)
+            .split(',')
+            .all(|clobber| matches!(clobber.trim(), "" | "memory" | "cc"));
+        if blank && !operands && clobbers {
+            return Ok(());
+        }
+        Err("inline assembly on wasm is refused, except an `asm` with an empty template, no \
+             operands and no clobber other than \"memory\" and \"cc\", which is a compiler \
+             barrier"
+            .into())
     }
 
     /// Select an instruction by the rule of `rules/wasm32.rules` that matches it, if one does.
