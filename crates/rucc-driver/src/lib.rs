@@ -5371,7 +5371,8 @@ mod tests {
     }
 
     /// What `--fetch` says for a target this release pins nothing for, which today is every target
-    /// but the three windows-gnu ones, the four musl ones and the eight glibc ones.
+    /// but the three windows-gnu ones, the four musl ones, the eight glibc ones and the three WASI
+    /// ones.
     #[test]
     fn a_fetch_of_a_target_nothing_is_pinned_for_says_so_rather_than_reaching_the_network() {
         let e = parse_args(&args(&["--fetch", "x86_64-linux-gnux32"])).unwrap_err();
@@ -5382,6 +5383,25 @@ mod tests {
         // The joined spelling is the same flag.
         let joined = parse_args(&args(&["--fetch=x86_64-linux-gnux32"])).unwrap_err();
         assert_eq!(joined, e);
+    }
+
+    /// Each WASI row fetches its own archive, which `bin/wasi-sysroot` in `tamnd/rucc-cross` takes
+    /// out of the wasi-sysroot of wasi-sdk 34. tamnd/rucc#2863.
+    #[test]
+    fn a_fetch_of_a_wasi_row_gets_the_archive_of_its_preview() {
+        for tuple in ["wasm32-wasip1", "wasm32-wasip2", "wasm32-wasip3"] {
+            match parse_args(&args(&["--fetch", tuple])) {
+                Ok(Action::Fetch { what, target, .. }) => {
+                    assert_eq!(what.tuple, tuple);
+                    assert_eq!(target.to_canonical_string(), tuple);
+                    assert_eq!(what.file_name(), format!("rucc-sysroot-{tuple}.tar.gz"));
+                }
+                other => panic!("{tuple}: {other:?}"),
+            }
+        }
+        // wasm32-none has no C library, so there is nothing to fetch for it.
+        let e = parse_args(&args(&["--fetch", "wasm32-none"])).unwrap_err();
+        assert!(e.message.contains("pins no sysroot for wasm32-none"), "{}", e.message);
     }
 
     /// The two targets a release will never pin, which is a different answer from the one above.

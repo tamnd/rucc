@@ -164,6 +164,13 @@ fn a_windows_sysroot_searches_one_directory_because_mingw_has_no_per_architectur
         assert!(includes[0].ends_with("include/generic"));
     }
 
+    // A WASI sysroot is one preview of wasi-libc for one architecture, so it has one tree as well.
+    for tuple in ["wasm32-wasip1", "wasm32-wasip2", "wasm32-wasip3"] {
+        let sysroot = Sysroot::in_cache(cache, target(tuple));
+        assert!(!sysroot.splits_by_arch(), "{tuple}");
+        assert_eq!(sysroot.includes(), vec![sysroot.generic_include()], "{tuple}");
+    }
+
     // And every other target still has both, so this is one libc's layout rather than a change to
     // the model. An msvc target is behind the microsoft-sdk wall and never reads a tree of ours at
     // all, which is why it is not the interesting case either way.

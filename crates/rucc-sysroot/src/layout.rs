@@ -140,7 +140,7 @@ impl Sysroot {
     /// that shares an architecture and carrying a copy of them per tuple is nine megabytes times
     /// the size of the table.
     ///
-    /// One rather than two for a Windows target, which is [`Sysroot::splits_by_arch`].
+    /// One rather than two for a Windows or a WASI target, which is [`Sysroot::splits_by_arch`].
     #[must_use]
     pub fn includes(&self) -> Vec<PathBuf> {
         if self.splits_by_arch() {
@@ -163,9 +163,13 @@ impl Sysroot {
     /// simply absent would cost nothing at lookup time, which is why this is about honesty rather
     /// than about speed: `-print-search-dirs` and `-E -v` print what is searched, and a directory
     /// nobody publishes is a line that sends a person looking for a tree that does not exist.
+    ///
+    /// A WASI target has one tree for the same reason in other words. wasi-sdk keeps one header
+    /// directory for each preview and there is one architecture, so `bin/wasi-sysroot` in
+    /// `tamnd/rucc-cross` has nothing to put on the architecture side of the split.
     #[must_use]
     pub fn splits_by_arch(&self) -> bool {
-        self.target.os() != Os::Windows
+        !matches!(self.target.os(), Os::Windows | Os::Wasi)
     }
 
     /// The link inputs: the start files, the libc archive or its generated stubs, and the

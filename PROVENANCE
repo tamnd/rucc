@@ -2,7 +2,7 @@ rucc distribution manifest 1
 release	0.21.0
 producer	https://github.com/tamnd/rucc-cross
 payload	rucc	apache-2.0
-targets	42
+targets	43
 target	x86_64-linux-gnu	pinned	https://github.com/tamnd/rucc-cross/releases/download/sysroots-2026-09-24b/rucc-sysroot-x86_64-linux-gnu.tar.gz	a951b219c641ee0b17e228adc8e43f36eaa70ee255d3c6f7717ec39c41e8b5b8
 target	x86_64-linux-musl	pinned	https://github.com/tamnd/rucc-cross/releases/download/sysroots-2026-09-23/rucc-sysroot-x86_64-linux-musl.tar.gz	93b42df66c0a7547c3e96cd5512267790df1ca0227a0000ba4f1808eb214c376
 target	aarch64-linux-gnu	pinned	https://github.com/tamnd/rucc-cross/releases/download/sysroots-2026-09-24b/rucc-sysroot-aarch64-linux-gnu.tar.gz	7a3e54260de1a07d00c7b6a1d8c4a3868367885d4aa96351b804a3a4c14e1a3c
@@ -42,7 +42,8 @@ target	riscv64-none	included
 target	i686-none	included
 target	armv7-none-eabi	included
 target	armv7m-none-eabi	included
-target	wasm32-wasip1	unpublished
-target	wasm32-wasip3	unpublished
+target	wasm32-wasip1	pinned	https://github.com/tamnd/rucc-cross/releases/download/sysroots-2026-10-05/rucc-sysroot-wasm32-wasip1.tar.gz	4a477d560f270d965d8fa416cf199e564c16331cf768f5fefc9f45378e51ada9
+target	wasm32-wasip2	pinned	https://github.com/tamnd/rucc-cross/releases/download/sysroots-2026-10-05/rucc-sysroot-wasm32-wasip2.tar.gz	09d580524d79ec6ed5cc1179a5baba40fbfd724798f17e1cb3ad7a61d9f6f159
+target	wasm32-wasip3	pinned	https://github.com/tamnd/rucc-cross/releases/download/sysroots-2026-10-05/rucc-sysroot-wasm32-wasip3.tar.gz	48fc4a3bea00c2c7d625dfa9bc53e153db0f2183924783fa137ffc9f31383378
 target	wasm32-none	included
 tree	kernel-headers	pinned	https://github.com/tamnd/rucc-cross/releases/download/sysroots-2026-09-23/rucc-kernel-headers.tar.gz	e96934f553df19d6bdbb6804f1b52d079adc4bea10a819d51eda5bc4ec584f2d
