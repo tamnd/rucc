@@ -521,6 +521,34 @@ jobs:
       - name: run rung 0
         run: tests/rung0/run.sh "$PWD/target/release/rucc" i686-linux-gnu
 
+  # rucc built as a WebAssembly module is the same compiler, so it writes the same bytes (#2862).
+  # Rung 0 is compiled by native rucc and by rucc.wasm in Wasmtime, at -O0 and -O2, and every
+  # object is compared byte for byte. Nothing is linked, because a wasm module cannot start a
+  # linker.
+  rucc-as-wasm:
+    name: rucc as a wasm module
+    needs: quick
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v7.0.1
+      - uses: Swatinem/rust-cache@v2.9.2
+      - name: install the wasm32-wasip1 target and Wasmtime
+        run: |
+          set -euo pipefail
+          rustup target add wasm32-wasip1
+          curl -sSfL -o wasmtime.tar.xz https://github.com/bytecodealliance/wasmtime/releases/download/v49.0.1/wasmtime-v49.0.1-x86_64-linux.tar.xz
+          echo "c71f7e0d30a92e418f0d17db7c6d8f6664c1ad764340a1278678f4209deab534  wasmtime.tar.xz" | sha256sum -c -
+          tar -xJf wasmtime.tar.xz
+          echo "$PWD/wasmtime-v49.0.1-x86_64-linux" >> "$GITHUB_PATH"
+      - name: build rucc, native and as a module
+        run: |
+          cargo build --release --bin rucc
+          cargo build --release --bin rucc --target wasm32-wasip1
+      - name: fetch the x86_64-linux-musl sysroot
+        run: ./target/release/rucc --fetch x86_64-linux-musl
+      - name: compare the objects
+        run: tests/rucc-as-wasm/run.sh "$PWD/target/release/rucc" "$PWD/target/wasm32-wasip1/release/rucc.wasm" x86_64-linux-musl
+
   # The barriers and atomics PostgreSQL is built on, run on AArch64 hardware. The qemu job above
   # cannot do this, because an emulated machine is only ever as weak as the x86 host under it, and
   # most of what AArch64 is allowed to reorder x86 never does. Each litmus test in tests/litmus runs

@@ -421,7 +421,7 @@ pub const TARGETS: &[TargetEntry] = &[
         tuple: "wasm32-wasip1",
         tier: Tier::Recognized,
         planned: Tier::SupportedWithEvidence,
-        host: Host::No,
+        host: Host::Planned,
         note: "one linear memory, no signals, and structured control flow",
     },
     TargetEntry {
