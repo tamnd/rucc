@@ -525,7 +525,7 @@ fn shaped(
 ) -> Shape {
     let mut shape = Shape { params: Vec::new(), values: Vec::new(), out: None };
     let quad = |ty: Type| quad(ty) || ty.is_scalar() && ty.format() == Some(Float::D128);
-    if quad(ty) && abi.scalar_is_by_reference(BYTES) {
+    if quad(ty) && abi.scalar_returns_by_reference(BYTES) {
         let out = slot(func, inst);
         shape.params.push(Param::with_abi(Type::PTR, Abi::Sret { size: BYTES, align: BITS / 8 }));
         shape.values.push(out);
@@ -622,7 +622,7 @@ pub(crate) fn becomes(func: &mut Func, inst: Inst, opcode: Opcode, extra: Extra,
 mod tests {
     use rucc_base::Interner;
     use rucc_ir::{Block, Builder, Module, Signature};
-    use rucc_target::{AbiDescription, Arch, Env, Os, TargetInfo, Triple, x86_64};
+    use rucc_target::{AbiDescription, Arch, Env, Os, TargetInfo, Triple, x86, x86_64};
 
     use super::{BITS, Flags, Float, FloatPred, Func, Opcode, Type, Value, calls};
 
@@ -947,6 +947,36 @@ mod tests {
         assert_eq!(text.matches("store").count(), 2, "and a copy into each: {text}");
         assert_eq!(text.matches(" = call").count(), 1, "the answer is still a result: {text}");
         assert!(text.contains("icmp eq"), "read the same way: {text}");
+    }
+
+    /// i386 is the third shape: the operands go in as themselves, sixteen bytes each in the argument
+    /// area, and the answer comes back through an address the way a structure of sixteen bytes
+    /// does, on Linux and on mingw-w64 alike. tamnd/rucc#2735.
+    #[test]
+    fn on_i386_the_operands_go_in_whole_and_the_answer_comes_back_through_an_address() {
+        for abi in [x86::SYSV.abi, x86::MINGW32.abi] {
+            let text = binary_on(Opcode::FAdd, abi);
+            assert!(text.contains("@__addtf3"), "{}: {text}", abi.name);
+            assert_eq!(
+                text.matches("alloca").count(),
+                1,
+                "{}: a slot for the answer: {text}",
+                abi.name
+            );
+            assert!(!text.contains("store"), "{}: nothing is copied: {text}", abi.name);
+            assert_eq!(
+                text.matches(" = call").count(),
+                0,
+                "{}: the call answers nothing: {text}",
+                abi.name
+            );
+            assert_eq!(
+                text.matches(" = load").count(),
+                1,
+                "{}: read back out of the slot: {text}",
+                abi.name
+            );
+        }
     }
 
     /// The same function on the convention that has registers wide enough is the plain shape.

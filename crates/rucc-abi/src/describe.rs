@@ -95,6 +95,17 @@ impl AbiDescription {
         self.scalars.wide_is_by_reference && !matches!(size, 1 | 2 | 4 | 8)
     }
 
+    /// Whether a scalar of this size comes back through the address the caller passes.
+    ///
+    /// Everything [`AbiDescription::scalar_is_by_reference`] says yes to, and on i386 a sixteen
+    /// byte scalar as well, which goes in as itself and comes back through an address. Asked by
+    /// the same two kinds of caller, the classifier with a C type and a pass writing a call to a
+    /// runtime routine with only a width.
+    #[must_use]
+    pub const fn scalar_returns_by_reference(&self, size: u64) -> bool {
+        self.scalar_is_by_reference(size) || self.scalars.quad_returns_by_reference && size == 16
+    }
+
     /// The format an integer of this size comes back in, where the ABI brings one back whole in a
     /// vector register rather than through the address the caller passed.
     ///
@@ -201,6 +212,17 @@ pub struct Scalars {
     /// bytes, which [`Scalars::wide_is_by_reference`] already answers for. False everywhere else,
     /// where a decimal goes where a binary float of its width goes.
     pub decimal_in_integers: bool,
+    /// Whether a sixteen byte scalar comes back through the address the caller passes, the way a
+    /// structure of sixteen bytes does, while it still goes in as itself.
+    ///
+    /// True on i386, for every convention there: gcc returns a `_Float128` through the hidden
+    /// first argument on Linux and on mingw-w64 alike, and who takes that address off the stack is
+    /// the same [`ReturnPointer`] answer a structure gets. No return register holds sixteen bytes
+    /// there, since `st(0)` is for the eighty bit format and `edx:eax` stops at eight. Going in,
+    /// the same value is sixteen bytes in the argument area like any other argument. False
+    /// everywhere else, where a register holds it or [`Scalars::wide_is_by_reference`] already
+    /// sends it both ways as an address.
+    pub quad_returns_by_reference: bool,
 }
 
 /// Where the address of a return value that comes back in memory travels.
@@ -496,7 +518,7 @@ pub enum Short {
 
 #[cfg(test)]
 mod tests {
-    use crate::abis::{AAPCS64, SYSV_AMD64, WIN64};
+    use crate::abis::{AAPCS64, I386_MINGW, I386_MSVC, I386_SYSV, SYSV_AMD64, WIN64};
     use crate::shape::Format;
 
     /// The two questions about a wide scalar are asked separately because the one ABI that says
@@ -516,11 +538,25 @@ mod tests {
         }
     }
 
+    /// On i386 a sixteen byte scalar goes in as itself and comes back through an address, and the
+    /// eighty bit `long double`, twelve bytes there, still comes back in `st(0)`.
+    #[test]
+    fn i386_brings_sixteen_bytes_back_through_an_address_and_sends_them_in_whole() {
+        for abi in [&I386_SYSV, &I386_MINGW, &I386_MSVC] {
+            assert!(abi.scalar_returns_by_reference(16), "{}", abi.name);
+            assert!(!abi.scalar_is_by_reference(16), "{}", abi.name);
+            for size in [1, 2, 4, 8, 12] {
+                assert!(!abi.scalar_returns_by_reference(size), "{} at {size} bytes", abi.name);
+            }
+        }
+    }
+
     /// Everywhere else a wide scalar has registers to travel in, so neither question applies.
     #[test]
     fn the_conventions_with_registers_for_one_say_no_to_both() {
         for abi in [&SYSV_AMD64, &AAPCS64] {
             assert!(!abi.scalar_is_by_reference(16), "{}", abi.name);
+            assert!(!abi.scalar_returns_by_reference(16), "{}", abi.name);
             assert_eq!(abi.wide_integer_returns_in(16), None, "{}", abi.name);
         }
     }

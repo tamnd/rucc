@@ -346,6 +346,9 @@ fn float_layout(kind: FloatKind, target: &TargetInfo) -> Layout {
         // Twelve bytes aligned to four on i386, sixteen aligned to sixteen on x86-64 and sixteen
         // aligned to eight on s390x, all of them a `long double`.
         FloatKind::LongDouble => target.scalars.long_double.align,
+        // Where `_Float64x` is the same format as `long double` it is the same type in storage
+        // too, so on i386 it is twelve bytes aligned to four like the `long double` it is.
+        FloatKind::Float64x if float64x_is_long_double(target) => target.scalars.long_double.align,
         FloatKind::Float64x | FloatKind::Float128 => capped(size, target),
         // Each decimal is aligned to its size on every target gcc has them for, the sixteen
         // byte one included.
@@ -357,6 +360,12 @@ fn float_layout(kind: FloatKind, target: &TargetInfo) -> Layout {
         | FloatKind::Decimal128 => size,
     };
     Layout::new(size, align)
+}
+
+/// Whether `_Float64x` is the target's `long double` under another name, which it is wherever
+/// the two have the same format.
+fn float64x_is_long_double(target: &TargetInfo) -> bool {
+    target.float64x_format == Some(target.long_double_format)
 }
 
 /// A natural alignment of `size` with the target's cap on scalar alignment applied.
@@ -379,6 +388,7 @@ pub fn float_width(kind: FloatKind, target: &TargetInfo) -> u32 {
         FloatKind::Double | FloatKind::Float32x | FloatKind::Float64 | FloatKind::Decimal64 => 64,
         FloatKind::Decimal128 => 128,
         FloatKind::LongDouble => target.long_double_width,
+        FloatKind::Float64x if float64x_is_long_double(target) => target.long_double_width,
         // The same sixteen bytes whichever of the two formats it is, for the same reason
         // `long double` is sixteen on x86-64: the x87 eighty bits are stored padded.
         FloatKind::Float64x | FloatKind::Float128 => 128,

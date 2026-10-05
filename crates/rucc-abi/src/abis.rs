@@ -78,6 +78,7 @@ pub static SYSV_AMD64: AbiDescription = AbiDescription {
         wide_integer_returns_in: None,
         wide_integer_in_memory: false,
         decimal_in_integers: false,
+        quad_returns_by_reference: false,
     },
     returns: &[
         Rule::new(Test::Empty, Travel::Ignore),
@@ -117,6 +118,7 @@ const AAPCS64_BASE: AbiDescription = AbiDescription {
         wide_integer_returns_in: None,
         wide_integer_in_memory: false,
         decimal_in_integers: false,
+        quad_returns_by_reference: false,
     },
     returns: &[
         Rule::new(Test::Empty, Travel::Ignore),
@@ -245,6 +247,7 @@ pub static WIN64: AbiDescription = AbiDescription {
         wide_integer_returns_in: Some(Format::Quad),
         wide_integer_in_memory: false,
         decimal_in_integers: true,
+        quad_returns_by_reference: false,
     },
     returns: &[
         Rule::new(Test::Empty, Travel::Ignore),
@@ -299,6 +302,7 @@ pub static RISCV_LP64D: AbiDescription = AbiDescription {
         wide_integer_returns_in: None,
         wide_integer_in_memory: false,
         decimal_in_integers: false,
+        quad_returns_by_reference: false,
     },
     returns: &[
         Rule::new(Test::Empty, Travel::Ignore),
@@ -362,6 +366,7 @@ pub static I386_SYSV: AbiDescription = AbiDescription {
         wide_integer_returns_in: None,
         wide_integer_in_memory: false,
         decimal_in_integers: false,
+        quad_returns_by_reference: true,
     },
     returns: &[
         Rule::new(Test::Empty, Travel::Ignore),
@@ -503,6 +508,7 @@ pub static I386_MINGW: AbiDescription = AbiDescription {
         wide_integer_returns_in: None,
         wide_integer_in_memory: false,
         decimal_in_integers: false,
+        quad_returns_by_reference: true,
     },
     returns: &[
         Rule::new(Test::Empty, Travel::Ignore),
@@ -706,6 +712,7 @@ pub static WASM32_BASIC_C: AbiDescription = AbiDescription {
         wide_integer_returns_in: None,
         wide_integer_in_memory: false,
         decimal_in_integers: false,
+        quad_returns_by_reference: false,
     },
     returns: &[
         Rule::new(Test::Empty, Travel::Ignore),
