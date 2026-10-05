@@ -41,6 +41,7 @@ rucc/
 │   ├── rucc-lto/           11  module merging, summaries, Thin LTO
 │   ├── rucc-regalloc/      11  both allocators and the allocation checker
 │   ├── rucc-codegen/       12  selection, scheduling, layout, frames, prologue/epilogue
+│   ├── rucc-wasm/          12  the wasm back end: selection, structured control flow, the object
 │   │   └── rules/              the lowering rule sets, one file per target, and their models
 │   │                           each of which includes the IR model above
 │   ├── rucc-driver/        13  CLI, phase graph, job scheduling, linker invocation

@@ -2258,10 +2258,17 @@ impl<'u> Body<'_, 'u> {
     /// the size that is asked rather than the width, because a `_BitInt(65)` is a pair too: sixteen
     /// bytes of which sixty five bits are the value, aligned to eight on x86-64 where an
     /// `__int128` is aligned to sixteen, and the object form reads that alignment off the type.
+    ///
+    /// wasm32 is the exception. Its `long long` is two pointers wide and is still one scalar in
+    /// the list, on a boundary of its own size, and the object form there is the address of a
+    /// copy, which is what an aggregate passed by reference is.
     fn va_arg(&mut self, list: ExprId, ty: TypeId, span: Span) -> Option<Value> {
         let result = repr::value_type(self.types(), self.target(), ty)?;
         let size = repr::size_of(self.types(), self.target(), ty);
-        if result.is_int() && size * 8 == 2 * u64::from(self.target().pointer_width) {
+        if result.is_int()
+            && size * 8 == 2 * u64::from(self.target().pointer_width)
+            && self.target().tuple.arch() != Arch::Wasm32
+        {
             let at = self.va_object(list, ty, span);
             let info = MemInfo {
                 size,

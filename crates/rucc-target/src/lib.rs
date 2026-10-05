@@ -138,7 +138,7 @@ impl Arch {
         }
     }
 
-    /// Whether code for this architecture is WebAssembly, for which rucc has no backend yet.
+    /// Whether code for this architecture is WebAssembly, which has a back end of its own.
     #[must_use]
     pub const fn is_wasm(self) -> bool {
         matches!(self, Arch::Wasm32)

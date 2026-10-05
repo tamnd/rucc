@@ -213,6 +213,7 @@ dependencies = [
  "rucc-tuple",
  "rucc-types",
  "rucc-unpack",
+ "rucc-wasm",
 ]
 
 [[package]]
@@ -435,6 +436,16 @@ name = "rucc-verify"
 version = "0.22.0"
 dependencies = [
  "rucc-rules",
+]
+
+[[package]]
+name = "rucc-wasm"
+version = "0.22.0"
+dependencies = [
+ "rucc-base",
+ "rucc-ir",
+ "rucc-object",
+ "rucc-target",
 ]
 
 [[package]]

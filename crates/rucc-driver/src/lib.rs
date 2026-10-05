@@ -4994,13 +4994,13 @@ pub fn run(args: &[String]) -> i32 {
 /// is kinder until the port is done. Only the link is refused: an object or a listing built
 /// with the checks in is still what was asked for, and is what a test of the instrumentation reads.
 ///
-/// A wasm target is the other case. There is no wasm backend yet, so there is no object to link,
-/// and the refusal says that rather than that there is no link line.
+/// A wasm target is the other case. The wasm back end writes an object, and the link line for
+/// wasi-libc is a later step of #2864, so the refusal says to use `-c` and link with `wasm-ld`.
 fn unlinkable(opts: &Options) -> Option<String> {
     if opts.target.arch.is_wasm() {
         return Some(format!(
-            "there is no wasm backend yet, so rucc cannot compile or link for {}. -fsyntax-only \
-             and -E work for this target; the backend is tamnd/rucc#2864",
+            "rucc cannot link for {} yet. -c writes the object, and wasm-ld links it; the link \
+             line is tamnd/rucc#2864",
             opts.target.tuple().to_canonical_string()
         ));
     }
@@ -6254,7 +6254,7 @@ mod tests {
         assert_eq!(unlinkable(&opts), None);
     }
 
-    /// A wasm target has no back end yet, so a link is refused before anything is compiled, and
+    /// A wasm target has no link line yet, so a link is refused before anything is compiled, and
     /// the refusal names what still works.
     #[test]
     fn a_wasm_target_is_refused_at_the_link() {
@@ -6262,8 +6262,8 @@ mod tests {
         {
             let (opts, _) = compile(&[&format!("--target={target}"), "a.c"]);
             let why = unlinkable(&opts).expect("a refusal");
-            assert!(why.starts_with("there is no wasm backend yet"), "{why}");
-            assert!(why.contains("-fsyntax-only"), "{why}");
+            assert!(why.starts_with("rucc cannot link for wasm32"), "{why}");
+            assert!(why.contains("-c writes the object"), "{why}");
         }
     }
 
