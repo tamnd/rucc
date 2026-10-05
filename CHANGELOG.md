@@ -4,13 +4,14 @@ All notable changes are recorded here. The format follows [Keep a Changelog](htt
 
 ## Unreleased
 
+## 0.24.2
+
+More of WA4, wasm code at `-O2` that is close to clang in size and speed (#2866). A value with more than one use is written at its first use with a `local.tee`, and a constant address offset goes in the offset field of a load or a store. The SQLite shell at `-O2` goes from 1,952,890 bytes to 1,816,667, which is 0.2% smaller than the shell that clang from wasi-sdk 34 builds, so the size criterion of WA4 is met.
+
 ### Changed
 
 - At `-O1` and above, a wasm load or store whose address is a `ptr_add` with `nuw` of a constant that is not negative puts the constant in its offset field, and a `ptr_add` that is then not used is not written (#2866). A chain of such `ptr_add` instructions folds into one offset. The SQLite shell at `-O2` goes from 1,923,305 bytes to 1,816,667, which is 0.2% smaller than the shell that clang from wasi-sdk 34 builds.
 - Lowering sets `nuw` on a `ptr_add` that moves an address forward by a constant number of bytes inside its object, as for a member of a structure, for `p[3]` and for `p++` (#2866). C does not let such an address leave its object, so the add does not wrap. `-fwrapv-pointer` stops the flag. The IR now allows `nuw` on `ptr_add`, and the text form is `ptr_add.nuw`.
-
-### Changed
-
 - At `-O1` and above, the wasm backend writes a value with more than one use at its first use and keeps a copy in its local with a `local.tee`, when the instruction that makes the value can move to that use and no other instruction of the block reads the value before it (#2866). The rules for what can move are the rules of stackify. A value is not written this way into one edge of a branch, because then the local is not written on the other edge. The SQLite shell at `-O2` goes from 1,952,890 bytes to 1,923,305.
 
 ## 0.24.1
