@@ -327,6 +327,39 @@ fn an_int128_is_two_i64_values_and_is_returned_through_memory() {
 }
 
 /// Where wasi-sdk is, or nothing when this machine has none.
+/// The tree form names each local by the IR value that it holds and each label local by its
+/// dispatch node, marks the code of each IR block where it starts, and indents each construct one
+/// step more than the construct around it.
+#[test]
+fn the_tree_form_names_the_values_and_marks_the_blocks() {
+    let mut names = Interner::new();
+    let module = rucc_ir::parse(TWISTED, &mut names).expect("the IR parses");
+    let text = rucc_wasm::tree(&module, &names, Cpu::Lime1.features()).unwrap();
+    assert!(text.starts_with("function __main_argc_argv (i32, i32) -> (i32)\n"), "{text}");
+    for line in ["  param 0 i32 %0\n", "local.set label0\n", "local.get label0\n"] {
+        assert!(text.contains(line), "{line:?} is not in\n{text}");
+    }
+    for note in ["; dispatch0 follows", "; loop of dispatch0", "; back to dispatch0"] {
+        assert!(text.contains(note), "{note:?} is not in\n{text}");
+    }
+    for block in 0..4 {
+        let mark = format!("; block{block}\n");
+        assert!(text.contains(&mark), "{mark:?} is not in\n{text}");
+    }
+    let mut open = Vec::new();
+    for line in text.lines().skip_while(|l| !l.starts_with("  block")).filter(|l| !l.is_empty()) {
+        let indent = line.len() - line.trim_start().len();
+        let op = line.trim_start().split([' ', '\t']).next().unwrap_or_default();
+        match op {
+            "block" | "loop" | "if" => open.push(indent),
+            "else" => assert_eq!(Some(&indent), open.last(), "{line}"),
+            "end_block" | "end_loop" | "end_if" => assert_eq!(open.pop(), Some(indent), "{line}"),
+            "end_function" => assert!(open.is_empty() && indent == 0, "{line}"),
+            _ => assert_eq!(indent, 2 * open.len() + 2, "{line}"),
+        }
+    }
+}
+
 /// The address of a function, in the code and in the data, and no call through a pointer.
 ///
 /// ```c

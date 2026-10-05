@@ -1333,6 +1333,10 @@ pub enum EmitKind {
     Ir,
     /// The machine IR after register allocation, `--emit=mir-final`.
     MirFinal,
+    /// The code of each function as the wasm backend structured it, `--emit=wasm-tree`. Each
+    /// construct is indented and marked with the IR block that it comes from, and each local is
+    /// named by the IR value that it holds. Only a wasm target writes it.
+    WasmTree,
     /// The safety summary, `--emit=safety-summary`.
     ///
     /// Not an intermediate form of the program the way the three above are. It is the answer to
@@ -1369,6 +1373,7 @@ impl EmitKind {
             EmitKind::Tast => "tast",
             EmitKind::Ir => "ir",
             EmitKind::MirFinal => "mir-final",
+            EmitKind::WasmTree => "wasm-tree",
             EmitKind::SafetySummary => "safety-summary",
             EmitKind::TypeGranules => "type-granules",
             EmitKind::SyntaxOnly => "syntax-only",
@@ -1389,6 +1394,7 @@ impl FromStr for EmitKind {
             "tast" => EmitKind::Tast,
             "ir" => EmitKind::Ir,
             "mir-final" => EmitKind::MirFinal,
+            "wasm-tree" => EmitKind::WasmTree,
             "safety-summary" => EmitKind::SafetySummary,
             "type-granules" => EmitKind::TypeGranules,
             "syntax-only" => EmitKind::SyntaxOnly,

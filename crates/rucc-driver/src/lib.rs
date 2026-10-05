@@ -300,7 +300,7 @@ options:
   -save-temps[=cwd|obj], -fstack-usage, -time   keep the .i and .s, write a .su, time each step
   --target=<triple>      generate code for <triple>, as the names <triple>-rucc and <triple>-gcc do
   --emit=<kind>          exe, obj, archive, asm, preprocessed, tast, ir, mir-final,
-                         safety-summary, type-granules
+                         wasm-tree, safety-summary, type-granules
   --print-config, --print-pipeline    print the configuration or the pipeline, and exit
   --version              print the version and exit
   -h, --help             print this message and exit
