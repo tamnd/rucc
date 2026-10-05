@@ -492,7 +492,7 @@ impl Parser<'_> {
             name = self.attribute_name()?;
         }
         let args = if self.cursor.at_punct(Punct::LParen) {
-            self.attribute_args()
+            self.attribute_args(self.assumes(namespace, name))
         } else {
             AttrArgList::EMPTY
         };
@@ -516,12 +516,23 @@ impl Parser<'_> {
         None
     }
 
+    /// Whether the attribute is GNU's `assume`, whose argument is an expression even when it is
+    /// a lone name, and a conditional expression rather than an assignment, which is how gcc
+    /// reads it: `assume(x)` is about the object and `assume(x = 1)` does not parse.
+    fn assumes(&self, namespace: Option<Symbol>, name: Symbol) -> bool {
+        let gnu = namespace.is_none_or(|ns| self.cx.interner.resolve(ns) == "gnu");
+        let name = self.cx.interner.resolve(name);
+        let bare = name.strip_prefix("__").and_then(|name| name.strip_suffix("__"));
+        gnu && bare.unwrap_or(name) == "assume"
+    }
+
     /// The parenthesised arguments of an attribute.
     ///
     /// An argument that is a lone identifier stays an identifier rather than becoming a name
     /// expression, because `format(printf, 1, 2)` and `mode(DI)` name things that are not
     /// objects and looking them up in the ordinary scope would find the wrong thing or nothing.
-    fn attribute_args(&mut self) -> AttrArgList {
+    /// The arguments of `assume` are the exception, and each is a conditional expression.
+    fn attribute_args(&mut self, assume: bool) -> AttrArgList {
         let mut args = Vec::new();
         if !self.enter() {
             self.cursor.bump();
@@ -531,13 +542,14 @@ impl Parser<'_> {
         while !self.cursor.at_punct(Punct::RParen) && !self.cursor.is_eof() {
             let before = self.cursor.index();
             let lone_ident = self.cursor.current().ident().filter(|_| {
-                matches!(self.cursor.peek(1).punct(), Some(Punct::Comma | Punct::RParen))
+                !assume && matches!(self.cursor.peek(1).punct(), Some(Punct::Comma | Punct::RParen))
             });
             match lone_ident {
                 Some(name) => {
                     self.cursor.bump();
                     args.push(AttrArg::Ident(name));
                 }
+                None if assume => args.push(AttrArg::Expr(self.const_expr())),
                 None => args.push(AttrArg::Expr(self.assign_expr())),
             }
             if !self.cursor.eat_punct(Punct::Comma) {

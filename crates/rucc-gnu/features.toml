@@ -1153,6 +1153,15 @@ tests = ["rucc::the_hints_gcc_answers_yes_for_are_taken_without_a_word"]
 notes = "Says the pointer returned is aligned, which gcc may use to pick an aligned instruction. Dropping it only gives up that choice."
 
 [[feature]]
+name = "assume"
+kind = "attribute"
+gcc_version = "13.0"
+status = "implemented"
+used_by = []
+tests = ["rucc::an_assumption_is_a_promise_the_optimizer_reads_and_never_computed", "rucc::assume_is_checked_in_gcc_s_words"]
+notes = "A statement, `__attribute__((assume(e)));`, promising that `e` is true without computing it, so a call in it is not made and an increment in it does not happen. When the optimizer runs and nothing in `e` would do anything it becomes `if (e) ; else __builtin_unreachable();`, the spelling programs used for the promise before gcc had one, and the optimizer makes what it makes of that, which today is less than gcc makes: gcc drops a test the promise decides and narrows a value it bounds. Anything else, and everything at `-O0`, is checked and dropped, as gcc drops it. The argument is a conditional expression even when it is a lone name, as in gcc, and a statement position takes it too, as in `if (x) __attribute__((assume(y)));`. gcc's errors for the argument count (`E0835`) and for a value that is not a scalar, and its warnings for the attribute at file scope, on a declaration and as C++'s unscoped `[[assume]]`, in its words."
+
+[[feature]]
 name = "vector_size"
 kind = "attribute"
 gcc_version = "3.1"

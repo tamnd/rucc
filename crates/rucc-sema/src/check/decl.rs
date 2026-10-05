@@ -179,8 +179,12 @@ impl Checker<'_> {
                 self.tast.add_decl_refs(&[])
             }
             // An attribute declaration appertains to nothing by definition, so there is nothing
-            // to check and nothing to declare.
-            ast::Decl::Attributes(_) => self.tast.add_decl_refs(&[]),
+            // to declare. One in a body is a statement, which [`Self::assumed`] reads, and the
+            // `assume` that is the reason to write one is out of place out here.
+            ast::Decl::Attributes(attrs) => {
+                self.assumed_at_top(attrs);
+                self.tast.add_decl_refs(&[])
+            }
         }
     }
 
@@ -209,6 +213,8 @@ impl Checker<'_> {
                 items.truncate(1);
             }
         }
+        // Once for the declaration rather than once for each declarator in it.
+        self.assume_misplaced(&[node.attrs], true, node.span);
         let mut declared = Vec::with_capacity(items.len());
         let register =
             self.ast[specs].storage == Some(StorageClass::Register) && !self.scopes.at_file_scope();
@@ -442,6 +448,7 @@ impl Checker<'_> {
         self.no_reordered(&[specs.attrs], true);
         self.strict_flex_refused(&[specs.attrs], Some(name));
         self.ms_hooked(&[specs.attrs], true);
+        self.assume_misplaced(&[specs.attrs], true, specs.span);
         self.record_patchable(id, &[specs.attrs], DeclKind::Function);
         self.record_wasm_names(id, &[specs.attrs], DeclKind::Function);
         self.record_fentry(Some(id), &[specs.attrs], DeclKind::Function);
