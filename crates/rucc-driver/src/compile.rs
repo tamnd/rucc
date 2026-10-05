@@ -4814,23 +4814,21 @@ decl #0 x : int object external static defined
     /// functions are attempted, so a file that is ahead of the back end in three places says so
     /// three times rather than one recompilation at a time.
     ///
-    /// The construct is a local of a fixed size wanting more alignment than a call leaves the
-    /// stack pointer on, in a function whose frame also grows. The prologue would force the
-    /// alignment and the array would move the stack pointer afterwards, and those are two frames
-    /// that each want the one register the rest of the frame is counted from.
+    /// The construct is a variable length array in a function that is `naked`. A frame that grows
+    /// is reached from a frame pointer, and setting one up is the prologue the function asked to
+    /// be without.
     #[test]
     fn a_construct_the_back_end_cannot_reach_yet_is_reported_against_its_function() {
         let mut opts = options();
         opts.emit = EmitKind::MirFinal;
-        let source = "void a(int n) { int v[n]; struct __attribute__((aligned(32))) S { int x; } \
-                      s; s.x = 1; v[0] = s.x; }\n\
-                      void b(int n) { int v[n]; struct __attribute__((aligned(32))) S { int x; } \
-                      s; s.x = 1; v[0] = s.x; }\n";
+        let source = "void use(int *);\n\
+                      __attribute__((naked)) void a(int n) { int v[n]; use(v); }\n\
+                      __attribute__((naked)) void b(int n) { int v[n]; use(v); }\n";
         let result = run(&opts, source);
         assert!(result.failed());
         assert_eq!(result.messages.len(), 2, "{:?}", result.messages);
         assert!(result.messages[0].contains("cannot generate code for 'a'"), "{:?}", result);
-        assert!(result.messages[0].contains("wants more alignment"), "{:?}", result);
+        assert!(result.messages[0].contains("`naked`"), "{:?}", result);
         assert!(result.messages[1].contains("cannot generate code for 'b'"), "{:?}", result);
         assert!(result.text().is_empty());
     }
