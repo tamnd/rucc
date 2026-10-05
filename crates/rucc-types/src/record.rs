@@ -956,11 +956,19 @@ fn member_layout(
     if !flexible {
         return layout(types, ty, target);
     }
-    let TypeKind::Array { elem, .. } = types.kind(types.canonical(ty)) else {
-        return Err(LayoutError::Incomplete);
+    // The element as written rather than the canonical one, since a typedef of the element may
+    // say what it is aligned to, and the canonical array has forgotten it.
+    let mut written = ty;
+    let elem = loop {
+        match types.kind(written) {
+            TypeKind::Typedef { underlying, .. } => written = underlying,
+            TypeKind::Array { elem, .. } => break elem,
+            _ => return Err(LayoutError::Incomplete),
+        }
     };
     // No size, but the element's alignment, which is why `struct { char c; long long f[]; }`
-    // is eight bytes rather than one.
+    // is eight bytes rather than one, and `struct { int i; u64 f[]; }` four with a `u64` that
+    // a typedef aligned to four, as in gcc.
     let elem = layout(types, elem, target)?;
     Ok(Layout::new(0, elem.align))
 }

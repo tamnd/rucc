@@ -851,6 +851,15 @@ tests = ["rucc-types::a_function_that_returns_by_a_jump_is_the_same_type", "rucc
 notes = "A function type whose function can come back by an indirect jump, as `swapcontext` does. Under `-fcf-protection=branch` or `full` each call to one is followed by `endbr64` or `endbr32`, whether it is called by name, through a pointer, a typedef or a member, in the listing and in the object the compiler writes itself, and `-mmanual-endbr` leaves the pads in. The callee's own declaration counts too, so a call through a plain pointer the optimizer saw the target of has its pad, while a declaration without a prototype has none, as in gcc. A call to `setjmp` or another `returns_twice` function gets the same pad, which gcc gives it and rucc did not before. A tail call to one stays a jump under `branch`, and under `full` it is a call with its pad unless the caller has the attribute too. It lands where `nocf_check` does, but it is not a difference between types: a declaration each way and a pointer of one taken for the other are said nothing about, and the composite keeps it. On something that is not a function it is warned about in gcc's words and dropped, and an argument is refused with `E0823`."
 
 [[feature]]
+name = "warn_if_not_aligned"
+kind = "attribute"
+gcc_version = "8.0"
+status = "implemented"
+used_by = ["linux"]
+tests = ["rucc-types::what_a_member_asks_to_sit_at_comes_from_the_nearest_typedef_that_said", "rucc::a_member_that_asks_for_more_than_it_gets_is_warned_about_in_gcc_s_words", "rucc::the_warning_is_turned_off_and_made_an_error_by_its_own_name", "rucc::the_attribute_is_checked_in_gcc_s_words"]
+notes = "The alignment a member of a type asks to sit at, checked under `-Wif-not-aligned`, which is on by default. A typedef, a tagged struct or union, an enumeration or a member's own declaration says it, a typedef of a typedef and an array of one ask what they name, and the nearest typedef that says its own number wins. Once a record is laid out, each member that asks is warned about, in gcc's words and order, where the record is aligned to less and again where the member sits at an offset that is not a multiple, so `struct { int i; __aligned_u64 x; }` is found where the kernel's uapi headers would be wrong on i386. A record inside it is asked only for what its own type says. Written bare it asks for the biggest alignment, as `aligned` does, zero is dropped with a warning, and another number that is not a power of two is refused. On an object or a function it is refused with `E0825`, on a bit-field or a bit-field of a type that carries it with `E0826`, and a second argument with `E0827`. One difference from gcc: on a parameter it is dropped without gcc's error. The warning points at the record where gcc sometimes points at the type of the member."
+
+[[feature]]
 name = "patchable_function_entry"
 kind = "attribute"
 gcc_version = "8.0"

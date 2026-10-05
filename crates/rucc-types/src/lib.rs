@@ -538,6 +538,62 @@ mod tests {
     }
 
     #[test]
+    fn a_flexible_array_of_an_aligned_typedef_is_as_aligned_as_the_typedef() {
+        // gcc 13 puts the array at four and the record at four, and the array was at eight.
+        let mut interner = Interner::new();
+        let mut types = Types::new();
+        let ull = types.int(IntKind::ULongLong);
+        let int = types.int(IntKind::Int);
+        let four = NonZeroU32::new(4).unwrap();
+        let u64 = types.aligned_typedef(interner.intern("u64"), ull, four);
+        let flexible = types.array(u64, ArrayLen::Unknown);
+        let laid_out =
+            lay_out_on(&linux(), &types, RecordKind::Struct, &[member(int), member(flexible)]);
+        assert_eq!(offsets(&laid_out), [0, 32]);
+        assert_eq!(laid_out.layout, Layout::new(4, 4));
+        // And through a typedef of the array.
+        let named = types.typedef(interner.intern("flex"), flexible);
+        let laid_out =
+            lay_out_on(&linux(), &types, RecordKind::Struct, &[member(int), member(named)]);
+        assert_eq!(laid_out.layout, Layout::new(4, 4));
+    }
+
+    #[test]
+    fn what_a_member_asks_to_sit_at_comes_from_the_nearest_typedef_that_said() {
+        let mut interner = Interner::new();
+        let mut types = Types::new();
+        let ull = types.int(IntKind::ULongLong);
+        let four = NonZeroU32::new(4);
+        let eight = NonZeroU32::new(8).unwrap();
+        let sixteen = NonZeroU32::new(16).unwrap();
+        // The kernel's `__aligned_u64` written the other way round, lowered and checked.
+        let u64 = types.checked_typedef(interner.intern("u64"), ull, four, false, eight);
+        assert_eq!(types.warn_if_not_aligned(u64), Some(eight));
+        assert_eq!(types.align_override(u64), four);
+        // It is not a different type to anything but the warning.
+        assert_eq!(types.canonical(u64), types.canonical(ull));
+        // Another name, an array and a qualifier ask what they name.
+        let alias = types.typedef(interner.intern("alias"), u64);
+        assert_eq!(types.warn_if_not_aligned(alias), Some(eight));
+        let array = types.array(u64, ArrayLen::Fixed(2));
+        assert_eq!(types.warn_if_not_aligned(array), Some(eight));
+        let constant = types.qualified(u64, Qualifiers::CONST);
+        assert_eq!(types.warn_if_not_aligned(constant), Some(eight));
+        // The nearest one that said wins, and below the sugar there is nothing.
+        let wider = types.checked_typedef(interner.intern("wider"), u64, None, false, sixteen);
+        assert_eq!(types.warn_if_not_aligned(wider), Some(sixteen));
+        assert_eq!(types.warn_if_not_aligned(ull), None);
+        // A record says it of itself, and a pointer to one asks nothing.
+        let record = record(&mut types, RecordKind::Struct, &[member(ull)]);
+        assert_eq!(types.warn_if_not_aligned(record), None);
+        let TypeKind::Record(id) = types.kind(record) else { unreachable!() };
+        types.make_record_checked(id, sixteen);
+        assert_eq!(types.warn_if_not_aligned(record), Some(sixteen));
+        let pointer = types.pointer(record);
+        assert_eq!(types.warn_if_not_aligned(pointer), None);
+    }
+
+    #[test]
     fn an_array_of_an_aligned_typedef_is_as_aligned_as_the_typedef() {
         // mingw-w64's `jmp_buf`, which is `typedef _JBTYPE jmp_buf[16]` with `_JBTYPE` a sixteen
         // byte record that a typedef aligns to sixteen. The canonical array holds the plain

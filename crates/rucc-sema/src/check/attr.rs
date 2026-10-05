@@ -38,6 +38,8 @@
 //! not this module's to complain about, since the same list is written on declarations that
 //! have no layout at all.
 
+use std::num::NonZeroU32;
+
 use rucc_ast::{AlignSpec, AttrArg, AttrList, AttrSyntax, Attribute, PragmaOptions};
 use rucc_base::Symbol;
 use rucc_base::float::Format;
@@ -2878,12 +2880,67 @@ impl Checker<'_> {
                 value
             }
         };
-        if requested <= 0 || requested & (requested - 1) != 0 {
+        // Zero is a warning and the attribute is dropped, as gcc 13 has it for both attributes
+        // that read their number here, where any other number that is not a power of two is an
+        // error.
+        if requested == 0 {
+            let what = "requested alignment '0' is not a positive power of 2";
+            self.report(Diagnostic::warning(what, attr.span).with_code("E0703"));
+            return None;
+        }
+        if requested < 0 || requested & (requested - 1) != 0 {
             let what = format!("requested alignment '{requested}' is not a positive power of 2");
             self.report(Diagnostic::error(what, attr.span).with_code("E0607"));
             return None;
         }
         u32::try_from(requested).ok()
+    }
+
+    /// What `warn_if_not_aligned` in these lists asked a member of the type to sit at a multiple
+    /// of, and where it was written.
+    ///
+    /// The number is read the way `aligned` reads its own, so written bare it is gcc's biggest
+    /// alignment, zero is warned about and dropped, and anything else that is not a power of two
+    /// is refused. More than one argument is refused with `E0827`. Where it is written twice the
+    /// last one counts.
+    pub(in crate::check) fn warn_alignment(
+        &mut self,
+        lists: &[AttrList],
+    ) -> Option<(NonZeroU32, Span)> {
+        let ast = self.ast;
+        let mut asked = None;
+        for &list in lists {
+            for &attr in &ast[list] {
+                if attr.namespace.is_some_and(|ns| self.text(ns) != "gnu")
+                    || self.gnu_name(&attr) != "warn_if_not_aligned"
+                {
+                    continue;
+                }
+                let count = ast[attr.args].len();
+                if count > 1 {
+                    let what =
+                        "wrong number of arguments specified for 'warn_if_not_aligned' attribute";
+                    let note = format!("expected between 0 and 1, found {count}");
+                    let refused = Diagnostic::error(what, attr.span).with_code("E0827");
+                    self.report(refused.note(note, attr.span));
+                    continue;
+                }
+                if let Some(align) = self.aligned_argument(attr).and_then(NonZeroU32::new) {
+                    asked = Some((align, attr.span));
+                }
+            }
+        }
+        asked
+    }
+
+    /// `warn_if_not_aligned` on the declaration of an object or a function, which gcc refuses in
+    /// these words: it is about where a member sits, so only a type or a member can say it.
+    pub(in crate::check) fn warn_alignment_misplaced(&mut self, lists: &[AttrList], name: Symbol) {
+        if let Some((_, at)) = self.warn_alignment(lists) {
+            let what =
+                format!("'warn_if_not_aligned' may not be specified for '{}'", self.text(name));
+            self.report(Diagnostic::error(what, at).with_code("E0825"));
+        }
     }
 }
 

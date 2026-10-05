@@ -71,6 +71,7 @@ const OPTIONS: &[(&str, &str)] = &[
     ("E0809", "declaration-after-statement"),
     ("E0812", "div-by-zero"),
     ("E0820", "attribute-alias"),
+    ("E0824", "if-not-aligned"),
     ("W0331", "cpp"),
     ("W0333", "invalid-memory-model"),
     ("W0334", "expansion-to-defined"),

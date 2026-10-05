@@ -45,6 +45,8 @@
 //! which agree with each other and with this. `packed` written on one enumeration does the same
 //! for that enumeration alone, whether it is written before the tag or after the closing brace.
 
+use std::num::NonZeroU32;
+
 use rucc_ast::{self as ast, Member, TypeSpec};
 use rucc_base::Symbol;
 use rucc_base::hash::Set;
@@ -257,6 +259,9 @@ impl Checker<'_> {
         // what lets the walk below call methods that take the checker mutably.
         let ast = self.ast;
         let mut fields: Vec<(FieldDecl, Span)> = Vec::with_capacity(ast[members].len());
+        // What a member's own `warn_if_not_aligned` asked for, by where the member was written,
+        // since the pass over flexible array members below may take members out of `fields`.
+        let mut asked: Vec<(Span, NonZeroU32)> = Vec::new();
         let mut named = Set::default();
         for member in &ast[members] {
             let field = match *member {
@@ -296,6 +301,7 @@ impl Checker<'_> {
                 let specs = self.ast[field.specs].attrs;
                 self.read_deprecated_member(id, name, &[field.attrs, specs], at);
             }
+            self.member_warn_alignment(field, &decl, at, &mut asked);
             fields.push((decl, at));
         }
         self.check_flexible(kind, &mut fields);
@@ -344,6 +350,86 @@ impl Checker<'_> {
         // refuses the attribute anywhere else, which is not this compiler's to repeat.
         if kind == RecordKind::Struct && self.designated_init(attrs) {
             self.mark_designated(id);
+        }
+        // The record's own is about a member of its type somewhere else, and changes nothing here.
+        if let Some((own, _)) = self.warn_alignment(&[attrs]) {
+            self.types.make_record_checked(id, own);
+        }
+        self.check_member_alignment(id, &fields, &asked, span);
+    }
+
+    /// A member's own `warn_if_not_aligned`, kept in `asked`, and what gcc refuses on a bit-field:
+    /// the attribute on its declaration, and a type that carries it.
+    fn member_warn_alignment(
+        &mut self,
+        field: ast::Field,
+        decl: &FieldDecl,
+        at: Span,
+        asked: &mut Vec<(Span, NonZeroU32)>,
+    ) {
+        let specs = self.ast[field.specs].attrs;
+        let own = self.warn_alignment(&[field.attrs, specs]);
+        if decl.bits.is_none() {
+            if let Some((own, _)) = own {
+                asked.push((at, own));
+            }
+            return;
+        }
+        let who = self.member_named(decl.name);
+        if let Some((_, written)) = own {
+            let what = format!("'warn_if_not_aligned' may not be specified for {who}");
+            self.report(Diagnostic::error(what, written).with_code("E0825"));
+        } else if self.types.warn_if_not_aligned(decl.ty).is_some() {
+            let what = format!("cannot declare bit-field {who} with 'warn_if_not_aligned' type");
+            self.report(Diagnostic::error(what, at).with_code("E0826"));
+        }
+    }
+
+    /// `-Wif-not-aligned`, once the record is laid out.
+    ///
+    /// A member that asks to sit at a multiple of some number, by its own attribute or by its
+    /// type's, is warned about where the record is aligned to less than that, and again where the
+    /// member does not sit at a multiple of it, in gcc's words and in gcc's order, member by
+    /// member. Only the record's own members are asked: a record inside it is asked when it is
+    /// laid out, and its type carries nothing unless its own definition said so.
+    fn check_member_alignment(
+        &mut self,
+        id: RecordId,
+        fields: &[(FieldDecl, Span)],
+        asked: &[(Span, NonZeroU32)],
+        span: Span,
+    ) {
+        let info = self.types.record_info(id);
+        let (Some(whole), None) = (info.layout, &info.variable) else { return };
+        if info.fields.len() != fields.len() {
+            return;
+        }
+        let placed: Vec<u64> = info.fields.iter().map(|field| field.offset).collect();
+        let record = self.types.record(id);
+        let spelled = self.spell(record);
+        for ((decl, at), offset) in fields.iter().zip(placed) {
+            let own = asked.iter().find(|(span, _)| span == at).map(|&(_, own)| own);
+            let Some(wanted) = own.or_else(|| self.types.warn_if_not_aligned(decl.ty)) else {
+                continue;
+            };
+            if decl.bits.is_some() {
+                continue;
+            }
+            let wanted = u64::from(wanted.get());
+            if whole.align % wanted != 0 {
+                let what =
+                    format!("alignment {} of '{spelled}' is less than {wanted}", whole.align);
+                self.report(Diagnostic::warning(what, span).with_code("E0824"));
+            }
+            if offset % wanted != 0 {
+                let who = match decl.name {
+                    Some(name) => self.text(name).to_owned(),
+                    None => String::from("<anonymous>"),
+                };
+                let what =
+                    format!("'{who}' offset {offset} in '{spelled}' isn't aligned to {wanted}");
+                self.report(Diagnostic::warning(what, *at).with_code("E0824"));
+            }
         }
     }
 
