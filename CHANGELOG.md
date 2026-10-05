@@ -29,6 +29,8 @@ The minor release for the -O0 gate milestone (#392), whose last two items closed
 
 ### Fixed
 
+- A call to a `noreturn` function now counts as cold to the inliner, as gcc predicts it, so it is inlined only when that does not grow the code. Linux 6.12's `machine_real_restart` was inlined into `native_machine_emergency_restart` with its `ljmpl`, which objtool rejects outside the function marked for it.
+- An `always_inline` function passed by pointer to an `always_inline` body that calls through it is now inlined once that body is, as gcc does. Linux 6.12's `poke_int3_handler` kept a call to `patch_cmp` out of `.noinstr.text`.
 - A function that can never return, such as a `static` one that ends in `BUG()`, is now marked `noreturn` from `-O1` up the way gcc's `ipa-pure-const` does it, and a call to it ends the block. Linux 6.1's `skb_put` had a `jmp` after `call skb_panic` that objtool reported as unreachable. `-fno-ipa-pure-const` turns it off.
 - A branch on a known condition is folded by the condition before an arm that is a dead end is read as never taken. `do { asm("ud2"); } while (0); __builtin_unreachable();`, which is BUG() in Linux 6.1, used to become a loop with a `jmp` after the `ud2` that objtool reports as an unreachable instruction.
 - An inline asm `"p"` operand that is the address of a global is now the link-time constant gcc sees, so `%P` prints the bare name and `%a` the rip-relative form. Linux 6.1's `this_cpu_read_stable` hands in `"p" (&current_task)` and was refused in 569 units.
