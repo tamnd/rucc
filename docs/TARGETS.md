@@ -48,7 +48,8 @@ A tier here does not say whether the evidence behind it came from hardware or fr
 | `armv7-none-eabi` | 3 | 2 | no | soft float, because a bare metal core may have no FPU |
 | `armv7m-none-eabi` | 3 | 2 | no | Thumb only, and the smallest target in the table |
 | `wasm32-wasip1` | 4 | 2 | yes | one linear memory, no signals, and structured control flow |
+| `wasm32-wasip2` | 4 | 2 | later | a component that wraps a wasip1-style core module |
 | `wasm32-wasip3` | 4 | 3 | no | a different ABI from p1 and p2, with the stack pointer and TLS base in a context |
 | `wasm32-none` | 4 | 2 | no | freestanding wasm, which is the second back end without the libc question |
 
-42 rows. The plan reaches tier 1 on 10, tier 2 on 18, tier 3 on 8 and recognizes 6, which is 36 targets that compile and link.
+43 rows. The plan reaches tier 1 on 10, tier 2 on 19, tier 3 on 8 and recognizes 6, which is 37 targets that compile and link.

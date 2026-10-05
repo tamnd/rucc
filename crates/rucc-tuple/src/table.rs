@@ -425,6 +425,13 @@ pub const TARGETS: &[TargetEntry] = &[
         note: "one linear memory, no signals, and structured control flow",
     },
     TargetEntry {
+        tuple: "wasm32-wasip2",
+        tier: Tier::Recognized,
+        planned: Tier::SupportedWithEvidence,
+        host: Host::Planned,
+        note: "a component that wraps a wasip1-style core module",
+    },
+    TargetEntry {
         tuple: "wasm32-wasip3",
         tier: Tier::Recognized,
         planned: Tier::InProgress,

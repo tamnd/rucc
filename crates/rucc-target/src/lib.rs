@@ -229,7 +229,7 @@ impl ObjectFormat {
 
     /// The same format as [`rucc_tuple::ObjectFormat`] names it.
     ///
-    /// The two enumerations exist because the tuple describes forty two targets and this crate
+    /// The two enumerations exist because the tuple describes forty three targets and this crate
     /// describes what the compiler emits for one, and they will stay separate for as long as that
     /// is true. This is the one place they are put side by side.
     #[must_use]
@@ -429,7 +429,7 @@ impl Triple {
     /// row of the matrix quietly answering as a neighbour.
     ///
     /// It returns `None` for most of the target table, and that is the honest answer rather than a
-    /// gap to be papered over. `rucc-abi` describes the scalar layout of all forty two rows, and
+    /// gap to be papered over. `rucc-abi` describes the scalar layout of all forty three rows, and
     /// this type holds three fields with four architectures in the first, so only the rows on
     /// those four have a [`TargetInfo`] and the rest do not. Anything that needs to lay a
     /// record out for `s390x-linux-gnu` needs that gap closed rather than an approximation of it.
@@ -593,7 +593,7 @@ pub struct TargetInfo {
     /// The machine this describes, as the ten field tuple rather than as a three field triple.
     ///
     /// It is the tuple because a record layout is a question every row of the target table has an
-    /// answer to, and a triple can spell fifteen of the forty two. Nothing else in this type had
+    /// answer to, and a triple can spell fifteen of the forty three. Nothing else in this type had
     /// to change to widen it: every field below is already derived from `rucc-abi`'s description
     /// of this tuple, and the ones that were not were the bugs.
     pub tuple: TargetTuple,
@@ -897,7 +897,7 @@ fn bits(bytes: u64) -> u32 {
 impl TargetInfo {
     /// The description of `triple`.
     ///
-    /// The three field triple spells fifteen of the forty two rows of the target table, which is
+    /// The three field triple spells fifteen of the forty three rows of the target table, which is
     /// every row with a backend and every row a driver will be handed today, so this is what the
     /// compiler proper calls. [`TargetInfo::for_tuple`] is the one that answers for the whole
     /// table.
@@ -1519,7 +1519,7 @@ mod tests {
 
     #[test]
     fn from_tuple_says_no_rather_than_saying_something_near() {
-        // Most of the forty two rows have no triple, and the answer is `None` rather than
+        // Most of the forty three rows have no triple, and the answer is `None` rather than
         // a neighbour. `rucc-abi` knows the scalar layout of every one of these and this type
         // cannot hold any of them, which is the gap the record layout engine inherits.
         for tuple in [

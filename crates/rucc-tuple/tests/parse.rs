@@ -153,8 +153,18 @@ fn wasi_previews_are_different_targets() {
     assert_eq!(p1.os(), Os::Wasi);
     assert_ne!(p1, p3);
     assert_eq!(p1.object_format(), ObjectFormat::Wasm);
-    assert_eq!(p1.to_llvm_string(), "wasm32-unknown-wasi");
+    assert_eq!(p1.to_llvm_string(), "wasm32-unknown-wasip1");
     assert_eq!(p3.to_llvm_string(), "wasm32-unknown-wasip3");
+    // The old name of preview 1 is the same target.
+    assert_eq!(parse("wasm32-wasi"), p1);
+    assert_eq!(parse("wasm32-wasip2").to_llvm_string(), "wasm32-unknown-wasip2");
+}
+
+#[test]
+fn freestanding_wasm_is_unknown_to_llvm() {
+    assert_eq!(parse("wasm32-none").to_llvm_string(), "wasm32-unknown-unknown");
+    assert_eq!(parse("wasm32-unknown-unknown"), parse("wasm32-none"));
+    assert_eq!(parse("x86_64-none").to_llvm_string(), "x86_64-unknown-none");
 }
 
 #[test]

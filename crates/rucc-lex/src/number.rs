@@ -1260,7 +1260,7 @@ mod tests {
         // a `double`, so all three of these are refused there, and i686 has the quad and not the
         // half, so one of them is.
         // The three field triple cannot spell either of these machines, so they come from the
-        // tuple, which spells all forty two rows.
+        // tuple, which spells all forty three rows.
         let arm =
             TargetInfo::for_tuple("armv7-linux-gnueabihf".parse().expect("a row in the table"));
         let i686 = TargetInfo::for_tuple("i686-linux-gnu".parse().expect("a row in the table"));

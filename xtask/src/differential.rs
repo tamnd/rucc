@@ -72,7 +72,7 @@
 //!
 //! # What this does not cover yet
 //!
-//! The rest of the table. The corpus is the same C for all forty two rows, and what runs here is
+//! The rest of the table. The corpus is the same C for all forty three rows, and what runs here is
 //! x86-64 System V on the machine's own row and the Microsoft x64 convention on the MinGW one.
 //! aarch64 Linux is held against gcc under qemu by `tests/qemu/run.sh`, which runs the same
 //! corpus. The rows with no back end wait on one.
