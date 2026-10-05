@@ -4,6 +4,10 @@ All notable changes are recorded here. The format follows [Keep a Changelog](htt
 
 ## Unreleased
 
+## 0.24.0
+
+The release for WA3, the hard C on wasm (#2865). rucc now builds nested functions, `__builtin_setjmp` and `__builtin_longjmp`, the `alias` attribute, and a `main` with one or three parameters for wasm32-wasip1. CI builds the SQLite shell with rucc at `-O0` and `-O2` and holds its output under Wasmtime and Node to the output of the shell that clang from wasi-sdk 34 builds. The execute tests of the GCC 16 torture suite give 3516 passed, 0 failed, 104 skipped and 20 excluded under Wasmtime, and each excluded program names an open issue.
+
 ### Added
 
 - Nested functions work on wasm32 (#2943). The static chain is the last parameter, an ordinary `i32`, so no register is needed. A nested function whose address is taken is refused with a reason, because a wasm program cannot make a trampoline. GCC's torture tests `20010209-1`, `20010605-1`, `20030501-1`, `20040520-1`, `20061220-1`, `20090219-1`, `nest-align-1`, `nestfunc-7`, `pr103405`, `pr22061-3`, `pr22061-4` and `pr71494` now pass at `-O0` and `-O2`.
