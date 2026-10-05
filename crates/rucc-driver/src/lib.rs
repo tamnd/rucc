@@ -1207,6 +1207,17 @@ pub fn parse_args(args: &[String]) -> Result<Action, CliError> {
             "-mnop-mcount" | "-mno-nop-mcount" if arch == rucc_target::Arch::X86_64 => {
                 opts.nop_mcount = arg == "-mnop-mcount";
             }
+            // The hook the call goes to and the section it is listed in, in place of the target's
+            // and `__mcount_loc`, on x86-64 where the others are. A function's own `fentry_name`
+            // and `fentry_section` win over them. Empty is the default again.
+            _ if arch == rucc_target::Arch::X86_64 && arg.starts_with("-mfentry-name=") => {
+                let name = &arg["-mfentry-name=".len()..];
+                opts.fentry_name = (!name.is_empty()).then(|| name.to_owned());
+            }
+            _ if arch == rucc_target::Arch::X86_64 && arg.starts_with("-mfentry-section=") => {
+                let section = &arg["-mfentry-section=".len()..];
+                opts.fentry_section = (!section.is_empty()).then(|| section.to_owned());
+            }
             // GCC drops its own include directory along with the system ones, because its
             // headers are half of a pair with the library's and half a pair is worse than
             // none. A build that passes this is supplying the whole set itself.
@@ -7250,6 +7261,32 @@ mod tests {
         let (opts, _) = compile(&["-c", "-mfentry", "-mno-fentry", "-pg", "a.c"]);
         assert_eq!(opts.hook, Hook::Late, "the last one wins");
         assert!(opts.profile);
+    }
+
+    /// Where the profiler's call goes and where it is listed, named on the command line, last one
+    /// winning and empty meaning the target's again; on x86-64 only, as the other two are.
+    #[test]
+    fn the_hook_and_its_list_can_be_named_on_x86_64() {
+        let (opts, _) = compile(&[KERNEL_X86, "-c", "a.c"]);
+        assert_eq!((opts.fentry_name, opts.fentry_section), (None, None));
+        let (opts, _) = compile(&[
+            KERNEL_X86,
+            "-mfentry-name=one",
+            "-mfentry-name=hook",
+            "-mfentry-section=calls",
+            "-c",
+            "a.c",
+        ]);
+        assert_eq!(opts.fentry_name.as_deref(), Some("hook"));
+        assert_eq!(opts.fentry_section.as_deref(), Some("calls"));
+        let (opts, _) = compile(&[KERNEL_X86, "-mfentry-name=hook", "-mfentry-name=", "-c", "a.c"]);
+        assert_eq!(opts.fentry_name, None);
+        for flag in ["-mfentry-name=hook", "-mfentry-section=calls"] {
+            assert_eq!(
+                refused(&[KERNEL_ARM64, flag, "-c", "a.c"]),
+                format!("unknown option `{flag}`")
+            );
+        }
     }
 
     /// How much room a patcher is promised, which is one number or two.

@@ -131,12 +131,14 @@ pub struct Text {
     /// rather than in these bytes. Empty on a format that keeps its tables after the function.
     pub tables: Vec<Table>,
     /// Where each call to the profiler's hook that `-mrecord-mcount` lists is, in the order they
-    /// were written, as offsets into [`Text::bytes`]. Empty unless the flag was given.
+    /// were written, as offsets into [`Text::bytes`], with the section each is listed in. Empty
+    /// unless the flag was given or a function asked with `fentry_section`.
     ///
     /// The writer puts one eight byte address per call in a section called `__mcount_loc`, which
     /// is what gcc writes and what a kernel before objtool took this over reads at boot to find
-    /// every call it can turn into a nop.
-    pub mcount: Vec<usize>,
+    /// every call it can turn into a nop, or in the section `-mfentry-section=` or a function's
+    /// `fentry_section` named instead.
+    pub mcount: Vec<(usize, String)>,
 }
 
 /// The section `-mrecord-mcount` lists the calls in. See [`Text::mcount`].

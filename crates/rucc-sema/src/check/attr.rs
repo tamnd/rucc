@@ -2259,6 +2259,70 @@ impl Checker<'_> {
         }
     }
 
+    /// Records what `fentry_name("hook")` and `fentry_section("section")` ask of the call `-pg`
+    /// writes into a function: the hook it goes to, in place of `__fentry__` or `mcount`, and the
+    /// section its address is listed in, which lists it whether or not `-mrecord-mcount` asked.
+    /// Both are x86 attributes, read on an x86 target only, as gcc reads them.
+    ///
+    /// The wrong number of arguments is refused, on whatever it is written on. Anything else gcc
+    /// cannot use it ignores with a warning: a variable or a type, and an argument that is not a
+    /// string. An empty string is ignored the same way here, where gcc writes a call to nothing
+    /// and leaves the assembler to refuse it. The second of two on a declaration counts, and a
+    /// later declaration over an earlier one, the definition included, since gcc reads them once
+    /// the file is done. `decl` is `None` for a typedef, which has nothing to record them on.
+    pub(in crate::check) fn record_fentry(
+        &mut self,
+        decl: Option<DeclId>,
+        lists: &[AttrList],
+        kind: DeclKind,
+    ) {
+        if self.cx.target.tuple.arch().as_str() != "x86_64" {
+            return;
+        }
+        let ast = self.ast;
+        for &attrs in lists {
+            for &attr in &ast[attrs] {
+                let name = self.gnu_name(&attr);
+                if !matches!(name, "fentry_name" | "fentry_section") {
+                    continue;
+                }
+                let args = ast[attr.args].to_vec();
+                if args.len() != 1 {
+                    let what = format!("wrong number of arguments specified for '{name}' attribute");
+                    let note = format!("expected 1, found {}", args.len());
+                    let refused = Diagnostic::error(what, attr.span).with_code("E0822");
+                    self.report(refused.note(note, attr.span));
+                    continue;
+                }
+                let string = match args[0] {
+                    AttrArg::Expr(expr) => {
+                        let checked = self.expr(expr);
+                        match self.tast[checked].kind {
+                            ExprKind::Str(id)
+                                if self.tast[id].encoding == Encoding::Plain
+                                    && !self.tast[id].elements.is_empty() =>
+                            {
+                                Some(id)
+                            }
+                            _ => None,
+                        }
+                    }
+                    AttrArg::Ident(_) => None,
+                };
+                let (Some(decl), Some(id), DeclKind::Function) = (decl, string, kind) else {
+                    let what = format!("'{name}' attribute ignored");
+                    self.report(Diagnostic::warning(what, attr.span).with_code("E0703"));
+                    continue;
+                };
+                if name == "fentry_name" {
+                    self.tast.record_fentry_name(decl, id);
+                } else {
+                    self.tast.record_fentry_section(decl, id);
+                }
+            }
+        }
+    }
+
     /// The type with its function, or the function it points at, made one without a landing pad,
     /// which is where [`Self::with_convention`] puts a convention and for the same reason.
     fn without_landing_pad(&mut self, ty: TypeId, span: Span) -> TypeId {

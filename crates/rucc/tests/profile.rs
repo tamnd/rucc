@@ -376,3 +376,136 @@ impl Elf<'_> {
         (0..self.word(0x3c, 2)).find(|&index| self.name(index) == name)
     }
 }
+
+/// The text of one function in a listing, from its label to its `.size`.
+fn body<'a>(text: &'a str, name: &str) -> &'a str {
+    let from = text.find(&format!("\n{name}:\n")).unwrap_or_else(|| panic!("{name} in\n{text}"));
+    text[from..].split("\t.size\t").next().unwrap_or("")
+}
+
+/// Whether that function's hook calls `hook`, and the section it is listed in, if any.
+fn hook<'a>(text: &'a str, name: &str) -> (String, Option<&'a str>) {
+    let body = body(text, name);
+    let call = body
+        .lines()
+        .find(|line| line.trim_start().starts_with("call"))
+        .unwrap_or_else(|| panic!("{name} calls nothing:\n{body}"));
+    let callee = call.trim_start()["call".len()..].trim().trim_end_matches("@PLT").to_owned();
+    let listed = body.lines().find_map(|line| {
+        let rest = line.strip_prefix("\t.section\t")?;
+        rest.strip_suffix(",\"a\",@progbits")
+    });
+    (callee, listed)
+}
+
+/// Three functions, two of which name their own hook or their own list, as the kernel does for the
+/// code it patches some other way.
+const NAMED: &str = "\
+__attribute__((fentry_name(\"hook\"))) int one(int x) { return x + 1; }
+__attribute__((__fentry_section__(\"calls\"))) int two(int x) { return x + 2; }
+int three(int x) { return x + 3; }
+";
+
+/// `fentry_name` is the function the call goes to and `fentry_section` the section the call is
+/// listed in, which it is whether or not `-mrecord-mcount` was given; the flags of the same names
+/// do the same for every function that did not say, as in gcc.
+#[test]
+fn a_function_can_name_its_own_hook_and_its_own_list() {
+    let text = asm("named", &["-pg", "-mfentry"], NAMED);
+    assert_eq!(hook(&text, "one"), ("hook".to_owned(), None), "{text}");
+    assert_eq!(hook(&text, "two"), ("__fentry__".to_owned(), Some("calls")), "{text}");
+    assert_eq!(hook(&text, "three"), ("__fentry__".to_owned(), None), "{text}");
+
+    let text = asm("recorded", &["-pg", "-mfentry", "-mrecord-mcount"], NAMED);
+    assert_eq!(hook(&text, "one"), ("hook".to_owned(), Some("__mcount_loc")), "{text}");
+    assert_eq!(hook(&text, "two"), ("__fentry__".to_owned(), Some("calls")), "{text}");
+    assert_eq!(hook(&text, "three"), ("__fentry__".to_owned(), Some("__mcount_loc")), "{text}");
+
+    let flags = ["-pg", "-mfentry", "-mrecord-mcount", "-mfentry-name=all", "-mfentry-section=gs"];
+    let text = asm("flags", &flags, NAMED);
+    assert_eq!(hook(&text, "one"), ("hook".to_owned(), Some("gs")), "{text}");
+    assert_eq!(hook(&text, "two"), ("all".to_owned(), Some("calls")), "{text}");
+    assert_eq!(hook(&text, "three"), ("all".to_owned(), Some("gs")), "{text}");
+
+    // The section from the command line lists nothing on its own, as in gcc.
+    let text = asm("unlisted", &["-pg", "-mfentry", "-mfentry-section=gs"], NAMED);
+    assert_eq!(hook(&text, "three"), ("__fentry__".to_owned(), None), "{text}");
+
+    // The later hook is named by it too, and a function that wants no hook gets none.
+    let text = asm("late", &["-pg", "-mno-fentry"], NAMED);
+    assert_eq!(hook(&text, "one").0, "hook", "{text}");
+    let quiet = "__attribute__((no_instrument_function, fentry_name(\"hook\"))) void q(void) {}\n";
+    let text = asm("quiet", &["-pg", "-mfentry"], quiet);
+    assert!(!body(&text, "q").contains("call"), "{text}");
+}
+
+/// The last name said is the one taken, from a declaration after the definition as well, and the
+/// nop of `-mnop-mcount` is listed in the section named.
+#[test]
+fn the_last_name_said_is_the_one_taken() {
+    let source = "\
+int f(int) __attribute__((fentry_name(\"a\")));
+int f(int x) { return x; }
+int f(int) __attribute__((fentry_name(\"b\")));
+__attribute__((fentry_name(\"c\"), fentry_name(\"d\"))) int g(int x) { return x; }
+";
+    let text = asm("last", &["-pg", "-mfentry"], source);
+    assert_eq!(hook(&text, "f").0, "b", "{text}");
+    assert_eq!(hook(&text, "g").0, "d", "{text}");
+
+    let flags = ["-pg", "-mfentry", "-fno-pie", "-mnop-mcount"];
+    let text = asm("nop-named", &flags, NAMED);
+    let two = body(&text, "two");
+    assert!(two.contains("\t.byte\t0x0f, 0x1f, 0x44, 0x00, 0x00\n"), "{text}");
+    assert!(two.contains("\t.section\tcalls,\"a\",@progbits"), "{text}");
+}
+
+/// What gcc warns about and what it refuses, in its words: a name on anything but a function, or
+/// not a string, is ignored with a warning, and the wrong number of names is an error.
+#[test]
+fn the_names_are_checked_in_gcc_s_words() {
+    for (source, said) in [
+        ("int v __attribute__((fentry_name(\"h\")));\n", "'fentry_name' attribute ignored"),
+        ("typedef void t(void) __attribute__((fentry_section(\"s\")));\n", "'fentry_section' attribute ignored"),
+        ("__attribute__((fentry_name(1))) void f(void) {}\n", "'fentry_name' attribute ignored"),
+        ("__attribute__((fentry_section(\"\"))) void f(void) {}\n", "'fentry_section' attribute ignored"),
+    ] {
+        let (ok, _, err) = run("warned", TARGET, &["-pg"], source);
+        assert!(ok, "{source}\n{err}");
+        assert!(err.contains(said), "{source}\nwanted {said:?}, got:\n{err}");
+    }
+    for (source, said) in [
+        ("__attribute__((fentry_name)) void f(void) {}\n", "wrong number of arguments specified for 'fentry_name' attribute"),
+        ("__attribute__((fentry_section(\"a\", \"b\"))) void f(void) {}\n", "expected 1, found 2"),
+    ] {
+        let (ok, _, err) = run("refused", TARGET, &["-pg"], source);
+        assert!(!ok, "{source}");
+        assert!(err.contains(said), "{source}\nwanted {said:?}, got:\n{err}");
+    }
+    let (ok, _, err) = run("plain", TARGET, &["-pg"], NAMED);
+    assert!(ok && err.is_empty(), "{err}");
+}
+
+/// The object has the section named, allocated, with the address of the one call listed there,
+/// and `__mcount_loc` keeps the others.
+#[test]
+fn the_object_lists_the_call_in_the_section_named() {
+    let path = fixture("obj-named", NAMED);
+    let object = path.with_extension("o");
+    let done = Command::new(env!("CARGO_BIN_EXE_rucc"))
+        .arg(format!("--target={TARGET}"))
+        .args(["-O2", "-pg", "-mfentry", "-mrecord-mcount", "-c", "-o"])
+        .arg(&object)
+        .arg(&path)
+        .output()
+        .expect("the compiler is built before its own tests run");
+    assert!(done.status.success(), "{}", String::from_utf8_lossy(&done.stderr));
+    let bytes = std::fs::read(&object).expect("the object was written");
+    let _ = std::fs::remove_dir_all(path.parent().expect("the fixture is in a directory"));
+    let elf = Elf(&bytes);
+    let calls = elf.section("calls").expect("the section named");
+    assert_eq!((elf.kind(calls), elf.flags(calls) & 2, elf.size(calls)), (1, 2, 8));
+    assert!(elf.section(".relacalls").is_some(), "its relocation");
+    let loc = elf.section("__mcount_loc").expect("the others' section");
+    assert_eq!(elf.size(loc), 16);
+}

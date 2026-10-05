@@ -184,6 +184,9 @@ pub struct Mcount {
     pub record: bool,
     /// Whether it is written as a nop.
     pub nop: bool,
+    /// The section it is listed in, where `fentry_section` or `-mfentry-section=` named one, and
+    /// `__mcount_loc` where nothing did.
+    pub section: Option<Symbol>,
 }
 
 /// Where one declaration in the source is, over one stretch of one function.

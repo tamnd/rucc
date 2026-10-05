@@ -470,8 +470,11 @@ impl Assembler<'_> {
                 // The profiler's call, listed where it begins and written as the nop of the same
                 // length when those were asked for. See [`rucc_mir::Mcount`].
                 let mcount = self.func.mcount.filter(|mcount| mcount.inst == inst);
-                if mcount.is_some_and(|mcount| mcount.record) {
-                    self.text.mcount.push(self.text.bytes.len());
+                if let Some(mcount) = mcount.filter(|mcount| mcount.record) {
+                    let section = mcount
+                        .section
+                        .map_or(rucc_object::MCOUNT_LOC, |section| self.names.resolve(section));
+                    self.text.mcount.push((self.text.bytes.len(), section.to_owned()));
                 }
                 if mcount.is_some_and(|mcount| mcount.nop) {
                     self.text.bytes.extend_from_slice(&MCOUNT_NOP);

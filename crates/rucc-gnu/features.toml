@@ -869,6 +869,26 @@ tests = ["rucc::the_name_is_an_indirect_function_set_to_its_resolver", "rucc::if
 notes = "The function's own name is written as an indirect function, `.type f, @gnu_indirect_function` and `.set f,resolver`, global or local as the declaration is, and the dynamic linker binds a call to whatever the resolver hands back, the call through a pointer included. The resolver has to be defined in the same file, and a `static` one that nothing else calls is kept for it. One that does not return a pointer is refused and one that returns a pointer to another function type warned about under `-Wattribute-alias`, both in gcc's words, while `void *` is taken as it is. A body written for the function is a redefinition, and so is `alias` beside it on one declaration. The wrong number of arguments is refused with `E0819`, and on a variable, a typedef or a declaration in a block it is ignored with gcc's warning. Only ELF has the symbol type, so a COFF or Mach-O target refuses it."
 
 [[feature]]
+name = "fentry_name"
+kind = "attribute"
+gcc_version = "9.0"
+status = "implemented"
+targets = ["x86-64"]
+used_by = ["linux"]
+tests = ["rucc::a_function_can_name_its_own_hook_and_its_own_list", "rucc::the_last_name_said_is_the_one_taken", "rucc::the_names_are_checked_in_gcc_s_words", "rucc-driver::the_hook_and_its_list_can_be_named_on_x86_64"]
+notes = "Under `-pg` the function's hook calls the name given in place of `__fentry__` or `mcount`, with either hook, and `-mfentry-name=` does the same for every function that did not say. The last name said wins, from a declaration after the definition as well. On anything but a function, or with an argument that is not a string, it is ignored with gcc's warning, and the wrong number of arguments is refused with `E0822`. An empty string is ignored with the warning too, where gcc writes a call to nothing. x86-64 only, as `-mrecord-mcount` is."
+
+[[feature]]
+name = "fentry_section"
+kind = "attribute"
+gcc_version = "9.0"
+status = "implemented"
+targets = ["x86-64"]
+used_by = ["linux"]
+tests = ["rucc::a_function_can_name_its_own_hook_and_its_own_list", "rucc::the_object_lists_the_call_in_the_section_named", "rucc::the_names_are_checked_in_gcc_s_words", "rucc-driver::the_hook_and_its_list_can_be_named_on_x86_64"]
+notes = "The address of the function's hook is listed in the section named in place of `__mcount_loc`, in the listing and in the object, and it is listed whether or not `-mrecord-mcount` was given, as in gcc. `-mfentry-section=` names the section for every function that did not, and lists nothing without `-mrecord-mcount`. Under `-mnop-mcount` the nop is what is listed. Checked as `fentry_name` is."
+
+[[feature]]
 name = "warning"
 kind = "attribute"
 gcc_version = "4.3"

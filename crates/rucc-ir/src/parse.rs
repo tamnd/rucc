@@ -667,6 +667,8 @@ impl<'a, 'n> Parser<'a, 'n> {
                 "export_name" => func.wasm.export = Some(self.symbol_from_string()?),
                 "import_module" => func.wasm.module = Some(self.symbol_from_string()?),
                 "import_name" => func.wasm.field = Some(self.symbol_from_string()?),
+                "fentry_name" => func.fentry_name = Some(self.symbol_from_string()?),
+                "fentry_section" => func.fentry_section = Some(self.symbol_from_string()?),
                 other => return self.fail(format!("a function has no `{other}`")),
             }
         }
@@ -2535,6 +2537,23 @@ global @b : bytes 8 = {{ apart.4 @.Llbl.0 from @.Llbl.1, apart.4 @.Llbl.2 + 1 fr
         assert_eq!(spelled(wasm[1].module).as_deref(), Some("host"));
         assert_eq!(spelled(wasm[1].field).as_deref(), Some("get"));
         assert_eq!((wasm[0].module, wasm[1].export), (None, None));
+    }
+
+    #[test]
+    fn the_hook_a_function_asked_the_profiler_for_comes_back_as_written() {
+        // What `fentry_name` and `fentry_section` ask of one function, which a module read back
+        // for the link has to ask for again.
+        let text = format!(
+            "{HEADER}\nfunc @f(i32) -> i32, linkage(external), fentry_name \"hook\", \
+             fentry_section \"__hooks\" {{\nblock0(%0: i32):\n    return %0\n}}\n"
+        );
+        assert_eq!(round_trip(&text), text);
+        let mut names = Interner::new();
+        let text = format!("{HEADER}\nfunc @f(), fentry_section \"s\";\n");
+        let module = parse(&text, &mut names).unwrap();
+        let func = module.funcs().next().map(|id| &module[id]).expect("one function");
+        assert_eq!(func.fentry_name, None);
+        assert_eq!(func.fentry_section.map(|s| names.resolve(s).to_owned()), Some("s".to_owned()));
     }
 
     #[test]
