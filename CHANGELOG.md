@@ -15,6 +15,7 @@ All notable changes are recorded here. The format follows [Keep a Changelog](htt
 
 ### Fixed
 
+- The assembler reads `jmp $0x33, $1f` and `call` with a segment and an offset as the far jump and call gas makes of them, in thirty two and sixteen bit code. The x86 selftests' thunks.S goes back to long mode that way and did not assemble.
 - `%P` on an `asm` operand that is the address of a global is now the bare name, so `movq %P1, %0` on `"p" (&current_task)` loads from `current_task` rather than moving its address. Linux 6.1 reads `current` that way on a kernel without SMP, and the tinyconfig kernel built with rucc faulted in vdso/vma.c on its first exec.
 - Two constructors or two destructors of one priority in one file now run in the order of the file at `-O1` and above, as with gcc. rucc writes the variables of an optimized unit newest first, as gcc does, and that turn also reached the entries of `.init_array` and `.fini_array`, so `-O2` ran them in the reverse order. gcc writes those entries as it writes each function, so its turn does not reach them, and rucc now writes them after the turn.
 - A shift of an `i8` or `i16` value by a count that is not a constant now takes the count modulo the width, as the IR says (#2864). Before, the wasm backend masked the count to the bits of its type, so an `i8` shift by 8 gave 0 in place of the value.

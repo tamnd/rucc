@@ -5604,6 +5604,10 @@ mod tests {
             bytes(&file, ".text"),
             [0x0f, 0x20, 0xc0, 0x0f, 0x20, 0xc0, 0xea, 0x0a, 0, 0, 0, 0x10, 0, 0x40, 0xff, 0xc0]
         );
+        // The x86 selftests' thunks.S, which calls into thirty two bit code and jumps back with
+        // the two operand `jmp` gas reads as a far one. The label is left to the linker.
+        let file = assembled(".text\n.code32\ncall *%esi\njmp $0x33,$1f\n.code64\n1: ret\n");
+        assert_eq!(bytes(&file, ".text"), [0xff, 0xd6, 0xea, 0, 0, 0, 0, 0x33, 0, 0xc3]);
         let long = read(".text\nljmpl $0x10, $0\n", Arch::X86_64).unwrap_err();
         assert!(long.why.contains("sixty four bit mode"), "{}", long.why);
         let narrow = read(".text\nmovl %cr0, %eax\n", Arch::X86_64).unwrap_err();
