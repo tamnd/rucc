@@ -290,9 +290,16 @@ fn one(
             index += 1;
             let before = u32::try_from(out.tokens.len()).unwrap_or(u32::MAX);
             let mut line = Tokens::default();
-            while pp.get(index).is_some_and(|next| {
+            while let Some(next) = pp.get(index).filter(|next| {
                 !matches!(next.kind, PpTokenKind::Eof) && !next.flags.has(TokenFlags::START_OF_LINE)
             }) {
+                // A stray byte or an unterminated literal becomes no token, so it is left out
+                // of the line here rather than reported. gcc ignores a pragma it does not know
+                // with everything in it, and one it knows reads the line without the token.
+                if matches!(next.kind, PpTokenKind::Other | PpTokenKind::HeaderName) {
+                    index += 1;
+                    continue;
+                }
                 index = one(pp, index, cx, out, diagnostics);
                 line.tokens.push(out.tokens.pop().expect("one token out"));
             }
@@ -313,13 +320,26 @@ fn one(
         // A stray byte is a legal pp-token and never a token, and a header name cannot get
         // here at all, because only a directive asks for one and no directive survives to
         // this point. Both are reported and dropped, since there is nothing to stand in
-        // for either of them.
+        // for either of them. An unterminated literal is the third kind. The lexer only
+        // warned about it, and it is an error now that it is in the program, as in gcc.
         PpTokenKind::Other | PpTokenKind::HeaderName => {
             let text = spelling(token, cx);
-            diagnostics.push(Diagnostic::error(format!("stray '{text}' in program"), token.span));
+            let message = match unterminated_quote(text) {
+                Some(quote) => format!("missing terminating {quote} character"),
+                None => format!("stray '{text}' in program"),
+            };
+            diagnostics.push(Diagnostic::error(message, token.span));
         }
     }
     index
+}
+
+/// The quote that an unterminated literal opened, when the spelling of an `Other` token is one.
+/// A stray byte is never a letter or a quote, so a quote after an encoding prefix or at the start
+/// is the lexer's literal with no end.
+fn unterminated_quote(text: &str) -> Option<char> {
+    let body = ["u8", "u", "U", "L"].iter().find_map(|p| text.strip_prefix(p)).unwrap_or(text);
+    body.chars().next().filter(|c| matches!(c, '\'' | '"'))
 }
 
 /// Whether a pp-token is the word `pragma`, which is the only thing a `#` at the start of a
@@ -603,7 +623,10 @@ mod tests {
             for token in &mut pp {
                 token.flags = token.flags.with(flags);
             }
-            assert!(lex_diagnostics.is_empty(), "the scanner disliked the source: {src}");
+            assert!(
+                lex_diagnostics.iter().all(|d| d.message.starts_with("missing terminating")),
+                "the scanner disliked the source: {src}"
+            );
             let cx = Convert {
                 keywords: &self.keywords,
                 interner: &self.interner,
@@ -824,6 +847,41 @@ mod tests {
         assert_eq!(diagnostics, vec!["stray '`' in program".to_owned()]);
         let kinds: Vec<_> = tokens.tokens.iter().map(|t| t.kind).collect();
         assert_eq!(kinds, vec![TokenKind::Ident, TokenKind::Ident, TokenKind::Eof]);
+    }
+
+    /// The lexer only warns about a literal with no end, because gcc does, and this is where it
+    /// becomes the error gcc gives when the token gets to the parser.
+    #[test]
+    fn an_unterminated_literal_is_an_error_here_and_a_warning_earlier() {
+        let mut fixture = Fixture::new(Std::C23);
+        let (tokens, diagnostics) = fixture.run("int c = 'a;\nint s = L\"b;\nx");
+        assert_eq!(
+            diagnostics,
+            vec![
+                "missing terminating ' character".to_owned(),
+                "missing terminating \" character".to_owned()
+            ]
+        );
+        assert_eq!(tokens.tokens.iter().filter(|t| t.kind == TokenKind::Ident).count(), 3);
+        assert_eq!(unterminated_quote("u8'x"), Some('\''));
+        assert_eq!(unterminated_quote("'"), Some('\''));
+        assert_eq!(unterminated_quote("`"), None);
+        assert_eq!(unterminated_quote("@"), None);
+    }
+
+    /// A pragma that rucc does not know is ignored with everything in it, as in gcc, so a stray
+    /// byte or an unterminated literal in one is neither an error nor a token that some other
+    /// line loses.
+    #[test]
+    fn a_pragma_line_leaves_out_what_converts_to_no_token() {
+        let mut fixture = Fixture::new(Std::C23);
+        let (tokens, diagnostics) = fixture.run("a\n#pragma foo it's\n#pragma bar ` b\nc");
+        assert!(diagnostics.is_empty(), "{diagnostics:?}");
+        let kinds: Vec<_> = tokens.tokens.iter().map(|t| t.kind).collect();
+        assert_eq!(kinds, vec![TokenKind::Ident, TokenKind::Ident, TokenKind::Eof]);
+        assert_eq!(tokens.pragmas.len(), 2);
+        assert_eq!(tokens.pragmas[0].tokens.len(), 2);
+        assert_eq!(tokens.pragmas[1].tokens.len(), 2);
     }
 
     #[test]

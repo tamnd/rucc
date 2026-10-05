@@ -238,8 +238,24 @@ mod tests {
         // between one error and a hundred.
         let (tokens, diagnostics) = scan("char *s = \"oops;\nint x;");
         assert_eq!(diagnostics.len(), 1);
-        assert!(diagnostics[0].contains("missing terminating quote"));
+        assert!(diagnostics[0].contains("missing terminating \" character"));
         assert!(tokens.iter().any(|(k, text)| *k == PpTokenKind::Ident && text == "int"));
+    }
+
+    /// gcc reads an unterminated literal as one token that is not a literal, from the quote to
+    /// the end of the line, and only warns. An apostrophe in the text of `#warning` or `#error`
+    /// is the usual case, and the conversion is where it becomes an error, if it gets there.
+    #[test]
+    fn an_unterminated_literal_is_the_rest_of_its_line_and_a_warning() {
+        let (tokens, diagnostics) = scan("#warning it isn't here\nint x;");
+        assert_eq!(diagnostics.len(), 1);
+        assert!(diagnostics[0].contains("missing terminating ' character"), "{diagnostics:?}");
+        assert!(tokens.contains(&(PpTokenKind::Other, "'t here".to_owned())), "{tokens:?}");
+        assert!(tokens.iter().any(|(k, text)| *k == PpTokenKind::Ident && text == "int"));
+        let (tokens, _) = scan("u8'a b");
+        assert_eq!(tokens, vec![(PpTokenKind::Other, "u8'a b".to_owned())]);
+        let (_, diagnostics) = tokenize(b"'a", 0, Options::new(), &mut Interner::new());
+        assert_eq!(diagnostics[0].severity, rucc_diag::Severity::Warning);
     }
 
     #[test]
