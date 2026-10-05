@@ -2092,16 +2092,25 @@ impl Unit<'_> {
         // A function declared without a prototype takes what it is given, which is what a
         // signature with no parameters and no end to them says. C23 removed these and this is
         // what `int f();` means in every dialect before it.
-        let variadic = signature.variadic || !signature.prototyped;
+        //
+        // wasm32 is the exception, as clang has it. A wasm function has one type and a call must
+        // give exactly that type, so the function is the type of its definition, `int f()` takes
+        // nothing, and a call passes each promoted argument as a parameter. A call that does not
+        // match the callee goes through the table, where the check traps when it runs.
+        let wasm = self.target.tuple.arch() == rucc_tuple::Arch::Wasm32;
+        let variadic = signature.variadic || (!signature.prototyped && !wasm);
         let params = if at_call && !signature.prototyped {
             // An argument past the end of the list has no parameter to travel as, which is what
             // a call to an unprototyped function with more arguments than the definition takes
-            // is, so the list ends where the arguments do.
+            // is, so the list ends where the arguments do. On wasm32 each argument past the end
+            // is a parameter of its own type.
+            let past = if wasm { actual.get(signature.params.len()..).unwrap_or(&[]) } else { &[] };
             signature
                 .params
                 .iter()
                 .zip(actual)
                 .map(|(&param, &arg)| if compatible(self.types, param, arg) { param } else { arg })
+                .chain(past.iter().copied())
                 .collect()
         } else {
             signature.params.clone()
