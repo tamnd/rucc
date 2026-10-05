@@ -426,7 +426,10 @@ mod tests {
         let twice = types.pointer(to_untracked);
         let to_both = types.pointer(both);
         let f = names.intern("f");
-        assert_eq!(spell(&types, &names, to_untracked), "void (__attribute__((nocf_check)) *)(void)");
+        assert_eq!(
+            spell(&types, &names, to_untracked),
+            "void (__attribute__((nocf_check)) *)(void)"
+        );
         assert_eq!(spell(&types, &names, twice), "void (__attribute__((nocf_check)) **)(void)");
         assert_eq!(
             spell(&types, &names, to_both),

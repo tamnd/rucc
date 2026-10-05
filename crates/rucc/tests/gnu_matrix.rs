@@ -626,7 +626,8 @@ _Static_assert(__has_attribute(nocf_check), \"nocf_check\");
         let end = rest.find(".size").unwrap_or(rest.len());
         rest[..end].lines().map(|line| line.trim().replace('\t', " ")).collect()
     };
-    let count = |name: &str, start: &str| body(name).iter().filter(|l| l.starts_with(start)).count();
+    let count =
+        |name: &str, start: &str| body(name).iter().filter(|l| l.starts_with(start)).count();
     assert_eq!(count("quiet", "endbr64"), 0, "{text}");
     for name in ["loud", "calls", "tail", "late"] {
         assert_eq!(count(name, "endbr64"), 1, "{name}\n{text}");
@@ -687,7 +688,8 @@ void calls(void) { p1(); }
     let out = compile("nocf-check-ignored", &["-O2", "-S"], source);
     let said = String::from_utf8_lossy(&out.stderr);
     assert!(out.status.success(), "{said}");
-    let ignored = "warning: 'nocf_check' attribute ignored. Use '-fcf-protection' option to enable it";
+    let ignored =
+        "warning: 'nocf_check' attribute ignored. Use '-fcf-protection' option to enable it";
     assert_eq!(said.matches(ignored).count(), 2, "{said}");
     let text = String::from_utf8_lossy(&out.stdout);
     assert!(!text.contains("notrack") && !text.contains("endbr64"), "{text}");

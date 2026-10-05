@@ -166,7 +166,8 @@ fn functions(
     // that did not know would fault on arriving.
     if left.convention != right.convention
         || left.nocf != right.nocf
-        || !same(types, left.ret, right.ret, assumed) {
+        || !same(types, left.ret, right.ret, assumed)
+    {
         return false;
     }
     match (left.prototyped, right.prototyped) {
