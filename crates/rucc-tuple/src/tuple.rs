@@ -459,8 +459,10 @@ impl TargetTuple {
             (Os::MacOs, Some(v)) => format!("macosx{}", v.to_llvm_string()),
             (Os::MacOs, None) => "macosx".to_string(),
             (Os::IOs, Some(v)) => format!("ios{}", v.to_llvm_string()),
-            (Os::Wasi, Some(v)) if v.major_part() == 1 => "wasi".to_string(),
+            // `wasi` alone is the old name of preview 1, and clang 23 warns that it is deprecated.
             (Os::Wasi, Some(v)) => format!("wasip{}", v.major_part()),
+            // LLVM has no `none` for wasm. A wasm module with no operating system is `unknown`.
+            (Os::None, _) if self.arch == Arch::Wasm32 => "unknown".to_string(),
             (Os::None, _) => "none".to_string(),
             (os, _) => os.as_str().to_string(),
         };
