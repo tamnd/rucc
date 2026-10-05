@@ -118,6 +118,9 @@ pub enum Place {
     /// 64-bit x86 with ELF objects, which is every operating system but Windows and macOS, and
     /// the one place indirect functions are built.
     X86_64Elf,
+    /// 32-bit WebAssembly, on any operating system. gcc has no wasm target, so a row here is a
+    /// clang attribute that the wasm rows read, and the answer is clang 23's.
+    Wasm,
 }
 
 /// The target a question is asked on, as far as the matrix cares, which is which of the places
@@ -141,6 +144,7 @@ impl Target {
             (Place::Aarch64, arch == "aarch64"),
             (Place::Windows, os == "windows"),
             (Place::X86_64Elf, arch == "x86_64" && !matches!(os, "windows" | "macos")),
+            (Place::Wasm, arch == "wasm32"),
         ] {
             if holds {
                 target.places |= 1 << place as u8;

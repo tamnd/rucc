@@ -664,6 +664,9 @@ impl<'a, 'n> Parser<'a, 'n> {
                     self.expect(")")?;
                     func.patchable = Some((total, before));
                 }
+                "export_name" => func.wasm.export = Some(self.symbol_from_string()?),
+                "import_module" => func.wasm.module = Some(self.symbol_from_string()?),
+                "import_name" => func.wasm.field = Some(self.symbol_from_string()?),
                 other => return self.fail(format!("a function has no `{other}`")),
             }
         }
@@ -2512,6 +2515,26 @@ global @b : bytes 8 = {{ apart.4 @.Llbl.0 from @.Llbl.1, apart.4 @.Llbl.2 + 1 fr
         let text = format!("{HEADER}\nfunc @f(), patchable(3, 1);\n");
         let module = parse(&text, &mut names).unwrap();
         assert_eq!(module.funcs().next().map(|id| module[id].patchable), Some(Some((3, 1))));
+    }
+
+    #[test]
+    fn the_wasm_names_of_a_function_come_back_as_written() {
+        // What `export_name`, `import_module` and `import_name` give a function on a wasm row,
+        // which a module read back for the link has to give again.
+        let text = format!(
+            "{HEADER}\nfunc @add(i32) -> i32, linkage(external), export_name \"add\" {{\n\
+             block0(%0: i32):\n    return %0\n}}\n\n\
+             func @get() -> i32, linkage(external), import_module \"host\", import_name \"get\";\n"
+        );
+        assert_eq!(round_trip(&text), text);
+        let mut names = Interner::new();
+        let module = parse(&text, &mut names).unwrap();
+        let wasm: Vec<_> = module.funcs().map(|id| module[id].wasm).collect();
+        let spelled = |name: Option<Symbol>| name.map(|name| names.resolve(name).to_owned());
+        assert_eq!(spelled(wasm[0].export).as_deref(), Some("add"));
+        assert_eq!(spelled(wasm[1].module).as_deref(), Some("host"));
+        assert_eq!(spelled(wasm[1].field).as_deref(), Some("get"));
+        assert_eq!((wasm[0].module, wasm[1].export), (None, None));
     }
 
     #[test]

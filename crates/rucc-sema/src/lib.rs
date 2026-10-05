@@ -121,7 +121,8 @@ pub use crate::print::{Printer, print};
 pub use crate::scope::{Binding, Scopes, Tag, TagKind};
 pub use crate::stmt::{Case, CaseId, CaseList, Stmt, StmtId, StmtList, StmtRef};
 pub use crate::tast::{
-    Address, AllocSize, Base, Const, ConstId, Counts, Label, LabelId, Notices, StrId, Tast, Version,
+    Address, AllocSize, Base, Const, ConstId, Counts, Label, LabelId, Notices, StrId, Tast,
+    Version, WasmNames,
 };
 
 /// The milestone in `spec/17-milestones.md` that fills this crate in.

@@ -815,6 +815,14 @@ impl Unit<'_> {
         self.tast[id].elements.iter().filter_map(|&unit| char::from_u32(unit)).collect()
     }
 
+    /// A plain string literal as a name, from its bytes, so that a name in UTF-8 stays the same
+    /// name. A wasm export or import name is any UTF-8 string.
+    fn spelled_symbol(&mut self, id: StrId) -> Symbol {
+        let bytes: Vec<u8> =
+            self.tast[id].elements.iter().filter_map(|&unit| u8::try_from(unit).ok()).collect();
+        self.names.intern(&String::from_utf8_lossy(&bytes))
+    }
+
     /// The section a `section` attribute put this function or object in, as the object format
     /// spells a section name.
     ///
@@ -1181,6 +1189,14 @@ impl Unit<'_> {
         // command line. See `rucc_codegen::pipeline`.
         func.patchable = tast.patchable(decl);
         func.section = self.section_of(decl, true);
+        // The names a wasm object gives it in place of its own, from clang's attributes, which
+        // sema records on a wasm row alone.
+        let wasm = tast.wasm_names(decl);
+        func.wasm = rucc_ir::WasmNames {
+            export: wasm.export.map(|name| self.spelled_symbol(name)),
+            module: wasm.module.map(|name| self.spelled_symbol(name)),
+            field: wasm.field.map(|name| self.spelled_symbol(name)),
+        };
         // A claim about what a call to it returns, which travels on the declaration for the reason
         // `noreturn` does: `malloc` is only ever declared here. `rucc_opt::objsize` reads it off
         // the callee of the call an address came out of.

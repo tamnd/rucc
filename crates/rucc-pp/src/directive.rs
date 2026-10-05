@@ -3709,6 +3709,24 @@ mod tests {
         }
     }
 
+    /// clang has the three wasm attributes on its wasm target, and gcc has no wasm target, so
+    /// gcc 16 does not know the names on any other row.
+    #[test]
+    fn the_wasm_attributes_are_there_on_the_wasm_rows_alone() {
+        let asked = "__has_attribute(export_name) __has_attribute(__import_module__) \
+                     __has_attribute(import_name)\n";
+        for (triple, answer) in [
+            ("wasm32-unknown-wasip1", "1 1 1"),
+            ("wasm32-unknown-unknown", "1 1 1"),
+            ("x86_64-unknown-linux-gnu", "0 0 0"),
+            ("aarch64-unknown-linux-gnu", "0 0 0"),
+        ] {
+            let mut run = Run::new();
+            run.predefine(triple, &Predef::new());
+            assert_eq!(run.go(asked), answer, "{triple}");
+        }
+    }
+
     /// clang has it on AArch64 alone, and mingw-w64's `<setjmp.h>` takes a yes anywhere as
     /// leave to call `_setjmp(buf, __builtin_sponentry())`, which sema then refuses.
     #[test]
