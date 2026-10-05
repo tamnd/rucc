@@ -924,6 +924,8 @@ pub fn compile_recording(
         leaf: base.leaf && guard.is_none() && profile != Profile::Late,
         saves_all,
         vectors,
+        // Not in a naked function, which has no prologue to do the aligning in.
+        forced: !naked && source.attrs.set.contains(ir::AttrSet::FORCE_ALIGN),
         // What comes back comes back in the general purpose registers, since a function that
         // saves everything has had the other files taken away above, and one register to a value
         // in the order the convention hands them out.

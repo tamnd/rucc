@@ -504,6 +504,11 @@ impl DeclFlags {
     /// header that says it covers the definition below that does not.
     pub const CF_CHECK: Self = Self(1 << 36);
 
+    /// `__attribute__((force_align_arg_pointer))` was written on a declaration of this function,
+    /// so it does not trust its caller to have aligned the stack beyond a word and aligns its own
+    /// frame where it needs more. x86 only. Merged the way [`Self::NOINLINE`] is.
+    pub const FORCE_ALIGN: Self = Self(1 << 37);
+
     /// Whether `zero_call_used_regs("skip")` was written. See [`Self::ZERO_WIDE`] for why this is
     /// more than the one bit.
     #[must_use]

@@ -2089,6 +2089,34 @@ mod tests {
         assert_eq!(Frame::of(&func, &allocation, &layout).realign(), None);
     }
 
+    /// A frame that trusts its caller with no more than a word, which is what
+    /// `force_align_arg_pointer` asks for, realigns when it calls anything and when a slot wants
+    /// more than a word, and a leaf that wants no more is left alone, as is a frame that grows.
+    #[test]
+    fn a_forced_frame_realigns_for_a_call_and_for_a_wide_slot() {
+        let realign = |local: Local, leaf: bool, grows: bool| {
+            let (func, allocation, _) = pressure(&SYSV, 2, 4);
+            let locals = [local];
+            let base = Layout::new(&SYSV, REGS);
+            let layout = Layout { locals: &locals, leaf, grows, forced: true, ..base };
+            assert!(crate::frame::keeps_frame_pointer(&layout) || leaf);
+            Frame::of(&func, &allocation, &layout).realign()
+        };
+        let narrow = Local { size: 8, align: 8 };
+        let wide = Local { size: 16, align: 16 };
+        assert_eq!(realign(narrow, false, false), Some(16));
+        assert_eq!(realign(wide, true, false), Some(16));
+        assert_eq!(realign(narrow, true, false), None);
+        assert_eq!(realign(narrow, false, true), None);
+        assert_eq!(realign(Local { size: 32, align: 32 }, false, false), Some(32));
+
+        let (mut func, allocation, mut names) = pressure(&SYSV, 2, 4);
+        let base = Layout::new(&SYSV, REGS);
+        let layout = Layout { leaf: false, forced: true, ..base };
+        let lines = written(&mut func, &allocation, &layout, &mut names);
+        assert!(added(&lines).contains(&"$rsp = x64.and_ri_64 $rsp, -16"), "{lines:?}");
+    }
+
     #[test]
     fn every_block_the_function_returns_from_gets_an_epilogue() {
         let mut names = Interner::new();

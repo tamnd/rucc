@@ -49,7 +49,7 @@ use rucc_lex::Encoding;
 use rucc_target::{BitFieldStyle, Convention, Isa, ObjectFormat, Target, TargetInfo};
 use rucc_types::{
     FloatKind, FunctionId, FunctionType, IntKind, TypeId, TypeKind, float_format, int_width,
-    integer_info, is_arithmetic, is_complex, is_real_floating, layout,
+    integer_info, is_arithmetic, is_complex, is_function, is_real_floating, layout,
 };
 
 use crate::check::Checker;
@@ -1810,7 +1810,7 @@ impl Checker<'_> {
     ///
     /// `always_inline`, `noinline`, `noipa`, `no_instrument_function`, `no_stack_protector`,
     /// `stack_protect`, `cold`, `hot`, `function_return("keep")`, `indirect_branch("keep")` and
-    /// `zero_call_used_regs`, `cf_check`, and the `optimize` options that stand for two of them, and
+    /// `zero_call_used_regs`, `cf_check`, `force_align_arg_pointer`, and the `optimize` options that stand for two of them, and
     /// `uninitialized`, `common`, `nocommon` and `retain`, which are not about inlining but are read in the
     /// same two places, under the namespace test [`Self::never_returns`] is under and through the
     /// same unarmouring, so `__always_inline__` in a header and `[[gnu::noinline]]` are both read.
@@ -1832,6 +1832,11 @@ impl Checker<'_> {
                 "no_profile_instrument_function" => flags |= DeclFlags::NO_PROFILE,
                 "cf_check" if matches!(self.cx.target.tuple.arch().as_str(), "x86_64" | "i686") => {
                     flags |= DeclFlags::CF_CHECK;
+                }
+                "force_align_arg_pointer"
+                    if matches!(self.cx.target.tuple.arch().as_str(), "x86_64" | "i686") =>
+                {
+                    flags |= DeclFlags::FORCE_ALIGN;
                 }
                 "no_stack_protector" => flags = flags.then(DeclFlags::NO_STACK_PROTECTOR),
                 "stack_protect" => flags = flags.then(DeclFlags::STACK_PROTECT),
@@ -2272,6 +2277,41 @@ impl Checker<'_> {
                     self.report(refused.note(format!("expected 0, found {count}"), attr.span));
                 } else if kind != DeclKind::Function {
                     let what = "'cf_check' attribute only applies to functions";
+                    self.report(Diagnostic::warning(what, attr.span).with_code("E0703"));
+                }
+            }
+        }
+    }
+
+    /// What gcc says about `force_align_arg_pointer` in the lists of one declaration whose type is
+    /// `ty`: an argument is refused in gcc's words, and on anything whose type is neither a
+    /// function nor a pointer to one the attribute is dropped with its warning. gcc puts it on the
+    /// function type, so a typedef of one and a pointer to one take it without a word. What it
+    /// does to the frame is read with the inlining flags, as [`DeclFlags::FORCE_ALIGN`].
+    ///
+    /// Read on x86 alone, where gcc has it.
+    pub(in crate::check) fn force_aligned(&mut self, lists: &[AttrList], ty: TypeId) {
+        if !matches!(self.cx.target.tuple.arch().as_str(), "x86_64" | "i686") {
+            return;
+        }
+        let ast = self.ast;
+        for &attrs in lists {
+            for &attr in &ast[attrs] {
+                if attr.namespace.is_some_and(|ns| self.text(ns) != "gnu")
+                    || self.gnu_name(&attr) != "force_align_arg_pointer"
+                {
+                    continue;
+                }
+                let count = ast[attr.args].len();
+                let pointee = rucc_types::pointee(&self.types, ty);
+                let function = is_function(&self.types, ty)
+                    || pointee.is_some_and(|to| is_function(&self.types, to));
+                if count > 0 {
+                    let what = "wrong number of arguments specified for 'force_align_arg_pointer' attribute";
+                    let refused = Diagnostic::error(what, attr.span).with_code("E0831");
+                    self.report(refused.note(format!("expected 0, found {count}"), attr.span));
+                } else if !function {
+                    let what = "'force_align_arg_pointer' attribute only applies to function types";
                     self.report(Diagnostic::warning(what, attr.span).with_code("E0703"));
                 }
             }

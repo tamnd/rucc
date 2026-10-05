@@ -253,6 +253,10 @@ impl AttrSet {
     /// `-fcf-protection=full` that lets it make a tail call to another such function, which
     /// would otherwise come back past it by a jump with no landing pad to meet it.
     pub const INDIRECT_RETURN: Self = Self(1 << 35);
+    /// The function does not trust its caller to have aligned the stack beyond a word, from
+    /// `__attribute__((force_align_arg_pointer))`, so it aligns its own frame to the target's
+    /// stack alignment when it calls anything and to whatever its own slots need.
+    pub const FORCE_ALIGN: Self = Self(1 << 36);
 
     /// The underlying bits, for the printer and for hashing.
     #[must_use]
@@ -381,6 +385,7 @@ static NAMED: &[(AttrSet, &str)] = &[
     (AttrSet::NOCF, "nocf"),
     (AttrSet::CF_CHECK, "cf_check"),
     (AttrSet::INDIRECT_RETURN, "indirect_return"),
+    (AttrSet::FORCE_ALIGN, "force_align_arg_pointer"),
 ];
 
 /// The pairs that cannot both be set, with their names for the message.
