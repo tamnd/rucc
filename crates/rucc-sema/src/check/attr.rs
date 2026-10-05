@@ -756,7 +756,8 @@ impl Checker<'_> {
                 self.report(refused.note("aliased declaration here", there));
                 continue;
             }
-            let TypeKind::Function(signature) = self.types[target.ty].kind else { continue };
+            let declared = self.types.canonical(target.ty);
+            let TypeKind::Function(signature) = self.types.kind(declared) else { continue };
             let returned = self.types.signature(signature).ret;
             let wanted = self.types.pointer(node.ty);
             let wanted_spelled = self.spell(wanted);
