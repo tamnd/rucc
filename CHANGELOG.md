@@ -9,6 +9,10 @@ All notable changes are recorded here. The format follows [Keep a Changelog](htt
 - At `-O1` and above, scalar replacement of aggregates splits a local whose accesses include a `bool`, which the front end loads and stores as an `i1`, and keeps the `bool` in a register (#2989). Before this a `bool isnull;` handed to an inlined `index_getattr` or `heap_getattr` stayed on the stack, so `_bt_compare` and the other tuple walks in PostgreSQL stored and reloaded the flag on every attribute. A struct with a `bool` field set to zero and then read is split too. A `bool` read back as a `char` still keeps the local in memory.
 - On wasm, a branch to a block that is only a `jump` and that copies nothing goes where the `jump` goes, and a `br` just before the `end` of the block that it goes to is not written, because the code falls through to the same place (#2866). The exit test of a simple loop is now one `br_if` back to the loop, where it was an `if` around a `br`. The SQLite shell at `-O2` goes from 1,684,044 bytes to 1,650,721, with 12,466 fewer `br` instructions.
 
+### Fixed
+
+- The inliner counts a local in the frame when its only use is as an argument to another block, as for a pointer that starts at a buffer and walks it (#1989). Such a local was taken for one nothing reads, so a function called once with a large buffer went into its caller past gcc's frame growth limit. In Postgres, `asyncQueueReadAllNotifications` took in the 8192 byte page of `asyncQueueProcessPageEntries` this way, a frame of 8320 bytes against gcc's 80.
+
 ## 0.24.3
 
 More of WA4 (#2866). On wasm with the bulk memory feature, a call to `memcpy`, `memmove` or `memset` is `memory.copy` or `memory.fill`, and with optimization, values that are never live at the same time share one local. The SQLite shell at `-O2` goes from 1,816,667 bytes to 1,684,044, which is 7.5% smaller than the shell that clang from wasi-sdk 34 builds. The release also has the `inject-fault` pass, a store of a constant in one `mov` on x86-64, and fixes for atomic builtins on a `bool` and for `-static` with `-pie`.
