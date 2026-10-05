@@ -23,8 +23,8 @@
 //! than from block frequency. No scheduling, and the redundant moves a coalescer would take out
 //! are still in the output.
 
-use rucc_base::Interner;
 use rucc_base::hash::Map;
+use rucc_base::{Interner, Symbol};
 use rucc_cost::Goal;
 use rucc_ir as ir;
 use rucc_mir as mir;
@@ -442,6 +442,12 @@ pub struct Flags {
     /// What else is done with that call: listed in `__mcount_loc` for `-mrecord-mcount`, and
     /// written as a nop for `-mnop-mcount`. See [`rucc_mir::Mcount`].
     pub mcount: Mcount,
+    /// The hook the call goes to in place of the target's, which `-mfentry-name=` names, and
+    /// which a function's own `fentry_name` overrides.
+    pub fentry_name: Option<Symbol>,
+    /// The section the call is listed in in place of `__mcount_loc`, which `-mfentry-section=`
+    /// names, and which a function's own `fentry_section` overrides.
+    pub fentry_section: Option<Symbol>,
     /// How much room every function opens with for a patcher, which
     /// `-fpatchable-function-entry=` asks for. See [`Room`].
     pub patch: Room,
@@ -544,6 +550,8 @@ impl Default for Flags {
             isa: Isa::NONE,
             profile: Profile::No,
             mcount: Mcount::default(),
+            fentry_name: None,
+            fentry_section: None,
             patch: Room::default(),
             reorder: false,
             partition: false,
@@ -1097,10 +1105,24 @@ pub fn compile_recording(
         .then_some(machine.insts.probe.as_ref())
         .flatten()
         .map(|probe| Probing { probe, branch: machine.branch, scratch: [scratch[0], scratch[1]] });
-    let trace = machine.conv.trace.and_then(|trace| match profile {
-        Profile::No => None,
-        Profile::Early => Some(Tracing { name: trace.early, early: true, mcount: flags.mcount }),
-        Profile::Late => Some(Tracing { name: trace.late, early: false, mcount: flags.mcount }),
+    // The hook and the list are the function's own where `fentry_name` and `fentry_section` said,
+    // and the command line's otherwise. A section the function named lists the call whether or not
+    // `-mrecord-mcount` asked, which is what gcc does, while one only the command line named is
+    // where the calls go when they are listed and nothing more.
+    let trace = machine.conv.trace.and_then(|trace| {
+        let (hook, early) = match profile {
+            Profile::No => return None,
+            Profile::Early => (trace.early, true),
+            Profile::Late => (trace.late, false),
+        };
+        let name = match source.fentry_name.or(flags.fentry_name) {
+            Some(name) => name,
+            None => names.intern(hook),
+        };
+        let record = flags.mcount.record || source.fentry_section.is_some();
+        let mcount = Mcount { record, ..flags.mcount };
+        let section = source.fentry_section.or(flags.fentry_section);
+        Some(Tracing { name, early, mcount, section })
     });
     // And once more for the room a patcher was promised, which is a run of the shortest
     // instruction that does nothing and so needs the target to have one. Nothing is written on a

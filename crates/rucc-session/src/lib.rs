@@ -2283,6 +2283,10 @@ pub struct Options {
     /// Whether that call is written as a five byte nop rather than a call, from `-mnop-mcount`,
     /// which leaves the patching entirely to whoever reads the list.
     pub nop_mcount: bool,
+    /// The hook that call goes to in place of the target's, from `-mfentry-name=`.
+    pub fentry_name: Option<String>,
+    /// The section the call is listed in in place of `__mcount_loc`, from `-mfentry-section=`.
+    pub fentry_section: Option<String>,
     /// How much room every function opens with for somebody to write over later, from
     /// `-fpatchable-function-entry=`.
     ///
@@ -2794,6 +2798,8 @@ impl Options {
             hook: Hook::default(),
             record_mcount: false,
             nop_mcount: false,
+            fentry_name: None,
+            fentry_section: None,
             patchable: Patchable::default(),
             wrapping: Wrapping::NONE,
             char_signed: None,

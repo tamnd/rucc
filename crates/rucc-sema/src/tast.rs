@@ -225,6 +225,8 @@ pub struct Tast {
     patchable: Map<DeclId, (u32, u32)>,
     wasm_names: Map<DeclId, WasmNames>,
     ifuncs: Set<DeclId>,
+    fentry_names: Map<DeclId, StrId>,
+    fentry_sections: Map<DeclId, StrId>,
     defined_at: Map<DeclId, Span>,
     notices: Map<DeclId, Notices>,
     asms: Vec<Asm>,
@@ -549,6 +551,33 @@ impl Tast {
     #[must_use]
     pub fn wasm_names(&self, decl: DeclId) -> WasmNames {
         self.wasm_names.get(&decl).copied().unwrap_or_default()
+    }
+
+    /// Records the profiler's hook `__attribute__((fentry_name("hook")))` asked `-pg` to call on
+    /// the way into this function, in place of `__fentry__` or `mcount`. A later declaration
+    /// replaces what an earlier one said, the way gcc reads the attributes once the file is done.
+    pub fn record_fentry_name(&mut self, decl: DeclId, name: StrId) {
+        self.fentry_names.insert(decl, name);
+    }
+
+    /// The hook this function asked the profiler's call to go to, and nothing when the command
+    /// line decides.
+    #[must_use]
+    pub fn fentry_name(&self, decl: DeclId) -> Option<StrId> {
+        self.fentry_names.get(&decl).copied()
+    }
+
+    /// Records the section `__attribute__((fentry_section("name")))` asked the address of the
+    /// profiler's call to be listed in, the same way [`Tast::record_fentry_name`] records the hook.
+    pub fn record_fentry_section(&mut self, decl: DeclId, section: StrId) {
+        self.fentry_sections.insert(decl, section);
+    }
+
+    /// The section this function asked the profiler's call to be listed in, and nothing when the
+    /// command line decides.
+    #[must_use]
+    pub fn fentry_section(&self, decl: DeclId) -> Option<StrId> {
+        self.fentry_sections.get(&decl).copied()
     }
 
     /// Records that the second name this function's `alias` is for is its resolver, which

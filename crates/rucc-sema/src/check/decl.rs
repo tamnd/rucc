@@ -438,6 +438,7 @@ impl Checker<'_> {
         self.cf_checked(&[specs.attrs], DeclKind::Function);
         self.record_patchable(id, &[specs.attrs], DeclKind::Function);
         self.record_wasm_names(id, &[specs.attrs], DeclKind::Function);
+        self.record_fentry(Some(id), &[specs.attrs], DeclKind::Function);
         let merged = self.tast[id].ty;
         self.record_alloc_size(id, &[specs.attrs], DeclKind::Function, merged);
         self.annotate_decl(id, &[specs.attrs]);
@@ -936,6 +937,7 @@ impl Checker<'_> {
         self.cf_checked(&[specs.attrs, item.attrs], kind);
         self.record_patchable(id, &[specs.attrs, item.attrs], kind);
         self.record_wasm_names(id, &[specs.attrs, item.attrs], kind);
+        self.record_fentry(Some(id), &[specs.attrs, item.attrs], kind);
         if ifunc {
             self.tast.record_ifunc(id);
         }
@@ -1056,6 +1058,7 @@ impl Checker<'_> {
         }
         // A typedef is not a function, whatever type it names.
         self.cf_checked(&[specs.attrs, item.attrs], DeclKind::Type);
+        self.record_fentry(None, &[specs.attrs, item.attrs], DeclKind::Type);
         self.resolver(&[specs.attrs, item.attrs], DeclKind::Type, span);
         if item.init.is_some() {
             let spelled = self.text(name).to_owned();

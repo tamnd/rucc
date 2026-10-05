@@ -530,14 +530,25 @@ pub fn write(
     // `__mcount_loc`, allocated and never written by the program. The address is against the
     // section the call is in for the reason the patch record's is, so it survives a function being
     // at an offset the linker picks.
+    // A section `fentry_section` or `-mfentry-section=` named is one more of these, made the first
+    // time a call is listed in it, so the sections come out in the order their first calls did.
+    let mut listed: Vec<(&str, object::write::SectionId)> = Vec::new();
     if !text.mcount.is_empty() {
-        let name = crate::section::MCOUNT_LOC.as_bytes().to_vec();
-        let id = obj.add_section(Vec::new(), name, SectionKind::ReadOnlyData);
         let flags =
             flavour.reloc(machine, Reference::Address { bytes: pointer }, 0).ok_or_else(|| {
                 Error::Refused { why: "no relocation holds an address here".to_owned() }
             })?;
-        for &call in &text.mcount {
+        for (call, name) in &text.mcount {
+            let call = *call;
+            let id = match listed.iter().find(|(made, _)| *made == name.as_str()) {
+                Some(&(_, id)) => id,
+                None => {
+                    let made = name.as_bytes().to_vec();
+                    let id = obj.add_section(Vec::new(), made, SectionKind::ReadOnlyData);
+                    listed.push((name, id));
+                    id
+                }
+            };
             let after = text.funcs.partition_point(|func| func.start <= call);
             let Some(index) = after.checked_sub(1) else {
                 let why = format!("a profiler call at {call} is in front of every function");

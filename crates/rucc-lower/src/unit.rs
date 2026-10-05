@@ -1188,6 +1188,15 @@ impl Unit<'_> {
         // The room a patcher gets in this function, when an attribute said rather than the
         // command line. See `rucc_codegen::pipeline`.
         func.patchable = tast.patchable(decl);
+        // And the hook and the list for the profiler's call, the same way.
+        if let Some(name) = tast.fentry_name(decl) {
+            let spelled = self.spelled(name);
+            func.fentry_name = Some(self.names.intern(&spelled));
+        }
+        if let Some(section) = tast.fentry_section(decl) {
+            let spelled = self.spelled(section);
+            func.fentry_section = Some(self.names.intern(&spelled));
+        }
         func.section = self.section_of(decl, true);
         // The names a wasm object gives it in place of its own, from clang's attributes, which
         // sema records on a wasm row alone.
@@ -1367,6 +1376,8 @@ impl Unit<'_> {
             clone.named = func.named;
             clone.align = func.align;
             clone.patchable = func.patchable;
+            clone.fentry_name = func.fentry_name;
+            clone.fentry_section = func.fentry_section;
             clone.attrs = func.attrs;
             clone.attrs.set = clone.attrs.set.without(AttrSet::ALWAYS_INLINE);
             clone.section = func.section;

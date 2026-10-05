@@ -381,6 +381,14 @@ impl<'a> Printer<'a> {
                 self.string(self.names.resolve(name).as_bytes());
             }
         }
+        if let Some(name) = func.fentry_name {
+            self.out.push_str(", fentry_name ");
+            self.string(self.names.resolve(name).as_bytes());
+        }
+        if let Some(section) = func.fentry_section {
+            self.out.push_str(", fentry_section ");
+            self.string(self.names.resolve(section).as_bytes());
+        }
         if func.is_declaration() {
             self.out.push_str(";\n");
             return;

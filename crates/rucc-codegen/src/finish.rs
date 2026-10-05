@@ -66,8 +66,8 @@
 //! `spec/10-backend.md` section 10.8 as it applies to the one pass that would otherwise be full
 //! of `x64.` by hand.
 
-use rucc_base::Interner;
 use rucc_base::hash::Map;
+use rucc_base::{Interner, Symbol};
 use rucc_diag::Span;
 use rucc_mir::{Block, BlockCall, CfiOp, Func, Inst, Mem, Opcode, Operand, Patch, Reg, Role};
 use rucc_regalloc::Allocation;
@@ -126,12 +126,16 @@ pub struct Probing<'a> {
 /// read against the target and a prologue that has the name has everything it needs.
 #[derive(Debug, Clone, Copy)]
 pub struct Tracing {
-    /// What is called, which is a routine the runtime provides and not one the program wrote.
-    pub name: &'static str,
+    /// What is called, which is a routine the runtime provides and not one the program wrote:
+    /// the target's, or what `fentry_name` or `-mfentry-name=` named in its place.
+    pub name: Symbol,
     /// Whether the call goes in front of the prologue rather than once the frame is taken.
     pub early: bool,
     /// Whether the call is listed and whether it is a nop. See [`crate::pipeline::Mcount`].
     pub mcount: Mcount,
+    /// The section the call is listed in, where `fentry_section` or `-mfentry-section=` named one
+    /// in place of `__mcount_loc`.
+    pub section: Option<Symbol>,
 }
 
 /// The room at the top of a function for something to be written over later, in a function that
@@ -812,11 +816,11 @@ impl Writer<'_> {
     /// rather than something cheaper.
     fn hook(&mut self, trace: Tracing) -> Inst {
         let call = self.opcode(self.insts.call);
-        let symbol = self.names.intern(trace.name);
-        let inst = self.func.build_loose(call).symbol(symbol).finish();
+        let inst = self.func.build_loose(call).symbol(trace.name).finish();
         let Mcount { record, nop } = trace.mcount;
         if record || nop {
-            self.func.mcount = Some(rucc_mir::Mcount { inst, record, nop });
+            let section = trace.section;
+            self.func.mcount = Some(rucc_mir::Mcount { inst, record, nop, section });
         }
         inst
     }

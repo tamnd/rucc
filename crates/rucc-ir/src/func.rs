@@ -114,6 +114,14 @@ pub struct Func {
     pub patchable: Option<(u32, u32)>,
     /// The names a wasm object gives it in place of its own. See [`WasmNames`].
     pub wasm: WasmNames,
+    /// The profiler's hook `-pg` calls on the way in, from `__attribute__((fentry_name(...)))`, in
+    /// place of `__fentry__` or `mcount` and of what `-mfentry-name=` says. `None` for one that
+    /// leaves it to the command line.
+    pub fentry_name: Option<Symbol>,
+    /// The section the address of that call is listed in, from
+    /// `__attribute__((fentry_section(...)))`, which lists it whether or not `-mrecord-mcount` was
+    /// given. `None` for one that leaves it to the command line.
+    pub fentry_section: Option<Symbol>,
     /// What is true of the whole function, which is what a caller reads when it wants to know
     /// what a call to it does without looking inside.
     pub attrs: Attrs,
@@ -225,6 +233,8 @@ impl Func {
             align: None,
             patchable: None,
             wasm: WasmNames::default(),
+            fentry_name: None,
+            fentry_section: None,
             attrs: Attrs::NONE,
             target: None,
             declared: Span::DUMMY,
