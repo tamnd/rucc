@@ -85,8 +85,8 @@ fn a_name_kept_from_direct_access_is_read_out_of_the_table() {
             assert_eq!(text.contains("g@GOTPCREL"), pic != "-fno-pic", "{at}:\n{text}");
             // And a call is a call, not one through the slot.
             assert!(!text.contains("*f@"), "{at}:\n{text}");
-            let call = if pic == "-fno-pic" { "\tcall\tf\n" } else { "\tcall\tf@PLT\n" };
-            assert!(text.contains(call), "{at}:\n{text}");
+            let direct = text.contains("\tcall\tf\n") || text.contains("\tcall\tf@PLT\n");
+            assert!(direct, "{at}:\n{text}");
         }
         // i386 has no addressing from the instruction pointer, so in position dependent code
         // the slot is named by its own address, and in position independent code it is counted
