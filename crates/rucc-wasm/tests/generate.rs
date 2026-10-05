@@ -1484,7 +1484,8 @@ fn body_of(text: &str, name: &str, optimize: bool) -> String {
 /// With optimization, a value with one use in its block stays on the operand stack where its
 /// instruction can move to the use. The load does not move past the store, and the call does not
 /// move past the load. The multiplication moves past the call, and the call moves to the add,
-/// with nothing between. Without optimization, each value has a local.
+/// with nothing between. A value written to a local takes the local of a parameter that is dead.
+/// Without optimization, each value has a local.
 #[test]
 fn a_value_with_one_use_stays_on_the_stack_when_its_instruction_can_move() {
     let f = body_of(STACKED, "f", true);
@@ -1492,14 +1493,13 @@ fn a_value_with_one_use_stays_on_the_stack_when_its_instruction_can_move() {
     assert_eq!(
         code,
         [
-            ".local\ti32",
             "local.get\t0",
             "i32.load\t0",
-            "local.set\t3",
+            "local.set\t0",
             "local.get\t1",
             "local.get\t2",
             "i32.store\t0",
-            "local.get\t3",
+            "local.get\t0",
             "local.get\t2",
             "i32.mul",
             "local.get\t2",
@@ -1511,7 +1511,7 @@ fn a_value_with_one_use_stays_on_the_stack_when_its_instruction_can_move() {
         "{f}"
     );
     let h = body_of(STACKED, "h", true);
-    assert!(h.contains("call\tg\n\tlocal.set\t2\n"), "{h}");
+    assert!(h.contains("call\tg\n\tlocal.set\t1\n"), "{h}");
     assert!(h.contains("i32.load\t0\n\ti32.add\n\treturn\n"), "{h}");
     let f = body_of(STACKED, "f", false);
     assert_eq!(f.matches("local.set").count(), 4, "{f}");
@@ -1735,4 +1735,18 @@ fn an_edge_that_is_only_a_branch_is_a_br_if() {
     assert_eq!(find.matches("i32.eqz\n\tbr_if\t").count(), 2, "{find}");
     assert_eq!(find.matches("\treturn\n\tend_if\n").count(), 1, "{find}");
     assert!(!find.contains("else"), "{find}");
+}
+
+/// With optimization, the argument and the parameter of an edge share a local when they are never
+/// live at the same time, and the edge copies nothing. In `sum`, the counter and the next counter
+/// share one local, and the sum and the next sum share another, so the edge back to the loop is
+/// only a `br`. Without optimization, each value has a local and the edge copies two of them.
+#[test]
+fn an_edge_argument_and_its_parameter_share_a_local() {
+    let sum = body_of(PROGRAM, "sum", true);
+    assert!(sum.contains("\t.local\ti32, i32\n"), "{sum}");
+    assert!(sum.contains("\tlocal.tee\t3\n\tlocal.get\t1\n\ti32.lt_s\n\tif\n\tbr\t1\n"), "{sum}");
+    assert_eq!(sum.matches("local.set").count(), 4, "{sum}");
+    let sum = body_of(PROGRAM, "sum", false);
+    assert!(sum.matches("local.set").count() > 4, "{sum}");
 }
