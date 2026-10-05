@@ -97,6 +97,31 @@ fn a_target_with_nowhere_to_put_the_chain_refuses_with_a_reason() {
     }
 }
 
+/// On wasm the chain is the last parameter, an ordinary `i32`, so a nested function that is only
+/// called by name is built. Its address is an index into the table, which a program cannot add a
+/// trampoline to, so one whose address is taken is refused with that reason.
+#[test]
+fn wasm_passes_the_chain_as_a_parameter_and_refuses_a_trampoline() {
+    let direct = "\
+int outer(int n) {
+  int total = 0;
+  int add(int k) { total += k * n; return total; }
+  add(1);
+  return add(2);
+}
+";
+    let (ok, text, err) = run("wasm", "wasm32-wasip1", &[], direct);
+    assert!(ok, "the compiler refused the fixture:\n{err}");
+    assert!(text.contains(".functype\tadd.0 (i32, i32) -> (i32)"), "no chain parameter:\n{text}");
+    assert!(text.contains("call\tadd.0"), "the nested function is not called:\n{text}");
+    assert!(!text.contains("__gcc_nested_func_ptr"), "a trampoline on wasm:\n{text}");
+
+    let (ok, _, err) = run("wasm-escapes", "wasm32-wasip1", &[], NESTED);
+    assert!(!ok, "wasm built a nested function whose address is taken");
+    assert!(err.contains("a nested function cannot be built for this target"), "{err}");
+    assert!(err.contains("needs a trampoline, which wasm cannot make"), "{err}");
+}
+
 /// A function with no nested function in it is built the way it always was, with no block and no
 /// calls into libgcc, which is what keeps the feature from costing anything where it is not used.
 #[test]

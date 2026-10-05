@@ -56,9 +56,9 @@ suite=$tree/gcc/testsuite/gcc.c-torture/execute
 
 # The effective targets that are false, and what each program is linked with. On wasm32 a program
 # cannot write code at run time and cannot read the call stack, so trampolines, return_address and
-# untyped_assembly are false. nonlocal_goto is false until nested functions (#2943) are built on
-# wasm. WASI has no signals and no mmap, and a pointer is 32 bits. The stack is 8 MiB, which is what
-# a Linux program has, and the long double conversions of printf are in a library of their own.
+# untyped_assembly are false. nonlocal_goto is false until a goto out of a nested function (#2980)
+# is built. WASI has no signals and no mmap, and a pointer is 32 bits. The stack is 8 MiB, which is
+# what a Linux program has, and the long double conversions of printf are in a library of their own.
 case $triple in
 wasm32-wasi*)
 	false_targets='trampolines nonlocal_goto return_address untyped_assembly signal mmap lp64 dfp dfprt run_expensive_tests'

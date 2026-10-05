@@ -33,6 +33,10 @@
 //! the trampoline is pointed at a stub of two instructions in front of the function that moves it
 //! across. On AArch64 the chain is `x18` on both sides and the trampoline goes straight to the
 //! function.
+//!
+//! On wasm the chain is an ordinary parameter, the last one, as it is in the IR. A wasm program
+//! cannot write code, and the address of a function is an index into a table that the linker
+//! fixes, so there is no trampoline, and a nested function whose address is taken is refused.
 
 use rucc_base::hash::{Map, Set};
 use rucc_sema::DeclId;
