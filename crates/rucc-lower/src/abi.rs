@@ -354,9 +354,13 @@ fn travel(
 /// A slot as wide as a register is that register's integer type. One that is not, which is what
 /// the last eightbyte of a twelve byte structure is, is rounded up to the next width a machine
 /// has an instruction for, and the walk is what keeps the load from reading past the object.
+///
+/// A slot of sixteen bytes is an `i128`. Only the wasm32 ABI makes one, for a structure whose one
+/// member is an `__int128`. clang passes that structure as the member, and the wasm backend holds
+/// an `i128` in two `i64` values, so the structure travels as the bare `__int128` does.
 pub(crate) fn slot_type(slot: Slot) -> Type {
     match slot {
-        Slot::Integer { size, .. } => Type::int(size.next_power_of_two().clamp(1, 8) * 8),
+        Slot::Integer { size, .. } => Type::int(size.next_power_of_two().clamp(1, 16) * 8),
         Slot::Float { format, .. } => match repr::ir_format(format) {
             Some(format) => Type::float(format),
             // A format the IR has no type for, which is `__bf16` in an aggregate. Sixteen bits
@@ -1041,5 +1045,24 @@ mod tests {
         let sysv = va_slots(&types, &target("x86_64-unknown-linux-gnu"), wide);
         assert_eq!(sysv, vec![half, Slot::Integer { offset: 8, size: 8 }]);
         assert!(va_slots(&types, &target("x86_64-pc-windows-gnu"), wide).is_empty());
+    }
+
+    /// On wasm32 a structure whose one member is an `__int128` travels as the member, which is
+    /// one `i128` that the backend splits into two `i64` values and returns through memory. That
+    /// is clang's signature. Before, the slot was cut to an `i64` and the high half was lost.
+    #[test]
+    fn a_structure_of_one_int128_travels_on_wasm32_as_the_int128() {
+        let mut types = Types::new();
+        let wasm = target("wasm32-unknown-wasip1");
+        let wide = types.int(IntKind::Int128);
+        let one = record(&mut types, &wasm, &[wide]);
+        let bare =
+            plan(&types, &wasm, Convention::Target, wide, &[wide], &[], false).expect("a plan");
+        let wrapped =
+            plan(&types, &wasm, Convention::Target, one, &[one], &[], false).expect("a plan");
+        assert_eq!(wrapped.args[0].types, vec![Type::int(128)]);
+        assert_eq!(wrapped.args[0].types, bare.args[0].types);
+        assert_eq!(wrapped.signature.params, bare.signature.params);
+        assert_eq!(wrapped.signature.returns, bare.signature.returns);
     }
 }
