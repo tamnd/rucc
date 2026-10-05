@@ -716,6 +716,14 @@ pub const DSE_WALK_LIMIT: u32 = 256;
 /// comparisons and an `or`, which is no more than the window comparison and the shift of a bit test.
 pub const RANGE_TEST_BIT_INTERVALS: usize = 3;
 
+/// The most values a set compared against can have and still be a `switch` with a case for each,
+/// per section 19.4.
+///
+/// Sixty four. The sets this is for are object ids and opcodes written out one comparison at a
+/// time, a few dozen at most, and a set bigger than this is ranges a `switch` would have to spell
+/// out value by value.
+pub const RANGE_SWITCH_CASES: u32 = 64;
+
 /// How many steps back from the operand of `__builtin_constant_p` the optimizer looks for a load
 /// before it decides the operand was not read from memory, per section 20.
 ///
@@ -1293,6 +1301,14 @@ pub const ALL: &[Constant] = &[
         name: "RANGE_TEST_BIT_INTERVALS",
         value: 3,
         unit: "intervals",
+        document: "19.4",
+        gcc: "",
+        provenance: Provenance::Chosen,
+    },
+    Constant {
+        name: "RANGE_SWITCH_CASES",
+        value: 64,
+        unit: "values",
         document: "19.4",
         gcc: "",
         provenance: Provenance::Chosen,
