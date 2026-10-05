@@ -974,6 +974,14 @@ impl<'a> Places<'a> {
         self.int = self.regs.int_args.len();
     }
 
+    /// Leaves one general purpose register fewer for the values after this one, if there is one.
+    ///
+    /// i386 `fastcall` asks for it after a structure of four bytes or fewer, which is on the stack
+    /// and still takes ecx or edx from the `int` after it.
+    pub fn spend_integer(&mut self) {
+        self.int = (self.int + 1).min(self.regs.int_args.len());
+    }
+
     /// Leaves no vector register for the values after this one, which AAPCS64 asks for after a
     /// homogeneous floating point aggregate that found too few of them left.
     pub fn drain_floats(&mut self) {
