@@ -1226,6 +1226,7 @@ fn generate(
         zero_extension: zero_extension(opts.isa),
         stack_clash: opts.stack_clash,
         landing: opts.control.branch(),
+        shadow_stack: opts.control.ret(),
         manual_endbr: opts.manual_endbr,
         speculation: opts.speculation,
         // Not in i386 position independent code, whose table would be found with an absolute

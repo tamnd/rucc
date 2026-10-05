@@ -626,6 +626,12 @@ impl Flags {
     /// tell the assembler which relocation to write. See tamnd/rucc#2247.
     pub const PLT: Self = Self(4);
 
+    /// A call that can come back by an indirect jump rather than a `ret`, which is one to a
+    /// `returns_twice` function or one of an `__attribute__((indirect_return))` type. Under
+    /// `-fcf-protection=branch` the code generator writes a landing pad right after it, where the
+    /// jump lands.
+    pub const LANDS: Self = Self(8);
+
     /// Both of them at once.
     #[must_use]
     pub const fn with(self, other: Self) -> Self {
@@ -659,6 +665,9 @@ impl fmt::Display for Flags {
         }
         if self.contains(Self::PLT) {
             f.write_str(" plt")?;
+        }
+        if self.contains(Self::LANDS) {
+            f.write_str(" lands")?;
         }
         Ok(())
     }

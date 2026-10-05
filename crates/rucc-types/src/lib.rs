@@ -614,6 +614,7 @@ mod tests {
                 prototyped: true,
                 convention: rucc_target::Convention::Target,
                 nocf: false,
+                indirect_return: false,
             })
         };
         let a = make(&mut types, vec![int, long], false);
@@ -636,6 +637,7 @@ mod tests {
             prototyped: true,
             convention: rucc_target::Convention::Target,
             nocf: false,
+            indirect_return: false,
         });
         let plain = types.function(FunctionType {
             ret: int,
@@ -644,6 +646,7 @@ mod tests {
             prototyped: true,
             convention: rucc_target::Convention::Target,
             nocf: false,
+            indirect_return: false,
         });
         assert_ne!(sugar, plain);
         assert_eq!(types.canonical(sugar), plain);
@@ -903,6 +906,7 @@ mod tests {
             prototyped: true,
             convention: rucc_target::Convention::Target,
             nocf: false,
+            indirect_return: false,
         });
         assert_eq!(layout(&types, function, &linux), Err(LayoutError::Function));
         let pointer_to_function = types.pointer(function);
@@ -1860,6 +1864,7 @@ mod tests {
             prototyped: true,
             convention: rucc_target::Convention::Target,
             nocf: false,
+            indirect_return: false,
         })
     }
 
@@ -1873,6 +1878,7 @@ mod tests {
             prototyped: false,
             convention: rucc_target::Convention::Target,
             nocf: false,
+            indirect_return: false,
         })
     }
 
@@ -2048,6 +2054,7 @@ mod tests {
             prototyped: false,
             convention: rucc_target::Convention::Target,
             nocf: false,
+            indirect_return: false,
         });
         assert!(!compatible(&types, returns_int, takes_int));
     }
@@ -2066,6 +2073,7 @@ mod tests {
             prototyped: true,
             convention: rucc_target::Convention::Ms,
             nocf: false,
+            indirect_return: false,
         };
         let native = types.function(FunctionType {
             convention: rucc_target::Convention::Target,
@@ -2079,6 +2087,7 @@ mod tests {
             prototyped: false,
             convention: rucc_target::Convention::Ms,
             nocf: false,
+            indirect_return: false,
         });
         assert!(!compatible(&types, native, ms));
         let (to_native, to_ms) = (types.pointer(native), types.pointer(ms));
@@ -2103,6 +2112,7 @@ mod tests {
             prototyped: true,
             convention: rucc_target::Convention::Target,
             nocf: true,
+            indirect_return: false,
         };
         let plain = types.function(FunctionType { nocf: false, ..signature.clone() });
         let untracked = types.function(signature);
@@ -2113,6 +2123,7 @@ mod tests {
             prototyped: false,
             convention: rucc_target::Convention::Target,
             nocf: true,
+            indirect_return: false,
         });
         assert!(!compatible(&types, plain, untracked));
         let (to_plain, to_untracked) = (types.pointer(plain), types.pointer(untracked));
@@ -2121,6 +2132,33 @@ mod tests {
         let merged = composite(&mut types, old, untracked).expect("the two agree");
         let TypeKind::Function(id) = types.kind(merged) else { panic!("a function") };
         assert!(types.signature(id).nocf);
+    }
+
+    /// gcc 13 takes a pointer to an `indirect_return` function for a pointer to a plain one in
+    /// silence and keeps the attribute through a redeclaration that does not repeat it.
+    #[test]
+    fn a_function_that_returns_by_a_jump_is_the_same_type() {
+        let mut types = Types::new();
+        let int = types.int(IntKind::Int);
+        let plain = FunctionType {
+            ret: int,
+            params: vec![int],
+            variadic: false,
+            prototyped: true,
+            convention: rucc_target::Convention::Target,
+            nocf: false,
+            indirect_return: false,
+        };
+        let jumps = types.function(FunctionType { indirect_return: true, ..plain.clone() });
+        let plain = types.function(plain);
+        assert!(compatible(&types, plain, jumps));
+        let (to_plain, to_jumps) = (types.pointer(plain), types.pointer(jumps));
+        assert!(compatible(&types, to_plain, to_jumps));
+        for (left, right) in [(plain, jumps), (jumps, plain)] {
+            let merged = composite(&mut types, left, right).expect("the two agree");
+            let TypeKind::Function(id) = types.kind(merged) else { panic!("a function") };
+            assert!(types.signature(id).indirect_return);
+        }
     }
 
     #[test]

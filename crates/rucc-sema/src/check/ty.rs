@@ -1147,6 +1147,7 @@ impl Checker<'_> {
             prototyped,
             convention: rucc_target::Convention::Target,
             nocf: false,
+            indirect_return: false,
         })
     }
 

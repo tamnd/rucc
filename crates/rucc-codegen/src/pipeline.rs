@@ -423,6 +423,10 @@ pub struct Flags {
     /// Whether the pad at the top of a function is only written in one that asks for it with
     /// `cf_check`, which `-mmanual-endbr` says. The pads at labels are not affected.
     pub manual_endbr: bool,
+    /// Whether returns are checked against a shadow stack as well, which `-fcf-protection=return`
+    /// and `full` ask for. With [`Self::landing`] it keeps a call that can come back by a jump
+    /// from becoming one. See [`crate::tail::mark`].
+    pub shadow_stack: bool,
     /// What the x86 speculation hardening flags ask of indirect branches and returns. See
     /// [`crate::thunks`].
     pub speculation: Speculation,
@@ -543,6 +547,7 @@ impl Default for Flags {
             code_model: CodeModel::Small,
             stack_clash: false,
             landing: false,
+            shadow_stack: false,
             manual_endbr: false,
             speculation: Speculation::default(),
             jump_tables: true,
@@ -733,7 +738,10 @@ pub fn compile_recording(
     // of them would be different when it returns, so the call stays a call and the registers are
     // put back after it. An interrupt handler also returns with `iretq`, which a jump would skip.
     if flags.sibling && machine.insts.away.is_some() && !saves_all {
-        tail::mark(source, names, elsewhere);
+        let guarded = flags.landing
+            && flags.shadow_stack
+            && !source.attrs.set.contains(ir::AttrSet::INDIRECT_RETURN);
+        tail::mark(source, names, elsewhere, guarded);
     }
     // Asked of the IR, where a call still says whom it calls. See [`tail::comes_back`].
     let alone = tail::comes_back(source, names, elsewhere);
@@ -1249,6 +1257,13 @@ pub fn compile_recording(
         stack.kept || !layout.leaf || jumped == stack.tails.len(),
         "a leaf whose tail calls did not all become jumps"
     );
+
+    // A landing pad after every call that can come back by a jump, which is one to a
+    // `returns_twice` function or one of an `indirect_return` type, as in gcc. After the tail
+    // calls, since one that became a jump comes back to this function's caller instead, and after
+    // everything that moves or adds instructions, so nothing comes between the call and its pad.
+    // `-mmanual-endbr` leaves these where they are, as it does the pads at labels.
+    split::after_calls(&mut func, machine.insts, landing, names);
 
     // After the tail calls, because a `ret` a tail call replaced leaves through the callee's, and
     // before the mitigations, which may turn a `ret` into a jump.

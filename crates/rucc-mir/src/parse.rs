@@ -272,6 +272,9 @@ impl<'a> Parser<'a, '_> {
         if self.eat_word("plt") {
             flags = flags.with(Flags::PLT);
         }
+        if self.eat_word("lands") {
+            flags = flags.with(Flags::LANDS);
+        }
 
         let mut inst = PendingInst {
             opcode,
