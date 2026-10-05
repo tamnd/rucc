@@ -9085,8 +9085,11 @@ mod tests {
         // until they have read a licence it prints for them. The one it went up by last is dlltool
         // mode, which is not a compiler flag at all but a second program behind the same binary,
         // and which a person building mingw-w64 with this compiler has to be able to find without
-        // knowing it is there.
-        assert!(USAGE.lines().count() < 74, "usage text has grown past one screen");
+        // knowing it is there. The one it went up by last is the wasm features and the execution
+        // model, which pick what a wasm module may use and whether it is a command or a reactor,
+        // and which could not share the machine line above them because that line is already
+        // full and asks a different question.
+        assert!(USAGE.lines().count() < 75, "usage text has grown past one screen");
     }
 
     const KERNEL_X86: &str = "--target=x86_64-unknown-linux-gnu";
