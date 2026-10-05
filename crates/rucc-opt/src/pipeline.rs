@@ -979,6 +979,17 @@ impl Report {
         }
         total
     }
+
+    /// Every pass that ran, in the order the passes first ran, with what it said across the
+    /// module added up.
+    ///
+    /// A pass that said nothing is here with an empty record rather than left out, since a count
+    /// of firings over a corpus has to tell a pass that never fired from one that never ran. This
+    /// is what `-frucc-trace` writes as `fired`.
+    #[must_use]
+    pub fn fired(&self) -> Vec<(&'static str, Stats)> {
+        self.time.iter().map(|(pass, _)| (*pass, self.totals(pass))).collect()
+    }
 }
 
 /// Runs the pipeline over the module.

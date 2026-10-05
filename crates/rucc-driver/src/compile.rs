@@ -221,7 +221,7 @@ pub fn compile(opts: &Options, name: &str, fs: &dyn FileSystem) -> Compiled {
     let mut dumps = Vec::new();
     let mut remarks = String::new();
     // How long each optimizer pass took, for `-frucc-trace`.
-    let mut passes = Vec::new();
+    let mut passes = crate::trace::Passes::default();
     // Filled in as the compilation goes past each of them, and only under `-save-temps`.
     let mut temps = Temps::default();
 
@@ -982,7 +982,7 @@ fn shares_slots(opts: &Options) -> bool {
 /// this is a walk over an empty list rather than a branch on the level. See section 9.1 of
 /// `spec/09-optimizer.md` for why the pipelines are written out rather than assembled.
 ///
-/// Gives back how long each pass took, for `-frucc-trace`.
+/// Gives back how long each pass took and what each said, for `-frucc-trace`.
 ///
 /// # Errors
 ///
@@ -997,7 +997,7 @@ fn optimize(
     file: &str,
     dumps: &mut Vec<rucc_opt::Dump>,
     remarks: &mut String,
-) -> Result<Vec<(&'static str, std::time::Duration)>, Vec<Diagnostic>> {
+) -> Result<crate::trace::Passes, Vec<Diagnostic>> {
     let mut settings = rucc_opt::Options::for_level(opts.opt_level);
     // What the analyses that read a body may believe about it. The same question the back end asks
     // about addresses, with one thing on top: `-fno-semantic-interposition` is the build promising
@@ -1048,9 +1048,10 @@ fn optimize(
     }
     let report = rucc_opt::run(module, names, &settings);
     remarks.push_str(&rucc_opt::optinfo::render(file, &report, names, wants));
+    let fired = report.fired();
     dumps.extend(report.dumps);
     match report.broke.is_empty() {
-        true => Ok(report.time),
+        true => Ok(crate::trace::Passes { time: report.time, fired }),
         false => Err(report.broke.iter().map(|why| internal(why)).collect()),
     }
 }

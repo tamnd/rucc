@@ -7,6 +7,7 @@ All notable changes are recorded here. The format follows [Keep a Changelog](htt
 ### Added
 
 - CI builds the SQLite shell for wasm32-wasip1 with rucc at `-O0` and `-O2` and runs a fixed workload under Wasmtime and under Node (#2865). `tests/sqlite/wasm.sh` holds each run to the output of the shell that clang from wasi-sdk 34 builds at `-O2`. The workload makes and indexes a table of 200000 rows and asks questions whose answers are arithmetic, and it uses the printf, JSON, date, window and text functions.
+- `-frucc-trace` gives each file's line a `fired` object: every optimizer pass that ran, in the order it first ran, with what it said across the module as `kind: what` and how many times (#2967). A pass that ran and did nothing is there as an empty object, so a count over many files can tell a pass that never fires from one that never ran. tamnd/rucc-corpus reads it to count what each pass does over the corpus.
 
 ## 0.23.0
 
