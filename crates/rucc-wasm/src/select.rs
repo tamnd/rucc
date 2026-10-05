@@ -172,6 +172,7 @@ pub(crate) fn function(unit: &mut Unit<'_>, id: FuncId, symbol: u32) -> Result<F
         trees: Trees::default(),
         pushed: Set::default(),
         root: None,
+        inverted: None,
     };
     if unit_notes {
         let (values, blocks) = rucc_ir::numbers(func);
@@ -242,6 +243,9 @@ struct Lower<'u, 'a> {
     pushed: Set<Value>,
     /// The instruction of the block that is written now and keeps its place.
     root: Option<Inst>,
+    /// The compare that is written with the inverse of its predicate, because the `br_if` that
+    /// reads it branches when the compare is false.
+    inverted: Option<Inst>,
 }
 
 /// The notes of the tree form for one function, and the numbers that the text of the IR gives
@@ -597,15 +601,12 @@ impl Lower<'_, '_> {
     /// the `if`, and that is what clang writes.
     fn br_if(&mut self, x: usize, term: Inst) -> Result<()> {
         let cond = self.args(term)[0];
-        self.push_z(cond)?;
         let (taken, other) = match (self.plain(x, 0)?, self.plain(x, 1)?) {
             (Some(depth), _) => (Some(depth), 1),
-            (None, Some(depth)) => {
-                self.code.op(emit::I32_EQZ);
-                (Some(depth), 0)
-            }
+            (None, Some(depth)) => (Some(depth), 0),
             (None, None) => (None, 1),
         };
+        self.push_cond(cond, other == 0)?;
         match taken {
             Some(depth) => {
                 let (from, index) = self.forward(x, 1 - other)?;
@@ -1136,6 +1137,30 @@ impl Lower<'_, '_> {
     }
 
     /// Push a value zero extended to the width of its value type.
+    /// Push the condition `cond`, or its negation when `negate` is set. A compare of integers
+    /// that stays on the stack gives its negation with the inverse predicate, and any other
+    /// condition with an `i32.eqz` after it.
+    fn push_cond(&mut self, cond: Value, negate: bool) -> Result<()> {
+        let compare = match self.def(cond) {
+            Some((inst, _))
+                if negate
+                    && self.func[inst].opcode == Opcode::ICmp
+                    && self.trees.stacked.contains(&cond)
+                    && !self.args(inst).iter().any(|&a| is_pair(self.ty(a))) =>
+            {
+                Some(inst)
+            }
+            _ => None,
+        };
+        self.inverted = compare;
+        self.push_z(cond)?;
+        self.inverted = None;
+        if negate && compare.is_none() {
+            self.code.op(emit::I32_EQZ);
+        }
+        Ok(())
+    }
+
     fn push_z(&mut self, value: Value) -> Result<()> {
         self.push(value)?;
         if let (Some(bits), false) = (self.narrow(value), self.clean(value)) {
@@ -1226,7 +1251,7 @@ impl Lower<'_, '_> {
         if !call && args.iter().chain(&results).any(|&v| is_pair(self.ty(v))) {
             return self.pair(inst, &args, &results);
         }
-        if rules::tried(data.opcode) && self.by_rule(inst)? {
+        if rules::tried(data.opcode) && self.inverted != Some(inst) && self.by_rule(inst)? {
             return Ok(());
         }
         let arg = |i: usize| args[i];
@@ -1351,6 +1376,7 @@ impl Lower<'_, '_> {
             }
             Opcode::ICmp => {
                 let Extra::IntPred(pred) = data.extra else { return Err("icmp".into()) };
+                let pred = if self.inverted == Some(inst) { pred.inverse() } else { pred };
                 let wide = self.wide(arg(0));
                 for &a in &args[..2] {
                     if pred.is_signed() { self.push_s(a)? } else { self.push_z(a)? }
