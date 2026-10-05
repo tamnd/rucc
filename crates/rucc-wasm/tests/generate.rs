@@ -327,6 +327,50 @@ fn an_int128_is_two_i64_values_and_is_returned_through_memory() {
 }
 
 /// Where wasi-sdk is, or nothing when this machine has none.
+/// The address of a function, in the code and in the data, and no call through a pointer.
+///
+/// ```c
+/// int f(void) { return 7; }
+/// int (*p)(void) = f;
+/// void *g(void) { return (void *)f; }
+/// ```
+const ADDRESSED: &str = r#"; ModuleID = 't.c'
+; format 0
+target triple = "wasm32-unknown-wasip1"
+target datalayout = "e-p:32:32-i64:64-S128"
+
+global @p : bytes 4 = { addr.4 @f }, align 4, linkage(external)
+
+func @f() -> i32, linkage(external) {
+block0:
+    %0 = iconst.i32 7
+    return %0
+}
+
+func @g() -> ptr, linkage(external) {
+block0:
+    %0 = global_addr @f
+    return %0
+}
+"#;
+
+/// clang imports the table and keeps it when a function has an address, on a target with the long
+/// form of `call_indirect`, and not on `mvp`. rucc does the same, so that the two objects have
+/// the same symbols.
+#[test]
+fn the_address_of_a_function_imports_the_table_as_clang_does() {
+    let mut names = Interner::new();
+    let module = rucc_ir::parse(ADDRESSED, &mut names).expect("the IR parses");
+    for (cpu, wanted) in [(Cpu::Lime1, true), (Cpu::Mvp, false)] {
+        let object = rucc_wasm::translate(&module, &names, cpu.features()).unwrap();
+        let table = object.symbols.iter().find(|s| s.name == "__indirect_function_table");
+        assert_eq!(table.is_some(), wanted, "{}", cpu.name());
+        if let Some(table) = table {
+            assert_ne!(table.flags & rucc_object::wasm::NO_STRIP, 0);
+        }
+    }
+}
+
 fn sdk() -> Option<PathBuf> {
     let path = PathBuf::from(std::env::var_os("WASI_SDK_PATH")?);
     path.join("bin/wasm-ld").exists().then_some(path)

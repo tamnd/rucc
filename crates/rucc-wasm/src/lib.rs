@@ -322,7 +322,15 @@ impl Unit<'_> {
     /// table for a function and a place in memory for data.
     pub(crate) fn address(&mut self, symbol: Symbol) -> Result<(bool, u32), String> {
         match self.ir.lookup(symbol) {
-            Some(SymbolRef::Func(_)) => Ok((true, self.function(symbol)?.0)),
+            Some(SymbolRef::Func(_)) => {
+                // A slot in the table is an address only when the module has the table. On a
+                // target with the long form of `call_indirect`, the object writer of LLVM imports
+                // `__indirect_function_table` and keeps it for each relocation to a slot, also in
+                // a module that has no `call_indirect`. rucc does the same, so that its object and
+                // the object that clang makes from its `-S` text have the same symbols.
+                self.table();
+                Ok((true, self.function(symbol)?.0))
+            }
             Some(SymbolRef::Global(_)) | None => {
                 let name = self.name(symbol);
                 if let Some(&found) = self.data.get(&name) {
