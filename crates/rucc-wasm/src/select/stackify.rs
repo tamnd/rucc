@@ -17,11 +17,12 @@
 //! against the second one covers that.
 //!
 //! Only the instructions whose code pushes each operand once take part, as a user and as an
-//! instruction that moves, so the code of a moved instruction is written once. A call does not
-//! move to a use that is written only on one path, which is an argument of one edge of a `br_if`,
-//! or to a use that comes after the epilogue or after the buffer of the extra arguments of a
-//! variadic call is written. A block whose branch takes the `longjmp` of a call is left as it is,
-//! because its call is written in a `try_table`. See `sjlj.rs`.
+//! instruction that moves, so the code of a moved instruction is written once. A call does not move
+//! to a use that is written only on one path, which is an argument of one edge of a `br_if`, or to
+//! a use that comes after the epilogue or after the buffer of the extra arguments of a variadic
+//! call is written. An operand of a moved instruction is pushed where that instruction is pushed,
+//! so the same limits apply to it. A block whose branch takes the `longjmp` of a call is left as it
+//! is, because its call is written in a `try_table`. See `sjlj.rs`.
 //!
 //! A value with more than one use moves down in the same way to the first of its uses, when no
 //! other instruction of the block reads it before that use, and it keeps its local. The selector
@@ -34,9 +35,9 @@
 //! left with no use is not written at all.
 
 use rucc_base::hash::{Map, Set};
-use rucc_ir::{Extra, Flags, FloatPred, Inst, Opcode, Value};
+use rucc_ir::{Extra, Flags, FloatPred, Func, Inst, Opcode, Value};
 
-use super::{Lower, builtin};
+use super::{Lower, builtin, pair};
 use crate::{functype, is_pair};
 
 /// The deepest tree, which keeps the recursion of the selector small on a long chain of
@@ -65,8 +66,9 @@ enum Kind {
     Call,
 }
 
-/// Where an operand is pushed, which tells what can move there.
-#[derive(Clone, Copy, PartialEq, Eq)]
+/// Where an operand is pushed, which tells what can move there. The order is from the place that
+/// takes the most to the place that takes the least.
+#[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
 enum Place {
     /// Anything that can move.
     Any,
@@ -228,7 +230,7 @@ impl Lower<'_, '_> {
             // From the end, so that an instruction is a root only when no root after it took it.
             for (root, &inst) in insts.iter().enumerate().rev() {
                 if !trees.moved.contains(&inst) {
-                    self.take(inst, inst, root, 0, &tree, &mut trees);
+                    self.take(inst, inst, root, 0, Place::Any, &tree, &mut trees);
                 }
             }
         }
@@ -236,13 +238,18 @@ impl Lower<'_, '_> {
     }
 
     /// Put in the tree of `top`, the root at position `root`, each operand of `user` that can move
-    /// there, and then the operands of each one that moves.
+    /// there, and then the operands of each one that moves. `within` is the place where `user`
+    /// itself is pushed. The code of an operand is written inside the code of its user, so an
+    /// operand of a value that is pushed on one edge is also pushed on that edge only, and an
+    /// operand of a value that is pushed after the epilogue is also pushed after it.
+    #[allow(clippy::too_many_arguments)]
     fn take(
         &self,
         user: Inst,
         top: Inst,
         root: usize,
         depth: u32,
+        within: Place,
         tree: &Tree<'_>,
         trees: &mut Trees,
     ) {
@@ -250,6 +257,7 @@ impl Lower<'_, '_> {
             return;
         }
         for (value, place) in self.operands(user) {
+            let place = place.max(within);
             let Some((def, _)) = self.def(value) else { continue };
             let Some(&from) = tree.at.get(&def) else { continue };
             if from >= root || trees.moved.contains(&def) {
@@ -288,7 +296,7 @@ impl Lower<'_, '_> {
                 }
                 trees.moved.insert(def);
                 trees.roots.insert(def, top);
-                self.take(def, top, root, depth + 1, tree, trees);
+                self.take(def, top, root, depth + 1, place, tree, trees);
             }
         }
     }
@@ -387,8 +395,10 @@ impl Lower<'_, '_> {
                 _ => Vec::new(),
             },
             // The epilogue gives the frame back before the values are pushed, and a call there
-            // would put its frame on top of what this function still reads.
-            Opcode::Return if !self.sret => all(Place::NoCall),
+            // would put its frame on top of what this function still reads. A function with no
+            // frame has nothing to give back.
+            Opcode::Return if !self.sret && self.framed => all(Place::NoCall),
+            Opcode::Return if !self.sret => all(Place::Any),
             // The arguments of the edges of a `br_if` are pushed only when the edge is taken, so a
             // call there would not be made on the other edge, and a local written there would not
             // be written on the other edge.
@@ -469,4 +479,19 @@ impl Lower<'_, '_> {
         let callee = self.func[info].callee;
         callee.is_some_and(|name| builtin::is_builtin(self.unit.names.resolve(name)))
     }
+}
+
+/// Whether `func` can have a frame on the shadow stack, which its epilogue gives back before a
+/// `return` pushes its values. This is true for each function that `plan` gives a frame, and it can
+/// be true for a function that `plan` gives no frame. `plan` runs after stackify, because it makes
+/// locals, so this looks only at the instructions.
+pub(super) fn framed(func: &Func) -> bool {
+    func.blocks().flat_map(|block| func.insts(block)).any(|inst| {
+        let data = &func[inst];
+        let variadic =
+            matches!(data.extra, Extra::Call(info) if func[func[info].signature].variadic);
+        matches!(data.opcode, Opcode::Alloca | Opcode::StackRestore)
+            || variadic
+            || pair::calls_runtime(data.opcode) && data.results().any(|v| is_pair(func[v].ty))
+    })
 }

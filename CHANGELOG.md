@@ -16,6 +16,7 @@ All notable changes are recorded here. The format follows [Keep a Changelog](htt
 
 ### Fixed
 
+- On wasm with optimization, an operand of a value that is pushed on one edge of a `br_if`, or after the epilogue of a `return`, is held to the same limits as the value (#2866). Before, a compare with a second use could be written with a `local.tee` on one edge only, and rucc refused the function with E0653. A call in the value of a `return` could also run after the frame was given back, so it could write over a local whose address it was given. A function with no frame keeps such a call in the `return`.
 - The inliner counts a local in the frame when its only use is as an argument to another block, as for a pointer that starts at a buffer and walks it (#1989). Such a local was taken for one nothing reads, so a function called once with a large buffer went into its caller past gcc's frame growth limit. In Postgres, `asyncQueueReadAllNotifications` took in the 8192 byte page of `asyncQueueProcessPageEntries` this way, a frame of 8320 bytes against gcc's 80.
 
 ## 0.24.3
