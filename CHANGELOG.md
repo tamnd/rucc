@@ -4,10 +4,19 @@ All notable changes are recorded here. The format follows [Keep a Changelog](htt
 
 ## Unreleased
 
+### Added
+
+- `-fenable-inject-fault=<function>` turns on `inject-fault`, a pass no level runs that flips the low bit of every integer the named functions store. It gives a bisection tool such as rucc-kernel's `rk mixed` a known miscompile to find, and each flip takes fuel, so `-fpass-fuel-global` lands on one store in one function.
+
 ### Changed
 
 - On x86-64, a store of a constant that fits in 32 bits is one `mov` that carries the constant, as in gcc and clang, rather than a `mov` into a register and a store of the register (#2957). This covers every integer width, `_Bool` and a null pointer, and saves a register and an instruction for each such store. A 64-bit constant that does not fit still goes through a register.
 - On wasm with the bulk memory feature, which is the default, a call to `memcpy` or `memmove` is `memory.copy` and a call to `memset` is `memory.fill`, as clang writes them (#2866). The engine runs each one as one native copy or fill, and the C library does the work in wasm code. A copy or a fill of a small constant length is loads and stores. A function marked `no_builtin`, which `-fno-builtin` and `-fsafety` mark, keeps the calls, and so does a unit that defines one of the three functions. The SQLite shell at `-O2` goes from 1,816,667 bytes to 1,805,063, and it makes no call to the three functions.
+
+### Fixed
+
+- An atomic builtin on a `bool`, such as `__sync_bool_compare_and_swap` in the kselftest harness, compiles. It runs on the byte the `bool` is stored in, as gcc does, where before it failed with no rule lowering a `cmpxchg` of an `i1`. `_Atomic _Bool` compound assignments take the same path.
+- `-static` with `-pie`, in either order, links a static program that is not position independent, as gcc does. Only `-static-pie` asks for both. Linux 5.15's exec selftests link `load_address_*` with `-pie -static` and a 2 MiB or 16 MiB page, and the static PIE rucc made was placed by a kernel that does not align it to that page yet, so two of the tests failed.
 
 ## 0.24.2
 
@@ -43,8 +52,6 @@ The release for WA3, the hard C on wasm (#2865). rucc now builds nested function
 
 ### Fixed
 
-- An atomic builtin on a `bool`, such as `__sync_bool_compare_and_swap` in the kselftest harness, compiles again. It now runs on the byte the `bool` is stored in, as gcc does, where before it failed with no rule lowering a `cmpxchg` of an `i1`. `_Atomic _Bool` compound assignments take the same path.
-- `-static` with `-pie`, in either order, links a static program that is not position independent, as gcc does. Only `-static-pie` asks for both. Linux 5.15's exec selftests link `load_address_*` with `-pie -static` and a 2 MiB or 16 MiB page, and the static PIE rucc made was placed by a kernel that does not align it to that page yet, so two of the tests failed.
 - A `main` with one parameter or with three works on wasm32-wasip1 (#2975). The start code of wasi-libc calls `__main_argc_argv` with the count and the vector of the arguments, and before, such a `main` got that name with the wrong type, so the program trapped when it started. Such a `main` now keeps its name, and the object defines a `__main_argc_argv` that calls it with the count, the vector and the environment from `__wasilibc_get_environ`, as many as it takes. clang from wasi-sdk 34 gives such a `main` no caller, and its program traps. GCC's torture test `alias-4` now passes at `-O0` and `-O2`.
 
 ## 0.23.0
