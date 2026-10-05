@@ -44,7 +44,7 @@
 //!
 //! [`inflate`]: mod@inflate
 
-#![doc(html_root_url = "https://docs.rs/rucc-unpack/0.24.3")]
+#![doc(html_root_url = "https://docs.rs/rucc-unpack/0.24.4")]
 
 pub mod cab;
 pub mod cfb;
