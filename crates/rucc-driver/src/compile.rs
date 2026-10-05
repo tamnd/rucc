@@ -1147,6 +1147,13 @@ fn generate(
     if opts.target.arch.is_wasm() {
         let refused = |refusal: rucc_wasm::Refusal| vec![unsupported(&refusal.to_string())];
         rucc_wasm::prepare(module, names).map_err(refused)?;
+        // A bit-field wider than 32 bits is arithmetic at a width that wasm has no type for, as on
+        // the other targets. The same pass puts each such value into an `i64`.
+        for id in module.funcs() {
+            if !module[id].is_declaration() {
+                rucc_codegen::widths::integers_inside(&mut module[id]);
+            }
+        }
         // A call in tail position becomes `return_call` only on a target with the tail-call
         // feature. Without it, wasm has no way to give the frame back before the call, so the
         // calls are left as they are. After `prepare`, which only knows the plain calls.
