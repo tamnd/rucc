@@ -1,0 +1,42 @@
+# The GCC torture execute tests that tests/torture/run.sh leaves out on wasm32-wasip1. Each line is
+# the program, the level or `all`, and the issue that tracks it.
+
+# Nested functions.
+20010209-1 all #2943
+20010605-1 all #2943
+20030501-1 all #2943
+20040520-1 all #2943
+20061220-1 all #2943
+20090219-1 all #2943
+920415-1 all #2943
+920721-4 all #2943
+nest-align-1 all #2943
+nest-stdar-1 all #2943
+nestfunc-7 all #2943
+pr103405 all #2943
+pr22061-3 all #2943
+pr22061-4 all #2943
+pr51447 all #2943
+pr71494 all #2943
+
+# __builtin_setjmp and __builtin_longjmp.
+built-in-setjmp all #2944
+pr60003 all #2944
+pr64242 all #2944
+pr84521 all #2944
+
+# The alias attribute.
+alias-2 all #2945
+alias-3 all #2945
+alias-4 all #2945
+
+# wasi-libc has no tmpnam, and a call through a pointer of another type traps.
+fprintf-2 all #2946
+printf-2 all #2946
+user-printf all #2946
+pr67037 all #2946
+
+# Folds and inlining that the optimizer misses on this target.
+ieee/fp-cmp-7 -O0 #2947
+va-arg-pack-1 all #2948
+20041114-1 -O2 #2949
