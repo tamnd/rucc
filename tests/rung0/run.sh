@@ -10,6 +10,10 @@
 # execute, i686-linux-gnu on an x86_64 Linux host being the first. RUNNER, when it is set, goes in
 # front of each program, which is how i686-windows-gnu runs under Wine: RUNNER=wine.
 #
+# VALIDATE, when it is set, is a command that checks one output file, and the wasm job sets it to
+# `wasm-tools validate`. Each program is then also compiled with -c, and the object and the linked
+# program both go to that command. A file that it rejects fails the program.
+#
 # tests/rung0/exclude-<triple>.txt names the programs left out, one per line, each with the issue
 # that tracks it. A line with no issue number fails the run, and so does an excluded program that
 # passes, so the list can only shrink.
@@ -92,6 +96,8 @@ for source in "$cases"/*.c; do
 		result=ok
 		if ! $rucc --target="$triple" -std=$std $defines -O$level -o "$binary" "$source" $libraries -lm >"$out/build.log" 2>&1; then
 			result='did not build'
+		elif [ -n "${VALIDATE:-}" ] && ! { $rucc --target="$triple" -std=$std $defines -O$level -c -o "$out/$name.o" "$source" && $VALIDATE "$out/$name.o" && $VALIDATE "$binary"; } >"$out/build.log" 2>&1; then
+			result='did not validate'
 		elif ! ${RUNNER:-} "$binary" >"$binary.raw" 2>"$binary.err"; then
 			result='exited nonzero'
 		elif ! tr -d '\r' <"$binary.raw" | cmp -s "$source.expected" -; then
