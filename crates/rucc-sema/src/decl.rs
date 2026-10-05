@@ -498,6 +498,12 @@ impl DeclFlags {
     /// [`Self::NOINLINE`] is.
     pub const NOIPA: Self = Self(1 << 35);
 
+    /// `__attribute__((cf_check))` was written on a declaration of this function, so it opens with
+    /// a landing pad under `-fcf-protection=branch` even when `-mmanual-endbr` leaves every other
+    /// function without one. x86 only. Merged the way [`Self::NOINLINE`] is, so a prototype in a
+    /// header that says it covers the definition below that does not.
+    pub const CF_CHECK: Self = Self(1 << 36);
+
     /// Whether `zero_call_used_regs("skip")` was written. See [`Self::ZERO_WIDE`] for why this is
     /// more than the one bit.
     #[must_use]

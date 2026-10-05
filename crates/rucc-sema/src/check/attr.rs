@@ -1524,7 +1524,7 @@ impl Checker<'_> {
     ///
     /// `always_inline`, `noinline`, `noipa`, `no_instrument_function`, `no_stack_protector`,
     /// `stack_protect`, `cold`, `hot`, `function_return("keep")`, `indirect_branch("keep")` and
-    /// `zero_call_used_regs`, and the `optimize` options that stand for two of them, and
+    /// `zero_call_used_regs`, `cf_check`, and the `optimize` options that stand for two of them, and
     /// `uninitialized`, `common`, `nocommon` and `retain`, which are not about inlining but are read in the
     /// same two places, under the namespace test [`Self::never_returns`] is under and through the
     /// same unarmouring, so `__always_inline__` in a header and `[[gnu::noinline]]` are both read.
@@ -1544,6 +1544,9 @@ impl Checker<'_> {
                 "noipa" => flags |= DeclFlags::NOINLINE | DeclFlags::NOIPA,
                 "no_instrument_function" => flags |= DeclFlags::NO_INSTRUMENT,
                 "no_profile_instrument_function" => flags |= DeclFlags::NO_PROFILE,
+                "cf_check" if matches!(self.cx.target.tuple.arch().as_str(), "x86_64" | "i686") => {
+                    flags |= DeclFlags::CF_CHECK;
+                }
                 "no_stack_protector" => flags = flags.then(DeclFlags::NO_STACK_PROTECTOR),
                 "stack_protect" => flags = flags.then(DeclFlags::STACK_PROTECT),
                 "uninitialized" => flags |= DeclFlags::UNINITIALIZED,
@@ -1939,6 +1942,37 @@ impl Checker<'_> {
             asked = asked.or(Some(attr.span));
         }
         asked
+    }
+
+    /// What gcc says about `cf_check` in the lists of one declaration of `kind`: an argument is
+    /// refused in gcc's words, and on anything but a function the attribute is dropped with its
+    /// warning. Whether the function opens with a landing pad under `-mmanual-endbr` is read with
+    /// the inlining flags, as [`DeclFlags::CF_CHECK`].
+    ///
+    /// Read on x86 alone, for the reason [`Self::nocf_in`] is.
+    pub(in crate::check) fn cf_checked(&mut self, lists: &[AttrList], kind: DeclKind) {
+        if !matches!(self.cx.target.tuple.arch().as_str(), "x86_64" | "i686") {
+            return;
+        }
+        let ast = self.ast;
+        for &attrs in lists {
+            for &attr in &ast[attrs] {
+                if attr.namespace.is_some_and(|ns| self.text(ns) != "gnu")
+                    || self.gnu_name(&attr) != "cf_check"
+                {
+                    continue;
+                }
+                let count = ast[attr.args].len();
+                if count > 0 {
+                    let what = "wrong number of arguments specified for 'cf_check' attribute";
+                    let refused = Diagnostic::error(what, attr.span).with_code("E0817");
+                    self.report(refused.note(format!("expected 0, found {count}"), attr.span));
+                } else if kind != DeclKind::Function {
+                    let what = "'cf_check' attribute only applies to functions";
+                    self.report(Diagnostic::warning(what, attr.span).with_code("E0703"));
+                }
+            }
+        }
     }
 
     /// The type with its function, or the function it points at, made one without a landing pad,

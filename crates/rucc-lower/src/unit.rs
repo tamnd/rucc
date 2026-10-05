@@ -1083,6 +1083,10 @@ impl Unit<'_> {
         if self.untracked(ty) {
             func.attrs.set |= AttrSet::NOCF;
         }
+        // And the one that asks for the pad when `-mmanual-endbr` leaves it out of the rest.
+        if node.flags.contains(DeclFlags::CF_CHECK) {
+            func.attrs.set |= AttrSet::CF_CHECK;
+        }
         // And the other one, for the same reason. What a call to `strtol` reads belongs to
         // `strtol`, and the purity analysis answers opaque for everything it cannot see a body
         // for, so a unit that only declares the function gets nothing out of it unless the

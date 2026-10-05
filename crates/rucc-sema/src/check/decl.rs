@@ -97,7 +97,7 @@ struct Declared {
     /// [`DeclFlags::NO_STRICT_ALIASING`], [`DeclFlags::OPTIMIZE_NONE`], [`DeclFlags::WRAPV`],
     /// [`DeclFlags::NO_LOOP_IDIOM`], [`DeclFlags::NO_INSTRUMENT`], [`DeclFlags::NO_PROFILE`], [`DeclFlags::NO_STACK_PROTECTOR`],
     /// [`DeclFlags::STACK_PROTECT`], [`DeclFlags::COLD`], [`DeclFlags::HOT`], [`DeclFlags::RETURN_KEEP`], [`DeclFlags::INDIRECT_KEEP`],
-    /// [`DeclFlags::UNINITIALIZED`] and the `ZERO_` bits and nothing else.
+    /// [`DeclFlags::CF_CHECK`], [`DeclFlags::UNINITIALIZED`] and the `ZERO_` bits and nothing else.
     inlining: DeclFlags,
     /// Whether this declaration said the name is in another DLL or is offered to others by this
     /// one, as [`DeclFlags::DLLIMPORT`] and [`DeclFlags::DLLEXPORT`] and nothing else.
@@ -426,6 +426,7 @@ impl Checker<'_> {
         self.handler_registers(self.tast[id].flags, ty, isa, x87, span);
         // The specifiers only, for the reason `noreturn` above reads them only.
         self.record_notices(id, &[specs.attrs], DeclKind::Function);
+        self.cf_checked(&[specs.attrs], DeclKind::Function);
         let merged = self.tast[id].ty;
         self.record_alloc_size(id, &[specs.attrs], DeclKind::Function, merged);
         self.annotate_decl(id, &[specs.attrs]);
@@ -907,6 +908,7 @@ impl Checker<'_> {
         // Both places, for the reason `noreturn` above reads both. The kernel writes it after the
         // declarator of a function declared inside the block that calls it.
         self.record_notices(id, &[specs.attrs, item.attrs], kind);
+        self.cf_checked(&[specs.attrs, item.attrs], kind);
         // Both places, for the reason `noreturn` above reads both. glibc writes it after the
         // declarator, as `extern void *malloc (size_t __size) __attr_alloc_size ((1));`.
         let merged = self.tast[id].ty;
@@ -1022,6 +1024,8 @@ impl Checker<'_> {
                 break;
             }
         }
+        // A typedef is not a function, whatever type it names.
+        self.cf_checked(&[specs.attrs, item.attrs], DeclKind::Type);
         if item.init.is_some() {
             let spelled = self.text(name).to_owned();
             self.report(
@@ -1524,6 +1528,7 @@ impl Checker<'_> {
                 DeclFlags::STACK_PROTECT,
                 DeclFlags::RETURN_KEEP,
                 DeclFlags::INDIRECT_KEEP,
+                DeclFlags::CF_CHECK,
             ];
         }
         for &flag in taken {

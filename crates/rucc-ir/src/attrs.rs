@@ -245,6 +245,10 @@ impl AttrSet {
     /// carries [`crate::Flags::NOTRACK`], or a direct call may reach it. A label whose address is
     /// taken in it still has its pad, since that is a different branch.
     pub const NOCF: Self = Self(1 << 33);
+    /// The function opens with a landing pad under `-fcf-protection=branch` even when
+    /// `-mmanual-endbr` leaves the rest without one, from `__attribute__((cf_check))`.
+    /// [`Self::NOCF`] wins over it, as in gcc.
+    pub const CF_CHECK: Self = Self(1 << 34);
 
     /// The underlying bits, for the printer and for hashing.
     #[must_use]
@@ -371,6 +375,7 @@ static NAMED: &[(AttrSet, &str)] = &[
     (AttrSet::NO_LOOP_IDIOM, "no_loop_idiom"),
     (AttrSet::NOIPA, "noipa"),
     (AttrSet::NOCF, "nocf"),
+    (AttrSet::CF_CHECK, "cf_check"),
 ];
 
 /// The pairs that cannot both be set, with their names for the message.
