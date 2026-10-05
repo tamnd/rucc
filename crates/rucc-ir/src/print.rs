@@ -268,6 +268,12 @@ impl<'a> Printer<'a> {
         if global.retain {
             self.out.push_str(", retain");
         }
+        if global.noinit {
+            self.out.push_str(", noinit");
+        }
+        if global.persistent {
+            self.out.push_str(", persistent");
+        }
         self.out.push('\n');
     }
 

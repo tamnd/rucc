@@ -750,6 +750,24 @@ tests = ["rucc-driver::an_attribute_keeps_a_static_function_nothing_refers_to", 
 notes = "The compiler keeps the definition and the linker is asked to as well. It goes in a section of its own marked `SHF_GNU_RETAIN`, which `--gc-sections` does not take away: the one it would have gone in under `-ffunction-sections` or `-fdata-sections`, or the one the program named, with `R` added to the flags, as gcc 16 writes it. A tentative definition so marked is a zeroed one in `.bss.` and its name rather than a common symbol. Only ELF has the flag."
 
 [[feature]]
+name = "noinit"
+kind = "attribute"
+gcc_version = "11.0"
+status = "implemented"
+used_by = ["zephyr"]
+tests = ["rucc::a_variable_the_startup_code_leaves_alone_is_in_a_section_of_its_own", "rucc::the_object_has_the_same_sections", "rucc::noinit_and_persistent_are_checked_in_gcc_s_words"]
+notes = "A variable with no initializer goes in `.noinit`, a section with no bytes in the file that the startup code never clears, as gcc writes it on ELF, and in `.noinit.` and its name under `-fdata-sections`, in the listing and in the object the compiler writes itself. It is never a common symbol. On anything but a variable it is ignored with gcc's warning, and so on a `const` one, on one with an initializer, after a `section` or a `persistent` written before it, and a `section` after it is ignored for it, all in gcc's words. On an automatic variable it is refused with `E0837`, and an argument with `E0836`. A thread-local one is in `.tbss` without a word, as in gcc. One declaration saying it is enough, as with `retain`, and the definition is what is asked whether it has an initializer. Only ELF has the section, so nothing else reads it. A section the program names `.noinit` itself carries no bytes either, as gas makes it."
+
+[[feature]]
+name = "persistent"
+kind = "attribute"
+gcc_version = "11.0"
+status = "implemented"
+used_by = ["zephyr"]
+tests = ["rucc::a_variable_the_startup_code_leaves_alone_is_in_a_section_of_its_own", "rucc::the_object_has_the_same_sections", "rucc::noinit_and_persistent_are_checked_in_gcc_s_words"]
+notes = "A variable with an initializer goes in `.persistent`, a section the loader fills and the startup code never copies into again, as gcc writes it on ELF, and in `.persistent.` and its name under `-fdata-sections`, in the listing and in the object the compiler writes itself. On anything but a variable it is ignored with gcc's warning, and so on a `const` one, on one with no initializer, after a `section` or a `noinit` written before it, and a `section` after it is ignored for it, all in gcc's words. On an automatic variable it is refused with `E0837`, and an argument with `E0836`. A thread-local one is in `.tdata` without a word, as in gcc. Only ELF has the section."
+
+[[feature]]
 name = "visibility"
 kind = "attribute"
 gcc_version = "3.3"

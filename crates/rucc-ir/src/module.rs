@@ -411,6 +411,15 @@ pub struct Global {
     /// named one and otherwise the one the variable would have gone in with its name after it,
     /// which is how gcc writes it. Only ELF has the flag, so nothing else reads this.
     pub retain: bool,
+    /// Whether it goes in `.noinit`, from `__attribute__((noinit))` on a definition with no
+    /// initializer: a section with no bytes in the file that the startup code never clears, so
+    /// what the program left in it is still there after a warm reset. Only ELF has it, so
+    /// nothing else reads this.
+    pub noinit: bool,
+    /// Whether it goes in `.persistent`, from `__attribute__((persistent))` on a definition with
+    /// an initializer: a section the loader fills once and the startup code never copies into
+    /// again. ELF only, as `noinit` is.
+    pub persistent: bool,
     /// Its initial image, or `None` if it is only declared here.
     pub init: Option<DataList>,
     /// Whether the optimizer may take it away once nothing in the module names it, which is a
@@ -440,6 +449,8 @@ impl Global {
             constant: false,
             section: None,
             retain: false,
+            noinit: false,
+            persistent: false,
             init: None,
             droppable: false,
             literal: false,

@@ -520,6 +520,16 @@ impl DeclFlags {
     /// longer one in front of its label. x86 only. Merged the way [`Self::NOINLINE`] is.
     pub const MS_HOOK: Self = Self(1 << 39);
 
+    /// `__attribute__((noinit))` was kept on a declaration of this object, so its definition, when
+    /// it has no initializer, goes in `.noinit`, which the startup code never clears. Merged the
+    /// way [`Self::RETAIN`] is. See `check::noinit`.
+    pub const NOINIT: Self = Self(1 << 40);
+
+    /// `__attribute__((persistent))` was kept on a declaration of this object, so its definition,
+    /// when it has an initializer, goes in `.persistent`, which the startup code never copies into.
+    /// Merged the way [`Self::RETAIN`] is.
+    pub const PERSISTENT: Self = Self(1 << 41);
+
     /// Whether `zero_call_used_regs("skip")` was written. See [`Self::ZERO_WIDE`] for why this is
     /// more than the one bit.
     #[must_use]

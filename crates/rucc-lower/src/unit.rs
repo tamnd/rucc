@@ -984,14 +984,21 @@ impl Unit<'_> {
             && state != Definition::Declared
             && !node.flags.contains(DeclFlags::RETAINED);
         global.retain = node.flags.contains(DeclFlags::RETAIN);
+        // gcc places a `noinit` object only when the definition has no initializer and a
+        // `persistent` one only when it has one, asking of the definition rather than of the
+        // declaration that said it, so `extern int x __attribute__((noinit)); int x = 5;` is in
+        // `.data`. See `check::noinit` in `rucc-sema` for what is said about the rest.
+        let defined = state != Definition::Declared;
+        global.noinit = defined && init.is_none() && node.flags.contains(DeclFlags::NOINIT);
+        global.persistent = defined && init.is_some() && node.flags.contains(DeclFlags::PERSISTENT);
         // Under `-fcommon` an `int x;` that nothing initializes is offered to the linker to merge
         // with every other one of the same name, and with a real definition if there is one. Only
         // the plain case is: a thread-local one has to be a copy per thread, a weak or internal
         // one is not the linker's to merge, and one the program put in a section of its own is in
         // that section, which is gcc's answer too. And one written `nocommon` is the program saying
         // this object is not to be merged whatever the command line says, one written `common`
-        // says the opposite, and one written `retain` goes in a section of its own, which gcc
-        // gives it rather than merging it.
+        // says the opposite, and one written `retain` or `noinit` goes in a section of its own,
+        // which gcc gives it rather than merging it.
         let common = if self.common {
             !node.flags.contains(DeclFlags::NO_COMMON)
         } else {
@@ -1003,6 +1010,7 @@ impl Unit<'_> {
             && global.tls.is_none()
             && global.section.is_none()
             && !global.retain
+            && !global.noinit
         {
             global.linkage = IrLinkage::Common;
         }

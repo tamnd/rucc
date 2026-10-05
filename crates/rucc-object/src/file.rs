@@ -1146,6 +1146,10 @@ fn put(
         Place::Thread { zero: false } => obj.section_id(StandardSection::Tls),
         Place::Thread { zero: true } => obj.section_id(StandardSection::UninitializedTls),
         Place::Merged => return (SymbolSection::Common, 0),
+        // Sections of the writer's two kinds under names it has none of its own for, which is
+        // what makes the first carry no bytes and the second carry them.
+        Place::NoInit => made(obj, named, ".noinit", SectionKind::UninitializedData),
+        Place::Persistent => made(obj, named, ".persistent", SectionKind::Data),
         // A named section is the program's word for where this goes, and a program that names one
         // wants what it named rather than what would have been chosen. Its flags are what the
         // variable holds, which is the answer gcc gives, except for the three names the startup
@@ -1247,11 +1251,15 @@ fn tables(
 
 /// Whether the section this goes in says how big the variable is and holds none of its bytes.
 ///
-/// Two of them, and they are the same answer twice: `.bss` is the image that is all zeros, and
-/// `.tbss` is a thread's own copy of one. A section like this costs its size in the section header
-/// and nothing in the file, which is what keeps a program with a large zeroed array small.
+/// Three of them, and they are the same answer three times: `.bss` is the image that is all zeros,
+/// `.tbss` is a thread's own copy of one, and `.noinit` is zeros nothing clears. A section like
+/// this costs its size in the section header and nothing in the file, which is what keeps a
+/// program with a large zeroed array small.
 fn carries_no_bytes(place: &Place) -> bool {
-    matches!(place, Place::Zero | Place::Thread { zero: true } | Place::Named(_, Holds::Zero))
+    matches!(
+        place,
+        Place::Zero | Place::Thread { zero: true } | Place::Named(_, Holds::Zero) | Place::NoInit
+    )
 }
 
 /// The section of this name, made the first time it is asked for and found afterwards.
@@ -1293,10 +1301,14 @@ fn kind_of(place: &Place) -> SectionKind {
         }
         Place::RelocReadOnly { .. } => SectionKind::ReadOnlyDataWithRel,
         Place::Strings { .. } => SectionKind::ReadOnlyString,
-        Place::Zero | Place::Named(_, Holds::Zero) => SectionKind::UninitializedData,
+        Place::Zero | Place::Named(_, Holds::Zero) | Place::NoInit => {
+            SectionKind::UninitializedData
+        }
         Place::Thread { zero: false } => SectionKind::Tls,
         Place::Thread { zero: true } => SectionKind::UninitializedTls,
-        Place::Written | Place::Merged | Place::Named(_, Holds::Written) => SectionKind::Data,
+        Place::Written | Place::Merged | Place::Named(_, Holds::Written) | Place::Persistent => {
+            SectionKind::Data
+        }
     }
 }
 
