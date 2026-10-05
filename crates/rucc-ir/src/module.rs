@@ -29,7 +29,7 @@ use std::fmt;
 use std::ops::{Index, IndexMut};
 
 use rucc_base::float::Format;
-use rucc_base::hash::Map;
+use rucc_base::hash::{Map, Set};
 use rucc_base::{Idx, IdxRange, Interner, Symbol};
 use rucc_target::TargetInfo;
 use rucc_tuple::TargetTuple;
@@ -868,11 +868,18 @@ impl Module {
     /// are in the reverse of the order the source wrote them. The ones before `from` keep their
     /// order, which is for what a file scope `asm` defined as one run.
     ///
+    /// The ones named in `kept` are the exception, which is what `__attribute__((no_reorder))`
+    /// asks for. gcc writes those first, in the order the source wrote them, and the rest after
+    /// them turned around.
+    ///
     /// # Panics
     ///
     /// Panics if `from` is past the last global.
-    pub fn reverse_globals(&mut self, from: usize) {
-        self.globals[from..].reverse();
+    pub fn reverse_globals(&mut self, from: usize, kept: &Set<Symbol>) {
+        let (mut first, rest): (Vec<Global>, Vec<Global>) =
+            self.globals.drain(from..).partition(|global| kept.contains(&global.name));
+        first.extend(rest.into_iter().rev());
+        self.globals.extend(first);
         for index in from..self.globals.len() {
             let name = self.globals[index].name;
             self.symbols.insert(name, SymbolRef::Global(Idx::from_usize(index)));

@@ -306,6 +306,7 @@ impl Checker<'_> {
             let specs = self.ast[field.specs].attrs;
             self.record_symver(None, &[field.attrs, specs], StorageDuration::Static, at);
             self.force_aligned(&[field.attrs, specs], decl.ty);
+            self.no_reordered(&[field.attrs, specs], false);
             fields.push((decl, at));
         }
         self.check_flexible(kind, &mut fields);

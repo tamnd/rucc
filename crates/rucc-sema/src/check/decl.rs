@@ -97,8 +97,8 @@ struct Declared {
     /// [`DeclFlags::NO_STRICT_ALIASING`], [`DeclFlags::OPTIMIZE_NONE`], [`DeclFlags::WRAPV`],
     /// [`DeclFlags::NO_LOOP_IDIOM`], [`DeclFlags::NO_INSTRUMENT`], [`DeclFlags::NO_PROFILE`], [`DeclFlags::NO_STACK_PROTECTOR`],
     /// [`DeclFlags::STACK_PROTECT`], [`DeclFlags::COLD`], [`DeclFlags::HOT`], [`DeclFlags::RETURN_KEEP`], [`DeclFlags::INDIRECT_KEEP`],
-    /// [`DeclFlags::CF_CHECK`], [`DeclFlags::FORCE_ALIGN`], [`DeclFlags::UNINITIALIZED`] and the
-    /// `ZERO_` bits and nothing else.
+    /// [`DeclFlags::CF_CHECK`], [`DeclFlags::FORCE_ALIGN`], [`DeclFlags::NO_REORDER`],
+    /// [`DeclFlags::UNINITIALIZED`] and the `ZERO_` bits and nothing else.
     inlining: DeclFlags,
     /// Whether this declaration said the name is in another DLL or is offered to others by this
     /// one, as [`DeclFlags::DLLIMPORT`] and [`DeclFlags::DLLEXPORT`] and nothing else.
@@ -439,6 +439,7 @@ impl Checker<'_> {
         self.record_notices(id, &[specs.attrs], DeclKind::Function);
         self.cf_checked(&[specs.attrs], DeclKind::Function);
         self.force_aligned(&[specs.attrs], ty);
+        self.no_reordered(&[specs.attrs], true);
         self.record_patchable(id, &[specs.attrs], DeclKind::Function);
         self.record_wasm_names(id, &[specs.attrs], DeclKind::Function);
         self.record_fentry(Some(id), &[specs.attrs], DeclKind::Function);
@@ -941,6 +942,7 @@ impl Checker<'_> {
         self.record_notices(id, &[specs.attrs, item.attrs], kind);
         self.cf_checked(&[specs.attrs, item.attrs], kind);
         self.force_aligned(&[specs.attrs, item.attrs], ty);
+        self.no_reordered(&[specs.attrs, item.attrs], true);
         self.record_patchable(id, &[specs.attrs, item.attrs], kind);
         self.record_wasm_names(id, &[specs.attrs, item.attrs], kind);
         self.record_fentry(Some(id), &[specs.attrs, item.attrs], kind);
@@ -1066,6 +1068,7 @@ impl Checker<'_> {
         // A typedef is not a function, whatever type it names.
         self.cf_checked(&[specs.attrs, item.attrs], DeclKind::Type);
         self.force_aligned(&[specs.attrs, item.attrs], ty);
+        self.no_reordered(&[specs.attrs, item.attrs], false);
         self.record_fentry(None, &[specs.attrs, item.attrs], DeclKind::Type);
         self.record_symver(None, &[specs.attrs, item.attrs], StorageDuration::Static, span);
         self.resolver(&[specs.attrs, item.attrs], DeclKind::Type, span);

@@ -509,6 +509,12 @@ impl DeclFlags {
     /// frame where it needs more. x86 only. Merged the way [`Self::NOINLINE`] is.
     pub const FORCE_ALIGN: Self = Self(1 << 37);
 
+    /// `__attribute__((no_reorder))` was written on a declaration of this function or object, so
+    /// under `-ftoplevel-reorder` it is written ahead of the ones that may be reordered, in the
+    /// order the source wrote it among the others that said the same. Merged the way
+    /// [`Self::NOINLINE`] is.
+    pub const NO_REORDER: Self = Self(1 << 38);
+
     /// Whether `zero_call_used_regs("skip")` was written. See [`Self::ZERO_WIDE`] for why this is
     /// more than the one bit.
     #[must_use]

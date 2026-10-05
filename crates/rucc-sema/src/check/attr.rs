@@ -1810,7 +1810,7 @@ impl Checker<'_> {
     ///
     /// `always_inline`, `noinline`, `noipa`, `no_instrument_function`, `no_stack_protector`,
     /// `stack_protect`, `cold`, `hot`, `function_return("keep")`, `indirect_branch("keep")` and
-    /// `zero_call_used_regs`, `cf_check`, `force_align_arg_pointer`, and the `optimize` options that stand for two of them, and
+    /// `zero_call_used_regs`, `cf_check`, `force_align_arg_pointer`, `no_reorder`, and the `optimize` options that stand for two of them, and
     /// `uninitialized`, `common`, `nocommon` and `retain`, which are not about inlining but are read in the
     /// same two places, under the namespace test [`Self::never_returns`] is under and through the
     /// same unarmouring, so `__always_inline__` in a header and `[[gnu::noinline]]` are both read.
@@ -1838,6 +1838,7 @@ impl Checker<'_> {
                 {
                     flags |= DeclFlags::FORCE_ALIGN;
                 }
+                "no_reorder" => flags |= DeclFlags::NO_REORDER,
                 "no_stack_protector" => flags = flags.then(DeclFlags::NO_STACK_PROTECTOR),
                 "stack_protect" => flags = flags.then(DeclFlags::STACK_PROTECT),
                 "uninitialized" => flags |= DeclFlags::UNINITIALIZED,
@@ -2312,6 +2313,34 @@ impl Checker<'_> {
                     self.report(refused.note(format!("expected 0, found {count}"), attr.span));
                 } else if !function {
                     let what = "'force_align_arg_pointer' attribute only applies to function types";
+                    self.report(Diagnostic::warning(what, attr.span).with_code("E0703"));
+                }
+            }
+        }
+    }
+
+    /// What gcc says about `no_reorder` in the lists of one declaration: an argument is refused in
+    /// gcc's words, and where `top` is false, which is a member, a typedef or a parameter, the
+    /// attribute is dropped with its warning. Any variable or function is `top`, the automatic
+    /// variable in a block included, which gcc lets through without a word and does nothing with.
+    /// Where the declaration is written is read with the inlining flags, as
+    /// [`DeclFlags::NO_REORDER`].
+    pub(in crate::check) fn no_reordered(&mut self, lists: &[AttrList], top: bool) {
+        let ast = self.ast;
+        for &attrs in lists {
+            for &attr in &ast[attrs] {
+                if attr.namespace.is_some_and(|ns| self.text(ns) != "gnu")
+                    || self.gnu_name(&attr) != "no_reorder"
+                {
+                    continue;
+                }
+                let count = ast[attr.args].len();
+                if count > 0 {
+                    let what = "wrong number of arguments specified for 'no_reorder' attribute";
+                    let refused = Diagnostic::error(what, attr.span).with_code("E0832");
+                    self.report(refused.note(format!("expected 0, found {count}"), attr.span));
+                } else if !top {
+                    let what = "'no_reorder' attribute only affects top level objects";
                     self.report(Diagnostic::warning(what, attr.span).with_code("E0703"));
                 }
             }

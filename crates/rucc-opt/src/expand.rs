@@ -9,6 +9,9 @@
 //! reaches. Linux 6.12's `poking_init` in init/main.c is that, and gcc writes it well after the
 //! `static` handlers `__setup` registers.
 //!
+//! A function written `__attribute__((no_reorder))` is the exception. gcc writes every one of
+//! those first, in the order the source wrote them, and the rest after them in the order below.
+//!
 //! # The walk
 //!
 //! gcc keeps its symbols in a list it puts each new one at the front of, so walking it starts at
@@ -165,7 +168,11 @@ pub fn order(module: &Module, reorder: bool) -> Vec<FuncId> {
             }
         }
     }
-    down.iter().rev().filter_map(|&node| func(node)).collect()
+    // A function written `no_reorder` is not gcc's to move. `output_in_order` writes those first,
+    // in the order the source wrote them, and the walk above places the rest without them.
+    let fixed = |id: &FuncId| module[*id].attrs.set.contains(AttrSet::NO_REORDER);
+    let walked = down.iter().rev().filter_map(|&node| func(node)).filter(|id| !fixed(id));
+    written.iter().copied().filter(fixed).chain(walked).collect()
 }
 
 /// A body or an image, which is what gcc reads.

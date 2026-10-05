@@ -257,6 +257,10 @@ impl AttrSet {
     /// `__attribute__((force_align_arg_pointer))`, so it aligns its own frame to the target's
     /// stack alignment when it calls anything and to whatever its own slots need.
     pub const FORCE_ALIGN: Self = Self(1 << 36);
+    /// The function is written ahead of the ones `-ftoplevel-reorder` puts in its own order, in
+    /// the order the source wrote it among the others like it, from
+    /// `__attribute__((no_reorder))`.
+    pub const NO_REORDER: Self = Self(1 << 37);
 
     /// The underlying bits, for the printer and for hashing.
     #[must_use]
@@ -386,6 +390,7 @@ static NAMED: &[(AttrSet, &str)] = &[
     (AttrSet::CF_CHECK, "cf_check"),
     (AttrSet::INDIRECT_RETURN, "indirect_return"),
     (AttrSet::FORCE_ALIGN, "force_align_arg_pointer"),
+    (AttrSet::NO_REORDER, "no_reorder"),
 ];
 
 /// The pairs that cannot both be set, with their names for the message.
