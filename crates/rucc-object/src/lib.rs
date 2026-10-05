@@ -1,4 +1,4 @@
-//! ELF, COFF and Mach-O object writers.
+//! ELF, COFF, Mach-O and wasm object writers.
 //!
 //! Design: `spec/11-asm-objects-debug.md`. Layer rank 9, see `spec/18-package-layout.md`.
 //!
@@ -64,6 +64,10 @@
 //! where a patcher's room is are refused for COFF, each being something that format has no way to
 //! write rather than something not written yet.
 //!
+//! [`wasm`] is the fourth format, and it is written without the `object` crate, which reads wasm and
+//! does not write it. It takes encoded function bodies and data segments with the fields the linker
+//! patches marked, and it writes the `linking` and `reloc.*` sections that LLD reads.
+//!
 //! Mach-O is written for AArch64 from a file of assembly, which is the way every unit for that
 //! machine reaches an object. See the `macho` module for what the format answers differently.
 //!
@@ -80,6 +84,7 @@ mod file;
 mod macho;
 mod section;
 mod source;
+pub mod wasm;
 mod zlib;
 mod zstd;
 

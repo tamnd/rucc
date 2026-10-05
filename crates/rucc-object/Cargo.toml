@@ -1,6 +1,6 @@
 [package]
 name = "rucc-object"
-description = "ELF, Mach-O and COFF object writers."
+description = "ELF, Mach-O, COFF and wasm object writers."
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
