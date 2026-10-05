@@ -63,7 +63,7 @@
 //! tier 3: its Rust API is explicitly unstable and will change without a major version bump.
 //! Depend on the `rucc` binary's behaviour, not on this.
 
-#![doc(html_root_url = "https://docs.rs/rucc-wasm/0.23.0")]
+#![doc(html_root_url = "https://docs.rs/rucc-wasm/0.24.0")]
 
 mod asm;
 mod emit;
