@@ -4,6 +4,10 @@ All notable changes are recorded here. The format follows [Keep a Changelog](htt
 
 ## Unreleased
 
+## 0.23.0
+
+The release for WA2, the wasm backend core (#2864). rucc compiles C to a wasm module for `wasm32-wasip1` and `wasm32-none` and links it with `wasm-ld`, wasi-libc and its own runtime. The backend selects by rules that `rucc-verify` proves against a model of the wasm instructions. It translates a computed `goto`, `-S` writes the wasm assembly of LLVM, and `--emit=wasm-tree` prints the structured code. The first work of WA3 (#2865) is in too: `setjmp` and `longjmp`, tail calls, constructors and destructors, the scalar `__builtin_wasm_*` functions, a compiler barrier, and a bit-field wider than 32 bits. A WASI link now needs lld 21 or newer. CI runs rung 0 under Wasmtime and Node and checks each object with `wasm-tools validate`, and rung 0 passes 440 of 440. A nightly job runs the execute tests of the GCC 16 torture suite under Wasmtime: 3478 pass, 104 are skipped and 58 are excluded, each with an issue.
+
 ### Added
 
 - `tests/torture/run.sh` runs the execute tests of the GCC 16 torture suite for wasm32-wasip1 at `-O0` and `-O2`, with the flags that GCC's own driver gives each program, and a nightly job runs it under Wasmtime (#2865). 3478 of the runs pass, 104 are skipped for an effective target that wasm32 does not have, and 58 are excluded, each with an issue: nested functions (#2943), `__builtin_setjmp` (#2944), the `alias` attribute (#2945), four programs the platform cannot run (#2946), two missed folds (#2947, #2949), and a missed inline (#2948).
