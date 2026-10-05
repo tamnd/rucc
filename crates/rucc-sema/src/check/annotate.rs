@@ -181,8 +181,7 @@ impl Checker<'_> {
                 }
             }
             let written = lists.iter().flat_map(|&list| self.ast[list].iter().copied());
-            let asked: Vec<Attribute> =
-                written.filter(|attr| self.is_strict_flex(attr)).collect();
+            let asked: Vec<Attribute> = written.filter(|attr| self.is_strict_flex(attr)).collect();
             for attr in asked {
                 if let Some(level) = self.strict_flex_level(attr, decl.ty) {
                     self.annotations.strict_flex.insert((record, name), level);
@@ -257,7 +256,8 @@ impl Checker<'_> {
                 if !self.is_strict_flex(&attr) || self.strict_flex_arity(attr) {
                     continue;
                 }
-                let what = "'strict_flex_array' attribute may not be specified for a non-array field";
+                let what =
+                    "'strict_flex_array' attribute may not be specified for a non-array field";
                 self.report(Diagnostic::error(what, attr.span).with_code("E0833"));
             }
         }
@@ -278,7 +278,8 @@ impl Checker<'_> {
                     continue;
                 }
                 let name = name.map_or("({anonymous})", |name| self.text(name));
-                let what = format!("'strict_flex_array' attribute may not be specified for '{name}'");
+                let what =
+                    format!("'strict_flex_array' attribute may not be specified for '{name}'");
                 self.report(Diagnostic::error(what, attr.span).with_code("E0833"));
             }
         }

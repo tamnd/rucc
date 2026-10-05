@@ -317,8 +317,7 @@ impl Checker<'_> {
                 // record inside it is followed by the rest of the outer one.
                 let size = self.bytes_of(field.ty);
                 let level = self.strict_flex_of(record, field.name);
-                if self.through_pointer(base) && (union || last && self.flexible(field.ty, level))
-                {
+                if self.through_pointer(base) && (union || last && self.flexible(field.ty, level)) {
                     return Some(reach.member(field.offset, None));
                 }
                 Some(reach.member(field.offset, Some(size?)))

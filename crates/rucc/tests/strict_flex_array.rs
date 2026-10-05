@@ -95,7 +95,9 @@ fn a_member_s_own_level_takes_the_place_of_the_command_line_s() {
 /// What gcc 13 says about the attribute, in its words. Each is an error.
 #[test]
 fn strict_flex_array_is_checked_in_gcc_s_words() {
-    let named = |name: &str| format!("error: 'strict_flex_array' attribute may not be specified for '{name}'");
+    let named = |name: &str| {
+        format!("error: 'strict_flex_array' attribute may not be specified for '{name}'")
+    };
     let between = |value: &str| {
         format!(
             "error: 'strict_flex_array' attribute argument '{value}' is not an integer constant \
@@ -123,12 +125,27 @@ fn strict_flex_array_is_checked_in_gcc_s_words() {
         ),
         ("struct s { int n; int x[1] __attribute__((strict_flex_array(4))); };\n", between("4")),
         ("struct s { int n; int x[1] __attribute__((strict_flex_array(-1))); };\n", between("-1")),
-        ("struct s { int n; int x[1] __attribute__((strict_flex_array(\"1\"))); };\n", not_integer.clone()),
-        ("struct s { int n; int x[1] __attribute__((strict_flex_array(1.0))); };\n", not_integer.clone()),
-        ("int k; struct s { int n; int x[1] __attribute__((strict_flex_array(k))); };\n", not_integer),
+        (
+            "struct s { int n; int x[1] __attribute__((strict_flex_array(\"1\"))); };\n",
+            not_integer.clone(),
+        ),
+        (
+            "struct s { int n; int x[1] __attribute__((strict_flex_array(1.0))); };\n",
+            not_integer.clone(),
+        ),
+        (
+            "int k; struct s { int n; int x[1] __attribute__((strict_flex_array(k))); };\n",
+            not_integer,
+        ),
         ("struct s { int n; int x[1] __attribute__((strict_flex_array)); };\n", arity.to_owned()),
-        ("struct s { int n; int x[1] __attribute__((strict_flex_array)); };\n", "expected 1, found 0".to_owned()),
-        ("struct s { int n; int x[1] __attribute__((strict_flex_array(1, 2))); };\n", "expected 1, found 2".to_owned()),
+        (
+            "struct s { int n; int x[1] __attribute__((strict_flex_array)); };\n",
+            "expected 1, found 0".to_owned(),
+        ),
+        (
+            "struct s { int n; int x[1] __attribute__((strict_flex_array(1, 2))); };\n",
+            "expected 1, found 2".to_owned(),
+        ),
     ] {
         let (ok, err) = check("words", &[], source);
         assert!(!ok, "{source}");
