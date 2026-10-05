@@ -246,7 +246,7 @@ jobs:
   # with the flags GCC's own driver gives each one and run under Wasmtime. tests/torture/run.sh
   # downloads the GCC release and checks its hash, and tests/torture/exclude-wasm32-wasip1.txt
   # names an issue for each program that is left out. A program gets five minutes, as in GCC's
-  # own runs.
+  # own runs. lld comes from apt.llvm.org, because the wasi-libc of wasi-sdk 34 needs lld 21.
   torture-wasm:
     name: gcc torture for wasm32-wasip1
     runs-on: ubuntu-24.04
@@ -257,8 +257,7 @@ jobs:
       - name: install lld and Wasmtime
         run: |
           set -euo pipefail
-          sudo apt-get update || echo "at least one apt source is unhappy, carrying on"
-          sudo apt-get install -y lld-19
+          sudo .github/install-lld-wasi.sh
           curl -sSfL -o wasmtime.tar.xz https://github.com/bytecodealliance/wasmtime/releases/download/v49.0.1/wasmtime-v49.0.1-x86_64-linux.tar.xz
           echo "c71f7e0d30a92e418f0d17db7c6d8f6664c1ad764340a1278678f4209deab534  wasmtime.tar.xz" | sha256sum -c -
           tar -xJf wasmtime.tar.xz
