@@ -6,6 +6,7 @@ All notable changes are recorded here. The format follows [Keep a Changelog](htt
 
 ### Added
 
+- `docs/REPLAY.md` is the scoreboard for the OSS-Fuzz replay, with the last full run of brotli, zlib, SQLite, Lua and zstd, what each shape is and which bucket it is in. Spec 12.7 says what the replay found and question 12 has the decompressor's half. The SQLite and zstd pins moved to the corpora downloaded on 2026-10-05.
 - rucc links a program for `wasm32-wasip1` and `wasm32-none` with `wasm-ld`, which is the line that clang 23 from wasi-sdk 34 writes (#2864). A command starts with `crt1-command.o` from the sysroot that `rucc --fetch` installs and ends with its `libc.a`. `-mexec-model=reactor` starts with `crt1-reactor.o` and enters at `_initialize`, and `wasm32-none` has no C library and gets `--no-entry` when no entry is given. rucc finds `wasm-ld` by `-fuse-ld=`, then on `PATH`, then in `$WASI_SDK_PATH/bin`, then where the other lld tools are, and the message when it finds none names all of them. `--emit=archive` writes a GNU archive of wasm objects, which `wasm-ld` reads. `-shared` is refused, because rucc does not write `dylink.0` yet, and `wasm32-wasip2` and `wasm32-wasip3` are refused at the link with the issue that adds `wasm-component-ld` (#2868). `-c` and `--emit=ir` work for all four rows as before.
 
 ## 0.22.1

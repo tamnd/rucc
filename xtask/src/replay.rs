@@ -244,7 +244,7 @@ const TARGETS: &[Target] = &[
         variable: "RUCC_SQLITE_CORPUS",
         upstream: "ossfuzz",
         corpus: "https://storage.googleapis.com/sqlite3-backup.clusterfuzz-external.appspot.com/corpus/libFuzzer/sqlite3_ossfuzz/public.zip",
-        pinned: ("2026-09-21", 22578),
+        pinned: ("2026-10-05", 23270),
         triaged: &[Triaged {
             judgement: 1,
             bytes: Some(8),
@@ -273,7 +273,7 @@ const TARGETS: &[Target] = &[
         variable: "RUCC_ZSTD_CORPUS",
         upstream: "simple_decompress",
         corpus: "https://storage.googleapis.com/zstd-backup.clusterfuzz-external.appspot.com/corpus/libFuzzer/zstd_simple_decompress/public.zip",
-        pinned: ("2026-09-21", 17310),
+        pinned: ("2026-10-05", 17088),
         triaged: &[Triaged {
             judgement: 2,
             bytes: None,
