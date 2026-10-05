@@ -639,7 +639,7 @@ fn settle(
     // whose calls gcc never thinks of as hot, and it inlines a call that is not hot only when that
     // does not make the program larger.
     let cold = module[id].attrs.set.contains(AttrSet::COLD);
-    let calls: Vec<(Block, Inst, FuncId, Kind)> = {
+    let mut calls: Vec<(Block, Inst, FuncId, Kind)> = {
         let func = &module[id];
         func.blocks()
             .flat_map(|block| func.insts(block).map(move |inst| (block, inst)))
@@ -678,7 +678,9 @@ fn settle(
     let mut stats = Stats::new();
     let mut spliced = false;
     let mut pool = Pool { on: how.share, ..Pool::default() };
-    for (_, call, callee, kind) in calls {
+    let mut next = 0;
+    while let Some(&(_, call, callee, kind)) = calls.get(next) {
+        next += 1;
         let why = |failure: InlineFailure| match kind {
             Kind::Always => failure.why(),
             Kind::Hinted | Kind::Asks | Kind::Small | Kind::Auto => failure.hint(),
@@ -738,7 +740,13 @@ fn settle(
             ),
             Kind::Always | Kind::Once | Kind::Small => size(&module[callee]),
         };
-        let cold_call = cold || module[callee].attrs.set.contains(AttrSet::COLD);
+        // A call to a function that never comes back is one gcc predicts is never made, so it
+        // is no more hot than one in a cold function. `machine_real_restart` in
+        // arch/x86/kernel/reboot.c ends in an `ljmpl` objtool only accepts there, and gcc keeps
+        // it a call in `native_machine_emergency_restart`.
+        let cold_call = cold
+            || module[callee].attrs.set.contains(AttrSet::COLD)
+            || module[callee].attrs.set.contains(AttrSet::NORETURN);
         // The estimate above does not follow a constant through a block parameter or answer a
         // `__builtin_constant_p` about anything but a parameter, so where it would refuse, the
         // copy is made and cleaned up the way it would be once inlined, and that is measured.
@@ -774,6 +782,14 @@ fn settle(
         match splice(module, id, call, callee, how.convention, kind, &mut pool) {
             Ok(()) => {
                 spliced = true;
+                // A pointer to an `always_inline` function handed to a body that calls through it
+                // is a direct call once the body is in, and gcc inlines that one as well. The
+                // kernel's `__inline_bsearch` is given `patch_cmp` that way in `poke_int3_handler`,
+                // which is `noinstr`, and a call left out of line there is a call out of the
+                // section objtool holds it to.
+                if !optnone {
+                    calls.extend(resolved(module, id, how));
+                }
                 // A loop the callee said must stay a loop is in the caller now, and the pass that
                 // would make it a call only knows functions. The whole caller keeps its loops,
                 // which costs it the calls it would have had and never makes the wrong one.
@@ -805,6 +821,51 @@ fn settle(
     if !stats.is_empty() {
         done.push((id, stats));
     }
+}
+
+/// The calls through a pointer that is the address of an `always_inline` function, made direct.
+///
+/// What is called has to be what the call says it calls, so a function whose signature is not the
+/// call's is left to be called through the pointer, the same as `crate::image` does.
+fn resolved(module: &mut Module, id: FuncId, how: &How<'_>) -> Vec<(Block, Inst, FuncId, Kind)> {
+    let mut out = Vec::new();
+    let func = &module[id];
+    let found: Vec<(Block, Inst, Symbol, FuncId)> = func
+        .blocks()
+        .flat_map(|block| func.insts(block).map(move |inst| (block, inst)))
+        .filter_map(|(block, inst)| {
+            let data = &func[inst];
+            let Extra::Call(info) = data.extra else { return None };
+            if data.opcode != Opcode::CallIndirect {
+                return None;
+            }
+            let Def::Result { inst: made, .. } = func[*func[data.args].first()?].def else {
+                return None;
+            };
+            if func[made].opcode != Opcode::GlobalAddr {
+                return None;
+            }
+            let Extra::Symbol(name) = func[made].extra else { return None };
+            let &(callee, kind) = how.wanted.get(&name)?;
+            (kind == Kind::Always && module[callee].signature() == &func[func[info].signature])
+                .then_some((block, inst, name, callee))
+        })
+        .collect();
+    let func = &mut module[id];
+    for (block, inst, name, callee) in found {
+        let Extra::Call(info) = func[inst].extra else { continue };
+        let args = func[func[inst].args][1..].to_vec();
+        let args = func.push_values(&args);
+        let mut call = func[info];
+        call.callee = Some(name);
+        let at = func.add_call(call);
+        let data = &mut func[inst];
+        data.opcode = Opcode::Call;
+        data.args = args;
+        data.extra = Extra::Call(at);
+        out.push((block, inst, callee, Kind::Always));
+    }
+    out
 }
 
 /// The parameters of a body that it asks `__builtin_constant_p` about, by position.
@@ -2740,6 +2801,74 @@ block0(%0: i32):
         let g = &out[out.find("func @g").expect("g is there")..];
         assert!(!g.contains("call @twice"), "{out}");
         assert!(g.contains("alloca"), "{out}");
+    }
+
+    /// A pointer to an `always_inline` function handed to an `always_inline` body that calls
+    /// through it is a direct call once that body is in, and goes in too, the way `patch_cmp` goes
+    /// through `__inline_bsearch` into `poke_int3_handler`. One whose signature is not the call's
+    /// stays a call through the pointer.
+    #[test]
+    fn an_always_inline_function_called_through_a_pointer_an_inlined_body_was_given_goes_in() {
+        let body = r#"
+func @cmp(i32) -> i32, linkage(internal), attrs(always_inline) {
+block0(%0: i32):
+    %1 = mul.i32 %0, %0
+    return %1
+}
+
+func @search(ptr, i32) -> i32, linkage(internal), attrs(always_inline) {
+block0(%0: ptr, %1: i32):
+    %2 = call_indirect %0(%1) : (i32) -> i32
+    return %2
+}
+
+func @g(i32) -> i32, linkage(external) {
+block0(%0: i32):
+    %1 = global_addr @cmp
+    %2 = call @search(%1, %0) : (ptr, i32) -> i32
+    return %2
+}
+"#;
+        let out = inlined(body);
+        let g = &out[out.find("func @g").expect("g is there")..];
+        assert!(!g.contains("call"), "{out}");
+        assert!(g.contains("mul"), "{out}");
+        let other = inlined(&body.replace(
+            "    %2 = call_indirect %0(%1) : (i32) -> i32\n    return %2",
+            "    %2 = sext.i64 %1\n    %3 = call_indirect %0(%2) : (i64) -> i32\n    return %3",
+        ));
+        let g = &other[other.find("func @g").expect("g is there")..];
+        assert!(g.contains("call_indirect"), "{other}");
+    }
+
+    /// A call to a function that never comes back is one gcc predicts is never made, so a body
+    /// that is larger than the call stays a call, as `machine_real_restart` does in
+    /// `native_machine_emergency_restart`. The same body that comes back goes in.
+    #[test]
+    fn a_call_to_a_function_that_never_comes_back_is_not_inlined_when_it_grows() {
+        let body = r#"
+func @warn(i32), linkage(external);
+
+func @stop(i32), linkage(external), attrs(inline_hint, noreturn) {
+block0(%0: i32):
+    call @warn(%0) : (i32)
+    call @warn(%0) : (i32)
+    call @warn(%0) : (i32)
+    unreachable
+}
+
+func @g(i32) {
+block0(%0: i32):
+    call @stop(%0) : (i32)
+    unreachable
+}
+"#;
+        let out = inlined_under(body, Some(40));
+        let g = &out[out.find("func @g").expect("g is there")..];
+        assert!(g.contains("call @stop"), "{out}");
+        let back = inlined_under(&body.replace("inline_hint, noreturn", "inline_hint"), Some(40));
+        let g = &back[back.find("func @g").expect("g is there")..];
+        assert!(!g.contains("call @stop"), "{back}");
     }
 
     /// A `static` one that every call was inlined into goes, at every level, and one that a call
