@@ -122,6 +122,16 @@ pub struct DataLayout {
     /// byte pointers and not the type. Both references provide it wherever the machine has sixty
     /// four bit registers to hold half of it in, and refuse it everywhere else.
     pub has_int128: bool,
+    /// Whether `size_t`, `ptrdiff_t`, `intptr_t` and `uintptr_t` are `long` where `int` is as wide
+    /// as a pointer too.
+    ///
+    /// The size does not say which of the two it is, and the library's headers do. i386, 32-bit
+    /// ARM and RV32 say `int`. wasm32 says `long`: wasi-libc's `bits/alltypes.h` has `#define
+    /// _Addr long` and `typedef unsigned _Addr size_t;`, and clang agrees. A wrong answer has the
+    /// correct size, so no layout test finds it, but `_Generic`, a pointer conversion and
+    /// `-Wformat` all see it. Where `long` is wider than a pointer, or `int` is narrower, the
+    /// answer is the first type as wide as a pointer, and this field is not read.
+    pub pointer_int_is_long: bool,
 }
 
 impl DataLayout {
@@ -159,6 +169,7 @@ impl DataLayout {
             },
             max_field_align: max_field_align(target),
             has_int128: has_int128(target),
+            pointer_int_is_long: target.arch() == Arch::Wasm32,
         }
     }
 

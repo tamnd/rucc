@@ -13,6 +13,8 @@ tests/
   abi-corpus/  one generated record layout program per row of the target table         M6.5
   abi-signatures/  one generated program whose two halves are compiled separately      M6.5
   link-lines/  the recorded cross linker command line, one file per target             M7
+  predef/wasm/ clang 23's predefined macros for each wasm row, and the approved
+               differences from rucc's                                                 WA1
   exec/        programs with a known exit status or output, run on every target        M3
   exec/across/ one program whose two halves two compilers build, both ways round       PG6
   rung0/       the c-testsuite runner for rung 0 of the target ladder, and the
@@ -87,6 +89,14 @@ The modes a target cannot use are in the file too, as a line saying what was ref
 The cache directory prints as `<cache>` rather than as a real path, so the files are the same on every machine. That is the same rule as `spec/cross-compile/02-the-goal.md` claim 5, one level out.
 
 Nothing here runs a linker. Linking a real object against a generated sysroot per architecture is `cargo xtask stubs` and the toolchain images in tamnd/rucc-cross.
+
+## predef/wasm
+
+One file for each wasm row, which is the output of clang 23 from wasi-sdk 34 for `-mcpu=lime1 -E -dM`, and `approved.txt`, which lists each difference from rucc and the reason for it. `crates/rucc/tests/wasm_macros.rs` compares the two. A difference with no line in the list fails, and a line that no difference uses fails too, so the list stays the same as the differences.
+
+The comparison normalizes the values first, because the two compilers write the same value in different ways. rucc writes `0x7fffffffL` as gcc does and clang writes `2147483647L`, and rucc writes `short unsigned int` where clang writes `unsigned short`. What is left after that is a real difference.
+
+`dump.sh` writes the files again from a wasi-sdk directory. Run it when wasi-sdk changes, and read the diff before you change the list.
 
 ## safety
 

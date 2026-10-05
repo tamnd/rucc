@@ -32,7 +32,7 @@ use std::str::FromStr;
 
 use rucc_base::Interner;
 use rucc_diag::{Diagnostic, Severity, SourceMap};
-use rucc_target::{Arch, CodeModel, Env, Isa, Os, Speculation, TargetInfo, Triple};
+use rucc_target::{Arch, CodeModel, Env, Isa, Os, Speculation, TargetInfo, Triple, wasm};
 
 /// An optimisation level.
 ///
@@ -2122,6 +2122,10 @@ pub struct Options {
     /// whether `-march=` gave the CRC32 extension, which `__ARM_FEATURE_CRC32` and
     /// `<arm_acle.h>` follow, and every other target's is [`Isa::NONE`]. See `rucc_target::isa`.
     pub isa: Isa,
+    /// The WebAssembly features the unit is built for, which decide the `__wasm_<feature>__`
+    /// macros on a wasm target and nothing on the others. The default is the `lime1` set
+    /// (decision D4). See `rucc_target::wasm`.
+    pub wasm: wasm::Features,
     /// Whether the blocks of a function are put in the order their weights say rather than in the
     /// order the shape of the graph gives, from `-freorder-blocks` and `-fno-reorder-blocks`.
     ///
@@ -2756,6 +2760,7 @@ impl Options {
                 // Nothing for i686 yet: x86-64's baseline promises SSE2, which an i686 does not.
                 Arch::Aarch64 | Arch::Riscv64 | Arch::X86 | Arch::Wasm32 => Isa::NONE,
             },
+            wasm: wasm::Cpu::default().features(),
             reorder_blocks: None,
             partition_blocks: None,
             reorder_functions: None,

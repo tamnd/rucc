@@ -279,3 +279,17 @@ fn every_target_in_the_table_has_a_layout_that_makes_sense() {
         }
     }
 }
+
+#[test]
+fn the_pointer_sized_integer_is_long_on_wasm32_and_int_on_the_other_ilp32_rows() {
+    // The same size on all of them, so only the name differs, and the name is what wasi-libc's
+    // `typedef unsigned _Addr size_t;` and glibc's `typedef unsigned int size_t;` disagree on.
+    for tuple in ["wasm32-wasip1", "wasm32-wasip2", "wasm32-wasip3", "wasm32-none"] {
+        let layout = layout(tuple);
+        assert_eq!((layout.int_size, layout.long_size, layout.pointer_size), (4, 4, 4), "{tuple}");
+        assert!(layout.pointer_int_is_long, "{tuple}");
+    }
+    for tuple in ["i686-linux-gnu", "armv7-linux-gnueabihf", "x86_64-linux-gnu"] {
+        assert!(!layout(tuple).pointer_int_is_long, "{tuple}");
+    }
+}

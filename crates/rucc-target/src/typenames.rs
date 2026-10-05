@@ -8,7 +8,8 @@
 //!
 //! x86 and PowerPC have one more, `__float128`, which is gcc's older name for `_Float128` and the
 //! one code written before C23 reaches for. gcc has it on those two and nowhere else, and
-//! `__SIZEOF_FLOAT128__` is defined exactly where it is.
+//! `__SIZEOF_FLOAT128__` is defined exactly where it is. wasm32 has it too, because clang has it
+//! there, and clang defines `__FLOAT128__` for it and not the size.
 //!
 //! They are names and not keywords, as they are in gcc, so a program may declare something of
 //! the same name and hide one, and on every other target they are ordinary identifiers.
@@ -101,7 +102,7 @@ const AARCH64: &[(&str, TypeName)] = &[
     ("__SVBool_t", TypeName::Sizeless),
 ];
 
-/// The name x86 and PowerPC have for quad precision.
+/// The name x86, PowerPC and wasm32 have for quad precision.
 const FLOAT128: &[(&str, TypeName)] = &[("__float128", TypeName::Float128)];
 
 /// The names `arch` has before anything is read, and what each one is.
@@ -109,7 +110,7 @@ const FLOAT128: &[(&str, TypeName)] = &[("__float128", TypeName::Float128)];
 pub(crate) fn type_names(arch: Arch) -> &'static [(&'static str, TypeName)] {
     match arch {
         Arch::Aarch64 => AARCH64,
-        Arch::X86_64 | Arch::X86 | Arch::PowerPc64 => FLOAT128,
+        Arch::X86_64 | Arch::X86 | Arch::PowerPc64 | Arch::Wasm32 => FLOAT128,
         _ => &[],
     }
 }

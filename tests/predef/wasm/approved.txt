@@ -1,0 +1,87 @@
+# The differences between the predefined macros of rucc and of clang 23 for the wasm rows. The
+# test in crates/rucc/tests/wasm_macros.rs reads this file. A difference that no line approves is
+# a failure, and a line that approves no difference is a failure too.
+#
+# Each line is a kind, a name and a reason. The kind is "clang" for a name that only clang
+# defines, "rucc" for a name that only rucc defines, and "value" for a name that both define
+# with different values. A name that ends in "*" is a prefix.
+#
+# The test compares values after it normalizes them. An integer is its value and its suffix, so
+# 0x7fffffffL is 2147483647L. A type is its words in a fixed order, so "short unsigned int" is
+# "unsigned short". A float is the number it rounds to in its type. "c ## LL" is "c##LL". A value
+# that is the name of another macro is the value of that macro.
+
+# What clang says about itself.
+clang __clang* clang names itself, and rucc does not say that it is clang.
+clang __llvm__ clang names its backend, and rucc does not use LLVM.
+clang __CLANG_ATOMIC_* clang's copies of the __GCC_ATOMIC_* names, which rucc defines.
+clang __OPENCL_MEMORY_SCOPE_* rucc has no OpenCL.
+clang __MEMORY_SCOPE_* the scope names of clang's __scoped_atomic builtins, which rucc does not have.
+clang __FPCLASS_* the mask bits of __builtin_isfpclass, which rucc does not have.
+clang __CONSTANT_CFSTRINGS__ an Objective-C name.
+clang __OBJC_BOOL_IS_BOOL an Objective-C name.
+
+# The names clang adds for its own stdint.h, which wasi-libc does not read.
+clang *_FMTd__ the printf letters for clang's stdint.h.
+clang *_FMTi__ the printf letters for clang's stdint.h.
+clang *_FMTo__ the printf letters for clang's stdint.h.
+clang *_FMTu__ the printf letters for clang's stdint.h.
+clang *_FMTx__ the printf letters for clang's stdint.h.
+clang *_FMTX__ the printf letters for clang's stdint.h.
+clang *_C_SUFFIX__ the literal suffixes for clang's stdint.h, which rucc gives through the *_C macros.
+clang __BOOL_WIDTH__ a width that clang adds and gcc 16 does not.
+clang __LLONG_WIDTH__ a width that clang adds, which rucc gives as __LONG_LONG_WIDTH__.
+clang __UINTMAX_WIDTH__ a width that clang adds and gcc 16 does not.
+clang __UINTPTR_WIDTH__ a width that clang adds and gcc 16 does not.
+clang __POINTER_WIDTH__ a width that clang adds and gcc 16 does not.
+clang __LITTLE_ENDIAN__ clang's name for __BYTE_ORDER__, which rucc defines.
+
+# What rucc says about itself, as gcc 16 does.
+value __GNUC__ rucc says gcc 16, and clang says gcc 4.2.1.
+value __GNUC_MINOR__ rucc says gcc 16.0, and clang says gcc 4.2.1.
+value __GNUC_PATCHLEVEL__ rucc says gcc 16.0.0, and clang says gcc 4.2.1.
+value __GXX_ABI_VERSION the value of gcc 16.
+value __VERSION__ the name and version of the compiler.
+value __STDC_VERSION__ the default dialect of rucc is gnu23, as in gcc 16, and the default of clang 23 is gnu17.
+rucc __rucc* rucc names itself.
+rucc __GNUC_EXECUTION_CHARSET_NAME a gcc 16 name.
+rucc __GNUC_WIDE_EXECUTION_CHARSET_NAME a gcc 16 name.
+rucc __REGISTER_PREFIX__ a gcc 16 name.
+rucc __SCHAR_WIDTH__ a gcc 16 name.
+rucc __LONG_LONG_WIDTH__ a gcc 16 name.
+rucc __CHAR8_TYPE__ a gcc 16 name, for char8_t.
+rucc __GCC_ATOMIC_CHAR8_T_LOCK_FREE a gcc 16 name, for char8_t.
+rucc __FLOAT_WORD_ORDER__ a gcc 16 name.
+rucc __FLT_EVAL_METHOD__ clang makes it a dynamic name, because a pragma can change it, so -dM does not show it.
+rucc __FLT_EVAL_METHOD_C99__ a gcc 16 name.
+rucc __FLT_EVAL_METHOD_TS_18661_3__ a gcc 16 name.
+rucc *_IS_IEC_60559__ the gcc 16 names for C23's *_IS_IEC_60559.
+rucc __FLT32_* the gcc 16 names for _Float32.
+rucc __FLT64_* the gcc 16 names for _Float64.
+rucc __FLT32X_* the gcc 16 names for _Float32x.
+rucc __GCC_IEC_559 zero, which is the value that a program reads from clang, which does not define it.
+rucc __GCC_IEC_559_COMPLEX zero, which is the value that a program reads from clang, which does not define it.
+rucc __STDC_ISO_10646__ wasi-libc's wchar_t holds a code point in every locale, and gcc 16 says so.
+
+# The names that rucc shows with -dM and clang does not. Both compilers expand them.
+rucc __BASE_FILE__ a dynamic name.
+rucc __COUNTER__ a dynamic name.
+rucc __DATE__ a dynamic name.
+rucc __FILE__ a dynamic name.
+rucc __FILE_NAME__ a dynamic name.
+rucc __INCLUDE_LEVEL__ a dynamic name.
+rucc __LINE__ a dynamic name.
+rucc __TIME__ a dynamic name.
+
+# Types where rucc follows the wasi-libc headers and clang does not.
+value __WINT_TYPE__ wasi-libc says "typedef unsigned wint_t", and rucc follows it.
+value __WINT_MAX__ wasi-libc says "typedef unsigned wint_t", and rucc follows it.
+value __WINT_MIN__ wasi-libc says "typedef unsigned wint_t", and rucc follows it.
+value __INT_FAST16_TYPE__ wasi-libc says that int_fast16_t is int32_t, and rucc follows it.
+value __INT_FAST16_MAX__ wasi-libc says that int_fast16_t is int32_t, and rucc follows it.
+value __INT_FAST16_WIDTH__ wasi-libc says that int_fast16_t is int32_t, and rucc follows it.
+value __UINT_FAST16_TYPE__ wasi-libc says that uint_fast16_t is uint32_t, and rucc follows it.
+value __UINT_FAST16_MAX__ wasi-libc says that uint_fast16_t is uint32_t, and rucc follows it.
+
+# Decision D5: a WASI row has exception handling on, because setjmp and longjmp use it.
+rucc __wasm_exception_handling__ setjmp and longjmp on a WASI row need exception handling.
