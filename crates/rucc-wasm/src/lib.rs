@@ -213,6 +213,13 @@ fn translate_with(
             continue;
         }
         let name = names.resolve(global.name).to_owned();
+        if let Some(priority) = init_priority(global, names).map_err(&unit_wide)? {
+            let called = init_function(module, global)
+                .ok_or_else(|| unit_wide(format!("`{name}` is not the address of a function")))?;
+            let symbol = unit.function(called).map_err(&unit_wide)?.0;
+            unit.out.inits.push((priority, symbol));
+            continue;
+        }
         let segment = u32::try_from(unit.out.segments.len()).expect("fewer than 2^32 segments");
         let size = u32::try_from(global.size)
             .map_err(|_| unit_wide(format!("`{name}` is larger than the 4 GiB of wasm32")))?;
@@ -249,6 +256,41 @@ fn translate_with(
         processed_by: vec![("rucc".into(), env!("CARGO_PKG_VERSION").into())],
     };
     Ok((unit.out, unit.notes.unwrap_or_default()))
+}
+
+/// The priority of the constructor that `global` is the entry of, or nothing for a variable.
+///
+/// rucc-lower puts the entry of a constructor in `.init_array` or `.init_array.NNNNN`, as on ELF.
+/// A wasm object has no such section: the constructors are a list in the `linking` section, each
+/// with its priority, and `wasm-ld` calls them from `__wasm_call_ctors` in the order of the
+/// priorities. A constructor with no number has the priority 65535, which is what clang gives it.
+/// A destructor has no list on wasm, and rucc-lower registers it with `atexit` from a constructor,
+/// so an entry in `.fini_array` is an error of the lowering.
+fn init_priority(global: &rucc_ir::Global, names: &Interner) -> Result<Option<u32>, String> {
+    let Some(section) = global.section.map(|s| names.resolve(s)) else { return Ok(None) };
+    if section.starts_with(".fini_array") {
+        return Err(format!("a destructor entry is in `{section}`, and wasm has no such list"));
+    }
+    match section.strip_prefix(".init_array") {
+        None => Ok(None),
+        Some("") => Ok(Some(65_535)),
+        Some(number) => number
+            .strip_prefix('.')
+            .and_then(|n| n.parse().ok())
+            .map(Some)
+            .ok_or_else(|| format!("the constructor section `{section}` has no priority")),
+    }
+}
+
+/// The function that the constructor entry `global` holds the address of.
+fn init_function(module: &Module, global: &rucc_ir::Global) -> Option<Symbol> {
+    match module[global.init?] {
+        [Datum::Addr(reloc)] if module[reloc].addend == 0 => {
+            let symbol = module[reloc].symbol;
+            matches!(module.lookup(symbol), Some(SymbolRef::Func(_))).then_some(symbol)
+        }
+        _ => None,
+    }
 }
 
 /// The segment that the data symbol `name` points at.

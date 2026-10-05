@@ -1657,12 +1657,12 @@ impl Unit<'_> {
 
     /// The list of functions to run around `main`, written out as the entries that run them.
     ///
-    /// In priority order rather than in the order the file defined them, because two of the three
-    /// formats get their order from the order the entries are in and only ELF sorts anything at
-    /// link time.
+    /// In priority order rather than in the order the file defined them, because two of the four
+    /// formats get their order from the order the entries are in. ELF and wasm sort them at link
+    /// time, and the order that this gives is the order that they sort to.
     fn startups(&mut self) {
         let mut starts = std::mem::take(&mut self.starts);
-        if self.target.object_format == ObjectFormat::Coff {
+        if matches!(self.target.object_format, ObjectFormat::Coff | ObjectFormat::Wasm) {
             for start in &mut starts {
                 if !start.before {
                     *start = self.registrar(start);
@@ -1682,6 +1682,10 @@ impl Unit<'_> {
     /// runs at the destructor's own priority, and `atexit` calls what it was given last first, so
     /// the destructors come out in the reverse of the order their constructors went in, which is
     /// the order gcc's come out in.
+    ///
+    /// wasm has a run-up list only, too. clang registers the destructors of one priority with
+    /// `__cxa_atexit` from a constructor that `WebAssemblyLowerGlobalDtors` writes, and `atexit` of
+    /// wasi-libc does the same thing for one function.
     fn registrar(&mut self, start: &Start) -> Start {
         let called = self.names.resolve(start.func).to_owned();
         let name = self.names.intern(&format!("__rucc_atexit.{called}"));
@@ -1766,6 +1770,11 @@ impl Unit<'_> {
     ///
     /// Mach-O has the run-up only as well, and it has no sorting at all: the entries run in the
     /// order the section holds them, which is the order [`Self::startups`] put them in.
+    ///
+    /// wasm has the run-up only as well. The names are the names of ELF, which are the names that
+    /// clang gives in its `-S` text, and the backend writes each entry as a constructor of the
+    /// `linking` section with the number as its priority. `wasm-ld` sorts the constructors by
+    /// priority and calls them from `__wasm_call_ctors`.
     fn start_section(&self, start: &Start) -> Option<String> {
         match self.target.object_format {
             ObjectFormat::Elf => {
@@ -1782,6 +1791,10 @@ impl Unit<'_> {
             ObjectFormat::MachO if start.before => {
                 Some("__DATA,__mod_init_func,mod_init_funcs".to_owned())
             }
+            ObjectFormat::Wasm if start.before => Some(match start.priority {
+                Priority::Numbered(number) => format!(".init_array.{number:05}"),
+                Priority::Unnumbered => ".init_array".to_owned(),
+            }),
             ObjectFormat::Coff | ObjectFormat::MachO | ObjectFormat::Wasm => None,
         }
     }
