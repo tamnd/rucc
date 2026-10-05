@@ -1393,7 +1393,7 @@ fn builtins(args: &[String]) -> Result<()> {
 ///
 /// As [`builtins`], which is the only other caller.
 fn builtins_archive(target: &str) -> Result<PathBuf> {
-    let sources = builtin_sources()?;
+    let sources = builtin_sources(target)?;
     let archive = root().join("target").join(target).join("release").join("librucc_builtins.a");
     if let Some(dir) = archive.parent() {
         fs::create_dir_all(dir).map_err(|e| Error::Io(format!("{}: {e}", dir.display())))?;
@@ -1471,16 +1471,21 @@ fn builtins_archive(target: &str) -> Result<PathBuf> {
 /// here is guarded by what the target is, and a small `s` is the extension that says the
 /// preprocessor does not run. See `runtime/builtins/chkstk.S`.
 ///
+/// A wasm target gets no assembly, because rucc has no assembler for wasm and none of the `.S`
+/// files is for wasm. Each of them is empty there after the preprocessor, so to leave them out
+/// changes nothing in the archive.
+///
 /// # Errors
 ///
 /// [`Error::Io`] when the directory cannot be read, and [`Error::Failed`] when there is nothing to
 /// compile in it at all, which would otherwise write an empty archive and call it a success.
-fn builtin_sources() -> Result<Vec<PathBuf>> {
+fn builtin_sources(target: &str) -> Result<Vec<PathBuf>> {
+    let assembly = !target.starts_with("wasm");
     let dir = root().join("runtime").join("builtins");
     let mut sources = Vec::new();
     for entry in fs::read_dir(&dir).map_err(|e| Error::Io(format!("{}: {e}", dir.display())))? {
         let path = entry.map_err(|e| Error::Io(format!("{}: {e}", dir.display())))?.path();
-        if path.extension().is_some_and(|e| e == "c" || e == "S") {
+        if path.extension().is_some_and(|e| e == "c" || (assembly && e == "S")) {
             sources.push(path);
         }
     }

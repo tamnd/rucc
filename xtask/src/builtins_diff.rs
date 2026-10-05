@@ -191,6 +191,7 @@ for side in ours reference; do
     nm -g --defined-only \"$lib\" | awk '$2 == \"T\" { print $3 }' > \"$out/$side.names\"
     for name in memcpy memmove memset memcmp \\
         __udivti3 __umodti3 __udivmodti4 __divti3 __modti3 __divmodti4 \\
+        __multi3 __muloti4 __ashlti3 __lshrti3 __ashrti3 \\
         __udivdi3 __umoddi3 __udivmoddi4 __divdi3 __moddi3 __divmoddi4 \\
         __floattidf __floattisf __floatuntidf __floatuntisf \\
         __fixdfti __fixsfti __fixunsdfti __fixunssfti \\

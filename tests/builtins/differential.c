@@ -49,6 +49,16 @@ long long __divdi3(long long top, long long bottom);
 long long __moddi3(long long top, long long bottom);
 long long __divmoddi4(long long top, long long bottom, long long *rest);
 
+/* And the 128-bit multiply and the three shifts, by name for the same reason. The host does a
+ * multiply or a shift on an __int128 in instructions over the two halves, and these are what wasm32
+ * calls instead, so a * or a << here would be a test of the host.
+ */
+__int128 __multi3(__int128 left, __int128 right);
+__int128 __muloti4(__int128 left, __int128 right, int *overflow);
+__int128 __ashlti3(__int128 value, int count);
+__int128 __lshrti3(__int128 value, int count);
+__int128 __ashrti3(__int128 value, int count);
+
 /* And the single precision soft float routines, by name for the same reason.
  *
  * Writing a + b here would compile to the machine's own instruction, which is not what is under
@@ -560,6 +570,51 @@ static void corner_divisions(int which) {
         digest = pair(digest, corners[i], corners[which]);
     }
     say("divcorner", which, digest);
+}
+
+/* One pair through the multiply, the multiply with the overflow, and the three shifts by the low
+ * seven bits of the second value, which is every count the shifts take. The flag starts at a value
+ * that is neither answer, so a routine that did not write it is seen.
+ */
+static unsigned long long product(unsigned long long digest, uwide left, uwide right) {
+    int overflow = 7;
+    int count = (int)(right & 127);
+    digest = mix_wide(digest, (uwide)__multi3((wide)left, (wide)right));
+    digest = mix_wide(digest, (uwide)__muloti4((wide)left, (wide)right, &overflow));
+    digest = mix_number(digest, overflow);
+    digest = mix_wide(digest, (uwide)__ashlti3((wide)left, count));
+    digest = mix_wide(digest, (uwide)__lshrti3((wide)left, count));
+    digest = mix_wide(digest, (uwide)__ashrti3((wide)left, count));
+    cases += 5;
+    return digest;
+}
+
+/* Random pairs at random widths, with each sign, because the overflow of a product depends on the
+ * signs and on how many digits each operand has.
+ */
+static void products(int round) {
+    unsigned long long digest = 14695981039346656037ull;
+    for (int i = 0; i < DIVISION_CASES; i++) {
+        uwide left = random_wide();
+        uwide right = random_wide();
+        unsigned long long signs = next_random();
+        digest = product(digest, signs & 1 ? -left : left, signs & 2 ? -right : right);
+    }
+    say("multiply", round, digest);
+}
+
+/* Every corner against every corner, both ways round, grouped by which corner one side was. The
+ * corners and their negations are where a product goes just over the type or stays just under it.
+ */
+static void corner_products(int which) {
+    unsigned long long digest = 14695981039346656037ull;
+    for (int i = 0; i < CORNERS; i++) {
+        digest = product(digest, corners[which], corners[i]);
+        digest = product(digest, corners[i], corners[which]);
+        digest = product(digest, -corners[which], corners[i]);
+        digest = product(digest, corners[i], -corners[which]);
+    }
+    say("mulcorner", which, digest);
 }
 
 /* The same three families one width down, for the six routines a 32-bit target calls.
@@ -2321,9 +2376,13 @@ int main(int argc, char **argv) {
     for (int i = 0; i < CORNERS; i++) {
         corner_conversions(i);
     }
+    for (int i = 0; i < CORNERS; i++) {
+        corner_products(i);
+    }
     for (int i = 0; i < DIVISION_ROUNDS; i++) {
         divisions(i);
         near_misses(i);
+        products(i);
         divisions_long(i);
         near_misses_long(i);
     }

@@ -59,6 +59,14 @@
 
 #ifndef __i386__
 
+/* clang has no `_Float128` on wasm32, and `long double` there is binary128, which is the format
+ * this file works in. So on wasm the type is spelled `long double`, and the names and the calling
+ * convention are the ones that clang gives to compiler-rt.
+ */
+#ifdef __wasm__
+#define _Float128 long double
+#endif
+
 typedef unsigned long long u64;
 
 /* How many bits of the significand the format writes down, the other one being implied. */
