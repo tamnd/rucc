@@ -368,9 +368,9 @@ pub enum Form {
     Store,
     /// A store of a constant: an addressing mode and the number that goes there.
     ///
-    /// No register at all, for the reason [`Form::AluMi`] has none. Only a template writes one, since
-    /// a store of a constant the compiler writes goes through a register it already has, and tcc's
-    /// `movl $51,%2` on an `"=m"` operand is a program writing one by name.
+    /// No register at all, for the reason [`Form::AluMi`] has none. The rules write one for a store
+    /// of a constant that fits, and tcc's `movl $51,%2` on an `"=m"` operand is a program writing one
+    /// by name.
     StoreImm,
     /// The value a function gives back, in the register it is given back in.
     ///
