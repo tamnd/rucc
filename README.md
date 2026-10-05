@@ -59,6 +59,8 @@ debug-info: false
 
 The twelve milestones are in [`spec/17-milestones.md`](spec/17-milestones.md) and are tracked as issues. Three of them are sane stopping points: M5 is a correct, fast, optimizing compiler that builds SQLite; M9 adds PostgreSQL on three hosts and three targets; M11 is the kernel.
 
+PostgreSQL 18.6 built by rucc 0.20.0 at `-O2` takes 1.12 times as long as the same server built by `gcc -O2` on pgbench `select-only`, with the two servers run one after the other on the same machine on the night of 2026-10-05. The other bench numbers are night by night in [tamnd/rucc-postgres](https://github.com/tamnd/rucc-postgres/blob/main/reports/bench.md), and this line moves at each PG milestone.
+
 ## Installing
 
 Every tagged release publishes prebuilt binaries for Linux, macOS and Windows on [the releases page](https://github.com/tamnd/rucc/releases), each with a SHA-256 file and a build provenance attestation you can check with `gh attestation verify`.
