@@ -15,6 +15,7 @@ All notable changes are recorded here. The format follows [Keep a Changelog](htt
 
 ### Fixed
 
+- On wasm32, a structure whose one member is an `__int128` travels as the member, as in clang 23 from wasi-sdk 34 (#2864). It is two `i64` parameters, and a return goes through memory. Before, rucc passed and returned it as one `i64`, so the high half was lost and a call between rucc and clang objects did not match.
 - On wasm32, `__builtin_add_overflow`, `__builtin_sub_overflow` and `__builtin_mul_overflow` on `__int128` operands do the arithmetic at 128 bits (#2864). sema took 128 bits only where the pointer is 64 bits, so on wasm32 it did the arithmetic at 64 bits and the high half of the answer was wrong. wasm32 has `__int128` as clang has, so the limit is 128 bits there as on a 64-bit word.
 - On wasm32, a function with no prototype is not variadic, as in clang 23 from wasi-sdk 34 (#2864). Its type is the type of its definition, so `int main()` is `() -> i32` and `int g(a, d) int a; double d;` is `(i32, f64) -> i32`, and a call passes each promoted argument as a fixed parameter. A call that does not match the callee goes through the table, where the check traps when it runs. Before, `int main()` took the buffer of a variadic function, wasm-ld did not link it to the `__main_void` that wasi-libc calls, and the program trapped at the start. Rung 0 on `wasm32-wasip1` under Wasmtime went from 46 to 435 of 440 builds. The other rows keep the variadic signature, which is what gcc does.
 
