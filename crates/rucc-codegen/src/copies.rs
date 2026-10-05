@@ -857,7 +857,7 @@ mod tests {
         copy(&mut func, &mut names, block, RAX, RAX);
         let kept = add(&mut func, &mut names, block, RAX, RAX);
 
-        assert_eq!(super::itself(&mut func, &FRAME, &mut names), 1);
+        assert_eq!(itself(&mut func, &FRAME, &mut names), 1);
         assert_eq!(func.insts(block).collect::<Vec<_>>(), vec![kept]);
     }
 
@@ -869,7 +869,7 @@ mod tests {
         let xmm = Reg::physical(PhysReg::new(3));
         func.build(block, movaps).def(xmm, XMM).uses(xmm, XMM).finish();
 
-        assert_eq!(super::itself(&mut func, &FRAME, &mut names), 1);
+        assert_eq!(itself(&mut func, &FRAME, &mut names), 1);
         assert_eq!(left(&func, block), 0);
     }
 
@@ -882,7 +882,7 @@ mod tests {
         let movl = op(&mut names, "mov_rr_32");
         func.build(block, movl).def(Reg::physical(RAX), GPR).uses(Reg::physical(RAX), GPR).finish();
 
-        assert_eq!(super::itself(&mut func, &FRAME, &mut names), 0);
+        assert_eq!(itself(&mut func, &FRAME, &mut names), 0);
         assert_eq!(left(&func, block), 2);
     }
 }
