@@ -2543,7 +2543,7 @@ pub fn parse_args(args: &[String]) -> Result<Action, CliError> {
             _ if arg.starts_with("-Zrewriter=") => {
                 let name = &arg["-Zrewriter=".len()..];
                 if rucc_opt::pipeline::Rewriter::from_name(name).is_none() {
-                    return Err(err("-Zrewriter= takes default, consed or classical"));
+                    return Err(err("-Zrewriter= takes default, consed, classical or egraph"));
                 }
                 opts.rewriter = name.to_string();
             }
@@ -5077,7 +5077,9 @@ mod tests {
         assert_eq!(opts.rewriter, "classical");
         let (plain, _) = compile(&["-c", "-O2", "a.c"]);
         assert_eq!(plain.rewriter, "", "the level decides unless it was asked for");
-        assert!(parse_args(&args(&["-Zrewriter=egraph", "a.c"])).is_err(), "not one there is");
+        let (opts, _) = compile(&["-c", "-O2", "-Zrewriter=egraph", "a.c"]);
+        assert_eq!(opts.rewriter, "egraph");
+        assert!(parse_args(&args(&["-Zrewriter=saturated", "a.c"])).is_err(), "not one there is");
     }
 
     /// Which register allocator runs, asked for by name, and left to the level when it is not.

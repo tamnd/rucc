@@ -732,6 +732,14 @@ pub const CONSTANT_P_LOAD_DEPTH: usize = 8;
 /// at it rather than hanging the compile.
 pub const CONS_CASCADE: u32 = 8;
 
+/// How many forms the rewrite rules may add to the e-classes of one function.
+///
+/// Section 12.7 asks for a budget per function, so that a rule set with a cycle in it stops adding
+/// forms and the extraction runs over what there is. [`CONS_CASCADE`] already bounds the forms one
+/// instruction gets, and this is the bound on all of them together. Sixty five thousand is more than
+/// the largest function in rucc-corpus or SQLite has instructions.
+pub const EGRAPH_NODES: u32 = 65_536;
+
 /// How many times the conventional rewriter runs `simplify` over a function before it stops.
 ///
 /// Arm A of section 12.3 applies the rules to a bounded fixpoint, which is how a peephole pass that
@@ -1294,6 +1302,14 @@ pub const ALL: &[Constant] = &[
         value: 8,
         unit: "rewrites",
         document: "12.1",
+        gcc: "",
+        provenance: Provenance::Chosen,
+    },
+    Constant {
+        name: "EGRAPH_NODES",
+        value: 65_536,
+        unit: "forms",
+        document: "12.7",
         gcc: "",
         provenance: Provenance::Chosen,
     },
