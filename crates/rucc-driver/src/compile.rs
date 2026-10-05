@@ -6169,6 +6169,17 @@ decl #0 x : int object external static defined
         assert!(said.contains("only available on x86_64"), "{said}");
     }
 
+    /// nolibc's `_start_c` declares `main` under another name with three parameters and calls it,
+    /// and the program defines `int main(void)`. The call goes through the address, since a call
+    /// by name has to agree with the function it names.
+    #[test]
+    fn a_call_by_a_label_the_file_defines_with_another_signature_goes_through_the_address() {
+        let text = asm("int f(void) {\n  extern int h(int, char **) __asm__(\"g\");\n  \
+             return h(1, 0) + 1;\n}\nint g(void) { return 7; }\n");
+        assert!(text.contains("g(%rip)"), "{text}");
+        assert!(text.contains("\tcall\t*%"), "{text}");
+    }
+
     /// `__builtin_cpu_supports` is a load of the word the feature's bit is in and an `and` with
     /// the bit, and the answer is the bit where it stands, which is gcc 16.2.0's lowering.
     ///
