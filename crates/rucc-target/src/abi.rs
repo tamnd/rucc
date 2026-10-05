@@ -200,7 +200,7 @@ mod tests {
         assert_eq!(fastcall.abi().name, "i386 SysV fastcall");
         assert_eq!(fastcall.integer_left(), 2);
 
-        let kernel = plain.with_regparm(3).expect("three").with_reg_struct_return(true);
+        let kernel = plain.clone().with_regparm(3).expect("three").with_reg_struct_return(true);
         let stdcall = kernel.call_under(Convention::Stdcall).expect("stdcall");
         assert_eq!(stdcall.abi().name, "i386 SysV stdcall regparm(3) -freg-struct-return");
         assert_eq!(stdcall.integer_left(), 3);
