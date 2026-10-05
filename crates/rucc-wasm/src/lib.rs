@@ -44,9 +44,14 @@
 //! every operation on a `long double` are calls to the compiler runtime, whose answer comes back
 //! through a buffer in the frame. That is section 8.6 of the WebAssembly notes.
 //!
-//! What this refuses, with a message that names the function: a vector, `setjmp`, inline
-//! assembly, an alias, and the instructions of the memory safety monitor. Each of these is a later
-//! step of #2864 or of the milestones after it. A graph of blocks that is not reducible is not
+//! `setjmp` and `longjmp` are the calls of the wasi-libc library `libsetjmp`, and each call that
+//! a `longjmp` can come out of is in a `try_table` that catches the exception that `longjmp`
+//! throws. [`prepare`] changes the IR for that before the translation. See the `sjlj` module.
+//!
+//! What this refuses, with a message that names the function: a vector, inline assembly other
+//! than a compiler barrier, `__builtin_setjmp`, a function other than `setjmp` that returns twice,
+//! unwinding to a cleanup with `-fexceptions`, an alias, and the instructions of the memory safety
+//! monitor. Each of these is a later step of #2864 or of the milestones after it. A graph of blocks that is not reducible is not
 //! refused: a dispatch node makes it reducible. A computed `goto` is not refused either: the
 //! address of a label is a small number, and the `goto` is a `br_table` on it, as in LLVM.
 //!
@@ -61,6 +66,7 @@ mod emit;
 mod irreducible;
 mod rules;
 mod select;
+mod sjlj;
 mod structure;
 
 use std::fmt;
@@ -73,6 +79,8 @@ use rucc_object::wasm::{
     Segment, SymbolKind, ValType, WEAK, Written,
 };
 use rucc_target::wasm::{Feature, Features};
+
+pub use sjlj::prepare;
 
 /// Why a module could not be translated. Each one is a part of C that this back end does not
 /// translate yet, and not a mistake in the program.
@@ -134,7 +142,8 @@ pub fn assembly(object: &wasm::Module) -> Result<String, Refusal> {
     asm::print(object).map_err(|(function, why)| Refusal { function: Some(function), why })
 }
 
-/// The object model of `module`, which [`write()`] encodes and [`assembly`] prints.
+/// The object model of `module`, which [`write()`] encodes and [`assembly`] prints. A module
+/// that calls `setjmp` or `longjmp` goes through [`prepare`] first.
 ///
 /// # Errors
 ///
@@ -188,6 +197,7 @@ fn translate_with(
         labels: Map::default(),
         stack_pointer: None,
         table: None,
+        tag: None,
         notes: notes.then(Vec::new),
     };
 
@@ -247,7 +257,14 @@ fn translate_with(
         unit.out.functions.push(function);
     }
 
-    unit.out.features = features.iter().map(|f| f.name().to_owned()).collect();
+    // A `try_table` needs exception handling, and `libsetjmp` is built with reference types too,
+    // so an object that catches a `longjmp` says both, as clang's does.
+    let used = if unit.tag.is_some() {
+        features.with(Feature::ExceptionHandling).with(Feature::ReferenceTypes)
+    } else {
+        features
+    };
+    unit.out.features = used.iter().map(|f| f.name().to_owned()).collect();
     if !features.has(Feature::Atomics) {
         unit.out.disallowed = vec!["shared-mem".into()];
     }
@@ -330,6 +347,8 @@ pub(crate) struct Unit<'a> {
     labels: Map<Symbol, u32>,
     stack_pointer: Option<u32>,
     table: Option<u32>,
+    /// The tag `__c_longjmp`, when a function catches a `longjmp`.
+    tag: Option<u32>,
     /// The notes of the tree form, one for each function in the order of the object, when the
     /// tree form is asked for.
     pub(crate) notes: Option<Vec<Notes>>,
@@ -442,6 +461,17 @@ impl Unit<'_> {
             let kind = SymbolKind::Global { ty: ValType::I32, mutable: true, import: None };
             self.out.symbol("__stack_pointer", kind, 0)
         })
+    }
+
+    /// The tag `__c_longjmp` of the exception that the `longjmp` of `libsetjmp` throws, which
+    /// carries the address of the buffer and the value. `libsetjmp` defines it.
+    pub(crate) fn longjmp_tag(&mut self) -> u32 {
+        if let Some(tag) = self.tag {
+            return tag;
+        }
+        let ty = self.out.intern(FuncType { params: vec![ValType::I32], results: Vec::new() });
+        let kind = SymbolKind::Tag { ty, import: None };
+        *self.tag.insert(self.out.symbol("__c_longjmp", kind, 0))
     }
 
     /// The symbol of the function table for the long form of `call_indirect`, or nothing when the

@@ -285,11 +285,17 @@ impl LinkLine {
     /// `libc.a` is wasi-libc whole, `libm` included, as on musl. Our runtime goes after it for the
     /// same reason as on musl, which is that wasi-libc calls `__multf3` and its friends for `long
     /// double`. tamnd/rucc#2864.
+    ///
+    /// `libsetjmp.a` comes before `libc.a`. It has `__wasm_setjmp`, `__wasm_setjmp_test`,
+    /// `__wasm_longjmp` and the tag `__c_longjmp`, which the code that rucc writes for a call of
+    /// `setjmp` or `longjmp` refers to. wasm-ld takes a member of an archive only for a symbol that
+    /// is undefined, so a program with no `setjmp` gets nothing from it, and it is always on the
+    /// line. clang puts it there only for `-lsetjmp`. tamnd/rucc#2865.
     #[must_use]
     pub fn wasi(sysroot: &Sysroot, reactor: bool, builtins: Option<&Path>) -> Self {
         let lib = sysroot.lib();
         let start = if reactor { "crt1-reactor.o" } else { "crt1-command.o" };
-        let mut libraries = vec![lib.join("libc.a")];
+        let mut libraries = vec![lib.join("libsetjmp.a"), lib.join("libc.a")];
         libraries.extend(ours(builtins));
         LinkLine { start: vec![lib.join(start)], libraries, end: Vec::new() }
     }

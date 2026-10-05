@@ -101,14 +101,16 @@ block0(%0: i32, %1: ptr):
 
 fn object(text: &str) -> Result<rucc_object::wasm::Written, rucc_wasm::Refusal> {
     let mut names = Interner::new();
-    let module = rucc_ir::parse(text, &mut names).expect("the IR parses");
+    let mut module = rucc_ir::parse(text, &mut names).expect("the IR parses");
+    rucc_wasm::prepare(&mut module, &mut names)?;
     rucc_wasm::generate(&module, &names, Cpu::Lime1.features())
 }
 
 /// The `-S` text of the object for `text`.
 fn assembly(text: &str) -> String {
     let mut names = Interner::new();
-    let module = rucc_ir::parse(text, &mut names).expect("the IR parses");
+    let mut module = rucc_ir::parse(text, &mut names).expect("the IR parses");
+    rucc_wasm::prepare(&mut module, &mut names).unwrap();
     let object = rucc_wasm::translate(&module, &names, Cpu::Lime1.features()).unwrap();
     rucc_wasm::assembly(&object).unwrap()
 }
@@ -532,6 +534,7 @@ fn link_and_run_as(name: &str, text: &str, assembled: bool) -> Option<i32> {
         let args: Vec<&std::ffi::OsStr> = vec![
             "--target=wasm32-wasip1".as_ref(),
             "-mcpu=lime1".as_ref(),
+            "-mexception-handling".as_ref(),
             "-c".as_ref(),
             listing.as_os_str(),
             "-o".as_ref(),
@@ -552,6 +555,7 @@ fn link_and_run_as(name: &str, text: &str, assembled: bool) -> Option<i32> {
         search.as_ref(),
         crt.as_os_str(),
         object_file.as_os_str(),
+        "-lsetjmp".as_ref(),
         "-lc".as_ref(),
         "-o".as_ref(),
         module.as_os_str(),
@@ -604,7 +608,9 @@ fn a_computed_goto_arrives_at_the_label_that_the_table_names() {
 /// assembler asks of the text and that the binary does not say.
 #[test]
 fn the_text_closes_each_construct_with_the_end_that_names_it() {
-    for (name, text) in [("program", PROGRAM), ("twisted", TWISTED), ("threaded", THREADED)] {
+    let texts =
+        [("program", PROGRAM), ("twisted", TWISTED), ("threaded", THREADED), ("sjlj", SJLJ)];
+    for (name, text) in texts {
         let listing = assembly(text);
         let count = |word: &str| listing.lines().filter(|l| l.trim_start() == word).count();
         let opened = |word: &str| {
@@ -617,6 +623,7 @@ fn the_text_closes_each_construct_with_the_end_that_names_it() {
         assert_eq!(opened("block"), count("end_block"), "{name}: {listing}");
         assert_eq!(opened("loop"), count("end_loop"), "{name}: {listing}");
         assert_eq!(opened("if"), count("end_if"), "{name}: {listing}");
+        assert_eq!(opened("try_table"), count("end_try_table"), "{name}: {listing}");
         assert_eq!(count("end_function"), listing.matches(",@function").count(), "{name}");
         assert_eq!(count("end"), 0, "{name}: {listing}");
         assert_eq!(count("select"), 0, "{name}: {listing}");
@@ -639,9 +646,121 @@ fn the_text_assembles_to_a_module_that_does_the_same() {
         ("twisted", TWISTED, 90),
         ("threaded", THREADED, 22),
         ("wide", WIDE, 123),
+        ("sjlj", SJLJ, 42),
     ] {
         if let Some(got) = link_and_run_as(&format!("{name}-s"), text, true) {
             assert_eq!(got, status, "{name}");
         }
     }
+}
+
+/// A `longjmp` back to a `setjmp` in the same function, and one that goes through a function with
+/// a `setjmp` of its own to a function further out, which is the C below at `-O1`. `main` exits
+/// with 42.
+///
+/// ```c
+/// static jmp_buf b, d;
+/// __attribute__((noinline)) void jump(jmp_buf e, int v) { longjmp(e, v); }
+/// __attribute__((noinline)) int inner(void) {
+///     jmp_buf c; if (setjmp(c)) return 100; jump(d, 30); return 0; }
+/// int main(void) { int r = setjmp(b); if (r == 0) jump(b, 12);
+///                  int s = setjmp(d); if (s == 0) inner(); return r + s; }
+/// ```
+const SJLJ: &str = r#"; ModuleID = 't.c'
+; format 0
+target triple = "wasm32-unknown-wasip1"
+target datalayout = "e-p:32:32-i64:64-S128"
+
+global @d : bytes 164 = { zero 164 }, align 4, linkage(internal), droppable
+global @b : bytes 164 = { zero 164 }, align 4, linkage(internal), droppable
+
+func @setjmp(ptr) -> i32, linkage(external), attrs(returns_twice);
+
+func @longjmp(ptr, i32), linkage(external), attrs(noreturn);
+
+func @jump(ptr, i32), linkage(external), attrs(noreturn, noinline) {
+block0(%0: ptr, %1: i32):
+    call @longjmp(%0, %1) : (ptr, i32)
+    unreachable
+}
+
+func @inner() -> i32, linkage(external), attrs(noinline) {
+block0:
+    %0 = alloca, size 164, align 4
+    %1 = call @setjmp(%0) : (ptr) -> i32
+    %2 = iconst.i32 0
+    %3 = icmp ne %1, %2
+    br_if %3, block1, block2
+
+block1:
+    %4 = iconst.i32 100
+    return %4
+
+block2:
+    %5 = global_addr @d
+    %6 = iconst.i32 30
+    call @jump(%5, %6) : (ptr, i32)
+    unreachable
+}
+
+func @main() -> i32, linkage(external) {
+block0:
+    %0 = global_addr @b
+    %1 = call @setjmp(%0) : (ptr) -> i32
+    %2 = iconst.i32 0
+    %3 = icmp eq %1, %2
+    br_if %3, block1, block2
+
+block1:
+    %4 = global_addr @b
+    %5 = iconst.i32 12
+    call @jump(%4, %5) : (ptr, i32)
+    unreachable
+
+block2:
+    %6 = global_addr @d
+    %7 = call @setjmp(%6) : (ptr) -> i32
+    %8 = iconst.i32 0
+    %9 = icmp eq %7, %8
+    br_if %9, block3, block4
+
+block3:
+    %10 = call @inner() : () -> i32
+    jump block4
+
+block4:
+    %11 = add.nsw %1, %7
+    return %11
+}
+"#;
+
+/// `setjmp` is `__wasm_setjmp` of libsetjmp, `longjmp` is `__wasm_longjmp`, and each call after a
+/// `setjmp` is in a `try_table` that catches the tag `__c_longjmp`. The object says that it uses
+/// exception handling. A function that returns twice and is not `setjmp` is refused.
+#[test]
+fn setjmp_and_longjmp_are_the_calls_and_the_catches_of_libsetjmp() {
+    let listing = assembly(SJLJ);
+    for want in [
+        "\tcall\t__wasm_setjmp\n",
+        "\tcall\t__wasm_setjmp_test\n",
+        "\tcall\t__wasm_longjmp\n",
+        "\ttry_table\t(catch __c_longjmp 0)\n",
+        "\t.tagtype\t__c_longjmp i32\n",
+    ] {
+        assert!(listing.contains(want), "{want:?} in {listing}");
+    }
+    assert!(!listing.contains("\tcall\tsetjmp\n") && !listing.contains("\tcall\tlongjmp\n"));
+    let written = object(SJLJ).unwrap();
+    assert!(written.bytes.windows(18).any(|w| w == b"exception-handling"));
+    assert!(!object(PROGRAM).unwrap().bytes.windows(18).any(|w| w == b"exception-handling"));
+    if let Some(status) = link_and_run("sjlj", SJLJ) {
+        assert_eq!(status, 42);
+    }
+
+    let vfork = SJLJ
+        .replace("@setjmp(ptr) -> i32", "@vfork() -> i32")
+        .replace("call @setjmp(%0) : (ptr)", "call @vfork() : ()");
+    let refusal = object(&vfork).unwrap_err();
+    assert!(refusal.why.contains("`vfork` returns twice"), "{refusal}");
+    assert_eq!(refusal.function.as_deref(), Some("inner"));
 }

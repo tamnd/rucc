@@ -505,13 +505,19 @@ impl Lower<'_, '_> {
         let Some(term) = func.terminator(block) else {
             return Err("a block has no terminator".into());
         };
+        let caught = self.caught(term);
         for inst in func.insts(block) {
-            if inst != term {
+            if inst != term && caught.is_none_or(|(call, unwound)| inst != call && inst != unwound)
+            {
                 self.inst(inst)?;
             }
         }
         match func[term].opcode {
             Opcode::Jump => self.branch(x, 0),
+            Opcode::BrIf if caught.is_some() => {
+                let (call, _) = caught.expect("checked just above");
+                self.catch(x, term, call)
+            }
             Opcode::BrIf => {
                 let cond = self.args(term)[0];
                 self.push_z(cond)?;
@@ -554,6 +560,72 @@ impl Lower<'_, '_> {
             Opcode::IndirectBr => self.indirect(x, term),
             other => Err(format!("the terminator {} is not translated yet", other.name())),
         }
+    }
+
+    /// The call and the `unwound` before the `br_if` `term`, when the branch is the edge that a
+    /// `longjmp` out of the call takes. See `sjlj.rs`.
+    fn caught(&self, term: Inst) -> Option<(Inst, Inst)> {
+        let func = self.func;
+        if func[term].opcode != Opcode::BrIf {
+            return None;
+        }
+        let (unwound, _) = self.def(self.args(term)[0])?;
+        if func[unwound].opcode != Opcode::Unwound || func.next_inst(unwound) != Some(term) {
+            return None;
+        }
+        let call = func.prev_inst(unwound)?;
+        matches!(func[call].opcode, Opcode::Call | Opcode::CallIndirect).then_some((call, unwound))
+    }
+
+    /// The call `call` in a `try_table` that catches the exception of a `longjmp`, and the edges
+    /// of the `br_if` `term` after it. Edge 0 goes to the dispatch, whose `landing` gets the
+    /// address that the exception carries, and edge 1 goes on after the call:
+    ///
+    /// ```text
+    /// block
+    ///   block (result i32)
+    ///     try_table (catch __c_longjmp 0)
+    ///       call ...
+    ///       br 2
+    ///     end
+    ///     unreachable
+    ///   end
+    ///   local.set landing
+    ///   (edge 0)
+    /// end
+    /// (edge 1)
+    /// ```
+    ///
+    /// This is the code of clang for a call after a `setjmp`.
+    fn catch(&mut self, x: usize, term: Inst, call: Inst) -> Result<()> {
+        let func = self.func;
+        let pad = func.successors(term).next().ok_or("a br_if with no target")?.block;
+        let landing = func
+            .insts(pad)
+            .next()
+            .filter(|&first| func[first].opcode == Opcode::Landing)
+            .ok_or("the target of an unwind edge does not start with landing")?;
+        let landing = self.results(landing)[0];
+        let local = *self.local.get(&landing).ok_or("a landing with no local")?;
+        let tag = self.unit.longjmp_tag();
+        self.code.open(emit::BLOCK, None);
+        self.context.push(Ctx::Other);
+        self.code.open(emit::BLOCK, Some(ValType::I32));
+        self.context.push(Ctx::Other);
+        self.code.try_table(tag, 0);
+        self.context.push(Ctx::Other);
+        self.inst(call)?;
+        self.code.br(2);
+        self.context.pop();
+        self.code.op(emit::END);
+        self.code.op(emit::UNREACHABLE);
+        self.context.pop();
+        self.code.op(emit::END);
+        self.code.local_set(local);
+        self.branch(x, 0)?;
+        self.context.pop();
+        self.code.op(emit::END);
+        self.branch(x, 1)
     }
 
     /// A switch, as one `block` for each distinct target around a `br_table` when the cases are
@@ -1324,8 +1396,16 @@ impl Lower<'_, '_> {
                 }
                 self.set(results[0]);
             }
-            Opcode::SetjmpMarker | Opcode::LongjmpMarker | Opcode::Unwound | Opcode::Landing => {
-                return Err("setjmp, longjmp and unwinding are not translated yet".into());
+            // An `unwound` that a `br_if` reads after a call is written with the call, and one
+            // with no call in front of it answers false. A `landing` gets its value from the
+            // `try_table` of the call. See [`Lower::catch`].
+            Opcode::Unwound => {
+                self.code.i32_const(0);
+                self.set(results[0]);
+            }
+            Opcode::Landing => {}
+            Opcode::SetjmpMarker | Opcode::LongjmpMarker => {
+                return Err("`__builtin_setjmp` and `__builtin_longjmp` are not translated".into());
             }
             Opcode::InlineAsm => self.barrier(inst)?,
             other => return Err(format!("the instruction {} is not translated yet", other.name())),
@@ -1548,10 +1628,17 @@ impl Lower<'_, '_> {
         let Extra::Call(info) = func[inst].extra else { return Err("a call".into()) };
         let info = func[info];
         // wasi-libc has `setjmp` only in libsetjmp, which works through exception handling and
-        // needs the compiler to write the matching code around each call. That is WA3.
+        // needs the compiler to write the matching code around each call. `prepare` does that,
+        // and a call that is still here is one that it did not see.
         let callee = info.callee.map(|callee| self.unit.names.resolve(callee));
-        if matches!(callee, Some("setjmp" | "_setjmp" | "sigsetjmp" | "__sigsetjmp")) {
-            return Err("setjmp needs the exception handling lowering of #2865".into());
+        let defined = |name| {
+            matches!(self.unit.ir.lookup(name),
+            Some(rucc_ir::SymbolRef::Func(f)) if !self.unit.ir[f].is_declaration())
+        };
+        if matches!(callee, Some("setjmp" | "_setjmp" | "sigsetjmp" | "__sigsetjmp"))
+            && !info.callee.is_some_and(defined)
+        {
+            return Err("a call to `setjmp` that `rucc_wasm::prepare` did not change".into());
         }
         let sig = &func[info.signature];
         let args = self.args(inst);
