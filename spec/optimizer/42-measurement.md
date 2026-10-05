@@ -63,6 +63,12 @@ visible as a pass that reports nothing rather than as a pass nobody instrumented
 question "does it fire" answerable for every pass on day one instead of for a third of them after ten
 years.
 
+What is built: `-frucc-trace` writes a `fired` object on each file's line, every pass that ran with
+what it said across the module and how many times, and a pass that said nothing as an empty object.
+tamnd/rucc-corpus passes the flag to every rucc build and adds the counts up over the corpus, so a
+pass that never fires on programs written for it is a line on a page rather than a guess
+(tamnd/rucc#2967).
+
 **`-ftime-report`** (`gcc/common.opt:3154`) and `-ftime-report-details` at :3158 give the per-pass
 time breakdown; spec 16.2 already commits rucc to recording it in CI.
 `contrib/compare_two_ftime_report_sets` exists to diff two of them, which is the tool that turns a

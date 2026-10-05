@@ -14,6 +14,8 @@ use std::fmt::Write as _;
 use std::io::Write as _;
 use std::time::{Duration, Instant};
 
+use rucc_opt::Stats;
+
 /// Where the time went in one compile.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct Timing {
@@ -21,6 +23,18 @@ pub struct Timing {
     pub phases: Vec<(&'static str, Duration)>,
     /// Each optimizer pass across the whole module, in the order the passes first ran.
     pub passes: Vec<(&'static str, Duration)>,
+    /// What each of those passes said across the whole module, in the same order, a pass that
+    /// said nothing included.
+    pub fired: Vec<(&'static str, Stats)>,
+}
+
+/// What the optimizer hands back about its passes.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct Passes {
+    /// How long each pass took, in the order the passes first ran.
+    pub time: Vec<(&'static str, Duration)>,
+    /// What each pass said, in the same order.
+    pub fired: Vec<(&'static str, Stats)>,
 }
 
 /// Times phases one after another, each from where the one before it stopped.
@@ -52,8 +66,9 @@ impl Clock {
     }
 
     /// Hands over what the optimizer said about its passes.
-    pub fn passes(&mut self, passes: Vec<(&'static str, Duration)>) {
-        self.timing.passes = passes;
+    pub fn passes(&mut self, passes: Passes) {
+        self.timing.passes = passes.time;
+        self.timing.fired = passes.fired;
     }
 
     /// What was recorded.
@@ -102,6 +117,8 @@ impl Record<'_> {
         object(&mut out, &self.timing.phases);
         out.push_str(",\"passes\":");
         object(&mut out, &self.timing.passes);
+        out.push_str(",\"fired\":");
+        fired(&mut out, &self.timing.fired);
         out.push_str("}\n");
         out
     }
@@ -135,6 +152,29 @@ fn object(out: &mut String, times: &[(&'static str, Duration)]) {
             out.push(',');
         }
         let _ = write!(out, "{}:{}", quoted(name), seconds(*time));
+    }
+    out.push('}');
+}
+
+/// What each pass said as one JSON object, a pass to an object of its events, each event named by
+/// its kind and its text the way `-fopt-info` names it and given its count. A pass that said
+/// nothing is an empty object, which is how a count over many files finds the passes that never
+/// fired.
+fn fired(out: &mut String, passes: &[(&'static str, Stats)]) {
+    out.push('{');
+    for (index, (pass, stats)) in passes.iter().enumerate() {
+        if index > 0 {
+            out.push(',');
+        }
+        let _ = write!(out, "{}:{{", quoted(pass));
+        for (at, event) in stats.events().iter().enumerate() {
+            if at > 0 {
+                out.push(',');
+            }
+            let what = format!("{}: {}", event.kind, event.what);
+            let _ = write!(out, "{}:{}", quoted(&what), event.count);
+        }
+        out.push('}');
     }
     out.push('}');
 }
@@ -185,6 +225,7 @@ mod tests {
                 ("parse", Duration::from_micros(1500)),
             ],
             passes: vec![("simplify", Duration::from_micros(20))],
+            fired: Vec::new(),
         };
         let line = Record {
             input: "src/a \"b\".c",
@@ -200,6 +241,31 @@ mod tests {
         assert!(line.contains("\"seconds\":0.005000"));
         assert!(line.contains("\"phases\":{\"preprocess\":0.003000,\"parse\":0.001500}"));
         assert!(line.contains("\"passes\":{\"simplify\":0.000020}"));
+        assert!(line.contains("\"fired\":{}"));
+    }
+
+    #[test]
+    fn a_pass_that_said_nothing_is_written_as_well_as_one_that_did() {
+        let mut folded = Stats::new();
+        folded.record(rucc_opt::stats::Kind::Optimized, "instruction folded to a constant", 3);
+        folded.missed("division by a value that might be zero");
+        let timing =
+            Timing { fired: vec![("fold", folded), ("dce", Stats::new())], ..Timing::default() };
+        let line = Record {
+            input: "a.c",
+            output: "a.o",
+            ok: true,
+            total: Duration::ZERO,
+            timing: &timing,
+        }
+        .render();
+        assert!(
+            line.contains(
+                "\"fired\":{\"fold\":{\"optimized: instruction folded to a constant\":3,\
+                 \"missed: division by a value that might be zero\":1},\"dce\":{}}"
+            ),
+            "{line}"
+        );
     }
 
     #[test]
