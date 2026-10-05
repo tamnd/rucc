@@ -1604,6 +1604,80 @@ fn a_constant_offset_with_nuw_goes_in_the_offset_field() {
     assert!(!f.contains("i32.load\t4") && !f.contains("i32.store\t8"), "{f}");
 }
 
+/// Calls to `memcpy`, `memset` and `memmove`. The answer of the copy is the destination of the
+/// fill, and the answer of the fill is the answer of `f`. The copy in `g` has a small constant
+/// length, and `h` is marked `no_builtin`.
+const BULK: &str = r#"; ModuleID = 't.c'
+; format 0
+target triple = "wasm32-unknown-wasip1"
+target datalayout = "e-p:32:32-i64:64-S128"
+
+func @memcpy(ptr, ptr, i32) -> ptr, linkage(external);
+
+func @memset(ptr, i32, i32) -> ptr, linkage(external);
+
+func @memmove(ptr, ptr, i32) -> ptr, linkage(external);
+
+func @f(ptr, ptr, i32) -> ptr, linkage(external) {
+block0(%0: ptr, %1: ptr, %2: i32):
+    %3 = call @memcpy(%0, %1, %2) : (ptr, ptr, i32) -> ptr
+    %4 = iconst.i32 0
+    %5 = call @memset(%3, %4, %2) : (ptr, i32, i32) -> ptr
+    return %5
+}
+
+func @g(ptr, ptr, i32), linkage(external) {
+block0(%0: ptr, %1: ptr, %2: i32):
+    %3 = iconst.i32 8
+    %4 = call @memcpy(%0, %1, %3) : (ptr, ptr, i32) -> ptr
+    %5 = call @memmove(%0, %1, %2) : (ptr, ptr, i32) -> ptr
+    return
+}
+
+func @h(ptr, ptr, i32), linkage(external), attrs(no_builtin) {
+block0(%0: ptr, %1: ptr, %2: i32):
+    %3 = call @memcpy(%0, %1, %2) : (ptr, ptr, i32) -> ptr
+    return
+}
+"#;
+
+/// The body of `name` in the `-S` text of `text` at `-O2`, after [`rucc_wasm::bulk`] for a
+/// target with these features.
+fn bulk_body_of(text: &str, name: &str, features: Features) -> String {
+    let mut names = Interner::new();
+    let mut module = rucc_ir::parse(text, &mut names).expect("the IR parses");
+    rucc_wasm::bulk(&mut module, &names, features);
+    let options = rucc_wasm::Options { features, optimize: true };
+    let object = rucc_wasm::translate(&module, &names, options).unwrap();
+    let listing = rucc_wasm::assembly(&object).unwrap();
+    let start = listing.find(&format!("\n{name}:\n")).expect("the function is in the listing");
+    let end = start + listing[start..].find("end_function").expect("the function ends");
+    listing[start..end].to_owned()
+}
+
+/// With the bulk memory feature, a call to `memcpy` or `memmove` is `memory.copy` and a call to
+/// `memset` is `memory.fill`, and the answer is the destination. A copy of a small constant length
+/// is loads and stores. A function marked `no_builtin`, and a target with no bulk memory, keep the
+/// calls.
+#[test]
+fn a_call_to_memcpy_or_memset_is_a_bulk_memory_instruction() {
+    let lime = Cpu::Lime1.features();
+    let f = bulk_body_of(BULK, "f", lime);
+    let wanted = "local.get\t0\n\tlocal.get\t1\n\tlocal.get\t2\n\tmemory.copy\t0, 0\n\t\
+                  local.get\t0\n\ti32.const\t0\n\tlocal.get\t2\n\tmemory.fill\t0\n\t\
+                  local.get\t0\n";
+    assert!(f.contains(wanted), "{f}");
+    assert!(!f.contains("call"), "{f}");
+    let g = bulk_body_of(BULK, "g", lime);
+    assert_eq!(g.matches("memory.copy").count(), 1, "{g}");
+    assert_eq!(g.matches("i32.store8").count(), 8, "{g}");
+    assert!(!g.contains("call"), "{g}");
+    let h = bulk_body_of(BULK, "h", lime);
+    assert!(h.contains("call\tmemcpy") && !h.contains("memory.copy"), "{h}");
+    let f = bulk_body_of(BULK, "f", Cpu::Mvp.features());
+    assert!(f.contains("call\tmemcpy") && f.contains("call\tmemset"), "{f}");
+}
+
 /// A loop with two ways out, which is the C below at `-O1`.
 ///
 /// ```c
