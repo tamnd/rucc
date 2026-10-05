@@ -4,6 +4,10 @@ All notable changes are recorded here. The format follows [Keep a Changelog](htt
 
 ## Unreleased
 
+## 0.21.0
+
+The minor release for WA0 (#2862), the first step of the WebAssembly plan. rucc runs as a WebAssembly module, and each release from this one has `rucc-wasm32-wasip1.wasm`. The module compiles C to objects for every target inside Wasmtime or Node, and the objects are the same bytes as the objects from native rucc: CI compares all 440 rung 0 objects on every commit, and the SQLite amalgamation matches at `-O0` and `-O2`. The module cannot link yet, because it cannot start a linker. The other entries are two GNU attributes, `unavailable` and `nocf_check`, function order as gcc writes it, a loop counting fix in `scev`, and replay and libraries work for the fuzz corpus milestone.
+
 ### Added
 
 - Each release has `rucc-wasm32-wasip1.wasm` and its SHA-256 file, which is rucc built as a WebAssembly module (#2862). The release job compiles a small program to an x86_64-linux-musl object inside Wasmtime before it publishes the file. The `host` column of `docs/TARGETS.md` says yes for `wasm32-wasip1`, and the CI job `rucc-as-wasm` compiles rung 0 with native rucc and with the module on every commit and compares every object byte for byte.
