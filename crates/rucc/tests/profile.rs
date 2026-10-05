@@ -416,26 +416,26 @@ fn a_function_can_name_its_own_hook_and_its_own_list() {
     assert_eq!(hook(&text, "two"), ("__fentry__".to_owned(), Some("calls")), "{text}");
     assert_eq!(hook(&text, "three"), ("__fentry__".to_owned(), None), "{text}");
 
-    let text = asm("recorded", &["-pg", "-mfentry", "-mrecord-mcount"], NAMED);
+    let text = asm("named-recorded", &["-pg", "-mfentry", "-mrecord-mcount"], NAMED);
     assert_eq!(hook(&text, "one"), ("hook".to_owned(), Some("__mcount_loc")), "{text}");
     assert_eq!(hook(&text, "two"), ("__fentry__".to_owned(), Some("calls")), "{text}");
     assert_eq!(hook(&text, "three"), ("__fentry__".to_owned(), Some("__mcount_loc")), "{text}");
 
     let flags = ["-pg", "-mfentry", "-mrecord-mcount", "-mfentry-name=all", "-mfentry-section=gs"];
-    let text = asm("flags", &flags, NAMED);
+    let text = asm("named-flags", &flags, NAMED);
     assert_eq!(hook(&text, "one"), ("hook".to_owned(), Some("gs")), "{text}");
     assert_eq!(hook(&text, "two"), ("all".to_owned(), Some("calls")), "{text}");
     assert_eq!(hook(&text, "three"), ("all".to_owned(), Some("gs")), "{text}");
 
     // The section from the command line lists nothing on its own, as in gcc.
-    let text = asm("unlisted", &["-pg", "-mfentry", "-mfentry-section=gs"], NAMED);
+    let text = asm("named-unlisted", &["-pg", "-mfentry", "-mfentry-section=gs"], NAMED);
     assert_eq!(hook(&text, "three"), ("__fentry__".to_owned(), None), "{text}");
 
     // The later hook is named by it too, and a function that wants no hook gets none.
-    let text = asm("late", &["-pg", "-mno-fentry"], NAMED);
+    let text = asm("named-late", &["-pg", "-mno-fentry"], NAMED);
     assert_eq!(hook(&text, "one").0, "hook", "{text}");
     let quiet = "__attribute__((no_instrument_function, fentry_name(\"hook\"))) void q(void) {}\n";
-    let text = asm("quiet", &["-pg", "-mfentry"], quiet);
+    let text = asm("named-quiet", &["-pg", "-mfentry"], quiet);
     assert!(!body(&text, "q").contains("call"), "{text}");
 }
 
@@ -449,7 +449,7 @@ int f(int x) { return x; }
 int f(int) __attribute__((fentry_name(\"b\")));
 __attribute__((fentry_name(\"c\"), fentry_name(\"d\"))) int g(int x) { return x; }
 ";
-    let text = asm("last", &["-pg", "-mfentry"], source);
+    let text = asm("named-last", &["-pg", "-mfentry"], source);
     assert_eq!(hook(&text, "f").0, "b", "{text}");
     assert_eq!(hook(&text, "g").0, "d", "{text}");
 
@@ -476,7 +476,7 @@ fn the_names_are_checked_in_gcc_s_words() {
             "'fentry_section' attribute ignored",
         ),
     ] {
-        let (ok, _, err) = run("warned", TARGET, &["-pg"], source);
+        let (ok, _, err) = run("named-warned", TARGET, &["-pg"], source);
         assert!(ok, "{source}\n{err}");
         assert!(err.contains(said), "{source}\nwanted {said:?}, got:\n{err}");
     }
@@ -487,11 +487,11 @@ fn the_names_are_checked_in_gcc_s_words() {
         ),
         ("__attribute__((fentry_section(\"a\", \"b\"))) void f(void) {}\n", "expected 1, found 2"),
     ] {
-        let (ok, _, err) = run("refused", TARGET, &["-pg"], source);
+        let (ok, _, err) = run("named-refused", TARGET, &["-pg"], source);
         assert!(!ok, "{source}");
         assert!(err.contains(said), "{source}\nwanted {said:?}, got:\n{err}");
     }
-    let (ok, _, err) = run("plain", TARGET, &["-pg"], NAMED);
+    let (ok, _, err) = run("named-plain", TARGET, &["-pg"], NAMED);
     assert!(ok && err.is_empty(), "{err}");
 }
 
