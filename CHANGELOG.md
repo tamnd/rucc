@@ -27,6 +27,7 @@ All notable changes are recorded here. The format follows [Keep a Changelog](htt
 
 ### Fixed
 
+- The assembler puts `.previous` back to what it was before a `.pushsection` when the `.popsection` comes, as gas does. Linux 5.15's `.Lbad_gs` in entry_64.S runs an `ALTERNATIVE` inside `.section .fixup` and then says `.previous`, which went to `.altinstr_replacement`, so `error_entry` and the code after it landed in init memory and every exception after the kernel freed it ran poison.
 - Three wrong results of the wasm backend, which GCC's torture tests found (#2865). `__builtin_bswap32` and the byte swap that `-O2` finds in shifts and masks swapped the two bytes in each half, so 0x11223344 became 0x22114433 and not 0x44332211. The labels of two functions had the same address, because each function numbered its labels from 1, so two copies of an inline function that took `&&label` compared equal. A function whose only locals were structs with no members made the compiler panic. The torture tests `bswap-3.c`, `pr65215-1.c`, `-2.c`, `-4.c`, `-5.c`, `990208-1.c`, `zero-struct-1.c` and `zero-struct-2.c` now pass on wasm32-wasip1 at `-O0` and `-O2`.
 - The x86 assembler reads a mnemonic and a prefix whatever their case, as gas does. The x86 selftests write `SYSENTER` in an inline asm.
 - `-iquote`, `-isystem` and `-idirafter` now take the directory joined to the flag as well as after it, as gcc does. The kernel's ptrace selftests write `-iquote../../../../include/uapi`.
