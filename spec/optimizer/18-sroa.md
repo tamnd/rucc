@@ -78,6 +78,8 @@ the partial-overlap case if the sizes differ, and the same-offset-same-size grou
 not. Type punning through a union, which document 08.1 established rucc must support, therefore
 mostly survives SROA by disqualifying the union, which is the conservative and correct outcome.
 
+**A `bool`.** A `bool` is an `i1` in a register and one byte in memory, and the front end loads and stores it as an `i1`, so `bool isnull;` handed to an inlined `index_getattr`, or a `bool` field of a local struct, is an access one bit wide. It is a piece of one byte that only ever holds a `bool`, and it scalarizes to an `i1`. A read of the same byte as a `char`, or an integer read across it and its neighbours, would need a widening the pass does not make, so either keeps the local in memory. Before this the `i1` access disqualified the local, which left every `isnull` flag in a PostgreSQL tuple walk on the stack, stored and loaded on every attribute.
+
 ## 18.3 The relationship to mem2reg
 
 `mem2reg` promotes an `alloca` that is only loaded and stored as a whole into an SSA value. SROA is

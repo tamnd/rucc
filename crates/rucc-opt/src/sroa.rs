@@ -76,7 +76,8 @@ const MISMATCH: &str = "local kept in memory, a piece of it is read as a type it
 /// as a vector. A narrower access to it is a lane, and nothing is wider.
 const WHOLE: u64 = 16; // not a threshold: sixteen bytes is one xmm register, not a tuned limit.
 
-/// An access is a vector, a long double or an integer that is not a whole number of bytes.
+/// An access is a vector, a long double or an integer other than a `bool` that is not a whole
+/// number of bytes.
 const WIDTH: &str = "local kept in memory, an access to it has a width the pass does not split";
 
 /// More than the limits in `rucc_cost::heuristics` allow.
@@ -667,6 +668,13 @@ fn width(ty: Type, target: Target) -> Option<u64> {
         return target.pointer;
     }
     let bits = ty.bits();
+    // A `bool` is an `i1` in a register and one byte in memory, and a load or a store of one
+    // reads or writes that byte, so it is a piece of one byte that only ever holds a `bool`. It
+    // cannot become an integer of the byte, see [`convertible`], so an access of another type
+    // over it keeps the local in memory.
+    if ty == Type::I1 {
+        return Some(1);
+    }
     let whole = (ty.is_int() && matches!(bits, 8 | 16 | 32 | 64))
         || (ty.is_float() && matches!(bits, 16 | 32 | 64));
     whole.then_some(u64::from(bits / 8))
@@ -1870,6 +1878,77 @@ block2:
         let func = body(&module);
         assert_eq!(count_of(func, Opcode::Load), 0);
         assert_eq!(params(func, 2), 1);
+    }
+
+    #[test]
+    fn a_bool_written_through_its_address_becomes_a_value() {
+        // `bool isnull;` handed to an inlined `index_getattr`, which writes it, and read back by
+        // the caller: the `i1` is stored and loaded as the byte it is in memory.
+        let text = wrap(
+            "(i32) -> i32",
+            "block0(%0: i32):
+    %1 = alloca, size 1, align 1
+    %2 = iconst.i32 0
+    %3 = icmp eq %0, %2
+    store %3 -> %1, align 1
+    %4 = load.i1 %1, align 1
+    %5 = zext.i32 %4
+    return %5
+",
+        );
+        let (module, stats) = run(&text);
+        assert_eq!(stats.count(Kind::Optimized, SCALARIZED), 1);
+        let func = body(&module);
+        assert_eq!(count_of(func, Opcode::Alloca), 0);
+        assert_eq!(count_of(func, Opcode::Load), 0);
+        assert_eq!(count_of(func, Opcode::Store), 0);
+    }
+
+    #[test]
+    fn a_bool_beside_an_int_set_to_zero_becomes_values() {
+        // `struct { bool a; int b; } s = {0};` with the `bool` read before anything else wrote
+        // it, so the zero the `memset` left is what it reads.
+        let text = wrap(
+            "(i32) -> i32",
+            "block0(%0: i32):
+    %1 = alloca, size 8, align 4
+    %2 = iconst.i8 0
+    memset %1, %2, size 8, align 4
+    %3 = iconst.i64 4
+    %4 = ptr_add %1, %3
+    store %0 -> %4, align 4
+    %5 = load.i1 %1, align 1
+    %6 = load.i32 %4, align 4
+    %7 = zext.i32 %5
+    %8 = add %6, %7
+    return %8
+",
+        );
+        let (module, stats) = run(&text);
+        assert_eq!(stats.count(Kind::Optimized, SCALARIZED), 1);
+        let func = body(&module);
+        assert_eq!(count_of(func, Opcode::Alloca), 0);
+        assert_eq!(count_of(func, Opcode::Memset), 0);
+        assert_eq!(count_of(func, Opcode::Load), 0);
+    }
+
+    #[test]
+    fn a_bool_read_back_as_a_byte_stays_in_memory() {
+        // Reading the byte back would take a widening of the `bool` this pass does not make.
+        let text = wrap(
+            "(i1) -> i32",
+            "block0(%0: i1):
+    %1 = alloca, size 1, align 1
+    store %0 -> %1, align 1
+    %2 = load.i8 %1, align 1
+    %3 = zext.i32 %2
+    return %3
+",
+        );
+        let (module, stats) = run(&text);
+        assert!(!stats.changed());
+        assert_eq!(stats.count(Kind::Missed, MISMATCH), 1);
+        assert_eq!(count_of(body(&module), Opcode::Alloca), 1);
     }
 
     /// `_mm_add_epi32` and `_mm_cvtsi128_si32` after inlining: a copy of an argument added to
