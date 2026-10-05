@@ -401,6 +401,32 @@ mod tests {
         assert_eq!(selects(&terms, shl), None);
     }
 
+    /// A constant written to memory is carried in the store at every width, and at one bit as a
+    /// byte. One at sixty four bits that does not fit in the thirty two the instruction carries
+    /// matches nothing, which leaves it to the store of a register.
+    #[test]
+    fn a_constant_that_fits_is_stored_by_the_instruction_that_carries_it() {
+        let mut terms = Terms::default();
+        for (width, head) in [
+            (1, "x64.mov_mi_8"),
+            (8, "x64.mov_mi_8"),
+            (16, "x64.mov_mi_16"),
+            (32, "x64.mov_mi_32"),
+            (64, "x64.mov_mi_64"),
+        ] {
+            let k = terms.constant(1);
+            let k = terms.app(&format!("iconst.i{width}"), &[k]);
+            let address = terms.value(64, "v0");
+            let write = terms.app(&format!("store.i{width}"), &[k, address]);
+            assert_eq!(selects(&terms, write), Some(head), "a store at {width} bits");
+        }
+        let k = terms.constant(1 << 40);
+        let k = terms.app("iconst.i64", &[k]);
+        let address = terms.value(64, "v1");
+        let write = terms.app("store.i64", &[k, address]);
+        assert_eq!(selects(&terms, write), None);
+    }
+
     /// One bit reaches the byte instructions, which is the whole of how the machine holds a truth
     /// value. The widening is the interesting one: it is `movzbl` under a name of its own, so the
     /// rule that fires here is not the rule a byte would have found.

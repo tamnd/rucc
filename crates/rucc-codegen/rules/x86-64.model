@@ -608,6 +608,27 @@
                                 (bvadd a 5) (extract 47 40 v))
                                 (bvadd a 6) (extract 55 48 v))
                                 (bvadd a 7) (extract 63 56 v)))
+;; The same four with the number carried in the instruction. At sixty four bits it carries thirty
+;; two and widens them with their sign, which is the whole difference from the store of a register.
+(semantics (x64.mov_mi_8 a k) (store (mem) a k))
+(semantics (x64.mov_mi_16 a k)
+           (store (store (mem) a (extract 7 0 k))
+                  (bvadd a 1) (extract 15 8 k)))
+(semantics (x64.mov_mi_32 a k)
+           (store (store (store (store (mem) a (extract 7 0 k))
+                                (bvadd a 1) (extract 15 8 k))
+                         (bvadd a 2) (extract 23 16 k))
+                  (bvadd a 3) (extract 31 24 k)))
+(semantics (x64.mov_mi_64 a k)
+           (store (store (store (store (store (store (store (store (mem)
+                                a (extract 7 0 (sign_extend 32 64 (extract 31 0 k))))
+                                (bvadd a 1) (extract 15 8 (sign_extend 32 64 (extract 31 0 k))))
+                                (bvadd a 2) (extract 23 16 (sign_extend 32 64 (extract 31 0 k))))
+                                (bvadd a 3) (extract 31 24 (sign_extend 32 64 (extract 31 0 k))))
+                                (bvadd a 4) (extract 39 32 (sign_extend 32 64 (extract 31 0 k))))
+                                (bvadd a 5) (extract 47 40 (sign_extend 32 64 (extract 31 0 k))))
+                                (bvadd a 6) (extract 55 48 (sign_extend 32 64 (extract 31 0 k))))
+                                (bvadd a 7) (extract 63 56 (sign_extend 32 64 (extract 31 0 k)))))
 ;; The pair that reaches a `_Bool` in memory. An object of that type is a byte, so both of these
 ;; are byte instructions, and both are named apart from the byte pair above for the reason the bit
 ;; widenings below are named apart from the byte ones: a head has to mean one thing, and what these

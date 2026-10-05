@@ -122,7 +122,8 @@ mod tests {
             let Some(rest) = rule.pattern.strip_prefix("(store.") else { continue };
             let (width, operands) = rest.split_once(' ').expect("a store takes operands");
             assert!(
-                operands.starts_with(&format!("(value.{width} ")),
+                operands.starts_with(&format!("(value.{width} "))
+                    || operands.starts_with(&format!("(iconst.{width} ")),
                 "line {}: {} binds something other than the value it is storing first",
                 rule.line,
                 rule.pattern
@@ -135,7 +136,7 @@ mod tests {
             );
             seen += 1;
         }
-        assert_eq!(seen, 20, "the store rules moved and this test did not follow them");
+        assert_eq!(seen, 30, "the store rules moved and this test did not follow them");
     }
 
     /// Every comparison can be made against a constant as well as against a register.
@@ -412,10 +413,9 @@ mod tests {
     /// A rotate is a term the IR could have, and does not yet: C spells one as two shifts and an or.
     /// The rules put those back together as a rotate left by a constant at thirty two and sixty four
     /// bits, which is what hashes and ciphers write, so those two are not here. A test against a constant is an and whose answer is
-    /// thrown away, and the layout writes a comparison for that rather than this. A store of a
-    /// constant goes through a register when the compiler writes it. So what reaches one of these
-    /// is a program that wrote the name, which is what tcc's byte swap, its copy of `memcpy` and
-    /// its test of `"m"` operands do.
+    /// thrown away, and the layout writes a comparison for that rather than this. So what reaches
+    /// one of these is a program that wrote the name, which is what tcc's byte swap and its copy of
+    /// `memcpy` do.
     const TEMPLATED: &[&str] = &[
         "rol_ri_8",
         "rol_rcl_8",
@@ -434,10 +434,6 @@ mod tests {
         "test_ri_16",
         "test_ri_32",
         "test_ri_64",
-        "mov_mi_8",
-        "mov_mi_16",
-        "mov_mi_32",
-        "mov_mi_64",
     ];
 
     /// The instructions a template asks for that are right because of the line above them.

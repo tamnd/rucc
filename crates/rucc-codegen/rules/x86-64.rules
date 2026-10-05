@@ -1359,6 +1359,98 @@
                            (bvadd (bvadd a k) 7) (extract 63 56 v))
                (result))))
 
+;; A constant written to memory, which the instruction carries itself rather than taking out of a
+;; register someone had to put it in first. Without these a store of `0` to a field cost a register
+;; and two instructions, and an interpreter that clears a flag or sets a field to a known value on
+;; every step pays that on every step. The selector shows a constant as one before it shows it as a
+;; register, so these are tried before the rules above and the rules above take what they refuse,
+;; which at sixty four bits is a constant that does not fit in thirty two.
+
+(rule (lower (store.i8 (iconst.i8 k) (value.i64 a)))
+      (x64.mov_mi_8 (amode_base a) k)
+      (spec (= (store (mem) a k) (result))))
+
+;; The one at one bit writes the byte, the bit and seven zeros above it, for the reason the store of
+;; a register does.
+
+(rule (lower (store.i1 (iconst.i1 k) (value.i64 a)))
+      (x64.mov_mi_8 (amode_base a) (zero_extend 1 8 k))
+      (spec (= (store (mem) a (zero_extend 1 8 k)) (result))))
+
+(rule (lower (store.i16 (iconst.i16 k) (value.i64 a)))
+      (x64.mov_mi_16 (amode_base a) k)
+      (spec (= (store (store (mem) a (extract 7 0 k))
+                      (bvadd a 1) (extract 15 8 k))
+               (result))))
+
+(rule (lower (store.i32 (iconst.i32 k) (value.i64 a)))
+      (x64.mov_mi_32 (amode_base a) k)
+      (spec (= (store (store (store (store (mem) a (extract 7 0 k))
+                                    (bvadd a 1) (extract 15 8 k))
+                             (bvadd a 2) (extract 23 16 k))
+                      (bvadd a 3) (extract 31 24 k))
+               (result))))
+
+;; The instruction takes thirty two bits and widens them with their sign, so a constant it can
+;; carry is one that widening gives back.
+
+(rule (lower (store.i64 (iconst.i64 k) (value.i64 a)))
+      (if (= k (sign_extend 32 64 (extract 31 0 k))))
+      (x64.mov_mi_64 (amode_base a) k)
+      (spec (= (store (store (store (store (store (store (store (store (mem)
+                           a (extract 7 0 k))
+                           (bvadd a 1) (extract 15 8 k))
+                           (bvadd a 2) (extract 23 16 k))
+                           (bvadd a 3) (extract 31 24 k))
+                           (bvadd a 4) (extract 39 32 k))
+                           (bvadd a 5) (extract 47 40 k))
+                           (bvadd a 6) (extract 55 48 k))
+                           (bvadd a 7) (extract 63 56 k))
+               (result))))
+
+;; And at an address with a constant added. The number stored is `j` here, since `k` is the offset.
+
+(rule (lower (store.i8 (iconst.i8 j) (add.i64 (value.i64 a) (iconst.i64 k))))
+      (if (= k (sign_extend 32 64 (extract 31 0 k))))
+      (x64.mov_mi_8 (amode_base_offset a k) j)
+      (spec (= (store (mem) (bvadd a k) j) (result))))
+
+(rule (lower (store.i1 (iconst.i1 j) (add.i64 (value.i64 a) (iconst.i64 k))))
+      (if (= k (sign_extend 32 64 (extract 31 0 k))))
+      (x64.mov_mi_8 (amode_base_offset a k) (zero_extend 1 8 j))
+      (spec (= (store (mem) (bvadd a k) (zero_extend 1 8 j)) (result))))
+
+(rule (lower (store.i16 (iconst.i16 j) (add.i64 (value.i64 a) (iconst.i64 k))))
+      (if (= k (sign_extend 32 64 (extract 31 0 k))))
+      (x64.mov_mi_16 (amode_base_offset a k) j)
+      (spec (= (store (store (mem) (bvadd a k) (extract 7 0 j))
+                      (bvadd (bvadd a k) 1) (extract 15 8 j))
+               (result))))
+
+(rule (lower (store.i32 (iconst.i32 j) (add.i64 (value.i64 a) (iconst.i64 k))))
+      (if (= k (sign_extend 32 64 (extract 31 0 k))))
+      (x64.mov_mi_32 (amode_base_offset a k) j)
+      (spec (= (store (store (store (store (mem) (bvadd a k) (extract 7 0 j))
+                                    (bvadd (bvadd a k) 1) (extract 15 8 j))
+                             (bvadd (bvadd a k) 2) (extract 23 16 j))
+                      (bvadd (bvadd a k) 3) (extract 31 24 j))
+               (result))))
+
+(rule (lower (store.i64 (iconst.i64 j) (add.i64 (value.i64 a) (iconst.i64 k))))
+      (if (and (= k (sign_extend 32 64 (extract 31 0 k)))
+               (= j (sign_extend 32 64 (extract 31 0 j)))))
+      (x64.mov_mi_64 (amode_base_offset a k) j)
+      (spec (= (store (store (store (store (store (store (store (store (mem)
+                           (bvadd a k) (extract 7 0 j))
+                           (bvadd (bvadd a k) 1) (extract 15 8 j))
+                           (bvadd (bvadd a k) 2) (extract 23 16 j))
+                           (bvadd (bvadd a k) 3) (extract 31 24 j))
+                           (bvadd (bvadd a k) 4) (extract 39 32 j))
+                           (bvadd (bvadd a k) 5) (extract 47 40 j))
+                           (bvadd (bvadd a k) 6) (extract 55 48 j))
+                           (bvadd (bvadd a k) 7) (extract 63 56 j))
+               (result))))
+
 ;; Giving a value back.
 ;;
 ;; The whole of what one of these does is put the value where the caller looks for it. It is
