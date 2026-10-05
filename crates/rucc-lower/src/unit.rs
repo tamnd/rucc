@@ -1513,7 +1513,8 @@ impl Unit<'_> {
         if self.tast.is_ifunc(decl) {
             if !matches!(self.module.lookup(target), Some(SymbolRef::Func(_))) {
                 let spelled = self.names.resolve(name).to_owned();
-                let what = format!("'{spelled}' alias between function and variable is not supported");
+                let what =
+                    format!("'{spelled}' alias between function and variable is not supported");
                 self.diagnostics.push(Diagnostic::error(what, span).with_code("E0821"));
                 return;
             }

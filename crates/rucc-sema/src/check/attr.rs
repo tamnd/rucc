@@ -742,8 +742,11 @@ impl Checker<'_> {
         for decl in ifuncs {
             let node = self.tast[decl].clone();
             let Some(written) = node.alias else { continue };
-            let spelling: String =
-                self.tast[written].elements.iter().filter_map(|&unit| char::from_u32(unit)).collect();
+            let spelling: String = self.tast[written]
+                .elements
+                .iter()
+                .filter_map(|&unit| char::from_u32(unit))
+                .collect();
             let Some(resolver) = self.cx.names.find(&spelling) else { continue };
             let Some(found) = self.file_scope_decl(resolver) else { continue };
             let at = self.tast.decl_span(decl);
@@ -764,7 +767,8 @@ impl Checker<'_> {
             let note = "resolver indirect function declared here";
             match rucc_types::pointee(&self.types, returned) {
                 None => {
-                    let what = format!("'ifunc' resolver for '{name}' must return '{wanted_spelled}'");
+                    let what =
+                        format!("'ifunc' resolver for '{name}' must return '{wanted_spelled}'");
                     let refused = Diagnostic::error(what, there).with_code("E0821");
                     self.report(refused.note(note, at));
                 }
