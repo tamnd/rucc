@@ -64,6 +64,7 @@
 //! anyway, so a promotion would have been undone by the widening that follows it.
 
 use rucc_diag::Span;
+use rucc_target::TargetInfo;
 use rucc_types::{IntKind, IntegerInfo, TypeId, integer_info, pointee};
 
 use crate::check::Checker;
@@ -99,7 +100,16 @@ pub(in crate::check) struct Asked {
 ///
 /// That is on a target with a 64-bit word. gcc has no 128-bit integer where the word is 32 bits,
 /// and the back end splits nothing wider than two words there, so the limit is 64 bits instead.
+/// wasm32 is the exception: clang has `__int128` there, and `rucc_wasm` holds it in two `i64`, so
+/// the limit is 128 bits as on a 64-bit word.
 const LIMIT: u32 = 128;
+
+/// The widest arithmetic that a check on `target` is done at, which is [`LIMIT`] where the target
+/// has `__int128` and 64 bits where it has not.
+fn limit(target: &TargetInfo) -> u32 {
+    let wasm = target.tuple.arch().as_str() == "wasm32";
+    if target.pointer_width == 64 || wasm { LIMIT } else { 64 }
+}
 
 /// Which of the six a name is, if it is one of them.
 pub(in crate::check) fn operation(spelled: &str) -> Option<Asked> {
@@ -176,8 +186,7 @@ impl Checker<'_> {
             };
             *slot = shape;
         }
-        let limit = if self.cx.target.pointer_width == 64 { LIMIT } else { 64 };
-        let at = self.widest(common(found, limit));
+        let at = self.widest(common(found, limit(self.cx.target)));
         let ty = self.types.boolean();
         // Left, right, destination, in that order, which is the order they were written in and the
         // order every walk over the node reads them back in.
@@ -291,6 +300,17 @@ mod tests {
         assert_eq!(common(mixed, 64), shape(false, 64));
         let signed = [shape(true, 64), shape(true, 32), shape(true, 64)];
         assert_eq!(common(signed, 64), shape(true, 64));
+    }
+
+    /// The limit follows `__int128`: 128 bits where the word is 64 bits, 64 bits on i386, and 128
+    /// bits on wasm32, where clang has `__int128` and the back end holds it in two `i64`. With 64
+    /// bits on wasm32, a check on two `__int128` lost the high half of the answer.
+    #[test]
+    fn the_limit_is_one_hundred_and_twenty_eight_where_the_target_has_int128() {
+        let on = |triple: &str| limit(&TargetInfo::new(triple.parse().expect("a triple")));
+        assert_eq!(on("x86_64-unknown-linux-gnu"), LIMIT);
+        assert_eq!(on("i686-unknown-linux-gnu"), 64);
+        assert_eq!(on("wasm32-unknown-wasip1"), LIMIT);
     }
 
     /// The same three unsigned types, which is the case above without the signed operand. It gets
