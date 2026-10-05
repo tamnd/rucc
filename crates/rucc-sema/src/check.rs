@@ -623,10 +623,12 @@ impl<'a> Checker<'a> {
     ///
     /// Derived the same way [`Checker::ptrdiff`] is and for the same reason, since `size_t` is
     /// the unsigned type as wide as a pointer on every target this compiles for and asking the
-    /// widths keeps the two from disagreeing about which one that is.
+    /// widths keeps the two from disagreeing about which one that is. Where `int` and `long` are
+    /// both as wide, the layout says which one the library uses, and wasm32 starts at `long`.
     pub(crate) fn size_type(&self) -> TypeId {
         let width = self.cx.target.pointer_width;
-        for kind in [IntKind::UInt, IntKind::ULong, IntKind::ULongLong] {
+        let first = if self.cx.target.scalars.pointer_int_is_long { 1 } else { 0 };
+        for kind in [IntKind::UInt, IntKind::ULong, IntKind::ULongLong].into_iter().skip(first) {
             if int_width(kind, self.cx.target) >= width {
                 return self.types.int(kind);
             }
@@ -692,7 +694,8 @@ impl<'a> Checker<'a> {
     /// same fact `long_width` already records. Asking the widths keeps the two from disagreeing.
     pub(crate) fn ptrdiff(&self) -> TypeId {
         let width = self.cx.target.pointer_width;
-        for kind in [IntKind::Int, IntKind::Long, IntKind::LongLong] {
+        let first = if self.cx.target.scalars.pointer_int_is_long { 1 } else { 0 };
+        for kind in [IntKind::Int, IntKind::Long, IntKind::LongLong].into_iter().skip(first) {
             if int_width(kind, self.cx.target) >= width {
                 return self.types.int(kind);
             }

@@ -2896,7 +2896,9 @@ pub fn parse_args(args: &[String]) -> Result<Action, CliError> {
     // gcc's spec rather than the fields: it is linked when `-Ofast`, `-ffast-math` or
     // `-funsafe-math-optimizations` is still in force at the end of the line, whatever a later
     // member took back, and `-mdaz-ftz` decides it outright.
-    let mut math = Math::default();
+    // wasm32 starts with `-fno-math-errno`, as clang does there. wasi-libc's maths functions do
+    // not set `errno`, so a promise that they do would only stop the code from being inlined.
+    let mut math = Math { errno: opts.target.arch != rucc_target::Arch::Wasm32, ..Math::default() };
     let mut trapping = if ofast { math.set_fast(true) } else { true };
     for flag in &math_flags {
         match *flag {

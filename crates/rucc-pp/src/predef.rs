@@ -21,7 +21,9 @@
 
 use rucc_base::float::Format;
 use rucc_session::{GnucVersion, Math, MscVersion, OptLevel, Options, Pic, Std};
-use rucc_target::{Arch, CodeModel, Env, Feature, Isa, ObjectFormat, Os, TargetInfo, Triple};
+use rucc_target::{
+    Arch, CodeModel, Env, Feature, Isa, ObjectFormat, Os, Preview, TargetInfo, Triple, wasm,
+};
 use rucc_tuple::{self as tuple};
 
 /// The name a diagnostic about the generated set points at.
@@ -152,6 +154,9 @@ pub struct Predef {
     /// The instruction set extensions the unit is built for, which decides `__SSE4_2__` and the
     /// rest of that family on x86-64 and nothing anywhere else.
     pub isa: Isa,
+    /// The WebAssembly features the unit is built for, which decide the `__wasm_<feature>__`
+    /// macros on a wasm target and nothing anywhere else.
+    pub wasm: wasm::Features,
     /// Whether a value may be kept in a vector register, which `-mgeneral-regs-only` turns off.
     /// On AArch64 it decides `__ARM_FP`, `__ARM_NEON` and the fused multiply add macros, which gcc
     /// leaves out under that flag. On x86-64 the extensions say the same thing, through `__SSE__`.
@@ -187,6 +192,7 @@ impl Predef {
             defines: Vec::new(),
             undefines: Vec::new(),
             isa: Isa::baseline(),
+            wasm: wasm::Cpu::default().features(),
             vector: true,
             assembler: false,
         }
@@ -221,6 +227,7 @@ impl Predef {
             defines: opts.defines.clone(),
             undefines: opts.undefines.clone(),
             isa: opts.isa,
+            wasm: opts.wasm,
             vector: opts.vector,
             assembler: false,
         }
@@ -401,7 +408,9 @@ fn dialect(d: &mut Defs, target: &TargetInfo, opts: &Predef) {
     // `<stdc-predef.h>` writes the same four from `__GCC_IEC_559` and writes none of them when that
     // is zero, so saying them here under `-ffast-math` would be the redefinition described below
     // with the opposite sign.
-    let iec = opts.math.iec_559(opts.trapping_math);
+    // wasm32 says none of them, as clang does there. wasi-libc has no `<stdc-predef.h>` to say them
+    // for it, and its maths library does not give the whole of Annex F.
+    let iec = opts.math.iec_559(opts.trapping_math) && target.tuple.arch() != tuple::Arch::Wasm32;
     d.flag_if(iec, "__STDC_IEC_559__");
     d.flag_if(iec, "__STDC_IEC_559_COMPLEX__");
     // TS 18661-1's date, in every dialect, which is gcc 16's answer rather than the standard's.
@@ -473,8 +482,11 @@ fn atomics(d: &mut Defs, target: &TargetInfo) {
     // `long` on a sixty four bit machine and its `long long` is still one instruction. i386 is
     // the thirty two bit machine that says two anyway, because every processor it builds for
     // has `cmpxchg8b`, and gcc and clang both say two there.
+    // wasm32 says two as well, because its values are sixty four bits wide and an `i64` atomic
+    // is one instruction.
     let x86 = matches!(target.tuple.arch(), tuple::Arch::X86_64 | tuple::Arch::X86);
-    let llong = if target.pointer_width == 64 || x86 { "2" } else { "1" };
+    let wasm = target.tuple.arch() == tuple::Arch::Wasm32;
+    let llong = if target.pointer_width == 64 || x86 || wasm { "2" } else { "1" };
     for name in [
         "BOOL", "CHAR", "CHAR8_T", "CHAR16_T", "CHAR32_T", "WCHAR_T", "SHORT", "INT", "LONG",
         "POINTER",
@@ -670,6 +682,22 @@ fn platform(d: &mut Defs, target: &TargetInfo, opts: &Predef) {
             d.flag("__wasm__");
             d.flag("__wasm32");
             d.flag("__wasm32__");
+            // One macro for each feature the unit is built for, and on wasip3 for the features
+            // that the preview turns on whatever the set is.
+            let mut features = opts.wasm;
+            if let Os::Wasi(preview) = triple.os {
+                features = features.union(wasm::required(preview));
+            }
+            for name in features.macros() {
+                d.flag(&name);
+            }
+            // wasi-libc's `setjmp.h` stops with `#error` unless exception handling is on. rucc
+            // lowers `setjmp` with `exnref` on every WASI row and marks the feature only on a
+            // function that calls it, so the macro is defined there with no flag (decision D5).
+            // clang defines it only for `-mexception-handling`. wasm32-none has no libsetjmp.
+            if matches!(triple.os, Os::Wasi(_)) && !features.has(wasm::Feature::ExceptionHandling) {
+                d.flag("__wasm_exception_handling__");
+            }
         }
     }
     match triple.os {
@@ -793,6 +821,9 @@ fn platform(d: &mut Defs, target: &TargetInfo, opts: &Predef) {
         Os::Wasi(preview) => {
             d.flag("__wasi__");
             d.flag(&format!("__wasip{}__", preview.number()));
+            // wasip3 reaches the stack pointer and the TLS base through library calls, so that
+            // each cooperative thread has its own, and clang 23 says so with this macro.
+            d.flag_if(preview == Preview::P3, "__wasm_libcall_thread_context__");
         }
     }
     match triple.env {
@@ -998,8 +1029,9 @@ fn sizes(d: &mut Defs, target: &TargetInfo) {
     d.set("__SIZEOF_LONG__", &long.to_string());
     d.set("__SIZEOF_LONG_LONG__", "8");
     // gcc has a 128-bit integer only where a register is 64 bits, and a program that finds this
-    // macro takes it as the promise that `__int128` compiles. So i686 does not see it.
-    if target.pointer_width == 64 {
+    // macro takes it as the promise that `__int128` compiles. So i686 does not see it, and wasm32
+    // and x32 do, because their values are sixty four bits wide and their pointers are not.
+    if target.scalars.has_int128 {
         d.set("__SIZEOF_INT128__", "16");
     }
     d.set("__SIZEOF_FLOAT__", "4");
@@ -1007,10 +1039,13 @@ fn sizes(d: &mut Defs, target: &TargetInfo) {
     d.set("__SIZEOF_LONG_DOUBLE__", &long_double.to_string());
     // Where the type has its old name and nowhere else, which is gcc's rule and the reason the
     // macro is the one portable code tests before it writes `__float128`. PowerPC also says
-    // `__FLOAT128__`, which gcc defines there and not on x86.
+    // `__FLOAT128__`, which gcc defines there and not on x86. wasm32 says `__FLOAT128__` as clang
+    // does and not the size: code that finds the size includes `quadmath.h`, and wasi-libc has
+    // none.
     if target.type_names().iter().any(|&(name, _)| name == "__float128") {
-        d.set("__SIZEOF_FLOAT128__", "16");
-        if target.tuple.arch() == tuple::Arch::PowerPc64 {
+        let wasm = target.tuple.arch() == tuple::Arch::Wasm32;
+        d.set_if(!wasm, "__SIZEOF_FLOAT128__", "16");
+        if matches!(target.tuple.arch(), tuple::Arch::PowerPc64 | tuple::Arch::Wasm32) {
             d.set("__FLOAT128__", "1");
         }
     }
@@ -1130,11 +1165,16 @@ fn integers(d: &mut Defs, target: &TargetInfo) {
     // The types as wide as a pointer, which are the wide ones above everywhere but a thirty two
     // bit target, where they are `int`. That is what gcc says for i386 on Linux and on Windows,
     // and it is what `rucc_sema` gives `sizeof` and a pointer difference, which have to agree.
-    let (pointer, pointer_unsigned, pointer_max, pointer_umax) = if target.pointer_width == 32 {
-        ("int", "unsigned int", "0x7fffffff".to_string(), "0xffffffffU".to_string())
-    } else {
-        (wide, wide_unsigned, wide_max.clone(), wide_umax.clone())
-    };
+    // wasm32 is the thirty two bit target where they are `long`, which wasi-libc's headers say,
+    // and `rucc_sema` reads the same field of the layout.
+    let (pointer, pointer_unsigned, pointer_max, pointer_umax) =
+        if target.scalars.pointer_int_is_long {
+            ("long int", "long unsigned int", "0x7fffffffL".to_string(), "0xffffffffUL".to_string())
+        } else if target.pointer_width == 32 {
+            ("int", "unsigned int", "0x7fffffff".to_string(), "0xffffffffU".to_string())
+        } else {
+            (wide, wide_unsigned, wide_max.clone(), wide_umax.clone())
+        };
     let int64_max = format!("0x7fffffffffffffff{int64_suffix}");
     let int64_umax = format!("0xffffffffffffffffU{int64_suffix}");
 
@@ -1149,7 +1189,10 @@ fn integers(d: &mut Defs, target: &TargetInfo) {
     d.set("__PTRDIFF_MAX__", &pointer_max);
     d.set("__INTPTR_MAX__", &pointer_max);
     d.set("__UINTPTR_MAX__", &pointer_umax);
-    d.set("__SIG_ATOMIC_MAX__", "0x7fffffff");
+    // `long` where the pointer sized integer is, which is wasm32, whose `signal.h` says `typedef
+    // long sig_atomic_t;`, and `int` everywhere else.
+    let sig_atomic = if target.scalars.pointer_int_is_long { "long int" } else { "int" };
+    d.set("__SIG_ATOMIC_MAX__", if sig_atomic == "int" { "0x7fffffff" } else { "0x7fffffffL" });
     d.set("__SIG_ATOMIC_MIN__", "(-__SIG_ATOMIC_MAX__ - 1)");
     // The widest `_BitInt` this compiler builds, which is narrower than gcc 16's sixty five
     // thousand five hundred and thirty five because a folded constant here is a hundred and
@@ -1173,7 +1216,7 @@ fn integers(d: &mut Defs, target: &TargetInfo) {
     d.set("__UINTMAX_TYPE__", wide_unsigned);
     d.set("__INTPTR_TYPE__", pointer);
     d.set("__UINTPTR_TYPE__", pointer_unsigned);
-    d.set("__SIG_ATOMIC_TYPE__", "int");
+    d.set("__SIG_ATOMIC_TYPE__", sig_atomic);
     d.set("__CHAR16_TYPE__", "short unsigned int");
     d.set("__CHAR32_TYPE__", "unsigned int");
     d.set("__INTMAX_C(c)", &format!("c ## {wide_suffix}"));
@@ -1524,7 +1567,11 @@ fn floats(d: &mut Defs, target: &TargetInfo, opts: &Predef) {
     // have meant yes. So the choice is not between claiming and not claiming, it is between
     // saying so and having it said for us. Zero for both once a fast math licence is given,
     // which is gcc's answer and what keeps glibc from claiming the family on our behalf.
-    let iec = if opts.math.iec_559(opts.trapping_math) { "2" } else { "0" };
+    // Zero on wasm32 as well, which is the value a program reads from clang, which does not define
+    // the two names. A positive value there would make a header claim Annex F for a library that
+    // does not give it.
+    let wasm = target.tuple.arch() == tuple::Arch::Wasm32;
+    let iec = if opts.math.iec_559(opts.trapping_math) && !wasm { "2" } else { "0" };
     d.set("__GCC_IEC_559", iec);
     d.set("__GCC_IEC_559_COMPLEX", iec);
     // Every operation is done in the type of its operands, which is what SSE2 and the AArch64
