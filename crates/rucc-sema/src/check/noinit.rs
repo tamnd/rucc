@@ -73,7 +73,8 @@ impl Checker<'_> {
                 }
                 let count = ast[attr.args].len();
                 if count > 0 {
-                    let what = format!("wrong number of arguments specified for '{name}' attribute");
+                    let what =
+                        format!("wrong number of arguments specified for '{name}' attribute");
                     let refused = Diagnostic::error(what, attr.span).with_code("E0836");
                     self.report(refused.note(format!("expected 0, found {count}"), attr.span));
                     continue;
@@ -90,11 +91,12 @@ impl Checker<'_> {
                 let ignored = match held {
                     None => "not set on a variable",
                     Some(held) if held.local => {
-                        let what = format!("'{name}' attribute cannot be specified for local variables");
+                        let what =
+                            format!("'{name}' attribute cannot be specified for local variables");
                         self.report(Diagnostic::error(what, at).with_code("E0837"));
                         continue;
                     }
-                    Some(held) if self.constant(held.ty) => "set on const variable",
+                    Some(held) if self.const_variable(held.ty) => "set on const variable",
                     Some(held) if noinit && held.initialized => "set on initialized variable",
                     Some(held) if !noinit && !held.initialized => "set on uninitialized variable",
                     Some(_) => {
@@ -115,7 +117,7 @@ impl Checker<'_> {
     }
 
     /// Whether a variable of this type is `const`, which for an array is its element's.
-    fn constant(&self, ty: TypeId) -> bool {
+    fn const_variable(&self, ty: TypeId) -> bool {
         let mut ty = self.types.canonical(ty);
         loop {
             if self.types.quals(ty).has(Qualifiers::CONST) {

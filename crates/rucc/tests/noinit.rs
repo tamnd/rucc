@@ -291,8 +291,10 @@ fn noinit_and_persistent_are_checked_in_gcc_s_words() {
     let conflicts = |name: &str, with: &str| {
         format!("warning: ignoring attribute '{name}' because it conflicts with attribute '{with}'")
     };
-    let elsewhere = |name: &str| format!("warning: ignoring '{name}' attribute not set on a variable");
-    let local = |name: &str| format!("error: '{name}' attribute cannot be specified for local variables");
+    let elsewhere =
+        |name: &str| format!("warning: ignoring '{name}' attribute not set on a variable");
+    let local =
+        |name: &str| format!("error: '{name}' attribute cannot be specified for local variables");
     let arity = "error: wrong number of arguments specified for 'noinit' attribute".to_owned();
     for (source, said, errors, warnings) in [
         (
@@ -349,7 +351,12 @@ fn noinit_and_persistent_are_checked_in_gcc_s_words() {
             1,
         ),
         ("int v __attribute__((noinit, persistent));\n", conflicts("persistent", "noinit"), 0, 1),
-        ("int v __attribute__((persistent, noinit)) = 1;\n", conflicts("noinit", "persistent"), 0, 1),
+        (
+            "int v __attribute__((persistent, noinit)) = 1;\n",
+            conflicts("noinit", "persistent"),
+            0,
+            1,
+        ),
     ] {
         let (ok, _, err) = assembly("words", target, &[], source);
         assert_eq!(ok, errors == 0, "{source}\n{err}");
