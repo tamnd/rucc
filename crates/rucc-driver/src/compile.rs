@@ -11724,14 +11724,22 @@ block5:
         source
     }
 
-    /// How many bytes of frame the first function in a listing opens.
+    /// How many bytes of frame the first function in a listing opens, or for a leaf that keeps its
+    /// slots in the red zone and opens none, how far below the stack pointer it reaches.
     fn the_frame(text: &str) -> u64 {
-        text.lines()
-            .find_map(|line| {
-                let (size, _) = line.strip_prefix("\tsubq\t$")?.split_once(", %rsp")?;
-                size.parse().ok()
+        let opened = text.lines().find_map(|line| {
+            let (size, _) = line.strip_prefix("\tsubq\t$")?.split_once(", %rsp")?;
+            size.parse().ok()
+        });
+        let below = text
+            .lines()
+            .filter_map(|line| {
+                let (before, _) = line.split_once("(%rsp)")?;
+                let (_, offset) = before.rsplit_once('-')?;
+                offset.parse().ok()
             })
-            .expect("a function that opens a frame")
+            .max();
+        opened.or(below).unwrap_or_else(|| panic!("a function with a frame:\n{text}"))
     }
 
     /// A frame holds what a function wants at once, and an interpreter does not want the whole
