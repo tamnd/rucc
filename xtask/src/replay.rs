@@ -295,9 +295,40 @@ const TARGETS: &[Target] = &[
         upstream: "libjpeg_turbo_fuzzer",
         corpus: "https://storage.googleapis.com/libjpeg-turbo-backup.clusterfuzz-external.appspot.com/corpus/libFuzzer/libjpeg-turbo_libjpeg_turbo_fuzzer/public.zip",
         pinned: ("2026-10-05", 7899),
-        // The full replay of this corpus is still being read on tamnd/rucc#1499, so nothing is on
-        // the list yet and every shape it reports fails until somebody has put it in a bucket.
-        triaged: &[],
+        triaged: &[
+            Triaged {
+                judgement: 1,
+                bytes: Some(1),
+                bucket: Bucket::Project { upstream: "not reported yet" },
+                why: "the upsamplers in jdsample.c reading rows of downsampled samples the IDCT \
+                      never wrote, at six sites in int_upsample, h2v1_upsample, h2v2_upsample and \
+                      the three fancy ones. Decoding all 131 inputs behind the two J1 shapes with \
+                      the heap as malloc leaves it and then filled with two different patterns \
+                      gives byte for byte the same output every time, so the values reach \
+                      nothing, and MemorySanitizer reports a use rather than a read. \
+                      tamnd/rucc#1499.",
+            },
+            Triaged {
+                judgement: 1,
+                bytes: Some(2),
+                bucket: Bucket::Project { upstream: "not reported yet" },
+                why: "the same upsampler reads as the one byte shape, on images whose samples \
+                      are two bytes wide, and the same test over the heap shows the output does \
+                      not depend on them either. tamnd/rucc#1499.",
+            },
+            Triaged {
+                judgement: 2,
+                bytes: None,
+                bucket: Bucket::Project { upstream: "not reported yet" },
+                why: "tj3Decompress16 at turbojpeg-mp.c:244 and 246 forming row pointers past \
+                      the end of the output buffer. Upstream's harness sizes that buffer for one \
+                      byte a sample when a lossless image has a precision below 8 and then calls \
+                      tj3Decompress16 anyway, since it only tests for 8 and 12, and \
+                      jpeg_read_scanlines rejects the precision before any row is written. So \
+                      nothing is written through the pointers, and the fuzzer never decodes a \
+                      lossless image of precision 2 to 7 or 9 to 11. tamnd/rucc#1499.",
+            },
+        ],
     },
 ];
 
