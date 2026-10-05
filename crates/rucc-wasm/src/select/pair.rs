@@ -165,7 +165,7 @@ impl Lower<'_, '_> {
             self.scratch_address(0);
         }
         args(self)?;
-        self.code.call(symbol);
+        self.code.call(symbol, false);
         if pair {
             self.load_scratch(result);
         } else {
@@ -529,7 +529,7 @@ impl Lower<'_, '_> {
             let (symbol, _) = s.unit.libcall(name, ty);
             s.push(a)?;
             s.push(b)?;
-            s.code.call(symbol);
+            s.code.call(symbol, false);
             s.code.i32_const(0);
             s.code.op(int_compare(pred, false));
             Ok(())
@@ -680,7 +680,7 @@ impl Lower<'_, '_> {
                 self.scratch_address(0);
                 self.push(result)?;
                 self.push(a)?;
-                self.code.call(udiv);
+                self.code.call(udiv, false);
                 let (fp, at) = (self.frame_pointer(), self.scratch());
                 for half in 0..2 {
                     self.code.local_get(fp);

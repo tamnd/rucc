@@ -486,7 +486,7 @@ impl Printer<'_> {
                 body.dead();
                 "return".into()
             }
-            0x10 => {
+            0x10 | 0x12 => {
                 let Some((RelocKind::FunctionIndexLeb, symbol, _)) = body.fixup()? else {
                     return Err("a `call` names no function symbol".into());
                 };
@@ -496,10 +496,14 @@ impl Printer<'_> {
                 };
                 let ty = &self.object.types[ty as usize];
                 body.pops(ty.params.len());
+                if op == 0x12 {
+                    body.dead();
+                    return Ok(format!("return_call\t{}", self.name(symbol)));
+                }
                 ty.results.iter().for_each(|&t| body.push(t));
                 format!("call\t{}", self.name(symbol))
             }
-            0x11 => {
+            0x11 | 0x13 => {
                 let Some((RelocKind::TypeIndexLeb, ty, _)) = body.fixup()? else {
                     return Err("a `call_indirect` names no type".into());
                 };
@@ -514,6 +518,10 @@ impl Printer<'_> {
                 let ty = &self.object.types[ty as usize];
                 body.pop();
                 body.pops(ty.params.len());
+                if op == 0x13 {
+                    body.dead();
+                    return Ok(format!("return_call_indirect\t{table}{}", Self::signature(ty)));
+                }
                 ty.results.iter().for_each(|&t| body.push(t));
                 format!("call_indirect\t{table}{}", Self::signature(ty))
             }
