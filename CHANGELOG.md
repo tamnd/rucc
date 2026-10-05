@@ -4,6 +4,10 @@ All notable changes are recorded here. The format follows [Keep a Changelog](htt
 
 ## Unreleased
 
+## 0.22.0
+
+The minor release for WA1 (#2863), the second step of the WebAssembly plan. rucc reads and checks C for the four wasm rows, `wasm32-wasip1`, `wasm32-wasip2`, `wasm32-wasip3` and `wasm32-none`, up to the end of semantic analysis, and it says that there is no wasm backend yet for anything after that. The predefined macros are those of clang 23 from wasi-sdk 34, with each difference on an approved list, and `-mcpu=` and the feature flags work as in clang 23. `rucc --fetch` installs the C library of each WASI row, and with it the SQLite amalgamation and its shell pass `-fsyntax-only` on all three previews. The other entries are the `egraph` rewriter behind `-Zrewriter=egraph`, three GNU attributes for x86 and the kernel, `cf_check`, `-mmanual-endbr` and `patchable_function_entry`, and a fix that makes an unterminated quote a warning, as in gcc.
+
 ### Added
 
 - `-Zrewriter=egraph` runs `egraph` wherever a level runs `simplify` or `number`. It is the e-graph arm of experiment 7 in section 12.3 of `spec/optimizer/12-egraph.md`: the walk of `-Zrewriter=consed`, with each rewrite added to the class of the value it matched rather than replacing it, and the cheapest member of each class extracted by the costs of section 40. The rules stop once a function has added `EGRAPH_NODES` forms, and `-fopt-info-note` prints how many forms and classes there were. It is off unless asked for. (#2829)
