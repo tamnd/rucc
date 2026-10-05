@@ -904,3 +904,140 @@ fn a_tail_call_is_return_call_when_the_target_has_the_feature() {
         }
     }
 }
+
+/// A byte swap of 32 bits. With one argument, `main` exits with 0x33, the second byte from the
+/// top of 0x44332211. A swap of the bytes in each half gives 0x22114433 and an exit with 0x11.
+///
+/// ```c
+/// int main(int argc, char **argv) {
+///   unsigned y = __builtin_bswap32(0x11223344u * argc);
+///   return (y >> 16) & 0xff;
+/// }
+/// ```
+const SWAPPED: &str = r#"; ModuleID = 't.c'
+; format 0
+target triple = "wasm32-unknown-wasip1"
+target datalayout = "e-p:32:32-i64:64-S128"
+
+func @main(i32, ptr) -> i32, linkage(external) {
+block0(%0: i32, %1: ptr):
+    %2 = iconst.i32 287454020
+    %3 = mul %0, %2
+    %4 = bswap %3
+    %5 = iconst.i32 16
+    %6 = lshr %4, %5
+    %7 = iconst.i32 255
+    %8 = and %6, %7
+    return %8
+}
+"#;
+
+#[test]
+fn a_byte_swap_of_32_bits_reverses_the_four_bytes() {
+    for assembled in [false, true] {
+        if let Some(status) = link_and_run_as("swapped", SWAPPED, assembled) {
+            assert_eq!(status, 0x33, "assembled: {assembled}");
+        }
+    }
+}
+
+/// Two functions that each keep the address of a label, as gcc's torture test `990208-1.c` does
+/// with two copies of an inline function. On the native rows the two addresses are different, so
+/// `main` exits with 1.
+///
+/// ```c
+/// static void *p, *q;
+/// __attribute__((noinline)) void f(void) { here: p = &&here; }
+/// __attribute__((noinline)) void g(void) { there: q = &&there; }
+/// int main(void) { f(); g(); return p != q; }
+/// ```
+const TWO_LABELS: &str = r#"; ModuleID = 't.c'
+; format 0
+target triple = "wasm32-unknown-wasip1"
+target datalayout = "e-p:32:32-i64:64-S128"
+
+global @q : bytes 4 = { zero 4 }, align 4, linkage(internal), droppable
+global @p : bytes 4 = { zero 4 }, align 4, linkage(internal), droppable
+
+func @f(), linkage(external), attrs(noinline) {
+block0:
+    jump block1
+
+block1:
+    %0 = global_addr @p
+    %1 = block_addr block1
+    store %1 -> %0, align 4
+    return
+}
+
+func @g(), linkage(external), attrs(noinline) {
+block0:
+    jump block1
+
+block1:
+    %0 = global_addr @q
+    %1 = block_addr block1
+    store %1 -> %0, align 4
+    return
+}
+
+func @main() -> i32, linkage(external) {
+block0:
+    call @f() : ()
+    call @g() : ()
+    %0 = global_addr @p
+    %1 = load %0, align 4
+    %2 = global_addr @q
+    %3 = load %2, align 4
+    %4 = icmp ne %1, %3
+    %5 = zext.i32 %4
+    return %5
+}
+"#;
+
+#[test]
+fn the_labels_of_two_functions_have_two_addresses() {
+    let text = assembly(TWO_LABELS);
+    assert!(text.contains("i32.const\t1\n"), "{text}");
+    assert!(text.contains("i32.const\t2\n"), "{text}");
+    if let Some(status) = link_and_run("labels", TWO_LABELS) {
+        assert_eq!(status, 1);
+    }
+}
+
+/// Locals of a struct with no members, which GNU C gives the size 0. The frame is empty, so the
+/// address of the local is the stack pointer, and `main` exits with 0.
+///
+/// ```c
+/// struct empty {};
+/// struct empty *where(void) { struct empty e; return &e; }
+/// int main(void) { struct empty a; where(); return 0; }
+/// ```
+const EMPTY: &str = r#"; ModuleID = 't.c'
+; format 0
+target triple = "wasm32-unknown-wasip1"
+target datalayout = "e-p:32:32-i64:64-S128"
+
+func @where() -> ptr, linkage(external) {
+block0:
+    %0 = alloca, align 1
+    return %0
+}
+
+func @main() -> i32, linkage(external) {
+block0:
+    %0 = alloca, align 1
+    %1 = call @where() : () -> ptr
+    %2 = iconst.i32 0
+    return %2
+}
+"#;
+
+#[test]
+fn a_local_of_size_zero_needs_no_frame() {
+    let text = assembly(EMPTY);
+    assert!(text.contains("global.get\t__stack_pointer"), "{text}");
+    if let Some(status) = link_and_run("empty", EMPTY) {
+        assert_eq!(status, 0);
+    }
+}

@@ -18,7 +18,7 @@ use crate::emit::{self, Code};
 use crate::irreducible::Node;
 use crate::rules;
 use crate::structure::Shape;
-use crate::{Notes, Unit, functype, is_pair, label_numbers, valtype};
+use crate::{Notes, Unit, functype, is_pair, valtype};
 
 mod builtin;
 mod pair;
@@ -147,6 +147,7 @@ pub(crate) fn function(unit: &mut Unit<'_>, id: FuncId, symbol: u32) -> Result<F
     let unit_notes = unit.notes.is_some();
     let ty = functype(func.signature())?;
     let params = u32::try_from(ty.params.len()).expect("fewer than 2^32 parameters");
+    let numbers = unit.numbers.remove(&id).unwrap_or_default();
     let mut lower = Lower {
         unit,
         func,
@@ -158,7 +159,7 @@ pub(crate) fn function(unit: &mut Unit<'_>, id: FuncId, symbol: u32) -> Result<F
         frame: Frame::default(),
         context: Vec::new(),
         labels: Vec::new(),
-        numbers: label_numbers(func),
+        numbers,
         va: func.signature().variadic.then(|| params - 1),
         returns: !ty.results.is_empty(),
         sret: func.signature().returns.iter().any(|ret| is_pair(ret.ty)),
@@ -717,7 +718,7 @@ impl Lower<'_, '_> {
     }
 
     /// A computed `goto`, as one `block` for each distinct target around a `br_table` on the
-    /// number of the label, which is the address that [`label_numbers`] gives the label. The
+    /// number of the label, which is the address that [`crate::label_numbers`] gives the label. The
     /// numbers are dense, so the table is short. An address that is not one of the targets is a
     /// jump that the program said it does not make, and it goes to an `unreachable`, which section
     /// 7.5 of the WebAssembly notes asks for.
@@ -1245,8 +1246,16 @@ impl Lower<'_, '_> {
             }
             Opcode::Alloca => {
                 if let Some(&offset) = self.frame.slots.get(&inst) {
-                    let fp = self.frame_pointer();
-                    self.code.local_get(fp);
+                    // A function whose slots all have the size 0, which a struct with no members
+                    // has in GNU C, has an empty frame and no frame pointer. Nothing reads or
+                    // writes such a slot, so the stack pointer is as good an address as any.
+                    match self.frame.fp {
+                        Some(fp) => self.code.local_get(fp),
+                        None => {
+                            let sp = self.unit.stack_pointer();
+                            self.code.global_get(sp);
+                        }
+                    }
                     if offset != 0 {
                         self.code.i32_const(offset as i32);
                         self.code.op(emit::I32_ADD);
@@ -2148,17 +2157,19 @@ impl Lower<'_, '_> {
                 self.code.op(emit::I32_OR);
             }
             32 => {
-                // rotr(x & 0xff00ff00, 8) | rotl(x & 0x00ff00ff, 8)
+                // rotl(x & 0xff00ff00, 8) | rotr(x & 0x00ff00ff, 8), as clang writes it. The left
+                // rotation takes byte 1 to byte 2 and byte 3 to byte 0, and the right rotation
+                // takes byte 0 to byte 3 and byte 2 to byte 1.
                 self.push(value)?;
                 self.code.i32_const(0xff00_ff00_u32 as i32);
                 self.code.op(emit::I32_AND);
                 self.code.i32_const(8);
-                self.code.op(emit::I32_ROTR);
+                self.code.op(emit::I32_ROTL);
                 self.push(value)?;
                 self.code.i32_const(0x00ff_00ff);
                 self.code.op(emit::I32_AND);
                 self.code.i32_const(8);
-                self.code.op(emit::I32_ROTL);
+                self.code.op(emit::I32_ROTR);
                 self.code.op(emit::I32_OR);
             }
             64 => {

@@ -73,7 +73,9 @@ use std::fmt;
 
 use rucc_base::hash::Map;
 use rucc_base::{Interner, Symbol};
-use rucc_ir::{Abi, Block, Datum, Func, Linkage, Module, Opcode, Signature, SymbolRef, Type};
+use rucc_ir::{
+    Abi, Block, Datum, Func, FuncId, Linkage, Module, Opcode, Signature, SymbolRef, Type,
+};
 use rucc_object::wasm::{
     self, EXPORTED, FuncType, HIDDEN, Import, LOCAL, NO_STRIP, Place, Producers, RETAIN, RelocKind,
     Segment, SymbolKind, ValType, WEAK, Written,
@@ -195,6 +197,7 @@ fn translate_with(
         functions: Map::default(),
         data: Map::default(),
         labels: Map::default(),
+        numbers: Map::default(),
         globals: Map::default(),
         table: None,
         tag: None,
@@ -204,6 +207,7 @@ fn translate_with(
     // Every definition gets its symbol first, so that a reference from a function or from data
     // finds the symbol whatever order the definitions come in.
     let mut bodies = Vec::new();
+    let mut next_label = 0;
     for id in module.funcs() {
         let func = &module[id];
         if func.is_declaration() {
@@ -211,10 +215,12 @@ fn translate_with(
         }
         let symbol = unit.function(func.name).map_err(unit_wide)?.0;
         bodies.push((id, symbol));
-        let numbers = label_numbers(func);
+        let numbers = label_numbers(func, next_label);
+        next_label += numbers.len() as u32;
         for (block, name) in func.named_blocks() {
             unit.labels.insert(name, numbers[&block]);
         }
+        unit.numbers.insert(id, numbers);
     }
     let mut variables = Vec::new();
     for id in module.globals() {
@@ -345,6 +351,8 @@ pub(crate) struct Unit<'a> {
     /// The number of each label whose address a variable holds, by the name that the function
     /// gave the label. See [`label_numbers`].
     labels: Map<Symbol, u32>,
+    /// The number of each label of each function. See [`label_numbers`].
+    numbers: Map<FuncId, Map<Block, u32>>,
     /// The globals that the linker defines, such as `__stack_pointer`, by name.
     globals: Map<&'static str, u32>,
     table: Option<u32>,
@@ -595,11 +603,15 @@ impl Unit<'_> {
 /// clang does what LLVM's `IndirectBrExpandPass` does: each label whose address is taken is a
 /// small number, and `goto *p` is a `br_table` on that number. rucc does the same. A label is a
 /// block that the function names for a variable, a block that a `block_addr` takes, or a target
-/// of an `indirect_br`. The labels are numbered from one in block order, so that no label has the
-/// address zero and the table of a `goto` is short. A label belongs to one function and its number
-/// is only compared inside that function, so two functions use the same numbers. A variable that
-/// holds the address and the code that takes it both ask this function, so they agree.
-pub(crate) fn label_numbers(func: &Func) -> Map<Block, u32> {
+/// of an `indirect_br`. The labels are numbered in block order from one more than `before`, which
+/// is the count of the labels of the functions before this one in the unit. So no label has the
+/// address zero, the table of a `goto` is short, and two labels of one unit have two addresses, as
+/// on the native rows. A copy of an inline function keeps its own labels, and gcc's torture test
+/// `990208-1.c` compares the addresses of two copies. The `goto` subtracts the smallest number of
+/// its targets before the `br_table`, so the numbers can start anywhere. The unit asks this
+/// function once for each function, and a variable that holds the address and the code that takes
+/// it both read that answer, so they agree.
+pub(crate) fn label_numbers(func: &Func, before: u32) -> Map<Block, u32> {
     let mut labels: Vec<Block> = func.named_blocks().map(|(block, _)| block).collect();
     for block in func.blocks() {
         for inst in func.insts(block) {
@@ -610,7 +622,7 @@ pub(crate) fn label_numbers(func: &Func) -> Map<Block, u32> {
     }
     labels.sort_by_key(|block| block.raw());
     labels.dedup();
-    labels.into_iter().zip(1..).collect()
+    labels.into_iter().zip(before + 1..).collect()
 }
 
 /// The bytes of a label number, or of the distance between two labels, in a variable.
