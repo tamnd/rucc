@@ -1177,6 +1177,10 @@ pub fn compile_recording(
     // decisions of the allocator and what stands between the two is settled by the function they
     // both went into. Before the layout, because the layout is where the instruction sequence
     // stops being something a pass may edit.
+    //
+    // A copy of a register into itself goes first, since it writes the register and the cleanup
+    // would take that as a new value and forget what it knew the register held.
+    copies::itself(&mut func, machine.insts, names);
     let pointer = frame.frame_pointer();
     copies::clean(&mut func, &moves, machine.shapes, machine.insts, machine.conv, pointer, names);
 

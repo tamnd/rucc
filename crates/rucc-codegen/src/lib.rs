@@ -80,7 +80,8 @@
 //! The near miss of the same thing, a slot read into one register while another already holds that
 //! word, stays an instruction and becomes a copy between the two registers, which is cheaper than
 //! going to the frame for a word that never left. Only the allocator's own moves are touched,
-//! which is why [`finish`] hands back which instruction each of them became.
+//! which is why [`finish`] hands back which instruction each of them became. The one exception is
+//! a copy of a whole register into itself, which is nothing whoever wrote it.
 //!
 //! [`layout`] runs last and is what makes a function something a machine could run rather than
 //! something a printer could print. It puts the blocks in the order they are laid out in and then
