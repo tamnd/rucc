@@ -1764,3 +1764,15 @@ fn a_branch_goes_past_a_block_that_only_jumps() {
     let sum = body_of(PROGRAM, "sum", false);
     assert!(sum.contains("\tbr\t1\n\tend_if\n"), "{sum}");
 }
+
+/// A `br_if` that branches when its condition is false gets a compare with the inverse predicate
+/// when the compare stays on the stack, and an `i32.eqz` after the condition when it does not.
+/// In `find`, the test before the loop is `0 < n`, and the branch past the loop is `0 >= n`.
+#[test]
+fn a_branch_on_a_false_compare_inverts_the_compare() {
+    let find = body_of(FIND, "find", true);
+    assert!(find.contains("\ti32.const\t0\n\tlocal.get\t1\n\ti32.ge_s\n\tbr_if\t0\n"), "{find}");
+    assert!(!find.contains("i32.eqz"), "{find}");
+    let find = body_of(FIND, "find", false);
+    assert!(find.contains("\ti32.lt_s\n\tlocal.set\t3\n\tlocal.get\t3\n\ti32.eqz\n"), "{find}");
+}
