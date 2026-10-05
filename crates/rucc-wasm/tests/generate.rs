@@ -9,7 +9,7 @@ use std::path::{Path, PathBuf};
 use std::process::Command;
 
 use rucc_base::Interner;
-use rucc_target::wasm::Cpu;
+use rucc_target::wasm::{Cpu, Feature, Features};
 
 /// A loop with block parameters, a switch with three cases and a default, and a `main` with a
 /// local array, which is the C below at `-O1`. With one argument, `main` exits with 17.
@@ -100,18 +100,31 @@ block0(%0: i32, %1: ptr):
 "#;
 
 fn object(text: &str) -> Result<rucc_object::wasm::Written, rucc_wasm::Refusal> {
+    object_for(text, Cpu::Lime1.features())
+}
+
+/// [`object`] for a target with these features.
+fn object_for(
+    text: &str,
+    features: Features,
+) -> Result<rucc_object::wasm::Written, rucc_wasm::Refusal> {
     let mut names = Interner::new();
     let mut module = rucc_ir::parse(text, &mut names).expect("the IR parses");
     rucc_wasm::prepare(&mut module, &mut names)?;
-    rucc_wasm::generate(&module, &names, Cpu::Lime1.features())
+    rucc_wasm::generate(&module, &names, features)
 }
 
 /// The `-S` text of the object for `text`.
 fn assembly(text: &str) -> String {
+    assembly_for(text, Cpu::Lime1.features())
+}
+
+/// [`assembly`] for a target with these features.
+fn assembly_for(text: &str, features: Features) -> String {
     let mut names = Interner::new();
     let mut module = rucc_ir::parse(text, &mut names).expect("the IR parses");
     rucc_wasm::prepare(&mut module, &mut names).unwrap();
-    let object = rucc_wasm::translate(&module, &names, Cpu::Lime1.features()).unwrap();
+    let object = rucc_wasm::translate(&module, &names, features).unwrap();
     rucc_wasm::assembly(&object).unwrap()
 }
 
@@ -520,6 +533,11 @@ fn link_and_run(name: &str, text: &str) -> Option<i32> {
 /// [`link_and_run`], with the object that clang assembles from the `-S` text in place of the one
 /// that rucc writes when `assembled` is set.
 fn link_and_run_as(name: &str, text: &str, assembled: bool) -> Option<i32> {
+    link_and_run_for(name, text, assembled, Cpu::Lime1.features())
+}
+
+/// [`link_and_run_as`] for a target with these features.
+fn link_and_run_for(name: &str, text: &str, assembled: bool, features: Features) -> Option<i32> {
     let Some(sdk) = sdk() else {
         eprintln!("WASI_SDK_PATH is not set, so the object was not linked");
         return None;
@@ -530,11 +548,12 @@ fn link_and_run_as(name: &str, text: &str, assembled: bool) -> Option<i32> {
     let object_file = dir.join("a.o");
     if assembled {
         let listing = dir.join("a.s");
-        std::fs::write(&listing, assembly(text)).unwrap();
+        std::fs::write(&listing, assembly_for(text, features)).unwrap();
         let args: Vec<&std::ffi::OsStr> = vec![
             "--target=wasm32-wasip1".as_ref(),
             "-mcpu=lime1".as_ref(),
             "-mexception-handling".as_ref(),
+            "-mtail-call".as_ref(),
             "-c".as_ref(),
             listing.as_os_str(),
             "-o".as_ref(),
@@ -542,7 +561,7 @@ fn link_and_run_as(name: &str, text: &str, assembled: bool) -> Option<i32> {
         ];
         run(&sdk.join("bin/clang"), &args);
     } else {
-        std::fs::write(&object_file, object(text).unwrap().bytes).unwrap();
+        std::fs::write(&object_file, object_for(text, features).unwrap().bytes).unwrap();
     }
 
     let lib = sdk.join("share/wasi-sysroot/lib/wasm32-wasip1");
@@ -763,4 +782,125 @@ fn setjmp_and_longjmp_are_the_calls_and_the_catches_of_libsetjmp() {
     let refusal = object(&vfork).unwrap_err();
     assert!(refusal.why.contains("`vfork` returns twice"), "{refusal}");
     assert_eq!(refusal.function.as_deref(), Some("inner"));
+}
+
+/// Calls in tail position, which `tail::mark` writes as the C below at `-O2`. `even` and `odd` call
+/// each other a million times, which is deeper than the stack of Wasmtime when each call keeps
+/// its frame. `pass` calls through a pointer, and `count` drops the answer of `twice`. `main`
+/// exits with 31.
+///
+/// ```c
+/// int odd(unsigned n);
+/// int even(unsigned n) { if (n == 0) return 1; return odd(n - 1); }
+/// int odd(unsigned n) { if (n == 0) return 0; return even(n - 1); }
+/// int (*volatile hop)(unsigned) = even;
+/// int pass(unsigned n) { return hop(n); }
+/// static int sink;
+/// int twice(int n) { sink += n; return 2 * n; }
+/// void count(int n) { twice(n); }
+/// int main(void) { count(10); count(20); return pass(1000000) + sink; }
+/// ```
+const TAIL: &str = r#"; ModuleID = 't.c'
+; format 0
+target triple = "wasm32-unknown-wasip1"
+target datalayout = "e-p:32:32-i64:64-S128"
+
+global @hop : bytes 4 = { addr.4 @even }, align 4, linkage(external)
+global @sink : bytes 4 = { zero 4 }, align 4, linkage(internal)
+
+func @even(i32) -> i32, linkage(external), attrs(noinline) {
+block0(%0: i32):
+    %1 = iconst.i32 0
+    %2 = icmp eq %0, %1
+    br_if %2, block1, block2
+
+block1:
+    %3 = iconst.i32 1
+    return %3
+
+block2:
+    %4 = iconst.i32 1
+    %5 = sub %0, %4
+    tail_call @odd(%5) : (i32) -> i32
+}
+
+func @odd(i32) -> i32, linkage(external), attrs(noinline) {
+block0(%0: i32):
+    %1 = iconst.i32 0
+    %2 = icmp eq %0, %1
+    br_if %2, block1, block2
+
+block1:
+    %3 = iconst.i32 0
+    return %3
+
+block2:
+    %4 = iconst.i32 1
+    %5 = sub %0, %4
+    tail_call @even(%5) : (i32) -> i32
+}
+
+func @pass(i32) -> i32, linkage(external), attrs(noinline) {
+block0(%0: i32):
+    %1 = global_addr @hop
+    %2 = load.volatile.ptr %1, align 4
+    tail_call %2(%0) : (i32) -> i32
+}
+
+func @twice(i32) -> i32, linkage(external), attrs(noinline) {
+block0(%0: i32):
+    %1 = global_addr @sink
+    %2 = load.i32 %1, align 4
+    %3 = add %2, %0
+    store %3 -> %1, align 4
+    %4 = add %0, %0
+    return %4
+}
+
+func @count(i32), linkage(external), attrs(noinline) {
+block0(%0: i32):
+    tail_call @twice(%0) : (i32) -> i32
+}
+
+func @main() -> i32, linkage(external) {
+block0:
+    %0 = iconst.i32 10
+    call @count(%0) : (i32)
+    %1 = iconst.i32 20
+    call @count(%1) : (i32)
+    %2 = iconst.i32 1000000
+    %3 = call @pass(%2) : (i32) -> i32
+    %4 = global_addr @sink
+    %5 = load.i32 %4, align 4
+    %6 = add %3, %5
+    return %6
+}
+"#;
+
+/// With the tail-call feature, a tail call is `return_call` or `return_call_indirect`, and the
+/// object says that it uses the feature. A tail call whose answer the caller drops stays a call
+/// and a `return`, because `return_call` must give back what the caller gives back. Without the
+/// feature, each tail call is a call and a `return`.
+#[test]
+fn a_tail_call_is_return_call_when_the_target_has_the_feature() {
+    let tail = Cpu::Lime1.features().with(Feature::TailCall);
+    let listing = assembly_for(TAIL, tail);
+    for want in [
+        "\treturn_call\todd\n",
+        "\treturn_call\teven\n",
+        "\treturn_call_indirect\t__indirect_function_table, (i32) -> (i32)\n",
+        "\tcall\ttwice\n",
+    ] {
+        assert!(listing.contains(want), "{want:?} in {listing}");
+    }
+    assert!(!listing.contains("return_call\ttwice"), "{listing}");
+    assert!(object_for(TAIL, tail).unwrap().bytes.windows(9).any(|w| w == b"tail-call"));
+    let plain = assembly(TAIL);
+    assert!(!plain.contains("return_call"), "{plain}");
+    assert!(!object(TAIL).unwrap().bytes.windows(9).any(|w| w == b"tail-call"));
+    for assembled in [false, true] {
+        if let Some(status) = link_and_run_for("tail", TAIL, assembled, tail) {
+            assert_eq!(status, 31, "assembled: {assembled}");
+        }
+    }
 }

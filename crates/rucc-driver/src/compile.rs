@@ -1147,6 +1147,18 @@ fn generate(
     if opts.target.arch.is_wasm() {
         let refused = |refusal: rucc_wasm::Refusal| vec![unsupported(&refusal.to_string())];
         rucc_wasm::prepare(module, names).map_err(refused)?;
+        // A call in tail position becomes `return_call` only on a target with the tail-call
+        // feature. Without it, wasm has no way to give the frame back before the call, so the
+        // calls are left as they are. After `prepare`, which only knows the plain calls.
+        let sibling = opts.sibling_calls.unwrap_or_else(|| opts.opt_level.sibling_calls());
+        if sibling && opts.wasm.has(rucc_target::wasm::Feature::TailCall) {
+            let elsewhere = Elsewhere::of(module, IrPic::Absolute, target.object_format, false);
+            for id in module.funcs() {
+                if !module[id].is_declaration() {
+                    rucc_codegen::tail::mark(&mut module[id], names, &elsewhere, false);
+                }
+            }
+        }
         if matches!(opts.emit, EmitKind::WasmTree) {
             return rucc_wasm::tree(module, names, opts.wasm).map(Artifact::Text).map_err(refused);
         }

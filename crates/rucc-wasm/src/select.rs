@@ -1123,7 +1123,7 @@ impl Lower<'_, '_> {
                 for &a in &args {
                     self.push(a)?;
                 }
-                self.code.call(symbol);
+                self.code.call(symbol, false);
                 self.set(results[0]);
             }
             Opcode::ICmp => {
@@ -1695,6 +1695,18 @@ impl Lower<'_, '_> {
         }
         let ty = functype(sig)?;
         let gives = !ty.results.is_empty();
+        // A tail call is `return_call` when the target has the feature, and a call and a `return`
+        // when it does not. `return_call` gives the frame back before the callee runs, so it is
+        // not used for a variadic callee, whose arguments are in the buffer of this frame. It also
+        // needs the callee to give back what this function gives back, type for type, and
+        // `tail::mark` lets a function that gives back nothing drop the answer of its callee.
+        let jump = tail
+            && self.unit.features.has(Feature::TailCall)
+            && !sig.variadic
+            && ty.results == functype(func.signature())?.results;
+        if jump {
+            self.epilogue();
+        }
         let ty = self.unit.out.intern(ty);
         match (info.callee, address) {
             (Some(callee), _) => {
@@ -1704,24 +1716,30 @@ impl Lower<'_, '_> {
                     Ok::<_, String>(self.unit.libcall(&name, ty))
                 })?;
                 if declared == ty {
-                    self.code.call(symbol);
+                    self.code.call(symbol, jump);
                 } else {
                     // The call does not match the declaration, which C allows for a function
                     // declared with no prototype. A direct call of the wrong type would not
                     // validate, and a call through the table is checked when it runs.
                     self.code.address(RelocKind::TableIndexSleb, symbol, 0);
                     let table = self.unit.table();
-                    self.code.call_indirect(ty, table);
+                    self.code.call_indirect(ty, table, jump);
                 }
             }
             (None, Some(address)) => {
                 self.push(address)?;
                 let table = self.unit.table();
-                self.code.call_indirect(ty, table);
+                self.code.call_indirect(ty, table, jump);
             }
             (None, None) => return Err("a call with no callee".into()),
         }
+        if jump {
+            return Ok(());
+        }
         if tail {
+            // A `return` takes the values that the function gives back from the top of the stack
+            // and leaves the rest, so an answer that `tail::mark` let this function drop needs no
+            // `drop`.
             self.epilogue();
             self.code.op(emit::RETURN);
             return Ok(());
@@ -1785,7 +1803,7 @@ impl Lower<'_, '_> {
             };
             let ty = FuncType { params: vec![ValType::I32; 3], results: vec![ValType::I32] };
             let (symbol, _) = self.unit.libcall(name, ty);
-            self.code.call(symbol);
+            self.code.call(symbol, false);
             self.code.op(emit::DROP);
         }
         Ok(())

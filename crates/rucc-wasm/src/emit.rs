@@ -157,16 +157,17 @@ impl Code {
         self.uleb(u64::from(default));
     }
 
-    pub(crate) fn call(&mut self, symbol: u32) {
-        self.bytes.push(0x10);
+    /// `call`, or `return_call` when `tail` is set.
+    pub(crate) fn call(&mut self, symbol: u32, tail: bool) {
+        self.bytes.push(if tail { 0x12 } else { 0x10 });
         self.reloc(RelocKind::FunctionIndexLeb, symbol, 0);
     }
 
-    /// `call_indirect` through the table, which is the long form of the table index with a
-    /// relocation when the target allows it and the single zero byte of the first version when it
-    /// does not.
-    pub(crate) fn call_indirect(&mut self, ty: u32, table: Option<u32>) {
-        self.bytes.push(0x11);
+    /// `call_indirect` through the table, or `return_call_indirect` when `tail` is set. The table
+    /// index is the long form with a relocation when the target allows it and the single zero
+    /// byte of the first version when it does not.
+    pub(crate) fn call_indirect(&mut self, ty: u32, table: Option<u32>, tail: bool) {
+        self.bytes.push(if tail { 0x13 } else { 0x11 });
         self.reloc(RelocKind::TypeIndexLeb, ty, 0);
         match table {
             Some(table) => self.reloc(RelocKind::TableNumberLeb, table, 0),
