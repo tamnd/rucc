@@ -96,6 +96,10 @@ pub struct RecordInfo {
     /// through a character type may, which is what a program that lays a structure over bytes it
     /// did not write as that structure asks for. Nothing about the layout changes.
     pub may_alias: bool,
+    /// What `__attribute__((warn_if_not_aligned(n)))` on it asked a member of its type to sit at
+    /// a multiple of. Nothing about its own layout changes, and the record it is a member of is
+    /// what is warned about. See [`TypeKind::Typedef`].
+    pub warn_if_not_aligned: Option<NonZeroU32>,
 }
 
 /// What is known about one `enum` declaration.
@@ -124,6 +128,9 @@ pub struct EnumInfo {
     /// nowhere else to ask. Debug information is that reader: without this a debugger prints the
     /// number where the program wrote the name.
     pub enumerators: Vec<Enumerator>,
+    /// What `__attribute__((warn_if_not_aligned(n)))` on it asked a member of its type to sit at
+    /// a multiple of. See [`RecordInfo::warn_if_not_aligned`].
+    pub warn_if_not_aligned: Option<NonZeroU32>,
 }
 
 /// One enumerator of an enumeration.
@@ -402,6 +409,7 @@ impl Types {
             transparent: false,
             reverse: false,
             may_alias: false,
+            warn_if_not_aligned: None,
         });
         id
     }
@@ -443,6 +451,17 @@ impl Types {
     /// Panics if `id` came from a different table.
     pub fn make_may_alias(&mut self, id: RecordId) {
         self.records[id.0 as usize].may_alias = true;
+    }
+
+    /// Records what a record said a member of it asks to sit at a multiple of. See
+    /// [`RecordInfo::warn_if_not_aligned`].
+    pub fn make_record_checked(&mut self, id: RecordId, asked: NonZeroU32) {
+        self.records[id.0 as usize].warn_if_not_aligned = Some(asked);
+    }
+
+    /// The same for an enumeration. See [`EnumInfo::warn_if_not_aligned`].
+    pub fn make_enum_checked(&mut self, id: EnumId, asked: NonZeroU32) {
+        self.enums[id.0 as usize].warn_if_not_aligned = Some(asked);
     }
 
     /// The type of a declared record.
@@ -508,7 +527,13 @@ impl Types {
     /// Panics past four billion enumeration declarations in one translation unit.
     pub fn declare_enum(&mut self, tag: Option<Symbol>) -> EnumId {
         let id = EnumId(u32::try_from(self.enums.len()).expect("too many types"));
-        self.enums.push(EnumInfo { tag, underlying: None, fixed: false, enumerators: Vec::new() });
+        self.enums.push(EnumInfo {
+            tag,
+            underlying: None,
+            fixed: false,
+            enumerators: Vec::new(),
+            warn_if_not_aligned: None,
+        });
         id
     }
 
@@ -602,6 +627,7 @@ impl Types {
             underlying,
             align: None,
             may_alias: false,
+            warn_if_not_aligned: None,
         }))
     }
 
@@ -621,6 +647,7 @@ impl Types {
             underlying,
             align: Some(align),
             may_alias: false,
+            warn_if_not_aligned: None,
         }))
     }
 
@@ -632,7 +659,60 @@ impl Types {
         underlying: TypeId,
         align: Option<NonZeroU32>,
     ) -> TypeId {
-        self.intern(Type::new(TypeKind::Typedef { name, underlying, align, may_alias: true }))
+        self.intern(Type::new(TypeKind::Typedef {
+            name,
+            underlying,
+            align,
+            may_alias: true,
+            warn_if_not_aligned: None,
+        }))
+    }
+
+    /// A typedef that said `warn_if_not_aligned`, and perhaps what the other two say as well.
+    /// See [`TypeKind::Typedef`].
+    pub fn checked_typedef(
+        &mut self,
+        name: Symbol,
+        underlying: TypeId,
+        align: Option<NonZeroU32>,
+        may_alias: bool,
+        warn_if_not_aligned: NonZeroU32,
+    ) -> TypeId {
+        self.intern(Type::new(TypeKind::Typedef {
+            name,
+            underlying,
+            align,
+            may_alias,
+            warn_if_not_aligned: Some(warn_if_not_aligned),
+        }))
+    }
+
+    /// What a member of type `id` asks to sit at a multiple of under `-Wif-not-aligned`.
+    ///
+    /// The nearest typedef that said wins, as [`Self::align_override`] has it, since gcc copies
+    /// the number into every typedef of the type and lets one that says its own replace it. An
+    /// array asks what its element does, and a record or an enumeration what was written on it.
+    ///
+    /// # Panics
+    ///
+    /// Panics if `id` came from a different table.
+    #[must_use]
+    pub fn warn_if_not_aligned(&self, id: TypeId) -> Option<NonZeroU32> {
+        let mut id = id;
+        loop {
+            match self.kind(id) {
+                TypeKind::Typedef { warn_if_not_aligned: Some(asked), .. } => return Some(asked),
+                TypeKind::Typedef { underlying, .. } => id = underlying,
+                TypeKind::Array { elem, .. } => id = elem,
+                TypeKind::Record(record) => {
+                    return self.records[record.0 as usize].warn_if_not_aligned;
+                }
+                TypeKind::Enum(enumeration) => {
+                    return self.enums[enumeration.0 as usize].warn_if_not_aligned;
+                }
+                _ => return None,
+            }
+        }
     }
 
     /// Whether any typedef in `id`'s sugar said `may_alias`.

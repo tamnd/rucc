@@ -541,6 +541,14 @@ pub enum TypeKind {
         /// alignment is: `typedef int A __attribute__((may_alias))` and `int` are the same type to
         /// everything but the alias analysis, and that has to be able to tell them apart.
         may_alias: bool,
+        /// What `__attribute__((warn_if_not_aligned(n)))` on the typedef asked a member of it
+        /// to sit at a multiple of, and [`None`] when it asked for nothing.
+        ///
+        /// It changes nothing about the type. A record with a member of it at an offset that is
+        /// not a multiple, or that is itself aligned to less, is warned about under
+        /// `-Wif-not-aligned`, which is how the kernel's `__aligned_u64` in a uapi header is
+        /// checked. On this node for the reason the alignment is.
+        warn_if_not_aligned: Option<NonZeroU32>,
     },
 }
 

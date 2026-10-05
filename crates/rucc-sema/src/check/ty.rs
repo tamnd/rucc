@@ -772,6 +772,9 @@ impl Checker<'_> {
         // kernel keeps `enum rw_hint` to a byte.
         let short = self.packing(attrs).packed;
         self.enum_body(id, list, underlying, short, again.is_some(), span);
+        if let Some((asked, _)) = self.warn_alignment(&[attrs]) {
+            self.types.make_enum_checked(id, asked);
+        }
         self.read_deprecated_tag(ty, attrs, span);
         match again {
             Some(first) => self.redefined(first, ty, span),

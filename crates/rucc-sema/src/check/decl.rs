@@ -403,6 +403,7 @@ impl Checker<'_> {
         // picks, so a body here defines it a second time, which is what gcc calls it, whether the
         // attribute is on this definition or on a declaration above it.
         let resolver = self.resolver(&[specs.attrs], DeclKind::Function, span);
+        self.warn_alignment_misplaced(&[specs.attrs], name);
         if resolver.is_some() || self.tast.is_ifunc(id) {
             let what = format!("redefinition of '{}'", self.text(name));
             let note = "the 'ifunc' attribute already defines it as an indirect function";
@@ -788,6 +789,7 @@ impl Checker<'_> {
         // the alias's does and the declaration is marked once it has an id. One declaration that
         // asks for both is gcc's error about a name defined twice. See [`Checker::resolver`].
         let resolver = self.resolver(&[specs.attrs, item.attrs], kind, span);
+        self.warn_alignment_misplaced(&[specs.attrs, item.attrs], name);
         let (alias, ifunc) = match (alias, resolver) {
             (Some(_), Some(_)) => {
                 let spelled = self.text(name).to_owned();
@@ -1103,10 +1105,16 @@ impl Checker<'_> {
         // `may_alias` in either place, and it is a node of its own for the reason an alignment
         // is: the alias analysis has to tell the typedef from the type it names.
         let aliases = self.may_alias(specs.attrs) || self.may_alias(item.attrs);
-        let ty = match (asked.and_then(NonZeroU32::new), aliases) {
-            (align, true) => self.types.may_alias_typedef(name, ty, align),
-            (Some(align), false) => self.types.aligned_typedef(name, ty, align),
-            (None, false) => ty,
+        // `warn_if_not_aligned` changes nothing about the type and is a node of its own all the
+        // same, since a member of the typedef is what it asks to be warned about.
+        let checked = self.warn_alignment(&[specs.attrs, item.attrs]).map(|(asked, _)| asked);
+        let ty = match (asked.and_then(NonZeroU32::new), aliases, checked) {
+            (align, aliases, Some(checked)) => {
+                self.types.checked_typedef(name, ty, align, aliases, checked)
+            }
+            (align, true, None) => self.types.may_alias_typedef(name, ty, align),
+            (Some(align), false, None) => self.types.aligned_typedef(name, ty, align),
+            (None, false, None) => ty,
         };
         // The name goes beside the table whether or not anything was interned for it, which is
         // the only record of it there will be: the binding below is in a scope that closes, and
