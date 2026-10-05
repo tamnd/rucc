@@ -242,6 +242,38 @@ jobs:
             ${{ runner.temp }}/sqlite-windows/*/failures.txt
           if-no-files-found: ignore
 
+  # The execute tests of GCC 16's torture suite for wasm32-wasip1, built by rucc at -O0 and -O2
+  # with the flags GCC's own driver gives each one and run under Wasmtime. tests/torture/run.sh
+  # downloads the GCC release and checks its hash, and tests/torture/exclude-wasm32-wasip1.txt
+  # names an issue for each program that is left out. A program gets five minutes, as in GCC's
+  # own runs.
+  torture-wasm:
+    name: gcc torture for wasm32-wasip1
+    runs-on: ubuntu-24.04
+    timeout-minutes: 90
+    steps:
+      - uses: actions/checkout@v7.0.1
+      - uses: Swatinem/rust-cache@v2.9.2
+      - name: install lld and Wasmtime
+        run: |
+          set -euo pipefail
+          sudo apt-get update || echo "at least one apt source is unhappy, carrying on"
+          sudo apt-get install -y lld-19
+          curl -sSfL -o wasmtime.tar.xz https://github.com/bytecodealliance/wasmtime/releases/download/v49.0.1/wasmtime-v49.0.1-x86_64-linux.tar.xz
+          echo "c71f7e0d30a92e418f0d17db7c6d8f6664c1ad764340a1278678f4209deab534  wasmtime.tar.xz" | sha256sum -c -
+          tar -xJf wasmtime.tar.xz
+          echo "$PWD/wasmtime-v49.0.1-x86_64-linux" >> "$GITHUB_PATH"
+      - name: build rucc and the runtime for wasm32-wasip1
+        run: |
+          cargo build --release --bin rucc
+          cargo xtask builtins --target wasm32-wasip1
+          ./target/release/rucc --fetch wasm32-wasip1
+      - name: run the torture suite under Wasmtime
+        shell: bash
+        env:
+          RUNNER: timeout 300 wasmtime run --dir=.
+        run: tests/torture/run.sh "$PWD/target/release/rucc" wasm32-wasip1 | tee -a "$GITHUB_STEP_SUMMARY"
+
   # Named so the gap is visible rather than implicit. Each of these turns into a real job at
   # the milestone that makes it possible, per spec/15-testing.md section 15.7.
   planned:
@@ -253,7 +285,7 @@ jobs:
           cat <<'EOF'
           rungs 2 and 3 of the target ladder, all optimization levels        M7, M9
           an eight-hour randomized differential run, Csmith and YARPGen      M5
-          the full GCC torture suite                                        M3
+          the full GCC torture suite on the native targets                  M3
           the DWARF differential against GDB and LLDB                       M8
           the ABI differential against GCC                                  M6
           the code quality suite, published to the tracking dashboard       M4

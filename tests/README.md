@@ -19,6 +19,8 @@ tests/
   exec/across/ one program whose two halves two compilers build, both ways round       PG6
   rung0/       the c-testsuite runner for rung 0 of the target ladder, and the
                exclusions for each target it runs on                                  W6
+  torture/     the GCC torture execute runner, and the exclusions for each target it
+               runs on                                                                 WA3
   litmus/      memory model litmus tests for PostgreSQL's barriers and atomics, run on
                AArch64 hardware                                                        PG4
   corpus/      checkouts and build recipes for the target ladder projects              M5
