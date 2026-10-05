@@ -9387,6 +9387,7 @@ impl<'u> Body<'_, 'u> {
             }
             None => {
                 let addr = self.value(callee);
+                let untracked = self.unit.untracked(ty);
                 let mut build = self.build(span);
                 let sig = build.func().add_signature(plan.signature.clone());
                 let varargs = build.func().push_abis(&plan.varargs);
@@ -9397,10 +9398,12 @@ impl<'u> Body<'_, 'u> {
                 operands.push(addr);
                 operands.extend_from_slice(&values);
                 let args = build.func().push_values(&operands);
+                let flags = if untracked { Flags::NOTRACK } else { Flags::NONE };
                 build.inst(
                     InstData {
                         args,
                         extra: Extra::Call(info),
+                        flags,
                         ..InstData::new(Opcode::CallIndirect)
                     },
                     &returns,

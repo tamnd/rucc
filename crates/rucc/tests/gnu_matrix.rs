@@ -597,6 +597,102 @@ _Static_assert(__has_attribute(noipa), \"noipa\");
     assert!(bump.contains("%edi") || bump.contains("%rdi"), "{text}");
 }
 
+/// `nocf_check` under `-fcf-protection=branch`, measured against gcc 13: a function of the type
+/// opens without `endbr64`, and a call or a tail jump through a pointer to one carries `notrack`,
+/// whether the attribute was written after the declarator, beside the star or in a typedef. A
+/// call through a plain pointer is left alone, and so is a function without the attribute.
+#[test]
+fn nocf_check_leaves_out_the_landing_pad_and_calls_through_a_pointer_with_notrack() {
+    let source = "\
+__attribute__((nocf_check)) void quiet(void) {}
+void loud(void) {}
+void (*p1)(void) __attribute__((nocf_check));
+void (__attribute__((nocf_check)) *p2)(void);
+typedef void (*fp)(void) __attribute__((__nocf_check__));
+fp p3;
+void (*plain)(void);
+int calls(void) { p1(); p2(); plain(); return 1; }
+void tail(void) { p3(); }
+void late(void) { p1(); plain(); }
+_Static_assert(__has_attribute(nocf_check), \"nocf_check\");
+";
+    let out = compile("nocf-check", &["-O2", "-S", "-fcf-protection=branch"], source);
+    let said = String::from_utf8_lossy(&out.stderr);
+    assert!(out.status.success() && said.is_empty(), "{said}");
+    let text = String::from_utf8_lossy(&out.stdout);
+    let body = |name: &str| -> Vec<String> {
+        let start = text.find(&format!("\n{name}:")).unwrap_or_else(|| panic!("{name}\n{text}"));
+        let rest = &text[start + 1..];
+        let end = rest.find(".size").unwrap_or(rest.len());
+        rest[..end].lines().map(|line| line.trim().replace('\t', " ")).collect()
+    };
+    let count = |name: &str, start: &str| body(name).iter().filter(|l| l.starts_with(start)).count();
+    assert_eq!(count("quiet", "endbr64"), 0, "{text}");
+    for name in ["loud", "calls", "tail", "late"] {
+        assert_eq!(count(name, "endbr64"), 1, "{name}\n{text}");
+    }
+    assert_eq!(count("calls", "notrack call *%"), 2, "{text}");
+    assert_eq!(count("calls", "call *%"), 1, "{text}");
+    assert_eq!(count("tail", "notrack jmp *%"), 1, "{text}");
+    assert_eq!(count("late", "notrack call *%"), 1, "{text}");
+    assert_eq!(count("late", "jmp *%"), 1, "the plain tail jump has no prefix\n{text}");
+
+    // The object the compiler writes itself, whose call through `p1` starts with the prefix byte
+    // in front of the call's opcode.
+    let object = compile("nocf-check-object", &["-c", "-fcf-protection=branch"], source);
+    assert!(object.status.success(), "{}", String::from_utf8_lossy(&object.stderr));
+    assert!(object.stdout.windows(2).any(|pair| pair == [0x3e, 0xff]), "no notrack call");
+}
+
+/// What gcc 13 says about `nocf_check` written where it means nothing, with too many arguments,
+/// on one declaration of a function and not the other, and on a pointer assigned to a plain one,
+/// which is an error from gcc 14 on and a warning before. Without `-fcf-protection` it is ignored with a warning and the code is the plain code.
+#[test]
+fn nocf_check_is_checked_and_kept_in_the_type_in_gcc_s_words() {
+    let source = "\
+int v __attribute__((nocf_check));
+__attribute__((nocf_check(1))) void counted(void);
+void once(void);
+__attribute__((nocf_check)) void once(void);
+void (__attribute__((nocf_check)) *untracked)(void);
+void use(void) { void (*plain)(void) = untracked; plain(); }
+";
+    let out = compile("nocf-check-said", &["-S", "-fcf-protection=full"], source);
+    let said = String::from_utf8_lossy(&out.stderr);
+    assert!(!out.status.success(), "{said}");
+    let expected = [
+        (1, "warning: 'nocf_check' attribute only applies to function types"),
+        (2, "error: wrong number of arguments specified for 'nocf_check' attribute"),
+        (4, "error: conflicting types for 'once'"),
+        (
+            6,
+            "initialization of 'void (*)(void)' from incompatible pointer type \
+             'void (__attribute__((nocf_check)) *)(void)'",
+        ),
+    ];
+    for (line, what) in expected {
+        let at = format!(".c:{line}:");
+        assert!(
+            said.lines().any(|said| said.contains(&at) && said.contains(what)),
+            "missing {what:?} on line {line} in\n{said}"
+        );
+    }
+    assert_eq!(said.matches("expected 0, found 1").count(), 1, "{said}");
+
+    let source = "\
+__attribute__((nocf_check)) void quiet(void) {}
+void (*p1)(void) __attribute__((nocf_check));
+void calls(void) { p1(); }
+";
+    let out = compile("nocf-check-ignored", &["-O2", "-S"], source);
+    let said = String::from_utf8_lossy(&out.stderr);
+    assert!(out.status.success(), "{said}");
+    let ignored = "warning: 'nocf_check' attribute ignored. Use '-fcf-protection' option to enable it";
+    assert_eq!(said.matches(ignored).count(), 2, "{said}");
+    let text = String::from_utf8_lossy(&out.stdout);
+    assert!(!text.contains("notrack") && !text.contains("endbr64"), "{text}");
+}
+
 #[test]
 fn nocommon_keeps_a_tentative_definition_out_of_the_common_block_under_fcommon() {
     let got = ir("nocommon", &["-fcommon"], "int merged;\n__attribute__((nocommon)) int alone;\n");

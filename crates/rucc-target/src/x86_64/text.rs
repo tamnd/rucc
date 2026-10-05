@@ -1012,6 +1012,9 @@ static TEXT: &[(&str, &[Written])] = &[
     // register stays in the operand vector for the allocator, so the text is a call to a name.
     // The second is the same with the code segment override gcc writes on a line of its own in
     // front of a thunk for `r8` to `r15` under `-mindirect-branch-cs-prefix`.
+    // The same call with the prefix that tells the processor not to check where it lands, which
+    // is a call through a pointer to a function of a `nocf_check` type.
+    ("call_reg_notrack", &[spell("notrack call", &[Through])]),
     ("call_thunk", &[spell("call", &[Symbol])]),
     ("call_thunk_cs", &[spell("cs", &[]), spell("call", &[Symbol])]),
     // What a condition and the block layout come to.
@@ -1117,6 +1120,8 @@ static TEXT: &[(&str, &[Written])] = &[
     // A jump through a register, which is the same mnemonic and a different instruction, the way
     // `call_reg` above is. The star is the whole of the difference in the text.
     ("jmp_reg", &[spell("jmp", &[Through])]),
+    // And the jump a tail call through such a pointer becomes.
+    ("jmp_reg_notrack", &[spell("notrack jmp", &[Through])]),
     // The same jump sent to the thunk for its register, and the same with the override, which is
     // what the two thunk calls above are to `call_reg`.
     ("jmp_thunk", &[spell("jmp", &[Symbol])]),

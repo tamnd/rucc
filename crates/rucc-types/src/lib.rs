@@ -613,6 +613,7 @@ mod tests {
                 variadic,
                 prototyped: true,
                 convention: rucc_target::Convention::Target,
+                nocf: false,
             })
         };
         let a = make(&mut types, vec![int, long], false);
@@ -634,6 +635,7 @@ mod tests {
             variadic: false,
             prototyped: true,
             convention: rucc_target::Convention::Target,
+            nocf: false,
         });
         let plain = types.function(FunctionType {
             ret: int,
@@ -641,6 +643,7 @@ mod tests {
             variadic: false,
             prototyped: true,
             convention: rucc_target::Convention::Target,
+            nocf: false,
         });
         assert_ne!(sugar, plain);
         assert_eq!(types.canonical(sugar), plain);
@@ -899,6 +902,7 @@ mod tests {
             variadic: false,
             prototyped: true,
             convention: rucc_target::Convention::Target,
+            nocf: false,
         });
         assert_eq!(layout(&types, function, &linux), Err(LayoutError::Function));
         let pointer_to_function = types.pointer(function);
@@ -1855,6 +1859,7 @@ mod tests {
             variadic,
             prototyped: true,
             convention: rucc_target::Convention::Target,
+            nocf: false,
         })
     }
 
@@ -1867,6 +1872,7 @@ mod tests {
             variadic: false,
             prototyped: false,
             convention: rucc_target::Convention::Target,
+            nocf: false,
         })
     }
 
@@ -2041,6 +2047,7 @@ mod tests {
             variadic: false,
             prototyped: false,
             convention: rucc_target::Convention::Target,
+            nocf: false,
         });
         assert!(!compatible(&types, returns_int, takes_int));
     }
@@ -2058,6 +2065,7 @@ mod tests {
             variadic: false,
             prototyped: true,
             convention: rucc_target::Convention::Ms,
+            nocf: false,
         };
         let native = types.function(FunctionType {
             convention: rucc_target::Convention::Target,
@@ -2070,6 +2078,7 @@ mod tests {
             variadic: false,
             prototyped: false,
             convention: rucc_target::Convention::Ms,
+            nocf: false,
         });
         assert!(!compatible(&types, native, ms));
         let (to_native, to_ms) = (types.pointer(native), types.pointer(ms));
@@ -2079,6 +2088,39 @@ mod tests {
         let TypeKind::Function(id) = types.kind(merged) else { panic!("a function") };
         assert_eq!(types.signature(id).convention, rucc_target::Convention::Ms);
         assert!(types.signature(id).prototyped);
+    }
+
+    /// gcc 13 calls a `nocf_check` declaration after a plain one `conflicting types`, and a
+    /// pointer to the one assigned to a pointer to the other an incompatible pointer.
+    #[test]
+    fn a_function_without_a_landing_pad_is_another_type() {
+        let mut types = Types::new();
+        let int = types.int(IntKind::Int);
+        let signature = FunctionType {
+            ret: int,
+            params: vec![int],
+            variadic: false,
+            prototyped: true,
+            convention: rucc_target::Convention::Target,
+            nocf: true,
+        };
+        let plain = types.function(FunctionType { nocf: false, ..signature.clone() });
+        let untracked = types.function(signature);
+        let old = types.function(FunctionType {
+            ret: int,
+            params: Vec::new(),
+            variadic: false,
+            prototyped: false,
+            convention: rucc_target::Convention::Target,
+            nocf: true,
+        });
+        assert!(!compatible(&types, plain, untracked));
+        let (to_plain, to_untracked) = (types.pointer(plain), types.pointer(untracked));
+        assert!(!compatible(&types, to_plain, to_untracked));
+        assert!(compatible(&types, untracked, old));
+        let merged = composite(&mut types, old, untracked).expect("the two agree");
+        let TypeKind::Function(id) = types.kind(merged) else { panic!("a function") };
+        assert!(types.signature(id).nocf);
     }
 
     #[test]

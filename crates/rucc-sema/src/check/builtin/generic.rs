@@ -605,6 +605,7 @@ impl Checker<'_> {
             variadic: generic.trailing,
             prototyped: true,
             convention: rucc_target::Convention::Target,
+            nocf: false,
         });
         // In no scope, for the reason at the top of this file: the next call to the same name may
         // want a different type, and a declaration left behind would be the wrong one.

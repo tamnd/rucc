@@ -525,6 +525,7 @@ mod tests {
             variadic: false,
             prototyped: true,
             convention: rucc_target::Convention::Target,
+            nocf: false,
         };
         let function = f.types.function(signature);
         let designator =

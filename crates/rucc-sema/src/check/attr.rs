@@ -1872,9 +1872,16 @@ impl Checker<'_> {
     /// and does nothing, since a 64-bit Windows program has one convention and the headers write
     /// these on every declaration for the sake of the 32-bit build. Anywhere else gcc says they are
     /// ignored, and so does this.
+    ///
+    /// `nocf_check` is a function type attribute too and lands where a convention does, so it is
+    /// read here as well, after the convention. See [`Self::untracked`].
     pub(in crate::check) fn convened(&mut self, ty: TypeId, attrs: AttrList) -> TypeId {
-        match self.convention_in(attrs) {
+        let ty = match self.convention_in(attrs) {
             Some((convention, name, span)) => self.with_convention(ty, convention, &name, span),
+            None => ty,
+        };
+        match self.nocf_in(attrs) {
+            Some(span) => self.without_landing_pad(ty, span),
             None => ty,
         }
     }
@@ -1889,12 +1896,93 @@ impl Checker<'_> {
         pointee: TypeId,
         attrs: AttrList,
     ) -> TypeId {
-        let Some((convention, name, span)) = self.convention_in(attrs) else { return pointee };
-        if let TypeKind::Function(function) = self.types.kind(self.types.canonical(pointee)) {
-            return self.function_under(function, convention);
+        let mut pointee = pointee;
+        if let Some((convention, name, span)) = self.convention_in(attrs) {
+            match self.types.kind(self.types.canonical(pointee)) {
+                TypeKind::Function(function) => pointee = self.function_under(function, convention),
+                _ => self.not_a_function(&name, span),
+            }
         }
-        self.not_a_function(&name, span);
+        if let Some(span) = self.nocf_in(attrs) {
+            match self.types.kind(self.types.canonical(pointee)) {
+                TypeKind::Function(function) => {
+                    pointee = self.untracked(function, span).unwrap_or(pointee);
+                }
+                _ => self.not_a_function("nocf_check", span),
+            }
+        }
         pointee
+    }
+
+    /// Where an attribute list says `nocf_check`, after refusing each one written with arguments
+    /// in gcc's words.
+    ///
+    /// Read on x86 alone, which is the one family with landing pads and the `notrack` prefix, and
+    /// the one gcc knows the attribute on.
+    fn nocf_in(&mut self, attrs: AttrList) -> Option<Span> {
+        if !matches!(self.cx.target.tuple.arch().as_str(), "x86_64" | "i686") {
+            return None;
+        }
+        let mut asked = None;
+        for attr in self.ast[attrs].to_vec() {
+            if self.gnu_name(&attr) != "nocf_check" {
+                continue;
+            }
+            let count = self.ast[attr.args].len();
+            if count > 0 {
+                let what = "wrong number of arguments specified for 'nocf_check' attribute";
+                let refused = Diagnostic::error(what, attr.span).with_code("E0816");
+                self.report(refused.note(format!("expected 0, found {count}"), attr.span));
+                continue;
+            }
+            asked = asked.or(Some(attr.span));
+        }
+        asked
+    }
+
+    /// The type with its function, or the function it points at, made one without a landing pad,
+    /// which is where [`Self::with_convention`] puts a convention and for the same reason.
+    fn without_landing_pad(&mut self, ty: TypeId, span: Span) -> TypeId {
+        let canonical = self.types.canonical(ty);
+        match self.types.kind(canonical) {
+            TypeKind::Function(function) => self.untracked(function, span).unwrap_or(ty),
+            TypeKind::Pointer(pointee) => {
+                let pointee = self.types.canonical(pointee);
+                let TypeKind::Function(function) = self.types.kind(pointee) else {
+                    self.not_a_function("nocf_check", span);
+                    return ty;
+                };
+                let Some(function) = self.untracked(function, span) else { return ty };
+                let quals = self.types.quals(canonical);
+                let pointer = self.types.pointer(function);
+                self.types.qualified(pointer, quals)
+            }
+            _ => {
+                self.not_a_function("nocf_check", span);
+                ty
+            }
+        }
+    }
+
+    /// The same function type without a landing pad, or nothing where the type stays as written.
+    ///
+    /// That is a function already without one, and every function when no option asked for the
+    /// pads, which gcc warns about and drops: a function with no pad to leave out is an ordinary
+    /// function, and a call through a pointer to one has nothing to skip the check of. The
+    /// warning comes after the one about a type that is not a function, as gcc's does, and the
+    /// attribute is the type's for the reason a convention is, which [`FunctionType::nocf`] says.
+    fn untracked(&mut self, function: FunctionId, span: Span) -> Option<TypeId> {
+        if !self.cx.landing_pads {
+            let what = "'nocf_check' attribute ignored. Use '-fcf-protection' option to enable it";
+            self.report(Diagnostic::warning(what, span).with_code("E0703"));
+            return None;
+        }
+        let current = self.types.signature(function);
+        if current.nocf {
+            return None;
+        }
+        let signature = FunctionType { nocf: true, ..current.clone() };
+        Some(self.types.function(signature))
     }
 
     /// The convention an attribute list names, with the name that named it and where, after

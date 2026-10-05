@@ -1108,10 +1108,13 @@ pub fn compile_recording(
         before: flags.patch.before,
         after: flags.patch.after,
     });
+    // The pad at the top of the function is left out of one whose type says `nocf_check`. The
+    // pads at its labels stay, since a computed `goto` is a different branch.
+    let entry = landing.filter(|_| !source.attrs.set.contains(ir::AttrSet::NOCF));
     let convention = Convention {
         protect,
         probe,
-        landing,
+        landing: entry,
         trace,
         pad,
         ..Convention::new(machine.conv, machine.insts)

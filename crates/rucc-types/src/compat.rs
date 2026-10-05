@@ -162,8 +162,11 @@ fn functions(
     // after a declaration of the other conflicting and a pointer to the one assigned to a pointer
     // to the other incompatible. Nothing about a call could go right across the difference: the
     // arguments would be in the other registers and the callee would clobber what the caller
-    // expects it to keep.
-    if left.convention != right.convention || !same(types, left.ret, right.ret, assumed) {
+    // expects it to keep. A function without a landing pad is a third way to differ, since a call
+    // that did not know would fault on arriving.
+    if left.convention != right.convention
+        || left.nocf != right.nocf
+        || !same(types, left.ret, right.ret, assumed) {
         return false;
     }
     match (left.prototyped, right.prototyped) {
@@ -388,7 +391,8 @@ fn composite_function(types: &mut Types, left: &FunctionType, right: &FunctionTy
             (params, false, false)
         }
     };
-    // The two conventions are the same one, since the types would not be compatible otherwise.
-    let convention = left.convention;
-    types.function(FunctionType { ret, params, variadic, prototyped, convention })
+    // The two conventions are the same one, since the types would not be compatible otherwise,
+    // and so is whether there is a landing pad.
+    let (convention, nocf) = (left.convention, left.nocf);
+    types.function(FunctionType { ret, params, variadic, prototyped, convention, nocf })
 }

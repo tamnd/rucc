@@ -318,6 +318,7 @@ impl Checker<'_> {
                     variadic: false,
                     prototyped: false,
                     convention: rucc_target::Convention::Target,
+                    nocf: false,
                 })
             }
         };
@@ -2944,6 +2945,7 @@ mod tests {
             variadic: false,
             prototyped: true,
             convention: rucc_target::Convention::Target,
+            nocf: false,
         };
         let function = c.types.function(signature);
         c.declare_object(g, function, Span::DUMMY);
@@ -2974,6 +2976,7 @@ mod tests {
             variadic: true,
             prototyped: true,
             convention: rucc_target::Convention::Target,
+            nocf: false,
         };
         let function = c.types.function(signature);
         c.declare_object(g, function, Span::DUMMY);
@@ -3014,6 +3017,7 @@ mod tests {
             variadic: false,
             prototyped: true,
             convention: rucc_target::Convention::Target,
+            nocf: false,
         };
         let function = c.types.function(signature);
         c.declare_object(g, function, Span::DUMMY);
