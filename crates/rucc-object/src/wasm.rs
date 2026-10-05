@@ -496,10 +496,10 @@ impl Layout {
             .flat_map(|f| &f.fixups)
             .chain(module.segments.iter().flat_map(|s| &s.fixups));
         for fixup in fixups {
-            if matches!(fixup.kind, RelocKind::TableIndexSleb | RelocKind::TableIndexI32)
-                && let Some(entry) = slot.get_mut(fixup.target as usize)
-                && entry.is_none()
-            {
+            if !matches!(fixup.kind, RelocKind::TableIndexSleb | RelocKind::TableIndexI32) {
+                continue;
+            }
+            if let Some(entry @ None) = slot.get_mut(fixup.target as usize) {
                 *entry = Some(slots);
                 slots += 1;
             }
