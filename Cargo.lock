@@ -445,6 +445,7 @@ dependencies = [
  "rucc-base",
  "rucc-ir",
  "rucc-object",
+ "rucc-rules",
  "rucc-target",
 ]
 

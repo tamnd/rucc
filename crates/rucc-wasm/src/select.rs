@@ -6,6 +6,8 @@
 //! narrow integers with undefined upper bits.
 
 use rucc_base::hash::Map;
+use rucc_base::rules::Piece;
+use rucc_ir::term::{PLAIN, Term, Terms};
 use rucc_ir::{
     Abi, Block, Def, Extra, FloatPred, Func, FuncId, Inst, IntPred, Opcode, RmwOp, Type, Value,
 };
@@ -14,6 +16,7 @@ use rucc_target::wasm::Feature;
 
 use crate::emit::{self, Code};
 use crate::irreducible::Node;
+use crate::rules;
 use crate::structure::Shape;
 use crate::{Notes, Unit, functype, is_pair, label_numbers, valtype};
 
@@ -928,6 +931,9 @@ impl Lower<'_, '_> {
         if !call && args.iter().chain(&results).any(|&v| is_pair(self.ty(v))) {
             return self.pair(inst, &args, &results);
         }
+        if rules::tried(data.opcode) && self.by_rule(inst)? {
+            return Ok(());
+        }
         let arg = |i: usize| args[i];
         match data.opcode {
             Opcode::IConst | Opcode::FConst | Opcode::GlobalAddr | Opcode::BlockAddr => {}
@@ -1323,6 +1329,82 @@ impl Lower<'_, '_> {
             }
             Opcode::InlineAsm => return Err("inline assembly has no meaning on wasm".into()),
             other => return Err(format!("the instruction {} is not translated yet", other.name())),
+        }
+        Ok(())
+    }
+
+    /// Select an instruction by the rule of `rules/wasm32.rules` that matches it, if one does.
+    ///
+    /// Each operand is shown to the table as a value in its local, because wasm has no immediate
+    /// operand to fold a constant into, and a constant is pushed where a rule uses it. Pointers are
+    /// shown at 32 bits.
+    fn by_rule(&mut self, inst: Inst) -> Result<bool> {
+        let &[result] = self.results(inst).as_slice() else { return Ok(false) };
+        let terms = Terms::new(self.func, inst, PLAIN, 32);
+        let Some(found) = rules::TABLE.find(&terms, Term::Root) else { return Ok(false) };
+        let rule = &rules::TABLE.rules[found.rule];
+        let mut at = 0;
+        self.build(rule.replacement, &mut at, &found.bindings)?;
+        self.set(result);
+        Ok(true)
+    }
+
+    /// Write the term of a replacement that starts at `pieces[*at]`: its arguments in order, and
+    /// then the code of its head.
+    fn build(&mut self, pieces: &[Piece], at: &mut usize, bindings: &[Term]) -> Result<()> {
+        let piece = &pieces[*at];
+        *at += 1;
+        let (name, arity) = match *piece {
+            Piece::Var { index, .. } => {
+                let Term::Reg(value) = bindings[index] else {
+                    return Err(format!(
+                        "the rule binds {:?}, which is not a value",
+                        bindings[index]
+                    ));
+                };
+                return self.push(value);
+            }
+            Piece::App { head, arity } => (head, arity),
+            Piece::Int(_) | Piece::Computed { .. } => {
+                return Err(
+                    "a wasm rule writes a constant, which the selector has no head for".into()
+                );
+            }
+        };
+        let head = rules::head(name).ok_or_else(|| format!("the rule head {name} has no code"))?;
+        // A zero extension of a value that is already clean is no code, which is what `push_z`
+        // does for the instructions that are not selected by rule. The mask of a shift count that
+        // is a constant below the width keeps the whole constant, so it is no code either.
+        if let Some(&Piece::Var { index, .. }) = pieces.get(*at) {
+            if let Term::Reg(value) = bindings[index] {
+                let bare = match head {
+                    rules::Head::ZeroExtend(_) => self.clean(value),
+                    rules::Head::Count(bits) => {
+                        self.constant(value).is_some_and(|count| count < u128::from(bits))
+                    }
+                    _ => false,
+                };
+                if bare {
+                    *at += 1;
+                    return self.push(value);
+                }
+            }
+        }
+        for _ in 0..arity {
+            self.build(pieces, at, bindings)?;
+        }
+        match head {
+            rules::Head::Op(op) => self.code.op(op),
+            rules::Head::SignExtend(bits) => self.sign_extend(bits),
+            rules::Head::ZeroExtend(bits) => {
+                self.code.i32_const(((1u32 << bits) - 1) as i32);
+                self.code.op(emit::I32_AND);
+            }
+            rules::Head::Count(bits) => {
+                self.code.i32_const(bits as i32 - 1);
+                self.code.op(emit::I32_AND);
+            }
+            rules::Head::Low => {}
         }
         Ok(())
     }

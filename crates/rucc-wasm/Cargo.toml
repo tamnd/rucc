@@ -20,3 +20,6 @@ rucc-base.workspace = true
 rucc-ir.workspace = true
 rucc-object.workspace = true
 rucc-target.workspace = true
+
+[build-dependencies]
+rucc-rules.workspace = true

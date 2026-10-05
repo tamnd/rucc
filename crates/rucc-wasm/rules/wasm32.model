@@ -1,0 +1,119 @@
+;; What the terms in the wasm32 rule set mean, in bitvectors.
+;;
+;; A head is one wasm instruction with the operands that it takes off the operand stack, in the
+;; order that they are pushed. The meanings come from the numeric functions of the Wasm 3.0
+;; specification (iadd, ishl, idiv_s, iextend and the others), which are total except where the
+;; instruction traps. The two exceptions to "one instruction" are the masks at the end of this
+;; file, which are an `i32.const` and an `i32.and`, because wasm has no `and` with an immediate.
+;;
+;; A value of 1, 8 or 16 bits is held in an `i32` local, and its upper bits are not defined, as on
+;; AArch64. So a term narrower than 32 bits stands for an `i32` whose low bits are that term and
+;; whose upper bits are unknown. An instruction whose low bits come only from the low bits of its
+;; operands (add, sub, mul, and, or, xor) takes such a term as it is. An instruction that reads all
+;; 32 bits of an operand (a compare, a division, a right shift, a shift count, an extension to
+;; 64 bits) takes it through `(extract 31 0 v)`, so a rule that gives it a narrow term without an
+;; extension first has a width error and the verifier refuses the rule.
+;;
+;; A division by zero and the signed division of the most negative value by minus one trap. The IR
+;; has no meaning for either (see the IR model), so the trap refines it, as the fault of
+;; AArch64's division refines it there.
+(include crates/rucc-ir/rules/ir.model)
+
+;; The arithmetic whose low bits come only from the low bits of the operands, so a narrow term is
+;; taken as it is. The `i32` forms also do the `i1` arithmetic.
+(semantics (w.i32_add l r) (bvadd l r))
+(semantics (w.i32_sub l r) (bvsub l r))
+(semantics (w.i32_mul l r) (bvmul l r))
+(semantics (w.i32_and l r) (bvand l r))
+(semantics (w.i32_or l r) (bvor l r))
+(semantics (w.i32_xor l r) (bvxor l r))
+(semantics (w.i64_add l r) (bvadd l r))
+(semantics (w.i64_sub l r) (bvsub l r))
+(semantics (w.i64_mul l r) (bvmul l r))
+(semantics (w.i64_and l r) (bvand l r))
+(semantics (w.i64_or l r) (bvor l r))
+(semantics (w.i64_xor l r) (bvxor l r))
+
+;; Shifts. The count is taken modulo the width, as `ishl` says.
+(semantics (w.i32_shl l r) (bvshl (extract 31 0 l) (bvand (extract 31 0 r) 31)))
+(semantics (w.i32_shr_s l r) (bvashr (extract 31 0 l) (bvand (extract 31 0 r) 31)))
+(semantics (w.i32_shr_u l r) (bvlshr (extract 31 0 l) (bvand (extract 31 0 r) 31)))
+(semantics (w.i64_shl l r) (bvshl (extract 63 0 l) (bvand (extract 63 0 r) 63)))
+(semantics (w.i64_shr_s l r) (bvashr (extract 63 0 l) (bvand (extract 63 0 r) 63)))
+(semantics (w.i64_shr_u l r) (bvlshr (extract 63 0 l) (bvand (extract 63 0 r) 63)))
+
+;; The low 8 or 16 bits of `i32.shl`. The low bits of a left shift come only from the low bits of
+;; the value, also when the count is 8 or more and they are all zero, so these take a narrow value
+;; as it is. The count is read at all 32 bits, as above.
+(semantics (w.i32_shl_8 l r) (bvshl (extract 7 0 l) (extract 7 0 (bvand (extract 31 0 r) 31))))
+(semantics (w.i32_shl_16 l r) (bvshl (extract 15 0 l) (extract 15 0 (bvand (extract 31 0 r) 31))))
+
+;; Division and remainder, where the operands do not trap.
+(semantics (w.i32_div_s l r) (bvsdiv (extract 31 0 l) (extract 31 0 r)))
+(semantics (w.i32_div_u l r) (bvudiv (extract 31 0 l) (extract 31 0 r)))
+(semantics (w.i32_rem_s l r) (bvsrem (extract 31 0 l) (extract 31 0 r)))
+(semantics (w.i32_rem_u l r) (bvurem (extract 31 0 l) (extract 31 0 r)))
+(semantics (w.i64_div_s l r) (bvsdiv (extract 63 0 l) (extract 63 0 r)))
+(semantics (w.i64_div_u l r) (bvudiv (extract 63 0 l) (extract 63 0 r)))
+(semantics (w.i64_rem_s l r) (bvsrem (extract 63 0 l) (extract 63 0 r)))
+(semantics (w.i64_rem_u l r) (bvurem (extract 63 0 l) (extract 63 0 r)))
+
+;; Comparisons. The result is an `i32` that is one or zero, so its upper bits are clean.
+(semantics (w.i32_eq l r) (ite (= (extract 31 0 l) (extract 31 0 r)) 1 0))
+(semantics (w.i32_ne l r) (ite (not (= (extract 31 0 l) (extract 31 0 r))) 1 0))
+(semantics (w.i32_lt_s l r) (ite (bvslt (extract 31 0 l) (extract 31 0 r)) 1 0))
+(semantics (w.i32_lt_u l r) (ite (bvult (extract 31 0 l) (extract 31 0 r)) 1 0))
+(semantics (w.i32_gt_s l r) (ite (bvsgt (extract 31 0 l) (extract 31 0 r)) 1 0))
+(semantics (w.i32_gt_u l r) (ite (bvugt (extract 31 0 l) (extract 31 0 r)) 1 0))
+(semantics (w.i32_le_s l r) (ite (bvsle (extract 31 0 l) (extract 31 0 r)) 1 0))
+(semantics (w.i32_le_u l r) (ite (bvule (extract 31 0 l) (extract 31 0 r)) 1 0))
+(semantics (w.i32_ge_s l r) (ite (bvsge (extract 31 0 l) (extract 31 0 r)) 1 0))
+(semantics (w.i32_ge_u l r) (ite (bvuge (extract 31 0 l) (extract 31 0 r)) 1 0))
+(semantics (w.i64_eq l r) (ite (= (extract 63 0 l) (extract 63 0 r)) 1 0))
+(semantics (w.i64_ne l r) (ite (not (= (extract 63 0 l) (extract 63 0 r))) 1 0))
+(semantics (w.i64_lt_s l r) (ite (bvslt (extract 63 0 l) (extract 63 0 r)) 1 0))
+(semantics (w.i64_lt_u l r) (ite (bvult (extract 63 0 l) (extract 63 0 r)) 1 0))
+(semantics (w.i64_gt_s l r) (ite (bvsgt (extract 63 0 l) (extract 63 0 r)) 1 0))
+(semantics (w.i64_gt_u l r) (ite (bvugt (extract 63 0 l) (extract 63 0 r)) 1 0))
+(semantics (w.i64_le_s l r) (ite (bvsle (extract 63 0 l) (extract 63 0 r)) 1 0))
+(semantics (w.i64_le_u l r) (ite (bvule (extract 63 0 l) (extract 63 0 r)) 1 0))
+(semantics (w.i64_ge_s l r) (ite (bvsge (extract 63 0 l) (extract 63 0 r)) 1 0))
+(semantics (w.i64_ge_u l r) (ite (bvuge (extract 63 0 l) (extract 63 0 r)) 1 0))
+
+;; `select` takes the value of its first operand when the third is not zero. The third operand is
+;; read at all 32 bits, so a condition of one bit is cleaned first.
+(semantics (w.select t f c) (ite (not (= (extract 31 0 c) 0)) t f))
+
+;; Changes of width. `i32.extend8_s` and `i32.extend16_s` come from the sign-extension operations,
+;; and without that feature the selector writes the same extension as a pair of shifts.
+(semantics (w.i32_extend8_s v) (sign_extend 8 32 (extract 7 0 v)))
+(semantics (w.i32_extend16_s v) (sign_extend 16 32 (extract 15 0 v)))
+(semantics (w.i32_wrap_i64 v) (extract 31 0 (extract 63 0 v)))
+(semantics (w.i64_extend_i32_s v) (sign_extend 32 64 (extract 31 0 v)))
+(semantics (w.i64_extend_i32_u v) (zero_extend 32 64 (extract 31 0 v)))
+
+;; Float arithmetic, which rounds to nearest with ties to even, as `fadd` and the others say.
+(semantics (w.f32_add l r) (fp.add l r))
+(semantics (w.f32_sub l r) (fp.sub l r))
+(semantics (w.f32_mul l r) (fp.mul l r))
+(semantics (w.f32_div l r) (fp.div l r))
+(semantics (w.f64_add l r) (fp.add l r))
+(semantics (w.f64_sub l r) (fp.sub l r))
+(semantics (w.f64_mul l r) (fp.mul l r))
+(semantics (w.f64_div l r) (fp.div l r))
+
+;; The low bits of a value, which is no instruction at all: the value stays in its local and the
+;; bits above are not defined from here on.
+(semantics (w.low_1 v) (extract 0 0 v))
+(semantics (w.low_8 v) (extract 7 0 v))
+(semantics (w.low_16 v) (extract 15 0 v))
+
+;; The masks, each an `i32.const` and an `i32.and`. A zero extension clears the bits above a
+;; narrow value. The selector leaves it out when the instruction that made the value already
+;; cleared them, such as a compare or a load. A shift count of a narrow shift keeps the bits below
+;; the width, as the IR model says the shift does.
+(semantics (w.zext_1 v) (zero_extend 1 32 (extract 0 0 v)))
+(semantics (w.zext_8 v) (zero_extend 8 32 (extract 7 0 v)))
+(semantics (w.zext_16 v) (zero_extend 16 32 (extract 15 0 v)))
+(semantics (w.count_8 v) (zero_extend 8 32 (bvand (extract 7 0 v) 7)))
+(semantics (w.count_16 v) (zero_extend 16 32 (bvand (extract 15 0 v) 15)))
