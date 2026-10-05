@@ -127,6 +127,7 @@ fn int_op(op: u8, wide: bool) -> u8 {
 /// Translate the function `id`, whose symbol is `symbol`.
 pub(crate) fn function(unit: &mut Unit<'_>, id: FuncId, symbol: u32) -> Result<Function> {
     let func = &unit.ir[id];
+    let export = func.wasm.export.map(|name| unit.names.resolve(name).to_owned());
     let shape = Shape::of(func).map_err(|block| {
         format!(
             "the graph of its blocks is not reducible at block{}, and node splitting is a later \
@@ -167,7 +168,7 @@ pub(crate) fn function(unit: &mut Unit<'_>, id: FuncId, symbol: u32) -> Result<F
             _ => locals.push((1, ty)),
         }
     }
-    Ok(Function { symbol, locals, code: lower.code.bytes, fixups: lower.code.fixups, export: None })
+    Ok(Function { symbol, locals, code: lower.code.bytes, fixups: lower.code.fixups, export })
 }
 
 struct Lower<'u, 'a> {

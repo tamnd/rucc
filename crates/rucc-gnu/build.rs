@@ -55,6 +55,7 @@ const PLACES: &[(&str, &str)] = &[
     ("aarch64", "Place::Aarch64"),
     ("windows", "Place::Windows"),
     ("x86-64-elf", "Place::X86_64Elf"),
+    ("wasm", "Place::Wasm"),
 ];
 
 fn main() {

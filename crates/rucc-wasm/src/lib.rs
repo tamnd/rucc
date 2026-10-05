@@ -51,8 +51,8 @@ use rucc_base::hash::Map;
 use rucc_base::{Interner, Symbol};
 use rucc_ir::{Abi, Datum, Linkage, Module, Signature, SymbolRef, Type};
 use rucc_object::wasm::{
-    self, FuncType, HIDDEN, LOCAL, NO_STRIP, Place, Producers, RETAIN, RelocKind, Segment,
-    SymbolKind, ValType, WEAK, Written,
+    self, EXPORTED, FuncType, HIDDEN, Import, LOCAL, NO_STRIP, Place, Producers, RETAIN, RelocKind,
+    Segment, SymbolKind, ValType, WEAK, Written,
 };
 use rucc_target::wasm::{Feature, Features};
 
@@ -226,8 +226,22 @@ impl Unit<'_> {
         };
         let func = &self.ir[id];
         let ty = self.out.intern(functype(func.signature())?);
-        let flags = if func.is_declaration() { 0 } else { flags(func.linkage) };
-        let index = self.out.symbol(name.clone(), SymbolKind::Function { ty, import: None }, flags);
+        // A definition that `export_name` names is exported and kept, and a declaration that
+        // `import_module` or `import_name` names is imported from there, which are the flags and
+        // the import that clang writes.
+        let wasm = func.wasm;
+        let (flags, import) = if func.is_declaration() {
+            let import = (wasm.module.is_some() || wasm.field.is_some()).then(|| Import {
+                module: wasm.module.map_or("env", |m| self.names.resolve(m)).to_owned(),
+                field: wasm.field.map_or(name.as_str(), |f| self.names.resolve(f)).to_owned(),
+            });
+            (0, import)
+        } else if wasm.export.is_some() {
+            (flags(func.linkage) | EXPORTED | NO_STRIP, None)
+        } else {
+            (flags(func.linkage), None)
+        };
+        let index = self.out.symbol(name.clone(), SymbolKind::Function { ty, import }, flags);
         self.functions.insert(name, (index, ty));
         Ok((index, ty))
     }

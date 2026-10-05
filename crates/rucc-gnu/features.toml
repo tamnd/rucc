@@ -1265,6 +1265,39 @@ used_by = ["mingw-w64"]
 tests = ["rucc::a_selectany_definition_is_one_the_link_may_find_elsewhere_too", "rucc-pp::the_answers_for_the_x86_and_windows_attributes_are_the_targets"]
 notes = "Makes a definition one the link may find in several objects, on Windows. Answered yes on Windows alone, as `dllimport` is."
 
+# clang's attributes for the wasm target. gcc has no wasm target, so these rows name no gcc
+# release, and on any other row the name is unknown, as it is to gcc 16.
+
+[[feature]]
+name = "export_name"
+kind = "attribute"
+gcc_version = ""
+status = "implemented"
+targets = ["wasm"]
+used_by = ["wasi-sdk"]
+tests = ["rucc::an_export_name_is_an_export_of_the_object", "rucc::the_wasm_names_are_checked_in_clang_s_words", "rucc::the_wasm_names_are_unknown_to_gcc_on_the_other_rows", "rucc-pp::the_wasm_attributes_are_there_on_the_wasm_rows_alone", "rucc-ir::the_wasm_names_of_a_function_come_back_as_written"]
+notes = "Exports a function from the wasm module under the name given, which is how a reactor or a `wasm32-none` module gives its interface to the host. The object has an entry in its export section, and the symbol is `EXPORTED` and `NO_STRIP`, as in clang 23. A `static` function keeps the flags, and `wasm-ld` does not export it, as with clang. The wrong number of arguments, a subject that is not a function, and an argument that is not a plain string literal are errors in clang's words with `E0822`. On a row that is not wasm, rucc warns as gcc does, `'export_name' attribute directive ignored`, and `__has_attribute` answers 0."
+
+[[feature]]
+name = "import_module"
+kind = "attribute"
+gcc_version = ""
+status = "implemented"
+targets = ["wasm"]
+used_by = ["wasi-sdk"]
+tests = ["rucc::an_import_module_and_an_import_name_are_the_import_of_the_object", "rucc::the_wasm_names_are_checked_in_clang_s_words", "rucc-pp::the_wasm_attributes_are_there_on_the_wasm_rows_alone"]
+notes = "The module that a function declared and not defined is imported from, in place of `env`. The field stays the symbol name unless `import_name` gives one. It is read on a declaration and has no effect on a definition, as in clang 23. Refused and warned about as `export_name` is."
+
+[[feature]]
+name = "import_name"
+kind = "attribute"
+gcc_version = ""
+status = "implemented"
+targets = ["wasm"]
+used_by = ["wasi-sdk"]
+tests = ["rucc::an_import_module_and_an_import_name_are_the_import_of_the_object", "rucc::the_wasm_names_are_checked_in_clang_s_words", "rucc-pp::the_wasm_attributes_are_there_on_the_wasm_rows_alone"]
+notes = "The field that a function declared and not defined is imported under, in place of its symbol name, from `env` unless `import_module` gives a module. The symbol gets the `EXPLICIT_NAME` flag when the field is not its name. Refused and warned about as `export_name` is."
+
 # The C23 standard attributes, which `__has_c_attribute` answers with the number the standard
 # gives them rather than with 1.
 

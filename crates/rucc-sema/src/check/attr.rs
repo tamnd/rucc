@@ -279,6 +279,16 @@ impl Checker<'_> {
                 self.report(Diagnostic::warning(what, attr.span).with_code("E0703"));
                 continue;
             }
+            // gcc has no wasm target, so on any other row the names that only clang's wasm
+            // target has are names that gcc 16 has never heard of, and it says so.
+            let tuple = &self.cx.target.tuple;
+            let here = rucc_gnu::Target::new(tuple.arch().as_str(), tuple.os().as_str());
+            if row.targets == [rucc_gnu::Place::Wasm] && !row.is_on(here) {
+                refused.push(attr.span);
+                let what = format!("'{}' attribute directive ignored", row.name);
+                self.report(Diagnostic::warning(what, attr.span).with_code("E0703"));
+                continue;
+            }
             // The two attributes about saving the machine are implemented for x86-64 alone, so
             // everywhere else they are what the row would have said before they were. See
             // [`Self::handler`].
@@ -544,14 +554,18 @@ impl Checker<'_> {
     /// settles is only whether the definition exists, which is the one part of each of the five
     /// that a program notices when the definition is dropped instead. What else three of them ask
     /// for is read elsewhere: `alias` by [`Self::aliased`] and the other two by
-    /// [`Self::startup`]. `used` and `retain` ask for nothing else.
+    /// [`Self::startup`]. `used` and `retain` ask for nothing else. On a wasm row `export_name`
+    /// keeps the definition too, because the host calls it, which is what clang does.
     pub(in crate::check) fn retains(&mut self, attrs: AttrList) -> bool {
         let written = self.ast[attrs].to_vec();
         for attr in written {
             if attr.namespace.is_some_and(|ns| self.text(ns) != "gnu") {
                 continue;
             }
-            if RETAINING.contains(&self.gnu_name(&attr)) {
+            let named = self.gnu_name(&attr);
+            let exported =
+                named == "export_name" && self.cx.target.object_format == ObjectFormat::Wasm;
+            if RETAINING.contains(&named) || exported {
                 return true;
             }
         }
@@ -1336,6 +1350,79 @@ impl Checker<'_> {
             return Some((total, 0));
         }
         Some((total, before))
+    }
+
+    /// Records the names that `export_name`, `import_module` and `import_name` give a function
+    /// on a wasm row, in place of the names that a wasm object gives it by default.
+    ///
+    /// These are clang attributes and gcc has no wasm target, so what is refused is what clang 23
+    /// from wasi-sdk 34 refuses, in its words, and each refusal is an error: the wrong number of
+    /// arguments, the attribute on anything but a function, and an argument that is not a plain
+    /// string literal. On a row that is not wasm the table does not have the three names, and
+    /// [`Self::refuse_unimplemented_attributes`] warns about them as gcc does.
+    pub(in crate::check) fn record_wasm_names(
+        &mut self,
+        decl: DeclId,
+        lists: &[AttrList],
+        kind: DeclKind,
+    ) {
+        if self.cx.target.object_format != ObjectFormat::Wasm {
+            return;
+        }
+        let ast = self.ast;
+        let mut said = crate::tast::WasmNames::default();
+        for &attrs in lists {
+            for &attr in &ast[attrs] {
+                let named = self.gnu_name(&attr);
+                if !matches!(named, "export_name" | "import_module" | "import_name") {
+                    continue;
+                }
+                let Some(name) = self.wasm_name_argument(attr, named, kind) else { continue };
+                match named {
+                    "export_name" => said.export = Some(name),
+                    "import_module" => said.module = Some(name),
+                    _ => said.field = Some(name),
+                }
+            }
+        }
+        if said != crate::tast::WasmNames::default() {
+            self.tast.record_wasm_names(decl, said);
+        }
+    }
+
+    /// The string one `export_name`, `import_module` or `import_name` gives, or nothing where
+    /// clang refuses it.
+    fn wasm_name_argument(
+        &mut self,
+        attr: Attribute,
+        named: &str,
+        kind: DeclKind,
+    ) -> Option<StrId> {
+        let args = self.ast[attr.args].to_vec();
+        if args.len() != 1 {
+            let what = format!("'{named}' attribute takes one argument");
+            self.report(Diagnostic::error(what, attr.span).with_code("E0822"));
+            return None;
+        }
+        if kind != DeclKind::Function {
+            let what = format!("'{named}' attribute only applies to functions");
+            self.report(Diagnostic::error(what, attr.span).with_code("E0822"));
+            return None;
+        }
+        let what = format!("expected string literal as argument of '{named}' attribute");
+        let AttrArg::Expr(expr) = args[0] else {
+            self.report(Diagnostic::error(what, attr.span).with_code("E0822"));
+            return None;
+        };
+        let checked = self.expr(expr);
+        match self.tast[checked].kind {
+            ExprKind::Str(id) if self.tast[id].encoding == Encoding::Plain => Some(id),
+            _ => {
+                let at = self.tast.expr_span(checked);
+                self.report(Diagnostic::error(what, at).with_code("E0822"));
+                None
+            }
+        }
     }
 
     /// The argument numbers one `alloc_size` names, or nothing where gcc drops or refuses it.

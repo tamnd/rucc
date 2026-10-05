@@ -56,6 +56,19 @@ pub struct AllocSize {
     pub count: Option<u8>,
 }
 
+/// The names that clang's `export_name`, `import_module` and `import_name` attributes give a
+/// function on a wasm row, in place of the names a wasm object gives it by default.
+///
+/// A definition with an export name is exported from the module under that name. A declaration
+/// with an import module or an import name is imported from that module or under that field, and
+/// the other part stays `env` or the symbol name.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct WasmNames {
+    pub export: Option<StrId>,
+    pub module: Option<StrId>,
+    pub field: Option<StrId>,
+}
+
 /// A label, in the label table.
 pub type LabelId = Idx<Label>;
 
@@ -210,6 +223,7 @@ pub struct Tast {
     function_names: Set<StrId>,
     alloc_sizes: Map<DeclId, AllocSize>,
     patchable: Map<DeclId, (u32, u32)>,
+    wasm_names: Map<DeclId, WasmNames>,
     ifuncs: Set<DeclId>,
     defined_at: Map<DeclId, Span>,
     notices: Map<DeclId, Notices>,
@@ -518,6 +532,23 @@ impl Tast {
     #[must_use]
     pub fn patchable(&self, decl: DeclId) -> Option<(u32, u32)> {
         self.patchable.get(&decl).copied()
+    }
+
+    /// Records the names a wasm row gives a function, from clang's `export_name`,
+    /// `import_module` and `import_name`. A later declaration adds to what an earlier one said,
+    /// and the second of two names of one kind replaces the first, which is what clang does.
+    pub fn record_wasm_names(&mut self, decl: DeclId, said: WasmNames) {
+        let names = self.wasm_names.entry(decl).or_default();
+        names.export = said.export.or(names.export);
+        names.module = said.module.or(names.module);
+        names.field = said.field.or(names.field);
+    }
+
+    /// The names a wasm row gives this function in place of its own, which are all `None` when
+    /// no attribute said otherwise.
+    #[must_use]
+    pub fn wasm_names(&self, decl: DeclId) -> WasmNames {
+        self.wasm_names.get(&decl).copied().unwrap_or_default()
     }
 
     /// Records that the second name this function's `alias` is for is its resolver, which

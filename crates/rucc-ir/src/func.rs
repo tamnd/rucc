@@ -41,6 +41,19 @@ use crate::inst::{
 use crate::module::{Dll, Linkage, Visibility};
 use crate::{Attrs, Facts, Flags, FloatPred, IntPred, MemOrder, Opcode, PrefetchHint, RmwOp, Type};
 
+/// The names that a wasm object gives a function in place of its own, from clang's
+/// `export_name`, `import_module` and `import_name`. Each is `None` on a function that did not
+/// say, which is every function on a row that is not wasm.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct WasmNames {
+    /// The name the module exports a definition under.
+    pub export: Option<Symbol>,
+    /// The module a declaration is imported from, in place of `env`.
+    pub module: Option<Symbol>,
+    /// The field a declaration is imported under, in place of its symbol name.
+    pub field: Option<Symbol>,
+}
+
 /// The messages an `error` and a `warning` attribute put on a function, for a call to it that
 /// survives optimization. A function may carry both, and gcc then says both at each such call.
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
@@ -99,6 +112,8 @@ pub struct Func {
     /// of what `-fpatchable-function-entry=` asks of every function. `None` for one that leaves
     /// it to the command line, and `(0, 0)` for one that asked for no room at all.
     pub patchable: Option<(u32, u32)>,
+    /// The names a wasm object gives it in place of its own. See [`WasmNames`].
+    pub wasm: WasmNames,
     /// What is true of the whole function, which is what a caller reads when it wants to know
     /// what a call to it does without looking inside.
     pub attrs: Attrs,
@@ -209,6 +224,7 @@ impl Func {
             section: None,
             align: None,
             patchable: None,
+            wasm: WasmNames::default(),
             attrs: Attrs::NONE,
             target: None,
             declared: Span::DUMMY,

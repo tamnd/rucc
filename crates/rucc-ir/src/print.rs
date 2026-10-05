@@ -341,6 +341,16 @@ impl<'a> Printer<'a> {
         if let Some((total, before)) = func.patchable {
             let _ = write!(self.out, ", patchable({total}, {before})");
         }
+        for (word, name) in [
+            ("export_name", func.wasm.export),
+            ("import_module", func.wasm.module),
+            ("import_name", func.wasm.field),
+        ] {
+            if let Some(name) = name {
+                let _ = write!(self.out, ", {word} ");
+                self.string(self.names.resolve(name).as_bytes());
+            }
+        }
         if func.is_declaration() {
             self.out.push_str(";\n");
             return;
