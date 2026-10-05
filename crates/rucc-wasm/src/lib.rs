@@ -20,8 +20,13 @@
 //! algorithm of Ramsey, "Beyond Relooper" (ICFP 2022), and the arguments of a branch are written
 //! to the parameters of its target as a parallel copy just before the branch. There is no
 //! register allocation of locals, no folding of an address into the offset of a load, and no use
-//! of the operand stack across instructions. Those come with the selection rules of a later step,
-//! and the code that this writes is the reference that they are checked against.
+//! of the operand stack across instructions. Those come in WA4.
+//!
+//! The integer arithmetic, the shifts, the divisions, the comparisons, `select`, the changes of
+//! width and the float arithmetic are selected by the rules of `rules/wasm32.rules`, each of
+//! which `rucc-verify` proves against the model of the wasm instructions in
+//! `rules/wasm32.model`. The other instructions are written by the code of `select.rs`. See the
+//! `rules` module.
 //!
 //! The calling convention is the Basic C ABI of `tool-conventions`, which `rucc-abi` has already
 //! applied by the time the IR is here. An aggregate travels by reference or as its one scalar, and
@@ -54,6 +59,7 @@
 mod asm;
 mod emit;
 mod irreducible;
+mod rules;
 mod select;
 mod structure;
 

@@ -320,6 +320,42 @@ block0(%0: i32, %1: ptr):
 }
 "#;
 
+/// Shifts of `i8` values by a count of 8, which the IR takes modulo 8, so that each shift leaves
+/// its value as it is. With one argument, `main` exits with 3 + 64 + 1 = 68. A count that is masked
+/// to the 8 bits of its type and not to the 3 bits of the width gives 0.
+const NARROW: &str = r#"; ModuleID = 't.c'
+; format 0
+target triple = "wasm32-unknown-wasip1"
+target datalayout = "e-p:32:32-i64:64-S128"
+
+func @main(i32, ptr) -> i32, linkage(external) {
+block0(%0: i32, %1: ptr):
+    %2 = trunc.i8 %0
+    %3 = iconst.i8 7
+    %4 = add %2, %3
+    %5 = iconst.i8 3
+    %6 = shl %5, %4
+    %7 = iconst.i8 64
+    %8 = lshr %7, %4
+    %9 = iconst.i8 -128
+    %10 = ashr %9, %4
+    %11 = zext.i32 %6
+    %12 = zext.i32 %8
+    %13 = icmp eq %10, %9
+    %14 = zext.i32 %13
+    %15 = add %11, %12
+    %16 = add %15, %14
+    return %16
+}
+"#;
+
+#[test]
+fn a_narrow_shift_takes_its_count_modulo_its_width() {
+    if let Some(status) = link_and_run("narrow", NARROW) {
+        assert_eq!(status, 68);
+    }
+}
+
 #[test]
 fn an_int128_is_two_i64_values_and_is_returned_through_memory() {
     let written = object(WIDE).unwrap();

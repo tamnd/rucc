@@ -14,9 +14,14 @@ use rucc_rules::{Matcher, parse};
 use rucc_verify::{Model, query};
 
 /// Every rule directory in the tree, one per crate that compiles rules. `rucc-codegen` lowers the
-/// IR to machine terms and `rucc-opt` rewrites it to more IR, and both are checked here, because
-/// the thing under test is the reading and the question rather than either rule set.
-const DIRECTORIES: &[&str] = &["../../crates/rucc-codegen/rules", "../../crates/rucc-opt/rules"];
+/// IR to machine terms, `rucc-wasm` lowers it to wasm instructions and `rucc-opt` rewrites it to
+/// more IR, and all of them are checked here, because the thing under test is the reading and the
+/// question rather than one rule set.
+const DIRECTORIES: &[&str] = &[
+    "../../crates/rucc-codegen/rules",
+    "../../crates/rucc-opt/rules",
+    "../../crates/rucc-wasm/rules",
+];
 
 /// A rule directory, found from this crate rather than from the working directory. The rules live
 /// in the crate that compiles them, per spec/18-package-layout.md.
