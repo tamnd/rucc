@@ -7,6 +7,7 @@ All notable changes are recorded here. The format follows [Keep a Changelog](htt
 ### Changed
 
 - At `-O1` and above, the wasm backend keeps a value with one use in its own block on the operand stack, with no local, when the instruction that makes the value can move to the use (#2866). This is stackify, the first step of WA4. A load does not move past a store or a call, a call does not move past a load, a store or a trap, and a call does not move into one edge of a branch. The SQLite shell at `-O2` goes from 2,651,549 bytes to 2,002,778, and the shell that clang from wasi-sdk 34 builds is 1,820,595 bytes. `-O0` is as before.
+- The wasm backend writes a two-way branch whose edge is only a `br` as a `br_if`, on the condition or on its negation, and it writes the other two-way branches as an `if` with no `else` (#2866). Each edge ends in a branch, a `return` or an `unreachable`, so the second edge can come after the `if`. clang writes the same forms. The SQLite shell at `-O2` goes from 2,002,778 bytes to 1,952,890, which is 7.3% larger than the shell that clang builds.
 
 ## 0.24.0
 

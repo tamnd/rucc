@@ -1516,3 +1516,62 @@ fn a_value_with_one_use_stays_on_the_stack_when_its_instruction_can_move() {
     let f = body_of(STACKED, "f", false);
     assert_eq!(f.matches("local.set").count(), 4, "{f}");
 }
+
+/// A loop with two ways out, which is the C below at `-O1`.
+///
+/// ```c
+/// int find(const int *p, int n, int k) {
+///   for (int i = 0; i < n; i++)
+///     if (p[i] == k) return i;
+///   return -1;
+/// }
+/// ```
+const FIND: &str = r#"; ModuleID = 't.c'
+; format 0
+target triple = "wasm32-unknown-wasip1"
+target datalayout = "e-p:32:32-i64:64-S128"
+
+func @find(ptr, i32, i32) -> i32, linkage(external) {
+block0(%0: ptr, %1: i32, %2: i32):
+    %3 = iconst.i32 0
+    %4 = icmp slt %3, %1
+    br_if %4, block5, block2
+
+block1(%5: i32):
+    %6 = iconst.i32 2
+    %7 = shl.nsw %5, %6
+    %8 = ptr_add %0, %7
+    %9 = load.i32 %8, align 4
+    %10 = icmp eq %9, %2
+    br_if %10, block3, block4
+
+block2:
+    %11 = iconst.i32 -1
+    return %11
+
+block3:
+    return %5
+
+block4:
+    %12 = iconst.i32 1
+    %13 = add.nsw %5, %12
+    %14 = icmp slt %13, %1
+    br_if %14, block6, block2
+
+block5:
+    jump block1(%3)
+
+block6:
+    jump block1(%13)
+}
+"#;
+
+/// An edge that is only a `br` is a `br_if`, on the negation of the condition when it is the
+/// second edge, and a `br_if` whose edges both do more is an `if` with no `else`.
+#[test]
+fn an_edge_that_is_only_a_branch_is_a_br_if() {
+    let find = body_of(FIND, "find", false);
+    assert_eq!(find.matches("i32.eqz\n\tbr_if\t").count(), 2, "{find}");
+    assert_eq!(find.matches("\treturn\n\tend_if\n").count(), 1, "{find}");
+    assert!(!find.contains("else"), "{find}");
+}
