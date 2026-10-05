@@ -32,7 +32,7 @@
 //!
 //! # What is in it
 //!
-//! Fifteen rows, which are the three windows-gnu targets, four musl ones and eight glibc ones. For windows-gnu,
+//! Eighteen rows, which are the three windows-gnu targets, four musl ones, eight glibc ones and three WASI ones. For windows-gnu,
 //! `bin/mingw-headers` in `tamnd/rucc-cross` installs mingw-w64 14.0.0's headers, `bin/mingw-runtime`
 //! builds the runtime, the import libraries and a static winpthreads into the `lib` directory beside
 //! them, `bin/artifact` packs the tree, and the release `sysroots-2026-09-29` is where the files are.
@@ -57,6 +57,8 @@
 //! because the driver writes the stubs itself, and one archive serves every release of its target,
 //! which is [`pinned_for_target`]. server2 and server3 built them from separate inputs and packed
 //! the same bytes.
+//!
+//! For WASI, `bin/wasi-sysroot` takes the C part of one preview out of the sysroot of wasi-sdk 34, `wasi-sysroot-34.0.tar.gz`, which it fetches by its sha256 `9d813544`. rucc does not build wasi-libc, because the bytes clang users link against are the bytes a rucc object has to link against too. The upstream archive is 119 MB and holds libc++ for four targets and two exception models, so the C headers, the static archives and the three start files of each preview are packed on their own, and the release `sysroots-2026-10-05` has the three archives, each about 1.5 MB. Every file in them is upstream's byte for byte. server2 and server3 produced the same bytes.
 //!
 //! Every other target is still unpublished, which is a statement about producers rather than about
 //! this table: `--fetch` of one says so by name, and the day a tree for it is published is the day a
@@ -180,6 +182,21 @@ pub const PINNED: &[Pinned] = &[
         tuple: "s390x-linux-gnu",
         url: "https://github.com/tamnd/rucc-cross/releases/download/sysroots-2026-09-24b/rucc-sysroot-s390x-linux-gnu.tar.gz",
         sha256: "ac73fa903ef8816f2eebb35d106bcf6aabdc3e5c22e94646af196df8d5615b56",
+    },
+    Pinned {
+        tuple: "wasm32-wasip1",
+        url: "https://github.com/tamnd/rucc-cross/releases/download/sysroots-2026-10-05/rucc-sysroot-wasm32-wasip1.tar.gz",
+        sha256: "4a477d560f270d965d8fa416cf199e564c16331cf768f5fefc9f45378e51ada9",
+    },
+    Pinned {
+        tuple: "wasm32-wasip2",
+        url: "https://github.com/tamnd/rucc-cross/releases/download/sysroots-2026-10-05/rucc-sysroot-wasm32-wasip2.tar.gz",
+        sha256: "09d580524d79ec6ed5cc1179a5baba40fbfd724798f17e1cb3ad7a61d9f6f159",
+    },
+    Pinned {
+        tuple: "wasm32-wasip3",
+        url: "https://github.com/tamnd/rucc-cross/releases/download/sysroots-2026-10-05/rucc-sysroot-wasm32-wasip3.tar.gz",
+        sha256: "48fc4a3bea00c2c7d625dfa9bc53e153db0f2183924783fa137ffc9f31383378",
     },
     Pinned {
         tuple: "x86_64-linux-gnu",
