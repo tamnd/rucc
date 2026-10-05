@@ -68,6 +68,22 @@
 //! across every point that is over rather than by which one the queue met last. Neither wins
 //! everywhere, so both are costed.
 //!
+//! # Putting a value away around a call
+//!
+//! A value wanted on the far side of a call cannot be in a register the call destroys, so it has
+//! the callee saved ones or the stack. Where the call is somewhere the loop only goes now and then,
+//! like the `strlen` a tuple deforming loop makes for a `cstring` column, every value the loop
+//! carries is wanted across it, the callee saved registers run out, and the rest are read from the
+//! stack in every turn while the registers the call destroys sit empty. tamnd/rucc#1177.
+//!
+//! So a value that would go to the stack is first offered a register whose only problem is the
+//! instructions that destroy it. It takes the one where that costs least, and the rewrite puts it
+//! away in a slot in front of each of those instructions and brings it back behind it. That is a
+//! store and a load for each, counted by how often its block runs, and it is only done when that is
+//! less than what the value would cost on the stack, which is a load or a store at every read and
+//! write. A value read in a hot loop around a cold call is the case it wins, and a value read once
+//! around a call in the same loop is the case it does not.
+//!
 //! It also gives up when it would lose. The linear scan runs as well, which is cheap next to this,
 //! and the answer kept is the one with the lower [`cost`]: the loads and stores of the values on
 //! the stack and the copies between the ends of each tie left apart, each counted by how often its
@@ -84,7 +100,7 @@ use rucc_target::{PhysReg, RegClass};
 
 use crate::assign::{self, Assignment, Blocks, Env, FEW, Pieces, Place, Reuse, Want};
 use crate::live::{Area, Live, Range};
-use crate::order::Order;
+use crate::order::{Order, Point};
 use crate::pressure::Pressure;
 use crate::spill;
 
@@ -167,6 +183,9 @@ pub fn cost(func: &Func, order: &Order, assignment: &Assignment) -> u128 {
             }
         }
     }
+    for save in assignment.saves() {
+        total += 2 * weights.get(&save.inst).copied().unwrap_or(1);
+    }
     let commuted: Set<Inst> = assignment.commuted().iter().copied().collect();
     for (number, reuse) in assign::reuses(func, order).iter().enumerate() {
         let Some(reuse) = reuse else { continue };
@@ -214,6 +233,7 @@ fn placed(
     let reused = reused(&reuses);
     let seconds = seconds(&reuses);
     let costs = costs(func);
+    let saveable = saveable(func, order);
 
     let count = func.vregs();
     let mut values: Vec<Option<Value<'_>>> = vec![None; count];
@@ -241,6 +261,7 @@ fn placed(
         pieces: Vec::new(),
         at: vec![None; count],
         commuted: vec![None; count],
+        saves: vec![Vec::new(); count],
         work: 0,
         budget,
         asked: (None, Vec::new()),
@@ -298,20 +319,33 @@ fn placed(
             state.take(value, at);
             continue;
         }
+        let mut gone = Vec::new();
         match state.cheapest(value, env.order(value.class)) {
             Some(at) => {
                 for other in state.evict(value, at) {
                     lost[other] += 1;
                     let Some(evicted) = values[other] else { continue };
                     if lost[other] > ROUNDS {
-                        assignment.spill(evicted.reg, evicted.class);
+                        gone.push(evicted);
                     } else {
                         queue.push((evicted.size, Reverse(other)));
                     }
                 }
                 state.take(value, at);
             }
-            None => assignment.spill(value.reg, value.class),
+            None => gone.push(value),
+        }
+        // Last, so that a value put away around a call never takes the register the value that
+        // evicted it was given.
+        for last in gone {
+            let spilled = costs[index(last.reg)];
+            match state.saved(func, last, env.order(last.class), spilled, &saveable) {
+                Some((at, insts)) => {
+                    state.take(last, at);
+                    state.saves[index(last.reg)] = insts;
+                }
+                None => assignment.spill(last.reg, last.class),
+            }
         }
         if state.work > state.budget {
             return None;
@@ -325,6 +359,9 @@ fn placed(
         let Some(at) = *at else { continue };
         let reg = Reg::virtual_reg(u32::try_from(number).expect("a register number"));
         assignment.put(reg, Place::Reg(at));
+        if let Some(value) = values[number] {
+            assignment.save(reg, value.class, &state.saves[number]);
+        }
     }
     for inst in state.commuted.iter().flatten() {
         assignment.commute(*inst);
@@ -353,6 +390,9 @@ struct State<'a, 'v> {
     /// The instruction whose sources were swapped for the answer written by each value, if its
     /// register is the second source's.
     commuted: Vec<Option<Inst>>,
+    /// The instructions each value is put away around, which is nothing for a value in a register
+    /// nothing in its range destroys.
+    saves: Vec<Vec<Inst>>,
     work: u64,
     budget: u64,
     /// What [`Blocks::insists`] said about each register for the value it was last asked about, by
@@ -603,8 +643,58 @@ impl<'a> State<'a, '_> {
         for &other in &clashes {
             self.at[other] = None;
             self.commuted[other] = None;
+            self.saves[other].clear();
         }
         clashes
+    }
+
+    /// The register that is cheapest for `value` to be put away in around every instruction that
+    /// destroys it, if one costs less than `spilled`, with those instructions.
+    ///
+    /// Only a register nothing else is in and nothing insists on for anything but destroying it.
+    /// The value itself is never written by one of the instructions, since then there is nothing to
+    /// put away in front of it.
+    fn saved(
+        &mut self,
+        func: &Func,
+        value: Value<'_>,
+        order: &[PhysReg],
+        spilled: u128,
+        saveable: &Map<Point, (Inst, u128)>,
+    ) -> Option<(PhysReg, Vec<Inst>)> {
+        let mut best: Option<(u128, PhysReg, Vec<Inst>)> = None;
+        for &at in order {
+            if self.work > self.budget {
+                return None;
+            }
+            let found = self.blocked.destroyed(
+                value.reg,
+                value.class,
+                value.area,
+                value.range,
+                at,
+                |point| saveable.contains_key(&point),
+            );
+            let Some(points) = found else { continue };
+            let mut insts = Vec::new();
+            let mut spent = Some(0u128);
+            for point in &points {
+                let Some(&(inst, weight)) = saveable.get(point) else { continue };
+                let written = func[func[inst].operands]
+                    .iter()
+                    .any(|operand| operand.reg == value.reg && operand.role.is_def());
+                spent = spent.filter(|_| !written).map(|spent| spent + 2 * weight);
+                insts.push(inst);
+            }
+            let Some(spent) = spent else { continue };
+            if spent >= spilled || best.as_ref().is_some_and(|&(least, _, _)| least <= spent) {
+                continue;
+            }
+            if self.clashes(value, at).is_empty() {
+                best = Some((spent, at, insts));
+            }
+        }
+        best.map(|(_, at, insts)| (at, insts))
     }
 
     /// Moves each value into the register the most values tied to it are in, of those that are free
@@ -666,6 +756,8 @@ impl<'a> State<'a, '_> {
                 }
                 if to == now {
                     self.commuted[number] = was;
+                } else {
+                    self.saves[number].clear();
                 }
                 self.take(value, to);
             }
@@ -684,6 +776,26 @@ impl<'a> State<'a, '_> {
             }
         }
     }
+}
+
+/// The late point of every instruction a value may be put away around, with the instruction and how
+/// often its block runs.
+///
+/// Every instruction but the last of a block that leaves more than one way, since what goes behind
+/// that one has to go at the start of each block it leaves to and a value brought back there is
+/// brought back on edges it may not be live on.
+fn saveable(func: &Func, order: &Order) -> Map<Point, (Inst, u128)> {
+    let mut saveable = Map::default();
+    for block in func.blocks() {
+        let weight = u128::from(func[block].weight.raw().max(1));
+        let last = if func[block].succs.len() > 1 { func.insts(block).last() } else { None };
+        for inst in func.insts(block) {
+            if Some(inst) != last {
+                saveable.insert(order.late(inst), (inst, weight));
+            }
+        }
+    }
+    saveable
 }
 
 /// How much of the line a value is live over.
@@ -1231,6 +1343,35 @@ mod tests {
         let mut apart = chosen.clone();
         apart.put(sum, chosen.place(right).expect("a place for right"));
         assert_eq!(cost(&func, &order, &apart), u128::from(func[block].weight.raw()));
+    }
+
+    /// A value written, then `calls` instructions that destroy both registers there are, then
+    /// `reads` reads of the value.
+    fn around_calls(calls: usize, reads: usize) -> Vec<String> {
+        let mut names = Interner::new();
+        let mut func = Func::new(names.intern("f"));
+        let opcode = Opcode::new(names.intern("x64.nop"));
+        let block = func.create_block();
+        let value = func.new_vreg(GPR);
+        func.build(block, opcode).def(value, GPR).finish();
+        for _ in 0..calls {
+            func.build(block, opcode)
+                .operand(Operand::write(Reg::physical(rucc_target::x86_64::RAX), GPR))
+                .operand(Operand::write(Reg::physical(rucc_target::x86_64::RCX), GPR))
+                .finish();
+        }
+        for _ in 0..reads {
+            func.build(block, opcode).uses(value, GPR).finish();
+        }
+        places(&mut func, &narrow(2))
+    }
+
+    #[test]
+    fn a_value_is_put_away_around_a_call_only_when_that_is_cheaper_than_the_stack() {
+        // One call and ten reads is a store and a load against ten loads.
+        assert_eq!(around_calls(1, 10), ["rax"]);
+        // Three calls and one read is six against a store and a load.
+        assert_eq!(around_calls(3, 1), ["slot"]);
     }
 
     #[test]

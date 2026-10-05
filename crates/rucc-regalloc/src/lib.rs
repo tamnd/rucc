@@ -162,8 +162,8 @@ pub const MILESTONE: &str = "M3";
 #[cfg(test)]
 mod tests {
     use rucc_base::Interner;
-    use rucc_mir::{Func, Opcode};
-    use rucc_target::x86_64::{GPR, SYSV};
+    use rucc_mir::{BlockCall, Func, Opcode, Operand, Reg, Weight};
+    use rucc_target::x86_64::{GPR, RAX, RCX, SYSV};
 
     use super::*;
 
@@ -194,5 +194,66 @@ mod tests {
 
         assert_eq!(allocation.assignment.spilled(), 1);
         assert_eq!(allocation.edits.len(), 2);
+    }
+
+    #[test]
+    fn a_value_a_loop_reads_is_put_away_around_the_call_the_loop_seldom_makes() {
+        let mut names = Interner::new();
+        let mut func = Func::new(names.intern("f"));
+        let opcode = Opcode::new(names.intern("x64.nop"));
+        let [entry, head, cold, skip, latch, back, out] = [(); 7].map(|()| func.create_block());
+        let step = func.new_vreg(GPR);
+        func.build(entry, opcode).def(step, GPR).finish();
+        *func.succs_mut(entry) = vec![BlockCall::to(head)];
+        func.build(head, opcode).uses(step, GPR).finish();
+        *func.succs_mut(head) = vec![BlockCall::to(cold), BlockCall::to(skip)];
+        // A call, as far as the allocator can tell: both registers it hands out are destroyed.
+        let call = func
+            .build(cold, opcode)
+            .operand(Operand::write(Reg::physical(RAX), GPR))
+            .operand(Operand::write(Reg::physical(RCX), GPR))
+            .finish();
+        *func.succs_mut(cold) = vec![BlockCall::to(latch)];
+        *func.succs_mut(skip) = vec![BlockCall::to(latch)];
+        func.build(latch, opcode).uses(step, GPR).finish();
+        *func.succs_mut(latch) = vec![BlockCall::to(back), BlockCall::to(out)];
+        *func.succs_mut(back) = vec![BlockCall::to(head)];
+        func.build(out, opcode).uses(step, GPR).finish();
+        for (block, often) in [(head, 100), (skip, 99), (latch, 100), (back, 99)] {
+            func.set_weight(block, Weight::parts(often * Weight::SCALE));
+        }
+
+        // Two registers and the call destroys both, so the only other answer is the stack and a
+        // load in every turn. The trace runs here as well, and it is what says the value read back
+        // behind the call is the one put away in front of it.
+        let env = assign::Env::new().with(GPR, &SYSV.int_order[..2], &SYSV.int_order[2..5]);
+        let allocation = run_with(&mut func, &env, "test", true, Allocator::Backtracking);
+
+        let assignment = &allocation.assignment;
+        assert_eq!(assignment.spilled(), 0);
+        let Some(assign::Place::Reg(at)) = assignment.place(step) else {
+            panic!("the value went to the stack");
+        };
+        let saves = assignment.saves();
+        assert_eq!(saves.len(), 1);
+        assert_eq!((saves[0].reg, saves[0].inst), (step, call));
+        let slot = assign::Place::Slot(saves[0].slot);
+        let here = |edit: &&rewrite::Edit| match edit.at {
+            rewrite::At::Before(inst) | rewrite::At::After(inst) => inst == call,
+            _ => false,
+        };
+        let around: Vec<_> = allocation
+            .edits
+            .iter()
+            .filter(here)
+            .map(|edit| (edit.at, edit.mov.to, edit.mov.from))
+            .collect();
+        assert_eq!(
+            around,
+            [
+                (rewrite::At::Before(call), slot, assign::Place::Reg(at)),
+                (rewrite::At::After(call), assign::Place::Reg(at), slot),
+            ]
+        );
     }
 }

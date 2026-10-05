@@ -27,6 +27,10 @@ All notable changes are recorded here. The format follows [Keep a Changelog](htt
 - `__attribute__((force_align_arg_pointer))` makes a function align its own stack frame rather than trust its caller to have, on x86-64 and i386 as in gcc 4.2 and later (#8). The prologue aligns the stack pointer to sixteen bytes behind a frame pointer when the function calls anything or keeps something that wants more than a word, and a leaf that keeps nothing wide is left alone, as gcc does. A frame with a variable length array is not realigned, where gcc does it through a second register. On anything that is not a function or a pointer to one it is ignored with gcc's warning, and an argument is refused with `E0831`.
 - `__attribute__((no_reorder))` keeps a function or an object where the source wrote it, as in gcc 5 and later (#8). Under `-ftoplevel-reorder`, which is on from `-O1`, the ones that say it are written first in the source's order and the rest after them in gcc's order. On a member, a typedef or a parameter it is ignored with gcc's warning, and an argument is refused with `E0832`.
 
+### Changed
+
+- At `-O1` and above, a value that would go to the stack only because a call destroys every register left for it now stays in one of those registers, stored in front of the call and loaded back behind it, when that costs less than the stack would (#1177). The case is a loop that reads the value in every turn and makes the call now and then, like the `strlen` call that the tuple deforming loop of PostgreSQL makes for a `cstring` column. Before, each such value was loaded from the stack at every read in the loop while the registers the call destroys sat empty.
+
 ### Fixed
 
 - `-ftracer` and `-fno-tracer` are taken and dropped, as the other flags that name a pass of gcc's own are. `builtins.exp` in the GCC torture suite gives `-fno-tracer` to every program in its directory, and rucc stopped with "unknown option".

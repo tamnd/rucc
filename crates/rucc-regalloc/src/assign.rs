@@ -183,6 +183,27 @@ pub struct Assignment {
     places: Vec<Option<Place>>,
     slots: Vec<RegClass>,
     commuted: Vec<Inst>,
+    saves: Vec<Save>,
+    /// How many of the slots are where a value in a register waits out an instruction that
+    /// destroys it, which are not values that went to the stack.
+    waiting: usize,
+}
+
+/// A value kept in a register an instruction destroys, put away in front of that instruction and
+/// brought back behind it.
+///
+/// The register is the value's [`Place`] and the slot is somewhere it waits for the length of the
+/// one instruction. That is what a value read in every turn of a loop and wanted on the far side of
+/// a call the loop only makes now and then gets instead of the stack: a store and a load where the
+/// call is, rather than a load at every read.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Save {
+    /// The value.
+    pub reg: Reg,
+    /// The instruction it is put away around.
+    pub inst: Inst,
+    /// The slot it waits in.
+    pub slot: u32,
 }
 
 impl Assignment {
@@ -199,7 +220,13 @@ impl Assignment {
     /// checker in [`crate::check`] reads an assignment without caring which allocator wrote it.
     #[must_use]
     pub fn empty(vregs: usize) -> Self {
-        Self { places: vec![None; vregs], slots: Vec::new(), commuted: Vec::new() }
+        Self {
+            places: vec![None; vregs],
+            slots: Vec::new(),
+            commuted: Vec::new(),
+            saves: Vec::new(),
+            waiting: 0,
+        }
     }
 
     /// The two address instructions whose answer went into the register of their second source.
@@ -261,7 +288,24 @@ impl Assignment {
     /// How many values went to the stack.
     #[must_use]
     pub fn spilled(&self) -> usize {
-        self.slots.len()
+        self.slots.len() - self.waiting
+    }
+
+    /// Every instruction a value in a register is put away around, in the order they were found.
+    #[must_use]
+    pub fn saves(&self) -> &[Save] {
+        &self.saves
+    }
+
+    /// Records that a value in a register is put away around each of those instructions, all in
+    /// the one slot.
+    pub(crate) fn save(&mut self, reg: Reg, class: RegClass, insts: &[Inst]) {
+        if insts.is_empty() {
+            return;
+        }
+        let slot = self.take_slot(class);
+        self.waiting += 1;
+        self.saves.extend(insts.iter().map(|&inst| Save { reg, inst, slot }));
     }
 
     /// Puts a value on the stack, in a slot of its own.
@@ -756,6 +800,39 @@ impl Blocks {
                 && one.reaches(self.width(reg))
                 && ((want == Want::Clear && one.by.is_some()) || area.covers(one.point))
         })
+    }
+
+    /// The points where an instruction destroys `at` while a value over `area` is in it, when those
+    /// are all that is in the way, or `None` when anything else is.
+    ///
+    /// What counts is a write at the point an instruction writes, by nobody's value, of the whole
+    /// of the register, with the value live on the way into the instruction as well as out of it,
+    /// at a point `saveable` says the value can be put away around. Everything else in the way is
+    /// in the way for good: a register taken where the instruction reads is taken while the value
+    /// would still have to be in it, and one handed to another value is that value's.
+    pub(crate) fn destroyed(
+        &self,
+        reg: Reg,
+        class: RegClass,
+        area: Area<'_>,
+        range: Range,
+        at: PhysReg,
+        saveable: impl Fn(Point) -> bool,
+    ) -> Option<Vec<Point>> {
+        let mut points = Vec::new();
+        for one in self.over(class, at, range) {
+            if one.by == Some(reg) || !one.reaches(self.width(reg)) || !area.covers(one.point) {
+                continue;
+            }
+            let through = one.point > 0 && area.covers(one.point - 1);
+            if one.by.is_some() || one.above.is_some() || !through || !saveable(one.point) {
+                return None;
+            }
+            if points.last() != Some(&one.point) {
+                points.push(one.point);
+            }
+        }
+        Some(points)
     }
 
     /// How many bytes of its register a value takes, or `None` for all of it.

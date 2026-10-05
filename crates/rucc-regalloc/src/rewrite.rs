@@ -25,6 +25,15 @@
 //! What each instruction needs around it for the machine to accept the places its operands were
 //! given is worked out in [`crate::legalize`], and this files what that says as edits.
 //!
+//! # A value put away around an instruction
+//!
+//! A value [`crate::backtrack`] kept in a register an instruction destroys is stored to its slot
+//! in front of everything else the instruction needs and loaded back behind everything else. In
+//! front because the moves that hand the instruction its operands read what they move and never
+//! write the value's register, which nothing at the instruction insists on, and behind because the
+//! moves that take its answers away may read the register the call returned something in. Either
+//! way round would be correct for the value. These are the only places it is not.
+//!
 //! # What an edge turns into
 //!
 //! The moves that write the block's parameters, in an order they can be made in one at a time,
@@ -42,6 +51,7 @@
 //! file: a move through a temporary is a fact about places, and which register is free to be the
 //! temporary is a fact only this crate has.
 
+use rucc_base::hash::Map;
 use rucc_mir::{Block, Func, Inst, Param, Reg};
 use rucc_target::RegClass;
 
@@ -102,8 +112,10 @@ pub fn rewrite(func: &mut Func, assignment: &mut Assignment, env: &Env) -> Vec<E
     // Collected once for the whole function rather than once a block, since rewriting an
     // instruction needs the function and the walk over the blocks would be borrowing it.
     let insts: Vec<Inst> = blocks.iter().flat_map(|&block| func.insts(block)).collect();
+    let saves = saves(func, assignment);
     for inst in insts {
-        instruction(func, assignment, env, &mut spare, inst, &mut edits);
+        let saved = saves.get(&inst).map_or(&[][..], Vec::as_slice);
+        instruction(func, assignment, env, &mut spare, inst, saved, &mut edits);
     }
 
     let preds = preds(func, &blocks);
@@ -122,6 +134,22 @@ pub fn rewrite(func: &mut Func, assignment: &mut Assignment, env: &Env) -> Vec<E
     edits
 }
 
+/// The stores that put away the values kept in a register each instruction destroys, by the
+/// instruction. Each load that brings one back is the same move the other way round.
+fn saves(func: &Func, assignment: &Assignment) -> Map<Inst, Vec<(Move<Place>, RegClass)>> {
+    let mut saves: Map<Inst, Vec<(Move<Place>, RegClass)>> = Map::default();
+    for save in assignment.saves() {
+        let (Some(Place::Reg(at)), Some(class)) =
+            (assignment.place(save.reg), func.class_of(save.reg))
+        else {
+            continue;
+        };
+        let store = Move::new(Place::Slot(save.slot), Place::Reg(at));
+        saves.entry(save.inst).or_default().push((store, class));
+    }
+    saves
+}
+
 /// Rewrites one instruction's operands, and files what has to happen either side of it.
 fn instruction(
     func: &mut Func,
@@ -129,17 +157,16 @@ fn instruction(
     env: &Env,
     spare: &mut Spare,
     inst: Inst,
+    saved: &[(Move<Place>, RegClass)],
     edits: &mut Vec<Edit>,
 ) {
     let legal = legalize::instruction(func, assignment, env, spare, inst);
     let list = func[inst].operands;
     func[list].copy_from_slice(&legal.operands);
-    edits.extend(legal.before.into_iter().map(|(mov, class)| Edit {
-        at: At::Before(inst),
-        mov,
-        class,
-    }));
-    edits.extend(legal.after.into_iter().map(|(mov, class)| Edit {
+    let before = saved.iter().copied().chain(legal.before);
+    edits.extend(before.map(|(mov, class)| Edit { at: At::Before(inst), mov, class }));
+    let back = saved.iter().map(|&(store, class)| (Move::new(store.from, store.to), class));
+    edits.extend(legal.after.into_iter().chain(back).map(|(mov, class)| Edit {
         at: At::After(inst),
         mov,
         class,
