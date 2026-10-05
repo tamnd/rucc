@@ -96,6 +96,20 @@ pub(crate) const MEMORY_FILL: u32 = 11;
 pub(crate) struct Code {
     pub(crate) bytes: Vec<u8>,
     pub(crate) fixups: Vec<Fixup>,
+    /// The last `br`, while the code after it is only the `end`s that [`Code::end`] wrote.
+    jump: Option<Jump>,
+}
+
+/// A `br` that can go when the code falls through to the same place.
+#[derive(Clone, Copy)]
+struct Jump {
+    /// Where the `br` starts.
+    at: usize,
+    /// Where the code after the `br` starts.
+    after: usize,
+    depth: u32,
+    /// How many frames the `end`s after the `br` close.
+    ends: u32,
 }
 
 impl Code {
@@ -139,8 +153,39 @@ impl Code {
     }
 
     pub(crate) fn br(&mut self, depth: u32) {
+        let at = self.bytes.len();
         self.bytes.push(0x0c);
         self.uleb(u64::from(depth));
+        self.jump = Some(Jump { at, after: self.bytes.len(), depth, ends: 0 });
+    }
+
+    /// The `end` of a block, a loop or an `if` that takes nothing and gives nothing, where `to_end`
+    /// says that a branch to the frame goes to its end, which is false for a loop. When the code
+    /// since the last `br` is only the `end`s of the frames inside the one that the `br` goes to,
+    /// and this `end` closes that frame, the code falls through to the place where the `br` goes,
+    /// so the `br` goes. Its bytes are given back, so that the notes after it can move.
+    pub(crate) fn end(&mut self, to_end: bool) -> Option<std::ops::Range<usize>> {
+        let jump = self.jump.take().filter(|jump| {
+            self.bytes.len() == jump.after + jump.ends as usize && jump.ends <= jump.depth
+        });
+        match jump {
+            Some(jump) if jump.ends == jump.depth && to_end => {
+                self.bytes.drain(jump.at..jump.after);
+                self.bytes.push(END);
+                Some(jump.at..jump.after)
+            }
+            Some(jump) => {
+                self.bytes.push(END);
+                if jump.ends < jump.depth {
+                    self.jump = Some(Jump { ends: jump.ends + 1, ..jump });
+                }
+                None
+            }
+            None => {
+                self.bytes.push(END);
+                None
+            }
+        }
     }
 
     pub(crate) fn br_if(&mut self, depth: u32) {

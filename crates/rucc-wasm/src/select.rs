@@ -455,7 +455,7 @@ impl Lower<'_, '_> {
             self.context.push(Ctx::Loop(x));
             self.within(x, &merges)?;
             self.context.pop();
-            self.code.op(emit::END);
+            self.end(false);
             Ok(())
         } else {
             self.within(x, &merges)
@@ -469,8 +469,20 @@ impl Lower<'_, '_> {
         self.context.push(Ctx::Follow(y));
         self.within(x, rest)?;
         self.context.pop();
-        self.code.op(emit::END);
+        self.end(true);
         self.tree(y)
+    }
+
+    /// The `end` of a frame of the structure. See [`emit::Code::end`]. When a `br` goes, each
+    /// note after it moves back.
+    fn end(&mut self, to_end: bool) {
+        let Some(gone) = self.code.end(to_end) else { return };
+        let Some(annotate) = self.annotate.as_mut() else { return };
+        for (at, _) in &mut annotate.notes.marks {
+            if *at >= gone.end {
+                *at -= gone.len();
+            }
+        }
     }
 
     fn depth(&self, frame: Ctx) -> u32 {
@@ -596,8 +608,9 @@ impl Lower<'_, '_> {
         };
         match taken {
             Some(depth) => {
-                let to = self.shape.edges[x][1 - other].to;
-                let way = if self.shape.is_backward(x, to) { "back" } else { "out" };
+                let (from, index) = self.forward(x, 1 - other)?;
+                let to = self.shape.edges[from][index].to;
+                let way = if self.shape.is_backward(from, to) { "back" } else { "out" };
                 self.mark(to, |name| format!("{way} to {name}"));
                 self.code.br_if(depth);
             }
@@ -606,7 +619,7 @@ impl Lower<'_, '_> {
                 self.context.push(Ctx::Other);
                 self.branch(x, 0)?;
                 self.context.pop();
-                self.code.op(emit::END);
+                self.end(true);
             }
         }
         self.branch(x, other)
@@ -638,6 +651,7 @@ impl Lower<'_, '_> {
     /// that follows.
     fn plain(&self, x: usize, index: usize) -> Result<Option<u32>> {
         let func = self.func;
+        let (x, index) = self.forward(x, index)?;
         let Node::Block(block) = self.shape.order[x] else { return Ok(None) };
         let term = func.terminator(block).ok_or("a block has no terminator")?;
         let copies = !self.copies(term, index)?.is_empty();
@@ -652,6 +666,39 @@ impl Lower<'_, '_> {
         } else {
             None
         })
+    }
+
+    /// The node and the edge where the edge `index` of the node at `x` goes in the end, past each
+    /// block that is only a `jump`, that only this edge goes to and that dominates nothing. Such a
+    /// block writes nothing when the edge to it copies nothing, so a `br_if` can go where the
+    /// `jump` goes. The loop exit of a `for` is such a block when the counter and the next counter
+    /// share a local.
+    fn forward(&self, mut x: usize, mut index: usize) -> Result<(usize, usize)> {
+        let func = self.func;
+        loop {
+            let edge = &self.shape.edges[x][index];
+            let to = edge.to;
+            let shape = &self.shape;
+            if shape.is_backward(x, to)
+                || shape.merge[to]
+                || shape.loop_header[to]
+                || !shape.children[to].is_empty()
+                || !edge.labels.is_empty()
+            {
+                return Ok((x, index));
+            }
+            let (Node::Block(block), Node::Block(next)) = (shape.order[x], shape.order[to]) else {
+                return Ok((x, index));
+            };
+            let term = func.terminator(block).ok_or("a block has no terminator")?;
+            let mut insts = func.insts(next);
+            let only = insts.next().is_some_and(|inst| func[inst].opcode == Opcode::Jump)
+                && insts.next().is_none();
+            if !only || !self.copies(term, index)?.is_empty() {
+                return Ok((x, index));
+            }
+            (x, index) = (to, 0);
+        }
     }
 
     /// The call and the `unwound` before the `br_if` `term`, when the branch is the edge that a

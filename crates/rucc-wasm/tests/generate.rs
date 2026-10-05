@@ -1739,14 +1739,28 @@ fn an_edge_that_is_only_a_branch_is_a_br_if() {
 
 /// With optimization, the argument and the parameter of an edge share a local when they are never
 /// live at the same time, and the edge copies nothing. In `sum`, the counter and the next counter
-/// share one local, and the sum and the next sum share another, so the edge back to the loop is
-/// only a `br`. Without optimization, each value has a local and the edge copies two of them.
+/// share one local, and the sum and the next sum share another, so the edge back to the loop
+/// copies nothing. Without optimization, each value has a local and the edge copies two of them.
 #[test]
 fn an_edge_argument_and_its_parameter_share_a_local() {
     let sum = body_of(PROGRAM, "sum", true);
     assert!(sum.contains("\t.local\ti32, i32\n"), "{sum}");
-    assert!(sum.contains("\tlocal.tee\t3\n\tlocal.get\t1\n\ti32.lt_s\n\tif\n\tbr\t1\n"), "{sum}");
+    assert!(sum.contains("\ti32.add\n\tlocal.tee\t3\n"), "{sum}");
+    assert!(!sum.contains("\tlocal.get\t3\n\tlocal.set\t3\n"), "{sum}");
     assert_eq!(sum.matches("local.set").count(), 4, "{sum}");
     let sum = body_of(PROGRAM, "sum", false);
     assert!(sum.matches("local.set").count() > 4, "{sum}");
+}
+
+/// An edge to a block that is only a `jump` and that copies nothing goes where the `jump` goes,
+/// so the exit test of the loop in `sum` is a `br_if` back to the loop. A `br` just before the
+/// `end` of the block that it goes to goes, because the code falls through to the same place.
+#[test]
+fn a_branch_goes_past_a_block_that_only_jumps() {
+    let sum = body_of(PROGRAM, "sum", true);
+    assert!(sum.contains("\ti32.lt_s\n\tbr_if\t0\n\tbr\t2\n\tend_loop\n"), "{sum}");
+    assert!(sum.contains("\tlocal.set\t2\n\tend_block\n"), "{sum}");
+    assert!(!sum.contains("\tbr\t0\n\tend_block\n"), "{sum}");
+    let sum = body_of(PROGRAM, "sum", false);
+    assert!(sum.contains("\tbr\t1\n\tend_if\n"), "{sum}");
 }
