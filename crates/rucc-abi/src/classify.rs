@@ -96,7 +96,7 @@ impl Call {
             // register holds it, where the caller passes somewhere to put it and the callee
             // writes it there, the same as for an aggregate of that size.
             Arg::Void => return Pass::Ignore,
-            Arg::Scalar(scalar) if self.by_reference(*scalar) => {
+            Arg::Scalar(scalar) if self.abi.scalar_returns_by_reference(scalar.size) => {
                 // Except for the one the ABI brings back in a vector register anyway, which is
                 // an `__int128` on Windows: it goes out as an address and comes back in xmm0.
                 let vector = self.abi.scalars.wide_integer_returns_in;

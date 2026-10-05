@@ -47,17 +47,7 @@
  * Through a union, which is what C says to write for this, and then through the two halves of it. Which
  * half holds the sign is a property of the target rather than of the format, so it is asked about once,
  * at the top, and nothing below here mentions a byte order again.
- *
- * # Not on i386 yet
- *
- * There gcc returns a `_Float128` through a hidden pointer, as it does a structure, and this compiler
- * does not do that yet (#2735). So every function here that returns one is refused on i386. So is
- * every program that does arithmetic on one, which is a call to a function here, which means nothing
- * on i386 could call these. The file is left out there until it can be built, so that the rest of
- * the archive can be.
  */
-
-#ifndef __i386__
 
 /* clang has no `_Float128` on wasm32, and `long double` there is binary128, which is the format
  * this file works in. So on wasm the type is spelled `long double`, and the names and the calling
@@ -1108,5 +1098,3 @@ unsigned __int128 __fixunstfti(_Float128 value) {
 }
 
 #endif
-
-#endif /* __i386__ */
