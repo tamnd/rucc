@@ -155,6 +155,53 @@ fn a_deprecated_name_can_be_used_quietly_under_the_option_that_turns_it_off() {
     assert_eq!(String::from_utf8_lossy(&out.stderr), "");
 }
 
+/// `unavailable` is `deprecated` made an error, at the same uses and in the same words, with no
+/// option to turn it off. It outranks `deprecated` on one declaration and across two, the last
+/// message `unavailable` gave is the one said, and a definition after it is not a use. The counts
+/// are gcc 13's for this source.
+#[test]
+fn a_name_marked_unavailable_is_refused_at_every_use_in_gcc_s_words() {
+    let source = "\
+int f(void) __attribute__((unavailable));
+int g(void) __attribute__((__unavailable__(\"use h\")));
+typedef int T __attribute__((unavailable));
+struct S { int m __attribute__((unavailable)); int n; } __attribute__((unavailable(\"old\")));
+enum E { A __attribute__((unavailable)), B };
+int a(void) __attribute__((deprecated(\"old\")));
+int a(void) __attribute__((unavailable));
+int b(void) __attribute__((unavailable(\"gone\"), deprecated(\"old\")));
+int d(void) __attribute__((unavailable(\"u1\")));
+int d(void) __attribute__((unavailable(\"u2\")));
+[[gnu::unavailable]] int e(void);
+int x(void) __attribute__((unavailable));
+int x(void) { return B; }
+int (*pf)(void) = f;
+T t;
+struct S s;
+int use(struct S *p) { return f() + g() + p->m + p->n + A + a() + b() + d() + e(); }
+_Static_assert(__has_attribute(unavailable), \"unavailable\");
+";
+    let flags = ["-fsyntax-only", "-std=gnu23", "-Wno-deprecated-declarations"];
+    let out = compile("unavailable", &flags, source);
+    let said = String::from_utf8_lossy(&out.stderr);
+    assert!(!out.status.success(), "{said}");
+    let count = |what: &str| lines_with(&said, &format!("error: {what}")).len();
+    assert_eq!(count("'f' is unavailable"), 2, "{said}");
+    assert_eq!(count("'g' is unavailable: use h"), 1, "{said}");
+    assert_eq!(count("'T' is unavailable"), 1, "{said}");
+    assert_eq!(count("'S' is unavailable: old"), 2, "{said}");
+    assert_eq!(count("'m' is unavailable"), 1, "{said}");
+    assert_eq!(count("'A' is unavailable"), 1, "{said}");
+    assert_eq!(count("'a' is unavailable"), 1, "{said}");
+    assert_eq!(count("'a' is unavailable:"), 0, "{said}");
+    assert_eq!(count("'b' is unavailable: gone"), 1, "{said}");
+    assert_eq!(count("'d' is unavailable: u2"), 1, "{said}");
+    assert_eq!(count("'e' is unavailable"), 1, "{said}");
+    assert_eq!(said.matches("error:").count(), 12, "{said}");
+    assert!(!said.contains("deprecated") && !said.contains("'x'"), "{said}");
+    assert!(said.contains("declared here"), "{said}");
+}
+
 #[test]
 fn a_result_thrown_away_is_said_the_way_gcc_says_it_for_each_attribute() {
     let got = said(

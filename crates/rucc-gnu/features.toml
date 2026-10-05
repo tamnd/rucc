@@ -822,6 +822,15 @@ tests = ["rucc::a_name_marked_deprecated_is_said_at_every_use_in_gcc_s_words", "
 notes = "A use of a function, an object, a typedef, a tag, a member or an enumerator marked with it is a warning in gcc's words under `-Wdeprecated-declarations`, with the message when one was given and a note at the declaration, except for a typedef, which gcc gives none."
 
 [[feature]]
+name = "unavailable"
+kind = "attribute"
+gcc_version = "12.0"
+status = "implemented"
+used_by = ["glibc"]
+tests = ["rucc::a_name_marked_unavailable_is_refused_at_every_use_in_gcc_s_words"]
+notes = "`deprecated` made an error: a use of a function, an object, a typedef, a tag, a member or an enumerator marked with it is refused in gcc's words, `'f' is unavailable` with the message when one was given and a note at the declaration, and no option turns it off. It outranks `deprecated` whichever came first, on one declaration or across several, and the message said is the last one `unavailable` gave. A definition after it is not a use. Under `-fgnuc-version=` before 12 it is an attribute gcc has not heard of. One difference from gcc: an argument that is not a string, or a second one, is taken without gcc's error, as for `deprecated`."
+
+[[feature]]
 name = "warning"
 kind = "attribute"
 gcc_version = "4.3"

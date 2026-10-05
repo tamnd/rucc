@@ -4,6 +4,10 @@ All notable changes are recorded here. The format follows [Keep a Changelog](htt
 
 ## Unreleased
 
+### Added
+
+- `__attribute__((unavailable))` refuses every use of what it marks, as in gcc 12 and later (#8), and `__has_attribute` answers yes for it. It is `deprecated` made an error: the same uses of a function, an object, a typedef, a tag, a member or an enumerator, the same words with `unavailable` in place of `deprecated`, the message when one was given and a note at the declaration, and no option that turns it off. It outranks `deprecated` whichever of the two came first, on one declaration or across several, and the message said is the last one `unavailable` gave, which is what gcc 13 does. Under `-fgnuc-version=` before 12 it is read as an attribute gcc has not heard of. An argument that is not a string is taken without gcc's error, as it is for `deprecated`.
+
 ### Fixed
 
 - `scev` reads arithmetic on constants as the number it is, so a loop whose counter starts at `add 0, 1` that nothing folded yet is counted. Loop rotation leaves one when the value going round is `i + 1`, and `-Zrewriter=consed` makes that common: the bubble sort in rucc-corpus kept its inner loop, `unroll` could not count it, and `sroa` could not take the array apart.
