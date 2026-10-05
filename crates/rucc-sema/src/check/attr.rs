@@ -3013,7 +3013,7 @@ impl Checker<'_> {
     /// The parser keeps a lone identifier as one rather than as an expression, since most of the
     /// attributes that take one name a thing outside the ordinary scope. The ones that take a
     /// number take an enumerator as well, and gcc finds it the way an expression would.
-    fn enumerator(&self, name: Symbol) -> Option<i128> {
+    pub(in crate::check) fn enumerator(&self, name: Symbol) -> Option<i128> {
         match self.scopes.lookup(name)? {
             Binding::Enumerator { value, .. } => Some(value),
             Binding::Decl(_) | Binding::Typedef(_) => None,

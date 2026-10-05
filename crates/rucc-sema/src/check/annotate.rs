@@ -64,6 +64,9 @@ pub(in crate::check) struct Annotations {
     records: Map<RecordId, AttrList>,
     /// The member a flexible array member's `counted_by` named, by record and array.
     counters: Map<(RecordId, Symbol), Symbol>,
+    /// The `-fstrict-flex-arrays` level a member's own `strict_flex_array` asked for, by record
+    /// and array.
+    strict_flex: Map<(RecordId, Symbol), u8>,
 }
 
 /// One argument of an attribute, as something two of them can be compared by.
@@ -136,8 +139,12 @@ impl Checker<'_> {
 
     /// Keeps the lists a member was written with.
     pub(in crate::check) fn annotate_member(&mut self, record: RecordId, field: ast::Field) {
-        let Some(name) = self.member_name(field) else { return };
         let specs = self.ast[field.specs].attrs;
+        let Some(name) = self.member_name(field) else {
+            // An unnamed bit-field or an anonymous record is never an array.
+            self.strict_flex_unnamed(&[field.attrs, specs]);
+            return;
+        };
         self.annotations.members.insert((record, name), [field.attrs, specs]);
     }
 
@@ -173,7 +180,116 @@ impl Checker<'_> {
                     self.annotations.counters.insert((record, name), counter);
                 }
             }
+            let written = lists.iter().flat_map(|&list| self.ast[list].iter().copied());
+            let asked: Vec<Attribute> = written.filter(|attr| self.is_strict_flex(attr)).collect();
+            for attr in asked {
+                if let Some(level) = self.strict_flex_level(attr, decl.ty) {
+                    self.annotations.strict_flex.insert((record, name), level);
+                }
+            }
         }
+    }
+
+    /// Whether an attribute is `strict_flex_array`, and one the gcc the persona claims knows.
+    fn is_strict_flex(&self, attr: &Attribute) -> bool {
+        self.cx.gnuc >= 13 && self.is_named(attr, "strict_flex_array")
+    }
+
+    /// Whether the wrong number of arguments was given to `strict_flex_array`, said in gcc's
+    /// words when it was.
+    fn strict_flex_arity(&mut self, attr: Attribute) -> bool {
+        let count = self.ast[attr.args].len();
+        if count == 1 {
+            return false;
+        }
+        let what = "wrong number of arguments specified for 'strict_flex_array' attribute";
+        let refused = Diagnostic::error(what, attr.span).with_code("E0833");
+        self.report(refused.note(format!("expected 1, found {count}"), attr.span));
+        true
+    }
+
+    /// The level one `strict_flex_array` on a member of this type asks for, once gcc 13's checks
+    /// have let it through: the member is an array and the argument an integer constant from
+    /// zero to three.
+    fn strict_flex_level(&mut self, attr: Attribute, ty: TypeId) -> Option<u8> {
+        if self.strict_flex_arity(attr) {
+            return None;
+        }
+        let refuse = |checker: &mut Self, what: String| {
+            checker.report(Diagnostic::error(what, attr.span).with_code("E0833"));
+            None
+        };
+        if !is_array(&self.types, self.types.canonical(ty)) {
+            let what = "'strict_flex_array' attribute may not be specified for a non-array field";
+            return refuse(self, what.into());
+        }
+        let arg = self.ast[attr.args][0];
+        let value = match arg {
+            AttrArg::Expr(expr) => {
+                let value = self.expr(expr);
+                let integer = is_integer(&self.types, self.types.canonical(self.tast[value].ty));
+                if integer { self.eval_integer(value).ok() } else { None }
+            }
+            // A level an enumerator spells, which the parser keeps as an identifier.
+            AttrArg::Ident(name) => self.enumerator(name),
+        };
+        let Some(value) = value else {
+            return refuse(self, "'strict_flex_array' attribute argument not an integer".into());
+        };
+        match u8::try_from(value) {
+            Ok(level) if level <= 3 => Some(level),
+            _ => {
+                let what = format!(
+                    "'strict_flex_array' attribute argument '{value}' is not an integer constant \
+                     between 0 and 3"
+                );
+                refuse(self, what)
+            }
+        }
+    }
+
+    /// What gcc says about `strict_flex_array` on a member with no name, which is not an array.
+    fn strict_flex_unnamed(&mut self, lists: &[AttrList]) {
+        let ast = self.ast;
+        for &attrs in lists {
+            for &attr in &ast[attrs] {
+                if !self.is_strict_flex(&attr) || self.strict_flex_arity(attr) {
+                    continue;
+                }
+                let what =
+                    "'strict_flex_array' attribute may not be specified for a non-array field";
+                self.report(Diagnostic::error(what, attr.span).with_code("E0833"));
+            }
+        }
+    }
+
+    /// What gcc says about `strict_flex_array` on something that is not a member, which is the
+    /// wrong number of arguments if that is wrong and otherwise that it may not be written there,
+    /// both errors. `name` is the declaration's, if it has one.
+    pub(in crate::check) fn strict_flex_refused(
+        &mut self,
+        lists: &[AttrList],
+        name: Option<Symbol>,
+    ) {
+        let ast = self.ast;
+        for &attrs in lists {
+            for &attr in &ast[attrs] {
+                if !self.is_strict_flex(&attr) || self.strict_flex_arity(attr) {
+                    continue;
+                }
+                let name = name.map_or("({anonymous})", |name| self.text(name));
+                let what =
+                    format!("'strict_flex_array' attribute may not be specified for '{name}'");
+                self.report(Diagnostic::error(what, attr.span).with_code("E0833"));
+            }
+        }
+    }
+
+    /// The `-fstrict-flex-arrays` level a member is measured at, which is its own
+    /// `strict_flex_array` if it said one and the command line's if not.
+    pub(in crate::check) fn strict_flex_of(&self, record: RecordId, name: Option<Symbol>) -> u8 {
+        let own = name.and_then(|name| self.annotations.strict_flex.get(&(record, name)));
+        own.copied().unwrap_or(self.cx.strict_flex_arrays)
     }
 
     /// The member one `counted_by` names, once it has been checked to be one it may name.

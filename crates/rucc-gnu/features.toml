@@ -916,6 +916,15 @@ tests = ["rucc::what_says_it_is_written_first_in_the_order_the_source_wrote", "r
 notes = "Under `-ftoplevel-reorder`, which is on from `-O1`, the functions and the objects written `no_reorder` are written first, in the order the source wrote them, and the rest after them in the order gcc gives them, which for the objects is the reverse of the source's. One declaration saying it is enough, as with `noinline`. Without the reordering everything keeps the source's order and the attribute changes nothing. On a member, a typedef or a parameter it is ignored with gcc's warning, an argument is refused with `E0832`, and on an object in a block it is taken without a word and does nothing, as in gcc. gcc also writes a file scope `asm` in order among them, where here every such `asm` comes ahead of the objects."
 
 [[feature]]
+name = "strict_flex_array"
+kind = "attribute"
+gcc_version = "13.0"
+status = "implemented"
+used_by = []
+tests = ["rucc::a_member_s_own_level_takes_the_place_of_the_command_line_s", "rucc::strict_flex_array_is_checked_in_gcc_s_words"]
+notes = "The level a trailing array member is measured at by `__builtin_object_size` and `__builtin_dynamic_object_size` through a pointer, in place of the one `-fstrict-flex-arrays` set, stricter or looser: zero takes any trailing array as one the program may allocate more of, one takes `[0]`, `[1]` and `[]`, two takes `[0]` and `[]`, and three takes only `[]`, as gcc 13 measures them. On a variable, a function, a typedef or a parameter, on a member that is not an array, with a level outside 0 to 3 or an argument that is not an integer constant, and with other than one argument, it is refused with gcc's errors and `E0833`. Under a persona older than gcc 13 it is a name gcc has never heard of. A member with no name is not read."
+
+[[feature]]
 name = "fentry_name"
 kind = "attribute"
 gcc_version = "9.0"

@@ -440,6 +440,7 @@ impl Checker<'_> {
         self.cf_checked(&[specs.attrs], DeclKind::Function);
         self.force_aligned(&[specs.attrs], ty);
         self.no_reordered(&[specs.attrs], true);
+        self.strict_flex_refused(&[specs.attrs], Some(name));
         self.record_patchable(id, &[specs.attrs], DeclKind::Function);
         self.record_wasm_names(id, &[specs.attrs], DeclKind::Function);
         self.record_fentry(Some(id), &[specs.attrs], DeclKind::Function);
@@ -943,6 +944,7 @@ impl Checker<'_> {
         self.cf_checked(&[specs.attrs, item.attrs], kind);
         self.force_aligned(&[specs.attrs, item.attrs], ty);
         self.no_reordered(&[specs.attrs, item.attrs], true);
+        self.strict_flex_refused(&[specs.attrs, item.attrs], Some(name));
         self.record_patchable(id, &[specs.attrs, item.attrs], kind);
         self.record_wasm_names(id, &[specs.attrs, item.attrs], kind);
         self.record_fentry(Some(id), &[specs.attrs, item.attrs], kind);
@@ -1069,6 +1071,7 @@ impl Checker<'_> {
         self.cf_checked(&[specs.attrs, item.attrs], DeclKind::Type);
         self.force_aligned(&[specs.attrs, item.attrs], ty);
         self.no_reordered(&[specs.attrs, item.attrs], false);
+        self.strict_flex_refused(&[specs.attrs, item.attrs], Some(name));
         self.record_fentry(None, &[specs.attrs, item.attrs], DeclKind::Type);
         self.record_symver(None, &[specs.attrs, item.attrs], StorageDuration::Static, span);
         self.resolver(&[specs.attrs, item.attrs], DeclKind::Type, span);

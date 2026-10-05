@@ -316,7 +316,8 @@ impl Checker<'_> {
                 // answer with at any level. Only the record the pointer points at, since a
                 // record inside it is followed by the rest of the outer one.
                 let size = self.bytes_of(field.ty);
-                if self.through_pointer(base) && (union || last && self.flexible(field.ty)) {
+                let level = self.strict_flex_of(record, field.name);
+                if self.through_pointer(base) && (union || last && self.flexible(field.ty, level)) {
                     return Some(reach.member(field.offset, None));
                 }
                 Some(reach.member(field.offset, Some(size?)))
@@ -401,12 +402,13 @@ impl Checker<'_> {
     }
 
     /// Whether an array at the end of a record reached through a pointer may run past its type,
-    /// at the level `-fstrict-flex-arrays` set.
+    /// at the level `-fstrict-flex-arrays` set or the member's own `strict_flex_array` asked for,
+    /// which gcc 13 lets take the place of the command line's in either direction.
     ///
     /// Zero takes every trailing array, one takes `[]`, `[0]` and `[1]`, two takes `[]` and `[0]`
     /// and three takes only `[]`, which are gcc 15's four levels as measured through a pointer at
     /// `-O2`. Something that is not an array is not flexible at any level.
-    fn flexible(&self, ty: TypeId) -> bool {
+    fn flexible(&self, ty: TypeId, level: u8) -> bool {
         let TypeKind::Array { len, .. } = bare(&self.types, ty) else {
             return false;
         };
@@ -415,7 +417,7 @@ impl Checker<'_> {
             ArrayLen::Fixed(count) => count,
             ArrayLen::Variable(_) => return false,
         };
-        match self.cx.strict_flex_arrays {
+        match level {
             0 => true,
             1 => count <= 1,
             2 => count == 0,
