@@ -10894,7 +10894,7 @@ block0(%0: ptr, %1: i32):
     %6 = lshr %3, %5
     %7 = trunc.i8 %6
     %8 = iconst.i64 2
-    %9 = ptr_add %0, %8
+    %9 = ptr_add.nuw %0, %8
     store %7 -> %9, align 1
     return
 "
@@ -11496,7 +11496,7 @@ block0(%0: i64):
     store %0 -> %1, align 4
     call @bail() : ()
     %2 = iconst.i64 4
-    %3 = ptr_add %1, %2
+    %3 = ptr_add.nuw %1, %2
     %4 = load.i32 %3, align 4, tbaa !1
     return %4
 ";
@@ -11553,7 +11553,7 @@ block0(%0: ptr):
     %2 = va_object %0, size 16, align 8, in(int 8 at 0, int 8 at 8)
     memcpy %1, %2, size 16, align 8
     %3 = iconst.i64 8
-    %4 = ptr_add %1, %3
+    %4 = ptr_add.nuw %1, %3
     %5 = load.i64 %4, align 8, tbaa !1
     return %5
 ";

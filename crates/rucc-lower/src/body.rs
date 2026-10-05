@@ -5525,10 +5525,11 @@ impl<'u> Body<'_, 'u> {
         }
         let moved = {
             let address = self.address;
+            let flags = self.forward(bytes);
             let mut build = self.build(span);
             let amount = build.iconst(address, bytes as i128);
             let args = build.func().push_values(&[addr, amount]);
-            build.value(InstData { args, ..InstData::new(Opcode::PtrAdd) }, Type::PTR)
+            build.value(InstData { args, flags, ..InstData::new(Opcode::PtrAdd) }, Type::PTR)
         };
         // The alignment the offset leaves of whatever the address had, for the addresses anything
         // knows an alignment for. This is what carries a packed record's one byte alignment out to
@@ -5537,6 +5538,16 @@ impl<'u> Body<'_, 'u> {
             self.aligns(moved, shifted(align, bytes));
         }
         moved
+    }
+
+    /// The flags of a `ptr_add` that moves an address `bytes` further on inside its object. C
+    /// does not let the result leave the object, except to the byte after its end, so the add does
+    /// not wrap when the number of bytes is not negative. A number of bytes at or above half the
+    /// address space is a negative number that was written as unsigned, and it gets no flag.
+    /// `-fwrapv-pointer` takes the assumption away.
+    fn forward(&self, bytes: u64) -> Flags {
+        let half = 1u64 << (self.address.bits() - 1);
+        if self.unit.wrapping.pointer || bytes >= half { Flags::NONE } else { Flags::NUW }
     }
 
     /// What an address is known to be aligned to, where the layout settled it.
@@ -5563,11 +5574,25 @@ impl<'u> Body<'_, 'u> {
         back: bool,
         span: Span,
     ) -> Value {
+        // A constant number of whole elements forward, such as `p[3]` or `p++`, is a number of
+        // bytes that is known here.
+        let ty = self.func[steps].ty;
+        let forward = match (self.bits_of(steps), size, back) {
+            (Some(bits), Stride::Bytes(bytes), false) if ty.bits() <= 64 => {
+                let negative = signed && ty.bits() > 0 && bits >> (ty.bits() - 1) & 1 == 1;
+                let total = (!negative).then(|| (bits as u64).checked_mul(bytes)).flatten();
+                total.map_or(Flags::NONE, |total| self.forward(total))
+            }
+            _ => Flags::NONE,
+        };
         let moved = {
             let amount = self.scaled(steps, signed, size, back, span);
             let mut build = self.build(span);
             let args = build.func().push_values(&[addr, amount]);
-            build.value(InstData { args, ..InstData::new(Opcode::PtrAdd) }, Type::PTR)
+            build.value(
+                InstData { args, flags: forward, ..InstData::new(Opcode::PtrAdd) },
+                Type::PTR,
+            )
         };
         // A step of a whole number of elements leaves whatever the element width and the address
         // have in common, which is what [`shifted`] works out. How many elements it is does not

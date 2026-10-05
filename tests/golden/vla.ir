@@ -18,7 +18,7 @@ block0(%0: i32):
     %7 = sext.i64 %6
     %8 = iconst.i64 4
     %9 = mul.nsw %7, %8
-    %10 = ptr_add %5, %9
+    %10 = ptr_add.nuw %5, %9
     %11 = iconst.i32 1
     store %11 -> %10, align 4, tbaa !1
     %12 = iconst.i32 0
@@ -51,7 +51,7 @@ block0(%0: i32, %1: i32):
     %17 = sext.i64 %16
     %18 = iconst.i64 4
     %19 = mul.nsw %17, %18
-    %20 = ptr_add %15, %19
+    %20 = ptr_add.nuw %15, %19
     %21 = iconst.i32 3
     store %21 -> %20, align 4, tbaa !1
     %22 = sext.i64 %0
@@ -81,7 +81,7 @@ block0(%0: i32, %1: ptr):
     %10 = sext.i64 %9
     %11 = iconst.i64 4
     %12 = mul.nsw %10, %11
-    %13 = ptr_add %8, %12
+    %13 = ptr_add.nuw %8, %12
     %14 = iconst.i32 4
     store %14 -> %13, align 4, tbaa !1
     %15 = iconst.i32 2
@@ -124,7 +124,7 @@ block0(%0: i32, %1: ptr):
     %52 = sext.i64 %51
     %53 = iconst.i64 4
     %54 = mul.nsw %52, %53
-    %55 = ptr_add %50, %54
+    %55 = ptr_add.nuw %50, %54
     %56 = load.i32 %55, align 4, tbaa !1
     %57 = add.nsw %43, %56
     return %57
@@ -143,7 +143,7 @@ block0(%0: i32, %1: ptr):
     %10 = sext.i64 %9
     %11 = iconst.i64 4
     %12 = mul.nsw %10, %11
-    %13 = ptr_add %8, %12
+    %13 = ptr_add.nuw %8, %12
     %14 = load.i32 %13, align 4, tbaa !1
     return %14
 }
@@ -156,7 +156,7 @@ block0(%0: i32, %1: ptr):
     %5 = sext.i64 %4
     %6 = iconst.i64 4
     %7 = mul.nsw %5, %6
-    %8 = ptr_add %1, %7
+    %8 = ptr_add.nuw %1, %7
     %9 = load.i32 %8, align 4, tbaa !1
     %10 = add.nsw %3, %9
     return %10
@@ -173,14 +173,14 @@ block0(%0: i32, %1: ptr, %2: i32, %3: ptr):
     %10 = sext.i64 %9
     %11 = iconst.i64 4
     %12 = mul.nsw %10, %11
-    %13 = ptr_add %1, %12
+    %13 = ptr_add.nuw %1, %12
     %14 = load.i32 %13, align 4, tbaa !1
     %15 = add.nsw %8, %14
     %16 = iconst.i32 0
     %17 = sext.i64 %16
     %18 = iconst.i64 4
     %19 = mul.nsw %17, %18
-    %20 = ptr_add %3, %19
+    %20 = ptr_add.nuw %3, %19
     %21 = load.i32 %20, align 4, tbaa !1
     %22 = add.nsw %15, %21
     return %22
@@ -206,7 +206,7 @@ block2:
     %11 = sext.i64 %10
     %12 = iconst.i64 4
     %13 = mul.nsw %11, %12
-    %14 = ptr_add %9, %13
+    %14 = ptr_add.nuw %9, %13
     %15 = load.i32 %14, align 4, tbaa !1
     %16 = iconst.i32 0
     %17 = icmp ne %15, %16
@@ -229,7 +229,7 @@ block6:
     %21 = sext.i64 %20
     %22 = iconst.i64 4
     %23 = mul.nsw %21, %22
-    %24 = ptr_add %9, %23
+    %24 = ptr_add.nuw %9, %23
     %25 = load.i32 %24, align 4, tbaa !1
     %26 = iconst.i32 0
     %27 = icmp ne %25, %26

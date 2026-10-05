@@ -295,7 +295,7 @@ block0(%0: i32):
     %8 = stacksave.ptr
     %9 = alloca %7, align 4
     %10 = iconst.i64 4
-    %11 = ptr_add %9, %10
+    %11 = ptr_add.nuw %9, %10
     %12 = sext.i64 %0
     %13 = iconst.i64 4
     %14 = mul.nsw %12, %13
