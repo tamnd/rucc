@@ -521,20 +521,22 @@ impl<'a> Lexer<'a> {
         self.eat();
         loop {
             if self.cursor.at_end() || self.cursor.first() == b'\n' {
-                // In assembly the quote is most likely an apostrophe in a comment, which gcc
-                // passes through with the rest of its line as one token and says nothing about.
-                // The rest of the line is then not expanded, which is gcc's reading too.
-                if self.options.assembly {
-                    return PpTokenKind::Other;
+                // A literal does not cross a line, so the quote and the rest of its line are
+                // one token that is not a literal, as in gcc. That keeps one missing quote from
+                // swallowing the rest of the file, and the rest of the line is not expanded.
+                //
+                // gcc only warns here, because the token is an error only if it gets to the
+                // parser, and that is where the conversion reports it. An apostrophe in the
+                // text of `#warning` or `#error`, or in a macro that is never used, is common
+                // in real headers and is not a reason to stop. In assembly the quote is most
+                // likely an apostrophe in a comment, and gcc says nothing about it.
+                if !self.options.assembly {
+                    let span =
+                        Span::new(self.file_start + start, self.file_start + self.cursor.pos());
+                    let message = format!("missing terminating {} character", char::from(quote));
+                    self.diagnostics.push(Diagnostic::warning(message, span));
                 }
-                // A literal does not cross a line. Reporting it here and stopping at the
-                // newline is what keeps one missing quote from swallowing the rest of the
-                // file and turning into a hundred nonsense errors.
-                let span = Span::new(self.file_start + start, self.file_start + self.cursor.pos());
-                let what = if quote == b'"' { "string literal" } else { "character constant" };
-                self.diagnostics
-                    .push(Diagnostic::error(format!("missing terminating quote in {what}"), span));
-                break;
+                return PpTokenKind::Other;
             }
             let b = self.eat();
             if b == quote {

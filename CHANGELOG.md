@@ -21,6 +21,10 @@ All notable changes are recorded here. The format follows [Keep a Changelog](htt
 
 - The target table has a `wasm32-wasip2` row, tier 4 with a plan for tier 2, for a component that wraps a core module built as for wasip1 (#2863). `tests/abi-corpus/wasm32-wasip2.c` compiles with no diagnostic under clang 23 from wasi-sdk 34. The LLVM spelling of a tuple, which is the `target triple` line of printed rucc IR and the answer of `rucc-targets llvm-triple`, is now `wasm32-unknown-wasip1` for wasip1, which is the name clang 23 uses, and `wasm32-unknown-unknown` for `wasm32-none`. Before, it was `wasm32-unknown-wasi`, which clang 23 says is deprecated, and `wasm32-unknown-none`, which LLVM does not know.
 
+### Fixed
+
+- A literal with no closing quote is a warning when it is read and an error only when it gets to the parser, as in gcc. An apostrophe in the text of `#warning` or `#error`, as in `#warning it isn't here`, in a macro that is never used, or on an unknown `#pragma` line, no longer stops the compile. The quote and the rest of its line are one token that is not expanded, the message is gcc's "missing terminating ' character", and `-pedantic-errors` makes the warning an error. A stray byte or an unterminated literal on a `#pragma` line is also no longer an error, and the token before the pragma is no longer taken into its line in its place. The SQLite check of #2863 found it.
+
 ## 0.21.0
 
 The minor release for WA0 (#2862), the first step of the WebAssembly plan. rucc runs as a WebAssembly module, and each release from this one has `rucc-wasm32-wasip1.wasm`. The module compiles C to objects for every target inside Wasmtime or Node, and the objects are the same bytes as the objects from native rucc: CI compares all 440 rung 0 objects on every commit, and the SQLite amalgamation matches at `-O0` and `-O2`. The module cannot link yet, because it cannot start a linker. The other entries are two GNU attributes, `unavailable` and `nocf_check`, function order as gcc writes it, a loop counting fix in `scev`, and replay and libraries work for the fuzz corpus milestone.
