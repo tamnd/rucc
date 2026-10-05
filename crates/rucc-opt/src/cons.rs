@@ -61,7 +61,7 @@
 //! It is not the e-graph. A rule replaces what it matched and the old form is gone, so there is
 //! nothing to extract and nothing a cost model chooses between. Section 12.3 calls that arm B and
 //! it is the arm with no search problem in it. [`crate::egraph`] is arm C, and it is this walk
-//! with the classes kept: [`build`] takes them, and does what it does here when there are none.
+//! with the classes kept: `build` takes them, and does what it does here when there are none.
 
 use rucc_base::hash::{Map, Set};
 use rucc_cost::heuristics;

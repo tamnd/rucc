@@ -797,7 +797,7 @@ pub fn bit_count(opcode: Opcode) -> Option<BitCount> {
 /// that has `popcnt` and not `lzcnt`, since the second sweep keeps the count it became.
 ///
 /// A count `kept` names as guarded is neither left alone nor written out. It is written as the
-/// choice [`chosen`] writes, which is the only shape the rule for it takes, and that is how a
+/// choice `chosen` writes, which is the only shape the rule for it takes, and that is how a
 /// plain x86-64 gets `bsr` and `bsf` for its zero counts in place of the arithmetic.
 pub fn counts(func: &mut Func, kept: &[CountInst]) {
     let answered = |func: &Func, inst: Inst, guarded: bool| {
