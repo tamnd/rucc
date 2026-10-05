@@ -33,7 +33,7 @@
 //! its extensions, can be asked for any symbol it has, and which ones are asked for is not
 //! something a link can see.
 
-#![doc(html_root_url = "https://docs.rs/rucc-lto/0.22.1")]
+#![doc(html_root_url = "https://docs.rs/rucc-lto/0.22.2")]
 
 use rucc_base::hash::{Map, Set};
 use rucc_base::{Interner, Symbol};
