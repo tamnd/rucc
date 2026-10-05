@@ -4,6 +4,10 @@ All notable changes are recorded here. The format follows [Keep a Changelog](htt
 
 ## Unreleased
 
+### Added
+
+- `rucc_object::wasm` writes a relocatable wasm object, which is the first part of the wasm backend (#2864). The `object` crate reads wasm and does not write it, so the writer is new. It takes function bodies and data segments with the fields that the linker patches marked, and it writes the import of the memory, the `linking` section version 2 with the symbol table, the segment names and the constructors, `reloc.CODE` and `reloc.DATA` with padded five byte fields, `producers` and `target_features`. A test links an object that it writes with `wasm-ld` against the wasi-sdk 34 sysroot and runs it under Wasmtime when `WASI_SDK_PATH` is set.
+
 ## 0.22.0
 
 The minor release for WA1 (#2863), the second step of the WebAssembly plan. rucc reads and checks C for the four wasm rows, `wasm32-wasip1`, `wasm32-wasip2`, `wasm32-wasip3` and `wasm32-none`, up to the end of semantic analysis, and it says that there is no wasm backend yet for anything after that. The predefined macros are those of clang 23 from wasi-sdk 34, with each difference on an approved list, and `-mcpu=` and the feature flags work as in clang 23. `rucc --fetch` installs the C library of each WASI row, and with it the SQLite amalgamation and its shell pass `-fsyntax-only` on all three previews. The other entries are the `egraph` rewriter behind `-Zrewriter=egraph`, three GNU attributes for x86 and the kernel, `cf_check`, `-mmanual-endbr` and `patchable_function_entry`, and a fix that makes an unterminated quote a warning, as in gcc.
