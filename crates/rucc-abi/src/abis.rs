@@ -643,19 +643,22 @@ pub static I386_MINGW_STDCALL: AbiDescription =
 /// [`I386_MINGW_STDCALL`] with two registers. The first two arguments that are integers or
 /// pointers of four bytes or fewer are in ecx and edx, and everything else is on the stack where
 /// cdecl would put it. What keeps it from being a two register bank like any other is what
-/// happens around the things that do not fit: a `double` is on the stack and the integer after it
-/// still gets the next register, while a `long long` or a structure of any size is on the stack
-/// and takes the registers that were left with it, so the integer after one of those is on the
-/// stack too. That is what gcc does and what Microsoft's compiler does, measured with
-/// i686-w64-mingw32-gcc. The address a structure comes back through is the first argument and so
-/// is in ecx, and it is not counted in the `ret $n`.
+/// happens around the things that do not fit. A `double`, a `_Complex` or a structure holding one
+/// `float` or `double` is on the stack and the integer after it still gets the next register. A
+/// structure of four bytes or fewer is on the stack and takes a register anyway, so the integer
+/// after it gets edx. A `long long` or a bigger structure is on the stack and takes the registers
+/// that were left with it, so the integer after one of those is on the stack too. That is what
+/// gcc does, measured with i686-w64-mingw32-gcc and i686-linux-gnu-gcc. The address a structure
+/// comes back through is the first argument and so is in ecx, and it is not counted in the
+/// `ret $n`.
 pub static I386_MINGW_FASTCALL: AbiDescription = AbiDescription {
     name: "i386 Windows fastcall (mingw)",
     banks: Banks { integer: 2, ..I386_MINGW.banks },
     scalars: Scalars { wide_integer_in_memory: true, ..I386_MINGW.scalars },
     arguments: &[
         Rule::new(Test::Empty, Travel::Ignore),
-        Rule::new(Test::Anything, Travel::InMemoryAndDrain),
+        Rule::new(Test::FloatingMode, Travel::InMemory),
+        Rule::new(Test::Anything, Travel::InMemoryAndSpend),
     ],
     cleanup: Cleanup::Callee,
     ..I386_MINGW

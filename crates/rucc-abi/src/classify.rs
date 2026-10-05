@@ -294,6 +294,7 @@ impl Call {
             Test::FloatPair => float_pair(shape, integer_width, float_width),
             Test::X87Stack => x87_stack(shape),
             Test::LoneFloat => lone_float(shape),
+            Test::FloatingMode => floating_mode(shape),
             Test::SingleScalar => single_scalar(shape),
             Test::ComplexFloat => {
                 (shape.complex && shape.is_all_of(Format::Single) && shape.size == 8).then(Vec::new)
@@ -315,12 +316,11 @@ impl Call {
         let slots = match rule.then {
             Travel::Ignore => return Some(Pass::Ignore),
             Travel::InMemory => return Some(Pass::Memory),
-            Travel::InMemoryAndDrain if !returning => {
-                self.integer = 0;
-                self.float = 0;
+            Travel::InMemoryAndSpend if !returning => {
+                self.integer = self.integer.saturating_sub(registers(shape.size, width));
                 return Some(Pass::Memory);
             }
-            Travel::InMemoryAndDrain => return Some(Pass::Memory),
+            Travel::InMemoryAndSpend => return Some(Pass::Memory),
             Travel::ByReference => {
                 // As an argument the address is one more argument. As a return value it is
                 // whichever register this ABI reserves for the purpose, and on AAPCS64 that is
@@ -480,6 +480,16 @@ fn lone_float(shape: &Shape<'_>) -> Option<Vec<Slot>> {
         }
         _ => None,
     }
+}
+
+/// Nothing, for a `_Complex` or for one floating point scalar that fills the aggregate, and
+/// [`None`] for anything else.
+fn floating_mode(shape: &Shape<'_>) -> Option<Vec<Slot>> {
+    if shape.complex {
+        return Some(Vec::new());
+    }
+    let [piece] = shape.pieces else { return None };
+    (piece.scalar.is_float() && piece.offset == 0 && piece.scalar.size == shape.size).then(Vec::new)
 }
 
 /// The one scalar of an aggregate that is nothing else, and [`None`] for anything else.

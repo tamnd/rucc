@@ -26,7 +26,7 @@ use rucc_abi::abis::{
 };
 use rucc_abi::{
     AbiDescription, Arg, Banks, BitInts, Cleanup, Convention, Format, Narrow, Pass, ReturnPointer,
-    Rule, Scalar, Scalars, Short, Slot, StackArgs, Test, Travel, Variadic, pieces, record,
+    Rule, Scalar, Scalars, Shape, Short, Slot, StackArgs, Test, Travel, Variadic, pieces, record,
 };
 use rucc_tuple::{TARGETS, TargetEntry};
 
@@ -316,11 +316,36 @@ fn fastcall_has_two_registers_and_a_wide_argument_spends_them() {
     let mut call = I386_MINGW_FASTCALL.call();
     assert_eq!(call.argument(&long_long), Pass::Direct);
     assert_eq!(call.integer_left(), 0);
-    // `f(struct { int }, int)`: the structure is on the stack and takes the registers with it.
+    // `f(struct { int }, int)`: the structure is on the stack and takes ecx anyway, so the `int`
+    // gets edx. Three bytes take one register as four do.
+    for scalars in [&[Scalar::integer(4)][..], &[Scalar::integer(1); 3]] {
+        let small = pieces(scalars);
+        let mut call = I386_MINGW_FASTCALL.call();
+        assert_eq!(call.argument(&Arg::Aggregate(record(&small))), Pass::Memory);
+        assert_eq!(call.integer_left(), 1, "{scalars:?}");
+    }
+    // `f(struct { int a, b; }, int)` and `f(int, struct { int }, int)`: on the stack, and nothing
+    // is left for the `int` after.
+    let two = pieces(&[Scalar::integer(4), Scalar::integer(4)]);
+    let mut call = I386_MINGW_FASTCALL.call();
+    assert_eq!(call.argument(&Arg::Aggregate(record(&two))), Pass::Memory);
+    assert_eq!(call.integer_left(), 0);
     let one = pieces(&[Scalar::integer(4)]);
     let mut call = I386_MINGW_FASTCALL.call();
+    assert_eq!(call.argument(&int), Pass::Direct);
     assert_eq!(call.argument(&Arg::Aggregate(record(&one))), Pass::Memory);
     assert_eq!(call.integer_left(), 0);
+    // `f(struct { double }, int)` and `f(_Complex float, int)`: gcc gives both a floating point
+    // mode, so they are on the stack and take no register. Two `float`s in a structure are an
+    // eight byte integer mode to gcc and take both.
+    let lone = pieces(&[Scalar::float(Format::Double, 8)]);
+    let pair = pieces(&[Scalar::float(Format::Single, 4), Scalar::float(Format::Single, 4)]);
+    let complex = Shape { complex: true, ..record(&pair) };
+    for (shape, left) in [(record(&lone), 2), (complex, 2), (record(&pair), 0)] {
+        let mut call = I386_SYSV_FASTCALL.call();
+        assert_eq!(call.argument(&Arg::Aggregate(shape)), Pass::Memory);
+        assert_eq!(call.integer_left(), left, "{shape:?}");
+    }
     // cdecl and stdcall have no registers to spend in the first place.
     assert_eq!(I386_MINGW_STDCALL.call().integer_left(), 0);
     assert_eq!(I386_MINGW.call().integer_left(), 0);

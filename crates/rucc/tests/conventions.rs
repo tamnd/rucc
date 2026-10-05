@@ -448,19 +448,21 @@ const LINUX_32: &str = "i686-linux-gnu";
 
 /// `stdcall` and `fastcall` on i386 Linux, as i686-linux-gnu-gcc 13 has them: the callee pops
 /// with `ret $n`, `fastcall` passes the first two small integers in `ecx` and `edx`, a structure
-/// comes back through an address that is counted in `n` with the arguments, and no name is
-/// decorated, since that is a Windows thing.
+/// argument counts against them from the stack, a structure comes back through an address that
+/// is counted in `n` with the arguments, and no name is decorated, since that is a Windows thing.
 #[test]
 fn stdcall_and_fastcall_pop_their_arguments_on_linux_too() {
     let text = asm(
         "i686-linux-conventions",
         LINUX_32,
         "struct q { int a[4]; };\n\
+         struct w { int a; };\n\
          __attribute__((stdcall, noinline)) int s(int a, int b) { return a - b; }\n\
+         __attribute__((fastcall, noinline)) int fw(struct w s, int y) { return s.a * 2 - y; }\n\
          __attribute__((fastcall, noinline)) int f(int a, int b, int c) { return a - b - c; }\n\
          __attribute__((stdcall, noinline)) struct q r(int a, int b) { struct q x = {{a, b}}; return x; }\n\
          __attribute__((cdecl, noinline)) int c(int a) { return a; }\n\
-         int g(void) { return s(1, 2) + f(3, 4, 5) + r(6, 7).a[1] + c(8); }\n",
+         int g(void) { struct w w = {9}; return s(1, 2) + f(3, 4, 5) + r(6, 7).a[1] + c(8) + fw(w, 10); }\n",
     );
     let s = body(&text, "s");
     assert!(has(&s, &["ret", "$8"]), "{s:?}\n{text}");
@@ -471,6 +473,9 @@ fn stdcall_and_fastcall_pop_their_arguments_on_linux_too() {
     assert!(has(&r, &["ret", "$12"]), "{r:?}\n{text}");
     let c = body(&text, "c");
     assert!(c.contains(&"ret"), "{c:?}\n{text}");
+    // A structure of four bytes is on the stack and takes ecx anyway, so `y` is in edx.
+    let fw = body(&text, "fw");
+    assert!(has(&fw, &["ret", "$4"]) && has(&fw, &["%edx"]), "{fw:?}\n{text}");
     let g = body(&text, "g");
     for callee in ["s", "f", "r", "c"] {
         assert!(g.iter().any(|line| *line == format!("call\t{callee}")), "{callee}: {g:?}");
