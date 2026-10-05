@@ -225,8 +225,11 @@ struct Solver<'a> {
     facts: Vec<Fact>,
     /// Whether each block is reachable, by [`Block::index`].
     reached: Vec<bool>,
-    /// The instructions that read each value, as an argument or as an argument to a block.
+    /// The instructions that read each value as one of their own arguments.
     readers: Vec<Vec<Inst>>,
+    /// Where each value is passed to a block, as the branch, the arm by position and the
+    /// parameter that takes it.
+    edges: Vec<Vec<(Inst, usize, Value)>>,
     /// Which arms of each terminator have been taken, by position.
     taken: Set<(Inst, usize)>,
     /// The branches on an undefined value that were given every edge.
@@ -243,9 +246,24 @@ impl<'a> Solver<'a> {
         let entry = func.entry()?;
         let counts = func.counts();
         let mut readers = vec![Vec::new(); counts.values];
+        let mut edges = vec![Vec::new(); counts.values];
+        // A value passed to a block goes to the one parameter that takes it rather than to the
+        // whole branch. A computed goto passes the same values to every one of its arms, and
+        // looking at the branch again for each change would walk every arm each time, and once
+        // for each arm the value was passed to as well, tamnd/rucc#2857.
         for block in func.blocks() {
             for inst in func.insts(block) {
-                uses::operands(func, inst, |value| readers[value.index()].push(inst));
+                for &value in &func[func[inst].args] {
+                    let list = &mut readers[value.index()];
+                    if list.last() != Some(&inst) {
+                        list.push(inst);
+                    }
+                }
+                for (arm, call) in func.successors(inst).enumerate() {
+                    for (&param, &value) in func[call.block].params.iter().zip(&func[call.args]) {
+                        edges[value.index()].push((inst, arm, param));
+                    }
+                }
             }
         }
         let mut solver = Self {
@@ -253,6 +271,7 @@ impl<'a> Solver<'a> {
             facts: vec![Fact::Undefined; counts.values],
             reached: vec![false; counts.blocks],
             readers,
+            edges,
             taken: Set::default(),
             forced: Set::default(),
             blocks: Vec::new(),
@@ -296,6 +315,12 @@ impl<'a> Solver<'a> {
                     self.func.block_of(inst).is_some_and(|block| self.reached[block.index()]);
                 if reached {
                     self.visit(inst);
+                }
+            }
+            for index in 0..self.edges[value.index()].len() {
+                let (term, arm, param) = self.edges[value.index()][index];
+                if self.taken.contains(&(term, arm)) {
+                    self.pass(param, value);
                 }
             }
         }
@@ -368,7 +393,9 @@ impl<'a> Solver<'a> {
         }
     }
 
-    /// Takes the arms of a terminator its condition allows, passing on what each passes.
+    /// Takes the arms of a terminator its condition allows, passing on what each passes the
+    /// first time it is taken. What an argument learns after that reaches its parameter along
+    /// the edge [`Solver::settle`] follows.
     fn branch(&mut self, term: Inst) {
         let calls: Vec<BlockCall> = self.func.successors(term).collect();
         let arms: Vec<usize> = match self.arm(term) {
@@ -378,18 +405,22 @@ impl<'a> Solver<'a> {
         };
         for arm in arms {
             let Some(call) = calls.get(arm) else { continue };
-            self.taken.insert((term, arm));
+            if !self.taken.insert((term, arm)) {
+                continue;
+            }
             let params = self.func[call.block].params.clone();
             for (param, &arg) in params.into_iter().zip(&self.func[call.args]) {
-                let fact = if tracked(self.func[param].ty) {
-                    self.facts[arg.index()]
-                } else {
-                    Fact::Varying
-                };
-                self.learn(param, fact);
+                self.pass(param, arg);
             }
             self.reach(call.block);
         }
+    }
+
+    /// Joins what an argument is known to be into the parameter that takes it.
+    fn pass(&mut self, param: Value, arg: Value) {
+        let fact =
+            if tracked(self.func[param].ty) { self.facts[arg.index()] } else { Fact::Varying };
+        self.learn(param, fact);
     }
 
     /// Which arms of a terminator its condition lets through.
@@ -857,6 +888,35 @@ block2:
         );
         assert!(out.contains("iconst.i32 25"), "{out}");
         assert!(!out.contains("mul"), "{out}");
+    }
+
+    /// Every arm of the switch is taken while the counter it passes is still one. What the
+    /// counter learns after that, going round the loop, still has to reach each arm's parameter
+    /// even though the switch is not taken again.
+    #[test]
+    fn an_argument_that_changes_after_its_arm_was_taken_still_reaches_the_parameter() {
+        let out = solved(
+            r#"
+func @f(i32) -> i32, linkage(external) {
+block0(%0: i32):
+    %1 = iconst.i32 0
+    jump block1(%1)
+block1(%2: i32):
+    %3 = iconst.i32 1
+    %4 = add.i32 %2, %3
+    switch %0, block2(%4), [1 => block2(%4), 2 => block3(%4)]
+block2(%5: i32):
+    %6 = icmp slt %5, %0
+    br_if %6, block1(%5), block4(%5)
+block3(%7: i32):
+    jump block4(%7)
+block4(%8: i32):
+    return %8
+}
+"#,
+        );
+        assert!(out.contains("%4 = add %2, %3"), "{out}");
+        assert!(out.contains("return %8"), "the counter is not a constant, {out}");
     }
 
     /// Known bits are facts short of a constant: whatever `x` is, `x & 12` has its low two bits
