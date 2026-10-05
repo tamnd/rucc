@@ -1177,6 +1177,9 @@ impl Unit<'_> {
         // What a `target` attribute said the function is built for, which the inliner compares
         // against each caller: a body built for SSE4.2 is not copied into one that is not.
         func.target = tast.target(decl);
+        // The room a patcher gets in this function, when an attribute said rather than the
+        // command line. See `rucc_codegen::pipeline`.
+        func.patchable = tast.patchable(decl);
         func.section = self.section_of(decl, true);
         // A claim about what a call to it returns, which travels on the declaration for the reason
         // `noreturn` does: `malloc` is only ever declared here. `rucc_opt::objsize` reads it off
@@ -1347,6 +1350,7 @@ impl Unit<'_> {
             clone.declared = func.declared;
             clone.named = func.named;
             clone.align = func.align;
+            clone.patchable = func.patchable;
             clone.attrs = func.attrs;
             clone.attrs.set = clone.attrs.set.without(AttrSet::ALWAYS_INLINE);
             clone.section = func.section;

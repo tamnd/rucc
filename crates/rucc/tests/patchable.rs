@@ -243,3 +243,104 @@ fn a_target_with_no_section_to_record_it_in_is_refused() {
     assert!(err.contains("-fpatchable-function-entry="), "{err}");
     assert!(err.contains("is not the section this compiler writes"), "{err}");
 }
+
+/// `__attribute__((patchable_function_entry(N, M)))` in place of the flag for one function,
+/// measured against gcc 13: `(0, 0)` takes the room away, one number puts all of it after the
+/// label, and the last declaration to say something is the one that counts, the definition's or
+/// not, as is the second of two on one declaration. A function that says nothing gets what the
+/// command line asked for.
+#[test]
+fn the_attribute_takes_the_place_of_the_flag_for_one_function() {
+    let source = "\
+void plain(void) {}
+__attribute__((patchable_function_entry(0, 0))) void off(void) {}
+__attribute__((patchable_function_entry(3))) void three(void) {}
+__attribute__((patchable_function_entry(4, 1))) void split(void) {}
+void declared(void) __attribute__((__patchable_function_entry__(2)));
+void declared(void) {}
+__attribute__((patchable_function_entry(2))) void twice(void);
+__attribute__((patchable_function_entry(3))) void twice(void) {}
+__attribute__((patchable_function_entry(2))) __attribute__((patchable_function_entry(3, 3)))
+void same(void) {}
+__attribute__((patchable_function_entry(3, 0))) void later(void);
+void later(void) __attribute__((patchable_function_entry(1, 1)));
+void later(void) {}
+_Static_assert(__has_attribute(patchable_function_entry), \"patchable_function_entry\");
+";
+    let sides = |text: &str, name: &str| {
+        let lines = about(text, name);
+        let own = label(&lines, name);
+        (nops(&lines[..own]), nops(&lines[own..]))
+    };
+    for (flags, plain) in [(&[][..], (0, 0)), (&["-fpatchable-function-entry=5,2"][..], (2, 3))] {
+        let text = asm("attribute", flags, source);
+        for (name, want) in [
+            ("plain", plain),
+            ("off", (0, 0)),
+            ("three", (0, 3)),
+            ("split", (1, 3)),
+            ("declared", (0, 2)),
+            ("twice", (0, 3)),
+            ("same", (3, 0)),
+            ("later", (1, 0)),
+        ] {
+            assert_eq!(sides(&text, name), want, "{name} under {flags:?}");
+            let recorded = text.contains(&format!(".Lpfe_{name}:"));
+            assert_eq!(recorded, want != (0, 0), "{name} under {flags:?}");
+        }
+    }
+}
+
+/// What gcc 13 says about `patchable_function_entry` written with the wrong number of arguments,
+/// with one that is not a count, and with more in front of the label than there is room, which
+/// leaves none in front. gcc says nothing about it on a variable or a type and neither does this.
+#[test]
+fn the_attribute_is_checked_in_gcc_s_words() {
+    let source = "\
+int v __attribute__((patchable_function_entry(1)));
+int n = 3;
+__attribute__((patchable_function_entry(n))) void var(void) {}
+__attribute__((patchable_function_entry(\"a\"))) void str(void) {}
+__attribute__((patchable_function_entry(-1))) void neg(void) {}
+__attribute__((patchable_function_entry(70000))) void big(void) {}
+__attribute__((patchable_function_entry(1, 2))) void more(void) {}
+typedef void fn(void) __attribute__((patchable_function_entry(1)));
+void (*p)(void) __attribute__((patchable_function_entry(1)));
+";
+    let (ok, text, said) = run("said", TARGET, &[], source);
+    assert!(ok, "{said}");
+    let expected = [
+        (3, "warning: 'patchable_function_entry' attribute argument 'n' is not an integer constant"),
+        (4, "warning: 'patchable_function_entry' attribute argument"),
+        (5, "warning: 'patchable_function_entry' attribute argument '-1' is not an integer constant"),
+        (6, "warning: 'patchable_function_entry' attribute argument '70000' exceeds 65535"),
+        (7, "warning: patchable function entry 2 exceeds size 1"),
+    ];
+    for (line, what) in expected {
+        let at = format!(".c:{line}:");
+        assert!(
+            said.lines().any(|said| said.contains(&at) && said.contains(what)),
+            "missing {what:?} on line {line} in\n{said}"
+        );
+    }
+    assert_eq!(said.matches("warning:").count(), expected.len(), "{said}");
+    for name in ["var", "str", "neg", "big"] {
+        assert_eq!(nops(&about(&text, name)), 0, "{name}");
+    }
+    let more = about(&text, "more");
+    let own = label(&more, "more");
+    assert_eq!((nops(&more[..own]), nops(&more[own..])), (0, 1), "{more:?}");
+
+    let source = "\
+__attribute__((patchable_function_entry(1, 2, 3))) void three(void) {}
+__attribute__((patchable_function_entry())) void none(void) {}
+";
+    let (ok, _, said) = run("refused", TARGET, &[], source);
+    assert!(!ok, "{said}");
+    let what = "error: wrong number of arguments specified for 'patchable_function_entry' attribute";
+    for (line, found) in [(1, 3), (2, 0)] {
+        let at = format!(".c:{line}:");
+        assert!(said.lines().any(|l| l.contains(&at) && l.contains(what)), "{line}\n{said}");
+        assert!(said.contains(&format!("expected between 1 and 2, found {found}")), "{said}");
+    }
+}

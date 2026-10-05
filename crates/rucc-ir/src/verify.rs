@@ -271,6 +271,11 @@ impl<'a> Verifier<'a> {
                 }
             }
         }
+        // The part in front of the label is part of the total, and the code generator takes the one
+        // from the other.
+        if let Some((total, before)) = func.patchable.filter(|&(total, before)| before > total) {
+            self.error(format!("a patchable entry of {total} cannot have {before} in front"));
+        }
         if func.is_declaration() {
             self.func = None;
             return;
