@@ -863,6 +863,14 @@ float __truncdfsf2(double value) {
  */
 #define QUAD_BETWEEN_HIGH (QUAD_FRACTION_HIGH - FRACTION)
 
+/* clang has no `_Float128` on wasm32, and `long double` there is binary128, which is the format
+ * that the conversions below write. So on wasm the type is spelled `long double`, and the names
+ * and the calling convention are the ones that clang gives to compiler-rt.
+ */
+#ifdef __wasm__
+#define _Float128 long double
+#endif
+
 /* Which half of a pair in memory holds the sign and the exponent, asked once the way quad.c asks it. */
 #if defined(__BYTE_ORDER__) && defined(__ORDER_BIG_ENDIAN__) \
     && __BYTE_ORDER__ == __ORDER_BIG_ENDIAN__
