@@ -294,6 +294,7 @@ impl Call {
             Test::FloatPair => float_pair(shape, integer_width, float_width),
             Test::X87Stack => x87_stack(shape),
             Test::LoneFloat => lone_float(shape),
+            Test::SingleScalar => single_scalar(shape),
             Test::ComplexFloat => {
                 (shape.complex && shape.is_all_of(Format::Single) && shape.size == 8).then(Vec::new)
             }
@@ -479,6 +480,22 @@ fn lone_float(shape: &Shape<'_>) -> Option<Vec<Slot>> {
         }
         _ => None,
     }
+}
+
+/// The one scalar of an aggregate that is nothing else, and [`None`] for anything else.
+///
+/// The scalar has to start the aggregate and end it. A `struct { short s; }` with `aligned(4)` on
+/// it is four bytes around a two byte scalar, and clang passes that one as the address of a copy.
+/// A `_Complex` is never one scalar, because clang reads it as an aggregate of two.
+fn single_scalar(shape: &Shape<'_>) -> Option<Vec<Slot>> {
+    let [piece] = shape.pieces else { return None };
+    if shape.complex || piece.offset != 0 || piece.scalar.size != shape.size {
+        return None;
+    }
+    Some(vec![match piece.scalar.kind {
+        Kind::Float(format) => Slot::Float { offset: 0, format },
+        Kind::Integer => Slot::Integer { offset: 0, size: u32::try_from(shape.size).ok()? },
+    }])
 }
 
 /// The class of one eightbyte, section 3.2.3 of the SysV psABI.

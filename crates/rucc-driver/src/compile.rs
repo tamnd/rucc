@@ -391,10 +391,9 @@ pub fn compile(opts: &Options, name: &str, fs: &dyn FileSystem) -> Compiled {
                         &sess.target,
                     ));
                 }
-                // The lowering is written for a machine with registers, so a wasm unit stops
-                // here, after the checker, until the wasm backend of #2864 exists.
-                EmitKind::Ir
-                | EmitKind::MirFinal
+                // A wasm unit is lowered and optimized like any other, and stops before the
+                // back end until the wasm backend of #2864 exists.
+                EmitKind::MirFinal
                 | EmitKind::Asm
                 | EmitKind::Object
                 | EmitKind::Archive
@@ -4327,17 +4326,27 @@ decl #0 x : int object external static defined
         assert!(result.text().is_empty());
     }
 
-    /// A wasm target reads and checks the program, and every output that needs a back end is
-    /// refused with the issue that brings one.
+    /// A wasm target reads, checks and lowers the program, and every output that needs a back
+    /// end is refused with the issue that brings one.
     #[test]
-    fn a_wasm_target_checks_the_program_and_refuses_to_generate_it() {
-        let source = "int f(int a) { return a; }\n";
+    fn a_wasm_target_lowers_the_program_and_refuses_to_generate_it() {
+        let source = "struct p { int x, y; };\nstruct p f(struct p a, long long b) { return a; }\n";
         let mut opts = options();
         opts.target = "wasm32-wasip1".parse::<Triple>().unwrap();
         opts.emit = EmitKind::SyntaxOnly;
         let checked = run(&opts, source);
         assert!(!checked.failed(), "{:?}", checked.messages);
-        for emit in [EmitKind::Ir, EmitKind::MirFinal, EmitKind::Asm, EmitKind::Object] {
+        // The structure comes back through a hidden first parameter and goes in as the address
+        // of a copy, which is the wasm Basic C ABI.
+        opts.emit = EmitKind::Ir;
+        let lowered = run(&opts, source);
+        assert!(!lowered.failed(), "{:?}", lowered.messages);
+        assert!(
+            lowered.text().contains("func @f(ptr sret(8, align 4), ptr, i64)"),
+            "{}",
+            lowered.text()
+        );
+        for emit in [EmitKind::MirFinal, EmitKind::Asm, EmitKind::Object] {
             opts.emit = emit;
             let result = run(&opts, source);
             assert!(result.failed(), "{emit:?}");

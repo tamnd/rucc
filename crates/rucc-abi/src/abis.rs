@@ -677,6 +677,54 @@ impl Convention {
     }
 }
 
+/// The wasm32 Basic C ABI, which is what clang and wasi-libc follow on every wasm32 row.
+///
+/// The one ABI here with no shortage of registers. A wasm function has as many parameters as its
+/// type says, so every scalar is a parameter of its own and nothing ever runs short. The banks
+/// are counted anyway, and they are counted large, so the classifier asks the same questions it
+/// asks everywhere else and always gets the answer that there is room.
+///
+/// An aggregate is the address of a copy the caller made, unless it is one scalar and nothing
+/// else, which travels as that scalar. That is the whole of clang's `WebAssemblyABIInfo` for C.
+/// The same goes for one past the `...`: the variadic area holds the address of the copy and not
+/// the bytes, which is what clang's `va_arg` on wasm reads back. A return value that is not one
+/// scalar comes back through a hidden first parameter, which is the address the caller wants it
+/// written to.
+///
+/// A `long double` is IEEE quad here and travels as itself, which the backend splits into two
+/// `i64` parameters. An integer narrower than an `int` is extended by the caller, which clang
+/// says with `signext` and `zeroext` on the parameter and which the wasm backend relies on.
+pub static WASM32_BASIC_C: AbiDescription = AbiDescription {
+    name: "wasm32 Basic C",
+    banks: Banks { integer: 1000, float: 1000, shared: false, integer_width: 8, float_width: 16 },
+    scalars: Scalars {
+        in_memory: None,
+        wide_integer_is_all_or_nothing: false,
+        wide_integer_starts_even: false,
+        wide_integer_drains: false,
+        wide_is_by_reference: false,
+        wide_integer_returns_in: None,
+        wide_integer_in_memory: false,
+        decimal_in_integers: false,
+    },
+    returns: &[
+        Rule::new(Test::Empty, Travel::Ignore),
+        Rule::new(Test::SingleScalar, Travel::AsFound),
+        Rule::new(Test::Anything, Travel::ByReference),
+    ],
+    arguments: &[
+        Rule::new(Test::Empty, Travel::Ignore),
+        Rule::new(Test::SingleScalar, Travel::AsFound),
+        Rule::new(Test::Anything, Travel::ByReference),
+    ],
+    return_pointer: ReturnPointer::FirstArgument,
+    variadic: Variadic::SameAsFixed,
+    stack_args: StackArgs::RegisterSized,
+    narrow: Narrow::ToInt,
+    bit_ints: BitInts::Untaught,
+    cleanup: Cleanup::Caller,
+};
+
 /// The ABI a function of that convention follows on this target, which is [`for_target`] for the
 /// target's own, the other description on x86-64 for the other one, and the `stdcall` or
 /// `fastcall` description of the same runtime on 32-bit Windows.
@@ -733,6 +781,7 @@ pub static DESCRIBED: &[&AbiDescription] = &[
     &I386_MINGW_FASTCALL,
     &I386_MSVC_STDCALL,
     &I386_MSVC_FASTCALL,
+    &WASM32_BASIC_C,
 ];
 
 /// The ABI this target follows, and [`None`] for one whose ABI is not described yet.
@@ -760,6 +809,7 @@ pub fn for_target(target: TargetTuple) -> Option<&'static AbiDescription> {
         (Arch::Aarch64, Os::Windows) => &WINDOWS_ARM64,
         (Arch::Aarch64, _) => &AAPCS64,
         (Arch::Riscv64, _) => &RISCV_LP64D,
+        (Arch::Wasm32, _) => &WASM32_BASIC_C,
         _ => return None,
     })
 }

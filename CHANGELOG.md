@@ -7,6 +7,7 @@ All notable changes are recorded here. The format follows [Keep a Changelog](htt
 ### Added
 
 - `rucc_object::wasm` writes a relocatable wasm object, which is the first part of the wasm backend (#2864). The `object` crate reads wasm and does not write it, so the writer is new. It takes function bodies and data segments with the fields that the linker patches marked, and it writes the import of the memory, the `linking` section version 2 with the symbol table, the segment names and the constructors, `reloc.CODE` and `reloc.DATA` with padded five byte fields, `producers` and `target_features`. A test links an object that it writes with `wasm-ld` against the wasi-sdk 34 sysroot and runs it under Wasmtime when `WASI_SDK_PATH` is set.
+- `--emit=ir` works on the wasm rows (#2864). The lowering classifies each call by the wasm32 Basic C ABI, which is the ABI of clang and wasi-libc: a structure that holds one scalar and nothing else travels as that scalar, any other aggregate travels as the address of a copy that the caller makes, also past the `...`, and an aggregate return comes back through a hidden first parameter. An integer narrower than an `int` is extended by the caller. Before, every call on a wasm row was refused with "calling a function on this target is not supported yet". The other outputs that need a back end are still refused with "there is no wasm backend yet".
 
 ## 0.22.0
 

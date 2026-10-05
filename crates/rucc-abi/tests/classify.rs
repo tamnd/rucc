@@ -12,7 +12,7 @@
 
 use rucc_abi::abis::{
     AAPCS64, DARWIN_ARM64, I386_MINGW, I386_MSVC, I386_SYSV, I386_SYSV_REG_STRUCT, RISCV_LP64D,
-    SYSV_AMD64, WIN64, WINDOWS_ARM64,
+    SYSV_AMD64, WASM32_BASIC_C, WIN64, WINDOWS_ARM64,
 };
 use rucc_abi::{Arg, Call, Format, Kind, Pass, Piece, Scalar, Shape, Slot, pieces, record};
 
@@ -851,4 +851,69 @@ fn mingw_returns_a_lone_float_in_st0_and_msvc_in_eax() {
         I386_MSVC.call().returns(&Arg::Aggregate(record(&one_float))),
         Pass::Pieces(vec![gpr(0, 4)])
     );
+}
+
+/// A call on wasm32 with nothing spent yet, which never runs short.
+fn wasm() -> Call {
+    WASM32_BASIC_C.call()
+}
+
+#[test]
+fn wasm_passes_a_structure_of_one_scalar_as_that_scalar() {
+    let members = pieces(&[int(8)]);
+    let shape = record(&members);
+    assert_eq!(wasm().argument(&Arg::Aggregate(shape)), Pass::Pieces(vec![gpr(0, 8)]));
+    assert_eq!(wasm().returns(&Arg::Aggregate(shape)), Pass::Pieces(vec![gpr(0, 8)]));
+
+    let members = pieces(&[float(Format::Double, 8)]);
+    let shape = record(&members);
+    assert_eq!(wasm().argument(&Arg::Aggregate(shape)), Pass::Pieces(vec![fpr(0, Format::Double)]));
+
+    // A `long double` is IEEE quad on wasm and is one scalar like any other.
+    let members = pieces(&[float(Format::Quad, 16)]);
+    let shape = record(&members);
+    assert_eq!(wasm().returns(&Arg::Aggregate(shape)), Pass::Pieces(vec![fpr(0, Format::Quad)]));
+}
+
+#[test]
+fn wasm_passes_any_other_aggregate_as_the_address_of_a_copy() {
+    // Two `int`s are eight bytes, which travel in one register on SysV and as an address here.
+    let members = pieces(&[int(4), int(4)]);
+    let shape = record(&members);
+    assert_eq!(wasm().argument(&Arg::Aggregate(shape)), Pass::Reference);
+    assert_eq!(wasm().returns(&Arg::Aggregate(shape)), Pass::Reference);
+
+    // One scalar with room after it is not one scalar, which is a `short` in a structure that
+    // `aligned(4)` made four bytes.
+    let members = [Piece { offset: 0, scalar: int(2) }];
+    let shape = Shape { size: 4, align: 4, pieces: &members, complex: false };
+    assert_eq!(wasm().argument(&Arg::Aggregate(shape)), Pass::Reference);
+
+    // A `_Complex float` is two scalars, and clang passes it as an aggregate.
+    let members = pieces(&[float(Format::Single, 4), float(Format::Single, 4)]);
+    let shape = Shape { complex: true, ..record(&members) };
+    assert_eq!(wasm().argument(&Arg::Aggregate(shape)), Pass::Reference);
+}
+
+#[test]
+fn wasm_never_runs_short_and_passes_the_variadic_part_the_same_way() {
+    let mut call = wasm();
+    for _ in 0..200 {
+        assert_eq!(call.argument(&Arg::Scalar(int(8))), Pass::Direct);
+    }
+    let members = pieces(&[int(4)]);
+    let shape = record(&members);
+    assert_eq!(call.argument(&Arg::Aggregate(shape)), Pass::Pieces(vec![gpr(0, 4)]));
+
+    // Past the `...` the area holds the address of the copy and not its bytes, which is what
+    // clang's `va_arg` on wasm reads.
+    let members = pieces(&[int(4), int(4), int(4)]);
+    let shape = record(&members);
+    assert_eq!(wasm().variadic_argument(&Arg::Aggregate(shape)), Pass::Reference);
+}
+
+#[test]
+fn wasm_ignores_an_aggregate_of_no_size() {
+    let shape = record(&[]);
+    assert_eq!(wasm().argument(&Arg::Aggregate(shape)), Pass::Ignore);
 }
