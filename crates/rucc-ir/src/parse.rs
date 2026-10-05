@@ -482,6 +482,8 @@ impl<'a, 'n> Parser<'a, 'n> {
                 "literal" => global.literal = true,
                 "section" => global.section = Some(self.symbol_from_string()?),
                 "retain" => global.retain = true,
+                "noinit" => global.noinit = true,
+                "persistent" => global.persistent = true,
                 other => return self.fail(format!("a global has no `{other}`")),
             }
         }

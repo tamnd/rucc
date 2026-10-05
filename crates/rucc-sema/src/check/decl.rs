@@ -41,6 +41,7 @@ use rucc_types::{compatible, composite, is_complete, is_function, is_void, layou
 
 use crate::asm::FileAsm;
 use crate::check::Checker;
+use crate::check::noinit::Held;
 use crate::check::stmt::Enclosing;
 use crate::check::tls::Holder;
 use crate::decl::{
@@ -448,6 +449,7 @@ impl Checker<'_> {
         self.no_reordered(&[specs.attrs], true);
         self.strict_flex_refused(&[specs.attrs], Some(name));
         self.ms_hooked(&[specs.attrs], true);
+        self.reset_kept(&[specs.attrs], None, span);
         self.assume_misplaced(&[specs.attrs], true, specs.span);
         self.record_patchable(id, &[specs.attrs], DeclKind::Function);
         self.record_wasm_names(id, &[specs.attrs], DeclKind::Function);
@@ -817,6 +819,14 @@ impl Checker<'_> {
         // it, since there is no object of its own here to lay out.
         let state = if weakref.is_some() { Definition::Declared } else { state };
         let after = self.inlining(item.attrs);
+        // Both places, for the reason `retained` below reads both, and in the order they were
+        // written, since that is what decides which of these and a `section` is kept.
+        let held = (kind == DeclKind::Object).then_some(Held {
+            initialized: item.init.is_some(),
+            local: duration == StorageDuration::Automatic,
+            ty,
+        });
+        let (reset, unsectioned) = self.reset_kept(&[specs.attrs, item.attrs], held, span);
         let mut declared = Declared {
             name,
             ty,
@@ -876,7 +886,8 @@ impl Checker<'_> {
                     &[specs.attrs, item.attrs],
                     ty,
                     self.is_naked(specs.attrs) || self.is_naked(item.attrs),
-                ),
+                )
+                | reset,
             // Both places, for the reason `noreturn` above reads both. `__declspec` is written
             // in front and the attribute spelling is as often written after the declarator.
             dll: self.dll(specs.attrs) | self.dll(item.attrs),
@@ -924,6 +935,7 @@ impl Checker<'_> {
         };
         let section =
             section.or_else(|| starred.iter().find_map(|&attrs| self.sectioned(attrs, duration)));
+        let section = if unsectioned { None } else { section };
         // Both places, for the reason `retained` above reads both. The kernel writes `__copy` after
         // the declarator, between the parameter list and the `alias` it goes with.
         let section = match self.copied(&[specs.attrs, item.attrs]) {
@@ -1082,6 +1094,7 @@ impl Checker<'_> {
         self.no_reordered(&[specs.attrs, item.attrs], false);
         self.strict_flex_refused(&[specs.attrs, item.attrs], Some(name));
         self.ms_hooked(&[specs.attrs, item.attrs], false);
+        self.reset_kept(&[specs.attrs, item.attrs], None, span);
         self.record_fentry(None, &[specs.attrs, item.attrs], DeclKind::Type);
         self.record_symver(None, &[specs.attrs, item.attrs], StorageDuration::Static, span);
         self.resolver(&[specs.attrs, item.attrs], DeclKind::Type, span);

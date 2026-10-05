@@ -249,6 +249,7 @@ impl Globals {
                     | Place::Merged
                     | Place::Thread { zero: true }
                     | Place::Named(_, Holds::Zero)
+                    | Place::NoInit
             ) {
                 data.objects.push(object);
                 continue;
@@ -514,6 +515,14 @@ fn variable(
         // A Windows image has no zeroed half of its thread-local template. Every thread gets a copy
         // of the one `.tls` section, zeros included, which is what gcc writes there too.
         Place::Thread { .. } if format == ObjectFormat::Coff => Place::Thread { zero: false },
+        // A thread-local one is in the template every thread copies whatever else it says, which
+        // is gcc's answer for both of the two below.
+        place @ Place::Thread { .. } => place,
+        // The two sections a board's startup code leaves alone, which only ELF has. The front end
+        // asked everything else gcc asks before it set either, so a `section` beside one is gone
+        // and the image of a `noinit` one is zeros.
+        _ if format == ObjectFormat::Elf && global.noinit => Place::NoInit,
+        _ if format == ObjectFormat::Elf && global.persistent => Place::Persistent,
         // A literal the linker can merge with every other copy of the same string, on the one
         // format that has a section for it. See [`Place::Strings`].
         Place::ReadOnly if format == ObjectFormat::Elf && global.literal && one_string(&pieces) => {

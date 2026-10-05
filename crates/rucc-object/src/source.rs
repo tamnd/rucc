@@ -230,8 +230,10 @@ impl Shape {
             Shape { write: true, ..alloc }
         } else if family(".rodata") || name == ".rodata1" {
             alloc
-        } else if family(".bss") || family(".gnu.linkonce.b") {
+        } else if family(".bss") || family(".gnu.linkonce.b") || family(".noinit") {
             Shape { write: true, bits: false, ..alloc }
+        } else if family(".persistent") {
+            Shape { write: true, ..alloc }
         } else if family(".tbss") {
             Shape { write: true, thread: true, bits: false, ..alloc }
         } else if family(".tdata") {

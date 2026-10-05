@@ -291,7 +291,7 @@ impl Directives {
                 // A thread-local one keeps the `T` that makes it the template every thread copies,
                 // which a split that dropped it would turn into one variable for the program.
                 let flags = match place {
-                    Place::Zero => "\"aw\",@nobits",
+                    Place::Zero | Place::NoInit => "\"aw\",@nobits",
                     Place::ReadOnly => "\"a\"",
                     Place::Thread { zero: false } => "\"awT\",@progbits",
                     Place::Thread { zero: true } => "\"awT\",@nobits",
@@ -376,6 +376,19 @@ impl Directives {
                 out.push_str("\t.section\t.tls$,\"dw\"\n");
             }
             (Directives::Elf, Place::ReadOnly) => out.push_str("\t.section\t.rodata\n"),
+            // The two a board's startup code leaves alone. gcc leaves the type to gas, which knows
+            // both names, and it is spelled out here so that an assembler that does not know them
+            // makes the same sections.
+            (Directives::Elf, Place::NoInit) => {
+                out.push_str("\t.section\t.noinit,\"aw\",@nobits\n");
+            }
+            (Directives::Elf, Place::Persistent) => {
+                out.push_str("\t.section\t.persistent,\"aw\",@progbits\n");
+            }
+            // Only ELF has either, and [`crate::globals`] gives no other format one.
+            (Directives::Coff | Directives::CoffI386, Place::NoInit | Place::Persistent) => {
+                out.push_str("\t.data\n");
+            }
             // `M` and `S` with an entry a byte wide, which is the line gcc writes for its literals.
             (Directives::Elf, Place::Strings { align }) => {
                 let name = Place::strings(*align);

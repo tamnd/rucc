@@ -78,6 +78,7 @@ mod expr;
 mod extname;
 mod format;
 mod init;
+mod noinit;
 mod stmt;
 mod tls;
 mod ty;

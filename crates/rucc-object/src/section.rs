@@ -612,6 +612,13 @@ pub enum Place {
         /// cannot be in one run the linker merges.
         align: u64,
     },
+    /// A variable written `noinit` with no initializer, in the section the startup code never
+    /// clears, so what a program left in it is still there after a warm reset. `.noinit`, with no
+    /// bytes in the file, `"aw",@nobits`. ELF only, as gcc has it.
+    NoInit,
+    /// A variable written `persistent` with an initializer, in the section the loader fills and
+    /// the startup code never copies into again. `.persistent`, `"aw"`. ELF only.
+    Persistent,
 }
 
 /// What a variable in a section the program named holds, which is the one thing about the section
@@ -633,8 +640,9 @@ pub enum Holds {
 
 impl Holds {
     /// Whether a section of this name is one gcc makes carry no bytes, which is `.bss` and the
-    /// names under it, the small data one and the old COMDAT spellings of both. A kernel puts
-    /// its page aligned zeros in `.bss..page_aligned` and relies on this.
+    /// names under it, the small data one and the old COMDAT spellings of both, and `.noinit`,
+    /// which gas has made `@nobits` by its name since binutils 2.36. A kernel puts its page
+    /// aligned zeros in `.bss..page_aligned` and relies on this.
     #[must_use]
     pub fn nobits(name: &str) -> bool {
         name == ".bss"
@@ -643,6 +651,8 @@ impl Holds {
             || name == ".sbss"
             || name.starts_with(".sbss.")
             || name.starts_with(".gnu.linkonce.sb.")
+            || name == ".noinit"
+            || name.starts_with(".noinit.")
     }
 }
 
@@ -681,6 +691,8 @@ impl Place {
             Place::Zero => ".bss",
             Place::Thread { zero: false } => ".tdata",
             Place::Thread { zero: true } => ".tbss",
+            Place::NoInit => ".noinit",
+            Place::Persistent => ".persistent",
             Place::Merged | Place::Named(..) | Place::Pointer | Place::Strings { .. } => {
                 return None;
             }
