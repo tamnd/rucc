@@ -26,11 +26,11 @@ fn fixture(what: &str, source: &str) -> PathBuf {
 }
 
 /// What the compiler wrote for that source on that target, and whether it agreed to write anything.
-fn compile(what: &str, target: &str, source: &str) -> (bool, String, String) {
+fn compile(what: &str, target: &str, level: &str, source: &str) -> (bool, String, String) {
     let path = fixture(what, source);
     let out = Command::new(env!("CARGO_BIN_EXE_rucc"))
         .arg(format!("--target={target}"))
-        .args(["-S", "-o", "-"])
+        .args([level, "-S", "-o", "-"])
         .arg(&path)
         .output()
         .expect("the compiler is built before its own tests run");
@@ -42,7 +42,12 @@ fn compile(what: &str, target: &str, source: &str) -> (bool, String, String) {
 
 /// The assembly the compiler writes for source it accepts.
 fn asm(what: &str, target: &str, source: &str) -> String {
-    let (ok, wrote, said) = compile(what, target, source);
+    asm_at(what, target, "-O0", source)
+}
+
+/// [`asm`] at the optimization level `level`.
+fn asm_at(what: &str, target: &str, level: &str, source: &str) -> String {
+    let (ok, wrote, said) = compile(what, target, level, source);
     assert!(ok, "the compiler refused the fixture:\n{said}");
     wrote
 }
@@ -97,6 +102,33 @@ __attribute__((constructor(101))) void first(void) {}
     let numbered = text.find(".init_array.00101").expect("the numbered entry");
     let plain = text.find(".section\t.init_array,").expect("the unnumbered entry");
     assert!(numbered < plain, "the numbered entry was written second:\n{text}");
+}
+
+#[test]
+fn two_at_one_priority_run_in_the_order_of_the_file_also_when_optimized() {
+    // gcc runs `early` first and `undo_early` last, at each level. When it optimizes, it writes
+    // the variables of the unit newest first, and rucc does the same, but the entries of the
+    // constructors and destructors are not variables in gcc and keep the order of the file. An
+    // ELF linker keeps the order of the entries in one section, and the C runtime walks
+    // `.init_array` from its start and `.fini_array` from its end.
+    for level in ["-O0", "-O2"] {
+        let text = asm_at(
+            "order",
+            "x86_64-unknown-linux-gnu",
+            level,
+            "\
+__attribute__((constructor)) void early(void) {}
+__attribute__((constructor)) void late(void) {}
+__attribute__((destructor)) void undo_early(void) {}
+__attribute__((destructor)) void undo_late(void) {}
+",
+        );
+        let at = |name: &str| {
+            text.find(&format!("\t.quad\t{name}\n")).unwrap_or_else(|| panic!("{name}:\n{text}"))
+        };
+        assert!(at("early") < at("late"), "{level}: late is first:\n{text}");
+        assert!(at("undo_early") < at("undo_late"), "{level}: undo_late is first:\n{text}");
+    }
 }
 
 #[test]
@@ -175,6 +207,7 @@ fn a_destructor_is_refused_on_darwin_which_has_nowhere_to_put_one() {
     let (ok, _, said) = compile(
         "refused",
         "x86_64-apple-darwin",
+        "-O0",
         "\
 __attribute__((destructor)) void teardown(void) {}
 ",
@@ -189,6 +222,7 @@ fn a_priority_outside_the_range_is_an_error_and_a_reserved_one_is_a_warning() {
     let (ok, _, said) = compile(
         "range",
         "x86_64-unknown-linux-gnu",
+        "-O0",
         "\
 __attribute__((constructor(70000))) void late(void) {}
 ",
@@ -200,6 +234,7 @@ __attribute__((constructor(70000))) void late(void) {}
     let (ok, text, said) = compile(
         "reserved",
         "x86_64-unknown-linux-gnu",
+        "-O0",
         "\
 __attribute__((constructor(50))) void early(void) {}
 ",
@@ -214,6 +249,7 @@ fn the_attribute_on_something_that_is_not_a_function_is_ignored() {
     let (ok, text, said) = compile(
         "object",
         "x86_64-unknown-linux-gnu",
+        "-O0",
         "\
 __attribute__((constructor)) int not_a_function;
 ",
