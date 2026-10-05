@@ -15,7 +15,7 @@ use rucc_target::wasm::Feature;
 use crate::emit::{self, Code};
 use crate::irreducible::Node;
 use crate::structure::Shape;
-use crate::{Unit, functype, is_pair, valtype};
+use crate::{Unit, functype, is_pair, label_numbers, valtype};
 
 mod pair;
 
@@ -153,6 +153,7 @@ pub(crate) fn function(unit: &mut Unit<'_>, id: FuncId, symbol: u32) -> Result<F
         frame: Frame::default(),
         context: Vec::new(),
         labels: Vec::new(),
+        numbers: label_numbers(func),
         va: func.signature().variadic.then(|| params - 1),
         returns: !ty.results.is_empty(),
         sret: func.signature().returns.iter().any(|ret| is_pair(ret.ty)),
@@ -194,6 +195,8 @@ struct Lower<'u, 'a> {
     context: Vec<Ctx>,
     /// The label local of each dispatch node, which says the entry of its loop to go to.
     labels: Vec<u32>,
+    /// The number of each block whose address is taken, which is the address.
+    numbers: Map<Block, u32>,
     /// The parameter that holds the address of the extra arguments, in a variadic function.
     va: Option<u32>,
     returns: bool,
@@ -247,8 +250,10 @@ impl Lower<'_, '_> {
                 self.local.insert(value, local);
             }
             for inst in func.insts(block) {
-                if matches!(func[inst].opcode, Opcode::IConst | Opcode::FConst | Opcode::GlobalAddr)
-                {
+                if matches!(
+                    func[inst].opcode,
+                    Opcode::IConst | Opcode::FConst | Opcode::GlobalAddr | Opcode::BlockAddr
+                ) {
                     continue;
                 }
                 for value in func[inst].results() {
@@ -476,7 +481,7 @@ impl Lower<'_, '_> {
                 Ok(())
             }
             Opcode::TailCall => self.call(term, true),
-            Opcode::IndirectBr => Err("a computed goto is not translated yet".into()),
+            Opcode::IndirectBr => self.indirect(x, term),
             other => Err(format!("the terminator {} is not translated yet", other.name())),
         }
     }
@@ -560,6 +565,56 @@ impl Lower<'_, '_> {
             }
             self.code.br(default);
         }
+        for target in targets {
+            self.context.pop();
+            self.code.op(emit::END);
+            self.branch(x, target)?;
+        }
+        Ok(())
+    }
+
+    /// A computed `goto`, as one `block` for each distinct target around a `br_table` on the
+    /// number of the label, which is the address that [`label_numbers`] gives the label. The
+    /// numbers are dense, so the table is short. An address that is not one of the targets is a
+    /// jump that the program said it does not make, and it goes to an `unreachable`, which section
+    /// 7.5 of the WebAssembly notes asks for.
+    ///
+    /// The `br_table` is at each `goto`, where the notes put one dispatch block for the function.
+    /// Each `goto` passes its own arguments to each target, so one dispatch block would need a
+    /// parameter for each parameter of each target, and each `goto` would write all of them.
+    fn indirect(&mut self, x: usize, term: Inst) -> Result<()> {
+        let func = self.func;
+        let address = self.args(term)[0];
+        // The distinct targets, as the index of the first edge to each, and the depth that each
+        // number goes to. The address names the block and not the arguments, so a second edge to
+        // the same block is never taken. The depth is one more than the index, because the
+        // innermost `block` is the one that ends in `unreachable`.
+        let mut targets: Vec<usize> = Vec::new();
+        let mut cases: Vec<(u32, u32)> = Vec::new();
+        for (index, call) in func.successors(term).enumerate() {
+            let number = self.numbers[&call.block];
+            if cases.iter().all(|&(n, _)| n != number) {
+                targets.push(index);
+                cases.push((number, targets.len() as u32));
+            }
+        }
+        for _ in 0..=targets.len() {
+            self.code.open(emit::BLOCK, None);
+            self.context.push(Ctx::Other);
+        }
+        let min = cases.iter().map(|&(n, _)| n).min().unwrap_or(1);
+        let max = cases.iter().map(|&(n, _)| n).max().unwrap_or(1);
+        let mut table = vec![0; (max - min + 1) as usize];
+        for &(n, depth) in &cases {
+            table[(n - min) as usize] = depth;
+        }
+        self.push(address)?;
+        self.code.i32_const(min as i32);
+        self.code.op(emit::I32_SUB);
+        self.code.br_table(&table, 0);
+        self.context.pop();
+        self.code.op(emit::END);
+        self.code.op(emit::UNREACHABLE);
         for target in targets {
             self.context.pop();
             self.code.op(emit::END);
@@ -690,6 +745,12 @@ impl Lower<'_, '_> {
                     self.code.address(kind, target, 0);
                     return Ok(());
                 }
+                (Opcode::BlockAddr, _) => {
+                    let call =
+                        self.func.successors(inst).next().ok_or("a block_addr names no block")?;
+                    self.code.i32_const(self.numbers[&call.block] as i32);
+                    return Ok(());
+                }
                 _ => {}
             }
         }
@@ -802,7 +863,7 @@ impl Lower<'_, '_> {
         }
         let arg = |i: usize| args[i];
         match data.opcode {
-            Opcode::IConst | Opcode::FConst | Opcode::GlobalAddr => {}
+            Opcode::IConst | Opcode::FConst | Opcode::GlobalAddr | Opcode::BlockAddr => {}
             Opcode::Add
             | Opcode::Sub
             | Opcode::Mul

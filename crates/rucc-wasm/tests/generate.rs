@@ -164,6 +164,94 @@ fn a_graph_that_is_not_reducible_gets_a_dispatch_node() {
     assert!(written.bytes.contains(&0x0e), "no br_table");
 }
 
+/// A computed `goto` with a table of label addresses and a table of distances between labels.
+/// The two tables are in data, so the label numbers are written in the segments, and the code
+/// takes the address of `add` with `block_addr`. With one argument, `main` exits with 22, which
+/// is what clang gives for the C below.
+///
+/// ```c
+/// int main(int argc, char **argv) {
+///     static void *const table[] = { &&add, &&twice, &&stop };
+///     static const int from_add[] = { 0, &&twice - &&add, &&stop - &&add };
+///     static const unsigned char program[] = { 0, 1, 0, 1, 2 };
+///     int s = argc, pc = 0;
+///     goto *table[program[pc]];
+/// add:
+///     s += 3;
+///     goto *(&&add + from_add[program[++pc]]);
+/// twice:
+///     s *= 2;
+///     goto *table[program[++pc]];
+/// stop:
+///     return s;
+/// }
+/// ```
+const THREADED: &str = r#"; ModuleID = 't.c'
+; format 0
+target triple = "wasm32-unknown-wasip1"
+target datalayout = "e-p:32:32-i64:64-S128"
+
+global @program.2 : bytes 5 = { i8 0, i8 1, i8 0, i8 1, i8 2 }, align 1, linkage(internal), constant, droppable
+global @from_add.1 : bytes 12 = { i32 0, apart.4 @.Llbl.1 from @.Llbl.0, apart.4 @.Llbl.2 from @.Llbl.0 }, align 4, linkage(internal), constant, droppable
+global @table.0 : bytes 12 = { addr.4 @.Llbl.0, addr.4 @.Llbl.1, addr.4 @.Llbl.2 }, align 4, linkage(internal), constant, droppable
+
+func @main(i32, ptr) -> i32, linkage(external) {
+block0(%0: i32, %1: ptr):
+    %2 = iconst.i32 0
+    %3 = global_addr @table.0
+    %4 = load %3, align 4
+    indirect_br %4, block1(%0, %2), block2(%0, %2), block3(%0)
+
+block1(%5: i32, %6: i32):
+    %7 = iconst.i32 3
+    %8 = add.nsw %5, %7
+    %9 = block_addr block1
+    %10 = global_addr @from_add.1
+    %11 = global_addr @program.2
+    %12 = iconst.i32 1
+    %13 = add.nsw %6, %12
+    %14 = ptr_add %11, %13
+    %15 = load.i8 %14, align 1
+    %16 = zext.i32 %15
+    %17 = iconst.i32 2
+    %18 = shl.nsw %16, %17
+    %19 = ptr_add %10, %18
+    %20 = load.i32 %19, align 4
+    %21 = ptr_add %9, %20
+    indirect_br %21, block1(%8, %13), block2(%8, %13), block3(%8)
+
+block2(%22: i32, %23: i32):
+    %24 = iconst.i32 2
+    %25 = add.nsw %22, %22
+    %26 = global_addr @table.0
+    %27 = global_addr @program.2
+    %28 = iconst.i32 1
+    %29 = add.nsw %23, %28
+    %30 = ptr_add %27, %29
+    %31 = load.i8 %30, align 1
+    %32 = zext.i32 %31
+    %33 = shl.nsw %32, %24
+    %34 = ptr_add %26, %33
+    %35 = load %34, align 4
+    indirect_br %35, block1(%25, %29), block2(%25, %29), block3(%25)
+
+block3(%36: i32):
+    return %36
+
+labels:
+    block1 = @.Llbl.0
+    block2 = @.Llbl.1
+    block3 = @.Llbl.2
+}
+"#;
+
+#[test]
+fn a_computed_goto_is_a_br_table_on_the_number_of_the_label() {
+    let written = object(THREADED).unwrap();
+    assert_eq!(written.defines, ["__main_argc_argv"]);
+    assert!(written.bytes.contains(&0x0e), "no br_table");
+}
+
 /// An `__int128` in two `i64` values: a call with two of them and one returned through memory,
 /// shifts by a constant across the halves, a sign extension, a compare of the high halves and a
 /// truncation. None of it calls the runtime. With one argument, `main` exits with 123, which is
@@ -314,5 +402,12 @@ fn the_dispatch_node_goes_to_the_entry_that_the_edge_named() {
 fn the_halves_of_an_int128_carry_into_each_other() {
     if let Some(status) = link_and_run("wide", WIDE) {
         assert_eq!(status, 123);
+    }
+}
+
+#[test]
+fn a_computed_goto_arrives_at_the_label_that_the_table_names() {
+    if let Some(status) = link_and_run("threaded", THREADED) {
+        assert_eq!(status, 22);
     }
 }

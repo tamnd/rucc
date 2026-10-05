@@ -37,9 +37,10 @@
 //! through a buffer in the frame. That is section 8.6 of the WebAssembly notes.
 //!
 //! What this refuses, with a message that names the function: a vector, `setjmp`, inline
-//! assembly, a computed `goto`, an alias, and the instructions of the memory safety monitor. Each
-//! of these is a later step of #2864 or of the milestones after it. A graph of blocks that is not
-//! reducible is not refused: a dispatch node makes it reducible.
+//! assembly, an alias, and the instructions of the memory safety monitor. Each of these is a later
+//! step of #2864 or of the milestones after it. A graph of blocks that is not reducible is not
+//! refused: a dispatch node makes it reducible. A computed `goto` is not refused either: the
+//! address of a label is a small number, and the `goto` is a `br_table` on it, as in LLVM.
 //!
 //! Every crate in the workspace is published, and publishing implies a promise. This one is
 //! tier 3: its Rust API is explicitly unstable and will change without a major version bump.
@@ -56,7 +57,7 @@ use std::fmt;
 
 use rucc_base::hash::Map;
 use rucc_base::{Interner, Symbol};
-use rucc_ir::{Abi, Datum, Linkage, Module, Signature, SymbolRef, Type};
+use rucc_ir::{Abi, Block, Datum, Func, Linkage, Module, Opcode, Signature, SymbolRef, Type};
 use rucc_object::wasm::{
     self, EXPORTED, FuncType, HIDDEN, Import, LOCAL, NO_STRIP, Place, Producers, RETAIN, RelocKind,
     Segment, SymbolKind, ValType, WEAK, Written,
@@ -107,6 +108,7 @@ pub fn generate(module: &Module, names: &Interner, features: Features) -> Result
         out: wasm::Module::default(),
         functions: Map::default(),
         data: Map::default(),
+        labels: Map::default(),
         stack_pointer: None,
         table: None,
     };
@@ -121,6 +123,10 @@ pub fn generate(module: &Module, names: &Interner, features: Features) -> Result
         }
         let symbol = unit.function(func.name).map_err(unit_wide)?.0;
         bodies.push((id, symbol));
+        let numbers = label_numbers(func);
+        for (block, name) in func.named_blocks() {
+            unit.labels.insert(name, numbers[&block]);
+        }
     }
     let mut variables = Vec::new();
     for id in module.globals() {
@@ -199,6 +205,9 @@ pub(crate) struct Unit<'a> {
     functions: Map<String, (u32, u32)>,
     /// The data symbols, by the name in the object.
     data: Map<String, u32>,
+    /// The number of each label whose address a variable holds, by the name that the function
+    /// gave the label. See [`label_numbers`].
+    labels: Map<Symbol, u32>,
     stack_pointer: Option<u32>,
     table: Option<u32>,
 }
@@ -328,6 +337,22 @@ impl Unit<'_> {
                     zero &= bits[..width].iter().all(|&b| b == 0);
                     bytes.extend_from_slice(&bits[..width]);
                 }
+                Datum::Addr(reloc) if self.labels.contains_key(&self.ir[reloc].symbol) => {
+                    let reloc = self.ir[reloc];
+                    let number = i64::from(self.labels[&reloc.symbol]) + reloc.addend;
+                    zero &= number == 0;
+                    bytes.extend_from_slice(&label_bytes(number, reloc.size)?);
+                }
+                Datum::Apart { to, from }
+                    if self.labels.contains_key(&self.ir[to].symbol)
+                        && self.labels.contains_key(&from) =>
+                {
+                    let to = self.ir[to];
+                    let number = i64::from(self.labels[&to.symbol]) + to.addend
+                        - i64::from(self.labels[&from]);
+                    zero &= number == 0;
+                    bytes.extend_from_slice(&label_bytes(number, to.size)?);
+                }
                 Datum::Addr(reloc) => {
                     let reloc = self.ir[reloc];
                     if reloc.size != 4 {
@@ -381,6 +406,46 @@ impl Unit<'_> {
             fixups,
         })
     }
+}
+
+/// The number that stands for the address of each label of `func`, which is what `&&label` is
+/// on wasm.
+///
+/// A wasm function has no addresses inside it, so a computed `goto` cannot jump to an address.
+/// clang does what LLVM's `IndirectBrExpandPass` does: each label whose address is taken is a
+/// small number, and `goto *p` is a `br_table` on that number. rucc does the same. A label is a
+/// block that the function names for a variable, a block that a `block_addr` takes, or a target
+/// of an `indirect_br`. The labels are numbered from one in block order, so that no label has the
+/// address zero and the table of a `goto` is short. A label belongs to one function and its number
+/// is only compared inside that function, so two functions use the same numbers. A variable that
+/// holds the address and the code that takes it both ask this function, so they agree.
+pub(crate) fn label_numbers(func: &Func) -> Map<Block, u32> {
+    let mut labels: Vec<Block> = func.named_blocks().map(|(block, _)| block).collect();
+    for block in func.blocks() {
+        for inst in func.insts(block) {
+            if matches!(func[inst].opcode, Opcode::BlockAddr | Opcode::IndirectBr) {
+                labels.extend(func.successors(inst).map(|call| call.block));
+            }
+        }
+    }
+    labels.sort_by_key(|block| block.raw());
+    labels.dedup();
+    labels.into_iter().zip(1..).collect()
+}
+
+/// The bytes of a label number, or of the distance between two labels, in a variable.
+fn label_bytes(number: i64, size: u32) -> Result<Vec<u8>, String> {
+    let fits = match size {
+        1 => i8::try_from(number).is_ok(),
+        2 => i16::try_from(number).is_ok(),
+        4 => i32::try_from(number).is_ok(),
+        8 => true,
+        _ => false,
+    };
+    if !fits {
+        return Err(format!("holds the address of a label in {size} bytes, where it does not fit"));
+    }
+    Ok(number.to_le_bytes()[..size as usize].to_vec())
 }
 
 /// How many bytes a scalar in the initial value of a variable takes.
