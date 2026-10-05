@@ -4,6 +4,10 @@ All notable changes are recorded here. The format follows [Keep a Changelog](htt
 
 ## Unreleased
 
+## 0.24.3
+
+More of WA4 (#2866). On wasm with the bulk memory feature, a call to `memcpy`, `memmove` or `memset` is `memory.copy` or `memory.fill`, and with optimization, values that are never live at the same time share one local. The SQLite shell at `-O2` goes from 1,816,667 bytes to 1,684,044, which is 7.5% smaller than the shell that clang from wasi-sdk 34 builds. The release also has the `inject-fault` pass, a store of a constant in one `mov` on x86-64, and fixes for atomic builtins on a `bool` and for `-static` with `-pie`.
+
 ### Added
 
 - `-fenable-inject-fault=<function>` turns on `inject-fault`, a pass no level runs that flips the low bit of every integer the named functions store. It gives a bisection tool such as rucc-kernel's `rk mixed` a known miscompile to find, and each flip takes fuel, so `-fpass-fuel-global` lands on one store in one function.
