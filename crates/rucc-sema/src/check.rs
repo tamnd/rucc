@@ -69,6 +69,7 @@ use crate::tast::{Const, Tast};
 
 mod advice;
 mod annotate;
+mod assume;
 mod attr;
 mod builtin;
 mod clones;

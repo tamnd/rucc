@@ -136,6 +136,19 @@ impl Parser<'_> {
     /// One statement.
     pub(crate) fn statement(&mut self) -> StmtId {
         let start = self.cursor.span();
+        // Attributes and a `;` where a statement goes, as in `if (x) __attribute__((assume(y)));`,
+        // which is the attribute declaration a block item would have been and which gcc takes as
+        // the body of the `if`. In front of anything else they are dropped, as in a block.
+        if self.at_attribute() {
+            let attrs = self.attributes();
+            if self.cursor.at_punct(Punct::Semi) {
+                let decl = self.declaration(attrs, start);
+                let span = self.ast.decl_span(decl);
+                return self.add_stmt(Stmt::Decl(decl), span);
+            }
+            let span = self.span_from(start);
+            self.warn("E0411", "attributes on this statement are ignored", span);
+        }
         if let Some(punct) = self.cursor.current().punct() {
             match punct {
                 Punct::LBrace => return self.compound_stmt(),

@@ -255,11 +255,14 @@ impl Checker<'_> {
                 self.discard(value);
                 Stmt::Expr(value)
             }
-            ast::Stmt::Decl(decl) => {
-                let decls = self.check_decl(decl);
-                self.variably_modified(decls);
-                Stmt::Decls(decls)
-            }
+            ast::Stmt::Decl(decl) => match self.ast[decl] {
+                ast::Decl::Attributes(attrs) => self.assumed(attrs),
+                _ => {
+                    let decls = self.check_decl(decl);
+                    self.variably_modified(decls);
+                    Stmt::Decls(decls)
+                }
+            },
             ast::Stmt::Compound(body) => Stmt::Block(self.block(body)),
             ast::Stmt::If { cond, then, otherwise } => {
                 let cond = self.controlling(cond);
