@@ -25,6 +25,8 @@ mod builtin;
 mod pair;
 mod stackify;
 
+use stackify::Trees;
+
 type Result<T> = std::result::Result<T, String>;
 
 /// The frames on the way out of the code being written, innermost last. A branch names a frame
@@ -166,16 +168,16 @@ pub(crate) fn function(unit: &mut Unit<'_>, id: FuncId, symbol: u32) -> Result<F
         returns: !ty.results.is_empty(),
         sret: func.signature().returns.iter().any(|ret| is_pair(ret.ty)),
         annotate: None,
-        stacked: Set::default(),
-        moved: Set::default(),
+        trees: Trees::default(),
         pushed: Set::default(),
+        root: None,
     };
     if unit_notes {
         let (values, blocks) = rucc_ir::numbers(func);
         lower.annotate = Some(Annotate { notes: Notes::default(), values, blocks });
     }
     if lower.unit.optimize {
-        (lower.stacked, lower.moved) = lower.stackify();
+        lower.trees = lower.stackify();
     }
     lower.assign()?;
     lower.labels = (0..lower.shape.dispatches).map(|_| lower.new_local(ValType::I32)).collect();
@@ -227,12 +229,14 @@ struct Lower<'u, 'a> {
     sret: bool,
     /// The notes of the tree form, when it is asked for.
     annotate: Option<Annotate>,
-    /// The values that stay on the operand stack, and the instructions that make them, which are
-    /// written where the value is pushed. See `stackify.rs`.
-    stacked: Set<Value>,
-    moved: Set<Inst>,
-    /// The values of `stacked` that are pushed already.
+    /// The values that stay on the operand stack or are written with a `local.tee`, and the
+    /// instructions that make them, which are written where the value is pushed. See
+    /// `stackify.rs`.
+    trees: Trees,
+    /// The values of `trees` that are pushed already.
     pushed: Set<Value>,
+    /// The instruction of the block that is written now and keeps its place.
+    root: Option<Inst>,
 }
 
 /// The notes of the tree form for one function, and the numbers that the text of the IR gives
@@ -339,7 +343,7 @@ impl Lower<'_, '_> {
                 }
                 for value in func[inst].results() {
                     let ty = func[value].ty;
-                    if ty.is_mem() || ty.is_void() || self.stacked.contains(&value) {
+                    if ty.is_mem() || ty.is_void() || self.trees.stacked.contains(&value) {
                         continue;
                     }
                     let local = self.local_for(ty)?;
@@ -524,12 +528,14 @@ impl Lower<'_, '_> {
         let caught = self.caught(term);
         for inst in func.insts(block) {
             if inst != term
-                && !self.moved.contains(&inst)
+                && !self.trees.moved.contains(&inst)
                 && caught.is_none_or(|(call, unwound)| inst != call && inst != unwound)
             {
+                self.root = Some(inst);
                 self.inst(inst)?;
             }
         }
+        self.root = Some(term);
         match func[term].opcode {
             Opcode::Jump => self.branch(x, 0),
             Opcode::BrIf if caught.is_some() => {
@@ -893,12 +899,17 @@ impl Lower<'_, '_> {
     }
 
     /// Take a value off the operand stack into its local, or into its two locals for a pair,
-    /// whose high half is on top. A value that stays on the stack stays there.
+    /// whose high half is on top. A value that stays on the stack stays there, and a value that is
+    /// written at its first use is copied into its local and stays there too.
     fn set(&mut self, value: Value) {
-        if self.stacked.contains(&value) {
+        if self.trees.stacked.contains(&value) {
             return;
         }
         let local = self.local[&value];
+        if self.trees.teed.contains_key(&value) {
+            self.code.local_tee(local);
+            return;
+        }
         if is_pair(self.ty(value)) {
             self.code.local_set(local + 1);
         }
@@ -978,10 +989,17 @@ impl Lower<'_, '_> {
                     self.code.i32_const(self.numbers[&call.block] as i32);
                     return Ok(());
                 }
-                _ if self.stacked.contains(&value) => {
+                _ if self.trees.stacked.contains(&value) => {
                     if !self.pushed.insert(value) {
                         return Err("a value that stays on the stack is pushed twice".into());
                     }
+                    return self.inst(inst);
+                }
+                _ if self.trees.teed.contains_key(&value) && !self.pushed.contains(&value) => {
+                    if self.root != self.trees.teed.get(&value).copied() {
+                        return Err("a value written at its first use is read before it".into());
+                    }
+                    self.pushed.insert(value);
                     return self.inst(inst);
                 }
                 _ => {}

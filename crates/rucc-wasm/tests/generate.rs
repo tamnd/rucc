@@ -1517,6 +1517,39 @@ fn a_value_with_one_use_stays_on_the_stack_when_its_instruction_can_move() {
     assert_eq!(f.matches("local.set").count(), 4, "{f}");
 }
 
+/// A value with two uses, the first one a store.
+///
+/// ```c
+/// int f(int *p, int n) { int x = n * n; *p = x; return x + n; }
+/// ```
+const TEED: &str = r#"; ModuleID = 't.c'
+; format 0
+target triple = "wasm32-unknown-wasip1"
+target datalayout = "e-p:32:32-i64:64-S128"
+
+func @f(ptr, i32) -> i32, linkage(external) {
+block0(%0: ptr, %1: i32):
+    %2 = mul.nsw %1, %1
+    store %2 -> %0, align 4
+    %3 = add.nsw %2, %1
+    return %3
+}
+"#;
+
+/// With optimization, a value with more than one use is written at its first use, with a
+/// `local.tee` that keeps a copy for the other uses.
+#[test]
+fn a_value_with_more_uses_is_written_at_the_first_one_with_a_tee() {
+    let f = body_of(TEED, "f", true);
+    let tee =
+        "local.get\t0\n\tlocal.get\t1\n\tlocal.get\t1\n\ti32.mul\n\tlocal.tee\t2\n\ti32.store\t0\n";
+    assert!(f.contains(tee), "{f}");
+    assert!(f.contains("i32.store\t0\n\tlocal.get\t2\n\tlocal.get\t1\n\ti32.add\n"), "{f}");
+    assert_eq!(f.matches("local.set").count(), 0, "{f}");
+    let f = body_of(TEED, "f", false);
+    assert_eq!(f.matches("local.tee").count(), 0, "{f}");
+}
+
 /// A loop with two ways out, which is the C below at `-O1`.
 ///
 /// ```c

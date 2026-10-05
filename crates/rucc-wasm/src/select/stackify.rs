@@ -22,6 +22,12 @@
 //! or to a use that comes after the epilogue or after the buffer of the extra arguments of a
 //! variadic call is written. A block whose branch takes the `longjmp` of a call is left as it is,
 //! because its call is written in a `try_table`. See `sjlj.rs`.
+//!
+//! A value with more than one use moves down in the same way to the first of its uses, when no
+//! other instruction of the block reads it before that use, and it keeps its local. The selector
+//! then writes the instruction at that use and a `local.tee` after it, and the other uses read the
+//! local. This is not done for a use that is written only on one path, because then the local is
+//! not written on the other path.
 
 use rucc_base::hash::{Map, Set};
 use rucc_ir::{Extra, Flags, FloatPred, Inst, Opcode, Value};
@@ -55,6 +61,17 @@ enum Kind {
     Call,
 }
 
+/// Where an operand is pushed, which tells what can move there.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum Place {
+    /// Anything that can move.
+    Any,
+    /// Anything but a call.
+    NoCall,
+    /// Only a value with one use that is not a call, because the operand is pushed on one path.
+    Edge,
+}
+
 /// The facts about one block that the choice of each tree reads.
 struct Tree<'a> {
     /// The position of each instruction in the block.
@@ -63,6 +80,21 @@ struct Tree<'a> {
     before: &'a [Counts],
     /// How many times each value of the function is used.
     uses: &'a Map<Value, u32>,
+    /// The positions in the block of the uses of each value, once for each use, in order.
+    seen: &'a Map<Value, Vec<usize>>,
+}
+
+/// What stackify finds for a function.
+#[derive(Default)]
+pub(super) struct Trees {
+    /// The values with one use that stay on the stack.
+    pub(super) stacked: Set<Value>,
+    /// The values with more than one use that are written at their first use with a `local.tee`,
+    /// and the root of the tree of that use.
+    pub(super) teed: Map<Value, Inst>,
+    /// The instructions that make the values of `stacked` and `teed`, which are written where
+    /// the value is pushed.
+    pub(super) moved: Set<Inst>,
 }
 
 /// Whether the code of an instruction with this opcode has no effect, reads no memory and cannot
@@ -116,7 +148,7 @@ fn pure(opcode: Opcode) -> bool {
 
 impl Lower<'_, '_> {
     /// The values that are written where they are used, and their instructions.
-    pub(super) fn stackify(&self) -> (Set<Value>, Set<Inst>) {
+    pub(super) fn stackify(&self) -> Trees {
         let func = self.func;
         let mut uses: Map<Value, u32> = Map::default();
         for block in func.blocks() {
@@ -131,8 +163,7 @@ impl Lower<'_, '_> {
                 }
             }
         }
-        let mut stacked = Set::default();
-        let mut moved = Set::default();
+        let mut trees = Trees::default();
         for block in self.blocks() {
             let Some(term) = func.terminator(block) else { continue };
             if self.caught(term).is_some() {
@@ -152,39 +183,58 @@ impl Lower<'_, '_> {
                     traps: before[i].traps + u32::from(traps),
                 };
             }
-            let tree = Tree { at: &at, before: &before, uses: &uses };
+            let mut seen: Map<Value, Vec<usize>> = Map::default();
+            for (i, &inst) in insts.iter().enumerate() {
+                let edges = func.successors(inst).flat_map(|call| func[call.args].iter());
+                for &value in func[func[inst].args].iter().chain(edges) {
+                    seen.entry(value).or_default().push(i);
+                }
+            }
+            let tree = Tree { at: &at, before: &before, uses: &uses, seen: &seen };
             // From the end, so that an instruction is a root only when no root after it took it.
             for (root, &inst) in insts.iter().enumerate().rev() {
-                if !moved.contains(&inst) {
-                    self.take(inst, root, 0, &tree, &mut stacked, &mut moved);
+                if !trees.moved.contains(&inst) {
+                    self.take(inst, inst, root, 0, &tree, &mut trees);
                 }
             }
         }
-        (stacked, moved)
+        trees
     }
 
-    /// Put in the tree of the root at position `root` each operand of `user` that can move there,
-    /// and then the operands of each one that moves.
+    /// Put in the tree of `top`, the root at position `root`, each operand of `user` that can move
+    /// there, and then the operands of each one that moves.
     fn take(
         &self,
         user: Inst,
+        top: Inst,
         root: usize,
         depth: u32,
         tree: &Tree<'_>,
-        stacked: &mut Set<Value>,
-        moved: &mut Set<Inst>,
+        trees: &mut Trees,
     ) {
         if depth >= DEPTH {
             return;
         }
-        for (value, calls) in self.operands(user) {
+        for (value, place) in self.operands(user) {
             let Some((def, _)) = self.def(value) else { continue };
             let Some(&from) = tree.at.get(&def) else { continue };
-            if from >= root || tree.uses.get(&value) != Some(&1) || moved.contains(&def) {
+            if from >= root || trees.moved.contains(&def) {
+                continue;
+            }
+            let one = tree.uses.get(&value) == Some(&1);
+            // A value with more than one use moves only to the one use of the block that is
+            // written first, and only when it is not pushed on one path.
+            let first = || {
+                let uses = tree.seen.get(&value).map_or(&[][..], Vec::as_slice);
+                uses.iter().filter(|&&at| at > from && at <= root).count() == 1
+            };
+            if !one && (place == Place::Edge || is_pair(self.ty(value)) || !first()) {
                 continue;
             }
             let Some(kind) = self.movable(def) else { continue };
-            if (kind == Kind::Call && !calls) || self.results(def).as_slice() != [value] {
+            if (kind == Kind::Call && place != Place::Any)
+                || self.results(def).as_slice() != [value]
+            {
                 continue;
             }
             let (low, high) = (tree.before[from + 1], tree.before[root]);
@@ -196,21 +246,25 @@ impl Lower<'_, '_> {
                 }
             };
             if free {
-                stacked.insert(value);
-                moved.insert(def);
-                self.take(def, root, depth + 1, tree, stacked, moved);
+                if one {
+                    trees.stacked.insert(value);
+                } else {
+                    trees.teed.insert(value, top);
+                }
+                trees.moved.insert(def);
+                self.take(def, top, root, depth + 1, tree, trees);
             }
         }
     }
 
-    /// The operands that the code of `inst` pushes once each, in any order, and for each one
-    /// whether a call can move there. Nothing for an instruction whose code does something else
-    /// with its operands.
-    fn operands(&self, inst: Inst) -> Vec<(Value, bool)> {
+    /// The operands that the code of `inst` pushes once each, in any order, and for each one what
+    /// can move there. Nothing for an instruction whose code does something else with its
+    /// operands.
+    fn operands(&self, inst: Inst) -> Vec<(Value, Place)> {
         let func = self.func;
         let data = &func[inst];
         let args = self.args(inst);
-        let all = |calls: bool| args.iter().map(|&v| (v, calls)).collect::<Vec<_>>();
+        let all = |place: Place| args.iter().map(|&v| (v, place)).collect::<Vec<_>>();
         let pairs = args.iter().chain(&self.results(inst)).any(|&v| is_pair(self.ty(v)));
         match data.opcode {
             Opcode::Call | Opcode::CallIndirect if !self.builtin_call(inst) => {
@@ -218,14 +272,15 @@ impl Lower<'_, '_> {
                 let info = func[info];
                 let sig = &func[info.signature];
                 if !sig.variadic {
-                    return all(true);
+                    return all(Place::Any);
                 }
                 // The extra arguments are stored in the buffer of the frame one by one, and the
                 // address of an indirect call is pushed after them, so a call there would write
                 // over the buffer.
                 let skip = usize::from(info.callee.is_none());
                 let fixed = skip + sig.params.iter().filter(|p| !p.ty.is_mem()).count();
-                args.iter().enumerate().map(|(i, &v)| (v, i >= skip && i < fixed)).collect()
+                let place = |i| if i >= skip && i < fixed { Place::Any } else { Place::NoCall };
+                args.iter().enumerate().map(|(i, &v)| (v, place(i))).collect()
             }
             _ if pairs => Vec::new(),
             Opcode::Add
@@ -267,8 +322,8 @@ impl Lower<'_, '_> {
             | Opcode::Cttz
             | Opcode::Ctpop
             | Opcode::Expect
-            | Opcode::Store => all(true),
-            Opcode::Load if !data.flags.contains(Flags::VOLATILE) => all(true),
+            | Opcode::Store => all(Place::Any),
+            Opcode::Load if !data.flags.contains(Flags::VOLATILE) => all(Place::Any),
             // The other predicates push an operand twice or not at all.
             Opcode::FCmp => match data.extra {
                 Extra::FloatPred(
@@ -282,25 +337,26 @@ impl Lower<'_, '_> {
                     | FloatPred::Uge
                     | FloatPred::Ult
                     | FloatPred::Ule,
-                ) => all(true),
+                ) => all(Place::Any),
                 _ => Vec::new(),
             },
             // The epilogue gives the frame back before the values are pushed, and a call there
             // would put its frame on top of what this function still reads.
-            Opcode::Return if !self.sret => all(false),
+            Opcode::Return if !self.sret => all(Place::NoCall),
             // The arguments of the edges of a `br_if` are pushed only when the edge is taken, so a
-            // call there would not be made on the other edge.
+            // call there would not be made on the other edge, and a local written there would not
+            // be written on the other edge.
             Opcode::BrIf | Opcode::Jump => {
                 let mut out = Vec::new();
                 if data.opcode == Opcode::BrIf {
-                    out.push((args[0], true));
+                    out.push((args[0], Place::Any));
                 }
-                let calls = data.opcode == Opcode::Jump;
+                let place = if data.opcode == Opcode::Jump { Place::Any } else { Place::Edge };
                 for call in func.successors(inst) {
                     let params = &func[call.block].params;
                     for (&arg, &param) in func[call.args].iter().zip(params) {
                         if !func[param].ty.is_mem() && arg != param {
-                            out.push((arg, calls));
+                            out.push((arg, place));
                         }
                     }
                 }

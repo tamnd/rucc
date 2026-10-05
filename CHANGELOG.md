@@ -4,6 +4,10 @@ All notable changes are recorded here. The format follows [Keep a Changelog](htt
 
 ## Unreleased
 
+### Changed
+
+- At `-O1` and above, the wasm backend writes a value with more than one use at its first use and keeps a copy in its local with a `local.tee`, when the instruction that makes the value can move to that use and no other instruction of the block reads the value before it (#2866). The rules for what can move are the rules of stackify. A value is not written this way into one edge of a branch, because then the local is not written on the other edge. The SQLite shell at `-O2` goes from 1,952,890 bytes to 1,923,305.
+
 ## 0.24.1
 
 The first steps of WA4, wasm code at `-O2` that is close to clang in size and speed (#2866). A value with one use stays on the operand stack, and a branch that is only a `br` is a `br_if`. The SQLite shell at `-O2` goes from 2,651,549 bytes to 1,952,890, which is 7.3% larger than the shell that clang from wasi-sdk 34 builds.
