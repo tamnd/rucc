@@ -365,13 +365,14 @@ impl std::fmt::Display for Error {
                 write!(f, "no linker was found; tried {}", tried.join(", "))?;
                 // wasm first, because wasm-ld is an lld too and the sentence below is about the
                 // floor for windows-gnu, which wasm does not have.
+                // Not the advice for the other targets, which names lld 19, because a WASI link
+                // needs lld 21 or newer.
                 if tried.iter().any(|name| name == "wasm-ld") {
                     return write!(
                         f,
-                        ". wasm-ld comes with lld: {}. wasi-sdk has one in its bin directory, \
-                         which rucc finds when WASI_SDK_PATH names it. `rucc --fetch` installs \
-                         the C library and not a linker",
-                        lld_advice()
+                        ". wasm-ld comes with lld {LLD_WASI} or newer. wasi-sdk 34 has one in its \
+                         bin directory, which rucc finds when WASI_SDK_PATH names it. `rucc \
+                         --fetch` installs the C library and not a linker"
                     );
                 }
                 // Only when lld was one of the names, because that is the linker every cross
@@ -409,6 +410,17 @@ impl std::fmt::Display for Error {
                  against, and this release pins none for it to fetch. Pass --sysroot=<dir> to name \
                  a tree you have already, or see spec/cross-compile/13-distribution.md section \
                  13.2 for the cache that will hold one"
+            ),
+            // The wasi-libc that `rucc --fetch` installs is the one in wasi-sdk 34, and its `sbrk`
+            // and dlmalloc refer to a symbol that only the linker defines. An older lld stops with
+            // "undefined symbol: __wasm_first_page_end", which says nothing about the cause.
+            Error::TooOld { name, found, target } if target.starts_with("wasm") => write!(
+                f,
+                "{name} is lld {found} and cannot link for {target}. The wasi-libc that `rucc \
+                 --fetch` installs, from wasi-sdk 34, refers to `__wasm_first_page_end`, which lld \
+                 defines from {LLD_WASI} on, so an older one stops on the first program that calls \
+                 malloc. No newer lld was found either. wasi-sdk 34 has one in its bin directory, \
+                 which rucc finds when WASI_SDK_PATH names it, or name one with -fuse-ld="
             ),
             // The whole message, because the person reading it has a linker that works, a link that
             // succeeded on their last try, and no reason to suspect the thing that is wrong.
@@ -1195,6 +1207,15 @@ fn lld_advice() -> &'static str {
 /// answer is wrong rather than absent. tamnd/rucc#1515.
 pub const LLD_EXPORTAS: u32 = 19;
 
+/// The first lld that defines `__wasm_first_page_end`, which `sbrk` and dlmalloc in the wasi-libc
+/// of wasi-sdk 34 refer to.
+///
+/// lld 18, 19 and 20 stop on any program that calls `malloc` with "undefined symbol:
+/// __wasm_first_page_end". The symbol is in `lld/wasm/Driver.cpp` of LLVM 21.1.0 and not of 20.1.8.
+/// Ubuntu 24.04 has lld 18 on PATH and 19 and 20 in its archive, so the machine this happens on is
+/// an ordinary one, and a newer lld that is installed in some other place must be found first.
+pub const LLD_WASI: u32 = 21;
+
 /// Whether a found linker can do this target's link, asked before it is handed anything.
 ///
 /// Section 11.6's rule is that suitable is checked and not assumed, and this is the one check that
@@ -1205,8 +1226,8 @@ pub const LLD_EXPORTAS: u32 = 19;
 /// program is wrong at startup and the link that made it said nothing. Ubuntu 24.04 is the current
 /// LTS and ships 18, so the machine this happens on is an ordinary one.
 ///
-/// Every other target is left alone, and so is anything that is not an lld, because this is the one
-/// version of the one linker that is known to answer wrongly rather than not at all.
+/// A WASI link has a floor too, [`LLD_WASI`], for the C library that `rucc --fetch` installs. Every
+/// other target is left alone, and so is anything that is not an lld.
 ///
 /// A linker that will not run or whose version cannot be read is allowed through. What the check
 /// can establish is that a specific old lld is here, and it should not turn every unusual linker
@@ -1215,13 +1236,15 @@ pub const LLD_EXPORTAS: u32 = 19;
 /// # Errors
 ///
 /// [`Error::TooOld`] when the linker is an lld older than [`LLD_EXPORTAS`] and the target is
-/// windows-gnu.
+/// windows-gnu, or older than [`LLD_WASI`] and the target is a WASI row.
 pub fn suitable(target: Triple, linker: &Linker) -> Result<(), Error> {
-    if (target.os, target.env) != (Os::Windows, Env::Gnu) {
-        return Ok(());
-    }
+    let floor = match (target.os, target.env) {
+        (Os::Windows, Env::Gnu) => LLD_EXPORTAS,
+        (Os::Wasi(_), _) => LLD_WASI,
+        _ => return Ok(()),
+    };
     let Some(found) = lld_major(&reported_version(&linker.path)) else { return Ok(()) };
-    if found >= LLD_EXPORTAS {
+    if found >= floor {
         return Ok(());
     }
     Err(Error::TooOld {
@@ -2977,6 +3000,27 @@ mod tests {
         // And the first one that reads them.
         let new = a_linker_that_says("19", "LLD 19.1.0 (compatible with GNU linkers)");
         assert_eq!(suitable(windows, &new), Ok(()));
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn an_lld_older_than_21_is_refused_for_wasi_and_the_message_says_why() {
+        // The wasi-libc of wasi-sdk 34 refers to `__wasm_first_page_end`, and 20 does not define
+        // it, so the link of the first program that calls malloc stops on an undefined symbol.
+        let wasi = Triple::new(Arch::Wasm32, Os::Wasi(rucc_target::Preview::P1), Env::None);
+        let old = a_linker_that_says("20", "Ubuntu LLD 20.1.2 (compatible with GNU linkers)");
+        let error = suitable(wasi, &old).expect_err("20 cannot link this");
+        let Error::TooOld { found, target, .. } = &error else { panic!("{error:?}") };
+        assert_eq!((*found, target.as_str()), (20, "wasm32-wasip1"));
+        let text = error.to_string();
+        assert!(text.contains("__wasm_first_page_end") && text.contains("WASI_SDK_PATH"), "{text}");
+        assert!(!text.contains("IMPORT_NAME_EXPORTAS"), "{text}");
+
+        // wasm32-none has no wasi-libc, and 21 defines the symbol.
+        let none = Triple::new(Arch::Wasm32, Os::None, Env::None);
+        assert_eq!(suitable(none, &old), Ok(()));
+        let new = a_linker_that_says("21", "LLD 21.1.0 (compatible with GNU linkers)");
+        assert_eq!(suitable(wasi, &new), Ok(()));
     }
 
     #[test]
