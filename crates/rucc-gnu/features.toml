@@ -888,6 +888,15 @@ tests = ["rucc::the_name_is_an_indirect_function_set_to_its_resolver", "rucc::if
 notes = "The function's own name is written as an indirect function, `.type f, @gnu_indirect_function` and `.set f,resolver`, global or local as the declaration is, and the dynamic linker binds a call to whatever the resolver hands back, the call through a pointer included. The resolver has to be defined in the same file, and a `static` one that nothing else calls is kept for it. One that does not return a pointer is refused and one that returns a pointer to another function type warned about under `-Wattribute-alias`, both in gcc's words, while `void *` is taken as it is. A body written for the function is a redefinition, and so is `alias` beside it on one declaration. The wrong number of arguments is refused with `E0819`, and on a variable, a typedef or a declaration in a block it is ignored with gcc's warning. Only ELF has the symbol type, so a COFF or Mach-O target refuses it."
 
 [[feature]]
+name = "symver"
+kind = "attribute"
+gcc_version = "10.0"
+status = "implemented"
+used_by = ["xz"]
+tests = ["rucc::a_version_is_a_second_name_written_back_as_the_symver_gcc_writes", "rucc::the_object_has_each_versioned_name", "rucc::the_attribute_is_checked_in_gcc_s_words"]
+notes = "`symver` with a string `name@node` on a function or a variable is a second name spelled with the version, at the same address and bound the same way, written as `.symver f, name@node` the way gcc writes it and put in the object's symbol table the way gas puts it. It is the same name a `.symver` in an `asm` makes. One declaration can ask for more than one, and an `alias` can ask for one, which is how a library keeps an old version beside the new. Only the first argument of one attribute counts, as in gcc. gcc's errors are given in its words, as `E0828` to `E0830`: the wrong number of arguments, an argument that is not a string or has no `@` or more than two, a version asked for twice, and a symbol that is not defined here, is common, is not public or does not have default visibility. A string that gas would refuse, such as one whose name starts with a digit, is refused at the attribute, where gcc leaves it to gas. On a member or a typedef it is ignored with gcc's warning, and so is an object in a frame. On a parameter it is ignored without one. Only ELF has symbol versions, so another object format refuses it, as gcc does. When the same version is asked for by a function and an object, the error is on the earlier declaration, where gcc puts it on the object."
+
+[[feature]]
 name = "fentry_name"
 kind = "attribute"
 gcc_version = "9.0"

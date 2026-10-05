@@ -2343,6 +2343,108 @@ impl Checker<'_> {
         }
     }
 
+    /// Records the versioned names `symver("name@node")` asks for, which are second names of a
+    /// function or an object with a symbol version in their spelling, as gas reads them in a
+    /// `.symver`. Whether the declaration may have them is settled where the symbols are, since
+    /// the definition may be below it, which is where the IR is built.
+    ///
+    /// Checked in gcc's words and in gcc's order. The wrong number of arguments is refused on
+    /// whatever it is written on. On anything but a function or a variable it is ignored with a
+    /// warning, `decl` being `None` there, and on an object in a frame with another, since it has
+    /// no symbol. An argument that is not a string, or a string without one or two `@` in it, is
+    /// refused, and so is one gas would refuse, which gcc leaves to gas. Only the first argument
+    /// of one attribute counts, which is what gcc does with the others. An object format other
+    /// than ELF has no symbol versions, and gcc refuses the attribute there.
+    pub(in crate::check) fn record_symver(
+        &mut self,
+        decl: Option<DeclId>,
+        lists: &[AttrList],
+        duration: StorageDuration,
+        span: Span,
+    ) {
+        let ast = self.ast;
+        let mut names = Vec::new();
+        for &attrs in lists {
+            for &attr in &ast[attrs] {
+                if self.gnu_name(&attr) != "symver" {
+                    continue;
+                }
+                let args = ast[attr.args].to_vec();
+                if args.is_empty() {
+                    let what = "wrong number of arguments specified for 'symver' attribute";
+                    let refused = Diagnostic::error(what, attr.span).with_code("E0828");
+                    self.report(refused.note("expected 1 or more, found 0", attr.span));
+                    continue;
+                }
+                if decl.is_none() {
+                    let what = "'symver' attribute only applies to functions and variables";
+                    self.report(Diagnostic::warning(what, attr.span).with_code("E0703"));
+                    continue;
+                }
+                if duration == StorageDuration::Automatic {
+                    let what = "'symver' attribute is only applicable to symbols";
+                    self.report(Diagnostic::warning(what, attr.span).with_code("E0703"));
+                    continue;
+                }
+                let mut spellings = Vec::new();
+                for arg in args {
+                    let string = match arg {
+                        AttrArg::Expr(expr) => {
+                            let checked = self.expr(expr);
+                            match self.tast[checked].kind {
+                                ExprKind::Str(id) if self.tast[id].encoding == Encoding::Plain => {
+                                    Some(id)
+                                }
+                                _ => None,
+                            }
+                        }
+                        AttrArg::Ident(_) => None,
+                    };
+                    let Some(id) = string else {
+                        let what = "'symver' attribute argument not a string constant";
+                        self.report(Diagnostic::error(what, attr.span).with_code("E0829"));
+                        spellings.clear();
+                        break;
+                    };
+                    let spelled: String = self.tast[id]
+                        .elements
+                        .iter()
+                        .filter_map(|&unit| char::from_u32(unit))
+                        .collect();
+                    if !matches!(spelled.matches('@').count(), 1 | 2) {
+                        let what = "symver attribute argument must have format 'name@nodename'";
+                        self.report(Diagnostic::error(what, attr.span).with_code("E0829"));
+                        let what = format!(
+                            "'symver' attribute argument '{spelled}' must contain one or two '@'"
+                        );
+                        self.report(Diagnostic::error(what, attr.span).with_code("E0829"));
+                        spellings.clear();
+                        break;
+                    }
+                    spellings.push(spelled);
+                }
+                let Some(spelled) = spellings.into_iter().next() else { continue };
+                if !is_versioned_name(&spelled) {
+                    let what = format!(
+                        "'symver' attribute argument '{spelled}' is not a name, an '@' or '@@' \
+                         and a version node"
+                    );
+                    self.report(Diagnostic::error(what, attr.span).with_code("E0829"));
+                    continue;
+                }
+                if self.cx.target.object_format != ObjectFormat::Elf {
+                    let what = "symver is only supported on ELF platforms";
+                    self.report(Diagnostic::error(what, span).with_code("E0830"));
+                    return;
+                }
+                names.push(spelled);
+            }
+        }
+        if let (Some(decl), false) = (decl, names.is_empty()) {
+            self.tast.record_symvers(decl, names, span);
+        }
+    }
+
     /// The type with its function, or the function it points at, made one without a landing pad,
     /// which is where [`Self::with_convention`] puts a convention and for the same reason.
     fn without_landing_pad(&mut self, ty: TypeId, span: Span) -> TypeId {
@@ -2942,6 +3044,18 @@ impl Checker<'_> {
             self.report(Diagnostic::error(what, at).with_code("E0825"));
         }
     }
+}
+
+/// Whether a `symver` string is one gas takes: a name, then `@` or `@@`, then a version node,
+/// which may be empty. `f@` is how a version script is asked for the base version.
+fn is_versioned_name(spelled: &str) -> bool {
+    let name = |part: &str| {
+        part.chars().next().is_some_and(|first| !first.is_ascii_digit())
+            && part.chars().all(|c| c.is_ascii_alphanumeric() || matches!(c, '_' | '.' | '$'))
+    };
+    let Some((bare, node)) = spelled.split_once('@') else { return false };
+    let node = node.strip_prefix('@').unwrap_or(node);
+    name(bare) && (node.is_empty() || name(node))
 }
 
 /// What one option of an `optimize` attribute or a `#pragma GCC optimize` line adds to `flags`.
