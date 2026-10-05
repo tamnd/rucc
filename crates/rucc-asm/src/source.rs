@@ -733,8 +733,9 @@ impl Reader {
         }
         // A prefix written on the same line as the instruction it goes in front of, which is how a
         // kernel writes `lock` and how it writes `cs` in front of a call it wants a byte longer.
-        // Taken off one at a time, so that `xacquire lock incl (%rax)` is two of them.
-        let (mut word, mut rest) = (word.to_owned(), rest);
+        // Taken off one at a time, so that `xacquire lock incl (%rax)` is two of them. gas reads a
+        // mnemonic whatever its case, and the x86 selftests write `SYSENTER`.
+        let (mut word, mut rest) = (word.to_ascii_lowercase(), rest);
         let mut prefixes = Vec::new();
         loop {
             if let Some((joined, after)) = repeated(&word, rest) {
@@ -747,7 +748,7 @@ impl Reader {
                 Some(cut) => (&rest[..cut], rest[cut..].trim()),
                 None => (rest, ""),
             };
-            (word, rest) = (next.to_owned(), after);
+            (word, rest) = (next.to_ascii_lowercase(), after);
         }
         let rest = self.unaliased(rest);
         self.instruction(&word, &rest, &prefixes)
@@ -5595,6 +5596,13 @@ mod tests {
 
     /// The shape of the kernel's la57toggle.S, which drops to thirty two bits in the middle of
     /// an x86-64 file, writes to a control register there and jumps back to a segment.
+    #[test]
+    fn a_mnemonic_is_read_whatever_its_case() {
+        // The x86 selftests write `SYSENTER`, and gas takes a prefix the same way.
+        let file = assembled(".text\nSYSENTER\nLOCK Incl (%rax)\nNop\n");
+        assert_eq!(bytes(&file, ".text"), [0x0f, 0x34, 0xf0, 0xff, 0x00, 0x90]);
+    }
+
     #[test]
     fn code32_reads_what_follows_in_thirty_two_bit_mode_until_code64() {
         let file = assembled(
