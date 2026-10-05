@@ -189,6 +189,9 @@ pub fn indirect(
     // the same register twice. Two parameters that share a register are given it by the one move.
     let mut writes: Vec<Vec<(mir::Reg, mir::Reg, RegClass)>> = vec![Vec::new(); branches.len()];
     let mut entries: Map<mir::Block, mir::Block> = Map::default();
+    // Each label with the block in front of it and the registers that block carries to it, in the
+    // order the labels were found.
+    let mut placed: Vec<(mir::Block, mir::Block, Vec<mir::Reg>)> = Vec::new();
 
     for target in targets {
         let params = func[target].params.clone();
@@ -238,21 +241,31 @@ pub fn indirect(
             }
         }
         func.set_weight(entry, total);
+        placed.push((target, entry, carried.clone()));
         *func.succs_mut(entry) = vec![mir::BlockCall::with(target, carried).taken(total)];
         entries.insert(target, entry);
     }
+
+    // And the labels that can do without a parameter at all, because what they would be given is
+    // already in a register they can keep using. See [`in_place`].
+    let renamed = in_place(func, &branches, &placed, &writes);
 
     // And the moves themselves, once every label has asked for what it wants, since what one label
     // asks for is what another may already have asked the same branch for.
     for (branch, moves) in branches.iter().zip(&writes) {
         let last = func.terminator(*branch).expect("a block that ends in a jump");
         for &(home, arg, class) in moves {
+            // A label handing on what it was given, which is in the register already.
+            if renamed.get(&arg) == Some(&home) {
+                continue;
+            }
             let name = frame.moves(class).expect("a class this machine can move").mov;
             let opcode = mir::Opcode::new(names.intern(&format!("{}{name}", frame.prefix)));
             let inst = func.build_loose(opcode).def(home, class).uses(arg, class).finish();
             func.insert_before(last, inst);
         }
     }
+    rename(func, &renamed);
 
     // And the addresses, which is the half of this that is not about edges. Every `&&label` in the
     // function names a block, and a label with a block in front of it now begins at that block, so
@@ -371,6 +384,183 @@ pub fn pads(
 /// register is, since sharing with a parameter a branch never gives anything to would be reading a
 /// register that branch never wrote.
 type Given = (RegClass, Vec<Vec<mir::Reg>>);
+
+/// Takes the parameters off the labels that can be given their value in the register a branch
+/// writes it to, and gives back each of those parameters with that register.
+///
+/// A label's parameter is given its value by a move out of that register at the top of the label,
+/// and an interpreter's handler hands most of what it was given on to the next handler unchanged,
+/// which is a move back into the same register in front of its jump. Neither move does anything
+/// the allocator could not have done by putting both in one place, but it cannot see that they
+/// belong in one place: the register lives from a jump to the label and no further, and the
+/// parameter lives from the label to the jump and no further, so a call in the handler is a reason
+/// to put the parameter somewhere a call keeps and no reason at all to do the same for the register.
+/// Every handler that makes a call then copies every value it carries out of one and back in.
+///
+/// So where it is safe the label reads the register itself and the parameter goes. It is safe when
+/// nothing else could have written the register by the time the label reads it, which is when all
+/// of these hold:
+///
+/// - The label is arrived at only from the block in front of it, so the register is the only way
+///   the value gets there.
+/// - Nothing defines the parameter but the label, which is true of every parameter in a function
+///   that has not been allocated and is checked rather than trusted.
+/// - No branch writes the parameter into a register other than its own, since the moves in front
+///   of a jump are written one after another and one that read a register an earlier one wrote
+///   would read the wrong value.
+/// - No jump reads it, since the moves are written in front of the jump.
+/// - It is not wanted on the far side of any jump, which is the only place the register is written.
+///   That one is a walk back from every place the parameter is read until it reaches the label,
+///   and a walk that reaches any block a jump goes to is a value a jump went past.
+fn in_place(
+    func: &mut mir::Func,
+    branches: &[mir::Block],
+    placed: &[(mir::Block, mir::Block, Vec<mir::Reg>)],
+    writes: &[Vec<(mir::Reg, mir::Reg, RegClass)>],
+) -> Map<mir::Reg, mir::Reg> {
+    let mut preds: Vec<Vec<mir::Block>> = vec![Vec::new(); func.block_count()];
+    for block in func.blocks() {
+        for call in &func[block].succs {
+            preds[call.block.index()].push(block);
+        }
+    }
+    // Every block a jump through a register goes to, which is the block in front of a label that
+    // takes something and the label itself for one that takes nothing.
+    let mut beyond = vec![false; func.block_count()];
+    for &branch in branches {
+        for call in &func[branch].succs {
+            beyond[call.block.index()] = true;
+        }
+    }
+    // Each parameter that may be its register, with its label and that register.
+    let mut candidates: Map<mir::Reg, (mir::Block, mir::Reg)> = Map::default();
+    for (target, front, homes) in placed {
+        let (target, front) = (*target, *front);
+        if preds[target.index()] != [front] {
+            continue;
+        }
+        for (param, &home) in func[target].params.iter().zip(homes) {
+            candidates.insert(param.reg, (target, home));
+        }
+    }
+    if candidates.is_empty() {
+        return Map::default();
+    }
+
+    let mut out: Vec<mir::Reg> = Vec::new();
+    let mut reads: Map<mir::Reg, Vec<mir::Block>> = Map::default();
+    for (&branch, moves) in branches.iter().zip(writes) {
+        for &(home, arg, _) in moves {
+            if let Some(&(_, own)) = candidates.get(&arg) {
+                if own == home {
+                    reads.entry(arg).or_default().push(branch);
+                } else {
+                    out.push(arg);
+                }
+            }
+        }
+        let last = func.terminator(branch).expect("a block that ends in a jump");
+        out.extend(func[func[last].operands].iter().map(|operand| operand.reg));
+    }
+    for block in func.blocks() {
+        for param in &func[block].params {
+            if candidates.get(&param.reg).is_some_and(|&(target, _)| target != block) {
+                out.push(param.reg);
+            }
+        }
+        for inst in func.insts(block) {
+            for operand in &func[func[inst].operands] {
+                if !candidates.contains_key(&operand.reg) {
+                    continue;
+                }
+                if operand.role.is_def() {
+                    out.push(operand.reg);
+                } else {
+                    reads.entry(operand.reg).or_default().push(block);
+                }
+            }
+        }
+        for call in &func[block].succs {
+            for arg in &call.args {
+                if candidates.contains_key(arg) {
+                    reads.entry(*arg).or_default().push(block);
+                }
+            }
+        }
+    }
+    for reg in out {
+        candidates.remove(&reg);
+    }
+
+    // The walk back, one parameter at a time and stamped rather than cleared between them.
+    let mut seen = vec![0_usize; func.block_count()];
+    let mut stamp = 0;
+    let mut wanted: Vec<mir::Block> = Vec::new();
+    candidates.retain(|reg, &mut (target, _)| {
+        stamp += 1;
+        wanted.clear();
+        let Some(blocks) = reads.get(reg) else { return true };
+        wanted.extend(blocks.iter().copied().filter(|&block| block != target));
+        while let Some(block) = wanted.pop() {
+            if seen[block.index()] == stamp {
+                continue;
+            }
+            seen[block.index()] = stamp;
+            if beyond[block.index()] {
+                return false;
+            }
+            wanted.extend(preds[block.index()].iter().copied().filter(|&pred| pred != target));
+        }
+        true
+    });
+
+    // And the parameters themselves, label by label and from the last so that taking one off does
+    // not move the ones still to look at.
+    let mut renamed: Map<mir::Reg, mir::Reg> = Map::default();
+    for &(target, front, _) in placed {
+        let params = func[target].params.clone();
+        for (index, param) in params.iter().enumerate().rev() {
+            let Some(&(_, home)) = candidates.get(&param.reg) else { continue };
+            // The register holds what the parameter did now, so it is as wide as the wider of them.
+            let width = match (func.width(param.reg), func.width(home)) {
+                (Some(one), Some(other)) => u32::from(one.max(other)),
+                _ => 0,
+            };
+            func.set_width(home, width);
+            func.params_mut(target).remove(index);
+            func.succs_mut(front)[0].args.remove(index);
+            renamed.insert(param.reg, home);
+        }
+    }
+    renamed
+}
+
+/// Reads each register [`in_place`] took off a label as the register it was given in instead,
+/// everywhere in the function.
+fn rename(func: &mut mir::Func, renamed: &Map<mir::Reg, mir::Reg>) {
+    if renamed.is_empty() {
+        return;
+    }
+    let blocks: Vec<mir::Block> = func.blocks().collect();
+    for block in blocks {
+        let insts: Vec<mir::Inst> = func.insts(block).collect();
+        for inst in insts {
+            let operands = func[inst].operands;
+            for operand in &mut func[operands] {
+                if let Some(&home) = renamed.get(&operand.reg) {
+                    operand.reg = home;
+                }
+            }
+        }
+        for call in func.succs_mut(block) {
+            for arg in &mut call.args {
+                if let Some(&home) = renamed.get(arg) {
+                    *arg = home;
+                }
+            }
+        }
+    }
+}
 
 /// What each branch gives that label, edge by edge.
 ///
@@ -642,6 +832,93 @@ mod tests {
         // one of its own.
         let text = mir::print_func(&func, &names, &REGS);
         assert_eq!(text.matches("x64.mov_rr_64").count(), 2, "{text}");
+    }
+
+    /// Whether any instruction or edge in the function still reads or writes that register.
+    fn mentions(func: &mir::Func, reg: mir::Reg) -> bool {
+        func.blocks().any(|block| {
+            func.insts(block).any(|inst| func[func[inst].operands].iter().any(|op| op.reg == reg))
+                || func[block].succs.iter().any(|call| call.args.contains(&reg))
+        })
+    }
+
+    /// A jump through a register at the end of that block, to the label `to`, carrying `args`.
+    fn dispatch(
+        func: &mut mir::Func,
+        names: &mut Interner,
+        from: mir::Block,
+        to: mir::Block,
+        args: Vec<mir::Reg>,
+    ) {
+        let lea = mir::Opcode::new(names.intern("x64.lea_64"));
+        let jump = mir::Opcode::new(names.intern("x64.jmp_reg"));
+        let address = func.new_vreg(GPR);
+        func.build(from, lea).def(address, GPR).mem(mir::Mem::block(to)).finish();
+        func.build(from, jump).operand(mir::Operand::read(address, GPR)).finish();
+        func.succs_mut(from).push(mir::BlockCall::with(to, args));
+    }
+
+    #[test]
+    fn a_label_that_hands_on_what_it_was_given_reads_it_where_it_arrives() {
+        let mut names = Interner::new();
+        let mut func = mir::Func::new(names.intern("f"));
+        let head = func.create_block();
+        let label = func.create_block();
+        let state = func.append_param(head, GPR);
+        let given = func.append_param(label, GPR);
+        // The label reads what it was given and then hands it on to itself, which is what every
+        // handler of an interpreter does with the state it is not changing.
+        let test = mir::Opcode::new(names.intern("x64.test_rr_64"));
+        func.build(label, test).uses(given, GPR).uses(given, GPR).finish();
+        dispatch(&mut func, &mut names, head, label, vec![state]);
+        dispatch(&mut func, &mut names, label, label, vec![given]);
+
+        assert_eq!(indirect(&mut func, &BRANCH, &FRAME, &mut names), 1);
+        // The label takes nothing now and reads the register the head writes, so the one move is
+        // the head's and the label's own jump writes nothing.
+        assert!(func[label].params.is_empty());
+        assert!(!mentions(&func, given));
+        let text = mir::print_func(&func, &names, &REGS);
+        assert_eq!(text.matches("x64.mov_rr_64").count(), 1, "{text}");
+    }
+
+    #[test]
+    fn a_value_wanted_past_a_jump_keeps_a_parameter_of_its_own() {
+        let mut names = Interner::new();
+        let mut func = mir::Func::new(names.intern("f"));
+        let head = func.create_block();
+        let first = func.create_block();
+        let second = func.create_block();
+        let state = func.append_param(head, GPR);
+        let kept = func.append_param(first, GPR);
+        let other = func.new_vreg(GPR);
+        let given = func.append_param(second, GPR);
+        dispatch(&mut func, &mut names, head, first, vec![state]);
+        let lea = mir::Opcode::new(names.intern("x64.lea_64"));
+        func.build(first, lea).def(other, GPR).mem(mir::Mem::block(second)).finish();
+        dispatch(&mut func, &mut names, first, second, vec![other]);
+        // The second label reads what the first was given, so that value is still wanted after the
+        // first label's jump, and the jump writes the register the second label is given in.
+        let test = mir::Opcode::new(names.intern("x64.test_rr_64"));
+        func.build(second, test).uses(kept, GPR).uses(given, GPR).finish();
+
+        assert_eq!(indirect(&mut func, &BRANCH, &FRAME, &mut names), 2);
+        assert_eq!(func[first].params.len(), 1);
+        assert!(func[second].params.is_empty());
+    }
+
+    #[test]
+    fn a_label_arrived_at_some_other_way_keeps_its_parameter() {
+        let (mut names, mut func) = computed(1, 1);
+        let label = mir::Block::new(1);
+        let other = func.create_block();
+        let arg = func.append_param(other, GPR);
+        *func.succs_mut(other) = vec![mir::BlockCall::with(label, vec![arg])];
+
+        assert_eq!(indirect(&mut func, &BRANCH, &FRAME, &mut names), 1);
+        // An ordinary edge gives the label its value too, and that edge writes the parameter and
+        // not the register the branch writes.
+        assert_eq!(func[label].params.len(), 1);
     }
 
     #[test]
