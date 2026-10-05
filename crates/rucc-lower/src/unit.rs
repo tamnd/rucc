@@ -33,9 +33,9 @@ use rucc_base::hash::{Map, Set};
 use rucc_base::{Interner, Symbol};
 use rucc_diag::{Diagnostic, Span};
 use rucc_ir::{
-    Abi, Alias, AliasKind, AttrSet, Builder, DataList, Datum, Dll, Extra, FpContract, Func, Global,
-    Imm, InstData, Linkage as IrLinkage, Meta, Module, Opcode, Param, Reloc, Signature, SymbolRef,
-    TlsModel, Type, Visibility as IrVisibility,
+    Abi, Alias, AliasKind, AttrSet, Builder, CallInfo, DataList, Datum, Dll, Extra, FpContract,
+    Func, FuncId, Global, Imm, InstData, Linkage as IrLinkage, Meta, Module, Opcode, Param, Reloc,
+    Signature, SymbolRef, TlsModel, Type, Visibility as IrVisibility,
 };
 use rucc_sema::{
     Address, Base, Const, Conversion, DeclFlags, DeclId, DeclKind, Definition, Effects, Emission,
@@ -644,6 +644,55 @@ impl Unit<'_> {
             self.module.reverse_globals(written);
         }
         self.startups();
+        self.mismatched_calls();
+    }
+
+    /// A call by a name the file defines with another signature, made a call through its address.
+    ///
+    /// A declaration at block scope can give a function the assembler name of one the file
+    /// defines with other parameters. nolibc's `_start_c` declares `_nolibc_main` with three of
+    /// them and the label `main`, and a program using it defines `int main(void)`. C leaves the
+    /// call to the link and gcc makes it as written. A call by name here has to agree with the
+    /// function it names, and a call through the address is the way to make it as written.
+    fn mismatched_calls(&mut self) {
+        let ids: Vec<FuncId> = self.module.funcs().collect();
+        for id in ids {
+            let func = &self.module[id];
+            let mut found = Vec::new();
+            for block in func.blocks() {
+                for inst in func.insts(block) {
+                    let data = &func[inst];
+                    let (Opcode::Call, Extra::Call(at)) = (data.opcode, data.extra) else {
+                        continue;
+                    };
+                    let Some(callee) = func[at].callee else { continue };
+                    let Some(SymbolRef::Func(to)) = self.module.lookup(callee) else { continue };
+                    if self.module[to].signature() != &func[func[at].signature]
+                        && func.arg_groups(inst).is_none()
+                    {
+                        found.push((inst, callee));
+                    }
+                }
+            }
+            let func = &mut self.module[id];
+            for (inst, callee) in found {
+                let Extra::Call(at) = func[inst].extra else { continue };
+                let span = func.span(inst);
+                let data =
+                    InstData { extra: Extra::Symbol(callee), ..InstData::new(Opcode::GlobalAddr) };
+                let made = func.create_inst(data, &[Type::PTR], span);
+                func.insert_before(made, inst);
+                let addr = func[made].first_result.expect("an address has a result");
+                let mut operands = vec![addr];
+                operands.extend_from_slice(&func[func[inst].args]);
+                let args = func.push_values(&operands);
+                let info = func.add_call(CallInfo { callee: None, ..func[at] });
+                let data = &mut func[inst];
+                data.opcode = Opcode::CallIndirect;
+                data.args = args;
+                data.extra = Extra::Call(info);
+            }
+        }
     }
 
     /// The `asm` written at file scope, read into the globals they define.
