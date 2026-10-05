@@ -6169,6 +6169,18 @@ decl #0 x : int object external static defined
         assert!(said.contains("only available on x86_64"), "{said}");
     }
 
+    /// rseq's `param_test` keeps a `pthread_t` array as long as the number of threads next to a
+    /// record aligned to 128. The record takes its alignment out of extra bytes rather than from
+    /// the prologue, since the array moves the stack pointer after the prologue is done.
+    #[test]
+    fn an_over_aligned_local_next_to_a_variable_length_array_is_placed_inside_its_bytes() {
+        let text = asm("struct e { long v; } __attribute__((aligned(128)));\n\
+             void use(void *, void *);\n\
+             void f(int n) { long t[n]; struct e d[4]; use(t, d); }\n");
+        assert!(text.contains("andq\t$127, %"), "{text}");
+        assert!(!text.contains("andq\t$-128, %rsp"), "{text}");
+    }
+
     /// nolibc's `_start_c` declares `main` under another name with three parameters and calls it,
     /// and the program defines `int main(void)`. The call goes through the address, since a call
     /// by name has to agree with the function it names.

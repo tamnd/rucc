@@ -88,8 +88,11 @@
 //! Realigning and growing together is the one combination that is not here. After the prologue has
 //! forced an alignment the distance from the frame pointer to the body's stack pointer is already
 //! not a constant, so there is no register left for the rest of the frame to be counted from, and
-//! what fixes that is a second pointer held for the purpose. The lowering refuses that pair rather
-//! than this guessing at it.
+//! what fixes that is a second pointer held for the purpose. A fixed local asking for more than
+//! the stack pointer has in a frame like this never asks the prologue for it:
+//! [`crate::expand::rounds`] gives it extra bytes and the address inside them, the same as an
+//! array. The lowering refuses the pair when it arrives some other way rather than this guessing
+//! at it.
 //!
 //! # Late
 //!

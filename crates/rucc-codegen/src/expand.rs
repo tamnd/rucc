@@ -1175,13 +1175,30 @@ fn checkable(ty: Type) -> bool {
 /// the address it wanted out of the middle of them, which `aligns` below writes. The stack pointer
 /// itself is left where a call can be made from, so nothing about a frame like that is different
 /// from any other frame that grows.
-pub fn rounds(func: &mut Func, to: u32) {
+///
+/// A fixed local asking for more than `to` in a frame that grows is given its alignment the same
+/// way, which is the other half of it. The prologue cannot force the alignment of a frame whose
+/// stack pointer moves afterwards, so the local takes `align - to` bytes more than it needs at
+/// `to` and hands out the address inside them. `word` is the width of an address in bytes, which
+/// is what that arithmetic is done at. rseq's `param_test` has a `pthread_t` array as long as the
+/// number of threads next to a record aligned to 128.
+pub fn rounds(func: &mut Func, to: u32, word: u32) {
     let found: Vec<Inst> = func.blocks().flat_map(|block| func.insts(block)).collect();
+    let grows = found.iter().any(|&inst| match func[inst].opcode {
+        Opcode::Alloca => !func[func[inst].args].is_empty(),
+        Opcode::StackRestore => true,
+        _ => false,
+    });
     for inst in found {
         if func[inst].opcode != Opcode::Alloca {
             continue;
         }
-        let Some(&size) = func[func[inst].args].first() else { continue };
+        let Some(&size) = func[func[inst].args].first() else {
+            if grows {
+                lifts(func, inst, to, Type::int(word * 8));
+            }
+            continue;
+        };
         let ty = func[size].ty;
         if !ty.is_int() {
             continue;
@@ -1239,6 +1256,27 @@ fn aligns(func: &mut Func, inst: Inst, mem: Idx<MemInfo>, align: u32, to: u32) {
         extra: Extra::Mem(func.add_mem(info)),
         ..InstData::new(Opcode::Alloca)
     };
+    let raw = written(func, inst, block, Type::PTR);
+    let address = ahead(func, inst, Opcode::PtrToInt, &[raw], ty);
+    let zero = ahead_const(func, inst, Imm::int(0, ty), ty);
+    let below = ahead(func, inst, Opcode::Sub, &[zero, address], ty);
+    let bits = ahead_const(func, inst, Imm::int(i128::from(align) - 1, ty), ty);
+    let offset = ahead(func, inst, Opcode::And, &[below, bits], ty);
+    becomes(func, inst, Opcode::PtrAdd, &[raw, offset]);
+}
+
+/// Gives a fixed local in a frame that grows the alignment it asked for, when that is more than
+/// `to`, by taking more bytes at `to` and handing out the address inside them. See [`rounds`].
+fn lifts(func: &mut Func, inst: Inst, to: u32, ty: Type) {
+    let Extra::Mem(mem) = func[inst].extra else { return };
+    let mut info = func[mem];
+    let align = info.align;
+    if align <= to {
+        return;
+    }
+    info.size += u64::from(align - to);
+    info.align = to;
+    let block = InstData { extra: Extra::Mem(func.add_mem(info)), ..InstData::new(Opcode::Alloca) };
     let raw = written(func, inst, block, Type::PTR);
     let address = ahead(func, inst, Opcode::PtrToInt, &[raw], ty);
     let zero = ahead_const(func, inst, Imm::int(0, ty), ty);
@@ -3195,7 +3233,7 @@ mod tests {
             let slot = growing(build, args[0], 8);
             build.ret(&[slot]);
         });
-        rounds(&mut func, 16);
+        rounds(&mut func, 16, 8);
         let text = printed(&func, &mut names);
         assert!(text.contains("%3 = add %0, %1"), "{text}");
         assert!(text.contains("%4 = and %3, %2"), "{text}");
@@ -3218,7 +3256,7 @@ mod tests {
             let slot = growing(build, args[0], 32);
             build.ret(&[slot]);
         });
-        rounds(&mut func, 16);
+        rounds(&mut func, 16, 8);
         let text = printed(&func, &mut names);
         // The size, rounded up and then given the whole of the alignment as room to move in.
         assert!(text.contains("%5 = iconst.i64 32"), "{text}");
@@ -3234,6 +3272,47 @@ mod tests {
         // returns is the value it already returned.
         assert!(text.contains("%13 = ptr_add %7, %12"), "{text}");
         assert!(text.contains("return %13"), "{text}");
+    }
+
+    /// A fixed local wanting more than the stack pointer has is given it the same way when an array
+    /// moves the stack pointer in the same function, and left for the prologue when nothing does.
+    #[test]
+    fn a_fixed_local_wanting_more_alignment_in_a_frame_that_grows_is_placed_inside_its_bytes() {
+        let fixed = |build: &mut Builder<'_>| {
+            let info = MemInfo {
+                size: 256,
+                align: 128,
+                order: MemOrder::NotAtomic,
+                tbaa: None,
+                owns: 0,
+                restrict: Restrict::default(),
+            };
+            let mem = build.func().add_mem(info);
+            build.value(
+                InstData { extra: Extra::Mem(mem), ..InstData::new(Opcode::Alloca) },
+                Type::PTR,
+            )
+        };
+        let (mut names, mut func) = one(&[Type::int(64)], &[Type::PTR], |build, args| {
+            let local = fixed(build);
+            let _ = growing(build, args[0], 8);
+            build.ret(&[local]);
+        });
+        rounds(&mut func, 16, 8);
+        let text = printed(&func, &mut names);
+        // The record and the most it can be moved up by, at what the stack pointer has.
+        assert!(text.contains("%1 = alloca, size 368, align 16"), "{text}");
+        assert!(text.contains("%5 = iconst.i64 127"), "{text}");
+        assert!(text.contains("%7 = ptr_add %1, %6"), "{text}");
+        assert!(text.contains("return %7"), "{text}");
+
+        let (mut names, mut func) = one(&[], &[Type::PTR], |build, _| {
+            let local = fixed(build);
+            build.ret(&[local]);
+        });
+        let before = printed(&func, &mut names);
+        rounds(&mut func, 16, 8);
+        assert_eq!(printed(&func, &mut names), before);
     }
 
     /// `void *f(void *to, void *from) { return memcpy(to, from, size); }`, or the same with
