@@ -356,6 +356,52 @@ fn a_narrow_shift_takes_its_count_modulo_its_width() {
     }
 }
 
+/// Compiler barriers between two stores, as `__atomic_signal_fence` and the `asm` of a lock write
+/// them. They are no code, so the two stores stay and `main` exits with 0.
+///
+/// ```c
+/// int g;
+/// int main(void) { g = 1; __asm__ volatile(" " ::: "memory", "cc"); g = 2; __asm__(""); return 0; }
+/// ```
+const BARRIER: &str = r#"; ModuleID = 't.c'
+; format 0
+target triple = "wasm32-unknown-wasip1"
+target datalayout = "e-p:32:32-i64:64-S128"
+
+global @g : bytes 4 = { zero 4 }, align 4, linkage(external)
+
+func @main() -> i32, linkage(external) {
+block0:
+    %0 = global_addr @g
+    %1 = iconst.i32 1
+    store %1 -> %0, align 4
+    inline_asm.volatile " ", "", "memory,cc"()
+    %2 = iconst.i32 2
+    store %2 -> %0, align 4
+    %3 = iconst.i32 0
+    inline_asm.volatile.nomem "", "", ""()
+    return %3
+}
+"#;
+
+#[test]
+fn a_compiler_barrier_is_no_code_and_other_assembly_is_refused() {
+    let text = assembly(BARRIER);
+    assert_eq!(text.matches("i32.store").count(), 2, "{text}");
+    if let Some(status) = link_and_run("barrier", BARRIER) {
+        assert_eq!(status, 0);
+    }
+    for asm in [
+        r#"%4 = inline_asm.i32.nomem "local.get 0", "=r", ""()"#,
+        r#"inline_asm.volatile "nop", "", ""()"#,
+        r#"inline_asm.volatile "", "", "memory,r0"()"#,
+    ] {
+        let text = BARRIER.replace(r#"inline_asm.volatile.nomem "", "", ""()"#, asm);
+        let Err(refusal) = object(&text) else { panic!("the assembly is not refused") };
+        assert!(refusal.why.contains("inline assembly"), "{refusal}");
+    }
+}
+
 #[test]
 fn an_int128_is_two_i64_values_and_is_returned_through_memory() {
     let written = object(WIDE).unwrap();
