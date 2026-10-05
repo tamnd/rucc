@@ -45,11 +45,16 @@
 //! it checks agrees with it about everything, including the mistakes, and the one bug it can never
 //! find is the one in the code they share. Fifteen lines is a cheap price for a second opinion.
 //!
-//! It is also allowed to be slow. Looking for a value in a register an instruction wants is the
-//! plain product of the values and the constrained operands, with no index over either, because a
-//! checker runs in debug builds and in CI and the thing it is checking is the thing that has to be
-//! fast.
+//! It is allowed to be slower than the allocator, but not by a power of the function's size. Both
+//! questions that compare values with something are asked one place at a time: two values can
+//! only be wrong together if they are in the same place, and a value can only be in the way of an
+//! instruction if it is in the register the instruction wants. Asking them over every value
+//! instead was the plain product of the values and the constrained operands, which is nothing on
+//! a function a person wrote and minutes on one the safety instrumentation grew. libjpeg-turbo's
+//! Huffman encoder took over five minutes to build with the safety checks under `-Zverify-each`
+//! that way, against under three seconds without it.
 
+use std::collections::HashMap;
 use std::fmt;
 
 use rucc_mir::{Constraint, Func, Inst, Reg, Role};
@@ -209,6 +214,12 @@ struct Reuse {
 /// so the pairs it compares are the pairs that can be wrong rather than all of them. The interval
 /// is generous, so a pair that survives the sweep is then asked whether the areas inside those
 /// intervals really meet.
+///
+/// The sweep runs once for each place rather than once over everything. Two values in different
+/// places are never wrong together however much they overlap, and in a long function nearly every
+/// pair the single sweep held was such a pair, so the list it carried grew with the function and
+/// every value was compared with all of it. What is found is put back in the order the single
+/// sweep would have found it, so a report reads the same either way.
 fn overlaps(
     values: &[Value<'_>],
     reuses: &[Option<Reuse>],
@@ -217,38 +228,48 @@ fn overlaps(
 ) {
     let mut sorted = values.to_vec();
     sorted.sort_by_key(|value| (value.range.start, value.reg));
-    let mut active: Vec<Value<'_>> = Vec::new();
-    for value in sorted {
-        active.retain(|held| held.range.end >= value.range.start);
-        for held in &active {
-            if !together(*held, value)
-                || !held.area.overlaps(value.area)
-                || coalesced(*held, value, reuses, live)
-            {
-                continue;
-            }
-            problems.push(Problem::Shared {
-                first: held.reg,
-                second: value.reg,
-                place: value.place,
-            });
-        }
-        active.push(value);
+    let mut places: HashMap<(Place, Option<RegClass>), Vec<usize>> = HashMap::new();
+    for (position, value) in sorted.iter().enumerate() {
+        places.entry(place_of(*value)).or_default().push(position);
     }
+    let mut found = Vec::new();
+    for positions in places.values() {
+        let mut active: Vec<usize> = Vec::new();
+        for &position in positions {
+            let value = sorted[position];
+            active.retain(|&held| sorted[held].range.end >= value.range.start);
+            for &held in &active {
+                let held_value = sorted[held];
+                if !held_value.area.overlaps(value.area)
+                    || coalesced(held_value, value, reuses, live)
+                {
+                    continue;
+                }
+                let problem = Problem::Shared {
+                    first: held_value.reg,
+                    second: value.reg,
+                    place: value.place,
+                };
+                found.push((position, held, problem));
+            }
+            active.push(position);
+        }
+    }
+    // The single sweep found problems in the order the later value started, and for one value in
+    // the order the earlier ones did, which is the order of the two positions.
+    found.sort_by_key(|&(position, held, _)| (position, held));
+    problems.extend(found.into_iter().map(|(_, _, problem)| problem));
 }
 
-/// Whether two values were put in the same place.
+/// The place a value was put in, as the thing two values have to share to be in each other's way.
 ///
 /// Two registers of different classes are different registers even when they are the same number,
 /// which is what a class is. Two slots are the same slot whatever is in them, because a frame is
-/// one piece of memory.
-fn together(first: Value<'_>, second: Value<'_>) -> bool {
-    match (first.place, second.place) {
-        (Place::Reg(first_at), Place::Reg(second_at)) => {
-            first_at == second_at && first.class == second.class
-        }
-        (Place::Slot(first_slot), Place::Slot(second_slot)) => first_slot == second_slot,
-        _ => false,
+/// one piece of memory, so a slot's class is left out.
+fn place_of(value: Value<'_>) -> (Place, Option<RegClass>) {
+    match value.place {
+        Place::Reg(_) => (value.place, Some(value.class)),
+        Place::Slot(_) => (value.place, None),
     }
 }
 
@@ -281,6 +302,14 @@ fn instructions(
     reuses: &[Option<Reuse>],
     problems: &mut Vec<Problem>,
 ) {
+    // The values in each register, in the order they were given, since a value anywhere else can
+    // never be in the way of an instruction that wants that register.
+    let mut held: HashMap<PhysReg, Vec<Value<'_>>> = HashMap::new();
+    for value in values {
+        if let Place::Reg(at) = value.place {
+            held.entry(at).or_default().push(*value);
+        }
+    }
     for block in func.blocks() {
         for inst in func.insts(block) {
             for operand in &func[func[inst].operands] {
@@ -297,9 +326,10 @@ fn instructions(
                     _ => operand.reg.phys(),
                 };
                 let Some(at) = at else { continue };
+                let Some(here) = held.get(&at) else { continue };
                 let early = order.early(inst);
                 let point = if operand.role == Role::Def { order.late(inst) } else { early };
-                for value in values {
+                for value in here {
                     let mine = value.reg == operand.reg
                         || reuses[index(value.reg)].is_some_and(|reuse| {
                             reuse.source == operand.reg
@@ -502,6 +532,44 @@ mod tests {
 
         let said = said(&func, &order, &live, &assignment);
         assert_eq!(said, ["%0 and %1 are both live and both in register 0"]);
+    }
+
+    #[test]
+    fn values_sharing_different_places_are_reported_in_the_order_they_start() {
+        // Three pairs, each pair in a place of its own, defined so that the order the later value
+        // of each pair starts in is not the order the places would come out of a table in. The
+        // report has to read the same as it did when one sweep went over every value at once.
+        let mut names = Interner::new();
+        let mut func = Func::new(names.intern("f"));
+        let opcode = Opcode::new(names.intern("x64.nop"));
+        let block = func.create_block();
+        let regs: Vec<Reg> = (0..6).map(|_| func.new_vreg(GPR)).collect();
+        for reg in &regs {
+            func.build(block, opcode).def(*reg, GPR).finish();
+        }
+        let mut last = func.build(block, opcode);
+        for reg in &regs {
+            last = last.uses(*reg, GPR);
+        }
+        last.finish();
+
+        let (order, live) = read(&func);
+        let mut assignment = Assignment::empty(func.vregs());
+        let places = [Place::Slot(0), Place::Reg(RCX), Place::Reg(RAX)];
+        for (number, reg) in regs.iter().enumerate() {
+            assignment.put(*reg, places[number % 3]);
+        }
+
+        let rcx = RCX.number();
+        let rax = RAX.number();
+        assert_eq!(
+            said(&func, &order, &live, &assignment),
+            [
+                "%0 and %3 are both live and both in slot 0".to_string(),
+                format!("%1 and %4 are both live and both in register {rcx}"),
+                format!("%2 and %5 are both live and both in register {rax}"),
+            ]
+        );
     }
 
     #[test]
