@@ -4,6 +4,10 @@ All notable changes are recorded here. The format follows [Keep a Changelog](htt
 
 ## Unreleased
 
+## 0.24.1
+
+The first steps of WA4, wasm code at `-O2` that is close to clang in size and speed (#2866). A value with one use stays on the operand stack, and a branch that is only a `br` is a `br_if`. The SQLite shell at `-O2` goes from 2,651,549 bytes to 1,952,890, which is 7.3% larger than the shell that clang from wasi-sdk 34 builds.
+
 ### Changed
 
 - At `-O1` and above, the wasm backend keeps a value with one use in its own block on the operand stack, with no local, when the instruction that makes the value can move to the use (#2866). This is stackify, the first step of WA4. A load does not move past a store or a call, a call does not move past a load, a store or a trap, and a call does not move into one edge of a branch. The SQLite shell at `-O2` goes from 2,651,549 bytes to 2,002,778, and the shell that clang from wasi-sdk 34 builds is 1,820,595 bytes. `-O0` is as before.
