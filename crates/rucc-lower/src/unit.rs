@@ -1069,7 +1069,7 @@ impl Unit<'_> {
         // what keeps every other parameter where the plan put it. See [`crate::nest`].
         let frame = self.nest.frame(decl).filter(|frame| frame.nested).cloned();
         if let Some(frame) = &frame {
-            if !self.chains(span) {
+            if !self.chains(frame.escapes, span) {
                 return;
             }
             plan.signature.params.push(Param::with_abi(Type::PTR, Abi::Chain));
@@ -1387,9 +1387,20 @@ impl Unit<'_> {
     /// whose objects are ELF. Apple and Windows keep the register AArch64 would use, and on x86-64
     /// Windows passes its arguments somewhere else. `-ffixed-x18` keeps the register for the
     /// kernel's shadow call stack.
-    fn chains(&mut self, span: Span) -> bool {
+    ///
+    /// On wasm the chain is an ordinary parameter, the last one, so no register is needed. A
+    /// function there cannot write code, and the address of a function is an index into a table
+    /// that the module fixes when it is linked, so there is no trampoline. A nested function whose
+    /// address is taken is refused, and one that is only called directly is built.
+    fn chains(&mut self, escapes: bool, span: Span) -> bool {
         let chain = self.target.call_regs.and_then(|regs| regs.chain);
+        let wasm = self.target.tuple.arch() == rucc_tuple::Arch::Wasm32;
         let why = match chain {
+            None if wasm && escapes => Some(
+                "its address is taken, and a call through the address needs a trampoline, which \
+                 wasm cannot make",
+            ),
+            None if wasm => None,
             None => {
                 Some("the calling convention of this target has no register for the static chain")
             }
