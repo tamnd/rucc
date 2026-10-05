@@ -71,7 +71,7 @@ use crate::egraph::Classes;
 use crate::gcm::movable;
 use crate::number::{Key, is_address, key, widened};
 use crate::simplify::{Finder, apply};
-use crate::uses::{chase, count, substitute};
+use crate::uses::{chase, count, operands, substitute};
 use crate::{Analyses, Analysis, Fuel, Pass, Preserved, Stats};
 
 /// What this pass is called, for the lists in [`crate::pipeline`] that name it.
@@ -219,6 +219,17 @@ pub(crate) fn build(
     if let Some(classes) = classes {
         let table = an.machine().table();
         classes.extract(func, dom, table, &order, &forward, &mut stats);
+        // A duplicate stayed as a member for extraction to choose between, and goes now unless
+        // something chose it. Left for `crate::dce` it would be one more reader of what it reads to
+        // the passes in between, and `crate::narrow` takes only a value read once.
+        let mut uses = count(func);
+        for inst in gone.into_iter().rev() {
+            if func[inst].results().any(|value| uses[value.index()] > 0) {
+                continue;
+            }
+            operands(func, inst, |value| uses[value.index()] -= 1);
+            func.remove_inst(inst);
+        }
         return stats;
     }
     for inst in gone {
@@ -234,8 +245,8 @@ pub(crate) fn build(
 struct Walk<'a> {
     /// What each result that went is read as, whether a rule or a duplicate sent it there.
     forward: Map<Value, Value>,
-    /// The duplicates on their way out. What a rule pointed elsewhere is left for [`crate::dce`],
-    /// as [`crate::simplify`] leaves it.
+    /// The duplicates on their way out, which with classes go only once extraction is done. What a
+    /// rule pointed elsewhere is left for [`crate::dce`], as [`crate::simplify`] leaves it.
     gone: Vec<Inst>,
     /// The classes, when the walk is building them. See [`crate::egraph`].
     classes: Option<&'a mut Classes>,
@@ -260,14 +271,14 @@ impl Walk<'_> {
         stats.optimized(why);
     }
 
-    /// Reads the result as an equal value from now on. The instruction goes, or with classes it
-    /// stays as another member of the class for extraction to choose between.
+    /// Reads the result as an equal value from now on. The instruction goes, and with classes it is
+    /// first another member of the class for extraction to choose between.
     fn merge(&mut self, inst: Inst, result: Value, first: Value) {
         self.forward.insert(result, first);
-        match self.classes.as_deref_mut() {
-            Some(classes) => classes.union(result, first),
-            None => self.gone.push(inst),
+        if let Some(classes) = self.classes.as_deref_mut() {
+            classes.union(result, first);
         }
+        self.gone.push(inst);
     }
 
     /// Makes what the instruction computes a node of the graph, when there is one being built.

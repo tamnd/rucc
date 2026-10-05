@@ -29,7 +29,8 @@
 //! table found equal to it, but not a member of the same class computed further down or on another
 //! path, which section 12.7 names as the way extraction goes wrong. The walk visits the blocks in
 //! the order the rewriter did, so what an operand was extracted as is known by the time its reader
-//! is costed. What was not extracted is left for [`crate::dce`].
+//! is costed. A duplicate the table found that nothing chose goes, as it does in arm B, and what
+//! else was not extracted is left for [`crate::dce`], as arm B leaves what a rule replaced.
 //!
 //! # The budget
 //!
@@ -377,6 +378,21 @@ target datalayout = "e-p:64:64-i64:64-f80:128-S128"
         (rucc_ir::print(&module, &names), stats)
     }
 
+    /// The module that text is with only the pass run over it, so what it left is still there.
+    fn built(body: &str) -> String {
+        let mut names = Interner::new();
+        let text = format!("{HEAD}{body}");
+        let mut module = rucc_ir::parse(&text, &mut names).expect("the fixture parses");
+        let id = module.funcs().next().expect("one function");
+        let mut an = crate::machine::fixtures::analyses();
+        let mut classes = Classes::new(u32::MAX);
+        cons::build(&mut module[id], &mut an, &mut Fuel::unlimited(), Some(&mut classes));
+        if let Err(errors) = rucc_ir::verify(&module, &names) {
+            panic!("the pass left invalid IR, {errors:?}\n{}", rucc_ir::print(&module, &names));
+        }
+        rucc_ir::print(&module, &names)
+    }
+
     /// How many lines hold `what`.
     fn count(out: &str, what: &str) -> usize {
         out.lines().filter(|line| line.contains(what)).count()
@@ -436,6 +452,25 @@ block0(%0: i32):
         );
         let (nodes, classes) = (stats.count(Kind::Note, NODES), stats.count(Kind::Note, CLASSES));
         assert!(nodes >= classes && classes > 0, "{nodes} forms in {classes} classes");
+    }
+
+    #[test]
+    fn a_duplicate_nothing_extracted_goes_without_waiting_for_dce() {
+        // The second add is the first again. Left in place it would still read `%0` and `%1`,
+        // and a pass between this one and dead code elimination would count it as a reader.
+        let out = built(
+            r#"
+func @f(i32, i32) -> i32, linkage(external) {
+block0(%0: i32, %1: i32):
+    %2 = add %0, %1
+    %3 = add %0, %1
+    %4 = mul %2, %3
+    return %4
+}
+"#,
+        );
+        assert_eq!(count(&out, "= add"), 1, "{out}");
+        assert_eq!(count(&out, "= mul %2, %2"), 1, "{out}");
     }
 
     /// An add, then a multiply of the same operands, then both read.
