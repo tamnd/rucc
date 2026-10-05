@@ -106,10 +106,7 @@ fn the_object_has_each_versioned_name() {
     let _ = std::fs::remove_dir_all(&dir);
     for name in ["foo@VERS_1", "foo@@VERS_2", "bar@VERS_2", "bar@VERS_3", "baz@VERS_1", "base@"] {
         let spelled = format!("\0{name}\0");
-        assert!(
-            bytes.windows(spelled.len()).any(|window| window == spelled.as_bytes()),
-            "{name}"
-        );
+        assert!(bytes.windows(spelled.len()).any(|window| window == spelled.as_bytes()), "{name}");
     }
 }
 
@@ -137,7 +134,11 @@ fn the_attribute_is_checked_in_gcc_s_words() {
             "error: wrong number of arguments specified for 'symver' attribute",
             true,
         ),
-        ("__attribute__((symver)) int f(void) { return 1; }\n", "expected 1 or more, found 0", true),
+        (
+            "__attribute__((symver)) int f(void) { return 1; }\n",
+            "expected 1 or more, found 0",
+            true,
+        ),
         (
             "__attribute__((symver(1))) int f(void) { return 1; }\n",
             "error: 'symver' attribute argument not a string constant",
