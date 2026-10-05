@@ -905,7 +905,8 @@ pub struct TargetInfo {
     pub timing: Option<&'static TimingInsts>,
     /// The bit counts this machine has one instruction for, each with the extension it needs.
     ///
-    /// Empty for an architecture with no rules for them, which is everything but x86-64 today.
+    /// Empty for an architecture with no rules for them, which is everything but x86-64 and
+    /// AArch64 today.
     /// The code generator writes a count that is not here out as arithmetic, so a pass that would
     /// put one where there was none reads this first. See [`CountInst`].
     pub counts: &'static [CountInst],
@@ -1237,6 +1238,7 @@ impl TargetInfo {
             timing,
             counts: match target.arch() {
                 tuple::Arch::X86_64 => x86_64::COUNTS,
+                tuple::Arch::Aarch64 => aarch64::COUNTS,
                 _ => &[],
             },
         }

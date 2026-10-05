@@ -56,6 +56,7 @@ pub use crate::aarch64::write::{Spelling, cond_name, write};
 
 use crate::bits::BitInsts;
 use crate::branch::{BranchInsts, Fusion, Move};
+use crate::counts::{BitCount, CountInst};
 use crate::flags::{Compare, FlagInsts, Reader, Reads};
 use crate::frame::{ClassMoves, FrameInsts, Kept, Pair, Probe};
 use crate::machine::MachineInsts;
@@ -835,7 +836,7 @@ const fn aapcs64(
         // A weakly ordered machine, so an acquire is `ldar` and a release is `stlr`.
         total_store_order: false,
         unaligned: true,
-        byte_swaps: &[],
+        byte_swaps: &[32, 64],
         push: 16,
         link: Some(LR),
         sret: Some(X8),
@@ -859,6 +860,17 @@ const fn aapcs64(
         conventions: crate::Conventions::ONLY,
     }
 }
+
+/// The counts AArch64 has an instruction for, both in the base architecture.
+///
+/// `clz` is the leading zeros, and the trailing ones are `rbit` and then `clz`, which is what gcc
+/// writes. Both answer the width for a zero, as the IR counts do. The set bits are not here: the
+/// base architecture counts them only in a vector register, with `cnt` and `addv`, and that is
+/// still waiting on its rule (tamnd/rucc#310).
+pub const COUNTS: &[CountInst] = &[
+    CountInst { of: BitCount::LeadingZeros, feature: "", widths: &[32, 64] },
+    CountInst { of: BitCount::TrailingZeros, feature: "", widths: &[32, 64] },
+];
 
 #[cfg(test)]
 mod tests {

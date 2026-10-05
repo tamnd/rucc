@@ -65,6 +65,7 @@ The minor release for WA1 (#2863), the second step of the WebAssembly plan. rucc
 
 ### Changed
 
+- On AArch64, `__builtin_bswap32` and `__builtin_bswap64` are one `rev`, `__builtin_clz` and its wider forms are one `clz`, and `__builtin_ctz` and its wider forms are `rbit` and `clz` (#310). All three were written out as fifteen to twenty five instructions of shifts, masks and a multiply before, though every AArch64 processor has the instructions. The loop deletion pass now turns a loop that counts leading or trailing zeros into the count on AArch64 too, since it reads the same table. `__builtin_popcount` is still written out there, as the base architecture counts bits only in a vector register.
 - The target table has a `wasm32-wasip2` row, tier 4 with a plan for tier 2, for a component that wraps a core module built as for wasip1 (#2863). `tests/abi-corpus/wasm32-wasip2.c` compiles with no diagnostic under clang 23 from wasi-sdk 34. The LLVM spelling of a tuple, which is the `target triple` line of printed rucc IR and the answer of `rucc-targets llvm-triple`, is now `wasm32-unknown-wasip1` for wasip1, which is the name clang 23 uses, and `wasm32-unknown-unknown` for `wasm32-none`. Before, it was `wasm32-unknown-wasi`, which clang 23 says is deprecated, and `wasm32-unknown-none`, which LLVM does not know.
 
 ### Fixed

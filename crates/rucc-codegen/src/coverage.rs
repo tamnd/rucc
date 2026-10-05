@@ -201,19 +201,13 @@ pub static AARCH64_NAMES: &[(&str, &str, &str)] = &[
         "a byte swap, which `expand::bytes` writes out as shifts and masks before selection",
         "tamnd/rucc#307",
     ),
-    ("bswap.i32", "the same", "tamnd/rucc#307"),
-    ("bswap.i64", "the same", "tamnd/rucc#307"),
     (
-        "ctlz.i32",
-        "a bit count, which `expand::counts` writes out as arithmetic before selection on a \
-         machine with no rule for it",
+        "ctpop.i32",
+        "a population count, which `expand::counts` writes out as arithmetic before selection \
+         since the base architecture counts bits only in a vector register",
         "tamnd/rucc#310",
     ),
-    ("ctlz.i64", "the same", "tamnd/rucc#310"),
-    ("ctpop.i32", "the same", "tamnd/rucc#310"),
     ("ctpop.i64", "the same", "tamnd/rucc#310"),
-    ("cttz.i32", "the same", "tamnd/rucc#310"),
-    ("cttz.i64", "the same", "tamnd/rucc#310"),
 ];
 
 /// [`NAMES`] for `i386.rules`.
