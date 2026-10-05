@@ -509,6 +509,16 @@ pub enum ExprKind {
         /// `rdtsc`.
         aux: Option<ExprId>,
     },
+    /// `__builtin_ia32_readeflags_u64()` and `__builtin_ia32_writeeflags_u64(value)`, and the
+    /// `_u32` pair on i386, the processor's flags register.
+    ///
+    /// A node for the reason the one above is. What it becomes is a push and a pop through the
+    /// stack, since nothing moves the flags to a register directly. See `check/builtin/eflags.rs`.
+    Eflags {
+        /// What a write puts in the register, already the register's width, and nothing for a
+        /// read.
+        value: Option<ExprId>,
+    },
     /// `__builtin_cpu_supports("name")` and `__builtin_cpu_is("name")`, one word of what libgcc
     /// found out about the processor, tested.
     ///
