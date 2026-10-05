@@ -554,8 +554,10 @@ jobs:
   # programs run under Wasmtime and then under the WASI of Node, through tests/rung0/wasi.mjs. In
   # the Wasmtime run, `wasm-tools validate` checks each object and each module that rucc writes.
   # 00187 writes a file and reads it back, so both engines give the program the working directory.
+  # Then rucc builds the SQLite shell at -O0 and -O2 (#2865), and each build runs a fixed workload
+  # under both engines and must give the output of the shell that clang from wasi-sdk 34 builds.
   wasm:
-    name: wasm32-wasip1 rung 0
+    name: wasm32-wasip1 rung 0 and SQLite
     needs: quick
     runs-on: ubuntu-24.04
     steps:
@@ -590,6 +592,19 @@ jobs:
         env:
           RUNNER: node ${{ github.workspace }}/tests/rung0/wasi.mjs
         run: tests/rung0/run.sh "$PWD/target/release/rucc" wasm32-wasip1
+      - name: fetch the sqlite amalgamation
+        run: |
+          curl -fsSL -o sqlite.tar.gz https://sqlite.org/2026/sqlite-autoconf-3530400.tar.gz
+          echo "0e9483900e92cd5de8fd48d16bf9200145a61f7fd5be542a5ac81d8a9516eb9c  sqlite.tar.gz" | sha256sum -c -
+          tar xzf sqlite.tar.gz
+      - name: run the SQLite shell under Wasmtime
+        env:
+          RUNNER: wasmtime run
+        run: tests/sqlite/wasm.sh "$PWD/target/release/rucc" "$PWD/sqlite-autoconf-3530400"
+      - name: run the SQLite shell under Node
+        env:
+          RUNNER: node ${{ github.workspace }}/tests/rung0/wasi.mjs
+        run: tests/sqlite/wasm.sh "$PWD/target/release/rucc" "$PWD/sqlite-autoconf-3530400"
 
   # The barriers and atomics PostgreSQL is built on, run on AArch64 hardware. The qemu job above
   # cannot do this, because an emulated machine is only ever as weak as the x86 host under it, and
