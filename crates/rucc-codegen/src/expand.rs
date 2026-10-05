@@ -795,16 +795,26 @@ pub fn bit_count(opcode: Opcode) -> Option<BitCount> {
 /// up what the first one wrote, and it means there is one place that knows how to count bits rather
 /// than three. A search written out as a set bit count is one instruction after all on a processor
 /// that has `popcnt` and not `lzcnt`, since the second sweep keeps the count it became.
+///
+/// A count `kept` names as guarded is neither left alone nor written out. It is written as the
+/// choice [`chosen`] writes, which is the only shape the rule for it takes, and that is how a
+/// plain x86-64 gets `bsr` and `bsf` for its zero counts in place of the arithmetic.
 pub fn counts(func: &mut Func, kept: &[CountInst]) {
-    let kept = |func: &Func, inst: Inst| {
+    let answered = |func: &Func, inst: Inst, guarded: bool| {
         let bits = produced(func, inst).bits();
         bit_count(func[inst].opcode).is_some_and(|of| {
-            kept.iter().any(|count| count.of == of && count.widths.contains(&bits))
+            kept.iter().any(|count| {
+                count.of == of && count.guarded == guarded && count.widths.contains(&bits)
+            })
         })
     };
     let found: Vec<Inst> = func.blocks().flat_map(|block| func.insts(block)).collect();
     for inst in found {
-        if kept(func, inst) {
+        if answered(func, inst, false) {
+            continue;
+        }
+        if answered(func, inst, true) {
+            chosen(func, inst);
             continue;
         }
         match func[inst].opcode {
@@ -815,10 +825,31 @@ pub fn counts(func: &mut Func, kept: &[CountInst]) {
     }
     let found: Vec<Inst> = func.blocks().flat_map(|block| func.insts(block)).collect();
     for inst in found {
-        if func[inst].opcode == Opcode::Ctpop && !kept(func, inst) {
+        if func[inst].opcode == Opcode::Ctpop && !answered(func, inst, false) {
             counted(func, inst);
         }
     }
+}
+
+/// A zero count as a choice between the width, for a zero, and the same count, for anything else.
+///
+/// The choice says no more than the count does, since the count answers the width for a zero
+/// already, so the function means what it meant. What it is for is the rule. `bsr` and `bsf` leave
+/// the destination as it was for a zero on some processors and say nothing about it on others, so
+/// a rule may reach one only where something else answers the zero, and the choice written here
+/// is what the rule matches and what the conditional move after the search stands for.
+fn chosen(func: &mut Func, inst: Inst) {
+    let ty = produced(func, inst);
+    let Some(&arg) = func[func[inst].args].first() else { return };
+    if !countable(ty) {
+        return;
+    }
+    let opcode = func[inst].opcode;
+    let count = ahead(func, inst, opcode, &[arg], ty);
+    let zero = ahead_const(func, inst, Imm::int(0, ty), ty);
+    let none = ahead_cmp(func, inst, Opcode::ICmp, Extra::IntPred(IntPred::Eq), &[arg, zero]);
+    let width = ahead_const(func, inst, Imm::int(i128::from(ty.bits()), ty), ty);
+    becomes(func, inst, Opcode::Select, &[none, width, count]);
 }
 
 /// A leading or trailing zero count, as the set bit count of a value with those zeroes turned into
@@ -2856,7 +2887,8 @@ mod tests {
     /// as the set bit count it became.
     #[test]
     fn a_count_the_machine_has_an_instruction_for_is_left_for_the_selector() {
-        let popcnt = CountInst { of: BitCount::Ones, feature: "popcnt", widths: &[32, 64] };
+        let popcnt =
+            CountInst { of: BitCount::Ones, feature: "popcnt", widths: &[32, 64], guarded: false };
         for width in [32, 64] {
             let (mut names, mut func) = counting(Opcode::Ctpop, width);
             let before = printed(&func, &mut names);
@@ -2873,6 +2905,33 @@ mod tests {
         assert!(!text.contains("ctlz"), "the search is written out: {text}");
         assert_eq!(text.matches("ctpop").count(), 1, "as the count it became: {text}");
         assert!(!text.contains(" mul "), "which is not written out in turn: {text}");
+    }
+
+    /// A guarded count is written as the choice its rule takes: the width for a zero and the count
+    /// for anything else, with the count still there to be selected and nothing written out.
+    #[test]
+    fn a_guarded_count_becomes_the_choice_that_answers_the_width_for_a_zero() {
+        let guarded = |of| CountInst { of, feature: "", widths: &[32, 64], guarded: true };
+        let kept = [guarded(BitCount::LeadingZeros), guarded(BitCount::TrailingZeros)];
+        for (op, name) in [(Opcode::Ctlz, "ctlz"), (Opcode::Cttz, "cttz")] {
+            for width in [32, 64] {
+                let (mut names, mut func) = counting(op, width);
+                counts(&mut func, &kept);
+                let text = printed(&func, &mut names);
+                assert_eq!(text.matches(name).count(), 1, "the count is still there: {text}");
+                assert!(text.contains(&format!("iconst.i{width} {width}")), "the width: {text}");
+                assert!(text.contains("icmp eq"), "against zero: {text}");
+                assert!(text.contains("select"), "and the choice: {text}");
+                assert!(!text.contains("ctpop"), "nothing written out: {text}");
+                let module = Module::new(names.intern("c.c"), &target());
+                rucc_ir::verify_func(&module, &func, &names)
+                    .unwrap_or_else(|e| panic!("{op:?} at {width}: {e:?}"));
+            }
+        }
+        // A width with no guarded rule is written out as before.
+        let (mut names, mut func) = counting(Opcode::Ctlz, 16);
+        counts(&mut func, &kept);
+        assert!(!printed(&func, &mut names).contains("select"), "no rule at sixteen bits");
     }
 
     /// Nothing else is touched, for the same reason the other passes have that test.

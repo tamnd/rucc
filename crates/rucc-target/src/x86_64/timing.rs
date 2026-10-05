@@ -112,6 +112,10 @@ fn plain(form: Form) -> Timing {
         // family has published for all four of them, and it is three rather than one because what
         // they answer is a position rather than an operation on each bit in place.
         Search => (3, Unit::Int),
+        // The same search with the move for a zero behind it, and the exclusive or as well for
+        // the leading count. The constant goes in alongside the search, so what is added is the
+        // move and the or, each one cycle after what it waits for.
+        Scan => (5, Unit::Int),
         // Turning a register round, which is one cycle on every core in this family. It reads and
         // writes the whole register and there is no carry between any two bytes of it, so the
         // machine does it in the same cycle an addition takes.

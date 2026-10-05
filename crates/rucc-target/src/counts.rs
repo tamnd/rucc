@@ -15,6 +15,13 @@
 //! instructions and still a long way short of the arithmetic. Those have no feature to name and are
 //! on everywhere.
 //!
+//! A count can also be guarded, which is how x86-64 has its two zero counts on a processor without
+//! `lzcnt` or BMI. `bsr` and `bsf` find the bit, but what they leave for a zero is not the same on
+//! every processor, so a rule takes one only where the count is written as a choice between the
+//! width, for a zero, and the count, for anything else. A conditional move after the search is that
+//! choice, so a guarded count is three or four instructions: much better than the arithmetic, and
+//! not one instruction, which is why the loop deletion pass does not count it as one.
+//!
 //! It names the counts without the IR, since this crate sits below it, and each reader says which
 //! of its instructions is which count.
 
@@ -31,7 +38,8 @@ pub enum BitCount {
     TrailingZeros,
 }
 
-/// A bit count that is one instruction on a processor with the extension that has it.
+/// A bit count that is one instruction on a processor with the extension that has it, or a short
+/// sequence where it is guarded.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub struct CountInst {
     /// The count it answers.
@@ -41,6 +49,9 @@ pub struct CountInst {
     pub feature: &'static str,
     /// The widths in bits a rule selects it at.
     pub widths: &'static [u32],
+    /// Whether a rule takes it only under the choice that answers the width for a zero, which the
+    /// code generator writes the count as before selection.
+    pub guarded: bool,
 }
 
 impl CountInst {
@@ -50,9 +61,12 @@ impl CountInst {
         self.feature.is_empty() || Feature::named(self.feature).is_some_and(|it| isa.has(it))
     }
 
-    /// Whether one of `table` is that count at that width on a processor with those extensions.
+    /// Whether one of `table` is that count at that width on a processor with those extensions,
+    /// as one instruction rather than a guarded sequence.
     #[must_use]
     pub fn in_one(table: &[CountInst], of: BitCount, bits: u32, isa: Isa) -> bool {
-        table.iter().any(|count| count.of == of && count.widths.contains(&bits) && count.on(isa))
+        table.iter().any(|count| {
+            count.of == of && !count.guarded && count.widths.contains(&bits) && count.on(isa)
+        })
     }
 }

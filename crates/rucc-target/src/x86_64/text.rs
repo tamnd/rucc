@@ -174,7 +174,9 @@ pub enum Arg {
     /// value to put in it and the selector would have to invent a constant to fill an operand
     /// with. The three that take one are the sixteen bit lane moves, where the immediate names
     /// which of the eight lanes is meant and the answer is always the first, because the first is
-    /// where the psABI puts a `_Float16` and where every runtime routine that takes one looks.
+    /// where the psABI puts a `_Float16` and where every runtime routine that takes one looks. The
+    /// others are the zero counts written as a search and a conditional move, where the number is
+    /// the width the count answers for a zero and what turns a position round into a count.
     ///
     /// It is a byte because every immediate of this kind on this machine is, and an instruction
     /// that carries one this way carries no other, which is what keeps it from colliding with
@@ -931,6 +933,43 @@ static TEXT: &[(&str, &[Written])] = &[
     ("tzcnt_64", &[spell("tzcntq", &[Reg(1, Quad), Reg(0, Quad)])]),
     ("popcnt_32", &[spell("popcntl", &[Reg(1, Long), Reg(0, Long)])]),
     ("popcnt_64", &[spell("popcntq", &[Reg(1, Quad), Reg(0, Quad)])]),
+    // The answer for a zero is put in by the move under the flag the search set, and the leading
+    // count is the position turned round with an exclusive or, which turns the width moved in
+    // first into the width as well: 63 is 32 once the low five bits are flipped.
+    (
+        "clz_scan_32",
+        &[
+            spell("bsrl", &[Reg(2, Long), Reg(0, Long)]),
+            spell("movl", &[Lit(63), Reg(1, Long)]),
+            spell("cmovel", &[Reg(1, Long), Reg(0, Long)]),
+            spell("xorl", &[Lit(31), Reg(0, Long)]),
+        ],
+    ),
+    (
+        "clz_scan_64",
+        &[
+            spell("bsrq", &[Reg(2, Quad), Reg(0, Quad)]),
+            spell("movl", &[Lit(127), Reg(1, Long)]),
+            spell("cmoveq", &[Reg(1, Quad), Reg(0, Quad)]),
+            spell("xorq", &[Lit(63), Reg(0, Quad)]),
+        ],
+    ),
+    (
+        "ctz_scan_32",
+        &[
+            spell("bsfl", &[Reg(2, Long), Reg(0, Long)]),
+            spell("movl", &[Lit(32), Reg(1, Long)]),
+            spell("cmovel", &[Reg(1, Long), Reg(0, Long)]),
+        ],
+    ),
+    (
+        "ctz_scan_64",
+        &[
+            spell("bsfq", &[Reg(2, Quad), Reg(0, Quad)]),
+            spell("movl", &[Lit(64), Reg(1, Long)]),
+            spell("cmoveq", &[Reg(1, Quad), Reg(0, Quad)]),
+        ],
+    ),
     ("bswap_32", &[spell("bswapl", &[Reg(0, Long)])]),
     ("bswap_64", &[spell("bswapq", &[Reg(0, Quad)])]),
     // The address computation the addressing modes are reached through.
@@ -1919,8 +1958,9 @@ mod tests {
                     ),
                     // An immediate the table wrote, which is not one the instruction carries, so
                     // it says nothing about whether the form takes one and is checked on its own.
+                    // It is a lane everywhere but the zero counts, where it is a width.
                     Lit(lane) => assert!(
-                        usize::from(lane) < 8,
+                        usize::from(lane) < 8 || form == Form::Scan,
                         "{name} names a lane a vector register does not have"
                     ),
                     Imm => imm = true,

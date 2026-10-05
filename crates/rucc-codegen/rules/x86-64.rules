@@ -429,8 +429,9 @@
 ;; Bit counts, each one instruction on a processor with the extension that has it: `popcnt` for
 ;; the set bits, `lzcnt` for the leading zeroes and `tzcnt`, which is BMI, for the trailing ones.
 ;; Nothing reaches these on a processor without the extension, because `rucc_codegen::expand`
-;; writes the count out as arithmetic first, and that is what keeps `lzcnt` right: on a processor
-;; that does not have it the same bytes are `bsr`, which answers a different number.
+;; writes the count out first, and that is what keeps `lzcnt` right: on a processor that does not
+;; have it the same bytes are `bsr`, which answers a different number. The zero counts are written
+;; out as the choice the rules after these take, and the set bit count as arithmetic.
 (rule (lower (ctpop.i32 (value.i32 x)))
       (x64.popcnt_32 x)
       (spec (= (pop.i32 x) (result))))
@@ -454,6 +455,26 @@
 (rule (lower (cttz.i64 (value.i64 x)))
       (x64.tzcnt_64 x)
       (spec (= (ctz.i64 x) (result))))
+
+;; The zero counts on a processor with neither extension, which `rucc_codegen::expand` writes as a
+;; choice between the width, for a zero, and the count. The choice is what the conditional move
+;; after `bsr` or `bsf` stands for, and it is the only shape these take, so a count on its own is
+;; never one of them and the plain rules above never have one to compete with.
+(rule (lower (select.i32 (icmp_eq.i1 (value.i32 x) (iconst.i32 0)) (iconst.i32 32) (ctlz.i32 (value.i32 x))))
+      (x64.clz_scan_32 x)
+      (spec (= (ite (= x 0) 32 (clz.i32 x)) (result))))
+
+(rule (lower (select.i64 (icmp_eq.i1 (value.i64 x) (iconst.i64 0)) (iconst.i64 64) (ctlz.i64 (value.i64 x))))
+      (x64.clz_scan_64 x)
+      (spec (= (ite (= x 0) 64 (clz.i64 x)) (result))))
+
+(rule (lower (select.i32 (icmp_eq.i1 (value.i32 x) (iconst.i32 0)) (iconst.i32 32) (cttz.i32 (value.i32 x))))
+      (x64.ctz_scan_32 x)
+      (spec (= (ite (= x 0) 32 (ctz.i32 x)) (result))))
+
+(rule (lower (select.i64 (icmp_eq.i1 (value.i64 x) (iconst.i64 0)) (iconst.i64 64) (cttz.i64 (value.i64 x))))
+      (x64.ctz_scan_64 x)
+      (spec (= (ite (= x 0) 64 (ctz.i64 x)) (result))))
 
 ;; Division and remainder.
 

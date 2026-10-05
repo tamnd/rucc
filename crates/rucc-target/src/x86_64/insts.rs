@@ -49,7 +49,7 @@ use Form::{
     ConvertToVec, ConvertVec, CpuId, CtrlX87, DivQuo, DivRem, DivWide, Exchange, Jcc, Jmp, JmpAway,
     JmpReg, Landing, Lea, Literal, Load, LoadImm, LoadVec, Move, MoveVec, MulHigh, MulWide, Nop,
     Pop, PopX87, Prefetch, Push, PushX87, Ret, RetPop, RetVal, RetVal2, RetVal2Vec, RetValVec, Rmw,
-    Search, Set, ShiftCl, ShiftRi, ShiftVec, ShuffleVec, Spin, Store, StoreImm, StoreVec,
+    Scan, Search, Set, ShiftCl, ShiftRi, ShiftVec, ShuffleVec, Spin, Store, StoreImm, StoreVec,
     StrCompare, StrCompareRep, StrLoad, StrMove, StrMoveRep, StrScan, StrScanRep, StrStore,
     StrStoreRep, Swap, SwapHalves, Template, Test, TestCmov, TestRi, Trap, UnaryM, UnaryR,
     UnaryX87,
@@ -263,6 +263,16 @@ pub enum Form {
     /// that a register holds bits it does not hold and tell the comparison pass that a comparison
     /// made before it is still standing, and either one is a wrong program rather than a slow one.
     Search,
+    /// A search for a set bit with the answer for a zero put in after it, which reads one register,
+    /// writes the count to another and writes a third on the way.
+    ///
+    /// `bsr` and `bsf` say the source was zero in the zero flag and leave the destination with
+    /// nothing anyone may read, so the row moves the width into the third register and moves that
+    /// over the destination when the flag is set. That is what makes it a count the program can
+    /// have on any x86-64 rather than a search only a template may ask for. The third register is
+    /// written before the source is read for the last time as far as the allocator can tell, which
+    /// is what keeps the two from sharing one.
+    Scan,
     /// The bytes of one register turned round, which is one operand read and written in place.
     ///
     /// The same operand vector as [`Form::UnaryR`], which is what a negate and a complement are,
@@ -949,6 +959,8 @@ static SHIFT_CL: [OperandDesc; 3] = [
 ];
 static LOAD_IMM: [OperandDesc; 1] = [OperandDesc::write(GPR)];
 static ONE_TO_ONE: [OperandDesc; 2] = [OperandDesc::write(GPR), OperandDesc::read(GPR)];
+static SCAN: [OperandDesc; 3] =
+    [OperandDesc::write(GPR), OperandDesc::write_early(GPR), OperandDesc::read(GPR)];
 static TWO_TO_ONE: [OperandDesc; 3] =
     [OperandDesc::write(GPR), OperandDesc::read(GPR), OperandDesc::read(GPR)];
 // What the processor is asked about itself. Every one of its operands is fixed by the instruction
@@ -1243,6 +1255,7 @@ impl Form {
             CmpMi => &ALU_MI,
             Set => &ONE_WRITTEN,
             Convert | Search => &ONE_TO_ONE,
+            Scan => &SCAN,
             CpuId => &CPU_ID,
             StrMove | StrCompare => &STR_MOVE,
             StrMoveRep | StrCompareRep => &STR_MOVE_REP,
@@ -2001,6 +2014,13 @@ pub static INSTS: &[(&str, Form)] = &[
     // own.
     ("popcnt_32", Search),
     ("popcnt_64", Search),
+    // The two zero counts on a processor with neither extension, which are the searches above with
+    // the answer for a zero put in by a conditional move. A rule selects one of these only where
+    // `rucc_codegen::expand` wrote the count as the choice the move stands for. See `Form::Scan`.
+    ("clz_scan_32", Scan),
+    ("clz_scan_64", Scan),
+    ("ctz_scan_32", Scan),
+    ("ctz_scan_64", Scan),
     // The bytes of a register turned round, at the two widths the machine has a defined answer
     // for. No rule selects either, and the reason is the one the searches have: `rucc_codegen`
     // builds a byte reversal out of shifts and masks so that every target gets the same answer,
