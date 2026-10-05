@@ -238,7 +238,7 @@ fn install_kernel_staged(
 /// its own: one process can install the same target twice.
 fn staging_dir(cache: &Path, name: &str) -> PathBuf {
     let now = SystemTime::now().duration_since(UNIX_EPOCH).unwrap_or_default();
-    let unique = format!("{name}-{}-{}", std::process::id(), now.as_nanos());
+    let unique = format!("{name}-{}-{}", crate::host::id(), now.as_nanos());
     cache.join("staging").join(unique)
 }
 
@@ -250,6 +250,9 @@ fn staging_dir(cache: &Path, name: &str) -> PathBuf {
 /// is one we made for this and a single directory inside the archive would only be a name to
 /// disagree about.
 fn unpack(archive: &Path, into: &Path) -> Result<(), CliError> {
+    if let Some(why) = crate::host::cannot_start("tar") {
+        return Err(err(format!("{why}, which is how an artifact is unpacked")));
+    }
     let output =
         Command::new("tar").arg("-xzf").arg(archive).arg("-C").arg(into).output().map_err(
             |why| err(format!("could not run `tar`, which is how an artifact is unpacked: {why}")),
@@ -418,7 +421,7 @@ fn swap(
     // The old tree is moved aside rather than deleted first. Deleting it first would leave the path
     // missing for as long as the delete takes, which on a sysroot is thousands of files, and the
     // window this way is one rename wide.
-    let aside = root.with_extension(format!("old.{}", std::process::id()));
+    let aside = root.with_extension(format!("old.{}", crate::host::id()));
     if before != Before::Nothing {
         let _ = fs::remove_dir_all(&aside);
         fs::rename(root, &aside)

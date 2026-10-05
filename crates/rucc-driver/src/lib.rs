@@ -35,6 +35,7 @@ pub mod deps;
 pub mod dlltool;
 pub mod fetch;
 mod glibc;
+pub mod host;
 pub mod install;
 mod kbuild;
 pub mod library;
@@ -644,6 +645,32 @@ fn native_aarch64() -> rucc_target::Isa {
     rucc_target::Isa::NONE
 }
 
+/// The target that the options start from: the host, or on a host that is not a target, the last
+/// `--target=` or the target of `--fetch`.
+///
+/// A host that is not a target is rucc running as WebAssembly, until rucc has a wasm backend. The
+/// loop reads `--target=` again and refuses a value that does not parse, so a bad value here only
+/// has to give an error that is not wrong.
+fn starting_target(host: Option<Triple>, args: &[String]) -> Result<Triple, CliError> {
+    if let Some(host) = host {
+        return Ok(host);
+    }
+    let fetched = args.iter().enumerate().rev().find_map(|(i, arg)| match arg.as_str() {
+        "--fetch" => args.get(i + 1).map(String::as_str),
+        _ => arg.strip_prefix("--fetch="),
+    });
+    let named = args.iter().rev().find_map(|arg| arg.strip_prefix("--target=")).or(fetched);
+    match named {
+        Some(named) => named.parse().or_else(|e| {
+            named.parse().ok().and_then(Triple::from_tuple).ok_or_else(|| err(format!("{e}")))
+        }),
+        None if host::WASM => Err(err(
+            "rucc running as WebAssembly has no default target yet, so give one with --target=",
+        )),
+        None => Err(err("this host is not a supported target and no --target was given")),
+    }
+}
+
 /// Parses a command line, without the program name.
 ///
 /// # Errors
@@ -653,8 +680,12 @@ fn native_aarch64() -> rucc_target::Isa {
 pub fn parse_args(args: &[String]) -> Result<Action, CliError> {
     let expanded = preprocessor_args(&response_files(args)?);
     let args = expanded.as_slice();
-    let host = Triple::host()
-        .ok_or_else(|| err("this host is not a supported target and no --target was given"))?;
+    let host = match starting_target(Triple::host(), args) {
+        Ok(target) => target,
+        // Help names no target, so it does not need one.
+        Err(_) if args.iter().any(|arg| arg == "-h" || arg == "--help") => return Ok(Action::Help),
+        Err(why) => return Err(why),
+    };
     let mut opts = Options::new(host);
     // Where the compiler is running, which is what `DW_AT_comp_dir` is and what a debugger joins a
     // relative file name onto. Asked here rather than where the debug sections are written, because
@@ -3549,8 +3580,10 @@ fn answer(query: &Query, opts: &Options, link: &LinkOptions) -> Result<String, C
         // kernel before 5.15 passes that to `-isystem` after `-nostdinc`. Ours are in the binary,
         // so they are written out to the cache for this, and the bare word is the answer only
         // when the cache cannot be written, as GCC's is for a file it does not have.
-        Query::FileName(name) if name == "include" => runtime::materialized(&cache::dir())
-            .map_or_else(|_| name.clone(), |dir| dir.display().to_string()),
+        Query::FileName(name) if name == "include" => {
+            runtime::materialized(&cache::dir(), host::id())
+                .map_or_else(|_| name.clone(), |dir| dir.display().to_string())
+        }
         Query::FileName(name) => found(name),
         // The name GCC gives the library of routines a compiler's output calls that the C
         // library does not have. Ours is built in and there is no file, so the answer is the
@@ -3892,7 +3925,7 @@ impl Scratch {
     /// directory, which they would otherwise do the moment two of them compiled a file of the
     /// same name.
     fn new() -> Result<Scratch, String> {
-        let dir = std::env::temp_dir().join(format!("rucc-{}", std::process::id()));
+        let dir = host::temp_dir().join(format!("rucc-{}", host::id()));
         std::fs::create_dir_all(&dir).map_err(|e| format!("{}: {e}", dir.display()))?;
         Ok(Scratch { dir })
     }
@@ -5974,6 +6007,22 @@ mod tests {
         );
         let i686: Triple = "i686-unknown-linux-gnu".parse().unwrap();
         assert_eq!(target("i686-linux-gnu-gcc", &["-c", "a.c"]), Ok(i686));
+    }
+
+    #[test]
+    fn a_host_that_is_not_a_target_starts_from_the_last_target_named() {
+        let start = |line: &[&str]| starting_target(None, &args(line));
+        let musl: Triple = "x86_64-linux-musl".parse().unwrap();
+        let line = ["--target=aarch64-linux-gnu", "-c", "--target=x86_64-linux-musl", "a.c"];
+        assert_eq!(start(&line), Ok(musl));
+        assert_eq!(start(&["--target=aarch64-macos.13"]).unwrap().arch, rucc_target::Arch::Aarch64);
+        assert_eq!(start(&["--fetch", "x86_64-linux-musl"]), Ok(musl));
+        assert_eq!(start(&["--fetch=x86_64-linux-musl"]), Ok(musl));
+        assert!(start(&["--target=sparc64-linux-gnu"]).unwrap_err().message.contains("sparc64"));
+        let e = start(&["-c", "a.c"]).unwrap_err();
+        assert!(e.message.contains("no --target was given"), "{}", e.message);
+        let riscv: Triple = "riscv64-linux-gnu".parse().unwrap();
+        assert_eq!(starting_target(Some(riscv), &args(&["--target=x86_64-linux-musl"])), Ok(riscv));
     }
 
     #[test]

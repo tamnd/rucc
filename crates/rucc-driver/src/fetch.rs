@@ -215,7 +215,9 @@ fn fetch_with(
 
     let partial = partial(into);
     let mut absent = Vec::new();
-    for downloader in Downloader::ORDER {
+    // A wasm host can start no program, so it tries no downloader.
+    let downloaders: &[Downloader] = if crate::host::WASM { &[] } else { &Downloader::ORDER };
+    for &downloader in downloaders {
         let argv = downloader.argv(url, &partial);
         match run(downloader, &partial, &argv) {
             Ran::Absent => {
@@ -254,10 +256,14 @@ fn fetch_with(
         // Nothing to check it against, which is the whole of what [`trusted`] gives up.
         None => String::new(),
     };
+    let why = if crate::host::WASM {
+        "rucc is running as WebAssembly, where it cannot start a downloader,".to_owned()
+    } else {
+        format!("none of {} can be run on this machine", tried.join(", "))
+    };
     Err(err(format!(
-        "none of {} can be run on this machine and rucc has no downloader of its own, so \
-         download {url}, {check}put it at {}, and run this again, which carries on from the check",
-        tried.join(", "),
+        "{why} and rucc has no downloader of its own, so download {url}, {check}put it at {}, and \
+         run this again, which carries on from the check",
         into.display()
     )))
 }
@@ -270,7 +276,7 @@ fn fetch_with(
 fn partial(into: &Path) -> PathBuf {
     let now = SystemTime::now().duration_since(UNIX_EPOCH).unwrap_or_default();
     let mut name = OsString::from(into.file_name().unwrap_or_default());
-    name.push(format!(".part.{}.{}", std::process::id(), now.as_nanos()));
+    name.push(format!(".part.{}.{}", crate::host::id(), now.as_nanos()));
     into.with_file_name(name)
 }
 

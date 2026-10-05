@@ -53,7 +53,13 @@ fn resolve(var: impl Fn(&str) -> Option<String>) -> PathBuf {
     if let Some(home) = var("HOME") {
         return PathBuf::from(home).join(".cache").join("rucc");
     }
-    std::env::temp_dir().join("rucc")
+    // A wasm engine gives a module no environment unless it is told to. The working directory
+    // stands in for the home directory, so `--dir=$HOME/.cache/rucc::/.cache/rucc` gives the module
+    // the cache that a native rucc uses.
+    if crate::host::WASM {
+        return PathBuf::from(".cache").join("rucc");
+    }
+    crate::host::temp_dir().join("rucc")
 }
 
 #[cfg(test)]
