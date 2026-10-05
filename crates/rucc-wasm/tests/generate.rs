@@ -1550,6 +1550,80 @@ fn a_value_with_more_uses_is_written_at_the_first_one_with_a_tee() {
     assert_eq!(f.matches("local.tee").count(), 0, "{f}");
 }
 
+/// A compare with two uses, the first one in a value that is an argument of one edge of a
+/// `br_if`. sqlite3_uri_boolean in SQLite has this shape after more inlining.
+///
+/// ```c
+/// int f(int a, int b) { int x = a != 0; return b ? x + b : x; }
+/// ```
+const EDGE_OPERAND: &str = r#"; ModuleID = 't.c'
+; format 0
+target triple = "wasm32-unknown-wasip1"
+target datalayout = "e-p:32:32-i64:64-S128"
+
+func @f(i32, i32) -> i32, linkage(external) {
+block0(%0: i32, %1: i32):
+    %2 = iconst.i32 0
+    %3 = icmp ne %0, %2
+    %4 = zext.i32 %3
+    %5 = icmp ne %1, %2
+    br_if %5, block1, block2(%4)
+
+block1:
+    %6 = zext.i32 %3
+    %7 = add %6, %1
+    jump block2(%7)
+
+block2(%8: i32):
+    return %8
+}
+"#;
+
+/// With optimization, the operands of a value that moves to one edge of a `br_if` are pushed on
+/// that edge only, so an operand with another use is not written there with a `local.tee`. It is
+/// written to its local before the branch, and both paths read the local.
+#[test]
+fn an_operand_of_an_edge_argument_is_not_teed_on_the_edge() {
+    let f = body_of(EDGE_OPERAND, "f", true);
+    assert!(f.contains("local.get\t0\n\ti32.const\t0\n\ti32.ne\n\tlocal.set\t0\n"), "{f}");
+    assert_eq!(f.matches("local.tee").count(), 0, "{f}");
+    assert_eq!(f.matches("i32.ne").count(), 2, "{f}");
+}
+
+/// A call in the value that a function with a frame returns.
+///
+/// ```c
+/// int g(int *);
+/// int f(int a) { return g(&a) + a; }
+/// ```
+const FRAMED: &str = r#"; ModuleID = 't.c'
+; format 0
+target triple = "wasm32-unknown-wasip1"
+target datalayout = "e-p:32:32-i64:64-S128"
+
+func @g(ptr) -> i32, linkage(external);
+
+func @f(i32) -> i32, linkage(external) {
+block0(%0: i32):
+    %1 = alloca, size 4, align 4
+    store %0 -> %1, align 4
+    %2 = call @g(%1) : (ptr) -> i32
+    %3 = add.nsw %2, %0
+    return %3
+}
+"#;
+
+/// With optimization, a function with a frame gives the frame back before its `return` pushes
+/// the value. A call in an operand of that value is made before the frame is given back, because
+/// the callee would put its own frame on top of the slot that its argument points to.
+#[test]
+fn a_call_under_the_return_of_a_function_with_a_frame_stays_before_the_epilogue() {
+    let f = body_of(FRAMED, "f", true);
+    let call = f.find("call\tg").expect("the call is written");
+    let epilogue = f.rfind("global.set").expect("the frame is given back");
+    assert!(call < epilogue, "{f}");
+}
+
 /// Three reads of a structure, which is the C below, and the same reads with a `ptr_add` that
 /// has no `nuw` and with one that goes back.
 ///

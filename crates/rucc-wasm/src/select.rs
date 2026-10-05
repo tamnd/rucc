@@ -168,6 +168,7 @@ pub(crate) fn function(unit: &mut Unit<'_>, id: FuncId, symbol: u32) -> Result<F
         va: func.signature().variadic.then(|| params - 1),
         returns: !ty.results.is_empty(),
         sret: func.signature().returns.iter().any(|ret| is_pair(ret.ty)),
+        framed: stackify::framed(func),
         annotate: None,
         trees: Trees::default(),
         pushed: Set::default(),
@@ -233,6 +234,8 @@ struct Lower<'u, 'a> {
     returns: bool,
     /// Whether the function returns a pair, through the address in its parameter 0.
     sret: bool,
+    /// Whether the function can have a frame on the shadow stack. See [`stackify::framed`].
+    framed: bool,
     /// The notes of the tree form, when it is asked for.
     annotate: Option<Annotate>,
     /// The values that stay on the operand stack or are written with a `local.tee`, and the
