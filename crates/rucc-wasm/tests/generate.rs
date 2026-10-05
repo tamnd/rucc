@@ -1134,3 +1134,90 @@ fn an_asm_with_a_blank_template_is_no_code() {
         assert_eq!(status, 43);
     }
 }
+
+/// A switch on a 128-bit value, which is the C below at `-O0`. Each case is a test of both halves,
+/// so the case 2^64 is not the case 0. `main` exits with 1 + 2 * 4 + 3 * 16 + 0 * 64, which is 57.
+///
+/// ```c
+/// unsigned char pick(__int128 v) {
+///     switch (v) { case 0: return 1; case 1: return 2; case (__int128)1 << 64: return 3; }
+///     return 0;
+/// }
+/// int main(void) {
+///     return pick(0) + pick(1) * 4 + pick((__int128)~0ull + 1) * 16 + pick(2) * 64;
+/// }
+/// ```
+const SWITCH128: &str = r#"; ModuleID = '/tmp/wa0/asm/s.c'
+; format 0
+target triple = "wasm32-unknown-wasip1"
+target datalayout = "e-p:32:32-i64:64-S128"
+
+func @pick(i128) -> i8 zext, linkage(external) {
+block0(%0: i128):
+    switch %0, block1, [0 => block2, 1 => block3, 18446744073709551616 => block4]
+
+block1:
+    %1 = iconst.i32 0
+    %2 = trunc.i8 %1
+    return %2
+
+block2:
+    %3 = iconst.i32 1
+    %4 = trunc.i8 %3
+    return %4
+
+block3:
+    %5 = iconst.i32 2
+    %6 = trunc.i8 %5
+    return %6
+
+block4:
+    %7 = iconst.i32 3
+    %8 = trunc.i8 %7
+    return %8
+}
+
+func @main() -> i32, linkage(external) {
+block0:
+    %0 = iconst.i32 0
+    %1 = sext.i128 %0
+    %2 = call @pick(%1) : (i128) -> i8 zext
+    %3 = zext.i32 %2
+    %4 = iconst.i32 1
+    %5 = sext.i128 %4
+    %6 = call @pick(%5) : (i128) -> i8 zext
+    %7 = zext.i32 %6
+    %8 = iconst.i32 4
+    %9 = mul.nsw %7, %8
+    %10 = add.nsw %3, %9
+    %11 = iconst.i64 0
+    %12 = iconst.i64 -1
+    %13 = xor %11, %12
+    %14 = zext.i128 %13
+    %15 = iconst.i32 1
+    %16 = sext.i128 %15
+    %17 = add.nsw %14, %16
+    %18 = call @pick(%17) : (i128) -> i8 zext
+    %19 = zext.i32 %18
+    %20 = iconst.i32 16
+    %21 = mul.nsw %19, %20
+    %22 = add.nsw %10, %21
+    %23 = iconst.i32 2
+    %24 = sext.i128 %23
+    %25 = call @pick(%24) : (i128) -> i8 zext
+    %26 = zext.i32 %25
+    %27 = iconst.i32 64
+    %28 = mul.nsw %26, %27
+    %29 = add.nsw %22, %28
+    return %29
+}
+"#;
+
+#[test]
+fn a_switch_on_128_bits_tests_both_halves() {
+    let text = assembly(SWITCH128);
+    assert_eq!(text.matches("i64.eq").count(), 6, "{text}");
+    if let Some(status) = link_and_run("switch128", SWITCH128) {
+        assert_eq!(status, 57);
+    }
+}

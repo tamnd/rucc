@@ -138,6 +138,21 @@ fn understood(opcode: Opcode) -> bool {
 /// `conv` is the convention of the function, through which the convention of each call it makes
 /// is found, and it is what says whether a width may cross either boundary.
 pub fn integers(func: &mut Func, conv: &CallRegs) -> bool {
+    widen(func, Some(conv))
+}
+
+/// [`integers`] for a target with no ABI for these widths, which is wasm today.
+///
+/// The wasm ABI of a `_BitInt` has not been taught, so no width may cross a boundary here, and a
+/// function with one at its own boundary or at a call's is left as it was, for the selector to
+/// refuse by name. What is left is the arithmetic of a bit-field wider than 32 bits, which is all
+/// of what a C program writes at these widths that is not a `_BitInt`.
+pub fn integers_inside(func: &mut Func) -> bool {
+    widen(func, None)
+}
+
+/// [`integers`], where `conv` is nothing when no convention of the target has been taught.
+fn widen(func: &mut Func, conv: Option<&CallRegs>) -> bool {
     let narrow: Vec<Option<u32>> = func
         .values()
         .map(|value| container(func[value].ty).map(|_| func[value].ty.bits()))
@@ -220,8 +235,9 @@ fn crosses(signature: &Signature) -> bool {
 /// The signature names its own convention, and a function of one convention calls functions of
 /// the other, so it is that convention's ABI that is asked. A convention the platform does not
 /// have is one nothing is known about.
-fn taught(signature: &Signature, conv: &CallRegs) -> bool {
-    conv.under(signature.convention).is_some_and(|conv| conv.abi.bit_ints == BitInts::SpareBits)
+fn taught(signature: &Signature, conv: Option<&CallRegs>) -> bool {
+    conv.and_then(|conv| conv.under(signature.convention))
+        .is_some_and(|conv| conv.abi.bit_ints == BitInts::SpareBits)
 }
 
 /// Whether every one of these widths at a boundary is at one whose ABI has been taught.
@@ -230,7 +246,7 @@ fn taught(signature: &Signature, conv: &CallRegs) -> bool {
 /// agreed with something this compilation is not looking at. The entry block's parameters are
 /// asked as well as the signature's, because they are the same list said twice and this pass
 /// would rather notice the day they stop being.
-fn every_crossing_is_taught(func: &Func, conv: &CallRegs) -> bool {
+fn every_crossing_is_taught(func: &Func, conv: Option<&CallRegs>) -> bool {
     if !func.signatures().all(|signature| !crosses(signature) || taught(signature, conv)) {
         return false;
     }
@@ -248,7 +264,7 @@ fn every_crossing_is_taught(func: &Func, conv: &CallRegs) -> bool {
 fn touches_nothing_it_does_not_understand(
     func: &Func,
     narrow: &[Option<u32>],
-    conv: &CallRegs,
+    conv: Option<&CallRegs>,
     inst: Inst,
 ) -> bool {
     let data = &func[inst];
@@ -559,7 +575,7 @@ mod tests {
     use rucc_target::x86_64::{SYSV, WIN64};
     use rucc_target::{Arch, Env, Os, TargetInfo, Triple};
 
-    use super::{container, integers};
+    use super::{container, integers, integers_inside};
 
     fn target() -> TargetInfo {
         TargetInfo::new(Triple::new(Arch::X86_64, Os::Linux, Env::Gnu))
@@ -789,6 +805,29 @@ mod tests {
         assert!(!integers(&mut func, &WIN64), "a boundary nobody taught this is not its to move");
         let text = printed(&func, &mut names);
         assert!(text.contains("i40"), "the function is exactly as it was: {text}");
+    }
+
+    /// A target with no taught convention, which is wasm, widens the arithmetic inside a function
+    /// and leaves a function with a width at a boundary as it was.
+    #[test]
+    fn a_target_with_no_convention_widens_only_what_stays_inside() {
+        let mut names = Interner::new();
+        let mut func = crossing(&mut names);
+        assert!(!integers_inside(&mut func), "no boundary has been taught");
+        let text = printed(&func, &mut names);
+        assert!(text.contains("i40"), "the function is exactly as it was: {text}");
+
+        let (mut func, entry) = shell(&mut names);
+        let narrow = Type::int(40);
+        let mut build = Builder::new(&mut func, entry);
+        let value = seed(&mut build, narrow);
+        let count = build.iconst(narrow, 8);
+        let shifted = build.binary(Opcode::Shl, value, count, Flags::NONE);
+        let answer = build.unary(Opcode::Trunc, shifted, Type::int(32));
+        build.ret(&[answer]);
+        assert!(integers_inside(&mut func), "the shift is inside the function");
+        let text = printed(&func, &mut names);
+        assert!(!text.contains("i40"), "no forty bit value is left: {text}");
     }
 
     #[test]

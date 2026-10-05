@@ -646,7 +646,9 @@ impl Lower<'_, '_> {
         let calls = &func[info.targets];
         let value = self.args(term)[0];
         let ty = func[value].ty;
-        let wide = valtype(ty)? == ValType::I64;
+        // A 128-bit value is a pair, and each case is a test of both halves.
+        let pair = is_pair(ty);
+        let wide = !pair && valtype(ty)? == ValType::I64;
 
         // The distinct targets, as the index of the first edge to each. Two cases that go to one
         // block with the same arguments share it.
@@ -675,7 +677,7 @@ impl Lower<'_, '_> {
         let (min, max) =
             cases.iter().fold((i128::MAX, i128::MIN), |(lo, hi), &(c, _)| (lo.min(c), hi.max(c)));
         let span = max - min;
-        if !cases.is_empty() && span < 1 << 16 && span < 4 * cases.len() as i128 + 8 {
+        if !pair && !cases.is_empty() && span < 1 << 16 && span < 4 * cases.len() as i128 + 8 {
             let mut table = vec![default; usize::try_from(span + 1).expect("a small span")];
             for &(c, t) in &cases {
                 table[usize::try_from(c - min).expect("in the span")] = t;
@@ -701,7 +703,15 @@ impl Lower<'_, '_> {
             self.code.br_table(&table, default);
         } else {
             for &(c, t) in &cases {
-                if wide {
+                if pair {
+                    self.push_half(value, false)?;
+                    self.code.i64_const(c as i64);
+                    self.code.op(emit::I64_EQ);
+                    self.push_half(value, true)?;
+                    self.code.i64_const((c >> 64) as i64);
+                    self.code.op(emit::I64_EQ);
+                    self.code.op(emit::I32_AND);
+                } else if wide {
                     self.push(value)?;
                     self.code.i64_const(i64::try_from(c).expect("an i64 case"));
                     self.code.op(emit::I64_EQ);
