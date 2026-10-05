@@ -111,9 +111,10 @@ pub struct DataLayout {
     /// The largest alignment the ABI will give a struct member on its own, in bytes, and [`None`]
     /// where there is no cap.
     ///
-    /// Four on System V i386 and eight on s390x. A cap is invisible until a program uses a
-    /// sixteen byte type inside a struct, and then it is a layout difference rather than an
-    /// error.
+    /// Eight on s390x. A cap is invisible until a program uses a sixteen byte type inside a
+    /// struct, and then it is a layout difference rather than an error. System V i386 has no cap
+    /// of this kind: it aligns `double` and `long long` to four, which their own fields say, and
+    /// leaves `_Float128` and `__m128` at sixteen.
     pub max_field_align: Option<u64>,
     /// Whether the target has `__int128`.
     ///
@@ -277,14 +278,11 @@ fn wchar_is_signed(target: TargetTuple) -> bool {
 
 /// The largest alignment the ABI gives a member on its own.
 fn max_field_align(target: TargetTuple) -> Option<u64> {
-    match (target.arch(), target.data_model()) {
-        // i386 Linux caps member alignment at four, so a sixteen byte aligned type inside a
-        // struct is aligned to four there and to sixteen everywhere else.
-        (Arch::X86, DataModel::Ilp32) if target.os() != Os::Windows => Some(4),
+    match target.arch() {
         // s390x caps at eight, which is why its `long double` and its `__int128` are both sixteen
-        // bytes aligned to eight. Two architectures with a cap and two different caps, which is
-        // the argument for this being a number rather than a boolean.
-        (Arch::S390x, _) => Some(8),
+        // bytes aligned to eight. i386 Linux is not here although it looks like it belongs: gcc
+        // aligns a `_Float128` to sixteen there, in a struct or out of one.
+        Arch::S390x => Some(8),
         _ => None,
     }
 }

@@ -206,9 +206,9 @@ fn system_v_i386_aligns_an_eight_byte_type_to_four() {
         i386.long_double,
         rucc_abi::FloatType { format: Format::X87Extended, size: 12, align: 4 }
     );
-    // The cap on member alignment goes with it, so a sixteen byte aligned type inside a struct is
-    // aligned to four here and to sixteen on x86-64.
-    assert_eq!(i386.max_field_align, Some(4));
+    // And that is all of it. There is no cap on member alignment behind those, which gcc shows
+    // by putting a `_Float128` inside a struct at offset sixteen.
+    assert_eq!(i386.max_field_align, None);
 
     let amd64 = layout("x86_64-linux-gnu");
     assert_eq!((amd64.long_long_size, amd64.long_long_align), (8, 8));

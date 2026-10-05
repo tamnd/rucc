@@ -358,6 +358,43 @@ mod tests {
                 (16, 16)
             ]
         );
+        // The i386 rows, read off gcc 13 the same way. `_Float64x` is the twelve byte `long
+        // double` it shares a format with, and `_Float128` is sixteen aligned on both even where
+        // `double` is aligned to four.
+        assert_eq!(
+            sizes(&target("i686-linux-gnu")),
+            [
+                (2, 2),
+                (4, 4),
+                (4, 4),
+                (8, 4),
+                (8, 4),
+                (8, 4),
+                (12, 4),
+                (12, 4),
+                (16, 16),
+                (4, 4),
+                (8, 8),
+                (16, 16)
+            ]
+        );
+        assert_eq!(
+            sizes(&target("i686-windows-gnu")),
+            [
+                (2, 2),
+                (4, 4),
+                (4, 4),
+                (8, 8),
+                (8, 8),
+                (8, 8),
+                (12, 4),
+                (12, 4),
+                (16, 16),
+                (4, 4),
+                (8, 8),
+                (16, 16)
+            ]
+        );
     }
 
     #[test]
