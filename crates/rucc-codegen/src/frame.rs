@@ -503,7 +503,8 @@ impl Frame {
         // word in place of what the convention trusts, and a call in it is one more thing that
         // wants the call alignment. See [`Layout::forced`].
         let trusted = if layout.forced { word } else { conv.trusted_align.min(conv.stack_align) };
-        let needed = if layout.forced && !layout.leaf { align.max(conv.stack_align) } else { align };
+        let needed =
+            if layout.forced && !layout.leaf { align.max(conv.stack_align) } else { align };
         let realign =
             (needed > conv.stack_align || (!layout.grows && needed > trusted)).then_some(needed);
         // Refused by [`crate::pipeline`] before anything gets here, because the two of them together

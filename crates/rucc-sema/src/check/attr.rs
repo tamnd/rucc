@@ -49,7 +49,7 @@ use rucc_lex::Encoding;
 use rucc_target::{BitFieldStyle, Convention, Isa, ObjectFormat, Target, TargetInfo};
 use rucc_types::{
     FloatKind, FunctionId, FunctionType, IntKind, TypeId, TypeKind, float_format, int_width,
-    integer_info, is_arithmetic, is_complex, is_function, is_real_floating, layout, pointee,
+    integer_info, is_arithmetic, is_complex, is_function, is_real_floating, layout,
 };
 
 use crate::check::Checker;
@@ -2303,11 +2303,11 @@ impl Checker<'_> {
                     continue;
                 }
                 let count = ast[attr.args].len();
+                let pointee = rucc_types::pointee(&self.types, ty);
                 let function = is_function(&self.types, ty)
-                    || pointee(&self.types, ty).is_some_and(|to| is_function(&self.types, to));
+                    || pointee.is_some_and(|to| is_function(&self.types, to));
                 if count > 0 {
-                    let what =
-                        "wrong number of arguments specified for 'force_align_arg_pointer' attribute";
+                    let what = "wrong number of arguments specified for 'force_align_arg_pointer' attribute";
                     let refused = Diagnostic::error(what, attr.span).with_code("E0831");
                     self.report(refused.note(format!("expected 0, found {count}"), attr.span));
                 } else if !function {
