@@ -282,7 +282,7 @@ pub fn run(program: &str, args: &[String]) -> i32 {
     // written archive where a later `ar` or `make` would find it. mingw-w64's build appends objects
     // to some of these libraries after dlltool has written them, and it does that to whatever file
     // is there.
-    let partial = format!("{output}.part{}", std::process::id());
+    let partial = format!("{output}.part{}", crate::host::id());
     let written =
         std::fs::write(&partial, &bytes).and_then(|()| std::fs::rename(&partial, &output));
     if let Err(e) = written {

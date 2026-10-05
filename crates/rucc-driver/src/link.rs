@@ -346,6 +346,8 @@ pub enum Error {
         /// What the operating system said.
         why: String,
     },
+    /// rucc is running as WebAssembly, where it cannot start a linker.
+    NoProcesses,
     /// The linker ran and said no.
     Refused {
         /// What it exited with, or a description when it was killed instead.
@@ -407,6 +409,12 @@ impl std::fmt::Display for Error {
                 lld_advice()
             ),
             Error::Spawn { path, why } => write!(f, "could not run the linker at {path}: {why}"),
+            Error::NoProcesses => write!(
+                f,
+                "{}, so it cannot run a linker. Compile with -c and link the objects outside the \
+                 module",
+                crate::host::NO_PROCESSES
+            ),
             Error::Refused { status } => write!(f, "the linker {status}"),
         }
     }
@@ -956,7 +964,7 @@ pub fn write_stubs(target: Triple, opts: &LinkOptions) -> Result<(), Error> {
         if fs::read(&path).is_ok_and(|there| there == file.bytes) {
             continue;
         }
-        let temporary = dir.join(format!(".{}.{}", file.name, std::process::id()));
+        let temporary = dir.join(format!(".{}.{}", file.name, crate::host::id()));
         fs::write(&temporary, &file.bytes).map_err(|why| failed(&temporary, why))?;
         fs::rename(&temporary, &path).map_err(|why| {
             let _ = fs::remove_file(&temporary);
@@ -977,6 +985,9 @@ pub fn write_stubs(target: Triple, opts: &LinkOptions) -> Result<(), Error> {
 /// [`Error::Named`] when `-fuse-ld=` asked for one that is not here, and [`Error::NoLinker`] when
 /// nothing was, which name the candidates so that the message says what was looked for.
 pub fn find(target: Triple, opts: &LinkOptions) -> Result<Linker, Error> {
+    if crate::host::WASM {
+        return Err(Error::NoProcesses);
+    }
     let tried = order(target, opts);
     let places = lld_dirs(Path::new("/"), std::env::var_os("ProgramFiles").map(PathBuf::from));
     // The first linker [`suitable`] turned down, which is the answer when nothing after it is any
@@ -2072,19 +2083,22 @@ fn response_text(args: &[String], windows: bool) -> String {
 ///
 /// # Errors
 ///
-/// [`Error::Spawn`] when it could not be started, which is a machine problem, and
-/// [`Error::Refused`] when it ran and said no, which is a program problem and one the linker has
+/// [`Error::NoProcesses`] on a wasm host, [`Error::Spawn`] when it could not be started, which is
+/// a machine problem, and [`Error::Refused`] when it ran and said no, which is a program problem and one the linker has
 /// already explained on its own error output.
 pub fn run(linker: &Linker, args: &[String]) -> Result<(), Error> {
     let spawn = |why: std::io::Error| Error::Spawn {
         path: linker.path.display().to_string(),
         why: why.to_string(),
     };
+    if crate::host::WASM {
+        return Err(Error::NoProcesses);
+    }
     let mut command = Command::new(&linker.path);
     let mut written = None;
     if too_long(args, if cfg!(windows) { WINDOWS_LINE } else { UNIX_LINE }) {
         let (front, rest) = split_for_file(args);
-        let path = std::env::temp_dir().join(format!("rucc-link-{}.rsp", std::process::id()));
+        let path = crate::host::temp_dir().join(format!("rucc-link-{}.rsp", crate::host::id()));
         fs::write(&path, response_text(&rest, windows_quoting(linker))).map_err(spawn)?;
         let mut at = OsString::from("@");
         at.push(&path);

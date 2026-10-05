@@ -108,10 +108,13 @@ pub fn read(path: &Path) -> Option<SourceBytes> {
 /// stale copy. It is written beside its final name and renamed, so two compilers asking at once
 /// both see it whole.
 ///
+/// `id` goes into the name of the staging directory. The driver gives its process id, or on a host
+/// with no process ids a number that stands in for one.
+///
 /// # Errors
 ///
 /// When the directory cannot be written.
-pub fn materialized(cache: &Path) -> std::io::Result<std::path::PathBuf> {
+pub fn materialized(cache: &Path, id: u32) -> std::io::Result<std::path::PathBuf> {
     let mut hash: u64 = 0xcbf2_9ce4_8422_2325;
     for &(name, text) in HEADERS {
         for byte in name.bytes().chain([0]).chain(text.bytes()).chain([0]) {
@@ -122,7 +125,7 @@ pub fn materialized(cache: &Path) -> std::io::Result<std::path::PathBuf> {
     if dir.is_dir() {
         return Ok(dir);
     }
-    let staging = cache.join("include").join(format!("{hash:016x}.{}", std::process::id()));
+    let staging = cache.join("include").join(format!("{hash:016x}.{id}"));
     std::fs::create_dir_all(&staging)?;
     for &(name, text) in HEADERS {
         std::fs::write(staging.join(name), text)?;
@@ -145,11 +148,11 @@ mod tests {
     #[test]
     fn the_shipped_headers_are_written_out_whole_and_once() {
         let cache = std::env::temp_dir().join(format!("rucc-runtime-{}", std::process::id()));
-        let dir = materialized(&cache).expect("the cache is writable");
+        let dir = materialized(&cache, std::process::id()).expect("the cache is writable");
         let text = std::fs::read_to_string(dir.join("stdarg.h")).expect("stdarg.h is there");
         assert_eq!(text, header("stdarg.h").unwrap());
         assert_eq!(std::fs::read_dir(&dir).unwrap().count(), names().len());
-        assert_eq!(materialized(&cache).unwrap(), dir);
+        assert_eq!(materialized(&cache, std::process::id()).unwrap(), dir);
         assert_eq!(std::fs::read_dir(cache.join("include")).unwrap().count(), 1);
         std::fs::remove_dir_all(&cache).unwrap();
     }
