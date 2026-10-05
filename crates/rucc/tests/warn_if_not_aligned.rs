@@ -201,7 +201,11 @@ fn the_attribute_is_checked_in_gcc_s_words() {
             "wrong number of arguments specified for 'warn_if_not_aligned' attribute",
             true,
         ),
-        ("typedef int t __attribute__((warn_if_not_aligned(8, 2)));\n", "expected between 0 and 1, found 2", true),
+        (
+            "typedef int t __attribute__((warn_if_not_aligned(8, 2)));\n",
+            "expected between 0 and 1, found 2",
+            true,
+        ),
         (
             "typedef int t __attribute__((warn_if_not_aligned(0)));\n\
              struct z { char c; t x; };\n",

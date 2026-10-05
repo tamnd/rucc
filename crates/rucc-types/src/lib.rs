@@ -538,6 +538,27 @@ mod tests {
     }
 
     #[test]
+    fn a_flexible_array_of_an_aligned_typedef_is_as_aligned_as_the_typedef() {
+        // gcc 13 puts the array at four and the record at four, and the array was at eight.
+        let mut interner = Interner::new();
+        let mut types = Types::new();
+        let ull = types.int(IntKind::ULongLong);
+        let int = types.int(IntKind::Int);
+        let four = NonZeroU32::new(4).unwrap();
+        let u64 = types.aligned_typedef(interner.intern("u64"), ull, four);
+        let flexible = types.array(u64, ArrayLen::Unknown);
+        let laid_out =
+            lay_out_on(&linux(), &types, RecordKind::Struct, &[member(int), member(flexible)]);
+        assert_eq!(offsets(&laid_out), [0, 32]);
+        assert_eq!(laid_out.layout, Layout::new(4, 4));
+        // And through a typedef of the array.
+        let named = types.typedef(interner.intern("flex"), flexible);
+        let laid_out =
+            lay_out_on(&linux(), &types, RecordKind::Struct, &[member(int), member(named)]);
+        assert_eq!(laid_out.layout, Layout::new(4, 4));
+    }
+
+    #[test]
     fn what_a_member_asks_to_sit_at_comes_from_the_nearest_typedef_that_said() {
         let mut interner = Interner::new();
         let mut types = Types::new();

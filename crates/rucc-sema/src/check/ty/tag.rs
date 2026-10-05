@@ -417,7 +417,8 @@ impl Checker<'_> {
             }
             let wanted = u64::from(wanted.get());
             if whole.align % wanted != 0 {
-                let what = format!("alignment {} of '{spelled}' is less than {wanted}", whole.align);
+                let what =
+                    format!("alignment {} of '{spelled}' is less than {wanted}", whole.align);
                 self.report(Diagnostic::warning(what, span).with_code("E0824"));
             }
             if offset % wanted != 0 {
@@ -425,7 +426,8 @@ impl Checker<'_> {
                     Some(name) => self.text(name).to_owned(),
                     None => String::from("<anonymous>"),
                 };
-                let what = format!("'{who}' offset {offset} in '{spelled}' isn't aligned to {wanted}");
+                let what =
+                    format!("'{who}' offset {offset} in '{spelled}' isn't aligned to {wanted}");
                 self.report(Diagnostic::warning(what, *at).with_code("E0824"));
             }
         }

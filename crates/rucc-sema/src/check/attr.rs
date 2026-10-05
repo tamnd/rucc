@@ -2935,13 +2935,10 @@ impl Checker<'_> {
 
     /// `warn_if_not_aligned` on the declaration of an object or a function, which gcc refuses in
     /// these words: it is about where a member sits, so only a type or a member can say it.
-    pub(in crate::check) fn warn_alignment_misplaced(
-        &mut self,
-        lists: &[AttrList],
-        name: Symbol,
-    ) {
+    pub(in crate::check) fn warn_alignment_misplaced(&mut self, lists: &[AttrList], name: Symbol) {
         if let Some((_, at)) = self.warn_alignment(lists) {
-            let what = format!("'warn_if_not_aligned' may not be specified for '{}'", self.text(name));
+            let what =
+                format!("'warn_if_not_aligned' may not be specified for '{}'", self.text(name));
             self.report(Diagnostic::error(what, at).with_code("E0825"));
         }
     }
