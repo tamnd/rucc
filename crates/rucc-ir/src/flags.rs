@@ -319,7 +319,9 @@ impl Flags {
             // one and the other two say nothing about where an access starts.
             Opcode::CheckBounds => Self::STATIC.union(Self::HANDED).union(Self::ALIGNED),
             Opcode::Alloca => Self::NOALIAS.union(Self::GUARD),
-            Opcode::PtrAdd => Self::NOALIAS,
+            // `nuw` on an address that moves forward inside its object, which is what lets a back
+            // end put the offset in the offset field of a load or a store.
+            Opcode::PtrAdd => Self::NOALIAS.union(Self::NUW),
             _ => Self::NONE,
         }
     }

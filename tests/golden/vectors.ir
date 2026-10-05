@@ -12,7 +12,7 @@ block0:
     %2 = iconst.i32 1
     store %2 -> %0, align 4, tbaa !1
     %3 = iconst.i64 4
-    %4 = ptr_add %0, %3
+    %4 = ptr_add.nuw %0, %3
     %5 = iconst.i32 2
     store %5 -> %4, align 4, tbaa !1
     memcpy %1, %0, size 8, align 8
@@ -32,14 +32,14 @@ block0(%0: f64, %1: f64):
     %7 = mul.nsw %5, %6
     store %7 -> %2, align 4, tbaa !1
     %8 = iconst.i64 4
-    %9 = ptr_add %3, %8
+    %9 = ptr_add.nuw %3, %8
     %10 = load.i32 %9, align 4, tbaa !1
     %11 = iconst.i64 4
-    %12 = ptr_add %4, %11
+    %12 = ptr_add.nuw %4, %11
     %13 = load.i32 %12, align 4, tbaa !1
     %14 = mul.nsw %10, %13
     %15 = iconst.i64 4
-    %16 = ptr_add %2, %15
+    %16 = ptr_add.nuw %2, %15
     store %14 -> %16, align 4, tbaa !1
     %17 = load.f64 %2, align 8
     return %17
@@ -53,21 +53,21 @@ block0(%0: f64, %1: i32):
     store %0 -> %4, align 8
     store %1 -> %2, align 4, tbaa !1
     %5 = iconst.i64 4
-    %6 = ptr_add %2, %5
+    %6 = ptr_add.nuw %2, %5
     store %1 -> %6, align 4, tbaa !1
     %7 = load.i32 %4, align 4, tbaa !1
     %8 = load.i32 %2, align 4, tbaa !1
     %9 = add.nsw %7, %8
     store %9 -> %3, align 4, tbaa !1
     %10 = iconst.i64 4
-    %11 = ptr_add %4, %10
+    %11 = ptr_add.nuw %4, %10
     %12 = load.i32 %11, align 4, tbaa !1
     %13 = iconst.i64 4
-    %14 = ptr_add %2, %13
+    %14 = ptr_add.nuw %2, %13
     %15 = load.i32 %14, align 4, tbaa !1
     %16 = add.nsw %12, %15
     %17 = iconst.i64 4
-    %18 = ptr_add %3, %17
+    %18 = ptr_add.nuw %3, %17
     store %16 -> %18, align 4, tbaa !1
     %19 = load.f64 %3, align 8
     return %19
@@ -84,14 +84,14 @@ block0(%0: f64, %1: f64):
     %6 = sub.nsw %4, %5
     store %6 -> %2, align 4, tbaa !1
     %7 = iconst.i64 4
-    %8 = ptr_add %2, %7
+    %8 = ptr_add.nuw %2, %7
     %9 = load.i32 %8, align 4, tbaa !1
     %10 = iconst.i64 4
-    %11 = ptr_add %3, %10
+    %11 = ptr_add.nuw %3, %10
     %12 = load.i32 %11, align 4, tbaa !1
     %13 = sub.nsw %9, %12
     %14 = iconst.i64 4
-    %15 = ptr_add %2, %14
+    %15 = ptr_add.nuw %2, %14
     store %13 -> %15, align 4, tbaa !1
     %16 = load.f64 %2, align 8
     return %16
@@ -106,11 +106,11 @@ block0(%0: f64):
     %4 = fneg %3
     store %4 -> %1, align 4, tbaa !2
     %5 = iconst.i64 4
-    %6 = ptr_add %2, %5
+    %6 = ptr_add.nuw %2, %5
     %7 = load.f32 %6, align 4, tbaa !2
     %8 = fneg %7
     %9 = iconst.i64 4
-    %10 = ptr_add %1, %9
+    %10 = ptr_add.nuw %1, %9
     store %8 -> %10, align 4, tbaa !2
     %11 = load.f64 %1, align 8
     return %11
@@ -126,12 +126,12 @@ block0(%0: f64):
     %5 = xor %3, %4
     store %5 -> %1, align 4, tbaa !1
     %6 = iconst.i64 4
-    %7 = ptr_add %2, %6
+    %7 = ptr_add.nuw %2, %6
     %8 = load.i32 %7, align 4, tbaa !1
     %9 = iconst.i32 -1
     %10 = xor %8, %9
     %11 = iconst.i64 4
-    %12 = ptr_add %1, %11
+    %12 = ptr_add.nuw %1, %11
     store %10 -> %12, align 4, tbaa !1
     %13 = load.f64 %1, align 8
     return %13
@@ -147,24 +147,24 @@ block0(%0: f64):
     %5 = add.nsw %3, %4
     store %5 -> %2, align 4, tbaa !1
     %6 = iconst.i64 4
-    %7 = ptr_add %2, %6
+    %7 = ptr_add.nuw %2, %6
     %8 = load.i32 %7, align 4, tbaa !1
     %9 = iconst.i32 1
     %10 = add.nsw %8, %9
     %11 = iconst.i64 4
-    %12 = ptr_add %2, %11
+    %12 = ptr_add.nuw %2, %11
     store %10 -> %12, align 4, tbaa !1
     %13 = load.i32 %2, align 4, tbaa !1
     %14 = iconst.i32 1
     %15 = sub.nsw %13, %14
     store %15 -> %2, align 4, tbaa !1
     %16 = iconst.i64 4
-    %17 = ptr_add %2, %16
+    %17 = ptr_add.nuw %2, %16
     %18 = load.i32 %17, align 4, tbaa !1
     %19 = iconst.i32 1
     %20 = sub.nsw %18, %19
     %21 = iconst.i64 4
-    %22 = ptr_add %2, %21
+    %22 = ptr_add.nuw %2, %21
     store %20 -> %22, align 4, tbaa !1
     memcpy %1, %2, size 8, align 8
     %23 = load.i32 %2, align 4, tbaa !1
@@ -172,12 +172,12 @@ block0(%0: f64):
     %25 = sub.nsw %23, %24
     store %25 -> %2, align 4, tbaa !1
     %26 = iconst.i64 4
-    %27 = ptr_add %2, %26
+    %27 = ptr_add.nuw %2, %26
     %28 = load.i32 %27, align 4, tbaa !1
     %29 = iconst.i32 1
     %30 = sub.nsw %28, %29
     %31 = iconst.i64 4
-    %32 = ptr_add %2, %31
+    %32 = ptr_add.nuw %2, %31
     store %30 -> %32, align 4, tbaa !1
     %33 = load.f64 %1, align 8
     return %33
@@ -192,12 +192,12 @@ block0(%0: f64):
     %4 = fadd %2, %3
     store %4 -> %1, align 4, tbaa !2
     %5 = iconst.i64 4
-    %6 = ptr_add %1, %5
+    %6 = ptr_add.nuw %1, %5
     %7 = load.f32 %6, align 4, tbaa !2
     %8 = fconst.f32 0x3f800000
     %9 = fadd %7, %8
     %10 = iconst.i64 4
-    %11 = ptr_add %1, %10
+    %11 = ptr_add.nuw %1, %10
     store %9 -> %11, align 4, tbaa !2
     %12 = load.f64 %1, align 8
     return %12
@@ -218,17 +218,17 @@ block0(%0: i32, %1: i32):
     %10 = trunc.i16 %9
     store %10 -> %2, align 2, tbaa !3
     %11 = iconst.i64 2
-    %12 = ptr_add %3, %11
+    %12 = ptr_add.nuw %3, %11
     %13 = load.i16 %12, align 2, tbaa !3
     %14 = iconst.i64 2
-    %15 = ptr_add %4, %14
+    %15 = ptr_add.nuw %4, %14
     %16 = load.i16 %15, align 2, tbaa !3
     %17 = sext.i32 %13
     %18 = sext.i32 %16
     %19 = sdiv %17, %18
     %20 = trunc.i16 %19
     %21 = iconst.i64 2
-    %22 = ptr_add %2, %21
+    %22 = ptr_add.nuw %2, %21
     store %20 -> %22, align 2, tbaa !3
     %23 = load.i32 %2, align 4
     return %23
@@ -254,7 +254,7 @@ block0(%0: f64, %1: i32, %2: i32):
     %5 = sext.i64 %4
     %6 = iconst.i64 4
     %7 = mul.nsw %5, %6
-    %8 = ptr_add %3, %7
+    %8 = ptr_add.nuw %3, %7
     store %2 -> %8, align 4, tbaa !1
     %9 = sext.i64 %1
     %10 = iconst.i64 4
@@ -267,7 +267,7 @@ block0(%0: f64, %1: i32, %2: i32):
     %16 = sext.i64 %15
     %17 = iconst.i64 4
     %18 = mul.nsw %16, %17
-    %19 = ptr_add %3, %18
+    %19 = ptr_add.nuw %3, %18
     %20 = load.i32 %19, align 4, tbaa !1
     %21 = iconst.i32 1
     %22 = add.nsw %20, %21
@@ -294,28 +294,28 @@ block0(%0: f64, %1: f64):
     %7 = lshr %5, %6
     store %7 -> %3, align 4, tbaa !1
     %8 = iconst.i64 4
-    %9 = ptr_add %3, %8
+    %9 = ptr_add.nuw %3, %8
     %10 = load.i32 %9, align 4, tbaa !1
     %11 = iconst.i64 4
-    %12 = ptr_add %4, %11
+    %12 = ptr_add.nuw %4, %11
     %13 = load.i32 %12, align 4, tbaa !1
     %14 = lshr %10, %13
     %15 = iconst.i64 4
-    %16 = ptr_add %3, %15
+    %16 = ptr_add.nuw %3, %15
     store %14 -> %16, align 4, tbaa !1
     %17 = load.i32 %3, align 4, tbaa !1
     %18 = load.i32 %4, align 4, tbaa !1
     %19 = shl %17, %18
     store %19 -> %2, align 4, tbaa !1
     %20 = iconst.i64 4
-    %21 = ptr_add %3, %20
+    %21 = ptr_add.nuw %3, %20
     %22 = load.i32 %21, align 4, tbaa !1
     %23 = iconst.i64 4
-    %24 = ptr_add %4, %23
+    %24 = ptr_add.nuw %4, %23
     %25 = load.i32 %24, align 4, tbaa !1
     %26 = shl %22, %25
     %27 = iconst.i64 4
-    %28 = ptr_add %2, %27
+    %28 = ptr_add.nuw %2, %27
     store %26 -> %28, align 4, tbaa !1
     %29 = load.f64 %2, align 8
     return %29
@@ -330,21 +330,21 @@ block0(%0: f64):
     %4 = iconst.i32 2
     store %4 -> %1, align 4, tbaa !1
     %5 = iconst.i64 4
-    %6 = ptr_add %1, %5
+    %6 = ptr_add.nuw %1, %5
     store %4 -> %6, align 4, tbaa !1
     %7 = load.i32 %1, align 4, tbaa !1
     %8 = load.i32 %3, align 4, tbaa !1
     %9 = shl %7, %8
     store %9 -> %2, align 4, tbaa !1
     %10 = iconst.i64 4
-    %11 = ptr_add %1, %10
+    %11 = ptr_add.nuw %1, %10
     %12 = load.i32 %11, align 4, tbaa !1
     %13 = iconst.i64 4
-    %14 = ptr_add %3, %13
+    %14 = ptr_add.nuw %3, %13
     %15 = load.i32 %14, align 4, tbaa !1
     %16 = shl %12, %15
     %17 = iconst.i64 4
-    %18 = ptr_add %2, %17
+    %18 = ptr_add.nuw %2, %17
     store %16 -> %18, align 4, tbaa !1
     %19 = load.f64 %2, align 8
     return %19
@@ -365,17 +365,17 @@ block0(%0: f64, %1: f64):
     %10 = sub %9, %8
     store %10 -> %2, align 4, tbaa !1
     %11 = iconst.i64 4
-    %12 = ptr_add %3, %11
+    %12 = ptr_add.nuw %3, %11
     %13 = load.i32 %12, align 4, tbaa !1
     %14 = iconst.i64 4
-    %15 = ptr_add %4, %14
+    %15 = ptr_add.nuw %4, %14
     %16 = load.i32 %15, align 4, tbaa !1
     %17 = icmp slt %13, %16
     %18 = zext.i32 %17
     %19 = iconst.i32 0
     %20 = sub %19, %18
     %21 = iconst.i64 4
-    %22 = ptr_add %2, %21
+    %22 = ptr_add.nuw %2, %21
     store %20 -> %22, align 4, tbaa !1
     %23 = load.f64 %2, align 8
     return %23
@@ -396,17 +396,17 @@ block0(%0: f64, %1: f64):
     %10 = sub %9, %8
     store %10 -> %2, align 4, tbaa !1
     %11 = iconst.i64 4
-    %12 = ptr_add %3, %11
+    %12 = ptr_add.nuw %3, %11
     %13 = load.f32 %12, align 4, tbaa !2
     %14 = iconst.i64 4
-    %15 = ptr_add %4, %14
+    %15 = ptr_add.nuw %4, %14
     %16 = load.f32 %15, align 4, tbaa !2
     %17 = fcmp oeq %13, %16
     %18 = zext.i32 %17
     %19 = iconst.i32 0
     %20 = sub %19, %18
     %21 = iconst.i64 4
-    %22 = ptr_add %2, %21
+    %22 = ptr_add.nuw %2, %21
     store %20 -> %22, align 4, tbaa !1
     %23 = load.f64 %2, align 8
     return %23
@@ -428,31 +428,31 @@ block0(%0: f64, %1: f64):
     %11 = sub %10, %9
     store %11 -> %2, align 4, tbaa !1
     %12 = iconst.i64 4
-    %13 = ptr_add %4, %12
+    %13 = ptr_add.nuw %4, %12
     %14 = load.i32 %13, align 4, tbaa !1
     %15 = iconst.i64 4
-    %16 = ptr_add %5, %15
+    %16 = ptr_add.nuw %5, %15
     %17 = load.i32 %16, align 4, tbaa !1
     %18 = icmp sgt %14, %17
     %19 = zext.i32 %18
     %20 = iconst.i32 0
     %21 = sub %20, %19
     %22 = iconst.i64 4
-    %23 = ptr_add %2, %22
+    %23 = ptr_add.nuw %2, %22
     store %21 -> %23, align 4, tbaa !1
     %24 = load.i32 %2, align 4, tbaa !1
     %25 = load.i32 %4, align 4, tbaa !1
     %26 = and %24, %25
     store %26 -> %3, align 4, tbaa !1
     %27 = iconst.i64 4
-    %28 = ptr_add %2, %27
+    %28 = ptr_add.nuw %2, %27
     %29 = load.i32 %28, align 4, tbaa !1
     %30 = iconst.i64 4
-    %31 = ptr_add %4, %30
+    %31 = ptr_add.nuw %4, %30
     %32 = load.i32 %31, align 4, tbaa !1
     %33 = and %29, %32
     %34 = iconst.i64 4
-    %35 = ptr_add %3, %34
+    %35 = ptr_add.nuw %3, %34
     store %33 -> %35, align 4, tbaa !1
     %36 = load.f64 %3, align 8
     return %36
@@ -474,10 +474,10 @@ block0(%0: i32, %1: i32):
     %11 = trunc.i16 %10
     store %11 -> %2, align 2, tbaa !3
     %12 = iconst.i64 2
-    %13 = ptr_add %3, %12
+    %13 = ptr_add.nuw %3, %12
     %14 = load.i16 %13, align 2, tbaa !3
     %15 = iconst.i64 2
-    %16 = ptr_add %4, %15
+    %16 = ptr_add.nuw %4, %15
     %17 = load.i16 %16, align 2, tbaa !3
     %18 = icmp sge %14, %17
     %19 = zext.i32 %18
@@ -485,7 +485,7 @@ block0(%0: i32, %1: i32):
     %21 = sub %20, %19
     %22 = trunc.i16 %21
     %23 = iconst.i64 2
-    %24 = ptr_add %2, %23
+    %24 = ptr_add.nuw %2, %23
     store %22 -> %24, align 2, tbaa !3
     %25 = load.i32 %2, align 4
     return %25
@@ -497,7 +497,7 @@ block0:
     %1 = iconst.i32 5
     store %1 -> %0, align 4, tbaa !1
     %2 = iconst.i64 4
-    %3 = ptr_add %0, %2
+    %3 = ptr_add.nuw %0, %2
     %4 = iconst.i32 6
     store %4 -> %3, align 4, tbaa !1
     %5 = load.f64 %0, align 8

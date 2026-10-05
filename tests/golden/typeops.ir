@@ -9,7 +9,7 @@ block0:
     %1 = iconst.i32 0
     store %1 -> %0, align 4, tbaa !1
     %2 = iconst.i64 4
-    %3 = ptr_add %0, %2
+    %3 = ptr_add.nuw %0, %2
     %4 = iconst.i32 0
     store %4 -> %3, align 4, tbaa !1
     %5 = iconst.i64 4

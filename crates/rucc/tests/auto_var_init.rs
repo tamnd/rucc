@@ -43,7 +43,9 @@ fn fills(text: &str, name: &str) -> Vec<(i64, u64, u64)> {
     let mut offsets = std::collections::HashMap::new();
     let mut found = Vec::new();
     for line in &body {
-        if let Some((to, rest)) = line.split_once(" = ptr_add ") {
+        // The flags come after the name, as in `ptr_add.nuw`.
+        if let Some((to, rest)) = line.split_once(" = ptr_add") {
+            let (_, rest) = rest.split_once(' ').expect("operands");
             let (_, by) = rest.split_once(", ").expect("two operands");
             offsets.insert(to.to_string(), value(by) as u64);
         }

@@ -141,16 +141,16 @@ block0:
 func @member(ptr) -> i32, linkage(external) {
 block0(%0: ptr):
     %1 = iconst.i64 4
-    %2 = ptr_add %0, %1
+    %2 = ptr_add.nuw %0, %1
     %3 = iconst.i32 5
     atomic_store %3 -> %2, align 4, seq_cst, tbaa !1, owns 4
     %4 = iconst.i64 4
-    %5 = ptr_add %0, %4
+    %5 = ptr_add.nuw %0, %4
     %6 = iconst.i32 2
     %7 = atomic_rmw.i32 add %5, %6, align 4, seq_cst, tbaa !1
     %8 = add %7, %6
     %9 = iconst.i64 4
-    %10 = ptr_add %0, %9
+    %10 = ptr_add.nuw %0, %9
     %11 = atomic_load.i32 %10, align 4, seq_cst, tbaa !1
     return %11
 }
@@ -332,7 +332,7 @@ block0:
     call @__atomic_load(%2, %1, %0, %3) : (i64, ptr, ptr, i32)
     %4 = load.i64 %0, align 4
     %5 = iconst.i64 8
-    %6 = ptr_add %0, %5
+    %6 = ptr_add.nuw %0, %5
     %7 = load.i32 %6, align 4
     return %4, %7
 }
@@ -342,7 +342,7 @@ block0(%0: i64, %1: i32):
     %2 = alloca, size 12, align 4
     store %0 -> %2, align 4
     %3 = iconst.i64 8
-    %4 = ptr_add %2, %3
+    %4 = ptr_add.nuw %2, %3
     store %1 -> %4, align 4
     %5 = global_addr @three
     %6 = iconst.i64 12

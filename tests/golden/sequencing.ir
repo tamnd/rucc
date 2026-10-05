@@ -14,7 +14,7 @@ block0:
     %2 = sext.i64 %1
     %3 = iconst.i64 4
     %4 = mul.nsw %2, %3
-    %5 = ptr_add %0, %4
+    %5 = ptr_add.nuw %0, %4
     %6 = call @side() : () -> i32
     %7 = load.i32 %5, align 4, tbaa !1
     %8 = or %7, %6
@@ -41,7 +41,7 @@ block0:
     %2 = sext.i64 %1
     %3 = iconst.i64 4
     %4 = mul.nsw %2, %3
-    %5 = ptr_add %0, %4
+    %5 = ptr_add.nuw %0, %4
     %6 = load.i32 %5, align 4, tbaa !1
     %7 = iconst.i32 1
     %8 = add %6, %7
@@ -56,7 +56,7 @@ block0:
     %2 = sext.i64 %1
     %3 = iconst.i64 4
     %4 = mul.nsw %2, %3
-    %5 = ptr_add %0, %4
+    %5 = ptr_add.nuw %0, %4
     %6 = load.i32 %5, align 4, tbaa !1
     %7 = iconst.i32 1
     %8 = add %6, %7

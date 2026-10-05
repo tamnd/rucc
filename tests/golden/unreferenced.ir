@@ -52,7 +52,7 @@ block0:
     %6 = sext.i64 %5
     %7 = iconst.i64 8
     %8 = mul.nsw %6, %7
-    %9 = ptr_add %4, %8
+    %9 = ptr_add.nuw %4, %8
     %10 = load %9, align 8, tbaa !1
     %11 = call_indirect %10() : () -> i32
     %12 = add.nsw %3, %11

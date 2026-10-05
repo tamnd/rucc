@@ -45,11 +45,11 @@ block0(%0: f64, %1: i64):
     %2 = alloca, size 16, align 16
     store %0 -> %2, align 8
     %3 = iconst.i64 8
-    %4 = ptr_add %2, %3
+    %4 = ptr_add.nuw %2, %3
     store %1 -> %4, align 8
     %5 = load.f64 %2, align 8
     %6 = iconst.i64 8
-    %7 = ptr_add %2, %6
+    %7 = ptr_add.nuw %2, %6
     %8 = load.i64 %7, align 8
     %9 = call @take_mixed(%5, %8) : (f64, i64) -> i32
     return %9
@@ -60,11 +60,11 @@ block0(%0: f64, %1: f32):
     %2 = alloca, size 12, align 4
     store %0 -> %2, align 4
     %3 = iconst.i64 8
-    %4 = ptr_add %2, %3
+    %4 = ptr_add.nuw %2, %3
     store %1 -> %4, align 4
     %5 = load.f64 %2, align 4
     %6 = iconst.i64 8
-    %7 = ptr_add %2, %6
+    %7 = ptr_add.nuw %2, %6
     %8 = load.f32 %7, align 4
     %9 = call @take_floats(%5, %8) : (f64, f32) -> i32
     return %9
@@ -116,15 +116,15 @@ block0:
     %4 = call @make_pair(%2, %3) : (i32, i32) -> i64
     store %4 -> %1, align 4
     %5 = iconst.i64 4
-    %6 = ptr_add %1, %5
+    %6 = ptr_add.nuw %1, %5
     %7 = load.i32 %6, align 4, tbaa !1
     %8, %9 = call @make_mixed() : () -> (f64, i64)
     store %8 -> %0, align 8
     %10 = iconst.i64 8
-    %11 = ptr_add %0, %10
+    %11 = ptr_add.nuw %0, %10
     store %9 -> %11, align 8
     %12 = iconst.i64 8
-    %13 = ptr_add %0, %12
+    %13 = ptr_add.nuw %0, %12
     %14 = load.i32 %13, align 4, tbaa !1
     %15 = add.nsw %7, %14
     return %15
@@ -167,11 +167,11 @@ block0(%0: f64, %1: i64):
     %2 = alloca, size 16, align 16
     store %0 -> %2, align 8
     %3 = iconst.i64 8
-    %4 = ptr_add %2, %3
+    %4 = ptr_add.nuw %2, %3
     store %1 -> %4, align 8
     %5 = load.f64 %2, align 8
     %6 = iconst.i64 8
-    %7 = ptr_add %2, %6
+    %7 = ptr_add.nuw %2, %6
     %8 = load.i64 %7, align 8
     return %5, %8
 }
@@ -197,7 +197,7 @@ block0:
     %3 = call @make_pair(%1, %2) : (i32, i32) -> i64
     store %3 -> %0, align 4
     %4 = iconst.i64 4
-    %5 = ptr_add %0, %4
+    %5 = ptr_add.nuw %0, %4
     %6 = load.i32 %5, align 4, tbaa !1
     return %6
 }
