@@ -104,6 +104,36 @@ pub fn print_func(module: &Module, func: &Func, names: &Interner) -> String {
     printer.finish()
 }
 
+/// The number that the text gives each value and each block of `func`, indexed by the index of
+/// the value and of the block. `u32::MAX` is for one that is not reached, which only a function
+/// that the verifier turns down has.
+///
+/// The numbers are in print order, which makes the text a fact about the shape of the function
+/// and not about the order in which its tables were filled. A dump of a later stage, such as the
+/// tree form of the wasm backend, names values and blocks with these numbers, so that a person can
+/// read it beside the text of the IR.
+#[must_use]
+pub fn numbers(func: &Func) -> (Vec<u32>, Vec<u32>) {
+    let counts = func.counts();
+    let mut values = vec![u32::MAX; counts.values];
+    let mut blocks = vec![u32::MAX; counts.blocks];
+    let mut next = 0;
+    for (index, block) in func.blocks().enumerate() {
+        blocks[block.index()] = index as u32;
+        for &param in &func[block].params {
+            values[param.index()] = next;
+            next += 1;
+        }
+        for inst in func.insts(block) {
+            for result in func[inst].results() {
+                values[result.index()] = next;
+                next += 1;
+            }
+        }
+    }
+    (values, blocks)
+}
+
 /// A module being written out.
 #[derive(Debug)]
 pub struct Printer<'a> {
@@ -439,29 +469,8 @@ impl<'a> Printer<'a> {
     }
 
     /// Gives every value and every block of a function the number it is printed as.
-    ///
-    /// In print order, which is what makes the text a fact about the function's shape rather
-    /// than about which order its tables were filled in.
     fn number(&mut self, func: &Func) {
-        let counts = func.counts();
-        self.values.clear();
-        self.values.resize(counts.values, u32::MAX);
-        self.blocks.clear();
-        self.blocks.resize(counts.blocks, u32::MAX);
-        let mut next = 0;
-        for (index, block) in func.blocks().enumerate() {
-            self.blocks[block.index()] = index as u32;
-            for &param in &func[block].params {
-                self.values[param.index()] = next;
-                next += 1;
-            }
-            for inst in func.insts(block) {
-                for result in func[inst].results() {
-                    self.values[result.index()] = next;
-                    next += 1;
-                }
-            }
-        }
+        (self.values, self.blocks) = numbers(func);
     }
 
     /// The parameter and result types of a function or a call, with what the ABI asks of each.
