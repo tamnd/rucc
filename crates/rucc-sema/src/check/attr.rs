@@ -1923,8 +1923,9 @@ impl Checker<'_> {
         if !matches!(self.cx.target.tuple.arch().as_str(), "x86_64" | "i686") {
             return None;
         }
+        let ast = self.ast;
         let mut asked = None;
-        for attr in self.ast[attrs].to_vec() {
+        for &attr in &ast[attrs] {
             if self.gnu_name(&attr) != "nocf_check" {
                 continue;
             }
