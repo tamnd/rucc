@@ -2148,17 +2148,19 @@ impl Lower<'_, '_> {
                 self.code.op(emit::I32_OR);
             }
             32 => {
-                // rotr(x & 0xff00ff00, 8) | rotl(x & 0x00ff00ff, 8)
+                // rotl(x & 0xff00ff00, 8) | rotr(x & 0x00ff00ff, 8), as clang writes it. The left
+                // rotation takes byte 1 to byte 2 and byte 3 to byte 0, and the right rotation
+                // takes byte 0 to byte 3 and byte 2 to byte 1.
                 self.push(value)?;
                 self.code.i32_const(0xff00_ff00_u32 as i32);
                 self.code.op(emit::I32_AND);
                 self.code.i32_const(8);
-                self.code.op(emit::I32_ROTR);
+                self.code.op(emit::I32_ROTL);
                 self.push(value)?;
                 self.code.i32_const(0x00ff_00ff);
                 self.code.op(emit::I32_AND);
                 self.code.i32_const(8);
-                self.code.op(emit::I32_ROTL);
+                self.code.op(emit::I32_ROTR);
                 self.code.op(emit::I32_OR);
             }
             64 => {

@@ -904,3 +904,39 @@ fn a_tail_call_is_return_call_when_the_target_has_the_feature() {
         }
     }
 }
+
+/// A byte swap of 32 bits. With one argument, `main` exits with 0x33, the second byte from the
+/// top of 0x44332211. A swap of the bytes in each half gives 0x22114433 and an exit with 0x11.
+///
+/// ```c
+/// int main(int argc, char **argv) {
+///   unsigned y = __builtin_bswap32(0x11223344u * argc);
+///   return (y >> 16) & 0xff;
+/// }
+/// ```
+const SWAPPED: &str = r#"; ModuleID = 't.c'
+; format 0
+target triple = "wasm32-unknown-wasip1"
+target datalayout = "e-p:32:32-i64:64-S128"
+
+func @main(i32, ptr) -> i32, linkage(external) {
+block0(%0: i32, %1: ptr):
+    %2 = iconst.i32 287454020
+    %3 = mul %0, %2
+    %4 = bswap %3
+    %5 = iconst.i32 16
+    %6 = lshr %4, %5
+    %7 = iconst.i32 255
+    %8 = and %6, %7
+    return %8
+}
+"#;
+
+#[test]
+fn a_byte_swap_of_32_bits_reverses_the_four_bytes() {
+    for assembled in [false, true] {
+        if let Some(status) = link_and_run_as("swapped", SWAPPED, assembled) {
+            assert_eq!(status, 0x33, "assembled: {assembled}");
+        }
+    }
+}
