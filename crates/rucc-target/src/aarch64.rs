@@ -868,8 +868,8 @@ const fn aapcs64(
 /// base architecture counts them only in a vector register, with `cnt` and `addv`, and that is
 /// still waiting on its rule (tamnd/rucc#310).
 pub const COUNTS: &[CountInst] = &[
-    CountInst { of: BitCount::LeadingZeros, feature: "", widths: &[32, 64] },
-    CountInst { of: BitCount::TrailingZeros, feature: "", widths: &[32, 64] },
+    CountInst { of: BitCount::LeadingZeros, feature: "", widths: &[32, 64], guarded: false },
+    CountInst { of: BitCount::TrailingZeros, feature: "", widths: &[32, 64], guarded: false },
 ];
 
 #[cfg(test)]

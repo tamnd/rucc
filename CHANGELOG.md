@@ -57,6 +57,7 @@ All notable changes are recorded here. The format follows [Keep a Changelog](htt
 ### Changed
 
 - On AArch64, `__builtin_bswap32` and `__builtin_bswap64` are one `rev`, `__builtin_clz` and its wider forms are one `clz`, and `__builtin_ctz` and its wider forms are `rbit` and `clz` (#310). All three were written out as fifteen to twenty five instructions of shifts, masks and a multiply before, though every AArch64 processor has the instructions. The loop deletion pass now turns a loop that counts leading or trailing zeros into the count on AArch64 too, since it reads the same table. `__builtin_popcount` is still written out there, as the base architecture counts bits only in a vector register.
+- On x86-64 without `lzcnt` or BMI, `__builtin_clz` and `__builtin_ctz` and their wider forms are `bsr` or `bsf` followed by a conditional move that puts in the answer for zero, which is three or four instructions (#310). They were written out as about twenty instructions of shifts, masks and a multiply before. This is the baseline x86-64 that most distributions build for, and Postgres reaches a 32-bit leading zero count on every `palloc`. With `-mlzcnt` or `-mbmi`, or a `target` attribute that names them, the count is still one `lzcnt` or `tzcnt`.
 
 ## 0.22.2
 

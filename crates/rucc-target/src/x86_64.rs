@@ -1594,15 +1594,22 @@ const fn win64(chkstk: Chkstk) -> CallRegs {
     }
 }
 
-/// The counts x86-64 has an instruction for, which are `popcnt`, `lzcnt` and `tzcnt`.
+/// The counts x86-64 has an instruction for, which are `popcnt`, `lzcnt` and `tzcnt`, and the two
+/// it has a guarded search for everywhere else.
 ///
 /// `tzcnt` is in BMI rather than in an extension of its own. All three answer the width for a
-/// zero, which is what the IR counts answer, and `bsf` and `bsr` are not here because what they
-/// leave for a zero is not the same on every processor (tamnd/rucc#310).
+/// zero, which is what the IR counts answer. `bsr` and `bsf` do not, because what they leave for a
+/// zero is not the same on every processor (tamnd/rucc#310), so they are here guarded: a rule
+/// takes one only where the count is written as a choice that answers the width for a zero, and
+/// the conditional move after the search is that choice. On a processor with the extension the
+/// count is kept for the plain rule and never written as the choice, so the guarded one is what
+/// a plain x86-64 gets in place of the arithmetic.
 pub const COUNTS: &[CountInst] = &[
-    CountInst { of: BitCount::Ones, feature: "popcnt", widths: &[32, 64] },
-    CountInst { of: BitCount::LeadingZeros, feature: "lzcnt", widths: &[32, 64] },
-    CountInst { of: BitCount::TrailingZeros, feature: "bmi", widths: &[32, 64] },
+    CountInst { of: BitCount::Ones, feature: "popcnt", widths: &[32, 64], guarded: false },
+    CountInst { of: BitCount::LeadingZeros, feature: "lzcnt", widths: &[32, 64], guarded: false },
+    CountInst { of: BitCount::TrailingZeros, feature: "bmi", widths: &[32, 64], guarded: false },
+    CountInst { of: BitCount::LeadingZeros, feature: "", widths: &[32, 64], guarded: true },
+    CountInst { of: BitCount::TrailingZeros, feature: "", widths: &[32, 64], guarded: true },
 ];
 
 #[cfg(test)]

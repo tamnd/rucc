@@ -206,6 +206,14 @@
 (semantics (x64.tzcnt_32 v) (ctz.i32 v))
 (semantics (x64.tzcnt_64 v) (ctz.i64 v))
 
+;; The two zero counts a processor without either extension has, which are the searches with a
+;; conditional move after them that puts the width in for a zero. What the search leaves for a zero
+;; is overwritten by the move, so the sequence answers what the counts above answer.
+(semantics (x64.clz_scan_32 v) (clz.i32 v))
+(semantics (x64.clz_scan_64 v) (clz.i64 v))
+(semantics (x64.ctz_scan_32 v) (ctz.i32 v))
+(semantics (x64.ctz_scan_64 v) (ctz.i64 v))
+
 ;; Division. Both quotient and remainder come out of one instruction, and which of the two
 ;; a rule wants is which register it reads afterwards, so they are two heads here.
 (semantics (x64.idiv_quo_8 l r) (bvsdiv l r))

@@ -704,10 +704,16 @@ pub fn compile_recording(
     let switching = (flags.goal, flags.switch, flags.jump_tables, flags.cmov);
     // The bit counts the selector is left to answer, which are the ones it has a rule for and the
     // processor the function is built for has the extension of. A `target` attribute on the
-    // function says what it is built for in place of the command line.
+    // function says what it is built for in place of the command line. A guarded count needs the
+    // conditional move its rule ends in, so a machine without one writes the count out instead.
     let isa = source.target.unwrap_or(flags.isa);
-    let counts: Vec<rucc_target::CountInst> =
-        machine.selector.counts.iter().copied().filter(|count| count.on(isa)).collect();
+    let counts: Vec<rucc_target::CountInst> = machine
+        .selector
+        .counts
+        .iter()
+        .copied()
+        .filter(|count| count.on(isa) && (flags.cmov || !count.guarded))
+        .collect();
     let ran = lowering::group(source, names, machine.conv, switching, &counts, counting);
     if !ran.switches.is_empty() {
         let called = names.resolve(source.name).to_owned();
@@ -2080,6 +2086,34 @@ mod tests {
                 assert!(!text.contains(inst), "no {inst} on a plain x86-64: {text}");
                 let text = built(opcode, width, has, Some(Isa::NONE));
                 assert!(!text.contains(inst), "nor in a function built for less: {text}");
+            }
+        }
+    }
+
+    /// A zero count on a plain x86-64 is the search instruction and a conditional move for the
+    /// zero, which is what `palloc` asks for on every call, rather than the arithmetic.
+    #[test]
+    fn a_zero_count_on_a_plain_x86_64_is_a_search_and_a_conditional_move() {
+        for (opcode, inst) in [(Opcode::Ctlz, "x64.clz_scan"), (Opcode::Cttz, "x64.ctz_scan")] {
+            for width in [32, 64] {
+                let ty = Type::int(width);
+                let (mut names, mut source, block, args) = blank(&[ty]);
+                let mut build = Builder::new(&mut source, block);
+                let counted = build.unary(opcode, args[0], ty);
+                build.ret(&[counted]);
+                let machine = Machine::x86_64(&SYSV);
+                let out = compile(
+                    &mut source,
+                    &mut names,
+                    &machine,
+                    &Elsewhere::default(),
+                    Flags::default(),
+                )
+                .expect("a count is an instruction");
+                let text = mir::print_func(&out, &names, &REGS);
+                let wanted = format!("{inst}_{width}");
+                assert!(text.contains(&wanted), "{wanted}: {text}");
+                assert!(!text.contains("imul"), "and no arithmetic: {text}");
             }
         }
     }
