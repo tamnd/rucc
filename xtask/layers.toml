@@ -81,6 +81,7 @@ rucc-safety = 10
 rucc-mir = 10
 rucc-debug = 10
 rucc-asm = 11
+rucc-legalize = 11
 rucc-lto = 11
 rucc-regalloc = 11
 rucc-codegen = 12

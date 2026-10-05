@@ -7,9 +7,9 @@
 //! the whole set fits in one word. PostgreSQL's `IsSharedRelation` is three chains like that, forty
 //! six object ids between 1213 and 6303, and what came out was a hundred and forty instructions of
 //! comparisons and `or`s run on every call. Both gcc and clang make a `switch` out of the chain,
-//! which the switch lowering in `crates/rucc-codegen/src/switch.rs` turns into a binary search over
-//! the clusters with a bit test for each stretch of values that fits in a word, so a call is a few
-//! comparisons and one bit.
+//! which the switch lowering in `crates/rucc-legalize/src/switch.rs` turns into a binary search
+//! over the clusters with a bit test for each stretch of values that fits in a word, so a call is a
+//! few comparisons and one bit.
 //!
 //! # What is matched
 //!

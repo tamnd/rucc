@@ -38,6 +38,7 @@ rucc-diag = { version = "=0.24.3", path = "crates/rucc-diag" }
 rucc-driver = { version = "=0.24.3", path = "crates/rucc-driver" }
 rucc-gnu = { version = "=0.24.3", path = "crates/rucc-gnu" }
 rucc-ir = { version = "=0.24.3", path = "crates/rucc-ir" }
+rucc-legalize = { version = "=0.24.3", path = "crates/rucc-legalize" }
 rucc-lex = { version = "=0.24.3", path = "crates/rucc-lex" }
 rucc-lower = { version = "=0.24.3", path = "crates/rucc-lower" }
 rucc-lto = { version = "=0.24.3", path = "crates/rucc-lto" }

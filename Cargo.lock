@@ -155,6 +155,7 @@ dependencies = [
  "rucc-cost",
  "rucc-diag",
  "rucc-ir",
+ "rucc-legalize",
  "rucc-mir",
  "rucc-opt",
  "rucc-regalloc",
@@ -232,6 +233,17 @@ dependencies = [
  "rucc-diag",
  "rucc-target",
  "rucc-tuple",
+]
+
+[[package]]
+name = "rucc-legalize"
+version = "0.24.3"
+dependencies = [
+ "rucc-base",
+ "rucc-cost",
+ "rucc-diag",
+ "rucc-ir",
+ "rucc-target",
 ]
 
 [[package]]

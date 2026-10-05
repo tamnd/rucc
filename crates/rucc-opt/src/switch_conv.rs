@@ -32,7 +32,7 @@
 //! The `switch` stays a `switch`. Every case edge is pointed at one new block, which works the
 //! answer out and hands it on, and the default edge is not touched at all. What that buys is that
 //! the range check is not written here: a `switch` whose cases are consecutive and all go to one
-//! place is exactly `crates/rucc-codegen/src/switch.rs`'s `Cluster::Run`, which is one subtraction
+//! place is exactly `crates/rucc-legalize/src/switch.rs`'s `Cluster::Run`, which is one subtraction
 //! and one unsigned comparison however long the run is, and which already gets the modular
 //! arithmetic and the run that covers a whole type right. Writing a second range check here would
 //! be a second place for section 24.6's overflow to be got wrong.
