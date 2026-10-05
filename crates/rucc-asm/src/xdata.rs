@@ -673,6 +673,7 @@ mod tests {
             binding: rucc_object::Binding::Global,
             visibility: rucc_object::Visibility::Default,
             patch: None,
+            hooked: 0,
             landings: Vec::new(),
         }
     }

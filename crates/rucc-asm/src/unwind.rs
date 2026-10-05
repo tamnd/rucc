@@ -1257,6 +1257,7 @@ mod tests {
             binding: Binding::Global,
             visibility: Visibility::Default,
             patch: None,
+            hooked: 0,
             landings: Vec::new(),
         }
     }

@@ -49,6 +49,7 @@ mod att;
 mod bytes;
 mod data;
 mod format;
+mod hook;
 mod instruction;
 mod lines;
 mod sixteen;

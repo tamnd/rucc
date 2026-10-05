@@ -261,6 +261,10 @@ impl AttrSet {
     /// the order the source wrote it among the others like it, from
     /// `__attribute__((no_reorder))`.
     pub const NO_REORDER: Self = Self(1 << 37);
+    /// The function opens with the bytes a Windows hot patcher writes a short jump over, and has
+    /// room in front of its label for the longer jump that one goes to, from
+    /// `__attribute__((ms_hook_prologue))`.
+    pub const MS_HOOK: Self = Self(1 << 38);
 
     /// The underlying bits, for the printer and for hashing.
     #[must_use]
@@ -391,6 +395,7 @@ static NAMED: &[(AttrSet, &str)] = &[
     (AttrSet::INDIRECT_RETURN, "indirect_return"),
     (AttrSet::FORCE_ALIGN, "force_align_arg_pointer"),
     (AttrSet::NO_REORDER, "no_reorder"),
+    (AttrSet::MS_HOOK, "ms_hook_prologue"),
 ];
 
 /// The pairs that cannot both be set, with their names for the message.

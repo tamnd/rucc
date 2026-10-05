@@ -462,6 +462,13 @@ impl Writer<'_> {
         let patch =
             func.patch.map(|patch| (patch, format!("{}pfe_{name}", self.directives.local())));
         let mut ahead = String::new();
+        // The room a hot patcher was promised in front of the label, in the words gcc writes it
+        // in. See `crate::hook`.
+        if func.hook {
+            for _ in 0..crate::hook::room(self.arch) / 4 {
+                ahead.push_str("\t.long\t 0xcccccccc\n");
+            }
+        }
         if let Some((patch, label)) = &patch {
             let back = if let Some(section) = &home {
                 section.clone()
@@ -478,6 +485,12 @@ impl Writer<'_> {
         }
         let fill = self.fill();
         self.directives.open(&mut self.out, &name, align, fill, binding, seen, &ahead);
+        // And what it writes over, which is after the label and in front of everything the
+        // unwinder is told, as gcc has it.
+        let opening = crate::hook::opening(self.arch);
+        if func.hook && !opening.is_empty() {
+            self.out.push_str(&crate::hook::spelled(opening));
+        }
         let unwind = self.unwind;
         if unwind {
             let _ = writeln!(self.out, "\t.cfi_startproc");

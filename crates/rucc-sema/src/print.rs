@@ -215,6 +215,9 @@ impl<'a> Printer<'a> {
         if node.flags.contains(DeclFlags::NO_REORDER) {
             head.push_str(" no_reorder");
         }
+        if node.flags.contains(DeclFlags::MS_HOOK) {
+            head.push_str(" ms_hook_prologue");
+        }
         if node.flags.contains(DeclFlags::NO_STACK_PROTECTOR) {
             head.push_str(" no_stack_protector");
         }

@@ -350,9 +350,22 @@ pub struct Extent {
     /// Where the room a patcher was promised is, or `None` in a function promised none, which is
     /// every function on a command line that did not ask. See [`Patch`].
     pub patch: Option<Patch>,
+    /// How many bytes of `int3` a hot patcher was promised in front of [`Extent::start`], from
+    /// `__attribute__((ms_hook_prologue))`, which are in front of the room [`Patch`] says is there
+    /// too. Zero in every other function.
+    pub hooked: usize,
     /// Each call an unwind lands somewhere from, in the order they are in the function, which is
     /// empty in every function with no cleanup handler to run on the way out. See [`Site`].
     pub landings: Vec<Site>,
+}
+
+impl Extent {
+    /// How many of the function's bytes are in front of [`Self::start`], which is where its own
+    /// section begins under [`Sections::functions`] rather than where its symbol is.
+    #[must_use]
+    pub fn ahead(&self) -> usize {
+        self.patch.map_or(0, |patch| patch.before) + self.hooked
+    }
 }
 
 /// One call an unwind out of lands in a pad, as distances from [`Extent::start`].

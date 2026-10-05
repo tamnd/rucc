@@ -418,7 +418,7 @@ pub fn write(
         // the function's, they are just not under its name: the symbol is where the label was and
         // the room is what came before, so a section holding one without the other would be a
         // section a linker could place with the room missing.
-        let ahead = func.patch.map_or(0, |patch| patch.before);
+        let ahead = func.ahead();
         let (section, at) = if sections.functions {
             let name = format!(".text.{}", func.name).into_bytes();
             let id = obj.add_section(Vec::new(), name, SectionKind::Text);
@@ -493,7 +493,7 @@ pub fn write(
         let (section, at) = if sections.functions {
             // From the start of the section rather than from the symbol, which is the same
             // correction a relocation inside a function gets below.
-            let base = func.start - func.patch.map_or(0, |patch| patch.before);
+            let base = func.start - func.ahead();
             (split[index].0, (label.at - base) as u64)
         } else {
             (whole, label.at as u64)
@@ -556,7 +556,7 @@ pub fn write(
             };
             let func = &text.funcs[index];
             let (section, at) = if sections.functions {
-                let base = func.start - func.patch.map_or(0, |patch| patch.before);
+                let base = func.start - func.ahead();
                 (split[index].0, call - base)
             } else {
                 (whole, call)
@@ -740,7 +740,7 @@ pub fn write(
             };
             // From the start of the section rather than from the symbol, and the two are not the
             // same byte in a function with room in front of its label.
-            let base = func.start - func.patch.map_or(0, |patch| patch.before);
+            let base = func.start - func.ahead();
             (split[after - 1].0, (reloc.at - base) as u64)
         } else {
             (whole, reloc.at as u64)
@@ -1441,6 +1441,7 @@ mod tests {
             binding,
             visibility: Visibility::Default,
             patch: None,
+            hooked: 0,
             landings: Vec::new(),
         }
     }

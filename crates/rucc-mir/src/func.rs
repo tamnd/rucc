@@ -304,6 +304,12 @@ pub struct Func {
     /// The profiler's call when `-mrecord-mcount` or `-mnop-mcount` asked for something to be done
     /// with it, written by the prologue for the reason [`Func::patch`] is. See [`Mcount`].
     pub mcount: Option<Mcount>,
+    /// Whether the function opens with the bytes a Windows hot patcher writes over, from
+    /// `__attribute__((ms_hook_prologue))`, and has the room in front of its label that goes with
+    /// them. Written by whoever lays the function down rather than as instructions, since they are
+    /// a fixed run of bytes the patcher reads for, which an encoder free to pick its own forms
+    /// would not write. See `rucc_asm::hook`.
+    pub hook: bool,
     /// The name each block something outside the function refers to was given, in block order.
     ///
     /// What asks for one is GNU's address of a label in the initializer of an object with static
@@ -468,6 +474,7 @@ impl Func {
             cfi: Vec::new(),
             patch: None,
             mcount: None,
+            hook: false,
             labels: Vec::new(),
             landings: Vec::new(),
             declared: Span::DUMMY,

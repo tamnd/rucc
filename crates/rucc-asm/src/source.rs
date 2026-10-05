@@ -3619,6 +3619,7 @@ impl Reader {
                 binding: Binding::Local,
                 visibility: Visibility::Default,
                 patch: None,
+                hooked: 0,
                 landings: Vec::new(),
             })
             .collect();
@@ -3685,6 +3686,7 @@ impl Reader {
                 binding: Binding::Local,
                 visibility: Visibility::Default,
                 patch: None,
+                hooked: 0,
                 landings: Vec::new(),
             })
             .collect();
@@ -3744,6 +3746,7 @@ impl Reader {
                 binding: Binding::Local,
                 visibility: Visibility::Default,
                 patch: None,
+                hooked: 0,
                 landings: Vec::new(),
             })
             .collect();

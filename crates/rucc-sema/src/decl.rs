@@ -515,6 +515,11 @@ impl DeclFlags {
     /// [`Self::NOINLINE`] is.
     pub const NO_REORDER: Self = Self(1 << 38);
 
+    /// `__attribute__((ms_hook_prologue))` was written on a declaration of this function, so it
+    /// opens with the bytes a Windows hot patcher writes its jump over and has the room for a
+    /// longer one in front of its label. x86 only. Merged the way [`Self::NOINLINE`] is.
+    pub const MS_HOOK: Self = Self(1 << 39);
+
     /// Whether `zero_call_used_regs("skip")` was written. See [`Self::ZERO_WIDE`] for why this is
     /// more than the one bit.
     #[must_use]

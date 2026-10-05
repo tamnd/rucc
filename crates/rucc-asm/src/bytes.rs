@@ -165,10 +165,19 @@ pub fn assemble(
         // _do_nothing_on_both_sides_of_the_symbol` is what holds it to the same byte the encoder
         // writes for the half that is in a block.
         let ahead = text.bytes.len();
+        // The room a hot patcher was promised, in front of the patchable room since gcc writes it
+        // first, and the bytes it writes over, which are the first of the function's own. See
+        // `crate::hook`.
+        let arch = target.tuple.arch();
+        let hooked = if func.hook { crate::hook::room(arch) } else { 0 };
+        text.bytes.extend(std::iter::repeat_n(crate::hook::INT3, hooked));
         if let Some(patch) = func.patch {
             text.bytes.extend(std::iter::repeat_n(NOP, patch.before as usize));
         }
         let start = text.bytes.len();
+        if func.hook {
+            text.bytes.extend_from_slice(crate::hook::opening(arch));
+        }
         let name = names.resolve(func.name).to_owned();
         let mut assembler = Assembler {
             names,
@@ -208,7 +217,7 @@ pub fn assemble(
         // The two are not one offset because a landing pad can sit between the halves.
         let patch = func.patch.map(|patch| {
             let at = if patch.before > 0 {
-                ahead
+                ahead + hooked
             } else {
                 room.expect("room that is neither in front of the label nor anywhere after it")
             };
@@ -222,6 +231,7 @@ pub fn assemble(
             binding: binding(func.binding),
             visibility: visibility(func.visibility),
             patch,
+            hooked,
             landings,
         });
     }
@@ -1014,6 +1024,7 @@ mod tests {
             binding: Binding::Global,
             visibility: Visibility::Default,
             patch: None,
+            hooked: 0,
             landings: Vec::new(),
         };
         assert_eq!(text.funcs, [f]);

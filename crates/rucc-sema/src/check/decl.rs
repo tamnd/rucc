@@ -97,7 +97,7 @@ struct Declared {
     /// [`DeclFlags::NO_STRICT_ALIASING`], [`DeclFlags::OPTIMIZE_NONE`], [`DeclFlags::WRAPV`],
     /// [`DeclFlags::NO_LOOP_IDIOM`], [`DeclFlags::NO_INSTRUMENT`], [`DeclFlags::NO_PROFILE`], [`DeclFlags::NO_STACK_PROTECTOR`],
     /// [`DeclFlags::STACK_PROTECT`], [`DeclFlags::COLD`], [`DeclFlags::HOT`], [`DeclFlags::RETURN_KEEP`], [`DeclFlags::INDIRECT_KEEP`],
-    /// [`DeclFlags::CF_CHECK`], [`DeclFlags::FORCE_ALIGN`], [`DeclFlags::NO_REORDER`],
+    /// [`DeclFlags::CF_CHECK`], [`DeclFlags::FORCE_ALIGN`], [`DeclFlags::NO_REORDER`], [`DeclFlags::MS_HOOK`],
     /// [`DeclFlags::UNINITIALIZED`] and the `ZERO_` bits and nothing else.
     inlining: DeclFlags,
     /// Whether this declaration said the name is in another DLL or is offered to others by this
@@ -441,6 +441,7 @@ impl Checker<'_> {
         self.force_aligned(&[specs.attrs], ty);
         self.no_reordered(&[specs.attrs], true);
         self.strict_flex_refused(&[specs.attrs], Some(name));
+        self.ms_hooked(&[specs.attrs], true);
         self.record_patchable(id, &[specs.attrs], DeclKind::Function);
         self.record_wasm_names(id, &[specs.attrs], DeclKind::Function);
         self.record_fentry(Some(id), &[specs.attrs], DeclKind::Function);
@@ -945,6 +946,7 @@ impl Checker<'_> {
         self.force_aligned(&[specs.attrs, item.attrs], ty);
         self.no_reordered(&[specs.attrs, item.attrs], true);
         self.strict_flex_refused(&[specs.attrs, item.attrs], Some(name));
+        self.ms_hooked(&[specs.attrs, item.attrs], kind == DeclKind::Function);
         self.record_patchable(id, &[specs.attrs, item.attrs], kind);
         self.record_wasm_names(id, &[specs.attrs, item.attrs], kind);
         self.record_fentry(Some(id), &[specs.attrs, item.attrs], kind);
@@ -1072,6 +1074,7 @@ impl Checker<'_> {
         self.force_aligned(&[specs.attrs, item.attrs], ty);
         self.no_reordered(&[specs.attrs, item.attrs], false);
         self.strict_flex_refused(&[specs.attrs, item.attrs], Some(name));
+        self.ms_hooked(&[specs.attrs, item.attrs], false);
         self.record_fentry(None, &[specs.attrs, item.attrs], DeclKind::Type);
         self.record_symver(None, &[specs.attrs, item.attrs], StorageDuration::Static, span);
         self.resolver(&[specs.attrs, item.attrs], DeclKind::Type, span);
@@ -1585,6 +1588,7 @@ impl Checker<'_> {
                 DeclFlags::INDIRECT_KEEP,
                 DeclFlags::CF_CHECK,
                 DeclFlags::FORCE_ALIGN,
+                DeclFlags::MS_HOOK,
             ];
         }
         for &flag in taken {
