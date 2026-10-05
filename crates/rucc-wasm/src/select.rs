@@ -15,7 +15,9 @@ use rucc_target::wasm::Feature;
 use crate::emit::{self, Code};
 use crate::irreducible::Node;
 use crate::structure::Shape;
-use crate::{Unit, functype, valtype};
+use crate::{Unit, functype, is_pair, valtype};
+
+mod pair;
 
 type Result<T> = std::result::Result<T, String>;
 
@@ -47,11 +49,19 @@ struct Frame {
     fp: Option<u32>,
     /// The local that holds the stack pointer as the function found it.
     base: Option<u32>,
+    /// The offset of the buffer that a call to the runtime writes a pair to, when the function
+    /// has a pair. It is 32 bytes, with the pair at the start and the overflow flag of
+    /// `__muloti4` at 16.
+    scratch: Option<u32>,
 }
 
 /// The bytes and the alignment of a value in the buffer of the extra arguments of a variadic
-/// call. Each one takes at least 4 bytes, and the alignment is the natural one.
+/// call. Each one takes at least 4 bytes, and the alignment is the natural one, which is 16 for a
+/// pair, as clang's `va_arg` reads it.
 fn va_slot(ty: Type) -> Result<(u32, u32)> {
+    if is_pair(ty) {
+        return Ok((16, 16));
+    }
     match valtype(ty)? {
         ValType::I32 | ValType::F32 => Ok((4, 4)),
         ValType::I64 | ValType::F64 => Ok((8, 8)),
@@ -145,6 +155,7 @@ pub(crate) fn function(unit: &mut Unit<'_>, id: FuncId, symbol: u32) -> Result<F
         labels: Vec::new(),
         va: func.signature().variadic.then(|| params - 1),
         returns: !ty.results.is_empty(),
+        sret: func.signature().returns.iter().any(|ret| is_pair(ret.ty)),
     };
     lower.assign()?;
     lower.labels = (0..lower.shape.dispatches).map(|_| lower.new_local(ValType::I32)).collect();
@@ -186,6 +197,8 @@ struct Lower<'u, 'a> {
     /// The parameter that holds the address of the extra arguments, in a variadic function.
     va: Option<u32>,
     returns: bool,
+    /// Whether the function returns a pair, through the address in its parameter 0.
+    sret: bool,
 }
 
 impl Lower<'_, '_> {
@@ -204,17 +217,32 @@ impl Lower<'_, '_> {
         index
     }
 
+    /// A local for a value of type `ty`. A pair takes two locals one after the other, and its
+    /// local is the one of its low half.
+    fn local_for(&mut self, ty: Type) -> Result<u32> {
+        if is_pair(ty) {
+            let low = self.new_local(ValType::I64);
+            self.new_local(ValType::I64);
+            return Ok(low);
+        }
+        Ok(self.new_local(valtype(ty)?))
+    }
+
     /// Give each value a local. The parameters of the entry block are the parameters of the
-    /// function, and a constant has none, because it is written where it is used.
+    /// function, after the address of the return value when there is one, and a constant has
+    /// none, because it is written where it is used.
     fn assign(&mut self) -> Result<()> {
         let func = self.func;
         for block in self.blocks() {
             let params = func[block].params.iter().copied().filter(|&v| !func[v].ty.is_mem());
-            for (index, value) in params.enumerate() {
+            let mut next = u32::from(self.sret);
+            for value in params {
                 let local = if Some(block) == func.entry() {
-                    u32::try_from(index).expect("fewer than 2^32 parameters")
+                    let local = next;
+                    next += if is_pair(func[value].ty) { 2 } else { 1 };
+                    local
                 } else {
-                    self.new_local(valtype(func[value].ty)?)
+                    self.local_for(func[value].ty)?
                 };
                 self.local.insert(value, local);
             }
@@ -228,7 +256,7 @@ impl Lower<'_, '_> {
                     if ty.is_mem() || ty.is_void() {
                         continue;
                     }
-                    let local = self.new_local(valtype(ty)?);
+                    let local = self.local_for(ty)?;
                     self.local.insert(value, local);
                 }
             }
@@ -237,14 +265,18 @@ impl Lower<'_, '_> {
     }
 
     /// Lay out the stack frame: the buffer for the extra arguments of the variadic calls at the
-    /// bottom, and the fixed `alloca` slots above it.
+    /// bottom, the buffer for the answers of the runtime above it, and the fixed `alloca` slots
+    /// above that.
     fn plan(&mut self) -> Result<()> {
         let func = self.func;
         let mut va = 0u32;
+        let mut scratch = false;
         let mut allocas = Vec::new();
         for block in self.blocks() {
             for inst in func.insts(block) {
                 let data = &func[inst];
+                scratch |=
+                    pair::calls_runtime(data.opcode) && data.results().any(|v| is_pair(func[v].ty));
                 match data.opcode {
                     Opcode::Alloca if self.args(inst).is_empty() => {
                         let Extra::Mem(mem) = data.extra else { continue };
@@ -269,7 +301,11 @@ impl Lower<'_, '_> {
                 }
             }
         }
-        let mut at = va.next_multiple_of(8);
+        let mut at = va.next_multiple_of(16);
+        if scratch {
+            self.frame.scratch = Some(at);
+            at += 32;
+        }
         let mut align = 16;
         for (inst, size, a) in allocas {
             at = at.next_multiple_of(a);
@@ -414,6 +450,16 @@ impl Lower<'_, '_> {
                 Ok(())
             }
             Opcode::Switch => self.switch(x, term),
+            Opcode::Return if self.sret => {
+                self.epilogue();
+                let value = self.args(term)[0];
+                self.store_pair(value, |s| {
+                    s.code.local_get(0);
+                    Ok(())
+                })?;
+                self.code.op(emit::RETURN);
+                Ok(())
+            }
             Opcode::Return => {
                 self.epilogue();
                 let sig = func.signature();
@@ -568,8 +614,13 @@ impl Lower<'_, '_> {
         (ty.is_int() && !ty.is_ptr() && ty.bits() < 32).then(|| ty.bits())
     }
 
+    /// Take a value off the operand stack into its local, or into its two locals for a pair,
+    /// whose high half is on top.
     fn set(&mut self, value: Value) {
         let local = self.local[&value];
+        if is_pair(self.ty(value)) {
+            self.code.local_set(local + 1);
+        }
         self.code.local_set(local);
     }
 
@@ -603,8 +654,12 @@ impl Lower<'_, '_> {
     }
 
     /// Put a value on the operand stack. A constant is written here, and anything else is read
-    /// from its local.
+    /// from its local. A pair is two values, the low half first.
     fn push(&mut self, value: Value) -> Result<()> {
+        if is_pair(self.ty(value)) {
+            self.push_half(value, false)?;
+            return self.push_half(value, true);
+        }
         if let Some((inst, _)) = self.def(value) {
             let data = &self.func[inst];
             match (data.opcode, data.extra) {
@@ -741,6 +796,10 @@ impl Lower<'_, '_> {
         let data = &func[inst];
         let args = self.args(inst);
         let results = self.results(inst);
+        let call = matches!(data.opcode, Opcode::Call | Opcode::CallIndirect);
+        if !call && args.iter().chain(&results).any(|&v| is_pair(self.ty(v))) {
+            return self.pair(inst, &args, &results);
+        }
         let arg = |i: usize| args[i];
         match data.opcode {
             Opcode::IConst | Opcode::FConst | Opcode::GlobalAddr => {}
@@ -1262,6 +1321,15 @@ impl Lower<'_, '_> {
         if args.len() < params.len() {
             return Err("a call with fewer arguments than its signature".into());
         }
+        // A pair comes back through the buffer of the frame, or straight to where this function
+        // returns its own pair when the call is a tail call.
+        let sret = sig.returns.iter().any(|ret| is_pair(ret.ty));
+        match (sret, tail) {
+            (true, true) if self.sret => self.code.local_get(0),
+            (true, true) => return Err("a tail call that returns a pair to a caller".into()),
+            (true, false) => self.scratch_address(0),
+            (false, _) => {}
+        }
         for (&value, param) in args.iter().zip(&params) {
             self.push_abi(value, param.abi)?;
         }
@@ -1274,6 +1342,13 @@ impl Lower<'_, '_> {
                 let fp = self.frame_pointer();
                 for (&value, offset) in extra.iter().zip(offsets) {
                     let ty = self.ty(value);
+                    if is_pair(ty) {
+                        self.store_pair_at(value, offset, 16, |s| {
+                            s.code.local_get(fp);
+                            Ok(())
+                        })?;
+                        continue;
+                    }
                     let (op, natural) = store_op(ty)?;
                     self.code.local_get(fp);
                     if self.narrow(value).is_some() {
@@ -1324,6 +1399,7 @@ impl Lower<'_, '_> {
         }
         match self.results(inst).first() {
             Some(&result) if gives => self.set(result),
+            Some(&result) if sret => self.load_scratch(result),
             _ if gives => self.code.op(emit::DROP),
             _ => {}
         }
