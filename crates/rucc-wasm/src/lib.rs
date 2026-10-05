@@ -195,7 +195,7 @@ fn translate_with(
         functions: Map::default(),
         data: Map::default(),
         labels: Map::default(),
-        stack_pointer: None,
+        globals: Map::default(),
         table: None,
         tag: None,
         notes: notes.then(Vec::new),
@@ -345,7 +345,8 @@ pub(crate) struct Unit<'a> {
     /// The number of each label whose address a variable holds, by the name that the function
     /// gave the label. See [`label_numbers`].
     labels: Map<Symbol, u32>,
-    stack_pointer: Option<u32>,
+    /// The globals that the linker defines, such as `__stack_pointer`, by name.
+    globals: Map<&'static str, u32>,
     table: Option<u32>,
     /// The tag `__c_longjmp`, when a function catches a `longjmp`.
     tag: Option<u32>,
@@ -457,10 +458,18 @@ impl Unit<'_> {
 
     /// The global `__stack_pointer`, which the linker defines.
     pub(crate) fn stack_pointer(&mut self) -> u32 {
-        *self.stack_pointer.get_or_insert_with(|| {
-            let kind = SymbolKind::Global { ty: ValType::I32, mutable: true, import: None };
-            self.out.symbol("__stack_pointer", kind, 0)
-        })
+        self.linker_global("__stack_pointer", ValType::I32, true)
+    }
+
+    /// The symbol of a global that the linker defines, such as `__stack_pointer` and `__tls_base`.
+    pub(crate) fn linker_global(&mut self, name: &'static str, ty: ValType, mutable: bool) -> u32 {
+        if let Some(&symbol) = self.globals.get(name) {
+            return symbol;
+        }
+        let kind = SymbolKind::Global { ty, mutable, import: None };
+        let symbol = self.out.symbol(name, kind, 0);
+        self.globals.insert(name, symbol);
+        symbol
     }
 
     /// The tag `__c_longjmp` of the exception that the `longjmp` of `libsetjmp` throws, which
