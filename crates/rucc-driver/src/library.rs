@@ -81,7 +81,18 @@ pub fn candidates(target: Triple, machine: &Machine) -> Vec<PathBuf> {
         // Freestanding. There is no library, so there are no headers of one, and the nine the
         // compiler ships are the whole of what a program may include.
         Os::None => Vec::new(),
+        Os::Wasi(_) => wasi(target, root),
     }
+}
+
+/// The headers of a wasi-sysroot, which keeps one directory for each preview under `include`.
+/// With no sysroot there is no other place to look, because no machine has WASI headers of its
+/// own.
+fn wasi(target: Triple, sysroot: Option<&Path>) -> Vec<PathBuf> {
+    let Some(root) = sysroot else {
+        return Vec::new();
+    };
+    vec![root.join("include").join(format!("{}-{}", target.arch.as_str(), target.os.as_str()))]
 }
 
 /// gcc's order on a glibc system, which is what every Linux distribution lays out.
@@ -457,7 +468,7 @@ fn ask_xcrun() -> Option<PathBuf> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use rucc_target::Arch;
+    use rucc_target::{Arch, Preview};
 
     fn triple(os: Os, env: Env) -> Triple {
         Triple::new(Arch::X86_64, os, env)
@@ -516,6 +527,19 @@ mod tests {
         // native compile there is still a native compile.
         let machine = Machine { host: None, ..Machine::default() };
         assert_eq!(candidates(triple(Os::Linux, Env::Gnu), &machine).len(), 3);
+    }
+
+    #[test]
+    fn a_wasi_target_reads_the_directory_of_its_preview_in_the_sysroot_and_nothing_else() {
+        let wasi = |preview| Triple::new(Arch::Wasm32, Os::Wasi(preview), Env::None);
+        let machine = Machine { sysroot: Some("/opt/wasi-sysroot".into()), ..on(Os::Linux) };
+        let under = |dir| PathBuf::from("/opt/wasi-sysroot").join("include").join(dir);
+        assert_eq!(candidates(wasi(Preview::P1), &machine), [under("wasm32-wasip1")]);
+        assert_eq!(candidates(wasi(Preview::P2), &machine), [under("wasm32-wasip2")]);
+        assert_eq!(candidates(wasi(Preview::P3), &machine), [under("wasm32-wasip3")]);
+        // No host has WASI headers of its own, so with no sysroot there is nothing to offer.
+        let alone = Machine { host: None, ..Machine::default() };
+        assert!(candidates(wasi(Preview::P1), &alone).is_empty());
     }
 
     #[test]

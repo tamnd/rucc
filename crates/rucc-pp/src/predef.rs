@@ -21,7 +21,7 @@
 
 use rucc_base::float::Format;
 use rucc_session::{GnucVersion, Math, MscVersion, OptLevel, Options, Pic, Std};
-use rucc_target::{Arch, CodeModel, Env, Feature, Isa, Os, TargetInfo, Triple};
+use rucc_target::{Arch, CodeModel, Env, Feature, Isa, ObjectFormat, Os, TargetInfo, Triple};
 use rucc_tuple::{self as tuple};
 
 /// The name a diagnostic about the generated set points at.
@@ -663,6 +663,14 @@ fn platform(d: &mut Defs, target: &TargetInfo, opts: &Predef) {
                 d.flag("i386");
             }
         }
+        // clang defines all four spellings, and wasi-libc's `wasi/api.h` stops with `#error`
+        // without `__wasm32__`.
+        Arch::Wasm32 => {
+            d.flag("__wasm");
+            d.flag("__wasm__");
+            d.flag("__wasm32");
+            d.flag("__wasm32__");
+        }
     }
     match triple.os {
         Os::Linux => {
@@ -776,8 +784,15 @@ fn platform(d: &mut Defs, target: &TargetInfo, opts: &Predef) {
         }
         Os::None => {
             // Freestanding. `__ELF__` still holds, because the object format is a property of
-            // the target rather than of having an operating system under it.
-            d.flag("__ELF__");
+            // the target rather than of having an operating system under it, and a wasm module
+            // is not ELF.
+            d.flag_if(triple.object_format() == ObjectFormat::Elf, "__ELF__");
+        }
+        // WASI is not Unix, so there is no `__unix__`. The wasi-libc headers select their
+        // declarations by the preview macro, and `errno.h` reads it before it includes anything.
+        Os::Wasi(preview) => {
+            d.flag("__wasi__");
+            d.flag(&format!("__wasip{}__", preview.number()));
         }
     }
     match triple.env {
@@ -840,7 +855,8 @@ fn platform(d: &mut Defs, target: &TargetInfo, opts: &Predef) {
     //
     // Neither pair under `-fno-pic` and `-fno-pie`, which is what gcc does and what the claim
     // above stops being true for.
-    if !matches!(triple.os, Os::Windows) && opts.pic != Pic::Absolute {
+    // rucc writes no position independent wasm, so neither pair is defined there.
+    if !matches!(triple.os, Os::Windows) && !triple.arch.is_wasm() && opts.pic != Pic::Absolute {
         d.set("__PIC__", "2");
         d.set("__pic__", "2");
         if opts.pic == Pic::Executable {
@@ -934,7 +950,7 @@ fn msvc(d: &mut Defs, target: &TargetInfo, arch: Arch, opts: &Predef) {
         // The same count for 32-bit x86, where 600 is the Pentium Pro and what clang and
         // Microsoft's compiler both say today.
         Arch::X86 => d.set("_M_IX86", "600"),
-        Arch::Riscv64 => {}
+        Arch::Riscv64 | Arch::Wasm32 => {}
     }
     d.set("_MSC_VER", &opts.msc.msc_ver().to_string());
     d.set("_MSC_FULL_VER", &opts.msc.msc_full_ver().to_string());
@@ -2742,5 +2758,49 @@ mod tests {
         }
         assert!(has(&strict, "#define _WIN32 1"));
         assert!(has(&strict, "#define __WINNT__ 1"));
+    }
+
+    #[test]
+    fn a_wasm_target_says_wasm_and_its_wasi_preview_and_nothing_unix() {
+        for (triple, preview) in [
+            ("wasm32-wasip1", Some(1)),
+            ("wasm32-wasip2", Some(2)),
+            ("wasm32-wasip3", Some(3)),
+            ("wasm32-unknown-unknown", None),
+        ] {
+            let text = set_for(triple);
+            for name in ["__wasm", "__wasm__", "__wasm32", "__wasm32__"] {
+                assert!(has(&text, &format!("#define {name} 1")), "{triple}: {name}");
+            }
+            assert_eq!(has(&text, "#define __wasi__ 1"), preview.is_some(), "{triple}");
+            for n in 1..=3 {
+                let line = format!("#define __wasip{n}__ 1");
+                assert_eq!(has(&text, &line), preview == Some(n), "{triple}: {line}");
+            }
+            // A wasm object is not ELF, the target is not Unix, and rucc writes no position
+            // independent wasm.
+            for name in [
+                "__ELF__",
+                "__unix__",
+                "__unix",
+                "unix",
+                "__linux__",
+                "__pic__",
+                "__PIC__",
+                "__pie__",
+                "__PIE__",
+            ] {
+                assert!(
+                    !text.lines().any(|l| l.starts_with(&format!("#define {name} "))),
+                    "{triple}: {name}"
+                );
+            }
+            assert!(
+                !has(&text, "#define __x86_64__ 1") && !has(&text, "#define __aarch64__ 1"),
+                "{triple}"
+            );
+        }
+        // A freestanding ELF target keeps `__ELF__`.
+        assert!(has(&set_for("x86_64-unknown-none"), "#define __ELF__ 1"));
     }
 }

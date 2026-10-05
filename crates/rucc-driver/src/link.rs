@@ -1839,6 +1839,9 @@ fn emulation(target: Triple) -> &'static str {
         Arch::Aarch64 => "aarch64linux",
         Arch::Riscv64 => "elf64lriscv",
         Arch::X86 => "elf_i386",
+        Arch::Wasm32 => {
+            unreachable!("only a Linux target asks for an emulation, and wasm32 is never one")
+        }
     }
 }
 
@@ -1856,6 +1859,9 @@ fn loader(target: Triple) -> &'static str {
         (Arch::Riscv64, _) => "/lib/ld-linux-riscv64-lp64d.so.1",
         (Arch::X86, Env::Musl) => "/lib/ld-musl-i386.so.1",
         (Arch::X86, _) => "/lib/ld-linux.so.2",
+        (Arch::Wasm32, _) => {
+            unreachable!("only a Linux target has a loader, and wasm32 is never one")
+        }
     }
 }
 

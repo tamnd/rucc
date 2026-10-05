@@ -101,21 +101,28 @@ pub enum Arch {
     Riscv64,
     /// 32-bit x86, the i386 of the psABI and the i686 of a triple, which issue #2247 brings up.
     X86,
+    /// 32-bit WebAssembly. The front end knows it and there is no backend yet, so the driver
+    /// stops before code generation. Design: #2863, and the WebAssembly plan, decision D1.
+    Wasm32,
 }
 
 impl Arch {
+    /// Every architecture, in the order of the enumeration.
+    pub const ALL: [Arch; 5] =
+        [Arch::X86_64, Arch::Aarch64, Arch::Riscv64, Arch::X86, Arch::Wasm32];
+
     /// Pointer width in bits.
     pub const fn pointer_width(self) -> u32 {
         match self {
             Arch::X86_64 | Arch::Aarch64 | Arch::Riscv64 => 64,
-            Arch::X86 => 32,
+            Arch::X86 | Arch::Wasm32 => 32,
         }
     }
 
     /// Whether the target is little-endian.
     pub const fn is_little_endian(self) -> bool {
         match self {
-            Arch::X86_64 | Arch::Aarch64 | Arch::Riscv64 | Arch::X86 => true,
+            Arch::X86_64 | Arch::Aarch64 | Arch::Riscv64 | Arch::X86 | Arch::Wasm32 => true,
         }
     }
 
@@ -126,7 +133,14 @@ impl Arch {
             Arch::Aarch64 => "aarch64",
             Arch::Riscv64 => "riscv64",
             Arch::X86 => "i686",
+            Arch::Wasm32 => "wasm32",
         }
+    }
+
+    /// Whether code for this architecture is WebAssembly, for which rucc has no backend yet.
+    #[must_use]
+    pub const fn is_wasm(self) -> bool {
+        matches!(self, Arch::Wasm32)
     }
 }
 
@@ -146,9 +160,46 @@ pub enum Os {
     Windows,
     /// No operating system, which is what `-ffreestanding` kernel work looks like.
     None,
+    /// The WebAssembly System Interface, at one of its previews.
+    Wasi(Preview),
+}
+
+/// A preview of WASI. Each one is a different set of imports and a different libc build, and
+/// preview 3 also moves the stack pointer into a context, so each one is a target of its own.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub enum Preview {
+    /// WASI 0.1, the core module interface that every engine runs.
+    P1,
+    /// WASI 0.2, a component that wraps a core module built as for preview 1.
+    P2,
+    /// WASI 0.3, with asynchronous calls and the stack pointer in the context.
+    P3,
+}
+
+impl Preview {
+    /// The number after the `p`.
+    #[must_use]
+    pub const fn number(self) -> u32 {
+        match self {
+            Preview::P1 => 1,
+            Preview::P2 => 2,
+            Preview::P3 => 3,
+        }
+    }
 }
 
 impl Os {
+    /// Every operating system, in the order of the enumeration.
+    pub const ALL: [Os; 7] = [
+        Os::Linux,
+        Os::Darwin,
+        Os::Windows,
+        Os::None,
+        Os::Wasi(Preview::P1),
+        Os::Wasi(Preview::P2),
+        Os::Wasi(Preview::P3),
+    ];
+
     /// The name as it appears in a triple.
     pub const fn as_str(self) -> &'static str {
         match self {
@@ -156,15 +207,9 @@ impl Os {
             Os::Darwin => "darwin",
             Os::Windows => "windows",
             Os::None => "none",
-        }
-    }
-
-    /// The object file format this operating system uses.
-    pub const fn object_format(self) -> ObjectFormat {
-        match self {
-            Os::Linux | Os::None => ObjectFormat::Elf,
-            Os::Darwin => ObjectFormat::MachO,
-            Os::Windows => ObjectFormat::Coff,
+            Os::Wasi(Preview::P1) => "wasip1",
+            Os::Wasi(Preview::P2) => "wasip2",
+            Os::Wasi(Preview::P3) => "wasip3",
         }
     }
 }
@@ -187,6 +232,9 @@ pub enum Env {
 }
 
 impl Env {
+    /// Every environment, in the order of the enumeration.
+    pub const ALL: [Env; 4] = [Env::None, Env::Gnu, Env::Musl, Env::Msvc];
+
     /// The name as it appears in a triple, if it appears at all.
     pub const fn as_str(self) -> &'static str {
         match self {
@@ -369,6 +417,32 @@ impl Triple {
         Self { arch, os, env }
     }
 
+    /// Whether the architecture runs on the operating system. wasm runs on WASI or on nothing,
+    /// and WASI runs nothing but wasm. Every other pair is a machine.
+    #[must_use]
+    pub const fn pairs(arch: Arch, os: Os) -> bool {
+        match (arch, os) {
+            (Arch::Wasm32, Os::Linux | Os::Darwin | Os::Windows) => false,
+            (Arch::Wasm32, Os::None | Os::Wasi(_)) => true,
+            (_, Os::Wasi(_)) => false,
+            _ => true,
+        }
+    }
+
+    /// The object file format for this target.
+    ///
+    /// It follows the operating system, except with no operating system, where it follows the
+    /// architecture: freestanding wasm is a wasm module and every other freestanding target is ELF.
+    #[must_use]
+    pub const fn object_format(self) -> ObjectFormat {
+        match (self.os, self.arch) {
+            (Os::Wasi(_), _) | (Os::None, Arch::Wasm32) => ObjectFormat::Wasm,
+            (Os::Linux | Os::None, _) => ObjectFormat::Elf,
+            (Os::Darwin, _) => ObjectFormat::MachO,
+            (Os::Windows, _) => ObjectFormat::Coff,
+        }
+    }
+
     /// The same machine as a [`TargetTuple`], which is what the layout and ABI descriptions are
     /// written over.
     ///
@@ -388,7 +462,7 @@ impl Triple {
     /// # Panics
     ///
     /// Never, for a triple this type can hold, which `every_triple_describes_a_machine` checks by
-    /// building all sixty four of them.
+    /// building all eighty of them whose architecture pairs with the operating system.
     #[must_use]
     pub fn tuple(self) -> TargetTuple {
         let arch = match self.arch {
@@ -396,6 +470,7 @@ impl Triple {
             Arch::Aarch64 => tuple::Arch::Aarch64,
             Arch::Riscv64 => tuple::Arch::Riscv64,
             Arch::X86 => tuple::Arch::X86,
+            Arch::Wasm32 => tuple::Arch::Wasm32,
         };
         let os = match self.os {
             Os::Linux => tuple::Os::Linux,
@@ -404,6 +479,7 @@ impl Triple {
             Os::Darwin => tuple::Os::MacOs,
             Os::Windows => tuple::Os::Windows,
             Os::None => tuple::Os::None,
+            Os::Wasi(_) => tuple::Os::Wasi,
         };
         let env = match (self.os, self.env) {
             (Os::Linux, Env::Musl) => tuple::Env::Musl,
@@ -412,13 +488,15 @@ impl Triple {
             // narrowing, because it has a different `long double` from MSVC on the same OS.
             (Os::Windows, Env::Gnu) => tuple::Env::Gnu,
             (Os::Windows, _) => tuple::Env::Msvc,
-            // Darwin and freestanding have no libc to name.
-            (Os::Darwin | Os::None, _) => tuple::Env::None,
+            // Darwin and freestanding have no libc to name, and WASI has one libc, wasi-libc.
+            (Os::Darwin | Os::None | Os::Wasi(_), _) => tuple::Env::None,
         };
-        TargetTuple::builder(arch, os)
-            .env(env)
-            .build()
-            .expect("every triple this type can hold describes a machine")
+        let mut builder = TargetTuple::builder(arch, os).env(env);
+        // The tuple keeps the preview as the version of the operating system.
+        if let Os::Wasi(preview) = self.os {
+            builder = builder.os_version(tuple::Version::major(preview.number()));
+        }
+        builder.build().expect("every triple this type can hold describes a machine")
     }
 
     /// The triple that describes the same machine as `target`, if this type can spell it.
@@ -441,16 +519,28 @@ impl Triple {
     /// `aarch64-macos.13` is the Darwin triple rather than a miss.
     #[must_use]
     pub fn from_tuple(target: TargetTuple) -> Option<Triple> {
+        // The preview is the one version that names a different target, so it stays.
+        let target = match (target.os(), target.os_version()) {
+            (tuple::Os::Wasi, Some(preview)) => TargetTuple::builder(target.arch(), target.os())
+                .env(target.env())
+                .os_version(tuple::Version::major(preview.major_part()))
+                .build()
+                .ok()?,
+            _ => target.without_versions(),
+        };
         // Four triples narrow onto `x86_64-linux-gnu`, because a Darwin triple claiming glibc is
         // a string somebody can type and not a machine. So a match is not enough on its own: the
         // answer is the candidate whose environment came through the narrowing unchanged, and
         // anything else is only a fallback for the day a narrowing loses a spelling entirely.
         let mut fallback = None;
-        for arch in [Arch::X86_64, Arch::Aarch64, Arch::Riscv64, Arch::X86] {
-            for os in [Os::Linux, Os::Darwin, Os::Windows, Os::None] {
-                for env in [Env::None, Env::Gnu, Env::Musl, Env::Msvc] {
+        for arch in Arch::ALL {
+            for os in Os::ALL {
+                for env in Env::ALL {
+                    if !Triple::pairs(arch, os) {
+                        continue;
+                    }
                     let candidate = Triple::new(arch, os, env);
-                    if candidate.tuple() != target.without_versions() {
+                    if candidate.tuple() != target {
                         continue;
                     }
                     // By name rather than by a match on the pair, so that an environment added to
@@ -542,6 +632,8 @@ impl FromStr for Triple {
             Some("aarch64" | "arm64") => Arch::Aarch64,
             Some("riscv64") => Arch::Riscv64,
             Some("i386" | "i486" | "i586" | "i686" | "x86") => Arch::X86,
+            Some("wasm32") => Arch::Wasm32,
+            Some("wasm64") => return Err(err("wasm64 is not supported, only wasm32")),
             _ => return Err(err("unknown architecture")),
         };
 
@@ -567,17 +659,36 @@ impl FromStr for Triple {
                 "gnu" | "gnueabi" | "gnueabihf" => env = Some(Env::Gnu),
                 "musl" | "musleabi" | "musleabihf" => env = Some(Env::Musl),
                 "msvc" => env = Some(Env::Msvc),
+                // `wasi` alone is the old name of preview 1.
+                "wasi" | "wasip1" => os = Some(Os::Wasi(Preview::P1)),
+                "wasip2" => os = Some(Os::Wasi(Preview::P2)),
+                "wasip3" => os = Some(Os::Wasi(Preview::P3)),
+                part if part.starts_with("wasip") => {
+                    return Err(err("unknown WASI preview, which is wasip1, wasip2 or wasip3"));
+                }
+                "threads" => return Err(err("the threads variant of WASI is not supported")),
                 _ => {}
             }
         }
 
+        // LLVM writes freestanding wasm as `wasm32-unknown-unknown`, with no operating system.
+        if arch == Arch::Wasm32 && os.is_none() {
+            os = Some(Os::None);
+        }
         let os = os.ok_or_else(|| err("unknown operating system"))?;
+        if !Triple::pairs(arch, os) {
+            return Err(err(if arch.is_wasm() {
+                "wasm32 runs on WASI or with no operating system"
+            } else {
+                "WASI is an operating system for wasm32 only"
+            }));
+        }
         // The same defaults as `rucc_tuple::Os::default_env`, so that `x86_64-pc-windows` means
         // one target whichever of the two parsers read it, and it means the mingw-w64 one because
         // that is the one a fresh machine can link for.
         let env = env.unwrap_or(match os {
             Os::Linux | Os::Windows => Env::Gnu,
-            Os::Darwin | Os::None => Env::None,
+            Os::Darwin | Os::None | Os::Wasi(_) => Env::None,
         });
         Ok(Self::new(arch, os, env))
     }
@@ -1366,6 +1477,47 @@ mod tests {
     }
 
     #[test]
+    fn reads_the_wasm_spellings() {
+        for (spelling, os) in [
+            ("wasm32-wasi", Os::Wasi(Preview::P1)),
+            ("wasm32-wasip1", Os::Wasi(Preview::P1)),
+            ("wasm32-unknown-wasip1", Os::Wasi(Preview::P1)),
+            ("wasm32-wasip2", Os::Wasi(Preview::P2)),
+            ("wasm32-wasip3", Os::Wasi(Preview::P3)),
+            ("wasm32", Os::None),
+            ("wasm32-unknown-unknown", Os::None),
+            ("wasm32-none", Os::None),
+        ] {
+            let t: Triple = spelling.parse().unwrap_or_else(|e| panic!("{spelling}: {e}"));
+            assert_eq!((t.arch, t.os, t.env), (Arch::Wasm32, os, Env::None), "{spelling}");
+            assert_eq!(t.object_format(), ObjectFormat::Wasm, "{spelling}");
+        }
+    }
+
+    #[test]
+    fn keeps_the_wasi_preview_through_the_tuple() {
+        for preview in [Preview::P1, Preview::P2, Preview::P3] {
+            let t = Triple { arch: Arch::Wasm32, os: Os::Wasi(preview), env: Env::None };
+            assert_eq!(Triple::from_tuple(t.tuple()), Some(t));
+        }
+    }
+
+    #[test]
+    fn refuses_the_wasm_rows_it_does_not_have() {
+        for (spelling, reason) in [
+            ("wasm64-wasip1", "wasm64 is not supported, only wasm32"),
+            ("wasm32-wasip9", "unknown WASI preview, which is wasip1, wasip2 or wasip3"),
+            ("wasm32-wasip1-threads", "the threads variant of WASI is not supported"),
+            ("wasm32-linux", "wasm32 runs on WASI or with no operating system"),
+            ("wasm32-unknown-linux-gnu", "wasm32 runs on WASI or with no operating system"),
+            ("x86_64-wasip1", "WASI is an operating system for wasm32 only"),
+        ] {
+            let e = spelling.parse::<Triple>().unwrap_err();
+            assert_eq!(e.reason, reason, "{spelling}");
+        }
+    }
+
+    #[test]
     fn displays_in_a_normalised_form() {
         let t: Triple = "amd64-linux-gnu".parse().unwrap();
         assert_eq!(t.to_string(), "x86_64-unknown-linux-gnu");
@@ -1446,13 +1598,13 @@ mod tests {
     #[test]
     fn every_triple_describes_a_machine() {
         // `Triple::tuple` panics on a pair that is not a machine and this is what says there is
-        // no such pair. All sixty four combinations, including the ones the parser will produce
-        // from a string somebody can type and no machine has, such as a Darwin target claiming
-        // glibc.
+        // no such pair. All eighty combinations whose architecture pairs with the operating
+        // system, including the ones the parser will produce from a string somebody can type and
+        // no machine has, such as a Darwin target claiming glibc.
         let mut built = 0;
-        for arch in [Arch::X86_64, Arch::Aarch64, Arch::Riscv64, Arch::X86] {
-            for os in [Os::Linux, Os::Darwin, Os::Windows, Os::None] {
-                for env in [Env::None, Env::Gnu, Env::Musl, Env::Msvc] {
+        for arch in Arch::ALL {
+            for os in Os::ALL.into_iter().filter(|&os| Triple::pairs(arch, os)) {
+                for env in Env::ALL {
                     let triple = Triple::new(arch, os, env);
                     let tuple = triple.tuple();
                     assert_eq!(tuple.pointer_width(), arch.pointer_width(), "{triple}");
@@ -1469,7 +1621,7 @@ mod tests {
                 }
             }
         }
-        assert_eq!(built, 64);
+        assert_eq!(built, 80);
     }
 
     #[test]
@@ -1478,9 +1630,9 @@ mod tests {
         // always the triple it started as, because the narrowing is many to one: a Darwin target
         // claiming glibc and the same one claiming nothing are one machine, and the answer is the
         // spelling that names no libc.
-        for arch in [Arch::X86_64, Arch::Aarch64, Arch::Riscv64, Arch::X86] {
-            for os in [Os::Linux, Os::Darwin, Os::Windows, Os::None] {
-                for env in [Env::None, Env::Gnu, Env::Musl, Env::Msvc] {
+        for arch in Arch::ALL {
+            for os in Os::ALL.into_iter().filter(|&os| Triple::pairs(arch, os)) {
+                for env in Env::ALL {
                     let triple = Triple::new(arch, os, env);
                     let back = Triple::from_tuple(triple.tuple())
                         .unwrap_or_else(|| panic!("{triple} has a tuple and no way back"));
@@ -1530,7 +1682,6 @@ mod tests {
             "x86_64-linux-gnux32",
             "aarch64-linux-android",
             "aarch64-ios",
-            "wasm32-wasip1",
             "x86_64-freebsd",
         ] {
             let target = tuple.parse().unwrap();
@@ -1540,6 +1691,9 @@ mod tests {
         let i686 = Triple::from_tuple("i686-linux-gnu".parse().unwrap()).unwrap();
         assert_eq!(i686, Triple::new(Arch::X86, Os::Linux, Env::Gnu));
         assert_eq!(i686.to_string(), "i686-unknown-linux-gnu");
+        // wasm32 has a triple now too, and the WASI preview stays in it.
+        let wasi = Triple::from_tuple("wasm32-wasip1".parse().unwrap()).unwrap();
+        assert_eq!(wasi, Triple::new(Arch::Wasm32, Os::Wasi(Preview::P1), Env::None));
     }
 
     #[test]
@@ -1674,9 +1828,14 @@ mod tests {
 
     #[test]
     fn the_object_format_follows_the_operating_system() {
-        assert_eq!(Os::Linux.object_format(), ObjectFormat::Elf);
-        assert_eq!(Os::Darwin.object_format(), ObjectFormat::MachO);
-        assert_eq!(Os::Windows.object_format(), ObjectFormat::Coff);
+        let of = |triple: &str| triple.parse::<Triple>().unwrap().object_format();
+        assert_eq!(of("x86_64-linux-gnu"), ObjectFormat::Elf);
+        assert_eq!(of("aarch64-apple-darwin"), ObjectFormat::MachO);
+        assert_eq!(of("x86_64-pc-windows-msvc"), ObjectFormat::Coff);
+        assert_eq!(of("wasm32-wasip1"), ObjectFormat::Wasm);
+        // With no operating system it follows the architecture.
+        assert_eq!(of("x86_64-unknown-none"), ObjectFormat::Elf);
+        assert_eq!(of("wasm32-unknown-unknown"), ObjectFormat::Wasm);
     }
 
     #[test]
@@ -1752,9 +1911,9 @@ mod tests {
     #[test]
     fn the_registers_and_the_abi_a_target_gets_are_the_same_convention() {
         let mut checked = 0;
-        for arch in [Arch::X86_64, Arch::Aarch64, Arch::Riscv64, Arch::X86] {
-            for os in [Os::Linux, Os::Darwin, Os::Windows, Os::None] {
-                for env in [Env::None, Env::Gnu, Env::Musl, Env::Msvc] {
+        for arch in Arch::ALL {
+            for os in Os::ALL {
+                for env in Env::ALL {
                     let triple = Triple::new(arch, os, env);
                     let info = TargetInfo::new(triple);
                     let Some(regs) = info.call_regs else { continue };
