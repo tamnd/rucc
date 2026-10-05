@@ -7,6 +7,7 @@ All notable changes are recorded here. The format follows [Keep a Changelog](htt
 ### Changed
 
 - At `-O1` and above, scalar replacement of aggregates splits a local whose accesses include a `bool`, which the front end loads and stores as an `i1`, and keeps the `bool` in a register (#2989). Before this a `bool isnull;` handed to an inlined `index_getattr` or `heap_getattr` stayed on the stack, so `_bt_compare` and the other tuple walks in PostgreSQL stored and reloaded the flag on every attribute. A struct with a `bool` field set to zero and then read is split too. A `bool` read back as a `char` still keeps the local in memory.
+- On wasm, a branch to a block that is only a `jump` and that copies nothing goes where the `jump` goes, and a `br` just before the `end` of the block that it goes to is not written, because the code falls through to the same place (#2866). The exit test of a simple loop is now one `br_if` back to the loop, where it was an `if` around a `br`. The SQLite shell at `-O2` goes from 1,684,044 bytes to 1,650,721, with 12,466 fewer `br` instructions.
 
 ## 0.24.3
 
