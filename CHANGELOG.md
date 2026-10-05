@@ -42,6 +42,7 @@ The release for WA3, the hard C on wasm (#2865). rucc now builds nested function
 
 ### Fixed
 
+- An atomic builtin on a `bool`, such as `__sync_bool_compare_and_swap` in the kselftest harness, compiles again. It now runs on the byte the `bool` is stored in, as gcc does, where before it failed with no rule lowering a `cmpxchg` of an `i1`. `_Atomic _Bool` compound assignments take the same path.
 - `-static` with `-pie`, in either order, links a static program that is not position independent, as gcc does. Only `-static-pie` asks for both. Linux 5.15's exec selftests link `load_address_*` with `-pie -static` and a 2 MiB or 16 MiB page, and the static PIE rucc made was placed by a kernel that does not align it to that page yet, so two of the tests failed.
 - A `main` with one parameter or with three works on wasm32-wasip1 (#2975). The start code of wasi-libc calls `__main_argc_argv` with the count and the vector of the arguments, and before, such a `main` got that name with the wrong type, so the program trapped when it started. Such a `main` now keeps its name, and the object defines a `__main_argc_argv` that calls it with the count, the vector and the environment from `__wasilibc_get_environ`, as many as it takes. clang from wasi-sdk 34 gives such a `main` no caller, and its program traps. GCC's torture test `alias-4` now passes at `-O0` and `-O2`.
 

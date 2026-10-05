@@ -7915,8 +7915,13 @@ impl<'u> Body<'_, 'u> {
             // than a doubleword, so the operand goes to the library as the value it already is.
             return self.library_modify(op, addr, object, operand, order, span);
         }
+        // A `bool` goes through the machine as the byte it is stored in, since no instruction
+        // exchanges a single bit, and comes back as the bit.
+        let bit = self.value_type(object, span) == Type::I1;
         let operand = if pointer {
             self.build(span).unary(Opcode::PtrToInt, operand, address)
+        } else if bit {
+            self.build(span).unary(Opcode::ZExt, operand, Type::int(8))
         } else {
             operand
         };
@@ -7943,6 +7948,8 @@ impl<'u> Body<'_, 'u> {
         };
         Some(if pointer {
             self.build(span).unary(Opcode::IntToPtr, answer, Type::PTR)
+        } else if bit {
+            self.build(span).unary(Opcode::Trunc, answer, Type::I1)
         } else {
             answer
         })
@@ -8037,7 +8044,18 @@ impl<'u> Body<'_, 'u> {
             place
         };
         let desired = self.value(put);
+        // A `bool` is compared and exchanged as the byte it is stored in, for the reason
+        // [`Self::modified`] gives, and what was there comes back as the bit.
+        let bit = self.value_type(stored, span) == Type::I1;
+        let (expected, desired) = if bit {
+            let mut build = self.build(span);
+            let expected = build.unary(Opcode::ZExt, expected, Type::int(8));
+            (expected, build.unary(Opcode::ZExt, desired, Type::int(8)))
+        } else {
+            (expected, desired)
+        };
         let (old, exchanged) = self.build(span).cmpxchg(addr, expected, desired, info, flags);
+        let old = if bit { self.build(span).unary(Opcode::Trunc, old, Type::I1) } else { old };
 
         if op == AtomicOp::SwapValue {
             return Some(old);
@@ -8958,7 +8976,12 @@ impl<'u> Body<'_, 'u> {
                 Some((RmwOp::Add, Opcode::Add, amount))
             }
             Step::Arithmetic { op, right, computation } => {
-                if !into.is_int() || !rucc_types::is_integer(self.types(), computation) {
+                // A `bool` is left to the loop, since `b += 1` is a conversion to `bool` after
+                // the addition and not an addition in the byte the object is stored in.
+                if !into.is_int()
+                    || into == Type::I1
+                    || !rucc_types::is_integer(self.types(), computation)
+                {
                     return None;
                 }
                 let (rmw, opcode) = match op {
@@ -8993,9 +9016,12 @@ impl<'u> Body<'_, 'u> {
         }
     }
 
-    /// The integer whose bits a value of that type is, which is the type itself where it is one.
+    /// The integer whose bits a value of that type is, which is the type itself where it is one,
+    /// and for a `bool` the byte it is stored in.
     fn bits_type(&self, into: Type) -> Type {
-        if into.is_int() {
+        if into == Type::I1 {
+            Type::int(8)
+        } else if into.is_int() {
             into
         } else if into.is_ptr() {
             self.address
@@ -9010,7 +9036,13 @@ impl<'u> Body<'_, 'u> {
         if from == raw {
             return value;
         }
-        let opcode = if from.is_ptr() { Opcode::PtrToInt } else { Opcode::Bitcast };
+        let opcode = if from.is_ptr() {
+            Opcode::PtrToInt
+        } else if from == Type::I1 {
+            Opcode::ZExt
+        } else {
+            Opcode::Bitcast
+        };
         self.build(span).unary(opcode, value, raw)
     }
 
@@ -9020,7 +9052,13 @@ impl<'u> Body<'_, 'u> {
         if from == into {
             return value;
         }
-        let opcode = if into.is_ptr() { Opcode::IntToPtr } else { Opcode::Bitcast };
+        let opcode = if into.is_ptr() {
+            Opcode::IntToPtr
+        } else if into == Type::I1 {
+            Opcode::Trunc
+        } else {
+            Opcode::Bitcast
+        };
         self.build(span).unary(opcode, value, into)
     }
 
