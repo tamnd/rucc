@@ -4,6 +4,10 @@ All notable changes are recorded here. The format follows [Keep a Changelog](htt
 
 ## Unreleased
 
+## 0.22.2
+
+A patch release in WA2 (#2864). rucc now links a wasm program itself: `wasm-ld` with wasi-libc and with `librucc_builtins.a`, which the release has for `wasm32-wasip1` and `wasm32-none`. `__int128` and `long double` work on wasm32, a loop with two entries is translated, and the wasm export and import attributes are read. Of the 1544 programs in rucc-corpus that are one file with no extra flags, 1505 run under Wasmtime with the expected output at `-O0` and at `-O2`, and none gives a wrong answer. Of the 39 that are refused, 26 use a computed goto, 8 use `setjmp` and 5 use inline assembly. Rung 0 on `wasm32-wasip1` passes 440 of 440.
+
 ### Added
 
 - `docs/REPLAY.md` is the scoreboard for the OSS-Fuzz replay, with the last full run of brotli, zlib, SQLite, Lua and zstd, what each shape is and which bucket it is in. Spec 12.7 says what the replay found and question 12 has the decompressor's half. The SQLite and zstd pins moved to the corpora downloaded on 2026-10-05.
