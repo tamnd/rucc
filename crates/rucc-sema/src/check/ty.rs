@@ -1207,6 +1207,7 @@ impl Checker<'_> {
             self.check_void_parameter(ty, declarator.name, index, span);
             if let Some(specs) = param.specs {
                 self.check_parameter_storage(specs, declarator.name, span);
+                self.no_reordered(&[ast[specs].attrs, param.attrs], false);
             }
 
             // The type the function has and the type the object has are two different types,

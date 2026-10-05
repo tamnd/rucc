@@ -488,9 +488,12 @@ pub fn compile(opts: &Options, name: &str, fs: &dyn FileSystem) -> Compiled {
                             share: shares_slots(opts),
                             in_place: !opts.safety.instruments(),
                             fixed_x18: opts.fixed_x18,
-                            // gcc keeps the order the source wrote at `-O0`, and Mach-O is
-                            // clang's, which keeps it always.
-                            reorder: opts.opt_level.runs_optimizer()
+                            // gcc keeps the order the source wrote at `-O0` and under
+                            // `-fno-toplevel-reorder`, and Mach-O is clang's, which keeps it
+                            // always.
+                            reorder: opts
+                                .toplevel_reorder
+                                .unwrap_or_else(|| opts.opt_level.runs_optimizer())
                                 && sess.target.object_format != rucc_target::ObjectFormat::MachO,
                             isa: opts.isa,
                             read: &mut read,

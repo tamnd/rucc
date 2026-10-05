@@ -907,6 +907,15 @@ tests = ["rucc::a_forced_frame_is_realigned_when_it_calls_or_keeps_something_wid
 notes = "The function counts on no more than a word of alignment when it is called, so its prologue aligns the stack pointer with `and` behind a frame pointer whenever it calls anything, which owes the callee the call alignment, or keeps something that wants more than a word, and a leaf that keeps nothing wide is left alone, as in gcc. It is how a library called from code that did not keep the stack aligned can still use the instructions that want sixteen bytes. It is a declaration's attribute here, merged across declarations as `noinline` is, where gcc puts it on the function type, so a definition through a typedef that says it is not realigned. A frame with a variable length array is not realigned either, where gcc reaches its arguments through a second register and does realign it. A naked function is left alone. On a variable, a member or a typedef whose type is neither a function nor a pointer to one it is ignored with gcc's warning, and an argument is refused with `E0831`."
 
 [[feature]]
+name = "no_reorder"
+kind = "attribute"
+gcc_version = "5.0"
+status = "implemented"
+used_by = []
+tests = ["rucc::what_says_it_is_written_first_in_the_order_the_source_wrote", "rucc::without_the_reordering_the_source_s_order_is_kept", "rucc::no_reorder_is_checked_in_gcc_s_words"]
+notes = "Under `-ftoplevel-reorder`, which is on from `-O1`, the functions and the objects written `no_reorder` are written first, in the order the source wrote them, and the rest after them in the order gcc gives them, which for the objects is the reverse of the source's. One declaration saying it is enough, as with `noinline`. Without the reordering everything keeps the source's order and the attribute changes nothing. On a member, a typedef or a parameter it is ignored with gcc's warning, an argument is refused with `E0832`, and on an object in a block it is taken without a word and does nothing, as in gcc. gcc also writes a file scope `asm` in order among them, where here every such `asm` comes ahead of the objects."
+
+[[feature]]
 name = "fentry_name"
 kind = "attribute"
 gcc_version = "9.0"

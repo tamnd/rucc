@@ -428,6 +428,7 @@ pub fn lower(name: &str, cx: Context<'_>) -> Lowered {
         statics: Map::default(),
         labels: Map::default(),
         done: Set::default(),
+        unreordered: Set::default(),
         bodies: Vec::new(),
         aliases: Vec::new(),
         sets: Vec::new(),
@@ -517,6 +518,9 @@ pub(crate) struct Unit<'a> {
     labels: Map<LabelId, Symbol>,
     /// What has been emitted, because a redeclaration is the same declaration seen twice.
     done: Set<DeclId>,
+    /// The objects written `no_reorder`, which keep the order the source wrote them in ahead of
+    /// the rest when [`Self::reorder`] turns the others around.
+    unreordered: Set<Symbol>,
     /// The functions lowered with a body, by the statement the body is and the symbol it went
     /// under. The statements were made as the source was read, so sorting by them is the order
     /// the bodies were written in, which is not the order the walk reaches them: that is the order
@@ -641,7 +645,7 @@ impl Unit<'_> {
         // `startups` sorts them to. gcc writes them as it writes each function and not as a
         // variable, so its turn of the variables does not reach them.
         if self.reorder {
-            self.module.reverse_globals(written);
+            self.module.reverse_globals(written, &self.unreordered);
         }
         self.startups();
         self.mismatched_calls();
@@ -942,6 +946,9 @@ impl Unit<'_> {
             state
         };
         let symbol = self.symbol_of(decl);
+        if node.flags.contains(DeclFlags::NO_REORDER) {
+            self.unreordered.insert(symbol);
+        }
         let size = repr::size_of(self.types, self.target, ty);
         let align = match alignment {
             Some(align) => align,
@@ -1157,6 +1164,10 @@ impl Unit<'_> {
         // And the one that says the caller is not to be trusted with the stack's alignment.
         if node.flags.contains(DeclFlags::FORCE_ALIGN) {
             func.attrs.set |= AttrSet::FORCE_ALIGN;
+        }
+        // And the one that keeps it where the source wrote it. See `rucc_opt::expand`.
+        if node.flags.contains(DeclFlags::NO_REORDER) {
+            func.attrs.set |= AttrSet::NO_REORDER;
         }
         // And the other one, for the same reason. What a call to `strtol` reads belongs to
         // `strtol`, and the purity analysis answers opaque for everything it cannot see a body
