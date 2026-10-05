@@ -785,6 +785,73 @@ fn setjmp_and_longjmp_are_the_calls_and_the_catches_of_libsetjmp() {
     assert_eq!(refusal.function.as_deref(), Some("inner"));
 }
 
+/// `__builtin_setjmp` in `main` and `__builtin_longjmp` in a function that `main` calls, which is
+/// the C below at `-O1`. `main` exits with 42.
+///
+/// ```c
+/// static void *buf[5];
+/// __attribute__((noinline)) void jump(void) { __builtin_longjmp(buf, 1); }
+/// int main(void) { volatile int n = 0; if (__builtin_setjmp(buf)) return n + 40; n = 2; jump();
+///                  return 1; }
+/// ```
+const BUILTIN_SJLJ: &str = r#"; ModuleID = 't.c'
+; format 0
+target triple = "wasm32-unknown-wasip1"
+target datalayout = "e-p:32:32-i64:64-S128"
+
+global @buf : bytes 20 = { zero 20 }, align 4, linkage(internal), droppable
+
+func @jump(), linkage(external), attrs(noinline) {
+block0:
+    %0 = global_addr @buf
+    longjmp_marker %0
+    return
+}
+
+func @main() -> i32, linkage(external) {
+block0:
+    %0 = alloca, size 4, align 4
+    %1 = iconst.i32 0
+    store.volatile %1 -> %0, align 4
+    %2 = global_addr @buf
+    %3 = setjmp_marker.i32 %2
+    %4 = icmp ne %3, %1
+    br_if %4, block1, block2
+
+block1:
+    %5 = load.i32.volatile %0, align 4
+    %6 = iconst.i32 40
+    %7 = add.nsw %5, %6
+    return %7
+
+block2:
+    %8 = iconst.i32 2
+    store.volatile %8 -> %0, align 4
+    call.nofree @jump() : ()
+    %9 = iconst.i32 1
+    return %9
+}
+"#;
+
+/// `__builtin_setjmp` is a call of `__wasm_setjmp` and `__builtin_longjmp` is a call of
+/// `__wasm_longjmp` with the value 1, as for `setjmp` and `longjmp`.
+#[test]
+fn builtin_setjmp_and_longjmp_take_the_path_of_setjmp_and_longjmp() {
+    let listing = assembly(BUILTIN_SJLJ);
+    for want in [
+        "\tcall\t__wasm_setjmp\n",
+        "\tcall\t__wasm_longjmp\n",
+        "\ttry_table\t(catch __c_longjmp 0)\n",
+    ] {
+        assert!(listing.contains(want), "{want:?} in {listing}");
+    }
+    for assembled in [false, true] {
+        if let Some(status) = link_and_run_as("builtin-sjlj", BUILTIN_SJLJ, assembled) {
+            assert_eq!(status, 42, "assembled: {assembled}");
+        }
+    }
+}
+
 /// Calls in tail position, which `tail::mark` writes as the C below at `-O2`. `even` and `odd` call
 /// each other a million times, which is deeper than the stack of Wasmtime when each call keeps
 /// its frame. `pass` calls through a pointer, and `count` drops the answer of `twice`. `main`

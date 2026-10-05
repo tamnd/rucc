@@ -27,6 +27,11 @@
 //!    value. For no call, the `longjmp` is for a function further out, and the dispatch throws
 //!    it again with `__wasm_longjmp`.
 //!
+//! `__builtin_setjmp` and `__builtin_longjmp` take the same path. GCC gives their buffer five
+//! words, which is 20 bytes on wasm32, and the buffer of `libsetjmp` needs 16. A
+//! `setjmp_marker` is a call of `setjmp` in step 2, and a `longjmp_marker` becomes
+//! `__wasm_longjmp(buf, 1)`, because `__builtin_setjmp` answers 1 after a `__builtin_longjmp`.
+//!
 //! The values of the IR are each in a local of their own, and an exception does not change a
 //! local, so a value that the function computed before the `longjmp` is still there after it.
 //! That is why this change does not have to repair the SSA form, as LLVM's pass does. The edges
@@ -52,8 +57,7 @@ const LONGJMP: &[&str] = &["longjmp", "_longjmp", "siglongjmp"];
 /// # Errors
 ///
 /// A [`Refusal`] for a function that calls `vfork` or another function that returns twice and is
-/// not `setjmp`, that uses `__builtin_setjmp`, or that unwinds to a cleanup with
-/// `-fexceptions`.
+/// not `setjmp`, or that unwinds to a cleanup with `-fexceptions`.
 pub fn prepare(module: &mut Module, names: &mut Interner) -> Result<(), Refusal> {
     let symbols = Symbols {
         setjmp: names.intern("__wasm_setjmp"),
@@ -69,12 +73,15 @@ pub fn prepare(module: &mut Module, names: &mut Interner) -> Result<(), Refusal>
             why,
         };
         let calls = classify(module, id, names).map_err(refuse)?;
-        if calls.longjmps.is_empty() && calls.setjmps.is_empty() {
+        if calls.longjmps.is_empty() && calls.setjmps.is_empty() && calls.markers.is_empty() {
             continue;
         }
         let func = &mut module[id];
         for &call in &calls.longjmps {
             rename(func, call, symbols.longjmp);
+        }
+        for &marker in &calls.markers {
+            builtin_longjmp(func, marker, symbols.longjmp);
         }
         if !calls.setjmps.is_empty() {
             rewrite(func, &calls.setjmps, symbols);
@@ -94,8 +101,11 @@ struct Symbols {
 /// The calls of one function that this change rewrites.
 #[derive(Default)]
 struct Calls {
+    /// The calls of `setjmp` and the `setjmp_marker` instructions.
     setjmps: Vec<Inst>,
     longjmps: Vec<Inst>,
+    /// The `longjmp_marker` instructions.
+    markers: Vec<Inst>,
 }
 
 /// Find the calls of `setjmp` and `longjmp` in the function `id`, and refuse what this change
@@ -107,10 +117,13 @@ fn classify(module: &Module, id: FuncId, names: &Interner) -> Result<Calls, Stri
         for inst in func.insts(block) {
             let data = &func[inst];
             match data.opcode {
-                Opcode::SetjmpMarker | Opcode::LongjmpMarker => {
-                    return Err("`__builtin_setjmp` and `__builtin_longjmp` are not translated \
-                                for wasm, use `setjmp` and `longjmp`"
-                        .into());
+                Opcode::SetjmpMarker => {
+                    calls.setjmps.push(inst);
+                    continue;
+                }
+                Opcode::LongjmpMarker => {
+                    calls.markers.push(inst);
+                    continue;
                 }
                 Opcode::Unwound | Opcode::Landing => {
                     return Err("unwinding to a cleanup with `-fexceptions` is not translated \
@@ -157,6 +170,21 @@ fn rename(func: &mut Func, inst: Inst, callee: rucc_base::Symbol) {
     let info = CallInfo { callee: Some(callee), ..func[info] };
     let info = func.add_call(info);
     func[inst].extra = Extra::Call(info);
+}
+
+/// Make the `longjmp_marker` `inst` a call of `__wasm_longjmp` with its buffer and the value 1.
+fn builtin_longjmp(func: &mut Func, inst: Inst, longjmp: rucc_base::Symbol) {
+    let i32 = Type::int(32);
+    let span = func.span(inst);
+    let block = func.block_of(inst).expect("the marker is in a block");
+    let buffer = func[func[inst].args][0];
+    let throw_sig = func.add_signature(Signature::new().with_params(&[Type::PTR, i32]));
+    let next = split_after(func, inst);
+    func.remove_inst(inst);
+    let mut build = Builder::new(func, block).at(span);
+    let one = build.iconst(i32, 1);
+    build.call(longjmp, throw_sig, &[buffer, one]);
+    build.jump(next, &[]);
 }
 
 /// The access of an `i32` or a pointer at a known place, with nothing known about it.

@@ -1430,7 +1430,9 @@ impl Lower<'_, '_> {
             }
             Opcode::Landing => {}
             Opcode::SetjmpMarker | Opcode::LongjmpMarker => {
-                return Err("`__builtin_setjmp` and `__builtin_longjmp` are not translated".into());
+                return Err(
+                    "a `__builtin_setjmp` or `__builtin_longjmp` that `prepare` left".into()
+                );
             }
             Opcode::InlineAsm => self.asm(inst)?,
             other => return Err(format!("the instruction {} is not translated yet", other.name())),
