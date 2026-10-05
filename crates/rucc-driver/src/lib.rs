@@ -308,6 +308,11 @@ options:
 See spec/04-driver-and-cli.md for the full flag reference.
 ";
 
+/// The flag naming a directory for one of the include chains that an argument starts with.
+fn search_flag(arg: &str) -> Option<&'static str> {
+    ["-iquote", "-isystem", "-idirafter"].into_iter().find(|flag| arg.starts_with(flag))
+}
+
 /// The argument of a flag that may be joined to it or may be the next word.
 ///
 /// `-DFOO` and `-D FOO` are the same thing, and `at` is where the flag's own letters end.
@@ -1240,9 +1245,6 @@ pub fn parse_args(args: &[String]) -> Result<Action, CliError> {
                     _ => opts.dump_dir = Some(value),
                 }
             }
-            // The flags that take a directory only in the separated form. GCC spells them
-            // this way and nothing writes `-iquotedir`, so accepting the joined form would
-            // mean guessing at a path that starts with the flag's own letters.
             // Apple's spelling of `--sysroot`, and the one its own build systems pass. The
             // two mean the same thing here: the configured directories are under there rather
             // than under the root.
@@ -1251,13 +1253,15 @@ pub fn parse_args(args: &[String]) -> Result<Action, CliError> {
                 i += 1;
                 sysroot = Some(PathBuf::from(dir));
             }
-            "-iquote" | "-isystem" | "-idirafter" => {
-                let dir = args.get(i).ok_or_else(|| err(format!("{arg} requires an argument")))?;
-                i += 1;
-                match arg {
-                    "-iquote" => opts.search.push_quote(dir.clone()),
-                    "-isystem" => opts.search.push_system(dir.clone()),
-                    _ => opts.search.push_after(dir.clone()),
+            // A directory joined or separate, as gcc takes them. The kernel's ptrace selftests
+            // write `-iquote../../../../include/uapi`.
+            _ if search_flag(arg).is_some() => {
+                let flag = search_flag(arg).unwrap_or_default();
+                let dir = joined_or_next(arg, flag.len(), args, &mut i)?;
+                match flag {
+                    "-iquote" => opts.search.push_quote(dir),
+                    "-isystem" => opts.search.push_system(dir),
+                    _ => opts.search.push_after(dir),
                 }
             }
             "-iprefix" => {
@@ -6571,8 +6575,10 @@ mod tests {
             "-Ii",
             "-iquote",
             "q",
+            "-iquote../uapi",
             "-isystem",
             "sys",
+            "-isystemsys2",
             "-idirafter",
             "after",
             "--sysroot=/nowhere-at-all",
@@ -6581,9 +6587,9 @@ mod tests {
         let dirs: Vec<&str> = opts.search.dirs().iter().filter_map(|d| d.path.to_str()).collect();
         // The compiler's own headers sit after every `-isystem` and before `-idirafter`,
         // which is where GCC puts its own: a directory the user named outranks ours.
-        assert_eq!(dirs, ["q", "i", "sys", runtime::DIR, "after"]);
-        assert!(!opts.search.dirs()[1].is_system);
-        assert!(opts.search.dirs()[2].is_system);
+        assert_eq!(dirs, ["q", "../uapi", "i", "sys", "sys2", runtime::DIR, "after"]);
+        assert!(!opts.search.dirs()[2].is_system);
+        assert!(opts.search.dirs()[3].is_system);
     }
 
     #[test]

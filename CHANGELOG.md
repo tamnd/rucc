@@ -23,6 +23,7 @@ All notable changes are recorded here. The format follows [Keep a Changelog](htt
 
 ### Fixed
 
+- `-iquote`, `-isystem` and `-idirafter` now take the directory joined to the flag as well as after it, as gcc does. The kernel's ptrace selftests write `-iquote../../../../include/uapi`.
 - A local aligned to more than the stack pointer has, in a function that also holds a variable length array, now takes its alignment out of extra bytes the way such an array does, instead of failing with E0653. rseq's `param_test` has one in five functions.
 - A call through a block scope declaration whose asm label names a function the file defines with another signature now goes through the address of it instead of failing the IR check. nolibc's `_start_c` declares `main` with three parameters and the vdso_standalone selftest defines `int main(void)`.
 - `-static-pie` links a static program that relocates itself, with gcc's `-static -pie --no-dynamic-linker -z text` and `rcrt1.o`. It was an unknown option, which the kernel's exec selftests build their load address checks with.
