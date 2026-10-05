@@ -64,6 +64,11 @@ fn room(text: &str, name: &str) -> usize {
     text[..start].lines().rev().take_while(|line| *line == "\t.long\t 0xcccccccc").count()
 }
 
+/// The first instruction after the opening bytes, past directives and local labels.
+fn after<'a>(body: &'a str, opening: &str) -> Option<&'a str> {
+    body[opening.len()..].lines().find(|line| line.starts_with('\t') && !line.starts_with("\t."))
+}
+
 /// A function that calls something, a leaf, an empty one, the attribute on a prototype above a
 /// definition that does not say it, the other two spellings, and one without it.
 const HOOKED: &str = "extern int g(int);\n\
@@ -88,7 +93,7 @@ fn a_hooked_function_opens_with_the_bytes_gcc_writes() {
                 assert_eq!(room(&text, name), lines, "{target} {level}: {name}:\n{text}");
                 // The frame pointer the i386 bytes pushed is taken back off before anything else.
                 if target.starts_with("i686") {
-                    let next = body[opening.len()..].lines().find(|line| !line.starts_with("\t."));
+                    let next = after(body, opening);
                     assert_eq!(next, Some("\tpopl\t%ebp"), "{target} {level}: {name}:\n{body}");
                 }
             }
@@ -97,11 +102,12 @@ fn a_hooked_function_opens_with_the_bytes_gcc_writes() {
             assert_eq!(room(&text, "plain"), 0, "{target} {level}:\n{text}");
         }
         // The landing pad is after the bytes, which is where gcc puts it.
-        let (ok, text, err) = assembly("landing", target, &["-O2", "-fcf-protection=branch"], HOOKED);
+        let (ok, text, err) =
+            assembly("landing", target, &["-O2", "-fcf-protection=branch"], HOOKED);
         assert!(ok, "{target}: {err}");
         let body = function(&text, "leaf");
         assert!(body.starts_with(opening), "{target}:\n{body}");
-        let next = body[opening.len()..].lines().find(|line| !line.starts_with("\t."));
+        let next = after(body, opening);
         assert!(next.is_some_and(|line| line.starts_with("\tendbr")), "{target}:\n{body}");
     }
     // The attribute is x86's, so another target writes nothing for it.
@@ -126,10 +132,7 @@ fn the_object_has_the_same_bytes() {
         assert!(ok, "{flags:?}: {err}");
         let bytes = std::fs::read(dir.join("a.o")).expect("the object was written");
         let _ = std::fs::remove_dir_all(&dir);
-        assert!(
-            bytes.windows(wanted.len()).any(|window| window == wanted.as_slice()),
-            "{flags:?}"
-        );
+        assert!(bytes.windows(wanted.len()).any(|window| window == wanted.as_slice()), "{flags:?}");
     }
 }
 

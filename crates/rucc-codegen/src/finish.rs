@@ -320,7 +320,8 @@ pub fn finish(
     // Every offset the frame reports is from this one register, which is the stack pointer in an
     // ordinary frame and the frame pointer in one that moves the stack pointer while it runs.
     let base = if frame.grows() { conv.frame_pointer } else { conv.stack_pointer };
-    let mut writer = Writer { func, conv, insts, names, base, ahead: None };
+    let hooked = hooked && !frame.naked();
+    let mut writer = Writer { func, conv, insts, names, base, ahead: None, hooked };
 
     let mut cursors: Map<At, Inst> = Map::default();
     let mut moves = Moves::default();
@@ -364,7 +365,6 @@ pub fn finish(
         landing,
         trace.filter(|_| !bare),
         pad.filter(|_| !bare),
-        hooked && !bare,
     );
     for &inst in prologue.iter().rev() {
         writer.func.prepend_inst(entry, inst);
@@ -567,6 +567,10 @@ struct Writer<'a> {
     /// on a command line that did not ask for the stack to be touched a page at a time and most
     /// of them on one that did. See [`Writer::pages`].
     ahead: Option<[Block; 2]>,
+    /// Whether the function opens with the bytes `ms_hook_prologue` asks for, which on i386 push
+    /// the caller's frame pointer and leave the prologue to take it back off. Never in a naked
+    /// function, which gets the bytes and nothing after them.
+    hooked: bool,
 }
 
 impl Writer<'_> {
@@ -605,7 +609,6 @@ impl Writer<'_> {
         landing: Option<&'static str>,
         trace: Option<Tracing>,
         pad: Option<Padding>,
-        hooked: bool,
     ) -> Vec<Inst> {
         let sp = self.conv.stack_pointer;
         let fp = self.conv.frame_pointer;
@@ -628,7 +631,7 @@ impl Writer<'_> {
         // The caller's frame pointer, which the bytes in front of the pad pushed, back where it
         // was. Nothing is described for it, since the unwinder is told nothing about those bytes
         // either, which is gcc's table too: the rows say what the function does from here.
-        if hooked {
+        if self.hooked {
             let inst = self.pop(fp);
             out.push(inst);
             quiet.push(inst);

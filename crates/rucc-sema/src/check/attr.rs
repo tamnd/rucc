@@ -2345,7 +2345,8 @@ impl Checker<'_> {
                 }
                 let count = ast[attr.args].len();
                 if count > 0 {
-                    let what = "wrong number of arguments specified for 'ms_hook_prologue' attribute";
+                    let what =
+                        "wrong number of arguments specified for 'ms_hook_prologue' attribute";
                     let refused = Diagnostic::error(what, attr.span).with_code("E0834");
                     self.report(refused.note(format!("expected 0, found {count}"), attr.span));
                 } else if !function {
