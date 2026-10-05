@@ -164,6 +164,72 @@ fn a_graph_that_is_not_reducible_gets_a_dispatch_node() {
     assert!(written.bytes.contains(&0x0e), "no br_table");
 }
 
+/// An `__int128` in two `i64` values: a call with two of them and one returned through memory,
+/// shifts by a constant across the halves, a sign extension, a compare of the high halves and a
+/// truncation. None of it calls the runtime. With one argument, `main` exits with 123, which is
+/// what clang gives for the C below at `-O1`.
+///
+/// ```c
+/// typedef __int128 i128;
+/// i128 wide(i128 a, i128 b) { return a + b - (b >> 70); }
+/// int main(int argc, char **argv) {
+///   i128 x = (i128)argc << 64;
+///   x = wide(x + 0x7fffffffffffffffLL, (i128)-argc);
+///   unsigned __int128 y = (unsigned __int128)x ^ ((unsigned __int128)argc << 100);
+///   return (int)(x >> 60) + (y > ((unsigned __int128)1 << 64)) * 100 + (x < 0);
+/// }
+/// ```
+const WIDE: &str = r#"; ModuleID = 't.c'
+; format 0
+target triple = "wasm32-unknown-wasip1"
+target datalayout = "e-p:32:32-i64:64-S128"
+
+func @wide(i128, i128) -> i128, linkage(external) {
+block0(%0: i128, %1: i128):
+    %2 = iconst.i128 70
+    %3 = ashr %1, %2
+    %4 = add %0, %1
+    %5 = sub %4, %3
+    return %5
+}
+
+func @main(i32, ptr) -> i32, linkage(external) {
+block0(%0: i32, %1: ptr):
+    %2 = sext.i128 %0
+    %3 = iconst.i128 64
+    %4 = shl %2, %3
+    %5 = iconst.i128 9223372036854775807
+    %6 = add.nsw %4, %5
+    %7 = iconst.i32 0
+    %8 = sub.nsw %7, %0
+    %9 = sext.i128 %8
+    %10 = call.nofree @wide(%6, %9) : (i128, i128) -> i128
+    %11 = iconst.i32 100
+    %12 = iconst.i128 100
+    %13 = shl %2, %12
+    %14 = xor %10, %13
+    %15 = iconst.i128 18446744073709551616
+    %16 = icmp ugt %14, %15
+    %17 = zext.i32 %16
+    %18 = iconst.i128 60
+    %19 = ashr %10, %18
+    %20 = trunc.i32 %19
+    %21 = mul.nsw %17, %11
+    %22 = add.nsw %20, %21
+    %23 = iconst.i128 0
+    %24 = icmp slt %10, %23
+    %25 = zext.i32 %24
+    %26 = add.nsw %22, %25
+    return %26
+}
+"#;
+
+#[test]
+fn an_int128_is_two_i64_values_and_is_returned_through_memory() {
+    let written = object(WIDE).unwrap();
+    assert_eq!(written.defines, ["wide", "__main_argc_argv"]);
+}
+
 /// Where wasi-sdk is, or nothing when this machine has none.
 fn sdk() -> Option<PathBuf> {
     let path = PathBuf::from(std::env::var_os("WASI_SDK_PATH")?);
@@ -241,5 +307,12 @@ fn the_object_links_with_wasm_ld_and_runs() {
 fn the_dispatch_node_goes_to_the_entry_that_the_edge_named() {
     if let Some(status) = link_and_run("twisted", TWISTED) {
         assert_eq!(status, 90);
+    }
+}
+
+#[test]
+fn the_halves_of_an_int128_carry_into_each_other() {
+    if let Some(status) = link_and_run("wide", WIDE) {
+        assert_eq!(status, 123);
     }
 }

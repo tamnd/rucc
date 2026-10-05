@@ -30,10 +30,16 @@
 //! the instructions that read the upper bits extend the value first. That is the convention of
 //! LLVM, and it makes arithmetic on narrow types cost nothing.
 //!
-//! What this refuses, with a message that names the function: an `i128`, a `long double`, a
-//! vector, `setjmp`, inline assembly, a computed `goto`, an alias, and the instructions of the
-//! memory safety monitor. Each of these is a later step of #2864 or of the milestones after it. A
-//! graph of blocks that is not reducible is not refused: a dispatch node makes it reducible.
+//! An `i128` and a `long double` are each held in two `i64` locals, the low half first, and they
+//! travel as two `i64` parameters, as clang does with them. Addition, subtraction, comparison and
+//! the bit operations on an `i128` are written in place, and the other operations on an `i128` and
+//! every operation on a `long double` are calls to the compiler runtime, whose answer comes back
+//! through a buffer in the frame. That is section 8.6 of the WebAssembly notes.
+//!
+//! What this refuses, with a message that names the function: a vector, `setjmp`, inline
+//! assembly, a computed `goto`, an alias, and the instructions of the memory safety monitor. Each
+//! of these is a later step of #2864 or of the milestones after it. A graph of blocks that is not
+//! reducible is not refused: a dispatch node makes it reducible.
 //!
 //! Every crate in the workspace is published, and publishing implies a promise. This one is
 //! tier 3: its Rust API is explicitly unstable and will change without a major version bump.
@@ -405,25 +411,48 @@ pub(crate) fn valtype(ty: Type) -> Result<ValType, String> {
     }
 }
 
+/// Whether a value of the IR type `ty` is held in two `i64`, the low half first. That is an
+/// `i128` and a `long double`, which is IEEE quad on wasm32, and it is what clang does with them.
+pub(crate) fn is_pair(ty: Type) -> bool {
+    !ty.is_vector()
+        && !ty.is_ptr()
+        && (ty.is_int() && ty.bits() == 128 || ty.format() == Some(rucc_ir::Float::F128))
+}
+
 /// The type of a function with this signature. A variadic function takes the address of the
 /// buffer of its extra arguments as one more `i32` after the fixed parameters.
+///
+/// A pair is two `i64` parameters, and a function that returns a pair returns nothing and takes
+/// the address to write the pair to as an `i32` before all the other parameters. That is the
+/// return through a hidden pointer of the Basic C ABI, and clang does it for an `i128` and a
+/// `long double` too.
 pub(crate) fn functype(sig: &Signature) -> Result<FuncType, String> {
     let mut params = Vec::new();
     for param in sig.params.iter().filter(|p| !p.ty.is_mem()) {
         if let Abi::ByVal { .. } = param.abi {
             return Err("a parameter that travels by value in memory is not translated yet".into());
         }
-        params.push(valtype(param.ty)?);
+        if is_pair(param.ty) {
+            params.extend([ValType::I64, ValType::I64]);
+        } else {
+            params.push(valtype(param.ty)?);
+        }
     }
     if sig.variadic {
         params.push(ValType::I32);
     }
-    let mut results = Vec::new();
-    for ret in sig.returns.iter().filter(|p| !p.ty.is_mem() && !p.ty.is_void()) {
-        results.push(valtype(ret.ty)?);
-    }
-    if results.len() > 1 {
+    let returns: Vec<Type> =
+        sig.returns.iter().filter(|p| !p.ty.is_mem() && !p.ty.is_void()).map(|p| p.ty).collect();
+    if returns.len() > 1 {
         return Err("a function that returns more than one value is not translated yet".into());
+    }
+    let mut results = Vec::new();
+    for ty in returns {
+        if is_pair(ty) {
+            params.insert(0, ValType::I32);
+        } else {
+            results.push(valtype(ty)?);
+        }
     }
     Ok(FuncType { params, results })
 }
