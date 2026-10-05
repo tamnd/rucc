@@ -1312,3 +1312,58 @@ fn an_alias_is_a_second_symbol_for_the_same_function_or_place() {
         }
     }
 }
+
+/// `int main(int argc) { return argc + 40; }` at `-O1`. With no arguments, it exits with 41.
+const MAIN_ONE: &str = r#"; ModuleID = 't.c'
+; format 0
+target triple = "wasm32-unknown-wasip1"
+target datalayout = "e-p:32:32-i64:64-S128"
+
+func @main(i32) -> i32, linkage(external) {
+block0(%0: i32):
+    %1 = iconst.i32 40
+    %2 = add.nsw %0, %1
+    return %2
+}
+"#;
+
+/// `int main(int argc, char **argv, char **envp)` that gives `argc + 2 * (argv[0] != 0) +
+/// 4 * (envp != 0)`, at `-O1`. With no arguments, it exits with 7.
+const MAIN_THREE: &str = r#"; ModuleID = 't.c'
+; format 0
+target triple = "wasm32-unknown-wasip1"
+target datalayout = "e-p:32:32-i64:64-S128"
+
+func @main(i32, ptr, ptr) -> i32, linkage(external) {
+block0(%0: i32, %1: ptr, %2: ptr):
+    %3 = iconst.i32 2
+    %4 = iconst.i32 0
+    %5 = load %1, align 4
+    %6 = inttoptr.ptr %4
+    %7 = icmp ne %5, %6
+    %8 = zext.i32 %7
+    %9 = add.nsw %8, %8
+    %10 = add.nsw %0, %9
+    %11 = icmp ne %2, %6
+    %12 = zext.i32 %11
+    %13 = shl.nsw %12, %3
+    %14 = add.nsw %10, %13
+    return %14
+}
+"#;
+
+/// A `main` with one parameter or with three keeps its name, and the object defines the
+/// `__main_argc_argv` that the start code of wasi-libc calls with two arguments. It calls `main`
+/// with the count, the vector and the environment, as many as `main` takes.
+#[test]
+fn a_main_with_one_or_three_parameters_gets_a_caller_with_two() {
+    for (name, text, status) in [("main-one", MAIN_ONE, 41), ("main-three", MAIN_THREE, 7)] {
+        let written = object(text).unwrap();
+        assert_eq!(written.defines, ["main", "__main_argc_argv"], "{name}");
+        for assembled in [false, true] {
+            if let Some(got) = link_and_run_as(name, text, assembled) {
+                assert_eq!(got, status, "{name}, assembled: {assembled}");
+            }
+        }
+    }
+}
