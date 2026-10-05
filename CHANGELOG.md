@@ -4,6 +4,10 @@ All notable changes are recorded here. The format follows [Keep a Changelog](htt
 
 ## Unreleased
 
+### Changed
+
+- At `-O1` and above, scalar replacement of aggregates splits a local whose accesses include a `bool`, which the front end loads and stores as an `i1`, and keeps the `bool` in a register (#2989). Before this a `bool isnull;` handed to an inlined `index_getattr` or `heap_getattr` stayed on the stack, so `_bt_compare` and the other tuple walks in PostgreSQL stored and reloaded the flag on every attribute. A struct with a `bool` field set to zero and then read is split too. A `bool` read back as a `char` still keeps the local in memory.
+
 ## 0.24.3
 
 More of WA4 (#2866). On wasm with the bulk memory feature, a call to `memcpy`, `memmove` or `memset` is `memory.copy` or `memory.fill`, and with optimization, values that are never live at the same time share one local. The SQLite shell at `-O2` goes from 1,816,667 bytes to 1,684,044, which is 7.5% smaller than the shell that clang from wasi-sdk 34 builds. The release also has the `inject-fault` pass, a store of a constant in one `mov` on x86-64, and fixes for atomic builtins on a `bool` and for `-static` with `-pie`.
