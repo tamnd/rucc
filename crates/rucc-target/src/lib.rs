@@ -61,6 +61,7 @@ mod short;
 pub mod template;
 mod timing;
 mod typenames;
+pub mod wasm;
 pub mod x86;
 pub mod x86_64;
 
