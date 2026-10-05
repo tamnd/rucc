@@ -1004,3 +1004,40 @@ fn the_labels_of_two_functions_have_two_addresses() {
         assert_eq!(status, 1);
     }
 }
+
+/// Locals of a struct with no members, which GNU C gives the size 0. The frame is empty, so the
+/// address of the local is the stack pointer, and `main` exits with 0.
+///
+/// ```c
+/// struct empty {};
+/// struct empty *where(void) { struct empty e; return &e; }
+/// int main(void) { struct empty a; where(); return 0; }
+/// ```
+const EMPTY: &str = r#"; ModuleID = 't.c'
+; format 0
+target triple = "wasm32-unknown-wasip1"
+target datalayout = "e-p:32:32-i64:64-S128"
+
+func @where() -> ptr, linkage(external) {
+block0:
+    %0 = alloca, align 1
+    return %0
+}
+
+func @main() -> i32, linkage(external) {
+block0:
+    %0 = alloca, align 1
+    %1 = call @where() : () -> ptr
+    %2 = iconst.i32 0
+    return %2
+}
+"#;
+
+#[test]
+fn a_local_of_size_zero_needs_no_frame() {
+    let text = assembly(EMPTY);
+    assert!(text.contains("global.get\t__stack_pointer"), "{text}");
+    if let Some(status) = link_and_run("empty", EMPTY) {
+        assert_eq!(status, 0);
+    }
+}

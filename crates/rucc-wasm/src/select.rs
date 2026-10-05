@@ -1246,8 +1246,16 @@ impl Lower<'_, '_> {
             }
             Opcode::Alloca => {
                 if let Some(&offset) = self.frame.slots.get(&inst) {
-                    let fp = self.frame_pointer();
-                    self.code.local_get(fp);
+                    // A function whose slots all have the size 0, which a struct with no members
+                    // has in GNU C, has an empty frame and no frame pointer. Nothing reads or
+                    // writes such a slot, so the stack pointer is as good an address as any.
+                    match self.frame.fp {
+                        Some(fp) => self.code.local_get(fp),
+                        None => {
+                            let sp = self.unit.stack_pointer();
+                            self.code.global_get(sp);
+                        }
+                    }
                     if offset != 0 {
                         self.code.i32_const(offset as i32);
                         self.code.op(emit::I32_ADD);
