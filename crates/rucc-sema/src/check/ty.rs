@@ -1211,6 +1211,7 @@ impl Checker<'_> {
                 self.strict_flex_refused(&[ast[specs].attrs, param.attrs], declarator.name);
                 self.ms_hooked(&[ast[specs].attrs, param.attrs], false);
                 self.reset_kept(&[ast[specs].attrs, param.attrs], None, span);
+                self.extern_access(&[ast[specs].attrs, param.attrs], None, span);
                 self.assume_misplaced(&[ast[specs].attrs, param.attrs], false, span);
             }
 

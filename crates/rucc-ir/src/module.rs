@@ -420,6 +420,10 @@ pub struct Global {
     /// an initializer: a section the loader fills once and the startup code never copies into
     /// again. ELF only, as `noinit` is.
     pub persistent: bool,
+    /// Whether its address is read out of the global offset table where it is only declared,
+    /// from `__attribute__((nodirect_extern_access))`, even in position dependent code. A
+    /// definition is reached the way it would have been. x86 ELF only, which is where gcc has it.
+    pub indirect: bool,
     /// Its initial image, or `None` if it is only declared here.
     pub init: Option<DataList>,
     /// Whether the optimizer may take it away once nothing in the module names it, which is a
@@ -451,6 +455,7 @@ impl Global {
             retain: false,
             noinit: false,
             persistent: false,
+            indirect: false,
             init: None,
             droppable: false,
             literal: false,

@@ -274,6 +274,9 @@ impl<'a> Printer<'a> {
         if global.persistent {
             self.out.push_str(", persistent");
         }
+        if global.indirect {
+            self.out.push_str(", nodirect_extern_access");
+        }
         self.out.push('\n');
     }
 

@@ -291,6 +291,9 @@ impl<'a> Printer<'a> {
         if node.flags.contains(DeclFlags::PERSISTENT) {
             head.push_str(" persistent");
         }
+        if node.flags.contains(DeclFlags::NODIRECT) {
+            head.push_str(" nodirect_extern_access");
+        }
         self.line(&head);
 
         // An initializer that is present and empty is `= {}`, which zero-initializes and is not

@@ -530,6 +530,12 @@ impl DeclFlags {
     /// Merged the way [`Self::RETAIN`] is.
     pub const PERSISTENT: Self = Self(1 << 41);
 
+    /// `__attribute__((nodirect_extern_access))` was kept on a declaration of this name, so the
+    /// code reads its address out of the global offset table when the name is only declared here,
+    /// even in position dependent code. x86 only. Merged the way [`Self::RETAIN`] is. See
+    /// `check::extern_access`.
+    pub const NODIRECT: Self = Self(1 << 42);
+
     /// Whether `zero_call_used_regs("skip")` was written. See [`Self::ZERO_WIDE`] for why this is
     /// more than the one bit.
     #[must_use]

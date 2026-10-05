@@ -1789,7 +1789,7 @@ mod tests {
     /// leaves the check turned off for, which is a build that looks like it worked.
     #[test]
     fn the_note_that_says_what_the_file_was_built_to_have_checked_is_written() {
-        let property = Property { features: Property::IBT | Property::SHSTK };
+        let property = Property { features: Property::IBT | Property::SHSTK, needed: 0 };
         let output = Output { property, ..Output::default() };
         let bytes =
             write(&calling("puts"), &Data::default(), &[], &target(), output, &Info::default())
@@ -3168,7 +3168,7 @@ mod tests {
     #[test]
     fn the_sections_only_elf_reads_are_left_out_rather_than_written_empty() {
         let text = calling("puts");
-        let output = Output { property: Property { features: 3 }, ..Output::default() };
+        let output = Output { property: Property { features: 3, needed: 0 }, ..Output::default() };
         let bytes = write(&text, &Data::default(), &[], &windows(), output, &Info::default())
             .expect("an object");
         let file = object::File::parse(&bytes[..]).expect("a readable object");
@@ -3306,7 +3306,7 @@ mod tests {
             }],
             ..Data::default()
         };
-        let property = Property { features: Property::IBT | Property::SHSTK };
+        let property = Property { features: Property::IBT | Property::SHSTK, needed: 0 };
         let output = Output { property, ..Output::default() };
         let bytes = write(&text, &data, &[], &i386(), output, &Info::default()).expect("an object");
         let file = object::read::elf::ElfFile32::<Endianness>::parse(&bytes[..]).expect("readable");

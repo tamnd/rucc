@@ -991,6 +991,7 @@ impl Unit<'_> {
         let defined = state != Definition::Declared;
         global.noinit = defined && init.is_none() && node.flags.contains(DeclFlags::NOINIT);
         global.persistent = defined && init.is_some() && node.flags.contains(DeclFlags::PERSISTENT);
+        global.indirect = node.flags.contains(DeclFlags::NODIRECT);
         // Under `-fcommon` an `int x;` that nothing initializes is offered to the linker to merge
         // with every other one of the same name, and with a real definition if there is one. Only
         // the plain case is: a thread-local one has to be a copy per thread, a weak or internal
@@ -1181,6 +1182,11 @@ impl Unit<'_> {
         // `rucc_asm::hook`.
         if node.flags.contains(DeclFlags::MS_HOOK) {
             func.attrs.set |= AttrSet::MS_HOOK;
+        }
+        // And the one that has its address read out of the table where it is only declared.
+        // See `rucc_codegen::elsewhere`.
+        if node.flags.contains(DeclFlags::NODIRECT) {
+            func.attrs.set |= AttrSet::NODIRECT;
         }
         // And the other one, for the same reason. What a call to `strtol` reads belongs to
         // `strtol`, and the purity analysis answers opaque for everything it cannot see a body

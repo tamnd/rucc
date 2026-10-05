@@ -378,11 +378,12 @@ impl Headers {
     }
 }
 
-/// The note that says what the file was built to have checked.
+/// The notes that say what the file was built to have checked and what it needs of the link.
 ///
 /// A note is a name, a description and a number saying what kind it is, and this kind is the one
 /// whose description is a list of properties. Each property is a key, a length and that many bytes,
-/// and the one written here is the feature word.
+/// and each written here is one word. One note each, which is what gcc writes, and what the linker
+/// reads the same as one note holding both.
 ///
 /// Everything is padded to the width of an address, which is eight in a 64 bit object and four in
 /// a 32 bit one, and is what makes the reader's walk over the list a walk over aligned words. The
@@ -390,21 +391,23 @@ impl Headers {
 /// description is sixteen bytes for a property of twelve in a 64 bit file and twelve in a 32 bit
 /// one, where there is nothing to pad.
 pub(crate) fn record(property: Property, align: u32) -> Vec<u8> {
-    // How long the name is, how long the description is, and which kind of note this is. Then the
-    // name, and then the description, which is the one property and whatever pads it.
     let size = 12u32.next_multiple_of(align);
-    let head = [4, size, elf::NT_GNU_PROPERTY_TYPE_0.0];
-    let desc = [Property::X86_FEATURES, 4, property.features];
-    let mut out = Vec::with_capacity(12 + 4 + size as usize);
-    for word in head {
-        out.extend_from_slice(&word.to_le_bytes());
+    let mut out = Vec::new();
+    for (key, word) in property.each() {
+        // How long the name is, how long the description is, and which kind of note this is.
+        // Then the name, and then the description, which is the one property and whatever pads it.
+        let start = out.len();
+        let head = [4, size, elf::NT_GNU_PROPERTY_TYPE_0.0];
+        for word in head {
+            out.extend_from_slice(&word.to_le_bytes());
+        }
+        // Sixteen bytes in once the name is there, which is a multiple of either width, so the
+        // description begins straight after the name with no padding between them.
+        out.extend_from_slice(b"GNU\0");
+        for word in [key, 4, word] {
+            out.extend_from_slice(&word.to_le_bytes());
+        }
+        out.resize(start + 16 + size as usize, 0);
     }
-    // Sixteen bytes in once the name is there, which is a multiple of either width, so the
-    // description begins straight after the name with no padding between them.
-    out.extend_from_slice(b"GNU\0");
-    for word in desc {
-        out.extend_from_slice(&word.to_le_bytes());
-    }
-    out.resize(16 + size as usize, 0);
     out
 }
