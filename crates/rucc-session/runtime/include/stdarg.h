@@ -48,7 +48,10 @@ typedef __gnuc_va_list va_list;
 #define va_arg(ap, type) __builtin_va_arg(ap, type)
 #define va_end(ap) __builtin_va_end(ap)
 
-#if defined(__STDC_VERSION__) && __STDC_VERSION__ >= 199901L
+/* gcc gives `va_copy` to every dialect but a strict C89 one, so `-std=gnu89` has it. Linux before
+ * 5.15 builds with `-std=gnu89` and takes this header, and calls `va_copy` in vsprintf.c. */
+#if !defined(__STRICT_ANSI__) || (defined(__STDC_VERSION__) && __STDC_VERSION__ >= 199901L) || \
+    (defined(__cplusplus) && __cplusplus >= 201103L)
 #define va_copy(dst, src) __builtin_va_copy(dst, src)
 #endif
 

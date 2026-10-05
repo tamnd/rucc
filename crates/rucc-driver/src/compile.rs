@@ -2447,6 +2447,22 @@ mod tests {
         assert!(text.contains("va-end"), "{text}");
     }
 
+    /// `va_copy` is there in `-std=gnu89`, as with gcc, and not in a strict `-std=c89`. Linux 5.10
+    /// builds with the first and calls it from vsprintf.c, which linked against a `va_copy`
+    /// nothing defined.
+    #[test]
+    fn va_copy_is_there_in_gnu89_and_not_in_strict_c89() {
+        let source = "#include <stdarg.h>\n#ifdef va_copy\nint copied;\n#endif\n";
+        for (gnu, there) in [(true, true), (false, false)] {
+            let mut opts = freestanding();
+            opts.std = rucc_session::Std::C89;
+            opts.gnu_extensions = gnu;
+            let result = run(&opts, source);
+            assert_eq!(result.messages, Vec::<String>::new());
+            assert_eq!(result.text().contains("copied"), there, "gnu {gnu}: {}", result.text());
+        }
+    }
+
     /// glibc includes `<stdarg.h>` this way from every header that declares a `vprintf`, and
     /// what it wants is the type without the four macro names. Answering the whole header
     /// would put `va_start` in the way of a program that has its own.
