@@ -60,16 +60,18 @@
 //!
 //! It is not the e-graph. A rule replaces what it matched and the old form is gone, so there is
 //! nothing to extract and nothing a cost model chooses between. Section 12.3 calls that arm B and
-//! it is the arm with no search problem in it.
+//! it is the arm with no search problem in it. [`crate::egraph`] is arm C, and it is this walk
+//! with the classes kept: [`build`] takes them, and does what it does here when there are none.
 
 use rucc_base::hash::{Map, Set};
 use rucc_cost::heuristics;
 use rucc_ir::{Block, Def, Func, Inst, InstData, Opcode, Value};
 
+use crate::egraph::Classes;
 use crate::gcm::movable;
 use crate::number::{Key, is_address, key, widened};
 use crate::simplify::{Finder, apply};
-use crate::uses::{chase, count, substitute};
+use crate::uses::{chase, count, operands, substitute};
 use crate::{Analyses, Analysis, Fuel, Pass, Preserved, Stats};
 
 /// What this pass is called, for the lists in [`crate::pipeline`] that name it.
@@ -111,117 +113,146 @@ impl Pass for Cons {
     }
 
     fn run(&self, func: &mut Func, an: &mut Analyses, fuel: &mut Fuel) -> Stats {
-        let mut stats = Stats::new();
-        if func.entry().is_none() {
-            return stats;
-        }
-        let mut finder = Finder::new(func, an);
-        let dom = an.dominators(func);
-        let freq = an.frequencies(func);
-        let order: Vec<Block> = an.cfg(func).reverse_postorder().collect();
-        let reached: Set<Block> = order.iter().copied().collect();
-        let blocks: Vec<Block> = order
-            .into_iter()
-            .chain(func.blocks().filter(|block| !reached.contains(block)))
-            .collect();
-        // Who reads what when the walk started, for the reason `crate::simplify` gives: a rule
-        // that fires on what nothing reads changes no program and would still spend fuel.
-        let uses = count(func);
-        let mut walk = Walk { forward: Map::default(), gone: Vec::new() };
-        // Where each key was found outside a block of its own, with the instruction, for moving it
-        // up when a second one turns up beside it rather than below it.
-        let mut across: Map<Key, Vec<(Block, Inst, Value)>> = Map::default();
-        // The first value of each constant in the function, which is what a constant operand is
-        // compared as in `across`, the same way `crate::number` does it.
-        let mut constants: Map<Key, Value> = Map::default();
-        let empty: Map<Value, Value> = Map::default();
-        for block in blocks {
-            let mut seen: Map<Key, Value> = Map::default();
-            for inst in func.insts(block).collect::<Vec<Inst>>() {
-                if !walk.forward.is_empty() {
-                    let args = func[inst].args;
-                    func.rewrite(args, |value| chase(&walk.forward, value));
-                }
-                if func[inst].first_result.is_some_and(|result| uses[result.index()] == 0) {
-                    continue;
-                }
-                if cascade(func, inst, &mut finder, fuel, &mut stats, &mut walk.forward) {
-                    continue;
-                }
-                // The operands were read through `forward` above, so there is nothing left for
-                // the key to look them up through.
-                let Some((key, result)) = key(func, &empty, inst) else { continue };
-                if let Some(&first) = seen.get(&key) {
-                    walk.take(fuel, &mut stats, inst, result, first, MERGED);
-                    continue;
-                }
-                seen.insert(key, result);
-                if key.args[0].is_none() {
-                    constants.entry(key).or_insert(result);
-                    continue;
-                }
-                let constant = |arg: &Option<Value>| arg.is_none_or(|arg| argless(func, arg));
-                if is_address(key.opcode)
-                    || !reached.contains(&block)
-                    || key.args.iter().all(constant)
-                {
-                    continue;
-                }
-                let found = across.entry(widened(func, &constants, key)).or_default();
-                if let Some(&(_, _, first)) =
-                    found.iter().find(|&&(at, ..)| dom.dominates(at, block))
-                {
-                    walk.take(fuel, &mut stats, inst, result, first, MERGED);
-                    continue;
-                }
-                let raised = found.iter().enumerate().find_map(|(index, &(at, first, _))| {
-                    let to = dom.nearest_common_dominator(at, block)?;
-                    raisable(func, first, to, &|of, to| dom.dominates(of, to))
-                        .then_some((index, to))
-                });
-                let Some((index, to)) = raised else {
-                    found.push((block, inst, result));
-                    continue;
-                };
-                let (at, first, value) = found[index];
-                let both = freq.get(at).raw().saturating_add(freq.get(block).raw());
-                if freq.get(to).raw() > both {
-                    stats.missed(COLDER);
-                    found.push((block, inst, result));
-                    continue;
-                }
-                if !fuel.take() {
-                    stats.missed(NO_FUEL);
-                    found.push((block, inst, result));
-                    continue;
-                }
-                raise(func, first, to, &|of, to| dom.dominates(of, to));
-                found[index].0 = to;
-                walk.forward.insert(result, value);
-                walk.gone.push(inst);
-                stats.optimized(RAISED);
-            }
-        }
-        for inst in walk.gone {
-            func.remove_inst(inst);
-        }
-        if !walk.forward.is_empty() {
-            substitute(func, &walk.forward);
-        }
-        stats
+        build(func, an, fuel, None)
     }
 }
 
-/// What the walk has decided, read as it goes and applied once at the end.
-struct Walk {
-    /// What each result that went is read as, whether a rule or a duplicate sent it there.
-    forward: Map<Value, Value>,
-    /// The duplicates on their way out. What a rule pointed elsewhere is left for [`crate::dce`],
-    /// as [`crate::simplify`] leaves it.
-    gone: Vec<Inst>,
+/// The walk, with the classes [`crate::egraph`] keeps or without them.
+///
+/// Without them a rule replaces what it matched and a duplicate goes, which is this pass. With them
+/// a rule adds a form to the class of what it matched, a duplicate joins the class of what it
+/// duplicates, and the classes are extracted from at the end.
+pub(crate) fn build(
+    func: &mut Func,
+    an: &mut Analyses,
+    fuel: &mut Fuel,
+    classes: Option<&mut Classes>,
+) -> Stats {
+    let mut stats = Stats::new();
+    if func.entry().is_none() {
+        return stats;
+    }
+    let mut finder = Finder::new(func, an);
+    let dom = an.dominators(func);
+    let freq = an.frequencies(func);
+    let order: Vec<Block> = an.cfg(func).reverse_postorder().collect();
+    let reached: Set<Block> = order.iter().copied().collect();
+    let blocks: Vec<Block> = order
+        .iter()
+        .copied()
+        .chain(func.blocks().filter(|block| !reached.contains(block)))
+        .collect();
+    // Who reads what when the walk started, for the reason `crate::simplify` gives: a rule
+    // that fires on what nothing reads changes no program and would still spend fuel.
+    let uses = count(func);
+    let mut walk = Walk { forward: Map::default(), gone: Vec::new(), classes };
+    // Where each key was found outside a block of its own, with the instruction, for moving it
+    // up when a second one turns up beside it rather than below it.
+    let mut across: Map<Key, Vec<(Block, Inst, Value)>> = Map::default();
+    // The first value of each constant in the function, which is what a constant operand is
+    // compared as in `across`, the same way `crate::number` does it.
+    let mut constants: Map<Key, Value> = Map::default();
+    let empty: Map<Value, Value> = Map::default();
+    for &block in &blocks {
+        let mut seen: Map<Key, Value> = Map::default();
+        for inst in func.insts(block).collect::<Vec<Inst>>() {
+            if !walk.forward.is_empty() {
+                let args = func[inst].args;
+                func.rewrite(args, |value| chase(&walk.forward, value));
+            }
+            if func[inst].first_result.is_some_and(|result| uses[result.index()] == 0) {
+                continue;
+            }
+            walk.look(func, inst);
+            let Some(inst) = cascade(func, inst, &mut finder, fuel, &mut stats, &mut walk) else {
+                continue;
+            };
+            // The operands were read through `forward` above, so there is nothing left for
+            // the key to look them up through.
+            let Some((key, result)) = key(func, &empty, inst) else { continue };
+            if let Some(&first) = seen.get(&key) {
+                walk.take(fuel, &mut stats, inst, result, first, MERGED);
+                continue;
+            }
+            seen.insert(key, result);
+            if key.args[0].is_none() {
+                constants.entry(key).or_insert(result);
+                continue;
+            }
+            let constant = |arg: &Option<Value>| arg.is_none_or(|arg| argless(func, arg));
+            if is_address(key.opcode) || !reached.contains(&block) || key.args.iter().all(constant)
+            {
+                continue;
+            }
+            let found = across.entry(widened(func, &constants, key)).or_default();
+            if let Some(&(_, _, first)) = found.iter().find(|&&(at, ..)| dom.dominates(at, block)) {
+                walk.take(fuel, &mut stats, inst, result, first, MERGED);
+                continue;
+            }
+            let raised = found.iter().enumerate().find_map(|(index, &(at, first, _))| {
+                let to = dom.nearest_common_dominator(at, block)?;
+                raisable(func, first, to, &|of, to| dom.dominates(of, to)).then_some((index, to))
+            });
+            let Some((index, to)) = raised else {
+                found.push((block, inst, result));
+                continue;
+            };
+            let (at, first, value) = found[index];
+            let both = freq.get(at).raw().saturating_add(freq.get(block).raw());
+            if freq.get(to).raw() > both {
+                stats.missed(COLDER);
+                found.push((block, inst, result));
+                continue;
+            }
+            if !fuel.take() {
+                stats.missed(NO_FUEL);
+                found.push((block, inst, result));
+                continue;
+            }
+            raise(func, first, to, &|of, to| dom.dominates(of, to));
+            found[index].0 = to;
+            walk.merge(inst, result, value);
+            stats.optimized(RAISED);
+        }
+    }
+    let Walk { forward, gone, classes } = walk;
+    if let Some(classes) = classes {
+        let table = an.machine().table();
+        classes.extract(func, dom, table, &order, &forward, &mut stats);
+        // A duplicate stayed as a member for extraction to choose between, and goes now unless
+        // something chose it. Left for `crate::dce` it would be one more reader of what it reads to
+        // the passes in between, and `crate::narrow` takes only a value read once.
+        let mut uses = count(func);
+        for inst in gone.into_iter().rev() {
+            if func[inst].results().any(|value| uses[value.index()] > 0) {
+                continue;
+            }
+            operands(func, inst, |value| uses[value.index()] -= 1);
+            func.remove_inst(inst);
+        }
+        return stats;
+    }
+    for inst in gone {
+        func.remove_inst(inst);
+    }
+    if !forward.is_empty() {
+        substitute(func, &forward);
+    }
+    stats
 }
 
-impl Walk {
+/// What the walk has decided, read as it goes and applied once at the end.
+struct Walk<'a> {
+    /// What each result that went is read as, whether a rule or a duplicate sent it there.
+    forward: Map<Value, Value>,
+    /// The duplicates on their way out, which with classes go only once extraction is done. What a
+    /// rule pointed elsewhere is left for [`crate::dce`], as [`crate::simplify`] leaves it.
+    gone: Vec<Inst>,
+    /// The classes, when the walk is building them. See [`crate::egraph`].
+    classes: Option<&'a mut Classes>,
+}
+
+impl Walk<'_> {
     /// Records that this instruction computes what an earlier one computed, or says why it stays.
     fn take(
         &mut self,
@@ -236,15 +267,33 @@ impl Walk {
             stats.missed(NO_FUEL);
             return;
         }
-        self.forward.insert(result, first);
-        self.gone.push(inst);
+        self.merge(inst, result, first);
         stats.optimized(why);
+    }
+
+    /// Reads the result as an equal value from now on. The instruction goes, and with classes it is
+    /// first another member of the class for extraction to choose between.
+    fn merge(&mut self, inst: Inst, result: Value, first: Value) {
+        self.forward.insert(result, first);
+        if let Some(classes) = self.classes.as_deref_mut() {
+            classes.union(result, first);
+        }
+        self.gone.push(inst);
+    }
+
+    /// Makes what the instruction computes a node of the graph, when there is one being built.
+    fn look(&mut self, func: &Func, inst: Inst) {
+        let Some(classes) = self.classes.as_deref_mut() else { return };
+        if let Some((_, result)) = key(func, &Map::default(), inst) {
+            classes.look(result);
+        }
     }
 }
 
 /// Applies the rules to the instruction, and to what they leave of it, until none fires.
 ///
-/// True when a rule found the result is a value the function already has, which ends it: the
+/// The instruction holding the last form, which is the same one unless there are classes, and
+/// nothing when a rule found the result is a value the function already has, which ends it: the
 /// instruction is on its way out and there is nothing left to rewrite or to look up.
 fn cascade(
     func: &mut Func,
@@ -252,20 +301,26 @@ fn cascade(
     finder: &mut Finder,
     fuel: &mut Fuel,
     stats: &mut Stats,
-    forward: &mut Map<Value, Value>,
-) -> bool {
+    walk: &mut Walk<'_>,
+) -> Option<Inst> {
+    let mut at = inst;
     for _ in 0..heuristics::CONS_CASCADE {
-        let Some((found, pattern, no_fuel)) = finder.find(func, inst) else { return false };
+        if walk.classes.as_deref_mut().is_some_and(|classes| !classes.open(stats)) {
+            return Some(at);
+        }
+        let Some((found, pattern, no_fuel)) = finder.find(func, at) else { return Some(at) };
         if !fuel.take() {
             stats.missed(no_fuel);
-            return false;
+            return Some(at);
         }
         stats.optimized(pattern);
-        if apply(func, inst, found, forward) {
-            return true;
+        match walk.classes.as_deref_mut() {
+            Some(classes) => at = classes.grow(func, at, found, &mut walk.forward)?,
+            None if apply(func, at, found, &mut walk.forward) => return None,
+            None => {}
         }
     }
-    false
+    Some(at)
 }
 
 /// Whether the value is the result of an instruction with no operands, which is a constant or the

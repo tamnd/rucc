@@ -647,11 +647,14 @@ pub enum Rewriter {
     /// arm A of section 12.3: the rules to a bounded fixpoint, then value numbering and loop
     /// invariant code motion where the level already runs them, and nothing placed globally.
     Classical,
+    /// [`crate::egraph`] wherever the level names `simplify` or `number`, which is arm C of
+    /// section 12.3: arm B with the e-classes kept and the cheapest form of each value extracted.
+    EGraph,
 }
 
 impl Rewriter {
     /// Every one of them, in the order `-Zrewriter=` lists them.
-    pub const ALL: [Self; 3] = [Self::Default, Self::Consed, Self::Classical];
+    pub const ALL: [Self; 4] = [Self::Default, Self::Consed, Self::Classical, Self::EGraph];
 
     /// What `-Zrewriter=` calls it.
     #[must_use]
@@ -660,6 +663,7 @@ impl Rewriter {
             Self::Default => "default",
             Self::Consed => "consed",
             Self::Classical => "classical",
+            Self::EGraph => "egraph",
         }
     }
 
@@ -673,6 +677,7 @@ impl Rewriter {
     const fn instead(self, name: &'static str) -> Option<&'static str> {
         match (self, name.as_bytes()) {
             (Self::Consed, b"simplify" | b"number") => Some(crate::cons::NAME),
+            (Self::EGraph, b"simplify" | b"number") => Some(crate::egraph::NAME),
             (Self::Classical, b"simplify") => Some(crate::simplify::FIXPOINT),
             (Self::Classical, b"gcm") => None,
             _ => Some(name),
@@ -1929,11 +1934,23 @@ mod tests {
     }
 
     #[test]
+    fn the_egraph_rewriter_runs_wherever_the_consed_one_does() {
+        for level in [OptLevel::O1, OptLevel::O2, OptLevel::O3, OptLevel::Os, OptLevel::Oz] {
+            let arm = |rewriter| Options { rewriter, ..Options::for_level(level) }.chosen();
+            let consed: Vec<&str> = arm(super::Rewriter::Consed)
+                .into_iter()
+                .map(|name| if name == crate::cons::NAME { crate::egraph::NAME } else { name })
+                .collect();
+            assert_eq!(arm(super::Rewriter::EGraph), consed, "{level:?}");
+        }
+    }
+
+    #[test]
     fn a_rewriter_is_found_by_its_name() {
         for rewriter in super::Rewriter::ALL {
             assert_eq!(super::Rewriter::from_name(rewriter.name()), Some(rewriter));
         }
-        assert_eq!(super::Rewriter::from_name("egraph"), None);
+        assert_eq!(super::Rewriter::from_name("saturated"), None);
     }
 
     #[test]

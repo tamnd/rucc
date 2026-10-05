@@ -4,6 +4,10 @@ All notable changes are recorded here. The format follows [Keep a Changelog](htt
 
 ## Unreleased
 
+### Added
+
+- `-Zrewriter=egraph` runs `egraph` wherever a level runs `simplify` or `number`. It is the e-graph arm of experiment 7 in section 12.3 of `spec/optimizer/12-egraph.md`: the walk of `-Zrewriter=consed`, with each rewrite added to the class of the value it matched rather than replacing it, and the cheapest member of each class extracted by the costs of section 40. The rules stop once a function has added `EGRAPH_NODES` forms, and `-fopt-info-note` prints how many forms and classes there were. It is off unless asked for. (#2829)
+
 ### Changed
 
 - The target table has a `wasm32-wasip2` row, tier 4 with a plan for tier 2, for a component that wraps a core module built as for wasip1 (#2863). `tests/abi-corpus/wasm32-wasip2.c` compiles with no diagnostic under clang 23 from wasi-sdk 34. The LLVM spelling of a tuple, which is the `target triple` line of printed rucc IR and the answer of `rucc-targets llvm-triple`, is now `wasm32-unknown-wasip1` for wasip1, which is the name clang 23 uses, and `wasm32-unknown-unknown` for `wasm32-none`. Before, it was `wasm32-unknown-wasi`, which clang 23 says is deprecated, and `wasm32-unknown-none`, which LLVM does not know.
