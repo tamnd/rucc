@@ -391,11 +391,10 @@ pub fn compile(opts: &Options, name: &str, fs: &dyn FileSystem) -> Compiled {
                         &sess.target,
                     ));
                 }
-                // A wasm unit is lowered and optimized like any other, and stops before the
-                // back end until the wasm backend of #2864 exists.
+                // A wasm unit is lowered and optimized like any other. The wasm back end of
+                // #2864 writes an object, and the other outputs past the checker wait for it.
                 EmitKind::MirFinal
                 | EmitKind::Asm
-                | EmitKind::Object
                 | EmitKind::Archive
                 | EmitKind::Executable
                 | EmitKind::SafetySummary
@@ -604,8 +603,9 @@ pub fn compile(opts: &Options, name: &str, fs: &dyn FileSystem) -> Compiled {
                             });
                             match made {
                                 Ok(mut made) => {
-                                    if let (Artifact::Object { bytes, .. }, Some(kept)) =
-                                        (&mut made, kept)
+                                    // A wasm object has no place for the section yet.
+                                    if let (Artifact::Object { bytes, .. }, Some(kept), false) =
+                                        (&mut made, kept, opts.target.arch.is_wasm())
                                     {
                                         rucc_object::attach(bytes, crate::lto::SECTION, &kept);
                                     }
@@ -1139,6 +1139,14 @@ fn generate(
     assembly: &mut Option<String>,
     origin: Origin<'_>,
 ) -> Result<Artifact, Vec<Diagnostic>> {
+    // A wasm object comes from its own back end, which reads the IR as it is and has no machine
+    // description, no register allocator and no assembler to share with the others.
+    if opts.target.arch.is_wasm() {
+        return match rucc_wasm::generate(module, names, opts.wasm) {
+            Ok(written) => Ok(Artifact::Object { bytes: written.bytes, defines: written.defines }),
+            Err(refusal) => Err(vec![unsupported(&refusal.to_string())]),
+        };
+    }
     let Some(machine) = Machine::for_target(target) else {
         return Err(vec![unsupported(&format!(
             "there is no back end for {} in this compiler yet, so there is nothing to generate",
@@ -2236,17 +2244,20 @@ fn refused(why: rucc_asm::Error) -> Vec<Diagnostic> {
     }
 }
 
-/// The refusal for a wasm target past the checker.
+/// The refusal for a wasm target, for an output that the wasm back end does not write yet.
 fn no_wasm_backend(target: Triple) -> Diagnostic {
     Diagnostic::error(
         format!(
-            "there is no wasm backend yet, so rucc cannot compile for {}",
+            "the wasm backend writes only an object so far, so rucc cannot give this output for {}",
             target.tuple().to_canonical_string()
         ),
         Span::DUMMY,
     )
     .with_code("E0653")
-    .note("-fsyntax-only and -E work for this target; the backend is tamnd/rucc#2864", Span::DUMMY)
+    .note(
+        "-c, --emit=ir, -fsyntax-only and -E work for this target; the rest is tamnd/rucc#2864",
+        Span::DUMMY,
+    )
 }
 
 /// A diagnostic about a program this compiler is not finished enough to compile.
@@ -4326,10 +4337,11 @@ decl #0 x : int object external static defined
         assert!(result.text().is_empty());
     }
 
-    /// A wasm target reads, checks and lowers the program, and every output that needs a back
-    /// end is refused with the issue that brings one.
+    /// A wasm target reads, checks and lowers the program, and the wasm back end writes the
+    /// object. The outputs that need the other back ends are refused with the issue that brings
+    /// them.
     #[test]
-    fn a_wasm_target_lowers_the_program_and_refuses_to_generate_it() {
+    fn a_wasm_target_lowers_the_program_and_writes_an_object() {
         let source = "struct p { int x, y; };\nstruct p f(struct p a, long long b) { return a; }\n";
         let mut opts = options();
         opts.target = "wasm32-wasip1".parse::<Triple>().unwrap();
@@ -4346,12 +4358,20 @@ decl #0 x : int object external static defined
             "{}",
             lowered.text()
         );
-        for emit in [EmitKind::MirFinal, EmitKind::Asm, EmitKind::Object] {
+        opts.emit = EmitKind::Object;
+        let object = run(&opts, source);
+        assert!(!object.failed(), "{:?}", object.messages);
+        let Artifact::Object { bytes, defines } = &object.artifact else {
+            panic!("{:?}", object.messages)
+        };
+        assert_eq!(&bytes[..8], b"\0asm\x01\0\0\0");
+        assert_eq!(defines, &["f".to_owned()]);
+        for emit in [EmitKind::MirFinal, EmitKind::Asm] {
             opts.emit = emit;
             let result = run(&opts, source);
             assert!(result.failed(), "{emit:?}");
             assert!(
-                result.messages[0].contains("there is no wasm backend yet"),
+                result.messages[0].contains("the wasm backend writes only an object"),
                 "{emit:?}: {:?}",
                 result.messages
             );

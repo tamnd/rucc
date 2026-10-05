@@ -53,3 +53,4 @@ rucc-types.workspace = true
 # formats of. Here rather than under the sysroot crate because the sysroot crate says which files
 # are wanted and this one is the layer that has them on disk.
 rucc-unpack.workspace = true
+rucc-wasm.workspace = true

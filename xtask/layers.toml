@@ -84,6 +84,7 @@ rucc-asm = 11
 rucc-lto = 11
 rucc-regalloc = 11
 rucc-codegen = 12
+rucc-wasm = 12
 
 # The top. Only these two know that a process, a file system and a command line exist.
 rucc-driver = 13

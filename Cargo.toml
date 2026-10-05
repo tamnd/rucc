@@ -58,6 +58,7 @@ rucc-targets = { version = "=0.22.0", path = "build-tools/rucc-targets" }
 rucc-tuple = { version = "=0.22.0", path = "crates/rucc-tuple" }
 rucc-unpack = { version = "=0.22.0", path = "crates/rucc-unpack" }
 rucc-types = { version = "=0.22.0", path = "crates/rucc-types" }
+rucc-wasm = { version = "=0.22.0", path = "crates/rucc-wasm" }
 # The compiler's dependencies outside the workspace, blessed by spec/18-package-layout.md
 # section 18.3. They are here rather than in the crates that use them so that the next one to be
 # proposed has to be added to a list a reviewer reads, which is the point of keeping the list.
