@@ -7,12 +7,13 @@
 
 use rucc_base::hash::Map;
 use rucc_ir::{
-    Abi, BlockCall, Def, Extra, FloatPred, Func, FuncId, Inst, IntPred, Opcode, RmwOp, Type, Value,
+    Abi, Block, Def, Extra, FloatPred, Func, FuncId, Inst, IntPred, Opcode, RmwOp, Type, Value,
 };
 use rucc_object::wasm::{FuncType, Function, RelocKind, ValType};
 use rucc_target::wasm::Feature;
 
 use crate::emit::{self, Code};
+use crate::irreducible::Node;
 use crate::structure::Shape;
 use crate::{Unit, functype, valtype};
 
@@ -128,13 +129,7 @@ fn int_op(op: u8, wide: bool) -> u8 {
 pub(crate) fn function(unit: &mut Unit<'_>, id: FuncId, symbol: u32) -> Result<Function> {
     let func = &unit.ir[id];
     let export = func.wasm.export.map(|name| unit.names.resolve(name).to_owned());
-    let shape = Shape::of(func).map_err(|block| {
-        format!(
-            "the graph of its blocks is not reducible at block{}, and node splitting is a later \
-             step",
-            block.index()
-        )
-    })?;
+    let shape = Shape::of(func)?;
     let ty = functype(func.signature())?;
     let params = u32::try_from(ty.params.len()).expect("fewer than 2^32 parameters");
     let mut lower = Lower {
@@ -147,10 +142,12 @@ pub(crate) fn function(unit: &mut Unit<'_>, id: FuncId, symbol: u32) -> Result<F
         local: Map::default(),
         frame: Frame::default(),
         context: Vec::new(),
+        labels: Vec::new(),
         va: func.signature().variadic.then(|| params - 1),
         returns: !ty.results.is_empty(),
     };
     lower.assign()?;
+    lower.labels = (0..lower.shape.dispatches).map(|_| lower.new_local(ValType::I32)).collect();
     lower.plan()?;
     lower.prologue();
     if !lower.shape.order.is_empty() {
@@ -184,12 +181,23 @@ struct Lower<'u, 'a> {
     local: Map<Value, u32>,
     frame: Frame,
     context: Vec<Ctx>,
+    /// The label local of each dispatch node, which says the entry of its loop to go to.
+    labels: Vec<u32>,
     /// The parameter that holds the address of the extra arguments, in a variadic function.
     va: Option<u32>,
     returns: bool,
 }
 
 impl Lower<'_, '_> {
+    /// The blocks of the function that are reached, in the order of the structure.
+    fn blocks(&self) -> Vec<Block> {
+        let blocks = self.shape.order.iter().filter_map(|&node| match node {
+            Node::Block(block) => Some(block),
+            Node::Dispatch(_) => None,
+        });
+        blocks.collect()
+    }
+
     fn new_local(&mut self, ty: ValType) -> u32 {
         let index = self.params + u32::try_from(self.locals.len()).expect("fewer locals");
         self.locals.push(ty);
@@ -200,10 +208,10 @@ impl Lower<'_, '_> {
     /// function, and a constant has none, because it is written where it is used.
     fn assign(&mut self) -> Result<()> {
         let func = self.func;
-        for (position, &block) in self.shape.order.clone().iter().enumerate() {
+        for block in self.blocks() {
             let params = func[block].params.iter().copied().filter(|&v| !func[v].ty.is_mem());
             for (index, value) in params.enumerate() {
-                let local = if position == 0 {
+                let local = if Some(block) == func.entry() {
                     u32::try_from(index).expect("fewer than 2^32 parameters")
                 } else {
                     self.new_local(valtype(func[value].ty)?)
@@ -234,7 +242,7 @@ impl Lower<'_, '_> {
         let func = self.func;
         let mut va = 0u32;
         let mut allocas = Vec::new();
-        for &block in &self.shape.order {
+        for block in self.blocks() {
             for inst in func.insts(block) {
                 let data = &func[inst];
                 match data.opcode {
@@ -337,21 +345,33 @@ impl Lower<'_, '_> {
         u32::try_from(self.context.len() - 1 - at).expect("fewer than 2^32 frames")
     }
 
-    fn branch(&mut self, x: usize, call: BlockCall) -> Result<()> {
+    /// The edge `index` of the node at `x`, which for a block is the target `index` of its
+    /// terminator. The edge writes the parameters of the block that it goes to, and the label of
+    /// each dispatch node that it passes, and then it goes.
+    fn branch(&mut self, x: usize, index: usize) -> Result<()> {
         let func = self.func;
-        let to = self.shape.position[&call.block];
-        let pairs: Vec<(Value, Value)> = func[call.args]
-            .iter()
-            .copied()
-            .zip(func[call.block].params.iter().copied())
-            .filter(|&(arg, param)| !func[param].ty.is_mem() && arg != param)
-            .collect();
-        for &(arg, _) in &pairs {
-            self.push(arg)?;
+        if let Node::Block(block) = self.shape.order[x] {
+            let term = func.terminator(block).ok_or("a block has no terminator")?;
+            let call = func.successors(term).nth(index).ok_or("an edge with no target")?;
+            let pairs: Vec<(Value, Value)> = func[call.args]
+                .iter()
+                .copied()
+                .zip(func[call.block].params.iter().copied())
+                .filter(|&(arg, param)| !func[param].ty.is_mem() && arg != param)
+                .collect();
+            for &(arg, _) in &pairs {
+                self.push(arg)?;
+            }
+            for &(_, param) in pairs.iter().rev() {
+                self.set(param);
+            }
         }
-        for &(_, param) in pairs.iter().rev() {
-            self.set(param);
+        let edge = self.shape.edges[x][index].clone();
+        for &(label, which) in &edge.labels {
+            self.code.i32_const(which as i32);
+            self.code.local_set(self.labels[label]);
         }
+        let to = edge.to;
         if self.shape.is_backward(x, to) {
             let depth = self.depth(Ctx::Loop(to));
             self.code.br(depth);
@@ -367,7 +387,10 @@ impl Lower<'_, '_> {
 
     fn body(&mut self, x: usize) -> Result<()> {
         let func = self.func;
-        let block = self.shape.order[x];
+        let block = match self.shape.order[x] {
+            Node::Block(block) => block,
+            Node::Dispatch(label) => return self.dispatch(x, label),
+        };
         let Some(term) = func.terminator(block) else {
             return Err("a block has no terminator".into());
         };
@@ -376,17 +399,16 @@ impl Lower<'_, '_> {
                 self.inst(inst)?;
             }
         }
-        let targets: Vec<BlockCall> = func.successors(term).collect();
         match func[term].opcode {
-            Opcode::Jump => self.branch(x, targets[0]),
+            Opcode::Jump => self.branch(x, 0),
             Opcode::BrIf => {
                 let cond = self.args(term)[0];
                 self.push_z(cond)?;
                 self.code.open(emit::IF, None);
                 self.context.push(Ctx::Other);
-                self.branch(x, targets[0])?;
+                self.branch(x, 0)?;
                 self.code.op(emit::ELSE);
-                self.branch(x, targets[1])?;
+                self.branch(x, 1)?;
                 self.context.pop();
                 self.code.op(emit::END);
                 Ok(())
@@ -426,15 +448,16 @@ impl Lower<'_, '_> {
         let ty = func[value].ty;
         let wide = valtype(ty)? == ValType::I64;
 
-        // The distinct targets. Two cases that go to one block with the same arguments share it.
-        let mut targets: Vec<BlockCall> = Vec::new();
+        // The distinct targets, as the index of the first edge to each. Two cases that go to one
+        // block with the same arguments share it.
+        let mut targets: Vec<usize> = Vec::new();
         let mut which = Vec::with_capacity(calls.len());
-        for call in calls {
-            let same = targets
-                .iter()
-                .position(|t| t.block == call.block && func[t.args] == func[call.args]);
+        for (index, call) in calls.iter().enumerate() {
+            let same = targets.iter().position(|&t| {
+                calls[t].block == call.block && func[calls[t].args] == func[call.args]
+            });
             which.push(same.unwrap_or_else(|| {
-                targets.push(*call);
+                targets.push(index);
                 targets.len() - 1
             }));
         }
@@ -495,6 +518,26 @@ impl Lower<'_, '_> {
             self.context.pop();
             self.code.op(emit::END);
             self.branch(x, target)?;
+        }
+        Ok(())
+    }
+
+    /// A dispatch node, as one `block` for each entry of its loop around a `br_table` on its
+    /// label.
+    fn dispatch(&mut self, x: usize, label: usize) -> Result<()> {
+        let entries = self.shape.edges[x].len();
+        for _ in 0..entries {
+            self.code.open(emit::BLOCK, None);
+            self.context.push(Ctx::Other);
+        }
+        let last = u32::try_from(entries - 1).expect("fewer than 2^32 entries");
+        let table: Vec<u32> = (0..=last).collect();
+        self.code.local_get(self.labels[label]);
+        self.code.br_table(&table, last);
+        for index in 0..entries {
+            self.context.pop();
+            self.code.op(emit::END);
+            self.branch(x, index)?;
         }
         Ok(())
     }

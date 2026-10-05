@@ -9,73 +9,97 @@
 //! of one `br_if` reach is a merge node and its code is written once.
 //!
 //! The translation is correct for a reducible graph only, which is one where every back edge goes
-//! to a block that dominates its source. C with no `goto` into a loop gives such a graph. A graph
-//! that is not reducible is refused here with the name of the block, and a later step of #2864
-//! splits nodes to make one reducible.
+//! to a block that dominates its source. C with no `goto` into a loop gives such a graph. For a
+//! graph that is not reducible, [`crate::irreducible`] puts a dispatch node in front of each loop
+//! with more than one entry, and the facts are about the graph with those nodes in it.
 
-use rucc_base::hash::Map;
-use rucc_ir::{Block, Func};
+use rucc_ir::Func;
 
-/// The facts about the reachable blocks of one function, by position in reverse postorder.
+use crate::irreducible::{Edge, Graph, Node};
+
+/// The facts about the reachable nodes of one function, by position in reverse postorder.
 pub(crate) struct Shape {
-    /// The blocks in reverse postorder. The entry is first.
-    pub(crate) order: Vec<Block>,
-    /// The position of each reachable block in [`Shape::order`].
-    pub(crate) position: Map<Block, usize>,
-    /// The blocks that each block immediately dominates, in reverse postorder.
+    /// The nodes in reverse postorder. The start is first.
+    pub(crate) order: Vec<Node>,
+    /// The edges of each node, with [`Edge::to`] as a position. The edges of a block are in the
+    /// order of the targets of its terminator.
+    pub(crate) edges: Vec<Vec<Edge>>,
+    /// How many dispatch nodes there are, each of which has a label local.
+    pub(crate) dispatches: usize,
+    /// The nodes that each node immediately dominates, in reverse postorder.
     pub(crate) children: Vec<Vec<usize>>,
     pub(crate) loop_header: Vec<bool>,
     pub(crate) merge: Vec<bool>,
 }
 
 impl Shape {
-    /// The facts about `func`, or the block where the graph stops being reducible.
-    pub(crate) fn of(func: &Func) -> Result<Shape, Block> {
+    /// The facts about `func`, with a dispatch node in front of each loop with more than one
+    /// entry when there is such a loop.
+    pub(crate) fn of(func: &Func) -> Result<Shape, String> {
         let Some(entry) = func.entry() else {
             return Ok(Shape {
                 order: Vec::new(),
-                position: Map::default(),
+                edges: Vec::new(),
+                dispatches: 0,
                 children: Vec::new(),
                 loop_header: Vec::new(),
                 merge: Vec::new(),
             });
         };
-        let successors = |block: Block| -> Vec<Block> {
-            func.terminator(block)
-                .map(|term| func.successors(term).map(|call| call.block).collect())
-                .unwrap_or_default()
-        };
+        let mut graph = Graph::of(func, entry);
+        if let Some(shape) = Shape::reducible(&graph) {
+            return Ok(shape);
+        }
+        graph.untangle();
+        Shape::reducible(&graph).ok_or_else(|| {
+            "the graph of its blocks is not reducible after the dispatch nodes were added".into()
+        })
+    }
 
+    /// The facts about `graph`, or nothing when it is not reducible.
+    fn reducible(graph: &Graph) -> Option<Shape> {
         // A depth first walk with an explicit stack, so that a function with a long chain of
         // blocks does not use up the stack of the compiler.
         let mut post = Vec::new();
-        let mut seen: Map<Block, ()> = Map::default();
-        let mut stack = vec![(entry, successors(entry), 0usize)];
-        seen.insert(entry, ());
-        while let Some((block, succ, next)) = stack.last_mut() {
-            if let Some(&to) = succ.get(*next) {
-                *next += 1;
-                if seen.insert(to, ()).is_none() {
-                    let more = successors(to);
-                    stack.push((to, more, 0));
+        let mut seen = vec![false; graph.nodes.len()];
+        let mut stack = vec![(graph.start, 0usize)];
+        seen[graph.start] = true;
+        while let Some(&(node, next)) = stack.last() {
+            if let Some(edge) = graph.edges[node].get(next) {
+                stack.last_mut().expect("the node is on the stack").1 += 1;
+                if !seen[edge.to] {
+                    seen[edge.to] = true;
+                    stack.push((edge.to, 0));
                 }
             } else {
-                post.push(*block);
+                post.push(node);
                 stack.pop();
             }
         }
-        let order: Vec<Block> = post.into_iter().rev().collect();
-        let position: Map<Block, usize> = order.iter().enumerate().map(|(i, &b)| (b, i)).collect();
-        let n = order.len();
+        let numbers: Vec<usize> = post.into_iter().rev().collect();
+        let mut position = vec![usize::MAX; graph.nodes.len()];
+        for (at, &number) in numbers.iter().enumerate() {
+            position[number] = at;
+        }
+        let n = numbers.len();
+        let order: Vec<Node> = numbers.iter().map(|&number| graph.nodes[number]).collect();
+        let node_edges: Vec<Vec<Edge>> = numbers
+            .iter()
+            .map(|&number| {
+                graph.edges[number]
+                    .iter()
+                    .map(|edge| Edge { to: position[edge.to], labels: edge.labels.clone() })
+                    .collect()
+            })
+            .collect();
 
         // Every edge, once for each time a terminator names it.
         let mut preds = vec![Vec::new(); n];
         let mut edges = Vec::new();
-        for (from, &block) in order.iter().enumerate() {
-            for to in successors(block) {
-                let to = position[&to];
-                preds[to].push(from);
-                edges.push((from, to));
+        for (from, out) in node_edges.iter().enumerate() {
+            for edge in out {
+                preds[edge.to].push(from);
+                edges.push((from, edge.to));
             }
         }
 
@@ -111,7 +135,7 @@ impl Shape {
         for &(from, to) in &edges {
             if to <= from {
                 if !dominates(&idom, to, from) {
-                    return Err(order[to]);
+                    return None;
                 }
                 loop_header[to] = true;
             } else {
@@ -119,7 +143,14 @@ impl Shape {
             }
         }
         let merge = forward.iter().map(|&count| count >= 2).collect();
-        Ok(Shape { order, position, children, loop_header, merge })
+        Some(Shape {
+            order,
+            edges: node_edges,
+            dispatches: graph.dispatches,
+            children,
+            loop_header,
+            merge,
+        })
     }
 
     /// Whether the edge from `from` to `to` goes back to a loop header.
