@@ -6,7 +6,7 @@
 //!
 //! # What this is and what `libraries` is
 //!
-//! [`crate::libraries`] builds six projects at Tier D and runs a workload this repository wrote.
+//! [`crate::libraries`] builds seven projects at Tier D and runs a workload this repository wrote.
 //! That proves the library survives instrumentation and that the monitor is quiet on code doing
 //! nothing wrong, which is the precision axis. It does not go looking for anything, because a
 //! workload somebody writes exercises what they thought to write down.
@@ -19,9 +19,10 @@
 //!
 //! # The harnesses are ours and the inputs are theirs
 //!
-//! A fuzz target is one function, `LLVMFuzzerTestOneInput`, and of the six projects only zstd ships
-//! its targets in the tarball the libraries table already points at. libwebp's are C++, which this
-//! compiler does not compile, and the rest live in a git tree or in the OSS-Fuzz repository. So the
+//! A fuzz target is one function, `LLVMFuzzerTestOneInput`, and of the projects replayed here only
+//! zstd and libjpeg-turbo ship their targets in the tarball the libraries table already points at.
+//! libjpeg-turbo's is C++ in name only, and the rest live in a git tree or in the OSS-Fuzz
+//! repository. So the
 //! harnesses under `tests/replay` are written here, and each row names the target it stands in for
 //! so that the two can be read side by side. Twenty lines is not what is being borrowed. The corpus
 //! is.
@@ -41,6 +42,22 @@
 //! the shared helpers those two call. A row names one harness, and changing that so one row can
 //! name three would put a list of one in every other row to buy nothing. So zstd's is written out
 //! like the rest, and the transliteration rule applies to it the same way.
+//!
+//! # libjpeg-turbo rather than libwebp
+//!
+//! The libraries table has libwebp and the replay does not, and the reason is the corpus rather than
+//! the harness. A ClusterFuzz backup bucket answers 403 both for a zip nobody may read and for a zip
+//! that is not there, so a wrong target name and a private corpus look the same from outside. libwebp
+//! moved its targets to FuzzTest, whose targets OSS-Fuzz names `binary@Suite.Test`, and every name
+//! that scheme and the older one give answered 403, while a known good zip in another project's
+//! bucket answered 206 to the same probe. With no way to tell those apart there
+//! is no corpus to pin.
+//!
+//! libjpeg-turbo sits in the same row of document 12's tier 1 table as libwebp, for the same reason,
+//! which is that image decoders are where memory bugs have always been. Its decoder target's corpus
+//! is public, the target is C, and the tarball carries it, so it takes libwebp's place here and the
+//! libraries table gained it as a seventh row to have somewhere to build it from. If libwebp's
+//! corpus becomes readable, the row it needs is the same few lines as every other.
 //!
 //! # The corpora are not in the tree
 //!
@@ -165,6 +182,14 @@ const TARGETS: &[Target] = &[
         corpus: "https://storage.googleapis.com/zstd-backup.clusterfuzz-external.appspot.com/corpus/libFuzzer/zstd_simple_decompress/public.zip",
         pinned: ("2026-09-21", 17310),
     },
+    Target {
+        project: "libjpeg-turbo",
+        harness: "libjpeg-turbo",
+        variable: "RUCC_LIBJPEG_TURBO_CORPUS",
+        upstream: "libjpeg_turbo_fuzzer",
+        corpus: "https://storage.googleapis.com/libjpeg-turbo-backup.clusterfuzz-external.appspot.com/corpus/libFuzzer/libjpeg-turbo_libjpeg_turbo_fuzzer/public.zip",
+        pinned: ("2026-10-05", 7899),
+    },
 ];
 
 /// What the driver prints before it hands an input over.
@@ -274,6 +299,7 @@ fn build(target: &Target, project: &Project, source: &Path) -> Result<PathBuf> {
     std::fs::create_dir_all(&work)
         .map_err(|e| Error::Io(format!("could not make {}: {e}", work.display())))?;
 
+    let configured = libraries::configure(project, source, &work)?;
     let rucc = cost::compiler()?;
     let archive = crate::staticlib("rucc-safe-rt", TRIPLE)?;
     std::fs::copy(&archive, work.join("safe-rt.a"))
@@ -293,6 +319,7 @@ fn build(target: &Target, project: &Project, source: &Path) -> Result<PathBuf> {
             ])
             .arg("-I")
             .arg(source)
+            .args(configured.iter().flat_map(|dir| [PathBuf::from("-I"), dir.clone()]))
             .args(
                 project
                     .includes
