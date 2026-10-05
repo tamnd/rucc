@@ -209,6 +209,9 @@ impl<'a> Printer<'a> {
         if node.flags.contains(DeclFlags::CF_CHECK) {
             head.push_str(" cf_check");
         }
+        if node.flags.contains(DeclFlags::FORCE_ALIGN) {
+            head.push_str(" force_align_arg_pointer");
+        }
         if node.flags.contains(DeclFlags::NO_STACK_PROTECTOR) {
             head.push_str(" no_stack_protector");
         }

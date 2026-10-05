@@ -897,6 +897,16 @@ tests = ["rucc::a_version_is_a_second_name_written_back_as_the_symver_gcc_writes
 notes = "`symver` with a string `name@node` on a function or a variable is a second name spelled with the version, at the same address and bound the same way, written as `.symver f, name@node` the way gcc writes it and put in the object's symbol table the way gas puts it. It is the same name a `.symver` in an `asm` makes. One declaration can ask for more than one, and an `alias` can ask for one, which is how a library keeps an old version beside the new. Only the first argument of one attribute counts, as in gcc. gcc's errors are given in its words, as `E0828` to `E0830`: the wrong number of arguments, an argument that is not a string or has no `@` or more than two, a version asked for twice, and a symbol that is not defined here, is common, is not public or does not have default visibility. A string that gas would refuse, such as one whose name starts with a digit, is refused at the attribute, where gcc leaves it to gas. On a member or a typedef it is ignored with gcc's warning, and so is an object in a frame. On a parameter it is ignored without one. Only ELF has symbol versions, so another object format refuses it, as gcc does. When the same version is asked for by a function and an object, the error is on the earlier declaration, where gcc puts it on the object."
 
 [[feature]]
+name = "force_align_arg_pointer"
+kind = "attribute"
+gcc_version = "4.2"
+status = "implemented"
+targets = ["x86-64", "x86"]
+used_by = ["ffmpeg", "wine"]
+tests = ["rucc::a_forced_frame_is_realigned_when_it_calls_or_keeps_something_wide", "rucc::another_target_does_not_realign", "rucc::force_align_arg_pointer_is_checked_in_gcc_s_words", "rucc-codegen::a_forced_frame_realigns_for_a_call_and_for_a_wide_slot"]
+notes = "The function counts on no more than a word of alignment when it is called, so its prologue aligns the stack pointer with `and` behind a frame pointer whenever it calls anything, which owes the callee the call alignment, or keeps something that wants more than a word, and a leaf that keeps nothing wide is left alone, as in gcc. It is how a library called from code that did not keep the stack aligned can still use the instructions that want sixteen bytes. It is a declaration's attribute here, merged across declarations as `noinline` is, where gcc puts it on the function type, so a definition through a typedef that says it is not realigned. A frame with a variable length array is not realigned either, where gcc reaches its arguments through a second register and does realign it. A naked function is left alone. On a variable, a member or a typedef whose type is neither a function nor a pointer to one it is ignored with gcc's warning, and an argument is refused with `E0831`."
+
+[[feature]]
 name = "fentry_name"
 kind = "attribute"
 gcc_version = "9.0"

@@ -290,6 +290,17 @@ pub struct Layout<'a> {
     /// save would itself be a vector instruction in code built to have none. gcc saves none either,
     /// which is what an `ms_abi` function in the kernel's EFI stub shows.
     pub vectors: bool,
+    /// Whether the function counts on nothing more than a word's alignment at entry, which
+    /// `__attribute__((force_align_arg_pointer))` asks for on x86 so that code called from
+    /// somewhere that did not keep the stack aligned, an old i386 binary or a hand written stub,
+    /// can still use the instructions that want sixteen bytes.
+    ///
+    /// Such a frame is realigned whenever something in it wants more than a word and whenever the
+    /// function calls anything, since the call owes its callee the alignment this function was not
+    /// given, which is what gcc does. A leaf that wants no more than a word is left as it is. A
+    /// frame that grows keeps counting on the call alignment, as one on i686 Windows does, where gcc
+    /// reaches its arguments through a second register and realigns it all the same.
+    pub forced: bool,
 }
 
 impl<'a> Layout<'a> {
@@ -319,6 +330,7 @@ impl<'a> Layout<'a> {
             returned: &[],
             interrupt: None,
             vectors: true,
+            forced: false,
         }
     }
 }
@@ -486,9 +498,14 @@ impl Frame {
         // grows is left to the first rule alone: it was asked to be on the call alignment so that an
         // array it hands out is, and forcing that as well would want a second base register. So it
         // keeps what it did before, which is to count on the call alignment.
-        let trusted = conv.trusted_align.min(conv.stack_align);
+        //
+        // A function that trusts its caller with no more than a word is the same rule with the
+        // word in place of what the convention trusts, and a call in it is one more thing that
+        // wants the call alignment. See [`Layout::forced`].
+        let trusted = if layout.forced { word } else { conv.trusted_align.min(conv.stack_align) };
+        let needed = if layout.forced && !layout.leaf { align.max(conv.stack_align) } else { align };
         let realign =
-            (align > conv.stack_align || (!layout.grows && align > trusted)).then_some(align);
+            (needed > conv.stack_align || (!layout.grows && needed > trusted)).then_some(needed);
         // Refused by [`crate::pipeline`] before anything gets here, because the two of them together
         // want one register twice. See `Growing` above.
         assert!(
@@ -994,6 +1011,7 @@ pub fn keeps_frame_pointer(layout: &Layout<'_>) -> bool {
         || layout.grows
         || (!layout.leaf && conv.link.is_some())
         || most > conv.trusted_align.min(conv.stack_align)
+        || (layout.forced && (most > conv.word || !layout.leaf))
 }
 
 /// How many bytes each of an allocation's spill slots takes on the stack.
