@@ -18,7 +18,7 @@ use crate::emit::{self, Code};
 use crate::irreducible::Node;
 use crate::rules;
 use crate::structure::Shape;
-use crate::{Notes, Unit, functype, is_pair, label_numbers, valtype};
+use crate::{Notes, Unit, functype, is_pair, valtype};
 
 mod builtin;
 mod pair;
@@ -147,6 +147,7 @@ pub(crate) fn function(unit: &mut Unit<'_>, id: FuncId, symbol: u32) -> Result<F
     let unit_notes = unit.notes.is_some();
     let ty = functype(func.signature())?;
     let params = u32::try_from(ty.params.len()).expect("fewer than 2^32 parameters");
+    let numbers = unit.numbers.remove(&id).unwrap_or_default();
     let mut lower = Lower {
         unit,
         func,
@@ -158,7 +159,7 @@ pub(crate) fn function(unit: &mut Unit<'_>, id: FuncId, symbol: u32) -> Result<F
         frame: Frame::default(),
         context: Vec::new(),
         labels: Vec::new(),
-        numbers: label_numbers(func),
+        numbers,
         va: func.signature().variadic.then(|| params - 1),
         returns: !ty.results.is_empty(),
         sret: func.signature().returns.iter().any(|ret| is_pair(ret.ty)),
@@ -717,7 +718,7 @@ impl Lower<'_, '_> {
     }
 
     /// A computed `goto`, as one `block` for each distinct target around a `br_table` on the
-    /// number of the label, which is the address that [`label_numbers`] gives the label. The
+    /// number of the label, which is the address that [`crate::label_numbers`] gives the label. The
     /// numbers are dense, so the table is short. An address that is not one of the targets is a
     /// jump that the program said it does not make, and it goes to an `unreachable`, which section
     /// 7.5 of the WebAssembly notes asks for.

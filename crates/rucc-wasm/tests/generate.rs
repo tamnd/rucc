@@ -940,3 +940,67 @@ fn a_byte_swap_of_32_bits_reverses_the_four_bytes() {
         }
     }
 }
+
+/// Two functions that each keep the address of a label, as gcc's torture test `990208-1.c` does
+/// with two copies of an inline function. On the native rows the two addresses are different, so
+/// `main` exits with 1.
+///
+/// ```c
+/// static void *p, *q;
+/// __attribute__((noinline)) void f(void) { here: p = &&here; }
+/// __attribute__((noinline)) void g(void) { there: q = &&there; }
+/// int main(void) { f(); g(); return p != q; }
+/// ```
+const TWO_LABELS: &str = r#"; ModuleID = 't.c'
+; format 0
+target triple = "wasm32-unknown-wasip1"
+target datalayout = "e-p:32:32-i64:64-S128"
+
+global @q : bytes 4 = { zero 4 }, align 4, linkage(internal), droppable
+global @p : bytes 4 = { zero 4 }, align 4, linkage(internal), droppable
+
+func @f(), linkage(external), attrs(noinline) {
+block0:
+    jump block1
+
+block1:
+    %0 = global_addr @p
+    %1 = block_addr block1
+    store %1 -> %0, align 4
+    return
+}
+
+func @g(), linkage(external), attrs(noinline) {
+block0:
+    jump block1
+
+block1:
+    %0 = global_addr @q
+    %1 = block_addr block1
+    store %1 -> %0, align 4
+    return
+}
+
+func @main() -> i32, linkage(external) {
+block0:
+    call @f() : ()
+    call @g() : ()
+    %0 = global_addr @p
+    %1 = load %0, align 4
+    %2 = global_addr @q
+    %3 = load %2, align 4
+    %4 = icmp ne %1, %3
+    %5 = zext.i32 %4
+    return %5
+}
+"#;
+
+#[test]
+fn the_labels_of_two_functions_have_two_addresses() {
+    let text = assembly(TWO_LABELS);
+    assert!(text.contains("i32.const\t1\n"), "{text}");
+    assert!(text.contains("i32.const\t2\n"), "{text}");
+    if let Some(status) = link_and_run("labels", TWO_LABELS) {
+        assert_eq!(status, 1);
+    }
+}
