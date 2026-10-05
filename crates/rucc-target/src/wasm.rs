@@ -14,7 +14,8 @@
 //!
 //! The sets and the implications below are clang 23's, measured with `-dM` from wasi-sdk 34.
 //! A feature that needs another one turns the other one on too: `bulk-memory` turns on
-//! `bulk-memory-opt`, and `relaxed-simd` turns on `simd128`.
+//! `bulk-memory-opt`, and `relaxed-simd` turns on `simd128`. [`resolve`] has the rule for the
+//! flags, which is not as simple.
 
 use std::fmt;
 
@@ -182,6 +183,19 @@ impl Features {
         feature.needs().iter().fold(set, |set, &f| set.with(f))
     }
 
+    /// The set with what `bulk-memory`, `gc` and `reference-types` turn on, which clang 23 adds
+    /// after every flag.
+    #[must_use]
+    pub fn closed(self) -> Features {
+        let mut set = self;
+        for f in [Feature::BulkMemory, Feature::Gc, Feature::ReferenceTypes] {
+            if set.has(f) {
+                set = set.with(f);
+            }
+        }
+        set
+    }
+
     /// The features in either set.
     #[must_use]
     pub const fn union(self, other: Features) -> Features {
@@ -197,6 +211,57 @@ impl Features {
     pub fn macros(self) -> impl Iterator<Item = String> {
         self.iter().filter_map(Feature::macro_name)
     }
+}
+
+/// The features of a unit, from the set that `-mcpu=` names and the `-m<feature>` and
+/// `-mno-<feature>` flags in the order of the command line.
+///
+/// This is clang 23's rule, which is not a plain closure. The set and the flags first fill one
+/// value for each feature, and the last flag for a feature wins. `simd128` and `relaxed-simd` are
+/// one level there, so `-mno-simd128` turns off `relaxed-simd` too and `-mrelaxed-simd` turns on
+/// `simd128` too. Then every feature that is on is applied before every feature that is off.
+/// `fp16` raises the level to `simd128` when nothing turned `simd128` off. Last, `bulk-memory`
+/// turns on `bulk-memory-opt` and `gc` turns on `reference-types`, whatever a flag said about
+/// them. So `-mno-bulk-memory-opt` does nothing while `bulk-memory` is on, as in clang.
+#[must_use]
+pub fn resolve(cpu: Cpu, flags: &[(Feature, bool)]) -> Features {
+    let mut said: [Option<bool>; 20] = [None; 20];
+    for f in cpu.features().iter() {
+        said[f as usize] = Some(true);
+    }
+    for &(f, on) in flags {
+        said[f as usize] = Some(on);
+        match (f, on) {
+            (Feature::Simd128, false) => said[Feature::RelaxedSimd as usize] = Some(false),
+            (Feature::RelaxedSimd, true) => said[Feature::Simd128 as usize] = Some(true),
+            _ => {}
+        }
+    }
+    let mut set = Features::NONE;
+    let mut level = 0;
+    for f in Feature::ALL.into_iter().filter(|&f| said[f as usize] == Some(true)) {
+        level = level.max(match f {
+            Feature::Simd128 | Feature::Fp16 => 1,
+            Feature::RelaxedSimd => 2,
+            _ => 0,
+        });
+        set.0 |= f.bit();
+    }
+    for f in Feature::ALL.into_iter().filter(|&f| said[f as usize] == Some(false)) {
+        level = level.min(match f {
+            Feature::Simd128 => 0,
+            Feature::RelaxedSimd => 1,
+            _ => level,
+        });
+    }
+    set.0 &= !(Feature::Simd128.bit() | Feature::RelaxedSimd.bit());
+    if level >= 1 {
+        set.0 |= Feature::Simd128.bit();
+    }
+    if level >= 2 {
+        set.0 |= Feature::RelaxedSimd.bit();
+    }
+    set.closed()
 }
 
 /// The features a WASI preview turns on whatever the set is.
@@ -362,6 +427,47 @@ mod tests {
         );
         assert_eq!(required(Preview::P1), Features::NONE);
         assert_eq!(required(Preview::P2), Features::NONE);
+    }
+
+    #[test]
+    fn the_flags_change_the_set_as_they_change_it_in_clang_23() {
+        // `clang --target=wasm32-wasip1 -mcpu=<set> <flags> -E -dM`, from wasi-sdk 34.
+        use Feature::*;
+        let names = |cpu, flags: &[(Feature, bool)]| -> Vec<String> {
+            macros(resolve(cpu, flags)).iter().map(|m| m[7..m.len() - 2].to_owned()).collect()
+        };
+        assert_eq!(resolve(Cpu::Lime1, &[]), Cpu::Lime1.features());
+        assert_eq!(names(Cpu::Mvp, &[(Fp16, true)]), ["fp16", "simd128"]);
+        assert_eq!(names(Cpu::Mvp, &[(Fp16, true), (Simd128, false)]), ["fp16"]);
+        assert_eq!(names(Cpu::Mvp, &[(Simd128, false), (Fp16, true)]), ["fp16"]);
+        assert!(names(Cpu::Mvp, &[(RelaxedSimd, true), (Simd128, false)]).is_empty());
+        assert_eq!(
+            names(Cpu::Mvp, &[(Simd128, false), (RelaxedSimd, true)]),
+            ["relaxed_simd", "simd128"]
+        );
+        assert_eq!(names(Cpu::Mvp, &[(Simd128, true), (RelaxedSimd, false)]), ["simd128"]);
+        assert_eq!(
+            names(Cpu::Mvp, &[(Gc, true), (ReferenceTypes, false)]),
+            ["gc", "reference_types"]
+        );
+        assert_eq!(
+            names(Cpu::Mvp, &[(BulkMemory, true), (BulkMemoryOpt, false)]),
+            ["bulk_memory", "bulk_memory_opt"]
+        );
+        assert!(!resolve(Cpu::Lime1, &[(BulkMemoryOpt, false)]).has(BulkMemoryOpt));
+        assert!(!resolve(Cpu::Lime1, &[(SignExt, false)]).has(SignExt));
+        assert!(resolve(Cpu::Lime1, &[(Simd128, true)]).has(Simd128));
+
+        let edge = |flags: &[(Feature, bool)]| resolve(Cpu::BleedingEdge, flags);
+        let without_simd = edge(&[(Simd128, false)]);
+        assert!(!without_simd.has(Simd128) && !without_simd.has(RelaxedSimd));
+        assert!(without_simd.has(Fp16));
+        assert!(!edge(&[(RelaxedSimd, false)]).has(RelaxedSimd));
+        assert!(edge(&[(RelaxedSimd, false)]).has(Simd128));
+        assert!(edge(&[(ReferenceTypes, false)]).has(ReferenceTypes));
+        assert!(edge(&[(BulkMemoryOpt, false)]).has(BulkMemoryOpt));
+        assert!(!edge(&[(BulkMemory, false)]).has(BulkMemory));
+        assert!(!edge(&[(Fp16, false), (Simd128, false)]).has(Fp16));
     }
 
     #[test]

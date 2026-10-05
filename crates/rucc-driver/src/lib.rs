@@ -275,6 +275,7 @@ options:
   -Wl,<arg> -Xlinker <arg> -fuse-ld=<name>, -Wa,<arg> -Xassembler <arg>   the linker, the assembler
   -Werror -pedantic -pedantic-errors -w -W[no-]system-headers   how much to say, and how fatal
   -m64 -march= -mtune= -mcpu= -mabi= -mcmodel=   what machine to generate for
+  -m[no-]<feature> -mexec-model=<model>   a wasm feature, and command or reactor on wasm
   -pg -p, -mfentry -mno-fentry   call a profiler on the way in, and where that call goes
   -fpatchable-function-entry=<n>[,<m>]   room at the top of every function to patch later
   -fwrapv, -fwrapv-pointer, -fno-strict-overflow, -ftrapv   overflow wraps, or stops the program
@@ -565,6 +566,16 @@ fn preprocessor_args(args: &[String]) -> Vec<String> {
     out
 }
 
+/// The WebAssembly feature that `-m<feature>` or `-mno-<feature>` names, and whether it turns it
+/// on. Nothing for a flag that names no feature.
+fn wasm_feature(arg: &str) -> Option<(rucc_target::wasm::Feature, bool)> {
+    let name = arg.strip_prefix("-m")?;
+    match name.strip_prefix("no-") {
+        Some(name) => rucc_target::wasm::Feature::named(name).map(|f| (f, false)),
+        None => rucc_target::wasm::Feature::named(name).map(|f| (f, true)),
+    }
+}
+
 /// The extension a `-m` flag names and whether it turns it on, when it names one.
 ///
 /// `-mno-` is the off form of every one of them, which is also how gcc spells it. A flag that is
@@ -798,6 +809,13 @@ pub fn parse_args(args: &[String]) -> Result<Action, CliError> {
         .map_or(opts.target.arch, |target| target.arch);
     // Either x86, since `-m32` on an x86-64 target only changes the machine once the loop is done.
     let x86 = matches!(arch, rucc_target::Arch::X86_64 | rucc_target::Arch::X86);
+    // The WebAssembly features. `-mcpu=` names a set, and `-m<feature>` and `-mno-<feature>` change
+    // one feature. They are weighed after the loop, where the set comes first and the flags come
+    // after it in the order written, whatever the order of `-mcpu=` and the flags. That is clang's
+    // rule, and `rucc_target::wasm::resolve` has the rest of it.
+    let wasm_row = arch == rucc_target::Arch::Wasm32;
+    let mut wasm_cpu = rucc_target::wasm::Cpu::default();
+    let mut wasm_flags: Vec<(rucc_target::wasm::Feature, bool, &str)> = Vec::new();
     // `-fmin-function-alignment=`, which is weighed after the loop against what
     // `-falign-functions` said, in whichever order the two came.
     let mut min_function_align: Option<u32> = None;
@@ -2578,6 +2596,46 @@ pub fn parse_args(args: &[String]) -> Result<Action, CliError> {
             // weighed after the loop, because `--target=` may come after it and the last one of
             // each is the one that counts.
             "-m64" | "-m32" | "-m16" | "-mx32" => word = Some(arg),
+            // The WebAssembly set and features, which only a wasm row has. clang refuses an unknown
+            // set with these words, and lists the names after them.
+            _ if wasm_row && arg.starts_with("-mcpu=") => {
+                let name = &arg["-mcpu=".len()..];
+                wasm_cpu = rucc_target::wasm::Cpu::named(name).ok_or_else(|| {
+                    err(format!(
+                        "unknown target CPU '{name}', the names for wasm32 are mvp, generic, \
+                         lime1 and bleeding-edge"
+                    ))
+                })?;
+            }
+            _ if wasm_row && wasm_feature(arg).is_some() => {
+                let Some((feature, on)) = wasm_feature(arg) else { continue };
+                wasm_flags.push((feature, on, arg));
+            }
+            // wasm has no processor family, and clang refuses `-march=` there. The message names the
+            // flag that does choose what the unit may use.
+            _ if wasm_row && arg.starts_with("-march=") => {
+                return Err(err(format!(
+                    "{arg}: wasm32 has no -march=, and -mcpu= chooses the features"
+                )));
+            }
+            // A command or a reactor, which only the link reads. clang refuses it on a line that
+            // does not link, and rucc takes it on any wasm line, because a build that gives it to
+            // every command is still clear.
+            _ if arg.starts_with("-mexec-model=") => {
+                if !wasm_row {
+                    return Err(err(format!("{arg}: the execution model is for wasm32 only")));
+                }
+                link.reactor = match &arg["-mexec-model=".len()..] {
+                    "command" => false,
+                    "reactor" => true,
+                    other => {
+                        return Err(err(format!(
+                            "invalid argument '{other}' to -mexec-model=, the models are command \
+                             and reactor"
+                        )));
+                    }
+                };
+            }
             // How many words of each function's arguments go in registers on 32 bit x86, which the
             // kernel builds every 32 bit unit with. See `rucc_target::TargetInfo::with_regparm`.
             _ if arg.starts_with("-mregparm=") => regparm = Some(arg),
@@ -2624,6 +2682,12 @@ pub fn parse_args(args: &[String]) -> Result<Action, CliError> {
                     // The C ABI of tool-conventions, which clang calls the MVP ABI.
                     rucc_target::Arch::Wasm32 => "mvp",
                 };
+                if want == "experimental-mv" && have == "mvp" {
+                    return Err(err(format!(
+                        "{arg}: the multivalue C ABI is not supported, and wasm32 uses the C ABI \
+                         of tool-conventions, which clang calls mvp"
+                    )));
+                }
                 if want != have {
                     return Err(err(format!(
                         "{arg}: {} uses the {have} convention and this compiler has no other",
@@ -2807,6 +2871,37 @@ pub fn parse_args(args: &[String]) -> Result<Action, CliError> {
             err(format!("{arg}: the boundary is a power of two between {least} and 12"))
         })?;
         opts.stack_boundary = Some(1 << power);
+    }
+
+    // The WebAssembly features, settled now that the target is. `-matomics` is refused, because
+    // no wasm row has shared memory (decision D10 of the WebAssembly plan, #2863), and `-pthread`
+    // is a warning for the same reason. wasm32-wasip3 has cooperative threads, and clang builds for
+    // it as if `-pthread` was given, so it refuses a flag that turns off what those threads need,
+    // and so does this.
+    if opts.target.arch == rucc_target::Arch::Wasm32 {
+        use rucc_target::wasm::{self, Feature};
+        use rucc_target::{Os, Preview};
+        let wasip3 = opts.target.os == Os::Wasi(Preview::P3);
+        // The short name, `wasm32-wasip1`, for the messages.
+        let row = opts.target.tuple();
+        let last = |feature: Feature| wasm_flags.iter().rev().find(|(f, _, _)| *f == feature);
+        if let Some((_, true, arg)) = last(Feature::Atomics) {
+            return Err(err(format!(
+                "{arg}: {row} has no shared memory, and rucc has no wasm row that has it"
+            )));
+        }
+        if wasip3 {
+            for feature in [Feature::BulkMemory, Feature::MutableGlobals, Feature::SignExt] {
+                if let Some((_, false, arg)) = last(feature) {
+                    return Err(err(format!("{arg}: {row} needs {feature} for its threads")));
+                }
+            }
+        }
+        let flags: Vec<(Feature, bool)> = wasm_flags.iter().map(|&(f, on, _)| (f, on)).collect();
+        opts.wasm = wasm::resolve(wasm_cpu, &flags);
+        if threads && !wasip3 {
+            notes.push(format!("-pthread has no effect on {row}: the row has one thread"));
+        }
     }
 
     // The registers against the machine, settled now that the machine is. gcc takes 0 to 3 on 32
@@ -8079,6 +8174,72 @@ mod tests {
         // reaches it and not afterwards.
         let names: Vec<&str> = plan.jobs.iter().map(|j| j.input.as_str()).collect();
         assert_eq!(names, vec!["a.c"]);
+    }
+
+    #[test]
+    fn the_wasm_set_and_features_come_from_mcpu_and_the_feature_flags() {
+        use rucc_target::wasm::{Cpu, Feature};
+        let wasm = |flags: &[&str]| {
+            let line: Vec<&str> = ["--target=wasm32-wasip1"]
+                .iter()
+                .chain(flags)
+                .chain(&["-c", "a.c"])
+                .copied()
+                .collect();
+            compile(&line).0.wasm
+        };
+        assert_eq!(wasm(&[]), Cpu::Lime1.features());
+        assert_eq!(wasm(&["-mcpu=generic"]), Cpu::Generic.features());
+        assert_eq!(wasm(&["-mcpu=generic", "-mcpu=mvp"]), Cpu::Mvp.features());
+        // The set comes first and the flags after it, whatever the order on the line.
+        assert!(wasm(&["-msimd128", "-mcpu=mvp"]).has(Feature::Simd128));
+        assert!(!wasm(&["-mno-sign-ext"]).has(Feature::SignExt));
+        assert!(!wasm(&["-mcpu=bleeding-edge", "-mno-simd128"]).has(Feature::RelaxedSimd));
+        // The target written after the flags still decides that they are wasm flags.
+        let (opts, _) =
+            compile(&["-mcpu=mvp", "-mtail-call", "--target=wasm32-wasip2", "-c", "a.c"]);
+        assert_eq!(opts.wasm, rucc_target::wasm::Features::of(&[Feature::TailCall]));
+        // `-mtune=` is taken and changes nothing, and `-mabi=mvp` is the convention wasm32 has.
+        assert_eq!(wasm(&["-mtune=x", "-mabi=mvp"]), Cpu::Lime1.features());
+
+        let wasip1 = |flag| refused(&["--target=wasm32-wasip1", flag, "-c", "a.c"]);
+        assert!(wasip1("-mcpu=lime2").contains("unknown target CPU 'lime2'"));
+        assert!(wasip1("-march=lime1").contains("-mcpu="));
+        assert!(wasip1("-matomics").contains("wasm32-wasip1 has no shared memory"));
+        assert!(wasip1("-mabi=experimental-mv").contains("multivalue C ABI is not supported"));
+        assert!(wasip1("-msimd").contains("unknown option `-msimd`"));
+        // The names are wasm's and no other target's.
+        assert!(refused(&["-msimd128", "-c", "a.c"]).contains("unknown option `-msimd128`"));
+    }
+
+    #[test]
+    fn a_wasm_row_takes_the_thread_flag_and_says_that_it_has_one_thread() {
+        let line = ["--target=wasm32-wasip1", "-pthread", "-c", "a.c"];
+        let (opts, _) = compile(&line);
+        assert!(opts.defines.iter().any(|d| d == "_REENTRANT"));
+        assert!(!opts.wasm.has(rucc_target::wasm::Feature::Atomics));
+        assert_eq!(
+            notes(&line),
+            ["-pthread has no effect on wasm32-wasip1: the row has one thread"]
+        );
+        // wasip3 has its threads already, and refuses a flag that takes away what they need.
+        assert!(notes(&["--target=wasm32-wasip3", "-pthread", "-c", "a.c"]).is_empty());
+        let why = refused(&["--target=wasm32-wasip3", "-mno-bulk-memory", "-c", "a.c"]);
+        assert!(why.contains("wasm32-wasip3 needs bulk-memory for its threads"), "{why}");
+        // `bulk-memory` turns `bulk-memory-opt` back on, so clang takes this one and so does rucc.
+        compile(&["--target=wasm32-wasip3", "-mno-bulk-memory-opt", "-c", "a.c"]);
+    }
+
+    #[test]
+    fn the_execution_model_is_a_link_option_of_the_wasm_rows() {
+        let (link, _) = linking(&["--target=wasm32-wasip1", "-mexec-model=reactor", "a.c"]);
+        assert!(link.reactor);
+        let (link, _) = linking(&["--target=wasm32-wasip1", "-mexec-model=command", "a.c"]);
+        assert!(!link.reactor);
+        let why = refused(&["--target=wasm32-wasip1", "-mexec-model=library", "a.c"]);
+        assert!(why.contains("invalid argument 'library' to -mexec-model="), "{why}");
+        let why = refused(&["--target=x86_64-linux-gnu", "-mexec-model=reactor", "a.c"]);
+        assert!(why.contains("for wasm32 only"), "{why}");
     }
 
     #[test]

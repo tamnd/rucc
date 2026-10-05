@@ -121,6 +121,9 @@ pub struct LinkOptions {
     /// On Windows it is the tree the `gcc.exe` on the path is in, which is MSYS2's `/ucrt64` and
     /// has gcc's files under `lib/gcc` the way `/usr` does. See [`usr`].
     pub usr: Option<PathBuf>,
+    /// `-mexec-model=reactor` on a wasm row. A reactor has `_initialize` and no `main`, and the
+    /// host calls its exports. A command, which is the default, has `_start`, which runs `main`.
+    pub reactor: bool,
     /// `-static`.
     pub is_static: bool,
     /// `-shared`.
