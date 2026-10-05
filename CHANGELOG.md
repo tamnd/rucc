@@ -4,6 +4,10 @@ All notable changes are recorded here. The format follows [Keep a Changelog](htt
 
 ## Unreleased
 
+### Added
+
+- CI builds the SQLite shell for wasm32-wasip1 with rucc at `-O0` and `-O2` and runs a fixed workload under Wasmtime and under Node (#2865). `tests/sqlite/wasm.sh` holds each run to the output of the shell that clang from wasi-sdk 34 builds at `-O2`. The workload makes and indexes a table of 200000 rows and asks questions whose answers are arithmetic, and it uses the printf, JSON, date, window and text functions.
+
 ## 0.23.0
 
 The release for WA2, the wasm backend core (#2864). rucc compiles C to a wasm module for `wasm32-wasip1` and `wasm32-none` and links it with `wasm-ld`, wasi-libc and its own runtime. The backend selects by rules that `rucc-verify` proves against a model of the wasm instructions. It translates a computed `goto`, `-S` writes the wasm assembly of LLVM, and `--emit=wasm-tree` prints the structured code. The first work of WA3 (#2865) is in too: `setjmp` and `longjmp`, tail calls, constructors and destructors, the scalar `__builtin_wasm_*` functions, a compiler barrier, and a bit-field wider than 32 bits. A WASI link now needs lld 21 or newer. CI runs rung 0 under Wasmtime and Node and checks each object with `wasm-tools validate`, and rung 0 passes 440 of 440. A nightly job runs the execute tests of the GCC 16 torture suite under Wasmtime: 3478 pass, 104 are skipped and 58 are excluded, each with an issue.
