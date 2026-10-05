@@ -448,6 +448,7 @@ impl<'a> Checker<'a> {
         for &decl in ast.top_level() {
             self.check_decl(decl);
         }
+        self.check_resolvers();
     }
 
     /// Checks one expression and gives back the node it became.

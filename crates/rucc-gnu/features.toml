@@ -860,6 +860,15 @@ tests = ["rucc::cf_check_under_manual_endbr_is_the_only_function_with_a_landing_
 notes = "The function opens with a landing pad under `-fcf-protection=branch` and `-mmanual-endbr`, which leaves `endbr64` or `endbr32` out of every function that does not say `cf_check`, the ones whose address is taken included. The pads at labels whose address is taken stay either way, and `nocf_check` on the type wins over it. It is a declaration's attribute rather than the type's, merged across declarations as `noinline` is, so a prototype that says it covers a definition that does not and the other way round. Without `-mmanual-endbr` it changes nothing, and without `-fcf-protection` nothing is said. On a variable or a typedef it is warned about in gcc's words, and an argument is refused with `E0817`."
 
 [[feature]]
+name = "ifunc"
+kind = "attribute"
+gcc_version = "4.6"
+status = "implemented"
+used_by = ["glibc", "xz"]
+tests = ["rucc::the_name_is_an_indirect_function_set_to_its_resolver", "rucc::ifunc_is_checked_in_gcc_s_words", "rucc::a_target_without_the_symbol_type_refuses_it"]
+notes = "The function's own name is written as an indirect function, `.type f, @gnu_indirect_function` and `.set f,resolver`, global or local as the declaration is, and the dynamic linker binds a call to whatever the resolver hands back, the call through a pointer included. The resolver has to be defined in the same file, and a `static` one that nothing else calls is kept for it. One that does not return a pointer is refused and one that returns a pointer to another function type warned about under `-Wattribute-alias`, both in gcc's words, while `void *` is taken as it is. A body written for the function is a redefinition, and so is `alias` beside it on one declaration. The wrong number of arguments is refused with `E0819`, and on a variable, a typedef or a declaration in a block it is ignored with gcc's warning. Only ELF has the symbol type, so a COFF or Mach-O target refuses it."
+
+[[feature]]
 name = "warning"
 kind = "attribute"
 gcc_version = "4.3"
