@@ -4,6 +4,10 @@ All notable changes are recorded here. The format follows [Keep a Changelog](htt
 
 ## Unreleased
 
+### Changed
+
+- Open question one in `spec/19-open-questions.md`, whether the ægraph carries from a Wasm JIT to an AOT C compiler, is answered no by experiment 7, and section 12.9 of `spec/optimizer/12-egraph.md` has the measurement. Over the 3271 cases of rucc-corpus at `-O2` and `-O3` and over SQLite, the hash-consed rewriter retires 0.001% fewer instructions than the classical arm and the e-graph retires 0.0002% more than the hash-consed rewriter, where section 12.3 asks for 1% and 0.5%, and they cost 4.5% and 5.8% more compile time than the default pipeline. So the default pipeline ships unchanged, and `-Zrewriter=classical`, `consed` and `egraph` stay off by default so the experiment can be run again as the rule set grows. The report, per arm and per facet, is in rucc-corpus under `experiments/07-rewriters`. (#2832)
+
 ### Added
 
 - `rucc_object::wasm` writes a relocatable wasm object, which is the first part of the wasm backend (#2864). The `object` crate reads wasm and does not write it, so the writer is new. It takes function bodies and data segments with the fields that the linker patches marked, and it writes the import of the memory, the `linking` section version 2 with the symbol table, the segment names and the constructors, `reloc.CODE` and `reloc.DATA` with padded five byte fields, `producers` and `target_features`. A test links an object that it writes with `wasm-ld` against the wasi-sdk 34 sysroot and runs it under Wasmtime when `WASI_SDK_PATH` is set.

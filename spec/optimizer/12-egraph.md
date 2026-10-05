@@ -210,3 +210,51 @@ Arm B should cost less than arm C by the extraction pass and the union-find, whi
 measures at 0.005% compile time for the multi-value part alone. That figure suggests B and C will
 be close in compile time and the decision between them will be made on code quality and on lines
 of code, which is an unusual and rather satisfying position to be in.
+
+## 12.9 What the experiment found
+
+Experiment 7 was run in October 2026 (tamnd/rucc#2832), on the 3271 programs of rucc-corpus at `-O2`
+and `-O3` and on SQLite, with gcc 16 as the reference. The arms are behind `-Zrewriter=`: arm A is
+`classical`, which runs `simplify` to a bounded fixpoint, arm B is `consed`, and arm C is `egraph`.
+The pipeline rucc already had, `simplify` and then `number` once each where a level runs them, is
+the default and the baseline. Every arm printed the right answer for every program at both levels,
+and every arm's SQLite shell printed what gcc's did with `-Zverify-each` passing. The numbers per
+facet are in [rucc-corpus](https://github.com/tamnd/rucc-corpus/tree/main/experiments/07-rewriters).
+
+At `-O2`, against the default, over the whole corpus:
+
+| arm | text | instructions retired | compile time | optimizer time | lines added |
+|---|---|---|---|---|---|
+| default | 3,729,571 bytes | 23,498,345,427 | 177.2 s | 78.3 s | 0 |
+| A | +0.150% | +0.001% | +3.7% | +9.8% | 39 |
+| B | -0.067% | +0.000% | +4.5% | +10.1% | 269 |
+| C | -0.044% | +0.001% | +5.8% | +13.0% | 555 |
+| C, classes kept into selection | -0.045% | +0.001% | +6.7% | +16.8% | 650 |
+
+`-O3` gives the same text and the same instructions to within 0.001%. SQLite's text is 1,169,344
+bytes by default, 1,171,231 under arm A, 1,170,064 under arm B and 1,169,776 under arm C.
+
+**The decision.** Instructions retired stand in for execution time, because they barely move from
+run to run. Arm B retires 0.001% fewer than arm A, and the rule asks for 1%, so by the rule arm A
+ships and the ægraph bet is lost. Arm C retires no fewer than arm B. Arm A as built is no better
+than the default either: the second round of rewrites makes the code 0.15% larger and the compile
+3.7% slower. So what ships is the default, the conventional pipeline rucc already had, and no
+rewriter is changed by the experiment.
+
+**Why it came out this way.** The classes are small. Over the corpus the e-graph held 1.10 forms per
+class, which is close to Cranelift's 1.13, so there is little for extraction to choose between, and
+where it does choose, the costs of section 40 sometimes choose wrong. 43 of the 48 programs where
+arm C is larger than arm B are a constant held live across a loop, a sum extracted unfolded, and a
+select extracted over a cheaper compare, which is the risk spec 19 named when it asked the question,
+that a cost model over a canonical graph is a weaker instrument than a pass that knows what it just
+did. Rewriting at construction, arm B's whole idea, finds what `simplify` then `number` find, in one
+walk that costs more than the two of them. Keeping the classes into instruction selection, the arm
+arXiv 2602.16707 reports 1.18x for, found 8 programs out of 3271 where selection could use a form
+extraction had dropped.
+
+**What happens to the arms that lost.** They stay behind `-Zrewriter=` and off by default, where
+they cost nothing, and the experiment is run again and its page in rucc-corpus written again each
+time the rule set grows by a phase. The place the e-graph could still win is a rule set large enough
+that the order of rewrites matters, and document 13's rule set is not that yet. Until a rerun says
+otherwise, spec 09's pipeline is the conventional one, and the rules, their verification and the
+cost model are unchanged by the answer.
