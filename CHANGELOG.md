@@ -31,6 +31,7 @@ All notable changes are recorded here. The format follows [Keep a Changelog](htt
 ### Changed
 
 - At `-O1` and above, a value that would go to the stack only because a call destroys every register left for it now stays in one of those registers, stored in front of the call and loaded back behind it, when that costs less than the stack would (#1177). The case is a loop that reads the value in every turn and makes the call now and then, like the `strlen` call that the tuple deforming loop of PostgreSQL makes for a `cstring` column. Before, each such value was loaded from the stack at every read in the loop while the registers the call destroys sat empty.
+- On x86-64, `r10` and `r11` now hold values in a function that never needs them as scratch registers (#1994). They were held back in every function for reading a spilled value and for breaking a cycle of moves on an edge, so a function with eight or nine values live at once and no call among them pushed and popped `rbx` and `r12` to hold the last two. `AllocSetAlloc` in PostgreSQL is one. The allocator now tries with the two registers given out, and keeps the answer when no general purpose value went to the stack and no edge needs a cycle broken. Otherwise it allocates again with the two held back, as before. A function with the stack protector, a frame that grows, `naked` or a list of its own registers to save keeps the two held back.
 
 ### Fixed
 
