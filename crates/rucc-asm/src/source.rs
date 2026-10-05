@@ -446,8 +446,8 @@ struct Reader {
     named: Map<String, usize>,
     /// The section being written to.
     here: usize,
-    /// What `.pushsection` stacked up.
-    stack: Vec<usize>,
+    /// What `.pushsection` stacked up, each with what `.previous` went back to then.
+    stack: Vec<(usize, Option<usize>)>,
     /// What `.previous` goes back to.
     before: Option<usize>,
     /// The parts that are a numbered subsection of another, with the part that is the section
@@ -1630,7 +1630,7 @@ impl Reader {
             // A number after the name is a subsection, which `.section` does not take on ELF and
             // this one does.
             "pushsection" => {
-                self.stack.push(self.here);
+                self.stack.push((self.here, self.before));
                 let (was, before) = (self.here, self.before);
                 let numbered = args.get(1).filter(|arg| !arg.trim().starts_with('"'));
                 match numbered {
@@ -1652,10 +1652,13 @@ impl Reader {
                 self.came_from(was, before);
             }
             "popsection" => {
-                let Some(back) = self.stack.pop() else {
+                // gas puts `.previous` back to what it was at the push too, so a template that
+                // pushes and pops inside `.section .fixup` leaves `.previous` going back to the
+                // section before `.fixup`, and not to the one the template pushed.
+                let Some((back, before)) = self.stack.pop() else {
                     return Err(self.bad(".popsection with nothing pushed"));
                 };
-                self.go(back);
+                (self.here, self.before) = (back, before);
             }
             "previous" => {
                 let Some(back) = self.before else {
@@ -6331,6 +6334,22 @@ _tls$tlv$init:
         );
         assert_eq!(bytes(&out, ".data"), vec![1, 2]);
         assert_eq!(bytes(&out, ".rodata"), vec![9]);
+    }
+
+    /// `.previous` after a push and a pop goes where it would have gone without them. Linux 5.15's
+    /// `.Lbad_gs` in entry_64.S is an `ALTERNATIVE` inside `.section .fixup` and then `.previous`,
+    /// and going back to `.altinstr_replacement` there put `error_entry` and everything after it
+    /// in init memory, which the kernel frees once it has booted.
+    #[test]
+    fn previous_after_a_push_and_a_pop_goes_back_past_them() {
+        let out = assembled(
+            "\t.text\n\t.byte 1\n\t.section .fixup, \"ax\"\n\t.byte 2\n\
+             \t.pushsection .altinstr_replacement, \"ax\"\n\t.byte 3\n\t.popsection\n\
+             \t.byte 4\n\t.previous\n\t.byte 5\n",
+        );
+        assert_eq!(bytes(&out, ".text"), vec![1, 5]);
+        assert_eq!(bytes(&out, ".fixup"), vec![2, 4]);
+        assert_eq!(bytes(&out, ".altinstr_replacement"), vec![3]);
     }
 
     /// A subsection goes behind the section it is part of, in the order of the numbers and not the
