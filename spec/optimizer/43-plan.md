@@ -222,12 +222,11 @@ to do about it.
 
 ## 43.7 Spec 19's open questions
 
-**Q1, the ægraph.** Open. It is M4's central experiment and exit criterion 4. Documents 12 and 13
-specify both arms and document 42's experiment 7 specifies the measurement. What changed since spec 19
-was written is that document 00 records new evidence, arXiv 2602.16707's 1.18x from keeping the
-e-graph alive across abstraction levels, which means the experiment should measure a third arm: the
-e-graph persisting into lowering rather than being discarded after extraction. Document 12.3 calls
-these arms A, B and C.
+**Q1, the ægraph.** Answered no by experiment 7, in October 2026. Arms A, B and C were built over
+the same rules, and the arm that keeps the classes alive into instruction selection, after arXiv
+2602.16707, was built and measured with them. None of them retires 0.5% fewer instructions than the
+conventional pipeline rucc already had, so that pipeline ships and the arms stay behind
+`-Zrewriter=`. Section 12.9 has the numbers and what happens to the arms.
 
 **Q2, our own linker.** Untouched by M4. Settled at M11 per spec 19. Default remains no.
 

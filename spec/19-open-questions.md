@@ -6,15 +6,7 @@ The first five are ranked. The rest are deferrals, which is a different thing: a
 
 ## Q1: Does the ægraph carry from a Wasm JIT to an AOT C compiler?
 
-**Why it is first.** Document 00 names this as the project's riskiest assumption, and document 09's entire middle-end structure rests on it.
-
-Acyclic e-graphs are proven in Cranelift, which is a JIT with a compile-time budget measured in microseconds per function, a small rule set, and Wasm's already-structured, already-validated input. C at `-O2` is different in every one of those dimensions: functions after inlining are large, the rule set will be an order of magnitude bigger, and the input has aliasing, volatile, atomics and inline assembly, all of which are *outside* the e-graph by design and therefore all of which are places where the e-graph's canonical value must be reconciled with a side-effecting world.
-
-The specific risks: e-class growth on large functions making compile time superlinear, which would put axis 3 in direct conflict with axis 2; extraction quality being worse than a well-ordered conventional pipeline because a cost model over a canonical DAG is a weaker instrument than a pass that knows what it just did; and GCM interacting badly with the loop transformations that must live outside the e-graph.
-
-**How it gets settled.** M4 builds both, the ægraph rewriter and a conventional apply-once pipeline over the same verified rule set, and measures compile time and code quality on rung 1 and the LLVM test-suite. The shared rule set is what makes this affordable: the experiment costs the pass-ordering scaffolding, not a second optimizer.
-
-**If the answer is no**, the rule DSL and the verification survive unchanged, the pipeline becomes conventional, and document 09's structure changes but its content mostly does not. That is the reason to run the experiment early and the reason the rules are separated from the engine that applies them.
+**Answered no, in October 2026, by experiment 7 (tamnd/rucc#2832).** On rucc-corpus and SQLite at `-O2` and `-O3`, the hash-consed rewriter retired 0.001% fewer instructions than the classical arm and the full ægraph retired no fewer than the hash-consed rewriter, against the 1% and 0.5% that section 12.3 of the optimizer specification asks for, while costing 4.5% and 5.8% more compile time than the conventional pipeline. The conventional pipeline ships, the three arms stay behind `-Zrewriter=` to be measured again as the rule set grows, and the measurement is in [section 12.9 of the optimizer specification](optimizer/12-egraph.md#129-what-the-experiment-found).
 
 ## Q2: Do we write our own linker?
 
