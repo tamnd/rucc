@@ -17,6 +17,7 @@ pub(crate) const IF: u8 = 0x04;
 pub(crate) const ELSE: u8 = 0x05;
 pub(crate) const END: u8 = 0x0b;
 pub(crate) const RETURN: u8 = 0x0f;
+pub(crate) const TRY_TABLE: u8 = 0x1f;
 pub(crate) const DROP: u8 = 0x1a;
 pub(crate) const SELECT: u8 = 0x1b;
 
@@ -126,6 +127,15 @@ impl Code {
     pub(crate) fn open(&mut self, op: u8, result: Option<ValType>) {
         self.bytes.push(op);
         self.bytes.push(result.map_or(EMPTY, ValType::byte));
+    }
+
+    /// A `try_table` that takes nothing and gives nothing, with one `catch` clause that sends an
+    /// exception with the tag `tag` to the label at `depth`, with the values of the tag. The depth
+    /// counts from the frame around the `try_table` and not from the `try_table` itself.
+    pub(crate) fn try_table(&mut self, tag: u32, depth: u32) {
+        self.bytes.extend_from_slice(&[TRY_TABLE, EMPTY, 1, 0x00]);
+        self.reloc(RelocKind::TagIndexLeb, tag, 0);
+        self.uleb(u64::from(depth));
     }
 
     pub(crate) fn br(&mut self, depth: u32) {

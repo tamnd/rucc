@@ -80,6 +80,7 @@ enum Kind {
     Block,
     Loop,
     If,
+    TryTable,
 }
 
 /// One open construct and what the operand stack held when it opened.
@@ -427,8 +428,40 @@ impl Printer<'_> {
                     Kind::Block => "end_block",
                     Kind::Loop => "end_loop",
                     Kind::If => "end_if",
+                    Kind::TryTable => "end_try_table",
                 }
                 .into()
+            }
+            0x1f => {
+                let result = body.open(Kind::TryTable)?;
+                let mut text = match result {
+                    Some(ty) => format!("try_table\t{ty}"),
+                    None => "try_table\t".into(),
+                };
+                for _ in 0..body.u32()? {
+                    let kind = body.byte()?;
+                    let name = match kind {
+                        0x00 => "catch",
+                        0x01 => "catch_ref",
+                        0x02 => "catch_all",
+                        0x03 => "catch_all_ref",
+                        _ => return Err(format!("a catch clause of kind {kind:#04x}")),
+                    };
+                    let tag = if kind < 0x02 {
+                        let Some((RelocKind::TagIndexLeb, symbol, _)) = body.fixup()? else {
+                            return Err("a `catch` names no tag symbol".into());
+                        };
+                        format!(" {}", self.name(symbol))
+                    } else {
+                        String::new()
+                    };
+                    let label = body.u32()?;
+                    if !text.ends_with('\t') {
+                        text.push(' ');
+                    }
+                    let _ = write!(text, "({name}{tag} {label})");
+                }
+                text.trim_end().to_owned()
             }
             0x0c => {
                 let depth = body.u32()?;

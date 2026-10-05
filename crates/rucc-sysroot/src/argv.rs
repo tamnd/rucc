@@ -1410,6 +1410,7 @@ mod tests {
             lib.join("crt1-command.o").display().to_string(),
             format!("-L{}", lib.display()),
             "main.o".to_owned(),
+            lib.join("libsetjmp.a").display().to_string(),
             lib.join("libc.a").display().to_string(),
             builtins().display().to_string(),
         ];

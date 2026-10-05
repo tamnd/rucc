@@ -1146,6 +1146,7 @@ fn generate(
     // the reason the native listing is printed from the functions about to be encoded.
     if opts.target.arch.is_wasm() {
         let refused = |refusal: rucc_wasm::Refusal| vec![unsupported(&refusal.to_string())];
+        rucc_wasm::prepare(module, names).map_err(refused)?;
         if matches!(opts.emit, EmitKind::WasmTree) {
             return rucc_wasm::tree(module, names, opts.wasm).map(Artifact::Text).map_err(refused);
         }
