@@ -2293,6 +2293,9 @@ pub fn parse_args(args: &[String]) -> Result<Action, CliError> {
             // gcc's global common subexpression pass, which the kernel's BPF interpreter turns off
             // because it undoes the computed goto dispatch the interpreter is written around.
             "-fgcse" | "-fno-gcse" => {}
+            // gcc's tail duplication pass, which `builtins.exp` in the torture suite turns off for
+            // every program in that directory.
+            "-ftracer" | "-fno-tracer" => {}
             // The scheduler's own knobs, which serpent asks for with `-fsched-pressure`. Every
             // name under `-fsched-` and `-fsched2-` tunes that pass and nothing else, so the family
             // is taken whole like the two above.
@@ -5774,6 +5777,8 @@ mod tests {
             "-fno-code-hoisting",
             "-fno-gcse",
             "-fgcse",
+            "-fno-tracer",
+            "-ftracer",
             "-fsched-pressure",
             "-fno-sched-interblock",
             "-fsched-stalled-insns=2",
