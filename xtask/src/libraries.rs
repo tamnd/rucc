@@ -38,9 +38,12 @@
 //! storage by two numbers multiplied by a stride the caller chose, and it picks which version of
 //! every inner loop to run by asking the processor what it is at startup and filling in a table of
 //! function pointers, so nearly every call into its pixel code goes through a pointer that was
-//! stored once and is read from everywhere after. None of the six reaches the others' paths. The
-//! rows here are the projects and the code below is the same for all of them, which is what makes
-//! adding the next one a paragraph of data.
+//! stored once and is read from everywhere after. libjpeg-turbo cuts its planes into eight by eight
+//! blocks and keeps every buffer as an array of row pointers out of pools it frees all at once, and
+//! it builds most of its codec three times by compiling one file under three settings of a macro,
+//! so one source file is three sets of functions over three sample widths. None of the seven
+//! reaches the others' paths. The rows here are the projects and the code below is the same for all
+//! of them, which is what makes adding the next one a paragraph of data.
 //!
 //! # Why the sources are not in the tree
 //!
@@ -108,6 +111,136 @@ struct Known {
     why: &'static str,
 }
 
+/// The headers a project's own build would write, and the values it would write into them.
+///
+/// The project's templates are filled in here the way cmake's `configure_file` fills them in, which
+/// is two rules. `@NAME@` anywhere in a line becomes the value the row gives `NAME`, and a line that
+/// says `#cmakedefine NAME rest` becomes `#define NAME rest` when the row gives `NAME` a value and
+/// a commented out `#undef` when it does not. `#cmakedefine01 NAME` is the same question answered
+/// with a `1` or a `0`. That is all three of libjpeg-turbo's templates ask for. `${NAME}` is the
+/// third form cmake knows and nothing here uses it, so it is left alone rather than half supported.
+///
+/// Values in the row rather than the filled in headers in the tree, for the reason the sources are
+/// not in the tree. The templates are the project's and they change between versions, so a copy of
+/// what cmake wrote for one version is a file that quietly goes stale the first time somebody
+/// points the variable at the next one. Filling in whatever templates the tarball has keeps the
+/// project's text the project's, and what the row owns is the dozen answers cmake would have found
+/// by probing a Linux machine.
+///
+/// One rule is stricter than cmake's. A template that asks for `@NAME@` when the row has no `NAME`
+/// is an error here, where cmake writes an empty string. An empty string in a header compiles into
+/// something wrong far more often than it fails to compile, and the first anyone would hear of it
+/// is a library that answers wrongly.
+#[derive(Clone, Copy)]
+pub(crate) struct Configure {
+    /// The templates, relative to the source directory. Each is written under its own file name
+    /// with the `.in` taken off, into one directory that goes on the include path.
+    pub(crate) templates: &'static [&'static str],
+    /// What cmake would have worked out on an x86-64 Linux machine, as a name and a value. A name
+    /// missing from this list is a feature that is off.
+    pub(crate) settings: &'static [(&'static str, &'static str)],
+}
+
+/// Fills in each of a project's templates and says which directory to put on the include path.
+///
+/// None when the project has no templates, which is every row but one, so that the two builds can
+/// ask unconditionally.
+pub(crate) fn configure(project: &Project, source: &Path, work: &Path) -> Result<Option<PathBuf>> {
+    let Some(configure) = project.configure else {
+        return Ok(None);
+    };
+    let out = work.join("configured");
+    std::fs::create_dir_all(&out)
+        .map_err(|e| Error::Io(format!("could not make {}: {e}", out.display())))?;
+    for template in configure.templates {
+        let from = source.join(template);
+        let text = std::fs::read_to_string(&from)
+            .map_err(|e| Error::Io(format!("could not read {}: {e}", from.display())))?;
+        let filled = fill(&text, configure.settings).map_err(|name| {
+            Error::Io(format!(
+                "{} asks for {name} and the {} row does not say what it is",
+                from.display(),
+                project.name
+            ))
+        })?;
+        let name = Path::new(template).file_name().and_then(|n| n.to_str()).unwrap_or(template);
+        let to = out.join(name.trim_end_matches(".in"));
+        std::fs::write(&to, filled)
+            .map_err(|e| Error::Io(format!("could not write {}: {e}", to.display())))?;
+    }
+    Ok(Some(out))
+}
+
+/// One template filled in, or the first name it asks for that the settings do not have.
+fn fill(text: &str, settings: &[(&str, &str)]) -> std::result::Result<String, String> {
+    let value = |name: &str| settings.iter().find(|(n, _)| *n == name).map(|(_, v)| *v);
+    let mut out = String::with_capacity(text.len());
+    for line in text.lines() {
+        let line = match cmakedefine(line) {
+            Some((true, name, _)) => {
+                format!("#define {name} {}", if value(name).is_some() { 1 } else { 0 })
+            }
+            Some((false, name, rest)) => match value(name) {
+                Some(_) => format!("#define {name}{rest}"),
+                None => format!("/* #undef {name} */"),
+            },
+            None => line.to_owned(),
+        };
+        out.push_str(&substitute(&line, &value)?);
+        out.push('\n');
+    }
+    Ok(out)
+}
+
+/// A `#cmakedefine` line taken apart, as whether it is the `01` form, the name, and everything after
+/// the name.
+///
+/// cmake allows space between the `#` and the word, as the preprocessor does, so this does too.
+fn cmakedefine(line: &str) -> Option<(bool, &str, &str)> {
+    let rest = line.trim_start().strip_prefix('#')?.trim_start();
+    let (zero_one, rest) = match rest.strip_prefix("cmakedefine01") {
+        Some(rest) => (true, rest),
+        None => (false, rest.strip_prefix("cmakedefine")?),
+    };
+    if !rest.starts_with([' ', '\t']) {
+        return None;
+    }
+    let rest = rest.trim_start();
+    let end = rest.find(|c: char| !(c.is_ascii_alphanumeric() || c == '_')).unwrap_or(rest.len());
+    if end == 0 {
+        return None;
+    }
+    Some((zero_one, &rest[..end], &rest[end..]))
+}
+
+/// Every `@NAME@` in a line replaced by its value, or the first name with none.
+///
+/// A name is what a C identifier is, so an `@` that is not followed by one and closed by another `@`
+/// is left as it is, which is what keeps an address in a comment out of this.
+fn substitute<'a>(
+    line: &str,
+    value: &impl Fn(&str) -> Option<&'a str>,
+) -> std::result::Result<String, String> {
+    let mut out = String::with_capacity(line.len());
+    let mut rest = line;
+    while let Some(at) = rest.find('@') {
+        out.push_str(&rest[..at]);
+        let after = &rest[at + 1..];
+        let end =
+            after.find(|c: char| !(c.is_ascii_alphanumeric() || c == '_')).unwrap_or(after.len());
+        if end > 0 && after[end..].starts_with('@') {
+            let name = &after[..end];
+            out.push_str(value(name).ok_or_else(|| name.to_owned())?);
+            rest = &after[end + 1..];
+        } else {
+            out.push('@');
+            rest = after;
+        }
+    }
+    out.push_str(rest);
+    Ok(out)
+}
+
 /// A library, everything needed to build it, and everything the monitor is expected to say.
 pub(crate) struct Project {
     /// The name, which is the case name in the report, the directory the build goes in, and the
@@ -131,6 +264,14 @@ pub(crate) struct Project {
     pub(crate) includes: &'static [&'static str],
     /// What the project's configure script would have defined on a Linux machine.
     pub(crate) defines: &'static [&'static str],
+    /// The headers the project's own build writes before it compiles anything, when it does.
+    ///
+    /// Most of the rows need nothing here, because a project that ships a `config.h` or never asks
+    /// for one hands over C that compiles as it comes. libjpeg-turbo is the one that does not: its
+    /// tarball has `jconfig.h.in` and two more like it, and cmake fills them in, so a source tree
+    /// nobody has run cmake over does not compile. See [`Configure`] for why the answer is a few
+    /// values in the row rather than a copy of the filled in headers.
+    pub(crate) configure: Option<Configure>,
     /// Every report the monitor should make, and nothing else.
     known: &'static [Known],
     /// Why the monitor's reports are not held against [`Project::known`] yet, when they are not.
@@ -163,6 +304,7 @@ pub(crate) const PROJECTS: &[Project] = &[
         sources: &["sqlite3.c"],
         includes: &[],
         defines: &[],
+        configure: None,
         known: &[],
         pending: None,
     },
@@ -193,6 +335,7 @@ pub(crate) const PROJECTS: &[Project] = &[
         // compile at all, because zlib only reaches for unistd.h when it has been told the header
         // is there.
         defines: &["HAVE_UNISTD_H=1"],
+        configure: None,
         known: &[Known {
             judgement: 1,
             bytes: 2,
@@ -253,6 +396,7 @@ pub(crate) const PROJECTS: &[Project] = &[
         // luac.c, are not in the list above, and they are the only ones that would have wanted
         // readline.
         defines: &["LUA_USE_LINUX"],
+        configure: None,
         known: &[],
         pending: None,
     },
@@ -299,6 +443,7 @@ pub(crate) const PROJECTS: &[Project] = &[
         // main in it, c/tools/brotli.c, is not in the list above.
         includes: &["c/include"],
         defines: &[],
+        configure: None,
         known: &[],
         pending: None,
     },
@@ -356,6 +501,7 @@ pub(crate) const PROJECTS: &[Project] = &[
         // without the hooks and stood in for the attribute until tamnd/rucc#1414 was done. The row
         // now builds what zstd builds.
         defines: &["ZSTD_DISABLE_ASM=1"],
+        configure: None,
         known: &[],
         pending: Some(
             "the monitor's two reports are not held to a list yet, and they are the same question \
@@ -519,6 +665,7 @@ pub(crate) const PROJECTS: &[Project] = &[
         // Thirteen, and two stories. The first eight are the init plane over a lane libwebp leaves
         // alone on purpose and then loads anyway, and the other five are the type plane over a run
         // of pixels the lossless decoder fills eight bytes at a time and reads back four at a time.
+        configure: None,
         known: &[
             Known {
                 judgement: 1,
@@ -624,6 +771,184 @@ pub(crate) const PROJECTS: &[Project] = &[
                       and reads the row above as well as the row it is writing.",
             },
         ],
+        pending: None,
+    },
+    Project {
+        name: "libjpeg-turbo",
+        variable: "RUCC_LIBJPEG_TURBO_SOURCE",
+        marker: "src/turbojpeg.h",
+        usual: &["libjpeg-turbo"],
+        // The list cmake builds into turbojpeg-static, in its order: the libjpeg core with each of
+        // the files that come in three precisions taken through the wrapper that sets
+        // BITS_IN_JSAMPLE and includes it, arithmetic coding, which is on by default, then the
+        // TurboJPEG layer and the image file readers and writers it carries, then the PNG reader
+        // and the zlib those need, which the tarball bundles under src/spng. The workload loads
+        // and saves no files, and the readers are here anyway because turbojpeg.c calls them and a
+        // link of every object, which is what this is, needs everything a called function names.
+        sources: &[
+            "src/jcapimin.c",
+            "src/wrapper/jcapistd-8.c",
+            "src/wrapper/jcapistd-12.c",
+            "src/wrapper/jcapistd-16.c",
+            "src/wrapper/jccoefct-8.c",
+            "src/wrapper/jccoefct-12.c",
+            "src/wrapper/jccolor-8.c",
+            "src/wrapper/jccolor-12.c",
+            "src/wrapper/jccolor-16.c",
+            "src/wrapper/jcdctmgr-8.c",
+            "src/wrapper/jcdctmgr-12.c",
+            "src/wrapper/jcdiffct-8.c",
+            "src/wrapper/jcdiffct-12.c",
+            "src/wrapper/jcdiffct-16.c",
+            "src/jchuff.c",
+            "src/jcicc.c",
+            "src/jcinit.c",
+            "src/jclhuff.c",
+            "src/wrapper/jclossls-8.c",
+            "src/wrapper/jclossls-12.c",
+            "src/wrapper/jclossls-16.c",
+            "src/wrapper/jcmainct-8.c",
+            "src/wrapper/jcmainct-12.c",
+            "src/wrapper/jcmainct-16.c",
+            "src/jcmarker.c",
+            "src/jcmaster.c",
+            "src/jcomapi.c",
+            "src/jcparam.c",
+            "src/jcphuff.c",
+            "src/wrapper/jcprepct-8.c",
+            "src/wrapper/jcprepct-12.c",
+            "src/wrapper/jcprepct-16.c",
+            "src/wrapper/jcsample-8.c",
+            "src/wrapper/jcsample-12.c",
+            "src/wrapper/jcsample-16.c",
+            "src/jctrans.c",
+            "src/jdapimin.c",
+            "src/wrapper/jdapistd-8.c",
+            "src/wrapper/jdapistd-12.c",
+            "src/wrapper/jdapistd-16.c",
+            "src/jdatadst.c",
+            "src/jdatasrc.c",
+            "src/wrapper/jdcoefct-8.c",
+            "src/wrapper/jdcoefct-12.c",
+            "src/wrapper/jdcolor-8.c",
+            "src/wrapper/jdcolor-12.c",
+            "src/wrapper/jdcolor-16.c",
+            "src/wrapper/jddctmgr-8.c",
+            "src/wrapper/jddctmgr-12.c",
+            "src/wrapper/jddiffct-8.c",
+            "src/wrapper/jddiffct-12.c",
+            "src/wrapper/jddiffct-16.c",
+            "src/jdhuff.c",
+            "src/jdicc.c",
+            "src/jdinput.c",
+            "src/jdlhuff.c",
+            "src/wrapper/jdlossls-8.c",
+            "src/wrapper/jdlossls-12.c",
+            "src/wrapper/jdlossls-16.c",
+            "src/wrapper/jdmainct-8.c",
+            "src/wrapper/jdmainct-12.c",
+            "src/wrapper/jdmainct-16.c",
+            "src/jdmarker.c",
+            "src/jdmaster.c",
+            "src/wrapper/jdmerge-8.c",
+            "src/wrapper/jdmerge-12.c",
+            "src/jdphuff.c",
+            "src/wrapper/jdpostct-8.c",
+            "src/wrapper/jdpostct-12.c",
+            "src/wrapper/jdpostct-16.c",
+            "src/wrapper/jdsample-8.c",
+            "src/wrapper/jdsample-12.c",
+            "src/wrapper/jdsample-16.c",
+            "src/jdtrans.c",
+            "src/jerror.c",
+            "src/jfdctflt.c",
+            "src/wrapper/jfdctfst-8.c",
+            "src/wrapper/jfdctfst-12.c",
+            "src/wrapper/jfdctint-8.c",
+            "src/wrapper/jfdctint-12.c",
+            "src/wrapper/jidctflt-8.c",
+            "src/wrapper/jidctflt-12.c",
+            "src/wrapper/jidctfst-8.c",
+            "src/wrapper/jidctfst-12.c",
+            "src/wrapper/jidctint-8.c",
+            "src/wrapper/jidctint-12.c",
+            "src/wrapper/jidctred-8.c",
+            "src/wrapper/jidctred-12.c",
+            "src/jmemmgr.c",
+            "src/jmemnobs.c",
+            "src/jpeg_nbits.c",
+            "src/wrapper/jquant1-8.c",
+            "src/wrapper/jquant1-12.c",
+            "src/wrapper/jquant2-8.c",
+            "src/wrapper/jquant2-12.c",
+            "src/wrapper/jutils-8.c",
+            "src/wrapper/jutils-12.c",
+            "src/wrapper/jutils-16.c",
+            "src/jaricom.c",
+            "src/jcarith.c",
+            "src/jdarith.c",
+            "src/turbojpeg.c",
+            "src/transupp.c",
+            "src/jdatadst-tj.c",
+            "src/jdatasrc-tj.c",
+            "src/rdbmp.c",
+            "src/wrapper/rdpng-8.c",
+            "src/wrapper/rdpng-12.c",
+            "src/wrapper/rdpng-16.c",
+            "src/wrapper/rdppm-8.c",
+            "src/wrapper/rdppm-12.c",
+            "src/wrapper/rdppm-16.c",
+            "src/wrbmp.c",
+            "src/wrapper/wrpng-8.c",
+            "src/wrapper/wrpng-12.c",
+            "src/wrapper/wrpng-16.c",
+            "src/wrapper/wrppm-8.c",
+            "src/wrapper/wrppm-12.c",
+            "src/wrapper/wrppm-16.c",
+            "src/spng/spng.c",
+            "src/spng/zlib/adler32.c",
+            "src/spng/zlib/compress.c",
+            "src/spng/zlib/crc32.c",
+            "src/spng/zlib/deflate.c",
+            "src/spng/zlib/inffast.c",
+            "src/spng/zlib/inflate.c",
+            "src/spng/zlib/inftrees.c",
+            "src/spng/zlib/trees.c",
+            "src/spng/zlib/zutil.c",
+        ],
+        // The public headers, and the two the bundled PNG reader wants, so that spng.c finds the
+        // zlib that came with it rather than whichever one the machine has.
+        includes: &["src", "src/spng", "src/spng/zlib"],
+        // What CMakeLists.txt puts on turbojpeg-static as a whole. The first three turn on the
+        // file formats the TurboJPEG layer can load and save, which have to be on for turbojpeg.c
+        // to compile against the readers above, and SPNG_STATIC says libspng is linked in rather
+        // than loaded.
+        defines: &["BMP_SUPPORTED", "PNG_SUPPORTED", "PPM_SUPPORTED", "SPNG_STATIC"],
+        // What cmake writes into jconfig.h, jconfigint.h and jversion.h on an x86-64 Linux machine
+        // with WITH_SIMD off, which is the one setting chosen rather than found. The SIMD code is
+        // assembly, and assembly is outside what the monitor can see, so a build with it on would
+        // send every inner loop of the codec somewhere no check can follow. The version is the
+        // version of the tarball this row was written against and is only ever printed.
+        configure: Some(Configure {
+            templates: &["src/jconfig.h.in", "src/jconfigint.h.in", "src/jversion.h.in"],
+            settings: &[
+                ("JPEG_LIB_VERSION", "62"),
+                ("VERSION", "3.2.0"),
+                ("LIBJPEG_TURBO_VERSION_NUMBER", "3002000"),
+                ("C_ARITH_CODING_SUPPORTED", "1"),
+                ("D_ARITH_CODING_SUPPORTED", "1"),
+                ("BUILD", "rucc"),
+                ("HIDDEN", "__attribute__((visibility(\"hidden\")))"),
+                ("INLINE", "__inline__ __attribute__((always_inline))"),
+                ("THREAD_LOCAL", "__thread"),
+                ("CMAKE_PROJECT_NAME", "libjpeg-turbo"),
+                ("SIZE_T", "8"),
+                ("HAVE_BUILTIN_CTZL", "1"),
+                ("SIMD_ARCHITECTURE", "NONE"),
+                ("COPYRIGHT_YEAR", "1991-2026"),
+            ],
+        }),
+        known: &[],
         pending: None,
     },
 ];
@@ -858,6 +1183,7 @@ fn build(project: &Project, source: &Path) -> Result<PathBuf> {
     std::fs::create_dir_all(&work)
         .map_err(|e| Error::Io(format!("could not make {}: {e}", work.display())))?;
 
+    let configured = configure(project, source, &work)?;
     let rucc = cost::compiler()?;
     let archive = crate::staticlib("rucc-safe-rt", TRIPLE)?;
     std::fs::copy(&archive, work.join("safe-rt.a"))
@@ -878,6 +1204,7 @@ fn build(project: &Project, source: &Path) -> Result<PathBuf> {
                 ])
                 .arg("-I")
                 .arg(source)
+                .args(configured.iter().flat_map(|dir| [PathBuf::from("-I"), dir.clone()]))
                 .args(
                     project
                         .includes
@@ -1052,6 +1379,7 @@ mod tests {
             sources: &[],
             includes: &[],
             defines: &[],
+            configure: None,
             known: &[],
             pending: None,
         };
@@ -1144,6 +1472,37 @@ mod tests {
 
     /// Half the projects worth running unpack their C into a `src` directory and half leave it at
     /// the top, and the person setting the variable should not have to know which this one is.
+    /// cmake's two rules, a `#cmakedefine` for a value the row gives and for one it does not, and
+    /// the `01` form both ways, which is all three of libjpeg-turbo's templates ask for.
+    #[test]
+    fn a_template_is_filled_in_the_way_cmake_fills_it_in() {
+        let settings = [("VERSION", "3.2.0"), ("ARITH", "1"), ("HIDDEN", "__attribute__((x))")];
+        let text = "#define VERSION \"@VERSION@\"\n\
+                    #cmakedefine ARITH 1\n\
+                    #  cmakedefine WITH_SIMD 1\n\
+                    #cmakedefine01 ARITH\n\
+                    #cmakedefine01 WITH_SIMD\n\
+                    #define HIDDEN @HIDDEN@\n\
+                    /* mail someone@example.org about it */\n";
+        assert_eq!(
+            fill(text, &settings).unwrap(),
+            "#define VERSION \"3.2.0\"\n\
+             #define ARITH 1\n\
+             /* #undef WITH_SIMD */\n\
+             #define ARITH 1\n\
+             #define WITH_SIMD 0\n\
+             #define HIDDEN __attribute__((x))\n\
+             /* mail someone@example.org about it */\n"
+        );
+    }
+
+    /// A value the template asks for and the row does not give is an error with the name in it,
+    /// rather than the empty string cmake would write.
+    #[test]
+    fn a_template_asking_for_a_value_the_row_lacks_is_an_error() {
+        assert_eq!(fill("#define BUILD \"@BUILD@\"\n", &[]), Err("BUILD".to_owned()));
+    }
+
     #[test]
     fn the_sources_are_taken_from_a_src_directory_as_well_as_from_the_top() {
         let xtask = root().join("xtask");
