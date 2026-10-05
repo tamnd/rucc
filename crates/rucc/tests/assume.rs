@@ -160,7 +160,8 @@ fn assume_is_checked_in_gcc_s_words() {
         assert_eq!(err.matches("warning:").count(), warnings, "{source}\n{err}");
     }
     // An assignment is not a conditional expression, so it does not parse, as in gcc.
-    let (ok, _, err) = assembly("assign", &[], "void f(int x) { __attribute__((assume(x = 1))); }\n");
+    let (ok, _, err) =
+        assembly("assign", &[], "void f(int x) { __attribute__((assume(x = 1))); }\n");
     assert!(!ok, "{err}");
     // Nothing to say about two in one list, one in front of a case label, a name the promise
     // uses and nothing else does, or about asking for it.

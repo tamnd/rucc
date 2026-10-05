@@ -24,8 +24,9 @@ impl Checker<'_> {
     /// The statement an attribute declaration in a body becomes, which is the promise each
     /// `assume` in it makes when the optimizer is there to read it, and nothing otherwise.
     pub(in crate::check) fn assumed(&mut self, attrs: AttrList) -> Stmt {
+        let ast = self.ast;
         let mut promises = Vec::new();
-        for attr in self.ast[attrs].to_vec() {
+        for &attr in &ast[attrs] {
             if self.gnu_name(&attr) != "assume" {
                 continue;
             }
@@ -41,9 +42,7 @@ impl Checker<'_> {
                 let what = "wrong number of arguments specified for 'assume' attribute";
                 let note = format!("expected 1, found {}", args.len());
                 self.report(
-                    Diagnostic::error(what, attr.span)
-                        .with_code("E0835")
-                        .note(note, attr.span),
+                    Diagnostic::error(what, attr.span).with_code("E0835").note(note, attr.span),
                 );
                 continue;
             };
@@ -51,7 +50,8 @@ impl Checker<'_> {
             // An array is a scalar to an `if`, through the pointer it decays to, and not to gcc's
             // `assume`, which asks before the decay.
             if is_array(&self.types, self.types.canonical(self.tast[value].ty)) {
-                let what = "used array that cannot be converted to pointer where scalar is required";
+                let what =
+                    "used array that cannot be converted to pointer where scalar is required";
                 self.report(Diagnostic::error(what, attr.span).with_code("E0510"));
                 continue;
             }
@@ -80,7 +80,8 @@ impl Checker<'_> {
 
     /// gcc's warning for an `assume` on its own outside any function.
     pub(in crate::check) fn assumed_at_top(&mut self, attrs: AttrList) {
-        for attr in self.ast[attrs].to_vec() {
+        let ast = self.ast;
+        for &attr in &ast[attrs] {
             if self.gnu_name(&attr) == "assume" {
                 let what = "'assume' attribute at top level";
                 self.report(Diagnostic::warning(what, attr.span).with_code("E0703"));
@@ -91,9 +92,15 @@ impl Checker<'_> {
     /// gcc's warnings for an `assume` written on a declaration, which is not where it goes. In
     /// front of the declaration it is one that should have had a `;` after it, and anywhere it
     /// is ignored, which gcc says at the start of the declaration.
-    pub(in crate::check) fn assume_misplaced(&mut self, lists: &[AttrList], leading: bool, at: Span) {
+    pub(in crate::check) fn assume_misplaced(
+        &mut self,
+        lists: &[AttrList],
+        leading: bool,
+        at: Span,
+    ) {
+        let ast = self.ast;
         for &attrs in lists {
-            for attr in self.ast[attrs].to_vec() {
+            for &attr in &ast[attrs] {
                 if self.gnu_name(&attr) != "assume" {
                     continue;
                 }
