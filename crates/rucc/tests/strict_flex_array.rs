@@ -109,6 +109,13 @@ fn strict_flex_array_is_checked_in_gcc_s_words() {
         ("typedef int t[1] __attribute__((strict_flex_array(1)));\n", named("t")),
         ("void g(int p[1] __attribute__((strict_flex_array(1))));\n", named("p")),
         ("__attribute__((strict_flex_array(1))) int f(void) { return 0; }\n", named("f")),
+        ("void g(int [1] __attribute__((strict_flex_array(1))));\n", named("({anonymous})")),
+        ("void h(void) { int v[2] __attribute__((strict_flex_array(1))); }\n", named("v")),
+        (
+            "struct s { int n; int : 3 __attribute__((strict_flex_array(1))); };\n",
+            "error: 'strict_flex_array' attribute may not be specified for a non-array field"
+                .to_owned(),
+        ),
         (
             "struct s { int n; int x __attribute__((strict_flex_array(1))); };\n",
             "error: 'strict_flex_array' attribute may not be specified for a non-array field"
@@ -117,7 +124,8 @@ fn strict_flex_array_is_checked_in_gcc_s_words() {
         ("struct s { int n; int x[1] __attribute__((strict_flex_array(4))); };\n", between("4")),
         ("struct s { int n; int x[1] __attribute__((strict_flex_array(-1))); };\n", between("-1")),
         ("struct s { int n; int x[1] __attribute__((strict_flex_array(\"1\"))); };\n", not_integer.clone()),
-        ("struct s { int n; int x[1] __attribute__((strict_flex_array(1.0))); };\n", not_integer),
+        ("struct s { int n; int x[1] __attribute__((strict_flex_array(1.0))); };\n", not_integer.clone()),
+        ("int k; struct s { int n; int x[1] __attribute__((strict_flex_array(k))); };\n", not_integer),
         ("struct s { int n; int x[1] __attribute__((strict_flex_array)); };\n", arity.to_owned()),
         ("struct s { int n; int x[1] __attribute__((strict_flex_array)); };\n", "expected 1, found 0".to_owned()),
         ("struct s { int n; int x[1] __attribute__((strict_flex_array(1, 2))); };\n", "expected 1, found 2".to_owned()),
@@ -135,6 +143,7 @@ fn strict_flex_array_is_checked_in_gcc_s_words() {
         union u { int n; int x[2] __attribute__((strict_flex_array(3))); };\n\
         struct t { int n; int x[2][2] __attribute__((strict_flex_array(3))); };\n\
         struct w { int n; int x[1] __attribute__((strict_flex_array(L))); };\n\
+        void gw(struct w *p) { _Static_assert(__builtin_object_size(p->x, 1) == 4, \"L\"); }\n\
         _Static_assert(__has_attribute(strict_flex_array), \"gcc 13\");\n";
     let (ok, err) = check("quiet", &["-Wall", "-Wextra"], quiet);
     assert!(ok, "{err}");

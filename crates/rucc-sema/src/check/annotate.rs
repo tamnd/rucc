@@ -139,8 +139,12 @@ impl Checker<'_> {
 
     /// Keeps the lists a member was written with.
     pub(in crate::check) fn annotate_member(&mut self, record: RecordId, field: ast::Field) {
-        let Some(name) = self.member_name(field) else { return };
         let specs = self.ast[field.specs].attrs;
+        let Some(name) = self.member_name(field) else {
+            // An unnamed bit-field or an anonymous record is never an array.
+            self.strict_flex_unnamed(&[field.attrs, specs]);
+            return;
+        };
         self.annotations.members.insert((record, name), [field.attrs, specs]);
     }
 
@@ -227,7 +231,8 @@ impl Checker<'_> {
                 let integer = is_integer(&self.types, self.types.canonical(self.tast[value].ty));
                 if integer { self.eval_integer(value).ok() } else { None }
             }
-            AttrArg::Ident(_) => None,
+            // A level an enumerator spells, which the parser keeps as an identifier.
+            AttrArg::Ident(name) => self.enumerator(name),
         };
         let Some(value) = value else {
             return refuse(self, "'strict_flex_array' attribute argument not an integer".into());
@@ -240,6 +245,20 @@ impl Checker<'_> {
                      between 0 and 3"
                 );
                 refuse(self, what)
+            }
+        }
+    }
+
+    /// What gcc says about `strict_flex_array` on a member with no name, which is not an array.
+    fn strict_flex_unnamed(&mut self, lists: &[AttrList]) {
+        let ast = self.ast;
+        for &attrs in lists {
+            for &attr in &ast[attrs] {
+                if !self.is_strict_flex(&attr) || self.strict_flex_arity(attr) {
+                    continue;
+                }
+                let what = "'strict_flex_array' attribute may not be specified for a non-array field";
+                self.report(Diagnostic::error(what, attr.span).with_code("E0833"));
             }
         }
     }
@@ -258,7 +277,7 @@ impl Checker<'_> {
                 if !self.is_strict_flex(&attr) || self.strict_flex_arity(attr) {
                     continue;
                 }
-                let name = name.map_or("<anonymous>", |name| self.text(name));
+                let name = name.map_or("({anonymous})", |name| self.text(name));
                 let what = format!("'strict_flex_array' attribute may not be specified for '{name}'");
                 self.report(Diagnostic::error(what, attr.span).with_code("E0833"));
             }
