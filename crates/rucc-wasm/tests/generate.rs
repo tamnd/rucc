@@ -115,28 +115,53 @@ fn the_object_defines_each_function_and_renames_main() {
     }
 }
 
-/// A loop that two blocks both jump into is not reducible, and it is refused with the name of
-/// the function and not written wrong.
-#[test]
-fn a_graph_that_is_not_reducible_is_refused() {
-    let text = r#"; ModuleID = 't.c'
+/// A loop that the entry jumps into at two places, which is not reducible, as a `goto` into a
+/// loop makes it. The loop gets a dispatch node, and with one argument `main` goes in at
+/// `block1` and exits with 90.
+///
+/// ```c
+/// int main(int argc, char **argv) {
+///   int i = 0, s = 0;
+///   if (argc) goto a; else goto b;
+/// a: s += 3;
+/// b: i++; s *= 2; if (i < 4) goto a;
+///   return s;
+/// }
+/// ```
+const TWISTED: &str = r#"; ModuleID = 't.c'
 ; format 0
 target triple = "wasm32-unknown-wasip1"
 target datalayout = "e-p:32:32-i64:64-S128"
 
-func @twisted(i32) -> i32, linkage(external) {
-block0(%0: i32):
-    br_if %0, block1, block2
+func @main(i32, ptr) -> i32, linkage(external) {
+block0(%0: i32, %1: ptr):
+    %2 = iconst.i32 0
+    br_if %0, block1(%2, %2), block2(%2, %2)
 
-block1:
-    jump block2
+block1(%3: i32, %4: i32):
+    %5 = iconst.i32 3
+    %6 = add %4, %5
+    jump block2(%3, %6)
 
-block2:
-    jump block1
+block2(%7: i32, %8: i32):
+    %9 = iconst.i32 1
+    %10 = add %7, %9
+    %11 = add %8, %8
+    %12 = iconst.i32 4
+    %13 = icmp slt %10, %12
+    br_if %13, block1(%10, %11), block3(%11)
+
+block3(%14: i32):
+    return %14
 }
 "#;
-    let refusal = object(text).unwrap_err().to_string();
-    assert!(refusal.contains("`twisted`") && refusal.contains("not reducible"), "{refusal}");
+
+#[test]
+fn a_graph_that_is_not_reducible_gets_a_dispatch_node() {
+    let written = object(TWISTED).unwrap();
+    assert_eq!(written.defines, ["__main_argc_argv"]);
+    // The dispatch is a `br_table` on the label local, and nothing else in the function has one.
+    assert!(written.bytes.contains(&0x0e), "no br_table");
 }
 
 /// Where wasi-sdk is, or nothing when this machine has none.
@@ -162,16 +187,19 @@ fn run(program: &Path, args: &[&std::ffi::OsStr]) -> std::process::Output {
     out
 }
 
-#[test]
-fn the_object_links_with_wasm_ld_and_runs() {
+/// Link the object for `text` with wasm-ld against wasi-libc, validate the object and the module
+/// when `wasm-tools` is on `PATH`, and run the module under Wasmtime. The exit status, or nothing
+/// when this machine has no wasi-sdk or no Wasmtime.
+fn link_and_run(name: &str, text: &str) -> Option<i32> {
     let Some(sdk) = sdk() else {
         eprintln!("WASI_SDK_PATH is not set, so the object was not linked");
-        return;
+        return None;
     };
-    let dir = std::env::temp_dir().join(format!("rucc-wasm-generate-{}", std::process::id()));
+    let dir =
+        std::env::temp_dir().join(format!("rucc-wasm-generate-{}-{name}", std::process::id()));
     std::fs::create_dir_all(&dir).unwrap();
     let object_file = dir.join("a.o");
-    std::fs::write(&object_file, object(PROGRAM).unwrap().bytes).unwrap();
+    std::fs::write(&object_file, object(text).unwrap().bytes).unwrap();
 
     let lib = sdk.join("share/wasi-sysroot/lib/wasm32-wasip1");
     let module = dir.join("a.wasm");
@@ -195,9 +223,23 @@ fn the_object_links_with_wasm_ld_and_runs() {
     }
     let Some(wasmtime) = on_path("wasmtime") else {
         eprintln!("there is no wasmtime on PATH, so the module was not run");
-        return;
+        return None;
     };
     let out = run(&wasmtime, &[module.as_os_str()]);
-    assert_eq!(out.status.code(), Some(17));
     std::fs::remove_dir_all(&dir).unwrap();
+    out.status.code()
+}
+
+#[test]
+fn the_object_links_with_wasm_ld_and_runs() {
+    if let Some(status) = link_and_run("program", PROGRAM) {
+        assert_eq!(status, 17);
+    }
+}
+
+#[test]
+fn the_dispatch_node_goes_to_the_entry_that_the_edge_named() {
+    if let Some(status) = link_and_run("twisted", TWISTED) {
+        assert_eq!(status, 90);
+    }
 }

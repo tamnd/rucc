@@ -31,9 +31,9 @@
 //! LLVM, and it makes arithmetic on narrow types cost nothing.
 //!
 //! What this refuses, with a message that names the function: an `i128`, a `long double`, a
-//! vector, a graph of blocks that is not reducible, `setjmp`, inline assembly, a computed `goto`,
-//! an alias, and the instructions of the memory safety monitor. Each of these is a later step of
-//! #2864 or of the milestones after it.
+//! vector, `setjmp`, inline assembly, a computed `goto`, an alias, and the instructions of the
+//! memory safety monitor. Each of these is a later step of #2864 or of the milestones after it. A
+//! graph of blocks that is not reducible is not refused: a dispatch node makes it reducible.
 //!
 //! Every crate in the workspace is published, and publishing implies a promise. This one is
 //! tier 3: its Rust API is explicitly unstable and will change without a major version bump.
@@ -42,6 +42,7 @@
 #![doc(html_root_url = "https://docs.rs/rucc-wasm/0.22.1")]
 
 mod emit;
+mod irreducible;
 mod select;
 mod structure;
 
