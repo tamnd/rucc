@@ -39,6 +39,10 @@
 //! licence, which is the one sysroot here that is not ours to produce, so the line names the tree's
 //! directories and the libraries by name and leaves the finding to the linker.
 //!
+//! wasm has a line of its own, `wasm`, for `wasm-ld`. It reads the GNU syntax for the inputs, but
+//! a wasm module has no loader, no sections to bracket and no position to choose, so almost none
+//! of the ELF flags apply, and the start file and the entry point are what is left to decide.
+//!
 //! Mach-O is refused rather than approximated. `ld64` wants a platform version load command and a
 //! `-syslibroot`, which is not a different spelling of what is below. [`Unsupported`] says so by
 //! name, which is a better answer than a line that looks plausible and produces nothing that runs.
@@ -123,6 +127,9 @@ pub struct Invocation<'a> {
     pub unicode: bool,
     /// `-fms-runtime-lib=`, which is `/MT` or `/MD`. Only a line for the MSVC environment reads it.
     pub crt: Crt,
+    /// `-mexec-model=reactor`, which makes a WASI module a reactor: `crt1-reactor.o` and the entry
+    /// `_initialize` in place of `crt1-command.o` and `_start`. Nothing on any other target.
+    pub reactor: bool,
     /// gcc's runtime directory for a mingw-w64 target, when the tree the line is against has one.
     ///
     /// That is a tree somebody named rather than one this compiler fetched, laid out the way MSYS2
@@ -144,9 +151,9 @@ pub struct Invocation<'a> {
 
 /// A target, or a combination of a target and a mode, that has no line here.
 ///
-/// Four variants and they are different kinds of answer. A format is not supported yet and will be.
-/// The MSVC ABI is waiting on something that is not code. A static glibc link is not a thing this
-/// scheme can produce at all. The distinction matters to somebody reading the message, because only
+/// The variants are different kinds of answer. A format is not supported yet and will be. The MSVC
+/// ABI is waiting on something that is not code. A static glibc link is not a thing this scheme can
+/// produce at all. A shared wasm library and a WASI component are later steps of the wasm plan. The distinction matters to somebody reading the message, because only
 /// some of them are worth waiting for.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Unsupported {
@@ -193,6 +200,22 @@ pub enum Unsupported {
         /// The target that was asked for.
         target: String,
     },
+    /// A shared library on wasm, which is a module with a `dylink.0` section, code that is
+    /// position independent, and a loader in the host to put it together with the program. None of
+    /// the three is written yet.
+    WasmShared {
+        /// The target that was asked for.
+        target: String,
+    },
+    /// A WASI preview after the first, whose program is a component and not a core module.
+    ///
+    /// `wasm-component-ld` links one: it runs `wasm-ld` and then wraps the module in a component
+    /// with an adapter. That is WA6, tamnd/rucc#2868. A core module linked against the wasip2
+    /// sysroot is not something an engine runs, so the link is refused here and not made wrong.
+    Component {
+        /// The target that was asked for.
+        target: String,
+    },
 }
 
 impl fmt::Display for Unsupported {
@@ -222,6 +245,17 @@ impl fmt::Display for Unsupported {
                  the code behind them, which is what a dynamic link reads and not what a static one \
                  needs. Link it dynamically, or use a musl target, which ships a real libc.a"
             ),
+            Unsupported::WasmShared { target } => write!(
+                f,
+                "shared libraries on wasm (dylink.0) are not supported yet, so {target} cannot \
+                 be linked with -shared. A module that the host calls into is -mexec-model=reactor"
+            ),
+            Unsupported::Component { target } => write!(
+                f,
+                "{target} is linked into a component by wasm-component-ld, and rucc does not \
+                 write that line yet (tamnd/rucc#2868). -c writes the object, and wasm32-wasip1 \
+                 links now"
+            ),
         }
     }
 }
@@ -246,14 +280,17 @@ impl std::error::Error for Unsupported {}
 ///
 /// Two formats reach a line here and the difference between them is the flags rather than the shape.
 /// Both are written in the GNU style, which is what `ld`, `ld.lld` and `ld.lld` in its MinGW mode all
-/// read, so the inputs and the `-L` directories are assembled once for both rather than twice.
+/// read, so the inputs and the `-L` directories are assembled once for both rather than twice. The
+/// MSVC line and the wasm line are their own, which is the module documentation.
 ///
 /// # Errors
 ///
-/// [`Unsupported::Format`] for a target whose object format is neither ELF nor PE,
+/// [`Unsupported::Format`] for a target whose object format is not ELF, PE or wasm,
 /// [`Unsupported::MsvcAbi`] for a Windows target in Microsoft's ABI with no CRT to link against,
-/// [`Unsupported::Machine`] for a PE target with no machine type, and
-/// [`Unsupported::StaticStub`] for a static link against a libc that is a stub.
+/// [`Unsupported::Machine`] for a PE target with no machine type,
+/// [`Unsupported::StaticStub`] for a static link against a libc that is a stub,
+/// [`Unsupported::WasmShared`] for `-shared` on wasm, and [`Unsupported::Component`] for a WASI
+/// preview whose program is a component.
 pub fn argv(
     target: TargetTuple,
     sysroot: &Sysroot,
@@ -266,6 +303,7 @@ pub fn argv(
         // is linked by a different linker with a different argument syntax.
         ObjectFormat::Coff if target.env() == Env::Gnu => coff(target, sysroot, options),
         ObjectFormat::Coff => msvc(target, sysroot, options),
+        ObjectFormat::Wasm => wasm(target, sysroot, options),
         _ => Err(Unsupported::Format {
             target: target.to_canonical_string(),
             format: format.as_str(),
@@ -559,6 +597,83 @@ fn body(sysroot: &Sysroot, options: &Invocation<'_>) -> Vec<String> {
     }
 
     args
+}
+
+/// The line for a wasm target, which `wasm-ld` reads.
+///
+/// It is the line clang 23 of wasi-sdk 34 writes for the same row, so that a link that fails for
+/// one compiler fails for the other in the same way. Two differences: our runtime takes the place
+/// of `libclang_rt.builtins.a`, and `libc.a` is named by its path as on every other line here,
+/// where clang writes `-lc` with the same directory on the line.
+///
+/// The ELF flags are not here, because each of them is about a thing a wasm module does not have:
+/// a loader to name, an address to place the image at, a `.eh_frame` to index, or pages to mark.
+/// There is no `--sysroot` either, because wasm-ld reads no linker scripts that would resolve
+/// names against it. The five modes give one line, which is the note on [`LinkLine::wasi`], with
+/// the exception of `-shared`, which is refused.
+///
+/// A WASI command needs nothing more. A reactor gets `--entry _initialize` after its start file,
+/// which is what clang writes, because wasm-ld looks for `_start` by default. wasm32-none has no
+/// libc and no start file, so it has no `_start` either, and gets `--no-entry` unless the user
+/// named an entry with `-Wl,`. Its library directory is not on the line, because there is no
+/// sysroot for a target with no libc to put one in.
+fn wasm(
+    target: TargetTuple,
+    sysroot: &Sysroot,
+    options: &Invocation<'_>,
+) -> Result<Vec<String>, Unsupported> {
+    if options.mode == LinkMode::Shared {
+        return Err(Unsupported::WasmShared { target: target.to_canonical_string() });
+    }
+    let hosted = libc(target) != Libc::None;
+    if hosted && target.os_version().is_some_and(|version| version.major_part() != 1) {
+        return Err(Unsupported::Component { target: target.to_canonical_string() });
+    }
+    let line = if hosted {
+        LinkLine::wasi(sysroot, options.reactor, options.builtins)
+    } else {
+        LinkLine::freestanding(options.builtins)
+    };
+
+    let mut args = output(options);
+    args.push("-m".to_owned());
+    args.push("wasm32".to_owned());
+    if !options.no_startfiles {
+        args.extend(shown(&line.start));
+    }
+    if hosted && options.reactor {
+        args.push("--entry".to_owned());
+        args.push("_initialize".to_owned());
+    }
+    let entry = options.inputs.iter().any(
+        |input| matches!(input, Item::Linker(arg) if arg == "-e" || arg.starts_with("--entry")),
+    );
+    if !hosted && !entry {
+        args.push("--no-entry".to_owned());
+    }
+    if options.export_dynamic {
+        args.push("--export-dynamic".to_owned());
+    }
+    if options.strip {
+        args.push("--strip-all".to_owned());
+    }
+    for dir in options.search {
+        args.push(format!("-L{}", dir.display()));
+    }
+    if hosted {
+        args.push(format!("-L{}", sysroot.lib().display()));
+    }
+    for input in options.inputs {
+        match input {
+            Item::File(path) => args.push(path.display().to_string()),
+            Item::Library(name) => args.push(format!("-l{name}")),
+            Item::Linker(arg) => args.push(arg.clone()),
+        }
+    }
+    if !options.no_defaultlibs {
+        args.extend(shown(&libraries(&line, options)));
+    }
+    Ok(args)
 }
 
 /// Whether this is a mingw-w64 target, the only one whose line takes gcc's runtime directory.
@@ -920,12 +1035,11 @@ mod tests {
 
     #[test]
     fn a_format_with_no_line_of_its_own_is_refused_by_name_rather_than_approximated() {
-        for spelling in ["aarch64-macos", "wasm32-wasi"] {
-            let options = Invocation { mode: LinkMode::Dynamic, ..Invocation::default() };
-            let error =
-                argv(target(spelling), &sysroot(spelling), &options).expect_err("no line for it");
-            assert!(matches!(error, Unsupported::Format { .. }), "{spelling} {error:?}");
-        }
+        let spelling = "aarch64-macos";
+        let options = Invocation { mode: LinkMode::Dynamic, ..Invocation::default() };
+        let error =
+            argv(target(spelling), &sysroot(spelling), &options).expect_err("no line for it");
+        assert!(matches!(error, Unsupported::Format { .. }), "{spelling} {error:?}");
     }
 
     #[test]
@@ -1282,6 +1396,66 @@ mod tests {
         // And it is a static link with nothing to interpret it, which is what a bare metal target is.
         assert!(args.contains(&"-static".to_owned()), "{args:?}");
         assert!(!args.contains(&"-dynamic-linker".to_owned()), "{args:?}");
+    }
+
+    #[test]
+    fn a_wasi_command_is_crt1_command_the_objects_libc_and_our_runtime_and_no_elf_flags() {
+        let args = line("wasm32-wasip1", LinkMode::Dynamic);
+        let lib = sysroot("wasm32-wasip1").lib();
+        let want = [
+            "-o".to_owned(),
+            "main".to_owned(),
+            "-m".to_owned(),
+            "wasm32".to_owned(),
+            lib.join("crt1-command.o").display().to_string(),
+            format!("-L{}", lib.display()),
+            "main.o".to_owned(),
+            lib.join("libc.a").display().to_string(),
+            builtins().display().to_string(),
+        ];
+        assert_eq!(args, want);
+        // Every mode but a shared one is the same module, because wasm has one kind of image.
+        for mode in [LinkMode::Static, LinkMode::StaticPie, LinkMode::DynamicNoPie] {
+            assert_eq!(line("wasm32-wasip1", mode), want, "{mode:?}");
+        }
+    }
+
+    #[test]
+    fn a_wasi_reactor_starts_at_initialize_and_wasm32_none_has_no_entry() {
+        let one = [Item::File(Path::new("main.o").to_path_buf())];
+        let reactor = Invocation { inputs: &one, reactor: true, ..Invocation::default() };
+        let args = argv(target("wasm32-wasip1"), &sysroot("wasm32-wasip1"), &reactor).unwrap();
+        let crt = sysroot("wasm32-wasip1").lib().join("crt1-reactor.o").display().to_string();
+        let at = args.iter().position(|arg| *arg == crt).expect("crt1-reactor.o");
+        assert_eq!(args[at + 1..at + 3], ["--entry", "_initialize"]);
+        assert!(!args.iter().any(|arg| arg.ends_with("crt1-command.o")), "{args:?}");
+
+        // No libc, so no start file, no `_start`, and no directory of a sysroot nobody fetched.
+        let args = line("wasm32-none", LinkMode::Dynamic);
+        assert!(args.contains(&"--no-entry".to_owned()), "{args:?}");
+        assert!(
+            !args.iter().any(|arg| arg.starts_with("-L") || arg.ends_with(".o") && arg != "main.o")
+        );
+        assert!(args.iter().any(|arg| arg.ends_with("librucc_builtins.a")), "{args:?}");
+        // An entry the user named wins, and `--no-entry` would take it away.
+        let named = [Item::Linker("--entry=go".to_owned())];
+        let options = Invocation { inputs: &named, ..Invocation::default() };
+        let args = argv(target("wasm32-none"), &sysroot("wasm32-none"), &options).unwrap();
+        assert!(!args.contains(&"--no-entry".to_owned()), "{args:?}");
+    }
+
+    #[test]
+    fn a_shared_wasm_library_and_a_wasi_component_are_refused_by_name() {
+        let shared = Invocation { mode: LinkMode::Shared, ..Invocation::default() };
+        let error = argv(target("wasm32-wasip1"), &sysroot("wasm32-wasip1"), &shared).unwrap_err();
+        assert!(matches!(error, Unsupported::WasmShared { .. }), "{error:?}");
+        assert!(error.to_string().contains("dylink.0"), "{error}");
+        for spelling in ["wasm32-wasip2", "wasm32-wasip3"] {
+            let options = Invocation::default();
+            let error = argv(target(spelling), &sysroot(spelling), &options).unwrap_err();
+            assert!(matches!(error, Unsupported::Component { .. }), "{spelling} {error:?}");
+            assert!(error.to_string().contains("wasm-component-ld"), "{error}");
+        }
     }
 
     #[test]

@@ -128,6 +128,9 @@ pub fn libc(target: TargetTuple) -> Libc {
     match (target.os(), target.env()) {
         (Os::None, _) => Libc::None,
         _ if target.object_format() == ObjectFormat::Coff => Libc::Import,
+        // wasi-libc is musl with the system interface replaced by WASI calls, and it is a real
+        // static archive in the same way. There is no shared form of it to stub.
+        (Os::Wasi, _) => Libc::Archive,
         (_, Env::Musl) => Libc::Archive,
         _ => Libc::Stub,
     }
@@ -211,6 +214,9 @@ impl LinkLine {
     pub fn for_target(sysroot: &Sysroot, mode: LinkMode, builtins: Option<&Path>) -> Self {
         match libc(sysroot.target()) {
             Libc::None => LinkLine::freestanding(builtins),
+            Libc::Archive if sysroot.target().os() == Os::Wasi => {
+                LinkLine::wasi(sysroot, false, builtins)
+            }
             Libc::Archive => LinkLine::musl(sysroot, mode, builtins),
             Libc::Stub => LinkLine::glibc(sysroot, mode, builtins),
             Libc::Import if sysroot.target().env() == Env::Msvc => {
@@ -262,6 +268,30 @@ impl LinkLine {
         let mut libraries = vec![lib.join("libc.a")];
         libraries.extend(ours(builtins));
         LinkLine { start: start_files(&lib, mode), libraries, end: vec![lib.join("crtn.o")] }
+    }
+
+    /// The line for a WASI link against this sysroot, which is a command unless `reactor` says
+    /// that it is a reactor.
+    ///
+    /// One start file and no end file. A wasm module has no `.init` section for `crti.o` and
+    /// `crtn.o` to open and close: the linker writes `__wasm_call_ctors` from the init functions of
+    /// the objects, and the start file calls it. `crt1-command.o` has `_start`, which runs the
+    /// constructors, then `main` through `__main_void`, then the destructors, and then exits with
+    /// the status. `crt1-reactor.o` has `_initialize`, which runs the constructors and nothing
+    /// more, for a module whose host calls its exports after that. The mode does not change the
+    /// line, because a wasm module is one kind of image: there is no loader, no interpreter and no
+    /// address to place it at.
+    ///
+    /// `libc.a` is wasi-libc whole, `libm` included, as on musl. Our runtime goes after it for the
+    /// same reason as on musl, which is that wasi-libc calls `__multf3` and its friends for `long
+    /// double`. tamnd/rucc#2864.
+    #[must_use]
+    pub fn wasi(sysroot: &Sysroot, reactor: bool, builtins: Option<&Path>) -> Self {
+        let lib = sysroot.lib();
+        let start = if reactor { "crt1-reactor.o" } else { "crt1-command.o" };
+        let mut libraries = vec![lib.join("libc.a")];
+        libraries.extend(ours(builtins));
+        LinkLine { start: vec![lib.join(start)], libraries, end: Vec::new() }
     }
 
     /// The line for a link against a generated stub, which is glibc and every other hosted libc that

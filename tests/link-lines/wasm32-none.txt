@@ -5,16 +5,40 @@ loader    none
 sysroot   <cache>/sysroots/wasm32-none
 
 [static]
-  refused: there is no cross link line for wasm32-none yet, because its object format is wasm and that linker takes a different line rather than a different spelling of this one
+  -o
+  main
+  -m
+  wasm32
+  --no-entry
+  main.o
+  <builtins>/librucc_builtins.a
 
 [static-pie]
-  refused: there is no cross link line for wasm32-none yet, because its object format is wasm and that linker takes a different line rather than a different spelling of this one
+  -o
+  main
+  -m
+  wasm32
+  --no-entry
+  main.o
+  <builtins>/librucc_builtins.a
 
 [dynamic]
-  refused: there is no cross link line for wasm32-none yet, because its object format is wasm and that linker takes a different line rather than a different spelling of this one
+  -o
+  main
+  -m
+  wasm32
+  --no-entry
+  main.o
+  <builtins>/librucc_builtins.a
 
 [dynamic-no-pie]
-  refused: there is no cross link line for wasm32-none yet, because its object format is wasm and that linker takes a different line rather than a different spelling of this one
+  -o
+  main
+  -m
+  wasm32
+  --no-entry
+  main.o
+  <builtins>/librucc_builtins.a
 
 [shared]
-  refused: there is no cross link line for wasm32-none yet, because its object format is wasm and that linker takes a different line rather than a different spelling of this one
+  refused: shared libraries on wasm (dylink.0) are not supported yet, so wasm32-none cannot be linked with -shared. A module that the host calls into is -mexec-model=reactor
