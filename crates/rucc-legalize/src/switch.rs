@@ -41,10 +41,10 @@
 //! tamnd/rucc#1548 found missing: pcre2's matcher is a `switch` of about a hundred opcodes, and
 //! walking a tree down to one of them on every step cost more than four times what gcc's table
 //! did. The table is not written here. What is written is the range check and then a `switch`
-//! again, on the value less the lowest case and widened to a word, which `crate::lower` turns into
-//! the load and the jump, and `rucc_asm` writes the table itself, in `.rodata` on x86-64 ELF the
-//! way gcc does and after the function's last instruction everywhere else. See `JUMP_TABLE_GROWTH`
-//! for what dense means.
+//! again, on the value less the lowest case and widened to a word, which `rucc_codegen::lower`
+//! turns into the load and the jump, and `rucc_asm` writes the table itself, in `.rodata` on x86-64
+//! ELF the way gcc does and after the function's last instruction everywhere else. See
+//! `JUMP_TABLE_GROWTH` for what dense means.
 //!
 //! # Why the tree compares signed
 //!
@@ -835,7 +835,7 @@ fn test(
 }
 
 /// A dense stretch, as one range check and then a `switch` on the value less the lowest case,
-/// which `crate::lower` turns into a jump through a table.
+/// which `rucc_codegen::lower` turns into a jump through a table.
 ///
 /// The range check is the same one a run is, and it is what lets the `switch` behind it be a table
 /// with no check of its own: every value that gets past it has a cell. A value in the range that
@@ -845,10 +845,10 @@ fn test(
 /// An arm that carries values into the block it goes to gets a block of its own in front of it
 /// that passes them, and the `switch` goes there with nothing on the edge. A jump through a
 /// register has nowhere to put the moves an edge with values on it needs, which is what
-/// `crate::split::indirect` works round for a computed `goto` and what one `switch` sending two
-/// cases to the same block with different values would get wrong, since a block reached from one
-/// jump gets one set of moves. A block per distinct edge is the same thing done before anything
-/// can go wrong, and it is where the moves would have been anyway.
+/// `rucc_codegen::split::indirect` works round for a computed `goto` and what one `switch` sending
+/// two cases to the same block with different values would get wrong, since a block reached from
+/// one jump gets one set of moves. A block per distinct edge is the same thing done before
+/// anything can go wrong, and it is where the moves would have been anyway.
 fn looked_up(
     func: &mut Func,
     of: &Lowering,

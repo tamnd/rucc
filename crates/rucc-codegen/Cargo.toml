@@ -26,6 +26,9 @@ rucc-base.workspace = true
 rucc-cost.workspace = true
 rucc-diag.workspace = true
 rucc-ir.workspace = true
+# The switch clustering, which the wasm back end runs too. Rank 11 against this crate's 12, per
+# `xtask/layers.toml`.
+rucc-legalize.workspace = true
 rucc-mir.workspace = true
 # The block frequencies, which are worked out over the IR and carried down onto the machine
 # blocks by `crate::weights` so that the layout has something to lay a trace along. Rank 10

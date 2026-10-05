@@ -191,7 +191,7 @@ pub mod select;
 pub mod shorten;
 pub mod slots;
 pub mod split;
-pub mod switch;
+pub use rucc_legalize::switch;
 pub mod tail;
 pub mod thunks;
 pub mod trailing;
