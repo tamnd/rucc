@@ -21,7 +21,9 @@
 //!
 //! An empty block, which is a jump to the next thing unless the layout puts it where it falls
 //! through. That is a cost, and it is why an edge with nothing to carry is left alone: there are
-//! no moves to find a place for, so splitting it would buy a jump and nothing else.
+//! no moves to find a place for, so splitting it would buy a jump and nothing else. When the
+//! allocator puts the moves somewhere else after all, the block is empty again, and from `-O1` up
+//! [`crate::layout::forward`] sends the branch past it.
 //!
 //! # The other edge with nowhere to put a move
 //!

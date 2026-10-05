@@ -68,6 +68,16 @@
 //! done for a different reason, and it costs the same jump the second jump would have cost while
 //! leaving every block with at most one.
 //!
+//! # The blocks with nothing in them
+//!
+//! Splitting a critical edge puts an empty block on it for the moves the edge carries, and when
+//! the allocator finds a place for those moves somewhere else, or finds there are none, the block
+//! is still there with nothing in it. Laid out, it is a jump to a jump: the branch goes to it and
+//! it goes on to where the edge went. [`forward`] runs before the order is chosen and sends each
+//! arm to such a block straight to where the block goes, so the branch jumps there itself and the
+//! empty block is reached by nothing. That is what gcc's control flow cleanup calls forwarding an
+//! edge past a forwarder block.
+//!
 //! # The test a comparison makes unnecessary
 //!
 //! Almost every branch a C program writes is on a comparison, and a comparison has already set
@@ -150,6 +160,111 @@ pub fn blocks(
     }
     func.set_block_order(&order);
     func.cold = split.map(|first| order[first]);
+}
+
+/// Sends every arm that goes to a block with nothing in it on to where that block goes, and gives
+/// back how many arms it moved.
+///
+/// Run after allocation and before [`blocks`], and only when the blocks are being put in an order
+/// of their own. See the module documentation for what leaves such a block behind.
+///
+/// A block is passed through when it holds no instruction, takes nothing in and carries nothing
+/// on, and when nothing but its arms says how it is reached: it is not the entry, not a landing
+/// pad and has no name. A chain of them is followed to its end, and a cycle of them, which is a
+/// loop with nothing in it, is left as it is. An arm is not moved when its block already has an
+/// arm to the same place, since a branch whose two arms agree is a test that decides nothing, or
+/// when its block ends in a jump this pass did not write, which is an `asm goto`, a jump an `asm`
+/// template wrote, or a computed `goto` reading a register with no table behind it.
+///
+/// A block that nothing goes to once that is done loses its arm, is marked as one control never
+/// leaves and is said to never run. The layout writes it as its label and nothing else and puts it
+/// behind every block that does run, where it cannot come between a block and the one it falls
+/// into. Not in a function with a computed `goto`, since an address taken of a label is a way in
+/// that no arm shows.
+pub fn forward(func: &mut mir::Func, insts: &BranchInsts, names: &mut Interner) -> usize {
+    let mut opcode =
+        |name: &str| mir::Opcode::new(names.intern(&format!("{}{name}", insts.prefix)));
+    let branch = opcode(insts.cond);
+    let indirect = opcode(insts.indirect);
+    let goto = opcode(insts.goto);
+    let conditional: Vec<mir::Opcode> = insts.conditional.iter().map(|name| opcode(name)).collect();
+    let blocks: Vec<mir::Block> = func.blocks().collect();
+    let entry = func.entry();
+
+    // Where each block that is only a way through leads in the end, or nothing for every other
+    // block. The walk stops after as many steps as there are blocks, which only a cycle takes.
+    let through = |func: &mir::Func, block: mir::Block| -> Option<mir::Block> {
+        let data = &func[block];
+        let [arm] = &data.succs[..] else { return None };
+        let empty = func.terminator(block).is_none() && data.params.is_empty() && !data.dead_end;
+        let named =
+            func.block_name(block).is_some() || func.landings.iter().any(|&(_, pad)| pad == block);
+        (empty && arm.args.is_empty() && !named && Some(block) != entry).then_some(arm.block)
+    };
+    let mut onward = vec![None; func.block_count()];
+    for &block in &blocks {
+        let mut at = block;
+        let mut steps = 0;
+        while let Some(next) = through(func, at) {
+            at = next;
+            steps += 1;
+            if at == block || steps > blocks.len() {
+                at = block;
+                break;
+            }
+        }
+        if at != block {
+            onward[block.index()] = Some(at);
+        }
+    }
+
+    // A jump through a table goes to a place among the arms rather than to a block, so moving the
+    // arm moves where the table goes too. A computed `goto` with no table goes to an address. A
+    // block that ends any other way this pass did not expect keeps its arms, which keeps every
+    // block they go to reached.
+    let tabled = |func: &mir::Func, last: mir::Inst| func.tables.iter().any(|it| it.jump == last);
+    let mut computed = false;
+    let mut moved = 0;
+    for &block in &blocks {
+        let last = func.terminator(block);
+        let op = last.map(|last| func[last].opcode);
+        let ours = match func[block].succs.len() {
+            0 => continue,
+            1 => op.is_none_or(|op| op != indirect && op != goto && !conditional.contains(&op)),
+            2 => op == Some(branch),
+            _ => false,
+        };
+        let ours = ours || last.is_some_and(|last| op == Some(indirect) && tabled(func, last));
+        if !ours {
+            computed |= op == Some(indirect);
+            continue;
+        }
+        for index in 0..func[block].succs.len() {
+            let Some(to) = onward[func[block].succs[index].block.index()] else { continue };
+            if func[block].succs.iter().any(|arm| arm.block == to) {
+                continue;
+            }
+            func.succs_mut(block)[index].block = to;
+            moved += 1;
+        }
+    }
+
+    if !computed {
+        let mut reached = vec![false; func.block_count()];
+        for &block in &blocks {
+            for arm in &func[block].succs {
+                reached[arm.block.index()] = true;
+            }
+        }
+        for &block in &blocks {
+            if onward[block.index()].is_some() && !reached[block.index()] {
+                func.succs_mut(block).clear();
+                func.set_dead_end(block);
+                func.set_weight(block, mir::Weight::NEVER);
+            }
+        }
+    }
+    moved
 }
 
 /// Moves the cold blocks to the end of the order, keeping the order each part was in, and gives
@@ -905,6 +1020,80 @@ mod tests {
     /// The blocks in layout order, by the number each was made with.
     fn order_of(func: &mir::Func) -> Vec<usize> {
         func.blocks().map(mir::Block::index).collect()
+    }
+
+    #[test]
+    fn a_branch_to_an_empty_block_goes_where_the_empty_block_goes() {
+        let (mut names, mut func, made) = blank(4);
+        // An `if` whose else arm is the empty block the edge splitting left, and whose then arm
+        // does something before joining it.
+        branch(&mut func, &mut names, made[0], &[made[3], made[1]]);
+        *func.succs_mut(made[1]) = vec![BlockCall::to(made[2])];
+        let ret = Opcode::new(names.intern("x64.ret"));
+        func.build(made[2], ret).finish();
+        let mov = Opcode::new(names.intern("x64.mov_rr_64"));
+        func.build(made[3], mov)
+            .operand(Operand::write(Reg::physical(RAX), GPR))
+            .operand(Operand::read(Reg::physical(RCX), GPR))
+            .finish();
+        *func.succs_mut(made[3]) = vec![BlockCall::to(made[2])];
+
+        assert_eq!(forward(&mut func, &BRANCH, &mut names), 1);
+
+        let arms: Vec<usize> = func[made[0]].succs.iter().map(|arm| arm.block.index()).collect();
+        assert_eq!(arms, [3, 2]);
+        // Nothing goes to the empty block now, so it goes nowhere either and is laid out as a
+        // label with nothing under it rather than as a jump.
+        assert!(func[made[1]].succs.is_empty());
+        assert!(func[made[1]].dead_end);
+        assert_eq!(func[made[1]].weight, mir::Weight::NEVER);
+    }
+
+    #[test]
+    fn an_empty_block_a_branch_already_has_an_arm_to_is_left_on_its_edge() {
+        let (mut names, mut func, made) = blank(3);
+        // Both arms end at block two, one of them by way of the empty block. Sending that one
+        // there too would leave a branch whose arms agree, which is a test that decides nothing.
+        branch(&mut func, &mut names, made[0], &[made[1], made[2]]);
+        *func.succs_mut(made[1]) = vec![BlockCall::to(made[2])];
+        let ret = Opcode::new(names.intern("x64.ret"));
+        func.build(made[2], ret).finish();
+
+        assert_eq!(forward(&mut func, &BRANCH, &mut names), 0);
+        assert_eq!(func[made[1]].succs.len(), 1);
+        assert!(!func[made[1]].dead_end);
+    }
+
+    #[test]
+    fn a_loop_with_nothing_in_it_is_left_as_it_is() {
+        let (mut names, mut func, made) = blank(2);
+        // `for (;;);`, which is an empty block whose arm is itself.
+        *func.succs_mut(made[0]) = vec![BlockCall::to(made[1])];
+        *func.succs_mut(made[1]) = vec![BlockCall::to(made[1])];
+
+        assert_eq!(forward(&mut func, &BRANCH, &mut names), 0);
+        assert_eq!(func[made[1]].succs[0].block, made[1]);
+    }
+
+    #[test]
+    fn an_empty_block_behind_a_computed_goto_keeps_its_arm() {
+        let (mut names, mut func, made) = blank(4);
+        // The jump through the register goes to block one or block two by an address the
+        // program took, so block one has to stay where that address says even though the branch
+        // in block three can go past it.
+        let jump = Opcode::new(names.intern("x64.jmp_reg"));
+        func.build(made[0], jump).operand(Operand::read(Reg::physical(RAX), GPR)).finish();
+        *func.succs_mut(made[0]) = vec![BlockCall::to(made[1]), BlockCall::to(made[3])];
+        *func.succs_mut(made[1]) = vec![BlockCall::to(made[2])];
+        let ret = Opcode::new(names.intern("x64.ret"));
+        func.build(made[2], ret).finish();
+        branch(&mut func, &mut names, made[3], &[made[1], made[0]]);
+
+        assert_eq!(forward(&mut func, &BRANCH, &mut names), 1);
+        assert_eq!(func[made[0]].succs[0].block, made[1]);
+        assert_eq!(func[made[3]].succs[0].block, made[2]);
+        assert_eq!(func[made[1]].succs[0].block, made[2]);
+        assert!(!func[made[1]].dead_end);
     }
 
     #[test]

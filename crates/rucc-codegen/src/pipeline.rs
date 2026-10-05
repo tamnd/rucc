@@ -1242,6 +1242,13 @@ pub fn compile_recording(
         );
     }
 
+    // Straight in front of the layout, because a block the edge splitting left empty is only known
+    // to be empty once every pass that might put an instruction in it has run, and a block this
+    // marks as one control never leaves is one nothing in between should take for a return.
+    if flags.reorder {
+        layout::forward(&mut func, machine.branch, names);
+    }
+
     // Last, because everything before this finds the blocks a function returns from by looking
     // for the ones that go nowhere, and after this a block that falls through goes nowhere too.
     layout::blocks(&mut func, machine.branch, names, &fusable, flags.reorder);

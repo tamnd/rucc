@@ -5588,6 +5588,31 @@ decl #0 x : int object external static defined
         assert!(!text.contains("\tset"), "{text}");
     }
 
+    /// A list walk whose two exits both end at the one `return`. rucc 0.21 sent each exit to a
+    /// block that was only a jump, through as many as two of them, and the loop's back edge was one
+    /// more. Every branch goes where it is going now.
+    #[test]
+    fn no_branch_goes_to_a_block_that_is_only_a_jump() {
+        let text = optimized(concat!(
+            "struct node { struct node *next; int key; };\n",
+            "struct node *find(struct node *n, int key) {\n",
+            "    while (n && n->key != key)\n",
+            "        n = n->next;\n",
+            "    return n;\n",
+            "}\n",
+        ));
+        let lines: Vec<&str> = text.lines().collect();
+        for pair in lines.windows(2) {
+            let label = pair[0].starts_with(".L") && pair[0].ends_with(':');
+            assert!(
+                !(label && pair[1].starts_with("\tjmp\t")),
+                "{} {} in\n{text}",
+                pair[0],
+                pair[1]
+            );
+        }
+    }
+
     /// A cast between a pointer and an integer as wide as one, which is every one C writes here.
     #[test]
     fn a_cast_between_a_pointer_and_an_integer_leaves_the_value_where_it_is() {
