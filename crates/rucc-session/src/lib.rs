@@ -2754,7 +2754,7 @@ impl Options {
             isa: match target.arch {
                 Arch::X86_64 => Isa::baseline(),
                 // Nothing for i686 yet: x86-64's baseline promises SSE2, which an i686 does not.
-                Arch::Aarch64 | Arch::Riscv64 | Arch::X86 => Isa::NONE,
+                Arch::Aarch64 | Arch::Riscv64 | Arch::X86 | Arch::Wasm32 => Isa::NONE,
             },
             reorder_blocks: None,
             partition_blocks: None,

@@ -29,7 +29,7 @@ use rucc_sema::{Checker, Context as CheckContext};
 use rucc_session::{
     Contract, EmitKind, FileSystem, Options, Padding, Pic, Protector, Session, Visibility,
 };
-use rucc_target::TargetInfo;
+use rucc_target::{TargetInfo, Triple};
 use rucc_tuple::{Arch, ObjectFormat};
 
 use crate::preprocess::render;
@@ -390,6 +390,19 @@ pub fn compile(opts: &Options, name: &str, fs: &dyn FileSystem) -> Compiled {
                         &sess.interner,
                         &sess.target,
                     ));
+                }
+                // The lowering is written for a machine with registers, so a wasm unit stops
+                // here, after the checker, until the wasm backend of #2864 exists.
+                EmitKind::Ir
+                | EmitKind::MirFinal
+                | EmitKind::Asm
+                | EmitKind::Object
+                | EmitKind::Archive
+                | EmitKind::Executable
+                | EmitKind::SafetySummary
+                    if opts.target.arch.is_wasm() =>
+                {
+                    diagnostics.push(no_wasm_backend(opts.target));
                 }
                 EmitKind::Ir
                 | EmitKind::MirFinal
@@ -2221,6 +2234,19 @@ fn refused(why: rucc_asm::Error) -> Vec<Diagnostic> {
         }
         _ => vec![internal(&why.to_string())],
     }
+}
+
+/// The refusal for a wasm target past the checker.
+fn no_wasm_backend(target: Triple) -> Diagnostic {
+    Diagnostic::error(
+        format!(
+            "there is no wasm backend yet, so rucc cannot compile for {}",
+            target.tuple().to_canonical_string()
+        ),
+        Span::DUMMY,
+    )
+    .with_code("E0653")
+    .note("-fsyntax-only and -E work for this target; the backend is tamnd/rucc#2864", Span::DUMMY)
 }
 
 /// A diagnostic about a program this compiler is not finished enough to compile.
@@ -4298,6 +4324,29 @@ decl #0 x : int object external static defined
         assert!(result.failed());
         assert!(result.messages[0].contains("no back end for riscv64"), "{:?}", result.messages);
         assert!(result.text().is_empty());
+    }
+
+    /// A wasm target reads and checks the program, and every output that needs a back end is
+    /// refused with the issue that brings one.
+    #[test]
+    fn a_wasm_target_checks_the_program_and_refuses_to_generate_it() {
+        let source = "int f(int a) { return a; }\n";
+        let mut opts = options();
+        opts.target = "wasm32-wasip1".parse::<Triple>().unwrap();
+        opts.emit = EmitKind::SyntaxOnly;
+        let checked = run(&opts, source);
+        assert!(!checked.failed(), "{:?}", checked.messages);
+        for emit in [EmitKind::Ir, EmitKind::MirFinal, EmitKind::Asm, EmitKind::Object] {
+            opts.emit = emit;
+            let result = run(&opts, source);
+            assert!(result.failed(), "{emit:?}");
+            assert!(
+                result.messages[0].contains("there is no wasm backend yet"),
+                "{emit:?}: {:?}",
+                result.messages
+            );
+            assert!(result.text().is_empty(), "{emit:?}");
+        }
     }
 
     /// AArch64 is written as its own assembly, with a function that calls keeping its return

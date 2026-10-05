@@ -7,6 +7,7 @@ All notable changes are recorded here. The format follows [Keep a Changelog](htt
 ### Added
 
 - `-Zrewriter=egraph` runs `egraph` wherever a level runs `simplify` or `number`. It is the e-graph arm of experiment 7 in section 12.3 of `spec/optimizer/12-egraph.md`: the walk of `-Zrewriter=consed`, with each rewrite added to the class of the value it matched rather than replacing it, and the cheapest member of each class extracted by the costs of section 40. The rules stop once a function has added `EGRAPH_NODES` forms, and `-fopt-info-note` prints how many forms and classes there were. It is off unless asked for. (#2829)
+- rucc reads and checks C for `wasm32-wasip1`, `wasm32-wasip2`, `wasm32-wasip3` and `wasm32-none` (#2863). `--target=` takes `wasm32-wasi`, `wasm32-wasip1`, `wasm32-wasip2`, `wasm32-wasip3`, `wasm32-unknown-unknown` and `wasm32-none`, and the triple keeps the WASI preview. `-fsyntax-only` and `-E` work, and the predefined macros include `__wasm__`, `__wasm32__`, `__wasi__` and `__wasip1__`, `__wasip2__` or `__wasip3__`, with no `__ELF__`, no Unix macros and no PIC macros. The headers come from `include/wasm32-wasip<n>` under `--sysroot`. Output that needs a back end, and a link, is refused with "there is no wasm backend yet", which names the backend issue #2864. Before, every wasm triple was refused with "unknown architecture". `wasm64`, the `threads` variant, an unknown preview, wasm32 with an operating system other than WASI, and WASI with an architecture other than wasm32 are refused, each with its own reason.
 
 ### Changed
 

@@ -2621,6 +2621,8 @@ pub fn parse_args(args: &[String]) -> Result<Action, CliError> {
                     rucc_target::Arch::X86_64 | rucc_target::Arch::X86 => "sysv",
                     rucc_target::Arch::Aarch64 => "lp64",
                     rucc_target::Arch::Riscv64 => "lp64d",
+                    // The C ABI of tool-conventions, which clang calls the MVP ABI.
+                    rucc_target::Arch::Wasm32 => "mvp",
                 };
                 if want != have {
                     return Err(err(format!(
@@ -2964,7 +2966,10 @@ pub fn parse_args(args: &[String]) -> Result<Action, CliError> {
             };
             opts.isa = isa.over(base);
         }
-        rucc_target::Arch::Aarch64 | rucc_target::Arch::Riscv64 | rucc_target::Arch::X86 => {
+        rucc_target::Arch::Aarch64
+        | rucc_target::Arch::Riscv64
+        | rucc_target::Arch::X86
+        | rucc_target::Arch::Wasm32 => {
             if opts.target.arch == rucc_target::Arch::X86 {
                 if let Some(flag) = isa_on {
                     return Err(err(format!(
@@ -3037,7 +3042,7 @@ pub fn parse_args(args: &[String]) -> Result<Action, CliError> {
     // independent executables by default and says the same about `-mcmodel=kernel` on its own.
     if cmodel == rucc_target::CodeModel::Kernel {
         if opts.target.arch != rucc_target::Arch::X86_64
-            || opts.target.os.object_format() != ObjectFormat::Elf
+            || opts.target.object_format() != ObjectFormat::Elf
         {
             return Err(err(format!(
                 "-mcmodel=kernel: {} has no kernel code model, which is x86-64 ELF's",
@@ -3102,7 +3107,7 @@ pub fn parse_args(args: &[String]) -> Result<Action, CliError> {
     // check runs in the epilogue after `%ebx` has been put back. See tamnd/rucc#2247.
     if opts.guard.is_none()
         && opts.target.arch == rucc_target::Arch::X86
-        && opts.target.os.object_format() == ObjectFormat::Elf
+        && opts.target.object_format() == ObjectFormat::Elf
         && opts.pic != Pic::Absolute
     {
         let guard = rucc_target::Guard::in_segment(rucc_target::Segment::Gs, 20);
@@ -4161,7 +4166,7 @@ fn archive_all(opts: &Options, plan: &Plan) -> i32 {
     };
     // Before anything is compiled, because a format this has no container for is worth knowing
     // about in the second it takes to look rather than after the whole compilation.
-    let flavour = match opts.target.os.object_format() {
+    let flavour = match opts.target.object_format() {
         ObjectFormat::Elf => rucc_archive::Flavour::Gnu,
         ObjectFormat::Coff => rucc_archive::Flavour::Coff,
         ObjectFormat::MachO => rucc_archive::Flavour::Bsd,
@@ -4886,7 +4891,17 @@ pub fn run(args: &[String]) -> i32 {
 /// fail at the link with a page of undefined `__rucc_check_` names. Saying so before the link
 /// is kinder until the port is done. Only the link is refused: an object or a listing built
 /// with the checks in is still what was asked for, and is what a test of the instrumentation reads.
+///
+/// A wasm target is the other case. There is no wasm backend yet, so there is no object to link,
+/// and the refusal says that rather than that there is no link line.
 fn unlinkable(opts: &Options) -> Option<String> {
+    if opts.target.arch.is_wasm() {
+        return Some(format!(
+            "there is no wasm backend yet, so rucc cannot compile or link for {}. -fsyntax-only \
+             and -E work for this target; the backend is tamnd/rucc#2864",
+            opts.target.tuple().to_canonical_string()
+        ));
+    }
     (opts.safety.instruments() && opts.target.os == rucc_target::Os::Windows).then(|| {
         format!(
             "-fsafety={}: the checked modes are not available on a Windows target yet, because \
@@ -6115,6 +6130,19 @@ mod tests {
         assert_eq!(unlinkable(&opts), None);
         let (opts, _) = compile(&["--target=x86_64-linux-gnu", "-fsafety=detect", "a.c"]);
         assert_eq!(unlinkable(&opts), None);
+    }
+
+    /// A wasm target has no back end yet, so a link is refused before anything is compiled, and
+    /// the refusal names what still works.
+    #[test]
+    fn a_wasm_target_is_refused_at_the_link() {
+        for target in ["wasm32-wasip1", "wasm32-wasip2", "wasm32-wasip3", "wasm32-unknown-unknown"]
+        {
+            let (opts, _) = compile(&[&format!("--target={target}"), "a.c"]);
+            let why = unlinkable(&opts).expect("a refusal");
+            assert!(why.starts_with("there is no wasm backend yet"), "{why}");
+            assert!(why.contains("-fsyntax-only"), "{why}");
+        }
     }
 
     #[test]
