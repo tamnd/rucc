@@ -51,8 +51,10 @@
 //! is the twenty routines libatomic exports at a width no machine reaches in one instruction and the
 //! table of locks under them: the four with no width in their name that take a size and work through
 //! pointers, and the sixteen at sixteen bytes that take the value itself, four of them the same
-//! operations and twelve of them the read and update pairs. The rest of section 12.8, which is the
-//! remaining `__int128` arithmetic and the eighty bit conversions, is not written, and the set is
+//! operations and twelve of them the read and update pairs. The 128-bit multiply and the three
+//! shifts are here too, with the multiply that says whether it overflowed, which are what wasm32
+//! calls for an `__int128`, because it holds one in two halves and has no instruction over both.
+//! The rest of section 12.8, which is the eighty bit conversions, is not written, and the set is
 //! driven by what the target ladder in `spec/14-target-ladder.md` actually calls.
 
 #![no_std]
@@ -65,9 +67,9 @@
 // that, so the warning is on the oldest compiler and on none of the newer ones. There is nothing
 // here for it to be about. These routines exist because rucc emits calls to them for an `__int128`,
 // and what rucc passes one in is the register pair the psABI names, which is the pair rustc passes
-// it in as well. `atomic`, `convert` and `div` are the modules it lands on. The three modules that
-// carry the same attribute of their own carry it for vector types instead, which is a separate
-// question and one they answer where they ask it.
+// it in as well. `atomic`, `convert`, `div` and `wide` are the modules it lands on. The three
+// modules that carry the same attribute of their own carry it for vector types instead, which is a
+// separate question and one they answer where they ask it.
 #![allow(improper_ctypes_definitions)]
 #![doc(html_root_url = "https://docs.rs/rucc-builtins/0.22.1")]
 
@@ -78,6 +80,7 @@ pub mod double;
 pub mod float;
 pub mod mem;
 pub mod quad;
+pub mod wide;
 
 // The tests allocate and compare, which `core` cannot do. The crate itself never sees this.
 #[cfg(test)]
