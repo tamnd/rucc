@@ -154,14 +154,26 @@ mod tests {
     fn a_comparison_against_a_constant_is_written_for_every_one_against_a_register() {
         let mut against_register = Vec::new();
         let mut against_constant = Vec::new();
+        let mut differences = 0;
         for rule in TABLE.rules {
             let Some(rest) = rule.pattern.strip_prefix("(icmp_") else { continue };
             let (condition, operands) = rest.split_once(".i1 ").expect("a comparison takes two");
             let width = operands
                 .strip_prefix("(value.")
                 .and_then(|rest| rest.split_once(' '))
-                .map(|(width, _)| width)
-                .expect("a comparison reads a value first");
+                .map(|(width, _)| width);
+            let Some(width) = width else {
+                // A comparison against zero of a difference, which takes the subtraction and is
+                // counted on its own.
+                assert!(
+                    operands.starts_with("(sub."),
+                    "line {}: {} reads neither a value nor a difference first",
+                    rule.line,
+                    rule.pattern
+                );
+                differences += 1;
+                continue;
+            };
             let named = format!("{condition}.{width}");
             if operands.contains("(iconst.") {
                 // The constant is the second operand and never the first, because a comparison is
@@ -181,6 +193,10 @@ mod tests {
         against_constant.sort_unstable();
         assert_eq!(against_register, against_constant);
         assert_eq!(against_register.len(), 40, "ten conditions at four widths");
+        assert_eq!(
+            differences, 8,
+            "equal and not equal at two widths, of a register and a constant"
+        );
     }
 
     /// The instructions the calling convention writes rather than a rule.

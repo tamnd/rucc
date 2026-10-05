@@ -66,6 +66,13 @@ pub enum Shown {
     Var,
     /// As the instruction that computed it, so a rule can be about two instructions at once.
     Expand,
+    /// As another instruction that computes the same value, the one at that position in
+    /// [`Func::forms`], so a rule can be about a form of the operand the rewriter did not keep.
+    ///
+    /// Otherwise this is [`Shown::Expand`]: the form is shown with its own operands as registers or
+    /// constants, one level down, and what a match takes is the instruction that really computes
+    /// the operand, since the form computes the same thing in its place.
+    Form(u8),
 }
 
 /// How every operand of one instruction is shown.
@@ -189,7 +196,7 @@ impl<'a> Terms<'a> {
             Shown::Var if self.constant(value).is_none() => value_head(ty, self.address)?,
             Shown::Var => return None,
             // An expansion is not a leaf, and nothing asks this about one.
-            Shown::Expand => return None,
+            Shown::Expand | Shown::Form(_) => return None,
         };
         Some((name, 1))
     }
@@ -199,7 +206,7 @@ impl<'a> Terms<'a> {
     fn leaf_arg(&self, value: Value, shown: Shown) -> Term {
         match shown {
             Shown::Const => self.constant(value).map_or(Term::Reg(value), Term::Num),
-            Shown::Reg | Shown::Var | Shown::Expand => Term::Reg(value),
+            Shown::Reg | Shown::Var | Shown::Expand | Shown::Form(_) => Term::Reg(value),
         }
     }
 
@@ -231,10 +238,14 @@ impl<'a> Terms<'a> {
         }
     }
 
-    /// The instruction an expanded operand of the root was computed by, with its operands.
+    /// The instruction an expanded operand of the root was computed by, with its operands, or
+    /// the form of it the plan asked for.
     fn expansion(&self, index: u8) -> Option<(Inst, &[Value])> {
         let value = self.arg_value(index)?;
-        let inst = self.def_of(value)?;
+        let inst = match self.plan.get(usize::from(index)) {
+            Some(&Shown::Form(form)) => self.func.forms(value).nth(usize::from(form))?,
+            _ => self.def_of(value)?,
+        };
         Some((inst, self.args(inst)))
     }
 }
@@ -256,7 +267,7 @@ impl Subject for Terms<'_> {
             Term::Arg(index) => {
                 let value = self.arg_value(index)?;
                 match self.plan[usize::from(index)] {
-                    Shown::Expand => {
+                    Shown::Expand | Shown::Form(_) => {
                         let (inst, args) = self.expansion(index)?;
                         Some((head_of(self.func, inst, self.address)?, args.len()))
                     }
@@ -284,7 +295,7 @@ impl Subject for Terms<'_> {
                 Term::Arg(index)
             }
             Term::Arg(outer) => match self.plan[usize::from(outer)] {
-                Shown::Expand => Term::Deep(outer, index),
+                Shown::Expand | Shown::Form(_) => Term::Deep(outer, index),
                 shown => {
                     self.arg_value(outer).map_or(Term::Num(0), |value| self.leaf_arg(value, shown))
                 }
