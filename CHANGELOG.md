@@ -4,6 +4,14 @@ All notable changes are recorded here. The format follows [Keep a Changelog](htt
 
 ## Unreleased
 
+## 0.24.7
+
+`stdcall` and `fastcall` now work on i686 Linux as gcc makes them, and the wasm code for the SQLite shell is 2.6% smaller with the same answers.
+
+### Added
+
+- `stdcall` and `fastcall` on i686 Linux, as gcc gives them there and not only on mingw (#2965). `stdcall` uses the convention of the unit with the callee popping the stack, so `-mregparm` and `-freg-struct-return` still apply. `fastcall` is the mingw convention. A `fastcall` structure argument now spends one of `ecx` and `edx` for each of its words, as gcc does, on mingw as well. `fastcall` with `regparm` is an error, and `stdcall` with a `regparm` count that is not the one of the unit is refused with E0519. Before this, rucc took both attributes on i686 Linux and made a cdecl call.
+
 ### Changed
 
 - On wasm at `-O1` and above, a load of 8 or 16 bits whose uses read it sign extended more often than zero extended is `i32.load8_s` or `i32.load16_s`, as clang writes it, and the `i32.extend8_s` or `i32.extend16_s` after it goes away (#2866). The SQLite shell has 528 such loads and is 673 bytes smaller.
@@ -11,6 +19,10 @@ All notable changes are recorded here. The format follows [Keep a Changelog](htt
 - On wasm, a compare for equality with zero or the null pointer is `i32.eqz` or `i64.eqz`, as clang writes it (#2866). At `-O1` and above, a branch on a compare of a 32-bit value with zero reads the value as it is, with an `i32.eqz` after it when the branch is taken on zero. The SQLite shell had 6,341 `i32.const 0` and `i32.eq` pairs and 6,395 `i32.const 0` and `i32.ne` pairs. It now has none of the first and 735 of the second, and it is 35,884 bytes smaller.
 - On wasm, a function that gives a value and ends with a `return` or an `unreachable` has no other `unreachable` before its `end` (#2866). The SQLite shell is 863 bytes smaller.
 - On wasm, a narrow `and` with an operand whose upper bits are zero, and a narrow `or`, `xor` or `select` of two such operands, is known to have its upper bits zero, and so is a narrow `lshr`, `udiv` or `urem`. A bit field such as `(flags >> 2) & 3` is then compared or widened with no second mask (#2866). The SQLite shell has 426 fewer `i32.and` masks of 255 or 65535 and is 4,460 bytes smaller.
+
+### Fixed
+
+- `rucc-targets` builds again after #2965 renamed a variant of the ABI table, so `cargo xtask provenance` works on main (#3037).
 
 ## 0.24.6
 
