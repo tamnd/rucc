@@ -5,16 +5,60 @@ loader    none
 sysroot   <cache>/sysroots/wasm32-wasip3
 
 [static]
-  refused: wasm32-wasip3 is linked into a component by wasm-component-ld, and rucc does not write that line yet (tamnd/rucc#2868). -c writes the object, and wasm32-wasip1 links now
+  -o
+  main
+  -m
+  wasm32
+  <cache>/sysroots/wasm32-wasip3/lib/crt1-command.o
+  -L<cache>/sysroots/wasm32-wasip3/lib
+  main.o
+  --cooperative-threading
+  <cache>/sysroots/wasm32-wasip3/lib/libpthread.a
+  <cache>/sysroots/wasm32-wasip3/lib/libsetjmp.a
+  <cache>/sysroots/wasm32-wasip3/lib/libc.a
+  <builtins>/librucc_builtins.a
 
 [static-pie]
-  refused: wasm32-wasip3 is linked into a component by wasm-component-ld, and rucc does not write that line yet (tamnd/rucc#2868). -c writes the object, and wasm32-wasip1 links now
+  -o
+  main
+  -m
+  wasm32
+  <cache>/sysroots/wasm32-wasip3/lib/crt1-command.o
+  -L<cache>/sysroots/wasm32-wasip3/lib
+  main.o
+  --cooperative-threading
+  <cache>/sysroots/wasm32-wasip3/lib/libpthread.a
+  <cache>/sysroots/wasm32-wasip3/lib/libsetjmp.a
+  <cache>/sysroots/wasm32-wasip3/lib/libc.a
+  <builtins>/librucc_builtins.a
 
 [dynamic]
-  refused: wasm32-wasip3 is linked into a component by wasm-component-ld, and rucc does not write that line yet (tamnd/rucc#2868). -c writes the object, and wasm32-wasip1 links now
+  -o
+  main
+  -m
+  wasm32
+  <cache>/sysroots/wasm32-wasip3/lib/crt1-command.o
+  -L<cache>/sysroots/wasm32-wasip3/lib
+  main.o
+  --cooperative-threading
+  <cache>/sysroots/wasm32-wasip3/lib/libpthread.a
+  <cache>/sysroots/wasm32-wasip3/lib/libsetjmp.a
+  <cache>/sysroots/wasm32-wasip3/lib/libc.a
+  <builtins>/librucc_builtins.a
 
 [dynamic-no-pie]
-  refused: wasm32-wasip3 is linked into a component by wasm-component-ld, and rucc does not write that line yet (tamnd/rucc#2868). -c writes the object, and wasm32-wasip1 links now
+  -o
+  main
+  -m
+  wasm32
+  <cache>/sysroots/wasm32-wasip3/lib/crt1-command.o
+  -L<cache>/sysroots/wasm32-wasip3/lib
+  main.o
+  --cooperative-threading
+  <cache>/sysroots/wasm32-wasip3/lib/libpthread.a
+  <cache>/sysroots/wasm32-wasip3/lib/libsetjmp.a
+  <cache>/sysroots/wasm32-wasip3/lib/libc.a
+  <builtins>/librucc_builtins.a
 
 [shared]
   refused: shared libraries on wasm (dylink.0) are not supported yet, so wasm32-wasip3 cannot be linked with -shared. A module that the host calls into is -mexec-model=reactor
