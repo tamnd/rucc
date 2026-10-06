@@ -33,6 +33,7 @@
 
 #![doc(html_root_url = "https://docs.rs/rucc-cost/0.24.8")]
 
+pub mod badness;
 pub mod cost;
 pub mod cycles;
 pub mod heuristics;

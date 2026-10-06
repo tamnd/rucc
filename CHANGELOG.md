@@ -4,6 +4,10 @@ All notable changes are recorded here. The format follows [Keep a Changelog](htt
 
 ## Unreleased
 
+### Added
+
+- From `-O2` up the inliner has the second pass of section 33.7, which is gcc's `inline_small_functions` (#2897). The calls the first pass found too large go in a heap ordered by the badness of section 33.4, which the new `rucc_cost::badness` computes, and the least bad is taken first. A call over its limit is taken when the copy knows a loop's count or stride, turns a call through a parameter into a direct one, or answers a `__builtin_constant_p`, each of which raises the limit the way gcc's hints do, or when it saves enough of the time the call and its caller take. The unit may grow by 40 percent and a large caller by 100 percent, and a call either bound stops says so under `-fopt-info`. A count every call passes gives no hint, since gcc's `ipa-cp` has made it a constant in the body before its inliner asks. With gcc 16, `mix` called with a known loop count is copied and with an unknown one is not, and the same holds for `apply` given the address of a function and a pointer it was handed. The parameters are in `heuristics.rs` with their `-O3` values, and `-fno-inline-small-functions` turns the pass off. A function that runs once each time the program does, which is `main` and a `static` function only called outside loops from code that runs once, is copied only where the program does not grow by it, so a large function with a loop that only `main` calls stays a call, as it does with gcc.
+
 ### Changed
 
 - Loop invariant code motion and global code motion also leave a pointer a small constant past another where it is when what reads it is another address in the same block, which is how `h->nodes[i]` on a flexible array is written. PostgreSQL's binaryheap `sift_up` held `h->nodes` in a register across the comparator call in its loop and spilled it.
