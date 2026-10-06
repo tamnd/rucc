@@ -6,6 +6,7 @@ All notable changes are recorded here. The format follows [Keep a Changelog](htt
 
 ### Added
 
+- An extended `asm` on AArch64 takes away only the registers its clobber list names and its text spells (#3110), as on x86 since #2358 and as gcc reads it. Every template used to be taken for a call, so its operands went in registers a call keeps, and each of the arm64 kernel's LSE atomics saved and restored two of them around one `ldadd`. A template with a `bl` or `blr` in it and basic assembly still take every register a call may write.
 - `cargo xtask sweep` and `cargo xtask passoff` run the corpus's threshold sweep and pass off measurement against the compiler this tree builds, with GCC 16 as the reference, for #2970 and #2968. The corpus pin moves to tamnd/rucc-corpus@60c8fd16, which has both commands and the short-circuit shape for `rangeswitch`.
 
 ### Changed
