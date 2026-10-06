@@ -31,6 +31,7 @@
 
 use std::fmt;
 
+mod atomic;
 mod neon;
 
 /// How much of a general purpose register an instruction reads or writes.
@@ -722,6 +723,9 @@ impl At<'_> {
         let m = self.mnemonic;
         if neon::wanted(m, values) {
             return self.neon(values).map(|word| (word, None));
+        }
+        if let Some(atomic) = atomic::wanted(m) {
+            return self.atomic(atomic, values).map(|word| (word, None));
         }
         if let Some(cond) = m.strip_prefix("b.") {
             let cond = Cond::named(cond).ok_or_else(|| self.unwritten())?;
