@@ -2273,6 +2273,48 @@ mod tests {
         assert!(text.contains("$xmm"), "{text}");
     }
 
+    /// Four `int` multiplied lane by lane, which SSE2 has no one instruction for. Each product is
+    /// two `pmuludq`, a `pshufd` to bring the low halves together and a `punpckldq` to put the
+    /// lanes back in order, and a multiply by a splat leaves the splat as it is for the odd lanes.
+    #[test]
+    fn four_ints_are_multiplied_in_the_vector_registers() {
+        let (mut names, mut source, block, args) = blank(&[Type::PTR, Type::PTR]);
+        let i32x4 = Type::vector(Type::int(32), 4);
+        let prime = source.add_imm(ir::Imm::int(16_777_619, Type::int(32)));
+        let mut build = Builder::new(&mut source, block);
+        let info = rucc_ir::MemInfo {
+            size: 16,
+            align: 16,
+            order: rucc_ir::MemOrder::NotAtomic,
+            tbaa: None,
+            owns: 0,
+            restrict: Restrict::NONE,
+        };
+        let x = build.load(i32x4, args[0], info, ir::Flags::default());
+        let y = build.load(i32x4, args[1], info, ir::Flags::default());
+        let product = build.binary(Opcode::Mul, x, y, ir::Flags::default());
+        let splat =
+            ir::InstData { extra: ir::Extra::Imm(prime), ..ir::InstData::new(Opcode::Splat) };
+        let splat = build.value(splat, i32x4);
+        let scaled = build.binary(Opcode::Mul, product, splat, ir::Flags::default());
+        build.store(scaled, args[0], info, ir::Flags::default());
+        build.ret(&[]);
+
+        let machine = Machine::x86_64(&SYSV);
+        let out =
+            compile(&mut source, &mut names, &machine, &Elsewhere::default(), Flags::default())
+                .expect("a multiply of four int is written by name");
+
+        let text = mir::print_func(&out, &names, &REGS);
+        let count = |name: &str| text.matches(name).count();
+        assert_eq!(count("x64.pmuludq_rr"), 4, "{text}");
+        assert_eq!(count("x64.punpckldq_rr"), 2, "{text}");
+        // Two for the odd lanes of `x` and `y`, one for the odd lanes of their product and none
+        // for the splat's, two for the halves of each multiply and one that spreads the constant
+        // across the splat.
+        assert_eq!(count("x64.pshufd_ri"), 2 + 1 + 2 * 2 + 1, "{text}");
+    }
+
     /// Lanes read, replaced and put in another order, which is a `pshufd` and the moves between the
     /// two files and nothing through memory but the loads and stores the program asked for.
     #[test]

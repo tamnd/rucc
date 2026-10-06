@@ -4570,14 +4570,16 @@ impl<'u> Body<'_, 'u> {
         }
     }
 
-    /// A lanewise operator done on the whole vector at once, where the back end has one
-    /// instruction for it, and whether it was.
+    /// A lanewise operator done on the whole vector at once, where the back end has a way to, and
+    /// whether it was.
     ///
     /// The vectors that fill one sixteen byte register with `int` or `long` lanes, under an add, a
     /// subtract or one of the three bitwise operators, on x86-64, which is where the rules for
-    /// them are so far (`tamnd/rucc#2320`). Both operands are read whole, the operator is one
-    /// instruction and the answer is written whole. The accesses name no type, because the lanes
-    /// around them are written through the lane's type and the two have to be seen to overlap.
+    /// them are so far (`tamnd/rucc#2320`), and a multiply of four `int`, which the back end
+    /// writes as the few instructions gcc does. Both operands are read whole, the operator is done
+    /// on the whole register and the answer is written whole. The accesses name no type, because
+    /// the lanes around them are written through the lane's type and the two have to be seen to
+    /// overlap.
     #[allow(clippy::too_many_arguments)]
     fn whole_vector(
         &mut self,
@@ -4596,6 +4598,7 @@ impl<'u> Body<'_, 'u> {
             BinaryOp::BitAnd => Opcode::And,
             BinaryOp::BitOr => Opcode::Or,
             BinaryOp::BitXor => Opcode::Xor,
+            BinaryOp::Mul => Opcode::Mul,
             _ => return false,
         };
         if self.target().tuple.arch() != Arch::X86_64 || counts != lane {
@@ -4609,6 +4612,11 @@ impl<'u> Body<'_, 'u> {
         }
         let one = self.value_type(lane, span);
         if !one.is_int() || !matches!((one.bits(), lanes), (32, 4) | (64, 2)) {
+            return false;
+        }
+        // SSE2 multiplies four `int` in a few instructions and has nothing for two `long` short of
+        // taking each apart, so those stay a lane at a time.
+        if opcode == Opcode::Mul && one.bits() != 32 {
             return false;
         }
         let whole = Type::vector(one, u32::try_from(lanes).unwrap_or(0));

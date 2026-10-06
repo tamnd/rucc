@@ -1386,6 +1386,8 @@ static TEXT: &[(&str, &[Written])] = &[
     ("pand_rr", &[spell("pand", &[Xmm(2), Xmm(0)])]),
     ("por_rr", &[spell("por", &[Xmm(2), Xmm(0)])]),
     ("pxor_rr", &[spell("pxor", &[Xmm(2), Xmm(0)])]),
+    ("pmuludq_rr", &[spell("pmuludq", &[Xmm(2), Xmm(0)])]),
+    ("punpckldq_rr", &[spell("punpckldq", &[Xmm(2), Xmm(0)])]),
     ("punpcklqdq_rr", &[spell("punpcklqdq", &[Xmm(2), Xmm(0)])]),
     ("movss_rr", &[spell("movss", &[Xmm(2), Xmm(0)])]),
     ("movsd_rr", &[spell("movsd", &[Xmm(2), Xmm(0)])]),

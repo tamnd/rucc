@@ -2441,6 +2441,12 @@ pub static INSTS: &[(&str, Form)] = &[
     ("pand_rr", AluVec),
     ("por_rr", AluVec),
     ("pxor_rr", AluVec),
+    // The two halves of a multiply of four `int`, which SSE2 has no one instruction for. The first
+    // multiplies lanes zero and two into two products of sixty four bits, and the second takes the
+    // low lanes of two registers in turn, which is how the low halves of those products are put
+    // back together.
+    ("pmuludq_rr", AluVec),
+    ("punpckldq_rr", AluVec),
     // Lanes. The unpack puts the low half of the second register in the high half of the first,
     // the two scalar moves put the low lane of the second in the low lane of
     // the first and keep the rest, and the shuffle is any order of four lanes a byte can say.
@@ -2652,7 +2658,7 @@ mod tests {
         // Every head in the model file, which is what the rule set may write and what
         // `rucc-verify` has an answer for. The two lists are checked against each other by
         // `rucc-codegen`, which is the crate that can read the rule set.
-        assert_eq!(described, 793);
+        assert_eq!(described, 795);
     }
 
     #[test]

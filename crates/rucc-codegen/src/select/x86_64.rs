@@ -364,13 +364,17 @@ mod tests {
     /// carries beside the instruction.
     const HINT: &[&str] = &["prefetch_nta", "prefetch_t0", "prefetch_t1", "prefetch_t2"];
 
-    /// The instructions a lane is moved with, and the shifts of every lane by one count.
+    /// The instructions a lane is moved with, the shifts of every lane by one count, and the two a
+    /// multiply of four `int` is put together from.
     ///
     /// Written by name in `crate::lower` for the prefetch's reason: which lane, or how far, is a
-    /// number beside the instruction, and a pattern matches on an opcode and a type.
+    /// number beside the instruction, and a pattern matches on an opcode and a type. The multiply
+    /// is several instructions, and a rule writes one.
     const LANES: &[&str] = &[
         "pshufd_ri",
         "punpcklqdq_rr",
+        "punpckldq_rr",
+        "pmuludq_rr",
         "movss_rr",
         "movsd_rr",
         "pslld_ri",
