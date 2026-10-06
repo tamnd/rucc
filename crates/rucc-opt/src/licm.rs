@@ -90,8 +90,9 @@
 //!
 //! A constant and the address of a symbol are free, and a free value moves only as a passenger of
 //! something that is not. So is a pointer a small constant past another that only loads and stores
-//! in its own block read, because each of those takes the constant into its address. That is arranged in `trim`, which is also where the reason it cannot
-//! simply be refused up front is written down.
+//! and other addresses in its own block read, because each of those takes the constant into its
+//! address. That is arranged in `trim`, which is also where the reason it cannot simply be refused
+//! up front is written down.
 //!
 //! # What this does not do yet
 //!
@@ -739,12 +740,13 @@ impl Job<'_> {
 ///
 /// Two kinds ride along. A constant or the address of a symbol costs nothing to work out again, and
 /// neither does an address the loads and stores reading it fold, so moving one out of a loop on its
-/// own buys nothing and costs a register held for the length of the loop. It still has to be in the plan while the plan is being made, because a load of a global is
-/// only invariant once the address it reads is going with it, and refusing the address up front
-/// would refuse the load as well. The other kind is `passengers`, the ones a full loop would have
-/// turned down on their own: a cheap computation under pressure is worth moving when something
-/// expensive downstream is waiting on it and is not worth moving otherwise, and what reads it has
-/// not been read yet at the point it is decided. Both come out here if nobody boarded behind them.
+/// own buys nothing and costs a register held for the length of the loop. It still has to be in the
+/// plan while the plan is being made, because a load of a global is only invariant once the address
+/// it reads is going with it, and refusing the address up front would refuse the load as well. The
+/// other kind is `passengers`, the ones a full loop would have turned down on their own: a cheap
+/// computation under pressure is worth moving when something expensive downstream is waiting on it
+/// and is not worth moving otherwise, and what reads it has not been read yet at the point it is
+/// decided. Both come out here if nobody boarded behind them.
 ///
 /// Backwards, because the plan is in dependency order and a passenger is wanted by something after
 /// it. One walk answers the whole chain for the same reason the invariance walk does, and a chain
@@ -864,7 +866,7 @@ fn bounds_a_lifetime(func: &Func, inst: Inst) -> bool {
 }
 
 /// The `ptr_add`s of a small constant that nothing reads but loads and stores in the same block,
-/// each of them at that address.
+/// each of them at that address, and other `ptr_add`s in the same block, each of them adding to it.
 ///
 /// The backend writes the constant into the displacement of each of those loads and stores, so
 /// where it stands the `ptr_add` is no instruction at all. Moved out of a loop it is a register
@@ -872,6 +874,11 @@ fn bounds_a_lifetime(func: &Func, inst: Inst) -> bool {
 /// to leave alone, which is one more push and pop each time the function runs. PostgreSQL's
 /// `list_free_deep` held the address of a list's length and the address of its elements that
 /// way, around a loop that calls `pfree`, and its frame was 48 bytes against gcc's 8.
+///
+/// A `ptr_add` that adds to it is the same answer one step further out. `h->nodes[i]` on a flexible
+/// array is the array's offset added first and the scaled subscript added to that, and x86 writes
+/// the two together as `32(%rbx,%rcx,8)` in the load at the end. PostgreSQL's binaryheap `sift_up`
+/// held `h->nodes` in a register across the comparator call in its loop, and spilled it.
 ///
 /// Small is what every target puts in a load without help, which on aarch64 is the unscaled
 /// range below and the scaled one above. Past it the add stays in the loop as an add, which is
@@ -898,7 +905,7 @@ pub(crate) fn displacements(func: &Func) -> Set<Inst> {
     for block in func.blocks() {
         for inst in func.insts(block) {
             let at = match func[inst].opcode {
-                Opcode::Load => Some(0),
+                Opcode::Load | Opcode::PtrAdd => Some(0),
                 Opcode::Store => Some(1),
                 _ => None,
             };
@@ -1541,6 +1548,25 @@ mod tests {
         assert_eq!(lives_in(&it.func, read), it.entry);
         assert_eq!(lives_in(&it.func, at), it.entry);
         assert!(position(&it.func, at) < position(&it.func, read));
+        sound(&it.func, &mut it.names);
+    }
+
+    #[test]
+    fn an_address_the_next_address_adds_to_stays_with_it() {
+        // `h->nodes[i]` with `i` read in the loop. The 32 the array is into the structure goes in
+        // the displacement of the load at the end along with the scaled subscript, so it is no
+        // instruction where it is and a register held across the loop in front of it.
+        let mut it = counted(0);
+        let mut build = Builder::new(&mut it.func, it.body);
+        let i = build.load(Type::int(64), it.pointer, record(8), Flags::NONE);
+        let thirty_two = build.iconst(Type::int(64), 32);
+        let nodes = build.binary(Opcode::PtrAdd, it.pointer, thirty_two, Flags::NONE);
+        let at = build.binary(Opcode::PtrAdd, nodes, i, Flags::NONE);
+        build.load(Type::int(64), at, record(8), Flags::NONE);
+        tucked(&mut it.func, it.body);
+
+        hoist(&mut it.func, &mut Fuel::unlimited());
+        assert_eq!(lives_in(&it.func, nodes), it.body, "it stays with what adds to it");
         sound(&it.func, &mut it.names);
     }
 

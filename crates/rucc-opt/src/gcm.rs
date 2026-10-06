@@ -728,6 +728,40 @@ block2:
     }
 
     #[test]
+    fn an_address_the_next_address_adds_to_stays_in_the_loop() {
+        // `h->nodes[i]`: the array's offset is added first and the scaled subscript to that, and
+        // the load folds both.
+        let out = moved(
+            r#"
+func @f(ptr, i32) -> i64, linkage(external) {
+block0(%0: ptr, %1: i32):
+    %2 = iconst.i32 0
+    %3 = iconst.i64 32
+    %4 = iconst.i64 3
+    %5 = iconst.i32 1
+    %6 = iconst.i64 0
+    jump block1(%2, %6)
+
+block1(%7: i32, %8: i64):
+    %9 = ptr_add %0, %3
+    %10 = sext.i64 %7
+    %11 = shl %10, %4
+    %12 = ptr_add %9, %11
+    %13 = load.i64 %12, align 8
+    %14 = add %8, %13
+    %15 = add %7, %5
+    %16 = icmp slt %15, %1
+    br_if %16, block1(%15, %14), block2
+
+block2:
+    return %14
+}
+"#,
+        );
+        assert_eq!(block_of(&out, "ptr_add"), "block1", "{out}");
+    }
+
+    #[test]
     fn an_address_kept_as_a_value_moves_in_front_of_the_loop() {
         let out = moved(
             r#"
