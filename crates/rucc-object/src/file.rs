@@ -742,6 +742,9 @@ pub fn write(
             section: SymbolSection::Undefined,
             flags: SymbolFlags::None,
         });
+        if let Some(&(_, visibility)) = data.unseen.iter().find(|(unseen, _)| unseen == name) {
+            flavour.see(&mut obj, id, Binding::Global, visibility);
+        }
         symbols.insert(name.clone(), id);
     }
 
@@ -2256,7 +2259,16 @@ mod tests {
             bytes: 4,
         };
         let apart = vec![apart(0, ".L1", ".L0"), apart(4, ".L0", ".L1")];
-        (text, Data { apart, exports: Vec::new(), weak: Vec::new(), objects: vec![table] })
+        (
+            text,
+            Data {
+                apart,
+                exports: Vec::new(),
+                weak: Vec::new(),
+                unseen: Vec::new(),
+                objects: vec![table],
+            },
+        )
     }
 
     #[test]
@@ -2322,6 +2334,7 @@ mod tests {
             apart: Vec::new(),
             exports: Vec::new(),
             weak: Vec::new(),
+            unseen: Vec::new(),
             objects: vec![object],
         };
         write(&Text::default(), &data, &[], &target(), Output::default(), &Info::default())
@@ -2426,7 +2439,13 @@ mod tests {
             variable("x", Place::Named(".init_array".to_owned(), Holds::Written)),
             variable("y", Place::Named(".init_array".to_owned(), Holds::Written)),
         ];
-        let data = Data { apart: Vec::new(), exports: Vec::new(), weak: Vec::new(), objects };
+        let data = Data {
+            apart: Vec::new(),
+            exports: Vec::new(),
+            weak: Vec::new(),
+            unseen: Vec::new(),
+            objects,
+        };
         let bytes =
             write(&Text::default(), &data, &[], &target(), Output::default(), &Info::default())
                 .expect("an object");
@@ -2457,6 +2476,7 @@ mod tests {
                 apart: Vec::new(),
                 exports: Vec::new(),
                 weak: Vec::new(),
+                unseen: Vec::new(),
                 objects: vec![variable("x", place.clone())],
             };
             let bytes = write(&Text::default(), &data, &[], &target(), sections, &Info::default())
@@ -2483,7 +2503,13 @@ mod tests {
         let objects = vec![variable("m", Place::Merged), variable("n", named)];
         let bytes = write(
             &Text::default(),
-            &Data { apart: Vec::new(), exports: Vec::new(), weak: Vec::new(), objects },
+            &Data {
+                apart: Vec::new(),
+                exports: Vec::new(),
+                weak: Vec::new(),
+                unseen: Vec::new(),
+                objects,
+            },
             &[],
             &target(),
             sections,
@@ -2520,7 +2546,13 @@ mod tests {
         let objects = vec![variable("first", Place::Written), pointer];
         let bytes = write(
             &Text::default(),
-            &Data { apart: Vec::new(), exports: Vec::new(), weak: Vec::new(), objects },
+            &Data {
+                apart: Vec::new(),
+                exports: Vec::new(),
+                weak: Vec::new(),
+                unseen: Vec::new(),
+                objects,
+            },
             &[],
             &target(),
             sections,
@@ -2550,6 +2582,7 @@ mod tests {
             apart: Vec::new(),
             exports: Vec::new(),
             weak: Vec::new(),
+            unseen: Vec::new(),
             objects: vec![variable("first", place.clone()), variable("second", place)],
         };
         let bytes =
@@ -2566,6 +2599,7 @@ mod tests {
             apart: Vec::new(),
             exports: Vec::new(),
             weak: Vec::new(),
+            unseen: Vec::new(),
             objects: vec![variable("first", Place::Written)],
         };
         data.objects.push(Object { align: 16, ..variable("second", Place::Written) });
@@ -2659,6 +2693,7 @@ mod tests {
             apart: Vec::new(),
             exports: Vec::new(),
             weak: vec!["hook".to_owned(), "never_called".to_owned()],
+            unseen: Vec::new(),
             objects: vec![],
         };
         let bytes = write(&text, &data, &[], &target(), Output::default(), &Info::default())
@@ -2711,8 +2746,13 @@ mod tests {
             addend: -4,
             after: 0,
         });
-        let data =
-            Data { apart: Vec::new(), exports: Vec::new(), weak: Vec::new(), objects: vec![] };
+        let data = Data {
+            apart: Vec::new(),
+            exports: Vec::new(),
+            weak: Vec::new(),
+            unseen: Vec::new(),
+            objects: vec![],
+        };
         let bytes = write(&text, &data, &[], &target(), Output::default(), &Info::default())
             .expect("an object");
         let file = object::File::parse(&bytes[..]).expect("a readable object");
@@ -2733,6 +2773,7 @@ mod tests {
             apart: Vec::new(),
             exports: Vec::new(),
             weak: Vec::new(),
+            unseen: Vec::new(),
             objects: vec![variable("first", Place::Written)],
         };
         data.objects.push(Object {
@@ -2765,6 +2806,7 @@ mod tests {
             apart: Vec::new(),
             exports: Vec::new(),
             weak: Vec::new(),
+            unseen: Vec::new(),
             objects: vec![Object { binding: Binding::Local, ..variable("a", Place::Written) }],
         };
         let aliases = [Alias {
@@ -2803,6 +2845,7 @@ mod tests {
             apart: Vec::new(),
             exports: Vec::new(),
             weak: Vec::new(),
+            unseen: Vec::new(),
             objects: vec![variable("a", Place::Written), variable("b", Place::Written)],
         };
         let alias = |name: &str, target: &str| Alias {
@@ -2981,6 +3024,7 @@ mod tests {
             apart: Vec::new(),
             exports: Vec::new(),
             weak: Vec::new(),
+            unseen: Vec::new(),
             objects: vec![variable("seen", Place::Written), {
                 let mut quiet = variable("quiet", Place::Zero);
                 quiet.binding = Binding::Local;
@@ -3112,6 +3156,7 @@ mod tests {
             apart: Vec::new(),
             exports: Vec::new(),
             weak: Vec::new(),
+            unseen: Vec::new(),
             objects: vec![object],
         };
         let bytes =
@@ -3211,6 +3256,7 @@ mod tests {
                 apart: Vec::new(),
                 exports: Vec::new(),
                 weak: Vec::new(),
+                unseen: Vec::new(),
                 objects: vec![variable("p", Place::RelocReadOnly { local })],
             };
             let bytes = write(
@@ -3315,6 +3361,7 @@ mod tests {
             apart: Vec::new(),
             exports: Vec::new(),
             weak: Vec::new(),
+            unseen: Vec::new(),
             objects: vec![variable("shared", Place::Written)],
         };
         let theirs = defines(&text, &data, &[], &windows()).expect("a list");

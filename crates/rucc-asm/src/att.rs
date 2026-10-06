@@ -72,7 +72,7 @@ use std::fmt::Write as _;
 use rucc_base::Interner;
 use rucc_base::hash::Map;
 use rucc_mir::{Amode, Block, CfiOp, Flags, Func, Inst, Opcode, Operand, Reach, defs};
-use rucc_object::{Alias, FUNC_ALIGN, Output, Sections};
+use rucc_object::{Alias, Binding, FUNC_ALIGN, Output, Sections};
 use rucc_target::x86_64::{self, Arg, Width};
 use rucc_target::{CallRegs, Feature, Isa, PhysReg, RegClass, TargetInfo, aarch64};
 use rucc_tuple::Arch;
@@ -239,6 +239,9 @@ fn listing(
     // a section for and nothing to close.
     for name in &globals.weak {
         writer.directives.absent(&mut writer.out, name);
+    }
+    for (name, visibility) in &globals.unseen {
+        writer.directives.seen(&mut writer.out, name, Binding::Global, *visibility);
     }
     // What `dllexport` asks for, as the options the linker reads out of `.drectve`, one `.ascii` a
     // name the way clang writes them. Only COFF has anything in the list. See

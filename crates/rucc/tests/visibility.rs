@@ -221,3 +221,31 @@ unsigned int get(void) { return outside; }
     assert!(text.contains("outside@GOTPCREL(%rip)"), "{text}");
     assert!(!text.contains("\t.hidden\tget\n"), "{text}");
 }
+
+/// A name the file refers to and does not define is written hidden or protected when its
+/// declaration said so, which gcc writes as `GLOBAL HIDDEN UND`, so that the linker keeps it in
+/// the image. One nothing refers to gets nothing, as with gcc, since a header read under the
+/// pragma is a great many prototypes and the file uses a few of them.
+#[test]
+fn a_hidden_declaration_the_file_refers_to_says_so() {
+    let text = asm(
+        "undefined",
+        &["-fPIC", "-O2"],
+        "\
+#pragma GCC visibility push(hidden)
+extern int used, unused;
+extern void called(void), never(void);
+#pragma GCC visibility pop
+extern int marked __attribute__((visibility(\"protected\")));
+extern int plain;
+int get(void) { called(); return used + marked + plain; }
+",
+    );
+
+    for line in ["\t.hidden\tused\n", "\t.hidden\tcalled\n", "\t.protected\tmarked\n"] {
+        assert!(text.contains(line), "{line:?}: {text}");
+    }
+    for name in ["unused", "never", "plain"] {
+        assert!(!text.contains(&format!("\t{name}\n")), "{name}: {text}");
+    }
+}

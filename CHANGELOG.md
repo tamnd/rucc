@@ -6,6 +6,7 @@ All notable changes are recorded here. The format follows [Keep a Changelog](htt
 
 ### Added
 
+- A declaration the file refers to that is hidden or protected, by an attribute or by `#pragma GCC visibility push`, now says so on its undefined symbol (#3112), with `.hidden` or `.protected` in the listing and the visibility in the object's symbol table, as gcc does. arm64's position independent early boot code pushes hidden over every header so the linker never reaches for a GOT, and this is the half of that it was missing.
 - An extended `asm` on AArch64 takes away only the registers its clobber list names and its text spells (#3110), as on x86 since #2358 and as gcc reads it. Every template used to be taken for a call, so its operands went in registers a call keeps, and each of the arm64 kernel's LSE atomics saved and restored two of them around one `ldadd`. A template with a `bl` or `blr` in it and basic assembly still take every register a call may write.
 - `cargo xtask sweep` and `cargo xtask passoff` run the corpus's threshold sweep and pass off measurement against the compiler this tree builds, with GCC 16 as the reference, for #2970 and #2968. The corpus pin moves to tamnd/rucc-corpus@60c8fd16, which has both commands and the short-circuit shape for `rangeswitch`.
 

@@ -40,6 +40,7 @@
 //! has the type, and an ordinary second name there would reach the resolver rather than what the
 //! resolver picked.
 
+use rucc_base::hash::Set;
 use rucc_base::{Interner, Symbol};
 use rucc_ir as ir;
 use rucc_ir::{AliasKind, Datum, Dll, GlobalId, Linkage, Module, SymbolRef};
@@ -74,6 +75,18 @@ pub struct Globals {
     /// here that gcc does not put in. A linker has nothing to do about an undefined weak symbol
     /// nothing refers to, which is why that difference is a difference and not a bug.
     pub weak: Vec<String>,
+    /// Every name this file refers to and does not define whose declaration said `hidden` or
+    /// `protected`, with which, the functions first and then the variables, each in the order the
+    /// module held them.
+    ///
+    /// gcc writes such a name as `GLOBAL HIDDEN UND`, and a linker gives a name the most
+    /// constraining visibility any object says it has, so a reference from a file built under
+    /// `#pragma GCC visibility push(hidden)` keeps the name in the image whatever its definition
+    /// says. That is how the kernel builds its early arm64 code, with `include/linux/hidden.h`
+    /// in front of every file and `-fpie`, and the linker is then sure that nothing it resolves
+    /// there can come from anywhere else. Only the names something refers to, as gcc does, since a
+    /// header with a thousand prototypes read under the pragma is not a thousand symbols.
+    pub unseen: Vec<(String, Visibility)>,
     /// The text of each `asm` at file scope with an instruction in it, in the order they were
     /// written, which goes into the listing as it is. See `rucc_ir::Module::add_file_asm`.
     ///
@@ -230,8 +243,12 @@ impl Globals {
     /// which is what makes a program with a large zeroed array a small file.
     #[must_use]
     pub fn image(&self) -> Data {
-        let mut data =
-            Data { weak: self.weak.clone(), exports: self.exports.clone(), ..Data::default() };
+        let mut data = Data {
+            weak: self.weak.clone(),
+            unseen: self.unseen.clone(),
+            exports: self.exports.clone(),
+            ..Data::default()
+        };
         for var in &self.vars {
             let mut object = Object {
                 name: var.name.clone(),
@@ -345,6 +362,33 @@ pub fn globals(module: &Module, names: &Interner, format: ObjectFormat) -> Resul
         if global.is_declaration() && global.linkage == Linkage::Weak {
             out.weak.push(names.resolve(global.name).to_owned());
         }
+    }
+    let mut referred: Set<Symbol> = module.relocs().iter().map(|reloc| reloc.symbol).collect();
+    for id in module.funcs() {
+        let func = &module[id];
+        for block in func.blocks() {
+            for inst in func.insts(block) {
+                let symbol = match func[inst].extra {
+                    ir::Extra::Symbol(symbol) => Some(symbol),
+                    ir::Extra::Call(at) => func[at].callee,
+                    _ => None,
+                };
+                referred.extend(symbol);
+            }
+        }
+    }
+    let mut unseen = |name: Symbol, declared: bool, seen: ir::Visibility| {
+        if declared && seen != ir::Visibility::Default && referred.contains(&name) {
+            out.unseen.push((names.resolve(name).to_owned(), visibility(seen)));
+        }
+    };
+    for id in module.funcs() {
+        let func = &module[id];
+        unseen(func.name, func.is_declaration(), func.visibility);
+    }
+    for id in module.globals() {
+        let global = &module[id];
+        unseen(global.name, global.is_declaration(), global.visibility);
     }
     out.file_asm = module.file_asms().to_vec();
     // What `dllexport` asks for, which only a COFF object has a way to say, and what a hidden
