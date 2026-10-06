@@ -4,6 +4,10 @@ All notable changes are recorded here. The format follows [Keep a Changelog](htt
 
 ## Unreleased
 
+### Changed
+
+- Loop invariant code motion and global code motion also leave a pointer a small constant past another where it is when what reads it is another address in the same block, which is how `h->nodes[i]` on a flexible array is written. PostgreSQL's binaryheap `sift_up` held `h->nodes` in a register across the comparator call in its loop and spilled it.
+
 ## 0.24.8
 
 A function with a computed `goto` no longer keeps empty blocks nothing reaches, which clears the two objtool warnings in Linux 7.2's BPF interpreter. This release also has the WA4 measurement script and merged string literals on wasm.
