@@ -72,7 +72,8 @@ pub struct Options {
     pub initial_memory: Option<u32>,
     /// The maximum memory in bytes, as `--max-memory`. `None` gives the memory no maximum.
     pub max_memory: Option<u32>,
-    /// Leave out the `name` section and the DWARF sections, as `--strip-all`.
+    /// Leave out every custom section, which is the DWARF sections and the `name`, `producers` and
+    /// `target_features` sections, as `--strip-all`.
     pub strip: bool,
     /// Leave out the DWARF sections, as `--strip-debug`.
     pub strip_debug: bool,
@@ -217,6 +218,18 @@ mod tests {
         bytes::name(&mut exports, "_start");
         exports.extend([0, 0]);
         assert_eq!(payload(&module, 7), exports);
+    }
+
+    #[test]
+    fn strip_all_leaves_out_every_custom_section() {
+        let a = caller("_start");
+        let f = callee("f", I32_TO_I32);
+        let inputs = [Input { name: "a.o", bytes: &a }, Input { name: "f.o", bytes: &f }];
+        let customs = |module: &[u8]| sections(module).iter().filter(|&&(id, _)| id == 0).count();
+        // The `name` section and the `target_features` section of `a.o`.
+        assert_eq!(customs(&link(&Options::default(), &inputs).unwrap()), 2);
+        let options = Options { strip: true, ..Options::default() };
+        assert_eq!(customs(&link(&options, &inputs).unwrap()), 0);
     }
 
     #[test]
