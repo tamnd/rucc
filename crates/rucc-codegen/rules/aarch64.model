@@ -107,6 +107,8 @@
 (semantics (a64.lsr_ri_64 l r) (bvlshr l r))
 (semantics (a64.asr_ri_32 l r) (bvashr l r))
 (semantics (a64.asr_ri_64 l r) (bvashr l r))
+(semantics (a64.ror_ri_32 l r) (bvor (bvlshr l r) (bvshl l (bvsub 32 r))))
+(semantics (a64.ror_ri_64 l r) (bvor (bvlshr l r) (bvshl l (bvsub 64 r))))
 ;; A byte or a half shifted right, which is widened in the register first and so is the shift at
 ;; its own width.
 (semantics (a64.lsr_ri_8 l r) (bvlshr l r))
@@ -119,6 +121,9 @@
 (semantics (a64.lsr_rr_64 l r) (bvlshr l (bvand r 63)))
 (semantics (a64.asr_rr_32 l r) (bvashr l (bvand r 31)))
 (semantics (a64.asr_rr_64 l r) (bvashr l (bvand r 63)))
+(semantics (a64.lsl_rw_64 l r) (bvshl l (zero_extend 32 64 (bvand r 63))))
+(semantics (a64.lsr_rw_64 l r) (bvlshr l (zero_extend 32 64 (bvand r 63))))
+(semantics (a64.asr_rw_64 l r) (bvashr l (zero_extend 32 64 (bvand r 63))))
 
 ;; Arithmetic and the bitwise operations with the second register shifted by a constant first,
 ;; which the machine does in the same instruction. The count is whatever the rule's guard let through.
