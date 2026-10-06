@@ -135,7 +135,7 @@ impl std::error::Error for Error {}
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::testing::{archive, callee, caller};
+    use crate::testing::{archive, callee, caller, importer};
 
     /// The payload of each section of a module, by id, in order.
     fn sections(module: &[u8]) -> Vec<(u8, &[u8])> {
@@ -197,6 +197,24 @@ mod tests {
         bytes::name(&mut exports, "_start");
         exports.extend([0, 0]);
         assert_eq!(payload(&module, 7), exports);
+    }
+
+    #[test]
+    fn the_same_inputs_make_the_same_module() {
+        let object = importer();
+        let inputs = [Input { name: "a.o", bytes: &object }];
+        let module = link(&Options::default(), &inputs).unwrap();
+        for _ in 0..8 {
+            assert_eq!(link(&Options::default(), &inputs).unwrap(), module);
+        }
+        // The imports are in the order of the first reference to each.
+        let mut imports = vec![3];
+        for field in ["a", "b", "c"] {
+            bytes::name(&mut imports, "m");
+            bytes::name(&mut imports, field);
+            imports.extend([0, 0]);
+        }
+        assert_eq!(payload(&module, 2), imports);
     }
 
     #[test]

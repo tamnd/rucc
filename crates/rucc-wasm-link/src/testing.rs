@@ -100,3 +100,32 @@ pub(crate) fn archive(members: &[(&str, &[u8])]) -> Vec<u8> {
     }
     out
 }
+
+/// An object with the function `_start`, which calls the functions `a`, `b` and `c` of the
+/// module `m`, in that order.
+pub(crate) fn importer() -> Vec<u8> {
+    let mut out = b"\0asm\x01\0\0\0".to_vec();
+    section(&mut out, 1, &[1, 0x60, 0, 0]);
+    let mut imports = vec![3];
+    for field in ["a", "b", "c"] {
+        name(&mut imports, "m");
+        name(&mut imports, field);
+        imports.extend([0, 0]);
+    }
+    section(&mut out, 2, &imports);
+    section(&mut out, 3, &[1, 0]);
+    let mut body = vec![0];
+    for _ in 0..3 {
+        body.extend([0x10, 0x80, 0x80, 0x80, 0x80, 0]);
+    }
+    body.push(0x0b);
+    let mut code = vec![1, body.len() as u8];
+    code.extend(body);
+    section(&mut out, 10, &code);
+    let mut symbols = vec![4, 0, 0, 3];
+    name(&mut symbols, "_start");
+    symbols.extend([0, 0x10, 0, 0, 0x10, 1, 0, 0x10, 2]);
+    linking(&mut out, &symbols, &[]);
+    custom(&mut out, "reloc.CODE", &[3, 3, 0, 4, 1, 0, 10, 2, 0, 16, 3]);
+    out
+}

@@ -8,6 +8,10 @@ All notable changes are recorded here. The format follows [Keep a Changelog](htt
 
 - The crate `rucc-wasm-link`, a static linker for wasm that runs inside the compiler, for a host that cannot start `wasm-ld`, such as rucc that runs as a wasm module (#2867). It reads objects and `ar` archives, fetches only the archive members that define a symbol something needs, drops what the entry and the exports do not reach, and writes a command or a reactor module for wasm32-wasip1. The SQLite shell linked with it against the wasi-sdk 34 sysroot gives the same answers as the module that `wasm-ld` links, and it is 16 bytes smaller without the custom sections. The driver does not use the crate yet.
 
+### Fixed
+
+- `rucc-wasm-link` writes the same module each time it links the same inputs (#2867). It put the imports in the order of a hash table, which changes from one run to the next. They are now in the order of the first reference to each.
+
 ## 0.25.0
 
 This release ends WA4 (#2866). On the SQLite workload the rucc module at `-O2` uses 7.1 percent more CPU time than the clang module on Wasmtime and 2.7 percent more on node, and it is 14.2 percent smaller. The limit was 10 percent for each. The inliner on wasm now copies a callee that only one caller calls in its loops, and the inliner and jump threading take less time to compile.

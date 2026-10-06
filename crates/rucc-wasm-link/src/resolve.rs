@@ -319,7 +319,11 @@ impl<'a> Loader<'a> {
         let mut undefined = Vec::new();
         // Where each global name goes.
         let mut names: HashMap<&'a str, Where> = HashMap::new();
-        for (&name, entry) in &table {
+        // In the order of the first reference, which is the order of the imports in the module.
+        // The order of a hash table changes from one run to the next, and the module must not.
+        let mut entries: Vec<(&'a str, &Entry)> = table.iter().map(|(&n, e)| (n, e)).collect();
+        entries.sort_unstable_by_key(|&(name, entry)| (entry.first, name));
+        for (name, entry) in entries {
             let place = match entry.state {
                 State::Defined(file, symbol, _) => own(&files[file], file, symbol),
                 State::Undefined | State::Lazy(..) => {
