@@ -556,7 +556,14 @@ impl<'a> Printer<'a> {
                 };
                 write!(self.out, " byval({size}, align {align}{drains})")
             }
-            Abi::Sret { size, align } => write!(self.out, " sret({size}, align {align})"),
+            Abi::Sret { size, align, popped } => {
+                let popped = match popped {
+                    None => "",
+                    Some(true) => ", popped",
+                    Some(false) => ", kept",
+                };
+                write!(self.out, " sret({size}, align {align}{popped})")
+            }
             Abi::Chain => write!(self.out, " chain"),
         };
     }
@@ -1533,7 +1540,7 @@ mod tests {
         let mut func = Func::new(
             names.intern("f"),
             Signature::new()
-                .and_param(Param::with_abi(Type::PTR, Abi::Sret { size: 24, align: 8 }))
+                .and_param(Param::with_abi(Type::PTR, Abi::Sret { size: 24, align: 8, popped: None }))
                 .and_param(Param::with_abi(
                     Type::PTR,
                     Abi::ByVal { size: 16, align: 8, drains: Drains::Nothing },

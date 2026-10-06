@@ -397,6 +397,8 @@ fn composite_function(types: &mut Types, left: &FunctionType, right: &FunctionTy
     // A call that can come back by a jump is one whichever declaration said so.
     let (convention, nocf) = (left.convention, left.nocf);
     let indirect_return = left.indirect_return || right.indirect_return;
+    // Who pops the address of a returned structure is whatever the first one that said said.
+    let return_pointer_popped = left.return_pointer_popped.or(right.return_pointer_popped);
     types.function(FunctionType {
         ret,
         params,
@@ -405,5 +407,6 @@ fn composite_function(types: &mut Types, left: &FunctionType, right: &FunctionTy
         convention,
         nocf,
         indirect_return,
+        return_pointer_popped,
     })
 }

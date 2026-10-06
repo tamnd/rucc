@@ -527,7 +527,7 @@ fn shaped(
     let quad = |ty: Type| quad(ty) || ty.is_scalar() && ty.format() == Some(Float::D128);
     if quad(ty) && abi.scalar_returns_by_reference(BYTES) {
         let out = slot(func, inst);
-        shape.params.push(Param::with_abi(Type::PTR, Abi::Sret { size: BYTES, align: BITS / 8 }));
+        shape.params.push(Param::with_abi(Type::PTR, Abi::Sret { size: BYTES, align: BITS / 8, popped: None }));
         shape.values.push(out);
         shape.out = Some(out);
     }

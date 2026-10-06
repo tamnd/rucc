@@ -790,9 +790,27 @@ mod tests {
 
     #[test]
     fn only_an_abi_whose_callee_pops_the_return_address_slot_says_so() {
-        assert_eq!(SYSV.return_pointer_popped(), 4);
+        assert_eq!(SYSV.return_pointer_popped(None), 4);
         let callers_pop = CallRegs { abi: &rucc_abi::abis::WIN64, ..SYSV };
-        assert_eq!(callers_pop.return_pointer_popped(), 0, "a plain ret where the caller pops");
+        assert_eq!(callers_pop.return_pointer_popped(None), 0, "a plain ret where the caller pops");
+    }
+
+    /// `callee_pop_aggregate_return` turns either 32-bit answer into the other, and changes
+    /// nothing where the address is in `eax` or the callee pops everything anyway.
+    #[test]
+    fn an_attribute_says_who_pops_the_return_address_slot() {
+        assert_eq!(SYSV.return_pointer_popped(Some(false)), 0);
+        assert_eq!(SYSV.return_pointer_popped(Some(true)), 4);
+        for windows in [&MINGW32, &MSVC32] {
+            assert_eq!(windows.return_pointer_popped(Some(true)), 4, "{}", windows.abi.name);
+            assert_eq!(windows.return_pointer_popped(Some(false)), 0, "{}", windows.abi.name);
+        }
+        let registers = regparm(3, false).expect("a family");
+        let regparm = registers.under(Convention::Regparm(3)).expect("every count");
+        assert_eq!(regparm.return_pointer_popped(Some(true)), 0, "the address is in eax");
+        let none = registers.under(Convention::Regparm(0)).expect("every count");
+        assert_eq!(none.return_pointer_popped(Some(true)), 4);
+        assert_eq!(MINGW32_STDCALL.return_pointer_popped(Some(true)), 0, "popped with the rest");
     }
 
     #[test]
@@ -801,7 +819,7 @@ mod tests {
             [(&MINGW32, &rucc_abi::abis::I386_MINGW), (&MSVC32, &rucc_abi::abis::I386_MSVC)]
         {
             assert!(std::ptr::eq(regs.abi, abi), "{}", abi.name);
-            assert_eq!(regs.return_pointer_popped(), 0, "{}: the caller pops it", abi.name);
+            assert_eq!(regs.return_pointer_popped(None), 0, "{}: the caller pops it", abi.name);
             assert!(regs.int_args.is_empty() && regs.sse_args.is_empty(), "{}", abi.name);
             assert_eq!(regs.int_returns, SYSV.int_returns, "{}", abi.name);
             assert_eq!(regs.x87_returns, SYSV.x87_returns, "{}", abi.name);

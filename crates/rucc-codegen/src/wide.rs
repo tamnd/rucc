@@ -1216,7 +1216,7 @@ fn runtime(
             let size = bytes(ty);
             let align = align(size);
             let slot = room(func, inst, size, align);
-            params.push(Param::with_abi(Type::PTR, Abi::Sret { size, align }));
+            params.push(Param::with_abi(Type::PTR, Abi::Sret { size, align, popped: None }));
             values.push(slot);
             answer = Answer::Slot(slot, ty);
         }

@@ -2167,6 +2167,7 @@ mod tests {
             convention: rucc_target::Convention::Target,
             nocf: false,
             indirect_return: false,
+            return_pointer_popped: None,
         };
         let function = c.types.function(signature);
         let record = tagged(&mut c, tag, &[]);
@@ -2492,6 +2493,7 @@ mod tests {
             convention: rucc_target::Convention::Target,
             nocf: false,
             indirect_return: false,
+            return_pointer_popped: None,
         };
         let ty = c.types.function(signature);
         c.declare_object(fname, ty, Span::DUMMY);

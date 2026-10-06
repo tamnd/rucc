@@ -706,11 +706,21 @@ impl CallRegs {
     /// returns. That is the address's slot where the ABI says the callee pops it, which is i386
     /// System V, and nothing where the caller does, which is every other ABI including i386
     /// Windows.
-    pub fn return_pointer_popped(&self) -> u32 {
-        match self.abi.return_pointer {
-            rucc_abi::ReturnPointer::FirstArgumentPopped => self.word,
-            _ => 0,
-        }
+    ///
+    /// `asked` is what gcc's `callee_pop_aggregate_return` said, which overrides the ABI where the
+    /// address is on the stack and the caller cleans up the rest. Where the address is in a
+    /// register, under `regparm`, there is nothing to pop whatever it says, which is gcc's
+    /// `ix86_return_pops_args`, and where the callee pops everything, as `stdcall` does, the
+    /// address is popped with the rest.
+    pub fn return_pointer_popped(&self, asked: Option<bool>) -> u32 {
+        let on_stack = self.abi.return_pointer != rucc_abi::ReturnPointer::Dedicated
+            && self.abi.cleanup == rucc_abi::Cleanup::Caller
+            && self.int_args.is_empty();
+        let popped = match asked {
+            Some(asked) => asked && on_stack,
+            None => self.abi.return_pointer == rucc_abi::ReturnPointer::FirstArgumentPopped,
+        };
+        if popped { self.word } else { 0 }
     }
 
     /// The registers a function of that convention uses on this platform, and [`None`] for a

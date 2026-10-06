@@ -785,11 +785,20 @@ impl<'a, 'n> Parser<'a, 'n> {
                         other => return self.fail(format!("`{other}` is not a register kind")),
                     };
                 }
+                // Who pops a returned address, where an attribute said.
+                let mut popped = None;
+                if !indirect && self.eat(",") {
+                    popped = match self.word() {
+                        "popped" => Some(true),
+                        "kept" => Some(false),
+                        other => return self.fail(format!("`{other}` is not who pops the address")),
+                    };
+                }
                 self.expect(")")?;
                 if indirect {
                     Abi::ByVal { size, align, drains }
                 } else {
-                    Abi::Sret { size, align }
+                    Abi::Sret { size, align, popped }
                 }
             }
             _ => Abi::Plain,
@@ -2695,6 +2704,10 @@ func @g(i8 sext) -> i8 sext, linkage(external);
 func @h(ptr byval(12, align 4, drains floats), ptr byval(16, align 8, drains integers)), linkage(external);
 
 func @i(ptr byval(4, align 4, drains one integer), i32), linkage(external);
+
+func @j(ptr sret(12, align 4, popped)), linkage(external);
+
+func @k(ptr sret(12, align 4, kept), i32), linkage(external);
 "
         );
         assert_eq!(round_trip(&text), text);

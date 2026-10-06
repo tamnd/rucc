@@ -527,6 +527,7 @@ mod tests {
             convention: rucc_target::Convention::Target,
             nocf: false,
             indirect_return: false,
+            return_pointer_popped: None,
         };
         let function = f.types.function(signature);
         let designator =
