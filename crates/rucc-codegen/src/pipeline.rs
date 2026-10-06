@@ -893,6 +893,7 @@ pub fn compile_recording(
     // allocation, while each address is one register written once.
     if std::ptr::eq(machine.selector, &select::aarch64::SELECTOR) {
         fold::pages(&mut func, names, elsewhere);
+        fold::indexes(&mut func, names);
     }
 
     // Whether this function carries a canary is the front end's answer, because what

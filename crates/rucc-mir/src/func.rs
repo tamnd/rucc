@@ -1038,6 +1038,7 @@ impl InstBuilder<'_> {
             table: mem.table,
             reach: mem.reach,
             segment: mem.segment,
+            widen: mem.widen,
         };
         if let Some(base) = mem.base {
             amode.base = Some(self.next_operand());

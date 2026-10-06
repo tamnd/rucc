@@ -878,6 +878,138 @@ fn low_bits(
         .then_some((amode.disp, size))
 }
 
+/// Puts the shift and the widening of an index into the loads and stores that read it on AArch64,
+/// and gives back how many indexes that took.
+///
+/// `arr[i]` with an `int` subscript is the subscript widened to 64 bits, shifted by the size of
+/// the element and added to the address, and after [`addresses`] has put the addition in the
+/// access the other two are still instructions of their own. The access can do both, which is
+/// what gcc writes:
+///
+/// ```text
+///   sxtw x0, w0
+///   lsl  x0, x0, #3            ->    ldr x0, [x1, w0, sxtw #3]
+///   ldr  x0, [x1, x0]
+/// ```
+///
+/// The shift has to be the size of the access, since that is the only one the machine has room
+/// for, and either half goes on its own when the other is not there. As with [`pages`] it is all
+/// the readers of the index or none of them, and each one that goes has to be read by nothing
+/// else, or it stays for whatever else reads it and nothing is saved.
+pub fn indexes(func: &mut mir::Func, names: &mut Interner) -> usize {
+    let opcode =
+        |names: &mut Interner, name: &str| mir::Opcode::new(names.intern(&format!("a64.{name}")));
+    let shift = opcode(names, "lsl_ri_64");
+    let signed = opcode(names, "sxtw_64");
+    let unsigned = opcode(names, "uxtw_64");
+    let sizes: Map<mir::Opcode, u32> =
+        LOW_BITS.iter().map(|&(name, size)| (opcode(names, name), size)).collect();
+    let mut reads: Map<mir::Reg, Vec<(mir::Inst, usize)>> = Map::default();
+    let mut writes: Map<mir::Reg, Vec<mir::Inst>> = Map::default();
+    let mut indexed: Map<mir::Reg, Vec<mir::Inst>> = Map::default();
+    for block in func.blocks().collect::<Vec<_>>() {
+        for inst in func.insts(block).collect::<Vec<_>>() {
+            for (at, operand) in func[func[inst].operands].iter().enumerate() {
+                if operand.role == Role::Use {
+                    reads.entry(operand.reg).or_default().push((inst, at));
+                } else {
+                    writes.entry(operand.reg).or_default().push(inst);
+                }
+            }
+            if let Some(reg) = plain_index(func, &sizes, inst) {
+                indexed.entry(reg).or_default().push(inst);
+            }
+        }
+    }
+    // The one instruction that writes a register, and the one register it reads, when the
+    // register is virtual and that instruction is the one of `opcode`.
+    let only = |func: &mir::Func, reg: mir::Reg, opcode: mir::Opcode| {
+        let [inst] = writes.get(&reg)?.as_slice() else { return None };
+        if !reg.is_virtual() || func[*inst].opcode != opcode {
+            return None;
+        }
+        let [_, from] = &func[func[*inst].operands] else { return None };
+        let [_] = writes.get(&from.reg)?.as_slice() else { return None };
+        from.reg.is_virtual().then_some((*inst, *from))
+    };
+    let mut folded = 0;
+    for (reg, readers) in indexed {
+        // Every read of the index is one of these accesses, once each and all of one size.
+        if reads.get(&reg).map_or(0, Vec::len) != readers.len() {
+            continue;
+        }
+        let size = sizes[&func[readers[0]].opcode];
+        if readers.iter().any(|&reader| sizes[&func[reader].opcode] != size) {
+            continue;
+        }
+        let mut gone = Vec::new();
+        let mut index = None;
+        let mut scale = 1;
+        let mut widen = None;
+        let mut wide = reg;
+        if size > 1
+            && let Some((inst, from)) = only(func, reg, shift)
+            && func[inst].imm.is_some_and(|imm| func[imm].0 == i64::from(size.trailing_zeros()))
+        {
+            gone.push(inst);
+            index = Some(from);
+            scale = u8::try_from(size).unwrap_or(1);
+            wide = from.reg;
+        }
+        // The widening goes only if nothing but the shift, or the accesses when there is none,
+        // reads what it wrote. Otherwise the shift alone moves in and reads the wide value.
+        let read_by = if gone.is_empty() { readers.len() } else { 1 };
+        for (opcode, how) in [(signed, mir::Widen::Signed), (unsigned, mir::Widen::Unsigned)] {
+            if let Some((inst, from)) = only(func, wide, opcode)
+                && reads.get(&wide).map_or(0, Vec::len) == read_by
+            {
+                gone.push(inst);
+                index = Some(from);
+                widen = Some(how);
+            }
+        }
+        let Some(from) = index else { continue };
+        for &reader in &readers {
+            let Some(mem) = func[reader].mem else { continue };
+            let Some(at) = func[mem].index else { continue };
+            let operands = func[reader].operands;
+            let operand = &mut func[operands][usize::from(at)];
+            operand.reg = from.reg;
+            operand.class = from.class;
+            func[mem].scale = scale;
+            func[mem].widen = widen;
+        }
+        for inst in gone {
+            func.remove_inst(inst);
+        }
+        folded += 1;
+    }
+    folded
+}
+
+/// The index register of a load or store whose address is a base and an index and nothing else,
+/// which is the shape [`indexes`] can add a shift and a widening to.
+fn plain_index(
+    func: &mir::Func,
+    sizes: &Map<mir::Opcode, u32>,
+    inst: mir::Inst,
+) -> Option<mir::Reg> {
+    sizes.get(&func[inst].opcode)?;
+    let amode = func[func[inst].mem?];
+    let plain = amode.base.is_some()
+        && amode.scale == 1
+        && amode.disp == 0
+        && amode.widen.is_none()
+        && amode.symbol.is_none()
+        && amode.block.is_none()
+        && amode.table.is_none()
+        && amode.segment.is_none();
+    let at = usize::from(amode.index?);
+    let reg = func[func[inst].operands].get(at)?.reg;
+    let once = func[func[inst].operands].iter().filter(|operand| operand.reg == reg).count() == 1;
+    (plain && once).then_some(reg)
+}
+
 /// The one table's rewrite, or nothing when its instructions are not the four it expects.
 fn absolute_table(
     func: &mut mir::Func,
