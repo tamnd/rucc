@@ -43,11 +43,11 @@
 //! linker already knows how to do, it costs the same one instruction the index cost, and the
 //! reporter reads it by dereferencing it.
 
-use rucc_base::Interner;
 use rucc_base::hash::{Map, Set};
+use rucc_base::{Interner, Symbol};
 use rucc_ir::{
-    CallInfo, Datum, Extra, Flags, Func, Global, Imm, Inst, InstData, Linkage, Meta, Module,
-    Opcode, Signature, Type, Value,
+    AttrSet, CallInfo, Datum, Extra, Flags, Func, Global, Imm, Inst, InstData, Linkage, Meta,
+    Module, Opcode, Signature, Type, Value,
 };
 
 use crate::plane;
@@ -127,11 +127,17 @@ pub fn lower(module: &mut Module, names: &mut Interner) -> usize {
     let numbers = plane::numbers(module, names);
     // The same again for the variables, whose sizes a `cap_of` over one of them is built out of.
     let objects = crate::slot::objects(module);
+    // And the functions whose address the unit takes, which is the set a call through a pointer
+    // can be checked on arrival at.
+    let addressed = addressed(module);
     for id in module.funcs() {
         if module[id].is_declaration() {
             continue;
         }
         calls(&mut module[id], names, word, &numbers, &objects, &mut written);
+        if addressed.contains(&module[id].name) {
+            entered(&mut module[id], names, word, &mut written);
+        }
     }
     for (index, row) in written.iter().enumerate() {
         emit(module, names, index, *row);
@@ -182,6 +188,7 @@ fn calls(
             Opcode::MetaAcquire => taken(func, names, inst),
             Opcode::MetaFenceRelease => published_everywhere(func, names, inst),
             Opcode::MetaFenceAcquire => taken_everywhere(func, names, inst),
+            Opcode::CallIndirect => through(func, names, word, table, inst),
             Opcode::CapExtent => extent(func, names, word, inst, "__rucc_extent"),
             Opcode::CapExtentBack => extent(func, names, word, inst, "__rucc_extent_back"),
             Opcode::SafeRegionBegin | Opcode::SafeRegionEnd => declared(func, inst),
@@ -1034,6 +1041,102 @@ pub(crate) fn calling(
     InstData { args, extra: Extra::Call(info), ..InstData::new(Opcode::Call) }
 }
 
+/// A call through a pointer gets `__rucc_call_through(target, count, descriptor)` in front of it.
+///
+/// Rows Y4 and Y5 of document 03, and `rucc_safe_rt::call` is where both are argued. The runtime
+/// refuses a target inside the heap there and then, and otherwise writes the target and the count
+/// down for the callee to compare with what it takes, which is [`entered`].
+///
+/// The count is the one the call's signature names rather than the number of operands, because
+/// both ends have to be counted the same way and the callee only has a signature. A variadic one
+/// passes the count the runtime reads as any at all.
+fn through(
+    func: &mut Func,
+    names: &mut Interner,
+    word: Type,
+    table: &mut Vec<Descriptor>,
+    inst: Inst,
+) {
+    let Extra::Call(info) = func[inst].extra else { return };
+    let Some(&target) = func[func[inst].args].first() else { return };
+    let signature = &func[func[info].signature];
+    let count = if signature.variadic { ANY } else { signature.params.len() as i128 };
+    let row = Descriptor { judgement: ACCESS, class: 0, size: 0 };
+    let desc = record(func, names, table, inst, row);
+    let passed = konst(func, inst, Imm::int(count, word), word);
+    let made = calling(
+        func,
+        names,
+        "__rucc_call_through",
+        &[Type::PTR, word, Type::PTR],
+        &[],
+        &[target, passed, desc],
+    );
+    let span = func.span(inst);
+    let made = func.create_inst(made, &[], span);
+    func.insert_before(made, inst);
+}
+
+/// The other end of [`through`]: `__rucc_call_entered(own, count, descriptor)` as the first thing
+/// a function a pointer can reach does.
+///
+/// A variadic function is left alone, since any count is one it takes, and so is a naked one,
+/// which has no frame for a call to be made from.
+fn entered(func: &mut Func, names: &mut Interner, word: Type, table: &mut Vec<Descriptor>) {
+    let signature = func.signature();
+    if signature.variadic || func.attrs.set.contains(AttrSet::NAKED) {
+        return;
+    }
+    let count = signature.params.len() as i128;
+    let Some(entry) = func.entry() else { return };
+    let Some(at) = func.insts(entry).next().or_else(|| func.terminator(entry)) else { return };
+    let row = Descriptor { judgement: ACCESS, class: 0, size: 0 };
+    let desc = record(func, names, table, at, row);
+    let span = func.span(at);
+    let data = InstData { extra: Extra::Symbol(func.name), ..InstData::new(Opcode::GlobalAddr) };
+    let own = func.create_inst(data, &[Type::PTR], span);
+    func.insert_before(own, at);
+    let own = func[own].results().next().expect("an address created with one result has one");
+    let params = konst(func, at, Imm::int(count, word), word);
+    let made = calling(
+        func,
+        names,
+        "__rucc_call_entered",
+        &[Type::PTR, word, Type::PTR],
+        &[],
+        &[own, params, desc],
+    );
+    let made = func.create_inst(made, &[], span);
+    func.insert_before(made, at);
+}
+
+/// The count [`through`] passes for a variadic call, which is `rucc_safe_rt::call::ANY`.
+const ANY: i128 = 0xfffe;
+
+/// Every function the module takes the address of, in a body or in an initializer.
+///
+/// The unit's own, rather than every function another unit could name as well. A function that is
+/// only ever called through a pointer some other unit made is missed, and the price of not missing
+/// it would be a runtime call at the top of every function with external linkage, which is most of
+/// the functions in a library. The callbacks a program installs are nearly always the static
+/// functions it puts in its own tables, and those are here.
+fn addressed(module: &Module) -> Set<Symbol> {
+    let mut found: Set<Symbol> = module.relocs().iter().map(|reloc| reloc.symbol).collect();
+    for id in module.funcs() {
+        let func = &module[id];
+        for block in func.blocks() {
+            for inst in func.insts(block) {
+                if let (Opcode::GlobalAddr, Extra::Symbol(symbol)) =
+                    (func[inst].opcode, func[inst].extra)
+                {
+                    found.insert(symbol);
+                }
+            }
+        }
+    }
+    found
+}
+
 /// Adds one descriptor to the module as a variable in the shared section.
 ///
 /// Internal, so the linker never has to resolve the name and two objects in a link do not collide
@@ -1310,6 +1413,91 @@ mod tests {
         if let Err(errors) = verify_func(&module, &module[id], &names) {
             panic!("that was expected to be believed: {errors:#?}");
         }
+    }
+
+    /// A module where `main` calls `one`, which takes one `i32`, through a pointer to a function
+    /// of `params` of them, and where `two` is never anybody's address.
+    fn pointed(names: &mut Interner, params: usize, variadic: bool) -> Module {
+        let i32_ = Type::int(32);
+        let mut module = Module::new(names.intern("pointed.c"), &target());
+
+        let mut one = Func::new(names.intern("one"), Signature::new().with_params(&[i32_]));
+        let entry = one.create_block();
+        one.append_param(entry, i32_);
+        Builder::new(&mut one, entry).ret(&[]);
+        module.add_func(one);
+
+        let mut two = Func::new(names.intern("two"), Signature::new());
+        let entry = two.create_block();
+        Builder::new(&mut two, entry).ret(&[]);
+        module.add_func(two);
+
+        let mut main = Func::new(names.intern("main"), Signature::new());
+        let entry = main.create_block();
+        let mut b = Builder::new(&mut main, entry);
+        let extra = Extra::Symbol(names.intern("one"));
+        let made = b.inst(InstData { extra, ..InstData::new(Opcode::GlobalAddr) }, &[Type::PTR]);
+        let target = b.func()[made].results().next().expect("an address has one result");
+        let one = b.iconst(i32_, 1);
+        let mut signature = Signature::new().with_params(&vec![i32_; params]);
+        signature.variadic = variadic;
+        let sig = b.func().add_signature(signature);
+        let varargs = b.func().push_abis(&[]);
+        let info = b.func().add_call(CallInfo { callee: None, signature: sig, varargs });
+        let mut operands = vec![target];
+        operands.extend(std::iter::repeat_n(one, params));
+        let args = b.func().push_values(&operands);
+        let extra = Extra::Call(info);
+        b.inst(InstData { args, extra, ..InstData::new(Opcode::CallIndirect) }, &[]);
+        b.ret(&[]);
+        module.add_func(main);
+        module
+    }
+
+    /// The function `name` in `module`, printed.
+    fn printed(module: &Module, names: &Interner, name: &str) -> String {
+        let id = module
+            .funcs()
+            .find(|&id| names.resolve(module[id].name) == name)
+            .expect("the module has that function");
+        if let Err(errors) = verify_func(module, &module[id], names) {
+            panic!("that was expected to be believed: {errors:#?}");
+        }
+        print_func(module, &module[id], names)
+    }
+
+    #[test]
+    fn a_call_through_a_pointer_says_what_it_passes_and_the_function_it_reaches_compares() {
+        // Rows Y4 and Y5. The call says where it is going and with how many, and the function whose
+        // address was taken checks the count on the way in. One descriptor each.
+        let mut names = Interner::new();
+        let mut module = pointed(&mut names, 2, false);
+        assert_eq!(lower(&mut module, &mut names), 2);
+
+        let main = printed(&module, &names, "main");
+        assert!(main.contains("call @__rucc_call_through(%"), "{main}");
+        assert!(main.contains("iconst.i64 2"), "{main}");
+        let judged = main.find("__rucc_call_through").expect("the call was judged");
+        let called = main.find("call_indirect").expect("and is still there");
+        assert!(judged < called, "{main}");
+
+        let one = printed(&module, &names, "one");
+        assert!(one.contains("global_addr @one"), "{one}");
+        assert!(one.contains("iconst.i64 1"), "{one}");
+        assert!(one.contains("call @__rucc_call_entered(%"), "{one}");
+
+        // Nobody takes the address of `two`, so nothing a pointer does can arrive there.
+        let two = printed(&module, &names, "two");
+        assert!(!two.contains("__rucc_call_entered"), "{two}");
+    }
+
+    #[test]
+    fn a_variadic_call_says_it_passes_any_count() {
+        let mut names = Interner::new();
+        let mut module = pointed(&mut names, 1, true);
+        lower(&mut module, &mut names);
+        let main = printed(&module, &names, "main");
+        assert!(main.contains("iconst.i64 65534"), "{main}");
     }
 
     /// A module with one function holding a `seq_cst` fence, edges in.

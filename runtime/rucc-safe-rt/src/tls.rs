@@ -21,6 +21,10 @@
 //! published for one call and consumed by it, and a restrict scope lives for as long as the block
 //! that declared the pointers. Putting them together would mean a call publishing a frame had to
 //! carry the enclosing scope along with it.
+//!
+//! [`crate::epoch`] keeps a third and [`crate::call`] a fourth. That last one lives for less time
+//! than a frame does, from the instruction in front of a call through a pointer to the first one
+//! inside the function it reaches.
 
 use core::ffi::c_void;
 #[cfg(not(all(target_arch = "x86_64", target_os = "linux")))]
@@ -41,7 +45,7 @@ type Key = core::ffi::c_ulong;
 type Key = core::ffi::c_uint;
 
 /// How many words each thread's block holds, which is how many slots there can be.
-pub const WORDS: usize = 4;
+pub const WORDS: usize = 5;
 
 /// The word [`crate::frame`]'s slot keeps.
 pub const FRAMES: usize = 0;
@@ -51,6 +55,9 @@ pub const CLOCK: usize = 1;
 
 /// The word [`crate::restrict`]'s slot keeps.
 pub const SCOPES: usize = 2;
+
+/// The word [`crate::call`]'s slot keeps.
+pub const CALLED: usize = 3;
 
 /// A pointer each thread has its own copy of.
 ///

@@ -1,9 +1,8 @@
 /* row: Y4 */
 /* refuse: J1 */
-/* gap: #431 */
-/* The callee reads a second argument the caller never passed, so it gets whatever was in the
-   register. Catching this needs the signature recorded beside the function's address, which is
-   the type plane's job and lands at S5. */
+/* A function of one parameter called through a pointer to a function of two. The caller writes the
+   count it passes beside the address it calls, and the callee compares it with its own on the way
+   in, because the two ends are never in one place anywhere else. */
 int one(int a) {
     return a;
 }
