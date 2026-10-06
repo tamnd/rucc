@@ -7926,6 +7926,23 @@ float through_a_union(union u *p) { p->i = 1; return p->f; }\n";
         assert!(!text.contains("call @llabs"), "{text}");
     }
 
+    /// `__builtin_isdigit` is a subtraction and an unsigned comparison and not a call.
+    ///
+    /// Linux defines `isdigit` to it whenever `__has_builtin` says yes, and has no `isdigit`
+    /// function, so a call left standing would not link. gcc 16.2.0 writes the same pair.
+    #[test]
+    fn isdigit_is_a_comparison_and_not_a_call() {
+        let text = body("int f(int c) { return __builtin_isdigit(c); }\n");
+        assert!(text.contains("iconst.i32 48"), "{text}");
+        assert!(text.contains("iconst.i32 9"), "{text}");
+        assert!(text.contains("icmp ule"), "{text}");
+        assert!(!text.contains("call"), "the call does not happen:\n{text}");
+
+        // A char is promoted by the prototype first, so a negative one is not a digit.
+        let text = body("int f(signed char c) { return __builtin_isdigit(c); }\n");
+        assert!(!text.contains("call"), "{text}");
+    }
+
     /// A byte swap is one instruction and not a call, and nothing had to declare it.
     ///
     /// SQLite writes these for its page headers and glibc's `<endian.h>` defines `htobe32` and its

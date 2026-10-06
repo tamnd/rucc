@@ -2282,6 +2282,17 @@ used_by = ["glibc", "sqlite", "ffmpeg"]
 tests = ["rucc-sema::every_library_builtin_is_declared_under_its_own_name_and_called_by_the_library_one", "rucc-driver::a_call_to_a_library_builtin_reaches_the_library_function"]
 
 [[feature]]
+name = "__builtin_isdigit"
+kind = "builtin"
+gcc_version = "4.3"
+status = "implemented"
+signature = "int(int)"
+library = "isdigit"
+used_by = ["linux"]
+tests = ["rucc-sema::isdigit_is_a_row_of_the_table_taking_and_giving_int", "rucc-driver::isdigit_is_a_comparison_and_not_a_call"]
+notes = "Answered as whether the argument less '0', taken unsigned, is at most nine, which is what gcc writes. Linux defines isdigit to it when __has_builtin says yes and has no isdigit function to call."
+
+[[feature]]
 name = "__builtin_abs"
 kind = "builtin"
 gcc_version = "2.0"
