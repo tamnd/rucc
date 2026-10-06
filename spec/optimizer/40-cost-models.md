@@ -463,6 +463,105 @@ Document 42 owes, from this document specifically:
   double the value. A constant whose sensitivity is flat is a constant that does not need tuning, and
   knowing which ones those are is worth more than tuning the rest.
 
+### What the sweep found
+
+The sensitivity sweep was run on 6 October 2026 as experiment 60 of section 42.5, tamnd/rucc#2970, over the 3500 cases of rucc-corpus at `-O2` against gcc 16. Each row of `rucc --print-params` was moved to half and to double its value through `--param`, one at a time, and only the cases whose assembly changed were built and run. It counts instructions retired rather than run time, since they barely move from run to run and most of the changes here are smaller than a timer's noise. The corpus page, [experiments/60-constant-sweep](https://github.com/tamnd/rucc-corpus/blob/main/experiments/60-constant-sweep/README.md), has every move with its compile time, the facets that moved most and rucc against gcc 16, and `results.json` next to it has the same for a tool. `cargo xtask sweep` runs it again.
+
+A row is flat when neither end moves instructions retired or text by more than 0.1% of what the cases it changed had before. It is wrong when an end saves on one of the two and does not spend on the other, so a value the sweep tried beats the default. Every other row that moves something is worth tuning, which means a different value trades one of the two for the other. Of the 88 rows, 63 are flat, 16 are worth tuning and 9 are wrong, and no move made any case print the wrong answer. Each wrong row has an issue, and its value only changes in a PR of its own that answers it with SQLite as well as the corpus.
+
+Three of the items above have a first answer here. The if-conversion budgets are flat, since no case moves at half or at double either of them, so the units they are counted in do not matter yet on this corpus. The LICM pressure margin, `loop-reserved-regs`, is wrong at both ends by a little, mostly in `crc32c`. The jump table threshold, `jump-table-min-targets`, is wrong at half: at 5 the cases it changed retire 14.88% fewer instructions, which goes against the timing of tamnd/rucc#1759 that set it at 11, and tamnd/rucc#3164 has to settle which of the two rucc follows. Each change is over the cases that move changed, not over the whole corpus.
+
+| row | default | at half | at double | call |
+|---|---:|---|---|---|
+| `branch-cost-for-size` | 2 | no case | no case | flat |
+| `branch-cost-predictable` | 0 | not run | no case | flat |
+| `predictable-branch-percent` | 2 | no case | no case | flat |
+| `if-conversion-budget-predictable` | 20 | no case | no case | flat |
+| `if-conversion-budget-unpredictable` | 40 | no case | no case | flat |
+| `if-conversion-block-limit` | 10 | no case | no case | flat |
+| `phiopt-arm-instructions` | 2 | 116 cases, -6.34% instructions, +0.04% text | 45 cases, +24.07% instructions, +0.57% text | wrong, tamnd/rucc#3157 |
+| `phiopt-factor-depth` | 4 | no case | no case | flat |
+| `phiopt-arm-scan-instructions` | 16 | no case | no case | flat |
+| `phiopt-unpredictable-margin-percent` | 3 | 2 cases, +0.28% instructions, -0.77% text | no case | worth tuning |
+| `short-circuit-instructions` | 2 | 8 cases, -0.53% instructions, +0.19% text | 65 cases, +0.25% instructions, +0.67% text | worth tuning |
+| `sra-max-bytes` | 128 | 11 cases, +0.00% instructions, +10.29% text | no case | worth tuning |
+| `sra-max-pieces` | 8 | 4 cases, +0.01% instructions, +11.32% text | 26 cases, +3.16% instructions, +8.38% text | worth tuning |
+| `sra-max-word-pieces` | 16 | 22 cases, +0.01% instructions, +5.72% text | no case | worth tuning |
+| `block-copy-moves-for-speed` | 8 | no case | no case | flat |
+| `block-copy-moves-for-size` | 4 | no case | no case | flat |
+| `loop-header-insns-for-speed` | 20 | no case | 4 cases, -0.03% instructions, +1.59% text | worth tuning |
+| `loop-header-insns-for-size` | 5 | no case | no case | flat |
+| `jump-thread-duplication-insns` | 15 | no case | no case | flat |
+| `jump-thread-paths` | 64 | no case | no case | flat |
+| `jump-thread-path-insns` | 100 | no case | no case | flat |
+| `jump-thread-back-edge-scale` | 2 | no case | no case | flat |
+| `reassoc-width-untuned` | 1 | no case | no case | flat |
+| `inline-frequency-clamp` | 100 | no case | no case | flat |
+| `inline-growth-squaring-bound` | 256 | no case | no case | flat |
+| `inline-insns-single` | 70 | no case | no case | flat |
+| `inline-early-insns` | 6 | no case | no case | flat |
+| `inline-insns-single-o3` | 200 | no case | no case | flat |
+| `inline-insns-auto` | 15 | 169 cases, +1.26% instructions, -4.92% text | 83 cases, -0.14% instructions, +16.49% text | worth tuning |
+| `inline-called-once-insns` | 4000 | no case | no case | flat |
+| `inline-called-once-loop-depth` | 6 | no case | no case | flat |
+| `inline-frame-growth` | 1000 | no case | 6 cases, +0.10% instructions, -6.72% text | worth tuning |
+| `inline-large-frame` | 256 | 6 cases, -0.19% instructions, +13.00% text | 6 cases, +0.10% instructions, -6.72% text | worth tuning |
+| `inline-frame-growth-conserve` | 40 | no case | no case | flat |
+| `inline-large-frame-conserve` | 100 | no case | no case | flat |
+| `inline-hint-percent` | 200 | 8 cases, -0.05% instructions, -18.11% text | 12 cases, -0.01% instructions, +24.23% text | wrong, tamnd/rucc#3158 |
+| `inline-hint-percent-o3` | 600 | no case | no case | flat |
+| `inline-min-speedup` | 30 | no case | no case | flat |
+| `inline-min-speedup-o3` | 15 | no case | no case | flat |
+| `inline-unit-growth` | 40 | no case | no case | flat |
+| `large-unit-insns` | 10000 | no case | no case | flat |
+| `large-function-insns` | 2700 | no case | no case | flat |
+| `large-function-growth` | 100 | no case | no case | flat |
+| `inline-call-time` | 10 | no case | no case | flat |
+| `hot-block-fraction` | 1000 | no case | no case | flat |
+| `predict-expect` | 90 | 8 cases, +11.04% instructions, -0.14% text | 17 cases, -0.24% instructions, +0.09% text | wrong, tamnd/rucc#3159 |
+| `predict-never-returns` | 99 | 96 cases, -0.00% instructions, -0.02% text | no case | flat |
+| `predict-cold-call` | 99 | no case | no case | flat |
+| `predict-loop-exit-not-taken` | 89 | 448 cases, -0.06% instructions, -0.03% text | 482 cases, +5.83% instructions, +0.42% text | worth tuning |
+| `predict-loop-guard-taken` | 73 | 335 cases, +0.12% instructions, +0.29% text | 87 cases, -0.08% instructions, +0.19% text | worth tuning |
+| `predict-pointer-not-null` | 70 | 74 cases, +0.09% instructions, -0.48% text | 24 cases, +0.00% instructions, -0.02% text | wrong, tamnd/rucc#3160 |
+| `predict-negative-return` | 98 | no case | no case | flat |
+| `predict-null-return` | 71 | no case | no case | flat |
+| `predict-call-not-taken` | 67 | 198 cases, -0.32% instructions, -0.03% text | 46 cases, -0.00% instructions, -0.07% text | wrong, tamnd/rucc#3161 |
+| `predict-continue-taken` | 67 | no case | no case | flat |
+| `max-predicted-iterations` | 100 | 4 cases, -0.00% instructions, +0.00% text | 6 cases, -0.00% instructions, +0.00% text | flat |
+| `loop-reserved-regs` | 2 | 71 cases, -0.05% instructions, +0.07% text | 71 cases, -0.03% instructions, -0.26% text | wrong, tamnd/rucc#3162 |
+| `licm-expensive` | 20 | no case | no case | flat |
+| `unroll-max-times` | 16 | 164 cases, +9.92% instructions, -8.10% text | 76 cases, -1.34% instructions, +37.23% text | worth tuning |
+| `unroll-max-insns` | 200 | 58 cases, +2.99% instructions, -7.49% text | 48 cases, -5.20% instructions, +33.02% text | worth tuning |
+| `split-max-insns` | 200 | no case | no case | flat |
+| `split-remade-insns` | 8 | no case | no case | flat |
+| `unroll-max-depth` | 8 | no case | no case | flat |
+| `profile-sum-tolerance-percent` | 1 | no case | no case | flat |
+| `predict-return-blocks` | 8 | no case | no case | flat |
+| `align-frequency-fraction` | 100 | no case | no case | flat |
+| `loop-align-min-iterations` | 4 | no case | no case | flat |
+| `iv-max-considered-uses` | 250 | no case | no case | flat |
+| `iv-consider-all-candidates-bound` | 40 | no case | no case | flat |
+| `iv-always-prune-cand-set-bound` | 10 | no case | no case | flat |
+| `ivopts-new-variable-bias` | 3 | 484 cases, -0.38% instructions, +1.19% text | 203 cases, +5.70% instructions, +0.12% text | worth tuning |
+| `ivopts-set-penalty` | 10 | no case | no case | flat |
+| `scheduler-ready-list-bound` | 100 | no case | no case | flat |
+| `switch-conversion-max-growth` | 8 | no case | 2 cases, -0.02% instructions, -15.64% text | wrong, tamnd/rucc#3163 |
+| `jump-table-min-targets` | 11 | 29 cases, -14.88% instructions, -1.53% text | 1 case, +35.76% instructions, +35.31% text | wrong, tamnd/rucc#3164 |
+| `jump-table-min-targets-for-size` | 6 | no case | no case | flat |
+| `switch-peel-percent` | 66 | no case | 4 cases, +11.04% instructions, +0.00% text | worth tuning |
+| `wasm-jump-table-min-targets` | 24 | no case | no case | flat |
+| `wasm-jump-table-min-targets-for-size` | 4 | no case | no case | flat |
+| `allocator-degradation-percent` | 10 | no case | no case | flat |
+| `dse-walk-limit` | 256 | 34 cases, +0.00% instructions, +0.64% text | 21 cases, -0.00% instructions, -0.36% text | wrong, tamnd/rucc#3165 |
+| `range-test-bit-intervals` | 3 | 63 cases, +0.01% instructions, +1.35% text | 1 case, +1.12% instructions, +0.78% text | worth tuning |
+| `range-switch-cases` | 64 | no case | no case | flat |
+| `constant-p-load-depth` | 8 | no case | no case | flat |
+| `cons-cascade` | 8 | no case | no case | flat |
+| `egraph-nodes` | 65536 | no case | no case | flat |
+| `select-forms` | 2 | no case | no case | flat |
+| `simplify-rounds` | 4 | no case | no case | flat |
+
 ## 40.15 The decision
 
 One cost model, two units, one cost type with an explicit infinity and a lexicographic tiebreak, two
