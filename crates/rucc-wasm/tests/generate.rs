@@ -1973,3 +1973,40 @@ fn a_narrow_load_that_is_read_signed_is_a_signed_load() {
         assert_eq!(status, 10);
     }
 }
+
+const EXTENDED: &str = r#"; ModuleID = 't.c'
+; format 0
+target triple = "wasm32-unknown-wasip1"
+target datalayout = "e-p:32:32-i64:64-S128"
+
+func @below(ptr) -> i32, linkage(external) {
+block0(%0: ptr):
+    %1 = load.i8 %0, align 1
+    %2 = iconst.i8 -3
+    %3 = icmp slt %1, %2
+    %4 = zext.i32 %3
+    return %4
+}
+
+func @widen() -> i32, linkage(external) {
+block0:
+    %0 = iconst.i16 -5
+    %1 = sext.i32 %0
+    return %1
+}
+"#;
+
+/// A sign extension of a narrow constant is the constant extended when the code is written, so
+/// `i32.const 253` and `i32.extend8_s` are `i32.const -3`. This is so in a rule, as in the compare
+/// of `below`, and in the code of the other instructions, as in the `sext` of `widen`.
+#[test]
+fn a_sign_extension_of_a_constant_is_the_extended_constant() {
+    for optimize in [false, true] {
+        let below = body_of(EXTENDED, "below", optimize);
+        assert!(below.contains("i32.const\t-3\n"), "{below}");
+        assert!(!below.contains("i32.extend8_s\n\ti32.lt_s"), "{below}");
+        let widen = body_of(EXTENDED, "widen", optimize);
+        assert!(widen.contains("i32.const\t-5\n"), "{widen}");
+        assert!(!widen.contains("extend16_s"), "{widen}");
+    }
+}

@@ -7,6 +7,7 @@ All notable changes are recorded here. The format follows [Keep a Changelog](htt
 ### Changed
 
 - On wasm at `-O1` and above, a load of 8 or 16 bits whose uses read it sign extended more often than zero extended is `i32.load8_s` or `i32.load16_s`, as clang writes it, and the `i32.extend8_s` or `i32.extend16_s` after it goes away (#2866). The SQLite shell has 528 such loads and is 673 bytes smaller.
+- On wasm, a sign extension of a narrow constant is the extended constant, so `i32.const 253` and `i32.extend8_s` are `i32.const -3` (#2866). The SQLite shell had 273 of these pairs.
 
 ## 0.24.6
 
