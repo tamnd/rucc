@@ -28,10 +28,13 @@
 //! as wasm, and when no `wasm-ld` is found.
 //!
 //! The module is the one `wasm-ld` writes for the same line, byte for byte, for the programs we
-//! compared: two small programs, one of which calls `printf`, and the SQLite shell against the wasi-sdk 34 sysroot. The one
-//! difference is that the DWARF sections of the inputs are not copied, so the module has no
-//! `.debug_info` and the like. The order of the objects, the merged strings, the types, the
-//! imports and the names are all LLD's.
+//! compared: two small programs, one of which calls `printf`, and the SQLite shell against the
+//! wasi-sdk 34 sysroot, each with and without `-g`. The order of the objects, the merged strings,
+//! the types, the imports and the names are all LLD's. The DWARF sections of the inputs go in the
+//! module as LLD puts them there: the sections of each name one after the other, the strings of
+//! `.debug_str` and `.debug_line_str` merged, and the addresses of the functions and the data
+//! patched. A function or data that the module does not have gets the address `-1`, or `-2` in
+//! `.debug_ranges` and `.debug_loc`.
 //!
 //! Every crate in the workspace is published, and publishing implies a promise. This one is
 //! tier 3: its Rust API is explicitly unstable and will change without a major version bump.
@@ -69,8 +72,10 @@ pub struct Options {
     pub initial_memory: Option<u32>,
     /// The maximum memory in bytes, as `--max-memory`. `None` gives the memory no maximum.
     pub max_memory: Option<u32>,
-    /// Leave out the `name` section, as `--strip-all`.
+    /// Leave out the `name` section and the DWARF sections, as `--strip-all`.
     pub strip: bool,
+    /// Leave out the DWARF sections, as `--strip-debug`.
+    pub strip_debug: bool,
     /// Make an undefined function an import from `env` and not an error, as `--allow-undefined`.
     pub allow_undefined: bool,
     /// The name of the module in the `name` section. `wasm-ld` gives the file name of the output.
@@ -87,6 +92,7 @@ impl Default for Options {
             initial_memory: None,
             max_memory: None,
             strip: false,
+            strip_debug: false,
             allow_undefined: false,
             name: None,
         }
@@ -150,7 +156,7 @@ impl std::error::Error for Error {}
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::testing::{archive, callee, caller, calls, custom, importer, weak_caller};
+    use crate::testing::{archive, callee, caller, calls, custom, debugged, importer, weak_caller};
 
     /// The payload of each section of a module, by id, in order.
     fn sections(module: &[u8]) -> Vec<(u8, &[u8])> {
@@ -211,6 +217,37 @@ mod tests {
         bytes::name(&mut exports, "_start");
         exports.extend([0, 0]);
         assert_eq!(payload(&module, 7), exports);
+    }
+
+    #[test]
+    fn the_dwarf_sections_are_kept_with_their_relocations_applied() {
+        let a = debugged("_start");
+        let b = debugged("g");
+        let inputs = [Input { name: "a.o", bytes: &a }, Input { name: "b.o", bytes: &b }];
+        let customs = |module: &[u8]| -> Vec<(String, Vec<u8>)> {
+            sections(module)
+                .into_iter()
+                .filter(|&(id, _)| id == 0)
+                .map(|(_, p)| {
+                    let len = usize::from(p[0]);
+                    (String::from_utf8(p[1..=len].to_vec()).unwrap(), p[len + 1..].to_vec())
+                })
+                .collect()
+        };
+        let module = customs(&link(&Options::default(), &inputs).unwrap());
+        let titles: Vec<&str> = module.iter().map(|(title, _)| title.as_str()).collect();
+        assert_eq!(titles, [".debug_str", ".debug_info", "name"]);
+        // The strings of both objects, each once, in LLD's order, which sorts them by their bytes
+        // from the end.
+        assert_eq!(module[0].1, b"_start\0g\0shared\0");
+        // `_start` starts at offset 2 of the code section, after the count and the size, and the
+        // relocation adds 1. Nothing calls `g`, so it is not in the module, and its address is the
+        // value that is not an address. Both offsets of `shared` are the offset of the one copy.
+        let info = [3, 0, 0, 0, 9, 0, 0, 0, 0xff, 0xff, 0xff, 0xff, 9, 0, 0, 0];
+        assert_eq!(module[1].1, info);
+        let options = Options { strip_debug: true, ..Options::default() };
+        let module = customs(&link(&options, &inputs).unwrap());
+        assert!(module.iter().all(|(title, _)| !title.starts_with(".debug")));
     }
 
     #[test]

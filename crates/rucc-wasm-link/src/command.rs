@@ -45,8 +45,6 @@ const NO_EFFECT: &[&str] = &[
     "-Bstatic",
     "-static",
     "--no-whole-archive",
-    "--strip-debug",
-    "-S",
     "--color-diagnostics",
     "--no-color-diagnostics",
     "--fatal-warnings",
@@ -122,6 +120,8 @@ impl Command {
             } else if NO_EFFECT.contains(&arg) || arg.starts_with("--sysroot=") {
             } else if matches!(arg, "--strip-all" | "-s") {
                 options.strip = true;
+            } else if matches!(arg, "--strip-debug" | "-S") {
+                options.strip_debug = true;
             } else if arg == "--no-entry" {
                 options.entry = None;
             } else if arg == "--allow-undefined" {
@@ -264,8 +264,11 @@ mod tests {
         assert_eq!(options.stack_size, 0x2000);
         assert_eq!((options.initial_memory, options.max_memory), (Some(131_072), Some(262_144)));
         assert!(options.strip);
-        let options = Command::parse(&line("-o a.wasm --no-entry a.o"), |_| false).unwrap().options;
+        assert!(!options.strip_debug);
+        let options =
+            Command::parse(&line("-o a.wasm --no-entry -S a.o"), |_| false).unwrap().options;
         assert_eq!(options.entry, None);
+        assert!(options.strip_debug);
     }
 
     #[test]

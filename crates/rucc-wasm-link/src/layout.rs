@@ -96,7 +96,7 @@ fn rank(name: &str) -> u8 {
 
 /// The strings of a string segment, each with its NUL, as ranges. A last string with no NUL is
 /// one too.
-fn strings(bytes: &[u8]) -> impl Iterator<Item = (u32, u32)> + '_ {
+pub(crate) fn strings(bytes: &[u8]) -> impl Iterator<Item = (u32, u32)> + '_ {
     let mut from = 0;
     std::iter::from_fn(move || {
         let rest = bytes.get(from..).filter(|rest| !rest.is_empty())?;
@@ -111,7 +111,7 @@ fn strings(bytes: &[u8]) -> impl Iterator<Item = (u32, u32)> + '_ {
 /// again, as LLD does at `-O1` and up. The strings are sorted by their bytes from the end, with
 /// the longer first, so a string comes just after each string it is the end of. The result gives
 /// each string its offset and whether it is written, and the size of the whole.
-fn merge(mut strings: Vec<&[u8]>) -> (HashMap<&[u8], (u32, bool)>, u32) {
+pub(crate) fn merge(mut strings: Vec<&[u8]>) -> (HashMap<&[u8], (u32, bool)>, u32) {
     strings.sort_unstable_by(|a, b| b.iter().rev().cmp(a.iter().rev()));
     let mut offsets = HashMap::with_capacity(strings.len());
     let mut size = 0;
