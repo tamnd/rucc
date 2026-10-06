@@ -995,8 +995,8 @@ impl Unported {
 pub enum Written {
     /// A template with instructions in it.
     Template,
-    /// An `asm goto` with instructions in it on a machine that does not write one yet, which is
-    /// every machine but x86-64.
+    /// An `asm goto` with instructions in it whose operands are on the x87 stack, which nothing
+    /// here writes yet.
     Goto,
     /// An operand this cannot put where the constraint says it goes.
     Operand,
@@ -6204,7 +6204,7 @@ impl<'a> Lowering<'a> {
                 let index: usize = digits.parse().map_err(|_| refused())?;
                 // A label, numbered after every operand. Arm 0 is the fall through, so the first
                 // label is arm 1.
-                if modifier == Some('l') && index >= list.len() && !a64 {
+                if modifier == Some('l') && index >= list.len() {
                     let label = index - list.len();
                     if label >= labels {
                         return Err(refused());
@@ -7182,9 +7182,6 @@ impl<'a> Lowering<'a> {
         let data = &self.source[inst];
         let Extra::Asm(asm) = data.extra else { return Err(self.unsupported(inst)) };
         let info = self.source[asm];
-        if self.jumps_from_text(inst) {
-            return Err(Unsupported::Assembly { inst, refused: Written::Goto });
-        }
         let refused = || Unsupported::Assembly { inst, refused: Written::Operand };
         let constraints = self.names.resolve(info.constraints).to_string();
         if !constraints.split(',').all(shared_letters) {

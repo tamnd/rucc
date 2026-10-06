@@ -26,7 +26,7 @@ use std::fmt::Write as _;
 use rucc_base::Interner;
 use rucc_mir::{Amode, Block, Func, Inst, Widen, defs};
 use rucc_target::aarch64::{self, Addr, Arg, Extend, Mode, Offset, Operands, Operator};
-use rucc_target::template::template_filled;
+use rucc_target::template::{template_arms, template_filled};
 
 use crate::Error;
 
@@ -64,7 +64,7 @@ pub(crate) fn inst(
     let opcode = spelled.strip_prefix(PREFIX).unwrap_or(spelled);
     let refused = || Error::Opcode { func: at.func_name.to_owned(), opcode: spelled.to_owned() };
     if opcode == aarch64::TEMPLATE {
-        return template(out, at, func, inst);
+        return template(out, at, func, block, inst, label);
     }
     let Some(written) = aarch64::written(opcode) else {
         return Err(refused());
@@ -157,10 +157,18 @@ pub(crate) fn inst(
 /// register its operand was given.
 ///
 /// A hole says the operand and whether it is the `w` or the `x` name of the register, and a name
-/// gets the prefix this object format puts in front of every symbol. The text is not handed to the
-/// encoder, since nothing reads it back into instructions, so what is wrong with it is the
-/// assembler's to say.
-fn template(out: &mut String, at: &Context<'_>, func: &Func, inst: Inst) -> Result<(), Error> {
+/// gets the prefix this object format puts in front of every symbol. A label an `asm goto` jumps
+/// to is the block that arm of this one goes to, written with the name `label` gives it. The text
+/// is not handed to the encoder, since nothing reads it back into instructions, so what is wrong
+/// with it is the assembler's to say.
+fn template(
+    out: &mut String,
+    at: &Context<'_>,
+    func: &Func,
+    block: Block,
+    inst: Inst,
+    label: impl Fn(Block) -> String,
+) -> Result<(), Error> {
     let data = func[inst];
     let spelled = at.names.resolve(data.opcode.name());
     let Some(text) = data.symbol else {
@@ -174,8 +182,14 @@ fn template(out: &mut String, at: &Context<'_>, func: &Func, inst: Inst) -> Resu
         Some(phys) => format!("{width}{}", phys.number()),
         None => String::from("?"),
     };
-    let filled =
-        template_filled(at.names.resolve(text), "", |name| format!("{}{name}", at.symbol), reg);
+    let arms = &func[block].succs;
+    let text = template_arms(at.names.resolve(text), |arm| Some(label(arms.get(arm)?.block)))
+        .ok_or_else(|| Error::Encode {
+            func: at.func_name.to_owned(),
+            opcode: spelled.to_owned(),
+            why: "it jumps to an arm its block does not have".to_owned(),
+        })?;
+    let filled = template_filled(&text, "", |name| format!("{}{name}", at.symbol), reg);
     for line in filled.lines() {
         let _ = writeln!(out, "\t{}", line.trim_start());
     }
