@@ -4,9 +4,15 @@ All notable changes are recorded here. The format follows [Keep a Changelog](htt
 
 ## Unreleased
 
+## 0.25.0
+
+This release ends WA4 (#2866). On the SQLite workload the rucc module at `-O2` uses 7.1 percent more CPU time than the clang module on Wasmtime and 2.7 percent more on node, and it is 14.2 percent smaller. The limit was 10 percent for each. The inliner on wasm now copies a callee that only one caller calls in its loops, and the inliner and jump threading take less time to compile.
+
 ### Changed
 
 - On wasm, the second pass of the inliner holds a call in a loop to the limit of a hinted call when the callee is `static`, every call to the callee is in that caller, and the caller is not over `LARGE_FUNCTION_INSNS` (#2866). The copy of the callee goes away, so the unit grows by little. The SQLite shell now inlines the merge of its sorter, as clang does, and runs 33.11G instructions on the WA4 benchmark where it ran 33.63G (clang: 31.47G). The module is 3,372 bytes larger. `TargetInfo::loop_hint` says which targets do this, and only wasm32 does, so a native target keeps gcc's decisions.
+- The second pass of the inliner measures a copy of a callee once for each set of constants it is given, and not once for each call (#3076). On c4 at `-O2` the compile goes from 0.60s to 0.21s, and monocypher from 2.91s to 1.73s. The objects do not change.
+- Jump threading keeps the loop forest across a thread that does not change a loop, and loop closing walks again only the blocks it changed (#3081). The edge lists of the graph and the children of the dominator tree are each one flat array.
 
 ### Fixed
 
