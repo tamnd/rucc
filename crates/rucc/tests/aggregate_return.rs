@@ -62,7 +62,9 @@ fn bodies(target: &str, flags: &[&str]) -> Vec<(String, String)> {
     assert!(ok, "{err}");
     let mut bodies: Vec<(String, String)> = Vec::new();
     for line in listing.lines() {
-        if let Some(name) = line.strip_suffix(':').filter(|name| !name.starts_with('.')) {
+        // A label of the function's own, `.L` on ELF and `L` on COFF, is not a function.
+        let local = |name: &&str| name.starts_with('.') || name.starts_with('L');
+        if let Some(name) = line.strip_suffix(':').filter(|name| !local(name)) {
             bodies.push((name.to_owned(), String::new()));
         } else if let Some((_, body)) = bodies.last_mut() {
             body.push_str(line);
@@ -197,8 +199,8 @@ fn callee_pop_aggregate_return_is_checked_in_gcc_s_words() {
         assert_eq!(err.matches("error:").count(), errors, "{source}\n{err}");
         assert_eq!(err.matches("warning:").count(), warnings, "{source}\n{err}");
     }
-    // gcc 4.5 has never heard of it.
-    let (ok, _, err) = run(&dir(), LINUX, &["-fgnuc-version=4.5.0"], &decl("(5)"));
+    // gcc 3.4 has never heard of it. The persona is read by its major number, so 4.5 is 4.6.
+    let (ok, _, err) = run(&dir(), LINUX, &["-fgnuc-version=3.4.6"], &decl("(5)"));
     assert!(ok, "{err}");
     assert!(err.contains(&format!("warning: {name} directive ignored")), "{err}");
     assert!(!err.contains("zero"), "{err}");
