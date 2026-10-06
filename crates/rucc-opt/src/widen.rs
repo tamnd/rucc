@@ -742,10 +742,12 @@ mod tests {
 
     #[test]
     fn a_counter_that_may_wrap_is_not_widened() {
-        // No `nsw` on the increment, so `sext(i)` is not known to go up by one each time and
-        // nothing about it is a sequence a twin could be.
+        // No `nsw` on the increment, and a loop that runs until `i != n` fails goes past the
+        // largest `int` and round to `n` when `n` is negative, so `sext(i)` is not known to go up
+        // by one each time and nothing about it is a sequence a twin could be. With `i < n` the
+        // exit test alone says the increment cannot wrap.
         let mut names = Interner::new();
-        let (mut func, _) = counted(&mut names, Opcode::SExt, Flags::NONE, IntPred::Slt);
+        let (mut func, _) = counted(&mut names, Opcode::SExt, Flags::NONE, IntPred::Ne);
         let stats = widen(&mut func);
         assert!(!stats.changed());
         assert_eq!(how_many(&func, Opcode::SExt), 1);
