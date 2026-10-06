@@ -2999,6 +2999,9 @@ pub fn parse_args(args: &[String]) -> Result<Action, CliError> {
         }
         let flags: Vec<(Feature, bool)> = wasm_flags.iter().map(|&(f, on, _)| (f, on)).collect();
         opts.wasm = wasm::resolve(wasm_cpu, &flags);
+        if wasip3 {
+            opts.wasm = opts.wasm.union(wasm::required(Preview::P3));
+        }
         if threads && !wasip3 {
             notes.push(format!("-pthread has no effect on {row}: the row has one thread"));
         }
@@ -8438,7 +8441,12 @@ mod tests {
         let why = refused(&["--target=wasm32-wasip3", "-mno-bulk-memory", "-c", "a.c"]);
         assert!(why.contains("wasm32-wasip3 needs bulk-memory for its threads"), "{why}");
         // `bulk-memory` turns `bulk-memory-opt` back on, so clang takes this one and so does rucc.
-        compile(&["--target=wasm32-wasip3", "-mno-bulk-memory-opt", "-c", "a.c"]);
+        let (opts, _) = compile(&["--target=wasm32-wasip3", "-mno-bulk-memory-opt", "-c", "a.c"]);
+        assert!(opts.wasm.has(rucc_target::wasm::Feature::BulkMemoryOpt));
+        // The object has the features that the threads need, as the macros say, also on a set
+        // that does not have them.
+        let (opts, _) = compile(&["--target=wasm32-wasip3", "-mcpu=mvp", "-c", "a.c"]);
+        assert_eq!(opts.wasm, rucc_target::wasm::required(rucc_target::Preview::P3));
     }
 
     #[test]

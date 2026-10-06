@@ -146,7 +146,10 @@ impl Code {
     pub(crate) fn reloc(&mut self, kind: RelocKind, target: u32, addend: i32) {
         let at = u32::try_from(self.bytes.len()).expect("a function body under 4 GiB");
         self.fixups.push(Fixup { at, kind, target, addend });
-        let field = if matches!(kind, RelocKind::TableIndexSleb | RelocKind::MemoryAddrSleb) {
+        let field = if matches!(
+            kind,
+            RelocKind::TableIndexSleb | RelocKind::MemoryAddrSleb | RelocKind::MemoryAddrTlsSleb
+        ) {
             wasm::sleb_padded(0)
         } else {
             wasm::uleb_padded(0)

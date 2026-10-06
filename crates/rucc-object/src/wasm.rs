@@ -55,9 +55,14 @@ pub const EXPORTED: u32 = 0x20;
 const EXPLICIT_NAME: u32 = 0x40;
 /// The linker keeps a symbol that nothing refers to.
 pub const NO_STRIP: u32 = 0x80;
+/// A data symbol is thread-local: its address is an offset from the TLS base of the thread.
+pub const TLS: u32 = 0x100;
 
 /// A segment holds strings that the linker can merge.
 pub const STRINGS: u32 = 0x1;
+/// A segment is a part of the image of the thread-local variables, which the linker copies for
+/// each thread.
+pub const TLS_SEGMENT: u32 = 0x2;
 /// The linker keeps a segment that nothing refers to.
 pub const RETAIN: u32 = 0x4;
 
@@ -137,7 +142,7 @@ pub struct Place {
 pub struct Symbol {
     pub name: String,
     pub kind: SymbolKind,
-    /// Any of [`WEAK`], [`LOCAL`], [`HIDDEN`], [`EXPORTED`] and [`NO_STRIP`].
+    /// Any of [`WEAK`], [`LOCAL`], [`HIDDEN`], [`EXPORTED`], [`NO_STRIP`] and [`TLS`].
     pub flags: u32,
 }
 
@@ -156,6 +161,8 @@ pub enum RelocKind {
     MemoryAddrSleb,
     /// A data address, in data.
     MemoryAddrI32,
+    /// The offset of a thread-local variable from the TLS base, in `i32.const`.
+    MemoryAddrTlsSleb,
     /// The index of a type, in `call_indirect`.
     TypeIndexLeb,
     /// The index of a global, in `global.get` and `global.set`.
@@ -181,6 +188,7 @@ impl RelocKind {
             RelocKind::GlobalIndexLeb => 7,
             RelocKind::TagIndexLeb => 10,
             RelocKind::TableNumberLeb => 20,
+            RelocKind::MemoryAddrTlsSleb => 21,
         }
     }
 
@@ -197,7 +205,10 @@ impl RelocKind {
     fn has_addend(self) -> bool {
         matches!(
             self,
-            RelocKind::MemoryAddrLeb | RelocKind::MemoryAddrSleb | RelocKind::MemoryAddrI32
+            RelocKind::MemoryAddrLeb
+                | RelocKind::MemoryAddrSleb
+                | RelocKind::MemoryAddrI32
+                | RelocKind::MemoryAddrTlsSleb
         )
     }
 
@@ -237,11 +248,12 @@ pub struct Function {
 /// One data segment. Each data object has its own, which is how the linker can drop one.
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
 pub struct Segment {
-    /// `.data.<symbol>`, `.rodata.<symbol>` or `.bss.<symbol>`, as clang names them.
+    /// `.data.<symbol>`, `.rodata.<symbol>`, `.bss.<symbol>`, `.tdata.<symbol>` or
+    /// `.tbss.<symbol>`, as clang names them.
     pub name: String,
     /// The alignment, as its log2.
     pub align: u32,
-    /// Any of [`STRINGS`] and [`RETAIN`].
+    /// Any of [`STRINGS`], [`TLS_SEGMENT`] and [`RETAIN`].
     pub flags: u32,
     pub bytes: Vec<u8>,
     pub fixups: Vec<Fixup>,
@@ -567,7 +579,10 @@ impl Layout {
                 Ok(i64::from(self.slot[index].unwrap_or(0)))
             }
             (
-                RelocKind::MemoryAddrLeb | RelocKind::MemoryAddrSleb | RelocKind::MemoryAddrI32,
+                RelocKind::MemoryAddrLeb
+                | RelocKind::MemoryAddrSleb
+                | RelocKind::MemoryAddrI32
+                | RelocKind::MemoryAddrTlsSleb,
                 SymbolKind::Data { place },
             ) => {
                 let base = place.map_or(0, |p| {
@@ -599,7 +614,7 @@ fn patch(bytes: &mut [u8], fixup: Fixup, value: i64) -> Result<(), Error> {
         RelocKind::TableIndexI32 | RelocKind::MemoryAddrI32 => {
             field.copy_from_slice(&value32.to_le_bytes());
         }
-        RelocKind::TableIndexSleb | RelocKind::MemoryAddrSleb => {
+        RelocKind::TableIndexSleb | RelocKind::MemoryAddrSleb | RelocKind::MemoryAddrTlsSleb => {
             field.copy_from_slice(&sleb_padded(value32));
         }
         _ => field.copy_from_slice(&uleb_padded(value as u32)),

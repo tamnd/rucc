@@ -87,7 +87,7 @@ use rucc_ir::{
 };
 use rucc_object::wasm::{
     self, EXPORTED, Fixup, FuncType, HIDDEN, Import, LOCAL, NO_STRIP, Place, Producers, RETAIN,
-    RelocKind, STRINGS, Segment, SymbolKind, ValType, WEAK, Written,
+    RelocKind, STRINGS, Segment, SymbolKind, TLS, TLS_SEGMENT, ValType, WEAK, Written,
 };
 use rucc_target::wasm::{Feature, Features};
 
@@ -104,12 +104,19 @@ pub struct Options {
     /// `-O1` and above ask. Now that is the values that stay on the operand stack, which is
     /// section 8.2 of the WebAssembly notes.
     pub optimize: bool,
+    /// Whether the stack pointer and the TLS base are in the context slots of the component model
+    /// and not in globals, as on wasm32-wasip3, where clang 23 defines
+    /// `__wasm_libcall_thread_context__`. The code then reaches them through calls to
+    /// `__wasm_get_stack_pointer`, `__wasm_set_stack_pointer` and `__wasm_get_tls_base`, and a
+    /// thread-local variable is an offset from the TLS base and not a place in memory. That is
+    /// section 5.8 of the WebAssembly notes.
+    pub thread_context: bool,
 }
 
 impl From<Features> for Options {
     /// The options of `-O0` with `features`.
     fn from(features: Features) -> Self {
-        Options { features, optimize: false }
+        Options { features, optimize: false, thread_context: false }
     }
 }
 
@@ -229,6 +236,7 @@ fn translate_with(
         names,
         features,
         optimize: options.optimize,
+        thread_context: options.thread_context,
         out: wasm::Module::default(),
         functions: Map::default(),
         data: Map::default(),
@@ -276,7 +284,7 @@ fn translate_with(
         let size = u32::try_from(global.size)
             .map_err(|_| unit_wide(format!("`{name}` is larger than the 4 GiB of wasm32")))?;
         let place = Some(Place { segment, offset: 0, size });
-        let flags = flags(global.linkage);
+        let flags = flags(global.linkage) | unit.tls(global);
         let symbol = unit.out.symbol(name.clone(), SymbolKind::Data { place }, flags);
         unit.data.insert(name.clone(), symbol);
         unit.out.segments.push(Segment::default());
@@ -303,7 +311,8 @@ fn translate_with(
                     }
                 };
                 let kind = SymbolKind::Data { place: Some(place) };
-                let symbol = unit.out.symbol(name.clone(), kind, flags(alias.linkage));
+                let flags = flags(alias.linkage) | unit.tls(&module[global]);
+                let symbol = unit.out.symbol(name.clone(), kind, flags);
                 unit.data.insert(name, symbol);
             }
             _ => {
@@ -342,7 +351,9 @@ fn translate_with(
         features
     };
     unit.out.features = used.iter().map(|f| f.name().to_owned()).collect();
-    if !features.has(Feature::Atomics) {
+    // A unit with the thread context keeps its thread-local variables, and clang does not
+    // disallow shared memory in its object then.
+    if !features.has(Feature::Atomics) && !options.thread_context {
         unit.out.disallowed = vec!["shared-mem".into()];
     }
     unit.out.producers = Producers {
@@ -468,6 +479,9 @@ pub(crate) struct Unit<'a> {
     pub(crate) features: Features,
     /// Whether the values with one use stay on the operand stack. See [`Options::optimize`].
     pub(crate) optimize: bool,
+    /// Whether the stack pointer and the TLS base are reached through calls. See
+    /// [`Options::thread_context`].
+    pub(crate) thread_context: bool,
     pub(crate) out: wasm::Module,
     /// The function symbols, by the name in the object.
     functions: Map<String, (u32, u32)>,
@@ -602,9 +616,27 @@ impl Unit<'_> {
         if let Some(&found) = self.data.get(&name) {
             return Ok((false, found));
         }
-        let index = self.out.symbol(name.clone(), SymbolKind::Data { place: None }, 0);
+        let flags = if self.is_tls(symbol) { TLS } else { 0 };
+        let index = self.out.symbol(name.clone(), SymbolKind::Data { place: None }, flags);
         self.data.insert(name, index);
         Ok((false, index))
+    }
+
+    /// [`TLS`] for a thread-local variable when the unit has the thread context, and nothing
+    /// otherwise. Without the thread context there is one thread, and a thread-local variable is
+    /// a variable like any other, which is what clang makes of it when it strips the thread-local
+    /// variables of a unit with no atomics.
+    pub(crate) fn tls(&self, global: &rucc_ir::Global) -> u32 {
+        if self.thread_context && global.tls.is_some() { TLS } else { 0 }
+    }
+
+    /// Whether the address of `symbol` is an offset from the TLS base, which is so for a
+    /// thread-local variable in a unit with the thread context.
+    pub(crate) fn is_tls(&self, symbol: Symbol) -> bool {
+        match self.ir.lookup(symbol) {
+            Some(SymbolRef::Global(id)) => self.tls(&self.ir[id]) != 0,
+            _ => false,
+        }
     }
 
     /// Whether the address of `symbol` is a slot in the function table and not a place in memory.
@@ -643,6 +675,18 @@ impl Unit<'_> {
     /// The global `__stack_pointer`, which the linker defines.
     pub(crate) fn stack_pointer(&mut self) -> u32 {
         self.linker_global("__stack_pointer", ValType::I32, true)
+    }
+
+    /// The library function that gives the stack pointer or the TLS base, or that
+    /// sets the stack pointer, when the unit has the thread context. wasm-ld writes these from
+    /// `context.get` and `context.set` when it links with `--cooperative-threading`.
+    pub(crate) fn context_call(&mut self, name: &str) -> u32 {
+        let ty = if name.starts_with("__wasm_set_") {
+            FuncType { params: vec![ValType::I32], results: Vec::new() }
+        } else {
+            FuncType { params: Vec::new(), results: vec![ValType::I32] }
+        };
+        self.libcall(name, ty).0
     }
 
     /// The symbol of a global that the linker defines, such as `__stack_pointer` and `__tls_base`.
@@ -751,12 +795,13 @@ impl Unit<'_> {
             return Err(format!("is {} bytes and the variable is {size}", bytes.len()));
         }
         bytes.resize(size, 0);
-        let prefix = if global.constant {
-            ".rodata."
-        } else if zero {
-            ".bss."
-        } else {
-            ".data."
+        let tls = self.tls(global) != 0;
+        let prefix = match (tls, global.constant, zero) {
+            (true, _, true) => ".tbss.",
+            (true, _, false) => ".tdata.",
+            (false, true, _) => ".rodata.",
+            (false, false, true) => ".bss.",
+            (false, false, false) => ".data.",
         };
         let name = match global.section {
             Some(section) => self.names.resolve(section).to_owned(),
@@ -764,6 +809,9 @@ impl Unit<'_> {
         };
         let align = global.align.max(1).trailing_zeros();
         let mut flags = if global.retain { RETAIN } else { 0 };
+        if tls {
+            flags |= TLS_SEGMENT;
+        }
         if mergeable(global, align, &bytes, &fixups) {
             flags |= STRINGS;
         }

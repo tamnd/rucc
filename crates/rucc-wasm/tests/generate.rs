@@ -9,7 +9,7 @@ use std::path::{Path, PathBuf};
 use std::process::Command;
 
 use rucc_base::Interner;
-use rucc_object::wasm::{HIDDEN, SymbolKind, WEAK};
+use rucc_object::wasm::{HIDDEN, SymbolKind, TLS, TLS_SEGMENT, WEAK};
 use rucc_target::wasm::{Cpu, Feature, Features};
 
 /// A loop with block parameters, a switch with three cases and a default, and a `main` with a
@@ -1473,7 +1473,8 @@ block0(%0: ptr, %1: i32):
 fn body_of(text: &str, name: &str, optimize: bool) -> String {
     let mut names = Interner::new();
     let module = rucc_ir::parse(text, &mut names).expect("the IR parses");
-    let options = rucc_wasm::Options { features: Cpu::Lime1.features(), optimize };
+    let options =
+        rucc_wasm::Options { features: Cpu::Lime1.features(), optimize, thread_context: false };
     let object = rucc_wasm::translate(&module, &names, options).unwrap();
     let listing = rucc_wasm::assembly(&object).unwrap();
     let start = listing.find(&format!("\n{name}:\n")).expect("the function is in the listing");
@@ -1816,7 +1817,7 @@ fn bulk_body_of(text: &str, name: &str, features: Features) -> String {
     let mut names = Interner::new();
     let mut module = rucc_ir::parse(text, &mut names).expect("the IR parses");
     rucc_wasm::bulk(&mut module, &names, features);
-    let options = rucc_wasm::Options { features, optimize: true };
+    let options = rucc_wasm::Options { features, optimize: true, thread_context: false };
     let object = rucc_wasm::translate(&module, &names, options).unwrap();
     let listing = rucc_wasm::assembly(&object).unwrap();
     let start = listing.find(&format!("\n{name}:\n")).expect("the function is in the listing");
@@ -2385,4 +2386,83 @@ fn the_address_of_a_slot_of_the_frame_is_written_at_each_use() {
     assert!(f.contains("local.get\t3\n\tlocal.get\t0\n\ti32.store\t16\n"), "{f}");
     let f = body_of(FRAME, "f", false);
     assert!(f.contains("i32.const\t16\n\ti32.add\n\tlocal.set"), "{f}");
+}
+
+/// Two thread-local variables and an external one, and a function with a frame.
+const THREAD_LOCAL: &str = r#"; ModuleID = 't.c'
+; format 0
+target triple = "wasm32-unknown-wasip3"
+target datalayout = "e-p:32:32-i64:64-S128"
+
+global @tz : bytes 4 = { zero 4 }, align 4, linkage(external), tls(global_dynamic)
+global @ev : bytes 4, align 4, linkage(external), tls(global_dynamic)
+global @tv : i32 = 5, align 4, linkage(external), tls(global_dynamic)
+
+func @get() -> i32, linkage(external) {
+block0:
+    %0 = global_addr @tv
+    %1 = load.i32 %0, align 4
+    %2 = global_addr @ev
+    %3 = load.i32 %2, align 4
+    %4 = add.nsw %1, %3
+    return %4
+}
+
+func @addr() -> ptr, linkage(external) {
+block0:
+    %0 = global_addr @tz
+    return %0
+}
+
+func @use(ptr), linkage(external);
+
+func @f(i32) -> i32, linkage(external) {
+block0(%0: i32):
+    %1 = alloca, size 64, align 1
+    call @use(%1) : (ptr)
+    %2 = ptr_add %1, %0
+    %3 = load.i8 %2, align 1
+    %4 = sext.i32 %3
+    return %4
+}
+"#;
+
+/// With the thread context of wasm32-wasip3, the code reaches the stack pointer and the TLS base
+/// through the library calls, a thread-local variable is an offset from the TLS base in a TLS
+/// segment, and the object does not disallow shared memory, as with clang 23. Without it, a
+/// thread-local variable is a variable like any other.
+#[test]
+fn the_thread_context_reaches_the_stack_pointer_and_the_tls_base_through_calls() {
+    let mut names = Interner::new();
+    let module = rucc_ir::parse(THREAD_LOCAL, &mut names).expect("the IR parses");
+    let options = |thread_context| rucc_wasm::Options {
+        features: Cpu::Lime1.features(),
+        optimize: true,
+        thread_context,
+    };
+    let object = rucc_wasm::translate(&module, &names, options(true)).unwrap();
+    let listing = rucc_wasm::assembly(&object).unwrap();
+    let tv = "call\t__wasm_get_tls_base\n\ti32.const\ttv@TLSREL\n\ti32.add\n\ti32.load\t0\n";
+    assert!(listing.contains(tv), "{listing}");
+    assert!(listing.contains("i32.const\tev@TLSREL\n"), "{listing}");
+    assert!(listing.contains("i32.const\ttz@TLSREL\n\ti32.add\n\treturn"), "{listing}");
+    assert!(listing.contains("call\t__wasm_get_stack_pointer\n"), "{listing}");
+    assert_eq!(listing.matches("call\t__wasm_set_stack_pointer\n").count(), 2, "{listing}");
+    assert!(!listing.contains("__stack_pointer\n"), "{listing}");
+    assert!(listing.contains(".section\t.tdata.tv,\"T\",@"), "{listing}");
+    assert!(listing.contains(".section\t.tbss.tz,\"T\",@"), "{listing}");
+    for name in ["tv", "tz", "ev"] {
+        let symbol = object.symbols.iter().find(|s| s.name == name).unwrap();
+        assert_ne!(symbol.flags & TLS, 0, "{name}");
+    }
+    assert!(object.segments.iter().all(|s| s.flags & TLS_SEGMENT != 0));
+    assert!(object.disallowed.is_empty(), "{:?}", object.disallowed);
+
+    let object = rucc_wasm::translate(&module, &names, options(false)).unwrap();
+    let listing = rucc_wasm::assembly(&object).unwrap();
+    assert!(!listing.contains("TLSREL") && !listing.contains("__wasm_get"), "{listing}");
+    assert!(listing.contains("global.get\t__stack_pointer\n"), "{listing}");
+    assert!(listing.contains(".section\t.data.tv,\"\",@"), "{listing}");
+    assert!(object.symbols.iter().all(|s| s.flags & TLS == 0));
+    assert_eq!(object.disallowed, ["shared-mem"]);
 }
