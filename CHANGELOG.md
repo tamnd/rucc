@@ -4,6 +4,10 @@ All notable changes are recorded here. The format follows [Keep a Changelog](htt
 
 ## Unreleased
 
+## 0.24.6
+
+Spill slots for values put away around a call now share their bytes, which brings the Linux 7.2 frame that went past `FRAME_WARN` back under it. This release also has the `ipa-vrp` remarks, the short copies on wasm and the address folding in code motion.
+
 ### Added
 
 - `ipa-vrp` says what it did. `-fopt-info` and the `fired` field of `-frucc-trace` show one `optimized` line for every parameter it writes a range on, and one `missed` line for every integer parameter the calls leave unbounded. Before this the pass reported nothing, so across the corpus it read as a pass that never fires. (#3016)
