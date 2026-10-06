@@ -69,6 +69,23 @@ pub fn read(text: &str) -> Result<Line, Error> {
     if mnemonic.len() == 3 && mnemonic.starts_with('b') && Cond::named(&mnemonic[1..]).is_some() {
         mnemonic.insert(1, '.');
     }
+    // A landing pad says which branches may land on it with a name and not an operand, and is the
+    // hint with that number.
+    if mnemonic == "bti" {
+        let target = match rest.to_ascii_lowercase().as_str() {
+            "" => 32,
+            "c" => 34,
+            "j" => 36,
+            "jc" => 38,
+            _ => return Err(error(text)),
+        };
+        return Ok(Line {
+            mnemonic: "hint".to_owned(),
+            values: vec![Value::Imm(target)],
+            symbol: None,
+            addend: 0,
+        });
+    }
     let mut line = Line { mnemonic, values: Vec::new(), symbol: None, addend: 0 };
     let mut named = (None, 0);
     let pieces = split(rest);

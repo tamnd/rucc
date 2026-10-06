@@ -95,6 +95,9 @@ const RESTORE_STATE: u8 = 0x0b;
 const DEF_CFA: u8 = 0x0c;
 const DEF_CFA_REGISTER: u8 = 0x0d;
 const DEF_CFA_OFFSET: u8 = 0x0e;
+/// One of the opcodes left to each machine, which on AArch64 flips whether the return address is
+/// signed. The same number is SPARC's register window save.
+const NEGATE_RA_STATE: u8 = 0x2d;
 const ADVANCE_LOC: u8 = 0x40;
 const OFFSET: u8 = 0x80;
 const RESTORE: u8 = 0xc0;
@@ -702,6 +705,7 @@ impl Table {
             }
             CfiOp::RememberState => self.out.bytes.push(REMEMBER_STATE),
             CfiOp::RestoreState => self.out.bytes.push(RESTORE_STATE),
+            CfiOp::NegateRaState => self.out.bytes.push(NEGATE_RA_STATE),
         }
     }
 
