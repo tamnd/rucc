@@ -206,14 +206,17 @@ fn every_relocation_points_at_a_padded_field_that_holds_its_value() {
             };
             // The function index of puts is 0, the only import, and greet's table slot is 1.
             // The string is at 0, msg at 16 after the 13 bytes of the string are aligned, and
-            // fp at 20. The type of call_indirect is 0 and the table is number 0.
+            // fp at 20. The table is number 0. The type of call_indirect is 1, because the types
+            // are in the order of their first use, and `__main_void`, the first symbol, has the
+            // other one.
             let want = match (kind, symbol) {
                 (0, 2) => 0,
                 (2, 1) => 1,
                 (3, 4) => 16,
                 (3, 5) => 20,
                 (5, 3) => 0,
-                (6, 0) | (20, 6) => 0,
+                (6, 1) => 1,
+                (20, 6) => 0,
                 other => panic!("{label}: an entry nobody wrote: {other:?}"),
             };
             assert_eq!(value, want, "{label}: kind {kind} symbol {symbol}");
@@ -260,6 +263,30 @@ fn an_alias_is_defined_only_by_a_function_that_the_object_defines() {
         let refused = matches!(with_alias(target, twice), Err(wasm::Error::Alias { .. }));
         assert!(refused, "{target}");
     }
+}
+
+/// The order in which a producer found the types does not change the object, and a type that
+/// nothing uses is not written. The type section of `program` is first the type of `__main_void`
+/// and then the other one.
+#[test]
+fn the_types_are_written_in_the_order_of_their_first_use() {
+    let written = wasm::write(&program()).unwrap().bytes;
+    let mut m = program();
+    m.types.swap(0, 1);
+    for symbol in &mut m.symbols {
+        if let SymbolKind::Function { ty, .. } = &mut symbol.kind {
+            *ty = 1 - *ty;
+        }
+    }
+    for fixup in m.functions.iter_mut().flat_map(|f| &mut f.fixups) {
+        if fixup.kind == RelocKind::TypeIndexLeb {
+            fixup.target = 1 - fixup.target;
+        }
+    }
+    m.intern(FuncType { params: vec![ValType::F64], results: vec![] });
+    assert_eq!(wasm::write(&m).unwrap().bytes, written);
+    let types = sections(&written).into_iter().find(|(id, _, _)| *id == 1).unwrap().2;
+    assert_eq!(types, [2, 0x60, 0, 1, 0x7f, 0x60, 1, 0x7f, 1, 0x7f]);
 }
 
 #[test]
