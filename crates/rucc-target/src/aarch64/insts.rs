@@ -42,9 +42,9 @@ use Form::{
     Acquire, Address, Alu, AluI, AluShift, ArgVal, ArgValFp, Barrier, BrCond, Call, Cmp, CmpI,
     CmpSet, CmpSetI, CompareSwap, Convert, Csel, FAlu, FCmp, FCmpSet, FConvert, FMove, FUnary,
     FetchOp, FpToInt, Insert, IntToFp, Jcc, Jump, JumpAway, JumpReg, JumpZero, Lea, Load, LoadFp,
-    LoadImm, Move, MulAdd, Nop, Pop, PopPair, Prefetch, Probe, Push, PushPair, Release, Ret,
-    RetVal, RetVal2, RetVal2Fp, RetVal3Fp, RetVal4Fp, RetValFp, Select, Set, SetBits, Store,
-    StoreFp, Swap, Template, Test, Trap, Unary,
+    LoadImm, LoadPair, Move, MulAdd, Nop, Pop, PopPair, Prefetch, Probe, Push, PushPair, Release,
+    Ret, RetVal, RetVal2, RetVal2Fp, RetVal3Fp, RetVal4Fp, RetValFp, Select, Set, SetBits, Store,
+    StoreFp, StorePair, Swap, Template, Test, Trap, Unary,
 };
 
 /// The operand vector one machine instruction has.
@@ -104,6 +104,12 @@ pub enum Form {
     Load,
     /// A source and an addressing mode it writes to.
     Store,
+    /// Two destinations and an addressing mode, the first read from the lower address and the
+    /// second from the word above it. Only ever written after allocation, by the pairing pass.
+    LoadPair,
+    /// Two sources and an addressing mode, the first written to the lower address and the second
+    /// to the word above it.
+    StorePair,
     /// [`Form::Load`] into the other register file.
     LoadFp,
     /// [`Form::Store`] out of the other register file.
@@ -289,14 +295,14 @@ impl Form {
             AluI | Unary | Convert | Move | CmpSetI => &ONE_TO_ONE,
             Alu | AluShift | CmpSet | Csel => &TWO_TO_ONE,
             MulAdd | Select => &THREE_TO_ONE,
-            Cmp | PushPair | Release => &TWO_READ,
+            Cmp | PushPair | StorePair | Release => &TWO_READ,
             Acquire => &ACQUIRE,
             Swap => &SWAP,
             FetchOp => &FETCH_OP,
             CompareSwap => &COMPARE_SWAP,
             CmpI | Test | Store | BrCond | JumpReg | JumpZero | Push => &ONE_READ,
             Pop => &ONE_WRITTEN,
-            PopPair => &TWO_WRITTEN,
+            PopPair | LoadPair => &TWO_WRITTEN,
             LoadFp | ArgValFp => &ONE_WRITTEN_FP,
             StoreFp => &ONE_READ_FP,
             FUnary | FMove | FConvert => &FP_TO_FP,
@@ -326,7 +332,10 @@ impl Form {
     /// Whether an instruction of this form carries an addressing mode.
     #[must_use]
     pub fn takes_mem(self) -> bool {
-        matches!(self, Lea | Load | Store | LoadFp | StoreFp | Probe | Prefetch)
+        matches!(
+            self,
+            Lea | Load | Store | LoadPair | StorePair | LoadFp | StoreFp | Probe | Prefetch
+        )
     }
 
     /// Whether an instruction of this form reads or writes memory.
@@ -340,6 +349,8 @@ impl Form {
         matches!(
             self,
             Load | Store
+                | LoadPair
+                | StorePair
                 | LoadFp
                 | StoreFp
                 | Push
@@ -655,6 +666,11 @@ pub static INSTS: &[(&str, Form)] = &[
     ("str_16", Store),
     ("str_32", Store),
     ("str_64", Store),
+    // Two of the loads and two of the stores above at once, from two words next to each other.
+    ("ldp_32", LoadPair),
+    ("ldp_64", LoadPair),
+    ("stp_32", StorePair),
+    ("stp_64", StorePair),
     // Loads and stores of the other register file.
     ("ldr_f32", LoadFp),
     ("ldr_f64", LoadFp),

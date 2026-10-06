@@ -183,6 +183,7 @@ pub mod lifetimes;
 pub mod lower;
 pub mod lowering;
 pub mod maths;
+pub mod pairs;
 pub mod pipeline;
 pub mod pressure;
 pub mod quad;

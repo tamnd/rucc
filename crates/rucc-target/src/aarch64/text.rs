@@ -625,6 +625,10 @@ static TEXT: &[(&str, &[Written])] = &[
     ("str_16", &[spell("strh", &[Reg(0, W), Mem])]),
     ("str_32", &[spell("str", &[Reg(0, W), Mem])]),
     ("str_64", &[spell("str", &[Reg(0, X), Mem])]),
+    ("ldp_32", &[spell("ldp", &[Reg(0, W), Reg(1, W), Mem])]),
+    ("ldp_64", &[spell("ldp", &[Reg(0, X), Reg(1, X), Mem])]),
+    ("stp_32", &[spell("stp", &[Reg(0, W), Reg(1, W), Mem])]),
+    ("stp_64", &[spell("stp", &[Reg(0, X), Reg(1, X), Mem])]),
     // Loads and stores of the other register file.
     ("ldr_f32", &[spell("ldr", &[Fp(0, S), Mem])]),
     ("ldr_f64", &[spell("ldr", &[Fp(0, D), Mem])]),
