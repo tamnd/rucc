@@ -174,6 +174,7 @@ pub(crate) fn function(unit: &mut Unit<'_>, id: FuncId, symbol: u32) -> Result<F
         pushed: Set::default(),
         root: None,
         inverted: None,
+        signed: Set::default(),
     };
     if unit_notes {
         let (values, blocks) = rucc_ir::numbers(func);
@@ -181,6 +182,7 @@ pub(crate) fn function(unit: &mut Unit<'_>, id: FuncId, symbol: u32) -> Result<F
     }
     if lower.unit.optimize {
         lower.trees = lower.stackify();
+        lower.signed = lower.signed_loads();
     }
     if lower.unit.optimize {
         lower.color()?;
@@ -249,6 +251,9 @@ struct Lower<'u, 'a> {
     /// The compare that is written with the inverse of its predicate, because the `br_if` that
     /// reads it branches when the compare is false.
     inverted: Option<Inst>,
+    /// The narrow loads that are written as `i32.load8_s` or `i32.load16_s`, whose upper bits are
+    /// copies of the sign bit and not zero. See [`Self::signed_loads`].
+    signed: Set<Value>,
 }
 
 /// The notes of the tree form for one function, and the numbers that the text of the IR gives
@@ -1053,11 +1058,11 @@ impl Lower<'_, '_> {
             Opcode::ICmp
             | Opcode::FCmp
             | Opcode::IConst
-            | Opcode::Load
             | Opcode::AtomicLoad
             | Opcode::AtomicRmw
             | Opcode::Cmpxchg
             | Opcode::ZExt => true,
+            Opcode::Load => !self.signed.contains(&value),
             Opcode::SAddOverflow
             | Opcode::UAddOverflow
             | Opcode::SSubOverflow
@@ -1066,6 +1071,46 @@ impl Lower<'_, '_> {
             | Opcode::UMulOverflow => index == 1,
             _ => false,
         }
+    }
+
+    /// The loads of 8 or 16 bits that are better written signed. A narrow load is written as
+    /// `i32.load8_u` or `i32.load16_u` and its upper bits are known to be zero, so a use that reads
+    /// the value zero extended needs nothing more. But a use that reads it sign extended needs an
+    /// `i32.extend8_s` or an `i32.extend16_s` after the load, which `i32.load8_s` and
+    /// `i32.load16_s` do in the same instruction. So a load is written signed when more of its
+    /// uses read it sign extended than zero extended, as clang does for a `signed char` that is
+    /// only compared or widened. The other uses read only the low bits, which are the same in both
+    /// forms. An atomic load has no signed form in wasm and stays as it is.
+    fn signed_loads(&self) -> Set<Value> {
+        let func = self.func;
+        let mut votes: Map<Value, i32> = Map::default();
+        for block in func.blocks() {
+            for inst in func.insts(block) {
+                let data = &func[inst];
+                // The vote of the use, and how many of its first operands it extends. A shift
+                // extends only the value that it shifts.
+                let (vote, count) = match (data.opcode, data.extra) {
+                    (Opcode::SExt, _) => (1, 1),
+                    (Opcode::ZExt, _) => (-1, 1),
+                    (Opcode::ICmp, Extra::IntPred(pred)) if pred.is_signed() => (1, 2),
+                    (Opcode::ICmp, _) => (-1, 2),
+                    (Opcode::AShr, _) => (1, 1),
+                    (Opcode::LShr, _) => (-1, 1),
+                    (Opcode::SDiv | Opcode::SRem, _) => (1, 2),
+                    (Opcode::UDiv | Opcode::URem, _) => (-1, 2),
+                    _ => continue,
+                };
+                for value in self.inputs(inst).into_iter().take(count) {
+                    let Some((def, _)) = self.def(value) else { continue };
+                    if func[def].opcode == Opcode::Load
+                        && matches!(self.narrow(value), Some(8 | 16))
+                    {
+                        *votes.entry(value).or_default() += vote;
+                    }
+                }
+            }
+        }
+        votes.into_iter().filter(|&(_, vote)| vote > 0).map(|(value, _)| value).collect()
     }
 
     /// Put a value on the operand stack. A constant is written here, a value that stays on the
@@ -1138,7 +1183,7 @@ impl Lower<'_, '_> {
     /// Push a value sign extended to the width of its value type.
     fn push_s(&mut self, value: Value) -> Result<()> {
         self.push(value)?;
-        if let Some(bits) = self.narrow(value) {
+        if let (Some(bits), false) = (self.narrow(value), self.signed.contains(&value)) {
             self.sign_extend(bits);
         }
         Ok(())
@@ -1481,7 +1526,10 @@ impl Lower<'_, '_> {
             }
             Opcode::Load | Opcode::AtomicLoad => {
                 let ty = self.ty(results[0]);
-                let (op, natural) = load_op(ty)?;
+                let (mut op, natural) = load_op(ty)?;
+                if self.signed.contains(&results[0]) {
+                    op = if natural == 1 { emit::I32_LOAD8_S } else { emit::I32_LOAD16_S };
+                }
                 let align = self.mem_info(inst).map_or(natural, |m| m.align);
                 let (address, offset) = self.folded(inst).map_or((arg(0), 0), |(_, b, o)| (b, o));
                 self.push(address)?;
@@ -1801,6 +1849,9 @@ impl Lower<'_, '_> {
             if let Term::Reg(value) = bindings[index] {
                 let bare = match head {
                     rules::Head::ZeroExtend(_) => self.clean(value),
+                    rules::Head::SignExtend(bits) => {
+                        self.signed.contains(&value) && self.narrow(value) == Some(bits)
+                    }
                     rules::Head::Count(bits) => {
                         self.constant(value).is_some_and(|count| count < u128::from(bits))
                     }
