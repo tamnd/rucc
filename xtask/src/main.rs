@@ -262,6 +262,29 @@ fn root() -> PathBuf {
     Path::new(env!("CARGO_MANIFEST_DIR")).parent().expect("xtask is not at the root").to_path_buf()
 }
 
+/// The directory cargo builds into, which is `target` under the root unless `CARGO_TARGET_DIR` or
+/// `CARGO_BUILD_TARGET_DIR` moves it. Every cargo a task starts inherits those, so a path a task
+/// makes under `target` for itself has to follow them, or it looks for an archive or a binary in a
+/// directory cargo never wrote to. A relative value is taken from the directory the task was run
+/// in, as cargo takes it.
+fn target_dir() -> PathBuf {
+    let set = ["CARGO_TARGET_DIR", "CARGO_BUILD_TARGET_DIR"]
+        .iter()
+        .filter_map(std::env::var_os)
+        .find(|dir| !dir.is_empty());
+    match set {
+        Some(dir) => {
+            let dir = PathBuf::from(dir);
+            if dir.is_absolute() {
+                dir
+            } else {
+                std::env::current_dir().map(|cwd| cwd.join(&dir)).unwrap_or(dir)
+            }
+        }
+        None => target_dir(),
+    }
+}
+
 // The layer check.
 
 /// One crate in the workspace, as read off disk.
@@ -1394,7 +1417,7 @@ fn builtins(args: &[String]) -> Result<()> {
 /// As [`builtins`], which is the only other caller.
 fn builtins_archive(target: &str) -> Result<PathBuf> {
     let sources = builtin_sources(target)?;
-    let archive = root().join("target").join(target).join("release").join("librucc_builtins.a");
+    let archive = target_dir().join(target).join("release").join("librucc_builtins.a");
     if let Some(dir) = archive.parent() {
         fs::create_dir_all(dir).map_err(|e| Error::Io(format!("{}: {e}", dir.display())))?;
     }
@@ -1530,7 +1553,7 @@ fn staticlib(package: &str, target: &str) -> Result<PathBuf> {
     }
 
     let file = format!("lib{}.a", package.replace('-', "_"));
-    let archive = root().join("target").join(target).join("release").join(file);
+    let archive = target_dir().join(target).join("release").join(file);
     if !archive.is_file() {
         return Err(Error::Failed {
             task: "staticlib",

@@ -28,7 +28,7 @@ use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::{fs, io};
 
-use crate::{Error, Result, root};
+use crate::{Error, Result, root, target_dir};
 
 /// How one row of the table is measured.
 enum How {
@@ -278,7 +278,7 @@ fn measure(component: &str, budget_text: &str, how: &How, wanted: &Wanted) -> Re
 /// first is a check that reports on whatever is lying in `target/`. `--no-build` is for the job that
 /// has just built it and for a machine with no network.
 fn binary(wanted: &Wanted) -> Result<PathBuf> {
-    let mut path = root().join("target");
+    let mut path = target_dir();
     if let Some(triple) = &wanted.target {
         path.push(triple);
     }

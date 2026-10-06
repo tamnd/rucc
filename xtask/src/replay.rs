@@ -128,7 +128,7 @@ use std::process::Command;
 use crate::libraries::{self, Project};
 use crate::runner::TRIPLE;
 use crate::safety::BANNER;
-use crate::{Error, Result, cost, indent, root};
+use crate::{Error, Result, cost, indent, root, target_dir};
 
 /// The level the replay builds at.
 const LEVEL: &str = "-O0";
@@ -448,7 +448,7 @@ fn count(corpus: &Path) -> usize {
 
 /// Compiles the project, its harness and the driver, and leaves a directory the script can link.
 fn build(target: &Target, project: &Project, source: &Path) -> Result<PathBuf> {
-    let work = root().join("target").join("replay").join(target.project);
+    let work = target_dir().join("replay").join(target.project);
     if work.exists() {
         std::fs::remove_dir_all(&work)
             .map_err(|e| Error::Io(format!("could not clear {}: {e}", work.display())))?;

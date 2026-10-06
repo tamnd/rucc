@@ -83,7 +83,7 @@ use std::path::{Path, PathBuf};
 use std::process::Command;
 
 use crate::runner::{Runner, TRIPLE};
-use crate::{Error, Result, indent, root};
+use crate::{Error, Result, indent, root, target_dir};
 
 /// The optimization level both compilers are asked for.
 ///
@@ -231,7 +231,7 @@ fn build() -> Result<PathBuf> {
 /// Clears the work directory and copies the corpus into it.
 fn corpus() -> Result<PathBuf> {
     let source = root().join("tests").join("abi-signatures");
-    let work = root().join("target").join("abi-differential");
+    let work = target_dir().join("abi-differential");
     if work.exists() {
         std::fs::remove_dir_all(&work)
             .map_err(|e| Error::Io(format!("could not clear {}: {e}", work.display())))?;
@@ -259,7 +259,7 @@ fn compiler() -> Result<PathBuf> {
     if !status.success() {
         return Err(Error::Io("the compiler did not build".to_owned()));
     }
-    Ok(root().join("target").join("release").join(format!("rucc{}", std::env::consts::EXE_SUFFIX)))
+    Ok(target_dir().join("release").join(format!("rucc{}", std::env::consts::EXE_SUFFIX)))
 }
 
 /// The script that assembles each side, links the four combinations and runs them.

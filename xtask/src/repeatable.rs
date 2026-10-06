@@ -41,7 +41,7 @@ use std::collections::BTreeMap;
 use std::process::Command;
 
 use crate::cost::compiler;
-use crate::{Error, Result, root};
+use crate::{Error, Result, root, target_dir};
 
 /// What this task is called, for the messages.
 const TASK: &str = "repeatable";
@@ -70,7 +70,7 @@ pub(crate) fn repeatable() -> Result<()> {
 
     // Somewhere to write the IR that is not beside the fixtures, since a check that leaves files in
     // `tests` is a check that makes the tree look changed.
-    let work = root().join("target").join("repeatable");
+    let work = target_dir().join("repeatable");
     std::fs::create_dir_all(&work)
         .map_err(|e| Error::Io(format!("could not make {}: {e}", work.display())))?;
 

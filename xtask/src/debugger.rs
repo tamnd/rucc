@@ -36,7 +36,7 @@ use std::path::PathBuf;
 use std::process::Command;
 
 use crate::runner::{Runner, TRIPLE};
-use crate::{Error, Result, root};
+use crate::{Error, Result, root, target_dir};
 
 /// What the two builds are called in the output and in the report.
 const OURS: &str = "rucc";
@@ -229,7 +229,7 @@ pub(crate) fn debugger() -> Result<()> {
 /// Compiles the function under test with this compiler and lays out the directory the runner is
 /// pointed at.
 fn build() -> Result<PathBuf> {
-    let work = root().join("target").join("debugger");
+    let work = target_dir().join("debugger");
     if work.exists() {
         std::fs::remove_dir_all(&work)
             .map_err(|e| Error::Io(format!("could not clear {}: {e}", work.display())))?;

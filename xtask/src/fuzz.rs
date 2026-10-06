@@ -58,7 +58,7 @@ use std::process::Command;
 
 use crate::runner::{Runner, TRIPLE};
 use crate::safety::{BANNER, LEVEL, NO_ELIMINATION, OPTIMIZED, Ran, SCRIPT, TIER, read};
-use crate::{Error, Result, indent, root, staticlib};
+use crate::{Error, Result, indent, root, staticlib, target_dir};
 
 /// How many programs a run makes when nobody says.
 ///
@@ -586,7 +586,7 @@ fn judgement(ran: &Ran) -> Option<u8> {
 
 /// Writes every generated program out, and says where they went.
 fn lay_out(programs: &[Program]) -> Result<PathBuf> {
-    let dir = root().join("target").join(SOURCES);
+    let dir = target_dir().join(SOURCES);
     if dir.exists() {
         std::fs::remove_dir_all(&dir)
             .map_err(|e| Error::Io(format!("could not clear {}: {e}", dir.display())))?;
@@ -609,7 +609,7 @@ fn build(
     without: &[&str],
     dir: &str,
 ) -> Result<PathBuf> {
-    let work = root().join("target").join(dir);
+    let work = target_dir().join(dir);
     if work.exists() {
         std::fs::remove_dir_all(&work)
             .map_err(|e| Error::Io(format!("could not clear {}: {e}", work.display())))?;
@@ -625,7 +625,7 @@ fn build(
     if !status.success() {
         return Err(Error::Io("the compiler did not build".to_owned()));
     }
-    let rucc = root().join("target").join("release").join("rucc");
+    let rucc = target_dir().join("release").join("rucc");
     let archive = staticlib("rucc-safe-rt", TRIPLE)?;
     std::fs::copy(&archive, work.join("safe-rt.a"))
         .map_err(|e| Error::Io(format!("could not copy {}: {e}", archive.display())))?;

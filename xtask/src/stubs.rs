@@ -32,7 +32,7 @@
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
-use crate::{Error, Result, root};
+use crate::{Error, Result, root, target_dir};
 
 /// The one complaint a reader is allowed to make, and the only file it is allowed to make it about.
 ///
@@ -83,7 +83,7 @@ pub(crate) fn stubs() -> Result<()> {
         ));
     }
 
-    let into = root().join("target").join("stubs");
+    let into = target_dir().join("stubs");
     let Written { stubs, archives, refused } = emit(&into)?;
     if stubs.is_empty() {
         return Err(Error::Io("the emit example wrote no stubs at all".to_owned()));

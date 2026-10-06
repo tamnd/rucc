@@ -23,7 +23,7 @@
 use std::path::Path;
 use std::process::Command;
 
-use crate::{Error, Result, root};
+use crate::{Error, Result, root, target_dir};
 
 /// Runs the corpus against the compiler this tree builds.
 pub(crate) fn corpus(args: &[String]) -> Result<()> {
@@ -63,10 +63,10 @@ pub(crate) fn corpus(args: &[String]) -> Result<()> {
         println!("xtask: using {rev} instead of the pinned commit");
         pin.rev = rev;
     }
-    let dir = root().join("target/corpus");
+    let dir = target_dir().join("corpus");
     checkout(&pin, &dir)?;
 
-    let rucc = root().join("target/release/rucc");
+    let rucc = target_dir().join("release").join("rucc");
     if build {
         println!("xtask: building rucc, which is what the corpus is about to run");
         cargo(&root(), &["build", "--release", "-p", "rucc"])?;

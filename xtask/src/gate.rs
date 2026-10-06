@@ -71,7 +71,7 @@ use std::path::PathBuf;
 use std::process::{Child, Command, Stdio};
 use std::time::Instant;
 
-use crate::{Error, Result, indent, root};
+use crate::{Error, Result, indent, root, target_dir};
 
 /// One check, as the command that runs it.
 struct Step {
@@ -156,7 +156,7 @@ impl Done {
 /// and the kernel does the rest, and it leaves the output on disk for anybody who wants to look at
 /// a check that passed.
 fn log_of(name: &str) -> Result<PathBuf> {
-    let dir = root().join("target").join("gate");
+    let dir = target_dir().join("gate");
     std::fs::create_dir_all(&dir)
         .map_err(|e| Error::Io(format!("could not make {}: {e}", dir.display())))?;
     Ok(dir.join(format!("{}.log", name.replace(' ', "-"))))
@@ -274,7 +274,7 @@ fn tail() -> Vec<Step> {
 /// one printed a warning into a log nobody reads and the gate went green. That is how
 /// tamnd/rucc#1064 put sixteen such links on main. A lint that does not fail is a lint that is off.
 fn docs() -> Step {
-    let into = root().join("target").join("gate-doc");
+    let into = target_dir().join("gate-doc");
     Step::cargo("doc", &["doc", "--workspace", "--all-features", "--no-deps"])
         .with("CARGO_TARGET_DIR", &into.display().to_string())
         .with("RUSTDOCFLAGS", "-D warnings")
@@ -313,7 +313,7 @@ fn programs() -> Result<Vec<Step>> {
     // Each of these would otherwise ask cargo to build the compiler before using it, and asking
     // while the tests hold the build directory's lock is ten waits for a build that already
     // happened. The spine built it, so the lane is told where rather than left to find out.
-    let built = root().join("target").join("release").join("rucc");
+    let built = target_dir().join("release").join("rucc");
     let built = built.display().to_string();
     [
         "repeatable",

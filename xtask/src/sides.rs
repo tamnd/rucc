@@ -38,7 +38,7 @@ use std::path::{Path, PathBuf};
 use std::process::Command;
 
 use crate::runner::TRIPLE;
-use crate::{Error, Result, root};
+use crate::{Error, Result, root, target_dir};
 
 /// The optimization levels a fixture is compiled at by the compiler under test.
 pub(crate) const LEVELS: [&str; 3] = ["0", "1", "2"];
@@ -57,7 +57,7 @@ pub(crate) const REFERENCE: &str = "reference";
 /// [`Error::Io`] when the directory cannot be made, the compiler will not build or the script cannot
 /// be written, and [`Error::Failed`] when the fixture does not compile at one of the levels.
 pub(crate) fn build(task: &'static str, fixture: &Path, script: &str) -> Result<PathBuf> {
-    let work = root().join("target").join(task);
+    let work = target_dir().join(task);
     if work.exists() {
         std::fs::remove_dir_all(&work)
             .map_err(|e| Error::Io(format!("could not clear {}: {e}", work.display())))?;
@@ -73,7 +73,7 @@ pub(crate) fn build(task: &'static str, fixture: &Path, script: &str) -> Result<
     if !status.success() {
         return Err(Error::Io("the compiler did not build".to_owned()));
     }
-    let rucc = root().join("target").join("release").join("rucc");
+    let rucc = target_dir().join("release").join("rucc");
 
     let named =
         fixture.file_name().map_or_else(|| "fixture.c".into(), std::ffi::OsStr::to_os_string);

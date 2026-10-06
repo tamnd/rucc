@@ -55,7 +55,7 @@ use std::path::PathBuf;
 use std::process::Command;
 
 use crate::runner::{Runner, TRIPLE};
-use crate::{Error, Result, root, staticlib};
+use crate::{Error, Result, root, staticlib, target_dir};
 
 /// The optimization level used when the caller names none.
 ///
@@ -280,7 +280,7 @@ pub(crate) fn benches() -> Result<Vec<Bench>> {
 
 /// Compiles every program twice and lays out the directory the runner is pointed at.
 fn build(benches: &[Bench], level: &str, extra: &[String]) -> Result<PathBuf> {
-    let work = root().join("target").join("cost");
+    let work = target_dir().join("cost");
     if work.exists() {
         std::fs::remove_dir_all(&work)
             .map_err(|e| Error::Io(format!("could not clear {}: {e}", work.display())))?;
@@ -338,7 +338,7 @@ pub(crate) fn compiler() -> Result<PathBuf> {
     if !status.success() {
         return Err(Error::Io("the compiler did not build".to_owned()));
     }
-    Ok(root().join("target").join("release").join("rucc"))
+    Ok(target_dir().join("release").join("rucc"))
 }
 
 /// The script that links each build and times it.

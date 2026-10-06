@@ -32,7 +32,7 @@ use std::path::PathBuf;
 use std::process::Command;
 
 use crate::runner::{Runner, TRIPLE};
-use crate::{Error, Result, root};
+use crate::{Error, Result, root, target_dir};
 
 /// The sources this compiler builds, which are the library and nothing else.
 const OURS: [&str; 2] = ["one", "two"];
@@ -168,7 +168,7 @@ pub(crate) fn dso() -> Result<()> {
 /// a compiler and then runs `as` by hand, and the one bug the listing path could not have shown is
 /// the one in tamnd/rucc#1004.
 fn build() -> Result<PathBuf> {
-    let work = root().join("target").join("dso");
+    let work = target_dir().join("dso");
     if work.exists() {
         std::fs::remove_dir_all(&work)
             .map_err(|e| Error::Io(format!("could not clear {}: {e}", work.display())))?;
@@ -184,7 +184,7 @@ fn build() -> Result<PathBuf> {
     if !status.success() {
         return Err(Error::Io("the compiler did not build".to_owned()));
     }
-    let rucc = root().join("target").join("release").join("rucc");
+    let rucc = target_dir().join("release").join("rucc");
 
     let fixtures = root().join("tests").join("dso");
     for name in OURS {
