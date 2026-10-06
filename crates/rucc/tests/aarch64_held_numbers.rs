@@ -3,7 +3,8 @@
 //! A constant is written in each block that wants it, so a loop whose sum starts at zero wrote
 //! `mov x2, #0` in the entry block for the path that skips the loop and again in the block in
 //! front of the loop. The allocator gives both the same register and nothing in between writes
-//! it, so the second one is taken out.
+//! it, so the second one is taken out. A number read on both sides of a call is the other way
+//! round: it is written again after the call rather than held across it.
 
 use std::process::Command;
 use std::sync::atomic::{AtomicUsize, Ordering};
@@ -11,6 +12,8 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 const SOURCE: &str = "\
 long sum(int *a, unsigned n) { long s = 0; for (unsigned i = 0; i < n; i++) s += a[i]; return s; }
 long count(long *a, long n) { long s = 0; for (long i = 0; i < n; i++) s += a[i] > 0; return s; }
+extern void h(long);
+void two(void) { h(0); h(0); }
 ";
 
 fn compile(flags: &[&str]) -> std::process::Output {
@@ -59,6 +62,16 @@ fn a_number_is_written_once() {
         unique.dedup();
         assert_eq!(regs.len(), unique.len(), "{name} writes a zero twice:\n{text}");
     }
+}
+
+/// A number read on both sides of a call is written again after it, rather than held across the
+/// call in a register the callee saves, which would cost the save and the restore as well.
+#[test]
+fn a_number_is_written_again_after_a_call() {
+    let text = listing();
+    let two = body(&text, "two");
+    assert_eq!(two.iter().filter(|line| *line == "mov x0, #0").count(), 2, "{text}");
+    assert!(!two.iter().any(|line| line.contains("x19")), "{text}");
 }
 
 /// The integrated assembler takes the function as well.

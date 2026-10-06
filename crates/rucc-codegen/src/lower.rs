@@ -8816,6 +8816,9 @@ impl<'a> Lowering<'a> {
     /// Writing the number again is also the right answer and not merely the safe one. It is one
     /// instruction that reads nothing, which is cheaper than holding a register live across a
     /// branch for it, and it is what a rematerializing allocator would do with the value anyway.
+    /// The same goes for a call in the block: a constant read on both sides of one is written again
+    /// after it, where holding it would cost a register the callee saves and the save and the
+    /// restore of that register, which is `h(0); h(0);` as gcc writes it.
     /// The address of a local and the address of a name are the same kind of value, and
     /// [`Rebuilt`] is the list and the reasons.
     fn reg_of(&mut self, value: Value) -> Result<mir::Reg, Unsupported> {
@@ -8825,10 +8828,9 @@ impl<'a> Lowering<'a> {
             let good = match rebuilt {
                 None => true,
                 Some(Rebuilt::Local(_)) => false,
-                Some(Rebuilt::Constant(_)) => {
-                    self.written[value.index()].is_some_and(|(block, _)| block == here)
+                Some(Rebuilt::Constant(_) | Rebuilt::Name(_)) => {
+                    self.written[value.index()] == Some((here, self.crossed))
                 }
-                Some(Rebuilt::Name(_)) => self.written[value.index()] == Some((here, self.crossed)),
             };
             if good {
                 return Ok(reg);
