@@ -1982,6 +1982,17 @@ pub static INSTS: &[(&str, Form)] = &[
     ("cmp_set_ae_mi_16", CmpSetMi),
     ("cmp_set_ae_mi_32", CmpSetMi),
     ("cmp_set_ae_mi_64", CmpSetMi),
+    // The test of a bit against memory, which is the test of a register against a constant
+    // with the register filled by a load nothing else wanted. `rucc_codegen::combine` narrows
+    // it to the one byte the constant asks about where it asks about only one.
+    ("test_set_e_mi_8", CmpSetMi),
+    ("test_set_e_mi_16", CmpSetMi),
+    ("test_set_e_mi_32", CmpSetMi),
+    ("test_set_e_mi_64", CmpSetMi),
+    ("test_set_ne_mi_8", CmpSetMi),
+    ("test_set_ne_mi_16", CmpSetMi),
+    ("test_set_ne_mi_32", CmpSetMi),
+    ("test_set_ne_mi_64", CmpSetMi),
     // The conversions between widths.
     ("movzx_8_16", Convert),
     ("movzx_8_32", Convert),
@@ -2195,6 +2206,11 @@ pub static INSTS: &[(&str, Form)] = &[
     ("cmp_mi_16", CmpMi),
     ("cmp_mi_32", CmpMi),
     ("cmp_mi_64", CmpMi),
+    // And the test against memory with the byte gone.
+    ("test_mi_8", CmpMi),
+    ("test_mi_16", CmpMi),
+    ("test_mi_32", CmpMi),
+    ("test_mi_64", CmpMi),
     // And the other half of the same pair, which is the byte with the comparison gone. There is
     // one per condition and not one per width, because what a `setcc` writes is a byte whatever
     // the comparison in front of it was comparing.
@@ -2667,7 +2683,7 @@ mod tests {
         // Every head in the model file, which is what the rule set may write and what
         // `rucc-verify` has an answer for. The two lists are checked against each other by
         // `rucc-codegen`, which is the crate that can read the rule set.
-        assert_eq!(described, 803);
+        assert_eq!(described, 819);
     }
 
     #[test]

@@ -895,6 +895,14 @@ static TEXT: &[(&str, &[Written])] = &[
     ("cmp_set_ae_mi_16", &[spell("cmpw", &[Imm, Mem]), spell("setae", &SET)]),
     ("cmp_set_ae_mi_32", &[spell("cmpl", &[Imm, Mem]), spell("setae", &SET)]),
     ("cmp_set_ae_mi_64", &[spell("cmpq", &[Imm, Mem]), spell("setae", &SET)]),
+    ("test_set_e_mi_8", &[spell("testb", &[Imm, Mem]), spell("sete", &SET)]),
+    ("test_set_e_mi_16", &[spell("testw", &[Imm, Mem]), spell("sete", &SET)]),
+    ("test_set_e_mi_32", &[spell("testl", &[Imm, Mem]), spell("sete", &SET)]),
+    ("test_set_e_mi_64", &[spell("testq", &[Imm, Mem]), spell("sete", &SET)]),
+    ("test_set_ne_mi_8", &[spell("testb", &[Imm, Mem]), spell("setne", &SET)]),
+    ("test_set_ne_mi_16", &[spell("testw", &[Imm, Mem]), spell("setne", &SET)]),
+    ("test_set_ne_mi_32", &[spell("testl", &[Imm, Mem]), spell("setne", &SET)]),
+    ("test_set_ne_mi_64", &[spell("testq", &[Imm, Mem]), spell("setne", &SET)]),
     // The conversions between widths. Widening to sixty four bits from thirty two is a thirty two
     // bit move, because every instruction that writes a thirty two bit register clears the half
     // above it, and taking the low bits of anything is a move of that many bits.
@@ -1106,6 +1114,10 @@ static TEXT: &[(&str, &[Written])] = &[
     ("cmp_mi_16", &[spell("cmpw", &[Imm, Mem])]),
     ("cmp_mi_32", &[spell("cmpl", &[Imm, Mem])]),
     ("cmp_mi_64", &[spell("cmpq", &[Imm, Mem])]),
+    ("test_mi_8", &[spell("testb", &[Imm, Mem])]),
+    ("test_mi_16", &[spell("testw", &[Imm, Mem])]),
+    ("test_mi_32", &[spell("testl", &[Imm, Mem])]),
+    ("test_mi_64", &[spell("testq", &[Imm, Mem])]),
     // And the byte with the comparison gone, which is the same pair cut the other way. It is the
     // second half of every `cmp_set_` row above, written on its own and with its operand back at
     // zero, and the assembler spells it the same way whatever width was compared.
