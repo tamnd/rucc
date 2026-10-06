@@ -149,6 +149,13 @@ use crate::types::{self, TypeId};
 /// access lands. That includes a member of a large structure, whose address is past the low page
 /// and would get past any test on the address alone.
 ///
+/// The capability of a named object is the other refusal that is believed, which is document 03's
+/// S2 and S3. A local or a variable the unit defines is in storage no region covers, so the planes
+/// have nothing to say about it and an overflow into the object beside it went ahead. The compiler
+/// made that capability out of the object's own address and size where the pointer was made, so
+/// none of the three reasons above applies to it, and [`crate::layout::Cap::beside`] takes the flag
+/// off one that arrives describing somebody else.
+///
 /// # Panics
 ///
 /// When the access is refused and [`crate::posture`] says to stop, which is the default. Under the
@@ -184,7 +191,7 @@ pub unsafe fn bounds(
         return;
     }
     // SAFETY: as above.
-    if unsafe { nothing(capability) } {
+    if unsafe { refuses(capability) } {
         // SAFETY: as below.
         unsafe { crate::fail::report(descriptor, Some(addr)) }
         return;
@@ -1170,7 +1177,9 @@ const fn clipped(region: &Region, addr: usize, size: usize) -> usize {
 /// nothing a checked half of a loop over one would ever catch, and saying so here is what makes the
 /// split collapse to the loop the program wrote. It is the same answer [`bounds`] and [`live`] give
 /// and for the same reason: a build that instruments the heap has nothing to say about a local, a
-/// global, or storage an allocator nobody told us about handed out.
+/// global, or storage an allocator nobody told us about handed out. The exports ask [`room`] before
+/// they ask this, and that is where a local or a global the compiler made a capability for gets an
+/// answer that stops at its end.
 ///
 /// An address whose granule is owned by nobody gets zero. It is already dead or was never an
 /// instance, the checked half starts at the first iteration, and the check in there is what reports
@@ -1239,6 +1248,36 @@ pub fn extent_back(addr: *const c_void, want: usize) -> usize {
     // definition, and then a granule for each one below it that answered.
     let covered = reached * plane::GRANULE + last % plane::GRANULE + 1;
     covered.min(want)
+}
+
+/// How much of a named object lies from `addr` up, or below it when `back` says so.
+///
+/// [`extent`] and [`extent_back`] answer from the planes, and for a local or a variable the unit
+/// defines no plane covers the address and the answer is everything, which runs the whole loop
+/// with no check in it. A capability the compiler made for that object knows where it ends, so the
+/// split is made there instead and the checked half meets the access that runs off it, which is
+/// the access the loop with every check still in it refuses. Nothing for any other capability,
+/// which leaves the question to the planes as before.
+///
+/// # Safety
+///
+/// `capability` is null or the address of a filled capability slot.
+#[must_use]
+pub unsafe fn room(capability: *const Cap, addr: usize, back: bool) -> Option<usize> {
+    if capability.is_null() {
+        return None;
+    }
+    // SAFETY: the caller's contract, and a slot is `Cap::BYTES` of storage the frame owns.
+    let held = unsafe { core::ptr::read(capability) };
+    if !held.is_named() {
+        return None;
+    }
+    let offset = (addr as u64).wrapping_sub(held.lo);
+    if offset > held.ext {
+        return Some(0);
+    }
+    let room = if back { offset } else { held.ext - offset };
+    Some(usize::try_from(room).unwrap_or(usize::MAX))
 }
 
 /// One granule on, as the offset [`reach`] steps by.
@@ -1312,17 +1351,23 @@ unsafe fn permits(capability: *const Cap, addr: usize, size: usize) -> bool {
     held.covers(addr as u64, size as u64)
 }
 
-/// Whether `capability` is the one a null pointer has, which [`bounds`] refuses outright.
+/// Whether `capability` is one whose no [`bounds`] believes, having already found that it does not
+/// permit the access.
+///
+/// The one a null pointer has, and one the compiler made for an object it could see. Both are
+/// answers no recovery was involved in, which is the reason [`bounds`] gives for not believing
+/// any other.
 ///
 /// # Safety
 ///
 /// `capability` is null or the address of a filled capability slot.
-unsafe fn nothing(capability: *const Cap) -> bool {
+unsafe fn refuses(capability: *const Cap) -> bool {
     if capability.is_null() {
         return false;
     }
     // SAFETY: the caller's contract, and a slot is `Cap::BYTES` of storage the frame owns.
-    unsafe { core::ptr::read(capability) }.is_null()
+    let held = unsafe { core::ptr::read(capability) };
+    held.is_null() || held.is_named()
 }
 
 /// Whether a pointer derived to `derived` is still inside the window [`deriv`] allows, going by the
@@ -1373,6 +1418,10 @@ unsafe fn stays(capability: *const Cap, derived: usize, stride: usize) -> bool {
 /// way: a slot holding an instance that had already been given back is not evidence about this
 /// pointer either.
 ///
+/// [`Meta::NAMED`] carries the same version for a different reason. It is a local or a variable
+/// the unit defines, whose storage nothing versions, so the number says nothing about which
+/// instance the pointer was made for and comparing it would refuse an access that is fine.
+///
 /// [`Meta::REBUILT`] is read and not one of them, and the reason is worth writing down because it
 /// was nearly the other way. The flag says the capability came out of an aux slot, which holds a
 /// displacement from the pointer it was written beside rather than an address, so it turns back
@@ -1392,7 +1441,7 @@ unsafe fn stale(capability: *const Cap, holder: Version) -> bool {
     }
     // SAFETY: the caller's contract, and a slot is `Cap::BYTES` of storage the frame owns.
     let held = unsafe { core::ptr::read(capability) };
-    if held.is_bottom() || held.meta.flags() & Meta::WIDE != 0 {
+    if held.is_bottom() || held.meta.flags() & (Meta::WIDE | Meta::NAMED) != 0 {
         return false;
     }
     if !plane::owned(held.ver) {
@@ -1497,21 +1546,46 @@ pub mod exports {
 
     /// How many of the `want` bytes from `addr` on the instance owning `addr` covers.
     ///
-    /// Safe, unlike the three above, because it takes no descriptor and reads nothing through the
-    /// address it is handed. What it asks is the plane about an address, and an address it knows
-    /// nothing about is an answer rather than undefined behaviour.
+    /// It takes no descriptor and reads nothing through the address it is handed. What it asks is
+    /// the plane about an address, and an address it knows nothing about is an answer rather than
+    /// undefined behaviour. The capability of the pointer comes too, for [`super::room`], which is
+    /// the one answer the planes cannot give.
+    ///
+    /// # Safety
+    ///
+    /// `capability` is null or the address of a filled capability slot.
     #[unsafe(no_mangle)]
-    pub extern "C" fn __rucc_extent(addr: *const c_void, want: usize) -> usize {
-        super::extent(addr, want)
+    pub unsafe extern "C" fn __rucc_extent(
+        addr: *const c_void,
+        want: usize,
+        capability: *const Cap,
+    ) -> usize {
+        // SAFETY: this function's own contract about `capability`, passed straight on.
+        match unsafe { super::room(capability, addr as usize, false) } {
+            Some(room) => room.min(want),
+            None => super::extent(addr, want),
+        }
     }
 
     /// How many of the `want` bytes ending at `addr` the instance owning the byte below it covers.
     ///
-    /// Safe for the same reason the one above is, and the address it is handed is one past what it
-    /// is asked about, which is what a walk from high to low hands over.
+    /// The same as the one above, and the address it is handed is one past what it is asked about,
+    /// which is what a walk from high to low hands over.
+    ///
+    /// # Safety
+    ///
+    /// As [`__rucc_extent`].
     #[unsafe(no_mangle)]
-    pub extern "C" fn __rucc_extent_back(addr: *const c_void, want: usize) -> usize {
-        super::extent_back(addr, want)
+    pub unsafe extern "C" fn __rucc_extent_back(
+        addr: *const c_void,
+        want: usize,
+        capability: *const Cap,
+    ) -> usize {
+        // SAFETY: as above.
+        match unsafe { super::room(capability, addr as usize, true) } {
+            Some(room) => room.min(want),
+            None => super::extent_back(addr, want),
+        }
     }
 
     /// # Safety
@@ -2846,6 +2920,44 @@ mod tests {
         assert!(!refused(|| bounds(core::ptr::null(), 4)));
         // A loop over a null pointer gets no unchecked half, so its first access meets the check.
         assert_eq!(extent(core::ptr::null(), 64), 0);
+    }
+
+    #[test]
+    fn an_overflow_of_an_object_the_compiler_named_is_refused_where_no_plane_covers_it() {
+        let _turn = turn();
+        // Document 03's S2 and S3. Two arrays side by side in storage no region covers, which is
+        // where a local or a global lives. The planes let a write past the first one through to
+        // the second, and its capability is what refuses it.
+        let mut pair = [0u32; 8];
+        let first = pair.as_mut_ptr().cast::<c_void>();
+        let named = recover::object(first, 16, Class::Automatic);
+        assert!(!refused(|| within(first, 16, &named)));
+        assert!(!refused(|| within(at(first, 12), 4, &named)));
+        assert!(refused(|| within(at(first, 16), 4, &named)));
+        assert!(refused(|| within(at(first, 12), 8, &named)));
+        assert!(refused(|| within(first.cast::<u8>().wrapping_sub(4).cast(), 4, &named)));
+        // The same overflow through what recovery says about the address, which is everything,
+        // goes ahead as it always did.
+        let recovered = recover::recover(first);
+        assert!(!refused(|| within(at(first, 16), 4, &recovered)));
+        // And a named capability that arrived beside a pointer outside it still permits what it
+        // did but no longer refuses, since it may be describing some other object.
+        // A loop over it is split at its end rather than run whole with no check in it, which is
+        // what the planes would say about an address none of them covers.
+        // SAFETY: the capability is a local that outlives the calls.
+        unsafe {
+            assert_eq!(room(&named, first as usize, false), Some(16));
+            assert_eq!(room(&named, at(first, 12) as usize, false), Some(4));
+            assert_eq!(room(&named, at(first, 20) as usize, false), Some(0));
+            assert_eq!(room(&named, at(first, 16) as usize, true), Some(16));
+            assert_eq!(room(&named, at(first, 4) as usize, true), Some(4));
+            assert_eq!(room(&recovered, first as usize, false), None);
+            assert_eq!(room(core::ptr::null(), first as usize, false), None);
+        }
+        let travelled = named.beside(at(first, 24) as u64);
+        assert!(!travelled.is_named());
+        assert!(!refused(|| within(at(first, 16), 4, &travelled)));
+        assert!(named.beside(at(first, 16) as u64).is_named());
     }
 
     #[test]

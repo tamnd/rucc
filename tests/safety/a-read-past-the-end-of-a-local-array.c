@@ -1,8 +1,7 @@
 /* row: S2 */
 /* refuse: J1 */
-/* gap: #431 */
-/* A stack overflow, which needs the plane writes at the start and end of a scope that milestone
-   S2 emits. The heap is what S1 instruments. */
+/* A stack overflow that reads. The local has no instance in any plane, and what refuses the read is
+   the capability made where the array was, which knows it is sixty four bytes. */
 int main(void) {
     int local[16];
     int i;

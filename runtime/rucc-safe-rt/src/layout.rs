@@ -207,6 +207,18 @@ impl Meta {
     /// member far enough into a large structure that the address is no longer in the low page.
     pub const NULL: u8 = 64;
 
+    /// Flag: the compiler made this capability itself, out of an object whose bounds it could see.
+    ///
+    /// A local, or a variable the unit defines, which are document 03's S2 and S3. No allocator lays
+    /// either out and no plane covers them, so recovery answers bounds over everything for an address
+    /// in one and an overflow into the next object has had nothing to be compared against. The
+    /// compiler does know: the size of the `alloca` or of the global, at the place the pointer was
+    /// made. This is what lets the bounds check believe a refusal from the capability, which it does
+    /// for no other, and the reason it may is that nothing here was recovered. The base is the
+    /// address the object was given and the extent is its size. It is taken off again wherever the
+    /// capability arrives beside a pointer it does not cover, which is [`Cap::beside`].
+    pub const NAMED: u8 = 128;
+
     /// A live instance of `class` with `perm`, whose identifier is `instance`.
     #[must_use]
     pub const fn new(class: Class, perm: u8, instance: u64) -> Self {
@@ -450,6 +462,28 @@ impl Cap {
     #[must_use]
     pub const fn is_null(self) -> bool {
         self.is_bottom() && self.meta.flags() & Meta::NULL != 0
+    }
+
+    /// Whether this is a capability the compiler made for an object it could see, per
+    /// [`Meta::NAMED`].
+    #[must_use]
+    pub const fn is_named(self) -> bool {
+        !self.is_bottom() && self.meta.flags() & Meta::NAMED != 0
+    }
+
+    /// The same capability, still named only if `addr` is inside it or one past its end.
+    ///
+    /// What a capability that travelled is checked against when it arrives, in an aux slot or in a
+    /// call frame. A pointer outside the object it is said to belong to is either one that already
+    /// went wrong or a capability that describes somebody else, and the second is the one a refusal
+    /// must never come out of. So the capability still permits what it did and only stops being
+    /// believed when it says no.
+    #[must_use]
+    pub const fn beside(self, addr: u64) -> Self {
+        if !self.is_named() || addr.wrapping_sub(self.lo) <= self.ext {
+            return self;
+        }
+        Self { meta: self.meta.with_flags(self.meta.flags() & !Meta::NAMED), ..self }
     }
 
     /// Whether this permits nothing at all.

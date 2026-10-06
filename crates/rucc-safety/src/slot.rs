@@ -46,6 +46,13 @@
 //! than a guess made from the region's class. `fresh` is the shape it recognises, and
 //! `rucc_safe_rt::recover`'s `made` is the load.
 //!
+//! And `cap_of` over a local of a fixed size or a variable the module defines, which is the same
+//! shape as the allocation site with the size in the instruction rather than in a header. The pointer
+//! is the object's own address and the program declared how big the object is, so the capability is
+//! exact, and it is the only thing that can say anything about document 03's S2 and S3, because no
+//! plane covers the stack or the data section. `named` is the shape and `rucc_safe_rt::recover`'s
+//! `object` is the answer.
+//!
 //! And `cap_of` over anything else, which is the last box and turned out to be a fallback rather
 //! than a lowering of its own. It is the general question, every other producer is a special case of
 //! it that has a cheap answer, and by the time they all exist a `cap_of` this pass cannot trace is a
@@ -117,8 +124,8 @@
 //! them instead. Running it to a fixpoint is what handles a chain, since a `cap_narrow` of a
 //! `cap_of` leaves the `cap_of` unread only once the `cap_narrow` has gone.
 
-use rucc_base::Interner;
 use rucc_base::hash::{Map, Set};
+use rucc_base::{Interner, Symbol};
 use rucc_ir::{
     Block, BlockCall, Builder, Def, Extra, Flags, Func, Imm, Inst, InstData, MemInfo, MemOrder,
     Opcode, Restrict, Type, Value,
@@ -141,6 +148,40 @@ pub const ALIGN: u32 = 8;
 /// How wide one of the four words is.
 const WORD: u64 = 8;
 
+/// The variables a module defines whose bounds a capability may be built out of, by name and size.
+///
+/// [`objects`] is what decides which ones, and [`named`] is what reads it.
+pub type Objects = Map<Symbol, u64>;
+
+/// The variables of `module` a `global_addr` can be given a capability of its own for.
+///
+/// A definition the linker will keep as written, which leaves out four kinds. A declaration has no
+/// size here that anybody promised. A weak or common definition can be replaced at link time by one
+/// of a different size. A variable in a section the program named is usually one element of an
+/// array the linker assembles out of every object in the link, which code walks from one element to
+/// the next on purpose. And a thread local one is reached through more than an address on some
+/// targets, so it is left for a later change. Nothing of size zero either, since a capability over
+/// no bytes refuses every access and the program may be using the symbol as a label.
+#[must_use]
+pub fn objects(module: &rucc_ir::Module) -> Objects {
+    let mut found = Objects::default();
+    for id in module.globals() {
+        let global = &module[id];
+        let kept =
+            matches!(global.linkage, rucc_ir::Linkage::External | rucc_ir::Linkage::Internal);
+        if global.is_declaration()
+            || !kept
+            || global.section.is_some()
+            || global.tls.is_some()
+            || global.size == 0
+        {
+            continue;
+        }
+        found.insert(global.name, global.size);
+    }
+    found
+}
+
 /// Puts every capability the function still holds into a frame slot.
 ///
 /// The three steps of the module documentation in order: take out the capabilities nobody reads,
@@ -155,7 +196,7 @@ const WORD: u64 = 8;
 /// Taking the block parameters out goes between the substitution and the second walk, because a
 /// capability carried along an edge is a value the first walk gives no slot to, and `parameters`
 /// needs every edge already carrying an address to decide which slot each parameter reads.
-pub fn frames(func: &mut Func, names: &mut Interner, word: Type) {
+pub fn frames(func: &mut Func, names: &mut Interner, word: Type, objects: &Objects) {
     prune(func);
     if !placeable(func) {
         return;
@@ -183,7 +224,9 @@ pub fn frames(func: &mut Func, names: &mut Interner, word: Type) {
         let slot = func[inst].results().next().and_then(|value| moved.get(&value).copied());
         match (func[inst].opcode, slot) {
             (Opcode::CapNull, Some(address)) => nulled(func, word, inst, address),
-            (Opcode::CapOf, Some(address)) => allocated(func, names, inst, address),
+            (Opcode::CapOf, Some(address)) => {
+                allocated(func, names, word, objects, inst, address);
+            }
             (Opcode::CapLoad, Some(address)) => read(func, names, inst, address),
             (Opcode::CapNarrow, Some(address)) => narrowed(func, names, word, inst, address),
             (Opcode::CapRecover, Some(address)) => recovered(func, names, inst, address),
@@ -652,7 +695,42 @@ fn fresh(func: &Func, inst: Inst) -> Option<Value> {
     (func[call].opcode == Opcode::Call && func[call].flags.contains(Flags::HEAP)).then_some(base)
 }
 
-/// `cap_of` becomes `__rucc_cap_made(slot, base)` or `__rucc_cap_recover(slot, at)`.
+/// The pointer a `cap_of` is asking about, its size and the runtime entry that makes its capability,
+/// when the pointer is an object the compiler can see the whole of.
+///
+/// A local of a fixed size, which is an `alloca` with no operand, and a variable the module defines
+/// that [`objects`] kept. Those are document 03's S2 and S3, and they are the objects no allocator
+/// lays out and no plane covers, so the other two answers here have nothing to give: recovery says
+/// everything for an address nothing watches. The size is the one the program declared, which is
+/// the extent the object was given and so the extent of every pointer derived from it.
+///
+/// A variable length array is left to recovery, since its size is a value rather than a number,
+/// and so is an `alloca` of nothing.
+fn named(func: &Func, objects: &Objects, inst: Inst) -> Option<(Value, u64, &'static str)> {
+    if func[inst].opcode != Opcode::CapOf {
+        return None;
+    }
+    let &[base] = &func[func[inst].args] else { return None };
+    let Def::Result { inst: made, index: 0 } = func[base].def else { return None };
+    match (func[made].opcode, func[made].extra) {
+        (Opcode::Alloca, Extra::Mem(mem)) if func[func[made].args].is_empty() => {
+            let size = func[mem].size;
+            (size > 0).then_some((base, size, "__rucc_cap_local"))
+        }
+        (Opcode::GlobalAddr, Extra::Symbol(name)) => {
+            objects.get(&name).map(|&size| (base, size, "__rucc_cap_static"))
+        }
+        _ => None,
+    }
+}
+
+/// `cap_of` becomes `__rucc_cap_made(slot, base)`, `__rucc_cap_local(slot, base, size)`,
+/// `__rucc_cap_static(slot, base, size)` or `__rucc_cap_recover(slot, at)`.
+///
+/// The two in the middle are [`named`], and they are exact for the reason the first one is: the
+/// pointer is the object's own address, taken where the object was made, and the size is what the
+/// program declared. They take the size as a third argument because there is no header to read it
+/// out of.
 ///
 /// Which of the two is not a property of the instruction, it is what [`fresh`] could find out about
 /// the pointer. A pointer traced back to an allocation site gets the cheap answer, which is a
@@ -682,7 +760,24 @@ fn fresh(func: &Func, inst: Inst) -> Option<Value> {
 /// In front of the `cap_of` rather than at the top of the function, because that is where the base
 /// pointer is: the call that produced it has run by then and nothing has to be kept live any longer
 /// than it already was. The slot itself is in the entry block for the reason [`reserve`] gives.
-fn allocated(func: &mut Func, names: &mut Interner, inst: Inst, address: Value) {
+fn allocated(
+    func: &mut Func,
+    names: &mut Interner,
+    word: Type,
+    objects: &Objects,
+    inst: Inst,
+    address: Value,
+) {
+    if let Some((base, size, routine)) = named(func, objects, inst) {
+        let size = konst(func, inst, Imm::int(i128::from(size), word), word);
+        let params = &[Type::PTR, Type::PTR, word];
+        let args = &[address, base, size];
+        let data = crate::lower::calling(func, names, routine, params, &[], args);
+        let made = func.create_inst(data, &[], func.span(inst));
+        func.insert_before(made, inst);
+        func.remove_inst(inst);
+        return;
+    }
     let (routine, base) = match fresh(func, inst) {
         Some(base) => ("__rucc_cap_made", base),
         None => {
@@ -825,7 +920,9 @@ pub(crate) fn konst(func: &mut Func, inst: Inst, imm: Imm, ty: Type) -> Value {
 #[cfg(test)]
 mod tests {
     use rucc_base::Symbol;
-    use rucc_ir::{Builder, CallInfo, Module, Signature, print_func, verify_func};
+    use rucc_ir::{
+        Builder, CallInfo, Datum, Global, Linkage, Module, Signature, print_func, verify_func,
+    };
     use rucc_target::{Arch, Env, Os, TargetInfo, Triple};
 
     use super::*;
@@ -917,7 +1014,7 @@ mod tests {
     fn a_capability_nothing_reads_is_taken_out() {
         let mut names = Interner::new();
         let mut func = built(&mut names, |_, _, _| {});
-        frames(&mut func, &mut names, Type::int(64));
+        frames(&mut func, &mut names, Type::int(64), &Objects::default());
         assert_eq!(count(&func, Opcode::CapNull), 0);
         assert_eq!(count(&func, Opcode::Alloca), 0);
         believed(&module(&mut names), &func, &names);
@@ -930,7 +1027,7 @@ mod tests {
             let args = b.func().push_values(&[cap, at, at, cap]);
             b.inst(InstData { args, ..InstData::new(Opcode::CapStore) }, &[]);
         });
-        frames(&mut func, &mut names, Type::int(64));
+        frames(&mut func, &mut names, Type::int(64), &Objects::default());
         assert_eq!(count(&func, Opcode::Alloca), 1);
         assert_eq!(count(&func, Opcode::Store), 4);
         assert_eq!(count(&func, Opcode::CapNull), 0);
@@ -955,7 +1052,7 @@ mod tests {
         let mut func = built(&mut names, |b, cap, at| {
             calling(b, live, Signature::new().with_params(&[Type::PTR; 3]), &[cap, at, at]);
         });
-        frames(&mut func, &mut names, Type::int(64));
+        frames(&mut func, &mut names, Type::int(64), &Objects::default());
         assert_eq!(count(&func, Opcode::Alloca), 1);
         assert_eq!(count(&func, Opcode::CapNull), 0);
         assert!(!any_capability(&func));
@@ -986,7 +1083,7 @@ mod tests {
             let sig = Signature::new().with_params(&[Type::PTR]).variadic();
             calling(b, odd, sig, &[at, cap]);
         });
-        frames(&mut func, &mut names, Type::int(64));
+        frames(&mut func, &mut names, Type::int(64), &Objects::default());
         assert_eq!(count(&func, Opcode::Alloca), 0);
         assert_eq!(count(&func, Opcode::CapNull), 1);
         assert!(any_capability(&func));
@@ -1000,7 +1097,7 @@ mod tests {
             let args = b.func().push_values(&[cap, at, at, other]);
             b.inst(InstData { args, ..InstData::new(Opcode::CapStore) }, &[]);
         });
-        frames(&mut func, &mut names, Type::int(64));
+        frames(&mut func, &mut names, Type::int(64), &Objects::default());
         assert_eq!(count(&func, Opcode::Alloca), 2);
         assert_eq!(count(&func, Opcode::Store), 8);
         believed(&module(&mut names), &func, &names);
@@ -1013,7 +1110,7 @@ mod tests {
             let args = b.func().push_values(&[cap, at, at, cap]);
             b.inst(InstData { args, ..InstData::new(Opcode::CapStore) }, &[]);
         });
-        frames(&mut func, &mut names, Type::int(64));
+        frames(&mut func, &mut names, Type::int(64), &Objects::default());
         let entry = func.entry().expect("the function has a body");
         let here = func.insts(entry).filter(|&inst| func[inst].opcode == Opcode::Alloca).count();
         assert_eq!(here, count(&func, Opcode::Alloca));
@@ -1023,7 +1120,7 @@ mod tests {
     fn a_capability_for_a_fresh_allocation_is_one_call_and_no_stores() {
         let mut names = Interner::new();
         let mut func = called(&mut names, true);
-        frames(&mut func, &mut names, Type::int(64));
+        frames(&mut func, &mut names, Type::int(64), &Objects::default());
         assert_eq!(count(&func, Opcode::Alloca), 1);
         assert_eq!(count(&func, Opcode::CapOf), 0);
         // Nothing writes the four words here, unlike the null case. The runtime fills the slot out
@@ -1041,7 +1138,7 @@ mod tests {
     fn a_capability_for_a_pointer_nobody_vouched_for_falls_back_to_the_plane_walk() {
         let mut names = Interner::new();
         let mut func = called(&mut names, false);
-        frames(&mut func, &mut names, Type::int(64));
+        frames(&mut func, &mut names, Type::int(64), &Objects::default());
         assert_eq!(count(&func, Opcode::CapOf), 0);
         assert_eq!(count(&func, Opcode::Alloca), 1);
         assert!(!any_capability(&func));
@@ -1068,7 +1165,7 @@ mod tests {
             let args = b.func().push_values(&[mine, inner, inner, mine]);
             b.inst(InstData { args, ..InstData::new(Opcode::CapStore) }, &[]);
         });
-        frames(&mut func, &mut names, word);
+        frames(&mut func, &mut names, word, &Objects::default());
         // `__rucc_cap_made` subtracts a constant to reach the header, which is right for a pointer
         // to the base of an object and wrong for one into the middle. This is the question document
         // 05 section 5.2.3 leaves open, and the answer is that the cheap path is never reached with
@@ -1078,6 +1175,118 @@ mod tests {
         assert!(text.contains("__rucc_cap_recover"), "{text}");
         assert!(!text.contains("__rucc_cap_made"), "{text}");
         believed(&unit, &func, &names);
+    }
+
+    /// A `cap_of` over the address `make` builds, stored so that something reads it.
+    fn rooted(names: &mut Interner, make: impl FnOnce(&mut Builder<'_>) -> Value) -> Func {
+        built(names, |b, _, at| {
+            let base = make(b);
+            let args = b.func().push_values(&[base]);
+            let mine = b.value(InstData { args, ..InstData::new(Opcode::CapOf) }, Type::CAP);
+            let args = b.func().push_values(&[mine, at, base, mine]);
+            b.inst(InstData { args, ..InstData::new(Opcode::CapStore) }, &[]);
+        })
+    }
+
+    /// An `alloca` of `size` bytes, with the size as an operand when `dynamic` says so.
+    fn local(b: &mut Builder<'_>, size: u64, dynamic: bool) -> Value {
+        let info = MemInfo {
+            size,
+            align: 8,
+            order: MemOrder::NotAtomic,
+            tbaa: None,
+            owns: 0,
+            restrict: Restrict::NONE,
+        };
+        let extra = Extra::Mem(b.func().add_mem(info));
+        let args = if dynamic {
+            let n = number(b, i128::from(size), Type::int(64));
+            b.func().push_values(&[n])
+        } else {
+            b.func().push_values(&[])
+        };
+        b.value(InstData { args, extra, ..InstData::new(Opcode::Alloca) }, Type::PTR)
+    }
+
+    #[test]
+    fn a_capability_for_a_local_is_its_own_address_and_its_declared_size() {
+        let mut names = Interner::new();
+        let mut func = rooted(&mut names, |b| local(b, 64, false));
+        frames(&mut func, &mut names, Type::int(64), &Objects::default());
+        assert_eq!(count(&func, Opcode::CapOf), 0);
+        assert!(!any_capability(&func));
+        // Document 03's S2. No plane covers the stack, so the walk would say everything and an
+        // overflow into the next local would go ahead. The size is the program's own.
+        let unit = module(&mut names);
+        let text = print_func(&unit, &func, &names);
+        assert!(text.contains("__rucc_cap_local"), "{text}");
+        assert!(text.contains("iconst.i64 64"), "{text}");
+        assert!(!text.contains("__rucc_cap_recover"), "{text}");
+        believed(&unit, &func, &names);
+    }
+
+    #[test]
+    fn a_variable_length_array_is_left_to_the_walk() {
+        let mut names = Interner::new();
+        let mut func = rooted(&mut names, |b| local(b, 64, true));
+        frames(&mut func, &mut names, Type::int(64), &Objects::default());
+        // The size is a value here rather than a number, so there is nothing to build an exact
+        // capability out of, and the answer is the one any other pointer gets.
+        let unit = module(&mut names);
+        let text = print_func(&unit, &func, &names);
+        assert!(text.contains("__rucc_cap_recover"), "{text}");
+        assert!(!text.contains("__rucc_cap_local"), "{text}");
+    }
+
+    #[test]
+    fn a_capability_for_a_variable_is_built_only_for_one_whose_size_the_link_keeps() {
+        let mut names = Interner::new();
+        let mut unit = module(&mut names);
+        let zero = unit.push_data(&[Datum::Zero(16)]);
+        let mut defined = |name: &str, size: u64, linkage: Linkage, section: bool| {
+            let mut global = Global::new(names.intern(name), size, 4);
+            global.linkage = linkage;
+            global.init = Some(zero);
+            global.section = section.then(|| names.intern(".init_array"));
+            unit.add_global(global);
+        };
+        defined("table", 64, Linkage::External, false);
+        defined("hidden", 16, Linkage::Internal, false);
+        defined("maybe", 16, Linkage::Weak, false);
+        defined("shared", 16, Linkage::Common, false);
+        defined("placed", 16, Linkage::External, true);
+        defined("label", 0, Linkage::External, false);
+        unit.add_global(Global::new(names.intern("elsewhere"), 16, 4));
+        let objects = objects(&unit);
+        // Only the two whose size the link cannot change and whose neighbours are not the point.
+        let mut kept: Vec<&str> = objects.keys().map(|&name| names.resolve(name)).collect();
+        kept.sort_unstable();
+        assert_eq!(kept, ["hidden", "table"]);
+
+        let table = names.intern("table");
+        let mut func = rooted(&mut names, |b| {
+            b.value(
+                InstData { extra: Extra::Symbol(table), ..InstData::new(Opcode::GlobalAddr) },
+                Type::PTR,
+            )
+        });
+        frames(&mut func, &mut names, Type::int(64), &objects);
+        let text = print_func(&unit, &func, &names);
+        assert!(text.contains("__rucc_cap_static"), "{text}");
+        assert!(text.contains("iconst.i64 64"), "{text}");
+
+        // And a weak one is the walk, because the definition that wins the link may be bigger.
+        let maybe = names.intern("maybe");
+        let mut func = rooted(&mut names, |b| {
+            b.value(
+                InstData { extra: Extra::Symbol(maybe), ..InstData::new(Opcode::GlobalAddr) },
+                Type::PTR,
+            )
+        });
+        frames(&mut func, &mut names, Type::int(64), &objects);
+        let text = print_func(&unit, &func, &names);
+        assert!(text.contains("__rucc_cap_recover"), "{text}");
+        assert!(!text.contains("__rucc_cap_static"), "{text}");
     }
 
     /// An integer constant of that width, in the block being built.
@@ -1100,7 +1309,7 @@ mod tests {
             let args = b.func().push_values(&[got, at, at, got]);
             b.inst(InstData { args, ..InstData::new(Opcode::CapStore) }, &[]);
         });
-        frames(&mut func, &mut names, Type::int(64));
+        frames(&mut func, &mut names, Type::int(64), &Objects::default());
         // Two slots, and the four stores are the null's. The one the read fills is written by the
         // runtime, so nothing in the function touches its words.
         assert_eq!(count(&func, Opcode::Alloca), 2);
@@ -1142,7 +1351,7 @@ mod tests {
             let args = b.func().push_values(&[got, at, at, got]);
             b.inst(InstData { args, ..InstData::new(Opcode::CapStore) }, &[]);
         });
-        frames(&mut func, &mut names, Type::int(64));
+        frames(&mut func, &mut names, Type::int(64), &Objects::default());
         // Both producers are ones this pass understands and the yield beside them is not, and
         // placing them anyway would leave the yield holding an operand that is now an address.
         assert_eq!(count(&func, Opcode::CapLoad), 1);
@@ -1158,7 +1367,7 @@ mod tests {
             let args = b.func().push_values(&[cap, at, at]);
             b.value(InstData { args, ..InstData::new(Opcode::CapLoad) }, Type::CAP);
         });
-        frames(&mut func, &mut names, Type::int(64));
+        frames(&mut func, &mut names, Type::int(64), &Objects::default());
         // The fixpoint in `prune` is what takes the pair, since the null is only unread once the
         // read that was its one reader has gone.
         assert_eq!(count(&func, Opcode::CapLoad), 0);
@@ -1180,7 +1389,7 @@ mod tests {
             let args = b.func().push_values(&[member, at, at, member]);
             b.inst(InstData { args, ..InstData::new(Opcode::CapStore) }, &[]);
         });
-        frames(&mut func, &mut names, word);
+        frames(&mut func, &mut names, word, &Objects::default());
         assert_eq!(count(&func, Opcode::Alloca), 2);
         assert_eq!(count(&func, Opcode::CapNarrow), 0);
         // Both numbers were written in a width that is not the target's, so both are extended. The
@@ -1214,7 +1423,7 @@ mod tests {
             let args = b.func().push_values(&[got, at, at, got]);
             b.inst(InstData { args, ..InstData::new(Opcode::CapStore) }, &[]);
         });
-        frames(&mut func, &mut names, Type::int(64));
+        frames(&mut func, &mut names, Type::int(64), &Objects::default());
         // One slot and nothing writing its words, since the walk is the runtime's and its answer
         // goes straight into the slot. The null the fixture starts from is unread and went in
         // `prune`.
@@ -1255,7 +1464,7 @@ mod tests {
             let args = b.func().push_values(&[member, at, at, member]);
             b.inst(InstData { args, ..InstData::new(Opcode::CapStore) }, &[]);
         });
-        frames(&mut func, &mut names, word);
+        frames(&mut func, &mut names, word, &Objects::default());
         assert_eq!(count(&func, Opcode::Alloca), 2);
         assert_eq!(count(&func, Opcode::CapRecover), 0);
         assert_eq!(count(&func, Opcode::CapNarrow), 0);
@@ -1316,7 +1525,7 @@ mod tests {
             let args = b.func().push_values(&[cap]);
             b.inst(InstData { args, ..InstData::new(Opcode::CapPublish) }, &[]);
         });
-        frames(&mut func, &mut names, Type::int(64));
+        frames(&mut func, &mut names, Type::int(64), &Objects::default());
         assert_eq!(count(&func, Opcode::CapPublish), 0);
         // Two reservations, which are the capability's own slot and the frame. The frame is the
         // function's rather than the call's, so a second call would not add a third.
@@ -1350,7 +1559,7 @@ mod tests {
             let args = b.func().push_values(&[cap]);
             b.inst(InstData { args, ..InstData::new(Opcode::CapPublish) }, &[]);
         });
-        frames(&mut func, &mut names, Type::int(64));
+        frames(&mut func, &mut names, Type::int(64), &Objects::default());
         // One read, and it is of the frame rather than of anything the program wrote. It has to be
         // after the call, since what it is reading is the link the runtime filled in, and the call
         // it feeds has to be after that again.
@@ -1373,7 +1582,7 @@ mod tests {
         let mut func = passing(&mut names, |b, _, _| {
             b.inst(InstData::new(Opcode::CapClear), &[]);
         });
-        frames(&mut func, &mut names, Type::int(64));
+        frames(&mut func, &mut names, Type::int(64), &Objects::default());
         assert_eq!(count(&func, Opcode::CapClear), 0);
         // Nothing is reserved, because saying there is no frame is not a statement about any
         // capability and the null the fixture starts from is unread and went in `prune`.
@@ -1393,7 +1602,7 @@ mod tests {
             let args = b.func().push_values(&[cap]);
             b.inst(InstData { args, ..InstData::new(Opcode::CapPublish) }, &[]);
         });
-        frames(&mut func, &mut names, Type::int(64));
+        frames(&mut func, &mut names, Type::int(64), &Objects::default());
         // There is no call for it to be about, and adjacency is the whole of the tie between the
         // two, so there is nothing to hand the capability to and the conservative answer is the
         // same one a producer this pass cannot write gets.
@@ -1411,7 +1620,7 @@ mod tests {
             let args = b.func().push_values(&caps);
             b.inst(InstData { args, ..InstData::new(Opcode::CapPublish) }, &[]);
         });
-        frames(&mut func, &mut names, Type::int(64));
+        frames(&mut func, &mut names, Type::int(64), &Objects::default());
         // A refusal rather than a truncation. Dropping the capabilities past the eighth would be a
         // silent weakening, and this way the back end says it cannot lower the instruction.
         assert_eq!(count(&func, Opcode::CapPublish), 1);
@@ -1441,7 +1650,7 @@ mod tests {
         let mut names = Interner::new();
         let word = Type::int(64);
         let mut func = asking(&mut names, word, 1);
-        frames(&mut func, &mut names, word);
+        frames(&mut func, &mut names, word, &Objects::default());
         assert_eq!(count(&func, Opcode::CapArg), 0);
         // One reservation, which is the answer's. The frame is not one of these, because it is the
         // caller's stack and this end is handed a pointer to it rather than making one.
@@ -1463,7 +1672,7 @@ mod tests {
         let mut names = Interner::new();
         let word = Type::int(64);
         let mut func = asking(&mut names, word, 3);
-        frames(&mut func, &mut names, word);
+        frames(&mut func, &mut names, word, &Objects::default());
         let unit = module(&mut names);
         let text = print_func(&unit, &func, &names);
         // Once, and this is the assertion the whole shape of the lowering is for. A second take
@@ -1479,7 +1688,7 @@ mod tests {
     fn a_position_narrower_than_a_word_is_widened_into_one() {
         let mut names = Interner::new();
         let mut func = asking(&mut names, Type::int(32), 1);
-        frames(&mut func, &mut names, Type::int(64));
+        frames(&mut func, &mut names, Type::int(64), &Objects::default());
         // The runtime takes the position as a `size_t` and the front end is under no obligation to
         // have produced one, which is the same thing `cap_narrow`'s offset and length need.
         assert_eq!(count(&func, Opcode::ZExt), 1);
@@ -1493,7 +1702,7 @@ mod tests {
             let args = b.func().push_values(&[cap]);
             b.inst(InstData { args, ..InstData::new(Opcode::CapYield) }, &[]);
         });
-        frames(&mut func, &mut names, Type::int(64));
+        frames(&mut func, &mut names, Type::int(64), &Objects::default());
         assert_eq!(count(&func, Opcode::CapYield), 0);
         // One reservation, which is the capability being handed back. The frame is not one of
         // these, for the reason the argument end's is not: it belongs to whoever called this.
@@ -1519,7 +1728,7 @@ mod tests {
             let args = b.func().push_values(&[cap, at, at, cap]);
             b.inst(InstData { args, ..InstData::new(Opcode::CapStore) }, &[]);
         });
-        frames(&mut func, &mut names, Type::int(64));
+        frames(&mut func, &mut names, Type::int(64), &Objects::default());
         // What it says is about the value leaving by one particular return, so one that is not in
         // front of a return is describing nothing, and the refusal is the publish's refusal.
         assert_eq!(count(&func, Opcode::CapYield), 1);
@@ -1564,7 +1773,7 @@ mod tests {
     fn the_pointer_a_call_gave_back_is_read_out_of_the_frame_it_was_published_with() {
         let mut names = Interner::new();
         let mut func = returning(&mut names, true);
-        frames(&mut func, &mut names, Type::int(64));
+        frames(&mut func, &mut names, Type::int(64), &Objects::default());
         assert_eq!(count(&func, Opcode::CapResult), 0);
         assert_eq!(count(&func, Opcode::CapPublish), 0);
         // Three reservations: the capability that went over, the frame it went over in, and the
@@ -1589,7 +1798,7 @@ mod tests {
     fn a_result_behind_a_call_with_no_frame_leaves_the_function_alone() {
         let mut names = Interner::new();
         let mut func = returning(&mut names, false);
-        frames(&mut func, &mut names, Type::int(64));
+        frames(&mut func, &mut names, Type::int(64), &Objects::default());
         // A call that says there is no frame has none for the callee to have written into, so
         // there is nothing here to read and the answer would be whatever the last call site left.
         assert_eq!(count(&func, Opcode::CapResult), 1);
@@ -1610,7 +1819,7 @@ mod tests {
             let args = b.func().push_values(&[cap, at, at, cap]);
             b.inst(InstData { args, ..InstData::new(Opcode::CapStore) }, &[]);
         });
-        frames(&mut func, &mut names, Type::int(64));
+        frames(&mut func, &mut names, Type::int(64), &Objects::default());
         // Both of them still capabilities, since placing the one this pass understands would hand
         // the store the address of a slot the other one never wrote.
         assert_eq!(count(&func, Opcode::CapOf), 1);
@@ -1657,7 +1866,7 @@ mod tests {
         // slot the producer filled, and nothing is copied anywhere.
         let mut names = Interner::new();
         let mut func = handed_along(&mut names, false);
-        frames(&mut func, &mut names, Type::int(64));
+        frames(&mut func, &mut names, Type::int(64), &Objects::default());
         assert_eq!(count(&func, Opcode::CapOf), 0);
         assert_eq!(count(&func, Opcode::CapStore), 0);
         assert_eq!(count(&func, Opcode::Alloca), 1, "one slot for the one capability");
@@ -1717,7 +1926,7 @@ mod tests {
         // store reads the header's, which is what makes the body's `cap_of` running first harmless.
         let mut names = Interner::new();
         let mut func = joining(&mut names, false);
-        frames(&mut func, &mut names, Type::int(64));
+        frames(&mut func, &mut names, Type::int(64), &Objects::default());
         assert_eq!(count(&func, Opcode::Alloca), 3);
         let head = func.blocks().nth(1).expect("the function has two blocks");
         assert!(func[head].params.is_empty(), "the parameter went");
@@ -1749,7 +1958,7 @@ mod tests {
         let done = b.func().create_block();
         b.br_if(again, head, &[held], done, &[]);
         Builder::new(&mut func, done).ret(&[]);
-        frames(&mut func, &mut names, Type::int(64));
+        frames(&mut func, &mut names, Type::int(64), &Objects::default());
         assert_eq!(count(&func, Opcode::CapOf), 0);
         assert_eq!(count(&func, Opcode::Call), 0);
         assert!(func[head].params.is_empty(), "the parameter went");
@@ -1762,7 +1971,7 @@ mod tests {
         // than in front of the branch, where it would run on the way out as well.
         let mut names = Interner::new();
         let mut func = joining(&mut names, true);
-        frames(&mut func, &mut names, Type::int(64));
+        frames(&mut func, &mut names, Type::int(64), &Objects::default());
         assert_eq!(func.blocks().count(), 4, "one more block, for the back edge");
         let edge = func.blocks().last().expect("the edge block is the last one made");
         assert_eq!(func.insts(edge).filter(|&inst| func[inst].opcode == Opcode::Store).count(), 4);
@@ -1776,7 +1985,7 @@ mod tests {
         // loop adds, and it is why there is nothing to copy round.
         let mut names = Interner::new();
         let mut func = handed_along(&mut names, true);
-        frames(&mut func, &mut names, Type::int(64));
+        frames(&mut func, &mut names, Type::int(64), &Objects::default());
         assert_eq!(count(&func, Opcode::CapOf), 0);
         assert_eq!(count(&func, Opcode::CapStore), 0);
         assert_eq!(count(&func, Opcode::Alloca), 1, "one slot for the one capability");

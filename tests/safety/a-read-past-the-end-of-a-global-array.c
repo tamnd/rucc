@@ -1,7 +1,7 @@
 /* row: S3 */
 /* refuse: J1 */
-/* gap: #431 */
-/* The same for a static object, which needs the same plane writes done once at start up. */
+/* The same for a static object. The read lands in the next global, which is real storage nobody
+   would fault on, and the capability made out of the variable's declared size refuses it. */
 int small[4];
 int next[4];
 

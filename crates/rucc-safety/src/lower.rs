@@ -125,11 +125,13 @@ pub fn lower(module: &mut Module, names: &mut Interner) -> usize {
     // metadata table and the module is not reachable while one of its functions is borrowed out of
     // it. The table is a handful of nodes, so it is read once here rather than per instruction.
     let numbers = plane::numbers(module, names);
+    // The same again for the variables, whose sizes a `cap_of` over one of them is built out of.
+    let objects = crate::slot::objects(module);
     for id in module.funcs() {
         if module[id].is_declaration() {
             continue;
         }
-        calls(&mut module[id], names, word, &numbers, &mut written);
+        calls(&mut module[id], names, word, &numbers, &objects, &mut written);
     }
     for (index, row) in written.iter().enumerate() {
         emit(module, names, index, *row);
@@ -143,6 +145,7 @@ fn calls(
     names: &mut Interner,
     word: Type,
     numbers: &Map<Meta, u32>,
+    objects: &crate::slot::Objects,
     table: &mut Vec<Descriptor>,
 ) {
     let insts: Vec<Inst> = func.blocks().flat_map(|block| func.insts(block)).collect();
@@ -188,7 +191,7 @@ fn calls(
     // Every `cap_of` in the function was put there to feed a check, and no check reads one any
     // more, so almost all of what this does is take them out again. The rest of it is putting the
     // capabilities that are left somewhere the back end can keep them, which is [`crate::slot`].
-    crate::slot::frames(func, names, word);
+    crate::slot::frames(func, names, word, objects);
 }
 
 /// `check_bounds` becomes `__rucc_check_bounds(pointer, size, align, capability, descriptor)`.
@@ -909,7 +912,8 @@ fn taken_everywhere(func: &mut Func, names: &mut Interner, inst: Inst) {
     call(func, names, inst, "__rucc_meta_fence_acquire", &[], &[], &[]);
 }
 
-/// `cap_extent` becomes `__rucc_extent(pointer, want)`, and `cap_extent_back` the backward one.
+/// `cap_extent` becomes `__rucc_extent(pointer, want, capability)`, and `cap_extent_back` the
+/// backward one.
 ///
 /// No descriptor, and these two are the only ones of these that have none. The other four are
 /// judgements and a judgement that refuses has to say what it refused. These decide nothing: they
@@ -920,21 +924,26 @@ fn taken_everywhere(func: &mut Func, names: &mut Interner, inst: Inst) {
 /// One function for both because the two differ in the name they call and in nothing else. The
 /// operands are the same three, the result is the same count, and the width the count comes back in
 /// is handled the same way.
+///
+/// The capability goes last, where the runtime only reads it for an object the compiler named. The
+/// planes cover neither a local nor a global, so without it the answer for one is everything and the
+/// whole loop runs with no check in it.
 fn extent(func: &mut Func, names: &mut Interner, word: Type, inst: Inst, called: &str) {
-    let [_capability, address, want] = func[func[inst].args] else { return };
+    let [capability, address, want] = func[func[inst].args] else { return };
     let asked = fitted(func, inst, want, word);
     let result = func[inst].results().next().expect("an extent query produces one value");
     let ty = func[result].ty;
-    let params = &[Type::PTR, word];
+    let params = &[Type::PTR, word, Type::PTR];
+    let args = &[address, asked, capability];
     if ty == word {
-        call(func, names, inst, called, params, &[word], &[address, asked]);
+        call(func, names, inst, called, params, &[word], args);
         return;
     }
     // The count came out in a width that is not the target's, for the reason [`fitted`] gives about
     // the operand going the other way. The call is made beside the instruction in the width the
     // runtime declares and the instruction itself becomes the conversion back, so that everything
     // reading its result still reads a value of the type it had.
-    let made = calling(func, names, called, params, &[word], &[address, asked]);
+    let made = calling(func, names, called, params, &[word], args);
     let holder = func.create_inst(made, &[word], func.span(inst));
     func.insert_before(holder, inst);
     let got = func[holder].results().next().expect("a call returning one value produces one");
@@ -1949,7 +1958,7 @@ mod tests {
         insert(&mut func, &plane, 8, Subobject::Off, Promise::Off, Races::Off);
 
         let mut table = Vec::new();
-        calls(&mut func, &mut names, Type::int(64), &numbers, &mut table);
+        calls(&mut func, &mut names, Type::int(64), &numbers, &Default::default(), &mut table);
         assert_eq!(table, [Descriptor { judgement: DERIVE, class: 0, size: 0 }]);
     }
 
@@ -1975,7 +1984,7 @@ mod tests {
         }
         b.ret(&[]);
         let (_, numbers) = planeless(&mut names);
-        calls(&mut func, &mut names, word, &numbers, &mut Vec::new());
+        calls(&mut func, &mut names, word, &numbers, &Default::default(), &mut Vec::new());
         let call = func
             .blocks()
             .flat_map(|block| func.insts(block))
@@ -2037,7 +2046,7 @@ mod tests {
 
         let mut table = Vec::new();
         let numbers = planeless(&mut names).1;
-        calls(&mut func, &mut names, Type::int(64), &numbers, &mut table);
+        calls(&mut func, &mut names, Type::int(64), &numbers, &Default::default(), &mut table);
         assert_eq!(table, [Descriptor { judgement: ACCESS, class: 0, size: 0 }]);
 
         let mut module = Module::new(names.intern("sweep.c"), &target());
@@ -2095,7 +2104,7 @@ mod tests {
         b.ret(&[]);
 
         let mut table = Vec::new();
-        calls(&mut func, &mut names, Type::int(64), &numbers, &mut table);
+        calls(&mut func, &mut names, Type::int(64), &numbers, &Default::default(), &mut table);
         assert_eq!(table.len(), 1, "one row serves the pair");
 
         module.add_func(func);
@@ -2147,7 +2156,7 @@ mod tests {
         b.ret(&[]);
 
         let mut table = Vec::new();
-        calls(&mut func, &mut names, Type::int(64), &numbers, &mut table);
+        calls(&mut func, &mut names, Type::int(64), &numbers, &Default::default(), &mut table);
         assert_eq!(table.len(), 2, "one row for the pair and one for the init check alone");
         assert!(table.iter().all(|row| row.size == 4), "{table:?}");
 
@@ -2204,7 +2213,7 @@ mod tests {
             b.ret(&[]);
 
             let mut table = Vec::new();
-            calls(&mut func, &mut names, Type::int(64), &numbers, &mut table);
+            calls(&mut func, &mut names, Type::int(64), &numbers, &Default::default(), &mut table);
 
             module.add_func(func);
             let id = module.funcs().next().expect("the module has one function");
@@ -2244,7 +2253,7 @@ mod tests {
 
         let mut table = Vec::new();
         let numbers = planeless(&mut names).1;
-        calls(&mut func, &mut names, Type::int(32), &numbers, &mut table);
+        calls(&mut func, &mut names, Type::int(32), &numbers, &Default::default(), &mut table);
         let opcodes: Vec<Opcode> = func
             .blocks()
             .flat_map(|block| func.insts(block))
@@ -2282,20 +2291,19 @@ mod tests {
 
         let mut table = Vec::new();
         let numbers = planeless(&mut names).1;
-        calls(&mut func, &mut names, Type::int(64), &numbers, &mut table);
+        calls(&mut func, &mut names, Type::int(64), &numbers, &Default::default(), &mut table);
         assert!(table.is_empty(), "{table:?}");
 
         let mut module = Module::new(names.intern("cover.c"), &target());
         module.add_func(func);
         let id = module.funcs().next().expect("the module has one function");
-        assert_eq!(
-            print_func(&module, &module[id], &names),
-            "func @cover(ptr, i64) -> i64, linkage(external) {\n\
-             block0(%0: ptr, %1: i64):\n    \
-             %2 = call @__rucc_extent(%0, %1) : (ptr, i64) -> i64\n    \
-             return %2\n\
-             }\n"
-        );
+        // The capability goes along, so it is placed in a slot like any other one a call reads,
+        // and the runtime only looks at it for an object the compiler named.
+        let text = print_func(&module, &module[id], &names);
+        assert!(text.contains("call @__rucc_extent(%0, %1, %"), "{text}");
+        assert!(text.contains(": (ptr, i64, ptr) -> i64"), "{text}");
+        assert!(text.contains("call @__rucc_cap_recover("), "{text}");
+        assert!(!text.contains("cap_extent"), "{text}");
         if let Err(errors) = verify_func(&module, &module[id], &names) {
             panic!("that was expected to be believed: {errors:#?}");
         }
@@ -2312,7 +2320,7 @@ mod tests {
 
         let mut table = Vec::new();
         let numbers = planeless(&mut names).1;
-        calls(&mut func, &mut names, Type::int(32), &numbers, &mut table);
+        calls(&mut func, &mut names, Type::int(32), &numbers, &Default::default(), &mut table);
         let opcodes: Vec<Opcode> = func
             .blocks()
             .flat_map(|block| func.insts(block))
