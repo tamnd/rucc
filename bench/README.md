@@ -5,6 +5,7 @@ Programs that exist to be timed. Nothing in here asserts anything, so nothing in
 ```
 bench/
   safety/      programs timed with the monitor off and on, for the overhead number    S1
+  wasm/        the SQLite shell on wasm32-wasip1, timed against clang                  WA4
 ```
 
 ## safety
@@ -45,3 +46,13 @@ The spill counts are the exception, and they are `cargo xtask pressure` rather t
 On an x86-64 Linux machine. That is the only back end, so anywhere else the programs run in a container under emulation, which changes the ratio between the cost of an instruction and the cost of a cache miss, and that ratio is the entire subject. The task says so in its own output when it happens. An emulated run is worth doing to check the apparatus works and is worth nothing as a measurement.
 
 The nightly workflow runs it natively on `ubuntu-24.04`, and that job's log is where the baseline comes from.
+
+## wasm
+
+`sqlite.sh` is the measurement protocol of milestone WA4 (#2866). It builds the SQLite shell for wasm32-wasip1 with rucc at `-O2`, and with clang from wasi-sdk 34 at `-O2` when `WASI_SDK_PATH` is set. It prints the size of each module. Then it runs each module once under Wasmtime and Node and compares the output with `sqlite.expected`, before it reads a time. It records the load average, runs five rounds, and prints the lowest CPU user time of each module and the ratio of rucc to clang. Each round runs every module under every engine once, so a machine that gets slower during the measurement slows both sides.
+
+```
+WASI_SDK_PATH=/opt/wasi-sdk bench/wasm/sqlite.sh target/release/rucc sqlite-autoconf-3530400
+```
+
+`sqlite.sql` makes a table of 2,000,000 rows and asks five questions of it. The exit criterion of WA4 is a ratio of at most 1.10 for the time under each engine and for the size. The nightly workflow runs the script on `ubuntu-24.04`. A shared runner is a noisy machine, so a number from it shows a trend and is not a result. A result comes from a quiet machine, with the load average in the output.

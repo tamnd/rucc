@@ -273,6 +273,51 @@ jobs:
           RUNNER: timeout 300 wasmtime run --dir=.
         run: tests/torture/run.sh "$PWD/target/release/rucc" wasm32-wasip1 | tee -a "$GITHUB_STEP_SUMMARY"
 
+  # The measurement protocol of WA4 (#2866), bench/wasm/sqlite.sh. The runner is shared, so the
+  # times show a trend and are not a result. The answers are checked before a time is read, and
+  # the job fails only when a module gives other answers. wasm-ld of wasi-sdk 34 does not start on
+  # Ubuntu, so rucc and clang link with the lld 21 that install-lld-wasi.sh installs.
+  wasm-sqlite-time:
+    name: SQLite on wasm32-wasip1, timed against clang
+    runs-on: ubuntu-24.04
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@v7.0.1
+      - uses: Swatinem/rust-cache@v2.9.2
+      - uses: actions/setup-node@v7.0.0
+        with:
+          node-version: 24
+      - name: install lld, Wasmtime and wasi-sdk
+        run: |
+          set -euo pipefail
+          sudo .github/install-lld-wasi.sh
+          curl -sSfL -o wasmtime.tar.xz https://github.com/bytecodealliance/wasmtime/releases/download/v49.0.1/wasmtime-v49.0.1-x86_64-linux.tar.xz
+          echo "c71f7e0d30a92e418f0d17db7c6d8f6664c1ad764340a1278678f4209deab534  wasmtime.tar.xz" | sha256sum -c -
+          tar -xJf wasmtime.tar.xz
+          echo "$PWD/wasmtime-v49.0.1-x86_64-linux" >> "$GITHUB_PATH"
+          curl -sSfL -o wasi-sdk.tar.gz https://github.com/WebAssembly/wasi-sdk/releases/download/wasi-sdk-34/wasi-sdk-34.0-x86_64-linux.tar.gz
+          echo "b761e3a0721dbae9c09a0059e5fdb2bf917d1b4a8a7b430fb3b5aafb0984b2c4  wasi-sdk.tar.gz" | sha256sum -c -
+          tar -xzf wasi-sdk.tar.gz
+      - name: build rucc and the runtime for wasm32-wasip1
+        run: |
+          cargo build --release --bin rucc
+          cargo xtask builtins --target wasm32-wasip1
+          ./target/release/rucc --fetch wasm32-wasip1
+      - name: fetch the sqlite amalgamation
+        run: |
+          curl -fsSL -o sqlite.tar.gz https://sqlite.org/2026/sqlite-autoconf-3530400.tar.gz
+          echo "0e9483900e92cd5de8fd48d16bf9200145a61f7fd5be542a5ac81d8a9516eb9c  sqlite.tar.gz" | sha256sum -c -
+          tar xzf sqlite.tar.gz
+      - name: time the SQLite shell under Wasmtime and Node
+        shell: bash
+        env:
+          WASI_SDK_PATH: ${{ github.workspace }}/wasi-sdk-34.0-x86_64-linux
+          RUCC_FLAGS: -fuse-ld=/usr/lib/llvm-21/bin/wasm-ld
+          CLANG_FLAGS: -fuse-ld=/usr/lib/llvm-21/bin/wasm-ld
+        run: |
+          set -o pipefail
+          bench/wasm/sqlite.sh "$PWD/target/release/rucc" "$PWD/sqlite-autoconf-3530400" | tee -a "$GITHUB_STEP_SUMMARY"
+
   # Named so the gap is visible rather than implicit. Each of these turns into a real job at
   # the milestone that makes it possible, per spec/15-testing.md section 15.7.
   planned:
