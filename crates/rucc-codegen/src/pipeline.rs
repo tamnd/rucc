@@ -49,6 +49,7 @@ use crate::elsewhere::Elsewhere;
 use crate::finish::{Convention, Padding, Probing, Protect, Tracing, far, finish};
 use crate::fold;
 use crate::frame::{self, Frame, Layout};
+use crate::held;
 use crate::kept;
 use crate::layout;
 use crate::lifetimes;
@@ -1270,6 +1271,19 @@ pub fn compile_recording(
     // somebody reads a variable's slot out of in a debugger and expects to see read.
     if flags.reloads {
         copies::reloads(&mut func, &moves, machine.shapes, scratch, names);
+    }
+
+    // After the allocator's moves are cleaned up, because a number written twice into one register
+    // is only the same register once the allocator has said so. Not at `-O0`, for the reason the
+    // reloads are not.
+    if flags.reloads {
+        let numbers: &[(&str, u32, held::From)] =
+            if std::ptr::eq(machine.selector, &select::aarch64::SELECTOR) {
+                &held::A64_NUMBERS
+            } else {
+                &[]
+            };
+        held::again(&mut func, machine.shapes, numbers, names);
     }
 
     // After the moves are cleaned up, since that pass follows what the scratch registers hold, and
