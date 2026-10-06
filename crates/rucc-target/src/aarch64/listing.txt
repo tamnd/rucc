@@ -241,6 +241,7 @@ f9400021	ldr x1, [x1, :lo12:s]	slot_64
 90000001	adrp x1, :gottprel:s	gottprel_64
 f9400021	ldr x1, [x1, :gottprel_lo12:s]	gottprel_64
 d53bd041	mrs x1, tpidr_el0	thread_64
+d5384101	mrs x1, sp_el0	sp_el0_64
 90000001	adrp x1, s	ldr_sym_32
 b9400021	ldr w1, [x1, :lo12:s]	ldr_sym_32
 f9402e41	ldr x1, [x18, #88]	teb_64

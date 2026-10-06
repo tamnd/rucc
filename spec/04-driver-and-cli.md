@@ -385,12 +385,7 @@ Taken because what they ask for is what happens:
 | `-mno-apx-features=*` (x86-64) | Nothing here uses APX. |
 | `-mlittle-endian` (AArch64) | Every AArch64 target here is little endian. |
 | `-mno-strict-align` (AArch64) | An access may be unaligned, which is what happens. |
-
-Refused, with the issue that would honor them:
-
-| Flag | Why | Issue |
-|---|---|---|
-| `-mstack-protector-guard*` (AArch64) | There is no stack protector on AArch64 yet, and the kernel's canary at an offset from `sp_el0` is part of that work. | #2279 |
+| `-mstack-protector-guard=global`, `-mstack-protector-guard=sysreg`, `-mstack-protector-guard-reg=sp_el0`, `-mstack-protector-guard-offset=` (AArch64) | Where the canary is read from. `global` is the default and reads `__stack_chk_guard` through the global offset table, or from its own page under `-fno-pic`, as gcc does. `sysreg` is the word `-mstack-protector-guard-offset=` bytes past the address in `sp_el0`, which is where an arm64 kernel keeps the running task, and it needs both of the other flags, as in gcc. The offset is one a single `ldr` carries, a multiple of 8 up to 32760. |
 
 Refused, with no issue, because nothing is planned for them:
 

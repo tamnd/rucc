@@ -58,10 +58,10 @@ use crate::bits::BitInsts;
 use crate::branch::{BranchInsts, Fusion, Move};
 use crate::counts::{BitCount, CountInst};
 use crate::flags::{Compare, FlagInsts, Reader, Reads};
-use crate::frame::{ClassMoves, FrameInsts, Kept, Pair, Probe, Signing, Targets};
+use crate::frame::{Canary, ClassMoves, FrameInsts, Kept, Pair, Probe, Signing, Targets};
 use crate::machine::MachineInsts;
 use crate::operand::OperandDesc;
-use crate::regs::{CallRegs, Chkstk, ClassInfo, PhysReg, RegClass, RegFile};
+use crate::regs::{CallRegs, Chkstk, ClassInfo, Guard, PhysReg, RegClass, RegFile};
 use crate::short::ShortInsts;
 
 /// The general purpose registers.
@@ -228,6 +228,7 @@ pub static FRAME: FrameInsts = FrameInsts {
     probe: Some(PROBE),
     landing: None,
     signing: Some(Signing { sign: "paciasp", check: "autiasp" }),
+    canary: Some(Canary { near: "addr_64", far: "got_64", system: "sp_el0_64" }),
     targets: Some(Targets { call: "bti_c", jump: "bti_j" }),
     pad: Some("nop"),
     step_bits: Some(12),
@@ -764,8 +765,16 @@ static FP_ORDER: [PhysReg; 32] = [
 /// The static chain of a nested function travels in `x18`, which is where gcc puts it and where
 /// the trampolines in libgcc load it, and which this compiler never hands to a value. Apple and
 /// Windows keep `x18` for themselves, so the two below have no chain and no nested functions.
-pub static AAPCS64: CallRegs =
-    CallRegs { chain: Some(X18), ..aapcs64(&rucc_abi::abis::AAPCS64, 0, crate::VaList::Aapcs) };
+///
+/// The stack protector's word is the plain global `__stack_chk_guard`, which glibc and musl both
+/// define on this machine, read through the global offset table since the C library is shared. The
+/// driver reads it directly instead in code that is not position independent, and moves it into
+/// the task for a kernel.
+pub static AAPCS64: CallRegs = CallRegs {
+    chain: Some(X18),
+    guard: Some(Guard::global("__stack_chk_guard", true)),
+    ..aapcs64(&rucc_abi::abis::AAPCS64, 0, crate::VaList::Aapcs)
+};
 
 /// Where a call puts things on Apple's platforms.
 ///
@@ -846,13 +855,11 @@ const fn aapcs64(
         list,
         dwarf: &AARCH64_DWARF,
         dwarf_return_address: DWARF_RETURN_ADDRESS,
-        // None for now, and it is a different mechanism rather than a missing number. glibc and
-        // musl on this machine keep the canary in an ordinary global, `__stack_chk_guard`, which is
-        // read through the GOT like any other, where [`crate::Guard`] describes a word at a fixed
-        // distance into a thread's own block. A command line that asks for a protector is told so
-        // until the frame code can load a global.
+        // None here, and the Linux convention below says where the word is. Apple and Windows keep
+        // it somewhere else under another name, and a command line that asks for a protector there
+        // is told so rather than given one that reads the wrong word.
         guard: None,
-        // None for the same kind of reason. gcc's hook on this machine is `_mcount` called with the
+        // None, and a different mechanism rather than a missing number. gcc's hook on this machine is `_mcount` called with the
         // caller's link register, and `-mfentry` does not exist here, so it waits for the frame code
         // too rather than being described as something it is not.
         trace: None,

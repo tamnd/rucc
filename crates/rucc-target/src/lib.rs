@@ -74,7 +74,7 @@ pub use crate::branch::{BranchInsts, Fusion, Move};
 pub use crate::counts::{BitCount, CountInst};
 pub use crate::flags::{Compare, FlagInsts, Reader, Reads, Zeroing};
 pub use crate::frame::{
-    ClassMoves, FrameInsts, Kept, Pair, Probe, Signing, SpillMove, Targets, Thunks,
+    Canary, ClassMoves, FrameInsts, Kept, Pair, Probe, Signing, SpillMove, Targets, Thunks,
 };
 pub use crate::isa::{Choices, Feature, Isa, Target, TargetRefusal};
 pub use crate::machine::{Address, MachineInsts};

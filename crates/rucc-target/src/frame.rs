@@ -112,6 +112,19 @@ pub struct Pair {
     pub pop: &'static str,
 }
 
+/// What puts the address of the stack protector's word in a register on a target that has no way
+/// to name it in a load, which is AArch64. The word is then read from that address. See
+/// [`crate::Guard`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Canary {
+    /// The address of a symbol, `adrp` and `add`.
+    pub near: &'static str,
+    /// The address of a symbol read out of the global offset table.
+    pub far: &'static str,
+    /// The address `sp_el0` holds, which is `mrs`.
+    pub system: &'static str,
+}
+
 /// The two hints that sign the return address in the prologue and check it in the epilogue, which
 /// AArch64 has as `paciasp` and `autiasp`. See [`crate::BranchProtection`].
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -277,6 +290,9 @@ pub struct FrameInsts {
     pub landing: Option<&'static str>,
     /// What signs and checks the return address, or `None` on a target that has nothing for it.
     pub signing: Option<Signing>,
+    /// How the stack protector's word is reached when a load cannot name it, or `None` on a target
+    /// whose loads can, where it is one load from a segment or a symbol.
+    pub canary: Option<Canary>,
     /// The landing pads `-mbranch-protection=bti` asks for, or `None` on a target without them.
     /// A different flag from [`Self::landing`], with two pads rather than one.
     pub targets: Option<Targets>,

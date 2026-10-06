@@ -72,9 +72,27 @@ fn a_flag_that_asks_for_what_happens_passes_the_probe() {
     assert!(cc_option(ARM64, "-msign-return-address=all"));
 }
 
+/// `CC_HAVE_STACKPROTECTOR_SYSREG` asks with all three flags at once, the way arm64 builds every
+/// unit once it is set, and the register and the offset alone are refused as gcc refuses them.
+#[test]
+fn the_canary_in_the_task_passes_the_arm64_probe() {
+    let sysreg = [
+        "--target=aarch64-unknown-linux-gnu",
+        "-mstack-protector-guard=sysreg",
+        "-mstack-protector-guard-reg=sp_el0",
+        "-mstack-protector-guard-offset=0",
+        "-c",
+        "-o",
+        "/dev/null",
+    ];
+    assert!(run(&sysreg, "").status.success());
+    assert!(!run(&[&sysreg[..3], &sysreg[4..]].concat(), "").status.success());
+    assert!(!cc_option(ARM64, "-mstack-protector-guard-reg=sp_el0"));
+}
+
 #[test]
 fn a_flag_that_is_not_honored_fails_the_probe() {
-    assert!(!cc_option(ARM64, "-mstack-protector-guard=sysreg"));
+    assert!(!cc_option(ARM64, "-mstack-protector-guard-symbol=__stack_chk_guard"));
     // And what gcc does not know either, which is what `cc-disable-warning` depends on.
     assert!(!cc_option(X86, "-Wthread-safety"));
     assert!(cc_option(X86, "-Wno-frame-address"));

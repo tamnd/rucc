@@ -35,7 +35,7 @@ use crate::named;
 use Arg::Doubles;
 use Arg::{
     At, Barrier, Base, Disp, Fixed, Fp, GotPage, GotSlot, Imm, Label, Lit, Low, LowSlot, Mem, Near,
-    Page, Pop, Push, Reg, Scaled, SecrelHi, SecrelLo, Symbol, Teb, Thread, Through, TlsPage,
+    Page, Pop, Push, Reg, Scaled, SecrelHi, SecrelLo, Symbol, Task, Teb, Thread, Through, TlsPage,
     TlsSlot, TprelHi, TprelLo, Vector,
 };
 use Scalar::{B, D, Q, S};
@@ -109,6 +109,8 @@ pub enum Arg {
     SecrelLo,
     /// The register that holds the thread pointer.
     Thread,
+    /// The register an arm64 kernel keeps the running task in, `sp_el0`.
+    Task,
     /// Sixteen bytes below the stack pointer, moving the stack pointer there first.
     Push,
     /// The stack pointer, moving it sixteen bytes up afterwards.
@@ -521,6 +523,7 @@ static TEXT: &[(&str, &[Written])] = &[
         &[spell("adrp", &[Reg(0, X), TlsPage]), spell("ldr", &[Reg(0, X), TlsSlot(0)])],
     ),
     ("thread_64", &[spell("mrs", &[Reg(0, X), Thread])]),
+    ("sp_el0_64", &[spell("mrs", &[Reg(0, X), Task])]),
     // Windows. A thread-local variable is in this thread's copy of the image's `.tls` section, the
     // copy is the slot `_tls_index` names in the array the TEB holds at 88, and the variable is as
     // far into the copy as it is into the section. The three are the six instructions clang
@@ -1093,6 +1096,9 @@ pub enum Missing {
 /// The fifteen bits `mrs` carries for `tpidr_el0`, which is where the thread pointer is.
 const TPIDR_EL0: u16 = system_field([3, 3, 13, 0, 2]);
 
+/// The fifteen bits `mrs` carries for `sp_el0`, which is where an arm64 kernel keeps the task.
+const SP_EL0: u16 = system_field([3, 0, 4, 1, 0]);
+
 /// One argument as the value [`encode`](crate::aarch64::encode) and
 /// [`write`](crate::aarch64::write) both take.
 ///
@@ -1160,6 +1166,7 @@ pub fn fill(arg: Arg, with: &Operands<'_>) -> Result<Value, Missing> {
         SecrelHi => Value::Symbol(Operator::SecrelHi12),
         SecrelLo => Value::Symbol(Operator::SecrelLo12),
         Thread => Value::System(TPIDR_EL0),
+        Task => Value::System(SP_EL0),
         Push => Value::Mem(Addr { base: 31, offset: Offset::Imm(-16), mode: Mode::Pre }),
         Pop => Value::Mem(Addr { base: 31, offset: Offset::Imm(16), mode: Mode::Post }),
         Through => {
@@ -1306,6 +1313,7 @@ mod tests {
             ["adrp x0, :gottprel:s", "ldr x0, [x0, :gottprel_lo12:s]"]
         );
         assert_eq!(listing("thread_64", &with), ["mrs x0, tpidr_el0"]);
+        assert_eq!(listing("sp_el0_64", &with), ["mrs x0, sp_el0"]);
         assert_eq!(listing("ldr_sym_32", &with), ["adrp x0, s", "ldr w0, [x0, :lo12:s]"]);
         assert_eq!(listing("teb_64", &with), ["ldr x0, [x18, #88]"]);
         assert_eq!(
