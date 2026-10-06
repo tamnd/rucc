@@ -2599,3 +2599,82 @@ fn the_reader_names_the_line_that_it_does_not_take() {
     let (line, why) = error("\t.section\t.text.g,\"\",@\ng:\n");
     assert_eq!((line, why.as_str()), (2, "`g` is not declared with `.functype`"));
 }
+
+/// The rows of the line table give the size of each body, and the DWARF sections go in the
+/// object with a relocation of the kind that the name of each target asks for.
+#[test]
+fn the_dwarf_sections_go_in_the_object_with_their_relocations() {
+    use rucc_object::wasm::RelocKind;
+    use rucc_object::{Chunk, Info, Reference, Reloc};
+
+    let mut names = Interner::new();
+    let module = rucc_ir::parse(PROGRAM, &mut names).expect("the IR parses");
+    let features = Cpu::Lime1.features();
+    let (mut object, lines) = rucc_wasm::translate_with_lines(&module, &names, features).unwrap();
+    assert_eq!(lines.len(), object.functions.len());
+    for (function, lines) in object.functions.iter().zip(&lines) {
+        // One run of `i32` locals at most in these functions, which is one byte for the count of
+        // runs and two for the run.
+        let head = if function.locals.is_empty() { 1 } else { 3 };
+        assert_eq!(lines.len as usize, head + function.code.len());
+        assert!(lines.rows.windows(2).all(|pair| pair[0].0 < pair[1].0));
+        assert!(lines.rows.iter().all(|&(at, _)| at < lines.len));
+    }
+
+    let address = |at, symbol: &str, addend| Reloc {
+        at,
+        symbol: symbol.into(),
+        kind: Reference::Address { bytes: 4 },
+        addend,
+        after: 0,
+    };
+    let info = Info {
+        chunks: vec![
+            Chunk { name: ".debug_abbrev".into(), bytes: vec![0; 4], relocs: Vec::new() },
+            Chunk {
+                name: ".debug_info".into(),
+                bytes: vec![0; 12],
+                relocs: vec![
+                    address(0, ".debug_abbrev", 0),
+                    address(4, "sum", 3),
+                    address(8, ".debug_info", 2),
+                ],
+            },
+        ],
+        ..Info::default()
+    };
+    let before = object.symbols.len();
+    rucc_wasm::describe(&mut object, &info).unwrap();
+    let customs: Vec<&str> = object.customs.iter().map(|custom| custom.name.as_str()).collect();
+    assert_eq!(customs, [".debug_abbrev", ".debug_info"]);
+    // A section symbol for each section that a relocation names, in the order of the sections.
+    let added: Vec<_> =
+        object.symbols[before..].iter().map(|s| (s.name.as_str(), s.kind.clone())).collect();
+    assert_eq!(
+        added,
+        [
+            (".Ldebug_abbrev", SymbolKind::Section { custom: 0 }),
+            (".Ldebug_info", SymbolKind::Section { custom: 1 })
+        ]
+    );
+    let sum = object.symbols.iter().position(|s| s.name == "sum").unwrap() as u32;
+    let fixups: Vec<_> =
+        object.customs[1].fixups.iter().map(|f| (f.at, f.kind, f.target, f.addend)).collect();
+    let before = before as u32;
+    assert_eq!(
+        fixups,
+        [
+            (0, RelocKind::SectionOffsetI32, before, 0),
+            (4, RelocKind::FunctionOffsetI32, sum, 3),
+            (8, RelocKind::SectionOffsetI32, before + 1, 2),
+        ]
+    );
+    let written = rucc_wasm::write(&object).unwrap();
+    let read = rucc_wasm::assemble(&rucc_wasm::assembly(&object).unwrap()).unwrap();
+    assert!(read.bytes == written.bytes);
+
+    let mut wrong = info.clone();
+    wrong.chunks[1].relocs[1].symbol = "nowhere".into();
+    let error = rucc_wasm::describe(&mut object.clone(), &wrong).unwrap_err();
+    assert!(error.why.contains("`nowhere`"), "{error}");
+}

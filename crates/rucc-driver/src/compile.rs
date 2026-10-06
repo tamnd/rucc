@@ -1205,7 +1205,19 @@ fn generate(
         if matches!(opts.emit, EmitKind::WasmTree) {
             return rucc_wasm::tree(module, names, wasm).map(Artifact::Text).map_err(refused);
         }
-        let object = rucc_wasm::translate(module, names, wasm).map_err(refused)?;
+        // With `-g` the back end gives the code offset and the span of each run of code too, and the
+        // DWARF from rucc-debug goes in the object before the text is printed from it, so `-S -g`
+        // has the DWARF sections too.
+        let object = if opts.debug_info {
+            let (mut object, lines) =
+                rucc_wasm::translate_with_lines(module, names, wasm).map_err(refused)?;
+            let info = describe_wasm(&object, &lines, origin, opts, target)
+                .map_err(|why| vec![unsupported(&why)])?;
+            rucc_wasm::describe(&mut object, &info).map_err(refused)?;
+            object
+        } else {
+            rucc_wasm::translate(module, names, wasm).map_err(refused)?
+        };
         if matches!(opts.emit, EmitKind::Asm) {
             return rucc_wasm::assembly(&object).map(Artifact::Text).map_err(refused);
         }
@@ -2067,6 +2079,105 @@ fn describe(
         rucc_session::Compress::Zstd => rucc_object::Compress::Zstd,
     };
     Ok(info)
+}
+
+/// The debug information of a wasm object, as [`describe`] makes it for a native one: the line
+/// table, the functions with their signatures, the types, and the variables at file scope that the
+/// object defines. The rows come from the back end, as offsets from the start of each function
+/// body. The locals are not there, because a local of wasm is at a place that only the wasm
+/// location expressions of DWARF can name, and nothing writes those yet. A function has no frame
+/// base for the same reason.
+///
+/// # Errors
+///
+/// Whatever the DWARF writer refused, which is a bug here rather than in the program.
+fn describe_wasm(
+    object: &rucc_object::wasm::Module,
+    lines: &[rucc_wasm::Lines],
+    origin: Origin<'_>,
+    opts: &Options,
+    target: &TargetInfo,
+) -> Result<rucc_object::Info, String> {
+    let rewrite = |path: &str| opts.prefix_map.debug.apply(path).into_owned();
+    let mut files: Vec<String> = Vec::new();
+    let mut funcs = Vec::with_capacity(object.functions.len());
+    for (function, lines) in object.functions.iter().zip(lines) {
+        let name = &object.symbols[function.symbol as usize].name;
+        let mut rows: Vec<rucc_debug::Row> = Vec::with_capacity(lines.rows.len());
+        for &(at, span) in &lines.rows {
+            if span.is_dummy() {
+                continue;
+            }
+            let Some(at_line) = origin.map.presumed(span.lo) else { continue };
+            let file = interned(&mut files, rewrite(at_line.name));
+            let row = rucc_debug::Row {
+                at: u64::from(at),
+                file,
+                line: at_line.line,
+                column: at_line.column,
+            };
+            // Two rows at one address is one row, and the first of the two wins, as in
+            // `describe`.
+            match rows.last() {
+                Some(last) if last.at == row.at => {}
+                _ => rows.push(row),
+            }
+        }
+        // The declarations of the locals and the prologue have no span, and the first row covers
+        // them, so that each address in the function has a line.
+        if let Some(first) = rows.first_mut() {
+            first.at = 0;
+        }
+        let known = origin.meaning.funcs.get(name);
+        let decl = known.map(|known| rucc_debug::Place {
+            file: interned(&mut files, rewrite(&known.file)),
+            line: known.line,
+        });
+        funcs.push(rucc_debug::Function {
+            name: name.clone(),
+            len: u64::from(lines.len),
+            rows,
+            decl,
+            sig: known.and_then(|known| known.sig.clone()),
+            external: known.is_some_and(|known| known.external),
+            locals: Vec::new(),
+            scopes: Vec::new(),
+        });
+    }
+    let mut globals = Vec::new();
+    for symbol in &object.symbols {
+        if !matches!(symbol.kind, rucc_object::wasm::SymbolKind::Data { place: Some(_) }) {
+            continue;
+        }
+        let Some(held) = origin.meaning.objects.get(&symbol.name) else { continue };
+        globals.push(rucc_debug::Global {
+            name: symbol.name.clone(),
+            ty: held.ty,
+            decl: Some(rucc_debug::Place {
+                file: interned(&mut files, rewrite(&held.file)),
+                line: held.line,
+            }),
+            external: held.external,
+        });
+    }
+    let unit = rucc_debug::Unit {
+        name: rewrite(origin.name),
+        dir: rewrite(opts.working_dir.as_deref().unwrap_or(".")),
+        producer: format!("rucc {}", crate::VERSION),
+        files,
+        types: origin.meaning.types.clone(),
+        funcs,
+        globals,
+        pointer: u8::try_from(target.pointer_width / 8).unwrap_or(4),
+        frames: false,
+        mach_o: false,
+        version: if opts.dwarf_version == 4 {
+            rucc_debug::Version::Four
+        } else {
+            rucc_debug::Version::Five
+        },
+    };
+    rucc_debug::write(&unit).map_err(|why| why.to_string())
 }
 
 /// Where each local the back end kept in a register is, as stretches of the function's addresses.
