@@ -148,9 +148,11 @@ names is not hypothetical; it is what `bison` output looks like, and it is in ev
 test corpus for exactly this reason.
 
 **rucc's version:** the cache is per name, holding a range at the definition plus a small map of
-block-specific refinements, and the map is bounded. When it would exceed the bound, the query
-falls back to the definition range, which is correct and less precise. One parameter, one
-threshold, and a counter in `-ftime-report` saying how often the fallback fired.
+block-specific refinements, and the map is bounded. When it would exceed the bound, the answer is
+worked out and not kept, and each such walk is charged to the same budget that bounds the
+definitions worked out. Once that budget is spent the query falls back to the definition range,
+which is correct and less precise. One parameter, one threshold, and a counter in `-ftime-report`
+saying how often the bound was passed.
 
 ## 10.7 How this is wrong
 

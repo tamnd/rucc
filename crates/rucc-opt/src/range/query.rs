@@ -46,9 +46,10 @@
 //! points out that the input which makes that hurt is not hypothetical: generated parsers have
 //! tens of thousands of blocks and it is why GCC has `vrp-sparse-threshold` at all. So the cache
 //! here holds one range per value at its definition and at most [`Options::refinements`]
-//! block-specific answers beside it. Past that, a query for a new block gets the definition
-//! range, which is correct and less precise, and [`Counts::fallbacks`] says how often that
-//! happened. The bound is a parameter rather than a constant because the right number is an
+//! block-specific answers beside it. Past that, a query for a new block is worked out and not
+//! kept, each one charged to [`Options::budget`], and [`Counts::fallbacks`] says how often that
+//! happened. Once the budget is spent it gets the definition range, which is correct and less
+//! precise. The bound is a parameter rather than a constant because the right number is an
 //! empirical question and section 10.6 says GCC's numbers are a record of bug reports.
 //!
 //! # How this is wrong
@@ -129,7 +130,8 @@ pub struct Options {
     pub recompute_depth: u32,
     /// How many block-specific answers the cache keeps for one value.
     ///
-    /// Section 10.6's one threshold. A query past it gets the range at the definition.
+    /// Section 10.6's one threshold. A query past it is worked out and not kept, and is charged to
+    /// the budget.
     pub refinements: usize,
     /// How many definitions one set of queries works out before it stops narrowing.
     ///
@@ -182,7 +184,8 @@ impl Counts {
         self.hits
     }
 
-    /// How many were answered with the range at the definition because the cache was full.
+    /// How many were asked about a block past the cache's bound, and so were worked out and not
+    /// kept.
     #[must_use]
     pub const fn fallbacks(&self) -> u64 {
         self.fallbacks
@@ -817,9 +820,20 @@ impl<'a> Ranges<'a> {
             .cache
             .get(&value)
             .is_some_and(|entry| entry.refined.len() >= self.options.refinements);
+        // Past the bound the answer is still worked out, and only not kept. A walk is a few
+        // dominators and the definitions under it are kept anyway, so what grows without the cache
+        // is time, and that is charged to the budget like a definition is. Falling back to the
+        // definition range at once lost the case a switch had pinned the value to in any function
+        // that tests one value in more than a handful of blocks: `savic_read` in
+        // arch/x86/kernel/apic/x2apic_savic.c has four case ranges, and its `BUILD_BUG_ON(reg !=
+        // APIC_ICR)` under `case APIC_ICR` stayed in.
         if full {
             self.counts.fallbacks += 1;
-            return self.at_def(value);
+            if self.spent >= self.options.budget {
+                self.counts.exhausted += 1;
+                return self.at_def(value);
+            }
+            self.spent += 1;
         }
         if let Some(&kept) = self.scratch.get(&(value, Some(block))) {
             self.counts.hits += 1;
@@ -2126,14 +2140,33 @@ mod tests {
     }
 
     #[test]
-    fn the_cache_gives_up_rather_than_growing_without_a_bound() {
+    fn the_cache_does_not_grow_past_its_bound_and_the_answer_is_still_worked_out() {
         let (func, x, then, otherwise) = guarded(IntPred::Slt, 10);
         let asked = Asked::new(func);
         let options = Options { refinements: 1, ..Options::default() };
         let mut ranges = asked.with(options);
         assert_eq!(bounds(ranges.at(x, then)), Some((i128::from(i32::MIN), 9)));
-        assert!(ranges.at(x, otherwise).is_full(), "past the bound it is the definition range");
+        let past = Some((10, i128::from(i32::MAX)));
+        assert_eq!(bounds(ranges.at(x, otherwise)), past, "past the bound it is still walked");
         assert_eq!(ranges.counts().fallbacks(), 1);
+        // Not kept, so the second time is a walk again and not a hit.
+        let hits = ranges.counts().hits();
+        assert_eq!(bounds(ranges.at(x, otherwise)), past);
+        assert_eq!(ranges.counts().fallbacks(), 2);
+        assert_eq!(ranges.cache[&x].refined.len(), 1);
+        assert!(ranges.counts().hits() > hits, "the definition range under the walk is kept");
+    }
+
+    #[test]
+    fn past_the_bound_with_the_budget_spent_it_is_the_definition_range() {
+        let (func, x, then, otherwise) = guarded(IntPred::Slt, 10);
+        let asked = Asked::new(func);
+        let options = Options { refinements: 1, ..Options::default() };
+        let mut ranges = asked.with(options);
+        assert_eq!(bounds(ranges.at(x, then)), Some((i128::from(i32::MIN), 9)));
+        ranges.spent = ranges.options.budget;
+        assert!(ranges.at(x, otherwise).is_full(), "with nothing left it is the definition range");
+        assert_eq!(ranges.counts().exhausted(), 1);
     }
 
     #[test]
