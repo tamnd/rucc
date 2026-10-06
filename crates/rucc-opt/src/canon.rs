@@ -123,7 +123,13 @@ impl Pass for Canon {
                 break;
             }
         }
-        an.clear();
+        // Only after an edit. A function whose loops already had every property is the common
+        // case, and the manager keeps the whole cache for a pass that changed nothing, so the
+        // header copy and licm after this read the forest it was given instead of building it
+        // again. A clear here threw that away for nothing. tamnd/rucc#3052.
+        if stats.changed() {
+            an.clear();
+        }
         stats
     }
 }
