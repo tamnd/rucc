@@ -1,6 +1,6 @@
 [package]
 name = "rucc-unpack"
-description = "Reads the container formats Microsoft's Windows SDK payloads arrive in, deflate and zip and cabinet and compound file, for the rucc C compiler."
+description = "Reads the container formats Microsoft's Windows SDK payloads arrive in, deflate and zip and cabinet and compound file, and the gzip and tar of a sysroot, for the rucc C compiler."
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
