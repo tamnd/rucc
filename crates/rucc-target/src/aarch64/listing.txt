@@ -37,6 +37,9 @@ aa230041	orn x1, x2, x3	orn_rr_64
 9ac32841	asrv x1, x2, x3	asr_rr_64
 1ac32c41	rorv w1, w2, w3	ror_rr_32
 9ac32c41	rorv x1, x2, x3	ror_rr_64
+9ac32041	lslv x1, x2, x3	lsl_rw_64
+9ac32441	lsrv x1, x2, x3	lsr_rw_64
+9ac32841	asrv x1, x2, x3	asr_rw_64
 9b437c41	smulh x1, x2, x3	smulh_rr_64
 9bc37c41	umulh x1, x2, x3	umulh_rr_64
 11000441	add w1, w2, #1	add_ri_32

@@ -402,6 +402,12 @@ pub static INSTS: &[(&str, Form)] = &[
     ("asr_rr_64", Alu),
     ("ror_rr_32", Alu),
     ("ror_rr_64", Alu),
+    // A sixty-four bit shift whose count is a thirty-two bit value. The machine only reads the
+    // low six bits of the count, so the bits above the thirty-two the value has are never asked
+    // about and the count needs no widening first.
+    ("lsl_rw_64", Alu),
+    ("lsr_rw_64", Alu),
+    ("asr_rw_64", Alu),
     ("smulh_rr_64", Alu),
     ("umulh_rr_64", Alu),
     // Arithmetic on a register and a constant. The constant is one the instruction can hold, which

@@ -514,6 +514,79 @@
       (a64.asr_rr_64 x y)
       (spec (= (bvashr x (bvand y 63)) (result))))
 
+;; A count the program masked to the width itself, as in `x << (n & 31)`, which is how C code keeps
+;; a shift by a count it does not trust defined. The machine takes the count modulo the width
+;; already, so the `and` is one instruction for nothing.
+
+(rule (lower (shl.i32 (value.i32 x) (and.i32 (value.i32 y) (iconst.i32 m))))
+      (if (= m 31))
+      (a64.lsl_rr_32 x y)
+      (spec (= (bvshl x (bvand (bvand y m) 31)) (result))))
+
+(rule (lower (shl.i64 (value.i64 x) (and.i64 (value.i64 y) (iconst.i64 m))))
+      (if (= m 63))
+      (a64.lsl_rr_64 x y)
+      (spec (= (bvshl x (bvand (bvand y m) 63)) (result))))
+
+(rule (lower (lshr.i32 (value.i32 x) (and.i32 (value.i32 y) (iconst.i32 m))))
+      (if (= m 31))
+      (a64.lsr_rr_32 x y)
+      (spec (= (bvlshr x (bvand (bvand y m) 31)) (result))))
+
+(rule (lower (lshr.i64 (value.i64 x) (and.i64 (value.i64 y) (iconst.i64 m))))
+      (if (= m 63))
+      (a64.lsr_rr_64 x y)
+      (spec (= (bvlshr x (bvand (bvand y m) 63)) (result))))
+
+(rule (lower (ashr.i32 (value.i32 x) (and.i32 (value.i32 y) (iconst.i32 m))))
+      (if (= m 31))
+      (a64.asr_rr_32 x y)
+      (spec (= (bvashr x (bvand (bvand y m) 31)) (result))))
+
+(rule (lower (ashr.i64 (value.i64 x) (and.i64 (value.i64 y) (iconst.i64 m))))
+      (if (= m 63))
+      (a64.asr_rr_64 x y)
+      (spec (= (bvashr x (bvand (bvand y m) 63)) (result))))
+
+;; A sixty-four bit shift whose count is a thirty-two bit value widened, which is what a shift by
+;; an `int` or an `unsigned` is. The machine reads the low six bits of the count and nothing else,
+;; so the widening is a `mov` for nothing and the shift reads the narrow value as it is.
+
+(rule (lower (shl.i64 (value.i64 x) (zext.i32.i64 (value.i32 y))))
+      (a64.lsl_rw_64 x y)
+      (spec (= (bvshl x (bvand (zero_extend 32 64 y) 63)) (result))))
+
+(rule (lower (lshr.i64 (value.i64 x) (zext.i32.i64 (value.i32 y))))
+      (a64.lsr_rw_64 x y)
+      (spec (= (bvlshr x (bvand (zero_extend 32 64 y) 63)) (result))))
+
+(rule (lower (ashr.i64 (value.i64 x) (zext.i32.i64 (value.i32 y))))
+      (a64.asr_rw_64 x y)
+      (spec (= (bvashr x (bvand (zero_extend 32 64 y) 63)) (result))))
+
+;; Rotates. C has no rotate and spells one as two shifts in opposite directions whose counts add up
+;; to the width, joined by an or, which is what every hash and cipher written in it does. The
+;; machine only rotates right, and a rotate left by `k` is a rotate right by the width less `k`.
+
+(rule (lower (or.i32 (shl.i32 (value.i32 x) (iconst.i32 k)) (lshr.i32 (value.i32 x) (iconst.i32 j))))
+      (if (and (and (> k 0) (< k 32)) (= (+ k j) 32)))
+      (a64.ror_ri_32 x j)
+      (spec (= (bvor (bvshl x k) (bvlshr x j)) (result))))
+
+(rule (lower (or.i32 (lshr.i32 (value.i32 x) (iconst.i32 j)) (shl.i32 (value.i32 x) (iconst.i32 k))))
+      (if (and (and (> k 0) (< k 32)) (= (+ k j) 32)))
+      (a64.ror_ri_32 x j)
+      (spec (= (bvor (bvlshr x j) (bvshl x k)) (result))))
+
+(rule (lower (or.i64 (shl.i64 (value.i64 x) (iconst.i64 k)) (lshr.i64 (value.i64 x) (iconst.i64 j))))
+      (if (and (and (> k 0) (< k 64)) (= (+ k j) 64)))
+      (a64.ror_ri_64 x j)
+      (spec (= (bvor (bvshl x k) (bvlshr x j)) (result))))
+
+(rule (lower (or.i64 (lshr.i64 (value.i64 x) (iconst.i64 j)) (shl.i64 (value.i64 x) (iconst.i64 k))))
+      (if (and (and (> k 0) (< k 64)) (= (+ k j) 64)))
+      (a64.ror_ri_64 x j)
+      (spec (= (bvor (bvlshr x j) (bvshl x k)) (result))))
 
 ;; A shifted register as the second operand of an arithmetic or bitwise instruction, which the
 ;; machine shifts on the way in for nothing, as gcc writes `a + (b << 3)`. The operations that do

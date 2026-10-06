@@ -190,6 +190,9 @@ static TEXT: &[(&str, &[Written])] = &[
     ("asr_rr_64", &[spell("asrv", &[Reg(0, X), Reg(1, X), Reg(2, X)])]),
     ("ror_rr_32", &[spell("rorv", &[Reg(0, W), Reg(1, W), Reg(2, W)])]),
     ("ror_rr_64", &[spell("rorv", &[Reg(0, X), Reg(1, X), Reg(2, X)])]),
+    ("lsl_rw_64", &[spell("lslv", &[Reg(0, X), Reg(1, X), Reg(2, X)])]),
+    ("lsr_rw_64", &[spell("lsrv", &[Reg(0, X), Reg(1, X), Reg(2, X)])]),
+    ("asr_rw_64", &[spell("asrv", &[Reg(0, X), Reg(1, X), Reg(2, X)])]),
     ("smulh_rr_64", &[spell("smulh", &[Reg(0, X), Reg(1, X), Reg(2, X)])]),
     ("umulh_rr_64", &[spell("umulh", &[Reg(0, X), Reg(1, X), Reg(2, X)])]),
     // Arithmetic on a register and a constant. The constant is one the instruction can hold, which
