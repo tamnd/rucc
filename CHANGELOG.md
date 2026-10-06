@@ -7,6 +7,7 @@ All notable changes are recorded here. The format follows [Keep a Changelog](htt
 ### Added
 
 - The crate `rucc-wasm-link`, a static linker for wasm that runs inside the compiler, for a host that cannot start `wasm-ld`, such as rucc that runs as a wasm module (#2867). It reads objects and `ar` archives, fetches only the archive members that define a symbol something needs, drops what the entry and the exports do not reach, and writes a command or a reactor module for wasm32-wasip1. The SQLite shell linked with it against the wasi-sdk 34 sysroot gives the same answers as the module that `wasm-ld` links, and it is 16 bytes smaller without the custom sections. The driver does not use the crate yet.
+- The driver links wasm with `rucc-wasm-link` when `-fuse-ld=rucc` is given, when rucc runs as a wasm module, and when no `wasm-ld` of lld 21 or newer is on the machine (#2867). It reads the line that the driver writes for `wasm-ld`, so the start file, the libraries and the `-Wl,` options are the same for the two linkers. An option that it does not take, such as `--shared-memory` or `--export-dynamic`, stops the link with a message that names the option. `-###` and `-v` show `rucc-wasm-link` in the place of the path of the linker. Linked this way, the SQLite shell gives the same answers as with `wasm-ld`. rucc built for wasm32-wasip1 and run in Wasmtime now compiles and links a program, with `-B` to name the directory of `librucc_builtins.a`.
 
 ### Fixed
 

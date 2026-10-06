@@ -19,11 +19,13 @@
 //!
 //! # Status
 //!
-//! [`link`] does the whole job: it reads the objects and the archives, resolves the symbols,
-//! fetches the archive members that define what is undefined, drops what the roots do not reach,
-//! lays out the memory and the table, applies the relocations and writes the module. The readers
-//! are public too: [`object`] for one object and [`archive`] for the members of an archive. The
-//! driver does not use this crate yet.
+//! [`command::run`] reads a `wasm-ld` line and links what it asks for, which is how the driver
+//! uses the crate. [`link`] does the whole job on bytes: it reads the objects and the archives,
+//! resolves the symbols, fetches the archive members that define what is undefined, drops what the
+//! roots do not reach, lays out the memory and the table, applies the relocations and writes the
+//! module. The readers are public too: [`object`] for one object and [`archive`] for the members
+//! of an archive. The driver links with this crate when `-fuse-ld=rucc` is given, when rucc runs
+//! as wasm, and when no `wasm-ld` is found.
 //!
 //! Every crate in the workspace is published, and publishing implies a promise. This one is
 //! tier 3: its Rust API is explicitly unstable and will change without a major version bump.
@@ -35,6 +37,7 @@ use core::fmt;
 
 pub mod archive;
 mod bytes;
+pub mod command;
 mod layout;
 mod live;
 pub mod object;
@@ -62,6 +65,8 @@ pub struct Options {
     pub max_memory: Option<u32>,
     /// Leave out the `name` section, as `--strip-all`.
     pub strip: bool,
+    /// Make an undefined function an import from `env` and not an error, as `--allow-undefined`.
+    pub allow_undefined: bool,
 }
 
 impl Default for Options {
@@ -74,6 +79,7 @@ impl Default for Options {
             initial_memory: None,
             max_memory: None,
             strip: false,
+            allow_undefined: false,
         }
     }
 }

@@ -351,6 +351,12 @@ pub enum Error {
     },
     /// rucc is running as WebAssembly, where it cannot start a linker.
     NoProcesses,
+    /// The linker inside rucc refused the line or the link, or was asked for a target it does not
+    /// link.
+    InProcess {
+        /// Why, in full, ready to print.
+        why: String,
+    },
     /// The linker ran and said no.
     Refused {
         /// What it exited with, or a description when it was killed instead.
@@ -362,19 +368,9 @@ impl std::fmt::Display for Error {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
             Error::NoLinker { tried } => {
+                // There is no sentence for wasm-ld here, because a wasm link that finds none is
+                // done by the linker inside rucc.
                 write!(f, "no linker was found; tried {}", tried.join(", "))?;
-                // wasm first, because wasm-ld is an lld too and the sentence below is about the
-                // floor for windows-gnu, which wasm does not have.
-                // Not the advice for the other targets, which names lld 19, because a WASI link
-                // needs lld 21 or newer.
-                if tried.iter().any(|name| name == "wasm-ld") {
-                    return write!(
-                        f,
-                        ". wasm-ld comes with lld {LLD_WASI} or newer. wasi-sdk 34 has one in its \
-                         bin directory, which rucc finds when WASI_SDK_PATH names it. `rucc \
-                         --fetch` installs the C library and not a linker"
-                    );
-                }
                 // Only when lld was one of the names, because that is the linker every cross
                 // target here is linked with and the one there is a single answer for.
                 if tried.iter().any(|name| is_lld(name)) {
@@ -442,6 +438,7 @@ impl std::fmt::Display for Error {
                 crate::host::NO_PROCESSES
             ),
             Error::Refused { status } => write!(f, "the linker {status}"),
+            Error::InProcess { why } => f.write_str(why),
         }
     }
 }
@@ -453,8 +450,26 @@ impl std::error::Error for Error {}
 pub struct Linker {
     /// The name it is known by, which is what `--print-config` reports.
     pub name: String,
-    /// Where it is, which is what gets spawned.
+    /// Where it is, which is what gets spawned. Empty for the linker inside rucc.
     pub path: PathBuf,
+}
+
+/// The name `-fuse-ld=` takes for the linker inside rucc.
+pub const IN_PROCESS: &str = "rucc";
+
+impl Linker {
+    /// The wasm linker inside rucc, which reads the line `wasm-ld` would get and runs in this
+    /// process.
+    #[must_use]
+    pub fn in_process() -> Self {
+        Linker { name: "rucc-wasm-link".to_owned(), path: PathBuf::new() }
+    }
+
+    /// Whether this is the linker inside rucc, which is called and not started.
+    #[must_use]
+    pub fn is_in_process(&self) -> bool {
+        self.path.as_os_str().is_empty()
+    }
 }
 
 /// The names to look for, in the order section 4.9 gives.
@@ -1019,10 +1034,32 @@ pub fn write_stubs(target: Triple, opts: &LinkOptions) -> Result<(), Error> {
 ///
 /// # Errors
 ///
+/// A wasm target has the linker inside rucc as well. `-fuse-ld=rucc` asks for it, rucc running as
+/// wasm has no other, and a machine with no `wasm-ld` of lld [`LLD_WASI`] or newer gets it in place
+/// of an error. It links a static module only, and refuses by name an option that it does not take.
+///
+/// # Errors
+///
 /// [`Error::Named`] when `-fuse-ld=` asked for one that is not here, and [`Error::NoLinker`] when
 /// nothing was, which name the candidates so that the message says what was looked for.
+/// [`Error::InProcess`] for `-fuse-ld=rucc` on a target that is not wasm.
 pub fn find(target: Triple, opts: &LinkOptions) -> Result<Linker, Error> {
+    let wasm = target.arch.is_wasm();
+    if opts.use_ld.as_deref() == Some(IN_PROCESS) {
+        if !wasm {
+            return Err(Error::InProcess {
+                why: format!(
+                    "-fuse-ld={IN_PROCESS} links only wasm, and the target is {}",
+                    target.tuple().to_canonical_string()
+                ),
+            });
+        }
+        return Ok(Linker::in_process());
+    }
     if crate::host::WASM {
+        if wasm && opts.use_ld.is_none() {
+            return Ok(Linker::in_process());
+        }
         return Err(Error::NoProcesses);
     }
     let tried = order(target, opts);
@@ -1048,6 +1085,11 @@ pub fn find(target: Triple, opts: &LinkOptions) -> Result<Linker, Error> {
                 }
             }
         }
+    }
+    // A wasm link does not stop here, because the linker inside rucc links what the driver writes.
+    // An lld that is too old is passed over for it too, as a newer one somewhere else would be.
+    if wasm && opts.use_ld.is_none() {
+        return Ok(Linker::in_process());
     }
     if let Some(why) = refused {
         return Err(why);
@@ -2040,7 +2082,12 @@ fn target_path(sysroot: Option<&Path>, path: &str) -> String {
 /// The whole invocation as one line, quoted the way `-###` prints it.
 #[must_use]
 pub fn render(linker: &Linker, args: &[String]) -> String {
-    let mut out = linker.path.display().to_string();
+    // The linker inside rucc has no path, so its name is printed in the place of one.
+    let mut out = if linker.is_in_process() {
+        linker.name.clone()
+    } else {
+        linker.path.display().to_string()
+    };
     for arg in args {
         out.push(' ');
         if arg.is_empty() || arg.contains(char::is_whitespace) {
@@ -2152,8 +2199,13 @@ fn response_text(args: &[String], windows: bool) -> String {
 ///
 /// [`Error::NoProcesses`] on a wasm host, [`Error::Spawn`] when it could not be started, which is
 /// a machine problem, and [`Error::Refused`] when it ran and said no, which is a program problem and one the linker has
-/// already explained on its own error output.
+/// already explained on its own error output. [`Error::InProcess`] when the linker inside rucc
+/// said no, which has printed nothing, so the message is the whole of the explanation.
 pub fn run(linker: &Linker, args: &[String]) -> Result<(), Error> {
+    if linker.is_in_process() {
+        return rucc_wasm_link::command::run(args)
+            .map_err(|why| Error::InProcess { why: why.to_string() });
+    }
     let spawn = |why: std::io::Error| Error::Spawn {
         path: linker.path.display().to_string(),
         why: why.to_string(),
@@ -2851,9 +2903,30 @@ mod tests {
         let reactor = LinkOptions { reactor: true, ..opts.clone() };
         let args = line(target, &reactor, &one("a.o"), "a.wasm").expect("a line");
         assert!(args.windows(2).any(|pair| pair == ["--entry", "_initialize"]), "{args:?}");
+    }
 
-        let missing = Error::NoLinker { tried: order(target, &opts) };
-        assert!(missing.to_string().contains("WASI_SDK_PATH"), "{missing}");
+    /// `-fuse-ld=rucc` is the linker inside rucc on a wasm target and an error on any other, and a
+    /// wasm link with no `-fuse-ld=` always has a linker, because that one is the last resort.
+    #[test]
+    fn the_linker_inside_rucc_links_wasm_when_asked_and_when_there_is_no_wasm_ld() {
+        let target = Triple::new(Arch::Wasm32, Os::Wasi(rucc_target::Preview::P1), Env::None);
+        let ours = LinkOptions { use_ld: Some(IN_PROCESS.to_owned()), ..cached() };
+        let linker = find(target, &ours).expect("the linker inside rucc");
+        assert!(linker.is_in_process(), "{linker:?}");
+        let args = line(target, &ours, &one("a.o"), "a.wasm").expect("a line");
+        assert!(render(&linker, &args).starts_with("rucc-wasm-link -o a.wasm -m wasm32 "));
+        let error = find(linux(), &ours).expect_err("not for ELF");
+        assert!(error.to_string().starts_with("-fuse-ld=rucc links only wasm"), "{error}");
+        assert!(find(target, &cached()).is_ok());
+    }
+
+    /// An error of the linker inside rucc is the whole message, because nothing else printed it.
+    #[test]
+    fn the_linker_inside_rucc_says_why_it_refused_a_line() {
+        let args = ["-o", "a.wasm", "--shared-memory", "a.o"].map(str::to_owned);
+        let error = run(&Linker::in_process(), &args).expect_err("an option it does not take");
+        let Error::InProcess { why } = &error else { panic!("{error:?}") };
+        assert!(why.contains("--shared-memory"), "{why}");
     }
 
     #[test]

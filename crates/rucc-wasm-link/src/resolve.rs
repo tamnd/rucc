@@ -330,7 +330,7 @@ impl<'a> Loader<'a> {
                     let Some((file, symbol)) = entry.first else { continue };
                     if let Some(synth) = Synth::of(name, entry.kind) {
                         Where::Synth(synth)
-                    } else if let Some(import) = import(&files[file], symbol) {
+                    } else if let Some(import) = import(&files[file], symbol, options) {
                         let index = *import_of.entry(name).or_insert_with(|| {
                             imports.push(import);
                             imports.len() as u32 - 1
@@ -405,15 +405,15 @@ fn own(object: &Object<'_>, file: usize, symbol: usize) -> Where {
 }
 
 /// The import an undefined function becomes, when it has an explicit import name or a module
-/// other than `env`.
-fn import<'a>(object: &Object<'a>, symbol: usize) -> Option<Imported<'a>> {
+/// other than `env`, or when the options allow an undefined function.
+fn import<'a>(object: &Object<'a>, symbol: usize, options: &Options) -> Option<Imported<'a>> {
     let symbol = &object.symbols[symbol];
     if symbol.kind != Kind::Function {
         return None;
     }
     let import = &object.func_imports[symbol.index as usize];
     let explicit = symbol.flags & EXPLICIT_NAME != 0 || import.module != "env";
-    explicit.then(|| Imported {
+    (explicit || options.allow_undefined).then(|| Imported {
         name: symbol.name,
         module: import.module,
         field: import.field,
