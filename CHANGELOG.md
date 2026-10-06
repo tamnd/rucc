@@ -8,6 +8,7 @@ All notable changes are recorded here. The format follows [Keep a Changelog](htt
 
 - Loop invariant code motion and global code motion also leave a pointer a small constant past another where it is when what reads it is another address in the same block, which is how `h->nodes[i]` on a flexible array is written. PostgreSQL's binaryheap `sift_up` held `h->nodes` in a register across the comparator call in its loop and spilled it.
 - On x86, a constant added to a pointer that another address then reads, which is a flexible array member such as `h->nodes[i]`, goes into that address's displacement, so `leaq 32(%rbx), %rax` and `movq (%rax,%rcx,8)` are `movq 32(%rbx,%rcx,8)` as gcc writes it.
+- On x86-64, a `double` or `float` kept in a vector register and put away only around a call is saved in a slot of its own size with `movsd` or `movss`, as one spilled for good already was, rather than in sixteen bytes with `movaps`. The search for a slice of a histogram in PostgreSQL's `calc_length_hist_frac` saves six doubles around one call, and its frame is 48 bytes smaller.
 
 ## 0.24.8
 
