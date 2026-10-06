@@ -1506,7 +1506,6 @@ fn a_value_with_one_use_stays_on_the_stack_when_its_instruction_can_move() {
             "call\tg",
             "i32.add",
             "return",
-            "unreachable",
         ],
         "{f}"
     );
@@ -2076,5 +2075,38 @@ fn a_compare_against_zero_is_the_value_or_an_eqz() {
     assert!(!none.contains("i64.eq\n"), "{none}");
     if let Some(status) = link_and_run("zero", ZERO) {
         assert_eq!(status, 20);
+    }
+}
+
+const SPIN: &str = r#"; ModuleID = 't.c'
+; format 0
+target triple = "wasm32-unknown-wasip1"
+target datalayout = "e-p:32:32-i64:64-S128"
+
+func @spin(i32) -> i32, linkage(external) {
+block0(%0: i32):
+    br_if %0, block1, block2
+
+block1:
+    return %0
+
+block2:
+    jump block2
+}
+"#;
+
+/// A function that gives a value and ends with a `return` has no `unreachable` after it, because
+/// the stack after a `return` can be of any type. A function whose code can fall through to its
+/// end, as after the loop of `spin`, keeps the `unreachable`.
+#[test]
+fn only_code_that_falls_through_to_the_end_needs_an_unreachable() {
+    for optimize in [false, true] {
+        let spin = body_of(SPIN, "spin", optimize);
+        assert!(!spin.contains("return\n\tunreachable"), "{spin}");
+        assert!(
+            spin.contains("end_loop\n\tunreachable\n")
+                || spin.contains("end_block\n\tunreachable\n"),
+            "{spin}"
+        );
     }
 }
