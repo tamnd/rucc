@@ -177,12 +177,54 @@ pub fn lowered(
     tables: bool,
     word: u32,
 ) -> Vec<Lowered> {
+    lowered_by(func, Rules::native(goal), force, tables, word)
+}
+
+/// The same as [`lowered`], with the bounds in `rules` in place of the ones the native back ends
+/// use. This is for the wasm back end, where a table costs a byte a cell and a comparison costs
+/// more than it does on a machine with a branch predictor in front of it.
+pub fn lowered_by(
+    func: &mut Func,
+    rules: Rules,
+    force: Option<Force>,
+    tables: bool,
+    word: u32,
+) -> Vec<Lowered> {
     let found: Vec<Inst> = func
         .blocks()
         .filter_map(|block| func.terminator(block))
         .filter(|&inst| func[inst].opcode == Opcode::Switch)
         .collect();
-    found.into_iter().filter_map(|inst| lower(func, inst, goal, force, tables, word)).collect()
+    found.into_iter().filter_map(|inst| lower(func, inst, rules, force, tables, word)).collect()
+}
+
+/// The bounds that decide what a `switch` becomes.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Rules {
+    /// How many cells a table may have for each comparison it replaces, counted with a single
+    /// value as one comparison and a run as two. See `JUMP_TABLE_GROWTH`.
+    pub growth: i128,
+    /// How many clusters a stretch needs before it is a table.
+    pub least: u32,
+    /// How many clusters or fewer are tested one after another, where more are split by a binary
+    /// search. See [`LINEAR`].
+    pub leaf: usize,
+    /// Whether the `switch` that a table is left as sends a value outside its cells to its
+    /// default, as `br_table` does. A table that is the last test of a chain then gets no range
+    /// check of its own, since a value outside the range goes to the default either way.
+    pub checked: bool,
+}
+
+impl Rules {
+    /// The bounds of the native back ends for `goal`, which are gcc's.
+    #[must_use]
+    pub fn native(goal: Goal) -> Self {
+        let (growth, least) = match goal {
+            Goal::Speed => (JUMP_TABLE_GROWTH, JUMP_TABLE_MIN_TARGETS),
+            Goal::Size => (JUMP_TABLE_GROWTH_FOR_SIZE, JUMP_TABLE_MIN_TARGETS_FOR_SIZE),
+        };
+        Rules { growth, least, leaf: LINEAR, checked: false }
+    }
 }
 
 /// A shape forced on every `switch`, which is what `-Zswitch=` asks for.
@@ -277,7 +319,7 @@ impl Lowered {
 fn lower(
     func: &mut Func,
     inst: Inst,
-    goal: Goal,
+    rules: Rules,
     force: Option<Force>,
     allowed: bool,
     word: u32,
@@ -298,7 +340,7 @@ fn lower(
     let hot = hottest(&arms).map(|at| (cases.remove(at).signed(ty), arms.remove(at)));
     let found = clusters(func, &cases, &arms, ty);
     let clusters = match force {
-        None if allowed => group(func, tables(func, found, ty, goal, word), word),
+        None if allowed => group(func, tables(func, found, ty, rules, word), word),
         None => group(func, found, word),
         Some(Force::Table) if allowed => forced(found, ty, word),
         Some(Force::Table | Force::Tree | Force::Walk) => found,
@@ -306,7 +348,7 @@ fn lower(
     let leaf = match force {
         Some(Force::Tree) => 1,
         Some(Force::Walk) => usize::MAX,
-        Some(Force::Table) | None => LINEAR,
+        Some(Force::Table) | None => rules.leaf,
     };
     let lowered = Lowered {
         cases: count,
@@ -320,7 +362,7 @@ fn lower(
     // Before anything is written, because the builder appends and the `switch` is where the
     // appending has to happen.
     func.remove_inst(inst);
-    let of = Lowering { value, ty, default, span, word: Type::int(word) };
+    let of = Lowering { value, ty, default, span, word: Type::int(word), checked: rules.checked };
     let rest = match hot {
         Some((case, call)) => peel(func, &of, block, case, call),
         None => block,
@@ -384,6 +426,8 @@ struct Lowering {
     span: Span,
     /// The machine's word, which a table's index and a bit test's masks are computed in.
     word: Type,
+    /// Whether a table sends a value outside its cells to its default. See [`Rules::checked`].
+    checked: bool,
 }
 
 /// A stretch of case values that one test separates from the rest of them.
@@ -507,14 +551,14 @@ const JUMP_TABLE_GROWTH_FOR_SIZE: i128 = 3;
 /// values once there are enough of them, and after it the single values a table wants would
 /// already be gone into masks. Only on an operand a word wide or narrower, since the index a
 /// table is read with is a word and a wider operand does not fit in one.
-fn tables(func: &Func, clusters: Vec<Cluster>, ty: Type, goal: Goal, word: u32) -> Vec<Cluster> {
+fn tables(func: &Func, clusters: Vec<Cluster>, ty: Type, rules: Rules, word: u32) -> Vec<Cluster> {
     if ty.bits() == 0 || ty.bits() > word {
         return clusters;
     }
     let mut out: Vec<Cluster> = Vec::with_capacity(clusters.len());
     let mut at = 0;
     while at < clusters.len() {
-        match dense(func, &clusters[at..], goal, word) {
+        match dense(func, &clusters[at..], rules, word) {
             Some(end) => {
                 out.push(table(&clusters[at..at + end]));
                 at += end;
@@ -542,11 +586,8 @@ fn tables(func: &Func, clusters: Vec<Cluster>, ty: Type, goal: Goal, word: u32) 
 ///
 /// The scan stops once the span is wider than every cluster left could pay for even if each were
 /// a run, since the span only grows and the count cannot catch it after that.
-fn dense(func: &Func, clusters: &[Cluster], goal: Goal, word: u32) -> Option<usize> {
-    let (growth, least) = match goal {
-        Goal::Speed => (JUMP_TABLE_GROWTH, JUMP_TABLE_MIN_TARGETS),
-        Goal::Size => (JUMP_TABLE_GROWTH_FOR_SIZE, JUMP_TABLE_MIN_TARGETS_FOR_SIZE),
-    };
+fn dense(func: &Func, clusters: &[Cluster], rules: Rules, word: u32) -> Option<usize> {
+    let Rules { growth, least, .. } = rules;
     let low = clusters.first()?.low();
     let most = 2 * i128::try_from(clusters.len()).ok()?;
     let least = usize::try_from(least).ok()?;
@@ -886,18 +927,32 @@ fn looked_up(
         _ => hop(func, of.default),
     };
 
+    // A table whose range check would fail to the default has no need of the check when the
+    // `switch` sends a value outside its cells to the default itself. The value less the lowest case
+    // is then read unsigned, so a value below the range is above it, and the operand must not be
+    // wider than a word, since cutting it down to the index could make a value outside the range
+    // look like one inside it.
+    let last = next == of.default.block && func[of.default.args] == *onward;
     let mut build = Builder::new(func, at).at(of.span);
     let base = shifted_down(&mut build, of, low);
-    let width = build.iconst(of.ty, high - low);
-    let ok = build.icmp(IntPred::Ule, base, width);
-    build.br_if(ok, inside, &[], next, onward);
+    if of.checked && last && of.ty.bits() <= of.word.bits() {
+        func.remove_block(inside);
+        let default = if full { hop(func, of.default) } else { default };
+        let mut build = Builder::new(func, at).at(of.span);
+        let index = in_word(&mut build, of, base);
+        build.switch(index, default, &cases);
+    } else {
+        let width = build.iconst(of.ty, high - low);
+        let ok = build.icmp(IntPred::Ule, base, width);
+        build.br_if(ok, inside, &[], next, onward);
 
-    // In a word, because that is what an address is added up in. The range check above is what
-    // makes widening without the sign the right widening: what gets here is between zero and the
-    // width, read unsigned.
-    let mut build = Builder::new(func, inside).at(of.span);
-    let index = in_word(&mut build, of, base);
-    build.switch(index, default, &cases);
+        // In a word, because that is what an address is added up in. The range check above is
+        // what makes widening without the sign the right widening: what gets here is between zero
+        // and the width, read unsigned.
+        let mut build = Builder::new(func, inside).at(of.span);
+        let index = in_word(&mut build, of, base);
+        build.switch(index, default, &cases);
+    }
 
     for (call, block) in hops {
         let args: Vec<Value> = func[call.args].to_vec();
@@ -1043,7 +1098,10 @@ mod tests {
     };
     use rucc_target::{Arch, Env, Os, TargetInfo, Triple};
 
-    use super::{Force, Goal, LINEAR, Lowered, SWITCH_PEEL_PERCENT, blocks_for, lowered, switches};
+    use super::{
+        Force, Goal, LINEAR, Lowered, Rules, SWITCH_PEEL_PERCENT, blocks_for, lowered, lowered_by,
+        switches,
+    };
 
     fn target() -> TargetInfo {
         TargetInfo::new(Triple::new(Arch::X86_64, Os::Linux, Env::Gnu))
@@ -1871,6 +1929,64 @@ mod tests {
         routes(&mut built, &cases, &arms, &probes, ty);
         let text = printed(&built.func, &mut built.names);
         assert_eq!(text.matches("switch").count(), 1, "the cases are one table: {text}");
+    }
+
+    /// What a `switch` over these cases becomes under the native rules with [`Rules::checked`] set
+    /// and a word of 32 bits, which is what the wasm back end asks for, checked for every probe.
+    fn checked(cases: &[i128], arms: &[usize], probes: &[i128], ty: Type) -> String {
+        let mut built = built_sharing(cases, arms, ty);
+        let rules = Rules { checked: true, ..Rules::native(Goal::Speed) };
+        let said = lowered_by(&mut built.func, rules, None, true, 32);
+        assert_eq!(said[0].tables, 1, "the cases are one table");
+        lands(&mut built, cases, arms, probes, ty);
+        printed(&built.func, &mut built.names)
+    }
+
+    /// A table that is the last test before the default gets no range check when the `switch` it
+    /// is left as sends a value outside its cells to the default itself, as `br_table` does.
+    #[test]
+    fn a_checked_table_before_the_default_has_no_range_check() {
+        let ty = Type::int(32);
+        let cases = [3, 4, 5, 7, 8, 10, 11, 13, 14, 15, 19];
+        let arms: Vec<usize> = (0..cases.len()).collect();
+        let text = checked(&cases, &arms, &around(&cases, ty), ty);
+        assert!(!text.contains("icmp"), "no range check: {text}");
+        assert_eq!(text.matches("switch").count(), 1, "and one table: {text}");
+    }
+
+    /// With no range check, a table with a case for every value in its range can still get a value
+    /// outside the range, so its default is the default of the `switch` and not one of its cases.
+    #[test]
+    fn a_checked_full_table_still_sends_a_value_outside_it_to_the_default() {
+        let ty = Type::int(32);
+        let cases: Vec<i128> = (0..13).collect();
+        let arms: Vec<usize> = (0..cases.len()).collect();
+        let text = checked(&cases, &arms, &around(&cases, ty), ty);
+        assert!(!text.contains("icmp"), "no range check: {text}");
+    }
+
+    /// The index of a narrow operand is widened without its sign after the subtraction, so a value
+    /// below the range is a large index and goes to the default with no range check.
+    #[test]
+    fn a_checked_table_on_a_narrow_operand_that_straddles_zero_routes_every_value() {
+        let ty = Type::int(8);
+        let cases: Vec<i128> = (-7..8).filter(|x| x % 4 != 0).collect();
+        let arms: Vec<usize> = (0..cases.len()).map(|at| at % 5).collect();
+        let probes: Vec<i128> = (-128..128).collect();
+        let text = checked(&cases, &arms, &probes, ty);
+        assert!(!text.contains("icmp"), "no range check: {text}");
+    }
+
+    /// A table that a value can fail on to another test keeps its range check, since the test
+    /// after it is not the default.
+    #[test]
+    fn a_checked_table_with_a_test_after_it_keeps_its_range_check() {
+        let ty = Type::int(32);
+        let mut cases: Vec<i128> = (0..13).collect();
+        cases.push(1000);
+        let arms: Vec<usize> = (0..cases.len()).collect();
+        let text = checked(&cases, &arms, &around(&cases, ty), ty);
+        assert_eq!(text.matches("icmp ule").count(), 1, "the range check stays: {text}");
     }
 
     /// Three places to go are three masks, and gcc keeps that shape too, so a bit test is not

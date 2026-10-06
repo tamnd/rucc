@@ -455,7 +455,9 @@ name = "rucc-wasm"
 version = "0.24.4"
 dependencies = [
  "rucc-base",
+ "rucc-cost",
  "rucc-ir",
+ "rucc-legalize",
  "rucc-object",
  "rucc-rules",
  "rucc-target",

@@ -1155,6 +1155,13 @@ fn generate(
         // target has them, as clang writes it. Before `tail::mark`, so that such a call in tail
         // position is the instruction and not a `return_call` to the library.
         rucc_wasm::bulk(module, names, opts.wasm);
+        // With optimization, each `switch` is split into tests and tables here, by the clustering
+        // the native targets run. The selector then writes each `switch` that is left as one
+        // `br_table`. Without, the selector picks a table or a chain of tests for each one alone.
+        if opts.opt_level.runs_optimizer() {
+            let goal = Goal::for_size(opts.opt_level.is_size());
+            rucc_wasm::switches(module, goal, opts.jump_tables);
+        }
         // A bit-field wider than 32 bits is arithmetic at a width that wasm has no type for, as on
         // the other targets. The same pass puts each such value into an `i64`.
         for id in module.funcs() {
