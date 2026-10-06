@@ -66,6 +66,7 @@ mod complex;
 mod constant;
 mod count;
 pub(in crate::check) mod cpu;
+mod ctype;
 mod eflags;
 mod entry;
 mod expect;
