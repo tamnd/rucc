@@ -4,6 +4,10 @@ All notable changes are recorded here. The format follows [Keep a Changelog](htt
 
 ## Unreleased
 
+### Added
+
+- `cargo xtask sweep` and `cargo xtask passoff` run the corpus's threshold sweep and pass off measurement against the compiler this tree builds, with GCC 16 as the reference, for #2970 and #2968. The corpus pin moves to tamnd/rucc-corpus@60c8fd16, which has both commands and the short-circuit shape for `rangeswitch`.
+
 ### Changed
 
 - A structure copied between a field of one object and a field of another, such as Postgres' `slot->tts_tid = tuple->t_self`, steps each word it moves from the two pointers rather than from the two fields, so on x86-64 every move carries the field's offset and the two `lea` in front of them are gone, as gcc writes it (#1994).

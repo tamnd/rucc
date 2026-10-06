@@ -27,6 +27,30 @@ use crate::{Error, Result, root, target_dir};
 
 /// Runs the corpus against the compiler this tree builds.
 pub(crate) fn corpus(args: &[String]) -> Result<()> {
+    drive(args, "run")
+}
+
+/// Moves each of the thresholds `--print-params` lists to half and to double its value and runs
+/// the cases each move changes, which is experiment 60 of section 42.5 and tamnd/rucc#2970.
+///
+/// The same checkout and build as [`corpus`], with the corpus's `sweep` in place of its `run`.
+/// The sweep writes a line for each move as it finishes and starts again after the last one, so
+/// it can be stopped and run again with the same command.
+pub(crate) fn sweep(args: &[String]) -> Result<()> {
+    drive(args, "sweep")
+}
+
+/// Turns each pass of the `-O2` pipeline off on its own and runs the cases that changes, which is
+/// the pass off experiment of section 42.4 and tamnd/rucc#2968.
+///
+/// The same checkout and build as [`corpus`], with the corpus's `passoff` in place of its `run`,
+/// and it resumes the way the sweep does.
+pub(crate) fn passoff(args: &[String]) -> Result<()> {
+    drive(args, "passoff")
+}
+
+/// Checks the corpus out at its pin, builds rucc, and runs one of the corpus's commands on it.
+fn drive(args: &[String], command: &str) -> Result<()> {
     let mut rev: Option<String> = None;
     let mut gcc = "gcc-16".to_owned();
     let mut build = true;
@@ -78,13 +102,26 @@ pub(crate) fn corpus(args: &[String]) -> Result<()> {
         )));
     }
 
-    let mut run: Vec<String> = ["run", "--release", "-p", "rucc-corpus", "--", "run"]
+    let mut run: Vec<String> = ["run", "--release", "-p", "rucc-corpus", "--", command]
         .iter()
         .map(|s| (*s).to_owned())
         .collect();
-    run.push("--toolchain".to_owned());
-    run.push(format!("rucc={}", rucc.display()));
-    if runnable(&gcc) {
+    if command == "run" {
+        run.push("--toolchain".to_owned());
+        run.push(format!("rucc={}", rucc.display()));
+    }
+    if command != "run" {
+        // A sweep or a pass off run is measured against GCC 16 or not at all. Each change is set
+        // against rucc as it is, and the reference is what says whether it brought rucc nearer to
+        // GCC or further from it, so a run without one would be half of what is asked.
+        if !runnable(&gcc) {
+            return Err(Error::Io(format!("the {command} needs {gcc} to measure against")));
+        }
+        run.push("--rucc".to_owned());
+        run.push(rucc.display().to_string());
+        run.push("--reference".to_owned());
+        run.push(format!("gcc-16={gcc}"));
+    } else if runnable(&gcc) {
         run.push("--toolchain".to_owned());
         run.push(format!("gcc-16={gcc}"));
         run.push("--reference".to_owned());
@@ -102,9 +139,11 @@ pub(crate) fn corpus(args: &[String]) -> Result<()> {
 
     println!("xtask: corpus at {}", &pin.rev[..12.min(pin.rev.len())]);
     cargo(&dir, &run.iter().map(String::as_str).collect::<Vec<_>>())?;
+    let reports =
+        if command == "run" { "reports".to_owned() } else { format!("reports/{command}") };
     println!(
         "xtask: the report is under {} unless --out said otherwise",
-        dir.join("reports").display()
+        dir.join(reports).display()
     );
     Ok(())
 }
@@ -246,7 +285,15 @@ fn usage(why: &str) -> Error {
          \x20 cargo xtask corpus -- --facet loops.reduction --level O2\n\
          \n\
          --rev runs a corpus commit other than the pinned one, for deciding whether to move the\n\
-         pin. --no-build uses the release binary that is already there."
+         pin. --no-build uses the release binary that is already there.\n\
+         \n\
+         cargo xtask sweep takes the same options and runs the corpus's sweep instead, every\n\
+         threshold at half and at double against GCC 16, which --row narrows to some of them:\n\
+         \n\
+         \x20 cargo xtask sweep -- --row inline-insns-auto --jobs 4\n\
+         \n\
+         cargo xtask passoff is the same with each pass of the -O2 pipeline turned off on its own\n\
+         in place of a threshold moved, which --pass narrows to some of them."
     ))
 }
 

@@ -383,6 +383,9 @@ fn place(laid: &mut Vec<Laid>, name: Option<&str>) -> usize {
     laid.len() - 1
 }
 
+/// Which section a function is in and which of that section's functions it is.
+type Place = (usize, usize);
+
 /// Every section laid out on its own, as the text section with the rest after it as runs, with the
 /// rows and the lines of each function in the order of the extents, and where each extent in
 /// `order` and each cold part in `colds` ended up.
@@ -391,8 +394,8 @@ fn place(laid: &mut Vec<Laid>, name: Option<&str>) -> usize {
 /// everything it kept as a function's number by how many functions are in front of it.
 fn merge(
     laid: Vec<Laid>,
-    order: &[(usize, usize)],
-    colds: &[((usize, usize), (usize, usize))],
+    order: &[Place],
+    colds: &[(Place, Place)],
 ) -> (Text, Vec<Rows>, Vec<Vec<Row>>, Vec<usize>) {
     let mut firsts = Vec::with_capacity(laid.len());
     let mut sections = laid.into_iter();
@@ -761,9 +764,8 @@ impl Assembler<'_> {
         }
         // Back to the section the first part is in, which is where the tables and the jumps are
         // worked out from.
-        if self.cold.as_ref().is_some_and(|cold| cold.apart)
-            && let Some(other) = self.other.as_mut()
-        {
+        let apart = self.cold.as_ref().is_some_and(|cold| cold.apart);
+        if let (true, Some(other)) = (apart, self.other.as_mut()) {
             std::mem::swap(&mut self.text, other);
         }
         Ok(())

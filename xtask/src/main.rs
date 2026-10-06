@@ -107,6 +107,8 @@ tasks:
   compress          sweep what a compressed capability in an aux slot can say exactly
   bisect            halve the optimizer's fuel until one rewrite is left holding the bug
   corpus            run the pinned C corpus against the compiler this tree builds
+  sweep             run the corpus with each threshold at half and at double its value
+  passoff           run the corpus with each pass of the -O2 pipeline off on its own
   bless             rewrite the expectations in tests/golden from what the compiler produces now
   interpose         check the interposition table and the compiler's copy of it agree
   ci                run every check the per-commit CI job runs, as much of it at once as
@@ -167,6 +169,8 @@ fn main() -> ExitCode {
         Some("compress") => compress::compress(),
         Some("bisect") => bisect::bisect(&std::env::args().skip(2).collect::<Vec<_>>()),
         Some("corpus") => corpus::corpus(&std::env::args().skip(2).collect::<Vec<_>>()),
+        Some("sweep") => corpus::sweep(&std::env::args().skip(2).collect::<Vec<_>>()),
+        Some("passoff") => corpus::passoff(&std::env::args().skip(2).collect::<Vec<_>>()),
         Some("bless") => bless(),
         Some("ci") => gate::ci(),
         Some("help") | Some("--help") | Some("-h") | None => {
