@@ -32,6 +32,7 @@
 //! Nothing turns a token back into text. `-E` prints pp-tokens, which is the stage before this
 //! one, so a spelling is never reconstructed from a converted value.
 
+use rucc_base::hash::Map;
 use rucc_base::{Interner, Symbol};
 use rucc_diag::{Diagnostic, Span};
 use rucc_session::Std;
@@ -130,7 +131,8 @@ impl Token {
 pub struct Tokens {
     /// The tokens themselves, ending in one [`TokenKind::Eof`].
     pub tokens: Vec<Token>,
-    /// The integer constants, in the order they were converted.
+    /// The integer constants, in the order they were first converted. A spelling written
+    /// again is the same constant and points at the one already here.
     pub ints: Vec<IntConstant>,
     /// The floating constants, in the order they were converted.
     pub floats: Vec<FloatConstant>,
@@ -140,6 +142,9 @@ pub struct Tokens {
     pub strings: Vec<StringLiteral>,
     /// The `#pragma` lines, in the order they were written.
     pub pragmas: Vec<Pragma>,
+    /// Where each integer spelling's constant is in [`Tokens::ints`], so that a table of a
+    /// few hundred thousand numbers reads each of the few hundred it writes once.
+    seen: Map<Symbol, u32>,
 }
 
 /// One `#pragma` line, and where in the token stream it stood.
@@ -264,7 +269,8 @@ fn one(
     match token.kind {
         PpTokenKind::Ident => out.tokens.push(identifier(token, cx)),
         PpTokenKind::Number => {
-            out.tokens.push(number(token, cx, &mut out.ints, &mut out.floats, diagnostics));
+            let number = number(token, cx, out, diagnostics);
+            out.tokens.push(number);
         }
         PpTokenKind::CharConst => {
             out.tokens.push(char_const(token, cx, &mut out.chars, diagnostics));
@@ -376,10 +382,17 @@ fn identifier(token: PpToken, cx: &Convert<'_>) -> Token {
 fn number(
     token: PpToken,
     cx: &Convert<'_>,
-    ints: &mut Vec<IntConstant>,
-    floats: &mut Vec<FloatConstant>,
+    out: &mut Tokens,
     diagnostics: &mut Vec<Diagnostic>,
 ) -> Token {
+    // The same spelling is the same constant, so only what is said about it is done again,
+    // since that depends on where it was written.
+    if let Some(&index) = token.value.and_then(|symbol| out.seen.get(&symbol)) {
+        let remarks = out.ints[index as usize].remarks;
+        report(remarks, None, token.span, token.flags, cx, diagnostics);
+        return Token { kind: TokenKind::Int, flags: token.flags, value: index, span: token.span };
+    }
+    let Tokens { ints, floats, seen, .. } = out;
     let text = spelling(token, cx);
     // Which of the two it is, is the integer path's answer rather than a guess made here: the
     // grammars overlap at the front and only one of them can tell where the number stops.
@@ -388,6 +401,9 @@ fn number(
             report(value.remarks, None, token.span, token.flags, cx, diagnostics);
             ints.push(value);
             let index = u32::try_from(ints.len() - 1).expect("that many constants in one file");
+            if let Some(symbol) = token.value {
+                seen.insert(symbol, index);
+            }
             Token { kind: TokenKind::Int, flags: token.flags, value: index, span: token.span }
         }
         Err(IntError::Floating) => match crate::number::floating(text, cx.std, cx.target) {

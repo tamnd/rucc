@@ -120,6 +120,9 @@ pub struct Parser<'a> {
     /// declaration of its headers that uses it, so that `-std=c89 -pedantic` is quiet about them.
     /// A count rather than a flag because the expression form nests.
     pub(crate) extension: u32,
+    /// The tree's copy of each integer constant in the token stream, by its place there, so
+    /// that a constant the stream shares between tokens is one entry in the tree as well.
+    pub(crate) ints: Vec<Option<rucc_ast::IntId>>,
 }
 
 impl<'a> Parser<'a> {
@@ -135,7 +138,8 @@ impl<'a> Parser<'a> {
             tokens,
             scopes,
             errors: Errors::new(cx.error_limit),
-            ast: Ast::new(),
+            // About one expression for every two tokens, which is what a list of numbers is.
+            ast: Ast::with_capacity(tokens.tokens.len() / 2),
             cx,
             depth: 0,
             too_deep: false,
@@ -145,6 +149,7 @@ impl<'a> Parser<'a> {
             weak_pragmas: Vec::new(),
             extname_pragmas: Vec::new(),
             extension: 0,
+            ints: vec![None; tokens.ints.len()],
         }
     }
 

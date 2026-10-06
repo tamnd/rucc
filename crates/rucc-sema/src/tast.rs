@@ -212,6 +212,10 @@ pub struct Tast {
     decl_spans: Vec<Span>,
 
     consts: Vec<Const>,
+    /// Where each integer constant already is, so that writing the same one again is one entry.
+    /// A table of a few hundred thousand bytes is a few hundred thousand constants and a few
+    /// hundred values.
+    ints: Map<i128, ConstId>,
     strings: Vec<StringLiteral>,
     labels: Vec<Label>,
     vlas: Vec<ExprId>,
@@ -250,6 +254,17 @@ impl Tast {
     #[must_use]
     pub fn new() -> Tast {
         Tast::default()
+    }
+
+    /// An empty tree with room for this many expressions, for the same reason as the untyped
+    /// tree's `with_capacity`.
+    #[must_use]
+    pub fn with_capacity(exprs: usize) -> Tast {
+        Tast {
+            exprs: Vec::with_capacity(exprs),
+            expr_spans: Vec::with_capacity(exprs),
+            ..Tast::default()
+        }
     }
 
     /// The objects and functions of the translation unit, in the order they were declared.
@@ -793,10 +808,32 @@ node_table!(StmtId => Stmt, stmts);
 node_table!(DeclId => Decl, decls);
 node_table!(CaseId => Case, cases);
 
-side_table! {
+impl Tast {
     /// Adds a folded constant.
-    add_const, ConstId => Const, consts
+    ///
+    /// An integer is entered once and shared after that, since nothing writes to a constant
+    /// once it is in and two readers of the same value cannot tell they share it.
+    ///
+    /// # Panics
+    ///
+    /// Panics if the table would exceed four billion entries.
+    pub fn add_const(&mut self, item: Const) -> ConstId {
+        if let Const::Int(value) = item {
+            if let Some(&id) = self.ints.get(&value) {
+                return id;
+            }
+            let id = Idx::from_usize(self.consts.len());
+            self.consts.push(item);
+            self.ints.insert(value, id);
+            return id;
+        }
+        let id = Idx::from_usize(self.consts.len());
+        self.consts.push(item);
+        id
+    }
 }
+
+node_table!(ConstId => Const, consts);
 side_table! {
     /// Adds a string literal.
     add_string, StrId => StringLiteral, strings

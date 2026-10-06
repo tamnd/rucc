@@ -226,6 +226,35 @@ impl<'a> Cursor<'a> {
         Some((s.byte, s.clean))
     }
 
+    /// Advances over the plain ASCII letters, digits and underscores of an identifier or a
+    /// number, without asking the splice question of each one.
+    ///
+    /// None of those bytes is one phases 1 and 2 rewrite, so stepping over them in a loop on the
+    /// raw bytes lands on the same place [`bump`](Self::bump) would have, with nothing unclean
+    /// passed over. A number also takes `.`, and takes an exponent letter only when what follows
+    /// it is not a sign, a backslash, a question mark or a carriage return, since `1e+5` is one
+    /// token and the caller is the one that knows how. Anything else stops it and is the
+    /// caller's to look at.
+    #[inline]
+    pub(crate) fn skip_word(&mut self, number: bool) {
+        let src = self.src;
+        let mut p = self.pos as usize;
+        while let Some(&b) = src.get(p) {
+            let plain = match b {
+                b'e' | b'E' | b'p' | b'P' if number => {
+                    !matches!(src.get(p + 1), Some(b'+' | b'-' | b'\\' | b'?' | b'\r'))
+                }
+                b'.' => number,
+                _ => b.is_ascii_alphanumeric() || b == b'_',
+            };
+            if !plain {
+                break;
+            }
+            p += 1;
+        }
+        self.pos = p as u32;
+    }
+
     /// Advances over spaces and tabs, eight at a time, and says whether it moved.
     ///
     /// Safe to do in one jump because neither byte is one phases 1 and 2 have anything to say
