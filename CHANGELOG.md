@@ -4,6 +4,10 @@ All notable changes are recorded here. The format follows [Keep a Changelog](htt
 
 ## Unreleased
 
+## 0.26.0
+
+This release ends WA5 (#2867). rucc links wasm inside the process with the new crate `rucc-wasm-link`, which writes the same bytes as `wasm-ld` 23, and rucc.wasm installs its sysroot with its own gzip and tar readers. So rucc.wasm compiles and links the SQLite shell in Wasmtime and in a browser, and the shell gives the answers of the clang build. The `web/` page runs rucc in a browser, and `rucc-reactor` runs the driver many times in one instance. The release also has AArch64 assembler and code generation work for the arm64 kernel.
+
 ### Added
 
 - Reassociation reads through a shared `x + constant` leaf of a sum when `x` is subtracted elsewhere in the same sum (#3107). `end - p` with `end = (p + 4096) + 262144` also read by a loop stayed a subtraction, since each tree was already as small as it gets on its own, and the `BUILD_BUG_ON` in the i686 kernel's `setup_cpu_entry_area_ptes` failed the build. The difference is now the constant gcc sees.
