@@ -325,7 +325,8 @@ const EXPAND: [Plan; 1] = [[Shown::Expand, Shown::Reg, Shown::Reg]];
 ///
 /// The constant on the left is not the missing half of the tier. A comparison is not commutative,
 /// so `0 < x` is not `x < 0` with the operands swapped, it is `x > 0`, and turning the first into
-/// the second is a canonicalisation that belongs in tier three rather than four more rules here.
+/// the second is a canonicalisation, which tier three does. A comparison that comes in the other
+/// way round is turned round there and reaches the rules here on the next run of the pass.
 const COMPARE: [Plan; 2] =
     [[Shown::Reg, Shown::Const, Shown::Reg], [Shown::Expand, Shown::Const, Shown::Reg]];
 
@@ -353,8 +354,8 @@ const SELECT: [Plan; 3] = [
 /// Tier four after those two and tier three last, because a canonicalisation only makes a term
 /// easier for another rule to be about and there is no reason to reach for it while a rule that
 /// improves the code still fires. Nothing turns on the order of those last two anyway: tier three
-/// is about a commutative operation with a constant in it and tier four is about a conversion, so
-/// no instruction is one both have something to say about.
+/// is about a commutative operation or a comparison with a constant in it and tier four is about a
+/// conversion, so no instruction is one both have something to say about.
 ///
 /// The plans belong to the table rather than to the loop because a tier is written against them.
 /// Tier three is only correct under the one plan that refuses a constant on the right, and a
@@ -362,10 +363,12 @@ const SELECT: [Plan; 3] = [
 /// Tier four is the other way round: its rules mean nothing at all under a plan that does not
 /// expand, since the second level of every one of its patterns is an instruction.
 ///
-/// Tier five sits where it does because nothing turns on it either. It is the only table about a
-/// comparison and no other table mentions one, so there is no instruction two of them have
-/// something to say about and no order in which one of them gets there first. Tier six is the
-/// same: it is the only table about a select.
+/// Tier five sits where it does because nothing turns on it either. Tier three is the one other
+/// table about a comparison, and the two are about different comparisons: tier five wants the
+/// constant on the right and tier three only matches one with it on the left and something that
+/// is not a number on the right, so there is no instruction both have something to say about and
+/// no order in which one of them gets there first. Tier six is about a select, which no other
+/// table is.
 const TABLES: [(&Table, &[Plan]); 6] = [
     (&identities::TABLE, &IDENTITIES),
     (&strength::TABLE, &PLANS),
@@ -2114,8 +2117,8 @@ mod tests {
         );
         assert_eq!(
             canonical::TABLE.rules.len(),
-            20,
-            "tier three is five commutative operators at four widths"
+            60,
+            "tier three is five commutative operators and ten comparisons at four widths"
         );
         assert_eq!(
             width::TABLE.rules.len(),
@@ -2603,6 +2606,59 @@ mod tests {
         let args = operands(&func, returned(&func, block));
         assert_eq!(number(&func, args[0]), 3);
         assert_eq!(args[1], x);
+    }
+
+    /// A comparison with its constant on the left moves it to the right, at every width and under
+    /// every predicate, and the predicate turns round with it.
+    ///
+    /// Three because it is neither end of any width, so no rule in tier five has anything to say
+    /// about the comparison once it has turned round, and the only rule that fires is the one this
+    /// test is here for. The width of the constant is checked as well as its value, since the
+    /// result of a comparison is one bit and a constant built at that width would be a different
+    /// comparison.
+    #[test]
+    fn a_constant_on_the_left_of_a_comparison_moves_to_the_right_and_the_predicate_turns() {
+        use IntPred::{Eq, Ne, Sge, Sgt, Sle, Slt, Uge, Ugt, Ule, Ult};
+        for pred in [Eq, Ne, Slt, Sle, Sgt, Sge, Ult, Ule, Ugt, Uge] {
+            for width in [8, 16, 32, 64] {
+                let ty = Type::int(width);
+                let (_, mut func, block) = blank();
+                let x = func.append_param(block, ty);
+                let mut build = Builder::new(&mut func, block);
+                let three = build.iconst(ty, 3);
+                let test = build.icmp(pred, three, x);
+                build.ret(&[test]);
+                assert!(simplify(&mut func), "{pred:?} at i{width} was left alone");
+                let got = returned(&func, block);
+                assert_eq!(
+                    came_from(&func, got),
+                    (Opcode::ICmp, Extra::IntPred(pred.swapped())),
+                    "{pred:?} at i{width} did not turn round"
+                );
+                let args = operands(&func, got);
+                assert_eq!(args[0], x, "{pred:?} at i{width} kept the value on the right");
+                assert_eq!(number(&func, args[1]), 3, "{pred:?} at i{width} lost its constant");
+                assert_eq!(func[args[1]].ty, ty, "{pred:?} at i{width} has a constant too narrow");
+            }
+        }
+    }
+
+    /// And a comparison of two constants is left for folding, for the reason an operation on two
+    /// constants is.
+    #[test]
+    fn a_comparison_of_two_constants_is_not_turned_round() {
+        let i32 = Type::int(32);
+        let (_, mut func, block) = blank();
+        let mut build = Builder::new(&mut func, block);
+        let three = build.iconst(i32, 3);
+        let five = build.iconst(i32, 5);
+        let test = build.icmp(IntPred::Slt, three, five);
+        build.ret(&[test]);
+        assert!(
+            !simplify(&mut func),
+            "the constants were turned round rather than left to folding"
+        );
+        assert_eq!(came_from(&func, returned(&func, block)).1, Extra::IntPred(IntPred::Slt));
     }
 
     /// A block whose parameter and whose result are different widths, which is what every width
