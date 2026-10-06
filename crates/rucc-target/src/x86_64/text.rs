@@ -977,8 +977,14 @@ static TEXT: &[(&str, &[Written])] = &[
     ("lea_32", &[spell("leal", &[Mem, Reg(0, Long)])]),
     // Reading and writing memory. The width is the width of what is moved rather than of the
     // address, which is sixty four bits in every one of them.
-    ("mov_rm_8", &[spell("movb", &[Mem, Reg(0, Byte)])]),
-    ("mov_rm_16", &[spell("movw", &[Mem, Reg(0, Word)])]),
+    //
+    // A byte or a half word is read with a zero widening into the whole register, as gcc and
+    // clang read one. `movw 4(%rdi), %r12w` writes the low half of a register and keeps the rest,
+    // so the load waits on whatever was in `%r12` before it, and in a loop that is the last turn's
+    // value of something else (tamnd/rucc#1994). Nothing reads the bits above the value's width,
+    // so filling them with zeros changes no answer.
+    ("mov_rm_8", &[spell("movzbl", &[Mem, Reg(0, Long)])]),
+    ("mov_rm_16", &[spell("movzwl", &[Mem, Reg(0, Long)])]),
     ("mov_rm_32", &[spell("movl", &[Mem, Reg(0, Long)])]),
     ("mov_rm_64", &[spell("movq", &[Mem, Reg(0, Quad)])]),
     ("mov_mr_8", &[spell("movb", &[Reg(0, Byte), Mem])]),
