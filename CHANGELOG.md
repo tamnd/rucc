@@ -4,6 +4,10 @@ All notable changes are recorded here. The format follows [Keep a Changelog](htt
 
 ## Unreleased
 
+### Fixed
+
+- `cargo xtask builtins` and every other task that looks under `target` no longer overflows the stack when neither `CARGO_TARGET_DIR` nor `CARGO_BUILD_TARGET_DIR` is set. The fallback in 0.24.9 called itself instead of returning `target` under the root (#3077).
+
 ## 0.24.9
 
 On wasm, a copy or a fill whose length is zero no longer calls into the engine, and the address of a frame slot or of a global at an index goes in the offset field of the access, as clang writes it. This release also has the second pass of the inliner at `-O2`, the merge of a chain of branches on one value, and several x86 code quality changes.
