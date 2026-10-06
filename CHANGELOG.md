@@ -4,6 +4,10 @@ All notable changes are recorded here. The format follows [Keep a Changelog](htt
 
 ## Unreleased
 
+### Changed
+
+- On wasm at `-O1` and above, a load of 8 or 16 bits whose uses read it sign extended more often than zero extended is `i32.load8_s` or `i32.load16_s`, as clang writes it, and the `i32.extend8_s` or `i32.extend16_s` after it goes away (#2866). The SQLite shell has 528 such loads and is 673 bytes smaller.
+
 ## 0.24.6
 
 Spill slots for values put away around a call now share their bytes, which brings the Linux 7.2 frame that went past `FRAME_WARN` back under it. This release also has the `ipa-vrp` remarks, the short copies on wasm and the address folding in code motion.

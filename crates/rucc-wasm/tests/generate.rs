@@ -1900,3 +1900,76 @@ fn a_branch_on_a_false_compare_inverts_the_compare() {
     let find = body_of(FIND, "find", false);
     assert!(find.contains("\ti32.lt_s\n\tlocal.set\t3\n\tlocal.get\t3\n\ti32.eqz\n"), "{find}");
 }
+
+const SIGNED: &str = r#"; ModuleID = 't.c'
+; format 0
+target triple = "wasm32-unknown-wasip1"
+target datalayout = "e-p:32:32-i64:64-S128"
+
+func @widen(ptr) -> i32, linkage(external) {
+block0(%0: ptr):
+    %1 = load.i8 %0, align 1
+    %2 = sext.i32 %1
+    return %2
+}
+
+func @less(ptr, ptr) -> i32, linkage(external) {
+block0(%0: ptr, %1: ptr):
+    %2 = load.i16 %0, align 2
+    %3 = load.i16 %1, align 2
+    %4 = icmp slt %2, %3
+    %5 = zext.i32 %4
+    return %5
+}
+
+func @unsigned(ptr) -> i32, linkage(external) {
+block0(%0: ptr):
+    %1 = load.i8 %0, align 1
+    %2 = zext.i32 %1
+    return %2
+}
+
+func @main(i32, ptr) -> i32, linkage(external) {
+block0(%0: i32, %1: ptr):
+    %2 = alloca, size 1, align 1
+    %3 = iconst.i8 -2
+    store %3 -> %2, align 1
+    %4 = load.i8 %2, align 1
+    %5 = sext.i32 %4
+    %6 = iconst.i8 0
+    %7 = icmp slt %4, %6
+    %8 = zext.i32 %7
+    %9 = icmp eq %4, %3
+    %10 = zext.i32 %9
+    %11 = add %5, %8
+    %12 = add %11, %10
+    %13 = iconst.i32 10
+    %14 = add %12, %13
+    return %14
+}
+"#;
+
+/// A narrow load whose uses read it sign extended more often than zero extended is
+/// `i32.load8_s` or `i32.load16_s`, with no `i32.extend8_s` or `i32.extend16_s` after it, as clang
+/// writes it. A load that is only zero extended stays unsigned. In `main` the byte -2 is read
+/// signed twice and compared for equality once, so the load is signed and the equality masks it
+/// to 8 bits before it compares: -2 plus 1 plus 1 plus 10 is 10.
+#[test]
+fn a_narrow_load_that_is_read_signed_is_a_signed_load() {
+    let widen = body_of(SIGNED, "widen", true);
+    assert!(widen.contains("i32.load8_s\t0\n"), "{widen}");
+    assert!(!widen.contains("extend8_s"), "{widen}");
+    let less = body_of(SIGNED, "less", true);
+    assert_eq!(less.matches("i32.load16_s\t0\n").count(), 2, "{less}");
+    assert!(!less.contains("extend16_s"), "{less}");
+    let unsigned = body_of(SIGNED, "unsigned", true);
+    assert!(unsigned.contains("i32.load8_u\t0\n"), "{unsigned}");
+    let main = body_of(SIGNED, "__main_argc_argv", true);
+    assert!(main.contains("i32.load8_s"), "{main}");
+    assert!(main.contains("i32.const\t255\n\ti32.and\n"), "{main}");
+    let main = body_of(SIGNED, "__main_argc_argv", false);
+    assert!(main.contains("i32.load8_u"), "{main}");
+    if let Some(status) = link_and_run("signed", SIGNED) {
+        assert_eq!(status, 10);
+    }
+}
