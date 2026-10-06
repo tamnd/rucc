@@ -309,7 +309,22 @@ impl Job<'_> {
             };
         }
         let best = self.pick(low?, here, here)?;
-        (best != here).then_some((here, best))
+        (best != here && !self.turns_back(func, best, here)).then_some((here, best))
+    }
+
+    /// Whether `block` is a latch of the innermost loop `here` is in, with nothing in it but the
+    /// jump back to the header.
+    ///
+    /// A value moved down into it runs once fewer, on the turn that leaves the loop, and the latch
+    /// then has work in it and is a jump of its own on every turn. Left empty it goes, and the exit
+    /// test branches straight back to the header. tamnd/rucc#1994: `ivopts` steps a pointer in
+    /// front of the exit test so the loop goes round on one branch, and the step came back down
+    /// behind the test here.
+    fn turns_back(&self, func: &Func, block: Block, here: Block) -> bool {
+        let Some(id) = self.loops.innermost(here) else { return false };
+        self.loops.innermost(block) == Some(id)
+            && self.loops.latches(id).contains(&block)
+            && func.insts(block).all(|inst| Some(inst) == func.terminator(block))
     }
 
     /// The loops a move from `here` down to `best` passes without saving any work: none when `best`
@@ -653,6 +668,37 @@ block3(%6: i32):
 "#,
         );
         assert_eq!(block_of(&out, "mul"), "block1", "{out}");
+    }
+
+    /// A pointer stepped in front of a loop's exit test and passed back only by the latch stays in
+    /// front of the test, so the latch is the jump alone.
+    #[test]
+    fn a_step_only_the_latch_passes_back_stays_in_front_of_the_exit_test() {
+        let out = moved(
+            r#"
+func @f(ptr, i32, i32), linkage(external) {
+block0(%0: ptr, %1: i32, %2: i32):
+    jump block1(%0, %1)
+
+block1(%3: ptr, %4: i32):
+    %5 = iconst.i64 0
+    store %5 -> %3, align 8
+    %6 = iconst.i64 8
+    %7 = ptr_add %3, %6
+    %8 = iconst.i32 1
+    %9 = add %4, %8
+    %10 = icmp slt %9, %2
+    br_if %10, block2, block3
+
+block2:
+    jump block1(%7, %9)
+
+block3:
+    return
+}
+"#,
+        );
+        assert_eq!(block_of(&out, "ptr_add"), "block1", "{out}");
     }
 
     #[test]
