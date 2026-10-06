@@ -1756,12 +1756,36 @@ fn spread(byte: u8, width: u32) -> u64 {
 
 /// The address that far into a block, written in front of an instruction, or the block itself for
 /// the word at the front of it.
+///
+/// A block that is itself a constant distance past another pointer, as `&tuple->t_self` is, is
+/// stepped from that other pointer by the two distances added together. Stepped from the block, the
+/// block had a reader for every word and was worked out into a register for them to share, and
+/// Postgres' copy of an item pointer was two `lea` in front of four moves where gcc writes the four
+/// moves alone.
 fn stepped(func: &mut Func, inst: Inst, block: Value, at: u64) -> Value {
     if at == 0 {
         return block;
     }
-    let step = ahead_const(func, inst, Imm::int(i128::from(at), Type::int(64)), Type::int(64));
+    let (block, at) = match past(func, block) {
+        Some((pointer, by)) if i64::try_from(by + i128::from(at)).is_ok() => {
+            (pointer, by + i128::from(at))
+        }
+        _ => (block, i128::from(at)),
+    };
+    let step = ahead_const(func, inst, Imm::int(at, Type::int(64)), Type::int(64));
     ahead(func, inst, Opcode::PtrAdd, &[block, step], Type::PTR)
+}
+
+/// The pointer a value is a constant number of bytes past, and the number, where it is one.
+fn past(func: &Func, value: Value) -> Option<(Value, i128)> {
+    let Def::Result { inst, .. } = func[value].def else { return None };
+    if func[inst].opcode != Opcode::PtrAdd {
+        return None;
+    }
+    let &[pointer, by] = &func[func[inst].args] else { return None };
+    let Def::Result { inst: made, .. } = func[by].def else { return None };
+    let Extra::Imm(imm) = func[made].extra else { return None };
+    (func[made].opcode == Opcode::IConst).then(|| (pointer, func[imm].signed(func[by].ty)))
 }
 
 /// A load put in front of an instruction, and the value it reads.
@@ -2487,6 +2511,37 @@ mod tests {
         assert_eq!(plan(0), Some(vec![]));
         assert_eq!(plan(64).map(|plan| plan.len()), Some(8));
         assert_eq!(plan(65).map(|plan| plan.len()), Some(9));
+    }
+
+    /// `slot->tts_tid = tuple->t_self`, six bytes four past one pointer into six bytes forty eight
+    /// past another, on a machine that moves a word at any address. Each word is stepped from the
+    /// two pointers the program had rather than from the two fields, so nothing reads the fields'
+    /// addresses but the first word's move, and every move can carry its own displacement.
+    #[test]
+    fn a_copy_between_two_fields_steps_from_the_pointers_the_fields_are_in() {
+        let (mut names, mut func) = one(&[Type::PTR, Type::PTR], &[], |build, args| {
+            let four = build.iconst(Type::int(64), 4);
+            let from = build.binary(Opcode::PtrAdd, args[1], four, Flags::NONE);
+            let forty_eight = build.iconst(Type::int(64), 48);
+            let into = build.binary(Opcode::PtrAdd, args[0], forty_eight, Flags::NONE);
+            let mem = build.func().add_mem(access(6, 2));
+            let operands = build.func().push_values(&[into, from]);
+            let data = InstData {
+                args: operands,
+                extra: Extra::Mem(mem),
+                ..InstData::new(Opcode::Memcpy)
+            };
+            build.inst(data, &[]);
+            build.ret(&[]);
+        });
+        bulk(&mut func, &mut names, 8, true);
+        let text = printed(&func, &mut names);
+        assert!(!text.contains("memcpy"), "{text}");
+        let made = |number: &str| text.lines().any(|line| line.trim_end().ends_with(number));
+        assert!(made("iconst.i64 6"), "the source's second word is six past it: {text}");
+        assert!(made("iconst.i64 50"), "and the destination's is fifty: {text}");
+        assert_eq!(text.matches("ptr_add").count(), 4, "{text}");
+        valid(&func, &mut names);
     }
 
     /// A copy or a fill whose length the program works out, which carries the count as a third

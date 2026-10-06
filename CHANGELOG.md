@@ -4,6 +4,10 @@ All notable changes are recorded here. The format follows [Keep a Changelog](htt
 
 ## Unreleased
 
+### Changed
+
+- A structure copied between a field of one object and a field of another, such as Postgres' `slot->tts_tid = tuple->t_self`, steps each word it moves from the two pointers rather than from the two fields, so on x86-64 every move carries the field's offset and the two `lea` in front of them are gone, as gcc writes it (#1994).
+
 ## 0.26.0
 
 This release ends WA5 (#2867). rucc links wasm inside the process with the new crate `rucc-wasm-link`, which writes the same bytes as `wasm-ld` 23, and rucc.wasm installs its sysroot with its own gzip and tar readers. So rucc.wasm compiles and links the SQLite shell in Wasmtime and in a browser, and the shell gives the answers of the clang build. The `web/` page runs rucc in a browser, and `rucc-reactor` runs the driver many times in one instance. The release also has AArch64 assembler and code generation work for the arm64 kernel.
