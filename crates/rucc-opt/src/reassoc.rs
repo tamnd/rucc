@@ -188,6 +188,8 @@ struct Tree {
     leaves: Vec<(Value, bool)>,
     /// The instructions under the root that go when it does.
     interior: Vec<Inst>,
+    /// The constants taken out of the leaves [`through`] read through, folded into one.
+    offset: i128,
 }
 
 impl Tree {
@@ -228,13 +230,24 @@ impl Tree {
             stack.push((args[1], negated != flip));
             stack.push((args[0], negated));
         }
-        (!interior.is_empty()).then_some(Self { op, ty, leaves, interior })
+        let offset = if op == Op::Sum { through(func, ty, &mut leaves) } else { None };
+        (!interior.is_empty() || offset.is_some()).then(|| Self {
+            op,
+            ty,
+            leaves,
+            interior,
+            offset: offset.unwrap_or(0),
+        })
     }
 
     /// What the tree becomes, or nothing when it is already that.
     fn plan(&self, func: &Func, rank: &Map<Value, u64>) -> Option<Plan> {
         let mut constant = self.op.identity();
         let mut constants = 0;
+        if self.offset != 0 {
+            constant = self.op.fold(constant, self.offset);
+            constants += 1;
+        }
         let mut first: Vec<Value> = Vec::new();
         let mut times: Map<Value, i128> = Map::default();
         for &(value, negated) in &self.leaves {
@@ -349,6 +362,59 @@ impl Plan {
             None => constant(func, before, ty, self.constant),
         }
     }
+}
+
+/// Reads through a leaf of a sum that is another value plus a constant, when that value is
+/// subtracted where the leaf is added or the other way round, and answers the constants taken out.
+///
+/// The leaf is a leaf because something else reads it too, which is what a loop bound does to the
+/// end of a range: `end = (p + 4096) + 262144` is read by the loop and `end - p` by the check the
+/// kernel's `BUILD_BUG_ON` makes of it. Each tree on its own is already as small as it gets, so
+/// the difference stayed a subtraction and the check failed the build. Reading the leaf as `p`
+/// and the constant takes nothing from whoever else reads it and lets the two `p` cancel. Without
+/// something to cancel against the leaf is left as it was, since reading through it would only
+/// make the sum longer.
+fn through(func: &Func, ty: Type, leaves: &mut [(Value, bool)]) -> Option<i128> {
+    let based: Vec<(Value, i128)> =
+        leaves.iter().map(|&(value, _)| base(func, ty, value)).collect();
+    let mut offset = None;
+    for (at, &(root, k)) in based.iter().enumerate() {
+        let (value, negated) = leaves[at];
+        let cancels = based
+            .iter()
+            .zip(leaves.iter())
+            .any(|(&(other, _), &(_, sign))| other == root && sign != negated);
+        if root == value || !cancels {
+            continue;
+        }
+        leaves[at] = (root, negated);
+        let k = if negated { k.wrapping_neg() } else { k };
+        offset = Some(offset.unwrap_or(0i128).wrapping_add(k));
+    }
+    offset
+}
+
+/// The value under a chain of adds and subtracts of constants, and what the chain adds to it.
+fn base(func: &Func, ty: Type, mut value: Value) -> (Value, i128) {
+    let mut offset = 0i128;
+    // Deep enough for any chain the kernel writes and short enough not to matter.
+    for _ in 0..8 {
+        let Def::Result { inst, .. } = func[value].def else { break };
+        let data = &func[inst];
+        if func[value].ty != ty || !matches!(data.opcode, Opcode::Add | Opcode::Sub) {
+            break;
+        }
+        let args = &func[data.args];
+        let (next, k) = match (integer(func, args[0]), integer(func, args[1])) {
+            (_, Some(k)) if data.opcode == Opcode::Sub => (args[0], k.wrapping_neg()),
+            (_, Some(k)) => (args[0], k),
+            (Some(k), None) if data.opcode == Opcode::Add => (args[1], k),
+            _ => break,
+        };
+        value = next;
+        offset = offset.wrapping_add(k);
+    }
+    (value, offset)
 }
 
 /// The value of an integer constant, read with its own sign.
@@ -611,6 +677,56 @@ block0(%0: i32, %1: i32):
         );
         assert_eq!(count(&out, "or"), 0, "{out}");
         assert!(out.contains("iconst.i32 -1"), "{out}");
+    }
+
+    /// `end - p` with `end = (p + 4096) + 262144` read by a loop as well is the constant, and the
+    /// loop still has its `end`.
+    #[test]
+    fn a_shared_leaf_is_read_through_when_its_base_cancels() {
+        let out = cleaned(
+            r#"
+func @f(i32) -> i32, linkage(external) {
+block0(%0: i32):
+    %1 = iconst.i32 4096
+    %2 = add %0, %1
+    %3 = iconst.i32 262144
+    %4 = add %2, %3
+    %5 = sub %4, %0
+    jump block1(%0)
+
+block1(%6: i32):
+    %7 = iconst.i32 1
+    %8 = add %6, %7
+    %9 = icmp ult %8, %4
+    br_if %9, block1(%8), block2
+
+block2:
+    return %5
+}
+"#,
+        );
+        assert!(out.contains("iconst.i32 266240"), "{out}");
+        assert_eq!(count(&out, "sub"), 0, "{out}");
+        assert!(out.contains("return %"), "{out}");
+    }
+
+    /// Without the base on the other side the shared leaf stays a leaf.
+    #[test]
+    fn a_shared_leaf_without_a_base_to_cancel_stays() {
+        let body = r#"
+func @use(i32), linkage(external);
+
+func @f(i32, i32) -> i32, linkage(external) {
+block0(%0: i32, %1: i32):
+    %2 = iconst.i32 8
+    %3 = add %0, %2
+    call @use(%3) : (i32)
+    %4 = sub %3, %1
+    return %4
+}
+"#;
+        let out = cleaned(body);
+        assert!(out.contains("%4 = sub %3, %1"), "{out}");
     }
 
     #[test]
