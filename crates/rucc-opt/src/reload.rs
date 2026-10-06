@@ -373,8 +373,7 @@ impl Place {
             return Self::At(from, offset);
         }
         let (mut base, mut offset) = (address, 0i64);
-        loop {
-            let Def::Result { inst, .. } = func[base].def else { break };
+        while let Def::Result { inst, .. } = func[base].def {
             let data = func[inst];
             match data.opcode {
                 Opcode::PtrAdd => {
