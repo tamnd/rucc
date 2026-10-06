@@ -910,6 +910,14 @@ pub struct TargetInfo {
     /// The code generator writes a count that is not here out as arithmetic, so a pass that would
     /// put one where there was none reads this first. See [`CountInst`].
     pub counts: &'static [CountInst],
+    /// Whether the code generator lowers a `select` of a pointer, a `float` or a `double`, and not
+    /// only of an integer of 8, 16, 32 or 64 bits.
+    ///
+    /// True only on wasm, where one `select` instruction takes two operands of any number type and
+    /// a pointer is an `i32`. The native rule set names a `select` only at the four integer widths,
+    /// so there a choice between two pointers stays a branch. If-conversion reads this before it
+    /// writes a `select`, because a `select` that no rule lowers fails at instruction selection.
+    pub selects_any: bool,
 }
 
 /// The type a target's `__builtin_va_list` is.
@@ -1241,6 +1249,7 @@ impl TargetInfo {
                 tuple::Arch::Aarch64 => aarch64::COUNTS,
                 _ => &[],
             },
+            selects_any: matches!(target.arch(), tuple::Arch::Wasm32),
         }
     }
 

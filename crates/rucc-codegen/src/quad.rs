@@ -40,16 +40,16 @@
 //! further from the cause.
 //!
 //! A `select` of two quads used to be listed here as a third one, and it is not, because nothing in
-//! this compiler can build one. `select` is an integer instruction: [`rucc_opt::phiopt`] is the only
-//! pass that turns a choice into one and it asks for a scalar integer of eight to sixty four bits
-//! before it will, every other writer of one in the tree is choosing between integers, and the rule
-//! set answers it with a conditional move, which this machine has for a general purpose register and
-//! for nothing else. A conditional expression over two quads is a branch and a phi and stays one. So
-//! the refusal that named it was a guard against a shape no front end path and no pass produces, and
-//! saying it was left alone was describing a gap that is not there. If a float `select` is ever
-//! wanted, what decides it is the machine rather than this pass, since a quad lives in a vector
-//! register and there is no conditional move for one, so it would be a mask and two ands and an or
-//! rather than a call.
+//! this compiler can build one. `select` is an integer instruction: [`rucc_opt::phiopt`] is the
+//! only pass that turns a choice into one and it asks `rucc_opt::Machine::selects` before it will,
+//! which is false for a quad on every target, every other writer of one in the tree is choosing
+//! between integers, and the rule set answers it with a conditional move, which this machine has
+//! for a general purpose register and for nothing else. A conditional expression over two quads is
+//! a branch and a phi and stays one. So the refusal that named it was a guard against a shape no
+//! front end path and no pass produces, and saying it was left alone was describing a gap that is
+//! not there. If a float `select` is ever wanted, what decides it is the machine rather than this
+//! pass, since a quad lives in a vector register and there is no conditional move for one, so it
+//! would be a mask and two ands and an or rather than a call.
 //!
 //! A conversion against a `__int128` is not in that list and is not this pass's work either.
 //! [`crate::wide`] runs above here and turns one into a call to `__floattitf`, `__floatuntitf`,
