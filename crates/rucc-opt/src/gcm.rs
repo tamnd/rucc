@@ -433,7 +433,7 @@ impl Job<'_> {
         let now = self.pressure.most_in_loop(self.loops, id, class);
         let holds = u32::try_from(held.len()).unwrap_or(u32::MAX);
         let after = (now + holds).saturating_sub(freed);
-        if after < room.saturating_sub(heuristics::LOOP_RESERVED_REGS) {
+        if after < room.saturating_sub(rucc_cost::param!(heuristics::LOOP_RESERVED_REGS)) {
             return false;
         }
         let costs =
@@ -483,7 +483,7 @@ impl Job<'_> {
     /// Whether the loop the value would leave has no register to spare, and the value is not
     /// worth one.
     fn tight(&self, func: &Func, inst: Inst, here: Block, value: Value) -> bool {
-        if licm::cost(func, inst) >= heuristics::LICM_EXPENSIVE {
+        if licm::cost(func, inst) >= rucc_cost::param!(heuristics::LICM_EXPENSIVE) {
             return false;
         }
         let Some(id) = self.loops.innermost(here) else { return false };

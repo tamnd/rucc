@@ -659,7 +659,7 @@ fn shaped(
         }
     }
     let size = body.iter().map(|&block| func.insts(block).count()).sum::<usize>();
-    if size > heuristics::SPLIT_MAX_INSNS as usize {
+    if size > rucc_cost::param!(heuristics::SPLIT_MAX_INSNS) as usize {
         return Err(TOO_BIG);
     }
     Ok((preheader, *latch))
@@ -1206,7 +1206,7 @@ fn measured(
     if !writable(func, loops, id, at, &mut rebuild, &mut leaves, &mut seen) {
         return None;
     }
-    if rebuild.len() > heuristics::SPLIT_REMADE_INSNS {
+    if rebuild.len() > rucc_cost::param!(heuristics::SPLIT_REMADE_INSNS) {
         return None;
     }
     if !leaves.iter().all(|&leaf| carried(func, cfg, loops, id, latch, leaf)) {

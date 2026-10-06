@@ -102,7 +102,8 @@ impl Frequencies {
             }
             let Some(id) = heads(loops, block) else { continue };
             let again = cyclic[id.index()];
-            of[block.index()] = of[block.index()].repeated_while(again, MAX_PREDICTED_ITERATIONS);
+            of[block.index()] = of[block.index()]
+                .repeated_while(again, rucc_cost::param!(MAX_PREDICTED_ITERATIONS));
             capped[block.index()] = is_capped(again);
         }
 
@@ -174,9 +175,10 @@ impl Frequencies {
     /// unless it says otherwise.
     #[must_use]
     pub fn iterations(&self, id: LoopId) -> u32 {
-        let once = Frequency::ENTRY.repeated_while(self.cyclic(id), MAX_PREDICTED_ITERATIONS);
+        let once = Frequency::ENTRY
+            .repeated_while(self.cyclic(id), rucc_cost::param!(MAX_PREDICTED_ITERATIONS));
         let count = once.raw() / u64::from(Probability::SCALE);
-        u32::try_from(count).unwrap_or(MAX_PREDICTED_ITERATIONS)
+        u32::try_from(count).unwrap_or(rucc_cost::param!(MAX_PREDICTED_ITERATIONS))
     }
 
     /// The block that runs most often, and `None` for a function with no blocks.
@@ -227,7 +229,9 @@ impl Frequencies {
             let apart = here.raw().abs_diff(arriving.raw());
             // A percent of the block's own frequency, and on top of that one part for each edge,
             // because each edge divides by the scale once and loses the remainder.
-            let allowed = here.raw() / 100 * u64::from(PROFILE_SUM_TOLERANCE_PERCENT) + edges;
+            let allowed = here.raw() / 100
+                * u64::from(rucc_cost::param!(PROFILE_SUM_TOLERANCE_PERCENT))
+                + edges;
             if apart > allowed {
                 problems.push(format!(
                     "{block:?} runs at {here} and the paths into it add up to {arriving}"
@@ -275,8 +279,8 @@ fn cyclic_probabilities(cfg: &Cfg, loops: &Loops, told: &Predictions) -> Vec<Pro
                 continue;
             }
             let again = cyclic[inner.index()];
-            relative[block.index()] =
-                relative[block.index()].repeated_while(again, MAX_PREDICTED_ITERATIONS);
+            relative[block.index()] = relative[block.index()]
+                .repeated_while(again, rucc_cost::param!(MAX_PREDICTED_ITERATIONS));
         }
 
         let mut round = Frequency::NEVER;
@@ -318,7 +322,9 @@ fn edge(told: &Predictions, cfg: &Cfg, from: Block, to: Block) -> Probability {
 /// Whether a loop this likely to go round again is one the cap decided for.
 fn is_capped(again: Probability) -> bool {
     let stop = Probability::SCALE - again.parts().min(Probability::SCALE);
-    stop <= Probability::SCALE.div_ceil(MAX_PREDICTED_ITERATIONS)
+    // The cap is never under once, as in `repeated_while`, so a `--param` of nothing does not
+    // divide by it.
+    stop <= Probability::SCALE.div_ceil(rucc_cost::param!(MAX_PREDICTED_ITERATIONS).max(1))
 }
 
 #[cfg(test)]

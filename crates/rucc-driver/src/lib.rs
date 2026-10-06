@@ -93,6 +93,9 @@ pub enum Action {
     PrintConfig(Box<Options>),
     /// Print the passes the level will run and exit successfully.
     PrintPipeline(Box<Options>),
+    /// Print every constant `--param` can set, with the value it has after the ones the command
+    /// line set, and exit successfully.
+    PrintParams(Vec<String>),
     /// Print the phase plan and the link line and exit successfully, which is `-###`.
     PrintPlan {
         /// The resolved options, which is what says what the link line is for.
@@ -301,9 +304,9 @@ options:
   --target=<triple>      generate code for <triple>, as the names <triple>-rucc and <triple>-gcc do
   --emit=<kind>          exe, obj, archive, asm, preprocessed, tast, ir, mir-final,
                          wasm-tree, safety-summary, type-granules
-  --print-config, --print-pipeline    print the configuration or the pipeline, and exit
-  --version              print the version and exit
-  -h, --help             print this message and exit
+  --print-config, --print-pipeline, --print-params   print the setup, the passes or the thresholds
+  --param <name>=<value> set one of the optimizer's thresholds for this compilation
+  -h, --help, --version  print this message or the version, and exit
 
 See spec/04-driver-and-cli.md for the full flag reference.
 ";
@@ -711,6 +714,7 @@ pub fn parse_args(args: &[String]) -> Result<Action, CliError> {
     let mut inputs: Vec<Input> = Vec::new();
     let mut print_config = false;
     let mut print_pipeline = false;
+    let mut print_params = false;
     let mut print_plan = false;
     let mut verbose = false;
     let mut jobs = Jobs::default();
@@ -917,6 +921,22 @@ pub fn parse_args(args: &[String]) -> Result<Action, CliError> {
             }
             "--print-config" => print_config = true,
             "--print-pipeline" => print_pipeline = true,
+            "--print-params" => print_params = true,
+            // gcc's spelling, both with the setting as the next argument and after an `=`. The
+            // name is checked here rather than when the passes read it, so that a misspelled one
+            // is an error and not a run that measured the default and said it measured something
+            // else.
+            "--param" => {
+                let spec = args.get(i).ok_or_else(|| err("--param requires name=value"))?.clone();
+                i += 1;
+                rucc_cost::heuristics::Param::new(&spec).map_err(|e| err(e.to_string()))?;
+                opts.params.push(spec);
+            }
+            _ if arg.starts_with("--param=") => {
+                let spec = &arg["--param=".len()..];
+                rucc_cost::heuristics::Param::new(spec).map_err(|e| err(e.to_string()))?;
+                opts.params.push(spec.to_owned());
+            }
             "-###" => print_plan = true,
             "-v" => verbose = true,
             // The files a compilation goes through, kept rather than thrown away. The bare
@@ -3439,6 +3459,9 @@ pub fn parse_args(args: &[String]) -> Result<Action, CliError> {
     if print_pipeline {
         return Ok(Action::PrintPipeline(Box::new(opts)));
     }
+    if print_params {
+        return Ok(Action::PrintParams(opts.params));
+    }
     let plan = Plan::new(&opts, &inputs, output.as_deref()).map_err(|e| err(e.message))?;
     if print_plan {
         return Ok(Action::PrintPlan {
@@ -4959,6 +4982,21 @@ fn emit(text: &str) {
     let _ = host::stdout().write_all(text.as_bytes());
 }
 
+/// Sets what `--param` said, before anything reads it.
+///
+/// The values are the process's and not the compilation's, since the passes that read them run on
+/// as many threads as `-j` asks for, so a command line with no `--param` leaves every one where the
+/// last command line in this process put it. The binary runs one command line, and the tests that
+/// set one run the binary.
+fn set_params(params: &[String]) {
+    for spec in params {
+        match rucc_cost::heuristics::Param::new(spec) {
+            Ok(param) => param.set(),
+            Err(_) => unreachable!("--param {spec} was checked when the arguments were read"),
+        }
+    }
+}
+
 /// Runs the driver and returns the process exit code.
 ///
 /// `args` excludes the program name. Output goes to `stdout` and errors to `stderr`, which
@@ -4979,6 +5017,11 @@ pub fn run(args: &[String]) -> i32 {
         }
         Ok(Action::PrintPipeline(opts)) => {
             emit(&print_pipeline(&opts));
+            0
+        }
+        Ok(Action::PrintParams(params)) => {
+            set_params(&params);
+            emit(&rucc_cost::heuristics::listing());
             0
         }
         Ok(Action::PrintPlan { opts, plan, link }) => {
@@ -5010,6 +5053,7 @@ pub fn run(args: &[String]) -> i32 {
             pinned.then_some(&rucc_sysroot::PINNED_BUILD),
         ),
         Ok(Action::Compile { opts, plan, link, jobs, verbose, notes }) => {
+            set_params(&opts.params);
             {
                 let mut stderr = host::stderr();
                 // Before the plan rather than after it, because a note is about the command line
@@ -9193,7 +9237,9 @@ mod tests {
         // knowing it is there. The one it went up by last is the wasm features and the execution
         // model, which pick what a wasm module may use and whether it is a command or a reactor,
         // and which could not share the machine line above them because that line is already
-        // full and asks a different question.
+        // full and asks a different question. The one it went up by last is `--param`, which is
+        // how an experiment moves a threshold without a build, and it took the line `--version`
+        // had by putting that beside `--help`.
         assert!(USAGE.lines().count() < 75, "usage text has grown past one screen");
     }
 

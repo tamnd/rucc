@@ -17,12 +17,23 @@
 //! the three the documents said would have to be measured and have not been. They are not hidden
 //! behind a plausible number. A report can print them, and [`ALL`] exists so that it can.
 //!
+//! # Moving one without a build
+//!
+//! Section 42.5's experiments change a constant and measure what moved, and a `const` can only
+//! change with a build. So a pass does not read the `const` bare but through
+//! [`param!`](crate::param), and `--param name=value` on the command line can set any row of
+//! [`ALL`] for one compilation. The name is the row's own in lower case with dashes, and gcc's where the row names
+//! a gcc parameter, so `--param max-inline-insns-auto=30` means what it means to gcc. With no
+//! `--param` every read is the `const`, and nothing about the output changes.
+//!
 //! # What is not here
 //!
 //! Anything that varies by target. How many operations a machine issues at once, what a mispredict
 //! costs it, and how narrow a store it is willing to do are facts about hardware and live in that
 //! target's [`crate::CostTable`]. The line is whether a second target would want a different
 //! number for a reason that is about the machine rather than about taste.
+
+use std::sync::atomic::{AtomicI64, Ordering};
 
 use crate::Cycles;
 
@@ -895,6 +906,14 @@ pub const ALL: &[Constant] = &[
         provenance: Provenance::Chosen,
     },
     Constant {
+        name: "PHIOPT_FACTOR_DEPTH",
+        value: 4,
+        unit: "levels of shared operations",
+        document: "22.2",
+        gcc: "",
+        provenance: Provenance::Chosen,
+    },
+    Constant {
         name: "PHIOPT_ARM_SCAN_INSTRUCTIONS",
         value: 16,
         unit: "instructions per arm",
@@ -1311,6 +1330,22 @@ pub const ALL: &[Constant] = &[
         provenance: Provenance::Gcc,
     },
     Constant {
+        name: "SPLIT_MAX_INSNS",
+        value: 200,
+        unit: "instructions",
+        document: "7.4 of spec/safe-memory/07-check-elimination.md",
+        gcc: "loop-versioning-max-inner-insns",
+        provenance: Provenance::Gcc,
+    },
+    Constant {
+        name: "SPLIT_REMADE_INSNS",
+        value: 8,
+        unit: "instructions",
+        document: "7.4 of spec/safe-memory/07-check-elimination.md",
+        gcc: "",
+        provenance: Provenance::Measured,
+    },
+    Constant {
         name: "UNROLL_MAX_DEPTH",
         value: 8,
         unit: "loops",
@@ -1423,6 +1458,14 @@ pub const ALL: &[Constant] = &[
         provenance: Provenance::Measured,
     },
     Constant {
+        name: "SWITCH_PEEL_PERCENT",
+        value: 66,
+        unit: "percent",
+        document: "24.5",
+        gcc: "",
+        provenance: Provenance::Chosen,
+    },
+    Constant {
         name: "WASM_JUMP_TABLE_MIN_TARGETS",
         value: 24,
         unit: "case targets",
@@ -1512,11 +1555,269 @@ pub const ALL: &[Constant] = &[
     },
 ];
 
+/// What a slot of [`SET`] holds when `--param` did not set its constant.
+const UNSET: i64 = i64::MIN;
+
+/// What `--param` set, one slot for each row of [`ALL`] in the same order.
+///
+/// A slot is written while the command line is read, before any pass runs, and read by every pass
+/// after that, from more than one thread when the driver compiles in parallel. Nothing orders one
+/// slot against another, so a relaxed load is all a read needs.
+static SET: [AtomicI64; ALL.len()] = [const { AtomicI64::new(UNSET) }; ALL.len()];
+
+/// Where the constant called `name` is in [`ALL`].
+///
+/// [`param!`](crate::param) runs this while the compiler is built, so a name that is not in the
+/// table stops the build rather than reading a default nobody can move.
+///
+/// # Panics
+///
+/// When `name` is not a row of [`ALL`], which at compile time is an error at the read.
+#[must_use]
+pub const fn at(name: &str) -> usize {
+    let mut i = 0;
+    while i < ALL.len() {
+        if same(ALL[i].name.as_bytes(), name.as_bytes()) {
+            return i;
+        }
+        i += 1;
+    }
+    panic!("not the name of a constant in heuristics::ALL");
+}
+
+/// Whether two names are the same, which `==` on strings cannot answer in a `const fn`.
+const fn same(a: &[u8], b: &[u8]) -> bool {
+    if a.len() != b.len() {
+        return false;
+    }
+    let mut i = 0;
+    while i < a.len() {
+        if a[i] != b[i] {
+            return false;
+        }
+        i += 1;
+    }
+    true
+}
+
+/// A type a constant here has, and how it goes to the number in [`Constant::value`] and back.
+pub trait Knob: Copy {
+    /// The number the table holds for this value.
+    fn value(self) -> i64;
+    /// The value for a number `--param` gave, which [`Param::new`] has already checked fits.
+    fn from_value(value: i64) -> Self;
+}
+
+impl Knob for u32 {
+    fn value(self) -> i64 {
+        i64::from(self)
+    }
+
+    fn from_value(value: i64) -> Self {
+        Self::try_from(value).unwrap_or(Self::MAX)
+    }
+}
+
+impl Knob for usize {
+    fn value(self) -> i64 {
+        i64::try_from(self).unwrap_or(i64::MAX)
+    }
+
+    fn from_value(value: i64) -> Self {
+        Self::try_from(value).unwrap_or(Self::MAX)
+    }
+}
+
+impl Knob for Cycles {
+    /// The table holds a cost in whole operations, which is what the first two rows say.
+    fn value(self) -> i64 {
+        self.raw() / Self::insns(1).raw()
+    }
+
+    fn from_value(value: i64) -> Self {
+        Self::insns(value)
+    }
+}
+
+/// The constant in row `at` of [`ALL`] as `--param` left it, which is `default` unless it set it.
+///
+/// What [`param!`](crate::param) expands to. A debug build checks that `default` is the value the
+/// row says, at every read a test reaches, which is the check
+/// `the_table_matches_the_constants_it_describes` could only make by hand for a few of them.
+#[must_use]
+pub fn read<K: Knob>(at: usize, default: K) -> K {
+    debug_assert_eq!(
+        default.value(),
+        ALL[at].value,
+        "{} is not the value heuristics::ALL gives it",
+        ALL[at].name
+    );
+    match SET[at].load(Ordering::Relaxed) {
+        UNSET => default,
+        value => K::from_value(value),
+    }
+}
+
+/// The name `--param` takes for a constant whatever gcc calls it, which is its own in lower case
+/// with dashes, so `INLINE_EARLY_INSNS` is `inline-early-insns`.
+#[must_use]
+pub fn param_name(constant: &Constant) -> String {
+    constant.name.to_ascii_lowercase().replace('_', "-")
+}
+
+/// The gcc parameter a constant is, when [`Constant::gcc`] names one rather than a macro or a
+/// place in gcc's source.
+///
+/// `max-inline-insns-auto` is one as it stands, `param_max_completely_peel_times` is gcc's
+/// variable for `max-completely-peel-times`, and `inline-min-speedup at -O3` is the same parameter
+/// as the row for the other levels. `MOVE_RATIO` and `overall_growth in edge_badness` are not
+/// parameters, and `--param` does not take them.
+#[must_use]
+pub fn gcc_param(constant: &Constant) -> Option<String> {
+    let gcc = constant.gcc.strip_suffix(" at -O3").unwrap_or(constant.gcc);
+    let gcc =
+        gcc.strip_prefix("param_").map_or_else(|| gcc.to_owned(), |rest| rest.replace('_', "-"));
+    let word = gcc.contains('-') && gcc.bytes().all(|b| b.is_ascii_alphanumeric() || b == b'-');
+    word.then_some(gcc)
+}
+
+/// One `--param name=value`, read and checked but not yet set.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Param {
+    /// The rows of [`ALL`] the name names. A gcc parameter can be more than one, since gcc has one
+    /// parameter where the table has a row for `-O3` or for `-fconserve-stack` beside it, and
+    /// setting it on the command line sets it at every level, as it does with gcc.
+    rows: Vec<usize>,
+    /// What they are set to.
+    value: i64,
+}
+
+/// Why a `--param` was refused.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ParamError {
+    /// It was not `name=value`.
+    Form,
+    /// No row of [`ALL`] goes by the name.
+    Unknown(String),
+    /// The value is not a whole number from zero to `u32::MAX`.
+    Value(String),
+}
+
+impl std::fmt::Display for ParamError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Form => f.write_str("--param takes name=value"),
+            Self::Unknown(name) => {
+                let mut known: Vec<String> = ALL.iter().map(param_name).collect();
+                known.extend(ALL.iter().filter_map(gcc_param));
+                known.sort_unstable();
+                known.dedup();
+                write!(
+                    f,
+                    "unknown --param name `{name}`, and the names rucc knows are {}",
+                    known.join(", ")
+                )
+            }
+            Self::Value(value) => {
+                write!(f, "--param value `{value}` is not a whole number from 0 to {}", u32::MAX)
+            }
+        }
+    }
+}
+
+impl std::error::Error for ParamError {}
+
+impl Param {
+    /// Reads `name=value`, the part of `--param name=value` after the flag.
+    ///
+    /// # Errors
+    ///
+    /// When it is not `name=value`, when no row goes by the name, or when the value is not a whole
+    /// number that fits every type a constant here has.
+    pub fn new(spec: &str) -> Result<Self, ParamError> {
+        let (name, value) = spec.split_once('=').ok_or(ParamError::Form)?;
+        let number: i64 = value.parse().map_err(|_| ParamError::Value(value.to_owned()))?;
+        if !(0..=i64::from(u32::MAX)).contains(&number) {
+            return Err(ParamError::Value(value.to_owned()));
+        }
+        let rows: Vec<usize> = ALL
+            .iter()
+            .enumerate()
+            .filter(|(_, constant)| {
+                param_name(constant) == name || gcc_param(constant).as_deref() == Some(name)
+            })
+            .map(|(at, _)| at)
+            .collect();
+        if rows.is_empty() {
+            return Err(ParamError::Unknown(name.to_owned()));
+        }
+        Ok(Self { rows, value: number })
+    }
+
+    /// Sets the rows it names, for every read after this one.
+    pub fn set(&self) {
+        for &at in &self.rows {
+            SET[at].store(self.value, Ordering::Relaxed);
+        }
+    }
+}
+
+/// Every row of [`ALL`] as `--param` has left it, one to a line: the name `--param` takes, the
+/// value and its unit, and gcc's name for it where it has one.
+#[must_use]
+pub fn listing() -> String {
+    let mut out = String::new();
+    for (at, constant) in ALL.iter().enumerate() {
+        let value = match SET[at].load(Ordering::Relaxed) {
+            UNSET => constant.value,
+            value => value,
+        };
+        let _ = std::fmt::Write::write_fmt(
+            &mut out,
+            format_args!("{} = {value} {}", param_name(constant), constant.unit),
+        );
+        if let Some(gcc) = gcc_param(constant) {
+            if gcc != param_name(constant) {
+                out.push_str(&format!(", gcc {gcc}"));
+            }
+        }
+        out.push('\n');
+    }
+    out
+}
+
+/// Reads a constant of [`heuristics`](crate::heuristics) as `--param` left it.
+///
+/// Every pass reads its thresholds through this rather than naming the `const` bare, so that the
+/// experiments of section 42.5 can move one without a build. The constant is named the way the
+/// caller would name it anyway, `param!(heuristics::LICM_EXPENSIVE)` where the module is imported
+/// and `param!(LICM_EXPENSIVE)` where the constant is. Its name is looked up in
+/// [`ALL`](crate::heuristics::ALL) while the compiler is built, so one that is not in the table
+/// does not build.
+#[macro_export]
+macro_rules! param {
+    (@ $name:ident, $default:expr) => {
+        $crate::heuristics::read(
+            const { $crate::heuristics::at(stringify!($name)) },
+            $default,
+        )
+    };
+    ($name:ident) => {
+        $crate::param!(@ $name, $name)
+    };
+    ($module:ident :: $name:ident) => {
+        $crate::param!(@ $name, $module::$name)
+    };
+    ($krate:ident :: $module:ident :: $name:ident) => {
+        $crate::param!(@ $name, $krate::$module::$name)
+    };
+}
+
 #[cfg(test)]
 mod tests {
     use super::{
-        ALL, BLOCK_COPY_MOVES_FOR_SIZE, BLOCK_COPY_MOVES_FOR_SPEED, BRANCH_COST_FOR_SIZE,
-        BRANCH_COST_PREDICTABLE, IF_CONVERSION_BUDGET_PREDICTABLE,
+        ALL, ALLOCATOR_DEGRADATION_PERCENT, BLOCK_COPY_MOVES_FOR_SIZE, BLOCK_COPY_MOVES_FOR_SPEED,
+        BRANCH_COST_FOR_SIZE, BRANCH_COST_PREDICTABLE, IF_CONVERSION_BUDGET_PREDICTABLE,
         IF_CONVERSION_BUDGET_UNPREDICTABLE, INLINE_FRAME_GROWTH_CONSERVE,
         INLINE_LARGE_FRAME_CONSERVE, JUMP_TABLE_MIN_TARGETS, JUMP_TABLE_MIN_TARGETS_FOR_SIZE,
         Provenance, WASM_JUMP_TABLE_MIN_TARGETS, WASM_JUMP_TABLE_MIN_TARGETS_FOR_SIZE,
@@ -1549,6 +1850,27 @@ mod tests {
             by_name("WASM_JUMP_TABLE_MIN_TARGETS_FOR_SIZE"),
             i64::from(WASM_JUMP_TABLE_MIN_TARGETS_FOR_SIZE)
         );
+    }
+
+    #[test]
+    fn every_constant_in_the_file_has_a_row() {
+        // A constant without one is a threshold `--param` cannot reach, and the read of it does
+        // not build, so this says which one it is before a pass that reads it is compiled.
+        let source = include_str!("heuristics.rs");
+        let mut constants = 0;
+        for line in source.lines() {
+            let Some(rest) = line.strip_prefix("pub const ") else { continue };
+            if rest.starts_with("fn ") {
+                continue;
+            }
+            let name = rest.split(':').next().unwrap_or_default();
+            if name == "ALL" {
+                continue;
+            }
+            constants += 1;
+            assert!(ALL.iter().any(|row| row.name == name), "{name} has no row in ALL");
+        }
+        assert_eq!(constants, ALL.len());
     }
 
     #[test]
@@ -1616,6 +1938,53 @@ mod tests {
                 "{} predicts at {} percent, which section 11.2 would not have kept",
                 constant.name,
                 constant.value
+            );
+        }
+    }
+
+    #[test]
+    fn a_param_sets_the_row_it_names_and_no_other() {
+        // `ALLOCATOR_DEGRADATION_PERCENT` because no pass reads it yet, so setting it here
+        // cannot change what another test running beside this one reads.
+        let at = super::at("ALLOCATOR_DEGRADATION_PERCENT");
+        assert_eq!(super::read(at, ALLOCATOR_DEGRADATION_PERCENT), 10);
+        super::Param::new("allocator-degradation-percent=25").expect("a row of the table").set();
+        assert_eq!(super::read(at, ALLOCATOR_DEGRADATION_PERCENT), 25);
+        assert!(super::listing().contains("allocator-degradation-percent = 25 percent\n"));
+        super::SET[at].store(super::UNSET, std::sync::atomic::Ordering::Relaxed);
+        assert_eq!(super::read(at, ALLOCATOR_DEGRADATION_PERCENT), 10);
+    }
+
+    #[test]
+    fn a_param_takes_gcc_s_name_and_sets_every_level_s_row() {
+        let both = super::Param::new("inline-heuristics-hint-percent=300").expect("gcc's name");
+        assert_eq!(
+            both.rows,
+            [super::at("INLINE_HINT_PERCENT"), super::at("INLINE_HINT_PERCENT_O3")]
+        );
+        let peel = super::Param::new("max-completely-peel-times=4").expect("gcc's name");
+        assert_eq!(peel.rows, [super::at("UNROLL_MAX_TIMES")]);
+        let own = super::Param::new("unroll-max-times=4").expect("the row's own name");
+        assert_eq!(own.rows, peel.rows);
+        // A macro of gcc's is not a parameter of gcc's.
+        assert!(super::Param::new("MOVE_RATIO=4").is_err());
+    }
+
+    #[test]
+    fn a_param_that_is_not_one_says_what_is() {
+        let error = super::Param::new("max-inline-insns-autoo=30").expect_err("a misspelling");
+        let said = error.to_string();
+        assert!(said.contains("`max-inline-insns-autoo`"), "{said}");
+        assert!(said.contains("max-inline-insns-auto,"), "{said}");
+        assert!(said.contains("inline-early-insns"), "{said}");
+        assert_eq!(super::Param::new("inline-early-insns"), Err(super::ParamError::Form));
+        for value in ["-1", "4294967296", "six", ""] {
+            assert!(
+                matches!(
+                    super::Param::new(&format!("inline-early-insns={value}")),
+                    Err(super::ParamError::Value(_))
+                ),
+                "{value}"
             );
         }
     }

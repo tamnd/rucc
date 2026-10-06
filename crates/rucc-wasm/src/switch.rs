@@ -22,8 +22,8 @@ use rucc_legalize::switch::{self, Rules};
 /// `switch` becomes a table. The word is 32 bits, which is the type of a `br_table` index.
 pub fn switches(module: &mut Module, goal: Goal, tables: bool) {
     let least = match goal {
-        Goal::Speed => WASM_JUMP_TABLE_MIN_TARGETS,
-        Goal::Size => WASM_JUMP_TABLE_MIN_TARGETS_FOR_SIZE,
+        Goal::Speed => rucc_cost::param!(WASM_JUMP_TABLE_MIN_TARGETS),
+        Goal::Size => rucc_cost::param!(WASM_JUMP_TABLE_MIN_TARGETS_FOR_SIZE),
     };
     let rules = Rules { least, checked: true, ..Rules::native(goal) };
     for id in module.funcs().collect::<Vec<_>>() {

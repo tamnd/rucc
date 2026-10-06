@@ -78,12 +78,25 @@ pub struct Second {
 }
 
 impl Second {
-    /// gcc's numbers at `-O2`.
-    pub const O2: Self =
-        Self { percent: INLINE_HINT_PERCENT, speedup: INLINE_MIN_SPEEDUP, constants: true };
+    /// gcc's numbers at `-O2`, with what `--param` set.
+    #[must_use]
+    pub fn o2() -> Self {
+        Self {
+            percent: rucc_cost::param!(INLINE_HINT_PERCENT),
+            speedup: rucc_cost::param!(INLINE_MIN_SPEEDUP),
+            constants: true,
+        }
+    }
+
     /// gcc's numbers at `-O3`, where a hint raises a limit further and a smaller speedup will do.
-    pub const O3: Self =
-        Self { percent: INLINE_HINT_PERCENT_O3, speedup: INLINE_MIN_SPEEDUP_O3, constants: true };
+    #[must_use]
+    pub fn o3() -> Self {
+        Self {
+            percent: rucc_cost::param!(INLINE_HINT_PERCENT_O3),
+            speedup: rucc_cost::param!(INLINE_MIN_SPEEDUP_O3),
+            constants: true,
+        }
+    }
 }
 
 /// What the first pass leaves the second about the calls it looked at.
@@ -243,8 +256,8 @@ pub(super) fn run(
     let unit: usize = sizes.values().sum();
     // gcc's `compute_max_insns`: the unit may grow by `inline-unit-growth` percent of itself, or of
     // `large-unit-insns` when it is smaller than that.
-    let floor = usize::try_from(LARGE_UNIT_INSNS).unwrap_or(usize::MAX);
-    let percent = usize::try_from(INLINE_UNIT_GROWTH).unwrap_or(0);
+    let floor = usize::try_from(rucc_cost::param!(LARGE_UNIT_INSNS)).unwrap_or(usize::MAX);
+    let percent = usize::try_from(rucc_cost::param!(INLINE_UNIT_GROWTH)).unwrap_or(0);
     let most = unit.max(floor) * (100 + percent) / 100;
     let mut heap = Heap {
         how,
@@ -461,7 +474,9 @@ impl Heap<'_> {
                 // What the first pass would have let through, past which it measured a cleaned up
                 // copy as well.
                 let plain = match kind {
-                    Kind::Auto => usize::try_from(INLINE_INSNS_AUTO).unwrap_or(0) + args,
+                    Kind::Auto => {
+                        usize::try_from(rucc_cost::param!(INLINE_INSNS_AUTO)).unwrap_or(0) + args
+                    }
                     _ => self.how.limit,
                 };
                 let mut passed: Vec<(Value, Imm, Type)> =
@@ -515,7 +530,7 @@ impl Heap<'_> {
         let spent = self.spent.get(&caller).copied().unwrap_or(0.0);
         // gcc's `eni_time_weights`: the call, a move for each argument and one for the result.
         let reads = usize::from(func[call].results > 0);
-        let call_time = f64::from(INLINE_CALL_TIME) + (args + reads) as f64;
+        let call_time = f64::from(rucc_cost::param!(INLINE_CALL_TIME)) + (args + reads) as f64;
         let saved = call_time + (time - copied).max(0.0);
         let removable = target.linkage == Linkage::Internal
             && !target.attrs.set.contains(AttrSet::USED)
@@ -529,7 +544,7 @@ impl Heap<'_> {
             && !hints.enables
             && removable
             && depth > 0
-            && size(caller) <= i64::from(LARGE_FUNCTION_INSNS)
+            && size(caller) <= i64::from(rucc_cost::param!(LARGE_FUNCTION_INSNS))
             && calls_to(func, target.name) >= count
         {
             Hints { enables: true, ..hints }
@@ -576,7 +591,8 @@ impl Heap<'_> {
             _ => {
                 let within = |hints: Hints| {
                     weighed.growth
-                        < i64::try_from(hints.limit(INLINE_INSNS_AUTO, percent)).unwrap_or(i64::MAX)
+                        < i64::try_from(hints.limit(rucc_cost::param!(INLINE_INSNS_AUTO), percent))
+                            .unwrap_or(i64::MAX)
                 };
                 within(weighed.hints)
                     || (!hinted && within(one) && weighed.speedup)
@@ -631,9 +647,10 @@ impl Heap<'_> {
         // larger of what it was and the callee, and no further.
         let theirs = self.sizes.get(&weighed.callee).copied().unwrap_or(0);
         let mut limit = self.original.get(&caller).copied().unwrap_or(0).max(theirs);
-        limit += limit * usize::try_from(LARGE_FUNCTION_GROWTH).unwrap_or(0) / 100;
+        limit +=
+            limit * usize::try_from(rucc_cost::param!(LARGE_FUNCTION_GROWTH)).unwrap_or(0) / 100;
         let after = self.sizes.get(&caller).copied().unwrap_or(0) + growth;
-        let large = usize::try_from(LARGE_FUNCTION_INSNS).unwrap_or(usize::MAX);
+        let large = usize::try_from(rucc_cost::param!(LARGE_FUNCTION_INSNS)).unwrap_or(usize::MAX);
         if after >= theirs && after > large && after > limit {
             return Some(InlineFailure::FunctionGrowth);
         }

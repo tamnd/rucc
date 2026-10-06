@@ -220,8 +220,10 @@ impl Rules {
     #[must_use]
     pub fn native(goal: Goal) -> Self {
         let (growth, least) = match goal {
-            Goal::Speed => (JUMP_TABLE_GROWTH, JUMP_TABLE_MIN_TARGETS),
-            Goal::Size => (JUMP_TABLE_GROWTH_FOR_SIZE, JUMP_TABLE_MIN_TARGETS_FOR_SIZE),
+            Goal::Speed => (JUMP_TABLE_GROWTH, rucc_cost::param!(JUMP_TABLE_MIN_TARGETS)),
+            Goal::Size => {
+                (JUMP_TABLE_GROWTH_FOR_SIZE, rucc_cost::param!(JUMP_TABLE_MIN_TARGETS_FOR_SIZE))
+            }
         };
         Rules { growth, least, leaf: LINEAR, checked: false }
     }
@@ -391,7 +393,7 @@ fn hottest(arms: &[BlockCall]) -> Option<usize> {
         .enumerate()
         .filter_map(|(at, call)| Some((at, call.hint.taken()?)))
         .max_by_key(|&(_, parts)| parts)?;
-    (parts >= SWITCH_PEEL_PERCENT * Hint::SCALE / 100).then_some(at)
+    (parts >= rucc_cost::param!(SWITCH_PEEL_PERCENT) * Hint::SCALE / 100).then_some(at)
 }
 
 /// One case tested on its own, with the hint on its arm, and the block the rest of the `switch` is

@@ -812,11 +812,11 @@ fn pieces(uses: &[(Inst, Use)], target: Target) -> Result<Vec<Piece>, &'static s
     }
     let bytes: u64 = pieces.iter().map(|piece| piece.size).sum();
     let most = if pieces.iter().all(|piece| piece.size >= WORD) {
-        SRA_MAX_WORD_PIECES
+        rucc_cost::param!(SRA_MAX_WORD_PIECES)
     } else {
-        SRA_MAX_PIECES
+        rucc_cost::param!(SRA_MAX_PIECES)
     };
-    if pieces.len() > most as usize || bytes > u64::from(SRA_MAX_BYTES) {
+    if pieces.len() > most as usize || bytes > u64::from(rucc_cost::param!(SRA_MAX_BYTES)) {
         return Err(TOO_BIG);
     }
     Ok(pieces)
@@ -850,7 +850,7 @@ fn fill(pieces: &mut Vec<Piece>, bulk: &[(u64, u64, bool)]) -> Result<(), &'stat
             }
             added.push(Piece { at, size, ty: integer(size) });
             at += size;
-            if pieces.len() + added.len() > SRA_MAX_PIECES as usize {
+            if pieces.len() + added.len() > rucc_cost::param!(SRA_MAX_PIECES) as usize {
                 return Err(TOO_BIG);
             }
         }

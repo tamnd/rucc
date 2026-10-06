@@ -97,7 +97,7 @@ const SHRINKS: f64 = -1.0e12;
 /// inline anywhere, so above the bound it goes on growing by one for every one.
 #[must_use]
 pub fn overall(growth: i64) -> f64 {
-    let bound = i64::from(INLINE_GROWTH_SQUARING_BOUND);
+    let bound = i64::from(crate::param!(INLINE_GROWTH_SQUARING_BOUND));
     if growth < bound { (growth * growth) as f64 } else { (growth + bound * bound - bound) as f64 }
 }
 
@@ -111,7 +111,7 @@ pub fn badness(call: &Call) -> f64 {
     let base = if call.growth <= 0 {
         SHRINKS + call.growth as f64
     } else if let Some(frequency) = call.frequency {
-        let frequency = frequency.clamp(1.0, f64::from(INLINE_FREQUENCY_CLAMP));
+        let frequency = frequency.clamp(1.0, most_frequent());
         // gcc takes a call that saves nothing as saving a little, so that it still has an order.
         let saved = if call.saved > 0.0 { call.saved } else { 1.0 / 256.0 };
         let mut denominator = call.growth as f64 * (call.caller + call.growth).max(1) as f64;
@@ -152,10 +152,16 @@ pub fn big_speedup(
     caller: f64,
     percent: u32,
 ) -> bool {
-    let frequency = frequency.clamp(1.0, f64::from(INLINE_FREQUENCY_CLAMP));
+    let frequency = frequency.clamp(1.0, most_frequent());
     let before = callee * frequency + caller;
     let after = ((specialized - call) * frequency + caller).max(1.0 / 256.0);
     (before - after) * 100.0 > before * f64::from(percent)
+}
+
+/// The most a frequency is believed, [`INLINE_FREQUENCY_CLAMP`] and never less than once, so that a
+/// `--param` of nothing does not put the clamp below its own floor.
+fn most_frequent() -> f64 {
+    f64::from(crate::param!(INLINE_FREQUENCY_CLAMP)).max(1.0)
 }
 
 /// A badness made better by a factor of two to the `shift`, which is gcc's `sreal::shift` toward

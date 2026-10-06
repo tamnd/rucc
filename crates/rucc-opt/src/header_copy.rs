@@ -103,17 +103,22 @@ pub struct HeaderCopy {
     /// What a `-f` flag spells.
     name: &'static str,
     /// How many instructions a header may hold and still be worth copying, which is
-    /// [`heuristics::LOOP_HEADER_INSNS_FOR_SPEED`] or the size one next to it.
-    budget: u32,
+    /// [`heuristics::LOOP_HEADER_INSNS_FOR_SPEED`] or the size one next to it. A function rather
+    /// than the number, because `--param` sets it after this was built.
+    budget: fn() -> u32,
 }
 
 /// The instance `-O1`, `-O2` and `-O3` run, at GCC's budget.
-pub static SPEED: HeaderCopy =
-    HeaderCopy { name: "header-copy", budget: heuristics::LOOP_HEADER_INSNS_FOR_SPEED };
+pub static SPEED: HeaderCopy = HeaderCopy {
+    name: "header-copy",
+    budget: || rucc_cost::param!(heuristics::LOOP_HEADER_INSNS_FOR_SPEED),
+};
 
 /// The instance `-Os` runs, at section 26.6's smaller one.
-pub static SIZE: HeaderCopy =
-    HeaderCopy { name: "header-copy-small", budget: heuristics::LOOP_HEADER_INSNS_FOR_SIZE };
+pub static SIZE: HeaderCopy = HeaderCopy {
+    name: "header-copy-small",
+    budget: || rucc_cost::param!(heuristics::LOOP_HEADER_INSNS_FOR_SIZE),
+};
 
 impl Pass for HeaderCopy {
     fn name(&self) -> &'static str {
@@ -292,7 +297,7 @@ impl HeaderCopy {
             return Err(SHAPE);
         }
         let insts: Vec<Inst> = func.insts(header).filter(|&inst| inst != term).collect();
-        if insts.len() > self.budget as usize {
+        if insts.len() > (self.budget)() as usize {
             return Err(TOO_BIG);
         }
         for &inst in &insts {

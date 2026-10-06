@@ -108,18 +108,18 @@ impl Predictor {
 
     /// The rate at which it was measured right, in percent, and fifty for no prediction at all.
     #[must_use]
-    pub const fn hit_rate(self) -> u32 {
+    pub fn hit_rate(self) -> u32 {
         match self {
-            Self::Expect => PREDICT_EXPECT,
-            Self::NeverReturns => PREDICT_NEVER_RETURNS,
-            Self::ColdCall => PREDICT_COLD_CALL,
-            Self::LoopExit => PREDICT_LOOP_EXIT_NOT_TAKEN,
-            Self::LoopGuard => PREDICT_LOOP_GUARD_TAKEN,
-            Self::PointerNotNull => PREDICT_POINTER_NOT_NULL,
-            Self::NegativeReturn => PREDICT_NEGATIVE_RETURN,
-            Self::NullReturn => PREDICT_NULL_RETURN,
-            Self::CallNotTaken => PREDICT_CALL_NOT_TAKEN,
-            Self::Continue => PREDICT_CONTINUE_TAKEN,
+            Self::Expect => rucc_cost::param!(PREDICT_EXPECT),
+            Self::NeverReturns => rucc_cost::param!(PREDICT_NEVER_RETURNS),
+            Self::ColdCall => rucc_cost::param!(PREDICT_COLD_CALL),
+            Self::LoopExit => rucc_cost::param!(PREDICT_LOOP_EXIT_NOT_TAKEN),
+            Self::LoopGuard => rucc_cost::param!(PREDICT_LOOP_GUARD_TAKEN),
+            Self::PointerNotNull => rucc_cost::param!(PREDICT_POINTER_NOT_NULL),
+            Self::NegativeReturn => rucc_cost::param!(PREDICT_NEGATIVE_RETURN),
+            Self::NullReturn => rucc_cost::param!(PREDICT_NULL_RETURN),
+            Self::CallNotTaken => rucc_cost::param!(PREDICT_CALL_NOT_TAKEN),
+            Self::Continue => rucc_cost::param!(PREDICT_CONTINUE_TAKEN),
             // Even, which is the absence of a prediction rather than one, and not a number
             // anybody would tune.
             Self::Nothing => 50,
@@ -291,12 +291,15 @@ fn branch(
 
     let gone = |at: Block| never_comes_back(func, callees, returns, at);
     if gone(first) != gone(second) {
-        return (toward(!gone(first), PREDICT_NEVER_RETURNS), Predictor::NeverReturns);
+        return (
+            toward(!gone(first), rucc_cost::param!(PREDICT_NEVER_RETURNS)),
+            Predictor::NeverReturns,
+        );
     }
 
     let cold = |at: Block| calls_named(func, at, |name| callees.is_cold(name));
     if cold(first) != cold(second) {
-        return (toward(!cold(first), PREDICT_COLD_CALL), Predictor::ColdCall);
+        return (toward(!cold(first), rucc_cost::param!(PREDICT_COLD_CALL)), Predictor::ColdCall);
     }
 
     let leaves = |at: Block| match loops.innermost(block) {
@@ -304,12 +307,18 @@ fn branch(
         None => false,
     };
     if leaves(first) != leaves(second) {
-        return (toward(!leaves(first), PREDICT_LOOP_EXIT_NOT_TAKEN), Predictor::LoopExit);
+        return (
+            toward(!leaves(first), rucc_cost::param!(PREDICT_LOOP_EXIT_NOT_TAKEN)),
+            Predictor::LoopExit,
+        );
     }
 
     let enters = |at: Block| enters_loop(cfg, loops, block, at);
     if enters(first) != enters(second) {
-        return (toward(enters(first), PREDICT_LOOP_GUARD_TAKEN), Predictor::LoopGuard);
+        return (
+            toward(enters(first), rucc_cost::param!(PREDICT_LOOP_GUARD_TAKEN)),
+            Predictor::LoopGuard,
+        );
     }
 
     if let Some(taken) = pointer_null(func, cond) {
@@ -319,21 +328,33 @@ fn branch(
     let gives = |at: Block| returns_constant(func, cfg, at);
     let negative = |at: Block| matches!(gives(at), Some(Returned::Negative));
     if negative(first) != negative(second) {
-        return (toward(!negative(first), PREDICT_NEGATIVE_RETURN), Predictor::NegativeReturn);
+        return (
+            toward(!negative(first), rucc_cost::param!(PREDICT_NEGATIVE_RETURN)),
+            Predictor::NegativeReturn,
+        );
     }
     let null = |at: Block| matches!(gives(at), Some(Returned::Null));
     if null(first) != null(second) {
-        return (toward(!null(first), PREDICT_NULL_RETURN), Predictor::NullReturn);
+        return (
+            toward(!null(first), rucc_cost::param!(PREDICT_NULL_RETURN)),
+            Predictor::NullReturn,
+        );
     }
 
     let calls = |at: Block| has_call(func, at);
     if calls(first) != calls(second) {
-        return (toward(!calls(first), PREDICT_CALL_NOT_TAKEN), Predictor::CallNotTaken);
+        return (
+            toward(!calls(first), rucc_cost::param!(PREDICT_CALL_NOT_TAKEN)),
+            Predictor::CallNotTaken,
+        );
     }
 
     let again = |at: Block| goes_round_again(loops, block, at);
     if again(first) != again(second) {
-        return (toward(again(first), PREDICT_CONTINUE_TAKEN), Predictor::Continue);
+        return (
+            toward(again(first), rucc_cost::param!(PREDICT_CONTINUE_TAKEN)),
+            Predictor::Continue,
+        );
     }
 
     (Probability::even(), Predictor::Nothing)
@@ -386,7 +407,9 @@ fn share(
         Predictor::Nothing
     } else {
         let budget = u64::from(
-            Probability::percent(PREDICT_NEVER_RETURNS, Quality::Guessed).complement().parts(),
+            Probability::percent(rucc_cost::param!(PREDICT_NEVER_RETURNS), Quality::Guessed)
+                .complement()
+                .parts(),
         );
         hand_out(budget, &weight, &gone, true, &mut parts);
         hand_out(whole - budget, &weight, &gone, false, &mut parts);
@@ -480,8 +503,8 @@ fn pointer_null(func: &Func, cond: Value) -> Option<Probability> {
         return None;
     }
     match pred {
-        IntPred::Eq => Some(toward(false, PREDICT_POINTER_NOT_NULL)),
-        IntPred::Ne => Some(toward(true, PREDICT_POINTER_NOT_NULL)),
+        IntPred::Eq => Some(toward(false, rucc_cost::param!(PREDICT_POINTER_NOT_NULL))),
+        IntPred::Ne => Some(toward(true, rucc_cost::param!(PREDICT_POINTER_NOT_NULL))),
         _ => None,
     }
 }
@@ -525,7 +548,7 @@ enum Returned {
 /// in front of the return, which is the shape the predictor was measured on.
 fn returns_constant(func: &Func, cfg: &Cfg, start: Block) -> Option<Returned> {
     let mut at = start;
-    for _ in 0..PREDICT_RETURN_BLOCKS {
+    for _ in 0..rucc_cost::param!(PREDICT_RETURN_BLOCKS) {
         let term = func.terminator(at)?;
         if func[term].opcode == Opcode::Return {
             let &value = func[func[term].args].first()?;

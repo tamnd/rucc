@@ -202,7 +202,8 @@ impl Probability {
         if !self.quality.is_measured() {
             return false;
         }
-        let margin = rucc_cost::heuristics::PREDICTABLE_BRANCH_PERCENT * (Self::SCALE / 100);
+        let margin = rucc_cost::param!(rucc_cost::heuristics::PREDICTABLE_BRANCH_PERCENT)
+            * (Self::SCALE / 100);
         self.parts <= margin || self.parts >= Self::SCALE - margin
     }
 }
@@ -357,7 +358,8 @@ impl Frequency {
         if entry.scaled == 0 {
             return false;
         }
-        self.scaled >= entry.scaled.div_ceil(u64::from(HOT_BLOCK_FRACTION))
+        let fraction = u64::from(rucc_cost::param!(HOT_BLOCK_FRACTION)).max(1);
+        self.scaled >= entry.scaled.div_ceil(fraction)
     }
 
     /// Whether this block is hot compared with the whole program.

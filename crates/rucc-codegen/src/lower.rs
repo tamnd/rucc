@@ -1353,9 +1353,9 @@ struct Decided {
 /// it was most of a compile at `-O0`.
 type Matched = Vec<Option<Option<(Plan, Match<Term>)>>>;
 
-/// How many other forms of one operand the selector shows the matcher, per
-/// [`heuristics::SELECT_FORMS`].
-const FORMS: usize = heuristics::SELECT_FORMS as usize;
+/// The most other forms of one operand the selector can be asked to show the matcher, which is
+/// where `--param select-forms` stops. It shows [`heuristics::SELECT_FORMS`] of them unless told.
+const MOST_FORMS: usize = 8;
 
 /// Whether an operand shown this way is one a match takes, so that the instruction computing it
 /// has nothing left to write once every reader has taken it.
@@ -8322,14 +8322,15 @@ impl<'a> Lowering<'a> {
     /// one that fires, and a form is only reached when nothing takes the extracted one.
     fn plans(&self, inst: Inst, refused: &Set<Value>) -> impl Iterator<Item = Plan> {
         let args = &self.source[self.source[inst].args];
-        let mut ways = [[Shown::Reg; 3 + FORMS]; MAX_ARGS];
+        let forms = (rucc_cost::param!(heuristics::SELECT_FORMS) as usize).min(MOST_FORMS);
+        let mut ways = [[Shown::Reg; 3 + MOST_FORMS]; MAX_ARGS];
         let mut counts = [1; MAX_ARGS];
         for (index, &arg) in args.iter().enumerate().take(MAX_ARGS) {
             let mut count = 0;
             if self.foldable(inst, arg, refused) {
                 ways[index][count] = Shown::Expand;
                 count += 1;
-                for form in (0..FORMS).zip(self.source.forms(arg)).map(|(form, _)| form) {
+                for form in (0..forms).zip(self.source.forms(arg)).map(|(form, _)| form) {
                     ways[index][count] = Shown::Form(u8::try_from(form).unwrap_or(u8::MAX));
                     count += 1;
                 }

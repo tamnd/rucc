@@ -177,7 +177,8 @@ impl Pressure {
     /// hoisted is now live across the loop and something else gets spilled to make room for it.
     #[must_use]
     pub fn is_tight(&self, loops: &Loops, id: LoopId, class: Class, allocatable: u32) -> bool {
-        self.most_in_loop(loops, id, class) >= allocatable.saturating_sub(LOOP_RESERVED_REGS)
+        self.most_in_loop(loops, id, class)
+            >= allocatable.saturating_sub(rucc_cost::param!(LOOP_RESERVED_REGS))
     }
 
     /// What is wrong with these numbers, which should be nothing.

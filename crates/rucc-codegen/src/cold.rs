@@ -206,7 +206,8 @@ fn behind_a_thread(
         }
         cfg.reaches(pred)
             && warm(pred)
-            && source.insts(pred).count() <= heuristics::JUMP_THREAD_DUPLICATION_INSNS as usize
+            && source.insts(pred).count()
+                <= rucc_cost::param!(heuristics::JUMP_THREAD_DUPLICATION_INSNS) as usize
             && thread::decided_towards(source, pred, arm, warm)
     })
 }

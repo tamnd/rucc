@@ -218,7 +218,7 @@ impl Walk<'_> {
             let mut ended = false;
             for inst in self.func.insts(block).skip(from) {
                 steps += 1;
-                if steps > DSE_WALK_LIMIT {
+                if steps > rucc_cost::param!(DSE_WALK_LIMIT) {
                     return Fate::TooFar;
                 }
                 if let Some(read) = self.read(store, inst, lo, hi) {

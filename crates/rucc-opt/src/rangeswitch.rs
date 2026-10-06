@@ -130,18 +130,22 @@ impl Plan {
             return None;
         }
         let top = max(func[value].ty);
-        let (cases, taken, default) = if values(&set) <= u128::from(RANGE_SWITCH_CASES) {
-            (set, then, otherwise)
-        } else {
-            let outside = complement(&set, top);
-            if values(&outside) > u128::from(RANGE_SWITCH_CASES) {
-                return None;
-            }
-            (outside, otherwise, then)
-        };
+        let (cases, taken, default) =
+            if values(&set) <= u128::from(rucc_cost::param!(RANGE_SWITCH_CASES)) {
+                (set, then, otherwise)
+            } else {
+                let outside = complement(&set, top);
+                if values(&outside) > u128::from(rucc_cost::param!(RANGE_SWITCH_CASES)) {
+                    return None;
+                }
+                (outside, otherwise, then)
+            };
         let (lo, hi) = (cases.first()?.0, cases.last()?.1);
         let one_word = hi - lo < 64; // not a threshold: one bit for each number in a `u64`.
-        if one_word || cases.len() < RANGE_TEST_BIT_INTERVALS || windows(&cases) >= cases.len() {
+        if one_word
+            || cases.len() < rucc_cost::param!(RANGE_TEST_BIT_INTERVALS)
+            || windows(&cases) >= cases.len()
+        {
             return None;
         }
         let cases = cases.iter().flat_map(|&(from, to)| from..=to).collect();

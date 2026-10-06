@@ -95,7 +95,12 @@ impl Pass for EGraph {
     }
 
     fn run(&self, func: &mut Func, an: &mut Analyses, fuel: &mut Fuel) -> Stats {
-        cons::build(func, an, fuel, Some(&mut Classes::new(heuristics::EGRAPH_NODES)))
+        cons::build(
+            func,
+            an,
+            fuel,
+            Some(&mut Classes::new(rucc_cost::param!(heuristics::EGRAPH_NODES))),
+        )
     }
 }
 

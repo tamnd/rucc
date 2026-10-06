@@ -106,8 +106,8 @@ static SPEED: LazyLock<CostTable> = LazyLock::new(|| {
         // A mispredict is about twenty cycles on every core in range, and it has been about twenty
         // cycles for fifteen years, because it is the length of the pipeline in front of execute.
         .mispredict_penalty(Cycles::insns(20))
-        .move_ratio(heuristics::BLOCK_COPY_MOVES_FOR_SPEED)
-        .clear_ratio(heuristics::BLOCK_COPY_MOVES_FOR_SPEED)
+        .move_ratio(crate::param!(heuristics::BLOCK_COPY_MOVES_FOR_SPEED))
+        .clear_ratio(crate::param!(heuristics::BLOCK_COPY_MOVES_FOR_SPEED))
         .cheapest_store(CHEAPEST_STORE)
         // Two independent integer chains, because the machine has four ALU ports and a
         // reassociated tree needs a register per branch of it. Four would use the ports and lose
@@ -158,18 +158,18 @@ static SIZE: LazyLock<CostTable> = LazyLock::new(|| {
         // rather than short, and an absent instruction is no bytes in either currency.
         .compare_zero(Cycles::ZERO)
         // Section 40.5's number, taken from the same place the speed table's is not.
-        .branch_cost(heuristics::BRANCH_COST_FOR_SIZE)
+        .branch_cost(crate::param!(heuristics::BRANCH_COST_FOR_SIZE))
         // Identical to the speed table, and it should be. How long the pipeline is does not depend
         // on which flag the compiler was invoked with, and section 40.13 asks only that the two
         // tables never disagree about what is possible, not that they disagree about everything.
         .mispredict_penalty(Cycles::insns(20))
-        .move_ratio(heuristics::BLOCK_COPY_MOVES_FOR_SIZE)
-        .clear_ratio(heuristics::BLOCK_COPY_MOVES_FOR_SIZE)
+        .move_ratio(crate::param!(heuristics::BLOCK_COPY_MOVES_FOR_SIZE))
+        .clear_ratio(crate::param!(heuristics::BLOCK_COPY_MOVES_FOR_SIZE))
         .cheapest_store(CHEAPEST_STORE)
         // No reassociation. A tree is the same instruction count as a chain, so it wins nothing
         // here, and it holds more values live, so it loses whatever the spills cost.
-        .reassoc_int(heuristics::REASSOC_WIDTH_UNTUNED)
-        .reassoc_fp(heuristics::REASSOC_WIDTH_UNTUNED)
+        .reassoc_int(crate::param!(heuristics::REASSOC_WIDTH_UNTUNED))
+        .reassoc_fp(crate::param!(heuristics::REASSOC_WIDTH_UNTUNED))
         .build()
 });
 
