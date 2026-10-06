@@ -634,6 +634,52 @@ jobs:
           node tests/web/run.mjs --reactor "$release/rucc_reactor.wasm" "$release/librucc_builtins.a" \
             "$HOME"/.cache/rucc/downloads/*/rucc-sysroot-wasm32-wasip1.tar.gz "$PWD/sqlite-autoconf-3530400"
 
+  # Rung 0 for wasm32-wasip2 and wasm32-wasip3 (#2868). The program of these targets is a component,
+  # which `wasm-component-ld` from wasi-sdk 34 links around `wasm-ld` from lld 23, as clang does.
+  # Each program runs under Wasmtime 49, and `wasm-tools validate` checks each object and each
+  # component. The WASI of Node runs core modules only, and the linker inside rucc writes no
+  # component, so neither is in this job.
+  wasi-components:
+    name: wasm32-wasip2 and wasm32-wasip3 rung 0
+    needs: quick
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v7.0.1
+      - uses: Swatinem/rust-cache@v2.9.2
+      - name: install lld, wasm-component-ld, Wasmtime and wasm-tools
+        run: |
+          set -euo pipefail
+          sudo .github/install-lld-wasi.sh 23
+          curl -sSfL -o wasm-component-ld.tar.gz https://github.com/bytecodealliance/wasm-component-ld/releases/download/v0.5.30/wasm-component-ld-v0.5.30-x86_64-linux.tar.gz
+          echo "fb07d7022859c3892a9243539910747a9c00870ba7abbfb69f22aaddc800f398  wasm-component-ld.tar.gz" | sha256sum -c -
+          tar -xzf wasm-component-ld.tar.gz
+          echo "$PWD/wasm-component-ld-v0.5.30-x86_64-linux" >> "$GITHUB_PATH"
+          curl -sSfL -o wasmtime.tar.xz https://github.com/bytecodealliance/wasmtime/releases/download/v49.0.1/wasmtime-v49.0.1-x86_64-linux.tar.xz
+          echo "c71f7e0d30a92e418f0d17db7c6d8f6664c1ad764340a1278678f4209deab534  wasmtime.tar.xz" | sha256sum -c -
+          tar -xJf wasmtime.tar.xz
+          echo "$PWD/wasmtime-v49.0.1-x86_64-linux" >> "$GITHUB_PATH"
+          curl -sSfL -o wasm-tools.tar.gz https://github.com/bytecodealliance/wasm-tools/releases/download/v1.261.0/wasm-tools-1.261.0-x86_64-linux.tar.gz
+          echo "ad62b2176037e93e1348cb65d6212d128ca9f097b63d155569f25215818ff7b1  wasm-tools.tar.gz" | sha256sum -c -
+          tar -xzf wasm-tools.tar.gz
+          echo "$PWD/wasm-tools-1.261.0-x86_64-linux" >> "$GITHUB_PATH"
+      - name: build rucc and the runtime for wasm32-wasip2 and wasm32-wasip3
+        run: |
+          cargo build --release --bin rucc
+          for target in wasm32-wasip2 wasm32-wasip3; do
+            cargo xtask builtins --target "$target"
+            ./target/release/rucc --fetch "$target"
+          done
+      - name: run rung 0 on wasm32-wasip2 under Wasmtime
+        env:
+          RUNNER: wasmtime run --dir=.
+          VALIDATE: wasm-tools validate
+        run: tests/rung0/run.sh "$PWD/target/release/rucc" wasm32-wasip2
+      - name: run rung 0 on wasm32-wasip3 under Wasmtime
+        env:
+          RUNNER: wasmtime run --dir=.
+          VALIDATE: wasm-tools validate
+        run: tests/rung0/run.sh "$PWD/target/release/rucc" wasm32-wasip3
+
   # The barriers and atomics PostgreSQL is built on, run on AArch64 hardware. The qemu job above
   # cannot do this, because an emulated machine is only ever as weak as the x86 host under it, and
   # most of what AArch64 is allowed to reorder x86 never does. Each litmus test in tests/litmus runs
@@ -1082,7 +1128,7 @@ jobs:
   ci:
     name: ci
     if: always()
-    needs: [quick, test, docs, solver, msrv, determinism, disasm, stubs, implib, wine, qemu, i686, wasm, litmus, windows, windows-i686, windows-objects, safety, accounting, audit, differential, abi-differential, postgres]
+    needs: [quick, test, docs, solver, msrv, determinism, disasm, stubs, implib, wine, qemu, i686, wasm, wasi-components, litmus, windows, windows-i686, windows-objects, safety, accounting, audit, differential, abi-differential, postgres]
     runs-on: ubuntu-24.04
     steps:
       - name: fail if anything upstream failed
