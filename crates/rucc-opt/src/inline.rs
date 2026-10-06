@@ -454,6 +454,7 @@ pub fn run(
             cold: &cold,
             elsewhere: &elsewhere,
             later,
+            sizes: RefCell::default(),
         };
         let mut state = Map::default();
         for id in module.funcs().collect::<Vec<FuncId>>() {
@@ -493,6 +494,7 @@ pub fn run(
             cold: &cold,
             elsewhere: &elsewhere,
             later: None,
+            sizes: RefCell::default(),
         };
         done.extend(heap::run(module, &how, &later, &own, second, pic));
     }
@@ -666,6 +668,33 @@ struct How<'a> {
     elsewhere: &'a Set<Symbol>,
     /// Where the calls left for the second pass are written down, when there is one.
     later: Option<&'a RefCell<heap::Later>>,
+    /// What [`specialized_size`] said, by callee, the constants it was given and whether it
+    /// weighed, so a body called from four hundred places with the same constants is copied and
+    /// folded once. A callee is settled before it is measured and nothing in a round changes it
+    /// after that, which is why the answer can be kept for the round.
+    sizes: RefCell<Map<(FuncId, Vec<(Value, Imm, Type)>, bool), usize>>,
+}
+
+impl How<'_> {
+    /// [`specialized_size`], worked out once for each callee and set of constants in a round.
+    fn specialized_size(
+        &self,
+        module: &Module,
+        callee: FuncId,
+        values: &Map<Value, (Imm, Type)>,
+        weighed: Option<&Interner>,
+    ) -> usize {
+        let mut passed: Vec<(Value, Imm, Type)> =
+            values.iter().map(|(&param, &(imm, ty))| (param, imm, ty)).collect();
+        passed.sort_unstable_by_key(|&(param, ..)| param);
+        let key = (callee, passed, weighed.is_some());
+        if let Some(&size) = self.sizes.borrow().get(&key) {
+            return size;
+        }
+        let size = specialized_size(&module[callee], values, weighed);
+        self.sizes.borrow_mut().insert(key, size);
+        size
+    }
 }
 
 /// How far inlining may grow a caller's frame, gcc's `large-stack-frame-growth` and
@@ -719,6 +748,10 @@ fn settle(
     // whose calls gcc never thinks of as hot, and it inlines a call that is not hot only when that
     // does not make the program larger.
     let cold = module[id].attrs.set.contains(AttrSet::COLD);
+    // Whether a splice can leave a call through a pointer that [`resolved`] makes direct, which
+    // takes an `always_inline` function to point at. Without one, walking the whole caller after
+    // every splice to look for such a call finds nothing.
+    let pointed = !optnone && how.wanted.values().any(|&(_, kind)| kind == Kind::Always);
     let mut calls: Vec<(Block, Inst, FuncId, Kind)> = {
         let func = &module[id];
         func.blocks()
@@ -838,7 +871,7 @@ fn settle(
         {
             let values = passed(&module[id], call, &module[callee]);
             let weighed = (kind == Kind::Auto).then_some(how.names);
-            large = large.min(specialized_size(&module[callee], &values, weighed));
+            large = large.min(how.specialized_size(module, callee, &values, weighed));
         }
         if large > most {
             // Left for the second pass to weigh with its hints, which says why if it refuses too.
@@ -856,16 +889,18 @@ fn settle(
             stats.missed(why(InlineFailure::Unlikely));
             continue;
         }
-        if kind != Kind::Always
-            && !fits(
-                own,
-                frame(&module[id], module.datalayout),
-                pool.growth(&module[callee], module.datalayout),
-                how.growth,
-            )
-        {
-            stats.missed(why(InlineFailure::Frame));
-            continue;
+        // The bound first, since `frame` runs the scalar replacement's analysis over the whole
+        // caller and a caller that takes hundreds of calls would run it once for each of them. The
+        // bound is never less than the frame, so a call that fits under it fits, and the frame is
+        // only worked out for the calls the bound cannot let through.
+        if kind != Kind::Always {
+            let body = pool.growth(&module[callee], module.datalayout);
+            if !fits(own, frame_bound(&module[id]), body, how.growth)
+                && !fits(own, frame(&module[id], module.datalayout), body, how.growth)
+            {
+                stats.missed(why(InlineFailure::Frame));
+                continue;
+            }
         }
         match splice(module, id, call, callee, how.convention, kind, &mut pool) {
             Ok(()) => {
@@ -875,7 +910,7 @@ fn settle(
                 // kernel's `__inline_bsearch` is given `patch_cmp` that way in `poke_int3_handler`,
                 // which is `noinstr`, and a call left out of line there is a call out of the
                 // section objtool holds it to.
-                if !optnone {
+                if pointed {
                     calls.extend(resolved(module, id, how, false, None));
                 }
                 // A loop the callee said must stay a loop is in the caller now, and the pass that
@@ -1556,6 +1591,20 @@ fn frame(func: &Func, layout: DataLayout) -> u64 {
         .flat_map(|block| func.insts(block))
         .filter(|&inst| func[inst].opcode == Opcode::Alloca && func[inst].args.is_empty())
         .filter(|&inst| !func[inst].first_result.is_some_and(|value| unread.contains(&value)))
+        .filter_map(|inst| match func[inst].extra {
+            Extra::Mem(mem) => Some(func[mem].size),
+            _ => None,
+        })
+        .sum()
+}
+
+/// Every byte of locals a body keeps, the ones [`frame`] leaves out as gone included, so never
+/// less than its frame. It is one walk with nothing to analyze, which is what makes it worth asking
+/// before [`frame`].
+fn frame_bound(func: &Func) -> u64 {
+    func.blocks()
+        .flat_map(|block| func.insts(block))
+        .filter(|&inst| func[inst].opcode == Opcode::Alloca && func[inst].args.is_empty())
         .filter_map(|inst| match func[inst].extra {
             Extra::Mem(mem) => Some(func[mem].size),
             _ => None,
@@ -2251,7 +2300,7 @@ fn copy(
         &[],
         span,
     );
-    crate::uses::substitute(func, &forward);
+    crate::uses::substitute_all(func, &forward);
     func.remove_inst(call);
     func.append_inst(block, jump);
 
