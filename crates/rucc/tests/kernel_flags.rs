@@ -68,11 +68,13 @@ fn a_flag_that_asks_for_what_happens_passes_the_probe() {
     assert!(cc_option(ARM64, "-mno-outline-atomics"));
     assert!(cc_option(ARM64, "-fzero-call-used-regs=used-gpr"));
     assert!(cc_option(ARM64, "-fzero-call-used-regs=all"));
+    assert!(cc_option(ARM64, "-mbranch-protection=pac-ret+leaf+bti"));
+    assert!(cc_option(ARM64, "-msign-return-address=all"));
 }
 
 #[test]
 fn a_flag_that_is_not_honored_fails_the_probe() {
-    assert!(!cc_option(ARM64, "-mbranch-protection=pac-ret+bti"));
+    assert!(!cc_option(ARM64, "-mstack-protector-guard=sysreg"));
     // And what gcc does not know either, which is what `cc-disable-warning` depends on.
     assert!(!cc_option(X86, "-Wthread-safety"));
     assert!(cc_option(X86, "-Wno-frame-address"));

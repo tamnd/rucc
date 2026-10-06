@@ -22,7 +22,8 @@
 use rucc_base::float::Format;
 use rucc_session::{GnucVersion, Math, MscVersion, OptLevel, Options, Pic, Std};
 use rucc_target::{
-    Arch, CodeModel, Env, Feature, Isa, ObjectFormat, Os, Preview, TargetInfo, Triple, wasm,
+    Arch, BranchProtection, CodeModel, Env, Feature, Isa, ObjectFormat, Os, Preview, SignReturn,
+    TargetInfo, Triple, wasm,
 };
 use rucc_tuple::{self as tuple};
 
@@ -161,6 +162,10 @@ pub struct Predef {
     /// On AArch64 it decides `__ARM_FP`, `__ARM_NEON` and the fused multiply add macros, which gcc
     /// leaves out under that flag. On x86-64 the extensions say the same thing, through `__SSE__`.
     pub vector: bool,
+    /// What `-mbranch-protection=` asked for, which decides `__ARM_FEATURE_BTI_DEFAULT` and
+    /// `__ARM_FEATURE_PAC_DEFAULT` on AArch64. The kernel's assembly reads both to write the same
+    /// note the compiler writes for C.
+    pub branch_protection: BranchProtection,
     /// Whether the file is assembly on its way to the assembler, `.S` or `-x assembler-with-cpp`.
     /// It defines `__ASSEMBLER__`, which every header that is also read from assembly tests to
     /// leave its C declarations out, and it takes away the macros that describe the C language
@@ -194,6 +199,7 @@ impl Predef {
             isa: Isa::baseline(),
             wasm: wasm::Cpu::default().features(),
             vector: true,
+            branch_protection: BranchProtection::default(),
             assembler: false,
         }
     }
@@ -229,6 +235,7 @@ impl Predef {
             isa: opts.isa,
             wasm: opts.wasm,
             vector: opts.vector,
+            branch_protection: opts.branch_protection,
             assembler: false,
         }
     }
@@ -640,6 +647,16 @@ fn platform(d: &mut Defs, target: &TargetInfo, opts: &Predef) {
             // before it includes `<arm_acle.h>`.
             if Feature::aarch64("crc").is_some_and(|crc| opts.isa.has(crc)) {
                 d.set("__ARM_FEATURE_CRC32", "1");
+            }
+            // What `-mbranch-protection=` asked for, as the ACLE spells it. The signing one is a
+            // set of bits: the A key is bit 0 and signing in leaf functions too is bit 2.
+            if opts.branch_protection.bti {
+                d.set("__ARM_FEATURE_BTI_DEFAULT", "1");
+            }
+            match opts.branch_protection.sign {
+                SignReturn::None => {}
+                SignReturn::NonLeaf => d.set("__ARM_FEATURE_PAC_DEFAULT", "1"),
+                SignReturn::All => d.set("__ARM_FEATURE_PAC_DEFAULT", "5"),
             }
         }
         Arch::Riscv64 => {
@@ -2590,6 +2607,20 @@ mod tests {
         }
         assert!(has(&text, "#define __ARM_FEATURE_IDIV 1"));
         assert!(has(&set_for("aarch64-unknown-linux-gnu"), "#define __ARM_NEON 1"));
+    }
+
+    #[test]
+    fn branch_protection_is_said_the_way_the_acle_says_it() {
+        let arm = TargetInfo::new("aarch64-unknown-linux-gnu".parse().expect("a triple"));
+        let plain = built_in(&arm, &Predef::new());
+        assert!(!plain.contains("__ARM_FEATURE_BTI_DEFAULT"));
+        assert!(!plain.contains("__ARM_FEATURE_PAC_DEFAULT"));
+        for (sign, pac) in [(SignReturn::NonLeaf, "1"), (SignReturn::All, "5")] {
+            let branch_protection = BranchProtection { sign, bti: true };
+            let text = built_in(&arm, &Predef { branch_protection, ..Predef::new() });
+            assert!(has(&text, "#define __ARM_FEATURE_BTI_DEFAULT 1"), "{text}");
+            assert!(has(&text, &format!("#define __ARM_FEATURE_PAC_DEFAULT {pac}")), "{text}");
+        }
     }
 
     #[test]

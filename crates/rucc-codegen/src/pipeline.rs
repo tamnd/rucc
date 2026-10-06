@@ -30,8 +30,9 @@ use rucc_ir as ir;
 use rucc_mir as mir;
 use rucc_regalloc::assign::Env;
 use rucc_target::{
-    BitInsts, BranchInsts, CallRegs, CodeModel, FlagInsts, FrameInsts, Isa, MachineInsts, PhysReg,
-    RegFile, ShortInsts, Speculation, TargetInfo, TimingInsts, aarch64, x86, x86_64,
+    BitInsts, BranchInsts, BranchProtection, CallRegs, CodeModel, FlagInsts, FrameInsts, Isa,
+    MachineInsts, PhysReg, RegFile, ShortInsts, Speculation, TargetInfo, TimingInsts, aarch64, x86,
+    x86_64,
 };
 use rucc_tuple::Arch;
 
@@ -444,6 +445,10 @@ pub struct Flags {
     /// and `full` ask for. With [`Self::landing`] it keeps a call that can come back by a jump
     /// from becoming one. See [`crate::tail::mark`].
     pub shadow_stack: bool,
+    /// What `-mbranch-protection=` asked for on AArch64: which functions sign their return
+    /// address, and whether every address an indirect branch may arrive at opens with a `bti`.
+    /// Nothing on a target without the instructions, which the driver refuses before this.
+    pub branch: BranchProtection,
     /// What the x86 speculation hardening flags ask of indirect branches and returns. See
     /// [`crate::thunks`].
     pub speculation: Speculation,
@@ -569,6 +574,7 @@ impl Default for Flags {
             stack_clash: false,
             landing: false,
             shadow_stack: false,
+            branch: BranchProtection::default(),
             manual_endbr: false,
             speculation: Speculation::default(),
             jump_tables: true,
@@ -772,7 +778,10 @@ pub fn compile_recording(
         let guarded = flags.landing
             && flags.shadow_stack
             && !source.attrs.set.contains(ir::AttrSet::INDIRECT_RETURN);
-        tail::mark(source, names, elsewhere, guarded);
+        // Under `bti` a jump through a register lands on the callee's `bti c` only from `x16` or
+        // `x17`, which nothing here keeps a callee in, so an indirect call stays a call.
+        let indirect = !flags.branch.bti;
+        tail::mark(source, names, elsewhere, guarded, indirect);
     }
     // Asked of the IR, where a call still says whom it calls. See [`tail::comes_back`].
     let alone = tail::comes_back(source, names, elsewhere);
@@ -988,7 +997,16 @@ pub fn compile_recording(
     // Nothing at all on a target with nothing that marks an address as one an indirect branch may
     // arrive at, which is the same answer the stack protector gives on a target with nowhere to
     // keep its word, and the driver refuses the command line over it before any of this runs.
-    let landing = flags.landing.then_some(machine.insts.landing).flatten();
+    //
+    // AArch64 has two of them where x86 has one: what a jump through a register may arrive at is
+    // `bti j` and what a call through one may is `bti c`, so this is the first and the entry pad
+    // below is the second.
+    let targets = machine.insts.targets.filter(|_| flags.branch.bti);
+    let landing = flags
+        .landing
+        .then_some(machine.insts.landing)
+        .flatten()
+        .or(targets.map(|targets| targets.jump));
     split::pads(&mut func, machine.insts, landing, names);
 
     // Before allocation, because an edge that carries values into a block arrived at more than
@@ -1199,7 +1217,10 @@ pub fn compile_recording(
     // under `-mmanual-endbr` out of every one that does not say `cf_check`. The pads at its
     // labels stay, since a computed `goto` is a different branch.
     let asked = !flags.manual_endbr || source.attrs.set.contains(ir::AttrSet::CF_CHECK);
-    let entry = landing.filter(|_| asked && !source.attrs.set.contains(ir::AttrSet::NOCF));
+    let entry = match targets {
+        Some(targets) => Some(targets.call),
+        None => landing.filter(|_| asked && !source.attrs.set.contains(ir::AttrSet::NOCF)),
+    };
     let convention = Convention {
         protect,
         probe,
@@ -1209,6 +1230,7 @@ pub fn compile_recording(
         // Only i386's bytes push anything. See `rucc_asm::hook`.
         hooked: source.attrs.set.contains(ir::AttrSet::MS_HOOK)
             && std::ptr::eq(machine.insts, &x86::FRAME),
+        sign: flags.branch.sign,
         ..Convention::new(machine.conv, machine.insts)
     };
     let moves = finish(&mut func, &allocation, &frame, &stack, convention, names);

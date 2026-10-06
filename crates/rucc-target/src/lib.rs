@@ -73,7 +73,9 @@ pub use crate::bits::BitInsts;
 pub use crate::branch::{BranchInsts, Fusion, Move};
 pub use crate::counts::{BitCount, CountInst};
 pub use crate::flags::{Compare, FlagInsts, Reader, Reads, Zeroing};
-pub use crate::frame::{ClassMoves, FrameInsts, Kept, Pair, Probe, SpillMove, Thunks};
+pub use crate::frame::{
+    ClassMoves, FrameInsts, Kept, Pair, Probe, Signing, SpillMove, Targets, Thunks,
+};
 pub use crate::isa::{Choices, Feature, Isa, Target, TargetRefusal};
 pub use crate::machine::{Address, MachineInsts};
 pub use crate::operand::{Constraint, OperandDesc, Role};
@@ -328,6 +330,105 @@ impl CodeModel {
             CodeModel::Kernel => "kernel",
             CodeModel::Tiny => "tiny",
         }
+    }
+}
+
+/// Which functions sign the return address they were called with, which is the `pac-ret` part of
+/// `-mbranch-protection=` and the whole of `-msign-return-address=`. AArch64 only.
+///
+/// A signed address is checked again just before the return, so one an overflow wrote over faults
+/// instead of being returned to. The signature goes in the bits above the address and is made from
+/// the address, the stack pointer and a key the program never sees.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default)]
+pub enum SignReturn {
+    /// No function signs it, which is the default.
+    #[default]
+    None,
+    /// The functions that save it to the stack, which is every one that calls something and every
+    /// one that keeps a frame record. A leaf keeps it in `x30` the whole time, where nothing can
+    /// write over it.
+    NonLeaf,
+    /// Every function, which is `+leaf`. What the arm64 kernel asks for.
+    All,
+}
+
+/// What `-mbranch-protection=` asks for on AArch64: which functions sign their return address, and
+/// whether every place an indirect branch may land opens with a `bti`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default)]
+pub struct BranchProtection {
+    /// Which functions sign their return address.
+    pub sign: SignReturn,
+    /// Whether a function opens with `bti c` and every label an indirect jump may reach with
+    /// `bti j`, so that a machine that checks branch targets faults on a jump anywhere else.
+    pub bti: bool,
+}
+
+impl SignReturn {
+    /// Parses the part after `-msign-return-address=`, which is `none`, `non-leaf` or `all`.
+    ///
+    /// # Errors
+    ///
+    /// Anything else, with the reason in words.
+    pub fn parse(s: &str) -> Result<Self, String> {
+        match s {
+            "none" => Ok(Self::None),
+            "non-leaf" => Ok(Self::NonLeaf),
+            "all" => Ok(Self::All),
+            _ => Err(format!(
+                "`{s}` is not a scope to sign return addresses in, which is none, \
+                 non-leaf or all"
+            )),
+        }
+    }
+}
+
+impl BranchProtection {
+    /// Parses the part after `-mbranch-protection=`, which is `none`, `standard`, or `pac-ret`
+    /// with `+leaf` after it and `bti`, joined with `+` in any order, as gcc reads it.
+    ///
+    /// # Errors
+    ///
+    /// The B key and the guarded control stack, which are not written yet, and anything gcc does
+    /// not know, with the reason in words.
+    pub fn parse(s: &str) -> Result<Self, String> {
+        match s {
+            "none" => return Ok(Self::default()),
+            "standard" => return Ok(Self { sign: SignReturn::NonLeaf, bti: true }),
+            _ => {}
+        }
+        let mut out = Self::default();
+        let mut leaf = false;
+        for part in s.split('+') {
+            match part {
+                "pac-ret" => out.sign = SignReturn::NonLeaf,
+                "leaf" => leaf = true,
+                "bti" => out.bti = true,
+                "b-key" | "gcs" => {
+                    return Err(format!(
+                        "`{part}` is not supported yet, only pac-ret, leaf and bti are"
+                    ));
+                }
+                _ => {
+                    return Err(format!(
+                        "`{s}` is not a branch protection, which is none, standard, or pac-ret, \
+                         leaf and bti joined with +"
+                    ));
+                }
+            }
+        }
+        if leaf {
+            if out.sign == SignReturn::None {
+                return Err(format!("`{s}` says leaf without pac-ret, which leaf is a part of"));
+            }
+            out.sign = SignReturn::All;
+        }
+        Ok(out)
+    }
+
+    /// Whether it asks for anything at all.
+    #[must_use]
+    pub fn any(self) -> bool {
+        self != Self::default()
     }
 }
 
@@ -1468,6 +1569,25 @@ fn va_list(target: TargetTuple) -> Option<VaList> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn branch_protection_reads_the_way_gcc_does() {
+        let read = |s: &str| BranchProtection::parse(s);
+        let sign = |sign, bti| Ok(BranchProtection { sign, bti });
+        assert_eq!(read("none"), sign(SignReturn::None, false));
+        assert_eq!(read("standard"), sign(SignReturn::NonLeaf, true));
+        assert_eq!(read("pac-ret"), sign(SignReturn::NonLeaf, false));
+        assert_eq!(read("pac-ret+leaf"), sign(SignReturn::All, false));
+        assert_eq!(read("pac-ret+leaf+bti"), sign(SignReturn::All, true));
+        assert_eq!(read("bti+pac-ret+leaf"), sign(SignReturn::All, true));
+        assert_eq!(read("bti"), sign(SignReturn::None, true));
+        assert!(read("pac-ret+b-key").unwrap_err().contains("b-key"));
+        assert!(read("leaf").unwrap_err().contains("without pac-ret"));
+        assert!(read("pac-ret+").is_err());
+        assert_eq!(SignReturn::parse("non-leaf"), Ok(SignReturn::NonLeaf));
+        assert_eq!(SignReturn::parse("all"), Ok(SignReturn::All));
+        assert!(SignReturn::parse("leaf").is_err());
+    }
 
     #[test]
     fn parses_a_four_field_triple() {

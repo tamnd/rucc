@@ -1035,7 +1035,12 @@ mod tests {
     #[test]
     fn an_elf_file_says_what_it_was_built_to_have_checked() {
         let mut out = String::new();
-        Directives::Elf.end(&mut out, Property { features: Property::IBT, needed: 0 }, 8, None);
+        Directives::Elf.end(
+            &mut out,
+            Property { features: Property::IBT, ..Property::default() },
+            8,
+            None,
+        );
         let lines: Vec<&str> = out.lines().collect();
         assert_eq!(
             lines,

@@ -75,7 +75,7 @@ use rucc_regalloc::assign::Place;
 use rucc_regalloc::rewrite::{At, Edit};
 use rucc_target::{
     BranchInsts, CallRegs, Chkstk, ClassMoves, FrameInsts, Guard, PhysReg, Probe, RegClass,
-    SpillMove,
+    SignReturn, Signing, SpillMove,
 };
 
 use crate::frame::Frame;
@@ -197,6 +197,9 @@ pub struct Convention<'a> {
     /// off before it builds a frame of its own. The bytes themselves are written by whatever lays
     /// the function down, and on x86-64 they leave nothing to take off.
     pub hooked: bool,
+    /// Which functions sign their return address on the way in and check it on the way out,
+    /// from `-mbranch-protection=pac-ret`. Nothing on a target with no instructions for it.
+    pub sign: SignReturn,
 }
 
 /// The furthest below the frame pointer an ARM64 Windows unwind code can say the stack pointer
@@ -217,6 +220,7 @@ impl<'a> Convention<'a> {
             trace: None,
             pad: None,
             hooked: false,
+            sign: SignReturn::None,
         }
     }
 }
@@ -271,7 +275,8 @@ pub fn finish(
     convention: Convention<'_>,
     names: &mut Interner,
 ) -> Moves {
-    let Convention { regs: conv, insts, protect, probe, landing, trace, pad, hooked } = convention;
+    let Convention { regs: conv, insts, protect, probe, landing, trace, pad, hooked, sign } =
+        convention;
     let entry = func.entry().expect("a function with a block in it");
 
     // Before anything is written, because these are instructions the lowering already put in the
@@ -321,7 +326,24 @@ pub fn finish(
     // ordinary frame and the frame pointer in one that moves the stack pointer while it runs.
     let base = if frame.grows() { conv.frame_pointer } else { conv.stack_pointer };
     let hooked = hooked && !frame.naked();
-    let mut writer = Writer { func, conv, insts, names, base, ahead: None, hooked };
+    // Which functions sign is gcc's answer: under `non-leaf` the ones that save the return
+    // address, which here is the ones that push it with the frame pointer, and under `all` every
+    // one of them. Never a naked one, which has no epilogue to check it in.
+    let saves_link = frame.frame_pointer() && conv.link.is_some() && insts.pair.is_some();
+    let signs = match sign {
+        SignReturn::None => false,
+        SignReturn::NonLeaf => saves_link,
+        SignReturn::All => true,
+    };
+    let signing = insts.signing.filter(|_| signs && !frame.naked());
+    // The signing instruction lets in every indirect call the `bti c` would have, so a function
+    // that would open with it has no pad in front of it, which is what clang writes. One that has
+    // anything before the signing keeps the pad, since the branch arrives at the first byte.
+    let first = !hooked && pad.is_none_or(|pad| pad.after == 0) && trace.is_none_or(|t| !t.early);
+    let landing = landing.filter(|&name| {
+        !(signing.is_some() && first && insts.targets.is_some_and(|t| t.call == name))
+    });
+    let mut writer = Writer { func, conv, insts, names, base, ahead: None, hooked, signing };
 
     let mut cursors: Map<At, Inst> = Map::default();
     let mut moves = Moves::default();
@@ -572,6 +594,9 @@ struct Writer<'a> {
     /// the caller's frame pointer and leave the prologue to take it back off. Never in a naked
     /// function, which gets the bytes and nothing after them.
     hooked: bool,
+    /// The instructions that sign the return address in the prologue and check it in each
+    /// epilogue, or `None` in a function that does neither.
+    signing: Option<Signing>,
 }
 
 impl Writer<'_> {
@@ -664,6 +689,15 @@ impl Writer<'_> {
             let inst = self.hook(trace);
             out.push(inst);
             quiet.push(inst);
+        }
+        // The return address signed before it goes anywhere, so that what the frame record holds
+        // is the signed one. The row tells an unwinder that from here the link register has to be
+        // stripped before it is followed.
+        if let Some(signing) = self.signing {
+            let opcode = self.opcode(signing.sign);
+            let inst = self.func.build_loose(opcode).finish();
+            out.push(inst);
+            self.row(inst, CfiOp::NegateRaState);
         }
         // How far the stack pointer is below the canonical frame address, and whether the address
         // is still counted from the stack pointer at all. It starts at the return address the
@@ -1387,6 +1421,16 @@ impl Writer<'_> {
             let inst = self.arith(add, i64::from(frame.home()));
             out.push(inst);
             self.row(inst, CfiOp::DefCfaOffset(offset(self.conv.return_address)));
+        }
+        // The return address checked once it is back in the link register, last before the
+        // return, so a frame record somebody wrote over faults here rather than going there.
+        if let Some(signing) = self.signing {
+            let opcode = self.opcode(signing.check);
+            let inst = self.func.build_loose(opcode).finish();
+            out.push(inst);
+            if described {
+                self.row(inst, CfiOp::NegateRaState);
+            }
         }
         // A function that takes some of its arguments with it says how many bytes on the `ret`,
         // which is i386 System V giving back the address its result went through. The count comes

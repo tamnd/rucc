@@ -779,6 +779,16 @@ pub static INSTS: &[(&str, Form)] = &[
     ("prefetch_w_t0", Prefetch),
     // Everything else.
     ("nop", Nop),
+    // Branch protection, which is hints so that a machine without it runs them as nothing. The
+    // two that sign and check the return address read and write x30 and read the stack pointer,
+    // and the prologue and the epilogue put them where nothing else is using either.
+    ("paciasp", Nop),
+    ("autiasp", Nop),
+    ("bti_c", Nop),
+    ("bti_j", Nop),
+    // The signature taken off a return address read out of a frame, through x30, since that is
+    // the one register the hint works on. Only in a function that saved x30 in its frame record.
+    ("strip_ra_64", Unary),
     ("trap", Trap),
     ("fence", Barrier),
     ("fence_acquire", Barrier),

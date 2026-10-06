@@ -58,7 +58,7 @@ use crate::bits::BitInsts;
 use crate::branch::{BranchInsts, Fusion, Move};
 use crate::counts::{BitCount, CountInst};
 use crate::flags::{Compare, FlagInsts, Reader, Reads};
-use crate::frame::{ClassMoves, FrameInsts, Kept, Pair, Probe};
+use crate::frame::{ClassMoves, FrameInsts, Kept, Pair, Probe, Signing, Targets};
 use crate::machine::MachineInsts;
 use crate::operand::OperandDesc;
 use crate::regs::{CallRegs, Chkstk, ClassInfo, PhysReg, RegClass, RegFile};
@@ -198,9 +198,9 @@ static AARCH64_MOVES: [ClassMoves; 2] = [
 /// shifted register forms read as zero, so every instruction here that reads it is one the encoder
 /// writes in a form that can say it: an addition of a register to it is the extended form, and the
 /// alignment goes through `x16`, since the one instruction that can mask the stack pointer cannot
-/// also read it. And there is no landing pad: `-fcf-protection` is an x86 flag, gcc refuses it for
-/// this machine, and what this machine has instead is `-mbranch-protection`, which is a different
-/// flag with a different instruction and is not here yet.
+/// also read it. And there is no landing pad for `-fcf-protection`, which is an x86 flag that gcc
+/// refuses for this machine. What this machine has instead is `-mbranch-protection`, which is a
+/// different flag with two pads, `bti c` and `bti j`, and a signed return address besides.
 pub static FRAME: FrameInsts = FrameInsts {
     prefix: "a64.",
     classes: &AARCH64_MOVES,
@@ -227,6 +227,8 @@ pub static FRAME: FrameInsts = FrameInsts {
     call: "bl",
     probe: Some(PROBE),
     landing: None,
+    signing: Some(Signing { sign: "paciasp", check: "autiasp" }),
+    targets: Some(Targets { call: "bti_c", jump: "bti_j" }),
     pad: Some("nop"),
     step_bits: Some(12),
     reaches: Some(frame_reaches),

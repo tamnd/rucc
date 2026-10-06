@@ -433,6 +433,13 @@ f9800934	prfm pstl3keep, [x9, #16]	prefetch_w_t2
 f9800932	prfm pstl2keep, [x9, #16]	prefetch_w_t1
 f9800930	prfm pstl1keep, [x9, #16]	prefetch_w_t0
 d503201f	nop	nop
+d503233f	hint #25	paciasp
+d50323bf	hint #29	autiasp
+d503245f	hint #34	bti_c
+d503249f	hint #36	bti_j
+aa0203fe	mov x30, x2	strip_ra_64
+d50320ff	hint #7	strip_ra_64
+aa1e03e1	mov x1, x30	strip_ra_64
 d4200020	brk #1	trap
 d5033bbf	dmb ish	fence
 d50339bf	dmb ishld	fence_acquire

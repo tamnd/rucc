@@ -29,7 +29,7 @@ use rucc_sema::{Checker, Context as CheckContext};
 use rucc_session::{
     Contract, EmitKind, FileSystem, Options, Padding, Pic, Protector, Session, Visibility,
 };
-use rucc_target::{TargetInfo, Triple};
+use rucc_target::{SignReturn, TargetInfo, Triple};
 use rucc_tuple::{Arch, ObjectFormat};
 
 use crate::preprocess::render;
@@ -1193,7 +1193,7 @@ fn generate(
             let elsewhere = Elsewhere::of(module, IrPic::Absolute, target.object_format, false);
             for id in module.funcs() {
                 if !module[id].is_declaration() {
-                    rucc_codegen::tail::mark(&mut module[id], names, &elsewhere, false);
+                    rucc_codegen::tail::mark(&mut module[id], names, &elsewhere, false, true);
                 }
             }
         }
@@ -1241,6 +1241,16 @@ fn generate(
             opts.control, target.tuple
         ))]);
     }
+    // The AArch64 half of it, whose note is ELF too. The unwind codes of Windows on Arm say a
+    // signed return address a way of their own, which is not written yet.
+    if opts.branch_protection.any() && target.tuple.os().object_format() != Some(ObjectFormat::Elf)
+    {
+        return Err(vec![unsupported(&format!(
+            "-mbranch-protection= is not supported for {} yet, because what says a file was built \
+             for it there is not the note this compiler writes",
+            target.tuple
+        ))]);
+    }
     // And once more. A profiled build is one whose functions call a routine the runtime provides,
     // and a target whose runtime provides no such routine would get a call to a name nothing
     // defines, which is a link error a long way from the flag that caused it. Windows profiles a
@@ -1280,6 +1290,7 @@ fn generate(
         stack_clash: opts.stack_clash,
         landing: opts.control.branch(),
         shadow_stack: opts.control.ret(),
+        branch: opts.branch_protection,
         manual_endbr: opts.manual_endbr,
         speculation: opts.speculation,
         // Not in i386 position independent code, whose table would be found with an absolute
@@ -2308,9 +2319,9 @@ fn sixteen(opts: &Options, listing: String) -> String {
     if opts.sixteen { format!("\t.code16gcc\n{listing}") } else { listing }
 }
 
-/// The feature word is empty on a machine whose bits these are not. It is the x86 one, and a target
-/// that wanted its control flow checked would want a property of its own with a key of its own, so
-/// writing this one there would be recording something untrue rather than recording nothing.
+/// The feature word is empty on a machine whose bits these are not. It is the x86 one, and AArch64
+/// has a property of its own with a key of its own, which says what `-mbranch-protection=` asked
+/// for, so writing either on the other machine would be recording something untrue.
 ///
 /// `indirect` is whether the module reaches what another object defines only through the table,
 /// which is [`Elsewhere::needs_indirect`], and is said on both x86 machines, as gcc does.
@@ -2326,12 +2337,21 @@ fn output(opts: &Options, target: &TargetInfo, indirect: bool) -> rucc_object::O
     }
     let x86 = matches!(target.tuple.arch(), Arch::X86_64 | Arch::X86);
     let needed = if x86 && indirect { rucc_object::Property::INDIRECT_EXTERN_ACCESS } else { 0 };
+    let mut arm = 0;
+    if target.tuple.arch() == Arch::Aarch64 {
+        if opts.branch_protection.bti {
+            arm |= rucc_object::Property::BTI;
+        }
+        if opts.branch_protection.sign != SignReturn::None {
+            arm |= rucc_object::Property::PAC;
+        }
+    }
     rucc_object::Output {
         sections: rucc_object::Sections {
             functions: opts.function_sections,
             data: opts.data_sections,
         },
-        property: rucc_object::Property { features, needed },
+        property: rucc_object::Property { features, needed, arm },
         isa: opts.isa,
         ident: opts.ident.then_some(IDENT),
     }

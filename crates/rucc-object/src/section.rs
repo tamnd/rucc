@@ -71,6 +71,9 @@ pub struct Property {
     /// than the command line: gcc writes it once `nodirect_extern_access` was said of a name the
     /// file defines or uses.
     pub needed: u32,
+    /// The bits of the AArch64 feature word, which are [`Self::BTI`] and [`Self::PAC`], and which
+    /// is written under a key of its own because the bits mean something else there.
+    pub arm: u32,
 }
 
 impl Property {
@@ -89,19 +92,30 @@ impl Property {
     /// linker must not copy a protected variable into an executable it is part of, and the loader
     /// must not bind a protected name in a library to a copy somewhere else.
     pub const INDIRECT_EXTERN_ACCESS: u32 = 1;
+    /// Which property the AArch64 feature word is, `GNU_PROPERTY_AARCH64_FEATURE_1_AND`.
+    pub const AARCH64_FEATURES: u32 = 0xc000_0000;
+    /// Every indirect branch in the file arrives at a `bti` that lets it in, so the loader may map
+    /// the text as guarded pages.
+    pub const BTI: u32 = 1;
+    /// Every function that saves the return address signs it and checks it before it returns.
+    pub const PAC: u32 = 2;
 
     /// Whether anything is recorded at all, which is whether the record is written.
     #[must_use]
     pub const fn any(self) -> bool {
-        self.features != 0 || self.needed != 0
+        self.features != 0 || self.needed != 0 || self.arm != 0
     }
 
     /// Each property there is something to record for, as its key and its word, in the order gcc
     /// writes them, which is one note each.
     pub fn each(self) -> impl Iterator<Item = (u32, u32)> {
-        [(Self::X86_FEATURES, self.features), (Self::NEEDED, self.needed)]
-            .into_iter()
-            .filter(|&(_, word)| word != 0)
+        [
+            (Self::AARCH64_FEATURES, self.arm),
+            (Self::X86_FEATURES, self.features),
+            (Self::NEEDED, self.needed),
+        ]
+        .into_iter()
+        .filter(|&(_, word)| word != 0)
     }
 }
 
