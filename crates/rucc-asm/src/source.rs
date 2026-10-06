@@ -729,7 +729,26 @@ impl Reader {
             return self.directive(directive, rest);
         }
         if self.aarch64 {
-            return self.a64(text);
+            // `name .req register` gives a register a second name, which is how the arm64 kernel
+            // has `lr` for `x30` and `wx0` for `w0` in `assembler.h`. Only the operands are
+            // renamed, so an alias cannot take the place of a mnemonic.
+            if let Some(register) =
+                rest.strip_prefix(".req").filter(|after| after.starts_with(char::is_whitespace))
+            {
+                let register = register.trim();
+                let register = self
+                    .registers
+                    .get(register)
+                    .cloned()
+                    .unwrap_or_else(|| register.to_ascii_lowercase());
+                self.registers.insert(word.to_owned(), register);
+                return Ok(());
+            }
+            if self.registers.is_empty() {
+                return self.a64(text);
+            }
+            let renamed = format!("{word} {}", self.renamed(rest));
+            return self.a64(&renamed);
         }
         // A prefix written on the same line as the instruction it goes in front of, which is how a
         // kernel writes `lock` and how it writes `cs` in front of a call it wants a byte longer.
@@ -765,7 +784,19 @@ impl Reader {
     /// not after `\`, which is a macro argument nothing replaced, and not in the middle of a
     /// longer name or a number.
     fn unaliased(&self, rest: &str) -> String {
-        if self.registers.is_empty() && self.values.is_empty() {
+        self.replaced(rest, true)
+    }
+
+    /// The operands of an AArch64 instruction with every name `.req` gave a register written as
+    /// the register. Numbers are left as they are, since the AArch64 reader works those out itself.
+    fn renamed(&self, rest: &str) -> String {
+        self.replaced(rest, false)
+    }
+
+    /// The operands with the names this file gave registers, and with the numbers it set when
+    /// `numbers` says so, put in place of the names.
+    fn replaced(&self, rest: &str, numbers: bool) -> String {
+        if self.registers.is_empty() && (self.values.is_empty() || !numbers) {
             return rest.to_owned();
         }
         let bytes = rest.as_bytes();
@@ -789,7 +820,7 @@ impl Reader {
                 out.push_str(word);
             } else if let Some(register) = self.registers.get(word) {
                 out.push_str(register);
-            } else if let Some(&value) = self.values.get(word) {
+            } else if let Some(&value) = self.values.get(word).filter(|_| numbers) {
                 match value < 0 {
                     true => out.push_str(&format!("({value})")),
                     false => out.push_str(&value.to_string()),
@@ -1843,6 +1874,10 @@ impl Reader {
             // gas takes every name it does not know to be defined elsewhere, so `.extern` says
             // nothing it would not have assumed anyway.
             "extern" => {}
+            // The end of a name `.req` gave a register.
+            "unreq" if self.aarch64 => {
+                self.registers.remove(rest.trim());
+            }
             // The one warning this assembler has. gas prints it and carries on, and nothing here has
             // anywhere to print to, so it is passed over like the notes above. Under
             // `--fatal-warnings` gas stops on it instead, and so does this, since a build that
@@ -5938,6 +5973,22 @@ _tls$tlv$init:
         assert_eq!(&frame[20..24], &[0; 4]);
         // x19 saved two slots below the end of the frame, after the first instruction.
         assert!(frame.windows(5).any(|w| w == [0x44, 0x0e, 16, 0x93, 2]), "{frame:x?}");
+    }
+
+    #[test]
+    fn an_aarch64_register_named_with_req_is_the_register_until_unreq() {
+        // How the arm64 kernel's `assembler.h` names its registers, and a name given again after
+        // `.unreq`. The words are what llvm-mc writes for the same lines.
+        let read = aarch64(concat!(
+            "\t.irp n,0,1,2\nwx\\n .req w\\n\n\t.endr\n",
+            "lr .req x30\ntmp .req x9\n",
+            "\tmov wx1, wx2\n\tadd x0, tmp, #8\n\tstp x29, lr, [sp, #-16]!\n\tldr wx0, [tmp, #4]\n",
+            "\t.unreq tmp\ntmp .req x10\n\tmov tmp, lr\n",
+        ));
+        assert_eq!(
+            words(&read, ".text"),
+            [0x2a02_03e1, 0x9100_2120, 0xa9bf_7bfd, 0xb940_0520, 0xaa1e_03ea]
+        );
     }
 
     #[test]

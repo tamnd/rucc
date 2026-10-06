@@ -312,6 +312,11 @@ pub enum CodeModel {
     /// instruction may carry it as an immediate (`movq $sym, %rax`) or as the displacement of an
     /// indexed address (`sym(,%rdi,8)`), both with `R_X86_64_32S`.
     Kernel,
+    /// AArch64's model for an image of 1 MiB, where gcc reaches a name with one `adr`. The code
+    /// written is the small model's, since `adrp` and `add` reach everything `adr` does, so this
+    /// only changes which `__AARCH64_CMODEL_*__` is defined. The arm64 kernel builds its vDSO
+    /// with it.
+    Tiny,
 }
 
 impl CodeModel {
@@ -321,6 +326,7 @@ impl CodeModel {
         match self {
             CodeModel::Small => "small",
             CodeModel::Kernel => "kernel",
+            CodeModel::Tiny => "tiny",
         }
     }
 }
