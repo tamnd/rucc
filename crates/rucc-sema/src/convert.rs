@@ -528,6 +528,7 @@ mod tests {
             nocf: false,
             indirect_return: false,
             return_pointer_popped: None,
+            sse_regparm: false,
         };
         let function = f.types.function(signature);
         let designator =

@@ -643,4 +643,12 @@ pub struct FunctionType {
     /// [`Self::indirect_return`] it is no difference between types, and a composite keeps the
     /// first declaration's answer.
     pub return_pointer_popped: Option<bool>,
+    /// Whether a `float` or a `double` goes in and comes back in an SSE register, from
+    /// `__attribute__((sseregparm))` on 32-bit x86.
+    ///
+    /// gcc holds it against a type without it, as it does [`Self::nocf`]: a declaration each way
+    /// is `conflicting types` and a pointer of one assigned to a pointer of the other is an
+    /// incompatible pointer, since the caller and the callee would look for the value in two
+    /// different places.
+    pub sse_regparm: bool,
 }

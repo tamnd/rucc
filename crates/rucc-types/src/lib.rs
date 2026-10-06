@@ -709,6 +709,7 @@ mod tests {
                 nocf: false,
                 indirect_return: false,
                 return_pointer_popped: None,
+                sse_regparm: false,
             })
         };
         let a = make(&mut types, vec![int, long], false);
@@ -733,6 +734,7 @@ mod tests {
             nocf: false,
             indirect_return: false,
             return_pointer_popped: None,
+            sse_regparm: false,
         });
         let plain = types.function(FunctionType {
             ret: int,
@@ -743,6 +745,7 @@ mod tests {
             nocf: false,
             indirect_return: false,
             return_pointer_popped: None,
+            sse_regparm: false,
         });
         assert_ne!(sugar, plain);
         assert_eq!(types.canonical(sugar), plain);
@@ -1004,6 +1007,7 @@ mod tests {
             nocf: false,
             indirect_return: false,
             return_pointer_popped: None,
+            sse_regparm: false,
         });
         assert_eq!(layout(&types, function, &linux), Err(LayoutError::Function));
         let pointer_to_function = types.pointer(function);
@@ -1963,6 +1967,7 @@ mod tests {
             nocf: false,
             indirect_return: false,
             return_pointer_popped: None,
+            sse_regparm: false,
         })
     }
 
@@ -1978,6 +1983,7 @@ mod tests {
             nocf: false,
             indirect_return: false,
             return_pointer_popped: None,
+            sse_regparm: false,
         })
     }
 
@@ -2155,6 +2161,7 @@ mod tests {
             nocf: false,
             indirect_return: false,
             return_pointer_popped: None,
+            sse_regparm: false,
         });
         assert!(!compatible(&types, returns_int, takes_int));
     }
@@ -2175,6 +2182,7 @@ mod tests {
             nocf: false,
             indirect_return: false,
             return_pointer_popped: None,
+            sse_regparm: false,
         };
         let native = types.function(FunctionType {
             convention: rucc_target::Convention::Target,
@@ -2190,6 +2198,7 @@ mod tests {
             nocf: false,
             indirect_return: false,
             return_pointer_popped: None,
+            sse_regparm: false,
         });
         assert!(!compatible(&types, native, ms));
         let (to_native, to_ms) = (types.pointer(native), types.pointer(ms));
@@ -2216,6 +2225,7 @@ mod tests {
             nocf: true,
             indirect_return: false,
             return_pointer_popped: None,
+            sse_regparm: false,
         };
         let plain = types.function(FunctionType { nocf: false, ..signature.clone() });
         let untracked = types.function(signature);
@@ -2228,6 +2238,7 @@ mod tests {
             nocf: true,
             indirect_return: false,
             return_pointer_popped: None,
+            sse_regparm: false,
         });
         assert!(!compatible(&types, plain, untracked));
         let (to_plain, to_untracked) = (types.pointer(plain), types.pointer(untracked));
@@ -2236,6 +2247,37 @@ mod tests {
         let merged = composite(&mut types, old, untracked).expect("the two agree");
         let TypeKind::Function(id) = types.kind(merged) else { panic!("a function") };
         assert!(types.signature(id).nocf);
+    }
+
+    /// gcc 14 calls an `sseregparm` declaration after a plain one `conflicting types`, a pointer to
+    /// the one assigned to a pointer to the other an incompatible pointer, and keeps the attribute
+    /// through an old style redeclaration.
+    #[test]
+    fn a_function_with_floats_in_sse_registers_is_another_type() {
+        let mut types = Types::new();
+        let double = types.float(FloatKind::Double);
+        let signature = FunctionType {
+            ret: double,
+            params: vec![double],
+            variadic: false,
+            prototyped: true,
+            convention: rucc_target::Convention::Target,
+            nocf: false,
+            indirect_return: false,
+            return_pointer_popped: None,
+            sse_regparm: true,
+        };
+        let plain = types.function(FunctionType { sse_regparm: false, ..signature.clone() });
+        let sse = types.function(signature.clone());
+        let old =
+            types.function(FunctionType { params: Vec::new(), prototyped: false, ..signature });
+        assert!(!compatible(&types, plain, sse));
+        let (to_plain, to_sse) = (types.pointer(plain), types.pointer(sse));
+        assert!(!compatible(&types, to_plain, to_sse));
+        assert!(compatible(&types, sse, old));
+        let merged = composite(&mut types, old, sse).expect("the two agree");
+        let TypeKind::Function(id) = types.kind(merged) else { panic!("a function") };
+        assert!(types.signature(id).sse_regparm);
     }
 
     /// gcc 13 takes a pointer to an `indirect_return` function for a pointer to a plain one in
@@ -2253,6 +2295,7 @@ mod tests {
             nocf: false,
             indirect_return: false,
             return_pointer_popped: None,
+            sse_regparm: false,
         };
         let jumps = types.function(FunctionType { indirect_return: true, ..plain.clone() });
         let plain = types.function(plain);
@@ -2281,6 +2324,7 @@ mod tests {
             nocf: false,
             indirect_return: false,
             return_pointer_popped: None,
+            sse_regparm: false,
         };
         let kept =
             types.function(FunctionType { return_pointer_popped: Some(false), ..plain.clone() });

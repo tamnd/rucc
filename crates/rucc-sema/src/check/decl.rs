@@ -469,6 +469,9 @@ impl Checker<'_> {
         // Read after the merge, because a declaration above the definition has a say in whether
         // the definition is emitted and the merge is what has settled it.
         let emitted = self.tast[id].inline.emits();
+        if emitted {
+            self.sse_refused_definition(merged, name, span);
+        }
         let outer = self.defining.replace(id);
         let (stmt, params) = self.function_body(ty, name, span, params, body, emitted);
         self.defining = outer;

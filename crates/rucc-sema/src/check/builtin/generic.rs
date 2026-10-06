@@ -608,6 +608,7 @@ impl Checker<'_> {
             nocf: false,
             indirect_return: false,
             return_pointer_popped: None,
+            sse_regparm: false,
         });
         // In no scope, for the reason at the top of this file: the next call to the same name may
         // want a different type, and a declaration left behind would be the wrong one.

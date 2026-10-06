@@ -1152,6 +1152,7 @@ impl Checker<'_> {
             nocf: false,
             indirect_return: false,
             return_pointer_popped: None,
+            sse_regparm: false,
         })
     }
 

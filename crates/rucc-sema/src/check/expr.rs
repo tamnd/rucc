@@ -321,6 +321,7 @@ impl Checker<'_> {
                     nocf: false,
                     indirect_return: false,
                     return_pointer_popped: None,
+                    sse_regparm: false,
                 })
             }
         };
@@ -705,6 +706,7 @@ impl Checker<'_> {
         };
         self.check_inlined_target(callee, span);
         self.check_interrupt_call(callee, span);
+        self.sse_refused_call(callee, &signature, span);
 
         if signature.prototyped {
             let (wanted, given) = (signature.params.len(), checked.len());
@@ -2960,6 +2962,7 @@ mod tests {
             nocf: false,
             indirect_return: false,
             return_pointer_popped: None,
+            sse_regparm: false,
         };
         let function = c.types.function(signature);
         c.declare_object(g, function, Span::DUMMY);
@@ -2993,6 +2996,7 @@ mod tests {
             nocf: false,
             indirect_return: false,
             return_pointer_popped: None,
+            sse_regparm: false,
         };
         let function = c.types.function(signature);
         c.declare_object(g, function, Span::DUMMY);
@@ -3036,6 +3040,7 @@ mod tests {
             nocf: false,
             indirect_return: false,
             return_pointer_popped: None,
+            sse_regparm: false,
         };
         let function = c.types.function(signature);
         c.declare_object(g, function, Span::DUMMY);
