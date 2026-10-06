@@ -308,8 +308,10 @@ fn push_pieces(
 /// as. Nothing in either vocabulary is named this way today and this is what keeps the day one is
 /// from turning a rule into a number quietly.
 fn computes(head: &str, arity: usize) -> bool {
-    matches!((head, arity), ("+" | "-", 2) | ("sign_extend" | "zero_extend" | "extract", 3))
-        || (arity == 1 && suffix(head, "ctz").is_some())
+    matches!(
+        (head, arity),
+        ("+" | "-" | "bvshl", 2) | ("sign_extend" | "zero_extend" | "extract", 3)
+    ) || (arity == 1 && suffix(head, "ctz").is_some())
 }
 
 /// One function per computed piece, which is a guard in every way except what it gives back.
@@ -517,6 +519,17 @@ fn value(
                     let name = if head == "+" { "saturating_add" } else { "saturating_sub" };
                     Ok(format!("({left}).{name}({right})"))
                 }
+                // A shift left, which is where a mask that starts at the bottom ends up once a
+                // field is moved up to where it sits. The solver shifts in the width the rule runs
+                // at, so the rule keeps what it shifts inside that width in its guard, the same as
+                // with adding. A count too large for `i128` is zero here rather than a panic.
+                ("bvshl", 2) => {
+                    let left = value(source, &args[0], bound, wanted, used)?;
+                    let right = value(source, &args[1], bound, wanted, used)?;
+                    Ok(format!(
+                        "({left}).checked_shl(u32::try_from({right}).unwrap_or(u32::MAX)).unwrap_or(0)"
+                    ))
+                }
                 ("sign_extend" | "zero_extend" | "extract", 3) => {
                     let first = width(source, &args[0])?;
                     let second = width(source, &args[1])?;
@@ -534,8 +547,8 @@ fn value(
                     term,
                     &format!(
                         "`{head}` of {arity} is not a number this can be compiled to. The ones \
-                         that are are `+`, `-`, `sign_extend`, `zero_extend`, `extract` and \
-                         `ctz.iN`"
+                         that are are `+`, `-`, `bvshl`, `sign_extend`, `zero_extend`, `extract` \
+                         and `ctz.iN`"
                     ),
                 )),
             }
@@ -906,6 +919,8 @@ mod tests {
         assert!(!computes("ctz", 1));
         assert!(!computes("ctz.i32", 2));
         assert!(!computes("ctz.f32", 1));
+        assert!(computes("bvshl", 2));
+        assert!(!computes("bvshl", 1));
     }
 
     /// The first binding is read by the name for it rather than by an index of zero, which is

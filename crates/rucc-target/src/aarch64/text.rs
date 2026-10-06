@@ -34,9 +34,9 @@ use crate::named;
 
 use Arg::Doubles;
 use Arg::{
-    At, Barrier, Base, Disp, Fixed, Fp, GotPage, GotSlot, Imm, Label, Lit, Low, LowSlot, Mem, Near,
-    Page, Pop, Push, Reg, Scaled, SecrelHi, SecrelLo, Shifted, Symbol, Task, Teb, Thread, Through,
-    TlsPage, TlsSlot, TprelHi, TprelLo, Vector,
+    At, Barrier, Base, Disp, Fixed, Fp, GotPage, GotSlot, Imm, Label, Lit, Low, LowSlot, Lowest,
+    Mem, Near, Ones, Page, Pop, Push, Reg, Scaled, SecrelHi, SecrelLo, Shifted, Symbol, Task, Teb,
+    Thread, Through, TlsPage, TlsSlot, TprelHi, TprelLo, Vector,
 };
 use Scalar::{B, D, Q, S};
 use Width::{W, X};
@@ -61,6 +61,10 @@ pub enum Arg {
     Shift(Shift, u8),
     /// A shift that is part of the opcode, by as much as the instruction's constant says.
     Shifted(Shift),
+    /// Where the run of ones in the instruction's constant starts, taking that many bits of it.
+    Lowest(u32),
+    /// How many ones there are in the instruction's constant, taking that many bits of it.
+    Ones(u32),
     /// How the register before this one is widened, as part of the opcode.
     Extend(Extend),
     /// A condition that is part of the opcode.
@@ -322,6 +326,10 @@ static TEXT: &[(&str, &[Written])] = &[
     ("low_32", &[spell("mov", &[Reg(0, W), Reg(1, W)])]),
     ("bit_of_32", &[spell("and", &[Reg(0, W), Reg(1, W), Imm])]),
     ("bit_of_64", &[spell("and", &[Reg(0, W), Reg(1, W), Imm])]),
+    ("ubfx_32", &[spell("ubfx", &[Reg(0, W), Reg(1, W), Lowest(32), Ones(32)])]),
+    ("ubfx_64", &[spell("ubfx", &[Reg(0, X), Reg(1, X), Lowest(64), Ones(64)])]),
+    ("bit_at_32", &[spell("ubfx", &[Reg(0, W), Reg(1, W), Lowest(32), Lit(1)])]),
+    ("bit_at_64", &[spell("ubfx", &[Reg(0, X), Reg(1, X), Lowest(64), Lit(1)])]),
     // Comparisons that keep nothing but the condition state, which is what a branch on one is
     // folded into.
     ("cmp_rr_32", &[spell("cmp", &[Reg(0, W), Reg(1, W)])]),
@@ -330,6 +338,8 @@ static TEXT: &[(&str, &[Written])] = &[
     ("cmp_rr_64", &[spell("cmp", &[Reg(0, X), Reg(1, X)])]),
     ("cmp_ri_64", &[spell("cmp", &[Reg(0, X), Imm])]),
     ("test_64", &[spell("cmp", &[Reg(0, X), Lit(0)])]),
+    ("tst_ri_32", &[spell("tst", &[Reg(0, W), Imm])]),
+    ("tst_ri_64", &[spell("tst", &[Reg(0, X), Imm])]),
     // Comparisons that keep the answer, which is `cset` after the comparison.
     (
         "cmp_set_eq_32",
@@ -490,6 +500,22 @@ static TEXT: &[(&str, &[Written])] = &[
     (
         "cmp_set_hs_ri_64",
         &[spell("cmp", &[Reg(1, X), Imm]), spell("cset", &[Reg(0, W), Arg::Cond(Cond::Hs)])],
+    ),
+    (
+        "tst_set_eq_ri_32",
+        &[spell("tst", &[Reg(1, W), Imm]), spell("cset", &[Reg(0, W), Arg::Cond(Cond::Eq)])],
+    ),
+    (
+        "tst_set_eq_ri_64",
+        &[spell("tst", &[Reg(1, X), Imm]), spell("cset", &[Reg(0, W), Arg::Cond(Cond::Eq)])],
+    ),
+    (
+        "tst_set_ne_ri_32",
+        &[spell("tst", &[Reg(1, W), Imm]), spell("cset", &[Reg(0, W), Arg::Cond(Cond::Ne)])],
+    ),
+    (
+        "tst_set_ne_ri_64",
+        &[spell("tst", &[Reg(1, X), Imm]), spell("cset", &[Reg(0, W), Arg::Cond(Cond::Ne)])],
     ),
     // A choice on a byte, which is the second source when the byte is not zero and the first when
     // it is, and the same choice straight off a condition some comparison left.
@@ -1136,6 +1162,13 @@ const TPIDR_EL0: u16 = system_field([3, 3, 13, 0, 2]);
 /// The fifteen bits `mrs` carries for `sp_el0`, which is where an arm64 kernel keeps the task.
 const SP_EL0: u16 = system_field([3, 0, 4, 1, 0]);
 
+/// The low `bits` of a constant, which is where a field mask of a thirty two bit register is
+/// whether or not the constant was sign extended on the way here.
+fn field(imm: i64, bits: u32) -> u64 {
+    let mask = if bits >= 64 { u64::MAX } else { (1u64 << bits) - 1 };
+    u64::from_ne_bytes(imm.to_ne_bytes()) & mask
+}
+
 /// One argument as the value [`encode`](crate::aarch64::encode) and
 /// [`write`](crate::aarch64::write) both take.
 ///
@@ -1161,6 +1194,8 @@ pub fn fill(arg: Arg, with: &Operands<'_>) -> Result<Value, Missing> {
         Arg::Shift(shift, amount) => Value::Shift(shift, amount),
         // Too far to name is a shift no instruction makes, which the encoder refuses.
         Shifted(shift) => Value::Shift(shift, u8::try_from(with.imm).unwrap_or(u8::MAX)),
+        Lowest(bits) => Value::Imm(i64::from(field(with.imm, bits).trailing_zeros())),
+        Ones(bits) => Value::Imm(i64::from(field(with.imm, bits).count_ones())),
         Arg::Extend(extend) => Value::Extend(extend, None),
         Arg::Cond(cond) => Value::Cond(cond),
         Barrier(option) => Value::Barrier(option),

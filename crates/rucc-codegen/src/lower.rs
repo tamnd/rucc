@@ -8652,7 +8652,8 @@ impl<'a> Lowering<'a> {
             // which is an immediate once it has been worked out and is read here as one. It gives
             // nothing back when a binding it reads is a register, and a replacement that cannot be
             // built is a rule this file and the matcher disagree about, which is what `unsupported`
-            // is for.
+            // is for. A number with the top bit of the register set, which a mask moved up to the
+            // top of a 64-bit register is, is read as the bits it is.
             Some(Piece::Computed { work, .. }) => {
                 let matched: Vec<Option<i128>> = bindings
                     .iter()
@@ -8662,7 +8663,9 @@ impl<'a> Lowering<'a> {
                     })
                     .collect();
                 let number = work(&matched).ok_or_else(|| self.unsupported(inst))?;
-                out.imm = i64::try_from(number).ok();
+                out.imm = i64::try_from(number)
+                    .ok()
+                    .or_else(|| u64::try_from(number).ok().map(|bits| bits as i64));
                 Ok(at + 1)
             }
             Some(Piece::Var { index, .. }) => {

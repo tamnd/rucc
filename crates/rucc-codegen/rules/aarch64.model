@@ -152,6 +152,16 @@
 (semantics (a64.eor_lsr_64 l r k) (bvxor l (bvlshr r k)))
 (semantics (a64.eor_asr_32 l r k) (bvxor l (bvashr r k)))
 (semantics (a64.eor_asr_64 l r k) (bvxor l (bvashr r k)))
+;; A field of a register brought down to the bottom, where the constant is the field's mask in
+;; place, and a test of the bits under a mask, kept as a number or as the condition state.
+(semantics (a64.ubfx_32 l m) (bvlshr (bvand l m) (ctz.i32 m)))
+(semantics (a64.ubfx_64 l m) (bvlshr (bvand l m) (ctz.i64 m)))
+(semantics (a64.bit_at_32 l m) (ite (= (bvand l m) 0) 0 1))
+(semantics (a64.bit_at_64 l m) (ite (= (bvand l m) 0) 0 1))
+(semantics (a64.tst_set_eq_ri_32 l m) (ite (= (bvand l m) 0) 1 0))
+(semantics (a64.tst_set_eq_ri_64 l m) (ite (= (bvand l m) 0) 1 0))
+(semantics (a64.tst_set_ne_ri_32 l m) (ite (= (bvand l m) 0) 0 1))
+(semantics (a64.tst_set_ne_ri_64 l m) (ite (= (bvand l m) 0) 0 1))
 
 ;; Turning a register round. `rev` reverses the bytes, which is the IR's `bswap`, and `rbit`
 ;; reverses the bits, written out here a bit at a time with the lowest bit of the operand ending up

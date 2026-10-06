@@ -825,6 +825,178 @@
       (a64.add_lsl_64 x x 4)
       (spec (= (bvmul x 17) (result))))
 
+;; A field read out of a register, which is a shift right and a mask of ones from the bottom and is
+;; one `ubfx`. The instruction's constant is the mask moved up to where the field is.
+
+(rule (lower (and.i32 (lshr.i32 (value.i32 x) (iconst.i32 k)) (iconst.i32 m)))
+      (if (and (and (>= k 0) (< k 32))
+               (and (> m 0) (and (power_of_two.i32 (+ m 1)) (<= (+ k (ctz.i32 (+ m 1))) 32)))))
+      (a64.ubfx_32 x (bvshl m k))
+      (spec (= (bvand (bvlshr x k) m) (result))))
+
+(rule (lower (and.i64 (lshr.i64 (value.i64 x) (iconst.i64 k)) (iconst.i64 m)))
+      (if (and (and (>= k 0) (< k 64))
+               (and (> m 0) (and (power_of_two.i64 (+ m 1)) (<= (+ k (ctz.i64 (+ m 1))) 64)))))
+      (a64.ubfx_64 x (bvshl m k))
+      (spec (= (bvand (bvlshr x k) m) (result))))
+
+;; A shifted register beside a constant. The rules above would put the constant in a register to
+;; get the shift for nothing, which is no shorter, so the shift is its own instruction and the
+;; constant goes in the immediate the way it did before.
+
+(rule (lower (and.i32 (shl.i32 (value.i32 x) (iconst.i32 k)) (iconst.i32 m)))
+      (if (and (and (>= k 0) (< k 32)) (logical_immediate.i32 m)))
+      (a64.and_ri_32 (a64.lsl_ri_32 x k) m)
+      (spec (= (bvand (bvshl x k) m) (result))))
+
+(rule (lower (and.i64 (shl.i64 (value.i64 x) (iconst.i64 k)) (iconst.i64 m)))
+      (if (and (and (>= k 0) (< k 64)) (logical_immediate.i64 m)))
+      (a64.and_ri_64 (a64.lsl_ri_64 x k) m)
+      (spec (= (bvand (bvshl x k) m) (result))))
+
+(rule (lower (and.i32 (lshr.i32 (value.i32 x) (iconst.i32 k)) (iconst.i32 m)))
+      (if (and (and (>= k 0) (< k 32)) (logical_immediate.i32 m)))
+      (a64.and_ri_32 (a64.lsr_ri_32 x k) m)
+      (spec (= (bvand (bvlshr x k) m) (result))))
+
+(rule (lower (and.i64 (lshr.i64 (value.i64 x) (iconst.i64 k)) (iconst.i64 m)))
+      (if (and (and (>= k 0) (< k 64)) (logical_immediate.i64 m)))
+      (a64.and_ri_64 (a64.lsr_ri_64 x k) m)
+      (spec (= (bvand (bvlshr x k) m) (result))))
+
+(rule (lower (and.i32 (ashr.i32 (value.i32 x) (iconst.i32 k)) (iconst.i32 m)))
+      (if (and (and (>= k 0) (< k 32)) (logical_immediate.i32 m)))
+      (a64.and_ri_32 (a64.asr_ri_32 x k) m)
+      (spec (= (bvand (bvashr x k) m) (result))))
+
+(rule (lower (and.i64 (ashr.i64 (value.i64 x) (iconst.i64 k)) (iconst.i64 m)))
+      (if (and (and (>= k 0) (< k 64)) (logical_immediate.i64 m)))
+      (a64.and_ri_64 (a64.asr_ri_64 x k) m)
+      (spec (= (bvand (bvashr x k) m) (result))))
+
+(rule (lower (or.i32 (shl.i32 (value.i32 x) (iconst.i32 k)) (iconst.i32 m)))
+      (if (and (and (>= k 0) (< k 32)) (logical_immediate.i32 m)))
+      (a64.orr_ri_32 (a64.lsl_ri_32 x k) m)
+      (spec (= (bvor (bvshl x k) m) (result))))
+
+(rule (lower (or.i64 (shl.i64 (value.i64 x) (iconst.i64 k)) (iconst.i64 m)))
+      (if (and (and (>= k 0) (< k 64)) (logical_immediate.i64 m)))
+      (a64.orr_ri_64 (a64.lsl_ri_64 x k) m)
+      (spec (= (bvor (bvshl x k) m) (result))))
+
+(rule (lower (or.i32 (lshr.i32 (value.i32 x) (iconst.i32 k)) (iconst.i32 m)))
+      (if (and (and (>= k 0) (< k 32)) (logical_immediate.i32 m)))
+      (a64.orr_ri_32 (a64.lsr_ri_32 x k) m)
+      (spec (= (bvor (bvlshr x k) m) (result))))
+
+(rule (lower (or.i64 (lshr.i64 (value.i64 x) (iconst.i64 k)) (iconst.i64 m)))
+      (if (and (and (>= k 0) (< k 64)) (logical_immediate.i64 m)))
+      (a64.orr_ri_64 (a64.lsr_ri_64 x k) m)
+      (spec (= (bvor (bvlshr x k) m) (result))))
+
+(rule (lower (or.i32 (ashr.i32 (value.i32 x) (iconst.i32 k)) (iconst.i32 m)))
+      (if (and (and (>= k 0) (< k 32)) (logical_immediate.i32 m)))
+      (a64.orr_ri_32 (a64.asr_ri_32 x k) m)
+      (spec (= (bvor (bvashr x k) m) (result))))
+
+(rule (lower (or.i64 (ashr.i64 (value.i64 x) (iconst.i64 k)) (iconst.i64 m)))
+      (if (and (and (>= k 0) (< k 64)) (logical_immediate.i64 m)))
+      (a64.orr_ri_64 (a64.asr_ri_64 x k) m)
+      (spec (= (bvor (bvashr x k) m) (result))))
+
+(rule (lower (xor.i32 (shl.i32 (value.i32 x) (iconst.i32 k)) (iconst.i32 m)))
+      (if (and (and (>= k 0) (< k 32)) (logical_immediate.i32 m)))
+      (a64.eor_ri_32 (a64.lsl_ri_32 x k) m)
+      (spec (= (bvxor (bvshl x k) m) (result))))
+
+(rule (lower (xor.i64 (shl.i64 (value.i64 x) (iconst.i64 k)) (iconst.i64 m)))
+      (if (and (and (>= k 0) (< k 64)) (logical_immediate.i64 m)))
+      (a64.eor_ri_64 (a64.lsl_ri_64 x k) m)
+      (spec (= (bvxor (bvshl x k) m) (result))))
+
+(rule (lower (xor.i32 (lshr.i32 (value.i32 x) (iconst.i32 k)) (iconst.i32 m)))
+      (if (and (and (>= k 0) (< k 32)) (logical_immediate.i32 m)))
+      (a64.eor_ri_32 (a64.lsr_ri_32 x k) m)
+      (spec (= (bvxor (bvlshr x k) m) (result))))
+
+(rule (lower (xor.i64 (lshr.i64 (value.i64 x) (iconst.i64 k)) (iconst.i64 m)))
+      (if (and (and (>= k 0) (< k 64)) (logical_immediate.i64 m)))
+      (a64.eor_ri_64 (a64.lsr_ri_64 x k) m)
+      (spec (= (bvxor (bvlshr x k) m) (result))))
+
+(rule (lower (xor.i32 (ashr.i32 (value.i32 x) (iconst.i32 k)) (iconst.i32 m)))
+      (if (and (and (>= k 0) (< k 32)) (logical_immediate.i32 m)))
+      (a64.eor_ri_32 (a64.asr_ri_32 x k) m)
+      (spec (= (bvxor (bvashr x k) m) (result))))
+
+(rule (lower (xor.i64 (ashr.i64 (value.i64 x) (iconst.i64 k)) (iconst.i64 m)))
+      (if (and (and (>= k 0) (< k 64)) (logical_immediate.i64 m)))
+      (a64.eor_ri_64 (a64.asr_ri_64 x k) m)
+      (spec (= (bvxor (bvashr x k) m) (result))))
+
+(rule (lower (add.i32 (shl.i32 (value.i32 x) (iconst.i32 k)) (iconst.i32 m)))
+      (if (and (and (>= k 0) (< k 32)) (and (>= m 0) (< m 4096))))
+      (a64.add_ri_32 (a64.lsl_ri_32 x k) m)
+      (spec (= (bvadd (bvshl x k) m) (result))))
+
+(rule (lower (add.i64 (shl.i64 (value.i64 x) (iconst.i64 k)) (iconst.i64 m)))
+      (if (and (and (>= k 0) (< k 64)) (and (>= m 0) (< m 4096))))
+      (a64.add_ri_64 (a64.lsl_ri_64 x k) m)
+      (spec (= (bvadd (bvshl x k) m) (result))))
+
+(rule (lower (add.i32 (lshr.i32 (value.i32 x) (iconst.i32 k)) (iconst.i32 m)))
+      (if (and (and (>= k 0) (< k 32)) (and (>= m 0) (< m 4096))))
+      (a64.add_ri_32 (a64.lsr_ri_32 x k) m)
+      (spec (= (bvadd (bvlshr x k) m) (result))))
+
+(rule (lower (add.i64 (lshr.i64 (value.i64 x) (iconst.i64 k)) (iconst.i64 m)))
+      (if (and (and (>= k 0) (< k 64)) (and (>= m 0) (< m 4096))))
+      (a64.add_ri_64 (a64.lsr_ri_64 x k) m)
+      (spec (= (bvadd (bvlshr x k) m) (result))))
+
+(rule (lower (add.i32 (ashr.i32 (value.i32 x) (iconst.i32 k)) (iconst.i32 m)))
+      (if (and (and (>= k 0) (< k 32)) (and (>= m 0) (< m 4096))))
+      (a64.add_ri_32 (a64.asr_ri_32 x k) m)
+      (spec (= (bvadd (bvashr x k) m) (result))))
+
+(rule (lower (add.i64 (ashr.i64 (value.i64 x) (iconst.i64 k)) (iconst.i64 m)))
+      (if (and (and (>= k 0) (< k 64)) (and (>= m 0) (< m 4096))))
+      (a64.add_ri_64 (a64.asr_ri_64 x k) m)
+      (spec (= (bvadd (bvashr x k) m) (result))))
+
+;; A test of the bits under a mask. One bit wanted as a number is that bit brought down, which is
+;; one `ubfx`, and anything else is `tst`, which a branch on it folds into.
+
+(rule (lower (icmp_ne.i1 (and.i32 (value.i32 x) (iconst.i32 m)) (iconst.i32 0)))
+      (if (power_of_two.i32 m))
+      (a64.bit_at_32 x m)
+      (spec (= (ite (= (bvand x m) 0) 0 1) (result))))
+
+(rule (lower (icmp_ne.i1 (and.i64 (value.i64 x) (iconst.i64 m)) (iconst.i64 0)))
+      (if (power_of_two.i64 m))
+      (a64.bit_at_64 x m)
+      (spec (= (ite (= (bvand x m) 0) 0 1) (result))))
+
+(rule (lower (icmp_ne.i1 (and.i32 (value.i32 x) (iconst.i32 m)) (iconst.i32 0)))
+      (if (logical_immediate.i32 m))
+      (a64.tst_set_ne_ri_32 x m)
+      (spec (= (ite (= (bvand x m) 0) 0 1) (result))))
+
+(rule (lower (icmp_ne.i1 (and.i64 (value.i64 x) (iconst.i64 m)) (iconst.i64 0)))
+      (if (logical_immediate.i64 m))
+      (a64.tst_set_ne_ri_64 x m)
+      (spec (= (ite (= (bvand x m) 0) 0 1) (result))))
+
+(rule (lower (icmp_eq.i1 (and.i32 (value.i32 x) (iconst.i32 m)) (iconst.i32 0)))
+      (if (logical_immediate.i32 m))
+      (a64.tst_set_eq_ri_32 x m)
+      (spec (= (ite (= (bvand x m) 0) 1 0) (result))))
+
+(rule (lower (icmp_eq.i1 (and.i64 (value.i64 x) (iconst.i64 m)) (iconst.i64 0)))
+      (if (logical_immediate.i64 m))
+      (a64.tst_set_eq_ri_64 x m)
+      (spec (= (ite (= (bvand x m) 0) 1 0) (result))))
+
 ;; Byte reversals, which are `rev` at the two widths the machine has. A sixteen bit one is left to
 ;; `rucc_codegen::expand`, since `rev16` turns round both halves of the register and what is above
 ;; a sixteen bit value there means nothing.

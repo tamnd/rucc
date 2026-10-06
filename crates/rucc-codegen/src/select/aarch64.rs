@@ -376,6 +376,11 @@ mod tests {
         for rule in TABLE.rules {
             let Some(rest) = rule.pattern.strip_prefix("(icmp_") else { continue };
             let (condition, operands) = rest.split_once(".i1 ").expect("a comparison takes two");
+            // A test of the bits under a mask compares an `and` with zero, which is `tst` and has
+            // no form against a register to pair with.
+            if operands.starts_with("(and.") {
+                continue;
+            }
             let width = operands
                 .strip_prefix("(value.")
                 .and_then(|rest| rest.split_once(' '))
