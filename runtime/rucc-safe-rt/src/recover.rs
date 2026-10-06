@@ -576,6 +576,25 @@ pub fn object(base: *const c_void, size: usize, class: Class) -> Cap {
     Cap::new(base as u64, size as u64, plane::FOREIGN, meta)
 }
 
+/// [`object`] for a local, with the version [`crate::witness::version`] reads out of `witness`.
+///
+/// That is what lets the lifetime check ask whether the frame the local was declared in has
+/// returned, which is row T4, and a frame with no witness gets the version every other named object
+/// has.
+///
+/// # Safety
+///
+/// `witness` is null or a readable, aligned word.
+#[must_use]
+pub unsafe fn local(base: *const c_void, size: usize, witness: *const u64) -> Cap {
+    let cap = object(base, size, Class::Automatic);
+    if cap.is_null() {
+        return cap;
+    }
+    // SAFETY: the caller's contract.
+    Cap { ver: unsafe { crate::witness::version(witness) }, ..cap }
+}
+
 /// The capability for an address nothing is known about.
 ///
 /// Bounds over the whole address space, which is the only honest answer, and [`Meta::WIDE`] so
@@ -636,29 +655,37 @@ pub mod exports {
         unsafe { out.write(cap) }
     }
 
-    /// The capability of a local of `size` bytes at `base`, which is [`super::object`].
+    /// The capability of a local of `size` bytes at `base`, which is [`super::local`].
     ///
     /// The same first two arguments as [`__rucc_cap_made`], and the size the compiler knows as the
-    /// third, because there is no header to read it out of.
+    /// third, because there is no header to read it out of. The fourth is the frame's witness, or
+    /// null for a frame that has none.
     ///
     /// # Safety
     ///
     /// `out` is a writable, aligned [`Cap`] sized slot. `base` is only ever recorded, never read
-    /// through.
+    /// through. `witness` is null or a readable, aligned word.
     #[unsafe(no_mangle)]
-    pub unsafe extern "C" fn __rucc_cap_local(out: *mut Cap, base: *const c_void, size: usize) {
-        let cap = super::object(base, size, crate::layout::Class::Automatic);
+    pub unsafe extern "C" fn __rucc_cap_local(
+        out: *mut Cap,
+        base: *const c_void,
+        size: usize,
+        witness: *const u64,
+    ) {
+        // SAFETY: this function's own contract about `witness`, passed straight on.
+        let cap = unsafe { super::local(base, size, witness) };
         // SAFETY: the caller's slot, which the contract above says is writable and aligned.
         unsafe { out.write(cap) }
     }
 
     /// The capability of a variable the unit defines, `size` bytes at `base`.
     ///
-    /// [`__rucc_cap_local`] for static storage.
+    /// [`__rucc_cap_local`] for static storage, which has no frame and so no witness.
     ///
     /// # Safety
     ///
-    /// As [`__rucc_cap_local`].
+    /// `out` is a writable, aligned [`Cap`] sized slot. `base` is only ever recorded, never read
+    /// through.
     #[unsafe(no_mangle)]
     pub unsafe extern "C" fn __rucc_cap_static(out: *mut Cap, base: *const c_void, size: usize) {
         let cap = super::object(base, size, crate::layout::Class::Static);

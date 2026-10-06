@@ -24,7 +24,8 @@
 //!
 //! [`crate::epoch`] keeps a third and [`crate::call`] a fourth. That last one lives for less time
 //! than a frame does, from the instruction in front of a call through a pointer to the first one
-//! inside the function it reaches.
+//! inside the function it reaches. [`crate::witness`] keeps a fifth, which is not a pointer at all
+//! but a count of the frames this thread has opened.
 
 use core::ffi::c_void;
 #[cfg(not(all(target_arch = "x86_64", target_os = "linux")))]
@@ -45,7 +46,7 @@ type Key = core::ffi::c_ulong;
 type Key = core::ffi::c_uint;
 
 /// How many words each thread's block holds, which is how many slots there can be.
-pub const WORDS: usize = 5;
+pub const WORDS: usize = 6;
 
 /// The word [`crate::frame`]'s slot keeps.
 pub const FRAMES: usize = 0;
@@ -58,6 +59,9 @@ pub const SCOPES: usize = 2;
 
 /// The word [`crate::call`]'s slot keeps.
 pub const CALLED: usize = 3;
+
+/// The word [`crate::witness`]'s slot keeps.
+pub const SERIAL: usize = 4;
 
 /// A pointer each thread has its own copy of.
 ///

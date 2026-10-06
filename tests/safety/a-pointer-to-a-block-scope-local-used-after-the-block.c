@@ -2,7 +2,8 @@
 /* refuse: J1 */
 /* gap: #431 */
 /* Use after scope rather than use after return, which is the harder half of T4 because the frame
-   is still there and the storage has only been handed to some other declaration. */
+   is still there and the storage has only been handed to some other declaration. The frame's
+   witness says the frame is live, which it is, and a block has no witness of its own yet. */
 int main(void) {
     int *escaped;
     {
