@@ -35,7 +35,10 @@
 //! writes one after the `narrow` pass has shortened it. One wider than a register is the runtime's
 //! unless the divisor is a power of two or the division is exact, which need no high multiply:
 //! those are written at their own width ahead of the splitting, which then takes the shifts or the
-//! multiply in halves, so a `long long` divided by four is no `__divdi3` on i386, as with gcc.
+//! multiply in halves, so a `long long` divided by four is no `__divdi3` on i386, as with gcc. A
+//! dividend that fits in a register, by a divisor that does too, is divided at the register's width
+//! and widened back, which is `(u64)a / 10` with `a` 32 bits wide, and that division then gets its
+//! magic number like any other.
 //!
 //! # What the dividend is known to hold
 //!
@@ -73,7 +76,11 @@ use crate::expand::{ahead, ahead_const, becomes};
 pub fn divisions(func: &mut Func, goal: Goal, register: u32) {
     let found: Vec<Inst> = func.blocks().flat_map(|block| func.insts(block)).collect();
     for inst in found {
-        let Some(division) = division(func, inst) else { continue };
+        let Some(mut division) = division(func, inst) else { continue };
+        let mut inst = inst;
+        if let Some((narrow, at)) = narrowed(func, inst, division, register) {
+            (inst, division) = (narrow, at);
+        }
         // Smaller code is the division instruction, but a division wider than a register has no
         // instruction and the call it would become is to a runtime a kernel does not link.
         if matches!(goal, Goal::Size) && division.width <= register {
@@ -82,6 +89,53 @@ pub fn divisions(func: &mut Func, goal: Goal, register: u32) {
         let Some(program) = program_at(division, register) else { continue };
         write(func, inst, &program);
     }
+}
+
+/// A division wider than a register of a value that fits in one, by a constant that does too, done
+/// at the register's width and widened back.
+///
+/// `(u64)a / 10` with `a` 32 bits wide is the shape, since C converts the narrower side before it
+/// divides. On i386 the division at sixty four bits is a call to `__udivdi3`, which the kernel does
+/// not link, and gcc narrows it to a division at thirty two, which then gets its magic number. An
+/// unsigned dividend gives an unsigned quotient and remainder below the divisor, so a positive
+/// divisor that fits is all that is asked, whichever way the division reads it. A signed dividend
+/// needs a divisor that fits signed and is not minus one, since the most negative value divided by
+/// it is the one quotient that does not fit.
+///
+/// Gives back the narrow division and what it is, with the wide one turned into the widening of it.
+fn narrowed(
+    func: &mut Func,
+    inst: Inst,
+    division: Division,
+    register: u32,
+) -> Option<(Inst, Division)> {
+    let Division { remainder, exact, width, range, divisor, .. } = division;
+    if width <= register {
+        return None;
+    }
+    let ty = Type::int(register);
+    let top = 1i128 << (register - 1);
+    let (opcode, widen, range) = match range {
+        Range::Unsigned(bits) if bits <= register && divisor > 0 && divisor < top << 1 => {
+            let opcode = if remainder { Opcode::URem } else { Opcode::UDiv };
+            (opcode, Opcode::ZExt, Range::Unsigned(bits))
+        }
+        Range::Signed(bits)
+            if bits <= register && (-top..top).contains(&divisor) && divisor != -1 =>
+        {
+            let opcode = if remainder { Opcode::SRem } else { Opcode::SDiv };
+            (opcode, Opcode::SExt, Range::Signed(bits))
+        }
+        _ => return None,
+    };
+    let dividend = func[func[inst].args][0];
+    let low = ahead(func, inst, Opcode::Trunc, &[dividend], ty);
+    let by = ahead_const(func, inst, Imm::int(divisor, ty), ty);
+    let narrow = ahead(func, inst, opcode, &[low, by], ty);
+    becomes(func, inst, widen, &[narrow]);
+    let Def::Result { inst: narrow, .. } = func[narrow].def else { return None };
+    let signed = opcode == Opcode::SDiv || opcode == Opcode::SRem;
+    Some((narrow, Division { signed, remainder, exact, width: register, range, divisor }))
 }
 
 /// What the dividend is known to hold.
@@ -551,11 +605,30 @@ fn folded(func: &Func, value: Value, depth: u32) -> Option<Imm> {
 ///
 /// A value widened with zeroes is never negative, whichever way the division reads it. One widened
 /// with its sign is a narrower signed value to a signed division, and to an unsigned one it is a
-/// value of the whole width, since its top bits are the sign's.
+/// value of the whole width, since its top bits are the sign's. A value masked by a constant or
+/// shifted right logically by one has its top bits clear in the same way, which is `(x & 0xffff) /
+/// 10` and `(x >> 32) / 10`.
 fn range(func: &Func, value: Value, width: u32, signed: bool) -> Range {
     let whole = if signed { Range::Signed(width) } else { Range::Unsigned(width) };
     let Def::Result { inst, .. } = func[value].def else { return whole };
     let Some(&from) = func[func[inst].args].first() else { return whole };
+    let cleared = match func[inst].opcode {
+        Opcode::And => func[func[inst].args]
+            .iter()
+            .filter_map(|&arg| constant(func, arg))
+            .map(|imm| 128 - (imm.unsigned() & mask(width)).leading_zeros())
+            .min(),
+        Opcode::LShr => func[func[inst].args]
+            .get(1)
+            .and_then(|&by| constant(func, by))
+            .and_then(|imm| u32::try_from(imm.unsigned()).ok())
+            .filter(|&by| by > 0 && by < width)
+            .map(|by| width - by),
+        _ => None,
+    };
+    if let Some(bits) = cleared {
+        return if bits < width { Range::Unsigned(bits.max(1)) } else { whole };
+    }
     let bits = func[from].ty.bits();
     if bits == 0 || bits >= width {
         return whole;

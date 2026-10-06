@@ -1076,11 +1076,80 @@ fn divide(
     // of half width instructions like everything else in this pass. Which call each one is, is in
     // the capability table, since a routine name is a fact about what this target cannot do.
     let width = calls.width;
+    if let Some((low, high)) = narrowed(func, width, inst, opcode, (a_low, a_high), (b_low, b_high))
+    {
+        replace(func, halves, inst, low, high);
+        return;
+    }
     let Some(routine) = width.libcall(opcode, width.mode()) else { return };
     let args = [Operand::Split(a_low, a_high), Operand::Split(b_low, b_high)];
     let made = runtime(func, names, calls, inst, routine, &args, &[width.half(), width.half()]);
     let [low, high] = made[..] else { return };
     replace(func, halves, inst, low, high);
+}
+
+/// A divide or a remainder of two values that each fit in a half, worked out at the half width.
+///
+/// `(u64)a / b` with `a` and `b` 32 bits wide is the common one, since C converts both sides to
+/// the wider type before it divides. Two zero widened values are numbers below two to the half
+/// width, so their quotient and their remainder are as well, and one unsigned division of the low
+/// halves is the whole answer with a zero above it. That holds for the signed opcodes too, since a
+/// zero widened value is never negative. gcc narrows the same way, and on a 32 bit target it is
+/// the difference between a `divl` and a call to `__udivdi3`, which the kernel does not link.
+///
+/// Two sign widened values divide the same way at the half width, signed, except for the most
+/// negative half divided by minus one, whose quotient does not fit and which raises at the half
+/// width. So the signed case is taken only when one side is a constant that rules that pair out:
+/// a divisor that is not minus one, or a dividend that is not the most negative value.
+fn narrowed(
+    func: &mut Func,
+    width: Width,
+    inst: Inst,
+    opcode: Opcode,
+    a: (Value, Value),
+    b: (Value, Value),
+) -> Option<(Value, Value)> {
+    let unsigned = match opcode {
+        Opcode::UDiv | Opcode::SDiv => Opcode::UDiv,
+        Opcode::URem | Opcode::SRem => Opcode::URem,
+        _ => return None,
+    };
+    if widened(func, width, a.0, a.1) == Some(false)
+        && widened(func, width, b.0, b.1) == Some(false)
+    {
+        let low = ahead(func, width, inst, unsigned, &[a.0, b.0]);
+        return Some((low, ahead_const(func, width, inst, 0)));
+    }
+    if !matches!(opcode, Opcode::SDiv | Opcode::SRem)
+        || !signed_half(func, width, a)
+        || !signed_half(func, width, b)
+    {
+        return None;
+    }
+    let least = -(1i128 << (width.half - 1));
+    let safe = constant_pair(func, width, b).is_some_and(|by| by != -1)
+        || constant_pair(func, width, a).is_some_and(|of| of != least);
+    if !safe {
+        return None;
+    }
+    let low = ahead(func, width, inst, opcode, &[a.0, b.0]);
+    let top = ahead_const(func, width, inst, i128::from(width.half - 1));
+    Some((low, ahead(func, width, inst, Opcode::AShr, &[low, top])))
+}
+
+/// Whether a wide value is a half sign widened, which a constant small enough to be one is too.
+fn signed_half(func: &Func, width: Width, (low, high): (Value, Value)) -> bool {
+    let least = -(1i128 << (width.half - 1));
+    widened(func, width, low, high) == Some(true)
+        || constant_pair(func, width, (low, high))
+            .is_some_and(|value| (least..-least).contains(&value))
+}
+
+/// The signed value of a wide constant, from its two halves.
+fn constant_pair(func: &Func, width: Width, (low, high): (Value, Value)) -> Option<i128> {
+    let bits = known(func, low)? | known(func, high)? << width.half;
+    let shift = 128 - width.wide();
+    Some(((bits << shift) as i128) >> shift)
 }
 
 /// A conversion from one of these to a float, as a call to the routine that works it out.
@@ -1513,9 +1582,41 @@ fn bitwise(func: &mut Func, width: Width, halves: &mut Halves, inst: Inst, opcod
     let (Some(&(a_low, a_high)), Some(&(b_low, b_high))) = (halves.get(&a), halves.get(&b)) else {
         return;
     };
-    let low = ahead(func, width, inst, opcode, &[a_low, b_low]);
-    let high = ahead(func, width, inst, opcode, &[a_high, b_high]);
+    let low = half_bitwise(func, width, inst, opcode, a_low, b_low);
+    let high = half_bitwise(func, width, inst, opcode, a_high, b_high);
     replace(func, halves, inst, low, high);
+}
+
+/// One half of a bitwise operation, which a constant half of all zeroes or all ones often answers.
+///
+/// `x & 0xffffffff` on a `long long` is a mask of the low half by all ones and of the high half by
+/// zero, and neither needs an instruction. Without this the high half is an `and` with zero that
+/// nothing after this pass can see through, and a division of it looks like one of two full words.
+fn half_bitwise(
+    func: &mut Func,
+    width: Width,
+    inst: Inst,
+    opcode: Opcode,
+    a: Value,
+    b: Value,
+) -> Value {
+    let ones = (1u128 << width.half) - 1;
+    let absorbing = match opcode {
+        Opcode::And => Some(0),
+        Opcode::Or => Some(ones),
+        _ => None,
+    };
+    let identity = if opcode == Opcode::And { ones } else { 0 };
+    for (constant, other) in [(a, b), (b, a)] {
+        let Some(bits) = known(func, constant) else { continue };
+        if Some(bits & ones) == absorbing {
+            return constant;
+        }
+        if bits & ones == identity {
+            return other;
+        }
+    }
+    ahead(func, width, inst, opcode, &[a, b])
 }
 
 /// A comparison, which produces one bit and so is pointed at its answer rather than halved.
