@@ -58,8 +58,10 @@ struct Tree {
     /// The immediate dominator of each node, the root's own number for the root, and [`NONE`]
     /// for a node the root does not reach.
     idom: Vec<Node>,
-    /// The nodes each node immediately dominates.
-    children: Vec<Vec<Node>>,
+    /// The nodes each node immediately dominates, every node's laid end to end.
+    children: Vec<Node>,
+    /// Where each node's children start in the list above, with one more on the end.
+    child_at: Vec<u32>,
     /// When a depth first walk of the tree entered each node.
     enter: Vec<u32>,
     /// One past the largest number handed out anywhere in a node's subtree.
@@ -106,13 +108,18 @@ impl Tree {
         for (index, &node) in rpo.iter().enumerate() {
             rank[node as usize] = index as u32;
         }
-        let mut preds: Vec<Vec<u32>> = vec![Vec::new(); rpo.len()];
-        for (index, &node) in rpo.iter().enumerate() {
+        // Laid end to end rather than one list each, because the tree is built again every time
+        // the graph changes and an allocation per node was a good part of what that cost.
+        let mut preds: Vec<u32> = Vec::new();
+        let mut pred_at: Vec<u32> = Vec::with_capacity(rpo.len() + 1);
+        pred_at.push(0);
+        for &node in &rpo {
             for pred in graph.preds(node) {
                 if rank[pred as usize] != NONE {
-                    preds[index].push(rank[pred as usize]);
+                    preds.push(rank[pred as usize]);
                 }
             }
+            pred_at.push(preds.len() as u32);
         }
 
         // The root dominates itself and everything else starts with no answer, which is what
@@ -127,7 +134,7 @@ impl Tree {
             changed = false;
             for index in 1..rpo.len() {
                 let mut new = NONE;
-                for &pred in &preds[index] {
+                for &pred in &preds[pred_at[index] as usize..pred_at[index + 1] as usize] {
                     if idom_by_rank[pred as usize] == NONE {
                         continue;
                     }
@@ -141,12 +148,24 @@ impl Tree {
         }
 
         let mut idom = vec![NONE; nodes];
-        let mut children: Vec<Vec<Node>> = vec![Vec::new(); nodes];
+        let mut child_at = vec![0u32; nodes + 1];
         for (index, &node) in rpo.iter().enumerate() {
             let parent = rpo[idom_by_rank[index] as usize];
             idom[node as usize] = parent;
             if node != root {
-                children[parent as usize].push(node);
+                child_at[parent as usize + 1] += 1;
+            }
+        }
+        for index in 1..child_at.len() {
+            child_at[index] += child_at[index - 1];
+        }
+        let mut next = child_at.clone();
+        let mut children = vec![0; rpo.len().saturating_sub(1)];
+        for &node in &rpo {
+            if node != root {
+                let parent = idom[node as usize] as usize;
+                children[next[parent] as usize] = node;
+                next[parent] += 1;
             }
         }
 
@@ -162,7 +181,9 @@ impl Tree {
         enter[root as usize] = time;
         time += 1;
         while let Some((node, next)) = stack.pop() {
-            match children[node as usize].get(next) {
+            let kids =
+                &children[child_at[node as usize] as usize..child_at[node as usize + 1] as usize];
+            match kids.get(next) {
                 Some(&child) => {
                     stack.push((node, next + 1));
                     enter[child as usize] = time;
@@ -173,13 +194,21 @@ impl Tree {
             }
         }
 
-        Self { idom, children, enter, leave, root }
+        Self { idom, children, child_at, enter, leave, root }
     }
 
     /// Whether the root reaches this node at all.
     ///
     /// A node number the tree has no room for is one of a function with no blocks, and the
     /// answer is the same: nothing reaches it.
+    /// The nodes this one immediately dominates.
+    fn kids(&self, node: Node) -> &[Node] {
+        match (self.child_at.get(node as usize), self.child_at.get(node as usize + 1)) {
+            (Some(&start), Some(&end)) => &self.children[start as usize..end as usize],
+            _ => &[],
+        }
+    }
+
     fn reached(&self, node: Node) -> bool {
         self.idom.get(node as usize).is_some_and(|&parent| parent != NONE)
     }
@@ -303,12 +332,7 @@ impl Dominators {
     /// Walking these from the entry is how a pass visits a function in dominator tree order,
     /// which is the order that has every definition in hand before any use of it.
     pub fn children(&self, block: Block) -> impl Iterator<Item = Block> + use<'_> {
-        self.tree
-            .children
-            .get(block.index())
-            .map_or(&[][..], Vec::as_slice)
-            .iter()
-            .map(|&node| Block::from_usize(node as usize))
+        self.tree.kids(block.index() as Node).iter().map(|&node| Block::from_usize(node as usize))
     }
 
     /// The nearest block that dominates both, which is the entry at worst.
@@ -520,6 +544,7 @@ impl Tree {
         Self {
             idom: Vec::new(),
             children: Vec::new(),
+            child_at: Vec::new(),
             enter: Vec::new(),
             leave: Vec::new(),
             root: NONE,
