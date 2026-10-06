@@ -109,7 +109,9 @@ mod tests {
     fn record<'a>(pieces: &'a [Piece]) -> Shape<'a> {
         let align = pieces.iter().map(|piece| piece.scalar.align).max().unwrap_or(1);
         let size = pieces.iter().map(Piece::end).max().unwrap_or(0).next_multiple_of(align);
-        Shape { size, align, pieces, complex: false }
+        let floating =
+            matches!(pieces, [piece] if piece.scalar.is_float() && piece.scalar.size == size);
+        Shape { size, align, pieces, complex: false, floating }
     }
 
     #[test]
