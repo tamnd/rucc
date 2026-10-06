@@ -119,8 +119,8 @@ fn the_loop<'a>(asm: &'a str, name: &str) -> Vec<&'a str> {
     panic!("no loop in\n{}", &asm[start..end]);
 }
 
-/// At `-O2` nothing in the loop sign extends the counter, and the arrays are read with a scaled
-/// index.
+/// At `-O2` nothing in the loop sign extends the counter from one register into another, and the
+/// arrays are read with a scaled index. An `int` element read with `movslq` is no widening.
 #[test]
 fn nothing_in_the_loop_widens_the_counter() {
     let dir = dir("asm");
@@ -132,7 +132,8 @@ fn nothing_in_the_loop_widens_the_counter() {
     for name in ["copy", "from"] {
         let body = the_loop(&asm, name);
         let text = body.join("\n");
-        assert!(!body.iter().any(|line| line.starts_with("movslq")), "{name}:\n{text}");
+        let widened = |line: &&str| line.starts_with("movslq") && !line.contains('(');
+        assert!(!body.iter().any(widened), "{name}:\n{text}");
         assert!(body.iter().any(|line| line.contains(",8)")), "{name}:\n{text}");
     }
     let _ = std::fs::remove_dir_all(&dir);

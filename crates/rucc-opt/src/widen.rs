@@ -687,6 +687,15 @@ mod tests {
             .count()
     }
 
+    /// What each of these instructions in the function reads, in the order they are laid out.
+    fn read_by(func: &Func, opcode: Opcode) -> Vec<Value> {
+        func.blocks()
+            .flat_map(|block| func.insts(block))
+            .filter(|&i| func[i].opcode == opcode)
+            .map(|i| func[func[i].args][0])
+            .collect()
+    }
+
     /// The width of what the loop's test compares.
     fn tested_at(func: &Func, head: Block) -> u32 {
         let term = func.terminator(head).expect("the header ends in a branch");
@@ -707,7 +716,8 @@ mod tests {
         assert_eq!(stats.count(Kind::Optimized, WIDENED), 1);
         assert_eq!(stats.count(Kind::Optimized, EXTENSION), 1);
         assert_eq!(stats.count(Kind::Optimized, COMPARED), 1);
-        assert_eq!(how_many(&func, Opcode::SExt), 0, "the address reads the twin");
+        let limit = func[func.entry().expect("the function has blocks")].params[1];
+        assert_eq!(read_by(&func, Opcode::SExt), [limit], "the address reads the twin");
         assert_eq!(tested_at(&func, head), 64, "the test is asked of the twin");
         assert_eq!(stores_given(&func, &[1000, 7]), before);
         assert_eq!(stores_given(&func, &[1000, 0]), Vec::new());

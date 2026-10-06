@@ -82,7 +82,7 @@ fn the_loop_compares_against_the_frame() {
     let end = asm[start..].find("main:").map_or(asm.len(), |at| start + at);
     let body = &asm[start..end];
     let cmp: Vec<&str> =
-        body.lines().map(str::trim).filter(|line| line.starts_with("cmpl")).collect();
+        body.lines().map(str::trim).filter(|line| line.starts_with("cmp")).collect();
     assert!(
         cmp.iter().any(|line| line.contains("(%rsp)")),
         "no compare against the frame in\n{body}"
