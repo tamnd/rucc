@@ -272,6 +272,12 @@ fn target_dir() -> PathBuf {
         .iter()
         .filter_map(std::env::var_os)
         .find(|dir| !dir.is_empty());
+    target_dir_from(set)
+}
+
+/// [`target_dir`] given what the environment says, so that a test can say nothing without
+/// changing the environment of every other test.
+fn target_dir_from(set: Option<std::ffi::OsString>) -> PathBuf {
     match set {
         Some(dir) => {
             let dir = PathBuf::from(dir);
@@ -281,7 +287,7 @@ fn target_dir() -> PathBuf {
                 std::env::current_dir().map(|cwd| cwd.join(&dir)).unwrap_or(dir)
             }
         }
-        None => target_dir(),
+        None => root().join("target"),
     }
 }
 
@@ -1730,7 +1736,15 @@ fn features(args: &[String]) -> Result<()> {
 
 #[cfg(test)]
 mod tests {
-    use super::{bare_integer, compared_literals};
+    use super::{bare_integer, compared_literals, target_dir_from};
+
+    #[test]
+    fn the_target_dir_is_under_the_root_when_nothing_moves_it() {
+        // 0.24.9 called itself here and overflowed the stack wherever neither variable was set.
+        assert_eq!(target_dir_from(None), super::root().join("target"));
+        let moved = std::env::temp_dir().join("elsewhere");
+        assert_eq!(target_dir_from(Some(moved.clone().into_os_string())), moved);
+    }
 
     #[test]
     fn a_comparison_against_a_number_is_found() {
