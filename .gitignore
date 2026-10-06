@@ -20,3 +20,6 @@ perf.data.old
 .idea/
 .vscode/
 *.swp
+
+# The browser shim that `npm ci` in web/ installs for the page and its test.
+/web/node_modules
