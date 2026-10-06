@@ -2143,22 +2143,34 @@ impl Lower<'_, '_> {
     /// addresses once for each piece. That is a copy or a fill of a known size of at most 64
     /// bytes, when the fill has a constant byte and the move is one piece.
     pub(super) fn short_bulk(&self, inst: Inst, args: &[Value]) -> bool {
-        let (size, align) = self.bulk_size(inst, args);
+        let (size, _) = self.bulk_size(inst, args);
         let Some(size @ ..=64) = size else { return false };
         match self.func[inst].opcode {
             Opcode::Memset => self.constant(args[1]).is_some(),
             Opcode::Memcpy => true,
-            _ => size <= 8 && size.is_power_of_two() && u64::from(align) >= size,
+            _ => size <= 8 && size.is_power_of_two(),
         }
     }
 
-    /// The widest piece of a short copy at offset `at` with `left` bytes to go.
-    fn piece(left: u32, align: u32) -> u32 {
+    /// The widest piece of a short copy or fill with `left` bytes to go. Wasm loads and stores
+    /// any width at any address, and the engines on x86-64 and AArch64 do an access that is not
+    /// aligned in one instruction, so the width does not depend on the alignment. The alignment
+    /// is only the hint in the field of the access, which [`Self::piece_field`] gives. clang does
+    /// the same, and a copy of a `Mem` in SQLite is three loads and three stores, where it was
+    /// twenty of each when the alignment was 1.
+    fn piece(left: u32) -> u32 {
         let mut width = 8;
-        while width > left || width > align {
+        while width > left {
             width /= 2;
         }
         width
+    }
+
+    /// The alignment field of a piece `width` bytes wide at offset `at` from an address that is
+    /// aligned to `align` bytes.
+    fn piece_field(align: u32, at: u32, width: u32) -> u32 {
+        let known = if at == 0 { align } else { align.min(1 << at.trailing_zeros()) };
+        align_field(known, width)
     }
 
     fn copy_short(&mut self, to: Value, from: Value, size: u32, align: u32) -> Result<()> {
@@ -2166,15 +2178,14 @@ impl Lower<'_, '_> {
         // of a size small enough to be one piece.
         let mut at = 0;
         while at < size {
-            let width = Self::piece(size - at, align);
-            let (load, store, vt) = match width {
-                8 => (emit::I64_LOAD, emit::I64_STORE, ValType::I64),
-                4 => (emit::I32_LOAD, emit::I32_STORE, ValType::I32),
-                2 => (emit::I32_LOAD16_U, emit::I32_STORE16, ValType::I32),
-                _ => (emit::I32_LOAD8_U, emit::I32_STORE8, ValType::I32),
+            let width = Self::piece(size - at);
+            let (load, store) = match width {
+                8 => (emit::I64_LOAD, emit::I64_STORE),
+                4 => (emit::I32_LOAD, emit::I32_STORE),
+                2 => (emit::I32_LOAD16_U, emit::I32_STORE16),
+                _ => (emit::I32_LOAD8_U, emit::I32_STORE8),
             };
-            let _ = vt;
-            let field = width.trailing_zeros();
+            let field = Self::piece_field(align, at, width);
             self.push(to)?;
             self.push(from)?;
             self.code.mem(load, field, at);
@@ -2187,8 +2198,8 @@ impl Lower<'_, '_> {
     fn fill_short(&mut self, to: Value, byte: u8, size: u32, align: u32) -> Result<()> {
         let mut at = 0;
         while at < size {
-            let width = Self::piece(size - at, align);
-            let field = width.trailing_zeros();
+            let width = Self::piece(size - at);
+            let field = Self::piece_field(align, at, width);
             self.push(to)?;
             if width == 8 {
                 self.code.i64_const(i64::from_le_bytes([byte; 8]));
