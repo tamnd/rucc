@@ -179,8 +179,9 @@ pub fn blocks(
 /// A block that nothing goes to once that is done loses its arm, is marked as one control never
 /// leaves and is said to never run. The layout writes it as its label and nothing else and puts it
 /// behind every block that does run, where it cannot come between a block and the one it falls
-/// into. Not in a function with a computed `goto`, since an address taken of a label is a way in
-/// that no arm shows.
+/// into. A computed `goto` lists every block it can go to among its arms, so those stay reached,
+/// and a block whose address an instruction takes stays reached as well, since the address is a
+/// way in that no arm of that block shows.
 pub fn forward(func: &mut mir::Func, insts: &BranchInsts, names: &mut Interner) -> usize {
     let mut opcode =
         |name: &str| mir::Opcode::new(names.intern(&format!("{}{name}", insts.prefix)));
@@ -223,7 +224,6 @@ pub fn forward(func: &mut mir::Func, insts: &BranchInsts, names: &mut Interner) 
     // block that ends any other way this pass did not expect keeps its arms, which keeps every
     // block they go to reached.
     let tabled = |func: &mir::Func, last: mir::Inst| func.tables.iter().any(|it| it.jump == last);
-    let mut computed = false;
     let mut moved = 0;
     for &block in &blocks {
         let last = func.terminator(block);
@@ -236,7 +236,6 @@ pub fn forward(func: &mut mir::Func, insts: &BranchInsts, names: &mut Interner) 
         };
         let ours = ours || last.is_some_and(|last| op == Some(indirect) && tabled(func, last));
         if !ours {
-            computed |= op == Some(indirect);
             continue;
         }
         for index in 0..func[block].succs.len() {
@@ -249,19 +248,24 @@ pub fn forward(func: &mut mir::Func, insts: &BranchInsts, names: &mut Interner) 
         }
     }
 
-    if !computed {
-        let mut reached = vec![false; func.block_count()];
-        for &block in &blocks {
-            for arm in &func[block].succs {
-                reached[arm.block.index()] = true;
+    // This holds in a function with a computed `goto` too. A block kept there keeps its jump, which
+    // nothing goes to, and objtool says that jump is an instruction no path reaches.
+    let mut reached = vec![false; func.block_count()];
+    for &block in &blocks {
+        for arm in &func[block].succs {
+            reached[arm.block.index()] = true;
+        }
+        for inst in func.insts(block) {
+            if let Some(named) = func[inst].mem.and_then(|mem| func[mem].block) {
+                reached[named.index()] = true;
             }
         }
-        for &block in &blocks {
-            if onward[block.index()].is_some() && !reached[block.index()] {
-                func.succs_mut(block).clear();
-                func.set_dead_end(block);
-                func.set_weight(block, mir::Weight::NEVER);
-            }
+    }
+    for &block in &blocks {
+        if onward[block.index()].is_some() && !reached[block.index()] {
+            func.succs_mut(block).clear();
+            func.set_dead_end(block);
+            func.set_weight(block, mir::Weight::NEVER);
         }
     }
     moved
@@ -1092,6 +1096,54 @@ mod tests {
         assert_eq!(forward(&mut func, &BRANCH, &mut names), 1);
         assert_eq!(func[made[0]].succs[0].block, made[1]);
         assert_eq!(func[made[3]].succs[0].block, made[2]);
+        assert_eq!(func[made[1]].succs[0].block, made[2]);
+        assert!(!func[made[1]].dead_end);
+    }
+
+    /// A computed `goto` in block zero that goes to block three or block four, block three
+    /// branching to the empty block one or to block four, and block one going on to block two.
+    /// Block four takes the address of block one when `taken` says to.
+    fn computed_past_an_empty_block(
+        names: &mut Interner,
+        taken: bool,
+    ) -> (mir::Func, Vec<mir::Block>) {
+        let mut func = mir::Func::new(names.intern("f"));
+        let made: Vec<mir::Block> = (0..5).map(|_| func.create_block()).collect();
+        let jump = Opcode::new(names.intern("x64.jmp_reg"));
+        func.build(made[0], jump).operand(Operand::read(Reg::physical(RAX), GPR)).finish();
+        *func.succs_mut(made[0]) = vec![BlockCall::to(made[3]), BlockCall::to(made[4])];
+        branch(&mut func, names, made[3], &[made[1], made[4]]);
+        *func.succs_mut(made[1]) = vec![BlockCall::to(made[2])];
+        if taken {
+            let lea = Opcode::new(names.intern("x64.lea"));
+            let address = Reg::physical(RCX);
+            func.build(made[4], lea).def(address, GPR).mem(Mem::block(made[1])).finish();
+        }
+        let ret = Opcode::new(names.intern("x64.ret"));
+        func.build(made[2], ret).finish();
+        func.build(made[4], ret).finish();
+        (func, made)
+    }
+
+    #[test]
+    fn an_empty_block_nothing_goes_to_is_dropped_in_a_function_with_a_computed_goto() {
+        let mut names = Interner::new();
+        let (mut func, made) = computed_past_an_empty_block(&mut names, false);
+
+        // The jump through the register cannot go to block one, so once the branch goes past it
+        // nothing does, and the jump it would end in is one objtool says nothing reaches.
+        assert_eq!(forward(&mut func, &BRANCH, &mut names), 1);
+        assert_eq!(func[made[3]].succs[0].block, made[2]);
+        assert!(func[made[1]].succs.is_empty());
+        assert!(func[made[1]].dead_end);
+    }
+
+    #[test]
+    fn an_empty_block_whose_address_is_taken_is_kept() {
+        let mut names = Interner::new();
+        let (mut func, made) = computed_past_an_empty_block(&mut names, true);
+
+        assert_eq!(forward(&mut func, &BRANCH, &mut names), 1);
         assert_eq!(func[made[1]].succs[0].block, made[2]);
         assert!(!func[made[1]].dead_end);
     }
