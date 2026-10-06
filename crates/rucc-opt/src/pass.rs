@@ -141,6 +141,7 @@ pub static PASSES: &[&dyn Pass] = &[
     &crate::subscript::Subscript,
     &crate::split::Split,
     &crate::nests::Nests,
+    &crate::widen::Widen,
     &crate::ivopts::Ivopts,
     &crate::coalesce::Coalesce,
     &crate::sink::Sink,

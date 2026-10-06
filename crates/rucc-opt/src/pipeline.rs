@@ -409,6 +409,10 @@ const O1: &[&str] = &[
 /// `i` it builds for `a[i - 1]` the same as the one `a[i]` already had, and in front of `licm` and
 /// `ivopts`, which then see the address as the plain index and a constant. Postgres reads an
 /// attribute at `attnum - 1` all through the executor, tamnd/rucc#1994.
+///
+/// `widen` goes right in front of `ivopts`. What it does is give a loop over an `int` a sixty four
+/// bit counter that its arrays can be read off with a scaled index, and that only pays if `ivopts`
+/// sees the counter when it chooses. See tamnd/rucc#1994.
 const O2: &[&str] = &[
     "expect",
     "fold",
@@ -462,6 +466,7 @@ const O2: &[&str] = &[
     "licm",
     "loop-idiom",
     "vectorize",
+    "widen",
     "ivopts",
     "simplify-cfg",
     "discharge",
@@ -529,6 +534,7 @@ const O3: &[&str] = &[
     "licm",
     "loop-idiom",
     "vectorize",
+    "widen",
     "ivopts",
     "simplify-cfg",
     "discharge",
