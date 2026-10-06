@@ -142,7 +142,8 @@ impl Lower<'_, '_> {
                 if matches!(
                     func[inst].opcode,
                     Opcode::IConst | Opcode::FConst | Opcode::GlobalAddr | Opcode::BlockAddr
-                ) {
+                ) || self.rematerialized(inst)
+                {
                     continue;
                 }
                 let landing = func[inst].opcode == Opcode::Landing;

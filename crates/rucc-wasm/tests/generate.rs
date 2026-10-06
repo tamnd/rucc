@@ -2308,3 +2308,55 @@ fn a_string_literal_is_a_segment_that_wasm_ld_merges() {
         assert!(text.contains(&line), "{line}{text}");
     }
 }
+
+/// A function with two slots in its frame that a loop reads and writes, and that a call sees.
+const FRAME: &str = r#"; ModuleID = 't.c'
+; format 0
+target triple = "wasm32-unknown-wasip1"
+target datalayout = "e-p:32:32-i64:64-S128"
+
+func @use(ptr, ptr) -> i32, linkage(external);
+
+func @f(i32) -> i32, linkage(external) {
+block0(%0: i32):
+    %1 = alloca, size 16, align 4
+    %2 = alloca, size 8, align 4
+    %3 = iconst.i32 4
+    %4 = ptr_add.nuw %1, %3
+    store %0 -> %4, align 4
+    store %0 -> %2, align 4
+    jump block1(%0)
+
+block1(%5: i32):
+    %6 = call @use(%1, %4) : (ptr, ptr) -> i32
+    %7 = load.i32 %4, align 4
+    %8 = load.i32 %2, align 4
+    %9 = add %6, %7
+    %10 = add %9, %8
+    store %10 -> %2, align 4
+    br_if %10, block1(%10), block2
+
+block2:
+    return %5
+}
+"#;
+
+/// With optimization, the address of a fixed `alloca`, and a constant number of bytes past it,
+/// has no local. The code writes it again at each use from the frame pointer, and a load or a
+/// store puts the offset of the slot in its offset field. Without optimization, each address has
+/// a local.
+#[test]
+fn the_address_of_a_slot_of_the_frame_is_written_at_each_use() {
+    let f = body_of(FRAME, "f", true);
+    // Two locals for the values of the loop, and the frame pointer and the stack pointer.
+    assert!(f.contains("\t.local\ti32, i32, i32, i32\n"), "{f}");
+    assert!(
+        f.contains("local.get\t3\n\tlocal.get\t3\n\ti32.const\t4\n\ti32.add\n\tcall\tuse\n"),
+        "{f}"
+    );
+    assert!(f.contains("local.get\t3\n\ti32.load\t4\n"), "{f}");
+    assert!(f.contains("local.get\t3\n\ti32.load\t16\n"), "{f}");
+    assert!(f.contains("local.get\t3\n\tlocal.get\t0\n\ti32.store\t16\n"), "{f}");
+    let f = body_of(FRAME, "f", false);
+    assert!(f.contains("i32.const\t16\n\ti32.add\n\tlocal.set"), "{f}");
+}

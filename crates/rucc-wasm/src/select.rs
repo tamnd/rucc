@@ -275,6 +275,9 @@ struct Folded {
     offset: u32,
     /// The global whose address is in the offset field too.
     symbol: Option<rucc_base::Symbol>,
+    /// The fixed `alloca` whose offset from the frame pointer is in the offset field too. The code
+    /// then pushes the frame pointer for the base.
+    frame: Option<Inst>,
 }
 
 /// The notes of the tree form for one function, and the numbers that the text of the IR gives
@@ -1028,11 +1031,16 @@ impl Lower<'_, '_> {
                 }
             }
         }
-        (offset != 0 || symbol.is_some()).then_some(Folded {
+        let frame = match self.in_frame(base) {
+            Some((alloca, 0)) if symbol.is_none() => Some(alloca),
+            _ => None,
+        };
+        (offset != 0 || symbol.is_some() || frame.is_some()).then_some(Folded {
             at,
             base,
             offset: offset as u32,
             symbol,
+            frame,
         })
     }
 
@@ -1059,6 +1067,55 @@ impl Lower<'_, '_> {
             value = from;
         }
         (value, offset)
+    }
+
+    /// The fixed `alloca` that `value` is a constant number of bytes past, through `ptr_add`
+    /// instructions with a constant, and that number of bytes. The frame pointer is in a local for
+    /// the whole function, so the code writes such an address again at each use, and the address
+    /// takes no local of its own. A local that holds it is live from the entry to its last use, and
+    /// in a large function the engine then has too few registers and spills other values, as the
+    /// base of the linear memory. clang also writes the address of a slot of the frame at each use.
+    /// This is done only at `-O1` and above.
+    pub(super) fn in_frame(&self, mut value: Value) -> Option<(Inst, u32)> {
+        if !self.unit.optimize {
+            return None;
+        }
+        let mut bytes = 0u32;
+        loop {
+            let (def, _) = self.def(value)?;
+            let data = &self.func[def];
+            match (data.opcode, &self.func[data.args]) {
+                (Opcode::Alloca, []) => return Some((def, bytes)),
+                (Opcode::PtrAdd, &[from, by]) => {
+                    bytes = bytes.wrapping_add(self.constant(by)? as u32);
+                    value = from;
+                }
+                _ => return None,
+            }
+        }
+    }
+
+    /// Whether the code of `inst` is written at each use of its result. See [`Self::in_frame`].
+    pub(super) fn rematerialized(&self, inst: Inst) -> bool {
+        let func = self.func;
+        matches!(func[inst].opcode, Opcode::Alloca | Opcode::PtrAdd)
+            && func[inst].results().next().is_some_and(|v| self.in_frame(v).is_some())
+    }
+
+    /// Push the frame pointer, or the stack pointer in a function with no frame pointer.
+    fn push_frame_pointer(&mut self) {
+        match self.frame.fp {
+            Some(fp) => self.code.local_get(fp),
+            None => {
+                let sp = self.unit.stack_pointer();
+                self.code.global_get(sp);
+            }
+        }
+    }
+
+    /// The offset of a fixed `alloca` from the frame pointer.
+    fn slot(&self, alloca: Inst) -> Result<u32> {
+        self.frame.slots.get(&alloca).copied().ok_or_else(|| "a fixed alloca has no slot".into())
     }
 
     /// The symbol of a `global_addr` of data, which has a place in memory. The address of a
@@ -1240,6 +1297,16 @@ impl Lower<'_, '_> {
                     let call =
                         self.func.successors(inst).next().ok_or("a block_addr names no block")?;
                     self.code.i32_const(self.numbers[&call.block] as i32);
+                    return Ok(());
+                }
+                (Opcode::Alloca | Opcode::PtrAdd, _) if self.in_frame(value).is_some() => {
+                    let (alloca, bytes) = self.in_frame(value).expect("an address in the frame");
+                    let offset = self.slot(alloca)?.wrapping_add(bytes);
+                    self.push_frame_pointer();
+                    if offset != 0 {
+                        self.code.i32_const(offset as i32);
+                        self.code.op(emit::I32_ADD);
+                    }
                     return Ok(());
                 }
                 _ if self.trees.stacked.contains(&value) => {
@@ -1434,9 +1501,26 @@ impl Lower<'_, '_> {
                 let (_, target) = self.unit.address(symbol)?;
                 self.code.mem_at(op, align, target, offset as i32);
             }
+            Some(Folded { frame: Some(alloca), offset, .. }) => {
+                let offset = self.slot(alloca)?.checked_add(offset);
+                let offset = offset.ok_or("an access 4 GiB past a slot of the frame")?;
+                self.code.mem(op, align, offset);
+            }
             folded => self.code.mem(op, align, folded.map_or(0, |f| f.offset)),
         }
         Ok(())
+    }
+
+    /// Push the base address of a load or a store, which is `address` when it is not folded.
+    fn push_base(&mut self, folded: Option<&Folded>, address: Value) -> Result<()> {
+        match folded {
+            Some(Folded { frame: Some(_), .. }) => {
+                self.push_frame_pointer();
+                Ok(())
+            }
+            Some(folded) => self.push(folded.base),
+            None => self.push(address),
+        }
     }
 
     fn frame_pointer(&self) -> u32 {
@@ -1452,6 +1536,9 @@ impl Lower<'_, '_> {
         let args = self.args(inst);
         let results = self.results(inst);
         let call = matches!(data.opcode, Opcode::Call | Opcode::CallIndirect);
+        if self.rematerialized(inst) {
+            return Ok(());
+        }
         if !call && args.iter().chain(&results).any(|&v| is_pair(self.ty(v))) {
             return self.pair(inst, &args, &results);
         }
@@ -1692,7 +1779,7 @@ impl Lower<'_, '_> {
                 }
                 let align = self.mem_info(inst).map_or(natural, |m| m.align);
                 let folded = self.folded(inst);
-                self.push(folded.as_ref().map_or(arg(0), |f| f.base))?;
+                self.push_base(folded.as_ref(), arg(0))?;
                 self.access(op, align_field(align, natural), folded)?;
                 self.set(results[0]);
             }
@@ -1701,7 +1788,7 @@ impl Lower<'_, '_> {
                 let (op, natural) = store_op(ty)?;
                 let align = self.mem_info(inst).map_or(natural, |m| m.align);
                 let folded = self.folded(inst);
-                self.push(folded.as_ref().map_or(arg(1), |f| f.base))?;
+                self.push_base(folded.as_ref(), arg(1))?;
                 if self.narrow(arg(0)) == Some(1) {
                     self.push_z(arg(0))?
                 } else {
