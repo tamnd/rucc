@@ -51,6 +51,10 @@
 //! each value whose bits are all known becomes a constant for as long as the fuel lasts. No block is
 //! deleted and no branch is rewritten here: a branch whose condition became a constant is a fold for
 //! `prune` and `simplify-cfg`, which run after this, as section 06.5 has it.
+//!
+//! Two more things are done with bits short of a constant. An access whose address is proved more
+//! aligned than it says takes the larger alignment, and an extension of a truncation is what was
+//! truncated when the bits the truncation dropped are known to be what the extension puts back.
 
 use rucc_base::hash::{Map, Set};
 use rucc_ir::{
@@ -82,6 +86,13 @@ const ALIGNED: &str = "access alignment raised to what its address is proved to 
 
 /// Recorded for an access that could have been given a larger alignment after the fuel ran out.
 const NO_FUEL_ALIGN: &str = "access alignment not raised, the pass ran out of fuel";
+
+/// Recorded once for each extension of a truncation that gave back what was truncated.
+const UNEXTENDED: &str = "extension of a truncation whose dropped bits were known replaced by \
+                          what was truncated";
+
+/// Recorded for an extension that could have gone after the fuel ran out.
+const NO_FUEL_UNEXTEND: &str = "extension of a truncation kept, the pass ran out of fuel";
 
 /// How many bits a pointer is followed at.
 ///
@@ -126,6 +137,7 @@ impl Pass for Sccp {
         let Some(solved) = Solver::solve(func, &mut stats) else { return stats };
         replace(func, &solved, fuel, &mut stats);
         align(func, &solved, fuel, &mut stats);
+        unextend(func, &solved, fuel, &mut stats);
         stats
     }
 }
@@ -761,6 +773,64 @@ fn align(func: &mut Func, solved: &Solved, fuel: &mut Fuel, stats: &mut Stats) {
     }
 }
 
+/// Points the readers of `sext (trunc x)` and `zext (trunc x)` at `x`, when the bits the
+/// truncation dropped are known to be what the extension puts back.
+///
+/// `mcxt_methods[header & 15]` with the mask made an `int` is that shape: the `and` is truncated
+/// to 32 bits and sign extended back to 64 to index the array, and the four bits the `and` leaves
+/// say the sign bit was clear all along. Postgres' `pfree` and `repalloc` do it on every call, and
+/// x86-64 wrote a `movslq` between the `and` and the multiply for it (tamnd/rucc#1994).
+///
+/// A zero extension needs every dropped bit known zero. A sign extension needs the dropped bits
+/// and the sign bit of what was kept to be known and all the same, zero or one.
+fn unextend(func: &mut Func, solved: &Solved, fuel: &mut Fuel, stats: &mut Stats) {
+    let blocks: Vec<Block> = func.blocks().filter(|block| solved.reached[block.index()]).collect();
+    let mut forward = Map::default();
+    for block in blocks {
+        for inst in func.insts(block) {
+            let data = &func[inst];
+            if !matches!(data.opcode, Opcode::SExt | Opcode::ZExt) {
+                continue;
+            }
+            let (Some(result), &[narrow]) = (data.results().next(), &func[data.args]) else {
+                continue;
+            };
+            let rucc_ir::Def::Result { inst: cut, .. } = func[narrow].def else { continue };
+            if func[cut].opcode != Opcode::Trunc {
+                continue;
+            }
+            let &[wide] = &func[func[cut].args] else { continue };
+            let ty = func[result].ty;
+            if func[wide].ty != ty || !ty.is_int() || !ty.is_scalar() {
+                continue;
+            }
+            let Some(&Fact::Known(bits)) = solved.facts.get(wide.index()) else { continue };
+            let kept = func[narrow].ty.bits();
+            let from = if data.opcode == Opcode::SExt { kept - 1 } else { kept };
+            let top = mask(ty.bits()) & !mask(from);
+            let zeros = bits.value() & top == 0;
+            let ones = data.opcode == Opcode::SExt && bits.value() & top == top;
+            if top & bits.unknown_bits() != 0 || !(zeros || ones) {
+                continue;
+            }
+            if !fuel.take() {
+                stats.missed(NO_FUEL_UNEXTEND);
+                continue;
+            }
+            forward.insert(result, wide);
+            stats.optimized(UNEXTENDED);
+        }
+    }
+    if !forward.is_empty() {
+        uses::substitute(func, &forward);
+    }
+}
+
+/// The low `width` bits.
+const fn mask(width: u32) -> u128 {
+    if width >= u128::BITS { u128::MAX } else { (1u128 << width) - 1 }
+}
+
 #[cfg(test)]
 mod tests {
     use rucc_base::Interner;
@@ -937,6 +1007,41 @@ block0(%0: i32):
         );
         assert!(out.contains("and %0, %1"), "the first and is not a constant, {out}");
         assert!(out.contains("%4 = iconst.i32 0"), "the second is, {out}");
+    }
+
+    /// `(long) (int) (x & 15)` is `x & 15`, since the four bits the mask leaves have the sign bit
+    /// of the `int` clear, and the same goes for a zero extension. Without the mask the sign bit
+    /// could be anything and the extension stays.
+    #[test]
+    fn an_extension_of_a_truncation_whose_dropped_bits_are_known_is_what_was_truncated() {
+        let out = solved(
+            r#"
+func @f(i64) -> i64, linkage(external) {
+block0(%0: i64):
+    %1 = iconst.i64 15
+    %2 = and.i64 %0, %1
+    %3 = trunc.i32 %2
+    %4 = sext.i64 %3
+    %5 = zext.i64 %3
+    %6 = add.i64 %4, %5
+    %7 = trunc.i32 %0
+    %8 = sext.i64 %7
+    %9 = iconst.i64 2147483648
+    %10 = and.i64 %0, %9
+    %11 = trunc.i32 %10
+    %12 = sext.i64 %11
+    %13 = zext.i64 %11
+    %14 = add.i64 %6, %8
+    %15 = add.i64 %14, %12
+    %16 = add.i64 %15, %13
+    return %16
+}
+"#,
+        );
+        assert!(out.contains("%6 = add %2, %2"), "{out}");
+        assert!(out.contains("%14 = add %6, %8"), "the unmasked one stays, {out}");
+        assert!(out.contains("%15 = add %14, %12"), "bit 31 is the sign of the int, {out}");
+        assert!(out.contains("%16 = add %15, %10"), "and is zero extended as it was, {out}");
     }
 
     /// A parameter that is a constant on every edge into its block is that constant, and one that
