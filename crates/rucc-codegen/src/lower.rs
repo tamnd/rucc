@@ -1634,7 +1634,11 @@ impl<'a> Lowering<'a> {
         // A function that returns through a hidden address takes that address off the stack on
         // its way out where the convention says so, which is `ret $4` on i386.
         if self.sret().is_some() {
-            self.stack.popped = self.conv.return_pointer_popped();
+            let popped = match self.source.signature().params.first() {
+                Some(&Param { abi: Abi::Sret { popped, .. }, .. }) => popped,
+                _ => None,
+            };
+            self.stack.popped = self.conv.return_pointer_popped(popped);
         }
         for value in self.source.values() {
             for start in self.source.value_starts(value) {
@@ -2383,7 +2387,10 @@ impl<'a> Lowering<'a> {
         // convention's answer, which is why the whole list goes to the same place the arguments do
         // rather than to a rule.
         let returns: Vec<Type> = signature.return_types().collect();
-        let returned_through = matches!(named.first(), Some(Abi::Sret { .. }));
+        let returned_through = match named.first() {
+            Some(&Abi::Sret { popped, .. }) => Some(popped),
+            _ => None,
+        };
 
         let mut args = Vec::with_capacity(values.len());
         // The address each argument that is one was just written by, which goes down to where it
@@ -2474,8 +2481,7 @@ impl<'a> Lowering<'a> {
         // i386 `stdcall` and `fastcall`, and that is the same thing on a larger scale.
         let popped = match conv.abi.cleanup {
             Cleanup::Callee if !variadic => made.area,
-            _ if returned_through => conv.return_pointer_popped(),
-            _ => 0,
+            _ => returned_through.map_or(0, |popped| conv.return_pointer_popped(popped)),
         };
         if popped > 0 {
             let sub = self.named(self.selector.frame.sub);
@@ -9476,7 +9482,7 @@ mod tests {
     /// front of whatever else it takes. Only the signature says it is one.
     fn returning_through_memory(params: &[Type]) -> (Interner, Func, Block, Vec<Value>) {
         let mut names = Interner::new();
-        let sret = Abi::Sret { size: 32, align: 8 };
+        let sret = Abi::Sret { size: 32, align: 8, popped: None };
         let mut signature = Signature::new().and_param(Param::with_abi(Type::PTR, sret));
         signature.params.extend(params.iter().copied().map(Param::new));
         let mut func = Func::new(names.intern("f"), signature);

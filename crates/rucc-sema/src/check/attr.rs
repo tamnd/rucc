@@ -2175,7 +2175,8 @@ impl Checker<'_> {
     ///
     /// `nocf_check` is a function type attribute too and lands where a convention does, so it is
     /// read here as well, after the convention. See [`Self::untracked`]. So is `indirect_return`,
-    /// last, which is [`FunctionType::indirect_return`].
+    /// which is [`FunctionType::indirect_return`], and `callee_pop_aggregate_return` last, which
+    /// is [`FunctionType::return_pointer_popped`].
     pub(in crate::check) fn convened(&mut self, ty: TypeId, attrs: AttrList) -> TypeId {
         let ty = match self.convention_in(attrs) {
             Some((convention, name, span)) => self.with_convention(ty, convention, &name, span),
@@ -2185,10 +2186,11 @@ impl Checker<'_> {
             Some(span) => self.without_landing_pad(ty, span),
             None => ty,
         };
-        match self.flag_in(attrs, "indirect_return", "E0823") {
+        let ty = match self.flag_in(attrs, "indirect_return", "E0823") {
             Some(span) => self.returning_by_jump(ty, span),
             None => ty,
-        }
+        };
+        self.popping(ty, attrs, false)
     }
 
     /// The type a pointer's attributes make of what it points at, which is where
@@ -2222,7 +2224,7 @@ impl Checker<'_> {
                 _ => self.not_a_function("indirect_return", span),
             }
         }
-        pointee
+        self.popping(pointee, attrs, true)
     }
 
     /// Where an attribute list says `nocf_check`, after refusing each one written with arguments
@@ -2853,7 +2855,7 @@ impl Checker<'_> {
     }
 
     /// gcc's warning for a convention written on something that is not a function.
-    fn not_a_function(&mut self, name: &str, span: Span) {
+    pub(in crate::check) fn not_a_function(&mut self, name: &str, span: Span) {
         let what = format!("'{name}' attribute only applies to function types");
         self.report(Diagnostic::warning(what, span).with_code("E0703"));
     }

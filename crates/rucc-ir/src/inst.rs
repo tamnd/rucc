@@ -751,6 +751,10 @@ pub enum Abi {
         size: u64,
         /// What the space is aligned to.
         align: u32,
+        /// Who takes the address off the stack where it travels there, which `Some(true)` says
+        /// is the callee and `Some(false)` the caller, from gcc's `callee_pop_aggregate_return`
+        /// on 32-bit x86. [`None`] is the convention's own answer.
+        popped: Option<bool>,
     },
     /// The static chain of a GNU nested function: the address the function reaches the
     /// variables of the function it is written in through.
@@ -774,7 +778,7 @@ impl Abi {
     #[must_use]
     pub const fn object(self) -> Option<(u64, u32)> {
         match self {
-            Self::ByVal { size, align, .. } | Self::Sret { size, align } => Some((size, align)),
+            Self::ByVal { size, align, .. } | Self::Sret { size, align, .. } => Some((size, align)),
             _ => None,
         }
     }
@@ -990,7 +994,7 @@ mod tests {
     fn a_parameter_says_how_it_travels_and_not_only_what_it_is() {
         let object = Abi::ByVal { size: 24, align: 8, drains: Drains::Nothing };
         let sig = Signature::new()
-            .and_param(Param::with_abi(Type::PTR, Abi::Sret { size: 32, align: 16 }))
+            .and_param(Param::with_abi(Type::PTR, Abi::Sret { size: 32, align: 16, popped: None }))
             .and_param(Param::with_abi(Type::PTR, object))
             .and_param(Param::with_abi(Type::int(8), Abi::Zext));
         // The types alone say `ptr, ptr, i8`, which is three of the calls in any C program and

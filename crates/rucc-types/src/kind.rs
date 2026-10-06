@@ -634,4 +634,13 @@ pub struct FunctionType {
     /// unlike [`Self::nocf`] it is not a difference between types: gcc takes a pointer of one
     /// for a pointer of the other in silence, and a composite keeps it if either had it.
     pub indirect_return: bool,
+    /// Who takes the address a returned structure goes back through off the stack, where
+    /// `__attribute__((callee_pop_aggregate_return(n)))` on 32-bit x86 said: the callee for one,
+    /// with a `ret $4`, and the caller for zero. [`None`] is the convention's own answer, which
+    /// is the callee on i386 System V and the caller on 32-bit Windows.
+    ///
+    /// gcc reads it off the type and does not hold it against another type, so like
+    /// [`Self::indirect_return`] it is no difference between types, and a composite keeps the
+    /// first declaration's answer.
+    pub return_pointer_popped: Option<bool>,
 }

@@ -1339,6 +1339,16 @@ tests = ["rucc::the_32_bit_conventions_warn_on_linux_and_are_silent_on_windows",
 notes = "On 32-bit x86 outside Windows the first n words of the arguments go in `eax`, `edx` and `ecx` the way gcc puts them there, structures of up to n words and the address of a returned structure included, and a variadic function takes everything on the stack whatever it says. `-mregparm=` sets the count for the whole unit and the attribute changes it for one function, which is how the kernel has `asmlinkage` be `regparm(0)`. On x86-64 outside Windows it is dropped with gcc's warning, and on Windows it is dropped quietly, which on 32-bit Windows is still short of gcc and is tamnd/rucc#2534. `__has_attribute` answers yes on x86 and x86-64."
 
 [[feature]]
+name = "callee_pop_aggregate_return"
+kind = "attribute"
+gcc_version = "4.6"
+status = "implemented"
+targets = ["x86-64", "x86"]
+used_by = ["mingw-w64"]
+tests = ["rucc::the_attribute_says_who_pops_a_returned_address", "rucc::callee_pop_aggregate_return_is_checked_in_gcc_s_words", "rucc-types::who_pops_a_returned_address_is_no_difference_between_types", "rucc-target::an_attribute_says_who_pops_the_return_address_slot"]
+notes = "On 32-bit x86 one has the callee take the address of a returned structure off the stack with `ret $4` and zero has the caller do it, whichever the ABI says by itself, as gcc does. Where the address is in `eax` under `regparm`, and under `stdcall`, it changes nothing. On x86-64 it is dropped with gcc's warning that it is only available for 32-bit, and an argument other than the integer constant zero or one is dropped with gcc's warning about it. A list with no argument or two is refused, E0840. It is not part of the type, so a redeclaration without it keeps it."
+
+[[feature]]
 name = "vectorcall"
 kind = "attribute"
 gcc_version = "none"

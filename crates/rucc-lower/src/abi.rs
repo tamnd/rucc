@@ -216,7 +216,7 @@ pub(crate) fn plan(
     signature.convention = convention;
     if matches!(ret.pass, Pass::Reference | Pass::Memory) {
         let (size, align) = (ret.size, ret.align);
-        signature.params.push(Param::with_abi(Type::PTR, Abi::Sret { size, align }));
+        signature.params.push(Param::with_abi(Type::PTR, Abi::Sret { size, align, popped: None }));
     } else {
         let returns = ret.types.iter().map(|ty| extended(types, target, narrow, &ret, *ty));
         signature.returns.extend(returns);
@@ -768,7 +768,7 @@ mod tests {
         assert!(plan.returns_through_memory());
         assert!(plan.signature.returns.is_empty());
         assert_eq!(plan.signature.params.len(), 1);
-        assert_eq!(plan.signature.params[0].abi, Abi::Sret { size: 24, align: 8 });
+        assert_eq!(plan.signature.params[0].abi, Abi::Sret { size: 24, align: 8, popped: None });
     }
 
     #[test]
@@ -991,7 +991,7 @@ mod tests {
         assert_eq!(both.args[0].types, vec![Type::PTR]);
         assert!(both.signature.returns.is_empty());
         assert_eq!(both.signature.params.len(), 2);
-        assert_eq!(both.signature.params[0].abi, Abi::Sret { size: 16, align: 16 });
+        assert_eq!(both.signature.params[0].abi, Abi::Sret { size: 16, align: 16, popped: None });
 
         let narrow =
             plan(&types, &msvc, Convention::Target, wide, &[wide], &[], false).expect("a plan");
@@ -1038,7 +1038,7 @@ mod tests {
         assert!(ms.returns_through_memory(), "a long double comes back through memory");
         assert_eq!(ms.args[0].pass, Pass::Reference);
         assert_eq!(ms.args[1].pass, Pass::Reference);
-        assert_eq!(ms.signature.params[0].abi, Abi::Sret { size: 16, align: 16 });
+        assert_eq!(ms.signature.params[0].abi, Abi::Sret { size: 16, align: 16, popped: None });
 
         let sysv =
             plan(&types, &mingw, Convention::Sysv, void, &[pair], &[], false).expect("a plan");

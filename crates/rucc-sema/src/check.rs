@@ -68,6 +68,7 @@ use crate::scope::{Binding, Scopes};
 use crate::tast::{Const, Tast};
 
 mod advice;
+mod aggregate_return;
 mod annotate;
 mod assume;
 mod attr;
