@@ -2107,7 +2107,9 @@ mod tests {
                 let ahead = build.icmp(asked, start, limit);
                 build.br_if(ahead, pre, &[], exit, &[]);
             }
-            None => build.jump(pre, &[]),
+            None => {
+                build.jump(pre, &[]);
+            }
         }
 
         let mut build = Builder::new(&mut func, pre);
