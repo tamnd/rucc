@@ -53,6 +53,20 @@ pub fn assemble(opts: &Options, name: &str, cpp: bool, fs: &dyn FileSystem) -> C
         }
     };
 
+    if opts.target.arch.is_wasm() {
+        // The dialect of LLVM for wasm, as `rucc -S` writes it, which the reader in `rucc-wasm`
+        // takes back into the object model of that back end (tamnd/rucc#3141).
+        return match rucc_wasm::assemble(&text) {
+            Ok(written) => {
+                let object = Artifact::Object { bytes: written.bytes, defines: written.defines };
+                done(object, messages, 0, deps, temps)
+            }
+            Err((line, why)) => {
+                messages.push(format!("{name}:{line}: error: {why}"));
+                done(Artifact::Nothing, messages, 1, deps, temps)
+            }
+        };
+    }
     let target = rucc_target::TargetInfo::new(opts.target);
     let flags = rucc_asm::Flags {
         fatal_warnings: opts.asm_fatal_warnings,

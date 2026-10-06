@@ -669,6 +669,8 @@ fn len32(n: usize) -> u64 {
 ///
 /// When a fixup or a symbol refers to something that is not in the module. See [`Error`].
 pub fn write(module: &Module) -> Result<Written, Error> {
+    let ordered = in_type_order(module);
+    let module = ordered.as_ref().unwrap_or(module);
     let layout = Layout::of(module)?;
     let mut out = Vec::from(MAGIC);
     // The index of each section in the file, which a reloc section names.
@@ -871,6 +873,55 @@ pub fn write(module: &Module) -> Result<Written, Error> {
         .map(|(_, s)| s.name.clone())
         .collect();
     Ok(Written { bytes: out, defines })
+}
+
+/// The module with its types in the order of their first use, or nothing when they are in that
+/// order already. The first use of a type is the first function or tag symbol that has it, in
+/// symbol order, and else the first `call_indirect` that names it, in the order of the code. A
+/// type that nothing uses goes. The translation finds a type when it first needs it, and the
+/// reader of the `-S` text finds it where the text names it, so without this order the two would
+/// write two type sections for one object. A type index that is not in the list leaves the module
+/// as it is, so that [`write`] gives the error that it gives for it.
+fn in_type_order(module: &Module) -> Option<Module> {
+    let count = module.types.len();
+    let mut order: Vec<u32> = Vec::with_capacity(count);
+    let mut new = vec![None; count];
+    let mut outside = false;
+    let mut see = |ty: u32| match new.get_mut(ty as usize) {
+        Some(slot @ None) => {
+            *slot = Some(u32::try_from(order.len()).expect("fewer than 2^32 types"));
+            order.push(ty);
+        }
+        Some(Some(_)) => {}
+        None => outside = true,
+    };
+    for symbol in &module.symbols {
+        if let SymbolKind::Function { ty, .. } | SymbolKind::Tag { ty, .. } = symbol.kind {
+            see(ty);
+        }
+    }
+    let calls = module.functions.iter().flat_map(|f| &f.fixups);
+    for fixup in calls.filter(|f| f.kind.names_type()) {
+        see(fixup.target);
+    }
+    let same = order.len() == count && order.iter().zip(0..).all(|(&old, at)| old == at);
+    if outside || same {
+        return None;
+    }
+    let mut out = module.clone();
+    out.types = order.iter().map(|&old| module.types[old as usize].clone()).collect();
+    let renumber = |ty: &mut u32| *ty = new[*ty as usize].expect("every type in use has a place");
+    for symbol in &mut out.symbols {
+        if let SymbolKind::Function { ty, .. } | SymbolKind::Tag { ty, .. } = &mut symbol.kind {
+            renumber(ty);
+        }
+    }
+    for fixup in out.functions.iter_mut().flat_map(|f| &mut f.fixups) {
+        if fixup.kind.names_type() {
+            renumber(&mut fixup.target);
+        }
+    }
+    Some(out)
 }
 
 /// The payload of the `producers` section, or nothing when there is nothing to say. The `-S` text
