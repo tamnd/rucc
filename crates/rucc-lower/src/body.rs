@@ -5583,6 +5583,13 @@ impl<'u> Body<'_, 'u> {
                 let total = (!negative).then(|| (bits as u64).checked_mul(bytes)).flatten();
                 total.map_or(Flags::NONE, |total| self.forward(total))
             }
+            // A number of elements that is not negative, because its type is unsigned or because
+            // it was widened with zeros, moves the address forward inside its object too, and so
+            // the add does not wrap. Clang gives `nuw` to such a step for the same reason, and wasm
+            // needs the flag to put the address of a global in the offset field of an access.
+            (None, Stride::Bytes(_), false) if !self.unit.wrapping.pointer => {
+                if !signed || self.widened_with_zeros(steps) { Flags::NUW } else { Flags::NONE }
+            }
             _ => Flags::NONE,
         };
         let moved = {
@@ -9227,6 +9234,12 @@ impl<'u> Body<'_, 'u> {
     /// Whether a value is an integer constant other than zero.
     fn nonzero_constant(&self, value: Value) -> bool {
         self.bits_of(value).is_some_and(|bits| bits != 0)
+    }
+
+    /// Whether a value is a narrower integer widened with zeros, which is never negative.
+    fn widened_with_zeros(&self, value: Value) -> bool {
+        let Def::Result { inst, .. } = self.func[value].def else { return false };
+        self.func[inst].opcode == Opcode::ZExt
     }
 
     /// The bits of an integer constant, for a value that is one.

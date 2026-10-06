@@ -265,6 +265,18 @@ struct Lower<'u, 'a> {
     signed: Set<Value>,
 }
 
+/// A load or a store whose address is split as [`Lower::folded`] splits it.
+struct Folded {
+    /// The index of the address among the arguments.
+    at: usize,
+    /// The value that the code pushes for the address.
+    base: Value,
+    /// The number of bytes in the offset field, past the global when there is one.
+    offset: u32,
+    /// The global whose address is in the offset field too.
+    symbol: Option<rucc_base::Symbol>,
+}
+
 /// The notes of the tree form for one function, and the numbers that the text of the IR gives
 /// its values and blocks, which the notes use as names.
 struct Annotate {
@@ -968,19 +980,22 @@ impl Lower<'_, '_> {
     /// or a store with a folded address pushes the base address. See [`Self::folded`].
     fn inputs(&self, inst: Inst) -> Vec<Value> {
         let mut args = self.args(inst);
-        if let Some((at, base, _)) = self.folded(inst) {
-            args[at] = base;
+        if let Some(folded) = self.folded(inst) {
+            args[folded.at] = folded.base;
         }
         args
     }
 
-    /// The index of the address among the arguments of a load or a store, the base address that
-    /// the code pushes for it, and the number that goes in the offset field of the access, when
-    /// the address is a constant number of bytes past the base. Only a `ptr_add` with `nuw` and a
+    /// The address of a load or a store split into the base that its code pushes and what goes
+    /// in the offset field, when the address is a constant number of bytes past the base, or the
+    /// address of a global plus such a number past an index. Only a `ptr_add` with `nuw` and a
     /// constant that is not negative is folded, because the engine adds the offset field with no
-    /// wrap, and `nuw` says that the add of the IR does not wrap either. This is done only at
-    /// `-O1` and above, as clang does it.
-    fn folded(&self, inst: Inst) -> Option<(usize, Value, u32)> {
+    /// wrap, and `nuw` says that the add of the IR does not wrap either. The address of a global
+    /// goes in the offset field only when it is the base of a `ptr_add` with `nuw` whose other
+    /// operand is not a constant, which is how clang writes `a[i]` for an index that is not
+    /// negative: `local.get i` and `i32.load a`, with no `i32.const a` and no `i32.add`. This is
+    /// done only at `-O1` and above, as clang does it.
+    fn folded(&self, inst: Inst) -> Option<Folded> {
         let func = self.func;
         let at = match func[inst].opcode {
             Opcode::Load => 0,
@@ -994,9 +1009,39 @@ impl Lower<'_, '_> {
         if args.iter().chain(&self.results(inst)).any(|&v| is_pair(self.ty(v))) {
             return None;
         }
-        let mut base = *args.get(at)?;
+        let (mut base, mut offset) = self.offset(*args.get(at)?, u64::from(u32::MAX));
+        let mut symbol = None;
+        if let Some((def, _)) = self.def(base) {
+            let data = &func[def];
+            if let (Opcode::PtrAdd, &[from, by]) = (data.opcode, &func[data.args]) {
+                // The addend of a relocation is signed, so the global and the constants past it
+                // stay under 2 GiB.
+                let most = i32::MAX as u64;
+                let index = offset <= most
+                    && self.constant(by).is_none()
+                    && !self.wide(by)
+                    && self.narrow(by).is_none()
+                    && data.flags.contains(Flags::NUW);
+                let (start, more) = self.offset(from, most.saturating_sub(offset));
+                if let (true, Some(global)) = (index, self.data_address(start)) {
+                    (base, offset, symbol) = (by, offset + more, Some(global));
+                }
+            }
+        }
+        (offset != 0 || symbol.is_some()).then_some(Folded {
+            at,
+            base,
+            offset: offset as u32,
+            symbol,
+        })
+    }
+
+    /// The address that `value` is a constant number of bytes past, through each `ptr_add` with
+    /// `nuw` and a constant that is not negative, and that number, which stays at or under `limit`.
+    fn offset(&self, mut value: Value, limit: u64) -> (Value, u64) {
+        let func = self.func;
         let mut offset = 0u64;
-        while let Some((def, _)) = self.def(base) {
+        while let Some((def, _)) = self.def(value) {
             let data = &func[def];
             let &[from, by] = &func[data.args] else { break };
             if data.opcode != Opcode::PtrAdd || !data.flags.contains(Flags::NUW) {
@@ -1008,12 +1053,21 @@ impl Lower<'_, '_> {
                 break;
             }
             match offset.checked_add(bits as u64) {
-                Some(total) if total <= u64::from(u32::MAX) => offset = total,
+                Some(total) if total <= limit => offset = total,
                 _ => break,
             }
-            base = from;
+            value = from;
         }
-        (offset != 0).then_some((at, base, offset as u32))
+        (value, offset)
+    }
+
+    /// The symbol of a `global_addr` of data, which has a place in memory. The address of a
+    /// function is a slot in the table and cannot go in the offset field of an access.
+    fn data_address(&self, value: Value) -> Option<rucc_base::Symbol> {
+        let (def, _) = self.def(value)?;
+        let Extra::Symbol(symbol) = self.func[def].extra else { return None };
+        let data = self.func[def].opcode == Opcode::GlobalAddr;
+        (data && !self.unit.is_function(symbol).ok()?).then_some(symbol)
     }
 
     fn results(&self, inst: Inst) -> Vec<Value> {
@@ -1372,6 +1426,19 @@ impl Lower<'_, '_> {
         }
     }
 
+    /// The instruction of a load or a store with its offset field, which is the address of a
+    /// global plus a number when the address was folded that way.
+    fn access(&mut self, op: u8, align: u32, folded: Option<Folded>) -> Result<()> {
+        match folded {
+            Some(Folded { symbol: Some(symbol), offset, .. }) => {
+                let (_, target) = self.unit.address(symbol)?;
+                self.code.mem_at(op, align, target, offset as i32);
+            }
+            folded => self.code.mem(op, align, folded.map_or(0, |f| f.offset)),
+        }
+        Ok(())
+    }
+
     fn frame_pointer(&self) -> u32 {
         self.frame.fp.expect("a function with a slot in its frame has a frame pointer")
     }
@@ -1624,23 +1691,23 @@ impl Lower<'_, '_> {
                     op = if natural == 1 { emit::I32_LOAD8_S } else { emit::I32_LOAD16_S };
                 }
                 let align = self.mem_info(inst).map_or(natural, |m| m.align);
-                let (address, offset) = self.folded(inst).map_or((arg(0), 0), |(_, b, o)| (b, o));
-                self.push(address)?;
-                self.code.mem(op, align_field(align, natural), offset);
+                let folded = self.folded(inst);
+                self.push(folded.as_ref().map_or(arg(0), |f| f.base))?;
+                self.access(op, align_field(align, natural), folded)?;
                 self.set(results[0]);
             }
             Opcode::Store | Opcode::AtomicStore => {
                 let ty = self.ty(arg(0));
                 let (op, natural) = store_op(ty)?;
                 let align = self.mem_info(inst).map_or(natural, |m| m.align);
-                let (address, offset) = self.folded(inst).map_or((arg(1), 0), |(_, b, o)| (b, o));
-                self.push(address)?;
+                let folded = self.folded(inst);
+                self.push(folded.as_ref().map_or(arg(1), |f| f.base))?;
                 if self.narrow(arg(0)) == Some(1) {
                     self.push_z(arg(0))?
                 } else {
                     self.push(arg(0))?
                 }
-                self.code.mem(op, align_field(align, natural), offset);
+                self.access(op, align_field(align, natural), folded)?;
             }
             Opcode::Alloca => {
                 if let Some(&offset) = self.frame.slots.get(&inst) {

@@ -1679,6 +1679,100 @@ fn a_constant_offset_with_nuw_goes_in_the_offset_field() {
     assert!(!f.contains("i32.load\t4") && !f.contains("i32.store\t8"), "{f}");
 }
 
+/// Reads and a write of arrays at an index, which is the C below, and a read with an index that
+/// can be negative, so its `ptr_add` has no `nuw`, and a read past the address of a function.
+///
+/// ```c
+/// int a[100];
+/// struct { int n; short s[50]; } g;
+/// int f(unsigned i) { return a[i]; }
+/// int h(unsigned i) { return g.s[i]; }
+/// void st(unsigned i, int v) { a[i + 3] = v; }
+/// int sg(int i) { return a[i]; }
+/// ```
+const GLOBAL: &str = r#"; ModuleID = 't.c'
+; format 0
+target triple = "wasm32-unknown-wasip1"
+target datalayout = "e-p:32:32-i64:64-S128"
+
+global @g : bytes 104 = { zero 104 }, align 4, linkage(external)
+global @a : bytes 400 = { zero 400 }, align 4, linkage(external)
+
+func @f(i32) -> i32, linkage(external) {
+block0(%0: i32):
+    %1 = global_addr @a
+    %2 = iconst.i32 2
+    %3 = shl %0, %2
+    %4 = ptr_add.nuw %1, %3
+    %5 = load.i32 %4, align 4
+    return %5
+}
+
+func @h(i32) -> i32, linkage(external) {
+block0(%0: i32):
+    %1 = global_addr @g
+    %2 = iconst.i32 4
+    %3 = ptr_add.nuw %1, %2
+    %4 = add %0, %0
+    %5 = ptr_add.nuw %3, %4
+    %6 = iconst.i32 2
+    %7 = ptr_add.nuw %5, %6
+    %8 = load.i16 %7, align 2
+    %9 = sext.i32 %8
+    return %9
+}
+
+func @st(i32, i32), linkage(external) {
+block0(%0: i32, %1: i32):
+    %2 = global_addr @a
+    %3 = iconst.i32 12
+    %4 = shl %0, %3
+    %5 = ptr_add.nuw %2, %4
+    store %1 -> %5, align 4
+    return
+}
+
+func @sg(i32) -> i32, linkage(external) {
+block0(%0: i32):
+    %1 = global_addr @a
+    %2 = iconst.i32 2
+    %3 = shl %0, %2
+    %4 = ptr_add %1, %3
+    %5 = load.i32 %4, align 4
+    return %5
+}
+
+func @code(i32) -> i32, linkage(external) {
+block0(%0: i32):
+    %1 = global_addr @code
+    %2 = ptr_add.nuw %1, %0
+    %3 = load.i32 %2, align 4
+    return %3
+}
+"#;
+
+/// With optimization, the address of a global that is the base of a `ptr_add` with `nuw` and an
+/// index goes in the offset field of the access, with the constants around it, as clang writes
+/// it. The code pushes only the index. A `ptr_add` with no `nuw` stays an `i32.add`, and so does
+/// the address of a function, which is a slot in the table and not a place in memory.
+#[test]
+fn the_address_of_a_global_at_an_index_goes_in_the_offset_field() {
+    let f = body_of(GLOBAL, "f", true);
+    assert!(f.contains("i32.shl\n\ti32.load\ta\n"), "{f}");
+    assert!(!f.contains("i32.add") && !f.contains("i32.const\ta"), "{f}");
+    let h = body_of(GLOBAL, "h", true);
+    assert!(h.contains("i32.add\n\ti32.load16_s\tg+6\n"), "{h}");
+    assert_eq!(h.matches("i32.add").count(), 1, "{h}");
+    let st = body_of(GLOBAL, "st", true);
+    assert!(st.contains("local.get\t1\n\ti32.store\ta\n"), "{st}");
+    let sg = body_of(GLOBAL, "sg", true);
+    assert!(sg.contains("i32.const\ta\n") && sg.contains("i32.load\t0\n"), "{sg}");
+    let code = body_of(GLOBAL, "code", true);
+    assert!(code.contains("i32.add\n\ti32.load\t0\n"), "{code}");
+    let f = body_of(GLOBAL, "f", false);
+    assert!(f.contains("i32.const\ta\n") && f.contains("i32.load\t0\n"), "{f}");
+}
+
 /// Calls to `memcpy`, `memset` and `memmove`. The answer of the copy is the destination of the
 /// fill, and the answer of the fill is the answer of `f`. The copy in `g` has a small constant
 /// length, and `h` is marked `no_builtin`.

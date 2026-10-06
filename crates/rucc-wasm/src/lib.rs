@@ -589,12 +589,7 @@ impl Unit<'_> {
     /// The relocation and the symbol of the address of `symbol`, which is a slot in the function
     /// table for a function and a place in memory for data.
     pub(crate) fn address(&mut self, symbol: Symbol) -> Result<(bool, u32), String> {
-        let function = match self.ir.lookup(symbol) {
-            Some(SymbolRef::Func(_)) => true,
-            Some(SymbolRef::Alias(alias)) => matches!(self.root(alias)?, SymbolRef::Func(_)),
-            Some(SymbolRef::Global(_)) | None => false,
-        };
-        if function {
+        if self.is_function(symbol)? {
             // A slot in the table is an address only when the module has the table. On a target
             // with the long form of `call_indirect`, the object writer of LLVM imports
             // `__indirect_function_table` and keeps it for each relocation to a slot, also in a
@@ -610,6 +605,15 @@ impl Unit<'_> {
         let index = self.out.symbol(name.clone(), SymbolKind::Data { place: None }, 0);
         self.data.insert(name, index);
         Ok((false, index))
+    }
+
+    /// Whether the address of `symbol` is a slot in the function table and not a place in memory.
+    pub(crate) fn is_function(&self, symbol: Symbol) -> Result<bool, String> {
+        Ok(match self.ir.lookup(symbol) {
+            Some(SymbolRef::Func(_)) => true,
+            Some(SymbolRef::Alias(alias)) => matches!(self.root(alias)?, SymbolRef::Func(_)),
+            Some(SymbolRef::Global(_)) | None => false,
+        })
     }
 
     /// The function or the variable that the alias `id` names, past any alias that it names.
