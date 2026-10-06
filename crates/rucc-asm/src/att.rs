@@ -323,6 +323,8 @@ struct Writer<'a> {
 struct Frame {
     cfa: (u16, i32),
     saved: std::collections::BTreeMap<u16, i32>,
+    /// Whether the return address is signed, which only AArch64 says anything about.
+    signed: bool,
 }
 
 impl Frame {
@@ -330,7 +332,7 @@ impl Frame {
     /// record says: the frame ends a word above the stack pointer, and the return address is the
     /// word below the end. See `crate::unwind`.
     fn called() -> Self {
-        Self { cfa: (7, 8), saved: std::iter::once((16, -8)).collect() }
+        Self { cfa: (7, 8), saved: std::iter::once((16, -8)).collect(), signed: false }
     }
 
     /// The state after one row.
@@ -356,6 +358,7 @@ impl Frame {
                     *self = state;
                 }
             }
+            CfiOp::NegateRaState => self.signed = !self.signed,
         }
     }
 
@@ -376,6 +379,9 @@ impl Frame {
             if !to.saved.contains_key(&reg) {
                 rows.push(CfiOp::Restore(reg));
             }
+        }
+        if self.signed != to.signed {
+            rows.push(CfiOp::NegateRaState);
         }
     }
 }
@@ -801,6 +807,7 @@ impl Writer<'_> {
             CfiOp::Restore(reg) => writeln!(self.out, "\t.cfi_restore {reg}"),
             CfiOp::RememberState => writeln!(self.out, "\t.cfi_remember_state"),
             CfiOp::RestoreState => writeln!(self.out, "\t.cfi_restore_state"),
+            CfiOp::NegateRaState => writeln!(self.out, "\t.cfi_negate_ra_state"),
         };
     }
 

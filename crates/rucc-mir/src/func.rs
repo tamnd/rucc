@@ -136,6 +136,11 @@ pub enum CfiOp {
     RememberState,
     /// Take the rule set back off that stack.
     RestoreState,
+    /// The return address went from signed to plain or from plain to signed, which is what
+    /// `paciasp` and `autiasp` do to x30 on AArch64. An unwinder that reads the address out of a
+    /// frame between the two has to take the signature off before it uses it, and this row is how it
+    /// knows to. DWARF for AArch64 calls it `DW_CFA_AARCH64_negate_ra_state`.
+    NegateRaState,
 }
 
 /// Where the room a patcher was promised at the top of a function is.

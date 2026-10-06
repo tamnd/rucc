@@ -945,6 +945,14 @@ impl At<'_> {
                 };
                 0xd61f_0000 | op << 21 | rn << 5
             }
+            // The hint space, where a machine without the feature a hint is for runs it as a nop.
+            // That is why the pointer authentication a return address is signed with and the
+            // landing pads of branch target identification are written here and nowhere else.
+            "hint" => match values {
+                [Value::Imm(imm)] => 0xd503_201f | self.number(*imm, 128)? << 5,
+                _ => return Err(self.unwritten()),
+            },
+            _ if values.is_empty() && hint(m).is_some() => 0xd503_201f | hint(m).unwrap_or(0) << 5,
             "nop" | "yield" | "isb" if values.is_empty() => match m {
                 "nop" => 0xd503_201f,
                 "yield" => 0xd503_203f,
@@ -1854,6 +1862,31 @@ struct Access {
 }
 
 /// The extension that means no extension in an instruction of that width.
+/// The number of the hint a name in the hint space is, which `hint` takes as its operand. These
+/// are the pointer authentication ones that sign and check the return address in x30 against the
+/// stack pointer or zero, with the A key or the B key. The landing pads of branch target
+/// identification are hints too, which the reader writes as `hint` since `bti` has a name after it.
+pub(crate) fn hint(name: &str) -> Option<u32> {
+    Some(match name {
+        "xpaclri" => 7,
+        "pacia1716" => 8,
+        "pacib1716" => 10,
+        "autia1716" => 12,
+        "autib1716" => 14,
+        "esb" => 16,
+        "csdb" => 20,
+        "paciaz" => 24,
+        "paciasp" => 25,
+        "pacibz" => 26,
+        "pacibsp" => 27,
+        "autiaz" => 28,
+        "autiasp" => 29,
+        "autibz" => 30,
+        "autibsp" => 31,
+        _ => return None,
+    })
+}
+
 fn default_extend(width: Width) -> Extend {
     match width {
         Width::W => Extend::Uxtw,

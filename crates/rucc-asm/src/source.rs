@@ -1229,7 +1229,16 @@ impl Reader {
             | "cfi_remember_state"
             | "cfi_restore_state"
             | "cfi_personality"
-            | "cfi_lsda" => {}
+            | "cfi_lsda"
+            | "cfi_negate_ra_state" => {}
+            // The B key needs a header of its own that says so, which this does not write, and
+            // leaving the directive out would have the unwinder check a signature with the wrong key.
+            "cfi_b_key_frame" => {
+                return Err(self.bad(
+                    "'.cfi_b_key_frame', a return address signed with the B key, which this \
+                     assembler writes no unwind header for",
+                ));
+            }
             _ => return Ok(()),
         }
         let (here, at) = (self.here, self.at());
@@ -1315,6 +1324,7 @@ impl Reader {
                 })?;
                 CfiOp::RestoreState
             }
+            "cfi_negate_ra_state" => CfiOp::NegateRaState,
             _ => unreachable!("every other word returned above"),
         };
         frame.rows.push(((at - frame.start) as usize, op));
@@ -5973,6 +5983,37 @@ _tls$tlv$init:
         assert_eq!(&frame[20..24], &[0; 4]);
         // x19 saved two slots below the end of the frame, after the first instruction.
         assert!(frame.windows(5).any(|w| w == [0x44, 0x0e, 16, 0x93, 2]), "{frame:x?}");
+    }
+
+    #[test]
+    fn an_aarch64_return_address_signed_in_the_prologue_says_so_in_the_unwind_table() {
+        // What clang writes for a function under -mbranch-protection=pac-ret+bti, and the kernel's
+        // `bti c` and `hint #34` for the landing pad a function written in assembly begins with.
+        let read = aarch64(concat!(
+            "f:\n\t.cfi_startproc\n\tpaciasp\n\t.cfi_negate_ra_state\n",
+            "\tstp x29, x30, [sp, #-16]!\n\t.cfi_def_cfa_offset 16\n",
+            "\tldp x29, x30, [sp], #16\n\tautiasp\n\tret\n\t.cfi_endproc\n",
+            "g:\n\tbti c\n\thint #34\n\tbti j\n\tret\n",
+        ));
+        assert_eq!(
+            words(&read, ".text"),
+            [
+                0xd503_233f,
+                0xa9bf_7bfd,
+                0xa8c1_7bfd,
+                0xd503_23bf,
+                0xd65f_03c0,
+                0xd503_245f,
+                0xd503_245f,
+                0xd503_249f,
+                0xd65f_03c0
+            ]
+        );
+        // The flip after the first instruction, and then the frame moving after the second.
+        let frame = bytes(&read, ".eh_frame");
+        assert!(frame.windows(5).any(|w| w == [0x44, 0x2d, 0x44, 0x0e, 16]), "{frame:x?}");
+        let trouble = super::read("f:\n\t.cfi_startproc\n\t.cfi_b_key_frame\n", Arch::Aarch64);
+        assert!(trouble.unwrap_err().why.contains("B key"));
     }
 
     #[test]

@@ -327,6 +327,19 @@ d5033b9f	dsb ish
 d5033f9f	dsb sy
 d5033fdf	isb
 d503203f	yield
+d503233f	paciasp
+d50323bf	autiasp
+d503237f	pacibsp
+d50323ff	autibsp
+d503231f	paciaz
+d503239f	autiaz
+d50320ff	xpaclri
+d503233f	hint #25
+d503245f	hint #34
+d503241f	bti
+d503245f	bti c
+d503249f	bti j
+d50324df	bti jc
 d53bd040	mrs x0, tpidr_el0
 d51bd040	msr tpidr_el0, x0
 d53b4200	mrs x0, nzcv
