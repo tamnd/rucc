@@ -481,8 +481,8 @@ kind = "attribute"
 gcc_version = "3.1"
 status = "implemented"
 used_by = ["linux", "glibc", "ffmpeg"]
-tests = ["rucc::a_fortified_wrapper_forwards_its_arguments", "rucc-opt::a_call_to_an_always_inline_function_is_replaced_by_its_body", "rucc-pp::the_kernel_s_compiler_attributes_are_answered_the_way_gcc_answers_them"]
-notes = "Every direct call is inlined at every level, `-O0` included, by `rucc_opt::inline`, which settles each callee before its callers and leaves a call inside a cycle alone. A call it refuses, which is one to a function that takes a structure by value, calls `va_start`, takes a label's address or calls `setjmp`, stays a call and is reported as missed under `-fopt-info`, where gcc gives an error."
+tests = ["rucc::a_fortified_wrapper_forwards_its_arguments", "rucc::an_always_inline_function_that_calls_va_start_is_refused", "rucc-opt::a_call_to_an_always_inline_function_is_replaced_by_its_body", "rucc-pp::the_kernel_s_compiler_attributes_are_answered_the_way_gcc_answers_them"]
+notes = "Every direct call is inlined at every level, `-O0` included, by `rucc_opt::inline`, which settles each callee before its callers and leaves a call inside a cycle alone. A body gcc says can never be copied into a caller is refused with gcc's error, `E0841`, in gcc's words and at the name in the definition: one that calls `va_start`, `setjmp` by any of its names, `__builtin_setjmp`, `__builtin_longjmp` or `__builtin_apply_args`, jumps through a label's address, or keeps a label's address in a `static`. As with gcc that is whether or not anything calls it, as long as the file compiles the function at all, so a `static` one nothing names and an inline definition nothing names are left alone. A call refused for any other reason, such as a call inside a cycle, stays a call and is reported as missed under `-fopt-info`."
 
 [[feature]]
 name = "gnu_inline"
