@@ -51,6 +51,9 @@
 //! count it returns is the `j` at which the old test first refuses. So the pointer at the moment
 //! the loop used to leave is `start + count * step`, and that number is the limit. It is one
 //! addition in the preheader and it is the same value the loop forms on its last turn anyway.
+//! Where the loop has nothing after the test but the way back, the step is taken in front of the
+//! test and the test is asked of the stepped pointer, and then the limit is one step further on.
+//! `retarget` says why that is the same test and what it is for.
 //!
 //! Why `!=` is the same test. Over `j` from nothing to the count, the pointer takes a different
 //! value each time, because the whole walk fits in a signed sixty four bit number and so no two of
@@ -241,7 +244,8 @@ impl Pass for Ivopts {
                 continue;
             };
             if let Some(aim) = plan.aim {
-                retarget(func, &walk, &aim, fuel, &mut stats);
+                let ahead = ahead(func, cfg, loops, plan.id, &walk, &aim);
+                retarget(func, &walk, &aim, ahead, fuel, &mut stats);
             }
         }
         stats
@@ -1753,8 +1757,30 @@ struct Walk {
 /// Nothing is deleted and nothing is edited in place. A new comparison goes in front of the old
 /// one and the branch is repointed at it, so anybody else reading the old comparison still reads
 /// what they read before and `crate::dce` is what takes it away when nobody does.
-fn retarget(func: &mut Func, walk: &Walk, aim: &Aim, fuel: &mut Fuel, stats: &mut Stats) {
-    let Some(reach) = reach(func, walk, aim) else {
+///
+/// # When the step goes in front of the test
+///
+/// With a jump back to the header that [`ahead`] found, the pointer is moved on in front of the
+/// test rather than behind it, the test is asked of the moved pointer, and the jump carries that
+/// one round. The limit is then one step further on, which is the address the pointer's last
+/// increment forms anyway. The test is the same test: on the `j`th turn the moved pointer is
+/// `start + (j + 1) * step` and the limit is `start + (count + 1) * step`, and the two are equal on
+/// the turn the old test refused on and on no other, for the reason the module documentation
+/// gives with one more step in the walk.
+///
+/// What it buys is the shape of the loop. Moved on behind the test, the step was in a block of its
+/// own between the test and the header, so every turn was a branch out, the increment and a jump
+/// back. With nothing left in that block but the jump, the branch goes straight to the header and
+/// each turn is one branch, the way GCC writes the same loop.
+fn retarget(
+    func: &mut Func,
+    walk: &Walk,
+    aim: &Aim,
+    ahead: Option<Inst>,
+    fuel: &mut Fuel,
+    stats: &mut Stats,
+) {
+    let Some(reach) = reach(func, walk, aim, ahead.is_some()) else {
         stats.missed(LIMIT_TOO_FAR);
         return;
     };
@@ -1766,21 +1792,36 @@ fn retarget(func: &mut Func, walk: &Walk, aim: &Aim, fuel: &mut Fuel, stats: &mu
     let term = func.terminator(walk.pre).expect("a preheader ends in a jump to the header");
     let limit = match reach {
         Reach::Fixed(far) => past(func, term, walk.start, far),
+        // The step on top is one more on the count's own offset where nothing has to be clamped,
+        // which is the same fold [`count_down`] makes. A clamped count gets it after the clamp,
+        // since a count that came out negative is a loop that refuses at the first test, and the
+        // moved pointer is one step past the start on that test.
+        Reach::Worked(count) if aim.entered => {
+            let times = crate::loop_delete::clamped(func, term, count, aim.reading);
+            let limit = walked(func, term, walk.start, times, walk.step);
+            if ahead.is_some() { past(func, term, limit, walk.step) } else { limit }
+        }
         Reach::Worked(count) => {
-            let times = if aim.entered {
-                crate::loop_delete::clamped(func, term, count, aim.reading)
-            } else {
-                crate::loop_delete::widened(func, term, count, aim.reading)
-            };
+            let count = Plain { offset: count.offset + i128::from(ahead.is_some()), ..count };
+            let times = crate::loop_delete::widened(func, term, count, aim.reading);
             walked(func, term, walk.start, times, walk.step)
         }
+    };
+
+    let tested = match ahead {
+        Some(back) => {
+            let next = past(func, aim.at, walk.param, walk.step);
+            carry(func, back, walk.param, next);
+            next
+        }
+        None => walk.param,
     };
 
     // Not an ordering, so there is no signedness to change and nothing to get wrong at the ends,
     // which is two of section 28.7's five in one choice of predicate.
     let pred = if aim.stays { IntPred::Ne } else { IntPred::Eq };
     let span = func.span(aim.at);
-    let args = func.push_values(&[walk.param, limit]);
+    let args = func.push_values(&[tested, limit]);
     let data = InstData { args, extra: Extra::IntPred(pred), ..InstData::new(Opcode::ICmp) };
     let ty = func[walk.param].ty.with_lane(Type::I1);
     let inst = func.create_inst(data, &[ty], span);
@@ -1788,6 +1829,66 @@ fn retarget(func: &mut Func, walk: &Walk, aim: &Aim, fuel: &mut Fuel, stats: &mu
     let cond = func[inst].first_result.expect("one result was asked for");
     set_arg(func, aim.branch, 0, cond);
     stats.optimized(RETARGETED);
+}
+
+/// The jump back to the header the pointer's step can be taken in front of the exit test for.
+///
+/// Either the branch that is the exit test, when it goes back to the header itself, or a block
+/// between the two that only the test reaches and that does nothing with the pointer but step it.
+/// In both the pointer is finished with by the time the test is asked, so moving it on in front of
+/// the test has it live in one register at a time, the same as before. A block with more of the
+/// loop's work in it after the test is left as it is, because work there that reads the pointer
+/// would want the old one and the new one both, and that is one more register for a branch.
+fn ahead(
+    func: &Func,
+    cfg: &Cfg,
+    loops: &Loops,
+    id: LoopId,
+    walk: &Walk,
+    aim: &Aim,
+) -> Option<Inst> {
+    let header = loops.header(id);
+    let exiting = func.block_of(aim.branch)?;
+    let calls = &func[func.target_list(aim.branch)];
+    let stay = calls.get(usize::from(!aim.stays))?.block;
+    if stay == header {
+        return Some(aim.branch);
+    }
+    if loops.latches(id) != [stay] || cfg.predecessors(stay).iter().any(|&from| from != exiting) {
+        return None;
+    }
+    let term = func.terminator(stay)?;
+    if func[term].opcode != Opcode::Jump {
+        return None;
+    }
+    let Def::Param { index, .. } = func[walk.param].def else { return None };
+    let index = usize::try_from(index).ok()?;
+    let back = func[func.target_list(term)].iter().find(|call| call.block == header)?;
+    let carried = *func[back.args].get(index)?;
+    let Def::Result { inst: step, .. } = func[carried].def else { return None };
+    let reads = |inst: Inst| func[func[inst].args].contains(&walk.param);
+    let passes =
+        func[func.target_list(term)].iter().any(|call| func[call.args].contains(&walk.param));
+    let alone = !passes && func.insts(stay).all(|inst| inst == step || !reads(inst));
+    alone.then_some(term)
+}
+
+/// Has the jump back to the header carry a value round in the pointer's place.
+fn carry(func: &mut Func, back: Inst, param: Value, value: Value) {
+    let Def::Param { block: header, index } = func[param].def else { return };
+    let Ok(index) = usize::try_from(index) else { return };
+    for at in func.target_list(back).iter() {
+        let call = func[at];
+        if call.block != header {
+            continue;
+        }
+        let mut values = func[call.args].to_vec();
+        if let Some(slot) = values.get_mut(index) {
+            *slot = value;
+        }
+        let args = func.push_values(&values);
+        func.set_block_call(at, BlockCall { args, ..call });
+    }
 }
 
 /// How far past its start the pointer is when the loop leaves.
@@ -1819,11 +1920,15 @@ enum Reach {
 /// `crate::range` would answer this more tightly, since a length checked before it is walked is
 /// bounded by the check, and the width is what is left when nothing checked it. Asking it is a
 /// second measurement rather than a second line, so the width is what this asks.
-fn reach(func: &Func, walk: &Walk, aim: &Aim) -> Option<Reach> {
+///
+/// A walk whose step goes in front of the test is one step longer, since its limit is the address
+/// one past the last turn, and that step is counted in when `ahead` says so.
+fn reach(func: &Func, walk: &Walk, aim: &Aim, ahead: bool) -> Option<Reach> {
     let fits = |far: i128| i64::try_from(far).is_ok().then_some(far);
+    let more = i128::from(ahead);
     match aim.count {
         Count::Exact(count) => {
-            let far = i128::try_from(count).ok()?.checked_mul(walk.step)?;
+            let far = i128::try_from(count).ok()?.checked_add(more)?.checked_mul(walk.step)?;
             Some(Reach::Fixed(fits(far)?))
         }
         Count::Symbolic(count) => {
@@ -1832,7 +1937,8 @@ fn reach(func: &Func, walk: &Walk, aim: &Aim) -> Option<Reach> {
             let bits = func[on].ty.bits();
             let most = 1i128.checked_shl(bits)?;
             let most = most.checked_mul(plain.scale.checked_abs()?)?;
-            let most = fits(most.checked_add(plain.offset.checked_abs()?)?)?;
+            let offset = plain.offset.checked_abs()?.checked_add(more)?;
+            let most = fits(most.checked_add(offset)?)?;
             fits(most.checked_mul(walk.step.checked_abs()?)?)?;
             Some(Reach::Worked(plain))
         }
@@ -3278,5 +3384,130 @@ mod tests {
         assert_eq!(stats.count(Kind::Optimized, ADDED), 0);
         assert_eq!(params(&func, it.head), before, "nothing new goes round the loop");
         assert!(!stats.changed());
+    }
+
+    /// A loop that tests at the bottom and steps behind the test in a block of its own.
+    ///
+    /// ```text
+    /// into:      jump head(0)
+    /// head(i):   body; n = i + 1; t = n < limit; br t -> back, out
+    /// back:      jump head(n)
+    /// ```
+    ///
+    /// What loop rotation leaves for `for (i = 0; i < limit; i++)` once a guard has said it is
+    /// entered, and the shape a pointer stepped in `back` turns into two branches a turn.
+    struct Rotated {
+        head: Block,
+        back: Block,
+        out: Block,
+        counter: Value,
+    }
+
+    fn rotated(func: &mut Func, into: Block, ty: Type) -> Rotated {
+        let head = func.create_block();
+        let back = func.create_block();
+        let out = func.create_block();
+        let counter = func.append_param(head, ty);
+        let mut build = Builder::new(func, into);
+        let zero = build.iconst(ty, 0);
+        build.jump(head, &[zero]);
+        Rotated { head, back, out, counter }
+    }
+
+    /// Closes a rotated loop against a limit, once its body has been written into the header.
+    fn rotated_close(func: &mut Func, it: &Rotated, limit: Value) {
+        let ty = func[it.counter].ty;
+        let mut build = Builder::new(func, it.head);
+        let one = build.iconst(ty, 1);
+        let next = build.binary(Opcode::Add, it.counter, one, Flags::NSW);
+        let test = build.icmp(IntPred::Slt, next, limit);
+        build.br_if(test, it.back, &[], it.out, &[]);
+        Builder::new(func, it.back).jump(it.head, &[next]);
+    }
+
+    /// The block the last value a jump hands its target is worked out in.
+    fn carried_from(func: &Func, block: Block) -> Block {
+        let term = func.terminator(block).expect("every block here has one");
+        let call = func.successors(term).next().expect("a jump has one edge");
+        let value = *func[call.args].last().expect("the jump carries something");
+        match func[value].def {
+            rucc_ir::Def::Result { inst, .. } => func.block_of(inst).expect("placed"),
+            rucc_ir::Def::Param { block, .. } => block,
+        }
+    }
+
+    /// The pointer is stepped in the header in front of the test, and the block behind the test is
+    /// left with the jump and nothing the jump needs, which is what lets the branch go straight back.
+    #[test]
+    fn a_pointer_is_stepped_in_front_of_the_test_when_nothing_after_it_reads_the_pointer() {
+        let mut names = Interner::new();
+        let (mut func, entry, base) = shell(&mut names);
+        let it = rotated(&mut func, entry, Type::int(64));
+        let mut build = Builder::new(&mut func, it.head);
+        let addr = element(&mut build, base, it.counter, 0);
+        let zero = build.iconst(Type::int(32), 0);
+        build.store(zero, addr, plain(), Flags::NONE);
+        let limit = build.iconst(Type::int(64), 7);
+        rotated_close(&mut func, &it, limit);
+        Builder::new(&mut func, it.out).ret(&[]);
+        let before = stores(&func);
+        assert_eq!(before, (0..7).map(|turn| turn * STRIDE).collect::<Vec<_>>());
+
+        let stats = choose(&mut func);
+        assert_eq!(stats.count(Kind::Optimized, RETARGETED), 1);
+        assert_eq!(leaves_on(&func, it.head), IntPred::Ne);
+        assert_eq!(carried_from(&func, it.back), it.head, "the step is in front of the test");
+        assert_eq!(stores(&func), before, "all seven, not six and not eight");
+        sound(&func, &mut names);
+    }
+
+    /// The same with a count that is an expression, run at limits on both sides of entering.
+    ///
+    /// With no guard in front the loop runs once whatever the limit is, so a limit of nothing or
+    /// less is a count that is clamped, and the step on top of it has to come after the clamp.
+    #[test]
+    fn a_pointer_stepped_in_front_of_the_test_leaves_at_every_limit_where_it_did() {
+        let mut names = Interner::new();
+        let (mut func, entry, base, limit) = shell_given(&mut names);
+        let it = rotated(&mut func, entry, Type::int(32));
+        let mut build = Builder::new(&mut func, it.head);
+        let addr = wide_element(&mut build, base, it.counter);
+        let zero = build.iconst(Type::int(32), 0);
+        build.store(zero, addr, plain(), Flags::NONE);
+        rotated_close(&mut func, &it, limit);
+        Builder::new(&mut func, it.out).ret(&[]);
+        let limits = [-3, 0, 1, 2, 7];
+        let before: Vec<Vec<i128>> =
+            limits.iter().map(|&limit| stores_given(&func, &[1000, limit])).collect();
+
+        let stats = choose(&mut func);
+        assert_eq!(stats.count(Kind::Optimized, RETARGETED), 1);
+        assert_eq!(carried_from(&func, it.back), it.head, "the step is in front of the test");
+        for (at, &limit) in limits.iter().enumerate() {
+            assert_eq!(stores_given(&func, &[1000, limit]), before[at], "at a limit of {limit}");
+        }
+        sound(&func, &mut names);
+    }
+
+    /// A loop whose work is after the test keeps the step behind it, since the work reads the
+    /// pointer and moving the step up would have it wanting the old pointer and the new one both.
+    #[test]
+    fn a_pointer_read_after_the_test_is_stepped_where_it_was() {
+        let mut names = Interner::new();
+        let (mut func, entry, base) = shell(&mut names);
+        let it = counted(&mut func, entry, 100);
+        let mut build = Builder::new(&mut func, it.body);
+        let addr = element(&mut build, base, it.counter, 0);
+        let zero = build.iconst(Type::int(32), 0);
+        build.store(zero, addr, plain(), Flags::NONE);
+        close(&mut func, &it, it.body);
+        Builder::new(&mut func, it.out).ret(&[]);
+        let before = stores(&func);
+
+        let stats = choose(&mut func);
+        assert_eq!(stats.count(Kind::Optimized, RETARGETED), 1);
+        assert_eq!(carried_from(&func, it.body), it.body, "the step stays behind the test");
+        assert_eq!(stores(&func), before);
+        sound(&func, &mut names);
     }
 }
