@@ -25,8 +25,8 @@ impl Checker<'_> {
         kind: DeclKind,
     ) -> DeclFlags {
         let tuple = self.cx.target.tuple;
-        let here = matches!(tuple.arch().as_str(), "x86_64" | "i686")
-            && tuple.os().as_str() == "windows";
+        let here =
+            matches!(tuple.arch().as_str(), "x86_64" | "i686") && tuple.os().as_str() == "windows";
         let ast = self.ast;
         let mut flags = DeclFlags::NONE;
         for &attrs in lists {

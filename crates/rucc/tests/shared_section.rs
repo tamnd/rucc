@@ -54,9 +54,8 @@ fn said(target: &str, flags: &[&str], source: &str) -> (bool, String, String) {
 /// `/` and where it is in the string table, which starts after the symbol table.
 fn sections(bytes: &[u8]) -> Vec<(String, usize)> {
     let u16_at = |at: usize| usize::from(u16::from_le_bytes([bytes[at], bytes[at + 1]]));
-    let u32_at = |at: usize| {
-        u32::from_le_bytes(bytes[at..at + 4].try_into().expect("four bytes")) as usize
-    };
+    let u32_at =
+        |at: usize| u32::from_le_bytes(bytes[at..at + 4].try_into().expect("four bytes")) as usize;
     let strings = u32_at(8) + 18 * u32_at(12);
     let headers = 20 + u16_at(16);
     (0..u16_at(2))
@@ -123,8 +122,7 @@ fn a_shared_variable_s_section_is_shared_between_the_copies_of_its_image() {
         let target_flag = format!("--target={target}");
         let (ok, object, err) = run(&dir(), "a.c", &[&target_flag, "-O2", "-c"], SOURCE.as_bytes());
         assert!(ok, "{target}: {err}");
-        let (ok, assembled, err) =
-            run(&dir(), "a.s", &[&target_flag, "-c"], listing.as_bytes());
+        let (ok, assembled, err) = run(&dir(), "a.s", &[&target_flag, "-c"], listing.as_bytes());
         assert!(ok, "{target}: {err}");
         for object in [object, assembled] {
             let sections = sections(&object);
@@ -168,7 +166,10 @@ fn shared_is_checked_in_gcc_s_words() {
         for target in [MINGW64, MINGW32] {
             let (ok, _, err) = said(target, &[], source);
             assert_eq!(ok, errors == 0, "{target}: {source}\n{err}");
-            assert!(err.contains(&said_here), "{target}: {source}\nwanted {said_here:?}, got:\n{err}");
+            assert!(
+                err.contains(&said_here),
+                "{target}: {source}\nwanted {said_here:?}, got:\n{err}"
+            );
             assert_eq!(err.matches("error:").count(), errors, "{target}: {source}\n{err}");
             assert_eq!(err.matches("warning:").count(), warnings, "{target}: {source}\n{err}");
         }
