@@ -167,6 +167,9 @@ struct Profile {
     calls: Map<Symbol, (f64, u32)>,
 }
 
+/// What a body's measurement depends on. See [`Heap::measured`].
+type Measured = (FuncId, u32, Vec<(Value, Imm, Type)>, bool, usize);
+
 /// What the second pass knows as it goes.
 struct Heap<'a> {
     how: &'a How<'a>,
@@ -198,6 +201,11 @@ struct Heap<'a> {
     /// What a call's body measured, how long its copy takes and the hints it has, with the callee's
     /// change it was measured at.
     bodies: Map<(FuncId, Inst), (u32, usize, f64, Hints)>,
+    /// What a body measured and how long its copy takes, by callee, the callee's change, the
+    /// constants it was given, whether it weighed and the limit past which it was cleaned up. A
+    /// callee called from hundreds of places with the same constants is copied and folded once
+    /// for all of them rather than once for each, and that copy was most of the pass.
+    measured: Map<Measured, (usize, f64)>,
     /// The parameters of each function that every call to it passes the same constant for, which
     /// give no hint. See [`Second::constants`].
     settled: Map<FuncId, Set<Value>>,
@@ -251,6 +259,7 @@ pub(super) fn run(
         spent: Map::default(),
         frames: Map::default(),
         bodies: Map::default(),
+        measured: Map::default(),
         settled,
         once: Set::default(),
         pools: Map::default(),
@@ -445,19 +454,36 @@ impl Heap<'_> {
             Some(&(seen, body, copied, hints)) if seen == version => (body, copied, hints),
             _ => {
                 let weighed = (kind == Kind::Auto).then_some(names);
-                let mut body = folded_size(target, Set::default(), values.clone(), weighed);
                 // What the first pass would have let through, past which it measured a cleaned up
                 // copy as well.
                 let plain = match kind {
                     Kind::Auto => usize::try_from(INLINE_INSNS_AUTO).unwrap_or(0) + args,
                     _ => self.how.limit,
                 };
-                if body > plain {
-                    body = body.min(specialized_size(target, &values, weighed));
-                }
-                let frequency = &self.profile(module, callee).frequency;
-                let copied =
-                    folded(target, Set::default(), values.clone(), Some(names), Some(frequency)).1;
+                let mut passed: Vec<(Value, Imm, Type)> =
+                    values.iter().map(|(&param, &(imm, ty))| (param, imm, ty)).collect();
+                passed.sort_unstable_by_key(|&(param, ..)| param);
+                let key = (callee, version, passed, weighed.is_some(), plain);
+                let (body, copied) = match self.measured.get(&key) {
+                    Some(&measured) => measured,
+                    None => {
+                        let mut body = folded_size(target, Set::default(), values.clone(), weighed);
+                        if body > plain {
+                            body = body.min(specialized_size(target, &values, weighed));
+                        }
+                        let frequency = &self.profile(module, callee).frequency;
+                        let copied = folded(
+                            target,
+                            Set::default(),
+                            values.clone(),
+                            Some(names),
+                            Some(frequency),
+                        )
+                        .1;
+                        self.measured.insert(key, (body, copied));
+                        (body, copied)
+                    }
+                };
                 // What the call knows that the body out of line does not.
                 let fresh: Map<Value, (Imm, Type)> = match self.settled.get(&callee) {
                     Some(settled) => values
