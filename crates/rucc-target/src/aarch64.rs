@@ -407,7 +407,7 @@ static ZERO: [Zero; 6] = [
 ///
 /// Ten conditions at two widths, against a register and against a constant. There is nothing
 /// against memory, since this machine has no comparison that reads it.
-static FUSED: [Fusion; 40] = [
+static FUSED: [Fusion; 44] = [
     Fusion { set: "cmp_set_eq_32", cmp: "cmp_rr_32", if_true: "b_eq", if_false: "b_ne" },
     Fusion { set: "cmp_set_eq_64", cmp: "cmp_rr_64", if_true: "b_eq", if_false: "b_ne" },
     Fusion { set: "cmp_set_ne_32", cmp: "cmp_rr_32", if_true: "b_ne", if_false: "b_eq" },
@@ -448,6 +448,10 @@ static FUSED: [Fusion; 40] = [
     Fusion { set: "cmp_set_hi_ri_64", cmp: "cmp_ri_64", if_true: "b_hi", if_false: "b_ls" },
     Fusion { set: "cmp_set_hs_ri_32", cmp: "cmp_ri_32", if_true: "b_hs", if_false: "b_lo" },
     Fusion { set: "cmp_set_hs_ri_64", cmp: "cmp_ri_64", if_true: "b_hs", if_false: "b_lo" },
+    Fusion { set: "tst_set_eq_ri_32", cmp: "tst_ri_32", if_true: "b_eq", if_false: "b_ne" },
+    Fusion { set: "tst_set_eq_ri_64", cmp: "tst_ri_64", if_true: "b_eq", if_false: "b_ne" },
+    Fusion { set: "tst_set_ne_ri_32", cmp: "tst_ri_32", if_true: "b_ne", if_false: "b_eq" },
+    Fusion { set: "tst_set_ne_ri_64", cmp: "tst_ri_64", if_true: "b_ne", if_false: "b_eq" },
 ];
 
 /// What a select on a comparison's answer becomes, which is the `csel` on the condition the
@@ -543,7 +547,7 @@ fn writes_flags(name: &str) -> bool {
 /// floating point comparisons are not here, for the reason they are not in the x86 table: a
 /// comparison of two numbers where one may be a NaN is not a question this pass knows how to ask
 /// twice.
-static COMPARES: [Compare; 44] = [
+static COMPARES: [Compare; 50] = [
     Compare { name: "cmp_set_eq_32", asks: "cmp_rr_32", kept: Some("cset_eq") },
     Compare { name: "cmp_set_eq_64", asks: "cmp_rr_64", kept: Some("cset_eq") },
     Compare { name: "cmp_set_ne_32", asks: "cmp_rr_32", kept: Some("cset_ne") },
@@ -588,6 +592,12 @@ static COMPARES: [Compare; 44] = [
     Compare { name: "cmp_rr_64", asks: "cmp_rr_64", kept: None },
     Compare { name: "cmp_ri_32", asks: "cmp_ri_32", kept: None },
     Compare { name: "cmp_ri_64", asks: "cmp_ri_64", kept: None },
+    Compare { name: "tst_set_eq_ri_32", asks: "tst_ri_32", kept: Some("cset_eq") },
+    Compare { name: "tst_set_eq_ri_64", asks: "tst_ri_64", kept: Some("cset_eq") },
+    Compare { name: "tst_set_ne_ri_32", asks: "tst_ri_32", kept: Some("cset_ne") },
+    Compare { name: "tst_set_ne_ri_64", asks: "tst_ri_64", kept: Some("cset_ne") },
+    Compare { name: "tst_ri_32", asks: "tst_ri_32", kept: None },
+    Compare { name: "tst_ri_64", asks: "tst_ri_64", kept: None },
 ];
 
 /// Every instruction that reads the condition state, and which part of it each names.
@@ -595,7 +605,7 @@ static COMPARES: [Compare; 44] = [
 /// The comparisons that keep an answer, the `cset` and `csel` with no comparison in front, and the
 /// fourteen branches. `lo` and `hs` are the carry, which is how this machine files an unsigned
 /// comparison, and `ls` and `hi` are the carry and the zero together, so all four are unsigned.
-static READERS: [Reader; 85] = [
+static READERS: [Reader; 89] = [
     Reader { name: "cmp_set_eq_32", reads: Reads::Zero },
     Reader { name: "cmp_set_eq_64", reads: Reads::Zero },
     Reader { name: "cmp_set_ne_32", reads: Reads::Zero },
@@ -636,6 +646,10 @@ static READERS: [Reader; 85] = [
     Reader { name: "cmp_set_hi_ri_64", reads: Reads::Unsigned },
     Reader { name: "cmp_set_hs_ri_32", reads: Reads::Unsigned },
     Reader { name: "cmp_set_hs_ri_64", reads: Reads::Unsigned },
+    Reader { name: "tst_set_eq_ri_32", reads: Reads::Zero },
+    Reader { name: "tst_set_eq_ri_64", reads: Reads::Zero },
+    Reader { name: "tst_set_ne_ri_32", reads: Reads::Zero },
+    Reader { name: "tst_set_ne_ri_64", reads: Reads::Zero },
     Reader { name: "cset_eq", reads: Reads::Zero },
     Reader { name: "cset_ne", reads: Reads::Zero },
     Reader { name: "cset_lt", reads: Reads::Signed },
@@ -1061,7 +1075,8 @@ mod tests {
                 .unwrap_or_else(|| panic!("{} has no opposite", fusion.if_false));
             assert_eq!(back.if_false, fusion.if_true);
             let asked = fusion.if_true.strip_prefix("b_").expect("a branch");
-            assert!(fusion.set.starts_with(&format!("cmp_set_{asked}_")), "{}", fusion.set);
+            let named = ["cmp", "tst"].map(|test| format!("{test}_set_{asked}_"));
+            assert!(named.iter().any(|name| fusion.set.starts_with(name)), "{}", fusion.set);
         }
         assert_eq!(BRANCH.conditional.len(), 14);
     }
@@ -1105,7 +1120,12 @@ mod tests {
                     let asks = form(entry.asks).expect("described").operands();
                     assert_eq!(asks, &operands[1..], "{} and {}", entry.name, entry.asks);
                     let condition = kept.strip_prefix("cset_").expect("a cset");
-                    assert!(entry.name.starts_with(&format!("cmp_set_{condition}_")));
+                    let named = ["cmp", "tst"].map(|test| format!("{test}_set_{condition}_"));
+                    assert!(
+                        named.iter().any(|name| entry.name.starts_with(name)),
+                        "{}",
+                        entry.name
+                    );
                 }
                 None => assert_eq!(entry.asks, entry.name),
             }

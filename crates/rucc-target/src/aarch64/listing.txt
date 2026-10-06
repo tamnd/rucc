@@ -139,12 +139,18 @@ dac00c41	rev x1, x2	rev_r_64
 2a0203e1	mov w1, w2	low_32
 12000041	and w1, w2, #1	bit_of_32
 12000041	and w1, w2, #1	bit_of_64
+53000041	ubfx w1, w2, #0, #1	ubfx_32
+d3400041	ubfx x1, x2, #0, #1	ubfx_64
+53000041	ubfx w1, w2, #0, #1	bit_at_32
+d3400041	ubfx x1, x2, #0, #1	bit_at_64
 6b02003f	cmp w1, w2	cmp_rr_32
 7100043f	cmp w1, #1	cmp_ri_32
 7100003f	cmp w1, #0	test_32
 eb02003f	cmp x1, x2	cmp_rr_64
 f100043f	cmp x1, #1	cmp_ri_64
 f100003f	cmp x1, #0	test_64
+7200003f	tst w1, #1	tst_ri_32
+f240003f	tst x1, #1	tst_ri_64
 6b03005f	cmp w2, w3	cmp_set_eq_32
 1a9f17e1	cset w1, eq	cmp_set_eq_32
 eb03005f	cmp x2, x3	cmp_set_eq_64
@@ -225,6 +231,14 @@ f100045f	cmp x2, #1	cmp_set_hi_ri_64
 1a9f37e1	cset w1, hs	cmp_set_hs_ri_32
 f100045f	cmp x2, #1	cmp_set_hs_ri_64
 1a9f37e1	cset w1, hs	cmp_set_hs_ri_64
+7200005f	tst w2, #1	tst_set_eq_ri_32
+1a9f17e1	cset w1, eq	tst_set_eq_ri_32
+f240005f	tst x2, #1	tst_set_eq_ri_64
+1a9f17e1	cset w1, eq	tst_set_eq_ri_64
+7200005f	tst w2, #1	tst_set_ne_ri_32
+1a9f07e1	cset w1, ne	tst_set_ne_ri_32
+f240005f	tst x2, #1	tst_set_ne_ri_64
+1a9f07e1	cset w1, ne	tst_set_ne_ri_64
 7100009f	cmp w4, #0	sel_32
 1a821061	csel w1, w3, w2, ne	sel_32
 7100009f	cmp w4, #0	sel_64

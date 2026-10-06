@@ -184,7 +184,8 @@ pub fn dead(
 /// ```
 ///
 /// gcc writes the second. A float comparison is the same, including the two that end in a
-/// `csinc` of the `cset`, since that writes a one or the zero or one it was given.
+/// `csinc` of the `cset`, since that writes a one or the zero or one it was given. So is a `tst`
+/// and its `cset`, and a `ubfx` of one bit, which leaves nothing but that bit in the register.
 ///
 /// What the source holds is known from the one instruction that writes it, so the source has to
 /// be a virtual register written once. The rest is [`dead`]'s rewrite: the readers go to the
@@ -211,7 +212,8 @@ pub fn settled(func: &mut mir::Func, machine: &MachineInsts, names: &Interner) -
             let Some((def, source)) = conversion(func, inst) else { continue };
             let Some([writer]) = writers.get(&source).map(Vec::as_slice) else { continue };
             let by = name(func, *writer);
-            if by.starts_with("a64.cmp_set_") || by.starts_with("a64.fcmp_set_") {
+            let set = ["a64.cmp_set_", "a64.fcmp_set_", "a64.tst_set_", "a64.bit_at_"];
+            if set.iter().any(|prefix| by.starts_with(prefix)) {
                 sent.insert(def, source);
                 gone.push(inst);
             }

@@ -507,6 +507,13 @@ pub static INSTS: &[(&str, Form)] = &[
     ("low_32", Convert),
     ("bit_of_32", AluI),
     ("bit_of_64", AluI),
+    // A field of a register brought down to the bottom of another, `ubfx`. The constant is the
+    // field's mask where it sits, so it says both where the field starts and how wide it is. The
+    // one bit case answers whether that bit is set.
+    ("ubfx_32", AluI),
+    ("ubfx_64", AluI),
+    ("bit_at_32", AluI),
+    ("bit_at_64", AluI),
     // Comparisons that keep nothing but the condition state, which is what a branch on one is
     // folded into.
     ("cmp_rr_32", Cmp),
@@ -515,6 +522,8 @@ pub static INSTS: &[(&str, Form)] = &[
     ("cmp_rr_64", Cmp),
     ("cmp_ri_64", CmpI),
     ("test_64", Test),
+    ("tst_ri_32", CmpI),
+    ("tst_ri_64", CmpI),
     // Comparisons that keep the answer, which is `cset` after the comparison.
     ("cmp_set_eq_32", CmpSet),
     ("cmp_set_eq_64", CmpSet),
@@ -556,6 +565,10 @@ pub static INSTS: &[(&str, Form)] = &[
     ("cmp_set_hi_ri_64", CmpSetI),
     ("cmp_set_hs_ri_32", CmpSetI),
     ("cmp_set_hs_ri_64", CmpSetI),
+    ("tst_set_eq_ri_32", CmpSetI),
+    ("tst_set_eq_ri_64", CmpSetI),
+    ("tst_set_ne_ri_32", CmpSetI),
+    ("tst_set_ne_ri_64", CmpSetI),
     // A choice on a byte, which is the second source when the byte is not zero and the first when
     // it is, and the same choice straight off a condition some comparison left.
     ("sel_32", Select),
