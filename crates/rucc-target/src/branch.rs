@@ -58,6 +58,17 @@
 //! three it found. Which of the two jumps it writes is the same question as before and gets the
 //! same answer, so an entry names both.
 //!
+//! # The comparison with zero a jump can make itself
+//!
+//! Some machines have a jump that reads a register and goes when it is zero, or when it is not,
+//! which is the test and the jump in one instruction. AArch64 has `cbz` and `cbnz`. They reach as
+//! far as the jumps on the condition state do there, so nothing about the layout changes.
+//!
+//! [`Zero`] is that written down, one entry per comparison and jump. The layout looks for one
+//! once it knows which jump it is writing, and writes the one instruction instead of the two when
+//! the comparison is against zero. The test of the byte is one of these, and so is a comparison
+//! against a constant that the program wrote as zero.
+//!
 //! # The select a comparison makes unnecessary
 //!
 //! A rule selects a choice between two values as a test of a condition byte and a conditional move
@@ -128,6 +139,11 @@ pub struct BranchInsts {
     ///
     /// Empty is a target that does not do this, and every select keeps the test of its byte.
     pub moves: &'static [Move],
+    /// The comparisons with zero that a jump on their answer can make itself.
+    ///
+    /// Empty is a target that has no such jump, and the layout then writes the comparison and the
+    /// jump as two instructions.
+    pub zero: &'static [Zero],
 }
 
 /// A comparison, and the two instructions a branch on its answer becomes.
@@ -157,4 +173,19 @@ pub struct Move {
     ///
     /// Its operands are the select's without the byte at the end, in the same order.
     pub cmov: &'static str,
+}
+
+/// A comparison with zero, a jump on what it found, and the one instruction that does both.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Zero {
+    /// The comparison, which reads one register and keeps nothing.
+    ///
+    /// When it carries a constant the entry only stands for it when the constant is zero, so the
+    /// test of a byte and a comparison against a constant are both comparisons this can name.
+    pub test: &'static str,
+    /// The jump that reads what the comparison left.
+    pub when: &'static str,
+    /// Reads the register the comparison read and goes to the block's first successor when the
+    /// jump would have gone there.
+    pub into: &'static str,
 }

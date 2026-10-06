@@ -56,7 +56,7 @@ pub use crate::aarch64::timing::{LOAD, MODEL, TIMING};
 pub use crate::aarch64::write::{Spelling, cond_name, write};
 
 use crate::bits::BitInsts;
-use crate::branch::{BranchInsts, Fusion, Move};
+use crate::branch::{BranchInsts, Fusion, Move, Zero};
 use crate::counts::{BitCount, CountInst};
 use crate::flags::{Compare, FlagInsts, Reader, Reads};
 use crate::frame::{Canary, ClassMoves, FrameInsts, Kept, Pair, Probe, Signing, Targets};
@@ -362,9 +362,9 @@ fn copies_low(name: &str) -> bool {
 ///
 /// The test compares the condition register with zero and the two branches read the answer, the
 /// way the x86 description has it. This machine also has `cbz` and `cbnz`, which are the test and
-/// the branch in one instruction, and they are not used yet: they reach a megabyte either side
-/// rather than the whole of a function, and which branches reach is a question for the layout
-/// that is not answered here.
+/// the branch in one instruction, and [`ZERO`] says when the layout writes those instead. They
+/// reach a megabyte either side, which is what `b.eq` reaches too, so a function the one cannot
+/// cross is one the other could not cross either.
 pub static BRANCH: BranchInsts = BranchInsts {
     prefix: "a64.",
     cond: "br_cond_32",
@@ -377,6 +377,7 @@ pub static BRANCH: BranchInsts = BranchInsts {
     conditional: &CONDITIONAL,
     fused: &FUSED,
     moves: &MOVES,
+    zero: &ZERO,
 };
 
 /// Every branch on the condition state this machine has, which is fourteen.
@@ -387,6 +388,19 @@ pub static BRANCH: BranchInsts = BranchInsts {
 static CONDITIONAL: [&str; 14] = [
     "b_eq", "b_ne", "b_lt", "b_le", "b_gt", "b_ge", "b_lo", "b_ls", "b_hi", "b_hs", "b_mi", "b_pl",
     "b_vs", "b_vc",
+];
+
+/// Every comparison with zero that `cbz` or `cbnz` makes on its own.
+///
+/// The test of the condition byte, and a comparison against a constant at either width, which the
+/// layout only takes when the constant is zero.
+static ZERO: [Zero; 6] = [
+    Zero { test: "test_32", when: "b_eq", into: "cbz_32" },
+    Zero { test: "test_32", when: "b_ne", into: "cbnz_32" },
+    Zero { test: "cmp_ri_32", when: "b_eq", into: "cbz_32" },
+    Zero { test: "cmp_ri_32", when: "b_ne", into: "cbnz_32" },
+    Zero { test: "cmp_ri_64", when: "b_eq", into: "cbz_64" },
+    Zero { test: "cmp_ri_64", when: "b_ne", into: "cbnz_64" },
 ];
 
 /// Every comparison the test in front of a branch can be taken off.

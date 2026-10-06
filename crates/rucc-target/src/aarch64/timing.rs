@@ -111,7 +111,7 @@ fn plain(form: Form) -> Timing {
         // The comparison, then the `cset` that reads what it left, which is back on the integer
         // side and a cycle more.
         FCmpSet => (3, Unit::Float),
-        Jump | Jcc | JumpAway => (1, Unit::Branch),
+        Jump | Jcc | JumpAway | JumpZero => (1, Unit::Branch),
         JumpReg | Call | Ret => (2, Unit::Branch),
         RetVal | RetVal2 | RetValFp | RetVal2Fp | RetVal3Fp | RetVal4Fp | ArgVal | ArgValFp
         | BrCond => (0, Unit::Free),

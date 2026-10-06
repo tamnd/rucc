@@ -413,6 +413,10 @@ fd000921	str d1, [x9, #16]	str_f64
 54000005	b.pl s	b_pl
 54000006	b.vs s	b_vs
 54000007	b.vc s	b_vc
+34000001	cbz w1, s	cbz_32
+b4000001	cbz x1, s	cbz_64
+35000001	cbnz w1, s	cbnz_32
+b5000001	cbnz x1, s	cbnz_64
 14000000	b s	b_away
 d61f0020	br x1	br
 94000000	bl s	bl
