@@ -19,6 +19,11 @@
 # -fuse-ld=rucc, and the command gets the module from `wasm-ld` and that module. The second module
 # also runs and must print what the suite expects.
 #
+# wasm32-none has no C library, so it runs a subset: the programs that include only the headers of
+# a freestanding implementation and do not call printf or puts. Each one is linked with
+# tests/wasm-none/start.c, and runs under Wasmtime with tests/wasm-none/host.c as its import
+# module `env`, which run.sh builds for wasm32-wasip1 first. RUNNER is not used for this target.
+#
 # tests/rung0/exclude-<triple>.txt names the programs left out, one per line, each with the issue
 # that tracks it. A line with no issue number fails the run, and so does an excluded program that
 # passes, so the list can only shrink.
@@ -72,14 +77,22 @@ fi
 # flag. clang needs the same flag.
 suffix=
 defines=
-libraries=
+inputs=
+libraries=-lm
 case $triple in
 *-windows-*) suffix=.exe ;;
 esac
 case $triple in
 *-windows-gnu*) defines=-D__USE_MINGW_ANSI_STDIO=1 ;;
-wasm32-wasi*) libraries=-lc-printscan-long-double ;;
+wasm32-wasi*) libraries="-lc-printscan-long-double -lm" ;;
+wasm32-none)
+	inputs="$here/../wasm-none/start.c -Wl,--entry=_start"
+	libraries=
+	$rucc --target=wasm32-wasip1 -mexec-model=reactor -O2 -o "$out/host.wasm" "$here/../wasm-none/host.c"
+	RUNNER="wasmtime run --preload env=$out/host.wasm"
+	;;
 esac
+outside=0
 
 mkdir "$out/in"
 
@@ -87,8 +100,18 @@ excluded() {
 	[ -f "$exclude" ] && grep -q "^$1 " "$exclude"
 }
 
+# Whether a program needs more than the start file of wasm32-none gives: a header of a hosted
+# implementation, or printf or puts, which some programs declare with no header.
+hosted() {
+	grep -E '^[[:space:]]*#[[:space:]]*include' "$1" | grep -vE '<(float|iso646|limits|stdalign|stdarg|stdbool|stddef|stdint|stdnoreturn)\.h>' | grep -q . || grep -qwE 'printf|puts' "$1"
+}
+
 for source in "$cases"/*.c; do
 	name=$(basename "$source" .c)
+	if [ "$triple" = wasm32-none ] && hosted "$source"; then
+		outside=$((outside + 1))
+		continue
+	fi
 	# Each program is written to the standard its tags name, and C23 reads some of them
 	# differently, `int f()` taking no arguments being the one that shows. The GNU dialect of
 	# that standard is used because a few of the c89 programs have // comments in them.
@@ -104,7 +127,7 @@ for source in "$cases"/*.c; do
 		# because the name section holds the file name.
 		inside=$out/in/$name-O$level$suffix
 		result=ok
-		if ! $rucc --target="$triple" -std=$std $defines -O$level -o "$binary" "$source" $libraries -lm >"$out/build.log" 2>&1; then
+		if ! $rucc --target="$triple" -std=$std $defines -O$level -o "$binary" "$source" $inputs $libraries >"$out/build.log" 2>&1; then
 			result='did not build'
 		elif [ -n "${VALIDATE:-}" ] && ! { $rucc --target="$triple" -std=$std $defines -O$level -c -o "$out/$name.o" "$source" && $VALIDATE "$out/$name.o" && $VALIDATE "$binary"; } >"$out/build.log" 2>&1; then
 			result='did not validate'
@@ -112,7 +135,7 @@ for source in "$cases"/*.c; do
 			result='exited nonzero'
 		elif ! tr -d '\r' <"$binary.raw" | cmp -s "$source.expected" -; then
 			result='printed something else'
-		elif [ -n "${SAME_LINK:-}" ] && ! { $rucc --target="$triple" -std=$std $defines -O$level -fuse-ld=rucc -o "$inside" "$source" $libraries -lm && $SAME_LINK "$binary" "$inside"; } >"$out/build.log" 2>&1; then
+		elif [ -n "${SAME_LINK:-}" ] && ! { $rucc --target="$triple" -std=$std $defines -O$level -fuse-ld=rucc -o "$inside" "$source" $inputs $libraries && $SAME_LINK "$binary" "$inside"; } >"$out/build.log" 2>&1; then
 			result='linked to another module inside rucc'
 		elif [ -n "${SAME_LINK:-}" ] && ! { ${RUNNER:-} "$inside" >"$inside.raw" 2>/dev/null && tr -d '\r' <"$inside.raw" | cmp -s "$source.expected" -; }; then
 			result='printed something else when linked inside rucc'
@@ -134,5 +157,9 @@ for source in "$cases"/*.c; do
 	done
 done
 
-echo "rung 0 on $triple: $passed passed, $failed failed, $skipped skipped"
+if [ "$triple" = wasm32-none ]; then
+	echo "rung 0 on $triple: $passed passed, $failed failed, $skipped skipped, $outside outside the subset"
+else
+	echo "rung 0 on $triple: $passed passed, $failed failed, $skipped skipped"
+fi
 [ "$failed" -eq 0 ]
