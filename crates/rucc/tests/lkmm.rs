@@ -77,8 +77,14 @@ fn a_volatile_access_is_one_access_of_its_own_width() {
         let lines = body(&text, name);
         let at: Vec<&String> = lines.iter().filter(|line| line.contains(operand)).collect();
         assert_eq!(at.len(), 1, "{name} is one access: {lines:#?}");
+        // A load of a half word comes in zero extended, `movzwl`, which reads the two bytes and
+        // nothing else. The width is the letter after the extension rather than the last one.
         let mnemonic = at[0].split_whitespace().next().unwrap_or_default();
-        assert!(mnemonic.ends_with(width), "{name} is {width} wide: {lines:#?}");
+        let read = mnemonic.strip_prefix("movz").and_then(|rest| rest.chars().next());
+        assert!(
+            read.map_or(mnemonic.ends_with(width), |read| read == width),
+            "{name} is {width} wide: {lines:#?}"
+        );
     }
 }
 
