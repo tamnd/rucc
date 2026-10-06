@@ -1,0 +1,22 @@
+[package]
+name = "rucc-reactor"
+description = "The rucc C compiler as a WebAssembly reactor, which runs the driver more than once in one instance."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+homepage.workspace = true
+authors.workspace = true
+keywords.workspace = true
+categories.workspace = true
+readme.workspace = true
+
+[lints]
+workspace = true
+
+# Layer rank 14, beside `rucc`. Like the binary, it composes the driver and nothing else. The crate
+# is an rlib here, and the wasm module comes from `cargo rustc --crate-type cdylib`, so a native
+# build of the workspace does not link the compiler a second time.
+[dependencies]
+rucc-driver.workspace = true

@@ -2,9 +2,12 @@
 // the same V8 as Chrome. This is the test of the page that CI runs (tamnd/rucc#2867):
 //
 //     (cd web && npm ci)
-//     node tests/web/run.mjs <rucc.wasm> <librucc_builtins.a> <sysroot.tar.gz> [<sqlite dir>]
+//     node tests/web/run.mjs [--reactor] <rucc.wasm> <librucc_builtins.a> <sysroot.tar.gz> \
+//         [<sqlite dir>]
 //
-// where <sqlite dir> is an unpacked sqlite-autoconf release.
+// where <sqlite dir> is an unpacked sqlite-autoconf release. With --reactor, <rucc.wasm> is the
+// reactor build of rucc, rucc_reactor.wasm, and every run of rucc in the test is a call into one
+// instance of it, which the test checks at the end.
 //
 // The three files are the ones that the page downloads: rucc built for wasm32-wasip1, the builtins
 // archive that `cargo xtask builtins --target wasm32-wasip1` writes, and the sysroot archive that
@@ -20,12 +23,14 @@ import { join } from 'node:path';
 import { argv, exit } from 'node:process';
 import { fileURLToPath } from 'node:url';
 
-import { Rucc, runProgram } from '../../web/rucc.js';
+import { Reactor, Rucc, runProgram } from '../../web/rucc.js';
 
-const [, , compilerPath, builtinsPath, sysrootPath, sqlite] = argv;
+const reactor = argv[2] === '--reactor';
+const [compilerPath, builtinsPath, sysrootPath, sqlite] = argv.slice(reactor ? 3 : 2);
 if (sysrootPath === undefined) {
   console.error(
-    'usage: node tests/web/run.mjs <rucc.wasm> <librucc_builtins.a> <sysroot.tar.gz> [<sqlite dir>]',
+    'usage: node tests/web/run.mjs [--reactor] <rucc.wasm> <librucc_builtins.a> <sysroot.tar.gz>',
+    '[<sqlite dir>]',
   );
   exit(2);
 }
@@ -44,13 +49,14 @@ function check(ok, what, detail = '') {
 }
 
 const started = performance.now();
-const rucc = await Rucc.load({
+const rucc = await (reactor ? Reactor : Rucc).load({
   compiler: await readFile(compilerPath),
   builtins: await readFile(builtinsPath),
   sysroot: await readFile(sysrootPath),
 });
 const loaded = ((performance.now() - started) / 1000).toFixed(1);
-check(true, `rucc.wasm compiled and installed its sysroot in ${loaded}s`);
+const what = reactor ? 'rucc_reactor.wasm' : 'rucc.wasm';
+check(true, `${what} compiled and installed its sysroot in ${loaded}s`);
 
 const SUM = `#include <stdio.h>
 #include <stdlib.h>
@@ -127,6 +133,16 @@ if (sqlite !== undefined) {
       `status ${ran.status}\n${decoder.decode(ran.stderr)}`,
     );
   }
+}
+
+if (reactor) {
+  const version = await rucc.run(['--target=wasm32-wasip1', '--version']);
+  check(
+    version.status === 0 && decoder.decode(version.stdout).startsWith('rucc'),
+    'what the reactor writes to standard output comes back',
+    decoder.decode(version.stdout),
+  );
+  check(rucc.instances === 1, 'every run was in one instance', `${rucc.instances} instances`);
 }
 
 exit(failed === 0 ? 0 : 1);

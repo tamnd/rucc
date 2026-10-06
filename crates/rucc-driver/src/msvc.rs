@@ -55,6 +55,7 @@
 pub mod tree;
 
 use std::collections::BTreeMap;
+use std::io::Write as _;
 use std::path::{Path, PathBuf};
 
 use rucc_sysroot::msvc::{Channel, Chip, PinnedBuild, Selection, Wanted};
@@ -136,7 +137,9 @@ fn run(
     cache: &Path,
     pinned: Option<&PinnedBuild>,
 ) -> Result<i32, CliError> {
-    let say = |line: &str| println!("rucc: {tuple}: {line}");
+    let say = |line: &str| {
+        let _ = writeln!(crate::host::stdout(), "rucc: {tuple}: {line}");
+    };
 
     // Which targets this is for is `Wall::of` rather than a second list of the ones it covers, the
     // same as everywhere else the two walls come up. A mingw-w64 target is refused here and is not
@@ -627,28 +630,33 @@ fn slurp(at: &Path) -> Result<Vec<u8>, CliError> {
 /// goes to the output rather than to the error stream: it is what the command was asked for when it
 /// was run without the acceptance, and a person reads it.
 fn refuse(licence: &str, chosen: &Selection, tuple: &str) {
-    println!(
+    let mut out = crate::host::stdout();
+    let _ = writeln!(
+        out,
         "The Windows SDK and the MSVC CRT are not ours to give you. Microsoft publishes them under\n\
          the Visual Studio Build Tools licence, which is at\n\
          \n    {licence}\n\
          \nand which you have to read and accept yourself. This compiler will not accept it for you\n\
          and will not download anything until you have said that you did.\n"
     );
-    println!(
+    let _ = writeln!(
+        out,
         "What would be downloaded for {tuple}, {} totalling {}:",
         files(chosen.files.len()),
         mb(chosen.size())
     );
     for file in &chosen.files {
-        println!("  {:>9}  {}", mb(file.payload.size), stored_as(&file.payload.name));
+        let _ = writeln!(out, "  {:>9}  {}", mb(file.payload.size), stored_as(&file.payload.name));
     }
-    println!(
+    let _ = writeln!(
+        out,
         "\nThe Windows SDK installers in that list hold no bytes of their own. Each one is a small\n\
          database naming the cabinets its headers and libraries are in, and those cabinets are\n\
          separate files that this total does not count, because which of them a target needs is a\n\
          question only the installers can answer."
     );
-    println!(
+    let _ = writeln!(
+        out,
         "\nIf you accept that licence, run this again with --accept-licence on the command line.\n\
          If you would rather not, build for the mingw-w64 environment instead, which is fully\n\
          redistributable and needs nothing installed."
