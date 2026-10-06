@@ -426,11 +426,10 @@ impl Lower<'_, '_> {
     /// it cannot.
     fn movable(&self, inst: Inst) -> Option<Kind> {
         let data = &self.func[inst];
-        if self.operands(inst).is_empty() {
-            // Only a fixed `alloca` has no operands and moves. Its address is in the frame, which
-            // stays where it is until the function returns.
-            let fixed = data.opcode == Opcode::Alloca && self.args(inst).is_empty();
-            return fixed.then_some(Kind::Pure);
+        // An address in the frame, as the one of a fixed `alloca`, is written again at each use
+        // and does not move. An instruction with no operands does not move either.
+        if self.rematerialized(inst) || self.operands(inst).is_empty() {
+            return None;
         }
         match data.opcode {
             Opcode::SDiv
