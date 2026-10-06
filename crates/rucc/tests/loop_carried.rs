@@ -58,8 +58,9 @@ fn assembly(level: &str) -> String {
 /// The instructions in front of every jump back round a loop, back to the branch or the label
 /// before them, which is the code that runs on the way round and nowhere else.
 ///
-/// A jump back round a loop is one to a label written earlier with no `ret` in between. A jump to
-/// a label written earlier that does have one is a block sharing the epilogue, not a loop.
+/// A jump back round a loop is one to a label written earlier with no `ret` in between, and it may
+/// be the loop's own test when nothing else stands at the bottom of it. A jump to a label written
+/// earlier that does have a `ret` in between is a block sharing the epilogue, not a loop.
 fn back_edges(asm: &str) -> Vec<Vec<String>> {
     let lines: Vec<&str> = asm.lines().map(str::trim).filter(|line| !line.is_empty()).collect();
     let mut seen: Vec<(&str, usize)> = Vec::new();
@@ -69,7 +70,10 @@ fn back_edges(asm: &str) -> Vec<Vec<String>> {
             seen.push((label, at));
             continue;
         }
-        let Some(target) = line.strip_prefix("jmp") else { continue };
+        let Some((opcode, target)) = line.split_once(char::is_whitespace) else { continue };
+        if !opcode.starts_with('j') {
+            continue;
+        }
         let Some(&(_, from)) = seen.iter().find(|(label, _)| *label == target.trim()) else {
             continue;
         };
@@ -90,10 +94,12 @@ fn back_edges(asm: &str) -> Vec<Vec<String>> {
     edges
 }
 
-/// Whether an instruction copies one register into another.
+/// Whether an instruction copies one register into another. A move that widens, such as
+/// `movslq`, makes a value the loop did not have before it and is not a copy.
 fn copy(inst: &str) -> bool {
     let Some((opcode, operands)) = inst.split_once(char::is_whitespace) else { return false };
-    opcode.starts_with("mov") && operands.split(',').all(|operand| operand.trim().starts_with('%'))
+    matches!(opcode, "mov" | "movb" | "movw" | "movl" | "movq")
+        && operands.split(',').all(|operand| operand.trim().starts_with('%'))
 }
 
 #[test]
