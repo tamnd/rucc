@@ -19,6 +19,11 @@
    picture the size of a field would spend its time allocating rather than decoding, which is what
    the ceilings are there to stop under libFuzzer too.
 
+   One thing differs from upstream. It calls the 8 bit function for a precision of exactly 8 and
+   the 12 bit one for exactly 12, so a lossless image of 2 to 7 or 9 to 11 bits went to the 16 bit
+   function with a buffer sized for 8 bit samples, which formed row pointers past its end and was
+   then rejected. This branches on the ranges the two functions take instead.
+
    The sum over every output sample is upstream's, and it is not decoration. It is there so that
    MemorySanitizer reads every sample the decoder claimed to write, and the init plane does the
    same job here: a sample the decoder left unwritten and this loop then reads is a J1 report rather
@@ -92,7 +97,7 @@ int LLVMFuzzerTestOneInput(const uint8_t *data, size_t size) {
 
         if ((dstBuf = tj3Alloc(w * h * tjPixelSize[pf] * sampleSize)) == NULL) goto bailout;
 
-        if (precision == 8) {
+        if (precision <= 8) {
             if (tj3Decompress8(handle, data, size, (unsigned char *)dstBuf, 0, pf) == 0) {
                 /* Touch all of the output pixels in order to catch uninitialized reads
                    when using MemorySanitizer. */
@@ -100,7 +105,7 @@ int LLVMFuzzerTestOneInput(const uint8_t *data, size_t size) {
             } else if (!strcmp(tj3GetErrorStr(handle),
                                "Progressive JPEG image has more than 100 scans"))
                 goto bailout;
-        } else if (precision == 12) {
+        } else if (precision <= 12) {
             if (tj3Decompress12(handle, data, size, (short *)dstBuf, 0, pf) == 0) {
                 /* Touch all of the output pixels in order to catch uninitialized reads
                    when using MemorySanitizer. */
