@@ -8,9 +8,9 @@
 //! globals of the objects.
 //!
 //! A relocated field keeps its width, five bytes for a LEB128 and four for a 32-bit word, so the
-//! code does not move. The output has no `linking` and no `reloc.*` section. It has the DWARF
-//! sections of the inputs and a `name` section unless the options strip them, and the `producers`
-//! and `target_features` sections of the inputs, merged.
+//! code does not move. The output has no `linking` and no `reloc.*` section. Unless the options
+//! strip them, it has the DWARF sections of the inputs, a `name` section, and the `producers` and
+//! `target_features` sections of the inputs, merged.
 
 use std::collections::HashMap;
 
@@ -521,9 +521,11 @@ impl<'w, 'a> Writer<'w, 'a> {
                 custom(&mut out, title, &bytes);
             }
         }
-        if !options.strip {
-            custom(&mut out, "name", &self.names(options));
+        // `--strip-all` leaves out every custom section, as it does in `wasm-ld`.
+        if options.strip {
+            return Ok(out);
         }
+        custom(&mut out, "name", &self.names(options));
         let producers = self.producers();
         if !producers.is_empty() {
             custom(&mut out, "producers", &producers);
