@@ -712,6 +712,42 @@ fn spelled_registers(template: &str, gpr: RegClass, sse: RegClass) -> Vec<(PhysR
     found
 }
 
+/// The AArch64 registers a template names in its text, `x16` in `mov x16, %0` or `lr` in a
+/// `blr`, each with its file.
+///
+/// A register has no prefix there, so a name is any word of the text that reads as one. A word
+/// straight after a `%` is an operand, `%w0` or `%x1`, and is left out.
+fn spelled_registers_a64(template: &str) -> Vec<(PhysReg, RegClass)> {
+    let mut found = Vec::new();
+    let mut previous = ' ';
+    let mut start = None;
+    for (at, c) in template.char_indices().chain([(template.len(), ' ')]) {
+        let word = c.is_ascii_alphanumeric() || c == '_';
+        match (word, start) {
+            (true, None) => start = Some((at, previous == '%')),
+            (false, Some((from, operand))) => {
+                start = None;
+                if let Some(reg) = aarch64::named(&template[from..at]).filter(|_| !operand) {
+                    if !found.contains(&reg) {
+                        found.push(reg);
+                    }
+                }
+            }
+            _ => {}
+        }
+        previous = c;
+    }
+    found
+}
+
+/// Whether an AArch64 template calls out to a function, which is a `bl` or a `blr` with or
+/// without a key.
+fn calls_out_a64(template: &str) -> bool {
+    template
+        .split(|c: char| !c.is_ascii_alphanumeric() && c != '_')
+        .any(|word| word == "bl" || word.starts_with("blr"))
+}
+
 /// What a call out of a template is given besides the operands, which is the same for every
 /// call in one template but for the argument registers the lines above it wrote.
 struct Called<'a> {
@@ -5732,28 +5768,36 @@ impl<'a> Lowering<'a> {
         // template the way a clobber is.
         //
         // Every register a call may leave anything in goes as well where the text may do more than
-        // that says: on AArch64, in basic assembly, whose registers are not marked off from
-        // anything else in it, and in a template with a call in it, since the function it calls
-        // writes those without the text spelling any of them. Everywhere else the list and the
-        // text are the whole of what the template writes, which is what gcc takes them to be, and
-        // a value held across it stays in its register. The kernel's `rmb()` and `wrmsr()` are
-        // templates like that, and treating each as a call cost a save and a restore around it.
-        // Nothing is written to any of them by this, so a register one template leaves a value in
-        // is still holding it when the next template reads it.
+        // that says: in basic assembly, whose registers are not marked off from anything else in
+        // it, and in a template with a call in it, since the function it calls writes those
+        // without the text spelling any of them. Everywhere else the list and the text are the
+        // whole of what the template writes, which is what gcc takes them to be, and a value held
+        // across it stays in its register. The kernel's `rmb()` and `wrmsr()` are templates like
+        // that, and treating each as a call cost a save and a restore around it. On AArch64 it
+        // cost more, since every operand then went in a register a call keeps, and each of the
+        // kernel's atomics saved and restored two of them around one `ldadd`. Nothing is written
+        // to any of them by this, so a register one template leaves a value in is still holding
+        // it when the next template reads it.
         let a64 = self.on_aarch64();
-        let mut named = if a64 {
-            Self::clobbered_a64(inst, &clobbers)?
+        let (mut named, spelled, calls) = if a64 {
+            (
+                Self::clobbered_a64(inst, &clobbers)?,
+                spelled_registers_a64(template),
+                calls_out_a64(template),
+            )
         } else {
-            Self::clobbered_x86(inst, &clobbers, self.gpr, self.conv.sse_class)?
+            (
+                Self::clobbered_x86(inst, &clobbers, self.gpr, self.conv.sse_class)?,
+                spelled_registers(template, self.gpr, self.conv.sse_class),
+                calls_out(template),
+            )
         };
-        if !a64 {
-            for reg in spelled_registers(template, self.gpr, self.conv.sse_class) {
-                if !named.contains(&reg) {
-                    named.push(reg);
-                }
+        for reg in spelled {
+            if !named.contains(&reg) {
+                named.push(reg);
             }
         }
-        let mut clobbered: Vec<(PhysReg, RegClass)> = if a64 || basic || calls_out(template) {
+        let mut clobbered: Vec<(PhysReg, RegClass)> = if basic || calls {
             self.lost(list).into_iter().map(|(reg, class, _)| (reg, class)).collect()
         } else {
             Vec::new()
@@ -8996,7 +9040,7 @@ mod tests {
     /// Nothing reads AArch64 assembly back into instructions, so every template there is kept as
     /// its text. The operands are the instruction's own, with the output first and the inputs
     /// last, a hole in the text asks for the `w` or the `x` name of one, and a vector register the
-    /// clobber list names is written by it as well as every register a call may leave anything in.
+    /// clobber list names is written by it and nothing else is, as gcc reads a template.
     #[test]
     fn a_template_on_aarch64_is_kept_as_text_with_its_operands_in_registers() {
         let (i32, i64) = (Type::int(32), Type::int(64));
@@ -9014,14 +9058,15 @@ mod tests {
         let produced = source[out].results().next().expect("one result");
         Builder::new(&mut source, block).ret(&[produced]);
 
-        // Forty one registers between the output and the inputs: `x0` to `x15`, the sixteen vector
-        // registers a call does not keep, and `v8`, which is the one the program named.
+        // One register between the output and the inputs, `v8`, which is the one the program named.
         let text = lower_a64(&mut names, &source).expect("kept as text");
-        assert!(text.contains("%2:gpr, early $x0, early $x1,"), "{text}");
-        assert!(text.contains(
-            "early $v31, early $v8 = a64.template %0, %1, \
-             @add \u{1}r0w\u{2}, \u{1}r42w\u{2}, #1\n\tstr \u{1}r43x\u{2}, [sp]\n"
-        ));
+        assert!(
+            text.contains(
+                "%2:gpr, early $v8 = a64.template %0, %1, \
+                 @add \u{1}r0w\u{2}, \u{1}r2w\u{2}, #1\n\tstr \u{1}r3x\u{2}, [sp]\n"
+            ),
+            "{text}"
+        );
     }
 
     /// A letter that means one thing on x86 and another on AArch64 is refused there rather than
@@ -9082,7 +9127,7 @@ mod tests {
         let produced = source[out].results().next().expect("one result");
         Builder::new(&mut source, block).ret(&[produced]);
         let text = lower_a64(&mut names, &source).expect("kept as text");
-        assert!(text.contains("%2:fpr, early $x0,"), "{text}");
+        assert!(text.contains("%2:fpr = a64.template"), "{text}");
         assert!(text.contains("@fadd \u{1}r0d\u{2}, \u{1}r"), "{text}");
         assert!(text.contains("\n\tmov \u{1}r0v\u{2}.16b, \u{1}r0v\u{2}.16b\n"), "{text}");
 
