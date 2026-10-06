@@ -300,6 +300,9 @@ struct Build<'a> {
     /// Whether each block is in the region being looked at, so an edge out of it is skipped in
     /// O(1) rather than by searching the region.
     inside: Vec<bool>,
+    /// Whether each block is in the loop being recorded, so finding its exits is linear in the
+    /// loop rather than in the square of it. An interpreter's dispatch loop is thousands of blocks.
+    member: Vec<bool>,
     /// Tarjan's numbering, and the lowest one reachable from each block.
     index: Vec<u32>,
     low: Vec<u32>,
@@ -320,6 +323,7 @@ impl<'a> Build<'a> {
             roots: Vec::new(),
             irreducible: Vec::new(),
             inside: vec![false; blocks],
+            member: vec![false; blocks],
             index: vec![UNVISITED; blocks],
             low: vec![0; blocks],
             stacked: vec![false; blocks],
@@ -373,6 +377,9 @@ impl<'a> Build<'a> {
         let mut latches = Vec::new();
         let mut exits = Vec::new();
         for &block in &blocks {
+            self.member[block.index()] = true;
+        }
+        for &block in &blocks {
             // Every block of the loop belongs to it until an inner call says otherwise, and an
             // inner call runs after this, so the last writer is the innermost loop.
             self.innermost[block.index()] = Some(id);
@@ -380,10 +387,13 @@ impl<'a> Build<'a> {
                 latches.push(block);
             }
             for &next in self.cfg.successors(block) {
-                if !blocks.contains(&next) {
+                if !self.member[next.index()] {
                     exits.push(Exit { from: block, to: next });
                 }
             }
+        }
+        for &block in &blocks {
+            self.member[block.index()] = false;
         }
         let depth = parent.map_or(0, |parent| self.loops[parent.index()].depth + 1);
         self.loops.push(LoopData {
