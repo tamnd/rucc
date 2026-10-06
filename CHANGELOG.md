@@ -8,6 +8,10 @@ All notable changes are recorded here. The format follows [Keep a Changelog](htt
 
 - `ipa-vrp` says what it did. `-fopt-info` and the `fired` field of `-frucc-trace` show one `optimized` line for every parameter it writes a range on, and one `missed` line for every integer parameter the calls leave unbounded. Before this the pass reported nothing, so across the corpus it read as a pass that never fires. (#3016)
 
+### Changed
+
+- On wasm, a copy of a short known length is loads and stores as wide as the bytes left allow, 8, 4, 2 or 1, whatever the alignment of the two addresses, and the alignment is only the hint of each access (#2866). Wasm loads and stores at any address, and Wasmtime does an access that is not aligned in one instruction on x86-64 and on AArch64. A copy of a 20 byte `Mem` in SQLite with an alignment of 1 was 20 byte loads and 20 byte stores, and it is now 3 of each. The SQLite shell at `-O2` goes from 1,631,906 bytes to 1,591,799, and the workload runs 34.40 G instructions on an Apple M machine, where it ran 34.58 G.
+
 ## 0.24.5
 
 The first release since 0.21.0 to publish its archives. It has the gate fixes that 0.24.4 still needed, jump threading run a second time at `-O2`, the switch clustering on wasm, and the other changes merged since 0.24.4.

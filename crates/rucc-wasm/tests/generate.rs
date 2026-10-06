@@ -1731,8 +1731,8 @@ fn bulk_body_of(text: &str, name: &str, features: Features) -> String {
 
 /// With the bulk memory feature, a call to `memcpy` or `memmove` is `memory.copy` and a call to
 /// `memset` is `memory.fill`, and the answer is the destination. A copy of a small constant length
-/// is loads and stores. A function marked `no_builtin`, and a target with no bulk memory, keep the
-/// calls.
+/// is loads and stores, each as wide as the bytes left allow. A function marked `no_builtin`, and
+/// a target with no bulk memory, keep the calls.
 #[test]
 fn a_call_to_memcpy_or_memset_is_a_bulk_memory_instruction() {
     let lime = Cpu::Lime1.features();
@@ -1744,12 +1744,62 @@ fn a_call_to_memcpy_or_memset_is_a_bulk_memory_instruction() {
     assert!(!f.contains("call"), "{f}");
     let g = bulk_body_of(BULK, "g", lime);
     assert_eq!(g.matches("memory.copy").count(), 1, "{g}");
-    assert_eq!(g.matches("i32.store8").count(), 8, "{g}");
+    // The copy of 8 bytes has an alignment of 1, and wasm loads and stores at any address, so
+    // it is one piece with the hint of a byte.
+    assert!(g.contains("i64.load\t0:p2align=0\n\ti64.store\t0:p2align=0\n"), "{g}");
+    assert!(!g.contains("i32.store8"), "{g}");
     assert!(!g.contains("call"), "{g}");
     let h = bulk_body_of(BULK, "h", lime);
     assert!(h.contains("call\tmemcpy") && !h.contains("memory.copy"), "{h}");
     let f = bulk_body_of(BULK, "f", Cpu::Mvp.features());
     assert!(f.contains("call\tmemcpy") && f.contains("call\tmemset"), "{f}");
+}
+
+/// Short copies of the IR at three alignments. See
+/// [`a_short_copy_is_as_wide_as_its_length_allows_and_its_alignment_is_a_hint`].
+const SHORT: &str = r#"; ModuleID = 't.c'
+; format 0
+target triple = "wasm32-unknown-wasip1"
+target datalayout = "e-p:32:32-i64:64-S128"
+
+func @bytes(ptr, ptr), linkage(external) {
+block0(%0: ptr, %1: ptr):
+    memcpy %0, %1, size 20, align 1
+    return
+}
+
+func @shorts(ptr, ptr), linkage(external) {
+block0(%0: ptr, %1: ptr):
+    memcpy %0, %1, size 7, align 8
+    return
+}
+
+func @moved(ptr, ptr), linkage(external) {
+block0(%0: ptr, %1: ptr):
+    memmove %0, %1, size 4, align 1
+    return
+}
+"#;
+
+/// A copy of a small constant length is pieces of 8, 4, 2 and 1 bytes whatever its alignment,
+/// because wasm loads and stores at any address. The alignment of each piece goes in its hint,
+/// and a piece at an offset has the alignment that the offset leaves. A `memmove` of 4 bytes with
+/// an alignment of 1 is one load and one store, where it was `memory.copy`.
+#[test]
+fn a_short_copy_is_as_wide_as_its_length_allows_and_its_alignment_is_a_hint() {
+    let lime = Cpu::Lime1.features();
+    let bytes = bulk_body_of(SHORT, "bytes", lime);
+    for piece in ["i64.store\t0:p2align=0", "i64.store\t8:p2align=0", "i32.store\t16:p2align=0"] {
+        assert!(bytes.contains(piece), "{bytes}");
+    }
+    assert!(!bytes.contains("store8"), "{bytes}");
+    let shorts = bulk_body_of(SHORT, "shorts", lime);
+    for piece in ["i32.store\t0\n", "i32.store16\t4\n", "i32.store8\t6\n"] {
+        assert!(shorts.contains(piece), "{shorts}");
+    }
+    let moved = bulk_body_of(SHORT, "moved", lime);
+    assert!(moved.contains("i32.load\t0:p2align=0\n\ti32.store\t0:p2align=0\n"), "{moved}");
+    assert!(!moved.contains("memory.copy"), "{moved}");
 }
 
 /// A loop with two ways out, which is the C below at `-O1`.
