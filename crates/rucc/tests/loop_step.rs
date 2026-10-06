@@ -25,8 +25,9 @@ fn run(dir: &Path, args: &[&str]) -> (bool, String) {
     (out.status.success(), String::from_utf8_lossy(&out.stderr).into_owned())
 }
 
-/// Two loops over an array whose length is handed in, and a `main` that checks them at lengths
-/// from nothing to a few. It gives back which check failed, or zero.
+/// Three loops over an array whose length is handed in, and a `main` that checks them at lengths
+/// from nothing to a few. It gives back which check failed, or zero. The third starts where it is
+/// told to, so its exit test stays on the counter and only the pointer's step can move.
 const PROGRAM: &str = r"
 __attribute__((noinline)) void scale(int *a, int n, int k) {
   for (int i = 0; i < n; i++)
@@ -38,6 +39,11 @@ __attribute__((noinline)) long total(const long *a, int n) {
   for (int i = 0; i < n; i++)
     s += a[i] * 3;
   return s;
+}
+
+__attribute__((noinline)) void clear(long *a, int from, int n) {
+  for (int i = from; i < n; i++)
+    a[i] = 0;
 }
 
 int main(void) {
@@ -57,6 +63,10 @@ int main(void) {
       want += (i + 1) * 3;
     if (total(b, n) != want)
       return 2;
+    clear(b, 1, n);
+    for (int i = 0; i < 10; i++)
+      if (b[i] != (i >= 1 && i < n ? 0 : i + 1))
+        return 3;
   }
   return 0;
 }
@@ -76,8 +86,8 @@ fn a_loop_stepped_in_front_of_its_test_writes_what_it_wrote_before() {
     let _ = std::fs::remove_dir_all(&dir);
 }
 
-/// `scale` at `-O2` has no jump that is not a branch on a condition: the guard leaves early and
-/// the loop goes back round on the branch that tests the pointer.
+/// `scale` and `clear` at `-O2` have no jump that is not a branch on a condition: the guard leaves
+/// early and the loop goes back round on the branch that tests it.
 #[test]
 fn the_loop_goes_round_on_the_branch_that_tests_it() {
     let dir = dir("asm");
@@ -86,10 +96,12 @@ fn the_loop_goes_round_on_the_branch_that_tests_it() {
         run(&dir, &["--target=x86_64-unknown-linux-gnu", "-O2", "-S", "a.c", "-o", "a.s"]);
     assert!(ok, "{said}");
     let asm = std::fs::read_to_string(dir.join("a.s")).expect("a.s was written");
-    let start = asm.find("scale:").expect("the function is there");
-    let end = asm[start..].find("total:").map_or(asm.len(), |at| start + at);
-    let body = &asm[start..end];
-    let jumps = body.lines().filter(|line| line.trim_start().starts_with("jmp")).count();
-    assert_eq!(jumps, 0, "a jump back round the loop in\n{body}");
+    for (name, next) in [("scale:", "total:"), ("clear:", "main:")] {
+        let start = asm.find(name).expect("the function is there");
+        let end = asm[start..].find(next).map_or(asm.len(), |at| start + at);
+        let body = &asm[start..end];
+        let jumps = body.lines().filter(|line| line.trim_start().starts_with("jmp")).count();
+        assert_eq!(jumps, 0, "a jump back round the loop in\n{body}");
+    }
     let _ = std::fs::remove_dir_all(&dir);
 }

@@ -163,6 +163,7 @@ const OUT_OF_REACH: &str =
     "not rewritten, what the group is measured from is not available before the loop";
 const OUT_OF_FUEL: &str = "not rewritten, the fuel for this compilation ran out first";
 const RETARGETED: &str = "exit test asked of the pointer the loop walks, so the counter goes";
+const STEPPED: &str = "pointer stepped in front of the exit test, so the jump back carries it";
 const COUNTED: &str =
     "loop given a variable counting down to zero, so the exit test is against zero";
 const COUNT_TOO_FAR: &str =
@@ -243,9 +244,12 @@ impl Pass for Ivopts {
             let Some(walk) = rewrite(func, cfg, loops, doms, &plan, fuel, &mut stats) else {
                 continue;
             };
-            if let Some(aim) = plan.aim {
+            let retargeted = plan.aim.is_some_and(|aim| {
                 let ahead = ahead(func, cfg, loops, plan.id, &walk, &aim);
-                retarget(func, &walk, &aim, ahead, fuel, &mut stats);
+                retarget(func, &walk, &aim, ahead, fuel, &mut stats)
+            });
+            if !retargeted {
+                step_ahead(func, cfg, loops, plan.id, &walk, fuel, &mut stats);
             }
         }
         stats
@@ -1779,14 +1783,14 @@ fn retarget(
     ahead: Option<Inst>,
     fuel: &mut Fuel,
     stats: &mut Stats,
-) {
+) -> bool {
     let Some(reach) = reach(func, walk, aim, ahead.is_some()) else {
         stats.missed(LIMIT_TOO_FAR);
-        return;
+        return false;
     };
     if !fuel.take() {
         stats.missed(OUT_OF_FUEL);
-        return;
+        return false;
     }
 
     let term = func.terminator(walk.pre).expect("a preheader ends in a jump to the header");
@@ -1829,6 +1833,7 @@ fn retarget(
     let cond = func[inst].first_result.expect("one result was asked for");
     set_arg(func, aim.branch, 0, cond);
     stats.optimized(RETARGETED);
+    true
 }
 
 /// The jump back to the header the pointer's step can be taken in front of the exit test for.
@@ -1854,6 +1859,21 @@ fn ahead(
     if stay == header {
         return Some(aim.branch);
     }
+    bare(func, cfg, loops, id, walk, exiting, stay)
+}
+
+/// The jump back to the header in the loop's one latch, when only the exit test reaches the latch
+/// and the latch does nothing with the pointer but step it.
+fn bare(
+    func: &Func,
+    cfg: &Cfg,
+    loops: &Loops,
+    id: LoopId,
+    walk: &Walk,
+    exiting: Block,
+    stay: Block,
+) -> Option<Inst> {
+    let header = loops.header(id);
     if loops.latches(id) != [stay] || cfg.predecessors(stay).iter().any(|&from| from != exiting) {
         return None;
     }
@@ -1871,6 +1891,47 @@ fn ahead(
         func[func.target_list(term)].iter().any(|call| func[call.args].contains(&walk.param));
     let alone = !passes && func.insts(stay).all(|inst| inst == step || !reads(inst));
     alone.then_some(term)
+}
+
+/// Steps a pointer in front of an exit test that was not rewritten to ask it.
+///
+/// The same move [`retarget`] makes when [`ahead`] says it can, without the test. A loop whose
+/// test stays on the counter, because something else still wants the counter or because where the
+/// loop starts is not something to work out a limit from, still had the pointer stepped behind the
+/// test in a block of its own, so every turn was a branch out, the step and a jump back. Stepped in
+/// front of the test the block behind it is the jump alone, `crate::simplify_cfg` takes it out, and
+/// the test branches straight back to the header. The step is only arithmetic on the pointer, so
+/// where it is worked out changes nothing but the shape: the block it moves to is the only way into
+/// the one it leaves.
+///
+/// Only when the block in front is where the loop leaves, so the step runs on the way out once
+/// rather than on a turn that did not need it.
+fn step_ahead(
+    func: &mut Func,
+    cfg: &Cfg,
+    loops: &Loops,
+    id: LoopId,
+    walk: &Walk,
+    fuel: &mut Fuel,
+    stats: &mut Stats,
+) {
+    let &[latch] = loops.latches(id) else { return };
+    let Some(&exiting) = cfg.predecessors(latch).first() else { return };
+    if !loops.exits(id).iter().any(|exit| exit.from == exiting) {
+        return;
+    }
+    let Some(branch) = func.terminator(exiting) else { return };
+    if func[branch].opcode != Opcode::BrIf {
+        return;
+    }
+    let Some(back) = bare(func, cfg, loops, id, walk, exiting, latch) else { return };
+    if !fuel.take() {
+        stats.missed(OUT_OF_FUEL);
+        return;
+    }
+    let next = past(func, branch, walk.param, walk.step);
+    carry(func, back, walk.param, next);
+    stats.optimized(STEPPED);
 }
 
 /// Has the jump back to the header carry a value round in the pointer's place.
@@ -2045,8 +2106,8 @@ mod tests {
         ADDED, AddrMode, CANDIDATE, CHANGED, CHOSEN, COUNTED, COUNTER_WANTED, Cand, Chrec, Cost,
         Cycles, GROUPED, Group, Invariant, Ivopts, KEPT, LIMIT_TOO_FAR, MANY_EXITS, NO_TARGET,
         NOT_A_WALK, NOT_EVERY_TURN, OUT_OF_FUEL, Origin, POPULATION, PRICED, Plain, RETARGETED,
-        REWRITTEN, USE_ADDRESS, USE_COMPARE, USE_GENERIC, Use, Width, address_cost, heuristics,
-        select, serve, total, upkeep, value_cost, width,
+        REWRITTEN, STEPPED, USE_ADDRESS, USE_COMPARE, USE_GENERIC, Use, Width, address_cost,
+        heuristics, select, serve, total, upkeep, value_cost, width,
     };
     use crate::stats::Kind;
     use crate::{Analyses, Fuel, Pass, Stats};
@@ -3199,6 +3260,7 @@ mod tests {
         assert_eq!(stats.count(Kind::Optimized, ADDED), 1, "the walk is still worth making");
         assert_eq!(stats.count(Kind::Optimized, RETARGETED), 0);
         assert_eq!(stats.count(Kind::Missed, COUNTER_WANTED), 1);
+        assert_eq!(stats.count(Kind::Optimized, STEPPED), 0, "the body after the test reads it");
         assert_eq!(leaves_on(&func, it.head), IntPred::Slt, "the test is the one it arrived as");
         assert_eq!(stores(&func), before);
         sound(&func, &mut names);
@@ -3507,6 +3569,34 @@ mod tests {
         let stats = choose(&mut func);
         assert_eq!(stats.count(Kind::Optimized, RETARGETED), 1);
         assert_eq!(carried_from(&func, it.body), it.body, "the step stays behind the test");
+        assert_eq!(stores(&func), before);
+        sound(&func, &mut names);
+    }
+
+    /// A walk the exit test was not rewritten to ask is stepped in front of the test all the same,
+    /// so the block behind the test is a jump with nothing the jump needs.
+    #[test]
+    fn a_pointer_the_test_does_not_ask_is_stepped_in_front_of_it_too() {
+        let mut names = Interner::new();
+        let (mut func, entry, base) = shell(&mut names);
+        let it = rotated(&mut func, entry, Type::int(64));
+        let mut build = Builder::new(&mut func, it.head);
+        let addr = element(&mut build, base, it.counter, 0);
+        let zero = build.iconst(Type::int(32), 0);
+        build.store(zero, addr, plain(), Flags::NONE);
+        // The counter itself written somewhere, so the test stays on it.
+        build.store(it.counter, base, plain(), Flags::NONE);
+        let limit = build.iconst(Type::int(64), 7);
+        rotated_close(&mut func, &it, limit);
+        Builder::new(&mut func, it.out).ret(&[]);
+        let before = stores(&func);
+
+        let stats = choose(&mut func);
+        assert_eq!(stats.count(Kind::Optimized, ADDED), 1);
+        assert_eq!(stats.count(Kind::Optimized, RETARGETED), 0);
+        assert_eq!(stats.count(Kind::Optimized, STEPPED), 1);
+        assert_eq!(leaves_on(&func, it.head), IntPred::Slt, "the test is the one it arrived as");
+        assert_eq!(carried_from(&func, it.back), it.head, "the step is in front of the test");
         assert_eq!(stores(&func), before);
         sound(&func, &mut names);
     }
