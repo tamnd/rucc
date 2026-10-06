@@ -12,6 +12,7 @@ All notable changes are recorded here. The format follows [Keep a Changelog](htt
 
 ### Changed
 
+- A branch on `!flag`, where `flag` is a `_Bool`, tests `flag` and jumps the other way at every level (#1994), so `if (!s->done)` is a `testb` and a jump instead of an `xorb $1`, a `testb` and a jump, as gcc writes it. The negation goes only when the branch is the one thing that reads it, and a `__builtin_expect` hint stays with the arm it was written for. Postgres' `XidInMVCCSnapshot` has two of these for every tuple it checks.
 - On x86-64, a vector of four `int` or two `long` with one value in every lane, which is `_mm_set1_epi32`, `_mm_set1_epi64x` and `(__v4si){a, a, a, a}`, is the value moved across with `movd` or `movq` and one `pshufd`, as gcc writes it, where it was the lanes written one at a time over a zero, sixteen instructions for four `int` (#1994). Postgres' `pg_lfind32` starts with one, and `XidInMVCCSnapshot` calls it twice for every tuple it checks.
 - On x86-64, `if (flags & MASK)` and `(flags & MASK) == 0` are a `test` of the register against the mask, as gcc writes them, rather than a copy of the register and an `and` that overwrites the copy. Postgres asks bits of a tuple's `t_infomask` this way all through the executor, and the mask is usually still wanted after the question, so each of them was a `movq` and an `andl` in front of the jump (#1994).
 

@@ -184,6 +184,12 @@ const UNDEFAULTED: &str = "switch default that is never taken pointed at one of 
 /// Recorded for a `switch` that would have been given a new default if there had been fuel.
 const NO_FUEL_DEFAULT: &str = "switch default that is never taken kept, the pass ran out of fuel";
 
+/// Recorded once for each branch on a negation that now branches on what was negated.
+const UNNEGATED: &str = "branch on a negated condition turned round to branch on the condition";
+
+/// Recorded for a branch on a negation that would have been turned round if there had been fuel.
+const NO_FUEL_UNNEGATED: &str = "branch on a negated condition kept, the pass ran out of fuel";
+
 /// Recorded once for each block that went with it.
 pub(crate) const REMOVED: &str = "block nothing reaches removed";
 
@@ -249,6 +255,9 @@ impl Pass for SimplifyCfg {
         // nobody can see and charge the two steps below for walking blocks that are not there.
         sweep(func, an, &mut stats);
         let undefaulted = undefault(func, fuel, &mut stats);
+        if unnegate(func, fuel, &mut stats) {
+            an.clear();
+        }
         if fold_branches(func, fuel, &mut stats) || undefaulted {
             // The second sweep section 21.4 folds into step two. The cache is holding answers
             // about the function as it was a moment ago, and the manager clears it after the pass
@@ -404,6 +413,66 @@ fn undefault(func: &mut Func, fuel: &mut Fuel, stats: &mut Stats) -> bool {
         changed = true;
     }
     changed
+}
+
+/// Turns a branch on `!c` into a branch on `c` with its arms the other way round, and says
+/// whether any turned.
+///
+/// A `!` on a `_Bool` is an `xor` with one, and `if (!p->flag)` branched on the `xor`, so the
+/// machine code was the load, an `xorb $1`, a `testb` and a jump where gcc writes a test and the
+/// jump the other way. Postgres' `XidInMVCCSnapshot` does that on `suboverflowed` and
+/// `takenDuringRecovery` for every tuple it looks at (tamnd/rucc#1994).
+///
+/// Only an `xor` the branch is the one reader of goes, and it goes here rather than being left for
+/// [`crate::dce`], because `-O0` runs this pass and nothing after it. A negation something else
+/// reads too is left alone, since turning the branch round would keep the `xor` and save nothing.
+/// The arms carry their hints with them, so what `__builtin_expect` said about each arm is still
+/// said about the same arm.
+fn unnegate(func: &mut Func, fuel: &mut Fuel, stats: &mut Stats) -> bool {
+    let uses = uses::count(func);
+    let mut changed = false;
+    for block in func.blocks().collect::<Vec<Block>>() {
+        let Some(term) = func.terminator(block) else { continue };
+        if func[term].opcode != Opcode::BrIf {
+            continue;
+        }
+        let Extra::Targets(targets) = func[term].extra else { continue };
+        let Some(&cond) = func[func[term].args].first() else { continue };
+        let Some((not, negated)) = negation(func, cond) else { continue };
+        if uses[cond.index()] != 1 {
+            continue;
+        }
+        let [then, otherwise] = func[targets] else { continue };
+        if !fuel.take() {
+            stats.missed(NO_FUEL_UNNEGATED);
+            continue;
+        }
+        let args = func[term].args;
+        func.rewrite(args, |_| negated);
+        let turned = func.push_block_calls(&[otherwise, then]);
+        func[term].extra = Extra::Targets(turned);
+        func.remove_inst(not);
+        stats.optimized(UNNEGATED);
+        changed = true;
+    }
+    changed
+}
+
+/// The `xor` with one that makes this `i1`, and the value it negates.
+fn negation(func: &Func, value: Value) -> Option<(Inst, Value)> {
+    let Def::Result { inst, .. } = func[value].def else { return None };
+    if func[inst].opcode != Opcode::Xor || func[value].ty != Type::I1 {
+        return None;
+    }
+    let [lhs, rhs] = func[func[inst].args] else { return None };
+    let one = |value| constant(func, value).is_some_and(|(imm, _)| imm.unsigned() & 1 == 1);
+    if one(rhs) {
+        Some((inst, lhs))
+    } else if one(lhs) {
+        Some((inst, rhs))
+    } else {
+        None
+    }
 }
 
 /// Whether control cannot get past an instruction.
@@ -1305,8 +1374,8 @@ fn numbered(func: &Func, value: Value) -> Option<(Imm, Type)> {
 mod tests {
     use rucc_base::Interner;
     use rucc_ir::{
-        Block, Builder, Def, Flags, Func, Inst, IntPred, MemInfo, MemOrder, Module, Opcode,
-        Restrict, Signature, Type, Value,
+        Block, Builder, Def, Extra, Flags, Func, Hint, Inst, IntPred, MemInfo, MemOrder, Module,
+        Opcode, Restrict, Signature, Type, Value,
     };
     use rucc_target::{Arch, Env, Os, TargetInfo, Triple};
 
@@ -1555,6 +1624,58 @@ block2:
         assert!(stats.is_empty(), "a pass with nothing to say should say nothing");
         assert_eq!(terminator(&func, 0), Opcode::BrIf);
         assert_eq!(blocks(&func), [0, 1, 2]);
+    }
+
+    /// A function that branches on `!c`, where `c` is its one parameter, with the arm taken when
+    /// `c` is false hinted at nine in ten, and the branch. The negation is returned too, along
+    /// with a second reader of it when `twice` asks for one.
+    fn negated(twice: bool) -> (Func, Value) {
+        let mut names = Interner::new();
+        let sig = Signature::new().with_params(&[Type::int(1)]).with_returns(&[Type::int(1)]);
+        let mut func = Func::new(names.intern("f"), sig);
+        let entry = func.create_block();
+        let then_block = func.create_block();
+        let else_block = func.create_block();
+        let cond = func.append_param(entry, Type::int(1));
+        let mut build = Builder::new(&mut func, entry);
+        let one = build.iconst(Type::int(1), -1);
+        let not = build.binary(Opcode::Xor, cond, one, Flags::NONE);
+        let term = build.br_if(not, then_block, &[], else_block, &[]);
+        let Extra::Targets(targets) = func[term].extra else { unreachable!("a br_if has arms") };
+        let mut arms = func[targets].to_vec();
+        arms[0].hint = Hint::parts(9_000);
+        arms[1].hint = Hint::parts(1_000);
+        let hinted = func.push_block_calls(&arms);
+        func[term].extra = Extra::Targets(hinted);
+        for (arm, mark) in [(then_block, 1), (else_block, 0)] {
+            let mut build = Builder::new(&mut func, arm);
+            let mark = build.iconst(Type::int(1), mark);
+            build.ret(&[if twice { not } else { mark }]);
+        }
+        (func, cond)
+    }
+
+    #[test]
+    fn a_branch_on_a_negation_branches_on_what_was_negated_with_the_arms_turned_round() {
+        let (mut func, cond) = negated(false);
+        let stats = simplify(&mut func);
+        assert_eq!(stats.count(Kind::Optimized, super::UNNEGATED), 1);
+        let term = func.terminator(Block::from_usize(0)).expect("the entry still branches");
+        assert_eq!(func[term].opcode, Opcode::BrIf);
+        assert_eq!(func[func[term].args], [cond]);
+        let arms: Vec<(usize, Option<u32>)> =
+            func.successors(term).map(|call| (call.block.index(), call.hint.taken())).collect();
+        assert_eq!(arms, [(2, Some(1_000)), (1, Some(9_000))]);
+        let xor = func.insts(Block::from_usize(0)).any(|it| func[it].opcode == Opcode::Xor);
+        assert!(!xor, "the negation nothing else read is still there");
+    }
+
+    #[test]
+    fn a_negation_something_else_reads_as_well_is_left_alone() {
+        let (mut func, _) = negated(true);
+        let stats = simplify(&mut func);
+        assert_eq!(stats.count(Kind::Optimized, super::UNNEGATED), 0);
+        assert_eq!(goes_to(&func, 0), [1, 2]);
     }
 
     /// A function whose entry switches on a constant, with a marker in the default and in each
