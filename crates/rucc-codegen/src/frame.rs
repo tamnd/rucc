@@ -1023,17 +1023,24 @@ pub fn keeps_frame_pointer(layout: &Layout<'_>) -> bool {
 ///
 /// Narrower than the class when every value in the slot is narrower than its register and the
 /// target has a load and a store for that much, which is a `double` in an x86-64 vector register
-/// getting eight bytes and a `movsd` rather than sixteen and a `movaps`. A slot with nothing in it
-/// that the function says how wide it is keeps the whole register, and that is every slot the
-/// allocator borrows a register through, since the register can be holding anything at all.
+/// getting eight bytes and a `movsd` rather than sixteen and a `movaps`. A value put away around a
+/// call counts as well as one that lives in its slot, so a `double` kept in a register across a
+/// loop and saved only where the loop calls something is saved with a `movsd` too. A slot with
+/// nothing in it that the function says how wide it is keeps the whole register, and that is every
+/// slot the allocator borrows a register through, since the register can be holding anything at
+/// all.
 #[must_use]
 pub fn widths(layout: &Layout<'_>, func: &Func, allocation: &Allocation) -> Vec<u32> {
     let classes = allocation.assignment.slots();
     // The widest value in each slot, or `None` once a slot has something in it whose width is the
     // whole register. `Some(0)` is a slot nothing has been found in yet.
     let mut held: Vec<Option<u32>> = vec![Some(0); classes.len()];
-    for (reg, place) in allocation.assignment.placed() {
-        let Place::Slot(slot) = place else { continue };
+    let placed = allocation.assignment.placed().filter_map(|(reg, place)| match place {
+        Place::Slot(slot) => Some((reg, slot)),
+        Place::Reg(_) => None,
+    });
+    let saved = allocation.assignment.saves().iter().map(|save| (save.reg, save.slot));
+    for (reg, slot) in placed.chain(saved) {
         let Some(at) = usize::try_from(slot).ok().and_then(|slot| held.get_mut(slot)) else {
             continue;
         };
@@ -1080,7 +1087,8 @@ fn offset(bytes: u32) -> i32 {
 #[cfg(test)]
 mod tests {
     use rucc_base::Interner;
-    use rucc_mir::{Opcode, Operand, Reg};
+    use rucc_mir::{BlockCall, Opcode, Operand, Reg, Weight};
+    use rucc_regalloc::Allocator;
     use rucc_regalloc::assign::Env;
     use rucc_target::x86_64::{GPR, RBP, REGS, SYSV, WIN64, XMM};
 
@@ -1542,6 +1550,49 @@ mod tests {
         }
         assert!(checked >= 3, "three of the four are in slots of their own");
         assert!(frame.size() < whole.size(), "{frame:?} against {whole:?}");
+    }
+
+    /// A `double` a loop keeps in a vector register, with the call the loop seldom makes destroying
+    /// both of the registers there are. It is put away around the call rather than spilled, and
+    /// the slot it waits in is the eight bytes a `movsd` moves, not the sixteen of a `movaps`.
+    #[test]
+    fn a_double_put_away_around_a_call_waits_in_a_slot_of_its_own_size() {
+        let mut names = Interner::new();
+        let mut func = Func::new(names.intern("f"));
+        let opcode = Opcode::new(names.intern("x64.nop"));
+        let [entry, head, cold, skip, latch, back, out] = [(); 7].map(|()| func.create_block());
+        let order = SYSV.sse_order;
+        let value = func.new_vreg(XMM);
+        func.set_width(value, 8);
+        func.build(entry, opcode).def(value, XMM).finish();
+        *func.succs_mut(entry) = vec![BlockCall::to(head)];
+        func.build(head, opcode).uses(value, XMM).finish();
+        *func.succs_mut(head) = vec![BlockCall::to(cold), BlockCall::to(skip)];
+        func.build(cold, opcode)
+            .operand(Operand::write(Reg::physical(order[0]), XMM))
+            .operand(Operand::write(Reg::physical(order[1]), XMM))
+            .finish();
+        *func.succs_mut(cold) = vec![BlockCall::to(latch)];
+        *func.succs_mut(skip) = vec![BlockCall::to(latch)];
+        func.build(latch, opcode).uses(value, XMM).finish();
+        *func.succs_mut(latch) = vec![BlockCall::to(back), BlockCall::to(out)];
+        *func.succs_mut(back) = vec![BlockCall::to(head)];
+        func.build(out, opcode).uses(value, XMM).finish();
+        for (block, often) in [(head, 100), (skip, 99), (latch, 100), (back, 99)] {
+            func.set_weight(block, Weight::parts(often * Weight::SCALE));
+        }
+        let env = Env::new().with(XMM, &order[..2], &order[2..5]);
+        let allocation =
+            rucc_regalloc::run_with(&mut func, &env, "test", true, Allocator::Backtracking);
+        let saves = allocation.assignment.saves();
+        assert_eq!(saves.len(), 1, "{allocation:?}");
+
+        let base = Layout::new(&SYSV, REGS);
+        let narrow = Layout { moves: rucc_target::x86_64::FRAME.classes, ..base };
+        let frame = Frame::of(&func, &allocation, &narrow);
+        assert_eq!(frame.slot_width(saves[0].slot), Some(8));
+        let whole = Frame::of(&func, &allocation, &base);
+        assert_eq!(whole.slot_width(saves[0].slot), Some(16));
     }
 
     /// A pair of saved registers that are not next to each other gets the one between, so every
