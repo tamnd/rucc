@@ -2187,6 +2187,12 @@ impl<'a> Lowering<'a> {
                     self.vector_shift(inst)?;
                     continue;
                 }
+                // Four `int` multiplied lane by lane, written by name because SSE2 has no one
+                // instruction for it and a rule writes one.
+                Opcode::Mul if !self.on_aarch64() && self.four_ints(inst) => {
+                    self.vector_multiply(inst)?;
+                    continue;
+                }
                 // The same sixteen bytes seen as another shape of vector, which is no instruction:
                 // both are in one vector register and the lanes are only how the next instruction
                 // reads it.
@@ -4937,6 +4943,73 @@ impl<'a> Lowering<'a> {
             .operand(mir::Operand::read(from, sse))
             .imm(i64::from(by))
             .finish();
+        Ok(())
+    }
+
+    /// Whether an instruction's answer is a vector of four `int`.
+    fn four_ints(&self, inst: Inst) -> bool {
+        let result = self.source[inst].first_result;
+        result.is_some_and(|result| crate::term::vector_slot(self.source[result].ty) == Some(0))
+    }
+
+    /// Whether a value is a `splat`, which has the same number in every lane.
+    fn is_splat(&self, value: Value) -> bool {
+        let Def::Result { inst, .. } = self.source[value].def else { return false };
+        self.source[inst].opcode == Opcode::Splat
+    }
+
+    /// A multiply of four `int`, which is what gcc 16.2.0 writes for one at the SSE2 baseline.
+    ///
+    /// `pmuludq` multiplies lanes zero and two of its operands into two products of sixty four bits,
+    /// so it is done twice: once as the operands are and once with lanes one and three shuffled
+    /// down into zero and two. The low half of each product is the lane C wants, since the low
+    /// thirty two bits of a product are the same whether the operands were signed or not. A
+    /// `pshufd` brings the two low halves of each answer down to lanes zero and one, and
+    /// `punpckldq` takes those in turn from the two, which is the four lanes in order. An operand
+    /// that is a `splat` has the same number in its odd lanes as in its even ones and is not
+    /// shuffled, which is the usual case of a vector multiplied by a constant.
+    fn vector_multiply(&mut self, inst: Inst) -> Result<(), Unsupported> {
+        let data = &self.source[inst];
+        let &[x, y] = &self.source[data.args] else { return Err(self.unsupported(inst)) };
+        let result = data.first_result.ok_or_else(|| self.unsupported(inst))?;
+        let sse = self.conv.sse_class;
+        let span = self.source.span(inst);
+        let block = self.at.expect("a block is being filled");
+        let fresh = |this: &mut Self| {
+            let reg = this.out.new_vreg(sse);
+            this.out.set_width(reg, 16);
+            reg
+        };
+        let two =
+            |this: &mut Self, name: &str, into: mir::Reg, first: mir::Reg, other: mir::Reg| {
+                let opcode = this.named(name);
+                this.out
+                    .build(block, opcode)
+                    .at(span)
+                    .operand(mir::Operand::write(into, sse).with(Constraint::Reuse(1)))
+                    .operand(mir::Operand::read(first, sse))
+                    .operand(mir::Operand::read(other, sse))
+                    .finish();
+            };
+        let odd = |this: &mut Self, value: Value, reg: mir::Reg| {
+            if this.is_splat(value) {
+                return reg;
+            }
+            let down = fresh(this);
+            this.pshufd(inst, down, reg, [1, 1, 3, 3]);
+            down
+        };
+        let (a, b) = (self.reg_of(x)?, self.reg_of(y)?);
+        let even = fresh(self);
+        two(self, "pmuludq_rr", even, a, b);
+        let (a_odd, b_odd) = (odd(self, x, a), odd(self, y, b));
+        let high = fresh(self);
+        two(self, "pmuludq_rr", high, a_odd, b_odd);
+        let (low_even, low_odd) = (fresh(self), fresh(self));
+        self.pshufd(inst, low_even, even, [0, 2, 0, 0]);
+        self.pshufd(inst, low_odd, high, [0, 2, 0, 0]);
+        let into = self.new_reg(result);
+        two(self, "punpckldq_rr", into, low_even, low_odd);
         Ok(())
     }
 

@@ -210,3 +210,72 @@ fn a_vector_read_and_written_through_an_unaligned_pointer_uses_the_unaligned_mov
     }
     let _ = std::fs::remove_dir_all(&dir);
 }
+
+/// Four `int` multiplied lane by lane, by another vector and by the same constant in every lane,
+/// signed and not, with products that wrap. SSE2 has no one instruction for it, so the back end
+/// writes the two `pmuludq` and the shuffles gcc does, and the answer has to be the low half of
+/// each lane's product whatever the signs were.
+const MULTIPLY: &str = r"
+typedef int v4si __attribute__((vector_size(16)));
+typedef unsigned v4su __attribute__((vector_size(16)));
+
+__attribute__((noinline)) v4si times(v4si a, v4si b) {
+  return a * b;
+}
+
+__attribute__((noinline)) v4su scaled(v4su a) {
+  v4su prime = { 16777619u, 16777619u, 16777619u, 16777619u };
+  return (a ^ prime) * prime;
+}
+
+int main(void) {
+  v4si a = { 3, -7, 0x7fffffff, -2147483647 - 1 };
+  v4si b = { -5, -9, 3, -1 };
+  v4si m = times(a, b);
+  for (int i = 0; i < 4; i++)
+    if ((unsigned)m[i] != (unsigned)a[i] * (unsigned)b[i])
+      return 1 + i;
+  v4su u = { 0, 1, 0x80000000u, 0xdeadbeefu };
+  v4su s = scaled(u);
+  for (int i = 0; i < 4; i++)
+    if (s[i] != (u[i] ^ 16777619u) * 16777619u)
+      return 5 + i;
+  v4si c = a;
+  c *= c;
+  for (int i = 0; i < 4; i++)
+    if ((unsigned)c[i] != (unsigned)a[i] * (unsigned)a[i])
+      return 9 + i;
+  return 0;
+}
+";
+
+#[cfg(all(target_os = "linux", target_arch = "x86_64"))]
+#[test]
+fn four_ints_multiplied_whole_give_the_answer_their_lanes_would() {
+    let dir = dir("mul-run");
+    std::fs::write(dir.join("a.c"), MULTIPLY).expect("the fixture can be written");
+    for level in ["-O0", "-O1", "-O2"] {
+        let (ok, said) = run(&dir, &[level, "a.c", "-o", "prog"]);
+        assert!(ok, "{level}: {said}");
+        let out = Command::new(dir.join("prog")).output().expect("what was linked can be run");
+        assert_eq!(out.status.code(), Some(0), "{level}: a check failed");
+    }
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// The multiply is `pmuludq` on the vector registers, not four `imul` on lanes taken out.
+#[test]
+fn four_ints_multiplied_whole_stay_in_the_vector_registers() {
+    let dir = dir("mul-asm");
+    std::fs::write(dir.join("a.c"), MULTIPLY).expect("the fixture can be written");
+    for level in ["-O0", "-O2"] {
+        let (ok, said) =
+            run(&dir, &["--target=x86_64-unknown-linux-gnu", level, "-S", "a.c", "-o", "a.s"]);
+        assert!(ok, "{level}: {said}");
+        let asm = std::fs::read_to_string(dir.join("a.s")).expect("a.s was written");
+        for inst in ["pmuludq", "punpckldq", "pshufd"] {
+            assert!(asm.contains(inst), "{level}: no {inst} in\n{asm}");
+        }
+    }
+    let _ = std::fs::remove_dir_all(&dir);
+}

@@ -284,7 +284,9 @@ fn slow(name: &str, form: Form) -> Option<Timing> {
         }
         // Moving lanes around inside the vector unit, which is one cycle on the shuffle port. The
         // scalar moves share a stem with their loads, so only the register to register ones.
-        "punpcklqdq" => Some(Timing { latency: 1, unit: Unit::Float }),
+        "punpckldq" | "punpcklqdq" => Some(Timing { latency: 1, unit: Unit::Float }),
+        // The multiply, which is the integer multiplier once per lane and as slow as it is.
+        "pmuludq" => Some(Timing { latency: 5, unit: Unit::Float }),
         "movss" | "movsd" if form == Form::AluVec => Some(Timing { latency: 1, unit: Unit::Float }),
         _ => None,
     }
