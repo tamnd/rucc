@@ -6,6 +6,7 @@ All notable changes are recorded here. The format follows [Keep a Changelog](htt
 
 ### Added
 
+- CI runs rung 0 on `wasm32-wasip2` and `wasm32-wasip3` under Wasmtime 49 (#2868). rucc links each c-testsuite program into a component with `wasm-component-ld` 0.5.30 and lld 23, and `wasm-tools validate` checks each object and each component.
 - A null pointer that is only compared against is no longer written into a register first (#3131). The cast that makes a pointer of the zero now leaves it a constant, which is written in the block that reads it like any other, so a comparison that takes it as `#0` leaves nothing behind. Before this every `while (p)` loop on AArch64 wrote a zero on each turn that nothing read.
 - A branch on whether a register is zero on AArch64 is one `cbz` or `cbnz` (#3130), as gcc writes it, where it was a `cmp` against zero and a `b.eq` or `b.ne`. Every `if (p)`, `while (n)` and `if (x == 0)` in the kernel is one instruction shorter. `cbz` reaches as far as `b.eq` does, so nothing about the layout changes.
 - A comparison whose answer is wanted as a number on AArch64 is the `cmp` and the `cset` with no `and w0, w0, #1` after it (#3127), as gcc writes it. The `cset` already clears every bit above the one it writes, so the `and` was one instruction more on every `return a < b;` and every flag the kernel stores.
