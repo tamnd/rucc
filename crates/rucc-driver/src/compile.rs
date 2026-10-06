@@ -1593,15 +1593,33 @@ fn generate(
             // encoder is x86-64's alone.
             //
             // A function the program put in a section of its own comes this way as well, and so
-            // does one written `retain`, which is given a section of its own. The object writer
-            // lays the code out as one run of bytes, and the listing is where a function's
-            // section is already said, so it is the one place the answer has to be right rather
-            // than two. A function split in two is placed code as well, since its cold part is in
-            // `.text.unlikely`.
+            // does one written `retain`, which is given a section of its own. The listing is where
+            // a function's section is already said, so it is the one place the answer has to be
+            // right rather than two.
+            //
+            // Except for what this compiler moves itself, which is a function only cold code calls
+            // and the cold part of one split in two, both in `.text.unlikely`. A large unit at `-O2`
+            // nearly always has one, and writing a listing only to read it back was an eighth of
+            // the time duktape took. The encoder lays each section out on its
+            // own and the writer puts each in the object, so it is not two answers to one question
+            // but the same one, with nothing in between. Not under `-g`, whose tables are written
+            // for code in one section, and not for a split function with a landing pad or room
+            // for a patcher, which the cold part would have to be told about.
             let listed = target.tuple.arch() != Arch::X86_64;
-            let placed_code = funcs
-                .iter()
-                .any(|func| func.section.is_some() || func.retain || func.cold.is_some());
+            let moved = |func: &rucc_mir::Func| {
+                func.section.is_some_and(|section| {
+                    let section = names.resolve(section);
+                    section == ".text.unlikely" || section.starts_with(".text.unlikely.")
+                })
+            };
+            let placed_code = funcs.iter().any(|func| {
+                let split = func.cold.is_some()
+                    && (!func.landings.is_empty() || func.patch.is_some() || func.hook);
+                func.retain
+                    || split
+                    || (func.section.is_some() && (!moved(func) || opts.debug_info))
+                    || (func.cold.is_some() && opts.debug_info)
+            });
             if listed || placed_code || globals.kept() || rucc_asm::kept(&funcs, names, target) {
                 // A unit with a landing pad comes through this too. The listing names the
                 // personality routine and the call site table with `.cfi_personality` and
@@ -1655,8 +1673,15 @@ fn generate(
                     rucc_object::assembled_described(&read, target, &info).map_err(wrote)?;
                 return Ok(Artifact::Object { bytes, defines });
             }
-            let assembled = rucc_asm::assemble(&funcs, names, target, unwind, opts.debug_info)
-                .map_err(refused)?;
+            let assembled = rucc_asm::assemble_in(
+                &funcs,
+                names,
+                target,
+                unwind,
+                opts.debug_info,
+                opts.function_sections,
+            )
+            .map_err(refused)?;
             let data = globals.image();
             // The line table, from the spans the assembler kept beside the bytes. Empty when the
             // build asked for no debug information, which is the case the rows above are not even

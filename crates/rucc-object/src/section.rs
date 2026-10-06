@@ -159,6 +159,38 @@ pub struct Text {
     /// every call it can turn into a nop, or in the section `-mfentry-section=` or a function's
     /// `fentry_section` named instead.
     pub mcount: Vec<(usize, String)>,
+    /// The stretches of [`Text::bytes`] that go in a section other than the text section, in the
+    /// order they are in the bytes, each up to where the next one starts or to the end.
+    ///
+    /// Everything in front of the first one is the text section, and nothing at all goes anywhere
+    /// else in a unit with none, which is every unit with no function the compiler moved out of
+    /// it. What moves one is gcc's: a function only cold code calls goes in `.text.unlikely`, and
+    /// so does the cold part of one split in two.
+    pub runs: Vec<Run>,
+    /// Places in [`Text::bytes`] a relocation in them names and that are no symbol of their own,
+    /// which is a jump from one part of a split function to the other.
+    ///
+    /// The two ends are in different sections, so the distance is the linker's to fill in, and it
+    /// is told the section the place is in and how far into it, which is what gas writes for a jump
+    /// to a `.L` label in another section. Kept apart from [`Text::labels`] because those are
+    /// symbols an image may name, and these are only ever a section and a number.
+    pub places: Vec<Marker>,
+}
+
+/// A stretch of [`Text::bytes`] that is a section of its own. See [`Text::runs`].
+///
+/// Laid out by the assembler as though it were at the front of its own section, which is what it
+/// becomes: the padding in front of a loop and the alignment of a function count from where the
+/// stretch starts, so they come out the same as they would have in a listing that switched to the
+/// section.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Run {
+    /// The section's name, with its leading dot.
+    pub name: String,
+    /// Where in [`Text::bytes`] it starts.
+    pub start: usize,
+    /// What the section has to be aligned to, which is the most anything in it asked for.
+    pub align: u32,
 }
 
 /// The section `-mrecord-mcount` lists the calls in. See [`Text::mcount`].
@@ -175,6 +207,8 @@ impl Default for Text {
             unwind: Unwind::default(),
             tables: Vec::new(),
             mcount: Vec::new(),
+            runs: Vec::new(),
+            places: Vec::new(),
         }
     }
 }
@@ -334,8 +368,14 @@ pub struct Table {
     pub name: String,
     /// Which of [`Text::funcs`] it belongs to.
     pub func: usize,
-    /// Where each cell's block is, counted from [`Extent::start`] of that function.
-    pub cells: Vec<usize>,
+    /// Where each cell's block is, as which of [`Text::funcs`] it is in and how far from that
+    /// one's [`Extent::start`].
+    ///
+    /// The function the table belongs to for every cell of a function in one piece. One split in
+    /// two has its cold part in a section of its own under a name of its own, and a cell naming a
+    /// block there is counted from the front of that part, since that is the only place in its
+    /// section anything here knows.
+    pub cells: Vec<(usize, usize)>,
     /// Whether each cell is the block's address in eight bytes rather than its distance from the
     /// table in four, which is the table the kernel code model reads.
     pub absolute: bool,

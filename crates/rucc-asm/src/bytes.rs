@@ -130,17 +130,71 @@ pub fn assemble(
     unwind: bool,
     lines: bool,
 ) -> Result<Assembled, Error> {
+    assemble_in(funcs, names, target, unwind, lines, false)
+}
+
+/// [`assemble`] for a unit some of whose functions are in a section other than the text section.
+///
+/// A function the program or the driver put in a section goes there, and the cold part of one
+/// split in two goes in `.text.unlikely`, or in `.text.unlikely.` and its name when `functions`
+/// says each function is in a section of its own, which is `-ffunction-sections`. Each section is
+/// laid out on its own, as though it started at nothing, and then put after the text section as a
+/// run of its own. See [`Text::runs`].
+///
+/// Only an ELF function is split, since the listing splits one only there, and a split function
+/// has no landing pad and no room for a patcher. The driver keeps any other to the listing.
+///
+/// # Errors
+///
+/// What [`assemble`] gives back.
+///
+/// # Panics
+///
+/// What [`assemble`] panics on.
+pub fn assemble_in(
+    funcs: &[Func],
+    names: &Interner,
+    target: &TargetInfo,
+    unwind: bool,
+    lines: bool,
+    functions: bool,
+) -> Result<Assembled, Error> {
     if target.tuple.arch() != Arch::X86_64 {
         return Err(Error::Machine { triple: target.tuple.to_string() });
     }
-    let mut text = Text::default();
-    let mut all = Vec::new();
-    // Where each function's frame rules landed, kept beside the extents rather than written into
-    // the section as they are found, because a record counts from the start of its function and the
-    // function's own length is not known until its last instruction has been encoded.
-    let mut rows = Vec::with_capacity(funcs.len());
+    let elf = target.object_format == ObjectFormat::Elf;
+    // The text section first and then every other section a function went in, in the order the
+    // first function in each was met, which is the order a listing would have switched to them.
+    let mut laid = vec![Laid::new(String::new(), Text::default())];
+    // Which section and which function in it each extent is, in the order the listing would have
+    // written them, for the unwind table, whose records are in that order.
+    let mut order = Vec::with_capacity(funcs.len());
+    // The cold part of each split function, as where it is and where its first part is, so that a
+    // jump table cell naming a block in it can be pointed at it once both have a number.
+    let mut colds = Vec::new();
     let mut known = Known::default();
     for func in funcs {
+        let home = func
+            .section
+            .map(|section| names.resolve(section))
+            .filter(|&section| section != ".text");
+        let here = place(&mut laid, home);
+        let name = names.resolve(func.name).to_owned();
+        let split = func.cold.filter(|_| elf);
+        let there = split.map(|_| {
+            let cold = if functions {
+                format!(".text.unlikely.{name}")
+            } else {
+                ".text.unlikely".to_owned()
+            };
+            place(&mut laid, Some(&cold))
+        });
+        // The section the cold part goes in, out of the list while the function is written so
+        // that it and the section the first part goes in can both be written to.
+        let mut other =
+            there.filter(|&there| there != here).map(|there| std::mem::take(&mut laid[there]));
+        let section = &mut laid[here];
+        let text = &mut section.text;
         // What this function asked for, which pads the space in front of it and, once every
         // function has been through here, is what the whole section is aligned to. Both halves
         // are needed: the offset inside the section is this padding and where the section itself
@@ -178,13 +232,13 @@ pub fn assemble(
         if func.hook {
             text.bytes.extend_from_slice(crate::hook::opening(arch));
         }
-        let name = names.resolve(func.name).to_owned();
         let mut assembler = Assembler {
             names,
             directives: Directives::for_target(target),
             func,
             name: &name,
-            text: &mut text,
+            text,
+            other: other.as_mut().map(|other| &mut other.text),
             blocks: Vec::new(),
             jumps: Vec::new(),
             rows: Vec::new(),
@@ -193,13 +247,16 @@ pub fn assemble(
             start,
             room: None,
             loops: Vec::new(),
-            apart: target.object_format == ObjectFormat::Elf,
+            apart: elf,
             sites: Vec::new(),
             known: &mut known,
+            split,
+            cold: None,
         };
         assembler.func()?;
         let room = assembler.room;
         let blocks = std::mem::take(&mut assembler.blocks);
+        let cold = assembler.cold.take();
         let mut landings: Vec<Site> = std::mem::take(&mut assembler.sites)
             .into_iter()
             .map(|(at, end, pad)| Site {
@@ -209,9 +266,13 @@ pub fn assemble(
             })
             .collect();
         landings.sort_by_key(|site| site.start);
-        rows.push(std::mem::take(&mut assembler.rows));
-        all.push(std::mem::take(&mut assembler.lines));
-        let len = text.bytes.len() - start;
+        let rows = std::mem::take(&mut assembler.rows);
+        let all = std::mem::take(&mut assembler.lines);
+        drop(assembler);
+        section.rows.push(rows);
+        section.lines.push(all);
+        let text = &mut section.text;
+        let len = cold.as_ref().map_or(text.bytes.len() - start, |cold| cold.hot);
         // Where the record points is the front of the room, which is the half in front of the
         // label in a function that has one and the first instruction of the other half otherwise.
         // The two are not one offset because a landing pad can sit between the halves.
@@ -223,8 +284,9 @@ pub fn assemble(
             };
             Patch { at, before: patch.before as usize }
         });
+        order.push((here, text.funcs.len()));
         text.funcs.push(Extent {
-            name,
+            name: name.clone(),
             start,
             len,
             align,
@@ -234,20 +296,159 @@ pub fn assemble(
             hooked,
             landings,
         });
+        let hot = (here, text.funcs.len() - 1);
+        if let Some(back) = other {
+            laid[there.expect("a section for the cold part")] = back;
+        }
+        // The cold part, which is a function of its own as far as the symbols and the unwind
+        // table go: `.cold` after the name, local, and with a record that starts from the state a
+        // call leaves and is brought to the one the first part ended in. See `crate::att`.
+        if let (Some(cold), Some(there)) = (cold, there) {
+            let section = &mut laid[there];
+            let text = &mut section.text;
+            order.push((there, text.funcs.len()));
+            colds.push((hot, (there, text.funcs.len())));
+            text.funcs.push(Extent {
+                name: format!("{name}.cold"),
+                start: cold.start,
+                len: text.bytes.len() - cold.start,
+                align: 1,
+                binding: Binding::Local,
+                visibility: Visibility::Default,
+                patch: None,
+                hooked: 0,
+                landings: Vec::new(),
+            });
+            section.rows.push(cold.rows);
+            section.lines.push(cold.lines);
+        }
     }
+    let (mut text, rows, all, order) = merge(laid, &order, &colds);
     // In whichever of the two shapes the target reads, which is what decides whether a prologue
     // this cannot describe is a refusal or is nothing at all. See [`unwind::table`].
     // Or, when there is to be no unwind table and there is to be debug information, the same rows
     // where only a debugger looks. See [`unwind::debug_frame`].
+    //
+    // In the order the listing would have written the functions, which is not the order they are
+    // in once every section has been put after the text section.
     let mut frames = None;
     if let Some(conv) = target.call_regs {
+        let sorted = order.iter().enumerate().all(|(at, &which)| at == which);
+        let (moved, rows): (Vec<Extent>, Vec<Rows>) = if sorted {
+            (Vec::new(), rows)
+        } else {
+            order.iter().map(|&which| (text.funcs[which].clone(), rows[which].clone())).unzip()
+        };
+        let extents = if sorted { &text.funcs } else { &moved };
         if unwind {
-            text.unwind = unwind::table(&text.funcs, &rows, conv, target.object_format, &[], &[])?;
+            text.unwind = unwind::table(extents, &rows, conv, target.object_format, &[], &[])?;
         } else if lines {
-            frames = unwind::debug_frame(&text.funcs, &rows, conv, target.object_format, &[]);
+            frames = unwind::debug_frame(extents, &rows, conv, target.object_format, &[]);
         }
     }
     Ok(Assembled { text, lines: all, frames })
+}
+
+/// One section the functions are laid out in, before it is put after the others.
+#[derive(Default)]
+struct Laid {
+    /// The section's name, and nothing for the text section.
+    name: String,
+    text: Text,
+    /// The frame rules of each function in it, in the order of [`Text::funcs`], kept beside the
+    /// extents rather than written into the section as they are found, because a record counts
+    /// from the start of its function and the function's own length is not known until its last
+    /// instruction has been encoded.
+    rows: Vec<Rows>,
+    /// Where each instruction of each function in it began, the same way.
+    lines: Vec<Vec<Row>>,
+}
+
+impl Laid {
+    fn new(name: String, text: Text) -> Self {
+        Self { name, text, rows: Vec::new(), lines: Vec::new() }
+    }
+}
+
+/// Which of the sections laid out so far is the one called `name`, making it if there is none,
+/// with the text section for no name at all.
+fn place(laid: &mut Vec<Laid>, name: Option<&str>) -> usize {
+    let Some(name) = name else { return 0 };
+    if let Some(at) = laid.iter().position(|section| section.name == name) {
+        return at;
+    }
+    // Aligned to nothing to begin with, since a listing that switches to a section asks for
+    // nothing of it until something in it does.
+    laid.push(Laid::new(name.to_owned(), Text { align: 1, ..Text::default() }));
+    laid.len() - 1
+}
+
+/// Every section laid out on its own, as the text section with the rest after it as runs, with the
+/// rows and the lines of each function in the order of the extents, and where each extent in
+/// `order` and each cold part in `colds` ended up.
+///
+/// Everything a section kept as a place in its own bytes is moved by how far its bytes moved, and
+/// everything it kept as a function's number by how many functions are in front of it.
+fn merge(
+    laid: Vec<Laid>,
+    order: &[(usize, usize)],
+    colds: &[((usize, usize), (usize, usize))],
+) -> (Text, Vec<Rows>, Vec<Vec<Row>>, Vec<usize>) {
+    let mut firsts = Vec::with_capacity(laid.len());
+    let mut sections = laid.into_iter();
+    let first = sections.next().expect("the text section");
+    let mut text = first.text;
+    let mut rows = first.rows;
+    let mut lines = first.lines;
+    firsts.push(0);
+    for section in sections {
+        let shift = text.bytes.len();
+        let count = text.funcs.len();
+        firsts.push(count);
+        let part = section.text;
+        text.runs.push(rucc_object::Run { name: section.name, start: shift, align: part.align });
+        text.bytes.extend_from_slice(&part.bytes);
+        text.funcs.extend(part.funcs.into_iter().map(|mut func| {
+            func.start += shift;
+            if let Some(patch) = &mut func.patch {
+                patch.at += shift;
+            }
+            func
+        }));
+        text.relocs
+            .extend(part.relocs.into_iter().map(|reloc| Reloc { at: reloc.at + shift, ..reloc }));
+        let moved = |marker: Marker| Marker { at: marker.at + shift, ..marker };
+        text.labels.extend(part.labels.into_iter().map(moved));
+        text.places.extend(part.places.into_iter().map(moved));
+        text.mcount.extend(part.mcount.into_iter().map(|(at, name)| (at + shift, name)));
+        text.tables.extend(part.tables.into_iter().map(|mut table| {
+            table.func += count;
+            for cell in &mut table.cells {
+                if cell.0 != usize::MAX {
+                    cell.0 += count;
+                }
+            }
+            table
+        }));
+        rows.extend(section.rows);
+        lines.extend(section.lines);
+    }
+    let at = |(section, func): (usize, usize)| firsts[section] + func;
+    // A cell naming a block in the cold part was written before the cold part had a number, and
+    // its function is the one the table belongs to.
+    if !colds.is_empty() {
+        let cold: Map<usize, usize> =
+            colds.iter().map(|&(hot, cold)| (at(hot), at(cold))).collect();
+        for table in &mut text.tables {
+            for cell in &mut table.cells {
+                if cell.0 == usize::MAX {
+                    cell.0 = cold[&table.func];
+                }
+            }
+        }
+    }
+    let order = order.iter().map(|&which| at(which)).collect();
+    (text, rows, lines, order)
 }
 
 /// A template kept as text, as the bytes the assembler reads out of it on its own and the places in
@@ -306,6 +507,25 @@ struct Jump {
     /// What is added to the distance, which is nothing for a jump and is the displacement for an
     /// address that names a block and has one.
     disp: i64,
+    /// Whether it is in the cold part of a function split in two. See [`Cold`].
+    cold: bool,
+}
+
+/// The cold part of a function split in two, from where the layout reached its first block.
+struct Cold {
+    /// Where it begins in the section it is in, which is what its own distances count from.
+    start: usize,
+    /// How long the first part is.
+    hot: usize,
+    /// Whether each block is in it, indexed by the block's own number.
+    blocks: Vec<bool>,
+    /// Whether it is in another section from the first part, which it is unless the whole function
+    /// was put in the section the cold part goes in.
+    apart: bool,
+    /// Its frame rules, counted from where it begins.
+    rows: Rows,
+    /// Where each of its instructions began, counted the same way.
+    lines: Vec<Row>,
 }
 
 /// A place in this function that an instruction can name: a block, or one of its jump tables.
@@ -323,7 +543,16 @@ struct Assembler<'a> {
     directives: Directives,
     func: &'a Func,
     name: &'a str,
+    /// The section being written, which is the one the cold part goes in while it is written.
     text: &'a mut Text,
+    /// The section the cold part of a split function goes in, and the one the first part is in
+    /// while the cold part is written. None for a function in one piece and for one whose two parts
+    /// go in one section.
+    other: Option<&'a mut Text>,
+    /// The first block of the cold part, for a function split in two.
+    split: Option<Block>,
+    /// The cold part, once the layout has reached it.
+    cold: Option<Cold>,
     /// Where each block starts, indexed by the block's own number, or [`usize::MAX`] for one that
     /// is not in the layout.
     blocks: Vec<usize>,
@@ -391,6 +620,9 @@ pub(crate) fn loop_sizes(
         func,
         name: "",
         text: &mut text,
+        other: None,
+        split: None,
+        cold: None,
         blocks: Vec::new(),
         jumps: Vec::new(),
         rows: Vec::new(),
@@ -437,9 +669,24 @@ impl Assembler<'_> {
             self.lines.push(Row { at: 0, span: self.func.declared, inst: None });
         }
         let end = self.func.cfi_end();
+        // A function split in two has its first part end at the last instruction in front of the
+        // cold part, and the rows after that one open the cold part instead. See `crate::att`.
+        let hot_end = self.split.and_then(|cold| {
+            self.func
+                .blocks()
+                .take_while(|&block| block != cold)
+                .flat_map(|block| self.func.insts(block))
+                .last()
+        });
         self.sites.clear();
         let pads: Map<Inst, Block> = self.func.landings.iter().copied().collect();
         for block in self.func.blocks() {
+            if Some(block) == self.split {
+                self.cut(block);
+            }
+            if let Some(cold) = &mut self.cold {
+                cold.blocks[block.index()] = true;
+            }
             // The head of a loop is padded the way the listing asks the assembler to pad it, with
             // instructions rather than single bytes, since the block in front of it may fall in.
             // The section is told for the reason an alignment instruction tells it below, since a
@@ -473,10 +720,13 @@ impl Assembler<'_> {
                 // asking what a program counter is in the middle of, and an unwinder is asking what
                 // the frame looked like at a return address.
                 if self.wants {
-                    let at = self.text.bytes.len() - self.start;
-                    self.lines.push(Row { at, span: self.func.span(inst), inst: Some(inst) });
+                    let row = Row { at: self.here(), span: self.func.span(inst), inst: Some(inst) };
+                    match &mut self.cold {
+                        Some(cold) => cold.lines.push(row),
+                        None => self.lines.push(row),
+                    }
                 }
-                let began = self.text.bytes.len() - self.start;
+                let began = self.here();
                 // The profiler's call, listed where it begins and written as the nop of the same
                 // length when those were asked for. See [`rucc_mir::Mcount`].
                 let mcount = self.func.mcount.filter(|mcount| mcount.inst == inst);
@@ -493,34 +743,107 @@ impl Assembler<'_> {
                 }
                 // A call an unwind lands somewhere from, as the bytes it is. See [`Site`].
                 if let Some(&pad) = pads.get(&inst) {
-                    self.sites.push((began, self.text.bytes.len() - self.start, pad));
+                    self.sites.push((began, self.here(), pad));
                 }
-                if Some(inst) == end {
+                if Some(inst) == end || Some(inst) == hot_end {
                     continue;
                 }
                 // Where the instruction ended, because a row takes effect after the instruction
                 // that changed the answer and an unwinder is looking up a return address, which is
                 // the byte after a call rather than the call itself.
-                let at = self.text.bytes.len() - self.start;
-                self.rows.extend(self.func.cfi_after(inst).map(|op| (at, op)));
+                let at = self.here();
+                let rows = match &mut self.cold {
+                    Some(cold) => &mut cold.rows,
+                    None => &mut self.rows,
+                };
+                rows.extend(self.func.cfi_after(inst).map(|op| (at, op)));
             }
+        }
+        // Back to the section the first part is in, which is where the tables and the jumps are
+        // worked out from.
+        if self.cold.as_ref().is_some_and(|cold| cold.apart)
+            && let Some(other) = self.other.as_mut()
+        {
+            std::mem::swap(&mut self.text, other);
         }
         Ok(())
     }
 
+    /// How far into the part being written the next byte is, which is what a row and a frame rule
+    /// count from.
+    fn here(&self) -> usize {
+        self.text.bytes.len() - self.cold.as_ref().map_or(self.start, |cold| cold.start)
+    }
+
+    /// Ends the first part of a function split in two at the block the cold part starts with, and
+    /// starts the cold part in the section it goes in.
+    ///
+    /// The cold part is a function of its own as far as the unwind table goes, so its rows open
+    /// with the ones that take a fresh record to the state the first part ended in. See
+    /// [`crate::att::cold_rows`].
+    fn cut(&mut self, block: Block) {
+        let hot = self.text.bytes.len() - self.start;
+        let apart = self.other.is_some();
+        if let Some(other) = self.other.as_mut() {
+            std::mem::swap(&mut self.text, other);
+        }
+        let rows = crate::att::cold_rows(self.func, block).into_iter().map(|op| (0, op)).collect();
+        self.cold = Some(Cold {
+            start: self.text.bytes.len(),
+            hot,
+            blocks: vec![false; self.func.block_count()],
+            apart,
+            rows,
+            lines: Vec::new(),
+        });
+    }
+
     /// Where the jumps go, now that every block and every table has a place.
+    ///
+    /// A jump from one part of a split function to the other is left to the linker, since the two
+    /// are in different sections, as a relocation against a place in the part it goes to. See
+    /// [`Text::places`].
     fn patch(&mut self, tables: &[usize]) -> Result<(), Error> {
+        let mut placed = Vec::new();
         for jump in std::mem::take(&mut self.jumps) {
-            let to = match jump.to {
-                To::Block(block) => self.blocks[block.index()],
-                To::Table(table) => tables[table as usize],
+            let (to, there) = match jump.to {
+                To::Block(block) => {
+                    let cold = self.cold.as_ref().is_some_and(|cold| cold.blocks[block.index()]);
+                    (self.blocks[block.index()], cold)
+                }
+                To::Table(table) => (tables[table as usize], false),
             };
             debug_assert_ne!(to, usize::MAX, "a jump to a block that was never laid out");
+            // The section the jump is in and the one the place it goes to is in, which are the
+            // same section unless the function was split into two of them.
+            let apart = self.cold.as_ref().is_some_and(|cold| cold.apart);
+            let (from, into) = match self.other.as_deref_mut() {
+                Some(other) if apart && jump.cold => (other, Some(&mut *self.text)),
+                Some(other) if apart => (&mut *self.text, Some(other)),
+                _ => (&mut *self.text, None),
+            };
+            if let Some(into) = into.filter(|_| jump.cold != there) {
+                let To::Block(block) = jump.to else {
+                    unreachable!("a table in the other part of a function split in two")
+                };
+                let name = format!("{}{}.{}", self.directives.local(), self.name, block.index());
+                if !placed.contains(&block) {
+                    placed.push(block);
+                    into.places.push(Marker { name: name.clone(), at: to });
+                }
+                let addend =
+                    jump.disp - i64::try_from(jump.end - jump.at).expect("a jump this long");
+                let after = u8::try_from(jump.end - jump.at - 4).expect("an instruction this long");
+                let kind = Reference::Data;
+                from.relocs.push(Reloc { at: jump.at, symbol: name, kind, addend, after });
+                from.bytes[jump.at..jump.at + 4].fill(0);
+                continue;
+            }
             let distance = i64::try_from(to).expect("a section this size") + jump.disp
                 - i64::try_from(jump.end).expect("a section this size");
             let distance = i32::try_from(distance)
                 .map_err(|_| Error::Distance { func: self.name.to_owned(), bytes: distance })?;
-            self.text.bytes[jump.at..jump.at + 4].copy_from_slice(&distance.to_le_bytes());
+            from.bytes[jump.at..jump.at + 4].copy_from_slice(&distance.to_le_bytes());
         }
         Ok(())
     }
@@ -544,6 +867,7 @@ impl Assembler<'_> {
             return Ok(starts);
         }
         if self.apart {
+            let func = self.text.funcs.len();
             for (index, table) in self.func.tables.iter().enumerate() {
                 let block =
                     self.func.block_of(table.jump).expect("a table read by a jump in no block");
@@ -552,13 +876,21 @@ impl Assembler<'_> {
                     .cells
                     .iter()
                     .map(|&cell| {
-                        let to = self.blocks[succs[cell as usize].block.index()];
+                        let block = succs[cell as usize].block;
+                        let to = self.blocks[block.index()];
                         debug_assert_ne!(to, usize::MAX, "a table naming a block never laid out");
-                        to - self.start
+                        // A block in the cold part of a function split into two sections is
+                        // counted from the front of that part, which has no number until it is
+                        // put after the first part. See `merge`.
+                        match &self.cold {
+                            Some(cold) if cold.apart && cold.blocks[block.index()] => {
+                                (usize::MAX, to - cold.start)
+                            }
+                            _ => (func, to - self.start),
+                        }
                     })
                     .collect();
                 let name = self.table(index);
-                let func = self.text.funcs.len();
                 self.text.tables.push(Table { name, func, cells, absolute: table.absolute });
             }
             return Ok(starts);
@@ -846,11 +1178,13 @@ impl Assembler<'_> {
                 // instruction pointer leaves and is patched where a jump is patched rather than
                 // written out as a relocation, since both ends of it are in this function.
                 let at = holes.rip.expect("an address naming a label leaves room for the distance");
-                self.jumps.push(Jump { at, end, to, disp });
+                let cold = self.cold.is_some();
+                self.jumps.push(Jump { at, end, to, disp, cold });
             } else if let Some(at) = holes.dest {
                 match self.func[block].succs.first() {
                     Some(call) => {
-                        self.jumps.push(Jump { at, end, to: To::Block(call.block), disp: 0 });
+                        let (to, cold) = (To::Block(call.block), self.cold.is_some());
+                        self.jumps.push(Jump { at, end, to, disp: 0, cold });
                     }
                     None => debug_assert!(false, "a jump out of a block with no arms"),
                 }
@@ -1132,6 +1466,81 @@ mod tests {
         assert!(text.relocs.is_empty(), "a jump inside a function is not the linker's business");
     }
 
+    /// A function split in two, the first part jumping to the cold part and back, and a function
+    /// put in `.text.unlikely` whole.
+    fn moved(names: &mut Interner) -> Vec<Func> {
+        let mut f = Func::new(names.intern("f"));
+        let first = f.create_block();
+        let second = f.create_block();
+        let addition = Opcode::new(names.intern("x64.add_rr_32"));
+        f.build(first, addition)
+            .operand(Operand::write(Reg::physical(RAX), GPR))
+            .operand(Operand::read(Reg::physical(RAX), GPR))
+            .operand(Operand::read(Reg::physical(RCX), GPR))
+            .finish();
+        let jmp = Opcode::new(names.intern("x64.jmp"));
+        f.build(first, jmp).finish();
+        f.succs_mut(first).push(BlockCall::to(second));
+        f.build(second, jmp).finish();
+        f.succs_mut(second).push(BlockCall::to(first));
+        f.cold = Some(second);
+        let mut g = Func::new(names.intern("g"));
+        add(&mut g, names);
+        g.section = Some(names.intern(".text.unlikely"));
+        vec![f, g]
+    }
+
+    #[test]
+    fn the_cold_part_of_a_split_function_is_a_section_of_its_own_the_linker_jumps_into() {
+        let mut names = Interner::new();
+        let funcs = moved(&mut names);
+        let text = assemble_in(&funcs, &names, &target(), true, false, false).expect("two").text;
+        // The first part is the addition and the jump, and the cold part is put after it as the
+        // section it goes in, with the function moved whole after that on its own boundary,
+        // counted from the front of the section.
+        let runs =
+            vec![rucc_object::Run { name: ".text.unlikely".to_owned(), start: 7, align: 16 }];
+        assert_eq!(text.runs, runs);
+        let extents: Vec<(&str, usize, usize, Binding)> = text
+            .funcs
+            .iter()
+            .map(|func| (func.name.as_str(), func.start, func.len, func.binding))
+            .collect();
+        assert_eq!(
+            extents,
+            vec![
+                ("f", 0, 7, Binding::Global),
+                ("f.cold", 7, 5, Binding::Local),
+                ("g", 23, 2, Binding::Global),
+            ]
+        );
+        // Each jump between the parts is the linker's, to a place in the other part, and neither
+        // place is a symbol.
+        let relocs: Vec<(usize, &str, i64)> = text
+            .relocs
+            .iter()
+            .map(|reloc| (reloc.at, reloc.symbol.as_str(), reloc.addend))
+            .collect();
+        assert_eq!(relocs, vec![(3, ".Lf.1", -4), (8, ".Lf.0", -4)]);
+        let places: Vec<(&str, usize)> =
+            text.places.iter().map(|place| (place.name.as_str(), place.at)).collect();
+        assert_eq!(places, vec![(".Lf.0", 0), (".Lf.1", 7)]);
+        assert!(text.labels.is_empty(), "{:?}", text.labels);
+        assert_eq!(&text.bytes[2..7], &[0xe9, 0, 0, 0, 0]);
+        assert_eq!(&text.bytes[7..12], &[0xe9, 0, 0, 0, 0]);
+    }
+
+    #[test]
+    fn under_function_sections_the_cold_part_is_in_a_section_named_for_its_function() {
+        let mut names = Interner::new();
+        let mut funcs = moved(&mut names);
+        funcs.truncate(1);
+        let text = assemble_in(&funcs, &names, &target(), true, false, true).expect("one").text;
+        let runs: Vec<&str> = text.runs.iter().map(|run| run.name.as_str()).collect();
+        assert_eq!(runs, vec![".text.unlikely.f"]);
+        assert_eq!(text.runs[0].align, 1, "nothing in the cold part asked for a boundary");
+    }
+
     #[test]
     fn the_address_of_a_label_is_filled_in_here_as_well() {
         let mut names = Interner::new();
@@ -1200,7 +1609,7 @@ mod tests {
         let table = rucc_object::Table {
             name: ".Lf_j0".to_owned(),
             func: 0,
-            cells: vec![9, 10, 9],
+            cells: vec![(0, 9), (0, 10), (0, 9)],
             absolute: false,
         };
         assert_eq!(text.tables, [table]);
