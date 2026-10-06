@@ -12,6 +12,10 @@ All notable changes are recorded here. The format follows [Keep a Changelog](htt
 
 - On wasm, a string literal whose first zero is its last byte and that is aligned to one byte has the `STRINGS` segment flag, as clang writes it, so wasm-ld keeps one copy of each string (#2866). The data section of the SQLite shell goes from 141,770 to 128,890 bytes, and clang's is 129,090.
 
+### Fixed
+
+- In a function with a computed `goto`, an empty block that no branch goes to any more is dropped, as it is in any other function (#3044). Only a block the `goto` lists among the places it can go, or one whose address an instruction takes, is kept. Linux 7.2's `___bpf_prog_run` kept two such blocks, each a `jmp` nothing went to, and objtool reported both as unreachable instructions.
+
 ## 0.24.7
 
 `stdcall` and `fastcall` now work on i686 Linux as gcc makes them, and the wasm code for the SQLite shell is 2.6% smaller with the same answers.
