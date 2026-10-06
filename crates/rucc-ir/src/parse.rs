@@ -484,6 +484,7 @@ impl<'a, 'n> Parser<'a, 'n> {
                 "retain" => global.retain = true,
                 "noinit" => global.noinit = true,
                 "persistent" => global.persistent = true,
+                "nobss" => global.nobss = true,
                 "nodirect_extern_access" => global.indirect = true,
                 other => return self.fail(format!("a global has no `{other}`")),
             }

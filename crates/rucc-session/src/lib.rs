@@ -2349,6 +2349,13 @@ pub struct Options {
     /// compiler each platform ships does: Apple's clang still has it on, and gcc has had it off
     /// since 10, as has clang everywhere but Darwin.
     pub common: Option<bool>,
+    /// Whether a variable the program initialized to all zeroes may go in `.bss`, from
+    /// `-fzero-initialized-in-bss` and `-fno-zero-initialized-in-bss`.
+    ///
+    /// On by default, as in gcc. The kernel turns it off for code that runs before anything has
+    /// cleared `.bss`, such as the purgatory between two kernels, where a variable in `.bss` holds
+    /// whatever was in memory and not the zero the program wrote.
+    pub zero_initialized_in_bss: bool,
     /// Whether an access names the type it goes through, from `-fstrict-aliasing` and
     /// `-fno-strict-aliasing`.
     ///
@@ -2808,6 +2815,7 @@ impl Options {
             short_enums: false,
             ms_extensions: None,
             common: None,
+            zero_initialized_in_bss: true,
             strict_aliasing: true,
             fp_contract: Contract::Off,
             trapping_math: true,

@@ -493,6 +493,7 @@ pub fn compile(opts: &Options, name: &str, fs: &dyn FileSystem) -> Compiled {
                                 .unwrap_or_else(|| opts.opt_level.runs_optimizer())
                                 && !opts.safety.instruments(),
                             common,
+                            zero_bss: opts.zero_initialized_in_bss,
                             builtins: opts.builtins && opts.hosted,
                             no_builtin: &opts.no_builtin,
                             auto_init: match opts.auto_var_init {

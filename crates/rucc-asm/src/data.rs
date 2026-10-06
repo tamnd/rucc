@@ -604,8 +604,10 @@ fn place(
     // copy of whatever else is true of it. It is never merged, since what `.comm` asks the linker
     // for is one piece of zeroed space and this wants one per thread, and it is never read only,
     // since the copy is made by writing it.
+    let zero = !global.nobss
+        && !pieces.is_empty()
+        && pieces.iter().all(|piece| matches!(piece, Piece::Zero(_)));
     if global.tls.is_some() {
-        let zero = !pieces.is_empty() && pieces.iter().all(|piece| matches!(piece, Piece::Zero(_)));
         return Place::Thread { zero };
     }
     // Before the tentative definition, because gcc never offers one the program put in a section
@@ -629,11 +631,9 @@ fn place(
     }
     // A constant stays out of the zeroed section even when every byte of it is zero, which is the
     // rule gcc keeps in bss_initializer_p: what the program promised never to write belongs with
-    // the rest of what it reads only, where a stray store faults.
-    if !global.constant
-        && !pieces.is_empty()
-        && pieces.iter().all(|piece| matches!(piece, Piece::Zero(_)))
-    {
+    // the rest of what it reads only, where a stray store faults. A variable the program gave an
+    // initializer under `-fno-zero-initialized-in-bss` stays out as well, which is the same rule.
+    if !global.constant && zero {
         return Place::Zero;
     }
     if global.constant {

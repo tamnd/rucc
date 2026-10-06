@@ -141,17 +141,6 @@ pub(crate) const TABLE: &[Row] = &[
         15,
         same("-fzero-init-padding-bits=standard", "padding is zeroed, which this setting allows"),
     ),
-    same(
-        "-fzero-initialized-in-bss",
-        "it permits putting a variable initialized to zero in .bss, which saves space and changes \
-         nothing a program sees",
-    ),
-    refused(
-        "-fno-zero-initialized-in-bss",
-        "a variable whose initializer is all zeroes, `= {}` say, is still put in .bss here, which \
-         is the one thing the flag forbids",
-        None,
-    ),
     same("-fno-stack-check", "nothing probes the stack unless something asked for it"),
     refused(
         "-fstack-check",

@@ -231,6 +231,9 @@ pub struct Context<'a> {
     /// Whether a tentative definition with external linkage is a common symbol, which is
     /// `-fcommon` and the default on Darwin, rather than a zeroed object in `.bss`.
     pub common: bool,
+    /// Whether a variable the program initialized to all zeroes may go in `.bss`, which is
+    /// `-fzero-initialized-in-bss` and on unless `-fno-zero-initialized-in-bss` turned it off.
+    pub zero_bss: bool,
     /// Whether a call to a library function by its plain name may be taken to mean that function,
     /// which is `-fno-builtin` and `-ffreestanding` turned around.
     ///
@@ -304,6 +307,7 @@ impl fmt::Debug for Context<'_> {
             .field("exceptions", &self.exceptions)
             .field("non_call_exceptions", &self.non_call_exceptions)
             .field("common", &self.common)
+            .field("zero_bss", &self.zero_bss)
             .field("builtins", &self.builtins)
             .field("no_builtin", &self.no_builtin)
             .field("auto_init", &self.auto_init)
@@ -381,6 +385,7 @@ pub fn lower(name: &str, cx: Context<'_>) -> Lowered {
         non_call_exceptions,
         lifetimes,
         common,
+        zero_bss,
         builtins,
         no_builtin,
         auto_init,
@@ -412,6 +417,7 @@ pub fn lower(name: &str, cx: Context<'_>) -> Lowered {
         non_call_exceptions,
         lifetimes,
         common,
+        zero_bss,
         builtins,
         no_builtin,
         auto_init,
@@ -479,6 +485,8 @@ pub(crate) struct Unit<'a> {
     pub(crate) lifetimes: bool,
     /// Whether a tentative definition is a common symbol. See [`Context::common`].
     common: bool,
+    /// Whether a zero initializer may put a variable in `.bss`. See [`Context::zero_bss`].
+    zero_bss: bool,
     /// Whether a plain library name means the library. See [`Context::builtins`].
     builtins: bool,
     /// The names taken away one at a time. See [`Context::no_builtin`].
@@ -991,6 +999,7 @@ impl Unit<'_> {
         let defined = state != Definition::Declared;
         global.noinit = defined && init.is_none() && node.flags.contains(DeclFlags::NOINIT);
         global.persistent = defined && init.is_some() && node.flags.contains(DeclFlags::PERSISTENT);
+        global.nobss = defined && init.is_some() && !self.zero_bss;
         global.indirect = node.flags.contains(DeclFlags::NODIRECT);
         // Under `-fcommon` an `int x;` that nothing initializes is offered to the linker to merge
         // with every other one of the same name, and with a real definition if there is one. Only
