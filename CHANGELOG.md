@@ -11,6 +11,7 @@ All notable changes are recorded here. The format follows [Keep a Changelog](htt
 ### Changed
 
 - On wasm, a copy of a short known length is loads and stores as wide as the bytes left allow, 8, 4, 2 or 1, whatever the alignment of the two addresses, and the alignment is only the hint of each access (#2866). Wasm loads and stores at any address, and Wasmtime does an access that is not aligned in one instruction on x86-64 and on AArch64. A copy of a 20 byte `Mem` in SQLite with an alignment of 1 was 20 byte loads and 20 byte stores, and it is now 3 of each. The SQLite shell at `-O2` goes from 1,631,906 bytes to 1,591,799, and the workload runs 34.40 G instructions on an Apple M machine, where it ran 34.58 G.
+- Loop invariant code motion and global code motion leave a pointer a small constant past another where it is, when nothing reads it but loads and stores in its own block (#1994). Those take the constant into their own address, so the add is no instruction where it stands, and out in front of the loop it was a register held across the whole of it. In a loop that calls something that register is one the callee keeps, so PostgreSQL's `list_free_deep` pushed four registers where gcc pushes two, and `tbm_private_iterate` and `object_address_present_add_flags` had the same shape. One that a load moved out of the loop reads still goes out with the load.
 
 ### Fixed
 

@@ -48,6 +48,8 @@
 //! 12.7 gives as the cheap and correct rule for loads: load motion is `licm`'s, where the alias
 //! analysis is in hand. A constant or the address of a symbol does not move either, because the
 //! backend puts those where they are used already and holding one costs a register for nothing.
+//! The same goes for a constant offset off a pointer that only the loads and stores beside it read,
+//! since each of them takes the offset into its own address.
 //!
 //! A division that may trap moves down and never up. Going down it runs on fewer paths, and every
 //! path it still runs on is one that ran it before. Going up it could run on a path that never
@@ -147,6 +149,7 @@ impl Pass for Gcm {
             at: Map::default(),
             readers: Map::default(),
             full: Set::default(),
+            folded: licm::displacements(func),
         };
         job.survey(func, &order);
         for &block in &order {
@@ -181,6 +184,8 @@ struct Job<'a> {
     /// The loops the sinking walk moves nothing past without saving work, from
     /// [`Job::left_full`].
     full: Set<LoopId>,
+    /// The addresses the loads and stores reading them fold, from [`licm::displacements`].
+    folded: Set<Inst>,
 }
 
 impl Job<'_> {
@@ -246,8 +251,11 @@ impl Job<'_> {
 
     /// Moves an instruction up out of the loops it does not need to be in, as high as its
     /// operands now are.
+    ///
+    /// An address the loads and stores next to it fold stays with them. It costs nothing in the
+    /// loop and a register out of it, and `licm` leaves it for the same reason.
     fn hoist(&mut self, func: &mut Func, inst: Inst, fuel: &mut Fuel, stats: &mut Stats) {
-        if !movable(func, inst) || !speculatable(func, inst) {
+        if !movable(func, inst) || !speculatable(func, inst) || self.folded.contains(&inst) {
             return;
         }
         let Some(&here) = self.at.get(&inst) else { return };
@@ -692,6 +700,57 @@ block2:
     fn a_value_the_loop_does_not_change_moves_in_front_of_it() {
         let out = moved(&LOOP.replace("BODY", "mul %0, %1"));
         assert_eq!(block_of(&out, "mul"), "block0", "{out}");
+    }
+
+    #[test]
+    fn an_address_the_loads_beside_it_fold_stays_in_the_loop() {
+        let out = moved(
+            r#"
+func @f(ptr, i32) -> i32, linkage(external) {
+block0(%0: ptr, %1: i32):
+    %2 = iconst.i32 0
+    %3 = iconst.i64 4
+    jump block1(%2)
+
+block1(%4: i32):
+    %5 = ptr_add %0, %3
+    %6 = load.i32 %5, align 4
+    %7 = add %4, %6
+    %8 = icmp slt %7, %1
+    br_if %8, block1(%7), block2
+
+block2:
+    return %7
+}
+"#,
+        );
+        assert_eq!(block_of(&out, "ptr_add"), "block1", "{out}");
+    }
+
+    #[test]
+    fn an_address_kept_as_a_value_moves_in_front_of_the_loop() {
+        let out = moved(
+            r#"
+func @f(ptr, ptr, i32) -> i32, linkage(external) {
+block0(%0: ptr, %1: ptr, %2: i32):
+    %3 = iconst.i32 0
+    %4 = iconst.i64 4
+    %5 = iconst.i32 1
+    jump block1(%3)
+
+block1(%6: i32):
+    %7 = ptr_add %0, %4
+    store %7 -> %1, align 8
+    %8 = add %6, %5
+    %9 = icmp slt %8, %2
+    br_if %9, block1(%8), block2
+
+block2:
+    return %8
+}
+"#,
+        );
+        assert_eq!(block_of(&out, "ptr_add"), "block0", "{out}");
     }
 
     #[test]
