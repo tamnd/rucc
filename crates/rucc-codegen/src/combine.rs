@@ -697,6 +697,28 @@ pub static WIDENINGS: &[Fold] = &[
     Fold { from: "mov_32_to_64", into: "mov_rm_32", load: "mov_rm_32", swapped: None },
 ];
 
+/// The same on AArch64, where a load of a byte, a half or a word can sign extend what it read, and
+/// one that does not has already zero extended it.
+///
+/// `ldrb` and `ldrh` clear every bit above what they read, and so does `ldr` into a W register, so
+/// each zero widening comes out as the load on its own writing the wider register. A sign widening
+/// is `ldrsb`, `ldrsh` or `ldrsw` into the width it widens to. A sixteen bit value lives in a W
+/// register, so the widenings to sixteen are the ones to thirty two.
+pub static A64_WIDENINGS: &[Fold] = &[
+    Fold { from: "uxtb_16", into: "ldr_8", load: "ldr_8", swapped: None },
+    Fold { from: "uxtb_32", into: "ldr_8", load: "ldr_8", swapped: None },
+    Fold { from: "uxtb_64", into: "ldr_8", load: "ldr_8", swapped: None },
+    Fold { from: "uxth_32", into: "ldr_16", load: "ldr_16", swapped: None },
+    Fold { from: "uxth_64", into: "ldr_16", load: "ldr_16", swapped: None },
+    Fold { from: "uxtw_64", into: "ldr_32", load: "ldr_32", swapped: None },
+    Fold { from: "sxtb_16", into: "ldrs_8_32", load: "ldr_8", swapped: None },
+    Fold { from: "sxtb_32", into: "ldrs_8_32", load: "ldr_8", swapped: None },
+    Fold { from: "sxtb_64", into: "ldrs_8_64", load: "ldr_8", swapped: None },
+    Fold { from: "sxth_32", into: "ldrs_16_32", load: "ldr_16", swapped: None },
+    Fold { from: "sxth_64", into: "ldrs_16_64", load: "ldr_16", swapped: None },
+    Fold { from: "sxtw_64", into: "ldrs_32_64", load: "ldr_32", swapped: None },
+];
+
 /// One arithmetic instruction that could work on memory rather than on a register, and the load
 /// and the store that would be the rest of the run.
 ///
@@ -1028,7 +1050,7 @@ impl Loads {
     fn of(machine: &MachineInsts, names: &Interner, opcode: Opcode) -> Self {
         let name = names.resolve(opcode.name());
         let bare = machine.bare(name);
-        let mut rows = FOLDS.iter().chain(WIDENINGS);
+        let mut rows = FOLDS.iter().chain(WIDENINGS).chain(A64_WIDENINGS);
         Self {
             barrier: machine.calls(name) || !machine.has(name) || machine.touches_mem(name),
             load: rows.find(|fold| fold.load == bare).map(|fold| fold.load),
@@ -1438,7 +1460,7 @@ fn joined(
     inst: Inst,
     bare: &str,
 ) -> Option<Plan> {
-    let fold = FOLDS.iter().chain(WIDENINGS).find(|fold| fold.from == bare)?;
+    let fold = FOLDS.iter().chain(WIDENINGS).chain(A64_WIDENINGS).find(|fold| fold.from == bare)?;
     if carried.load != fold.load || reads.count(carried.reg) != 1 {
         return None;
     }
@@ -2664,6 +2686,27 @@ mod tests {
             assert_eq!(from(row.from), width(row.load), "{} loads another width", row.from);
             assert!((MACHINE.takes_mem)(row.into), "{} reads no memory", row.into);
             assert!(!(MACHINE.takes_mem)(row.from), "{} already reads memory", row.from);
+            assert_eq!(row.swapped, None, "{} has nothing to swap", row.from);
+        }
+    }
+
+    /// Every AArch64 widening names instructions that machine has, reads memory only once folded,
+    /// and takes a load of the width it widens from, which is the letter after the `x`.
+    #[test]
+    fn every_aarch64_widening_takes_a_load_of_the_width_it_widens_from() {
+        let machine = &rucc_target::aarch64::MACHINE;
+        for row in A64_WIDENINGS {
+            assert!(machine.has(row.from), "{} is not an instruction", row.from);
+            assert!(machine.has(row.into), "{} is not an instruction", row.into);
+            assert!(machine.has(row.load), "{} is not an instruction", row.load);
+            let width = match row.from.as_bytes()[3] {
+                b'b' => "ldr_8",
+                b'h' => "ldr_16",
+                _ => "ldr_32",
+            };
+            assert_eq!(row.load, width, "{} loads another width", row.from);
+            assert!((machine.takes_mem)(row.into), "{} reads no memory", row.into);
+            assert!(!(machine.takes_mem)(row.from), "{} already reads memory", row.from);
             assert_eq!(row.swapped, None, "{} has nothing to swap", row.from);
         }
     }

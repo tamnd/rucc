@@ -161,7 +161,7 @@ use rucc_regalloc::rewrite::Edit;
 use rucc_target::{CallRegs, FrameInsts, MachineInsts, PhysReg, RegClass};
 
 use crate::changes::Plan;
-use crate::combine::{FOLDS, WIDENINGS};
+use crate::combine::{A64_WIDENINGS, FOLDS, WIDENINGS};
 use crate::finish::Moves;
 
 /// What one function came to.
@@ -431,7 +431,7 @@ fn reloaded(
         return None;
     }
     let width = |name: &str| name.rsplit('_').next()?.parse::<u32>().ok();
-    let rows = || FOLDS.iter().chain(WIDENINGS);
+    let rows = || FOLDS.iter().chain(WIDENINGS).chain(A64_WIDENINGS);
     let had = machine.bare(names.resolve(func[load].opcode.name())).to_owned();
     if !rows().any(|fold| fold.load == had) {
         return None;
