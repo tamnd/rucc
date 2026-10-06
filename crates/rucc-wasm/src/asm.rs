@@ -34,7 +34,7 @@ use std::fmt::Write as _;
 use crate::Notes;
 use rucc_object::wasm::{
     EXPORTED, FuncType, Function, HIDDEN, LOCAL, Module, NO_STRIP, RETAIN, RelocKind, STRINGS,
-    Segment, SymbolKind, ValType, WEAK,
+    Segment, SymbolKind, TLS_SEGMENT, ValType, WEAK,
 };
 
 /// The text of `object`.
@@ -618,6 +618,13 @@ impl Printer<'_> {
                     Some((RelocKind::TableIndexSleb, symbol, _)) => {
                         format!("i32.const\t{}", self.name(symbol))
                     }
+                    Some((RelocKind::MemoryAddrTlsSleb, symbol, addend)) => {
+                        let name = self.name(symbol);
+                        match addend {
+                            0 => format!("i32.const\t{name}@TLSREL"),
+                            _ => format!("i32.const\t{name}@TLSREL{addend:+}"),
+                        }
+                    }
                     Some(_) => return Err("an `i32.const` is relocated wrongly".into()),
                     None => format!("i32.const\t{}", body.sleb()?),
                 }
@@ -706,6 +713,9 @@ impl Printer<'_> {
         let mut flags = String::new();
         if segment.flags & STRINGS != 0 {
             flags.push('S');
+        }
+        if segment.flags & TLS_SEGMENT != 0 {
+            flags.push('T');
         }
         if segment.flags & RETAIN != 0 {
             flags.push('R');

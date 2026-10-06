@@ -1197,8 +1197,14 @@ fn generate(
                 }
             }
         }
-        let wasm =
-            rucc_wasm::Options { features: opts.wasm, optimize: opts.opt_level.runs_optimizer() };
+        // wasm32-wasip3 keeps the stack pointer and the TLS base in the context slots of the
+        // component model, as `__wasm_libcall_thread_context__` says.
+        let thread_context = opts.target.os == rucc_target::Os::Wasi(rucc_target::Preview::P3);
+        let wasm = rucc_wasm::Options {
+            features: opts.wasm,
+            optimize: opts.opt_level.runs_optimizer(),
+            thread_context,
+        };
         if matches!(opts.emit, EmitKind::WasmTree) {
             return rucc_wasm::tree(module, names, wasm).map(Artifact::Text).map_err(refused);
         }

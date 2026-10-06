@@ -110,6 +110,10 @@ impl Lower<'_, '_> {
                 self.code.op(op);
                 self.code.op(0);
             }
+            Write::Global("__tls_base", _) if self.unit.thread_context => {
+                let base = self.unit.context_call("__wasm_get_tls_base");
+                self.code.call(base, false);
+            }
             Write::Global(global, mutable) => {
                 let symbol = self.unit.linker_global(global, ValType::I32, mutable);
                 self.code.global_get(symbol);

@@ -470,8 +470,7 @@ impl Lower<'_, '_> {
     /// put it back.
     fn prologue(&mut self) {
         let (Some(fp), Some(base)) = (self.frame.fp, self.frame.base) else { return };
-        let sp = self.unit.stack_pointer();
-        self.code.global_get(sp);
+        self.get_stack_pointer();
         self.code.local_tee(base);
         self.code.i32_const(self.frame.size as i32);
         self.code.op(emit::I32_SUB);
@@ -480,14 +479,13 @@ impl Lower<'_, '_> {
             self.code.op(emit::I32_AND);
         }
         self.code.local_tee(fp);
-        self.code.global_set(sp);
+        self.set_stack_pointer();
     }
 
     fn epilogue(&mut self) {
         if let Some(base) = self.frame.base {
-            let sp = self.unit.stack_pointer();
             self.code.local_get(base);
-            self.code.global_set(sp);
+            self.set_stack_pointer();
         }
     }
 
@@ -1115,13 +1113,35 @@ impl Lower<'_, '_> {
             && func[inst].results().next().is_some_and(|v| self.in_frame(v).is_some())
     }
 
+    /// Push the stack pointer: `global.get __stack_pointer`, or a call to `__wasm_get_stack_pointer`
+    /// in a unit with the thread context.
+    fn get_stack_pointer(&mut self) {
+        if self.unit.thread_context {
+            let get = self.unit.context_call("__wasm_get_stack_pointer");
+            self.code.call(get, false);
+        } else {
+            let sp = self.unit.stack_pointer();
+            self.code.global_get(sp);
+        }
+    }
+
+    /// Pop the stack pointer, the other half of [`Self::get_stack_pointer`].
+    fn set_stack_pointer(&mut self) {
+        if self.unit.thread_context {
+            let set = self.unit.context_call("__wasm_set_stack_pointer");
+            self.code.call(set, false);
+        } else {
+            let sp = self.unit.stack_pointer();
+            self.code.global_set(sp);
+        }
+    }
+
     /// Push the frame pointer, or the stack pointer in a function with no frame pointer.
     fn push_frame_pointer(&mut self) {
         match self.frame.fp {
             Some(fp) => self.code.local_get(fp),
             None => {
-                let sp = self.unit.stack_pointer();
-                self.code.global_get(sp);
+                self.get_stack_pointer();
             }
         }
     }
@@ -1132,12 +1152,15 @@ impl Lower<'_, '_> {
     }
 
     /// The symbol of a `global_addr` of data, which has a place in memory. The address of a
-    /// function is a slot in the table and cannot go in the offset field of an access.
+    /// function is a slot in the table and cannot go in the offset field of an access, and nor
+    /// can the address of a thread-local variable with the thread context, which is a sum that
+    /// the code computes.
     fn data_address(&self, value: Value) -> Option<rucc_base::Symbol> {
         let (def, _) = self.def(value)?;
         let Extra::Symbol(symbol) = self.func[def].extra else { return None };
         let data = self.func[def].opcode == Opcode::GlobalAddr;
-        (data && !self.unit.is_function(symbol).ok()?).then_some(symbol)
+        let fixed = data && !self.unit.is_function(symbol).ok()? && !self.unit.is_tls(symbol);
+        fixed.then_some(symbol)
     }
 
     fn results(&self, inst: Inst) -> Vec<Value> {
@@ -1298,6 +1321,15 @@ impl Lower<'_, '_> {
                 }
                 (Opcode::GlobalAddr, Extra::Symbol(symbol)) => {
                     let (function, target) = self.unit.address(symbol)?;
+                    if self.unit.is_tls(symbol) {
+                        // The TLS base and the offset of the variable in the TLS block, as clang
+                        // writes it.
+                        let base = self.unit.context_call("__wasm_get_tls_base");
+                        self.code.call(base, false);
+                        self.code.address(RelocKind::MemoryAddrTlsSleb, target, 0);
+                        self.code.op(emit::I32_ADD);
+                        return Ok(());
+                    }
                     let kind = if function {
                         RelocKind::TableIndexSleb
                     } else {
@@ -1817,8 +1849,7 @@ impl Lower<'_, '_> {
                     match self.frame.fp {
                         Some(fp) => self.code.local_get(fp),
                         None => {
-                            let sp = self.unit.stack_pointer();
-                            self.code.global_get(sp);
+                            self.get_stack_pointer();
                         }
                     }
                     if offset != 0 {
@@ -1827,28 +1858,25 @@ impl Lower<'_, '_> {
                     }
                 } else {
                     let align = self.mem_info(inst).map_or(16, |m| m.align).max(16);
-                    let sp = self.unit.stack_pointer();
                     let at = self.local[&results[0]];
-                    self.code.global_get(sp);
+                    self.get_stack_pointer();
                     self.push_i32(arg(0))?;
                     self.code.op(emit::I32_SUB);
                     self.code.i32_const(-(align as i32));
                     self.code.op(emit::I32_AND);
                     self.code.local_tee(at);
-                    self.code.global_set(sp);
+                    self.set_stack_pointer();
                     return Ok(());
                 }
                 self.set(results[0]);
             }
             Opcode::StackSave => {
-                let sp = self.unit.stack_pointer();
-                self.code.global_get(sp);
+                self.get_stack_pointer();
                 self.set(results[0]);
             }
             Opcode::StackRestore => {
-                let sp = self.unit.stack_pointer();
                 self.push(arg(0))?;
-                self.code.global_set(sp);
+                self.set_stack_pointer();
             }
             Opcode::Memcpy | Opcode::Memmove | Opcode::Memset => self.bulk(inst, &args)?,
             Opcode::AtomicRmw => self.rmw(inst, &args, &results)?,
@@ -1921,8 +1949,7 @@ impl Lower<'_, '_> {
                 match self.frame.fp {
                     Some(fp) => self.code.local_get(fp),
                     None => {
-                        let sp = self.unit.stack_pointer();
-                        self.code.global_get(sp);
+                        self.get_stack_pointer();
                     }
                 }
                 self.set(results[0]);
