@@ -1,7 +1,8 @@
 //! What `-g` puts in a wasm object: the DWARF sections, as custom sections with their relocations,
 //! in the object and in the `-S` text. With a wasi-sdk and Wasmtime on the machine, the module that
 //! `wasm-ld` links from the object gives a backtrace with the file and the line of each frame, and
-//! `llvm-dwarfdump --verify` takes the object and the module.
+//! `llvm-dwarfdump --verify` takes the object and the module. The rucc linker writes the same
+//! module as `wasm-ld`, byte for byte, with the same DWARF sections.
 //!
 //! Design: #3149.
 
@@ -109,6 +110,12 @@ fn a_trap_gives_the_line_of_each_frame() {
     let dir = scratch("trap");
     ok(&rucc(&["--target=wasm32-wasip1", "-g", "-c", "t.c", "-o", "t.o"], &dir));
     ok(&rucc(&["--target=wasm32-wasip1", "-g", "t.o", "-o", "t.wasm"], &dir));
+    // The name section holds the file name of the output, so the two modules have the same one.
+    std::fs::create_dir_all(dir.join("own")).unwrap();
+    ok(&rucc(&["--target=wasm32-wasip1", "-g", "-fuse-ld=rucc", "t.o", "-o", "own/t.wasm"], &dir));
+    let same = std::fs::read(dir.join("t.wasm")).unwrap()
+        == std::fs::read(dir.join("own/t.wasm")).unwrap();
+    assert!(same, "the rucc linker and wasm-ld wrote different modules");
     let dwarfdump = sdk.join("bin/llvm-dwarfdump");
     if dwarfdump.exists() {
         for file in ["t.o", "t.wasm"] {

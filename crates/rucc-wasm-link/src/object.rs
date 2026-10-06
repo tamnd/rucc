@@ -9,7 +9,8 @@
 //! code, the data, the `linking` section and the `reloc.CODE` and `reloc.DATA` sections. A defined
 //! memory or table, a start function and a `dylink.0` section are for a shared library or for an
 //! input this linker does not cover, and the reader refuses them with a message that names wasm-ld.
-//! The DWARF sections and their relocations, the element section and the data count are read past
+//! The DWARF sections, the custom sections whose names start with `.debug`, are kept with their
+//! relocations, so that the module has them. The element section and the data count are read past
 //! and dropped.
 
 use crate::Error;
@@ -126,6 +127,18 @@ pub struct Reloc {
     pub addend: i64,
 }
 
+/// A DWARF section: a custom section whose name starts with `.debug`, and the relocations that
+/// patch it. The offset of a relocation is from the start of `bytes`, which is the payload after
+/// the name, as LLVM writes it.
+#[derive(Debug, Clone)]
+pub struct Dwarf<'a> {
+    pub name: &'a str,
+    pub bytes: &'a [u8],
+    /// The index of the section in the file, which is how a section symbol names it.
+    pub section: u32,
+    pub relocs: Vec<Reloc>,
+}
+
 /// A constructor: its priority and its symbol.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct Init {
@@ -163,6 +176,8 @@ pub struct Object<'a> {
     pub data: Vec<Segment<'a>>,
     pub code_relocs: Vec<Reloc>,
     pub data_relocs: Vec<Reloc>,
+    /// The DWARF sections in file order.
+    pub debug: Vec<Dwarf<'a>>,
     pub symbols: Vec<Symbol<'a>>,
     pub inits: Vec<Init>,
     pub comdats: Vec<Comdat<'a>>,
@@ -240,16 +255,23 @@ impl<'a> Object<'a> {
                     if name == "linking" {
                         self.linking(&mut s)?;
                         linking = true;
-                    } else if let Some(target) = name.strip_prefix("reloc.") {
+                    } else if name.starts_with("reloc.") {
                         let section = s.u32()?;
                         let relocs = Self::relocs(&mut s)?;
                         if Some(section) == code_index {
                             self.code_relocs = relocs;
                         } else if Some(section) == data_index {
                             self.data_relocs = relocs;
-                        } else if !target.starts_with(".debug") {
+                        } else if let Some(debug) =
+                            self.debug.iter_mut().find(|debug| debug.section == section)
+                        {
+                            debug.relocs = relocs;
+                        } else {
                             return Err(unsupported(&format!("the section {name}")));
                         }
+                    } else if name.starts_with(".debug") {
+                        let bytes = &payload[s.pos()..];
+                        self.debug.push(Dwarf { name, bytes, section: index, relocs: Vec::new() });
                     } else if name == "target_features" {
                         for _ in 0..s.count()? {
                             let prefix = s.byte()?;
@@ -600,7 +622,8 @@ impl<'a> Object<'a> {
         for init in &self.inits {
             range("constructor symbol", init.symbol, self.symbols.len())?;
         }
-        for reloc in self.code_relocs.iter().chain(&self.data_relocs) {
+        let debug = self.debug.iter().flat_map(|debug| &debug.relocs);
+        for reloc in self.code_relocs.iter().chain(&self.data_relocs).chain(debug) {
             if reloc.kind == 6 {
                 range("type", reloc.index, self.types.len())?;
             } else {

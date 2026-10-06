@@ -184,3 +184,24 @@ pub(crate) fn weak_caller(callees: [&str; 2]) -> Vec<u8> {
     custom(&mut out, "reloc.CODE", &[3, 2, 0, 4, 0, 0, 10, 1]);
     out
 }
+
+/// An object that defines the function `name` of the type `() -> ()`, with DWARF sections as
+/// LLVM writes them. `.debug_str` holds `name` and `shared`, each with its NUL. `.debug_info`
+/// holds the address of the second byte of the function, which follows its symbol, and the offset
+/// of `shared` in `.debug_str`, which follows a section symbol.
+pub(crate) fn debugged(name_: &str) -> Vec<u8> {
+    let mut out = b"\0asm\x01\0\0\0".to_vec();
+    section(&mut out, 1, &[1, 0x60, 0, 0]);
+    section(&mut out, 3, &[1, 0]);
+    section(&mut out, 10, &[1, 2, 0, 0x0b]);
+    custom(&mut out, ".debug_str", format!("{name_}\0shared\0").as_bytes());
+    custom(&mut out, ".debug_info", &[0; 8]);
+    let mut symbols = vec![2, 0, 0, 0];
+    name(&mut symbols, name_);
+    // The section symbol of section 3, `.debug_str`, which is local.
+    symbols.extend([3, 0x2, 3]);
+    linking(&mut out, &symbols, &[]);
+    let shared = name_.len() as u8 + 1;
+    custom(&mut out, "reloc..debug_info", &[4, 2, 8, 0, 0, 1, 9, 4, 1, shared]);
+    out
+}

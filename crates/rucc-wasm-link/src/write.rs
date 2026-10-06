@@ -8,16 +8,16 @@
 //! globals of the objects.
 //!
 //! A relocated field keeps its width, five bytes for a LEB128 and four for a 32-bit word, so the
-//! code does not move. The output has no `linking` and no `reloc.*` section. It has a `name`
-//! section unless the options strip it, and the `producers` and `target_features` sections of
-//! the inputs, merged.
+//! code does not move. The output has no `linking` and no `reloc.*` section. It has the DWARF
+//! sections of the inputs and a `name` section unless the options strip them, and the `producers`
+//! and `target_features` sections of the inputs, merged.
 
 use std::collections::HashMap;
 
 use crate::bytes::{name, sleb, sleb5, uleb, uleb5};
-use crate::layout::Layout;
+use crate::layout::{Layout, merge, strings};
 use crate::live::Live;
-use crate::object::{EXPORTED, Kind, Reloc};
+use crate::object::{Dwarf, EXPORTED, Kind, Reloc};
 use crate::resolve::{Synth, Where, World};
 use crate::{Error, Options};
 
@@ -44,6 +44,27 @@ struct Writer<'w, 'a> {
     synth_globals: Vec<(Synth, u32)>,
     tags: Vec<Vec<Option<u32>>>,
     global_count: u32,
+}
+
+/// Where the bytes of one DWARF section of an object go in the output section of that name.
+enum Place {
+    /// At this offset, in one piece.
+    At(u32),
+    /// Cut into strings: where each string starts in the input and in the output, in input order.
+    Strings(Vec<(u32, u32)>),
+}
+
+impl Place {
+    /// Where an offset in the input section goes.
+    fn offset(&self, offset: u32) -> u32 {
+        match self {
+            Place::At(base) => base + offset,
+            Place::Strings(starts) => {
+                let at = starts.partition_point(|&(from, _)| from <= offset).saturating_sub(1);
+                starts.get(at).map_or(offset, |&(from, out)| out + (offset - from))
+            }
+        }
+    }
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -471,9 +492,11 @@ impl<'w, 'a> Writer<'w, 'a> {
 
         let mut s = Vec::new();
         uleb(&mut s, self.bodies.len() as u64);
+        let mut starts = Vec::with_capacity(self.bodies.len());
         for &body in &self.bodies {
             let code = self.code(body)?;
             uleb(&mut s, code.len() as u64);
+            starts.push(s.len() as u32);
             s.extend_from_slice(&code);
         }
         section(&mut out, 10, &s);
@@ -493,6 +516,11 @@ impl<'w, 'a> Writer<'w, 'a> {
             section(&mut out, 11, &s);
         }
 
+        if !options.strip && !options.strip_debug {
+            for (title, bytes) in self.dwarf(&starts)? {
+                custom(&mut out, title, &bytes);
+            }
+        }
         if !options.strip {
             custom(&mut out, "name", &self.names(options));
         }
@@ -510,6 +538,139 @@ impl<'w, 'a> Writer<'w, 'a> {
             custom(&mut out, "target_features", &s);
         }
         Ok(out)
+    }
+
+    /// The DWARF sections of the module, as LLD writes them. Each name is a section, in the order
+    /// the names are first seen, and holds the sections of that name of each object in load
+    /// order, one after the other. The strings of `.debug_str` and `.debug_line_str` are merged,
+    /// as the strings of a data segment are. `code` is where each body starts in the payload of the
+    /// code section, after its size, which is the address DWARF gives the start of a function.
+    fn dwarf(&self, code: &[u32]) -> Result<Vec<(&'a str, Vec<u8>)>, Error> {
+        let files = &self.world.files;
+        let mut sections: Vec<(&'a str, Vec<u8>)> = Vec::new();
+        for object in files {
+            for debug in &object.debug {
+                if !sections.iter().any(|&(title, _)| title == debug.name) {
+                    sections.push((debug.name, Vec::new()));
+                }
+            }
+        }
+        let mut places: HashMap<(usize, u32), Place> = HashMap::new();
+        for (title, out) in &mut sections {
+            let title = *title;
+            let parts = || {
+                files.iter().enumerate().flat_map(move |(file, object)| {
+                    object.debug.iter().filter(move |d| d.name == title).map(move |d| (file, d))
+                })
+            };
+            if !matches!(title, ".debug_str" | ".debug_line_str") {
+                for (file, debug) in parts() {
+                    places.insert((file, debug.section), Place::At(out.len() as u32));
+                    out.extend_from_slice(debug.bytes);
+                }
+                continue;
+            }
+            let mut distinct = Vec::new();
+            let mut seen = std::collections::HashSet::new();
+            for (_, debug) in parts() {
+                for (from, to) in strings(debug.bytes) {
+                    let string = &debug.bytes[from as usize..to as usize];
+                    if seen.insert(string) {
+                        distinct.push(string);
+                    }
+                }
+            }
+            let (offsets, size) = merge(distinct);
+            out.resize(size as usize, 0);
+            for (string, &(offset, written)) in &offsets {
+                if written {
+                    out[offset as usize..][..string.len()].copy_from_slice(string);
+                }
+            }
+            for (file, debug) in parts() {
+                let starts = strings(debug.bytes)
+                    .map(|(from, to)| (from, offsets[&debug.bytes[from as usize..to as usize]].0))
+                    .collect();
+                places.insert((file, debug.section), Place::Strings(starts));
+            }
+        }
+        for (file, object) in files.iter().enumerate() {
+            for debug in object.debug.iter().filter(|d| !d.relocs.is_empty()) {
+                let Place::At(base) = places[&(file, debug.section)] else {
+                    return Err(Error::new(format!(
+                        "{}: the string section {} has relocations",
+                        object.name, debug.name
+                    )));
+                };
+                let out =
+                    &mut sections.iter_mut().find(|(title, _)| *title == debug.name).unwrap().1;
+                for reloc in &debug.relocs {
+                    if reloc.offset as usize + 4 > debug.bytes.len() {
+                        return Err(Error::new(format!(
+                            "{}: a relocation at offset {} ends past {}",
+                            object.name, reloc.offset, debug.name
+                        )));
+                    }
+                    let value = self.dwarf_value(file, debug, reloc, code, &places)?;
+                    let at = (base + reloc.offset) as usize;
+                    out[at..at + 4].copy_from_slice(&value.to_le_bytes());
+                }
+            }
+        }
+        Ok(sections)
+    }
+
+    /// The value of a relocation in a DWARF section. What the output does not have, such as a
+    /// function that was dropped, gets the value LLD gives it, which is not an address in the
+    /// module: `-2` in `.debug_ranges` and `.debug_loc`, where `-1` has a meaning of its own, and
+    /// `-1` in the others.
+    fn dwarf_value(
+        &self,
+        file: usize,
+        debug: &Dwarf<'_>,
+        reloc: &Reloc,
+        code: &[u32],
+        places: &HashMap<(usize, u32), Place>,
+    ) -> Result<u32, Error> {
+        let object = &self.world.files[file];
+        let place = self.world.targets[file][reloc.index as usize];
+        let value = match reloc.kind {
+            // `R_WASM_FUNCTION_OFFSET_I32`
+            8 => match place {
+                Where::Func(f, i) => self.funcs[f][i as usize].map(|index| {
+                    let body = index as usize - self.import_order.len();
+                    i64::from(code[body]) + reloc.addend
+                }),
+                _ => None,
+            },
+            // `R_WASM_SECTION_OFFSET_I32`
+            9 => {
+                let symbol = &object.symbols[reloc.index as usize];
+                let target = (symbol.kind == Kind::Section)
+                    .then(|| places.get(&(file, symbol.index)))
+                    .flatten()
+                    .ok_or_else(|| self.bad(file, reloc.index, "a DWARF section"))?;
+                Some(i64::from(target.offset(reloc.addend as u32)))
+            }
+            // `R_WASM_MEMORY_ADDR_I32`
+            5 => self.layout.address(place).map(|address| i64::from(address) + reloc.addend),
+            // `R_WASM_GLOBAL_INDEX_I32`, as the frame base names `__stack_pointer`.
+            13 => self.global(place, file, reloc.index).ok().map(i64::from),
+            // `R_WASM_FUNCTION_INDEX_I32`
+            26 => self.func(place, file, reloc.index).ok().map(i64::from),
+            kind => {
+                return Err(Error::new(format!(
+                    "{}: relocation type {kind} in {} is outside what the rucc linker covers; \
+                     link with wasm-ld",
+                    object.name, debug.name
+                )));
+            }
+        };
+        let tombstone = match debug.name {
+            ".debug_ranges" | ".debug_loc" => u32::MAX - 1,
+            _ => u32::MAX,
+        };
+        Ok(value.map_or(tombstone, |value| value as u32))
     }
 
     fn code(&self, body: Body) -> Result<Vec<u8>, Error> {
