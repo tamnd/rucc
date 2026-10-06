@@ -19,7 +19,7 @@ const SOURCE: &str = "\
 long run(const long *v, int n, long k) {
     long total = 0;
     for (int i = 0; i < n; i++) {
-        long t = v[i] * 3;
+        long t = v[i] * 7;
         total ^= k + t;
     }
     return total;
