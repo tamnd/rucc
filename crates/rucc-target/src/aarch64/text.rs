@@ -35,8 +35,8 @@ use crate::named;
 use Arg::Doubles;
 use Arg::{
     At, Barrier, Base, Disp, Fixed, Fp, GotPage, GotSlot, Imm, Label, Lit, Low, LowSlot, Mem, Near,
-    Page, Pop, Push, Reg, Scaled, SecrelHi, SecrelLo, Symbol, Task, Teb, Thread, Through, TlsPage,
-    TlsSlot, TprelHi, TprelLo, Vector,
+    Page, Pop, Push, Reg, Scaled, SecrelHi, SecrelLo, Shifted, Symbol, Task, Teb, Thread, Through,
+    TlsPage, TlsSlot, TprelHi, TprelLo, Vector,
 };
 use Scalar::{B, D, Q, S};
 use Width::{W, X};
@@ -59,6 +59,8 @@ pub enum Arg {
     Lit(i64),
     /// A shift that is part of the opcode.
     Shift(Shift, u8),
+    /// A shift that is part of the opcode, by as much as the instruction's constant says.
+    Shifted(Shift),
     /// How the register before this one is widened, as part of the opcode.
     Extend(Extend),
     /// A condition that is part of the opcode.
@@ -224,6 +226,36 @@ static TEXT: &[(&str, &[Written])] = &[
     ),
     ("ror_ri_32", &[spell("ror", &[Reg(0, W), Reg(1, W), Imm])]),
     ("ror_ri_64", &[spell("ror", &[Reg(0, X), Reg(1, X), Imm])]),
+    ("add_lsl_32", &[spell("add", &[Reg(0, W), Reg(1, W), Reg(2, W), Shifted(Shift::Lsl)])]),
+    ("add_lsl_64", &[spell("add", &[Reg(0, X), Reg(1, X), Reg(2, X), Shifted(Shift::Lsl)])]),
+    ("add_lsr_32", &[spell("add", &[Reg(0, W), Reg(1, W), Reg(2, W), Shifted(Shift::Lsr)])]),
+    ("add_lsr_64", &[spell("add", &[Reg(0, X), Reg(1, X), Reg(2, X), Shifted(Shift::Lsr)])]),
+    ("add_asr_32", &[spell("add", &[Reg(0, W), Reg(1, W), Reg(2, W), Shifted(Shift::Asr)])]),
+    ("add_asr_64", &[spell("add", &[Reg(0, X), Reg(1, X), Reg(2, X), Shifted(Shift::Asr)])]),
+    ("sub_lsl_32", &[spell("sub", &[Reg(0, W), Reg(1, W), Reg(2, W), Shifted(Shift::Lsl)])]),
+    ("sub_lsl_64", &[spell("sub", &[Reg(0, X), Reg(1, X), Reg(2, X), Shifted(Shift::Lsl)])]),
+    ("sub_lsr_32", &[spell("sub", &[Reg(0, W), Reg(1, W), Reg(2, W), Shifted(Shift::Lsr)])]),
+    ("sub_lsr_64", &[spell("sub", &[Reg(0, X), Reg(1, X), Reg(2, X), Shifted(Shift::Lsr)])]),
+    ("sub_asr_32", &[spell("sub", &[Reg(0, W), Reg(1, W), Reg(2, W), Shifted(Shift::Asr)])]),
+    ("sub_asr_64", &[spell("sub", &[Reg(0, X), Reg(1, X), Reg(2, X), Shifted(Shift::Asr)])]),
+    ("and_lsl_32", &[spell("and", &[Reg(0, W), Reg(1, W), Reg(2, W), Shifted(Shift::Lsl)])]),
+    ("and_lsl_64", &[spell("and", &[Reg(0, X), Reg(1, X), Reg(2, X), Shifted(Shift::Lsl)])]),
+    ("and_lsr_32", &[spell("and", &[Reg(0, W), Reg(1, W), Reg(2, W), Shifted(Shift::Lsr)])]),
+    ("and_lsr_64", &[spell("and", &[Reg(0, X), Reg(1, X), Reg(2, X), Shifted(Shift::Lsr)])]),
+    ("and_asr_32", &[spell("and", &[Reg(0, W), Reg(1, W), Reg(2, W), Shifted(Shift::Asr)])]),
+    ("and_asr_64", &[spell("and", &[Reg(0, X), Reg(1, X), Reg(2, X), Shifted(Shift::Asr)])]),
+    ("orr_lsl_32", &[spell("orr", &[Reg(0, W), Reg(1, W), Reg(2, W), Shifted(Shift::Lsl)])]),
+    ("orr_lsl_64", &[spell("orr", &[Reg(0, X), Reg(1, X), Reg(2, X), Shifted(Shift::Lsl)])]),
+    ("orr_lsr_32", &[spell("orr", &[Reg(0, W), Reg(1, W), Reg(2, W), Shifted(Shift::Lsr)])]),
+    ("orr_lsr_64", &[spell("orr", &[Reg(0, X), Reg(1, X), Reg(2, X), Shifted(Shift::Lsr)])]),
+    ("orr_asr_32", &[spell("orr", &[Reg(0, W), Reg(1, W), Reg(2, W), Shifted(Shift::Asr)])]),
+    ("orr_asr_64", &[spell("orr", &[Reg(0, X), Reg(1, X), Reg(2, X), Shifted(Shift::Asr)])]),
+    ("eor_lsl_32", &[spell("eor", &[Reg(0, W), Reg(1, W), Reg(2, W), Shifted(Shift::Lsl)])]),
+    ("eor_lsl_64", &[spell("eor", &[Reg(0, X), Reg(1, X), Reg(2, X), Shifted(Shift::Lsl)])]),
+    ("eor_lsr_32", &[spell("eor", &[Reg(0, W), Reg(1, W), Reg(2, W), Shifted(Shift::Lsr)])]),
+    ("eor_lsr_64", &[spell("eor", &[Reg(0, X), Reg(1, X), Reg(2, X), Shifted(Shift::Lsr)])]),
+    ("eor_asr_32", &[spell("eor", &[Reg(0, W), Reg(1, W), Reg(2, W), Shifted(Shift::Asr)])]),
+    ("eor_asr_64", &[spell("eor", &[Reg(0, X), Reg(1, X), Reg(2, X), Shifted(Shift::Asr)])]),
     // Multiply and add, and multiply and subtract, which is how a remainder is taken: the quotient
     // times the divisor, subtracted from the dividend.
     ("madd_rrr_32", &[spell("madd", &[Reg(0, W), Reg(1, W), Reg(2, W), Reg(3, W)])]),
@@ -1127,6 +1159,8 @@ pub fn fill(arg: Arg, with: &Operands<'_>) -> Result<Value, Missing> {
         Imm => Value::Imm(with.imm),
         Lit(imm) => Value::Imm(imm),
         Arg::Shift(shift, amount) => Value::Shift(shift, amount),
+        // Too far to name is a shift no instruction makes, which the encoder refuses.
+        Shifted(shift) => Value::Shift(shift, u8::try_from(with.imm).unwrap_or(u8::MAX)),
         Arg::Extend(extend) => Value::Extend(extend, None),
         Arg::Cond(cond) => Value::Cond(cond),
         Barrier(option) => Value::Barrier(option),

@@ -987,6 +987,88 @@ pub fn indexes(func: &mut mir::Func, names: &mut Interner) -> usize {
     folded
 }
 
+/// Takes a shifted addition on AArch64 apart again where the shift is one the loads and stores
+/// reading the sum can do themselves, and gives back how many it took apart.
+///
+/// The selector writes `a + (i << 3)` as one `add` with the shift in it, which is right for a sum
+/// that is a value. A sum that is only ever an address is better off inside the access, and
+/// [`addresses`] and [`indexes`] put it there from the two instructions it used to be:
+///
+/// ```text
+///   add x0, x0, x1, lsl #3     ->    lsl x2, x1, #3     ->    ldr x0, [x0, x1, lsl #3]
+///   ldr x0, [x0]                     add x0, x0, x2
+///                                    ldr x0, [x0]
+/// ```
+///
+/// So it is every reader or none of them, each a load or store as wide as the shift scales, which
+/// reads the sum once and as nothing but its base. Run before [`addresses`].
+pub fn unshifted(func: &mut mir::Func, names: &mut Interner) -> usize {
+    let opcode =
+        |names: &mut Interner, name: &str| mir::Opcode::new(names.intern(&format!("a64.{name}")));
+    let shifted = opcode(names, "add_lsl_64");
+    let shift = opcode(names, "lsl_ri_64");
+    let add = opcode(names, "add_rr_64");
+    let sizes: Map<mir::Opcode, u32> =
+        LOW_BITS.iter().map(|&(name, size)| (opcode(names, name), size)).collect();
+    let mut reads: Map<mir::Reg, Vec<(mir::Inst, usize)>> = Map::default();
+    let mut sums = Vec::new();
+    for block in func.blocks().collect::<Vec<_>>() {
+        for inst in func.insts(block).collect::<Vec<_>>() {
+            for (at, operand) in func[func[inst].operands].iter().enumerate() {
+                if operand.role == Role::Use {
+                    reads.entry(operand.reg).or_default().push((inst, at));
+                }
+            }
+            if func[inst].opcode == shifted {
+                sums.push(inst);
+            }
+        }
+    }
+    let mut split = 0;
+    for inst in sums {
+        let Some(k) = func[inst].imm.map(|imm| func[imm].0) else { continue };
+        let &[sum, base, index] = &func[func[inst].operands][..] else { continue };
+        let Some(readers) = reads.get(&sum.reg) else { continue };
+        let address = |&(reader, at): &(mir::Inst, usize)| {
+            let size = sizes.get(&func[reader].opcode)?;
+            let amode = func[func[reader].mem?];
+            let once = readers.iter().filter(|&&(other, _)| other == reader).count() == 1;
+            let plain = amode.index.is_none()
+                && amode.disp == 0
+                && amode.symbol.is_none()
+                && amode.block.is_none()
+                && amode.table.is_none()
+                && amode.segment.is_none();
+            let scaled = (0..8).contains(&k) && 1 << k == *size;
+            (once && plain && scaled && amode.base.map(usize::from) == Some(at)).then_some(())
+        };
+        if !sum.reg.is_virtual() || !readers.iter().all(|reader| address(reader).is_some()) {
+            continue;
+        }
+        let span = func.span(inst);
+        let moved = func.new_vreg(index.class);
+        let made = func
+            .build_loose(shift)
+            .at(span)
+            .def(moved, index.class)
+            .uses(index.reg, index.class)
+            .imm(k)
+            .finish();
+        func.insert_before(inst, made);
+        let made = func
+            .build_loose(add)
+            .at(span)
+            .def(sum.reg, sum.class)
+            .uses(base.reg, base.class)
+            .uses(moved, index.class)
+            .finish();
+        func.insert_before(inst, made);
+        func.remove_inst(inst);
+        split += 1;
+    }
+    split
+}
+
 /// The index register of a load or store whose address is a base and an index and nothing else,
 /// which is the shape [`indexes`] can add a shift and a widening to.
 fn plain_index(
