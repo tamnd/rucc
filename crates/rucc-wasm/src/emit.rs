@@ -100,6 +100,8 @@ pub(crate) struct Code {
     pub(crate) fixups: Vec<Fixup>,
     /// The last `br`, while the code after it is only the `end`s that [`Code::end`] wrote.
     jump: Option<Jump>,
+    /// Where the code after the last `return` or `unreachable` that [`Code::stop`] wrote starts.
+    stop: Option<usize>,
 }
 
 /// A `br` that can go when the code falls through to the same place.
@@ -117,6 +119,19 @@ struct Jump {
 impl Code {
     pub(crate) fn op(&mut self, op: u8) {
         self.bytes.push(op);
+    }
+
+    /// A `return` or an `unreachable`, after which no code is reached.
+    pub(crate) fn stop(&mut self, op: u8) {
+        self.bytes.push(op);
+        self.stop = Some(self.bytes.len());
+    }
+
+    /// Whether the last instruction is a `return` or an `unreachable` that [`Code::stop`] wrote.
+    /// The stack after it can be of any type, so the `end` of the function body needs no other
+    /// `unreachable` before it.
+    pub(crate) fn stopped(&self) -> bool {
+        self.stop == Some(self.bytes.len())
     }
 
     pub(crate) fn uleb(&mut self, value: u64) {
@@ -167,6 +182,7 @@ impl Code {
     /// and this `end` closes that frame, the code falls through to the place where the `br` goes,
     /// so the `br` goes. Its bytes are given back, so that the notes after it can move.
     pub(crate) fn end(&mut self, to_end: bool) -> Option<std::ops::Range<usize>> {
+        self.stop = None;
         let jump = self.jump.take().filter(|jump| {
             self.bytes.len() == jump.after + jump.ends as usize && jump.ends <= jump.depth
         });

@@ -201,7 +201,10 @@ pub(crate) fn function(unit: &mut Unit<'_>, id: FuncId, symbol: u32) -> Result<F
     if !lower.shape.order.is_empty() {
         lower.tree(0)?;
     }
-    if lower.returns {
+    // The code that falls through to the end of a function that gives values must give them, so
+    // an `unreachable` closes it. After a `return` or an `unreachable` the stack can be of any
+    // type, and the `end` is valid as it is.
+    if lower.returns && !lower.code.stopped() {
         lower.code.op(emit::UNREACHABLE);
     }
     lower.code.op(emit::END);
@@ -580,7 +583,7 @@ impl Lower<'_, '_> {
                     s.code.local_get(0);
                     Ok(())
                 })?;
-                self.code.op(emit::RETURN);
+                self.code.stop(emit::RETURN);
                 Ok(())
             }
             Opcode::Return => {
@@ -591,11 +594,11 @@ impl Lower<'_, '_> {
                 for (&value, ret) in values.iter().zip(abis) {
                     self.push_abi(value, ret.abi)?;
                 }
-                self.code.op(emit::RETURN);
+                self.code.stop(emit::RETURN);
                 Ok(())
             }
             Opcode::Unreachable => {
-                self.code.op(emit::UNREACHABLE);
+                self.code.stop(emit::UNREACHABLE);
                 Ok(())
             }
             Opcode::TailCall => self.call(term, true),
@@ -2083,7 +2086,7 @@ impl Lower<'_, '_> {
                 self.builtin(name, &args)?;
                 if tail {
                     self.epilogue();
-                    self.code.op(emit::RETURN);
+                    self.code.stop(emit::RETURN);
                 } else {
                     match self.results(inst).first() {
                         Some(&result) => self.set(result),
@@ -2194,7 +2197,7 @@ impl Lower<'_, '_> {
             // and leaves the rest, so an answer that `tail::mark` let this function drop needs no
             // `drop`.
             self.epilogue();
-            self.code.op(emit::RETURN);
+            self.code.stop(emit::RETURN);
             return Ok(());
         }
         match self.results(inst).first() {
