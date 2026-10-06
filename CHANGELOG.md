@@ -14,7 +14,7 @@ All notable changes are recorded here. The format follows [Keep a Changelog](htt
 
 ### Fixed
 
-- In a function with a computed `goto`, an empty block that no branch goes to any more is dropped, as it is in any other function. Only a block the `goto` lists among the places it can go, or one whose address an instruction takes, is kept. Linux 7.2's `___bpf_prog_run` kept two such blocks, each a `jmp` nothing went to, and objtool reported both as unreachable instructions.
+- In a function with a computed `goto`, an empty block that no branch goes to any more is dropped, as it is in any other function (#3044). Only a block the `goto` lists among the places it can go, or one whose address an instruction takes, is kept. Linux 7.2's `___bpf_prog_run` kept two such blocks, each a `jmp` nothing went to, and objtool reported both as unreachable instructions.
 
 ## 0.24.7
 
