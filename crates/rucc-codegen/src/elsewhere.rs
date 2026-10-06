@@ -236,8 +236,9 @@ impl Elsewhere {
         // leaves a `.got` behind, and the kernel's link script asserts there is none, so a single
         // `__start_` symbol read out of a slot is a kernel that does not link. tamnd/rucc#2276.
         //
-        // Only where the linker copies variables, which is the one machine the driver sends this
-        // for. Anywhere else the same code as an executable is what this answers, and it is right.
+        // Only where the linker copies variables, which on ELF is every machine once the code is
+        // not position independent. Anywhere else the same code as an executable is what this
+        // answers, and it is right.
         //
         // Except for a name a declaration said `nodirect_extern_access` of, which is a library's
         // promise that the name is in the library and stays there, protected, so it is never
@@ -428,6 +429,35 @@ impl Elsewhere {
             .map(|id| module[id].name)
             .filter(|name| names.contains(name) && read.contains(name))
             .collect()
+    }
+
+    /// The same set for AArch64 code that is not position independent, which still reads a weak
+    /// name nothing here defines out of the table, as gcc does. The name may be nothing at all, and
+    /// `adrp` cannot reach null from an image linked far above it, which a kernel always is. A
+    /// hidden or protected one is promised to be in the image and is reached directly.
+    #[must_use]
+    pub fn weak_from_table(mut self, module: &Module) -> Self {
+        let funcs = module
+            .funcs()
+            .filter(|&id| {
+                let func = &module[id];
+                func.is_declaration()
+                    && func.linkage == Linkage::Weak
+                    && func.visibility == Visibility::Default
+            })
+            .map(|id| module[id].name);
+        let globals = module
+            .globals()
+            .filter(|&id| {
+                let global = &module[id];
+                global.is_declaration()
+                    && global.linkage == Linkage::Weak
+                    && global.visibility == Visibility::Default
+                    && global.tls.is_none()
+            })
+            .map(|id| module[id].name);
+        self.names.extend(funcs.chain(globals));
+        self
     }
 
     /// The same set for i386 position independent code, which reaches every name from the global
@@ -705,11 +735,36 @@ mod tests {
         }
         // Thread-local storage is a different question and keeps its answer.
         assert!(elsewhere.thread(names.intern("own")));
-        // A machine whose linker makes no copies keeps the executable's answer, since the driver
-        // never sends this for one and the executable's code is still right there.
+        // A linker that makes no copies keeps the executable's answer, since the driver never
+        // sends this for one and the executable's code is still right there.
         let uncopied = Elsewhere::of(&module, Pic::Absolute, ObjectFormat::Elf, false);
         assert!(uncopied.holds(names.intern("away")));
         assert!(uncopied.holds(names.intern("maybe")));
+    }
+
+    /// AArch64 without pic reaches every name directly but a weak one nothing here defines, which
+    /// gcc still reads out of a slot there, and not a hidden one, which is in the image.
+    #[test]
+    fn aarch64_position_dependent_code_reads_only_the_weak_ones_out_of_the_table() {
+        let mut names = Interner::new();
+        let mut module = module(&mut names);
+        let mut maybe = Global::new(names.intern("maybe"), 4, 4);
+        maybe.linkage = Linkage::Weak;
+        module.add_global(maybe);
+        let mut perhaps = Func::new(names.intern("perhaps"), Signature::new());
+        perhaps.linkage = Linkage::Weak;
+        module.add_func(perhaps);
+        let mut inside = Global::new(names.intern("inside"), 4, 4);
+        inside.linkage = Linkage::Weak;
+        inside.visibility = Visibility::Hidden;
+        module.add_global(inside);
+        let elsewhere =
+            Elsewhere::of(&module, Pic::Absolute, ObjectFormat::Elf, true).weak_from_table(&module);
+        assert!(elsewhere.holds(names.intern("maybe")));
+        assert!(elsewhere.holds(names.intern("perhaps")));
+        for name in ["here", "exit", "kept", "away", "quiet", "shy", "inside"] {
+            assert!(!elsewhere.holds(names.intern(name)), "{name} was in the table");
+        }
     }
 
     /// Mach-O never copies a variable into the executable, so the one this file only declares is
