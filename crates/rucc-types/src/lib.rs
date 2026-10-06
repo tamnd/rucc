@@ -2269,11 +2269,8 @@ mod tests {
         };
         let plain = types.function(FunctionType { sse_regparm: false, ..signature.clone() });
         let sse = types.function(signature.clone());
-        let old = types.function(FunctionType {
-            params: Vec::new(),
-            prototyped: false,
-            ..signature
-        });
+        let old =
+            types.function(FunctionType { params: Vec::new(), prototyped: false, ..signature });
         assert!(!compatible(&types, plain, sse));
         let (to_plain, to_sse) = (types.pointer(plain), types.pointer(sse));
         assert!(!compatible(&types, to_plain, to_sse));

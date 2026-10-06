@@ -82,7 +82,13 @@ fn sseregparm_is_checked_in_gcc_s_words() {
     let wrong = format!("error: wrong number of arguments specified for {name}");
     for (target, source, said, errors, warnings) in [
         (LINUX, "__attribute__((sseregparm(1))) double f(double);\n", wrong.clone(), 1, 0),
-        (LINUX, "__attribute__((sseregparm(1, 2))) double f(double);\n", "expected 0, found 2".to_owned(), 1, 0),
+        (
+            LINUX,
+            "__attribute__((sseregparm(1, 2))) double f(double);\n",
+            "expected 0, found 2".to_owned(),
+            1,
+            0,
+        ),
         (
             LINUX,
             "int v __attribute__((sseregparm));\n",
@@ -120,7 +126,8 @@ fn sseregparm_is_checked_in_gcc_s_words() {
     assert!(err.contains("from incompatible pointer type"), "{err}");
 
     // On x86-64 Windows the attribute names nothing and gcc drops it without a word.
-    let source = "__attribute__((sseregparm)) double f(double);\ndouble g(void) { return f(1.0); }\n";
+    let source =
+        "__attribute__((sseregparm)) double f(double);\ndouble g(void) { return f(1.0); }\n";
     let (ok, err) = run(&dir(), WIN64, &["-Wall", "-Wextra"], source);
     assert!(ok, "{err}");
     assert_eq!(err, "");

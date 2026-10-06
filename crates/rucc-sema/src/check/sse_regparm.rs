@@ -95,7 +95,12 @@ impl Checker<'_> {
 
     /// Refuses the definition of a function of type `ty` that takes its floats in SSE registers,
     /// in the words gcc built without SSE uses, which name it as though it were being called.
-    pub(in crate::check) fn sse_refused_definition(&mut self, ty: TypeId, name: Symbol, span: Span) {
+    pub(in crate::check) fn sse_refused_definition(
+        &mut self,
+        ty: TypeId,
+        name: Symbol,
+        span: Span,
+    ) {
         if self.takes_sse(ty) {
             let named = format!("'{}'", self.text(name));
             self.sse_refused(&named, span);
