@@ -32,27 +32,36 @@
 use rucc_base::hash::Map;
 use rucc_ir::{Facts, FuncId, Module};
 
-use crate::CallGraph;
 use crate::cfg::Cfg;
 use crate::dom::Dominators;
 use crate::ipa;
 use crate::range::Range;
 use crate::range::query::Ranges;
+use crate::{CallGraph, Stats};
 
 /// What this is called, which is gcc's spelling so that `-fno-ipa-vrp` means the same thing.
 pub const NAME: &str = "ipa-vrp";
 
+/// What it says for a parameter every call keeps inside a range narrower than its type.
+const WRITTEN: &str = "range every call agrees on written on a parameter";
+
+/// What it says for an integer parameter the calls between them can pass anything.
+const UNBOUNDED: &str = "parameter left unbounded, the calls between them can pass it anything";
+
 /// Writes `!range(lo, hi)` on every integer parameter its callers all keep inside one.
 ///
-/// Gives back how many parameters were given one, which is what a test asks.
-pub fn annotate(module: &mut Module, graph: &CallGraph) -> usize {
+/// Gives back what it said about each function it looked at: one line for every parameter it
+/// wrote a range on, and one for every integer parameter the calls leave unbounded. Without them
+/// the pass is one `-fopt-info` and the corpus count of tamnd/rucc#2967 cannot see, and a pass
+/// whose work only shows as a test some other pass folds later reads as one that never fires.
+pub fn annotate(module: &mut Module, graph: &CallGraph) -> Vec<(FuncId, Stats)> {
     let closed = ipa::closed(module, graph);
     if closed.is_empty() {
-        return 0;
+        return Vec::new();
     }
     let sites = ipa::sites(module, &closed);
     let mut graphs: Map<FuncId, (Cfg, Dominators)> = Map::default();
-    let mut written = 0;
+    let mut said = Vec::new();
     for part in ipa::order(graph, &closed) {
         for id in part {
             let Some(site) = sites.get(&id) else { continue };
@@ -69,6 +78,8 @@ pub fn annotate(module: &mut Module, graph: &CallGraph) -> usize {
             let Some(entry) = module[id].entry() else { continue };
             let params = module[id][entry].params.clone();
             let mut found = Vec::new();
+            let mut stats = Stats::new();
+            let mut spoke = false;
             for (index, &param) in params.iter().enumerate() {
                 let ty = module[id][param].ty;
                 if !ty.is_int() {
@@ -94,6 +105,9 @@ pub fn annotate(module: &mut Module, graph: &CallGraph) -> usize {
                 }
                 if let Some(interval) = interval(union) {
                     found.push((param, interval));
+                } else if union.is_full() {
+                    stats.missed(UNBOUNDED);
+                    spoke = true;
                 }
             }
             let func = &mut module[id];
@@ -109,11 +123,15 @@ pub fn annotate(module: &mut Module, graph: &CallGraph) -> usize {
                 };
                 let Some(range) = interval(both) else { continue };
                 func.set_facts(param, Facts { range: Some(range), ..had });
-                written += 1;
+                stats.optimized(WRITTEN);
+                spoke = true;
+            }
+            if spoke {
+                said.push((id, stats));
             }
         }
     }
-    written
+    said
 }
 
 /// One interval holding every value in the range, read whichever way round makes it narrower.

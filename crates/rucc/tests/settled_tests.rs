@@ -27,6 +27,11 @@ fn asm(what: &str, source: &str) -> String {
 
 /// [`asm`] with more flags, for a fixture whose shape needs one the kernel builds with.
 fn asm_with(what: &str, source: &str, flags: &[&str]) -> String {
+    compiled(what, source, flags).0
+}
+
+/// The assembly at `-O2` with those flags, and what the compiler said.
+fn compiled(what: &str, source: &str, flags: &[&str]) -> (String, String) {
     let path = fixture(what, source);
     let out = Command::new(env!("CARGO_BIN_EXE_rucc"))
         .arg(format!("--target={TARGET}"))
@@ -38,7 +43,7 @@ fn asm_with(what: &str, source: &str, flags: &[&str]) -> String {
     let said = String::from_utf8_lossy(&out.stderr).into_owned();
     assert!(out.status.success(), "the compiler refused the fixture:\n{said}");
     let _ = std::fs::remove_dir_all(path.parent().expect("the fixture is in a directory"));
-    String::from_utf8(out.stdout).expect("what the compiler writes is text")
+    (String::from_utf8(out.stdout).expect("what the compiler writes is text"), said)
 }
 
 /// The `BUG_ON(index >= t->num_targets)` of `dm_table_get_target`, inside a loop that only runs
@@ -224,22 +229,40 @@ fn an_object_size_through_a_parameter_is_answered_after_inlining() {
     assert!(!listing.contains("ud2"), "the trap is still there:\n{listing}");
 }
 
+/// evdev's `str_to_user`, called with `_IOC_SIZE (cmd)`, which is at most 16383, and testing what
+/// it was given against `INT_MAX` the way `check_copy_size` does.
+const EVDEV: &str = "unsigned long cp(void *d, const char *s, unsigned long n);\n\
+    static __attribute__((noinline)) int to_user(const char *s, unsigned n, void *d) {\n\
+        if (__builtin_expect(n > 0x7fffffff, 0)) __builtin_trap();\n\
+        return cp(d, s, n);\n\
+    }\n\
+    int f(unsigned cmd, void *d, const char *a, const char *b) {\n\
+        if (cmd & 1) return to_user(a, (cmd >> 16) & 0x3fff, d);\n\
+        if (cmd & 2) return to_user(b, (cmd >> 16) & 0x3fff, d);\n\
+        return 0;\n\
+    }\n";
+
 #[test]
 fn a_length_every_caller_keeps_small_is_not_tested_against_int_max() {
-    // evdev's str_to_user, called three times with `_IOC_SIZE (cmd)`, which is at most 16383, and
-    // testing what it was given against `INT_MAX` the way `check_copy_size` does.
-    let source = "unsigned long cp(void *d, const char *s, unsigned long n);\n\
-        static __attribute__((noinline)) int to_user(const char *s, unsigned n, void *d) {\n\
-            if (__builtin_expect(n > 0x7fffffff, 0)) __builtin_trap();\n\
-            return cp(d, s, n);\n\
-        }\n\
-        int f(unsigned cmd, void *d, const char *a, const char *b) {\n\
-            if (cmd & 1) return to_user(a, (cmd >> 16) & 0x3fff, d);\n\
-            if (cmd & 2) return to_user(b, (cmd >> 16) & 0x3fff, d);\n\
-            return 0;\n\
-        }\n";
-    let listing = asm("ipvrp", source);
+    let listing = asm("ipvrp", EVDEV);
     assert!(!listing.contains("ud2"), "the test is still there:\n{listing}");
+}
+
+#[test]
+fn the_range_every_caller_agrees_on_is_said() {
+    let (_, said) = compiled("ipvrp-said", EVDEV, &["-fopt-info-all"]);
+    let written = "optimized: range every call agrees on written on a parameter";
+    assert!(said.contains(&format!("to_user: {written}")), "{said}");
+    // `f` is exported, so a call this unit cannot see may pass it anything.
+    assert!(!said.contains(&format!(" f: {written}")), "{said}");
+    // A length read from memory can be anything. Passing `cmd` itself would not do, since below
+    // `cmd & 1` it is known not to be the largest value and the union of the two is a range.
+    let open =
+        EVDEV.replace("to_user(b, (cmd >> 16) & 0x3fff, d)", "to_user(b, *(unsigned *)d, d)");
+    assert_ne!(open, EVDEV);
+    let (_, said) = compiled("ipvrp-unbounded", &open, &["-fopt-info-all"]);
+    assert!(!said.contains(written), "{said}");
+    assert!(said.contains("to_user: missed: parameter left unbounded"), "{said}");
 }
 
 #[test]

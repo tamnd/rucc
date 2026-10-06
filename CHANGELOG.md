@@ -4,6 +4,10 @@ All notable changes are recorded here. The format follows [Keep a Changelog](htt
 
 ## Unreleased
 
+### Added
+
+- `ipa-vrp` says what it did. `-fopt-info` and the `fired` field of `-frucc-trace` show one `optimized` line for every parameter it writes a range on, and one `missed` line for every integer parameter the calls leave unbounded. Before this the pass reported nothing, so across the corpus it read as a pass that never fires. (#3016)
+
 ## 0.24.5
 
 The first release since 0.21.0 to publish its archives. It has the gate fixes that 0.24.4 still needed, jump threading run a second time at `-O2`, the switch clustering on wasm, and the other changes merged since 0.24.4.
