@@ -84,6 +84,22 @@
 //! reader rather than the first is what makes this the set's question too, since a write after the
 //! first reader and before the second is a write the one at a time version would never have seen.
 //!
+//! # A constant added to the base
+//!
+//! `p + 32` is an address of a base and a displacement, and when a load reads it in the same IR
+//! instruction the selector writes the two as one, `32(%rdi)`. When what reads it is another
+//! address the selector writes it as the addition it is, `addq $32`, since the rules that make a
+//! `lea` are the ones with a multiply in them. That is the flexible array at the end of a
+//! structure, `h->nodes[i]`, where the field's offset goes on first and the scaled subscript goes
+//! on after, and it came out as a `lea` of the offset and a load through the base it wrote and the
+//! index, where gcc writes `32(%rbx,%rcx,8)`. An addition of a constant at the width of an address
+//! is read here as that base and displacement and is handed to its readers under the rules a `lea`
+//! is.
+//!
+//! Only on a machine with room for a displacement beside an index. AArch64 adds a base to a
+//! constant or to a register and not to both, and its displacements have ranges a load and a store
+//! each have their own of, so there the addition stays what it is.
+//!
 //! # A constant added to the index
 //!
 //! `p[i + 3]` is an index of `i + 3`, and what selection gives the address is the register an
@@ -301,6 +317,7 @@ pub fn addresses(
     let absolute = model == CodeModel::Kernel;
     let lea = mir::Opcode::new(names.intern(&format!("{}{}", insts.prefix, insts.lea)));
     let sum = mir::Opcode::new(names.intern(&format!("{}{}", insts.prefix, insts.sum)));
+    let step = mir::Opcode::new(names.intern(&format!("{}{}", insts.prefix, insts.add)));
     let mut reads = Reads::of(func);
     let mut held = pending.held();
     // The moves are kept here and made once at the end, since nothing reads the lists before then
@@ -370,6 +387,11 @@ pub fn addresses(
                 }
             } else if func[inst].opcode == sum {
                 let Some(address) = summed(func, inst) else { continue };
+                if let Some((reg, wanted)) = folding_def(func, &reads, inst) {
+                    open.insert(reg, Open { from: inst, address, wanted, folds: Vec::new() });
+                }
+            } else if func[inst].opcode == step && machine.index_and_disp {
+                let Some(address) = stepped(func, inst) else { continue };
                 if let Some((reg, wanted)) = folding_def(func, &reads, inst) {
                     open.insert(reg, Open { from: inst, address, wanted, folds: Vec::new() });
                 }
@@ -541,6 +563,20 @@ fn summed(func: &mir::Func, inst: mir::Inst) -> Option<mir::Amode> {
         return None;
     };
     Some(mir::Amode { base: Some(base), index: Some(index), ..mir::Amode::NOTHING })
+}
+
+/// The address an addition of a constant to a register is, as a base and a displacement.
+///
+/// The operands are the register written and then the one added to, so the address names the
+/// second. `None` when the constant does not fit in a displacement, which a selected addition of
+/// one always does, and when the instruction carries an address of its own.
+fn stepped(func: &mir::Func, inst: mir::Inst) -> Option<mir::Amode> {
+    let [_, _] = &func[func[inst].operands] else { return None };
+    if func[inst].mem.is_some() {
+        return None;
+    }
+    let disp = i32::try_from(func[func[inst].imm?].0).ok()?;
+    Some(mir::Amode { base: Some(1), disp, ..mir::Amode::NOTHING })
 }
 
 /// Whether an address is one every reader can carry in the room it already has, which is what
@@ -1875,6 +1911,100 @@ mod tests {
         let copy = func.new_vreg(GPR);
         let add = op(&mut names, "add_rr_64");
         func.build(block, add).def(copy, GPR).uses(address, GPR).uses(index, GPR).finish();
+
+        assert_eq!(folds(&mut func, &mut names), 0);
+        assert_eq!(shape(&func, &names, block).len(), 3);
+    }
+
+    /// `h->nodes[i]` on a flexible array of words as selection leaves it: an `addq $32` for the
+    /// offset of the array and a load that scales the subscript by eight off what it wrote.
+    fn stepped_and_indexed(
+        func: &mut mir::Func,
+        names: &mut Interner,
+        block: mir::Block,
+        [heap, index]: [mir::Reg; 2],
+    ) -> mir::Reg {
+        let nodes = func.new_vreg(GPR);
+        let value = func.new_vreg(GPR);
+        func.build(block, op(names, FRAME.add))
+            .operand(mir::Operand::write(nodes, GPR).with(mir::Constraint::Reuse(1)))
+            .uses(heap, GPR)
+            .imm(32)
+            .finish();
+        func.build(block, op(names, "mov_rm_64"))
+            .def(value, GPR)
+            .mem(
+                mir::Mem::at(mir::Operand::read(nodes, GPR))
+                    .indexed(mir::Operand::read(index, GPR), 8),
+            )
+            .finish();
+        nodes
+    }
+
+    #[test]
+    fn a_constant_added_to_the_base_goes_into_the_displacement_beside_the_index() {
+        let (mut names, mut func, block) = empty();
+        let heap = func.new_vreg(GPR);
+        let index = func.new_vreg(GPR);
+        stepped_and_indexed(&mut func, &mut names, block, [heap, index]);
+
+        assert_eq!(folds(&mut func, &mut names), 1);
+
+        let left = shape(&func, &names, block);
+        assert_eq!(left.len(), 1, "the add is still there: {left:?}");
+        assert_eq!((left[0].1.scale, left[0].1.disp), (8, 32));
+        let inst = func.insts(block).next().expect("the load is still there");
+        assert_eq!(address_regs(&func, inst), vec![heap, index]);
+    }
+
+    /// The same address worked out by a `lea` that the load reads through, which is what the
+    /// selector writes when the subscript is scaled in the IR rather than in the load. The add goes
+    /// into the `lea` and the `lea` into the load, in the one run.
+    #[test]
+    fn a_constant_added_to_the_base_of_a_lea_reaches_the_load_through_it() {
+        let (mut names, mut func, block) = empty();
+        let heap = func.new_vreg(GPR);
+        let index = func.new_vreg(GPR);
+        let nodes = func.new_vreg(GPR);
+        let address = func.new_vreg(GPR);
+        let value = func.new_vreg(GPR);
+        func.build(block, op(&mut names, FRAME.add))
+            .operand(mir::Operand::write(nodes, GPR).with(mir::Constraint::Reuse(1)))
+            .uses(heap, GPR)
+            .imm(32)
+            .finish();
+        func.build(block, op(&mut names, FRAME.lea))
+            .def(address, GPR)
+            .mem(
+                mir::Mem::at(mir::Operand::read(nodes, GPR))
+                    .indexed(mir::Operand::read(index, GPR), 8),
+            )
+            .finish();
+        func.build(block, op(&mut names, "mov_rm_64"))
+            .def(value, GPR)
+            .mem(mir::Mem::at(mir::Operand::read(address, GPR)))
+            .finish();
+
+        assert_eq!(folds(&mut func, &mut names), 2);
+
+        let left = shape(&func, &names, block);
+        assert_eq!(left.len(), 1, "the address is still worked out on its own: {left:?}");
+        assert_eq!((left[0].1.scale, left[0].1.disp), (8, 32));
+        let inst = func.insts(block).next().expect("the load is still there");
+        assert_eq!(address_regs(&func, inst), vec![heap, index]);
+    }
+
+    /// An add whose answer is wanted as a number as well is arithmetic the program wants, and it
+    /// stays.
+    #[test]
+    fn a_constant_added_and_read_as_a_number_as_well_is_left_where_it_is() {
+        let (mut names, mut func, block) = empty();
+        let heap = func.new_vreg(GPR);
+        let index = func.new_vreg(GPR);
+        let nodes = stepped_and_indexed(&mut func, &mut names, block, [heap, index]);
+        let copy = func.new_vreg(GPR);
+        let add = op(&mut names, "add_rr_64");
+        func.build(block, add).def(copy, GPR).uses(nodes, GPR).uses(index, GPR).finish();
 
         assert_eq!(folds(&mut func, &mut names), 0);
         assert_eq!(shape(&func, &names, block).len(), 3);

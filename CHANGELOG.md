@@ -7,6 +7,7 @@ All notable changes are recorded here. The format follows [Keep a Changelog](htt
 ### Changed
 
 - Loop invariant code motion and global code motion also leave a pointer a small constant past another where it is when what reads it is another address in the same block, which is how `h->nodes[i]` on a flexible array is written. PostgreSQL's binaryheap `sift_up` held `h->nodes` in a register across the comparator call in its loop and spilled it.
+- On x86, a constant added to a pointer that another address then reads, which is a flexible array member such as `h->nodes[i]`, goes into that address's displacement, so `leaq 32(%rbx), %rax` and `movq (%rax,%rcx,8)` are `movq 32(%rbx,%rcx,8)` as gcc writes it.
 
 ## 0.24.8
 
