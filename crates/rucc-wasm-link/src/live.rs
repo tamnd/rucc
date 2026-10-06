@@ -4,7 +4,8 @@
 //! segments marked `RETAIN`. From each live function and segment the step follows the
 //! relocations in it to what they name. When `__wasm_call_ctors` is live, every constructor of a
 //! loaded object is live too, because that function calls them. This is the step that makes the
-//! module for an empty `main` about 20 KB when `libc.a` is 3 MB.
+//! module for an empty `main` about 20 KB when `libc.a` is 3 MB. As with `wasm-ld`, the module has
+//! `__stack_pointer` only when a live function or segment refers to it.
 
 use std::ops::Range;
 
@@ -13,7 +14,7 @@ use crate::resolve::{Synth, Where, World};
 
 /// What the roots reach.
 #[derive(Debug)]
-pub(crate) struct Live<'a> {
+pub(crate) struct Live {
     /// For each object, for each defined function, whether it is live.
     pub(crate) funcs: Vec<Vec<bool>>,
     pub(crate) segments: Vec<Vec<bool>>,
@@ -21,8 +22,9 @@ pub(crate) struct Live<'a> {
     pub(crate) tags: Vec<Vec<bool>>,
     pub(crate) imports: Vec<bool>,
     pub(crate) synths: Vec<Synth>,
-    /// The types of the trap functions that calls to undefined weak functions need.
-    pub(crate) stubs: Vec<&'a [u8]>,
+    /// The undefined weak functions that a live call names, as indices into the world's `weak` in
+    /// the order of that list. Each needs a function that traps, which the call goes to.
+    pub(crate) stubs: Vec<usize>,
     /// For each object, for each body, the range of its relocations in `code_relocs`.
     pub(crate) code: Vec<Vec<Range<usize>>>,
     /// For each object, for each segment, the range of its relocations in `data_relocs`.
@@ -40,8 +42,8 @@ fn ranges(relocs: &[Reloc], chunks: impl Iterator<Item = (u32, usize)>) -> Vec<R
         .collect()
 }
 
-impl<'a> Live<'a> {
-    pub(crate) fn mark(world: &mut World<'a>) -> Self {
+impl Live {
+    pub(crate) fn mark(world: &mut World<'_>) -> Self {
         for object in &mut world.files {
             object.code_relocs.sort_by_key(|r| r.offset);
             object.data_relocs.sort_by_key(|r| r.offset);
@@ -54,7 +56,7 @@ impl<'a> Live<'a> {
             globals: files.iter().map(|o| vec![false; o.globals.len()]).collect(),
             tags: files.iter().map(|o| vec![false; o.tags.len()]).collect(),
             imports: vec![false; world.imports.len()],
-            synths: vec![Synth::StackPointer],
+            synths: Vec::new(),
             stubs: Vec::new(),
             code: files
                 .iter()
@@ -84,10 +86,11 @@ impl<'a> Live<'a> {
         while let Some(place) = work.pop() {
             live.visit(world, place, &mut work);
         }
+        live.stubs.sort_unstable();
         live
     }
 
-    fn visit(&mut self, world: &World<'a>, place: Where, work: &mut Vec<Where>) {
+    fn visit(&mut self, world: &World<'_>, place: Where, work: &mut Vec<Where>) {
         let (file, relocs) = match place {
             Where::Func(file, index) => {
                 let seen = &mut self.funcs[file][index as usize];
@@ -140,9 +143,11 @@ impl<'a> Live<'a> {
             }
             let target = world.targets[file][reloc.index as usize];
             if target == Where::Null && matches!(reloc.kind, 0 | 26) {
-                let ty = world.func_type(file, reloc.index as usize).expect("a function symbol");
-                if !self.stubs.contains(&ty) {
-                    self.stubs.push(ty);
+                // `wasm-ld` makes one stub for each such symbol, also when two have one type.
+                let name = world.files[file].symbols[reloc.index as usize].name;
+                let weak = world.weak.iter().position(|&(weak, ..)| weak == name);
+                if let Some(weak) = weak.filter(|weak| !self.stubs.contains(weak)) {
+                    self.stubs.push(weak);
                 }
             }
             work.push(target);

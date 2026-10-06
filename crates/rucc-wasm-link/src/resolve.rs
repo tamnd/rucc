@@ -138,6 +138,9 @@ pub(crate) struct World<'a> {
     pub(crate) entry: Option<Where>,
     /// The names `--export` gives, and where each goes.
     pub(crate) exports: Vec<(String, Where)>,
+    /// The undefined weak symbols, in the order of the symbol table, each with the object and the
+    /// symbol that first named it. A call to one of these functions goes to a stub that traps.
+    pub(crate) weak: Vec<(&'a str, usize, usize)>,
 }
 
 struct Loader<'a> {
@@ -393,6 +396,7 @@ impl<'a> Loader<'a> {
         let mut imports: Vec<Imported<'a>> = Vec::new();
         let mut import_of: HashMap<&'a str, u32> = HashMap::new();
         let mut undefined = Vec::new();
+        let mut weak = Vec::new();
         // Where each global name goes.
         let mut names: HashMap<&'a str, Where> = HashMap::new();
         // In the order the names were first seen, which is the order of the imports in the module.
@@ -413,6 +417,7 @@ impl<'a> Loader<'a> {
                         });
                         Where::Import(index)
                     } else if !entry.strong {
+                        weak.push((name, file, symbol));
                         Where::Null
                     } else {
                         undefined.push((name, files[file].name.as_str()));
@@ -448,7 +453,7 @@ impl<'a> Loader<'a> {
             }
             targets.push(places);
         }
-        let mut world = World { files, targets, imports, entry: None, exports: Vec::new() };
+        let mut world = World { files, targets, imports, entry: None, exports: Vec::new(), weak };
         if let Some(name) = &options.entry {
             match names.get(name.as_str()) {
                 Some(&place @ Where::Func(..)) => world.entry = Some(place),
