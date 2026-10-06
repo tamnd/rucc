@@ -73,6 +73,8 @@
 //! The cost is paid now so that the passes that use it are simple, and until they land the
 //! measurement to make is that the cost really is nothing, which is what the corpus says.
 
+use std::collections::BTreeSet;
+
 use rucc_base::hash::{Map, Set};
 use rucc_ir::{Block, BlockCall, Builder, Def, Func, Inst, Opcode, Type, Value};
 
@@ -252,13 +254,15 @@ fn exits(func: &mut Func, an: &mut Analyses, fuel: &mut Fuel, stats: &mut Stats)
 /// the section does not say that because it is written against phi nodes, where the merge at the
 /// meeting is already there to be edited.
 fn closed(func: &mut Func, an: &mut Analyses, fuel: &mut Fuel, stats: &mut Stats) -> bool {
+    let mut leaving = Leaving::new(func, an.loops(func));
     loop {
         let (dom, fronts, loops) = (an.dominators(func), an.frontiers(func), an.loops(func));
-        let Some(job) = leak(func, dom, fronts, loops) else { return true };
+        let Some(job) = leaving.first(func, dom, fronts, loops) else { return true };
         if !fuel.take() {
             return false;
         }
-        close(func, dom, loops, &job);
+        let edited = close(func, dom, loops, &job);
+        leaving.refresh(func, loops, &edited);
         stats.optimized(CLOSED);
         // Every edge is where it was. A parameter appeared on some blocks and the edges into them
         // hand over one more value, which is a change to what the blocks say and not to which
@@ -286,31 +290,57 @@ pub(crate) struct Leak {
     id: LoopId,
 }
 
-/// Finds one value that crosses an exit without being handed over there.
+/// Every use of a value outside a loop that defines it, filed by the block the use is in.
 ///
-/// One at a time rather than all at once, because adding a parameter changes what the uses are and
-/// which blocks the exits dominate, and a list worked out before the first edit is a list that is
-/// wrong after it. The cost is a walk per repair, and section 26.9 says the way to make that cheap
-/// is GCC's `changed_bbs` set, which is worth building the second time it is needed rather than the
-/// first.
-/// One walk of the function rather than one per loop, which is what asking [`leaked`] of every loop
-/// in turn would be. A value named by a block leaves exactly those loops that hold its definition
-/// and not the block, and since loops that meet at all are nested, those are the innermost stretch
-/// of the chain of loops around the definition, up to the first one that holds the block as well.
-/// So one walk can sort every use into the loops it leaks out of. On a function with sixteen hundred
-/// loops and no leak to repair, asking per loop walked a hundred and ninety thousand instructions
-/// sixteen hundred times to answer nothing. tamnd/rucc#1086.
+/// One value is repaired at a time rather than all at once, because adding a parameter changes what
+/// the uses are and which blocks the exits dominate, and a list worked out before the first edit is
+/// a list that is wrong after it. What a block contributes depends only on what its own
+/// instructions name, though, since no definition moves and the forest stays as it was. So after a
+/// repair only the blocks it edited are walked again, rather than the whole function. On lz4 that
+/// was a thousand walks of the function. tamnd/rucc#3052.
 ///
-/// The order the candidates are looked at in is the order asking per loop produced, outer loop
-/// first and within a loop the blocks and the instructions in theirs, so the repair this picks is
-/// the repair that was picked before.
-fn leak(func: &Func, dom: &Dominators, fronts: &Frontiers, loops: &Loops) -> Option<Leak> {
-    if loops.count() == 0 {
-        return None;
+/// A value named by a block leaves exactly those loops that hold its definition and not the block,
+/// and since loops that meet at all are nested, those are the innermost stretch of the chain of
+/// loops around the definition, up to the first one that holds the block as well. So one walk can
+/// sort every use into the loops it leaks out of. On a function with sixteen hundred loops and no
+/// leak to repair, asking per loop walked a hundred and ninety thousand instructions sixteen
+/// hundred times to answer nothing. tamnd/rucc#1086.
+struct Leaving {
+    /// What each block names that leaves a loop, with the loop, in the order a walk of the block
+    /// meets them.
+    uses: Vec<Vec<(LoopId, Value)>>,
+    /// The places in the layout of the blocks with something in the list above for each loop.
+    blocks: Vec<BTreeSet<u32>>,
+    /// The layout, and where each block is in it. A repair adds no block.
+    order: Vec<Block>,
+    place: Vec<u32>,
+}
+
+impl Leaving {
+    fn new(func: &Func, loops: &Loops) -> Self {
+        let order: Vec<Block> = func.blocks().collect();
+        let mut place = vec![0; func.counts().blocks];
+        for (at, &block) in order.iter().enumerate() {
+            place[block.index()] = at as u32;
+        }
+        let mut leaving = Self {
+            uses: vec![Vec::new(); place.len()],
+            blocks: vec![BTreeSet::new(); loops.count()],
+            order,
+            place,
+        };
+        if loops.count() > 0 {
+            for at in 0..leaving.order.len() {
+                leaving.walk(func, loops, leaving.order[at]);
+            }
+        }
+        leaving
     }
-    let mut found: Vec<Vec<(Block, Value)>> = vec![Vec::new(); loops.count()];
-    for block in func.blocks() {
+
+    /// Files what one block names.
+    fn walk(&mut self, func: &Func, loops: &Loops, block: Block) {
         let around = chain(loops, loops.innermost(block));
+        let mut uses = std::mem::take(&mut self.uses[block.index()]);
         for inst in func.insts(block) {
             for value in named(func, inst) {
                 let Some(from) = defining(func, value) else { continue };
@@ -319,25 +349,59 @@ fn leak(func: &Func, dom: &Dominators, fronts: &Frontiers, loops: &Loops) -> Opt
                     if around.contains(&id) {
                         break;
                     }
-                    found[id.index()].push((block, value));
+                    uses.push((id, value));
+                    self.blocks[id.index()].insert(self.place[block.index()]);
                     walk = loops.parent(id);
                 }
             }
         }
+        self.uses[block.index()] = uses;
     }
-    for id in loops.all() {
-        for &(block, value) in &found[id.index()] {
-            let at = caught(func, dom, fronts, loops, id, value);
-            // A use no placement covers is one this repair does not reach, and reporting it would
-            // have the caller do the work and find the use still there, which for a caller that asks
-            // again until the answer is nothing is a loop that does not end.
-            if !covered(dom, &at, block) {
-                continue;
+
+    /// Files the blocks a repair edited again.
+    fn refresh(&mut self, func: &Func, loops: &Loops, edited: &[Block]) {
+        for &block in edited {
+            let at = self.place[block.index()];
+            for (id, _) in std::mem::take(&mut self.uses[block.index()]) {
+                self.blocks[id.index()].remove(&at);
             }
-            return Some(Leak { value, at, id });
+            self.walk(func, loops, block);
         }
     }
-    None
+
+    /// Finds one value that crosses an exit without being handed over there.
+    ///
+    /// The order the candidates are looked at in is the order asking per loop produced, outer loop
+    /// first and within a loop the blocks and the instructions in theirs, so the repair this picks
+    /// is the repair that was picked before.
+    fn first(
+        &self,
+        func: &Func,
+        dom: &Dominators,
+        fronts: &Frontiers,
+        loops: &Loops,
+    ) -> Option<Leak> {
+        for id in loops.all() {
+            for &at in &self.blocks[id.index()] {
+                let block = self.order[at as usize];
+                for &(leaves, value) in &self.uses[block.index()] {
+                    if leaves != id {
+                        continue;
+                    }
+                    let at = caught(func, dom, fronts, loops, id, value);
+                    // A use no placement covers is one this repair does not reach, and reporting it
+                    // would have the caller do the work and find the use still there, which for a
+                    // caller that asks again until the answer is nothing is a loop that does not
+                    // end.
+                    if !covered(dom, &at, block) {
+                        continue;
+                    }
+                    return Some(Leak { value, at, id });
+                }
+            }
+        }
+        None
+    }
 }
 
 /// The loops around a block, innermost first.
@@ -505,7 +569,9 @@ fn reaching(
 /// value or another parameter that was handed it, so a use that ends up naming one of them is right
 /// whatever path it took. What has to hold is only that the parameter is in scope where the use is,
 /// which is why both the placement and the rewrite go by dominance.
-pub(crate) fn close(func: &mut Func, dom: &Dominators, loops: &Loops, job: &Leak) {
+///
+/// What comes back is every block whose instructions it edited.
+pub(crate) fn close(func: &mut Func, dom: &Dominators, loops: &Loops, job: &Leak) -> Vec<Block> {
     let ty = func[job.value].ty;
     let param: Map<Block, Value> =
         job.at.iter().map(|&block| (block, func.append_param(block, ty))).collect();
@@ -514,6 +580,7 @@ pub(crate) fn close(func: &mut Func, dom: &Dominators, loops: &Loops, job: &Leak
         None => Map::default(),
     };
     let name = |block: Block| names.get(&block).copied().unwrap_or(job.value);
+    let mut edited = Vec::new();
     // Each edge in hands over whatever the value is called at the end of the block it leaves, which
     // is the value itself on the way out of the loop and a parameter written above on the joins.
     for term in terminators(func) {
@@ -526,6 +593,9 @@ pub(crate) fn close(func: &mut Func, dom: &Dominators, loops: &Loops, job: &Leak
             }
             let args = func.append_arg(call.args, hand);
             func.set_block_call(at, BlockCall { args, ..call });
+            if edited.last() != Some(&from) {
+                edited.push(from);
+            }
         }
     }
     for (&block, &hand) in &names {
@@ -539,7 +609,9 @@ pub(crate) fn close(func: &mut Func, dom: &Dominators, loops: &Loops, job: &Leak
                 func.rewrite(list, |value| if value == job.value { hand } else { value });
             }
         }
+        edited.push(block);
     }
+    edited
 }
 
 /// The edits one step wants that do not tread on each other, from a forest it asks for itself.

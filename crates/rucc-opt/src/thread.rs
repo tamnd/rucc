@@ -322,6 +322,9 @@ impl Pass for Thread {
                     stats.missed(NO_FUEL);
                     break 'blocks;
                 }
+                // Asked before the edge moves, since what it asks about is the graph the forest was
+                // built on.
+                let kept = free.is_some() && settled(an, func, &edges, from, block, at);
                 // The record has to follow the edge, so that a block further down the walk sees the
                 // predecessor it now has. That is what lets one thread make the next one possible
                 // within the single walk this pass is.
@@ -346,7 +349,11 @@ impl Pass for Thread {
                 }
                 // The loop forest was about the function as it was a moment ago, and the manager
                 // clears the cache after the pass returns, which is too late for the next edge.
-                an.clear();
+                // Unless the forest is still right, which rebuilding after each of hundreds of
+                // threads in one function would otherwise spend most of the pass finding out.
+                if !kept {
+                    an.clear();
+                }
                 threaded = true;
             }
         }
@@ -354,7 +361,9 @@ impl Pass for Thread {
             // Threading every edge into a block leaves nothing arriving at it, and section 6.5
             // makes taking an unreachable block out the standing obligation of whichever pass
             // stranded it rather than something the next pass tidies up. The verifier holds every
-            // pass to that, so this is not a courtesy.
+            // pass to that, so this is not a courtesy. The graph in the cache can be from before a
+            // thread that kept the forest, and the sweep wants the one there is now.
+            an.clear();
             sweep(func, an, &mut stats);
         }
         stats
@@ -401,6 +410,61 @@ impl Thread {
             return Err(Some(TOO_MANY));
         }
         Ok(path)
+    }
+}
+
+/// Whether threading the edge at `at` from `from` past `block` without a copy leaves the loop
+/// forest the answer it was, so the pass can go on asking it rather than building it again.
+///
+/// It does when the edge is on no cycle and something control reaches from outside every cycle
+/// `block` is on still arrives at it by another edge. No cycle went through the edge, and none goes
+/// through the one that replaces it, since that would have been a cycle through the edge before.
+/// Nothing stops being reached, because whatever reached `block` this way reaches it the other
+/// way, and that way cannot pass through the edge without the edge being on a cycle. A block of a
+/// cycle that some path went round to reach another block of it still has a path round it for the
+/// same reason. The one block that can stop dominating anything is `block`, and if it headed a
+/// loop it still does: the new edge cannot enter that loop anywhere but its header, because
+/// [`allowed`] refused it if it did. So the cycles are the same, the block of each that dominates
+/// the rest is the same, and the same loops come out with the same headers, latches and nesting,
+/// and the same blocks are irreducible. What can change is the order they are found in and which
+/// edges leave a loop, and nothing here asks either.
+///
+/// The graph in the cache can be one from before a thread this already said yes to. What blocks
+/// it reaches is still right, which is all this asks of it.
+fn settled(
+    an: &Analyses,
+    func: &Func,
+    edges: &Edges,
+    from: Block,
+    block: Block,
+    at: Idx<BlockCall>,
+) -> bool {
+    let loops = an.loops(func);
+    if together(loops, from, block) {
+        return false;
+    }
+    let cfg = an.cfg(func);
+    edges.get(&block).is_some_and(|list| {
+        list.iter()
+            .any(|&(pred, slot)| slot != at && cfg.reaches(pred) && !together(loops, pred, block))
+    })
+}
+
+/// Whether two blocks might be on a cycle together.
+///
+/// Two blocks are when they are in the same outermost loop. Outside every loop the forest only
+/// says a block is in some irreducible region and not which, so two such blocks might be.
+fn together(loops: &Loops, a: Block, b: Block) -> bool {
+    let outermost = |block: Block| {
+        let mut id = loops.innermost(block)?;
+        while let Some(parent) = loops.parent(id) {
+            id = parent;
+        }
+        Some(id)
+    };
+    match (outermost(a), outermost(b)) {
+        (None, None) => loops.is_irreducible(a) && loops.is_irreducible(b),
+        (a, b) => a == b,
     }
 }
 

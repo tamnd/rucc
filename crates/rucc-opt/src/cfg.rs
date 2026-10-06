@@ -24,9 +24,9 @@ use rucc_ir::{Block, Func};
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Cfg {
     /// The blocks each block branches to, indexed by block number.
-    succs: Vec<Vec<Block>>,
+    succs: Lists,
     /// The blocks that branch to each block, indexed by block number.
-    preds: Vec<Vec<Block>>,
+    preds: Lists,
     /// The blocks the entry reaches, children before parents.
     postorder: Vec<Block>,
     /// Where each block sits in reverse postorder, and `None` for one the entry misses.
@@ -44,8 +44,13 @@ impl Cfg {
     #[must_use]
     pub fn new(func: &Func) -> Self {
         let counts = func.counts();
-        let mut succs: Vec<Vec<Block>> = vec![Vec::new(); counts.blocks];
-        let mut preds: Vec<Vec<Block>> = vec![Vec::new(); counts.blocks];
+        // Every edge once, in the order the blocks are laid out, and how many leave and arrive at
+        // each block, so both lists can be laid end to end in one allocation each. The graph is
+        // built again after every pass that moves an edge, and two allocations per block was most
+        // of what building it cost.
+        let mut edges: Vec<(Block, Block)> = Vec::new();
+        let mut leaving = vec![0u32; counts.blocks + 1];
+        let mut arriving = vec![0u32; counts.blocks + 1];
 
         // The terminator and nothing else, which is where the invariant the verifier proves
         // gets spent: a block has exactly one terminator and it is the last instruction, so
@@ -72,10 +77,13 @@ impl Cfg {
                     continue;
                 }
                 stamp[call.block.index()] = block.index();
-                succs[block.index()].push(call.block);
-                preds[call.block.index()].push(block);
+                edges.push((block, call.block));
+                leaving[block.index() + 1] += 1;
+                arriving[call.block.index() + 1] += 1;
             }
         }
+        let succs = Lists::new(leaving, &edges, |(from, to)| (from, to));
+        let preds = Lists::new(arriving, &edges, |(from, to)| (to, from));
 
         let entry = func.entry();
         let postorder = match entry {
@@ -99,13 +107,13 @@ impl Cfg {
     /// The blocks this one branches to, each named once however many edges go to it.
     #[must_use]
     pub fn successors(&self, block: Block) -> &[Block] {
-        &self.succs[block.index()]
+        self.succs.of(block)
     }
 
     /// The blocks that branch to this one, each named once however many edges come from it.
     #[must_use]
     pub fn predecessors(&self, block: Block) -> &[Block] {
-        &self.preds[block.index()]
+        self.preds.of(block)
     }
 
     /// Every block the entry reaches, children before parents.
@@ -157,17 +165,54 @@ impl Cfg {
     }
 }
 
+/// A list of blocks for each block number, laid end to end.
+#[derive(Clone, Debug, PartialEq, Eq)]
+struct Lists {
+    /// Where each block's list starts, with one more on the end for where the last one stops.
+    at: Vec<u32>,
+    /// The lists.
+    blocks: Vec<Block>,
+}
+
+impl Lists {
+    /// Files each pair's second block under its first, keeping the order the pairs come in.
+    ///
+    /// `sizes` is how many each block gets, shifted up one place, which is the start of each list
+    /// once it is added up.
+    fn new(
+        mut sizes: Vec<u32>,
+        pairs: &[(Block, Block)],
+        pick: impl Fn((Block, Block)) -> (Block, Block),
+    ) -> Self {
+        for index in 1..sizes.len() {
+            sizes[index] += sizes[index - 1];
+        }
+        let mut next = sizes.clone();
+        let mut blocks = vec![Block::from_usize(0); pairs.len()];
+        for &pair in pairs {
+            let (under, block) = pick(pair);
+            blocks[next[under.index()] as usize] = block;
+            next[under.index()] += 1;
+        }
+        Self { at: sizes, blocks }
+    }
+
+    fn of(&self, block: Block) -> &[Block] {
+        &self.blocks[self.at[block.index()] as usize..self.at[block.index() + 1] as usize]
+    }
+}
+
 /// Every block the entry reaches, children before parents.
 ///
 /// An explicit stack rather than recursion, because a chain of blocks is as long as the
 /// function is and a straight line of ten thousand statements is a real program.
-fn postorder(succs: &[Vec<Block>], entry: Block, blocks: usize) -> Vec<Block> {
+fn postorder(succs: &Lists, entry: Block, blocks: usize) -> Vec<Block> {
     let mut order = Vec::new();
     let mut seen = vec![false; blocks];
     let mut stack = vec![(entry, 0usize)];
     seen[entry.index()] = true;
     while let Some((block, next)) = stack.pop() {
-        match succs[block.index()].get(next) {
+        match succs.of(block).get(next) {
             Some(&target) => {
                 stack.push((block, next + 1));
                 if !seen[target.index()] {
