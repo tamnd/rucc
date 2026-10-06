@@ -39,7 +39,7 @@
 //! this file having known.
 
 use rucc_base::Symbol;
-use rucc_base::hash::Set;
+use rucc_base::hash::{Map, Set};
 use rucc_ir::{AttrSet, Datum, Dll, Extra, Linkage, Module, Opcode, Pic, Visibility};
 use rucc_target::ObjectFormat;
 
@@ -84,6 +84,7 @@ pub struct Elsewhere {
     referred: Set<Symbol>,
     based: bool,
     defined: Set<Symbol>,
+    aligned: Map<Symbol, u32>,
 }
 
 /// Which pointer a name on COFF is reached through, when it is reached through one.
@@ -155,6 +156,11 @@ impl Elsewhere {
         let described = format == ObjectFormat::MachO;
         let indexed = format == ObjectFormat::Coff;
         let (imported, referred) = Self::pointers(module, format);
+        let aligned = if format == ObjectFormat::Elf {
+            module.globals().map(|id| (module[id].name, module[id].align)).collect()
+        } else {
+            Map::default()
+        };
         Self {
             threads,
             twice,
@@ -164,6 +170,7 @@ impl Elsewhere {
             indexed,
             imported,
             referred,
+            aligned,
             ..Self::table(module, pic, format, copies)
         }
     }
@@ -358,6 +365,19 @@ impl Elsewhere {
             })
         });
         defined.chain(used).chain(held).any(|name| said.contains(&name))
+    }
+
+    /// How far the address of that variable is aligned, which is how many of its low bits are
+    /// known to be zero. `None` for a name that is not a variable of this module, or on a format
+    /// other than ELF, where nothing asks.
+    ///
+    /// A load from a variable on AArch64 is `adrp` and then the low twelve bits of the address in
+    /// the load itself, and the load scales those bits by the size it reads, so the address has to
+    /// be a multiple of that size. A variable another object defines is as aligned as its type
+    /// says here, which is what gcc takes it to be too.
+    #[must_use]
+    pub fn aligned(&self, name: Symbol) -> Option<u32> {
+        self.aligned.get(&name).copied()
     }
 
     /// Whether the address of that name has to be read out of the global offset table.

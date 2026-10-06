@@ -12,9 +12,9 @@
 //!
 //! An addressing mode here is a base register and either a constant or an index register, which is
 //! every mode this machine has for an ordinary access. The index can be shifted by the size of the
-//! access and there is no room for a constant beside it. A symbol is reached with `adrp` and a low
-//! twelve bits argument rather than through a mode, so a mode with a symbol or a label in it is a
-//! function this writer has not been taught and is refused rather than written as something else.
+//! access and there is no room for a constant beside it. A symbol is reached with `adrp` and the low
+//! twelve bits of it, which a load or a store can carry in place of the constant, so a mode with a
+//! symbol is either that or the page `adrp` is given. A label in a mode is the one `adr` takes.
 //!
 //! Every line is also handed to the encoder before it is written. What the assembler would reject,
 //! such as a constant too wide for the instruction, is refused here with the encoder's reason
@@ -24,7 +24,7 @@ use std::fmt::Write as _;
 
 use rucc_base::Interner;
 use rucc_mir::{Amode, Block, Func, Inst, defs};
-use rucc_target::aarch64::{self, Addr, Arg, Extend, Mode, Offset, Operands};
+use rucc_target::aarch64::{self, Addr, Arg, Extend, Mode, Offset, Operands, Operator};
 use rucc_target::template::template_filled;
 
 use crate::Error;
@@ -90,8 +90,20 @@ pub(crate) fn inst(
         Amode { base: None, index: None, disp: 0, table: Some(at), .. } => Some(table(*at)),
         _ => None,
     });
+    // A symbol in the mode is the page of it for `adrp`, which has no base, and the low twelve
+    // bits of it for a load or a store through that page. Either way it is written with the
+    // offset beside it, which the linker takes as the addend.
+    let named = data.mem.map(|mem| &func[mem]).and_then(|amode| {
+        let symbol = amode.symbol?;
+        let offset = match amode.disp {
+            0 => String::new(),
+            disp => format!("{disp:+}"),
+        };
+        Some((amode.base.is_none(), format!("{}{}{offset}", at.symbol, at.names.resolve(symbol))))
+    });
     let mem = match data.mem {
         Some(_) if near.is_some() => None,
+        Some(_) if named.as_ref().is_some_and(|&(page, _)| page) => None,
         Some(mem) => Some(address(&func[mem], &regs).ok_or_else(refused)?),
         None => None,
     };
@@ -109,6 +121,8 @@ pub(crate) fn inst(
         func[block].succs.first().map(|to| label(to.block))
     } else if near.is_some() {
         near
+    } else if let Some((_, named)) = named {
+        Some(named)
     } else {
         data.symbol.map(|symbol| format!("{}{}", at.symbol, at.names.resolve(symbol)))
     };
@@ -171,17 +185,16 @@ fn template(out: &mut String, at: &Context<'_>, func: &Func, inst: Inst) -> Resu
 /// mode with anything else in it.
 ///
 /// An index scaled by anything but a power of two, or with a constant beside it, is a mode this
-/// machine has no way to say in one instruction.
+/// machine has no way to say in one instruction. A symbol beside a base is the low twelve bits of
+/// its address, with the page of it in the base, and the constant goes with the symbol.
 fn address(amode: &Amode, regs: &[u8]) -> Option<Addr> {
-    if amode.symbol.is_some()
-        || amode.block.is_some()
-        || amode.table.is_some()
-        || amode.segment.is_some()
-    {
+    if amode.block.is_some() || amode.table.is_some() || amode.segment.is_some() {
         return None;
     }
     let base = *regs.get(usize::from(amode.base?))?;
     let offset = match amode.index {
+        None if amode.symbol.is_some() => Offset::Symbol(Operator::Lo12),
+        _ if amode.symbol.is_some() => return None,
         None => Offset::Imm(i64::from(amode.disp)),
         Some(at) if amode.disp == 0 && amode.scale.is_power_of_two() => Offset::Reg {
             reg: *regs.get(usize::from(at))?,

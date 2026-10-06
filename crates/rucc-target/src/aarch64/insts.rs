@@ -562,6 +562,9 @@ pub static INSTS: &[(&str, Form)] = &[
     // offset into that page.
     ("lea_64", Lea),
     ("addr_64", Address),
+    // The page alone, for the loads and stores that carry the low twelve bits of the symbol
+    // themselves. The symbol and its offset are in the addressing mode, as the readers' are.
+    ("page_64", Lea),
     // The address of a block or a jump table of this function, which is a fixed distance from the
     // code and carried in the addressing mode, the way x86-64 carries it in a `lea`.
     ("adr_64", Lea),
