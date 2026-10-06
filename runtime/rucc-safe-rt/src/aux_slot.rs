@@ -231,7 +231,10 @@ pub const fn address_of(container: Cap, addr: u64) -> Option<u64> {
     }
     // `layout::HEADER` rather than the `IN_HEADER` above: one is the thirty two bytes in front of
     // the payload and the other is the flag that sends a reader to them.
-    let block = container.lo - layout::HEADER as u64 - layout::aux(container.ext as usize) as u64;
+    // The class rather than the extent, since a capability is held to what was asked for and the
+    // block was laid out for the class it was rounded up to.
+    let class = crate::heap::Arena::sized(container.ext as usize);
+    let block = container.lo - layout::HEADER as u64 - layout::aux(class) as u64;
     Some(block + layout::aux_at(off as usize) as u64)
 }
 

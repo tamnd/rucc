@@ -65,7 +65,7 @@ pub struct Arena {
     plane: Lifetime,
     versions: Counter,
     instances: Counter,
-    id: u64,
+    id: u32,
     base: usize,
     next: usize,
     end: usize,
@@ -85,7 +85,7 @@ impl Arena {
     /// as it lives. `plane` covers every address in it. `id` is not shared with another allocator,
     /// since that is the whole content of the wrong allocator refusal.
     #[must_use]
-    pub const unsafe fn new(plane: Lifetime, base: usize, len: usize, id: u64) -> Self {
+    pub const unsafe fn new(plane: Lifetime, base: usize, len: usize, id: u32) -> Self {
         Self {
             plane,
             versions: Counter::new(),
@@ -144,6 +144,9 @@ impl Arena {
             ver: version,
             meta: Meta::new(Class::Allocated, perm::READ | perm::WRITE, self.instances.next()),
             allocator: self.id,
+            // A request for nothing asked for nothing, and the granule it was given anyway is
+            // all slack, so no access through it is in bounds.
+            slack: u32::try_from(size - n).unwrap_or(0),
         };
         // SAFETY: `block` is inside the region, which the caller of `new` promised is mapped and
         // writable, and the arena hands out no two overlapping blocks.
@@ -241,6 +244,32 @@ impl Arena {
     pub unsafe fn extent(&self, payload: usize) -> Result<usize, Refusal> {
         // SAFETY: the caller's contract is this function's contract passed straight on.
         Ok(unsafe { self.header(payload)? }.ext as usize)
+    }
+
+    /// [`Arena::extent`], and from now on the instance's bounds are all of it.
+    ///
+    /// This is `malloc_usable_size`, whose whole point is that the program goes on to use the bytes
+    /// it was told about. So the rounding stops being slack the moment it is asked about, and an
+    /// access to it after that is one the program was invited to make.
+    ///
+    /// # Errors
+    ///
+    /// As [`Arena::extent`].
+    ///
+    /// # Safety
+    ///
+    /// As [`Arena::end`].
+    pub unsafe fn room(&self, payload: usize) -> Result<usize, Refusal> {
+        // SAFETY: the caller's contract is this function's contract passed straight on.
+        let header = unsafe { self.header(payload)? };
+        if header.slack != 0 {
+            // SAFETY: reading it just established that this is a live header of this arena's, and
+            // the header is the arena's own storage rather than the program's.
+            unsafe {
+                (layout::header_of(payload) as *mut Header).write(Header { slack: 0, ..header })
+            };
+        }
+        Ok(header.ext as usize)
     }
 
     /// Whether `addr` is inside the region this arena was built over.
@@ -406,7 +435,7 @@ mod tests {
 
     impl Fake {
         /// An arena over `len` bytes, whose identity is `id`.
-        fn new(len: usize, id: u64) -> Self {
+        fn new(len: usize, id: u32) -> Self {
             let mut region = std::vec![0u8; len + GRANULE];
             // The region has to start on a granule, because the plane's slot for an address that
             // did not would be shared with whatever is in front of it.

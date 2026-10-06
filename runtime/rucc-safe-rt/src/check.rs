@@ -34,22 +34,19 @@
 //! instance and runs past it is refused, and so is a pointer that is walked off the end of the
 //! object it came from.
 //!
-//! There are two things it is not enough for, and both are written down here rather than left for
-//! somebody to find in a corpus run.
+//! The plane alone is not enough for an overflow that stays inside the block the allocator rounded
+//! the request up to. `malloc(17)` is served out of a thirty two byte payload and the plane says all
+//! thirty two bytes belong to that instance. The header says seventeen were asked for, and both
+//! places that hold an access to an instance read it: a capability's bounds stop there, and when
+//! no capability covers the access [`bounds`] walks to the base of the run and reads the header
+//! itself, which is a cost only the slow path pays.
 //!
-//! The first is an overflow that stays inside the block the allocator rounded the request up to.
-//! `malloc(17)` is served out of a thirty two byte payload, the plane says all thirty two bytes
-//! belong to that instance, and a write to byte twenty is not caught. Closing that needs the exact
-//! extent, which is in the header the allocator already writes, and reading a header per access is
-//! the thing the aux plane exists to avoid.
-//!
-//! The second is a pointer that has landed in a different live instance before anything is read
-//! through it. [`bounds`] asks whether an access straddles out of the instance its first byte is
-//! in, and an access wholly inside somebody else's live instance does not straddle anything.
-//! Deciding that needs the version the pointer was made with, which is what a capability is.
-//!
-//! Both are milestone S2 and S5 work, and neither is a surprise: they are the two places where a
-//! judgement about a *capability* has been answered with a question about an *address*.
+//! It is not enough either for a pointer that has landed in a different live instance before
+//! anything is read through it. [`bounds`] asks whether an access straddles out of the instance its
+//! first byte is in, and an access wholly inside somebody else's live instance does not straddle
+//! anything. Deciding that needs the version the pointer was made with, which is what a capability
+//! is, and it is the place where a judgement about a *capability* is still answered with a question
+//! about an *address*.
 //!
 //! # Addresses that are not the heap's
 //!
@@ -196,11 +193,28 @@ pub unsafe fn bounds(
     // An access of no bytes reads nothing, so the last byte is the first one and the check is
     // trivially satisfied rather than reaching an address one before the pointer.
     let last = addr.wrapping_add(size.saturating_sub(1));
-    if !region.holds(last) || owner(&region, addr) != owner(&region, last) {
+    if !region.holds(last)
+        || owner(&region, addr) != owner(&region, last)
+        || rounded(&region, addr, last)
+    {
         // SAFETY: the descriptor is this function's caller's to get right, and it is passed on
         // unchanged. The address is the one the access was about, which is what a report wants.
         unsafe { crate::fail::report(descriptor, Some(addr)) }
     }
+}
+
+/// Whether an access the planes allow reaches into the rounding of the instance it is in.
+///
+/// The planes are per granule and a class is a whole number of them, so a request for seventeen
+/// bytes owns thirty two as far as they can tell, and a write to the twentieth is document 03's S1
+/// landing in storage nobody else owns. The header says how much was asked for, and the run the
+/// planes found has the header in front of it, so this is a walk to the base and one load, paid
+/// only by an access no capability covered.
+///
+/// Nothing is refused where there is no header to believe, which is an arena somebody else carved,
+/// or where the address is owned by nobody, which is [`live`]'s refusal and not this one's.
+fn rounded(region: &Region, addr: usize, last: usize) -> bool {
+    recover::extent(region, addr).is_some_and(|(lo, ext)| last - lo >= ext)
 }
 
 /// Judgement J1, the lifetime half: the capability the access goes through still names the
@@ -2853,13 +2867,39 @@ mod tests {
     }
 
     #[test]
-    fn an_overflow_that_stays_inside_the_rounded_up_block_is_not_caught_yet() {
+    fn an_overflow_that_stays_inside_the_rounded_up_block_is_refused() {
         let _turn = turn();
-        // The hole the module comment describes, written down as a test so that the milestone
-        // that closes it has something to turn round. Seventeen bytes are served out of thirty
-        // two and the plane says all thirty two belong to the instance.
+        // Seventeen bytes are served out of thirty two and the plane says all thirty two belong to
+        // the instance. The header says seventeen, and both the capability and the planes are held
+        // to that.
         let ptr = alloc(17);
+        let made = recover::made(ptr);
+        assert_eq!(made.ext, 17);
+        assert!(!refused(|| within(at(ptr, 13), 4, &made)));
+        assert!(refused(|| within(at(ptr, 14), 4, &made)));
+        assert!(refused(|| within(at(ptr, 20), 4, &made)));
+        assert!(!refused(|| bounds(at(ptr, 16), 1)));
+        assert!(refused(|| bounds(at(ptr, 17), 1)));
+        assert!(refused(|| bounds(at(ptr, 20), 4)));
+        // A pointer into the middle recovers the same bounds, since the walk ends at the header.
+        assert_eq!(recover::recover(at(ptr, 16)).ext, 17);
+        // SAFETY: `ptr` is a live instance.
+        unsafe { dealloc(ptr) };
+    }
+
+    #[test]
+    fn asking_for_the_usable_size_makes_the_rounding_the_programs_own() {
+        let _turn = turn();
+        // `malloc_usable_size` is the program being told the rest of the class is its own, so the
+        // access the bounds check refused a moment ago is one it was invited to make.
+        let ptr = alloc(17);
+        assert!(refused(|| bounds(at(ptr, 20), 4)));
+        // SAFETY: `ptr` is a live instance of this arena's.
+        let room = unsafe { alloc::usable(ptr) };
+        assert_eq!(room, 32);
         assert!(!refused(|| bounds(at(ptr, 20), 4)));
+        assert!(!refused(|| within(at(ptr, 20), 4, &recover::made(ptr))));
+        assert!(refused(|| bounds(at(ptr, 28), 8)));
         // SAFETY: `ptr` is a live instance.
         unsafe { dealloc(ptr) };
     }
