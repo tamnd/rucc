@@ -325,7 +325,7 @@ mod tests {
     /// two of them have one type, as from `wasm-ld`.
     #[test]
     fn each_called_weak_function_gets_a_stub_of_its_own() {
-        let a = weak_caller();
+        let a = weak_caller(["a", "b"]);
         let module = link(&Options::default(), &[Input { name: "a.o", bytes: &a }]).unwrap();
         let start = [0, 0x10, 0x80, 0x80, 0x80, 0x80, 0, 0x10, 0x81, 0x80, 0x80, 0x80, 0, 0x0b];
         let mut code = vec![3, 3, 0, 0x00, 0x0b, 3, 0, 0x00, 0x0b, 14];
@@ -344,5 +344,22 @@ mod tests {
         let mut want = vec![1, funcs.len() as u8];
         want.extend(funcs);
         assert!(names.starts_with(&want), "{names:?}");
+    }
+
+    /// The stub for a `main` that takes arguments and is not there is named after `main`, as
+    /// `wasm-ld` shows `__main_argc_argv` in the `name` section. A start file that calls the
+    /// `main` that the program defines, by two weak names, has such a stub.
+    #[test]
+    fn the_stub_for_main_with_arguments_is_named_after_main() {
+        let a = weak_caller(["__main_argc_argv", "b"]);
+        let module = link(&Options::default(), &[Input { name: "a.o", bytes: &a }]).unwrap();
+        let names = sections(&module)
+            .into_iter()
+            .find(|&(id, payload)| id == 0 && payload.starts_with(b"\x04name"))
+            .map(|(_, payload)| payload[5..].to_vec())
+            .unwrap();
+        let has = |name: &str| names.windows(name.len()).any(|w| w == name.as_bytes());
+        assert!(has("undefined_weak:main"), "{names:?}");
+        assert!(!has("__main_argc_argv"), "{names:?}");
     }
 }

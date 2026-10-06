@@ -623,7 +623,7 @@ impl<'w, 'a> Writer<'w, 'a> {
         let stubs: Vec<(u32, String)> = self
             .stubs
             .iter()
-            .map(|(name, &index)| (index, format!("undefined_weak:{name}")))
+            .map(|(name, &index)| (index, format!("undefined_weak:{}", shown(name))))
             .collect();
         for (index, name) in &stubs {
             funcs.push((*index, name));
@@ -663,10 +663,7 @@ impl<'w, 'a> Writer<'w, 'a> {
         uleb(&mut sub, funcs.len() as u64);
         for (index, func) in funcs {
             uleb(&mut sub, u64::from(index));
-            // A `main` that takes arguments is `__main_argc_argv` in the object, because a call
-            // and its callee must have the same type on wasm. `wasm-ld` shows it as `main`. It
-            // also demangles C++ names, and there are none in C.
-            name(&mut sub, if func == "__main_argc_argv" { "main" } else { func });
+            name(&mut sub, shown(func));
         }
         subsection(&mut s, 1, &sub);
         let mut globals: Vec<(u32, &str)> = Vec::new();
@@ -753,6 +750,14 @@ impl<'w, 'a> Writer<'w, 'a> {
 enum Export {
     Func(u32),
     Data(u32),
+}
+
+/// The name that `wasm-ld` shows for a symbol in the `name` section, also in the name of a stub. A
+/// `main` that takes arguments is `__main_argc_argv` in the object, because a call and its callee
+/// must have the same type on wasm, and `wasm-ld` shows it as `main`. It also demangles C++ names,
+/// and there are none in C.
+fn shown(symbol: &str) -> &str {
+    if symbol == "__main_argc_argv" { "main" } else { symbol }
 }
 
 fn section(out: &mut Vec<u8>, id: u8, payload: &[u8]) {

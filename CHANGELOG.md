@@ -11,6 +11,7 @@ All notable changes are recorded here. The format follows [Keep a Changelog](htt
 ### Fixed
 
 - A weak declaration on wasm, such as `__attribute__((weak)) int f(void);` or `extern int x __attribute__((weak));`, is a weak undefined symbol in the object, as clang writes it (#3137). When nothing defines it, `wasm-ld` and the linker inside rucc give it a null address, so `if (f) f();` works. Before, the symbol was a plain undefined one, and the link stopped with "undefined symbol".
+- The linker inside rucc names the stub of a `main` with arguments that is not there `undefined_weak:main`, as `wasm-ld` does (#3137). A start file that calls `__main_void` or `__main_argc_argv` by weak names has such a stub, and the name section was the only part of the module that was not the same as the module from `wasm-ld`.
 
 ## 0.27.0
 
