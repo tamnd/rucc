@@ -222,9 +222,17 @@ impl Slots {
         let held = spilled(allocation, widths.len());
         let moved = moved(allocation, widths.len());
         for (slot, &width) in widths.iter().enumerate() {
-            let area = held[slot]
-                .and_then(|reg| allocation.live.area(reg))
-                .map(|live| merged(live.pieces().chain(moved[slot].iter().copied())));
+            // A slot no value lives in is one only the moves touch: a value in a register put
+            // away around a call, or a register the legalizer borrowed. Where those moves are is
+            // the whole of where it is wanted.
+            let area = match held[slot] {
+                Some(reg) => allocation
+                    .live
+                    .area(reg)
+                    .map(|live| merged(live.pieces().chain(moved[slot].iter().copied()))),
+                None if !moved[slot].is_empty() => Some(merged(moved[slot].iter().copied())),
+                None => None,
+            };
             wants.push(Want { what: What::Slot(slot), size: width, align: width, area });
         }
         fit(wants, locals.len(), widths.len(), BUDGET)

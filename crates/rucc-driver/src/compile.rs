@@ -11896,6 +11896,50 @@ block5:
         assert_eq!(small, large, "four times the labels and the same values: {small}, {large}");
     }
 
+    /// Loops one after the other, each with eight values of its own and a call it rarely makes.
+    fn rare_calls(loops: usize) -> String {
+        let mut source =
+            String::from("void rare(long);\nlong sum(long *p, long n)\n{\n\tlong s = 0;\n");
+        for each in 0..loops {
+            let values: Vec<String> = (0..8).map(|value| format!("v{each}_{value}")).collect();
+            for (value, name) in values.iter().enumerate() {
+                source.push_str(&format!(
+                    "\tlong {name} = p[{}] * {};\n",
+                    each * 8 + value,
+                    value + 3
+                ));
+            }
+            source.push_str("\tfor (long i = 0; i < n; i++) {\n");
+            source.push_str(&format!(
+                "\t\tif (__builtin_expect(p[i] == {each}, 0))\n\t\t\trare(i);\n"
+            ));
+            let sum: Vec<String> = values.iter().map(|name| format!("({name} + i)")).collect();
+            source.push_str(&format!("\t\ts += {};\n\t}}\n", sum.join(" ^ ")));
+        }
+        source.push_str("\treturn s;\n}\n");
+        source
+    }
+
+    /// A value kept in a register and put away only around a call is put in a slot that is wanted
+    /// for the length of that call, so the next loop's values go in the same bytes.
+    ///
+    /// Those slots had nothing saying where they were wanted and so shared with nothing, which
+    /// gave `hidinput_configure_usage` in Linux 7.2 a frame of 2256 bytes under the kernel's
+    /// `-mpreferred-stack-boundary=3`, past `FRAME_WARN`, where gcc's is 136.
+    #[test]
+    fn a_slot_a_value_waits_in_around_a_call_is_shared_with_the_next_loop() {
+        let frame = |loops| {
+            let mut opts = options();
+            opts.emit = EmitKind::Asm;
+            opts.opt_level = rucc_session::OptLevel::O2;
+            let result = run(&opts, &rare_calls(loops));
+            assert_eq!(result.messages, Vec::<String>::new(), "expected this to compile");
+            the_frame(result.text())
+        };
+        let (two, six) = (frame(2), frame(6));
+        assert_eq!(two, six, "three times the loops and the same values at once: {two}, {six}");
+    }
+
     /// A template that saves the callee-saved registers by name, which is micropython's non local
     /// return and is tamnd/rucc#1583.
     ///
