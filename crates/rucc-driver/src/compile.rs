@@ -5613,6 +5613,20 @@ decl #0 x : int object external static defined
         }
     }
 
+    /// `0 < n` is the guard header copying puts in front of a loop that counts up from zero, and it
+    /// is how some people write the test by hand. With the constant on the left it is a register
+    /// zeroed to hold the zero and a compare of two registers. Turned round it is `n > 0`, which is
+    /// the one register tested against itself and nothing zeroed.
+    #[test]
+    fn a_constant_on_the_left_of_a_comparison_is_not_put_in_a_register() {
+        let text = optimized(concat!(
+            "int g(void);\n",
+            "int f(int n) { if (0 < n) return g(); return 1; }\n",
+        ));
+        assert!(text.contains("\ttestl\t%edi, %edi"), "{text}");
+        assert!(!text.contains("\txorl\t"), "{text}");
+    }
+
     /// A cast between a pointer and an integer as wide as one, which is every one C writes here.
     #[test]
     fn a_cast_between_a_pointer_and_an_integer_leaves_the_value_where_it_is() {
