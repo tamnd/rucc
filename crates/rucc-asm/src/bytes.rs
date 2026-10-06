@@ -1472,8 +1472,8 @@ mod tests {
         let mut f = Func::new(names.intern("f"));
         let first = f.create_block();
         let second = f.create_block();
-        let add = Opcode::new(names.intern("x64.add_rr_32"));
-        f.build(first, add)
+        let addition = Opcode::new(names.intern("x64.add_rr_32"));
+        f.build(first, addition)
             .operand(Operand::write(Reg::physical(RAX), GPR))
             .operand(Operand::read(Reg::physical(RAX), GPR))
             .operand(Operand::read(Reg::physical(RCX), GPR))

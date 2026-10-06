@@ -625,6 +625,18 @@ pub fn write(
     // before any relocation of the text is added, since the instruction that reads one names it.
     let mut tables = tables(&mut obj, text, &split, &mut named, sections, flavour)?;
 
+    // A place a jump from one part of a split function to the other goes to, which the linker is
+    // told as a section and how far in, the way a table is. See [`Text::places`]. Before the names
+    // nothing here defines are gathered, since a place is not one of those.
+    for place in &text.places {
+        let after = text.funcs.partition_point(|func| func.start <= place.at);
+        let Some(index) = after.checked_sub(1) else {
+            let why = format!("'{}' is in front of every function", place.name);
+            return Err(Error::Refused { why });
+        };
+        tables.insert(place.name.clone(), within(text, &split, index, place.at));
+    }
+
     // The distances between two labels, written into the images just placed. Both labels were
     // added above with the section they are in and where in it, so the distance is the one value
     // less the other, and it is a number only when the section is the same one.
@@ -733,16 +745,6 @@ pub fn write(
         symbols.insert(name.clone(), id);
     }
 
-    // A place a jump from one part of a split function to the other goes to, which the linker is
-    // told as a section and how far in, the way a table is. See [`Text::places`].
-    for place in &text.places {
-        let after = text.funcs.partition_point(|func| func.start <= place.at);
-        let Some(index) = after.checked_sub(1) else {
-            let why = format!("'{}' is in front of every function", place.name);
-            return Err(Error::Refused { why });
-        };
-        tables.insert(place.name.clone(), within(text, &split, index, place.at));
-    }
     for reloc in &text.relocs {
         // Which function's bytes this one is in, which is the question only the split path has to
         // ask: when there is one text section every offset in it is already the offset in it.
@@ -2128,6 +2130,31 @@ mod tests {
             cells(&file, ".rodata"),
             [(0, ".text".to_owned(), 16), (4, ".text".to_owned(), 25)]
         );
+    }
+
+    #[test]
+    fn a_run_is_a_section_of_its_own_and_a_place_in_it_is_that_section_and_how_far_in() {
+        // The second function moved to `.text.unlikely`, and the first jumping two bytes into it.
+        let mut text = two();
+        text.runs.push(crate::Run { name: ".text.unlikely".to_owned(), start: 16, align: 16 });
+        text.places.push(Marker { name: ".Lg.0".to_owned(), at: 18 });
+        text.relocs[0].symbol = ".Lg.0".to_owned();
+        text.relocs[0].kind = Reference::Data;
+        let bytes =
+            write(&text, &Data::default(), &[], &target(), Output::default(), &Info::default())
+                .expect("an object");
+        let file = object::File::parse(&bytes[..]).expect("a readable object");
+        let code = file.section_by_name(".text").expect("the text section");
+        assert_eq!(code.size(), 16, "only the first function and its padding are left behind");
+        let unlikely = file.section_by_name(".text.unlikely").expect("the run");
+        assert_eq!((unlikely.size(), unlikely.align()), (6, 16));
+        assert_eq!(cells(&file, ".text"), [(1, ".text.unlikely".to_owned(), -2)]);
+        assert!(file.symbols().all(|s| s.name() != Ok(".Lg.0")), "a place leaves no name behind");
+        let g = file.symbols().find(|s| s.name() == Ok("g")).expect("the moved function");
+        assert_eq!((g.section_index(), g.address()), (Some(unlikely.index()), 0));
+        // And what the moved function calls is counted from the front of its own section.
+        let (at, _) = unlikely.relocations().next().expect("the call in it");
+        assert_eq!(at, 1);
     }
 
     #[test]
