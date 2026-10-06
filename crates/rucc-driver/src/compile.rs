@@ -5627,6 +5627,19 @@ decl #0 x : int object external static defined
         assert!(!text.contains("\txorl\t"), "{text}");
     }
 
+    /// The guard in front of a loop that adds into a sum starting at zero. The arm that skips the
+    /// loop passes the zero to the return, and that constant is written for the edge after the
+    /// rest of the block, which used to put it between the comparison and the branch. Apart, the
+    /// two cannot be one compare and jump, so the answer was set in a byte and tested again.
+    #[test]
+    fn a_constant_an_arm_passes_does_not_come_between_a_comparison_and_its_branch() {
+        let text = optimized(
+            "long f(const int *s, int n) { long t = 0; for (int i = 0; i < n; i++) t += s[i]; return t; }\n",
+        );
+        assert!(!text.contains("\tset"), "{text}");
+        assert!(!text.contains("\ttestb"), "{text}");
+    }
+
     /// A cast between a pointer and an integer as wide as one, which is every one C writes here.
     #[test]
     fn a_cast_between_a_pointer_and_an_integer_leaves_the_value_where_it_is() {

@@ -7376,8 +7376,9 @@ impl<'a> Lowering<'a> {
     /// instruction, and a block that leaves through a register has the indirect jump as its last,
     /// and anything appended after either is something it has already jumped past, so a constant
     /// materialized here would be a register the block below reads and nothing ever writes. The
-    /// one that was there is put back on the end when that happened, which is the only reordering
-    /// anything in this crate does and is why it is remembered before a single argument is read.
+    /// one that was there is put back on the end when that happened, with the comparison in front
+    /// of it if it branches on that, which is the only reordering anything in this crate does and
+    /// is why both are remembered before a single argument is read.
     fn edges(&mut self, block: Block, out: mir::Block) -> Result<(), Unsupported> {
         let Some(term) = self.source.terminator(block) else { return Ok(()) };
         // No edges, like a return, and no epilogue either, which is the difference. What ends a
@@ -7425,6 +7426,9 @@ impl<'a> Lowering<'a> {
                 Opcode::BrIf | Opcode::IndirectBr | Opcode::Switch
             );
         let branch = if leaves { self.out.terminator(out) } else { None };
+        let condition = branch
+            .filter(|_| self.source[term].opcode == Opcode::BrIf)
+            .and_then(|branch| self.condition_in_front(out, branch));
 
         let calls: Vec<rucc_ir::BlockCall> = self.source.successors(term).collect();
         let mut succs = Vec::with_capacity(calls.len());
@@ -7449,10 +7453,56 @@ impl<'a> Lowering<'a> {
             if self.out.terminator(out) != Some(branch) {
                 self.out.remove_inst(branch);
                 self.out.append_inst(out, branch);
+                // The comparison goes down with it. Layout only turns a comparison and the branch
+                // on its byte into a compare and a conditional jump when the two are next to each
+                // other, and a constant an arm passes would otherwise be written between them, so
+                // `br_if %c, a, b(0)` would set a byte, zero a register and test the byte again.
+                if let Some(compare) = condition.filter(|&compare| self.passes(compare, branch)) {
+                    self.out.remove_inst(compare);
+                    self.out.insert_before(branch, compare);
+                }
             }
         }
         *self.out.succs_mut(out) = succs;
         Ok(())
+    }
+
+    /// The instruction in front of a branch on a byte, when that is the instruction that writes
+    /// the byte, which is the comparison the branch is about before a single argument is read.
+    fn condition_in_front(&self, out: mir::Block, branch: mir::Inst) -> Option<mir::Inst> {
+        let read = self.out[self.out[branch].operands].first().filter(|op| !op.role.is_def())?.reg;
+        let insts: Vec<mir::Inst> = self.out.insts(out).collect();
+        let [.., compare, last] = insts[..] else { return None };
+        let written = self.out[self.out[compare].operands].first()?;
+        (last == branch && written.role.is_def() && written.reg == read).then_some(compare)
+    }
+
+    /// Whether a comparison can be moved down past what an edge wrote after it, to just in front
+    /// of the branch.
+    ///
+    /// What an edge writes is a constant or an address made again for the arm that passes it,
+    /// each into a register of its own, so this is true of everything the lowering writes today.
+    /// It is checked rather than assumed all the same: nothing in between may touch memory, read
+    /// what the comparison writes, or write what it reads or writes, and if anything does the
+    /// comparison stays where it was and the branch tests the byte.
+    fn passes(&self, compare: mir::Inst, branch: mir::Inst) -> bool {
+        let ours = &self.out[self.out[compare].operands];
+        let mut at = self.out.next_inst(compare);
+        while let Some(inst) = at.filter(|&inst| inst != branch) {
+            if self.out[inst].mem.is_some() {
+                return false;
+            }
+            for operand in &self.out[self.out[inst].operands] {
+                let clash = ours.iter().any(|our| {
+                    our.reg == operand.reg && (our.role.is_def() || operand.role.is_def())
+                });
+                if clash {
+                    return false;
+                }
+            }
+            at = self.out.next_inst(inst);
+        }
+        true
     }
 
     /// The `unwound` a branch reads, when the branch is a call's unwind edge.
