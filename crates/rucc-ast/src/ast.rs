@@ -144,6 +144,20 @@ impl Ast {
         Ast::default()
     }
 
+    /// An empty tree with room for this many expressions.
+    ///
+    /// A guess made up front costs nothing where it is too large, since memory nobody writes to
+    /// is never handed over, and saves copying the whole table each time it doubles where the
+    /// unit is a large one.
+    #[must_use]
+    pub fn with_capacity(exprs: usize) -> Ast {
+        Ast {
+            exprs: Vec::with_capacity(exprs),
+            expr_spans: Vec::with_capacity(exprs),
+            ..Ast::default()
+        }
+    }
+
     /// The declarations of the translation unit, in source order.
     #[must_use]
     pub fn top_level(&self) -> &[DeclId] {

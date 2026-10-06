@@ -258,7 +258,14 @@ pub fn compile(opts: &Options, name: &str, fs: &dyn FileSystem) -> Compiled {
             if pp.preinclude(&opts.preincludes, &mut tokens, &mut cx).is_err() {
                 return failure(format!("{name}: the source map has no room for the command line"));
             }
-            tokens.append(&mut pp.run(file, &mut cx));
+            // Moved rather than appended when nothing came before it, which is almost always,
+            // since appending copies the whole of the file's tokens a second time.
+            let body = pp.run(file, &mut cx);
+            if tokens.is_empty() {
+                tokens = body;
+            } else {
+                tokens.extend(body);
+            }
         }
         if opts.save_temps.wanted() {
             temps.preprocessed = Some(rucc_pp::print(
@@ -290,6 +297,11 @@ pub fn compile(opts: &Options, name: &str, fs: &dyn FileSystem) -> Compiled {
     // Taken here rather than at the end, because the preprocessor is done with and everything
     // after this is about the tree it produced.
     let deps = pp.dependencies().to_vec();
+    // Each stage's input is let go of as soon as the next stage has what it needs from it, so
+    // that what the later stages ask for is memory the process already has. Otherwise a large
+    // unit holds every form of itself at once until the end, and touching that much fresh
+    // memory is a large part of what a file of big initializers costs.
+    drop(pp);
     clock.lap("preprocess");
 
     // Phase 7, which is where a spelling becomes a keyword and a preprocessing number becomes
@@ -303,6 +315,7 @@ pub fn compile(opts: &Options, name: &str, fs: &dyn FileSystem) -> Compiled {
         pedantic: opts.pedantic,
     };
     let (tokens, complaints) = convert(&expanded, &cx);
+    drop(expanded);
     diagnostics.extend(complaints);
     clock.lap("convert");
 
@@ -321,6 +334,7 @@ pub fn compile(opts: &Options, name: &str, fs: &dyn FileSystem) -> Compiled {
         },
     );
     clock.lap("parse");
+    drop(tokens);
     let parse_failed = parsed.diagnostics.iter().any(|d| d.severity.is_fatal());
     diagnostics.extend(parsed.diagnostics);
     let comments = parsed.comments;
@@ -371,6 +385,7 @@ pub fn compile(opts: &Options, name: &str, fs: &dyn FileSystem) -> Compiled {
             checker.pragma_extname(pragma.old, pragma.new, pragma.span);
         }
         let checked = checker.finish();
+        drop(parsed.ast);
         clock.lap("check");
         if !checked.failed() {
             match opts.emit {

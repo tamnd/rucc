@@ -471,6 +471,14 @@ impl<'a> Lexer<'a> {
 
     fn identifier(&mut self) -> PpTokenKind {
         while !self.cursor.at_end() {
+            // Once the spelling is being copied byte by byte every byte has to go through
+            // `eat`, and until then a run of plain ones is nothing to record.
+            if !self.unclean {
+                self.cursor.skip_word(false);
+                if self.cursor.at_end() {
+                    break;
+                }
+            }
             let b = self.cursor.first();
             if self.continues(b) {
                 self.eat();
@@ -493,6 +501,12 @@ impl<'a> Lexer<'a> {
         // doing it here would break `##` pasting that builds a number out of pieces.
         self.eat();
         while !self.cursor.at_end() {
+            if !self.unclean {
+                self.cursor.skip_word(true);
+                if self.cursor.at_end() {
+                    break;
+                }
+            }
             let b = self.cursor.first();
             let n1 = self.cursor.nth(1);
             if matches!(b, b'e' | b'E' | b'p' | b'P') && matches!(n1, b'+' | b'-') {

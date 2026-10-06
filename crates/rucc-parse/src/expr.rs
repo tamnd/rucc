@@ -412,7 +412,14 @@ impl Parser<'_> {
     fn constant(&mut self, token: Token) -> Expr {
         let index = token.value as usize;
         match token.kind {
-            TokenKind::Int => Expr::Int(self.ast.add_int(self.tokens.ints[index])),
+            TokenKind::Int => Expr::Int(match self.ints[index] {
+                Some(id) => id,
+                None => {
+                    let id = self.ast.add_int(self.tokens.ints[index]);
+                    self.ints[index] = Some(id);
+                    id
+                }
+            }),
             TokenKind::Float => Expr::Float(self.ast.add_float(self.tokens.floats[index])),
             TokenKind::Char => Expr::Char(self.ast.add_char(self.tokens.chars[index])),
             TokenKind::Str => {
