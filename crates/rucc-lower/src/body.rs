@@ -28,12 +28,12 @@ use std::iter;
 use rucc_ast::{AsmQuals, BinaryOp, UnaryOp};
 use rucc_base::float::{Float as Real, Format};
 use rucc_base::hash::{Map, Set};
-use rucc_base::{Idx, Symbol, dfp};
-use rucc_diag::Span;
+use rucc_base::{Idx, Interner, Symbol, dfp};
+use rucc_diag::{Diagnostic, Span};
 use rucc_ir::{
     Abi, AsmInfo, AttrSet, Block, BlockCall, Builder, CallInfo, Def, Extra, Flags, FloatPred, Func,
     Inst, InstData, IntPred, MemInfo, MemOrder, Opcode, Param, PrefetchHint, Restrict, RmwOp,
-    Signature, Type, VaInfo, Value,
+    Signature, Type, VaInfo, Value, twice_by_name,
 };
 use rucc_sema::{
     AtomicOp, BitCount, Classify, Const, Conversion, CpuTest, DeclFlags, DeclId, DeclKind, Eval,
@@ -65,6 +65,9 @@ pub(crate) fn lower(unit: &mut Unit<'_>, decl: DeclId, func: &mut Func, plan: &P
     let Some(root) = tast[decl].body else { return };
     let params = tast[decl].params;
     let span = tast.decl_span(decl);
+    if tast[decl].flags.contains(DeclFlags::ALWAYS_INLINE) {
+        never_inlined(unit, decl, root);
+    }
     if tast[params].len() != plan.args.len() {
         // A definition written without a prototype, `int f(a) int a; { }`, whose type says
         // nothing about what it takes. The entry block's parameters have to be the signature's
@@ -10048,6 +10051,18 @@ struct Scan<'a> {
     /// Whether anything in the body is a `__builtin_setjmp`, which decides where every local in
     /// the function lives. See [`Body::declare`].
     saves: bool,
+    /// The first thing in the body gcc says a function can never be inlined for, and where it is.
+    /// See [`never_inlined`].
+    first: Option<(Never, Span)>,
+    /// Where the body first saves a place for a `__builtin_longjmp` to come back to.
+    receives: Option<Span>,
+    /// Where an initializer of a `static` the body declares first takes the address of a label.
+    static_label: Option<Span>,
+    /// Whether the walk is in the initializer of a `static` the body declares.
+    in_static: bool,
+    /// The names, when the scan is asked whether a call goes to `setjmp` by name. Only
+    /// [`never_inlined`] asks.
+    names: Option<&'a Interner>,
     /// The block each block is inside, by number. See [`Nests::parents`].
     blocks: Vec<u32>,
     /// The block the scan is in.
@@ -10073,6 +10088,11 @@ impl<'a> Scan<'a> {
             taken: Vec::new(),
             grows: false,
             saves: false,
+            first: None,
+            receives: None,
+            static_label: None,
+            in_static: false,
+            names: None,
             blocks: vec![0],
             block: 0,
             within: Map::default(),
@@ -10095,7 +10115,10 @@ impl<'a> Scan<'a> {
         match self.tast[id] {
             Stmt::Error | Stmt::Empty | Stmt::Break | Stmt::Continue | Stmt::Goto(_) => {}
             Stmt::Expr(expr) => self.expr(expr),
-            Stmt::IndirectGoto(expr) => self.expr(expr),
+            Stmt::IndirectGoto(expr) => {
+                self.forbid(Never::ComputedGoto, self.tast.stmt_span(id));
+                self.expr(expr);
+            }
             Stmt::Asm(asm) => self.asm(asm),
             Stmt::Block(list) => self.nested(|scan| {
                 for index in 0..scan.tast[list].len() {
@@ -10170,10 +10193,13 @@ impl<'a> Scan<'a> {
             self.escaped.insert(id);
         }
         if let Some(init) = self.tast[id].init {
+            let outer = self.in_static;
+            self.in_static = self.tast[id].duration != StorageDuration::Automatic;
             for index in 0..self.tast[init].len() {
                 let entry = self.tast[init][index];
                 self.expr(entry.value);
             }
+            self.in_static = outer;
         }
     }
 
@@ -10194,8 +10220,8 @@ impl<'a> Scan<'a> {
             | ExprKind::SpEntry
             | ExprKind::TimeStamp { aux: None }
             | ExprKind::Eflags { value: None }
-            | ExprKind::CpuModel { .. }
-            | ExprKind::ApplyArgs => {}
+            | ExprKind::CpuModel { .. } => {}
+            ExprKind::ApplyArgs => self.forbid(Never::ApplyArgs, self.tast.expr_span(id)),
             ExprKind::Apply { function, args, .. } => {
                 self.expr(function);
                 self.expr(args);
@@ -10209,6 +10235,9 @@ impl<'a> Scan<'a> {
             ExprKind::LabelAddr(label) => {
                 if !self.taken.contains(&label) {
                     self.taken.push(label);
+                }
+                if self.in_static {
+                    self.static_label.get_or_insert(self.tast.expr_span(id));
                 }
             }
             ExprKind::Member { base, .. }
@@ -10224,6 +10253,13 @@ impl<'a> Scan<'a> {
             // function, and the walk reaches a declaration long before it reaches this.
             ExprKind::Jump { ask, buffer } => {
                 self.saves |= ask == JumpAsk::Save;
+                let at = self.tast.expr_span(id);
+                match ask {
+                    JumpAsk::Save => {
+                        self.receives.get_or_insert(at);
+                    }
+                    JumpAsk::Restore => self.forbid(Never::Longjmp, at),
+                }
                 self.expr(buffer);
             }
             ExprKind::Subscript { base, index } => {
@@ -10244,6 +10280,9 @@ impl<'a> Scan<'a> {
                     {
                         if let ExprKind::Decl(decl) = self.tast[operand].kind {
                             self.refs.insert(decl);
+                            if self.twice(decl) {
+                                self.forbid(Never::Setjmp, self.tast.expr_span(id));
+                            }
                         }
                     }
                     _ => self.expr(named),
@@ -10290,6 +10329,9 @@ impl<'a> Scan<'a> {
                 _ => self.stmt(body),
             },
             ExprKind::VaArg { list } | ExprKind::VaStart { list } | ExprKind::VaEnd { list } => {
+                if matches!(self.tast[id].kind, ExprKind::VaStart { .. }) {
+                    self.forbid(Never::VaStart, self.tast.expr_span(id));
+                }
                 self.escape(list);
                 self.expr(list);
             }
@@ -10352,6 +10394,35 @@ impl<'a> Scan<'a> {
         }
     }
 
+    /// Remembers the first thing in the body gcc refuses to inline a function for, in the order
+    /// the body is written, which is the one gcc names.
+    fn forbid(&mut self, why: Never, at: Span) {
+        self.first.get_or_insert((why, at));
+    }
+
+    /// Whether a call to `decl` comes back twice, which is what its declaration says or, when the
+    /// scan was given the names, what its name says. See [`twice_by_name`].
+    fn twice(&self, decl: DeclId) -> bool {
+        let node = &self.tast[decl];
+        node.flags.contains(DeclFlags::RETURNS_TWICE)
+            || node
+                .name
+                .zip(self.names)
+                .is_some_and(|(name, names)| twice_by_name(names.resolve(name)))
+    }
+
+    /// Why gcc says the function can never be inlined, if it says so, and where in the body.
+    ///
+    /// gcc asks two questions about the function before it looks at a statement in it, whether a
+    /// `__builtin_longjmp` comes back to it and whether a `static` in it holds a label's address,
+    /// so either of those is the answer whatever the walk met first.
+    fn never(&self) -> Option<(Never, Span)> {
+        self.receives
+            .map(|at| (Never::Receives, at))
+            .or_else(|| self.static_label.map(|at| (Never::StaticLabel, at)))
+            .or(self.first)
+    }
+
     /// Marks the object an address was taken of, if it was taken of one.
     fn escape(&mut self, id: ExprId) {
         match self.tast[id].kind {
@@ -10366,6 +10437,81 @@ impl<'a> Scan<'a> {
             // is an array of one arrives at the operators that write it.
             ExprKind::Convert { kind: Conversion::ArrayDecay, operand } => self.escape(operand),
             _ => {}
+        }
+    }
+}
+
+/// Refuses an `always_inline` function whose body gcc says can never be copied into a caller,
+/// with gcc's error.
+///
+/// gcc asks this of every `always_inline` function it compiles, whether or not anything calls
+/// it, and stops, since the attribute is a promise that no call to the function stays a call and
+/// a program may depend on that. A function the file does not reach is not lowered and is not
+/// asked, which is gcc's answer too: a `static` one nothing names, or an inline definition, is
+/// left alone. The reasons are gcc's own, in gcc's words, and the error is at the name in the
+/// definition, where gcc puts it, with a note at what in the body is the reason.
+///
+/// A call inside a cycle is not one of them. gcc leaves it a call at `-O2`, `-O3` and `-Os` and
+/// refuses it at `-O0`, `-O1` and `-Og`, and which of those it does comes from the order its passes
+/// run in rather than from anything about the program, so it is left a call here at every level.
+fn never_inlined(unit: &mut Unit<'_>, decl: DeclId, root: StmtId) {
+    let tast = unit.tast;
+    let mut scan = Scan::new(tast);
+    scan.names = Some(&*unit.names);
+    scan.stmt(root);
+    let Some((why, at)) = scan.never() else { return };
+    let name = tast[decl].name.map_or("", |name| unit.names.resolve(name));
+    let error = Diagnostic::error(why.error(name), tast.definition_span(decl))
+        .with_code("E0841")
+        .note(why.note(), at);
+    unit.diagnostics.push(error);
+}
+
+/// What gcc says makes a function impossible to inline, which [`never_inlined`] gives an
+/// `always_inline` function an error for.
+#[derive(Debug, Clone, Copy)]
+enum Never {
+    /// A `__builtin_setjmp`, which a `__builtin_longjmp` somewhere comes back to.
+    Receives,
+    /// A `static` whose initializer holds the address of one of the function's labels.
+    StaticLabel,
+    /// A call to `setjmp`, or to anything else that comes back twice.
+    Setjmp,
+    /// A `__builtin_longjmp`.
+    Longjmp,
+    /// A `va_start`.
+    VaStart,
+    /// A `__builtin_apply_args`.
+    ApplyArgs,
+    /// A `goto` through the address of a label.
+    ComputedGoto,
+}
+
+impl Never {
+    /// gcc's error, for a function called `name`.
+    fn error(self, name: &str) -> String {
+        let (done, why) = match self {
+            Self::Receives => ("copied", "receives a non-local goto"),
+            Self::StaticLabel => ("copied", "saves address of local label in a static variable"),
+            Self::Setjmp => ("inlined", "uses setjmp"),
+            Self::Longjmp => ("inlined", "uses setjmp-longjmp exception handling"),
+            Self::VaStart => ("inlined", "uses variable argument lists"),
+            Self::ApplyArgs => ("inlined", "uses '__builtin_return' or '__builtin_apply_args'"),
+            Self::ComputedGoto => ("inlined", "contains a computed goto"),
+        };
+        format!("function '{name}' can never be {done} because it {why}")
+    }
+
+    /// The note at what in the body is the reason.
+    fn note(self) -> &'static str {
+        match self {
+            Self::Receives => "a '__builtin_longjmp' comes back to here",
+            Self::StaticLabel => "the address of a label is kept in a static here",
+            Self::Setjmp => "this call comes back twice",
+            Self::Longjmp => "the '__builtin_longjmp' is here",
+            Self::VaStart => "the variable argument list is started here",
+            Self::ApplyArgs => "the arguments are saved here",
+            Self::ComputedGoto => "the computed goto is here",
         }
     }
 }
