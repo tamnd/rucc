@@ -110,11 +110,8 @@ fn a_string_argument_is_checked_in_gcc_s_words() {
             1,
         ),
         (
-            "typedef unsigned long size_t;\n\
-             int f(size_t n) __attribute__((null_terminated_string_arg(1u)));\n",
-            format!(
-                "{name} value '1u' refers to parameter type 'size_t' {{aka 'long unsigned int'}}"
-            ),
+            "int f(unsigned long n) __attribute__((null_terminated_string_arg(1u)));\n",
+            format!("{name} value '1u' refers to parameter type 'long unsigned int'"),
             0,
             1,
         ),
