@@ -869,6 +869,19 @@ impl Func {
         }
     }
 
+    /// Replaces the values in every run there is, in one pass over where runs are kept rather than
+    /// a walk of the blocks.
+    ///
+    /// That is every run an instruction or a branch in the body reads, and also the runs of
+    /// instructions already taken out of their blocks, which nothing reads. So it is
+    /// [`Func::rewrite`] over the whole body for a caller that is not going to put one of those
+    /// back.
+    pub fn rewrite_all(&mut self, mut with: impl FnMut(Value) -> Value) {
+        for value in &mut self.value_pool {
+            *value = with(*value);
+        }
+    }
+
     /// Records a run of branch targets.
     pub fn push_block_calls(&mut self, calls: &[BlockCall]) -> BlockCallList {
         let start = Idx::from_usize(self.block_calls.len());

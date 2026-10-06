@@ -69,6 +69,24 @@ pub fn substitute(func: &mut Func, forward: &Map<Value, Value>) {
     rename(func, forward);
 }
 
+/// [`substitute`] for a caller that will not put back an instruction it took out of a block.
+///
+/// One pass over the function's runs of operands with nothing allocated, where [`substitute`]
+/// walks every block and collects each one first. The inliner points the results of each call it
+/// replaces at the block after it, and a caller that takes hundreds of calls walked itself once
+/// for every one of them. The runs of instructions already out of their blocks are rewritten too,
+/// which nothing sees.
+pub fn substitute_all(func: &mut Func, forward: &Map<Value, Value>) {
+    // The results of one instruction are numbered one after another, so the keys are a short range
+    // and almost every operand is outside it, which is a compare rather than a lookup.
+    let (Some(&low), Some(&high)) = (forward.keys().min(), forward.keys().max()) else {
+        return;
+    };
+    let within = low..=high;
+    func.rewrite_all(|value| if within.contains(&value) { chase(forward, value) } else { value });
+    rename(func, forward);
+}
+
 /// Moves the names of the values in the map to the values they point at.
 ///
 /// The second half of [`substitute`], for a pass that points the readers at the new values itself
