@@ -162,6 +162,9 @@ pub struct Predef {
     /// On AArch64 it decides `__ARM_FP`, `__ARM_NEON` and the fused multiply add macros, which gcc
     /// leaves out under that flag. On x86-64 the extensions say the same thing, through `__SSE__`.
     pub vector: bool,
+    /// Whether `-mstrict-align` was given, which takes `__ARM_FEATURE_UNALIGNED` away on AArch64
+    /// as it does in gcc.
+    pub strict_align: bool,
     /// What `-mbranch-protection=` asked for, which decides `__ARM_FEATURE_BTI_DEFAULT` and
     /// `__ARM_FEATURE_PAC_DEFAULT` on AArch64. The kernel's assembly reads both to write the same
     /// note the compiler writes for C.
@@ -199,6 +202,7 @@ impl Predef {
             isa: Isa::baseline(),
             wasm: wasm::Cpu::default().features(),
             vector: true,
+            strict_align: false,
             branch_protection: BranchProtection::default(),
             assembler: false,
         }
@@ -235,6 +239,7 @@ impl Predef {
             isa: opts.isa,
             wasm: opts.wasm,
             vector: opts.vector,
+            strict_align: opts.strict_align,
             branch_protection: opts.branch_protection,
             assembler: false,
         }
@@ -611,7 +616,9 @@ fn platform(d: &mut Defs, target: &TargetInfo, opts: &Predef) {
                 d.set("__ARM_FP", "0xe");
                 d.set("__ARM_NEON", "1");
             }
-            d.set("__ARM_FEATURE_UNALIGNED", "1");
+            if !opts.strict_align {
+                d.set("__ARM_FEATURE_UNALIGNED", "1");
+            }
             d.set("__ARM_PCS_AAPCS64", "1");
             // The rest of what gcc says for a plain Armv8-A. Every one is an instruction the
             // base architecture has, so none of them depends on a `-march` this compiler does

@@ -572,7 +572,8 @@ pub struct CallRegs {
     /// an aligned one, so a copy of bytes may move them a word at a time whatever the alignment.
     ///
     /// True on x86 and on AArch64, where it holds for normal memory, which is all a copy of bytes
-    /// ever touches. `-mstrict-align`, which would make it false there, is refused.
+    /// ever touches. `-mstrict-align` makes it false there, and then a load or store less aligned
+    /// than its width is split too. See [`CallRegs::strictly_aligned`].
     pub unaligned: bool,
     /// The widths in bits a byte reversal is one instruction at, which the selector has a rule for.
     ///
@@ -815,6 +816,18 @@ impl CallRegs {
             return self;
         }
         made(CallRegs { sse_args: &[], ..*self })
+    }
+
+    /// The same convention on a machine where no word may be moved at an address less aligned
+    /// than its width, which is what `-mstrict-align` asks for on AArch64.
+    ///
+    /// Kept the way [`CallRegs::aligned_to`] keeps its answers, see `made`.
+    #[must_use]
+    pub fn strictly_aligned(&'static self) -> &'static CallRegs {
+        if !self.unaligned {
+            return self;
+        }
+        made(CallRegs { unaligned: false, ..*self })
     }
 
     /// The same convention with the stack protector's word somewhere else, which is what the

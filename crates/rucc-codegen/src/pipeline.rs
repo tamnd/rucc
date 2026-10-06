@@ -313,14 +313,18 @@ impl Machine {
     ///
     /// The boundary the stack is kept on is the command line's rather than the convention's, so the
     /// answer keeps the boundary this machine has, it keeps the vector registers out of the
-    /// arguments if this machine does, and its canary is where this machine's is. See
-    /// [`rucc_target::CallRegs::aligned_to`], [`rucc_target::CallRegs::without_vectors`] and
-    /// [`rucc_target::CallRegs::guarded_by`].
+    /// arguments if this machine does, it keeps every access aligned if this machine does, and
+    /// its canary is where this machine's is. See [`rucc_target::CallRegs::aligned_to`],
+    /// [`rucc_target::CallRegs::without_vectors`], [`rucc_target::CallRegs::strictly_aligned`]
+    /// and [`rucc_target::CallRegs::guarded_by`].
     #[must_use]
     pub fn under(&self, convention: rucc_target::Convention) -> Option<Self> {
         let mut conv = self.conv.under(convention)?.aligned_to(self.conv.stack_align);
         if self.conv.sse_args.is_empty() {
             conv = conv.without_vectors();
+        }
+        if !self.conv.unaligned {
+            conv = conv.strictly_aligned();
         }
         if let Some(guard) = self.conv.guard {
             conv = conv.guarded_by(guard);

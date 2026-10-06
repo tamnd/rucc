@@ -387,6 +387,7 @@ Taken because what they ask for is what happens:
 | `-mno-apx-features=*` (x86-64) | Nothing here uses APX. |
 | `-mlittle-endian` (AArch64) | Every AArch64 target here is little endian. |
 | `-mno-strict-align` (AArch64) | An access may be unaligned, which is what happens. |
+| `-mstrict-align` (AArch64) | No load or store is at an address less aligned than its width. A packed member is read and written a piece at a time, each piece as wide as the member is aligned, a copy moves no wider than its two sides are aligned, and `__ARM_FEATURE_UNALIGNED` is not defined, as in gcc. The last of the two spellings counts. |
 | `-mstack-protector-guard=global`, `-mstack-protector-guard=sysreg`, `-mstack-protector-guard-reg=sp_el0`, `-mstack-protector-guard-offset=` (AArch64) | Where the canary is read from. `global` is the default and reads `__stack_chk_guard` through the global offset table, or from its own page under `-fno-pic`, as gcc does. `sysreg` is the word `-mstack-protector-guard-offset=` bytes past the address in `sp_el0`, which is where an arm64 kernel keeps the running task, and it needs both of the other flags, as in gcc. The offset is one a single `ldr` carries, a multiple of 8 up to 32760. |
 
 Refused, with no issue, because nothing is planned for them:
@@ -397,6 +398,5 @@ Refused, with no issue, because nothing is planned for them:
 | `-fplugin=*`, `-fplugin-arg-*` | A gcc plugin is built against gcc's own internals. |
 | `-mharden-sls=*` (AArch64) | Nothing is put after a return to stop speculation past it. |
 | `-mbig-endian` (AArch64) | There is no big endian AArch64 target. |
-| `-mstrict-align` (AArch64) | A load or store may be unaligned, a packed member say, and nothing splits one. |
 
 Some of what the kernel passes was answered before the table and is not in it: `-fno-builtin-wcslen` is the `-fno-builtin-<name>` of document 13, `-falign-jumps=1` and `-falign-loops=1` are taken with the rest of the alignment family in section 4.3, `-fno-lto` is the negative of a flag this compiler reads, and `-fsanitize=shadow-call-stack` is refused as every sanitizer is in section 4.7. `-fms-anonymous-structs`, `-fdebug-info-for-profiling`, `-fno-integrated-as` and `--param=allow-store-data-races=0` are unknown options, and gcc 16 refuses each of them too. #2285, inlining a small constant `memcpy` and `memset`, has no flag and so has no row.
