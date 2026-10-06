@@ -129,3 +129,34 @@ pub(crate) fn importer() -> Vec<u8> {
     custom(&mut out, "reloc.CODE", &[3, 3, 0, 4, 1, 0, 10, 2, 0, 16, 3]);
     out
 }
+
+/// An object that defines the function `name` of the type `() -> ()`, which calls the undefined
+/// function `callee` of the same type, when there is one, and else does nothing.
+pub(crate) fn calls(name_: &str, callee: Option<&str>) -> Vec<u8> {
+    let mut out = b"\0asm\x01\0\0\0".to_vec();
+    section(&mut out, 1, &[1, 0x60, 0, 0]);
+    let mut symbols = Vec::new();
+    let mut body = vec![0];
+    if let Some(callee) = callee {
+        let mut imports = vec![1];
+        name(&mut imports, "env");
+        name(&mut imports, callee);
+        imports.extend([0, 0]);
+        section(&mut out, 2, &imports);
+        symbols.extend([2, 0, 0x10, 0, 0, 0, 1]);
+        body.extend([0x10, 0x80, 0x80, 0x80, 0x80, 0]);
+    } else {
+        symbols.extend([1, 0, 0, 0]);
+    }
+    name(&mut symbols, name_);
+    body.push(0x0b);
+    section(&mut out, 3, &[1, 0]);
+    let mut code = vec![1, body.len() as u8];
+    code.extend(body);
+    section(&mut out, 10, &code);
+    linking(&mut out, &symbols, &[]);
+    if callee.is_some() {
+        custom(&mut out, "reloc.CODE", &[3, 1, 0, 4, 0]);
+    }
+    out
+}

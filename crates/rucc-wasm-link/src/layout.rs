@@ -9,11 +9,8 @@
 //! a string in it, is not written again, as LLD does. `__heap_base` is the end of the data aligned to 16, and the memory starts with
 //! the pages that cover it.
 //!
-//! The segments that are not strings are in load order. This linker loads the archive members in
-//! the order it first needs them, from a queue, and LLD loads each one when it needs it, depth
-//! first. So the order of the members, and the padding between their segments, can be different
-//! from the order and the padding in the module that `wasm-ld` makes. For a small program that
-//! calls `printf` the difference is 4 bytes, and the program does the same thing.
+//! The segments that are not strings are in the order of the objects, which is LLD's order: an
+//! object goes after the archive members that it loads (see `resolve`).
 //!
 //! The table starts at slot 1, so that a null function pointer traps when it is called. Slots go
 //! to functions in the order their first table relocation is seen.
