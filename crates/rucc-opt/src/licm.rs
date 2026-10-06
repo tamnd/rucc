@@ -89,7 +89,8 @@
 //! is one more value live across it, so the room left is counted down as the pass spends it.
 //!
 //! A constant and the address of a symbol are free, and a free value moves only as a passenger of
-//! something that is not. That is arranged in `trim`, which is also where the reason it cannot
+//! something that is not. So is a pointer a small constant past another that only loads and stores
+//! in its own block read, because each of those takes the constant into its address. That is arranged in `trim`, which is also where the reason it cannot
 //! simply be refused up front is written down.
 //!
 //! # What this does not do yet
@@ -111,7 +112,7 @@
 
 use rucc_base::hash::Set;
 use rucc_cost::heuristics;
-use rucc_ir::{Block, Flags, Func, Inst, Opcode, Value};
+use rucc_ir::{Block, Def, Flags, Func, Inst, Opcode, Value};
 
 use crate::alias::{Access, Alias};
 use crate::cfg::Cfg;
@@ -123,7 +124,7 @@ use crate::modref::{Summaries, Summary};
 use crate::outside::Outside;
 use crate::pressure::{Class, Pressure, class_of};
 use crate::range::query::Ranges;
-use crate::{Analyses, Analysis, Fuel, Pass, Preserved, Stats, speculate};
+use crate::{Analyses, Analysis, Fuel, Pass, Preserved, Stats, discharge, speculate};
 
 const HOISTED: &str = "computation moved in front of the loop, nothing in the loop changes it";
 const SPECULATIVE: &str =
@@ -189,6 +190,7 @@ impl Pass for Licm {
         let dom = an.dominators(func);
         let post = an.post_dominators(func);
         let invented: Set<Block> = post.fake_exits().iter().copied().collect();
+        let folded = displacements(func);
 
         // Innermost first, so a value hoisted out of an inner loop lands in the outer loop's body
         // and is looked at again on the outer loop's turn. That is what carries a computation all
@@ -218,6 +220,7 @@ impl Pass for Licm {
                 post,
                 loops,
                 invented: &invented,
+                folded: &folded,
             };
             if job.run(func, &pressure, id, fuel, &mut stats) {
                 // The counts inside the loop just changed and the next loop out is about to be
@@ -252,6 +255,8 @@ struct Job<'a> {
     post: &'a PostDominators,
     loops: &'a Loops,
     invented: &'a Set<Block>,
+    /// What [`displacements`] found, which costs nothing where it is.
+    folded: &'a Set<Inst>,
 }
 
 /// Whether anything this loop writes can be what this instruction reads.
@@ -684,7 +689,7 @@ impl Job<'_> {
                         }
                     }
                 }
-                let cost = cost(func, inst);
+                let cost = if self.folded.contains(&inst) { 0 } else { cost(func, inst) };
                 let why = speculate::why_not(func, self.modref, inst, &mut ranges, preheader);
                 match movement(why) {
                     Move::Anywhere => (),
@@ -708,7 +713,7 @@ impl Job<'_> {
                     }
                     if !fuel.take() {
                         stats.missed(NO_FUEL);
-                        return trim(func, plan, &passengers, stats);
+                        return trim(func, plan, &passengers, self.folded, stats);
                     }
                     room[bank] = room[bank].saturating_sub(1);
                 }
@@ -716,7 +721,7 @@ impl Job<'_> {
                 plan.push(inst);
             }
         }
-        trim(func, plan, &passengers, stats)
+        trim(func, plan, &passengers, self.folded, stats)
     }
 
     /// Whether nothing in the loop changes what this instruction reads.
@@ -732,9 +737,9 @@ impl Job<'_> {
 
 /// Takes the instructions nothing else in the plan needed back out of it.
 ///
-/// Two kinds ride along. A constant or the address of a symbol costs nothing to work out again, so
-/// moving one out of a loop on its own buys nothing and costs a register held for the length of the
-/// loop. It still has to be in the plan while the plan is being made, because a load of a global is
+/// Two kinds ride along. A constant or the address of a symbol costs nothing to work out again, and
+/// neither does an address the loads and stores reading it fold, so moving one out of a loop on its
+/// own buys nothing and costs a register held for the length of the loop. It still has to be in the plan while the plan is being made, because a load of a global is
 /// only invariant once the address it reads is going with it, and refusing the address up front
 /// would refuse the load as well. The other kind is `passengers`, the ones a full loop would have
 /// turned down on their own: a cheap computation under pressure is worth moving when something
@@ -748,12 +753,18 @@ impl Job<'_> {
 /// The pressure miss is counted here rather than where it is decided, because an instruction that
 /// went on to carry an expensive one out of the loop was not left in the loop and reporting it as
 /// missed would say the opposite of what happened.
-fn trim(func: &Func, plan: Vec<Inst>, passengers: &Set<Inst>, stats: &mut Stats) -> Vec<Inst> {
+fn trim(
+    func: &Func,
+    plan: Vec<Inst>,
+    passengers: &Set<Inst>,
+    folded: &Set<Inst>,
+    stats: &mut Stats,
+) -> Vec<Inst> {
     let mut wanted: Set<Value> = Set::default();
     let mut keep = Vec::with_capacity(plan.len());
     for inst in plan.into_iter().rev() {
         if !func[inst].results().any(|value| wanted.contains(&value)) {
-            if cost(func, inst) == 0 {
+            if cost(func, inst) == 0 || folded.contains(&inst) {
                 continue;
             }
             if passengers.contains(&inst) {
@@ -850,6 +861,63 @@ fn bounds_a_lifetime(func: &Func, inst: Inst) -> bool {
         | Opcode::MetaTransfer => true,
         _ => false,
     }
+}
+
+/// The `ptr_add`s of a small constant that nothing reads but loads and stores in the same block,
+/// each of them at that address.
+///
+/// The backend writes the constant into the displacement of each of those loads and stores, so
+/// where it stands the `ptr_add` is no instruction at all. Moved out of a loop it is a register
+/// held for the whole of it, and in a loop that calls something it is a register the callee has
+/// to leave alone, which is one more push and pop each time the function runs. PostgreSQL's
+/// `list_free_deep` held the address of a list's length and the address of its elements that
+/// way, around a loop that calls `pfree`, and its frame was 48 bytes against gcc's 8.
+///
+/// Small is what every target puts in a load without help, which on aarch64 is the unscaled
+/// range below and the scaled one above. Past it the add stays in the loop as an add, which is
+/// one cycle rather than a register, so a guess at the edge costs little either way.
+pub(crate) fn displacements(func: &Func) -> Set<Inst> {
+    let mut found: Set<Inst> = Set::default();
+    for block in func.blocks() {
+        for inst in func.insts(block) {
+            let offset = func[func[inst].args].get(1).and_then(|&k| discharge::constant(func, k));
+            if func[inst].opcode == Opcode::PtrAdd
+                && offset.is_some_and(|k| (-256..4096).contains(&k))
+            {
+                found.insert(inst);
+            }
+        }
+    }
+    if found.is_empty() {
+        return found;
+    }
+    let made = |value: Value| match func[value].def {
+        Def::Result { inst, .. } => Some(inst),
+        Def::Param { .. } => None,
+    };
+    for block in func.blocks() {
+        for inst in func.insts(block) {
+            let at = match func[inst].opcode {
+                Opcode::Load => Some(0),
+                Opcode::Store => Some(1),
+                _ => None,
+            };
+            for (position, &value) in func[func[inst].args].iter().enumerate() {
+                let Some(def) = made(value) else { continue };
+                if at != Some(position) || func.block_of(def) != Some(block) {
+                    found.remove(&def);
+                }
+            }
+            for call in func.successors(inst) {
+                for &value in &func[call.args] {
+                    if let Some(def) = made(value) {
+                        found.remove(&def);
+                    }
+                }
+            }
+        }
+    }
+    found
 }
 
 /// Section 27.2's table, which GCC's `stmt_cost` opens by admitting is ad hoc.
@@ -1435,6 +1503,60 @@ mod tests {
         let stats = hoist(&mut it.func, &mut Fuel::unlimited());
         assert_eq!(stats.count(Kind::Missed, PRESSURE), 0);
         assert_eq!(lives_in(&it.func, sum), it.entry);
+        sound(&it.func, &mut it.names);
+    }
+
+    #[test]
+    fn an_address_the_load_beside_it_folds_stays_with_the_load() {
+        // `list->length` read where the loop may not get to it, which keeps the load in. The
+        // address four bytes into the list is no instruction beside the load, since the four goes
+        // in the load's displacement, and out in front of the loop on its own it would be one
+        // more register held across the whole of it.
+        let mut it = counted(0);
+        let mut build = Builder::new(&mut it.func, it.body);
+        let four = build.iconst(Type::int(64), 4);
+        let at = build.binary(Opcode::PtrAdd, it.pointer, four, Flags::NONE);
+        let read = build.load(Type::int(32), at, record(4), Flags::NONE);
+        tucked(&mut it.func, it.body);
+
+        let stats = hoist(&mut it.func, &mut Fuel::unlimited());
+        assert_eq!(stats.count(Kind::Optimized, HOISTED), 0);
+        assert_eq!(lives_in(&it.func, read), it.body);
+        assert_eq!(lives_in(&it.func, at), it.body, "it stays with what folds it");
+        sound(&it.func, &mut it.names);
+    }
+
+    #[test]
+    fn an_address_the_load_beside_it_folds_goes_with_the_load() {
+        // The same load where every entry reaches it, so it comes out, and the address is what it
+        // reads and has to come out in front of it.
+        let mut it = counted(0);
+        let mut build = Builder::new(&mut it.func, it.head);
+        let four = build.iconst(Type::int(64), 4);
+        let at = build.binary(Opcode::PtrAdd, it.pointer, four, Flags::NONE);
+        let read = build.load(Type::int(32), at, record(4), Flags::NONE);
+        tucked(&mut it.func, it.head);
+
+        hoist(&mut it.func, &mut Fuel::unlimited());
+        assert_eq!(lives_in(&it.func, read), it.entry);
+        assert_eq!(lives_in(&it.func, at), it.entry);
+        assert!(position(&it.func, at) < position(&it.func, read));
+        sound(&it.func, &mut it.names);
+    }
+
+    #[test]
+    fn an_address_kept_as_a_value_moves_like_any_add() {
+        // Stored rather than read through, so nothing folds it and it is an add the loop does
+        // not change.
+        let mut it = counted(0);
+        let mut build = Builder::new(&mut it.func, it.body);
+        let four = build.iconst(Type::int(64), 4);
+        let at = build.binary(Opcode::PtrAdd, it.pointer, four, Flags::NONE);
+        build.store(at, it.pointer, record(8), Flags::NONE);
+        tucked(&mut it.func, it.body);
+
+        hoist(&mut it.func, &mut Fuel::unlimited());
+        assert_eq!(lives_in(&it.func, at), it.entry);
         sound(&it.func, &mut it.names);
     }
 

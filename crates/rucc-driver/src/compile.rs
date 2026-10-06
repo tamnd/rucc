@@ -5640,6 +5640,27 @@ decl #0 x : int object external static defined
         assert!(!text.contains("\ttestb"), "{text}");
     }
 
+    /// PostgreSQL's `list_free_deep`. The loop calls `pfree`, so whatever it holds across that
+    /// call is in a register the callee keeps, and rucc 0.21 held the address of the length and
+    /// the address of the elements pointer as well as the list, which was four registers pushed
+    /// where gcc pushes two. Each of those addresses is the list and a constant, and the load
+    /// takes the constant into its own address.
+    #[test]
+    fn a_loop_that_calls_holds_no_address_a_load_would_fold() {
+        let text = optimized(concat!(
+            "typedef struct { int type; int length; int max; void **elements; } List;\n",
+            "void pfree(void *);\n",
+            "void f(List *list) {\n",
+            "    if (!list) return;\n",
+            "    for (int i = 0; i < list->length; i++)\n",
+            "        pfree(list->elements[i]);\n",
+            "    pfree(list);\n",
+            "}\n",
+        ));
+        assert!(!text.contains("\tleaq\t4("), "{text}");
+        assert!(!text.contains("\tleaq\t16("), "{text}");
+    }
+
     /// A cast between a pointer and an integer as wide as one, which is every one C writes here.
     #[test]
     fn a_cast_between_a_pointer_and_an_integer_leaves_the_value_where_it_is() {
