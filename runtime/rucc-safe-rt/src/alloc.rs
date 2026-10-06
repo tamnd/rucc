@@ -160,7 +160,7 @@ fn needed(n: usize) -> Option<usize> {
 /// One, because there is one. The identity matters when a program has several allocators and a
 /// pointer from one reaches the other's `free`, which is what document 10 section 10.4's
 /// `__rucc_alloc_tag` is for and which is milestone S3.
-const IDENTITY: u64 = 1;
+const IDENTITY: u32 = 1;
 
 /// The one heap, and the lock that keeps two threads out of its free lists.
 ///
@@ -804,7 +804,7 @@ pub unsafe fn dealloc(ptr: *mut c_void) {
         // 10.4's API turns the vaguest refusal this crate produces into the specific one, which is
         // document 03's free by the wrong deallocator rather than a free of something unknown.
         if let Some(id) = crate::adopt::deallocator(payload) {
-            if u64::from(id) != IDENTITY {
+            if id != IDENTITY {
                 crate::fail::refused_at(
                     Judgement::Free,
                     "free, of a pointer another allocator handed out",
@@ -900,7 +900,9 @@ pub unsafe fn realloc(ptr: *mut c_void, size: usize) -> *mut c_void {
 /// The class size rather than what was asked for, which is more, and answering with the smaller
 /// number would be answering a different question than the one the name asks. A program that
 /// rounds a request up to this and then uses all of it is using storage the arena gave it and the
-/// plane agrees it owns, so the monitor lets it through, which is the whole point of the call.
+/// plane agrees it owns, so the monitor lets it through, which is the whole point of the call. The
+/// bounds check holds an access to what was asked for and not to the class, so asking this is
+/// also what moves the instance's bounds out to the class, through `heap::Arena::room`.
 ///
 /// This is not in the standard and it is here because leaving it out is worse than a gap. Without
 /// it the call resolves to the C library's, which reads a chunk header this arena never wrote and
@@ -926,8 +928,8 @@ pub unsafe fn usable(ptr: *mut c_void) -> usize {
     }
     let payload = ptr as usize;
     let size = HEAP.owning(payload, |arena| {
-        // SAFETY: the address is inside the region, which is what `extent` asks for.
-        unsafe { arena.extent(payload) }
+        // SAFETY: the address is inside the region, which is what `room` asks for.
+        unsafe { arena.room(payload) }
     });
     match size {
         Some(Ok(size)) => size,

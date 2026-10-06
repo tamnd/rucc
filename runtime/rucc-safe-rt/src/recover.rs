@@ -253,7 +253,7 @@ pub fn made(base: *const c_void) -> Cap {
         return recover(base);
     }
     let Some(header) = headed(&region, payload, version) else { return recover(base) };
-    Cap::new(payload as u64, header.ext, version, header.meta)
+    Cap::new(payload as u64, header.asked(), version, header.meta)
 }
 
 /// The capability for a pointer that was in memory and whose capability was not.
@@ -401,7 +401,7 @@ fn run(region: &Region, addr: usize, version: Version) -> (usize, usize) {
     let here = addr & !(GRANULE - 1);
 
     if let Some(header) = headed(region, here, version) {
-        return (here, header.ext as usize);
+        return (here, header.asked() as usize);
     }
 
     // How many granules there are to look at on each side, worked out from the region's own bounds
@@ -410,6 +410,11 @@ fn run(region: &Region, addr: usize, version: Version) -> (usize, usize) {
     let up = (region.end - 1 - here) / GRANULE;
 
     let lo = here - edge(region, here, version, down, -STEP) * GRANULE;
+    // The base of the run is the base of an instance, so its header says how much of the run was
+    // asked for, which the plane cannot. Granules are all the walk has without one.
+    if let Some(header) = headed(region, lo, version) {
+        return (lo, header.asked() as usize);
+    }
     let hi = here + (edge(region, here, version, up, STEP) + 1) * GRANULE;
 
     (lo, hi - lo)
@@ -901,13 +906,12 @@ mod tests {
         assert!(!second.is_null());
 
         let cap = recover(first);
-        // Eighty rather than the seventy two that was asked for, because what the walk finds is
-        // the storage the instance owns and this allocator rounds a request up to a size class.
-        // That over-approximation is the arena's, not recovery's, and it is the same one
-        // `an_overflow_that_stays_inside_the_rounded_up_block_is_not_caught_yet` is about. Seventy
-        // two rather than a round number precisely so that it is rounded, since a size the arena
-        // gives exactly would make this test pass without testing anything.
-        assert_eq!(cap.ext, 80);
+        // Seventy two, which is what was asked for, rather than the eighty of the size class the
+        // arena rounded it up to, because the header remembers the difference and the walk reads
+        // it once it has found the start. Seventy two rather than a round number precisely so
+        // that it is rounded, since a size the arena gives exactly would make this test pass
+        // without testing anything.
+        assert_eq!(cap.ext, 72);
         assert!(!cap.covers(second as u64, 1), "the walk stopped at the neighbour");
 
         free(second);
@@ -985,6 +989,7 @@ mod tests {
             ver: version,
             meta: Meta::new(Class::Allocated, crate::layout::perm::READ, 0),
             allocator: 1,
+            slack: 0,
         };
         // SAFETY: the thirty two bytes in front of the payload are inside the same mapping, which
         // is this process's and is writable.

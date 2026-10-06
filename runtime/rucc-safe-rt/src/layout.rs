@@ -289,7 +289,28 @@ pub struct Header {
     /// The packed word of [`Meta`].
     pub meta: Meta,
     /// Which allocator handed this out, so that judgement J6 can refuse a free by the wrong one.
-    pub allocator: u64,
+    pub allocator: u32,
+    /// How many of the `ext` bytes the program did not ask for, which is the class rounding.
+    ///
+    /// `ext` is the class size because everything that lays a block out works from it, and the
+    /// plane is per granule and says the same. Neither can tell the seventeenth byte of a request
+    /// for seventeen from the twentieth, and a write to the twentieth is still a heap overflow that
+    /// happens to land in storage nobody else owns. This is what tells them apart: the bounds a
+    /// capability carries stop at [`Header::asked`], and so does the bounds check when the planes
+    /// are what it asks.
+    ///
+    /// Zero once the program has asked `malloc_usable_size`, since that call is the program being
+    /// told the rest is its own, and zero when the rounding does not fit, which only a request of
+    /// tens of gigabytes produces and which costs precision there rather than reporting anything.
+    pub slack: u32,
+}
+
+impl Header {
+    /// How many bytes the program asked for, which is what an access is held to.
+    #[must_use]
+    pub const fn asked(self) -> u64 {
+        self.ext - self.slack as u64
+    }
 }
 
 /// How many bytes the header takes, and therefore where the aux starts.
