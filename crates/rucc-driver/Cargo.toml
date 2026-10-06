@@ -54,3 +54,5 @@ rucc-types.workspace = true
 # are wanted and this one is the layer that has them on disk.
 rucc-unpack.workspace = true
 rucc-wasm.workspace = true
+# The wasm linker that runs in the process, for rucc running as wasm and a machine with no wasm-ld.
+rucc-wasm-link.workspace = true

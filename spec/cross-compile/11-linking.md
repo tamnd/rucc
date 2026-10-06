@@ -15,7 +15,7 @@ The framing: **a native link works because the machine is already configured. A 
 | ELF | **`lld`, bundled** | the only maintained linker that cross-links every ELF architecture we target, from every host, in one binary |
 | Mach-O | the platform's `ld` (macOS host) or `ld64.lld` | document 07.3: the format moves, and the platform linker is the reference |
 | COFF/PE | `lld-link` for MSVC, `ld.lld` or binutils `ld` for mingw | mingw's `ld` is what mingw-w64 targets in practice |
-| wasm | `wasm-ld` | there is no alternative |
+| wasm | `wasm-ld`, then the linker inside rucc | `rucc-wasm-link` links a static module in the process. `-fuse-ld=rucc` selects it, rucc running as wasm has no other, and a machine with no `wasm-ld` of lld 21 or newer uses it |
 
 **The uncomfortable part, stated plainly.** Bundling `lld` means shipping several megabytes of LLVM-derived code inside a compiler whose thesis is that LLVM is too big. Document 02.4 objects to `zig cc` on exactly that ground, so the objection applies to us and we do not get to ignore it.
 
