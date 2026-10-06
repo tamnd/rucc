@@ -586,6 +586,7 @@ pub static FRAME: FrameInsts = FrameInsts {
     probe: Some(crate::x86_64::PROBE),
     landing: Some("endbr32"),
     signing: None,
+    canary: None,
     targets: None,
     pad: Some("nop"),
     step_bits: None,

@@ -67,9 +67,6 @@ const fn since(major: u32, row: Row) -> Row {
 const X86: Arch = Arch::X86_64;
 const A64: Arch = Arch::Aarch64;
 
-const GUARD: &str = "there is no stack protector on AArch64 yet, and the canary the kernel keeps \
-                     at an offset from sp_el0 is part of that work";
-
 /// The table, searched in order, so a spelling that means the default comes before the family it
 /// belongs to.
 pub(crate) const TABLE: &[Row] = &[
@@ -161,7 +158,6 @@ pub(crate) const TABLE: &[Row] = &[
     refused("-fplugin-arg-*", "there are no gcc plugins here to hand an argument to", None),
     // Debug information.
     // x86-64.
-    only(A64, refused("-mstack-protector-guard*", GUARD, Some(2279))),
     only(
         X86,
         same(

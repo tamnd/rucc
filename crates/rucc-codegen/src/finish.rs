@@ -1302,10 +1302,33 @@ impl Writer<'_> {
     /// block begins is something only the machine knows and the segment register is what holds it.
     /// A symbol read through the segment is the same load with the symbol's distance from the
     /// instruction added, which is `%gs:__ref_stack_chk_guard(%rip)` in a kernel.
+    ///
+    /// AArch64 cannot name either in a load, so there the address goes into the register first,
+    /// out of `sp_el0` for a kernel's copy in the task and from the symbol's page otherwise, and
+    /// the word is read from it.
     fn read_guard(&mut self, into: PhysReg, guard: &Guard) -> Vec<Inst> {
         let class = self.conv.int_class;
         let load = self.opcode(self.insts.moves(class).expect("a class to load").load);
         let mut out = Vec::with_capacity(2);
+        if let Some(canary) = self.insts.canary {
+            let address = match guard.symbol {
+                None => {
+                    let opcode = self.opcode(canary.system);
+                    self.func.build_loose(opcode).def(Reg::physical(into), class).finish()
+                }
+                Some(name) => {
+                    let opcode = self.opcode(if guard.table { canary.far } else { canary.near });
+                    let symbol = self.names.intern(name);
+                    let inst = self.func.build_loose(opcode).def(Reg::physical(into), class);
+                    inst.symbol(symbol).finish()
+                }
+            };
+            out.push(address);
+            let base = Operand::read(Reg::physical(into), class);
+            let mem = Mem::at(base).plus(guard.at);
+            out.push(self.func.build_loose(load).def(Reg::physical(into), class).mem(mem).finish());
+            return out;
+        }
         let mem = match guard.symbol {
             None => {
                 let segment = guard.segment.expect("a guard with no symbol is in a segment");
@@ -2308,13 +2331,13 @@ mod tests {
         // What 6.13 and later ask for, which is one load through the segment and the distance to
         // the symbol from the instruction, like gcc's `%gs:__ref_stack_chk_guard(%rip)`.
         assert_eq!(
-            reads(Guard { segment, symbol, table: false, at: 0, fail }),
+            reads(Guard { segment, symbol, table: false, system: false, at: 0, fail }),
             ["$r11 = x64.mov_rm_64 [gs:@__ref_stack_chk_guard]"]
         );
         // The same in code that may be in a shared library, where the address comes out of the
         // table first and the load through the segment is from the register.
         assert_eq!(
-            reads(Guard { segment, symbol, table: true, at: 0, fail }),
+            reads(Guard { segment, symbol, table: true, system: false, at: 0, fail }),
             ["$r11 = x64.mov_rm_64 [got @__ref_stack_chk_guard]", "$r11 = x64.mov_rm_64 [gs:$r11]",]
         );
     }

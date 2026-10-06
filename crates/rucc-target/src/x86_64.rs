@@ -242,6 +242,7 @@ pub static FRAME: FrameInsts = FrameInsts {
     probe: Some(PROBE),
     landing: Some("endbr64"),
     signing: None,
+    canary: None,
     targets: None,
     pad: Some("nop"),
     step_bits: None,

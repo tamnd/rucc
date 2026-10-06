@@ -474,12 +474,13 @@ pub(super) fn prefetch_name(operation: u8) -> Option<String> {
 }
 
 /// The system registers a compiler reads by name, as the op0, op1, CRn, CRm and op2 fields.
-pub(super) static SYSTEM: [(&str, [u16; 5]); 9] = [
+pub(super) static SYSTEM: [(&str, [u16; 5]); 10] = [
     ("nzcv", [3, 3, 4, 2, 0]),
     ("fpcr", [3, 3, 4, 4, 0]),
     ("fpsr", [3, 3, 4, 4, 1]),
     ("tpidr_el0", [3, 3, 13, 0, 2]),
     ("tpidrro_el0", [3, 3, 13, 0, 3]),
+    ("sp_el0", [3, 0, 4, 1, 0]),
     ("cntfrq_el0", [3, 3, 14, 0, 0]),
     ("cntvct_el0", [3, 3, 14, 0, 2]),
     ("dczid_el0", [3, 3, 0, 0, 7]),

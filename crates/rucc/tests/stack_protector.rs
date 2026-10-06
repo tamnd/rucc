@@ -305,3 +305,59 @@ int gone(int x) { int n = x; put(&n); return n; }
     let text = asm("asked-all", &["-O2", "-fstack-protector-all"], source);
     assert_eq!(protected(&text), ["asked", "gone"], "{text}");
 }
+
+/// The body of one function in an AArch64 listing, from its label to its `.size`.
+fn arm64(what: &str, flags: &[&str], name: &str) -> Vec<String> {
+    let out = run(what, "aarch64-unknown-linux-gnu", flags, FOUR);
+    let text = String::from_utf8_lossy(&out.stdout);
+    assert!(out.status.success(), "{}", String::from_utf8_lossy(&out.stderr));
+    text.lines()
+        .skip_while(|line| *line != format!("{name}:"))
+        .take_while(|line| !line.starts_with("\t.size"))
+        .filter(|line| line.starts_with('\t') && !line.starts_with("\t."))
+        .map(|line| line.trim().to_string())
+        .collect()
+}
+
+/// AArch64 reads `__stack_chk_guard`, a plain global, through the global offset table by default
+/// and from its own page under `-fno-pic`, which is what gcc writes for both.
+#[test]
+fn arm64_reads_the_global_guard_the_way_its_code_reaches_any_global() {
+    let reads = |flags: &[&str]| {
+        let body = arm64("arm64", flags, "buf");
+        let calls = body.iter().filter(|line| *line == "bl __stack_chk_fail").count();
+        assert_eq!(calls, 1, "{flags:?}: {body:?}");
+        body.iter().filter(|line| line.contains("__stack_chk_guard")).cloned().collect::<Vec<_>>()
+    };
+    let got = reads(&["-fstack-protector"]);
+    assert_eq!(got.len(), 4, "{got:?}");
+    assert!(got[0].starts_with("adrp x") && got[0].ends_with(", :got:__stack_chk_guard"));
+    assert!(got[1].contains(", :got_lo12:__stack_chk_guard]"), "{got:?}");
+    let page = reads(&["-fstack-protector", "-fno-pic"]);
+    assert_eq!(page.len(), 4, "{page:?}");
+    assert!(page[0].starts_with("adrp x") && page[0].ends_with(", __stack_chk_guard"));
+    assert!(page[1].ends_with(", :lo12:__stack_chk_guard"), "{page:?}");
+}
+
+/// An arm64 kernel keeps the canary in each task and passes its distance from the task, which
+/// `sp_el0` holds while the kernel runs, so the word is a read of the register and one load.
+#[test]
+fn arm64_reads_the_kernel_canary_past_sp_el0() {
+    let flags = [
+        "-fstack-protector",
+        "-fno-PIE",
+        "-mstack-protector-guard=sysreg",
+        "-mstack-protector-guard-reg=sp_el0",
+        "-mstack-protector-guard-offset=1912",
+    ];
+    let body = arm64("sysreg", &flags, "buf");
+    let mrs: Vec<usize> = (0..body.len()).filter(|&i| body[i].starts_with("mrs x")).collect();
+    assert_eq!(mrs.len(), 2, "{body:?}");
+    for at in mrs {
+        let reg = &body[at]["mrs ".len()..body[at].find(',').expect("two operands")];
+        assert!(body[at].ends_with(", sp_el0"), "{body:?}");
+        let load = format!("[{reg}, #1912]");
+        assert!(body[at..].iter().any(|line| line.ends_with(&load)), "{body:?}");
+    }
+    assert!(!body.iter().any(|line| line.contains("__stack_chk_guard")), "{body:?}");
+}

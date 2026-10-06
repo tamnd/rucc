@@ -569,6 +569,8 @@ pub static INSTS: &[(&str, Form)] = &[
     ("slot_64", Address),
     ("gottprel_64", Address),
     ("thread_64", Address),
+    // The address an arm64 kernel keeps the running task at, which its stack protector reads.
+    ("sp_el0_64", Address),
     // Windows thread-local variables, in the three steps `text` gives. The first and the last
     // read memory that does not change while the thread runs, `_tls_index` and the thread's
     // array, which is why they are not loads either.

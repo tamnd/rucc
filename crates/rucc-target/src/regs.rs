@@ -285,6 +285,11 @@ impl Segment {
 /// named `__stack_chk_guard`, which is what `-mstack-protector-guard=global` asks for. All three
 /// are this one struct with different fields set.
 ///
+/// AArch64 has no segments. glibc and musl keep the word in the plain global `__stack_chk_guard`,
+/// read through the global offset table in code that may be position independent, and an arm64
+/// kernel keeps a copy in each task, at a distance into the task that `sp_el0` points at while the
+/// kernel runs. Those are a symbol with no segment and [`Guard::system`] with no symbol.
+///
 /// A convention that answers `None` is one this compiler has no protector for, and a command line
 /// that asks for one on such a target is told so rather than quietly given an unprotected frame.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -297,7 +302,12 @@ pub struct Guard {
     /// Whether the symbol's address is read out of the global offset table first, which is what a
     /// global guard needs in code that may end up in a shared library.
     pub table: bool,
-    /// How far past the symbol, or into the segment when there is no symbol, the word is.
+    /// Whether the word is a distance past the address the system register `sp_el0` holds, which
+    /// is where an arm64 kernel keeps the task that is running. What
+    /// `-mstack-protector-guard=sysreg` asks for, and only ever set on AArch64.
+    pub system: bool,
+    /// How far past the symbol, or into the segment or past `sp_el0` when there is no symbol, the
+    /// word is.
     pub at: i32,
     /// The function called when the copy in the frame no longer matches it, which does not come
     /// back.
@@ -308,7 +318,23 @@ impl Guard {
     /// The word at a distance into a thread's block, which is where every C library keeps it.
     #[must_use]
     pub const fn in_segment(segment: Segment, at: i32) -> Self {
-        Self { segment: Some(segment), symbol: None, table: false, at, fail: "__stack_chk_fail" }
+        let fail = "__stack_chk_fail";
+        Self { segment: Some(segment), symbol: None, table: false, system: false, at, fail }
+    }
+
+    /// A plain global of that name, read through the global offset table when `table` is set.
+    #[must_use]
+    pub const fn global(symbol: &'static str, table: bool) -> Self {
+        let fail = "__stack_chk_fail";
+        Self { segment: None, symbol: Some(symbol), table, system: false, at: 0, fail }
+    }
+
+    /// The word that distance past the address in `sp_el0`, which is an arm64 kernel's copy in the
+    /// task that is running.
+    #[must_use]
+    pub const fn in_task(at: i32) -> Self {
+        let fail = "__stack_chk_fail";
+        Self { segment: None, symbol: None, table: false, system: true, at, fail }
     }
 }
 
