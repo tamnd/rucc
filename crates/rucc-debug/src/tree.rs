@@ -699,7 +699,9 @@ mod tests {
             }],
             funcs: vec![Function {
                 name: "f".to_owned(),
+                symbol: None,
                 len: 16,
+                prologue_end: None,
                 rows: vec![Row { at: 0, file: 0, line: 3, column: 1 }],
                 decl: Some(Place { file: 0, line: 3 }),
                 sig: Some(Sig {

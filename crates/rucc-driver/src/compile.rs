@@ -2018,7 +2018,9 @@ fn describe(
         }
         funcs.push(rucc_debug::Function {
             name: extent.name.clone(),
+            symbol: None,
             len: extent.len as u64,
+            prologue_end: None,
             rows: out,
             decl,
             sig,
@@ -2101,8 +2103,18 @@ fn describe_wasm(
     let rewrite = |path: &str| opts.prefix_map.debug.apply(path).into_owned();
     let mut files: Vec<String> = Vec::new();
     let mut funcs = Vec::with_capacity(object.functions.len());
+    // The back end gives a `main` with no parameters or with two the name that the start code of
+    // wasi-libc calls, as clang does, and the program and the declarations know it as `main`. A
+    // `main` with one parameter or with three keeps its name, and the `__main_argc_argv` next to it
+    // is a caller that the back end made, which is not `main`.
+    let renamed =
+        !object.functions.iter().any(|f| object.symbols[f.symbol as usize].name == "main");
     for (function, lines) in object.functions.iter().zip(lines) {
-        let name = &object.symbols[function.symbol as usize].name;
+        let symbol = &object.symbols[function.symbol as usize].name;
+        let name = match symbol.as_str() {
+            "__main_void" | "__main_argc_argv" if renamed => "main",
+            name => name,
+        };
         let mut rows: Vec<rucc_debug::Row> = Vec::with_capacity(lines.rows.len());
         for &(at, span) in &lines.rows {
             if span.is_dummy() {
@@ -2123,19 +2135,34 @@ fn describe_wasm(
                 _ => rows.push(row),
             }
         }
-        // The declarations of the locals and the prologue have no span, and the first row covers
-        // them, so that each address in the function has a line.
-        if let Some(first) = rows.first_mut() {
-            first.at = 0;
-        }
         let known = origin.meaning.funcs.get(name);
         let decl = known.map(|known| rucc_debug::Place {
             file: interned(&mut files, rewrite(&known.file)),
             line: known.line,
         });
+        // The declarations of the locals and the prologue have no span. A row at the line of the
+        // declaration covers them, as in `describe` and as clang writes it, and the first row after
+        // it is the end of the prologue, so that a breakpoint on the function stops at the first
+        // statement. With no declaration, the first row covers them, so that each address in the
+        // function has a line.
+        let mut prologue_end = None;
+        match decl {
+            Some(decl) if rows.first().is_some_and(|first| first.at > 0) => {
+                prologue_end = rows.first().map(|first| first.at);
+                let row = rucc_debug::Row { at: 0, file: decl.file, line: decl.line, column: 0 };
+                rows.insert(0, row);
+            }
+            _ => {
+                if let Some(first) = rows.first_mut() {
+                    first.at = 0;
+                }
+            }
+        }
         funcs.push(rucc_debug::Function {
-            name: name.clone(),
+            name: name.to_owned(),
+            symbol: (name != symbol).then(|| symbol.clone()),
             len: u64::from(lines.len),
+            prologue_end,
             rows,
             decl,
             sig: known.and_then(|known| known.sig.clone()),

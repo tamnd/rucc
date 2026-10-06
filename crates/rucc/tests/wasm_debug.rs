@@ -80,6 +80,49 @@ fn asking_for_debug_information_writes_the_dwarf_sections() {
     std::fs::remove_dir_all(dir).unwrap();
 }
 
+/// `main` is `__main_void` to the linker and `main` to a debugger: the unit has an entry for it by
+/// its own name, and the relocations of its address name the symbol.
+#[test]
+fn main_is_named_main_in_the_debug_information() {
+    let dir = scratch("main");
+    ok(&rucc(&["--target=wasm32-wasip1", "-g", "-c", "t.c", "-o", "t.o"], &dir));
+    let object = std::fs::read(dir.join("t.o")).unwrap();
+    assert!(holds(&object, "\0main\0"), "the strings of the unit do not name main");
+    assert!(holds(&object, "__main_void"));
+    let Some(sdk) = sdk() else {
+        eprintln!("WASI_SDK_PATH is not set, so the object was not read back");
+        std::fs::remove_dir_all(dir).unwrap();
+        return;
+    };
+    let dwarfdump = sdk.join("bin/llvm-dwarfdump");
+    let out = Command::new(&dwarfdump)
+        .args(["--debug-info", "--debug-line"])
+        .arg(dir.join("t.o"))
+        .output()
+        .expect("llvm-dwarfdump starts");
+    ok(&out);
+    let text = String::from_utf8_lossy(&out.stdout);
+    for name in ["depth", "main"] {
+        assert!(
+            text.contains(&format!("DW_AT_name\t(\"{name}\")")),
+            "no entry for {name}:\n{text}"
+        );
+    }
+    // Each function has a row at the line of its declaration, and the end of the prologue at the
+    // first statement after it, as clang writes them.
+    // The rows of the line table are the lines that start with an address and have no colon, as
+    // the entries of the unit have one after their offset.
+    let rows: Vec<&str> =
+        text.lines().filter(|line| line.starts_with("0x") && !line.contains(':')).collect();
+    let line_of = |row: &str| row.split_whitespace().nth(1).map(str::to_owned);
+    let ends: Vec<_> = rows.iter().filter(|row| row.contains("prologue_end")).collect();
+    assert_eq!(ends.len(), 2, "{text}");
+    assert_eq!(line_of(rows[0]).as_deref(), Some("1"), "{text}");
+    assert_eq!(line_of(ends[0]).as_deref(), Some("2"), "{text}");
+    assert_eq!(line_of(ends[1]).as_deref(), Some("7"), "{text}");
+    std::fs::remove_dir_all(dir).unwrap();
+}
+
 #[test]
 fn the_text_with_debug_information_assembles_to_the_same_object() {
     let dir = scratch("same");
