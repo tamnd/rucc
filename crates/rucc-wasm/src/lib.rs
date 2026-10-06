@@ -87,7 +87,7 @@ use rucc_ir::{
 };
 use rucc_object::wasm::{
     self, EXPORTED, Fixup, FuncType, HIDDEN, Import, LOCAL, NO_STRIP, Place, Producers, RETAIN,
-    RelocKind, Segment, SymbolKind, ValType, WEAK, Written,
+    RelocKind, STRINGS, Segment, SymbolKind, ValType, WEAK, Written,
 };
 use rucc_target::wasm::{Feature, Features};
 
@@ -758,14 +758,30 @@ impl Unit<'_> {
             Some(section) => self.names.resolve(section).to_owned(),
             None => format!("{prefix}{name}"),
         };
-        Ok(Segment {
-            name,
-            align: global.align.max(1).trailing_zeros(),
-            flags: if global.retain { RETAIN } else { 0 },
-            bytes,
-            fixups,
-        })
+        let align = global.align.max(1).trailing_zeros();
+        let mut flags = if global.retain { RETAIN } else { 0 };
+        if mergeable(global, align, &bytes, &fixups) {
+            flags |= STRINGS;
+        }
+        Ok(Segment { name, align, flags, bytes, fixups })
     }
+}
+
+/// Whether wasm-ld may merge the segment of `global` with each other segment that holds the same
+/// string, which is what the `STRINGS` flag tells it.
+///
+/// The rule is the native one, which `rucc_asm` applies for `.rodata.str1.`: a string literal with
+/// no section of its own whose bytes are one string, so the first zero is the last byte. wasm-ld
+/// reads a merged segment up to each zero, so a literal with a zero inside it would become two
+/// strings. wasm-ld also merges only a segment aligned to one byte (`shouldMerge` in
+/// `lld/wasm/InputFiles.cpp`), so a literal the program aligned to more keeps its own segment.
+fn mergeable(global: &rucc_ir::Global, align: u32, bytes: &[u8], fixups: &[Fixup]) -> bool {
+    global.literal
+        && global.constant
+        && global.section.is_none()
+        && align == 0
+        && fixups.is_empty()
+        && bytes.iter().position(|&byte| byte == 0) == Some(bytes.len().wrapping_sub(1))
 }
 
 /// The number that stands for the address of each label of `func`, which is what `&&label` is
