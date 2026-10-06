@@ -371,6 +371,8 @@ Taken because what they ask for is what happens:
 | `-fverbose-asm`, `-fno-verbose-asm` | Comments in assembly output. The instructions are the same. |
 | `-fvar-tracking`, `-fno-var-tracking`, `-fvar-tracking-assignments`, `-fno-var-tracking-assignments` | How hard gcc works at where a variable lives in the debug information. The code is the same. |
 | `-femit-struct-debug-baseonly` | Less type information in the debug sections of a unit that does not define the type. The size changes and nothing a debugger or the program sees does. |
+| `-femit-struct-debug-reduced` | The same, for a type whose header is not the unit's own. |
+| `-femit-struct-debug-detailed=*` | The same, with the cases spelled out one by one. |
 | `-fdwarf2-cfi-asm`, `-fno-dwarf2-cfi-asm` | Whether gcc hands the assembler `.cfi` directives or writes the unwind table itself. The object has the same `.eh_frame`. |
 | `-fdiagnostics-show-context`, `-fdiagnostics-show-context=*` | How much source a diagnostic quotes. |
 | `-fpartial-inlining`, `-fno-partial-inlining` | A gcc pass this compiler does not have. |

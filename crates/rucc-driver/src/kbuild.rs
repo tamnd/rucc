@@ -90,6 +90,15 @@ pub(crate) const TABLE: &[Row] = &[
          type, which changes their size and nothing a debugger or the program sees",
     ),
     same(
+        "-femit-struct-debug-reduced",
+        "the same family, and it changes the debug sections and not the code",
+    ),
+    same(
+        "-femit-struct-debug-detailed=*",
+        "the same family, which the kernel's lib/debug_info.c asks for so that every type it names \
+         is described in full, and it changes the debug sections and not the code",
+    ),
+    same(
         "-fdwarf2-cfi-asm",
         "it is about whether gcc hands the assembler .cfi directives or writes the unwind table \
          itself, and the object has the same .eh_frame either way",

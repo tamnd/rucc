@@ -80,8 +80,8 @@ use rucc_base::float::{Float, Format, Status};
 use rucc_diag::Diagnostic;
 use rucc_target::TargetInfo;
 use rucc_types::{
-    IntegerInfo, Qualifiers, TypeId, TypeKind, Types, float_format, integer_info, layout,
-    real_part, spell,
+    IntegerInfo, Qualifiers, TypeId, TypeKind, Types, float_format, integer_info, is_scalar,
+    layout, real_part, spell,
 };
 
 use crate::decl::{DeclFlags, DeclId, DeclKind, StorageDuration};
@@ -320,7 +320,11 @@ impl<'a> Eval<'a> {
             // the other exception, and it is one only where [`Self::initializer`] was asked. The
             // `const` object gcc reads is a third, and only where [`Self::objects`] was asked.
             ExprKind::Convert { kind: Conversion::Lvalue, operand } => {
-                match self.named_constant(operand).or_else(|| self.string_element(expr, operand)) {
+                let value = self
+                    .named_constant(operand)
+                    .or_else(|| self.string_element(expr, operand))
+                    .or_else(|| self.literal_value(operand));
+                match value {
                     Some(value) => Ok(value),
                     None => Err(self.stop(expr)),
                 }
@@ -1027,6 +1031,33 @@ impl<'a> Eval<'a> {
             }
             _ => None,
         }
+    }
+
+    /// The value a compound literal of a scalar type holds, where [`Self::initializer`] asked and
+    /// [`None`] everywhere else.
+    ///
+    /// gcc reads `(T){ x }` as `x` in an initializer for an object with static storage, and the
+    /// kernel's STM32 clock tables are written that way: `.clock_cfg = (struct clk_stm32_gate *)
+    /// {&ck}`, a pointer built by a literal and then read. The literal is not `volatile` and has
+    /// the one entry, at its start.
+    fn literal_value(&mut self, expr: ExprId) -> Option<Const> {
+        if !self.literals || self.depth >= OBJECT_DEPTH {
+            return None;
+        }
+        let ExprKind::CompoundLiteral(decl) = self.tast[expr].kind else { return None };
+        let ty = self.types.canonical(self.tast[decl].ty);
+        if !is_scalar(self.types, ty) || self.types.quals(ty).has(Qualifiers::VOLATILE) {
+            return None;
+        }
+        let entries = self.tast[self.tast[decl].init?].to_vec();
+        let [entry] = entries.as_slice() else { return None };
+        if entry.offset != 0 || entry.bit_width != 0 {
+            return None;
+        }
+        self.depth += 1;
+        let value = self.eval(entry.value);
+        self.depth -= 1;
+        value.ok()
     }
 
     /// The character a string literal holds at a place, and [`None`] when the expression is not a

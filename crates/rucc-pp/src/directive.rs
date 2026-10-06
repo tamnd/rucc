@@ -2032,7 +2032,9 @@ fn is_conditional(name: Option<Symbol>, names: &Names) -> bool {
 }
 
 /// Whether `text` ends partway through the arguments of a function-like macro, that is with a
-/// parenthesis still open right after the name of one.
+/// parenthesis still open right after the name of one, or after the name of an object-like macro
+/// that ends in the name of one. The kernel's `cpu_to_le64` is `__cpu_to_le64`, and arm64's SMMU
+/// driver has an `#ifdef __BIG_ENDIAN` inside the parentheses after it.
 fn open_invocation(text: &[Tok], macros: &MacroTable) -> bool {
     let mut open: Vec<usize> = Vec::new();
     for (at, tok) in text.iter().enumerate() {
@@ -2042,13 +2044,22 @@ fn open_invocation(text: &[Tok], macros: &MacroTable) -> bool {
             open.pop();
         }
     }
-    open.iter().any(|&at| {
-        at > 0
-            && text[at - 1]
-                .ident()
-                .and_then(|name| macros.lookup(name))
-                .is_some_and(|def| def.function_like)
-    })
+    open.iter().any(|&at| at > 0 && text[at - 1].ident().is_some_and(|name| calls(name, macros)))
+}
+
+/// Whether a parenthesis after `name` is the start of a function-like macro's arguments once
+/// `name` has been expanded as far as an object-like macro goes.
+fn calls(mut name: Symbol, macros: &MacroTable) -> bool {
+    // Deep enough for any real chain and short enough that one naming itself ends.
+    for _ in 0..16 {
+        let Some(def) = macros.lookup(name) else { return false };
+        if def.function_like {
+            return true;
+        }
+        let Some(last) = def.body.last().and_then(ident_of) else { return false };
+        name = last;
+    }
+    false
 }
 
 /// Whether a directive name is one that may be followed by a header name.
@@ -2850,6 +2861,16 @@ mod tests {
         assert_eq!(clean(src), "struct { int a; int c; int e; } g;");
         // A parenthesis that is not a macro's still ends the run, as it always did.
         assert_eq!(clean("f(1,\n#ifdef X\n2\n#else\n3\n#endif\n)\n"), "f(1, 3 )");
+    }
+
+    #[test]
+    fn a_conditional_inside_the_arguments_after_an_object_like_name_for_one_is_read_too() {
+        // The kernel's `cpu_to_le64` is `__cpu_to_le64`, and arm64's SMMU driver has an
+        // `#ifdef __BIG_ENDIAN` inside the parentheses after it.
+        let src = "#define F(x) [x]\n#define G F\n#define H G\nH(1 |\n#ifdef X\n2 |\n#endif\n4)\n";
+        assert_eq!(clean(src), "[1 | 4]");
+        // A name defined as itself is still only a name.
+        assert_eq!(clean("#define S S\nS(1,\n#ifdef X\n2\n#endif\n)\n"), "S(1, )");
     }
 
     #[test]

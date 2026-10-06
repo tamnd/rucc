@@ -10683,6 +10683,24 @@ float through_a_union(union u *p) { p->i = 1; return p->f; }\n";
         assert_eq!(run(&opts, initializer).messages, [message]);
     }
 
+    /// A compound literal of a scalar type read in a static initializer is the value it holds,
+    /// which is how the kernel's STM32 clock tables fill a pointer: `(struct gate *){&ck}`.
+    #[test]
+    fn a_scalar_literal_read_in_a_static_initializer_is_its_value() {
+        let mut opts = options();
+        opts.emit = EmitKind::Ir;
+        let source = concat!(
+            "struct g { int a; } ck;\n",
+            "struct c { int id; void *cfg; };\n",
+            "static const struct c t[] = { { 1, (struct g *){&ck} } };\n",
+            "long n = (long){ 4 } + 1;\n",
+            "void *get(void) { return t[0].cfg; }\n",
+        );
+        let compiled = run(&opts, source);
+        assert!(compiled.messages.is_empty(), "{:?}", compiled.messages);
+        assert!(compiled.text().contains("@ck"), "{}", compiled.text());
+    }
+
     /// A member whose size was refused is not a flexible array member, whatever it looks like.
     ///
     /// The refusal leaves the member with no size, which is also how `int a[]` is written, so
