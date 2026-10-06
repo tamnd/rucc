@@ -2743,6 +2743,7 @@ pub fn parse_args(args: &[String]) -> Result<Action, CliError> {
             // tamnd/rucc#2275.
             "-mcmodel=small" => cmodel = rucc_target::CodeModel::Small,
             "-mcmodel=kernel" => cmodel = rucc_target::CodeModel::Kernel,
+            "-mcmodel=tiny" => cmodel = rucc_target::CodeModel::Tiny,
             // clang's spellings of the deployment target, which it takes over a version in the
             // tuple. gcc on a Mac takes the first. A target that is not Apple ignores it, as
             // clang does, so a makefile that always passes it still builds for Linux.
@@ -2756,7 +2757,7 @@ pub fn parse_args(args: &[String]) -> Result<Action, CliError> {
             }
             _ if arg.starts_with("-mcmodel=") => {
                 return Err(err(format!(
-                    "{arg}: this compiler emits the small and kernel code models and no other, \
+                    "{arg}: this compiler emits the small, kernel and tiny code models and no other, \
                      see spec/04-driver-and-cli.md section 4.3"
                 )));
             }
@@ -3199,6 +3200,16 @@ pub fn parse_args(args: &[String]) -> Result<Action, CliError> {
                 "code model kernel does not support PIC mode: add -fno-pie or -fno-pic".to_owned(),
             ));
         }
+    }
+    // The tiny model is AArch64's, and gcc for any other machine refuses it.
+    if cmodel == rucc_target::CodeModel::Tiny
+        && (opts.target.arch != rucc_target::Arch::Aarch64
+            || opts.target.object_format() != ObjectFormat::Elf)
+    {
+        return Err(err(format!(
+            "-mcmodel=tiny: {} has no tiny code model, which is AArch64 ELF's",
+            opts.target
+        )));
     }
     // The nop is written where a direct call would be, and a position independent call to the hook
     // goes through the procedure linkage table, so gcc refuses the pair, with or without `-pg`, and
@@ -7858,7 +7869,7 @@ mod tests {
         assert!(refused(&["-Wa,--execstack", "-c", "a.c"]).contains("`--execstack`"));
         assert!(refused(&["-Wp,-C", "-c", "a.c"]).contains("separate preprocessor"));
         assert!(refused(&["-specs=/x", "a.c"]).contains("-specs= is not supported"));
-        assert!(refused(&["-mcmodel=large", "-c", "a.c"]).contains("kernel code models"));
+        assert!(refused(&["-mcmodel=large", "-c", "a.c"]).contains("tiny code models"));
         assert!(refused(&["-gdwarf-3", "-c", "a.c"]).contains("DWARF 4 and 5"));
         // The word size the target does not have, which is a target this compiler was not asked
         // for rather than a flag it does not know.

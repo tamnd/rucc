@@ -581,7 +581,7 @@ fn platform(d: &mut Defs, target: &TargetInfo, opts: &Predef) {
             // Which code model, which is the small one unless `-mcmodel=kernel` said otherwise.
             // A kernel header reads the second to know its addresses are in the top 2 GiB.
             d.flag(match opts.code_model {
-                CodeModel::Small => "__code_model_small__",
+                CodeModel::Small | CodeModel::Tiny => "__code_model_small__",
                 CodeModel::Kernel => "__code_model_kernel__",
             });
             // The MMX registers are not used on x86-64: the sixty four bit operations go
@@ -624,7 +624,10 @@ fn platform(d: &mut Defs, target: &TargetInfo, opts: &Predef) {
             // clang for aarch64-w64-mingw32 says 2 there, and a header that sizes a buffer by it
             // rather than by `sizeof` gets half the room it asked for when this says 4.
             d.set("__ARM_SIZEOF_WCHAR_T", &wchar(target).size.to_string());
-            d.set("__AARCH64_CMODEL_SMALL__", "1");
+            match opts.code_model {
+                CodeModel::Tiny => d.set("__AARCH64_CMODEL_TINY__", "1"),
+                _ => d.set("__AARCH64_CMODEL_SMALL__", "1"),
+            }
             // A fused multiply add is one instruction here, and glibc's `math.h` turns these
             // into `FP_FAST_FMA` and `FP_FAST_FMAF`, which a program reads to decide whether
             // calling `fma` is cheaper than writing the product and the sum apart.

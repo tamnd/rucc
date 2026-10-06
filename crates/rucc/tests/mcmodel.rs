@@ -234,3 +234,27 @@ fn a_small_model_jump_table_is_still_distances() {
     assert!(text.contains("\t.long\t.Lsw_"), "{text}");
     assert!(!text.contains(".quad"), "{text}");
 }
+
+/// The tiny model on AArch64 is taken, as the arm64 kernel's vDSO asks for it, and the code is the
+/// small model's, which reaches everything the tiny model does. Only the macro is different, and
+/// anywhere else it is refused, as gcc refuses it.
+#[test]
+fn the_tiny_model_is_aarch64s_and_writes_the_small_models_code() {
+    let source = "\
+int here;
+#if defined __AARCH64_CMODEL_TINY__ && !defined __AARCH64_CMODEL_SMALL__
+int tiny(void) { return here; }
+#else
+int small(void) { return here; }
+#endif
+";
+    let arm = "--target=aarch64-unknown-linux-gnu";
+    let tiny = asm("tiny", &[arm, "-mcmodel=tiny", "-O2"], source);
+    let small = asm("tiny-small", &[arm, "-O2"], source);
+    assert!(tiny.contains("tiny:"), "{tiny}");
+    assert!(small.contains("small:"), "{small}");
+    assert_eq!(tiny.replace("tiny", "small"), small);
+    let (ok, _, err) = run("tiny-x86", &["-mcmodel=tiny", "-S"], "int x;\n");
+    assert!(!ok, "-mcmodel=tiny was taken on x86-64");
+    assert!(err.contains("has no tiny code model"), "{err}");
+}
