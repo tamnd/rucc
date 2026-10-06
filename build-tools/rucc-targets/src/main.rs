@@ -421,6 +421,9 @@ fn rule_line(rule: &Rule) -> String {
         Test::LoneFloat => "one float or one double and nothing else".to_string(),
         Test::SingleScalar => "one scalar and nothing else, with no padding".to_string(),
         Test::ComplexFloat => "a _Complex float and nothing else".to_string(),
+        Test::FloatingMode => {
+            "a _Complex, or one floating point scalar that fills the aggregate".to_string()
+        }
         Test::Eightbytes { limit } => {
             format!("at most {limit} bytes that classify into eightbytes")
         }
@@ -432,8 +435,8 @@ fn rule_line(rule: &Rule) -> String {
         Travel::AsOneInteger => "travels in one integer register of its exact size",
         Travel::ByReference => "travels as the address of a copy",
         Travel::InMemory => "travels in the argument area",
-        Travel::InMemoryAndDrain => {
-            "travels in the argument area and uses up the integer registers it did not take"
+        Travel::InMemoryAndSpend => {
+            "travels in the argument area and spends an integer register for each of its words"
         }
     };
     let short = match rule.short {
