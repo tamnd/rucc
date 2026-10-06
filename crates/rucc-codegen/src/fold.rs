@@ -144,6 +144,7 @@ use rucc_mir as mir;
 use rucc_target::{CodeModel, FrameInsts, MachineInsts, Role};
 
 use crate::changes::{Changes, Plan, Reads};
+use crate::elsewhere::Elsewhere;
 
 /// The addresses [`crate::finish`] has still to write a displacement into.
 ///
@@ -733,6 +734,148 @@ pub fn tables(func: &mut mir::Func, insts: &FrameInsts, names: &mut Interner) ->
         }
     }
     rewritten
+}
+
+/// The AArch64 loads and stores that can take the low twelve bits of a symbol's address, each with
+/// how many bytes it reads or writes, which is what the twelve bits are scaled by.
+const LOW_BITS: [(&str, u32); 21] = [
+    ("ldr_8", 1),
+    ("ldr_16", 2),
+    ("ldr_32", 4),
+    ("ldr_64", 8),
+    ("ldrs_8_32", 1),
+    ("ldrs_8_64", 1),
+    ("ldrs_16_32", 2),
+    ("ldrs_16_64", 2),
+    ("ldrs_32_64", 4),
+    ("ldr_bit", 1),
+    ("str_bit", 1),
+    ("str_8", 1),
+    ("str_16", 2),
+    ("str_32", 4),
+    ("str_64", 8),
+    ("ldr_f32", 4),
+    ("ldr_f64", 8),
+    ("ldr_f128", 16),
+    ("str_f32", 4),
+    ("str_f64", 8),
+    ("str_f128", 16),
+];
+
+/// Puts the low twelve bits of a variable's address into the loads and stores that read through
+/// it on AArch64, and gives back how many addresses that took.
+///
+/// The address of a variable is `adrp` for its page and an `add` of the low twelve bits, and a load
+/// through it is a third instruction. A load can carry the low bits itself, which is what gcc
+/// writes, so the `add` goes and the page goes straight to the load:
+///
+/// ```text
+///   adrp x0, g                       adrp x0, g
+///   add  x0, x0, :lo12:g       ->    ldr  w0, [x0, :lo12:g]
+///   ldr  w0, [x0]
+/// ```
+///
+/// All the readers or none of them, for the reason [`addresses`] gives: one reader that cannot
+/// take it keeps the `add`, and then the others save nothing. A reader is one of [`LOW_BITS`] that
+/// reads the address as its base and nothing else, with no index beside it.
+///
+/// The load scales the twelve bits by the size it reads, so the variable has to be aligned to that
+/// size and the reader's offset into it a multiple of it, or the link cannot write the field. And
+/// `adrp` answers for the page of the one address it was given, so each reader has to land on that
+/// page. A reader at the same offset as every other one is written with the offset on both, as
+/// gcc writes `adrp x0, g+8` and `[x0, :lo12:g+8]`. Readers at different offsets share the page of
+/// the variable itself when they are all inside its alignment, which no page boundary can split.
+pub fn pages(func: &mut mir::Func, names: &mut Interner, elsewhere: &Elsewhere) -> usize {
+    let opcode =
+        |names: &mut Interner, name: &str| mir::Opcode::new(names.intern(&format!("a64.{name}")));
+    let address = opcode(names, "addr_64");
+    let page = opcode(names, "page_64");
+    let sizes: Map<mir::Opcode, u32> =
+        LOW_BITS.iter().map(|&(name, size)| (opcode(names, name), size)).collect();
+    let mut addresses = Vec::new();
+    let mut reads: Map<mir::Reg, Vec<(mir::Inst, usize)>> = Map::default();
+    let mut writes: Map<mir::Reg, usize> = Map::default();
+    for block in func.blocks().collect::<Vec<_>>() {
+        for inst in func.insts(block).collect::<Vec<_>>() {
+            if func[inst].opcode == address {
+                addresses.push(inst);
+            }
+            for (at, operand) in func[func[inst].operands].iter().enumerate() {
+                if operand.role == Role::Use {
+                    reads.entry(operand.reg).or_default().push((inst, at));
+                } else {
+                    *writes.entry(operand.reg).or_default() += 1;
+                }
+            }
+        }
+    }
+    let mut folded = 0;
+    for inst in addresses {
+        let Some(symbol) = func[inst].symbol else { continue };
+        let Some(&written) = func[func[inst].operands].first() else { continue };
+        let Some(align) = elsewhere.aligned(symbol) else { continue };
+        // A register written anywhere else may be read as something other than this address.
+        if writes.get(&written.reg) != Some(&1) {
+            continue;
+        }
+        let Some(readers) = reads.get(&written.reg).filter(|readers| !readers.is_empty()) else {
+            continue;
+        };
+        let Some(offsets) = readers
+            .iter()
+            .map(|&(reader, at)| low_bits(func, &sizes, readers, reader, at, align))
+            .collect::<Option<Vec<_>>>()
+        else {
+            continue;
+        };
+        let first = offsets[0].0;
+        let room = i64::from(align.min(4096));
+        let addend = if offsets.iter().all(|&(disp, _)| disp == first) {
+            first
+        } else if offsets
+            .iter()
+            .all(|&(disp, size)| disp >= 0 && i64::from(disp) + i64::from(size) <= room)
+        {
+            0
+        } else {
+            continue;
+        };
+        let span = func.span(inst);
+        let mem = mir::Mem { disp: addend, ..mir::Mem::of(symbol) };
+        let made =
+            func.build_loose(page).at(span).def(written.reg, written.class).mem(mem).finish();
+        func.insert_before(inst, made);
+        func.remove_inst(inst);
+        for &(reader, _) in readers {
+            let Some(mem) = func[reader].mem else { continue };
+            func[mem].symbol = Some(symbol);
+        }
+        folded += 1;
+    }
+    folded
+}
+
+/// The offset into the variable and the size of one reader of its address, when the reader can
+/// take the low twelve bits of it. See [`pages`].
+fn low_bits(
+    func: &mir::Func,
+    sizes: &Map<mir::Opcode, u32>,
+    readers: &[(mir::Inst, usize)],
+    reader: mir::Inst,
+    at: usize,
+    align: u32,
+) -> Option<(i32, u32)> {
+    let size = *sizes.get(&func[reader].opcode)?;
+    let amode = func[func[reader].mem?];
+    let alone = readers.iter().filter(|&&(other, _)| other == reader).count() == 1;
+    let plain = amode.index.is_none()
+        && amode.symbol.is_none()
+        && amode.block.is_none()
+        && amode.table.is_none()
+        && amode.segment.is_none();
+    let fits = align >= size && amode.disp % i32::try_from(size).ok()? == 0;
+    (alone && plain && fits && amode.base.map(usize::from) == Some(at))
+        .then_some((amode.disp, size))
 }
 
 /// The one table's rewrite, or nothing when its instructions are not the four it expects.

@@ -43,7 +43,7 @@ use rucc_sema::{
     StrId, Tast, Version, Visibility,
 };
 use rucc_target::{Convention, ObjectFormat, TargetInfo};
-use rucc_types::{TypeId, TypeKind, Types, compatible, is_complex, is_scalar};
+use rucc_types::{ArrayLen, TypeId, TypeKind, Types, compatible, is_complex, is_scalar};
 
 use crate::abi::{self, Plan};
 use crate::aliasing;
@@ -963,7 +963,15 @@ impl Unit<'_> {
             None => {
                 let natural = repr::align_of(self.types, self.target, ty);
                 if state == Definition::Declared {
-                    natural
+                    // `extern long arr[]` has no size here and so no layout, but whatever object
+                    // defines it is at least as aligned as its element, which is what lets a read
+                    // of `arr[3]` fold its offset into the access the way gcc does.
+                    match self.types.kind(self.types.canonical(ty)) {
+                        TypeKind::Array { elem, len: ArrayLen::Unknown } => {
+                            repr::align_of(self.types, self.target, elem)
+                        }
+                        _ => natural,
+                    }
                 } else {
                     let thread = duration == StorageDuration::Thread;
                     repr::static_align(self.types, self.target, ty, natural, thread)

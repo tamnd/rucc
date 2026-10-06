@@ -510,6 +510,7 @@ static TEXT: &[(&str, &[Written])] = &[
     // offset into that page.
     ("lea_64", &[spell("add", &[Reg(0, X), Base, Disp])]),
     ("addr_64", &[spell("adrp", &[Reg(0, X), Page]), spell("add", &[Reg(0, X), Reg(0, X), Low])]),
+    ("page_64", &[spell("adrp", &[Reg(0, X), Page])]),
     ("adr_64", &[spell("adr", &[Reg(0, X), Symbol])]),
     ("got_64", &[spell("adrp", &[Reg(0, X), GotPage]), spell("ldr", &[Reg(0, X), GotSlot(0)])]),
     // A pointer this image holds, which is where COFF keeps the address of a name a DLL or

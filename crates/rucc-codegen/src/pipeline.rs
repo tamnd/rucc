@@ -888,6 +888,12 @@ pub fn compile_recording(
         fold::absolute(&mut func, machine.insts, names);
         fold::tables(&mut func, machine.insts, names);
     }
+    // AArch64's loads and stores carry the low bits of a variable's address, so its `add` goes.
+    // After the folds above, which have nothing to say about a symbol on this machine, and before
+    // allocation, while each address is one register written once.
+    if std::ptr::eq(machine.selector, &select::aarch64::SELECTOR) {
+        fold::pages(&mut func, names, elsewhere);
+    }
 
     // Whether this function carries a canary is the front end's answer, because what
     // `-fstack-protector` asks about is the kind of local a function has and the types are gone by
