@@ -161,13 +161,13 @@ pub(crate) fn calls(name_: &str, callee: Option<&str>) -> Vec<u8> {
     out
 }
 
-/// An object with the function `_start`, which calls the undefined weak functions `a` and `b`,
+/// An object with the function `_start`, which calls the two undefined weak functions `callees`,
 /// both of the type `() -> ()`, in that order.
-pub(crate) fn weak_caller() -> Vec<u8> {
+pub(crate) fn weak_caller(callees: [&str; 2]) -> Vec<u8> {
     let mut out = b"\0asm\x01\0\0\0".to_vec();
     section(&mut out, 1, &[1, 0x60, 0, 0]);
     let mut imports = vec![2];
-    for field in ["a", "b"] {
+    for field in callees {
         name(&mut imports, "env");
         name(&mut imports, field);
         imports.extend([0, 0]);
