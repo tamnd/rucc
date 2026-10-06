@@ -1106,19 +1106,16 @@ fn optimize(
 /// leaves a DLL by an export table the linker is handed. Neither has an object writer here yet, so
 /// what this does is decline to say the ELF answer about them.
 ///
-/// `-fno-pic` reaches the back end on x86-64 and i386 ELF only, which are the rows that write
-/// anything different for it (tamnd/rucc#2276, and #2247 for i386, whose position independent code
-/// keeps the table's address in a register the other code does not need). Everywhere else the position independent executable's code
-/// is what it gets, and that is still right for a link that is not position independent: it reads
-/// some names out of a table the linker then has to build, which costs a load and is correct.
+/// `-fno-pic` reaches the back end on every ELF machine (tamnd/rucc#2276, and #2247 for i386,
+/// whose position independent code keeps the table's address in a register the other code does not
+/// need). The linker copies a variable another object defines into an executable that is not
+/// position independent, so a variable this file only declares is reached directly, as gcc does on
+/// AArch64 with `adrp` and a `:lo12:` load where a position independent executable reads it out of
+/// the table.
 fn replaceable(target: &TargetInfo, opts: &Options) -> IrPic {
     match (target.tuple.os().object_format(), opts.pic) {
         (Some(ObjectFormat::Elf), Pic::Library) => IrPic::Library,
-        (Some(ObjectFormat::Elf), Pic::Absolute)
-            if matches!(target.tuple.arch(), Arch::X86_64 | Arch::X86) =>
-        {
-            IrPic::Absolute
-        }
+        (Some(ObjectFormat::Elf), Pic::Absolute) => IrPic::Absolute,
         _ => IrPic::Executable,
     }
 }
@@ -1423,17 +1420,25 @@ fn generate(
     // that is said, which is why the flag reaches this far down. See #756. The format decides the
     // other half, since a table only exists on a format that has one to reach through.
     //
-    // Only x86-64 copies a variable into the executable for a reference from the instruction
-    // pointer, so on the other machines a variable this file only declares is read from the table.
+    // Only x86-64 copies a variable into a position independent executable for a reference from
+    // the instruction pointer, so there on the other machines a variable this file only declares
+    // is read from the table.
     //
-    // i386 copies too, but only in an executable that is not position independent: its position
-    // independent code reads a variable another object defines out of a slot, which is what gcc
-    // writes there. That code reaches every name from the table's address in a register, since
-    // i386 has no addressing relative to the instruction pointer. See tamnd/rucc#2247.
+    // Every machine copies in an executable that is not position independent, which is `-fno-pic`
+    // and a kernel, and gcc reaches the variable directly there: `adrp` and a `:lo12:` load on
+    // AArch64, and on i386 an absolute address. i386 position independent code reads a variable
+    // another object defines out of a slot, and reaches every name from the table's address in a
+    // register, since i386 has no addressing relative to the instruction pointer. See
+    // tamnd/rucc#2247.
     let pic = replaceable(target, opts);
     let i386 = target.tuple.arch() == Arch::X86;
-    let copies = target.tuple.arch() == Arch::X86_64 || (i386 && pic == IrPic::Absolute);
+    let copies = target.tuple.arch() == Arch::X86_64 || pic == IrPic::Absolute;
     let elsewhere = Elsewhere::of(module, pic, target.object_format, copies);
+    let elsewhere = if target.tuple.arch() == Arch::Aarch64 && pic == IrPic::Absolute {
+        elsewhere.weak_from_table(module)
+    } else {
+        elsewhere
+    };
     let elsewhere = if i386
         && pic != IrPic::Absolute
         && target.tuple.os().object_format() == Some(ObjectFormat::Elf)
