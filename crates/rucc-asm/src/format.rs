@@ -643,13 +643,14 @@ impl Directives {
     /// What is said once, after every function.
     ///
     /// `property` is what the file says it was built to have checked, which is written on the one
-    /// format that has somewhere to put it and is nothing on the other two, and so is `ident`,
-    /// which is what made the file and goes where gcc writes its own.
-    pub fn end(self, out: &mut String, property: Property, ident: Option<&str>) {
+    /// format that has somewhere to put it and is nothing on the other two, padded to `align`,
+    /// which is the width of an address. So is `ident`, which is what made the file and goes where
+    /// gcc writes its own.
+    pub fn end(self, out: &mut String, property: Property, align: u32, ident: Option<&str>) {
         match self {
             Directives::Elf => {
                 if property.any() {
-                    self.property(out, property);
+                    self.property(out, property, align);
                 }
                 if let Some(ident) = ident {
                     let _ = writeln!(out, "\t.ident\t\"{ident}\"");
@@ -669,29 +670,37 @@ impl Directives {
         }
     }
 
-    /// The note that says what the file was built to have checked.
+    /// The notes that say what the file was built to have checked and what it needs of the link.
     ///
     /// A note is how long its name is, how long its description is, which kind it is, the name and
-    /// then the description, and this kind's description is a list of properties. The one written
-    /// here is the feature word, whose bits are what `-fcf-protection=` asked for.
+    /// then the description, and this kind's description is a list of properties. One is the
+    /// feature word, whose bits are what `-fcf-protection=` asked for, and the other the word of
+    /// what the file needs, and each that has anything in it is a note of its own, as gcc writes
+    /// them.
     ///
     /// The lengths count the padding that follows what they measure, which is why the description
-    /// is sixteen bytes for a property of twelve. Nothing between the name and the description,
-    /// because twelve bytes of header and four of name is already a multiple of eight, and the four
-    /// zero bytes at the end are what carries it to the next one. Written as numbers rather than as
-    /// distances between labels, which is what gcc writes, because the numbers are fixed by there
-    /// being exactly one property in it and a label in a listing is another name that can collide.
-    fn property(self, out: &mut String, property: Property) {
+    /// is sixteen bytes for a property of twelve in a 64 bit file. Nothing between the name and the
+    /// description, because twelve bytes of header and four of name is already a multiple of
+    /// eight, and the four zero bytes at the end are what carries it to the next one. Written as
+    /// numbers rather than as distances between labels, which is what gcc writes, because the
+    /// numbers are fixed by there being exactly one property in each and a label in a listing is
+    /// another name that can collide.
+    fn property(self, out: &mut String, property: Property, align: u32) {
+        let size = 12u32.next_multiple_of(align);
         out.push_str("\t.section\t.note.gnu.property,\"a\",@note\n");
-        out.push_str("\t.p2align\t3\n");
-        let _ = writeln!(out, "\t.long\t4");
-        let _ = writeln!(out, "\t.long\t16");
-        let _ = writeln!(out, "\t.long\t5");
-        let _ = writeln!(out, "\t.asciz\t\"GNU\"");
-        let _ = writeln!(out, "\t.long\t{:#x}", Property::X86_FEATURES);
-        let _ = writeln!(out, "\t.long\t4");
-        let _ = writeln!(out, "\t.long\t{:#x}", property.features);
-        let _ = writeln!(out, "\t.long\t0");
+        let _ = writeln!(out, "\t.p2align\t{}", align.trailing_zeros());
+        for (key, word) in property.each() {
+            let _ = writeln!(out, "\t.long\t4");
+            let _ = writeln!(out, "\t.long\t{size}");
+            let _ = writeln!(out, "\t.long\t5");
+            let _ = writeln!(out, "\t.asciz\t\"GNU\"");
+            let _ = writeln!(out, "\t.long\t{key:#x}");
+            let _ = writeln!(out, "\t.long\t4");
+            let _ = writeln!(out, "\t.long\t{word:#x}");
+            if size > 12 {
+                let _ = writeln!(out, "\t.long\t0");
+            }
+        }
     }
 }
 
@@ -1012,7 +1021,7 @@ mod tests {
         // The absence of this is what makes it executable, so the test is that it is there
         // rather than that it is spelled a particular way.
         let mut out = String::new();
-        Directives::Elf.end(&mut out, Property::default(), None);
+        Directives::Elf.end(&mut out, Property::default(), 8, None);
         assert!(out.contains(".note.GNU-stack"), "{out}");
         assert!(!out.contains(".note.gnu.property"), "nothing was asked to be checked");
     }
@@ -1026,7 +1035,7 @@ mod tests {
     #[test]
     fn an_elf_file_says_what_it_was_built_to_have_checked() {
         let mut out = String::new();
-        Directives::Elf.end(&mut out, Property { features: Property::IBT }, None);
+        Directives::Elf.end(&mut out, Property { features: Property::IBT, needed: 0 }, 8, None);
         let lines: Vec<&str> = out.lines().collect();
         assert_eq!(
             lines,
@@ -1049,10 +1058,10 @@ mod tests {
     #[test]
     fn an_i386_coff_file_says_it_is_safe_for_safeseh() {
         let mut out = String::new();
-        Directives::CoffI386.end(&mut out, Property::default(), None);
+        Directives::CoffI386.end(&mut out, Property::default(), 4, None);
         assert_eq!(out, "\t.set\t@feat.00, 1\n");
         let mut out = String::new();
-        Directives::Coff.end(&mut out, Property::default(), None);
+        Directives::Coff.end(&mut out, Property::default(), 8, None);
         assert!(out.is_empty(), "x86-64 has no SafeSEH: {out}");
     }
 
@@ -1072,7 +1081,7 @@ mod tests {
                 "",
             );
             directives.close(&mut out, "f");
-            directives.end(&mut out, Property::default(), None);
+            directives.end(&mut out, Property::default(), 8, None);
             assert!(out.ends_with('\n'), "{format:?} left a line unfinished");
         }
     }

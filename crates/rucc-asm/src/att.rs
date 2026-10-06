@@ -252,7 +252,9 @@ fn listing(
             let _ = writeln!(writer.out, "\t.ascii\t\"{option}\"");
         }
     }
-    writer.directives.end(&mut writer.out, property, ident);
+    // Padded to the width of an address, which is four bytes on i386 and eight everywhere else.
+    let align = if writer.arch == Arch::X86 { 4 } else { 8 };
+    writer.directives.end(&mut writer.out, property, align, ident);
     Ok(writer.out)
 }
 

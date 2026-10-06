@@ -40,7 +40,7 @@
 
 use rucc_base::Symbol;
 use rucc_base::hash::Set;
-use rucc_ir::{AttrSet, Dll, Extra, Linkage, Module, Opcode, Pic, Visibility};
+use rucc_ir::{AttrSet, Datum, Dll, Extra, Linkage, Module, Opcode, Pic, Visibility};
 use rucc_target::ObjectFormat;
 
 /// The names whose address only the linker knows.
@@ -238,8 +238,34 @@ impl Elsewhere {
         //
         // Only where the linker copies variables, which is the one machine the driver sends this
         // for. Anywhere else the same code as an executable is what this answers, and it is right.
+        //
+        // Except for a name a declaration said `nodirect_extern_access` of, which is a library's
+        // promise that the name is in the library and stays there, protected, so it is never
+        // copied and its address is read out of a slot even here, as gcc does. A hidden one is
+        // in this image whatever was said, and gcc reaches it directly.
+        let indirect = module
+            .funcs()
+            .filter(|&id| {
+                let func = &module[id];
+                func.is_declaration()
+                    && func.attrs.set.contains(AttrSet::NODIRECT)
+                    && func.visibility == Visibility::Default
+            })
+            .map(|id| module[id].name);
+        let indirect = indirect.chain(
+            module
+                .globals()
+                .filter(|&id| {
+                    let global = &module[id];
+                    global.is_declaration()
+                        && global.indirect
+                        && global.tls.is_none()
+                        && global.visibility == Visibility::Default
+                })
+                .map(|id| module[id].name),
+        );
         if pic == Pic::Absolute && copies && format == ObjectFormat::Elf {
-            return Self::default();
+            return Self { names: indirect.collect(), ..Self::default() };
         }
         // A declared function marked hidden or protected is promised to be in this image, so the
         // distance to it is one the linker has. The kernel's compressed loader is built `-fPIE`
@@ -279,7 +305,58 @@ impl Elsewhere {
             .aliases()
             .filter(|&id| pic.replaceable(module[id].linkage, module[id].visibility))
             .map(|id| module[id].name);
-        funcs.map(|id| module[id].name).chain(globals).chain(aliases).collect()
+        funcs.map(|id| module[id].name).chain(globals).chain(aliases).chain(indirect).collect()
+    }
+
+    /// Whether the file says it needs every name another object defines reached through the
+    /// global offset table, which gcc says in a property of its own beside the feature word once a
+    /// name it has said `nodirect_extern_access` of is defined here or used, hidden or not. A
+    /// declaration nothing uses is not asked about, and gcc says nothing for it.
+    ///
+    /// The linker reads it to keep from copying a protected variable into an executable whose
+    /// code may reach one directly, and the loader to refuse to put such an executable together
+    /// with a library that was built expecting it would be.
+    #[must_use]
+    pub fn needs_indirect(module: &Module) -> bool {
+        let said: Set<Symbol> = module
+            .funcs()
+            .filter(|&id| module[id].attrs.set.contains(AttrSet::NODIRECT))
+            .map(|id| module[id].name)
+            .chain(module.globals().filter(|&id| module[id].indirect).map(|id| module[id].name))
+            .collect();
+        if said.is_empty() {
+            return false;
+        }
+        let defined = module
+            .funcs()
+            .filter(|&id| !module[id].is_declaration())
+            .map(|id| module[id].name)
+            .chain(
+                module
+                    .globals()
+                    .filter(|&id| !module[id].is_declaration())
+                    .map(|id| module[id].name),
+            );
+        let used = module.funcs().flat_map(|id| {
+            let func = &module[id];
+            func.blocks().flat_map(|block| func.insts(block)).filter_map(|inst| {
+                match func[inst].extra {
+                    Extra::Call(info) => func[info].callee,
+                    Extra::Symbol(name) => Some(name),
+                    _ => None,
+                }
+            })
+        });
+        let held = module.globals().flat_map(|id| {
+            let init = module[id].init.map(|list| &module[list]).unwrap_or_default();
+            init.iter().filter_map(|datum| match *datum {
+                Datum::Addr(reloc) | Datum::Away(reloc) | Datum::Apart { to: reloc, .. } => {
+                    Some(module[reloc].symbol)
+                }
+                _ => None,
+            })
+        });
+        defined.chain(used).chain(held).any(|name| said.contains(&name))
     }
 
     /// Whether the address of that name has to be read out of the global offset table.
@@ -794,5 +871,34 @@ mod tests {
             assert_eq!(elsewhere.slot(names.intern(name)), None, "{name}");
         }
         assert!(elsewhere.referred(&module).is_empty());
+    }
+
+    /// A name a declaration said `nodirect_extern_access` of is read out of the table in position
+    /// dependent code as well, unless it is hidden, and a file that only declares it and never
+    /// uses it says nothing about needing that.
+    #[test]
+    fn a_name_kept_from_direct_access_is_read_out_of_the_table_everywhere() {
+        let mut names = Interner::new();
+        let mut module = module(&mut names);
+        let mut far = Global::new(names.intern("far"), 4, 4);
+        far.indirect = true;
+        module.add_global(far);
+        let mut near = Global::new(names.intern("near"), 4, 4);
+        near.indirect = true;
+        near.visibility = Visibility::Hidden;
+        module.add_global(near);
+        let mut called = Func::new(names.intern("called"), Signature::new());
+        called.attrs.set |= AttrSet::NODIRECT;
+        module.add_func(called);
+        for pic in [Pic::Absolute, Pic::Executable, Pic::Library] {
+            let elsewhere = Elsewhere::of(&module, pic, ObjectFormat::Elf, true);
+            assert!(elsewhere.holds(names.intern("far")), "{pic:?}");
+            assert!(elsewhere.holds(names.intern("called")), "{pic:?}");
+            assert!(!elsewhere.holds(names.intern("near")), "{pic:?}");
+        }
+        // Not anything else, which is still reached directly in position dependent code.
+        let elsewhere = Elsewhere::of(&module, Pic::Absolute, ObjectFormat::Elf, true);
+        assert!(!elsewhere.holds(names.intern("exit")));
+        assert!(!Elsewhere::needs_indirect(&module));
     }
 }

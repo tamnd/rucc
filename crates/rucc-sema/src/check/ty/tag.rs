@@ -309,6 +309,7 @@ impl Checker<'_> {
             self.no_reordered(&[field.attrs, specs], false);
             self.ms_hooked(&[field.attrs, specs], false);
             self.reset_kept(&[field.attrs, specs], None, at);
+            self.extern_access(&[field.attrs, specs], None, at);
             self.assume_misplaced(&[field.attrs, specs], false, at);
             fields.push((decl, at));
         }

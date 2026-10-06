@@ -359,7 +359,12 @@ impl Checker<'_> {
                 .then(beside.inlining)
                 .then(self.pragma_optimize(specs.options))
                 .with(DeclFlags::DECLARED_INLINE, specs.func.has(FuncSpecs::INLINE))
-                | self.handler(&[specs.attrs], ty, self.is_naked(specs.attrs)),
+                | self.handler(&[specs.attrs], ty, self.is_naked(specs.attrs))
+                | self.extern_access(
+                    &[specs.attrs],
+                    Some(linkage == Linkage::External),
+                    specs.span,
+                ),
             // The specifiers only, for the reason `noreturn` above reads them only. What a
             // definition says here is almost always `dllexport`, and `__declspec` is written in
             // front of the declaration, which is where the specifiers are.
@@ -887,7 +892,12 @@ impl Checker<'_> {
                     ty,
                     self.is_naked(specs.attrs) || self.is_naked(item.attrs),
                 )
-                | reset,
+                | reset
+                | self.extern_access(
+                    &[specs.attrs, item.attrs],
+                    Some(linkage == Linkage::External),
+                    specs.span,
+                ),
             // Both places, for the reason `noreturn` above reads both. `__declspec` is written
             // in front and the attribute spelling is as often written after the declarator.
             dll: self.dll(specs.attrs) | self.dll(item.attrs),
@@ -1095,6 +1105,7 @@ impl Checker<'_> {
         self.strict_flex_refused(&[specs.attrs, item.attrs], Some(name));
         self.ms_hooked(&[specs.attrs, item.attrs], false);
         self.reset_kept(&[specs.attrs, item.attrs], None, span);
+        self.extern_access(&[specs.attrs, item.attrs], None, span);
         self.record_fentry(None, &[specs.attrs, item.attrs], DeclKind::Type);
         self.record_symver(None, &[specs.attrs, item.attrs], StorageDuration::Static, span);
         self.resolver(&[specs.attrs, item.attrs], DeclKind::Type, span);

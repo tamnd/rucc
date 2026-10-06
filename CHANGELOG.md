@@ -69,6 +69,7 @@ Tagged but never published, because the release gate stopped on a bare threshold
 ### Added
 
 - A new pass, `rangeswitch`, turns a branch on comparisons of one value against constants that are too far apart for one bit test into a `switch` on the value, at `-O2` and `-O3` (#2987). It runs just before `rangetest` and takes the chains `rangetest` could only write as one test per interval, all run every time. PostgreSQL's `IsSharedRelation` is three chains of object ids between 1213 and 6303, and each is now a `switch` that the switch lowering makes a few comparisons and a bit test, which is what gcc and clang do. A chain is rewritten when the lowering would make fewer clusters of it than it has intervals, the rule gcc's `if-to-switch` pass uses.
+- `__attribute__((nodirect_extern_access))`, gcc 12's attribute for a name a library keeps to itself, is read on x86 (#8). A variable or a function the file only declares, said to be one, has its address read out of the global offset table even under `-fno-pic`: `v@GOTPCREL(%rip)` on x86-64 and `v@GOT` with no base register on i386. Calls, definitions and hidden declarations are reached as before, as in gcc. Once such a name is defined or used, the file says so in a `GNU_PROPERTY_1_NEEDED` note after the feature word, in the listing and in the object rucc writes itself. A name without external linkage, a member, a typedef and a parameter are ignored with gcc's warnings, and an argument is refused with `E0838`.
 
 ### Changed
 

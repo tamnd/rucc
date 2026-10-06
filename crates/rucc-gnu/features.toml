@@ -768,6 +768,16 @@ tests = ["rucc::a_variable_the_startup_code_leaves_alone_is_in_a_section_of_its_
 notes = "A variable with an initializer goes in `.persistent`, a section the loader fills and the startup code never copies into again, as gcc writes it on ELF, and in `.persistent.` and its name under `-fdata-sections`, in the listing and in the object the compiler writes itself. On anything but a variable it is ignored with gcc's warning, and so on a `const` one, on one with no initializer, after a `section` or a `noinit` written before it, and a `section` after it is ignored for it, all in gcc's words. On an automatic variable it is refused with `E0837`, and an argument with `E0836`. A thread-local one is in `.tdata` without a word, as in gcc. Only ELF has the section."
 
 [[feature]]
+name = "nodirect_extern_access"
+kind = "attribute"
+gcc_version = "12.0"
+status = "implemented"
+targets = ["x86-64", "x86"]
+used_by = []
+tests = ["rucc::a_name_kept_from_direct_access_is_read_out_of_the_table", "rucc::the_file_says_it_needs_names_reached_indirectly", "rucc::the_object_has_the_same_note", "rucc::a_program_kept_from_direct_access_runs", "rucc::nodirect_extern_access_is_checked_in_gcc_s_words"]
+notes = "A variable or a function the file only declares, said to be one, has its address read out of the global offset table even under `-fno-pic`, as gcc does on ELF: `v@GOTPCREL(%rip)` on x86-64 and `v@GOT` with no base register on i386, so the linker never copies the variable into the executable and a library may keep it protected. A call is the call it was, a definition is reached the way it was, and so is a hidden declaration, as in gcc. Once a name said to be one is defined, used or written into an image, the file says it needs that in a `GNU_PROPERTY_1_NEEDED` note of its own after the feature word, padded to the width of an address, in the listing and in the object the compiler writes itself. A declaration nothing uses says nothing, as in gcc. On a name without external linkage it is ignored with gcc's warning about public objects, on a member, a typedef or a parameter with gcc's warning, and an argument is refused with `E0838`. Read on x86 alone, and only ELF has the note."
+
+[[feature]]
 name = "visibility"
 kind = "attribute"
 gcc_version = "3.3"

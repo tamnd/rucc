@@ -1405,6 +1405,9 @@ fn generate(
     } else {
         elsewhere
     };
+    // Asked of the module the code is made from, since a use the optimizer took away is one gcc
+    // never asks about either.
+    let indirect = Elsewhere::needs_indirect(module);
 
     // A function written `cold` goes in `.text.unlikely` with the cold parts of the others, which
     // is gcc's `default_function_section`, and so does a `static` function only those call. Only
@@ -1530,11 +1533,17 @@ fn generate(
     // description both of them read and every register in it has been allocated.
     let unwind = opts.unwinds();
     match opts.emit {
-        EmitKind::Asm => {
-            rucc_asm::print(&funcs, &globals, &aliases, names, target, unwind, output(opts, target))
-                .map(|listing| Artifact::Text(sixteen(opts, listing)))
-                .map_err(refused)
-        }
+        EmitKind::Asm => rucc_asm::print(
+            &funcs,
+            &globals,
+            &aliases,
+            names,
+            target,
+            unwind,
+            output(opts, target, indirect),
+        )
+        .map(|listing| Artifact::Text(sixteen(opts, listing)))
+        .map_err(refused),
         // An executable is an object as far as this gets: one is what each file of a link
         // contributes, and the linker is what turns them into the other. An archive is the same
         // again, with the archive writer in place of the linker.
@@ -1547,7 +1556,7 @@ fn generate(
                     names,
                     target,
                     unwind,
-                    output(opts, target),
+                    output(opts, target, indirect),
                 );
                 *assembly = Some(sixteen(opts, listing.map_err(refused)?));
             }
@@ -1578,9 +1587,16 @@ fn generate(
                 // personality routine and the call site table with `.cfi_personality` and
                 // `.cfi_lsda`, writes the table in `.gcc_except_table`, and the reader keeps both.
                 let print = if opts.debug_info { rucc_asm::print_marked } else { rucc_asm::print };
-                let listing =
-                    print(&funcs, &globals, &aliases, names, target, unwind, output(opts, target))
-                        .map_err(refused)?;
+                let listing = print(
+                    &funcs,
+                    &globals,
+                    &aliases,
+                    names,
+                    target,
+                    unwind,
+                    output(opts, target, indirect),
+                )
+                .map_err(refused)?;
                 let listing = sixteen(opts, listing);
                 let arch = target.tuple.arch();
                 let flags = rucc_asm::Flags {
@@ -1639,9 +1655,15 @@ fn generate(
             }
             // A format with no writer is a target this compiler is behind on and anything else
             // the writer refused is a bug here, and the two are not the same news to get.
-            let bytes =
-                rucc_object::write(&text, &data, &aliases, target, output(opts, target), &info)
-                    .map_err(wrote)?;
+            let bytes = rucc_object::write(
+                &text,
+                &data,
+                &aliases,
+                target,
+                output(opts, target, indirect),
+                &info,
+            )
+            .map_err(wrote)?;
             // Asked of the writer rather than worked out from the same three values here, so that
             // what the archive's index says and what is in the member cannot come apart. It is
             // wanted only by `--emit=archive` and is cheap enough that the other two kinds are not
@@ -2244,7 +2266,10 @@ fn sixteen(opts: &Options, listing: String) -> String {
 /// The feature word is empty on a machine whose bits these are not. It is the x86 one, and a target
 /// that wanted its control flow checked would want a property of its own with a key of its own, so
 /// writing this one there would be recording something untrue rather than recording nothing.
-fn output(opts: &Options, target: &TargetInfo) -> rucc_object::Output {
+///
+/// `indirect` is whether the module reaches what another object defines only through the table,
+/// which is [`Elsewhere::needs_indirect`], and is said on both x86 machines, as gcc does.
+fn output(opts: &Options, target: &TargetInfo, indirect: bool) -> rucc_object::Output {
     let mut features = 0;
     if target.tuple.arch() == Arch::X86_64 {
         if opts.control.branch() {
@@ -2254,12 +2279,14 @@ fn output(opts: &Options, target: &TargetInfo) -> rucc_object::Output {
             features |= rucc_object::Property::SHSTK;
         }
     }
+    let x86 = matches!(target.tuple.arch(), Arch::X86_64 | Arch::X86);
+    let needed = if x86 && indirect { rucc_object::Property::INDIRECT_EXTERN_ACCESS } else { 0 };
     rucc_object::Output {
         sections: rucc_object::Sections {
             functions: opts.function_sections,
             data: opts.data_sections,
         },
-        property: rucc_object::Property { features },
+        property: rucc_object::Property { features, needed },
         isa: opts.isa,
         ident: opts.ident.then_some(IDENT),
     }

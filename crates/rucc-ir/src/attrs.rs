@@ -265,6 +265,10 @@ impl AttrSet {
     /// room in front of its label for the longer jump that one goes to, from
     /// `__attribute__((ms_hook_prologue))`.
     pub const MS_HOOK: Self = Self(1 << 38);
+    /// The function's address is read out of the global offset table where it is only declared,
+    /// even in position dependent code, from `__attribute__((nodirect_extern_access))`. A call to
+    /// it is the call it would have been.
+    pub const NODIRECT: Self = Self(1 << 39);
 
     /// The underlying bits, for the printer and for hashing.
     #[must_use]
@@ -396,6 +400,7 @@ static NAMED: &[(AttrSet, &str)] = &[
     (AttrSet::FORCE_ALIGN, "force_align_arg_pointer"),
     (AttrSet::NO_REORDER, "no_reorder"),
     (AttrSet::MS_HOOK, "ms_hook_prologue"),
+    (AttrSet::NODIRECT, "nodirect_extern_access"),
 ];
 
 /// The pairs that cannot both be set, with their names for the message.

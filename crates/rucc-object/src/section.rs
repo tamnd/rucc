@@ -66,6 +66,11 @@ impl Sections {
 pub struct Property {
     /// The bits of the x86 feature word, which are [`Self::IBT`] and [`Self::SHSTK`].
     pub features: u32,
+    /// The bits of the word that says what the file needs of the link, which is
+    /// [`Self::INDIRECT_EXTERN_ACCESS`] and nothing else yet. That one is about the code rather
+    /// than the command line: gcc writes it once `nodirect_extern_access` was said of a name the
+    /// file defines or uses.
+    pub needed: u32,
 }
 
 impl Property {
@@ -77,11 +82,26 @@ impl Property {
     /// The shadow stack: every return in the file goes where a second copy of the return address
     /// says it should, so the machine may fault when the two disagree.
     pub const SHSTK: u32 = 2;
+    /// Which property the word of needs is, `GNU_PROPERTY_1_NEEDED`. Not the machine's, so it is
+    /// the same key on every machine, though only x86 writes it.
+    pub const NEEDED: u32 = 0xb000_8000;
+    /// The file reaches a name another object defines only through the global offset table, so the
+    /// linker must not copy a protected variable into an executable it is part of, and the loader
+    /// must not bind a protected name in a library to a copy somewhere else.
+    pub const INDIRECT_EXTERN_ACCESS: u32 = 1;
 
     /// Whether anything is recorded at all, which is whether the record is written.
     #[must_use]
     pub const fn any(self) -> bool {
-        self.features != 0
+        self.features != 0 || self.needed != 0
+    }
+
+    /// Each property there is something to record for, as its key and its word, in the order gcc
+    /// writes them, which is one note each.
+    pub fn each(self) -> impl Iterator<Item = (u32, u32)> {
+        [(Self::X86_FEATURES, self.features), (Self::NEEDED, self.needed)]
+            .into_iter()
+            .filter(|&(_, word)| word != 0)
     }
 }
 
