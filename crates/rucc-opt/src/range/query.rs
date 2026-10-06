@@ -46,8 +46,8 @@
 //! points out that the input which makes that hurt is not hypothetical: generated parsers have
 //! tens of thousands of blocks and it is why GCC has `vrp-sparse-threshold` at all. So the cache
 //! here holds one range per value at its definition and at most [`Options::refinements`]
-//! block-specific answers beside it. Past that, a query for a new block is worked out and not
-//! kept, each one charged to [`Options::budget`], and [`Counts::fallbacks`] says how often that
+//! block-specific answers beside it. Past that, a query for a new block is worked out and kept
+//! apart, each one charged to [`Options::budget`], and [`Counts::fallbacks`] says how often that
 //! happened. Once the budget is spent it gets the definition range, which is correct and less
 //! precise. The bound is a parameter rather than a constant because the right number is an
 //! empirical question and section 10.6 says GCC's numbers are a record of bug reports.
@@ -130,8 +130,8 @@ pub struct Options {
     pub recompute_depth: u32,
     /// How many block-specific answers the cache keeps for one value.
     ///
-    /// Section 10.6's one threshold. A query past it is worked out and not kept, and is charged to
-    /// the budget.
+    /// Section 10.6's one threshold. A query past it is worked out and kept apart, and is charged
+    /// to the budget.
     pub refinements: usize,
     /// How many definitions one set of queries works out before it stops narrowing.
     ///
@@ -184,8 +184,8 @@ impl Counts {
         self.hits
     }
 
-    /// How many were asked about a block past the cache's bound, and so were worked out and not
-    /// kept.
+    /// How many were asked about a block past the cache's bound, and so were answered from the
+    /// answers kept apart or worked out and kept there.
     #[must_use]
     pub const fn fallbacks(&self) -> u64 {
         self.fallbacks
@@ -286,6 +286,15 @@ pub struct Ranges<'a> {
     /// An answer that leaned on a cycle took the whole type where the cycle closed, so it is
     /// sound wherever it is read again, only perhaps wider than another way round would give.
     scratch: Map<(Value, Option<Block>), Range>,
+    /// The answers for blocks past a value's bound in the cache, kept beside it.
+    ///
+    /// Each one cost a unit of the budget to work out, so there are never more of them than the
+    /// budget, and the memory the bound is there for stays bounded. Not keeping them made every
+    /// walk that asked again walk again, and a walk asks about the values its branches test at
+    /// the blocks above it, which are past their bound too in a function that tests one value
+    /// everywhere. The budget then went on the same few answers over and over: prune took half a
+    /// second on c4's `next` and the whole `-O2` build took twice as long. tamnd/rucc#3052.
+    beyond: Map<(Value, Block), Range>,
     /// Set while a walk asks about a value an edge said was equal to the one it was asked about,
     /// so the second walk does not follow the same edge back to the first. What is worked out
     /// under it is not cached, because it is less than the walk would find on its own.
@@ -324,6 +333,7 @@ impl<'a> Ranges<'a> {
             cycles: 0,
             spent: 0,
             scratch: Map::default(),
+            beyond: Map::default(),
             equating: false,
             joins: 0,
             loops: None,
@@ -820,15 +830,18 @@ impl<'a> Ranges<'a> {
             .cache
             .get(&value)
             .is_some_and(|entry| entry.refined.len() >= self.options.refinements);
-        // Past the bound the answer is still worked out, and only not kept. A walk is a few
-        // dominators and the definitions under it are kept anyway, so what grows without the cache
-        // is time, and that is charged to the budget like a definition is. Falling back to the
+        // Past the bound the answer is still worked out, and kept apart from the cache. A walk is a
+        // few dominators, and its cost is charged to the budget like a definition is. Falling back to the
         // definition range at once lost the case a switch had pinned the value to in any function
         // that tests one value in more than a handful of blocks: `savic_read` in
         // arch/x86/kernel/apic/x2apic_savic.c has four case ranges, and its `BUILD_BUG_ON(reg !=
         // APIC_ICR)` under `case APIC_ICR` stayed in.
         if full {
             self.counts.fallbacks += 1;
+            if let Some(&kept) = self.beyond.get(&(value, block)) {
+                self.counts.hits += 1;
+                return kept;
+            }
             if self.spent >= self.options.budget {
                 self.counts.exhausted += 1;
                 return self.at_def(value);
@@ -848,6 +861,8 @@ impl<'a> Ranges<'a> {
             let entry = self.cache.entry(value).or_default();
             if entry.refined.len() < self.options.refinements {
                 entry.refined.insert(block, range);
+            } else if full {
+                self.beyond.insert((value, block), range);
             }
         } else if !self.active.is_empty() {
             self.scratch.insert((value, Some(block)), range);
@@ -2149,12 +2164,14 @@ mod tests {
         let past = Some((10, i128::from(i32::MAX)));
         assert_eq!(bounds(ranges.at(x, otherwise)), past, "past the bound it is still walked");
         assert_eq!(ranges.counts().fallbacks(), 1);
-        // Not kept, so the second time is a walk again and not a hit.
-        let hits = ranges.counts().hits();
+        // Kept apart, so the second time is a hit and costs nothing from the budget, and the
+        // cache itself did not grow.
+        let (hits, spent) = (ranges.counts().hits(), ranges.spent);
         assert_eq!(bounds(ranges.at(x, otherwise)), past);
         assert_eq!(ranges.counts().fallbacks(), 2);
         assert_eq!(ranges.cache[&x].refined.len(), 1);
-        assert!(ranges.counts().hits() > hits, "the definition range under the walk is kept");
+        assert_eq!(ranges.counts().hits(), hits + 1, "the answer past the bound is kept apart");
+        assert_eq!(ranges.spent, spent, "and asking again is free");
     }
 
     #[test]
