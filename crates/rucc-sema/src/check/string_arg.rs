@@ -170,7 +170,13 @@ impl Checker<'_> {
     /// without a prototype has parameters nobody can count, and any other number is taken.
     /// Otherwise the number has to be one of the parameters, the `...` not being one, and the
     /// parameter has to be a pointer.
-    fn names_a_pointer(&mut self, attr: Attribute, function: FunctionId, value: i128, spelled: &str) {
+    fn names_a_pointer(
+        &mut self,
+        attr: Attribute,
+        function: FunctionId,
+        value: i128,
+        spelled: &str,
+    ) {
         let warn = |checker: &mut Self, what: String| {
             checker.report(Diagnostic::warning(what, attr.span).with_code("E0703"));
         };
