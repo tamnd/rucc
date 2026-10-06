@@ -156,6 +156,7 @@ mod tests {
         let mut against_register = Vec::new();
         let mut against_constant = Vec::new();
         let mut differences = 0;
+        let mut tests = 0;
         for rule in TABLE.rules {
             let Some(rest) = rule.pattern.strip_prefix("(icmp_") else { continue };
             let (condition, operands) = rest.split_once(".i1 ").expect("a comparison takes two");
@@ -164,8 +165,12 @@ mod tests {
                 .and_then(|rest| rest.split_once(' '))
                 .map(|(width, _)| width);
             let Some(width) = width else {
-                // A comparison against zero of a difference, which takes the subtraction and is
-                // counted on its own.
+                // A comparison against zero of a difference or of an `and`, which takes the
+                // arithmetic and is counted on its own.
+                if operands.starts_with("(and.") {
+                    tests += 1;
+                    continue;
+                }
                 assert!(
                     operands.starts_with("(sub."),
                     "line {}: {} reads neither a value nor a difference first",
@@ -198,6 +203,7 @@ mod tests {
             differences, 8,
             "equal and not equal at two widths, of a register and a constant"
         );
+        assert_eq!(tests, 8, "equal and not equal at four widths, of an `and` with a constant");
     }
 
     /// The instructions the calling convention writes rather than a rule.
@@ -290,6 +296,10 @@ mod tests {
         "cmp_mi_16",
         "cmp_mi_32",
         "cmp_mi_64",
+        "test_ri_8",
+        "test_ri_16",
+        "test_ri_32",
+        "test_ri_64",
         "jcc_e",
         "jcc_ne",
         "jcc_l",
@@ -412,14 +422,14 @@ mod tests {
     /// it is whatever the program wrote that could not be read as instructions.
     const TEMPLATE: &[&str] = &["cpuid", "pause", "align", "byte", "template"];
 
-    /// The rotates and the test against a constant, which a template writes and nothing else does.
+    /// The rotates, which a template writes and nothing else does.
     ///
     /// A rotate is a term the IR could have, and does not yet: C spells one as two shifts and an or.
     /// The rules put those back together as a rotate left by a constant at thirty two and sixty four
-    /// bits, which is what hashes and ciphers write, so those two are not here. A test against a constant is an and whose answer is
-    /// thrown away, and the layout writes a comparison for that rather than this. So what reaches
-    /// one of these is a program that wrote the name, which is what tcc's byte swap and its copy of
-    /// `memcpy` do.
+    /// bits, which is what hashes and ciphers write, so those two are not here. So what reaches one
+    /// of these is a program that wrote the name, which is what tcc's byte swap does. The test
+    /// against a constant used to be here too, and is now the layout's, which writes it for
+    /// `if (flags & MASK)` when it takes the byte off the test a rule selected.
     const TEMPLATED: &[&str] = &[
         "rol_ri_8",
         "rol_rcl_8",
@@ -434,10 +444,6 @@ mod tests {
         "ror_rcl_16",
         "ror_rcl_32",
         "ror_rcl_64",
-        "test_ri_8",
-        "test_ri_16",
-        "test_ri_32",
-        "test_ri_64",
     ];
 
     /// The instructions a template asks for that are right because of the line above them.

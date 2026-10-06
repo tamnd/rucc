@@ -451,10 +451,11 @@ pub enum Form {
     TestCmov,
     /// A test of a register against a constant, which ands the two and keeps only the flags.
     ///
-    /// Only a template writes one. A program testing the low bits of a count before it copies the
-    /// last few bytes of a buffer, which is what tcc's `memcpy` in its own test suite does, wants
-    /// the flags that and leaves and not the and itself, so the register is read and nothing is
-    /// written. It is not [`Form::CmpRi`] because a comparison is something the compare pass
+    /// The block layout writes one when it takes the byte off a test a rule selected for
+    /// `if (flags & MASK)`, and a template writes one too. A program testing the low bits of a count
+    /// before it copies the last few bytes of a buffer, which is what tcc's `memcpy` in its own test
+    /// suite does, wants the flags that and leaves and not the and itself, so the register is read
+    /// and nothing is written. It is not [`Form::CmpRi`] because a comparison is something the compare pass
     /// reasons about and this is not a comparison.
     TestRi,
     /// The move alone, reading a condition state something else left.
@@ -1890,6 +1891,14 @@ pub static INSTS: &[(&str, Form)] = &[
     ("cmp_set_ae_ri_16", CmpSetRi),
     ("cmp_set_ae_ri_32", CmpSetRi),
     ("cmp_set_ae_ri_64", CmpSetRi),
+    ("test_set_e_ri_8", CmpSetRi),
+    ("test_set_e_ri_16", CmpSetRi),
+    ("test_set_e_ri_32", CmpSetRi),
+    ("test_set_e_ri_64", CmpSetRi),
+    ("test_set_ne_ri_8", CmpSetRi),
+    ("test_set_ne_ri_16", CmpSetRi),
+    ("test_set_ne_ri_32", CmpSetRi),
+    ("test_set_ne_ri_64", CmpSetRi),
     // The same ten conditions with the right hand side read out of memory, which is the
     // shape `rucc_codegen::combine` writes where the register one of the two sides came out
     // of a load nothing else wanted.

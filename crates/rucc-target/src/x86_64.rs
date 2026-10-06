@@ -439,7 +439,14 @@ static CONDITIONAL: [&str; 16] = [
 /// them a comparison that had a load folded into it would be a comparison the layout walks past,
 /// and the branch behind it would keep the byte and the test that reads it, which would make
 /// folding the load a saving of one instruction and a cost of two.
-pub(crate) static FUSED: [Fusion; 160] = [
+///
+/// The last eight are not comparisons in the sense of the rest. They are `if (flags & MASK)`, an
+/// `and` against a constant whose answer only the question of whether it was zero wanted, and a
+/// rule selects them so that the register the `and` would have overwritten is only read. What is
+/// left once the byte comes off is `test`, which is what gcc writes for every bit Postgres asks of
+/// a tuple's header. Equal and not equal are the only two, because a `test` says nothing about the
+/// sign or the carry that the program asked.
+pub(crate) static FUSED: [Fusion; 168] = [
     Fusion { set: "cmp_set_e_8", cmp: "cmp_rr_8", if_true: "jcc_e", if_false: "jcc_ne" },
     Fusion { set: "cmp_set_e_16", cmp: "cmp_rr_16", if_true: "jcc_e", if_false: "jcc_ne" },
     Fusion { set: "cmp_set_e_32", cmp: "cmp_rr_32", if_true: "jcc_e", if_false: "jcc_ne" },
@@ -520,6 +527,14 @@ pub(crate) static FUSED: [Fusion; 160] = [
     Fusion { set: "cmp_set_ae_ri_16", cmp: "cmp_ri_16", if_true: "jcc_ae", if_false: "jcc_b" },
     Fusion { set: "cmp_set_ae_ri_32", cmp: "cmp_ri_32", if_true: "jcc_ae", if_false: "jcc_b" },
     Fusion { set: "cmp_set_ae_ri_64", cmp: "cmp_ri_64", if_true: "jcc_ae", if_false: "jcc_b" },
+    Fusion { set: "test_set_e_ri_8", cmp: "test_ri_8", if_true: "jcc_e", if_false: "jcc_ne" },
+    Fusion { set: "test_set_e_ri_16", cmp: "test_ri_16", if_true: "jcc_e", if_false: "jcc_ne" },
+    Fusion { set: "test_set_e_ri_32", cmp: "test_ri_32", if_true: "jcc_e", if_false: "jcc_ne" },
+    Fusion { set: "test_set_e_ri_64", cmp: "test_ri_64", if_true: "jcc_e", if_false: "jcc_ne" },
+    Fusion { set: "test_set_ne_ri_8", cmp: "test_ri_8", if_true: "jcc_ne", if_false: "jcc_e" },
+    Fusion { set: "test_set_ne_ri_16", cmp: "test_ri_16", if_true: "jcc_ne", if_false: "jcc_e" },
+    Fusion { set: "test_set_ne_ri_32", cmp: "test_ri_32", if_true: "jcc_ne", if_false: "jcc_e" },
+    Fusion { set: "test_set_ne_ri_64", cmp: "test_ri_64", if_true: "jcc_ne", if_false: "jcc_e" },
     Fusion { set: "cmp_set_e_rm_8", cmp: "cmp_rm_8", if_true: "jcc_e", if_false: "jcc_ne" },
     Fusion { set: "cmp_set_e_rm_16", cmp: "cmp_rm_16", if_true: "jcc_e", if_false: "jcc_ne" },
     Fusion { set: "cmp_set_e_rm_32", cmp: "cmp_rm_32", if_true: "jcc_e", if_false: "jcc_ne" },
@@ -922,7 +937,11 @@ fn writes_flags(name: &str) -> bool {
 /// Memory can also have changed between the two, which no amount of comparing operands would say.
 /// Leaving them out costs a saving that is not taken and keeps the pass from taking one that is
 /// not there.
-static COMPARES: [Compare; 88] = [
+///
+/// The eight tests of a register against a constant ask what `test` asks, and there is no row for
+/// that one on its own since the layout is all that writes it. Two of them that agree are an `and`
+/// asked about twice, which is as much the same question as two comparisons are.
+static COMPARES: [Compare; 96] = [
     Compare { name: "cmp_set_e_8", asks: "cmp_rr_8", kept: Some("set_e") },
     Compare { name: "cmp_set_e_16", asks: "cmp_rr_16", kept: Some("set_e") },
     Compare { name: "cmp_set_e_32", asks: "cmp_rr_32", kept: Some("set_e") },
@@ -1003,6 +1022,14 @@ static COMPARES: [Compare; 88] = [
     Compare { name: "cmp_set_ae_ri_16", asks: "cmp_ri_16", kept: Some("set_ae") },
     Compare { name: "cmp_set_ae_ri_32", asks: "cmp_ri_32", kept: Some("set_ae") },
     Compare { name: "cmp_set_ae_ri_64", asks: "cmp_ri_64", kept: Some("set_ae") },
+    Compare { name: "test_set_e_ri_8", asks: "test_ri_8", kept: Some("set_e") },
+    Compare { name: "test_set_e_ri_16", asks: "test_ri_16", kept: Some("set_e") },
+    Compare { name: "test_set_e_ri_32", asks: "test_ri_32", kept: Some("set_e") },
+    Compare { name: "test_set_e_ri_64", asks: "test_ri_64", kept: Some("set_e") },
+    Compare { name: "test_set_ne_ri_8", asks: "test_ri_8", kept: Some("set_ne") },
+    Compare { name: "test_set_ne_ri_16", asks: "test_ri_16", kept: Some("set_ne") },
+    Compare { name: "test_set_ne_ri_32", asks: "test_ri_32", kept: Some("set_ne") },
+    Compare { name: "test_set_ne_ri_64", asks: "test_ri_64", kept: Some("set_ne") },
     Compare { name: "cmp_rr_8", asks: "cmp_rr_8", kept: None },
     Compare { name: "cmp_rr_16", asks: "cmp_rr_16", kept: None },
     Compare { name: "cmp_rr_32", asks: "cmp_rr_32", kept: None },
@@ -1025,7 +1052,7 @@ static COMPARES: [Compare; 88] = [
 /// door lists them, and they are the eight rows here that carry no condition in their names. What
 /// they read is [`Reads::Carry`], which is the group nothing in [`ZEROING`] is good for, so they
 /// can only stop the pass and never point it at the wrong bits.
-static READERS: [Reader; 232] = [
+static READERS: [Reader; 240] = [
     Reader { name: "adc_rr_8", reads: Reads::Carry },
     Reader { name: "adc_rr_16", reads: Reads::Carry },
     Reader { name: "adc_rr_32", reads: Reads::Carry },
@@ -1122,6 +1149,14 @@ static READERS: [Reader; 232] = [
     Reader { name: "cmp_set_ae_ri_16", reads: Reads::Unsigned },
     Reader { name: "cmp_set_ae_ri_32", reads: Reads::Unsigned },
     Reader { name: "cmp_set_ae_ri_64", reads: Reads::Unsigned },
+    Reader { name: "test_set_e_ri_8", reads: Reads::Zero },
+    Reader { name: "test_set_e_ri_16", reads: Reads::Zero },
+    Reader { name: "test_set_e_ri_32", reads: Reads::Zero },
+    Reader { name: "test_set_e_ri_64", reads: Reads::Zero },
+    Reader { name: "test_set_ne_ri_8", reads: Reads::Zero },
+    Reader { name: "test_set_ne_ri_16", reads: Reads::Zero },
+    Reader { name: "test_set_ne_ri_32", reads: Reads::Zero },
+    Reader { name: "test_set_ne_ri_64", reads: Reads::Zero },
     Reader { name: "cmp_set_e_rm_8", reads: Reads::Zero },
     Reader { name: "cmp_set_e_rm_16", reads: Reads::Zero },
     Reader { name: "cmp_set_e_rm_32", reads: Reads::Zero },
@@ -1938,6 +1973,7 @@ mod tests {
     fn condition(name: &str) -> &str {
         let name = name
             .strip_prefix("cmp_set_")
+            .or_else(|| name.strip_prefix("test_set_"))
             .or_else(|| name.strip_prefix("set_"))
             .or_else(|| name.strip_prefix("cmov_"))
             .or_else(|| name.strip_prefix("jcc_"))

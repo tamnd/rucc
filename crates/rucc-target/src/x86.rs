@@ -712,8 +712,9 @@ const fn narrow_moves<const N: usize>(all: &[Move]) -> [Move; N] {
     out
 }
 
-/// Ten conditions at three widths, against a register, a constant and memory.
-static FUSED: [Fusion; 120] = narrow_fused(&crate::x86_64::FUSED);
+/// Ten conditions at three widths, against a register, a constant and memory, and the test of a
+/// register against a constant for equal and not equal at the same three.
+static FUSED: [Fusion; 126] = narrow_fused(&crate::x86_64::FUSED);
 
 /// Ten conditions at the three widths a select has here.
 static MOVES: [Move; 30] = narrow_moves(&crate::x86_64::MOVES);

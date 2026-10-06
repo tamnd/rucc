@@ -359,6 +359,17 @@
 (semantics (x64.cmp_set_ae_ri_32 l r) (ite (bvuge l r) 1 0))
 (semantics (x64.cmp_set_ae_ri_64 l r) (ite (bvuge l r) 1 0))
 
+;; The test of a register against a constant, for equal and not equal, which is the `and` of the
+;; two compared against zero.
+(semantics (x64.test_set_e_ri_8 l r) (ite (= (bvand l r) 0) 1 0))
+(semantics (x64.test_set_e_ri_16 l r) (ite (= (bvand l r) 0) 1 0))
+(semantics (x64.test_set_e_ri_32 l r) (ite (= (bvand l r) 0) 1 0))
+(semantics (x64.test_set_e_ri_64 l r) (ite (= (bvand l r) 0) 1 0))
+(semantics (x64.test_set_ne_ri_8 l r) (ite (not (= (bvand l r) 0)) 1 0))
+(semantics (x64.test_set_ne_ri_16 l r) (ite (not (= (bvand l r) 0)) 1 0))
+(semantics (x64.test_set_ne_ri_32 l r) (ite (not (= (bvand l r) 0)) 1 0))
+(semantics (x64.test_set_ne_ri_64 l r) (ite (not (= (bvand l r) 0)) 1 0))
+
 ;; The conversions. Truncation is not an instruction at all: the low half of a register is
 ;; a register, so what these heads say is which part of it the next instruction reads.
 (semantics (x64.movzx_8_16 v) (zero_extend 8 16 v))
