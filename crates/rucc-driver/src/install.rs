@@ -35,7 +35,7 @@ use std::process::Command;
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use rucc_sysroot::{Kernel, KernelManifest, Manifest, Sysroot, sha256};
-use rucc_tuple::TargetTuple;
+use rucc_tuple::{Arch, TargetTuple};
 
 use crate::{CliError, err};
 
@@ -176,7 +176,9 @@ fn install_staged(
     cache: &Path,
     staging: &Path,
 ) -> Result<Installed, CliError> {
-    unpack(archive, staging)?;
+    // A wasm sysroot is unpacked inside the process on every host, so that the reader that rucc
+    // running as wasm depends on is the one that every fetch of these rows runs.
+    unpack(archive, staging, target.arch() == Arch::Wasm32 || crate::host::WASM)?;
     let text = record(archive, staging)?;
     let manifest =
         Manifest::parse(&text).map_err(|why| err(format!("{}: {why}", archive.display())))?;
@@ -214,7 +216,7 @@ fn install_kernel_staged(
     cache: &Path,
     staging: &Path,
 ) -> Result<Installed, CliError> {
-    unpack(archive, staging)?;
+    unpack(archive, staging, crate::host::WASM)?;
     let text = record(archive, staging)?;
     let manifest =
         KernelManifest::parse(&text).map_err(|why| err(format!("{}: {why}", archive.display())))?;
@@ -242,14 +244,19 @@ fn staging_dir(cache: &Path, name: &str) -> PathBuf {
     cache.join("staging").join(unique)
 }
 
-/// Unpack a verified archive with the platform's own `tar`.
+/// Unpack a verified archive with the platform's own `tar`, or inside this process when
+/// `in_process` is true.
 ///
 /// Section 13.8's decision keeps an archive reader out of the compiler for the same reason it keeps
 /// a TLS stack out, and `tar` is on every host in the support table, including Windows since 1803.
-/// The members are unpacked as they are, with no component stripped, because the staging directory
-/// is one we made for this and a single directory inside the archive would only be a name to
-/// disagree about.
-fn unpack(archive: &Path, into: &Path) -> Result<(), CliError> {
+/// rucc running as a wasm module cannot start `tar`, so for that host, and for the wasm rows on
+/// every host, the gzip and tar readers of `rucc-unpack` do the work (#2867). The members are
+/// unpacked as they are, with no component stripped, because the staging directory is one we made
+/// for this and a single directory inside the archive would only be a name to disagree about.
+fn unpack(archive: &Path, into: &Path, in_process: bool) -> Result<(), CliError> {
+    if in_process {
+        return unpack_here(archive, into);
+    }
     if let Some(why) = crate::host::cannot_start("tar") {
         return Err(err(format!("{why}, which is how an artifact is unpacked")));
     }
@@ -264,6 +271,36 @@ fn unpack(archive: &Path, into: &Path) -> Result<(), CliError> {
     let said = said.trim();
     let detail = if said.is_empty() { String::new() } else { format!(": {said}") };
     Err(err(format!("`tar` could not unpack {}{detail}", archive.display())))
+}
+
+/// Unpack a verified archive with the readers of `rucc-unpack`.
+///
+/// Only files and directories come out. A link or any other kind of member is an error, and so is
+/// a name that would land outside `into`, which [`rucc_unpack::under`] decides.
+fn unpack_here(archive: &Path, into: &Path) -> Result<(), CliError> {
+    let failed = |why: &dyn std::fmt::Display| {
+        err(format!("rucc could not unpack {}: {why}", archive.display()))
+    };
+    let bytes = fs::read(archive).map_err(|why| failed(&why))?;
+    let tar = rucc_unpack::gunzip(&bytes).map_err(|why| failed(&why))?;
+    for entry in rucc_unpack::tar::entries(&tar).map_err(|why| failed(&why))? {
+        let Some(path) = rucc_unpack::under(into, &entry.name) else {
+            // `./`, the top of the archive, is the staging directory itself.
+            if entry.name.split(['/', '\\']).all(|part| part.is_empty() || part == ".") {
+                continue;
+            }
+            return Err(failed(&format!("{} names a place outside the archive", entry.name)));
+        };
+        let wrote = match entry.kind {
+            rucc_unpack::tar::Kind::Dir => fs::create_dir_all(&path),
+            rucc_unpack::tar::Kind::File => path
+                .parent()
+                .map_or(Ok(()), fs::create_dir_all)
+                .and_then(|()| fs::write(&path, entry.data)),
+        };
+        wrote.map_err(|why| err(format!("{}: {why}", path.display())))?;
+    }
+    Ok(())
 }
 
 /// Check a tree against a record and the record against the tree, and say which recorded files
@@ -500,7 +537,12 @@ mod tests {
 
     /// A manifest for these files, with their real hashes in it.
     fn manifest_for(files: &[(&str, &str)]) -> Manifest {
-        let mut manifest = Manifest::new(target());
+        manifest_of(target(), files)
+    }
+
+    /// The same, for another target.
+    fn manifest_of(target: TargetTuple, files: &[(&str, &str)]) -> Manifest {
+        let mut manifest = Manifest::new(target);
         for (path, text) in files {
             manifest.push(Input {
                 path: (*path).to_owned(),
@@ -536,15 +578,7 @@ mod tests {
         std::fs::write(staged.join("manifest"), record).expect("the manifest should be writable");
 
         let archive = tree.0.join("artifact.tar.gz");
-        let status = Command::new("tar")
-            .arg("-czf")
-            .arg(&archive)
-            .arg("-C")
-            .arg(&staged)
-            .arg(".")
-            .status()
-            .expect("tar should be on a machine that runs these tests");
-        assert!(status.success(), "tar should be able to write an archive");
+        pack(&staged, &archive);
         std::fs::remove_dir_all(&staged).expect("the staged tree should be removable");
 
         let bytes = std::fs::read(&archive).expect("the archive should be readable");
@@ -552,8 +586,64 @@ mod tests {
         (archive, hash)
     }
 
+    /// Packs the tree at `staged` into the archive with the host `tar`. The `tar` of macOS writes
+    /// an AppleDouble `._` member for a file with extended attributes unless `COPYFILE_DISABLE` is
+    /// set, and a sysroot, which is packed on Linux, has none.
+    fn pack(staged: &Path, archive: &Path) {
+        let status = Command::new("tar")
+            .env("COPYFILE_DISABLE", "1")
+            .arg("-czf")
+            .arg(archive)
+            .arg("-C")
+            .arg(staged)
+            .arg(".")
+            .status()
+            .expect("tar should be on a machine that runs these tests");
+        assert!(status.success(), "tar should be able to write an archive");
+    }
+
     const FILES: &[(&str, &str)] =
         &[("include/stdio.h", "int puts(const char *);\n"), ("lib/libc.so", "not really\n")];
+
+    /// A sysroot for wasm is unpacked by the readers inside rucc, as rucc running as wasm must do
+    /// it (#2867). The archive comes from the host `tar`, so the readers see what GNU tar or bsdtar
+    /// writes, and the long name makes the archive use a GNU long name or an extended header.
+    #[test]
+    fn a_wasm_sysroot_is_unpacked_inside_the_process() {
+        let tree = Tree::new("wasm");
+        let wasm: TargetTuple = "wasm32-wasip1".parse().expect("a tuple the table knows");
+        let long = format!("include/{}/stdio.h", "deep".repeat(30));
+        let files = [("include/stdio.h", "int puts(const char *);\n"), (long.as_str(), "deep\n")];
+        let manifest = manifest_of(wasm, &files);
+        let (archive, hash) = artifact(&tree, &files, &manifest);
+        let cache = tree.0.join("cache");
+        let done = install(&archive, &hash, wasm, &cache).expect("this one should install");
+        assert_eq!(done.files, 2);
+        assert_eq!(done.root, cache.join("sysroots").join("wasm32-wasip1"));
+        assert_eq!(
+            std::fs::read_to_string(done.root.join(&long)).expect("the long name"),
+            "deep\n"
+        );
+    }
+
+    /// A link in a wasm sysroot is refused, because the readers inside rucc write only files and
+    /// directories.
+    #[cfg(unix)]
+    #[test]
+    fn a_link_in_a_wasm_sysroot_is_refused() {
+        let tree = Tree::new("wasm-link");
+        let wasm: TargetTuple = "wasm32-wasip1".parse().expect("a tuple the table knows");
+        let staged = tree.0.join("staged");
+        std::fs::create_dir_all(&staged).expect("a staging directory should be creatable");
+        std::os::unix::fs::symlink("/etc/passwd", staged.join("passwd")).expect("a link");
+        let manifest = manifest_of(wasm, &[]);
+        std::fs::write(staged.join("manifest"), manifest.render()).expect("the manifest");
+        let archive = tree.0.join("artifact.tar.gz");
+        pack(&staged, &archive);
+        let hash = sha256::hex(&std::fs::read(&archive).expect("the archive"));
+        let why = install(&archive, &hash, wasm, &tree.0.join("cache")).expect_err("a link");
+        assert!(why.to_string().contains("only files and directories"), "{why}");
+    }
 
     #[test]
     fn an_artifact_that_matches_its_record_is_installed() {
@@ -730,15 +820,7 @@ mod tests {
         std::fs::create_dir_all(&staged).expect("a directory");
         std::fs::write(staged.join("include.h"), "int x;\n").expect("a file");
         let archive = tree.0.join("bare.tar.gz");
-        let status = Command::new("tar")
-            .arg("-czf")
-            .arg(&archive)
-            .arg("-C")
-            .arg(&staged)
-            .arg(".")
-            .status()
-            .expect("tar should run");
-        assert!(status.success());
+        pack(&staged, &archive);
         let hash = sha256::hex(&std::fs::read(&archive).expect("readable"));
         let cache = tree.0.join("cache");
 

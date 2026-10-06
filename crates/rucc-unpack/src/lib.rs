@@ -38,6 +38,9 @@
 //! which header and what the cabinet calls it. All four readers are here. What is not here is the
 //! driver that puts the four together and lays a sysroot out, which is not this crate's business.
 //!
+//! [`gzip`] and [`tar`] read the `.tar.gz` that a sysroot arrives in. The driver unpacks a sysroot
+//! for wasm with them, because rucc running as a wasm module cannot start `tar` (tamnd/rucc#2867).
+//!
 //! Reading only. Nothing in this compiler writes a zip or a cabinet, and if something ever does it
 //! will not be this crate's business, the same way `rucc-archive` writes the one container a linker
 //! reads and does not read it back.
@@ -48,16 +51,20 @@
 
 pub mod cab;
 pub mod cfb;
+pub mod gzip;
 pub mod inflate;
 pub mod msi;
+pub mod tar;
 pub mod zip;
 
 use std::path::{Component, Path, PathBuf};
 
 pub use cab::{Cab, CabError};
 pub use cfb::{Cfb, CfbError};
+pub use gzip::{GzipError, gunzip};
 pub use inflate::{InflateError, inflate, inflate_into};
 pub use msi::{Msi, MsiError, Payload, Table};
+pub use tar::{Entry, TarError};
 pub use zip::{Member, Zip, ZipError};
 
 /// Where a name out of an archive is allowed to be written, under `root`.
