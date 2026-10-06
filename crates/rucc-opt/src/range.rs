@@ -79,6 +79,44 @@ use rucc_ir::Type;
 /// this number, so the arithmetic that comes next pays for it nine times over.
 pub const PAIRS: usize = 3;
 
+/// Intervals on their way into [`Range::from_pairs`], kept on the stack rather than the heap.
+///
+/// Every operation here makes a handful of intervals and hands them straight over, and on a body
+/// of unrolled crypto the solver does that tens of millions of times, which was a call to the
+/// allocator and another to free each time. The most any of them makes is one for each pairing of
+/// two ranges' intervals, which is what an intersection makes, so that is how many there is room
+/// for.
+#[derive(Clone, Copy)]
+struct Gathered {
+    pairs: [(u128, u128); PAIRS * PAIRS],
+    count: usize,
+}
+
+impl Gathered {
+    const fn new() -> Self {
+        Self { pairs: [(0, 0); PAIRS * PAIRS], count: 0 }
+    }
+
+    fn push(&mut self, pair: (u128, u128)) {
+        self.pairs[self.count] = pair;
+        self.count += 1;
+    }
+
+    fn as_slice(&self) -> &[(u128, u128)] {
+        &self.pairs[..self.count]
+    }
+}
+
+impl FromIterator<(u128, u128)> for Gathered {
+    fn from_iter<I: IntoIterator<Item = (u128, u128)>>(pairs: I) -> Self {
+        let mut gathered = Self::new();
+        for pair in pairs {
+            gathered.push(pair);
+        }
+        gathered
+    }
+}
+
 /// The widest integer this reasons about.
 ///
 /// A wider one gets [`Range::full`] and that is correct rather than a gap, because a range that
@@ -314,14 +352,14 @@ impl Range {
     pub fn other_than(value: u128, width: u32) -> Self {
         let width = clamp(width);
         let value = value & mask(width);
-        let mut pairs: Vec<(u128, u128)> = Vec::with_capacity(2);
+        let mut pairs = Gathered::new();
         if value > 0 {
             pairs.push((0, value - 1));
         }
         if value < mask(width) {
             pairs.push((value + 1, mask(width)));
         }
-        Self::from_pairs(&pairs, width)
+        Self::from_pairs(pairs.as_slice(), width)
     }
 
     /// A range from intervals that need not be sorted, disjoint or in bounds.
@@ -341,6 +379,12 @@ impl Range {
         // into a list to be sorted first.
         if masked.clone().is_sorted() {
             return Self::merged(masked, width);
+        }
+        if pairs.len() <= PAIRS * PAIRS {
+            let mut sorted: Gathered = masked.collect();
+            let count = sorted.count;
+            sorted.pairs[..count].sort_unstable();
+            return Self::merged(sorted.as_slice().iter().copied(), width);
         }
         let mut sorted: Vec<(u128, u128)> = masked.collect();
         sorted.sort_unstable();
@@ -576,9 +620,8 @@ impl Range {
         if other.is_empty() {
             return self;
         }
-        let mut pairs = self.pairs().to_vec();
-        pairs.extend_from_slice(other.pairs());
-        let range = Self::from_pairs(&pairs, self.width);
+        let pairs: Gathered = self.pairs().iter().chain(other.pairs()).copied().collect();
+        let range = Self::from_pairs(pairs.as_slice(), self.width);
         // The bits of a union are only what both sides agree on, and that can be sharper than
         // what the merged intervals show, since three ones and a hull have lost the shape the
         // bits still remember.
@@ -593,7 +636,7 @@ impl Range {
     #[must_use]
     pub fn intersect(self, other: Self) -> Self {
         assert_eq!(self.width, other.width, "these are ranges of different widths");
-        let mut pairs: Vec<(u128, u128)> = Vec::with_capacity(PAIRS * PAIRS);
+        let mut pairs = Gathered::new();
         for &(lo, hi) in self.pairs() {
             for &(start, end) in other.pairs() {
                 let (lo, hi) = (lo.max(start), hi.min(end));
@@ -604,13 +647,13 @@ impl Range {
         }
         // Both sets of bits and not just the intervals, because a fact like "this is even" lives
         // only in the bits and intersecting the intervals alone would drop it.
-        Self::from_pairs(&pairs, self.width).narrow(self.bits).narrow(other.bits)
+        Self::from_pairs(pairs.as_slice(), self.width).narrow(self.bits).narrow(other.bits)
     }
 
     /// Everything of this width that is not in it.
     #[must_use]
     pub fn invert(self) -> Self {
-        let mut pairs: Vec<(u128, u128)> = Vec::with_capacity(PAIRS + 1);
+        let mut pairs = Gathered::new();
         let mut next = 0u128;
         for &(lo, hi) in self.pairs() {
             if lo > next {
@@ -619,14 +662,14 @@ impl Range {
             // The top interval can end at the largest value there is, and there is nothing above
             // it to start the next gap at.
             let Some(after) = hi.checked_add(1) else {
-                return Self::from_pairs(&pairs, self.width);
+                return Self::from_pairs(pairs.as_slice(), self.width);
             };
             next = after;
         }
         if next <= mask(self.width) {
             pairs.push((next, mask(self.width)));
         }
-        Self::from_pairs(&pairs, self.width)
+        Self::from_pairs(pairs.as_slice(), self.width)
     }
 
     /// The bits every interval agrees on.

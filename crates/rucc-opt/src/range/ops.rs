@@ -47,7 +47,7 @@
 
 use rucc_ir::{Flags, IntPred};
 
-use super::{Bits, PAIRS, Range, clamp, mask, sign_bit, signed_limits};
+use super::{Bits, Gathered, Range, clamp, mask, sign_bit, signed_limits};
 
 /// How many values of a shift count are worth walking one at a time.
 ///
@@ -102,14 +102,17 @@ pub fn overflows(op: Checked, signed: bool, a: Range, b: Range) -> Truth {
         let window = match op {
             Checked::Add => al.checked_add(bl).zip(ah.checked_add(bh)),
             Checked::Sub => al.checked_sub(bh).zip(ah.checked_sub(bl)),
-            Checked::Mul => [(al, bl), (al, bh), (ah, bl), (ah, bh)]
-                .into_iter()
-                .map(|(x, y)| x.checked_mul(y))
-                .collect::<Option<Vec<i128>>>()
-                .map(|corners| {
-                    let least = corners.iter().copied().min().expect("four corners");
-                    (least, corners.into_iter().max().expect("four corners"))
-                }),
+            Checked::Mul => {
+                let corners = [
+                    al.checked_mul(bl),
+                    al.checked_mul(bh),
+                    ah.checked_mul(bl),
+                    ah.checked_mul(bh),
+                ];
+                corners.into_iter().try_fold((i128::MAX, i128::MIN), |(least, most), corner| {
+                    corner.map(|corner| (least.min(corner), most.max(corner)))
+                })
+            }
         };
         let Some((lo, hi)) = window else { return Truth::Either };
         (lo >= min && hi <= max, hi < min || lo > max)
@@ -331,9 +334,9 @@ pub fn xor(a: Range, b: Range) -> Range {
 #[must_use]
 pub fn not(a: Range) -> Range {
     let width = a.width();
-    let pairs: Vec<(u128, u128)> =
+    let pairs: Gathered =
         a.pairs().iter().map(|&(lo, hi)| (mask(width) - hi, mask(width) - lo)).collect();
-    Range::from_pairs(&pairs, width)
+    Range::from_pairs(pairs.as_slice(), width)
 }
 
 /// The value shifted left by the count, modulo the width.
@@ -366,7 +369,7 @@ pub fn ashr(a: Range, count: Range, flags: Flags) -> Range {
 #[must_use]
 pub fn trunc(a: Range, to: u32) -> Range {
     let to = clamp(to);
-    let mut pairs: Vec<(u128, u128)> = Vec::with_capacity(PAIRS * 2);
+    let mut pairs = Gathered::new();
     for &(lo, hi) in a.pairs() {
         if hi - lo >= mask(to) {
             return Range::full(to);
@@ -379,7 +382,7 @@ pub fn trunc(a: Range, to: u32) -> Range {
             pairs.push((lo, mask(to)));
         }
     }
-    Range::from_pairs(&pairs, to)
+    Range::from_pairs(pairs.as_slice(), to)
 }
 
 /// It at the wider width with zeroes on top, which keeps every interval as it was.
@@ -406,7 +409,7 @@ pub fn sext(a: Range, to: u32) -> Range {
     }
     let boundary = sign_bit(from);
     let lift = mask(to) - mask(from);
-    let mut pairs: Vec<(u128, u128)> = Vec::with_capacity(PAIRS * 2);
+    let mut pairs = Gathered::new();
     for &(lo, hi) in a.pairs() {
         if lo < boundary {
             pairs.push((lo, hi.min(boundary - 1)));
@@ -415,7 +418,7 @@ pub fn sext(a: Range, to: u32) -> Range {
             pairs.push((lo.max(boundary) + lift, hi + lift));
         }
     }
-    Range::from_pairs(&pairs, to)
+    Range::from_pairs(pairs.as_slice(), to)
 }
 
 /// Whether the ranges settle the comparison.
@@ -539,12 +542,12 @@ pub fn backward(undo: Undo, result: Range, other: Range) -> Range {
                 return Range::full(width);
             }
             let fits = result.intersect(Range::between(0, mask(width) / by, width));
-            let pairs: Vec<(u128, u128)> = fits
+            let pairs: Gathered = fits
                 .pairs()
                 .iter()
                 .map(|&(lo, hi)| (lo * by, (hi * by).saturating_add(by - 1).min(mask(width))))
                 .collect();
-            Range::from_pairs(&pairs, width)
+            Range::from_pairs(pairs.as_slice(), width)
         }
     }
 }
@@ -727,9 +730,8 @@ fn one_shift(a: Range, at: u32, flags: Flags, kind: Kind, width: u32) -> Range {
         // including what the flags say about it.
         Kind::Left => mul(a, Range::exactly(1u128 << at, width), flags),
         Kind::Logical => {
-            let pairs: Vec<(u128, u128)> =
-                a.pairs().iter().map(|&(lo, hi)| (lo >> at, hi >> at)).collect();
-            Range::from_pairs(&pairs, width)
+            let pairs: Gathered = a.pairs().iter().map(|&(lo, hi)| (lo >> at, hi >> at)).collect();
+            Range::from_pairs(pairs.as_slice(), width)
         }
         Kind::Arithmetic => {
             // An arithmetic shift is monotone on the signed reading, so the ends stay the ends.
@@ -762,7 +764,7 @@ fn coarse(a: Range, low: u32, width: u32, kind: Kind) -> Range {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::range::{signed, signed_limits};
+    use crate::range::{PAIRS, signed, signed_limits};
 
     /// An operation run the way round the inverse claims to undo.
     type Forwards = Box<dyn Fn(u128, u128) -> u128>;
