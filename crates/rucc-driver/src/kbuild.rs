@@ -69,8 +69,6 @@ const A64: Arch = Arch::Aarch64;
 
 const GUARD: &str = "there is no stack protector on AArch64 yet, and the canary the kernel keeps \
                      at an offset from sp_el0 is part of that work";
-const BRANCH_PROTECTION: &str = "no function here signs its return address or starts with a bti \
-                                 landing pad";
 
 /// The table, searched in order, so a spelling that means the default comes before the family it
 /// belongs to.
@@ -238,10 +236,6 @@ pub(crate) const TABLE: &[Row] = &[
     ),
     only(A64, same("-mlittle-endian", "every AArch64 target here is little endian")),
     only(A64, refused("-mbig-endian", "there is no big endian AArch64 target here", None)),
-    only(A64, same("-mbranch-protection=none", "no branch protection, which is what happens")),
-    only(A64, refused("-mbranch-protection=*", BRANCH_PROTECTION, Some(2286))),
-    only(A64, same("-msign-return-address=none", "no return address is signed")),
-    only(A64, refused("-msign-return-address=*", BRANCH_PROTECTION, Some(2286))),
     only(
         A64,
         same("-mno-strict-align", "an access here may be unaligned, which is what this allows"),

@@ -2483,6 +2483,19 @@ pub fn parse_args(args: &[String]) -> Result<Action, CliError> {
             "-mno-indirect-branch-cs-prefix" if arch == rucc_target::Arch::X86_64 => {
                 opts.speculation.padded = false;
             }
+            // Which functions sign their return address and whether indirect branches land on
+            // `bti`. AArch64 only, as in gcc, and the older flag says the first half alone.
+            _ if arch == rucc_target::Arch::Aarch64 && arg.starts_with("-mbranch-protection=") => {
+                let value = &arg["-mbranch-protection=".len()..];
+                opts.branch_protection =
+                    rucc_target::BranchProtection::parse(value).map_err(err)?;
+            }
+            _ if arch == rucc_target::Arch::Aarch64
+                && arg.starts_with("-msign-return-address=") =>
+            {
+                let value = &arg["-msign-return-address=".len()..];
+                opts.branch_protection.sign = rucc_target::SignReturn::parse(value).map_err(err)?;
+            }
             // Only a function that says `cf_check` opens with a landing pad, which is how a
             // program that knows every function it takes the address of keeps the rest from being
             // somewhere an indirect branch may land. x86 only, as in gcc.
@@ -9502,14 +9515,8 @@ mod tests {
     /// that would add it, so that the person reading the error can find where the work is.
     #[test]
     fn a_kernel_flag_that_is_not_honored_yet_names_its_issue() {
-        for (flag, issue) in [
-            ("-mbranch-protection=pac-ret+bti", 2286),
-            ("-msign-return-address=non-leaf", 2286),
-            ("-mstack-protector-guard=sysreg", 2279),
-        ] {
-            let failed = refused(&[KERNEL_ARM64, flag, "-c", "a.c"]);
-            assert!(failed.contains(&format!("tamnd/rucc#{issue}")), "{flag}: {failed}");
-        }
+        let failed = refused(&[KERNEL_ARM64, "-mstack-protector-guard=sysreg", "-c", "a.c"]);
+        assert!(failed.contains("tamnd/rucc#2279"), "{failed}");
         // Refused with no issue, because nothing is planned for them, and still with the reason.
         for flag in ["-fstack-check", "-fplugin=a.so"] {
             let failed = refused(&[KERNEL_X86, flag, "-c", "a.c"]);

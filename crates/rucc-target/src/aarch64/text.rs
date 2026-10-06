@@ -847,6 +847,20 @@ static TEXT: &[(&str, &[Written])] = &[
     ("prefetch_w_t0", &[spell("prfm", &[Arg::Prefetch(0b10000), Mem])]),
     // Everything else.
     ("nop", &[spell("nop", &[])]),
+    // Written as the hints they are, which is what clang writes, so that an assembler that was not
+    // told about pointer authentication takes them.
+    ("paciasp", &[spell("hint", &[Lit(25)])]),
+    ("autiasp", &[spell("hint", &[Lit(29)])]),
+    ("bti_c", &[spell("hint", &[Lit(34)])]),
+    ("bti_j", &[spell("hint", &[Lit(36)])]),
+    (
+        "strip_ra_64",
+        &[
+            spell("mov", &[Fixed(30, X), Reg(1, X)]),
+            spell("hint", &[Lit(7)]),
+            spell("mov", &[Reg(0, X), Fixed(30, X)]),
+        ],
+    ),
     ("trap", &[spell("brk", &[Lit(1)])]),
     ("fence", &[spell("dmb", &[Barrier(0b1011)])]),
     ("fence_acquire", &[spell("dmb", &[Barrier(0b1001)])]),

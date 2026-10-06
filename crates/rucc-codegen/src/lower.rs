@@ -4442,6 +4442,26 @@ impl<'a> Lowering<'a> {
 
         if returning && late && depth == 0 {
             own(self, word, reg);
+        } else if returning && self.on_aarch64() {
+            // A return address a callee signed has the signature in its top bits, which is no
+            // address anybody can use, so it is stripped on the way out whether or not this file
+            // signs anything, since the frame it came from may be another file's. That goes through
+            // `x30`, which the frame record already saved, as gcc and clang write it.
+            //
+            // The record is the caller's `x29` and then `x30`, so the address is a word above
+            // where the frame pointer points. Not the distance the target gives for a return
+            // address, which is from the canonical frame address and is nothing here, since a
+            // call leaves it in a register rather than on the stack.
+            let at = mir::Mem::at(mir::Operand::read(base, self.gpr)).plus(word);
+            let signed = self.out.new_vreg(self.gpr);
+            self.out.build(block, load).at(span).def(signed, self.gpr).mem(at).finish();
+            let strip = self.named("strip_ra_64");
+            self.out
+                .build(block, strip)
+                .at(span)
+                .operand(mir::Operand::write(reg, self.gpr))
+                .operand(mir::Operand::read(signed, self.gpr))
+                .finish();
         } else if returning {
             let up = i32::try_from(self.conv.return_address).expect("a word above the frame");
             let at = mir::Mem::at(mir::Operand::read(base, self.gpr)).plus(up);

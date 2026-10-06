@@ -32,7 +32,9 @@ use std::str::FromStr;
 
 use rucc_base::Interner;
 use rucc_diag::{Diagnostic, Severity, SourceMap};
-use rucc_target::{Arch, CodeModel, Env, Isa, Os, Speculation, TargetInfo, Triple, wasm};
+use rucc_target::{
+    Arch, BranchProtection, CodeModel, Env, Isa, Os, Speculation, TargetInfo, Triple, wasm,
+};
 
 /// An optimisation level.
 ///
@@ -2233,6 +2235,10 @@ pub struct Options {
     /// See [`Control`]. Off by default, which is gcc's default on these targets, and on again in
     /// every distribution's global flags for the same reason the stack protector is.
     pub control: Control,
+    /// Which return addresses are signed and whether indirect branches land on `bti`, from
+    /// `-mbranch-protection=` and `-msign-return-address=`. AArch64 only, which the driver checks,
+    /// and off by default as in gcc.
+    pub branch_protection: BranchProtection,
     /// Whether only a function written `cf_check` opens with a landing pad, from
     /// `-mmanual-endbr`. x86 only, which the driver checks, and off by default as in gcc. Labels
     /// whose address is taken keep theirs either way.
@@ -2796,6 +2802,7 @@ impl Options {
             protector: Protector::default(),
             stack_clash: false,
             control: Control::default(),
+            branch_protection: BranchProtection::default(),
             manual_endbr: false,
             speculation: Speculation::default(),
             jump_tables: true,

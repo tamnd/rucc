@@ -112,6 +112,27 @@ pub struct Pair {
     pub pop: &'static str,
 }
 
+/// The two hints that sign the return address in the prologue and check it in the epilogue, which
+/// AArch64 has as `paciasp` and `autiasp`. See [`crate::BranchProtection`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Signing {
+    /// Signs the return address against the stack pointer.
+    pub sign: &'static str,
+    /// Checks it against the same stack pointer, leaving an address that faults when it is wrong.
+    pub check: &'static str,
+}
+
+/// The two landing pads of branch target identification, which AArch64 has as `bti c` and `bti j`.
+/// See [`crate::BranchProtection`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Targets {
+    /// What a function opens with, where a call through a register lands.
+    pub call: &'static str,
+    /// What a label opens with, where a jump through a register lands, which is a computed `goto`,
+    /// a jump table and the return of a `setjmp` by `longjmp`.
+    pub jump: &'static str,
+}
+
 /// The load and the store of the part of a vector register a call keeps, on a convention that
 /// keeps only part of one. See [`crate::CallRegs::sse_kept`].
 ///
@@ -254,6 +275,11 @@ pub struct FrameInsts {
     /// pointer can hold, and one goes at the top of every label a program took the address of,
     /// because a computed `goto` is an indirect branch and those are the addresses it arrives at.
     pub landing: Option<&'static str>,
+    /// What signs and checks the return address, or `None` on a target that has nothing for it.
+    pub signing: Option<Signing>,
+    /// The landing pads `-mbranch-protection=bti` asks for, or `None` on a target without them.
+    /// A different flag from [`Self::landing`], with two pads rather than one.
+    pub targets: Option<Targets>,
     /// A byte that does nothing, or `None` on a target where nothing is written for the purpose.
     ///
     /// What `-fpatchable-function-entry=` reserves room with, and an option for the same reason
