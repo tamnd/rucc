@@ -341,7 +341,7 @@ void (*p)(void) __attribute__((patchable_function_entry(1)));
 __attribute__((patchable_function_entry(1, 2, 3))) void three(void) {}
 __attribute__((patchable_function_entry())) void none(void) {}
 ";
-    let (ok, _, said) = run("refused", TARGET, &[], source);
+    let (ok, _, said) = run("arity", TARGET, &[], source);
     assert!(!ok, "{said}");
     let what =
         "error: wrong number of arguments specified for 'patchable_function_entry' attribute";

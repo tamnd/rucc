@@ -2460,6 +2460,10 @@ pub struct Options {
     /// AArch64. Nothing here ever gives `x18` to a value, so the one thing it changes is that a
     /// nested function, whose static chain travels in `x18`, cannot be built.
     pub fixed_x18: bool,
+    /// Whether `-mstrict-align` was given, which says no load or store may be at an address less
+    /// aligned than its width on AArch64. The kernel asks for it in the code that runs before the
+    /// MMU is on, where every access is to device memory and an unaligned one faults.
+    pub strict_align: bool,
     /// Whether the whole unit is under GNU's reading of `inline` rather than C's, which is
     /// `-fgnu89-inline`.
     ///
@@ -2847,6 +2851,7 @@ impl Options {
             pedantic: false,
             permissive: false,
             fixed_x18: false,
+            strict_align: false,
             gnu89_inline: false,
             strict_flex_arrays: 0,
             visibility: Visibility::default(),
@@ -2981,12 +2986,13 @@ impl Session {
             target.wchar_width = 16;
             target.wchar_is_signed = false;
         }
-        // The boundary the stack is kept on, whether the vector registers carry arguments and
-        // where the canary is, which the front end reads to decide how far it may align a local
+        // The boundary the stack is kept on, whether the vector registers carry arguments,
+        // whether a word may be moved at any address and where the canary is, which the front end reads to decide how far it may align a local
         // and the back end reads for everything else.
         if let Some(regs) = target.call_regs {
             let regs = opts.stack_boundary.map_or(regs, |bytes| regs.aligned_to(bytes));
             let regs = if opts.vector { regs } else { regs.without_vectors() };
+            let regs = if opts.strict_align { regs.strictly_aligned() } else { regs };
             target.call_regs = Some(opts.guard.map_or(regs, |guard| regs.guarded_by(guard)));
         }
         Self {

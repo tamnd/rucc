@@ -872,10 +872,15 @@ pub fn parse_args(args: &[String]) -> Result<Action, CliError> {
                 if row.since > 0 {
                     newer.push((row.since, format!("unknown option `{arg}`")));
                 }
-                // The one row with something to remember: `x18` is the static chain of a nested
+                // A row with something to remember: `x18` is the static chain of a nested
                 // function, which the lowering refuses to build once it has been promised away.
                 if arg == "-ffixed-x18" {
                     opts.fixed_x18 = true;
+                }
+                // And whether a load or store may be at any address, which the last of the two
+                // spellings says.
+                if let Some(strict) = arg.strip_suffix("strict-align") {
+                    opts.strict_align = strict == "-m";
                 }
             }
             "--version" => version = true,
@@ -9339,6 +9344,7 @@ mod tests {
             "-mlittle-endian",
             "-mbranch-protection=none",
             "-mabi=lp64",
+            "-mstrict-align",
         ] {
             compile(&[KERNEL_ARM64, flag, "-c", "a.c"]);
         }
@@ -9659,7 +9665,6 @@ mod tests {
             let failed = refused(&[KERNEL_X86, flag, "-c", "a.c"]);
             assert!(failed.starts_with(&format!("{flag}: ")) && !failed.contains('#'), "{failed}");
         }
-        assert!(refused(&[KERNEL_ARM64, "-mstrict-align", "-c", "a.c"]).contains("unaligned"));
         // A sanitizer rather than a typo, so it gets the refusal every sanitizer gets.
         let failed = refused(&[KERNEL_ARM64, "-fsanitize=shadow-call-stack", "-c", "a.c"]);
         assert!(failed.contains("no sanitizer instrumentation"), "{failed}");

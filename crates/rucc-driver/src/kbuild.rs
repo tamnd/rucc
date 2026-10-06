@@ -247,10 +247,10 @@ pub(crate) const TABLE: &[Row] = &[
     ),
     only(
         A64,
-        refused(
+        same(
             "-mstrict-align",
-            "a load or store here may be unaligned, a packed member say, and nothing splits one",
-            None,
+            "a load or store less aligned than its width, a packed member say, is split into ones \
+             that are not, and a copy moves no wider than its two sides are aligned",
         ),
     ),
 ];

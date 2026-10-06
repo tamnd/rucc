@@ -1345,11 +1345,15 @@ pub const UNROLL: usize = 32;
 /// bytes and cover an odd tail with one more word that overlaps the one before it, as gcc does.
 /// Where it may, a call to `memcpy` or `memset` of a small constant size is taken apart here too,
 /// which catches the sizes that were only constant once a function was inlined, unless the unit
-/// said those names are not the library's. See `small`.
+/// said those names are not the library's. See `small`. Where it may not, a load or store less
+/// aligned than its width is taken apart instead. See `pieces`.
 pub fn bulk(func: &mut Func, names: &mut Interner, word: u32, unaligned: bool) {
     let found: Vec<Inst> = func.blocks().flat_map(|block| func.insts(block)).collect();
     if unaligned && !func.attrs.set.contains(AttrSet::NO_BUILTIN) {
         small(func, names, &found, word);
+    }
+    if !unaligned {
+        pieces(func, &found, word);
     }
     let found: Vec<Inst> = func.blocks().flat_map(|block| func.insts(block)).collect();
     for inst in found {
@@ -1358,6 +1362,104 @@ pub fn bulk(func: &mut Func, names: &mut Interner, word: u32, unaligned: bool) {
             Opcode::Memset => fill(func, names, inst, word, unaligned),
             Opcode::Memmove => shift(func, names, inst, word, unaligned),
             _ => {}
+        }
+    }
+}
+
+/// Every load and store less aligned than its width, as accesses no wider than its alignment, on
+/// a machine where a word may not be moved at any address.
+///
+/// That is AArch64 under `-mstrict-align`, which the kernel asks for in the code that runs before
+/// the MMU is on, where all of memory is device memory and an unaligned access faults. A packed
+/// member is the usual case, and so is the load the byte swap pass makes out of byte loads, which
+/// says how aligned its address is and is put back the way it was here. A load becomes a load of
+/// each piece, widened and shifted up to its place and put together with `or`, the lowest piece
+/// first since every target here is little endian. A store becomes a store of each piece of the
+/// value shifted down. A pointer goes through an integer of its width and a float through one of
+/// its bits, and each piece keeps whatever the program said about the access, a volatile one
+/// included, which is what gcc does with it too.
+///
+/// An atomic access is left alone, since one that is not aligned is not atomic whatever is done
+/// with it, and so is a vector.
+fn pieces(func: &mut Func, found: &[Inst], word: u32) {
+    for &inst in found {
+        let load = match func[inst].opcode {
+            Opcode::Load => true,
+            Opcode::Store => false,
+            _ => continue,
+        };
+        let Extra::Mem(mem) = func[inst].extra else { continue };
+        let info = func[mem];
+        let args = func[func[inst].args].to_vec();
+        let ty = if load { produced(func, inst) } else { func[args[0]].ty };
+        let bytes = if ty.is_ptr() { word } else { ty.bits().div_ceil(8) };
+        let piece = info.align.max(1);
+        if !ty.is_scalar()
+            || !bytes.is_power_of_two()
+            || bytes > word
+            || piece >= bytes
+            || info.order != MemOrder::NotAtomic
+        {
+            continue;
+        }
+        let (int, narrow) = (Type::int(bytes * 8), Type::int(piece * 8));
+        let access = MemInfo { size: u64::from(piece), align: piece, ..info };
+        let flags = func[inst].flags;
+        let address = if load { args[0] } else { args[1] };
+        let shift = |func: &mut Func, at: u32| {
+            ahead_const(func, inst, Imm::int(i128::from(at * piece * 8), int), int)
+        };
+        if load {
+            let mut parts = Vec::new();
+            for at in 0..bytes / piece {
+                let there = stepped(func, inst, address, u64::from(at * piece));
+                let args = func.push_values(&[there]);
+                let extra = Extra::Mem(func.add_mem(access));
+                let data = InstData { args, extra, flags, ..InstData::new(Opcode::Load) };
+                let part = written(func, inst, data, narrow);
+                let mut part = ahead(func, inst, Opcode::ZExt, &[part], int);
+                if at > 0 {
+                    let by = shift(func, at);
+                    part = ahead(func, inst, Opcode::Shl, &[part, by], int);
+                }
+                parts.push(part);
+            }
+            // The last `or` is the load itself when the value is an integer, and the conversion
+            // back is when it is not, so what the rest of the function reads stays where it was.
+            let last = parts.pop().expect("a load in pieces has at least two");
+            let low = parts
+                .into_iter()
+                .reduce(|low, part| ahead(func, inst, Opcode::Or, &[low, part], int));
+            let low = low.expect("a load in pieces has at least two");
+            if ty.is_int() {
+                becomes(func, inst, Opcode::Or, &[low, last]);
+            } else {
+                let whole = ahead(func, inst, Opcode::Or, &[low, last], int);
+                let back = if ty.is_ptr() { Opcode::IntToPtr } else { Opcode::Bitcast };
+                becomes(func, inst, back, &[whole]);
+            }
+        } else {
+            let value = match ty {
+                ty if ty.is_int() => args[0],
+                ty if ty.is_ptr() => ahead(func, inst, Opcode::PtrToInt, &[args[0]], int),
+                _ => ahead(func, inst, Opcode::Bitcast, &[args[0]], int),
+            };
+            for at in 0..bytes / piece {
+                let mut part = value;
+                if at > 0 {
+                    let by = shift(func, at);
+                    part = ahead(func, inst, Opcode::LShr, &[part, by], int);
+                }
+                let part = ahead(func, inst, Opcode::Trunc, &[part], narrow);
+                let there = stepped(func, inst, address, u64::from(at * piece));
+                let span = func.span(inst);
+                let args = func.push_values(&[part, there]);
+                let extra = Extra::Mem(func.add_mem(access));
+                let data = InstData { args, extra, flags, ..InstData::new(Opcode::Store) };
+                let made = func.create_inst(data, &[], span);
+                func.insert_before(made, inst);
+            }
+            func.remove_inst(inst);
         }
     }
 }
