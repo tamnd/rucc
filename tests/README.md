@@ -21,6 +21,8 @@ tests/
                exclusions for each target it runs on                                  W6
   torture/     the GCC torture execute runner, and the exclusions for each target it
                runs on                                                                 WA3
+  wasm-asm/    the check that the -S text of rucc for wasm assembles with rucc to the
+               object of the C source, and with llvm-mc                                WA7
   wasm-link/   the check that the linker inside rucc writes the module that wasm-ld
                writes                                                                  WA5
   web/         rucc.wasm as the browser page of web/ runs it, over browser_wasi_shim

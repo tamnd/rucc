@@ -2543,3 +2543,59 @@ fn the_thread_context_reaches_the_stack_pointer_and_the_tls_base_through_calls()
     assert!(object.symbols.iter().all(|s| s.flags & TLS == 0));
     assert_eq!(object.disallowed, ["shared-mem"]);
 }
+
+/// rucc reads its own `-S` text back into the object that it writes for the IR, byte for byte, at
+/// each level and with and without the thread context of wasm32-wasip3 (tamnd/rucc#3141).
+#[test]
+fn the_text_reads_back_into_the_same_object() {
+    let programs = [
+        ("program", PROGRAM),
+        ("twisted", TWISTED),
+        ("threaded", THREADED),
+        ("wide", WIDE),
+        ("narrow", NARROW),
+        ("addressed", ADDRESSED),
+        ("sjlj", SJLJ),
+        ("builtin sjlj", BUILTIN_SJLJ),
+        ("tail", TAIL),
+        ("aliases", ALIASES),
+        ("weak undefined", WEAK_UNDEFINED),
+        ("main three", MAIN_THREE),
+        ("global", GLOBAL),
+        ("bulk", BULK),
+        ("strings", STRINGS),
+        ("thread local", THREAD_LOCAL),
+    ];
+    for (name, text) in programs {
+        let mut names = Interner::new();
+        let mut module = rucc_ir::parse(text, &mut names).expect("the IR parses");
+        rucc_wasm::prepare(&mut module, &mut names).unwrap();
+        for optimize in [false, true] {
+            for thread_context in [false, true] {
+                let features = Cpu::Lime1.features();
+                let options = rucc_wasm::Options { features, optimize, thread_context };
+                let object = rucc_wasm::translate(&module, &names, options).unwrap();
+                let listing = rucc_wasm::assembly(&object).unwrap();
+                let read = rucc_wasm::assemble(&listing)
+                    .unwrap_or_else(|(line, why)| panic!("{name}: line {line}: {why}\n{listing}"));
+                let written = rucc_wasm::write(&object).unwrap();
+                assert!(read.bytes == written.bytes, "{name}, {optimize}, {thread_context}");
+                assert_eq!(read.defines, written.defines, "{name}");
+            }
+        }
+    }
+}
+
+/// A line that the reader does not take is an error with its number and the reason.
+#[test]
+fn the_reader_names_the_line_that_it_does_not_take() {
+    let error = |text: &str| rucc_wasm::assemble(text).map(|_| ()).unwrap_err();
+    let text = "\t.functype\tf () -> ()\n\t.section\t.text.f,\"\",@\nf:\n\tbogus\n";
+    assert_eq!(error(text), (4, "the instruction `bogus` is not one that rucc writes".into()));
+    let (line, why) = error("\tlocal.get\t0\n");
+    assert_eq!((line, why.as_str()), (1, "`local.get` is an instruction outside a function"));
+    let (line, why) = error("\t.functype\tf () -> ()\n\t.section\t.text.f,\"\",@\nf:\n\tnop\n");
+    assert_eq!((line, why.as_str()), (4, "the text ends inside a function"));
+    let (line, why) = error("\t.section\t.text.g,\"\",@\ng:\n");
+    assert_eq!((line, why.as_str()), (2, "`g` is not declared with `.functype`"));
+}

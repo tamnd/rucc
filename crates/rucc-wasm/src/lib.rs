@@ -71,6 +71,7 @@ mod asm;
 mod emit;
 mod irreducible;
 mod libcall;
+mod read;
 mod rules;
 mod select;
 mod sjlj;
@@ -182,6 +183,20 @@ pub fn write(object: &wasm::Module) -> Result<Written, Refusal> {
 /// in the translation or in the printer.
 pub fn assembly(object: &wasm::Module) -> Result<String, Refusal> {
     asm::print(object).map_err(|(function, why)| Refusal { function: Some(function), why })
+}
+
+/// The object of a file of `-S` text for wasm, in the dialect that [`assembly`] prints. For the
+/// text of `rucc -S`, the bytes are the bytes that `rucc -c` writes for the same source. See the
+/// `read` module.
+///
+/// # Errors
+///
+/// The number of the line, from 1, and the reason, for the first line that the reader does not
+/// take, or for the last line when the object that the text describes is not valid.
+pub fn assemble(text: &str) -> Result<Written, (usize, String)> {
+    let object = read::read(text)?;
+    wasm::write(&object)
+        .map_err(|error| (text.lines().count(), format!("the object is not valid, {error}")))
 }
 
 /// The object model of `module`, which [`write()`] encodes and [`assembly`] prints. A module
