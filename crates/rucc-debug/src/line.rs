@@ -128,10 +128,21 @@ pub enum Version {
 /// One function: where each of its instructions came from, and what it is.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct Function {
-    /// Its name, as the C program spelled it, which is what a relocation here asks the linker for.
+    /// Its name, as the C program spelled it, which is what a relocation here asks the linker for
+    /// when [`Function::symbol`] is empty.
     pub name: String,
+    /// The symbol a relocation here asks the linker for, when it is not the name. On wasm, `main` is
+    /// `__main_void` or `__main_argc_argv` to the linker, as it is for clang, and a debugger still
+    /// shows `main`.
+    pub symbol: Option<String>,
     /// How many bytes of instructions it is.
     pub len: u64,
+    /// The address of the first statement, which the row there marks as the end of the prologue,
+    /// and nothing to leave the prologue to the debugger. A debugger stops there for a breakpoint
+    /// on the function. On wasm, the code that the debugger reads is the code that the runtime
+    /// compiled, which has no prologue of the shape that gcc gives, so the mark is the only way to
+    /// tell it where the body starts. clang writes the mark for the same reason.
+    pub prologue_end: Option<u64>,
     /// The rows, in increasing order of address.
     pub rows: Vec<Row>,
     /// Where it was declared, and nothing when that is not known.
@@ -279,7 +290,8 @@ pub fn write(unit: &Unit) -> Result<Info, Error> {
         let mut said: Option<(usize, u32, u32)> = None;
         for row in &func.rows {
             let now = (row.file, row.line, row.column);
-            if said == Some(now) {
+            let body = func.prologue_end == Some(row.at);
+            if said == Some(now) && !body {
                 continue;
             }
             said = Some(now);
@@ -296,6 +308,7 @@ pub fn write(unit: &Unit) -> Result<Info, Error> {
             // every row is the start of a statement or is code with no statement to be the start
             // of, and the second kind carries line zero and is not a place a debugger stops.
             state.is_statement = true;
+            state.prologue_end = body;
             program.generate_row();
         }
         program.end_sequence(func.len);
@@ -363,7 +376,7 @@ pub fn write(unit: &Unit) -> Result<Info, Error> {
     // variable's location asks for a variable.
     let named = |target: gimli::write::RelocationTarget| match target {
         gimli::write::RelocationTarget::Symbol(index) => match unit.funcs.get(index) {
-            Some(func) => func.name.clone(),
+            Some(func) => func.symbol.clone().unwrap_or_else(|| func.name.clone()),
             None => unit.globals[index - unit.funcs.len()].name.clone(),
         },
         gimli::write::RelocationTarget::Section(id) => id.name().to_owned(),
@@ -494,6 +507,18 @@ mod tests {
         assert!(rest.clone().count() > 0);
         assert!(rest.clone().all(|reloc| reloc.symbol == ".debug_line_str"));
         assert!(rest.clone().all(|reloc| reloc.kind == Reference::Address { bytes: 4 }));
+    }
+
+    /// A function whose symbol is not its name, which is `main` on wasm, asks the linker for the
+    /// symbol and is still called by its name.
+    #[test]
+    fn a_function_with_a_symbol_of_its_own_asks_the_linker_for_the_symbol() {
+        let mut unit = one();
+        unit.funcs[0].symbol = Some("__main_void".to_owned());
+        let info = write(&unit).expect("sections");
+        let line = info.chunks.iter().find(|chunk| chunk.name == ".debug_line").expect("a table");
+        assert!(line.relocs.iter().any(|reloc| reloc.symbol == "__main_void"));
+        assert!(line.relocs.iter().all(|reloc| reloc.symbol != "f"));
     }
 
     /// On a Mac the unit's own name, directory and producer are read from `.debug_str`, which is
