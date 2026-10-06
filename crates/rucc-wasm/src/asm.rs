@@ -250,7 +250,9 @@ impl Printer<'_> {
     }
 
     /// The types of the globals and the table, and the signature of every function, before any
-    /// code names them, with the module and field of an import that is not the default one.
+    /// code names them, with the module and field of an import that is not the default one. Each
+    /// data symbol is named here too, so that the block names every symbol in the order of the
+    /// symbol table, and the reader in `read` gives them back in that order.
     fn declarations(&mut self) {
         let object = self.object;
         for (index, symbol) in object.symbols.iter().enumerate() {
@@ -281,8 +283,12 @@ impl Printer<'_> {
                         self.binding(name, symbol.flags, false);
                     }
                 }
-                SymbolKind::Data { place: None } => self.binding(name, symbol.flags, false),
-                SymbolKind::Data { place: Some(_) } => {}
+                SymbolKind::Data { place } => {
+                    if place.is_none() {
+                        self.binding(name, symbol.flags, false);
+                    }
+                    self.line(&format!(".type\t{name},@object"));
+                }
             }
         }
     }
