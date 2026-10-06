@@ -33,8 +33,8 @@ use std::fmt::Write as _;
 
 use crate::Notes;
 use rucc_object::wasm::{
-    EXPORTED, FuncType, Function, HIDDEN, LOCAL, Module, NO_STRIP, RETAIN, RelocKind, STRINGS,
-    Segment, SymbolKind, TLS_SEGMENT, ValType, WEAK,
+    Custom, EXPORTED, FuncType, Function, HIDDEN, LOCAL, Module, NO_STRIP, RETAIN, RelocKind,
+    STRINGS, Segment, SymbolKind, TLS_SEGMENT, ValType, WEAK,
 };
 
 /// The text of `object`.
@@ -252,7 +252,8 @@ impl Printer<'_> {
     /// The types of the globals and the table, and the signature of every function, before any
     /// code names them, with the module and field of an import that is not the default one. Each
     /// data symbol is named here too, so that the block names every symbol in the order of the
-    /// symbol table, and the reader in `read` gives them back in that order.
+    /// symbol table, and the reader in `read` gives them back in that order. A section symbol is
+    /// the label at the start of its custom section, after the code and the data.
     fn declarations(&mut self) {
         let object = self.object;
         for (index, symbol) in object.symbols.iter().enumerate() {
@@ -289,6 +290,7 @@ impl Printer<'_> {
                     }
                     self.line(&format!(".type\t{name},@object"));
                 }
+                SymbolKind::Section { .. } => {}
             }
         }
     }
@@ -810,7 +812,40 @@ impl Printer<'_> {
         }
     }
 
-    /// The constructors, the symbols the linker keeps, and the two custom sections.
+    /// One custom section with fixups, as LLVM writes a DWARF section: its section symbol as a
+    /// label at the start, and each fixup as `.int32` of a symbol and an offset. A function
+    /// symbol there is a code offset, a section symbol is an offset into its section, and a data
+    /// symbol is an address.
+    fn custom(&mut self, index: usize, custom: &Custom) {
+        // The string sections of DWARF have the flag of strings in LLVM, and its assembler refuses
+        // them without it.
+        if matches!(custom.name.as_str(), ".debug_str" | ".debug_line_str") {
+            self.line(&format!(".section\t{},\"S\",@", custom.name));
+        } else if custom.name.starts_with(".debug_") {
+            self.line(&format!(".section\t{},\"\",@", custom.name));
+        } else {
+            self.line(&format!(".section\t.custom_section.{},\"\",@", custom.name));
+        }
+        let start = self.object.symbols.iter().find(|s| match s.kind {
+            SymbolKind::Section { custom } => custom as usize == index,
+            _ => false,
+        });
+        if let Some(symbol) = start {
+            let _ = writeln!(self.out, "{}:", symbol.name);
+        }
+        let mut fixups = custom.fixups.clone();
+        fixups.sort_unstable_by_key(|f| f.at);
+        let mut at = 0usize;
+        for fixup in fixups {
+            self.bytes(&custom.bytes[at..fixup.at as usize]);
+            self.line(&format!(".int32\t{}", self.address(fixup.target, fixup.addend)));
+            at = fixup.at as usize + fixup.kind.width();
+        }
+        self.bytes(&custom.bytes[at..]);
+    }
+
+    /// The constructors, the symbols the linker keeps, the custom sections with fixups and the
+    /// two custom sections of the toolchain.
     fn trailer(&mut self) {
         let object = self.object;
         for &(priority, symbol) in &object.inits {
@@ -824,6 +859,9 @@ impl Printer<'_> {
         }
         for symbol in object.symbols.iter().filter(|s| s.flags & NO_STRIP != 0) {
             self.line(&format!(".no_dead_strip\t{}", symbol.name));
+        }
+        for (index, custom) in object.customs.iter().enumerate() {
+            self.custom(index, custom);
         }
         let sections = [
             ("producers", rucc_object::wasm::producers(&object.producers)),

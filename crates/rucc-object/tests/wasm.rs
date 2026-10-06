@@ -11,8 +11,8 @@ use std::path::{Path, PathBuf};
 use std::process::Command;
 
 use rucc_object::wasm::{
-    self, Fixup, FuncType, Function, HIDDEN, LOCAL, Module, NO_STRIP, Place, Producers, RelocKind,
-    STRINGS, Segment, SymbolKind, ValType,
+    self, Custom, Fixup, FuncType, Function, HIDDEN, LOCAL, Module, NO_STRIP, Place, Producers,
+    RelocKind, STRINGS, Segment, SymbolKind, ValType,
 };
 
 /// `static int greet(const char *s) { return puts(s); }`, a pointer to it and a pointer to a
@@ -226,6 +226,93 @@ fn every_relocation_points_at_a_padded_field_that_holds_its_value() {
     assert_eq!(seen, 7);
 }
 
+/// `program` with two DWARF sections: `.debug_abbrev`, and a `.debug_info` that holds the
+/// offset 4 into it, the code address 3 bytes into `__main_void` and the address of `msg`.
+fn described() -> Module {
+    let mut m = program();
+    m.customs.push(Custom { name: ".debug_abbrev".into(), bytes: vec![7; 8], fixups: vec![] });
+    let at = |at, kind, target, addend| Fixup { at, kind, target, addend };
+    let abbrev = u32::try_from(m.symbols.len()).unwrap();
+    let fixups = vec![
+        at(0, RelocKind::SectionOffsetI32, abbrev, 4),
+        at(5, RelocKind::FunctionOffsetI32, 0, 3),
+        at(9, RelocKind::MemoryAddrI32, 4, 0),
+    ];
+    m.customs.push(Custom { name: ".debug_info".into(), bytes: vec![0; 13], fixups });
+    m.symbol(".Ldebug_abbrev", SymbolKind::Section { custom: 0 }, 0);
+    m
+}
+
+#[test]
+fn a_dwarf_section_holds_offsets_into_the_code_and_into_other_sections() {
+    let written = wasm::write(&described()).unwrap();
+    let all = sections(&written.bytes);
+    let order: Vec<&str> = all.iter().map(|(_, label, _)| label.as_str()).collect();
+    let want = [
+        "",
+        "",
+        "",
+        "",
+        "",
+        ".debug_abbrev",
+        ".debug_info",
+        "linking",
+        "reloc.CODE",
+        "reloc.DATA",
+        "reloc..debug_info",
+        "producers",
+        "target_features",
+    ];
+    assert_eq!(order, want);
+    assert_eq!(written.defines, ["__main_void", "msg", "fp"], "a section symbol is local");
+
+    // The body of `__main_void` is the second one in the code section, after its size.
+    let code = &all[3].2;
+    let mut at = 1;
+    let first = usize::try_from(read_uleb(code, &mut at)).unwrap();
+    at += first;
+    read_uleb(code, &mut at);
+    let body = i64::try_from(at).unwrap();
+
+    let info = &all[6].2;
+    let word = |at: usize| i64::from(u32::from_le_bytes(info[at..at + 4].try_into().unwrap()));
+    assert_eq!((word(0), word(5), word(9)), (4, body + 3, 16));
+
+    let relocs = &all[10].2;
+    let mut at = 0;
+    assert_eq!(read_uleb(relocs, &mut at), 6, "the index of .debug_info in the file");
+    assert_eq!(read_uleb(relocs, &mut at), 3);
+    let mut entries = Vec::new();
+    for _ in 0..3 {
+        let kind = relocs[at];
+        at += 1;
+        let offset = read_uleb(relocs, &mut at);
+        let symbol = read_uleb(relocs, &mut at);
+        entries.push((kind, offset, symbol, read_sleb(relocs, &mut at)));
+    }
+    assert_eq!(entries, [(9, 0, 7, 4), (8, 5, 0, 3), (5, 9, 4, 0)]);
+
+    // The last entry of the symbol table is the section symbol: kind 3, local, and the index of
+    // `.debug_abbrev` in the file.
+    let linking = &all[7].2;
+    assert_eq!(linking[..2], [2, 8], "the version, then the symbol table");
+    let mut at = 2;
+    let size = usize::try_from(read_uleb(linking, &mut at)).unwrap();
+    let end = at + size;
+    assert_eq!(read_uleb(linking, &mut at), 8);
+    assert_eq!(linking[end - 3..end], [3, LOCAL as u8, 5]);
+}
+
+#[test]
+fn a_custom_section_has_at_most_one_section_symbol() {
+    let mut m = described();
+    m.symbol(".Lagain", SymbolKind::Section { custom: 0 }, 0);
+    assert_eq!(wasm::write(&m).unwrap_err(), wasm::Error::Section { symbol: 8 });
+    let mut m = described();
+    m.symbols[7].kind = SymbolKind::Section { custom: 2 };
+    assert_eq!(wasm::write(&m).unwrap_err(), wasm::Error::Section { symbol: 7 });
+}
+
 #[test]
 fn a_fixup_that_names_the_wrong_kind_of_symbol_is_an_error() {
     let mut m = program();
@@ -336,7 +423,18 @@ fn the_object_links_with_wasm_ld_and_runs() {
     let dir = std::env::temp_dir().join(format!("rucc-object-wasm-{}", std::process::id()));
     std::fs::create_dir_all(&dir).unwrap();
     let object = dir.join("a.o");
-    std::fs::write(&object, wasm::write(&program()).unwrap().bytes).unwrap();
+    std::fs::write(&object, wasm::write(&described()).unwrap().bytes).unwrap();
+
+    // LLVM reads the relocations of the DWARF sections as the ones it writes.
+    let dump = run(&sdk.join("bin/llvm-objdump"), &["-r".as_ref(), object.as_os_str()]);
+    let dump = String::from_utf8_lossy(&dump.stdout);
+    for line in [
+        "00000000 R_WASM_SECTION_OFFSET_I32 .debug_abbrev+4",
+        "00000005 R_WASM_FUNCTION_OFFSET_I32 __main_void+3",
+        "00000009 R_WASM_MEMORY_ADDR_I32   msg+0",
+    ] {
+        assert!(dump.contains(line), "{dump}");
+    }
 
     let dump = run(&sdk.join("bin/llvm-objdump"), &["-t".as_ref(), object.as_os_str()]);
     let dump = String::from_utf8_lossy(&dump.stdout);
