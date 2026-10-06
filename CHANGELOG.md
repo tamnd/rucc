@@ -4,6 +4,10 @@ All notable changes are recorded here. The format follows [Keep a Changelog](htt
 
 ## Unreleased
 
+### Fixed
+
+- `rucc-wasm-link` writes the same module each time it links the same inputs (#2867). It put the imports in the order of a hash table, which changes from one run to the next. They are now in the order of the first reference to each.
+
 ### Added
 
 - The crate `rucc-wasm-link`, a static linker for wasm that runs inside the compiler, for a host that cannot start `wasm-ld`, such as rucc that runs as a wasm module (#2867). It reads objects and `ar` archives, fetches only the archive members that define a symbol something needs, drops what the entry and the exports do not reach, and writes a command or a reactor module for wasm32-wasip1. The SQLite shell linked with it against the wasi-sdk 34 sysroot gives the same answers as the module that `wasm-ld` links, and it is 16 bytes smaller without the custom sections. The driver does not use the crate yet.
