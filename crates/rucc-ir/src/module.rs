@@ -428,6 +428,11 @@ pub struct Global {
     /// from `__attribute__((nodirect_extern_access))`, even in position dependent code. A
     /// definition is reached the way it would have been. x86 ELF only, which is where gcc has it.
     pub indirect: bool,
+    /// Whether the section it is in is one every process running the image shares, from
+    /// `__attribute__((shared))` on x86 Windows. What that takes is the section's flag, so it
+    /// means something only in a section the program named, which is where gcc reads it, and
+    /// only COFF has the flag, so nothing else reads this.
+    pub shared: bool,
     /// Its initial image, or `None` if it is only declared here.
     pub init: Option<DataList>,
     /// Whether the optimizer may take it away once nothing in the module names it, which is a
@@ -461,6 +466,7 @@ impl Global {
             persistent: false,
             nobss: false,
             indirect: false,
+            shared: false,
             init: None,
             droppable: false,
             literal: false,

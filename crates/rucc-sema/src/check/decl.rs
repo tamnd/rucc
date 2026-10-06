@@ -364,7 +364,8 @@ impl Checker<'_> {
                     &[specs.attrs],
                     Some(linkage == Linkage::External),
                     specs.span,
-                ),
+                )
+                | self.shared_section(&[specs.attrs], DeclKind::Function),
             // The specifiers only, for the reason `noreturn` above reads them only. What a
             // definition says here is almost always `dllexport`, and `__declspec` is written in
             // front of the declaration, which is where the specifiers are.
@@ -902,7 +903,8 @@ impl Checker<'_> {
                     &[specs.attrs, item.attrs],
                     Some(linkage == Linkage::External),
                     specs.span,
-                ),
+                )
+                | self.shared_section(&[specs.attrs, item.attrs], kind),
             // Both places, for the reason `noreturn` above reads both. `__declspec` is written
             // in front and the attribute spelling is as often written after the declarator.
             dll: self.dll(specs.attrs) | self.dll(item.attrs),
@@ -1114,6 +1116,7 @@ impl Checker<'_> {
         self.ms_hooked(&[specs.attrs, item.attrs], false);
         self.reset_kept(&[specs.attrs, item.attrs], None, span);
         self.extern_access(&[specs.attrs, item.attrs], None, span);
+        self.shared_section(&[specs.attrs, item.attrs], DeclKind::Type);
         self.string_arg(&[specs.attrs, item.attrs], ty);
         self.record_fentry(None, &[specs.attrs, item.attrs], DeclKind::Type);
         self.record_symver(None, &[specs.attrs, item.attrs], StorageDuration::Static, span);

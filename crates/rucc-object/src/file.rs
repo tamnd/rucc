@@ -204,6 +204,23 @@ impl Flavour {
         }
     }
 
+    /// The flags of a section a variable written `shared` is in, which are those of a written
+    /// one and the flag that has every process running the image share it, `"dws"` as the
+    /// assembler reads it. Only COFF has that flag, and anywhere else the section is a written
+    /// one like any other.
+    fn shared(self) -> Option<SectionFlags> {
+        use object::pe;
+        match self {
+            Flavour::Coff => Some(SectionFlags::Coff {
+                characteristics: pe::IMAGE_SCN_CNT_INITIALIZED_DATA
+                    | pe::IMAGE_SCN_MEM_READ
+                    | pe::IMAGE_SCN_MEM_WRITE
+                    | pe::IMAGE_SCN_MEM_SHARED,
+            }),
+            Flavour::Elf | Flavour::MachO => None,
+        }
+    }
+
     /// The header fields a file of assembly stated about one of its own sections, where the format
     /// has fields to put them in.
     ///
@@ -1183,6 +1200,10 @@ fn put(
             if let Some(flags) = Array::of(name).and_then(|array| flavour.gathered(array)) {
                 obj.section_mut(section).flags = flags;
             }
+            if let (Place::Named(_, Holds::Shared), Some(flags)) = (&object.place, flavour.shared())
+            {
+                obj.section_mut(section).flags = flags;
+            }
             section
         }
         // A section of its own whatever the flags say, since it is the unit the linker keeps one
@@ -1343,9 +1364,10 @@ fn kind_of(place: &Place) -> SectionKind {
         }
         Place::Thread { zero: false } => SectionKind::Tls,
         Place::Thread { zero: true } => SectionKind::UninitializedTls,
-        Place::Written | Place::Merged | Place::Named(_, Holds::Written) | Place::Persistent => {
-            SectionKind::Data
-        }
+        Place::Written
+        | Place::Merged
+        | Place::Named(_, Holds::Written | Holds::Shared)
+        | Place::Persistent => SectionKind::Data,
     }
 }
 

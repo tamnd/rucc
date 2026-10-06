@@ -46,7 +46,7 @@ use rucc_types::{
 };
 
 use crate::check::{Checker, Promoted};
-use crate::decl::DeclId;
+use crate::decl::{DeclId, DeclKind};
 use crate::scope::{Binding, Tag, TagKind};
 
 mod tag;
@@ -1214,6 +1214,7 @@ impl Checker<'_> {
                 self.ms_hooked(&[ast[specs].attrs, param.attrs], false);
                 self.reset_kept(&[ast[specs].attrs, param.attrs], None, span);
                 self.extern_access(&[ast[specs].attrs, param.attrs], None, span);
+                self.shared_section(&[ast[specs].attrs, param.attrs], DeclKind::Type);
                 self.string_arg(&[ast[specs].attrs, param.attrs], ty);
                 self.assume_misplaced(&[ast[specs].attrs, param.attrs], false, span);
             }

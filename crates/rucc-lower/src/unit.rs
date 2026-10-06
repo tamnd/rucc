@@ -1009,6 +1009,7 @@ impl Unit<'_> {
         global.persistent = defined && init.is_some() && node.flags.contains(DeclFlags::PERSISTENT);
         global.nobss = defined && init.is_some() && !self.zero_bss;
         global.indirect = node.flags.contains(DeclFlags::NODIRECT);
+        global.shared = node.flags.contains(DeclFlags::SHARED);
         // Under `-fcommon` an `int x;` that nothing initializes is offered to the linker to merge
         // with every other one of the same name, and with a real definition if there is one. Only
         // the plain case is: a thread-local one has to be a copy per thread, a weak or internal

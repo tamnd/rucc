@@ -121,6 +121,9 @@ pub enum Place {
     /// 32-bit WebAssembly, on any operating system. gcc has no wasm target, so a row here is a
     /// clang attribute that the wasm rows read, and the answer is clang 23's.
     Wasm,
+    /// 32-bit or 64-bit x86 on Windows, which is where gcc has the attributes its PE back end
+    /// reads and its AArch64 Windows port does not.
+    X86Windows,
 }
 
 /// The target a question is asked on, as far as the matrix cares, which is which of the places
@@ -145,6 +148,7 @@ impl Target {
             (Place::Windows, os == "windows"),
             (Place::X86_64Elf, arch == "x86_64" && !matches!(os, "windows" | "macos")),
             (Place::Wasm, arch == "wasm32"),
+            (Place::X86Windows, matches!(arch, "x86_64" | "i686") && os == "windows"),
         ] {
             if holds {
                 target.places |= 1 << place as u8;
@@ -525,6 +529,12 @@ mod tests {
             assert_eq!(has_attribute(name, LINUX, GCC), 0, "{name}");
             assert_eq!(has_attribute(name, windows, GCC), 1, "{name}");
             assert_eq!(has_attribute(name, Target::new("aarch64", "windows"), GCC), 1, "{name}");
+        }
+        // gcc's PE back end has `shared` and its AArch64 Windows port does not.
+        assert_eq!(has_attribute("shared", windows, GCC), 1);
+        assert_eq!(has_attribute("shared", Target::new("i686", "windows"), GCC), 1);
+        for target in [LINUX, i686, Target::new("aarch64", "windows")] {
+            assert_eq!(has_attribute("shared", target, GCC), 0, "{target:?}");
         }
         for target in [LINUX, windows, arm] {
             assert_eq!(has_attribute("vectorcall", target, GCC), 0, "gcc does not know it");

@@ -280,6 +280,9 @@ impl<'a> Printer<'a> {
         if global.indirect {
             self.out.push_str(", nodirect_extern_access");
         }
+        if global.shared {
+            self.out.push_str(", shared");
+        }
         self.out.push('\n');
     }
 

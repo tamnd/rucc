@@ -661,9 +661,14 @@ fn place(
     if let Some(section) = global.section {
         let name = names.resolve(section).to_owned();
         let zero = pieces.iter().all(|piece| matches!(piece, Piece::Zero(_)));
-        let holds = if zero && Holds::nobits(&name) {
+        // A shared one is written whatever its bytes are, since gcc gives the flag to any
+        // section it would make writable and names no section of zeros on COFF.
+        let read_only = global.constant && addrs.is_empty();
+        let holds = if global.shared && !read_only {
+            Holds::Shared
+        } else if zero && Holds::nobits(&name) {
             Holds::Zero
-        } else if global.constant && addrs.is_empty() {
+        } else if read_only {
             Holds::ReadOnly
         } else {
             Holds::Written

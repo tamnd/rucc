@@ -536,6 +536,11 @@ impl DeclFlags {
     /// `check::extern_access`.
     pub const NODIRECT: Self = Self(1 << 42);
 
+    /// `__attribute__((shared))` was kept on a declaration of this object, so the section its
+    /// definition goes in is one every process running the image shares. x86 Windows only.
+    /// Merged the way [`Self::RETAIN`] is. See `check::shared`.
+    pub const SHARED: Self = Self(1 << 43);
+
     /// Whether `zero_call_used_regs("skip")` was written. See [`Self::ZERO_WIDE`] for why this is
     /// more than the one bit.
     #[must_use]

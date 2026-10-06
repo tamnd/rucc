@@ -81,6 +81,7 @@ mod extname;
 mod format;
 mod init;
 mod noinit;
+mod shared;
 mod sse_regparm;
 mod stmt;
 mod string_arg;
