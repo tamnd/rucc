@@ -382,7 +382,7 @@ impl Frame {
 
 /// The rows the cold part of a split function opens with, which take a fresh record to the state
 /// the first part ended in, each remembered state on the way. See [`Writer::cold_part`].
-fn cold_rows(func: &Func, cold: Block) -> Vec<CfiOp> {
+pub(crate) fn cold_rows(func: &Func, cold: Block) -> Vec<CfiOp> {
     let mut now = Frame::called();
     let mut stack = Vec::new();
     for block in func.blocks().take_while(|&block| block != cold) {

@@ -392,9 +392,23 @@ pub fn write(
         obj.section_id(StandardSection::Data);
         obj.section_id(StandardSection::UninitializedData);
     }
+    // The bytes in front of the first stretch the assembler laid out for a section of its own,
+    // which is all of them in a unit that moved nothing out of the text section. See `Text::runs`.
+    let first = text.runs.first().map_or(text.bytes.len(), |run| run.start);
     if !sections.functions {
-        obj.append_section_data(whole, &text.bytes, u64::from(text.align));
+        obj.append_section_data(whole, &text.bytes[..first], u64::from(text.align));
     }
+    // And each of those stretches as the section it was laid out for, in the order they are in.
+    let mut homes = Vec::with_capacity(text.runs.len());
+    for (index, run) in text.runs.iter().enumerate() {
+        let end = text.runs.get(index + 1).map_or(text.bytes.len(), |next| next.start);
+        let id = obj.add_section(Vec::new(), run.name.clone().into_bytes(), SectionKind::Text);
+        obj.append_section_data(id, &text.bytes[run.start..end], u64::from(run.align.max(1)));
+        homes.push(id);
+    }
+    // Which of those a byte is in, or `None` for the text section and the sections of its own a
+    // function there is given.
+    let run_of = |at: usize| text.runs.partition_point(|run| run.start <= at).checked_sub(1);
 
     // Every function defined here, then every variable, then every name either of them wanted that
     // is not. A name is looked up rather than added twice, because two symbols with one name is
@@ -419,7 +433,12 @@ pub fn write(
         // the room is what came before, so a section holding one without the other would be a
         // section a linker could place with the room missing.
         let ahead = func.ahead();
-        let (section, at) = if sections.functions {
+        let run = run_of(func.start);
+        let (section, at) = if let Some(run) = run {
+            // Already in the stretch laid out for its section, room and all, so it is where it is
+            // in that.
+            (homes[run], (func.start - text.runs[run].start) as u64)
+        } else if sections.functions {
             let name = format!(".text.{}", func.name).into_bytes();
             let id = obj.add_section(Vec::new(), name, SectionKind::Text);
             let bytes = &text.bytes[func.start - ahead..func.start + func.len];
@@ -443,7 +462,8 @@ pub fn write(
         // is what ties the two together and it needs a section index the writer underneath does not
         // set, so `link` fills it in afterwards. See `link`.
         if let Some(patch) = func.patch {
-            let base = if sections.functions { func.start - ahead } else { 0 };
+            // Where the section starts, in the bytes the room's place is counted in.
+            let base = func.start - at as usize;
             let name = elf::PATCHABLE.as_bytes().to_vec();
             let id = obj.add_section(Vec::new(), name, SectionKind::Data);
             obj.section_mut(id).flags = elf::ordered();
@@ -458,10 +478,10 @@ pub fn write(
                 id,
                 Relocation { offset: 0, symbol, addend: (patch.at - base) as i64, flags },
             )?;
-            ordered.push(if sections.functions {
-                format!(".text.{}", func.name)
-            } else {
-                ".text".to_owned()
+            ordered.push(match run {
+                Some(run) => text.runs[run].name.clone(),
+                None if sections.functions => format!(".text.{}", func.name),
+                None => ".text".to_owned(),
             });
         }
         let id = obj.add_symbol(Symbol {
@@ -489,15 +509,7 @@ pub fn write(
             let why = format!("'{}' is at {} and in front of every function", label.name, label.at);
             return Err(Error::Refused { why });
         };
-        let func = &text.funcs[index];
-        let (section, at) = if sections.functions {
-            // From the start of the section rather than from the symbol, which is the same
-            // correction a relocation inside a function gets below.
-            let base = func.start - func.ahead();
-            (split[index].0, (label.at - base) as u64)
-        } else {
-            (whole, label.at as u64)
-        };
+        let (section, at) = within(text, &split, index, label.at);
         // On ELF a label is a place and not a symbol, which is what gas makes of a `.L` name: a
         // reference to it is written against the section with the label's offset added, and the
         // symbol table has no entry for it. An entry there is one a profiler reads as the start of
@@ -554,13 +566,7 @@ pub fn write(
                 let why = format!("a profiler call at {call} is in front of every function");
                 return Err(Error::Refused { why });
             };
-            let func = &text.funcs[index];
-            let (section, at) = if sections.functions {
-                let base = func.start - func.ahead();
-                (split[index].0, call - base)
-            } else {
-                (whole, call)
-            };
+            let (section, at) = within(text, &split, index, call);
             let offset =
                 obj.append_section_data(id, &vec![0; usize::from(pointer)], u64::from(pointer));
             let symbol = obj.section_symbol(section);
@@ -617,7 +623,7 @@ pub fn write(
 
     // The jump tables, which the code reaches by name and which reach the code in turn. Placed
     // before any relocation of the text is added, since the instruction that reads one names it.
-    let tables = tables(&mut obj, text, &split, &mut named, sections, flavour)?;
+    let mut tables = tables(&mut obj, text, &split, &mut named, sections, flavour)?;
 
     // The distances between two labels, written into the images just placed. Both labels were
     // added above with the section they are in and where in it, so the distance is the one value
@@ -727,21 +733,28 @@ pub fn write(
         symbols.insert(name.clone(), id);
     }
 
+    // A place a jump from one part of a split function to the other goes to, which the linker is
+    // told as a section and how far in, the way a table is. See [`Text::places`].
+    for place in &text.places {
+        let after = text.funcs.partition_point(|func| func.start <= place.at);
+        let Some(index) = after.checked_sub(1) else {
+            let why = format!("'{}' is in front of every function", place.name);
+            return Err(Error::Refused { why });
+        };
+        tables.insert(place.name.clone(), within(text, &split, index, place.at));
+    }
     for reloc in &text.relocs {
         // Which function's bytes this one is in, which is the question only the split path has to
         // ask: when there is one text section every offset in it is already the offset in it.
         // Every relocation is inside some function, since the padding between two of them is
         // instructions that do nothing and holds nothing a linker fills in.
-        let (section, at) = if sections.functions {
+        let (section, at) = if sections.functions || !text.runs.is_empty() {
             let after = text.funcs.partition_point(|func| func.start <= reloc.at);
-            let Some(func) = after.checked_sub(1).map(|i| &text.funcs[i]) else {
+            let Some(index) = after.checked_sub(1) else {
                 let why = format!("a relocation at {} is in front of every function", reloc.at);
                 return Err(Error::Refused { why });
             };
-            // From the start of the section rather than from the symbol, and the two are not the
-            // same byte in a function with room in front of its label.
-            let base = func.start - func.ahead();
-            (split[after - 1].0, (reloc.at - base) as u64)
+            within(text, &split, index, reloc.at)
         } else {
             (whole, reloc.at as u64)
         };
@@ -769,6 +782,10 @@ pub fn write(
     // none needs nothing written about it, and `.pdata` is a section the loader of a 32 bit image
     // does not read. What the rest of the file says is the same whether or not the producer
     // described its frames.
+    // Which function each name is, for the records below that name one, which is every function
+    // there is and would otherwise be a walk of every function for each of them.
+    let by_name: Map<&str, usize> =
+        text.funcs.iter().enumerate().map(|(index, func)| (func.name.as_str(), index)).collect();
     let seh_free = flavour == Flavour::Coff && machine == Architecture::I386;
     if !text.unwind.bytes.is_empty() && !seh_free {
         let ((name, align), second) = flavour.tables();
@@ -840,8 +857,8 @@ pub fn write(
                 // rather than a shape to handle: the writer says what it was given rather than
                 // guessing.
                 None => {
-                    let found = text.funcs.iter().position(|func| func.name == reloc.symbol);
-                    let Some((section, at)) = found.map(|i| split[i]) else {
+                    let found = by_name.get(reloc.symbol.as_str());
+                    let Some(&(section, at)) = found.map(|&i| &split[i]) else {
                         let why = format!(
                             "'{}' has an unwind record and is not a function here",
                             reloc.symbol
@@ -892,7 +909,7 @@ pub fn write(
                 // for the reason the unwind table's records are written that way: a global name is
                 // answered at load time by whichever object defines it first, and a distance to
                 // one is not a distance a linker can work out.
-                None => match text.funcs.iter().position(|func| func.name == reloc.symbol) {
+                None => match by_name.get(reloc.symbol.as_str()).copied() {
                     Some(which) => {
                         let (section, at) = split[which];
                         (obj.section_symbol(section), reloc.addend + at as i64)
@@ -1191,6 +1208,21 @@ fn put(
 /// offset and the cell's own place in the table as the addend. Against the section rather than the
 /// function's name for the reason the unwind records are: a global name may be answered by another
 /// object at load time, and a linker refuses a distance to one.
+/// Where a byte of the function at `index` in [`Text::funcs`] went, as the section and how far into
+/// it, worked out from where the walk over the functions put that function's start.
+///
+/// From the front of the section rather than from the symbol, which are not the same byte in a
+/// function with room in front of its label or in any function after the first in a section.
+fn within(
+    text: &Text,
+    split: &[(object::write::SectionId, u64)],
+    index: usize,
+    at: usize,
+) -> (object::write::SectionId, u64) {
+    let (section, start) = split[index];
+    (section, start + (at - text.funcs[index].start) as u64)
+}
+
 fn tables(
     obj: &mut Writer<'_>,
     text: &Text,
@@ -1237,10 +1269,10 @@ fn tables(
         let offset =
             obj.append_section_data(section, &vec![0; width * table.cells.len()], width as u64);
         placed.insert(table.name.clone(), (section, offset));
-        let (code, at) = split[table.func];
-        let symbol = obj.section_symbol(code);
-        for (index, &cell) in table.cells.iter().enumerate() {
+        for (index, &(func, cell)) in table.cells.iter().enumerate() {
             let place = (width * index) as u64;
+            let (code, at) = split[func];
+            let symbol = obj.section_symbol(code);
             let addend = at as i64 + cell as i64 + if table.absolute { 0 } else { place as i64 };
             let record = Relocation { offset: offset + place, symbol, addend, flags };
             relocate(obj, section, record)?;
@@ -2034,7 +2066,12 @@ mod tests {
     fn switching() -> Text {
         let mut text = two();
         let name = ".Lg_j0".to_owned();
-        text.tables.push(crate::Table { name, func: 1, cells: vec![0, 5], absolute: false });
+        text.tables.push(crate::Table {
+            name,
+            func: 1,
+            cells: vec![(1, 0), (1, 5)],
+            absolute: false,
+        });
         text
     }
 
