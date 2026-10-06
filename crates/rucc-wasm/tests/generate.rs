@@ -1825,16 +1825,19 @@ fn bulk_body_of(text: &str, name: &str, features: Features) -> String {
 }
 
 /// With the bulk memory feature, a call to `memcpy` or `memmove` is `memory.copy` and a call to
-/// `memset` is `memory.fill`, and the answer is the destination. A copy of a small constant length
-/// is loads and stores, each as wide as the bytes left allow. A function marked `no_builtin`, and
-/// a target with no bulk memory, keep the calls.
+/// `memset` is `memory.fill`, and the answer is the destination. An instruction whose length is not
+/// a constant is in a block that a `br_if` leaves when the length is zero. A copy of a small
+/// constant length is loads and stores, each as wide as the bytes left allow. A function marked
+/// `no_builtin`, and a target with no bulk memory, keep the calls.
 #[test]
 fn a_call_to_memcpy_or_memset_is_a_bulk_memory_instruction() {
     let lime = Cpu::Lime1.features();
     let f = bulk_body_of(BULK, "f", lime);
-    let wanted = "local.get\t0\n\tlocal.get\t1\n\tlocal.get\t2\n\tmemory.copy\t0, 0\n\t\
+    let wanted = "block\n\tlocal.get\t2\n\ti32.eqz\n\tbr_if\t0\n\t\
+                  local.get\t0\n\tlocal.get\t1\n\tlocal.get\t2\n\tmemory.copy\t0, 0\n\t\
+                  end_block\n\tblock\n\tlocal.get\t2\n\ti32.eqz\n\tbr_if\t0\n\t\
                   local.get\t0\n\ti32.const\t0\n\tlocal.get\t2\n\tmemory.fill\t0\n\t\
-                  local.get\t0\n";
+                  end_block\n\tlocal.get\t0\n";
     assert!(f.contains(wanted), "{f}");
     assert!(!f.contains("call"), "{f}");
     let g = bulk_body_of(BULK, "g", lime);
@@ -1848,6 +1851,29 @@ fn a_call_to_memcpy_or_memset_is_a_bulk_memory_instruction() {
     assert!(h.contains("call\tmemcpy") && !h.contains("memory.copy"), "{h}");
     let f = bulk_body_of(BULK, "f", Cpu::Mvp.features());
     assert!(f.contains("call\tmemcpy") && f.contains("call\tmemset"), "{f}");
+}
+
+/// A function of more than 8192 instructions writes a copy of a length that is not a constant with
+/// no test of a zero length, because extra blocks in a function that large make the register
+/// allocation of the engine worse.
+#[test]
+fn a_bulk_instruction_in_a_large_function_has_no_test_of_a_zero_length() {
+    let mut text = String::from(
+        "; ModuleID = 't.c'\n; format 0\ntarget triple = \"wasm32-unknown-wasip1\"\n\
+         target datalayout = \"e-p:32:32-i64:64-S128\"\n\n\
+         func @memcpy(ptr, ptr, i32) -> ptr, linkage(external);\n\n\
+         func @big(ptr, ptr, i32) -> i32, linkage(external) {\n\
+         block0(%0: ptr, %1: ptr, %2: i32):\n    \
+         %3 = call @memcpy(%0, %1, %2) : (ptr, ptr, i32) -> ptr\n",
+    );
+    let mut last = 2;
+    for n in 4..8300 {
+        text.push_str(&format!("    %{n} = add %{last}, %2\n"));
+        last = n;
+    }
+    text.push_str(&format!("    return %{last}\n}}\n"));
+    let big = bulk_body_of(&text, "big", Cpu::Lime1.features());
+    assert!(big.contains("memory.copy") && !big.contains("i32.eqz"), "{}", &big[..200]);
 }
 
 /// Short copies of the IR at three alignments. See

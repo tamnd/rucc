@@ -374,8 +374,11 @@ impl Lower<'_, '_> {
             | Opcode::Store => all(Place::Any),
             Opcode::Load if !data.flags.contains(Flags::VOLATILE) => all(Place::Any),
             // A short copy or fill is loads and stores that push the addresses again for each
-            // piece, and the other ones push each operand once.
-            Opcode::Memcpy | Opcode::Memmove | Opcode::Memset if !self.short_bulk(inst, &args) => {
+            // piece, and one whose length is not a constant pushes the length twice. The other
+            // ones push each operand once.
+            Opcode::Memcpy | Opcode::Memmove | Opcode::Memset
+                if !self.short_bulk(inst, &args) && !self.guarded_bulk(inst, &args) =>
+            {
                 all(Place::Any)
             }
             // The other predicates push an operand twice or not at all.
