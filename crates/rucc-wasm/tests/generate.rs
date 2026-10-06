@@ -1581,13 +1581,15 @@ block2(%8: i32):
 
 /// With optimization, the operands of a value that moves to one edge of a `br_if` are pushed on
 /// that edge only, so an operand with another use is not written there with a `local.tee`. It is
-/// written to its local before the branch, and both paths read the local.
+/// written to its local before the branch, and both paths read the local. The branch on `%5` reads
+/// `%1` as it is, so the only `i32.ne` is the one of `%3`.
 #[test]
 fn an_operand_of_an_edge_argument_is_not_teed_on_the_edge() {
     let f = body_of(EDGE_OPERAND, "f", true);
     assert!(f.contains("local.get\t0\n\ti32.const\t0\n\ti32.ne\n\tlocal.set\t0\n"), "{f}");
     assert_eq!(f.matches("local.tee").count(), 0, "{f}");
-    assert_eq!(f.matches("i32.ne").count(), 2, "{f}");
+    assert_eq!(f.matches("i32.ne").count(), 1, "{f}");
+    assert!(f.contains("local.get\t1\n\tif\n"), "{f}");
 }
 
 /// A call in the value that a function with a frame returns.
@@ -2008,5 +2010,71 @@ fn a_sign_extension_of_a_constant_is_the_extended_constant() {
         let widen = body_of(EXTENDED, "widen", optimize);
         assert!(widen.contains("i32.const\t-5\n"), "{widen}");
         assert!(!widen.contains("extend16_s"), "{widen}");
+    }
+}
+
+const ZERO: &str = r#"; ModuleID = 't.c'
+; format 0
+target triple = "wasm32-unknown-wasip1"
+target datalayout = "e-p:32:32-i64:64-S128"
+
+func @first(ptr) -> i32, linkage(external) {
+block0(%0: ptr):
+    %1 = iconst.i32 0
+    %2 = inttoptr.ptr %1
+    %3 = icmp eq %0, %2
+    br_if %3, block1, block2
+
+block1:
+    return %1
+
+block2:
+    %4 = load %0, align 4
+    return %4
+}
+
+func @none(i64) -> i32, linkage(external) {
+block0(%0: i64):
+    %1 = iconst.i64 0
+    %2 = icmp eq %0, %1
+    %3 = zext.i32 %2
+    return %3
+}
+
+func @main(i32, ptr) -> i32, linkage(external) {
+block0(%0: i32, %1: ptr):
+    %2 = iconst.i32 255
+    %3 = add %0, %2
+    %4 = trunc.i8 %3
+    %5 = iconst.i8 0
+    %6 = icmp eq %4, %5
+    br_if %6, block1, block2
+
+block1:
+    %7 = iconst.i32 20
+    return %7
+
+block2:
+    %8 = iconst.i32 30
+    return %8
+}
+"#;
+
+/// With optimization, a compare of a value against zero or the null pointer is the value as it
+/// is in a branch, and `i32.eqz` or `i64.eqz` when it is a value. The compare of an 8-bit value
+/// masks the value to 8 bits first: 255 plus `argc`, which is 1, is 0 in 8 bits.
+#[test]
+fn a_compare_against_zero_is_the_value_or_an_eqz() {
+    let first = body_of(ZERO, "first", true);
+    assert!(!first.contains("i32.const\t0\n\ti32.eq"), "{first}");
+    assert!(
+        first.contains("local.get\t0\n\ti32.eqz\n") || first.contains("local.get\t0\n\tif"),
+        "{first}"
+    );
+    let none = body_of(ZERO, "none", true);
+    assert!(none.contains("i64.eqz\n"), "{none}");
+    assert!(!none.contains("i64.eq\n"), "{none}");
+    if let Some(status) = link_and_run("zero", ZERO) {
+        assert_eq!(status, 20);
     }
 }
