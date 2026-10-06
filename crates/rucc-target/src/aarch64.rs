@@ -56,7 +56,7 @@ pub use crate::aarch64::timing::{LOAD, MODEL, TIMING};
 pub use crate::aarch64::write::{Spelling, cond_name, write};
 
 use crate::bits::BitInsts;
-use crate::branch::{BranchInsts, Fusion, Move, Zero};
+use crate::branch::{Bit, BranchInsts, Fusion, Move, Zero};
 use crate::counts::{BitCount, CountInst};
 use crate::flags::{Compare, FlagInsts, Reader, Reads};
 use crate::frame::{Canary, ClassMoves, FrameInsts, Kept, Pair, Probe, Signing, Targets};
@@ -378,7 +378,27 @@ pub static BRANCH: BranchInsts = BranchInsts {
     fused: &FUSED,
     moves: &MOVES,
     zero: &ZERO,
+    bits: &ONE_BIT,
+    near: NEAR,
 };
+
+/// Every test of one bit that `tbz` or `tbnz` makes on its own.
+///
+/// The jump carries which bit rather than the mask, and the spelling works that out of the mask
+/// the `tst` carried, so the constant goes across unchanged.
+static ONE_BIT: [Bit; 4] = [
+    Bit { test: "tst_ri_32", width: 32, when: "b_eq", into: "tbz_32" },
+    Bit { test: "tst_ri_32", width: 32, when: "b_ne", into: "tbnz_32" },
+    Bit { test: "tst_ri_64", width: 64, when: "b_eq", into: "tbz_64" },
+    Bit { test: "tst_ri_64", width: 64, when: "b_ne", into: "tbnz_64" },
+];
+
+/// The most instructions a function can have for `tbz` to reach across all of it.
+///
+/// `tbz` reaches 32 KiB either side, which is 8192 instructions. Most of what is selected is one
+/// instruction and the longest spelling is a handful, so counting each one as four leaves room
+/// for that and for the jumps the layout adds, and nothing here has to know how long each one is.
+const NEAR: usize = 2048;
 
 /// Every branch on the condition state this machine has, which is fourteen.
 ///
@@ -406,8 +426,12 @@ static ZERO: [Zero; 6] = [
 /// Every comparison the test in front of a branch can be taken off.
 ///
 /// Ten conditions at two widths, against a register and against a constant. There is nothing
-/// against memory, since this machine has no comparison that reads it.
-static FUSED: [Fusion; 44] = [
+/// against memory, since this machine has no comparison that reads it. The `ubfx` of one bit
+/// comes first, in the order the opcodes are in, and is the `tst` of that bit when only a branch
+/// reads it. The tests of the bits under a mask come last.
+static FUSED: [Fusion; 46] = [
+    Fusion { set: "bit_at_32", cmp: "tst_ri_32", if_true: "b_ne", if_false: "b_eq" },
+    Fusion { set: "bit_at_64", cmp: "tst_ri_64", if_true: "b_ne", if_false: "b_eq" },
     Fusion { set: "cmp_set_eq_32", cmp: "cmp_rr_32", if_true: "b_eq", if_false: "b_ne" },
     Fusion { set: "cmp_set_eq_64", cmp: "cmp_rr_64", if_true: "b_eq", if_false: "b_ne" },
     Fusion { set: "cmp_set_ne_32", cmp: "cmp_rr_32", if_true: "b_ne", if_false: "b_eq" },
@@ -1011,6 +1035,12 @@ mod tests {
             names.extend(entry.kept);
         }
         names.extend(READERS.iter().map(|entry| entry.name));
+        for entry in BRANCH.zero {
+            names.extend([entry.test, entry.when, entry.into]);
+        }
+        for entry in BRANCH.bits {
+            names.extend([entry.test, entry.when, entry.into]);
+        }
         for name in names {
             assert!(described(name), "{name} is not an opcode");
         }
@@ -1057,7 +1087,9 @@ mod tests {
     fn every_comparison_folds_into_a_branch_and_its_opposite() {
         let sets: Vec<&str> = INSTS
             .iter()
-            .filter(|&&(_, shape)| matches!(shape, Form::CmpSet | Form::CmpSetI))
+            .filter(|&&(name, shape)| {
+                matches!(shape, Form::CmpSet | Form::CmpSetI) || name.starts_with("bit_at_")
+            })
             .map(|&(name, _)| name)
             .collect();
         let entries: Vec<&str> = BRANCH.fused.iter().map(|fusion| fusion.set).collect();
@@ -1076,7 +1108,8 @@ mod tests {
             assert_eq!(back.if_false, fusion.if_true);
             let asked = fusion.if_true.strip_prefix("b_").expect("a branch");
             let named = ["cmp", "tst"].map(|test| format!("{test}_set_{asked}_"));
-            assert!(named.iter().any(|name| fusion.set.starts_with(name)), "{}", fusion.set);
+            let bit = fusion.set.starts_with("bit_at_") && asked == "ne";
+            assert!(bit || named.iter().any(|name| fusion.set.starts_with(name)), "{}", fusion.set);
         }
         assert_eq!(BRANCH.conditional.len(), 14);
     }

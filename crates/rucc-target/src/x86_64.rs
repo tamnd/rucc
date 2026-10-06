@@ -414,6 +414,8 @@ pub static BRANCH: BranchInsts = BranchInsts {
     fused: &FUSED,
     moves: &MOVES,
     zero: &[],
+    bits: &[],
+    near: 0,
 };
 
 /// Every jump on the condition state this machine has, which is sixteen conditions.
