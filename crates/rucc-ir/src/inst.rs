@@ -441,6 +441,9 @@ pub struct CallInfo {
 /// less that finds too few general purpose registers does the same to those. The classification
 /// knows which of the two happened and the backend placing the arguments does not, so the object
 /// carries it.
+///
+/// i386 `fastcall` asks for the third case. A structure of four bytes or fewer is on the stack and
+/// still spends one of ecx and edx, so the `int` after it gets edx.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Default)]
 pub enum Drains {
     /// Every register left is still there for the arguments after the object.
@@ -448,6 +451,8 @@ pub enum Drains {
     Nothing,
     /// No general purpose register is.
     Integers,
+    /// One general purpose register fewer is.
+    OneInteger,
     /// No vector register is.
     Floats,
 }

@@ -431,6 +431,15 @@ pub enum Test {
     /// member, padding after the one member, or a `_Complex` of any kind turns it back into an
     /// aggregate, which on wasm travels as the address of a copy.
     SingleScalar,
+    /// A `_Complex` of any kind, or one floating point scalar of any format that fills the
+    /// aggregate however deeply it is wrapped.
+    ///
+    /// What gcc gives a floating point machine mode, which is what i386 `fastcall` asks of an
+    /// argument: one of these is on the stack and takes no register, where every other aggregate
+    /// takes one for each of its words. A `union` holding one `float` and a structure holding one
+    /// `_Complex` are the two that gcc reads the other way, and a shape cannot tell either of them
+    /// from the structure this matches or does not.
+    FloatingMode,
     /// A `_Complex float` and nothing else, which is not the same as a structure of two floats.
     ///
     /// The i386 SysV return rule gcc and libgcc follow. Every structure comes back in memory there,
@@ -474,12 +483,13 @@ pub enum Travel {
     ByReference,
     /// As the object's own bytes in the argument area.
     InMemory,
-    /// As the object's own bytes in the argument area, with every register left spent, so an
-    /// argument after it that would have fit in one is in the argument area as well.
+    /// As the object's own bytes in the argument area, with an integer register spent for each of
+    /// its words, or as many as are left.
     ///
-    /// i386 `fastcall`, where a structure of any size is on the stack and the `int` after it does
-    /// not get the ecx the structure did not use.
-    InMemoryAndDrain,
+    /// i386 `fastcall`, where a structure is on the stack and still counts against ecx and edx,
+    /// so the `int` after a structure of four bytes is in edx and the `int` after a bigger one is
+    /// on the stack.
+    InMemoryAndSpend,
 }
 
 /// What happens when the registers a rule wanted are not there.

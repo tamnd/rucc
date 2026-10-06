@@ -775,6 +775,10 @@ impl<'a, 'n> Parser<'a, 'n> {
                     self.expect("drains")?;
                     drains = match self.word() {
                         "integers" => Drains::Integers,
+                        "one" => {
+                            self.expect("integer")?;
+                            Drains::OneInteger
+                        }
                         "floats" => Drains::Floats,
                         other => return self.fail(format!("`{other}` is not a register kind")),
                     };
@@ -2687,6 +2691,8 @@ block0(%0: ptr, %1: ptr, %2: i8):
 func @g(i8 sext) -> i8 sext, linkage(external);
 
 func @h(ptr byval(12, align 4, drains floats), ptr byval(16, align 8, drains integers)), linkage(external);
+
+func @i(ptr byval(4, align 4, drains one integer), i32), linkage(external);
 "
         );
         assert_eq!(round_trip(&text), text);

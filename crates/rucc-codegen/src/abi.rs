@@ -216,6 +216,7 @@ pub(crate) fn drain(places: &mut Places<'_>, drains: Drains) {
     match drains {
         Drains::Nothing => {}
         Drains::Integers => places.drain_integers(),
+        Drains::OneInteger => places.spend_integer(),
         Drains::Floats => places.drain_floats(),
     }
 }

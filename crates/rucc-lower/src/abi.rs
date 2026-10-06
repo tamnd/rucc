@@ -340,10 +340,12 @@ fn travel(
     };
     // An object that went to memory and took every register of a kind with it is AAPCS64's
     // rule for one that found too few left, and the backend has to know so the next argument of
-    // that kind goes to memory too. Only a kind that had some left can have been drained.
+    // that kind goes to memory too. Only a kind that had some left can have been drained. One
+    // that took a single register and left some is i386 `fastcall`'s small structure.
     let drains = match pass {
         Pass::Memory if left.1 > 0 && call.float_left() == 0 => Drains::Floats,
         Pass::Memory if left.0 > 0 && call.integer_left() == 0 => Drains::Integers,
+        Pass::Memory if call.integer_left() + 1 == left.0 => Drains::OneInteger,
         _ => Drains::Nothing,
     };
     Travel { pass, size, align, types, ty, drains }
@@ -798,6 +800,25 @@ mod tests {
             plan(&types, &target, Convention::Target, void, &params, &[], false).expect("a plan");
         let drained = Abi::ByVal { size: 16, align: 8, drains: Drains::Integers };
         assert_eq!(planned.signature.params[7].abi, drained);
+    }
+
+    #[test]
+    fn a_small_structure_spends_one_fastcall_register_and_a_bigger_one_both() {
+        let mut types = Types::new();
+        let target = target("i686-linux-gnu");
+        let int = types.int(IntKind::Int);
+        let small = record(&mut types, &target, &[int]);
+        let big = record(&mut types, &target, &[int, int]);
+        // `fastcall int f(struct { int a; }, int)`, where gcc has the `int` in edx.
+        let planned = plan(&types, &target, Convention::Fastcall, int, &[small, int], &[], false)
+            .expect("a plan");
+        let spent = Abi::ByVal { size: 4, align: 4, drains: Drains::OneInteger };
+        assert_eq!(planned.signature.params[0].abi, spent);
+        // `fastcall int f(struct { int a, b; }, int)`, where gcc has the `int` on the stack.
+        let planned = plan(&types, &target, Convention::Fastcall, int, &[big, int], &[], false)
+            .expect("a plan");
+        let drained = Abi::ByVal { size: 8, align: 4, drains: Drains::Integers };
+        assert_eq!(planned.signature.params[0].abi, drained);
     }
 
     #[test]

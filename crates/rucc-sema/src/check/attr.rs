@@ -2636,9 +2636,10 @@ impl Checker<'_> {
     /// Three things are said. `ms_abi` or `sysv_abi` on a target other than x86-64 is ignored with
     /// a warning, since there is no second convention there to pick. One of each in the same list
     /// is refused, as gcc refuses it, because a function cannot be both, and the same goes for two
-    /// of `stdcall`, `fastcall` and `cdecl` on 32-bit Windows, where those are conventions. And
-    /// `stdcall`, `cdecl`, `fastcall`, `thiscall`, `regparm` and `vectorcall` are ignored with a
-    /// warning on x86-64 outside Windows. The same name twice is the one convention asked for twice, which is no conflict.
+    /// of `stdcall`, `fastcall` and `cdecl` on 32-bit x86, where those are conventions, and for
+    /// `fastcall` with `regparm`. And `stdcall`, `cdecl`, `fastcall`, `thiscall`, `regparm` and
+    /// `vectorcall` are ignored with a warning on x86-64 outside Windows. The same name twice is
+    /// the one convention asked for twice, which is no conflict.
     fn convention_in(&mut self, attrs: AttrList) -> Option<(Convention, String, Span)> {
         let written = self.ast[attrs].to_vec();
         let tuple = self.cx.target.tuple;
@@ -2648,6 +2649,9 @@ impl Checker<'_> {
         let foreign_to_them = tuple.arch().as_str() == "x86_64" && !windows;
         let regparm_here = tuple.arch().as_str() == "i686" && !windows;
         let mut asked: Option<(Convention, String, Span)> = None;
+        // A `regparm` count is kept apart until the list is read, since outside Windows it goes
+        // with `stdcall` rather than against it, and `fastcall` refuses it whichever comes first.
+        let mut regparm: Option<(u8, Span)> = None;
         for attr in written {
             if attr.namespace.is_some_and(|ns| self.text(ns) != "gnu") {
                 continue;
@@ -2672,8 +2676,8 @@ impl Checker<'_> {
                         None => asked = Some((convention, name, attr.span)),
                     }
                 }
-                // The three 32-bit Windows has, where each is a convention of its own and `cdecl`
-                // is the target's. Two different ones in a list are refused as gcc refuses them.
+                // The three 32-bit x86 has, where each is a convention of its own and `cdecl` is
+                // the target's. Two different ones in a list are refused as gcc refuses them.
                 "stdcall" | "cdecl" | "fastcall" if Convention::asked(tuple, &name).is_some() => {
                     let convention = Convention::asked(tuple, &name).unwrap_or_default();
                     match &asked {
@@ -2692,12 +2696,7 @@ impl Checker<'_> {
                 // convention, so the attribute written to match `-mregparm=` changes nothing.
                 "regparm" if regparm_here => {
                     let Some(registers) = self.regparm_argument(&attr) else { continue };
-                    let convention = if registers == self.cx.target.regparm {
-                        Convention::Target
-                    } else {
-                        Convention::Regparm(registers)
-                    };
-                    asked = Some((convention, name, attr.span));
+                    regparm = Some((registers, attr.span));
                 }
                 "stdcall" | "cdecl" | "fastcall" | "thiscall" | "regparm" | "vectorcall"
                     if foreign_to_them =>
@@ -2711,7 +2710,36 @@ impl Checker<'_> {
                 _ => {}
             }
         }
-        asked
+        let Some((registers, span)) = regparm else { return asked };
+        let own = registers == self.cx.target.regparm;
+        match asked {
+            None | Some((Convention::Target, ..)) => {
+                let convention =
+                    if own { Convention::Target } else { Convention::Regparm(registers) };
+                Some((convention, "regparm".to_owned(), span))
+            }
+            Some((Convention::Fastcall, ..)) => {
+                let what = "fastcall and regparm attributes are not compatible";
+                self.report(Diagnostic::error(what.to_owned(), span).with_code("E0740"));
+                asked
+            }
+            // A `stdcall` function takes as many words in registers as the unit gives every
+            // function, so a count that is the unit's own says nothing more. Another count is a
+            // convention gcc has and this compiler does not yet, and it is refused rather than
+            // compiled as the wrong one.
+            Some((Convention::Stdcall, ..)) if !own => {
+                let what = format!(
+                    "'stdcall' with 'regparm({registers})' in a unit whose count is {} is not \
+                     supported yet",
+                    self.cx.target.regparm
+                );
+                let note = "drop the 'regparm', or build the unit with the same '-mregparm='";
+                let refused = Diagnostic::error(what, span).with_code("E0519");
+                self.report(refused.note(note, span));
+                asked
+            }
+            Some(_) => asked,
+        }
     }
 
     /// The count a `regparm` attribute gives, or nothing where gcc warns and drops it: an

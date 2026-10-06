@@ -545,6 +545,7 @@ impl<'a> Printer<'a> {
                 let drains = match drains {
                     Drains::Nothing => "",
                     Drains::Integers => ", drains integers",
+                    Drains::OneInteger => ", drains one integer",
                     Drains::Floats => ", drains floats",
                 };
                 write!(self.out, " byval({size}, align {align}{drains})")

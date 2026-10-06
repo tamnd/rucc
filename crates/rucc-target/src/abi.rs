@@ -71,8 +71,10 @@ impl TargetInfo {
             other => other,
         };
         // Under `-freg-struct-return` the descriptions are the ones the unit's registers carry,
-        // since the table of conventions says nothing about the flag.
-        if self.reg_struct_return {
+        // since the table of conventions says nothing about the flag, and so is `stdcall` under
+        // `-mregparm=`, which has the unit's registers.
+        let stdcall_with_registers = convention == Convention::Stdcall && self.regparm > 0;
+        if self.reg_struct_return || stdcall_with_registers {
             return self.call_regs?.under(convention).map(|regs| regs.abi.call());
         }
         abis::for_convention(self.tuple, convention).map(AbiDescription::call)
@@ -183,5 +185,32 @@ mod tests {
             }
         }
         assert_eq!(described, 48);
+    }
+
+    #[test]
+    fn stdcall_on_i386_linux_takes_the_units_registers_and_fastcall_its_own() {
+        use rucc_abi::Cleanup;
+
+        let plain = target("i686-linux-gnu");
+        let stdcall = plain.call_under(Convention::Stdcall).expect("stdcall");
+        assert_eq!(stdcall.abi().name, "i386 SysV stdcall");
+        assert_eq!(stdcall.abi().cleanup, Cleanup::Callee);
+        assert_eq!(stdcall.integer_left(), 0);
+        let fastcall = plain.call_under(Convention::Fastcall).expect("fastcall");
+        assert_eq!(fastcall.abi().name, "i386 SysV fastcall");
+        assert_eq!(fastcall.integer_left(), 2);
+
+        let kernel = plain.clone().with_regparm(3).expect("three").with_reg_struct_return(true);
+        let stdcall = kernel.call_under(Convention::Stdcall).expect("stdcall");
+        assert_eq!(stdcall.abi().name, "i386 SysV stdcall regparm(3) -freg-struct-return");
+        assert_eq!(stdcall.integer_left(), 3);
+        let fastcall = kernel.call_under(Convention::Fastcall).expect("fastcall");
+        assert_eq!(fastcall.abi().name, "i386 SysV fastcall -freg-struct-return");
+        assert_eq!(fastcall.integer_left(), 2);
+
+        let counted = plain.with_regparm(2).expect("two");
+        let stdcall = counted.call_under(Convention::Stdcall).expect("stdcall");
+        assert_eq!(stdcall.abi().name, "i386 SysV stdcall regparm(2)");
+        assert_eq!(stdcall.integer_left(), 2);
     }
 }
