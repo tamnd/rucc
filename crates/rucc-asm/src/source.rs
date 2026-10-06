@@ -744,11 +744,11 @@ impl Reader {
                 self.registers.insert(word.to_owned(), register);
                 return Ok(());
             }
-            if self.registers.is_empty() {
+            if self.registers.is_empty() && !rest.contains('#') {
                 return self.a64(text);
             }
-            let renamed = format!("{word} {}", self.renamed(rest));
-            return self.a64(&renamed);
+            let rest = self.worked_out(&self.renamed(rest));
+            return self.a64(&format!("{word} {rest}"));
         }
         // A prefix written on the same line as the instruction it goes in front of, which is how a
         // kernel writes `lock` and how it writes `cs` in front of a call it wants a byte longer.
@@ -788,9 +788,71 @@ impl Reader {
     }
 
     /// The operands of an AArch64 instruction with every name `.req` gave a register written as
-    /// the register. Numbers are left as they are, since the AArch64 reader works those out itself.
+    /// the register. Numbers are left as they are, since [`Self::worked_out`] puts them in where
+    /// they are immediates and a name anywhere else is a symbol.
     fn renamed(&self, rest: &str) -> String {
         self.replaced(rest, false)
+    }
+
+    /// The operands of an AArch64 instruction with every immediate that is arithmetic, or a name
+    /// set to a number, written as the number it comes to.
+    ///
+    /// The AArch64 reader takes a number after `#` and nothing else, and the kernel's assembly is
+    /// full of more than that once the preprocessor has been over it: `#(1 << 3)` for a flag,
+    /// `#((0x40) | (0x80))` for two, and the `bti` macro it has for an assembler that does not
+    /// know the instruction, which sets `.L__bti_targets_c` to 34 and writes `hint #.L__bti_targets_c`. An immediate
+    /// runs to the comma or the bracket that ends it. One that names a label, or `:lo12:` and the
+    /// like, is left for the reader, which says what it makes of it.
+    fn worked_out(&self, rest: &str) -> String {
+        let mut pieces = rest.split('#');
+        let mut out = String::with_capacity(rest.len());
+        out.push_str(pieces.next().unwrap_or(""));
+        for piece in pieces {
+            out.push('#');
+            let mut depth = 0i32;
+            let end = piece
+                .char_indices()
+                .find(|&(_, c)| {
+                    match c {
+                        '(' => depth += 1,
+                        ')' => depth -= 1,
+                        _ => {}
+                    }
+                    depth == 0 && matches!(c, ',' | ']')
+                })
+                .map_or(piece.len(), |(at, _)| at);
+            let (immediate, after) = piece.split_at(end);
+            let text = immediate.trim();
+            let plain = text.is_empty()
+                || text.starts_with(':')
+                || text.parse::<f64>().is_ok()
+                || text
+                    .strip_prefix('-')
+                    .unwrap_or(text)
+                    .bytes()
+                    .all(|b| b.is_ascii_alphanumeric());
+            let number = (!plain || self.values.contains_key(text))
+                .then(|| {
+                    Parser {
+                        text,
+                        at: 0,
+                        here: (0, 0),
+                        values: Some(&self.values),
+                        reader: None,
+                        guessed: None,
+                    }
+                    .whole()
+                    .ok()?
+                    .flat()
+                })
+                .flatten();
+            match number {
+                Some(number) => out.push_str(&number.to_string()),
+                None => out.push_str(immediate),
+            }
+            out.push_str(after);
+        }
+        out
     }
 
     /// The operands with the names this file gave registers, and with the numbers it set when
@@ -6029,6 +6091,25 @@ _tls$tlv$init:
         assert_eq!(
             words(&read, ".text"),
             [0x2a02_03e1, 0x9100_2120, 0xa9bf_7bfd, 0xb940_0520, 0xaa1e_03ea]
+        );
+    }
+
+    #[test]
+    fn an_aarch64_immediate_is_worked_out_before_it_is_read() {
+        // What the arm64 kernel's assembly is once the preprocessor has been over it, and the
+        // `bti` macro it falls back on for an assembler without the instruction. The words are
+        // what llvm-mc writes for `mov x0, #192`, `add x1, x1, #8`, `mov x2, #5`, `ldr x3, [x4,
+        // #16]`, `stp x29, x30, [sp, #-32]!` and `bti c`.
+        let read = aarch64(concat!(
+            "\t.equ five, 5\n\t.set back, -32\n",
+            "\t.macro bti, targets\n\t.equ .L__bti_targets_c, 34\n",
+            "\thint #.L__bti_targets_\\targets\n\t.endm\n",
+            "\tmov x0, #((0x00000040) | (0x00000080))\n\tadd x1, x1, #(1 << 3)\n",
+            "\tmov x2, #five\n\tldr x3, [x4, #(8*2)]\n\tstp x29, x30, [sp, #back]!\n\tbti c\n",
+        ));
+        assert_eq!(
+            words(&read, ".text"),
+            [0xd280_1800, 0x9100_2021, 0xd280_00a2, 0xf940_0883, 0xa9be_7bfd, 0xd503_245f]
         );
     }
 
