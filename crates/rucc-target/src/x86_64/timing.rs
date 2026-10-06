@@ -131,6 +131,9 @@ fn plain(form: Form) -> Timing {
         // byte cannot start until the comparison has set the bits it reads, so the pair costs the
         // two of them one after the other rather than the slower of the two.
         CmpSet | CmpSetRi | TestCmov => (2, Unit::Int),
+        // A multiply by a constant, which `slow` answers by its name before this is asked. The
+        // number is the same one so that the two places cannot disagree.
+        MulRi => (3, Unit::Mul),
         // The same arithmetic reading its second source out of memory. The load is the whole of
         // the extra cost and the unit it needs is the address unit, because that is what is scarce
         // about it: the arithmetic behind the load is one cycle on a unit there are four of.

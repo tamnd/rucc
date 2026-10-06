@@ -47,12 +47,12 @@ use Form::{
     ArithX87, Barrier, BrCond, Call, Cmov, Cmp, CmpMi, CmpRi, CmpRm, CmpSet, CmpSetMi, CmpSetRi,
     CmpSetRm, CmpSetVec, CmpSetVecBoth, CmpSetX87, CmpSetX87Both, CmpXchg, Convert, ConvertFromVec,
     ConvertToVec, ConvertVec, CpuId, CtrlX87, DivQuo, DivRem, DivWide, Exchange, Jcc, Jmp, JmpAway,
-    JmpReg, Landing, Lea, Literal, Load, LoadImm, LoadVec, Move, MoveVec, MulHigh, MulWide, Nop,
-    Pop, PopX87, Prefetch, Push, PushX87, Ret, RetPop, RetVal, RetVal2, RetVal2Vec, RetValVec, Rmw,
-    Scan, Search, Set, ShiftCl, ShiftRi, ShiftVec, ShuffleVec, Spin, Store, StoreImm, StoreVec,
-    StrCompare, StrCompareRep, StrLoad, StrMove, StrMoveRep, StrScan, StrScanRep, StrStore,
-    StrStoreRep, Swap, SwapHalves, Template, Test, TestCmov, TestRi, Trap, UnaryM, UnaryR,
-    UnaryX87,
+    JmpReg, Landing, Lea, Literal, Load, LoadImm, LoadVec, Move, MoveVec, MulHigh, MulRi, MulWide,
+    Nop, Pop, PopX87, Prefetch, Push, PushX87, Ret, RetPop, RetVal, RetVal2, RetVal2Vec, RetValVec,
+    Rmw, Scan, Search, Set, ShiftCl, ShiftRi, ShiftVec, ShuffleVec, Spin, Store, StoreImm,
+    StoreVec, StrCompare, StrCompareRep, StrLoad, StrMove, StrMoveRep, StrScan, StrScanRep,
+    StrStore, StrStoreRep, Swap, SwapHalves, Template, Test, TestCmov, TestRi, Trap, UnaryM,
+    UnaryR, UnaryX87,
 };
 
 /// The operand vector one machine instruction has.
@@ -69,6 +69,14 @@ pub enum Form {
     AluRr,
     /// Two-address arithmetic on a register and an immediate.
     AluRi,
+    /// A multiply of a register by an immediate into a register of its own.
+    ///
+    /// `imul $k, %src, %dst`, which is the one arithmetic instruction with a constant that the
+    /// machine has in three operand form. Described as [`Form::AluRi`] it was tied, so the
+    /// allocator put a copy of the source into the destination in front of it whenever the two
+    /// were different registers, and the instruction then read the source anyway and the copy was
+    /// thrown away. The checksum loop in Postgres has one of those in front of every multiply.
+    MulRi,
     /// Two-address arithmetic on two registers that reads the carry as well.
     ///
     /// `adc` and `sbb`, which are [`Form::AluRr`] with one more source that is not in this vector
@@ -1248,7 +1256,7 @@ impl Form {
             Exchange => &EXCHANGE,
             ShiftCl => &SHIFT_CL,
             CmpSet => &TWO_TO_ONE,
-            CmpSetRi | CmpSetRm => &ONE_TO_ONE,
+            CmpSetRi | CmpSetRm | MulRi => &ONE_TO_ONE,
             Cmp => &CMP,
             CmpRi | CmpRm => &CMP_RI,
             CmpSetMi => &ONE_WRITTEN,
@@ -1318,6 +1326,7 @@ impl Form {
             self,
             LoadImm
                 | AluRi
+                | MulRi
                 | AluCarryI
                 | AluMi
                 | ShiftRi
@@ -1654,10 +1663,10 @@ pub static INSTS: &[(&str, Form)] = &[
     ("xor_ri_16", AluRi),
     ("xor_ri_32", AluRi),
     ("xor_ri_64", AluRi),
-    ("imul_ri_8", AluRi),
-    ("imul_ri_16", AluRi),
-    ("imul_ri_32", AluRi),
-    ("imul_ri_64", AluRi),
+    ("imul_ri_8", MulRi),
+    ("imul_ri_16", MulRi),
+    ("imul_ri_32", MulRi),
+    ("imul_ri_64", MulRi),
     // Negation and complement.
     ("neg_r_8", UnaryR),
     ("neg_r_16", UnaryR),
@@ -2735,9 +2744,10 @@ mod tests {
         // separate form from the integer arithmetic it is otherwise shaped exactly like.
         assert!(AluVec.operands().iter().all(|operand| operand.class == XMM));
         assert!(AluRr.operands().iter().all(|operand| operand.class == GPR));
-        // A comparison writes a byte that has nothing to do with either operand, and a
-        // conversion reads one width and writes another, so neither destroys its source.
-        for form in [CmpSet, CmpSetVec, CmpSetVecBoth, Convert, LoadImm, Lea] {
+        // A comparison writes a byte that has nothing to do with either operand, a conversion
+        // reads one width and writes another, and a multiply by a constant names its source and
+        // its destination apart, so none of them destroys its source.
+        for form in [CmpSet, CmpSetVec, CmpSetVecBoth, Convert, LoadImm, Lea, MulRi] {
             assert_eq!(form.operands()[0].constraint, Constraint::Reg);
         }
     }
@@ -2830,6 +2840,7 @@ mod tests {
     #[test]
     fn only_the_shapes_that_carry_one_carry_an_immediate_or_an_address() {
         assert!(LoadImm.takes_imm() && AluRi.takes_imm() && ShiftRi.takes_imm());
+        assert!(MulRi.takes_imm() && !MulRi.takes_mem());
         assert!(!AluRr.takes_imm() && !CmpSet.takes_imm() && !DivQuo.takes_imm());
         assert!(Lea.takes_mem());
         assert!(!AluRr.takes_mem() && !LoadImm.takes_mem());
