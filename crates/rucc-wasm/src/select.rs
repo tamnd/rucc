@@ -139,6 +139,12 @@ fn int_compare(pred: IntPred, wide: bool) -> u8 {
     }
 }
 
+/// The low `bits` of `constant` sign extended to 32 bits.
+fn sign_extended(constant: u128, bits: u32) -> i32 {
+    let shift = 32 - bits;
+    ((constant as u32) << shift) as i32 >> shift
+}
+
 /// An `i32` arithmetic opcode, moved to its `i64` form when `wide` is set.
 fn int_op(op: u8, wide: bool) -> u8 {
     if wide { op + emit::I64_FROM_I32 } else { op }
@@ -1182,6 +1188,10 @@ impl Lower<'_, '_> {
 
     /// Push a value sign extended to the width of its value type.
     fn push_s(&mut self, value: Value) -> Result<()> {
+        if let (Some(bits), Some(constant)) = (self.narrow(value), self.constant(value)) {
+            self.code.i32_const(sign_extended(constant, bits));
+            return Ok(());
+        }
         self.push(value)?;
         if let (Some(bits), false) = (self.narrow(value), self.signed.contains(&value)) {
             self.sign_extend(bits);
@@ -1860,6 +1870,14 @@ impl Lower<'_, '_> {
                 if bare {
                     *at += 1;
                     return self.push(value);
+                }
+                // A sign extension of a constant is the constant extended here.
+                if let (rules::Head::SignExtend(bits), Some(constant)) =
+                    (head, self.constant(value))
+                {
+                    *at += 1;
+                    self.code.i32_const(sign_extended(constant, bits));
+                    return Ok(());
                 }
             }
         }
