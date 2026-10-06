@@ -558,7 +558,8 @@ jobs:
   # under both engines and must give the output of the shell that clang from wasi-sdk 34 builds.
   # In the Wasmtime runs, each program and each shell is also linked by the linker inside rucc
   # (#2867). tests/wasm-link/same.sh holds that module to the `wasm-ld` module byte for byte, apart
-  # from the DWARF sections, and the module runs too.
+  # from the DWARF sections, and the module runs too. The job installs lld 23, the `wasm-ld` of
+  # wasi-sdk 34, because lld 21 puts the data before the stack and writes other bytes.
   wasm:
     name: wasm32-wasip1 rung 0 and SQLite
     needs: quick
@@ -572,7 +573,7 @@ jobs:
       - name: install lld, Wasmtime and wasm-tools
         run: |
           set -euo pipefail
-          sudo .github/install-lld-wasi.sh
+          sudo .github/install-lld-wasi.sh 23
           curl -sSfL -o wasmtime.tar.xz https://github.com/bytecodealliance/wasmtime/releases/download/v49.0.1/wasmtime-v49.0.1-x86_64-linux.tar.xz
           echo "c71f7e0d30a92e418f0d17db7c6d8f6664c1ad764340a1278678f4209deab534  wasmtime.tar.xz" | sha256sum -c -
           tar -xJf wasmtime.tar.xz
