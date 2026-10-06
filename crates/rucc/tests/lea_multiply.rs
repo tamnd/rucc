@@ -116,7 +116,7 @@ fn a_multiply_by_three_five_or_nine_is_a_lea() {
         let leas = lines.iter().filter(|line| line.starts_with("lea")).count();
         assert_eq!(leas, 1, "{name}: {lines:#?}");
         let shifts = lines.iter().filter(|line| line.starts_with("sal") || line.starts_with("shl"));
-        assert_eq!(shifts.count(), usize::from(k > 9), "{name}: {lines:#?}");
+        assert_eq!(shifts.count(), usize::from(![3, 5, 9].contains(&k)), "{name}: {lines:#?}");
     }
     // The element's address is the base and the `lea` scaled by eight, inside the load.
     let lines = body(&asm, "id_of");
