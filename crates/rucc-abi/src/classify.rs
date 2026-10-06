@@ -482,14 +482,10 @@ fn lone_float(shape: &Shape<'_>) -> Option<Vec<Slot>> {
     }
 }
 
-/// Nothing, for a `_Complex` or for one floating point scalar that fills the aggregate, and
-/// [`None`] for anything else.
+/// Nothing, for a `_Complex` or for an aggregate gcc gives a floating point mode, and [`None`] for
+/// anything else.
 fn floating_mode(shape: &Shape<'_>) -> Option<Vec<Slot>> {
-    if shape.complex {
-        return Some(Vec::new());
-    }
-    let [piece] = shape.pieces else { return None };
-    (piece.scalar.is_float() && piece.offset == 0 && piece.scalar.size == shape.size).then(Vec::new)
+    (shape.complex || shape.floating).then(Vec::new)
 }
 
 /// The one scalar of an aggregate that is nothing else, and [`None`] for anything else.

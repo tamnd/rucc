@@ -431,14 +431,11 @@ pub enum Test {
     /// member, padding after the one member, or a `_Complex` of any kind turns it back into an
     /// aggregate, which on wasm travels as the address of a copy.
     SingleScalar,
-    /// A `_Complex` of any kind, or one floating point scalar of any format that fills the
-    /// aggregate however deeply it is wrapped.
+    /// A `_Complex` of any kind, or an aggregate gcc gives a floating point machine mode, which is
+    /// what [`crate::Shape::floating`] says.
     ///
-    /// What gcc gives a floating point machine mode, which is what i386 `fastcall` asks of an
-    /// argument: one of these is on the stack and takes no register, where every other aggregate
-    /// takes one for each of its words. A `union` holding one `float` and a structure holding one
-    /// `_Complex` are the two that gcc reads the other way, and a shape cannot tell either of them
-    /// from the structure this matches or does not.
+    /// This is what i386 `fastcall` asks of an argument: one of these is on the stack and takes no
+    /// register, where every other aggregate takes one for each of its words.
     FloatingMode,
     /// A `_Complex float` and nothing else, which is not the same as a structure of two floats.
     ///

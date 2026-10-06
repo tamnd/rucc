@@ -335,13 +335,26 @@ fn fastcall_has_two_registers_and_a_wide_argument_spends_them() {
     assert_eq!(call.argument(&int), Pass::Direct);
     assert_eq!(call.argument(&Arg::Aggregate(record(&one))), Pass::Memory);
     assert_eq!(call.integer_left(), 0);
-    // `f(struct { double }, int)` and `f(_Complex float, int)`: gcc gives both a floating point
-    // mode, so they are on the stack and take no register. Two `float`s in a structure are an
-    // eight byte integer mode to gcc and take both.
+    // `f(struct { double }, int)`, `f(_Complex float, int)` and `f(struct { _Complex float c; },
+    // int)`: gcc gives all three a floating point mode, so they are on the stack and take no
+    // register. Two `float`s in a structure are an eight byte integer mode to gcc and take both,
+    // and a `union` of one `float` is a four byte one and takes one. The caller says which from
+    // the type, since the pieces are the same.
     let lone = pieces(&[Scalar::float(Format::Double, 8)]);
+    let single = pieces(&[Scalar::float(Format::Single, 4)]);
     let pair = pieces(&[Scalar::float(Format::Single, 4), Scalar::float(Format::Single, 4)]);
     let complex = Shape { complex: true, ..record(&pair) };
-    for (shape, left) in [(record(&lone), 2), (complex, 2), (record(&pair), 0)] {
+    let wrapped = Shape { floating: true, ..record(&pair) };
+    let union = Shape { floating: false, ..record(&single) };
+    let cases = [
+        (record(&lone), 2),
+        (complex, 2),
+        (wrapped, 2),
+        (record(&pair), 0),
+        (record(&single), 2),
+        (union, 1),
+    ];
+    for (shape, left) in cases {
         let mut call = I386_SYSV_FASTCALL.call();
         assert_eq!(call.argument(&Arg::Aggregate(shape)), Pass::Memory);
         assert_eq!(call.integer_left(), left, "{shape:?}");

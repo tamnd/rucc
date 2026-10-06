@@ -43,7 +43,8 @@
 //! // architecture, different answer, which is the whole reason this is a property of the target
 //! // rather than a rule about C.
 //! let pieces = rucc_abi::pieces(&[Scalar::integer(8), Scalar::integer(8)]);
-//! let shape = Arg::Aggregate(Shape { size: 16, align: 8, pieces: &pieces, complex: false });
+//! let shape =
+//!     Arg::Aggregate(Shape { size: 16, align: 8, pieces: &pieces, complex: false, floating: false });
 //!
 //! let mut call = abis::for_target(linux).unwrap().call();
 //! assert_eq!(
@@ -96,9 +97,14 @@ pub fn pieces(scalars: &[Scalar]) -> Vec<Piece> {
 }
 
 /// The shape of a record whose members are these, sized and aligned the way C would.
+///
+/// It is a structure, so it has a floating point mode when its one member is a floating point
+/// scalar.
 #[must_use]
 pub fn record(pieces: &[Piece]) -> Shape<'_> {
     let align = pieces.iter().map(|piece| piece.scalar.align).max().unwrap_or(1);
     let size = pieces.iter().map(Piece::end).max().unwrap_or(0).next_multiple_of(align);
-    Shape { size, align, pieces, complex: false }
+    let floating =
+        matches!(pieces, [piece] if piece.scalar.is_float() && piece.scalar.size == size);
+    Shape { size, align, pieces, complex: false, floating }
 }

@@ -27,7 +27,7 @@ use rucc_target::{
     Arg, Call, Convention, Kind, Narrow, Pass, Piece, Scalar, Shape, Slot, TargetInfo,
 };
 use rucc_tuple::{Arch, Os};
-use rucc_types::{ArrayLen, TypeId, TypeKind, Types, float_format, layout};
+use rucc_types::{ArrayLen, RecordKind, TypeId, TypeKind, Types, float_format, layout};
 
 use crate::repr;
 
@@ -60,6 +60,8 @@ pub(crate) enum Shaped {
         pieces: Vec<Piece>,
         /// Whether it is a `_Complex` rather than a record of the same shape.
         complex: bool,
+        /// Whether gcc gives it a floating point machine mode. See [`floating_mode`].
+        floating: bool,
     },
 }
 
@@ -69,9 +71,13 @@ impl Shaped {
         match self {
             Self::Void => Arg::Void,
             Self::Scalar(scalar) => Arg::Scalar(*scalar),
-            Self::Aggregate { size, align, pieces, complex } => {
-                Arg::Aggregate(Shape { size: *size, align: *align, pieces, complex: *complex })
-            }
+            Self::Aggregate { size, align, pieces, complex, floating } => Arg::Aggregate(Shape {
+                size: *size,
+                align: *align,
+                pieces,
+                complex: *complex,
+                floating: *floating,
+            }),
         }
     }
 
@@ -408,6 +414,7 @@ pub(crate) fn va_slots(types: &Types, target: &TargetInfo, ty: TypeId) -> Vec<Sl
                 align: scalar.align,
                 pieces: &halves,
                 complex: false,
+                floating: false,
             })
         }
         _ => shaped.arg(),
@@ -441,7 +448,47 @@ pub(crate) fn shape(types: &Types, target: &TargetInfo, ty: TypeId) -> Option<Sh
     pieces.sort_by_key(|piece| piece.offset);
     pieces.dedup();
     let complex = matches!(types.kind(id), TypeKind::Complex(_));
-    Some(Shaped::Aggregate { size, align, pieces, complex })
+    let floating = floating_mode(types, target, id);
+    Some(Shaped::Aggregate { size, align, pieces, complex, floating })
+}
+
+/// Whether gcc gives a type a floating point machine mode, which is what i386 `fastcall` asks of a
+/// structure argument: one that has such a mode takes no register, and every other one takes one
+/// for each of its words.
+///
+/// A floating point scalar and a `_Complex` have one. A structure has the mode of its member when
+/// it has exactly one member with bytes in it and that member fills it, and an array of one
+/// element has the mode of the element. A `union` never has one, whatever is in it, which is the
+/// one place this and the pieces disagree: `union { float f; }` takes a register where
+/// `struct { float f; }` does not. Measured with i686-linux-gnu-gcc and i686-w64-mingw32-gcc 13,
+/// which agree. tamnd/rucc#3029.
+fn floating_mode(types: &Types, target: &TargetInfo, ty: TypeId) -> bool {
+    let id = types.canonical(ty);
+    match types.kind(id) {
+        TypeKind::Float(_) | TypeKind::Complex(_) => true,
+        TypeKind::Atomic(inner) => floating_mode(types, target, inner),
+        TypeKind::Array { elem, len: ArrayLen::Fixed(1) } => floating_mode(types, target, elem),
+        TypeKind::Record(record) => {
+            let info = types.record_info(record);
+            if info.kind != RecordKind::Struct {
+                return false;
+            }
+            let size = repr::size_of(types, target, id);
+            let mut members = info.fields.iter().filter(|field| {
+                field.bits != Some(0) && repr::size_of(types, target, field.ty) > 0
+            });
+            match (members.next(), members.next()) {
+                (Some(field), None) => {
+                    field.bits.is_none()
+                        && field.offset == 0
+                        && repr::size_of(types, target, field.ty) == size
+                        && floating_mode(types, target, field.ty)
+                }
+                _ => false,
+            }
+        }
+        _ => false,
+    }
 }
 
 /// A `_BitInt` wider than a register, as the x86-64 psABI reads it, and [`None`] for anything
@@ -474,7 +521,7 @@ fn chunks(types: &Types, target: &TargetInfo, id: TypeId) -> Option<Shaped> {
     let word = Scalar { kind: Kind::Integer, size: 8, align: 8 };
     let pieces = (0..size / 8).map(|at| Piece { offset: at * 8, scalar: word }).collect();
     let align = u64::from(repr::align_of(types, target, id));
-    Some(Shaped::Aggregate { size, align, pieces, complex: false })
+    Some(Shaped::Aggregate { size, align, pieces, complex: false, floating: false })
 }
 
 /// The scalar a C type is, and [`None`] for a type that is not one.
@@ -636,6 +683,17 @@ mod tests {
         let options = RecordOptions::default();
         let laid = layout_record(types, RecordKind::Struct, &fields, &options, target)
             .expect("a record that lays out");
+        types.complete_record(id, laid);
+        types.record(id)
+    }
+
+    /// A union of these members, laid out.
+    fn union(types: &mut Types, target: &TargetInfo, members: &[TypeId]) -> TypeId {
+        let fields: Vec<FieldDecl> = members.iter().map(|ty| FieldDecl::new(None, *ty)).collect();
+        let id = types.declare_record(RecordKind::Union, None);
+        let options = RecordOptions::default();
+        let laid = layout_record(types, RecordKind::Union, &fields, &options, target)
+            .expect("a union that lays out");
         types.complete_record(id, laid);
         types.record(id)
     }
@@ -819,6 +877,42 @@ mod tests {
             .expect("a plan");
         let drained = Abi::ByVal { size: 8, align: 4, drains: Drains::Integers };
         assert_eq!(planned.signature.params[0].abi, drained);
+    }
+
+    /// tamnd/rucc#3029. What a `fastcall` structure spends goes by the mode gcc gives it, which a
+    /// `union` and a wrapped `_Complex` have the other way round from the pieces in them.
+    #[test]
+    fn a_fastcall_union_spends_registers_and_a_wrapped_complex_does_not() {
+        let mut types = Types::new();
+        let target = target("i686-linux-gnu");
+        let int = types.int(IntKind::Int);
+        let float = types.float(FloatKind::Float);
+        let double = types.float(FloatKind::Double);
+        let one = types.array(float, ArrayLen::Fixed(1));
+        let complex = types.complex_float(FloatKind::Float);
+        let union_float = union(&mut types, &target, &[float]);
+        let union_double = union(&mut types, &target, &[double]);
+        let wrapped_union = record(&mut types, &target, &[union_float]);
+        let wrapped_complex = record(&mut types, &target, &[complex]);
+        let wrapped_float = record(&mut types, &target, &[float]);
+        let wrapped_array = record(&mut types, &target, &[one]);
+        let wrapped_twice = record(&mut types, &target, &[wrapped_float]);
+        let two = record(&mut types, &target, &[float, float]);
+        let cases = [
+            (union_float, 4, Drains::OneInteger),
+            (wrapped_union, 4, Drains::OneInteger),
+            (union_double, 8, Drains::Integers),
+            (two, 8, Drains::Integers),
+            (wrapped_complex, 8, Drains::Nothing),
+            (wrapped_float, 4, Drains::Nothing),
+            (wrapped_array, 4, Drains::Nothing),
+            (wrapped_twice, 4, Drains::Nothing),
+        ];
+        for (ty, size, drains) in cases {
+            let planned = plan(&types, &target, Convention::Fastcall, int, &[ty, int], &[], false)
+                .expect("a plan");
+            assert_eq!(planned.signature.params[0].abi, Abi::ByVal { size, align: 4, drains });
+        }
     }
 
     #[test]

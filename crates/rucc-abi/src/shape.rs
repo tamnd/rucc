@@ -115,6 +115,15 @@ pub struct Shape<'a> {
     /// bytes with the same two members in the same places, comes back in memory. Without the
     /// flag there is no way to tell those apart from the shape, and they are passed differently.
     pub complex: bool,
+    /// Whether gcc gives the whole object a floating point machine mode.
+    ///
+    /// That is a `_Complex`, and a structure whose one member fills it and has such a mode itself,
+    /// through any number of structures and arrays of one element. A `union` never has one, so
+    /// `union { float f; }` does not, though its pieces are the same as `struct { float f; }`,
+    /// and `struct { _Complex float c; }` does, though its pieces are the same as a structure of
+    /// two `float`s. Only i386 `fastcall` reads this, and the caller works it out from the type,
+    /// since the pieces have already lost what it depends on.
+    pub floating: bool,
 }
 
 impl Shape<'_> {

@@ -136,7 +136,7 @@ fn sysv_gives_an_upper_half_with_nothing_under_it_a_register_of_its_own() {
     // register and a vector register rather than half of a sixteen byte value.
     let members =
         [Piece { offset: 0, scalar: float(Format::Quad, 16) }, Piece { offset: 0, scalar: int(8) }];
-    let shape = Shape { size: 16, align: 16, pieces: &members, complex: false };
+    let shape = Shape { size: 16, align: 16, pieces: &members, complex: false, floating: false };
     assert_eq!(
         sysv().argument(&Arg::Aggregate(shape)),
         Pass::Pieces(vec![gpr(0, 8), fpr(8, Format::Double)])
@@ -148,7 +148,7 @@ fn sysv_gives_an_upper_half_with_nothing_under_it_a_register_of_its_own() {
         Piece { offset: 0, scalar: float(Format::Quad, 16) },
         Piece { offset: 0, scalar: float(Format::Double, 8) },
     ];
-    let shape = Shape { size: 16, align: 16, pieces: &members, complex: false };
+    let shape = Shape { size: 16, align: 16, pieces: &members, complex: false, floating: false };
     assert_eq!(sysv().argument(&Arg::Aggregate(shape)), Pass::Pieces(vec![fpr(0, Format::Quad)]));
 }
 
@@ -179,7 +179,7 @@ fn sysv_sends_a_misaligned_member_to_memory_and_a_bitfield_not() {
         Piece { offset: 0, scalar: int(1) },
         Piece { offset: 1, scalar: Scalar { kind: Kind::Integer, size: 4, align: 4 } },
     ];
-    let shape = Shape { size: 5, align: 1, pieces: &members, complex: false };
+    let shape = Shape { size: 5, align: 1, pieces: &members, complex: false, floating: false };
     assert_eq!(sysv().argument(&Arg::Aggregate(shape)), Pass::Memory);
 
     // A bit-field may sit anywhere, which is what an alignment of one says, and it sends
@@ -188,7 +188,7 @@ fn sysv_sends_a_misaligned_member_to_memory_and_a_bitfield_not() {
         Piece { offset: 0, scalar: int(1) },
         Piece { offset: 1, scalar: Scalar { kind: Kind::Integer, size: 4, align: 1 } },
     ];
-    let shape = Shape { size: 5, align: 1, pieces: &members, complex: false };
+    let shape = Shape { size: 5, align: 1, pieces: &members, complex: false, floating: false };
     assert_eq!(sysv().argument(&Arg::Aggregate(shape)), Pass::Pieces(vec![gpr(0, 5)]));
 }
 
@@ -291,7 +291,7 @@ fn sysv_gives_an_int128_no_register_rather_than_half_of_one() {
 #[test]
 fn an_aggregate_of_no_size_travels_nowhere_on_every_abi_but_win64() {
     // Windows x64 passes one as an address, see the test about it below.
-    let shape = Shape { size: 0, align: 1, pieces: &[], complex: false };
+    let shape = Shape { size: 0, align: 1, pieces: &[], complex: false, floating: false };
     for mut call in [sysv(), aapcs(), riscv(), DARWIN_ARM64.call()] {
         assert_eq!(call.argument(&Arg::Aggregate(shape)), Pass::Ignore);
         assert_eq!(call.returns(&Arg::Aggregate(shape)), Pass::Ignore);
@@ -338,7 +338,7 @@ fn aapcs_does_not_call_a_float_with_padding_after_it_homogeneous() {
     for at in 4..16 {
         members.push(Piece { offset: at, scalar: int(1) });
     }
-    let shape = Shape { size: 16, align: 4, pieces: &members, complex: false };
+    let shape = Shape { size: 16, align: 4, pieces: &members, complex: false, floating: false };
     assert_eq!(aapcs().argument(&Arg::Aggregate(shape)), Pass::Pieces(vec![gpr(0, 8), gpr(8, 8)]));
 }
 
@@ -886,7 +886,7 @@ fn wasm_passes_any_other_aggregate_as_the_address_of_a_copy() {
     // One scalar with room after it is not one scalar, which is a `short` in a structure that
     // `aligned(4)` made four bytes.
     let members = [Piece { offset: 0, scalar: int(2) }];
-    let shape = Shape { size: 4, align: 4, pieces: &members, complex: false };
+    let shape = Shape { size: 4, align: 4, pieces: &members, complex: false, floating: false };
     assert_eq!(wasm().argument(&Arg::Aggregate(shape)), Pass::Reference);
 
     // A `_Complex float` is two scalars, and clang passes it as an aggregate.
