@@ -694,6 +694,27 @@ pub const SWITCH_PEEL_PERCENT: u32 = 66;
 /// smaller by more with every arm after that. gcc builds one from five cases at `-Os` as well.
 pub const JUMP_TABLE_MIN_TARGETS_FOR_SIZE: u32 = 6;
 
+/// What [`JUMP_TABLE_MIN_TARGETS`] is on wasm, where the table is a `br_table` and the engine
+/// writes the jump.
+///
+/// Twenty four, measured the way the native number was, on a `noinline` loop over 4096 inputs with
+/// one dense case per arm and each arm doing different work. The inputs are new random values on
+/// each pass, since a fixed buffer let the branch predictor learn the walk and made the walk look
+/// four times faster than it is. Each count of arms was built both ways and run under Wasmtime 49
+/// on an Apple M-series machine. The table is 8 percent slower at sixteen arms, the same at twenty
+/// four, 4 percent faster at thirty two and 18 percent faster at forty eight. The switch lowering
+/// splits a walk of more than thirty two clusters with a binary search first, so a long sparse
+/// `switch` stays fast with no table in it.
+pub const WASM_JUMP_TABLE_MIN_TARGETS: u32 = 24;
+
+/// What [`WASM_JUMP_TABLE_MIN_TARGETS`] becomes when optimizing for size.
+///
+/// Four. A cell of a `br_table` is one byte, where a native cell is four, and a compare and a
+/// branch are six to eight. Measured at `-Os` on the same loop, the code section is 119 bytes with
+/// the table against 125 with the walk at four arms, and the two are the same at three, where the
+/// cases are a bit test either way. LLVM builds a table from four cases on every target.
+pub const WASM_JUMP_TABLE_MIN_TARGETS_FOR_SIZE: u32 = 4;
+
 /// How much worse than the reference the allocator may do before it counts as a regression, as a
 /// percentage, per section 39.4.
 ///
@@ -1282,6 +1303,22 @@ pub const ALL: &[Constant] = &[
         provenance: Provenance::Measured,
     },
     Constant {
+        name: "WASM_JUMP_TABLE_MIN_TARGETS",
+        value: 24,
+        unit: "case targets",
+        document: "40.10",
+        gcc: "",
+        provenance: Provenance::Measured,
+    },
+    Constant {
+        name: "WASM_JUMP_TABLE_MIN_TARGETS_FOR_SIZE",
+        value: 4,
+        unit: "case targets",
+        document: "40.10",
+        gcc: "",
+        provenance: Provenance::Measured,
+    },
+    Constant {
         name: "ALLOCATOR_DEGRADATION_PERCENT",
         value: 10,
         unit: "percent",
@@ -1362,7 +1399,7 @@ mod tests {
         BRANCH_COST_PREDICTABLE, IF_CONVERSION_BUDGET_PREDICTABLE,
         IF_CONVERSION_BUDGET_UNPREDICTABLE, INLINE_FRAME_GROWTH_CONSERVE,
         INLINE_LARGE_FRAME_CONSERVE, JUMP_TABLE_MIN_TARGETS, JUMP_TABLE_MIN_TARGETS_FOR_SIZE,
-        Provenance,
+        Provenance, WASM_JUMP_TABLE_MIN_TARGETS, WASM_JUMP_TABLE_MIN_TARGETS_FOR_SIZE,
     };
     use crate::Cycles;
 
@@ -1386,6 +1423,11 @@ mod tests {
         assert_eq!(
             by_name("JUMP_TABLE_MIN_TARGETS_FOR_SIZE"),
             i64::from(JUMP_TABLE_MIN_TARGETS_FOR_SIZE)
+        );
+        assert_eq!(by_name("WASM_JUMP_TABLE_MIN_TARGETS"), i64::from(WASM_JUMP_TABLE_MIN_TARGETS));
+        assert_eq!(
+            by_name("WASM_JUMP_TABLE_MIN_TARGETS_FOR_SIZE"),
+            i64::from(WASM_JUMP_TABLE_MIN_TARGETS_FOR_SIZE)
         );
     }
 

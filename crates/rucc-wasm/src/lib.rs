@@ -75,6 +75,7 @@ mod rules;
 mod select;
 mod sjlj;
 mod structure;
+mod switch;
 
 use std::fmt;
 
@@ -92,6 +93,7 @@ use rucc_target::wasm::{Feature, Features};
 
 pub use libcall::bulk;
 pub use sjlj::prepare;
+pub use switch::switches;
 
 /// What a translation is asked for.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

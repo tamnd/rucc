@@ -813,7 +813,12 @@ impl Lower<'_, '_> {
         let (min, max) =
             cases.iter().fold((i128::MAX, i128::MIN), |(lo, hi), &(c, _)| (lo.min(c), hi.max(c)));
         let span = max - min;
-        if !pair && !cases.is_empty() && span < 1 << 16 && span < 4 * cases.len() as i128 + 8 {
+        // With optimization, [`crate::switches`] has split each `switch` into tests and left a
+        // `switch` only for a stretch that its rules made a table, so that `switch` is written as a
+        // table whatever its density. Without, a dense `switch` is a table and the rest is a chain
+        // of tests. V8 takes a `br_table` of at most 65,520 cells, which is the bound on both.
+        let dense = self.unit.optimize || span < 4 * cases.len() as i128 + 8;
+        if !pair && !cases.is_empty() && span < 65_520 && dense {
             let mut table = vec![default; usize::try_from(span + 1).expect("a small span")];
             for &(c, t) in &cases {
                 table[usize::try_from(c - min).expect("in the span")] = t;
