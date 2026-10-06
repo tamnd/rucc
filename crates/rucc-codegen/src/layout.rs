@@ -884,16 +884,49 @@ impl Writer<'_> {
             (if_true, Some(self.bridge(block, 1)))
         };
 
-        match fused {
-            Some((compare, fusion)) => self.keep_only_the_flags(compare, fusion),
+        let test = match fused {
+            Some((compare, fusion)) => {
+                self.keep_only_the_flags(compare, fusion);
+                compare
+            }
             None => {
                 let opcode = self.opcode(self.insts.test);
-                self.func.build(block, opcode).operand(condition).finish();
+                self.func.build(block, opcode).operand(condition).finish()
             }
+        };
+        // The comparison is with zero and the machine has a jump that makes it itself, so the two
+        // are one instruction reading the register the comparison read.
+        if let Some(into) = self.zero(test, name) {
+            let read = self.func[self.func[test].operands][0];
+            self.func.remove_inst(test);
+            self.func.build(block, into).operand(read).finish();
+            return bridge;
         }
         let opcode = self.opcode(name);
         self.func.build(block, opcode).finish();
         bridge
+    }
+
+    /// The jump that makes the comparison in front of it itself, when the comparison is with zero
+    /// and the target has one for this jump.
+    ///
+    /// A comparison that carries a constant only asks about zero when the constant is zero, and
+    /// one that reads memory or more than one register is not a comparison of one register at
+    /// all, whatever its name.
+    fn zero(&mut self, test: mir::Inst, jump: &str) -> Option<mir::Opcode> {
+        let data = self.func[test];
+        if data.mem.is_some() || self.func[data.operands].len() != 1 {
+            return None;
+        }
+        if data.imm.is_some_and(|imm| self.func[imm].0 != 0) {
+            return None;
+        }
+        let insts = self.insts;
+        let entry = insts
+            .zero
+            .iter()
+            .find(|entry| entry.when == jump && self.opcode(entry.test) == data.opcode)?;
+        Some(self.opcode(entry.into))
     }
 
     /// The comparison the block's branch can be folded into, when there is one.

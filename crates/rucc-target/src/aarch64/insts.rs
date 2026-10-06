@@ -41,9 +41,9 @@ use crate::operand::{Constraint, OperandDesc};
 use Form::{
     Acquire, Address, Alu, AluI, ArgVal, ArgValFp, Barrier, BrCond, Call, Cmp, CmpI, CmpSet,
     CmpSetI, CompareSwap, Convert, Csel, FAlu, FCmp, FCmpSet, FConvert, FMove, FUnary, FetchOp,
-    FpToInt, Insert, IntToFp, Jcc, Jump, JumpAway, JumpReg, Lea, Load, LoadFp, LoadImm, Move,
-    MulAdd, Nop, Pop, PopPair, Prefetch, Probe, Push, PushPair, Release, Ret, RetVal, RetVal2,
-    RetVal2Fp, RetVal3Fp, RetVal4Fp, RetValFp, Select, Set, SetBits, Store, StoreFp, Swap,
+    FpToInt, Insert, IntToFp, Jcc, Jump, JumpAway, JumpReg, JumpZero, Lea, Load, LoadFp, LoadImm,
+    Move, MulAdd, Nop, Pop, PopPair, Prefetch, Probe, Push, PushPair, Release, Ret, RetVal,
+    RetVal2, RetVal2Fp, RetVal3Fp, RetVal4Fp, RetValFp, Select, Set, SetBits, Store, StoreFp, Swap,
     Template, Test, Trap, Unary,
 };
 
@@ -145,6 +145,8 @@ pub enum Form {
     Jump,
     /// A branch to a block when a condition holds.
     Jcc,
+    /// A branch to a block when the register it reads is zero, or when it is not.
+    JumpZero,
     /// A branch to a symbol, which is how a tail call leaves.
     JumpAway,
     /// A branch to the address in a register.
@@ -290,7 +292,7 @@ impl Form {
             Swap => &SWAP,
             FetchOp => &FETCH_OP,
             CompareSwap => &COMPARE_SWAP,
-            CmpI | Test | Store | BrCond | JumpReg | Push => &ONE_READ,
+            CmpI | Test | Store | BrCond | JumpReg | JumpZero | Push => &ONE_READ,
             Pop => &ONE_WRITTEN,
             PopPair => &TWO_WRITTEN,
             LoadFp | ArgValFp => &ONE_WRITTEN_FP,
@@ -754,6 +756,10 @@ pub static INSTS: &[(&str, Form)] = &[
     ("b_pl", Jcc),
     ("b_vs", Jcc),
     ("b_vc", Jcc),
+    ("cbz_32", JumpZero),
+    ("cbz_64", JumpZero),
+    ("cbnz_32", JumpZero),
+    ("cbnz_64", JumpZero),
     ("b_away", JumpAway),
     ("br", JumpReg),
     ("bl", Call),
