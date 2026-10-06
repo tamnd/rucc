@@ -732,6 +732,15 @@ tests = ["tests/accept/attributes-that-ask-for-nothing-this-compiler-does.c", "r
 notes = "What it asks for is that the unused warnings keep quiet about the name, and this compiler gives none of them, so taking it and doing nothing is the whole of it. It becomes work the day `-Wunused-variable` does."
 
 [[feature]]
+name = "expected_throw"
+kind = "attribute"
+gcc_version = "14.1"
+status = "implemented"
+used_by = []
+tests = ["rucc::expected_throw_is_taken_on_a_function_and_warned_about_elsewhere"]
+notes = "gcc 14 reads it only under `-fharden-control-flow-redundancy`, to check the path taken before a call that is expected to throw past the check at the end. This compiler has no such hardening, so on a function it says nothing and does nothing. On anything else it is dropped with gcc's warning, and an argument is refused with E0843."
+
+[[feature]]
 name = "externally_visible"
 kind = "attribute"
 gcc_version = "4.2"

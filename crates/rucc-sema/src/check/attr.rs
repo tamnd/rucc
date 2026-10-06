@@ -2294,6 +2294,33 @@ impl Checker<'_> {
         }
     }
 
+    /// What gcc says about `expected_throw` in the lists of one declaration of `kind`: an argument
+    /// is refused in gcc's words, and on anything but a function the attribute is dropped with its
+    /// warning.
+    ///
+    /// gcc 14 reads it only under `-fharden-control-flow-redundancy`, which checks the path taken
+    /// before a call to such a function, since the call is expected to throw past the check at the
+    /// end. This compiler has no such hardening, so on a function it says nothing and does nothing.
+    pub(in crate::check) fn expected_throws(&mut self, lists: &[AttrList], kind: DeclKind) {
+        let ast = self.ast;
+        for &attrs in lists {
+            for &attr in &ast[attrs] {
+                if self.gnu_name(&attr) != "expected_throw" {
+                    continue;
+                }
+                let count = ast[attr.args].len();
+                if count > 0 {
+                    let what = "wrong number of arguments specified for 'expected_throw' attribute";
+                    let refused = Diagnostic::error(what, attr.span).with_code("E0843");
+                    self.report(refused.note(format!("expected 0, found {count}"), attr.span));
+                } else if kind != DeclKind::Function {
+                    let what = "'expected_throw' attribute ignored";
+                    self.report(Diagnostic::warning(what, attr.span).with_code("E0703"));
+                }
+            }
+        }
+    }
+
     /// What gcc says about `force_align_arg_pointer` in the lists of one declaration whose type is
     /// `ty`: an argument is refused in gcc's words, and on anything whose type is neither a
     /// function nor a pointer to one the attribute is dropped with its warning. gcc puts it on the
