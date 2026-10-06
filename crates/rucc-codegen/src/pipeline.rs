@@ -849,9 +849,10 @@ pub fn compile_recording(
     // will be rather than as they were.
     bits::dead(&mut func, machine.bits, machine.shapes, names);
     // A `cset` has already cleared everything above the bit it wrote, so the `and` that widens
-    // the bit is a copy, and its readers can read the `cset` instead.
+    // the bit is a copy, and its readers can read the `cset` instead. The same goes for a `uxtw`
+    // of anything written to a `w` register.
     if std::ptr::eq(machine.selector, &select::aarch64::SELECTOR) {
-        bits::settled(&mut func, machine.shapes, names);
+        bits::settled(&mut func, machine.bits, machine.shapes, names);
     }
 
     // After selection, because the address instruction and the one that reads it are both machine

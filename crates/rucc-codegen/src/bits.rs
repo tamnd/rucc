@@ -115,7 +115,7 @@
 //! and that is where `crate::pipeline` calls it.
 
 use rucc_base::Interner;
-use rucc_base::hash::Map;
+use rucc_base::hash::{Map, Set};
 use rucc_mir as mir;
 use rucc_target::{BitInsts, Constraint, MachineInsts, Role};
 
@@ -187,10 +187,22 @@ pub fn dead(
 /// `csinc` of the `cset`, since that writes a one or the zero or one it was given. So is a `tst`
 /// and its `cset`, and a `ubfx` of one bit, which leaves nothing but that bit in the register.
 ///
+/// A `uxtw` is the same. Every instruction that writes a `w` register clears the thirty two bits
+/// above it, so a zero widening of what one of them wrote is `mov w0, w0`, which changes nothing.
+/// gcc never writes it. Which instructions write a `w` register is the target's description, read
+/// through `insts`, so one it is silent about, such as an `asm` statement, keeps its widening.
+///
 /// What the source holds is known from the one instruction that writes it, so the source has to
-/// be a virtual register written once. The rest is [`dead`]'s rewrite: the readers go to the
-/// source and the widening goes, as one set of changes.
-pub fn settled(func: &mut mir::Func, machine: &MachineInsts, names: &Interner) -> usize {
+/// be a virtual register written once, or for a `uxtw` a block parameter every edge into the
+/// block hands a register like that or another such parameter, which is a loop counter. The rest
+/// is [`dead`]'s rewrite: the readers go to the source and the widening goes, as one set of
+/// changes.
+pub fn settled(
+    func: &mut mir::Func,
+    insts: &BitInsts,
+    machine: &MachineInsts,
+    names: &Interner,
+) -> usize {
     let mut writers: Map<mir::Reg, Vec<mir::Inst>> = Map::default();
     for block in func.blocks() {
         for inst in func.insts(block) {
@@ -202,24 +214,109 @@ pub fn settled(func: &mut mir::Func, machine: &MachineInsts, names: &Interner) -
         }
     }
     let name = |func: &mir::Func, inst: mir::Inst| names.resolve(func[inst].opcode.name());
+    let words = words(func, insts, names, &writers);
     let mut sent: Map<mir::Reg, mir::Reg> = Map::default();
     let mut gone: Vec<mir::Inst> = Vec::new();
     for block in func.blocks() {
         for inst in func.insts(block) {
-            if !name(func, inst).starts_with("a64.bit_to_") {
+            let widening = name(func, inst);
+            let bit = widening.starts_with("a64.bit_to_");
+            if !bit && widening != "a64.uxtw_64" {
                 continue;
             }
             let Some((def, source)) = conversion(func, inst) else { continue };
-            let Some([writer]) = writers.get(&source).map(Vec::as_slice) else { continue };
-            let by = name(func, *writer);
-            let set = ["a64.cmp_set_", "a64.fcmp_set_", "a64.tst_set_", "a64.bit_at_"];
-            if set.iter().any(|prefix| by.starts_with(prefix)) {
+            let cleared = if bit {
+                let Some([writer]) = writers.get(&source).map(Vec::as_slice) else { continue };
+                let by = name(func, *writer);
+                let set = ["a64.cmp_set_", "a64.fcmp_set_", "a64.tst_set_", "a64.bit_at_"];
+                set.iter().any(|prefix| by.starts_with(prefix))
+            } else {
+                words.contains(&source)
+            };
+            if cleared {
                 sent.insert(def, source);
                 gone.push(inst);
             }
         }
     }
     send(func, &sent, gone, machine, names)
+}
+
+/// Every register whose upper thirty two bits are known to be clear because a `w` register was
+/// the last thing written to it.
+///
+/// A virtual register written once by an instruction [`writes_word`] says yes to is one. So is a
+/// block parameter when every edge into its block hands it one of those or another parameter
+/// like it, which is a fixpoint, worked from every parameter being one down to the ones no edge
+/// spoils. The entry block's parameters are the function's arguments, whose upper halves the
+/// caller left as they were, and a block nothing jumps to has no edges to say anything, so
+/// neither starts in the set.
+fn words(
+    func: &mir::Func,
+    insts: &BitInsts,
+    names: &Interner,
+    writers: &Map<mir::Reg, Vec<mir::Inst>>,
+) -> Set<mir::Reg> {
+    let mut found: Set<mir::Reg> = Set::default();
+    for (&reg, written) in writers {
+        if let [writer] = written.as_slice()
+            && reg.is_virtual()
+            && writes_word(func, insts, names, *writer, reg)
+        {
+            found.insert(reg);
+        }
+    }
+    let mut entered: Set<mir::Block> = Set::default();
+    for block in func.blocks() {
+        entered.extend(func[block].succs.iter().map(|call| call.block));
+    }
+    let mut params: Set<mir::Reg> = Set::default();
+    for block in func.blocks() {
+        if Some(block) == func.entry() || !entered.contains(&block) {
+            continue;
+        }
+        for param in &func[block].params {
+            if param.reg.is_virtual() && !writers.contains_key(&param.reg) {
+                params.insert(param.reg);
+            }
+        }
+    }
+    loop {
+        let mut moved = false;
+        for block in func.blocks() {
+            for call in &func[block].succs {
+                for (arg, param) in call.args.iter().zip(&func[call.block].params) {
+                    let held = found.contains(arg) || params.contains(arg);
+                    if !held && params.remove(&param.reg) {
+                        moved = true;
+                    }
+                }
+            }
+        }
+        if !moved {
+            break;
+        }
+    }
+    found.extend(params);
+    found
+}
+
+/// Whether an instruction writes `reg` as a thirty two bit register and nothing wider, which on
+/// AArch64 clears every bit above the thirty two it wrote.
+///
+/// The register has to be the instruction's first operand and a definition there, which is where
+/// the description names what an instruction writes, and the description has to name it at
+/// thirty two bits. An opcode it has no spelling for answers `None` and is not one.
+fn writes_word(
+    func: &mir::Func,
+    insts: &BitInsts,
+    names: &Interner,
+    inst: mir::Inst,
+    reg: mir::Reg,
+) -> bool {
+    let Some(name) = opcode(func, insts, names, inst) else { return false };
+    let Some(first) = func[func[inst].operands].first() else { return false };
+    first.role != Role::Use && first.reg == reg && (insts.width)(name, 0) == Some(32)
 }
 
 /// Sends the readers of each register in `sent` to the register it maps to and takes out the

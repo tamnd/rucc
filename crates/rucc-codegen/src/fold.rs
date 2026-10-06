@@ -922,14 +922,18 @@ pub fn indexes(func: &mut mir::Func, names: &mut Interner) -> usize {
         }
     }
     // The one instruction that writes a register, and the one register it reads, when the
-    // register is virtual and that instruction is the one of `opcode`.
+    // register is virtual and that instruction is the one of `opcode`. What it reads is written
+    // once too, or by no instruction at all, which is a block parameter and is as fixed as the
+    // value of one instruction until the allocator has run.
     let only = |func: &mir::Func, reg: mir::Reg, opcode: mir::Opcode| {
         let [inst] = writes.get(&reg)?.as_slice() else { return None };
         if !reg.is_virtual() || func[*inst].opcode != opcode {
             return None;
         }
         let [_, from] = &func[func[*inst].operands] else { return None };
-        let [_] = writes.get(&from.reg)?.as_slice() else { return None };
+        if writes.get(&from.reg).map_or(0, Vec::len) > 1 {
+            return None;
+        }
         from.reg.is_virtual().then_some((*inst, *from))
     };
     let mut folded = 0;
