@@ -12,6 +12,10 @@ All notable changes are recorded here. The format follows [Keep a Changelog](htt
 - A comparison with a constant on the left is turned round, so `0 < n` becomes `n > 0` and the predicate swaps with the operands (#1994). These are forty more tier three rules in `crates/rucc-opt/rules/canonical.rules`, all ten integer predicates at `i8`, `i16`, `i32` and `i64`, each proved by `rucc-verify`. The peephole can build a comparison with a constant at the width of its operands, which tier five already relies on, and that was what the comparison normalisations were waiting for. `0 < n` is the guard header copying puts in front of a loop that counts up from zero, and on x86-64 it was a register zeroed to hold the zero and a compare of two registers, where `n > 0` is `testl` of the one register. Every rule in tier five has its constant on the right, so a comparison written the other way round now reaches those as well.
 - On x86-64, a conditional branch whose arm passes a constant compares and jumps again rather than setting a byte and testing it (#1994). The constant is written for the edge after the rest of the block, and it used to land between the comparison and the branch, where layout cannot put the two together. The comparison now moves down with the branch. The guard in front of a loop that sums into a zero was `cmpl`, `setl`, `xorl`, `testb` and `je`, and is now the compare and the jump.
 
+### Fixed
+
+- The release gate and the lint job pass again. The word width in `rangeswitch` says it is not a threshold, the constant store test gives each call its own temporary directory so its two tests no longer remove each other's fixture, and `tests/link-lines` has the `libsetjmp.a` that the wasm link line gained in #2927.
+
 ## 0.24.4
 
 The release gate passes again, so this is the first release since 0.21.0 to publish its archives. It carries `rangeswitch`, the switch clustering in its own crate, `rucc-legalize`, a value sent ahead to the stack that can still sit in a register a call destroys, and the other changes merged since 0.24.3.
