@@ -862,6 +862,11 @@ pub fn compile_recording(
     // is still an address the frame layout knows to write an offset into.
     // A constant added to an index goes into the displacement first, so an address that took one
     // is handed on to its readers with it already inside.
+    // A shifted `add` that only loads and stores read is taken apart before either, so the sum
+    // and the shift go into the accesses the way they would have from the two instructions.
+    if std::ptr::eq(machine.selector, &select::aarch64::SELECTOR) {
+        fold::unshifted(&mut func, names);
+    }
     fold::offsets(&mut func, machine.insts, machine.shapes, names);
     let mut pending = fold::Pending {
         addresses: &mut stack.addresses,

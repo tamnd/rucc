@@ -82,6 +82,9 @@ fn plain(form: Form) -> Timing {
         | Set => (1, Unit::Int),
         // A comparison and the `cset` or `csel` behind it, which waits for the comparison.
         CmpSet | CmpSetI | Select => (2, Unit::Int),
+        // Arithmetic on a shifted register, which is two cycles on the cores that do not take a
+        // short left shift for free and never worse than the shift and the arithmetic apart.
+        AluShift => (2, Unit::Int),
         // The page of a symbol and the offset into it, one after the other.
         Address => (2, Unit::Int),
         // A multiply and add, on the one pipeline that multiplies.

@@ -120,6 +120,39 @@
 (semantics (a64.asr_rr_32 l r) (bvashr l (bvand r 31)))
 (semantics (a64.asr_rr_64 l r) (bvashr l (bvand r 63)))
 
+;; Arithmetic and the bitwise operations with the second register shifted by a constant first,
+;; which the machine does in the same instruction. The count is whatever the rule's guard let through.
+(semantics (a64.add_lsl_32 l r k) (bvadd l (bvshl r k)))
+(semantics (a64.add_lsl_64 l r k) (bvadd l (bvshl r k)))
+(semantics (a64.add_lsr_32 l r k) (bvadd l (bvlshr r k)))
+(semantics (a64.add_lsr_64 l r k) (bvadd l (bvlshr r k)))
+(semantics (a64.add_asr_32 l r k) (bvadd l (bvashr r k)))
+(semantics (a64.add_asr_64 l r k) (bvadd l (bvashr r k)))
+(semantics (a64.sub_lsl_32 l r k) (bvsub l (bvshl r k)))
+(semantics (a64.sub_lsl_64 l r k) (bvsub l (bvshl r k)))
+(semantics (a64.sub_lsr_32 l r k) (bvsub l (bvlshr r k)))
+(semantics (a64.sub_lsr_64 l r k) (bvsub l (bvlshr r k)))
+(semantics (a64.sub_asr_32 l r k) (bvsub l (bvashr r k)))
+(semantics (a64.sub_asr_64 l r k) (bvsub l (bvashr r k)))
+(semantics (a64.and_lsl_32 l r k) (bvand l (bvshl r k)))
+(semantics (a64.and_lsl_64 l r k) (bvand l (bvshl r k)))
+(semantics (a64.and_lsr_32 l r k) (bvand l (bvlshr r k)))
+(semantics (a64.and_lsr_64 l r k) (bvand l (bvlshr r k)))
+(semantics (a64.and_asr_32 l r k) (bvand l (bvashr r k)))
+(semantics (a64.and_asr_64 l r k) (bvand l (bvashr r k)))
+(semantics (a64.orr_lsl_32 l r k) (bvor l (bvshl r k)))
+(semantics (a64.orr_lsl_64 l r k) (bvor l (bvshl r k)))
+(semantics (a64.orr_lsr_32 l r k) (bvor l (bvlshr r k)))
+(semantics (a64.orr_lsr_64 l r k) (bvor l (bvlshr r k)))
+(semantics (a64.orr_asr_32 l r k) (bvor l (bvashr r k)))
+(semantics (a64.orr_asr_64 l r k) (bvor l (bvashr r k)))
+(semantics (a64.eor_lsl_32 l r k) (bvxor l (bvshl r k)))
+(semantics (a64.eor_lsl_64 l r k) (bvxor l (bvshl r k)))
+(semantics (a64.eor_lsr_32 l r k) (bvxor l (bvlshr r k)))
+(semantics (a64.eor_lsr_64 l r k) (bvxor l (bvlshr r k)))
+(semantics (a64.eor_asr_32 l r k) (bvxor l (bvashr r k)))
+(semantics (a64.eor_asr_64 l r k) (bvxor l (bvashr r k)))
+
 ;; Turning a register round. `rev` reverses the bytes, which is the IR's `bswap`, and `rbit`
 ;; reverses the bits, written out here a bit at a time with the lowest bit of the operand ending up
 ;; highest in the result.

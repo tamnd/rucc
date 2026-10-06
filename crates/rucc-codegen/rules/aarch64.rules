@@ -515,6 +515,316 @@
       (spec (= (bvashr x (bvand y 63)) (result))))
 
 
+;; A shifted register as the second operand of an arithmetic or bitwise instruction, which the
+;; machine shifts on the way in for nothing, as gcc writes `a + (b << 3)`. The operations that do
+;; not care about their order take the shift on either side, and a subtraction only on the right.
+
+
+(rule (lower (add.i32 (value.i32 x) (shl.i32 (value.i32 y) (iconst.i32 k))))
+      (if (and (>= k 0) (< k 32)))
+      (a64.add_lsl_32 x y k)
+      (spec (= (bvadd x (bvshl y k)) (result))))
+
+(rule (lower (add.i32 (shl.i32 (value.i32 y) (iconst.i32 k)) (value.i32 x)))
+      (if (and (>= k 0) (< k 32)))
+      (a64.add_lsl_32 x y k)
+      (spec (= (bvadd x (bvshl y k)) (result))))
+
+(rule (lower (add.i64 (value.i64 x) (shl.i64 (value.i64 y) (iconst.i64 k))))
+      (if (and (>= k 0) (< k 64)))
+      (a64.add_lsl_64 x y k)
+      (spec (= (bvadd x (bvshl y k)) (result))))
+
+(rule (lower (add.i64 (shl.i64 (value.i64 y) (iconst.i64 k)) (value.i64 x)))
+      (if (and (>= k 0) (< k 64)))
+      (a64.add_lsl_64 x y k)
+      (spec (= (bvadd x (bvshl y k)) (result))))
+
+(rule (lower (add.i32 (value.i32 x) (lshr.i32 (value.i32 y) (iconst.i32 k))))
+      (if (and (>= k 0) (< k 32)))
+      (a64.add_lsr_32 x y k)
+      (spec (= (bvadd x (bvlshr y k)) (result))))
+
+(rule (lower (add.i32 (lshr.i32 (value.i32 y) (iconst.i32 k)) (value.i32 x)))
+      (if (and (>= k 0) (< k 32)))
+      (a64.add_lsr_32 x y k)
+      (spec (= (bvadd x (bvlshr y k)) (result))))
+
+(rule (lower (add.i64 (value.i64 x) (lshr.i64 (value.i64 y) (iconst.i64 k))))
+      (if (and (>= k 0) (< k 64)))
+      (a64.add_lsr_64 x y k)
+      (spec (= (bvadd x (bvlshr y k)) (result))))
+
+(rule (lower (add.i64 (lshr.i64 (value.i64 y) (iconst.i64 k)) (value.i64 x)))
+      (if (and (>= k 0) (< k 64)))
+      (a64.add_lsr_64 x y k)
+      (spec (= (bvadd x (bvlshr y k)) (result))))
+
+(rule (lower (add.i32 (value.i32 x) (ashr.i32 (value.i32 y) (iconst.i32 k))))
+      (if (and (>= k 0) (< k 32)))
+      (a64.add_asr_32 x y k)
+      (spec (= (bvadd x (bvashr y k)) (result))))
+
+(rule (lower (add.i32 (ashr.i32 (value.i32 y) (iconst.i32 k)) (value.i32 x)))
+      (if (and (>= k 0) (< k 32)))
+      (a64.add_asr_32 x y k)
+      (spec (= (bvadd x (bvashr y k)) (result))))
+
+(rule (lower (add.i64 (value.i64 x) (ashr.i64 (value.i64 y) (iconst.i64 k))))
+      (if (and (>= k 0) (< k 64)))
+      (a64.add_asr_64 x y k)
+      (spec (= (bvadd x (bvashr y k)) (result))))
+
+(rule (lower (add.i64 (ashr.i64 (value.i64 y) (iconst.i64 k)) (value.i64 x)))
+      (if (and (>= k 0) (< k 64)))
+      (a64.add_asr_64 x y k)
+      (spec (= (bvadd x (bvashr y k)) (result))))
+
+(rule (lower (sub.i32 (value.i32 x) (shl.i32 (value.i32 y) (iconst.i32 k))))
+      (if (and (>= k 0) (< k 32)))
+      (a64.sub_lsl_32 x y k)
+      (spec (= (bvsub x (bvshl y k)) (result))))
+
+(rule (lower (sub.i64 (value.i64 x) (shl.i64 (value.i64 y) (iconst.i64 k))))
+      (if (and (>= k 0) (< k 64)))
+      (a64.sub_lsl_64 x y k)
+      (spec (= (bvsub x (bvshl y k)) (result))))
+
+(rule (lower (sub.i32 (value.i32 x) (lshr.i32 (value.i32 y) (iconst.i32 k))))
+      (if (and (>= k 0) (< k 32)))
+      (a64.sub_lsr_32 x y k)
+      (spec (= (bvsub x (bvlshr y k)) (result))))
+
+(rule (lower (sub.i64 (value.i64 x) (lshr.i64 (value.i64 y) (iconst.i64 k))))
+      (if (and (>= k 0) (< k 64)))
+      (a64.sub_lsr_64 x y k)
+      (spec (= (bvsub x (bvlshr y k)) (result))))
+
+(rule (lower (sub.i32 (value.i32 x) (ashr.i32 (value.i32 y) (iconst.i32 k))))
+      (if (and (>= k 0) (< k 32)))
+      (a64.sub_asr_32 x y k)
+      (spec (= (bvsub x (bvashr y k)) (result))))
+
+(rule (lower (sub.i64 (value.i64 x) (ashr.i64 (value.i64 y) (iconst.i64 k))))
+      (if (and (>= k 0) (< k 64)))
+      (a64.sub_asr_64 x y k)
+      (spec (= (bvsub x (bvashr y k)) (result))))
+
+(rule (lower (and.i32 (value.i32 x) (shl.i32 (value.i32 y) (iconst.i32 k))))
+      (if (and (>= k 0) (< k 32)))
+      (a64.and_lsl_32 x y k)
+      (spec (= (bvand x (bvshl y k)) (result))))
+
+(rule (lower (and.i32 (shl.i32 (value.i32 y) (iconst.i32 k)) (value.i32 x)))
+      (if (and (>= k 0) (< k 32)))
+      (a64.and_lsl_32 x y k)
+      (spec (= (bvand x (bvshl y k)) (result))))
+
+(rule (lower (and.i64 (value.i64 x) (shl.i64 (value.i64 y) (iconst.i64 k))))
+      (if (and (>= k 0) (< k 64)))
+      (a64.and_lsl_64 x y k)
+      (spec (= (bvand x (bvshl y k)) (result))))
+
+(rule (lower (and.i64 (shl.i64 (value.i64 y) (iconst.i64 k)) (value.i64 x)))
+      (if (and (>= k 0) (< k 64)))
+      (a64.and_lsl_64 x y k)
+      (spec (= (bvand x (bvshl y k)) (result))))
+
+(rule (lower (and.i32 (value.i32 x) (lshr.i32 (value.i32 y) (iconst.i32 k))))
+      (if (and (>= k 0) (< k 32)))
+      (a64.and_lsr_32 x y k)
+      (spec (= (bvand x (bvlshr y k)) (result))))
+
+(rule (lower (and.i32 (lshr.i32 (value.i32 y) (iconst.i32 k)) (value.i32 x)))
+      (if (and (>= k 0) (< k 32)))
+      (a64.and_lsr_32 x y k)
+      (spec (= (bvand x (bvlshr y k)) (result))))
+
+(rule (lower (and.i64 (value.i64 x) (lshr.i64 (value.i64 y) (iconst.i64 k))))
+      (if (and (>= k 0) (< k 64)))
+      (a64.and_lsr_64 x y k)
+      (spec (= (bvand x (bvlshr y k)) (result))))
+
+(rule (lower (and.i64 (lshr.i64 (value.i64 y) (iconst.i64 k)) (value.i64 x)))
+      (if (and (>= k 0) (< k 64)))
+      (a64.and_lsr_64 x y k)
+      (spec (= (bvand x (bvlshr y k)) (result))))
+
+(rule (lower (and.i32 (value.i32 x) (ashr.i32 (value.i32 y) (iconst.i32 k))))
+      (if (and (>= k 0) (< k 32)))
+      (a64.and_asr_32 x y k)
+      (spec (= (bvand x (bvashr y k)) (result))))
+
+(rule (lower (and.i32 (ashr.i32 (value.i32 y) (iconst.i32 k)) (value.i32 x)))
+      (if (and (>= k 0) (< k 32)))
+      (a64.and_asr_32 x y k)
+      (spec (= (bvand x (bvashr y k)) (result))))
+
+(rule (lower (and.i64 (value.i64 x) (ashr.i64 (value.i64 y) (iconst.i64 k))))
+      (if (and (>= k 0) (< k 64)))
+      (a64.and_asr_64 x y k)
+      (spec (= (bvand x (bvashr y k)) (result))))
+
+(rule (lower (and.i64 (ashr.i64 (value.i64 y) (iconst.i64 k)) (value.i64 x)))
+      (if (and (>= k 0) (< k 64)))
+      (a64.and_asr_64 x y k)
+      (spec (= (bvand x (bvashr y k)) (result))))
+
+(rule (lower (or.i32 (value.i32 x) (shl.i32 (value.i32 y) (iconst.i32 k))))
+      (if (and (>= k 0) (< k 32)))
+      (a64.orr_lsl_32 x y k)
+      (spec (= (bvor x (bvshl y k)) (result))))
+
+(rule (lower (or.i32 (shl.i32 (value.i32 y) (iconst.i32 k)) (value.i32 x)))
+      (if (and (>= k 0) (< k 32)))
+      (a64.orr_lsl_32 x y k)
+      (spec (= (bvor x (bvshl y k)) (result))))
+
+(rule (lower (or.i64 (value.i64 x) (shl.i64 (value.i64 y) (iconst.i64 k))))
+      (if (and (>= k 0) (< k 64)))
+      (a64.orr_lsl_64 x y k)
+      (spec (= (bvor x (bvshl y k)) (result))))
+
+(rule (lower (or.i64 (shl.i64 (value.i64 y) (iconst.i64 k)) (value.i64 x)))
+      (if (and (>= k 0) (< k 64)))
+      (a64.orr_lsl_64 x y k)
+      (spec (= (bvor x (bvshl y k)) (result))))
+
+(rule (lower (or.i32 (value.i32 x) (lshr.i32 (value.i32 y) (iconst.i32 k))))
+      (if (and (>= k 0) (< k 32)))
+      (a64.orr_lsr_32 x y k)
+      (spec (= (bvor x (bvlshr y k)) (result))))
+
+(rule (lower (or.i32 (lshr.i32 (value.i32 y) (iconst.i32 k)) (value.i32 x)))
+      (if (and (>= k 0) (< k 32)))
+      (a64.orr_lsr_32 x y k)
+      (spec (= (bvor x (bvlshr y k)) (result))))
+
+(rule (lower (or.i64 (value.i64 x) (lshr.i64 (value.i64 y) (iconst.i64 k))))
+      (if (and (>= k 0) (< k 64)))
+      (a64.orr_lsr_64 x y k)
+      (spec (= (bvor x (bvlshr y k)) (result))))
+
+(rule (lower (or.i64 (lshr.i64 (value.i64 y) (iconst.i64 k)) (value.i64 x)))
+      (if (and (>= k 0) (< k 64)))
+      (a64.orr_lsr_64 x y k)
+      (spec (= (bvor x (bvlshr y k)) (result))))
+
+(rule (lower (or.i32 (value.i32 x) (ashr.i32 (value.i32 y) (iconst.i32 k))))
+      (if (and (>= k 0) (< k 32)))
+      (a64.orr_asr_32 x y k)
+      (spec (= (bvor x (bvashr y k)) (result))))
+
+(rule (lower (or.i32 (ashr.i32 (value.i32 y) (iconst.i32 k)) (value.i32 x)))
+      (if (and (>= k 0) (< k 32)))
+      (a64.orr_asr_32 x y k)
+      (spec (= (bvor x (bvashr y k)) (result))))
+
+(rule (lower (or.i64 (value.i64 x) (ashr.i64 (value.i64 y) (iconst.i64 k))))
+      (if (and (>= k 0) (< k 64)))
+      (a64.orr_asr_64 x y k)
+      (spec (= (bvor x (bvashr y k)) (result))))
+
+(rule (lower (or.i64 (ashr.i64 (value.i64 y) (iconst.i64 k)) (value.i64 x)))
+      (if (and (>= k 0) (< k 64)))
+      (a64.orr_asr_64 x y k)
+      (spec (= (bvor x (bvashr y k)) (result))))
+
+(rule (lower (xor.i32 (value.i32 x) (shl.i32 (value.i32 y) (iconst.i32 k))))
+      (if (and (>= k 0) (< k 32)))
+      (a64.eor_lsl_32 x y k)
+      (spec (= (bvxor x (bvshl y k)) (result))))
+
+(rule (lower (xor.i32 (shl.i32 (value.i32 y) (iconst.i32 k)) (value.i32 x)))
+      (if (and (>= k 0) (< k 32)))
+      (a64.eor_lsl_32 x y k)
+      (spec (= (bvxor x (bvshl y k)) (result))))
+
+(rule (lower (xor.i64 (value.i64 x) (shl.i64 (value.i64 y) (iconst.i64 k))))
+      (if (and (>= k 0) (< k 64)))
+      (a64.eor_lsl_64 x y k)
+      (spec (= (bvxor x (bvshl y k)) (result))))
+
+(rule (lower (xor.i64 (shl.i64 (value.i64 y) (iconst.i64 k)) (value.i64 x)))
+      (if (and (>= k 0) (< k 64)))
+      (a64.eor_lsl_64 x y k)
+      (spec (= (bvxor x (bvshl y k)) (result))))
+
+(rule (lower (xor.i32 (value.i32 x) (lshr.i32 (value.i32 y) (iconst.i32 k))))
+      (if (and (>= k 0) (< k 32)))
+      (a64.eor_lsr_32 x y k)
+      (spec (= (bvxor x (bvlshr y k)) (result))))
+
+(rule (lower (xor.i32 (lshr.i32 (value.i32 y) (iconst.i32 k)) (value.i32 x)))
+      (if (and (>= k 0) (< k 32)))
+      (a64.eor_lsr_32 x y k)
+      (spec (= (bvxor x (bvlshr y k)) (result))))
+
+(rule (lower (xor.i64 (value.i64 x) (lshr.i64 (value.i64 y) (iconst.i64 k))))
+      (if (and (>= k 0) (< k 64)))
+      (a64.eor_lsr_64 x y k)
+      (spec (= (bvxor x (bvlshr y k)) (result))))
+
+(rule (lower (xor.i64 (lshr.i64 (value.i64 y) (iconst.i64 k)) (value.i64 x)))
+      (if (and (>= k 0) (< k 64)))
+      (a64.eor_lsr_64 x y k)
+      (spec (= (bvxor x (bvlshr y k)) (result))))
+
+(rule (lower (xor.i32 (value.i32 x) (ashr.i32 (value.i32 y) (iconst.i32 k))))
+      (if (and (>= k 0) (< k 32)))
+      (a64.eor_asr_32 x y k)
+      (spec (= (bvxor x (bvashr y k)) (result))))
+
+(rule (lower (xor.i32 (ashr.i32 (value.i32 y) (iconst.i32 k)) (value.i32 x)))
+      (if (and (>= k 0) (< k 32)))
+      (a64.eor_asr_32 x y k)
+      (spec (= (bvxor x (bvashr y k)) (result))))
+
+(rule (lower (xor.i64 (value.i64 x) (ashr.i64 (value.i64 y) (iconst.i64 k))))
+      (if (and (>= k 0) (< k 64)))
+      (a64.eor_asr_64 x y k)
+      (spec (= (bvxor x (bvashr y k)) (result))))
+
+(rule (lower (xor.i64 (ashr.i64 (value.i64 y) (iconst.i64 k)) (value.i64 x)))
+      (if (and (>= k 0) (< k 64)))
+      (a64.eor_asr_64 x y k)
+      (spec (= (bvxor x (bvashr y k)) (result))))
+
+;; A multiply by one more than a power of two is the value added to itself shifted, which is one
+;; instruction where the multiply wants the constant in a register first.
+
+(rule (lower (mul.i32 (value.i32 x) (iconst.i32 3)))
+      (a64.add_lsl_32 x x 1)
+      (spec (= (bvmul x 3) (result))))
+
+(rule (lower (mul.i32 (value.i32 x) (iconst.i32 5)))
+      (a64.add_lsl_32 x x 2)
+      (spec (= (bvmul x 5) (result))))
+
+(rule (lower (mul.i32 (value.i32 x) (iconst.i32 9)))
+      (a64.add_lsl_32 x x 3)
+      (spec (= (bvmul x 9) (result))))
+
+(rule (lower (mul.i32 (value.i32 x) (iconst.i32 17)))
+      (a64.add_lsl_32 x x 4)
+      (spec (= (bvmul x 17) (result))))
+
+(rule (lower (mul.i64 (value.i64 x) (iconst.i64 3)))
+      (a64.add_lsl_64 x x 1)
+      (spec (= (bvmul x 3) (result))))
+
+(rule (lower (mul.i64 (value.i64 x) (iconst.i64 5)))
+      (a64.add_lsl_64 x x 2)
+      (spec (= (bvmul x 5) (result))))
+
+(rule (lower (mul.i64 (value.i64 x) (iconst.i64 9)))
+      (a64.add_lsl_64 x x 3)
+      (spec (= (bvmul x 9) (result))))
+
+(rule (lower (mul.i64 (value.i64 x) (iconst.i64 17)))
+      (a64.add_lsl_64 x x 4)
+      (spec (= (bvmul x 17) (result))))
+
 ;; Byte reversals, which are `rev` at the two widths the machine has. A sixteen bit one is left to
 ;; `rucc_codegen::expand`, since `rev16` turns round both halves of the register and what is above
 ;; a sixteen bit value there means nothing.

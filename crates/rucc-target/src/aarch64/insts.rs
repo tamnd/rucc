@@ -39,12 +39,12 @@ use crate::named;
 use crate::operand::{Constraint, OperandDesc};
 
 use Form::{
-    Acquire, Address, Alu, AluI, ArgVal, ArgValFp, Barrier, BrCond, Call, Cmp, CmpI, CmpSet,
-    CmpSetI, CompareSwap, Convert, Csel, FAlu, FCmp, FCmpSet, FConvert, FMove, FUnary, FetchOp,
-    FpToInt, Insert, IntToFp, Jcc, Jump, JumpAway, JumpReg, JumpZero, Lea, Load, LoadFp, LoadImm,
-    Move, MulAdd, Nop, Pop, PopPair, Prefetch, Probe, Push, PushPair, Release, Ret, RetVal,
-    RetVal2, RetVal2Fp, RetVal3Fp, RetVal4Fp, RetValFp, Select, Set, SetBits, Store, StoreFp, Swap,
-    Template, Test, Trap, Unary,
+    Acquire, Address, Alu, AluI, AluShift, ArgVal, ArgValFp, Barrier, BrCond, Call, Cmp, CmpI,
+    CmpSet, CmpSetI, CompareSwap, Convert, Csel, FAlu, FCmp, FCmpSet, FConvert, FMove, FUnary,
+    FetchOp, FpToInt, Insert, IntToFp, Jcc, Jump, JumpAway, JumpReg, JumpZero, Lea, Load, LoadFp,
+    LoadImm, Move, MulAdd, Nop, Pop, PopPair, Prefetch, Probe, Push, PushPair, Release, Ret,
+    RetVal, RetVal2, RetVal2Fp, RetVal3Fp, RetVal4Fp, RetValFp, Select, Set, SetBits, Store,
+    StoreFp, Swap, Template, Test, Trap, Unary,
 };
 
 /// The operand vector one machine instruction has.
@@ -59,6 +59,8 @@ pub enum Form {
     Alu,
     /// A destination, a source and a constant the instruction can hold.
     AluI,
+    /// Two registers in and one out, the second shifted by the instruction's constant first.
+    AluShift,
     /// A destination and three sources, the product of the first two added to or taken from the
     /// third.
     MulAdd,
@@ -285,7 +287,7 @@ impl Form {
             LoadImm | Lea | Address | Load | ArgVal | Set => &ONE_WRITTEN,
             Insert => &INSERT,
             AluI | Unary | Convert | Move | CmpSetI => &ONE_TO_ONE,
-            Alu | CmpSet | Csel => &TWO_TO_ONE,
+            Alu | AluShift | CmpSet | Csel => &TWO_TO_ONE,
             MulAdd | Select => &THREE_TO_ONE,
             Cmp | PushPair | Release => &TWO_READ,
             Acquire => &ACQUIRE,
@@ -318,7 +320,7 @@ impl Form {
     /// Whether an instruction of this form carries an immediate.
     #[must_use]
     pub fn takes_imm(self) -> bool {
-        matches!(self, LoadImm | Insert | AluI | CmpI | CmpSetI | Probe)
+        matches!(self, LoadImm | Insert | AluI | AluShift | CmpI | CmpSetI | Probe)
     }
 
     /// Whether an instruction of this form carries an addressing mode.
@@ -426,6 +428,38 @@ pub static INSTS: &[(&str, Form)] = &[
     ("asr_ri_16", AluI),
     ("ror_ri_32", AluI),
     ("ror_ri_64", AluI),
+    // Arithmetic on a register and a second register shifted by a constant, which the machine
+    // does in the one instruction. The constant is the shift and is below the width.
+    ("add_lsl_32", AluShift),
+    ("add_lsl_64", AluShift),
+    ("add_lsr_32", AluShift),
+    ("add_lsr_64", AluShift),
+    ("add_asr_32", AluShift),
+    ("add_asr_64", AluShift),
+    ("sub_lsl_32", AluShift),
+    ("sub_lsl_64", AluShift),
+    ("sub_lsr_32", AluShift),
+    ("sub_lsr_64", AluShift),
+    ("sub_asr_32", AluShift),
+    ("sub_asr_64", AluShift),
+    ("and_lsl_32", AluShift),
+    ("and_lsl_64", AluShift),
+    ("and_lsr_32", AluShift),
+    ("and_lsr_64", AluShift),
+    ("and_asr_32", AluShift),
+    ("and_asr_64", AluShift),
+    ("orr_lsl_32", AluShift),
+    ("orr_lsl_64", AluShift),
+    ("orr_lsr_32", AluShift),
+    ("orr_lsr_64", AluShift),
+    ("orr_asr_32", AluShift),
+    ("orr_asr_64", AluShift),
+    ("eor_lsl_32", AluShift),
+    ("eor_lsl_64", AluShift),
+    ("eor_lsr_32", AluShift),
+    ("eor_lsr_64", AluShift),
+    ("eor_asr_32", AluShift),
+    ("eor_asr_64", AluShift),
     // Multiply and add, and multiply and subtract, which is how a remainder is taken: the quotient
     // times the divisor, subtracted from the dividend.
     ("madd_rrr_32", MulAdd),
