@@ -53,6 +53,12 @@
 //! An alias is a second symbol, as in clang. The second name of a function has the index of the
 //! function, and the second name of a variable is a data symbol at the place of the variable.
 //!
+//! With `-g`, [`translate_with_lines`] also gives the code offset and the source span of each run
+//! of code, and the driver makes the DWARF of the unit from them with rucc-debug, as for the native
+//! targets. [`describe`] puts that DWARF in the object as custom sections with their relocations,
+//! which is the form that clang writes and that Wasmtime and the debuggers read. The locals are not
+//! in it yet. See #3149.
+//!
 //! What this refuses, with a message that names the function: a vector, inline assembly with a
 //! template that is not blank, a function other than `setjmp` that returns twice, unwinding to a
 //! cleanup with `-fexceptions`, an `ifunc`, and the instructions of the memory safety monitor. Each
@@ -82,6 +88,7 @@ use std::fmt;
 
 use rucc_base::hash::Map;
 use rucc_base::{Interner, Symbol};
+use rucc_diag::Span;
 use rucc_ir::{
     Abi, AliasId, AliasKind, Block, Datum, Func, FuncId, Linkage, Module, Opcode, Signature,
     SymbolRef, Type,
@@ -214,7 +221,120 @@ pub fn translate(
     names: &Interner,
     options: impl Into<Options>,
 ) -> Result<wasm::Module, Refusal> {
-    Ok(translate_with(module, names, options.into(), false)?.0)
+    Ok(translate_with(module, names, options.into(), false, false)?.0)
+}
+
+/// The rows of the line table of one function of the object, which is what `-g` asks of the back
+/// end. The driver makes the DWARF from them with rucc-debug, and [`describe`] puts it in the
+/// object.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct Lines {
+    /// The offset of each run of code from the start of the function body, after the size of the
+    /// body, and the span of the IR instruction that the run comes from. The offsets go up. An
+    /// offset counts the declarations of the locals too, because the address of a function in
+    /// DWARF is the start of its body, which is where `R_WASM_FUNCTION_OFFSET_I32` points.
+    pub rows: Vec<(u32, Span)>,
+    /// The size of the body in bytes, with the declarations of the locals and the last `end`.
+    pub len: u32,
+}
+
+/// The object model of `module`, as [`translate`] gives it, and the rows of the line table of
+/// each function, in the order of [`wasm::Module::functions`].
+///
+/// # Errors
+///
+/// A [`Refusal`] for the first part of the module that this back end does not translate yet.
+///
+/// # Panics
+///
+/// When the module has 2^32 data segments or more, which a module under 4 GiB cannot have.
+pub fn translate_with_lines(
+    module: &Module,
+    names: &Interner,
+    options: impl Into<Options>,
+) -> Result<(wasm::Module, Vec<Lines>), Refusal> {
+    let (object, _, lines) = translate_with(module, names, options.into(), false, true)?;
+    Ok((object, lines))
+}
+
+/// Put the DWARF sections of `info`, which rucc-debug made for the object, in the object as custom
+/// sections. A relocation in a section is `R_WASM_FUNCTION_OFFSET_I32` when it names a function,
+/// `R_WASM_SECTION_OFFSET_I32` when it names a section of `info`, and `R_WASM_MEMORY_ADDR_I32`
+/// when it names data. Each section that a relocation names gets a section symbol, after the other
+/// symbols, with the name of the section after `.L` in place of its dot, which is the label of the
+/// section in the `-S` text.
+///
+/// # Errors
+///
+/// A [`Refusal`] for a relocation that is not 4 bytes or that names a symbol that the object does
+/// not define, which is a mistake in the translation or in rucc-debug.
+///
+/// # Panics
+///
+/// When the object has 2^32 custom sections or symbols or more, which a module under 4 GiB
+/// cannot have.
+pub fn describe(object: &mut wasm::Module, info: &rucc_object::Info) -> Result<(), Refusal> {
+    let refused = |why: String| Refusal { function: None, why };
+    let first = u32::try_from(object.customs.len()).expect("fewer than 2^32 custom sections");
+    let named = |name: &str| info.chunks.iter().position(|chunk| chunk.name == name);
+    // The section symbols come in the order of their sections, which is the order in which the
+    // reader of the `-S` text finds their labels.
+    let mut sections: Vec<Option<u32>> = vec![None; info.chunks.len()];
+    for (index, chunk) in info.chunks.iter().enumerate() {
+        let named = info.chunks.iter().flat_map(|chunk| &chunk.relocs);
+        if named.into_iter().any(|reloc| reloc.symbol == chunk.name) {
+            let custom = first + u32::try_from(index).expect("fewer than 2^32 sections");
+            let label = format!(".L{}", chunk.name.trim_start_matches('.'));
+            sections[index] = Some(object.symbol(label, SymbolKind::Section { custom }, LOCAL));
+        }
+    }
+    for chunk in &info.chunks {
+        let mut fixups = Vec::with_capacity(chunk.relocs.len());
+        for reloc in &chunk.relocs {
+            if !matches!(reloc.kind, rucc_object::Reference::Address { bytes: 4 }) {
+                return Err(refused(format!(
+                    "a relocation in {} is {:?} and not an address of 4 bytes",
+                    chunk.name, reloc.kind
+                )));
+            }
+            let at = u32::try_from(reloc.at)
+                .map_err(|_| refused(format!("{} is larger than 4 GiB", chunk.name)))?;
+            let addend = i32::try_from(reloc.addend).map_err(|_| {
+                refused(format!("an addend in {} does not fit 32 bits", chunk.name))
+            })?;
+            let (kind, target) =
+                if let Some(symbol) = named(&reloc.symbol).and_then(|i| sections[i]) {
+                    (RelocKind::SectionOffsetI32, symbol)
+                } else {
+                    let defined = object.symbols.iter().position(|symbol| {
+                        symbol.name == reloc.symbol
+                            && matches!(
+                                symbol.kind,
+                                SymbolKind::Function { import: None, .. }
+                                    | SymbolKind::Data { place: Some(_) }
+                            )
+                    });
+                    let Some(symbol) = defined else {
+                        return Err(refused(format!(
+                            "{} names `{}`, which the object does not define",
+                            chunk.name, reloc.symbol
+                        )));
+                    };
+                    let kind = match object.symbols[symbol].kind {
+                        SymbolKind::Function { .. } => RelocKind::FunctionOffsetI32,
+                        _ => RelocKind::MemoryAddrI32,
+                    };
+                    (kind, u32::try_from(symbol).expect("fewer than 2^32 symbols"))
+                };
+            fixups.push(Fixup { at, kind, target, addend });
+        }
+        object.customs.push(wasm::Custom {
+            name: chunk.name.clone(),
+            bytes: chunk.bytes.clone(),
+            fixups,
+        });
+    }
+    Ok(())
 }
 
 /// The tree form of `module`, which is `--emit=wasm-tree`: the code of each function as the
@@ -232,18 +352,19 @@ pub fn tree(
     names: &Interner,
     options: impl Into<Options>,
 ) -> Result<String, Refusal> {
-    let (object, notes) = translate_with(module, names, options.into(), true)?;
+    let (object, notes, _) = translate_with(module, names, options.into(), true, false)?;
     asm::tree(&object, &notes).map_err(|(function, why)| Refusal { function: Some(function), why })
 }
 
-/// The object model of `module`, and the notes of the tree form for each function when `notes`
-/// is set.
+/// The object model of `module`, the notes of the tree form for each function when `notes` is
+/// set, and the rows of the line table of each function when `lines` is set.
 fn translate_with(
     module: &Module,
     names: &Interner,
     options: Options,
     notes: bool,
-) -> Result<(wasm::Module, Vec<Notes>), Refusal> {
+    lines: bool,
+) -> Result<(wasm::Module, Vec<Notes>, Vec<Lines>), Refusal> {
     let unit_wide = |why: String| Refusal { function: None, why };
     let features = options.features;
     let mut unit = Unit {
@@ -261,6 +382,7 @@ fn translate_with(
         table: None,
         tag: None,
         notes: notes.then(Vec::new),
+        lines: lines.then(Vec::new),
     };
 
     // Every definition gets its symbol first, so that a reference from a function or from data
@@ -356,6 +478,9 @@ fn translate_with(
         if let Some(notes) = &mut unit.notes {
             notes.push(Notes::default());
         }
+        if let Some(lines) = &mut unit.lines {
+            lines.push(Lines::default());
+        }
     }
 
     // A `try_table` needs exception handling, and `libsetjmp` is built with reference types too,
@@ -375,7 +500,7 @@ fn translate_with(
         language: None,
         processed_by: vec![("rucc".into(), env!("CARGO_PKG_VERSION").into())],
     };
-    Ok((unit.out, unit.notes.unwrap_or_default()))
+    Ok((unit.out, unit.notes.unwrap_or_default(), unit.lines.unwrap_or_default()))
 }
 
 /// The function `__main_argc_argv` that the start code of wasi-libc calls, when the `main` of the
@@ -521,6 +646,9 @@ pub(crate) struct Unit<'a> {
     /// The notes of the tree form, one for each function in the order of the object, when the
     /// tree form is asked for.
     pub(crate) notes: Option<Vec<Notes>>,
+    /// The rows of the line table, one for each function in the order of the object, when `-g`
+    /// asks for them.
+    pub(crate) lines: Option<Vec<Lines>>,
 }
 
 /// What the tree form says about one function beside its code. See [`tree()`].

@@ -464,6 +464,7 @@ version = "0.27.0"
 dependencies = [
  "rucc-base",
  "rucc-cost",
+ "rucc-diag",
  "rucc-ir",
  "rucc-legalize",
  "rucc-object",

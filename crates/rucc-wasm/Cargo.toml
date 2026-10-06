@@ -18,6 +18,7 @@ workspace = true
 [dependencies]
 rucc-base.workspace = true
 rucc-cost.workspace = true
+rucc-diag.workspace = true
 rucc-ir.workspace = true
 rucc-legalize.workspace = true
 rucc-object.workspace = true

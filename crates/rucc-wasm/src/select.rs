@@ -7,6 +7,7 @@
 
 use rucc_base::hash::{Map, Set};
 use rucc_base::rules::Piece;
+use rucc_diag::Span;
 use rucc_ir::term::{PLAIN, Term, Terms};
 use rucc_ir::{
     Abi, AsmOperands, Block, Def, Extra, Flags, FloatPred, Func, FuncId, Inst, IntPred, Opcode,
@@ -19,7 +20,7 @@ use crate::emit::{self, Code};
 use crate::irreducible::Node;
 use crate::rules;
 use crate::structure::Shape;
-use crate::{Notes, Unit, functype, is_pair, valtype};
+use crate::{Lines, Notes, Unit, functype, is_pair, valtype};
 
 mod builtin;
 mod color;
@@ -192,7 +193,12 @@ pub(crate) fn function(unit: &mut Unit<'_>, id: FuncId, symbol: u32) -> Result<F
         root: None,
         inverted: None,
         signed: Set::default(),
+        rows: None,
+        span: Span::DUMMY,
     };
+    if lower.unit.lines.is_some() {
+        lower.rows = Some(Vec::new());
+    }
     if unit_notes {
         let (values, blocks) = rucc_ir::numbers(func);
         lower.annotate = Some(Annotate { notes: Notes::default(), values, blocks });
@@ -230,6 +236,20 @@ pub(crate) fn function(unit: &mut Unit<'_>, id: FuncId, symbol: u32) -> Result<F
             Some((count, last)) if *last == ty => *count += 1,
             _ => locals.push((1, ty)),
         }
+    }
+    if let (Some(lines), Some(rows)) = (lower.unit.lines.as_mut(), lower.rows.take()) {
+        // The offsets in the line table count from the start of the body, and the declarations of
+        // the locals come before the code.
+        let mut head = Vec::new();
+        rucc_object::wasm::uleb(&mut head, locals.len() as u64);
+        for &(count, ty) in &locals {
+            rucc_object::wasm::uleb(&mut head, u64::from(count));
+            head.push(ty.byte());
+        }
+        let head = u32::try_from(head.len()).expect("a short head");
+        let len = u32::try_from(lower.code.bytes.len()).expect("a function body under 4 GiB");
+        let rows = rows.into_iter().map(|(at, span)| (head + at, span)).collect();
+        lines.push(Lines { rows, len: head + len });
     }
     Ok(Function { symbol, locals, code: lower.code.bytes, fixups: lower.code.fixups, export })
 }
@@ -276,6 +296,11 @@ struct Lower<'u, 'a> {
     /// The narrow loads that are written as `i32.load8_s` or `i32.load16_s`, whose upper bits are
     /// copies of the sign bit and not zero. See [`Self::signed_loads`].
     signed: Set<Value>,
+    /// The offset in the code of each run of instructions and the span of the IR instruction that
+    /// the run comes from, when `-g` asks for the line table. See [`Self::at`].
+    rows: Option<Vec<(u32, Span)>>,
+    /// The span of the IR instruction whose code is written now.
+    span: Span,
 }
 
 /// A load or a store whose address is split as [`Lower::folded`] splits it.
@@ -524,6 +549,25 @@ impl Lower<'_, '_> {
     /// note after it moves back.
     fn end(&mut self, to_end: bool) {
         let Some(gone) = self.code.end(to_end) else { return };
+        // A row in the bytes that went starts where they were, and the next row after it in the
+        // same place takes its place.
+        if let Some(rows) = self.rows.as_mut() {
+            let (start, end) = (gone.start as u32, gone.end as u32);
+            for (at, _) in rows.iter_mut() {
+                if *at >= end {
+                    *at -= end - start;
+                } else if *at > start {
+                    *at = start;
+                }
+            }
+            rows.dedup_by(|later, earlier| {
+                let same = later.0 == earlier.0;
+                if same {
+                    earlier.1 = later.1;
+                }
+                same
+            });
+        }
         let Some(annotate) = self.annotate.as_mut() else { return };
         for (at, _) in &mut annotate.notes.marks {
             if *at >= gone.end {
@@ -594,6 +638,7 @@ impl Lower<'_, '_> {
             }
         }
         self.root = Some(term);
+        self.at(func.span(term));
         match func[term].opcode {
             Opcode::Jump => self.branch(x, 0),
             Opcode::BrIf if caught.is_some() => {
@@ -1575,7 +1620,34 @@ impl Lower<'_, '_> {
     // Instructions.
 
     #[allow(clippy::too_many_lines)]
+    /// The code of the IR instruction `inst`, with a row for its span in the line table. The code
+    /// of an operand that stays on the stack is written inside it, so the span of the outer
+    /// instruction comes back after the operand.
     fn inst(&mut self, inst: Inst) -> Result<()> {
+        if self.rows.is_none() {
+            return self.select(inst);
+        }
+        let outer = self.at(self.func.span(inst));
+        let done = self.select(inst);
+        self.at(outer);
+        done
+    }
+
+    /// Start a row for `span` at the end of the code, when the line table is asked for, and give
+    /// back the span of the code before it. A row with the span of the row before it is not a new
+    /// row, and a row at the offset of the row before it takes its place.
+    fn at(&mut self, span: Span) -> Span {
+        let Some(rows) = self.rows.as_mut() else { return span };
+        let at = u32::try_from(self.code.bytes.len()).expect("a function body under 4 GiB");
+        match rows.last_mut() {
+            Some(last) if last.0 == at => last.1 = span,
+            Some(last) if last.1 == span => {}
+            _ => rows.push((at, span)),
+        }
+        std::mem::replace(&mut self.span, span)
+    }
+
+    fn select(&mut self, inst: Inst) -> Result<()> {
         let func = self.func;
         let data = &func[inst];
         let args = self.args(inst);
