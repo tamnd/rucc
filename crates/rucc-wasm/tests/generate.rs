@@ -2172,3 +2172,45 @@ fn a_masked_bit_field_needs_no_other_mask() {
         assert_eq!(status, 17);
     }
 }
+
+/// Four constants: two string literals, a literal with a zero inside it, a literal aligned to
+/// four bytes, and a constant that is not a literal.
+const STRINGS: &str = r#"; ModuleID = 't.c'
+; format 0
+target triple = "wasm32-unknown-wasip1"
+target datalayout = "e-p:32:32-i64:64-S128"
+
+global @.str : bytes 3 = { bytes "hi\00" }, align 1, linkage(internal), constant, literal
+global @.str.1 : bytes 3 = { bytes "hi\00" }, align 1, linkage(internal), constant, literal
+global @.str.2 : bytes 4 = { bytes "a\00b\00" }, align 1, linkage(internal), constant, literal
+global @.str.3 : bytes 3 = { bytes "hi\00" }, align 4, linkage(internal), constant, literal
+global @name : bytes 3 = { bytes "hi\00" }, align 1, linkage(external), constant
+
+func @pick(i32) -> ptr, linkage(external) {
+block0(%0: i32):
+    %1 = global_addr @.str
+    %2 = global_addr @.str.1
+    %3 = global_addr @.str.2
+    %4 = global_addr @.str.3
+    %5 = global_addr @name
+    %6 = select %0, %1, %2
+    %7 = select %0, %3, %4
+    %8 = select %0, %6, %7
+    %9 = select %0, %8, %5
+    return %9
+}
+"#;
+
+/// A string literal that is one string and is aligned to one byte has the `STRINGS` flag, so
+/// wasm-ld keeps one copy of each string. A literal with a zero inside it, a literal aligned to
+/// more than one byte, and a constant that is not a literal do not have the flag.
+#[test]
+fn a_string_literal_is_a_segment_that_wasm_ld_merges() {
+    let text = assembly(STRINGS);
+    for (name, flags) in
+        [(".str", "S"), (".str.1", "S"), (".str.2", ""), (".str.3", ""), ("name", "")]
+    {
+        let line = format!(".section\t.rodata.{name},\"{flags}\",@\n");
+        assert!(text.contains(&line), "{line}{text}");
+    }
+}

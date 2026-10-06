@@ -8,6 +8,10 @@ All notable changes are recorded here. The format follows [Keep a Changelog](htt
 
 - `bench/wasm/sqlite.sh`, the measurement protocol of WA4 (#2866). It builds the SQLite shell for wasm32-wasip1 with rucc and with clang from wasi-sdk 34 at `-O2`, checks the answers of each module under Wasmtime and Node before it reads a time, records the load average, and prints the lowest CPU user time of five interleaved rounds and the ratio of rucc to clang. The nightly workflow runs it.
 
+### Changed
+
+- On wasm, a string literal whose first zero is its last byte and that is aligned to one byte has the `STRINGS` segment flag, as clang writes it, so wasm-ld keeps one copy of each string (#2866). The data section of the SQLite shell goes from 141,770 to 128,890 bytes, and clang's is 129,090.
+
 ## 0.24.7
 
 `stdcall` and `fastcall` now work on i686 Linux as gcc makes them, and the wasm code for the SQLite shell is 2.6% smaller with the same answers.
