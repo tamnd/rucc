@@ -44,7 +44,7 @@ use rucc_target::{Isa, TargetInfo};
 use crate::{
     Analyses, CallGraph, Fuel, Gates, Machine, Pass, Preserved, Stats, adce, constant_p, dce, dse,
     extents, heap, image, inline, ipasra, ipcp, ipvrp, lanes, libcall, load, loop_idiom, modref,
-    nofree, number, objsize, outside, params, pass, purity, readonly, reload, sroa,
+    nofree, number, objsize, outside, params, pass, purity, readonly, reload, sroa, vectorize,
 };
 
 /// The passes that read a summary [`nofree::annotate`], [`extents::annotate`],
@@ -75,7 +75,8 @@ const READS_SUMMARIES: &[&str] = &[
 /// document 17 both want one, and neither is written. A pass left off here builds its oracle on an
 /// empty table, which answers `May` to every question it would have used the module for, so what
 /// forgetting a name costs is a missed optimization rather than a wrong answer.
-const READS_OUTSIDE: &[&str] = &[load::NAME, reload::NAME, sroa::NAME, dse::NAME, lanes::NAME];
+const READS_OUTSIDE: &[&str] =
+    &[load::NAME, reload::NAME, sroa::NAME, dse::NAME, lanes::NAME, vectorize::NAME];
 
 /// Which passes ask what a call is allowed to do.
 ///
@@ -387,6 +388,13 @@ const O1: &[&str] = &[
 /// on that alone. The second run is for what the passes in between leave in a shape the first one
 /// could not take, and it finds nothing to do on a loop the first run already emptied.
 ///
+/// `vectorize` runs after `licm` and `loop-idiom` and before `ivopts`. The first two leave the loop
+/// with nothing in it that does not change from one iteration to the next and with the copies and
+/// fills that are a call to `memcpy` or `memset` already taken out, which is what is left to do
+/// four at a time. `ivopts` after it is what turns the address of each lane into a pointer moved on
+/// sixteen bytes a trip. The loop in `pg_checksum_block` is the one that asked for it, and it was at
+/// the top of the Postgres profile against `gcc -O2` (tamnd/rucc#1994).
+///
 /// `ivopts` goes last of the loop passes, because it is the one that decides what the loop's
 /// variables finally are and everything above it is still moving code around. It is followed by
 /// `simplify-cfg` and the pair cannot be separated. Section 28.4 has a loop stop asking its counter
@@ -447,6 +455,7 @@ const O2: &[&str] = &[
     "reassoc",
     "licm",
     "loop-idiom",
+    "vectorize",
     "ivopts",
     "simplify-cfg",
     "discharge",
@@ -512,6 +521,7 @@ const O3: &[&str] = &[
     "reassoc",
     "licm",
     "loop-idiom",
+    "vectorize",
     "ivopts",
     "simplify-cfg",
     "discharge",

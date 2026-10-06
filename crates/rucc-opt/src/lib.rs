@@ -191,6 +191,7 @@ pub(crate) mod trip;
 pub mod unlikely;
 pub mod unroll;
 pub mod uses;
+pub mod vectorize;
 
 // `alias::Options` is deliberately not re-exported: [`pipeline::Options`] already has that name
 // here and two of them at the top of the crate would be one import mistake away from a flag going
