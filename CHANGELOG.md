@@ -10,6 +10,10 @@ All notable changes are recorded here. The format follows [Keep a Changelog](htt
 - CI runs a subset of rung 0 on `wasm32-none` under Wasmtime 49 (#3137). The subset is the 151 c-testsuite programs that include only the headers of a freestanding implementation and do not call `printf` or `puts`. rucc links each one at -O0 and -O2 with tests/wasm-none/start.c, which gives `_start`, `putchar`, `strlen` and the block functions. The program runs with tests/wasm-none/host.c, a wasm32-wasip1 reactor, as its import module `env`. `wasm-tools validate` checks each object and module, and the linker inside rucc must write the module that `wasm-ld` writes.
 - A shifted register is the second operand of `add`, `sub`, `and`, `orr` and `eor` on AArch64 (#3136), as gcc writes it, so `a + (b << 3)` is one `add x0, x0, x1, lsl #3` where it was a `lsl` and an `add`. A multiply by 3, 5, 9 or 17 is the value added to itself shifted, one instruction where it was a `mov` and a `mul`. A sum read only as an address still goes into the load as a scaled index.
 
+### Changed
+
+- On x86-64, `if (flags & MASK)` and `(flags & MASK) == 0` are a `test` of the register against the mask, as gcc writes them, rather than a copy of the register and an `and` that overwrites the copy. Postgres asks bits of a tuple's `t_infomask` this way all through the executor, and the mask is usually still wanted after the question, so each of them was a `movq` and an `andl` in front of the jump (#1994).
+
 ### Fixed
 
 - A weak declaration on wasm, such as `__attribute__((weak)) int f(void);` or `extern int x __attribute__((weak));`, is a weak undefined symbol in the object, as clang writes it (#3137). When nothing defines it, `wasm-ld` and the linker inside rucc give it a null address, so `if (f) f();` works. Before, the symbol was a plain undefined one, and the link stopped with "undefined symbol".
