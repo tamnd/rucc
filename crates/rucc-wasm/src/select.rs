@@ -1062,8 +1062,30 @@ impl Lower<'_, '_> {
 
     /// Whether the upper bits of a narrow value are known to be zero.
     fn clean(&self, value: Value) -> bool {
+        self.clean_within(value, 4)
+    }
+
+    /// [`Self::clean`], looking through at most `depth` instructions whose result is clean when
+    /// their operands are. An `and` is clean when one operand is, because its upper bits are
+    /// zero where they are zero in either operand, and an `or`, an `xor` or a `select` is clean
+    /// when both are. A narrow `lshr`, `udiv` or `urem` zero extends its operands first, so its
+    /// result is clean whatever they are. So a bit field that is shifted and masked, as
+    /// `(flags >> 2) & 3` is, needs no other mask before it is compared or widened.
+    fn clean_within(&self, value: Value, depth: u32) -> bool {
         let Some((inst, index)) = self.def(value) else { return false };
-        match self.func[inst].opcode {
+        let data = &self.func[inst];
+        let operands =
+            || self.func[data.args].iter().copied().filter(|&v| self.narrow(v).is_some());
+        match data.opcode {
+            Opcode::LShr | Opcode::UDiv | Opcode::URem => self.narrow(value).is_some(),
+            Opcode::And if depth > 0 => operands().any(|v| self.clean_within(v, depth - 1)),
+            Opcode::Or | Opcode::Xor if depth > 0 => {
+                operands().all(|v| self.clean_within(v, depth - 1))
+            }
+            Opcode::Select if depth > 0 => {
+                operands().skip(1).all(|v| self.clean_within(v, depth - 1))
+            }
+
             Opcode::ICmp
             | Opcode::FCmp
             | Opcode::IConst

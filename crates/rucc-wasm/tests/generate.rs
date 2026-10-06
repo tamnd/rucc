@@ -2110,3 +2110,65 @@ fn only_code_that_falls_through_to_the_end_needs_an_unreachable() {
         );
     }
 }
+
+const FIELDS: &str = r#"; ModuleID = 't.c'
+; format 0
+target triple = "wasm32-unknown-wasip1"
+target datalayout = "e-p:32:32-i64:64-S128"
+
+func @field(ptr) -> i32, linkage(external) {
+block0(%0: ptr):
+    %1 = load.i8 %0, align 1
+    %2 = iconst.i8 2
+    %3 = lshr %1, %2
+    %4 = iconst.i8 3
+    %5 = and %3, %4
+    %6 = icmp eq %5, %2
+    %7 = zext.i32 %6
+    %8 = zext.i32 %5
+    %9 = add %7, %8
+    return %9
+}
+
+func @main(i32, ptr) -> i32, linkage(external) {
+block0(%0: i32, %1: ptr):
+    %2 = alloca, size 1, align 1
+    %3 = iconst.i8 -10
+    store %3 -> %2, align 1
+    %4 = load.i8 %2, align 1
+    %5 = sext.i32 %4
+    %6 = iconst.i8 2
+    %7 = lshr %4, %6
+    %8 = iconst.i8 3
+    %9 = and %7, %8
+    %10 = zext.i32 %9
+    %11 = iconst.i8 15
+    %12 = and %4, %11
+    %13 = zext.i32 %12
+    %14 = add %5, %10
+    %15 = add %14, %13
+    %16 = icmp slt %4, %3
+    %17 = zext.i32 %16
+    %18 = add %15, %17
+    %19 = iconst.i32 20
+    %20 = add %18, %19
+    return %20
+}
+"#;
+
+/// A narrow `and` with a clean operand, here a constant, is clean, and so is a narrow `lshr`,
+/// which zero extends its operand first. So the bit field `(x >> 2) & 3` of `field` is compared
+/// and widened with no `i32.const 255` and `i32.and`. In `main` the byte -10 is loaded signed,
+/// because two of its uses read it sign extended and one reads it zero extended. Then `-10 & 15`
+/// is still 6, and `-10 >> 2` masks the byte before it shifts, so it is 61 and its field is 1:
+/// -10 plus 1 plus 6 plus 0 plus 20 is 17.
+#[test]
+fn a_masked_bit_field_needs_no_other_mask() {
+    let field = body_of(FIELDS, "field", true);
+    assert!(!field.contains("i32.const\t255\n"), "{field}");
+    let main = body_of(FIELDS, "__main_argc_argv", true);
+    assert!(main.contains("i32.load8_s"), "{main}");
+    if let Some(status) = link_and_run("fields", FIELDS) {
+        assert_eq!(status, 17);
+    }
+}
