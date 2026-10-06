@@ -13,6 +13,9 @@
 //!    shortest LEB128 form, as the translation writes them.
 //! 4. The object writer gives the types in the order of their first use, so the order in which the
 //!    reader interns them does not change the bytes.
+//! 5. A custom section with fixups, which is a DWARF section of `-g`, has the label of its section
+//!    symbol at its start. The reader makes the section symbols at their labels, after every
+//!    symbol of the declarations, and the producer puts them at the end of the symbol table.
 //!
 //! A float constant that is a NaN with a payload of its own is printed as an integer constant and
 //! a `reinterpret`. The reader makes the pair into the float constant again, which gives the same
@@ -26,9 +29,9 @@ use std::collections::HashMap;
 
 use crate::asm::{MEMORY, NUMERIC, SATURATING, float32, float64};
 use rucc_object::wasm::{
-    EXPORTED, FuncType, Function, HIDDEN, Import, LOCAL, Module, NO_STRIP, Place, Producers,
-    RETAIN, RelocKind, STRINGS, Segment, SymbolKind, TLS, TLS_SEGMENT, ValType, WEAK, sleb,
-    sleb_padded, uleb, uleb_padded,
+    Custom, EXPORTED, Fixup, FuncType, Function, HIDDEN, Import, LOCAL, Module, NO_STRIP, Place,
+    Producers, RETAIN, RelocKind, STRINGS, Segment, SymbolKind, TLS, TLS_SEGMENT, ValType, WEAK,
+    sleb, sleb_padded, uleb, uleb_padded,
 };
 
 /// The object model of `text`.
@@ -57,8 +60,10 @@ enum Section {
     Data(usize),
     /// The constructors of this priority.
     Init(u32),
-    /// A custom section and its payload so far.
+    /// A custom section of the toolchain and its payload so far, which the reader decodes.
     Custom(String, Vec<u8>),
+    /// A custom section with fixups, as its index in the custom sections of the module.
+    Relocated(usize),
 }
 
 /// The function that the reader is in, from its label to its `end_function`.
@@ -82,6 +87,10 @@ struct Reader {
     /// The names of the exports that `.export_name` gave before the function.
     exports: HashMap<u32, String>,
     custom: Vec<(String, Vec<u8>)>,
+    /// The `.int32` fields of the custom sections with fixups: the section, the offset, the name
+    /// and the addend. A field can name the label of a section that comes later in the text, so
+    /// the fixups are made at the end.
+    pending: Vec<(usize, u32, String, i32)>,
 }
 
 impl Reader {
@@ -189,6 +198,20 @@ impl Reader {
                 if tls {
                     entry.flags |= TLS;
                 }
+                Ok(())
+            }
+            Section::Relocated(custom) => {
+                let start = self.out.customs[custom].bytes.is_empty();
+                let taken = self.out.symbols.iter().any(|s| match s.kind {
+                    SymbolKind::Section { custom: c } => c as usize == custom,
+                    _ => false,
+                });
+                if !start || taken || self.names.contains_key(name) {
+                    return Err(format!("the label `{name}` is not the start of its section"));
+                }
+                let custom = u32::try_from(custom).map_err(|_| "too many custom sections")?;
+                let symbol = self.declare(name, SymbolKind::Section { custom });
+                self.out.symbols[symbol as usize].flags = LOCAL;
                 Ok(())
             }
             _ => Err(format!("the label `{name}` is in no code and no data section")),
@@ -344,8 +367,7 @@ impl Reader {
                                 SymbolKind::Data { .. } => RelocKind::MemoryAddrI32,
                                 _ => return Err(format!("`{rest}` is not an address")),
                             };
-                            let fixup =
-                                rucc_object::wasm::Fixup { at, kind, target: symbol, addend };
+                            let fixup = Fixup { at, kind, target: symbol, addend };
                             self.out.segments[segment].fixups.push(fixup);
                             [0; 4]
                         }
@@ -355,6 +377,24 @@ impl Reader {
                 Section::Init(priority) => {
                     let symbol = self.known_function(rest)?;
                     self.out.inits.push((priority, symbol));
+                }
+                Section::Relocated(custom) => {
+                    let bytes = &mut self.out.customs[custom].bytes;
+                    match integer(rest) {
+                        Ok(value) => {
+                            let value = u32::try_from(value)
+                                .or_else(|_| i32::try_from(value).map(|v| v as u32))
+                                .map_err(|_| "the value does not fit in 32 bits")?;
+                            bytes.extend_from_slice(&value.to_le_bytes());
+                        }
+                        Err(_) => {
+                            let at =
+                                u32::try_from(bytes.len()).map_err(|_| "a section too large")?;
+                            let (name, addend) = split(rest)?;
+                            self.pending.push((custom, at, name.to_owned(), addend));
+                            bytes.extend_from_slice(&[0; 4]);
+                        }
+                    }
                 }
                 _ => return Err("`.int32` outside data".into()),
             },
@@ -374,6 +414,9 @@ impl Reader {
                         self.out.segments[*segment].bytes.extend_from_slice(&bytes);
                     }
                     Section::Custom(_, payload) => payload.extend_from_slice(&bytes),
+                    Section::Relocated(custom) => {
+                        self.out.customs[*custom].bytes.extend_from_slice(&bytes);
+                    }
                     _ => return Err(format!("`{op}` outside data")),
                 }
             }
@@ -401,8 +444,16 @@ impl Reader {
                 None => return Err(format!("the section `{name}`")),
             };
             Section::Init(priority)
-        } else if let Some(custom) = name.strip_prefix(".custom_section.") {
+        } else if let Some(custom) = name
+            .strip_prefix(".custom_section.")
+            .filter(|&n| matches!(n, "producers" | "target_features"))
+        {
             Section::Custom(custom.to_owned(), Vec::new())
+        } else if name.starts_with(".debug_") || name.starts_with(".custom_section.") {
+            let name = name.strip_prefix(".custom_section.").unwrap_or(name);
+            let custom = Custom { name: name.to_owned(), ..Custom::default() };
+            self.out.customs.push(custom);
+            Section::Relocated(self.out.customs.len() - 1)
         } else {
             let mut bits = 0;
             for flag in flags.chars() {
@@ -433,17 +484,7 @@ impl Reader {
 
     /// A symbol and the offset from it: `name`, `name+N` or `name-N`.
     fn address(&mut self, text: &str) -> Result<(u32, i32), String> {
-        let split = text.rfind(['+', '-']).filter(|&at| at > 0);
-        let (name, addend) = match split.map(|at| text.split_at(at)) {
-            Some((name, offset)) if integer(offset.trim_start_matches('+')).is_ok() => {
-                let offset = integer(offset.trim_start_matches('+'))?;
-                (name, i32::try_from(offset).map_err(|_| "the offset does not fit in 32 bits")?)
-            }
-            _ => (text, 0),
-        };
-        if name.is_empty() || name.starts_with(|c: char| c.is_ascii_digit() || c == '-') {
-            return Err(format!("`{text}` is not a symbol"));
-        }
+        let (name, addend) = split(text)?;
         Ok((self.symbol(name), addend))
     }
 
@@ -697,7 +738,7 @@ impl Reader {
         let start = body.function.code.len();
         for (at, kind, target, addend) in fixups {
             let at = u32::try_from(start + at).map_err(|_| "a function is too large")?;
-            body.function.fixups.push(rucc_object::wasm::Fixup { at, kind, target, addend });
+            body.function.fixups.push(Fixup { at, kind, target, addend });
         }
         body.function.code.extend_from_slice(&code);
         body.open = body.open.checked_add_signed(open).ok_or("an `end` with nothing open")?;
@@ -745,6 +786,20 @@ impl Reader {
                 symbol.flags |= LOCAL;
             }
         }
+        // A field of a custom section with fixups is an offset into the code for a function, an
+        // offset into a section for the label of a section, and an address for data.
+        for (custom, at, name, addend) in std::mem::take(&mut self.pending) {
+            let Some(&target) = self.names.get(&name) else {
+                return Err(format!("`{name}` in a custom section is not declared"));
+            };
+            let kind = match self.out.symbols[target as usize].kind {
+                SymbolKind::Function { .. } => RelocKind::FunctionOffsetI32,
+                SymbolKind::Section { .. } => RelocKind::SectionOffsetI32,
+                SymbolKind::Data { .. } => RelocKind::MemoryAddrI32,
+                _ => return Err(format!("`{name}` in a custom section is not an address")),
+            };
+            self.out.customs[custom].fixups.push(Fixup { at, kind, target, addend });
+        }
         for (name, payload) in std::mem::take(&mut self.custom) {
             let mut at = Payload { bytes: &payload, at: 0 };
             match name.as_str() {
@@ -768,6 +823,22 @@ impl Reader {
         }
         Ok(self.out)
     }
+}
+
+/// A symbol and the offset from it, `name`, `name+N` or `name-N`, as the name and the offset.
+fn split(text: &str) -> Result<(&str, i32), String> {
+    let at = text.rfind(['+', '-']).filter(|&at| at > 0);
+    let (name, addend) = match at.map(|at| text.split_at(at)) {
+        Some((name, offset)) if integer(offset.trim_start_matches('+')).is_ok() => {
+            let offset = integer(offset.trim_start_matches('+'))?;
+            (name, i32::try_from(offset).map_err(|_| "the offset does not fit in 32 bits")?)
+        }
+        _ => (text, 0),
+    };
+    if name.is_empty() || name.starts_with(|c: char| c.is_ascii_digit() || c == '-') {
+        return Err(format!("`{text}` is not a symbol"));
+    }
+    Ok((name, addend))
 }
 
 /// The payload of a custom section, as it is decoded.
@@ -1028,6 +1099,64 @@ fn string(text: &str) -> Result<Vec<u8>, String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A function, a variable and two DWARF sections, one with a field of each kind of fixup. The
+    /// section symbol of the second section comes first in the text and is named before its label.
+    fn described() -> Module {
+        let mut m = Module::default();
+        let ty = m.intern(FuncType::default());
+        let f = m.symbol("f", SymbolKind::Function { ty, import: None }, HIDDEN);
+        m.functions.push(Function {
+            symbol: f,
+            locals: vec![(1, ValType::I32)],
+            code: vec![0x01, 0x0b],
+            ..Function::default()
+        });
+        m.segments.push(Segment {
+            name: ".bss.v".into(),
+            align: 2,
+            bytes: vec![0; 4],
+            ..Segment::default()
+        });
+        let place = Some(Place { segment: 0, offset: 0, size: 4 });
+        let v = m.symbol("v", SymbolKind::Data { place }, LOCAL);
+        let fixups = vec![
+            Fixup { at: 4, kind: RelocKind::SectionOffsetI32, target: 3, addend: 6 },
+            Fixup { at: 8, kind: RelocKind::FunctionOffsetI32, target: f, addend: 2 },
+            Fixup { at: 14, kind: RelocKind::MemoryAddrI32, target: v, addend: 0 },
+        ];
+        let info = Custom {
+            name: ".debug_info".into(),
+            bytes: vec![1, 2, 3, 0, 0, 0, 0, 0, 0, 0, 0, 0, 9, 9, 0, 0, 0, 0, 5],
+            fixups,
+        };
+        m.customs.push(info);
+        m.customs.push(Custom {
+            name: ".debug_str".into(),
+            bytes: b"\0int\0f\0".to_vec(),
+            fixups: vec![],
+        });
+        m.symbol(".Ldebug_info", SymbolKind::Section { custom: 0 }, LOCAL);
+        m.symbol(".Ldebug_str", SymbolKind::Section { custom: 1 }, LOCAL);
+        m
+    }
+
+    #[test]
+    fn a_dwarf_section_reads_back_with_its_fixups() {
+        let m = described();
+        let text = crate::asm::print(&m).unwrap();
+        assert!(text.contains("\t.section\t.debug_str,\"S\",@\n.Ldebug_str:\n"), "{text}");
+        assert!(text.contains("\t.int32\t.Ldebug_str+6\n\t.int32\tf+2\n"), "{text}");
+        assert_eq!(read(&text), Ok(m));
+    }
+
+    #[test]
+    fn a_label_inside_a_dwarf_section_is_refused() {
+        let text = "\t.section\t.debug_info,\"\",@\n\t.ascii\t\"a\"\n.La:\n";
+        assert_eq!(read(text), Err((3, "the label `.La` is not the start of its section".into())));
+        let text = "\t.section\t.debug_info,\"\",@\n\t.int32\tg\n";
+        assert_eq!(read(text), Err((2, "`g` in a custom section is not declared".into())));
+    }
 
     #[test]
     fn a_hexadecimal_float_is_read_exactly() {
