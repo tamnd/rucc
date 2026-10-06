@@ -559,7 +559,10 @@ jobs:
   # In the Wasmtime runs, each program and each shell is also linked by the linker inside rucc
   # (#2867). tests/wasm-link/same.sh holds that module to the `wasm-ld` module byte for byte, apart
   # from the DWARF sections, and the module runs too. The job installs lld 23, the `wasm-ld` of
-  # wasi-sdk 34, because lld 21 puts the data before the stack and writes other bytes.
+  # wasi-sdk 34, because lld 21 puts the data before the stack and writes other bytes. The job also
+  # runs the wasm32-none subset of rung 0 (#3137): the programs that need no C library, linked with
+  # tests/wasm-none/start.c and run under Wasmtime with tests/wasm-none/host.c as their import
+  # module. The same checks of the objects and of the linker inside rucc apply.
   wasm:
     name: wasm32-wasip1 rung 0 and SQLite
     needs: quick
@@ -597,6 +600,13 @@ jobs:
         env:
           RUNNER: node ${{ github.workspace }}/tests/rung0/wasi.mjs
         run: tests/rung0/run.sh "$PWD/target/release/rucc" wasm32-wasip1
+      - name: run the wasm32-none subset of rung 0 under Wasmtime
+        env:
+          VALIDATE: wasm-tools validate
+          SAME_LINK: ${{ github.workspace }}/tests/wasm-link/same.sh
+        run: |
+          cargo xtask builtins --target wasm32-none
+          tests/rung0/run.sh "$PWD/target/release/rucc" wasm32-none
       - name: fetch the sqlite amalgamation
         run: |
           curl -fsSL -o sqlite.tar.gz https://sqlite.org/2026/sqlite-autoconf-3530400.tar.gz

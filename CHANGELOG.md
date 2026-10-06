@@ -6,6 +6,7 @@ All notable changes are recorded here. The format follows [Keep a Changelog](htt
 
 ### Added
 
+- CI runs a subset of rung 0 on `wasm32-none` under Wasmtime 49 (#3137). The subset is the 151 c-testsuite programs that include only the headers of a freestanding implementation and do not call `printf` or `puts`. rucc links each one at -O0 and -O2 with tests/wasm-none/start.c, which gives `_start`, `putchar`, `strlen` and the block functions. The program runs with tests/wasm-none/host.c, a wasm32-wasip1 reactor, as its import module `env`. `wasm-tools validate` checks each object and module, and the linker inside rucc must write the module that `wasm-ld` writes.
 - A shifted register is the second operand of `add`, `sub`, `and`, `orr` and `eor` on AArch64 (#3136), as gcc writes it, so `a + (b << 3)` is one `add x0, x0, x1, lsl #3` where it was a `lsl` and an `add`. A multiply by 3, 5, 9 or 17 is the value added to itself shifted, one instruction where it was a `mov` and a `mul`. A sum read only as an address still goes into the load as a scaled index.
 
 ### Fixed
