@@ -46,6 +46,7 @@ use rucc_ir::{
     AttrSet, Block, Def, Extra, Func, FuncId, Imm, Inst, Linkage, Module, Opcode, Pic, SymbolRef,
     Type, Value,
 };
+use rucc_target::TargetInfo;
 
 use super::{
     ASKED_DEPTH, How, INLINED, InlineFailure, Kind, Pool, calls_twice, fits, folded, folded_size,
@@ -213,6 +214,8 @@ struct Heap<'a> {
     once: Set<FuncId>,
     pools: Map<FuncId, Pool>,
     stats: Map<FuncId, Stats>,
+    /// Whether a call in a loop to a callee it removes is hinted. See `TargetInfo::loop_hint`.
+    loop_hint: bool,
 }
 
 /// Weighs and inlines the calls the first pass left, and says what it did where.
@@ -264,6 +267,7 @@ pub(super) fn run(
         once: Set::default(),
         pools: Map::default(),
         stats: Map::default(),
+        loop_hint: TargetInfo::for_tuple(module.tuple).loop_hint,
     };
     heap.once = heap.once(module, &defined);
     let mut queue = BinaryHeap::new();
@@ -519,6 +523,19 @@ impl Heap<'_> {
         let count = self.calls.get(&target.name).copied().unwrap_or(1).max(1);
         let size = |id| as_i64(self.sizes.get(&id).copied().unwrap_or(0));
         let overall = growth * as_i64(count) - if removable { size(callee) } else { 0 };
+        // A call in a loop whose callee goes away with it, on a target that asks for that. The
+        // count is of this caller's calls, so a callee called from anywhere else is not hinted.
+        let hints = if self.loop_hint
+            && !hints.enables
+            && removable
+            && depth > 0
+            && size(caller) <= i64::from(LARGE_FUNCTION_INSNS)
+            && calls_to(func, target.name) >= count
+        {
+            Hints { enables: true, ..hints }
+        } else {
+            hints
+        };
         let badness = badness::badness(&Call {
             growth,
             saved,
@@ -811,6 +828,17 @@ fn direct(func: &Func) -> Vec<Inst> {
                 && matches!(func[inst].extra, Extra::Call(info) if func[info].callee.is_some())
         })
         .collect()
+}
+
+/// How many direct calls `func` makes to `name`.
+fn calls_to(func: &Func, name: Symbol) -> usize {
+    direct(func)
+        .into_iter()
+        .filter(|&inst| match func[inst].extra {
+            Extra::Call(info) => func[info].callee == Some(name),
+            _ => false,
+        })
+        .count()
 }
 
 /// How large a function is, the way the second pass counts the unit and a caller.
