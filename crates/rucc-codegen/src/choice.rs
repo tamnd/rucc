@@ -36,6 +36,14 @@
 //! walk, and a select the walk did not reach keeps the byte, so the comparison keeps it too and
 //! every select behind it stays as it was.
 //!
+//! Except in front of the first select, where the comparison can be moved down to it instead.
+//! `r = (x & 2) ? r : -r` computes `-r` after the comparison, because that is the order the IR has
+//! them in, and the `neg` writes the condition state. Asking the question after it gets the same
+//! answer as long as nothing on the way writes a register the comparison reads, and that is what
+//! gcc writes: the `neg`, then the `test` and the `cmov`. The comparison does not move past a call,
+//! since what a call does to registers is not in its operands, nor past anything that reads the
+//! condition state the comparison left, and one that reads memory does not move at all.
+//!
 //! A comparison of floats is not in the table and is left alone. What it leaves in the condition
 //! state is two answers, one for whether the operands were ordered at all, and a move can read only
 //! one of them.
@@ -121,16 +129,19 @@ pub fn moves(
             ((select, entry.when), opcode(insts, names, entry.cmov))
         })
         .collect();
-    let names = &*names;
+    let walk = Walk { flags, machine, names: &*names, chosen };
     let mut counts = changes::Reads::of(func);
     let mut made = 0;
     for block in func.blocks().collect::<Vec<_>>() {
         let sequence: Vec<mir::Inst> = func.insts(block).collect();
-        for (at, &compare) in sequence.iter().enumerate() {
+        for compare in sequence {
             let Some(&wanted) = fusable.get(&compare) else { continue };
             let Some(&fusion) = compares.get(&func[compare].opcode) else { continue };
-            let Some(&byte) = func[func[compare].operands].first() else { continue };
-            let found = reached(func, flags, names, &chosen, fusion, byte, &sequence[at + 1..]);
+            // What follows it now rather than what followed it before the walk began, because a
+            // comparison in front of this one may have been moved down past it.
+            let after: Vec<mir::Inst> =
+                func.insts(block).skip_while(|&inst| inst != compare).skip(1).collect();
+            let Reached { found, before } = reached(func, &walk, fusion, compare, &after);
             if found.len() != wanted {
                 continue;
             }
@@ -142,7 +153,11 @@ pub fn moves(
                 plan.operands.truncate(3);
                 set.rewrite(select, Plan { opcode: cmov, ..plan });
             }
-            if set.commit(func, &mut counts, names, machine).is_ok() {
+            if set.commit(func, &mut counts, walk.names, machine).is_ok() {
+                if let Some(select) = before {
+                    func.remove_inst(compare);
+                    func.insert_before(select, compare);
+                }
                 made += 1;
             }
         }
@@ -150,22 +165,51 @@ pub fn moves(
     made
 }
 
+/// The tables [`reached`] reads, which are the same for every comparison in the function.
+struct Walk<'a> {
+    flags: &'a FlagInsts,
+    machine: &'a MachineInsts,
+    names: &'a Interner,
+    chosen: Map<(mir::Opcode, &'a str), mir::Opcode>,
+}
+
+/// What a walk from a comparison found.
+struct Reached {
+    /// The selects on its byte, in order, each with the move it becomes.
+    found: Vec<(mir::Inst, mir::Opcode)>,
+    /// The first of them, when something in front of it writes the condition state and the
+    /// comparison has to be moved down to just before it.
+    before: Option<mir::Inst>,
+}
+
 /// The selects on the byte a comparison wrote that the condition state it left still reaches, in
 /// order, each with the move it becomes.
 ///
 /// The walk ends at the first instruction that writes the condition state or the byte's register,
 /// and a select on the byte is not the first of those even though its test is, because the test is
-/// the half that goes.
+/// the half that goes. In front of the first select an instruction that writes the condition state
+/// only ends it when the comparison cannot be moved past it, which is when it writes a register the
+/// comparison reads, is a call, or comes after something that read what the comparison left.
 fn reached(
     func: &mir::Func,
-    flags: &FlagInsts,
-    names: &Interner,
-    chosen: &Map<(mir::Opcode, &str), mir::Opcode>,
+    walk: &Walk<'_>,
     fusion: &Fusion,
-    byte: mir::Operand,
+    compare: mir::Inst,
     after: &[mir::Inst],
-) -> Vec<(mir::Inst, mir::Opcode)> {
+) -> Reached {
+    let none = Reached { found: Vec::new(), before: None };
+    let operands = &func[func[compare].operands];
+    let Some(&byte) = operands.first() else { return none };
     let place = (byte.class, byte.reg);
+    let inputs: Vec<mir::Reg> = operands
+        .iter()
+        .filter(|operand| operand.role == Role::Use)
+        .map(|operand| operand.reg)
+        .collect();
+    // A comparison that reads memory stays where it is, since what it would read further down is
+    // a question about every store on the way.
+    let mut movable = func[compare].mem.is_none();
+    let mut crossed = false;
     let mut found = Vec::new();
     for &inst in after {
         let data = &func[inst];
@@ -173,7 +217,7 @@ fn reached(
         let writes = operands
             .iter()
             .any(|operand| operand.role != Role::Use && (operand.class, operand.reg) == place);
-        if let Some(&cmov) = chosen.get(&(data.opcode, fusion.if_true)) {
+        if let Some(&cmov) = walk.chosen.get(&(data.opcode, fusion.if_true)) {
             let [_, false_arm, true_arm, condition] = operands else { break };
             let arms = [false_arm, true_arm];
             if (condition.class, condition.reg) == place
@@ -186,14 +230,38 @@ fn reached(
                 continue;
             }
         }
-        let Some(name) = names.resolve(data.opcode.name()).strip_prefix(flags.prefix) else {
+        let Some(name) = walk.names.resolve(data.opcode.name()).strip_prefix(walk.flags.prefix)
+        else {
             break;
         };
-        if (flags.writes)(name) || writes {
+        if writes {
+            break;
+        }
+        if found.is_empty() {
+            // Moving the comparison down past this one is still possible while the registers it
+            // reads are the ones it read where it is, and while nothing in between has read the
+            // condition state it left there.
+            let clobbers = operands
+                .iter()
+                .any(|operand| operand.role != Role::Use && inputs.contains(&operand.reg));
+            let reads = walk.flags.readers.iter().any(|reader| reader.name == name);
+            if clobbers || (walk.machine.calls)(name) || (reads && !crossed) {
+                movable = false;
+            }
+            if (walk.flags.writes)(name) {
+                crossed = true;
+            }
+            if crossed && !movable {
+                return none;
+            }
+            continue;
+        }
+        if (walk.flags.writes)(name) {
             break;
         }
     }
-    found
+    let before = found.first().map(|&(select, _)| select).filter(|_| crossed);
+    Reached { found, before }
 }
 
 /// The comparison with the byte at the front taken off, which is the one that keeps nothing.
@@ -347,17 +415,76 @@ mod tests {
         assert_eq!(shape(&func, &names, block), ["cmp_rr_32", "mov_rr_64", "cmov_l_32"]);
     }
 
-    /// Arithmetic between the two writes the condition state, so what the select would read is
-    /// what the arithmetic left and the test of the byte has to stay.
+    /// A comparison of `x` and `y`, an instruction of that name that reads `x` and writes a
+    /// register, which is `x` when it `clobbers` and one of its own when not, and a select on the
+    /// comparison's byte.
+    fn something_between(
+        names: &mut Interner,
+        func: &mut mir::Func,
+        block: mir::Block,
+        name: &str,
+        clobbers: bool,
+    ) {
+        let [x, y, byte, t, f, other] = [(); 6].map(|()| func.new_vreg(GPR));
+        let cmp = op(names, "cmp_set_l_32");
+        let between = op(names, name);
+        let select = op(names, "test_cmov_ne_32");
+        func.build(block, cmp).def(byte, GPR).uses(x, GPR).uses(y, GPR).finish();
+        let writes = if clobbers { x } else { other };
+        func.build(block, between).def(writes, GPR).uses(writes, GPR).uses(x, GPR).finish();
+        func.build(block, select)
+            .operand(tied(f))
+            .uses(f, GPR)
+            .uses(t, GPR)
+            .uses(byte, GPR)
+            .finish();
+    }
+
+    /// Arithmetic between the two writes the condition state, and nothing it writes is read by the
+    /// comparison, so the comparison moves down to the select and asks its question there. This is
+    /// `r = (x & 2) ? r : -r`, where the `neg` comes after the comparison.
     #[test]
-    fn arithmetic_between_the_comparison_and_the_select_keeps_the_test() {
+    fn arithmetic_between_the_comparison_and_the_select_moves_the_comparison_down() {
+        let (mut names, mut func, block) = empty();
+        something_between(&mut names, &mut func, block, "add_rr_32", false);
+
+        assert_eq!(fuse(&mut func, &mut names), 1);
+        assert_eq!(shape(&func, &names, block), ["add_rr_32", "cmp_rr_32", "cmov_l_32"]);
+    }
+
+    /// Arithmetic that writes a register the comparison reads, so asking the question after it
+    /// would ask it of something else, and the test of the byte has to stay.
+    #[test]
+    fn arithmetic_on_what_the_comparison_reads_keeps_the_test() {
+        let (mut names, mut func, block) = empty();
+        something_between(&mut names, &mut func, block, "add_rr_32", true);
+
+        assert_eq!(fuse(&mut func, &mut names), 0);
+        assert_eq!(shape(&func, &names, block), ["cmp_set_l_32", "add_rr_32", "test_cmov_ne_32"]);
+    }
+
+    /// An add with carry reads what the comparison left before it writes anything, so the
+    /// comparison has to stay where it is, and with it the test of the byte.
+    #[test]
+    fn something_that_reads_what_the_comparison_left_keeps_the_test() {
+        let (mut names, mut func, block) = empty();
+        something_between(&mut names, &mut func, block, "adc_rr_32", false);
+
+        assert_eq!(fuse(&mut func, &mut names), 0);
+        assert_eq!(shape(&func, &names, block), ["cmp_set_l_32", "adc_rr_32", "test_cmov_ne_32"]);
+    }
+
+    /// A call between the two, which writes registers its operands do not name, so the comparison
+    /// is not moved past it.
+    #[test]
+    fn a_call_between_the_comparison_and_the_select_keeps_the_test() {
         let (mut names, mut func, block) = empty();
         let [x, y, byte, t, f] = [(); 5].map(|()| func.new_vreg(GPR));
         let cmp = op(&mut names, "cmp_set_l_32");
-        let add = op(&mut names, "add_rr_32");
+        let call = op(&mut names, "call");
         let select = op(&mut names, "test_cmov_ne_32");
         func.build(block, cmp).def(byte, GPR).uses(x, GPR).uses(y, GPR).finish();
-        func.build(block, add).def(t, GPR).uses(t, GPR).uses(x, GPR).finish();
+        func.build(block, call).finish();
         func.build(block, select)
             .operand(tied(f))
             .uses(f, GPR)
@@ -366,7 +493,7 @@ mod tests {
             .finish();
 
         assert_eq!(fuse(&mut func, &mut names), 0);
-        assert_eq!(shape(&func, &names, block), ["cmp_set_l_32", "add_rr_32", "test_cmov_ne_32"]);
+        assert_eq!(shape(&func, &names, block), ["cmp_set_l_32", "call", "test_cmov_ne_32"]);
     }
 
     /// A byte something other than a select reads, here a store of it, has to be written, so the
