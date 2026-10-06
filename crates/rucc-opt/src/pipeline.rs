@@ -1294,8 +1294,11 @@ pub fn run(module: &mut Module, names: &mut Interner, opts: &Options) -> Report 
     // for, and a body ipcp rewrote passes its callees what the rewrite left.
     if let (true, Some(graph)) = (wants_ipvrp, graph.as_ref()) {
         let started = Instant::now();
-        ipvrp::annotate(module, graph);
+        let said = ipvrp::annotate(module, graph);
         report.took(ipvrp::NAME, started.elapsed());
+        for (id, stats) in said {
+            report.remarks.push(Remark { pass: ipvrp::NAME, func: module[id].name, stats });
+        }
     }
     let purity = match (wants_purity, graph.as_ref()) {
         (true, Some(graph)) => {
