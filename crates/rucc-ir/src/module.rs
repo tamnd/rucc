@@ -420,6 +420,10 @@ pub struct Global {
     /// an initializer: a section the loader fills once and the startup code never copies into
     /// again. ELF only, as `noinit` is.
     pub persistent: bool,
+    /// Whether it stays out of the zeroed section even when every byte of it is zero, from
+    /// `-fno-zero-initialized-in-bss` on a definition with an initializer. A definition with none
+    /// is still put there, as gcc puts it.
+    pub nobss: bool,
     /// Whether its address is read out of the global offset table where it is only declared,
     /// from `__attribute__((nodirect_extern_access))`, even in position dependent code. A
     /// definition is reached the way it would have been. x86 ELF only, which is where gcc has it.
@@ -455,6 +459,7 @@ impl Global {
             retain: false,
             noinit: false,
             persistent: false,
+            nobss: false,
             indirect: false,
             init: None,
             droppable: false,

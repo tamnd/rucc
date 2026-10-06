@@ -1455,6 +1455,10 @@ pub fn parse_args(args: &[String]) -> Result<Action, CliError> {
             // Unwritten, the target answers, which is on for Darwin and off everywhere else.
             "-fcommon" => opts.common = Some(true),
             "-fno-common" => opts.common = Some(false),
+            // Whether a variable the program initialized to zero may go in `.bss` rather than in
+            // `.data` with its zeros written out. One with no initializer goes there either way.
+            "-fzero-initialized-in-bss" => opts.zero_initialized_in_bss = true,
+            "-fno-zero-initialized-in-bss" => opts.zero_initialized_in_bss = false,
             // What overflows rather than being undefined. Every one of these takes something away
             // from the optimizer rather than asking it to do anything, which is why the negative
             // spellings are the interesting ones and the positive spellings are the default.
@@ -9494,7 +9498,7 @@ mod tests {
             assert!(failed.contains(&format!("tamnd/rucc#{issue}")), "{flag}: {failed}");
         }
         // Refused with no issue, because nothing is planned for them, and still with the reason.
-        for flag in ["-fstack-check", "-fno-zero-initialized-in-bss"] {
+        for flag in ["-fstack-check", "-fplugin=a.so"] {
             let failed = refused(&[KERNEL_X86, flag, "-c", "a.c"]);
             assert!(failed.starts_with(&format!("{flag}: ")) && !failed.contains('#'), "{failed}");
         }

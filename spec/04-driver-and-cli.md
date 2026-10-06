@@ -342,6 +342,7 @@ Honored, by doing what gcc does:
 |---|---|
 | `-fconserve-stack`, `-fno-conserve-stack` | Inlining may grow a caller's frame to 40 percent more than its own locals or to 100 bytes, whichever is more, where the default is 1000 percent or 256 bytes. Those are the values gcc gives `large-stack-frame-growth` and `large-stack-frame` under the flag. See section 33.7 of the optimizer spec. |
 | `-fshort-wchar`, `-fno-short-wchar` | `wchar_t` is a 16 bit unsigned type, in `L""`, in `__WCHAR_TYPE__` and its neighbours and in the checker, because the session puts it into the target the way it puts `-funsigned-char` there. The negative form is the target's own `wchar_t`. |
+| `-fno-zero-initialized-in-bss`, `-fzero-initialized-in-bss` | A variable the program gave an initializer goes in `.data`, or `.tdata` if it is thread-local, even when every byte of it is zero, as gcc's `bss_initializer_p` puts it. One with no initializer still goes in `.bss` or is a common symbol. The kernel passes it for the purgatory and the decompressor, which run before anything has cleared `.bss`. The positive form is the default. |
 | `-fmin-function-alignment=N` | A floor under every function, rounded up to a power of two the way gcc rounds `-falign-functions=`. `-falign-functions` may raise it and cannot lower it, in whichever order the two are written. |
 | `-fstrict-flex-arrays`, `-fstrict-flex-arrays=N`, `-fno-strict-flex-arrays` | Which arrays at the end of a structure count as flexible when `__builtin_object_size` is asked about one through a pointer, which section 13.5 describes. Zero, the default, takes every trailing array, one takes `[]`, `[0]` and `[1]`, two takes `[]` and `[0]`, and three takes only `[]`. The bare flag is three and the negative form is zero, as in gcc, and a level outside zero to three is refused. |
 | `-mno-outline-atomics` (AArch64) | Every atomic operation is written inline, and none calls a helper such as `__aarch64_ldadd4_acq`, which is what the flag asks for. |
@@ -372,7 +373,6 @@ Taken because what they ask for is what happens:
 | `-fmerge-constants`, `-fno-merge-constants` | Whether equal constants from different units share storage, which the standard leaves open. |
 | `-fno-allow-store-data-races`, `-fallow-store-data-races` | No pass writes memory on a path that did not write it. Loop invariant motion moves no store, and the one store phiopt merges is one both arms made. |
 | `-fzero-init-padding-bits=all`, `-fzero-init-padding-bits=unions`, `-fzero-init-padding-bits=standard` | An automatic object whose initializer does not cover every byte, padding and the rest of a union included, is zeroed whole before its members are stored. |
-| `-fzero-initialized-in-bss` | A permission to put a variable initialized to zero in `.bss`. |
 | `-fno-stack-check` | Nothing probes the stack unless something asked. |
 | `-mindirect-branch-register`, `-mno-indirect-branch-register` (x86-64) | Every indirect call and jump already goes through a register and never through memory. |
 | `-mharden-sls=none` (AArch64) | Nothing is put after a return or an indirect branch, the default. |
@@ -394,7 +394,6 @@ Refused, with no issue, because nothing is planned for them:
 
 | Flag | Why |
 |---|---|
-| `-fno-zero-initialized-in-bss` | A variable whose initializer is all zeroes, `= {}` say, can still be put in `.bss`, which is the one thing the flag forbids. A variable with a zero written out, `= 0`, goes in `.data` already. |
 | `-fstack-check`, `-fstack-check=*` | gcc's old probing is not written. `-fstack-clash-protection` is the probing this compiler does. |
 | `-fplugin=*`, `-fplugin-arg-*` | A gcc plugin is built against gcc's own internals. |
 | `-mharden-sls=*` (AArch64) | Nothing is put after a return to stop speculation past it. |
