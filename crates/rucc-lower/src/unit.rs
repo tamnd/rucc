@@ -2358,7 +2358,8 @@ impl Unit<'_> {
             signature.params.clone()
         };
 
-        let mut plan = abi::plan(self.types, self.target, convention, ret, &params, actual, variadic)?;
+        let mut plan =
+            abi::plan(self.types, self.target, convention, ret, &params, actual, variadic)?;
         // `callee_pop_aggregate_return` goes on the address it is about, which is where the
         // back end reads who pops it at both ends of the call.
         if let Some(Param { abi: Abi::Sret { popped, .. }, .. }) = plan.signature.params.first_mut()

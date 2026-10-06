@@ -1540,7 +1540,10 @@ mod tests {
         let mut func = Func::new(
             names.intern("f"),
             Signature::new()
-                .and_param(Param::with_abi(Type::PTR, Abi::Sret { size: 24, align: 8, popped: None }))
+                .and_param(Param::with_abi(
+                    Type::PTR,
+                    Abi::Sret { size: 24, align: 8, popped: None },
+                ))
                 .and_param(Param::with_abi(
                     Type::PTR,
                     Abi::ByVal { size: 16, align: 8, drains: Drains::Nothing },

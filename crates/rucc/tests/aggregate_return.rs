@@ -34,7 +34,8 @@ int call_popped(popped_t f) { return f(1).a[0]; }
 fn dir() -> PathBuf {
     static NEXT: AtomicUsize = AtomicUsize::new(0);
     let n = NEXT.fetch_add(1, Ordering::Relaxed);
-    let dir = std::env::temp_dir().join(format!("rucc-aggregate-return-{}-{n}", std::process::id()));
+    let dir =
+        std::env::temp_dir().join(format!("rucc-aggregate-return-{}-{n}", std::process::id()));
     let _ = std::fs::remove_dir_all(&dir);
     std::fs::create_dir_all(&dir).expect("a temporary directory can be created");
     dir
@@ -163,12 +164,30 @@ fn callee_pop_aggregate_return_is_checked_in_gcc_s_words() {
         (LINUX, decl("(1.0)"), constant.clone(), 0, 1),
         (LINUX, decl("(\"1\")"), constant.clone(), 0, 1),
         (LINUX, decl("(n)"), constant.clone(), 0, 1),
-        (LINUX, decl("(nope)"), "error: 'nope' undeclared here (not in a function)".to_owned(), 1, 1),
+        (
+            LINUX,
+            decl("(nope)"),
+            "error: 'nope' undeclared here (not in a function)".to_owned(),
+            1,
+            1,
+        ),
         (LINUX, decl("(nope)"), constant.clone(), 1, 1),
         (LINUX, decl(""), wrong.clone(), 1, 0),
         (LINUX, decl("(0, 1)"), "expected 1, found 2".to_owned(), 1, 0),
-        (LINUX, "int v __attribute__((callee_pop_aggregate_return(1)));\n".to_owned(), types.clone(), 0, 1),
-        (LINUX, "int v __attribute__((callee_pop_aggregate_return(5)));\n".to_owned(), types.clone(), 0, 1),
+        (
+            LINUX,
+            "int v __attribute__((callee_pop_aggregate_return(1)));\n".to_owned(),
+            types.clone(),
+            0,
+            1,
+        ),
+        (
+            LINUX,
+            "int v __attribute__((callee_pop_aggregate_return(5)));\n".to_owned(),
+            types.clone(),
+            0,
+            1,
+        ),
         (X86_64, decl("(1)"), format!("{name} only available for 32-bit"), 0, 1),
         (X86_64, decl("(5)"), format!("{name} only available for 32-bit"), 0, 1),
     ] {

@@ -2282,14 +2282,18 @@ mod tests {
             indirect_return: false,
             return_pointer_popped: None,
         };
-        let kept = types.function(FunctionType { return_pointer_popped: Some(false), ..plain.clone() });
-        let popped = types.function(FunctionType { return_pointer_popped: Some(true), ..plain.clone() });
+        let kept =
+            types.function(FunctionType { return_pointer_popped: Some(false), ..plain.clone() });
+        let popped =
+            types.function(FunctionType { return_pointer_popped: Some(true), ..plain.clone() });
         let plain = types.function(plain);
         assert!(compatible(&types, plain, kept));
         assert!(compatible(&types, kept, popped));
         let (to_kept, to_popped) = (types.pointer(kept), types.pointer(popped));
         assert!(compatible(&types, to_kept, to_popped));
-        for (left, right, said) in [(plain, kept, false), (kept, plain, false), (popped, kept, true)] {
+        for (left, right, said) in
+            [(plain, kept, false), (kept, plain, false), (popped, kept, true)]
+        {
             let merged = composite(&mut types, left, right).expect("the two agree");
             let TypeKind::Function(id) = types.kind(merged) else { panic!("a function") };
             assert_eq!(types.signature(id).return_pointer_popped, Some(said));

@@ -25,7 +25,12 @@ impl Checker<'_> {
     ///
     /// `pointee` is a type a pointer's own list landed on, which is already the function and goes
     /// no further down.
-    pub(in crate::check) fn popping(&mut self, ty: TypeId, attrs: AttrList, pointee: bool) -> TypeId {
+    pub(in crate::check) fn popping(
+        &mut self,
+        ty: TypeId,
+        attrs: AttrList,
+        pointee: bool,
+    ) -> TypeId {
         if !matches!(self.cx.target.tuple.arch().as_str(), "x86_64" | "i686") {
             return ty;
         }
@@ -116,7 +121,9 @@ impl Checker<'_> {
         let what = match number {
             Some(0) => return Some(false),
             Some(1) => return Some(true),
-            Some(_) => "argument to 'callee_pop_aggregate_return' attribute is neither zero, nor one",
+            Some(_) => {
+                "argument to 'callee_pop_aggregate_return' attribute is neither zero, nor one"
+            }
             None => "'callee_pop_aggregate_return' attribute requires an integer constant argument",
         };
         self.report(Diagnostic::warning(what, attr.span).with_code("E0703"));

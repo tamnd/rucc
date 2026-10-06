@@ -791,7 +791,9 @@ impl<'a, 'n> Parser<'a, 'n> {
                     popped = match self.word() {
                         "popped" => Some(true),
                         "kept" => Some(false),
-                        other => return self.fail(format!("`{other}` is not who pops the address")),
+                        other => {
+                            return self.fail(format!("`{other}` is not who pops the address"));
+                        }
                     };
                 }
                 self.expect(")")?;
