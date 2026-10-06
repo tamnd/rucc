@@ -179,7 +179,7 @@ fn windows(set: &[(u64, u64)]) -> usize {
     let mut start: Option<u64> = None;
     for &(from, to) in set {
         match start {
-            Some(lo) if to - lo < 64 => {}
+            Some(lo) if to - lo < 64 => {} // not a threshold: the bits in a word
             _ => {
                 count += 1;
                 start = Some(from);

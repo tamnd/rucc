@@ -7,6 +7,7 @@
 
 use std::path::PathBuf;
 use std::process::Command;
+use std::sync::atomic::{AtomicUsize, Ordering};
 
 /// A structure with a field at each width, and a store through an index for the addressing mode
 /// the rules leave to the fold.
@@ -25,8 +26,15 @@ void fill(struct s *s, long *v, long i) {
 ";
 
 /// The assembly the compiler writes for the fixture.
+///
+/// Each call gets a directory of its own. The tests run on threads of one process, so a name made
+/// from the process id alone is one directory, and the first test to finish removed it while the
+/// other was still compiling from it.
 fn assembly() -> String {
-    let dir = std::env::temp_dir().join(format!("rucc-constant-stores-{}", std::process::id()));
+    static CALLS: AtomicUsize = AtomicUsize::new(0);
+    let call = CALLS.fetch_add(1, Ordering::Relaxed);
+    let name = format!("rucc-constant-stores-{}-{call}", std::process::id());
+    let dir = std::env::temp_dir().join(name);
     std::fs::create_dir_all(&dir).expect("a temporary directory can be created");
     let path: PathBuf = dir.join("stores.c");
     std::fs::write(&path, SOURCE).expect("the fixture can be written");
