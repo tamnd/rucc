@@ -138,9 +138,11 @@ pub fn blocks(
     reorder: bool,
 ) {
     let table = table(insts, names);
+    let near = near(func, insts, names);
     let mut order = if reorder { traces(func) } else { order(func) };
     let mut split = partition(func, &mut order);
-    let mut writer = Writer { func, insts, names, table, fusable };
+    let cold = split.map_or_else(Set::default, |first| order[first..].iter().copied().collect());
+    let mut writer = Writer { func, insts, names, table, fusable, near, cold };
     let mut at = 0;
     while at < order.len() {
         // The last block of the first part falls into nothing, since what is after it in the
@@ -736,6 +738,64 @@ fn table(insts: &BranchInsts, names: &mut Interner) -> Map<mir::Opcode, &'static
         .collect()
 }
 
+/// Whether the function is short enough for a jump in [`BranchInsts::bits`] to reach from any of
+/// its instructions to any other.
+///
+/// An `asm` template counts as one instruction per line of its text, and one that can make more
+/// bytes than its lines say, by repeating something, filling space or lining up on a boundary,
+/// makes the answer no. A template that calls a macro counts the call as one, which the room
+/// [`BranchInsts::near`] leaves is there for.
+fn near(func: &mir::Func, insts: &BranchInsts, names: &mut Interner) -> bool {
+    if insts.bits.is_empty() {
+        return false;
+    }
+    let template = mir::Opcode::new(names.intern(&format!("{}{}", insts.prefix, insts.goto)));
+    let mut count = 0;
+    for block in func.blocks() {
+        for inst in func.insts(block) {
+            let data = func[inst];
+            count += match data.symbol {
+                Some(text) if data.opcode == template => match lines(names.resolve(text)) {
+                    Some(lines) => lines,
+                    None => return false,
+                },
+                _ => 1,
+            };
+        }
+    }
+    count <= insts.near
+}
+
+/// How many statements an `asm` template has, or nothing when one of them can make more bytes
+/// than a statement does.
+fn lines(text: &str) -> Option<usize> {
+    const LONG: [&str; 18] = [
+        ".rept",
+        ".irp",
+        ".irpc",
+        ".fill",
+        ".space",
+        ".skip",
+        ".zero",
+        ".incbin",
+        ".align",
+        ".balign",
+        ".balignw",
+        ".balignl",
+        ".p2align",
+        ".p2alignw",
+        ".p2alignl",
+        ".ascii",
+        ".asciz",
+        ".macro",
+    ];
+    let words = text.split(|c: char| c.is_whitespace() || matches!(c, ';' | ':' | ','));
+    if words.map(str::to_ascii_lowercase).any(|word| LONG.contains(&word.as_str())) {
+        return None;
+    }
+    Some(text.split(['\n', ';']).filter(|line| !line.trim().is_empty()).count())
+}
+
 /// The comparisons a branch on their answer is the whole of what reads, which [`blocks`] may fold
 /// the test out of.
 ///
@@ -783,6 +843,11 @@ struct Writer<'a> {
     names: &'a mut Interner,
     table: Map<mir::Opcode, &'static Fusion>,
     fusable: &'a Set<mir::Inst>,
+    /// Whether a jump on one bit reaches across the whole function. See [`near`].
+    near: bool,
+    /// The blocks laid out in the part of the function that goes in another section, which a
+    /// jump on one bit does not reach from the first part, nor the other way round.
+    cold: Set<mir::Block>,
 }
 
 impl Writer<'_> {
@@ -902,6 +967,19 @@ impl Writer<'_> {
             self.func.build(block, into).operand(read).finish();
             return bridge;
         }
+        // The same with one bit under the mask, where the jump carries the mask across for its
+        // spelling to say which bit.
+        if let Some(into) = self.bit(test, name, block) {
+            let read = self.func[self.func[test].operands][0];
+            let imm = self.func[test].imm.map(|imm| self.func[imm].0);
+            self.func.remove_inst(test);
+            let mut build = self.func.build(block, into).operand(read);
+            if let Some(mask) = imm {
+                build = build.imm(mask);
+            }
+            build.finish();
+            return bridge;
+        }
         let opcode = self.opcode(name);
         self.func.build(block, opcode).finish();
         bridge
@@ -927,6 +1005,32 @@ impl Writer<'_> {
             .iter()
             .find(|entry| entry.when == jump && self.opcode(entry.test) == data.opcode)?;
         Some(self.opcode(entry.into))
+    }
+
+    /// The jump that makes the test in front of it itself, when the test is of one bit and the
+    /// jump reaches where it goes.
+    ///
+    /// Where it goes is the block's first arm, which is where every jump this pass writes goes.
+    fn bit(&mut self, test: mir::Inst, jump: &str, block: mir::Block) -> Option<mir::Opcode> {
+        if !self.near {
+            return None;
+        }
+        let data = self.func[test];
+        if data.mem.is_some() || self.func[data.operands].len() != 1 {
+            return None;
+        }
+        let target = self.func[block].succs[0].block;
+        if self.cold.contains(&block) != self.cold.contains(&target) {
+            return None;
+        }
+        let insts = self.insts;
+        let entry = insts
+            .bits
+            .iter()
+            .find(|entry| entry.when == jump && self.opcode(entry.test) == data.opcode)?;
+        let mask = u64::from_ne_bytes(self.func[data.imm?].0.to_ne_bytes());
+        let low = if entry.width >= 64 { mask } else { mask & ((1 << entry.width) - 1) };
+        low.is_power_of_two().then(|| self.opcode(entry.into))
     }
 
     /// The comparison the block's branch can be folded into, when there is one.

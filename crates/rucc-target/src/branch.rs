@@ -144,6 +144,15 @@ pub struct BranchInsts {
     /// Empty is a target that has no such jump, and the layout then writes the comparison and the
     /// jump as two instructions.
     pub zero: &'static [Zero],
+    /// The tests of one bit that a jump on their answer can make itself.
+    ///
+    /// Such a jump reaches less far than the others, so the layout only writes one in a function
+    /// of at most [`Self::near`] instructions, and only to a block in the same part of the
+    /// function as the jump. Empty is a target with no such jump.
+    pub bits: &'static [Bit],
+    /// How many instructions a function may have for a jump in [`Self::bits`] to reach from any
+    /// of them to any other, with an `asm` template counted as one per line of its text.
+    pub near: usize,
 }
 
 /// A comparison, and the two instructions a branch on its answer becomes.
@@ -173,6 +182,22 @@ pub struct Move {
     ///
     /// Its operands are the select's without the byte at the end, in the same order.
     pub cmov: &'static str,
+}
+
+/// A test of the bits under a mask, a jump on what it found, and the one instruction that does
+/// both when the mask is one bit.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Bit {
+    /// The test, which reads one register and carries the mask.
+    pub test: &'static str,
+    /// How many of the low bits of the mask the test reads, which is how many there are to be
+    /// one bit among. A mask for a narrow test may come with the bits above those sign extended.
+    pub width: u32,
+    /// The jump that reads what the test left.
+    pub when: &'static str,
+    /// Reads the register the test read, carries the mask the test carried, and goes to the
+    /// block's first successor when the jump would have gone there.
+    pub into: &'static str,
 }
 
 /// A comparison with zero, a jump on what it found, and the one instruction that does both.
