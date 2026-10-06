@@ -471,6 +471,12 @@ fn flags(linkage: Linkage) -> u32 {
     }
 }
 
+/// The flags of an undefined symbol with this linkage. A weak declaration is a weak undefined
+/// symbol, which the linker resolves to a null address when nothing defines it, as clang writes it.
+fn weak(linkage: Linkage) -> u32 {
+    if linkage == Linkage::Weak { WEAK } else { 0 }
+}
+
 /// The state of one translation: the module that is being read, the object that is being
 /// written, and the symbols that are already in the object.
 pub(crate) struct Unit<'a> {
@@ -577,7 +583,7 @@ impl Unit<'_> {
                 module: wasm.module.map_or("env", |m| self.names.resolve(m)).to_owned(),
                 field: wasm.field.map_or(name.as_str(), |f| self.names.resolve(f)).to_owned(),
             });
-            (0, import)
+            (weak(func.linkage), import)
         } else if wasm.export.is_some() {
             (flags(func.linkage) | EXPORTED | NO_STRIP, None)
         } else {
@@ -616,7 +622,11 @@ impl Unit<'_> {
         if let Some(&found) = self.data.get(&name) {
             return Ok((false, found));
         }
-        let flags = if self.is_tls(symbol) { TLS } else { 0 };
+        let linkage = match self.ir.lookup(symbol) {
+            Some(SymbolRef::Global(id)) => self.ir[id].linkage,
+            _ => Linkage::External,
+        };
+        let flags = weak(linkage) | if self.is_tls(symbol) { TLS } else { 0 };
         let index = self.out.symbol(name.clone(), SymbolKind::Data { place: None }, flags);
         self.data.insert(name, index);
         Ok((false, index))

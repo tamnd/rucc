@@ -8,6 +8,10 @@ All notable changes are recorded here. The format follows [Keep a Changelog](htt
 
 - A shifted register is the second operand of `add`, `sub`, `and`, `orr` and `eor` on AArch64 (#3136), as gcc writes it, so `a + (b << 3)` is one `add x0, x0, x1, lsl #3` where it was a `lsl` and an `add`. A multiply by 3, 5, 9 or 17 is the value added to itself shifted, one instruction where it was a `mov` and a `mul`. A sum read only as an address still goes into the load as a scaled index.
 
+### Fixed
+
+- A weak declaration on wasm, such as `__attribute__((weak)) int f(void);` or `extern int x __attribute__((weak));`, is a weak undefined symbol in the object, as clang writes it (#3137). When nothing defines it, `wasm-ld` and the linker inside rucc give it a null address, so `if (f) f();` works. Before, the symbol was a plain undefined one, and the link stopped with "undefined symbol".
+
 ## 0.27.0
 
 This release ends WA6 (#2868). rucc compiles and links `wasm32-wasip2` and `wasm32-wasip3` programs into components with `wasm-component-ld`, as clang 23 and wasi-sdk 34 do. On `wasm32-wasip3` the code reaches the stack pointer and the TLS base through the library calls of the new core ABI. CI runs rung 0 on both targets under Wasmtime 49. The release also has AArch64 code generation work that makes the output closer to gcc, and i386 and visibility fixes.

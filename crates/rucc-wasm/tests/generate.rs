@@ -1380,6 +1380,83 @@ fn an_alias_is_a_second_symbol_for_the_same_function_or_place() {
     }
 }
 
+/// `__attribute__((weak)) int wf(void); extern int wd __attribute__((weak));` and a `main` that
+/// gives `(wf ? wf() : 20) + (&wd ? wd : 3)`, at `-O1`. Nothing defines the two, so it exits with
+/// 23.
+const WEAK_UNDEFINED: &str = r#"; ModuleID = 't.c'
+; format 0
+target triple = "wasm32-unknown-wasip1"
+target datalayout = "e-p:32:32-i64:64-S128"
+
+global @wd : bytes 4, align 4, linkage(weak)
+
+func @wf() -> i32, linkage(weak);
+
+func @main() -> i32, linkage(external) {
+block0:
+    %0 = global_addr @wf
+    %1 = iconst.i32 0
+    %2 = inttoptr.ptr %1
+    %3 = icmp ne %0, %2
+    br_if %3, block1, block2
+
+block1:
+    %4 = call @wf() : () -> i32
+    jump block3(%4)
+
+block2:
+    %5 = iconst.i32 20
+    jump block3(%5)
+
+block3(%6: i32):
+    %7 = global_addr @wd
+    %8 = iconst.i32 0
+    %9 = inttoptr.ptr %8
+    %10 = icmp ne %7, %9
+    br_if %10, block4, block5
+
+block4:
+    %11 = global_addr @wd
+    %12 = load.i32 %11, align 4
+    jump block6(%12)
+
+block5:
+    %13 = iconst.i32 3
+    jump block6(%13)
+
+block6(%14: i32):
+    %15 = add.nsw %6, %14
+    return %15
+}
+"#;
+
+/// A weak declaration is a weak undefined symbol, for a function and for a variable, as clang
+/// writes it. wasm-ld then gives it a null address when nothing defines it, where a plain
+/// undefined symbol stops the link.
+#[test]
+fn a_weak_declaration_is_a_weak_undefined_symbol() {
+    let mut names = Interner::new();
+    let module = rucc_ir::parse(WEAK_UNDEFINED, &mut names).expect("the IR parses");
+    let object = rucc_wasm::translate(&module, &names, Cpu::Lime1.features()).unwrap();
+    for (name, function) in [("wf", true), ("wd", false)] {
+        let symbol = object.symbols.iter().find(|s| s.name == name).expect(name);
+        assert_eq!(symbol.flags, WEAK, "{name}");
+        match symbol.kind {
+            SymbolKind::Function { import: None, .. } => assert!(function, "{name}"),
+            SymbolKind::Data { place: None } => assert!(!function, "{name}"),
+            _ => panic!("{name} is not an undefined symbol: {:?}", symbol.kind),
+        }
+    }
+    let listing = rucc_wasm::assembly(&object).unwrap();
+    assert!(listing.contains("\t.weak\twf\n") && listing.contains("\t.weak\twd\n"), "{listing}");
+
+    for assembled in [false, true] {
+        if let Some(status) = link_and_run_as("weak", WEAK_UNDEFINED, assembled) {
+            assert_eq!(status, 23, "assembled: {assembled}");
+        }
+    }
+}
+
 /// `int main(int argc) { return argc + 40; }` at `-O1`. With no arguments, it exits with 41.
 const MAIN_ONE: &str = r#"; ModuleID = 't.c'
 ; format 0
