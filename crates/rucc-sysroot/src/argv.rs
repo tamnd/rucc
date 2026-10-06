@@ -207,15 +207,6 @@ pub enum Unsupported {
         /// The target that was asked for.
         target: String,
     },
-    /// A WASI preview after the first, whose program is a component and not a core module.
-    ///
-    /// `wasm-component-ld` links one: it runs `wasm-ld` and then wraps the module in a component
-    /// with an adapter. That is WA6, tamnd/rucc#2868. A core module linked against the wasip2
-    /// sysroot is not something an engine runs, so the link is refused here and not made wrong.
-    Component {
-        /// The target that was asked for.
-        target: String,
-    },
 }
 
 impl fmt::Display for Unsupported {
@@ -250,12 +241,6 @@ impl fmt::Display for Unsupported {
                 "shared libraries on wasm (dylink.0) are not supported yet, so {target} cannot \
                  be linked with -shared. A module that the host calls into is -mexec-model=reactor"
             ),
-            Unsupported::Component { target } => write!(
-                f,
-                "{target} is linked into a component by wasm-component-ld, and rucc does not \
-                 write that line yet (tamnd/rucc#2868). -c writes the object, and wasm32-wasip1 \
-                 links now"
-            ),
         }
     }
 }
@@ -288,9 +273,8 @@ impl std::error::Error for Unsupported {}
 /// [`Unsupported::Format`] for a target whose object format is not ELF, PE or wasm,
 /// [`Unsupported::MsvcAbi`] for a Windows target in Microsoft's ABI with no CRT to link against,
 /// [`Unsupported::Machine`] for a PE target with no machine type,
-/// [`Unsupported::StaticStub`] for a static link against a libc that is a stub,
-/// [`Unsupported::WasmShared`] for `-shared` on wasm, and [`Unsupported::Component`] for a WASI
-/// preview whose program is a component.
+/// [`Unsupported::StaticStub`] for a static link against a libc that is a stub, and
+/// [`Unsupported::WasmShared`] for `-shared` on wasm.
 pub fn argv(
     target: TargetTuple,
     sysroot: &Sysroot,
@@ -617,6 +601,13 @@ fn body(sysroot: &Sysroot, options: &Invocation<'_>) -> Vec<String> {
 /// libc and no start file, so it has no `_start` either, and gets `--no-entry` unless the user
 /// named an entry with `-Wl,`. Its library directory is not on the line, because there is no
 /// sysroot for a target with no libc to put one in.
+///
+/// wasm32-wasip2 and wasm32-wasip3 have the same line, and the driver gives it to
+/// `wasm-component-ld`, which takes the flags of `wasm-ld`, runs it, and makes a component of the
+/// module. wasm32-wasip3 has cooperative threads in wasi-libc, so its line has
+/// `--cooperative-threading` after the inputs and `libpthread.a` in front of the libraries, which
+/// is where clang writes `--cooperative-threading -lpthread`. The flag makes wasm-ld keep the stack
+/// pointer and the TLS base in the context slots.
 fn wasm(
     target: TargetTuple,
     sysroot: &Sysroot,
@@ -626,9 +617,7 @@ fn wasm(
         return Err(Unsupported::WasmShared { target: target.to_canonical_string() });
     }
     let hosted = libc(target) != Libc::None;
-    if hosted && target.os_version().is_some_and(|version| version.major_part() != 1) {
-        return Err(Unsupported::Component { target: target.to_canonical_string() });
-    }
+    let threads = hosted && target.os_version().is_some_and(|version| version.major_part() == 3);
     let line = if hosted {
         LinkLine::wasi(sysroot, options.reactor, options.builtins)
     } else {
@@ -670,7 +659,13 @@ fn wasm(
             Item::Linker(arg) => args.push(arg.clone()),
         }
     }
+    if threads {
+        args.push("--cooperative-threading".to_owned());
+    }
     if !options.no_defaultlibs {
+        if threads {
+            args.push(sysroot.lib().join("libpthread.a").display().to_string());
+        }
         args.extend(shown(&libraries(&line, options)));
     }
     Ok(args)
@@ -1446,17 +1441,59 @@ mod tests {
     }
 
     #[test]
-    fn a_shared_wasm_library_and_a_wasi_component_are_refused_by_name() {
+    fn a_shared_wasm_library_is_refused_by_name() {
         let shared = Invocation { mode: LinkMode::Shared, ..Invocation::default() };
         let error = argv(target("wasm32-wasip1"), &sysroot("wasm32-wasip1"), &shared).unwrap_err();
         assert!(matches!(error, Unsupported::WasmShared { .. }), "{error:?}");
         assert!(error.to_string().contains("dylink.0"), "{error}");
-        for spelling in ["wasm32-wasip2", "wasm32-wasip3"] {
-            let options = Invocation::default();
-            let error = argv(target(spelling), &sysroot(spelling), &options).unwrap_err();
-            assert!(matches!(error, Unsupported::Component { .. }), "{spelling} {error:?}");
-            assert!(error.to_string().contains("wasm-component-ld"), "{error}");
-        }
+    }
+
+    /// The line of clang 23 for each preview, for `wasm-component-ld` on the two that make a
+    /// component. wasip3 adds the cooperative threads and their library, and a reactor has the
+    /// same entry on every preview.
+    #[test]
+    fn a_wasi_component_has_the_line_of_its_preview() {
+        let p2 = sysroot("wasm32-wasip2").lib();
+        let want = [
+            "-o".to_owned(),
+            "main".to_owned(),
+            "-m".to_owned(),
+            "wasm32".to_owned(),
+            p2.join("crt1-command.o").display().to_string(),
+            format!("-L{}", p2.display()),
+            "main.o".to_owned(),
+            p2.join("libsetjmp.a").display().to_string(),
+            p2.join("libc.a").display().to_string(),
+            builtins().display().to_string(),
+        ];
+        assert_eq!(line("wasm32-wasip2", LinkMode::Dynamic), want);
+
+        let p3 = sysroot("wasm32-wasip3").lib();
+        let want = [
+            "-o".to_owned(),
+            "main".to_owned(),
+            "-m".to_owned(),
+            "wasm32".to_owned(),
+            p3.join("crt1-command.o").display().to_string(),
+            format!("-L{}", p3.display()),
+            "main.o".to_owned(),
+            "--cooperative-threading".to_owned(),
+            p3.join("libpthread.a").display().to_string(),
+            p3.join("libsetjmp.a").display().to_string(),
+            p3.join("libc.a").display().to_string(),
+            builtins().display().to_string(),
+        ];
+        assert_eq!(line("wasm32-wasip3", LinkMode::Dynamic), want);
+
+        let one = [Item::File(Path::new("main.o").to_path_buf())];
+        let options = Invocation { inputs: &one, no_defaultlibs: true, ..Invocation::default() };
+        let args = argv(target("wasm32-wasip3"), &sysroot("wasm32-wasip3"), &options).unwrap();
+        assert_eq!(args.last().map(String::as_str), Some("--cooperative-threading"), "{args:?}");
+        let reactor = Invocation { inputs: &one, reactor: true, ..Invocation::default() };
+        let args = argv(target("wasm32-wasip2"), &sysroot("wasm32-wasip2"), &reactor).unwrap();
+        let crt = p2.join("crt1-reactor.o").display().to_string();
+        let at = args.iter().position(|arg| *arg == crt).expect("crt1-reactor.o");
+        assert_eq!(args[at + 1..at + 3], ["--entry", "_initialize"]);
     }
 
     #[test]

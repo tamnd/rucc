@@ -82,7 +82,7 @@ use std::process::Command;
 use rucc_session::Compress;
 use rucc_sysroot::layout::{Kernel, Sysroot};
 use rucc_sysroot::{Chip, Crt, LinkMode, argv};
-use rucc_target::{Arch, Env, Os, Triple};
+use rucc_target::{Arch, Env, Os, Preview, Triple};
 use rucc_tuple::TargetTuple;
 
 /// What the command line said about linking.
@@ -351,6 +351,14 @@ pub enum Error {
     },
     /// rucc is running as WebAssembly, where it cannot start a linker.
     NoProcesses,
+    /// A WASI target whose program is a component, and the two programs that make one were not
+    /// both found: [`COMPONENT_LD`], and the `wasm-ld` of lld [`LLD_WASI`] or newer that it runs.
+    NoComponentLinker {
+        /// The target, in its short form.
+        target: String,
+        /// Whether a `wasm-ld` was found, so that the message names only what is missing.
+        wasm_ld: bool,
+    },
     /// The linker inside rucc refused the line or the link, or was asked for a target it does not
     /// link.
     InProcess {
@@ -439,6 +447,22 @@ impl std::fmt::Display for Error {
             ),
             Error::Refused { status } => write!(f, "the linker {status}"),
             Error::InProcess { why } => f.write_str(why),
+            // Both programs are in the bin directory of wasi-sdk 34, so that is the first advice,
+            // and `wasm-component-ld` alone is a Rust crate that `cargo install` builds.
+            Error::NoComponentLinker { target, wasm_ld: true } => write!(
+                f,
+                "{target} is linked into a component by {COMPONENT_LD}, which was not found. \
+                 wasi-sdk 34 has it in its bin directory, which rucc finds when WASI_SDK_PATH \
+                 names it, and `cargo install wasm-component-ld` puts it on PATH. -c writes the \
+                 object without it"
+            ),
+            Error::NoComponentLinker { target, wasm_ld: false } => write!(
+                f,
+                "{target} is linked into a component by {COMPONENT_LD}, which runs wasm-ld, and no \
+                 wasm-ld of lld {LLD_WASI} or newer was found. The linker inside rucc writes a \
+                 core module and not a component. wasi-sdk 34 has both programs in its bin \
+                 directory, which rucc finds when WASI_SDK_PATH names it"
+            ),
         }
     }
 }
@@ -452,7 +476,15 @@ pub struct Linker {
     pub name: String,
     /// Where it is, which is what gets spawned. Empty for the linker inside rucc.
     pub path: PathBuf,
+    /// The `wasm-ld` that [`COMPONENT_LD`] runs, which goes first on its line as `--wasm-ld-path`.
+    /// Nothing for every other linker.
+    pub wasm_ld: Option<PathBuf>,
 }
+
+/// The program that links a component for wasm32-wasip2 and wasm32-wasip3. It takes the line of
+/// `wasm-ld`, runs `wasm-ld` with it, and makes a component of the core module, as clang 23 does
+/// for these targets.
+pub const COMPONENT_LD: &str = "wasm-component-ld";
 
 /// The name `-fuse-ld=` takes for the linker inside rucc.
 pub const IN_PROCESS: &str = "rucc";
@@ -462,7 +494,21 @@ impl Linker {
     /// process.
     #[must_use]
     pub fn in_process() -> Self {
-        Linker { name: "rucc-wasm-link".to_owned(), path: PathBuf::new() }
+        Linker { name: "rucc-wasm-link".to_owned(), path: PathBuf::new(), wasm_ld: None }
+    }
+
+    /// The words of the command after the program: the line, with the `wasm-ld` that a component
+    /// linker runs in front of it. The path is given so that the `wasm-ld` that rucc chose is the
+    /// one that runs, and not the first one on `PATH`, which can be too old.
+    #[must_use]
+    pub fn words(&self, args: &[String]) -> Vec<String> {
+        let mut words = Vec::with_capacity(args.len() + 2);
+        if let Some(wasm_ld) = &self.wasm_ld {
+            words.push("--wasm-ld-path".to_owned());
+            words.push(wasm_ld.display().to_string());
+        }
+        words.extend_from_slice(args);
+        words
     }
 
     /// Whether this is the linker inside rucc, which is called and not started.
@@ -1042,7 +1088,9 @@ pub fn write_stubs(target: Triple, opts: &LinkOptions) -> Result<(), Error> {
 ///
 /// [`Error::Named`] when `-fuse-ld=` asked for one that is not here, and [`Error::NoLinker`] when
 /// nothing was, which name the candidates so that the message says what was looked for.
-/// [`Error::InProcess`] for `-fuse-ld=rucc` on a target that is not wasm.
+/// [`Error::InProcess`] for `-fuse-ld=rucc` on a target that is not wasm, or whose program is a
+/// component. [`Error::NoComponentLinker`] when the target is a component and one of the two
+/// programs that link it was not found.
 pub fn find(target: Triple, opts: &LinkOptions) -> Result<Linker, Error> {
     let wasm = target.arch.is_wasm();
     if opts.use_ld.as_deref() == Some(IN_PROCESS) {
@@ -1054,14 +1102,29 @@ pub fn find(target: Triple, opts: &LinkOptions) -> Result<Linker, Error> {
                 ),
             });
         }
+        // The libc of wasm32-wasip2 and wasm32-wasip3 has relocations that the linker inside rucc
+        // does not take, and the program of those targets is a component, which it does not write.
+        if is_component(target) {
+            return Err(Error::InProcess {
+                why: format!(
+                    "-fuse-ld={IN_PROCESS} links a core module, and {} is linked into a component \
+                     by {COMPONENT_LD}",
+                    wasi_row(target)
+                ),
+            });
+        }
         return Ok(Linker::in_process());
     }
     if crate::host::WASM {
-        if wasm && opts.use_ld.is_none() {
+        if wasm && opts.use_ld.is_none() && !is_component(target) {
             return Ok(Linker::in_process());
         }
         return Err(Error::NoProcesses);
     }
+    // wasm32-wasip2 and wasm32-wasip3 are linked by `wasm-component-ld`, which runs the `wasm-ld`
+    // that the search below finds, unless `-fuse-ld=` names a linker, which then writes a core
+    // module, as with clang.
+    let component = is_component(target) && opts.use_ld.is_none();
     let tried = order(target, opts);
     let mut places = lld_dirs(Path::new("/"), std::env::var_os("ProgramFiles").map(PathBuf::from));
     // The wasi-sdk that WASI_SDK_PATH names, after PATH and before the other places, which is the
@@ -1077,8 +1140,9 @@ pub fn find(target: Triple, opts: &LinkOptions) -> Result<Linker, Error> {
     let mut refused = None;
     for name in &tried {
         for path in linker_candidates(name, opts, &places) {
-            let linker = Linker { name: name.clone(), path };
+            let linker = Linker { name: name.clone(), path, wasm_ld: None };
             match suitable(target, &linker) {
+                Ok(()) if component => return wrap(target, linker, opts, &places),
                 Ok(()) => return Ok(linker),
                 Err(why) => {
                     refused.get_or_insert(why);
@@ -1088,6 +1152,10 @@ pub fn find(target: Triple, opts: &LinkOptions) -> Result<Linker, Error> {
     }
     // A wasm link does not stop here, because the linker inside rucc links what the driver writes.
     // An lld that is too old is passed over for it too, as a newer one somewhere else would be.
+    // A component is not something it writes, so a component target stops.
+    if component {
+        return Err(Error::NoComponentLinker { target: wasi_row(target), wasm_ld: false });
+    }
     if wasm && opts.use_ld.is_none() {
         return Ok(Linker::in_process());
     }
@@ -1097,6 +1165,34 @@ pub fn find(target: Triple, opts: &LinkOptions) -> Result<Linker, Error> {
     match &opts.use_ld {
         Some(name) => Err(Error::Named { name: name.clone() }),
         None => Err(Error::NoLinker { tried }),
+    }
+}
+
+/// Whether the program of this target is a component, which is so for wasm32-wasip2 and
+/// wasm32-wasip3.
+#[must_use]
+pub fn is_component(target: Triple) -> bool {
+    target.arch.is_wasm() && matches!(target.os, Os::Wasi(Preview::P2 | Preview::P3))
+}
+
+/// The short name of a WASI target, such as `wasm32-wasip2`, for the messages.
+fn wasi_row(target: Triple) -> String {
+    target.tuple().to_canonical_string()
+}
+
+/// [`COMPONENT_LD`] around the `wasm-ld` that was found, from the same places, or the error that
+/// says that it is not there.
+fn wrap(
+    target: Triple,
+    wasm_ld: Linker,
+    opts: &LinkOptions,
+    places: &[PathBuf],
+) -> Result<Linker, Error> {
+    match linker_candidates(COMPONENT_LD, opts, places).into_iter().next() {
+        Some(path) => {
+            Ok(Linker { name: COMPONENT_LD.to_owned(), path, wasm_ld: Some(wasm_ld.path) })
+        }
+        None => Err(Error::NoComponentLinker { target: wasi_row(target), wasm_ld: true }),
     }
 }
 
@@ -1128,7 +1224,7 @@ fn linker_candidates(name: &str, opts: &LinkOptions, places: &[PathBuf]) -> Vec<
     // The same spellings as on PATH, so `ld.lld` here and `ld.lld.exe` on Windows. Only `.exe`
     // was tried at first, which found nothing in /usr/lib/llvm-19/bin on the Linux machines this
     // search was written for.
-    if is_lld(name) {
+    if is_lld(name) || name == COMPONENT_LD {
         for dir in places {
             for file in spellings(&dir.join(name), &pathext) {
                 if executable(&file) && !found.contains(&file) {
@@ -2088,7 +2184,7 @@ pub fn render(linker: &Linker, args: &[String]) -> String {
     } else {
         linker.path.display().to_string()
     };
-    for arg in args {
+    for arg in &linker.words(args) {
         out.push(' ');
         if arg.is_empty() || arg.contains(char::is_whitespace) {
             out.push('"');
@@ -2213,6 +2309,8 @@ pub fn run(linker: &Linker, args: &[String]) -> Result<(), Error> {
     if crate::host::WASM {
         return Err(Error::NoProcesses);
     }
+    let words = linker.words(args);
+    let args = &words;
     let mut command = Command::new(&linker.path);
     let mut written = None;
     if too_long(args, if cfg!(windows) { WINDOWS_LINE } else { UNIX_LINE }) {
@@ -2642,7 +2740,8 @@ mod tests {
 
     #[test]
     fn the_line_is_printed_the_way_it_would_be_typed() {
-        let linker = Linker { name: "ld".to_owned(), path: PathBuf::from("/usr/bin/ld") };
+        let linker =
+            Linker { name: "ld".to_owned(), path: PathBuf::from("/usr/bin/ld"), wasm_ld: None };
         let args = ["-o".to_owned(), "a b".to_owned()];
         assert_eq!(render(&linker, &args), "/usr/bin/ld -o \"a b\"");
     }
@@ -2877,7 +2976,7 @@ mod tests {
     /// the command that builds it.
     #[test]
     fn a_wasi_program_is_linked_by_wasm_ld_against_the_fetched_wasi_libc() {
-        let target = Triple::new(Arch::Wasm32, Os::Wasi(rucc_target::Preview::P1), Env::None);
+        let target = Triple::new(Arch::Wasm32, Os::Wasi(Preview::P1), Env::None);
         let bare = LinkOptions { cache: Some(PathBuf::from("/cache")), ..LinkOptions::default() };
         let error = line(target, &bare, &one("a.o"), "a.wasm").expect_err("no runtime");
         let Error::Cross { why } = &error else { panic!("{error:?}") };
@@ -2909,7 +3008,7 @@ mod tests {
     /// wasm link with no `-fuse-ld=` always has a linker, because that one is the last resort.
     #[test]
     fn the_linker_inside_rucc_links_wasm_when_asked_and_when_there_is_no_wasm_ld() {
-        let target = Triple::new(Arch::Wasm32, Os::Wasi(rucc_target::Preview::P1), Env::None);
+        let target = Triple::new(Arch::Wasm32, Os::Wasi(Preview::P1), Env::None);
         let ours = LinkOptions { use_ld: Some(IN_PROCESS.to_owned()), ..cached() };
         let linker = find(target, &ours).expect("the linker inside rucc");
         assert!(linker.is_in_process(), "{linker:?}");
@@ -2918,6 +3017,63 @@ mod tests {
         let error = find(linux(), &ours).expect_err("not for ELF");
         assert!(error.to_string().starts_with("-fuse-ld=rucc links only wasm"), "{error}");
         assert!(find(target, &cached()).is_ok());
+    }
+
+    /// wasm32-wasip2 and wasm32-wasip3 are linked by `wasm-component-ld`, which is given the path
+    /// of the `wasm-ld` that was found before the line, as clang does. A `-B` prefix is asked
+    /// first, so the two scripts here are the answer whatever is on PATH.
+    #[test]
+    #[cfg(unix)]
+    fn a_wasi_component_is_linked_by_wasm_component_ld_around_the_wasm_ld_that_was_found() {
+        use std::os::unix::fs::PermissionsExt as _;
+        let p2 = Triple::new(Arch::Wasm32, Os::Wasi(Preview::P2), Env::None);
+        let p3 = Triple::new(Arch::Wasm32, Os::Wasi(Preview::P3), Env::None);
+        let p1 = Triple::new(Arch::Wasm32, Os::Wasi(Preview::P1), Env::None);
+        assert!(is_component(p2) && is_component(p3) && !is_component(p1));
+        assert!(!is_component(linux()));
+
+        let dir = std::env::temp_dir().join(format!("rucc-link-component-{}", std::process::id()));
+        fs::create_dir_all(&dir).expect("a temporary directory");
+        for name in ["wasm-ld", COMPONENT_LD] {
+            let path = dir.join(name);
+            fs::write(&path, "#!/bin/sh\necho 'LLD 22.1.0'\n").expect("a script");
+            fs::set_permissions(&path, fs::Permissions::from_mode(0o755)).expect("executable");
+        }
+        let opts = LinkOptions { prefixes: vec![dir.clone()], ..cached() };
+        for target in [p2, p3] {
+            let linker = find(target, &opts).expect("the two scripts");
+            assert_eq!(linker.name, COMPONENT_LD);
+            assert_eq!(linker.path, dir.join(COMPONENT_LD));
+            assert_eq!(linker.wasm_ld.as_deref(), Some(dir.join("wasm-ld").as_path()));
+            let args = ["-o", "a.wasm", "a.o"].map(str::to_owned);
+            let wasm_ld = dir.join("wasm-ld").display().to_string();
+            assert_eq!(linker.words(&args), ["--wasm-ld-path", &wasm_ld, "-o", "a.wasm", "a.o"]);
+            let shown = render(&linker, &args);
+            let expected =
+                format!("{} --wasm-ld-path {wasm_ld} -o a.wasm a.o", linker.path.display());
+            assert_eq!(shown, expected);
+        }
+        // wasip1 is a core module, and so is a component target when `-fuse-ld=` names a linker.
+        let linker = find(p1, &opts).expect("the wasm-ld script");
+        assert_eq!((linker.name.as_str(), linker.wasm_ld.as_ref()), ("wasm-ld", None));
+        let path = dir.join("wasm-ld");
+        let named = LinkOptions { use_ld: Some(path.display().to_string()), ..opts.clone() };
+        let linker = find(p2, &named).expect("the wasm-ld script");
+        assert_eq!((&linker.path, linker.wasm_ld.as_ref()), (&path, None));
+        let _ = fs::remove_dir_all(&dir);
+
+        // The linker inside rucc writes a core module, so it is refused for a component by name.
+        let ours = LinkOptions { use_ld: Some(IN_PROCESS.to_owned()), ..cached() };
+        let error = find(p2, &ours).expect_err("not a component");
+        assert!(error.to_string().contains("wasm32-wasip2 is linked into a component"), "{error}");
+
+        // Each message names only the program that is missing.
+        let row = "wasm32-wasip3".to_owned();
+        let neither = Error::NoComponentLinker { target: row.clone(), wasm_ld: false }.to_string();
+        assert!(neither.contains("no wasm-ld of lld") && neither.contains("WASI_SDK_PATH"));
+        let one = Error::NoComponentLinker { target: row, wasm_ld: true }.to_string();
+        assert!(one.contains("wasm-component-ld, which was not found"), "{one}");
+        assert!(one.contains("cargo install wasm-component-ld"), "{one}");
     }
 
     /// An error of the linker inside rucc is the whole message, because nothing else printed it.
@@ -3050,7 +3206,7 @@ mod tests {
         let path = dir.join(format!("ld.lld-{tag}"));
         fs::write(&path, format!("#!/bin/sh\necho '{text}'\n")).expect("a script");
         fs::set_permissions(&path, fs::Permissions::from_mode(0o755)).expect("an executable one");
-        Linker { name: "ld.lld".to_owned(), path }
+        Linker { name: "ld.lld".to_owned(), path, wasm_ld: None }
     }
 
     #[test]
@@ -3080,7 +3236,7 @@ mod tests {
     fn an_lld_older_than_21_is_refused_for_wasi_and_the_message_says_why() {
         // The wasi-libc of wasi-sdk 34 refers to `__wasm_first_page_end`, and 20 does not define
         // it, so the link of the first program that calls malloc stops on an undefined symbol.
-        let wasi = Triple::new(Arch::Wasm32, Os::Wasi(rucc_target::Preview::P1), Env::None);
+        let wasi = Triple::new(Arch::Wasm32, Os::Wasi(Preview::P1), Env::None);
         let old = a_linker_that_says("20", "Ubuntu LLD 20.1.2 (compatible with GNU linkers)");
         let error = suitable(wasi, &old).expect_err("20 cannot link this");
         let Error::TooOld { found, target, .. } = &error else { panic!("{error:?}") };
@@ -3220,7 +3376,11 @@ mod tests {
         let quiet = a_linker_that_says("gnu", "GNU ld (GNU Binutils for Ubuntu) 2.42");
         assert_eq!(suitable(windows, &quiet), Ok(()));
 
-        let missing = Linker { name: "ld.lld".to_owned(), path: PathBuf::from("/no/such/linker") };
+        let missing = Linker {
+            name: "ld.lld".to_owned(),
+            path: PathBuf::from("/no/such/linker"),
+            wasm_ld: None,
+        };
         assert_eq!(suitable(windows, &missing), Ok(()));
     }
 
