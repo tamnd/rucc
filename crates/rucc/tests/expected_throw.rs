@@ -10,8 +10,7 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 fn dir() -> PathBuf {
     static NEXT: AtomicUsize = AtomicUsize::new(0);
     let n = NEXT.fetch_add(1, Ordering::Relaxed);
-    let dir =
-        std::env::temp_dir().join(format!("rucc-expected-throw-{}-{n}", std::process::id()));
+    let dir = std::env::temp_dir().join(format!("rucc-expected-throw-{}-{n}", std::process::id()));
     let _ = std::fs::remove_dir_all(&dir);
     std::fs::create_dir_all(&dir).expect("a temporary directory can be created");
     dir
@@ -50,14 +49,24 @@ fn expected_throw_is_taken_on_a_function_and_warned_about_elsewhere() {
     let name = "'expected_throw' attribute";
     for (source, said, errors, warnings) in [
         ("int v __attribute__((expected_throw));\n", format!("warning: {name} ignored"), 0, 1),
-        ("typedef void f_t(void) __attribute__((expected_throw));\n", format!("warning: {name} ignored"), 0, 1),
+        (
+            "typedef void f_t(void) __attribute__((expected_throw));\n",
+            format!("warning: {name} ignored"),
+            0,
+            1,
+        ),
         (
             "__attribute__((expected_throw(1))) void f(void);\n",
             format!("error: wrong number of arguments specified for {name}"),
             1,
             0,
         ),
-        ("__attribute__((expected_throw(1, 2))) void f(void);\n", "expected 0, found 2".to_owned(), 1, 0),
+        (
+            "__attribute__((expected_throw(1, 2))) void f(void);\n",
+            "expected 0, found 2".to_owned(),
+            1,
+            0,
+        ),
     ] {
         let (ok, err) = run(&dir(), target, &[], source);
         assert_eq!(ok, errors == 0, "{source}\n{err}");
