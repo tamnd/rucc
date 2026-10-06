@@ -41,7 +41,7 @@
 //! tier 3: its Rust API is explicitly unstable and will change without a major version bump.
 //! Depend on the `rucc` binary's behaviour, not on this.
 
-#![doc(html_root_url = "https://docs.rs/rucc-asm/0.26.0")]
+#![doc(html_root_url = "https://docs.rs/rucc-asm/0.27.0")]
 
 mod a64;
 mod arm_unwind;
