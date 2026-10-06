@@ -155,11 +155,13 @@
 
 use rucc_base::Interner;
 use rucc_base::hash::Map;
-use rucc_mir::{Block, Func, Inst, Opcode, Reg};
+use rucc_mir::{Block, Constraint, Func, Inst, Opcode, Operand, Reg};
 use rucc_regalloc::assign::Place;
 use rucc_regalloc::rewrite::Edit;
 use rucc_target::{CallRegs, FrameInsts, MachineInsts, PhysReg, RegClass};
 
+use crate::changes::Plan;
+use crate::combine::{FOLDS, WIDENINGS};
 use crate::finish::Moves;
 
 /// What one function came to.
@@ -301,6 +303,182 @@ pub fn itself(func: &mut Func, frame: &FrameInsts, names: &mut Interner) -> usiz
     gone.len()
 }
 
+/// Reads a spilled value out of the frame in the instruction that wanted it, where the allocator
+/// read it into a scratch register in front of that instruction, and gives back how many.
+///
+/// ```text
+///   movq 40(%rsp), %r10
+///   cmpl %r10d, %r13d      ->    cmpl 40(%rsp), %r13d
+/// ```
+///
+/// [`crate::combine::loads`] does this for a load the selector wrote, and cannot do it for one the
+/// allocator wrote, which is not there until the allocator is done. The hot loop of Postgres'
+/// tuple deforming reads its bound back like that on every turn, and gcc reads it out of the frame
+/// in the comparison. tamnd/rucc#1994.
+///
+/// Only a load the allocator asked for, which is what `moves` says, and only into a scratch
+/// register. Nothing lives in one of those into another block, so whether the value is wanted
+/// past the instruction is a question about the rest of the block. Only the allocator's moves
+/// into registers may stand between the load and the instruction, since none of them writes
+/// memory, and none of them may write the register the load did.
+///
+/// The load may be wider than the instruction reads. A slot holds the whole register it was
+/// spilled from, and on a machine that keeps the low bytes first the narrower read of the same
+/// address is the low part of that register, which is what the instruction would have read.
+pub fn reloads(
+    func: &mut Func,
+    moves: &Moves,
+    machine: &MachineInsts,
+    scratch: &[PhysReg],
+    names: &mut Interner,
+) -> usize {
+    let mut done = 0;
+    for block in func.blocks().collect::<Vec<_>>() {
+        let insts: Vec<Inst> = func.insts(block).collect();
+        for (at, &load) in insts.iter().enumerate() {
+            let Some(edit) = moves.at(load) else { continue };
+            let (Place::Reg(reg), Place::Slot(_)) = (edit.mov.to, edit.mov.from) else { continue };
+            if !scratch.contains(&reg) {
+                continue;
+            }
+            let class = edit.class;
+            let Some(user) = reader(func, moves, &insts[at + 1..], class, reg) else { continue };
+            if wanted(func, &insts[at + 1..], user, class, reg) {
+                continue;
+            }
+            let Some(plan) = reloaded(func, machine, names, load, user, (class, reg)) else {
+                continue;
+            };
+            let operands = func.push_operands(&plan.operands);
+            let imm = plan.imm.map(|value| func.add_imm(value));
+            let mem = plan.amode.map(|amode| func.add_amode(amode));
+            let data = &mut func[user];
+            data.opcode = plan.opcode;
+            data.operands = operands;
+            data.imm = imm;
+            data.mem = mem;
+            data.symbol = plan.symbol;
+            func.remove_inst(load);
+            done += 1;
+        }
+    }
+    done
+}
+
+/// The first instruction behind a load into that register that reads it, where everything before
+/// it is one of the allocator's moves into some other register.
+fn reader(
+    func: &Func,
+    moves: &Moves,
+    after: &[Inst],
+    class: RegClass,
+    reg: PhysReg,
+) -> Option<Inst> {
+    for &inst in after {
+        if touches(func, inst, false, class, reg) {
+            return Some(inst);
+        }
+        let edit = moves.at(inst)?;
+        let Place::Reg(to) = edit.mov.to else { return None };
+        if edit.class == class && to == reg {
+            return None;
+        }
+    }
+    None
+}
+
+/// Whether anything behind that instruction reads the register before something writes it.
+///
+/// The instruction itself counts as the write when it is one. Only the rest of the block is
+/// looked at, which is enough for a scratch register and for nothing else.
+fn wanted(func: &Func, after: &[Inst], user: Inst, class: RegClass, reg: PhysReg) -> bool {
+    if touches(func, user, true, class, reg) {
+        return false;
+    }
+    for &inst in after.iter().skip_while(|&&inst| inst != user).skip(1) {
+        if touches(func, inst, false, class, reg) {
+            return true;
+        }
+        if touches(func, inst, true, class, reg) {
+            return false;
+        }
+    }
+    false
+}
+
+/// Whether that instruction writes the register, or reads it, by the role asked about.
+fn touches(func: &Func, inst: Inst, def: bool, class: RegClass, reg: PhysReg) -> bool {
+    func[func[inst].operands].iter().any(|operand| {
+        operand.role.is_def() == def && operand.class == class && operand.reg.phys() == Some(reg)
+    })
+}
+
+/// What that instruction becomes with the load in it, where it is a row of the fold tables and
+/// the load is one they name at least as wide as the row reads.
+///
+/// The operands are matched the way [`crate::combine::loads`] matches them, with the one more
+/// condition a register that was handed out brings: an answer tied to a source has to be in the
+/// register of the source that is kept, which it is not where the load fed that source.
+fn reloaded(
+    func: &Func,
+    machine: &MachineInsts,
+    names: &mut Interner,
+    load: Inst,
+    user: Inst,
+    (class, reg): (RegClass, PhysReg),
+) -> Option<Plan> {
+    if func[user].mem.is_some() {
+        return None;
+    }
+    let width = |name: &str| name.rsplit('_').next()?.parse::<u32>().ok();
+    let rows = || FOLDS.iter().chain(WIDENINGS);
+    let had = machine.bare(names.resolve(func[load].opcode.name())).to_owned();
+    if !rows().any(|fold| fold.load == had) {
+        return None;
+    }
+    let bare = machine.bare(names.resolve(func[user].opcode.name())).to_owned();
+    let fold = rows().find(|fold| fold.from == bare)?;
+    if width(&had)? < width(fold.load)? {
+        return None;
+    }
+    let is = |operand: &Operand| operand.class == class && operand.reg.phys() == Some(reg);
+    let operands = func[func[user].operands].to_vec();
+    let (front, into) = match operands[..] {
+        [answer, first, second] => {
+            let (kept, into) = if is(&second) {
+                (first, fold.into)
+            } else if is(&first) {
+                (second, fold.swapped?)
+            } else {
+                return None;
+            };
+            let tied = matches!(answer.constraint, Constraint::Reuse(_));
+            if is(&kept) || (tied && answer.reg != kept.reg) {
+                return None;
+            }
+            (vec![answer, kept], into)
+        }
+        [answer, only] if is(&only) => (vec![answer], fold.into),
+        _ => return None,
+    };
+    let into = format!("{}{}", machine.prefix, into);
+    if !machine.has(&into) {
+        return None;
+    }
+    let address = func[func[load].operands][1..].to_vec();
+    let mut amode = func[func[load].mem?];
+    let along = u8::try_from(front.len() - 1).expect("a handful of operands");
+    amode.base = amode.base.map(|at| at + along);
+    amode.index = amode.index.map(|at| at + along);
+    Some(Plan {
+        opcode: Opcode::new(names.intern(&into)),
+        operands: front.into_iter().chain(address).collect(),
+        imm: func[user].imm.map(|at| func[at].0),
+        amode: Some(amode),
+        symbol: func[load].symbol,
+    })
+}
+
 /// Whether that register is one the frame is addressed through, so writing it moves every slot.
 ///
 /// The frame pointer only in a frame that keeps one. Elsewhere it is a register the allocator
@@ -407,10 +585,10 @@ impl Holds {
 
 #[cfg(test)]
 mod tests {
-    use rucc_mir::{Mem, Opcode, Operand, Reg};
+    use rucc_mir::{Constraint, Mem, Opcode, Operand, Reg};
     use rucc_regalloc::moves::Move;
     use rucc_regalloc::rewrite::{At, Edit};
-    use rucc_target::x86_64::{FRAME, GPR, MACHINE, RAX, SYSV, XMM};
+    use rucc_target::x86_64::{FRAME, GPR, MACHINE, R13, RAX, RBX, SYSV, XMM};
 
     use super::*;
 
@@ -883,6 +1061,150 @@ mod tests {
         func.build(block, movl).def(Reg::physical(RAX), GPR).uses(Reg::physical(RAX), GPR).finish();
 
         assert_eq!(itself(&mut func, &FRAME, &mut names), 0);
+        assert_eq!(left(&func, block), 2);
+    }
+
+    /// The pass that reads a reload in the instruction that wanted it, with the two registers
+    /// x86-64 holds back.
+    fn reloads(func: &mut Func, moves: &Moves, names: &mut Interner) -> usize {
+        super::reloads(func, moves, &MACHINE, &[R10, R11], names)
+    }
+
+    /// A comparison of two registers, which is what the selector writes for a loop's test.
+    fn compare(
+        func: &mut Func,
+        names: &mut Interner,
+        block: Block,
+        first: PhysReg,
+        second: PhysReg,
+    ) -> Inst {
+        let cmp = op(names, "cmp_set_l_32");
+        func.build(block, cmp)
+            .def(Reg::physical(PhysReg::new(1)), GPR)
+            .uses(Reg::physical(first), GPR)
+            .uses(Reg::physical(second), GPR)
+            .finish()
+    }
+
+    /// Two-address addition of those two registers into the first.
+    fn sum(
+        func: &mut Func,
+        names: &mut Interner,
+        block: Block,
+        to: PhysReg,
+        from: PhysReg,
+    ) -> Inst {
+        let add = op(names, "add_rr_64");
+        func.build(block, add)
+            .operand(Operand::write(Reg::physical(to), GPR).with(Constraint::Reuse(1)))
+            .uses(Reg::physical(to), GPR)
+            .uses(Reg::physical(from), GPR)
+            .finish()
+    }
+
+    /// The loop bound of tamnd/rucc#1994's deforming loop, read back into a scratch register for
+    /// the comparison and read nowhere else.
+    #[test]
+    fn a_bound_read_back_for_a_comparison_is_read_out_of_the_frame_by_it() {
+        let (mut names, mut func, block) = empty();
+        let reload = load(&mut func, &mut names, block, R10, 40);
+        let cmp = compare(&mut func, &mut names, block, R13, R10);
+        let mut moves = Moves::default();
+        moves.record(reload, back(block, 0, R10));
+
+        assert_eq!(reloads(&mut func, &moves, &mut names), 1);
+        assert_eq!(func.insts(block).collect::<Vec<_>>(), vec![cmp]);
+        assert_eq!(func[cmp].opcode, op(&mut names, "cmp_set_l_rm_32"));
+        assert_eq!(reads(&func, block, 0), vec![R13, RAX]);
+        let mem = func[func[cmp].mem.expect("an address")];
+        assert_eq!((mem.base, mem.disp), (Some(2), 40));
+    }
+
+    /// Read on the left the comparison asks the same question the other way round.
+    #[test]
+    fn a_reload_on_the_left_of_a_comparison_turns_the_question_over() {
+        let (mut names, mut func, block) = empty();
+        let reload = load(&mut func, &mut names, block, R10, 40);
+        let cmp = compare(&mut func, &mut names, block, R10, R13);
+        let mut moves = Moves::default();
+        moves.record(reload, back(block, 0, R10));
+
+        assert_eq!(reloads(&mut func, &moves, &mut names), 1);
+        assert_eq!(func[cmp].opcode, op(&mut names, "cmp_set_g_rm_32"));
+        assert_eq!(reads(&func, block, 0), vec![R13, RAX]);
+    }
+
+    /// The register is read again further down, so the word has to arrive in it.
+    #[test]
+    fn a_reload_read_again_after_the_instruction_stays() {
+        let (mut names, mut func, block) = empty();
+        let reload = load(&mut func, &mut names, block, R10, 40);
+        compare(&mut func, &mut names, block, R13, R10);
+        add(&mut func, &mut names, block, RAX, R10);
+        let mut moves = Moves::default();
+        moves.record(reload, back(block, 0, R10));
+
+        assert_eq!(reloads(&mut func, &moves, &mut names), 0);
+        assert_eq!(left(&func, block), 3);
+    }
+
+    /// A load into a register the allocator hands out may be live into the next block, which this
+    /// cannot see, so it is left alone.
+    #[test]
+    fn a_reload_into_a_register_that_is_not_scratch_stays() {
+        let (mut names, mut func, block) = empty();
+        let reload = load(&mut func, &mut names, block, RBX, 40);
+        compare(&mut func, &mut names, block, R13, RBX);
+        let mut moves = Moves::default();
+        moves.record(reload, back(block, 0, RBX));
+
+        assert_eq!(reloads(&mut func, &moves, &mut names), 0);
+        assert_eq!(left(&func, block), 2);
+    }
+
+    /// A copy of the allocator's between the two touches no memory and leaves the register alone,
+    /// and a spill between them writes the frame the load would be read from later.
+    #[test]
+    fn a_copy_between_the_two_is_passed_and_a_spill_is_not() {
+        let (mut names, mut func, block) = empty();
+        let reload = load(&mut func, &mut names, block, R10, 40);
+        let between = copy(&mut func, &mut names, block, RBX, R13);
+        compare(&mut func, &mut names, block, R13, R10);
+        let mut moves = Moves::default();
+        moves.record(reload, back(block, 0, R10));
+        moves.record(between, across(block, RBX, R13));
+        assert_eq!(reloads(&mut func, &moves, &mut names), 1);
+        assert_eq!(left(&func, block), 2);
+
+        let (mut names, mut func, block) = empty();
+        let reload = load(&mut func, &mut names, block, R10, 40);
+        let spill = store(&mut func, &mut names, block, R13, 40);
+        compare(&mut func, &mut names, block, R13, R10);
+        let mut moves = Moves::default();
+        moves.record(reload, back(block, 0, R10));
+        moves.record(spill, out(block, 0, R13));
+        assert_eq!(reloads(&mut func, &moves, &mut names), 0);
+        assert_eq!(left(&func, block), 3);
+    }
+
+    /// An addition whose answer is tied to its first source takes the load as its second, and
+    /// not as its first, where the answer would have to be in the register the load was.
+    #[test]
+    fn a_tied_answer_takes_the_load_only_on_the_side_it_is_not_tied_to() {
+        let (mut names, mut func, block) = empty();
+        let reload = load(&mut func, &mut names, block, R10, 40);
+        let add = sum(&mut func, &mut names, block, R13, R10);
+        let mut moves = Moves::default();
+        moves.record(reload, back(block, 0, R10));
+        assert_eq!(reloads(&mut func, &moves, &mut names), 1);
+        assert_eq!(func[add].opcode, op(&mut names, "add_rm_64"));
+
+        let (mut names, mut func, block) = empty();
+        let reload = load(&mut func, &mut names, block, R10, 40);
+        sum(&mut func, &mut names, block, R10, R13);
+        let mut moves = Moves::default();
+        moves.record(reload, back(block, 0, R10));
+        assert_eq!(reloads(&mut func, &moves, &mut names), 0);
         assert_eq!(left(&func, block), 2);
     }
 }

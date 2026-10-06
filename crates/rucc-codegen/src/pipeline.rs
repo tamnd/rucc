@@ -485,6 +485,10 @@ pub struct Flags {
     /// says, since a spill slot is not a variable and nothing can ask a debugger for one. See
     /// [`crate::slots`].
     pub reuse: bool,
+    /// Whether a value the allocator reads back into a scratch register for one instruction is read
+    /// out of the frame by that instruction instead, which every level above `-O0` asks for. See
+    /// [`crate::copies::reloads`].
+    pub reloads: bool,
     /// Whether the instructions of a block are put in the order the machine finishes soonest,
     /// which `-fschedule-insns2` asks for and every level from `-O2` turns on. See
     /// [`crate::schedule`].
@@ -578,6 +582,7 @@ impl Default for Flags {
             reorder: false,
             partition: false,
             reuse: false,
+            reloads: false,
             schedule: false,
             align_loops: false,
             accurate: None,
@@ -1218,6 +1223,14 @@ pub fn compile_recording(
     copies::itself(&mut func, machine.insts, names);
     let pointer = frame.frame_pointer();
     copies::clean(&mut func, &moves, machine.shapes, machine.insts, machine.conv, pointer, names);
+
+    // After the cleanup, which takes out a reload whose register still has the word and would
+    // otherwise find a register this had folded away. Before anything that orders or lays out
+    // the instructions, for the reason the cleanup is. Not at `-O0`, whose output is the one
+    // somebody reads a variable's slot out of in a debugger and expects to see read.
+    if flags.reloads {
+        copies::reloads(&mut func, &moves, machine.shapes, scratch, names);
+    }
 
     // After the moves are cleaned up, since that pass follows what the scratch registers hold, and
     // before the schedule, which should see the extra `add` as the instruction it is.
