@@ -327,7 +327,8 @@ pub fn finish(
     let mut moves = Moves::default();
     for edit in &allocation.edits {
         let inst = writer.mov(edit, frame);
-        writer.put(&mut cursors, edit.at, inst);
+        let at = writer.behind_the_pop(edit.at);
+        writer.put(&mut cursors, at, inst);
         moves.record(inst, *edit);
     }
 
@@ -1525,6 +1526,33 @@ impl Writer<'_> {
             At::EndOf(block) => self.func.append_inst(block, inst),
         }
         cursors.insert(at, inst);
+    }
+
+    /// Where an edit the allocator put behind an instruction goes, which is behind the `sub` that
+    /// follows it when the instruction is a call whose callee took bytes off the stack.
+    ///
+    /// The lowering writes that `sub` straight behind such a call, so the outgoing area is back
+    /// where the frame says it is before anything else reads it. A slot is counted from the stack
+    /// pointer, so a value read back from one has to wait for the `sub` too. The allocator does not
+    /// know that, since the `sub` names no register it hands out, and it puts the read straight
+    /// behind the call, where the slot is four bytes higher than it was. That is every i386 call
+    /// that returns a structure on Linux and every `stdcall` and `fastcall` one, and in position
+    /// independent code the value read back is usually the table base in `%ebx`. tamnd/rucc#3027.
+    ///
+    /// Nothing the edits move is something the `sub` reads or writes, so putting them behind it
+    /// changes nothing else. A frame that moves its stack pointer counts its slots from the frame
+    /// pointer, and there it changes nothing at all.
+    fn behind_the_pop(&mut self, at: At) -> At {
+        let At::After(call) = at else { return at };
+        let Some(next) = self.func.next_inst(call) else { return at };
+        let sub = self.opcode(self.insts.sub);
+        let sp = Reg::physical(self.conv.stack_pointer);
+        let fixes = self.func[next].opcode == sub
+            && self.func[next].imm.is_some()
+            && self.func[self.func[next].operands]
+                .iter()
+                .any(|operand| operand.role.is_def() && operand.reg == sp);
+        if fixes { At::After(next) } else { at }
     }
 
     /// Where a spill slot is, from the stack pointer in the body of the function.
