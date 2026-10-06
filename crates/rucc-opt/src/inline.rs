@@ -1285,6 +1285,14 @@ fn calls_twice(module: &Module, func: &Func, names: &Interner) -> bool {
 /// the size of an `alloca` is the size every later pass reads as the object's, and
 /// `__builtin_object_size` would answer for the smaller with the larger. One slot is taken at most
 /// once by each splice, since two locals of one body may well be wanted at once.
+///
+/// A local that scalar replacement makes values of is not in the pool. gcc shares the bytes of
+/// locals when it expands to RTL, after its scalar replacement, so its sharing never keeps a value
+/// in memory. A shared slot is one object to scalar replacement, so one splice that gives the
+/// address of its local to a call kept the locals of every other splice in the slot in memory as
+/// well. In SQLite, the `u32` that `sqlite3Get4byte` copies the bytes into shared one slot with
+/// the `int` of other bodies in `sqlite3VdbeExec`, and each read of a page header went through
+/// the stack.
 #[derive(Debug, Default)]
 struct Pool {
     /// Whether anything is shared at all, which is `-fstack-reuse=` and off at `-O0`.
@@ -1517,8 +1525,9 @@ fn splice(
     // before this.
     let stand_in = Func::new(module[caller].name, Signature::new());
     let mut func = std::mem::replace(&mut module[caller], stand_in);
+    let scalar = crate::sroa::scalarizable(&module[callee], module.datalayout);
     let result = check(&func, call, &module[callee], convention, kind)
-        .map(|plan| copy(&mut func, call, &module[callee], &plan, pool));
+        .map(|plan| copy(&mut func, call, &module[callee], &plan, pool, &scalar));
     module[caller] = func;
     result
 }
@@ -1870,8 +1879,16 @@ fn forwardable(
     }
 }
 
-/// Splices the callee in where the call is, which [`check`] has said it can be.
-fn copy(func: &mut Func, call: Inst, callee: &Func, plan: &Plan, pool: &mut Pool) {
+/// Splices the callee in where the call is, which [`check`] has said it can be. The locals in
+/// `scalar` are ones that scalar replacement makes values of, which are not put in the [`Pool`].
+fn copy(
+    func: &mut Func,
+    call: Inst,
+    callee: &Func,
+    plan: &Plan,
+    pool: &mut Pool,
+    scalar: &Set<Value>,
+) {
     let block = func.block_of(call).expect("a call being inlined is in a block");
     let entry = func.entry().expect("a function with a call in it has a body");
     // Where an unwind out of the call went, and where a return from it went, when a `cleanup`
@@ -1969,7 +1986,8 @@ fn copy(func: &mut Func, call: Inst, callee: &Func, plan: &Plan, pool: &mut Pool
             let types: Vec<Type> = data.results().map(|value| callee[value].ty).collect();
             let shell = InstData { flags: data.flags, ..InstData::new(opcode) };
             let fixed = opcode == Opcode::Alloca && data.args.is_empty();
-            let taken = if fixed { pool.take(func, callee, data.extra, data.flags) } else { None };
+            let shared = fixed && !data.first_result.is_some_and(|value| scalar.contains(&value));
+            let taken = if shared { pool.take(func, callee, data.extra, data.flags) } else { None };
             if let Some(slot) = taken {
                 let old = data.first_result.expect("an alloca has an address");
                 values.insert(old, slot);
@@ -1986,9 +2004,11 @@ fn copy(func: &mut Func, call: Inst, callee: &Func, plan: &Plan, pool: &mut Pool
             for (old, value) in data.results().zip(func[new].results().collect::<Vec<Value>>()) {
                 values.insert(old, value);
             }
-            if fixed {
+            if shared {
                 func.insert_before(new, first);
                 pool.add(func, new, callee, data.extra);
+            } else if fixed {
+                func.insert_before(new, first);
             } else {
                 func.append_inst(blocks[&from], new);
             }
@@ -2747,6 +2767,85 @@ block0(%0: i32):
         };
         assert_eq!(slots(true), [64, 640, 640]);
         assert_eq!(slots(false), [64, 640, 640, 640]);
+    }
+
+    /// A local that scalar replacement makes a value of keeps a slot of its own, and only the
+    /// locals that stay in memory share. Two splices of `put`, whose local goes to a call, share
+    /// one slot, and the local of each splice of `get` is its own, so that one `put` does not keep
+    /// the value of `get` in memory.
+    #[test]
+    fn a_local_scalar_replacement_takes_is_not_shared() {
+        let body = r#"
+func @use(ptr), linkage(external);
+
+func @put(i32), linkage(internal), attrs(always_inline) {
+block0(%0: i32):
+    %1 = alloca, size 4, align 4
+    store %0 -> %1, align 4
+    call @use(%1) : (ptr)
+    return
+}
+
+func @get(i32) -> i32, linkage(internal), attrs(always_inline) {
+block0(%0: i32):
+    %1 = alloca, size 4, align 4
+    store %0 -> %1, align 4
+    %2 = load.i32 %1, align 4
+    return %2
+}
+
+func @g(i32) -> i32, linkage(external) {
+block0(%0: i32):
+    call @put(%0) : (i32)
+    %1 = call @get(%0) : (i32) -> i32
+    call @put(%1) : (i32)
+    %2 = call @get(%1) : (i32) -> i32
+    return %2
+}
+"#;
+        let mut names = Interner::new();
+        let text = format!("{HEAD}{body}");
+        let mut module = rucc_ir::parse(&text, &mut names).expect("the fixture parses");
+        let growth = Growth::DEFAULT;
+        run(
+            &mut module,
+            &names,
+            None,
+            false,
+            Isa::baseline(),
+            growth,
+            true,
+            Pic::Executable,
+            false,
+        );
+        if let Err(errors) = rucc_ir::verify(&module, &names) {
+            panic!("the inliner left invalid IR, {errors:?}");
+        }
+        let g = module.funcs().find(|&id| names.resolve(module[id].name) == "g").expect("g");
+        let func = &module[g];
+        let slots: Vec<Value> = func
+            .blocks()
+            .flat_map(|block| func.insts(block))
+            .filter(|&inst| func[inst].opcode == Opcode::Alloca)
+            .filter_map(|inst| func[inst].first_result)
+            .collect();
+        assert_eq!(slots.len(), 3, "{}", rucc_ir::print(&module, &names));
+        // The slot that goes to `use` is the same one both times, and no load reads it.
+        let given: Set<Value> = func
+            .blocks()
+            .flat_map(|block| func.insts(block))
+            .filter(|&inst| func[inst].opcode == Opcode::Call)
+            .flat_map(|inst| func[func[inst].args].to_vec())
+            .collect();
+        assert_eq!(given.len(), 1, "{}", rucc_ir::print(&module, &names));
+        let read: Set<Value> = func
+            .blocks()
+            .flat_map(|block| func.insts(block))
+            .filter(|&inst| func[inst].opcode == Opcode::Load)
+            .map(|inst| func[func[inst].args][0])
+            .collect();
+        assert!(read.is_disjoint(&given), "{}", rucc_ir::print(&module, &names));
+        assert_eq!(read.len(), 2, "{}", rucc_ir::print(&module, &names));
     }
 
     /// A callee built for SSE4.2 stays a call from a caller that is not, whether it asked to be
