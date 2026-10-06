@@ -1499,6 +1499,12 @@ struct Lowering<'a> {
     /// Each constant splat every reader of which is a vector shift that takes it as the count
     /// in its byte, so that nothing is written for it. See [`Self::shifted_by_splat`].
     counts: Set<Inst>,
+    /// The last `insertlane` of each chain that writes one value into every lane of a vector of
+    /// four `int` or two `long`, with the value. See [`Self::broadcast_chains`].
+    broadcasts: Map<Inst, Value>,
+    /// What those chains are built on and nothing else reads, the inserts below the last one and a
+    /// constant splat under the first, so that nothing is written for them.
+    beneath: Set<Inst>,
     /// The frame slot each fixed size `alloca` was given, which is what every reader of its
     /// address writes the address of. See [`Self::local`].
     frame_slots: Map<Value, usize>,
@@ -1657,6 +1663,8 @@ impl<'a> Lowering<'a> {
             fired: Fired::new(),
             marks: Map::default(),
             counts: Set::default(),
+            broadcasts: Map::default(),
+            beneath: Set::default(),
             frame_slots: Map::default(),
             unwinding: Map::default(),
             effectless: (Vec::new(), Vec::new()),
@@ -1686,6 +1694,7 @@ impl<'a> Lowering<'a> {
             }
         }
         self.counts = self.only_counts();
+        (self.broadcasts, self.beneath) = self.broadcast_chains();
         // Every block before any of them is filled, because a block that jumps forward has to
         // name the block it jumps to and a machine IR block is named by a handle rather than by
         // the IR block it came from.
@@ -1988,7 +1997,11 @@ impl<'a> Lowering<'a> {
                 let at = self.at.unwrap_or(out);
                 reached.push((before, at, self.out.terminator(at)));
             }
-            if folded.contains(&inst) || self.writes_nothing(inst) || self.counts.contains(&inst) {
+            if folded.contains(&inst)
+                || self.writes_nothing(inst)
+                || self.counts.contains(&inst)
+                || self.beneath.contains(&inst)
+            {
                 continue;
             }
             // A call is built from the convention rather than matched, which is why it is the one
@@ -4800,7 +4813,8 @@ impl<'a> Lowering<'a> {
     /// lane of their second operand and keep the rest of the first, and `punpcklqdq` puts the low
     /// half of the second in the high half of the first. An `int` lane other than zero is swapped
     /// down to zero for the merge and back up after it, since the swap is its own inverse. A splat
-    /// is the value moved across and its low lane copied to every other one.
+    /// is the value moved across and its low lane copied to every other one, and so is the last
+    /// insert of a chain that writes one value into every lane.
     fn lanes(&mut self, inst: Inst) -> Result<(), Unsupported> {
         let data = &self.source[inst];
         let opcode = data.opcode;
@@ -4816,6 +4830,11 @@ impl<'a> Lowering<'a> {
             Some(1) => true,
             _ => return Err(self.unsupported(inst)),
         };
+        if let Some(&value) = self.broadcasts.get(&inst) {
+            let held = self.reg_of(value)?;
+            self.spread(inst, held, quad, result);
+            return Ok(());
+        }
         let sse = self.conv.sse_class;
         let gpr = self.gpr;
         let span = self.source.span(inst);
@@ -4913,18 +4932,101 @@ impl<'a> Lowering<'a> {
         let held = self.out.new_vreg(gpr);
         let put = self.named(if quad { "mov_ri_64" } else { "mov_ri_32" });
         self.out.build(block, put).at(span).def(held, gpr).imm(lane).finish();
-        let moved = self.named(if quad { "movq_to_xmm" } else { "movd_to_xmm" });
         if lane == 0 {
+            let moved = self.named(if quad { "movq_to_xmm" } else { "movd_to_xmm" });
             let into = self.new_reg(result);
             self.out.build(block, moved).at(span).def(into, sse).uses(held, gpr).finish();
             return Ok(());
         }
+        self.spread(inst, held, quad, result);
+        Ok(())
+    }
+
+    /// A value in a general purpose register moved across into the low lane of a vector register
+    /// and copied from there to the other lanes, which is the answer of `inst`.
+    fn spread(&mut self, inst: Inst, held: mir::Reg, quad: bool, result: Value) {
+        let (sse, gpr) = (self.conv.sse_class, self.gpr);
+        let span = self.source.span(inst);
+        let block = self.at.expect("a block is being filled");
+        let moved = self.named(if quad { "movq_to_xmm" } else { "movd_to_xmm" });
         let across = self.out.new_vreg(sse);
         self.out.set_width(across, 16);
         self.out.build(block, moved).at(span).def(across, sse).uses(held, gpr).finish();
         let into = self.new_reg(result);
         self.pshufd(inst, into, across, if quad { [0, 1, 0, 1] } else { [0, 0, 0, 0] });
-        Ok(())
+    }
+
+    /// The chains of `insertlane` that write one value into every lane of a vector of four `int`
+    /// or two `long`, by the last insert of each with the value, and what is under them that
+    /// nothing else reads.
+    ///
+    /// That is what `_mm_set1_epi32` and `(__v2di){a, a}` are, the vector written lane by lane
+    /// over a splat of zero. Done one lane at a time, four `int` is sixteen instructions, where gcc
+    /// and clang move the value across and copy its low lane to the others with one `pshufd`. The
+    /// last insert of a chain is written that way by [`Self::lanes`]. The inserts below it are
+    /// read by the next one up and nothing else, and what the first one was built on is written
+    /// over in every lane, so a constant splat there that nothing else reads is not written
+    /// either.
+    fn broadcast_chains(&self) -> (Map<Inst, Value>, Set<Inst>) {
+        let mut broadcasts = Map::default();
+        let mut beneath = Set::default();
+        if self.on_aarch64() {
+            return (broadcasts, beneath);
+        }
+        for block in self.source.blocks() {
+            for inst in self.source.insts(block) {
+                let Some(value) = self.inserted(inst) else { continue };
+                let Some(result) = self.source[inst].first_result else { continue };
+                let lanes = match crate::term::vector_slot(self.source[result].ty) {
+                    Some(0) => 4,
+                    Some(1) => 2,
+                    _ => continue,
+                };
+                let mut written = 0u8;
+                let mut below = Vec::new();
+                let mut at = inst;
+                let base = loop {
+                    let Extra::Lane(lane) = self.source[at].extra else { break None };
+                    if lane >= lanes {
+                        break None;
+                    }
+                    written |= 1 << lane;
+                    let vector = self.source[self.source[at].args][0];
+                    if written == (1 << lanes) - 1 {
+                        break Some(vector);
+                    }
+                    let Def::Result { inst: under, .. } = self.source[vector].def else {
+                        break None;
+                    };
+                    if self.inserted(under) != Some(value) || self.uses[vector.index()] != 1 {
+                        break None;
+                    }
+                    below.push(under);
+                    at = under;
+                };
+                let Some(base) = base else { continue };
+                broadcasts.insert(inst, value);
+                beneath.extend(below);
+                if self.is_splat(base) && self.uses[base.index()] == 1 {
+                    if let Def::Result { inst: made, .. } = self.source[base].def {
+                        beneath.insert(made);
+                    }
+                }
+            }
+        }
+        (broadcasts, beneath)
+    }
+
+    /// The value an `insertlane` writes into its lane, when that is what the instruction is.
+    fn inserted(&self, inst: Inst) -> Option<Value> {
+        let data = &self.source[inst];
+        if data.opcode != Opcode::InsertLane {
+            return None;
+        }
+        match self.source[data.args] {
+            [_, value] => Some(value),
+            _ => None,
+        }
     }
 
     /// The count a shift of a vector of four `int` or two `long` moves every lane by, when it is

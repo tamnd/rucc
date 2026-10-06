@@ -2391,8 +2391,9 @@ mod tests {
         build.store(u, args[0], info, ir::Flags::default());
         let p = build.load(i64x2, args[1], info, ir::Flags::default());
         let q = build.extract_lane(p, 1);
+        let o = build.extract_lane(p, 0);
         let r = build.insert_lane(p, q, 0);
-        let w = build.insert_lane(r, q, 1);
+        let w = build.insert_lane(r, o, 1);
         let b = build.unary(Opcode::Bitcast, w, i32x4);
         build.store(b, args[1], info, ir::Flags::default());
         build.ret(&[]);
@@ -2421,6 +2422,57 @@ mod tests {
             if ["movss_rr", "movsd_rr", "punpcklqdq_rr"].iter().any(|it| line.contains(*it)) {
                 assert!(line.contains("(reuse 1)"), "{line} in {text}");
             }
+        }
+    }
+
+    /// One value written into every lane, which is `_mm_set1_epi32` and `(__v2di){a, a}`, is the
+    /// value moved across and one `pshufd`, with nothing written for the splat of zero the inserts
+    /// were built on or for the inserts below the last.
+    #[test]
+    fn one_value_in_every_lane_is_moved_across_and_spread() {
+        let (mut names, mut source, block, args) =
+            blank(&[Type::PTR, Type::int(32), Type::int(64)]);
+        let i32x4 = Type::vector(Type::int(32), 4);
+        let i64x2 = Type::vector(Type::int(64), 2);
+        let zero = source.add_imm(ir::Imm::int(0, Type::int(32)));
+        let wide_zero = source.add_imm(ir::Imm::int(0, Type::int(64)));
+        let mut build = Builder::new(&mut source, block);
+        let info = rucc_ir::MemInfo {
+            size: 16,
+            align: 16,
+            order: rucc_ir::MemOrder::NotAtomic,
+            tbaa: None,
+            owns: 0,
+            restrict: Restrict::NONE,
+        };
+        let splat =
+            ir::InstData { extra: ir::Extra::Imm(zero), ..ir::InstData::new(Opcode::Splat) };
+        let mut four = build.value(splat, i32x4);
+        for lane in 0..4 {
+            four = build.insert_lane(four, args[1], lane);
+        }
+        build.store(four, args[0], info, ir::Flags::default());
+        let splat =
+            ir::InstData { extra: ir::Extra::Imm(wide_zero), ..ir::InstData::new(Opcode::Splat) };
+        let mut two = build.value(splat, i64x2);
+        for lane in 0..2 {
+            two = build.insert_lane(two, args[2], lane);
+        }
+        build.store(two, args[0], info, ir::Flags::default());
+        build.ret(&[]);
+
+        let machine = Machine::x86_64(&SYSV);
+        let out =
+            compile(&mut source, &mut names, &machine, &Elsewhere::default(), Flags::default())
+                .expect("every lane has a lowering");
+
+        let text = mir::print_func(&out, &names, &REGS);
+        let count = |name: &str| text.matches(name).count();
+        assert_eq!(count("x64.movd_to_xmm"), 1, "{text}");
+        assert_eq!(count("x64.movq_to_xmm"), 1, "{text}");
+        assert_eq!(count("x64.pshufd_ri"), 2, "{text}");
+        for inst in ["x64.movss_rr", "x64.movsd_rr", "x64.punpcklqdq_rr", "x64.mov_ri"] {
+            assert!(!text.contains(inst), "{inst} in {text}");
         }
     }
 
