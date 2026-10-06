@@ -172,15 +172,19 @@ pub unsafe fn load(dest: Cap, at: *const c_void, value: *const c_void) -> Cap {
 /// refusing would report a correct program. tamnd/rucc#1081 is the decision and
 /// [`crate::layout::Meta::HANDED`] is the bit.
 ///
-/// A null word is bottom either way and the check is not an optimization. Recovery over an address
-/// nothing watches answers with bounds over everything, so recovering null would hand back a
-/// capability that permits dereferencing it, which is the one thing no reading of this can want.
+/// A null word is [`Cap::NULL`] either way and the check is not an optimization. Recovery over an
+/// address nothing watches answers with bounds over everything, so it has to be asked about null
+/// before anything else is, and a capability that permits dereferencing null is the one thing no
+/// reading of this can want.
 ///
 /// The flag is looked for in the capability first and in the instance's header second. The first is
 /// where it will be once `cap_of` reads a header inline, and the second is what makes a capability
 /// taken before the call and used after it give the same answer as one taken after.
 fn nothing(dest: Cap, value: *const c_void) -> Cap {
-    if value.is_null() || !incomplete(dest) {
+    if value.is_null() {
+        return Cap::NULL;
+    }
+    if !incomplete(dest) {
         return Cap::BOTTOM;
     }
     recover::unwritten(value)

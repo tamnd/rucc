@@ -195,6 +195,18 @@ impl Meta {
     /// and not the region it came out of.
     pub const ADOPTED: u8 = 32;
 
+    /// Flag: the pointer this is about was null where its capability was taken.
+    ///
+    /// Only ever set on a bottom capability, which is [`Cap::NULL`], so everything that asks
+    /// whether a capability permits something gets the answer bottom gets. What it adds is the one
+    /// thing bottom cannot say. Bottom means nobody owns the address, and an address outside every
+    /// watched region has nobody owning it either way, so a bounds check has always let an access
+    /// through bottom go ahead there and left the hardware to fault. A null pointer is the common
+    /// shape of that, and the fault names nothing. With this bit the check knows the pointer had no
+    /// provenance at all and refuses it as J1, which is document 03's S6, including through a
+    /// member far enough into a large structure that the address is no longer in the low page.
+    pub const NULL: u8 = 64;
+
     /// A live instance of `class` with `perm`, whose identifier is `instance`.
     #[must_use]
     pub const fn new(class: Class, perm: u8, instance: u64) -> Self {
@@ -406,6 +418,19 @@ impl Cap {
         Self { lo, ext, ver, meta }
     }
 
+    /// The capability of a null pointer: bottom, and saying why.
+    ///
+    /// [`Meta::NULL`] is the difference, and it is the whole of how the check tells a null pointer
+    /// from a pointer to storage nobody watches.
+    pub const NULL: Self =
+        Self { lo: 0, ext: 0, ver: crate::plane::DEAD, meta: Meta(0).with_flags(Meta::NULL) };
+
+    /// Whether this is the capability of a pointer that was null where it was taken.
+    #[must_use]
+    pub const fn is_null(self) -> bool {
+        self.is_bottom() && self.meta.flags() & Meta::NULL != 0
+    }
+
     /// Whether this permits nothing at all.
     #[must_use]
     pub const fn is_bottom(self) -> bool {
@@ -449,6 +474,11 @@ impl Cap {
     /// carrying the dead version it was handed.
     #[must_use]
     pub const fn narrowed(self, off: u64, len: u64) -> Self {
+        // A member of nothing is nothing, and it has to stay the null one rather than plain bottom
+        // or the access through it would lose the reason it is refused.
+        if self.is_null() {
+            return self;
+        }
         let (end, over) = off.overflowing_add(len);
         if over || end > self.ext {
             return Self::BOTTOM;

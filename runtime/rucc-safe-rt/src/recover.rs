@@ -181,6 +181,12 @@ fn bump(origin: Origin) -> Origin {
 /// is a function.
 #[must_use]
 pub fn recover(addr: *const c_void) -> Cap {
+    // Null is the one address whose answer is known without asking anything, and it is not a
+    // recovery in the sense the counts measure, since nothing about the pointer was lost. Leaving
+    // it to fall through would answer with bounds over everything, which permits the dereference.
+    if addr.is_null() {
+        return Cap::NULL;
+    }
     let addr = addr as usize;
     let Some(region) = alloc::covering(addr) else {
         return tally(Origin::Unwatched, everything());
@@ -343,16 +349,19 @@ pub fn witness(addr: *const c_void) -> Origin {
 /// recovers over it. That is not a hole. Recovery over a dead pointer inside a watched heap answers
 /// [`Origin::Nobody`], which is the bottom capability again.
 ///
-/// A null one is bottom and stays bottom, without a recovery, which is the rule
-/// [`crate::cap::load`] already has for a null word read out of memory and for the same reason:
-/// recovery over an address nothing watches answers with bounds over everything, and a capability
-/// that permits dereferencing null is the one answer no reading of this can want. It is also most of
+/// A null one is [`Cap::NULL`] without a recovery, which is the rule [`crate::cap::load`] already
+/// has for a null word read out of memory and for the same reason: recovery over an address nothing
+/// watches answers with bounds over everything, and a capability that permits dereferencing null is
+/// the one answer no reading of this can want. It is also most of
 /// the recoveries a recursive walk does, since every leaf is a call with a null in it, and each of
 /// them was a scan of every region and an atomic add on a counter shared by every thread.
 #[must_use]
 pub fn argument(carried: Cap, addr: *const c_void) -> Cap {
-    if !carried.is_bottom() || addr.is_null() {
+    if !carried.is_bottom() {
         return carried;
+    }
+    if addr.is_null() {
+        return Cap::NULL;
     }
     recover(addr)
 }
@@ -866,7 +875,7 @@ mod tests {
 
         let before = counts();
         let cap = super::argument(Cap::BOTTOM, core::ptr::null());
-        assert!(cap.is_bottom());
+        assert!(cap.is_null());
         assert_eq!(counts(), before, "nothing was recovered");
     }
 
