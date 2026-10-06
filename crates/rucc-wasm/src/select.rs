@@ -1204,6 +1204,19 @@ impl Lower<'_, '_> {
     /// that stays on the stack gives its negation with the inverse predicate, and any other
     /// condition with an `i32.eqz` after it.
     fn push_cond(&mut self, cond: Value, negate: bool) -> Result<()> {
+        // A compare of a 32-bit value with zero that stays on the stack is not written. The value
+        // is the condition, as clang writes it, with an `i32.eqz` after it when the branch is
+        // taken on zero.
+        if let Some((inst, _)) = self.def(cond).filter(|_| self.trees.stacked.contains(&cond)) {
+            if let Some((value, pred)) = self.zero_compare(inst).filter(|&(v, _)| !self.wide(v)) {
+                self.pushed.insert(cond);
+                self.push_z(value)?;
+                if (pred == IntPred::Eq) != negate {
+                    self.code.op(emit::I32_EQZ);
+                }
+                return Ok(());
+            }
+        }
         let compare = match self.def(cond) {
             Some((inst, _))
                 if negate
@@ -1222,6 +1235,42 @@ impl Lower<'_, '_> {
             self.code.op(emit::I32_EQZ);
         }
         Ok(())
+    }
+
+    /// The operand and the predicate of a compare for equality or inequality with zero, when
+    /// `inst` is one. See [`Self::is_zero`]. The predicate is the inverse when the compare is written
+    /// inverted.
+    fn zero_compare(&self, inst: Inst) -> Option<(Value, IntPred)> {
+        let data = &self.func[inst];
+        let Extra::IntPred(pred) = data.extra else { return None };
+        if data.opcode != Opcode::ICmp {
+            return None;
+        }
+        let pred = if self.inverted == Some(inst) { pred.inverse() } else { pred };
+        let &[a, b] = &self.args(inst)[..] else { return None };
+        if !matches!(pred, IntPred::Eq | IntPred::Ne) || is_pair(self.ty(a)) {
+            return None;
+        }
+        if self.is_zero(b) {
+            Some((a, pred))
+        } else if self.is_zero(a) {
+            Some((b, pred))
+        } else {
+            None
+        }
+    }
+
+    /// Whether a value is the constant zero, or the null pointer that `inttoptr` makes of it,
+    /// and is not kept in a local. The code of the compare does not push it, so it must not be a
+    /// value that a `local.tee` writes where it is pushed.
+    fn is_zero(&self, value: Value) -> bool {
+        let constant = match self.def(value) {
+            Some((inst, _)) if self.func[inst].opcode == Opcode::IntToPtr => {
+                self.args(inst).first().and_then(|&int| self.constant(int))
+            }
+            _ => self.constant(value),
+        };
+        constant == Some(0) && !self.trees.teed.contains_key(&value)
     }
 
     fn push_z(&mut self, value: Value) -> Result<()> {
@@ -1313,6 +1362,15 @@ impl Lower<'_, '_> {
         let call = matches!(data.opcode, Opcode::Call | Opcode::CallIndirect);
         if !call && args.iter().chain(&results).any(|&v| is_pair(self.ty(v))) {
             return self.pair(inst, &args, &results);
+        }
+        // An equality with zero is `i32.eqz` or `i64.eqz`, which is shorter than a compare with
+        // the constant.
+        if let Some((value, IntPred::Eq)) = self.zero_compare(inst) {
+            let wide = self.wide(value);
+            self.push_z(value)?;
+            self.code.op(if wide { emit::I64_EQZ } else { emit::I32_EQZ });
+            self.set(results[0]);
+            return Ok(());
         }
         if rules::tried(data.opcode) && self.inverted != Some(inst) && self.by_rule(inst)? {
             return Ok(());
