@@ -3590,7 +3590,9 @@ fn fetch_sysroot(
     cache: &std::path::Path,
 ) -> i32 {
     let tuple = target.to_canonical_string();
-    let say = |line: &str| println!("rucc: {tuple}: {line}");
+    let say = |line: &str| {
+        let _ = writeln!(host::stdout(), "rucc: {tuple}: {line}");
+    };
     if let Err(why) = bring(what, cache, &say) {
         return complain(why);
     }
@@ -3943,7 +3945,7 @@ fn write_deps(
 /// status is still a failure either way.
 fn preprocess_all(opts: &Options, plan: &Plan) -> i32 {
     let fs = OsFileSystem::new();
-    let mut stderr = std::io::stderr().lock();
+    let mut stderr = host::stderr();
     let mut failed = false;
     for job in &plan.jobs {
         if !job.phases.first().is_some_and(|p| *p == Phase::Preprocess) {
@@ -4004,7 +4006,7 @@ fn assembly_wants_cpp(job: &Job) -> bool {
 /// compile phase and is passed over here, which the plan has already said in its notes.
 fn compile_all(opts: &Options, plan: &Plan) -> i32 {
     let fs = OsFileSystem::new();
-    let mut stderr = std::io::stderr().lock();
+    let mut stderr = host::stderr();
     let mut failed = false;
     let (mut remarks, ok) = Remarks::new(opts.opt_info_file.as_ref(), &mut stderr);
     failed |= !ok;
@@ -4120,7 +4122,7 @@ fn link_all(opts: &Options, plan: &Plan, link: &LinkOptions, verbose: bool) -> i
     let Some(job) = &plan.link else {
         // Every path into here comes from a plan whose last phase is the link, and such a plan
         // has a link job. Saying so is cheaper than an unwrap that would have to be explained.
-        let mut stderr = std::io::stderr().lock();
+        let mut stderr = host::stderr();
         let _ = writeln!(stderr, "rucc: error: there is nothing to link");
         return 1;
     };
@@ -4158,7 +4160,7 @@ fn link_all(opts: &Options, plan: &Plan, link: &LinkOptions, verbose: bool) -> i
     let mut pressure = Pressure::new();
     let mut lowerings = Lowerings::new();
     {
-        let mut stderr = std::io::stderr().lock();
+        let mut stderr = host::stderr();
         let (mut remarks, ok) = Remarks::new(opts.opt_info_file.as_ref(), &mut stderr);
         failed |= !ok;
         for (at, job) in plan.jobs.iter().enumerate() {
@@ -4263,7 +4265,7 @@ fn link_all(opts: &Options, plan: &Plan, link: &LinkOptions, verbose: bool) -> i
     if opts.lto.requested {
         let started = std::time::Instant::now();
         let joined = lto::link(opts, link.shared, &items, &scratch.dir);
-        let mut stderr = std::io::stderr().lock();
+        let mut stderr = host::stderr();
         match joined {
             Ok(Some(joined)) => items = joined,
             Ok(None) => {}
@@ -4284,7 +4286,7 @@ fn link_all(opts: &Options, plan: &Plan, link: &LinkOptions, verbose: bool) -> i
         Err(why) => return complain(why),
     };
     if verbose {
-        let mut stderr = std::io::stderr().lock();
+        let mut stderr = host::stderr();
         let _ = writeln!(stderr, "{}", link::render(&linker, &args));
     }
     let started = std::time::Instant::now();
@@ -4292,7 +4294,7 @@ fn link_all(opts: &Options, plan: &Plan, link: &LinkOptions, verbose: bool) -> i
     if opts.time {
         // The one step of a compilation that really is another program, so this line is the same
         // measurement gcc's is and names the linker the way gcc names `collect2`.
-        let mut stderr = std::io::stderr().lock();
+        let mut stderr = host::stderr();
         say_time(&linker.name, started.elapsed(), &mut stderr);
     }
     match ran {
@@ -4339,7 +4341,7 @@ fn archive_all(opts: &Options, plan: &Plan) -> i32 {
     let mut pressure = Pressure::new();
     let mut lowerings = Lowerings::new();
     {
-        let mut stderr = std::io::stderr().lock();
+        let mut stderr = host::stderr();
         let (mut remarks, ok) = Remarks::new(opts.opt_info_file.as_ref(), &mut stderr);
         failed |= !ok;
         for plan_job in &plan.jobs {
@@ -4436,7 +4438,7 @@ fn archive_all(opts: &Options, plan: &Plan) -> i32 {
 
 /// Prints one driver level message and gives back the exit status that goes with it.
 fn complain(why: impl std::fmt::Display) -> i32 {
-    let mut stderr = std::io::stderr().lock();
+    let mut stderr = host::stderr();
     let _ = writeln!(stderr, "rucc: error: {why}");
     1
 }
@@ -4721,7 +4723,7 @@ fn say_time(name: &str, took: std::time::Duration, stderr: &mut impl std::io::Wr
 fn write_out(output: &Output, bytes: &[u8]) -> Result<(), String> {
     match output {
         Output::Stdout => {
-            let mut stdout = std::io::stdout().lock();
+            let mut stdout = host::stdout();
             stdout.write_all(bytes).map_err(|e| format!("writing to standard output: {e}"))
         }
         Output::File(path) | Output::Temporary(path) => {
@@ -4941,7 +4943,7 @@ fn assembler_words(words: &[(String, String)], target: Triple) -> Result<Assembl
 /// kbuild's `$(CC) --version | head -n 1` does, and that is not a failure: `print!` would panic
 /// there and leave a backtrace in the build log.
 fn emit(text: &str) {
-    let _ = std::io::stdout().lock().write_all(text.as_bytes());
+    let _ = host::stdout().write_all(text.as_bytes());
 }
 
 /// Runs the driver and returns the process exit code.
@@ -4975,7 +4977,7 @@ pub fn run(args: &[String]) -> i32 {
                 match link_line(&opts, &link, job) {
                     Ok(line) => emit(&format!("{line}\n")),
                     Err(why) => {
-                        let mut stderr = std::io::stderr().lock();
+                        let mut stderr = host::stderr();
                         let _ = writeln!(stderr, "rucc: error: {why}");
                         return 1;
                     }
@@ -4996,7 +4998,7 @@ pub fn run(args: &[String]) -> i32 {
         ),
         Ok(Action::Compile { opts, plan, link, jobs, verbose, notes }) => {
             {
-                let mut stderr = std::io::stderr().lock();
+                let mut stderr = host::stderr();
                 // Before the plan rather than after it, because a note is about the command line
                 // and the plan is what the command line was read as, so the reader wants the two
                 // in that order.
@@ -5021,13 +5023,13 @@ pub fn run(args: &[String]) -> i32 {
                 return compile_all(&opts, &plan);
             }
             if let Some(why) = unlinkable(&opts) {
-                let _ = writeln!(std::io::stderr().lock(), "rucc: error: {why}");
+                let _ = writeln!(host::stderr(), "rucc: error: {why}");
                 return 1;
             }
             link_all(&opts, &plan, &link, verbose)
         }
         Err(e) => {
-            let mut stderr = std::io::stderr().lock();
+            let mut stderr = host::stderr();
             let _ = writeln!(stderr, "rucc: error: {e}");
             let _ = writeln!(stderr, "rucc: note: run `rucc --help` for usage");
             1

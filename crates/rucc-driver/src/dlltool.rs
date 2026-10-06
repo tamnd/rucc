@@ -259,7 +259,7 @@ fn build(program: &str, request: &Request) -> Result<(String, Vec<u8>), String> 
 /// `program` is `argv[0]`, which may say the target, and `args` excludes it and excludes the
 /// `--dlltool` that asked for this mode.
 pub fn run(program: &str, args: &[String]) -> i32 {
-    let mut stderr = std::io::stderr().lock();
+    let mut stderr = crate::host::stderr();
     let request = match parse(args) {
         Ok(request) => request,
         Err(why) => {
@@ -268,7 +268,7 @@ pub fn run(program: &str, args: &[String]) -> i32 {
         }
     };
     if request.help {
-        print!("{USAGE}");
+        let _ = write!(crate::host::stdout(), "{USAGE}");
         return 0;
     }
     let (output, bytes) = match build(program, &request) {
