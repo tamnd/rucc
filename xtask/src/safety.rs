@@ -46,7 +46,7 @@ use std::process::Command;
 
 use crate::indent;
 use crate::runner::{Runner, TRIPLE};
-use crate::{Error, Result, root, staticlib};
+use crate::{Error, Result, root, staticlib, target_dir};
 
 /// The tier the suite is run at.
 ///
@@ -664,7 +664,7 @@ struct Plan {
 /// builds and runs them. Nothing is written into it after this, and the runner mounts it read
 /// only, which is what keeps a container from leaving files in the tree owned by somebody else.
 fn build(cases: &[Case], plan: &Plan) -> Result<PathBuf> {
-    let work = root().join("target").join(plan.dir);
+    let work = target_dir().join(plan.dir);
     if work.exists() {
         std::fs::remove_dir_all(&work)
             .map_err(|e| Error::Io(format!("could not clear {}: {e}", work.display())))?;
@@ -680,7 +680,7 @@ fn build(cases: &[Case], plan: &Plan) -> Result<PathBuf> {
     if !status.success() {
         return Err(Error::Io("the compiler did not build".to_owned()));
     }
-    let rucc = root().join("target").join("release").join("rucc");
+    let rucc = target_dir().join("release").join("rucc");
     let archive = staticlib("rucc-safe-rt", TRIPLE)?;
     std::fs::copy(&archive, work.join("safe-rt.a"))
         .map_err(|e| Error::Io(format!("could not copy {}: {e}", archive.display())))?;

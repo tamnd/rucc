@@ -31,7 +31,7 @@
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
-use crate::{Error, Result, root};
+use crate::{Error, Result, root, target_dir};
 
 /// What the example had to say for itself.
 struct Emitted {
@@ -65,7 +65,7 @@ struct Written {
 pub(crate) fn implib() -> Result<()> {
     let dlltool = dlltool()?;
 
-    let into = root().join("target").join("implib");
+    let into = target_dir().join("implib");
     let Emitted { written, refused } = emit(&into)?;
     if written.is_empty() {
         return Err(Error::Io("the implib example wrote no libraries at all".to_owned()));

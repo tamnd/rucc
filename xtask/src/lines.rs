@@ -41,7 +41,7 @@ use std::path::{Path, PathBuf};
 use std::process::Command;
 
 use crate::runner::{Runner, TRIPLE};
-use crate::{Error, Result, cost, indent, libraries, root};
+use crate::{Error, Result, cost, indent, libraries, root, target_dir};
 
 /// One claim about the table, as a share of the functions both compilers wrote.
 struct Claim {
@@ -240,7 +240,7 @@ fn percent(got: u32, outof: u32) -> u32 {
 
 /// The directory the script is run over, emptied first.
 fn laid_out() -> Result<PathBuf> {
-    let work = root().join("target").join("lines");
+    let work = target_dir().join("lines");
     if work.exists() {
         std::fs::remove_dir_all(&work)
             .map_err(|e| Error::Io(format!("could not clear {}: {e}", work.display())))?;

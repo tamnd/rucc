@@ -17,7 +17,7 @@
 
 use std::process::Command;
 
-use crate::{Error, Result, root};
+use crate::{Error, Result, root, target_dir};
 
 /// Checks every crate, test and feature with the toolchain the manifest names.
 pub(crate) fn msrv() -> Result<()> {
@@ -37,7 +37,7 @@ pub(crate) fn msrv() -> Result<()> {
              with. `rustup toolchain install {version} --profile minimal` gets it"
         )));
     }
-    let into = root().join("target").join("msrv");
+    let into = target_dir().join("msrv");
     let status = Command::new("cargo")
         .args([toolchain.as_str(), "check", "--workspace", "--all-targets", "--all-features"])
         .env("CARGO_TARGET_DIR", &into)

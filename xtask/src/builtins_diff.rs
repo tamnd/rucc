@@ -67,7 +67,7 @@ use std::path::{Path, PathBuf};
 use std::process::Command;
 
 use crate::runner::{Runner, TRIPLE};
-use crate::{Error, Result, root};
+use crate::{Error, Result, root, target_dir};
 
 /// What this task is called, for the messages.
 const TASK: &str = "builtins-diff";
@@ -92,7 +92,7 @@ pub(crate) fn builtins_diff() -> Result<()> {
 
 /// Lays out the directory the runner is pointed at: both archives, the harness, and the script.
 fn build() -> Result<PathBuf> {
-    let work = root().join("target").join(TASK);
+    let work = target_dir().join(TASK);
     if work.exists() {
         std::fs::remove_dir_all(&work)
             .map_err(|e| Error::Io(format!("could not clear {}: {e}", work.display())))?;
@@ -126,7 +126,7 @@ fn build() -> Result<PathBuf> {
 /// [`Error::Io`] when cargo cannot be run, and [`Error::Failed`] when the build fails, which on a
 /// fresh machine is almost always the standard library for the target not being installed.
 fn reference_archive() -> Result<PathBuf> {
-    let into = root().join("target").join(format!("{TASK}-rust"));
+    let into = target_dir().join(format!("{TASK}-rust"));
     let status = Command::new("cargo")
         .args(["rustc", "-q", "-p", "rucc-builtins", "--release", "--crate-type", "staticlib"])
         .args(["--target", TRIPLE])

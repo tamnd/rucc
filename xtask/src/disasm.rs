@@ -18,7 +18,7 @@
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
-use crate::{Error, Result, root};
+use crate::{Error, Result, root, target_dir};
 
 /// The machine the listing is written for, and the machine the decoder is asked about.
 const TRIPLE: &str = "--triple=x86_64-unknown-linux-gnu";
@@ -152,7 +152,7 @@ fn listing() -> Result<String> {
 /// `--show-encoding` puts the bytes in a comment beside each instruction, which is a way of asking
 /// for them that does not go through an object file and so does not need a second tool to read one.
 fn assemble(tool: &Path, text: &str) -> Result<Vec<String>> {
-    let source = root().join("target").join("listing.s");
+    let source = target_dir().join("listing.s");
     std::fs::create_dir_all(source.parent().expect("the file is under a directory"))
         .map_err(|e| Error::Io(format!("could not make a place for the listing: {e}")))?;
     std::fs::write(&source, text)
@@ -176,7 +176,7 @@ fn decode(tool: &Path, instructions: &[String]) -> Result<Vec<String>> {
         }
         hex.push('\n');
     }
-    let source = root().join("target").join("listing.hex");
+    let source = target_dir().join("listing.hex");
     std::fs::write(&source, hex)
         .map_err(|e| Error::Io(format!("could not write {}: {e}", source.display())))?;
     let out = run(tool, &["--disassemble", TRIPLE], Some(&source))?;

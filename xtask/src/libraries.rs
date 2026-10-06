@@ -77,7 +77,7 @@ use std::process::Command;
 
 use crate::runner::{Runner, TRIPLE};
 use crate::safety::{self, BANNER};
-use crate::{Error, Result, cost, indent, root};
+use crate::{Error, Result, cost, indent, root, target_dir};
 
 /// What a program has to say before its answers count.
 ///
@@ -1193,7 +1193,7 @@ fn usual(project: &Project) -> Option<PathBuf> {
 /// has, and it is what lets the container do one link and one run rather than being handed a binary
 /// built somewhere it cannot read.
 fn build(project: &Project, source: &Path) -> Result<PathBuf> {
-    let work = root().join("target").join("libraries").join(project.name);
+    let work = target_dir().join("libraries").join(project.name);
     if work.exists() {
         std::fs::remove_dir_all(&work)
             .map_err(|e| Error::Io(format!("could not clear {}: {e}", work.display())))?;

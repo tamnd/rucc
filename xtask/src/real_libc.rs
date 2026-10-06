@@ -27,7 +27,7 @@ use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
-use crate::{Error, Result, root, stubs};
+use crate::{Error, Result, root, stubs, target_dir};
 
 /// One definition a reader printed, which is everything the comparison looks at.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -88,7 +88,7 @@ pub(crate) fn real_libc(args: &[String]) -> Result<()> {
         ceiling.as_deref().unwrap_or("none at all")
     );
 
-    let stub = root().join("target").join("real-libc").join(format!("{tuple}-libc.so.6"));
+    let stub = target_dir().join("real-libc").join(format!("{tuple}-libc.so.6"));
     if let Some(parent) = stub.parent() {
         std::fs::create_dir_all(parent)
             .map_err(|e| Error::Io(format!("could not make {}: {e}", parent.display())))?;

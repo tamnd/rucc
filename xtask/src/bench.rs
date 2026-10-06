@@ -33,7 +33,7 @@ use std::path::Path;
 use std::process::{Command, Stdio};
 use std::time::{Duration, Instant};
 
-use crate::{Error, Result, root};
+use crate::{Error, Result, target_dir};
 
 /// How many timings are taken, and how many are thrown away first.
 ///
@@ -84,7 +84,7 @@ pub(crate) fn bench(args: &[String]) -> Result<()> {
         }
     }
 
-    let rucc = root().join("target/release/rucc");
+    let rucc = target_dir().join("release").join("rucc");
     if !rucc.exists() {
         return Err(bad(format!(
             "{} does not exist, run `cargo build --release -p rucc` first",

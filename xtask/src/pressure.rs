@@ -34,7 +34,7 @@ use std::process::Command;
 
 use crate::cost::{Bench, benches, compiler};
 use crate::runner::TRIPLE;
-use crate::{Error, Result, root};
+use crate::{Error, Result, root, target_dir};
 
 /// The optimization level, on both sides.
 const LEVEL: &str = "-O2";
@@ -107,7 +107,7 @@ pub(crate) fn pressure(extra: &[String]) -> Result<()> {
     }
 
     let rucc = compiler()?;
-    let work = root().join("target").join("pressure");
+    let work = target_dir().join("pressure");
     if work.exists() {
         std::fs::remove_dir_all(&work)
             .map_err(|e| Error::Io(format!("could not clear {}: {e}", work.display())))?;

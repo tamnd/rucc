@@ -50,7 +50,7 @@ use std::path::{Path, PathBuf};
 
 use crate::bench::{Stats, commit, host};
 use crate::runner::{Runner, TRIPLE};
-use crate::{Error, Result, root};
+use crate::{Error, Result, root, target_dir};
 
 /// What this task is called, for the messages.
 const TASK: &str = "builtins-bench";
@@ -104,7 +104,7 @@ pub(crate) fn builtins_bench(args: &[String]) -> Result<()> {
 
 /// Lays out the directory the runner is pointed at: the archive, the harness, and the script.
 fn build(runs: usize) -> Result<PathBuf> {
-    let work = root().join("target").join(TASK);
+    let work = target_dir().join(TASK);
     if work.exists() {
         std::fs::remove_dir_all(&work)
             .map_err(|e| Error::Io(format!("could not clear {}: {e}", work.display())))?;
