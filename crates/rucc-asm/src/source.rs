@@ -2380,6 +2380,29 @@ impl Reader {
         self.go(at);
     }
 
+    /// A name nothing in the file defines that is the name of one of its sections, which gas takes
+    /// to be the start of that section.
+    ///
+    /// The vDSO's exception table is written that way: each entry is `.long (from) - __ex_table`
+    /// in the section `__ex_table`, the distance to the place from the start of the table, which is
+    /// a distance from these bytes once the name is a place in the same section. gas puts no name
+    /// for it in the table, so the name is given a `\u{1}` the way a numbered label is, which
+    /// keeps it out, and a relocation that names it alone is written against the section.
+    fn sections_by_name(&mut self) {
+        if !self.elf() {
+            return;
+        }
+        for sym in &mut self.syms {
+            if matches!(sym.at, Held::Undefined) && !sym.numbered {
+                if let Some(&part) = self.named.get(&sym.name) {
+                    sym.at = Held::In { part, offset: 0 };
+                    let unseen = format!("{}\u{1}start", sym.name);
+                    self.renamed.insert(std::mem::replace(&mut sym.name, unseen.clone()), unseen);
+                }
+            }
+        }
+    }
+
     /// The symbol of each `.linkonce` group, which is the first name its section defines.
     fn leaders(&mut self) -> Result<(), Trouble> {
         for at in 0..self.parts.len() {
@@ -3289,6 +3312,7 @@ impl Reader {
         let within = self.within_pieces();
         self.old_padding();
         self.join_subsections();
+        self.sections_by_name();
         self.line_table()?;
         self.unwind_table();
         self.seh_table()?;
@@ -6574,6 +6598,28 @@ _tls$tlv$init:
         assert_eq!(reloc.at, 8);
         assert_eq!(reloc.kind, Reference::Data);
         assert_eq!(reloc.addend, 8);
+    }
+
+    #[test]
+    fn a_section_named_where_a_name_was_expected_is_its_start() {
+        // The vDSO's exception table, which counts each place from the start of the table. The
+        // second entry is four bytes in, so its distance from the start is four more than from
+        // these bytes. The name itself is not in the table and a lone reference is to the section.
+        let out = assembled(
+            "\t.text\nf:\tnop\n.Lfrom:\tnop\n.Lto:\tret\n\
+             \t.pushsection __ex_table, \"a\"\n\
+             \t.long (.Lfrom) - __ex_table\n\t.long (.Lto) - __ex_table\n\t.popsection\n\
+             \t.section .rodata\n\t.quad __ex_table + 4\n",
+        );
+        let table = out.parts.iter().find(|part| part.name == "__ex_table").expect("the table");
+        let got: Vec<_> =
+            table.relocs.iter().map(|r| (r.at, r.symbol.as_str(), r.addend)).collect();
+        assert_eq!(got, [(0, ".Lfrom", 0), (4, ".Lto", 4)]);
+        assert!(table.relocs.iter().all(|reloc| reloc.kind == Reference::Data));
+        assert!(out.names.iter().all(|name| name.name != "__ex_table"));
+        let rodata = out.parts.iter().find(|part| part.name == ".rodata").expect("rodata");
+        assert_eq!(rodata.relocs[0].symbol, "__ex_table\u{1}start");
+        assert_eq!(rodata.relocs[0].addend, 4);
     }
 
     #[test]
