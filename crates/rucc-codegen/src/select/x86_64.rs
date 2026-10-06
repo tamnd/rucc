@@ -300,6 +300,10 @@ mod tests {
         "test_ri_16",
         "test_ri_32",
         "test_ri_64",
+        "test_mi_8",
+        "test_mi_16",
+        "test_mi_32",
+        "test_mi_64",
         "jcc_e",
         "jcc_ne",
         "jcc_l",
@@ -924,7 +928,9 @@ mod tests {
         let constants = crate::combine::BUMPS.iter().map(|bump| bump.into);
         // And the load that widens on the way in, which only a load that a widening reads becomes.
         let widened = crate::combine::WIDENINGS.iter().map(|fold| fold.into);
-        loads.chain(swapped).chain(stores).chain(constants).chain(widened).collect()
+        // And the test of a bit against memory, at the width of every load that can fill it.
+        let tests = crate::combine::TESTS.iter().map(|fold| fold.into);
+        loads.chain(swapped).chain(stores).chain(constants).chain(widened).chain(tests).collect()
     }
 
     #[test]

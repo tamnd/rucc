@@ -175,6 +175,18 @@
 //! because a widening reads one width and writes another, which is the one thing every row of that
 //! table is checked not to do.
 //!
+//! And then the test of a bit, which is `if (p->flags & MASK)` and what Postgres asks of every
+//! tuple header it looks at. The field is narrower than an `int`, so C widens it before the `and`,
+//! and the widening takes the load in first. What that leaves is a load again, and the test behind
+//! it takes it in turn, reading only the byte the constant asks about:
+//!
+//! ```text
+//!   movzwl 4(%rdi), %eax
+//!   testl $2048, %eax      ->    testb $8, 5(%rdi)
+//! ```
+//!
+//! [`TESTS`] is the list, with a row for every load that can fill the register a test reads.
+//!
 //! # What a `volatile` access gets
 //!
 //! Nothing. Both walks stop at one, so `volatile int *p; *p += x;` comes out as the load, the
@@ -697,6 +709,96 @@ pub static WIDENINGS: &[Fold] = &[
     Fold { from: "mov_32_to_64", into: "mov_rm_32", load: "mov_rm_32", swapped: None },
 ];
 
+/// The tests of a bit a load can move into on this machine, which is `if (p->flags & MASK)`.
+///
+/// A row for every width of load that can fill the register the test reads. The load of the same
+/// width is the one a field of that width comes in by, and the loads that widen are the narrower
+/// fields C promotes to an `int` before it asks anything of one, which is every `uint16` in a
+/// Postgres tuple header. Those come here already folded into the widening by [`WIDENINGS`], and
+/// the test reads memory at the width the load did rather than the width the register is: the bits
+/// above it are zero, so the constant loses nothing it could have found, and memory past the field
+/// is not the program's to read. The widening from thirty two bits came out as a thirty two bit
+/// load, which is why that load is a row at sixty four.
+///
+/// What the row names is the widest test it can come to. `joined` narrows it to the one byte the
+/// constant asks about where it asks about only one, which is gcc's `testb $8, 5(%rdi)` for a bit
+/// in the high byte of a sixteen bit field.
+///
+/// Its own table rather than more of [`FOLDS`], because a row here is two widths and the reload
+/// after allocation that reads that table knows nothing of narrowing a constant.
+pub static TESTS: &[Fold] = &[
+    Fold { from: "test_set_e_ri_8", into: "test_set_e_mi_8", load: "mov_rm_8", swapped: None },
+    Fold { from: "test_set_e_ri_16", into: "test_set_e_mi_16", load: "mov_rm_16", swapped: None },
+    Fold {
+        from: "test_set_e_ri_16",
+        into: "test_set_e_mi_8",
+        load: "movzx_rm_8_16",
+        swapped: None,
+    },
+    Fold { from: "test_set_e_ri_32", into: "test_set_e_mi_32", load: "mov_rm_32", swapped: None },
+    Fold {
+        from: "test_set_e_ri_32",
+        into: "test_set_e_mi_8",
+        load: "movzx_rm_8_32",
+        swapped: None,
+    },
+    Fold {
+        from: "test_set_e_ri_32",
+        into: "test_set_e_mi_16",
+        load: "movzx_rm_16_32",
+        swapped: None,
+    },
+    Fold { from: "test_set_e_ri_64", into: "test_set_e_mi_64", load: "mov_rm_64", swapped: None },
+    Fold {
+        from: "test_set_e_ri_64",
+        into: "test_set_e_mi_8",
+        load: "movzx_rm_8_64",
+        swapped: None,
+    },
+    Fold {
+        from: "test_set_e_ri_64",
+        into: "test_set_e_mi_16",
+        load: "movzx_rm_16_64",
+        swapped: None,
+    },
+    Fold { from: "test_set_e_ri_64", into: "test_set_e_mi_32", load: "mov_rm_32", swapped: None },
+    Fold { from: "test_set_ne_ri_8", into: "test_set_ne_mi_8", load: "mov_rm_8", swapped: None },
+    Fold { from: "test_set_ne_ri_16", into: "test_set_ne_mi_16", load: "mov_rm_16", swapped: None },
+    Fold {
+        from: "test_set_ne_ri_16",
+        into: "test_set_ne_mi_8",
+        load: "movzx_rm_8_16",
+        swapped: None,
+    },
+    Fold { from: "test_set_ne_ri_32", into: "test_set_ne_mi_32", load: "mov_rm_32", swapped: None },
+    Fold {
+        from: "test_set_ne_ri_32",
+        into: "test_set_ne_mi_8",
+        load: "movzx_rm_8_32",
+        swapped: None,
+    },
+    Fold {
+        from: "test_set_ne_ri_32",
+        into: "test_set_ne_mi_16",
+        load: "movzx_rm_16_32",
+        swapped: None,
+    },
+    Fold { from: "test_set_ne_ri_64", into: "test_set_ne_mi_64", load: "mov_rm_64", swapped: None },
+    Fold {
+        from: "test_set_ne_ri_64",
+        into: "test_set_ne_mi_8",
+        load: "movzx_rm_8_64",
+        swapped: None,
+    },
+    Fold {
+        from: "test_set_ne_ri_64",
+        into: "test_set_ne_mi_16",
+        load: "movzx_rm_16_64",
+        swapped: None,
+    },
+    Fold { from: "test_set_ne_ri_64", into: "test_set_ne_mi_32", load: "mov_rm_32", swapped: None },
+];
+
 /// The same on AArch64, where a load of a byte, a half or a word can sign extend what it read, and
 /// one that does not has already zero extended it.
 ///
@@ -989,7 +1091,7 @@ pub fn loads(
             // it. Nothing else about the answer moves: the other end of a row of the fold table is
             // arithmetic this target describes and is not a call.
             let opcode = func[inst].opcode;
-            let Loads { barrier, load } =
+            let Loads { barrier, mut load } =
                 *seen.entry(opcode).or_insert_with(|| Loads::of(machine, names, opcode));
             if let Some(carried) = waiting {
                 let bare = machine.bare(names.resolve(opcode.name())).to_owned();
@@ -1001,6 +1103,12 @@ pub fn loads(
                         pending.moved(carried.inst, &[inst]);
                         waiting = None;
                         done += 1;
+                        // A widening that took its load in is a load itself now, and the test
+                        // of a bit behind it can take it in turn, which is how a sixteen bit
+                        // field C promoted to an `int` comes to be asked about in memory.
+                        let now = func[inst].opcode;
+                        load =
+                            seen.entry(now).or_insert_with(|| Loads::of(machine, names, now)).load;
                     }
                 }
             }
@@ -1050,7 +1158,7 @@ impl Loads {
     fn of(machine: &MachineInsts, names: &Interner, opcode: Opcode) -> Self {
         let name = names.resolve(opcode.name());
         let bare = machine.bare(name);
-        let mut rows = FOLDS.iter().chain(WIDENINGS).chain(A64_WIDENINGS);
+        let mut rows = FOLDS.iter().chain(WIDENINGS).chain(A64_WIDENINGS).chain(TESTS);
         Self {
             barrier: machine.calls(name) || !machine.has(name) || machine.touches_mem(name),
             load: rows.find(|fold| fold.load == bare).map(|fold| fold.load),
@@ -1460,8 +1568,15 @@ fn joined(
     inst: Inst,
     bare: &str,
 ) -> Option<Plan> {
-    let fold = FOLDS.iter().chain(WIDENINGS).chain(A64_WIDENINGS).find(|fold| fold.from == bare)?;
-    if carried.load != fold.load || reads.count(carried.reg) != 1 {
+    // Found by the load as well as by the instruction, because a test has a row for every width
+    // of load that can fill what it reads and the rest have one.
+    let fold = FOLDS
+        .iter()
+        .chain(WIDENINGS)
+        .chain(A64_WIDENINGS)
+        .chain(TESTS)
+        .find(|fold| fold.from == bare && fold.load == carried.load)?;
+    if reads.count(carried.reg) != 1 {
         return None;
     }
     let operands = func[func[inst].operands].to_vec();
@@ -1498,14 +1613,48 @@ fn joined(
     let along = u8::try_from(front.len() - 1).expect("a handful of operands");
     amode.base = amode.base.map(|at| at + along);
     amode.index = amode.index.map(|at| at + along);
+    let mut imm = func[inst].imm.map(|at| func[at].0);
+    let mut into = into.to_owned();
+    if TESTS.contains(fold) {
+        let (narrowed, skip, constant) = tested(&into, imm?)?;
+        amode.disp = amode.disp.checked_add(skip)?;
+        (into, imm) = (narrowed, Some(constant));
+    }
     let into = names.intern(&format!("{}{}", machine.prefix, into));
     Some(Plan {
         opcode: Opcode::new(into),
         operands: front.into_iter().chain(address).collect(),
-        imm: func[inst].imm.map(|at| func[at].0),
+        imm,
         amode: Some(amode),
         symbol: func[load].symbol,
     })
+}
+
+/// The test a row of [`TESTS`] comes to with its constant held against what the load read: the
+/// instruction, how many bytes into the place it starts reading, and the constant it carries.
+///
+/// The constant loses every bit above the width read, since what the load put there is zero. Where
+/// what is left is in one byte the test is of that byte alone, which is how gcc asks the same, and
+/// what it costs nothing to do on a machine that puts the low byte first. A constant across more
+/// than one byte stays the test it was. None where nothing is left at all, which is a test whose
+/// answer is known and is for the passes in front of this one to have taken out.
+fn tested(into: &str, constant: i64) -> Option<(String, i32, i64)> {
+    let (front, width) = into.rsplit_once('_')?;
+    let bits: u32 = width.parse().ok()?;
+    let mask = u64::from_le_bytes(constant.to_le_bytes()) & (u64::MAX >> (64 - bits));
+    if mask == 0 {
+        return None;
+    }
+    let low = mask.trailing_zeros() / 8;
+    if low == (63 - mask.leading_zeros()) / 8 {
+        let byte = mask.to_le_bytes()[usize::try_from(low).ok()?];
+        let skip = i32::try_from(low).ok()?;
+        return Some((format!("{front}_8"), skip, i64::from(i8::from_le_bytes([byte]))));
+    }
+    // Written back the way a constant of that width is written, with its top bit carried up.
+    let shift = 64 - bits;
+    let constant = (i64::from_le_bytes(mask.to_le_bytes()) << shift) >> shift;
+    Some((into.to_owned(), 0, constant))
 }
 
 #[cfg(test)]
@@ -2595,6 +2744,147 @@ mod tests {
         assert_eq!(func[func[inst].operands][1].reg, base, "the address it took on");
         let imm = func[inst].imm.expect("the constant is still on it");
         assert_eq!(func[imm].0, 7, "and is the one that was written");
+    }
+
+    /// A load of that name and a test of what it read against that constant, behind a widening of
+    /// the name given where there is one, which is `if (p->flags & k)` for a field that narrow.
+    fn bit(read: &str, widen: Option<&str>, test: &str, k: i64) -> (Interner, Func) {
+        let (mut names, mut func, block) = empty();
+        let base = func.new_vreg(GPR);
+        let mut value = func.new_vreg(GPR);
+        let load = op(&mut names, read);
+        func.build(block, load)
+            .def(value, GPR)
+            .mem(Mem { disp: 4, ..Mem::at(Operand::read(base, GPR)) })
+            .finish();
+        if let Some(widen) = widen {
+            let wide = func.new_vreg(GPR);
+            let opcode = op(&mut names, widen);
+            func.build(block, opcode).def(wide, GPR).uses(value, GPR).finish();
+            value = wide;
+        }
+        let byte = func.new_vreg(GPR);
+        let opcode = op(&mut names, test);
+        func.build(block, opcode).def(byte, GPR).uses(value, GPR).imm(k).finish();
+        (names, func)
+    }
+
+    /// The one test left in a function `bit` made, as its name, where it reads and its constant.
+    fn tested_as(func: &Func, names: &Interner) -> (String, i32, i64) {
+        let block = func.blocks().next().expect("the one block");
+        let insts: Vec<Inst> = func.insts(block).collect();
+        let [inst] = insts[..] else {
+            panic!("{:?} is more than the test", shape(func, names, block));
+        };
+        let mem = func[inst].mem.expect("it reads memory now");
+        assert_eq!(func[mem].base, Some(1), "the address is behind the byte");
+        let imm = func[inst].imm.expect("the constant is still on it");
+        (names.resolve(func[inst].opcode.name()).to_owned(), func[mem].disp, func[imm].0)
+    }
+
+    /// A bit in the high byte of a sixteen bit field, which C asks about once the field is an
+    /// `int`. The load widens on the way in and the test then takes that in as well, and what it
+    /// reads is the one byte the bit is in, which is `testb $8, 5(%rdi)` for Postgres's
+    /// `HEAP_XMAX_INVALID` in `t_infomask`.
+    #[test]
+    fn a_bit_of_a_sixteen_bit_field_is_tested_in_the_byte_it_is_in() {
+        let (mut names, mut func) =
+            bit("mov_rm_16", Some("movzx_16_32"), "test_set_ne_ri_32", 0x0800);
+        assert_eq!(combine(&mut func, &mut names), 2, "the widening and then the test");
+        assert_eq!(tested_as(&func, &names), ("x64.test_set_ne_mi_8".to_owned(), 5, 8));
+    }
+
+    /// The same at the bit on the top of that byte, whose byte is negative read as one.
+    #[test]
+    fn the_top_bit_of_a_field_is_tested_as_a_negative_byte() {
+        let (mut names, mut func) =
+            bit("mov_rm_16", Some("movzx_16_64"), "test_set_e_ri_64", 0x8000);
+        assert_eq!(combine(&mut func, &mut names), 2);
+        assert_eq!(tested_as(&func, &names), ("x64.test_set_e_mi_8".to_owned(), 5, -128));
+    }
+
+    /// A field read at its own width, where there is no widening and the test takes the load on
+    /// directly. The bit is in the low byte, which is at the address the field is.
+    #[test]
+    fn a_bit_of_a_word_is_tested_in_its_low_byte() {
+        let (mut names, mut func) = bit("mov_rm_32", None, "test_set_ne_ri_32", 4);
+        assert_eq!(combine(&mut func, &mut names), 1);
+        assert_eq!(tested_as(&func, &names), ("x64.test_set_ne_mi_8".to_owned(), 4, 4));
+    }
+
+    /// Bits in two bytes are asked about at the width the field was read at, and the bits of the
+    /// constant above that width go, since the widening put zeros there.
+    #[test]
+    fn bits_in_two_bytes_are_tested_at_the_width_the_field_was_read() {
+        let (mut names, mut func) =
+            bit("mov_rm_16", Some("movzx_16_32"), "test_set_ne_ri_32", 0x0007_0801);
+        assert_eq!(combine(&mut func, &mut names), 2);
+        assert_eq!(tested_as(&func, &names), ("x64.test_set_ne_mi_16".to_owned(), 4, 0x0801));
+    }
+
+    /// A thirty two bit field asked about at sixty four is read at thirty two, which is what the
+    /// widening from thirty two left it as, and a constant whose top bit is that field's top bit
+    /// is the negative number at that width.
+    #[test]
+    fn a_word_widened_to_sixty_four_bits_is_tested_at_thirty_two() {
+        let (mut names, mut func) =
+            bit("mov_rm_32", Some("mov_32_to_64"), "test_set_ne_ri_64", 0x8000_0001);
+        assert_eq!(combine(&mut func, &mut names), 2);
+        let wanted = ("x64.test_set_ne_mi_32".to_owned(), 4, -0x7fff_ffff);
+        assert_eq!(tested_as(&func, &names), wanted);
+    }
+
+    /// A constant with nothing left once the bits the widening cleared are gone asks a question
+    /// whose answer is known, and the test is left as it was rather than written against memory.
+    #[test]
+    fn a_test_of_only_the_bits_a_widening_cleared_stays_a_test_of_a_register() {
+        let (mut names, mut func) = bit("mov_rm_8", Some("movzx_8_32"), "test_set_ne_ri_32", 0x100);
+        assert_eq!(combine(&mut func, &mut names), 1, "only the widening");
+        let block = func.blocks().next().expect("the one block");
+        assert_eq!(shape(&func, &names, block), ["x64.movzx_rm_8_32", "x64.test_set_ne_ri_32"]);
+    }
+
+    /// A widened load something else reads as well stays in its register, for the reason a load
+    /// does.
+    #[test]
+    fn a_widened_field_something_else_reads_is_tested_in_its_register() {
+        let (mut names, mut func) =
+            bit("mov_rm_16", Some("movzx_16_32"), "test_set_ne_ri_32", 0x0800);
+        let block = func.blocks().next().expect("the one block");
+        let wide = func[func[func.insts(block).nth(1).expect("the widening")].operands][0].reg;
+        let other = func.new_vreg(GPR);
+        let add = op(&mut names, "add_rr_32");
+        func.build(block, add)
+            .operand(Operand::write(other, GPR).with(Constraint::Reuse(1)))
+            .uses(wide, GPR)
+            .uses(wide, GPR)
+            .finish();
+        assert_eq!(combine(&mut func, &mut names), 1, "only the widening");
+        let shape = shape(&func, &names, block);
+        assert_eq!(shape, ["x64.movzx_rm_16_32", "x64.test_set_ne_ri_32", "x64.add_rr_32"]);
+    }
+
+    /// Every row of the test table names instructions this target has, reads memory only once
+    /// folded, and reads the width the load did, which is never wider than the test was.
+    #[test]
+    fn every_test_reads_memory_at_the_width_its_load_did() {
+        let width =
+            |name: &str| name.rsplit('_').next().and_then(|width| width.parse::<u32>().ok());
+        // What a load reads is the first width in its name, since one that widens names two.
+        let read = |name: &str| name.split('_').find_map(|width| width.parse::<u32>().ok());
+        for row in TESTS {
+            assert!(MACHINE.has(row.from), "{} is not an instruction", row.from);
+            assert!(MACHINE.has(row.into), "{} is not an instruction", row.into);
+            assert!(MACHINE.has(row.load), "{} is not an instruction", row.load);
+            assert!((MACHINE.takes_mem)(row.into), "{} reads no memory", row.into);
+            assert!(!(MACHINE.takes_mem)(row.from), "{} already reads memory", row.from);
+            assert_eq!(width(row.into), read(row.load), "{} reads another width", row.from);
+            assert!(width(row.into) <= width(row.from), "{} reads too wide", row.from);
+            let condition = |name: &'static str| name.split('_').nth(2);
+            assert_eq!(condition(row.from), condition(row.into), "{}", row.from);
+            assert_eq!(row.swapped, None, "{} has nothing to swap", row.from);
+        }
+        assert_eq!(TESTS.len(), 20, "two conditions, and one row per load at each of four widths");
     }
 
     /// A load that nothing but a widening reads becomes the load that widens, at every width the

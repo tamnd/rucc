@@ -442,13 +442,18 @@ static CONDITIONAL: [&str; 16] = [
 /// and the branch behind it would keep the byte and the test that reads it, which would make
 /// folding the load a saving of one instruction and a cost of two.
 ///
-/// The last eight are not comparisons in the sense of the rest. They are `if (flags & MASK)`, an
-/// `and` against a constant whose answer only the question of whether it was zero wanted, and a
-/// rule selects them so that the register the `and` would have overwritten is only read. What is
-/// left once the byte comes off is `test`, which is what gcc writes for every bit Postgres asks of
-/// a tuple's header. Equal and not equal are the only two, because a `test` says nothing about the
-/// sign or the carry that the program asked.
-pub(crate) static FUSED: [Fusion; 168] = [
+/// The eight tests against a register are not comparisons in the sense of the rest. They are
+/// `if (flags & MASK)`, an `and` against a constant whose answer only the question of whether it
+/// was zero wanted, and a rule selects them so that the register the `and` would have overwritten
+/// is only read. What is left once the byte comes off is `test`, which is what gcc writes for every
+/// bit Postgres asks of a tuple's header. Equal and not equal are the only two, because a `test`
+/// says nothing about the sign or the carry that the program asked.
+///
+/// The last eight are the same tests with the register filled by a load nothing else read, which
+/// `rucc_codegen::combine` puts back together. That is the shape of the header bit itself, since
+/// `t_infomask` is a field that is read once to ask one bit of it, and what is left is gcc's
+/// `testb $8, 5(%rdi)`.
+pub(crate) static FUSED: [Fusion; 176] = [
     Fusion { set: "cmp_set_e_8", cmp: "cmp_rr_8", if_true: "jcc_e", if_false: "jcc_ne" },
     Fusion { set: "cmp_set_e_16", cmp: "cmp_rr_16", if_true: "jcc_e", if_false: "jcc_ne" },
     Fusion { set: "cmp_set_e_32", cmp: "cmp_rr_32", if_true: "jcc_e", if_false: "jcc_ne" },
@@ -617,6 +622,14 @@ pub(crate) static FUSED: [Fusion; 168] = [
     Fusion { set: "cmp_set_ae_mi_16", cmp: "cmp_mi_16", if_true: "jcc_ae", if_false: "jcc_b" },
     Fusion { set: "cmp_set_ae_mi_32", cmp: "cmp_mi_32", if_true: "jcc_ae", if_false: "jcc_b" },
     Fusion { set: "cmp_set_ae_mi_64", cmp: "cmp_mi_64", if_true: "jcc_ae", if_false: "jcc_b" },
+    Fusion { set: "test_set_e_mi_8", cmp: "test_mi_8", if_true: "jcc_e", if_false: "jcc_ne" },
+    Fusion { set: "test_set_e_mi_16", cmp: "test_mi_16", if_true: "jcc_e", if_false: "jcc_ne" },
+    Fusion { set: "test_set_e_mi_32", cmp: "test_mi_32", if_true: "jcc_e", if_false: "jcc_ne" },
+    Fusion { set: "test_set_e_mi_64", cmp: "test_mi_64", if_true: "jcc_e", if_false: "jcc_ne" },
+    Fusion { set: "test_set_ne_mi_8", cmp: "test_mi_8", if_true: "jcc_ne", if_false: "jcc_e" },
+    Fusion { set: "test_set_ne_mi_16", cmp: "test_mi_16", if_true: "jcc_ne", if_false: "jcc_e" },
+    Fusion { set: "test_set_ne_mi_32", cmp: "test_mi_32", if_true: "jcc_ne", if_false: "jcc_e" },
+    Fusion { set: "test_set_ne_mi_64", cmp: "test_mi_64", if_true: "jcc_ne", if_false: "jcc_e" },
 ];
 
 /// What a select on a comparison's answer becomes, which is the move on the condition the
@@ -1054,7 +1067,7 @@ static COMPARES: [Compare; 96] = [
 /// door lists them, and they are the eight rows here that carry no condition in their names. What
 /// they read is [`Reads::Carry`], which is the group nothing in [`ZEROING`] is good for, so they
 /// can only stop the pass and never point it at the wrong bits.
-static READERS: [Reader; 240] = [
+static READERS: [Reader; 248] = [
     Reader { name: "adc_rr_8", reads: Reads::Carry },
     Reader { name: "adc_rr_16", reads: Reads::Carry },
     Reader { name: "adc_rr_32", reads: Reads::Carry },
@@ -1239,6 +1252,14 @@ static READERS: [Reader; 240] = [
     Reader { name: "cmp_set_ae_mi_16", reads: Reads::Unsigned },
     Reader { name: "cmp_set_ae_mi_32", reads: Reads::Unsigned },
     Reader { name: "cmp_set_ae_mi_64", reads: Reads::Unsigned },
+    Reader { name: "test_set_e_mi_8", reads: Reads::Zero },
+    Reader { name: "test_set_e_mi_16", reads: Reads::Zero },
+    Reader { name: "test_set_e_mi_32", reads: Reads::Zero },
+    Reader { name: "test_set_e_mi_64", reads: Reads::Zero },
+    Reader { name: "test_set_ne_mi_8", reads: Reads::Zero },
+    Reader { name: "test_set_ne_mi_16", reads: Reads::Zero },
+    Reader { name: "test_set_ne_mi_32", reads: Reads::Zero },
+    Reader { name: "test_set_ne_mi_64", reads: Reads::Zero },
     Reader { name: "set_e", reads: Reads::Zero },
     Reader { name: "set_ne", reads: Reads::Zero },
     Reader { name: "set_l", reads: Reads::Signed },
