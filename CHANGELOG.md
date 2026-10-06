@@ -4,6 +4,10 @@ All notable changes are recorded here. The format follows [Keep a Changelog](htt
 
 ## Unreleased
 
+### Changed
+
+- On wasm, the second pass of the inliner holds a call in a loop to the limit of a hinted call when the callee is `static`, every call to the callee is in that caller, and the caller is not over `LARGE_FUNCTION_INSNS` (#2866). The copy of the callee goes away, so the unit grows by little. The SQLite shell now inlines the merge of its sorter, as clang does, and runs 33.11G instructions on the WA4 benchmark where it ran 33.63G (clang: 31.47G). The module is 3,372 bytes larger. `TargetInfo::loop_hint` says which targets do this, and only wasm32 does, so a native target keeps gcc's decisions.
+
 ### Fixed
 
 - `cargo xtask builtins` and every other task that looks under `target` no longer overflows the stack when neither `CARGO_TARGET_DIR` nor `CARGO_BUILD_TARGET_DIR` is set. The fallback in 0.24.9 called itself instead of returning `target` under the root (#3077).

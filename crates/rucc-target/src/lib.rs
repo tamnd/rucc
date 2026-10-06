@@ -918,6 +918,16 @@ pub struct TargetInfo {
     /// so there a choice between two pointers stays a branch. If-conversion reads this before it
     /// writes a `select`, because a `select` that no rule lowers fails at instruction selection.
     pub selects_any: bool,
+    /// Whether the second inliner treats a call in a loop as hinted when its callee goes away with
+    /// it: the callee is `static`, every call to it is in this caller, and the caller is not
+    /// large. The hint doubles the limit the call is held to, the way gcc's loop hints do.
+    ///
+    /// True only on wasm. The compiler a wasm build is measured against there is clang, which
+    /// inlines far more than gcc, and a call costs more in a wasm engine than on the machine,
+    /// because the engine passes its context to the callee and checks the stack limit at entry.
+    /// The callee's own copy is removed, so the unit grows by little. A native target keeps gcc's
+    /// decisions.
+    pub loop_hint: bool,
 }
 
 /// The type a target's `__builtin_va_list` is.
@@ -1250,6 +1260,7 @@ impl TargetInfo {
                 _ => &[],
             },
             selects_any: matches!(target.arch(), tuple::Arch::Wasm32),
+            loop_hint: matches!(target.arch(), tuple::Arch::Wasm32),
         }
     }
 
