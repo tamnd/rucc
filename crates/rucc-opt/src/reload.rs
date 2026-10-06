@@ -105,14 +105,14 @@
 //! values and does not, which is why this pass drops it whether or not it changed anything.
 
 use rucc_base::hash::Map;
-use rucc_ir::{Block, Extra, Flags, Func, Inst, Opcode, Restrict, Type, Value};
+use rucc_ir::{Block, Def, Extra, Flags, Func, Inst, Opcode, Restrict, Type, Value};
 
 use crate::alias::{Access, Origin, origin};
 use crate::dom::Dominators;
 use crate::loops::Loops;
 use crate::memssa::{Clobber, Step, Walk};
 use crate::uses::substitute;
-use crate::{Analyses, Analysis, Fuel, Pass, Preserved, Stats, memssa};
+use crate::{Analyses, Analysis, Fuel, Pass, Preserved, Stats, discharge, memssa};
 
 /// What this pass is called, which the pipeline matches on to decide whether to build the module
 /// facts the oracle asks for.
@@ -348,22 +348,50 @@ fn through(func: &Func, reference: &Access, inst: Inst) -> Option<Access> {
 /// kernel/sched/deadline.c being the one written most often. So the address is followed back to
 /// where it came from and how far past that it is, and two addresses that agree on both are the
 /// same place.
+///
+/// An address with a step on the way back that is not a constant has no distance from where it
+/// came from, and it used to be only the same place as itself. That is the field of an array
+/// element: `&atts[i]` is a `ptr_add` of `i` times the size, and `atts[i].attlen` read in one
+/// block and again in a block below it is two `ptr_add`s of that by the same constant. The tuple
+/// deforming loop in PostgreSQL's `slot_deform_heap_tuple` tests `attlen` three times a turn and
+/// read it from memory each time (tamnd/rucc#1994). So such an address is followed back only as
+/// far as the constant steps go, and two that reach the same value at the same distance past it
+/// are the same place.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 enum Place {
     /// So many bytes past where this came from.
     At(Origin, i64),
-    /// An address whose distance from where it came from is not a constant, which is only ever
-    /// the same place as itself.
-    Address(Value),
+    /// So many bytes past a value the address was a constant step from, where some step behind
+    /// that value was not a constant.
+    Past(Value, i64),
 }
 
 impl Place {
     /// Where this address points.
     fn of(func: &Func, address: Value) -> Self {
-        match origin(func, address) {
-            (from, Some(offset)) => Self::At(from, offset),
-            (_, None) => Self::Address(address),
+        if let (from, Some(offset)) = origin(func, address) {
+            return Self::At(from, offset);
         }
+        let (mut base, mut offset) = (address, 0i64);
+        while let Def::Result { inst, .. } = func[base].def {
+            let data = func[inst];
+            match data.opcode {
+                Opcode::PtrAdd => {
+                    let &[from, by] = &func[data.args] else { break };
+                    let Some(by) = discharge::constant(func, by)
+                        .and_then(|by| i64::try_from(by).ok())
+                        .and_then(|by| offset.checked_add(by))
+                    else {
+                        break;
+                    };
+                    (base, offset) = (from, by);
+                }
+                // A cast between two pointers is the same address, as it is to `origin`.
+                Opcode::Bitcast => base = func[data.args][0],
+                _ => break,
+            }
+        }
+        Self::Past(base, offset)
     }
 }
 
@@ -974,6 +1002,84 @@ block3(%5: i32):
         let func = one(&module);
         off(func);
         assert_eq!(count_of(func, Opcode::Load), 1);
+    }
+
+    #[test]
+    fn a_field_of_an_element_at_an_index_tested_again_below_is_read_once() {
+        // `atts[i].attlen` in the deforming loop, tested in one block and again in the block the
+        // first test falls through to. The element is at no constant distance from the array, so
+        // the two `ptr_add`s of four are told apart only by being two values.
+        let text = wrap(
+            "(ptr, i64) -> i32",
+            "block0(%0: ptr, %1: i64):
+    %2 = iconst.i64 3
+    %3 = shl %1, %2
+    %4 = ptr_add %0, %3
+    %5 = iconst.i64 4
+    %6 = ptr_add %4, %5
+    %7 = load.i16 %6, align 2
+    %8 = iconst.i16 1
+    %9 = icmp eq %7, %8
+    br_if %9, block1, block2
+
+block1:
+    %10 = iconst.i32 1
+    return %10
+
+block2:
+    %11 = iconst.i64 4
+    %12 = ptr_add %4, %11
+    %13 = load.i16 %12, align 2
+    %14 = sext.i32 %13
+    return %14
+",
+        );
+        let (module, stats) = run(&text);
+        assert_eq!(stats.count(crate::stats::Kind::Optimized, REUSED), 1);
+        let func = one(&module);
+        off(func);
+        assert_eq!(count_of(func, Opcode::Load), 1);
+    }
+
+    #[test]
+    fn another_field_of_the_same_element_is_another_place() {
+        // The same element at a distance of six rather than four is the next field, and the
+        // element of the index one further on is the next element.
+        let text = wrap(
+            "(ptr, i64) -> i32",
+            "block0(%0: ptr, %1: i64):
+    %2 = iconst.i64 3
+    %3 = shl %1, %2
+    %4 = ptr_add %0, %3
+    %5 = iconst.i64 4
+    %6 = ptr_add %4, %5
+    %7 = load.i16 %6, align 2
+    %8 = iconst.i16 1
+    %9 = icmp eq %7, %8
+    br_if %9, block1, block2
+
+block1:
+    %10 = iconst.i64 6
+    %11 = ptr_add %4, %10
+    %12 = load.i16 %11, align 2
+    %13 = sext.i32 %12
+    return %13
+
+block2:
+    %14 = iconst.i64 8
+    %15 = add %3, %14
+    %16 = ptr_add %0, %15
+    %17 = ptr_add %16, %5
+    %18 = load.i16 %17, align 2
+    %19 = sext.i32 %18
+    return %19
+",
+        );
+        let (module, stats) = run(&text);
+        assert_eq!(stats.count(crate::stats::Kind::Optimized, REUSED), 0);
+        let func = one(&module);
+        off(func);
+        assert_eq!(count_of(func, Opcode::Load), 3);
     }
 
     #[test]
