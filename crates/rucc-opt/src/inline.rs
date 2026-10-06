@@ -672,8 +672,12 @@ struct How<'a> {
     /// weighed, so a body called from four hundred places with the same constants is copied and
     /// folded once. A callee is settled before it is measured and nothing in a round changes it
     /// after that, which is why the answer can be kept for the round.
-    sizes: RefCell<Map<(FuncId, Vec<(Value, Imm, Type)>, bool), usize>>,
+    sizes: RefCell<Map<SizeKey, usize>>,
 }
+
+/// What [`How::specialized_size`] keeps an answer under: the callee, the constants it was given in
+/// the order of their parameters, and whether it weighed.
+type SizeKey = (FuncId, Vec<(Value, Imm, Type)>, bool);
 
 impl How<'_> {
     /// [`specialized_size`], worked out once for each callee and set of constants in a round.
