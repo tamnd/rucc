@@ -138,11 +138,19 @@ use crate::types::{self, TypeId};
 /// could name an instance for is under one in ten thousand, which is what tamnd/rucc#1241's `cap_of`
 /// box is about.
 ///
-/// This is also why a bottom capability and a null one need no case of their own. Neither covers
+/// This is also why a bottom capability and a missing one need no case of their own. Neither covers
 /// anything, so neither permits anything, and both fall through to the planes the way they always
 /// did. That matters most for bottom, which says nobody owns the address: that is [`live`]'s
 /// refusal and not this one's, and calling it out of bounds would put the wrong sentence in the
 /// report, since storage that has been freed is inside the instance it used to be inside.
+///
+/// The capability of a null pointer is the one bottom that does get a case, and it is a refusal.
+/// The planes have nothing to say about the low page because no region covers it, so falling
+/// through let the access go ahead and the hardware fault in its place, which is document 03's S6
+/// reported as a segmentation fault that names nothing. [`Cap::NULL`] says the pointer had no
+/// provenance at all, which no address it can reach changes, so this refuses it wherever the
+/// access lands. That includes a member of a large structure, whose address is past the low page
+/// and would get past any test on the address alone.
 ///
 /// # Panics
 ///
@@ -176,6 +184,12 @@ pub unsafe fn bounds(
     }
     // SAFETY: this function's own contract about `capability`, passed straight on.
     if unsafe { permits(capability, addr, size) } {
+        return;
+    }
+    // SAFETY: as above.
+    if unsafe { nothing(capability) } {
+        // SAFETY: as below.
+        unsafe { crate::fail::report(descriptor, Some(addr)) }
         return;
     }
     let Some(region) = alloc::covering(addr) else { return };
@@ -1150,6 +1164,11 @@ const fn clipped(region: &Region, addr: usize, size: usize) -> usize {
 #[must_use]
 pub fn extent(addr: *const c_void, want: usize) -> usize {
     let addr = addr as usize;
+    // Nothing is owned at null, and answering for an unwatched address here would let a loop over
+    // a null pointer run with no check in it to meet the null capability.
+    if addr == 0 {
+        return 0;
+    }
     let Some(region) = alloc::covering(addr) else { return want };
     let instance = owner(&region, addr);
     if !plane::owned(instance) || want == 0 {
@@ -1277,6 +1296,19 @@ unsafe fn permits(capability: *const Cap, addr: usize, size: usize) -> bool {
     // SAFETY: the caller's contract, and a slot is `Cap::BYTES` of storage the frame owns.
     let held = unsafe { core::ptr::read(capability) };
     held.covers(addr as u64, size as u64)
+}
+
+/// Whether `capability` is the one a null pointer has, which [`bounds`] refuses outright.
+///
+/// # Safety
+///
+/// `capability` is null or the address of a filled capability slot.
+unsafe fn nothing(capability: *const Cap) -> bool {
+    if capability.is_null() {
+        return false;
+    }
+    // SAFETY: the caller's contract, and a slot is `Cap::BYTES` of storage the frame owns.
+    unsafe { core::ptr::read(capability) }.is_null()
 }
 
 /// Whether a pointer derived to `derived` is still inside the window [`deriv`] allows, going by the
@@ -2770,7 +2802,8 @@ mod tests {
     #[test]
     fn a_capability_that_covers_nothing_leaves_the_planes_to_answer_too() {
         let _turn = turn();
-        // Bottom and null cover nothing, so they permit nothing and need no case of their own.
+        // Bottom and a missing one cover nothing, so they permit nothing and need no case of their
+        // own.
         // Bottom matters most: it says nobody owns the address, which is the lifetime check's
         // refusal and not this one's, and refusing here would put the wrong sentence in the report.
         let ptr = alloc(64);
@@ -2780,6 +2813,25 @@ mod tests {
         assert!(refused(|| bounds(at(ptr, 60), 8)));
         // SAFETY: `ptr` is a live instance.
         unsafe { dealloc(ptr) };
+    }
+
+    #[test]
+    fn the_capability_of_a_null_pointer_is_refused_wherever_the_access_lands() {
+        let _turn = turn();
+        // Document 03's S6. No region covers the low page, so the planes have nothing to say and a
+        // plain bottom capability lets the access through to fault. The null one refuses it, at
+        // null itself and at a member far enough into a large structure to be past the low page.
+        let null = recover::recover(core::ptr::null());
+        assert!(null.is_null());
+        assert!(refused(|| within(core::ptr::null(), 4, &null)));
+        assert!(refused(|| within(8192 as *const c_void, 4, &null)));
+        assert!(refused(|| within(core::ptr::null(), 4, &null.narrowed(0, 4))));
+        // Plain bottom over the same address still leaves it to the hardware, which is the
+        // difference the flag makes, and so does a check with no capability at all.
+        assert!(!refused(|| within(core::ptr::null(), 4, &Cap::BOTTOM)));
+        assert!(!refused(|| bounds(core::ptr::null(), 4)));
+        // A loop over a null pointer gets no unchecked half, so its first access meets the check.
+        assert_eq!(extent(core::ptr::null(), 64), 0);
     }
 
     #[test]
