@@ -450,6 +450,7 @@ impl Checker<'_> {
         // The specifiers only, for the reason `noreturn` above reads them only.
         self.record_notices(id, &[specs.attrs], DeclKind::Function);
         self.cf_checked(&[specs.attrs], DeclKind::Function);
+        self.expected_throws(&[specs.attrs], DeclKind::Function);
         self.force_aligned(&[specs.attrs], ty);
         self.no_reordered(&[specs.attrs], true);
         self.strict_flex_refused(&[specs.attrs], Some(name));
@@ -976,6 +977,7 @@ impl Checker<'_> {
         // declarator of a function declared inside the block that calls it.
         self.record_notices(id, &[specs.attrs, item.attrs], kind);
         self.cf_checked(&[specs.attrs, item.attrs], kind);
+        self.expected_throws(&[specs.attrs, item.attrs], kind);
         self.force_aligned(&[specs.attrs, item.attrs], ty);
         self.no_reordered(&[specs.attrs, item.attrs], true);
         self.strict_flex_refused(&[specs.attrs, item.attrs], Some(name));
@@ -1105,6 +1107,7 @@ impl Checker<'_> {
         }
         // A typedef is not a function, whatever type it names.
         self.cf_checked(&[specs.attrs, item.attrs], DeclKind::Type);
+        self.expected_throws(&[specs.attrs, item.attrs], DeclKind::Type);
         self.force_aligned(&[specs.attrs, item.attrs], ty);
         self.no_reordered(&[specs.attrs, item.attrs], false);
         self.strict_flex_refused(&[specs.attrs, item.attrs], Some(name));
