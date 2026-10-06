@@ -4651,6 +4651,11 @@ impl<'a> Lowering<'a> {
         {
             return Err(self.unsupported(inst));
         }
+        // A constant is written in each block that reads it, by [`Self::reg_of`], so here it is
+        // nothing. See [`Rebuilt`].
+        if self.rebuilt(result).is_some() {
+            return Ok(());
+        }
         let reg = self.reg_of(arg)?;
         self.regs[result.index()] = Some(reg);
         Ok(())
@@ -8727,8 +8732,11 @@ impl<'a> Lowering<'a> {
         match rebuilt {
             Some(Rebuilt::Constant(inst)) => {
                 // Cleared so that the register the constant is written into is a new one rather
-                // than the one the block above wrote, which is still being read up there.
+                // than the one the block above wrote, which is still being read up there. The
+                // value may be a cast of the constant, and the register is the constant's.
+                let made = self.source[inst].first_result.ok_or_else(|| self.unsupported(inst))?;
                 self.regs[value.index()] = None;
+                self.regs[made.index()] = None;
                 // Nothing is refused here. A constant is written on its own, out of the loop over
                 // the block, and the operands of the rule that writes one are the number and
                 // nothing else.
@@ -8742,8 +8750,11 @@ impl<'a> Lowering<'a> {
                 // one where the IR wrote it, so a rule that lowers a constant fires from nowhere
                 // else and would be reported as a rule nothing reaches.
                 self.fired.mark(matched.rule);
+                let reg = self.regs[made.index()].expect("a constant is written into a register");
+                self.regs[value.index()] = Some(reg);
                 self.written[value.index()] = Some((here, self.crossed));
-                Ok(self.regs[value.index()].expect("a constant is written into a register"))
+                self.written[made.index()] = Some((here, self.crossed));
+                Ok(reg)
             }
             Some(Rebuilt::Local(inst)) => self.local_address(inst, value),
             Some(Rebuilt::Name(inst)) => {
@@ -8763,6 +8774,19 @@ impl<'a> Lowering<'a> {
         let data = &self.source[inst];
         match data.opcode {
             Opcode::IConst => Some(Rebuilt::Constant(inst)),
+            // A constant cast between a number and an address, which is the same constant. A null
+            // pointer is one, and written where the IR put it, it is a register holding zero in
+            // front of a comparison that reads the zero as an immediate and not the register.
+            Opcode::PtrToInt | Opcode::IntToPtr => {
+                let &[inner] = &self.source[data.args] else { return None };
+                let result = data.first_result?;
+                if !self.is_address_width(self.source[inner].ty)
+                    || !self.is_address_width(self.source[result].ty)
+                {
+                    return None;
+                }
+                self.rebuilt(inner).filter(|rebuilt| matches!(rebuilt, Rebuilt::Constant(_)))
+            }
             Opcode::Alloca if self.source[data.args].is_empty() => Some(Rebuilt::Local(inst)),
             Opcode::GlobalAddr => match data.extra {
                 Extra::Symbol(symbol) if !self.elsewhere.thread(symbol) => {

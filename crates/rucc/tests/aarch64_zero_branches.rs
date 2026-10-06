@@ -81,6 +81,31 @@ fn a_comparison_with_anything_else_keeps_its_flags() {
     assert!(!seven.iter().any(|line| line.starts_with("cb")), "{text}");
 }
 
+/// The null pointer `walk` compares against is the `#0` the `cbnz` reads, not a register, so the
+/// loop writes no zero on each turn for nothing to read.
+#[test]
+fn the_null_pointer_is_not_written_into_the_loop() {
+    let text = listing();
+    let lines: Vec<&str> = text
+        .lines()
+        .skip_while(|line| *line != "walk:")
+        .take_while(|line| !line.starts_with("\t.size"))
+        .collect();
+    let back = lines
+        .iter()
+        .find_map(|line| line.trim().strip_prefix("cbnz x1, "))
+        .unwrap_or_else(|| panic!("{text}"));
+    let top = lines
+        .iter()
+        .position(|line| *line == format!("{back}:"))
+        .unwrap_or_else(|| panic!("{text}"));
+    let turn = &lines[top..];
+    assert!(
+        !turn.iter().any(|line| line.starts_with("\tmov ") && line.ends_with(", #0")),
+        "{text}"
+    );
+}
+
 /// The integrated assembler takes the new instructions too.
 #[test]
 fn the_object_assembles() {
