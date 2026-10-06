@@ -9316,6 +9316,8 @@ mod tests {
             "-fno-stack-check",
             "-fno-dwarf2-cfi-asm",
             "-femit-struct-debug-baseonly",
+            "-femit-struct-debug-reduced",
+            "-femit-struct-debug-detailed=any",
             "-fdiagnostics-show-context=2",
             "-fjump-tables",
             "-ftrivial-auto-var-init=uninitialized",
