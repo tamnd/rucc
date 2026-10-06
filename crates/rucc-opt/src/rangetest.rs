@@ -1,15 +1,16 @@
 //! Range tests: comparisons of one value against constants, joined by `and` and `or`, become the
 //! fewest tests of the set of values that passes.
 //!
-//! Section 19.4 of `spec/optimizer/19-reassociation-and-arithmetic.md`, the single block version.
+//! Section 19.4 of `spec/optimizer/19-reassociation-and-arithmetic.md`, in one block and across a
+//! chain of them.
 //! `x == 1 || x == 2 || x == 3 || x == 7` is four comparisons and three `or`s, and read as a set it
 //! is `x` in `[1, 3]` or `x` is `7`. The first of those is `(unsigned)(x - 1) <= 2`, one subtract
 //! and one comparison, and `c >= '0' && c <= '9'` is the same shape with an `and`.
 //!
-//! By the time this pass runs `short-circuit` has already turned the `||` into an `or` of bits in
-//! one block, so what it sees is a tree like the ones `reassoc` sees: a root `and` or `or` of type
-//! `i1`, and under it every operand of the same operation defined in the same block and used by
-//! nothing else.
+//! At `-O2` and `-O3` `short-circuit` has already turned the `||` into an `or` of bits in one block
+//! by the time this pass runs, so what it sees is a tree like the ones `reassoc` sees: a root `and`
+//! or `or` of type `i1`, and under it every operand of the same operation defined in the same block
+//! and used by nothing else.
 //!
 //! # Sets
 //!
@@ -35,13 +36,32 @@
 //!
 //! A value whose rewritten form is not cheaper than the comparisons it had is left as it was, and
 //! comparisons of other values stay where they are in the tree.
+//!
+//! # Chains of branches
+//!
+//! At `-O1`, `-Os` and `-Oz` there is no `short-circuit`, so the comparisons are still a chain of
+//! blocks, each asking about `x` and branching. The first block may hold anything. Every block
+//! after it holds nothing but its comparisons and their constants, is reached only from the block
+//! before it, and sends one of its two edges where all the others send one. That place is reached
+//! when `x` is in the union of what each block sends there, so the first block can ask that once
+//! and go straight to where the last block went otherwise, and nothing reaches the rest of the
+//! chain. This is the cross block half of gcc's `optimize_range_tests`, which
+//! `maybe_optimize_range_tests` at `gcc/tree-ssa-reassoc.cc` does. Asking the later comparisons on
+//! a path that did not ask them is safe because a comparison of an integer with a constant cannot
+//! trap and does nothing else.
+//!
+//! The chain is weighed as a tree is, by its comparisons, and written back in the same forms. A
+//! chain the pass takes is one branch where it was several, which is what tamnd/rucc#3017 measured
+//! missing at those levels.
 
 use rucc_base::hash::{Map, Set};
 use rucc_cost::heuristics::RANGE_TEST_BIT_INTERVALS;
-use rucc_ir::{Block, Def, Extra, Func, Imm, Inst, InstData, IntPred, Opcode, Type, Value};
+use rucc_ir::{
+    Block, BlockCall, Def, Extra, Func, Imm, Inst, InstData, IntPred, Opcode, Type, Value,
+};
 
 use crate::uses::{count, operands, substitute};
-use crate::{Analyses, Analysis, Fuel, Pass, Preserved, Stats};
+use crate::{Analyses, Fuel, Pass, Preserved, Stats};
 
 /// What this pass is called, for the lists in [`crate::pipeline`] that name it.
 pub const NAME: &str = "rangetest";
@@ -54,6 +74,9 @@ const BITS: &str = "comparisons of one value merged into a bit test";
 
 /// Recorded for comparisons that decide nothing because their set is empty or everything.
 const SETTLED: &str = "comparisons of one value that are always true or always false";
+
+/// Recorded for a chain of branches on one value made one branch in the block it starts in.
+const CHAINED: &str = "branches on comparisons of one value merged into one test";
 
 /// Recorded for a tree that would have been rewritten if there had been fuel for it.
 const NO_FUEL: &str = "comparisons left as they were, the pass ran out of fuel";
@@ -72,12 +95,14 @@ impl Pass for RangeTest {
     }
 
     fn preserves(&self) -> Preserved {
-        // Instructions come and go inside blocks and no edge moves.
-        Preserved::ALL.without(Analysis::Liveness)
+        // A chain merged into its first block takes the rest of the chain and its edges away, so
+        // the graph is not the one anything was built on.
+        Preserved::NONE
     }
 
-    fn run(&self, func: &mut Func, _an: &mut Analyses, fuel: &mut Fuel) -> Stats {
+    fn run(&self, func: &mut Func, an: &mut Analyses, fuel: &mut Fuel) -> Stats {
         let mut stats = Stats::new();
+        chains(func, an, fuel, &mut stats);
         let uses = count(func);
         let mut inside: Set<Inst> = Set::default();
         let mut forward: Map<Value, Value> = Map::default();
@@ -373,30 +398,8 @@ impl Plan {
     fn build(&self, func: &mut Func, before: Inst, op: Opcode, stats: &mut Stats) -> Value {
         let mut bits = self.kept.clone();
         for (value, ty, form) in &self.forms {
-            let bit = match form {
-                Form::Constant(yes) => {
-                    stats.optimized(SETTLED);
-                    constant(func, before, Type::I1, i128::from(*yes))
-                }
-                Form::Intervals { negated, intervals } => {
-                    stats.optimized(INTERVALS);
-                    let join = if *negated { Opcode::And } else { Opcode::Or };
-                    let mut acc: Option<Value> = None;
-                    for &(from, to) in intervals {
-                        let test = interval(func, before, *value, *ty, from, to, *negated);
-                        acc = Some(match acc {
-                            None => test,
-                            Some(had) => binary(func, before, join, had, test, Type::I1),
-                        });
-                    }
-                    acc.expect("a set that is not empty has an interval")
-                }
-                Form::Bits { base, span, word } => {
-                    stats.optimized(BITS);
-                    bit_test(func, before, *value, *ty, *base, *span, *word)
-                }
-            };
-            bits.push(bit);
+            stats.optimized(form.said());
+            bits.push(test(func, before, *value, *ty, form));
         }
         let mut acc = bits[0];
         for &bit in &bits[1..] {
@@ -404,6 +407,244 @@ impl Plan {
         }
         acc
     }
+}
+
+impl Form {
+    /// What is recorded for a tree written in this form.
+    const fn said(&self) -> &'static str {
+        match self {
+            Self::Constant(_) => SETTLED,
+            Self::Intervals { .. } => INTERVALS,
+            Self::Bits { .. } => BITS,
+        }
+    }
+}
+
+/// The bit that is true when `value` is in the set the form tests, written in front of `before`.
+fn test(func: &mut Func, before: Inst, value: Value, ty: Type, form: &Form) -> Value {
+    match form {
+        Form::Constant(yes) => constant(func, before, Type::I1, i128::from(*yes)),
+        Form::Intervals { negated, intervals } => {
+            let join = if *negated { Opcode::And } else { Opcode::Or };
+            let mut acc: Option<Value> = None;
+            for &(from, to) in intervals {
+                let test = interval(func, before, value, ty, from, to, *negated);
+                acc = Some(match acc {
+                    None => test,
+                    Some(had) => binary(func, before, join, had, test, Type::I1),
+                });
+            }
+            acc.expect("a set that is not empty has an interval")
+        }
+        Form::Bits { base, span, word } => bit_test(func, before, value, ty, *base, *span, *word),
+    }
+}
+
+/// Merges every chain of branches on one value into the block it starts in.
+fn chains(func: &mut Func, an: &mut Analyses, fuel: &mut Fuel, stats: &mut Stats) {
+    if func.entry().is_none() {
+        return;
+    }
+    // From the top down, so that a chain is met at its first block and not partway along it.
+    let order: Vec<Block> = an.cfg(func).reverse_postorder().collect();
+    // A block whose address is taken can be reached by a jump nobody can see, so it is never one
+    // to take away.
+    let addressed = crate::copy::addressed(func);
+    let mut uses = count(func);
+    let mut into = incoming(func);
+    let mut gone: Set<Block> = Set::default();
+    for head in order {
+        if gone.contains(&head) {
+            continue;
+        }
+        let known = Known { uses: &uses, into: &into, addressed: &addressed };
+        let Some(chain) = Chain::of(func, &known, head) else { continue };
+        if !fuel.take() {
+            stats.missed(NO_FUEL);
+            return;
+        }
+        gone.extend(chain.rest.iter().copied());
+        chain.write(func);
+        stats.optimized(CHAINED);
+        uses = count(func);
+        into = incoming(func);
+    }
+}
+
+/// How many edges come into each block.
+fn incoming(func: &Func) -> Map<Block, u32> {
+    let mut into: Map<Block, u32> = Map::default();
+    for block in func.blocks() {
+        let Some(term) = func.terminator(block) else { continue };
+        for call in func.successors(term) {
+            *into.entry(call.block).or_insert(0) += 1;
+        }
+    }
+    into
+}
+
+/// What is known about the function while a chain is looked for.
+struct Known<'a> {
+    uses: &'a [u32],
+    into: &'a Map<Block, u32>,
+    addressed: &'a Set<Block>,
+}
+
+/// A chain of branches on one value, from the block it starts in.
+struct Chain {
+    head: Block,
+    /// The blocks after the head, which nothing reaches once the head asks the whole question.
+    rest: Vec<Block>,
+    /// Which edge of the head's branch every block of the chain has one of, the first or the
+    /// second.
+    common: usize,
+    /// Where the last block went when the value was not in the set, which is where the head's
+    /// other edge goes now.
+    out: BlockCall,
+    value: Value,
+    ty: Type,
+    form: Form,
+    /// The comparisons the head's own condition was read from, which go when nothing reads them.
+    consumed: Vec<Inst>,
+}
+
+impl Chain {
+    /// The chain that starts in this block, when there is one and one test is cheaper than its
+    /// comparisons.
+    fn of(func: &Func, known: &Known<'_>, head: Block) -> Option<Self> {
+        let term = func.terminator(head)?;
+        if func[term].opcode != Opcode::BrIf {
+            return None;
+        }
+        let edges: Vec<BlockCall> = func.successors(term).collect();
+        let mut read =
+            Read { func, uses: known.uses, block: head, consumed: Vec::new(), compares: 0 };
+        let (value, first) = read.set(func[func[term].args][0])?;
+        let ty = func[value].ty;
+        let top = max(ty);
+        for common in 0..2 {
+            let target = edges[common];
+            // The values that take the edge every block of the chain has.
+            let mut set = if common == 0 { first.clone() } else { complement(&first, top) };
+            let mut compares = read.compares;
+            let mut rest: Vec<Block> = Vec::new();
+            let mut next = edges[1 - common];
+            loop {
+                if next.block == head || next.block == target.block || rest.contains(&next.block) {
+                    break;
+                }
+                let Some(Link { set: more, compares: asked, other: out }) =
+                    link(func, known, next, value, target)
+                else {
+                    break;
+                };
+                set = union(&set, &more);
+                compares += asked;
+                rest.push(next.block);
+                next = out;
+            }
+            if rest.is_empty() {
+                continue;
+            }
+            // The branch takes its first edge when its bit is true, so the bit is the set that
+            // goes that way.
+            let taken = if common == 0 { set } else { complement(&set, top) };
+            let mut group = Group::new(value, ty, taken);
+            group.compares = compares;
+            let Some(form) = group.form() else { continue };
+            let consumed = read.consumed.clone();
+            return Some(Self { head, rest, common, out: next, value, ty, form, consumed });
+        }
+        None
+    }
+
+    /// Asks the whole question in the head, sends its other edge where the chain ended, and takes
+    /// the rest of the chain away.
+    fn write(self, func: &mut Func) {
+        let term = func.terminator(self.head).expect("the head of a chain ends in its branch");
+        let bit = test(func, term, self.value, self.ty, &self.form);
+        let args = func[term].args;
+        func.rewrite(args, |_| bit);
+        let at =
+            func.target_list(term).iter().nth(1 - self.common).expect("a branch has two edges");
+        func.set_block_call(at, self.out);
+        for block in self.rest {
+            func.remove_block(block);
+        }
+        sweep(func, self.consumed);
+    }
+}
+
+/// What one block after the head adds to a chain.
+#[derive(Debug)]
+struct Link {
+    /// The values of the chain's value that take the edge the chain leaves by.
+    set: Vec<(u64, u64)>,
+    /// How many comparisons that was read from.
+    compares: u32,
+    /// Where the block goes otherwise, which is the next link if there is one.
+    other: BlockCall,
+}
+
+/// The [`Link`] that the block `call` reaches is, if it is one.
+///
+/// The block has to be reached only by `call`, take nothing, end in a branch with one edge the
+/// same as `common`, and hold nothing but comparisons of `value` and their constants, none of them
+/// read anywhere else. Then nothing is lost when it goes.
+fn link(
+    func: &Func,
+    known: &Known<'_>,
+    call: BlockCall,
+    value: Value,
+    common: BlockCall,
+) -> Option<Link> {
+    let block = call.block;
+    if known.into.get(&block).copied() != Some(1)
+        || known.addressed.contains(&block)
+        || !func[block].params.is_empty()
+    {
+        return None;
+    }
+    let term = func.terminator(block)?;
+    if func[term].opcode != Opcode::BrIf {
+        return None;
+    }
+    let edges: Vec<BlockCall> = func.successors(term).collect();
+    let same =
+        |edge: &BlockCall| edge.block == common.block && func[edge.args] == func[common.args];
+    let at = match (same(&edges[0]), same(&edges[1])) {
+        (true, false) => 0,
+        (false, true) => 1,
+        _ => return None,
+    };
+    let mut read = Read { func, uses: known.uses, block, consumed: Vec::new(), compares: 0 };
+    let (asked, set) = read.set(func[func[term].args][0])?;
+    if asked != value {
+        return None;
+    }
+    let mut inside: Map<Value, u32> = Map::default();
+    for inst in func.insts(block) {
+        for &arg in &func[func[inst].args] {
+            *inside.entry(arg).or_insert(0) += 1;
+        }
+    }
+    for inst in func.insts(block) {
+        if func.is_terminator(inst) {
+            continue;
+        }
+        if func[inst].opcode != Opcode::IConst && !read.consumed.contains(&inst) {
+            return None;
+        }
+        // Every use inside the block, and none on an edge or anywhere else.
+        if func[inst]
+            .results()
+            .any(|result| inside.get(&result).copied().unwrap_or(0) != known.uses[result.index()])
+        {
+            return None;
+        }
+    }
+    let set = if at == 0 { set } else { complement(&set, max(func[value].ty)) };
+    Some(Link { set, compares: read.compares, other: edges[1 - at] })
 }
 
 /// Whether `value` is in `[from, to]`, or with `negated`, whether it is not.
@@ -876,6 +1117,231 @@ block0(%0: i32):
 "#;
         let out = cleaned(body);
         assert!(out.contains("%5 = or %2, %4"), "{out}");
+    }
+
+    /// `x == 1 || x == 2 || x == 3` at `-O1`, once `simplify-cfg` has merged what `thread` left: three
+    /// blocks, each comparing and branching to the call when it holds.
+    const CHAIN: &str = r#"
+func @hit(), linkage(external);
+
+func @f(i32), linkage(external) {
+block0(%0: i32):
+    %1 = iconst.i32 1
+    %2 = icmp eq %0, %1
+    %3 = iconst.i1 -1
+    br_if %2, block3, block1
+
+block1:
+    %4 = iconst.i32 2
+    %5 = icmp eq %0, %4
+    %6 = iconst.i1 -1
+    br_if %5, block3, block2
+
+block2:
+    %7 = iconst.i32 3
+    %8 = icmp eq %0, %7
+    br_if %8, block3, block4
+
+block3:
+    call @hit() : ()
+    jump block4
+
+block4:
+    return
+}
+"#;
+
+    fn branches(out: &str) -> usize {
+        out.lines().filter(|line| line.trim_start().starts_with("br_if")).count()
+    }
+
+    /// How many blocks there are, which the printer numbers again from zero once some have gone.
+    fn blocks(out: &str) -> usize {
+        out.lines().filter(|line| line.starts_with("block")).count()
+    }
+
+    #[test]
+    fn a_chain_of_branches_is_one_test_in_its_first_block() {
+        let out = cleaned(CHAIN);
+        assert_eq!(branches(&out), 1, "{out}");
+        assert_eq!(count(&out, "icmp"), 1, "{out}");
+        assert!(out.contains("icmp ule") && out.contains("= sub %0"), "{out}");
+        assert_eq!(blocks(&out), 3, "{out}");
+        assert!(out.contains(", block1, block2"), "{out}");
+    }
+
+    /// `c >= '0' && c <= '9'` sends the other way round: every block leaves for the end when its
+    /// comparison fails, so the set is the one that reaches the call.
+    #[test]
+    fn a_chain_that_leaves_when_a_comparison_fails_is_its_intersection() {
+        let out = cleaned(
+            r#"
+func @hit(), linkage(external);
+
+func @f(i32), linkage(external) {
+block0(%0: i32):
+    %1 = iconst.i32 48
+    %2 = icmp sge %0, %1
+    br_if %2, block1, block3
+
+block1:
+    %3 = iconst.i32 57
+    %4 = icmp sle %0, %3
+    br_if %4, block2, block3
+
+block2:
+    call @hit() : ()
+    jump block3
+
+block3:
+    return
+}
+"#,
+        );
+        assert_eq!(branches(&out), 1, "{out}");
+        assert!(out.contains("icmp ule") && out.contains("iconst.i32 9"), "{out}");
+        assert_eq!(blocks(&out), 3, "{out}");
+        assert!(out.contains(", block1, block2"), "{out}");
+    }
+
+    /// `x != 3 && x != 4 && x != 5` leaves for the end on each equality, and the values that reach
+    /// the call are everything outside `[3, 5]`, which is one test of the complement.
+    #[test]
+    fn a_chain_of_inequalities_is_one_test_of_what_they_leave_out() {
+        let out = cleaned(
+            r#"
+func @hit(), linkage(external);
+
+func @f(i32), linkage(external) {
+block0(%0: i32):
+    %1 = iconst.i32 3
+    %2 = icmp ne %0, %1
+    br_if %2, block1, block4
+
+block1:
+    %3 = iconst.i32 4
+    %4 = icmp ne %0, %3
+    br_if %4, block2, block4
+
+block2:
+    %5 = iconst.i32 5
+    %6 = icmp ne %0, %5
+    br_if %6, block3, block4
+
+block3:
+    call @hit() : ()
+    jump block4
+
+block4:
+    return
+}
+"#,
+        );
+        assert_eq!(branches(&out), 1, "{out}");
+        assert_eq!(count(&out, "icmp"), 1, "{out}");
+        assert!(out.contains("icmp ugt") && out.contains("iconst.i32 2"), "{out}");
+        assert_eq!(blocks(&out), 3, "{out}");
+        assert!(out.contains(", block1, block2"), "{out}");
+    }
+
+    /// A block that does something else, one that something else also reaches, one that hands the
+    /// common block another argument, and one asking about another value all stop the chain.
+    #[test]
+    fn a_block_that_is_more_than_a_comparison_ends_the_chain() {
+        let body = r#"
+func @hit(), linkage(external);
+
+func @busy(i32), linkage(external) {
+block0(%0: i32):
+    %1 = iconst.i32 1
+    %2 = icmp eq %0, %1
+    br_if %2, block2, block1
+
+block1:
+    call @hit() : ()
+    %3 = iconst.i32 2
+    %4 = icmp eq %0, %3
+    br_if %4, block2, block3
+
+block2:
+    call @hit() : ()
+    jump block3
+
+block3:
+    return
+}
+
+func @shared(i32, i1), linkage(external) {
+block0(%0: i32, %1: i1):
+    br_if %1, block2, block1
+
+block1:
+    %2 = iconst.i32 1
+    %3 = icmp eq %0, %2
+    br_if %3, block4, block2
+
+block2:
+    %4 = iconst.i32 2
+    %5 = icmp eq %0, %4
+    br_if %5, block4, block3
+
+block3:
+    return
+
+block4:
+    call @hit() : ()
+    return
+}
+
+func @args(i32) -> i32, linkage(external) {
+block0(%0: i32):
+    %1 = iconst.i32 1
+    %2 = icmp eq %0, %1
+    %3 = iconst.i32 7
+    br_if %2, block2(%3), block1
+
+block1:
+    %4 = iconst.i32 2
+    %5 = icmp eq %0, %4
+    %6 = iconst.i32 8
+    br_if %5, block2(%6), block3
+
+block2(%7: i32):
+    return %7
+
+block3:
+    %8 = iconst.i32 0
+    return %8
+}
+
+func @other(i32, i32), linkage(external) {
+block0(%0: i32, %1: i32):
+    %2 = iconst.i32 1
+    %3 = icmp eq %0, %2
+    br_if %3, block2, block1
+
+block1:
+    %4 = iconst.i32 2
+    %5 = icmp eq %1, %4
+    br_if %5, block2, block3
+
+block2:
+    call @hit() : ()
+    jump block3
+
+block3:
+    return
+}
+"#;
+        let out = cleaned(body);
+        assert_eq!(branches(&out), 9, "{out}");
+        assert_eq!(count(&out, "icmp"), 8, "{out}");
+    }
+
+    #[test]
+    fn fuel_stops_a_chain() {
+        let none = run(CHAIN, &mut Fuel::of(0));
+        assert_eq!(branches(&none), 3, "{none}");
     }
 
     #[test]
