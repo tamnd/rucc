@@ -21,6 +21,8 @@ tests/
                exclusions for each target it runs on                                  W6
   torture/     the GCC torture execute runner, and the exclusions for each target it
                runs on                                                                 WA3
+  wasm-link/   the check that the linker inside rucc writes the module that wasm-ld
+               writes                                                                  WA5
   web/         rucc.wasm as the browser page of web/ runs it, over browser_wasi_shim
                in Node                                                                 WA5
   litmus/      memory model litmus tests for PostgreSQL's barriers and atomics, run on

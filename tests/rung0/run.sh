@@ -14,6 +14,11 @@
 # `wasm-tools validate`. Each program is then also compiled with -c, and the object and the linked
 # program both go to that command. A file that it rejects fails the program.
 #
+# SAME_LINK, when it is set, is a command that compares two wasm modules, and the wasm job sets it
+# to tests/wasm-link/same.sh. Each program is then also linked by the linker inside rucc, with
+# -fuse-ld=rucc, and the command gets the module from `wasm-ld` and that module. The second module
+# also runs and must print what the suite expects.
+#
 # tests/rung0/exclude-<triple>.txt names the programs left out, one per line, each with the issue
 # that tracks it. A line with no issue number fails the run, and so does an excluded program that
 # passes, so the list can only shrink.
@@ -76,6 +81,8 @@ case $triple in
 wasm32-wasi*) libraries=-lc-printscan-long-double ;;
 esac
 
+mkdir "$out/in"
+
 excluded() {
 	[ -f "$exclude" ] && grep -q "^$1 " "$exclude"
 }
@@ -93,6 +100,9 @@ for source in "$cases"/*.c; do
 	done
 	for level in 0 2; do
 		binary=$out/$name-O$level$suffix
+		# The module from the linker inside rucc has the same file name in another directory,
+		# because the name section holds the file name.
+		inside=$out/in/$name-O$level$suffix
 		result=ok
 		if ! $rucc --target="$triple" -std=$std $defines -O$level -o "$binary" "$source" $libraries -lm >"$out/build.log" 2>&1; then
 			result='did not build'
@@ -102,6 +112,10 @@ for source in "$cases"/*.c; do
 			result='exited nonzero'
 		elif ! tr -d '\r' <"$binary.raw" | cmp -s "$source.expected" -; then
 			result='printed something else'
+		elif [ -n "${SAME_LINK:-}" ] && ! { $rucc --target="$triple" -std=$std $defines -O$level -fuse-ld=rucc -o "$inside" "$source" $libraries -lm && $SAME_LINK "$binary" "$inside"; } >"$out/build.log" 2>&1; then
+			result='linked to another module inside rucc'
+		elif [ -n "${SAME_LINK:-}" ] && ! { ${RUNNER:-} "$inside" >"$inside.raw" 2>/dev/null && tr -d '\r' <"$inside.raw" | cmp -s "$source.expected" -; }; then
+			result='printed something else when linked inside rucc'
 		fi
 		if excluded "$name"; then
 			if [ "$result" = ok ]; then
