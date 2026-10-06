@@ -172,7 +172,21 @@ impl<'w, 'a> Writer<'w, 'a> {
                 }
             }
         }
-        // The types in the order the sections use them.
+        // The types in LLD's order. First the ones a live `call_indirect` names, which can be
+        // types that no function in the module has, in the order of the relocations. Then the
+        // types of the imports, of the functions and of the tags.
+        for (file, object) in world.files.iter().enumerate() {
+            for (index, ranges) in live.code[file].iter().enumerate() {
+                if !live.funcs[file][index] {
+                    continue;
+                }
+                for reloc in &object.code_relocs[ranges.clone()] {
+                    if reloc.kind == 6 {
+                        self.ty(object.types[reloc.index as usize]);
+                    }
+                }
+            }
+        }
         for &i in &self.import_order.clone() {
             self.ty(world.imports[i].ty);
         }
@@ -184,19 +198,6 @@ impl<'w, 'a> Writer<'w, 'a> {
             for (index, &ty) in object.tags.iter().enumerate() {
                 if live.tags[file][index] {
                     self.ty(object.types[ty as usize]);
-                }
-            }
-        }
-        // A `call_indirect` can name a type that no function in the module has.
-        for (file, object) in world.files.iter().enumerate() {
-            for (index, ranges) in live.code[file].iter().enumerate() {
-                if !live.funcs[file][index] {
-                    continue;
-                }
-                for reloc in &object.code_relocs[ranges.clone()] {
-                    if reloc.kind == 6 {
-                        self.ty(object.types[reloc.index as usize]);
-                    }
                 }
             }
         }
@@ -486,7 +487,7 @@ impl<'w, 'a> Writer<'w, 'a> {
         }
 
         if !options.strip {
-            custom(&mut out, "name", &self.names());
+            custom(&mut out, "name", &self.names(options));
         }
         let producers = self.producers();
         if !producers.is_empty() {
@@ -602,7 +603,7 @@ impl<'w, 'a> Writer<'w, 'a> {
     }
 
     /// The `name` section: the function names, the global names and the data segment names.
-    fn names(&self) -> Vec<u8> {
+    fn names(&self, options: &Options) -> Vec<u8> {
         let world = self.world;
         let mut funcs: Vec<(u32, &str)> = Vec::new();
         for &i in &self.import_order {
@@ -615,15 +616,21 @@ impl<'w, 'a> Writer<'w, 'a> {
             funcs.push((index, "undefined_weak"));
         }
         for (file, object) in world.files.iter().enumerate() {
+            // The name from the object's own `name` section, and else the first symbol that
+            // defines the function, which are the two names `wasm-ld` takes, in its order.
             let imported = object.func_imports.len() as u32;
             let mut named = vec![None; object.funcs.len()];
             for symbol in &object.symbols {
                 if symbol.kind != Kind::Function || symbol.is_undefined() {
                     continue;
                 }
-                let slot = &mut named[(symbol.index - imported) as usize];
-                if slot.is_none() || !symbol.is_local() {
-                    *slot = Some(symbol.name);
+                named[(symbol.index - imported) as usize].get_or_insert(symbol.name);
+            }
+            for &(index, name) in &object.func_names {
+                if let Some(slot) =
+                    index.checked_sub(imported).and_then(|i| named.get_mut(i as usize))
+                {
+                    *slot = Some(name);
                 }
             }
             for (index, name) in named.into_iter().enumerate() {
@@ -634,11 +641,19 @@ impl<'w, 'a> Writer<'w, 'a> {
         }
         funcs.sort_unstable_by_key(|&(index, _)| index);
         let mut s = Vec::new();
+        if let Some(module) = &options.name {
+            let mut sub = Vec::new();
+            name(&mut sub, module);
+            subsection(&mut s, 0, &sub);
+        }
         let mut sub = Vec::new();
         uleb(&mut sub, funcs.len() as u64);
         for (index, func) in funcs {
             uleb(&mut sub, u64::from(index));
-            name(&mut sub, func);
+            // A `main` that takes arguments is `__main_argc_argv` in the object, because a call
+            // and its callee must have the same type on wasm. `wasm-ld` shows it as `main`. It
+            // also demangles C++ names, and there are none in C.
+            name(&mut sub, if func == "__main_argc_argv" { "main" } else { func });
         }
         subsection(&mut s, 1, &sub);
         let mut globals: Vec<(u32, &str)> = Vec::new();

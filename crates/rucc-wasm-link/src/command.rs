@@ -161,6 +161,7 @@ impl Command {
             at += 1;
         }
         let output = output.ok_or_else(|| Error::new("there is no -o on the line".to_owned()))?;
+        options.name = output.file_name().map(|name| name.to_string_lossy().into_owned());
         let mut inputs = Vec::with_capacity(pending.len());
         for input in pending {
             match input {
@@ -231,6 +232,7 @@ mod tests {
         );
         let command = Command::parse(&args, |path| path == Path::new("/s/lib/libm.a")).unwrap();
         assert_eq!(command.output, Path::new("a.wasm"));
+        assert_eq!(command.options.name.as_deref(), Some("a.wasm"));
         let inputs: Vec<_> = command.inputs.iter().map(|p| p.to_str().unwrap()).collect();
         assert_eq!(
             inputs,
@@ -243,7 +245,10 @@ mod tests {
                 "/r/librucc_builtins.a"
             ]
         );
-        assert_eq!(command.options, Options::default());
+        assert_eq!(
+            command.options,
+            Options { name: Some("a.wasm".to_owned()), ..Options::default() }
+        );
     }
 
     #[test]

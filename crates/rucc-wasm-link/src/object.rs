@@ -170,6 +170,9 @@ pub struct Object<'a> {
     pub features: Vec<(u8, &'a str)>,
     /// The `producers` section: the field, then the name and the version of each value.
     pub producers: Vec<(&'a str, Vec<(&'a str, &'a str)>)>,
+    /// The function names of the `name` section: the function index, imports counted, and the
+    /// name. `wasm-ld` gives a function this name in the output in place of a symbol name.
+    pub func_names: Vec<(u32, &'a str)>,
 }
 
 /// Whether a relocation type has an addend.
@@ -260,6 +263,17 @@ impl<'a> Object<'a> {
                                 values.push((s.name()?, s.name()?));
                             }
                             self.producers.push((field, values));
+                        }
+                    } else if name == "name" {
+                        while !s.is_empty() {
+                            let id = s.byte()?;
+                            let len = s.u32()? as usize;
+                            let mut sub = Cursor::new(s.take(len)?);
+                            if id == 1 {
+                                for _ in 0..sub.count()? {
+                                    self.func_names.push((sub.u32()?, sub.name()?));
+                                }
+                            }
                         }
                     } else if name.starts_with("dylink") {
                         return Err(unsupported("a shared library (dylink.0)"));

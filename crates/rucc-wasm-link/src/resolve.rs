@@ -7,14 +7,20 @@
 //! objects in it, and a function must have the same type at its definition and at every
 //! reference.
 //!
+//! The order is LLD's too, because the order of the objects is the order of the output. An object
+//! is read symbol by symbol, and a strong reference to a name that an archive member defines loads
+//! that member at once, depth first. An archive is read member by member, and a member that
+//! defines a name a strong reference waits for loads at once. An object goes in the output when
+//! it has been read to the end, so after the members that it loaded.
+//!
 //! What is left undefined at the end is one of four things. A name the linker defines, such as
 //! `__stack_pointer` or `__heap_base`, is synthesized. A function with an explicit import name or
 //! module, such as `fd_write` of `wasi_snapshot_preview1`, is an import of the module. A weak
 //! reference is null, and a call to it traps. Anything else is an undefined symbol and an error.
 
-use std::collections::{HashMap, VecDeque};
+use std::collections::HashMap;
 
-use crate::object::{EXPLICIT_NAME, Kind, Object};
+use crate::object::{EXPLICIT_NAME, Kind, Object, Symbol};
 use crate::{Error, Input, Options, archive};
 
 /// A name the linker defines when an input refers to it and no input defines it.
@@ -112,6 +118,9 @@ enum State {
 struct Entry {
     kind: Kind,
     state: State,
+    /// The number of names in the table before this one, which is the order LLD walks its table
+    /// in, and so the order of the imports.
+    seq: usize,
     /// The first reference: the object and the symbol.
     first: Option<(usize, usize)>,
     /// Whether some reference is strong.
@@ -132,12 +141,24 @@ pub(crate) struct World<'a> {
 }
 
 struct Loader<'a> {
+    /// The objects in the order their parse started, which is the index each one is known by
+    /// while the inputs load.
     files: Vec<Object<'a>>,
+    /// The objects in the order their parse ended, which is LLD's order and the order of the
+    /// output.
+    order: Vec<usize>,
     archives: Vec<Vec<Option<Object<'a>>>>,
     table: HashMap<&'a str, Entry>,
-    queue: VecDeque<(usize, usize)>,
     /// The COMDAT groups seen, so that a second copy of a group is dropped.
     comdats: HashMap<&'a str, usize>,
+}
+
+/// An object whose symbols are being added: its index, the next symbol, and which of its
+/// definitions are in a COMDAT group that an earlier object kept.
+struct Frame {
+    file: usize,
+    next: usize,
+    dropped: Vec<bool>,
 }
 
 impl<'a> World<'a> {
@@ -145,9 +166,9 @@ impl<'a> World<'a> {
     pub(crate) fn load(options: &Options, inputs: &[Input<'a>]) -> Result<Self, Error> {
         let mut loader = Loader {
             files: Vec::new(),
+            order: Vec::new(),
             archives: Vec::new(),
             table: HashMap::new(),
-            queue: VecDeque::new(),
             comdats: HashMap::new(),
         };
         for input in inputs {
@@ -161,78 +182,105 @@ impl<'a> World<'a> {
                 }
                 loader.archives.push(objects);
                 for member in 0..loader.archives[index].len() {
-                    loader.lazy(index, member)?;
+                    if loader.lazy(index, member) {
+                        loader.extract(index, member)?;
+                    }
                 }
             } else {
-                loader.object(Object::parse(input.name, input.bytes)?)?;
+                loader.load(Object::parse(input.name, input.bytes)?)?;
             }
-            loader.drain()?;
         }
-        let roots = options.entry.iter().chain(&options.exports).chain(&options.undefined);
+        // In LLD's order, which loads the members for `-u` before the ones for the exports and
+        // those before the one for the entry.
+        let roots = options.undefined.iter().chain(&options.exports).chain(&options.entry);
         for name in roots {
-            loader.root(name);
+            loader.root(name)?;
         }
-        loader.drain()?;
         loader.finish(options)
     }
 }
 
 impl<'a> Loader<'a> {
-    /// Notes the names a member of an archive defines.
-    fn lazy(&mut self, archive: usize, member: usize) -> Result<(), Error> {
-        let object = self.archives[archive][member].as_ref().expect("a member not yet loaded");
-        let mut fetch = false;
-        for symbol in &object.symbols {
-            if symbol.is_undefined() || symbol.is_local() || symbol.kind == Kind::Section {
-                continue;
-            }
-            match self.table.get_mut(symbol.name) {
-                None => {
-                    let entry = Entry {
-                        kind: symbol.kind,
-                        state: State::Lazy(archive, member),
-                        first: None,
-                        strong: false,
-                    };
-                    self.table.insert(symbol.name, entry);
-                }
-                Some(entry) => {
-                    if let State::Undefined = entry.state {
-                        entry.state = State::Lazy(archive, member);
-                        fetch |= entry.strong;
-                    }
-                }
-            }
-        }
-        if fetch {
-            self.queue.push_back((archive, member));
-        }
-        Ok(())
+    /// Adds a name to the table, numbered in the order the names were first seen.
+    fn entry(&mut self, name: &'a str, kind: Kind, state: State) -> &mut Entry {
+        let seq = self.table.len();
+        self.table.entry(name).or_insert(Entry { kind, state, seq, first: None, strong: false })
     }
 
-    /// Loads the members that strong references asked for, and the ones those ask for.
-    fn drain(&mut self) -> Result<(), Error> {
-        while let Some((archive, member)) = self.queue.pop_front() {
-            if let Some(object) = self.archives[archive][member].take() {
-                self.object(object)?;
+    /// Notes the names a member of an archive defines, and says whether the member must load,
+    /// which is when a strong reference already waits for one of them.
+    ///
+    /// The names after the one that loads the member are not noted, because the member defines
+    /// them as it loads. That is what LLD does, and it decides the order of the names.
+    fn lazy(&mut self, archive: usize, member: usize) -> bool {
+        let object = self.archives[archive][member].as_ref().expect("a member not yet loaded");
+        let symbols: Vec<(&'a str, Kind)> = object
+            .symbols
+            .iter()
+            .filter(|s| !s.is_undefined() && !s.is_local() && s.kind != Kind::Section)
+            .map(|s| (s.name, s.kind))
+            .collect();
+        for (name, kind) in symbols {
+            let entry = self.entry(name, kind, State::Lazy(archive, member));
+            if let State::Undefined = entry.state {
+                entry.state = State::Lazy(archive, member);
+                if entry.strong {
+                    return true;
+                }
             }
         }
-        Ok(())
+        false
+    }
+
+    /// Loads a member of an archive, unless it is loaded already.
+    fn extract(&mut self, archive: usize, member: usize) -> Result<(), Error> {
+        match self.archives[archive][member].take() {
+            Some(object) => self.load(object),
+            None => Ok(()),
+        }
     }
 
     /// A name an option makes a strong reference to.
-    fn root(&mut self, name: &str) {
-        if let Some(entry) = self.table.get_mut(name) {
-            entry.strong = true;
-            if let State::Lazy(archive, member) = entry.state {
-                self.queue.push_back((archive, member));
-            }
+    fn root(&mut self, name: &str) -> Result<(), Error> {
+        let Some(entry) = self.table.get_mut(name) else { return Ok(()) };
+        entry.strong = true;
+        match entry.state {
+            State::Lazy(archive, member) => self.extract(archive, member),
+            _ => Ok(()),
         }
     }
 
-    fn object(&mut self, object: Object<'a>) -> Result<(), Error> {
+    /// Loads an object and, depth first, each member that a strong reference in it needs, at the
+    /// reference, as LLD does. An object is in the output after the members it loaded, so the
+    /// order of the output is LLD's.
+    ///
+    /// The stack is a vector and not the call stack, because a chain of members can be as long as
+    /// the archive, and rucc as wasm has a stack of one megabyte.
+    fn load(&mut self, object: Object<'a>) -> Result<(), Error> {
+        let mut stack = vec![self.start(object)];
+        while let Some(frame) = stack.last_mut() {
+            let file = frame.file;
+            let Some(symbol) = self.files[file].symbols.get(frame.next).cloned() else {
+                stack.pop();
+                self.order.push(file);
+                continue;
+            };
+            let i = frame.next;
+            frame.next += 1;
+            let dropped = frame.dropped[i];
+            if let Some((archive, member)) = self.symbol(file, i, &symbol, dropped)? {
+                if let Some(object) = self.archives[archive][member].take() {
+                    stack.push(self.start(object));
+                }
+            }
+        }
+        Ok(())
+    }
+
+    /// Takes an object in, keeps the COMDAT groups no earlier object has, and returns the frame
+    /// its symbols are added from.
+    fn start(&mut self, object: Object<'a>) -> Frame {
         let file = self.files.len();
-        let mut dropped = vec![false; object.symbols.len()];
         let mut funcs = vec![false; object.funcs.len()];
         let mut segments = vec![false; object.data.len()];
         for comdat in &object.comdats {
@@ -252,77 +300,105 @@ impl<'a> Loader<'a> {
             }
         }
         let imported = object.func_imports.len() as u32;
-        for (i, symbol) in object.symbols.iter().enumerate() {
-            if symbol.is_undefined() {
-                continue;
-            }
-            dropped[i] = match symbol.kind {
+        let dropped = object
+            .symbols
+            .iter()
+            .map(|symbol| match symbol.kind {
+                _ if symbol.is_undefined() => false,
                 Kind::Function => funcs[(symbol.index - imported) as usize],
                 Kind::Data => segments[symbol.index as usize],
                 _ => false,
-            };
+            })
+            .collect();
+        self.files.push(object);
+        Frame { file, next: 0, dropped }
+    }
+
+    /// Adds one symbol of an object to the table. Returns the member of an archive that a strong
+    /// reference in it needs, if any.
+    fn symbol(
+        &mut self,
+        file: usize,
+        i: usize,
+        symbol: &Symbol<'a>,
+        dropped: bool,
+    ) -> Result<Option<(usize, usize)>, Error> {
+        if symbol.is_local() || symbol.kind == Kind::Section {
+            return Ok(None);
         }
-        for (i, symbol) in object.symbols.iter().enumerate() {
-            if symbol.is_local() || symbol.kind == Kind::Section {
-                continue;
+        let files = &self.files;
+        let seq = self.table.len();
+        let entry = self.table.entry(symbol.name).or_insert(Entry {
+            kind: symbol.kind,
+            state: State::Undefined,
+            seq,
+            first: None,
+            strong: false,
+        });
+        let object = &files[file].name;
+        if entry.kind != symbol.kind {
+            let other = match entry.state {
+                State::Defined(f, _, _) => files[f].name.clone(),
+                _ => entry.first.map_or_else(String::new, |(f, _)| files[f].name.clone()),
+            };
+            return Err(Error::new(format!(
+                "{} is {:?} in {object} and {:?} in {other}",
+                symbol.name, symbol.kind, entry.kind
+            )));
+        }
+        if symbol.is_undefined() || dropped {
+            entry.first = entry.first.or(Some((file, i)));
+            if !symbol.is_weak() {
+                entry.strong = true;
+                if let State::Lazy(archive, member) = entry.state {
+                    return Ok(Some((archive, member)));
+                }
             }
-            let entry = self.table.entry(symbol.name).or_insert(Entry {
-                kind: symbol.kind,
-                state: State::Undefined,
-                first: None,
-                strong: false,
-            });
-            if entry.kind != symbol.kind {
-                let other = match entry.state {
-                    State::Defined(f, _, _) => self.files[f].name.clone(),
-                    _ => entry.first.map_or_else(String::new, |(f, _)| self.files[f].name.clone()),
-                };
+            return Ok(None);
+        }
+        match entry.state {
+            State::Undefined | State::Lazy(..) => {
+                entry.state = State::Defined(file, i, symbol.is_weak());
+            }
+            State::Defined(_, _, true) if !symbol.is_weak() => {
+                entry.state = State::Defined(file, i, false);
+            }
+            State::Defined(other, _, false) if !symbol.is_weak() => {
                 return Err(Error::new(format!(
-                    "{} is {:?} in {} and {:?} in {other}",
-                    symbol.name, symbol.kind, object.name, entry.kind
+                    "{} is defined in {} and in {object}",
+                    symbol.name, files[other].name
                 )));
             }
-            if symbol.is_undefined() || dropped[i] {
-                entry.first = entry.first.or(Some((file, i)));
-                if !symbol.is_weak() {
-                    entry.strong = true;
-                    if let State::Lazy(archive, member) = entry.state {
-                        self.queue.push_back((archive, member));
-                    }
-                }
-                continue;
-            }
-            match entry.state {
-                State::Undefined | State::Lazy(..) => {
-                    entry.state = State::Defined(file, i, symbol.is_weak());
-                }
-                State::Defined(_, _, true) if !symbol.is_weak() => {
-                    entry.state = State::Defined(file, i, false);
-                }
-                State::Defined(other, _, false) if !symbol.is_weak() => {
-                    return Err(Error::new(format!(
-                        "{} is defined in {} and in {}",
-                        symbol.name, self.files[other].name, object.name
-                    )));
-                }
-                State::Defined(..) => {}
-            }
+            State::Defined(..) => {}
         }
-        self.files.push(object);
-        Ok(())
+        Ok(None)
     }
 
     fn finish(self, options: &Options) -> Result<World<'a>, Error> {
-        let Loader { files, table, .. } = self;
+        let Loader { files, order, mut table, .. } = self;
+        // The objects go in the order their parse ended, and every index into them moves with them.
+        let mut moved = vec![0; files.len()];
+        for (to, &from) in order.iter().enumerate() {
+            moved[from] = to;
+        }
+        let mut slots: Vec<Option<Object<'a>>> = files.into_iter().map(Some).collect();
+        let files: Vec<Object<'a>> =
+            order.iter().map(|&from| slots[from].take().expect("each object once")).collect();
+        for entry in table.values_mut() {
+            if let State::Defined(file, symbol, weak) = entry.state {
+                entry.state = State::Defined(moved[file], symbol, weak);
+            }
+            entry.first = entry.first.map(|(file, symbol)| (moved[file], symbol));
+        }
         let mut imports: Vec<Imported<'a>> = Vec::new();
         let mut import_of: HashMap<&'a str, u32> = HashMap::new();
         let mut undefined = Vec::new();
         // Where each global name goes.
         let mut names: HashMap<&'a str, Where> = HashMap::new();
-        // In the order of the first reference, which is the order of the imports in the module.
+        // In the order the names were first seen, which is the order of the imports in the module.
         // The order of a hash table changes from one run to the next, and the module must not.
         let mut entries: Vec<(&'a str, &Entry)> = table.iter().map(|(&n, e)| (n, e)).collect();
-        entries.sort_unstable_by_key(|&(name, entry)| (entry.first, name));
+        entries.sort_unstable_by_key(|&(_, entry)| entry.seq);
         for (name, entry) in entries {
             let place = match entry.state {
                 State::Defined(file, symbol, _) => own(&files[file], file, symbol),

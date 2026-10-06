@@ -27,6 +27,12 @@
 //! of an archive. The driver links with this crate when `-fuse-ld=rucc` is given, when rucc runs
 //! as wasm, and when no `wasm-ld` is found.
 //!
+//! The module is the one `wasm-ld` writes for the same line, byte for byte, for the programs we
+//! compared: two small programs, one of which calls `printf`, and the SQLite shell against the wasi-sdk 34 sysroot. The one
+//! difference is that the DWARF sections of the inputs are not copied, so the module has no
+//! `.debug_info` and the like. The order of the objects, the merged strings, the types, the
+//! imports and the names are all LLD's.
+//!
 //! Every crate in the workspace is published, and publishing implies a promise. This one is
 //! tier 3: its Rust API is explicitly unstable and will change without a major version bump.
 //! Depend on the `rucc` binary's behaviour, not on this.
@@ -67,6 +73,8 @@ pub struct Options {
     pub strip: bool,
     /// Make an undefined function an import from `env` and not an error, as `--allow-undefined`.
     pub allow_undefined: bool,
+    /// The name of the module in the `name` section. `wasm-ld` gives the file name of the output.
+    pub name: Option<String>,
 }
 
 impl Default for Options {
@@ -80,6 +88,7 @@ impl Default for Options {
             max_memory: None,
             strip: false,
             allow_undefined: false,
+            name: None,
         }
     }
 }
@@ -141,7 +150,7 @@ impl std::error::Error for Error {}
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::testing::{archive, callee, caller, importer};
+    use crate::testing::{archive, callee, caller, calls, custom, importer};
 
     /// The payload of each section of a module, by id, in order.
     fn sections(module: &[u8]) -> Vec<(u8, &[u8])> {
@@ -265,5 +274,51 @@ mod tests {
         // `g` and `d` are not reached, so there is one function and no data.
         assert_eq!(payload(&module, 3), [1, 0]);
         assert!(sections(&module).iter().all(|&(id, _)| id != 11));
+    }
+
+    /// A member loads at the first strong reference to it, and goes in the output after the
+    /// members that it loads, which is LLD's order. `f.o` loads `g.o`, so `g` is before `f`,
+    /// though `f` is the one that `_start` calls. Loading the members in a queue put `f` first.
+    #[test]
+    fn a_member_goes_after_the_members_that_it_loads() {
+        let a = calls("_start", Some("f"));
+        let g = calls("g", None);
+        let f = calls("f", Some("g"));
+        let lib = archive(&[("g.o", &g), ("f.o", &f)]);
+        let inputs = [Input { name: "a.o", bytes: &a }, Input { name: "lib.a", bytes: &lib }];
+        let module = link(&Options::default(), &inputs).unwrap();
+        let call = |index: u8| [8, 0, 0x10, 0x80 | index, 0x80, 0x80, 0x80, 0, 0x0b];
+        let mut code = vec![3];
+        code.extend(call(2));
+        code.extend([2, 0, 0x0b]);
+        code.extend(call(1));
+        assert_eq!(payload(&module, 10), code);
+    }
+
+    /// The `name` section names the module after the output, as `wasm-ld` does, and shows a
+    /// `main` that takes arguments as `main`.
+    #[test]
+    fn the_name_section_has_the_module_and_main() {
+        let a = calls("__main_argc_argv", None);
+        let options = Options {
+            entry: Some("__main_argc_argv".to_owned()),
+            name: Some("a.wasm".to_owned()),
+            ..Options::default()
+        };
+        let names = |a: &[u8]| {
+            let module = link(&options, &[Input { name: "a.o", bytes: a }]).unwrap();
+            sections(&module)
+                .into_iter()
+                .find(|&(id, payload)| id == 0 && payload.starts_with(b"\x04name"))
+                .map(|(_, payload)| payload[5..].to_vec())
+                .unwrap()
+        };
+        let got = names(&a);
+        assert!(got.starts_with(b"\x00\x07\x06a.wasm\x01\x07\x01\x00\x04main"), "{got:?}");
+        // A name in the object's own `name` section is the one the output gets.
+        let mut a = a;
+        custom(&mut a, "name", b"\x01\x07\x01\x00\x04real");
+        let got = names(&a);
+        assert!(got.starts_with(b"\x00\x07\x06a.wasm\x01\x07\x01\x00\x04real"), "{got:?}");
     }
 }
