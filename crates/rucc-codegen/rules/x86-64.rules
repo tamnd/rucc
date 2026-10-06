@@ -406,6 +406,46 @@
       (x64.shl_ri_64 (x64.lea_64 (amode_base_index_scale y y 8)) 3)
       (spec (= (bvmul y 72) (result))))
 
+;; And the same multiply added to a base, which is the address of an element of one of those
+;; arrays. The shift is the scale of a second `lea`, which `crate::fold` then puts into the access
+;; that reads the element, so `table[i].field` is one `lea` and the load, as gcc writes it.
+
+(rule (lower (add.i64 (value.i64 x) (mul.i64 (value.i64 y) (iconst.i64 6))))
+      (x64.lea_64 (amode_base_index_scale x (x64.lea_64 (amode_base_index_scale y y 2)) 2))
+      (spec (= (bvadd x (bvmul y 6)) (result))))
+
+(rule (lower (add.i64 (value.i64 x) (mul.i64 (value.i64 y) (iconst.i64 10))))
+      (x64.lea_64 (amode_base_index_scale x (x64.lea_64 (amode_base_index_scale y y 4)) 2))
+      (spec (= (bvadd x (bvmul y 10)) (result))))
+
+(rule (lower (add.i64 (value.i64 x) (mul.i64 (value.i64 y) (iconst.i64 18))))
+      (x64.lea_64 (amode_base_index_scale x (x64.lea_64 (amode_base_index_scale y y 8)) 2))
+      (spec (= (bvadd x (bvmul y 18)) (result))))
+
+(rule (lower (add.i64 (value.i64 x) (mul.i64 (value.i64 y) (iconst.i64 12))))
+      (x64.lea_64 (amode_base_index_scale x (x64.lea_64 (amode_base_index_scale y y 2)) 4))
+      (spec (= (bvadd x (bvmul y 12)) (result))))
+
+(rule (lower (add.i64 (value.i64 x) (mul.i64 (value.i64 y) (iconst.i64 20))))
+      (x64.lea_64 (amode_base_index_scale x (x64.lea_64 (amode_base_index_scale y y 4)) 4))
+      (spec (= (bvadd x (bvmul y 20)) (result))))
+
+(rule (lower (add.i64 (value.i64 x) (mul.i64 (value.i64 y) (iconst.i64 36))))
+      (x64.lea_64 (amode_base_index_scale x (x64.lea_64 (amode_base_index_scale y y 8)) 4))
+      (spec (= (bvadd x (bvmul y 36)) (result))))
+
+(rule (lower (add.i64 (value.i64 x) (mul.i64 (value.i64 y) (iconst.i64 24))))
+      (x64.lea_64 (amode_base_index_scale x (x64.lea_64 (amode_base_index_scale y y 2)) 8))
+      (spec (= (bvadd x (bvmul y 24)) (result))))
+
+(rule (lower (add.i64 (value.i64 x) (mul.i64 (value.i64 y) (iconst.i64 40))))
+      (x64.lea_64 (amode_base_index_scale x (x64.lea_64 (amode_base_index_scale y y 4)) 8))
+      (spec (= (bvadd x (bvmul y 40)) (result))))
+
+(rule (lower (add.i64 (value.i64 x) (mul.i64 (value.i64 y) (iconst.i64 72))))
+      (x64.lea_64 (amode_base_index_scale x (x64.lea_64 (amode_base_index_scale y y 8)) 8))
+      (spec (= (bvadd x (bvmul y 72)) (result))))
+
 ;; Negation and complement. The IR writes both as arithmetic against a constant and the
 ;; machine has an instruction for each, which is a rule that has something to prove.
 

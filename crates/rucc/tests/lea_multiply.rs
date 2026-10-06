@@ -99,7 +99,8 @@ fn body<'a>(asm: &'a str, name: &str) -> Vec<&'a str> {
 }
 
 /// At `-O2` none of the multipliers is an `imul`, each is one `lea`, and the ones that are a
-/// power of two times 3, 5 or 9 have one shift after it.
+/// power of two times 3, 5 or 9 have one shift after it. An element of an array of 72 byte
+/// structures is read with the shift as the scale of the load.
 #[test]
 fn a_multiply_by_three_five_or_nine_is_a_lea() {
     let dir = dir("asm");
@@ -117,7 +118,13 @@ fn a_multiply_by_three_five_or_nine_is_a_lea() {
         let shifts = lines.iter().filter(|line| line.starts_with("sal") || line.starts_with("shl"));
         assert_eq!(shifts.count(), usize::from(k > 9), "{name}: {lines:#?}");
     }
+    // The element's address is the base and the `lea` scaled by eight, inside the load.
     let lines = body(&asm, "id_of");
-    assert!(!lines.iter().any(|line| line.starts_with("imul")), "id_of: {lines:#?}");
+    let unwanted = ["imul", "sal", "shl", "add"];
+    assert!(
+        !lines.iter().any(|line| unwanted.iter().any(|it| line.starts_with(it))),
+        "id_of: {lines:#?}"
+    );
+    assert!(lines.iter().any(|line| line.starts_with("movl\t64(%rdi,")), "id_of: {lines:#?}");
     let _ = std::fs::remove_dir_all(&dir);
 }
