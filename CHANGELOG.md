@@ -13,6 +13,7 @@ All notable changes are recorded here. The format follows [Keep a Changelog](htt
 
 ### Changed
 
+- From `-O2` up, a subscript that adds a constant to an `int` index, such as Postgres' `attrs[attnum - 1]`, widens the index alone and puts the constant times the element size into the address, so on x86-64 `subl $1, %esi` before the `movslq` is gone and the load reads `-8(%rdi,%rax,8)`, and `a[i + 2] + a[i]` has one `movslq` rather than two, as gcc writes them. It only does so where the `int` addition cannot wrap, which is not the case under `-fwrapv` (#1994).
 - A structure copied between a field of one object and a field of another, such as Postgres' `slot->tts_tid = tuple->t_self`, steps each word it moves from the two pointers rather than from the two fields, so on x86-64 every move carries the field's offset and the two `lea` in front of them are gone, as gcc writes it (#1994).
 
 ## 0.26.0

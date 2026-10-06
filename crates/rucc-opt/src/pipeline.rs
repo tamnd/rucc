@@ -404,6 +404,11 @@ const O1: &[&str] = &[
 /// on a cycle. `crate::simplify_cfg` can, and says it was written for this. Without it the loop
 /// pays for the new pointer and keeps the old counter as well, which over the corpus is about half
 /// of what choosing badly costs.
+///
+/// `subscript` goes in front of the last `number`, which is the one that finds the extension of
+/// `i` it builds for `a[i - 1]` the same as the one `a[i]` already had, and in front of `licm` and
+/// `ivopts`, which then see the address as the plain index and a constant. Postgres reads an
+/// attribute at `attnum - 1` all through the executor, tamnd/rucc#1994.
 const O2: &[&str] = &[
     "expect",
     "fold",
@@ -446,6 +451,7 @@ const O2: &[&str] = &[
     "phiopt",
     "prune",
     "redundant-load",
+    "subscript",
     "number",
     "prune",
     "hoist",
@@ -512,6 +518,7 @@ const O3: &[&str] = &[
     "phiopt",
     "prune",
     "redundant-load",
+    "subscript",
     "number",
     "prune",
     "hoist",

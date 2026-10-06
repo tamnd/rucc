@@ -183,6 +183,7 @@ pub mod speculate;
 pub mod split;
 pub mod sroa;
 pub mod stats;
+pub mod subscript;
 pub mod switch_conv;
 #[cfg(test)]
 mod testing;
