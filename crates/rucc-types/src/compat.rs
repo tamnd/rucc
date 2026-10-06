@@ -163,9 +163,10 @@ fn functions(
     // to the other incompatible. Nothing about a call could go right across the difference: the
     // arguments would be in the other registers and the callee would clobber what the caller
     // expects it to keep. A function without a landing pad is a third way to differ, since a call
-    // that did not know would fault on arriving.
+    // that did not know would fault on arriving, and a float in an SSE register is a fourth.
     if left.convention != right.convention
         || left.nocf != right.nocf
+        || left.sse_regparm != right.sse_regparm
         || !same(types, left.ret, right.ret, assumed)
     {
         return false;
@@ -394,8 +395,9 @@ fn composite_function(types: &mut Types, left: &FunctionType, right: &FunctionTy
     };
     // The two conventions are the same one, since the types would not be compatible otherwise,
     // and so is whether there is a landing pad.
+    // So is whether a float goes in an SSE register.
     // A call that can come back by a jump is one whichever declaration said so.
-    let (convention, nocf) = (left.convention, left.nocf);
+    let (convention, nocf, sse_regparm) = (left.convention, left.nocf, left.sse_regparm);
     let indirect_return = left.indirect_return || right.indirect_return;
     // Who pops the address of a returned structure is whatever the first one that said said.
     let return_pointer_popped = left.return_pointer_popped.or(right.return_pointer_popped);
@@ -408,5 +410,6 @@ fn composite_function(types: &mut Types, left: &FunctionType, right: &FunctionTy
         nocf,
         indirect_return,
         return_pointer_popped,
+        sse_regparm,
     })
 }

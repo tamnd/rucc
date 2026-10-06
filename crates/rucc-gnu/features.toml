@@ -1349,6 +1349,16 @@ tests = ["rucc::the_attribute_says_who_pops_a_returned_address", "rucc::callee_p
 notes = "On 32-bit x86 one has the callee take the address of a returned structure off the stack with `ret $4` and zero has the caller do it, whichever the ABI says by itself, as gcc does. Where the address is in `eax` under `regparm`, and under `stdcall`, it changes nothing. On x86-64 it is dropped with gcc's warning that it is only available for 32-bit, and an argument other than the integer constant zero or one is dropped with gcc's warning about it. A list with no argument or two is refused, E0840. It is not part of the type, so a redeclaration without it keeps it."
 
 [[feature]]
+name = "sseregparm"
+kind = "attribute"
+gcc_version = "4.1"
+status = "implemented"
+targets = ["x86-64", "x86"]
+used_by = []
+tests = ["rucc::sseregparm_is_refused_without_sse_as_gcc_refuses_it", "rucc::sseregparm_is_checked_in_gcc_s_words", "rucc-types::a_function_with_floats_in_sse_registers_is_another_type"]
+notes = "Part of the function type, as gcc makes it: a declaration each way is conflicting types and a pointer of one assigned to a pointer of the other is incompatible. This compiler builds i386 code with no extensions, so each definition of such a function and each call to one is refused with E0842 in the words gcc built without SSE uses, rather than passing a float on the stack to a callee that looks in `xmm0`. An argument is refused with E0841, and on x86-64 outside Windows it is ignored with gcc's warning."
+
+[[feature]]
 name = "vectorcall"
 kind = "attribute"
 gcc_version = "none"

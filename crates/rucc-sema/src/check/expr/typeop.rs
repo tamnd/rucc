@@ -2168,6 +2168,7 @@ mod tests {
             nocf: false,
             indirect_return: false,
             return_pointer_popped: None,
+            sse_regparm: false,
         };
         let function = c.types.function(signature);
         let record = tagged(&mut c, tag, &[]);
@@ -2494,6 +2495,7 @@ mod tests {
             nocf: false,
             indirect_return: false,
             return_pointer_popped: None,
+            sse_regparm: false,
         };
         let ty = c.types.function(signature);
         c.declare_object(fname, ty, Span::DUMMY);

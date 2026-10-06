@@ -2175,8 +2175,9 @@ impl Checker<'_> {
     ///
     /// `nocf_check` is a function type attribute too and lands where a convention does, so it is
     /// read here as well, after the convention. See [`Self::untracked`]. So is `indirect_return`,
-    /// which is [`FunctionType::indirect_return`], and `callee_pop_aggregate_return` last, which
-    /// is [`FunctionType::return_pointer_popped`].
+    /// which is [`FunctionType::indirect_return`], `sseregparm`, which is
+    /// [`FunctionType::sse_regparm`], and `callee_pop_aggregate_return` last, which is
+    /// [`FunctionType::return_pointer_popped`].
     pub(in crate::check) fn convened(&mut self, ty: TypeId, attrs: AttrList) -> TypeId {
         let ty = match self.convention_in(attrs) {
             Some((convention, name, span)) => self.with_convention(ty, convention, &name, span),
@@ -2190,6 +2191,7 @@ impl Checker<'_> {
             Some(span) => self.returning_by_jump(ty, span),
             None => ty,
         };
+        let ty = self.sse_registers(ty, attrs, false);
         self.popping(ty, attrs, false)
     }
 
@@ -2224,6 +2226,7 @@ impl Checker<'_> {
                 _ => self.not_a_function("indirect_return", span),
             }
         }
+        let pointee = self.sse_registers(pointee, attrs, true);
         self.popping(pointee, attrs, true)
     }
 
