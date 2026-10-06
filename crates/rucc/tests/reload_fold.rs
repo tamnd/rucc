@@ -28,7 +28,7 @@ fn run(dir: &Path, args: &[&str]) -> (bool, String) {
 /// A loop with more running sums than x86-64 has registers for, so the bound and the pointer are
 /// spilled and read back on every turn. `main` prints what it comes to over a few lengths.
 const PROGRAM: &str = r#"
-#include <stdio.h>
+int printf(const char *, ...);
 
 __attribute__((noinline)) long mix(const long *a, int n, long k) {
   long s0 = 0, s1 = 0, s2 = 0, s3 = 0, s4 = 0, s5 = 0, s6 = 0, s7 = 0, s8 = 0, s9 = 0;
