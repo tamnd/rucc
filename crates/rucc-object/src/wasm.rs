@@ -20,6 +20,10 @@
 //! `EXPLICIT_NAME` flags itself from these facts, so a symbol cannot say that it is defined and
 //! have no definition.
 //!
+//! The DWARF sections of `-g` are [`Custom`] sections with fixups of their own. A code address in
+//! them is the offset of a function in the code section and an offset from it, and an offset into
+//! another DWARF section names that section by a section symbol, as LLVM writes them.
+//!
 //! # The fields the linker patches
 //!
 //! Every relocated field in code is a LEB128 at its widest, five bytes, and every one in data is
@@ -119,6 +123,13 @@ pub enum SymbolKind {
     Table { import: Option<Import> },
     /// An exception tag of the function type at this index, always imported.
     Tag { ty: u32, import: Option<Import> },
+    /// The start of the custom section at this index of [`Module::customs`], which a
+    /// [`RelocKind::SectionOffsetI32`] names. It is always defined and local, and this module sets
+    /// [`LOCAL`] itself. The object gives it no name, and the name here is the label that the
+    /// `-S` text puts at the start of the section. The text gives a module back with the same
+    /// symbols only when the section symbols come after every other symbol, in the order of their
+    /// sections.
+    Section { custom: u32 },
 }
 
 /// The module and the field of an import when they are not `env` and the symbol name, which is
@@ -171,6 +182,11 @@ pub enum RelocKind {
     TagIndexLeb,
     /// The number of a table, in `call_indirect`.
     TableNumberLeb,
+    /// The offset of a function in the code section, plus the addend, in a DWARF section. The
+    /// offset is that of the body after its size, where its locals start.
+    FunctionOffsetI32,
+    /// An offset into a custom section, as its section symbol and the addend, in a DWARF section.
+    SectionOffsetI32,
 }
 
 impl RelocKind {
@@ -186,6 +202,8 @@ impl RelocKind {
             RelocKind::MemoryAddrI32 => 5,
             RelocKind::TypeIndexLeb => 6,
             RelocKind::GlobalIndexLeb => 7,
+            RelocKind::FunctionOffsetI32 => 8,
+            RelocKind::SectionOffsetI32 => 9,
             RelocKind::TagIndexLeb => 10,
             RelocKind::TableNumberLeb => 20,
             RelocKind::MemoryAddrTlsSleb => 21,
@@ -196,12 +214,15 @@ impl RelocKind {
     #[must_use]
     pub fn width(self) -> usize {
         match self {
-            RelocKind::TableIndexI32 | RelocKind::MemoryAddrI32 => 4,
+            RelocKind::TableIndexI32
+            | RelocKind::MemoryAddrI32
+            | RelocKind::FunctionOffsetI32
+            | RelocKind::SectionOffsetI32 => 4,
             _ => PADDED,
         }
     }
 
-    /// Whether the entry carries an addend. Only the address relocations do.
+    /// Whether the entry carries an addend. Only the address and offset relocations do.
     fn has_addend(self) -> bool {
         matches!(
             self,
@@ -209,6 +230,8 @@ impl RelocKind {
                 | RelocKind::MemoryAddrSleb
                 | RelocKind::MemoryAddrI32
                 | RelocKind::MemoryAddrTlsSleb
+                | RelocKind::FunctionOffsetI32
+                | RelocKind::SectionOffsetI32
         )
     }
 
@@ -221,13 +244,14 @@ impl RelocKind {
 /// A field that names something the linker places.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct Fixup {
-    /// Where the field starts, from the start of the code of its function or of the bytes of its
-    /// segment. The caller reserves [`RelocKind::width`] bytes there.
+    /// Where the field starts, from the start of the code of its function, of the bytes of its
+    /// segment or of the bytes of its custom section. The caller reserves [`RelocKind::width`]
+    /// bytes there.
     pub at: u32,
     pub kind: RelocKind,
     /// A symbol index, or a type index for [`RelocKind::TypeIndexLeb`].
     pub target: u32,
-    /// Added to a data address. Zero for the other kinds.
+    /// Added to a data address or an offset. Zero for the other kinds.
     pub addend: i32,
 }
 
@@ -256,6 +280,17 @@ pub struct Segment {
     /// Any of [`STRINGS`], [`TLS_SEGMENT`] and [`RETAIN`].
     pub flags: u32,
     pub bytes: Vec<u8>,
+    pub fixups: Vec<Fixup>,
+}
+
+/// A custom section with fixups, which is how a DWARF section of `-g` is written.
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
+pub struct Custom {
+    /// The name of the section, such as `.debug_info`.
+    pub name: String,
+    pub bytes: Vec<u8>,
+    /// Each one is a [`RelocKind::FunctionOffsetI32`], a [`RelocKind::SectionOffsetI32`] or a
+    /// [`RelocKind::MemoryAddrI32`].
     pub fixups: Vec<Fixup>,
 }
 
@@ -289,6 +324,8 @@ pub struct Module {
     /// The LLVM names of the features the object must not be linked with.
     pub disallowed: Vec<String>,
     pub producers: Producers,
+    /// The custom sections with fixups, after the data and before `linking`.
+    pub customs: Vec<Custom>,
 }
 
 impl Module {
@@ -333,6 +370,8 @@ pub enum Error {
     /// An alias is not a function symbol, is defined twice, or names a function that this object
     /// does not define.
     Alias { symbol: u32 },
+    /// A section symbol names no custom section, or a custom section has two section symbols.
+    Section { symbol: u32 },
 }
 
 impl fmt::Display for Error {
@@ -354,6 +393,9 @@ impl fmt::Display for Error {
             Error::Place { symbol } => write!(f, "symbol {symbol} is outside its segment"),
             Error::Alias { symbol } => {
                 write!(f, "symbol {symbol} is not a second name of a function that is defined here")
+            }
+            Error::Section { symbol } => {
+                write!(f, "symbol {symbol} is not the one section symbol of a custom section")
             }
         }
     }
@@ -446,6 +488,9 @@ struct Layout {
     slot: Vec<Option<u32>>,
     /// Which function symbols a definition names.
     defined: Vec<bool>,
+    /// The offset of the body of each defined function symbol in the payload of the code section,
+    /// after the size of the body, which is what a [`RelocKind::FunctionOffsetI32`] adds to.
+    body: Vec<Option<u32>>,
 }
 
 impl Layout {
@@ -545,7 +590,36 @@ impl Layout {
             }
         }
 
-        Ok(Layout { function, other, segment, slot, defined })
+        // Each custom section has at most one section symbol, and each section symbol names one.
+        let mut named = vec![false; module.customs.len()];
+        for (index, symbol) in module.symbols.iter().enumerate() {
+            if let SymbolKind::Section { custom } = symbol.kind {
+                match named.get_mut(custom as usize) {
+                    Some(seen @ false) => *seen = true,
+                    _ => {
+                        let symbol = u32::try_from(index).unwrap_or(u32::MAX);
+                        return Err(Error::Section { symbol });
+                    }
+                }
+            }
+        }
+
+        // The payload of the code section is the count, then each body as its size, its locals
+        // and its code.
+        let mut body = vec![None; count];
+        let mut offset = uleb_len(len32(module.functions.len()));
+        for f in &module.functions {
+            let mut size = uleb_len(len32(f.locals.len())) + f.code.len();
+            size += f.locals.iter().map(|&(n, _)| uleb_len(u64::from(n)) + 1).sum::<usize>();
+            offset += uleb_len(len32(size));
+            body[f.symbol as usize] = Some(u32::try_from(offset).unwrap_or(u32::MAX));
+            offset += size;
+        }
+        for &(alias, target) in &module.aliases {
+            body[alias as usize] = body[target as usize];
+        }
+
+        Ok(Layout { function, other, segment, slot, defined, body })
     }
 
     /// Whether the symbol at `index` is defined in this object.
@@ -553,6 +627,7 @@ impl Layout {
         match module.symbols[index].kind {
             SymbolKind::Function { .. } => self.defined[index],
             SymbolKind::Data { place } => place.is_some(),
+            SymbolKind::Section { .. } => true,
             SymbolKind::Global { .. } | SymbolKind::Table { .. } | SymbolKind::Tag { .. } => false,
         }
     }
@@ -595,6 +670,13 @@ impl Layout {
             | (RelocKind::TagIndexLeb, SymbolKind::Tag { .. }) => {
                 Ok(i64::from(self.other[index].unwrap_or(0)))
             }
+            (RelocKind::FunctionOffsetI32, SymbolKind::Function { .. }) => match self.body[index] {
+                Some(body) => Ok(i64::from(body) + i64::from(fixup.addend)),
+                None => fail("is not defined in this object"),
+            },
+            (RelocKind::SectionOffsetI32, SymbolKind::Section { .. }) => {
+                Ok(i64::from(fixup.addend))
+            }
             _ => fail("is not of the kind the relocation wants"),
         }
     }
@@ -611,7 +693,10 @@ fn patch(bytes: &mut [u8], fixup: Fixup, value: i64) -> Result<(), Error> {
     // object for a 32-bit memory is a bug in the layout above.
     let value32 = value as i32;
     match fixup.kind {
-        RelocKind::TableIndexI32 | RelocKind::MemoryAddrI32 => {
+        RelocKind::TableIndexI32
+        | RelocKind::MemoryAddrI32
+        | RelocKind::FunctionOffsetI32
+        | RelocKind::SectionOffsetI32 => {
             field.copy_from_slice(&value32.to_le_bytes());
         }
         RelocKind::TableIndexSleb | RelocKind::MemoryAddrSleb | RelocKind::MemoryAddrTlsSleb => {
@@ -650,7 +735,7 @@ fn import_of(symbol: &Symbol) -> (String, String) {
         | SymbolKind::Global { import, .. }
         | SymbolKind::Table { import }
         | SymbolKind::Tag { import, .. } => import.as_ref(),
-        SymbolKind::Data { .. } => None,
+        SymbolKind::Data { .. } | SymbolKind::Section { .. } => None,
     };
     match import {
         Some(i) => (i.module.clone(), i.field.clone()),
@@ -661,6 +746,11 @@ fn import_of(symbol: &Symbol) -> (String, String) {
 /// A length or a count, as the LEB128 functions take it.
 fn len32(n: usize) -> u64 {
     n as u64
+}
+
+/// The number of bytes of `value` as an unsigned LEB128 at its shortest.
+fn uleb_len(value: u64) -> usize {
+    (64 - (value | 1).leading_zeros() as usize).div_ceil(7)
 }
 
 /// The object for `module`.
@@ -736,7 +826,9 @@ pub fn write(module: &Module) -> Result<Written, Error> {
                         entry.extend_from_slice(&[0x04, 0x00]);
                         uleb(&mut entry, u64::from(ty));
                     }
-                    SymbolKind::Data { .. } => unreachable!("data is never imported"),
+                    SymbolKind::Data { .. } | SymbolKind::Section { .. } => {
+                        unreachable!("data and sections are never imported")
+                    }
                 }
                 entries.push(entry);
             }
@@ -833,12 +925,34 @@ pub fn write(module: &Module) -> Result<Written, Error> {
         }
         section(&mut out, 11, &payload);
         data_section = Some(sections);
+        sections += 1;
     }
 
-    custom(&mut out, "linking", &linking(module, &layout));
-    for (label, target, mut entries) in
-        [("reloc.CODE", code_section, code_relocs), ("reloc.DATA", data_section, data_relocs)]
-    {
+    // The custom sections with fixups, before `linking`, because a section symbol there names a
+    // section that the reader has already read. A fixup's offset is counted from the end of the
+    // name of the section.
+    let mut custom_sections = Vec::with_capacity(module.customs.len());
+    let mut custom_relocs = Vec::with_capacity(module.customs.len());
+    for c in &module.customs {
+        let mut bytes = c.bytes.clone();
+        let mut entries = Vec::with_capacity(c.fixups.len());
+        for fixup in &c.fixups {
+            let value = layout.value(module, *fixup)?;
+            patch(&mut bytes, *fixup, value)?;
+            entries.push(Entry { offset: fixup.at, fixup: *fixup });
+        }
+        custom(&mut out, &c.name, &bytes);
+        custom_sections.push(sections);
+        custom_relocs.push((format!("reloc.{}", c.name), Some(sections), entries));
+        sections += 1;
+    }
+
+    custom(&mut out, "linking", &linking(module, &layout, &custom_sections));
+    let relocs = [
+        ("reloc.CODE".to_owned(), code_section, code_relocs),
+        ("reloc.DATA".to_owned(), data_section, data_relocs),
+    ];
+    for (label, target, mut entries) in relocs.into_iter().chain(custom_relocs) {
         let Some(target) = target else { continue };
         if entries.is_empty() {
             continue;
@@ -855,7 +969,7 @@ pub fn write(module: &Module) -> Result<Written, Error> {
                 sleb(&mut payload, i64::from(entry.fixup.addend));
             }
         }
-        custom(&mut out, label, &payload);
+        custom(&mut out, &label, &payload);
     }
 
     if let Some(payload) = producers(&module.producers) {
@@ -869,7 +983,10 @@ pub fn write(module: &Module) -> Result<Written, Error> {
         .symbols
         .iter()
         .enumerate()
-        .filter(|(index, s)| layout.is_defined(module, *index) && s.flags & LOCAL == 0)
+        .filter(|(index, s)| {
+            let section = matches!(s.kind, SymbolKind::Section { .. });
+            layout.is_defined(module, *index) && s.flags & LOCAL == 0 && !section
+        })
         .map(|(_, s)| s.name.clone())
         .collect();
     Ok(Written { bytes: out, defines })
@@ -973,8 +1090,9 @@ pub fn target_features(module: &Module) -> Option<Vec<u8>> {
 }
 
 /// The payload of the `linking` section: the version, then the symbol table, the segment names
-/// and the constructors, in that fixed order so that two objects compare byte for byte.
-fn linking(module: &Module, layout: &Layout) -> Vec<u8> {
+/// and the constructors, in that fixed order so that two objects compare byte for byte. `customs`
+/// is the index in the file of each custom section of the module.
+fn linking(module: &Module, layout: &Layout, customs: &[u32]) -> Vec<u8> {
     let mut payload = Vec::new();
     uleb(&mut payload, u64::from(LINKING_VERSION));
 
@@ -996,12 +1114,19 @@ fn linking(module: &Module, layout: &Layout) -> Vec<u8> {
             SymbolKind::Function { .. } => 0,
             SymbolKind::Data { .. } => 1,
             SymbolKind::Global { .. } => 2,
+            SymbolKind::Section { .. } => {
+                flags |= LOCAL;
+                3
+            }
             SymbolKind::Tag { .. } => 4,
             SymbolKind::Table { .. } => 5,
         };
         table.push(kind);
         uleb(&mut table, u64::from(flags));
         match symbol.kind {
+            SymbolKind::Section { custom } => {
+                uleb(&mut table, u64::from(customs[custom as usize]));
+            }
             SymbolKind::Data { place } => {
                 name(&mut table, &symbol.name);
                 if let Some(place) = place {
