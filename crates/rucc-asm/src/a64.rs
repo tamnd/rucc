@@ -12,9 +12,10 @@
 //!
 //! An addressing mode here is a base register and either a constant or an index register, which is
 //! every mode this machine has for an ordinary access. The index can be shifted by the size of the
-//! access and there is no room for a constant beside it. A symbol is reached with `adrp` and the low
-//! twelve bits of it, which a load or a store can carry in place of the constant, so a mode with a
-//! symbol is either that or the page `adrp` is given. A label in a mode is the one `adr` takes.
+//! access, it can be a W register sign or zero extended on the way in, and there is no room for a
+//! constant beside it. A symbol is reached with `adrp` and the low twelve bits of it, which a load
+//! or a store can carry in place of the constant, so a mode with a symbol is either that or the
+//! page `adrp` is given. A label in a mode is the one `adr` takes.
 //!
 //! Every line is also handed to the encoder before it is written. What the assembler would reject,
 //! such as a constant too wide for the instruction, is refused here with the encoder's reason
@@ -23,7 +24,7 @@
 use std::fmt::Write as _;
 
 use rucc_base::Interner;
-use rucc_mir::{Amode, Block, Func, Inst, defs};
+use rucc_mir::{Amode, Block, Func, Inst, Widen, defs};
 use rucc_target::aarch64::{self, Addr, Arg, Extend, Mode, Offset, Operands, Operator};
 use rucc_target::template::template_filled;
 
@@ -198,7 +199,11 @@ fn address(amode: &Amode, regs: &[u8]) -> Option<Addr> {
         None => Offset::Imm(i64::from(amode.disp)),
         Some(at) if amode.disp == 0 && amode.scale.is_power_of_two() => Offset::Reg {
             reg: *regs.get(usize::from(at))?,
-            extend: Extend::Uxtx,
+            extend: match amode.widen {
+                None => Extend::Uxtx,
+                Some(Widen::Signed) => Extend::Sxtw,
+                Some(Widen::Unsigned) => Extend::Uxtw,
+            },
             amount: (amode.scale > 1)
                 .then(|| u8::try_from(amode.scale.trailing_zeros()).unwrap_or(0)),
         },

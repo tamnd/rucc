@@ -35,7 +35,7 @@ use rucc_base::{Interner, Symbol};
 use rucc_target::{Constraint, PhysReg, RegClass, RegFile, Role, Segment};
 
 use crate::func::{Func, Table};
-use crate::inst::{Block, BlockCall, Flags, Mem, Opcode, Operand, Param, Reach, Reg};
+use crate::inst::{Block, BlockCall, Flags, Mem, Opcode, Operand, Param, Reach, Reg, Widen};
 
 /// Why a text could not be read.
 ///
@@ -103,6 +103,7 @@ struct PendingMem {
     table: Option<u32>,
     reach: Reach,
     segment: Option<Segment>,
+    widen: Option<Widen>,
 }
 
 /// A jump table, read but not yet built: the block whose jump reads it, and its cells.
@@ -449,7 +450,34 @@ impl<'a> Parser<'a, '_> {
         let mut negative = false;
         loop {
             self.spaces();
-            if self.at("@") {
+            // An index narrower than the address says how it is widened in front of it, and is
+            // the index wherever it is written, since only an index can be widened.
+            let widen = if self.eat_word("sxtw") {
+                Some(Widen::Signed)
+            } else if self.eat_word("uxtw") {
+                Some(Widen::Unsigned)
+            } else {
+                None
+            };
+            if widen.is_some() {
+                if mem.index.is_some() {
+                    return self.fail("an address names one index");
+                }
+                self.spaces();
+                mem.index = Some(PendingOperand {
+                    reg: self.written(false)?,
+                    role: Role::Use,
+                    constraint: Constraint::Reg,
+                });
+                mem.widen = widen;
+                if self.eat("*") {
+                    let scale = self.u32()?;
+                    match u8::try_from(scale) {
+                        Ok(scale) => mem.scale = scale,
+                        Err(_) => return self.fail(format!("{scale} is not a scale")),
+                    }
+                }
+            } else if self.at("@") {
                 if mem.symbol.is_some() {
                     return self.fail("an address names one symbol");
                 }
@@ -630,6 +658,7 @@ impl<'a> Parser<'a, '_> {
                             table: mem.table,
                             reach: mem.reach,
                             segment: mem.segment,
+                            widen: mem.widen,
                         })
                     }
                     None => None,
@@ -952,6 +981,22 @@ block0:
 mfunc @index {
 block0(%0:gpr):
     %1:gpr = x64.mov_rm [abs @tab + %0*8]
+    x64.ret
+}
+",
+        );
+    }
+
+    #[test]
+    fn a_widened_index_round_trips() {
+        // What AArch64 makes of `arr[i]` with an `int` subscript, which is the W register extended
+        // inside the access. Written against the x86-64 names the fixtures use.
+        round_trip(
+            "\
+mfunc @widen {
+block0(%0:gpr, %1:gpr, %2:gpr):
+    %3:gpr = x64.mov_rm [%0 + sxtw %1*8]
+    %4:gpr = x64.mov_rm [%0 + uxtw %2]
     x64.ret
 }
 ",

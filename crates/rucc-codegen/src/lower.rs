@@ -8943,6 +8943,7 @@ fn address(kind: Address, read: &Read, gpr: RegClass) -> Option<mir::Mem> {
             table: None,
             reach: mir::Reach::Itself,
             segment: None,
+            widen: None,
         }),
         Address::Base => Some(mir::Mem::at(regs.next()?)),
         // The rule that writes this has a guard saying the constant fits, so a displacement that

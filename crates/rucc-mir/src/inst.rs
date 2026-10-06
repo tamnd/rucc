@@ -208,6 +208,20 @@ pub enum Reach {
     GotOff,
 }
 
+/// How an index narrower than the address is widened to it, which AArch64 does inside the access.
+///
+/// `arr[i]` with an `int` subscript adds a 32 bit index to a 64 bit address. AArch64 can take the W
+/// register as it is and extend it on the way in, as in `ldr x0, [x1, w0, sxtw #3]`, so the
+/// extension needs no instruction of its own. No widening is an index as wide as the address,
+/// which is every index on x86.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Widen {
+    /// Sign extended, which is `sxtw`.
+    Signed,
+    /// Zero extended, which is `uxtw`.
+    Unsigned,
+}
+
 /// A memory addressing mode, as the instruction holds it.
 ///
 /// The registers are the indices of the operands holding them rather than the registers
@@ -236,6 +250,8 @@ pub struct Amode {
     pub reach: Reach,
     /// Which storage the address is counted from, when it is not the flat one. See [`Segment`].
     pub segment: Option<Segment>,
+    /// How the index is widened to the address, when it is narrower. See [`Widen`].
+    pub widen: Option<Widen>,
 }
 
 impl Amode {
@@ -250,6 +266,7 @@ impl Amode {
         table: None,
         reach: Reach::Itself,
         segment: None,
+        widen: None,
     };
 }
 
@@ -279,6 +296,8 @@ pub struct Mem {
     pub reach: Reach,
     /// Which storage the address is counted from, when it is not the flat one. See [`Segment`].
     pub segment: Option<Segment>,
+    /// How the index is widened to the address, when it is narrower. See [`Widen`].
+    pub widen: Option<Widen>,
 }
 
 impl Mem {
@@ -295,6 +314,7 @@ impl Mem {
             table: None,
             reach: Reach::Itself,
             segment: None,
+            widen: None,
         }
     }
 
@@ -311,6 +331,7 @@ impl Mem {
             table: None,
             reach: Reach::Itself,
             segment: None,
+            widen: None,
         }
     }
 
@@ -334,6 +355,7 @@ impl Mem {
             table: None,
             reach: Reach::Itself,
             segment: None,
+            widen: None,
         }
     }
 
@@ -361,6 +383,7 @@ impl Mem {
             table: None,
             reach: Reach::Itself,
             segment: None,
+            widen: None,
         }
     }
 
@@ -380,6 +403,7 @@ impl Mem {
             table: None,
             reach: Reach::Itself,
             segment: Some(segment),
+            widen: None,
         }
     }
 

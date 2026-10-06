@@ -45,7 +45,7 @@ use rucc_base::Interner;
 use rucc_target::{Constraint, PhysReg, RegClass, RegFile, Role};
 
 use crate::func::{Func, defs};
-use crate::inst::{Amode, Block, BlockCall, Inst, Operand, Param, Reach, Reg};
+use crate::inst::{Amode, Block, BlockCall, Inst, Operand, Param, Reach, Reg, Widen};
 
 /// Every function, as text, which is what `--emit=mir` writes.
 #[must_use]
@@ -355,6 +355,11 @@ impl<'a> Printer<'a> {
         if let Some(operand) = amode.index.and_then(|at| operands.get(usize::from(at))) {
             if written {
                 self.out.push_str(" + ");
+            }
+            match amode.widen {
+                Some(Widen::Signed) => self.out.push_str("sxtw "),
+                Some(Widen::Unsigned) => self.out.push_str("uxtw "),
+                None => {}
             }
             self.reg(operand.reg, operand.class, false);
             if amode.scale != 1 {
