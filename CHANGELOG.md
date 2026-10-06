@@ -6,6 +6,7 @@ All notable changes are recorded here. The format follows [Keep a Changelog](htt
 
 ### Changed
 
+- At `-O2` and `-O3` on x86-64, a loop over `int` arrays that runs a known multiple of four times, with every access to consecutive elements and nothing but lanewise arithmetic on what it loads, is done four elements at a time in the vector registers. This is the very cheap model `gcc -O2` runs: no scalar remainder, no test at run time for overlap, and a loop whose accesses might overlap from one iteration to the next is left as it was. The loop in `pg_checksum_block` is now eight trips of `movdqu`, `pxor`, `pmuludq` and `psrld` where it was thirty two trips a lane at a time (#1994).
 - On wasm, the second pass of the inliner holds a call in a loop to the limit of a hinted call when the callee is `static`, every call to the callee is in that caller, and the caller is not over `LARGE_FUNCTION_INSNS` (#2866). The copy of the callee goes away, so the unit grows by little. The SQLite shell now inlines the merge of its sorter, as clang does, and runs 33.11G instructions on the WA4 benchmark where it ran 33.63G (clang: 31.47G). The module is 3,372 bytes larger. `TargetInfo::loop_hint` says which targets do this, and only wasm32 does, so a native target keeps gcc's decisions.
 
 ### Fixed
