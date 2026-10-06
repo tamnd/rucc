@@ -719,7 +719,39 @@ pub struct Scev<'a> {
     cfg: &'a Cfg,
     loops: &'a Loops,
     known: Map<LoopId, Map<Value, Evolution>>,
-    held: Map<LoopId, Option<Chrec>>,
+    held: Map<LoopId, Held>,
+}
+
+/// The counters a loop's exit tests keep inside their type, one for each way a test reads a sign.
+///
+/// Two because an extension has a sign of its own and only a test that read the counter the same
+/// way says anything about it. A signed counter held below its limit can still start out negative,
+/// which zero extends to a large number, and an unsigned one held below its limit can still cross
+/// the middle of its type, which sign extends to a negative one.
+#[derive(Clone, Copy, Debug, Default)]
+struct Held {
+    /// What an unsigned test keeps there, which is what a zero extension leans on.
+    unsigned: Option<Hold>,
+    /// What a signed test keeps there, which is what a sign extension leans on.
+    signed: Option<Hold>,
+}
+
+/// One counter an exit test keeps inside its type.
+#[derive(Clone, Copy, Debug)]
+struct Hold {
+    /// The counter the test compares.
+    chrec: Chrec,
+    /// The same counter one step behind, when the loop is only entered with that one inside the
+    /// limit too. See [`Scev::entered_behind`].
+    behind: Option<Chrec>,
+}
+
+impl Hold {
+    /// Whether this sequence is kept inside its type by what the test keeps there.
+    fn covers(self, chrec: Chrec, signed: bool) -> bool {
+        trails(chrec, self.chrec, signed)
+            || self.behind.is_some_and(|behind| trails(chrec, behind, signed))
+    }
 }
 
 impl<'a> Scev<'a> {
@@ -768,38 +800,81 @@ impl<'a> Scev<'a> {
         exits.into_iter().find_map(|from| self.bound_at(id, from))
     }
 
-    /// The counter an exit test of this loop keeps inside its own type, when there is one.
+    /// The counters the exit tests of this loop keep inside their own type, one for each reading.
     ///
     /// [`bounded_by_its_test`] is the argument and this is where its answer is written down as a
     /// fact about the loop rather than spent on one trip count. What it buys is [`Scev::extend`]:
     /// an unsigned counter carries no `nuw`, so widening anything built out of one used to be
-    /// refused, and the test that holds the counter holds everything walking beside it.
+    /// refused, and the test that holds the counter holds everything walking beside it. A signed
+    /// counter under `-fwrapv` carries no `nsw` either, and is held the same way by a signed test.
     ///
     /// Settled once per loop and then read. It is settled from [`Scev::evolution`] and
     /// [`Scev::bound`], which are the two ways in, so that it is worked out with nothing in flight.
     /// The cache for the loop is emptied afterwards, because the answers already in it were worked
     /// out while this was still unknown and a conservative answer that stayed would make what the
     /// analysis says depend on which question was asked first.
-    fn holds(&mut self, id: LoopId) -> Option<Chrec> {
-        if let Some(&known) = self.held.get(&id) {
-            return known;
+    fn holds(&mut self, id: LoopId) {
+        if self.held.contains_key(&id) {
+            return;
         }
-        // Unknown while it is being worked out, which is what stops the recursion below from
+        // Nothing held while it is being worked out, which is what stops the recursion below from
         // asking the same question forever, and which is why the cache is emptied after.
-        self.held.insert(id, None);
+        self.held.insert(id, Held::default());
         let exits: Vec<Block> = self.loops.exits(id).iter().map(|exit| exit.from).collect();
-        let found = exits.into_iter().find_map(|from| {
-            let test = self.test_at(id, from)?;
-            let step = test.chrec.step.as_number()?;
-            // Unsigned tests only. What is held is read through a zero extension, and a signed
-            // counter kept below its limit can still start out negative, which zero extends to a
-            // large number.
-            let unsigned = matches!(test.pred, IntPred::Ult | IntPred::Ugt);
-            (test.each && unsigned && bounded_by_its_test(test.pred, step)).then_some(test.chrec)
-        });
+        let mut found = Held::default();
+        for from in exits {
+            let Some(test) = self.test_at(id, from) else { continue };
+            let Some(step) = test.chrec.step.as_number() else { continue };
+            if !test.each || !bounded_by_its_test(test.pred, step) {
+                continue;
+            }
+            let signed = matches!(test.pred, IntPred::Slt | IntPred::Sgt);
+            let behind = self.entered_behind(id, &test);
+            let slot = if signed { &mut found.signed } else { &mut found.unsigned };
+            if slot.is_none() {
+                *slot = Some(Hold { chrec: test.chrec, behind });
+            }
+        }
         self.held.insert(id, found);
         self.known.remove(&id);
-        found
+    }
+
+    /// The counter a test holds, taken one step back, when the way into the loop already asked
+    /// the same question of it.
+    ///
+    /// Where a loop has had its test copied in front of it, the test at the bottom asks about
+    /// `i + 1` and every use in the body reads `i`. What the test holds is `i + 1`, and `i` starts
+    /// one behind it, so `i` is not held by [`trails`] alone: if `i` starts at the top of its type,
+    /// `i + 1` starts at the bottom and the test is then asked of a counter that has already
+    /// wrapped. The copy in front rules that out. It asked `i < n` of where `i` starts and the loop
+    /// is only entered when that held, so `i` starts below a number of its type, every later `i`
+    /// is an `i + 1` the test let through, and none of them is at the top either. That is the same
+    /// argument [`bounded_by_its_test`] makes, with the entry test standing in for the first turn.
+    ///
+    /// Going up by one only, under the strict test, since that is what [`trails`] reads. The entry
+    /// test has to be the one every way into the loop goes through, which is read by walking up
+    /// from the preheader while each block has one way in, the same walk `Scev::asked_each_time`
+    /// makes inside the loop.
+    fn entered_behind(&self, id: LoopId, test: &Test) -> Option<Chrec> {
+        if !matches!(test.pred, IntPred::Slt | IntPred::Ult) {
+            return None;
+        }
+        let base = test.chrec.base.minus(Invariant::number(1))?;
+        let read = |value: Value| self.invariant(id, self.forwarded(value));
+        let asks = |pred: IntPred, lhs: Value, rhs: Value| {
+            pred == test.pred && read(lhs) == Some(base) && read(rhs) == Some(test.limit)
+        };
+        let mut at = self.loops.preheader(self.cfg, id)?;
+        for _ in 0..FORWARD_LIMIT {
+            let &[before] = self.cfg.predecessors(at) else { return None };
+            if let Some((pred, lhs, rhs)) = edge_test(self.func, before, at) {
+                if asks(pred, lhs, rhs) || asks(swap(pred), rhs, lhs) {
+                    return Some(Chrec { base, ..test.chrec });
+                }
+            }
+            at = before;
+        }
+        None
     }
 
     /// How many times this loop probably runs.
@@ -1002,11 +1077,13 @@ impl<'a> Scev<'a> {
     /// signed sequence does not wrap, which is exactly what makes the wide sequence the same
     /// numbers as the narrow one.
     ///
-    /// The second proof is the loop's own exit test, through [`Scev::holds`] and [`trails`], and it
-    /// is here because of what an unsigned counter looks like. `for (unsigned i = 0; i < n; i++)`
-    /// carries no `nuw`, because C says unsigned arithmetic wraps, so `a[i]` on that counter used
-    /// to come back unwidened and every bounds check in the loop stayed where it was. The test that
-    /// keeps the counter inside its type keeps everything walking beside it inside too.
+    /// The second proof is the loop's own exit test, through [`Scev::holds`] and [`trails`], read
+    /// with the sign the extension has, and it is here because of what an unsigned counter looks
+    /// like. `for (unsigned i = 0; i < n; i++)` carries no `nuw`, because C says unsigned
+    /// arithmetic wraps, so `a[i]` on that counter used to come back unwidened and every bounds
+    /// check in the loop stayed where it was. The test that keeps the counter inside its type
+    /// keeps everything walking beside it inside too. An `int` counter under `-fwrapv` is the same
+    /// case under the signed reading.
     ///
     /// Each part is either a plain number or one of a value, and nothing else. A number means the
     /// same thing at both widths, and one of a value becomes that value read through the extension,
@@ -1026,9 +1103,10 @@ impl<'a> Scev<'a> {
     fn extend(&mut self, id: LoopId, opcode: Opcode, from: Value, to: Type) -> Evolution {
         let narrow = self.func[from].ty;
         let signed = opcode == Opcode::SExt;
-        let held = self.held.get(&id).copied().flatten();
+        let held = self.held.get(&id).copied().unwrap_or_default();
+        let hold = if signed { held.signed } else { held.unsigned };
         let settled = |chrec: Chrec| {
-            chrec.does_not_wrap(signed) || (!signed && held.is_some_and(|held| trails(chrec, held)))
+            chrec.does_not_wrap(signed) || hold.is_some_and(|hold| hold.covers(chrec, signed))
         };
         let reading = if signed { Reading::Signed } else { Reading::Unsigned };
         match self.at(id, from) {
@@ -1284,6 +1362,29 @@ fn solve(chrec: Chrec, limit: Invariant, pred: IntPred) -> Option<Bound> {
     found.map(|(count, assumptions)| Bound { count, assumptions, reading })
 }
 
+/// The comparison that holds on the way from one block to the next, when the first ends by branching
+/// on one, turned round when the way is the arm taken when it fails.
+fn edge_test(func: &Func, from: Block, to: Block) -> Option<(IntPred, Value, Value)> {
+    let term = func.terminator(from)?;
+    if func[term].opcode != Opcode::BrIf {
+        return None;
+    }
+    let &cond = func[func[term].args].first()?;
+    let calls = &func[func.target_list(term)];
+    let (taken, not_taken) = (calls.first()?.block, calls.get(1)?.block);
+    if taken == not_taken {
+        return None;
+    }
+    let Def::Result { inst, .. } = func[cond].def else { return None };
+    if func[inst].opcode != Opcode::ICmp {
+        return None;
+    }
+    let Extra::IntPred(pred) = func[inst].extra else { return None };
+    let pred = if taken == to { pred } else { invert(pred) };
+    let operands = &func[func[inst].args];
+    Some((pred, *operands.first()?, *operands.get(1)?))
+}
+
 /// Whether the exit test by itself rules out the counter wrapping before the loop ends.
 ///
 /// An unsigned counter carries no `nuw`, because C says unsigned arithmetic wraps, so without this
@@ -1326,7 +1427,11 @@ fn bounded_by_its_test(pred: IntPred, step: i128) -> bool {
 /// that is safe is the one that starts further along rather than the one that starts behind, and
 /// nothing measured so far walks an array downwards. Doing it would be turning the comparison
 /// round, and it should come with the program that wants it.
-fn trails(chrec: Chrec, held: Chrec) -> bool {
+///
+/// The same holds under a signed test for a sign extension, which is every `int` counter in a
+/// program built with `-fwrapv`. Postgres is built that way, so without it each `for (int i = 0;
+/// i < n; i++)` there kept a widening and a scaled index on every turn rather than a pointer.
+fn trails(chrec: Chrec, held: Chrec, signed: bool) -> bool {
     if chrec.ty != held.ty || chrec.step != held.step {
         return false;
     }
@@ -1338,9 +1443,18 @@ fn trails(chrec: Chrec, held: Chrec) -> bool {
     else {
         return false;
     };
-    // Read as unsigned, which is the reading the test took, so a base that came in negative is a
-    // large number rather than a small one and starting behind is not what it is doing.
-    step > 0 && mine >= 0 && theirs >= 0 && mine <= theirs
+    // Read the way the test read them. Unsigned, a base that came in negative is a large number
+    // rather than a small one and starting behind is not what it is doing. Signed, a base is only
+    // the number it looks like when nothing added to get it went past the ends of the type.
+    let bits = chrec.ty.bits();
+    let fits = |number: i128| {
+        !(1..128).contains(&bits) || {
+            let half = 1i128 << (bits - 1);
+            (-half..half).contains(&number)
+        }
+    };
+    let read = if signed { fits(mine) && fits(theirs) } else { mine >= 0 && theirs >= 0 };
+    step > 0 && mine <= theirs && read
 }
 
 /// The same expression, read the way a test without a sign reads it.
@@ -1937,6 +2051,131 @@ mod tests {
                 build.unary(Opcode::ZExt, ahead, Type::int(32))
             });
         assert_eq!(evolution(&it.func, wide), Evolution::Unknown);
+    }
+
+    #[test]
+    fn a_signed_counter_its_own_test_holds_widens_under_a_sign_extension_only() {
+        // `for (int i = -5; i < 100; i++)` under `-fwrapv`. The signed test holds it the way the
+        // unsigned one above holds its counter, and what it says is about the signed reading, so a
+        // zero extension of a counter that starts out negative is still refused.
+        let (it, (wide, zero_extended)) =
+            counted_with(Type::int(32), -5, 100, 1, IntPred::Slt, Flags::NONE, |build, counter| {
+                (
+                    build.unary(Opcode::SExt, counter, Type::int(64)),
+                    build.unary(Opcode::ZExt, counter, Type::int(64)),
+                )
+            });
+        let chrec = evolution(&it.func, wide).chrec().expect("its own test holds it");
+        assert_eq!(chrec.ty, Type::int(64));
+        assert_eq!(chrec.base, Invariant::number(-5));
+        assert_eq!(chrec.step, Invariant::number(1));
+        assert_eq!(evolution(&it.func, zero_extended), Evolution::Unknown);
+    }
+
+    /// A loop whose test has been copied in front of it, which is the shape `crate::header_copy`
+    /// leaves every `for` loop in, with `extra` run in the body on the counter.
+    ///
+    /// ```text
+    /// entry(start, limit): ahead = icmp pred start, limit ; br_if ahead, pre, exit
+    /// pre:     jump body(start)
+    /// body(i): next = add i, 1 ; again = icmp pred next, limit ; br_if again, latch, exit
+    /// latch:   jump body(next)
+    /// exit:    ret
+    /// ```
+    ///
+    /// `asked` is the predicate the copy in front asks, or `None` for a loop entered without one.
+    fn rotated_with<T>(
+        ty: Type,
+        pred: IntPred,
+        asked: Option<IntPred>,
+        extra: impl FnOnce(&mut Builder<'_>, Value) -> T,
+    ) -> (Func, Value, T) {
+        let mut names = Interner::new();
+        let mut func = Func::new(names.intern("f"), Signature::new());
+        let entry = func.create_block();
+        let pre = func.create_block();
+        let body = func.create_block();
+        let latch = func.create_block();
+        let exit = func.create_block();
+        let start = func.append_param(entry, ty);
+        let limit = func.append_param(entry, ty);
+        let counter = func.append_param(body, ty);
+
+        let mut build = Builder::new(&mut func, entry);
+        match asked {
+            Some(asked) => {
+                let ahead = build.icmp(asked, start, limit);
+                build.br_if(ahead, pre, &[], exit, &[]);
+            }
+            None => build.jump(pre, &[]),
+        }
+
+        let mut build = Builder::new(&mut func, pre);
+        build.jump(body, &[start]);
+
+        let mut build = Builder::new(&mut func, body);
+        let derived = extra(&mut build, counter);
+        let one = build.iconst(ty, 1);
+        let next = build.binary(Opcode::Add, counter, one, Flags::NONE);
+        let again = build.icmp(pred, next, limit);
+        build.br_if(again, latch, &[], exit, &[]);
+
+        let mut build = Builder::new(&mut func, latch);
+        build.jump(body, &[next]);
+
+        let mut build = Builder::new(&mut func, exit);
+        build.ret(&[]);
+
+        (func, start, derived)
+    }
+
+    #[test]
+    fn a_counter_one_behind_its_test_widens_when_the_way_in_asked_it_first() {
+        // `for (int i = s; i < n; i++)` under `-fwrapv` once its test is at the bottom. The test
+        // asks about `i + 1` and the body reads `i`, and the copy in front asked `s < n`, so no `i`
+        // the body sees is at the top of the type.
+        let (func, start, wide) =
+            rotated_with(Type::int(32), IntPred::Slt, Some(IntPred::Slt), |build, counter| {
+                build.unary(Opcode::SExt, counter, Type::int(64))
+            });
+        let chrec = evolution(&func, wide).chrec().expect("the copy in front holds it");
+        assert_eq!(chrec.ty, Type::int(64));
+        assert_eq!(chrec.step, Invariant::number(1));
+        let read = Widening { reading: Reading::Signed, to: Type::int(64) };
+        assert_eq!(chrec.base.value, Some(start));
+        assert_eq!(chrec.base.read, Some(read));
+        assert_eq!((chrec.base.scale, chrec.base.offset), (1, 0));
+    }
+
+    #[test]
+    fn the_same_counter_unsigned_widens_under_a_zero_extension() {
+        let (func, _, wide) =
+            rotated_with(Type::int(32), IntPred::Ult, Some(IntPred::Ult), |build, counter| {
+                build.unary(Opcode::ZExt, counter, Type::int(64))
+            });
+        assert!(evolution(&func, wide).chrec().is_some(), "the copy in front holds it");
+    }
+
+    #[test]
+    fn a_counter_one_behind_its_test_does_not_widen_when_the_way_in_did_not_ask() {
+        // With nothing in front, `s` may be the largest `int`, and then `i + 1` is the smallest
+        // one, which the test lets through, and the body's next `i` is that.
+        let (func, _, wide) = rotated_with(Type::int(32), IntPred::Slt, None, |build, counter| {
+            build.unary(Opcode::SExt, counter, Type::int(64))
+        });
+        assert_eq!(evolution(&func, wide), Evolution::Unknown);
+        // Asking `s <= n` in front lets `s` be the largest `int` too.
+        let (func, _, wide) =
+            rotated_with(Type::int(32), IntPred::Slt, Some(IntPred::Sle), |build, counter| {
+                build.unary(Opcode::SExt, counter, Type::int(64))
+            });
+        assert_eq!(evolution(&func, wide), Evolution::Unknown);
+        // And a signed question says nothing about the unsigned reading.
+        let (func, _, wide) =
+            rotated_with(Type::int(32), IntPred::Slt, Some(IntPred::Slt), |build, counter| {
+                build.unary(Opcode::ZExt, counter, Type::int(64))
+            });
+        assert_eq!(evolution(&func, wide), Evolution::Unknown);
     }
 
     #[test]

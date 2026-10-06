@@ -35,9 +35,11 @@ long long shl(long long a) { return a << 61; }
 ";
 
 /// A loop the optimizer can only work the trip count of out by assuming the counter does not turn
-/// round, which is what makes it the thing to measure a withdrawn licence with.
+/// round, which is what makes it the thing to measure a withdrawn licence with. The test is the
+/// inclusive one because `i < n` holds the counter by itself: it is at `n` before it is past it,
+/// so it never gets to the top of its type whichever way the build reads overflow.
 const LOOP: &str = "\
-int sum(int *a, int n) { int s = 0; for (int i = 0; i < n; i++) s += a[i]; return s; }
+int sum(int *a, int n) { int s = 0; for (int i = 0; i <= n; i++) s += a[i]; return s; }
 ";
 
 /// The fixture, under a directory of its own so that two of these running at once do not write the
@@ -52,6 +54,18 @@ fn fixture(what: &str, source: &str) -> PathBuf {
 
 /// What the compiler wrote for that source under those flags, in whichever form was asked for.
 fn run(what: &str, emit: &[&str], flags: &[&str], source: &str) -> String {
+    let out = compile(what, emit, flags, source);
+    String::from_utf8_lossy(&out.stdout).into_owned()
+}
+
+/// What the compiler said about that source under those flags, which is where the remarks go.
+fn remarks(what: &str, flags: &[&str], source: &str) -> String {
+    let out = compile(what, &["-O2", "-S", "-fopt-info-all"], flags, source);
+    String::from_utf8_lossy(&out.stderr).into_owned()
+}
+
+/// The compiler run over the fixture, which it has to have accepted.
+fn compile(what: &str, emit: &[&str], flags: &[&str], source: &str) -> std::process::Output {
     let path = fixture(what, source);
     let out = Command::new(env!("CARGO_BIN_EXE_rucc"))
         .arg(format!("--target={TARGET}"))
@@ -67,7 +81,7 @@ fn run(what: &str, emit: &[&str], flags: &[&str], source: &str) -> String {
         "the compiler refused the fixture:\n{}",
         String::from_utf8_lossy(&out.stderr)
     );
-    String::from_utf8_lossy(&out.stdout).into_owned()
+    out
 }
 
 /// The IR for that source under those flags, which is where the licence is written down.
@@ -169,11 +183,11 @@ fn the_older_flag_is_both_of_the_newer_ones() {
 
 /// And a pass that reads the licence does less work with it withdrawn, which is the point.
 ///
-/// The count of a loop whose counter goes up one at a time rests on the counter not turning round,
-/// so a build where it may turn round cannot have the count and cannot do the thing the count is
-/// for. What the splitter does with it is ask the runtime once in front of the loop how many bytes
-/// the walk has room for, and send the iterations that fit down a copy of the body with no checks
-/// in it. That question is the measurement, since it is the whole of what the licence bought: it is
+/// The count of a loop whose counter goes up one at a time to an inclusive limit rests on the
+/// counter not turning round, so a build where it may turn round cannot have the count and cannot
+/// do the thing the count is for. What the splitter does with it is ask the runtime once in front
+/// of the loop how many bytes the walk has room for, and send the iterations that fit down a copy
+/// of the body with no checks in it. That question is the measurement, since it is the whole of what the licence bought: it is
 /// there in the plain build and it is not there with the licence withdrawn, and the loop is then
 /// the one loop it always was with its check still inside it.
 ///
@@ -190,4 +204,22 @@ fn withdrawing_the_licence_stops_the_optimizer_sizing_the_walk_in_front_of_the_l
     };
     assert!(windows(&[]) > 0, "nothing sized the walk in the plain build");
     assert_eq!(windows(&["-fwrapv"]), 0, "the flag left a window in front of the loop");
+}
+
+/// A counter that stops at its own limit is still walked on a pointer with the licence withdrawn.
+///
+/// `i < n` is asked before `i` is stepped past it, so `i` is never more than `n` and never gets to
+/// the top of `int`, and sign extending it each time round is the same as sign extending where it
+/// started and counting on in 64 bits. Postgres is built with `-fwrapv`, and before this every
+/// `for (int i = ...; i < n; i++)` in it kept a sign extension and a scaled index in the loop.
+#[test]
+fn a_counter_held_by_its_own_test_is_walked_on_a_pointer_either_way() {
+    let source = "void zero(long *a, int s, int n) { for (int i = s; i < n; i++) a[i] = 0; }\n";
+    for flags in [&[][..], &["-fwrapv"][..]] {
+        let said = remarks("walk", flags, source);
+        assert!(
+            said.contains("pointer given to the loop for a group of addresses to walk on"),
+            "{flags:?} left the index in the loop:\n{said}"
+        );
+    }
 }
