@@ -848,6 +848,11 @@ pub fn compile_recording(
     // computation, so asking which bits are read first means the fold sees the addresses as they
     // will be rather than as they were.
     bits::dead(&mut func, machine.bits, machine.shapes, names);
+    // A `cset` has already cleared everything above the bit it wrote, so the `and` that widens
+    // the bit is a copy, and its readers can read the `cset` instead.
+    if std::ptr::eq(machine.selector, &select::aarch64::SELECTOR) {
+        bits::settled(&mut func, machine.shapes, names);
+    }
 
     // After selection, because the address instruction and the one that reads it are both machine
     // instructions only once selection has written them, and before allocation, because what makes
