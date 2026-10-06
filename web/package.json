@@ -1,0 +1,10 @@
+{
+  "name": "rucc-web",
+  "private": true,
+  "description": "rucc in a browser, with browser_wasi_shim",
+  "license": "Apache-2.0",
+  "type": "module",
+  "dependencies": {
+    "@bjorn3/browser_wasi_shim": "0.4.2"
+  }
+}

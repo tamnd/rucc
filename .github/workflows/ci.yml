@@ -605,6 +605,20 @@ jobs:
         env:
           RUNNER: node ${{ github.workspace }}/tests/rung0/wasi.mjs
         run: tests/sqlite/wasm.sh "$PWD/target/release/rucc" "$PWD/sqlite-autoconf-3530400"
+      # The browser page of #2867: rucc.wasm over browser_wasi_shim in Node, which runs the V8 of
+      # Chrome. It installs the sysroot from the archive that the fetch above left in the download
+      # cache, and builds and runs small programs and the SQLite shell, all inside the shim.
+      - name: build rucc as a wasm module
+        run: |
+          rustup target add wasm32-wasip1
+          cargo build --release --bin rucc --target wasm32-wasip1
+      - name: build the SQLite shell with rucc.wasm in the browser shim
+        run: |
+          set -euo pipefail
+          (cd web && npm ci --no-audit --no-fund)
+          release=target/wasm32-wasip1/release
+          node tests/web/run.mjs "$release/rucc.wasm" "$release/librucc_builtins.a" \
+            "$HOME"/.cache/rucc/downloads/*/rucc-sysroot-wasm32-wasip1.tar.gz "$PWD/sqlite-autoconf-3530400"
 
   # The barriers and atomics PostgreSQL is built on, run on AArch64 hardware. The qemu job above
   # cannot do this, because an emulated machine is only ever as weak as the x86 host under it, and

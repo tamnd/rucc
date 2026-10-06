@@ -1,0 +1,95 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>rucc in the browser</title>
+<script type="importmap">
+{ "imports": { "@bjorn3/browser_wasi_shim": "./shim/index.js" } }
+</script>
+<style>
+  body { font: 15px/1.4 system-ui, sans-serif; margin: 1.5em auto; max-width: 60em; padding: 0 1em; }
+  textarea, pre, input { font: 13px/1.4 ui-monospace, monospace; box-sizing: border-box; width: 100%; }
+  textarea { height: 18em; }
+  #stdin { height: 4em; }
+  pre { background: #f4f4f4; padding: .6em; min-height: 3em; white-space: pre-wrap; }
+  .row { display: flex; gap: .5em; align-items: center; margin: .5em 0; }
+  .row input { flex: 1; }
+</style>
+</head>
+<body>
+<h1>rucc in the browser</h1>
+<p>rucc, compiled to WebAssembly, compiles and links your C program for wasm32-wasip1 in this page. Then the page runs the program. Nothing goes to a server.</p>
+<p id="state">Loading the compiler and the sysroot.</p>
+<textarea id="source" spellcheck="false">#include &lt;stdio.h&gt;
+
+int main(void) {
+    char name[64];
+    if (fgets(name, sizeof name, stdin))
+        printf("hello, %s", name);
+    for (int i = 1; i &lt;= 5; i++)
+        printf("%d squared is %d\n", i, i * i);
+    return 0;
+}
+</textarea>
+<div class="row"><label for="flags">Flags</label><input id="flags" value="-O2 -Wall" spellcheck="false"><button id="go" disabled>Compile and run</button></div>
+<label for="stdin">Standard input</label>
+<textarea id="stdin" spellcheck="false">world
+</textarea>
+<h2>Compiler</h2>
+<pre id="diagnostics"></pre>
+<h2>Program</h2>
+<pre id="output"></pre>
+<script type="module">
+import { Rucc, runProgram } from './rucc.js';
+
+const $ = (id) => document.getElementById(id);
+const decoder = new TextDecoder();
+
+async function bytes(url) {
+  const response = await fetch(url);
+  if (!response.ok) {
+    throw new Error(`${url}: ${response.status} ${response.statusText}`);
+  }
+  return new Uint8Array(await response.arrayBuffer());
+}
+
+let rucc;
+try {
+  const started = performance.now();
+  const [compiler, builtins, sysroot] = await Promise.all([
+    WebAssembly.compileStreaming(fetch('rucc.wasm')),
+    bytes('librucc_builtins.a'),
+    bytes('rucc-sysroot-wasm32-wasip1.tar.gz'),
+  ]);
+  rucc = await Rucc.load({ compiler, builtins, sysroot });
+  $('state').textContent = `Ready. The compiler and the sysroot took ${((performance.now() - started) / 1000).toFixed(1)} s to load.`;
+  $('go').disabled = false;
+} catch (why) {
+  $('state').textContent = `The compiler did not load: ${why.message ?? why}`;
+}
+
+$('go').addEventListener('click', async () => {
+  $('go').disabled = true;
+  $('diagnostics').textContent = 'Compiling.';
+  $('output').textContent = '';
+  // Let the page show the text above before the compile holds the main thread.
+  await new Promise((resolve) => setTimeout(resolve, 0));
+  try {
+    const flags = $('flags').value.split(/\s+/).filter(Boolean);
+    const started = performance.now();
+    const built = await rucc.compile($('source').value, flags);
+    const seconds = ((performance.now() - started) / 1000).toFixed(2);
+    $('diagnostics').textContent = `${built.diagnostics}rucc exited with status ${built.status} after ${seconds} s.`;
+    if (built.module !== null) {
+      const ran = await runProgram(built.module, { stdin: $('stdin').value });
+      $('output').textContent = decoder.decode(ran.stdout) + decoder.decode(ran.stderr) + `\nThe program exited with status ${ran.status}.`;
+    }
+  } catch (why) {
+    $('diagnostics').textContent = `${why.message ?? why}`;
+  }
+  $('go').disabled = false;
+});
+</script>
+</body>
+</html>

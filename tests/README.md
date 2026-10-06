@@ -21,6 +21,8 @@ tests/
                exclusions for each target it runs on                                  W6
   torture/     the GCC torture execute runner, and the exclusions for each target it
                runs on                                                                 WA3
+  web/         rucc.wasm as the browser page of web/ runs it, over browser_wasi_shim
+               in Node                                                                 WA5
   litmus/      memory model litmus tests for PostgreSQL's barriers and atomics, run on
                AArch64 hardware                                                        PG4
   corpus/      checkouts and build recipes for the target ladder projects              M5
