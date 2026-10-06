@@ -1,8 +1,9 @@
 #!/bin/sh
 # The round trip of the -S text for one wasm target (tamnd/rucc#3141): each c-testsuite
 # single-exec program is compiled by rucc to text with -S and to an object with -c, at -O0 and
-# -O2, and the text is then assembled by rucc with -c. The object from the text must be the object
-# from the C source, byte for byte.
+# -O2, each with and without -g, and the text is then assembled by rucc with -c. The object from
+# the text must be the object from the C source, byte for byte. With -g the text and the object
+# hold the DWARF sections (tamnd/rucc#3149).
 #
 # usage: tests/wasm-asm/run.sh <rucc> <triple> [<c-testsuite checkout>]
 #
@@ -44,9 +45,10 @@ for source in "$cases"/*.c; do
 			std=gnu$tag
 		fi
 	done
-	for level in 0 2; do
+	for level in 0 2 0-g 2-g; do
 		base=$out/$name-O$level
-		flags="--target=$triple -std=$std -O$level"
+		flags="--target=$triple -std=$std -O${level%-g}"
+		case $level in *-g) flags="$flags -g" ;; esac
 		result=ok
 		if ! $rucc $flags -S -o "$base.s" "$source" >"$out/build.log" 2>&1; then
 			result='gave no text'
