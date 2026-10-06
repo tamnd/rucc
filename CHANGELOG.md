@@ -28,6 +28,7 @@ A function with a computed `goto` no longer keeps empty blocks nothing reaches, 
 ### Added
 
 - `bench/wasm/sqlite.sh`, the measurement protocol of WA4 (#2866). It builds the SQLite shell for wasm32-wasip1 with rucc and with clang from wasi-sdk 34 at `-O2`, checks the answers of each module under Wasmtime and Node before it reads a time, records the load average, and prints the lowest CPU user time of five interleaved rounds and the ratio of rucc to clang. The nightly workflow runs it.
+- `__attribute__((null_terminated_string_arg(n)))`, gcc 14's word that an argument is a string ending in a zero byte, is taken and its number checked as gcc checks it, in its words (#8). A zero, a number past the parameters, a parameter that is not a pointer, an argument that is not an integer constant and the attribute on anything but a function or a pointer to one are warned about, and the wrong number of arguments is refused with `E0839`. Only `-fanalyzer` reads the promise in gcc, so nothing reads it here.
 
 ### Changed
 

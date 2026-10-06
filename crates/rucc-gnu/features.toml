@@ -1154,6 +1154,15 @@ tests = ["rucc::the_promises_and_the_tool_hints_gcc_answers_yes_for_are_taken_wi
 notes = "Tells `-fanalyzer` the argument is a file descriptor open for writing. This compiler has no analyzer, so there is nothing to tell."
 
 [[feature]]
+name = "null_terminated_string_arg"
+kind = "attribute"
+gcc_version = "14.0"
+status = "implemented"
+used_by = []
+tests = ["rucc::a_string_argument_is_taken_where_gcc_takes_it", "rucc::a_string_argument_is_checked_in_gcc_s_words"]
+notes = "Tells `-fanalyzer` the numbered argument is a string ending in a zero byte, or a null pointer. This compiler has no analyzer, so nothing reads it, but the number is checked as gcc 14 checks it, in its words: zero, a number past the parameters, a parameter that is not a pointer, an argument that is not an integer constant and the attribute on something that is not a function or a pointer to one are each warned about and the attribute dropped, and the wrong number of arguments is refused with `E0839`. A function without a prototype takes any number."
+
+[[feature]]
 name = "counted_by"
 kind = "attribute"
 gcc_version = "15.0"

@@ -1002,7 +1002,7 @@ impl Checker<'_> {
     }
 
     /// A type the way gcc's format messages quote it, with what a typedef stands for after it.
-    fn gcc_quoted(&self, ty: TypeId) -> String {
+    pub(in crate::check) fn gcc_quoted(&self, ty: TypeId) -> String {
         let written = self.gcc_type(ty, false);
         let plain = self.gcc_type(ty, true);
         if written == plain {

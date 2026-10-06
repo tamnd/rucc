@@ -81,6 +81,7 @@ mod format;
 mod init;
 mod noinit;
 mod stmt;
+mod string_arg;
 mod tls;
 mod ty;
 mod weak;
