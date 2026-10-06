@@ -297,6 +297,13 @@ const O0: &[&str] = &["expect", "simplify-cfg"];
 /// at all, so there is nothing here to decline. It sits where `-O2` puts the full pass, which is
 /// immediately above `thread`, and that pass is the reason: threading turns the shape this matches
 /// into one it does not.
+///
+/// `rangetest` runs twice. The first, after `phiopt`, takes the trees of `and` and `or` in one
+/// block, and at this level there are few of those, since `short-circuit` is what makes them.
+/// `x == 1 || x == 2` is still a chain of branches then, with blocks `thread` left handing a bit to
+/// the next one, and only once `simplify-cfg` has merged those is each link one block that compares
+/// and branches. The second runs right after that `simplify-cfg` and merges such a chain into one
+/// test in the block it starts in, which is what gcc's reassociation does at this level too.
 const O1: &[&str] = &[
     "expect",
     "fold",
@@ -318,6 +325,7 @@ const O1: &[&str] = &[
     "canon",
     "licm",
     "simplify-cfg",
+    "rangetest",
     "number",
     "load-forward",
     "constant-p",
@@ -543,6 +551,14 @@ const O3: &[&str] = &[
 /// it will pay. What it gets back is a body that is one region and an exit test at the bottom,
 /// which is slightly smaller in the steady state, so the trade is worth making at a limit that
 /// keeps the header small and not at one that copies twenty instructions to save two.
+///
+/// `rangetest` runs a second time after the first `simplify-cfg`, for the reason the `-O1` list
+/// gives. Merging a chain of branches into one test is smaller as well as faster, so it is not a
+/// trade this level declines. `thread` runs once more just before that `simplify-cfg`, because
+/// `phiopt` leaves `x == 1 || x == 2` as a bit handed to a block that does nothing but branch on
+/// it, and the edge that hands it a constant has to go past that block before the chain is one
+/// block for each link. At `-O1` `thread-copy` does that. This level has no `thread-copy`, but
+/// that edge needs no copy, so `thread` is enough and the code only gets smaller.
 const OS: &[&str] = &[
     "expect",
     "fold",
@@ -562,7 +578,9 @@ const OS: &[&str] = &[
     "canon",
     "header-copy-small",
     "canon",
+    "thread",
     "simplify-cfg",
+    "rangetest",
     "number",
     "load-forward",
     "dse",
@@ -591,6 +609,8 @@ const OS: &[&str] = &[
 /// is the one loop canonicalization that makes the function bigger, `-Oz` is the level that would
 /// rather have the branch than the bytes, and every reason to want the do-while form here is a
 /// speed reason.
+///
+/// `thread` and `rangetest` run again after `phiopt`, as at `-Os`.
 const OZ: &[&str] = &[
     "expect",
     "fold",
@@ -608,7 +628,9 @@ const OZ: &[&str] = &[
     "rangetest",
     "prune",
     "canon",
+    "thread",
     "simplify-cfg",
+    "rangetest",
     "number",
     "load-forward",
     "dse",
