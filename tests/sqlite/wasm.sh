@@ -22,6 +22,10 @@
 # The shell calls `system`, `popen` and `pclose`, which wasi-libc does not have, and
 # wasi-stubs.c defines them. It also needs the four emulations of wasi-libc for signals, process
 # clocks, `getpid` and `mmap`, each a macro and a library.
+#
+# SAME_LINK, when it is set, is a command that compares two wasm modules, as in
+# tests/rung0/run.sh. Each build is then also linked by the linker inside rucc, with -fuse-ld=rucc,
+# the command gets the two modules, and the second module runs the workload too.
 
 set -eu
 
@@ -47,6 +51,27 @@ defs="-DSQLITE_THREADSAFE=0 -DSQLITE_OMIT_LOAD_EXTENSION -DSQLITE_OMIT_WAL"
 emulated="-D_WASI_EMULATED_SIGNAL -D_WASI_EMULATED_PROCESS_CLOCKS -D_WASI_EMULATED_GETPID -D_WASI_EMULATED_MMAN"
 libraries="-lwasi-emulated-signal -lwasi-emulated-process-clocks -lwasi-emulated-getpid -lwasi-emulated-mman"
 
+mkdir "$out/in"
+
+# Runs one build of the shell with the workload and holds its output to the clang build.
+run() {
+	label=$1
+	shell=$2
+	# The shell writes a warning to stderr that it cannot find a home directory, and Node writes
+	# one that WASI is experimental, so stderr is shown only when the run fails.
+	# shellcheck disable=SC2086
+	if ! ${RUNNER:-} "$shell" :memory: <"$here/wasm-workload.sql" >"$shell.out" 2>"$shell.err"; then
+		echo "$label exited nonzero"
+		sed 's/^/    /' "$shell.err"
+		failed=$((failed + 1))
+	elif ! diff -u "$here/wasm-workload.expected" "$shell.out"; then
+		echo "$label gave other answers than the clang build"
+		failed=$((failed + 1))
+	else
+		echo "$label gave the answers of the clang build"
+	fi
+}
+
 failed=0
 for level in 0 2; do
 	shell=$out/sqlite3-O$level.wasm
@@ -57,18 +82,20 @@ for level in 0 2; do
 		failed=$((failed + 1))
 		continue
 	fi
+	run "sqlite -O$level" "$shell"
+	[ -n "${SAME_LINK:-}" ] || continue
+	# The same file name in another directory, because the name section holds the file name.
+	inside=$out/in/sqlite3-O$level.wasm
 	# shellcheck disable=SC2086
-	# The shell writes a warning to stderr that it cannot find a home directory, and Node writes
-	# one that WASI is experimental, so stderr is shown only when the run fails.
-	if ! ${RUNNER:-} "$shell" :memory: <"$here/wasm-workload.sql" >"$out/O$level.out" 2>"$out/O$level.err"; then
-		echo "sqlite -O$level exited nonzero"
-		sed 's/^/    /' "$out/O$level.err"
+	if ! "$rucc" --target=wasm32-wasip1 -O$level $defs $emulated -I"$sqlite" "$sqlite/shell.c" \
+		"$sqlite/sqlite3.c" "$here/wasi-stubs.c" $libraries -fuse-ld=rucc -o "$inside"; then
+		echo "sqlite -O$level did not link inside rucc"
 		failed=$((failed + 1))
-	elif ! diff -u "$here/wasm-workload.expected" "$out/O$level.out"; then
-		echo "sqlite -O$level gave other answers than the clang build"
+	elif ! $SAME_LINK "$shell" "$inside"; then
 		failed=$((failed + 1))
 	else
-		echo "sqlite -O$level gave the answers of the clang build"
+		echo "sqlite -O$level linked inside rucc to the module from wasm-ld"
+		run "sqlite -O$level linked inside rucc" "$inside"
 	fi
 done
 [ "$failed" -eq 0 ]
