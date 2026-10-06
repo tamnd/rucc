@@ -310,6 +310,7 @@ impl Checker<'_> {
             self.ms_hooked(&[field.attrs, specs], false);
             self.reset_kept(&[field.attrs, specs], None, at);
             self.extern_access(&[field.attrs, specs], None, at);
+            self.string_arg(&[field.attrs, specs], decl.ty);
             self.assume_misplaced(&[field.attrs, specs], false, at);
             fields.push((decl, at));
         }

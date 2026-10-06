@@ -1212,6 +1212,7 @@ impl Checker<'_> {
                 self.ms_hooked(&[ast[specs].attrs, param.attrs], false);
                 self.reset_kept(&[ast[specs].attrs, param.attrs], None, span);
                 self.extern_access(&[ast[specs].attrs, param.attrs], None, span);
+                self.string_arg(&[ast[specs].attrs, param.attrs], ty);
                 self.assume_misplaced(&[ast[specs].attrs, param.attrs], false, span);
             }
 

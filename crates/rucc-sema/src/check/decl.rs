@@ -462,6 +462,7 @@ impl Checker<'_> {
         self.record_symver(Some(id), &[specs.attrs], StorageDuration::Static, span);
         let merged = self.tast[id].ty;
         self.record_alloc_size(id, &[specs.attrs], DeclKind::Function, merged);
+        self.string_arg(&[specs.attrs], merged);
         self.annotate_decl(id, &[specs.attrs]);
         self.check_tls_model(&[specs.attrs], Some(name), Holder::NotVariable);
         self.read_advice(id, &[specs.attrs]);
@@ -987,6 +988,7 @@ impl Checker<'_> {
         // declarator, as `extern void *malloc (size_t __size) __attr_alloc_size ((1));`.
         let merged = self.tast[id].ty;
         self.record_alloc_size(id, &[specs.attrs, item.attrs], kind, merged);
+        self.string_arg(&[specs.attrs, item.attrs], merged);
         self.annotate_decl(id, &[specs.attrs, item.attrs]);
         if kind == DeclKind::Object {
             self.check_nonstring(&[specs.attrs, item.attrs], merged);
@@ -1106,6 +1108,7 @@ impl Checker<'_> {
         self.ms_hooked(&[specs.attrs, item.attrs], false);
         self.reset_kept(&[specs.attrs, item.attrs], None, span);
         self.extern_access(&[specs.attrs, item.attrs], None, span);
+        self.string_arg(&[specs.attrs, item.attrs], ty);
         self.record_fentry(None, &[specs.attrs, item.attrs], DeclKind::Type);
         self.record_symver(None, &[specs.attrs, item.attrs], StorageDuration::Static, span);
         self.resolver(&[specs.attrs, item.attrs], DeclKind::Type, span);
