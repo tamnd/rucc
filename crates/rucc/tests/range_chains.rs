@@ -84,6 +84,7 @@ fn the_merge_is_said() {
 
 /// The shapes and a few more, run over every value near the constants and the ends of the type,
 /// with a checksum of the answers. Every level has to give the answer `-O0` gives.
+#[cfg(all(target_os = "linux", target_arch = "x86_64"))]
 const PROGRAM: &str = "\
 #include <limits.h>
 #include <stdio.h>

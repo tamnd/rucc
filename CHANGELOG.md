@@ -12,6 +12,7 @@ All notable changes are recorded here. The format follows [Keep a Changelog](htt
 ### Fixed
 
 - `rucc-wasm-link` writes the same module each time it links the same inputs (#2867). It put the imports in the order of a hash table, which changes from one run to the next. They are now in the order of the first reference to each.
+- `-fzero-call-used-regs=` works on i386, with `--target=i686` or with `-m32`, where it stopped the compiler on a register that i386 does not have (#3086). It clears `edx` and `ecx` and then `xmm0` to `xmm7` in gcc's order, the `-arg` choices clear the registers that `-mregparm=3` and `-msse` pass arguments in, and `zmm16` to `zmm31` are never named. The 32-bit vDSO of an x86-64 allmodconfig kernel is built this way.
 
 ## 0.25.0
 

@@ -2432,10 +2432,13 @@ pub fn parse_args(args: &[String]) -> Result<Action, CliError> {
                         )));
                     }
                 };
-                let here = matches!(arch, rucc_target::Arch::X86_64 | rucc_target::Arch::Aarch64);
+                let here = matches!(
+                    arch,
+                    rucc_target::Arch::X86_64 | rucc_target::Arch::X86 | rucc_target::Arch::Aarch64
+                );
                 if opts.zero_regs.is_some() && !here {
                     return Err(err(format!(
-                        "{arg}: registers are only cleared on return on x86-64 and AArch64"
+                        "{arg}: registers are only cleared on return on x86-64, i386 and AArch64"
                     )));
                 }
             }

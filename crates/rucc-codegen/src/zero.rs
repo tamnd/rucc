@@ -10,12 +10,16 @@
 //! - Only a register a call may clobber, since the ones a call keeps are restored by the epilogue
 //!   already. On x86-64 that is `rax`, `rdx`, `rcx`, `rsi`, `rdi` and `r8` to `r11`, and on AArch64
 //!   `x0` to `x17`. gcc also clears `x18` there, which this compiler always keeps for the platform.
+//!   On i386 it is `eax`, `edx` and `ecx`, and `xmm0` to `xmm7` after them, all eight of which a
+//!   call clobbers there.
 //! - Never a register the return value is in.
 //! - For the `used` choices, only a register the body itself wrote or read. A register a call
 //!   clobbers is not one the body used, but a register an argument arrived in is, and on AArch64 a
 //!   function that makes a call has used `x16` and `x17`, since the linker may put a veneer that
 //!   writes them between the call and its target.
-//! - For the `-arg` choices, only a register an argument is passed in.
+//! - For the `-arg` choices, only a register an argument is passed in. On i386 that is the three
+//!   general purpose registers `-mregparm=3` would use and `xmm0` to `xmm2`, which is gcc's
+//!   answer whatever the function's own convention is.
 //! - For the choices without `-gpr` in them, the vector registers as well, by the same three
 //!   rules: `xmm0` to `xmm15` on x86-64, with the eight arguments are passed in coming in gcc's
 //!   order between `rdi` and `r8`, and `v0` to `v7` and `v16` to `v31` on AArch64 after every
@@ -33,7 +37,8 @@
 //! single `vzeroall` in front of everything else rather than sixteen of them. With AVX-512 `all`
 //! also clears `zmm16` to `zmm31`, with `vpxord` or, when AVX-512VL and AVX-512DQ let it name them
 //! as `xmm16` to `xmm31`, with `vxorps`, and the eight mask registers with `kxorw`. No value is
-//! ever allocated to any of those, so they are named outright.
+//! ever allocated to any of those, so they are named outright. i386 has no `zmm16` to `zmm31`,
+//! so there only the masks are cleared.
 //!
 //! It runs after the tail calls are made, since a call that became a jump leaves through the
 //! callee's `ret` and gcc clears nothing in front of it, and before the mitigations, so that the
@@ -128,6 +133,8 @@ struct Plan {
     imm: Option<i64>,
     /// The instruction that clears a vector register.
     clear_vector: &'static str,
+    /// Whether there are sixteen more vector registers with AVX-512, which there are not on i386.
+    upper: bool,
 }
 
 /// gcc's order is its own register numbers, which put the eight vector registers arguments are
@@ -164,6 +171,30 @@ const X86_64: Plan = Plan {
     clear: "xor_rr_32",
     imm: None,
     clear_vector: "pxor_rr",
+    upper: true,
+};
+
+/// gcc's numbers on i386 put `eax`, `edx` and `ecx` first and the vector registers after the x87
+/// stack, and every vector register is one a call clobbers.
+const I386: Plan = Plan {
+    clobbered: &[
+        gpr("eax", true),
+        gpr("edx", true),
+        gpr("ecx", true),
+        vec("xmm0", true),
+        vec("xmm1", true),
+        vec("xmm2", true),
+        vec("xmm3", false),
+        vec("xmm4", false),
+        vec("xmm5", false),
+        vec("xmm6", false),
+        vec("xmm7", false),
+    ],
+    veneers: &[],
+    clear: "xor_rr_32",
+    imm: None,
+    clear_vector: "pxor_rr",
+    upper: false,
 };
 
 /// `v8` to `v15` are not here, since a call keeps their low halves and gcc counts them as kept.
@@ -216,6 +247,7 @@ const AARCH64: Plan = Plan {
     clear: "mov_ri_64",
     imm: Some(0),
     clear_vector: "movi_zero",
+    upper: false,
 };
 
 /// How many registers the x87 stack has, all of which `all` clears.
@@ -224,8 +256,8 @@ const X87_DEPTH: usize = 8;
 /// Clears the registers `how` asks for in front of every `ret` in `func`, and says how many
 /// instructions it put in.
 ///
-/// Nothing is done on a target other than x86-64 and AArch64, which the driver does not take the
-/// flag for.
+/// Nothing is done on a target other than x86-64, i386 and AArch64, which the driver does not take
+/// the flag for.
 ///
 /// # Panics
 ///
@@ -241,7 +273,9 @@ pub fn apply(
 ) -> usize {
     let Some(how) = how else { return 0 };
     let x86 = insts.prefix == "x64.";
+    // i386 writes x86-64's instructions, and its file is the one with no `rax`.
     let plan = match insts.prefix {
+        "x64." if file.reg_named("rax").is_none() => &I386,
         "x64." => &X86_64,
         "a64." => &AARCH64,
         _ => return 0,
@@ -341,7 +375,7 @@ pub fn apply(
     let mut written: Vec<Write> = Vec::new();
     if whole {
         written.push(Write::Bare("vzeroall"));
-        if high {
+        if high && plan.upper {
             written.push(Write::Bare(upper));
         }
     }
@@ -354,7 +388,7 @@ pub fn apply(
             written.push(Write::Clear(clear_vector, None, class, phys));
         }
     }
-    if high && !whole {
+    if high && plan.upper && !whole {
         written.push(Write::Bare(upper));
     }
     if high {

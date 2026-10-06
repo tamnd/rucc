@@ -288,6 +288,30 @@ fn a_unit_without_the_registers_does_not_clear_them() {
     assert_eq!(epilogue(&text, "f"), gprs, "{text}");
 }
 
+/// i386 clears `edx` and `ecx` and never a 64-bit register, which it does not have. The vDSO's
+/// 32-bit half is built with `-m32` and `used-gpr` in an allmodconfig kernel, and this compiler
+/// used to stop there on a register its file did not name.
+#[test]
+fn i386_clears_its_own_registers_in_gcc_order() {
+    let source = "\
+int f(int a, int b) { return a * b + 3; }
+long long wide(long long a, long long b) { return a + b; }
+__attribute__((regparm(3))) int three(int a, int b, int c) { return a + b + c; }
+";
+    let all = asm("i686", "all-gpr", &["-fzero-call-used-regs=all-gpr"], source);
+    assert_eq!(cleared(&all, "f"), ["edx", "ecx"], "{all}");
+    assert_eq!(cleared(&all, "wide"), ["ecx"], "{all}");
+    assert_eq!(cleared(&all, "three"), ["edx", "ecx"], "{all}");
+    let used = asm("i686", "used", USED, source);
+    assert_eq!(cleared(&used, "three"), ["edx", "ecx"], "{used}");
+    for name in ["f", "wide"] {
+        let found = cleared(&used, name);
+        let order: Vec<&str> =
+            ["edx", "ecx"].into_iter().filter(|r| found.iter().any(|f| f == r)).collect();
+        assert_eq!(found, order, "{used}");
+    }
+}
+
 /// AArch64 clears `v0` to `v7` and `v16` to `v31` after the general purpose registers, and never
 /// the callee saved `v8` to `v15`.
 #[test]
