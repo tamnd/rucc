@@ -16,10 +16,10 @@ block1(%5: i64):
 block2:
     %7 = iconst.i64 4
     %8 = mul.nsw %5, %7
-    %9 = ptr_add %0, %8
+    %9 = ptr_add.nuw %0, %8
     %10 = iconst.i64 4
     %11 = mul.nsw %5, %10
-    %12 = ptr_add %1, %11
+    %12 = ptr_add.nuw %1, %11
     %13 = load.i32 %12, align 4, tbaa !1, restrict(1, 2)
     store %13 -> %9, align 4, tbaa !1, restrict(1, 1)
     %14 = iconst.i64 1
@@ -61,14 +61,14 @@ block1(%5: i64):
 block2:
     %7 = iconst.i64 4
     %8 = mul.nsw %5, %7
-    %9 = ptr_add %0, %8
+    %9 = ptr_add.nuw %0, %8
     %10 = iconst.i64 4
     %11 = mul.nsw %5, %10
-    %12 = ptr_add %0, %11
+    %12 = ptr_add.nuw %0, %11
     %13 = load.i32 %12, align 4, tbaa !1, restrict(3, 1)
     %14 = iconst.i64 4
     %15 = mul.nsw %5, %14
-    %16 = ptr_add %1, %15
+    %16 = ptr_add.nuw %1, %15
     %17 = load.i32 %16, align 4, tbaa !1, restrict(3, 2)
     %18 = mul.nsw %13, %17
     store %18 -> %9, align 4, tbaa !1, restrict(3, 1)

@@ -270,6 +270,13 @@ impl Code {
         self.uleb(u64::from(offset));
     }
 
+    /// A load or a store whose offset field is the address of data, which the linker writes.
+    pub(crate) fn mem_at(&mut self, op: u8, align: u32, symbol: u32, addend: i32) {
+        self.bytes.push(op);
+        self.uleb(u64::from(align));
+        self.reloc(RelocKind::MemoryAddrLeb, symbol, addend);
+    }
+
     pub(crate) fn i32_const(&mut self, value: i32) {
         self.bytes.push(0x41);
         self.sleb(i64::from(value));
