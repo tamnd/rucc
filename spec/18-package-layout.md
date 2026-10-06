@@ -47,7 +47,8 @@ rucc/
 │   │   └── rules/              the lowering rule sets, one file per target, and their models
 │   │                           each of which includes the IR model above
 │   ├── rucc-driver/        13  CLI, phase graph, job scheduling, linker invocation
-│   └── rucc/               14  the binary; also the library entry point
+│   ├── rucc/               14  the binary; also the library entry point
+│   └── rucc-reactor/       14  the driver as a WebAssembly reactor, for a page that compiles on each change
 ├── build-tools/
 │   ├── rucc-headers/           derives the multi-version libc header tree from real header sets
 │   ├── rucc-rules/             the rule DSL compiler; a build dependency, never a runtime one
@@ -61,7 +62,7 @@ rucc/
 
 A rule set sits under the crate that compiles it rather than at the root, because a published crate has to build from its own source archive and a build script that reads a file outside the package it belongs to cannot. `rucc-verify` reads them from there as well, so there is one copy of every rule and one gate over it. What the rules are written about is the other way round: `rucc-ir` says what the IR's terms mean, once, and both rule sets include that file.
 
-Thirty two library crates, four build tools, two runtime libraries, one binary. `rucc-arena` and `rucc-intern` are reserved on crates.io but are modules inside `rucc-base`. The split is not worth two crates, and holding the names costs nothing while preventing a confusing squat. All names in this tree were confirmed unclaimed on crates.io on 2026-08-31, `rucc-headers` on 2026-09-12 and `rucc-unpack` on 2026-09-22 and `rucc-legalize` and `rucc-wasm-link` on 2026-10-06, each when it was added.
+Thirty three library crates, four build tools, two runtime libraries, one binary. `rucc-arena` and `rucc-intern` are reserved on crates.io but are modules inside `rucc-base`. The split is not worth two crates, and holding the names costs nothing while preventing a confusing squat. All names in this tree were confirmed unclaimed on crates.io on 2026-08-31, `rucc-headers` on 2026-09-12 and `rucc-unpack` on 2026-09-22 and `rucc-legalize`, `rucc-wasm-link` and `rucc-reactor` on 2026-10-06, each when it was added.
 
 `rucc-lower` is the crate that keeps the rest of the layering honest. It owns the walk from the typed AST to the IR, which means it is the only crate that sees both the C type system and the IR at once. Without it that walk would have to live in `rucc-ir`, and `rucc-opt` would then transitively depend on the AST and the type system, which is exactly what section 18.2 promises cannot happen.
 

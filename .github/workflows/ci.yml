@@ -619,6 +619,14 @@ jobs:
           release=target/wasm32-wasip1/release
           node tests/web/run.mjs "$release/rucc.wasm" "$release/librucc_builtins.a" \
             "$HOME"/.cache/rucc/downloads/*/rucc-sysroot-wasm32-wasip1.tar.gz "$PWD/sqlite-autoconf-3530400"
+      # The reactor build of the same driver, which runs every compile of the test in one instance.
+      - name: build the reactor and run the same test with it
+        run: |
+          set -euo pipefail
+          cargo rustc -p rucc-reactor --release --target wasm32-wasip1 --crate-type cdylib
+          release=target/wasm32-wasip1/release
+          node tests/web/run.mjs --reactor "$release/rucc_reactor.wasm" "$release/librucc_builtins.a" \
+            "$HOME"/.cache/rucc/downloads/*/rucc-sysroot-wasm32-wasip1.tar.gz "$PWD/sqlite-autoconf-3530400"
 
   # The barriers and atomics PostgreSQL is built on, run on AArch64 hardware. The qemu job above
   # cannot do this, because an emulated machine is only ever as weak as the x86 host under it, and

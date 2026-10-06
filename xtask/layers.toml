@@ -91,9 +91,12 @@ rucc-regalloc = 11
 rucc-codegen = 12
 rucc-wasm = 12
 
-# The top. Only these two know that a process, a file system and a command line exist.
+# The top. Only these know that a process, a file system and a command line exist. rucc-reactor
+# is a second front for the driver beside the binary, for a WebAssembly host that runs the driver
+# more than once in one instance.
 rucc-driver = 13
 rucc = 14
+rucc-reactor = 14
 
 # Outside the stack entirely. Build tooling and the target-side runtime, neither of which is
 # linked into the compiler, so the rank rule does not apply to them.
