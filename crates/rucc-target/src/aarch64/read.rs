@@ -15,6 +15,7 @@ use std::fmt;
 use crate::aarch64::encode::{
     Addr, Arrangement, Cond, Extend, Mode, Offset, Operator, Scalar, Shift, Value, Width,
 };
+use crate::aarch64::system::{OPERATIONS, PSTATE, REGISTERS, Use};
 
 /// One instruction, read.
 #[derive(Debug, Clone, PartialEq)]
@@ -89,6 +90,11 @@ pub fn read(text: &str) -> Result<Line, Error> {
     let mut line = Line { mnemonic, values: Vec::new(), symbol: None, addend: 0 };
     let mut named = (None, 0);
     let pieces = split(rest);
+    if let Some((mnemonic, values)) = system_line(&line.mnemonic, &pieces) {
+        line.mnemonic = mnemonic.to_owned();
+        line.values = values;
+        return Ok(line);
+    }
     let mut at = 0;
     while at < pieces.len() {
         let piece = pieces[at];
@@ -118,6 +124,72 @@ pub fn read(text: &str) -> Result<Line, Error> {
     }
     (line.symbol, line.addend) = named;
     Ok(line)
+}
+
+/// The lines of the system instructions, which name what they are about with words that are
+/// nothing anywhere else, or `None` for any other line, and for one of them that is wrong, which
+/// the ordinary reading then finds no encoding for.
+///
+/// Each name is only looked for where the instruction takes one, so that `bl pan` is still a
+/// call to a function called `pan`. `tlbi`, `ic`, `dc` and `at` are `sys` with the operation's
+/// four fields, and are read as that. So is the `Cn` that `sys` itself is written with, which is a
+/// number here.
+fn system_line(mnemonic: &str, pieces: &[&str]) -> Option<(&'static str, Vec<Value>)> {
+    let lower: Vec<String> = pieces.iter().map(|piece| piece.to_ascii_lowercase()).collect();
+    let lower: Vec<&str> = lower.iter().map(String::as_str).collect();
+    let gpr = |piece: &str| match register(piece) {
+        Some(value @ Value::Gpr(Width::X, _)) => Some(value),
+        _ => None,
+    };
+    match (mnemonic, lower.as_slice()) {
+        ("mrs", &[t, name]) => Some(("mrs", vec![register(t)?, Value::System(system(name)?)])),
+        ("msr", &[name, imm]) if imm.starts_with(|c: char| c == '#' || c.is_ascii_digit()) => {
+            let at = PSTATE.binary_search_by(|&(known, ..)| known.cmp(name)).ok()?;
+            Some(("msr", vec![Value::Pstate(u8::try_from(at).ok()?), Value::Imm(immediate(imm)?)]))
+        }
+        ("msr", &[name, t]) => Some(("msr", vec![Value::System(system(name)?), register(t)?])),
+        ("psb" | "tsb", &["csync"]) => {
+            Some(("hint", vec![Value::Imm(if mnemonic == "psb" { 17 } else { 18 })]))
+        }
+        ("tlbi" | "ic" | "dc" | "at", &[name, ref t @ ..]) => {
+            let at = OPERATIONS
+                .binary_search_by(|&(m, known, ..)| (m, known).cmp(&(mnemonic, name)))
+                .ok()?;
+            let (_, _, field, used) = OPERATIONS[at];
+            let t = match (used, t) {
+                (Use::None | Use::Optional, []) => Value::Gpr(Width::X, 31),
+                (Use::Required | Use::Optional, &[t]) => gpr(t)?,
+                _ => return None,
+            };
+            let field = i64::from(field);
+            let fields = [field >> 11, field >> 7 & 15, field >> 3 & 15, field & 7];
+            let mut values: Vec<Value> = fields.into_iter().map(Value::Imm).collect();
+            values.push(t);
+            Some(("sys", values))
+        }
+        ("sys", &[op1, crn, crm, op2, ref t @ ..]) => {
+            let mut values = sys_fields(op1, crn, crm, op2)?;
+            values.push(match t {
+                [] => Value::Gpr(Width::X, 31),
+                &[t] => gpr(t)?,
+                _ => return None,
+            });
+            Some(("sys", values))
+        }
+        ("sysl", &[t, op1, crn, crm, op2]) => {
+            let mut values = vec![gpr(t)?];
+            values.extend(sys_fields(op1, crn, crm, op2)?);
+            Some(("sysl", values))
+        }
+        _ => None,
+    }
+}
+
+/// `#op1, Cn, Cm, #op2` as four numbers.
+fn sys_fields(op1: &str, crn: &str, crm: &str, op2: &str) -> Option<Vec<Value>> {
+    let control = |piece: &str| piece.strip_prefix('c')?.parse::<i64>().ok();
+    let fields = [immediate(op1)?, control(crn)?, control(crm)?, immediate(op2)?];
+    Some(fields.into_iter().map(Value::Imm).collect())
 }
 
 /// The symbol a line names so far, and what is added to it.
@@ -233,9 +305,6 @@ fn operand(piece: &str, symbol: &mut Named) -> Result<Value, Error> {
     }
     if let Some(option) = barrier(&lower) {
         return Ok(Value::Barrier(option));
-    }
-    if let Some(field) = system(&lower) {
-        return Ok(Value::System(field));
     }
     if let Some(operation) = prefetch(&lower) {
         return Ok(Value::Prefetch(operation));
@@ -473,20 +542,6 @@ pub(super) fn prefetch_name(operation: u8) -> Option<String> {
     Some(format!("p{kind}l{level}{policy}"))
 }
 
-/// The system registers a compiler reads by name, as the op0, op1, CRn, CRm and op2 fields.
-pub(super) static SYSTEM: [(&str, [u16; 5]); 10] = [
-    ("nzcv", [3, 3, 4, 2, 0]),
-    ("fpcr", [3, 3, 4, 4, 0]),
-    ("fpsr", [3, 3, 4, 4, 1]),
-    ("tpidr_el0", [3, 3, 13, 0, 2]),
-    ("tpidrro_el0", [3, 3, 13, 0, 3]),
-    ("sp_el0", [3, 0, 4, 1, 0]),
-    ("cntfrq_el0", [3, 3, 14, 0, 0]),
-    ("cntvct_el0", [3, 3, 14, 0, 2]),
-    ("dczid_el0", [3, 3, 0, 0, 7]),
-    ("ctr_el0", [3, 3, 0, 0, 1]),
-];
-
 /// The fifteen bits `mrs` and `msr` carry for a system register with those five fields.
 pub(super) const fn system_field([op0, op1, crn, crm, op2]: [u16; 5]) -> u16 {
     (op0 - 2) << 14 | op1 << 11 | crn << 7 | crm << 3 | op2
@@ -494,10 +549,10 @@ pub(super) const fn system_field([op0, op1, crn, crm, op2]: [u16; 5]) -> u16 {
 
 /// A system register, as the fifteen bits `mrs` and `msr` carry for it.
 ///
-/// The ones in [`SYSTEM`], and any of them written the generic way, as `s3_3_c13_c0_2`.
+/// The ones in [`REGISTERS`], and any of them written the generic way, as `s3_3_c13_c0_2`.
 fn system(name: &str) -> Option<u16> {
-    if let Some(&(_, fields)) = SYSTEM.iter().find(|(known, _)| *known == name) {
-        return Some(system_field(fields));
+    if let Ok(at) = REGISTERS.binary_search_by(|&(known, _)| known.cmp(name)) {
+        return Some(REGISTERS[at].1);
     }
     let mut parts = name.strip_prefix('s')?.split('_');
     let mut next = |prefix: &str, below: u16| {
@@ -661,5 +716,30 @@ mod tests {
         assert!(read("ldr x0, [x1, w2]").is_err());
         assert!(read("add x0, x1, #zz").is_err());
         assert_eq!(system("s3_3_c13_c0_2"), system("tpidr_el0"));
+    }
+
+    #[test]
+    fn the_generated_tables_are_sorted_for_the_binary_search() {
+        assert!(REGISTERS.windows(2).all(|two| two[0].0 < two[1].0));
+        assert!(PSTATE.windows(2).all(|two| two[0].0 < two[1].0));
+        assert!(OPERATIONS.windows(2).all(|two| (two[0].0, two[0].1) < (two[1].0, two[1].1)));
+    }
+
+    #[test]
+    fn a_system_name_is_only_one_where_the_instruction_takes_it() {
+        let line = read("bl pan").unwrap();
+        assert_eq!(
+            (line.values[0], line.symbol.as_deref()),
+            (Value::Symbol(Operator::Plain), Some("pan"))
+        );
+        let line = read("adrp x0, sctlr_el1").unwrap();
+        assert_eq!(line.symbol.as_deref(), Some("sctlr_el1"));
+        // `pan` is a register as well as a field, and which one is the operand after it.
+        assert_eq!(read("msr pan, x0").unwrap().values[0], Value::System(system("pan").unwrap()));
+        assert!(matches!(read("msr pan, #1").unwrap().values[0], Value::Pstate(_)));
+        // An operation that takes no register is refused one, and one that takes it needs it.
+        assert_eq!(read("tlbi vmalle1is").unwrap().mnemonic, "sys");
+        assert_eq!(read("tlbi vmalle1, x0").unwrap().mnemonic, "tlbi");
+        assert_eq!(read("dc civac").unwrap().mnemonic, "dc");
     }
 }

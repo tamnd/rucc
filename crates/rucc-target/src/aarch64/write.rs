@@ -18,7 +18,8 @@ use std::fmt::Write;
 use crate::aarch64::encode::{
     Addr, Cond, Extend, Mode, Offset, Operator, Scalar, Shift, Value, Width,
 };
-use crate::aarch64::read::{BARRIERS, SYSTEM, prefetch_name, system_field};
+use crate::aarch64::read::{BARRIERS, prefetch_name};
+use crate::aarch64::system::{PSTATE, REGISTERS};
 
 /// Which assembler a line is written for.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -120,16 +121,20 @@ fn operand(line: &mut String, value: &Value, named: Named<'_>) {
                 let _ = write!(line, "#{operation}");
             }
         },
-        Value::System(field) => {
-            match SYSTEM.iter().find(|&&(_, fields)| system_field(fields) == field) {
-                Some((name, _)) => line.push_str(name),
-                None => {
-                    let (op0, op1) = ((field >> 14) + 2, (field >> 11) & 7);
-                    let (crn, crm, op2) = ((field >> 7) & 15, (field >> 3) & 15, field & 7);
-                    let _ = write!(line, "s{op0}_{op1}_c{crn}_c{crm}_{op2}");
-                }
+        Value::System(field) => match REGISTERS.iter().find(|&&(_, known)| known == field) {
+            Some((name, _)) => line.push_str(name),
+            None => {
+                let (op0, op1) = ((field >> 14) + 2, (field >> 11) & 7);
+                let (crn, crm, op2) = ((field >> 7) & 15, (field >> 3) & 15, field & 7);
+                let _ = write!(line, "s{op0}_{op1}_c{crn}_c{crm}_{op2}");
             }
-        }
+        },
+        Value::Pstate(at) => match PSTATE.get(usize::from(at)) {
+            Some((name, ..)) => line.push_str(name),
+            None => {
+                let _ = write!(line, "#{at}");
+            }
+        },
     }
 }
 

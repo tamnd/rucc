@@ -40,6 +40,7 @@
 mod encode;
 mod insts;
 mod read;
+mod system;
 mod text;
 mod timing;
 mod write;
