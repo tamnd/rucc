@@ -4,6 +4,10 @@ All notable changes are recorded here. The format follows [Keep a Changelog](htt
 
 ## Unreleased
 
+## 0.27.0
+
+This release ends WA6 (#2868). rucc compiles and links `wasm32-wasip2` and `wasm32-wasip3` programs into components with `wasm-component-ld`, as clang 23 and wasi-sdk 34 do. On `wasm32-wasip3` the code reaches the stack pointer and the TLS base through the library calls of the new core ABI. CI runs rung 0 on both targets under Wasmtime 49. The release also has AArch64 code generation work that makes the output closer to gcc, and i386 and visibility fixes.
+
 ### Added
 
 - CI runs rung 0 on `wasm32-wasip2` and `wasm32-wasip3` under Wasmtime 49 (#2868). rucc links each c-testsuite program into a component with `wasm-component-ld` 0.5.30 and lld 23, and `wasm-tools validate` checks each object and each component.
