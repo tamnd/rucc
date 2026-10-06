@@ -44,15 +44,15 @@ use crate::x86_64::{GPR, RAX, RBX, RCX, RDI, RDX, RSI, XMM, xmm};
 
 use Form::{
     Align, AluCarry, AluCarryI, AluMi, AluMr, AluRi, AluRm, AluRr, AluVec, ArgVal, ArgValVec,
-    ArithX87, Barrier, BrCond, Call, Cmov, Cmp, CmpMi, CmpRi, CmpRm, CmpSet, CmpSetMi, CmpSetRi,
-    CmpSetRm, CmpSetVec, CmpSetVecBoth, CmpSetX87, CmpSetX87Both, CmpXchg, Convert, ConvertFromVec,
-    ConvertToVec, ConvertVec, CpuId, CtrlX87, DivQuo, DivRem, DivWide, Exchange, Jcc, Jmp, JmpAway,
-    JmpReg, Landing, Lea, Literal, Load, LoadImm, LoadVec, Move, MoveVec, MulHigh, MulRi, MulWide,
-    Nop, Pop, PopX87, Prefetch, Push, PushX87, Ret, RetPop, RetVal, RetVal2, RetVal2Vec, RetValVec,
-    Rmw, Scan, Search, Set, ShiftCl, ShiftRi, ShiftVec, ShuffleVec, Spin, Store, StoreImm,
-    StoreVec, StrCompare, StrCompareRep, StrLoad, StrMove, StrMoveRep, StrScan, StrScanRep,
-    StrStore, StrStoreRep, Swap, SwapHalves, Template, Test, TestCmov, TestRi, Trap, UnaryM,
-    UnaryR, UnaryX87,
+    ArithX87, Barrier, BrCond, Call, CallMem, Cmov, Cmp, CmpMi, CmpRi, CmpRm, CmpSet, CmpSetMi,
+    CmpSetRi, CmpSetRm, CmpSetVec, CmpSetVecBoth, CmpSetX87, CmpSetX87Both, CmpXchg, Convert,
+    ConvertFromVec, ConvertToVec, ConvertVec, CpuId, CtrlX87, DivQuo, DivRem, DivWide, Exchange,
+    Jcc, Jmp, JmpAway, JmpMem, JmpReg, Landing, Lea, Literal, Load, LoadImm, LoadVec, Move,
+    MoveVec, MulHigh, MulRi, MulWide, Nop, Pop, PopX87, Prefetch, Push, PushX87, Ret, RetPop,
+    RetVal, RetVal2, RetVal2Vec, RetValVec, Rmw, Scan, Search, Set, ShiftCl, ShiftRi, ShiftVec,
+    ShuffleVec, Spin, Store, StoreImm, StoreVec, StrCompare, StrCompareRep, StrLoad, StrMove,
+    StrMoveRep, StrScan, StrScanRep, StrStore, StrStoreRep, Swap, SwapHalves, Template, Test,
+    TestCmov, TestRi, Trap, UnaryM, UnaryR, UnaryX87,
 };
 
 /// The operand vector one machine instruction has.
@@ -503,6 +503,13 @@ pub enum Form {
     /// [`Form::Call`]: a call through an address has an operand vector nothing can write down,
     /// because a call passes arguments and this passes none.
     JmpReg,
+    /// The same jump with the address read out of memory rather than out of a register.
+    ///
+    /// What a call through a pointer in tail position comes to when a load put the pointer in the
+    /// register the jump went through, which is the load and the jump folded into one instruction
+    /// once every register is settled. The block it ends returns, so it has no successors, and
+    /// it has no operand of its own: every register it reads is one its addressing mode names.
+    JmpMem,
     /// A jump always taken whose target is a symbol rather than a block in this function.
     ///
     /// A tail jump out of the function. The name it goes to rides on the instruction the way a
@@ -543,6 +550,13 @@ pub enum Form {
     /// [`Arg::Through`](crate::x86_64::Arg::Through), which is the first operand read rather than
     /// the operand at a place.
     Call,
+    /// A call through an address read out of memory rather than out of a register.
+    ///
+    /// The same call as [`Form::Call`] in every way but where the address comes from. Its operands
+    /// are what the call's were, with the register it went through replaced by the registers the
+    /// addressing mode names, so it is built out of a call the convention already built, once the
+    /// load in front of it is known to be the only thing that register was for.
+    CallMem,
     /// A copy from one general purpose register to another.
     ///
     /// The first form here no rule reaches. A copy is what the allocator writes when the two ends
@@ -1172,6 +1186,9 @@ static JUMP: [OperandDesc; 0] = [];
 // goes is still the block's successors, since the register holds one of them and nothing knows
 // which.
 static JUMP_REG: [OperandDesc; 1] = [OperandDesc::read(GPR)];
+// The same jump with the address in memory reads only what its addressing mode names, and those
+// are written by whoever builds the instruction, which leaves nothing to describe here.
+static JUMP_MEM: [OperandDesc; 0] = [];
 // A push reads a whole register and a pop writes one. Neither says anything about the stack
 // pointer, which every one of them moves: it is not an operand because nothing may be allocated
 // to it, and a frame that has one of these in it is a frame that has already accounted for the
@@ -1284,13 +1301,14 @@ impl Form {
             RetVal2 => &RET_VAL_2,
             ArgVal => &ARG_VAL,
             BrCond => &BR_COND,
-            Call => &CALL,
+            Call | CallMem => &CALL,
             Test => &TEST,
             TestRi => &CMP_RI,
             TestCmov => &TEST_CMOV,
             Cmov => &CMOV,
             Jcc | Jmp | JmpAway => &JUMP,
             JmpReg => &JUMP_REG,
+            JmpMem => &JUMP_MEM,
             Move => &ONE_TO_ONE,
             Push => &PUSH,
             Pop => &POP,
@@ -1367,6 +1385,8 @@ impl Form {
                 | CmpXchg
                 | Rmw
                 | Prefetch
+                | CallMem
+                | JmpMem
         )
     }
 
@@ -1417,6 +1437,8 @@ impl Form {
                 | Ret
                 | RetPop
                 | Call
+                | CallMem
+                | JmpMem
                 | StrMove
                 | StrMoveRep
                 | StrStore
@@ -2149,6 +2171,9 @@ pub static INSTS: &[(&str, Form)] = &[
     // The same call with `notrack` in front, which is a different instruction to the assembler
     // and the same call to everything here.
     ("call_reg_notrack", Call),
+    // The same call with the address read out of memory, which is what a load of a pointer and a
+    // call through it come to once the load is folded in after the allocator.
+    ("call_mem", CallMem),
     // The same call sent to a retpoline thunk, with and without the code segment override in
     // front of it. What `-mindirect-branch=thunk-extern` rewrites `call_reg` into once the
     // registers are settled, keeping every operand, so they are calls for the same reason.
@@ -2286,6 +2311,8 @@ pub static INSTS: &[(&str, Form)] = &[
     // being a register rather than a place in the program.
     ("jmp_reg", JmpReg),
     ("jmp_reg_notrack", JmpReg),
+    // And the jump of a tail call through a pointer the same way.
+    ("jmp_mem", JmpMem),
     // The same jump sent to a retpoline thunk, which is what `jmp_reg` becomes under
     // `-mindirect-branch=thunk-extern`. It keeps the one operand and every successor, since the
     // thunk goes where the register says and the register is still the address.
@@ -2683,7 +2710,7 @@ mod tests {
         // Every head in the model file, which is what the rule set may write and what
         // `rucc-verify` has an answer for. The two lists are checked against each other by
         // `rucc-codegen`, which is the crate that can read the rule set.
-        assert_eq!(described, 815);
+        assert_eq!(described, 817);
     }
 
     #[test]
@@ -2729,6 +2756,7 @@ mod tests {
                             | RetVal2Vec
                             | BrCond
                             | Call
+                            | CallMem
                             | Test
                             | TestRi
                             | Cmp
@@ -2739,6 +2767,7 @@ mod tests {
                             | Jmp
                             | JmpAway
                             | JmpReg
+                            | JmpMem
                             | Push
                             | Ret
                             | RetPop
@@ -2925,9 +2954,11 @@ mod tests {
                 shape.operands().is_empty()
                     == matches!(
                         shape,
-                        Call | Jcc
+                        Call | CallMem
+                            | Jcc
                             | Jmp
                             | JmpAway
+                            | JmpMem
                             | Ret
                             | RetPop
                             | Barrier
@@ -3018,6 +3049,12 @@ mod tests {
         assert_eq!(form(FRAME.sub), Some(AluRi));
         assert_eq!(form(FRAME.align), Some(AluRi));
         assert_eq!(form(FRAME.lea), Some(Lea));
+        let through = FRAME.through.expect("x86-64 calls through memory");
+        assert_eq!(form(through.load), Some(Load));
+        assert_eq!(form(through.call.0), Some(Call));
+        assert_eq!(form(through.call.1), Some(CallMem));
+        assert_eq!(form(through.jump.0), Some(JmpReg));
+        assert_eq!(form(through.jump.1), Some(JmpMem));
 
         // One set of moves per class the allocator may spill, and the class each of them is
         // written for is the class the form draws its operands from.

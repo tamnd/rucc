@@ -600,6 +600,10 @@ mod tests {
     /// one, so neither is an answer to a term.
     const NOTRACK: &[&str] = &["call_reg_notrack", "jmp_reg_notrack"];
 
+    /// The call and the jump that read where they go out of memory. `crate::through` makes one of
+    /// a load and a `call_reg` or `jmp_reg` after the allocator, so neither is an answer to a term.
+    const THROUGH: &[&str] = &["call_mem", "jmp_mem"];
+
     /// The registers cleared in front of a `ret` under `-fzero-call-used-regs=` and the
     /// `zero_call_used_regs` attribute.
     ///
@@ -1097,7 +1101,7 @@ mod tests {
             if LABELS.contains(&opcode) || STOP.contains(&opcode) || CELL.contains(&opcode) {
                 continue;
             }
-            if I386.contains(&opcode) || NOTRACK.contains(&opcode) {
+            if I386.contains(&opcode) || NOTRACK.contains(&opcode) || THROUGH.contains(&opcode) {
                 continue;
             }
             let head = format!("{PREFIX}{opcode}");

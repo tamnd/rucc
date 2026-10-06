@@ -1142,6 +1142,14 @@ impl Writer<'_> {
                         Some(mem) => self.amode(operands, &func[mem], func_name, spelled)?,
                         None => "0".to_owned(),
                     },
+                    // The address a call or a jump reads where it goes from, with the star that
+                    // says so in front of it.
+                    Arg::Indirect => match data.mem {
+                        Some(mem) => {
+                            format!("*{}", self.amode(operands, &func[mem], func_name, spelled)?)
+                        }
+                        None => "*0".to_owned(),
+                    },
                     Arg::Symbol => match data.symbol {
                         // Through the procedure linkage table, which only the suffix says. See
                         // [`Flags::PLT`].

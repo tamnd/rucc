@@ -45,7 +45,7 @@ use crate::named;
 use crate::operand::Constraint;
 use crate::regs::PhysReg;
 
-use Arg::{High, Imm, Label, Lit, Low, Mem, Named, Reg, Stack, Symbol, Through, Xmm};
+use Arg::{High, Imm, Indirect, Label, Lit, Low, Mem, Named, Reg, Stack, Symbol, Through, Xmm};
 use Width::{Byte, Long, Quad, Word};
 
 /// How much of a register one argument of one instruction is.
@@ -203,6 +203,14 @@ pub enum Arg {
     ///
     /// A whole register, because an address is one. There is no width to write.
     Through,
+    /// The addressing mode a call or a jump reads where it goes from, which the assembler writes
+    /// with a star in front of it for the reason [`Arg::Through`] has one.
+    ///
+    /// The address the instruction carries, the way [`Arg::Mem`] is, and not a second one: the
+    /// star is the only difference in the text, and in the bytes there is none at all, since an
+    /// indirect call through memory is the same opcode byte and the same extension as one through
+    /// a register with the addressing byte saying memory.
+    Indirect,
     /// The block the instruction goes to, which is the first successor of the block it ends.
     Label,
 }
@@ -1076,6 +1084,8 @@ static TEXT: &[(&str, &[Written])] = &[
     // The same call with the prefix that tells the processor not to check where it lands, which
     // is a call through a pointer to a function of a `nocf_check` type.
     ("call_reg_notrack", &[spell("notrack call", &[Through])]),
+    // A call through an address read out of memory, with the star on the address.
+    ("call_mem", &[spell("call", &[Indirect])]),
     ("call_thunk", &[spell("call", &[Symbol])]),
     ("call_thunk_cs", &[spell("cs", &[]), spell("call", &[Symbol])]),
     // What a condition and the block layout come to.
@@ -1187,6 +1197,7 @@ static TEXT: &[(&str, &[Written])] = &[
     ("jmp_reg", &[spell("jmp", &[Through])]),
     // And the jump a tail call through such a pointer becomes.
     ("jmp_reg_notrack", &[spell("notrack jmp", &[Through])]),
+    ("jmp_mem", &[spell("jmp", &[Indirect])]),
     // The same jump sent to the thunk for its register, and the same with the override, which is
     // what the two thunk calls above are to `call_reg`.
     ("jmp_thunk", &[spell("jmp", &[Symbol])]),
@@ -1762,7 +1773,7 @@ fn shape_of(arg: Arg) -> Option<Shape> {
         // it, and [`super::read`] refuses it when the number is a different one.
         Imm | Lit(_) => Some(Shape::Imm),
         Mem => Some(Shape::Mem),
-        Xmm(_) | Named(_) | Stack(_) | Symbol | Through | Label => None,
+        Xmm(_) | Named(_) | Stack(_) | Symbol | Through | Indirect | Label => None,
     }
 }
 
@@ -2001,13 +2012,19 @@ mod tests {
                     // these or a symbol and never both: those are the two places a call can go and
                     // an instruction that named neither would go nowhere.
                     Through => through = true,
+                    // Both of those at once: an address the instruction carries, and the place
+                    // it goes.
+                    Indirect => (mem, through) = (true, true),
                 }
             }
             assert_eq!(imm, form.takes_imm(), "{name} and its immediate disagree");
             assert_eq!(mem, form.takes_mem(), "{name} and its addressing mode disagree");
             assert_eq!(
                 symbol || through,
-                matches!(form, Form::Call | Form::JmpReg | Form::JmpAway),
+                matches!(
+                    form,
+                    Form::Call | Form::CallMem | Form::JmpReg | Form::JmpMem | Form::JmpAway
+                ),
                 "{name} and where it goes disagree"
             );
             assert!(!(symbol && through), "{name} goes to a name and through a register at once");

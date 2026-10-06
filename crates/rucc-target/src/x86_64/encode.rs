@@ -114,7 +114,7 @@ impl Kind {
             Arg::Named(_) => Kind::Reg,
             Arg::Xmm(_) => Kind::Vec,
             Arg::Stack(_) => Kind::Stack,
-            Arg::Mem => Kind::Mem,
+            Arg::Mem | Arg::Indirect => Kind::Mem,
             Arg::Imm | Arg::Lit(_) => Kind::Imm,
             Arg::Symbol | Arg::Label => Kind::Dest,
         }

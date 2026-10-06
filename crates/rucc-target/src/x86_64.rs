@@ -61,7 +61,7 @@ use crate::bits::BitInsts;
 use crate::branch::{BranchInsts, Fusion, Move};
 use crate::counts::{BitCount, CountInst};
 use crate::flags::{Compare, FlagInsts, Reader, Reads, Zeroing};
-use crate::frame::{ClassMoves, FrameInsts, Probe, SpillMove, Thunks};
+use crate::frame::{ClassMoves, FrameInsts, Probe, SpillMove, Through, Thunks};
 use crate::machine::MachineInsts;
 use crate::operand::OperandDesc;
 use crate::regs::{
@@ -248,6 +248,11 @@ pub static FRAME: FrameInsts = FrameInsts {
     step_bits: None,
     reaches: None,
     thunks: Some(THUNKS),
+    through: Some(Through {
+        load: "mov_rm_64",
+        call: ("call_reg", "call_mem"),
+        jump: ("jmp_reg", "jmp_mem"),
+    }),
 };
 
 /// What the x86 speculation hardening flags rewrite branches into, with the names gcc and the
@@ -363,12 +368,12 @@ fn machine_touches_mem(name: &str) -> bool {
 
 /// Whether an instruction of that name is a call.
 ///
-/// [`Form::Call`] and nothing else. An indirect call is the same form, which is right here: what
-/// a pass asks this for is which registers are gone across the instruction, and a call through an
-/// address destroys the same ones a call to a name does.
+/// [`Form::Call`] and [`Form::CallMem`]. An indirect call is the same form, which is right here:
+/// what a pass asks this for is which registers are gone across the instruction, and a call through
+/// an address destroys the same ones a call to a name does, wherever the address was read from.
 #[must_use]
 fn machine_calls(name: &str) -> bool {
-    form(name) == Some(Form::Call)
+    matches!(form(name), Some(Form::Call | Form::CallMem))
 }
 
 /// Whether an instruction of that name reads its two sources either way round.
