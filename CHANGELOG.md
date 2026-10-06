@@ -13,6 +13,7 @@ All notable changes are recorded here. The format follows [Keep a Changelog](htt
 ### Changed
 
 - `rucc-wasm-link` writes the same module as `wasm-ld`, byte for byte, apart from the DWARF sections that it does not copy (#2867). It loads an archive member at the first strong reference to it and puts an object after the members that it loads, as LLD does, where before it loaded the members from a queue. The types, the module name and the function names in the `name` section are in LLD's order and form too. Two small programs and the SQLite shell, linked against the wasi-sdk 34 sysroot, give the same module with the two linkers.
+- The assembler reads the AVX-512 forms that the kernel's AES-CTR, AES-XTS and IFMA Poly1305 code writes (#3089). These are `vpbroadcastb`, `w`, `d` and `q` from a general purpose register, the EVEX forms of the twelve widening moves such as `vpmovzxbq` to a `zmm`, `vpermd`, `vpermq` with an immediate, `vpsllvd`, `vpsllvq`, `vpsrlvd`, `vpsrlvq` and `vpsravd`, `vporq`, `vpord`, `vmovdqa32`, `vmovdqu32`, `vpmadd52luq`, `vpmadd52huq` and `kmovw`. Each one gives the bytes that llvm-mc gives for the same line.
 
 ### Fixed
 
