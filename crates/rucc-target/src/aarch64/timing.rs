@@ -89,8 +89,8 @@ fn plain(form: Form) -> Timing {
         Address => (2, Unit::Int),
         // A multiply and add, on the one pipeline that multiplies.
         MulAdd => (2, Unit::Mul),
-        Load => (LOAD, Unit::Load),
-        Store | Probe => (1, Unit::Store),
+        Load | LoadPair => (LOAD, Unit::Load),
+        Store | StorePair | Probe => (1, Unit::Store),
         // A hint goes to the load pipeline like the load it is ahead of, and nothing waits on it.
         Prefetch => (1, Unit::Load),
         Push | PushPair => (1, Unit::Store),

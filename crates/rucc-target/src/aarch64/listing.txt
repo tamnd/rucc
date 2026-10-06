@@ -315,6 +315,10 @@ b9801121	ldrsw x1, [x9, #16]	ldrs_32_64
 79002121	strh w1, [x9, #16]	str_16
 b9001121	str w1, [x9, #16]	str_32
 f9000921	str x1, [x9, #16]	str_64
+29420921	ldp w1, w2, [x9, #16]	ldp_32
+a9410921	ldp x1, x2, [x9, #16]	ldp_64
+29020921	stp w1, w2, [x9, #16]	stp_32
+a9010921	stp x1, x2, [x9, #16]	stp_64
 bd401121	ldr s1, [x9, #16]	ldr_f32
 fd400921	ldr d1, [x9, #16]	ldr_f64
 3dc00521	ldr q1, [x9, #16]	ldr_f128

@@ -55,6 +55,7 @@ use crate::layout;
 use crate::lifetimes;
 use crate::lower::{self, Unsupported};
 use crate::lowering::{self, Lowerings};
+use crate::pairs;
 use crate::pressure::{Cost, Pressure};
 use crate::schedule;
 use crate::select::{self, Selector};
@@ -1306,6 +1307,18 @@ pub fn compile_recording(
             names,
             flags.accurate.unwrap_or(machine.timing.accurate),
             &fusable,
+        );
+    }
+
+    // After the schedule, which decides which two accesses end up next to each other, and before
+    // the layout freezes the order. Not at `-O0`, for the reason the reloads are not.
+    if flags.reloads && std::ptr::eq(machine.selector, &select::aarch64::SELECTOR) {
+        pairs::pairs(
+            &mut func,
+            machine.shapes,
+            &pairs::A64_PAIRS,
+            machine.conv.stack_pointer,
+            names,
         );
     }
 
