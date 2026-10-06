@@ -317,6 +317,9 @@ fn understood(opcode: Opcode) -> bool {
             | Opcode::BrIf
             | Opcode::InlineAsm
             | Opcode::RegisterValue
+            | Opcode::Memcpy
+            | Opcode::Memmove
+            | Opcode::Memset
     )
 }
 
@@ -782,6 +785,7 @@ fn rewrite(
             assembly(func, names, width, halves, forward, inst);
         }
         Opcode::Return if takes => flatten(func, halves, inst),
+        Opcode::Memcpy | Opcode::Memmove | Opcode::Memset if takes => length(func, halves, inst),
         Opcode::Jump | Opcode::BrIf => edges(func, halves, inst),
         _ => {}
     }
@@ -1931,6 +1935,21 @@ fn flatten(func: &mut Func, halves: &Halves, inst: Inst) {
     func[inst].args = func.push_values(&args);
 }
 
+/// A copy or a fill whose length is a wide value, which takes the low half of it.
+///
+/// The addresses and the byte are never wide, so the length is the one operand that can be. A
+/// length that does not fit in the low half is more bytes than the address space has, which no copy
+/// or fill can be asked for, so the high half has nothing to say. Loop idiom recognition writes the
+/// length of a loop it turns into a `memset` at sixty four bits on every target, and without this a
+/// thirty two bit function with one in it was not split at all.
+fn length(func: &mut Func, halves: &Halves, inst: Inst) {
+    let args: Vec<Value> = func[func[inst].args]
+        .iter()
+        .map(|value| halves.get(value).map_or(*value, |&(low, _)| low))
+        .collect();
+    func[inst].args = func.push_values(&args);
+}
+
 /// A branch, whose arguments hang on the edge rather than on the instruction.
 fn edges(func: &mut Func, halves: &Halves, inst: Inst) {
     for at in func.target_list(inst).iter() {
@@ -2101,7 +2120,7 @@ mod tests {
     use rucc_target::x86_64::{MINGW64, SYSV};
     use rucc_target::{Arch, Env, Os, TargetInfo, Triple};
 
-    use super::{Def, Extra, IntPred, MemInfo, Opcode, halves, renumber};
+    use super::{Def, Extra, InstData, IntPred, MemInfo, Opcode, halves, renumber};
 
     /// A pair is two operands now, so every number after it is one further on, a modifier stays
     /// with its number, `%%` is left alone, and a label past the operands moves too.
@@ -3031,6 +3050,25 @@ mod tests {
         assert!(text.contains("iconst.i32 7"), "the high half: {text}");
         let low = text.contains("iconst.i32 4294967294") || text.contains("iconst.i32 -2");
         assert!(low, "the low half: {text}");
+    }
+
+    #[test]
+    fn at_thirty_two_bits_a_fill_of_a_long_long_length_takes_the_low_half() {
+        // What loop idiom recognition leaves on i386: a length worked out at sixty four bits.
+        let mut names = Interner::new();
+        let (mut func, entry, params) = shell(&mut names, &[Type::PTR, Type::int(32)], &[]);
+        let mut build = Builder::new(&mut func, entry);
+        let length = build.unary(Opcode::ZExt, params[1], long());
+        let byte = build.iconst(Type::int(8), 32);
+        let args = build.func().push_values(&[params[0], byte, length]);
+        let extra = Extra::Mem(build.func().add_mem(info(0, 1)));
+        build.inst(InstData { args, extra, ..InstData::new(Opcode::Memset) }, &[]);
+        build.ret(&[]);
+
+        assert!(narrow(&mut func, &mut names), "there is a width to split");
+        let text = printed(&func, &mut names);
+        assert!(!text.contains("i64"), "nothing that wide is left: {text}");
+        assert!(text.contains("memset %0, %3, %1,"), "the length is the low half: {text}");
     }
 
     #[test]
