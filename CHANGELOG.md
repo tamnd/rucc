@@ -20,6 +20,7 @@ A function with a computed `goto` no longer keeps empty blocks nothing reaches, 
 
 ### Changed
 
+- On wasm, if-conversion turns a choice of two pointers, two `float` values or two `double` values into a `select`, as clang does, because one wasm `select` takes any number type (#2866). Native targets keep the branch, because their rule set has a `select` only at the four integer widths. The SQLite shell has 1,670 `select` instructions where it had 1,007 (clang: 1,955) and is 4,801 bytes smaller.
 - On wasm, a string literal whose first zero is its last byte and that is aligned to one byte has the `STRINGS` segment flag, as clang writes it, so wasm-ld keeps one copy of each string (#2866). The data section of the SQLite shell goes from 141,770 to 128,890 bytes, and clang's is 129,090.
 
 ### Fixed

@@ -339,7 +339,7 @@ use crate::profile::Probability;
 use crate::range::ops::Truth;
 use crate::range::query::Ranges;
 use crate::simplify_cfg::{self, Bindings};
-use crate::{Analyses, Fuel, Pass, Preserved, Stats};
+use crate::{Analyses, Fuel, Machine, Pass, Preserved, Stats};
 
 /// Recorded once for each diamond that became a select.
 const CONVERTED: &str =
@@ -421,23 +421,24 @@ impl Pass for PhiOpt {
         // What a store only one arm made asks about the whole function. Worked out the first time
         // one is asked about and dropped at each conversion, since that is the only edit made here.
         let mut frame = None;
+        let machine = an.machine();
         for head in func.blocks().collect::<Vec<Block>>() {
             let cfg = an.cfg(func);
             if !cfg.reaches(head) {
                 continue;
             }
             let Some(shape) = diamond(func, cfg, head) else { continue };
-            let store = storing(func, &shape, &mut frame);
+            let store = storing(func, machine, &shape, &mut frame);
             // Before the refusals rather than after, because one of them is about a value having a
             // width a select is lowered at, and a value the condition settles gets no select at all.
             // The waste that costs is a range query on a diamond that then turns out to have an
             // effect in it, and the equality gate below is what keeps that from being every diamond.
             let implied = implied(func, an, &shape);
-            if let Some(reason) = refused(func, &shape, store.as_ref(), &implied) {
+            if let Some(reason) = refused(func, machine, &shape, store.as_ref(), &implied) {
                 stats.missed(reason);
                 continue;
             }
-            let plan = factoring(func, &shape, &implied);
+            let plan = factoring(func, machine, &shape, &implied);
             // What is factored is not speculated. Both arms did the operation, one of them was
             // always going to do it, and after this one copy of it runs whichever way the branch
             // would have gone. So it comes off the count the cost rule is about, and a diamond
@@ -607,6 +608,7 @@ fn passes_through(func: &Func, cfg: &Cfg, head: Block, block: Block) -> Option<B
 /// with effects this pass is allowed to move, and everything else with an effect still refuses.
 fn refused(
     func: &Func,
+    machine: Machine,
     shape: &Diamond,
     store: Option<&Stored>,
     implied: &[Option<usize>],
@@ -664,7 +666,7 @@ fn refused(
         if implied.get(index).copied().flatten().is_some() {
             continue;
         }
-        if !selectable(func[param].ty) {
+        if !machine.selects(func[param].ty) {
             return Some(NO_SELECT_AT_THAT_WIDTH);
         }
     }
@@ -903,12 +905,17 @@ fn mismatch(func: &Func, shape: &Diamond) -> &'static str {
 ///
 /// Two stores to the same place are the half of the transformation that needs no proof. One store
 /// is the half that does, and [`alone`] is where it is asked for.
-fn storing(func: &Func, shape: &Diamond, frame: &mut Option<Frame>) -> Option<Stored> {
+fn storing(
+    func: &Func,
+    machine: Machine,
+    shape: &Diamond,
+    frame: &mut Option<Frame>,
+) -> Option<Stored> {
     let found = shape.arms.map(|arm| arm.and_then(|block| stored_in(func, block)));
     match found {
-        [Some(then), Some(other)] => both(func, [then, other]),
-        [Some(one), None] => alone(func, shape, one, 0, frame),
-        [None, Some(one)] => alone(func, shape, one, 1, frame),
+        [Some(then), Some(other)] => both(func, machine, [then, other]),
+        [Some(one), None] => alone(func, machine, shape, one, 0, frame),
+        [None, Some(one)] => alone(func, machine, shape, one, 1, frame),
         [None, None] => None,
     }
 }
@@ -935,7 +942,7 @@ impl Frame {
 }
 
 /// The one store two stores to the same place become.
-fn both(func: &Func, insts: [Inst; 2]) -> Option<Stored> {
+fn both(func: &Func, machine: Machine, insts: [Inst; 2]) -> Option<Stored> {
     let data = [func[insts[0]], func[insts[1]]];
     // The flags are what the optimizer is licensed to assume about the access, so one store written
     // under the union of two sets of assumptions would be claiming on one path something only the
@@ -962,7 +969,7 @@ fn both(func: &Func, insts: [Inst; 2]) -> Option<Stored> {
     if addr != addr_two || func[then].ty != func[other].ty {
         return None;
     }
-    if !agree(func, then, other) && !selectable(func[then].ty) {
+    if !agree(func, then, other) && !machine.selects(func[then].ty) {
         return None;
     }
     let ty = func[then].ty;
@@ -981,6 +988,7 @@ fn both(func: &Func, insts: [Inst; 2]) -> Option<Stored> {
 /// stores is what it would have found had it looked.
 fn alone(
     func: &Func,
+    machine: Machine,
     shape: &Diamond,
     inst: Inst,
     side: usize,
@@ -996,7 +1004,7 @@ fn alone(
     }
     let &[value, addr] = func[data.args].first_chunk::<2>()?;
     let ty = func[value].ty;
-    if !selectable(ty) || !touched(func, shape.head, addr, ty) {
+    if !machine.selects(ty) || !touched(func, shape.head, addr, ty) {
         return None;
     }
     let (Origin::Local(slot), _) = alias::origin(func, addr) else { return None };
@@ -1175,7 +1183,12 @@ impl Factored {
 /// A triangle factors nothing. One of its sides is the join itself, so there is no block on that
 /// side holding an operation to pair the other one with, and what that side hands the join is a
 /// value worked out before the branch.
-fn factoring(func: &Func, shape: &Diamond, implied: &[Option<usize>]) -> Vec<Option<Factored>> {
+fn factoring(
+    func: &Func,
+    machine: Machine,
+    shape: &Diamond,
+    implied: &[Option<usize>],
+) -> Vec<Option<Factored>> {
     let count = shape.args[0].len();
     let [Some(then), Some(other)] = shape.arms else {
         return (0..count).map(|_| None).collect();
@@ -1187,14 +1200,20 @@ fn factoring(func: &Func, shape: &Diamond, implied: &[Option<usize>]) -> Vec<Opt
             if implied.get(index).copied().flatten().is_some() {
                 return None;
             }
-            factored(func, shape, [then, other], index)
+            factored(func, machine, shape, [then, other], index)
         })
         .collect()
 }
 
 /// Whether this join argument is the same operation on both sides, and what to write instead.
-fn factored(func: &Func, shape: &Diamond, arms: [Block; 2], index: usize) -> Option<Factored> {
-    factored_at(func, arms, [shape.args[0][index], shape.args[1][index]], 0)
+fn factored(
+    func: &Func,
+    machine: Machine,
+    shape: &Diamond,
+    arms: [Block; 2],
+    index: usize,
+) -> Option<Factored> {
+    factored_at(func, machine, arms, [shape.args[0][index], shape.args[1][index]], 0)
 }
 
 /// Whether these two values are the same operation, one in each arm, and what to write instead.
@@ -1203,7 +1222,13 @@ fn factored(func: &Func, shape: &Diamond, arms: [Block; 2], index: usize) -> Opt
 /// chain from being walked all the way down. gcc's `factor_out_conditional_operation` at
 /// `gcc/tree-ssa-phiopt.cc:310` runs to a fixed point instead, and the bound is here for the same
 /// reason the arm scan has one.
-fn factored_at(func: &Func, arms: [Block; 2], sides: [Value; 2], depth: u32) -> Option<Factored> {
+fn factored_at(
+    func: &Func,
+    machine: Machine,
+    arms: [Block; 2],
+    sides: [Value; 2],
+    depth: u32,
+) -> Option<Factored> {
     // Two sides that agree need no operation written at all, and the caller passes the value on.
     if agree(func, sides[0], sides[1]) {
         return None;
@@ -1252,8 +1277,9 @@ fn factored_at(func: &Func, arms: [Block; 2], sides: [Value; 2], depth: u32) -> 
             // A level that factors below needs no select at this one, so the width a select can
             // choose at is asked about only where the chain stops.
             let deeper = depth + 1 < heuristics::PHIOPT_FACTOR_DEPTH;
-            below = deeper.then(|| factored_at(func, arms, [one, two], depth + 1)).flatten();
-            if below.is_none() && !selectable(func[one].ty) {
+            let next = [one, two];
+            below = deeper.then(|| factored_at(func, machine, arms, next, depth + 1)).flatten();
+            if below.is_none() && !machine.selects(func[one].ty) {
                 return None;
             }
             Some((at, [one, two]))
@@ -1285,20 +1311,6 @@ fn written_in(func: &Func, arm: Block, value: Value) -> Option<Inst> {
         }
     }
     (seen == 1).then_some(inst)
-}
-
-/// Whether a value of this type is one a `select` can choose.
-///
-/// The four widths `crates/rucc-ir/src/term.rs` names a `select` at. A wider integer, a float, a
-/// pointer, a bit or a vector has no head, so a `select` of one would be a term the rule set has
-/// no lowering for and the failure would be at instruction selection rather than here.
-///
-/// This function is also the whole answer to whether a `select` at any of those types can exist at
-/// all, since this pass is the only one that turns a choice into one and every other writer of one
-/// in the tree is choosing between integers it built itself. `crates/rucc-codegen/src/quad.rs`
-/// leans on that where it says a conditional expression over two `_Float128`s stays a branch.
-fn selectable(ty: Type) -> bool {
-    ty.is_scalar() && ty.is_int() && matches!(ty.bits(), 8 | 16 | 32 | 64)
 }
 
 /// How much work an arm does, not counting the jump that is about to go.
@@ -1614,6 +1626,55 @@ mod tests {
         );
         assert_eq!(goes_to(&func, 0), vec![3]);
         assert_eq!(blocks(&func), vec![0, 3]);
+    }
+
+    /// A diamond whose empty arms hand the join one of two parameters of this type.
+    fn choice_of(ty: Type) -> Func {
+        let mut names = Interner::new();
+        let signature = Signature::new().with_params(&[Type::int(32), Type::int(32), ty, ty]);
+        let mut func = Func::new(names.intern("f"), signature);
+        let head = func.create_block();
+        let left = func.append_param(head, Type::int(32));
+        let right = func.append_param(head, Type::int(32));
+        let values = [func.append_param(head, ty), func.append_param(head, ty)];
+        let arms = [func.create_block(), func.create_block()];
+        let join = func.create_block();
+        let param = func.append_param(join, ty);
+
+        let mut build = Builder::new(&mut func, head);
+        let test = build.icmp(IntPred::Slt, left, right);
+        build.br_if(test, arms[0], &[], arms[1], &[]);
+        for (arm, value) in arms.iter().zip(values) {
+            Builder::new(&mut func, *arm).jump(join, &[value]);
+        }
+        Builder::new(&mut func, join).ret(&[param]);
+        func
+    }
+
+    /// Whether the pass turns the choice of two values of this type into a `select` for a machine
+    /// that does or does not lower a `select` of a pointer or a float.
+    fn converts(ty: Type, selects_any: bool) -> bool {
+        let mut func = choice_of(ty);
+        let machine = crate::machine::fixtures::machine().selecting_any(selects_any);
+        let mut an = crate::Analyses::new(machine);
+        let stats = PhiOpt.run(&mut func, &mut an, &mut Fuel::unlimited());
+        let converted = stats.count(Kind::Optimized, super::CONVERTED) == 1;
+        assert_eq!(opcodes(&func, 0).contains(&Opcode::Select), converted);
+        converted
+    }
+
+    /// wasm has one `select` for every number type and a pointer is an `i32` there, so a choice
+    /// of two pointers or two doubles is a `select`. A native target lowers a `select` only at the
+    /// four integer widths and keeps the branch. A quad has no `select` on any target.
+    #[test]
+    fn a_pointer_or_a_float_is_selected_only_where_the_machine_lowers_it() {
+        let double = Type::float(Float::F64);
+        for ty in [Type::PTR, Type::float(Float::F32), double] {
+            assert!(converts(ty, true), "{ty}");
+            assert!(!converts(ty, false), "{ty}");
+        }
+        assert!(!converts(Type::float(Float::F128), true));
+        assert!(converts(Type::int(64), false));
     }
 
     #[test]

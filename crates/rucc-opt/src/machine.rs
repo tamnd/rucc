@@ -29,7 +29,7 @@
 //! one being compiled for.
 
 use rucc_cost::{CostTable, Cycles, Goal, RegClass, TargetCosts, TuneFlag};
-use rucc_ir::{Func, Module, Opcode};
+use rucc_ir::{Func, Module, Opcode, Type};
 use rucc_session::OptLevel;
 use rucc_target::{BitCount, CountInst, Isa, TargetInfo};
 
@@ -42,6 +42,8 @@ pub struct Machine {
     isa: Isa,
     /// The bit counts the target has one instruction for, which the code generator reads too.
     counts: &'static [CountInst],
+    /// Whether a `select` of a pointer or a float is lowered. See `TargetInfo::selects_any`.
+    selects_any: bool,
 }
 
 impl Machine {
@@ -52,8 +54,10 @@ impl Machine {
     /// so, and the goal is whether the level optimizes for size, which is one call on the level.
     #[must_use]
     pub fn of(module: &Module, level: OptLevel) -> Self {
+        let target = TargetInfo::for_tuple(module.tuple);
         Self::with(rucc_cost::for_tuple(module.tuple), Goal::for_size(level.is_size()))
-            .counting(TargetInfo::for_tuple(module.tuple).counts)
+            .counting(target.counts)
+            .selecting_any(target.selects_any)
     }
 
     /// The same machine with the extensions the module is built for, which is what `-m` and
@@ -74,6 +78,31 @@ impl Machine {
         Self { counts, ..self }
     }
 
+    /// The same machine with that answer for whether a `select` of a pointer or a float is
+    /// lowered, which is what a test that builds one by hand wants. [`Machine::of`] takes the
+    /// target's.
+    #[must_use]
+    pub const fn selecting_any(self, selects_any: bool) -> Self {
+        Self { selects_any, ..self }
+    }
+
+    /// Whether the code generator lowers a `select` of a value of this type.
+    ///
+    /// Every target lowers one of an integer of 8, 16, 32 or 64 bits, which are the four widths
+    /// `crates/rucc-ir/src/term.rs` names a `select` at. A target whose `TargetInfo::selects_any`
+    /// is true also lowers one of a pointer, a `float` and a `double`. A wider integer, a wider
+    /// float, a bit and a vector have no lowering on any target.
+    #[must_use]
+    pub fn selects(self, ty: Type) -> bool {
+        if !ty.is_scalar() {
+            return false;
+        }
+        if ty.is_int() {
+            return matches!(ty.bits(), 8 | 16 | 32 | 64);
+        }
+        self.selects_any && (ty == Type::PTR || (ty.is_float() && matches!(ty.bits(), 32 | 64)))
+    }
+
     /// The machine for costs already in hand.
     ///
     /// What [`Machine::of`] is written in terms of, and what a caller that resolved a target some
@@ -81,7 +110,7 @@ impl Machine {
     /// no back end for.
     #[must_use]
     pub const fn with(costs: Option<&'static dyn TargetCosts>, goal: Goal) -> Self {
-        Self { costs, goal, isa: Isa::NONE, counts: &[] }
+        Self { costs, goal, isa: Isa::NONE, counts: &[], selects_any: false }
     }
 
     /// A machine nobody has a cost table for, which is what a test that does not care wants.
