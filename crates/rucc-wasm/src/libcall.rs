@@ -9,7 +9,9 @@
 //! The call becomes the bulk operation of the IR with the length as its third operand, and the
 //! selector writes that operation as the instruction, or as loads and stores when the length is a
 //! small constant. Each of the three calls gives back its destination, so each use of the answer
-//! reads the destination.
+//! reads the destination. When the length is not a constant, the instruction is in a block that a
+//! `br_if` leaves when the length is zero, because Wasmtime runs the instruction as a call into
+//! the engine and a length of zero is frequent.
 //!
 //! A function marked `no_builtin` keeps its calls, because the mark says that the name is whatever
 //! function the link finds, and that is so under `-fno-builtin` and under `-fsafety`, where the

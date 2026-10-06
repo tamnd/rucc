@@ -150,6 +150,16 @@ fn int_op(op: u8, wide: bool) -> u8 {
     if wide { op + emit::I64_FROM_I32 } else { op }
 }
 
+/// The number of IR instructions above which a function gets no extra blocks that only make the
+/// code faster, as the test of [`Lower::guarded_bulk`]. The engine allocates the registers of the
+/// whole function at once, and in a function as large as the interpreter loop of SQLite each extra
+/// block changes how it splits the live ranges. In `sqlite3VdbeExec`, which has 17,000
+/// instructions, the 15 tests of a zero length make the SQLite benchmark 4% slower under Wasmtime,
+/// because the base of the linear memory and other values then go to the stack. Each subset of the
+/// tests that was measured costs 1.5% to 4%, so the cost comes from the allocation and not from
+/// one hot test.
+const LARGE: usize = 8192;
+
 /// Translate the function `id`, whose symbol is `symbol`.
 pub(crate) fn function(unit: &mut Unit<'_>, id: FuncId, symbol: u32) -> Result<Function> {
     let func = &unit.ir[id];
@@ -175,6 +185,7 @@ pub(crate) fn function(unit: &mut Unit<'_>, id: FuncId, symbol: u32) -> Result<F
         returns: !ty.results.is_empty(),
         sret: func.signature().returns.iter().any(|ret| is_pair(ret.ty)),
         framed: stackify::framed(func),
+        large: func.blocks().map(|block| func.insts(block).count()).sum::<usize>() > LARGE,
         annotate: None,
         trees: Trees::default(),
         pushed: Set::default(),
@@ -247,6 +258,8 @@ struct Lower<'u, 'a> {
     sret: bool,
     /// Whether the function can have a frame on the shadow stack. See [`stackify::framed`].
     framed: bool,
+    /// Whether the function has more than [`LARGE`] instructions.
+    large: bool,
     /// The notes of the tree form, when it is asked for.
     annotate: Option<Annotate>,
     /// The values that stay on the operand stack or are written with a `local.tee`, and the
@@ -2387,10 +2400,22 @@ impl Lower<'_, '_> {
 
     /// `memcpy`, `memmove` and `memset`. A short copy of a known size is loads and stores, and
     /// anything else is `memory.copy` and `memory.fill` when the target has them and a call to
-    /// the C library when it does not.
+    /// the C library when it does not. See [`Self::guarded_bulk`] for the block around an
+    /// instruction whose length is not a constant.
     fn bulk(&mut self, inst: Inst, args: &[Value]) -> Result<()> {
         let opcode = self.func[inst].opcode;
         let (size, align) = self.bulk_size(inst, args);
+        if self.guarded_bulk(inst, args) {
+            self.code.open(emit::BLOCK, None);
+            self.context.push(Ctx::Other);
+            self.push_i32(args[2])?;
+            self.code.op(emit::I32_EQZ);
+            self.code.br_if(0);
+            self.bulk_op(opcode, args, size)?;
+            self.context.pop();
+            self.end(true);
+            return Ok(());
+        }
         if self.short_bulk(inst, args) {
             let size = size.unwrap_or(0) as u32;
             return match self.constant(args[1]) {
@@ -2400,6 +2425,11 @@ impl Lower<'_, '_> {
                 _ => self.copy_short(args[0], args[1], size, align),
             };
         }
+        self.bulk_op(opcode, args, size)
+    }
+
+    /// The instruction or the call of [`Self::bulk`] that is not loads and stores.
+    fn bulk_op(&mut self, opcode: Opcode, args: &[Value], size: Option<u64>) -> Result<()> {
         self.push(args[0])?;
         if opcode == Opcode::Memset {
             self.push_z(args[1])?
@@ -2443,6 +2473,21 @@ impl Lower<'_, '_> {
             None => mem.map(|m| m.size),
         };
         (size, align)
+    }
+
+    /// Whether [`Self::bulk`] writes `memory.copy` or `memory.fill` in a block that a `br_if`
+    /// leaves when the length is zero, which is so when the length is not a constant. Wasmtime
+    /// runs each of the two instructions as a call into the engine, and that costs much more than
+    /// the test. A length of zero is frequent in real code. An example is the `memset` in
+    /// `fillInCell` of SQLite, which clears the bytes after the payload of a new cell and nearly
+    /// always clears none. clang writes the same test. The length is pushed twice, so stackify
+    /// moves no operand into the instruction, and each operand is a constant or a local. A
+    /// function of more than [`LARGE`] instructions gets no test. See [`LARGE`].
+    pub(super) fn guarded_bulk(&self, inst: Inst, args: &[Value]) -> bool {
+        self.unit.features.has(Feature::BulkMemoryOpt)
+            && !self.large
+            && !self.short_bulk(inst, args)
+            && args.get(2).is_some_and(|&length| self.constant(length).is_none())
     }
 
     /// Whether [`Self::bulk`] writes a bulk operation as loads and stores, which push the
