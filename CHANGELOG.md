@@ -4,6 +4,10 @@ All notable changes are recorded here. The format follows [Keep a Changelog](htt
 
 ## Unreleased
 
+## 0.24.5
+
+The first release since 0.21.0 to publish its archives. It has the gate fixes that 0.24.4 still needed, jump threading run a second time at `-O2`, the switch clustering on wasm, and the other changes merged since 0.24.4.
+
 ### Changed
 
 - At `-O2` and `-O3`, jump threading runs a second time, after the `simplify-cfg` that follows the loop passes (#1994). An inline function that returns `a && b` and that the caller tests used to leave the first half's `false` going through the blocks inlining left behind, so the answer was written with a `set` and tested again. The early instance cannot see through those blocks and the late one sees the edge arrive at the test, so the caller now branches straight to where the answer sends it. This late instance copies nothing.
@@ -18,7 +22,7 @@ All notable changes are recorded here. The format follows [Keep a Changelog](htt
 
 ## 0.24.4
 
-The release gate passes again, so this is the first release since 0.21.0 to publish its archives. It carries `rangeswitch`, the switch clustering in its own crate, `rucc-legalize`, a value sent ahead to the stack that can still sit in a register a call destroys, and the other changes merged since 0.24.3.
+Tagged but never published, because the release gate stopped on a bare threshold in `rangeswitch` and a test that raced on its temporary directory. Both are fixed in 0.24.5. It carries `rangeswitch`, the switch clustering in its own crate, `rucc-legalize`, a value sent ahead to the stack that can still sit in a register a call destroys, and the other changes merged since 0.24.3.
 
 ### Added
 
