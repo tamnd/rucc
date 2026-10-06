@@ -167,10 +167,73 @@ pub fn dead(
             gone.push(inst);
         }
     }
+    send(func, &sent, gone, machine, names)
+}
+
+/// Takes out every AArch64 `bit_to` whose source a comparison wrote, and gives back how many.
+///
+/// A comparison that keeps its answer is a `cmp` and a `cset`, and `cset` writes a one or a zero
+/// to a `w` register, which clears the other thirty one bits and the thirty two above them. So the
+/// register already holds the answer at every width, and the `and w0, w0, #1` the selector writes
+/// to widen a bit is an instruction that changes nothing:
+///
+/// ```text
+///   cmp  w0, w1                  cmp  w0, w1
+///   cset w0, lt          ->      cset w0, lt
+///   and  w0, w0, #1
+/// ```
+///
+/// gcc writes the second. A float comparison is the same, including the two that end in a
+/// `csinc` of the `cset`, since that writes a one or the zero or one it was given.
+///
+/// What the source holds is known from the one instruction that writes it, so the source has to
+/// be a virtual register written once. The rest is [`dead`]'s rewrite: the readers go to the
+/// source and the widening goes, as one set of changes.
+pub fn settled(func: &mut mir::Func, machine: &MachineInsts, names: &Interner) -> usize {
+    let mut writers: Map<mir::Reg, Vec<mir::Inst>> = Map::default();
+    for block in func.blocks() {
+        for inst in func.insts(block) {
+            for operand in &func[func[inst].operands] {
+                if operand.role != Role::Use {
+                    writers.entry(operand.reg).or_default().push(inst);
+                }
+            }
+        }
+    }
+    let name = |func: &mir::Func, inst: mir::Inst| names.resolve(func[inst].opcode.name());
+    let mut sent: Map<mir::Reg, mir::Reg> = Map::default();
+    let mut gone: Vec<mir::Inst> = Vec::new();
+    for block in func.blocks() {
+        for inst in func.insts(block) {
+            if !name(func, inst).starts_with("a64.bit_to_") {
+                continue;
+            }
+            let Some((def, source)) = conversion(func, inst) else { continue };
+            let Some([writer]) = writers.get(&source).map(Vec::as_slice) else { continue };
+            let by = name(func, *writer);
+            if by.starts_with("a64.cmp_set_") || by.starts_with("a64.fcmp_set_") {
+                sent.insert(def, source);
+                gone.push(inst);
+            }
+        }
+    }
+    send(func, &sent, gone, machine, names)
+}
+
+/// Sends the readers of each register in `sent` to the register it maps to and takes out the
+/// instruction in `gone` that wrote it, one set of changes per instruction, and gives back how
+/// many sets were taken.
+fn send(
+    func: &mut mir::Func,
+    sent: &Map<mir::Reg, mir::Reg>,
+    gone: Vec<mir::Inst>,
+    machine: &MachineInsts,
+    names: &Interner,
+) -> usize {
     if gone.is_empty() {
         return 0;
     }
-    let sent = chased(&sent);
+    let sent = chased(sent);
     let readers = Readers::of(func, &sent);
     let mut reads = Reads::of(func);
     let mut taken = 0;
