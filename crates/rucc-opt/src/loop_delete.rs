@@ -188,7 +188,10 @@ impl Pass for LoopDelete {
         if !done.is_empty() {
             crate::dce::dce_in(func, an.purity(), &mut Fuel::unlimited());
         }
-        an.clear();
+        // The cache is still right when nothing was deleted, as for [`crate::canon`].
+        if stats.changed() {
+            an.clear();
+        }
         stats
     }
 }

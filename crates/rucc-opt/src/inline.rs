@@ -1180,8 +1180,11 @@ fn specialized_size(
     ];
     for _ in 0..2 {
         for pass in passes {
-            pass.run(&mut copy, &mut an, &mut fuel);
-            an.clear();
+            // The manager's rule, so a pass that changed nothing leaves the next one the graph
+            // it was given rather than one to build again.
+            if pass.run(&mut copy, &mut an, &mut fuel).changed() {
+                an.clear();
+            }
         }
     }
     folded_size(&copy, Set::default(), Map::default(), weighed)

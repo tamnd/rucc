@@ -173,7 +173,10 @@ impl Pass for HeaderCopy {
             // entry test the ranges disproved is a loop nothing reaches any more.
             simplify_cfg::sweep(func, an, &mut stats);
         }
-        an.clear();
+        // The cache is still right when nothing was copied, as for [`crate::canon`].
+        if stats.changed() {
+            an.clear();
+        }
         stats
     }
 }
