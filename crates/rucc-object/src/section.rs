@@ -473,6 +473,9 @@ pub struct Data {
     /// then read a zero address. A name here is not an object and carries no bytes, which is why
     /// it is a list of names beside the objects rather than one of them.
     pub weak: Vec<String>,
+    /// Every name this file refers to and does not define that its declaration made hidden or
+    /// protected, which the symbol says the way a definition's does.
+    pub unseen: Vec<(String, Visibility)>,
     /// Every distance between two labels an image holds, which the writer fills in once it knows
     /// where the labels are. See [`Apart`].
     pub apart: Vec<Apart>,
