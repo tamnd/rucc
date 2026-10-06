@@ -48,9 +48,11 @@ use rucc_ir::{
 };
 use rucc_target::TargetInfo;
 
+use super::summary::Summary;
 use super::{
-    ASKED_DEPTH, How, INLINED, InlineFailure, Kind, Pool, calls_twice, fits, folded, folded_size,
+    ASKED_DEPTH, CUT, How, INLINED, InlineFailure, Kind, Pool, calls_twice, fits, folded_size,
     frame, grows, made_of_params, passed, passes_asked, resolved, specialized_size, splice,
+    summed_size, summed_time,
 };
 use crate::Stats;
 use crate::callgraph::CallGraph;
@@ -167,6 +169,8 @@ struct Weighed {
     /// How much longer the caller takes with the copy in it, which is the copy less the call, as
     /// often as the call runs.
     adds: f64,
+    /// Whether the constants the call passes removed some of the body.
+    cut: bool,
 }
 
 /// How often each block of a function runs each time it is entered, how many loops deep each one
@@ -179,7 +183,14 @@ struct Profile {
     /// How often the most frequent direct call to each name runs and how deep it is, which is
     /// what a copy of the function brings into its caller.
     calls: Map<Symbol, (f64, u32)>,
+    /// What the function comes to with some of its parameters known, with the time each block
+    /// takes weighed by `frequency`.
+    summary: Summary,
 }
+
+/// What a call's body measured, how long its copy takes, its hints and whether the constants the
+/// call passes removed some of it, with the callee's change it was measured at. See [`Heap::bodies`].
+type Body = (u32, usize, f64, Hints, bool);
 
 /// What a body's measurement depends on. See [`Heap::measured`].
 type Measured = (FuncId, u32, Vec<(Value, Imm, Type)>, bool, usize);
@@ -214,12 +225,12 @@ struct Heap<'a> {
     frames: Map<FuncId, u64>,
     /// What a call's body measured, how long its copy takes and the hints it has, with the callee's
     /// change it was measured at.
-    bodies: Map<(FuncId, Inst), (u32, usize, f64, Hints)>,
+    bodies: Map<(FuncId, Inst), Body>,
     /// What a body measured and how long its copy takes, by callee, the callee's change, the
     /// constants it was given, whether it weighed and the limit past which it was cleaned up. A
     /// callee called from hundreds of places with the same constants is copied and folded once
     /// for all of them rather than once for each, and that copy was most of the pass.
-    measured: Map<Measured, (usize, f64)>,
+    measured: Map<Measured, (usize, f64, bool)>,
     /// The parameters of each function that every call to it passes the same constant for, which
     /// give no hint. See [`Second::constants`].
     settled: Map<FuncId, Set<Value>>,
@@ -467,8 +478,10 @@ impl Heap<'_> {
         let values = passed(func, call, target);
         let args = func[func[call].args].len();
         let version = self.version(callee);
-        let (body, copied, hints) = match self.bodies.get(&(caller, call)) {
-            Some(&(seen, body, copied, hints)) if seen == version => (body, copied, hints),
+        let (body, copied, hints, cut) = match self.bodies.get(&(caller, call)) {
+            Some(&(seen, body, copied, hints, cut)) if seen == version => {
+                (body, copied, hints, cut)
+            }
             _ => {
                 let weighed = (kind == Kind::Auto).then_some(names);
                 // What the first pass would have let through, past which it measured a cleaned up
@@ -483,24 +496,24 @@ impl Heap<'_> {
                     values.iter().map(|(&param, &(imm, ty))| (param, imm, ty)).collect();
                 passed.sort_unstable_by_key(|&(param, ..)| param);
                 let key = (callee, version, passed, weighed.is_some(), plain);
-                let (body, copied) = match self.measured.get(&key) {
+                let (body, copied, cut) = match self.measured.get(&key) {
                     Some(&measured) => measured,
                     None => {
-                        let mut body = folded_size(target, Set::default(), values.clone(), weighed);
+                        let profile = self.profile(module, callee);
+                        let (mut body, cut) =
+                            summed_size(&profile.summary, target, values.clone(), weighed);
                         if body > plain {
                             body = body.min(specialized_size(target, &values, weighed));
                         }
-                        let frequency = &self.profile(module, callee).frequency;
-                        let copied = folded(
+                        let copied = summed_time(
+                            &profile.summary,
                             target,
-                            Set::default(),
                             values.clone(),
-                            Some(names),
-                            Some(frequency),
-                        )
-                        .1;
-                        self.measured.insert(key, (body, copied));
-                        (body, copied)
+                            names,
+                            &profile.frequency,
+                        );
+                        self.measured.insert(key, (body, copied, cut));
+                        (body, copied, cut)
                     }
                 };
                 // What the call knows that the body out of line does not.
@@ -518,8 +531,8 @@ impl Heap<'_> {
                     asks: passes_asked(func, call, target),
                     declared: kind == Kind::Hinted,
                 };
-                self.bodies.insert((caller, call), (version, body, copied, hints));
-                (body, copied, hints)
+                self.bodies.insert((caller, call), (version, body, copied, hints, cut));
+                (body, copied, hints, cut)
             }
         };
         let growth = as_i64(body) - as_i64(1 + args);
@@ -563,7 +576,7 @@ impl Heap<'_> {
         let speedup =
             badness::big_speedup(time, copied, call_time, frequency, spent, self.second.speedup);
         let adds = (copied - call_time) * frequency;
-        Some(Weighed { callee, kind, body, growth, hints, overall, badness, speedup, adds })
+        Some(Weighed { callee, kind, body, growth, hints, overall, badness, speedup, adds, cut })
     }
 
     /// Whether the limit for the call's kind lets it through, which is gcc's
@@ -697,6 +710,9 @@ impl Heap<'_> {
         match outcome {
             Ok(()) => {
                 stats.optimized(WEIGHED);
+                if weighed.cut {
+                    stats.note(CUT);
+                }
                 if module[weighed.callee].attrs.set.contains(AttrSet::NO_LOOP_IDIOM) {
                     module[caller].attrs.set |= AttrSet::NO_LOOP_IDIOM;
                 }
@@ -876,7 +892,8 @@ fn profile(func: &Func, names: &Interner) -> Profile {
         // Counted as gcc counts, so a block in one loop is one deep.
         depth.insert(block, loops.innermost(block).map_or(0, |inner| loops.depth(inner) + 1));
     }
-    let time = folded(func, Set::default(), Map::default(), Some(names), Some(&frequency)).1;
+    let summary = Summary::of(func, names, Some(&frequency));
+    let time = summed_time(&summary, func, Map::default(), names, &frequency);
     let mut calls: Map<Symbol, (f64, u32)> = Map::default();
     for inst in direct(func) {
         let (Some(block), Extra::Call(info)) = (func.block_of(inst), func[inst].extra) else {
@@ -890,7 +907,7 @@ fn profile(func: &Func, names: &Interner) -> Profile {
             *seen = (often, deep);
         }
     }
-    Profile { frequency, depth, time, calls }
+    Profile { frequency, depth, time, calls, summary }
 }
 
 /// Whether the constants a call passes make one of the body's loops count known, which is gcc's

@@ -438,6 +438,13 @@ pub const LARGE_FUNCTION_GROWTH: u32 = 100;
 /// result comes on top, which is what a copy saves besides the work the constants fold out of it.
 pub const INLINE_CALL_TIME: u32 = 10;
 
+/// How many clauses a condition in an inliner summary may have, and how many conditions a clause,
+/// per section 33.3.
+///
+/// gcc's `MAX_CLAUSES` in `ipa-predicate.h`. A body whose blocks need longer conditions than that
+/// is weighed for each call by walking it, which gives the same answer more slowly.
+pub const INLINE_SUMMARY_CLAUSES: u32 = 8;
+
 /// How cold a block may be and still count as hot in its own function, as a fraction of the entry
 /// block, per section 11.4.
 ///
@@ -1199,6 +1206,14 @@ pub const ALL: &[Constant] = &[
         unit: "time units",
         document: "33.5",
         gcc: "eni_time_weights.call_cost",
+        provenance: Provenance::Gcc,
+    },
+    Constant {
+        name: "INLINE_SUMMARY_CLAUSES",
+        value: 8,
+        unit: "clauses",
+        document: "33.3",
+        gcc: "MAX_CLAUSES",
         provenance: Provenance::Gcc,
     },
     Constant {

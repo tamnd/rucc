@@ -168,6 +168,10 @@ const NO_FIXTURE: &[(&str, &str)] = &[
         "It only reorders the heap of calls the inliner may copy, and no program tried has two calls whose order it swaps.",
     ),
     (
+        "inline-summary-clauses",
+        "It only decides which bodies the inliner weighs by their summary and which it walks for each call, and the two give the same answer.",
+    ),
+    (
         "predict-continue-taken",
         "No program tried has a branch to a loop's next round whose layout turns on this guess rather than another one.",
     ),

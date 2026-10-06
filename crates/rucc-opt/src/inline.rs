@@ -112,6 +112,7 @@ use crate::dom::Dominators;
 use crate::loops::Loops;
 
 mod heap;
+mod summary;
 
 pub use heap::Second;
 
@@ -138,6 +139,9 @@ const ASKS_INLINED: &str = "call passing a constant __builtin_constant_p asks ab
 const SMALL_INLINED: &str = "call to a function no larger than the call inlined";
 
 const AUTO_INLINED: &str = "call to a small function inlined";
+/// A call weighed by less than the callee's whole body, since the constants it passes remove some of
+/// it. See [`summary::Summary`].
+const CUT: &str = "call weighed without the code its constant arguments remove";
 
 /// Which of the two reasons a function is inlined for.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -455,6 +459,7 @@ pub fn run(
             elsewhere: &elsewhere,
             later,
             sizes: RefCell::default(),
+            summaries: RefCell::default(),
         };
         let mut state = Map::default();
         for id in module.funcs().collect::<Vec<FuncId>>() {
@@ -495,6 +500,7 @@ pub fn run(
             elsewhere: &elsewhere,
             later: None,
             sizes: RefCell::default(),
+            summaries: RefCell::default(),
         };
         done.extend(heap::run(module, &how, &later, &own, second, pic));
     }
@@ -673,6 +679,9 @@ struct How<'a> {
     /// folded once. A callee is settled before it is measured and nothing in a round changes it
     /// after that, which is why the answer can be kept for the round.
     sizes: RefCell<Map<SizeKey, usize>>,
+    /// The summary of each callee a call declared `inline` or small enough to take was weighed
+    /// against, made the first time one is and kept for the round for the same reason as `sizes`.
+    summaries: RefCell<Map<FuncId, summary::Summary>>,
 }
 
 /// What [`How::specialized_size`] keeps an answer under: the callee, the constants it was given in
@@ -698,6 +707,22 @@ impl How<'_> {
         let size = specialized_size(&module[callee], values, weighed);
         self.sizes.borrow_mut().insert(key, size);
         size
+    }
+
+    /// [`folded_size`] for a call passing `values`, read off the callee's summary, and whether the
+    /// constants removed anything. See [`summed_size`].
+    fn copy_size(
+        &self,
+        module: &Module,
+        callee: FuncId,
+        values: Map<Value, (Imm, Type)>,
+        weighed: Option<&Interner>,
+    ) -> (usize, bool) {
+        let mut summaries = self.summaries.borrow_mut();
+        let summary = summaries
+            .entry(callee)
+            .or_insert_with(|| summary::Summary::of(&module[callee], self.names, None));
+        summed_size(summary, &module[callee], values, weighed)
     }
 }
 
@@ -863,23 +888,20 @@ fn settle(
                     + module[id][module[id][call].args].len()
             }
         };
-        let mut large = match kind {
+        let (mut large, cut) = match kind {
             Kind::Asks => {
-                answered_size(&module[callee], passed(&module[id], call, &module[callee]))
+                (answered_size(&module[callee], passed(&module[id], call, &module[callee])), false)
             }
-            Kind::Hinted => folded_size(
-                &module[callee],
-                Set::default(),
-                passed(&module[id], call, &module[callee]),
-                None,
-            ),
-            Kind::Auto => folded_size(
-                &module[callee],
-                Set::default(),
+            Kind::Hinted => {
+                how.copy_size(module, callee, passed(&module[id], call, &module[callee]), None)
+            }
+            Kind::Auto => how.copy_size(
+                module,
+                callee,
                 passed(&module[id], call, &module[callee]),
                 Some(how.names),
             ),
-            Kind::Always | Kind::Once | Kind::Small => size(&module[callee]),
+            Kind::Always | Kind::Once | Kind::Small => (size(&module[callee]), false),
         };
         // A call to a function that never comes back is one gcc predicts is never made, so it
         // is no more hot than one in a cold function. `machine_real_restart` in
@@ -952,6 +974,9 @@ fn settle(
                     Kind::Small => SMALL_INLINED,
                     Kind::Auto => AUTO_INLINED,
                 });
+                if cut {
+                    stats.note(CUT);
+                }
             }
             Err(failure) => stats.missed(why(failure)),
         }
@@ -1253,37 +1278,19 @@ fn folded(
             let data = &func[inst];
             let args = &func[data.args];
             let folds = args.iter().all(|arg| known.contains(arg));
-            if let (true, Some(result)) = (folds && data.results == 1, data.results().next()) {
-                let ty = func[result].ty;
+            if let (true, Some(result)) = (folds, data.results().next()) {
                 let operand = |arg: Value| {
                     values.get(&arg).copied().or_else(|| crate::fold::constant(func, arg))
                 };
-                let found = if data.opcode == Opcode::IsConstant {
-                    Some(Imm::int(1, ty))
-                } else if ty.is_int() && ty.is_scalar() {
-                    crate::fold::arithmetic(data, args, ty, &operand)
-                } else {
-                    None
-                };
-                if let Some(found) = found {
-                    values.insert(result, (found, ty));
+                if let Some(found) = computed(func, inst, &operand) {
+                    values.insert(result, found);
                 }
             }
             if func.is_terminator(inst) {
-                let decided =
-                    args.first().and_then(|arg| values.get(arg)).and_then(|&(value, _)| match data
-                        .extra
-                    {
-                        Extra::Targets(targets) if data.opcode == Opcode::BrIf => {
-                            func[targets].get(usize::from(value.bits() == 0)).copied()
-                        }
-                        Extra::Switch(at) if data.opcode == Opcode::Switch => {
-                            let info = func[at];
-                            let case = func[info.cases].iter().position(|it| *it == value);
-                            func[info.targets].get(case.map_or(0, |case| case + 1)).copied()
-                        }
-                        _ => None,
-                    });
+                let decided = args
+                    .first()
+                    .and_then(|arg| values.get(arg))
+                    .and_then(|&(value, _)| goes_to(func, data, value));
                 match decided {
                     Some(call) => {
                         live.insert(call.block);
@@ -1376,6 +1383,89 @@ fn folded(
         }
     }
     (work, time)
+}
+
+/// What an instruction works out to when it has one result and `operand` gives the numbers of what
+/// it reads. A `__builtin_constant_p` whose operand is known is one.
+fn computed(
+    func: &Func,
+    inst: Inst,
+    operand: &dyn Fn(Value) -> Option<(Imm, Type)>,
+) -> Option<(Imm, Type)> {
+    let data = &func[inst];
+    let result = data.results().next().filter(|_| data.results == 1)?;
+    let ty = func[result].ty;
+    let found = if data.opcode == Opcode::IsConstant {
+        Some(Imm::int(1, ty))
+    } else if ty.is_int() && ty.is_scalar() {
+        crate::fold::arithmetic(data, &func[data.args], ty, operand)
+    } else {
+        None
+    };
+    found.map(|found| (found, ty))
+}
+
+/// Where a `br_if` or a `switch` goes when what it tests is `value`.
+fn goes_to(func: &Func, data: &InstData, value: Imm) -> Option<BlockCall> {
+    match data.extra {
+        Extra::Targets(targets) if data.opcode == Opcode::BrIf => {
+            func[targets].get(usize::from(value.bits() == 0)).copied()
+        }
+        Extra::Switch(at) if data.opcode == Opcode::Switch => {
+            let info = func[at];
+            let case = func[info.cases].iter().position(|it| *it == value);
+            func[info.targets].get(case.map_or(0, |case| case + 1)).copied()
+        }
+        _ => None,
+    }
+}
+
+/// [`folded_size`] with nothing known but `values`, read off the callee's summary when it has an
+/// exact one, and whether the constants removed anything.
+///
+/// Every debug build checks the summary against the walk, so a rule changed in one and not the
+/// other is found by the first test that weighs a call.
+fn summed_size(
+    summary: &summary::Summary,
+    callee: &Func,
+    values: Map<Value, (Imm, Type)>,
+    weighed: Option<&Interner>,
+) -> (usize, bool) {
+    let Some(estimate) = summary.estimate(callee, &values) else {
+        return (folded_size(callee, Set::default(), values, weighed), false);
+    };
+    let size = if weighed.is_some() { estimate.weighed } else { estimate.plain };
+    debug_assert_eq!(
+        size,
+        folded_size(callee, Set::default(), values, weighed),
+        "the summary of {:?} is not the walk",
+        callee.name
+    );
+    (size, estimate.cut)
+}
+
+/// How long a copy of the callee takes when the call passes `values`, read off a summary made with
+/// `frequency` when it is exact, and walked as [`folded`] does when not.
+fn summed_time(
+    summary: &summary::Summary,
+    callee: &Func,
+    values: Map<Value, (Imm, Type)>,
+    names: &Interner,
+    frequency: &Map<Block, f64>,
+) -> f64 {
+    let Some(estimate) = summary.estimate(callee, &values) else {
+        return folded(callee, Set::default(), values, Some(names), Some(frequency)).1;
+    };
+    if cfg!(debug_assertions) {
+        let walked = folded(callee, Set::default(), values, Some(names), Some(frequency)).1;
+        let near = (estimate.time - walked).abs() <= 1e-9 * walked.abs().max(1.0);
+        assert!(
+            near,
+            "the summary of {:?} takes {} and the walk {walked}",
+            callee.name, estimate.time
+        );
+    }
+    estimate.time
 }
 
 /// What gcc's `estimate_num_insns` charges for an instruction when it weighs a body by size, for
