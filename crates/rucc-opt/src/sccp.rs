@@ -58,8 +58,8 @@
 
 use rucc_base::hash::{Map, Set};
 use rucc_ir::{
-    Block, BlockCall, Extra, Flags, Func, Imm, Inst, InstData, MemInfo, MemOrder, Opcode, Type,
-    Value, ValueList,
+    Block, Extra, Flags, Func, Imm, Inst, InstData, MemInfo, MemOrder, Opcode, Type, Value,
+    ValueList,
 };
 
 use crate::range::ops::{self, Truth};
@@ -387,19 +387,18 @@ impl<'a> Solver<'a> {
         if self.func.is_terminator(inst) {
             // An asm goto is a terminator with outputs, and they come from the asm, which nothing
             // here can see into.
-            let results: Vec<Value> = self.func[inst].results().collect();
-            for value in results {
+            for value in self.func[inst].results() {
                 self.learn(value, nothing(self.func[value].ty));
             }
             self.branch(inst);
             return;
         }
-        let results: Vec<Value> = self.func[inst].results().collect();
-        let fact = match results.as_slice() {
-            [one] => self.transfer(inst, self.func[*one].ty),
+        let data = &self.func[inst];
+        let fact = match (data.results, data.results().next()) {
+            (1, Some(one)) => self.transfer(inst, self.func[one].ty),
             _ => Fact::Varying,
         };
-        for value in results {
+        for value in self.func[inst].results() {
             let fact = if fact == Fact::Varying { nothing(self.func[value].ty) } else { fact };
             self.learn(value, fact);
         }
@@ -409,19 +408,19 @@ impl<'a> Solver<'a> {
     /// first time it is taken. What an argument learns after that reaches its parameter along
     /// the edge [`Solver::settle`] follows.
     fn branch(&mut self, term: Inst) {
-        let calls: Vec<BlockCall> = self.func.successors(term).collect();
-        let arms: Vec<usize> = match self.arm(term) {
-            Arms::One(arm) => vec![arm],
-            Arms::NoneYet => Vec::new(),
-            Arms::Every => (0..calls.len()).collect(),
+        // The function outlives the solver's borrow of itself, so its lists are read in place
+        // while the solver learns from them.
+        let func = self.func;
+        let only = match self.arm(term) {
+            Arms::One(arm) => Some(arm),
+            Arms::NoneYet => return,
+            Arms::Every => None,
         };
-        for arm in arms {
-            let Some(call) = calls.get(arm) else { continue };
-            if !self.taken.insert((term, arm)) {
+        for (arm, call) in func.successors(term).enumerate() {
+            if only.is_some_and(|only| only != arm) || !self.taken.insert((term, arm)) {
                 continue;
             }
-            let params = self.func[call.block].params.clone();
-            for (param, &arg) in params.into_iter().zip(&self.func[call.args]) {
+            for (&param, &arg) in func[call.block].params.iter().zip(&func[call.args]) {
                 self.pass(param, arg);
             }
             self.reach(call.block);
@@ -507,18 +506,22 @@ impl<'a> Solver<'a> {
         if !reads(data.opcode) {
             return nothing(ty);
         }
-        let mut ranges = Vec::with_capacity(args.len());
-        for &arg in args {
+        // Every opcode the table reads takes one operand or two.
+        let mut ranges = [Range::empty(1); 2];
+        if args.len() > ranges.len() {
+            return nothing(ty);
+        }
+        for (at, &arg) in args.iter().enumerate() {
             let arg_ty = self.func[arg].ty;
             match self.facts[arg.index()] {
                 Fact::Undefined => return Fact::Undefined,
                 Fact::Known(bits) if tracked(arg_ty) => {
-                    ranges.push(Range::full(followed(arg_ty)).narrow(bits));
+                    ranges[at] = Range::full(followed(arg_ty)).narrow(bits);
                 }
                 _ => return nothing(ty),
             }
         }
-        let range = arithmetic(data, &ranges, width);
+        let range = arithmetic(data, &ranges[..args.len()], width);
         match range {
             Some(range) if range.is_empty() => Fact::Undefined,
             Some(range) if range.width() == width => Fact::Known(range.bits()),
