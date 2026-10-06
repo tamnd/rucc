@@ -1059,6 +1059,14 @@ pub fn run(module: &mut Module, names: &mut Interner, opts: &Options) -> Report 
     let started = Instant::now();
     let growth =
         if opts.conserve_stack { inline::Growth::CONSERVE } else { inline::Growth::DEFAULT };
+    // gcc's second inliner, which weighs what the first found too large with its hints, comes
+    // with `-finline-small-functions`.
+    let second = match opts.level {
+        _ if !auto => None,
+        OptLevel::O3 => Some(inline::Second::O3),
+        _ => Some(inline::Second::O2),
+    }
+    .map(|second| inline::Second { constants: opts.wants(ipcp::NAME), ..second });
     let inlined = inline::run(
         module,
         names,
@@ -1069,6 +1077,7 @@ pub fn run(module: &mut Module, names: &mut Interner, opts: &Options) -> Report 
         opts.stack_reuse,
         opts.interposition,
         auto,
+        second,
     );
     report.took(inline::NAME, started.elapsed());
     for (id, stats) in inlined {

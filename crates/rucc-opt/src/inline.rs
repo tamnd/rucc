@@ -89,10 +89,12 @@
 //! jumps to such an address, or whose labels a static table holds, is refused, since the copy
 //! would still be reaching into the original.
 
+use std::cell::RefCell;
+
 use rucc_base::hash::{Map, Set};
 use rucc_base::{Interner, Symbol};
 use rucc_cost::heuristics::{
-    INLINE_CALLED_ONCE_INSNS, INLINE_CALLED_ONCE_LOOP_DEPTH, INLINE_EARLY_INSNS,
+    INLINE_CALL_TIME, INLINE_CALLED_ONCE_INSNS, INLINE_CALLED_ONCE_LOOP_DEPTH, INLINE_EARLY_INSNS,
     INLINE_FRAME_GROWTH, INLINE_FRAME_GROWTH_CONSERVE, INLINE_INSNS_AUTO, INLINE_LARGE_FRAME,
     INLINE_LARGE_FRAME_CONSERVE,
 };
@@ -108,6 +110,10 @@ use crate::callgraph::trusted;
 use crate::cfg::Cfg;
 use crate::dom::Dominators;
 use crate::loops::Loops;
+
+mod heap;
+
+pub use heap::Second;
 
 /// What the step calls itself in a remark, and the name `-fno-inline` turns the declared half off
 /// by.
@@ -215,6 +221,10 @@ pub enum InlineFailure {
     /// body copied in. Only a call that is not `always_inline` or to a function called once is
     /// refused for this.
     Unlikely,
+    /// The second pass would grow the whole unit past what `inline-unit-growth` lets it.
+    UnitGrowth,
+    /// The second pass would grow a large caller past what `large-function-growth` lets it.
+    FunctionGrowth,
 }
 
 impl InlineFailure {
@@ -240,6 +250,8 @@ impl InlineFailure {
             Self::Unlikely => {
                 "always_inline call not inlined: call is unlikely and code size would grow"
             }
+            Self::UnitGrowth => "always_inline call not inlined: unit growth limit reached",
+            Self::FunctionGrowth => "always_inline call not inlined: function growth limit reached",
         }
     }
 
@@ -263,6 +275,8 @@ impl InlineFailure {
             Self::Unwinds => "inline call not inlined: call has a landing pad",
             Self::Target => "inline call not inlined: target specific option mismatch",
             Self::Unlikely => "inline call not inlined: call is unlikely and code size would grow",
+            Self::UnitGrowth => "inline call not inlined: unit growth limit reached",
+            Self::FunctionGrowth => "inline call not inlined: function growth limit reached",
         }
     }
 
@@ -302,6 +316,12 @@ impl InlineFailure {
             Self::Unlikely => {
                 "call to a function called once not inlined: call is unlikely and code size would grow"
             }
+            Self::UnitGrowth => {
+                "call to a function called once not inlined: unit growth limit reached"
+            }
+            Self::FunctionGrowth => {
+                "call to a function called once not inlined: function growth limit reached"
+            }
         }
     }
 }
@@ -318,7 +338,9 @@ impl InlineFailure {
 /// is built for. A callee built for more than its caller is never copied into it. `names` is
 /// what the names of the functions a body calls are read from, to find a call to `setjmp`.
 /// `growth` is how far a caller's frame may grow, which `-fconserve-stack` makes tighter. `pic` is
-/// what says whether the body of a function other files see is the one a call reaches.
+/// what says whether the body of a function other files see is the one a call reaches. With
+/// `second_pass` the calls the first pass finds too large are weighed again by the second, see
+/// [`Second`].
 #[allow(clippy::too_many_arguments)]
 pub fn run(
     module: &mut Module,
@@ -330,6 +352,7 @@ pub fn run(
     share: bool,
     pic: Pic,
     auto: bool,
+    second_pass: Option<Second>,
 ) -> Vec<(FuncId, Stats)> {
     // A call through a member of a `static const` table of operations, or through a pointer that
     // can only be one function, is a call to that function by the time gcc decides what to inline,
@@ -400,7 +423,21 @@ pub fn run(
     let mut done = Vec::new();
     let convention = Convention::of(module);
     let most = limit.map_or(0, |limit| usize::try_from(limit).unwrap_or(usize::MAX));
-    let round = |module: &mut Module, wanted: &Map<Symbol, (FuncId, Kind)>, done: &mut Vec<_>| {
+    // The frames the functions have before anything is inlined into them, which is what the second
+    // pass measures a caller's frame against, as the first measures each caller's own.
+    let own: Map<FuncId, u64> = if second_pass.is_some() {
+        module
+            .funcs()
+            .filter(|&id| !module[id].is_declaration())
+            .map(|id| (id, frame(&module[id], module.datalayout)))
+            .collect()
+    } else {
+        Map::default()
+    };
+    let round = |module: &mut Module,
+                 wanted: &Map<Symbol, (FuncId, Kind)>,
+                 done: &mut Vec<_>,
+                 later: Option<&RefCell<heap::Later>>| {
         if wanted.is_empty() {
             return;
         }
@@ -416,6 +453,7 @@ pub fn run(
             calls: &calls,
             cold: &cold,
             elsewhere: &elsewhere,
+            later,
         };
         let mut state = Map::default();
         for id in module.funcs().collect::<Vec<FuncId>>() {
@@ -431,37 +469,77 @@ pub fn run(
     // call.
     let mut small = wanted.clone();
     small.retain(|_, &mut (_, kind)| kind == Kind::Small);
-    round(module, &small, &mut done);
+    round(module, &small, &mut done, None);
     let mut wanted = small;
     wanted.extend(classify(module, &Set::default()));
-    round(module, &wanted, &mut done);
+    // gcc's second inliner comes after its early one and before the called once rule, and weighs
+    // what the early one found too large again, so this round writes those down rather than
+    // refusing them.
+    let later = RefCell::new(heap::Later::default());
+    let second_pass = second_pass.filter(|_| limit.is_some());
+    round(module, &wanted, &mut done, second_pass.and(Some(&later)));
+    if let Some(second) = second_pass {
+        let later = later.into_inner();
+        let (calls, cold, elsewhere) = callers(module);
+        let how = How {
+            wanted: &wanted,
+            convention,
+            limit: most,
+            isa,
+            names,
+            growth,
+            share,
+            calls: &calls,
+            cold: &cold,
+            elsewhere: &elsewhere,
+            later: None,
+        };
+        done.extend(heap::run(module, &how, &later, &own, second, pic));
+    }
     if limit.is_some() && once {
+        // A function the heap copied into its last caller still holds the calls in its body until
+        // it goes, and a function one of those reaches would not look called once while it does.
+        // gcc's inliner drops such a function as soon as its last call is in.
+        while bury(module, &wanted) {}
         let mut second = classify(module, &called_once(module));
         second.retain(|_, &mut (_, kind)| kind == Kind::Once);
-        round(module, &second, &mut done);
+        round(module, &second, &mut done, None);
         wanted.extend(second);
     }
     if !wanted.is_empty() {
-        let (calls, elsewhere) = references(module);
-        for &(id, kind) in wanted.values() {
-            let func = &module[id];
-            let name = func.name;
-            let gone = match kind {
-                Kind::Once => true,
-                Kind::Always | Kind::Hinted | Kind::Asks | Kind::Small | Kind::Auto => {
-                    func.linkage == Linkage::Internal && !func.attrs.set.contains(AttrSet::USED)
-                }
-            };
-            if gone && !calls.contains_key(&name) && !elsewhere.contains(&name) {
-                module[id] = declaration(&module[id]);
-            }
-        }
+        bury(module, &wanted);
         for &(id, _) in &done {
             settle_operands(&mut module[id]);
         }
     }
     withdraw(module);
     done
+}
+
+/// Makes a declaration of each function the passes inlined that nothing refers to any more and
+/// that may go, and says whether there was one.
+fn bury(module: &mut Module, wanted: &Map<Symbol, (FuncId, Kind)>) -> bool {
+    let (calls, elsewhere) = references(module);
+    let mut buried = false;
+    for &(id, kind) in wanted.values() {
+        let func = &module[id];
+        let name = func.name;
+        let gone = match kind {
+            Kind::Once => true,
+            Kind::Always | Kind::Hinted | Kind::Asks | Kind::Small | Kind::Auto => {
+                func.linkage == Linkage::Internal && !func.attrs.set.contains(AttrSet::USED)
+            }
+        };
+        if gone
+            && !func.is_declaration()
+            && !calls.contains_key(&name)
+            && !elsewhere.contains(&name)
+        {
+            module[id] = declaration(&module[id]);
+            buried = true;
+        }
+    }
+    buried
 }
 
 /// Every operand of an assembly statement in that function that is arithmetic over constants,
@@ -586,6 +664,8 @@ struct How<'a> {
     cold: &'a Map<Symbol, usize>,
     /// The names the module reaches other than by a direct call.
     elsewhere: &'a Set<Symbol>,
+    /// Where the calls left for the second pass are written down, when there is one.
+    later: Option<&'a RefCell<heap::Later>>,
 }
 
 /// How far inlining may grow a caller's frame, gcc's `large-stack-frame-growth` and
@@ -681,6 +761,9 @@ fn settle(
     let mut next = 0;
     while let Some(&(_, call, callee, kind)) = calls.get(next) {
         next += 1;
+        if let Some(later) = how.later {
+            later.borrow_mut().examined.insert((id, call));
+        }
         let why = |failure: InlineFailure| match kind {
             Kind::Always => failure.why(),
             Kind::Hinted | Kind::Asks | Kind::Small | Kind::Auto => failure.hint(),
@@ -758,6 +841,11 @@ fn settle(
             large = large.min(specialized_size(&module[callee], &values, weighed));
         }
         if large > most {
+            // Left for the second pass to weigh with its hints, which says why if it refuses too.
+            if let (Some(later), Kind::Hinted | Kind::Auto) = (how.later, kind) {
+                later.borrow_mut().deferred.insert((id, call));
+                continue;
+            }
             stats.missed(why(InlineFailure::TooLarge));
             continue;
         }
@@ -788,7 +876,7 @@ fn settle(
                 // which is `noinstr`, and a call left out of line there is a call out of the
                 // section objtool holds it to.
                 if !optnone {
-                    calls.extend(resolved(module, id, how));
+                    calls.extend(resolved(module, id, how, false, None));
                 }
                 // A loop the callee said must stay a loop is in the caller now, and the pass that
                 // would make it a call only knows functions. The whole caller keeps its loops,
@@ -823,16 +911,34 @@ fn settle(
     }
 }
 
-/// The calls through a pointer that is the address of an `always_inline` function, made direct.
+/// The calls through a pointer that is the address of an `always_inline` function, made direct, or
+/// of any function the step inlines when `every` says so, which the second pass does once a copy
+/// has made the pointer one it knows. With `since` only the instructions made after that many
+/// are looked at, which are the ones a copy brought.
 ///
 /// What is called has to be what the call says it calls, so a function whose signature is not the
 /// call's is left to be called through the pointer, the same as `crate::image` does.
-fn resolved(module: &mut Module, id: FuncId, how: &How<'_>) -> Vec<(Block, Inst, FuncId, Kind)> {
+fn resolved(
+    module: &mut Module,
+    id: FuncId,
+    how: &How<'_>,
+    every: bool,
+    since: Option<usize>,
+) -> Vec<(Block, Inst, FuncId, Kind)> {
     let mut out = Vec::new();
     let func = &module[id];
-    let found: Vec<(Block, Inst, Symbol, FuncId)> = func
-        .blocks()
-        .flat_map(|block| func.insts(block).map(move |inst| (block, inst)))
+    let placed: Vec<(Block, Inst)> = match since {
+        Some(mark) => (mark..func.counts().insts)
+            .map(Inst::from_usize)
+            .filter_map(|inst| func.block_of(inst).map(|block| (block, inst)))
+            .collect(),
+        None => func
+            .blocks()
+            .flat_map(|block| func.insts(block).map(move |inst| (block, inst)))
+            .collect(),
+    };
+    let found: Vec<(Block, Inst, Symbol, FuncId, Kind)> = placed
+        .into_iter()
         .filter_map(|(block, inst)| {
             let data = &func[inst];
             let Extra::Call(info) = data.extra else { return None };
@@ -847,12 +953,13 @@ fn resolved(module: &mut Module, id: FuncId, how: &How<'_>) -> Vec<(Block, Inst,
             }
             let Extra::Symbol(name) = func[made].extra else { return None };
             let &(callee, kind) = how.wanted.get(&name)?;
-            (kind == Kind::Always && module[callee].signature() == &func[func[info].signature])
-                .then_some((block, inst, name, callee))
+            ((kind == Kind::Always || every)
+                && module[callee].signature() == &func[func[info].signature])
+                .then_some((block, inst, name, callee, kind))
         })
         .collect();
     let func = &mut module[id];
-    for (block, inst, name, callee) in found {
+    for (block, inst, name, callee, kind) in found {
         let Extra::Call(info) = func[inst].extra else { continue };
         let args = func[func[inst].args][1..].to_vec();
         let args = func.push_values(&args);
@@ -863,7 +970,7 @@ fn resolved(module: &mut Module, id: FuncId, how: &How<'_>) -> Vec<(Block, Inst,
         data.opcode = Opcode::Call;
         data.args = args;
         data.extra = Extra::Call(at);
-        out.push((block, inst, callee, Kind::Always));
+        out.push((block, inst, callee, kind));
     }
     out
 }
@@ -1033,10 +1140,22 @@ fn specialized_size(
 /// arms it does not take are not counted at all, as they are gone from the copy once it folds.
 fn folded_size(
     func: &Func,
+    known: Set<Value>,
+    values: Map<Value, (Imm, Type)>,
+    weighed: Option<&Interner>,
+) -> usize {
+    folded(func, known, values, weighed, None).0
+}
+
+/// What [`folded_size`] counts, with how long it takes as well, which is each instruction counted
+/// weighed by how often `frequency` says its block runs.
+fn folded(
+    func: &Func,
     mut known: Set<Value>,
     mut values: Map<Value, (Imm, Type)>,
     weighed: Option<&Interner>,
-) -> usize {
+    frequency: Option<&Map<Block, f64>>,
+) -> (usize, f64) {
     known.extend(values.keys().copied());
     // Who reads each value and as which operand, for what is part of the instruction reading it
     // once there is code: an address a load or a store takes, the index it scales, and the
@@ -1062,6 +1181,7 @@ fn folded_size(
     let cfg = Cfg::new(func);
     let mut live: Set<Block> = cfg.entry().into_iter().collect();
     let mut work = 0;
+    let mut time = 0.0;
     for block in cfg.reverse_postorder() {
         if !live.contains(&block) {
             continue;
@@ -1178,11 +1298,21 @@ fn folded_size(
             };
             if !costless {
                 let read = data.results().any(|result| readers.contains_key(&result));
-                work += weighed.map_or(1, |names| weight(func, inst, names, read));
+                let cost = weighed.map_or(1, |names| weight(func, inst, names, read));
+                work += cost;
+                let often = frequency.and_then(|it| it.get(&block)).copied().unwrap_or(1.0);
+                // A call takes longer than its size says, which is gcc's `eni_time_weights`.
+                let waits = match data.opcode {
+                    Opcode::Call | Opcode::CallIndirect | Opcode::TailCall => {
+                        f64::from(INLINE_CALL_TIME) - 1.0
+                    }
+                    _ => 0.0,
+                };
+                time += (cost as f64 + waits) * often;
             }
         }
     }
-    work
+    (work, time)
 }
 
 /// What gcc's `estimate_num_insns` charges for an instruction when it weighs a body by size, for
@@ -2689,6 +2819,7 @@ target datalayout = "e-p:64:64-i64:64-f80:128-S128"
                 false,
                 Pic::Executable,
                 false,
+                None,
             )
         );
         if let Err(errors) = rucc_ir::verify(&module, &names) {
@@ -2747,6 +2878,7 @@ block0(%0: i32):
                 share,
                 Pic::Executable,
                 false,
+                None,
             );
             if let Err(errors) = rucc_ir::verify(&module, &names) {
                 panic!("the inliner left invalid IR, {errors:?}");
@@ -2817,6 +2949,7 @@ block0(%0: i32):
             true,
             Pic::Executable,
             false,
+            None,
         );
         if let Err(errors) = rucc_ir::verify(&module, &names) {
             panic!("the inliner left invalid IR, {errors:?}");
@@ -3164,6 +3297,7 @@ block0(%0: i32):
             false,
             Pic::Executable,
             false,
+            None,
         );
         let id = module.funcs().find(|&id| module[id].name == g).expect("g is there");
         let func = &module[id];
@@ -3556,6 +3690,7 @@ block0(%0: i32):
                 false,
                 Pic::Executable,
                 false,
+                None,
             );
             rucc_ir::print(&module, &names)
         };

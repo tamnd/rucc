@@ -379,6 +379,54 @@ pub const INLINE_FRAME_GROWTH_CONSERVE: u32 = 40;
 /// to 100 under that flag.
 pub const INLINE_LARGE_FRAME_CONSERVE: u32 = 100;
 
+/// How much a hint raises the limit a call is held to, in percent, per section 33.5.
+///
+/// GCC's `inline-heuristics-hint-percent` at `-O2`. A call whose copy would make a loop's trip
+/// count or stride known, turn a call through a pointer into a direct one, or answer a
+/// `__builtin_constant_p` gets a limit twice the size. With both kinds of hint the limit is scaled
+/// by the square of this over a hundred, which is what gcc does.
+pub const INLINE_HINT_PERCENT: u32 = 200;
+
+/// [`INLINE_HINT_PERCENT`] at `-O3`, per section 33.5, where gcc raises it to six hundred.
+pub const INLINE_HINT_PERCENT_O3: u32 = 600;
+
+/// How much of the time a call and its caller take inlining has to save before a call over its
+/// limit is taken anyway, in percent, per section 33.5.
+///
+/// GCC's `inline-min-speedup` at `-O2`. A body that the constants a call passes fold most of away
+/// is worth the size, but only when what it saves is a real part of what the caller does.
+pub const INLINE_MIN_SPEEDUP: u32 = 30;
+
+/// [`INLINE_MIN_SPEEDUP`] at `-O3`, per section 33.5, where gcc lowers it to fifteen.
+pub const INLINE_MIN_SPEEDUP_O3: u32 = 15;
+
+/// How much the inliner's second pass may grow the whole unit, in percent, per section 33.6.
+///
+/// GCC's `inline-unit-growth`. The bound is taken from the larger of the unit as it was and
+/// [`LARGE_UNIT_INSNS`], so a small file is never held to a bound smaller than a large one would.
+pub const INLINE_UNIT_GROWTH: u32 = 40;
+
+/// The size below which a unit is treated as being this size when its growth is bounded, per
+/// section 33.6. GCC's `large-unit-insns`.
+pub const LARGE_UNIT_INSNS: u32 = 10_000;
+
+/// The size a caller may reach before the second pass bounds how much it grows, per section 33.6.
+///
+/// GCC's `large-function-insns`. A caller smaller than this may grow as much as the unit bound
+/// lets it.
+pub const LARGE_FUNCTION_INSNS: u32 = 2700;
+
+/// How much a caller larger than [`LARGE_FUNCTION_INSNS`] may grow, in percent of the larger of
+/// itself and the callee, per section 33.6. GCC's `large-function-growth`.
+pub const LARGE_FUNCTION_GROWTH: u32 = 100;
+
+/// What a call costs in the second inliner pass's measure of time, before its arguments, per
+/// section 33.5.
+///
+/// gcc's `eni_time_weights.call_cost`. A call is ten, and a move for each argument and for the
+/// result comes on top, which is what a copy saves besides the work the constants fold out of it.
+pub const INLINE_CALL_TIME: u32 = 10;
+
 /// How cold a block may be and still count as hot in its own function, as a fraction of the entry
 /// block, per section 11.4.
 ///
@@ -1060,6 +1108,78 @@ pub const ALL: &[Constant] = &[
         unit: "bytes",
         document: "33.6",
         gcc: "large-stack-frame",
+        provenance: Provenance::Gcc,
+    },
+    Constant {
+        name: "INLINE_HINT_PERCENT",
+        value: 200,
+        unit: "percent",
+        document: "33.5",
+        gcc: "inline-heuristics-hint-percent",
+        provenance: Provenance::Gcc,
+    },
+    Constant {
+        name: "INLINE_HINT_PERCENT_O3",
+        value: 600,
+        unit: "percent",
+        document: "33.5",
+        gcc: "inline-heuristics-hint-percent at -O3",
+        provenance: Provenance::Gcc,
+    },
+    Constant {
+        name: "INLINE_MIN_SPEEDUP",
+        value: 30,
+        unit: "percent",
+        document: "33.5",
+        gcc: "inline-min-speedup",
+        provenance: Provenance::Gcc,
+    },
+    Constant {
+        name: "INLINE_MIN_SPEEDUP_O3",
+        value: 15,
+        unit: "percent",
+        document: "33.5",
+        gcc: "inline-min-speedup at -O3",
+        provenance: Provenance::Gcc,
+    },
+    Constant {
+        name: "INLINE_UNIT_GROWTH",
+        value: 40,
+        unit: "percent",
+        document: "33.6",
+        gcc: "inline-unit-growth",
+        provenance: Provenance::Gcc,
+    },
+    Constant {
+        name: "LARGE_UNIT_INSNS",
+        value: 10_000,
+        unit: "instructions",
+        document: "33.6",
+        gcc: "large-unit-insns",
+        provenance: Provenance::Gcc,
+    },
+    Constant {
+        name: "LARGE_FUNCTION_INSNS",
+        value: 2700,
+        unit: "instructions",
+        document: "33.6",
+        gcc: "large-function-insns",
+        provenance: Provenance::Gcc,
+    },
+    Constant {
+        name: "LARGE_FUNCTION_GROWTH",
+        value: 100,
+        unit: "percent",
+        document: "33.6",
+        gcc: "large-function-growth",
+        provenance: Provenance::Gcc,
+    },
+    Constant {
+        name: "INLINE_CALL_TIME",
+        value: 10,
+        unit: "time units",
+        document: "33.5",
+        gcc: "eni_time_weights.call_cost",
         provenance: Provenance::Gcc,
     },
     Constant {
