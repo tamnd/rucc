@@ -26,7 +26,7 @@ const VOID: &[u8] = &[0x60, 0, 0];
 
 struct Writer<'w, 'a> {
     world: &'w World<'a>,
-    live: &'w Live<'a>,
+    live: &'w Live,
     layout: &'w Layout,
     types: Vec<&'a [u8]>,
     type_of: HashMap<&'a [u8], u32>,
@@ -36,7 +36,8 @@ struct Writer<'w, 'a> {
     /// The imported functions, as indices into the world's list, in output order.
     import_order: Vec<usize>,
     ctors: Option<u32>,
-    stubs: HashMap<&'a [u8], u32>,
+    /// The output index of the stub for each undefined weak function that a call names.
+    stubs: HashMap<&'a str, u32>,
     /// The defined functions in output order.
     bodies: Vec<Body>,
     globals: Vec<Vec<Option<u32>>>,
@@ -55,7 +56,7 @@ enum Body {
 /// Writes the module.
 pub(crate) fn write(
     world: &World<'_>,
-    live: &Live<'_>,
+    live: &Live,
     layout: &Layout,
     options: &Options,
 ) -> Result<Vec<u8>, Error> {
@@ -133,9 +134,9 @@ impl<'w, 'a> Writer<'w, 'a> {
             self.bodies.push(Body::Ctors);
             next += 1;
         }
-        for (i, &ty) in live.stubs.iter().enumerate() {
-            self.stubs.insert(ty, next);
-            self.bodies.push(Body::Stub(i as u32));
+        for &weak in &live.stubs {
+            self.stubs.insert(world.weak[weak].0, next);
+            self.bodies.push(Body::Stub(weak as u32));
             next += 1;
         }
         for (file, used) in live.funcs.iter().enumerate() {
@@ -206,7 +207,10 @@ impl<'w, 'a> Writer<'w, 'a> {
     fn body_type(&self, body: Body) -> &'a [u8] {
         match body {
             Body::Ctors => VOID,
-            Body::Stub(i) => self.live.stubs[i as usize],
+            Body::Stub(weak) => {
+                let (_, file, symbol) = self.world.weak[weak as usize];
+                self.world.func_type(file, symbol).expect("a function symbol")
+            }
             Body::Input(file, index) => {
                 let object = &self.world.files[file];
                 object.types[object.funcs[index as usize] as usize]
@@ -221,8 +225,7 @@ impl<'w, 'a> Writer<'w, 'a> {
             Where::Import(i) => self.imports[i as usize],
             Where::Synth(Synth::CallCtors) => self.ctors,
             Where::Null => {
-                let ty = self.world.func_type(file, symbol as usize);
-                ty.and_then(|ty| self.stubs.get(ty).copied())
+                self.stubs.get(self.world.files[file].symbols[symbol as usize].name).copied()
             }
             _ => None,
         };
@@ -421,7 +424,11 @@ impl<'w, 'a> Writer<'w, 'a> {
             sleb(&mut s, i64::from(address as i32));
             s.push(0x0b);
         }
-        section(&mut out, 6, &s);
+        // A module with no globals has no global section, as from `wasm-ld`, and the same goes
+        // for the global names and the segment names below.
+        if self.global_count > 0 || !data_exports.is_empty() {
+            section(&mut out, 6, &s);
+        }
 
         let mut s = Vec::new();
         uleb(&mut s, exports.len() as u64 + 1);
@@ -612,8 +619,14 @@ impl<'w, 'a> Writer<'w, 'a> {
         if let Some(index) = self.ctors {
             funcs.push((index, "__wasm_call_ctors"));
         }
-        for &index in self.stubs.values() {
-            funcs.push((index, "undefined_weak"));
+        // `wasm-ld` names a stub for the symbol whose calls it takes.
+        let stubs: Vec<(u32, String)> = self
+            .stubs
+            .iter()
+            .map(|(name, &index)| (index, format!("undefined_weak:{name}")))
+            .collect();
+        for (index, name) in &stubs {
+            funcs.push((*index, name));
         }
         for (file, object) in world.files.iter().enumerate() {
             // The name from the object's own `name` section, and else the first symbol that
@@ -677,21 +690,25 @@ impl<'w, 'a> Writer<'w, 'a> {
         }
         globals.sort_unstable_by_key(|&(index, _)| index);
         globals.dedup_by_key(|&mut (index, _)| index);
-        let mut sub = Vec::new();
-        uleb(&mut sub, globals.len() as u64);
-        for (index, global) in globals {
-            uleb(&mut sub, u64::from(index));
-            name(&mut sub, global);
+        if !globals.is_empty() {
+            let mut sub = Vec::new();
+            uleb(&mut sub, globals.len() as u64);
+            for (index, global) in globals {
+                uleb(&mut sub, u64::from(index));
+                name(&mut sub, global);
+            }
+            subsection(&mut s, 7, &sub);
         }
-        subsection(&mut s, 7, &sub);
         let segments: Vec<_> = self.layout.segments.iter().filter(|s| !s.is_bss()).collect();
-        let mut sub = Vec::new();
-        uleb(&mut sub, segments.len() as u64);
-        for (index, segment) in segments.iter().enumerate() {
-            uleb(&mut sub, index as u64);
-            name(&mut sub, &segment.name);
+        if !segments.is_empty() {
+            let mut sub = Vec::new();
+            uleb(&mut sub, segments.len() as u64);
+            for (index, segment) in segments.iter().enumerate() {
+                uleb(&mut sub, index as u64);
+                name(&mut sub, &segment.name);
+            }
+            subsection(&mut s, 9, &sub);
         }
-        subsection(&mut s, 9, &sub);
         s
     }
 

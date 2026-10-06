@@ -18,6 +18,7 @@ All notable changes are recorded here. The format follows [Keep a Changelog](htt
 ### Fixed
 
 - `rucc-wasm-link` writes the same module each time it links the same inputs (#2867). It put the imports in the order of a hash table, which changes from one run to the next. They are now in the order of the first reference to each.
+- `rucc-wasm-link` makes one stub for each undefined weak function that a live call names, with the name `undefined_weak:` and the name of the symbol, and it writes `__stack_pointer` and the global section only when something refers to them, as `wasm-ld` does (#2867). Before, it made one stub for each type, and the modules of the c-testsuite programs 00187 and 00209 were not the modules from `wasm-ld`.
 - `-fzero-call-used-regs=` works on i386, with `--target=i686` or with `-m32`, where it stopped the compiler on a register that i386 does not have (#3086). It clears `edx` and `ecx` and then `xmm0` to `xmm7` in gcc's order, the `-arg` choices clear the registers that `-mregparm=3` and `-msse` pass arguments in, and `zmm16` to `zmm31` are never named. The 32-bit vDSO of an x86-64 allmodconfig kernel is built this way.
 - The assembler takes the name of a section in the file as the address of its start when nothing else defines that name, as gas does (#3090). The vDSO's exception table writes `.long (from) - __ex_table` inside `__ex_table`, which stopped with a message about an expression that a relocation cannot say. It now gives the same relocations as llvm-mc, and the name does not go into the symbol table.
 

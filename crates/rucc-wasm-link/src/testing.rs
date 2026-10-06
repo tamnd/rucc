@@ -160,3 +160,27 @@ pub(crate) fn calls(name_: &str, callee: Option<&str>) -> Vec<u8> {
     }
     out
 }
+
+/// An object with the function `_start`, which calls the undefined weak functions `a` and `b`,
+/// both of the type `() -> ()`, in that order.
+pub(crate) fn weak_caller() -> Vec<u8> {
+    let mut out = b"\0asm\x01\0\0\0".to_vec();
+    section(&mut out, 1, &[1, 0x60, 0, 0]);
+    let mut imports = vec![2];
+    for field in ["a", "b"] {
+        name(&mut imports, "env");
+        name(&mut imports, field);
+        imports.extend([0, 0]);
+    }
+    section(&mut out, 2, &imports);
+    section(&mut out, 3, &[1, 0]);
+    let body = [0, 0x10, 0x80, 0x80, 0x80, 0x80, 0, 0x10, 0x80, 0x80, 0x80, 0x80, 0, 0x0b];
+    let mut code = vec![1, body.len() as u8];
+    code.extend(body);
+    section(&mut out, 10, &code);
+    let mut symbols = vec![3, 0, 0x11, 0, 0, 0x11, 1, 0, 0, 2];
+    name(&mut symbols, "_start");
+    linking(&mut out, &symbols, &[]);
+    custom(&mut out, "reloc.CODE", &[3, 2, 0, 4, 0, 0, 10, 1]);
+    out
+}

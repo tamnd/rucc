@@ -150,7 +150,7 @@ impl std::error::Error for Error {}
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::testing::{archive, callee, caller, calls, custom, importer};
+    use crate::testing::{archive, callee, caller, calls, custom, importer, weak_caller};
 
     /// The payload of each section of a module, by id, in order.
     fn sections(module: &[u8]) -> Vec<(u8, &[u8])> {
@@ -191,7 +191,8 @@ mod tests {
         let inputs = [Input { name: "a.o", bytes: &a }, Input { name: "lib.a", bytes: &lib }];
         let module = link(&Options::default(), &inputs).unwrap();
         let ids: Vec<u8> = sections(&module).iter().map(|&(id, _)| id).collect();
-        assert_eq!(ids, [1, 3, 4, 5, 6, 7, 10, 11, 0, 0]);
+        // Nothing refers to the stack pointer, so there are no globals and no global section.
+        assert_eq!(ids, [1, 3, 4, 5, 7, 10, 11, 0, 0]);
         // `_start` is function 0 and `f` is function 1. The address of `d` is 65536, just above
         // the stack, as a padded LEB128, and the call goes to function 1.
         let start =
@@ -204,8 +205,6 @@ mod tests {
             payload(&module, 11),
             [1, 0, 0x41, 0x80, 0x80, 4, 0x0b, 4, b'a', b'b', b'c', b'd']
         );
-        // The stack pointer starts at the top of the stack.
-        assert_eq!(payload(&module, 6), [1, 0x7f, 1, 0x41, 0x80, 0x80, 4, 0x0b]);
         let mut exports = vec![2];
         bytes::name(&mut exports, "memory");
         exports.extend([2, 0]);
@@ -320,5 +319,30 @@ mod tests {
         custom(&mut a, "name", b"\x01\x07\x01\x00\x04real");
         let got = names(&a);
         assert!(got.starts_with(b"\x00\x07\x06a.wasm\x01\x07\x01\x00\x04real"), "{got:?}");
+    }
+
+    /// Each undefined weak function that is called gets its own stub, named after it, also when
+    /// two of them have one type, as from `wasm-ld`.
+    #[test]
+    fn each_called_weak_function_gets_a_stub_of_its_own() {
+        let a = weak_caller();
+        let module = link(&Options::default(), &[Input { name: "a.o", bytes: &a }]).unwrap();
+        let start = [0, 0x10, 0x80, 0x80, 0x80, 0x80, 0, 0x10, 0x81, 0x80, 0x80, 0x80, 0, 0x0b];
+        let mut code = vec![3, 3, 0, 0x00, 0x0b, 3, 0, 0x00, 0x0b, 14];
+        code.extend(start);
+        assert_eq!(payload(&module, 10), code);
+        let names = sections(&module)
+            .into_iter()
+            .find(|&(id, payload)| id == 0 && payload.starts_with(b"\x04name"))
+            .map(|(_, payload)| payload[5..].to_vec())
+            .unwrap();
+        let mut funcs = vec![3];
+        for (index, func) in ["undefined_weak:a", "undefined_weak:b", "_start"].iter().enumerate() {
+            funcs.push(index as u8);
+            bytes::name(&mut funcs, func);
+        }
+        let mut want = vec![1, funcs.len() as u8];
+        want.extend(funcs);
+        assert!(names.starts_with(&want), "{names:?}");
     }
 }

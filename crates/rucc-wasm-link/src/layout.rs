@@ -137,11 +137,7 @@ fn align(value: u64, log2: u32) -> u64 {
 }
 
 impl Layout {
-    pub(crate) fn new(
-        world: &World<'_>,
-        live: &Live<'_>,
-        options: &Options,
-    ) -> Result<Self, Error> {
+    pub(crate) fn new(world: &World<'_>, live: &Live, options: &Options) -> Result<Self, Error> {
         let files = &world.files;
         // The output segments in order of first appearance, then sorted by rank.
         let mut order: Vec<&str> = Vec::new();
@@ -281,7 +277,7 @@ impl Layout {
         })
     }
 
-    fn table(world: &World<'_>, live: &Live<'_>) -> (Vec<Where>, HashMap<Where, u32>) {
+    fn table(world: &World<'_>, live: &Live) -> (Vec<Where>, HashMap<Where, u32>) {
         let mut slots = Vec::new();
         let mut slot_of = HashMap::new();
         for (file, object) in world.files.iter().enumerate() {
