@@ -18,6 +18,9 @@ int narrow(unsigned x, int y) { if (x != 0) return y * 7; return y; }
 int boolean(_Bool b, int y) { if (b) return y * 3; return y; }
 void guard(int *p) { if (!p) return; f(); }
 int seven(int x, int y) { if (x == 7) return y * 7; return y; }
+long sum(int *a, unsigned n) { long s = 0; for (unsigned i = 0; i < n; i++) s += a[i]; return s; }
+int one(unsigned x, int y) { if (x >= 1) return y * 3; return y; }
+int below(unsigned long x, int y) { if (x < 1) return y * 3; return y; }
 ";
 
 fn compile(flags: &[&str]) -> std::process::Output {
@@ -63,12 +66,25 @@ fn a_branch_on_zero_is_one_instruction() {
         ("narrow", "cbz w0, "),
         ("boolean", "cbz w0, "),
         ("guard", "cbz x0, "),
+        ("one", "cbz w0, "),
+        ("below", "cbnz x0, "),
     ] {
         let body = body(&text, name);
         assert!(body.iter().any(|line| line.starts_with(branch)), "{name} {branch}:\n{text}");
         assert!(!body.iter().any(|line| line.starts_with("cmp ")), "{name}:\n{text}");
         assert!(!body.iter().any(|line| line.starts_with("b.")), "{name}:\n{text}");
     }
+}
+
+/// An unsigned counter that starts at zero is compared as `0 < n` on the way into the loop, which
+/// is `n != 0`, so the guard is a `cbz` and only the test at the bottom of the loop is an ordering.
+#[test]
+fn an_unsigned_loop_guard_is_a_test_against_zero() {
+    let text = listing();
+    let sum = body(&text, "sum");
+    assert!(sum.iter().any(|line| line.starts_with("cbz w1, ")), "{text}");
+    assert!(!sum.contains(&"cmp w1, #0".to_string()), "{text}");
+    assert_eq!(sum.iter().filter(|line| line.starts_with("cmp ")).count(), 1, "{text}");
 }
 
 /// Seven is not zero, so the comparison and the jump on the flags stay.

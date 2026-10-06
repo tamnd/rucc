@@ -326,7 +326,8 @@ const EXPAND: [Plan; 1] = [[Shown::Expand, Shown::Reg, Shown::Reg]];
 /// The constant on the left is not the missing half of the tier. A comparison is not commutative,
 /// so `0 < x` is not `x < 0` with the operands swapped, it is `x > 0`, and turning the first into
 /// the second is a canonicalisation, which tier three does. A comparison that comes in the other
-/// way round is turned round there and reaches the rules here on the next run of the pass.
+/// way round is turned round there and is looked at again straight away, which is when it reaches
+/// the rules here.
 const COMPARE: [Plan; 2] =
     [[Shown::Reg, Shown::Const, Shown::Reg], [Shown::Expand, Shown::Const, Shown::Reg]];
 
@@ -377,6 +378,11 @@ const TABLES: [(&Table, &[Plan]); 6] = [
     (&select::TABLE, &SELECT),
     (&canonical::TABLE, &CANONICAL),
 ];
+
+/// How many rewrites one instruction gets in one run. Two is what a comparison with the constant
+/// on the left needs, one to turn it round and one for the rule about the constant, and the rest
+/// is room for a rule that leaves something another one is about.
+const AGAIN: usize = 4;
 
 /// The pass. It holds nothing, because a peephole needs to know nothing beyond the pattern.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -490,16 +496,26 @@ impl Pass for Simplify {
                     let args = func[inst].args;
                     func.rewrite(args, |value| chase(&forward, value));
                 }
-                let Some((found, pattern, no_fuel)) = finder.find(func, inst) else { continue };
-                if !fuel.take() {
-                    // Out of fuel, which stops the transforming rather than the looking, the same
-                    // way the other two passes treat it. The walk is the same walk at every fuel
-                    // setting, which is what makes bisecting over it monotonic.
-                    stats.missed(no_fuel);
-                    continue;
+                // An instruction a rewrite changed where it stands is looked at again, so that a
+                // comparison the canonical tier turned round reaches the comparison rules in the
+                // same run. The run after header copying is the last one, and `0 < n` as a loop
+                // guard would otherwise stay an ordering where it is a test against zero. The
+                // bound is what stops a pair of rules that undo each other going round for ever.
+                for _ in 0..AGAIN {
+                    let Some((found, pattern, no_fuel)) = finder.find(func, inst) else { break };
+                    if !fuel.take() {
+                        // Out of fuel, which stops the transforming rather than the looking, the
+                        // same way the other two passes treat it. The walk is the same walk at
+                        // every fuel setting, which is what makes bisecting over it monotonic.
+                        stats.missed(no_fuel);
+                        break;
+                    }
+                    let forwarded = apply(func, inst, found, &mut forward);
+                    stats.optimized(pattern);
+                    if forwarded {
+                        break;
+                    }
                 }
-                apply(func, inst, found, &mut forward);
-                stats.optimized(pattern);
             }
         }
         if !forward.is_empty() {
@@ -2128,9 +2144,10 @@ mod tests {
         );
         assert_eq!(
             compare::TABLE.rules.len(),
-            72,
-            "tier five is four predicates against each of four constants at four widths, and a \
-             widened boolean against zero under two predicates at the same four"
+            80,
+            "tier five is four predicates against each of four constants at four widths, two \
+             against one at the same four, and a widened boolean against zero under two \
+             predicates at the same four"
         );
         assert_eq!(
             select::TABLE.rules.len(),
@@ -2489,10 +2506,8 @@ mod tests {
     /// is a comparison, which is this test, the hand written rewrite above the tables turns that
     /// exclusive or into the opposite comparison, and the pair composes into one instruction.
     ///
-    /// Two runs, because the walk visits each instruction once and the hand written rewrite is
-    /// tried before the tables are: the exclusive or did not exist when this instruction was
-    /// looked at. Every pipeline above `-O0` names the pass twice, which is where the second run
-    /// comes from in a real compile.
+    /// One run, because an instruction a rule changed where it stands is looked at again, and the
+    /// second look is when the hand written rewrite finds the exclusive or.
     #[test]
     fn a_widened_boolean_that_is_zero_is_the_boolean_negated() {
         for width in [8u32, 16, 32, 64] {
@@ -2508,8 +2523,6 @@ mod tests {
             build.ret(&[test]);
             assert!(simplify(&mut func), "i{width} was left alone");
             let got = returned(&func, block);
-            assert_eq!(came_from(&func, got).0, Opcode::Xor, "i{width} is not a negation");
-            assert!(simplify(&mut func), "i{width} kept the exclusive or");
             assert_eq!(
                 came_from(&func, got),
                 (Opcode::ICmp, Extra::IntPred(IntPred::Ne)),

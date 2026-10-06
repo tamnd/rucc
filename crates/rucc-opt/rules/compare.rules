@@ -108,6 +108,43 @@
       (spec (= (ite (bvugt x 0) 1 0) (result))))
 
 
+;; One above zero, which is the same pair said with the other constant. `x >= 1u` is false for
+;; exactly zero and `x < 1u` is true for exactly zero, so they are `x != 0` and `x == 0`. A loop
+;; guard comes out this way when the counter starts at zero and the bound is unsigned, and a test
+;; against zero is one instruction on a machine with `cbz` where an ordering is two.
+
+(rule (simplify (icmp_uge.i1 (value.i8 x) (iconst.i8 1)))
+      (icmp_ne.i1 (value.i8 x) (iconst.i8 0))
+      (spec (= (ite (bvuge x 1) 1 0) (result))))
+
+(rule (simplify (icmp_ult.i1 (value.i8 x) (iconst.i8 1)))
+      (icmp_eq.i1 (value.i8 x) (iconst.i8 0))
+      (spec (= (ite (bvult x 1) 1 0) (result))))
+
+(rule (simplify (icmp_uge.i1 (value.i16 x) (iconst.i16 1)))
+      (icmp_ne.i1 (value.i16 x) (iconst.i16 0))
+      (spec (= (ite (bvuge x 1) 1 0) (result))))
+
+(rule (simplify (icmp_ult.i1 (value.i16 x) (iconst.i16 1)))
+      (icmp_eq.i1 (value.i16 x) (iconst.i16 0))
+      (spec (= (ite (bvult x 1) 1 0) (result))))
+
+(rule (simplify (icmp_uge.i1 (value.i32 x) (iconst.i32 1)))
+      (icmp_ne.i1 (value.i32 x) (iconst.i32 0))
+      (spec (= (ite (bvuge x 1) 1 0) (result))))
+
+(rule (simplify (icmp_ult.i1 (value.i32 x) (iconst.i32 1)))
+      (icmp_eq.i1 (value.i32 x) (iconst.i32 0))
+      (spec (= (ite (bvult x 1) 1 0) (result))))
+
+(rule (simplify (icmp_uge.i1 (value.i64 x) (iconst.i64 1)))
+      (icmp_ne.i1 (value.i64 x) (iconst.i64 0))
+      (spec (= (ite (bvuge x 1) 1 0) (result))))
+
+(rule (simplify (icmp_ult.i1 (value.i64 x) (iconst.i64 1)))
+      (icmp_eq.i1 (value.i64 x) (iconst.i64 0))
+      (spec (= (ite (bvult x 1) 1 0) (result))))
+
 ;; Against the least signed value, which is the same four sentences with the ordering read
 ;; the other way.
 
