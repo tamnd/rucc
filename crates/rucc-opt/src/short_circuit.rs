@@ -258,7 +258,7 @@ impl Pass for ShortCircuit {
                         continue 'heads;
                     }
                     if work > 0 {
-                        if work > heuristics::SHORT_CIRCUIT_INSTRUCTIONS {
+                        if work > rucc_cost::param!(heuristics::SHORT_CIRCUIT_INSTRUCTIONS) {
                             stats.missed(TOO_MUCH_WORK);
                             continue 'heads;
                         }

@@ -456,7 +456,10 @@ impl Pass for PhiOpt {
                 .arms
                 .map(|arm| arm.map_or(0, |block| work(func, head, block)).saturating_sub(saved));
             if work.iter().any(|&count| count > 0) {
-                if work.iter().any(|&count| count > heuristics::PHIOPT_ARM_INSTRUCTIONS) {
+                if work
+                    .iter()
+                    .any(|&count| count > rucc_cost::param!(heuristics::PHIOPT_ARM_INSTRUCTIONS))
+                {
                     stats.missed(ARMS_TOO_LONG);
                     continue;
                 }
@@ -1276,7 +1279,7 @@ fn factored_at(
             }
             // A level that factors below needs no select at this one, so the width a select can
             // choose at is asked about only where the chain stops.
-            let deeper = depth + 1 < heuristics::PHIOPT_FACTOR_DEPTH;
+            let deeper = depth + 1 < rucc_cost::param!(heuristics::PHIOPT_FACTOR_DEPTH);
             let next = [one, two];
             below = deeper.then(|| factored_at(func, machine, arms, next, depth + 1)).flatten();
             if below.is_none() && !machine.selects(func[one].ty) {
@@ -1331,7 +1334,7 @@ pub(crate) fn length(func: &Func, block: Block) -> u32 {
 /// converts it, and that one extra constant was the difference between a select and a branch.
 pub(crate) fn work(func: &Func, head: Block, arm: Block) -> u32 {
     let whole = length(func, arm);
-    if whole > heuristics::PHIOPT_ARM_SCAN_INSTRUCTIONS {
+    if whole > rucc_cost::param!(heuristics::PHIOPT_ARM_SCAN_INSTRUCTIONS) {
         return whole;
     }
     let done: Vec<Value> = func
@@ -1357,7 +1360,8 @@ pub(crate) fn work(func: &Func, head: Block, arm: Block) -> u32 {
 
 /// Whether the estimate leaves enough doubt about this branch to be worth removing it.
 pub(crate) fn unpredictable(taken: Probability) -> bool {
-    let margin = heuristics::PHIOPT_UNPREDICTABLE_MARGIN_PERCENT * (Probability::SCALE / 100);
+    let margin = rucc_cost::param!(heuristics::PHIOPT_UNPREDICTABLE_MARGIN_PERCENT)
+        * (Probability::SCALE / 100);
     taken.parts() >= margin && taken.parts() <= Probability::SCALE - margin
 }
 

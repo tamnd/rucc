@@ -709,7 +709,7 @@ impl Job<'_> {
                 // passenger and [`trim`] takes it out again if nothing else in the plan wanted it.
                 if cost > 0 {
                     let tight = pressure.is_tight(self.loops, id, class, room[bank]);
-                    if tight && cost < heuristics::LICM_EXPENSIVE {
+                    if tight && cost < rucc_cost::param!(heuristics::LICM_EXPENSIVE) {
                         passengers.insert(inst);
                     }
                     if !fuel.take() {
@@ -964,12 +964,12 @@ pub(crate) fn cost(func: &Func, inst: Inst) -> u32 {
         | Opcode::LShr
         | Opcode::AShr
         | Opcode::ICmp
-        | Opcode::FCmp => heuristics::LICM_EXPENSIVE,
+        | Opcode::FCmp => rucc_cost::param!(heuristics::LICM_EXPENSIVE),
         // Both become a call to the runtime in `rucc_safety::lower`, and the census in
         // `spec/safe-memory/13-performance.md` section 13.1 measured one at about 377 instructions.
         // Left at the default they price as an add, and then the pressure test throws them out of
         // exactly the loops where they cost the most.
-        Opcode::CapExtent | Opcode::CapExtentBack => heuristics::LICM_EXPENSIVE,
+        Opcode::CapExtent | Opcode::CapExtentBack => rucc_cost::param!(heuristics::LICM_EXPENSIVE),
         _ => 1,
     }
 }

@@ -269,7 +269,7 @@ fn claim(func: &Func, inst: Inst, sense: bool) -> Option<u32> {
 fn probability(func: &Func, given: Option<&Value>) -> Option<u32> {
     Some(match given {
         Some(&given) => u32::try_from(literal(func, given)?).ok()?.min(Hint::SCALE),
-        None => PREDICT_EXPECT * Hint::SCALE / 100,
+        None => rucc_cost::param!(PREDICT_EXPECT) * Hint::SCALE / 100,
     })
 }
 

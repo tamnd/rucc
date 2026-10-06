@@ -214,15 +214,18 @@ pub struct Thread {
     /// What a `-f` flag spells.
     name: &'static str,
     /// The most instructions a block threaded past may hold, and zero for a pass that copies none.
-    budget: u32,
+    /// A function rather than the number, because `--param` sets it after this was built.
+    budget: fn() -> u32,
 }
 
 /// The instance `-Os` and `-Oz` run, which threads an edge only where nothing has to be copied.
-pub static FREE: Thread = Thread { name: "thread", budget: 0 };
+pub static FREE: Thread = Thread { name: "thread", budget: || 0 };
 
 /// The instance `-O1` and above run, which copies a block of up to section 23.4's fifteen.
-pub static COPY: Thread =
-    Thread { name: "thread-copy", budget: heuristics::JUMP_THREAD_DUPLICATION_INSNS };
+pub static COPY: Thread = Thread {
+    name: "thread-copy",
+    budget: || rucc_cost::param!(heuristics::JUMP_THREAD_DUPLICATION_INSNS),
+};
 
 impl Pass for Thread {
     fn name(&self) -> &'static str {
@@ -230,7 +233,7 @@ impl Pass for Thread {
     }
 
     fn describe(&self) -> &'static str {
-        if self.budget == 0 {
+        if self.name == FREE.name {
             "an edge that already decides the branch it arrives at is pointed at the arm that \
              branch would have taken"
         } else {
@@ -388,7 +391,8 @@ impl Thread {
         paths: &Map<Block, u32>,
         copies: u32,
     ) -> Result<u32, Option<&'static str>> {
-        if self.budget == 0 {
+        let budget = (self.budget)();
+        if budget == 0 {
             return Err(None);
         }
         let body: Vec<Inst> = func.insts(block).filter(|&inst| !func.is_terminator(inst)).collect();
@@ -397,16 +401,16 @@ impl Thread {
         }
         let mut cost = u32::try_from(body.len()).unwrap_or(u32::MAX);
         if back_edge(loops, block, into) {
-            cost = cost.saturating_mul(heuristics::JUMP_THREAD_BACK_EDGE_SCALE);
+            cost = cost.saturating_mul(rucc_cost::param!(heuristics::JUMP_THREAD_BACK_EDGE_SCALE));
         }
-        if cost > self.budget {
+        if cost > budget {
             return Err(Some(TOO_BIG));
         }
         let path = paths.get(&from).copied().unwrap_or(0).saturating_add(cost);
-        if path > heuristics::JUMP_THREAD_PATH_INSNS {
+        if path > rucc_cost::param!(heuristics::JUMP_THREAD_PATH_INSNS) {
             return Err(Some(TOO_LONG));
         }
-        if copies >= heuristics::JUMP_THREAD_PATHS {
+        if copies >= rucc_cost::param!(heuristics::JUMP_THREAD_PATHS) {
             return Err(Some(TOO_MANY));
         }
         Ok(path)

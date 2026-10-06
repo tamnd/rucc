@@ -176,7 +176,7 @@ fn reads_memory(func: &Func, inst: Inst) -> bool {
         if func[from].opcode == Opcode::Load {
             return true;
         }
-        if depth < CONSTANT_P_LOAD_DEPTH {
+        if depth < rucc_cost::param!(CONSTANT_P_LOAD_DEPTH) {
             work.extend(func[func[from].args].iter().map(|&arg| (arg, depth + 1)));
         }
     }

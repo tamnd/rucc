@@ -415,7 +415,7 @@ impl Pass for Fixpoint {
 
     fn run(&self, func: &mut Func, an: &mut Analyses, fuel: &mut Fuel) -> Stats {
         let mut stats = Stats::new();
-        for _ in 0..rucc_cost::heuristics::SIMPLIFY_ROUNDS {
+        for _ in 0..rucc_cost::param!(rucc_cost::heuristics::SIMPLIFY_ROUNDS) {
             let round = Simplify.run(func, an, fuel);
             stats.merge(&round);
             if !round.changed() {

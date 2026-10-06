@@ -202,9 +202,6 @@ const PLACE_IS_ODD: &str =
 /// The fewest labels worth converting, per the module documentation.
 const LABELS: usize = 3;
 
-/// How many cells a table may have for every label it stands for, per the module documentation.
-const GROWTH: i128 = SWITCH_CONVERSION_MAX_GROWTH as i128;
-
 /// The pass.
 #[derive(Debug)]
 pub struct SwitchConv;
@@ -725,7 +722,9 @@ fn spread<T: Copy>(labels: &[i128], answers: &[T]) -> Result<(i128, Vec<Option<T
         return Err(TOO_FEW);
     };
     let span = high - low + 1;
-    if span > GROWTH * labels.len() as i128 {
+    // How many cells a table may have for every label it stands for, per the module documentation.
+    let growth = i128::from(rucc_cost::param!(SWITCH_CONVERSION_MAX_GROWTH));
+    if span > growth * labels.len() as i128 {
         return Err(TOO_SPARSE);
     }
     let mut cells = vec![None; usize::try_from(span).map_err(|_| TOO_SPARSE)?];

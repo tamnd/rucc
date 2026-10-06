@@ -506,7 +506,7 @@ fn consider(
     for want in &wants {
         stats.note(want.kind.remark());
     }
-    if wants.len() > heuristics::IV_MAX_CONSIDERED_USES {
+    if wants.len() > rucc_cost::param!(heuristics::IV_MAX_CONSIDERED_USES) {
         // Section 28.8: the search is cubic in the uses, and this is the bound that stops it
         // being cubic in a number the program chose.
         stats.missed(TOO_MANY_USES);
@@ -1007,7 +1007,7 @@ fn countdown(func: &Func, count: Count, groups: &[Group]) -> Option<Chrec> {
 /// enough that carrying a useless candidate costs nothing, and above it every candidate is a
 /// column in a search that is cubic in the count.
 fn prune(cands: &mut Vec<Cand>, table: &CostTable, groups: &[Group], stats: &mut Stats) {
-    if cands.len() <= heuristics::IV_ALWAYS_PRUNE_CAND_SET_BOUND {
+    if cands.len() <= rucc_cost::param!(heuristics::IV_ALWAYS_PRUNE_CAND_SET_BOUND) {
         return;
     }
     let mut wanted = vec![false; cands.len()];
@@ -1312,7 +1312,9 @@ fn upkeep(table: &CostTable, cand: &Cand) -> Cost {
     match cand.origin {
         Origin::Original | Origin::Countdown => step,
         Origin::Derived => {
-            step + Cost::cycles(table.add * i64::from(heuristics::IVOPTS_NEW_VARIABLE_BIAS))
+            step + Cost::cycles(
+                table.add * i64::from(rucc_cost::param!(heuristics::IVOPTS_NEW_VARIABLE_BIAS)),
+            )
         }
     }
 }
@@ -1340,9 +1342,13 @@ fn total(
     for &at in set {
         cost += upkeep(table, &cands[at]);
     }
-    let spare = room.saturating_sub(heuristics::LOOP_RESERVED_REGS);
+    let spare = room.saturating_sub(rucc_cost::param!(heuristics::LOOP_RESERVED_REGS));
     let over = u32::try_from(set.len()).unwrap_or(u32::MAX).saturating_sub(spare);
-    cost += Cost::cycles(Cycles::ONE * i64::from(over) * i64::from(heuristics::IVOPTS_SET_PENALTY));
+    cost += Cost::cycles(
+        Cycles::ONE
+            * i64::from(over)
+            * i64::from(rucc_cost::param!(heuristics::IVOPTS_SET_PENALTY)),
+    );
     Some(cost)
 }
 

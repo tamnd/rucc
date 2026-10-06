@@ -253,7 +253,7 @@ fn consider(
     id: LoopId,
 ) -> Result<Job, &'static str> {
     let header = loops.header(id);
-    if loops.depth(id) > heuristics::UNROLL_MAX_DEPTH {
+    if loops.depth(id) > rucc_cost::param!(heuristics::UNROLL_MAX_DEPTH) {
         return Err(TOO_DEEP);
     }
     let [latch] = loops.latches(id) else {
@@ -298,7 +298,7 @@ fn consider(
         _ => return Err(NO_COUNT),
     };
     let times = count.checked_add(1).and_then(|times| u32::try_from(times).ok()).ok_or(TOO_MANY)?;
-    if times > heuristics::UNROLL_MAX_TIMES {
+    if times > rucc_cost::param!(heuristics::UNROLL_MAX_TIMES) {
         return Err(TOO_MANY);
     }
 
@@ -324,7 +324,7 @@ fn consider(
         return Err(ESCAPES);
     }
     let size = size_after(func, scev, id, &blocks, times).ok_or(TOO_BIG)?;
-    if size > heuristics::UNROLL_MAX_INSNS {
+    if size > rucc_cost::param!(heuristics::UNROLL_MAX_INSNS) {
         return Err(TOO_BIG);
     }
     Ok(Job {

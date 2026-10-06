@@ -304,7 +304,7 @@ fn cascade(
     walk: &mut Walk<'_>,
 ) -> Option<Inst> {
     let mut at = inst;
-    for _ in 0..heuristics::CONS_CASCADE {
+    for _ in 0..rucc_cost::param!(heuristics::CONS_CASCADE) {
         if walk.classes.as_deref_mut().is_some_and(|classes| !classes.open(stats)) {
             return Some(at);
         }

@@ -178,7 +178,7 @@ pub trait TargetCosts: Send + Sync {
     /// because zero is a claim about hardware rather than about this machine.
     fn branch_cost(&self, goal: Goal, predictable: bool) -> Cycles {
         if goal == Goal::Speed && predictable {
-            return heuristics::BRANCH_COST_PREDICTABLE;
+            return crate::param!(heuristics::BRANCH_COST_PREDICTABLE);
         }
         self.table(goal).branch_cost
     }

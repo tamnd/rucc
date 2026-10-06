@@ -2691,6 +2691,12 @@ pub struct Options {
     /// `-fpass-fuel` finds the rewrite and this finds the function. The pass names are checked
     /// against the pass list while the arguments are parsed.
     pub pass_gates: Vec<(bool, String)>,
+    /// What `--param name=value` said, each as it was written after the flag, in order.
+    ///
+    /// The names are checked against the table in `rucc_cost::heuristics` while the arguments are
+    /// parsed, and the values are set there before the first pass runs, so a later `--param` for
+    /// the same name is the one that holds, as it is with gcc.
+    pub params: Vec<String>,
     /// What `-fdump-ir=` asked to see, as it was written, which is `all`, `before-<pass>` or
     /// `after-<pass>`.
     pub dump_ir: Vec<String>,
@@ -2880,6 +2886,7 @@ impl Options {
             pass_fuel_global: None,
             trace: None,
             pass_gates: Vec::new(),
+            params: Vec::new(),
             dump_ir: Vec::new(),
             opt_info: Vec::new(),
             opt_info_file: None,

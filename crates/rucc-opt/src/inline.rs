@@ -718,6 +718,23 @@ impl Growth {
     /// kernel builds with.
     pub const CONSERVE: Self =
         Self { percent: INLINE_FRAME_GROWTH_CONSERVE, bytes: INLINE_LARGE_FRAME_CONSERVE };
+
+    /// [`Self::CONSERVE`] when `conserve` says `-fconserve-stack` was given and [`Self::DEFAULT`]
+    /// when not, with what `--param` set.
+    #[must_use]
+    pub fn new(conserve: bool) -> Self {
+        if conserve {
+            Self {
+                percent: rucc_cost::param!(INLINE_FRAME_GROWTH_CONSERVE),
+                bytes: rucc_cost::param!(INLINE_LARGE_FRAME_CONSERVE),
+            }
+        } else {
+            Self {
+                percent: rucc_cost::param!(INLINE_FRAME_GROWTH),
+                bytes: rucc_cost::param!(INLINE_LARGE_FRAME),
+            }
+        }
+    }
 }
 
 /// Where a function is in being settled.
@@ -785,7 +802,8 @@ fn settle(
         calls
             .iter()
             .filter(|&&(block, _, _, kind)| {
-                kind == Kind::Once && depth(block) > INLINE_CALLED_ONCE_LOOP_DEPTH
+                kind == Kind::Once
+                    && depth(block) > rucc_cost::param!(INLINE_CALLED_ONCE_LOOP_DEPTH)
             })
             .map(|&(_, inst, ..)| inst)
             .collect()
@@ -836,11 +854,14 @@ fn settle(
         let most = match kind {
             Kind::Always => usize::MAX,
             Kind::Hinted | Kind::Asks => how.limit,
-            Kind::Once => INLINE_CALLED_ONCE_INSNS as usize,
+            Kind::Once => rucc_cost::param!(INLINE_CALLED_ONCE_INSNS) as usize,
             Kind::Small => 2 + module[id][module[id][call].args].len(),
             // gcc's limit is on the growth, the body less the call it replaces, and a growth as
             // large as the limit is refused.
-            Kind::Auto => INLINE_INSNS_AUTO as usize + module[id][module[id][call].args].len(),
+            Kind::Auto => {
+                rucc_cost::param!(INLINE_INSNS_AUTO) as usize
+                    + module[id][module[id][call].args].len()
+            }
         };
         let mut large = match kind {
             Kind::Asks => {
@@ -1343,7 +1364,7 @@ fn folded(
                 // A call takes longer than its size says, which is gcc's `eni_time_weights`.
                 let waits = match data.opcode {
                     Opcode::Call | Opcode::CallIndirect | Opcode::TailCall => {
-                        f64::from(INLINE_CALL_TIME) - 1.0
+                        f64::from(rucc_cost::param!(INLINE_CALL_TIME)) - 1.0
                     }
                     _ => 0.0,
                 };
@@ -1557,7 +1578,7 @@ fn grows(func: &Func, call: Inst, callee: &Func, size: usize, how: &How<'_>) -> 
             matches!(callee[inst].opcode, Opcode::Call | Opcode::CallIndirect | Opcode::TailCall)
         })
         .count();
-    if growth * (calls + 1) <= INLINE_EARLY_INSNS as usize {
+    if growth * (calls + 1) <= rucc_cost::param!(INLINE_EARLY_INSNS) as usize {
         return false;
     }
     let removable = callee.linkage == Linkage::Internal
