@@ -155,6 +155,44 @@ int ksm(void) {{
     }
 }
 
+/// A case pins the value it switches on even in a function that tests that value in many blocks,
+/// which is what `savic_read` in arch/x86/kernel/apic/x2apic_savic.c leans on with
+/// `BUILD_BUG_ON(reg != APIC_ICR)` under `case APIC_ICR`, among four case ranges.
+#[test]
+fn a_build_bug_on_a_case_settles_in_a_switch_of_ranges_says_nothing() {
+    let source = format!(
+        "{KERNEL}extern int pr(unsigned);
+static inline __attribute__((always_inline)) unsigned get(unsigned *ap, int reg) {{
+\tBUILD_BUG_ON(reg != 0x300);
+\treturn ap[reg];
+}}
+unsigned savic_read(unsigned *ap, unsigned reg) {{
+\tswitch (reg) {{
+\tcase 0x500 ... 0x530:
+\t\treturn ap[reg];
+\tcase 0x300:
+\t\treturn get(ap, reg);
+\tcase 0x100 ... 0x170:
+\tcase 0x180 ... 0x1f0:
+\t\tif (reg & 15)
+\t\t\treturn pr(reg);
+\t\treturn ap[reg];
+\tcase 0x200 ... 0x274:
+\t\tif ((reg & 15) && ((reg - 4) & 15))
+\t\t\treturn pr(reg);
+\t\treturn ap[reg];
+\t}}
+\treturn 1;
+}}
+"
+    );
+    for level in ["-O1", "-O2", "-Os"] {
+        let (ok, _, said) = compile(&format!("case-ranges{level}"), &[level], &source);
+        assert!(ok, "{level}: {said}");
+        assert!(said.is_empty(), "{level}: {said}");
+    }
+}
+
 /// A call in a branch the optimizer took out is not in the program, at every level: gcc folds an
 /// `if (0)` at `-O0` as well, and so does this compiler.
 #[test]
