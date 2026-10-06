@@ -549,3 +549,96 @@ c8e1fc02	casal x1, x2, [x0]
 4860fc82	caspal x0, x1, x2, x3, [x4]
 48647fe6	caspa x4, x5, x6, x7, [sp]
 4822fc04	caspl x2, x3, x4, x5, [x0]
+# The system instructions and the named system registers. GNU as was not at hand for these either,
+# so the words are llvm-mc 23 for aarch64-linux-gnu with every feature on.
+d5381000	mrs x0, sctlr_el1
+d5181001	msr sctlr_el1, x1
+d53b4222	mrs x2, daif
+d51b4223	msr daif, x3
+d5384244	mrs x4, currentel
+d5380005	mrs x5, midr_el1
+d5380726	mrs x6, id_aa64mmfr1_el1
+d518d087	msr tpidr_el1, x7
+d518c008	msr vbar_el1, x8
+d5385209	mrs x9, esr_el1
+d51be32a	msr cntv_ctl_el0, x10
+d53800ab	mrs x11, mpidr_el1
+d518200c	msr ttbr0_el1, x12
+d518202d	msr ttbr1_el1, x13
+d518204e	msr tcr_el1, x14
+d538600f	mrs x15, far_el1
+d5184030	msr elr_el1, x16
+d5184011	msr spsr_el1, x17
+d53be032	mrs x18, cntpct_el0
+d51c1113	msr hcr_el2, x19
+d538cc14	mrs x20, icc_iar1_el1
+d518cc35	msr icc_eoir1_el1, x21
+d51b9c16	msr pmcr_el0, x22
+d53be8f7	mrs x23, pmevcntr7_el0
+d5100258	msr mdscr_el1, x24
+d5380639	mrs x25, id_aa64isar1_el1
+d53b421a	mrs x26, nzcv
+d538f21b	mrs x27, s3_0_c15_c2_0
+d50342df	msr daifset, #2
+d5034fff	msr daifclr, #15
+d50041bf	msr spsel, #1
+d500419f	msr pan, #1
+d500407f	msr uao, #0
+d503415f	msr dit, #1
+d503413f	msr ssbs, #1
+d503409f	msr tco, #0
+d501411f	msr allint, #1
+d5184260	msr pan, x0
+d503207f	wfi
+d503205f	wfe
+d503209f	sev
+d50320bf	sevl
+d50320df	dgh
+d503223f	psb csync
+d503225f	tsb csync
+d5033f5f	clrex
+d503335f	clrex #3
+d50330ff	sb
+d503309f	ssbb
+d503349f	pssbb
+d5033fdf	isb sy
+d50335df	isb #5
+d503349f	dsb #4
+d69f03e0	eret
+d69f0bff	eretaa
+d69f0fff	eretab
+d6bf03e0	drps
+d4000002	hvc #0
+d4000023	smc #1
+d41fffe2	hvc #65535
+d508871f	tlbi vmalle1
+d508831f	tlbi vmalle1is
+d5088320	tlbi vae1is, x0
+d50883a1	tlbi vale1is, x1
+d5088342	tlbi aside1is, x2
+d5088363	tlbi vaae1is, x3
+d5088224	tlbi rvae1is, x4
+d50c871f	tlbi alle2
+d508811f	tlbi vmalle1os
+d5089325	tlbi vae1isnxs, x5
+d50c8026	tlbi ipas2e1is, x6
+d508751f	ic iallu
+d508711f	ic ialluis
+d50b7527	ic ivau, x7
+d50b7e28	dc civac, x8
+d50b7a29	dc cvac, x9
+d50b7b2a	dc cvau, x10
+d50b742b	dc zva, x11
+d50b7c2c	dc cvap, x12
+d508762d	dc ivac, x13
+d50b746e	dc gva, x14
+d508780f	at s1e1r, x15
+d5087830	at s1e1w, x16
+d50c7891	at s12e1r, x17
+d508751f	sys #0, c7, c5, #0
+d50b7b20	sys #3, c7, c11, #1, x0
+d52bf201	sysl x1, #3, c15, c2, #0
+b8bfc020	ldapr w0, [x1]
+f8bfc3e2	ldapr x2, [sp]
+38bfc083	ldaprb w3, [x4]
+78bfc0c5	ldaprh w5, [x6]

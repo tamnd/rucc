@@ -31,6 +31,8 @@
 
 use std::fmt;
 
+use crate::aarch64::system::PSTATE;
+
 mod atomic;
 mod neon;
 
@@ -399,6 +401,9 @@ pub enum Value {
     System(u16),
     /// What a `prfm` is asked to do, as the five bits the encoding gives it. `pldl1keep` is zero.
     Prefetch(u8),
+    /// A field of the processor state `msr` writes an immediate to, as where it is in the table of
+    /// them. `daifset` is one.
+    Pstate(u8),
 }
 
 /// How the zeros an instruction was written with are to be filled in.
@@ -872,6 +877,7 @@ impl At<'_> {
             "ldp" | "stp" | "ldpsw" => self.pair(values)?,
             "ldxr" | "ldxrb" | "ldxrh" | "ldaxr" | "ldaxrb" | "ldaxrh" | "ldar" | "ldarb"
             | "ldarh" | "stlr" | "stlrb" | "stlrh" => self.exclusive(None, values)?,
+            "ldapr" | "ldaprb" | "ldaprh" => self.rcpc(values)?,
             "stxr" | "stxrb" | "stxrh" | "stlxr" | "stlxrb" | "stlxrh" => match values {
                 [s, rest @ ..] => {
                     let (width, rs) = self.zr(s)?;
@@ -962,25 +968,80 @@ impl At<'_> {
                 "yield" => 0xd503_203f,
                 _ => 0xd503_3fdf,
             },
-            "brk" | "svc" | "hlt" => match values {
+            "brk" | "svc" | "hvc" | "smc" | "hlt" => match values {
                 [Value::Imm(imm)] => {
                     let imm = self.number(*imm, 1 << 16)?;
                     let base = match m {
                         "brk" => 0xd420_0000,
                         "svc" => 0xd400_0001,
+                        "hvc" => 0xd400_0002,
+                        "smc" => 0xd400_0003,
                         _ => 0xd440_0000,
                     };
                     base | imm << 5
                 }
                 _ => return Err(self.unwritten()),
             },
-            "dmb" | "dsb" => match values {
+            "dmb" | "dsb" | "isb" => match values {
                 [Value::Barrier(option)] if *option < 16 => {
-                    let base = if m == "dmb" { 0xd503_30bf } else { 0xd503_309f };
+                    let base = match m {
+                        "dmb" => 0xd503_30bf,
+                        "dsb" => 0xd503_309f,
+                        _ => 0xd503_30df,
+                    };
                     base | u32::from(*option) << 8
+                }
+                [Value::Imm(option)] => {
+                    let base = match m {
+                        "dmb" => 0xd503_30bf,
+                        "dsb" => 0xd503_309f,
+                        _ => 0xd503_30df,
+                    };
+                    base | self.number(*option, 16)? << 8
                 }
                 _ => return Err(self.unwritten()),
             },
+            // The barriers with no option. `ssbb` and `pssbb` are `dsb` with the two numbers no
+            // option has a name for.
+            "clrex" | "sb" | "ssbb" | "pssbb" | "eret" | "eretaa" | "eretab" | "drps"
+                if values.is_empty() =>
+            {
+                match m {
+                    "clrex" => 0xd503_3f5f,
+                    "sb" => 0xd503_30ff,
+                    "ssbb" => 0xd503_309f,
+                    "pssbb" => 0xd503_349f,
+                    "eret" => 0xd69f_03e0,
+                    "eretaa" => 0xd69f_0bff,
+                    "eretab" => 0xd69f_0fff,
+                    _ => 0xd6bf_03e0,
+                }
+            }
+            "clrex" => match values {
+                [Value::Imm(imm)] => 0xd503_305f | self.number(*imm, 16)? << 8,
+                _ => return Err(self.unwritten()),
+            },
+            // The system instructions, which `tlbi`, `ic`, `dc` and `at` were read as.
+            "sys" | "sysl" => {
+                let (fields, t) = match (m, values) {
+                    ("sys", [op1, crn, crm, op2, t]) => ([op1, crn, crm, op2], t),
+                    ("sysl", [t, op1, crn, crm, op2]) => ([op1, crn, crm, op2], t),
+                    _ => return Err(self.unwritten()),
+                };
+                let mut word = if m == "sys" { 0xd508_0000 } else { 0xd528_0000 };
+                for (field, (shift, below)) in
+                    fields.into_iter().zip([(16, 8), (12, 16), (8, 16), (5, 8)])
+                {
+                    let Value::Imm(field) = field else {
+                        return Err(self.unwritten());
+                    };
+                    word |= self.number(*field, below)? << shift;
+                }
+                match self.zr(t)? {
+                    (Width::X, rt) => word | rt,
+                    _ => return Err(self.register()),
+                }
+            }
             "mrs" => match values {
                 [t, Value::System(field)] => {
                     let (width, rt) = self.zr(t)?;
@@ -992,6 +1053,20 @@ impl At<'_> {
                 _ => return Err(self.unwritten()),
             },
             "msr" => match values {
+                // A field of the processor state from an immediate, in the space beside the hints,
+                // with the immediate in `CRm`. The ones that are a single bit take the top three
+                // bits of `CRm` too.
+                [Value::Pstate(at), Value::Imm(imm)] => {
+                    let Some(&(_, field, high)) = PSTATE.get(usize::from(*at)) else {
+                        return Err(self.unwritten());
+                    };
+                    let crm = match high {
+                        None => self.number(*imm, 16)?,
+                        Some(high) => u32::from(high) << 1 | self.number(*imm, 2)?,
+                    };
+                    let (op1, op2) = (u32::from(field >> 3), u32::from(field & 7));
+                    0xd500_401f | op1 << 16 | crm << 8 | op2 << 5
+                }
                 [Value::System(field), t] => {
                     let (width, rt) = self.zr(t)?;
                     if width != Width::X {
@@ -1851,6 +1926,28 @@ impl At<'_> {
             | u32::from(addr.base) << 5
             | rt)
     }
+
+    /// The loads that acquire only against the stores that release, which ARMv8.3 added and a
+    /// kernel built with link time optimization reads every `READ_ONCE` with.
+    fn rcpc(self, values: &[Value]) -> Result<u32, Error> {
+        let [t, Value::Mem(addr)] = values else {
+            return Err(self.unwritten());
+        };
+        if addr.offset != Offset::Imm(0) || addr.mode != Mode::Offset {
+            return Err(self.unwritten());
+        }
+        let (width, rt) = self.zr(t)?;
+        let size = match self.mnemonic {
+            "ldaprb" => 0b00,
+            "ldaprh" => 0b01,
+            _ if width == Width::X => 0b11,
+            _ => 0b10,
+        };
+        if size < 0b10 && width != Width::W {
+            return Err(self.register());
+        }
+        Ok(size << 30 | 0x38bf_c000 | u32::from(addr.base) << 5 | rt)
+    }
 }
 
 /// What one load or store reads or writes.
@@ -1867,11 +1964,17 @@ struct Access {
 
 /// The extension that means no extension in an instruction of that width.
 /// The number of the hint a name in the hint space is, which `hint` takes as its operand. These
-/// are the pointer authentication ones that sign and check the return address in x30 against the
+/// are the waits for an interrupt or an event and the sending of one, and the pointer
+/// authentication ones that sign and check the return address in x30 against the
 /// stack pointer or zero, with the A key or the B key. The landing pads of branch target
 /// identification are hints too, which the reader writes as `hint` since `bti` has a name after it.
 pub(crate) fn hint(name: &str) -> Option<u32> {
     Some(match name {
+        "wfe" => 2,
+        "wfi" => 3,
+        "sev" => 4,
+        "sevl" => 5,
+        "dgh" => 6,
         "xpaclri" => 7,
         "pacia1716" => 8,
         "pacib1716" => 10,
