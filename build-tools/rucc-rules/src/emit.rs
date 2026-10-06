@@ -62,6 +62,7 @@ const HELPERS: &[(&str, &str)] = &[
     ("zero_extend", ZERO_EXTEND),
     ("extract", EXTRACT),
     ("power_of_two", POWER_OF_TWO),
+    ("logical_immediate", LOGICAL_IMMEDIATE),
     ("trailing_zeros", TRAILING_ZEROS),
     ("shifted", SHIFTED),
     ("low", LOW),
@@ -434,6 +435,14 @@ fn condition(
         want(wanted, "power_of_two");
         return Ok(format!("power_of_two({bits}, {inner})"));
     }
+    // The same at sixty four bits or fewer, about whether a constant is a pattern an AArch64
+    // `and`, `orr` or `eor` can carry in place of a register. The helper works on the bits as a
+    // number in `i128`, which has room for the carry out of a run of sixty four ones and no more.
+    if let Some(bits) = suffix(head, "logical_immediate").filter(|bits| arity == 1 && *bits <= 64) {
+        let inner = value(source, &args[0], bound, wanted, used)?;
+        want(wanted, "logical_immediate");
+        return Ok(format!("logical_immediate({bits}, {inner})"));
+    }
     match (head.as_str(), arity) {
         ("and" | "or", 1..) => {
             let joint = if head == "and" { " && " } else { " || " };
@@ -455,7 +464,8 @@ fn condition(
             term,
             &format!(
                 "`{head}` of {arity} is not a condition a guard can be compiled to. A guard is \
-                 `and`, `or`, `not`, `power_of_two.iN`, or a comparison of two numbers"
+                 `and`, `or`, `not`, `power_of_two.iN`, `logical_immediate.iN`, or a comparison of two \
+                 numbers"
             ),
         )),
     }
@@ -560,7 +570,9 @@ fn want(wanted: &mut Vec<&'static str>, name: &'static str) {
     wanted.push(name);
     match name {
         "sign_extend" => want(wanted, "shifted"),
-        "zero_extend" | "extract" | "power_of_two" | "trailing_zeros" => want(wanted, "low"),
+        "zero_extend" | "extract" | "power_of_two" | "logical_immediate" | "trailing_zeros" => {
+            want(wanted, "low");
+        }
         _ => {}
     }
 }
@@ -613,6 +625,33 @@ const POWER_OF_TWO: &str = "
 fn power_of_two(bits: u32, value: i128) -> bool {
     let masked = low(bits, value);
     masked > 0 && masked & (masked - 1) == 0
+}
+";
+
+const LOGICAL_IMMEDIATE: &str = "
+/// Whether the low `bits` bits of `value` are a run of ones, turned some way round, repeated in
+/// pieces of two, four and so on up to `bits`. Those are the constants an AArch64 logical
+/// instruction carries, and nothing and everything are not among them.
+///
+/// A run turned round within its piece is either a run or what is left of the piece once a run
+/// is taken out, and a run is a number the lowest bit of which carries all the way through it
+/// when it is added. That is the same test the model writes for the solver.
+fn logical_immediate(bits: u32, value: i128) -> bool {
+    let all = low(bits, -1);
+    let value = low(bits, value);
+    if value == 0 || value == all {
+        return false;
+    }
+    let run = |piece: i128| piece & (piece + (piece & -piece)) == 0;
+    let mut size = 2;
+    while size <= bits {
+        let repeats = size == bits || value == (value >> size | value << (bits - size)) & all;
+        if repeats && (run(low(size, value)) || run(low(size, !value))) {
+            return true;
+        }
+        size *= 2;
+    }
+    false
 }
 ";
 
@@ -762,6 +801,39 @@ mod tests {
             "{}",
             errors[0]
         );
+    }
+
+    /// The question an AArch64 logical immediate asks, at the width the rule names, with the
+    /// helper it is written in and the one that helper is written in.
+    #[test]
+    fn a_guard_can_ask_whether_a_constant_is_a_logical_immediate() {
+        let out = built(
+            "(rule (lower (and.i64 (value.i64 x) (iconst.i64 k)))\n\
+             (if (logical_immediate.i64 k))\n\
+             (a64.and_ri_64 x k)\n\
+             (spec (= (bvand x k) (result))))\n",
+        );
+        assert!(out.contains("logical_immediate(64, v1)"), "{out}");
+        assert!(out.contains("fn logical_immediate(bits: u32, value: i128) -> bool {"), "{out}");
+        assert!(out.contains("fn low(bits: u32, value: i128) -> i128 {"), "{out}");
+    }
+
+    /// The helper has room for sixty four bits and no more, so a wider question is refused
+    /// rather than answered wrong.
+    #[test]
+    fn a_logical_immediate_wider_than_a_register_is_refused() {
+        let rules = parse(
+            "rules/test.rules",
+            "(rule (lower (and.i128 (value.i128 x) (iconst.i128 k)))\n\
+             (if (logical_immediate.i128 k))\n\
+             (a64.and_ri_64 x k)\n\
+             (spec (= (bvand x k) (result))))\n",
+        )
+        .expect("the rules read");
+        let matcher = Matcher::build("rules/test.rules", &rules).expect("the matcher builds");
+        let errors = emit("rules/test.rules", &rules, &matcher).expect_err("the guard is refused");
+        assert_eq!(errors.len(), 1);
+        assert!(errors[0].message.contains("`logical_immediate.i128` of 1"), "{}", errors[0]);
     }
 
     /// The rule issue 523 was about, whole: a guard asking whether the matched constant is a

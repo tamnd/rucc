@@ -40,6 +40,46 @@
 (semantics (a64.add_ri_64 l r) (bvadd l r))
 (semantics (a64.sub_ri_32 l r) (bvsub l r))
 (semantics (a64.sub_ri_64 l r) (bvsub l r))
+(semantics (a64.and_ri_32 l r) (bvand l r))
+(semantics (a64.and_ri_64 l r) (bvand l r))
+(semantics (a64.orr_ri_32 l r) (bvor l r))
+(semantics (a64.orr_ri_64 l r) (bvor l r))
+(semantics (a64.eor_ri_32 l r) (bvxor l r))
+(semantics (a64.eor_ri_64 l r) (bvxor l r))
+
+;; Which constants `and`, `orr` and `eor` can carry, which is what the guard on those rules asks.
+;; The answer is a run of ones turned some way round within a piece of two, four, eight, sixteen,
+;; thirty two or sixty four bits, with the piece repeated to fill the register. Nothing and
+;; everything are not among them, and neither is a piece that is all ones, which repeating would
+;; make everything anyway.
+;;
+;; A run is a number whose lowest set bit, added to it, carries through every one of its bits and
+;; leaves none of them set. A run turned round within its piece is either a run or the piece with
+;; a run taken out of it, so the second test is the first one asked of the complement. A piece of
+;; size `e` repeats when turning the whole number round by `e` gives it back.
+(semantics (contiguous.i32 x) (= (bvand x (bvadd x (bvand x (bvneg x)))) 0))
+(semantics (contiguous.i64 x) (= (bvand x (bvadd x (bvand x (bvneg x)))) 0))
+(semantics (turned.i32 v m) (or (contiguous.i32 (bvand v m)) (contiguous.i32 (bvand (bvnot v) m))))
+(semantics (turned.i64 v m) (or (contiguous.i64 (bvand v m)) (contiguous.i64 (bvand (bvnot v) m))))
+(semantics (repeats.i32 v e) (= v (bvor (bvlshr v e) (bvshl v (bvsub 32 e)))))
+(semantics (repeats.i64 v e) (= v (bvor (bvlshr v e) (bvshl v (bvsub 64 e)))))
+(semantics (logical_immediate.i32 v)
+  (and (not (= v 0)) (not (= (bvnot v) 0))
+       (or (and (repeats.i32 v 2) (turned.i32 v 3))
+           (and (repeats.i32 v 4) (turned.i32 v 15))
+           (and (repeats.i32 v 8) (turned.i32 v 255))
+           (and (repeats.i32 v 16) (turned.i32 v 65535))
+           (contiguous.i32 v)
+           (contiguous.i32 (bvnot v)))))
+(semantics (logical_immediate.i64 v)
+  (and (not (= v 0)) (not (= (bvnot v) 0))
+       (or (and (repeats.i64 v 2) (turned.i64 v 3))
+           (and (repeats.i64 v 4) (turned.i64 v 15))
+           (and (repeats.i64 v 8) (turned.i64 v 255))
+           (and (repeats.i64 v 16) (turned.i64 v 65535))
+           (and (repeats.i64 v 32) (turned.i64 v 4294967295))
+           (contiguous.i64 v)
+           (contiguous.i64 (bvnot v)))))
 (semantics (a64.neg_r_32 v) (bvsub 0 v))
 (semantics (a64.neg_r_64 v) (bvsub 0 v))
 (semantics (a64.mvn_r_32 v) (bvnot v))

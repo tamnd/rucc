@@ -260,6 +260,81 @@ mod tests {
         assert_eq!(selects(&terms, add), None);
     }
 
+    /// The constants a logical instruction holds, built the way the architecture describes them:
+    /// a run of ones in a piece, turned round within it, the piece repeated to fill the register.
+    fn patterns(bits: u32) -> std::collections::BTreeSet<u64> {
+        let mut out = std::collections::BTreeSet::new();
+        let mut size = 2;
+        while size <= bits {
+            let piece_mask = if size == 64 { u64::MAX } else { (1u64 << size) - 1 };
+            for ones in 1..size {
+                let run = (1u64 << ones) - 1;
+                for by in 0..size {
+                    let piece =
+                        if by == 0 { run } else { (run >> by | run << (size - by)) & piece_mask };
+                    let mut value = 0u64;
+                    for at in (0..bits).step_by(size as usize) {
+                        value |= piece << at;
+                    }
+                    out.insert(value);
+                }
+            }
+            size *= 2;
+        }
+        out
+    }
+
+    /// The guard on the logical immediates says yes to exactly the patterns above. Every pattern
+    /// is asked about, and so is every number one bit away from one, which is where a mistake in
+    /// the test for a run would show.
+    #[test]
+    fn the_logical_immediate_guard_takes_exactly_the_patterns() {
+        for bits in [32u32, 64] {
+            let all = patterns(bits);
+            assert_eq!(all.len(), if bits == 64 { 5334 } else { 1302 });
+            let width_mask = if bits == 64 { u64::MAX } else { u64::from(u32::MAX) };
+            for &value in &all {
+                assert!(super::logical_immediate(bits, i128::from(value)), "{bits} {value:#x}");
+                for bit in 0..bits {
+                    let near = value ^ (1u64 << bit);
+                    let want = all.contains(&near);
+                    assert_eq!(super::logical_immediate(bits, i128::from(near)), want, "{near:#x}");
+                }
+            }
+            // The IR holds a thirty two bit constant sign extended, and the answer is about the
+            // bits the instruction gets.
+            let sign = |value: u64| i128::from(value as u32 as i32);
+            if bits == 32 {
+                assert!(super::logical_immediate(32, sign(0xffff_fff0)));
+                assert!(super::logical_immediate(32, sign(0x8000_0000)));
+            }
+            for value in [0, width_mask, 0x12345, 0xff01] {
+                assert!(!super::logical_immediate(bits, i128::from(value)), "{value:#x}");
+            }
+        }
+    }
+
+    #[test]
+    fn a_logical_operation_takes_a_pattern_and_leaves_the_rest_to_a_register() {
+        let mut terms = Terms::default();
+        let x = terms.value("i32", "v0");
+        let k = terms.constant("iconst.i32", -16);
+        let and = terms.app("and.i32", &[x, k]);
+        assert_eq!(selects(&terms, and), Some("a64.and_ri_32"));
+        let y = terms.value("i64", "v1");
+        let k = terms.constant("iconst.i64", 0x5555_5555_5555_5555);
+        let xor = terms.app("xor.i64", &[y, k]);
+        assert_eq!(selects(&terms, xor), Some("a64.eor_ri_64"));
+        let k = terms.constant("iconst.i32", 0x8000_0000_u32.cast_signed().into());
+        let or = terms.app("or.i32", &[x, k]);
+        assert_eq!(selects(&terms, or), Some("a64.orr_ri_32"));
+        for odd in [0, -1, 0x12345] {
+            let k = terms.constant("iconst.i32", odd);
+            let and = terms.app("and.i32", &[x, k]);
+            assert_eq!(selects(&terms, and), None, "{odd:#x}");
+        }
+    }
+
     /// The IR's unsigned predicates are under the architecture's names for them.
     #[test]
     fn an_unsigned_comparison_is_the_condition_the_architecture_names() {

@@ -259,6 +259,41 @@
       (spec (= (bvsub x k) (result))))
 
 
+;; The bitwise operations with an immediate. What the instruction holds is a pattern rather than a
+;; number, a run of ones turned some way round and repeated, and the guard asks whether the constant
+;; is one of those. Anything else is left to the register form. A byte or a half is left there too
+;; for now, since the pattern is of the whole register and the IR holds those constants narrower.
+
+(rule (lower (and.i32 (value.i32 x) (iconst.i32 k)))
+      (if (logical_immediate.i32 k))
+      (a64.and_ri_32 x k)
+      (spec (= (bvand x k) (result))))
+
+(rule (lower (and.i64 (value.i64 x) (iconst.i64 k)))
+      (if (logical_immediate.i64 k))
+      (a64.and_ri_64 x k)
+      (spec (= (bvand x k) (result))))
+
+(rule (lower (or.i32 (value.i32 x) (iconst.i32 k)))
+      (if (logical_immediate.i32 k))
+      (a64.orr_ri_32 x k)
+      (spec (= (bvor x k) (result))))
+
+(rule (lower (or.i64 (value.i64 x) (iconst.i64 k)))
+      (if (logical_immediate.i64 k))
+      (a64.orr_ri_64 x k)
+      (spec (= (bvor x k) (result))))
+
+(rule (lower (xor.i32 (value.i32 x) (iconst.i32 k)))
+      (if (logical_immediate.i32 k))
+      (a64.eor_ri_32 x k)
+      (spec (= (bvxor x k) (result))))
+
+(rule (lower (xor.i64 (value.i64 x) (iconst.i64 k)))
+      (if (logical_immediate.i64 k))
+      (a64.eor_ri_64 x k)
+      (spec (= (bvxor x k) (result))))
+
 ;; Negation and complement, which the IR writes as arithmetic against a constant.
 
 (rule (lower (sub.i8 (iconst.i8 0) (value.i8 x)))
