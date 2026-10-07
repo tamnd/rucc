@@ -76,7 +76,9 @@ fn the_kernel_shapes_need_no_vector_register() {
 }
 
 /// Each line is a shape computed from constants and the same shape computed from `volatile`
-/// copies of them, compared as bits, so that a NaN and the sign of a zero count.
+/// copies of them, compared as bits, so that a NaN and the sign of a zero count. Only a machine
+/// that runs the program reads it.
+#[cfg(all(target_os = "macos", target_arch = "aarch64"))]
 const SAME: &str = r#"
 #include <stdio.h>
 #include <string.h>

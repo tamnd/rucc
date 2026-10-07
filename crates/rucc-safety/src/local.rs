@@ -22,7 +22,7 @@
 //! A `lifetime_end` does not count, since a build with this pass in it never gives two locals the
 //! same bytes.
 //!
-//! Every way of using the address that is not on the list in [`kept`] counts as it going
+//! Every way of using the address that is not on the list in `kept` counts as it going
 //! somewhere. That is the conservative way round: a local wrongly left out is a read the plane does
 //! not ask about, which is what happened before this pass existed.
 //!
