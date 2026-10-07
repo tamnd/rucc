@@ -653,6 +653,29 @@ fn at_source(func: &mut mir::Func, made: &[(mir::Block, mir::Inst)], lea: mir::O
                 }
             }
         }
+        // A step worked out from the register it is written into, such as `leaq 24(%rcx), %rcx`,
+        // is tied to it the way a two address instruction is. The allocator asks no more of a
+        // `lea` than that its answer is in some register, and a register of its own and a copy at
+        // the end of it is an answer.
+        if func[maker].opcode == lea {
+            let base = func[maker].mem.and_then(|mem| func[mem].base);
+            let operands = func[maker].operands;
+            let reads = base.filter(|&at| {
+                func[operands].get(usize::from(at)).is_some_and(|operand| {
+                    operand.reg == home && operand.class == to.class && !operand.role.is_def()
+                })
+            });
+            if let Some(at) = reads {
+                for operand in &mut func[operands] {
+                    if operand.reg == home
+                        && operand.role == mir::Role::Def
+                        && operand.constraint == mir::Constraint::Reg
+                    {
+                        operand.constraint = mir::Constraint::Reuse(at);
+                    }
+                }
+            }
+        }
         // A variable the value was is the register now, for the debugger's sake.
         for named in &mut func.named {
             if named.1 == value {
@@ -1069,6 +1092,8 @@ mod tests {
         assert!(!mentions(&func, next));
         let text = mir::print_func(&func, &names, &REGS);
         assert_eq!(text.matches("x64.mov_rr_64").count(), 1, "{text}");
+        // And tied to the register it steps on from, as `addq $24, %rcx` would be.
+        assert!(text.contains("(reuse 1) = x64.lea_64"), "{text}");
     }
 
     #[test]
