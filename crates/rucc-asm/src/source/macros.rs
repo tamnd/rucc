@@ -223,7 +223,16 @@ impl Reader {
             collecting.body.push(text.to_owned());
             return Ok(());
         }
+        // A label in front of a conditional is where the line is, and is defined when the line is
+        // reached in code that is being assembled, whichever way the condition goes. The arm64
+        // GHASH code of 6.12 starts its loop with `0: .ifc \pn, p64` and goes back to it with `0b`.
+        let live = self.macros.active();
         if self.conditional(word, rest)? {
+            if live {
+                for label in &labels {
+                    self.label(label)?;
+                }
+            }
             return Ok(());
         }
         if !self.macros.active() {
