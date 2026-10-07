@@ -561,7 +561,7 @@ pub fn order(target: Triple, opts: &LinkOptions) -> Vec<String> {
     }
     // A tree somebody named, which is MSYS2's own and was written for its own binutils, so GNU ld
     // reads its import libraries as well as lld does and both are worth finding.
-    if named_mingw(target, opts).is_some() || distro_cross(target, opts).is_some() {
+    if named_tree(target, opts).is_some() || distro_cross(target, opts).is_some() {
         return cross_order(target);
     }
     match target.os {
@@ -680,6 +680,30 @@ fn cross_for(target: Triple, opts: &LinkOptions, host: Option<Triple>) -> Option
     }
     let cache = opts.cache.as_deref()?;
     Some(Sysroot::in_cache(cache, tuple))
+}
+
+/// A tree somebody named with `--sysroot` that is linked by a cross line: a mingw-w64 tree or a
+/// wasi-sysroot.
+fn named_tree(target: Triple, opts: &LinkOptions) -> Option<Sysroot> {
+    named_mingw(target, opts).or_else(|| named_wasi(target, opts))
+}
+
+/// A wasi-sysroot somebody named with `--sysroot`, for a WASI target.
+///
+/// The shape is the one wasi-sdk ships in `share/wasi-sysroot` and the one clang reads with the same
+/// flag: the headers in `include/<tuple>` and the start files and archives in `lib/<tuple>`. A tree
+/// with no directory for the tuple is read the way we lay one out, with everything in `lib`. Before
+/// this, a named tree turned the cache line off and nothing turned another line on, so the link
+/// fell through to the native line and said there was no line for the target. tamnd/rucc#3259.
+fn named_wasi(target: Triple, opts: &LinkOptions) -> Option<Sysroot> {
+    if !target.arch.is_wasm() || !matches!(target.os, Os::Wasi(_)) {
+        return None;
+    }
+    let root = opts.sysroot.as_ref()?;
+    let tuple = target_tuple(target, opts);
+    let sysroot = Sysroot::at(root.clone(), tuple);
+    let own = sysroot.lib().join(tuple.to_canonical_string());
+    Some(if own.is_dir() { sysroot.with_lib(own) } else { sysroot })
 }
 
 /// A mingw-w64 tree somebody named with `--sysroot`, for a windows-gnu target.
@@ -967,7 +991,7 @@ pub fn preflight(target: Triple, opts: &LinkOptions) -> Result<(), Error> {
     if is_msvc(target) {
         return msvc_preflight(target, opts);
     }
-    let Some(sysroot) = cross_sysroot(target, opts).or_else(|| named_mingw(target, opts)) else {
+    let Some(sysroot) = cross_sysroot(target, opts).or_else(|| named_tree(target, opts)) else {
         return Ok(());
     };
     // Whether there is a line for this target and mode at all, asked with our own runtime left off
@@ -1477,7 +1501,7 @@ fn line_for(
     if is_msvc(target) {
         return cross_line(target, opts, items, output, &msvc_sysroot(target, opts)?);
     }
-    if let Some(sysroot) = cross_sysroot(target, opts).or_else(|| named_mingw(target, opts)) {
+    if let Some(sysroot) = cross_sysroot(target, opts).or_else(|| named_tree(target, opts)) {
         return cross_line(target, opts, items, output, &sysroot);
     }
     if target.os != Os::Linux {
@@ -2125,6 +2149,10 @@ pub fn search_dirs(link: &LinkOptions, target: Triple) -> Vec<PathBuf> {
     if let Some(sysroot) = named_mingw(target, link) {
         dirs.push(sysroot.lib());
         dirs.extend(mingw_gcc(target, link, &sysroot));
+        return dirs;
+    }
+    if let Some(sysroot) = named_wasi(target, link) {
+        dirs.push(sysroot.lib());
         return dirs;
     }
     if let Some(distro) = distro_cross(target, link) {
@@ -3002,6 +3030,46 @@ mod tests {
         let reactor = LinkOptions { reactor: true, ..opts.clone() };
         let args = line(target, &reactor, &one("a.o"), "a.wasm").expect("a line");
         assert!(args.windows(2).any(|pair| pair == ["--entry", "_initialize"]), "{args:?}");
+    }
+
+    /// A wasi-sysroot named with `--sysroot` is linked the way the fetched one is. In the layout of
+    /// wasi-sdk the start file and the archives are read out of `lib/wasm32-wasip1`, and in our own
+    /// layout out of `lib`. Before this, a named tree gave "no link line" for every WASI target.
+    #[test]
+    fn a_wasi_sysroot_named_with_sysroot_is_linked_out_of_its_directory_for_the_target() {
+        let tree = std::env::temp_dir().join(format!("rucc-link-wasi-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&tree);
+        let own = tree.join("lib").join("wasm32-wasip1");
+        fs::create_dir_all(tree.join("include").join("wasm32-wasip1")).expect("a scratch tree");
+        fs::create_dir_all(&own).expect("a scratch tree");
+        for file in ["crt1-command.o", "libc.a", "libsetjmp.a"] {
+            fs::write(own.join(file), b"").expect("a file in lib");
+        }
+        let shown = |path: PathBuf| path.display().to_string();
+
+        let target = Triple::new(Arch::Wasm32, Os::Wasi(Preview::P1), Env::None);
+        let opts = LinkOptions { sysroot: Some(tree.clone()), ..cached() };
+        preflight(target, &opts).expect("the tree is one to link against");
+        assert_eq!(order(target, &opts), ["wasm-ld"]);
+        let args = line(target, &opts, &one("a.o"), "a.wasm").expect("a line for the named tree");
+        let at = |path: PathBuf| {
+            let path = shown(path);
+            args.iter().position(|arg| *arg == path).unwrap_or_else(|| panic!("{path} {args:?}"))
+        };
+        let object = args.iter().position(|arg| arg == "a.o").expect("the object");
+        assert!(at(own.join("crt1-command.o")) < object, "{args:?}");
+        assert!(object < at(own.join("libsetjmp.a")), "{args:?}");
+        assert!(at(own.join("libsetjmp.a")) < at(own.join("libc.a")), "{args:?}");
+        assert!(args.last().is_some_and(|arg| arg.ends_with("librucc_builtins.a")), "{args:?}");
+        assert_eq!(search_dirs(&opts, target), std::slice::from_ref(&own));
+
+        // A tree with no directory for the target is read out of `lib`.
+        fs::remove_dir_all(&own).expect("the directory for the target goes");
+        let flat = tree.join("lib");
+        let args = line(target, &opts, &one("a.o"), "a.wasm").expect("a line for a flat tree");
+        assert!(args.contains(&shown(flat.join("libc.a"))), "{args:?}");
+        assert_eq!(search_dirs(&opts, target), [flat]);
+        let _ = fs::remove_dir_all(&tree);
     }
 
     /// `-fuse-ld=rucc` is the linker inside rucc on a wasm target and an error on any other, and a
