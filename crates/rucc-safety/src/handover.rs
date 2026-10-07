@@ -188,7 +188,7 @@ pub fn remaining(module: &Module, names: &Interner) -> Map<Symbol, usize> {
     wrappers.chain(defined).collect()
 }
 
-/// Whether some `return` in `func` gives back the address of a local of a fixed size.
+/// Whether some `return` in `func` gives back the address of a local.
 fn returns_a_local(func: &Func) -> bool {
     all(func).into_iter().any(|inst| {
         func[inst].opcode == Opcode::Return
@@ -196,11 +196,11 @@ fn returns_a_local(func: &Func) -> bool {
     })
 }
 
-/// Whether `value` is the address an `alloca` of a fixed size produced, which is the shape
-/// `crate::slot` builds a local's capability out of.
+/// Whether `value` is the address an `alloca` produced, which is the shape `crate::slot` builds a
+/// local's capability out of, with the size it was declared with or the size the stack grew by.
 fn local(func: &Func, value: Value) -> bool {
     let Def::Result { inst, .. } = func[value].def else { return false };
-    func[inst].opcode == Opcode::Alloca && func[func[inst].args].is_empty()
+    func[inst].opcode == Opcode::Alloca
 }
 
 /// Which of the five `inst` is, or `None` when it is not a call at all.
@@ -1132,7 +1132,9 @@ mod tests {
     }
 
     /// A function `f` that hands `callee` a local and a pointer into its middle, and checks nothing.
-    fn handing_a_local(names: &mut Interner, callee: &str) -> (Func, Value) {
+    ///
+    /// The local is `alloca(8)` rather than an array of eight bytes when `grown` says so.
+    fn handing_a_local(names: &mut Interner, callee: &str, grown: bool) -> (Func, Value) {
         let mut func = Func::new(names.intern("f"), Signature::new());
         let entry = func.create_block();
         let sig = func.add_signature(three());
@@ -1140,7 +1142,7 @@ mod tests {
         let callee = Some(names.intern(callee));
         let info = func.add_call(CallInfo { callee, signature: sig, varargs });
         let mem = MemInfo {
-            size: 8,
+            size: if grown { 0 } else { 8 },
             align: 4,
             order: MemOrder::NotAtomic,
             tbaa: None,
@@ -1149,7 +1151,9 @@ mod tests {
         };
         let extra = Extra::Mem(func.add_mem(mem));
         let mut b = Builder::new(&mut func, entry);
-        let local = b.value(InstData { extra, ..InstData::new(Opcode::Alloca) }, Type::PTR);
+        let size = if grown { vec![b.iconst(Type::int(64), 8)] } else { Vec::new() };
+        let args = b.func().push_values(&size);
+        let local = b.value(InstData { args, extra, ..InstData::new(Opcode::Alloca) }, Type::PTR);
         let four = b.iconst(Type::int(64), 4);
         let args = b.func().push_values(&[local, four]);
         let inside = b.value(InstData { args, ..InstData::new(Opcode::PtrAdd) }, Type::PTR);
@@ -1181,7 +1185,7 @@ mod tests {
         // call, over the local itself for the pointer into its middle as well.
         let mut names = Interner::new();
         let mut module = unit(&mut names);
-        let (func, local) = handing_a_local(&mut names, "g");
+        let (func, local) = handing_a_local(&mut names, "g", false);
         module.add_func(func);
         module.add_func(caller(&mut names, "g", Some("h"), three(), true));
         assert_eq!(arrange(&mut module, &names), 1);
@@ -1195,10 +1199,23 @@ mod tests {
         // a copy into the stack that nothing judged, since no region covers it.
         let mut names = Interner::new();
         let mut module = unit(&mut names);
-        let (func, local) = handing_a_local(&mut names, "__rucc_wrap_memcpy");
+        let (func, local) = handing_a_local(&mut names, "__rucc_wrap_memcpy", false);
         module.add_func(func);
         let wrapper = names.find("__rucc_wrap_memcpy").expect("the call names it");
         assert_eq!(remaining(&module, &names).get(&wrapper), Some(&1));
+        assert_eq!(arrange(&mut module, &names), 1);
+        publishes_the_local(&module, local);
+    }
+
+    #[test]
+    fn an_alloca_handed_to_a_wrapper_travels_like_any_other_local() {
+        // `__builtin_alloca` and a variable length array are an `alloca` with the size as its
+        // operand. The capability is made over it all the same, and a clear here was a copy past
+        // the end of one that the wrapper let through.
+        let mut names = Interner::new();
+        let mut module = unit(&mut names);
+        let (func, local) = handing_a_local(&mut names, "__rucc_wrap_memcpy", true);
+        module.add_func(func);
         assert_eq!(arrange(&mut module, &names), 1);
         publishes_the_local(&module, local);
     }

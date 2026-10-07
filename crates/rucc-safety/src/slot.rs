@@ -46,8 +46,8 @@
 //! than a guess made from the region's class. `fresh` is the shape it recognises, and
 //! `rucc_safe_rt::recover`'s `made` is the load.
 //!
-//! And `cap_of` over a local of a fixed size or a variable the module defines, which is the same
-//! shape as the allocation site with the size in the instruction rather than in a header. The pointer
+//! And `cap_of` over a local or a variable the module defines, which is the same shape as the
+//! allocation site with the size in the instruction rather than in a header. The pointer
 //! is the object's own address and the program declared how big the object is, so the capability is
 //! exact, and it is the only thing that can say anything about document 03's S2 and S3, because no
 //! plane covers the stack or the data section. `named` is the shape and `rucc_safe_rt::recover`'s
@@ -821,30 +821,45 @@ fn fresh(func: &Func, inst: Inst) -> Option<Value> {
 /// The pointer a `cap_of` is asking about, its size and the runtime entry that makes its capability,
 /// when the pointer is an object the compiler can see the whole of.
 ///
-/// A local of a fixed size, which is an `alloca` with no operand, and a variable the module defines
-/// that [`objects`] kept. Those are document 03's S2 and S3, and they are the objects no allocator
-/// lays out and no plane covers, so the other two answers here have nothing to give: recovery says
-/// everything for an address nothing watches. The size is the one the program declared, which is
-/// the extent the object was given and so the extent of every pointer derived from it.
+/// A local, which is an `alloca`, and a variable the module defines that [`objects`] kept. Those
+/// are document 03's S2 and S3, and they are the objects no allocator lays out and no plane covers,
+/// so the other two answers here have nothing to give: recovery says everything for an address
+/// nothing watches. The size is the one the program declared, which is the extent the object was
+/// given and so the extent of every pointer derived from it.
 ///
-/// A variable length array is left to recovery, since its size is a value rather than a number,
-/// and so is an `alloca` of nothing.
-fn named(func: &Func, objects: &Objects, inst: Inst) -> Option<(Value, u64, &'static str)> {
+/// A variable length array and an `__builtin_alloca` are a local too, an `alloca` with the size as
+/// its operand, and the size they get is that operand, the number of bytes the stack actually grew
+/// by. Leaving them to recovery, as this once did, gave them the capability of everything, so a
+/// write past the end of one went through with nobody asking. An `alloca` of nothing is still left
+/// out, since there is no object there to name.
+fn named(func: &Func, objects: &Objects, inst: Inst) -> Option<(Value, Extent, &'static str)> {
     if func[inst].opcode != Opcode::CapOf {
         return None;
     }
     let &[base] = &func[func[inst].args] else { return None };
     let Def::Result { inst: made, index: 0 } = func[base].def else { return None };
     match (func[made].opcode, func[made].extra) {
-        (Opcode::Alloca, Extra::Mem(mem)) if func[func[made].args].is_empty() => {
-            let size = func[mem].size;
-            (size > 0).then_some((base, size, LOCAL))
-        }
+        (Opcode::Alloca, Extra::Mem(mem)) => match func[func[made].args] {
+            [] => {
+                let size = func[mem].size;
+                (size > 0).then_some((base, Extent::Fixed(size), LOCAL))
+            }
+            [size] => Some((base, Extent::Grown(size), LOCAL)),
+            _ => None,
+        },
         (Opcode::GlobalAddr, Extra::Symbol(name)) => {
-            objects.get(&name).map(|&size| (base, size, "__rucc_cap_static"))
+            objects.get(&name).map(|&size| (base, Extent::Fixed(size), "__rucc_cap_static"))
         }
         _ => None,
     }
+}
+
+/// How big an object [`named`] found is: a number the program declared, or the operand of the
+/// `alloca` that grew the stack for it.
+#[derive(Clone, Copy)]
+enum Extent {
+    Fixed(u64),
+    Grown(Value),
 }
 
 /// `cap_of` becomes `__rucc_cap_made(slot, base)`, `__rucc_cap_local(slot, base, size, at)`,
@@ -900,7 +915,10 @@ fn allocated(
         .filter(|&(base, _, made)| made != LOCAL || witness(base).is_some());
     if let Some((base, size, routine)) = exact {
         let witness = witness(base);
-        let size = konst(func, inst, Imm::int(i128::from(size), word), word);
+        let size = match size {
+            Extent::Fixed(size) => konst(func, inst, Imm::int(i128::from(size), word), word),
+            Extent::Grown(size) => crate::lower::fitted(func, inst, size, word),
+        };
         let data = match witness.filter(|_| routine == LOCAL) {
             Some(witness) => {
                 let params = &[Type::PTR, Type::PTR, word, Type::PTR];
@@ -1329,9 +1347,12 @@ mod tests {
     }
 
     /// An `alloca` of `size` bytes, with the size as an operand when `dynamic` says so.
+    ///
+    /// The operand is narrower than a word and the memory says nothing, which is how the front end
+    /// builds a variable length array whose length is an `int`.
     fn local(b: &mut Builder<'_>, size: u64, dynamic: bool) -> Value {
         let info = MemInfo {
-            size,
+            size: if dynamic { 0 } else { size },
             align: 8,
             order: MemOrder::NotAtomic,
             tbaa: None,
@@ -1340,7 +1361,7 @@ mod tests {
         };
         let extra = Extra::Mem(b.func().add_mem(info));
         let args = if dynamic {
-            let n = number(b, i128::from(size), Type::int(64));
+            let n = number(b, i128::from(size), Type::int(32));
             b.func().push_values(&[n])
         } else {
             b.func().push_values(&[])
@@ -1421,16 +1442,20 @@ mod tests {
     }
 
     #[test]
-    fn a_variable_length_array_is_left_to_the_walk() {
+    fn a_variable_length_array_is_held_to_the_size_the_stack_grew_by() {
         let mut names = Interner::new();
-        let mut func = rooted(&mut names, |b| local(b, 64, true));
+        let mut func = rooted(&mut names, |b| local(b, 40, true));
         frames(&mut func, &mut names, Type::int(64), &Objects::default());
-        // The size is a value here rather than a number, so there is nothing to build an exact
-        // capability out of, and the answer is the one any other pointer gets.
+        // The walk would say everything for a stack address, so the size has to come from the
+        // `alloca`, and it is the operand widened to a word rather than a number made up here.
         let unit = module(&mut names);
         let text = print_func(&unit, &func, &names);
-        assert!(text.contains("__rucc_cap_recover"), "{text}");
-        assert!(!text.contains("__rucc_cap_local"), "{text}");
+        assert!(text.contains("__rucc_cap_local"), "{text}");
+        assert!(!text.contains("__rucc_cap_recover"), "{text}");
+        assert!(text.contains("zext"), "{text}");
+        assert!(!text.contains("iconst.i64 40"), "{text}");
+        assert!(text.contains("__rucc_frame_open"), "{text}");
+        believed(&unit, &func, &names);
     }
 
     #[test]
