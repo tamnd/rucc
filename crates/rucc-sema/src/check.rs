@@ -83,6 +83,7 @@ mod hardbool;
 mod init;
 mod musttail;
 mod noinit;
+mod nonnull;
 mod nonnull_if;
 mod shared;
 mod sse_regparm;

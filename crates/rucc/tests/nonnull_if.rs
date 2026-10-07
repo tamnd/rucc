@@ -40,7 +40,8 @@ fn run(dir: &Path, args: &[&str]) -> (bool, String) {
 /// Everywhere gcc 15 takes it: glibc's declarations, two and three numbers, an enumeration and a
 /// `char` for the count, a definition, a function nobody can count the parameters of, and a
 /// function type reached through a typedef, a pointer, a member and a parameter. A null pointer
-/// with a count that is not zero is not warned about, as `nonnull`'s is not.
+/// with a count of zero is not warned about, and one with a count that is not zero is, which is
+/// in `nonnull.rs`.
 #[test]
 fn a_conditional_nonnull_is_taken_where_gcc_takes_it() {
     let source = "typedef __SIZE_TYPE__ size_t;\n\
@@ -63,7 +64,7 @@ fn a_conditional_nonnull_is_taken_where_gcc_takes_it() {
         struct s { void *(*m)(void *, size_t) __attribute__((nonnull_if_nonzero(1, 2))); };\n\
         void k(void *(*p)(void *, size_t) __attribute__((nonnull_if_nonzero(1, 2))));\n\
         int use(char *d, const char *s) \
-            { memcpy(d, s, 0); memcpy(0, s, 4); return memcmp(d, 0, 0); }\n\
+            { memcpy(d, s, 0); memcpy(0, s, 0); return memcmp(d, 0, 0); }\n\
         _Static_assert(__has_attribute(nonnull_if_nonzero), \"gcc 15\");\n";
     let (ok, err) = compile("quiet", X86_64, &["-Wall", "-Wextra", "-std=gnu23"], source);
     assert!(ok, "{err}");

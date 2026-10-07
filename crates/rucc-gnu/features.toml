@@ -1042,8 +1042,8 @@ kind = "attribute"
 gcc_version = "3.3"
 status = "implemented"
 used_by = ["glibc", "systemd", "postgres"]
-tests = ["rucc-driver::nonnull_is_answered_yes_and_taken_with_or_without_operands"]
-notes = "Taken with or without operands and nothing is assumed from it, which is always safe: a null check on a parameter it names stays where gcc would drop it, and `-Wnonnull` is not given for a null argument. glibc writes it on its declarations whatever `__has_attribute` says, and Postgres writes `pg_attribute_nonnull` only when it answers yes, so answering no made rucc's preprocessed Postgres differ from gcc's."
+tests = ["rucc-driver::nonnull_is_answered_yes_and_taken_with_or_without_operands", "rucc::a_null_argument_is_warned_about_in_gcc_s_words", "rucc::the_warning_is_heard_under_the_flags_gcc_says_it_under"]
+notes = "Taken with or without operands and nothing is assumed from it, which is always safe: a null check on a parameter it names stays where gcc would drop it. A call handing a null pointer to a parameter it names, or to any parameter where it has no operands, is warned about in gcc's words under `-Wnonnull` (`E0851`), which `-Wall` and `-Wformat` turn on, with both arms of a `?:` looked at. The attribute is read from the declarations of a name, so a call through a pointer is checked where the pointer object is marked and not otherwise, and a library function declared without it is not checked against gcc's built-in declaration. glibc writes it on its declarations whatever `__has_attribute` says, and Postgres writes `pg_attribute_nonnull` only when it answers yes, so answering no made rucc's preprocessed Postgres differ from gcc's."
 
 [[feature]]
 name = "nonnull_if_nonzero"
@@ -1051,8 +1051,8 @@ kind = "attribute"
 gcc_version = "15.0"
 status = "implemented"
 used_by = ["glibc"]
-tests = ["rucc::a_conditional_nonnull_is_taken_where_gcc_takes_it", "rucc::a_conditional_nonnull_is_checked_in_gcc_s_words"]
-notes = "`nonnull` with a condition: the pointer argument may be null where the count is zero. glibc 2.42 writes it on `memcpy` and the rest of `<string.h>`. It is taken as `nonnull` is, so nothing is assumed from it and `-Wnonnull` is not given. The numbers are checked as gcc 15 checks them, in its words: the first has to name a pointer parameter and the others integer ones that are not `bool`, and zero, a number past the parameters, an argument that is not an integer constant and the attribute on something that is not a function or a pointer to one are each warned about. The wrong number of arguments is refused with `E0846`. A function without a prototype takes any numbers."
+tests = ["rucc::a_conditional_nonnull_is_taken_where_gcc_takes_it", "rucc::a_conditional_nonnull_is_checked_in_gcc_s_words", "rucc::a_conditional_nonnull_is_heard_where_the_count_is_not_zero"]
+notes = "`nonnull` with a condition: the pointer argument may be null where the count is zero. glibc 2.42 writes it on `memcpy` and the rest of `<string.h>`. It is taken as `nonnull` is, so nothing is assumed from it, and a null pointer where the counts are integer constants other than zero is warned about under `-Wnonnull` in gcc 15's words, which name both counts of the three-number form. A `nonnull` without operands on the same function checks every argument instead, as in gcc. The numbers are checked as gcc 15 checks them, in its words: the first has to name a pointer parameter and the others integer ones that are not `bool`, and zero, a number past the parameters, an argument that is not an integer constant and the attribute on something that is not a function or a pointer to one are each warned about. The wrong number of arguments is refused with `E0846`. A function without a prototype takes any numbers."
 
 [[feature]]
 name = "returns_nonnull"

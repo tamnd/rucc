@@ -468,7 +468,8 @@ impl Checker<'_> {
         let merged = self.tast[id].ty;
         self.record_alloc_size(id, &[specs.attrs], DeclKind::Function, merged);
         self.string_arg(&[specs.attrs], merged);
-        self.nonnull_if_nonzero(&[specs.attrs], merged);
+        let conditional = self.nonnull_if_nonzero(&[specs.attrs], merged);
+        self.read_nonnull(id, &[specs.attrs], conditional);
         self.annotate_decl(id, &[specs.attrs]);
         self.check_tls_model(&[specs.attrs], Some(name), Holder::NotVariable);
         self.read_advice(id, &[specs.attrs]);
@@ -1000,7 +1001,8 @@ impl Checker<'_> {
         let merged = self.tast[id].ty;
         self.record_alloc_size(id, &[specs.attrs, item.attrs], kind, merged);
         self.string_arg(&[specs.attrs, item.attrs], merged);
-        self.nonnull_if_nonzero(&[specs.attrs, item.attrs], merged);
+        let conditional = self.nonnull_if_nonzero(&[specs.attrs, item.attrs], merged);
+        self.read_nonnull(id, &[specs.attrs, item.attrs], conditional);
         self.annotate_decl(id, &[specs.attrs, item.attrs]);
         if kind == DeclKind::Object {
             self.check_nonstring(&[specs.attrs, item.attrs], merged);

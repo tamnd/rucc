@@ -54,6 +54,7 @@ use rucc_types::{FunctionType, RecordId, TypeId, TypeKind, is_void};
 
 use crate::check::Checker;
 use crate::check::format::Format;
+use crate::check::nonnull::Nonnull;
 use crate::decl::DeclId;
 use crate::expr::{Conversion, ExprId, ExprKind};
 use crate::stmt::Stmt;
@@ -88,6 +89,9 @@ pub(in crate::check) struct Advice {
     pub(in crate::check) format_arg: Map<DeclId, usize>,
     /// The functions some declaration marked `sentinel`, with how far from the end it is.
     sentinel: Map<DeclId, usize>,
+    /// The functions some declaration marked `nonnull` or `nonnull_if_nonzero`, with which
+    /// arguments, for `check/nonnull.rs`.
+    pub(in crate::check) nonnull: Map<DeclId, Nonnull>,
     /// The structures marked `designated_init`.
     designated: Set<RecordId>,
     /// Typedef names marked `deprecated`, by the name and the type. A plain typedef is bound to
