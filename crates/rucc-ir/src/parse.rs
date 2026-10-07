@@ -486,6 +486,7 @@ impl<'a, 'n> Parser<'a, 'n> {
                 "persistent" => global.persistent = true,
                 "nobss" => global.nobss = true,
                 "nodirect_extern_access" => global.indirect = true,
+                "shared" => global.shared = true,
                 other => return self.fail(format!("a global has no `{other}`")),
             }
         }

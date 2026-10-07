@@ -713,6 +713,10 @@ pub enum Holds {
     /// Zeros, in a section named for holding nothing else, so the file carries none of them.
     /// `"aw",@nobits` on ELF.
     Zero,
+    /// Bytes the program may write, in a section every process running the image shares, from
+    /// `__attribute__((shared))`. `"dws"` on COFF, the one format with the flag, and what
+    /// [`Self::Written`] is anywhere else.
+    Shared,
 }
 
 impl Holds {

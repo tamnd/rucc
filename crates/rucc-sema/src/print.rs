@@ -294,6 +294,9 @@ impl<'a> Printer<'a> {
         if node.flags.contains(DeclFlags::NODIRECT) {
             head.push_str(" nodirect_extern_access");
         }
+        if node.flags.contains(DeclFlags::SHARED) {
+            head.push_str(" shared");
+        }
         self.line(&head);
 
         // An initializer that is present and empty is `= {}`, which zero-initializes and is not

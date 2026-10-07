@@ -418,7 +418,7 @@ impl Directives {
             // name is one that always means zeros.
             (Directives::Elf, Place::Named(name, holds)) => {
                 let (flags, kind) = match holds {
-                    Holds::Written => ("aw", "@progbits"),
+                    Holds::Written | Holds::Shared => ("aw", "@progbits"),
                     Holds::ReadOnly => ("a", "@progbits"),
                     Holds::Zero => ("aw", "@nobits"),
                 };
@@ -430,6 +430,7 @@ impl Directives {
                     Holds::Written => "dw",
                     Holds::ReadOnly => "dr",
                     Holds::Zero => "bw",
+                    Holds::Shared => "dws",
                 };
                 let _ = writeln!(out, "\t.section\t{name},\"{flags}\"");
             }
