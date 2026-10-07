@@ -48,6 +48,7 @@ pub mod phase;
 pub mod preprocess;
 pub mod schedule;
 mod shapes;
+mod specs;
 pub mod trace;
 mod warnings;
 
@@ -275,7 +276,7 @@ options:
   -f[no-]stack-protector[-strong|-all|-explicit], -f[no-]stack-clash-protection, -fcf-protection=<edges>, -fhardened
   -ffunction-sections -fdata-sections, -fno-plt   a section per function or variable, for --gc-sections, calls through the GOT
   -fvisibility=<what>    default, hidden, internal or protected, when nothing in the source said
-  -l<name>, -L <dir>, -B <dir>, --gcc-toolchain=<dir>   a library, where to look for one, our tools, the GCC
+  -l<name>, -L <dir>, -B <dir>, --gcc-toolchain=<dir>, -specs=<file>   a library, where to look for one, our tools, the GCC, the flags of a dpkg or Red Hat spec file
   -fPIC -fpic -fPIE -fpie, -pipe   what it does anyway, and -f[no-]common as the target's cc
   -f[no-]strict-aliasing, -f[no-]delete-null-pointer-checks   what it assumes anyway
   -static -shared -pie -no-pie -nostdlib -nostartfiles -nodefaultlibs -rdynamic -s   how to link
@@ -812,6 +813,7 @@ fn with_config(
 pub fn parse_args(args: &[String]) -> Result<Action, CliError> {
     let expanded = preprocessor_args(&response_files(args)?);
     let (expanded, configs) = with_config(expanded, &config_dirs())?;
+    let expanded = specs::expand(expanded).map_err(err)?;
     let args = expanded.as_slice();
     let host = match starting_target(Triple::host(), args) {
         Ok(target) => target,
@@ -2971,16 +2973,6 @@ pub fn parse_args(args: &[String]) -> Result<Action, CliError> {
                 return Err(err(
                     "-dumpspecs: this compiler has no spec strings to print. Use -dumpmachine, \
                      -dumpversion, -print-search-dirs or -v for what a script reads from them",
-                ));
-            }
-            // GCC's own scripting language for how the driver builds a command line.
-            // `spec/04-driver-and-cli.md` section 4.4 settles that we will not have it, so a
-            // build reaching for it is told which flags do the same job.
-            _ if arg.starts_with("-specs=") => {
-                return Err(err(
-                    "-specs= is not supported: the parts of it builds rely on are -B, -L, \
-                     -nostdlib, -nostartfiles and -Wl,, see spec/04-driver-and-cli.md \
-                     section 4.4",
                 ));
             }
             // What a build hands the assembler. gcc splits `-Wa,` at every comma and passes
@@ -8422,6 +8414,29 @@ mod tests {
         parse_args(&args(s)).expect_err("expected a refusal").message
     }
 
+    /// The dpkg file that Debian passes for `hardening=-pie`, and the Red Hat one that adds `-pie`.
+    #[test]
+    fn a_spec_file_of_a_distribution_adds_its_flags() {
+        let tree = TempTree::new(
+            "specs",
+            &[
+                (
+                    "no-pie-link.specs",
+                    "*self_spec:\n+ %{!shared:%{!r:%{!fPIE:%{!pie:-fno-PIE -no-pie}}}}\n",
+                ),
+                ("redhat-hardened-ld", "*self_spec:\n+ %{!static:%{!shared:%{!r:-pie}}}\n"),
+            ],
+        );
+        let no_pie = format!("-specs={}", tree.path("no-pie-link.specs"));
+        let (link, _) = linking(&[LINUX, &no_pie, "a.c"]);
+        assert_eq!(link.pie, Some(false));
+        let (link, _) = linking(&[LINUX, &no_pie, "-shared", "a.c"]);
+        assert_eq!(link.pie, None);
+        let hardened = format!("-specs={}", tree.path("redhat-hardened-ld"));
+        let (link, _) = linking(&[LINUX, &hardened, "a.c"]);
+        assert_eq!(link.pie, Some(true));
+    }
+
     #[test]
     fn a_configuration_file_puts_its_flags_before_the_command_line() {
         let tree = TempTree::new(
@@ -8555,7 +8570,7 @@ mod tests {
         // Every one of these says something about the output, so the wrong answer is silence.
         assert!(refused(&["-Wa,--execstack", "-c", "a.c"]).contains("`--execstack`"));
         assert!(refused(&["-Wp,-C", "-c", "a.c"]).contains("separate preprocessor"));
-        assert!(refused(&["-specs=/x", "a.c"]).contains("-specs= is not supported"));
+        assert!(refused(&["-specs=/no/such/file", "a.c"]).starts_with("-specs=/no/such/file"));
         assert!(refused(&["-mcmodel=large", "-c", "a.c"]).contains("tiny code models"));
         assert!(refused(&["-gdwarf-3", "-c", "a.c"]).contains("DWARF 4 and 5"));
         // The word size the target does not have, which is a target this compiler was not asked
