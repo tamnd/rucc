@@ -133,6 +133,9 @@ fn operand(line: &mut String, value: &Value, named: Named<'_>) {
         Value::Z(number) => {
             let _ = write!(line, "z{number}");
         }
+        Value::Za(register, slice) => {
+            let _ = write!(line, "za[w{register}, {slice}]");
+        }
         Value::Pred(number, lanes) => {
             let _ = write!(line, "p{number}");
             if let Some(scalar) = lanes {
