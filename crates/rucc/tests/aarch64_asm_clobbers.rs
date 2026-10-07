@@ -1,6 +1,9 @@
 //! What an extended `asm` statement on AArch64 takes away from the register allocator, which is
 //! what its clobber list names and what its text spells and nothing more, as gcc reads it. A
-//! template that calls out, and basic assembly, still take every register a call may write.
+//! template that calls out, and basic assembly, still take every register a call may write. A
+//! register the text only reads, as a store, a compare or a branch reads it, is not taken away,
+//! so the kernel's `crash_setup_regs`, which stores all thirty one, still leaves room for its
+//! operands.
 //!
 //! Before this every AArch64 template was taken to be a call, so each operand went in a register
 //! a call keeps and the kernel's atomics saved and restored two of them around one `ldadd`.
@@ -100,4 +103,45 @@ long basic(long a, long b) { asm volatile(\"nop\"); return a + b; }
     for name in ["calls", "basic"] {
         assert!(body(&text, name)[0].starts_with("stp x19, x20"), "{name}:\n{text}");
     }
+}
+
+#[test]
+fn a_register_the_text_only_reads_is_still_held_across_it() {
+    let text = listing(
+        "reads",
+        "long stored(long a, long b, long *p) { asm volatile(\"str x1, [%0]\" :: \"r\"(p) : \"memory\"); return a + b; }
+long compared(long a, long b) { asm volatile(\"cmp x1, #0\" ::: \"cc\"); return a + b; }
+long back(long a, long b, long *p) { asm volatile(\"str x3, [x1, #8]!\" :: \"r\"(p) : \"memory\"); return a + b; }
+long status(long a, long b, long *p) { asm volatile(\"stxr w1, x3, [%0]\" :: \"r\"(p) : \"memory\"); return a + b; }
+",
+    );
+    for name in ["stored", "compared"] {
+        assert_eq!(body(&text, name)[1..], ["add x0, x0, x1", "ret"], "{name}:\n{text}");
+    }
+    // A base written back and the status of a store exclusive are written.
+    for name in ["back", "status"] {
+        assert!(!body(&text, name).contains(&"add x0, x0, x1".to_string()), "{name}:\n{text}");
+    }
+}
+
+#[test]
+fn a_template_that_stores_every_register_still_has_room_for_its_operands() {
+    // The kernel's `crash_setup_regs` in arch/arm64/include/asm/kexec.h, cut down.
+    let mut stores = String::new();
+    for pair in 0..15 {
+        stores.push_str(&format!("stp x{}, x{}, [%2, #16 * {pair}]\\n", 2 * pair, 2 * pair + 1));
+    }
+    let text = listing(
+        "crash",
+        &format!(
+            "struct regs {{ unsigned long r[34]; }} saved;
+void crash(void) {{
+  unsigned long a, b;
+  asm volatile(\"{stores}mov %0, sp\\nstp x30, %0, [%2, #16 * 15]\\nadr %1, 1f\\n1:\\nstp %1, %0, [%2, #16 * 16]\"
+               : \"=&r\"(a), \"=&r\"(b) : \"r\"(&saved) : \"memory\");
+}}
+"
+        ),
+    );
+    assert!(body(&text, "crash").iter().any(|line| line.starts_with("stp x28, x29")), "{text}");
 }
