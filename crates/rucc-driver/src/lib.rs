@@ -268,7 +268,7 @@ options:
   -f<pass> -fno-<pass> -fdump-ir=<what> -fopt-info[-<kind>][=FILE]
   -fpass-fuel=<pass>=<n>, -fpass-fuel-global=<n>   stop a pass, or all of them, after n
   -fdisable-<pass>[=<funcs>], -fenable-<pass>[=<funcs>]   run a pass on some functions only
-  -g -g0 -gdwarf-5, -fno-omit-frame-pointer, -mno-red-zone   debug info, frame pointer, red zone
+  -g -g0 -gdwarf-5, -fno-omit-frame-pointer, -m[no-]omit-leaf-frame-pointer, -mno-red-zone   debug info, frame pointer, red zone
   -gz[=none|zlib|zlib-gnu] -gno-split-dwarf   compress the debug sections, zlib when bare
   -flto[=auto|jobserver|<n>] -fno-lto -ffat-lto-objects   keep the module in the object, not read at link time yet
   -fprofile-use[=<path>] -fprofile-dir=<dir> --coverage   read, and counted for gcov
@@ -1264,6 +1264,10 @@ pub fn parse_args(args: &[String]) -> Result<Action, CliError> {
             // writes it beside the flag that turns it back off for one directory.
             "-fno-omit-frame-pointer" => opts.frame_pointer = Some(true),
             "-fomit-frame-pointer" => opts.frame_pointer = Some(false),
+            // Ubuntu, Fedora and Arch pass the negative with `-fno-omit-frame-pointer`, so that
+            // `perf` can walk each stack.
+            "-mno-omit-leaf-frame-pointer" => opts.leaf_frame_pointer = true,
+            "-momit-leaf-frame-pointer" => opts.leaf_frame_pointer = false,
             // Both directions again, for the same reason, and a third answer for a command line
             // that wrote neither: see `reorder_blocks` in `rucc_session`.
             "-freorder-blocks" => opts.reorder_blocks = Some(true),
@@ -7485,6 +7489,28 @@ mod tests {
         assert_eq!(opts.frame_pointer, Some(false), "the last one wins, as it does in gcc");
         assert!(!opts.keeps_frame_pointer(), "and it wins over the level too");
         assert!(opts.red_zone);
+    }
+
+    /// The Ubuntu line: both frame pointer flags, and the leaf one is read in both directions.
+    #[test]
+    fn the_leaf_frame_pointer_flag_is_read_in_both_directions() {
+        let (opts, _) = compile(&["-c", "a.c"]);
+        assert!(opts.leaf_frame_pointer, "a leaf keeps it unless the command line said not to");
+
+        let (opts, _) = compile(&[
+            "-c",
+            "-O2",
+            "-fno-omit-frame-pointer",
+            "-mno-omit-leaf-frame-pointer",
+            "a.c",
+        ]);
+        assert!(opts.keeps_frame_pointer() && opts.leaf_frame_pointer);
+
+        let (opts, _) = compile(&["-c", "-momit-leaf-frame-pointer", "a.c"]);
+        assert!(!opts.leaf_frame_pointer);
+        let (opts, _) =
+            compile(&["-c", "-momit-leaf-frame-pointer", "-mno-omit-leaf-frame-pointer", "a.c"]);
+        assert!(opts.leaf_frame_pointer, "the last one wins");
     }
 
     /// Five flags rather than one with an argument, which is how gcc spells them, and the negative

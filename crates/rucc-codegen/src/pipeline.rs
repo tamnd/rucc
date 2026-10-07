@@ -433,6 +433,9 @@ impl Room {
 pub struct Flags {
     /// Whether every function keeps a frame pointer, which `-fno-omit-frame-pointer` asks for.
     pub frame_pointer: bool,
+    /// Whether a leaf function keeps one too when [`Flags::frame_pointer`] is on. This is
+    /// `-mno-omit-leaf-frame-pointer`, and `-momit-leaf-frame-pointer` turns it off.
+    pub leaf_frame_pointer: bool,
     /// Whether the red zone may be used, which `-mno-red-zone` and every kernel turns off.
     pub red_zone: bool,
     /// Where the code and static data are promised to be, which `-mcmodel=` says. Under the kernel
@@ -576,6 +579,7 @@ impl Default for Flags {
     fn default() -> Self {
         Self {
             frame_pointer: false,
+            leaf_frame_pointer: true,
             red_zone: true,
             code_model: CodeModel::Small,
             stack_clash: false,
@@ -954,6 +958,16 @@ pub fn compile_recording(
     let base = Layout { moves: machine.insts.classes, ..Layout::new(machine.conv, machine.file) };
     let base = stack.layout(base);
     let guarded = machine.guarded();
+    // A protected function calls the one that does not come back, on the arm where the check
+    // failed, so it is not a leaf however few calls the program wrote in it. That is what takes
+    // the red zone away from it and what makes its frame leave the stack pointer where a call
+    // needs it. The later hook is a call in the same position and costs the same.
+    //
+    // The earlier one is not, and this is the one place the difference shows. It runs before the
+    // prologue has written anything, so the bytes below the stack pointer it uses are ones this
+    // function has not put anything in yet, and a leaf that keeps its locals down there stays a
+    // leaf. gcc leaves it alone too.
+    let leaf = base.leaf && guard.is_none() && profile != Profile::Late;
     let layout = Layout {
         // The later hook reads the frame pointer to find out who called this function, so a
         // function that calls it is given one whether or not anything else asked. A function that
@@ -964,8 +978,11 @@ pub fn compile_recording(
         // instructions of a prologue there is none of, and a function that saves the machine state
         // by hand is usually saving the frame pointer among it, which is what micropython's
         // `nlr_push` does on its third line.
+        //
+        // `-momit-leaf-frame-pointer` takes back what `-fno-omit-frame-pointer` asked for, in a
+        // leaf only. A leaf calls nothing, so no frame below it has to find this one.
         frame_pointer: !naked
-            && (flags.frame_pointer
+            && ((flags.frame_pointer && (flags.leaf_frame_pointer || !leaf))
                 || profile == Profile::Late
                 || stack.walks_frames
                 || stack.saves_place),
@@ -984,16 +1001,7 @@ pub fn compile_recording(
         protect: guard.is_some(),
         guarded: &guarded,
         naked,
-        // A protected function calls the one that does not come back, on the arm where the check
-        // failed, so it is not a leaf however few calls the program wrote in it. That is what
-        // takes the red zone away from it and what makes its frame leave the stack pointer where
-        // a call needs it. The later hook is a call in the same position and costs the same.
-        //
-        // The earlier one is not, and this is the one place the difference shows. It runs before
-        // the prologue has written anything, so the bytes below the stack pointer it uses are ones
-        // this function has not put anything in yet, and a leaf that keeps its locals down there
-        // stays a leaf. gcc leaves it alone too.
-        leaf: base.leaf && guard.is_none() && profile != Profile::Late,
+        leaf,
         saves_all,
         vectors,
         // Not in a naked function, which has no prologue to do the aligning in.

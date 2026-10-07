@@ -2088,6 +2088,12 @@ pub struct Options {
     /// by following saved frame pointers needs it on, and so does any code a debugger has to
     /// unwind without unwind tables. Read it through `keeps_frame_pointer`.
     pub frame_pointer: Option<bool>,
+    /// Whether a leaf function keeps the frame pointer that `frame_pointer` asks for, from
+    /// `-mno-omit-leaf-frame-pointer` and `-momit-leaf-frame-pointer`.
+    ///
+    /// Kept by default, which is what gcc does on x86-64 at `-O0`. gcc on AArch64 omits it by
+    /// default. A distribution that wants `perf` to walk each stack passes the flag anyway.
+    pub leaf_frame_pointer: bool,
     /// Whether the red zone may be used, from `-mno-red-zone` turned around.
     ///
     /// The 128 bytes below the stack pointer that the System V psABI promises no signal handler
@@ -2808,6 +2814,7 @@ impl Options {
             lto: Lto::default(),
             profile_data: Profile::default(),
             frame_pointer: None,
+            leaf_frame_pointer: true,
             red_zone: true,
             code_model: CodeModel::Small,
             stack_boundary: None,
