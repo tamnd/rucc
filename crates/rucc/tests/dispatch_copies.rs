@@ -86,3 +86,30 @@ fn the_dispatch_on_aarch64_copies_no_register_into_itself() {
     let copies: Vec<&str> = onto_itself(&asm, "mov").into_iter().filter(whole).collect();
     assert!(copies.is_empty(), "{copies:?} in:\n{asm}");
 }
+
+/// Whether the line is a `movq` from one register into another.
+fn between_registers(line: &str) -> bool {
+    let mut words = line.split_whitespace();
+    if words.next() != Some("movq") {
+        return false;
+    }
+    let rest: String = words.collect();
+    rest.split_once(',').is_some_and(|(to, from)| to.starts_with('%') && from.starts_with('%'))
+}
+
+/// A handler that changes what it carries writes the new value into the register the next
+/// handler reads it in, so `code++` is one `addq` or `leaq` into the register `code` is in and
+/// the swap is two `xorq`, where each was worked out in a register of its own and copied across
+/// in front of the jump.
+#[test]
+fn the_dispatch_on_x86_64_works_each_value_out_in_the_register_it_is_carried_in() {
+    let asm = assembly("x86_64-unknown-linux-gnu");
+    let handlers: Vec<&str> = asm.split("\n.Llbl.").skip(1).collect();
+    assert_eq!(handlers.len(), 4, "the fixture has four handlers:\n{asm}");
+    for handler in handlers {
+        let Some(at) = handler.find("jmp\t*") else { continue };
+        let copies: Vec<&str> =
+            handler[..at].lines().filter(|line| between_registers(line)).collect();
+        assert!(copies.is_empty(), "{copies:?} in:\n{asm}");
+    }
+}

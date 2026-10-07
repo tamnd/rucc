@@ -39,9 +39,9 @@
 //! above, so the pad is written after it and not where the prologue's own pad is written.
 
 use rucc_base::Interner;
-use rucc_base::hash::Map;
+use rucc_base::hash::{Map, Set};
 use rucc_mir as mir;
-use rucc_target::{BranchInsts, FrameInsts, RegClass};
+use rucc_target::{BranchInsts, FlagInsts, FrameInsts, RegClass, ShortInsts};
 
 /// Splits every critical edge that carries values, and every critical edge out of an `asm goto`
 /// that writes any, and gives back how many it split.
@@ -160,6 +160,8 @@ pub fn indirect(
     func: &mut mir::Func,
     branch: &BranchInsts,
     frame: &FrameInsts,
+    short: &ShortInsts,
+    flags: &FlagInsts,
     names: &mut Interner,
 ) -> usize {
     let jump = mir::Opcode::new(names.intern(&format!("{}{}", branch.prefix, branch.indirect)));
@@ -254,6 +256,7 @@ pub fn indirect(
 
     // And the moves themselves, once every label has asked for what it wants, since what one label
     // asks for is what another may already have asked the same branch for.
+    let mut made: Vec<(mir::Block, mir::Inst)> = Vec::new();
     for (branch, moves) in branches.iter().zip(&writes) {
         let last = func.terminator(*branch).expect("a block that ends in a jump");
         for &(home, arg, class) in moves {
@@ -265,9 +268,19 @@ pub fn indirect(
             let opcode = mir::Opcode::new(names.intern(&format!("{}{name}", frame.prefix)));
             let inst = func.build_loose(opcode).def(home, class).uses(arg, class).finish();
             func.insert_before(last, inst);
+            made.push((*branch, inst));
         }
     }
     rename(func, &renamed);
+    let lea = mir::Opcode::new(names.intern(&format!("{}{}", frame.prefix, frame.lea)));
+    let mut opcode =
+        |name: &str| mir::Opcode::new(names.intern(&format!("{}{name}", short.prefix)));
+    let spreads = short
+        .spreading
+        .iter()
+        .map(|entry| (opcode(entry.name), opcode(entry.into), entry.sign))
+        .collect();
+    at_source(func, &made, &Steps { lea, spreads, flags, names });
 
     // And the addresses, which is the half of this that is not about edges. Every `&&label` in the
     // function names a block, and a label with a block in front of it now begins at that block, so
@@ -537,6 +550,220 @@ fn in_place(
     renamed
 }
 
+/// Writes a value a branch works out for a label into the register the label is given it in, where
+/// it is worked out, and takes out the move that copied it there. Gives back how many moves went.
+///
+/// An interpreter's handler steps on to the next instruction and jumps to it, which is `op++` and
+/// `goto *op->opcode`. The step is a new value, and the move in front of the jump copies it into
+/// the register the next handler reads the step pointer in. The allocator does not see that the
+/// two belong in one register, since a copy is not something it is asked to keep together, so every
+/// handler of Postgres' `ExecInterpExpr` ended in `leaq 24(%rcx), %rdi`, the load through `%rdi`
+/// and `movq %rdi, %rcx`, where gcc writes `addq $24, %rcx`. tamnd/rucc#1994.
+///
+/// That register is written by the moves in front of the jump and read only by the labels, so it
+/// may be written earlier in the same block as long as nothing in between reads what it held or
+/// writes it, which is what is checked:
+///
+/// - The value is written once in the function, by an instruction in the branch's own block in
+///   front of the move, that writes it as any register at all and names no register outright.
+/// - Every read of it is in that block, between that instruction and the move, so renaming those
+///   reads is renaming all of them.
+/// - Nothing in between, and nothing in that instruction but a read, names the register the move
+///   writes. A read in the instruction itself is fine, since an instruction reads its sources
+///   before it writes an answer that is not written early.
+/// - It is not itself one of those registers, which another move may have written there first.
+///
+/// A handler that steps on before it is done with the old pointer, such as `op++` above a read of
+/// what `op` pointed at, reads the register in between. When the step is an address worked out
+/// with the target's `lea`, which reads no memory and writes no flags, it is moved down to just
+/// after the last of those reads first, as long as nothing it is moved past writes what it reads
+/// or reads what it writes. A step that is an addition of a constant, which is how `op++` comes
+/// out of selection, is written as the `lea` that is the same sum before it is moved, when nothing
+/// reads the flags the addition wrote.
+fn at_source(func: &mut mir::Func, made: &[(mir::Block, mir::Inst)], steps: &Steps<'_>) -> usize {
+    let homes: Set<mir::Reg> =
+        made.iter().map(|&(_, copy)| func[func[copy].operands][0].reg).collect();
+    let mut writes: Map<mir::Reg, usize> = Map::default();
+    let mut reads: Map<mir::Reg, usize> = Map::default();
+    for block in func.blocks() {
+        for param in &func[block].params {
+            *writes.entry(param.reg).or_default() += 1;
+        }
+        for inst in func.insts(block) {
+            for operand in &func[func[inst].operands] {
+                let count = if operand.role.is_def() { &mut writes } else { &mut reads };
+                *count.entry(operand.reg).or_default() += 1;
+            }
+        }
+        for call in &func[block].succs {
+            for &arg in &call.args {
+                *reads.entry(arg).or_default() += 1;
+            }
+        }
+    }
+    let mut gone = 0;
+    for &(block, copy) in made {
+        let &[to, from] = &func[func[copy].operands] else { continue };
+        let (home, value) = (to.reg, from.reg);
+        if !value.is_virtual() || homes.contains(&value) || writes.get(&value) != Some(&1) {
+            continue;
+        }
+        let mut insts: Vec<mir::Inst> = func.insts(block).collect();
+        let Some(end) = insts.iter().position(|&inst| inst == copy) else { continue };
+        let Some(start) = insts[..end].iter().position(|&inst| {
+            func[func[inst].operands]
+                .iter()
+                .any(|operand| operand.reg == value && operand.role.is_def())
+        }) else {
+            continue;
+        };
+        let plain = func[func[insts[start]].operands].iter().all(|operand| {
+            let answer = operand.role == mir::Role::Def
+                && operand.class == to.class
+                && matches!(operand.constraint, mir::Constraint::Reg | mir::Constraint::Reuse(_));
+            operand.reg.is_virtual()
+                && (operand.reg != value || answer)
+                && (operand.reg != home || !operand.role.is_def())
+        });
+        if !plain {
+            continue;
+        }
+        if insts[start + 1..end].iter().any(|&inst| naming(func, inst, home) > 0) {
+            if let Some(address) = as_address(func, steps, &insts, start) {
+                insts[start] = address;
+            }
+        }
+        let maker = insts[start];
+        let lea = steps.lea;
+        let mut between = &insts[start + 1..end];
+        if let Some(last) = between.iter().rposition(|&inst| naming(func, inst, home) > 0) {
+            let read: Vec<mir::Reg> = func[func[maker].operands]
+                .iter()
+                .filter(|operand| !operand.role.is_def())
+                .map(|operand| operand.reg)
+                .collect();
+            let past = &between[..=last];
+            let movable = func[maker].opcode == lea
+                && past.iter().all(|&inst| {
+                    func[func[inst].operands].iter().all(|operand| {
+                        operand.reg != value
+                            && !(operand.role.is_def()
+                                && (operand.reg == home || read.contains(&operand.reg)))
+                    })
+                });
+            if !movable {
+                continue;
+            }
+            func.remove_inst(maker);
+            func.insert_after(past[last], maker);
+            between = &between[last + 1..];
+        }
+        let local: usize = between.iter().map(|&inst| naming(func, inst, value)).sum();
+        if reads.get(&value) != Some(&(local + 1)) {
+            continue;
+        }
+        for &inst in between.iter().chain([&maker]) {
+            let operands = func[inst].operands;
+            for operand in &mut func[operands] {
+                if operand.reg == value {
+                    operand.reg = home;
+                }
+            }
+        }
+        // A step worked out from the register it is written into, such as `leaq 24(%rcx), %rcx`,
+        // is tied to it the way a two address instruction is. The allocator asks no more of a
+        // `lea` than that its answer is in some register, and a register of its own and a copy at
+        // the end of it is an answer.
+        if func[maker].opcode == lea {
+            let base = func[maker].mem.and_then(|mem| func[mem].base);
+            let operands = func[maker].operands;
+            let reads = base.filter(|&at| {
+                func[operands].get(usize::from(at)).is_some_and(|operand| {
+                    operand.reg == home && operand.class == to.class && !operand.role.is_def()
+                })
+            });
+            if let Some(at) = reads {
+                for operand in &mut func[operands] {
+                    if operand.reg == home
+                        && operand.role == mir::Role::Def
+                        && operand.constraint == mir::Constraint::Reg
+                    {
+                        operand.constraint = mir::Constraint::Reuse(at);
+                    }
+                }
+            }
+        }
+        // A variable the value was is the register now, for the debugger's sake.
+        for named in &mut func.named {
+            if named.1 == value {
+                named.1 = home;
+            }
+        }
+        func.remove_inst(copy);
+        gone += 1;
+    }
+    gone
+}
+
+/// What [`at_source`] needs to know to move a step down: the target's `lea`, each addition of a
+/// constant with the `lea` that is the same sum and what the constant is multiplied by on its way
+/// into the address, and which instructions read and write the flags.
+struct Steps<'a> {
+    lea: mir::Opcode,
+    spreads: Vec<(mir::Opcode, mir::Opcode, i64)>,
+    flags: &'a FlagInsts,
+    names: &'a Interner,
+}
+
+/// Writes the step at that place in the block as the `lea` that is the same sum, when it is an
+/// addition of a constant into a register and nothing after it reads the flags it wrote before
+/// something else writes them. Gives back the `lea`, which is where the addition was.
+///
+/// Only an addition whose `lea` is the target's own is taken, since that is the one [`at_source`]
+/// knows how to move, and a 32 bit step is left as it was.
+fn as_address(
+    func: &mut mir::Func,
+    steps: &Steps<'_>,
+    insts: &[mir::Inst],
+    at: usize,
+) -> Option<mir::Inst> {
+    let step = insts[at];
+    let opcode = func[step].opcode;
+    let &(_, into, sign) = steps.spreads.iter().find(|&&(from, _, _)| from == opcode)?;
+    if into != steps.lea || func[step].mem.is_some() {
+        return None;
+    }
+    let constant = func[func[step].imm?].0;
+    let &[answer, first] = &func[func[step].operands] else { return None };
+    let plain = answer.role.is_def() && !first.role.is_def() && first.class == answer.class;
+    let disp = i32::try_from(i128::from(constant) * i128::from(sign)).ok()?;
+    if !plain || !first.reg.is_virtual() {
+        return None;
+    }
+    // A name the target does not know may read them.
+    for &inst in &insts[at + 1..] {
+        let name = steps.names.resolve(func[inst].opcode.name());
+        let bare = name.strip_prefix(steps.flags.prefix)?;
+        if steps.flags.reads(bare).is_some() {
+            return None;
+        }
+        if (steps.flags.writes)(bare) {
+            break;
+        }
+    }
+    let span = func.span(step);
+    let mem = mir::Mem { disp, ..mir::Mem::at(mir::Operand::read(first.reg, first.class)) };
+    let address = func.build_loose(into).def(answer.reg, answer.class).mem(mem).at(span).finish();
+    func.insert_before(step, address);
+    func.remove_inst(step);
+    Some(address)
+}
+
+/// How many of the instruction's operands name the register.
+fn naming(func: &mir::Func, inst: mir::Inst, reg: mir::Reg) -> usize {
+    func[func[inst].operands].iter().filter(|operand| operand.reg == reg).count()
+}
+
 /// Reads each register [`in_place`] took off a label as the register it was given in instead,
 /// everywhere in the function.
 fn rename(func: &mut mir::Func, renamed: &Map<mir::Reg, mir::Reg>) {
@@ -599,7 +826,7 @@ fn preds(func: &mir::Func) -> Vec<usize> {
 #[cfg(test)]
 mod tests {
     use rucc_base::Interner;
-    use rucc_target::x86_64::{BRANCH, FRAME, GPR, REGS};
+    use rucc_target::x86_64::{BRANCH, FLAGS, FRAME, GPR, REGS, SHORT};
 
     use super::*;
 
@@ -737,7 +964,7 @@ mod tests {
     #[test]
     fn the_values_a_computed_goto_carries_move_into_a_block_in_front_of_the_label() {
         let (mut names, mut func) = computed(1, 1);
-        assert_eq!(indirect(&mut func, &BRANCH, &FRAME, &mut names), 1);
+        assert_eq!(indirect(&mut func, &BRANCH, &FRAME, &SHORT, &FLAGS, &mut names), 1);
 
         // The branch goes to the new block carrying nothing, and the new block carries the value
         // the branch used to. The address the `lea` works out is the new block's as well, since
@@ -750,7 +977,7 @@ mod tests {
     #[test]
     fn two_computed_gotos_that_reach_one_label_are_made_to_agree() {
         let (mut names, mut func) = computed(2, 1);
-        assert_eq!(indirect(&mut func, &BRANCH, &FRAME, &mut names), 1);
+        assert_eq!(indirect(&mut func, &BRANCH, &FRAME, &SHORT, &FLAGS, &mut names), 1);
 
         // One block in front of the label and not two, because the label has one address and both
         // branches arrive at it. What makes that sound is the move each branch writes in front of
@@ -792,7 +1019,7 @@ mod tests {
     #[test]
     fn labels_a_branch_gives_the_same_value_are_given_it_in_one_register() {
         let (mut names, mut func, _) = table(8);
-        assert_eq!(indirect(&mut func, &BRANCH, &FRAME, &mut names), 8);
+        assert_eq!(indirect(&mut func, &BRANCH, &FRAME, &SHORT, &FLAGS, &mut names), 8);
 
         // One move in front of the jump and not eight, because the eight labels are given the one
         // value and it is now in the one register. Eight blocks were still made, since each label
@@ -809,7 +1036,7 @@ mod tests {
         let last = func[head].succs.len() - 1;
         func.succs_mut(head)[last] = mir::BlockCall::with(targets[7], vec![other]);
 
-        assert_eq!(indirect(&mut func, &BRANCH, &FRAME, &mut names), 8);
+        assert_eq!(indirect(&mut func, &BRANCH, &FRAME, &SHORT, &FLAGS, &mut names), 8);
         // Two moves: one register for the seven labels given the same value, and one for the label
         // given the other. Sharing is about what a label is given and not about how many there are.
         let text = mir::print_func(&func, &names, &REGS);
@@ -828,7 +1055,7 @@ mod tests {
         let last = func[head].succs.len() - 1;
         func.succs_mut(head)[last] = mir::BlockCall::with(targets[7], vec![arg, other]);
 
-        assert_eq!(indirect(&mut func, &BRANCH, &FRAME, &mut names), 8);
+        assert_eq!(indirect(&mut func, &BRANCH, &FRAME, &SHORT, &FLAGS, &mut names), 8);
         // Two moves, not nine. The first parameter of the long label is given what the other seven
         // are given, so it takes the same register, and only the value nothing else is given needs
         // one of its own.
@@ -875,13 +1102,140 @@ mod tests {
         dispatch(&mut func, &mut names, head, label, vec![state]);
         dispatch(&mut func, &mut names, label, label, vec![given]);
 
-        assert_eq!(indirect(&mut func, &BRANCH, &FRAME, &mut names), 1);
+        assert_eq!(indirect(&mut func, &BRANCH, &FRAME, &SHORT, &FLAGS, &mut names), 1);
         // The label takes nothing now and reads the register the head writes, so the one move is
         // the head's and the label's own jump writes nothing.
         assert!(func[label].params.is_empty());
         assert!(!mentions(&func, given));
         let text = mir::print_func(&func, &names, &REGS);
         assert_eq!(text.matches("x64.mov_rr_64").count(), 1, "{text}");
+    }
+
+    /// What a [`stepping`] label reads between making the step and loading through it: nothing,
+    /// the old pointer, or the old pointer and the step both.
+    #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+    enum Then {
+        Nothing,
+        Old,
+        Both,
+        Carry,
+    }
+
+    /// A label given a step pointer that steps it on and jumps where the next step says, which is
+    /// `op++` and `goto *op->opcode`, reading what `then` says in between.
+    fn stepping(then: Then) -> (Interner, mir::Func, mir::Reg) {
+        stepping_by(then, false)
+    }
+
+    /// The same, with the step the `add` selection makes of `op++` when `added` says so.
+    fn stepping_by(then: Then, added: bool) -> (Interner, mir::Func, mir::Reg) {
+        let mut names = Interner::new();
+        let mut func = mir::Func::new(names.intern("f"));
+        let head = func.create_block();
+        let label = func.create_block();
+        let state = func.append_param(head, GPR);
+        let given = func.append_param(label, GPR);
+        dispatch(&mut func, &mut names, head, label, vec![state]);
+        let lea = mir::Opcode::new(names.intern("x64.lea_64"));
+        let load = mir::Opcode::new(names.intern("x64.mov_rm_64"));
+        let test = mir::Opcode::new(names.intern("x64.test_rr_64"));
+        let jump = mir::Opcode::new(names.intern("x64.jmp_reg"));
+        let next = func.new_vreg(GPR);
+        let to = func.new_vreg(GPR);
+        if added {
+            let add = mir::Opcode::new(names.intern("x64.add_ri_64"));
+            let answer = mir::Operand::write(next, GPR).with(mir::Constraint::Reuse(1));
+            func.build(label, add).operand(answer).uses(given, GPR).imm(24).finish();
+        } else {
+            let stepped = mir::Mem { disp: 24, ..mir::Mem::at(mir::Operand::read(given, GPR)) };
+            func.build(label, lea).def(next, GPR).mem(stepped).finish();
+        }
+        match then {
+            Then::Nothing => {}
+            Then::Old => {
+                func.build(label, test).uses(given, GPR).uses(given, GPR).finish();
+            }
+            Then::Both => {
+                func.build(label, test).uses(given, GPR).uses(next, GPR).finish();
+            }
+            Then::Carry => {
+                let carry = mir::Opcode::new(names.intern("x64.adc_ri_64"));
+                let (old, sum) = (func.new_vreg(GPR), func.new_vreg(GPR));
+                let answer = mir::Operand::write(sum, GPR).with(mir::Constraint::Reuse(1));
+                func.build(label, carry).operand(answer).uses(old, GPR).imm(0).finish();
+                func.build(label, test).uses(given, GPR).uses(given, GPR).finish();
+            }
+        }
+        let at = mir::Mem::at(mir::Operand::read(next, GPR));
+        func.build(label, load).def(to, GPR).mem(at).finish();
+        func.build(label, jump).operand(mir::Operand::read(to, GPR)).finish();
+        func.succs_mut(label).push(mir::BlockCall::with(label, vec![next]));
+        (names, func, next)
+    }
+
+    #[test]
+    fn a_step_a_label_makes_for_the_next_is_made_in_the_register_the_next_reads() {
+        let (mut names, mut func, next) = stepping(Then::Nothing);
+        assert_eq!(indirect(&mut func, &BRANCH, &FRAME, &SHORT, &FLAGS, &mut names), 1);
+        // The `lea` writes the register the label reads the pointer in, so the label's jump has no
+        // move in front of it and the head's is the only one.
+        assert!(!mentions(&func, next));
+        let text = mir::print_func(&func, &names, &REGS);
+        assert_eq!(text.matches("x64.mov_rr_64").count(), 1, "{text}");
+        // And tied to the register it steps on from, as `addq $24, %rcx` would be.
+        assert!(text.contains("(reuse 1) = x64.lea_64"), "{text}");
+    }
+
+    #[test]
+    fn a_step_made_while_the_old_pointer_is_still_wanted_is_made_after_it() {
+        let (mut names, mut func, next) = stepping(Then::Old);
+        assert_eq!(indirect(&mut func, &BRANCH, &FRAME, &SHORT, &FLAGS, &mut names), 1);
+        // The `test` reads the old pointer after the step is made and nothing reads the step
+        // before it, so the `lea` goes after the `test` and writes the register itself.
+        assert!(!mentions(&func, next));
+        let text = mir::print_func(&func, &names, &REGS);
+        assert_eq!(text.matches("x64.mov_rr_64").count(), 1, "{text}");
+        // The last `lea`, since the head has one of its own for the address it jumps to.
+        let (test, lea) = (text.find("x64.test_rr_64"), text.rfind("x64.lea_64"));
+        assert!(test.zip(lea).is_some_and(|(test, lea)| test < lea), "{text}");
+    }
+
+    #[test]
+    fn a_step_added_while_the_old_pointer_is_still_wanted_is_made_after_it_as_a_lea() {
+        let (mut names, mut func, next) = stepping_by(Then::Old, true);
+        assert_eq!(indirect(&mut func, &BRANCH, &FRAME, &SHORT, &FLAGS, &mut names), 1);
+        // The `add` cannot go past the `test`, which writes the flags it wrote, but the `lea` that
+        // is the same sum can, and then it writes the register the label reads the pointer in.
+        assert!(!mentions(&func, next));
+        let text = mir::print_func(&func, &names, &REGS);
+        assert!(!text.contains("x64.add_ri_64"), "{text}");
+        assert_eq!(text.matches("x64.mov_rr_64").count(), 1, "{text}");
+        assert!(text.contains("(reuse 1) = x64.lea_64"), "{text}");
+        let (test, lea) = (text.find("x64.test_rr_64"), text.rfind("x64.lea_64"));
+        assert!(test.zip(lea).is_some_and(|(test, lea)| test < lea), "{text}");
+    }
+
+    #[test]
+    fn a_step_added_where_the_next_instruction_reads_its_carry_is_left_an_add() {
+        let (mut names, mut func, next) = stepping_by(Then::Carry, true);
+        assert_eq!(indirect(&mut func, &BRANCH, &FRAME, &SHORT, &FLAGS, &mut names), 1);
+        // The `adc` reads the carry the `add` wrote, so a `lea` would hand it another one, and the
+        // `add` stays where it is with the move in front of the jump.
+        assert!(mentions(&func, next));
+        let text = mir::print_func(&func, &names, &REGS);
+        assert!(text.contains("x64.add_ri_64"), "{text}");
+        assert_eq!(text.matches("x64.mov_rr_64").count(), 2, "{text}");
+    }
+
+    #[test]
+    fn a_step_read_while_the_old_pointer_is_still_wanted_is_moved_across() {
+        let (mut names, mut func, next) = stepping(Then::Both);
+        assert_eq!(indirect(&mut func, &BRANCH, &FRAME, &SHORT, &FLAGS, &mut names), 1);
+        // The `test` reads the old pointer and the step both, so the step cannot go into the
+        // register the old pointer is in until the move in front of the jump.
+        assert!(mentions(&func, next));
+        let text = mir::print_func(&func, &names, &REGS);
+        assert_eq!(text.matches("x64.mov_rr_64").count(), 2, "{text}");
     }
 
     #[test]
@@ -904,7 +1258,7 @@ mod tests {
         let test = mir::Opcode::new(names.intern("x64.test_rr_64"));
         func.build(second, test).uses(kept, GPR).uses(given, GPR).finish();
 
-        assert_eq!(indirect(&mut func, &BRANCH, &FRAME, &mut names), 2);
+        assert_eq!(indirect(&mut func, &BRANCH, &FRAME, &SHORT, &FLAGS, &mut names), 2);
         assert_eq!(func[first].params.len(), 1);
         assert!(func[second].params.is_empty());
     }
@@ -917,7 +1271,7 @@ mod tests {
         let arg = func.append_param(other, GPR);
         *func.succs_mut(other) = vec![mir::BlockCall::with(label, vec![arg])];
 
-        assert_eq!(indirect(&mut func, &BRANCH, &FRAME, &mut names), 1);
+        assert_eq!(indirect(&mut func, &BRANCH, &FRAME, &SHORT, &FLAGS, &mut names), 1);
         // An ordinary edge gives the label its value too, and that edge writes the parameter and
         // not the register the branch writes.
         assert_eq!(func[label].params.len(), 1);
@@ -928,21 +1282,21 @@ mod tests {
         let (mut names, mut func) = computed(1, 0);
 
         // No values to carry, so no block to carry them, and the address stays the label's own.
-        assert_eq!(indirect(&mut func, &BRANCH, &FRAME, &mut names), 0);
+        assert_eq!(indirect(&mut func, &BRANCH, &FRAME, &SHORT, &FLAGS, &mut names), 0);
         assert_eq!(addressed(&func), vec![1]);
     }
 
     #[test]
     fn a_function_with_no_computed_goto_in_it_is_left_alone() {
         let (mut names, mut func, _) = diamond(1);
-        assert_eq!(indirect(&mut func, &BRANCH, &FRAME, &mut names), 0);
+        assert_eq!(indirect(&mut func, &BRANCH, &FRAME, &SHORT, &FLAGS, &mut names), 0);
         assert_eq!(edges(&func), vec![vec![1, 2], vec![3], vec![3], vec![]]);
     }
 
     #[test]
     fn what_it_leaves_is_nothing_for_the_splitting_below_to_do() {
         let (mut names, mut func) = computed(2, 1);
-        indirect(&mut func, &BRANCH, &FRAME, &mut names);
+        indirect(&mut func, &BRANCH, &FRAME, &SHORT, &FLAGS, &mut names);
         // The edges out of the branches carry nothing now, and the edges out of the blocks it
         // added are the only way out of those blocks, so neither kind is critical.
         assert_eq!(critical(&mut func), 0);
@@ -962,7 +1316,7 @@ mod tests {
     #[test]
     fn the_block_a_label_begins_at_gets_a_landing_pad_when_the_forward_edge_is_checked() {
         let (mut names, mut func) = computed(2, 1);
-        indirect(&mut func, &BRANCH, &FRAME, &mut names);
+        indirect(&mut func, &BRANCH, &FRAME, &SHORT, &FLAGS, &mut names);
 
         // One pad, at the block in front of the label, because that is the block both addresses
         // name once the values have been moved on to it. The label's own block is arrived at by an
@@ -974,7 +1328,7 @@ mod tests {
     #[test]
     fn a_label_with_no_block_in_front_of_it_gets_the_pad_itself() {
         let (mut names, mut func) = computed(1, 0);
-        indirect(&mut func, &BRANCH, &FRAME, &mut names);
+        indirect(&mut func, &BRANCH, &FRAME, &SHORT, &FLAGS, &mut names);
 
         // Nothing was moved on to anything, so the address still names the label and the pad goes
         // where the address goes.
