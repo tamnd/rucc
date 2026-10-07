@@ -342,12 +342,18 @@ pub const INLINE_INSNS_SINGLE_O3: u32 = 200;
 /// to this for each of them and itself together.
 pub const INLINE_EARLY_INSNS: u32 = 6;
 
+/// The same at `-O3`, per section 33.6, where GCC raises it to fourteen.
+pub const INLINE_EARLY_INSNS_O3: u32 = 14;
+
 /// How much a call to a function nobody declared `inline` may grow its caller and still be
 /// inlined, per section 33.6.
 ///
 /// GCC's `max-inline-insns-auto` at `-O2`, where `-finline-small-functions` is on. A growth as
 /// large as this is refused.
 pub const INLINE_INSNS_AUTO: u32 = 15;
+
+/// The same at `-O3`, per section 33.6, where GCC raises it to thirty.
+pub const INLINE_INSNS_AUTO_O3: u32 = 30;
 
 /// The largest body a `static` function called from one place may have and still be inlined there,
 /// per section 33.1.
@@ -1073,6 +1079,14 @@ pub const ALL: &[Constant] = &[
         provenance: Provenance::Gcc,
     },
     Constant {
+        name: "INLINE_EARLY_INSNS_O3",
+        value: 14,
+        unit: "instructions of growth",
+        document: "33.6",
+        gcc: "early-inlining-insns at -O3",
+        provenance: Provenance::Gcc,
+    },
+    Constant {
         name: "INLINE_INSNS_SINGLE_O3",
         value: 200,
         unit: "instructions",
@@ -1086,6 +1100,14 @@ pub const ALL: &[Constant] = &[
         unit: "instructions",
         document: "33.6",
         gcc: "max-inline-insns-auto",
+        provenance: Provenance::Gcc,
+    },
+    Constant {
+        name: "INLINE_INSNS_AUTO_O3",
+        value: 30,
+        unit: "instructions",
+        document: "33.6",
+        gcc: "max-inline-insns-auto at -O3",
         provenance: Provenance::Gcc,
     },
     Constant {
@@ -1976,6 +1998,13 @@ mod tests {
         assert_eq!(
             both.rows,
             [super::at("INLINE_HINT_PERCENT"), super::at("INLINE_HINT_PERCENT_O3")]
+        );
+        let auto = super::Param::new("max-inline-insns-auto=20").expect("gcc's name");
+        assert_eq!(auto.rows, [super::at("INLINE_INSNS_AUTO"), super::at("INLINE_INSNS_AUTO_O3")]);
+        let early = super::Param::new("early-inlining-insns=10").expect("gcc's name");
+        assert_eq!(
+            early.rows,
+            [super::at("INLINE_EARLY_INSNS"), super::at("INLINE_EARLY_INSNS_O3")]
         );
         let peel = super::Param::new("max-completely-peel-times=4").expect("gcc's name");
         assert_eq!(peel.rows, [super::at("UNROLL_MAX_TIMES")]);

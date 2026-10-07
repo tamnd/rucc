@@ -36,7 +36,6 @@ use std::time::{Duration, Instant};
 
 use rucc_base::hash::{Map, Set};
 use rucc_base::{Interner, Symbol};
-use rucc_cost::heuristics;
 use rucc_ir::{AttrSet, Datum, FuncId, Global, Imm, Linkage, Module, Pic, Reloc};
 use rucc_session::OptLevel;
 use rucc_target::{Isa, TargetInfo};
@@ -1089,8 +1088,8 @@ pub fn run(module: &mut Module, names: &mut Interner, opts: &Options) -> Report 
     let limit = match opts.level {
         OptLevel::O0 => None,
         _ if !opts.wants(inline::NAME) => None,
-        OptLevel::O3 => Some(rucc_cost::param!(heuristics::INLINE_INSNS_SINGLE_O3)),
-        _ => Some(rucc_cost::param!(heuristics::INLINE_INSNS_SINGLE)),
+        OptLevel::O3 => Some(inline::Limits::o3()),
+        _ => Some(inline::Limits::o2()),
     };
     // `-fno-inline-functions-called-once` turns the called once half off alone. It is not a pass,
     // so the toggle only ever means this and never adds or removes anything from the list.

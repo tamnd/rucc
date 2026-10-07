@@ -38,9 +38,9 @@ use rucc_base::hash::{Map, Set};
 use rucc_base::{Interner, Symbol};
 use rucc_cost::badness::{self, Call, Hints};
 use rucc_cost::heuristics::{
-    INLINE_CALL_TIME, INLINE_HINT_PERCENT, INLINE_HINT_PERCENT_O3, INLINE_INSNS_AUTO,
-    INLINE_MIN_SPEEDUP, INLINE_MIN_SPEEDUP_O3, INLINE_UNIT_GROWTH, LARGE_FUNCTION_GROWTH,
-    LARGE_FUNCTION_INSNS, LARGE_UNIT_INSNS,
+    INLINE_CALL_TIME, INLINE_HINT_PERCENT, INLINE_HINT_PERCENT_O3, INLINE_MIN_SPEEDUP,
+    INLINE_MIN_SPEEDUP_O3, INLINE_UNIT_GROWTH, LARGE_FUNCTION_GROWTH, LARGE_FUNCTION_INSNS,
+    LARGE_UNIT_INSNS,
 };
 use rucc_ir::{
     AttrSet, Block, Def, Extra, Func, FuncId, Imm, Inst, Linkage, Module, Opcode, Pic, SymbolRef,
@@ -479,9 +479,7 @@ impl Heap<'_> {
                 // What the first pass would have let through, past which it measured a cleaned up
                 // copy as well.
                 let plain = match kind {
-                    Kind::Auto => {
-                        usize::try_from(rucc_cost::param!(INLINE_INSNS_AUTO)).unwrap_or(0) + args
-                    }
+                    Kind::Auto => usize::try_from(self.how.auto).unwrap_or(0) + args,
                     _ => self.how.limit,
                 };
                 let mut passed: Vec<(Value, Imm, Type)> =
@@ -596,8 +594,7 @@ impl Heap<'_> {
             _ => {
                 let within = |hints: Hints| {
                     weighed.growth
-                        < i64::try_from(hints.limit(rucc_cost::param!(INLINE_INSNS_AUTO), percent))
-                            .unwrap_or(i64::MAX)
+                        < i64::try_from(hints.limit(self.how.auto, percent)).unwrap_or(i64::MAX)
                 };
                 within(weighed.hints)
                     || (!hinted && within(one) && weighed.speedup)
