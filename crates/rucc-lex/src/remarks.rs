@@ -77,6 +77,10 @@ impl Remarks {
     /// A universal character name before C99, where GCC says "universal character names are
     /// only valid in C++ and C99" and converts it anyway.
     pub const UCN: Remarks = Remarks(131_072);
+    /// `\(`, `\[`, `\{` and `\%`, which gcc takes quietly as the character itself because editors
+    /// and SCCS want them, so that only `-pedantic` hears about them. bcachefs writes
+    /// `"d_ino_hardlimit\%llu\n"`. GCC says "unknown escape sequence" here too.
+    pub const QUIET_ESCAPE: Remarks = Remarks(262_144);
 
     /// Whether every remark in `other` is set here.
     #[inline]
