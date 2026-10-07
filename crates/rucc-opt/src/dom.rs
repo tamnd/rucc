@@ -50,6 +50,12 @@ trait Graph {
 
     /// Where control goes from this node.
     fn succs(&self, node: Node) -> impl Iterator<Item = Node>;
+
+    /// The nodes the root reaches, children before parents, when the graph has them already in
+    /// the order the walk in [`Tree::new`] would find them in.
+    fn postorder(&self) -> Option<Vec<Node>> {
+        None
+    }
 }
 
 /// A dominator tree over a graph whose nodes are numbered from zero.
@@ -76,27 +82,7 @@ impl Tree {
     fn new(graph: &impl Graph) -> Self {
         let nodes = graph.nodes();
         let root = graph.root();
-
-        // Postorder by an explicit stack. The recursive form runs out of stack on a function
-        // that is one long chain of blocks, and a ten thousand statement function is a real
-        // thing that people write and that generated code writes more of.
-        let mut order: Vec<Node> = Vec::new();
-        let mut seen = vec![false; nodes];
-        seen[root as usize] = true;
-        let mut stack = vec![(root, graph.succs(root))];
-        while let Some((node, mut walk)) = stack.pop() {
-            // Out of the `match` scrutinee, because the closure borrows the seen set and the
-            // arm below writes to it.
-            let step = walk.find(|&next| !seen[next as usize]);
-            match step {
-                Some(next) => {
-                    stack.push((node, walk));
-                    seen[next as usize] = true;
-                    stack.push((next, graph.succs(next)));
-                }
-                None => order.push(node),
-            }
-        }
+        let order = graph.postorder().unwrap_or_else(|| postorder(graph));
 
         // Reverse postorder is the order this fixed point settles fastest in, because every
         // node other than a loop header is reached after a predecessor that already has an
@@ -243,6 +229,33 @@ impl Tree {
     }
 }
 
+/// The nodes the root of a graph reaches, children before parents.
+///
+/// By an explicit stack. The recursive form runs out of stack on a function that is one long chain
+/// of blocks, and a ten thousand statement function is a real thing that people write and that
+/// generated code writes more of.
+fn postorder(graph: &impl Graph) -> Vec<Node> {
+    let root = graph.root();
+    let mut order: Vec<Node> = Vec::new();
+    let mut seen = vec![false; graph.nodes()];
+    seen[root as usize] = true;
+    let mut stack = vec![(root, graph.succs(root))];
+    while let Some((node, mut walk)) = stack.pop() {
+        // Out of the `match` scrutinee, because the closure borrows the seen set and the arm
+        // below writes to it.
+        let step = walk.find(|&next| !seen[next as usize]);
+        match step {
+            Some(next) => {
+                stack.push((node, walk));
+                seen[next as usize] = true;
+                stack.push((next, graph.succs(next)));
+            }
+            None => order.push(node),
+        }
+    }
+    order
+}
+
 /// The nearest node dominating both, walking the two chains towards the root by rank.
 ///
 /// Ranks are reverse postorder positions, so the larger number is the deeper node and stepping
@@ -277,6 +290,14 @@ impl Graph for Forward<'_> {
 
     fn succs(&self, node: Node) -> impl Iterator<Item = Node> {
         self.0.successors(Block::from_usize(node as usize)).iter().map(|b| b.index() as Node)
+    }
+
+    /// The graph's own, which its walk found the same way: the successors in the order the graph
+    /// holds them, the first one not yet seen taken first. The tree is built again every time the
+    /// graph is, and walking it a second time for this was work the graph had already done.
+    /// tamnd/rucc#3052.
+    fn postorder(&self) -> Option<Vec<Node>> {
+        Some(self.0.postorder().iter().map(|b| b.index() as Node).collect())
     }
 }
 
@@ -557,7 +578,7 @@ mod tests {
     use rucc_ir::Block;
 
     use crate::cfg::Cfg;
-    use crate::dom::{Dominators, PostDominators};
+    use crate::dom::{Dominators, Forward, Graph, PostDominators, postorder};
     use crate::testing::{computed_goto, graph};
 
     /// Block number `n`, spelled the way the tests read.
@@ -568,6 +589,23 @@ mod tests {
     /// The immediate dominator of every block, as block numbers, `None` where there is none.
     fn idoms(doms: &Dominators, blocks: usize) -> Vec<Option<usize>> {
         (0..blocks).map(|n| doms.immediate_dominator(b(n)).map(|d| d.index())).collect()
+    }
+
+    #[test]
+    fn the_order_the_graph_keeps_is_the_order_the_walk_would_find() {
+        let shapes: [&[&[usize]]; 6] = [
+            &[&[1], &[2], &[]],
+            &[&[1, 2], &[3], &[3], &[]],
+            &[&[2, 1], &[3], &[1, 3], &[2]],
+            &[&[1], &[2, 3], &[1], &[]],
+            &[&[1, 1, 2], &[0], &[], &[2]],
+            &[&[3, 1, 2], &[2], &[1, 4], &[4, 1], &[]],
+        ];
+        for shape in shapes {
+            let cfg = Cfg::new(&graph(shape));
+            let forward = Forward(&cfg);
+            assert_eq!(forward.postorder(), Some(postorder(&forward)), "{shape:?}");
+        }
     }
 
     #[test]
