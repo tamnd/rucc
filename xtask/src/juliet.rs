@@ -161,6 +161,7 @@ const EXCUSES: &[Excuse] = &[
             "CWE124_Buffer_Underwrite__",
             "CWE126_Buffer_Overread__",
             "CWE127_Buffer_Underread__",
+            "CWE476_NULL_Pointer_Dereference__",
         ],
         variant: Some("_32"),
         fault: Fault::Both,
@@ -188,6 +189,13 @@ const EXCUSES: &[Excuse] = &[
         fault: Fault::Neither,
         why: "the bad half reads its index from a server on the loopback that nothing here runs, \
               so it keeps the -1 it started with, and its own check turns that away",
+    },
+    Excuse {
+        prefixes: &["CWE476_NULL_Pointer_Dereference__null_check_after_deref_"],
+        variant: None,
+        fault: Fault::Neither,
+        why: "the bad half writes through what malloc gave it and checks it for null only after, \
+              which goes wrong only when malloc fails, and here it does not",
     },
 ];
 
@@ -524,7 +532,7 @@ const SUPPORT: [&str; 2] = ["io.c", "std_thread.c"];
 /// One driver for every case, with the two names it calls bound to the case's own functions when
 /// the case is linked, so that it is compiled once rather than once per case. It is compiled by the
 /// system compiler and is not instrumented, and it touches no memory a case owns. It seeds `rand`
-/// when [`SEEDED`] says what with, for the reason [`SEED`] gives.
+/// with what [`SEEDED`] says, for the reason [`HIGH_SEED`] gives.
 const DRIVER: &str = "\
 #include <stdlib.h>
 void juliet_bad(void);
@@ -577,15 +585,22 @@ const LOW: &[u32] = &[124, 127];
 /// The variable the environment sources read.
 const ENVIRONMENT: &str = "ADD";
 
-/// The seed the cases that take their number from `rand` are given, under [`SEEDED`].
+/// The seed every case is given under [`SEEDED`], unless it is under one of the [`LOW`] CWEs.
 ///
-/// Juliet's `main` seeds `rand` with the time and the driver here does not, so an unseeded run
-/// starts glibc's generator where it always starts it, and the first number `RAND32` makes out of
-/// that is negative. That is the number a CWE-124 or CWE-127 case wants and none of the others do:
-/// they check for a negative index and turn it away, and the case is a miss nobody could have
-/// caught. Four is the first seed whose first `RAND32` is past the end of a ten element buffer, so
-/// the cases under the two CWEs in [`LOW`] are left unseeded and the rest are given it.
-const SEED: u32 = 4;
+/// Juliet's `main` seeds `rand` with the time, so the cases that draw from it go wrong on some runs
+/// and not on others, and the driver here seeds it with a number chosen so that they go wrong on
+/// every run. Two kinds of case draw from it. The ones whose source is `rand` take a `RAND32` as
+/// the index, and the bad half checks for a negative one and turns it away. And the variant 12
+/// cases flip `globalReturnsTrueOrFalse` once to choose the source and once more to choose the
+/// sink, and the bad source and the unchecked sink are both the true side. Seventeen is the first
+/// seed under glibc whose first two flips are both true and whose first `RAND32` is ten or more,
+/// both alone and between two true flips, which is how a variant 12 case with a `rand` source
+/// draws them.
+const HIGH_SEED: u32 = 17;
+
+/// The seed the cases under the [`LOW`] CWEs are given, which is [`HIGH_SEED`] with a negative
+/// `RAND32` instead of a large one. Six is the first seed under glibc that does that.
+const LOW_SEED: u32 = 6;
 
 /// The variable the driver reads its seed from.
 const SEEDED: &str = "JULIET_SEED";
@@ -597,8 +612,7 @@ const SEEDED: &str = "JULIET_SEED";
 /// anything else did.
 ///
 /// Each half is given [`HIGH`], or minus one under one of the [`LOW`] CWEs, on its standard input
-/// and in [`ENVIRONMENT`], and a case that takes its number from `rand` is given [`SEED`] in
-/// [`SEEDED`] when it is not under one of those.
+/// and in [`ENVIRONMENT`], and [`HIGH_SEED`] or [`LOW_SEED`] in [`SEEDED`] to match.
 fn one() -> String {
     format!(
         "\
@@ -613,9 +627,8 @@ if ! gcc -no-pie \"$tier/$id\"/*.o \"$tier\"/support/*.o \"$out/driver.o\" safe-
     exit 0
 fi
 case $id in
-{low}) input=-1 seed= ;;
-*_rand_*) input={HIGH} seed={SEED} ;;
-*) input={HIGH} seed= ;;
+{low}) input=-1 seed={LOW_SEED} ;;
+*) input={HIGH} seed={HIGH_SEED} ;;
 esac
 half() {{
     printf '%s\\n' \"$input\" | {ENVIRONMENT}=\"$input\" {SEEDED}=\"$seed\" timeout {SECONDS} \"$program\" \"$1\" \\
@@ -860,9 +873,7 @@ mod tests {
     #[test]
     fn a_half_is_given_the_number_that_makes_its_bad_half_go_wrong() {
         let one = one();
-        assert!(one.contains(
-            "CWE124_*|CWE127_*) input=-1 seed= ;;\n*_rand_*) input=10 seed=4 ;;\n*) input=10 seed= ;;"
-        ));
+        assert!(one.contains("CWE124_*|CWE127_*) input=-1 seed=6 ;;\n*) input=10 seed=17 ;;"));
         assert!(one.contains(
             "printf '%s\\n' \"$input\" | ADD=\"$input\" JULIET_SEED=\"$seed\" timeout 10 "
         ));
@@ -965,5 +976,6 @@ mod tests {
         assert!(excuse.covers("CWE121_Stack_Based_Buffer_Overflow__CWE805_char_declare_loop_32"));
         assert!(!excuse.covers("CWE121_Stack_Based_Buffer_Overflow__CWE805_char_declare_loop_31"));
         assert!(!excuse.covers("CWE122_Heap_Based_Buffer_Overflow__c_CWE805_char_loop_32"));
+        assert!(excuse.covers("CWE476_NULL_Pointer_Dereference__int_32"));
     }
 }
