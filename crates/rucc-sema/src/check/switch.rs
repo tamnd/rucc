@@ -18,7 +18,8 @@
 //! * Then each case value that is no enumerator's is said at its `case`, in the order of the
 //!   values, under the same pair of options. Each end of a range has to be an enumerator's own,
 //!   so `case A ... C` is quiet about its middle and `case 4 ... 5` is said twice. An enumeration
-//!   with no enumerators says none of this.
+//!   with no enumerators says none of this, nor does one marked `flag_enum`, gcc 15's way of
+//!   saying that its values are bits to be combined.
 //!
 //! gcc names an enumeration with a tag by the typedef the controlling expression was declared
 //! with, where there was one, as `'t2' {aka 'enum e2'}`. A typedef name is not kept on the type
@@ -28,8 +29,14 @@
 //! `switch` on the enumeration there. Before C23 this compiler gives an enumerator the `int` it
 //! is, and a `switch` on one is not checked. Nor is gcc's exception for the enumerators with
 //! reserved names a system header declares, which this checker has no system headers to tell.
+//!
+//! `flag_enum` marks an enumeration where it is written about the enumeration itself, as
+//! `enum __attribute__((flag_enum)) f { ... }` or after the closing brace. gcc also takes it on
+//! a declaration or a typedef of an enumeration, as being about a variant of the type that
+//! declaration has, and this compiler, which keeps no such variants, takes it there and does
+//! nothing with it. On any other type it is ignored with gcc's warning.
 
-use rucc_ast::{self as ast, AttrList, AttrSyntax, BinaryOp, UnaryOp};
+use rucc_ast::{self as ast, AttrList, AttrSyntax, Attribute, BinaryOp, UnaryOp};
 use rucc_base::Symbol;
 use rucc_diag::{Diagnostic, Span};
 use rucc_types::{EnumId, TypeId, TypeKind};
@@ -47,6 +54,8 @@ const SWITCH_ENUM: &str = "E0853";
 const SWITCH_DEFAULT: &str = "E0854";
 /// The code of the warning about a `switch` on a truth value.
 const SWITCH_BOOL: &str = "E0855";
+/// The code of the error about `flag_enum` given arguments.
+const FLAG_ENUM_ARITY: &str = "E0856";
 
 /// What one `switch` was found to be once its body was read.
 pub(in crate::check) struct Switched<'a> {
@@ -84,6 +93,58 @@ impl Checker<'_> {
         if unused {
             self.advice.unused_enumerators.insert((id, name));
         }
+    }
+
+    /// Remembers an enumeration marked `flag_enum`, whose values are bits a program may combine,
+    /// so that a case value made of them is not one a `switch` on it says is not among them.
+    pub(in crate::check) fn read_flag_enum(&mut self, id: EnumId, attrs: AttrList) {
+        let ast = self.ast;
+        let mut marked = false;
+        for &attr in &ast[attrs] {
+            if self.is_flag_enum(&attr) {
+                marked |= self.flag_enum_arity(attr);
+            }
+        }
+        if marked {
+            self.advice.flag_enums.insert(id);
+        }
+    }
+
+    /// Says what gcc says of `flag_enum` written about a type that is not an enumeration, which
+    /// is that it is ignored. On a declaration it is about the type declared.
+    pub(in crate::check) fn flag_enum_misplaced(&mut self, lists: &[AttrList], ty: TypeId) {
+        if matches!(self.types.kind(self.types.canonical(ty)), TypeKind::Enum(_)) {
+            return;
+        }
+        let ast = self.ast;
+        for &attrs in lists {
+            for &attr in &ast[attrs] {
+                if self.is_flag_enum(&attr) && self.flag_enum_arity(attr) {
+                    let what = "'flag_enum' attribute ignored on non-enum";
+                    self.report(Diagnostic::warning(what, attr.span).with_code("E0703"));
+                }
+            }
+        }
+    }
+
+    /// Whether that is `flag_enum`, in any of gcc 15's spellings, `clang::flag_enum` among them.
+    fn is_flag_enum(&self, attr: &Attribute) -> bool {
+        if attr.namespace.is_some_and(|ns| self.text(ns) == "clang") {
+            return self.gnu_name(&Attribute { namespace: None, ..*attr }) == "flag_enum";
+        }
+        self.gnu_name(attr) == "flag_enum"
+    }
+
+    /// Whether `flag_enum` was given no arguments, as it takes, said in gcc's words where not.
+    fn flag_enum_arity(&mut self, attr: Attribute) -> bool {
+        let count = self.ast[attr.args].len();
+        if count == 0 {
+            return true;
+        }
+        let what = "wrong number of arguments specified for 'flag_enum' attribute";
+        let refused = Diagnostic::error(what, attr.span).with_code(FLAG_ENUM_ARITY);
+        self.report(refused.note(format!("expected 0, found {count}"), attr.span));
+        false
     }
 
     /// Whether gcc reads a controlling expression as a truth value, given as it was written and
@@ -190,7 +251,9 @@ impl Checker<'_> {
                 .with_code(code),
             );
         }
-        if enumerators.is_empty() {
+        // A value made of an enumeration's bits is one of its values when it says it is made of
+        // them.
+        if enumerators.is_empty() || self.advice.flag_enums.contains(&id) {
             return;
         }
         let named = self.enumerated(id, switch.written);

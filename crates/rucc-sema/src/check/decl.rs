@@ -766,6 +766,7 @@ impl Checker<'_> {
         let name = node.name?;
         let span = node.name_span;
         let specs = self.ast[specs];
+        self.flag_enum_misplaced(&[specs.attrs, item.attrs], ty);
         if specs.is_typedef() {
             return self.typedef(name, ty, &specs, item, span);
         }
