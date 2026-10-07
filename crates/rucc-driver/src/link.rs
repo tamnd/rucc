@@ -142,6 +142,9 @@ pub struct LinkOptions {
     pub no_defaultlibs: bool,
     /// `-rdynamic`, which puts every symbol in the dynamic table so a program can look itself up.
     pub export_dynamic: bool,
+    /// `-fhardened` on a link that names no other link option against it. The line then has `-z now`
+    /// and `-z relro`, as gcc's has.
+    pub hardened: bool,
     /// `-s`, which drops the symbol table.
     pub strip: bool,
     /// `-mwindows` rather than `-mconsole`, whichever came last. Only a Windows line reads it.
@@ -1516,6 +1519,9 @@ pub fn line(
             how => args.push(format!("--compress-debug-sections={how}")),
         }
     }
+    if opts.hardened && target.os == Os::Linux {
+        args.extend(["-z", "now", "-z", "relro"].map(str::to_owned));
+    }
     Ok(args)
 }
 
@@ -2569,6 +2575,17 @@ mod tests {
         let args = line(linux(), &LinkOptions::default(), &one("a.o"), "a.out").expect("a line");
         let at = args.iter().position(|a| a == "-dynamic-linker").expect("the flag");
         assert!(args[at + 1].ends_with("/lib64/ld-linux-x86-64.so.2"), "{args:?}");
+    }
+
+    /// `-fhardened` asks the linker for `-z now` and `-z relro`, as gcc does.
+    #[test]
+    fn a_hardened_link_binds_now_and_has_relro() {
+        let args = line(linux(), &LinkOptions::default(), &one("a.o"), "a.out").expect("a line");
+        assert!(!args.iter().any(|a| a == "now"), "{args:?}");
+        let opts = LinkOptions { hardened: true, ..LinkOptions::default() };
+        let args = line(linux(), &opts, &one("a.o"), "a.out").expect("a line");
+        assert!(args.windows(2).any(|pair| pair == ["-z", "now"]), "{args:?}");
+        assert!(args.windows(2).any(|pair| pair == ["-z", "relro"]), "{args:?}");
     }
 
     /// Kbuild's `built-in.o`, which is objects joined into an object and is linked again later.
