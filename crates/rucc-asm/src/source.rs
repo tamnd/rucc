@@ -927,8 +927,14 @@ impl Reader {
                     .flat()
                 })
                 .flatten();
+            // A relocation specifier reads its sum with no spaces in it: `:lo12:table + 1`.
+            let specified = text.trim_start_matches('#').starts_with(':');
             match number {
                 Some(number) => out.push_str(&format!(" #{number}")),
+                None if specified => {
+                    out.push(' ');
+                    out.extend(text.chars().filter(|c| !c.is_whitespace()));
+                }
                 None => out.push_str(piece),
             }
         }
@@ -2134,8 +2140,8 @@ impl Reader {
             // rather than refused, because a file that carries them is otherwise readable and
             // refusing would turn a note into a failure.
             "ident" if self.elf() => self.ident(&args)?,
-            "ident" | "loc_mark_labels" | "version" | "arch" | "arch_extension" | "att_syntax"
-            | "intel_syntax" => {}
+            "ident" | "loc_mark_labels" | "version" | "arch" | "arch_extension" | "cpu"
+            | "att_syntax" | "intel_syntax" => {}
             "code32" | "code64" if !self.aarch64 => {
                 self.code = Some(if word == "code32" { Mode::Bits32 } else { Mode::Bits64 });
                 self.sixteen = None;
@@ -6344,6 +6350,19 @@ _tls$tlv$init:
             ]
         );
         assert_eq!(relocs(&read, ".text"), [(24, "sym", Reference::Address { bytes: 4 }, 0)]);
+    }
+
+    #[test]
+    fn an_aarch64_sum_after_a_relocation_specifier_may_have_spaces_in_it() {
+        // What the arm64 kernel's `adr_l` writes for `aes_enc_tab + 1`, under the `.cpu` line
+        // crc32-core.S starts with, and the relocations llvm-mc writes for the same text.
+        let read = aarch64(concat!(
+            "\t.cpu generic+crc\n\tadrp x0, table + 1\n\tadd x0, x0, :lo12:table + 1\n",
+            "\tldr x1, [x0, #:lo12:table + 8]\n",
+        ));
+        let relocs: Vec<_> =
+            relocs(&read, ".text").into_iter().map(|(at, _, _, addend)| (at, addend)).collect();
+        assert_eq!(relocs, [(0, 1), (4, 1), (8, 8)]);
     }
 
     #[test]
