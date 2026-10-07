@@ -4,17 +4,23 @@
 //! `rucc_safe_rt::stack`, which keeps one init bit per byte of the thread's stack. A bit is only
 //! worth anything once somebody has said which bytes are a local that has not been written yet, and
 //! that is what this pass puts in: `__rucc_local_begin(base, size)` at the top of the function for
-//! each local it picks, and `__rucc_local_end(base, size)` in front of every return.
+//! each local it picks, again at each `meta_begin` of it, and `__rucc_local_end(base, size)` in front
+//! of every return.
+//!
+//! A `meta_begin` is where the front end reached the declaration of a local in a block, and C11
+//! 6.2.4p6 says the value of one is indeterminate each time its declaration is reached. So a local
+//! that loses its value at the bottom of a loop and is read at the top of the next time round is a
+//! read of nothing, and saying so takes beginning it again there.
 //!
 //! # Which locals
 //!
-//! A local is begun only when three things hold. Some `check_init` reads through it, because a
-//! local nobody asks about gains nothing from being tracked. Its address goes nowhere this pass
+//! A local is begun only when two things hold. Some `check_init` reads through it, because a local
+//! nobody asks about gains nothing from being tracked. And its address goes nowhere this pass
 //! cannot see, because a write by code that was not built with the flag, a library routine handed
 //! the address or a pointer stored into memory and written through later, would leave the plane
 //! saying the bytes were never written when they were, and that is a refusal of a correct program.
-//! And it has no `lifetime_end`, because a local with one may share its bytes with another, and
-//! beginning the one would say nothing true about the other.
+//! A `lifetime_end` does not count, since a build with this pass in it never gives two locals the
+//! same bytes.
 //!
 //! Every way of using the address that is not on the list in [`kept`] counts as it going
 //! somewhere. That is the conservative way round: a local wrongly left out is a read the plane does
@@ -85,6 +91,17 @@ pub(crate) fn begin(func: &mut Func, names: &mut Interner, word: Type) {
         let data = crate::lower::calling(func, names, BEGIN, &params, &[], &[base, len]);
         let made = func.create_inst(data, &[], func.span(first));
         func.insert_before(made, first);
+        for &inst in &insts {
+            if func[inst].opcode != Opcode::MetaBegin
+                || func[func[inst].args].first() != Some(&base)
+            {
+                continue;
+            }
+            let len = crate::lower::konst(func, inst, Imm::int(i128::from(size), word), word);
+            let data = crate::lower::calling(func, names, BEGIN, &params, &[], &[base, len]);
+            let made = func.create_inst(data, &[], func.span(inst));
+            func.insert_before(made, inst);
+        }
         for &end in &ends {
             let len = crate::lower::konst(func, end, Imm::int(i128::from(size), word), word);
             let data = crate::lower::calling(func, names, END, &params, &[], &[base, len]);
@@ -153,10 +170,10 @@ fn wanted(func: &Func, insts: &[Inst], locals: &[(Value, u64)]) -> Set<Value> {
 
 /// Whether an address in operand `index` of an `opcode` stays where this pass can see it.
 ///
-/// A `lifetime_end` is not here, which is what leaves a local with one out.
+/// A `lifetime_end` is here, because nothing shares a local's bytes in a build that has this pass.
 fn kept(opcode: Opcode, index: usize) -> bool {
     match opcode {
-        Opcode::Load | Opcode::PtrAdd | Opcode::Memset => index == 0,
+        Opcode::Load | Opcode::PtrAdd | Opcode::Memset | Opcode::LifetimeEnd => index == 0,
         Opcode::Store => index == 1,
         Opcode::Memcpy | Opcode::Memmove => index < 2,
         Opcode::ICmp => true,
@@ -243,21 +260,29 @@ block0(%0: ptr):
     }
 
     #[test]
-    fn a_local_with_a_lifetime_end_is_left_alone() {
+    fn a_local_in_a_block_is_begun_again_where_its_declaration_is_reached() {
         let got = calls(
             r#"
-func @f() -> i32, linkage(external) {
-block0:
-    %0 = alloca, size 4, align 4
-    %1 = cap_of %0
-    check_init %1, %0, size 4, align 4
-    %2 = load.i32 %0, align 4
-    lifetime_end %0
-    return %2
+func @f(i1) -> i32, linkage(external) {
+block0(%0: i1):
+    %1 = alloca, size 4, align 4
+    %2 = cap_of %1
+    %3 = iconst.i64 4
+    jump block1
+
+block1:
+    meta_begin %1, %3, class automatic
+    check_init %2, %1, size 4, align 4
+    %4 = load.i32 %1, align 4
+    lifetime_end %1
+    br_if %0, block1, block2
+
+block2:
+    return %4
 }
 "#,
         );
-        assert!(got.is_empty(), "{got:?}");
+        assert_eq!(got, [BEGIN, BEGIN, END]);
     }
 
     #[test]

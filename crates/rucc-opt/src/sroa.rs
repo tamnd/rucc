@@ -613,6 +613,9 @@ fn access(
             Found::Use(Use::Store { at: start, size: width, ty, value })
         }
         (Opcode::LifetimeEnd, &[address]) if at(address).is_some() => Found::End,
+        // Where the safety build's front end says the local's lifetime begins, which is as much
+        // a marker as its end and goes with the local the same way.
+        (Opcode::MetaBegin, &[address, _]) if at(address) == Some(0) => Found::End,
         (Opcode::Memset | Opcode::Memcpy | Opcode::Memmove, _) if !volatile => {
             let Some(found) = bulk(func, inst, offsets, size) else {
                 return Ok(None);

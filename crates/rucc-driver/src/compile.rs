@@ -487,11 +487,14 @@ pub fn compile(opts: &Options, name: &str, fs: &dyn FileSystem) -> Compiled {
                             exceptions: opts.exceptions,
                             non_call_exceptions: opts.exceptions && opts.non_call_exceptions,
                             // The same answer `reuse` below is given, since the markers are only
-                            // read where locals may share bytes.
+                            // read where locals may share bytes, and always under the safety
+                            // instrumentation, which reads them as where a local is out of scope
+                            // and never shares a byte because of them.
                             lifetimes: opts
                                 .stack_reuse
                                 .unwrap_or_else(|| opts.opt_level.runs_optimizer())
-                                && !opts.safety.instruments(),
+                                || opts.safety.instruments(),
+                            begins: opts.safety.instruments(),
                             common,
                             zero_bss: opts.zero_initialized_in_bss,
                             builtins: opts.builtins && opts.hosted,
@@ -985,8 +988,9 @@ struct Instrumented {
 /// by the walk for blocks apart from each other and by the inliner for bodies spliced into the
 /// same caller.
 ///
-/// The same answer the code generator gets for its own sharing, less a build that checks accesses,
-/// which reasons about each local as an object of its own and should not find two at one address.
+/// The same answer the code generator gets for its own sharing. Neither shares in a build that
+/// checks accesses, which reasons about each local as an object of its own and should not find
+/// two at one address.
 fn shares_slots(opts: &Options) -> bool {
     opts.stack_reuse.unwrap_or_else(|| opts.opt_level.runs_optimizer())
         && !opts.safety.instruments()
@@ -1345,7 +1349,9 @@ fn generate(
         // run of bytes between two locals is a smaller frame and a worse debugger: a variable that
         // is out of scope reads as whatever took its place, which is what `-O0` exists not to do.
         // Above it the frame is the win, and `-fstack-reuse=` says either answer at any level.
-        reuse: opts.stack_reuse.unwrap_or_else(|| opts.opt_level.runs_optimizer()),
+        // Never under the safety instrumentation, where a local that is out of scope keeps its
+        // bytes so a pointer to it that is used later finds them and not some other local.
+        reuse: shares_slots(opts),
         // On at every level above `-O0`, where gcc reads a spilled value out of the frame in the
         // instruction that wants it rather than into a register first. See
         // `rucc_codegen::copies::reloads`.

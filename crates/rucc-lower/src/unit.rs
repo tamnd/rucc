@@ -223,11 +223,19 @@ pub struct Context<'a> {
     /// of it or by a `break` or a `continue`.
     ///
     /// Asked for by a build that lets two locals share bytes in the frame, which is what the
-    /// markers are for, and by nothing else. A build that does not share has nothing to read them
-    /// and every pass in between would only have one more instruction to walk past, and a build
-    /// with the safety instrumentation keeps every local in bytes of its own, since the checks it
-    /// puts in were written against a frame in which no two locals share any.
+    /// markers are for, and by a build with the safety instrumentation, which reads them as the
+    /// point a pointer to the local stops being one the program may use. That build keeps every
+    /// local in bytes of its own all the same, since the checks it puts in were written against a
+    /// frame in which no two locals share any. A build that does neither has nothing to read them
+    /// and every pass in between would only have one more instruction to walk past.
     pub lifetimes: bool,
+    /// Whether the walk also says where the lifetime of a local in memory begins, which is a
+    /// `meta_begin` where its declaration is reached, in front of the initializer.
+    ///
+    /// The safety instrumentation's, and only asked for along with [`Context::lifetimes`]. A local
+    /// that a label after its declaration could reach from outside its block has none, because
+    /// control arriving there has started the local's lifetime without passing a marker.
+    pub begins: bool,
     /// Whether a tentative definition with external linkage is a common symbol, which is
     /// `-fcommon` and the default on Darwin, rather than a zeroed object in `.bss`.
     pub common: bool,
@@ -384,6 +392,7 @@ pub fn lower(name: &str, cx: Context<'_>) -> Lowered {
         exceptions,
         non_call_exceptions,
         lifetimes,
+        begins,
         common,
         zero_bss,
         builtins,
@@ -416,6 +425,7 @@ pub fn lower(name: &str, cx: Context<'_>) -> Lowered {
         exceptions,
         non_call_exceptions,
         lifetimes,
+        begins,
         common,
         zero_bss,
         builtins,
@@ -483,6 +493,8 @@ pub(crate) struct Unit<'a> {
     pub(crate) non_call_exceptions: bool,
     /// Whether the end of a local's lifetime is written down. See [`Context::lifetimes`].
     pub(crate) lifetimes: bool,
+    /// Whether the start of a local's lifetime is written down. See [`Context::begins`].
+    pub(crate) begins: bool,
     /// Whether a tentative definition is a common symbol. See [`Context::common`].
     common: bool,
     /// Whether a zero initializer may put a variable in `.bss`. See [`Context::zero_bss`].

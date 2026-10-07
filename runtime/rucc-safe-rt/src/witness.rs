@@ -14,6 +14,15 @@
 //! serial or something that is not a witness at all, so a pointer that outlived its frame finds a
 //! word that does not match and is refused.
 //!
+//! # Block scope
+//!
+//! A local declared in a block whose address is taken and that the compiler can see go out of
+//! scope gets a witness of its own rather than the frame's. It is opened with the frame and shut
+//! by [`shut`] where control leaves the block, which writes [`SHUT`] over the mark and keeps the
+//! serial, so the same check refuses a pointer to it from then on. Reaching the declaration again
+//! puts the mark back with [`reopen`], with the same serial, because a capability made once at the
+//! top of the function for that local is still the one every later pass through the block uses.
+//!
 //! # What it gets wrong, and which way
 //!
 //! Every way it can be wrong is quiet. A frame left by `longjmp` never clears its witness, so a
@@ -47,6 +56,10 @@ static SERIAL: Slot = Slot::new(crate::tls::SERIAL);
 /// unlikely to pass for one.
 pub const MARK: u64 = 0x7275_6363_7769_0000;
 
+/// What the high bits of a witness hold while the block its local was declared in is not running,
+/// which is not [`MARK`] and so is gone to every capability made while it was.
+pub const SHUT: u64 = 0x7275_6363_7368_0000;
+
 /// How many bits of a version are the witness's address.
 const SHIFT: u32 = 48;
 
@@ -78,6 +91,36 @@ pub unsafe fn close(witness: *mut u64) {
     // SAFETY: the caller's word. Volatile so that a store to a frame about to go away is not one
     // anything decides nobody reads.
     unsafe { witness.write_volatile(0) };
+}
+
+/// Shuts `witness` when it is open, which is where control leaves the block of the local it
+/// belongs to.
+///
+/// # Safety
+///
+/// As [`open`].
+pub unsafe fn shut(witness: *mut u64) {
+    // SAFETY: the caller's word.
+    let held = unsafe { witness.read_volatile() };
+    if held & !SERIALS == MARK {
+        // SAFETY: as above.
+        unsafe { witness.write_volatile(SHUT | (held & SERIALS)) };
+    }
+}
+
+/// Opens `witness` again with the serial it had when it is shut, which is where control reaches
+/// the declaration of the local it belongs to.
+///
+/// # Safety
+///
+/// As [`open`].
+pub unsafe fn reopen(witness: *mut u64) {
+    // SAFETY: the caller's word.
+    let held = unsafe { witness.read_volatile() };
+    if held & !SERIALS == SHUT {
+        // SAFETY: as above.
+        unsafe { witness.write_volatile(MARK | (held & SERIALS)) };
+    }
 }
 
 /// The version a capability for a local of the frame `witness` belongs to carries.
@@ -147,6 +190,28 @@ pub mod exports {
         // SAFETY: as above.
         unsafe { super::close(witness) };
     }
+
+    /// As [`super::shut`].
+    ///
+    /// # Safety
+    ///
+    /// As [`super::shut`].
+    #[unsafe(no_mangle)]
+    pub unsafe extern "C" fn __rucc_scope_shut(witness: *mut u64) {
+        // SAFETY: as above.
+        unsafe { super::shut(witness) };
+    }
+
+    /// As [`super::reopen`].
+    ///
+    /// # Safety
+    ///
+    /// As [`super::reopen`].
+    #[unsafe(no_mangle)]
+    pub unsafe extern "C" fn __rucc_scope_open(witness: *mut u64) {
+        // SAFETY: as above.
+        unsafe { super::reopen(witness) };
+    }
 }
 
 #[cfg(test)]
@@ -184,6 +249,31 @@ mod tests {
             let again = recover::local((&raw const local).cast(), 4, &raw const witness);
             assert!(!gone(&again));
             close(&raw mut witness);
+        }
+    }
+
+    #[test]
+    fn a_local_is_gone_while_its_block_is_shut_and_back_when_it_opens_again() {
+        let mut witness = 0_u64;
+        let local = 0_u32;
+        // SAFETY: as above.
+        unsafe {
+            open(&raw mut witness);
+            let cap = recover::local((&raw const local).cast(), 4, &raw const witness);
+            reopen(&raw mut witness);
+            assert!(!gone(&cap), "opening an open witness leaves it alone");
+            shut(&raw mut witness);
+            assert!(gone(&cap));
+            shut(&raw mut witness);
+            assert!(gone(&cap));
+            let late = recover::local((&raw const local).cast(), 4, &raw const witness);
+            assert_eq!(late.ver, crate::plane::FOREIGN, "made while shut, so never asked");
+            reopen(&raw mut witness);
+            assert!(!gone(&cap), "the same serial");
+            close(&raw mut witness);
+            reopen(&raw mut witness);
+            assert!(gone(&cap), "a closed frame is not opened by a block");
+            assert_eq!(witness, 0);
         }
     }
 
