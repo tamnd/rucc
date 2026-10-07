@@ -609,7 +609,7 @@ impl<'a> Run<'a> {
                     if next.ident() == Some(self.va_opt) {
                         if let Some(inner) = va_opt_group(is, at + 1) {
                             let close = inner.end;
-                            let raw = if args.raw(def.arity()).is_empty() {
+                            let raw = if self.no_variadic_tokens(def, args) {
                                 Vec::new()
                             } else {
                                 self.subst_raw(def, args, &is[inner])
@@ -708,11 +708,19 @@ impl<'a> Run<'a> {
         invocation: Tok,
         span: Span,
     ) -> Vec<Tok> {
-        if args.raw(def.arity()).is_empty() {
+        if self.no_variadic_tokens(def, args) {
             return vec![Tok::placemarker_at(span)];
         }
         let value = self.subst_list(def, args, inner, invocation);
         if value.is_empty() { vec![Tok::placemarker_at(span)] } else { value }
+    }
+
+    /// Whether the variadic argument is empty once it has been expanded, which is the test
+    /// `__VA_OPT__` makes in C23 and in gcc and Clang. An argument that is a macro expanding to
+    /// nothing counts as no argument at all, and the kernel depends on that: xe's `IF_ARGS`
+    /// asks `__VA_OPT__` whether `PICK_ARG3(70, 44)` picked anything.
+    fn no_variadic_tokens(&mut self, def: &MacroDef, args: &mut Args) -> bool {
+        args.raw(def.arity()).is_empty() || args.expanded(def.arity(), self).is_empty()
     }
 
     /// Substitution with parameters replaced by their unexpanded arguments, which is what
@@ -808,7 +816,13 @@ impl<'a> Run<'a> {
             span: lhs.span.to(rhs.span),
             expansion: lhs.expansion,
             trace: lhs.trace,
-            hides: self.hides.union(lhs.hides, rhs.hides),
+            // Only what hides both halves hides the token they make, as in Prosser's `glue`. A
+            // name the argument half picked up inside an expansion that has already finished,
+            // such as the `DROP_FIRST_ARG` that took the head off a list, says nothing about the
+            // new name, and the macro that is expanding now is added to every token of its body
+            // after this anyway. With the union a name made by pasting, and everything in its
+            // body, could not call any macro that had once taken its argument apart.
+            hides: self.hides.intersect(lhs.hides, rhs.hides),
             placemarker: false,
         })
     }
