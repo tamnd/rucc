@@ -45,6 +45,7 @@ All notable changes are recorded here. The format follows [Keep a Changelog](htt
 
 ### Fixed
 
+- An `asm` operand can be a vector, carried in the floating point type of its width, so `"w" (p)` for a `uint64x2_t` lands in a vector register on AArch64 and the kernel's xor-eor3 builds. (#3320)
 - A `const` object with a constant initializer is taken as a case label, and in a static assertion inside a function, once `-O1` or above is given, the way gcc folds it there, so the kernel's msm dp_ctrl builds. At `-O0` both stay errors as in gcc, and `-pedantic` warns in gcc's words (`E0848`, `E0849`). (#3318)
 - Under `-fsafety`, a loop the optimizer splits into a half with no checks and a half with all of them no longer runs into the rounding of a heap block in the unchecked half. The split was made at how much of the block the lifetime plane covers, which is the block rounded up to its size class, so eleven bytes copied one at a time into `malloc(10)` were refused at -O0 and went through at -O2. It is now made at what the block's header says was asked for. Juliet's CWE-122 CWE193 loop cases have this shape. (#3317)
 - An array that lives for the whole program can be initialized from a compound literal of its own array type, as gcc allows, which is how the kernel's FCoE headers spell their MAC addresses, so fcoe_ctlr and qedf_fip build. (#3314)

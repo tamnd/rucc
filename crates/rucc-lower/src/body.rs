@@ -2819,7 +2819,8 @@ impl<'u> Body<'_, 'u> {
                 args.push(addr);
                 continue;
             }
-            let record = self.record_in_a_register(place.ty);
+            let record =
+                self.record_in_a_register(place.ty).or_else(|| self.vector_in_a_register(place.ty));
             let ty = match record {
                 Some(ty) => ty,
                 None => self.value_type(place.ty, at),
@@ -2847,7 +2848,9 @@ impl<'u> Body<'_, 'u> {
                 space = space.union(self.space(place.ty));
                 let addr = self.address_of(place, at);
                 args.push(addr);
-            } else if let Some(ty) = self.record_in_a_register(ty) {
+            } else if let Some(ty) =
+                self.record_in_a_register(ty).or_else(|| self.vector_in_a_register(ty))
+            {
                 let place = self.place(operand.value);
                 let value = self.load_record(place, ty, at);
                 args.push(value);
@@ -2923,7 +2926,10 @@ impl<'u> Body<'_, 'u> {
     /// every edge out of an `asm goto` and once after any other.
     fn asm_writes(&mut self, writes: &[Place], produced: &[Value], span: Span) {
         for (&place, &value) in writes.iter().zip(produced) {
-            match self.record_in_a_register(place.ty) {
+            match self
+                .record_in_a_register(place.ty)
+                .or_else(|| self.vector_in_a_register(place.ty))
+            {
                 Some(_) => self.store_record(place, value, span),
                 None => {
                     self.write(place, value, span);
@@ -3039,6 +3045,27 @@ impl<'u> Body<'_, 'u> {
         }
         let size = repr::size_of(self.types(), self.target(), ty);
         Some(Type::int(u32::try_from(size).ok()? * 8))
+    }
+
+    /// The type a vector an `asm` operand names is carried in, which is the floating point type
+    /// of its width, and [`None`] for anything else.
+    ///
+    /// A vector is an object in memory everywhere else in the lowering, and an operand has to be
+    /// a value. The floating point type of the same width is one the back end keeps in the
+    /// register file AArch64's `w` and x86's `x` ask for, and a load and a store of it move the
+    /// bits and nothing else, so the lanes come out of the statement the way they went in. The
+    /// kernel's RAID code writes `"w" (p)` for a `uint64x2_t` around an `eor3`.
+    fn vector_in_a_register(&mut self, ty: TypeId) -> Option<Type> {
+        if !rucc_types::is_vector(self.types(), ty) {
+            return None;
+        }
+        let format = match repr::size_of(self.types(), self.target(), ty) {
+            4 => rucc_ir::Float::F32,
+            8 => rucc_ir::Float::F64,
+            16 => rucc_ir::Float::F128,
+            _ => return None,
+        };
+        Some(Type::float(format))
     }
 
     /// One of those read out of the object it is in.
