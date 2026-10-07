@@ -35,6 +35,17 @@ The consequence is a rule rather than a note. A crash under emulation is tried a
 
 The same job on a real x86-64 runner has not crashed once. So this entry is about the emulated path and the hardware path is clean, which is exactly the distinction section 14.4 asks these entries to make.
 
+## Build systems on Linux
+
+The build system fixtures in `probes/linux/buildsys/` of tamnd/rucc-compat configure autotools with libtool, CMake, meson, zlib, OpenSSL and Python projects with `CC=gcc` and with `CC=rucc`, and compare the two configurations. The reference is GCC 16.2.1 in Arch Linux. The differences below are on purpose. Each other difference is a fault, and the README of the fixtures names the issue that fixes it.
+
+| Fixture | Difference | Why |
+|---|---|---|
+| CMake, meson | The compiler version is 16.0.0. GCC gives 16.2.1. | rucc claims GCC 16 and does not follow the minor releases. `-fgnuc-version=` sets a different version. |
+| CMake | `CMAKE_C_IMPLICIT_INCLUDE_DIRECTORIES` has no GCC directory. | The rucc headers, for example `stddef.h` and `stdatomic.h`, are inside the binary. The `-v` search list names only the directories on the disk. |
+| CMake | `CMAKE_C_IMPLICIT_LINK_LIBRARIES` has `librucc_builtins.a` and no `libatomic`. | The rucc runtime library gives the `__atomic_*` routines and the other compiler routines. rucc still links `libgcc` and `libgcc_s` for the unwinder. |
+| CMake, meson | `-fopenmp` and `-fsanitize=address` are refused. | rucc has no OpenMP runtime. For the sanitizers, the message names `-fsafety=detect`. A refused flag is better than a flag that does nothing. |
+
 ## The architectures the reference corpora run on
 
 `aarch64-linux-musl`, `riscv64-linux-musl`, `armv7-linux-musleabihf` and `x86_64-linux-musl` run the layout, executing and signature corpora under qemu, built by the reference on both sides, and `x86_64-linux-gnu` runs them on the runner's own hardware. The first run of the signature corpus over that set was five rows passing, none failing and no crash retried, with the ninety two functions including the thirty four variadic ones. So the corpus is a program that runs on four architectures rather than one, which is a fact worth having about the corpus before it is used to say anything about the compiler.
