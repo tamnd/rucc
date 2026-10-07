@@ -4,7 +4,8 @@
 //! tamnd/rucc#1994. Postgres calls through a table of methods everywhere: `pfree` ends in a jump
 //! through the method its chunk header picks, and every node of a plan runs through the pointer it
 //! carries. rucc loaded the pointer into a register and went through that, where gcc writes
-//! `jmp *16(%rdi)` and `call *(%rax)`.
+//! `jmp *16(%rdi)` and `call *(%rax)`. Every handler of its expression interpreter goes to the
+//! next through the step it is at, which clang writes as `jmp *(%rcx)`.
 
 use std::path::{Path, PathBuf};
 use std::process::Command;
@@ -28,7 +29,8 @@ fn run(dir: &Path, args: &[&str]) -> (bool, String) {
 }
 
 /// A tail call through a field, a call through a field of a field, a tail call through a table a
-/// header picks the entry of, and a `main` that runs all three over a spread of values.
+/// header picks the entry of, an interpreter whose handlers go to the next one through the step
+/// they are at, and a `main` that runs all four over a spread of values.
 const PROGRAM: &str = r#"
 int printf(const char *, ...);
 
@@ -52,6 +54,33 @@ __attribute__((noinline)) int go(struct node *n, int x) { return n->ops->go(n, x
 
 __attribute__((noinline)) int dispatch(const long *p) { return methods[p[-1] & 3](p[0]); }
 
+struct step {
+  const void *op;
+  long arg;
+};
+
+__attribute__((noinline)) long interp(struct step *s, int init) {
+  static const void *const ops[] = {&&push, &&add, &&done};
+  if (init) {
+    for (struct step *p = s;; p++) {
+      p->op = ops[p->arg >> 8];
+      if (p->arg >> 8 == 2) return 0;
+    }
+  }
+  long acc = 0;
+  goto *s->op;
+push:
+  acc = acc * 10 + (s->arg & 0xff);
+  s++;
+  goto *s->op;
+add:
+  acc += s->arg & 0xff;
+  s++;
+  goto *s->op;
+done:
+  return acc;
+}
+
 static int twice(struct node *n, int x) { return (int) n->id * 2 + x; }
 static int thrice(struct node *n, int x) { return (int) n->id * 3 + x; }
 static int ran(struct node *n) { return n->ops->done(n) + (int) n->id; }
@@ -73,7 +102,9 @@ int main(void) {
   for (int i = 0; i < 16; i++) {
     struct node n = {i, (i & 1) ? &first : &second, ran};
     long cell[2] = {i * 7, i - 5};
-    printf("%d %d %d\n", exec(&n), go(&n, i), dispatch(&cell[1]));
+    struct step steps[] = {{0, i}, {0, 3}, {0, 0x100 | i}, {0, 0x200}};
+    interp(steps, 1);
+    printf("%d %d %d %ld\n", exec(&n), go(&n, i), dispatch(&cell[1]), interp(steps, 0));
   }
   return 0;
 }
@@ -132,8 +163,19 @@ fn a_call_through_a_pointer_just_loaded_reads_the_pointer_itself() {
     let go = body(&asm, "go", "dispatch");
     assert!(go.contains(&"call\t*(%rax)"), "{go:#?}");
     assert!(!go.iter().any(|line| line.ends_with("(%rax), %rax")), "{go:#?}");
-    let dispatch = body(&asm, "dispatch", "main");
+    let dispatch = body(&asm, "dispatch", "interp");
     assert_eq!(dispatch.last(), Some(&"jmp\t*(%rcx,%rax,8)"), "{dispatch:#?}");
+}
+
+/// A computed `goto` reads where it goes out of the step it is at, as clang writes it, since no
+/// handler reads the register the load would have put the pointer in before writing it.
+#[test]
+fn a_computed_goto_reads_the_pointer_out_of_the_step() {
+    let asm = assembly("goto", &[]);
+    let interp = body(&asm, "interp", "main");
+    let jumps: Vec<&&str> = interp.iter().filter(|line| line.starts_with("jmp\t*")).collect();
+    assert_eq!(jumps.len(), 3, "{interp:#?}");
+    assert!(jumps.iter().all(|line| line.starts_with("jmp\t*(")), "{interp:#?}");
 }
 
 /// A thunk is named after the register a branch goes through, so under `-mindirect-branch=` the

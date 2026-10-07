@@ -24,14 +24,19 @@
 //! the function, and [`crate::lower`] gave it a register no argument is in, so nothing reads it
 //! after. A call has to write it, which a call does to every register the convention lets the
 //! callee destroy, and must not pass anything in it. A jump with somewhere in this function to go
-//! is a computed `goto` or a table, and is left alone: the blocks it goes to could read the same
-//! register.
+//! is a computed `goto` or a table, and the blocks it goes to could read the same register, so it
+//! is folded only when no way on from any of them reads the register before something writes it.
+//! That is every handler of an interpreter like Postgres' `ExecInterpExpr`, which ends in
+//! `goto *op->opcode` and so in `jmp *(%rcx)`, as clang writes it, where it was a load into a
+//! register no handler reads before writing it again. A function with a landing pad keeps its
+//! jumps as they are, since a pad is reached by no edge and could read a register a call keeps.
 //!
 //! Nothing is folded when a speculation hardening flag is in force. Those send a branch through a
 //! register to a thunk named after the register, and a branch through memory has no register to
 //! name.
 
 use rucc_base::Interner;
+use rucc_base::hash::{Map, Set};
 use rucc_mir as mir;
 use rucc_target::{FrameInsts, MachineInsts, PhysReg, RegClass};
 
@@ -56,12 +61,19 @@ pub fn fold(
     let (jump, jump_mem) = (opcode(through.jump.0), opcode(through.jump.1));
     let blocks: Vec<mir::Block> = func.blocks().collect();
     let mut folded = 0;
+    // The blocks each register a jump inside the function goes through is wanted on entry to,
+    // worked out once for each register, since every handler of an interpreter goes through one
+    // of a few and to the same blocks. A fold leaves the answer right, since what it takes out is
+    // a write of the register and the jump's read of it straight after, at the end of a block
+    // nothing after wants the register in.
+    let mut wanted: Map<(mir::Reg, RegClass), Set<mir::Block>> = Map::default();
     for block in blocks {
         let order: Vec<mir::Inst> = func.insts(block).collect();
         for (at, &branch) in order.iter().enumerate() {
             let calls = func[branch].opcode == call;
-            let leaves = func[branch].opcode == jump && func[block].succs.is_empty();
-            if !calls && !leaves {
+            let jumps = func[branch].opcode == jump;
+            let stays = jumps && !func[block].succs.is_empty();
+            if (!calls && !jumps) || (stays && !func.landings.is_empty()) {
                 continue;
             }
             let found =
@@ -69,6 +81,14 @@ pub fn fold(
             let Some(from) = found else {
                 continue;
             };
+            if stays {
+                let pointer = func[func[branch].operands][mir::defs(&func[func[branch].operands])];
+                let target = (pointer.reg, pointer.class);
+                let wanted = wanted.entry(target).or_insert_with(|| live_into(func, target));
+                if func[block].succs.iter().any(|to| wanted.contains(&to.block)) {
+                    continue;
+                }
+            }
             join(func, from, branch, if calls { call_mem } else { jump_mem });
             folded += 1;
         }
@@ -143,6 +163,59 @@ fn feeding(
         written.extend(defined.map(|operand| (operand.reg, operand.class)));
     }
     None
+}
+
+/// The blocks that read the register, or lead to a block that reads it, before anything writes
+/// it, which are the blocks it is live into.
+///
+/// What a block hands its successors counts as a read at its end, and a block that leaves the
+/// function reads only what its last instructions name, since a register a call keeps is put back
+/// by the epilogue in front of the return and the register is this function's to destroy
+/// otherwise.
+fn live_into(func: &mir::Func, target: (mir::Reg, RegClass)) -> Set<mir::Block> {
+    let blocks: Vec<mir::Block> = func.blocks().collect();
+    // For each block, whether it reads the register before writing it, writes it first, or names
+    // it nowhere at all.
+    let first: Vec<Option<bool>> = blocks
+        .iter()
+        .map(|&block| {
+            for inst in func.insts(block) {
+                let operands = &func[func[inst].operands];
+                let names = |def: bool| {
+                    operands.iter().any(|operand| {
+                        operand.role.is_def() == def && (operand.reg, operand.class) == target
+                    })
+                };
+                // The reads first, since an instruction reads its sources before it writes.
+                if names(false) {
+                    return Some(true);
+                }
+                if names(true) {
+                    return Some(false);
+                }
+            }
+            func[block].succs.iter().any(|call| call.args.contains(&target.0)).then_some(true)
+        })
+        .collect();
+    let mut live: Set<mir::Block> = Set::default();
+    let mut changed = true;
+    while changed {
+        changed = false;
+        for (&block, &first) in blocks.iter().zip(&first).rev() {
+            if live.contains(&block) {
+                continue;
+            }
+            let reads = match first {
+                Some(reads) => reads,
+                None => func[block].succs.iter().any(|to| live.contains(&to.block)),
+            };
+            if reads {
+                live.insert(block);
+                changed = true;
+            }
+        }
+    }
+    live
 }
 
 /// The branch rewritten to read where it goes out of the address `from` read, and `from` gone.
@@ -303,9 +376,22 @@ mod tests {
         assert_eq!(folded(&mut names, func).0, 0);
     }
 
-    /// `movq (%rcx,%rax,1), %rax`, then `pops`, then `jmp *%rax`, in a block that ends the
-    /// function when `leaves` and goes to a second block otherwise.
-    fn jump(names: &mut Interner, base: rucc_target::PhysReg, pops: usize, leaves: bool) -> Func {
+    /// Where a [`jump`] goes.
+    #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+    enum Then {
+        /// Out of the function.
+        Leaves,
+        /// To a block that returns.
+        Returns,
+        /// To a block that reads `%rax` and returns.
+        Reads,
+        /// Back to the top of its own block, which reads `%rax` as the index.
+        Loops,
+    }
+
+    /// `movq (%rcx,%rax,1), %rax`, then `pops`, then `jmp *%rax`, in a block that goes where
+    /// `then` says.
+    fn jump(names: &mut Interner, base: rucc_target::PhysReg, pops: usize, then: Then) -> Func {
         let mut func = Func::new(names.intern("f"));
         let block = func.create_block();
         let load = op(names, "mov_rm_64");
@@ -323,8 +409,14 @@ mod tests {
         }
         let jump = op(names, "jmp_reg");
         func.build(block, jump).uses(phys(RAX), GPR).finish();
-        if !leaves {
+        if then == Then::Loops {
+            func.succs_mut(block).push(BlockCall::to(block));
+        } else if then != Then::Leaves {
             let next = func.create_block();
+            if then == Then::Reads {
+                let test = op(names, "test_rr_64");
+                func.build(next, test).uses(phys(RAX), GPR).uses(phys(RAX), GPR).finish();
+            }
             func.build(next, op(names, "ret")).finish();
             func.succs_mut(block).push(BlockCall::to(next));
         }
@@ -332,28 +424,50 @@ mod tests {
     }
 
     /// [`jump`] once folded.
-    fn jumped(base: rucc_target::PhysReg, pops: usize, leaves: bool) -> (usize, Vec<String>) {
+    fn jumped(base: rucc_target::PhysReg, pops: usize, then: Then) -> (usize, Vec<String>) {
         let mut names = Interner::new();
-        let func = jump(&mut names, base, pops, leaves);
+        let func = jump(&mut names, base, pops, then);
         folded(&mut names, func)
     }
 
     #[test]
     fn a_tail_jump_reads_the_pointer_past_the_epilogue() {
-        let (count, lines) = jumped(RCX, 0, true);
+        let (count, lines) = jumped(RCX, 0, Then::Leaves);
         assert_eq!(count, 1, "{lines:#?}");
         assert_eq!(lines.len(), 1, "{lines:#?}");
         assert!(lines[0].starts_with("x64.jmp_mem"), "{lines:#?}");
-        let (count, lines) = jumped(RCX, 2, true);
+        let (count, lines) = jumped(RCX, 2, Then::Leaves);
         assert_eq!(count, 1, "{lines:#?}");
         assert!(lines[2].starts_with("x64.jmp_mem"), "{lines:#?}");
     }
 
     #[test]
-    fn a_jump_that_stays_in_the_function_or_reads_the_stack_past_a_pop_is_left_alone() {
-        assert_eq!(jumped(RCX, 0, false).0, 0);
-        assert_eq!(jumped(RSP, 1, true).0, 0);
+    fn a_jump_past_a_pop_that_moved_the_stack_it_read_is_left_alone() {
+        assert_eq!(jumped(RSP, 1, Then::Leaves).0, 0);
         // With nothing between them, the address is the same one the load read.
-        assert_eq!(jumped(RSP, 0, true).0, 1);
+        assert_eq!(jumped(RSP, 0, Then::Leaves).0, 1);
+    }
+
+    #[test]
+    fn a_jump_inside_the_function_reads_the_pointer_when_nowhere_it_goes_wants_the_register() {
+        let (count, lines) = jumped(RCX, 0, Then::Returns);
+        assert_eq!(count, 1, "{lines:#?}");
+        assert!(lines[0].starts_with("x64.jmp_mem"), "{lines:#?}");
+        assert!(lines[0].contains("[$rcx + $rax]"), "{lines:#?}");
+        // The block it goes to reads what the load put in `%rax`, and so does the top of a block
+        // that goes back to itself, which reads it as the index.
+        assert_eq!(jumped(RCX, 0, Then::Reads).0, 0);
+        assert_eq!(jumped(RCX, 0, Then::Loops).0, 0);
+    }
+
+    #[test]
+    fn a_jump_inside_a_function_with_a_landing_pad_is_left_alone() {
+        let mut names = Interner::new();
+        let mut func = jump(&mut names, RCX, 0, Then::Returns);
+        let block = func.entry().expect("a block");
+        let first = func.insts(block).next().expect("the load");
+        let pad = func[block].succs[0].block;
+        func.landings.push((first, pad));
+        assert_eq!(folded(&mut names, func).0, 0);
     }
 }
