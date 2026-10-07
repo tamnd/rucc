@@ -93,6 +93,7 @@ pub(crate) fn lower(unit: &mut Unit<'_>, decl: DeclId, func: &mut Func, plan: &P
         sret: None,
         vlas: Map::default(),
         shared: None,
+        conditions: 0,
         marks: Vec::new(),
         cleanups: Vec::new(),
         ends: Vec::new(),
@@ -737,6 +738,11 @@ struct Body<'a, 'u> {
     /// for it, so meeting that node again while lowering the arm is meeting the same node and not
     /// a second read.
     shared: Option<(ExprId, Value)>,
+    /// How many tests the statement being lowered is inside, counting each arm of an `if` and of a
+    /// `?:` and the right of a `&&` or a `||`. A `return` met while it is above nought is marked
+    /// [`Flags::EARLY`]. This is gcc's conditional context, which the cases of a `switch` and the
+    /// body of a loop are not in, so a `return` there is not marked.
+    conditions: u32,
     /// One entry per open scope, outermost first.
     marks: Vec<Mark>,
     /// The objects each open scope has to run a handler on when control leaves it, in the order
@@ -3243,13 +3249,26 @@ impl<'u> Body<'_, 'u> {
         }
     }
 
+    /// Marks a `return` the program wrote inside a test, which is what gcc's front end guesses is
+    /// not taken (tamnd/rucc#3182).
+    ///
+    /// The `return` the end of a function falls into is built elsewhere and is never marked, since
+    /// nobody wrote it.
+    fn mark_early(&mut self, ret: Inst) {
+        if self.conditions > 0 {
+            self.func[ret].flags |= Flags::EARLY;
+        }
+    }
+
     /// `if (cond) then else otherwise`.
     fn if_stmt(&mut self, cond: ExprId, then: StmtId, otherwise: Option<StmtId>, span: Span) {
         if let Some((effects, taken)) = self.decided_condition(cond) {
             for effect in effects {
                 self.discard(effect);
             }
+            self.conditions += 1;
             self.constant_if(taken, then, otherwise, span);
+            self.conditions -= 1;
             return;
         }
         let cond = self.condition(cond);
@@ -3259,6 +3278,7 @@ impl<'u> Body<'_, 'u> {
         self.ssa.seal(self.func, then_block);
         self.ssa.seal(self.func, else_block);
 
+        self.conditions += 1;
         let mut join = None;
         self.at = Some(then_block);
         self.stmt(then);
@@ -3269,6 +3289,7 @@ impl<'u> Body<'_, 'u> {
             self.stmt(otherwise);
         }
         self.leave_arm(&mut join, span);
+        self.conditions -= 1;
 
         self.at = join;
         if let Some(join) = join {
@@ -3551,7 +3572,8 @@ impl<'u> Body<'_, 'u> {
             let values: Vec<Value> = returns.into_iter().map(|ty| self.blank(ty, span)).collect();
             self.unwind_cleanups(0, span);
             self.leave_hook(span);
-            self.build(span).ret(&values);
+            let ret = self.build(span).ret(&values);
+            self.mark_early(ret);
             self.at = None;
             return;
         };
@@ -3618,7 +3640,8 @@ impl<'u> Body<'_, 'u> {
         // of it: `return obj->field;` reads the object a handler is about to be given.
         self.unwind_cleanups(0, span);
         self.leave_hook(span);
-        self.build(span).ret(&values);
+        let ret = self.build(span).ret(&values);
+        self.mark_early(ret);
         self.at = None;
     }
 
@@ -8454,7 +8477,9 @@ impl<'u> Body<'_, 'u> {
         self.ssa.seal(self.func, other);
 
         self.at = Some(other);
+        self.conditions += 1;
         let right = self.condition(rhs);
+        self.conditions -= 1;
         let block = self.block();
         self.ssa.write(var, block, right);
         self.jump(join, span);
@@ -8569,7 +8594,9 @@ impl<'u> Body<'_, 'u> {
         let mut join = None;
         for (block, arm) in [then_block, else_block].into_iter().zip(arms) {
             self.at = Some(block);
+            self.conditions += 1;
             let value = of(self, arm);
+            self.conditions -= 1;
             if self.at.is_none() {
                 continue;
             }

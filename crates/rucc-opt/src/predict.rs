@@ -2,7 +2,7 @@
 //!
 //! Design: section 11.2 of `spec/optimizer/11-profile-and-frequency.md`.
 //!
-//! # Ten predictors and not fifty five
+//! # Eleven predictors and not fifty five
 //!
 //! GCC has fifty five, in `gcc/predict.def`, each naming a syntactic situation and the rate at
 //! which the guess turned out right when somebody measured it. Ten of those are for Fortran, and
@@ -42,17 +42,35 @@
 //! has only its function passes [`Callees::nothing`] and keeps the first answer, which is most of
 //! what the predictor was for: C error handling is `if (x) { report(); abort(); }` and it is the
 //! `abort` that shows up as unreachable.
+//!
+//! # The early return
+//!
+//! The eleventh, asked last. gcc's front end guesses that a `return` written inside an `if`, an arm
+//! of `?:` or the right of `&&` or `||` is not taken, which is `PRED_TREE_EARLY_RETURN`, and it is
+//! the guess that the work of a function is on the long path and not on the quick way out at the
+//! top. It came after the other ten because the inliner weighs what a call saves by how often each
+//! block of the callee runs, and without it a function that returns on a test and otherwise does
+//! forty lines of work looked half as likely to do the work as gcc thinks it is (tamnd/rucc#3182).
+//!
+//! Where a `return` was written is gone by the time there is a graph, so the front end says it on
+//! the instruction, as [`Flags::EARLY`], and this reads the flag. As in gcc, the guess is on every
+//! edge that enters the part of the function a marked `return` post-dominates from outside that
+//! part, which is the branch whose arm returns and not the branches inside that arm, and two arms
+//! that each reach a marked `return` of their own cancel out.
 
 use rucc_base::Symbol;
 use rucc_base::hash::Map;
 use rucc_cost::heuristics::{
-    PREDICT_CALL_NOT_TAKEN, PREDICT_COLD_CALL, PREDICT_CONTINUE_TAKEN, PREDICT_EXPECT,
-    PREDICT_LOOP_EXIT_NOT_TAKEN, PREDICT_LOOP_GUARD_TAKEN, PREDICT_NEGATIVE_RETURN,
+    PREDICT_CALL_NOT_TAKEN, PREDICT_COLD_CALL, PREDICT_CONTINUE_TAKEN, PREDICT_EARLY_RETURN,
+    PREDICT_EXPECT, PREDICT_LOOP_EXIT_NOT_TAKEN, PREDICT_LOOP_GUARD_TAKEN, PREDICT_NEGATIVE_RETURN,
     PREDICT_NEVER_RETURNS, PREDICT_NULL_RETURN, PREDICT_POINTER_NOT_NULL, PREDICT_RETURN_BLOCKS,
 };
-use rucc_ir::{AttrSet, Attrs, Block, Def, Extra, Func, Inst, IntPred, Module, Opcode, Value};
+use rucc_ir::{
+    AttrSet, Attrs, Block, Def, Extra, Flags, Func, Inst, IntPred, Module, Opcode, Value,
+};
 
 use crate::cfg::Cfg;
+use crate::dom::PostDominators;
 use crate::fold::constant;
 use crate::loops::Loops;
 use crate::profile::{Probability, Quality};
@@ -83,6 +101,8 @@ pub enum Predictor {
     CallNotTaken,
     /// One arm goes back to the top of the loop.
     Continue,
+    /// One arm leaves the function by a `return` written inside a test.
+    EarlyReturn,
     /// Nothing applied, so the arms are even.
     Nothing,
 }
@@ -102,6 +122,7 @@ impl Predictor {
             Self::NullReturn => "the arm that returns null",
             Self::CallNotTaken => "the arm that calls something",
             Self::Continue => "the continue",
+            Self::EarlyReturn => "the early return",
             Self::Nothing => "nothing, so even",
         }
     }
@@ -120,14 +141,15 @@ impl Predictor {
             Self::NullReturn => rucc_cost::param!(PREDICT_NULL_RETURN),
             Self::CallNotTaken => rucc_cost::param!(PREDICT_CALL_NOT_TAKEN),
             Self::Continue => rucc_cost::param!(PREDICT_CONTINUE_TAKEN),
+            Self::EarlyReturn => rucc_cost::param!(PREDICT_EARLY_RETURN),
             // Even, which is the absence of a prediction rather than one, and not a number
             // anybody would tune.
             Self::Nothing => 50,
         }
     }
 
-    /// The ten, in the order they are asked.
-    pub const ORDER: [Self; 10] = [
+    /// The eleven, in the order they are asked.
+    pub const ORDER: [Self; 11] = [
         Self::Expect,
         Self::NeverReturns,
         Self::ColdCall,
@@ -138,6 +160,7 @@ impl Predictor {
         Self::NullReturn,
         Self::CallNotTaken,
         Self::Continue,
+        Self::EarlyReturn,
     ];
 }
 
@@ -222,12 +245,13 @@ impl Predictions {
         let mut edges: Vec<Vec<Probability>> = vec![Vec::new(); width];
         let mut by = vec![Predictor::Nothing; width];
         let returns = returning(func, cfg);
+        let early = Early::of(func, cfg);
 
         for block in func.blocks() {
             let Some(term) = func.terminator(block) else { continue };
             let succs = cfg.successors(block);
             if succs.len() == 2 && func[term].opcode == Opcode::BrIf {
-                let (taken, who) = branch(func, cfg, loops, callees, &returns, block);
+                let (taken, who) = branch(func, cfg, loops, callees, &returns, &early, block);
                 edges[block.index()] = vec![taken, taken.complement()];
                 by[block.index()] = who;
                 continue;
@@ -278,6 +302,7 @@ fn branch(
     loops: &Loops,
     callees: &Callees,
     returns: &[bool],
+    early: &Early,
     block: Block,
 ) -> (Probability, Predictor) {
     let succs = cfg.successors(block);
@@ -357,7 +382,70 @@ fn branch(
         );
     }
 
+    let ends = |at: Block| early.ends(at, block);
+    if ends(first) != ends(second) {
+        return (
+            toward(!ends(first), rucc_cost::param!(PREDICT_EARLY_RETURN)),
+            Predictor::EarlyReturn,
+        );
+    }
+
     (Probability::even(), Predictor::Nothing)
+}
+
+/// The `return` marked [`Flags::EARLY`] that every path from each block reaches, which is what the
+/// early return predictor asks.
+///
+/// A block is bound to a marked `return` when that `return` post-dominates it, and to nothing when
+/// its paths part before they reach one. An edge from a block bound to nothing, or to another
+/// `return`, into a block bound to a marked one enters the part of the function that `return`
+/// post-dominates, which is the edge gcc's `predict_paths_leading_to` guesses is not taken.
+#[derive(Debug)]
+struct Early {
+    bound: Vec<Option<Block>>,
+}
+
+impl Early {
+    /// Binds every block, or none when no `return` is marked, which costs no post-dominator tree.
+    fn of(func: &Func, cfg: &Cfg) -> Self {
+        let marked = |block: Block| {
+            func.terminator(block).is_some_and(|term| {
+                func[term].opcode == Opcode::Return && func[term].flags.contains(Flags::EARLY)
+            })
+        };
+        let mut bound = vec![None; cfg.capacity()];
+        if !cfg.postorder().iter().any(|&block| marked(block)) {
+            return Self { bound };
+        }
+        let pdoms = PostDominators::new(cfg);
+        let mut done = vec![false; cfg.capacity()];
+        let mut path = Vec::new();
+        for &start in cfg.postorder() {
+            let mut at = start;
+            let top = loop {
+                if done[at.index()] {
+                    break bound[at.index()];
+                }
+                path.push(at);
+                match pdoms.immediate_post_dominator(at) {
+                    Some(up) => at = up,
+                    None => break marked(at).then_some(at),
+                }
+            };
+            for block in path.drain(..) {
+                bound[block.index()] = top;
+                done[block.index()] = true;
+            }
+        }
+        Self { bound }
+    }
+
+    /// Whether the edge from `from` to `at` enters the part of the function a marked `return`
+    /// post-dominates.
+    fn ends(&self, at: Block, from: Block) -> bool {
+        let bound = |block: Block| self.bound.get(block.index()).copied().flatten();
+        bound(at).is_some_and(|ret| bound(from) != Some(ret))
+    }
 }
 
 /// Splits a block's outgoing probability when it is not a two armed branch.
@@ -659,7 +747,8 @@ fn returning(func: &Func, cfg: &Cfg) -> Vec<bool> {
 mod tests {
     use rucc_base::Interner;
     use rucc_ir::{
-        AttrSet, Attrs, Block, BlockCall, Builder, Func, Hint, IntPred, Opcode, Signature, Type,
+        AttrSet, Attrs, Block, BlockCall, Builder, Flags, Func, Hint, IntPred, Opcode, Signature,
+        Type,
     };
 
     use super::{Callees, Predictions, Predictor};
@@ -1087,9 +1176,103 @@ mod tests {
         }
     }
 
+    /// Ends each block in `ends` with a `return` of `value`, marked the way the front end marks one
+    /// written inside a test when `early` says so.
+    fn returns(func: &mut Func, ends: &[(Block, i128, bool)]) {
+        for &(block, value, early) in ends {
+            let mut build = Builder::new(func, block);
+            let value = build.iconst(Type::int(32), value);
+            let ret = build.ret(&[value]);
+            if early {
+                func[ret].flags |= Flags::EARLY;
+            }
+        }
+    }
+
     #[test]
-    fn the_ten_are_the_ten_the_document_named_and_they_are_asked_in_its_order() {
-        assert_eq!(Predictor::ORDER.len(), 10);
+    fn an_arm_that_returns_early_is_the_one_not_taken() {
+        // `if (x) return 1; return 2;`, where only the first is inside the `if`.
+        let (_, mut func, at) = blank(3);
+        let mut build = Builder::new(&mut func, at[0]);
+        let cond = build.iconst(Type::int(1), 1);
+        build.br_if(cond, at[1], &[], at[2], &[]);
+        returns(&mut func, &[(at[1], 1, true), (at[2], 2, false)]);
+
+        let (seen, _) = predict(&func);
+        assert_eq!(seen.by(at[0]), Predictor::EarlyReturn);
+        assert_eq!(seen.taken(at[0], 0), Probability::percent(66, Quality::Guessed).complement());
+        assert_eq!(seen.taken(at[0], 1), Probability::percent(66, Quality::Guessed));
+    }
+
+    #[test]
+    fn a_return_nobody_marked_says_nothing() {
+        // The same shape out of a `switch`, whose cases are not inside a test.
+        let (_, mut func, at) = blank(3);
+        let mut build = Builder::new(&mut func, at[0]);
+        let cond = build.iconst(Type::int(1), 1);
+        build.br_if(cond, at[1], &[], at[2], &[]);
+        returns(&mut func, &[(at[1], 1, false), (at[2], 2, false)]);
+
+        let (seen, _) = predict(&func);
+        assert_eq!(seen.by(at[0]), Predictor::Nothing);
+    }
+
+    #[test]
+    fn two_arms_that_both_return_early_cancel_out() {
+        // `if (x) return 1; else return 2;`, which gcc prunes because both arms say not taken.
+        let (_, mut func, at) = blank(3);
+        let mut build = Builder::new(&mut func, at[0]);
+        let cond = build.iconst(Type::int(1), 1);
+        build.br_if(cond, at[1], &[], at[2], &[]);
+        returns(&mut func, &[(at[1], 1, true), (at[2], 2, true)]);
+
+        let (seen, _) = predict(&func);
+        assert_eq!(seen.by(at[0]), Predictor::Nothing);
+        assert_eq!(seen.taken(at[0], 0), Probability::even());
+    }
+
+    #[test]
+    fn only_the_branch_into_the_early_return_is_predicted() {
+        // `if (a) { if (b) { work; return 1; } more; } return 2;`. The inner test is the one that
+        // decides whether the marked `return` runs. Neither arm of the outer one is bound to it.
+        let (_, mut func, at) = blank(7);
+        let mut build = Builder::new(&mut func, at[0]);
+        let cond = build.iconst(Type::int(1), 1);
+        build.br_if(cond, at[1], &[], at[2], &[]);
+        let mut build = Builder::new(&mut func, at[1]);
+        let inner = build.iconst(Type::int(1), 0);
+        build.br_if(inner, at[3], &[], at[4], &[]);
+        Builder::new(&mut func, at[3]).jump(at[6], &[]);
+        Builder::new(&mut func, at[4]).jump(at[5], &[]);
+        Builder::new(&mut func, at[2]).jump(at[5], &[]);
+        returns(&mut func, &[(at[6], 1, true), (at[5], 2, false)]);
+
+        let (seen, _) = predict(&func);
+        assert_eq!(seen.by(at[1]), Predictor::EarlyReturn);
+        assert_eq!(seen.taken(at[1], 0), Probability::percent(66, Quality::Guessed).complement());
+        assert_eq!(seen.by(at[0]), Predictor::Nothing);
+    }
+
+    #[test]
+    fn a_predictor_asked_earlier_wins_over_an_early_return() {
+        // The early return is asked last, so a branch another predictor decides keeps its answer.
+        let (_, mut func, at) = blank(3);
+        let mut build = Builder::new(&mut func, at[0]);
+        let cond = build.iconst(Type::int(1), 1);
+        build.br_if(cond, at[1], &[], at[2], &[]);
+        let mut build = Builder::new(&mut func, at[1]);
+        let bad = build.iconst(Type::int(32), -1);
+        let ret = build.ret(&[bad]);
+        func[ret].flags |= Flags::EARLY;
+        returns(&mut func, &[(at[2], 2, false)]);
+
+        let (seen, _) = predict(&func);
+        assert_eq!(seen.by(at[0]), Predictor::NegativeReturn);
+    }
+
+    #[test]
+    fn the_eleven_are_the_ones_the_document_names_and_they_are_asked_in_its_order() {
+        assert_eq!(Predictor::ORDER.len(), 11);
         assert!(!Predictor::ORDER.contains(&Predictor::Nothing));
         let mut sorted = Predictor::ORDER;
         sorted.sort_unstable();

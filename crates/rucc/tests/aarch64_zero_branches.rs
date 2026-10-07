@@ -56,18 +56,20 @@ fn body(text: &str, name: &str) -> Vec<String> {
         .collect()
 }
 
+/// Which of `cbz` and `cbnz` each one is follows from the layout. The `return` inside each `if` is
+/// guessed not taken, as gcc guesses it, so the branch jumps to it and the rest falls through.
 #[test]
 fn a_branch_on_zero_is_one_instruction() {
     let text = listing();
     for (name, branch) in [
         ("walk", "cbnz x1, "),
-        ("truth", "cbz w0, "),
-        ("wide", "cbnz x0, "),
-        ("narrow", "cbz w0, "),
-        ("boolean", "cbz w0, "),
+        ("truth", "cbnz w0, "),
+        ("wide", "cbz x0, "),
+        ("narrow", "cbnz w0, "),
+        ("boolean", "cbnz w0, "),
         ("guard", "cbz x0, "),
-        ("one", "cbz w0, "),
-        ("below", "cbnz x0, "),
+        ("one", "cbnz w0, "),
+        ("below", "cbz x0, "),
     ] {
         let body = body(&text, name);
         assert!(body.iter().any(|line| line.starts_with(branch)), "{name} {branch}:\n{text}");
@@ -93,7 +95,7 @@ fn a_comparison_with_anything_else_keeps_its_flags() {
     let text = listing();
     let seven = body(&text, "seven");
     assert!(seven.contains(&"cmp w0, #7".to_string()), "{text}");
-    assert!(seven.iter().any(|line| line.starts_with("b.ne ")), "{text}");
+    assert!(seven.iter().any(|line| line.starts_with("b.eq ")), "{text}");
     assert!(!seven.iter().any(|line| line.starts_with("cb")), "{text}");
 }
 

@@ -74,7 +74,7 @@ block1:
     %3 = iconst.i32 1
     %4 = iconst.i32 0
     %5 = sub.nsw %4, %3
-    return %5
+    return.early %5
 
 block2:
     %6 = iconst.i32 0
@@ -83,7 +83,7 @@ block2:
 
 block3:
     %8 = iconst.i32 0
-    return %8
+    return.early %8
 
 block4:
     %9 = iconst.i32 4

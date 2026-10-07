@@ -2461,7 +2461,10 @@ fn copy(
                 opcode => opcode,
             };
             let types: Vec<Type> = data.results().map(|value| callee[value].ty).collect();
-            let shell = InstData { flags: data.flags.without(dropped), ..InstData::new(opcode) };
+            // A `return` that becomes a jump keeps nothing, since the flags it carries are about
+            // leaving the function, and this one no longer does.
+            let flags = data.flags.without(dropped).intersection(Flags::legal_on(opcode));
+            let shell = InstData { flags, ..InstData::new(opcode) };
             let fixed = opcode == Opcode::Alloca && data.args.is_empty();
             let shared = fixed && !data.first_result.is_some_and(|value| scalar.contains(&value));
             let taken = if shared { pool.take(func, callee, data.extra, data.flags) } else { None };

@@ -49,7 +49,7 @@ block0:
 block1:
     %7 = iconst.i32 1
     call @release(%0) : (ptr)
-    return %7
+    return.early %7
 
 block2:
     %8 = iconst.i32 0
