@@ -24,7 +24,7 @@ use std::path::Path;
 ///
 /// A message for a file that cannot be read, or that uses a part of the language that rucc does
 /// not have.
-pub fn expand(args: Vec<String>) -> Result<Vec<String>, String> {
+pub(crate) fn expand(args: Vec<String>) -> Result<Vec<String>, String> {
     let mut files = Vec::new();
     let mut rest = Vec::with_capacity(args.len());
     for arg in args {
@@ -51,7 +51,12 @@ pub fn expand(args: Vec<String>) -> Result<Vec<String>, String> {
     let mut added = Vec::new();
     for section in own.into_iter().chain(others) {
         let at = format!("-specs={}: line {}", files[section.file], section.line);
-        if let Some(plugin) = section.text.split_whitespace().find(|w| w.starts_with("-fplugin=")) {
+        // Looked for before the text is read, because the annobin file also uses `%:`, which rucc
+        // does not have, and the plugin is the reason to give.
+        if let Some(start) = section.text.find("-fplugin=") {
+            let tail = &section.text[start..];
+            let plugin =
+                &tail[..tail.find(|c: char| c.is_whitespace() || c == '}').unwrap_or(tail.len())];
             return Err(format!(
                 "{at}: {plugin} loads a GCC plugin, and rucc cannot load one. For annobin, turn \
                  it off in the recipe with %undefine _annotated_build"
@@ -272,7 +277,7 @@ mod tests {
         std::fs::write(&link, format!("{NO_PIE_LINK}\n*link:\n+ -z now\n")).unwrap();
         std::fs::write(&plugin, ANNOBIN.replace("%{!iplugindir*:%:find-plugindir()} ", ""))
             .unwrap();
-        let line = |extra: &[&std::path::Path]| {
+        let line = |extra: &[&Path]| {
             let mut args = vec!["-O2".to_owned()];
             args.extend(extra.iter().map(|path| format!("-specs={}", path.display())));
             args.push("a.c".to_owned());
@@ -285,7 +290,7 @@ mod tests {
         );
         let wrong = line(&[&plugin]).unwrap_err();
         assert!(
-            wrong.contains("-fplugin=annobin") && wrong.contains("_annotated_build"),
+            wrong.contains("-fplugin=annobin ") && wrong.contains("_annotated_build"),
             "{wrong}"
         );
         let missing = expand(vec!["-specs=/no/such/file".to_owned()]).unwrap_err();
