@@ -270,7 +270,8 @@ pub fn indirect(
         }
     }
     rename(func, &renamed);
-    at_source(func, &made);
+    let lea = mir::Opcode::new(names.intern(&format!("{}{}", frame.prefix, frame.lea)));
+    at_source(func, &made, lea);
 
     // And the addresses, which is the half of this that is not about edges. Every `&&label` in the
     // function names a block, and a label with a block in front of it now begins at that block, so
@@ -562,7 +563,13 @@ fn in_place(
 ///   writes. A read in the instruction itself is fine, since an instruction reads its sources
 ///   before it writes an answer that is not written early.
 /// - It is not itself one of those registers, which another move may have written there first.
-fn at_source(func: &mut mir::Func, made: &[(mir::Block, mir::Inst)]) -> usize {
+///
+/// A handler that steps on before it is done with the old pointer, such as `op++` above a read of
+/// what `op` pointed at, reads the register in between. When the step is an address worked out
+/// with the target's `lea`, which reads no memory and writes no flags, it is moved down to just
+/// after the last of those reads first, as long as nothing it is moved past writes what it reads
+/// or reads what it writes.
+fn at_source(func: &mut mir::Func, made: &[(mir::Block, mir::Inst)], lea: mir::Opcode) -> usize {
     let homes: Set<mir::Reg> =
         made.iter().map(|&(_, copy)| func[func[copy].operands][0].reg).collect();
     let mut writes: Map<mir::Reg, usize> = Map::default();
@@ -607,15 +614,38 @@ fn at_source(func: &mut mir::Func, made: &[(mir::Block, mir::Inst)]) -> usize {
                 && (operand.reg != value || answer)
                 && (operand.reg != home || !operand.role.is_def())
         });
-        let between = &insts[start + 1..end];
-        if !plain || between.iter().any(|&inst| naming(func, inst, home) > 0) {
+        if !plain {
             continue;
+        }
+        let maker = insts[start];
+        let mut between = &insts[start + 1..end];
+        if let Some(last) = between.iter().rposition(|&inst| naming(func, inst, home) > 0) {
+            let read: Vec<mir::Reg> = func[func[maker].operands]
+                .iter()
+                .filter(|operand| !operand.role.is_def())
+                .map(|operand| operand.reg)
+                .collect();
+            let past = &between[..=last];
+            let movable = func[maker].opcode == lea
+                && past.iter().all(|&inst| {
+                    func[func[inst].operands].iter().all(|operand| {
+                        operand.reg != value
+                            && !(operand.role.is_def()
+                                && (operand.reg == home || read.contains(&operand.reg)))
+                    })
+                });
+            if !movable {
+                continue;
+            }
+            func.remove_inst(maker);
+            func.insert_after(past[last], maker);
+            between = &between[last + 1..];
         }
         let local: usize = between.iter().map(|&inst| naming(func, inst, value)).sum();
         if reads.get(&value) != Some(&(local + 1)) {
             continue;
         }
-        for &inst in &insts[start..end] {
+        for &inst in between.iter().chain([&maker]) {
             let operands = func[inst].operands;
             for operand in &mut func[operands] {
                 if operand.reg == value {
@@ -987,9 +1017,18 @@ mod tests {
         assert_eq!(text.matches("x64.mov_rr_64").count(), 1, "{text}");
     }
 
+    /// What a [`stepping`] label reads between making the step and loading through it: nothing,
+    /// the old pointer, or the old pointer and the step both.
+    #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+    enum Then {
+        Nothing,
+        Old,
+        Both,
+    }
+
     /// A label given a step pointer that steps it on and jumps where the next step says, which is
-    /// `op++` and `goto *op->opcode`, reading what it was given at `then` as well.
-    fn stepping(then: bool) -> (Interner, mir::Func, mir::Reg) {
+    /// `op++` and `goto *op->opcode`, reading what `then` says in between.
+    fn stepping(then: Then) -> (Interner, mir::Func, mir::Reg) {
         let mut names = Interner::new();
         let mut func = mir::Func::new(names.intern("f"));
         let head = func.create_block();
@@ -1005,8 +1044,14 @@ mod tests {
         let to = func.new_vreg(GPR);
         let stepped = mir::Mem { disp: 24, ..mir::Mem::at(mir::Operand::read(given, GPR)) };
         func.build(label, lea).def(next, GPR).mem(stepped).finish();
-        if then {
-            func.build(label, test).uses(given, GPR).uses(given, GPR).finish();
+        match then {
+            Then::Nothing => {}
+            Then::Old => {
+                func.build(label, test).uses(given, GPR).uses(given, GPR).finish();
+            }
+            Then::Both => {
+                func.build(label, test).uses(given, GPR).uses(next, GPR).finish();
+            }
         }
         let at = mir::Mem::at(mir::Operand::read(next, GPR));
         func.build(label, load).def(to, GPR).mem(at).finish();
@@ -1017,7 +1062,7 @@ mod tests {
 
     #[test]
     fn a_step_a_label_makes_for_the_next_is_made_in_the_register_the_next_reads() {
-        let (mut names, mut func, next) = stepping(false);
+        let (mut names, mut func, next) = stepping(Then::Nothing);
         assert_eq!(indirect(&mut func, &BRANCH, &FRAME, &mut names), 1);
         // The `lea` writes the register the label reads the pointer in, so the label's jump has no
         // move in front of it and the head's is the only one.
@@ -1027,10 +1072,24 @@ mod tests {
     }
 
     #[test]
-    fn a_step_made_while_the_old_pointer_is_still_wanted_is_moved_across() {
-        let (mut names, mut func, next) = stepping(true);
+    fn a_step_made_while_the_old_pointer_is_still_wanted_is_made_after_it() {
+        let (mut names, mut func, next) = stepping(Then::Old);
         assert_eq!(indirect(&mut func, &BRANCH, &FRAME, &mut names), 1);
-        // The `test` reads the old pointer after the step is made, so the step cannot go into the
+        // The `test` reads the old pointer after the step is made and nothing reads the step
+        // before it, so the `lea` goes after the `test` and writes the register itself.
+        assert!(!mentions(&func, next));
+        let text = mir::print_func(&func, &names, &REGS);
+        assert_eq!(text.matches("x64.mov_rr_64").count(), 1, "{text}");
+        // The last `lea`, since the head has one of its own for the address it jumps to.
+        let (test, lea) = (text.find("x64.test_rr_64"), text.rfind("x64.lea_64"));
+        assert!(test.zip(lea).is_some_and(|(test, lea)| test < lea), "{text}");
+    }
+
+    #[test]
+    fn a_step_read_while_the_old_pointer_is_still_wanted_is_moved_across() {
+        let (mut names, mut func, next) = stepping(Then::Both);
+        assert_eq!(indirect(&mut func, &BRANCH, &FRAME, &mut names), 1);
+        // The `test` reads the old pointer and the step both, so the step cannot go into the
         // register the old pointer is in until the move in front of the jump.
         assert!(mentions(&func, next));
         let text = mir::print_func(&func, &names, &REGS);
