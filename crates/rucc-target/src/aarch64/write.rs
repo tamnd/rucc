@@ -121,10 +121,11 @@ fn operand(line: &mut String, value: &Value, named: Named<'_>) {
                 let _ = write!(line, "#{operation}");
             }
         },
-        Value::System(field) => match REGISTERS.iter().find(|&&(_, known)| known == field) {
+        Value::System(field) => match REGISTERS.iter().find(|&&(_, known)| known | 0x8000 == field)
+        {
             Some((name, _)) => line.push_str(name),
             None => {
-                let (op0, op1) = ((field >> 14) + 2, (field >> 11) & 7);
+                let (op0, op1) = (field >> 14, (field >> 11) & 7);
                 let (crn, crm, op2) = ((field >> 7) & 15, (field >> 3) & 15, field & 7);
                 let _ = write!(line, "s{op0}_{op1}_c{crn}_c{crm}_{op2}");
             }

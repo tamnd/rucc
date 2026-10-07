@@ -112,6 +112,11 @@ pub fn read(text: &str) -> Result<Line, Error> {
             line.values.push(Value::Mem(addr));
         } else if piece.starts_with('{') {
             line.values.push(list(piece)?);
+        } else if let Some(value) =
+            piece.strip_suffix('!').and_then(|reg| register(&reg.trim().to_ascii_lowercase()))
+        {
+            // A register the memory copy and set instructions move on as they go, `x2!`.
+            line.values.push(value);
         } else if at + 1 == pieces.len() && takes_label(&line.mnemonic) && !piece.starts_with('#') {
             // Where the instruction wants a label a bare word is a symbol, whatever else it could
             // spell. A C global called `le` or `eq` is written `adrp x0, le`, and reading that as
@@ -314,9 +319,13 @@ fn operand(piece: &str, symbol: &mut Named) -> Result<Value, Error> {
 
 /// A shift or an extension, with its amount.
 fn modifier(lower: &str) -> Result<Option<Value>, Error> {
+    // `lsl#6` is the same as `lsl #6` to GNU as, and the kernel's SHA-256 is written that way.
     let (name, amount) = match lower.split_once(char::is_whitespace) {
         Some((name, amount)) => (name, Some(amount.trim())),
-        None => (lower, None),
+        None => match lower.split_once('#') {
+            Some((name, amount)) => (name, Some(amount)),
+            None => (lower, None),
+        },
     };
     let amount = match amount {
         Some(amount) => {
@@ -542,17 +551,22 @@ pub(super) fn prefetch_name(operation: u8) -> Option<String> {
     Some(format!("p{kind}l{level}{policy}"))
 }
 
-/// The fifteen bits `mrs` and `msr` carry for a system register with those five fields.
+/// The sixteen bits `mrs` and `msr` carry for a system register with those five fields.
 pub(super) const fn system_field([op0, op1, crn, crm, op2]: [u16; 5]) -> u16 {
-    (op0 - 2) << 14 | op1 << 11 | crn << 7 | crm << 3 | op2
+    op0 << 14 | op1 << 11 | crn << 7 | crm << 3 | op2
 }
 
-/// A system register, as the fifteen bits `mrs` and `msr` carry for it.
+/// A system register, as the sixteen bits `mrs` and `msr` carry for it.
 ///
-/// The ones in [`REGISTERS`], and any of them written the generic way, as `s3_3_c13_c0_2`.
+/// The ones in [`REGISTERS`], and any of them written the generic way, as `s3_3_c13_c0_2`. The
+/// generic way reaches the instructions with a register in the system space as well, which is how
+/// the arm64 kernel writes `wfet x0` as `msr s0_3_c1_c0_0, x0` for an assembler that does not know
+/// it.
 fn system(name: &str) -> Option<u16> {
+    // The table has the fifteen bits of a register in the space where `op0` is two or three, and
+    // the top bit says it is in that space.
     if let Ok(at) = REGISTERS.binary_search_by(|&(known, _)| known.cmp(name)) {
-        return Some(REGISTERS[at].1);
+        return Some(REGISTERS[at].1 | 0x8000);
     }
     let mut parts = name.strip_prefix('s')?.split('_');
     let mut next = |prefix: &str, below: u16| {
@@ -560,7 +574,7 @@ fn system(name: &str) -> Option<u16> {
         part.strip_prefix(prefix)?.parse::<u16>().ok().filter(|&n| n < below)
     };
     let fields = [next("", 4)?, next("", 8)?, next("c", 16)?, next("c", 16)?, next("", 8)?];
-    if parts.next().is_some() || fields[0] < 2 {
+    if parts.next().is_some() {
         return None;
     }
     Some(system_field(fields))

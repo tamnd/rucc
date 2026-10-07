@@ -44,7 +44,7 @@ pub(super) fn wanted(mnemonic: &str, values: &[Value]) -> bool {
     values
         .iter()
         .any(|value| matches!(value, Value::Vector(..) | Value::Element(..) | Value::List(..)))
-        || matches!(mnemonic, "movi" | "mvni")
+        || matches!(mnemonic, "movi" | "mvni" | "sha1h")
         || (matches!(values.first(), Some(Value::Fp(Scalar::D, _)))
             && SCALAR_NAMES.contains(&mnemonic))
         || (matches!(values, [Value::Fp(Scalar::S | Scalar::D, _), Value::Fp(..), ..])
@@ -80,7 +80,11 @@ impl Arrangement {
     fn q(self) -> u32 {
         u32::from(matches!(
             self,
-            Arrangement::B16 | Arrangement::H8 | Arrangement::S4 | Arrangement::D2
+            Arrangement::B16
+                | Arrangement::H8
+                | Arrangement::S4
+                | Arrangement::D2
+                | Arrangement::Q1
         ))
     }
 
@@ -91,12 +95,13 @@ impl Arrangement {
             Arrangement::H4 | Arrangement::H8 => 1,
             Arrangement::S2 | Arrangement::S4 => 2,
             Arrangement::D1 | Arrangement::D2 => 3,
+            Arrangement::Q1 => 4,
         }
     }
 
     /// Whether an instruction that takes the lane sizes in `sizes` takes this one.
     fn takes(self, sizes: u8) -> bool {
-        self != Arrangement::D1 && sizes & (1 << self.size()) != 0
+        !matches!(self, Arrangement::D1 | Arrangement::Q1) && sizes & (1 << self.size()) != 0
     }
 
     /// The whole register of lanes twice as wide as these, which is what a widening instruction
@@ -470,7 +475,12 @@ fn row<T: Copy>(table: &[(&str, T)], name: &str) -> Option<T> {
 impl At<'_> {
     /// The word for one of these, or why there is none.
     pub(super) fn neon(self, values: &[Value]) -> Result<u32, Error> {
-        let families: [Family<'_>; 12] = [
+        let whole = values.iter().any(|value| matches!(value, Value::Vector(Arrangement::Q1, _)));
+        if whole && !matches!(self.mnemonic, "pmull" | "pmull2") {
+            return Err(self.register());
+        }
+        let families: [Family<'_>; 13] = [
+            At::crypto,
             At::copy,
             At::modified,
             At::three_same,
@@ -490,6 +500,68 @@ impl At<'_> {
             }
         }
         Err(self.unwritten())
+    }
+
+    /// The AES, SHA-1, SHA-256, SHA-512 and SHA-3 instructions.
+    fn crypto(self, values: &[Value]) -> Result<Option<u32>, Error> {
+        use Arrangement::{B16, D2, S4};
+        use Value::{Fp, Vector};
+        let m = self.mnemonic;
+        let three = |base: u32, m: u8, n: u8, d: u8| {
+            base | u32::from(m) << 16 | u32::from(n) << 5 | u32::from(d)
+        };
+        let word = match (m, values) {
+            ("aese", [Vector(B16, d), Vector(B16, n)]) => three(0x4E28_4800, 0, *n, *d),
+            ("aesd", [Vector(B16, d), Vector(B16, n)]) => three(0x4E28_5800, 0, *n, *d),
+            ("aesmc", [Vector(B16, d), Vector(B16, n)]) => three(0x4E28_6800, 0, *n, *d),
+            ("aesimc", [Vector(B16, d), Vector(B16, n)]) => three(0x4E28_7800, 0, *n, *d),
+            ("sha1h", [Fp(Scalar::S, d), Fp(Scalar::S, n)]) => three(0x5E28_0800, 0, *n, *d),
+            ("sha1su1", [Vector(S4, d), Vector(S4, n)]) => three(0x5E28_1800, 0, *n, *d),
+            ("sha256su0", [Vector(S4, d), Vector(S4, n)]) => three(0x5E28_2800, 0, *n, *d),
+            ("sha1c" | "sha1p" | "sha1m", [Fp(Scalar::Q, d), Fp(Scalar::S, n), Vector(S4, r)]) => {
+                let opcode = match m {
+                    "sha1c" => 0,
+                    "sha1p" => 1,
+                    _ => 2,
+                };
+                three(0x5E00_0000 | opcode << 12, *r, *n, *d)
+            }
+            ("sha1su0", [Vector(S4, d), Vector(S4, n), Vector(S4, r)]) => {
+                three(0x5E00_3000, *r, *n, *d)
+            }
+            ("sha256h", [Fp(Scalar::Q, d), Fp(Scalar::Q, n), Vector(S4, r)]) => {
+                three(0x5E00_4000, *r, *n, *d)
+            }
+            ("sha256h2", [Fp(Scalar::Q, d), Fp(Scalar::Q, n), Vector(S4, r)]) => {
+                three(0x5E00_5000, *r, *n, *d)
+            }
+            ("sha256su1", [Vector(S4, d), Vector(S4, n), Vector(S4, r)]) => {
+                three(0x5E00_6000, *r, *n, *d)
+            }
+            ("sha512h", [Fp(Scalar::Q, d), Fp(Scalar::Q, n), Vector(D2, r)]) => {
+                three(0xCE60_8000, *r, *n, *d)
+            }
+            ("sha512h2", [Fp(Scalar::Q, d), Fp(Scalar::Q, n), Vector(D2, r)]) => {
+                three(0xCE60_8400, *r, *n, *d)
+            }
+            ("sha512su0", [Vector(D2, d), Vector(D2, n)]) => three(0xCEC0_8000, 0, *n, *d),
+            ("sha512su1", [Vector(D2, d), Vector(D2, n), Vector(D2, r)]) => {
+                three(0xCE60_8800, *r, *n, *d)
+            }
+            ("rax1", [Vector(D2, d), Vector(D2, n), Vector(D2, r)]) => {
+                three(0xCE60_8C00, *r, *n, *d)
+            }
+            ("xar", [Vector(D2, d), Vector(D2, n), Vector(D2, r), Value::Imm(by)]) => {
+                let imm6 = u32::try_from(*by).ok().filter(|&imm6| imm6 < 64);
+                three(0xCE80_0000 | imm6.ok_or_else(|| self.immediate(*by))? << 10, *r, *n, *d)
+            }
+            ("eor3" | "bcax", [Vector(B16, d), Vector(B16, n), Vector(B16, r), Vector(B16, a)]) => {
+                let base = if m == "eor3" { 0xCE00_0000 } else { 0xCE20_0000 };
+                three(base | u32::from(*a) << 10, *r, *n, *d)
+            }
+            _ => return Ok(None),
+        };
+        Ok(Some(word))
     }
 
     /// Every lane arrangement the same and one the instruction takes.
@@ -995,16 +1067,20 @@ impl At<'_> {
             Shape::Wide => (*c, [*a, *b]),
             Shape::Narrow => (*a, [*b, *c]),
         };
-        if narrow.q() != second || wide.iter().any(|&wide| narrow.wide() != Some(wide)) {
+        // The polynomial multiply of two doublewords writes all sixteen bytes as one lane.
+        let doubles = base == "pmull" && matches!(narrow, Arrangement::D1 | Arrangement::D2);
+        let twice = if doubles { Some(Arrangement::Q1) } else { narrow.wide() };
+        if narrow.q() != second || wide.iter().any(|&wide| twice != Some(wide)) {
             return Err(self.register());
         }
-        // The saturating doubling ones have no byte form, and the polynomial one only has that.
+        // The saturating doubling ones have no byte form, and the polynomial one only has that
+        // and the doublewords.
         let sizes = match base {
             "pmull" => B,
             "sqdmlal" | "sqdmlsl" | "sqdmull" => H | S,
             _ => BHS,
         };
-        if !narrow.takes(sizes) {
+        if !doubles && !narrow.takes(sizes) {
             return Err(self.register());
         }
         Ok(Some(
