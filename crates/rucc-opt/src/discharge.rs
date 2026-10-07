@@ -739,6 +739,9 @@ impl Pass for Discharge {
         // `meta_end` runs before the check on any path, and a fact carried down the dominator
         // tree only ever says something about the paths that go through one block.
         let ends = ends_a_lifetime(func);
+        // And which lifetime checks a local in a block may have gone out of scope before, which
+        // the frame slot rule is wrong about for that local and only that one.
+        let late = out_of_scope(func);
 
         // The walk is a stack rather than recursion because the dominator tree of a long chain of
         // blocks is as deep as the function is long, and a pass is not a place to find that out.
@@ -931,6 +934,7 @@ impl Pass for Discharge {
                             let wide = span.filter(|wide| {
                                 (self.sources.objects
                                     && !ends
+                                    && !late.contains(&(inst, wide.base))
                                     && declared(func, wide.base)
                                         .is_some_and(|local| reaches(&local, wide)))
                                     || (self.sources.dominance && scope.alive.reaches(wide))
@@ -966,6 +970,7 @@ impl Pass for Discharge {
                             Some(REMOVED_LIVE_HANDED)
                         } else if self.sources.objects
                             && !ends
+                            && !late.contains(&(inst, asked.base))
                             && declared(func, asked.base)
                                 .is_some_and(|local| covers(&local, &asked))
                         {
@@ -982,6 +987,7 @@ impl Pass for Discharge {
                                 .filter(|wide| {
                                     (self.sources.objects
                                         && !ends
+                                        && !late.contains(&(inst, wide.base))
                                         && declared(func, wide.base)
                                             .is_some_and(|local| reaches(&local, wide)))
                                         || (self.sources.dominance && scope.alive.reaches(wide))
@@ -1146,6 +1152,10 @@ impl Pass for Discharge {
                         }
                         going.push((inst, REMOVED_TYPE));
                     }
+                    // A local going out of scope, after which no check that it was alive has
+                    // anything to say about it. Every lifetime fact goes rather than the ones about
+                    // that local, because a fact is a range and not a name.
+                    Opcode::LifetimeEnd => scope.alive.forget(),
                     // The two ways bytes that were written stop counting as written without a call
                     // being involved. A `meta_begin` is a lifetime starting, which is the storage
                     // becoming fresh again, and a `meta_init_copy` carries whatever the source said
@@ -1478,6 +1488,9 @@ impl Scope {
             self.written.forget();
             self.stored.forget();
         }
+        if crossed.ended {
+            self.alive.forget();
+        }
         match crossed.retyped {
             Retyped::Untouched => {}
             Retyped::Only(node) => self.retyped(Some(node)),
@@ -1517,6 +1530,8 @@ struct Crossed {
     wrote: bool,
     /// A `meta_begin` or a `meta_init_copy`, which can make written bytes unwritten.
     unwritten: bool,
+    /// A `lifetime_end`, which is a local going out of scope.
+    ended: bool,
     /// What happened to the type plane.
     retyped: Retyped,
 }
@@ -1552,6 +1567,7 @@ impl Crossed {
             called: self.called || other.called,
             wrote: self.wrote || other.wrote,
             unwritten: self.unwritten || other.unwritten,
+            ended: self.ended || other.ended,
             retyped: self.retyped.and(other.retyped),
         }
     }
@@ -1569,6 +1585,7 @@ impl Crossed {
                     crossed.retyped = Retyped::Anyhow;
                 }
                 Opcode::MetaInitCopy => crossed.unwritten = true,
+                Opcode::LifetimeEnd => crossed.ended = true,
                 Opcode::MetaTypeCopy => crossed.retyped = Retyped::Anyhow,
                 Opcode::MetaType => {
                     crossed.retyped = match func[inst].extra {
@@ -2513,6 +2530,58 @@ fn spanned(
 /// whoever makes `meta_end` appear.
 fn ends_a_lifetime(func: &Func) -> bool {
     func.blocks().any(|block| func.insts(block).any(|inst| func[inst].opcode == Opcode::MetaEnd))
+}
+
+/// Each lifetime check a local may have gone out of scope before, with the local.
+///
+/// A local in a block has a `lifetime_end` where control leaves the block and, in a build that
+/// checks, a `meta_begin` where its declaration is reached, and the frame slot rule holds for it
+/// only between the two. So this is a walk forward from every `lifetime_end` that stops at a
+/// `meta_begin` of the same local, and a check it reaches is one the rule says nothing about.
+/// A function with no `lifetime_end`, which is every function in a build that does not check,
+/// answers at once with nothing.
+fn out_of_scope(func: &Func) -> Set<(Inst, Value)> {
+    let marked = |inst: Inst, opcode: Opcode| {
+        (func[inst].opcode == opcode).then(|| func[func[inst].args].first().copied()).flatten()
+    };
+    let mut found: Set<(Inst, Value)> = Set::default();
+    let any = func
+        .blocks()
+        .any(|block| func.insts(block).any(|inst| marked(inst, Opcode::LifetimeEnd).is_some()));
+    if !any {
+        return found;
+    }
+    // What has ended where each block starts, grown until nothing changes. A set only grows, so
+    // this stops, and it is small: the locals of one function that are in blocks.
+    let mut entering: Map<Block, Set<Value>> = Map::default();
+    let mut work: Vec<Block> = func.entry().into_iter().collect();
+    let mut queued: Set<Block> = work.iter().copied().collect();
+    let mut seen: Set<Block> = Set::default();
+    while let Some(block) = work.pop() {
+        queued.remove(&block);
+        seen.insert(block);
+        let mut ended = entering.get(&block).cloned().unwrap_or_default();
+        for inst in func.insts(block) {
+            if let Some(local) = marked(inst, Opcode::LifetimeEnd) {
+                ended.insert(local);
+            } else if let Some(local) = marked(inst, Opcode::MetaBegin) {
+                ended.remove(&local);
+            } else if func[inst].opcode == Opcode::CheckLive {
+                found.extend(ended.iter().map(|&local| (inst, local)));
+            }
+        }
+        let Some(end) = func.terminator(block) else { continue };
+        for call in func.successors(end) {
+            let next = entering.entry(call.block).or_default();
+            let before = next.len();
+            next.extend(ended.iter().copied());
+            let grew = next.len() != before;
+            if (grew || !seen.contains(&call.block)) && queued.insert(call.block) {
+                work.push(call.block);
+            }
+        }
+    }
+    found
 }
 
 fn walks_by_a_value(func: &Func) -> bool {
@@ -4798,6 +4867,30 @@ mod tests {
         assert_eq!(lives(&func), 1);
         assert_eq!(stats.count(Kind::Optimized, super::REMOVED_LIVE_LOCAL), 0);
         assert_eq!(stats.count(Kind::Optimized, super::REMOVED_LIVE), 1);
+    }
+
+    #[test]
+    fn a_lifetime_check_after_a_local_went_out_of_scope_stays_until_it_is_back() {
+        // A local in a block. The check inside goes with the frame slot rule, the one past the
+        // `lifetime_end` stays because the local is out of scope there, and the one past the next
+        // `meta_begin` goes again, since the declaration has been reached and the local is back.
+        let (_, mut func, block, _) = blank();
+        let mut build = Builder::new(&mut func, block);
+        let slot = local(&mut build, 16);
+        live(&mut build, slot);
+        let args = build.func().push_values(&[slot]);
+        build.inst(InstData { args, ..InstData::new(Opcode::LifetimeEnd) }, &[]);
+        live(&mut build, slot);
+        let size = build.iconst(Type::int(64), 16);
+        let args = build.func().push_values(&[slot, size]);
+        let extra = Extra::Class(rucc_ir::StorageClass::Automatic);
+        build.inst(InstData { args, extra, ..InstData::new(Opcode::MetaBegin) }, &[]);
+        live(&mut build, slot);
+        build.ret(&[]);
+        let stats = run(&mut func);
+        assert_eq!(lives(&func), 1);
+        assert_eq!(stats.count(Kind::Optimized, super::REMOVED_LIVE_LOCAL), 2);
+        assert_eq!(stats.count(Kind::Optimized, super::REMOVED_LIVE), 0);
     }
 
     /// Puts `cap_of` and a `check_deriv` for a walk from `from` to `to` into a block.

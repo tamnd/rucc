@@ -33,7 +33,7 @@ use rucc_diag::{Diagnostic, Span};
 use rucc_ir::{
     Abi, AsmInfo, AttrSet, Block, BlockCall, Builder, CallInfo, Def, Extra, Flags, FloatPred, Func,
     Inst, InstData, IntPred, MemInfo, MemOrder, Opcode, Param, PrefetchHint, Restrict, RmwOp,
-    Signature, Type, VaInfo, Value, twice_by_name,
+    Signature, StorageClass, Type, VaInfo, Value, twice_by_name,
 };
 use rucc_sema::{
     AtomicOp, BitCount, Classify, Const, Conversion, CpuTest, DeclFlags, DeclId, DeclKind, Eval,
@@ -113,6 +113,7 @@ pub(crate) fn lower(unit: &mut Unit<'_>, decl: DeclId, func: &mut Func, plan: &P
         nests: Nests::default(),
         in_place: Set::default(),
         env: Env::default(),
+        skipped: Set::default(),
     };
     body.ssa.seal(body.func, entry);
 
@@ -280,6 +281,10 @@ pub(crate) fn lower(unit: &mut Unit<'_>, decl: DeclId, func: &mut Func, plan: &P
         let Some(stmt) = tast[label].stmt else { continue };
         let block = body.label_block(stmt);
         body.func.name_block(block, symbol);
+    }
+
+    if !body.skipped.is_empty() {
+        unbegin(body.func, &body.skipped);
     }
 
     let Body { ssa, .. } = body;
@@ -495,6 +500,19 @@ fn landing(from: &[Mark], to: &[Mark], pinned: &Set<u32>) -> Landing {
 /// labels turn out to be dead is not known until the whole body has been walked, since the
 /// `goto` that reaches one is allowed to be the last statement in the function, so it is
 /// answered here and not while the walk is going on.
+fn unbegin(func: &mut Func, skipped: &Set<Value>) {
+    let blocks: Vec<Block> = func.blocks().collect();
+    for block in blocks {
+        let insts: Vec<Inst> = func.insts(block).collect();
+        for inst in insts {
+            let data = &func[inst];
+            if data.opcode == Opcode::MetaBegin && skipped.contains(&func[data.args][0]) {
+                func.remove_inst(inst);
+            }
+        }
+    }
+}
+
 fn prune(func: &mut Func) {
     let Some(entry) = func.entry() else { return };
     let mut reached = vec![false; func.counts().blocks];
@@ -808,6 +826,14 @@ struct Body<'a, 'u> {
     /// Where the things a nested function reaches are, for a function in a tree of nested ones.
     /// See [`crate::nest`].
     env: Env,
+    /// The locals in memory a label is inside the lifetime of, whose `meta_begin` is taken out
+    /// when the walk is done.
+    ///
+    /// A label after a declaration is somewhere control can arrive without passing the
+    /// declaration, and a local whose lifetime can begin without its marker is better off with no
+    /// marker at all. Taken at every label rather than only the ones a jump from outside reaches,
+    /// which costs a check on a local nothing jumps past and nothing else.
+    skipped: Set<Value>,
 }
 
 /// What one function of a tree of nested ones has in hand to find the things it reaches.
@@ -1477,6 +1503,32 @@ impl<'u> Body<'_, 'u> {
         if !ending.contains(&slot) {
             ending.push(slot);
         }
+    }
+
+    /// The `meta_begin` of a local in memory, where the walk reaches its declaration, if the
+    /// unit asks for one.
+    ///
+    /// The same locals [`Self::lives`] takes, so each one with a marker where it begins has one
+    /// where it ends, and the length is the size of the slot.
+    fn begins(&mut self, decl: DeclId) {
+        if !self.unit.begins || self.at.is_none() {
+            return;
+        }
+        let Some(Local::Slot(slot)) = self.vars.get(&decl).copied() else { return };
+        let Def::Result { inst, .. } = self.func[slot].def else { return };
+        let data = &self.func[inst];
+        let Extra::Mem(mem) = data.extra else { return };
+        if data.opcode != Opcode::Alloca || !self.func[data.args].is_empty() {
+            return;
+        }
+        let size = self.func[mem].size;
+        let address = self.address;
+        let span = self.unit.tast.decl_span(decl);
+        let mut build = self.build(span);
+        let len = build.iconst(address, i128::from(size));
+        let args = build.func().push_values(&[slot, len]);
+        let extra = Extra::Class(StorageClass::Automatic);
+        build.inst(InstData { args, extra, ..InstData::new(Opcode::MetaBegin) }, &[]);
     }
 
     /// One `lifetime_end` for each of these locals, the last declared first, if there is
@@ -2176,6 +2228,8 @@ impl<'u> Body<'_, 'u> {
                     // for the register's value to be replaced by it rather than the other way
                     // around, and a declaration with no initializer keeps what the register had.
                     self.seed_register(decl);
+                    // In front of the initializer, which is part of the lifetime it begins.
+                    self.begins(decl);
                     self.init(decl);
                     // After the initializer, because the handler runs on the object the
                     // declaration made and a declaration that was never reached made none.
@@ -2403,6 +2457,10 @@ impl<'u> Body<'_, 'u> {
             // before the labelled statement is walked, since a scope that statement opens is one
             // the label is outside of.
             self.landings.insert(body, self.marks.clone());
+        }
+        if self.unit.begins {
+            let open = self.ends.iter().flatten().flatten();
+            self.skipped.extend(open.copied());
         }
         if self.at.is_some() {
             self.jump(block, span);

@@ -216,7 +216,7 @@ pub fn frames(func: &mut Func, names: &mut Interner, word: Type, objects: &Objec
     if moved.is_empty() && !clears {
         return;
     }
-    let witness = witnessed(func, names, objects, &moved);
+    let witnesses = witnessed(func, names, objects, &moved);
     substitute(func, &moved);
     parameters(func, word);
     let mut frame: Option<Value> = None;
@@ -226,7 +226,7 @@ pub fn frames(func: &mut Func, names: &mut Interner, word: Type, objects: &Objec
         match (func[inst].opcode, slot) {
             (Opcode::CapNull, Some(address)) => nulled(func, word, inst, address),
             (Opcode::CapOf, Some(address)) => {
-                allocated(func, names, word, objects, witness, inst, address);
+                allocated(func, names, word, objects, witnesses.as_ref(), inst, address);
             }
             (Opcode::CapLoad, Some(address)) => read(func, names, inst, address),
             (Opcode::CapNarrow, Some(address)) => narrowed(func, names, word, inst, address),
@@ -284,6 +284,21 @@ pub fn frames(func: &mut Func, names: &mut Interner, word: Type, objects: &Objec
     }
 }
 
+/// The witnesses a function's locals are checked against, which [`witnessed`] gives it.
+struct Witnesses {
+    /// The frame's, for a local whose lifetime is the call's, if there is one of those.
+    frame: Option<Value>,
+    /// One of its own for each local with a block scope, keyed by the local's `alloca`.
+    scoped: Map<Value, Value>,
+}
+
+impl Witnesses {
+    /// The witness the local at `base` is checked against.
+    fn of(&self, base: Value) -> Option<Value> {
+        self.scoped.get(&base).copied().or(self.frame)
+    }
+}
+
 /// Gives the frame a witness when a local of it gets a capability, and gives back its address.
 ///
 /// Row T4 of document 03, and `rucc_safe_rt::witness` is where it is argued. One word at the top of
@@ -291,6 +306,13 @@ pub fn frames(func: &mut Func, names: &mut Interner, word: Type, objects: &Objec
 /// in front of every `return` and tail call, which are the two ways the frame is given back. The
 /// capability of each local then names the word, so the lifetime check can tell a pointer that
 /// outlived the frame from one that did not.
+///
+/// A local the front end said both where its lifetime begins and where it ends, which is one in a
+/// block, gets a word of its own instead, made the same way. That one is also shut by
+/// `__rucc_scope_shut(witness)` in front of each `lifetime_end` of the local and opened again by
+/// `__rucc_scope_open(witness)` in front of each `meta_begin`, so a pointer to it that is used after
+/// its block is refused while the frame is still running. A local with only one of the two markers
+/// is one a jump can take in or out of its block without passing a marker, and keeps the frame's.
 ///
 /// Only a frame that hands out a capability for one of its locals pays, since nothing else could
 /// ever ask about the word. A call rather than a store at each end, because a store to a local
@@ -300,14 +322,53 @@ fn witnessed(
     names: &mut Interner,
     objects: &Objects,
     moved: &Map<Value, Value>,
-) -> Option<Value> {
-    let wanted = walk(func).into_iter().any(|inst| {
+) -> Option<Witnesses> {
+    let insts = walk(func);
+    let mut locals: Vec<Value> = Vec::new();
+    for &inst in &insts {
         let kept = func[inst].results().next().is_some_and(|value| moved.contains_key(&value));
-        kept && named(func, objects, inst).is_some_and(|(_, _, routine)| routine == LOCAL)
-    });
-    if !wanted {
+        let Some((base, _, routine)) = named(func, objects, inst).filter(|_| kept) else {
+            continue;
+        };
+        if routine == LOCAL && !locals.contains(&base) {
+            locals.push(base);
+        }
+    }
+    if locals.is_empty() {
         return None;
     }
+    let marked = |opcode: Opcode| -> Set<Value> {
+        let marks = insts.iter().filter(|&&inst| func[inst].opcode == opcode);
+        marks.filter_map(|&inst| func[func[inst].args].first().copied()).collect()
+    };
+    let (begun, ended) = (marked(Opcode::MetaBegin), marked(Opcode::LifetimeEnd));
+    let (scoped, framed): (Vec<Value>, Vec<Value>) =
+        locals.into_iter().partition(|base| begun.contains(base) && ended.contains(base));
+    let frame = if framed.is_empty() { None } else { Some(opened(func, names)?) };
+    let mut witnesses = Witnesses { frame, scoped: Map::default() };
+    for base in scoped {
+        let witness = opened(func, names)?;
+        witnesses.scoped.insert(base, witness);
+        for &inst in &insts {
+            let routine = match func[inst].opcode {
+                Opcode::LifetimeEnd => "__rucc_scope_shut",
+                Opcode::MetaBegin => "__rucc_scope_open",
+                _ => continue,
+            };
+            if func[func[inst].args].first() != Some(&base) {
+                continue;
+            }
+            let data = crate::lower::calling(func, names, routine, &[Type::PTR], &[], &[witness]);
+            let call = func.create_inst(data, &[], func.span(inst));
+            func.insert_before(call, inst);
+        }
+    }
+    Some(witnesses)
+}
+
+/// One witness word at the top of the entry block, opened there and closed in front of every way
+/// out of the function.
+fn opened(func: &mut Func, names: &mut Interner) -> Option<Value> {
     let entry = func.entry()?;
     let first = func.insts(entry).next()?;
     let span = func.span(first);
@@ -828,15 +889,17 @@ fn allocated(
     names: &mut Interner,
     word: Type,
     objects: &Objects,
-    witness: Option<Value>,
+    witnesses: Option<&Witnesses>,
     inst: Inst,
     address: Value,
 ) {
-    // A local has its frame's witness by now, since `witnessed` saw the same `cap_of`, and one
-    // that somehow does not is left to recovery rather than called with an argument missing.
-    let exact =
-        named(func, objects, inst).filter(|&(_, _, made)| made != LOCAL || witness.is_some());
+    // A local has a witness by now, since `witnessed` saw the same `cap_of`, and one that somehow
+    // does not is left to recovery rather than called with an argument missing.
+    let witness = |base: Value| witnesses.and_then(|witnesses| witnesses.of(base));
+    let exact = named(func, objects, inst)
+        .filter(|&(base, _, made)| made != LOCAL || witness(base).is_some());
     if let Some((base, size, routine)) = exact {
+        let witness = witness(base);
         let size = konst(func, inst, Imm::int(i128::from(size), word), word);
         let data = match witness.filter(|_| routine == LOCAL) {
             Some(witness) => {
@@ -1307,6 +1370,53 @@ mod tests {
         let back = text.find("return").expect("the function returns");
         assert!(open < made && made < close && close < back, "{text}");
         assert_eq!(text.matches("__rucc_frame_close").count(), 1, "{text}");
+        believed(&unit, &func, &names);
+    }
+
+    /// A local of 64 bytes with a `meta_begin` and a `lifetime_end` when `begun` says so and only
+    /// the `lifetime_end` when it does not.
+    fn scoped(b: &mut Builder<'_>, begun: bool) -> Value {
+        let base = local(b, 64, false);
+        if begun {
+            let len = number(b, 64, Type::int(64));
+            let args = b.func().push_values(&[base, len]);
+            let extra = Extra::Class(rucc_ir::StorageClass::Automatic);
+            b.inst(InstData { args, extra, ..InstData::new(Opcode::MetaBegin) }, &[]);
+        }
+        let args = b.func().push_values(&[base]);
+        b.inst(InstData { args, ..InstData::new(Opcode::LifetimeEnd) }, &[]);
+        base
+    }
+
+    #[test]
+    fn a_local_in_a_block_has_a_witness_its_block_shuts_and_opens() {
+        let mut names = Interner::new();
+        let mut func = rooted(&mut names, |b| scoped(b, true));
+        frames(&mut func, &mut names, Type::int(64), &Objects::default());
+        let unit = module(&mut names);
+        let text = print_func(&unit, &func, &names);
+        // The local's own word and no frame word, since it is the only local with a capability.
+        assert_eq!(text.matches("__rucc_frame_open").count(), 1, "{text}");
+        assert_eq!(text.matches("__rucc_frame_close").count(), 1, "{text}");
+        let open = text.find("__rucc_scope_open").expect("the declaration opens it");
+        let begin = text.find("meta_begin").expect("the marker is still there");
+        let shut = text.find("__rucc_scope_shut").expect("the end of the block shuts it");
+        let end = text.find("lifetime_end").expect("the marker is still there");
+        assert!(open < begin && begin < shut && shut < end, "{text}");
+        believed(&unit, &func, &names);
+    }
+
+    #[test]
+    fn a_local_with_only_an_end_keeps_the_frame_witness() {
+        let mut names = Interner::new();
+        let mut func = rooted(&mut names, |b| scoped(b, false));
+        frames(&mut func, &mut names, Type::int(64), &Objects::default());
+        let unit = module(&mut names);
+        let text = print_func(&unit, &func, &names);
+        // A jump into its block reaches it without a marker, so it is not one this can shut.
+        assert_eq!(text.matches("__rucc_frame_open").count(), 1, "{text}");
+        assert!(!text.contains("__rucc_scope_shut"), "{text}");
+        assert!(!text.contains("__rucc_scope_open"), "{text}");
         believed(&unit, &func, &names);
     }
 

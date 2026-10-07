@@ -202,6 +202,16 @@ fn calls(
     // more, so almost all of what this does is take them out again. The rest of it is putting the
     // capabilities that are left somewhere the back end can keep them, which is [`crate::slot`].
     crate::slot::frames(func, names, word, objects);
+    // The `meta_begin` the front end puts where a local in a block is declared has said what it
+    // had to by now, to [`crate::local`] and to the witnesses, and no back end has a rule for one.
+    let begins: Vec<Inst> = func
+        .blocks()
+        .flat_map(|block| func.insts(block))
+        .filter(|&inst| func[inst].opcode == Opcode::MetaBegin)
+        .collect();
+    for inst in begins {
+        func.remove_inst(inst);
+    }
 }
 
 /// `check_bounds` becomes `__rucc_check_bounds(pointer, size, align, capability, descriptor)`.
