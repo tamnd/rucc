@@ -301,7 +301,7 @@ pub struct Row {
 /// the only thing that knows how big it is. That is believed the way [`crate::check::bounds`]
 /// believes it, which is only when it is named and only when it says no, and only about a range
 /// that reaches the object at all. A range wholly outside it is a capability describing somebody
-/// else as far as this can tell, and [`touches`] is where that is decided.
+/// else as far as this can tell, and `touches` is where that is decided.
 ///
 /// # Panics
 ///
