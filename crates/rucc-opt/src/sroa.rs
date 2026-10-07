@@ -183,6 +183,13 @@ pub(crate) fn scalarizable(func: &Func, layout: DataLayout) -> Set<Value> {
     let Some(entry) = func.entry() else {
         return out;
     };
+    // Most bodies the inliner weighs have no local in memory left, and the graph and the readers
+    // of every value were built for each of them only to look at no local. tamnd/rucc#3052.
+    let local =
+        |inst: Inst| func[inst].opcode == Opcode::Alloca && func[func[inst].args].is_empty();
+    if !func.insts(entry).any(local) {
+        return out;
+    }
     let cfg = Cfg::new(func);
     if !shaped(func, &cfg, entry) {
         return out;
@@ -198,7 +205,7 @@ pub(crate) fn scalarizable(func: &Func, layout: DataLayout) -> Set<Value> {
     }
     let mut readers = Readers::new(func);
     for alloca in func.insts(entry) {
-        if func[alloca].opcode != Opcode::Alloca || !func[func[alloca].args].is_empty() {
+        if !local(alloca) {
             continue;
         }
         if let Ok(Some(_)) = plan(func, &rpo, &mut readers, alloca, target) {

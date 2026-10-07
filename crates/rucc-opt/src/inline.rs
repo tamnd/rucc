@@ -1779,10 +1779,15 @@ fn size(func: &Func) -> usize {
 /// time this counts them, since the lowering shares them, and so are the slots of bodies spliced
 /// in earlier, see [`Pool`], so the sum is close to what the frame will be.
 fn frame(func: &Func, layout: DataLayout) -> u64 {
+    let local = |&inst: &Inst| func[inst].opcode == Opcode::Alloca && func[inst].args.is_empty();
+    let mut locals = func.blocks().flat_map(|block| func.insts(block)).filter(local).peekable();
+    // A body with no local in memory has no frame, and finding which of its locals are gone was
+    // two more walks over it and a graph for nothing. tamnd/rucc#3052.
+    if locals.peek().is_none() {
+        return 0;
+    }
     let unread = gone(func, layout);
-    func.blocks()
-        .flat_map(|block| func.insts(block))
-        .filter(|&inst| func[inst].opcode == Opcode::Alloca && func[inst].args.is_empty())
+    locals
         .filter(|&inst| !func[inst].first_result.is_some_and(|value| unread.contains(&value)))
         .filter_map(|inst| match func[inst].extra {
             Extra::Mem(mem) => Some(func[mem].size),
@@ -1835,6 +1840,9 @@ fn unread(func: &Func) -> Set<Value> {
         .filter(|&inst| func[inst].opcode == Opcode::Alloca && func[inst].args.is_empty())
         .filter_map(|inst| func[inst].first_result)
         .collect();
+    if locals.is_empty() {
+        return locals;
+    }
     for inst in func.blocks().flat_map(|block| func.insts(block)) {
         let data = &func[inst];
         for (at, arg) in func[data.args].iter().enumerate() {
