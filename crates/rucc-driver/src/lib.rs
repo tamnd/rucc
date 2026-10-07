@@ -356,6 +356,17 @@ fn thunked(arg: &str, flag: &str) -> Result<rucc_target::Thunk, CliError> {
     }
 }
 
+/// The number of the AArch64 vector register `-ffixed-` names, in any of the spellings gcc takes
+/// for it, from `b0` to `v31`.
+fn fixed_vector(arg: &str) -> Option<u8> {
+    let name = arg.strip_prefix("-ffixed-")?;
+    let number = name.strip_prefix(['b', 'h', 's', 'd', 'q', 'v'])?;
+    if number.len() > 1 && number.starts_with('0') {
+        return None;
+    }
+    number.parse::<u8>().ok().filter(|&number| number < 32)
+}
+
 /// What `-falign-functions=N` asks for, as a power of two, or `None` for the target's own answer.
 ///
 /// Zero and one both mean the default, which is gcc's reading of them, and everything else is
@@ -864,6 +875,12 @@ pub fn parse_args(args: &[String]) -> Result<Action, CliError> {
             // System V has a choice about. The kernel builds every 32 bit unit with the first.
             "-freg-struct-return" => opts.reg_struct_return = true,
             "-fpcc-struct-return" => opts.reg_struct_return = false,
+            // A vector register kept out of the allocator on AArch64, which the kernel's AEGIS
+            // code asks for so that the S-box its `asm` loads into `v16` to `v31` stays there.
+            _ if aarch64 && fixed_vector(arg).is_some() => {
+                let Some(number) = fixed_vector(arg) else { continue };
+                opts.fixed_vectors |= 1 << number;
+            }
             _ if kbuild::row(arg, arch).is_some() => {
                 let Some(row) = kbuild::row(arg, arch) else { continue };
                 if let kbuild::Answer::Refused(why, issue) = row.answer {
