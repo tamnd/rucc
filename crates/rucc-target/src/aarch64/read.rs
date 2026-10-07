@@ -519,7 +519,7 @@ fn reference(text: &str, symbol: &mut Named) -> Result<Operator, Error> {
                 "tprel_lo12_nc" => Operator::TprelLo12Nc,
                 "secrel_hi12" => Operator::SecrelHi12,
                 "secrel_lo12" => Operator::SecrelLo12,
-                _ => return Err(error(text)),
+                other => wide(other).ok_or_else(|| error(text))?,
             };
             (operator, name)
         }
@@ -528,6 +528,20 @@ fn reference(text: &str, symbol: &mut Named) -> Result<Operator, Error> {
     };
     named(text, name, symbol)?;
     Ok(operator)
+}
+
+/// The operator of a wide move, `abs_g0` to `abs_g3`, `abs_g0_nc` to `abs_g2_nc` and `abs_g0_s`
+/// to `abs_g2_s`, which are the ones the ELF ABI has relocations for.
+fn wide(operator: &str) -> Option<Operator> {
+    let rest = operator.strip_prefix("abs_g")?;
+    let (group, kind) = rest.split_at_checked(1)?;
+    let group: u8 = group.parse().ok().filter(|&group| group < 4)?;
+    match kind {
+        "" => Some(Operator::Abs(group)),
+        "_nc" if group < 3 => Some(Operator::AbsNc(group)),
+        "_s" if group < 3 => Some(Operator::AbsS(group)),
+        _ => None,
+    }
 }
 
 /// A symbol with the part of its address Apple's assembler wants said after it, as in

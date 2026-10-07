@@ -1791,7 +1791,14 @@ mod tests {
         ] {
             assert_eq!(crate::elf::r_type(reference), Some(wanted));
         }
-        assert_eq!(crate::elf::r_type_aarch64(Reference::AwayWide), Some(elf::R_AARCH64_PREL64));
+        for (reference, wanted) in [
+            (Reference::AwayWide, elf::R_AARCH64_PREL64),
+            (Reference::Address { bytes: 2 }, elf::R_AARCH64_ABS16),
+            (Reference::Short, elf::R_AARCH64_PREL16),
+        ] {
+            assert_eq!(crate::elf::r_type_aarch64(reference), Some(wanted));
+        }
+        assert_eq!(crate::elf::r_type_aarch64(Reference::Address { bytes: 1 }), None);
     }
 
     #[test]

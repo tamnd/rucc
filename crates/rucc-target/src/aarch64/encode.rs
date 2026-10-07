@@ -321,6 +321,14 @@ pub enum Operator {
     SecrelHi12,
     /// The low twelve bits of it, `:secrel_lo12:`.
     SecrelLo12,
+    /// Sixteen bits of the address for `movz` or `movk`, the group number of them counting from
+    /// the bottom, checking that nothing above them is set, `:abs_g1:`.
+    Abs(u8),
+    /// The same without the check, `:abs_g1_nc:`.
+    AbsNc(u8),
+    /// The same for an address taken as signed, which the linker writes as a `movn` of its
+    /// complement when it is negative, `:abs_g1_s:`.
+    AbsS(u8),
 }
 
 /// What is added to the base register of an address.
@@ -478,6 +486,14 @@ pub enum Fixup {
     /// The low twelve bits of it, as the offset of an access of the size the instruction says,
     /// which carries them divided by that size.
     SecrelLow12L,
+    /// Sixteen bits of an address for a wide move, the group number of them counting from the
+    /// bottom, with the rest above them checked to be zero.
+    MovwUabs(u8),
+    /// The same without the check.
+    MovwUabsNc(u8),
+    /// The same for a signed address, checked to fit, with the move made a `movn` of the
+    /// complement when it is negative.
+    MovwSabs(u8),
 }
 
 impl Fixup {
@@ -504,6 +520,9 @@ impl Fixup {
             Fixup::GotTprelLo12Nc => 542,
             Fixup::TprelHi12 => 549,
             Fixup::TprelLo12Nc => 551,
+            Fixup::MovwUabs(group) => 263 + 2 * u32::from(group),
+            Fixup::MovwUabsNc(group) => 264 + 2 * u32::from(group),
+            Fixup::MovwSabs(group) => 270 + u32::from(group),
             Fixup::SecrelHigh12A | Fixup::SecrelLow12A | Fixup::SecrelLow12L => return None,
         })
     }
@@ -531,6 +550,9 @@ impl Fixup {
             Fixup::GotTprelLo12Nc => "R_AARCH64_TLSIE_LD64_GOTTPREL_LO12_NC",
             Fixup::TprelHi12 => "R_AARCH64_TLSLE_ADD_TPREL_HI12",
             Fixup::TprelLo12Nc => "R_AARCH64_TLSLE_ADD_TPREL_LO12_NC",
+            Fixup::MovwUabs(group) => MOVW_UABS[usize::from(group)],
+            Fixup::MovwUabsNc(group) => MOVW_UABS_NC[usize::from(group)],
+            Fixup::MovwSabs(group) => MOVW_SABS[usize::from(group)],
             Fixup::SecrelHigh12A => "IMAGE_REL_ARM64_SECREL_HIGH12A",
             Fixup::SecrelLow12A => "IMAGE_REL_ARM64_SECREL_LOW12A",
             Fixup::SecrelLow12L => "IMAGE_REL_ARM64_SECREL_LOW12L",
@@ -570,8 +592,43 @@ impl Fixup {
             Fixup::Ldst64Lo12 | Fixup::GotLo12 | Fixup::GotTprelLo12Nc => scaled_low(word, low, 3),
             Fixup::Ldst128Lo12 => scaled_low(word, low, 4),
             Fixup::SecrelLow12L => scaled_low(word, low, access_scale(word)),
+            Fixup::MovwUabs(group) => {
+                let above = (value as u64).checked_shr(16 * u32::from(group) + 16).unwrap_or(0);
+                (above == 0).then(|| wide_bits(word, value, group))
+            }
+            Fixup::MovwUabsNc(group) => Some(wide_bits(word, value, group)),
+            Fixup::MovwSabs(group) => {
+                let half = 1i64 << (16 * u32::from(group) + 15);
+                if !(-2 * half..2 * half).contains(&value) {
+                    return None;
+                }
+                // `movz` when it is not negative and `movn` of the complement when it is.
+                let word = word & !(3 << 29);
+                Some(if value < 0 {
+                    wide_bits(word, !value, group)
+                } else {
+                    wide_bits(word | 2 << 29, value, group)
+                })
+            }
         }
     }
+}
+
+/// The names of the wide move relocations by group, which `name` hands out.
+const MOVW_UABS: [&str; 4] = [
+    "R_AARCH64_MOVW_UABS_G0",
+    "R_AARCH64_MOVW_UABS_G1",
+    "R_AARCH64_MOVW_UABS_G2",
+    "R_AARCH64_MOVW_UABS_G3",
+];
+const MOVW_UABS_NC: [&str; 3] =
+    ["R_AARCH64_MOVW_UABS_G0_NC", "R_AARCH64_MOVW_UABS_G1_NC", "R_AARCH64_MOVW_UABS_G2_NC"];
+const MOVW_SABS: [&str; 3] =
+    ["R_AARCH64_MOVW_SABS_G0", "R_AARCH64_MOVW_SABS_G1", "R_AARCH64_MOVW_SABS_G2"];
+
+/// A wide move with the sixteen bits of a number its group stands for put in.
+fn wide_bits(word: u32, value: i64, group: u8) -> u32 {
+    word | ((value >> (16 * u32::from(group))) as u32 & 0xffff) << 5
 }
 
 /// How many bits the offset of a load or store with an unsigned offset is shifted by, which is the
@@ -926,9 +983,9 @@ impl At<'_> {
                 }
                 [] => return Err(self.unwritten()),
             },
-            "movz" => self.wide(0b10, values)?,
-            "movn" => self.wide(0b00, values)?,
-            "movk" => self.wide(0b11, values)?,
+            "movz" => return self.wide(0b10, values),
+            "movn" => return self.wide(0b00, values),
+            "movk" => return self.wide(0b11, values),
             "madd" | "msub" | "mul" | "mneg" => self.multiply(values)?,
             "smaddl" | "umaddl" | "smsubl" | "umsubl" | "smull" | "umull" => self.long(values)?,
             "smulh" | "umulh" => match values {
@@ -1573,8 +1630,23 @@ impl At<'_> {
         }
     }
 
-    /// `movz`, `movn` and `movk`, with sixteen bits and where they go.
-    fn wide(self, opc: u32, values: &[Value]) -> Result<u32, Error> {
+    /// `movz`, `movn` and `movk`, with sixteen bits and where they go, or with a part of an
+    /// address the linker fills in.
+    fn wide(self, opc: u32, values: &[Value]) -> Result<Word, Error> {
+        if let [d, Value::Symbol(op)] = values {
+            let (group, fixup) = match *op {
+                Operator::Abs(group) => (group, Fixup::MovwUabs(group)),
+                Operator::AbsNc(group) => (group, Fixup::MovwUabsNc(group)),
+                Operator::AbsS(group) => (group, Fixup::MovwSabs(group)),
+                _ => return Err(self.unwritten()),
+            };
+            let (width, rd) = self.zr(d)?;
+            if u32::from(group) * 16 >= width.bits() {
+                return Err(self.unwritten());
+            }
+            let word = width.sf() << 31 | opc << 29 | 0x1280_0000 | u32::from(group) << 21 | rd;
+            return Ok((word, Some(fixup)));
+        }
         let (d, imm, shift) = match values {
             [d, Value::Imm(imm)] => (d, *imm, 0),
             [d, Value::Imm(imm), Value::Shift(Shift::Lsl, shift)] => (d, *imm, *shift),
@@ -1585,7 +1657,8 @@ impl At<'_> {
         if shift % 16 != 0 || u32::from(shift) >= width.bits() {
             return Err(self.immediate(i64::from(shift)));
         }
-        Ok(width.sf() << 31 | opc << 29 | 0x1280_0000 | u32::from(shift / 16) << 21 | imm << 5 | rd)
+        let word = width.sf() << 31 | opc << 29 | 0x1280_0000 | u32::from(shift / 16) << 21;
+        Ok((word | imm << 5 | rd, None))
     }
 
     /// `madd` and `msub`, and `mul` and `mneg`, which are them adding to zero.
@@ -2632,6 +2705,44 @@ mod tests {
         assert_eq!(Fixup::SecrelLow12L.apply(0xb940_0109, 0x388), Some(0xb943_8909));
         assert_eq!(Fixup::SecrelLow12L.apply(0x3dc0_0000, 0x20), Some(0x3dc0_0800));
         assert_eq!(Fixup::SecrelLow12L.apply(0x3dc0_0000, 0x28), None);
+    }
+
+    #[test]
+    fn a_wide_move_of_part_of_an_address_is_the_word_and_relocation_llvm_mc_writes() {
+        // The arm64 kernel's reloc_test_syms.S, which the module loader's self test is built
+        // from, loads an address sixteen bits at a time with these.
+        for (text, word, name) in [
+            ("movz x0, #:abs_g2_s:sym", 0xd2c0_0000, "R_AARCH64_MOVW_SABS_G2"),
+            ("movk x0, #:abs_g1_nc:sym", 0xf2a0_0000, "R_AARCH64_MOVW_UABS_G1_NC"),
+            ("movk x0, #:abs_g0_nc:sym", 0xf280_0000, "R_AARCH64_MOVW_UABS_G0_NC"),
+            ("movz x0, #:abs_g3:sym", 0xd2e0_0000, "R_AARCH64_MOVW_UABS_G3"),
+            ("movz w1, :abs_g1:sym", 0x52a0_0001, "R_AARCH64_MOVW_UABS_G1"),
+            ("movn x1, #:abs_g0_s:sym", 0x9280_0001, "R_AARCH64_MOVW_SABS_G0"),
+            ("movk x2, #:abs_g1:sym", 0xf2a0_0002, "R_AARCH64_MOVW_UABS_G1"),
+        ] {
+            let line = read(text).expect("a line");
+            let got = encode(&line.mnemonic, &line.values).expect("a word");
+            assert_eq!((got.word, got.fixup.map(Fixup::name)), (word, Some(name)), "{text}");
+        }
+        assert_eq!(Fixup::MovwUabs(0).elf(), Some(263));
+        assert_eq!(Fixup::MovwUabs(3).elf(), Some(269));
+        assert_eq!(Fixup::MovwUabsNc(2).elf(), Some(268));
+        assert_eq!(Fixup::MovwSabs(2).elf(), Some(272));
+        // A group past the register, and the groups the ABI has no relocation for.
+        for text in ["movz w0, #:abs_g2:sym", "movz x0, #:abs_g3_nc:sym", "movz x0, #:abs_g3_s:sym"]
+        {
+            let refused =
+                read(text).map_or(true, |line| encode(&line.mnemonic, &line.values).is_err());
+            assert!(refused, "{text}");
+        }
+        // Filled in the way a linker does it, a negative signed one as a `movn`.
+        assert_eq!(Fixup::MovwUabs(1).apply(0xf2a0_0000, 0x1234_5678), Some(0xf2a2_4680));
+        assert_eq!(Fixup::MovwUabs(0).apply(0xd280_0000, 0x1_0000), None);
+        assert_eq!(Fixup::MovwUabsNc(0).apply(0xf280_0000, 0x1_0005), Some(0xf280_00a0));
+        assert_eq!(Fixup::MovwUabs(3).apply(0xd2e0_0000, -1), Some(0xd2ff_ffe0));
+        assert_eq!(Fixup::MovwSabs(0).apply(0xd280_0000, -2), Some(0x9280_0020));
+        assert_eq!(Fixup::MovwSabs(0).apply(0xd280_0000, 5), Some(0xd280_00a0));
+        assert_eq!(Fixup::MovwSabs(0).apply(0xd280_0000, -0x1_0001), None);
     }
 
     #[test]

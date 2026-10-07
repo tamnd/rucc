@@ -157,17 +157,20 @@ pub(crate) fn width_i386(r_type: elf::RelocationType) -> Option<usize> {
 /// The same for AArch64.
 ///
 /// A field of an instruction is the relocation its fixup names. What a table of data holds is the
-/// same question it is on the other machine with different numbers: an address at eight bytes or
-/// at four, and a distance from the four bytes themselves, which is what an unwind record says
-/// about its function. Nothing for the kinds that are about an x86-64 instruction, since an
+/// same question it is on the other machine with different numbers: an address at eight bytes, four
+/// or two, and a distance from the bytes themselves, which is what an unwind record says about its
+/// function. The arm64 kernel's module loader test has the two byte ones, `.short sym` and
+/// `.short sym - .`. Nothing for the kinds that are about an x86-64 instruction, since an
 /// instruction here asks through a field.
 pub(crate) fn r_type_aarch64(reference: Reference) -> Option<elf::RelocationType> {
     Some(match reference {
         Reference::Field(fixup) => elf::RelocationType(fixup.elf()?),
         Reference::Address { bytes: 8 } => elf::R_AARCH64_ABS64,
         Reference::Address { bytes: 4 } => elf::R_AARCH64_ABS32,
+        Reference::Address { bytes: 2 } => elf::R_AARCH64_ABS16,
         Reference::Data | Reference::Away => elf::R_AARCH64_PREL32,
         Reference::AwayWide => elf::R_AARCH64_PREL64,
+        Reference::Short => elf::R_AARCH64_PREL16,
         _ => return None,
     })
 }

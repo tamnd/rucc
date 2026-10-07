@@ -1016,7 +1016,8 @@ pub enum Reference {
     Away,
     /// How far the thing is from the end of two bytes holding the answer, which is a jump or a call
     /// in sixteen bit code to somewhere in another section. `R_386_PC16` on ELF, and nothing on
-    /// the other formats, which have no sixteen bit code to write it for.
+    /// the other formats, which have no sixteen bit code to write it for. AArch64 has it for
+    /// `.short sym - .` in data, `R_AARCH64_PREL16`.
     Short,
     /// The same in one byte, which is `.byte target - 1f` in front of `1:`. The kernel's boot
     /// header starts with a short jump written out byte by byte that way, to a label in another

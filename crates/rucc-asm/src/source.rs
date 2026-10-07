@@ -1021,7 +1021,8 @@ impl Reader {
     /// `.Lalias` to `TRAMP_VALIAS + tramp_exit - .entry.tramp.text`, a label further down less the
     /// start of its section. Such a number is the one the last pass put the labels at, and is only
     /// checked to fit when nothing in it was guessed, since a guess the next pass corrects can be
-    /// anything. Anything that is not a number here, a symbol say, is left for the reader.
+    /// anything. Anything that is not a number here, a symbol from another file say, is left for
+    /// the reader, which leaves a relocation for the linker.
     fn wide_part(&mut self, word: &str, rest: &str) -> Option<String> {
         let word = word.to_ascii_lowercase();
         if !matches!(word.as_str(), "movz" | "movk" | "movn") {
@@ -1054,7 +1055,12 @@ impl Reader {
             Some(value) => value,
             None => {
                 let sum = self.expression(text).ok()?;
-                self.absolute(&sum)?
+                let Some(value) = self.absolute(&sum) else {
+                    // A symbol from elsewhere is the reader's, and is no guess of this pass's.
+                    self.guessed.truncate(guessed);
+                    return None;
+                };
+                value
             }
         };
         let sure = self.guessed.len() == guessed;
@@ -4778,11 +4784,11 @@ impl Reader {
                 }
             }
             // x86-64 has a relocation for an address in one byte and in two as well, which is
-            // what `.byte sym` and `movw $sym, %ax` ask for and gas writes. The linker checks that
-            // the address fits.
-            let narrow = !self.aarch64 && !self.coff && !self.macho;
+            // what `.byte sym` and `movw $sym, %ax` ask for and gas writes, and AArch64 has one
+            // for two. The linker checks that the address fits.
+            let narrow = !self.coff && !self.macho;
             if matches!(kind, Reference::Address { bytes }
-                if bytes != 4 && bytes != 8 && !(narrow && bytes < 4))
+                if bytes != 4 && bytes != 8 && !(narrow && bytes < 4 && !(self.aarch64 && bytes == 1)))
             {
                 return Err(bad(format!(
                     "the address of '{symbol}' written into {} bytes, and this machine relocates \
@@ -6526,6 +6532,44 @@ _tls$tlv$init:
         );
         // A number too wide for a checked group is refused, as GNU as refuses it.
         assert!(super::read("\tmovz x0, :abs_g0:0x10000\n", Arch::Aarch64).is_err());
+    }
+
+    #[test]
+    fn a_wide_move_of_part_of_a_symbol_leaves_a_relocation_for_each_part() {
+        // The arm64 kernel's reloc_test_syms.S, cut down to one load of each kind. The words and
+        // relocations are what llvm-mc writes for the same text.
+        let read = aarch64(concat!(
+            "\tmovz x0, #:abs_g2_s:sym64_abs\n\tmovk x0, #:abs_g1_nc:sym64_abs\n",
+            "\tmovk x0, #:abs_g0_nc:sym64_abs\n\tmovz x0, #:abs_g3:sym64_abs+8\n",
+        ));
+        assert_eq!(words(&read, ".text"), [0xd2c0_0000, 0xf2a0_0000, 0xf280_0000, 0xd2e0_0000]);
+        let fields: Vec<_> = relocs(&read, ".text")
+            .into_iter()
+            .map(|(at, symbol, kind, addend)| {
+                let Reference::Field(field) = kind else { panic!("{kind:?} at {at}") };
+                (at, symbol, field.name(), addend)
+            })
+            .collect();
+        assert_eq!(
+            fields,
+            [
+                (0, "sym64_abs", "R_AARCH64_MOVW_SABS_G2", 0),
+                (4, "sym64_abs", "R_AARCH64_MOVW_UABS_G1_NC", 0),
+                (8, "sym64_abs", "R_AARCH64_MOVW_UABS_G0_NC", 0),
+                (12, "sym64_abs", "R_AARCH64_MOVW_UABS_G3", 8),
+            ]
+        );
+        // The same file's two byte data, an address and a distance, and a byte of an address,
+        // which this machine has no relocation for.
+        let read = aarch64("\t.data\n\t.short sym16_abs, 0\n\t.short sym64_rel - ., 0\n");
+        assert_eq!(
+            relocs(&read, ".data"),
+            [
+                (0, "sym16_abs", Reference::Address { bytes: 2 }, 0),
+                (4, "sym64_rel", Reference::Short, 0),
+            ]
+        );
+        assert!(super::read("\t.data\n\t.byte sym\n", Arch::Aarch64).is_err());
     }
 
     #[test]
