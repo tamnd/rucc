@@ -526,6 +526,8 @@ fn escape(chars: &mut std::iter::Peekable<std::str::Chars<'_>>) -> Result<u64, S
         'v' => Some(11),
         'e' => Some(27),
         '\\' | '\'' | '"' | '?' => Some(c as u8),
+        // gcc takes these as themselves without a word unless `-pedantic` asks.
+        '(' | '[' | '{' | '%' => Some(c as u8),
         'x' | 'u' | 'U' => None,
         _ => return Err(format!("unknown escape sequence `\\{c}`")),
     };
@@ -613,6 +615,7 @@ mod tests {
         assert_eq!(parse_char("'\\0'", Chars::default()).expect("nul").bits, 0);
         assert_eq!(parse_char("'\\x41'", Chars::default()).expect("hex").bits, 65);
         assert_eq!(parse_char("'\\101'", Chars::default()).expect("octal").bits, 65);
+        assert_eq!(parse_char("'\\%'", Chars::default()).expect("quiet").bits, 37);
     }
 
     #[test]

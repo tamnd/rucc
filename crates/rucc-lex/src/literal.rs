@@ -613,6 +613,10 @@ impl Reader<'_> {
             b'x' => self.hex(width).map(Piece::Value),
             b'u' | b'U' => self.ucn(byte).map(Piece::Char),
             b'N' => Err(LiteralError::NamedUcn),
+            b'(' | b'[' | b'{' | b'%' => {
+                self.remarks = self.remarks.with(Remarks::QUIET_ESCAPE);
+                Ok(Piece::Value(u32::from(byte)))
+            }
             // An escape that means nothing is the character itself, which both compilers do
             // after a warning rather than refusing the program.
             _ => {
@@ -910,6 +914,9 @@ mod tests {
         assert!(ch_remarks(r"'\e'").has(Remarks::NON_ISO_ESCAPE));
         assert_eq!(ch(r"'\q'"), 0x71);
         assert!(ch_remarks(r"'\q'").has(Remarks::UNKNOWN_ESCAPE));
+        assert_eq!(ch(r"'\%'"), 0x25);
+        assert!(ch_remarks(r"'\%'").has(Remarks::QUIET_ESCAPE));
+        assert!(!ch_remarks(r"'\{'").has(Remarks::UNKNOWN_ESCAPE));
         assert_eq!(ch_error(r"'\x'"), LiteralError::NoHexDigits);
         assert_eq!(ch_error(r"'\N{LATIN SMALL LETTER A}'"), LiteralError::NamedUcn);
     }

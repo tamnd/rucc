@@ -42,6 +42,7 @@ All notable changes are recorded here. The format follows [Keep a Changelog](htt
 
 ### Fixed
 
+- `\(`, `\[`, `\{` and `\%` in a string or character constant are the character itself with no warning, as gcc has them, and only `-pedantic` says "unknown escape sequence". bcachefs writes `"d_ino_hardlimit\%llu\n"` and was refused under `-Werror` (#3295).
 - A test against null of an address read out of a `const` table now folds once the read does, when the module gives that name a body. `BUILD_BUG_ON (!table[i].member)` on a string or a function pointer kept its call to the `error` function, so the 7.2.8 arm64 allmodconfig refused madera.c and rtw89's sar.c. (#3294)
 - A constant that does not fit the type it is converted to is no longer warned about inside `sizeof`, `_Alignof` or `typeof`, where nothing evaluates it, as gcc holds it back too. The kernel's s5k5baf counts its 16 bit register values with `sizeof((char[]){ seq })`, and the `-Werror` arm64 allmodconfig refused it. (#3293)
 - A format picked by a conditional is judged as gcc judges it. A constant condition reads only the arm it picks, two arms that are the same literal are read once, and "too many arguments for format" and the empty format warning are given only when no arm read the arguments it was handed. The 7.2.8 arm64 allmodconfig builds with `-Werror`, and five units were refused for a format gcc is quiet about: bcache's `sysfs_print` through `__builtin_types_compatible_p`, and `of_device_make_bus_id`, dm-ebs, fun_queue and aacraid through a run time condition. (#3292)

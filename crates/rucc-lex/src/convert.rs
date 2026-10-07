@@ -570,8 +570,9 @@ fn report(
     }
     // Quiet without `-pedantic`, because each of these is a value the compiler understood
     // perfectly well and only the standard objects to.
-    let pedantic: [(Remarks, &str); 9] = [
+    let pedantic: [(Remarks, &str); 10] = [
         (Remarks::NON_ISO_ESCAPE, "non-ISO-standard escape sequence"),
+        (Remarks::QUIET_ESCAPE, "unknown escape sequence"),
         (Remarks::DOUBLE_SUFFIX, "suffix for double constant is a GCC extension"),
         (Remarks::IMAGINARY, "imaginary constants are a C2Y feature or GCC extension"),
         (Remarks::BINARY, "binary constants are a C23 feature or GCC extension"),
@@ -774,12 +775,12 @@ mod tests {
     #[test]
     fn the_warnings_that_need_pedantic_wait_for_it() {
         let mut quiet = Fixture::new(Std::C17);
-        let (_, diagnostics) = quiet.run(r"1.0d 1.0i 0b1010 '\e'");
+        let (_, diagnostics) = quiet.run(r"1.0d 1.0i 0b1010 '\e' '\%' '\('");
         assert!(diagnostics.is_empty(), "{diagnostics:?}");
 
         let mut loud = Fixture::new(Std::C17);
         loud.pedantic = true;
-        let (_, diagnostics) = loud.run(r"1.0d 1.0i 0b1010 '\e'");
+        let (_, diagnostics) = loud.run(r"1.0d 1.0i 0b1010 '\e' '\%'");
         assert_eq!(
             diagnostics,
             vec![
@@ -787,6 +788,7 @@ mod tests {
                 "imaginary constants are a C2Y feature or GCC extension".to_owned(),
                 "binary constants are a C23 feature or GCC extension".to_owned(),
                 "non-ISO-standard escape sequence".to_owned(),
+                "unknown escape sequence".to_owned(),
             ]
         );
     }
