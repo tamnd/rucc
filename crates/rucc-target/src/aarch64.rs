@@ -224,7 +224,7 @@ pub static FRAME: FrameInsts = FrameInsts {
     iret: None,
     clear_direction: None,
     differ: "cmp_set_ne_64",
-    above: "cmp_set_hi_64",
+    not_below: "cmp_set_hs_64",
     away: Some("b_away"),
     call: "bl",
     probe: Some(PROBE),
@@ -1024,7 +1024,7 @@ mod tests {
     #[test]
     fn every_name_a_description_hands_out_is_an_opcode() {
         let mut names = vec![FRAME.push, FRAME.pop, FRAME.add, FRAME.sub, FRAME.grow, FRAME.align];
-        names.extend([FRAME.imm, FRAME.lea, FRAME.sum, FRAME.ret, FRAME.differ, FRAME.above]);
+        names.extend([FRAME.imm, FRAME.lea, FRAME.sum, FRAME.ret, FRAME.differ, FRAME.not_below]);
         names.extend([FRAME.call, PROBE.inst, FRAME.pad.expect("a pad")]);
         for moves in FRAME.classes {
             names.extend([moves.mov, moves.load, moves.store]);

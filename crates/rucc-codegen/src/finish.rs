@@ -260,7 +260,9 @@ impl Moves {
 /// with.
 ///
 /// Hands back which instruction each of the allocator's moves became, for the one pass that is
-/// allowed to take one of them out again.
+/// allowed to take one of them out again. Also hands back the comparison in each loop that walks
+/// the stack a page at a time. The layout may join each of these with the branch behind it, as it
+/// does for a comparison the lowering wrote.
 ///
 /// # Panics
 ///
@@ -274,7 +276,7 @@ pub fn finish(
     stack: &Stack,
     convention: Convention<'_>,
     names: &mut Interner,
-) -> Moves {
+) -> (Moves, Vec<Inst>) {
     let Convention { regs: conv, insts, protect, probe, landing, trace, pad, hooked, sign } =
         convention;
     let entry = func.entry().expect("a function with a block in it");
@@ -343,7 +345,8 @@ pub fn finish(
     let landing = landing.filter(|&name| {
         !(signing.is_some() && first && insts.targets.is_some_and(|t| t.call == name))
     });
-    let mut writer = Writer { func, conv, insts, names, base, ahead: None, hooked, signing };
+    let mut writer =
+        Writer { func, conv, insts, names, base, ahead: None, hooked, signing, loops: Vec::new() };
 
     let mut cursors: Map<At, Inst> = Map::default();
     let mut moves = Moves::default();
@@ -423,7 +426,7 @@ pub fn finish(
         let order: Vec<Block> = ahead.into_iter().chain(rest).collect();
         writer.func.set_block_order(&order);
     }
-    moves
+    (moves, writer.loops)
 }
 
 /// Points every access to the frame that its instruction cannot carry the offset of at a scratch
@@ -597,6 +600,12 @@ struct Writer<'a> {
     /// The instructions that sign the return address in the prologue and check it in each
     /// epilogue, or `None` in a function that does neither.
     signing: Option<Signing>,
+    /// The comparison in each loop that walks the stack a page at a time.
+    ///
+    /// Each one writes a byte that only the branch behind it reads, so the layout can make the
+    /// comparison set the flags and jump on them. That is two instructions fewer in each loop, and
+    /// it is the shape that gcc writes and that `hardening-check` looks for.
+    loops: Vec<Inst>,
 }
 
 impl Writer<'_> {
@@ -1107,6 +1116,7 @@ impl Writer<'_> {
             .uses(Reg::physical(limit), class)
             .finish();
         self.func.append_inst(body, inst);
+        self.loops.push(inst);
         let cond = Opcode::new(
             self.names.intern(&format!("{}{}", probing.branch.prefix, probing.branch.cond)),
         );
@@ -1127,24 +1137,33 @@ impl Writer<'_> {
     /// it worked out in advance and stop when it gets there. A declaration in the body cannot: how
     /// many bytes it asked for arrives in a register, so where it is going is arithmetic rather than
     /// a constant, and how many pages that is is a number nothing has. What is written instead is a
-    /// loop that steps a page and asks whether it has arrived yet, which is the same walk with the
-    /// count taken out of it.
+    /// loop that asks whether a whole page is still to come and steps one if it is, which is the
+    /// same walk with the count taken out of it.
     ///
     /// The one instruction the lowering wrote becomes four blocks:
     ///
     /// ```text
-    ///   what the block was          everything it did before the declaration, and then where the
-    ///                               stack pointer is going, worked out before it starts moving
-    ///   the step                    one page, and whether the stack pointer is still above there
-    ///   the page it stepped onto    the touch, and round again
+    ///   what the block was          everything it did before the declaration, and then a page
+    ///                               above where the stack pointer is going, worked out before it
+    ///                               starts moving
+    ///   the question                whether the stack pointer is still a page or more above the
+    ///                               end of the array
+    ///   the step                    one page, the touch, and round again
     ///   the rest of the block       the stack pointer put where it was going, and then the body
     /// ```
     ///
-    /// The touch is behind the question rather than in front of it, so the only page ever written
-    /// is one the array reaches. The last step down is a whole page whatever is left, which puts the
-    /// stack pointer at or past the end of the array, and the block that follows puts it back on the
-    /// end. Nothing is touched there and nothing has to be: that is a move of less than a page from
-    /// a page this loop has already been to, which is the whole of what a guard page asks.
+    /// The register holds the end of the array plus one page, so that the question is one unsigned
+    /// comparison. When the stack pointer is at or above that address, a whole page is still to
+    /// come, and the step goes down into the array and touches the page it reaches. So the only page
+    /// ever written is one the array reaches. When the stack pointer is below that address, less
+    /// than a page is left, and the block that follows puts the stack pointer on the end. Nothing is
+    /// touched there and nothing has to be: that is a move of less than a page from a page this loop
+    /// has already been to, which is the whole of what a guard page asks.
+    ///
+    /// The question is in front of the step, as it is in gcc's loop. `hardening-check` finds
+    /// `-fstack-clash-protection` in a program by a comparison with the stack pointer, a jump out,
+    /// the step, the touch and a jump back to the comparison, one after another. A loop with the
+    /// step first does the same work and is not found.
     ///
     /// Nothing is described to the unwinder for any of it. A function with a variable length array
     /// in it keeps a frame pointer, because its own stack pointer is not a fixed distance from
@@ -1171,12 +1190,12 @@ impl Writer<'_> {
             rest.next();
             rest.collect()
         };
+        let question = self.func.create_block();
         let step = self.func.create_block();
-        let onto = self.func.create_block();
         let done = self.func.create_block();
 
-        let mov = self.opcode(self.insts.moves(class).expect("a class the target can move").mov);
-        let inst = self.two(mov, sp, limit);
+        let lea = self.opcode(self.insts.lea);
+        let inst = self.address(lea, sp, limit, -offset(probing.probe.interval));
         self.func.append_inst(done, inst);
         for inst in tail {
             self.func.remove_inst(inst);
@@ -1186,9 +1205,9 @@ impl Writer<'_> {
         *self.func.succs_mut(done) = succs;
 
         // The subtraction the lowering wrote is what the loop is instead of, so it goes. What is
-        // left in the block it was in is where the stack pointer is walking down to.
+        // left in the block it was in is a page above where the stack pointer is walking down to.
         self.func.remove_inst(took);
-        let inst = self.two(mov, limit, sp);
+        let inst = self.address(lea, limit, sp, offset(probing.probe.interval));
         self.func.append_inst(block, inst);
         let grow = self.opcode(self.insts.grow);
         let inst = self
@@ -1200,32 +1219,33 @@ impl Writer<'_> {
             .uses(Reg::physical(bytes), class)
             .finish();
         self.func.append_inst(block, inst);
-        *self.func.succs_mut(block) = vec![BlockCall::to(step)];
+        *self.func.succs_mut(block) = vec![BlockCall::to(question)];
 
-        let inst = self.sub(probing.probe.interval);
-        self.func.append_inst(step, inst);
-        let above = self.opcode(self.insts.above);
+        let not_below = self.opcode(self.insts.not_below);
         let inst = self
             .func
-            .build_loose(above)
+            .build_loose(not_below)
             .def(Reg::physical(flag), class)
             .uses(Reg::physical(sp), class)
             .uses(Reg::physical(limit), class)
             .finish();
-        self.func.append_inst(step, inst);
+        self.func.append_inst(question, inst);
+        self.loops.push(inst);
         let cond = Opcode::new(
             self.names.intern(&format!("{}{}", probing.branch.prefix, probing.branch.cond)),
         );
         let inst = self.func.build_loose(cond).uses(Reg::physical(flag), class).finish();
-        self.func.append_inst(step, inst);
-        // The first arm is the one taken when the condition held, and the condition is that the
-        // stack pointer is still above where the array ends, so the first arm is the page it has
-        // just stepped onto being written and another time round.
-        *self.func.succs_mut(step) = vec![BlockCall::to(onto), BlockCall::to(done)];
+        self.func.append_inst(question, inst);
+        // The first arm is the one taken when the condition held, and the condition is that a whole
+        // page is still to come, so the first arm is the step. The layout puts the first arm next
+        // and jumps out on the other, which is the order `hardening-check` looks for.
+        *self.func.succs_mut(question) = vec![BlockCall::to(step), BlockCall::to(done)];
 
+        let inst = self.sub(probing.probe.interval);
+        self.func.append_inst(step, inst);
         let touch = self.touch(probing.probe);
-        self.func.append_inst(onto, touch);
-        *self.func.succs_mut(onto) = vec![BlockCall::to(step)];
+        self.func.append_inst(step, touch);
+        *self.func.succs_mut(step) = vec![BlockCall::to(question)];
     }
 
     /// Writes the page the stack pointer is on without changing what is there.
@@ -2399,8 +2419,8 @@ mod tests {
 
         // The whole listing, because what the walk is cannot be read off the instructions alone.
         // The one subtraction the lowering wrote is gone and four blocks stand where its block was:
-        // where the stack pointer is going, the step, the page the step landed on, and the rest of
-        // what the block was doing with the stack pointer put back where it was going.
+        // a page above where the stack pointer is going, the question, the step and its touch, and
+        // the rest of what the block was doing with the stack pointer put where it was going.
         assert_eq!(
             lines,
             [
@@ -2408,16 +2428,16 @@ mod tests {
                 "block0:",
                 "x64.push_64 $rbp",
                 "$rbp = x64.mov_rr_64 $rsp",
-                "$r10 = x64.mov_rr_64 $rsp",
+                "$r10 = x64.lea_64 [$rsp + 4096]",
                 "$r10 = x64.sub_rr_64 $r10, $rax, block1",
                 "block1:",
-                "$rsp = x64.sub_ri_64 $rsp, 4096",
-                "$r11 = x64.cmp_set_a_64 $rsp, $r10",
+                "$r11 = x64.cmp_set_ae_64 $rsp, $r10",
                 "x64.br_cond_8 $r11, block2, block3",
                 "block2:",
+                "$rsp = x64.sub_ri_64 $rsp, 4096",
                 "x64.or_mi_8 [$rsp], 0, block1",
                 "block3:",
-                "$rsp = x64.mov_rr_64 $r10",
+                "$rsp = x64.lea_64 [$r10 - 4096]",
                 "x64.nop",
                 "$rsp = x64.mov_rr_64 $rbp",
                 "$rbp = x64.pop_64",
@@ -2440,9 +2460,9 @@ mod tests {
         // reload the rewriter wrote would have put it, so the limit goes in the other one and the
         // comparison writes the first one back only once the count has been read for the last time.
         let added = added(&lines);
-        assert!(added.contains(&"$r11 = x64.mov_rr_64 $rsp"), "{added:?}");
+        assert!(added.contains(&"$r11 = x64.lea_64 [$rsp + 4096]"), "{added:?}");
         assert!(added.contains(&"$r11 = x64.sub_rr_64 $r11, $r10, block1"), "{added:?}");
-        assert!(added.contains(&"$r10 = x64.cmp_set_a_64 $rsp, $r11"), "{added:?}");
+        assert!(added.contains(&"$r10 = x64.cmp_set_ae_64 $rsp, $r11"), "{added:?}");
     }
 
     #[test]
