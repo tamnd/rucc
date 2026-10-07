@@ -25,14 +25,16 @@ use crate::preprocess::preprocess;
 pub fn assemble(opts: &Options, name: &str, cpp: bool, fs: &dyn FileSystem) -> Compiled {
     let mut messages = Vec::new();
     let mut deps = Vec::new();
+    let mut preprocessed = false;
     let mut temps = Temps::default();
     let text = if cpp {
         let out = preprocess(opts, name, true, fs);
         messages.extend(out.messages.iter().cloned());
         deps = out.deps.clone();
         if out.failed() {
-            return done(Artifact::Nothing, messages, 1, deps, temps);
+            return done(Artifact::Nothing, messages, 1, deps, false, temps);
         }
+        preprocessed = true;
         // Under `-save-temps` this is the `.s` beside the `.S`, which is the file somebody looking
         // at a macro that expanded to the wrong directive wants to read.
         temps.preprocessed = Some(out.text.clone());
@@ -43,12 +45,12 @@ pub fn assemble(opts: &Options, name: &str, cpp: bool, fs: &dyn FileSystem) -> C
                 Ok(text) => text,
                 Err(_) => {
                     messages.push(format!("rucc: error: {name}: this is not text"));
-                    return done(Artifact::Nothing, messages, 1, deps, temps);
+                    return done(Artifact::Nothing, messages, 1, deps, preprocessed, temps);
                 }
             },
             Err(e) => {
                 messages.push(format!("rucc: error: {name}: {e}"));
-                return done(Artifact::Nothing, messages, 1, deps, temps);
+                return done(Artifact::Nothing, messages, 1, deps, preprocessed, temps);
             }
         }
     };
@@ -59,11 +61,11 @@ pub fn assemble(opts: &Options, name: &str, cpp: bool, fs: &dyn FileSystem) -> C
         return match rucc_wasm::assemble(&text) {
             Ok(written) => {
                 let object = Artifact::Object { bytes: written.bytes, defines: written.defines };
-                done(object, messages, 0, deps, temps)
+                done(object, messages, 0, deps, preprocessed, temps)
             }
             Err((line, why)) => {
                 messages.push(format!("{name}:{line}: error: {why}"));
-                done(Artifact::Nothing, messages, 1, deps, temps)
+                done(Artifact::Nothing, messages, 1, deps, preprocessed, temps)
             }
         };
     }
@@ -82,15 +84,17 @@ pub fn assemble(opts: &Options, name: &str, cpp: bool, fs: &dyn FileSystem) -> C
             // reads the same whether the file that stopped it was C or assembly and so that an
             // editor which jumps to a position finds this one too.
             messages.push(format!("{name}:{}: error: {}", trouble.line, trouble.why));
-            return done(Artifact::Nothing, messages, 1, deps, temps);
+            return done(Artifact::Nothing, messages, 1, deps, preprocessed, temps);
         }
     };
     let defines = rucc_object::assembled_defines(&assembled);
     match rucc_object::assembled(&assembled, &target) {
-        Ok(bytes) => done(Artifact::Object { bytes, defines }, messages, 0, deps, temps),
+        Ok(bytes) => {
+            done(Artifact::Object { bytes, defines }, messages, 0, deps, preprocessed, temps)
+        }
         Err(e) => {
             messages.push(format!("rucc: error: {name}: {e}"));
-            done(Artifact::Nothing, messages, 1, deps, temps)
+            done(Artifact::Nothing, messages, 1, deps, preprocessed, temps)
         }
     }
 }
@@ -105,6 +109,7 @@ fn done(
     messages: Vec<String>,
     errors: u32,
     deps: Vec<rucc_pp::Dependency>,
+    preprocessed: bool,
     temps: Temps,
 ) -> Compiled {
     Compiled {
@@ -117,6 +122,7 @@ fn done(
         dumps: Vec::new(),
         remarks: String::new(),
         deps,
+        preprocessed,
         temps,
         timing: crate::trace::Timing::default(),
         stack_usage: String::new(),

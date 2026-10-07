@@ -118,6 +118,14 @@ pub struct Compiled {
     /// The same list `Preprocessed` carries and for the same reason. A `-MD` writes it beside
     /// the object, so the compiling path needs it as much as the preprocessing one does.
     pub deps: Vec<rucc_pp::Dependency>,
+    /// Whether the preprocessor got through the file without an error, which is when the rule
+    /// the `-M` family asked for is written even though the compilation failed after it.
+    ///
+    /// gcc and clang both leave the rule behind for a file that did not compile, and kbuild's
+    /// `fixdep` reads it after a command that was expected to fail: `lib/test_fortify` compiles
+    /// code that has to be refused. A header that was not found is the one failure that leaves
+    /// none, because the list of headers is not the whole of what the file reads.
+    pub preprocessed: bool,
     /// What `-save-temps` asked to be kept, which is nothing at all unless it was given.
     ///
     /// It comes back from here rather than being produced by a second run of the compiler under
@@ -293,7 +301,9 @@ pub fn compile(opts: &Options, name: &str, fs: &dyn FileSystem) -> Compiled {
             })
             .collect()
     };
-    diagnostics.extend(pp.take_diagnostics());
+    let pp_diagnostics = pp.take_diagnostics();
+    let preprocessed = !pp_diagnostics.iter().any(|diag| diag.severity.is_fatal());
+    diagnostics.extend(pp_diagnostics);
     // Taken here rather than at the end, because the preprocessor is done with and everything
     // after this is about the tree it produced.
     let deps = pp.dependencies().to_vec();
@@ -727,6 +737,7 @@ pub fn compile(opts: &Options, name: &str, fs: &dyn FileSystem) -> Compiled {
         dumps,
         remarks,
         deps,
+        preprocessed,
         temps,
         timing,
         stack_usage,
@@ -794,6 +805,7 @@ pub fn compile_ir(opts: &Options, name: &str, fs: &dyn FileSystem) -> Compiled {
         dumps: Vec::new(),
         remarks: String::new(),
         deps: Vec::new(),
+        preprocessed: false,
         temps: Temps::default(),
         timing: crate::trace::Timing::default(),
         stack_usage: String::new(),
@@ -2736,6 +2748,7 @@ fn failure(message: String) -> Compiled {
         dumps: Vec::new(),
         remarks: String::new(),
         deps: Vec::new(),
+        preprocessed: false,
         temps: Temps::default(),
         timing: crate::trace::Timing::default(),
         stack_usage: String::new(),
