@@ -259,11 +259,10 @@ fn words(
 ) -> Set<mir::Reg> {
     let mut found: Set<mir::Reg> = Set::default();
     for (&reg, written) in writers {
-        if let [writer] = written.as_slice()
-            && reg.is_virtual()
-            && writes_word(func, insts, names, *writer, reg)
-        {
-            found.insert(reg);
+        if let [writer] = written.as_slice() {
+            if reg.is_virtual() && writes_word(func, insts, names, *writer, reg) {
+                found.insert(reg);
+            }
         }
     }
     let mut entered: Set<mir::Block> = Set::default();

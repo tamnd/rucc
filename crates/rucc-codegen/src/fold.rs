@@ -963,26 +963,25 @@ pub fn indexes(func: &mut mir::Func, names: &mut Interner) -> usize {
         let mut scale = 1;
         let mut widen = None;
         let mut wide = reg;
-        if size > 1
-            && let Some((inst, from)) = only(func, reg, shift)
-            && func[inst].imm.is_some_and(|imm| func[imm].0 == i64::from(size.trailing_zeros()))
-        {
-            gone.push(inst);
-            index = Some(from);
-            scale = u8::try_from(size).unwrap_or(1);
-            wide = from.reg;
+        let shifted = if size > 1 { only(func, reg, shift) } else { None };
+        if let Some((inst, from)) = shifted {
+            if func[inst].imm.is_some_and(|imm| func[imm].0 == i64::from(size.trailing_zeros())) {
+                gone.push(inst);
+                index = Some(from);
+                scale = u8::try_from(size).unwrap_or(1);
+                wide = from.reg;
+            }
         }
         // The widening goes only if nothing but the shift, or the accesses when there is none,
         // reads what it wrote. Otherwise the shift alone moves in and reads the wide value.
         let read_by = if gone.is_empty() { readers.len() } else { 1 };
         for (opcode, how) in [(signed, mir::Widen::Signed), (unsigned, mir::Widen::Unsigned)] {
-            if let Some((inst, from)) = only(func, wide, opcode)
-                && reads.get(&wide).map_or(0, Vec::len) == read_by
-                && !carried.contains(&wide)
-            {
-                gone.push(inst);
-                index = Some(from);
-                widen = Some(how);
+            if let Some((inst, from)) = only(func, wide, opcode) {
+                if reads.get(&wide).map_or(0, Vec::len) == read_by && !carried.contains(&wide) {
+                    gone.push(inst);
+                    index = Some(from);
+                    widen = Some(how);
+                }
             }
         }
         let Some(from) = index else { continue };
