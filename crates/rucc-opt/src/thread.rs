@@ -164,6 +164,7 @@ use rucc_ir::{Block, BlockCall, Builder, Def, Extra, Func, Inst, Opcode, Start, 
 
 use crate::frontier::Frontiers;
 use crate::header_copy::{clone_into, repeatable};
+use crate::loops::LoopId;
 use crate::simplify_cfg::{Bindings, Edges, incoming, sweep, taken};
 use crate::{Analyses, Cfg, Dominators, Fuel, Loops, Pass, Preserved, Stats, uses};
 
@@ -558,6 +559,16 @@ fn strand(
 /// is in, so that is refused here. Every block reached is still reached, by the same argument as in
 /// [`settled`], so the graph's reach is still right too.
 ///
+/// When `into` is outside that loop, or does not get back to `block`, the same holds if the
+/// loop's header still gets to `block` and `from` still gets to the header, both without the edge.
+/// Then a path that used the edge has one that goes round it instead, through the header, and
+/// that path stays inside the loop, so it is there in every graph the forest looks at that holds
+/// the loop. The new edge is a path that was already there through `block`, so no level finds a
+/// cycle it did not before, and below the loop's header the two blocks were on none together. No
+/// block is stranded, since every block reached by way of the edge still is. The loop gains an
+/// exit, which this pass never asks about, and the cache is cleared when it ends. On lz4.c at
+/// `-O2` these were most of the threads that still built the forest again. tamnd/rucc#3052.
+///
 /// The walk goes over the function as it is now and not the cached graph, which can be one from
 /// before an earlier thread, and it stays inside the loop, so it costs the loop rather than the
 /// three analyses built again over the whole function.
@@ -577,24 +588,44 @@ fn within(
     if loops.irreducible().iter().any(|&odd| loops.contains(both, odd)) {
         return false;
     }
-    if !loops.contains(both, into) || around().any(|id| loops.header(id) == into) {
+    if around().any(|id| loops.header(id) == into) {
         return false;
     }
+    if loops.contains(both, into) && reaches(loops, func, both, into, block, at) {
+        return true;
+    }
+    let header = loops.header(both);
+    reaches(loops, func, both, header, block, at) && reaches(loops, func, both, from, header, at)
+}
+
+/// Whether `start` gets to `to` along the edges the function has now, staying inside the loop
+/// `inside` and leaving out the edge at `at`.
+fn reaches(
+    loops: &Loops,
+    func: &Func,
+    inside: LoopId,
+    start: Block,
+    to: Block,
+    at: Idx<BlockCall>,
+) -> bool {
+    if start == to {
+        return true;
+    }
     let mut seen: Set<Block> = Set::default();
-    seen.insert(into);
-    let mut work = vec![into];
+    seen.insert(start);
+    let mut work = vec![start];
     while let Some(next) = work.pop() {
         let Some(term) = func.terminator(next) else { continue };
         for slot in func.target_list(term).iter() {
             if slot == at {
                 continue;
             }
-            let to = func[slot].block;
-            if to == block {
+            let next = func[slot].block;
+            if next == to {
                 return true;
             }
-            if loops.contains(both, to) && seen.insert(to) {
-                work.push(to);
+            if loops.contains(inside, next) && seen.insert(next) {
+                work.push(next);
             }
         }
     }
@@ -1907,6 +1938,92 @@ mod tests {
             build.ret(&[]);
         }
         func
+    }
+
+    /// A loop in which one arm into a join can be threaded onto the way out.
+    ///
+    /// Block 0 is the entry, block 1 the header, which branches to blocks 2 and 3, block 4 the
+    /// join, which leaves the loop for block 6 or goes on to the latch, block 5. Block 2 carries 1
+    /// into the join, so its edge there could be threaded onto the way out, and block 3 carries 0.
+    /// With `other` block 2 also has an edge to block 3, which is a way back to the header that
+    /// does not go through the join.
+    fn loop_with_a_way_out(other: bool) -> Func {
+        let mut names = Interner::new();
+        let mut func = Func::new(names.intern("f"), Signature::new());
+        let blocks: Vec<Block> = (0..7).map(|_| func.create_block()).collect();
+        let param = func.append_param(blocks[4], Type::int(32));
+
+        Builder::new(&mut func, blocks[0]).jump(blocks[1], &[]);
+        let mut build = Builder::new(&mut func, blocks[1]);
+        let cond = build.iconst(Type::int(1), 1);
+        build.br_if(cond, blocks[2], &[], blocks[3], &[]);
+        let mut build = Builder::new(&mut func, blocks[2]);
+        let one = build.iconst(Type::int(32), 1);
+        if other {
+            let cond = build.iconst(Type::int(1), 1);
+            build.br_if(cond, blocks[4], &[one], blocks[3], &[]);
+        } else {
+            build.jump(blocks[4], &[one]);
+        }
+        let mut build = Builder::new(&mut func, blocks[3]);
+        let zero = build.iconst(Type::int(32), 0);
+        build.jump(blocks[4], &[zero]);
+        let mut build = Builder::new(&mut func, blocks[4]);
+        let lit = build.iconst(Type::int(32), 1);
+        let test = build.icmp(IntPred::Eq, param, lit);
+        build.br_if(test, blocks[6], &[], blocks[5], &[]);
+        Builder::new(&mut func, blocks[5]).jump(blocks[1], &[]);
+        Builder::new(&mut func, blocks[6]).ret(&[]);
+        func
+    }
+
+    /// Every loop as its header, its blocks and its latches, and the blocks in no loop that are
+    /// in an irreducible region, which is what the pass asks the forest.
+    type Forest = (Vec<(usize, Vec<usize>, Vec<usize>)>, Vec<usize>);
+
+    fn forest(loops: &crate::Loops) -> Forest {
+        let sorted = |blocks: &[Block]| {
+            let mut out: Vec<usize> = blocks.iter().map(|block| block.index()).collect();
+            out.sort_unstable();
+            out
+        };
+        let mut all: Vec<_> = loops
+            .all()
+            .map(|id| {
+                (loops.header(id).index(), sorted(loops.blocks(id)), sorted(loops.latches(id)))
+            })
+            .collect();
+        all.sort_unstable();
+        (all, sorted(loops.irreducible()))
+    }
+
+    /// Asks [`super::within`] about threading block 2's edge into the join onto the way out, then
+    /// makes the thread and says whether the forest built before it is the one built after.
+    fn exit_thread(other: bool) -> (bool, bool) {
+        let mut func = loop_with_a_way_out(other);
+        let an = crate::machine::fixtures::analyses();
+        let before = forest(an.loops(&func));
+        let (from, join, out) = (Block::from_usize(2), Block::from_usize(4), Block::from_usize(6));
+        let term = func.terminator(from).expect("every block here has one");
+        let at = func.target_list(term).iter().next().expect("the edge into the join is first");
+        let kept = super::within(an.loops(&func), &func, from, join, at, out);
+        let call = func[at];
+        func.set_block_call(at, BlockCall { block: out, args: ValueList::EMPTY, ..call });
+        let after = forest(crate::machine::fixtures::analyses().loops(&func));
+        (kept, before == after)
+    }
+
+    #[test]
+    fn a_thread_onto_the_way_out_keeps_the_forest_when_the_loop_still_goes_round() {
+        // Block 2 still gets back to the header through block 3, and the header still gets to the
+        // join through block 3, so every loop is what it was.
+        assert_eq!(exit_thread(true), (true, true));
+    }
+
+    #[test]
+    fn a_thread_onto_the_way_out_that_takes_a_block_out_of_the_loop_is_a_forest_built_again() {
+        // Block 2's only way back went through the join, so the thread takes it out of the loop.
+        assert_eq!(exit_thread(false), (false, false));
     }
 
     #[test]
