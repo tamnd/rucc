@@ -224,7 +224,9 @@ fn a_variable_length_array_walks_the_pages_it_takes() {
         let limit = at("subq\t%r");
         let (_, reg) = lines[limit].split_once(", ").expect("a subtraction of two registers");
         assert!(reg == "%r10" || reg == "%r11", "{level}: {lines:?}");
-        assert_eq!(lines[limit - 1], format!("leaq\t4096(%rsp), {reg}"), "{level}: {lines:?}");
+        // The schedule may move the copy of the stack pointer up, but not past the subtraction.
+        let lea = format!("leaq\t4096(%rsp), {reg}");
+        assert!(lines[..limit].contains(&lea.as_str()), "{level}: {lines:?}");
         // The question, then one page and its touch, then back to the question.
         assert_eq!(lines[limit + 1], format!("cmpq\t{reg}, %rsp"), "{level}: {lines:?}");
         assert!(lines[limit + 2].starts_with("jb\t"), "{level}: {lines:?}");
