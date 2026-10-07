@@ -191,6 +191,14 @@ const EXCUSES: &[Excuse] = &[
               so it keeps the -1 it started with, and its own check turns that away",
     },
     Excuse {
+        prefixes: &["CWE761_Free_Pointer_Not_at_Start_of_Buffer__char_connect_socket_"],
+        variant: None,
+        fault: Fault::Neither,
+        why: "the bad half reads its string from a server on the loopback that nothing here runs, \
+              so it keeps the empty string it started with, never moves its pointer, and frees it \
+              from the start",
+    },
+    Excuse {
         prefixes: &["CWE476_NULL_Pointer_Dereference__null_check_after_deref_"],
         variant: None,
         fault: Fault::Neither,
@@ -519,7 +527,7 @@ fn build<'a>(
         .map_err(|e| Error::Io(format!("could not write the unbuilt list: {e}")))?;
     std::fs::write(work.join("one.sh"), one())
         .map_err(|e| Error::Io(format!("could not write the script: {e}")))?;
-    std::fs::write(work.join("run.sh"), SCRIPT)
+    std::fs::write(work.join("run.sh"), script())
         .map_err(|e| Error::Io(format!("could not write the script: {e}")))?;
     Ok(built)
 }
@@ -554,18 +562,40 @@ int main(int argc, char **argv)
 ///
 /// Each case prints one line, and a line that short goes out in one write, so the lines from
 /// different cases can interleave but never tear. Everything it makes goes under `/tmp`, so the
-/// work directory can be mounted read only.
-const SCRIPT: &str = "\
+/// work directory can be mounted read only. It writes [`HIGH`] into [`FILE`] when nothing is there,
+/// and takes the file away again when it is done.
+fn script() -> String {
+    format!(
+        "\
 #!/bin/sh
 here=$(pwd)
-out=/tmp/rucc-${here##*/}
+out=/tmp/rucc-${{here##*/}}
 rm -rf \"$out\"
 mkdir -p \"$out\"
 gcc -c driver.c -o \"$out/driver.o\" || exit 1
 export out
+made=
+if [ ! -e {FILE} ]; then
+    printf '{HIGH}\\n' > {FILE} && made=1
+fi
 xargs -P \"$(nproc)\" -n 2 sh one.sh < cases
+if [ -n \"$made\" ]; then
+    rm -f {FILE}
+fi
 rm -rf \"$out\"
-";
+"
+    )
+}
+
+/// The file the cases whose source is a file read their input from, which is the path Juliet's
+/// own sources name for a target that is not Windows.
+///
+/// Like the standard input and [`ENVIRONMENT`], it is where the value that goes wrong comes from,
+/// and with no file there the bad half keeps the empty string it started with and does nothing
+/// wrong. The CWE-761 cases walk their pointer along what the file says and free it from where it
+/// stopped, so any line at all is enough. A file already at the path is somebody else's and is
+/// left as it is, and a run then reads whatever it says.
+const FILE: &str = "/tmp/file.txt";
 
 /// The number a half that reads one is given.
 ///
@@ -879,6 +909,12 @@ mod tests {
         ));
         // The driver reads the seed out of the variable the script puts it in.
         assert!(DRIVER.contains(&format!("getenv(\"{SEEDED}\")")));
+        // And a case whose source is a file finds the same number there.
+        let script = script();
+        assert!(
+            script.contains("if [ ! -e /tmp/file.txt ]; then\n    printf '10\\n' > /tmp/file.txt")
+        );
+        assert!(script.contains("if [ -n \"$made\" ]; then\n    rm -f /tmp/file.txt\nfi"));
     }
 
     #[test]
