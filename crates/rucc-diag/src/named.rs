@@ -73,6 +73,7 @@ const OPTIONS: &[(&str, &str)] = &[
     ("E0820", "attribute-alias"),
     ("E0824", "if-not-aligned"),
     ("E0850", "musttail-local-addr"),
+    ("E0851", "nonnull"),
     ("W0331", "cpp"),
     ("W0333", "invalid-memory-model"),
     ("W0334", "expansion-to-defined"),
@@ -110,9 +111,10 @@ const PEDWARNS: &[&str] = &[
 /// The options gcc leaves off until something asks for them, each with the group that turns it
 /// on. Sorted by option.
 ///
-/// The format checks are here, and `-Wunknown-pragmas`, which is its own group. `-Wformat` turns
-/// on all four format checks, `-Wall` turns on `-Wformat`, and so does `-Wformat=` with any level
-/// but nought, which is gcc 16's reading. A name turned off by itself stays off whatever group is
+/// The format checks are here, with `-Wnonnull`, which gcc turns on with `-Wformat` too, and
+/// `-Wunknown-pragmas`, which is its own group. `-Wformat` turns on all four format checks and
+/// `-Wnonnull`, `-Wall` turns on `-Wformat`, and so does `-Wformat=` with any level but nought,
+/// which is gcc 16's reading. A name turned off by itself stays off whatever group is
 /// asked for later, which is how gcc reads `-Wno-format-extra-args -Wall`. `-Wall` turns on
 /// nothing else yet, which is #485.
 const QUIET: &[(&str, &str)] = &[
@@ -120,8 +122,14 @@ const QUIET: &[(&str, &str)] = &[
     ("format-contains-nul", "format"),
     ("format-extra-args", "format"),
     ("format-zero-length", "format"),
+    ("nonnull", "format"),
     ("unknown-pragmas", "unknown-pragmas"),
 ];
+
+/// The options in [`QUIET`] that are checks of their own rather than parts of their group's, so
+/// naming one turns it on whatever the group was told. gcc's `-Wnonnull` is turned on with
+/// `-Wformat` and is not part of the format checking, so `-Wno-format -Wnonnull` warns.
+const OWN: &[&str] = &["nonnull"];
 
 /// The warnings that answer to no option and are not pedantic either, so `-pedantic-errors`
 /// leaves them warnings, as gcc 13 does: `#pragma once` in the main file, and the text of a
@@ -200,8 +208,12 @@ impl Named {
     /// Whether a warning that is off until asked for was asked for, which every other warning
     /// is. The name has to be asked for itself or through its group, and the group must not have
     /// been turned off, since `-Wno-format` silences `-Wformat-extra-args` along with the rest.
+    /// One of [`OWN`] asked for itself is asked for whatever its group was told.
     fn asked(&self, name: &str) -> bool {
         let Ok(at) = QUIET.binary_search_by(|&(known, _)| known.cmp(name)) else { return true };
+        if self.on.contains(name) && OWN.contains(&name) {
+            return true;
+        }
         let group = QUIET[at].1;
         if self.off.contains(group) {
             return false;
@@ -479,10 +491,12 @@ mod tests {
         assert!(named.silenced(&warning("E0785")));
         assert!(named.silenced(&warning("E0786")));
         assert!(named.silenced(&warning("E0789")));
+        assert!(named.silenced(&warning("E0851")));
         assert!(!named.silenced(&warning("E0790")));
         named.flag("all");
         assert!(!named.silenced(&warning("E0785")));
         assert!(!named.silenced(&warning("E0786")));
+        assert!(!named.silenced(&warning("E0851")));
         named.flag("no-format-extra-args");
         named.flag("all");
         assert!(named.silenced(&warning("E0786")));
@@ -490,6 +504,13 @@ mod tests {
         named.flag("format=0");
         assert!(named.silenced(&warning("E0785")));
         assert!(named.silenced(&warning("E0788")));
+
+        let mut named = Named::default();
+        named.flag("no-format");
+        named.flag("nonnull");
+        named.flag("all");
+        assert!(!named.silenced(&warning("E0851")));
+        assert!(named.silenced(&warning("E0785")));
 
         let mut named = Named::default();
         named.flag("format=2");
