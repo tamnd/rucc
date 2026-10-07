@@ -1472,7 +1472,7 @@ unsafe fn stale(capability: *const Cap, holder: Version) -> bool {
     if !plane::owned(held.ver) {
         return false;
     }
-    held.ver != holder
+    held.ver != holder && !crate::mapping::surrendered(held.ver)
 }
 
 /// The fifteen names generated code is compiled against.

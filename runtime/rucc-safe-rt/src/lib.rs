@@ -29,6 +29,10 @@
 //! out of it. The heap is a list of regions rather than one reservation so that there is somewhere
 //! for those to go.
 //!
+//! [`mapping`] is the same idea turned round. A mapping is an instance the kernel would place
+//! wherever it liked, so the rows for `mmap`, `munmap` and `mremap` place it in an arena of our own
+//! instead, and the unmapping ends the instance there rather than handing the range back.
+//!
 //! [`frame`] is section 5.3's call frame, which is where the capability of a pointer argument
 //! travels. It travels beside the call rather than in the pointer because an instrumented
 //! function's calling convention does not change, and that is the property the boundary is made
@@ -194,6 +198,8 @@ pub mod frame;
 pub mod heap;
 pub mod init;
 pub mod layout;
+#[cfg(unix)]
+pub mod mapping;
 pub mod plane;
 pub mod posture;
 #[cfg(unix)]
@@ -219,7 +225,7 @@ pub mod wrap;
 /// and a group is a file. What `--emit=safety-summary` wants is the count per group as well as the
 /// total, so the shape that keeps them apart is the shape it is going to ask for.
 #[cfg(unix)]
-pub static TABLES: &[&[effects::Row]] = &[wrap::TABLE, syscall::TABLE, sync::TABLE];
+pub static TABLES: &[&[effects::Row]] = &[wrap::TABLE, syscall::TABLE, sync::TABLE, mapping::TABLE];
 
 /// The milestone in `spec/safe-memory/16-milestones.md` that fills this crate in.
 pub const MILESTONE: &str = "S1";

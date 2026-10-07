@@ -111,6 +111,10 @@ pub const INTERPOSED: &[&str] = &[
     "sem_wait",
     "sem_trywait",
     "sem_post",
+    "mmap",
+    "mmap64",
+    "munmap",
+    "mremap",
 ];
 
 /// Points every mention of an interposed function at its wrapper, and says how many it moved.

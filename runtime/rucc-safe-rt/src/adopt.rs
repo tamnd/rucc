@@ -93,7 +93,16 @@ pub unsafe fn adopt(base: *mut c_void, size: usize, class: u32) -> bool {
     let lo = at.next_multiple_of(GRANULE);
     let Some(top) = at.checked_add(size) else { return false };
     let hi = floor(top);
-    if hi <= lo || alloc::overlaps(lo, hi) {
+    if hi <= lo {
+        return false;
+    }
+    // A mapping the program made through the interposed `mmap` is already watched, as one
+    // instance, so taking it on is ending that instance and leaving the planes where they are.
+    // `crate::mapping` says what else it remembers about it.
+    if crate::mapping::surrender(lo, hi) {
+        return true;
+    }
+    if alloc::overlaps(lo, hi) {
         return false;
     }
     // All four planes and the side table in one mapping, in the order `alloc::reserve` puts them,
