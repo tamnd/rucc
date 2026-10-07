@@ -94,12 +94,6 @@ fn a_conditional_nonnull_is_checked_in_gcc_s_words() {
             1,
         ),
         (
-            "void *f(void *d, _Bool n) __attribute__((nonnull_if_nonzero(1, 2)));\n",
-            format!("{name} 2 value '2' refers to parameter type 'bool'"),
-            0,
-            1,
-        ),
-        (
             "void *f(void *d, unsigned long n, double m) \
                 __attribute__((nonnull_if_nonzero(1, 2, 3)));\n",
             format!("{name} 3 value '3' refers to parameter type 'double'"),
@@ -169,6 +163,12 @@ fn a_conditional_nonnull_is_checked_in_gcc_s_words() {
         assert_eq!(err.matches("error:").count(), errors, "{source}\n{err}");
         assert_eq!(err.matches("warning:").count(), warnings, "{source}\n{err}");
     }
+    // A `bool` is no count. gcc spells it `_Bool` before C23, as this compiler does everywhere.
+    let flag = "void *f(void *d, _Bool n) __attribute__((nonnull_if_nonzero(1, 2)));\n";
+    let (ok, err) = compile("bool", X86_64, &["-std=gnu17"], flag);
+    assert!(ok, "{err}");
+    let said = format!("{name} 2 value '2' refers to parameter type '_Bool'");
+    assert!(err.contains(&said), "wanted {said:?}, got:\n{err}");
     // Under C23 an empty list is a prototype that takes nothing, so both numbers are counted.
     let empty = "void *f() __attribute__((nonnull_if_nonzero(1, 2)));\n";
     let (ok, err) = compile("c23", X86_64, &["-std=c23"], empty);

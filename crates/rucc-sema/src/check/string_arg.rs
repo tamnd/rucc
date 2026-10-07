@@ -223,8 +223,7 @@ impl Checker<'_> {
         };
         let words = lead.words();
         if value == 0 {
-            let what =
-                format!("{words} value '{spelled}' does not refer to a function parameter");
+            let what = format!("{words} value '{spelled}' does not refer to a function parameter");
             return warn(self, what);
         }
         let signature = self.types.signature(function);
