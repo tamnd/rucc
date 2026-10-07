@@ -1013,7 +1013,7 @@ pub fn compile_recording(
     // In front of the splitting below, because what it does is take the values off the edges out of
     // a computed `goto` and the splitting has no answer for one of those: the block they leave ends
     // in a jump already, so neither end of the edge is somewhere a move can go.
-    split::indirect(&mut func, machine.branch, machine.insts, names);
+    split::indirect(&mut func, machine.branch, machine.insts, machine.short, machine.flags, names);
 
     // And after it, because what it puts a pad at is the block an address names and the pass above
     // is what settles which block that is. The pad the prologue opens with is written much later,
