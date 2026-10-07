@@ -715,6 +715,35 @@ mod tests {
     }
 
     #[test]
+    fn a_copy_one_byte_past_what_was_asked_for_is_refused_inside_the_rounding() {
+        let _turn = turn();
+        // Ten bytes come out of a sixteen byte granule, so the plane says the eleventh is the
+        // instance's as well. The header says ten were asked for, and the walk and the range are
+        // both held to that, which is how a copy that left no room for the terminator is caught.
+        let from = alloc(16);
+        let to = alloc(10);
+        put(from, c"AAAAAAAAAA");
+        assert!(refused(|| {
+            // SAFETY: the destination is judged before anything is written.
+            let _ = unsafe { strcpy(to.cast(), from.cast()) };
+        }));
+        assert!(refused(|| {
+            // SAFETY: as above, over a length rather than a walk.
+            let _ = unsafe { memcpy(to, from, 11) };
+        }));
+        put(from, c"AAAAAAAAA");
+        assert!(!refused(|| {
+            // SAFETY: nine bytes and the terminator are the ten that were asked for.
+            let _ = unsafe { strcpy(to.cast(), from.cast()) };
+        }));
+        // SAFETY: both are live instances.
+        unsafe {
+            dealloc(from);
+            dealloc(to);
+        }
+    }
+
+    #[test]
     fn a_copy_of_a_string_that_has_no_terminator_is_refused_over_its_source() {
         let _turn = turn();
         // The other direction. Here the destination is enormous and the source is the problem, and
