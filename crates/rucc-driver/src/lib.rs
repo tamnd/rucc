@@ -89,6 +89,8 @@ pub enum Action {
     /// is paste it into a path or into another command line, so each one is a single line with
     /// no decoration around it.
     Print(String),
+    /// Print the `-v` banner on standard error and exit successfully, which is `-v` with no input.
+    Verbose(String),
     /// Print the resolved configuration and exit successfully.
     PrintConfig(Box<Options>),
     /// Print the passes the level will run and exit successfully.
@@ -3444,6 +3446,11 @@ pub fn parse_args(args: &[String]) -> Result<Action, CliError> {
     if version {
         return Ok(Action::Print(banner(&opts)));
     }
+    // `gcc -v` with no file prints its banner and stops, and build systems ask it this way to find
+    // out which compiler they have. A `-l` or a `-Wl,` word is not a file to compile.
+    if verbose && !inputs.iter().any(|input| input.role == Role::File) {
+        return Ok(Action::Verbose(verbose_banner(&opts)));
+    }
     // `-M` and `-MM` produce the rule and nothing else, so the run stops after phase 4 whatever
     // else the command line asked for. Read here rather than where the flag was, because a `-c`
     // written after it has to lose and the loop cannot know that until it has ended. The output
@@ -4952,6 +4959,26 @@ fn banner(opts: &Options) -> String {
     )
 }
 
+/// What `-v` prints first, on standard error, in the shape of `gcc -v`.
+///
+/// zlib, libtool and OpenSSL read this text to decide if the compiler is GCC. They look for the
+/// word `gcc`, and some read the `Target:` and `Thread model:` lines. So the first line names this
+/// compiler and the GCC release that `__GNUC__` claims, and the lines after it are the ones that
+/// GCC and clang both print. tamnd/rucc#3277.
+fn verbose_banner(opts: &Options) -> String {
+    let installed = std::env::current_exe()
+        .ok()
+        .and_then(|exe| exe.parent().map(std::path::Path::to_path_buf))
+        .unwrap_or_default();
+    let threads = if opts.target.arch.is_wasm() { "single" } else { "posix" };
+    format!(
+        "rucc version {VERSION} (gcc version {} compatible)\nTarget: {}\nThread model: {threads}\nInstalledDir: {}\n",
+        opts.gnuc,
+        opts.target.tuple().to_canonical_string(),
+        installed.display()
+    )
+}
+
 /// The first line of what gas prints for `--version`, which is all of what this compiler prints.
 ///
 /// gas writes `GNU assembler (GNU Binutils) 2.44` and then a copyright and a licence, and what
@@ -5112,6 +5139,10 @@ pub fn run(args: &[String]) -> i32 {
             emit(&format!("{line}\n"));
             0
         }
+        Ok(Action::Verbose(text)) => {
+            let _ = write!(host::stderr(), "{text}");
+            0
+        }
         Ok(Action::PrintConfig(opts)) => {
             emit(&print_config(&opts));
             0
@@ -5164,6 +5195,7 @@ pub fn run(args: &[String]) -> i32 {
                     let _ = writeln!(stderr, "rucc: warning: {note}");
                 }
                 if verbose {
+                    let _ = write!(stderr, "{}", verbose_banner(&opts));
                     let _ = write!(stderr, "{}", plan.render());
                     let _ = writeln!(stderr, "workers: {}", jobs.count());
                     // What `gcc -v` says about headers, because meson and cmake read it to find the
@@ -7984,6 +8016,32 @@ mod tests {
 
     fn refused(s: &[&str]) -> String {
         parse_args(&args(s)).expect_err("expected a refusal").message
+    }
+
+    #[test]
+    fn dash_v_with_no_input_prints_the_banner_build_systems_read() {
+        for line in [&["-v"][..], &["-v", "-pthread"], &["-v", "--target=aarch64-linux-gnu"]] {
+            let Action::Verbose(text) = parse_args(&args(line)).expect("an answer") else {
+                panic!("{line:?} did not print the banner");
+            };
+            let first = text.lines().next().unwrap();
+            assert!(
+                first.starts_with("rucc version ") && first.contains("gcc version 16."),
+                "{text}"
+            );
+            assert!(text.contains("\nThread model: posix\n"), "{text}");
+            assert!(text.contains("\nInstalledDir: "), "{text}");
+        }
+        let Action::Verbose(text) =
+            parse_args(&args(&["-v", "--target=aarch64-linux-gnu"])).unwrap()
+        else {
+            unreachable!()
+        };
+        assert!(text.contains("\nTarget: aarch64-linux-gnu\n"), "{text}");
+        assert!(matches!(
+            parse_args(&args(&["-v", "a.c"])),
+            Ok(Action::Compile { verbose: true, .. })
+        ));
     }
 
     #[test]
