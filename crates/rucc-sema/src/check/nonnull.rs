@@ -179,9 +179,9 @@ impl Checker<'_> {
             {
                 self.null_arms(operand)
             }
-            _ => usize::from(
-                self.is_pointer_typed(arg) && self.conv().is_null_pointer_constant(arg),
-            ),
+            _ => {
+                usize::from(self.is_pointer_typed(arg) && self.conv().is_null_pointer_constant(arg))
+            }
         }
     }
 

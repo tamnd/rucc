@@ -9,8 +9,7 @@ const X86_64: &str = "x86_64-unknown-linux-gnu";
 
 /// A directory of this test's own, empty.
 fn dir(what: &str) -> PathBuf {
-    let dir =
-        std::env::temp_dir().join(format!("rucc-nonnull-call-{}-{what}", std::process::id()));
+    let dir = std::env::temp_dir().join(format!("rucc-nonnull-call-{}-{what}", std::process::id()));
     let _ = std::fs::remove_dir_all(&dir);
     std::fs::create_dir_all(&dir).expect("a temporary directory can be created");
     dir.canonicalize().expect("the directory is there")
@@ -66,11 +65,11 @@ fn a_null_argument_is_warned_about_in_gcc_s_words() {
     let warned = [(6, 1), (7, 3), (8, 1), (9, 3), (11, 2), (12, 1), (13, 3)];
     for (line, number) in warned {
         let what = format!(
-            "a.c:{line}:1: warning: argument {number} null where non-null expected [-Wnonnull]"
+            "a.c:{line}:1: warning: argument {number} null where non-null expected [E0851]"
         );
         assert!(said.contains(&what), "{what}\n{said}");
     }
-    assert_eq!(said.matches("[-Wnonnull]").count(), warned.len(), "{said}");
+    assert_eq!(said.matches("[E0851]").count(), warned.len(), "{said}");
     let f = "a.c:1:6: note: in a call to function 'f' declared 'nonnull'";
     assert_eq!(said.matches(f).count(), 4, "{said}");
     assert!(said.contains("a.c:2:6: note: in a call to function 'g' declared 'nonnull'"), "{said}");
@@ -94,7 +93,7 @@ fn the_warning_is_heard_under_the_flags_gcc_says_it_under() {
     ] {
         let (ok, said) = compile("flags", flags, CALLS);
         assert!(ok, "{flags:?}: {said}");
-        assert_eq!(said.contains("[-Wnonnull]"), heard, "{flags:?}: {said}");
+        assert_eq!(said.contains("[E0851]"), heard, "{flags:?}: {said}");
     }
     let (ok, said) = compile("error", &["-Werror=nonnull"], CALLS);
     assert!(!ok, "{said}");
@@ -124,15 +123,15 @@ fn a_conditional_nonnull_is_heard_where_the_count_is_not_zero() {
     assert!(ok, "{said}");
     for what in [
         "a.c:6:1: warning: argument 1 null where non-null expected because argument 3 is nonzero \
-         [-Wnonnull]",
+         [E0851]",
         "a.c:2:7: note: in a call to function 'cp' declared 'nonnull_if_nonzero'",
         "a.c:9:1: warning: argument 1 null where non-null expected because arguments 2 and 3 \
-         are nonzero [-Wnonnull]",
+         are nonzero [E0851]",
         "a.c:3:7: note: in a call to function 'fill' declared 'nonnull_if_nonzero'",
-        "a.c:11:1: warning: argument 1 null where non-null expected [-Wnonnull]",
+        "a.c:11:1: warning: argument 1 null where non-null expected [E0851]",
         "a.c:4:7: note: in a call to function 'both' declared 'nonnull'",
     ] {
         assert!(said.contains(what), "{what}\n{said}");
     }
-    assert_eq!(said.matches("[-Wnonnull]").count(), 3, "{said}");
+    assert_eq!(said.matches("[E0851]").count(), 3, "{said}");
 }
