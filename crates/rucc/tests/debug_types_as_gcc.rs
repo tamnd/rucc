@@ -10,8 +10,7 @@
 //! arrays. What gcc writes for each is what is asserted.
 //!
 //! The entries are read out of `.debug_info` by hand, with only the forms this compiler writes,
-//! because this crate depends on the driver and on nothing else. Each test gives the unit a
-//! function, since a unit with none gets no `.debug_info` from this compiler yet.
+//! because this crate depends on the driver and on nothing else.
 
 use std::collections::HashMap;
 use std::path::PathBuf;
@@ -26,6 +25,7 @@ const DW_TAG_MEMBER: u64 = 0x0d;
 const DW_TAG_STRUCTURE: u64 = 0x13;
 const DW_TAG_SUBROUTINE: u64 = 0x15;
 const DW_TAG_TYPEDEF: u64 = 0x16;
+const DW_TAG_VARIABLE: u64 = 0x34;
 const DW_TAG_SUBRANGE: u64 = 0x21;
 const DW_TAG_BASE: u64 = 0x24;
 const DW_TAG_CONST: u64 = 0x26;
@@ -300,4 +300,17 @@ fn an_array_of_arrays_is_one_entry() {
     assert_eq!(ranges.count(), 2);
     let element = at(&all, arrays[0].ty.expect("an element type"));
     assert_eq!(element.name.as_deref(), Some("int"));
+}
+
+/// A file with variables and no code still describes them, as gcc does: the kernel has tables of
+/// structures in files like that, and their types reach the BTF only through these entries.
+#[test]
+fn a_file_of_only_variables_still_describes_them() {
+    let source =
+        "struct op { int code; const char *name; };\nconst struct op ops[2] = { { 1, \"a\" } };\n";
+    let all = entries(&build("data", source));
+    let ops = named(&all, DW_TAG_VARIABLE, "ops").expect("ops is described");
+    let array = at(&all, ops.ty.expect("ops has a type"));
+    assert_eq!(array.tag, DW_TAG_ARRAY);
+    assert!(named(&all, DW_TAG_STRUCTURE, "op").is_some());
 }
