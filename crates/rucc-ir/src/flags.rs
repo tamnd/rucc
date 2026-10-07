@@ -318,9 +318,10 @@ impl Flags {
                 .union(Self::NOTRACK)
                 .union(Self::INDIRECT_RETURN)
                 .union(Self::MUST_TAIL),
-            Opcode::TailCall | Opcode::CallIndirect => {
-                Self::NOFREE.union(Self::NOTRACK).union(Self::INDIRECT_RETURN).union(Self::MUST_TAIL)
-            }
+            Opcode::TailCall | Opcode::CallIndirect => Self::NOFREE
+                .union(Self::NOTRACK)
+                .union(Self::INDIRECT_RETURN)
+                .union(Self::MUST_TAIL),
             // On the three checks `rucc-safety` emits and on nothing else. What they say is about
             // the bytes a check names, so an instruction that names no bytes has no room for them.
             Opcode::CheckLive | Opcode::CheckDeriv => Self::STATIC.union(Self::HANDED),
