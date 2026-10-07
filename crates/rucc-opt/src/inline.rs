@@ -2339,11 +2339,7 @@ fn copy(
         let ty = func[result].ty;
         forward.insert(result, func.append_param(after, ty));
     }
-    let moving: Vec<Inst> = func.insts(block).skip_while(|&inst| inst != call).skip(1).collect();
-    for inst in moving {
-        func.remove_inst(inst);
-        func.append_inst(after, inst);
-    }
+    func.move_after(call, after);
     // With the call gone the `unwound` behind it has nothing to ask about, and the branch on it
     // goes where a return went, always.
     if let Some((unwound, branch, _, returned)) = arms {
@@ -2573,12 +2569,7 @@ fn copy(
         for new in bare {
             let block = func.block_of(new).expect("a copied call is in a block");
             let rest = func.create_block();
-            let moving: Vec<Inst> =
-                func.insts(block).skip_while(|&inst| inst != new).skip(1).collect();
-            for inst in moving {
-                func.remove_inst(inst);
-                func.append_inst(rest, inst);
-            }
+            func.move_after(new, rest);
             let span = func.span(new);
             let unwound = func.create_inst(InstData::new(Opcode::Unwound), &[Type::I1], span);
             func.append_inst(block, unwound);

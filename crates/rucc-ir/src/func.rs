@@ -606,6 +606,42 @@ impl Func {
         self.placed(inst);
     }
 
+    /// Moves every instruction after `inst` in its block to the end of `into`, in the order they
+    /// were in, which is a block split in two at `inst`.
+    ///
+    /// It is [`Func::remove_inst`] and [`Func::append_inst`] on each in turn, without the two
+    /// asking after the declarations each time. Taking one out turns every declaration holding
+    /// its results into a start and putting it back turns them into names again, and both are a
+    /// shift of a list as long as the function's declarations. The inliner splits the block of
+    /// every call it takes, so on monocypher.c at -O2 that was a tenth of the compile,
+    /// tamnd/rucc#3052. Nothing was between an instruction and the one in front of it but the
+    /// instruction, so the names it would have given back are the names it has.
+    ///
+    /// # Panics
+    ///
+    /// Panics if `inst` is not in a block, or if `into` is the block it is in.
+    pub fn move_after(&mut self, inst: Inst, into: Block) {
+        let at = self.inst_layout[inst.index()];
+        let from = at.block.expect("the instruction is not in a block");
+        assert!(from != into, "the instructions are moved to another block");
+        let Some(first) = at.next else { return };
+        let last = self.blocks[from.index()].last;
+        self.inst_layout[inst.index()].next = None;
+        self.blocks[from.index()].last = Some(inst);
+        let mut moving = Some(first);
+        while let Some(moved) = moving {
+            self.inst_layout[moved.index()].block = Some(into);
+            moving = self.inst_layout[moved.index()].next;
+        }
+        let tail = self.blocks[into.index()].last;
+        self.inst_layout[first.index()].prev = tail;
+        match tail {
+            Some(tail) => self.inst_layout[tail.index()].next = Some(first),
+            None => self.blocks[into.index()].first = Some(first),
+        }
+        self.blocks[into.index()].last = last;
+    }
+
     /// Takes an instruction out of its block, leaving it and its results in the tables.
     ///
     /// The instruction is not deleted, because deleting it would move every instruction after
@@ -2101,6 +2137,46 @@ mod tests {
         // The instructions say they are in no block, the way a removed one does.
         assert!(inside.iter().all(|&inst| func.block_of(inst).is_none()));
         assert!(func.insts(header).next().is_none());
+    }
+
+    #[test]
+    fn moving_what_is_after_an_instruction_is_taking_each_out_and_appending_it() {
+        let (mut func, _, header, exit) = sum();
+        let insts: Vec<Inst> = func.insts(header).collect();
+        for (at, &inst) in insts.iter().enumerate() {
+            if let Some(value) = func[inst].first_result {
+                func.declare_value(value, at as u32);
+            }
+        }
+        let mut each = func.clone();
+        let into = func.create_block();
+        func.move_after(insts[1], into);
+        let into_each = each.create_block();
+        for &inst in &insts[2..] {
+            each.remove_inst(inst);
+            each.append_inst(into_each, inst);
+        }
+        for func in [&func, &each] {
+            assert_eq!(func.insts(header).collect::<Vec<_>>(), insts[..2]);
+            assert_eq!(func.insts(into).collect::<Vec<_>>(), insts[2..]);
+            assert!(insts[2..].iter().all(|&inst| func.block_of(inst) == Some(into)));
+            assert_eq!(func.insts(exit).count(), 1);
+        }
+        for &inst in &insts {
+            let Some(value) = func[inst].first_result else { continue };
+            assert_eq!(
+                func.value_decls(value).collect::<Vec<_>>(),
+                each.value_decls(value).collect::<Vec<_>>()
+            );
+            assert_eq!(func.value_starts(value).count(), 0);
+            assert_eq!(each.value_starts(value).count(), 0);
+        }
+        // Nothing after the last instruction is nothing to move.
+        let term = insts[insts.len() - 1];
+        let other = func.create_block();
+        func.move_after(term, other);
+        assert_eq!(func.insts(other).count(), 0);
+        assert_eq!(func.insts(into).last(), Some(term));
     }
 
     #[test]
