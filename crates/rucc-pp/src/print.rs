@@ -346,13 +346,14 @@ fn avoid_paste(prev: Tok, prev_text: &str, next: Tok, next_text: &str) -> bool {
     let word = matches!(prev.kind, PpTokenKind::Ident | PpTokenKind::Number)
         || (prev.kind == PpTokenKind::Other && prev_text != "$");
     if word {
-        let joins = matches!(
-            next.kind,
-            PpTokenKind::Ident
-                | PpTokenKind::Number
-                | PpTokenKind::CharConst
-                | PpTokenKind::StringLit
-        );
+        // A number that starts with a `.` is the exception after a name, since a name stops at
+        // the `.`. The arm64 kernel's assembly names its vector registers with macros and writes
+        // `copy1.4s`, which has to come out as `v5.4s`, as it does from gcc.
+        let joins = match next.kind {
+            PpTokenKind::Number => first != '.' || prev.kind != PpTokenKind::Ident,
+            PpTokenKind::Ident | PpTokenKind::CharConst | PpTokenKind::StringLit => true,
+            _ => false,
+        };
         if joins {
             return true;
         }
@@ -555,6 +556,17 @@ mod tests {
         // `$3`, which is the form every x86 assembler reads.
         let src = "#define FOO 3\nmovq $FOO, %rax\na$FOO\n";
         assert_eq!(run.assembly(src), "# 1 \"/main.c\"\n\nmovq $3, %rax\na$3\n");
+    }
+
+    #[test]
+    fn a_register_from_a_macro_keeps_its_arrangement() {
+        let mut run = Run::new();
+        // `.4s` is a pp-number, and a name stops at the `.`, so `v5.4s` reads back as the two
+        // tokens it is. gcc writes it that way and the arm64 vDSO's ChaCha needs it.
+        let src = "#define copy1 v5\nld1 { copy1.4s }, [x1]\n";
+        assert_eq!(run.assembly(src), "# 1 \"/main.c\"\n\nld1 { v5.4s }, [x1]\n");
+        let mut run = Run::new();
+        assert_eq!(run.go("#define N 1\nN.5\n"), "# 1 \"/main.c\"\n\n1 .5\n");
     }
 
     /// The paste test is for tokens a macro put next to each other. Two the user wrote next to

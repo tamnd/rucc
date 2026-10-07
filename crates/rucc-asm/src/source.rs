@@ -744,6 +744,9 @@ impl Reader {
                 self.registers.insert(word.to_owned(), register);
                 return Ok(());
             }
+            if let Some(text) = self.wide_part(word, &self.renamed(rest)) {
+                return self.a64(&text);
+            }
             if self.registers.is_empty() && !rest.contains('#') {
                 return self.a64(text);
             }
@@ -853,6 +856,58 @@ impl Reader {
             out.push_str(after);
         }
         out
+    }
+
+    /// A wide move of sixteen bits out of a number, `movz x0, :abs_g3:0x1234`, as the plain move
+    /// it is, `movz x0, #0x1234 >> 48 & 0xffff, lsl #48` with the number worked out.
+    ///
+    /// The arm64 kernel's `mov_q` writes a constant into a register with these, and the reader only
+    /// takes the operators that leave a symbol for a relocation. `:abs_gN:` and `:abs_gN_nc:` are
+    /// bits `16N` to `16N + 15` of the number, the first checking that nothing is above them.
+    /// `:abs_gN_s:` is the signed version, which makes a `movz` of a negative number a `movn` of
+    /// its complement, as GNU as does. Anything that is not a number here, a symbol say, is left
+    /// for the reader.
+    fn wide_part(&self, word: &str, rest: &str) -> Option<String> {
+        let word = word.to_ascii_lowercase();
+        if !matches!(word.as_str(), "movz" | "movk" | "movn") {
+            return None;
+        }
+        let (register, operand) = rest.split_once(',')?;
+        let operand = operand.trim();
+        let operand = operand.strip_prefix('#').unwrap_or(operand).trim_start();
+        let (operator, text) = operand.strip_prefix(':')?.split_once(':')?;
+        let operator = operator.to_ascii_lowercase();
+        let group = operator.strip_prefix("abs_g")?;
+        let (group, kind) = group.split_at(1);
+        let group: u32 = group.parse().ok().filter(|&group| group < 4)?;
+        if !matches!(kind, "" | "_nc" | "_s") || (kind == "_s" && group == 3) {
+            return None;
+        }
+        let value = Parser {
+            text: text.trim(),
+            at: 0,
+            here: (0, 0),
+            values: Some(&self.values),
+            reader: None,
+            guessed: None,
+        }
+        .whole()
+        .ok()?
+        .flat()?;
+        let shift = 16 * group;
+        let fits = |value: i64| shift + 16 >= 64 || value >> (shift + 16) == 0;
+        let (word, part) = match kind {
+            "_s" if word == "movz" && value < 0 => {
+                if !fits(!value) {
+                    return None;
+                }
+                ("movn", !value >> shift & 0xffff)
+            }
+            "_s" if !fits(value) => return None,
+            "" if !fits(value) => return None,
+            _ => (word.as_str(), value >> shift & 0xffff),
+        };
+        Some(format!("{word} {register}, #{part}, lsl #{shift}"))
     }
 
     /// The operands with the names this file gave registers, and with the numbers it set when
@@ -6111,6 +6166,33 @@ _tls$tlv$init:
             words(&read, ".text"),
             [0xd280_1800, 0x9100_2021, 0xd280_00a2, 0xf940_0883, 0xa9be_7bfd, 0xd503_245f]
         );
+    }
+
+    #[test]
+    fn a_wide_move_of_part_of_a_number_is_the_plain_move() {
+        // The arm64 kernel's `mov_q`, cut down to the lines each constant takes. The words are
+        // what llvm-mc writes for the same text.
+        let read = aarch64(concat!(
+            "\tmovz x0, :abs_g3:0x3320646e61707865\n\tmovk x0, :abs_g2_nc:0x3320646e61707865\n",
+            "\tmovk x0, :abs_g1_nc:0x3320646e61707865\n\tmovk x0, :abs_g0_nc:0x3320646e61707865\n",
+            "\tmovz x1, :abs_g1_s:0xffffffff80000000\n\tmovk x1, :abs_g0_nc:0xffffffff80000000\n",
+            "\tmovz x2, :abs_g2_s:0x123456789a\n\tmovz x3, #:abs_g1_s:0x1234\n",
+        ));
+        assert_eq!(
+            words(&read, ".text"),
+            [
+                0xd2e6_6400,
+                0xf2cc_8dc0,
+                0xf2ac_2e00,
+                0xf28f_0ca0,
+                0x92af_ffe1,
+                0xf280_0001,
+                0xd2c0_0242,
+                0xd2a0_0003
+            ]
+        );
+        // A number too wide for a checked group is refused, as GNU as refuses it.
+        assert!(super::read("\tmovz x0, :abs_g0:0x10000\n", Arch::Aarch64).is_err());
     }
 
     #[test]
