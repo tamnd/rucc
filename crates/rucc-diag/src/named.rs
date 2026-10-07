@@ -72,7 +72,7 @@ const OPTIONS: &[(&str, &str)] = &[
     ("E0812", "div-by-zero"),
     ("E0820", "attribute-alias"),
     ("E0824", "if-not-aligned"),
-    ("E0848", "musttail-local-addr"),
+    ("E0850", "musttail-local-addr"),
     ("W0331", "cpp"),
     ("W0333", "invalid-memory-model"),
     ("W0334", "expansion-to-defined"),

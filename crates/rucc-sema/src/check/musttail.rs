@@ -96,7 +96,7 @@ impl Checker<'_> {
             self.tast[args].iter().filter_map(|&arg| self.frame_address(arg)).collect();
         for what in passed {
             let what = format!("address of {what} passed to 'musttail' call argument");
-            self.report(Diagnostic::warning(what, span).with_code("E0848"));
+            self.report(Diagnostic::warning(what, span).with_code("E0850"));
         }
     }
 
