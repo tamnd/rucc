@@ -190,6 +190,12 @@ struct Reached {
 /// the half that goes. In front of the first select an instruction that writes the condition state
 /// only ends it when the comparison cannot be moved past it, which is when it writes a register the
 /// comparison reads, is a call, or comes after something that read what the comparison left.
+///
+/// A comparison that kept its byte without writing the condition state, which on AArch64 is the
+/// `ubfx` of one bit, starts writing it here. So an instruction behind it that reads the condition
+/// state was reading what something in front of it left, and the comparison has to be moved down
+/// past that one, or the reader would get the new answer. Behind the first select there is nowhere
+/// to move it to, and a reader there ends the walk with nothing found.
 fn reached(
     func: &mir::Func,
     walk: &Walk<'_>,
@@ -209,6 +215,11 @@ fn reached(
     // A comparison that reads memory stays where it is, since what it would read further down is
     // a question about every store on the way.
     let mut movable = func[compare].mem.is_none();
+    let wrote = walk
+        .names
+        .resolve(func[compare].opcode.name())
+        .strip_prefix(walk.flags.prefix)
+        .is_none_or(|name| (walk.flags.writes)(name));
     let mut crossed = false;
     let mut found = Vec::new();
     for &inst in after {
@@ -245,16 +256,19 @@ fn reached(
                 .iter()
                 .any(|operand| operand.role != Role::Use && inputs.contains(&operand.reg));
             let reads = walk.flags.readers.iter().any(|reader| reader.name == name);
-            if clobbers || (walk.machine.calls)(name) || (reads && !crossed) {
+            if clobbers || (walk.machine.calls)(name) || (reads && !crossed && wrote) {
                 movable = false;
             }
-            if (walk.flags.writes)(name) {
+            if (walk.flags.writes)(name) || (reads && !wrote) {
                 crossed = true;
             }
             if crossed && !movable {
                 return none;
             }
             continue;
+        }
+        if walk.flags.readers.iter().any(|reader| reader.name == name) && !wrote {
+            return none;
         }
         if (walk.flags.writes)(name) {
             break;
