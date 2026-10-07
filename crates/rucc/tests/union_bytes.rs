@@ -6,6 +6,7 @@
 //! that its lock bit lands in the first byte, so the bytes left over are now pieces of one, two and
 //! four. This runs the program, so that every byte comes out where the target puts it.
 
+#[cfg(all(target_os = "macos", target_arch = "aarch64"))]
 use std::process::Command;
 
 /// Every way the kernel shape can be read, against the same bytes taken apart with shifts.
