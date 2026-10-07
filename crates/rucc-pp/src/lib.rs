@@ -491,6 +491,48 @@ mod tests {
         assert_eq!(pp.text("f(y, 1)"), "yx");
     }
 
+    /// The test is whether the variable arguments are empty once expanded, as in gcc and Clang,
+    /// so a macro that expands to nothing is no argument. The kernel's xe driver picks a third
+    /// version number with `IF_ARGS(PICK_ARG3(ver), 0, PICK_ARG3(ver))`, which is
+    /// `FIRST_ARG(__VA_OPT__(then,) else)`, and got `| ()` where a two part version wanted `0`.
+    #[test]
+    fn va_opt_asks_about_the_expanded_arguments() {
+        let mut pp = Pp::new();
+        pp.define("E");
+        pp.define("F()");
+        pp.define("o(a, ...) [a __VA_OPT__(, __VA_ARGS__)]");
+        assert_eq!(pp.text("o(1, E)"), "[1 ]");
+        assert_eq!(pp.text("o(1, F())"), "[1 ]");
+        assert_eq!(pp.text("o(1, F)"), "[1 , F]", "a function-like name without a call is a token");
+        pp.define("first(a, ...) a");
+        pp.define("pick(a, b, ...) first(__VA_ARGS__)");
+        pp.define("if_args(then, else, ...) first(__VA_OPT__(then,) else)");
+        assert_eq!(pp.text("if_args(a, b, pick(70, 44))"), "b");
+        assert_eq!(pp.text("if_args(a, b, pick(70, 44, 1))"), "a");
+    }
+
+    /// The name `##` makes is hidden only by what hid both halves. With the union, a name the
+    /// argument half picked up in an expansion that had already finished stayed hidden for the
+    /// new name and its whole body, and xe's `XE_RTP_ACTIONS` left `DROP_FIRST_ARG` unexpanded
+    /// in every action after the first.
+    #[test]
+    fn a_pasted_name_is_hidden_only_by_what_hid_both_halves() {
+        let mut pp = Pp::new();
+        pp.define("drop(args...) drop_(args)");
+        pp.define("drop_(a, b...) b");
+        pp.define("first(args...) first_(args)");
+        pp.define("first_(a, b...) a");
+        pp.define("tail(...) (drop(__VA_ARGS__))");
+        pp.define("esc(...) __VA_ARGS__");
+        pp.define("uncast(...) esc(drop esc __VA_ARGS__)");
+        pp.define("cat(a, b) cat_(a, b)");
+        pp.define("cat_(a, b) a ## b");
+        pp.define("action_set(r) { uncast(r) }");
+        pp.define("p1(args) cat(action_, first args)");
+        pp.define("p2(args) cat(action_, first args), p1(tail args)");
+        assert_eq!(pp.text("p2((set(((int){1})), set(((int){2}))))"), "{ {1} }, { {2} }");
+    }
+
     #[test]
     fn too_few_arguments_are_reported_against_the_definition() {
         let mut pp = Pp::new();
