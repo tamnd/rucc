@@ -151,9 +151,8 @@ impl Checker<'_> {
             ),
         };
         let mut warning = Diagnostic::warning(what, span).with_code(NONNULL);
-        if self.tast[decl].kind == DeclKind::Function
-            && let Some(name) = self.tast[decl].name
-        {
+        let name = self.tast[decl].name.filter(|_| self.tast[decl].kind == DeclKind::Function);
+        if let Some(name) = name {
             let attribute = if condition.is_some() { "nonnull_if_nonzero" } else { "nonnull" };
             let note =
                 format!("in a call to function '{}' declared '{attribute}'", self.text(name));
