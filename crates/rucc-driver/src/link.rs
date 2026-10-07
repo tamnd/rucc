@@ -2005,7 +2005,9 @@ pub fn runtime_dirs(target: Triple, sysroot: Option<&Path>) -> Vec<PathBuf> {
 /// named one, and the newest on the machine when it did not.
 fn gcc_runtime(target: Triple, opts: &LinkOptions) -> Vec<PathBuf> {
     match &opts.gcc_toolchain {
-        Some(prefix) => newest(&gcc_dirs(target, Some(prefix), &["/lib/gcc", "/lib64/gcc"])),
+        Some(prefix) => {
+            newest(&gcc_dirs(target, Some(prefix.as_path()), &["/lib/gcc", "/lib64/gcc"]))
+        }
         None => runtime_dirs(target, opts.sysroot.as_deref()),
     }
 }
