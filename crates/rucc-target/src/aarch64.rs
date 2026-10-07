@@ -114,7 +114,8 @@ pub const SP: PhysReg = PhysReg::new(31);
 ///
 /// A clobber list and a local register variable both name a register this way, and either width
 /// of it means the whole of it: `w19` in a clobber list is `x19` gone, and `d8` is `v8`. `fp` and
-/// `lr` are the names GNU as gives `x29` and `x30`. The stack pointer and the zero register are
+/// `lr` are the names GNU as gives `x29` and `x30`, and `r0` to `r30` are the names gcc takes for
+/// the same registers, which the kernel's SMC calls in `arm-smccc.h` keep their arguments in. The stack pointer and the zero register are
 /// not here, since neither is somewhere a value can be put or taken away.
 #[must_use]
 pub fn named(name: &str) -> Option<(PhysReg, RegClass)> {
@@ -129,7 +130,7 @@ pub fn named(name: &str) -> Option<(PhysReg, RegClass)> {
     }
     let number: u8 = number.parse().ok()?;
     match file {
-        "x" | "w" if number < 31 => Some((x(number), GPR)),
+        "x" | "w" | "r" if number < 31 => Some((x(number), GPR)),
         "v" | "q" | "d" | "s" | "h" | "b" if number < 32 => Some((v(number), FPR)),
         _ => None,
     }
@@ -1275,9 +1276,10 @@ mod tests {
         assert_eq!(named("x19"), Some((x(19), GPR)));
         assert_eq!(named("w19"), Some((x(19), GPR)));
         assert_eq!(named("lr"), Some((LR, GPR)));
+        assert_eq!(named("r1"), Some((x(1), GPR)));
         assert_eq!(named("d8"), Some((v(8), FPR)));
         assert_eq!(named("q31"), Some((v(31), FPR)));
-        for wrong in ["sp", "xzr", "wzr", "x31", "v32", "x07", "r1", "x", ""] {
+        for wrong in ["sp", "xzr", "wzr", "x31", "v32", "x07", "r31", "x", ""] {
             assert_eq!(named(wrong), None, "{wrong}");
         }
     }
