@@ -28,6 +28,7 @@ mod dso;
 mod fuzz;
 mod gate;
 mod implib;
+mod juliet;
 mod libraries;
 mod lines;
 mod msrv;
@@ -98,6 +99,8 @@ tasks:
                     against each, and hold it to its own answers and to what was reported
   replay            build a real library instrumented at -O0 and hand it every input of the
                     corpus its OSS-Fuzz target accumulated, one process per input
+  juliet            build the Juliet cases for every row with a CWE at every tier, run both
+                    halves of each, and count what was detected, missed and wrongly reported
   fuzz              generate C programs with one memory error each and hold both builds to it
   cost              time bench/safety with the monitor off and on at -O0, or at a level and
                     any -f flags given
@@ -160,6 +163,7 @@ fn main() -> ExitCode {
         Some("safety") => safety::safety(),
         Some("libraries") => libraries::libraries(),
         Some("replay") => replay::replay(),
+        Some("juliet") => juliet::juliet(&std::env::args().skip(2).collect::<Vec<_>>()),
         Some("size") => size::size(&std::env::args().skip(2).collect::<Vec<_>>()),
         Some("accounting") => safety::accounting(),
         Some("fuzz") => fuzz::fuzz(&std::env::args().skip(2).collect::<Vec<_>>()),

@@ -103,6 +103,8 @@ Document 03's matrix has a row per class and every row with a CWE column runs th
 
 **How the numbers are reported.** Per row, per tier, as raw counts, with the missed cases *enumerated by test id* rather than summarized as a percentage. A missed case is either a document 17 entry with a reason or a bug. The comparison points, from document 01: the SEI's Pointer Ownership Model work evaluated against all 4,604 cases for the five temporal CWEs, and PoisonCap against 2,776 cases across three classes.
 
+**What the run found.** `cargo xtask juliet` builds all 8,654 C cases of Juliet 1.3 at `-O2` at every tier, and `docs/JULIET.md` keeps the result of the last full run. It detects 6,050, misses 2,203 and has no false positive at any tier, and every one of the misses is in one of seven shapes, each with an open issue: a pointer to a local that went through memory or across files, leaks, reads of what nothing wrote, a string walk that starts below a local, wide strings, a `memcpy` that runs from one member into the next, and a local's address returned.
+
 **What Juliet is not.** Synthetic, uniform in shape, and its false-negative profile is not real code's. A tool can score 100% on Juliet and be useless. It is a floor and a regression detector, and document 12's CVE corpus is the number that means something. Reporting Juliet as the headline result is a well-established way to overstate a tool in this field and this project will not do it.
 
 ## 14.7 The ACSAC replay
