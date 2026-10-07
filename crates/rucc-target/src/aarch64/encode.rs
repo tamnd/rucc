@@ -936,7 +936,7 @@ impl At<'_> {
             "rev" => self.one_source(|width| 0b10 | width.sf(), values)?,
             "clz" => self.one_source(|_| 0b00_0100, values)?,
             "cls" => self.one_source(|_| 0b00_0101, values)?,
-            "ldp" | "stp" | "ldpsw" => self.pair(values)?,
+            "ldp" | "stp" | "ldpsw" | "ldnp" | "stnp" => self.pair(values)?,
             "ldxr" | "ldxrb" | "ldxrh" | "ldaxr" | "ldaxrb" | "ldaxrh" | "ldar" | "ldarb"
             | "ldarh" | "stlr" | "stlrb" | "stlrh" => self.exclusive(None, values)?,
             "ldapr" | "ldaprb" | "ldaprh" => self.rcpc(values)?,
@@ -1980,7 +1980,12 @@ impl At<'_> {
             return Err(self.immediate(imm));
         }
         let imm7 = signed(imm / step, 7).ok_or_else(|| self.immediate(imm))?;
+        // The pair that hints the data will not be wanted again, which the kernel's `copy_page`
+        // writes with, has the one mode and a zero where the others say which.
+        let streaming = self.mnemonic.ends_with("np");
         let mode = match addr.mode {
+            Mode::Offset if streaming => 0b00,
+            _ if streaming => return Err(self.unwritten()),
             Mode::Post => 0b01,
             Mode::Offset => 0b10,
             Mode::Pre => 0b11,
@@ -2400,6 +2405,27 @@ mod tests {
             "ldteor x0, x1, [x2]",
             "ldtaddb w0, w1, [x2]",
         ] {
+            let line = read(text).expect("a line");
+            assert!(encode(&line.mnemonic, &line.values).is_err(), "{text}");
+        }
+    }
+
+    #[test]
+    fn the_non_temporal_pairs_are_llvm_mc_words() {
+        // The kernel's `copy_page` under hibernation, which streams a page through `ldnp` and
+        // `stnp`. There is no pre or post index form of either.
+        for (text, word) in [
+            ("stnp x1, x2, [x0]", 0xa800_0801),
+            ("ldnp x3, x4, [x0, #16]", 0xa841_1003),
+            ("stnp q0, q1, [x0, #-32]", 0xac3f_0400),
+            ("ldnp d0, d1, [x2, #8]", 0x6c40_8440),
+            ("ldnp w5, w6, [sp, #4]", 0x2840_9be5),
+        ] {
+            let line = read(text).expect("a line");
+            let got = encode(&line.mnemonic, &line.values).expect("a word");
+            assert_eq!((got.word, got.fixup), (word, None), "{text}");
+        }
+        for text in ["ldnp x3, x4, [x0, #16]!", "stnp x1, x2, [x0], #16"] {
             let line = read(text).expect("a line");
             assert!(encode(&line.mnemonic, &line.values).is_err(), "{text}");
         }

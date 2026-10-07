@@ -5,7 +5,9 @@
 //! number, and a zero under either is the zero register at that width, which is how the kernel's
 //! atomics write `add w0, w0, 1` against `"Ir"`. A number the letter does not take, as gcc decides
 //! it on this machine, goes in a register instead. A local register variable may be named `r0` to
-//! `r30` as well as `x0` to `x30`, as the kernel's SMC calls name theirs.
+//! `r30` as well as `x0` to `x30`, as the kernel's SMC calls name theirs. An address under `"p"`
+//! is a register, even when it is a constant, and `%a` spells it `[x0]`, which is how the kernel's
+//! `prefetch` writes its `prfm`.
 
 use std::path::{Path, PathBuf};
 use std::process::Command;
@@ -124,4 +126,22 @@ long odd(long a) { return add(a, 0x1001); }
     assert_eq!(body(&text, "minus"), ["sub x0, x0, -4096", "ret"], "{text}");
     assert_eq!(body(&text, "page"), ["add x0, x0, 262144", "ret"], "{text}");
     assert_eq!(body(&text, "odd"), ["mov x1, #4097", "add x0, x0, x1", "ret"], "{text}");
+}
+
+#[test]
+fn an_address_under_p_is_a_register_in_brackets() {
+    // The kernel's `prefetch` and `prefetchw`, called on a pointer and on the address of a global,
+    // which is a constant gcc puts in a register all the same.
+    let text = listing(
+        "address",
+        "static inline void prefetch(const void *p) { asm volatile(\"prfm pldl1keep, %a0\" : : \"p\"(p)); }
+long table[4];
+void one(long *p) { prefetch(p); }
+void two(void) { prefetch(&table[1]); }
+",
+    );
+    assert_eq!(body(&text, "one"), ["prfm pldl1keep, [x0]", "ret"], "{text}");
+    let two = body(&text, "two");
+    assert_eq!(two.last().map(String::as_str), Some("ret"), "{text}");
+    assert_eq!(two[two.len() - 2], "prfm pldl1keep, [x0]", "{text}");
 }

@@ -5994,13 +5994,15 @@ impl<'a> Lowering<'a> {
                     && match (self.bare_number(value), operand.range) {
                         // `Z` on AArch64 is the zero register, which only a zero can be.
                         (_, Some('Z')) if a64 => self.zero(value),
+                        // An address on AArch64 is a register, which `%a` puts in brackets.
+                        (_, Some('p')) if a64 => false,
                         // AArch64's letters are gcc's for that machine, and a constant one
                         // of them does not take goes in a register.
                         (Some(number), Some(letter)) if a64 => aarch64::takes(letter, number),
                         (Some(number), range) => a64 || in_range(range, number),
                         // The two thirty two bit letters take an address too, which fits under the
                         // code models gcc takes them in.
-                        (None, None | Some('e' | 'Z')) => self.named_address(value).is_some(),
+                        (None, None | Some('e' | 'Z' | 'p')) => self.named_address(value).is_some(),
                         (None, Some(_)) => false,
                     };
                 // An operand in memory is spelled on AArch64 as the register its address is in,
@@ -6272,6 +6274,14 @@ impl<'a> Lowering<'a> {
                             Some(_) => return Err(refused()),
                         }
                     } else if a64 {
+                        // The register as an address, which is how the kernel's `prefetch`
+                        // hands `prfm pldl1keep, %a0` its pointer.
+                        if modifier == Some('a') {
+                            text.push('[');
+                            text.push_str(&template_reg(at, 'x'));
+                            text.push(']');
+                            continue;
+                        }
                         match (modifier, bits) {
                             (None, 8 | 16 | 32) | (Some('w'), _) => 'w',
                             (None, 64) | (Some('x'), _) => 'x',
