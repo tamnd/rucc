@@ -6,6 +6,7 @@ All notable changes are recorded here. The format follows [Keep a Changelog](htt
 
 ### Added
 
+- The AArch64 assembler reads the SVE registers `z0` to `z31` and `p0` to `p15`, and assembles the instructions the arm64 kernel saves and restores SVE state with: `ldr` and `str` of a whole `z` or `p` register at `#n, mul vl` from a base, `pfalse`, `rdffr` and `wrffr`. fpsimd.c, entry-common.c and the KVM switch code build. (#3223)
 - Two neighbouring float, double or `long double` loads or stores on AArch64 are one `ldp` or `stp` of `s`, `d` or `q` registers, as gcc writes them. (#3213)
 
 ### Changed

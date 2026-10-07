@@ -344,6 +344,8 @@ pub enum Offset {
     },
     /// Part of a symbol's address, which is left for a relocation to fill in.
     Symbol(Operator),
+    /// A number of whole vector lengths, `#3, mul vl`, which only the SVE loads and stores take.
+    Vl(i64),
 }
 
 /// When the base register is moved by the offset.
@@ -406,6 +408,11 @@ pub enum Value {
     System(u16),
     /// What a `prfm` is asked to do, as the five bits the encoding gives it. `pldl1keep` is zero.
     Prefetch(u8),
+    /// A scalable vector register of SVE, `z0`, taken whole.
+    Z(u8),
+    /// A predicate register of SVE, `p0`, and the size of its lanes when the text gave one, as in
+    /// `p0.b`.
+    Pred(u8, Option<Scalar>),
     /// A field of the processor state `msr` writes an immediate to, as where it is in the table of
     /// them. `daifset` is one.
     Pstate(u8),
@@ -744,6 +751,46 @@ impl At<'_> {
         Ok(Some(word))
     }
 
+    /// The SVE instructions the kernel saves and restores a task's vector state with: a whole `z`
+    /// or `p` register loaded or stored at a number of vector lengths from a base, `pfalse`, which
+    /// clears a predicate, and `rdffr` and `wrffr`, which move the first fault register to and from
+    /// one. Any other line with an SVE register in it has no encoding.
+    fn sve(self, values: &[Value]) -> Result<Option<u32>, Error> {
+        let m = self.mnemonic;
+        let store = if m == "str" { 0x6000_0000 } else { 0 };
+        let word = match (m, values) {
+            ("ldr" | "str", [Value::Z(t), Value::Mem(addr)]) => {
+                0x8580_4000 | store | self.vector_lengths(addr)? | u32::from(*t)
+            }
+            ("ldr" | "str", [Value::Pred(t, None), Value::Mem(addr)]) => {
+                0x8580_0000 | store | self.vector_lengths(addr)? | u32::from(*t)
+            }
+            ("pfalse", [Value::Pred(d, Some(Scalar::B))]) => 0x2518_e400 | u32::from(*d),
+            ("rdffr", [Value::Pred(d, Some(Scalar::B))]) => 0x2519_f000 | u32::from(*d),
+            ("wrffr", [Value::Pred(n, Some(Scalar::B))]) => 0x2528_9000 | u32::from(*n) << 5,
+            _ if values.iter().any(|value| matches!(value, Value::Z(_) | Value::Pred(..))) => {
+                return Err(self.unwritten());
+            }
+            _ => return Ok(None),
+        };
+        Ok(Some(word))
+    }
+
+    /// The base and the nine bit signed number of vector lengths of an SVE load or store, which
+    /// the encoding splits into its top six bits and its bottom three.
+    fn vector_lengths(self, addr: &Addr) -> Result<u32, Error> {
+        let times = match (addr.offset, addr.mode) {
+            (Offset::Imm(0), Mode::Offset) => 0,
+            (Offset::Vl(times), Mode::Offset) => times,
+            _ => return Err(self.unwritten()),
+        };
+        if !(-256..256).contains(&times) {
+            return Err(self.immediate(times));
+        }
+        let field = (times & 0x1ff) as u32;
+        Ok(field >> 3 << 16 | (field & 7) << 10 | u32::from(addr.base) << 5)
+    }
+
     /// A general register where thirty one is the zero register.
     fn zr(self, value: &Value) -> Result<(Width, u32), Error> {
         match *value {
@@ -801,6 +848,9 @@ impl At<'_> {
             };
         }
         if let Some(word) = self.mops(values)? {
+            return Ok((word, None));
+        }
+        if let Some(word) = self.sve(values)? {
             return Ok((word, None));
         }
         let word = match m {
@@ -2404,6 +2454,43 @@ mod tests {
             "casalt w0, w2, [x3]",
             "ldteor x0, x1, [x2]",
             "ldtaddb w0, w1, [x2]",
+        ] {
+            let line = read(text).expect("a line");
+            assert!(encode(&line.mnemonic, &line.values).is_err(), "{text}");
+        }
+    }
+
+    #[test]
+    fn the_sve_state_saves_are_llvm_mc_words() {
+        for (text, word) in [
+            ("ldr z0, [x0]", 0x8580_4000),
+            ("ldr z31, [x2, #-256, mul vl]", 0x85a0_405f),
+            ("ldr z5, [sp, #255, mul vl]", 0x859f_5fe5),
+            ("str z3, [x1, #7, mul vl]", 0xe580_5c23),
+            ("str z9, [x0, #9, MUL VL]", 0xe581_4409),
+            ("ldr p0, [x0]", 0x8580_0000),
+            ("ldr p15, [x2, #15, mul vl]", 0x8581_1c4f),
+            ("str p7, [x1, #-1, mul vl]", 0xe5bf_1c27),
+            ("pfalse p3.b", 0x2518_e403),
+            ("rdffr p2.b", 0x2519_f002),
+            ("wrffr p4.b", 0x2528_9080),
+        ] {
+            let line = read(text).expect("a line");
+            let got = encode(&line.mnemonic, &line.values).expect("a word");
+            assert_eq!((got.word, got.fixup), (word, None), "{text}");
+        }
+        // What the instructions do not have, which llvm-mc refuses too.
+        for text in [
+            "ldr z0, [x0, #256, mul vl]",
+            "str z0, [x0, #-257, mul vl]",
+            "ldr z0, [x0, #1]",
+            "ldr z0, [x0], #16",
+            "ldr z0, [x0, x1]",
+            "ldr p0.b, [x0]",
+            "pfalse p0",
+            "pfalse p0.h",
+            "wrffr p0",
+            "ldr x0, [x1, #1, mul vl]",
         ] {
             let line = read(text).expect("a line");
             assert!(encode(&line.mnemonic, &line.values).is_err(), "{text}");

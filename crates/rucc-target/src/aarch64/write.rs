@@ -130,6 +130,15 @@ fn operand(line: &mut String, value: &Value, named: Named<'_>) {
                 let _ = write!(line, "s{op0}_{op1}_c{crn}_c{crm}_{op2}");
             }
         },
+        Value::Z(number) => {
+            let _ = write!(line, "z{number}");
+        }
+        Value::Pred(number, lanes) => {
+            let _ = write!(line, "p{number}");
+            if let Some(scalar) = lanes {
+                let _ = write!(line, ".{}", lane_letter(scalar));
+            }
+        }
         Value::Pstate(at) => match PSTATE.get(usize::from(at)) {
             Some((name, ..)) => line.push_str(name),
             None => {
@@ -179,6 +188,9 @@ fn address(line: &mut String, addr: Addr, named: Named<'_>) {
                 }
             }
             line.push(']');
+        }
+        (Offset::Vl(times), _) => {
+            let _ = write!(line, ", #{times}, mul vl]");
         }
         (Offset::Symbol(operator), _) => {
             line.push_str(", ");
