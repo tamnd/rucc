@@ -1912,13 +1912,13 @@ impl FromStr for SaveTemps {
 /// The members of `-ffast-math` that are licences about what an arithmetic may answer, one field
 /// each, so that a build writing `-ffast-math -fno-finite-math-only` gets what gcc gives it.
 ///
-/// Nothing here folds floating point arithmetic in a function body at any level, so none of these
-/// changes the code this compiler writes. What each one does change is the predefined set: gcc
-/// names each licence it was given with a macro of its own, `<math.h>` and a numerics library read
-/// those, and a header that configured itself for a licence the other objects were built without is
-/// a program answering two ways. `-ftrapping-math` is the sixth member and lives in
-/// [`Options::trapping_math`], because it was taken before the rest and it is the one that does
-/// change an answer here.
+/// None of these changes the code this compiler writes. What each one does change is the
+/// predefined set: gcc names each licence it was given with a macro of its own, `<math.h>` and a
+/// numerics library read those, and a header that configured itself for a licence the other
+/// objects were built without is a program answering two ways. `-ftrapping-math` is the sixth
+/// member and lives in [`Options::trapping_math`], because it was taken before the rest and it is
+/// one that does change an answer here. `-frounding-math` is the other, in
+/// [`Options::rounding_math`].
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub struct Math {
     /// Whether a function in the maths library is taken to set `errno`, from `-fmath-errno`. On,
@@ -2373,15 +2373,16 @@ pub struct Options {
     /// How far a multiply and an addition may be fused into one rounding, from `-ffp-contract=`.
     ///
     /// See [`Contract`]. Most of the floating point flags have nowhere to be kept, because they
-    /// withdraw licences that nothing here takes in the first place: no arithmetic in a function
-    /// body is folded at any level, so a flag saying the rounding mode may have changed describes
-    /// what already happens. This one and [`Options::trapping_math`] are the two that have
-    /// somewhere to go.
+    /// withdraw licences that nothing here takes in the first place. This one,
+    /// [`Options::trapping_math`] and [`Options::rounding_math`] are the three that have somewhere
+    /// to go.
     pub fp_contract: Contract,
     /// Whether an operation may raise an exception the program then looks at, from
     /// `-ftrapping-math` and `-fno-trapping-math`.
     ///
-    /// On, which is gcc's default. What clearing it licenses here is one thing: the conversion of
+    /// On, which is gcc's default. What clearing it licenses here is two things. The first is
+    /// folding an operation on floating constants that overflows to an infinity, which is what gcc
+    /// does under it too. The second is the conversion of
     /// a constant floating value to an integer type it does not fit in. Left to the hardware that
     /// conversion is one instruction and the answer is the integer indefinite value, which is what
     /// both compilers give by default. gcc folds it under this flag instead, to the nearest end of
@@ -2389,6 +2390,15 @@ pub struct Options {
     /// behaviour rather than a value, so neither answer is wrong and the one a program was written
     /// against is gcc's.
     pub trapping_math: bool,
+    /// Whether the rounding mode may be changed while the program runs, from `-frounding-math` and
+    /// `-fno-rounding-math`.
+    ///
+    /// Off, which is gcc's default, and `-ffast-math` turns it off again. An operation on floating
+    /// constants is folded at compile time in the default rounding mode, as gcc folds it, so
+    /// `1.5 * 1000` is a number and not a multiply. Under this flag only an exact answer is
+    /// folded, since an inexact one would be rounded the way the compiler rounds rather than the
+    /// way the program asked.
+    pub rounding_math: bool,
     /// The rest of the `-ffast-math` family, from the flag itself and from each member spelled on
     /// its own. See [`Math`].
     pub math: Math,
@@ -2836,6 +2846,7 @@ impl Options {
             strict_aliasing: true,
             fp_contract: Contract::Off,
             trapping_math: true,
+            rounding_math: false,
             math: Math::default(),
             exceptions: false,
             non_call_exceptions: false,

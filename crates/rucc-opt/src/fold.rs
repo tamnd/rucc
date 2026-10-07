@@ -38,19 +38,24 @@
 //! `BUILD_BUG_ON (i >= ARRAY_SIZE (table))` is a call to a function declared `error` that is only
 //! gone once that division is a number the comparison can be decided against.
 //!
-//! Not floating point arithmetic. Folding it means deciding what rounding mode to fold under and
-//! what to do about a signalling NaN, and `rucc_base::float` has the arithmetic but the decision
-//! about the environment belongs with the rest of the floating point work rather than in the first
-//! pass.
+//! Not a floating point operation whose answer depends on the environment at run time. An add, a
+//! subtract, a multiply, a divide and a conversion of constants are folded as gcc folds them in
+//! `const_binop`: never when an operand is a NaN, and under `-ftrapping-math`, the default, never
+//! when the answer raises an exception the program could look at, an invalid operation, a divide
+//! by zero or an overflow. Under `-frounding-math` an inexact answer is not folded either, because
+//! it is only the answer in the rounding mode the compiler would have to guess. The function
+//! carries both flags as attributes, so an inlined body is judged by the flags it was built with.
+//! The kernel needs this: it writes `1.5 * DELAY` where it means an integer and builds with
+//! `-mgeneral-regs-only` on arm64, where a `double` left for the machine is a refused build.
 //!
-//! Negation is folded, and is inside that boundary rather than an exception to it. 754 says a
-//! negation flips the sign bit and copies every other bit, for every input including a NaN and a
-//! zero, so it is exact, it raises nothing and it never consults the rounding mode: there is no
-//! decision about the environment in it to get wrong. The reason to bother is that C has no
-//! negative floating constant. Every one of them is a unary minus applied to a positive one, so
-//! `-1.0` arrives as an `fneg` of an `fconst`, and without this the back end makes a constant, a
-//! mask and three moves through a general register out of what should be one load. That is every
-//! negative floating literal in every program, and it is issue 1427.
+//! Negation is folded always. 754 says a negation flips the sign bit and copies every other bit,
+//! for every input including a NaN and a zero, so it is exact, it raises nothing and it never
+//! consults the rounding mode: there is no decision about the environment in it to get wrong. The
+//! reason to bother is that C has no negative floating constant. Every one of them is a unary
+//! minus applied to a positive one, so `-1.0` arrives as an `fneg` of an `fconst`, and without
+//! this the back end makes a constant, a mask and three moves through a general register out of
+//! what should be one load. That is every negative floating literal in every program, and it is
+//! issue 1427.
 //!
 //! A bitcast of a constant is folded for the same reason and pays for the same kind of code. It is
 //! the same bits read as another type of the same width, so there is nothing to decide about it
@@ -58,21 +63,22 @@
 //! front end lowers both to a mask over the bits, and without this the mask and the two bitcasts
 //! around it survive to the back end computing a number the compiler already has.
 //!
-//! A conversion from floating point to an integer is folded, and is inside that boundary rather
-//! than an exception to it. C says the conversion discards the fractional part, so the rounding is
-//! the language's rather than the environment's and nothing anybody sets at run time reaches it.
-//! What is left is a value whose truncation does not fit the destination type, and a NaN, and both
-//! of those are undefined rather than a number: `rucc_base::float::Float::to_integer` reports each
-//! as `Status::INVALID` and neither folds, which is the rule below for an add that overflows under
-//! `nsw` applied to the same kind of program. That is issue 1357.
+//! A conversion from floating point to an integer is folded under any flags. C says the conversion
+//! discards the fractional part, so the rounding is the language's rather than the environment's
+//! and nothing anybody sets at run time reaches it. What is left is a value whose truncation does
+//! not fit the destination type, and a NaN, and both of those are undefined rather than a number:
+//! `rucc_base::float::Float::to_integer` reports each as `Status::INVALID` and neither folds, which
+//! is the rule below for an add that overflows under `nsw` applied to the same kind of program.
+//! That is issue 1357.
 //!
 //! Not an operation that overflows under `nsw` or `nuw`. The result there is poison, so any
 //! answer would be a valid refinement, and quietly picking the wrapping one hides a program that
 //! has stepped outside the language from the sanitizer that should be reporting it.
 //!
-//! Not floating point comparisons, for the reason above and one more: an ordered predicate and an
-//! unordered one differ only on a NaN, so the answer is the whole of what makes them two
-//! predicates, and evaluating it is the floating point decision rather than a step around it.
+//! Not floating point comparisons. An ordered predicate and an unordered one differ only on a NaN,
+//! and a comparison of a NaN may raise an exception the program can look at, so the answer is the
+//! whole of what makes them two predicates, and evaluating it is the floating point decision rather
+//! than a step around it.
 //!
 //! Integer comparisons are folded, and were not until issue 352 was closed. An `icmp` produces an
 //! `i1`, and while nothing lowered one that was left standing on its own, folding one would have
@@ -84,7 +90,7 @@ use rucc_base::Symbol;
 use rucc_base::float::{Float, Status};
 use rucc_base::hash::Map;
 use rucc_ir::{
-    Block, Def, Extra, Flags, Func, FuncId, Imm, Inst, InstData, IntPred, Module, Opcode,
+    AttrSet, Block, Def, Extra, Flags, Func, FuncId, Imm, Inst, InstData, IntPred, Module, Opcode,
     SymbolRef, Type, Value,
 };
 
@@ -512,12 +518,43 @@ fn evaluate(func: &Func, inst: Inst) -> Option<Imm> {
         return None;
     }
     let args = &func[data.args];
-    // The two that are the bits and nothing else, and the only two here whose answer can have a
-    // floating point type. They are above the gate below rather than inside the match under it
-    // because that gate is what keeps the rest of this file about integers.
+    // The ones whose answer can have a floating point type. They are above the gate below rather
+    // than inside the match under it because that gate is what keeps the rest of this file about
+    // integers.
     match data.opcode {
         Opcode::FNeg => return negated(func, *args.first()?, ty),
         Opcode::Bitcast => return reinterpreted(func, *args.first()?, ty),
+        Opcode::FAdd | Opcode::FSub | Opcode::FMul | Opcode::FDiv => {
+            let lhs = number(func, *args.first()?)?;
+            let rhs = number(func, *args.get(1)?)?;
+            let answer = match data.opcode {
+                Opcode::FAdd => lhs.sum(rhs),
+                Opcode::FSub => lhs.difference(rhs),
+                Opcode::FMul => lhs.product(rhs),
+                _ => lhs.quotient(rhs),
+            };
+            return settled(func, answer);
+        }
+        Opcode::SIToFP | Opcode::UIToFP => {
+            let (value, from) = constant(func, *args.first()?)?;
+            let format = ty.format()?.encoding();
+            if format.decimal().is_some() {
+                return None;
+            }
+            let answer = if data.opcode == Opcode::SIToFP {
+                Float::from_signed(value.signed(from), format)
+            } else {
+                Float::from_unsigned(value.unsigned(), format)
+            };
+            return settled(func, answer);
+        }
+        Opcode::FPExt | Opcode::FPTrunc => {
+            let format = ty.format()?.encoding();
+            if format.decimal().is_some() {
+                return None;
+            }
+            return settled(func, number(func, *args.first()?)?.to_format(format));
+        }
         _ => {}
     }
     if !ty.is_int() {
@@ -638,11 +675,10 @@ fn bits_of(func: &Func, value: Value) -> Option<u128> {
 
 /// A negation of a floating point constant, which is that constant with its sign bit flipped.
 ///
-/// This is the one piece of floating point arithmetic that folds, and it is inside the boundary
-/// the file header draws rather than an exception to it. Negation is not arithmetic in the sense
-/// that boundary is about: 754 says it flips the sign bit and copies every other bit, for every
-/// input including a NaN and a zero, so it is exact, it raises nothing and it never consults the
-/// rounding mode. There is no decision about the environment to get wrong.
+/// Unlike the rest of the floating point arithmetic here it folds under any flags, NaN included.
+/// 754 says a negation flips the sign bit and copies every other bit, for every input including a
+/// NaN and a zero, so it is exact, it raises nothing and it never consults the rounding mode.
+/// There is no decision about the environment to get wrong.
 ///
 /// The reason to bother is that C has no negative floating constant. Every one of them is a unary
 /// minus applied to a positive one, so `-1.0` arrives here as an `fneg` of an `fconst` and stays
@@ -713,6 +749,35 @@ fn floating(func: &Func, value: Value) -> Option<Float> {
         return None;
     }
     Some(Float::from_bits(format, func[at].bits()))
+}
+
+/// The floating point constant this value is, if it is one and is a number.
+///
+/// Not a NaN, quiet or signalling. gcc gives back the quiet NaN for an operation on one, but a
+/// signalling one raises when the operation runs and keeping both to the machine is one rule
+/// rather than two for a case nobody writes on purpose.
+fn number(func: &Func, value: Value) -> Option<Float> {
+    floating(func, value).filter(|number| !number.is_nan())
+}
+
+/// The answer of a floating point operation on constants, if the floating point environment lets
+/// it be decided now.
+///
+/// These are gcc's rules in `const_binop`. Under `-ftrapping-math`, the default, an operation that
+/// makes a NaN out of numbers, divides by zero or overflows to an infinity raises an exception the
+/// program may look at, so it is left to run. Under `-frounding-math` an inexact answer is the one
+/// the default rounding mode gives and not the one the program may have asked for, so only an
+/// exact one is folded. What is left is an answer every run of the program agrees on.
+fn settled(func: &Func, (value, status): (Float, Status)) -> Option<Imm> {
+    let set = func.attrs.set;
+    let raised = [Status::INVALID, Status::DIVIDE_BY_ZERO, Status::OVERFLOW];
+    if !set.contains(AttrSet::NO_TRAPPING_MATH) && raised.iter().any(|&flag| status.has(flag)) {
+        return None;
+    }
+    if set.contains(AttrSet::ROUNDING_MATH) && status.has(Status::INEXACT) {
+        return None;
+    }
+    Some(Imm::from_bits(value.to_bits()))
 }
 
 /// A conversion of a floating point constant to an integer, and nothing when C does not say what
@@ -902,8 +967,8 @@ mod tests {
     use rucc_base::Interner;
     use rucc_base::float::Format;
     use rucc_ir::{
-        Block, Builder, Extra, Flags, Float, Func, Imm, IntPred, Module, Opcode, Signature, Type,
-        Value,
+        AttrSet, Block, Builder, Extra, Flags, Float, Func, Imm, IntPred, Module, Opcode,
+        Signature, Type, Value,
     };
     use rucc_target::{Arch, Env, Os, TargetInfo, Triple};
 
@@ -954,6 +1019,54 @@ mod tests {
         }
         let Extra::Imm(at) = func[inst].extra else { return None };
         Some(func[at].bits())
+    }
+
+    /// Builds `lhs op rhs` on two `double` constants under the environment given, folds it, and
+    /// says what it became.
+    fn arithmetic(opcode: Opcode, lhs: &str, rhs: &str, environment: AttrSet) -> Option<u128> {
+        let (_, mut func, block) = blank();
+        func.attrs.set |= environment;
+        let ty = Type::float(Float::F64);
+        let mut build = Builder::new(&mut func, block);
+        let lhs = number(&mut build, lhs, ty);
+        let rhs = number(&mut build, rhs, ty);
+        let out = build.binary(opcode, lhs, rhs, Flags::NONE);
+        build.ret(&[out]);
+        fold(&mut func);
+        float_bits(&func, out)
+    }
+
+    /// An answer every run of the program agrees on folds, rounded to nearest as the machine
+    /// would have rounded it.
+    #[test]
+    fn floating_arithmetic_on_constants_folds() {
+        let none = AttrSet::NONE;
+        assert_eq!(arithmetic(Opcode::FAdd, "0.1", "0.2", none), Some(0x3fd3_3333_3333_3334));
+        assert_eq!(arithmetic(Opcode::FSub, "1.0", "0.25", none), Some(0x3fe8_0000_0000_0000));
+        assert_eq!(arithmetic(Opcode::FMul, "1.5", "200", none), Some(0x4072_c000_0000_0000));
+        assert_eq!(arithmetic(Opcode::FDiv, "1.0", "3.0", none), Some(0x3fd5_5555_5555_5555));
+    }
+
+    /// Under `-ftrapping-math` an answer that raises an exception is left for the machine to
+    /// raise it, and under `-fno-trapping-math` it is a number like any other.
+    #[test]
+    fn an_answer_that_raises_folds_only_when_nothing_traps() {
+        let none = AttrSet::NONE;
+        let quiet = AttrSet::NO_TRAPPING_MATH;
+        assert_eq!(arithmetic(Opcode::FDiv, "1.0", "0.0", none), None);
+        assert_eq!(arithmetic(Opcode::FDiv, "1.0", "0.0", quiet), Some(0x7ff0_0000_0000_0000));
+        assert_eq!(arithmetic(Opcode::FMul, "1e308", "10", none), None);
+        assert_eq!(arithmetic(Opcode::FMul, "1e308", "10", quiet), Some(0x7ff0_0000_0000_0000));
+        assert_eq!(arithmetic(Opcode::FDiv, "0.0", "0.0", none), None);
+        assert!(arithmetic(Opcode::FDiv, "0.0", "0.0", quiet).is_some());
+    }
+
+    /// Under `-frounding-math` the answer is only known when it is exact.
+    #[test]
+    fn under_rounding_math_only_an_exact_answer_folds() {
+        let rounding = AttrSet::ROUNDING_MATH;
+        assert_eq!(arithmetic(Opcode::FDiv, "1.0", "3.0", rounding), None);
+        assert_eq!(arithmetic(Opcode::FDiv, "1.0", "4.0", rounding), Some(0x3fd0_0000_0000_0000));
     }
 
     /// C has no negative floating constant, so `-1.0` is a unary minus on a positive one and

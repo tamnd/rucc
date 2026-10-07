@@ -181,6 +181,9 @@ pub(crate) fn lower(unit: &mut Unit<'_>, decl: DeclId, func: &mut Func, plan: &P
     // function with a body gets it: there is nothing to fuse in a declaration, and an attribute
     // saying what may be done to code that is not here would be a claim about somebody else's file.
     body.func.attrs.fp_contract = body.unit.contract;
+    // The floating point environment the same way, for the pass that folds operations on
+    // floating constants.
+    body.func.attrs.set |= body.unit.environment;
     // Which parameters are used where the caller left them, before any slot is made, because a
     // parameter that is gets none.
     for (&param, travel) in params.iter().zip(&plan.args) {

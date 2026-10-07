@@ -4,23 +4,25 @@
 //!
 //! `-ffp-contract=`, `-frounding-math`, `-ftrapping-math` and `-fexcess-precision=` are four ways
 //! of asking the same kind of question: how much liberty the compiler may take with an arithmetic
-//! the program wrote. Each has a restrictive spelling and a permissive one, and this compiler sits
-//! on the restrictive side of all four. It fuses no multiply into an addition, folds no floating
-//! point arithmetic in a function body, reassociates nothing, and computes every operation in the
-//! type it was written in. So the restrictive spellings describe what already happens and the
-//! permissive ones are licences taken and not used, which is the same shape of answer
-//! `-fno-strict-aliasing` and `-fno-delete-null-pointer-checks` get.
+//! the program wrote. This compiler fuses no multiply into an addition, reassociates nothing, and
+//! computes every operation in the type it was written in, so for those the restrictive spellings
+//! describe what already happens and the permissive ones are licences taken and not used.
 //!
-//! That is only allowed to be the answer while it is true, which is what this file is for. Each
-//! shape below is one gcc 16 rearranges under the permissive spelling and leaves alone under the
-//! restrictive one, and the day one of these stops coming out whole, whoever made that change has
-//! to make the flags turn it off in the same change. That is the rule
-//! `spec/04-driver-and-cli.md` section 4.1 states for exactly this case.
+//! An operation on floating constants is the exception, and it goes the way gcc's does. From
+//! `-O1` it is folded in the default rounding mode, so `0.1 + 0.2` is a number, unless
+//! `-frounding-math` says the mode may be another one and the answer is inexact. A division by
+//! zero and an overflow are folded only under `-fno-trapping-math`, since by default they raise an
+//! exception the program may look at. Each of the two flags is recorded on the functions it
+//! applies to, which is how the optimizer hears about it.
+//!
+//! Each shape below is one gcc 16 rearranges under some spelling, and the day one of these comes
+//! out differently, whoever made that change has to make the flags say so in the same change. That
+//! is the rule `spec/04-driver-and-cli.md` section 4.1 states for exactly this case.
 //!
 //! The assembly is asserted and not only the IR, because fusing is a thing a code generator does
 //! rather than a thing a pass does: a machine with an `fma` instruction can emit one for a multiply
 //! and an addition that are still two instructions right up until they are selected. Only x86-64 is
-//! asked, because it is the only target this compiler has a back end for.
+//! asked, because it is the target with the most ways to fuse.
 
 use std::path::PathBuf;
 use std::process::Command;
@@ -34,13 +36,12 @@ const TARGET: &str = "x86_64-unknown-linux-gnu";
 ///
 /// The first two are the contraction itself, in both widths, since a machine has an `fma` for each
 /// and a code generator that formed one might form only one. The third and fourth are what
-/// `-frounding-math` and `-ftrapping-math` are about: an addition folded at compile time is folded
-/// in the default rounding mode whatever the program set, and a division by zero folded at compile
-/// time is an exception the program never sees raised. The fifth is reassociation, which needs the
-/// sum to be exact to be worth anything and is not. The last two are the identities that hold for
-/// real numbers and not for floating point, because zero has a sign and because a NaN is not equal
-/// to itself. The declaration at the end is not a shape at all and is here so that the module has
-/// a function with no body in it, which is the one thing `-ffp-contract=` must not write on.
+/// `-frounding-math` and `-ftrapping-math` are about: an inexact addition and a division by zero.
+/// The fifth is reassociation, which needs the sum to be exact to be worth anything and is not.
+/// The last two are the identities that hold for real numbers and not for floating point, because
+/// zero has a sign and because a NaN is not equal to itself. The declaration at the end is not a
+/// shape at all and is here so that the module has a function with no body in it, which is the one
+/// thing a flag must not write on.
 const SHAPES: &str = "\
 double fma_double(double a, double b, double c) { return a * b + c; }
 float fma_float(float a, float b, float c) { return a * b + c; }
@@ -142,29 +143,31 @@ fn no_multiply_and_addition_is_ever_fused() {
 }
 
 #[test]
-fn arithmetic_the_rounding_mode_would_change_is_still_done_at_run_time() {
-    // Both spellings of both flags, because the permissive ones are permission to fold and the
-    // question is whether anything takes it. gcc folds all four of these under
-    // `-fno-trapping-math`, and the first two under its default, which is why the restrictive
-    // spellings exist at all.
-    let sets: &[&[&str]] = &[
-        &[],
-        &["-frounding-math", "-ftrapping-math"],
-        &["-fno-rounding-math", "-fno-trapping-math"],
-        &["-fno-rounding-math", "-fno-trapping-math", "-fexcess-precision=fast"],
+fn constants_fold_as_the_rounding_mode_and_the_exceptions_allow() {
+    // Both spellings of both flags, and `-ffast-math`, which takes the rounding mode back to the
+    // default and turns trapping off.
+    let sets: &[(&[&str], bool, bool)] = &[
+        (&[], true, false),
+        (&["-frounding-math", "-ftrapping-math"], false, false),
+        (&["-frounding-math", "-fno-trapping-math"], false, true),
+        (&["-fno-rounding-math", "-fno-trapping-math"], true, true),
+        (&["-fno-rounding-math", "-fno-trapping-math", "-fexcess-precision=fast"], true, true),
+        (&["-frounding-math", "-ffast-math"], true, true),
     ];
-    for flags in sets {
+    for &(flags, inexact, by_zero) in sets {
         for level in ["-O0", "-O1", "-O2", "-O3"] {
             let ir = emit("fold", "ir", level, flags);
-            for (name, op) in [
-                ("folds", "fadd"),
-                ("divides_by_zero", "fdiv"),
-                ("times_zero", "fmul"),
-                ("minus_itself", "fsub"),
+            let optimizing = level != "-O0";
+            for (name, op, folds) in [
+                ("folds", "fadd", optimizing && inexact),
+                ("divides_by_zero", "fdiv", optimizing && by_zero),
+                ("times_zero", "fmul", false),
+                ("minus_itself", "fsub", false),
             ] {
                 let body = body(&ir, name);
-                assert!(
-                    body.iter().any(|line| line.contains(op)),
+                assert_eq!(
+                    !body.iter().any(|line| line.contains(op)),
+                    folds,
                     "{flags:?} {level} on {name}: {body:?}"
                 );
             }
@@ -179,13 +182,13 @@ fn arithmetic_the_rounding_mode_would_change_is_still_done_at_run_time() {
     }
 }
 
-/// And the flags change nothing about what comes out, except for the one that is recorded.
+/// And the flags change nothing about what comes out but what they are for.
 ///
 /// Asserted as the whole module being the same rather than as the shapes surviving, because a
-/// compiler where one of these did something would have two answers and this has one. The three
-/// that are descriptions are compared as they are. `-ffp-contract=` is compared with the attribute
-/// it sets taken off each function, since that attribute is the whole of what it does and comparing
-/// with it in would be asserting that it does nothing at all.
+/// compiler where one of these did something would have two answers and this has one. The ones
+/// that are descriptions of the default are compared as they are. The ones that are recorded are
+/// compared with the attribute taken off each function, and with the two constants they decide
+/// about left out, since the attribute and those two are the whole of what they do.
 #[test]
 fn nothing_but_the_recorded_flag_changes_what_comes_out() {
     let module = |what: &str, flags: &[&str]| {
@@ -194,10 +197,8 @@ fn nothing_but_the_recorded_flag_changes_what_comes_out() {
     };
     let plain = module("plain", &[]);
     for flags in [
-        vec!["-frounding-math"],
         vec!["-fno-rounding-math"],
         vec!["-ftrapping-math"],
-        vec!["-fno-trapping-math"],
         vec!["-fexcess-precision=standard"],
         vec!["-fexcess-precision=fast"],
         vec!["-fexcess-precision=16"],
@@ -206,28 +207,48 @@ fn nothing_but_the_recorded_flag_changes_what_comes_out() {
     }
 
     let without_attrs = |text: &str| {
-        text.lines()
-            .map(|line| match line.find(", attrs(") {
+        let mut skip = false;
+        let mut kept = Vec::new();
+        for line in text.lines() {
+            if line.starts_with("func @") {
+                skip =
+                    line.starts_with("func @folds(") || line.starts_with("func @divides_by_zero(");
+            }
+            if skip {
+                continue;
+            }
+            kept.push(match line.find(", attrs(") {
                 Some(at) if line.starts_with("func @") => line[..at].to_string() + " {",
                 _ => line.to_string(),
-            })
-            .collect::<Vec<_>>()
-            .join("\n")
+            });
+        }
+        kept.join("\n")
     };
     let bare = without_attrs(&plain);
-    for how in ["off", "on", "fast"] {
-        let text = module("contract", &[&format!("-ffp-contract={how}")]);
-        assert_eq!(without_attrs(&text), bare, "{how}");
+    for flag in [
+        "-ffp-contract=off",
+        "-ffp-contract=on",
+        "-ffp-contract=fast",
+        "-frounding-math",
+        "-fno-trapping-math",
+    ] {
+        let text = module("recorded", &[flag]);
+        assert_eq!(without_attrs(&text), bare, "{flag}");
     }
 
-    // And what it does is recorded, on a function with a body and not on a declaration, since a
+    // And what each does is recorded, on a function with a body and not on a declaration, since a
     // licence about code that is not in this file would be a claim about somebody else's.
-    let text = module("recorded", &["-ffp-contract=fast"]);
-    let written: Vec<&str> =
-        text.lines().filter(|line| line.contains("fp_contract=fast")).collect();
-    assert_eq!(written.len(), 8, "one per function with a body: {written:?}");
-    assert!(
-        text.lines().any(|line| line.starts_with("func @outside(") && !line.contains("attrs")),
-        "the declaration was written on: {text}"
-    );
+    for (flag, attr) in [
+        ("-ffp-contract=fast", "fp_contract=fast"),
+        ("-frounding-math", "rounding_math"),
+        ("-fno-trapping-math", "no_trapping_math"),
+    ] {
+        let text = module("recorded", &[flag]);
+        let written: Vec<&str> = text.lines().filter(|line| line.contains(attr)).collect();
+        assert_eq!(written.len(), 8, "{flag}, one per function with a body: {written:?}");
+        assert!(
+            text.lines().any(|line| line.starts_with("func @outside(") && !line.contains("attrs")),
+            "{flag}: the declaration was written on: {text}"
+        );
+    }
 }

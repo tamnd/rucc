@@ -269,6 +269,14 @@ impl AttrSet {
     /// even in position dependent code, from `__attribute__((nodirect_extern_access))`. A call to
     /// it is the call it would have been.
     pub const NODIRECT: Self = Self(1 << 39);
+    /// The rounding mode may not be the default one when the function runs, from
+    /// `-frounding-math`. A floating point operation on constants is only folded when its answer
+    /// is exact, since that is the one answer every rounding mode agrees on.
+    pub const ROUNDING_MATH: Self = Self(1 << 40);
+    /// Nothing looks at the exceptions an operation raises, from `-fno-trapping-math`. A floating
+    /// point operation on constants that overflows to an infinity may be folded to it, which with
+    /// the default it may not, since the overflow is the program's to see.
+    pub const NO_TRAPPING_MATH: Self = Self(1 << 41);
 
     /// The underlying bits, for the printer and for hashing.
     #[must_use]
@@ -401,6 +409,8 @@ static NAMED: &[(AttrSet, &str)] = &[
     (AttrSet::NO_REORDER, "no_reorder"),
     (AttrSet::MS_HOOK, "ms_hook_prologue"),
     (AttrSet::NODIRECT, "nodirect_extern_access"),
+    (AttrSet::ROUNDING_MATH, "rounding_math"),
+    (AttrSet::NO_TRAPPING_MATH, "no_trapping_math"),
 ];
 
 /// The pairs that cannot both be set, with their names for the message.
