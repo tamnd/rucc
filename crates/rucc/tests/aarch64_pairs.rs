@@ -2,10 +2,9 @@
 //! writes them.
 //!
 //! A structure of two longs read for a sum, or written from two arguments, is two accesses at one
-//! base with offsets a word apart, and the machine does both in one instruction. A copy that loads
-//! and stores in turn is left alone, since there is no alias information after allocation and the
-//! second load cannot move above the first store. Floats, doubles and `long double` pair the
-//! same way, into `ldp` and `stp` of `s`, `d` and `q` registers.
+//! base with offsets a word apart, and the machine does both in one instruction. A structure copy
+//! reads two words before it writes them, so it is one `ldp` and one `stp`. Floats, doubles and
+//! `long double` pair the same way, into `ldp` and `stp` of `s`, `d` and `q` registers.
 
 use std::process::Command;
 use std::sync::atomic::{AtomicUsize, Ordering};
@@ -64,6 +63,7 @@ fn neighbouring_words_are_one_instruction() {
         ("st", &["stp x1, x2, [x0]", "ret"][..]),
         ("ld", &["ldp x1, x0, [x0]", "add x0, x1, x0", "ret"][..]),
         ("st4", &["stp w1, w2, [x0, #8]", "ret"][..]),
+        ("cp", &["ldp x2, x1, [x1]", "stp x2, x1, [x0]", "ret"][..]),
         ("dst", &["stp d0, d1, [x0]", "ret"][..]),
         ("fs", &["ldp s0, s1, [x0, #8]", "fmul s0, s0, s1", "ret"][..]),
         ("qst", &["stp q0, q1, [x0, #32]", "ret"][..]),
@@ -75,13 +75,13 @@ fn neighbouring_words_are_one_instruction() {
     assert!(arr.contains(&"ldp x2, x0, [x0, #16]".to_string()), "{text}");
 }
 
-/// A load that would have to move above a store stays where it is, and two words that are not
-/// next to each other stay two loads.
+/// Two words that are not next to each other stay two loads, and two stores stay apart when the
+/// register the first reads is written again before the second.
 #[test]
 fn what_cannot_be_paired_is_left_alone() {
     let text = listing();
     // In `mix` the register the first store reads is written again before the second.
-    for name in ["cp", "far", "mix"] {
+    for name in ["far", "mix"] {
         let body = body(&text, name);
         assert!(
             !body.iter().any(|line| line.starts_with("ldp") || line.starts_with("stp")),
