@@ -2188,6 +2188,9 @@ fn copy(
 ) {
     let block = func.block_of(call).expect("a call being inlined is in a block");
     let entry = func.entry().expect("a function with a call in it has a body");
+    // Taken before anything of the callee's is in the caller, whose payloads until they are mapped
+    // below are the callee's numbers and would be read as the caller's.
+    let past = highest_clique(func);
     // Where an unwind out of the call went, and where a return from it went, when a `cleanup`
     // handler's scope gave it a pad. Read before the block is split, since the split moves the
     // branch that says so.
@@ -2348,6 +2351,9 @@ fn copy(
         } else {
             match data.extra {
                 Extra::Imm(imm) => Extra::Imm(func.add_imm(callee[imm])),
+                Extra::Mem(mem) if scoping(data.opcode) => {
+                    Extra::Mem(func.add_mem(rescoped(callee[mem], past)))
+                }
                 Extra::Mem(mem) => Extra::Mem(func.add_mem(unscoped(callee[mem]))),
                 Extra::Rmw(op, mem) => Extra::Rmw(op, func.add_mem(unscoped(callee[mem]))),
                 Extra::Targets(list) => {
@@ -2606,6 +2612,49 @@ fn spill(func: &mut Func, entry: Block, call: Inst, pieces: &[Value]) -> (Value,
 /// callee's and could mean a different scope in the caller.
 fn unscoped(info: MemInfo) -> MemInfo {
     MemInfo { restrict: Restrict::NONE, ..info }
+}
+
+/// Whether `opcode` is one of the instructions `-fsafety-restrict` puts in, whose scope is not a
+/// hint that can be dropped but the thing they are about.
+///
+/// A check with no clique asks nothing and the verifier refuses it, and a `restrict_enter` with
+/// none opens no record. The runtime finds a record by walking out to the innermost block with the
+/// check's clique, so a body inlined with its own blocks still around it behaves as the call did.
+fn scoping(opcode: Opcode) -> bool {
+    matches!(
+        opcode,
+        Opcode::RestrictEnter
+            | Opcode::RestrictLeave
+            | Opcode::CheckRestrictRead
+            | Opcode::CheckRestrictWrite
+    )
+}
+
+/// One of those, with the callee's clique moved past every clique the caller already has, so that
+/// a check of the caller's and one of the inlined body's are never the same check to anything that
+/// compares them.
+fn rescoped(info: MemInfo, past: u16) -> MemInfo {
+    let Restrict { clique, base } = info.restrict;
+    if clique == 0 {
+        return info;
+    }
+    let clique = clique.checked_add(past).expect("fewer restrict scopes than that");
+    MemInfo { restrict: Restrict { clique, base }, ..info }
+}
+
+/// The largest clique any access of `func` names, which is zero when it names none.
+fn highest_clique(func: &Func) -> u16 {
+    let mut highest = 0;
+    for block in func.blocks() {
+        for inst in func.insts(block) {
+            let mem = match func[inst].extra {
+                Extra::Mem(mem) | Extra::Rmw(_, mem) => mem,
+                _ => continue,
+            };
+            highest = highest.max(func[mem].restrict.clique);
+        }
+    }
+    highest
 }
 
 /// A list of branch targets copied across, with the blocks and the arguments mapped.
@@ -4138,5 +4187,42 @@ block2(%3: i32):
         let main = &out[out.find("func @main").expect("main")..];
         assert!(!main.contains("call @spin"), "{out}");
         assert!(!main.contains("100"), "{out}");
+    }
+
+    /// A body with `-fsafety-restrict` in it keeps the scope of its block and of its checks, moved
+    /// past the caller's own, while a plain access loses the promise it was given as a hint. Before
+    /// this the checks came out in no scope, which the verifier refuses, and the case in
+    /// `tests/safety` that passes two aliasing `restrict` pointers did not compile at -O2.
+    #[test]
+    fn a_body_with_restrict_checks_keeps_their_scope_past_the_callers() {
+        let out = inlined(
+            r#"
+func @combine(ptr), linkage(internal), attrs(always_inline) {
+block0(%0: ptr):
+    %1 = alloca, size 112, align 8
+    restrict_enter %1, size 112, align 8, restrict(1, 1)
+    check_restrict_write %0, size 4, align 4, restrict(1, 1)
+    %2 = iconst.i32 1
+    store %2 -> %0, align 4, restrict(1, 1)
+    restrict_leave %1
+    return
+}
+
+func @main(ptr), linkage(external) {
+block0(%0: ptr):
+    %1 = alloca, size 112, align 8
+    restrict_enter %1, size 112, align 8, restrict(1, 2)
+    check_restrict_read %0, size 4, align 4, restrict(1, 2)
+    call @combine(%0) : (ptr)
+    restrict_leave %1
+    return
+}
+"#,
+        );
+        let main = &out[out.find("func @main").expect("main")..];
+        assert!(!main.contains("call @combine"), "{out}");
+        assert_eq!(main.matches("restrict(1, 2)").count(), 2, "{out}");
+        assert_eq!(main.matches("restrict(2, 1)").count(), 2, "{out}");
+        assert_eq!(main.matches("restrict_leave").count(), 2, "{out}");
     }
 }
