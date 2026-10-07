@@ -1034,6 +1034,14 @@ pub enum Unsupported {
         /// How many bytes it wanted, which is the whole of what is wrong.
         bytes: u32,
     },
+    /// A call `musttail` asked for that cannot be made as a jump, which is the program's error
+    /// and not a part of this compiler that is missing. See [`crate::tail::mark`].
+    MustTail {
+        /// The call.
+        inst: Inst,
+        /// Why not, in gcc's words.
+        reason: &'static str,
+    },
     /// A value in a register file the command line turned off, which is a `double` under
     /// `-mno-sse` or a `long double` under `-mno-80387`. See [`off_registers`].
     Registers {
@@ -1172,7 +1180,8 @@ impl Unsupported {
             | Unsupported::Returned { inst, .. }
             | Unsupported::Dynamic { inst, .. }
             | Unsupported::Assembly { inst, .. }
-            | Unsupported::Register { inst, .. } => Some(inst),
+            | Unsupported::Register { inst, .. }
+            | Unsupported::MustTail { inst, .. } => Some(inst),
             Unsupported::Unported { inst, .. } | Unsupported::Registers { inst, .. } => inst,
             Unsupported::Argument { .. } | Unsupported::Phi { .. } | Unsupported::Naked { .. } => {
                 None
@@ -1231,6 +1240,7 @@ impl fmt::Display for Unsupported {
                     "this object is kept in `{name}`, which is not a register this machine has"
                 )
             }
+            Unsupported::MustTail { reason, .. } => write!(f, "cannot tail-call: {reason}"),
             Unsupported::Naked { bytes } => write!(
                 f,
                 "this function is `naked` and wants {bytes} bytes of frame, which there is no prologue to take"
@@ -2700,12 +2710,25 @@ impl<'a> Lowering<'a> {
         // Not a call through the procedure linkage table, whose entry reads `%ebx` after the
         // epilogue has put the caller's back in it. gcc makes no such call a jump either.
         let linked = self.out[call].flags.contains(mir::Flags::PLT);
+        let must = self.source[inst].flags.contains(Flags::MUST_TAIL).then_some(inst);
         if outgoing == 0 && !x87 && !linked && self.sret().is_none() {
             let returns =
                 std::iter::successors(self.out.next_inst(call), |&at| self.out.next_inst(at))
                     .collect();
-            self.stack.tails.push(crate::tail::Tail { call, returns });
+            self.stack.tails.push(crate::tail::Tail { call, returns, must });
             self.stack.kept = kept;
+        } else if let Some(inst) = must {
+            // gcc's words where it has the same reason. It also jumps to a callee that takes no
+            // more of the stack for its arguments than this function was given, which this does
+            // not do yet, so that one is in words of this compiler's.
+            let reason = if outgoing != 0 {
+                "the callee takes arguments on the stack, which no tail call here passes yet"
+            } else if self.sret().is_some() {
+                "callee returns a structure"
+            } else {
+                crate::tail::UNABLE
+            };
+            return Err(Unsupported::MustTail { inst, reason });
         }
         Ok(())
     }

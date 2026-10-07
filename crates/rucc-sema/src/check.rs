@@ -81,6 +81,7 @@ mod extname;
 mod format;
 mod hardbool;
 mod init;
+mod musttail;
 mod noinit;
 mod nonnull_if;
 mod shared;

@@ -1224,6 +1224,7 @@ impl Checker<'_> {
                 self.string_arg(&[ast[specs].attrs, param.attrs], ty);
                 self.nonnull_if_nonzero(&[ast[specs].attrs, param.attrs], ty);
                 self.assume_misplaced(&[ast[specs].attrs, param.attrs], false, span);
+                self.musttail_misplaced(&[ast[specs].attrs, param.attrs]);
             }
 
             // The type the function has and the type the object has are two different types,

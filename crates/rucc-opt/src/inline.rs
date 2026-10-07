@@ -2354,6 +2354,13 @@ fn copy(
         let prologue = span == body || !body.contains(span.lo);
         if span.is_dummy() || body.is_dummy() || !prologue { span } else { at }
     };
+    // A `musttail` call in the callee is in tail position there and is not here, unless the call
+    // being replaced was one too, which is where gcc keeps the promise as well.
+    let dropped = if func[call].flags.contains(Flags::MUST_TAIL) {
+        Flags::NONE
+    } else {
+        Flags::MUST_TAIL
+    };
     let mut made = Vec::new();
     pool.site += 1;
     for from in callee.blocks() {
@@ -2368,7 +2375,7 @@ fn copy(
                 opcode => opcode,
             };
             let types: Vec<Type> = data.results().map(|value| callee[value].ty).collect();
-            let shell = InstData { flags: data.flags, ..InstData::new(opcode) };
+            let shell = InstData { flags: data.flags.without(dropped), ..InstData::new(opcode) };
             let fixed = opcode == Opcode::Alloca && data.args.is_empty();
             let shared = fixed && !data.first_result.is_some_and(|value| scalar.contains(&value));
             let taken = if shared { pool.take(func, callee, data.extra, data.flags) } else { None };

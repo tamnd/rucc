@@ -39,7 +39,7 @@
 
 use std::mem;
 
-use rucc_ast::{self as ast, AsmQuals, ForInit, StorageClass};
+use rucc_ast::{self as ast, AsmQuals, AttrList, ForInit, StorageClass};
 use rucc_base::Symbol;
 use rucc_base::hash::{Map, Set};
 use rucc_diag::{Diagnostic, Span};
@@ -256,7 +256,10 @@ impl Checker<'_> {
                 Stmt::Expr(value)
             }
             ast::Stmt::Decl(decl) => match self.ast[decl] {
-                ast::Decl::Attributes(attrs) => self.assumed(attrs),
+                ast::Decl::Attributes(attrs) => {
+                    self.musttail_misplaced(&[attrs]);
+                    self.assumed(attrs)
+                }
                 _ => {
                     let decls = self.check_decl(decl);
                     self.variably_modified(decls);
@@ -283,7 +286,7 @@ impl Checker<'_> {
             ast::Stmt::GotoExpr(target) => self.computed_goto(target),
             ast::Stmt::Continue => self.continue_stmt(span),
             ast::Stmt::Break => self.break_stmt(span),
-            ast::Stmt::Return(value) => self.return_stmt(value, span),
+            ast::Stmt::Return(value, attrs) => self.return_stmt(value, attrs, span),
             ast::Stmt::Label { name, body, .. } => self.labelled(name, body, span),
             ast::Stmt::Case { lo, hi, body } => self.case(lo, hi, body, span),
             ast::Stmt::Default { body } => self.default(body, span),
@@ -1379,7 +1382,10 @@ impl Checker<'_> {
     /// gcc 14 turned them into errors along with the rest of `-Wreturn-mismatch`, because a
     /// function that returns nothing where a value was promised hands its caller whatever was in
     /// the return register.
-    fn return_stmt(&mut self, value: Option<ast::ExprId>, span: Span) -> Stmt {
+    ///
+    /// The attributes in front of it are where `musttail` goes. See [`Self::must_tail`].
+    fn return_stmt(&mut self, value: Option<ast::ExprId>, attrs: AttrList, span: Span) -> Stmt {
+        let must = self.musttail(attrs, span);
         let Some((ret, at)) = self.body.as_ref().map(|state| (state.ret, state.at)) else {
             return Stmt::Return(None);
         };
@@ -1401,11 +1407,17 @@ impl Checker<'_> {
                     .note("declared here".to_owned(), at),
                 );
             }
+            if must {
+                self.must_tail(None, span);
+            }
             return Stmt::Return(None);
         };
         let where_from = self.ast.expr_span(value);
         let value = self.expr(value);
         let value = self.value(value);
+        if must {
+            self.must_tail(Some(value), where_from);
+        }
         if !void {
             return Stmt::Return(Some(self.assign_to(ret, value, where_from, Target::Return)));
         }
@@ -2306,7 +2318,7 @@ mod tests {
     #[test]
     fn a_bare_return_from_a_function_that_promised_a_value_is_an_error() {
         let mut f = Fixture::new();
-        let stmt = f.stmt(ast::Stmt::Return(None));
+        let stmt = f.stmt(ast::Stmt::Return(None, AttrList::EMPTY));
 
         let mut c = f.checker();
         let int = c.int();
@@ -2320,7 +2332,7 @@ mod tests {
     fn a_value_returned_from_a_function_returning_void_is_an_error() {
         let mut f = Fixture::new();
         let one = f.int(1);
-        let stmt = f.stmt(ast::Stmt::Return(Some(one)));
+        let stmt = f.stmt(ast::Stmt::Return(Some(one), AttrList::EMPTY));
 
         let mut c = f.checker();
         let void = c.types.void();
@@ -2335,7 +2347,7 @@ mod tests {
         let specs = f.keywords(&[BuiltinSet::VOID]);
         let one = f.int(1);
         let value = f.cast(specs, one);
-        let stmt = f.stmt(ast::Stmt::Return(Some(value)));
+        let stmt = f.stmt(ast::Stmt::Return(Some(value), AttrList::EMPTY));
 
         let mut c = f.checker();
         let void = c.types.void();
@@ -2348,7 +2360,7 @@ mod tests {
     fn a_returned_value_is_converted_to_the_return_type() {
         let mut f = Fixture::new();
         let one = f.int(1);
-        let stmt = f.stmt(ast::Stmt::Return(Some(one)));
+        let stmt = f.stmt(ast::Stmt::Return(Some(one), AttrList::EMPTY));
 
         let mut c = f.checker();
         let long = c.types.int(IntKind::Long);

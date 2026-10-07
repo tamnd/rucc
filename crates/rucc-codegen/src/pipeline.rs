@@ -781,14 +781,21 @@ pub fn compile_recording(
     // that function the registers to write as it likes, and what this one promised is that none
     // of them would be different when it returns, so the call stays a call and the registers are
     // put back after it. An interrupt handler also returns with `iretq`, which a jump would skip.
-    if flags.sibling && machine.insts.away.is_some() && !saves_all {
+    // A call `musttail` asked for is made at every level of optimization, and where it cannot be
+    // made at all that is an error.
+    let able = machine.insts.away.is_some() && !saves_all;
+    let asked = tail::asked(source);
+    if let (false, Some(inst)) = (able, asked) {
+        return Err(Unsupported::MustTail { inst, reason: tail::UNABLE });
+    }
+    if able && (flags.sibling || asked.is_some()) {
         let guarded = flags.landing
             && flags.shadow_stack
             && !source.attrs.set.contains(ir::AttrSet::INDIRECT_RETURN);
         // Under `bti` a jump through a register lands on the callee's `bti c` only from `x16` or
         // `x17`, which nothing here keeps a callee in, so an indirect call stays a call.
         let indirect = !flags.branch.bti;
-        tail::mark(source, names, elsewhere, guarded, indirect);
+        tail::mark(source, names, elsewhere, guarded, indirect, flags.sibling)?;
     }
     // Asked of the IR, where a call still says whom it calls. See [`tail::comes_back`].
     let alone = tail::comes_back(source, names, elsewhere);
@@ -1394,7 +1401,7 @@ pub fn compile_recording(
     // A frame laid out as anything but a leaf is fine with a call left in it, and a protected one
     // is one of those: its check comes between the call and the `ret`, so the call has to stay
     // where it is, and the frame already leaves the stack pointer where a call needs it.
-    let jumped = tail::jumps(&mut func, &stack.tails, machine.insts, machine.branch, names);
+    let jumped = tail::jumps(&mut func, &stack.tails, machine.insts, machine.branch, names)?;
     assert!(
         stack.kept || !layout.leaf || jumped == stack.tails.len(),
         "a leaf whose tail calls did not all become jumps"
