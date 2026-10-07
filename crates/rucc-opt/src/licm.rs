@@ -199,7 +199,9 @@ impl Pass for Licm {
         let mut order: Vec<LoopId> = loops.all().collect();
         order.sort_by_key(|&id| std::cmp::Reverse(loops.depth(id)));
 
-        let mut pressure = Pressure::of(func, cfg, &Liveness::of(func, cfg));
+        // Worked out the first time a loop asks, since a loop with nothing in it worth moving never
+        // does, and a function where no loop does never needs the numbers at all. tamnd/rucc#3052.
+        let mut pressure: Option<Pressure> = None;
         // Blocks whose counts a hoist has changed since the numbers above were worked out. A hoist
         // takes instructions from inside one loop and puts them in its preheader, so no block
         // outside those can hold a different number afterwards, and a loop sharing none of them
@@ -209,7 +211,7 @@ impl Pass for Licm {
         let mut stale: Set<Block> = Set::default();
         for id in order {
             if loops.blocks(id).iter().any(|block| stale.contains(block)) {
-                pressure = Pressure::of(func, cfg, &Liveness::of(func, cfg));
+                pressure = None;
                 stale.clear();
             }
             let job = Job {
@@ -223,7 +225,7 @@ impl Pass for Licm {
                 invented: &invented,
                 folded: &folded,
             };
-            if job.run(func, &pressure, id, fuel, &mut stats) {
+            if job.run(func, &mut pressure, id, fuel, &mut stats) {
                 // The counts inside the loop just changed and the next loop out is about to be
                 // asked what it holds. The alternative to noticing that is deciding the outer loop
                 // against a number the inner loop invalidated.
@@ -506,7 +508,7 @@ impl Job<'_> {
     fn run(
         &self,
         func: &mut Func,
-        pressure: &Pressure,
+        pressure: &mut Option<Pressure>,
         id: LoopId,
         fuel: &mut Fuel,
         stats: &mut Stats,
@@ -543,7 +545,7 @@ impl Job<'_> {
     fn plan(
         &self,
         func: &Func,
-        pressure: &Pressure,
+        pressure: &mut Option<Pressure>,
         id: LoopId,
         preheader: Block,
         fuel: &mut Fuel,
@@ -708,9 +710,15 @@ impl Job<'_> {
                 // A free instruction is not asked to pay, because it is only in the plan as a
                 // passenger and [`trim`] takes it out again if nothing else in the plan wanted it.
                 if cost > 0 {
-                    let tight = pressure.is_tight(self.loops, id, class, room[bank]);
-                    if tight && cost < rucc_cost::param!(heuristics::LICM_EXPENSIVE) {
-                        passengers.insert(inst);
+                    // Only a cheap one asks, since an expensive one is worth moving however full
+                    // the loop is.
+                    if cost < rucc_cost::param!(heuristics::LICM_EXPENSIVE) {
+                        let pressure = pressure.get_or_insert_with(|| {
+                            Pressure::of(func, self.cfg, &Liveness::of(func, self.cfg))
+                        });
+                        if pressure.is_tight(self.loops, id, class, room[bank]) {
+                            passengers.insert(inst);
+                        }
                     }
                     if !fuel.take() {
                         stats.missed(NO_FUEL);
