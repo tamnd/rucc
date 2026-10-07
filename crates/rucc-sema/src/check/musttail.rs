@@ -88,11 +88,11 @@ impl Checker<'_> {
         }
         let ExprKind::Call { args, .. } = self.tast[call].kind else { return };
         let span = self.tast.expr_span(call);
-        for arg in self.tast[args].to_vec() {
-            if let Some(what) = self.frame_address(arg) {
-                let what = format!("address of {what} passed to 'musttail' call argument");
-                self.report(Diagnostic::warning(what, span).with_code("E0848"));
-            }
+        let passed: Vec<String> =
+            self.tast[args].iter().filter_map(|&arg| self.frame_address(arg)).collect();
+        for what in passed {
+            let what = format!("address of {what} passed to 'musttail' call argument");
+            self.report(Diagnostic::warning(what, span).with_code("E0848"));
         }
     }
 
