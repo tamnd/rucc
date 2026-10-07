@@ -20,8 +20,11 @@
 //! reads are all written by the time it happens, which they are often not where the first store
 //! was: the value of the second is commonly written by the instruction right in front of it.
 //!
-//! Nothing in between may touch memory at all, since there is no alias information here and a
-//! store in between could be to either word. Nothing in between may write the base. For loads,
+//! Nothing in between may write memory, since there is no alias information here and a store in
+//! between could be to either word. Between two loads another plain load of the table may stand,
+//! as in `a[0] * b[0] + a[1] * b[1]`, where the two loads of `a` and the two of `b` are written
+//! in turn; between two stores nothing may touch memory at all, since the first store moves down
+//! past it and the load could be of the word it writes. Nothing in between may write the base. For loads,
 //! nothing in between may read or write the register the second load writes, since it is now
 //! written earlier. For stores, nothing in between may write the register the first store reads,
 //! since it is now read later. A call or
@@ -93,29 +96,41 @@ pub fn pairs(
     for block in func.blocks().collect::<Vec<_>>() {
         let insts: Vec<Inst> = func.insts(block).collect();
         let mut taken = vec![false; insts.len()];
+        // The second load of a pair, which is gone from its place, since the pair is where the
+        // first load was. A search from a load in between goes on past it.
+        let mut moved = vec![false; insts.len()];
         for at in 0..insts.len() {
             if taken[at] {
                 continue;
             }
             let Some(first) = access(func, insts[at], &table, stack) else { continue };
+            let load = first.value.role.is_def();
             let mut between: Vec<Inst> = Vec::new();
             for next in at + 1..insts.len().min(at + 1 + WINDOW) {
                 if taken[next] {
+                    if load && moved[next] {
+                        continue;
+                    }
                     break;
                 }
                 let inst = insts[next];
                 if let Some(second) = access(func, inst, &table, stack) {
                     if partners(func, &first, &second, &between) {
                         let pair = pair(func, insts[at], &first, &second);
-                        let load = first.value.role.is_def();
                         func.insert_before(if load { insts[at] } else { inst }, pair);
                         func.remove_inst(insts[at]);
                         func.remove_inst(inst);
                         taken[at] = true;
                         taken[next] = true;
+                        moved[next] = load;
                         made += 1;
+                        break;
                     }
-                    break;
+                    if !(load && second.value.role.is_def()) {
+                        break;
+                    }
+                    between.push(inst);
+                    continue;
                 }
                 let opcode = func[inst].opcode;
                 let stop = *stops.entry(opcode).or_insert_with(|| {
