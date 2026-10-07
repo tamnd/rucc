@@ -4401,8 +4401,16 @@ fn link_all(opts: &Options, plan: &Plan, link: &LinkOptions, verbose: bool) -> i
     match ran {
         Ok(()) => 0,
         // The linker has already said what was wrong on its own error output, and repeating that
-        // linking failed would only push its message further up the screen.
-        Err(link::Error::Refused { .. }) => 1,
+        // linking failed would only push its message further up the screen. A note after it is
+        // different, when the link went ahead without our runtime, since that is the cause the
+        // linker cannot see.
+        Err(link::Error::Refused { .. }) => {
+            if let Some(note) = link::missing_builtins(opts.target, link) {
+                let mut stderr = host::stderr();
+                let _ = writeln!(stderr, "rucc: note: {note}");
+            }
+            1
+        }
         Err(why) => complain(why),
     }
 }

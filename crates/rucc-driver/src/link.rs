@@ -2055,6 +2055,30 @@ pub fn builtins_archive(target: Triple, prefixes: &[PathBuf]) -> Option<PathBuf>
     places.into_iter().find(|path| path.is_file())
 }
 
+/// What to say after a failed link that went ahead without our runtime, or `None` when the link
+/// had it or did not want it.
+///
+/// A native link goes on without the archive when it is not there, because most programs never
+/// call into it and a compiler built from source has none until `cargo xtask builtins` makes one.
+/// A program that does call into it then fails on `__atomic_store` or `__udivti3`, and the linker
+/// names the caller rather than the cause.
+#[must_use]
+pub fn missing_builtins(target: Triple, opts: &LinkOptions) -> Option<String> {
+    if !opts.wants_runtime() || opts.no_builtins_lib {
+        return None;
+    }
+    if builtins_archive(target, &opts.prefixes).is_some() {
+        return None;
+    }
+    let tuple = target.tuple().to_canonical_string();
+    Some(format!(
+        "this link had no librucc_builtins.a, this compiler's own runtime for {tuple}, because \
+         there is none beside the compiler or under a -B prefix. If the linker says that a name \
+         such as `__atomic_store` or `__udivti3` is undefined, build it with `cargo xtask \
+         builtins --target={tuple}`"
+    ))
+}
+
 /// Which output format this `ld` should write, in the name `ld` knows it by.
 fn emulation(target: Triple) -> &'static str {
     match target.arch {
@@ -2906,6 +2930,21 @@ mod tests {
         fs::create_dir_all(&dir).expect("a temporary directory");
         fs::write(dir.join("librucc_builtins.a"), b"not really an archive").expect("a file in it");
         dir
+    }
+
+    /// The note after a failed link names the task that builds the runtime, and only when the
+    /// runtime is missing and the link wanted it.
+    #[test]
+    fn a_link_without_our_runtime_names_the_task_that_builds_it() {
+        let opts = LinkOptions::default();
+        if builtins_archive(linux(), &opts.prefixes).is_none() {
+            let note = missing_builtins(linux(), &opts).expect("a note");
+            assert!(note.contains("cargo xtask builtins --target="), "{note}");
+        }
+        let off = LinkOptions { no_builtins_lib: true, ..LinkOptions::default() };
+        assert_eq!(missing_builtins(linux(), &off), None);
+        let found = LinkOptions { prefixes: vec![a_builtins_dir()], ..LinkOptions::default() };
+        assert_eq!(missing_builtins(linux(), &found), None);
     }
 
     /// An archive in a directory named by the short tuple is found, which is where `cargo xtask
