@@ -1732,7 +1732,10 @@ impl Checker<'_> {
             let node = ExprKind::Assign { op: None, computation: ty, lhs, rhs };
             return self.tast.expr(Expr::new(node, ty, Category::Rvalue), span);
         };
-        let Some((computation, rhs)) = self.computation(op, ty, rhs, span) else {
+        // A type `hardbool` made computes as the `bool` it stands for, and the lowering decays
+        // the value it reads to that and converts the result back.
+        let operand = if self.types.hardbool_of(ty).is_some() { self.types.boolean() } else { ty };
+        let Some((computation, rhs)) = self.computation(op, operand, rhs, span) else {
             return self.poison(span);
         };
         let node = ExprKind::Assign { op: Some(op), computation, lhs, rhs };
@@ -2354,8 +2357,10 @@ impl Checker<'_> {
     /// `float f = 1e300;`.
     fn warn_overflow(&mut self, value: ExprId, target: TypeId) {
         // `bool` is left out because converting to it is a comparison against zero and not a
-        // truncation, so `bool b = 2;` loses nothing and gcc warns about neither.
+        // truncation, so `bool b = 2;` loses nothing and gcc warns about neither. A type
+        // `hardbool` made is converted to through `bool` and is left out for the same reason.
         if matches!(eval::bare(&self.types, target), TypeKind::Bool)
+            || self.types.hardbool_of(target).is_some()
             || self.answered_late.contains(&value)
             || self.not_taken > 0
         {

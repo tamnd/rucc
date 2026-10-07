@@ -293,7 +293,11 @@ impl<'a> Eval<'a> {
             }
             ExprKind::Cast(operand) => self.convert(expr, operand),
             ExprKind::Convert {
-                kind: Conversion::Arithmetic | Conversion::Bool | Conversion::Pointer,
+                kind:
+                    Conversion::Arithmetic
+                    | Conversion::Bool
+                    | Conversion::Pointer
+                    | Conversion::Hardbool,
                 operand,
             } => self.convert(expr, operand),
             // An array or a function becoming a pointer is the address of the thing itself,
@@ -1310,6 +1314,22 @@ impl<'a> Eval<'a> {
     /// `(char)300` is silent in gcc and `char c = 300;` is not, and both of them come through
     /// here.
     fn converted(&self, value: Const, from: TypeId, to: TypeId) -> Option<Const> {
+        // Out of a type `__attribute__((hardbool))` made, a value is the `bool` its representation
+        // stands for, and into one it is the representation of its truth, so a conversion between
+        // two of them goes through a `bool`. A number that is neither of the two is not a constant,
+        // since what reading it does is trap.
+        if let Some(hardbool) = self.types.hardbool_of(from) {
+            let bit = match value {
+                Const::Int(value) if value == hardbool.true_value => 1,
+                Const::Int(value) if value == hardbool.false_value => 0,
+                _ => return None,
+            };
+            return self.converted(Const::Int(bit), self.types.boolean(), to);
+        }
+        if let Some(hardbool) = self.types.hardbool_of(to) {
+            let held = if truth(value)? { hardbool.true_value } else { hardbool.false_value };
+            return Some(Const::Int(held));
+        }
         match bare(self.types, to) {
             // Not a truncation to one bit. `(bool)2` is one and `(bool)0.5` is one, which is
             // why this is a comparison against zero and not the integer case below.

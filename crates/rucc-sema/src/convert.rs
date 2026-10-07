@@ -75,9 +75,14 @@ impl Conv<'_> {
     /// An array becomes a pointer to its first element, a function becomes a pointer to itself,
     /// and everything else that is an lvalue is read. An expression that is already a value is
     /// its own answer, so this can be called on any operand without asking what it is first.
+    ///
+    /// A value of a type `__attribute__((hardbool))` made is the one value that goes further,
+    /// to the `bool` it stands for. gcc decays one wherever it decays an lvalue, whether it was
+    /// read out of an object or came out of a cast, a call or an assignment, so it is a `bool`
+    /// to every operator and only the object holds the representation.
     pub fn value(&mut self, expr: ExprId) -> ExprId {
         let ty = self.tast[expr].ty;
-        match self.types.kind(self.types.canonical(ty)) {
+        let value = match self.types.kind(self.types.canonical(ty)) {
             TypeKind::Array { elem, .. } => {
                 let ty = self.types.pointer(elem);
                 self.write(Conversion::ArrayDecay, expr, ty)
@@ -91,7 +96,12 @@ impl Conv<'_> {
                 let ty = self.read_as(ty);
                 self.write(Conversion::Lvalue, expr, ty)
             }
+        };
+        if self.types.hardbool_of(self.tast[value].ty).is_none() {
+            return value;
         }
+        let boolean = self.types.boolean();
+        self.write(Conversion::Hardbool, value, boolean)
     }
 
     /// The value of an expression with the integer promotions applied, 6.3.1.1.
@@ -246,6 +256,12 @@ impl Conv<'_> {
         let boolean = self.types.boolean();
         if target == boolean {
             return self.to_bool(expr);
+        }
+        // To a type `__attribute__((hardbool))` made, which is a conversion to `bool` and then to
+        // the representation of what that gave, in gcc's words and in this order.
+        if self.types.hardbool_of(target).is_some() {
+            let expr = self.to_bool(expr);
+            return self.write(Conversion::Hardbool, expr, target);
         }
         let kind = if is_pointer(self.types, target) {
             // A null pointer constant is not the integer zero converted. The constant may have

@@ -157,7 +157,7 @@ impl Checker<'_> {
     pub fn type_name(&mut self, id: ast::TypeNameId) -> TypeId {
         let name = self.ast[id];
         let ty = self.declared_type(name.specs, name.declarator);
-        // `mode` and `vector_size` change which type is named rather than how that type is laid
+        // `mode`, `hardbool` and `vector_size` change which type is named rather than how that type is laid
         // out, so they are read here for the same reason `Checker::declare` reads them. A type
         // name is nearly always a typedef that already carries the answer, and the one place it
         // is not is a cast or a compound literal with the attribute written out, which real code
@@ -1195,11 +1195,17 @@ impl Checker<'_> {
         let mut declared = Vec::new();
         for (index, param) in list.iter().enumerate() {
             let ty = match param.specs {
-                Some(specs) => self.build_type(
-                    specs,
-                    param.declarator,
-                    Place { parameter: true, member: false, prototype: true },
-                ),
+                Some(specs) => {
+                    let ty = self.build_type(
+                        specs,
+                        param.declarator,
+                        Place { parameter: true, member: false, prototype: true },
+                    );
+                    // `hardbool` makes a different type of the one written, on a parameter as
+                    // on a variable, and the call converts to that.
+                    let ty = self.hardened(ty, ast[specs].attrs);
+                    self.hardened(ty, param.attrs)
+                }
                 // An identifier list, which the caller told apart by its kind and which cannot
                 // reach here. Its parameters have no specifiers at all.
                 None => self.int(),

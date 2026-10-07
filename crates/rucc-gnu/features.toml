@@ -458,6 +458,15 @@ used_by = ["glibc"]
 tests = ["tests/accept/a-type-in-a-machine-mode.c", "tests/accept/a-vector-written-as-a-machine-mode.c", "tests/accept/a-machine-mode-that-does-not-exist.c", "tests/accept/a-machine-mode-of-the-wrong-class.c"]
 
 [[feature]]
+name = "hardbool"
+kind = "attribute"
+gcc_version = "14.1"
+status = "implemented"
+used_by = []
+tests = ["rucc::a_hardened_bool_is_stored_as_its_two_numbers_and_traps_on_anything_else", "rucc::hardbool_is_checked_in_gcc_s_words"]
+notes = "An integer type made into a bool stored as two numbers, zero and its complement unless written. A value decays to bool wherever an lvalue is read, a conversion into the type goes through bool, and reading anything but the two traps. Zero-initialized objects hold zero bytes, which is what gcc 16 emits whatever its manual says. A non-constant argument is refused with E0845 where gcc 16 has an internal error."
+
+[[feature]]
 name = "transparent_union"
 kind = "attribute"
 gcc_version = "2.0"
