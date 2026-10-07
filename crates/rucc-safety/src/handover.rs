@@ -135,7 +135,9 @@
 
 use rucc_base::hash::Map;
 use rucc_base::{Interner, Symbol};
-use rucc_ir::{Def, Doms, Extra, Func, Imm, Inst, InstData, Module, Opcode, Type, Value};
+use rucc_ir::{
+    BlockCall, Def, Doms, Extra, Func, Imm, Inst, InstData, Module, Opcode, Type, Value,
+};
 
 use crate::frame::ARGS;
 use crate::{origin, slot};
@@ -323,6 +325,7 @@ fn one(func: &mut Func, left: &Map<Symbol, usize>, word: Type) -> usize {
     }
     let held = origin::existing(func);
     let Some(doms) = func.entry().map(|_| Doms::new(func)) else { return 0 };
+    let mut joins = Map::default();
     let mut published = 0;
     for inst in all(func) {
         // A tail call is left alone for the reason the module doc gives, which is that the frame
@@ -332,7 +335,7 @@ fn one(func: &mut Func, left: &Map<Symbol, usize>, word: Type) -> usize {
         }
         match wanted(func, inst, left) {
             Some(Frame::Checked) => {
-                if over(func, inst, &held, &doms) {
+                if over(func, inst, &held, &doms, &mut joins) {
                     published += 1;
                     from_the_call(func, inst);
                 }
@@ -342,7 +345,7 @@ fn one(func: &mut Func, left: &Map<Symbol, usize>, word: Type) -> usize {
             // one the caller recovers a pointer the callee could have described exactly, and for
             // a pointer to one of the callee's own locals that is the whole of row T4.
             Some(Frame::Pointerless) if returning(func, inst) && reads_frame(func, inst, left) => {
-                if over(func, inst, &held, &doms) {
+                if over(func, inst, &held, &doms, &mut joins) {
                     published += 1;
                     from_the_call(func, inst);
                 }
@@ -487,16 +490,97 @@ fn giving_back(func: &mut Func, held: &Map<Value, Value>, doms: &Doms) -> usize 
 ///
 /// Over the local rather than over `pointer`, so that a pointer into the middle of a buffer carries
 /// the whole buffer's bounds, which is the same reason [`origin::already`] answers by the base.
-fn made(func: &mut Func, pointer: Value, inst: Inst) -> Option<Value> {
+///
+/// A pointer that arrives at a block parameter is a local too when every edge into the block passes
+/// one or a null, and [`joined`] makes its capability. `joins` keeps the ones already made, so that
+/// two calls handing over the same parameter share one.
+fn made(
+    func: &mut Func,
+    pointer: Value,
+    inst: Inst,
+    joins: &mut Map<Value, Value>,
+) -> Option<Value> {
     let base = origin::root(func, pointer);
     if !local(func, base) {
-        return None;
+        if let Some(&cap) = joins.get(&base) {
+            return Some(cap);
+        }
+        let cap = joined(func, base)?;
+        joins.insert(base, cap);
+        return Some(cap);
     }
     let args = func.push_values(&[base]);
     let data = InstData { args, ..InstData::new(Opcode::CapOf) };
     let cap = func.create_inst(data, &[Type::CAP], func.span(inst));
     func.insert_before(cap, inst);
     func[cap].results().next()
+}
+
+/// The capability of a block parameter that every edge into its block passes a local or a null,
+/// as a capability parameter beside it.
+///
+/// That is what a pointer set on one side of a branch and not the other is once the optimizer has
+/// run: `char *data; if (flag) data = buffer; strcpy(data, ...)` leaves `data` a parameter of the
+/// block after the branch, passed the buffer on one edge and, since reading it on the other would
+/// be reading nothing, a null on the other. The same goes for a pointer set to one of two buffers.
+/// Each edge passes the capability of what it passes, the local's made in front of its branch and
+/// a null's the bottom one, so the parameter carries the bounds of whichever buffer it arrived
+/// with, and nothing on the way is a plane walk.
+///
+/// Not the entry block, whose parameters are the function's own, and not when any edge passes
+/// something else, since its capability would be a walk this pass does not make.
+fn joined(func: &mut Func, pointer: Value) -> Option<Value> {
+    let Def::Param { block, index } = func[pointer].def else { return None };
+    if func.entry() == Some(block) {
+        return None;
+    }
+    let index = index as usize;
+    let mut edges = Vec::new();
+    for pred in func.blocks().collect::<Vec<_>>() {
+        let Some(term) = func.terminator(pred) else { continue };
+        for place in func.target_list(term).iter() {
+            let call = func[place];
+            if call.block != block {
+                continue;
+            }
+            let base = origin::root(func, *func[call.args].get(index)?);
+            if !local(func, base) && !null(func, base) {
+                return None;
+            }
+            edges.push((term, place, base));
+        }
+    }
+    if edges.is_empty() {
+        return None;
+    }
+    let cap = func.append_param(block, Type::CAP);
+    for (term, place, base) in edges {
+        let data = if local(func, base) {
+            let args = func.push_values(&[base]);
+            InstData { args, ..InstData::new(Opcode::CapOf) }
+        } else {
+            InstData::new(Opcode::CapNull)
+        };
+        let made = func.create_inst(data, &[Type::CAP], func.span(term));
+        func.insert_before(made, term);
+        let passed = func[made].results().next()?;
+        let call = func[place];
+        let mut args = func[call.args].to_vec();
+        args.push(passed);
+        let args = func.push_values(&args);
+        func.set_block_call(place, BlockCall { args, ..call });
+    }
+    Some(cap)
+}
+
+/// Whether `value` is a null pointer, which is a conversion of a zero because `iconst` never makes
+/// a pointer.
+fn null(func: &Func, value: Value) -> bool {
+    let Def::Result { inst, .. } = func[value].def else { return false };
+    if func[inst].opcode != Opcode::IntToPtr {
+        return false;
+    }
+    func[func[inst].args].first().is_some_and(|&zero| crate::is_zero(func, zero))
 }
 
 /// The instruction directly behind `inst` in the block it is in.
@@ -516,13 +600,19 @@ fn behind(func: &Func, inst: Inst) -> Option<Inst> {
 /// anyway: a publish describing nothing is a clear spelled at length, and the two mean opposite
 /// things. The exception is a call that gives back a pointer, whose frame is where the answer comes
 /// back, so that one publishes a single bottom capability rather than clearing.
-fn over(func: &mut Func, inst: Inst, held: &Map<Value, Value>, doms: &Doms) -> bool {
+fn over(
+    func: &mut Func,
+    inst: Inst,
+    held: &Map<Value, Value>,
+    doms: &Doms,
+    joins: &mut Map<Value, Value>,
+) -> bool {
     let carried: Vec<Value> = pointers(func, inst).take(ARGS).collect();
     let mut found: Vec<Option<Value>> = Vec::with_capacity(carried.len());
     for &value in &carried {
         let cap = match seen(func, held, doms, value, inst) {
             Some(cap) => Some(cap),
-            None => made(func, value, inst),
+            None => made(func, value, inst, joins),
         };
         found.push(cap);
     }
@@ -1238,5 +1328,153 @@ mod tests {
         let g = &module[funcs.next().expect("the module defines two")];
         assert_eq!(count(g, Opcode::CapOf), 1);
         assert_eq!(count(g, Opcode::CapYield), 1);
+    }
+
+    /// `body` parsed as the one function of a module, run through [`arrange`], and verified.
+    fn arranged(body: &str) -> Module {
+        let mut names = Interner::new();
+        let text = format!(
+            "; ModuleID = 't.c'\n\
+             ; format 0\n\
+             target triple = \"x86_64-unknown-linux-gnu\"\n\
+             target datalayout = \"e-p:64:64-i64:64-f80:128-S128\"\n\
+             func @__rucc_wrap_strcpy(ptr, ptr) -> ptr, linkage(external);\n{body}"
+        );
+        let mut module = rucc_ir::parse(&text, &mut names).expect("the fixture parses");
+        assert_eq!(arrange(&mut module, &names), 1);
+        if let Err(errors) = rucc_ir::verify(&module, &names) {
+            panic!("the pass left invalid IR, {errors:?}\n{}", rucc_ir::print(&module, &names));
+        }
+        module
+    }
+
+    /// What each edge into the block the capability parameter `cap` belongs to passes for it, as
+    /// the opcode that made it and what that was over, in the order the edges come.
+    fn passed(func: &Func, cap: Value) -> Vec<(Opcode, Vec<Value>)> {
+        let Def::Param { block, index } = func[cap].def else { panic!("a parameter") };
+        let mut got = Vec::new();
+        for pred in func.blocks() {
+            let Some(term) = func.terminator(pred) else { continue };
+            for call in func.successors(term) {
+                if call.block != block {
+                    continue;
+                }
+                let value = func[call.args][index as usize];
+                let Def::Result { inst, .. } = func[value].def else { panic!("made on the edge") };
+                got.push((func[inst].opcode, func[func[inst].args].to_vec()));
+            }
+        }
+        got
+    }
+
+    #[test]
+    fn a_pointer_set_on_one_side_of_a_branch_carries_the_local_it_was_set_to() {
+        // Juliet's flow variants 05 and 09 to 14: the buffer is chosen under a test the optimizer
+        // cannot fold, and the other side leaves the pointer unset, which arrives as a null. The
+        // copy into it was let through because the wrapper was handed nothing.
+        let module = arranged(
+            r#"
+func @f(i1), linkage(external) {
+block0(%0: i1):
+    %1 = alloca, size 10, align 1
+    %2 = alloca, size 11, align 1
+    br_if %0, block1, block2
+
+block1:
+    jump block3(%1)
+
+block2:
+    %3 = iconst.i64 0
+    %4 = inttoptr.ptr %3
+    jump block3(%4)
+
+block3(%5: ptr):
+    %6 = call @__rucc_wrap_strcpy(%5, %2) : (ptr, ptr) -> ptr
+    return
+}
+"#,
+        );
+        let func = &module[module.funcs().find(|&id| !module[id].is_declaration()).expect("f")];
+        let caps = operands(func, Opcode::CapPublish);
+        assert_eq!(caps.len(), 2);
+        let local = func[func.insts(func.entry().expect("an entry")).next().expect("the alloca")]
+            .results()
+            .next()
+            .expect("an address");
+        assert_eq!(
+            passed(func, caps[0]),
+            [(Opcode::CapOf, vec![local]), (Opcode::CapNull, vec![])]
+        );
+    }
+
+    #[test]
+    fn a_pointer_set_to_one_of_two_locals_carries_the_one_it_arrived_with() {
+        // Variant 12, where a coin picks the buffer that is too small or the one that is not.
+        let module = arranged(
+            r#"
+func @f(i1), linkage(external) {
+block0(%0: i1):
+    %1 = alloca, size 10, align 1
+    %2 = alloca, size 11, align 1
+    %3 = alloca, size 11, align 1
+    br_if %0, block1, block2
+
+block1:
+    jump block3(%1)
+
+block2:
+    %4 = iconst.i64 1
+    %5 = ptr_add %2, %4
+    jump block3(%5)
+
+block3(%6: ptr):
+    %7 = call @__rucc_wrap_strcpy(%6, %3) : (ptr, ptr) -> ptr
+    return
+}
+"#,
+        );
+        let func = &module[module.funcs().find(|&id| !module[id].is_declaration()).expect("f")];
+        let locals: Vec<Value> = func
+            .insts(func.entry().expect("an entry"))
+            .take(2)
+            .filter_map(|inst| func[inst].results().next())
+            .collect();
+        let caps = operands(func, Opcode::CapPublish);
+        assert_eq!(
+            passed(func, caps[0]),
+            [(Opcode::CapOf, vec![locals[0]]), (Opcode::CapOf, vec![locals[1]])]
+        );
+    }
+
+    #[test]
+    fn a_pointer_that_may_be_anything_else_is_handed_over_as_before() {
+        // A parameter of the function passed on one edge has a capability only a walk could make,
+        // so the block gets no parameter beside it and the frame holds the bottom one for it.
+        let module = arranged(
+            r#"
+func @f(i1, ptr), linkage(external) {
+block0(%0: i1, %1: ptr):
+    %2 = alloca, size 10, align 1
+    %3 = alloca, size 11, align 1
+    br_if %0, block1, block2
+
+block1:
+    jump block3(%2)
+
+block2:
+    jump block3(%1)
+
+block3(%4: ptr):
+    %5 = call @__rucc_wrap_strcpy(%4, %3) : (ptr, ptr) -> ptr
+    return
+}
+"#,
+        );
+        let func = &module[module.funcs().find(|&id| !module[id].is_declaration()).expect("f")];
+        let join = func.blocks().last().expect("the block the pointer arrives at");
+        assert_eq!(func[join].params.len(), 1);
+        let caps = operands(func, Opcode::CapPublish);
+        let Def::Result { inst, .. } = func[caps[0]].def else { panic!("a capability is made") };
+        assert_eq!(func[inst].opcode, Opcode::CapNull);
     }
 }
