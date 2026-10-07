@@ -214,6 +214,13 @@ impl Flags {
     /// stays one when a pass works out where it goes and becomes a `tail_call` when it is made.
     pub const MUST_TAIL: Self = Self(1 << 23);
 
+    /// A `ptr_add` whose count the program worked out rather than wrote as a constant
+    /// expression, which `rucc_opt::objsize` reads the way gcc's early object size pass does: it
+    /// runs before any constant is propagated, so `args + i` with `i` a local holding one is an
+    /// address somewhere in `args` and not two bytes into it. A fact from the front end that
+    /// nothing after that pass sees.
+    pub const COUNTED: Self = Self(1 << 24);
+
     /// Every flag that tells the optimizer to leave an access exactly where it is.
     pub const KEEP: Self = Self(Self::VOLATILE.0 | Self::SEG_FS.0 | Self::SEG_GS.0);
 
@@ -331,7 +338,7 @@ impl Flags {
             Opcode::Alloca => Self::NOALIAS.union(Self::GUARD),
             // `nuw` on an address that moves forward inside its object, which is what lets a back
             // end put the offset in the offset field of a load or a store.
-            Opcode::PtrAdd => Self::NOALIAS.union(Self::NUW),
+            Opcode::PtrAdd => Self::NOALIAS.union(Self::NUW).union(Self::COUNTED),
             _ => Self::NONE,
         }
     }
@@ -408,6 +415,7 @@ static NAMED: &[(Flags, &str)] = &[
     (Flags::NOTRACK, "notrack"),
     (Flags::INDIRECT_RETURN, "indirect_return"),
     (Flags::MUST_TAIL, "musttail"),
+    (Flags::COUNTED, "counted"),
 ];
 
 /// How strongly an atomic operation is ordered against everything around it.
@@ -881,6 +889,16 @@ mod tests {
         }
         assert_eq!(Flags::from_name("musttail"), Some(Flags::MUST_TAIL));
         assert!(!Flags::FAST.contains(Flags::MUST_TAIL));
+    }
+
+    #[test]
+    fn counted_goes_on_a_ptr_add_and_nowhere_else() {
+        for opcode in Opcode::all() {
+            let add = opcode == Opcode::PtrAdd;
+            assert_eq!(Flags::legal_on(opcode).contains(Flags::COUNTED), add, "{opcode}");
+        }
+        assert_eq!(Flags::from_name("counted"), Some(Flags::COUNTED));
+        assert!(!Flags::FAST.contains(Flags::COUNTED));
     }
 
     #[test]

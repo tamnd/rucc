@@ -21,6 +21,9 @@ typedef unsigned long size_t;
 struct in { int x; char y[8]; };
 struct o { int a; char buf[16]; struct in inner; int c; char tail[4]; } inst;
 struct o *gp;
+struct fl { int n; char d[]; };
+struct mid { long a; struct fl in; };
+struct holder { int x; struct mid m; } *hp;
 #define I static inline __attribute__((always_inline))
 I size_t q1(const void *p) { return __builtin_object_size(p, 1); }
 I size_t q3(const void *p) { return __builtin_object_size(p, 3); }
@@ -45,6 +48,12 @@ void f(int i) {
     WANT(wrong_whole, q1(&inst), 40);
     char *p = inst.buf;
     WANT(wrong_local, q1(p + 4), 12);
+    WANT(wrong_flex_holder, q1(&hp->m), -1);
+    WANT(wrong_flex_inner, q1(&hp->m.in), -1);
+    int k = 1;
+    WANT(wrong_counted, q1(gp->buf + k), 16);
+    WANT(wrong_counted_object, q1(inst.buf + k), 16);
+    WANT(wrong_counted_whole, q1((char *)&inst + 30 + k), 9);
 }
 "#;
 

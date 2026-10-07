@@ -5532,9 +5532,13 @@ impl<'u> Body<'_, 'u> {
     /// may allocate past the end of: which of those count is `-fstrict-flex-arrays` and the
     /// member's own attribute, which the checker reads, so the IR is told nothing and answers
     /// with the whole object. Nothing for a member with no bytes either, since the kernel puts
-    /// those in the middle of a structure as markers to copy from and up to.
+    /// those in the middle of a structure as markers to copy from and up to. Nor for a record
+    /// that ends in a flexible array, which is how the program reaches past it.
     fn closest(&self, kind: RecordKind, last: bool, ty: TypeId) -> Option<u32> {
-        if kind == RecordKind::Union || last && is_array(self.types(), ty) {
+        if kind == RecordKind::Union
+            || last && is_array(self.types(), ty)
+            || self.types().ends_flexible(ty)
+        {
             return None;
         }
         let size = repr::size_of(self.types(), self.target(), ty);
@@ -7075,7 +7079,23 @@ impl<'u> Body<'_, 'u> {
         let amount = self.value(steps);
         let size = self.stride(self.pointee(ty), span);
         let signed = repr::is_signed(self.types(), self.target(), index);
-        Some(self.step(base, amount, signed, size, op == BinaryOp::Sub, span))
+        let moved = self.step(base, amount, signed, size, op == BinaryOp::Sub, span);
+        // gcc folds a count written as a constant expression before its early object size pass
+        // and nothing else, and that pass answers about a member differently for the two.
+        if !self.integer_constant(steps) {
+            if let Def::Result { inst, .. } = self.func[moved].def {
+                let data = &mut self.func[inst];
+                data.flags = data.flags.union(Flags::COUNTED);
+            }
+        }
+        Some(moved)
+    }
+
+    /// Whether the expression is an integer constant expression.
+    fn integer_constant(&self, expr: ExprId) -> bool {
+        let mut eval = Eval::new(self.tast(), self.types(), self.target(), self.unit.names);
+        let folded = eval.integer(expr);
+        !eval.addressed() && eval.finish().is_empty() && folded.is_ok()
     }
 
     /// `p - q`, which is how many elements apart they are.

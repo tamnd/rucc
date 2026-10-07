@@ -506,6 +506,28 @@ impl Types {
         &self.records[id.0 as usize]
     }
 
+    /// Whether a record ends in a flexible array member, or in a record that does, or for a union
+    /// has one that does in any member, which is gcc's `TYPE_INCLUDES_FLEXARRAY`.
+    ///
+    /// The object size builtins do not take such a member as the closest object, because the
+    /// program allocates past its end and the array is how it reaches what it allocated.
+    /// crypto/essiv.c does that through `&inst->s.base`, a `struct crypto_instance` whose `__ctx[]`
+    /// is where its own context lives, and gcc answers type 1 there with what is left of the
+    /// object holding it.
+    #[must_use]
+    pub fn ends_flexible(&self, ty: TypeId) -> bool {
+        let TypeKind::Record(id) = self.kind(self.canonical(ty)) else { return false };
+        let info = self.record_info(id);
+        let flexible = |field: &Field| match self.kind(self.canonical(field.ty)) {
+            TypeKind::Array { len, .. } => len == ArrayLen::Unknown,
+            _ => self.ends_flexible(field.ty),
+        };
+        match info.kind {
+            RecordKind::Union => info.fields.iter().any(flexible),
+            RecordKind::Struct => info.fields.last().is_some_and(flexible),
+        }
+    }
+
     /// Every record declared so far, in declaration order.
     ///
     /// For whoever wants to say something about all of them rather than about one, which so
