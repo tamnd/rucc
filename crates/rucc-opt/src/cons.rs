@@ -298,7 +298,7 @@ impl Walk<'_> {
 fn cascade(
     func: &mut Func,
     inst: Inst,
-    finder: &mut Finder,
+    finder: &mut Finder<'_>,
     fuel: &mut Fuel,
     stats: &mut Stats,
     walk: &mut Walk<'_>,

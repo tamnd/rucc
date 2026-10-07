@@ -541,22 +541,24 @@ pub(crate) enum Found {
 }
 
 /// What looking for a rewrite needs, made once for a whole walk rather than once per instruction.
-pub(crate) struct Finder {
+pub(crate) struct Finder<'a> {
     /// How wide an address is, which is the width the rules see a pointer at.
     address: u32,
     /// The edges, for the comparisons a branch in front of them settles.
-    cfg: Cfg,
+    cfg: &'a Cfg,
     /// The matcher's two stacks. See [`identity`].
     stacks: (Vec<Term>, Match<Term>),
 }
 
-impl Finder {
+impl<'a> Finder<'a> {
     /// What a walk over this function needs.
     ///
     /// The edges are taken once, before the walk, which is right for as long as nothing in the
     /// walk adds or removes one. Nothing here does, and nothing in [`crate::cons`] does either:
-    /// that pass moves an instruction from one block to another and leaves the edges alone.
-    pub(crate) fn new(func: &Func, an: &Analyses) -> Self {
+    /// that pass moves an instruction from one block to another and leaves the edges alone. They
+    /// are the cache's, which the manager hands over built on the function as it is, rather than
+    /// a graph of this walk's own built again beside it. tamnd/rucc#3052.
+    pub(crate) fn new(func: &Func, an: &'a Analyses) -> Self {
         // A module that does not say how wide an address is is one written for a test, and those
         // are all sixty four bit ones.
         let address = an
@@ -565,7 +567,7 @@ impl Finder {
             .and_then(|bytes| u32::try_from(bytes * 8).ok())
             .unwrap_or(64);
         let stacks = (Vec::with_capacity(16), Match { rule: 0, bindings: Vec::with_capacity(8) });
-        Self { address, cfg: Cfg::new(func), stacks }
+        Self { address, cfg: an.cfg(func), stacks }
     }
 
     /// The first rewrite that fires on the instruction, what it is called, and what is said in
@@ -587,7 +589,7 @@ impl Finder {
         if let Some(settled) = magnitude_comparison(func, inst) {
             return Some((Found::Composite(settled), MAGNITUDE, NO_FUEL_MAGNITUDE));
         }
-        if let Some(settled) = bounded_comparison(func, &self.cfg, inst) {
+        if let Some(settled) = bounded_comparison(func, self.cfg, inst) {
             return Some((Found::Composite(settled), BOUNDED, NO_FUEL_BOUNDED));
         }
         if let Some(lane) = packed_lane(func, inst) {
