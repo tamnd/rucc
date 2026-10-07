@@ -979,6 +979,39 @@ jobs:
       - name: compile the signature corpus both ways round and run it
         run: cargo xtask abi-differential
 
+  # The four checks where a program that is not ours reads what rucc wrote: the dynamic loader
+  # reads a shared library, the unwinder and readelf read the unwind tables, gdb reads the debug
+  # information, and the real libc.so.6 is held against the glibc stub. Each one had a fault that
+  # only it could see (#733, #767, #1004, #1645), and none of them ran in CI, so a change that broke
+  # one was found by hand or not at all. Milestone L0, #3275.
+  linux-readers:
+    name: linux ${{ matrix.check }}
+    needs: quick
+    runs-on: ubuntu-24.04
+    strategy:
+      fail-fast: false
+      matrix:
+        check: [dso, unwind, debugger, real-libc]
+    steps:
+      - uses: actions/checkout@v7.0.1
+      - uses: Swatinem/rust-cache@v2.9.2
+      - name: install gdb
+        if: matrix.check == 'debugger'
+        run: |
+          sudo apt-get update || echo "at least one apt source is unhappy, carrying on"
+          sudo apt-get install -y gdb
+      - name: check out the abilist fetch
+        if: matrix.check == 'real-libc'
+        uses: actions/checkout@v7.0.1
+        with:
+          repository: tamnd/rucc-cross
+          path: cross
+      - name: fetch the x86_64 abilists
+        if: matrix.check == 'real-libc'
+        run: echo "RUCC_ABILISTS=$(cross/bin/abilist x86_64)" >> "$GITHUB_ENV"
+      - name: run the check
+        run: cargo xtask ${{ matrix.check }}
+
   audit:
     name: supply chain
     needs: quick
