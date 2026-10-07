@@ -51,7 +51,8 @@ use rucc_target::TargetInfo;
 use super::summary::Summary;
 use super::{
     ASKED_DEPTH, CUT, How, INLINED, InlineFailure, Kind, Pool, calls_twice, fits, folded_size,
-    frame, grows, made_of_params, passed, passes_asked, resolved, splice, summed_size, summed_time,
+    frame, grows, made_of_params, passed, passes_asked, resolved, runs_once, splice, summed_size,
+    summed_time,
 };
 use crate::Stats;
 use crate::callgraph::CallGraph;
@@ -384,16 +385,8 @@ impl Heap<'_> {
     /// one.
     fn once(&mut self, module: &Module, defined: &[FuncId]) -> Set<FuncId> {
         let names = self.how.names;
-        let mut once: Set<FuncId> = defined
-            .iter()
-            .copied()
-            .filter(|&id| {
-                let func = &module[id];
-                let main = func.linkage != Linkage::Internal && names.resolve(func.name) == "main";
-                !func.attrs.set.contains(AttrSet::HOT)
-                    && (main || func.attrs.set.contains(AttrSet::NORETURN))
-            })
-            .collect();
+        let mut once: Set<FuncId> =
+            defined.iter().copied().filter(|&id| runs_once(&module[id], names)).collect();
         let by_name: Map<Symbol, FuncId> =
             defined.iter().map(|&id| (module[id].name, id)).collect();
         // Every direct call to each function, as the caller that makes it and how deep it is.

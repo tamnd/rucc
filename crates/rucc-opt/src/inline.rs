@@ -447,7 +447,8 @@ pub fn run(
         if wanted.is_empty() {
             return;
         }
-        let (calls, cold, elsewhere) = callers(module);
+        let (calls, elsewhere) = references(module);
+        let cold = unlikely(module, names);
         let how = How {
             wanted,
             convention,
@@ -488,7 +489,8 @@ pub fn run(
     round(module, &wanted, &mut done, second_pass.and(Some(&later)));
     if let Some(second) = second_pass {
         let later = later.into_inner();
-        let (calls, cold, elsewhere) = callers(module);
+        let (calls, elsewhere) = references(module);
+        let cold = unlikely(module, names);
         let how = How {
             wanted: &wanted,
             convention,
@@ -610,27 +612,15 @@ fn called_once(module: &Module) -> Set<Symbol> {
 
 /// How many direct calls the module makes to each name, and the names it reaches any other way.
 fn references(module: &Module) -> (Map<Symbol, usize>, Set<Symbol>) {
-    let (calls, _, elsewhere) = callers(module);
-    (calls, elsewhere)
-}
-
-/// What [`references`] answers, with how many of the calls are made from a function written
-/// `cold` as well.
-fn callers(module: &Module) -> (Map<Symbol, usize>, Map<Symbol, usize>, Set<Symbol>) {
     let mut calls: Map<Symbol, usize> = Map::default();
-    let mut cold: Map<Symbol, usize> = Map::default();
     let mut elsewhere = Set::default();
     for id in module.funcs() {
         let func = &module[id];
-        let unlikely = func.attrs.set.contains(AttrSet::COLD);
         for inst in func.blocks().flat_map(|block| func.insts(block)) {
             match func[inst].extra {
                 Extra::Call(info) if func[inst].opcode == Opcode::Call => {
                     if let Some(callee) = func[info].callee {
                         *calls.entry(callee).or_default() += 1;
-                        if unlikely {
-                            *cold.entry(callee).or_default() += 1;
-                        }
                     }
                 }
                 Extra::Call(info) => elsewhere.extend(func[info].callee),
@@ -653,7 +643,57 @@ fn callers(module: &Module) -> (Map<Symbol, usize>, Map<Symbol, usize>, Set<Symb
     for id in module.aliases() {
         elsewhere.insert(module[id].target);
     }
-    (calls, cold, elsewhere)
+    (calls, elsewhere)
+}
+
+/// How many of the direct calls to each name are ones gcc does not think of as hot, which are the
+/// calls made from a function written `cold` and the calls a function that [`runs_once`] makes
+/// outside its loops.
+fn unlikely(module: &Module, names: &Interner) -> Map<Symbol, usize> {
+    let mut cold: Map<Symbol, usize> = Map::default();
+    for id in module.funcs() {
+        let func = &module[id];
+        if func.is_declaration() {
+            continue;
+        }
+        let made: Vec<Inst> = if func.attrs.set.contains(AttrSet::COLD) {
+            func.blocks().flat_map(|block| func.insts(block)).collect()
+        } else if runs_once(func, names) {
+            flat(func).into_iter().collect()
+        } else {
+            continue;
+        };
+        for inst in made {
+            let Extra::Call(info) = func[inst].extra else { continue };
+            if func[inst].opcode != Opcode::Call {
+                continue;
+            }
+            if let Some(callee) = func[info].callee {
+                *cold.entry(callee).or_default() += 1;
+            }
+        }
+    }
+    cold
+}
+
+/// Whether gcc says a function runs once each time the program does before it has seen who calls
+/// it, which it says of `main` and of a function that never comes back, unless either is written
+/// `hot`. That is `compute_function_frequency` with no profile, and a call such a function makes
+/// outside its loops is one `cgraph_edge::maybe_hot_p` says is not hot.
+fn runs_once(func: &Func, names: &Interner) -> bool {
+    let main = func.linkage != Linkage::Internal && names.resolve(func.name) == "main";
+    !func.attrs.set.contains(AttrSet::HOT) && (main || func.attrs.set.contains(AttrSet::NORETURN))
+}
+
+/// The direct calls a function makes outside its loops.
+fn flat(func: &Func) -> Set<Inst> {
+    let cfg = Cfg::new(func);
+    let loops = Loops::new(&cfg, &Dominators::new(&cfg));
+    func.blocks()
+        .filter(|&block| loops.innermost(block).is_none())
+        .flat_map(|block| func.insts(block))
+        .filter(|&inst| func[inst].opcode == Opcode::Call)
+        .collect()
 }
 
 /// What stays the same for every function [`settle`] visits.
@@ -674,7 +714,7 @@ struct How<'a> {
     share: bool,
     /// How many direct calls the module makes to each name before anything is inlined.
     calls: &'a Map<Symbol, usize>,
-    /// How many of those calls are made from a function written `cold`.
+    /// How many of those calls are not hot, see [`unlikely`].
     cold: &'a Map<Symbol, usize>,
     /// The names the module reaches other than by a direct call.
     elsewhere: &'a Set<Symbol>,
@@ -812,6 +852,12 @@ fn settle(
     // whose calls gcc never thinks of as hot, and it inlines a call that is not hot only when that
     // does not make the program larger.
     let cold = module[id].attrs.set.contains(AttrSet::COLD);
+    // A call `main` makes outside its loops is not hot to gcc either, since `main` runs once, and
+    // neither is one from a function that never comes back. gcc 16 keeps the four calls `main`
+    // makes to a `static` setter of ten lines at `-O2`, where the first pass used to copy it into
+    // each. tamnd/rucc#3224. Found before anything is spliced in, as `deep` is below.
+    let flat: Set<Inst> =
+        if !cold && runs_once(&module[id], how.names) { flat(&module[id]) } else { Set::default() };
     // Whether a splice can leave a call through a pointer that [`resolved`] makes direct, which
     // takes an `always_inline` function to point at. Without one, walking the whole caller after
     // every splice to look for such a call finds nothing.
@@ -926,6 +972,7 @@ fn settle(
         // arch/x86/kernel/reboot.c ends in an `ljmpl` objtool only accepts there, and gcc keeps
         // it a call in `native_machine_emergency_restart`.
         let cold_call = cold
+            || flat.contains(&call)
             || module[callee].attrs.set.contains(AttrSet::COLD)
             || module[callee].attrs.set.contains(AttrSet::NORETURN);
         // The estimate above does not follow a constant through a block parameter or answer a
@@ -1218,9 +1265,14 @@ fn specialized_size(
     crate::uses::substitute(&mut copy, &forward);
     let mut an = crate::Analyses::new(crate::machine::Machine::unknown());
     let mut fuel = crate::Fuel::unlimited();
-    let passes: [&dyn Pass; 6] = [
+    // `reassoc` stands for gcc's `forwprop`, which puts the constants of a chain of adds together
+    // before the early inliner weighs the body, so sixteen lines adding a constant each are one
+    // add to gcc. Without it a helper like that grows `main` by fourteen and stays a call there,
+    // where gcc copies it (tamnd/rucc#3224).
+    let passes: [&dyn Pass; 7] = [
         &crate::fold::Fold,
         &crate::simplify::Simplify,
+        &crate::reassoc::Reassoc,
         &crate::constant_p::ConstantP,
         &crate::sccp::Sccp,
         &crate::simplify_cfg::SimplifyCfg,
@@ -1752,9 +1804,9 @@ fn grows(func: &Func, call: Inst, callee: &Func, size: usize, how: &How<'_>) -> 
     let removable = callee.linkage == Linkage::Internal
         && !callee.attrs.set.contains(AttrSet::USED)
         && !how.elsewhere.contains(&callee.name);
-    // The calls from functions that are not cold are taken first and go in when they fit, so what
-    // the copy left out of line has to pay for is the calls from cold ones, unless the callee is
-    // cold itself and every call to it is weighed this way.
+    // The calls that are hot are taken first and go in when they fit, so what the copy left out of
+    // line has to pay for is the calls that are not, unless the callee is cold itself and every
+    // call to it is weighed this way.
     let sites = if callee.attrs.set.contains(AttrSet::COLD) { how.calls } else { how.cold };
     let sites = sites.get(&callee.name).copied().unwrap_or(1).max(1);
     !removable || growth * sites > size
