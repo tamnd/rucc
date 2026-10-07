@@ -15,7 +15,7 @@
 use core::fmt;
 use core::str::FromStr;
 
-use crate::{Error, TargetTuple};
+use crate::{Env, Error, TargetTuple};
 
 /// What is known to be true about a target.
 ///
@@ -451,9 +451,19 @@ pub const TARGETS: &[TargetEntry] = &[
 ///
 /// Takes a parsed tuple rather than a string so that `x86_64-unknown-linux-gnu` and
 /// `x86_64-linux-gnu` find the same row. That is the reason canonicalization exists.
+///
+/// A glibc version finds the row without it, so `x86_64-linux-gnu.2.28` has the tier of
+/// `x86_64-linux-gnu`. The stubs for an older glibc come from the same abilists and the link is
+/// the same, so the evidence for the row is evidence for the older version too. tamnd/rucc#3276.
 pub fn lookup(target: &TargetTuple) -> Option<&'static TargetEntry> {
-    let canonical = target.to_canonical_string();
-    TARGETS.iter().find(|entry| entry.tuple == canonical)
+    let find = |tuple: &TargetTuple| {
+        let canonical = tuple.to_canonical_string();
+        TARGETS.iter().find(|entry| entry.tuple == canonical)
+    };
+    find(target).or_else(|| {
+        let glibc = target.env() == Env::Gnu && target.env_version().is_some();
+        glibc.then(|| find(&target.without_versions())).flatten()
+    })
 }
 
 /// How many rows are at each tier today, and how many the plan commits to.
