@@ -438,6 +438,8 @@ pub fn run(
     } else {
         Map::default()
     };
+    // What the bodies measured, kept from one round to the next. See [`How::sizes`].
+    let sizes = RefCell::default();
     let round = |module: &mut Module,
                  wanted: &Map<Symbol, (FuncId, Kind)>,
                  done: &mut Vec<_>,
@@ -458,7 +460,7 @@ pub fn run(
             cold: &cold,
             elsewhere: &elsewhere,
             later,
-            sizes: RefCell::default(),
+            sizes: &sizes,
             summaries: RefCell::default(),
         };
         let mut state = Map::default();
@@ -499,10 +501,14 @@ pub fn run(
             cold: &cold,
             elsewhere: &elsewhere,
             later: None,
-            sizes: RefCell::default(),
+            sizes: &sizes,
             summaries: RefCell::default(),
         };
         done.extend(heap::run(module, &how, &later, &own, second, pic));
+        // The heap takes the blocks its copies stranded out of each caller once it is finished,
+        // which changes a body without making it any larger, so nothing measured before that is
+        // kept past it.
+        sizes.borrow_mut().clear();
     }
     if limit.is_some() && once {
         // A function the heap copied into its last caller still holds the calls in its body until
@@ -674,22 +680,30 @@ struct How<'a> {
     elsewhere: &'a Set<Symbol>,
     /// Where the calls left for the second pass are written down, when there is one.
     later: Option<&'a RefCell<heap::Later>>,
-    /// What [`specialized_size`] said, by callee, the constants it was given and whether it
-    /// weighed, so a body called from four hundred places with the same constants is copied and
-    /// folded once. A callee is settled before it is measured and nothing in a round changes it
-    /// after that, which is why the answer can be kept for the round.
-    sizes: RefCell<Map<SizeKey, usize>>,
+    /// What [`specialized_size`] said, by callee, how large its tables were, the constants it was
+    /// given and whether it weighed, so a body called from four hundred places with the same
+    /// constants is copied and folded once.
+    ///
+    /// Kept across the rounds rather than for one, since a callee the first round settled and the
+    /// second finds nothing more to copy into is the same body both times, and on monocypher.c at
+    /// `-O2` measuring the same few large ones again in each round was a third of the build.
+    /// tamnd/rucc#3052. A callee is settled before it is measured, and what changes one after that
+    /// is a copy into it, which only ever adds to its tables, so an answer under the sizes it had
+    /// then is an answer about the body it has now. The one edit that takes away without adding
+    /// is the sweep after the heap, and the cache is emptied there.
+    sizes: &'a RefCell<Map<SizeKey, usize>>,
     /// The summary of each callee a call declared `inline` or small enough to take was weighed
     /// against, made the first time one is and kept for the round for the same reason as `sizes`.
     summaries: RefCell<Map<FuncId, summary::Summary>>,
 }
 
-/// What [`How::specialized_size`] keeps an answer under: the callee, the constants it was given in
-/// the order of their parameters, and whether it weighed.
-type SizeKey = (FuncId, Vec<(Value, Imm, Type)>, bool);
+/// What [`How::specialized_size`] keeps an answer under: the callee, how many values, instructions
+/// and blocks it had made, the constants it was given in the order of their parameters, and
+/// whether it weighed.
+type SizeKey = (FuncId, (usize, usize, usize), Vec<(Value, Imm, Type)>, bool);
 
 impl How<'_> {
-    /// [`specialized_size`], worked out once for each callee and set of constants in a round.
+    /// [`specialized_size`], worked out once for each body and set of constants.
     fn specialized_size(
         &self,
         module: &Module,
@@ -700,7 +714,8 @@ impl How<'_> {
         let mut passed: Vec<(Value, Imm, Type)> =
             values.iter().map(|(&param, &(imm, ty))| (param, imm, ty)).collect();
         passed.sort_unstable_by_key(|&(param, ..)| param);
-        let key = (callee, passed, weighed.is_some());
+        let counts = module[callee].counts();
+        let key = (callee, (counts.values, counts.insts, counts.blocks), passed, weighed.is_some());
         if let Some(&size) = self.sizes.borrow().get(&key) {
             return size;
         }
