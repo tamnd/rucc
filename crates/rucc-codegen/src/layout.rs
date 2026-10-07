@@ -769,8 +769,9 @@ fn near(func: &mir::Func, insts: &BranchInsts, names: &mut Interner) -> bool {
 /// How many statements an `asm` template has, or nothing when one of them can make more bytes
 /// than a statement does.
 fn lines(text: &str) -> Option<usize> {
-    const LONG: [&str; 18] = [
+    const LONG: [&str; 19] = [
         ".rept",
+        ".rep",
         ".irp",
         ".irpc",
         ".fill",

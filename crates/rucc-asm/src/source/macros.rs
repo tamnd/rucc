@@ -208,6 +208,8 @@ impl Reader {
             return Ok(());
         }
         let Parts { labels, word, rest } = parts(text);
+        // `.rep` is another spelling of `.rept`, which the kernel's kuser32.S uses.
+        let word = if word.eq_ignore_ascii_case(".rep") { ".rept" } else { word };
         if let Some(collecting) = &mut self.macros.collecting {
             if collecting.what.opens(word) {
                 collecting.nest += 1;
