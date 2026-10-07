@@ -830,6 +830,22 @@ impl CallRegs {
         made(CallRegs { unaligned: false, ..*self })
     }
 
+    /// The same convention with some vector registers kept out of the allocator, which is what
+    /// `-ffixed-q16` and its kind ask for on AArch64. The kernel's AEGIS code loads its S-box into
+    /// `v16` to `v31` with `asm` and reads it from there in later statements, so nothing compiled
+    /// in between may put a value in one of them. `numbers` has bit `n` set for register `n`.
+    ///
+    /// Kept the way [`CallRegs::aligned_to`] keeps its answers, see `made`.
+    #[must_use]
+    pub fn without_vector_regs(&'static self, numbers: u32) -> &'static CallRegs {
+        let kept = |reg: &PhysReg| reg.number() >= 32 || numbers & (1 << reg.number()) == 0;
+        if self.sse_order.iter().all(kept) {
+            return self;
+        }
+        let order: Vec<PhysReg> = self.sse_order.iter().copied().filter(kept).collect();
+        made(CallRegs { sse_order: order_made(order), ..*self })
+    }
+
     /// The same convention with the stack protector's word somewhere else, which is what the
     /// `-mstack-protector-guard` flags ask for.
     ///
@@ -1099,6 +1115,22 @@ fn made(wanted: CallRegs) -> &'static CallRegs {
     let regs: &'static CallRegs = Box::leak(Box::new(wanted));
     made.push(regs);
     regs
+}
+
+/// An allocation order that one of the [`CallRegs`] methods worked out, kept the way `made` keeps
+/// a convention so that asking twice does not keep two copies.
+fn order_made(wanted: Vec<PhysReg>) -> &'static [PhysReg] {
+    use std::sync::Mutex;
+
+    static MADE: Mutex<Vec<&'static [PhysReg]>> = Mutex::new(Vec::new());
+
+    let mut made = MADE.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+    if let Some(&order) = made.iter().find(|&&order| *order == wanted[..]) {
+        return order;
+    }
+    let order: &'static [PhysReg] = Vec::leak(wanted);
+    made.push(order);
+    order
 }
 
 #[cfg(test)]
