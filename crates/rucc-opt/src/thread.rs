@@ -115,8 +115,10 @@
 //! Without a copy no new cycle can appear. The new edge from A goes where the edge out of B went, so
 //! a path along it is a path that was already there with B taken out of the middle. With one the
 //! same is true of the path through the copy, which is B's path with B's test taken out, so loops
-//! can still only be destroyed. The loop forest is rebuilt after each thread anyway, which is what
-//! keeps the next decision honest.
+//! can still only be destroyed. The loop forest is rebuilt after a thread that could have broken a
+//! loop, which is what keeps the next decision honest, and kept after one that provably did not.
+//! An edge between two blocks of one loop whose target still gets back round to where it came
+//! from is the common one, and rebuilding the forest after each of those was most of the pass.
 //!
 //! That is also why a thread without a copy is allowed in an irreducible region. The region already
 //! has more than one way in, no loop pass looks inside it, and the loops the forest does describe
@@ -256,7 +258,11 @@ impl Pass for Thread {
         // A block call rather than a predecessor, since redirecting an edge wants the slot in the
         // pool and there is no finding it again from the block the edge used to arrive at.
         let mut edges: Edges = incoming(func);
-        let mut leaks = leaky(func);
+        // Worked out the first time an edge gets as far as asking, since most runs over most
+        // functions find no edge that does and the walk over every operand was then for nothing.
+        // Nothing has moved before that first question, so the set is the one a walk here would
+        // have made.
+        let mut leaks: Option<Set<Block>> = None;
         let unbound = Bindings::default();
         let mut threaded = false;
         // What each copy made in this run has cost the path it is on, which is what the path limit
@@ -298,7 +304,7 @@ impl Pass for Thread {
                 }
                 // The block's own values read below are what the leaky set is about, and the ones
                 // the arm carries are what `carried` is about. Either needs the copy.
-                let (free, why) = if leaks.contains(&block) {
+                let (free, why) = if leaks.get_or_insert_with(|| leaky(func)).contains(&block) {
                     (None, WOULD_COPY_READ_BELOW)
                 } else {
                     (carried(func, block, call, &subst), WOULD_COPY_CARRIED)
@@ -327,7 +333,7 @@ impl Pass for Thread {
                 }
                 // Asked before the edge moves, since what it asks about is the graph the forest was
                 // built on.
-                let kept = free.is_some() && settled(an, func, &edges, from, block, at);
+                let kept = free.is_some() && settled(an, func, &edges, from, block, at, call.block);
                 // The record has to follow the edge, so that a block further down the walk sees the
                 // predecessor it now has. That is what lets one thread make the next one possible
                 // within the single walk this pass is.
@@ -347,7 +353,7 @@ impl Pass for Thread {
                     // The merges put parameters on blocks further down, and a parameter something
                     // reads from below is exactly what the leaky set is about. It went stale in the
                     // safe direction before there were copies. It does not now.
-                    leaks = leaky(func);
+                    leaks = Some(leaky(func));
                     stats.optimized(COPIED);
                 }
                 // The loop forest was about the function as it was a moment ago, and the manager
@@ -434,7 +440,8 @@ impl Thread {
 /// edges leave a loop, and nothing here asks either.
 ///
 /// The graph in the cache can be one from before a thread this already said yes to. What blocks
-/// it reaches is still right, which is all this asks of it.
+/// it reaches is still right, which is all this asks of it. An edge that is on a cycle is
+/// [`within`]'s to answer.
 fn settled(
     an: &Analyses,
     func: &Func,
@@ -442,16 +449,81 @@ fn settled(
     from: Block,
     block: Block,
     at: Idx<BlockCall>,
+    into: Block,
 ) -> bool {
     let loops = an.loops(func);
     if together(loops, from, block) {
-        return false;
+        return within(loops, func, from, block, at, into);
     }
     let cfg = an.cfg(func);
     edges.get(&block).is_some_and(|list| {
         list.iter()
             .any(|&(pred, slot)| slot != at && cfg.reaches(pred) && !together(loops, pred, block))
     })
+}
+
+/// Whether threading the edge at `at` from `from` past `block` to `into`, where `from` and `block`
+/// are in a loop together, leaves the loop forest the answer it was.
+///
+/// The forest is the cycles of the graph found level by level: the loops of the reachable blocks,
+/// then the loops of each of those with its header taken out, and so on. A path along the new edge
+/// is a path that was already there with `block` taken out of the middle, so no two blocks come to
+/// be on a cycle that were not on one before. What can happen is that a cycle stops being one.
+///
+/// Take the innermost loop holding both blocks. Inside it, below its header, the two are in no
+/// cycle together, so the edge between them was on no cycle there and taking it away breaks none.
+/// The new edge is on none either, since [`allowed`] only lets it into a loop `from` is outside of
+/// at that loop's header. In that loop and every loop around it, `into` is a block of the loop, and
+/// if `into` still gets back to `block` without the edge, the loop is still one cycle: everything
+/// reaches `from` as it did, since a path to `from` never needed the edge out of it, `from` reaches
+/// `into` by the new edge, and `into` reaches `block` and from there what `block` reached. So the
+/// same blocks are in the same loops at every level.
+///
+/// With no irreducible region, every loop is entered at its header and nowhere else, before and
+/// after, so the header still dominates the rest and is the header the forest finds. A latch is a
+/// block with an edge to its loop's header, and the edge `from` loses cannot have been one, since
+/// [`allowed`] refused a latch. The edge it gains would make it one if `into` headed a loop `from`
+/// is in, so that is refused here. Every block reached is still reached, by the same argument as in
+/// [`settled`], so the graph's reach is still right too.
+///
+/// The walk goes over the function as it is now and not the cached graph, which can be one from
+/// before an earlier thread, and it stays inside the loop, so it costs the loop rather than the
+/// three analyses built again over the whole function.
+fn within(
+    loops: &Loops,
+    func: &Func,
+    from: Block,
+    block: Block,
+    at: Idx<BlockCall>,
+    into: Block,
+) -> bool {
+    if !loops.irreducible().is_empty() {
+        return false;
+    }
+    let around = || std::iter::successors(loops.innermost(from), |&id| loops.parent(id));
+    let Some(both) = around().find(|&id| loops.contains(id, block)) else { return false };
+    if !loops.contains(both, into) || around().any(|id| loops.header(id) == into) {
+        return false;
+    }
+    let mut seen: Set<Block> = Set::default();
+    seen.insert(into);
+    let mut work = vec![into];
+    while let Some(next) = work.pop() {
+        let Some(term) = func.terminator(next) else { continue };
+        for slot in func.target_list(term).iter() {
+            if slot == at {
+                continue;
+            }
+            let to = func[slot].block;
+            if to == block {
+                return true;
+            }
+            if loops.contains(both, to) && seen.insert(to) {
+                work.push(to);
+            }
+        }
+    }
+    false
 }
 
 /// Whether two blocks might be on a cycle together.
@@ -904,8 +976,8 @@ fn same_test(func: &Func, asked: Value, known: Value, subst: &Bindings) -> bool 
 /// so the pass walks again after each one.
 fn leaky(func: &Func) -> Set<Block> {
     let mut out = Set::default();
-    for block in func.blocks().collect::<Vec<Block>>() {
-        for inst in func.insts(block).collect::<Vec<Inst>>() {
+    for block in func.blocks() {
+        for inst in func.insts(block) {
             uses::operands(func, inst, |value| {
                 if let Some(home) = defined_in(func, value) {
                     if home != block {
