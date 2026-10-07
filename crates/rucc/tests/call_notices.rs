@@ -110,6 +110,41 @@ int user(void) {{ struct attr at; copy(&at, sizeof(at)); return at.a; }}
     }
 }
 
+/// A member of a `const` table read at a constant index is what the table was initialized to, and
+/// an address with a body here is not null. madera checks its mixer names that way, defined after
+/// the check, and rtw89 its SAR handlers. A function only declared may be weak and stay undefined,
+/// and gcc keeps that test under the kernel's flags too.
+#[test]
+fn a_build_bug_on_a_name_read_out_of_a_constant_table_says_nothing() {
+    let source = format!(
+        "{KERNEL}extern const char *const texts[3];
+static int common(void) {{ return 0; }}
+int declared(void);
+struct handler {{ const char *descr; int factor; int (*query)(void); }};
+static const struct handler handlers[2] = {{
+\t[0] = {{ .descr = \"COMMON\", .factor = 2, .query = common }},
+\t[1] = {{ .descr = \"ACPI\", .factor = 3, .query = declared }},
+}};
+void check(void) {{
+\tint s = 0;
+\tBUILD_BUG_ON(!texts[2]);
+\tBUILD_BUG_ON(!handlers[s].descr);
+\tBUILD_BUG_ON(!handlers[s].query);
+\tBUILD_BUG_ON(handlers[1].descr == 0);
+}}
+void weak(void) {{ BUILD_BUG_ON(!handlers[1].query); }}
+const char *const texts[] = {{ \"a\", \"b\", \"c\" }};
+"
+    );
+    for level in ["-O1", "-O2", "-Os", "-O3"] {
+        let flags = [level, "-fno-delete-null-pointer-checks"];
+        let (ok, _, said) = compile(&format!("table-name{level}"), &flags, &source);
+        assert!(!ok, "{level}: the test of a declared function was settled");
+        assert_eq!(said.matches(": error: ").count(), 1, "{level}: {said}");
+        assert!(said.contains("BUILD_BUG_ON failed: !handlers[1].query"), "{level}: {said}");
+    }
+}
+
 /// A number cast to a pointer and back is the number, however wide, which is what lib/test_printf.c
 /// leans on in `BUILD_BUG_ON (IS_ERR (PTR))` with a sixty four bit `PTR`.
 #[test]
