@@ -123,13 +123,12 @@ impl Pass for Canon {
                 break;
             }
         }
-        // Only after an edit. A function whose loops already had every property is the common
-        // case, and the manager keeps the whole cache for a pass that changed nothing, so the
-        // header copy and licm after this read the forest it was given instead of building it
-        // again. A clear here threw that away for nothing. tamnd/rucc#3052.
-        if stats.changed() {
-            an.clear();
-        }
+        // No clear at the end, edit or not. Each round of routing cleared what it moved, and each
+        // repair kept only what it left right, so what is in the cache now was built on the
+        // function as it is. The manager reads the graph again after a pass that says it kept
+        // nothing and keeps what was built on it when it is the same graph, so the header copy and
+        // licm after this read the forest the last step built rather than building it again.
+        // tamnd/rucc#3052.
         stats
     }
 }

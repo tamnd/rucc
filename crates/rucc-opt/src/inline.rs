@@ -1229,9 +1229,11 @@ fn specialized_size(
     for _ in 0..2 {
         for pass in passes {
             // The manager's rule, so a pass that changed nothing leaves the next one the graph
-            // it was given rather than one to build again.
+            // it was given rather than one to build again, and one that changed something keeps
+            // what it says it kept and what the graph read again says it did not move.
             if pass.run(&mut copy, &mut an, &mut fuel).changed() {
-                an.clear();
+                let keeps = an.unmoved(&copy, pass.preserves());
+                an.settle(&copy, keeps, false);
             }
         }
     }

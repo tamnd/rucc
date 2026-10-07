@@ -1449,9 +1449,13 @@ pub fn run(module: &mut Module, names: &mut Interner, opts: &Options) -> Report 
             }
             // A pass that changed nothing preserved everything, whatever it says about itself,
             // so the cheap case does not need every pass to have a second opinion about it.
-            // A pass that did change something is taken at its word, and in a checked build the
-            // word is checked.
-            let keeps = if stats.changed() { pass.preserves() } else { Preserved::ALL };
+            // A pass that did change something is taken at its word, less what the graph read
+            // again says it left alone, and in a checked build the word is checked.
+            let keeps = if stats.changed() {
+                an.unmoved(&module[id], pass.preserves())
+            } else {
+                Preserved::ALL
+            };
             for broken in an.settle(&module[id], keeps, opts.verify) {
                 let func = names.resolve(module[id].name);
                 report.broke.push(format!(

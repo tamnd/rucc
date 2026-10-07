@@ -128,6 +128,17 @@ impl Analysis {
     }
 }
 
+/// The analyses read off the graph and nothing else, which a pass that left the graph as it was
+/// cannot have broken whatever it did to the instructions. See [`Analyses::unmoved`].
+const SHAPE: &[Analysis] = &[
+    Analysis::Cfg,
+    Analysis::Dominators,
+    Analysis::PostDominators,
+    Analysis::Loops,
+    Analysis::Frontiers,
+    Analysis::ControlDependence,
+];
+
 /// What a pass leaves standing.
 ///
 /// A set rather than the three cases the design writes, because [`Preserved::ALL`] and
@@ -451,6 +462,35 @@ impl Analyses {
             }
         }
         lied
+    }
+
+    /// What a pass that changed the function left standing, once the graph has been read again.
+    ///
+    /// A pass that can move an edge says it preserved nothing, and most of the times one of those
+    /// changes something it moved no edge: a jump threading that only renamed a value, a pruning
+    /// that only narrowed a compare. The graph, both trees, the forest, the frontiers and the
+    /// control dependence are read off the graph and nothing else, and each one in the cache was
+    /// built on the graph in the cache, since none of them outlives it. So when the graph read off
+    /// the function now is the one in the cache, all six are what building them again would give,
+    /// and they are kept. When it is not, the graph just read is the right one and is kept in
+    /// place of the old, and what was built on the old goes the way the claim says. On duktape.c
+    /// at `-O2` the forest built again after a pass like that was a tenth of the build.
+    /// tamnd/rucc#3052.
+    ///
+    /// For the manager, between a pass and [`Analyses::settle`]. A pass that changes the function
+    /// itself has [`Analyses::clear`] or its own claim, and a test of what a claim means wants the
+    /// claim read literally.
+    pub fn unmoved(&mut self, func: &Func, keeps: Preserved) -> Preserved {
+        if keeps.keeps(Analysis::Cfg) {
+            return keeps;
+        }
+        let Some(old) = self.cfg.get() else { return keeps };
+        let now = Cfg::new(func);
+        if now == *old {
+            return SHAPE.iter().fold(keeps, |keeps, &analysis| keeps.and(analysis));
+        }
+        self.cfg = OnceCell::from(now);
+        keeps.and(Analysis::Cfg)
     }
 
     /// What a claim leaves standing, once what each analysis is built out of is taken into
@@ -848,6 +888,41 @@ mod tests {
         // Which is the trade the flag is: the lie is not caught, and the stale graph is still
         // there, exactly as the pass claimed.
         assert!(an.holds(Analysis::Cfg));
+    }
+
+    #[test]
+    fn a_pass_that_moved_no_edge_keeps_what_was_read_off_the_graph() {
+        let func = func();
+        let mut an = crate::machine::fixtures::analyses();
+        an.loops(&func);
+        an.frontiers(&func);
+        an.control_dependence(&func);
+        an.frequencies(&func);
+        let keeps = an.unmoved(&func, Preserved::NONE);
+        assert!(an.settle(&func, keeps, true).is_empty(), "what was kept was right");
+        for &analysis in super::SHAPE {
+            assert!(an.holds(analysis), "{} was thrown away", analysis.name());
+        }
+        // The predictions read the branches and not only the graph, so they go as claimed.
+        assert!(!an.holds(Analysis::Frequencies));
+    }
+
+    #[test]
+    fn a_pass_that_moved_an_edge_gets_the_graph_read_again_and_loses_the_rest() {
+        let mut func = func();
+        let mut an = crate::machine::fixtures::analyses();
+        an.loops(&func);
+        let block = Block::from_usize(3);
+        let term = func.terminator(block).expect("the helper gives every block a terminator");
+        func.remove_inst(term);
+        let mut build = rucc_ir::Builder::new(&mut func, block);
+        build.ret(&[]);
+        let keeps = an.unmoved(&func, Preserved::NONE);
+        assert!(an.settle(&func, keeps, true).is_empty(), "the graph kept is the one read now");
+        assert!(an.holds(Analysis::Cfg));
+        assert_eq!(an.cfg(&func), &crate::Cfg::new(&func));
+        assert!(!an.holds(Analysis::Dominators), "the tree was built on the old graph");
+        assert!(!an.holds(Analysis::Loops), "the forest was built on the old graph");
     }
 
     #[test]
