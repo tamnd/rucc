@@ -27,6 +27,13 @@ void member(int v) { q.y = v; }
 int narrow(void) { return c + h + (int)d; }
 long fields(void) { return p.x + p.y + p.z; }
 int *address(void) { return &g; }
+struct node { struct node *next; int v; };
+static struct node head;
+struct node *place(int v) {
+  struct node *at = &head;
+  for (struct node *n = head.next; n && n->v >= v; n = n->next) at = n;
+  return at;
+}
 ";
 
 fn listing(flags: &[&str]) -> String {
@@ -104,4 +111,20 @@ fn a_position_independent_executable_folds_its_own_variables() {
     let read = body(&text, "read");
     assert!(read.iter().any(|line| line.ends_with(":lo12:s]")), "{text}");
     assert!(read.iter().any(|line| line.contains(":got:g")), "{text}");
+}
+
+/// The address of `head` is read once by the load of `head.next` and once more as where the walk
+/// starts, which goes into the loop as an edge carries it. The load can take the low bits but the
+/// walk wants the whole address, so it keeps its `add`. The kernel's list of clocksources is walked
+/// like this, and with the `add` gone the first clocksource was put after the page and not the head.
+#[test]
+fn an_address_carried_into_a_loop_keeps_its_add() {
+    let text = listing(&["-fno-pic"]);
+    let body = body(&text, "place");
+    for (at, line) in body.iter().enumerate() {
+        if line.starts_with("adrp ") && line.ends_with(", head") {
+            let next = body.get(at + 1).map_or("", String::as_str);
+            assert!(next.starts_with("add x") && next.ends_with(":lo12:head"), "{text}");
+        }
+    }
 }
