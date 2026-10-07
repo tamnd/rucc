@@ -214,6 +214,8 @@ enum Query {
     FullVersion,
     /// `-print-multiarch`, the directory name a distribution files this target under.
     Multiarch,
+    /// `-print-multi-os-directory`, where the libraries are from GCC's own directory.
+    MultiOsDirectory,
     /// `-print-search-dirs`, in the three lines GCC prints.
     SearchDirs,
     /// `-print-sysroot`, the root the headers and the libraries are read under.
@@ -291,6 +293,7 @@ options:
   -pthread               build for more than one thread, and link the library for it
   -dumpmachine -dumpversion -print-multiarch -print-search-dirs   what this compiler is
   -print-file-name=<name> -print-prog-name=<name>   where a file or a program is
+  -print-libgcc-file-name -print-multi-os-directory   where the GCC runtime and the libraries are
   -print-sysroot         the root the headers and the libraries are read under
   -print-sysroot-provenance   every input under it, where it came from and its licence
   -print-sysroot-digest   the sha256 of that record, which names the whole sysroot in one line
@@ -1101,6 +1104,7 @@ pub fn parse_args(args: &[String]) -> Result<Action, CliError> {
             "-dumpversion" => query = Some(Query::Version),
             "-dumpfullversion" => query = Some(Query::FullVersion),
             "-print-multiarch" => query = Some(Query::Multiarch),
+            "-print-multi-os-directory" => query = Some(Query::MultiOsDirectory),
             "-print-search-dirs" => query = Some(Query::SearchDirs),
             "-print-sysroot" => query = Some(Query::Sysroot),
             // Both spellings, because this one is ours rather than GCC's and our own documents
@@ -3773,6 +3777,10 @@ fn answer(query: &Query, opts: &Options, link: &LinkOptions) -> Result<String, C
         Query::Version => opts.gnuc.dumpversion(),
         Query::FullVersion => opts.gnuc.to_string(),
         Query::Multiarch => link::multiarch(opts.target),
+        // libtool asks this to find the library directory next to the one it was given.
+        Query::MultiOsDirectory => {
+            link::multi_os_directory(opts.target, link.sysroot.as_deref()).to_owned()
+        }
         // The three lines GCC prints, in its order and with its punctuation, because what reads
         // them is a script written against that shape. There is no installation directory to
         // report: this compiler is one binary that works wherever it is copied, and the headers
@@ -3840,8 +3848,9 @@ fn answer(query: &Query, opts: &Options, link: &LinkOptions) -> Result<String, C
         }
         Query::FileName(name) => found(name),
         // The name GCC gives the library of routines a compiler's output calls that the C
-        // library does not have. Ours is built in and there is no file, so the answer is the
-        // name itself, which is what GCC prints when it cannot find one either.
+        // library does not have. The native link uses the one in the directory of the newest GCC,
+        // so that is the full path. With no GCC on the machine, the answer is the name itself,
+        // which is what GCC prints when it cannot find one either.
         Query::Libgcc => found("libgcc.a"),
         // A program rather than a library: the linker and the archiver are the ones a build asks
         // about, and this compiler finds them on the path or under `-B` rather than shipping
@@ -8625,6 +8634,9 @@ mod tests {
         assert_eq!(printed(&[target, "-fgnuc-version=15.2", "-dumpversion"]), "15");
         assert_eq!(printed(&[target, "-fgnuc-version=15.2", "-dumpfullversion"]), "15.2.0");
         assert_eq!(printed(&[target, "-print-multiarch"]), "x86_64-linux-gnu");
+        assert_eq!(printed(&[target, "-m32", "-print-multiarch"]), "i386-linux-gnu");
+        let os = printed(&[target, "-print-multi-os-directory"]);
+        assert!(os == "../lib" || os == "../lib64", "{os}");
         // A name nothing holds comes back unchanged, which is GCC's rule and is what makes the
         // answer safe to paste into a link line whether or not the file is there.
         assert_eq!(printed(&[target, "-print-file-name=no-such-library.a"]), "no-such-library.a");
