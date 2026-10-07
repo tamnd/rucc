@@ -383,6 +383,45 @@ fn a_format_attribute_and_format_arg_are_followed_the_way_gcc_follows_them() {
     assert_eq!(lines_with(&got, "warning:").len(), 6, "{got}");
 }
 
+/// The kernel picks a format by a condition in three ways: by a constant one, as bcache's
+/// `sysfs_print` does with `__builtin_types_compatible_p`, by one at run time with an argument only
+/// the longer arm reads, as `of_device_make_bus_id` does, and with an empty arm, as aacraid does.
+/// gcc 16 is quiet about all three, and the build is `-Werror`.
+#[test]
+fn a_conditional_format_is_judged_as_gcc_judges_it() {
+    let got = said_with(
+        "format-conditional",
+        &["-Wall"],
+        "int printf(const char *, ...);\n\
+         void f(int c, char *s, unsigned long ul) {\n\
+             printf(__builtin_types_compatible_p(__typeof__(ul), int) ? \"%i\" : \"%lu\", ul);\n\
+             printf(c ? \"%s:%s\" : \"%s\", s, s);\n\
+             printf(c ? \"x\" : \"\");\n\
+             printf(c ? \"a\" : \"b\", 1);\n\
+             printf(c ? \"\" : \"\");\n\
+             printf(c ? \"%d\" : \"%s\", 1);\n\
+             printf(c ? s : \"a\", 1);\n\
+             printf(c ? \"\" : \"a\", 1);\n\
+             printf(c ? \"a\" : (c > 1 ? \"b\" : \"c\"), 1);\n\
+             printf(sizeof(int) == 4 ? \"%d\" : \"%s\", 1);\n\
+             printf(c ? \"%d\" : \"%d\");\n\
+         }\n",
+    );
+    for line in [
+        ":6:18: warning: too many arguments for format",
+        ":7:12: warning: zero-length gnu_printf format string",
+        ":8:21: warning: format '%s' expects argument of type 'char *', but argument 2 has type \
+         'int'",
+        ":10:17: warning: too many arguments for format",
+        ":10:17: warning: zero-length gnu_printf format string",
+        ":11:12: warning: too many arguments for format",
+        ":13:14: warning: format '%d' expects a matching 'int' argument",
+    ] {
+        assert_eq!(lines_with(&got, line).len(), 1, "{line}\n{got}");
+    }
+    assert_eq!(lines_with(&got, "warning:").len(), 7, "{got}");
+}
+
 #[test]
 fn a_call_without_its_sentinel_is_said_under_wall() {
     let source = "#include <stddef.h>\n\
