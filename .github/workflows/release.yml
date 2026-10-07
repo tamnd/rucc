@@ -312,9 +312,46 @@ jobs:
           "$rucc" native.c -o native
           ./native | grep -q '^hello$'
 
+  # The release test of the static musl archive, in a container of each Linux system that the
+  # release claims, on both runners. Each container gets only the C library development package
+  # and binutils, then builds and runs hello world, threads, a shared library with TLS and rung 0
+  # with the row that rucc picks by itself. Arch Linux has no arm64 image. tamnd/rucc#3276.
+  release-test:
+    name: release test in ${{ matrix.image }} on ${{ matrix.runner }}
+    needs: build
+    runs-on: ${{ matrix.runner }}
+    strategy:
+      fail-fast: false
+      matrix:
+        runner: [ubuntu-24.04, ubuntu-24.04-arm]
+        image: [ubuntu:20.04, ubuntu:24.04, debian:11, debian:13, rockylinux:8, fedora:42, alpine:3.20, archlinux]
+        exclude:
+          - runner: ubuntu-24.04-arm
+            image: archlinux
+    steps:
+      - uses: actions/checkout@v7.0.1
+      - uses: actions/download-artifact@v8.0.1
+        with:
+          name: dist-${{ matrix.runner == 'ubuntu-24.04-arm' && 'aarch64' || 'x86_64' }}-unknown-linux-musl
+          path: dist
+      - name: unpack the archive and fetch the c-testsuite
+        run: |
+          set -euo pipefail
+          mkdir unpacked
+          tar -xzf dist/*.tar.gz -C unpacked
+          commit=$(sed -n 's/^commit=//p' tests/rung0/run.sh)
+          git init -q suite
+          git -C suite fetch -q --depth 1 https://github.com/c-testsuite/c-testsuite.git "$commit"
+          git -C suite checkout -q FETCH_HEAD
+      - name: run the release test
+        run: |
+          set -euo pipefail
+          archive=$(cd unpacked/* && pwd)
+          docker run --rm -v "$PWD:/w" -v "$archive:/archive:ro" -w /w ${{ matrix.image }} sh tests/release/run.sh /archive /w/suite
+
   publish:
     name: publish
-    needs: [build, smoke, wasm]
+    needs: [build, smoke, release-test, wasm]
     runs-on: ubuntu-24.04
     permissions:
       contents: write
