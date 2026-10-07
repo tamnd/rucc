@@ -788,20 +788,22 @@ mod tests {
 
     #[test]
     fn a_floating_point_parameter_becomes_a_constant_too() {
-        // The bits, which is the reading that keeps a positive zero and a negative zero apart.
+        // The bits, which is the reading that keeps a positive zero and a negative zero apart. The
+        // largest double, so that the add overflows and is left for the machine rather than
+        // folded, and the operand is still there to be read.
         let mut unit = Unit::new();
-        let half: u64 = 0x3fe0_0000_0000_0000;
+        let largest: u64 = 0x7fef_ffff_ffff_ffff;
         let g = unit.private("g", &[Type::float(Float::F64)], |build, params| {
             build.binary(Opcode::FAdd, params[0], params[0], Flags::NONE);
         });
         unit.outside(|build, _| {
-            let it = build.fconst(Type::float(Float::F64), u128::from(half));
+            let it = build.fconst(Type::float(Float::F64), u128::from(largest));
             call(build, g, &[Type::float(Float::F64)], &[it]);
             call(build, g, &[Type::float(Float::F64)], &[it]);
         });
         let done = unit.propagate();
         assert_eq!(unit.said(&done, g).count(Kind::Optimized, KNOWN), 1);
-        assert_eq!(unit.reads(g, Opcode::FAdd), Some(i128::from(half)));
+        assert_eq!(unit.reads(g, Opcode::FAdd), Some(i128::from(largest)));
     }
 
     /// A caller that branches on its parameter to two arms, each passing a number made an address

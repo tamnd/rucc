@@ -188,6 +188,13 @@ pub struct Context<'a> {
     /// generator and by the time it runs the command line is gone and the two operations it might
     /// fuse may have come from different statements.
     pub contract: FpContract,
+    /// What the command line said about the floating point environment, as the attributes each
+    /// function with a body carries: [`AttrSet::ROUNDING_MATH`] from `-frounding-math` and
+    /// [`AttrSet::NO_TRAPPING_MATH`] from `-fno-trapping-math`.
+    ///
+    /// Written down for the reason [`Context::contract`] is. The pass that acts on it folds
+    /// operations on floating constants, and it runs after the command line is gone.
+    pub environment: AttrSet,
     /// What every function in the unit is aligned to unless it asked for more itself, which is
     /// `-falign-functions` and is `None` for the alignment the target gives anyway.
     ///
@@ -310,6 +317,7 @@ impl fmt::Debug for Context<'_> {
             .field("aliasing", &self.aliasing)
             .field("padding", &self.padding)
             .field("contract", &self.contract)
+            .field("environment", &self.environment)
             .field("align", &self.align)
             .field("instrument", &self.instrument)
             .field("exceptions", &self.exceptions)
@@ -387,6 +395,7 @@ pub fn lower(name: &str, cx: Context<'_>) -> Lowered {
         aliasing,
         padding,
         contract,
+        environment,
         align,
         instrument,
         exceptions,
@@ -420,6 +429,7 @@ pub fn lower(name: &str, cx: Context<'_>) -> Lowered {
         cliques: 0,
         tree: aliasing::Tree::default(),
         contract,
+        environment,
         align,
         instrument,
         exceptions,
@@ -483,6 +493,8 @@ pub(crate) struct Unit<'a> {
     tree: aliasing::Tree,
     /// How far a multiply and an addition may be fused. See [`Context::contract`].
     pub(crate) contract: FpContract,
+    /// The floating point environment. See [`Context::environment`].
+    pub(crate) environment: AttrSet,
     /// What every function is aligned to unless it asked for more. See [`Context::align`].
     align: Option<u32>,
     /// Whether the profiling hooks are called. See [`Context::instrument`].

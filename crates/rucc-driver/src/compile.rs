@@ -22,7 +22,7 @@ use rucc_codegen::pressure::Pressure;
 use rucc_codegen::usage::StackUsage;
 use rucc_cost::Goal;
 use rucc_diag::{Diagnostic, SourceMap, Span};
-use rucc_ir::{FpContract, Pic as IrPic, Visibility as IrVisibility};
+use rucc_ir::{AttrSet, FpContract, Pic as IrPic, Visibility as IrVisibility};
 use rucc_lex::{Convert, Keywords, PpToken, TokenFlags, convert};
 use rucc_lower::Protector as LowerProtector;
 use rucc_sema::{Checker, Context as CheckContext};
@@ -491,6 +491,16 @@ pub fn compile(opts: &Options, name: &str, fs: &dyn FileSystem) -> Compiled {
                                 Contract::Off => FpContract::Off,
                                 Contract::On => FpContract::On,
                                 Contract::Fast => FpContract::Fast,
+                            },
+                            environment: {
+                                let mut set = AttrSet::NONE;
+                                if opts.rounding_math {
+                                    set |= AttrSet::ROUNDING_MATH;
+                                }
+                                if !opts.trapping_math {
+                                    set |= AttrSet::NO_TRAPPING_MATH;
+                                }
+                                set
                             },
                             align: opts.align_functions,
                             instrument: opts.instrument_functions,

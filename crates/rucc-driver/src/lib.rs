@@ -1572,27 +1572,17 @@ pub fn parse_args(args: &[String]) -> Result<Action, CliError> {
             // `-fstrict-aliasing` does: assuming less than was asked for costs speed and not
             // correctness, and `-O2` implies it, so refusing it would stop builds for nothing.
             "-fdelete-null-pointer-checks" | "-fno-delete-null-pointer-checks" => {}
-            // The floating point group, which goes the same way and for the same reason, and which
-            // is worth writing out because the reason is easy to get backwards.
+            // The floating point group. Each of these has a restrictive spelling and a permissive
+            // one. The restrictive ones, `-frounding-math` and `-ftrapping-math`, say that the
+            // rounding mode may have been changed and that an exception raised by an operation may
+            // be looked at. An operation on floating constants is folded the way gcc folds it,
+            // in the default rounding mode and only when it raises nothing worse than an inexact
+            // answer, so `-ftrapping-math`, the default, keeps a division by zero and an overflow
+            // as code that runs, and `-frounding-math` keeps an inexact answer as code that runs.
+            // Both are taken with the rest of the family below.
             //
-            // Each of these has a restrictive spelling and a permissive one. The restrictive ones,
-            // `-frounding-math` and `-ftrapping-math`, say that the rounding mode may have been
-            // changed and that an exception raised by an operation may be looked at, so an
-            // arithmetic the compiler folds at compile time is an arithmetic whose rounding and
-            // whose exception the program does not get. Nothing here folds any floating point
-            // arithmetic in a function body: `0.1 + 0.2` is an `fadd` and `1.0 / 0.0` is a divide
-            // that runs, at every level. So both of those describe what already happens.
-            //
-            // The permissive ones are the other half, and they are licences rather than requests
-            // for an answer. `-fno-rounding-math` says the rounding mode is the default one and
-            // `-fno-trapping-math` says nothing looks at the exceptions, which together are
-            // permission to fold. Not folding is the conservative side of that permission and is
-            // what a program is entitled to whichever was written, so `-fno-rounding-math` costs
-            // speed and not correctness, which is the test section 4.1 puts a licence through.
-            "-frounding-math" | "-fno-rounding-math" => {}
-            // `-fno-trapping-math` is the one of the four that is kept, because there is one
-            // conversion this compiler does not fold and gcc folds under it, and the two answers
-            // differ. Converting a constant floating value to an integer type it does not fit in
+            // `-fno-trapping-math` changes one more answer, because there is one conversion this
+            // compiler does not fold and gcc folds under it, and the two answers differ. Converting a constant floating value to an integer type it does not fit in
             // is undefined behaviour rather than a value: left to the hardware it is one
             // instruction and the answer is the integer indefinite value, and folded it is the
             // nearest end of the integer's range. Both compilers leave it to the instruction by
@@ -1601,14 +1591,16 @@ pub fn parse_args(args: &[String]) -> Result<Action, CliError> {
             // gcc's default, so a build spelling it out is asking for what it already has.
             //
             // The rest of the family goes with it, `-ffast-math` included, and all of them are
-            // taken now. Each is a licence rather than a request and nothing here folds floating
-            // point arithmetic, so the code does not change. What does change is the macros gcc
+            // taken now. Each is a licence rather than a request and none of them is taken, so
+            // the code does not change. What does change is the macros gcc
             // defines for each licence, which a header reads, and the startup file `-ffast-math`
             // links, which puts the hardware in flush to zero mode. Both are done after the loop,
             // because the family is a set of switches over the same fields and the last word on
             // each of them is the end of the command line.
             "-ftrapping-math"
             | "-fno-trapping-math"
+            | "-frounding-math"
+            | "-fno-rounding-math"
             | "-ffast-math"
             | "-fno-fast-math"
             | "-funsafe-math-optimizations"
@@ -3103,11 +3095,19 @@ pub fn parse_args(args: &[String]) -> Result<Action, CliError> {
     // not set `errno`, so a promise that they do would only stop the code from being inlined.
     let mut math = Math { errno: opts.target.arch != rucc_target::Arch::Wasm32, ..Math::default() };
     let mut trapping = if ofast { math.set_fast(true) } else { true };
+    let mut rounding = false;
     for flag in &math_flags {
         match *flag {
             "-ftrapping-math" => trapping = true,
             "-fno-trapping-math" => trapping = false,
-            "-ffast-math" => trapping = math.set_fast(true),
+            "-frounding-math" => rounding = true,
+            "-fno-rounding-math" => rounding = false,
+            // `-ffast-math` says the rounding mode is the default one and `-fno-fast-math` says
+            // nothing about it, as in gcc's `set_fast_math_flags`.
+            "-ffast-math" => {
+                trapping = math.set_fast(true);
+                rounding = false;
+            }
             "-fno-fast-math" => trapping = math.set_fast(false),
             "-funsafe-math-optimizations" => trapping = math.set_unsafe(true),
             "-fno-unsafe-math-optimizations" => trapping = math.set_unsafe(false),
@@ -3125,6 +3125,7 @@ pub fn parse_args(args: &[String]) -> Result<Action, CliError> {
         }
     }
     opts.trapping_math = trapping;
+    opts.rounding_math = rounding;
     opts.math = math;
     let last = |on: &str, off: &str| {
         math_flags.iter().rev().find(|f| **f == on || **f == off).is_some_and(|f| *f == on)
@@ -5888,6 +5889,22 @@ mod tests {
         // place and overrides it in another is read.
         let (opts, _) = compile(&["-c", "-fno-trapping-math", "-ftrapping-math", "a.c"]);
         assert!(opts.trapping_math);
+    }
+
+    #[test]
+    fn whether_the_rounding_mode_may_change_is_kept_and_fast_math_takes_it_back() {
+        let (opts, _) = compile(&["-c", "a.c"]);
+        assert!(!opts.rounding_math, "the default was not gcc's");
+        let (opts, _) = compile(&["-c", "-frounding-math", "a.c"]);
+        assert!(opts.rounding_math);
+        let (opts, _) = compile(&["-c", "-frounding-math", "-fno-rounding-math", "a.c"]);
+        assert!(!opts.rounding_math);
+        let (opts, _) = compile(&["-c", "-frounding-math", "-ffast-math", "a.c"]);
+        assert!(!opts.rounding_math, "fast math did not turn it off");
+        let (opts, _) = compile(&["-c", "-ffast-math", "-frounding-math", "a.c"]);
+        assert!(opts.rounding_math);
+        let (opts, _) = compile(&["-c", "-frounding-math", "-fno-fast-math", "a.c"]);
+        assert!(opts.rounding_math, "-fno-fast-math is not a word about the rounding mode");
     }
 
     /// The flags a torture program writes on its own `dg-options` line, which is where most of
