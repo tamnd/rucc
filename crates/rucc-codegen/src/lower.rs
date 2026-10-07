@@ -1877,7 +1877,7 @@ impl<'a> Lowering<'a> {
         // and on a function of tens of thousands of blocks it is a walk of all of them for every
         // local.
         let mut entries = Vec::new();
-        let held = if self.debug { crate::holding::on_entry(self.source) } else { Vec::new() };
+        let held = if self.debug { rucc_ir::holding::on_entry(self.source) } else { Vec::new() };
         for (decl, block, value) in held {
             if let (Some(block), Some(reg)) = (self.blocks[block.index()], self.regs[value.index()])
             {
