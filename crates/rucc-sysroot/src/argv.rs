@@ -50,7 +50,7 @@
 use std::fmt;
 use std::path::{Path, PathBuf};
 
-use rucc_tuple::{Arch, DataModel, Endian, Env, ObjectFormat, TargetTuple};
+use rucc_tuple::{Arch, DataModel, Endian, Env, ObjectFormat, Os, TargetTuple};
 
 use crate::layout::Sysroot;
 use crate::link::{BUILTINS, Crt, Libc, LinkLine, LinkMode, libc, loader};
@@ -314,7 +314,7 @@ fn elf(
     args.push(sysroot_flag(sysroot));
 
     args.extend(mode_flags(target, options.mode));
-    args.extend(hardening());
+    args.extend(hardening(target));
     if options.export_dynamic {
         args.push("--export-dynamic".to_owned());
     }
@@ -746,7 +746,7 @@ fn mode_flags(target: TargetTuple, mode: LinkMode) -> Vec<String> {
     args
 }
 
-/// The flags that are on every ELF line, whatever the target and whatever the mode.
+/// The flags that are on every ELF line, whatever the mode.
 ///
 /// Five answers to defaults nobody wants. An executable stack is a target default several linkers
 /// still assume when no input object says otherwise. `relro` and `now` make the relocation tables
@@ -759,21 +759,22 @@ fn mode_flags(target: TargetTuple, mode: LinkMode) -> Vec<String> {
 /// build id computed over the inputs carries their absolute paths into the binary. A deterministic
 /// one would also do, and it is a linker's own idea of deterministic rather than ours, so the
 /// absence of one is the answer that holds on all three linkers.
-fn hardening() -> Vec<String> {
-    [
-        "--eh-frame-hdr",
-        "--hash-style=gnu",
-        "-z",
-        "relro",
-        "-z",
-        "now",
-        "-z",
-        "noexecstack",
-        "--build-id=none",
-    ]
-    .iter()
-    .map(|flag| (*flag).to_owned())
-    .collect()
+///
+/// A GNU or musl Linux row is different. Its line is the same as the native line, so that a native
+/// link and a cross link for one row give the same program. Each distribution GCC passes
+/// `--build-id`, and `debuginfod`, `systemd-coredump` and the Debian and Fedora debug packages read
+/// the note. The default build ID is a SHA-1 of the output, so it is the same on two hosts when the
+/// output is. `-z now` is not on the line, because upstream GCC does not pass it. `-fhardened` and
+/// `-Wl,-z,now` add it on both lines.
+fn hardening(target: TargetTuple) -> Vec<String> {
+    let linux = target.os() == Os::Linux && matches!(target.env(), Env::Gnu | Env::Musl);
+    let mut flags = vec!["--eh-frame-hdr", "--hash-style=gnu", "-z", "relro"];
+    if !linux {
+        flags.extend(["-z", "now"]);
+    }
+    flags.extend(["-z", "noexecstack"]);
+    flags.push(if linux { "--build-id" } else { "--build-id=none" });
+    flags.into_iter().map(str::to_owned).collect()
 }
 
 /// The flags that are on every PE line, whatever the target and whatever the mode.
