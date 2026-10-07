@@ -412,7 +412,11 @@ impl<'a> Printer<'a> {
                 self.token("break");
                 self.token(";");
             }
-            Stmt::Return(value) => {
+            Stmt::Return(value, attrs) => {
+                if !attrs.is_empty() {
+                    self.attributes(attrs);
+                    self.space();
+                }
                 self.token("return");
                 if let Some(value) = value {
                     self.space();

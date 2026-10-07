@@ -184,6 +184,7 @@ impl Checker<'_> {
             // `assume` that is the reason to write one is out of place out here.
             ast::Decl::Attributes(attrs) => {
                 self.assumed_at_top(attrs);
+                self.musttail_misplaced(&[attrs]);
                 self.tast.add_decl_refs(&[])
             }
         }
@@ -216,6 +217,7 @@ impl Checker<'_> {
         }
         // Once for the declaration rather than once for each declarator in it.
         self.assume_misplaced(&[node.attrs], true, node.span);
+        self.musttail_misplaced(&[node.attrs]);
         let mut declared = Vec::with_capacity(items.len());
         let register =
             self.ast[specs].storage == Some(StorageClass::Register) && !self.scopes.at_file_scope();
@@ -458,6 +460,7 @@ impl Checker<'_> {
         self.ms_hooked(&[specs.attrs], true);
         self.reset_kept(&[specs.attrs], None, span);
         self.assume_misplaced(&[specs.attrs], true, specs.span);
+        self.musttail_misplaced(&[specs.attrs]);
         self.record_patchable(id, &[specs.attrs], DeclKind::Function);
         self.record_wasm_names(id, &[specs.attrs], DeclKind::Function);
         self.record_fentry(Some(id), &[specs.attrs], DeclKind::Function);
@@ -3597,7 +3600,7 @@ mod tests {
         let first = f.define(specs, "f", &[function()], offered);
         let plain = f.int_specs();
         let two = f.int(2);
-        let ret = f.stmt(ast::Stmt::Return(Some(two)));
+        let ret = f.stmt(ast::Stmt::Return(Some(two), AttrList::EMPTY));
         let own = f.block(&[ret]);
         let second = f.define(plain, "f", &[function()], own);
 
@@ -4279,7 +4282,7 @@ mod tests {
         let n = f.param(int, Some("n"), &[]);
         let takes = f.takes(&[n]);
         let use_n = f.use_name("n");
-        let ret = f.stmt(ast::Stmt::Return(Some(use_n)));
+        let ret = f.stmt(ast::Stmt::Return(Some(use_n), AttrList::EMPTY));
         let body = f.block(&[ret]);
         let specs = f.int_specs();
         let decl = f.define(specs, "f", &[takes], body);
@@ -4306,7 +4309,7 @@ mod tests {
         let anonymous = f.param(int, None, &[]);
         let takes = f.takes(&[a, anonymous]);
         let use_a = f.use_name("a");
-        let ret = f.stmt(ast::Stmt::Return(Some(use_a)));
+        let ret = f.stmt(ast::Stmt::Return(Some(use_a), AttrList::EMPTY));
         let body = f.block(&[ret]);
         let specs = f.int_specs();
         let decl = f.define(specs, "f", &[takes], body);
@@ -4427,7 +4430,7 @@ mod tests {
     #[test]
     fn the_body_answers_to_the_return_type_the_definition_was_written_with() {
         let mut f = Fixture::new();
-        let ret = f.stmt(ast::Stmt::Return(None));
+        let ret = f.stmt(ast::Stmt::Return(None, AttrList::EMPTY));
         let body = f.block(&[ret]);
         let specs = f.int_specs();
         let decl = f.define(specs, "f", &[function()], body);

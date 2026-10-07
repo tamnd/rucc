@@ -42,6 +42,7 @@ fn said(source: &str) -> (bool, String) {
 /// and casts, with constants folded and a `_Generic` choosing by the type itself. What it prints
 /// is what gcc 16's build of it prints. Run with `i` or `b` it puts a number that is neither
 /// representation in an object and reads it, and gcc stops it with a trap there.
+#[cfg(all(target_os = "linux", target_arch = "x86_64"))]
 const PROGRAM: &str = r#"
 int printf(const char *, ...);
 void *memcpy(void *, const void *, unsigned long);
@@ -115,6 +116,7 @@ int main(int argc, char **argv) {
 }
 "#;
 
+#[cfg(all(target_os = "linux", target_arch = "x86_64"))]
 const PRINTS: &str = "\
 -1 90 254
 -1 0 165 65025

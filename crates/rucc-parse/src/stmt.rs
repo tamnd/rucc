@@ -16,8 +16,8 @@
 //! because a typedef name is still a perfectly good label name.
 
 use rucc_ast::{
-    Asm, AsmId, AsmOperand, AsmOperandList, AsmQuals, AttrList, Expr, ExprId, ForInit, Stmt,
-    StmtId, StmtList, StrList, SymbolList,
+    Asm, AsmId, AsmOperand, AsmOperandList, AsmQuals, AttrList, AttrSyntax, Attribute, Expr,
+    ExprId, ForInit, Stmt, StmtId, StmtList, StrList, SymbolList,
 };
 use rucc_base::Symbol;
 use rucc_diag::Span;
@@ -113,14 +113,38 @@ impl Parser<'_> {
             let span = self.ast.decl_span(decl);
             return self.add_stmt(Stmt::Decl(decl), span);
         }
+        // A `return` keeps them, since gcc's `musttail` is written there.
+        if self.cursor.at_keyword(Keyword::Return) {
+            return self.return_stmt(attrs, start);
+        }
         if !attrs.is_empty() {
             // C23 allows attributes on any statement and this tree has nowhere to keep them
-            // except on a label, so they are dropped. Saying so is the difference between a
-            // construct that does nothing and a construct that silently does nothing.
+            // except on a label and a `return`, so they are dropped. Saying so is the difference
+            // between a construct that does nothing and a construct that silently does nothing.
             let span = self.span_from(start);
-            self.warn("E0411", "attributes on this statement are ignored", span);
+            self.ignored_on_statement(attrs, span);
         }
         self.statement()
+    }
+
+    /// What is said about attributes in front of a statement that has nowhere to keep them: gcc's
+    /// warning that a `musttail` with no `return` behind it is ignored, and that the rest are.
+    fn ignored_on_statement(&mut self, attrs: AttrList, span: Span) {
+        let musttail = self.cx.interner.find("musttail");
+        let spaces = ["gnu", "__gnu__", "clang"].map(|space| self.cx.interner.find(space));
+        let is_musttail = |attr: &Attribute| {
+            attr.namespace.is_none_or(|space| spaces.contains(&Some(space)))
+                && Some(attr.name) == musttail
+                && attr.syntax != AttrSyntax::Declspec
+        };
+        let ignored: Vec<Span> =
+            self.ast[attrs].iter().filter(|attr| is_musttail(attr)).map(|attr| attr.span).collect();
+        for span in &ignored {
+            self.warn("E0703", "'musttail' attribute ignored", *span);
+        }
+        if ignored.len() < self.ast[attrs].len() {
+            self.warn("E0411", "attributes on this statement are ignored", span);
+        }
     }
 
     /// The attributes written here, in either syntax, and an empty list when there are none.
@@ -138,7 +162,8 @@ impl Parser<'_> {
         let start = self.cursor.span();
         // Attributes and a `;` where a statement goes, as in `if (x) __attribute__((assume(y)));`,
         // which is the attribute declaration a block item would have been and which gcc takes as
-        // the body of the `if`. In front of anything else they are dropped, as in a block.
+        // the body of the `if`. A `return` keeps them, and in front of anything else they are
+        // dropped, as in a block.
         if self.at_attribute() {
             let attrs = self.attributes();
             if self.cursor.at_punct(Punct::Semi) {
@@ -146,8 +171,11 @@ impl Parser<'_> {
                 let span = self.ast.decl_span(decl);
                 return self.add_stmt(Stmt::Decl(decl), span);
             }
+            if self.cursor.at_keyword(Keyword::Return) {
+                return self.return_stmt(attrs, start);
+            }
             let span = self.span_from(start);
-            self.warn("E0411", "attributes on this statement are ignored", span);
+            self.ignored_on_statement(attrs, span);
         }
         if let Some(punct) = self.cursor.current().punct() {
             match punct {
@@ -181,7 +209,7 @@ impl Parser<'_> {
             Keyword::For => self.for_stmt(start),
             Keyword::Goto => self.goto_stmt(start),
             Keyword::Continue | Keyword::Break => self.jump_stmt(word, start),
-            Keyword::Return => self.return_stmt(start),
+            Keyword::Return => self.return_stmt(AttrList::EMPTY, start),
             Keyword::Case | Keyword::Default => self.labeled(AttrList::EMPTY, start),
             Keyword::Asm => self.asm_stmt(start),
             Keyword::Label => self.local_labels(start),
@@ -343,13 +371,13 @@ impl Parser<'_> {
         self.add_stmt(stmt, span)
     }
 
-    /// `return expr;`, or `return;`.
-    fn return_stmt(&mut self, start: Span) -> StmtId {
+    /// `return expr;`, or `return;`, with the attributes in front of it.
+    fn return_stmt(&mut self, attrs: AttrList, start: Span) -> StmtId {
         self.cursor.bump();
         let value = if self.cursor.at_punct(Punct::Semi) { None } else { Some(self.expr()) };
         self.expect_punct(Punct::Semi);
         let span = self.span_from(start);
-        self.add_stmt(Stmt::Return(value), span)
+        self.add_stmt(Stmt::Return(value, attrs), span)
     }
 
     /// `__label__ a, b;`, GNU's block-local labels.

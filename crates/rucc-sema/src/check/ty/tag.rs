@@ -313,6 +313,7 @@ impl Checker<'_> {
             self.string_arg(&[field.attrs, specs], decl.ty);
             self.nonnull_if_nonzero(&[field.attrs, specs], decl.ty);
             self.assume_misplaced(&[field.attrs, specs], false, at);
+            self.musttail_misplaced(&[field.attrs, specs]);
             fields.push((decl, at));
         }
         self.check_flexible(kind, &mut fields);

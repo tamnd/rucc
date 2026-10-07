@@ -88,8 +88,9 @@ pub enum Stmt {
     Continue,
     /// `break;`.
     Break,
-    /// `return expr;`, or `return;`.
-    Return(Option<ExprId>),
+    /// `return expr;`, or `return;`, with the attributes written in front of it, which is where
+    /// gcc 15's `musttail` goes.
+    Return(Option<ExprId>, AttrList),
     /// `name: body`.
     Label {
         /// The label, which lives in a namespace of its own and is scoped to the function.

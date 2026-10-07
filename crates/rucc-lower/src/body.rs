@@ -4316,7 +4316,8 @@ impl<'u> Body<'_, 'u> {
                 let size = repr::size_of(self.types(), self.target(), ty);
                 let align = repr::align_of(self.types(), self.target(), ty);
                 let at = self.scratch(size, align, span);
-                self.call_into(callee, args, Some(at), span);
+                let must = self.tast().is_must_tail(expr);
+                self.call_into(callee, args, Some(at), must, span);
                 Place::new(Where::Addr(at), ty)
             }
             ExprKind::CompoundLiteral(decl) => self.literal(decl, ty),
@@ -6175,7 +6176,9 @@ impl<'u> Body<'_, 'u> {
                 let place = self.place(expr);
                 self.read(place, span)
             }
-            ExprKind::Call { callee, args } => self.call(callee, args, span),
+            ExprKind::Call { callee, args } => {
+                self.call(callee, args, tast.is_must_tail(expr), span)
+            }
             ExprKind::Unary { op, operand } => self.unary(op, operand, ty, span),
             ExprKind::Binary { op, lhs, rhs } => self.binary(op, lhs, rhs, ty, span),
             ExprKind::Assign { op, computation, lhs, rhs } => {
@@ -9357,9 +9360,10 @@ impl<'u> Body<'_, 'u> {
         None
     }
 
-    /// A call, whose value is a value when the return type has one.
-    fn call(&mut self, callee: ExprId, args: ExprList, span: Span) -> Option<Value> {
-        self.call_into(callee, args, None, span)
+    /// A call, whose value is a value when the return type has one, and `must` where a
+    /// `musttail` return gives it back.
+    fn call(&mut self, callee: ExprId, args: ExprList, must: bool, span: Span) -> Option<Value> {
+        self.call_into(callee, args, None, must, span)
     }
 
     /// Turns down a call an exception could unwind out of while a scope owes a handler, on a
@@ -9587,11 +9591,15 @@ impl<'u> Body<'_, 'u> {
     /// the call does not: it is the temporary behind `f().x`, or the object of `p = f()`. A call
     /// whose value nobody wants still passes somewhere to put it when the ABI says the callee
     /// writes it, because the callee writes it either way.
+    ///
+    /// `must` is a call a `musttail` return gives back, which carries [`Flags::MUST_TAIL`] for the
+    /// code generator to make as a jump or refuse.
     fn call_into(
         &mut self,
         callee: ExprId,
         args: ExprList,
         into: Option<Value>,
+        must: bool,
         span: Span,
     ) -> Option<Value> {
         let pack = match self.builtin_named(callee) {
@@ -9798,6 +9806,9 @@ impl<'u> Body<'_, 'u> {
         };
         if self.unit.returns_by_jump(ty) {
             self.func[inst].flags = self.func[inst].flags.union(Flags::INDIRECT_RETURN);
+        }
+        if must {
+            self.func[inst].flags = self.func[inst].flags.union(Flags::MUST_TAIL);
         }
         self.landing_pad(span);
         // A call that does not come back is where the block stops, and it says so the same way

@@ -1210,15 +1210,39 @@ fn generate(
         }
         // A call in tail position becomes `return_call` only on a target with the tail-call
         // feature. Without it, wasm has no way to give the frame back before the call, so the
-        // calls are left as they are. After `prepare`, which only knows the plain calls.
+        // calls are left as they are, and one `musttail` asked for is an error. After `prepare`,
+        // which only knows the plain calls.
         let sibling = opts.sibling_calls.unwrap_or_else(|| opts.opt_level.sibling_calls());
-        if sibling && opts.wasm.has(rucc_target::wasm::Feature::TailCall) {
-            let elsewhere = Elsewhere::of(module, IrPic::Absolute, target.object_format, false);
-            for id in module.funcs() {
-                if !module[id].is_declaration() {
-                    rucc_codegen::tail::mark(&mut module[id], names, &elsewhere, false, true);
-                }
+        let able = opts.wasm.has(rucc_target::wasm::Feature::TailCall);
+        let elsewhere = Elsewhere::of(module, IrPic::Absolute, target.object_format, false);
+        let mut refusals = Vec::new();
+        for id in module.funcs() {
+            if module[id].is_declaration() {
+                continue;
             }
+            let asked = rucc_codegen::tail::asked(&module[id]);
+            let marked = match asked {
+                Some(inst) if !able => Err(rucc_codegen::lower::Unsupported::MustTail {
+                    inst,
+                    reason: rucc_codegen::tail::UNABLE,
+                }),
+                _ if able && (sibling || asked.is_some()) => rucc_codegen::tail::mark(
+                    &mut module[id],
+                    names,
+                    &elsewhere,
+                    false,
+                    true,
+                    sibling,
+                ),
+                _ => Ok(0),
+            };
+            if let Err(why) = marked {
+                let span = why.inst().map_or(Span::DUMMY, |inst| module[id].span(inst));
+                refusals.push(Diagnostic::error(why.to_string(), span).with_code("E0847"));
+            }
+        }
+        if !refusals.is_empty() {
+            return Err(refusals);
         }
         // wasm32-wasip3 keeps the stack pointer and the TLS base in the context slots of the
         // component model, as `__wasm_libcall_thread_context__` says.
@@ -1533,6 +1557,11 @@ fn generate(
                 complaints.push(match why {
                     rucc_codegen::lower::Unsupported::Registers { .. } => {
                         Diagnostic::error(said, span)
+                    }
+                    // A `musttail` call that cannot be made is the program's error, said in gcc's
+                    // words at the call.
+                    rucc_codegen::lower::Unsupported::MustTail { .. } => {
+                        Diagnostic::error(why.to_string(), span).with_code("E0847")
                     }
                     _ => unsupported_at(&said, span),
                 });
