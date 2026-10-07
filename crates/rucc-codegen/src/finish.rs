@@ -2419,8 +2419,8 @@ mod tests {
 
         // The whole listing, because what the walk is cannot be read off the instructions alone.
         // The one subtraction the lowering wrote is gone and four blocks stand where its block was:
-        // where the stack pointer is going, the step, the page the step landed on, and the rest of
-        // what the block was doing with the stack pointer put back where it was going.
+        // a page above where the stack pointer is going, the question, the step and its touch, and
+        // the rest of what the block was doing with the stack pointer put where it was going.
         assert_eq!(
             lines,
             [
@@ -2428,16 +2428,16 @@ mod tests {
                 "block0:",
                 "x64.push_64 $rbp",
                 "$rbp = x64.mov_rr_64 $rsp",
-                "$r10 = x64.mov_rr_64 $rsp",
+                "$r10 = x64.lea_64 [$rsp + 4096]",
                 "$r10 = x64.sub_rr_64 $r10, $rax, block1",
                 "block1:",
-                "$rsp = x64.sub_ri_64 $rsp, 4096",
-                "$r11 = x64.cmp_set_a_64 $rsp, $r10",
+                "$r11 = x64.cmp_set_ae_64 $rsp, $r10",
                 "x64.br_cond_8 $r11, block2, block3",
                 "block2:",
+                "$rsp = x64.sub_ri_64 $rsp, 4096",
                 "x64.or_mi_8 [$rsp], 0, block1",
                 "block3:",
-                "$rsp = x64.mov_rr_64 $r10",
+                "$rsp = x64.lea_64 [$r10 - 4096]",
                 "x64.nop",
                 "$rsp = x64.mov_rr_64 $rbp",
                 "$rbp = x64.pop_64",
@@ -2460,9 +2460,9 @@ mod tests {
         // reload the rewriter wrote would have put it, so the limit goes in the other one and the
         // comparison writes the first one back only once the count has been read for the last time.
         let added = added(&lines);
-        assert!(added.contains(&"$r11 = x64.mov_rr_64 $rsp"), "{added:?}");
+        assert!(added.contains(&"$r11 = x64.lea_64 [$rsp + 4096]"), "{added:?}");
         assert!(added.contains(&"$r11 = x64.sub_rr_64 $r11, $r10, block1"), "{added:?}");
-        assert!(added.contains(&"$r10 = x64.cmp_set_a_64 $rsp, $r11"), "{added:?}");
+        assert!(added.contains(&"$r10 = x64.cmp_set_ae_64 $rsp, $r11"), "{added:?}");
     }
 
     #[test]
