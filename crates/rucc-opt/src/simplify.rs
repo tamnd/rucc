@@ -733,15 +733,17 @@ fn identity(
     // The head of the instruction is the same under every plan, since a plan only says how the
     // operands are shown, so it is worked out once. Most instructions open none of the tables or
     // only one, and asking each table's root first saves every walk under every plan of the rest.
+    // What the root said is kept for the walks, which start under it.
     let root = Terms::new(func, inst, PLAIN, address);
     let head = root.head(Term::Root);
-    for (table, plan) in TABLES
+    for (table, opening, plan) in TABLES
         .into_iter()
-        .filter(|(table, _)| table.opens(head))
-        .flat_map(|(table, plans)| plans.iter().map(move |&plan| (table, plan)))
+        .filter_map(|(table, plans)| Some((table, table.opening(head)?, plans)))
+        .flat_map(|(table, opening, plans)| plans.iter().map(move |&plan| (table, opening, plan)))
     {
         let terms = Terms::new(func, inst, plan, address);
-        let Some(rule) = table.find_in(&terms, Term::Root, left, &mut found.bindings) else {
+        let Some(rule) = table.find_opened(&terms, Term::Root, opening, left, &mut found.bindings)
+        else {
             continue;
         };
         found.rule = rule;

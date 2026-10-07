@@ -78,6 +78,7 @@
 use std::fmt;
 
 use rucc_base::hash::{Map, Set};
+use rucc_base::rules::Subject;
 use rucc_base::{Interner, Symbol};
 use rucc_cost::heuristics;
 use rucc_diag::Span;
@@ -8587,10 +8588,15 @@ impl<'a> Lowering<'a> {
         refused: &Set<Value>,
         left: &mut Vec<Term>,
     ) -> Option<(Plan, Match<Term>)> {
+        // The root of the trie is asked about the head once, since a plan only says how the
+        // operands are shown and the head is the same under every one.
+        let table = self.selector.table;
+        let root = Terms::new(self.source, inst, PLAIN, self.address_bits());
+        let opening = table.opening(root.head(Term::Root))?;
         let mut bindings = Vec::with_capacity(8);
         for plan in self.plans(inst, refused) {
             let terms = Terms::new(self.source, inst, plan, self.address_bits());
-            if let Some(rule) = self.selector.table.find_in(&terms, Term::Root, left, &mut bindings)
+            if let Some(rule) = table.find_opened(&terms, Term::Root, opening, left, &mut bindings)
             {
                 return Some((plan, Match { rule, bindings }));
             }
