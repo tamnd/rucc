@@ -12,14 +12,45 @@
 //! The jump gives the frame back before the callee runs, so a pointer into it that the call is
 //! handed points at nothing by then. gcc 15 warns about one passed as an argument, which is
 //! `-Wmusttail-local-addr` and on by default, and so does this.
+//!
+//! A call that is not handed one may still reach the frame through an address the function gave
+//! away earlier, and gcc 15 warns about that under `-Wmaybe-musttail-local-addr`, which `-Wextra`
+//! turns on, once for each call the first warning said nothing about. It names one object: of
+//! the variables whose address was taken and which are still in scope at the call, the one
+//! declared last, and where there is none, the first parameter whose address was taken anywhere
+//! in the function. That is gcc's reading without optimization, where any object whose address
+//! was taken may be what a call reaches, and its words: `address of automatic variable 'a' can
+//! escape to 'musttail' call`, or of `parameter 'x'`. An address is taken by `&` and by an array
+//! decaying to a pointer, but not by an array being indexed, and a variable counts once that has
+//! been written, which is where gcc's reading of what is live at the call comes from. So the
+//! parameters are only named once the whole function has been read, and these warnings are
+//! said then, in the order of the calls.
+//!
+//! gcc reads the frame once its optimizers have, and with them it names only the objects whose
+//! address could have left the function, where this names any whose address was taken. A
+//! compound literal, which gcc names as a local variable, is not named here. Nor is the second
+//! warning given for a call the first one was given for under `-Wno-musttail-local-addr`, as gcc
+//! gives it there.
 
 use rucc_ast::{AttrList, Attribute, UnaryOp};
 use rucc_diag::{Diagnostic, Span};
 use rucc_types::is_pointer;
 
 use crate::check::Checker;
+use crate::check::stmt::Body;
 use crate::decl::{DeclId, DeclKind, StorageDuration};
 use crate::expr::{Conversion, ExprId, ExprKind};
+use crate::scope::Binding;
+
+/// A `musttail` call `-Wmusttail-local-addr` said nothing about, waiting for the end of its
+/// function to be warned about under `-Wmaybe-musttail-local-addr` or not.
+#[derive(Debug)]
+pub(in crate::check) struct Tail {
+    /// Where the call is.
+    at: Span,
+    /// The variable in scope at the call whose address was taken that gcc names, if any.
+    local: Option<DeclId>,
+}
 
 impl Checker<'_> {
     /// Whether the attributes in front of a `return` ask for a tail call, with what gcc says about
@@ -94,9 +125,118 @@ impl Checker<'_> {
         let span = self.tast.expr_span(call);
         let passed: Vec<String> =
             self.tast[args].iter().filter_map(|&arg| self.frame_address(arg)).collect();
+        if passed.is_empty() {
+            let local = self.escaped_local();
+            if let Some(body) = &mut self.body {
+                body.tails.push(Tail { at: span, local });
+            }
+        }
         for what in passed {
             let what = format!("address of {what} passed to 'musttail' call argument");
             self.report(Diagnostic::warning(what, span).with_code("E0850"));
+        }
+    }
+
+    /// Of the variables whose address the function has taken so far and that are in scope here,
+    /// the one gcc names, which is the one declared last.
+    fn escaped_local(&self) -> Option<DeclId> {
+        let body = self.body.as_ref()?;
+        let decayed = body.decayed.iter().map(|&(_, decl)| decl);
+        body.addressed
+            .iter()
+            .copied()
+            .chain(decayed)
+            .filter(|&decl| !self.is_parameter(decl))
+            .filter(|&decl| {
+                self.tast[decl].name.is_some_and(|name| {
+                    self.scopes.lookup_where(name, |found| found == Binding::Decl(decl)).is_some()
+                })
+            })
+            .max()
+    }
+
+    /// gcc's `-Wmaybe-musttail-local-addr`, for each `musttail` call of a function that has been
+    /// read to its end.
+    pub(in crate::check) fn maybe_musttail_local_addr(&mut self, body: &Body) {
+        let params = &self.tast[body.params];
+        let addressed = |decl: &DeclId| {
+            body.addressed.contains(decl) || body.decayed.iter().any(|(_, held)| held == decl)
+        };
+        let param = params.iter().copied().find(addressed);
+        let mut said = Vec::new();
+        for tail in &body.tails {
+            let what = match (tail.local, param) {
+                (Some(local), _) => format!("automatic variable '{}'", self.decl_name(local)),
+                (None, Some(param)) => format!("parameter '{}'", self.decl_name(param)),
+                (None, None) => continue,
+            };
+            let what = format!("address of {what} can escape to 'musttail' call");
+            said.push(Diagnostic::warning(what, tail.at).with_code("E0857"));
+        }
+        for diag in said {
+            self.report(diag);
+        }
+    }
+
+    /// The name an object of the frame was declared with.
+    fn decl_name(&self, decl: DeclId) -> String {
+        self.tast[decl].name.map_or_else(String::new, |name| self.text(name).to_owned())
+    }
+
+    /// Notes that the address of what an lvalue is part of was taken, where that is an object
+    /// of this function's frame.
+    pub(in crate::check) fn note_addressed(&mut self, lvalue: ExprId) {
+        let Some(decl) = self.frame_root(lvalue) else { return };
+        let Some(body) = &mut self.body else { return };
+        if !body.addressed.contains(&decl) {
+            body.addressed.push(decl);
+        }
+    }
+
+    /// Notes a value that is an array of this function's frame decayed to a pointer, which takes
+    /// its address unless it turns out to be the base of a subscript.
+    pub(in crate::check) fn note_decayed(&mut self, value: ExprId) {
+        let ExprKind::Convert { kind: Conversion::ArrayDecay, operand } = self.tast[value].kind
+        else {
+            return;
+        };
+        let Some(decl) = self.frame_root(operand) else { return };
+        if let Some(body) = &mut self.body {
+            body.decayed.push((value, decl));
+        }
+    }
+
+    /// Takes back what [`Self::note_decayed`] noted of the base of a subscript.
+    pub(in crate::check) fn note_subscripted(&mut self, base: ExprId) {
+        if let Some(body) = &mut self.body {
+            body.decayed.retain(|&(decay, _)| decay != base);
+        }
+    }
+
+    /// The named object of this function's frame an lvalue is part of, through members and
+    /// elements.
+    fn frame_root(&self, lvalue: ExprId) -> Option<DeclId> {
+        let mut at = lvalue;
+        loop {
+            match self.tast[at].kind {
+                ExprKind::Member { base, .. } => at = base,
+                ExprKind::Subscript { base, .. } => {
+                    let ExprKind::Convert { kind: Conversion::ArrayDecay, operand } =
+                        self.tast[base].kind
+                    else {
+                        return None;
+                    };
+                    at = operand;
+                }
+                ExprKind::Decl(decl) => {
+                    let object = &self.tast[decl];
+                    let automatic = object.kind == DeclKind::Object
+                        && object.duration == StorageDuration::Automatic
+                        && object.name.is_some();
+                    return automatic.then_some(decl);
+                }
+                _ => return None,
+            }
         }
     }
 

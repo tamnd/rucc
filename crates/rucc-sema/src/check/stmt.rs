@@ -48,6 +48,7 @@ use rucc_types::{IntegerInfo, Qualifiers, TypeId, is_integer, is_pointer, is_rec
 
 use crate::asm::{Asm, AsmOperand, AsmOperandList, FileAsm, LabelList, in_a_register};
 use crate::check::expr::Target;
+use crate::check::musttail::Tail;
 use crate::check::switch::Switched;
 use crate::check::{Checker, Promoted};
 use crate::decl::{DeclId, DeclList};
@@ -78,7 +79,7 @@ pub(in crate::check) struct Body {
     /// Every parameter, which is what tells an assignment to one of them from an assignment to
     /// a local: gcc says `read-only parameter` for the first and `read-only variable` for the
     /// second, and there is nothing on a declaration itself that says which it is.
-    params: DeclList,
+    pub(in crate::check) params: DeclList,
     /// The name the definition was written with, which is what `__func__` answers.
     name: Option<Symbol>,
     /// Whether a definition of this function is emitted, which is [`Enclosing::emitted`].
@@ -120,6 +121,15 @@ pub(in crate::check) struct Body {
     /// Every value a statement threw away, kept until the whole function has been walked for the
     /// reason given in `check/advice.rs`.
     pub(in crate::check) discarded: Vec<ExprId>,
+    /// The objects of this function's frame whose address it has taken so far, each once, for
+    /// `check/musttail.rs`.
+    pub(in crate::check) addressed: Vec<DeclId>,
+    /// The arrays of its frame that have decayed so far, by the decay, which are taken off again
+    /// when the decay turns out to be the base of a subscript, since `b[1]` takes no address.
+    pub(in crate::check) decayed: Vec<(ExprId, DeclId)>,
+    /// Its `musttail` calls that `-Wmusttail-local-addr` said nothing about, kept until it has
+    /// been walked for the reason given in `check/musttail.rs`.
+    pub(in crate::check) tails: Vec<Tail>,
 }
 
 /// One declaration of a variably modified type, which is one a jump may not enter the scope of.
@@ -387,6 +397,9 @@ impl Checker<'_> {
             landings: Map::default(),
             jumps: Vec::new(),
             discarded: Vec::new(),
+            addressed: Vec::new(),
+            decayed: Vec::new(),
+            tails: Vec::new(),
         };
         self.body.replace(body)
     }
@@ -467,6 +480,7 @@ impl Checker<'_> {
             return;
         };
         self.heed_discarded(mem::take(&mut body.discarded));
+        self.maybe_musttail_local_addr(&body);
         // Sorted, because a map has no order and a compiler whose diagnostics come out in a
         // different order on two runs of the same input is one nobody can write a test against.
         let mut undefined: Vec<Labelled> =
