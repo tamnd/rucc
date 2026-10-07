@@ -4,6 +4,10 @@ All notable changes are recorded here. The format follows [Keep a Changelog](htt
 
 ## Unreleased
 
+## 0.29.0
+
+This release ends S5 (#431), the full plane set of the safe memory work. The type plane, the init plane and the epoch plane are in the runtime and in the compiler, with `restrict` checking, `-fsafety-subobject`, the torn store, the lock, thread, condition variable, atomics and fence edges, and rule verification over the whole `safety/` namespace. The OSS-Fuzz replay of six projects is in `docs/REPLAY.md`, with what it found fixed in our forks of SQLite, zstd and libjpeg-turbo, and `cargo xtask juliet` runs all 8,654 Juliet C cases at every tier with the numbers in `docs/JULIET.md`: 6,050 detected, 2,203 missed in seven shapes that each have an issue, and no false positive. Since 0.28.0 the monitor also refuses a null dereference, an overflow inside the allocator's rounding or from one local into the next, a call through the wrong function type, a pointer to a local used after its function or its block, a read of a local nothing wrote, and a bad `printf` family call, and it interposes the mappings. The release also has the gcc 14 and 15 attributes `hardbool`, `nonnull_if_nonzero` and `musttail`, AArch64 assembler and code generation work for the arm64 kernel, and a round of compile time work in the optimizer. No release archive was published for 0.24.9 to 0.28.0, because the release gate failed on each of those tags, so this is the first one since 0.24.8.
+
 ### Added
 
 - `cargo xtask juliet` builds every Juliet 1.3 C case at every tier, runs both halves and lists by test id what it missed, and `docs/JULIET.md` keeps the numbers from the last full run, 6,050 detected, 2,203 missed and no false positive, with the seven shapes the misses fall into (#3329)
