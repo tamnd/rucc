@@ -9,8 +9,7 @@ const X86_64: &str = "x86_64-unknown-linux-gnu";
 
 /// A directory of this test's own, empty.
 fn dir(what: &str) -> PathBuf {
-    let dir =
-        std::env::temp_dir().join(format!("rucc-switch-warn-{}-{what}", std::process::id()));
+    let dir = std::env::temp_dir().join(format!("rucc-switch-warn-{}-{what}", std::process::id()));
     let _ = std::fs::remove_dir_all(&dir);
     std::fs::create_dir_all(&dir).expect("a temporary directory can be created");
     dir.canonicalize().expect("the directory is there")

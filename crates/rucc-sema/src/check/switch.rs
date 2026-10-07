@@ -230,9 +230,10 @@ impl Checker<'_> {
         if self.types.enum_info(id).tag.is_some() {
             return format!(" {}", self.gcc_quoted(written));
         }
-        let named = self.types.aliases().iter().find(|alias| {
-            self.types.kind(self.types.canonical(alias.of)) == TypeKind::Enum(id)
-        });
+        let named =
+            self.types.aliases().iter().find(|alias| {
+                self.types.kind(self.types.canonical(alias.of)) == TypeKind::Enum(id)
+            });
         named.map_or_else(String::new, |alias| format!(" '{}'", self.text(alias.name)))
     }
 }
