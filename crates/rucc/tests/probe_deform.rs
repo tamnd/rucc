@@ -14,6 +14,23 @@ fn probe() {
     let out = Command::new(env!("CARGO_BIN_EXE_rucc")).args(flags).arg(&rucc).output().unwrap();
     assert!(out.status.success(), "{}", String::from_utf8_lossy(&out.stderr));
     let _ = Command::new("gcc").args(flags).arg(&gcc).output();
+    let ir = dir.join("a.ir");
+    let out = Command::new(env!("CARGO_BIN_EXE_rucc"))
+        .args(["-O2", "-fwrapv", "-fno-strict-aliasing", "--emit=ir", src, "-o"])
+        .arg(&ir)
+        .output()
+        .unwrap();
+    let ir = std::fs::read_to_string(ir)
+        .unwrap_or_else(|_| String::from_utf8_lossy(&out.stderr).into_owned());
+    let mir = dir.join("a.mir");
+    let out = Command::new(env!("CARGO_BIN_EXE_rucc"))
+        .args(["-O2", "-fwrapv", "-fno-strict-aliasing", "--emit=mir-final", src, "-o"])
+        .arg(&mir)
+        .output()
+        .unwrap();
+    let mir = std::fs::read_to_string(mir)
+        .unwrap_or_else(|_| String::from_utf8_lossy(&out.stderr).into_owned());
+    eprintln!("PROBE-IR-BEGIN\n{ir}\nPROBE-IR-END\nPROBE-MIR-BEGIN\n{mir}\nPROBE-MIR-END");
     let rucc = std::fs::read_to_string(rucc).unwrap();
     let gcc = std::fs::read_to_string(gcc).unwrap_or_default();
     panic!("PROBE-RUCC-BEGIN\n{rucc}\nPROBE-RUCC-END\nPROBE-GCC-BEGIN\n{gcc}\nPROBE-GCC-END");
