@@ -787,6 +787,11 @@ const INTERPOSE_ROWS: &[&str] = &[
 /// Where the compiler's copy of the same names is written.
 const INTERPOSE_NAMES: &str = "crates/rucc-safety/src/wrap.rs";
 
+/// The rows the compiler calls in front of a call to the printf family rather than redirecting a
+/// call to, and where the compiler's copy of their names is written.
+const JUDGE_ROWS: &str = "runtime/rucc-safe-rt/src/format.rs";
+const JUDGE_NAMES: &str = "crates/rucc-safety/src/format.rs";
+
 /// Checks that the interposition table and the compiler's copy of its names say the same thing.
 ///
 /// There are two lists because there have to be. The table lives in `rucc-safe-rt`, which is
@@ -802,78 +807,103 @@ const INTERPOSE_NAMES: &str = "crates/rucc-safety/src/wrap.rs";
 /// The order has to match as well as the contents, which is stricter than anything depends on and
 /// is worth it: two lists in different orders are two lists a person has to sort before they can
 /// compare them, and the next hundred rows are going in by hand.
+///
+/// The printf family's rows are held to their own list the same way. Nothing is redirected to
+/// them, so they are not in the first, and a row there that the compiler never calls is the same
+/// quiet hole.
 fn interpose() -> Result<()> {
-    let root = root();
-    let names = fs::read_to_string(root.join(INTERPOSE_NAMES))?;
-
-    let mut written: Vec<String> = Vec::new();
-    for group in INTERPOSE_ROWS {
-        let rows = fs::read_to_string(root.join(group))?;
-        let Some((_, table)) = rows.split_once("interpose! {") else {
-            return Err(Error::Failed {
-                task: "interpose",
-                problems: vec![format!("{group} has no interpose! table to read")],
-            });
-        };
-        // The rows stop where the invocation does, which is the first closing brace in column one.
-        // Everything after it is the test module, whose functions are indented the same way a row
-        // is.
-        let table = table.split_once("\n}\n").map_or(table, |(inside, _)| inside);
-        written.extend(
-            table
-                .lines()
-                .filter_map(|line| line.strip_prefix("    fn "))
-                .filter_map(|rest| rest.split_once('('))
-                .map(|(name, _)| name.to_owned()),
-        );
-    }
-    let rows = INTERPOSE_ROWS.join(" and ");
-
-    let Some((_, list)) = names.split_once("INTERPOSED: &[&str] = &[") else {
-        return Err(Error::Failed {
-            task: "interpose",
-            problems: vec![format!("{INTERPOSE_NAMES} has no INTERPOSED list to read")],
-        });
-    };
-    let Some((list, _)) = list.split_once("];") else {
-        return Err(Error::Failed {
-            task: "interpose",
-            problems: vec![format!("{INTERPOSE_NAMES} has an INTERPOSED list that never ends")],
-        });
-    };
-    let known: Vec<String> = quoted(list);
-
     let mut problems = Vec::new();
-    for name in &written {
-        if !known.contains(name) {
-            problems.push(format!(
-                "{rows} has a row for `{name}` and {INTERPOSE_NAMES} does not name it, so the \
-                 wrapper is generated and nothing is redirected to it. That is a hole in the \
-                 monitor that looks exactly like a program with no bugs in it."
-            ));
-        }
+    let mut written = Vec::new();
+    for group in INTERPOSE_ROWS {
+        written.extend(rows_of(group)?);
     }
-    for name in &known {
-        if !written.contains(name) {
-            problems.push(format!(
-                "{INTERPOSE_NAMES} names `{name}` and {rows} has no row for it, so every call to \
-                 it is redirected to a symbol that does not exist."
-            ));
-        }
-    }
-    if problems.is_empty() && written != known {
-        problems.push(format!(
-            "{rows} and {INTERPOSE_NAMES} hold the same names in different orders. Two lists a \
-             person has to sort before they can compare them is how the next hundred rows go \
-             wrong."
-        ));
-    }
+    let known = names_in(INTERPOSE_NAMES, "INTERPOSED")?;
+    agree(&INTERPOSE_ROWS.join(" and "), &written, INTERPOSE_NAMES, &known, &mut problems);
+    let judged = rows_of(JUDGE_ROWS)?;
+    let judges = names_in(JUDGE_NAMES, "JUDGES")?;
+    agree(JUDGE_ROWS, &judged, JUDGE_NAMES, &judges, &mut problems);
 
     if problems.is_empty() {
-        println!("interpose: {} rows, the compiler and the runtime agree", written.len());
+        println!(
+            "interpose: {} rows and {} judgements, the compiler and the runtime agree",
+            written.len(),
+            judged.len()
+        );
         Ok(())
     } else {
         Err(Error::Failed { task: "interpose", problems })
+    }
+}
+
+/// The name of every row in one file of the interposition table, in order.
+fn rows_of(group: &str) -> Result<Vec<String>> {
+    let rows = fs::read_to_string(root().join(group))?;
+    let Some((_, table)) = rows.split_once("interpose! {") else {
+        return Err(Error::Failed {
+            task: "interpose",
+            problems: vec![format!("{group} has no interpose! table to read")],
+        });
+    };
+    // The rows stop where the invocation does, which is the first closing brace in column one.
+    // Everything after it is the test module, whose functions are indented the same way a row is.
+    let table = table.split_once("\n}\n").map_or(table, |(inside, _)| inside);
+    Ok(table
+        .lines()
+        .filter_map(|line| line.strip_prefix("    fn "))
+        .filter_map(|rest| rest.split_once('('))
+        .map(|(name, _)| name.to_owned())
+        .collect())
+}
+
+/// The names in the list called `list` in `file`, in order.
+fn names_in(file: &str, list: &str) -> Result<Vec<String>> {
+    let names = fs::read_to_string(root().join(file))?;
+    let Some((_, rest)) = names.split_once(&format!("{list}: &[&str] = &[")) else {
+        return Err(Error::Failed {
+            task: "interpose",
+            problems: vec![format!("{file} has no {list} list to read")],
+        });
+    };
+    let Some((rest, _)) = rest.split_once("];") else {
+        return Err(Error::Failed {
+            task: "interpose",
+            problems: vec![format!("{file} has a {list} list that never ends")],
+        });
+    };
+    Ok(quoted(rest))
+}
+
+/// What is wrong between the rows `rows` holds and the names `names` holds, if anything.
+fn agree(
+    rows: &str,
+    written: &[String],
+    names: &str,
+    known: &[String],
+    problems: &mut Vec<String>,
+) {
+    let before = problems.len();
+    for name in written {
+        if !known.contains(name) {
+            problems.push(format!(
+                "{rows} has a row for `{name}` and {names} does not name it, so the wrapper is \
+                 generated and nothing calls it. That is a hole in the monitor that looks exactly \
+                 like a program with no bugs in it."
+            ));
+        }
+    }
+    for name in known {
+        if !written.contains(name) {
+            problems.push(format!(
+                "{names} names `{name}` and {rows} has no row for it, so every call to it goes \
+                 to a symbol that does not exist."
+            ));
+        }
+    }
+    if problems.len() == before && written != known {
+        problems.push(format!(
+            "{rows} and {names} hold the same names in different orders. Two lists a person has \
+             to sort before they can compare them is how the next hundred rows go wrong."
+        ));
     }
 }
 

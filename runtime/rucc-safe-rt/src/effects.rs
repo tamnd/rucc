@@ -524,6 +524,12 @@ pub unsafe fn scan_within(
     limit: usize,
     cap: Cap,
 ) -> usize {
+    // A null string has nowhere to start. The C library's own `strlen` faults on one, which it
+    // would have done here too, and a `%s` given one prints `(null)` in glibc, so the walk leaves
+    // it to whatever the call is about to do with it.
+    if addr.is_null() {
+        return 0;
+    }
     let start = addr as usize;
     let watch = Watch::on(start, cap);
     let mut len = 0;
