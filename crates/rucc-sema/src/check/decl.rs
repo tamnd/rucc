@@ -2224,8 +2224,26 @@ impl Checker<'_> {
         if self.is_poisoned(cond) {
             return;
         }
-        let value = match self.eval_integer(cond) {
-            Ok(value) => value,
+        // gcc folds the condition first in a body when it optimizes, and not at file scope.
+        let folded = if self.scopes.at_file_scope() {
+            self.eval_integer(cond).map(|value| (value, false))
+        } else {
+            self.eval_folded_integer(cond)
+        };
+        let value = match folded {
+            Ok((value, read_object)) => {
+                if read_object && self.cx.pedantic {
+                    self.report(
+                        Diagnostic::warning(
+                            "expression in static assertion is not an integer constant \
+                             expression",
+                            self.tast.expr_span(cond),
+                        )
+                        .with_code("E0849"),
+                    );
+                }
+                value
+            }
             Err(failed) => {
                 if !failed.poisoned {
                     self.report(

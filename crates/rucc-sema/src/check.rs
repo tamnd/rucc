@@ -514,6 +514,23 @@ impl<'a> Checker<'a> {
         value
     }
 
+    /// The same, for a case label or a static assertion in a body, with whether a `const` object
+    /// was read to get it, which gcc does there once it optimizes. See [`Eval::optimized`].
+    ///
+    /// # Errors
+    ///
+    /// [`NotConstant`] when the expression is not one, the same way [`Self::eval_integer`] is.
+    pub(crate) fn eval_folded_integer(
+        &mut self,
+        expr: ExprId,
+    ) -> Result<(i128, bool), NotConstant> {
+        let mut eval = self.eval().optimized(self.cx.optimizing);
+        let value = eval.integer(expr);
+        let read_object = eval.read_object();
+        self.absorb(eval.finish());
+        value.map(|value| (value, read_object))
+    }
+
     /// The tree, the types and the diagnostics.
     #[must_use]
     pub fn finish(self) -> Checked {
