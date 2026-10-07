@@ -185,3 +185,72 @@ fn a_musttail_is_checked_in_gcc_s_words() {
     assert!(ok, "{err}");
     assert!(!err.contains("tail-call"), "{err}");
 }
+
+/// gcc 15's `-Wmusttail-local-addr`: an argument that points into the frame the jump gives back,
+/// once for each, in its words, with the call made all the same. An address the call cannot be
+/// handed without running something first, and one of anything outside the frame, say nothing.
+#[test]
+fn a_pointer_into_the_frame_is_warned_about_in_gcc_s_words() {
+    let lead = "int g(void *); int g2(void *, void *); struct s { int m[2]; };\n";
+    let warned = [
+        ("int f(int a) { int b = a; [[gnu::musttail]] return g(&b); }", "automatic variable 'b'"),
+        ("int f(int a) { [[gnu::musttail]] return g(&a); }", "parameter 'a'"),
+        (
+            "int f(void) { struct s s; [[gnu::musttail]] return g(&s.m[1]); }",
+            "automatic variable 's'",
+        ),
+        (
+            "int f(void) { int b[2]; [[gnu::musttail]] return g((char *)b); }",
+            "automatic variable 'b'",
+        ),
+        ("int f(void) { [[gnu::musttail]] return g((int[]){1, 2}); }", "local variable"),
+        ("int f(void) { goto l; l:; [[gnu::musttail]] return g(&&l); }", "label"),
+    ];
+    for level in ["-O0", "-O2"] {
+        for (def, what) in warned {
+            let source = format!("{lead}{def}\n");
+            let (ok, text, err) = compile("frame", X86_64, &[level], &source);
+            assert!(ok, "{level} {def}\n{err}");
+            let said = format!("warning: address of {what} passed to 'musttail' call argument");
+            assert!(err.contains(&said), "{level} {def}\nwanted {said:?}, got:\n{err}");
+            assert_eq!(err.matches("warning:").count(), 1, "{level} {def}\n{err}");
+            assert!(body(&text, "f").contains(&"jmp g".to_owned()), "{level} {def}\n{text}");
+        }
+    }
+    let both = format!("{lead}int f(int a) {{ int b; [[gnu::musttail]] return g2(&a, &b); }}\n");
+    let (ok, _, err) = compile("both", X86_64, &[], &both);
+    assert!(ok, "{err}");
+    assert!(err.contains("address of parameter 'a' passed"), "{err}");
+    assert!(err.contains("address of automatic variable 'b' passed"), "{err}");
+    assert_eq!(err.matches("warning:").count(), 2, "{err}");
+
+    let quiet = [
+        "int f(int i) { int b[2]; [[gnu::musttail]] return g(&b[i]); }",
+        "int f(void) { static int b; [[gnu::musttail]] return g(&b); }",
+        "extern int e; int f(void) { [[gnu::musttail]] return g(&e); }",
+        "int f(int *p) { [[gnu::musttail]] return g2(p, &p[1]); }",
+        "int f(struct s *p) { [[gnu::musttail]] return g(&p->m[1]); }",
+        "int f(void) { [[gnu::musttail]] return g(\"text\"); }",
+        "int f(int a) { int b = a; return g(&b); }",
+    ];
+    for def in quiet {
+        let source = format!("{lead}{def}\n");
+        let (ok, _, err) = compile("quiet", X86_64, &["-Wall", "-Wextra"], &source);
+        assert!(ok, "{def}\n{err}");
+        assert_eq!(err, "", "{def}");
+    }
+    // A caller with variable arguments is refused before gcc looks at what the call is handed.
+    let variadic = format!("{lead}int f(int a, ...) {{ [[gnu::musttail]] return g(&a); }}\n");
+    let (ok, _, err) = compile("variadic", X86_64, &[], &variadic);
+    assert!(!ok);
+    assert!(err.contains("cannot tail-call: caller uses stdargs"), "{err}");
+    assert!(!err.contains("warning:"), "{err}");
+
+    let one = format!("{lead}int f(int a) {{ [[gnu::musttail]] return g(&a); }}\n");
+    let (ok, _, err) = compile("off", X86_64, &["-Wno-musttail-local-addr"], &one);
+    assert!(ok, "{err}");
+    assert_eq!(err, "");
+    let (ok, _, err) = compile("error", X86_64, &["-Werror=musttail-local-addr"], &one);
+    assert!(!ok);
+    assert!(err.contains("error: address of parameter 'a' passed"), "{err}");
+}
