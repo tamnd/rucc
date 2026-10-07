@@ -60,9 +60,17 @@ impl Checker<'_> {
     /// gcc asks before the value is converted to the return type, so a call whose answer then has
     /// to change is taken here and refused by the back end, which says the value changed after
     /// the call.
+    ///
+    /// A function with variable arguments is refused here whether it reads them or not, since
+    /// gcc refuses one by its type, before it looks at anything else about the call.
     pub(in crate::check) fn must_tail(&mut self, value: Option<ExprId>, span: Span) {
         let call = value.filter(|&value| matches!(self.tast[value].kind, ExprKind::Call { .. }));
         match call {
+            Some(call) if self.in_variadic_function() => {
+                let at = self.tast.expr_span(call);
+                let what = "cannot tail-call: caller uses stdargs";
+                self.report(Diagnostic::error(what, at).with_code("E0847"));
+            }
             Some(call) => {
                 self.tast.add_must_tail(call);
                 self.musttail_local_addr(call);
@@ -80,12 +88,8 @@ impl Checker<'_> {
     ///
     /// gcc looks for it once the call is in its middle end, where an argument is a value or an
     /// address it can work out without running anything, so `&a`, `&s.m`, `&b[1]`, `b` decayed
-    /// and any of them cast to another pointer are each one and `&b[i]` is not. Nothing is said
-    /// in a function with variable arguments, which gcc refuses the call in before it looks.
+    /// and any of them cast to another pointer are each one and `&b[i]` is not.
     fn musttail_local_addr(&mut self, call: ExprId) {
-        if self.in_variadic_function() {
-            return;
-        }
         let ExprKind::Call { args, .. } = self.tast[call].kind else { return };
         let span = self.tast.expr_span(call);
         let passed: Vec<String> =
