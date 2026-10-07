@@ -82,47 +82,48 @@ const SWITCHES: &str = "enum e { A, B, C, D = 10 };\n\
     }\n";
 
 /// What gcc 13 says about [`SWITCHES`] under `-Wall -Wswitch-enum -Wswitch-default`, line for
-/// line, with this compiler's code where gcc gives the option.
+/// line, with this compiler's code where gcc gives the option. gcc was given the lines indented
+/// by two, which the string above takes off, so each column here is two less than gcc's.
 const SAID: &[&str] = &[
-    "a.c:9:3: warning: switch missing default case [E0854]",
-    "a.c:9:3: warning: enumeration value 'C' not handled in switch [E0852]",
-    "a.c:9:3: warning: enumeration value 'D' not handled in switch [E0852]",
-    "a.c:10:3: warning: enumeration value 'B' not handled in switch [E0853]",
-    "a.c:10:3: warning: enumeration value 'C' not handled in switch [E0853]",
-    "a.c:10:3: warning: enumeration value 'D' not handled in switch [E0853]",
-    "a.c:11:3: warning: switch missing default case [E0854]",
-    "a.c:11:3: warning: enumeration value 'D' not handled in switch [E0852]",
-    "a.c:11:30: warning: case value '5' not in enumerated type 'enum e' [E0852]",
-    "a.c:12:3: warning: switch missing default case [E0854]",
-    "a.c:12:3: warning: enumeration value 'Y' not handled in switch [E0852]",
-    "a.c:12:24: warning: case value '7' not in enumerated type 't' [E0852]",
-    "a.c:13:3: warning: switch missing default case [E0854]",
-    "a.c:13:3: warning: enumeration value 'S' not handled in switch [E0852]",
-    "a.c:14:3: warning: switch condition has boolean value [E0855]",
-    "a.c:15:3: warning: switch missing default case [E0854]",
-    "a.c:16:3: warning: switch condition has boolean value [E0855]",
-    "a.c:17:3: warning: switch missing default case [E0854]",
-    "a.c:17:3: warning: enumeration value 'C' not handled in switch [E0852]",
-    "a.c:18:3: warning: switch missing default case [E0854]",
-    "a.c:18:56: warning: case value '4' not in enumerated type 'enum e' [E0852]",
-    "a.c:18:56: warning: case value '5' not in enumerated type 'enum e' [E0852]",
-    "a.c:19:3: warning: switch missing default case [E0854]",
-    "a.c:20:3: warning: switch missing default case [E0854]",
-    "a.c:20:3: warning: enumeration value 'N' not handled in switch [E0852]",
-    "a.c:20:24: warning: case value '9' not in enumerated type 't2' {aka 'enum e2'} [E0852]",
-    "a.c:21:3: warning: switch missing default case [E0854]",
-    "a.c:21:3: warning: enumeration value 'L' not handled in switch [E0852]",
-    "a.c:21:27: warning: case value '4294967295' not in enumerated type [E0852]",
-    "a.c:22:3: warning: switch missing default case [E0854]",
-    "a.c:22:32: warning: case value '3' not in enumerated type 't3' {aka 'enum e2'} [E0852]",
-    "a.c:23:3: warning: switch missing default case [E0854]",
-    "a.c:23:3: warning: enumeration value 'N' not handled in switch [E0852]",
-    "a.c:23:39: warning: case value '4' not in enumerated type 'enum e2' [E0852]",
-    "a.c:26:3: warning: switch missing default case [E0854]",
-    "a.c:26:3: warning: switch condition has boolean value [E0855]",
-    "a.c:27:3: warning: switch missing default case [E0854]",
-    "a.c:28:3: warning: enumeration value 'A' not handled in switch [E0853]",
-    "a.c:28:16: warning: case value '11' not in enumerated type 'enum e' [E0852]",
+    "a.c:9:1: warning: switch missing default case [E0854]",
+    "a.c:9:1: warning: enumeration value 'C' not handled in switch [E0852]",
+    "a.c:9:1: warning: enumeration value 'D' not handled in switch [E0852]",
+    "a.c:10:1: warning: enumeration value 'B' not handled in switch [E0853]",
+    "a.c:10:1: warning: enumeration value 'C' not handled in switch [E0853]",
+    "a.c:10:1: warning: enumeration value 'D' not handled in switch [E0853]",
+    "a.c:11:1: warning: switch missing default case [E0854]",
+    "a.c:11:1: warning: enumeration value 'D' not handled in switch [E0852]",
+    "a.c:11:28: warning: case value '5' not in enumerated type 'enum e' [E0852]",
+    "a.c:12:1: warning: switch missing default case [E0854]",
+    "a.c:12:1: warning: enumeration value 'Y' not handled in switch [E0852]",
+    "a.c:12:22: warning: case value '7' not in enumerated type 't' [E0852]",
+    "a.c:13:1: warning: switch missing default case [E0854]",
+    "a.c:13:1: warning: enumeration value 'S' not handled in switch [E0852]",
+    "a.c:14:1: warning: switch condition has boolean value [E0855]",
+    "a.c:15:1: warning: switch missing default case [E0854]",
+    "a.c:16:1: warning: switch condition has boolean value [E0855]",
+    "a.c:17:1: warning: switch missing default case [E0854]",
+    "a.c:17:1: warning: enumeration value 'C' not handled in switch [E0852]",
+    "a.c:18:1: warning: switch missing default case [E0854]",
+    "a.c:18:54: warning: case value '4' not in enumerated type 'enum e' [E0852]",
+    "a.c:18:54: warning: case value '5' not in enumerated type 'enum e' [E0852]",
+    "a.c:19:1: warning: switch missing default case [E0854]",
+    "a.c:20:1: warning: switch missing default case [E0854]",
+    "a.c:20:1: warning: enumeration value 'N' not handled in switch [E0852]",
+    "a.c:20:22: warning: case value '9' not in enumerated type 't2' {aka 'enum e2'} [E0852]",
+    "a.c:21:1: warning: switch missing default case [E0854]",
+    "a.c:21:1: warning: enumeration value 'L' not handled in switch [E0852]",
+    "a.c:21:25: warning: case value '4294967295' not in enumerated type [E0852]",
+    "a.c:22:1: warning: switch missing default case [E0854]",
+    "a.c:22:30: warning: case value '3' not in enumerated type 't3' {aka 'enum e2'} [E0852]",
+    "a.c:23:1: warning: switch missing default case [E0854]",
+    "a.c:23:1: warning: enumeration value 'N' not handled in switch [E0852]",
+    "a.c:23:37: warning: case value '4' not in enumerated type 'enum e2' [E0852]",
+    "a.c:26:1: warning: switch missing default case [E0854]",
+    "a.c:26:1: warning: switch condition has boolean value [E0855]",
+    "a.c:27:1: warning: switch missing default case [E0854]",
+    "a.c:28:1: warning: enumeration value 'A' not handled in switch [E0853]",
+    "a.c:28:14: warning: case value '11' not in enumerated type 'enum e' [E0852]",
 ];
 
 /// The lines of [`SAID`] with one of these codes.
@@ -163,11 +164,11 @@ fn each_warning_is_heard_under_the_flags_gcc_says_it_under() {
 fn an_error_of_switch_enum_follows_the_name_the_warning_was_said_under() {
     let (ok, said) = compile("error-enum", &["-Werror=switch-enum"], SWITCHES);
     assert!(!ok, "{said}");
-    assert!(said.contains("a.c:11:30: error: case value '5' not in enumerated type"), "{said}");
-    assert!(said.contains("a.c:9:3: error: enumeration value 'C' not handled"), "{said}");
+    assert!(said.contains("a.c:11:28: error: case value '5' not in enumerated type"), "{said}");
+    assert!(said.contains("a.c:9:1: error: enumeration value 'C' not handled"), "{said}");
     let (ok, said) = compile("error-wall", &["-Wall", "-Werror=switch-enum"], SWITCHES);
     assert!(!ok, "{said}");
-    assert!(said.contains("a.c:11:30: warning: case value '5' not in enumerated type"), "{said}");
-    assert!(said.contains("a.c:10:3: error: enumeration value 'B' not handled"), "{said}");
-    assert!(said.contains("a.c:9:3: warning: enumeration value 'C' not handled"), "{said}");
+    assert!(said.contains("a.c:11:28: warning: case value '5' not in enumerated type"), "{said}");
+    assert!(said.contains("a.c:10:1: error: enumeration value 'B' not handled"), "{said}");
+    assert!(said.contains("a.c:9:1: warning: enumeration value 'C' not handled"), "{said}");
 }

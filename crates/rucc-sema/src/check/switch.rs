@@ -82,6 +82,17 @@ impl Checker<'_> {
         }
     }
 
+    /// The type a `switch` is on as gcc names it, from the type the controlling expression had
+    /// before it was read and the one it has after. Reading it takes the typedef off along with
+    /// the qualifiers, and gcc names the enumeration by the typedef it was reached through, so
+    /// only the qualifiers come off here. Where reading made it another type altogether, which a
+    /// `hardbool` one becomes, the type it became is the one.
+    pub(in crate::check) fn switched_type(&mut self, read: TypeId, value: TypeId) -> TypeId {
+        let read = self.types.unqualified(read);
+        let became = self.types.kind(self.types.canonical(value));
+        if self.types.kind(self.types.canonical(read)) == became { read } else { value }
+    }
+
     /// Whether gcc reads a controlling expression as a truth value, given as it was written and
     /// as it was checked, before the promotion.
     pub(in crate::check) fn truth_valued(&self, written: ast::ExprId, cond: ExprId) -> bool {
