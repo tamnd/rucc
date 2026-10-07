@@ -50,6 +50,7 @@ All notable changes are recorded here. The format follows [Keep a Changelog](htt
 
 ### Fixed
 
+- The AArch64 assembler takes `:abs_g0:` to `:abs_g3:`, the `_nc` and the `_s` operators on a symbol in `movz`, `movk` and `movn`, leaving the `R_AARCH64_MOVW_UABS` and `R_AARCH64_MOVW_SABS` relocations, and writes `.short sym` and `.short sym - .` as `R_AARCH64_ABS16` and `R_AARCH64_PREL16`, so the arm64 kernel's reloc_test_syms.S assembles to the same words and relocations llvm-mc writes (#3335).
 - The bound on a runaway macro expansion is counted for each invocation the user wrote rather than for each stretch of the file between two directives, so the kernel's ice_common.c, which calls `pack_fields` six times in one stretch, preprocesses again, while one invocation that doubles itself without end still stops with E0310 (#3331).
 - The AArch64 assembler reads and encodes the single lane loads and stores of a list, `st4 {v19.s,v20.s,v21.s,v22.s}[0],[x0],#16` and the like, which the kernel's poly1305-core.S ends with. (#3323)
 - `-ffixed-q16` and the other spellings of an AArch64 vector register keep that register out of the allocator, so the kernel's aegis128-neon builds with the S-box it loads into `v16` to `v31` left alone. (#3322)

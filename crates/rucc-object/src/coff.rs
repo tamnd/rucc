@@ -120,7 +120,10 @@ pub(crate) fn arm64(reference: Reference) -> Option<pe::RelocationType> {
             | Fixup::GotTprelPage21
             | Fixup::GotTprelLo12Nc
             | Fixup::TprelHi12
-            | Fixup::TprelLo12Nc,
+            | Fixup::TprelLo12Nc
+            | Fixup::MovwUabs(_)
+            | Fixup::MovwUabsNc(_)
+            | Fixup::MovwSabs(_),
         ) => return None,
         Reference::Address { bytes: 8 } => pe::IMAGE_REL_ARM64_ADDR64,
         Reference::Address { bytes: 4 } => pe::IMAGE_REL_ARM64_ADDR32,
