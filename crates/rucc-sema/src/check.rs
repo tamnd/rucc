@@ -89,6 +89,7 @@ mod shared;
 mod sse_regparm;
 mod stmt;
 mod string_arg;
+mod switch;
 mod tls;
 mod ty;
 mod weak;

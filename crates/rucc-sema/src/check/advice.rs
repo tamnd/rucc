@@ -50,7 +50,7 @@ use rucc_base::hash::{Map, Set};
 use rucc_diag::{Diagnostic, Span};
 use rucc_gnu::{Kind, Status};
 use rucc_lex::Encoding;
-use rucc_types::{FunctionType, RecordId, TypeId, TypeKind, is_void};
+use rucc_types::{EnumId, FunctionType, RecordId, TypeId, TypeKind, is_void};
 
 use crate::check::Checker;
 use crate::check::format::Format;
@@ -105,6 +105,9 @@ pub(in crate::check) struct Advice {
     /// Enumerators marked `deprecated`, by name, value and type, which is everything a use of one
     /// resolves to.
     enumerators: Map<(Symbol, i128, TypeId), Marked>,
+    /// Enumerators marked `unused` or `[[maybe_unused]]`, by their enumeration and name, which a
+    /// `switch` that leaves them out is quiet about, for `check/switch.rs`.
+    pub(in crate::check) unused_enumerators: Set<(EnumId, Symbol)>,
 }
 
 /// What `deprecated` and `unavailable` asked to have said at a use of a name.

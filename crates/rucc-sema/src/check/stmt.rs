@@ -48,6 +48,7 @@ use rucc_types::{IntegerInfo, Qualifiers, TypeId, is_integer, is_pointer, is_rec
 
 use crate::asm::{Asm, AsmOperand, AsmOperandList, FileAsm, LabelList, in_a_register};
 use crate::check::expr::Target;
+use crate::check::switch::Switched;
 use crate::check::{Checker, Promoted};
 use crate::decl::{DeclId, DeclList};
 use crate::eval;
@@ -272,7 +273,7 @@ impl Checker<'_> {
                 let then = self.stmt(then);
                 Stmt::If { cond, then, otherwise: otherwise.map(|id| self.stmt(id)) }
             }
-            ast::Stmt::Switch { scrutinee, body } => self.switch(scrutinee, body),
+            ast::Stmt::Switch { scrutinee, body } => self.switch(scrutinee, body, span),
             ast::Stmt::While { cond, body } => {
                 let cond = self.controlling(cond);
                 Stmt::While { cond, body: self.loop_body(body) }
@@ -734,10 +735,12 @@ impl Checker<'_> {
     }
 
     /// `switch (cond) body`, with the case table collected while the body is walked.
-    fn switch(&mut self, scrutinee: ast::ExprId, body: ast::StmtId) -> Stmt {
+    fn switch(&mut self, scrutinee: ast::ExprId, body: ast::StmtId, span: Span) -> Stmt {
         let at = self.ast.expr_span(scrutinee);
         let cond = self.expr(scrutinee);
         let cond = self.value(cond);
+        let written = self.tast[cond].ty;
+        let boolean = self.truth_valued(scrutinee, cond);
         // Read before the promotion and not after it, because the range a case value is measured
         // against is the one that was written. `switch (c)` on a `char` and `case 300` is worth
         // saying, and by the time the promotion has run there is nothing left to say it about.
@@ -768,6 +771,17 @@ impl Checker<'_> {
         let Some(switch) = self.body.as_mut().and_then(|state| state.switches.pop()) else {
             return Stmt::Error;
         };
+        if !self.is_poisoned(cond) {
+            self.switch_warnings(&Switched {
+                written,
+                cond,
+                boolean,
+                cases: &switch.cases,
+                spans: &switch.spans,
+                default: switch.default.is_some(),
+                at: span,
+            });
+        }
         let cases = self.tast.add_cases(&switch.cases);
         for &labelled in &switch.labels {
             let Stmt::Case { case: entry, body } = self.tast[labelled] else {

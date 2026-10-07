@@ -74,6 +74,10 @@ const OPTIONS: &[(&str, &str)] = &[
     ("E0824", "if-not-aligned"),
     ("E0850", "musttail-local-addr"),
     ("E0851", "nonnull"),
+    ("E0852", "switch"),
+    ("E0853", "switch-enum"),
+    ("E0854", "switch-default"),
+    ("E0855", "switch-bool"),
     ("W0331", "cpp"),
     ("W0333", "invalid-memory-model"),
     ("W0334", "expansion-to-defined"),
@@ -115,16 +119,25 @@ const PEDWARNS: &[&str] = &[
 /// `-Wunknown-pragmas`, which is its own group. `-Wformat` turns on all four format checks and
 /// `-Wnonnull`, `-Wall` turns on `-Wformat`, and so does `-Wformat=` with any level but nought,
 /// which is gcc 16's reading. A name turned off by itself stays off whatever group is
-/// asked for later, which is how gcc reads `-Wno-format-extra-args -Wall`. `-Wall` turns on
-/// nothing else yet, which is #485.
+/// asked for later, which is how gcc reads `-Wno-format-extra-args -Wall`. `-Wswitch` is its own
+/// group too, and `-Wall` turns on nothing else yet, which is #485.
 const QUIET: &[(&str, &str)] = &[
     ("format", "format"),
     ("format-contains-nul", "format"),
     ("format-extra-args", "format"),
     ("format-zero-length", "format"),
     ("nonnull", "format"),
+    ("switch", "switch"),
     ("unknown-pragmas", "unknown-pragmas"),
 ];
+
+/// The options gcc leaves off until they are named, which `-Wall` does not turn on. Sorted.
+const NAMED_ONLY: &[&str] = &["switch-default", "switch-enum"];
+
+/// The options a warning is filed under when its own is not heard and the other one is. gcc says
+/// an enumerator a `switch` without `default` leaves out, and a case value that is not one of the
+/// enumeration's, under `-Wswitch` where that is on and under `-Wswitch-enum` where only that is.
+const OR_ELSE: &[(&str, &str)] = &[("switch", "switch-enum")];
 
 /// The options in [`QUIET`] that are checks of their own rather than parts of their group's, so
 /// naming one turns it on whatever the group was told. gcc's `-Wnonnull` is turned on with
@@ -208,8 +221,12 @@ impl Named {
     /// Whether a warning that is off until asked for was asked for, which every other warning
     /// is. The name has to be asked for itself or through its group, and the group must not have
     /// been turned off, since `-Wno-format` silences `-Wformat-extra-args` along with the rest.
-    /// One of [`OWN`] asked for itself is asked for whatever its group was told.
+    /// One of [`OWN`] asked for itself is asked for whatever its group was told, and one of
+    /// [`NAMED_ONLY`] is only asked for by name.
     fn asked(&self, name: &str) -> bool {
+        if NAMED_ONLY.binary_search(&name).is_ok() {
+            return self.on.contains(name);
+        }
         let Ok(at) = QUIET.binary_search_by(|&(known, _)| known.cmp(name)) else { return true };
         if self.on.contains(name) && OWN.contains(&name) {
             return true;
@@ -244,8 +261,14 @@ impl Named {
         }
     }
 
+    /// The option a warning is filed under, which is its own unless [`OR_ELSE`] says otherwise.
     fn name(&self, diag: &Diagnostic) -> Option<&'static str> {
-        diag.code.and_then(option_of)
+        let name = diag.code.and_then(option_of)?;
+        let heard = |name: &str| !self.off.contains(name) && self.asked(name);
+        match OR_ELSE.iter().find(|&&(own, _)| own == name) {
+            Some(&(_, other)) if !heard(name) && heard(other) => Some(other),
+            _ => Some(name),
+        }
     }
 
     /// Applies what one `#pragma GCC diagnostic` line says about the option `name`, given
@@ -519,6 +542,37 @@ mod tests {
         named.flag("error=format");
         assert!(!named.silenced(&warning("E0785")));
         assert!(named.promoted(&warning("E0785"), false));
+    }
+
+    /// `-Wswitch` waits for `-Wall`, `-Wswitch-enum` and `-Wswitch-default` for their own names,
+    /// and what `-Wswitch` says is said under `-Wswitch-enum` where only that one is on.
+    #[test]
+    fn the_switch_checks_are_heard_under_the_names_gcc_files_them_under() {
+        assert!(NAMED_ONLY.windows(2).all(|pair| pair[0] < pair[1]));
+        let mut named = Named::default();
+        assert!(named.silenced(&warning("E0852")));
+        assert!(named.silenced(&warning("E0853")));
+        assert!(named.silenced(&warning("E0854")));
+        assert!(!named.silenced(&warning("E0855")));
+        named.flag("all");
+        assert!(!named.silenced(&warning("E0852")));
+        assert!(named.silenced(&warning("E0853")));
+        assert!(named.silenced(&warning("E0854")));
+        named.flag("no-switch");
+        named.flag("switch-enum");
+        assert!(!named.silenced(&warning("E0852")));
+        assert!(!named.silenced(&warning("E0853")));
+        named.flag("error=switch-enum");
+        assert!(named.promoted(&warning("E0852"), false));
+
+        let mut named = Named::default();
+        named.flag("switch-enum");
+        named.flag("error=switch-enum");
+        named.flag("all");
+        assert!(!named.promoted(&warning("E0852"), false));
+        assert!(named.promoted(&warning("E0853"), false));
+        named.flag("switch-default");
+        assert!(!named.silenced(&warning("E0854")));
     }
 
     #[test]
