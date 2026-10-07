@@ -183,6 +183,10 @@ fn fill(
 /// expression a reader cannot evaluate is worse than an attribute that is not there. That is a
 /// target with no calling convention written down, or a format with no `.debug_frame`.
 ///
+/// A wasm function has no call frame table, and its frame is in linear memory at the address one of
+/// its locals holds. Its frame base is that local, which is what clang writes, and the offsets of
+/// the locals in its frame are measured up from it.
+///
 /// A file-scope variable needs none of it: its address is its own symbol and the linker knows where
 /// that went.
 ///
@@ -215,11 +219,19 @@ fn defined(
     let start = gimli::write::Address::Symbol { symbol: index, addend: 0 };
     entry.set(gimli::DW_AT_low_pc, AttributeValue::Address(start));
     entry.set(gimli::DW_AT_high_pc, AttributeValue::Udata(func.len));
-    if frames {
+    if let Some(local) = func.frame_local {
+        let mut expr = gimli::write::Expression::new();
+        expr.op_wasm_local(local);
+        expr.op(gimli::DW_OP_stack_value);
+        entry.set(gimli::DW_AT_frame_base, AttributeValue::Exprloc(expr));
+    } else if frames {
         let mut expr = gimli::write::Expression::new();
         expr.op(gimli::DW_OP_call_frame_cfa);
         entry.set(gimli::DW_AT_frame_base, AttributeValue::Exprloc(expr));
     }
+    // A wasm function with a frame has a frame base of its own, so the offsets in it can be said
+    // whether or not the unit writes a call frame table.
+    let frames = frames || func.frame_local.is_some();
     takes(dwarf, at, sig, ids, Some(index), frames)?;
     let nests = nested(dwarf, func, at, index, frames)?;
     for local in &func.locals {
@@ -376,7 +388,8 @@ fn kept(
 /// honest one, so the entry is left off rather than written with a location nothing can evaluate.
 ///
 /// A place in a register is not measured from anything, so it is as good in a build with no frame
-/// base as in any other, and that is the whole of the difference. A local that is in a register
+/// base as in any other, and that is the whole of the difference. A wasm local and a constant are
+/// not measured from anything either. A local that is in a register
 /// over part of a function and in the frame over the rest keeps the part that can be said and
 /// loses the rest, which leaves a debugger telling the truth at both kinds of address.
 fn sayable(spot: &Spot, frames: bool) -> bool {
@@ -384,8 +397,8 @@ fn sayable(spot: &Spot, frames: bool) -> bool {
         return true;
     }
     match spot {
-        Spot::Always(held) => matches!(held, Held::Reg(_)),
-        Spot::Over(spans) => spans.iter().any(|span| matches!(span.held, Held::Reg(_))),
+        Spot::Always(held) => !matches!(held, Held::Frame(_)),
+        Spot::Over(spans) => spans.iter().any(|span| !matches!(span.held, Held::Frame(_))),
     }
 }
 
@@ -463,6 +476,14 @@ fn saying(held: Held) -> gimli::write::Expression {
     match held {
         Held::Frame(at) => expr.op_fbreg(at),
         Held::Reg(number) => expr.op_reg(gimli::Register(number)),
+        Held::Local(index) => {
+            expr.op_wasm_local(index);
+            expr.op(gimli::DW_OP_stack_value);
+        }
+        Held::Constant(number) => {
+            expr.op_constu(number);
+            expr.op(gimli::DW_OP_stack_value);
+        }
     }
     expr
 }
@@ -712,6 +733,7 @@ mod tests {
                 }),
                 external: true,
                 locals: Vec::new(),
+                frame_local: None,
                 scopes: Vec::new(),
             }],
             globals: Vec::new(),
@@ -1100,6 +1122,55 @@ mod tests {
         }];
         let info = write(&unit).expect("sections");
         assert!(!named(&info).contains(&"total".to_owned()), "a name with nowhere to be");
+    }
+
+    /// A wasm function with a frame says that its frame base is the local that holds the bottom of
+    /// the frame, and a local in the frame is an offset from it, in a unit with no call frame table.
+    ///
+    /// The frame base is a length of four, `DW_OP_WASM_location` with kind nought and local five,
+    /// and `DW_OP_stack_value`, which are the bytes clang writes for the same function.
+    #[test]
+    fn a_wasm_function_measures_its_frame_from_the_local_that_holds_it() {
+        let mut unit = one();
+        unit.frames = false;
+        unit.funcs[0].frame_local = Some(5);
+        unit.funcs[0].locals = vec![Local {
+            name: "total".to_owned(),
+            ty: Some(0),
+            decl: None,
+            spot: Spot::Always(Held::Frame(8)),
+            scope: None,
+        }];
+        let info = write(&unit).expect("sections");
+        let local = [4, 0xed, 0, 5, gimli::DW_OP_stack_value.0];
+        assert!(holds(&info, ".debug_info", &local), "the frame base is not local five");
+        assert!(holds(&info, ".debug_info", &away(8)), "the local is not 8 above the base");
+        assert!(named(&info).contains(&"total".to_owned()), "the local lost its name");
+    }
+
+    /// A value in a wasm local is that local and `DW_OP_stack_value`, and a constant is the number
+    /// and `DW_OP_stack_value`. Neither is measured from a frame base, so a unit with no call frame
+    /// table keeps both.
+    #[test]
+    fn a_wasm_local_and_a_constant_need_no_frame_base() {
+        let mut unit = one();
+        unit.frames = false;
+        let local = |name: &str, held| Local {
+            name: name.to_owned(),
+            ty: Some(0),
+            decl: None,
+            spot: Spot::Always(held),
+            scope: None,
+        };
+        unit.funcs[0].locals = vec![local("k", Held::Local(3)), local("i", Held::Constant(300))];
+        let info = write(&unit).expect("sections");
+        let k = [4, 0xed, 0, 3, gimli::DW_OP_stack_value.0];
+        assert!(holds(&info, ".debug_info", &k), "k is not in local three");
+        // Three hundred is two bytes of LEB128, and a number under 32 would be `DW_OP_lit`.
+        let i = [4, gimli::DW_OP_constu.0, 0xac, 0x02, gimli::DW_OP_stack_value.0];
+        assert!(holds(&info, ".debug_info", &i), "i is not three hundred");
+        assert!(named(&info).contains(&"k".to_owned()), "k lost its name");
+        assert!(named(&info).contains(&"i".to_owned()), "i lost its name");
     }
 
     /// A record holding a pointer to itself is one entry and terminates.

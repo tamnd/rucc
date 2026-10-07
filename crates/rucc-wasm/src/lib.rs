@@ -236,6 +236,41 @@ pub struct Lines {
     pub rows: Vec<(u32, Span)>,
     /// The size of the body in bytes, with the declarations of the locals and the last `end`.
     pub len: u32,
+    /// The local that holds the bottom of the frame, for a function with a frame. It is the frame
+    /// base of the function in DWARF, and [`Spot::Frame`] counts up from it.
+    pub frame: Option<u32>,
+    /// Where the declarations of the source are, in no particular order. See [`Kept`].
+    pub kept: Vec<Kept>,
+}
+
+/// Where one declaration of the source is, over the code of one function or over all of it.
+///
+/// A declaration in the frame is there over all of the function. A declaration in a value is in
+/// the local of the value from where the value is given to it to where the next value is, and only
+/// at `-O0`, where each value has a local of its own and nothing else writes it. Above `-O0`, the
+/// coloring gives one local to many values, and the stretch where a local holds one value is not
+/// known here, so those declarations get no place.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Kept {
+    /// Which declaration, as the opaque number that the IR function carried.
+    pub decl: u32,
+    /// Where it is.
+    pub at: Spot,
+    /// The offset of the code from the start of the body, counted as [`Lines::rows`] counts it,
+    /// and the length of the code, or `None` for all of the function.
+    pub over: Option<(u32, u32)>,
+}
+
+/// A place a declaration can be in a wasm function.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Spot {
+    /// This many bytes above the bottom of the frame, which is the value of [`Lines::frame`].
+    Frame(u32),
+    /// In this local.
+    Local(u32),
+    /// Nowhere, because the value is this number. A constant has no local at `-O0`, because it is
+    /// written where it is used.
+    Constant(u64),
 }
 
 /// The object model of `module`, as [`translate`] gives it, and the rows of the line table of

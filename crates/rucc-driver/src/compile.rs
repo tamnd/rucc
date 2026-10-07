@@ -2012,7 +2012,7 @@ fn describe(
         // block stops being one of the function's own. The numbers the walk over the tree handed out
         // are over the whole unit, and what goes on an entry is a place in this function's table, so
         // the two are joined here.
-        let (scopes, at) = nests(&wants, &origin.meaning.scopes, extent, rows);
+        let (scopes, at) = nests(&wants, &origin.meaning.scopes, extent.len as u64, rows);
         for (local, want) in locals.iter_mut().zip(&wants) {
             local.scope = want.and_then(|want| at.get(&want).copied());
         }
@@ -2026,6 +2026,7 @@ fn describe(
             sig,
             external: known.is_some_and(|known| known.external),
             locals,
+            frame_local: None,
             scopes,
         });
     }
@@ -2086,9 +2087,14 @@ fn describe(
 /// The debug information of a wasm object, as [`describe`] makes it for a native one: the line
 /// table, the functions with their signatures, the types, and the variables at file scope that the
 /// object defines. The rows come from the back end, as offsets from the start of each function
-/// body. The locals are not there, because a local of wasm is at a place that only the wasm
-/// location expressions of DWARF can name, and nothing writes those yet. A function has no frame
-/// base for the same reason.
+/// body.
+///
+/// The locals and the parameters are where the back end says they are. A function with a frame
+/// has the local that holds the bottom of the frame as its frame base, and a declaration in the
+/// frame is an offset from it. A declaration in a value is in a wasm local, or is a constant, and
+/// the back end says those only at `-O0`. This is what clang writes, and a runtime that gives the
+/// DWARF to a debugger, as Wasmtime does with `-D debug-info`, turns the wasm locals into the
+/// places of the code that it compiled.
 ///
 /// # Errors
 ///
@@ -2158,6 +2164,70 @@ fn describe_wasm(
                 }
             }
         }
+        // Where each declaration is. One place over all of the function is one expression, and
+        // the stretches of a declaration are one list. A declaration in the frame is in the frame
+        // over all of the function, so that answer is taken over any other.
+        let mut kept = lines.kept.clone();
+        kept.sort_by_key(|kept| {
+            (
+                kept.decl,
+                kept.over.is_some(),
+                !matches!(kept.at, rucc_wasm::Spot::Frame(_)),
+                kept.over,
+            )
+        });
+        let mut spots: Vec<(u32, rucc_debug::Spot)> = Vec::new();
+        for kept in kept {
+            let held = match kept.at {
+                rucc_wasm::Spot::Frame(at) => rucc_debug::Held::Frame(i64::from(at)),
+                rucc_wasm::Spot::Local(local) => rucc_debug::Held::Local(local),
+                rucc_wasm::Spot::Constant(number) => rucc_debug::Held::Constant(number),
+            };
+            let span = kept.over.map(|(from, len)| rucc_debug::Span {
+                from: u64::from(from),
+                len: u64::from(len),
+                held,
+            });
+            match (spots.last_mut(), span) {
+                (Some((decl, rucc_debug::Spot::Over(spans))), Some(span)) if *decl == kept.decl => {
+                    spans.push(span);
+                }
+                (Some((decl, _)), _) if *decl == kept.decl => {}
+                (_, Some(span)) => spots.push((kept.decl, rucc_debug::Spot::Over(vec![span]))),
+                (_, None) => spots.push((kept.decl, rucc_debug::Spot::Always(held))),
+            }
+        }
+        // A parameter goes on the entry that the signature wrote for it, as in `describe`.
+        let mut sig = known.and_then(|known| known.sig.clone());
+        if let (Some(sig), Some(known)) = (sig.as_mut(), known) {
+            for (param, decl) in sig.params.iter_mut().zip(&known.params) {
+                let Some(decl) = *decl else { continue };
+                let Ok(which) = spots.binary_search_by_key(&decl, |&(have, _)| have) else {
+                    continue;
+                };
+                param.spot = Some(spots.remove(which).1);
+            }
+        }
+        let mut locals = Vec::with_capacity(spots.len());
+        let mut wants: Vec<Option<usize>> = Vec::with_capacity(spots.len());
+        for (decl, spot) in spots {
+            let Some(named) = origin.meaning.locals.get(&decl) else { continue };
+            wants.push(named.scope);
+            locals.push(rucc_debug::Local {
+                name: named.name.clone(),
+                ty: named.ty,
+                decl: Some(rucc_debug::Place {
+                    file: interned(&mut files, rewrite(&named.file)),
+                    line: named.line,
+                }),
+                spot,
+                scope: None,
+            });
+        }
+        let (scopes, at) = nests(&wants, &origin.meaning.scopes, u64::from(lines.len), &lines.rows);
+        for (local, want) in locals.iter_mut().zip(&wants) {
+            local.scope = want.and_then(|want| at.get(&want).copied());
+        }
         funcs.push(rucc_debug::Function {
             name: name.to_owned(),
             symbol: (name != symbol).then(|| symbol.clone()),
@@ -2165,10 +2235,11 @@ fn describe_wasm(
             prologue_end,
             rows,
             decl,
-            sig: known.and_then(|known| known.sig.clone()),
+            sig,
             external: known.is_some_and(|known| known.external),
-            locals: Vec::new(),
-            scopes: Vec::new(),
+            locals,
+            frame_local: lines.frame,
+            scopes,
         });
     }
     let mut globals = Vec::new();
@@ -2228,7 +2299,7 @@ fn stretches(
     let (false, Some(regs)) = (built.kept.is_empty(), target.call_regs) else {
         return Vec::new();
     };
-    let ends = ends(extent, rows);
+    let ends = ends(extent.len as u64, rows);
     let mut bounds = vec![None; built.inst_count()];
     for (which, row) in rows.iter().enumerate() {
         let Some(inst) = row.inst else { continue };
@@ -2265,6 +2336,34 @@ fn stretches(
     spots
 }
 
+/// A row of a line table as [`ends`], [`nests`] and [`spread`] read it: how far into its function
+/// the code of the row starts, and the source the code was built for. A native row comes from the
+/// assembler, and a wasm row comes from the wasm back end as an offset and a span.
+trait Located {
+    fn at(&self) -> u64;
+    fn span(&self) -> Span;
+}
+
+impl Located for rucc_asm::Row {
+    fn at(&self) -> u64 {
+        self.at as u64
+    }
+
+    fn span(&self) -> Span {
+        self.span
+    }
+}
+
+impl Located for (u32, Span) {
+    fn at(&self) -> u64 {
+        u64::from(self.0)
+    }
+
+    fn span(&self) -> Span {
+        self.1
+    }
+}
+
 /// Where the instruction each of a function's line table rows was written for ends.
 ///
 /// The row after it, which is where the next instruction begins, and the end of the function for the
@@ -2274,16 +2373,16 @@ fn stretches(
 ///
 /// Backwards, because that is one pass rather than a search from each row for the next address that
 /// differs, and a function the size of `sqlite3VdbeExec` has tens of thousands of rows.
-fn ends(extent: &rucc_object::Extent, rows: &[rucc_asm::Row]) -> Vec<u64> {
-    let mut out = vec![extent.len as u64; rows.len()];
-    let mut next = extent.len as u64;
+fn ends<R: Located>(len: u64, rows: &[R]) -> Vec<u64> {
+    let mut out = vec![len; rows.len()];
+    let mut next = len;
     for which in (0..rows.len()).rev() {
-        let at = rows[which].at as u64;
+        let at = rows[which].at();
         // The answer the row behind got, for a row sharing an address with the one in front of it,
         // since the two end in the same place and the one in front has already been asked.
         out[which] = match next > at {
             true => next,
-            false => out.get(which + 1).copied().unwrap_or(extent.len as u64),
+            false => out.get(which + 1).copied().unwrap_or(len),
         };
         next = next.min(at);
     }
@@ -2305,11 +2404,11 @@ fn ends(extent: &rucc_object::Extent, rows: &[rucc_asm::Row]) -> Vec<u64> {
 /// inside it. Nothing had to be carried down the compiler for this, and the nesting comes out right
 /// on its own: a scope's bytes hold the bytes of every scope inside it, so its addresses hold
 /// theirs.
-fn nests(
+fn nests<R: Located>(
     wants: &[Option<usize>],
     scopes: &[crate::shapes::Scope],
-    extent: &rucc_object::Extent,
-    rows: &[rucc_asm::Row],
+    len: u64,
+    rows: &[R],
 ) -> (Vec<rucc_debug::Scope>, Map<usize, usize>) {
     let mut needed: Vec<usize> = Vec::new();
     for &want in wants {
@@ -2327,7 +2426,7 @@ fn nests(
     needed.sort_unstable();
     let at: Map<usize, usize> =
         needed.iter().enumerate().map(|(which, &scope)| (scope, which)).collect();
-    let ends = ends(extent, rows);
+    let ends = ends(len, rows);
     let out = needed
         .iter()
         .map(|&which| {
@@ -2348,13 +2447,14 @@ fn nests(
 /// which is what almost all of a scope is: the rows of a block are next to each other unless
 /// something moved them, and a block the back end split into pieces is exactly the case a list is
 /// for.
-fn spread(span: Span, ends: &[u64], rows: &[rucc_asm::Row]) -> Vec<rucc_debug::Reach> {
+fn spread<R: Located>(span: Span, ends: &[u64], rows: &[R]) -> Vec<rucc_debug::Reach> {
     let mut out: Vec<rucc_debug::Reach> = Vec::new();
     for (which, row) in rows.iter().enumerate() {
-        if row.span.is_dummy() || row.span.lo < span.lo || row.span.hi > span.hi {
+        let have = row.span();
+        if have.is_dummy() || have.lo < span.lo || have.hi > span.hi {
             continue;
         }
-        let (from, to) = (row.at as u64, ends[which]);
+        let (from, to) = (row.at(), ends[which]);
         if to <= from {
             continue;
         }
@@ -12938,21 +13038,6 @@ away:
         assert_eq!(settle(vec![one, two]), vec![one, two]);
     }
 
-    /// A function of `len` bytes, since that is the only thing about one these tests look at.
-    fn extent(len: usize) -> rucc_object::Extent {
-        rucc_object::Extent {
-            name: "f".to_owned(),
-            start: 0,
-            len,
-            align: 1,
-            binding: rucc_object::Binding::Global,
-            visibility: rucc_object::Visibility::Default,
-            patch: None,
-            hooked: 0,
-            landings: Vec::new(),
-        }
-    }
-
     /// A line table row at `at` built for the source bytes `lo` to `hi`.
     fn row(at: usize, lo: u32, hi: u32) -> rucc_asm::Row {
         let span = Span::new(lo, hi);
@@ -12962,7 +13047,7 @@ away:
     #[test]
     fn a_row_ends_where_the_next_address_begins() {
         let rows = [row(0, 0, 1), row(4, 1, 2), row(10, 2, 3)];
-        assert_eq!(ends(&extent(16), &rows), vec![4, 10, 16]);
+        assert_eq!(ends(16, &rows), vec![4, 10, 16]);
     }
 
     #[test]
@@ -12970,13 +13055,13 @@ away:
         // Two instructions that encoded to nothing sit on the address of the one after them, and
         // none of the three ends in front of that one.
         let rows = [row(0, 0, 1), row(4, 1, 2), row(4, 2, 3), row(4, 3, 4)];
-        assert_eq!(ends(&extent(12), &rows), vec![4, 12, 12, 12]);
+        assert_eq!(ends(12, &rows), vec![4, 12, 12, 12]);
     }
 
     #[test]
     fn the_rows_of_a_scope_that_are_next_to_each_other_come_out_as_one_stretch() {
         let rows = [row(0, 0, 4), row(4, 10, 14), row(8, 14, 18), row(12, 40, 44)];
-        let ends = ends(&extent(16), &rows);
+        let ends = ends(16, &rows);
         let scope = Span::new(8, 20);
         assert_eq!(spread(scope, &ends, &rows), vec![rucc_debug::Reach { from: 4, len: 8 }]);
     }
@@ -12984,7 +13069,7 @@ away:
     #[test]
     fn a_scope_the_back_end_split_in_two_comes_out_as_two_stretches() {
         let rows = [row(0, 10, 14), row(4, 40, 44), row(8, 14, 18)];
-        let ends = ends(&extent(12), &rows);
+        let ends = ends(12, &rows);
         let scope = Span::new(8, 20);
         let over = spread(scope, &ends, &rows);
         assert_eq!(
@@ -12997,7 +13082,7 @@ away:
     fn a_row_with_no_source_of_its_own_belongs_to_no_scope() {
         // The prologue is the one of these every function has, and it is not inside any block.
         let rows = [rucc_asm::Row { at: 0, span: Span::DUMMY, inst: None }, row(4, 10, 14)];
-        let ends = ends(&extent(8), &rows);
+        let ends = ends(8, &rows);
         let scope = Span::new(0, 20);
         assert_eq!(spread(scope, &ends, &rows), vec![rucc_debug::Reach { from: 4, len: 4 }]);
     }
@@ -13013,7 +13098,7 @@ away:
         // Two functions' worth of scopes in one table, and this one is in the second pair.
         let scopes = [scope(None, 0, 10), scope(None, 20, 30), scope(Some(1), 22, 26)];
         let rows = [row(0, 22, 24), row(4, 26, 28)];
-        let (out, at) = nests(&[Some(2)], &scopes, &extent(8), &rows);
+        let (out, at) = nests(&[Some(2)], &scopes, 8, &rows);
         // The one the local is in and the one that is inside, numbered from zero for this
         // function, with the parent named by the entry it became rather than by where it was.
         assert_eq!(at.get(&1), Some(&0));
@@ -13030,7 +13115,7 @@ away:
     fn a_local_written_straight_into_the_body_pulls_no_scope_in() {
         let scopes = [scope(None, 20, 30)];
         let rows = [row(0, 22, 24)];
-        let (out, at) = nests(&[None], &scopes, &extent(4), &rows);
+        let (out, at) = nests(&[None], &scopes, 4, &rows);
         assert_eq!(out, Vec::new());
         assert!(at.is_empty());
     }
@@ -13042,7 +13127,7 @@ away:
         // function and make it answer to a name it was not declared under.
         let scopes = [scope(None, 20, 30)];
         let rows = [row(0, 40, 44)];
-        let (out, at) = nests(&[Some(0)], &scopes, &extent(4), &rows);
+        let (out, at) = nests(&[Some(0)], &scopes, 4, &rows);
         assert_eq!(at.get(&0), Some(&0));
         assert_eq!(out.len(), 1);
         assert_eq!(out[0].over, Vec::new());

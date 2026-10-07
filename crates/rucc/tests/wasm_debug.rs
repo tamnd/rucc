@@ -4,7 +4,10 @@
 //! `llvm-dwarfdump --verify` takes the object and the module. The rucc linker writes the same
 //! module as `wasm-ld`, byte for byte, with the same DWARF sections.
 //!
-//! Design: #3149.
+//! At `-O0` each declaration has a location: the parameters and the scalars are in wasm locals, and
+//! the arrays are in the frame, at an offset from the local that holds the bottom of the frame.
+//!
+//! Design: #3149, #3195.
 
 use std::path::{Path, PathBuf};
 use std::process::{Command, Output};
@@ -183,6 +186,73 @@ fn a_trap_gives_the_line_of_each_frame() {
     // of the `if`, as it is for a module from clang.
     for frame in ["t.c:2:", "t.c:4:12", "t.c:7:12"] {
         assert!(stderr.contains(frame), "no frame at {frame}:\n{stderr}");
+    }
+    std::fs::remove_dir_all(dir).unwrap();
+}
+
+/// A function with a parameter, a scalar and an array, and a loop with values that change.
+const PLACES: &str = "\
+int depth(int n) {
+    int k = n * 3;
+    int a[2] = {k, n};
+    if (n == 0)
+        __builtin_trap();
+    return depth(n - 1) + a[0] + k;
+}
+int sum(int n) {
+    int s = 0;
+    int i;
+    for (i = 0; i < n; i++) {
+        int x = i * 2;
+        s += x;
+    }
+    return s + i;
+}
+int main(void) {
+    return depth(2) + sum(3);
+}
+";
+
+/// The attributes of the first entry of the unit with that name, up to the next entry.
+fn entry<'a>(text: &'a str, name: &str) -> &'a str {
+    let at = text.find(&format!("DW_AT_name\t(\"{name}\")")).unwrap_or_else(|| panic!("{text}"));
+    let rest = &text[at..];
+    let end = rest.find("DW_TAG_").unwrap_or(rest.len());
+    &rest[..end]
+}
+
+#[test]
+fn each_declaration_has_a_location_at_o0() {
+    let Some(sdk) = sdk() else {
+        eprintln!("WASI_SDK_PATH is not set, so the object was not read back");
+        return;
+    };
+    let dir = scratch("places");
+    std::fs::write(dir.join("p.c"), PLACES).unwrap();
+    let dwarfdump = sdk.join("bin/llvm-dwarfdump");
+    for level in ["-O0", "-O2"] {
+        let object = format!("p{level}.o");
+        ok(&rucc(&["--target=wasm32-wasip1", level, "-g", "-c", "p.c", "-o", &object], &dir));
+        let out = Command::new(&dwarfdump).arg("--verify").arg(dir.join(&object)).output();
+        let out = out.expect("llvm-dwarfdump starts");
+        assert!(out.status.success(), "{level}: {}", String::from_utf8_lossy(&out.stdout));
+    }
+    let out = Command::new(&dwarfdump).arg("--debug-info").arg(dir.join("p-O0.o")).output();
+    let out = out.expect("llvm-dwarfdump starts");
+    ok(&out);
+    let text = String::from_utf8_lossy(&out.stdout);
+    let local = "DW_OP_WASM_location 0x0 ";
+    // The frame base is a local, and the array is at an offset from it.
+    assert!(entry(&text, "depth").contains(&format!("DW_AT_frame_base\t({local}")), "{text}");
+    assert!(entry(&text, "a").contains("DW_OP_fbreg +"), "{text}");
+    // The parameter is the first local, and the scalar with one value is in a local all through.
+    let n = entry(&text, "n");
+    assert!(n.contains(&format!("DW_AT_location\t({local}0x0, DW_OP_stack_value)")), "{text}");
+    assert!(entry(&text, "k").contains(&format!("DW_AT_location\t({local}")), "{text}");
+    // A declaration that the loop changes is in more than one local, so it has a location list.
+    for name in ["s", "i"] {
+        let have = entry(&text, name);
+        assert!(have.contains("DW_AT_location\t(0x") && have.contains(local), "{name}:\n{text}");
     }
     std::fs::remove_dir_all(dir).unwrap();
 }
