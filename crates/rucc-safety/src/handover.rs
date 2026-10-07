@@ -166,8 +166,9 @@ pub enum Frame {
 /// the same either way. A name missing from the table is a name this unit does not define, which is
 /// what [`wanted`] reads it as.
 ///
-/// A wrapper `crate::wrap` sent a call to counts one too, though nothing here defines it. It is
-/// `rucc-safe-rt`'s, it takes its frame, and it judges the range it was handed against the
+/// A wrapper `crate::wrap` sent a call to counts one too, though nothing here defines it, and so
+/// does a judgement `crate::format` put in front of a call to the printf family. Either is
+/// `rucc-safe-rt`'s, takes its frame, and judges the range it was handed against the
 /// capability it finds there, which for a local is the only thing that knows how big the local is:
 /// no region covers the stack, so the planes the wrapper otherwise asks have nothing to say. A
 /// clear in front of the call was a `memcpy` into a local that nothing judged at all.
@@ -181,6 +182,7 @@ pub fn remaining(module: &Module, names: &Interner) -> Map<Symbol, usize> {
     // Found rather than interned, since a wrapper this unit never names is one no call goes to.
     let wrappers = crate::wrap::INTERPOSED
         .iter()
+        .chain(crate::format::JUDGES)
         .filter_map(|name| names.find(&[crate::wrap::PREFIX, name].concat()))
         .map(|symbol| (symbol, 1));
     let defined = module.funcs().filter(|&id| !module[id].is_declaration()).map(|id| {

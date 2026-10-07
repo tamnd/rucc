@@ -198,6 +198,8 @@ pub mod effects;
 pub mod epoch;
 pub mod fail;
 #[cfg(unix)]
+pub mod format;
+#[cfg(unix)]
 pub mod frame;
 pub mod heap;
 pub mod init;
@@ -231,7 +233,8 @@ pub mod wrap;
 /// and a group is a file. What `--emit=safety-summary` wants is the count per group as well as the
 /// total, so the shape that keeps them apart is the shape it is going to ask for.
 #[cfg(unix)]
-pub static TABLES: &[&[effects::Row]] = &[wrap::TABLE, syscall::TABLE, sync::TABLE, mapping::TABLE];
+pub static TABLES: &[&[effects::Row]] =
+    &[wrap::TABLE, syscall::TABLE, sync::TABLE, mapping::TABLE, format::TABLE];
 
 /// The milestone in `spec/safe-memory/16-milestones.md` that fills this crate in.
 pub const MILESTONE: &str = "S1";

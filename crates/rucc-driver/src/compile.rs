@@ -960,7 +960,10 @@ fn instrument(
     // `rucc_safety::wrap` argues out: `memcpy` is a name an optimizer knows things about, and a
     // pass that turns a short copy into a pair of loads and stores would leave behind accesses the
     // check insertion has already finished walking past.
-    let interposed = rucc_safety::redirect(module, names);
+    let interposed = rucc_safety::redirect(module, names)
+        // The printf family is judged at the call rather than in a wrapper, which
+        // `rucc_safety::format` says why, and before the optimizer for the same reason.
+        + rucc_safety::format::judge(module, names);
     // After the redirection, so that a call this build models with a wrapper is not also counted
     // as a crossing it did not model.
     let crossings = rucc_safety::witness(module, names);
