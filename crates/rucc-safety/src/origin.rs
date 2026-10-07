@@ -463,7 +463,7 @@ pub(crate) fn already(func: &Func, held: &Map<Value, Value>, pointer: Value) -> 
 /// Anything that is not a `ptr_add` over a pointer is its own base, which includes a parameter, a
 /// load, a call's result and a cast, and each of those is a place a later box on tamnd/rucc#1241
 /// gives a producer of its own.
-fn root(func: &Func, pointer: Value) -> Value {
+pub(crate) fn root(func: &Func, pointer: Value) -> Value {
     let mut at = pointer;
     loop {
         let Def::Result { inst, .. } = func[at].def else { return at };

@@ -45,7 +45,7 @@
 //! # Where the capabilities come from
 //!
 //! [`arrange`] hands over the capabilities the caller already has and says nothing about the rest.
-//! It never makes one, and that is the whole shape of it.
+//! It makes one only for a local, and that is the whole shape of it.
 //!
 //! The reason is that making one after the optimizer costs a `cap_recover`, which is the walk of the
 //! lifetime plane that tamnd/rucc#1241 exists to stop paying for. A caller that made a capability
@@ -63,7 +63,9 @@
 //! walks and eight per cent of the text on the SQLite amalgamation, which is how it was found.
 //!
 //! So a pointer the caller holds a capability for travels, a pointer it does not is the bottom
-//! capability, and the callee recovers that one exactly the way it does today. That makes this pass
+//! capability, and the callee recovers that one exactly the way it does today. The one exception is
+//! a pointer into one of the caller's own locals, whose capability is its address and its size and
+//! so costs no walk to make, and which recovery cannot describe at all. That makes this pass
 //! a strict improvement on the code it replaces rather than a trade, which is what lets the numbers
 //! in the pull request mean what they say. The other half of tamnd/rucc#1241 is what makes the
 //! caller hold more of them: once a pointer read out of memory has its capability in the aux slot
@@ -459,6 +461,32 @@ fn giving_back(func: &mut Func, held: &Map<Value, Value>, doms: &Doms) -> usize 
     done
 }
 
+/// A capability for the local `pointer` points into, made in front of `inst`, when it points into
+/// one.
+///
+/// The exception [`giving_back`] makes for a returned local, made for a passed one. The optimizer
+/// takes out every check a caller makes on its own local when they are all in bounds, and with them
+/// the capability, so at `-O2` a buffer that is written once and handed down arrives at a callee
+/// that still checks with nothing in the frame. The callee then recovers, and recovery has nothing
+/// to say about a stack address, so a callee reading four bytes through a pointer to a `char` was
+/// refused at `-O0` and let through at `-O2`. The capability of a local is its address and its
+/// size, which is no plane walk at all, so making one here costs a call and buys the callee its
+/// bounds.
+///
+/// Over the local rather than over `pointer`, so that a pointer into the middle of a buffer carries
+/// the whole buffer's bounds, which is the same reason [`origin::already`] answers by the base.
+fn made(func: &mut Func, pointer: Value, inst: Inst) -> Option<Value> {
+    let base = origin::root(func, pointer);
+    if !local(func, base) {
+        return None;
+    }
+    let args = func.push_values(&[base]);
+    let data = InstData { args, ..InstData::new(Opcode::CapOf) };
+    let cap = func.create_inst(data, &[Type::CAP], func.span(inst));
+    func.insert_before(cap, inst);
+    func[cap].results().next()
+}
+
 /// The instruction directly behind `inst` in the block it is in.
 fn behind(func: &Func, inst: Inst) -> Option<Inst> {
     let block = func.block_of(inst)?;
@@ -478,8 +506,14 @@ fn behind(func: &Func, inst: Inst) -> Option<Inst> {
 /// back, so that one publishes a single bottom capability rather than clearing.
 fn over(func: &mut Func, inst: Inst, held: &Map<Value, Value>, doms: &Doms) -> bool {
     let carried: Vec<Value> = pointers(func, inst).take(ARGS).collect();
-    let found: Vec<Option<Value>> =
-        carried.iter().map(|&value| seen(func, held, doms, value, inst)).collect();
+    let mut found: Vec<Option<Value>> = Vec::with_capacity(carried.len());
+    for &value in &carried {
+        let cap = match seen(func, held, doms, value, inst) {
+            Some(cap) => Some(cap),
+            None => made(func, value, inst),
+        };
+        found.push(cap);
+    }
     // Nothing to hand over is still a frame worth publishing when a pointer comes back, since the
     // callee's answer goes into it. It describes one bottom capability rather than none, which says
     // the same to the callee and keeps the publish one the verifier can tell from a clear.
@@ -1084,6 +1118,51 @@ mod tests {
         let local = b.value(InstData { extra, ..InstData::new(Opcode::Alloca) }, Type::PTR);
         b.ret(&[local]);
         func
+    }
+
+    #[test]
+    fn a_local_handed_to_a_callee_that_checks_travels_with_no_check_left_in_the_caller() {
+        // The shape -O2 leaves when the caller's only store into its buffer was in bounds and was
+        // discharged: nothing in the caller holds a capability, and the callee still checks. The
+        // callee cannot recover a stack address, so the caller makes the local's capability at the
+        // call, over the local itself for the pointer into its middle as well.
+        let mut names = Interner::new();
+        let mut module = unit(&mut names);
+        let mut func = Func::new(names.intern("f"), Signature::new());
+        let entry = func.create_block();
+        let sig = func.add_signature(three());
+        let varargs = func.push_abis(&[]);
+        let callee = Some(names.intern("g"));
+        let info = func.add_call(CallInfo { callee, signature: sig, varargs });
+        let mem = MemInfo {
+            size: 8,
+            align: 4,
+            order: MemOrder::NotAtomic,
+            tbaa: None,
+            owns: 0,
+            restrict: Restrict::NONE,
+        };
+        let extra = Extra::Mem(func.add_mem(mem));
+        let mut b = Builder::new(&mut func, entry);
+        let local = b.value(InstData { extra, ..InstData::new(Opcode::Alloca) }, Type::PTR);
+        let four = b.iconst(Type::int(64), 4);
+        let args = b.func().push_values(&[local, four]);
+        let inside = b.value(InstData { args, ..InstData::new(Opcode::PtrAdd) }, Type::PTR);
+        let args = b.func().push_values(&[local, four, inside]);
+        b.inst(InstData { args, extra: Extra::Call(info), ..InstData::new(Opcode::Call) }, &[]);
+        b.ret(&[]);
+        module.add_func(func);
+        module.add_func(caller(&mut names, "g", Some("h"), three(), true));
+        assert_eq!(arrange(&mut module), 1);
+        let func = &module[module.funcs().next().expect("the module defines two")];
+        assert_eq!(count(func, Opcode::CapClear), 0);
+        let caps = operands(func, Opcode::CapPublish);
+        assert_eq!(caps.len(), 2);
+        for cap in caps {
+            let Def::Result { inst, .. } = func[cap].def else { panic!("a capability is made") };
+            assert_eq!(func[inst].opcode, Opcode::CapOf);
+            assert_eq!(func[func[inst].args].to_vec(), [local]);
+        }
     }
 
     #[test]
