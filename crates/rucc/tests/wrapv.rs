@@ -206,20 +206,25 @@ fn withdrawing_the_licence_stops_the_optimizer_sizing_the_walk_in_front_of_the_l
     assert_eq!(windows(&["-fwrapv"]), 0, "the flag left a window in front of the loop");
 }
 
-/// A counter that stops at its own limit is still walked on a pointer with the licence withdrawn.
+/// A counter that stops at its own limit is still counted in 64 bits with the licence withdrawn.
 ///
 /// `i < n` is asked before `i` is stepped past it, so `i` is never more than `n` and never gets to
 /// the top of `int`, and sign extending it each time round is the same as sign extending where it
 /// started and counting on in 64 bits. Postgres is built with `-fwrapv`, and before this every
 /// `for (int i = ...; i < n; i++)` in it kept a sign extension and a scaled index in the loop.
+///
+/// Either way of getting the extension out of the loop will do. Ivopts used to do it by walking a
+/// pointer, and since tamnd/rucc#3065 the counter is given a 64 bit twin in front of ivopts, which
+/// then keeps the twin as a scaled index.
 #[test]
-fn a_counter_held_by_its_own_test_is_walked_on_a_pointer_either_way() {
+fn a_counter_held_by_its_own_test_is_counted_in_sixty_four_bits_either_way() {
     let source = "void zero(long *a, int s, int n) { for (int i = s; i < n; i++) a[i] = 0; }\n";
     for flags in [&[][..], &["-fwrapv"][..]] {
         let said = remarks("walk", flags, source);
         assert!(
-            said.contains("pointer given to the loop for a group of addresses to walk on"),
-            "{flags:?} left the index in the loop:\n{said}"
+            said.contains("pointer given to the loop for a group of addresses to walk on")
+                || said.contains("widening of a counter read off its sixty four bit twin"),
+            "{flags:?} left the extension in the loop:\n{said}"
         );
     }
 }
