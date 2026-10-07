@@ -94,9 +94,8 @@ impl Checker<'_> {
             return None;
         }
         let canonical_base = self.types.canonical(base);
-        let made = self
-            .types
-            .hardbool(canonical_base, Hardbool { false_value, true_value, written });
+        let made =
+            self.types.hardbool(canonical_base, Hardbool { false_value, true_value, written });
         let made = if atomic { self.types.atomic(made) } else { made };
         Some(self.types.qualified(made, quals))
     }

@@ -43,8 +43,8 @@ use rucc_sema::{
 use rucc_target::{Pass, TargetInfo};
 use rucc_tuple::Arch;
 use rucc_types::{
-    ArrayLen, Extent, Hardbool, IntKind, IntegerInfo, Qualifiers, RecordId, RecordKind, TypeId, TypeKind, Types,
-    VlaId, integer_info, pointee,
+    ArrayLen, Extent, Hardbool, IntKind, IntegerInfo, Qualifiers, RecordId, RecordKind, TypeId,
+    TypeKind, Types, VlaId, integer_info, pointee,
 };
 
 use crate::abi::{self, Plan, Travel};

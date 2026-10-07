@@ -177,7 +177,12 @@ fn hardbool_is_checked_in_gcc_s_words() {
         ("_BitInt(8) __attribute__((hardbool)) a;\n", integral, 1, 0),
         ("struct S { int __attribute__((hardbool(2))) m; };\n", "", 0, 0),
         ("void f(int __attribute__((hardbool)) p);\n", "", 0, 0),
-        ("typedef int __attribute__((hardbool)) h;\nh __attribute__((hardbool)) a;\n", integral, 1, 0),
+        (
+            "typedef int __attribute__((hardbool)) h;\nh __attribute__((hardbool)) a;\n",
+            integral,
+            1,
+            0,
+        ),
         ("int __attribute__((hardbool(1, 1))) a;\n", &format!("{different} for type 'int'"), 1, 0),
         (
             "signed char __attribute__((hardbool(1445))) a;\n",
