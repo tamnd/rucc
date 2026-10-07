@@ -19,7 +19,10 @@
 //! [`crate::lower`] builds a `tail_call` as the call and the return it stands for, and writes the
 //! call down as a [`Tail`] when the convention put every argument in a register. A call that needs
 //! the argument area is left as the call it was: the area is the bottom of this function's frame,
-//! and the frame is gone by the time the callee would read it.
+//! and the frame is gone by the time the callee would read it. Unless `musttail` asked for it, in
+//! which case the arguments go where this function's own came, above the return address the jump
+//! leaves for the callee, which is what gcc does. That is as many bytes as this function's caller
+//! gave it and no more, and past that the call is refused in gcc's words.
 //!
 //! [`jumps`] runs last, on machine code with every register handed out and the epilogue written.
 //! Each [`Tail`] whose block goes straight from the call to the epilogue, with nothing in between
