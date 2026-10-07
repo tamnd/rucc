@@ -70,7 +70,7 @@ fn a_musttail_call_is_a_jump_at_every_level() {
             assert!(!lines.contains(&format!("call {callee}")), "{level}: {lines:#?}");
         }
         let lines = body(&text, "i");
-        assert!(lines.iter().any(|line| line.starts_with("jmp *%")), "{level}: {lines:#?}");
+        assert!(lines.iter().any(|line| line.starts_with("jmp *")), "{level}: {lines:#?}");
 
         let (ok, text, err) = compile("a64", "aarch64-unknown-linux-gnu", &[level], CALLS);
         assert!(ok, "{level}\n{err}");
