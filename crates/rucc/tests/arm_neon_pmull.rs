@@ -27,7 +27,8 @@ int main(void) {
 }
 "#;
 
-/// What clang's build printed.
+/// What clang's build printed, read only where the product is run.
+#[cfg(all(target_os = "macos", target_arch = "aarch64"))]
 const EXPECTED: &str = "0000000000000000ffffffffffffffff
 756e20fe95d1ea100000000000000000
 756e20fe95d1ea100000000000000000
