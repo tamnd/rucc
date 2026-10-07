@@ -1285,7 +1285,25 @@ pub fn extent(addr: *const c_void, want: usize) -> usize {
     // one past it that answered. Starting at the next granule would say nothing about an address
     // in the middle of one.
     let covered = reached * plane::GRANULE + (plane::GRANULE - addr % plane::GRANULE);
-    covered.min(want)
+    asked(&region, addr, covered.min(want))
+}
+
+/// `covered` bytes from `addr` on, less what of them lies in the rounding of the instance.
+///
+/// The planes are per granule and a class is a whole number of them, so the run [`extent`] found
+/// is the instance rounded up to its class, and a request for ten bytes owns sixteen as far as the
+/// planes can tell, and one for two hundred owns more than one granule past its end. [`bounds`]
+/// refuses the bytes past the request all the same, which is [`rounded`], and an answer that
+/// counted them here would put them in the half of a split loop with no check in it. A loop
+/// copying eleven bytes into a ten byte block was refused at `-O0` and ran clean at `-O2`.
+///
+/// The header says how much was asked for. Reading it from partway into an instance is a search
+/// for the base, which costs as many reads as the instance has bits of size, and it is paid once
+/// in front of a loop rather than once per access in it. Nothing is taken off where there is no
+/// header to believe, which is [`rounded`]'s rule as well.
+fn asked(region: &Region, addr: usize, covered: usize) -> usize {
+    recover::extent(region, addr)
+        .map_or(covered, |(lo, ext)| covered.min((lo + ext).saturating_sub(addr)))
 }
 
 /// How many of the `want` bytes ending at `addr` the instance owning the byte below it covers.
@@ -1324,6 +1342,13 @@ pub fn extent_back(addr: *const c_void, want: usize) -> usize {
     // The part of the granule the last byte is in that lies below the address, which is owned by
     // definition, and then a granule for each one below it that answered.
     let covered = reached * plane::GRANULE + last % plane::GRANULE + 1;
+    // The base of an instance is the start of a granule, so all of the rounding is at the top and
+    // the only byte that can be in it is the highest one asked about. When that one is past what
+    // was asked for, so is every byte between it and the end of the instance, and none of the walk
+    // down from there is covered.
+    if asked(&region, last, 1) == 0 {
+        return 0;
+    }
     covered.min(want)
 }
 
@@ -3283,6 +3308,35 @@ mod tests {
             dealloc(one);
             dealloc(two);
         }
+    }
+
+    #[test]
+    fn the_extent_stops_where_the_request_did_and_not_where_its_granule_does() {
+        let _turn = turn();
+        // A request for ten bytes owns sixteen as far as the planes can tell, and the six past the
+        // tenth are ones the checks refuse. An answer that counted them would run the eleventh
+        // byte of a copy loop in the half of the split with no check in it.
+        let ptr = alloc(10);
+        assert_eq!(extent(at(ptr, 0), 1024), 10);
+        assert_eq!(extent(at(ptr, 4), 1024), 6);
+        assert_eq!(extent(at(ptr, 10), 1024), 0, "the rounding is not the instance's");
+        assert_eq!(extent(at(ptr, 0), 8), 8);
+        assert_eq!(extent_back(at(ptr, 10), 1024), 10);
+        assert_eq!(extent_back(at(ptr, 11), 1024), 0, "a walk down from the rounding");
+        assert_eq!(extent_back(at(ptr, 16), 1024), 0);
+        // SAFETY: `ptr` is a live instance.
+        unsafe { dealloc(ptr) };
+
+        // And the same at the end of an instance several granules long, where the planes settle
+        // everything up to the last granule and only that one has rounding in it.
+        let ptr = alloc(40);
+        assert_eq!(extent(at(ptr, 0), 1024), 40);
+        assert_eq!(extent(at(ptr, 33), 1024), 7);
+        assert_eq!(extent(at(ptr, 0), 20), 20);
+        assert_eq!(extent_back(at(ptr, 40), 1024), 40);
+        assert_eq!(extent_back(at(ptr, 41), 1024), 0);
+        // SAFETY: `ptr` is a live instance.
+        unsafe { dealloc(ptr) };
     }
 
     #[test]
