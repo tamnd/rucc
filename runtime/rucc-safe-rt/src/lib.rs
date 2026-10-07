@@ -209,6 +209,8 @@ pub mod syscall;
 pub mod tls;
 pub mod types;
 #[cfg(unix)]
+pub mod witness;
+#[cfg(unix)]
 pub mod wrap;
 
 /// Every group of the interposition table, as one thing to walk.

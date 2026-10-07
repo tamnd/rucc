@@ -216,6 +216,7 @@ pub fn frames(func: &mut Func, names: &mut Interner, word: Type, objects: &Objec
     if moved.is_empty() && !clears {
         return;
     }
+    let witness = witnessed(func, names, objects, &moved);
     substitute(func, &moved);
     parameters(func, word);
     let mut frame: Option<Value> = None;
@@ -225,7 +226,7 @@ pub fn frames(func: &mut Func, names: &mut Interner, word: Type, objects: &Objec
         match (func[inst].opcode, slot) {
             (Opcode::CapNull, Some(address)) => nulled(func, word, inst, address),
             (Opcode::CapOf, Some(address)) => {
-                allocated(func, names, word, objects, inst, address);
+                allocated(func, names, word, objects, witness, inst, address);
             }
             (Opcode::CapLoad, Some(address)) => read(func, names, inst, address),
             (Opcode::CapNarrow, Some(address)) => narrowed(func, names, word, inst, address),
@@ -282,6 +283,67 @@ pub fn frames(func: &mut Func, names: &mut Interner, word: Type, objects: &Objec
         }
     }
 }
+
+/// Gives the frame a witness when a local of it gets a capability, and gives back its address.
+///
+/// Row T4 of document 03, and `rucc_safe_rt::witness` is where it is argued. One word at the top of
+/// the entry block, `__rucc_frame_open(witness)` straight after it, and `__rucc_frame_close(witness)`
+/// in front of every `return` and tail call, which are the two ways the frame is given back. The
+/// capability of each local then names the word, so the lifetime check can tell a pointer that
+/// outlived the frame from one that did not.
+///
+/// Only a frame that hands out a capability for one of its locals pays, since nothing else could
+/// ever ask about the word. A call rather than a store at each end, because a store to a local
+/// right before the frame goes away is the first thing dead store elimination takes out.
+fn witnessed(
+    func: &mut Func,
+    names: &mut Interner,
+    objects: &Objects,
+    moved: &Map<Value, Value>,
+) -> Option<Value> {
+    let wanted = walk(func).into_iter().any(|inst| {
+        let kept = func[inst].results().next().is_some_and(|value| moved.contains_key(&value));
+        kept && named(func, objects, inst).is_some_and(|(_, _, routine)| routine == LOCAL)
+    });
+    if !wanted {
+        return None;
+    }
+    let entry = func.entry()?;
+    let first = func.insts(entry).next()?;
+    let span = func.span(first);
+    let info = MemInfo {
+        size: WORD,
+        align: ALIGN,
+        order: MemOrder::NotAtomic,
+        tbaa: None,
+        owns: 0,
+        restrict: Restrict::NONE,
+    };
+    let extra = Extra::Mem(func.add_mem(info));
+    let data = InstData { extra, ..InstData::new(Opcode::Alloca) };
+    let slot = func.create_inst(data, &[Type::PTR], span);
+    func.insert_before(slot, first);
+    let witness = func[slot].results().next()?;
+    let data =
+        crate::lower::calling(func, names, "__rucc_frame_open", &[Type::PTR], &[], &[witness]);
+    let open = func.create_inst(data, &[], span);
+    func.insert_after(open, slot);
+    let blocks: Vec<Block> = func.blocks().collect();
+    for block in blocks {
+        let Some(end) = func.terminator(block) else { continue };
+        if !matches!(func[end].opcode, Opcode::Return | Opcode::TailCall) {
+            continue;
+        }
+        let data =
+            crate::lower::calling(func, names, "__rucc_frame_close", &[Type::PTR], &[], &[witness]);
+        let close = func.create_inst(data, &[], func.span(end));
+        func.insert_before(close, end);
+    }
+    Some(witness)
+}
+
+/// The runtime entry that makes a local's capability, which is the one [`witnessed`] looks for.
+const LOCAL: &str = "__rucc_cap_local";
 
 /// Every instruction in the function, in an order that does not borrow it.
 fn walk(func: &Func) -> Vec<Inst> {
@@ -715,7 +777,7 @@ fn named(func: &Func, objects: &Objects, inst: Inst) -> Option<(Value, u64, &'st
     match (func[made].opcode, func[made].extra) {
         (Opcode::Alloca, Extra::Mem(mem)) if func[func[made].args].is_empty() => {
             let size = func[mem].size;
-            (size > 0).then_some((base, size, "__rucc_cap_local"))
+            (size > 0).then_some((base, size, LOCAL))
         }
         (Opcode::GlobalAddr, Extra::Symbol(name)) => {
             objects.get(&name).map(|&size| (base, size, "__rucc_cap_static"))
@@ -724,13 +786,14 @@ fn named(func: &Func, objects: &Objects, inst: Inst) -> Option<(Value, u64, &'st
     }
 }
 
-/// `cap_of` becomes `__rucc_cap_made(slot, base)`, `__rucc_cap_local(slot, base, size)`,
+/// `cap_of` becomes `__rucc_cap_made(slot, base)`, `__rucc_cap_local(slot, base, size, at)`,
 /// `__rucc_cap_static(slot, base, size)` or `__rucc_cap_recover(slot, at)`.
 ///
 /// The two in the middle are [`named`], and they are exact for the reason the first one is: the
 /// pointer is the object's own address, taken where the object was made, and the size is what the
 /// program declared. They take the size as a third argument because there is no header to read it
-/// out of.
+/// out of, and a local takes the address of its frame's witness as a fourth, which [`witnessed`]
+/// put there.
 ///
 /// Which of the two is not a property of the instruction, it is what [`fresh`] could find out about
 /// the pointer. A pointer traced back to an allocation site gets the cheap answer, which is a
@@ -765,14 +828,28 @@ fn allocated(
     names: &mut Interner,
     word: Type,
     objects: &Objects,
+    witness: Option<Value>,
     inst: Inst,
     address: Value,
 ) {
-    if let Some((base, size, routine)) = named(func, objects, inst) {
+    // A local has its frame's witness by now, since `witnessed` saw the same `cap_of`, and one
+    // that somehow does not is left to recovery rather than called with an argument missing.
+    let exact =
+        named(func, objects, inst).filter(|&(_, _, made)| made != LOCAL || witness.is_some());
+    if let Some((base, size, routine)) = exact {
         let size = konst(func, inst, Imm::int(i128::from(size), word), word);
-        let params = &[Type::PTR, Type::PTR, word];
-        let args = &[address, base, size];
-        let data = crate::lower::calling(func, names, routine, params, &[], args);
+        let data = match witness.filter(|_| routine == LOCAL) {
+            Some(witness) => {
+                let params = &[Type::PTR, Type::PTR, word, Type::PTR];
+                let args = &[address, base, size, witness];
+                crate::lower::calling(func, names, routine, params, &[], args)
+            }
+            None => {
+                let params = &[Type::PTR, Type::PTR, word];
+                let args = &[address, base, size];
+                crate::lower::calling(func, names, routine, params, &[], args)
+            }
+        };
         let made = func.create_inst(data, &[], func.span(inst));
         func.insert_before(made, inst);
         func.remove_inst(inst);
@@ -1222,6 +1299,14 @@ mod tests {
         assert!(text.contains("__rucc_cap_local"), "{text}");
         assert!(text.contains("iconst.i64 64"), "{text}");
         assert!(!text.contains("__rucc_cap_recover"), "{text}");
+        // Row T4. The frame gets a witness before anything makes a capability out of it, the
+        // capability names it, and it is cleared on the way out.
+        let open = text.find("__rucc_frame_open").expect("the witness is written");
+        let made = text.find("__rucc_cap_local").expect("the capability is made");
+        let close = text.find("__rucc_frame_close").expect("the witness is cleared");
+        let back = text.find("return").expect("the function returns");
+        assert!(open < made && made < close && close < back, "{text}");
+        assert_eq!(text.matches("__rucc_frame_close").count(), 1, "{text}");
         believed(&unit, &func, &names);
     }
 
@@ -1274,6 +1359,8 @@ mod tests {
         let text = print_func(&unit, &func, &names);
         assert!(text.contains("__rucc_cap_static"), "{text}");
         assert!(text.contains("iconst.i64 64"), "{text}");
+        // A variable outlives every frame, so this one has nothing to witness.
+        assert!(!text.contains("__rucc_frame_open"), "{text}");
 
         // And a weak one is the walk, because the definition that wins the link may be bigger.
         let maybe = names.intern("maybe");

@@ -278,6 +278,12 @@ fn rounded(region: &Region, addr: usize, last: usize) -> bool {
 /// a slot for and filled.
 pub unsafe fn live(addr: *const c_void, capability: *const Cap, descriptor: *const Descriptor) {
     let addr = addr as usize;
+    // SAFETY: this function's own contract about `capability`.
+    if unsafe { returned(capability) } {
+        // SAFETY: as in `bounds`.
+        unsafe { crate::fail::report(descriptor, Some(addr)) };
+        return;
+    }
     let Some(region) = alloc::covering(addr) else { return };
     let holder = owner(&region, addr);
     if plane::owned(holder) {
@@ -310,6 +316,25 @@ pub unsafe fn live(addr: *const c_void, capability: *const Cap, descriptor: *con
     }
     // SAFETY: as in `bounds`.
     unsafe { crate::fail::report(descriptor, Some(addr)) }
+}
+
+/// Whether `capability` is a local's whose frame has returned, which is row T4.
+///
+/// Asked before the planes are, because no plane covers a stack and so the rest of [`live`] has
+/// nothing to say about one. [`crate::witness`] is the whole of the answer.
+///
+/// # Safety
+///
+/// `capability` is null or the address of a filled capability slot.
+unsafe fn returned(capability: *const Cap) -> bool {
+    if capability.is_null() {
+        return false;
+    }
+    // SAFETY: the caller's contract, and a slot is `Cap::BYTES` of storage the frame owns.
+    let held = unsafe { core::ptr::read(capability) };
+    // SAFETY: a named local's capability was made by `__rucc_cap_local` with its frame's witness,
+    // which is a word of a stack that is still mapped for as long as its thread runs.
+    unsafe { crate::witness::gone(&held) }
 }
 
 /// Judgement J6, the half an allocator cannot decide: the capability being freed still names the
@@ -2920,6 +2945,29 @@ mod tests {
         assert!(!refused(|| bounds(core::ptr::null(), 4)));
         // A loop over a null pointer gets no unchecked half, so its first access meets the check.
         assert_eq!(extent(core::ptr::null(), 64), 0);
+    }
+
+    #[test]
+    fn a_local_of_a_frame_that_returned_is_refused_and_one_still_running_is_not() {
+        let _turn = turn();
+        // Row T4. No plane covers the stack, so the witness is the only thing that can say the
+        // frame has gone, and a pointer into a frame still running is the ordinary case.
+        let mut witness = 0_u64;
+        let local = [0_u32; 4];
+        let first = local.as_ptr().cast::<c_void>();
+        // SAFETY: both are locals of this test that outlive every use below.
+        let cap = unsafe {
+            crate::witness::open(&raw mut witness);
+            recover::local(first, 16, &raw const witness)
+        };
+        assert!(!refused(|| held(first, &cap)));
+        // SAFETY: as above.
+        unsafe { crate::witness::close(&raw mut witness) };
+        assert!(refused(|| held(first, &cap)));
+        // A variable is never asked, and nor is a pointer nothing vouched for.
+        let global = recover::object(first, 16, Class::Static);
+        assert!(!refused(|| held(first, &global)));
+        assert!(!refused(|| live(first)));
     }
 
     #[test]

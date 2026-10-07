@@ -157,13 +157,36 @@ pub enum Frame {
 /// Its own walk because a callee is allowed to be defined after its caller and the answer has to be
 /// the same either way. A name missing from the table is a name this unit does not define, which is
 /// what [`wanted`] reads it as.
+///
+/// A function that returns the address of one of its own locals counts one more, because that is
+/// a capability it will yield whether or not any check is left in it, and a caller that cleared
+/// instead of publishing would never read it. That is row T4 once the optimizer has taken out every
+/// check in the function, which in the usual shape of the bug it has.
 #[must_use]
 pub fn remaining(module: &Module) -> Map<Symbol, usize> {
     module
         .funcs()
         .filter(|&id| !module[id].is_declaration())
-        .map(|id| (module[id].name, checks_left(&module[id])))
+        .map(|id| {
+            let func = &module[id];
+            (func.name, checks_left(func) + usize::from(returns_a_local(func)))
+        })
         .collect()
+}
+
+/// Whether some `return` in `func` gives back the address of a local of a fixed size.
+fn returns_a_local(func: &Func) -> bool {
+    all(func).into_iter().any(|inst| {
+        func[inst].opcode == Opcode::Return
+            && func[func[inst].args].iter().any(|&value| local(func, value))
+    })
+}
+
+/// Whether `value` is the address an `alloca` of a fixed size produced, which is the shape
+/// `crate::slot` builds a local's capability out of.
+fn local(func: &Func, value: Value) -> bool {
+    let Def::Result { inst, .. } = func[value].def else { return false };
+    func[inst].opcode == Opcode::Alloca && func[func[inst].args].is_empty()
 }
 
 /// Which of the five `inst` is, or `None` when it is not a call at all.
@@ -300,6 +323,16 @@ fn one(func: &mut Func, left: &Map<Symbol, usize>, word: Type) -> usize {
                     from_the_call(func, inst);
                 }
             }
+            // A call that hands nothing over and gets a pointer back still wants a frame, because
+            // the frame is where the callee leaves the capability of what it returned. Without
+            // one the caller recovers a pointer the callee could have described exactly, and for
+            // a pointer to one of the callee's own locals that is the whole of row T4.
+            Some(Frame::Pointerless) if returning(func, inst) && reads_frame(func, inst, left) => {
+                if over(func, inst, &held, &doms) {
+                    published += 1;
+                    from_the_call(func, inst);
+                }
+            }
             Some(Frame::Outside | Frame::Unknown) => empty(func, inst),
             Some(Frame::Elided | Frame::Pointerless) | None => {}
         }
@@ -390,9 +423,12 @@ fn from_the_call(func: &mut Func, inst: Inst) -> bool {
 /// returns one value, so the loop is there to make the choice visible rather than because there is
 /// anything to choose between.
 ///
-/// Nothing is made here, as everywhere else in this pass: `held` holds the capabilities the function
-/// is paying for already, and a returned pointer that is not in it leaves the caller reading the
-/// bottom capability the publish wrote, which is the recovery the caller was doing anyway.
+/// Nothing is made here, as everywhere else in this pass, with one exception: `held` holds the
+/// capabilities the function is paying for already, and a returned pointer that is not in it leaves
+/// the caller reading the bottom capability the publish wrote, which is the recovery the caller was
+/// doing anyway. The exception is the address of a local, which gets a `cap_of` made for it in
+/// front of the return. Recovery has nothing to say about a stack address, and the capability is
+/// the only thing that can tell the caller the frame it points into is about to go, which is T4.
 fn giving_back(func: &mut Func, held: &Map<Value, Value>, doms: &Doms) -> usize {
     let mut done = 0;
     for inst in all(func) {
@@ -403,7 +439,17 @@ fn giving_back(func: &mut Func, held: &Map<Value, Value>, doms: &Doms) -> usize 
         let Some(&pointer) = returned.iter().find(|&&value| func[value].ty.is_ptr()) else {
             continue;
         };
-        let Some(cap) = seen(func, held, doms, pointer, inst) else { continue };
+        let cap = match seen(func, held, doms, pointer, inst) {
+            Some(cap) => cap,
+            None if local(func, pointer) => {
+                let args = func.push_values(&[pointer]);
+                let data = InstData { args, ..InstData::new(Opcode::CapOf) };
+                let made = func.create_inst(data, &[Type::CAP], func.span(inst));
+                func.insert_before(made, inst);
+                func[made].results().next().expect("cap_of produces one value")
+            }
+            None => continue,
+        };
         let args = func.push_values(&[cap]);
         let data = InstData { args, ..InstData::new(Opcode::CapYield) };
         let made = func.create_inst(data, &[], func.span(inst));
@@ -428,17 +474,28 @@ fn behind(func: &Func, inst: Inst) -> Option<Inst> {
 /// thing to the callee and the shorter one is four fewer stores. A list that would be empty is the
 /// clear instead, which is the same saving taken all the way and is what the verifier asks for
 /// anyway: a publish describing nothing is a clear spelled at length, and the two mean opposite
-/// things.
+/// things. The exception is a call that gives back a pointer, whose frame is where the answer comes
+/// back, so that one publishes a single bottom capability rather than clearing.
 fn over(func: &mut Func, inst: Inst, held: &Map<Value, Value>, doms: &Doms) -> bool {
     let carried: Vec<Value> = pointers(func, inst).take(ARGS).collect();
     let found: Vec<Option<Value>> =
         carried.iter().map(|&value| seen(func, held, doms, value, inst)).collect();
-    let Some(last) = found.iter().rposition(Option::is_some) else {
-        empty(func, inst);
-        return false;
+    // Nothing to hand over is still a frame worth publishing when a pointer comes back, since the
+    // callee's answer goes into it. It describes one bottom capability rather than none, which says
+    // the same to the callee and keeps the publish one the verifier can tell from a clear.
+    let given = match found.iter().rposition(Option::is_some) {
+        Some(last) => last + 1,
+        None if returning(func, inst) => 0,
+        None => {
+            empty(func, inst);
+            return false;
+        }
     };
-    let mut caps = Vec::with_capacity(last + 1);
-    for each in &found[..=last] {
+    let mut caps = Vec::with_capacity(given.max(1));
+    if given == 0 {
+        caps.push(nothing(func, inst));
+    }
+    for each in &found[..given] {
         let cap = match *each {
             Some(cap) => cap,
             None => nothing(func, inst),
@@ -480,6 +537,25 @@ fn seen(
         },
     };
     visible.then_some(cap)
+}
+
+/// Whether `inst` gives back a pointer the caller makes a capability for, which is what makes the
+/// frame around it worth reading after it returns.
+///
+/// The same shape [`from_the_call`] turns into the read, so a call whose result nobody checks goes
+/// on paying nothing for it.
+fn returning(func: &Func, inst: Inst) -> bool {
+    let Some(result) = func[inst].results().next() else { return false };
+    func[result].ty.is_ptr()
+        && behind(func, inst).is_some_and(|next| {
+            func[next].opcode == Opcode::CapOf && func[func[next].args].first() == Some(&result)
+        })
+}
+
+/// Whether `inst` calls a function this unit defines that still has a check standing, which is
+/// one that takes its frame and so one that can leave a capability in it.
+fn reads_frame(func: &Func, inst: Inst, left: &Map<Symbol, usize>) -> bool {
+    callee(func, inst).and_then(|name| left.get(&name)).is_some_and(|&n| n > 0)
 }
 
 /// Puts a `cap_clear` in front of a call.
@@ -954,5 +1030,78 @@ mod tests {
         let func = &module[module.funcs().next().expect("the module defines two")];
         assert_eq!(count(func, Opcode::CapResult), 0);
         assert_eq!(count(func, Opcode::CapYield), 0);
+        assert_eq!(count(func, Opcode::CapPublish), 0);
+    }
+
+    /// A function `f` that asks `g` for a pointer, handing it nothing, and checks what comes back.
+    fn asking(names: &mut Interner) -> Func {
+        let mut func = Func::new(names.intern("f"), Signature::new());
+        let entry = func.create_block();
+        let sig = func.add_signature(Signature::new().with_returns(&[Type::PTR]));
+        let varargs = func.push_abis(&[]);
+        let callee = Some(names.intern("g"));
+        let info = func.add_call(CallInfo { callee, signature: sig, varargs });
+        let mut b = Builder::new(&mut func, entry);
+        let args = b.func().push_values(&[]);
+        let data = InstData { args, extra: Extra::Call(info), ..InstData::new(Opcode::Call) };
+        let got = b.value(data, Type::PTR);
+        checked(&mut b, got);
+        b.ret(&[]);
+        func
+    }
+
+    #[test]
+    fn a_call_that_hands_nothing_over_still_gets_back_the_capability_of_what_it_returned() {
+        // Row T4 needs this one: a function that returns a pointer to its own local and takes no
+        // pointer, so there was nothing to publish and the caller recovered an address the callee
+        // could have described exactly. The frame is published for the answer alone.
+        let mut names = Interner::new();
+        let mut module = unit(&mut names);
+        module.add_func(asking(&mut names));
+        module.add_func(passing_on(&mut names, "g", Some("h"), true));
+        assert_eq!(arrange(&mut module), 1);
+        let func = &module[module.funcs().next().expect("the module defines two")];
+        assert_eq!(count(func, Opcode::CapPublish), 1);
+        assert_eq!(operands(func, Opcode::CapPublish).len(), 1);
+        assert_eq!(count(func, Opcode::CapResult), 1);
+        assert!(crate::frame::given(func, the(func, Opcode::CapResult)));
+    }
+
+    /// A function `g` that returns the address of a local of its own and checks nothing.
+    fn escaping(names: &mut Interner) -> Func {
+        let mut func = Func::new(names.intern("g"), Signature::new().with_returns(&[Type::PTR]));
+        let entry = func.create_block();
+        let info = MemInfo {
+            size: 4,
+            align: 4,
+            order: MemOrder::NotAtomic,
+            tbaa: None,
+            owns: 0,
+            restrict: Restrict::NONE,
+        };
+        let extra = Extra::Mem(func.add_mem(info));
+        let mut b = Builder::new(&mut func, entry);
+        let local = b.value(InstData { extra, ..InstData::new(Opcode::Alloca) }, Type::PTR);
+        b.ret(&[local]);
+        func
+    }
+
+    #[test]
+    fn a_function_returning_its_own_local_yields_its_capability_with_no_check_left() {
+        // Row T4 at -O2, where the optimizer has taken every check out of the function that lets
+        // its local escape. It still counts as one that answers, and it makes the capability it
+        // answers with, so the caller's frame read is the local's and not the bottom one.
+        let mut names = Interner::new();
+        let mut module = unit(&mut names);
+        module.add_func(asking(&mut names));
+        module.add_func(escaping(&mut names));
+        assert_eq!(remaining(&module).get(&names.intern("g")), Some(&1));
+        assert_eq!(arrange(&mut module), 1);
+        let mut funcs = module.funcs();
+        let f = &module[funcs.next().expect("the module defines two")];
+        assert_eq!(count(f, Opcode::CapResult), 1);
+        let g = &module[funcs.next().expect("the module defines two")];
+        assert_eq!(count(g, Opcode::CapOf), 1);
+        assert_eq!(count(g, Opcode::CapYield), 1);
     }
 }
