@@ -22,7 +22,7 @@ use rucc_base::{Idx, IdxRange, Symbol};
 use rucc_diag::Span;
 use rucc_lex::StringLiteral;
 use rucc_target::Isa;
-use rucc_types::{TypeId, VlaId};
+use rucc_types::{Prototype, TypeId, VlaId};
 
 use crate::asm::{Asm, AsmId, AsmOperand, AsmOperandList, FileAsm, LabelList, StrList};
 use crate::decl::{Decl, DeclId, DeclList, InitEntry};
@@ -221,6 +221,7 @@ pub struct Tast {
     vlas: Vec<ExprId>,
     adjusted: Vec<(DeclId, TypeId)>,
     spellings: Vec<(DeclId, Symbol, TypeId)>,
+    prototypes: Map<DeclId, Vec<Prototype>>,
     targets: Vec<(DeclId, Isa)>,
     versions: Vec<(DeclId, Vec<Version>)>,
     sections: Map<DeclId, StrId>,
@@ -443,6 +444,21 @@ impl Tast {
     #[must_use]
     pub fn spellings(&self) -> &[(DeclId, Symbol, TypeId)] {
         &self.spellings
+    }
+
+    /// Records the prototypes a declaration's declarator wrote, which say how each pointer to a
+    /// function in its type wrote its parameters. See [`rucc_types::Prototype`]. The first time a
+    /// declaration is written is the one that counts, as it is for its typedef name.
+    pub fn record_prototypes(&mut self, decl: DeclId, written: Vec<Prototype>) {
+        if !written.is_empty() {
+            self.prototypes.entry(decl).or_insert(written);
+        }
+    }
+
+    /// The prototypes a declaration's declarator wrote, and nothing for one that wrote none.
+    #[must_use]
+    pub fn prototypes(&self, decl: DeclId) -> &[Prototype] {
+        self.prototypes.get(&decl).map_or(&[], Vec::as_slice)
     }
 
     /// Records where the name is written in a function's definition, when the function was

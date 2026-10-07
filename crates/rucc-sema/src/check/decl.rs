@@ -741,8 +741,10 @@ impl Checker<'_> {
         let deduces = self.ast[specs].deduces();
         let spelled = self.spelled_with(specs);
         let deducible = deduces.is_some_and(|which| self.deducible(which, item));
+        let mark = self.types.prototypes_mark();
         let ty =
             if deduces.is_some() { self.int() } else { self.declared_type(specs, item.declarator) };
+        let prototypes = self.types.take_prototypes(mark);
         // `constexpr` implies `const`, which C23 6.7.2p6 says and which is what makes taking the
         // address of one and writing through it the diagnostic gcc gives it rather than silence.
         // An array is qualified through its element, so `constexpr int a[3];` is an array of
@@ -768,6 +770,9 @@ impl Checker<'_> {
         let specs = self.ast[specs];
         self.flag_enum_misplaced(&[specs.attrs, item.attrs], ty);
         if specs.is_typedef() {
+            if self.scopes.at_file_scope() {
+                self.types.record_alias_prototypes(name, prototypes);
+            }
             return self.typedef(name, ty, &specs, item, span);
         }
         let kind = if is_function(&self.types, ty) { DeclKind::Function } else { DeclKind::Object };
@@ -971,6 +976,7 @@ impl Checker<'_> {
         if let Some((name, of)) = spelled {
             self.tast.record_spelling(id, name, of);
         }
+        self.tast.record_prototypes(id, prototypes);
         // Both places, for the reason `noreturn` above reads both. gcc says nothing about the
         // attribute on an object beyond that it is ignored, and it is not read there at all.
         let cloned = self.cloned(&[specs.attrs, item.attrs], kind);
@@ -1192,7 +1198,16 @@ impl Checker<'_> {
         // the block it was written in and there is nothing yet that says which block a type was
         // named in.
         if self.scopes.at_file_scope() {
-            self.types.alias(name, ty);
+            // The name this one was written over, looked up before this one is declared, since
+            // `typedef u64 u64;` in a second header names the one already there.
+            let spelled = match specs.ty {
+                ast::TypeSpec::Typedef(over) => match self.scopes.lookup(over) {
+                    Some(Binding::Typedef(of)) if over != name => Some((over, of)),
+                    _ => None,
+                },
+                _ => None,
+            };
+            self.types.alias(name, ty, spelled);
         }
         match self.scopes.lookup_here(name) {
             // A typedef may be written twice for the same type, which is what lets two headers

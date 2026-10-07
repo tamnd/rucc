@@ -41,8 +41,8 @@ use rucc_session::Std;
 use rucc_target::{TargetInfo, VaList};
 use rucc_types::{
     ArrayLen, FieldDecl, FloatKind, FunctionType, IntKind, Qualifiers, RecordKind, RecordOptions,
-    TypeId, TypeKind, adjust_parameter, is_complete, is_function, is_integer, is_pointer, is_void,
-    layout,
+    TypeId, TypeKind, Written, adjust_parameter, is_complete, is_function, is_integer, is_pointer,
+    is_void, layout,
 };
 
 use crate::check::{Checker, Promoted};
@@ -1134,6 +1134,7 @@ impl Checker<'_> {
             None => ret,
         };
 
+        let mut written = Vec::new();
         let (params, prototyped) = match kind {
             ParamKind::Void => (Vec::new(), true),
             // `int f()` says nothing about the parameters before C23 and says there are none
@@ -1143,9 +1144,13 @@ impl Checker<'_> {
             // in the declarations between the parenthesis and the body, which is the function
             // definition's business rather than this one's.
             ParamKind::Identifiers => (Vec::new(), false),
-            ParamKind::Prototype => (self.prototype(params), true),
+            ParamKind::Prototype => (self.prototype(params, &mut written), true),
         };
-        self.types.function(FunctionType {
+        // What the parameters were written as, which the type does not keep and the debug
+        // information for a pointer to it does, the way it does for a declaration.
+        let keep =
+            written.iter().zip(&params).any(|(one, &ty)| one.spelled.is_some() || one.ty != ty);
+        let ty = self.types.function(FunctionType {
             ret,
             params,
             variadic,
@@ -1155,7 +1160,14 @@ impl Checker<'_> {
             indirect_return: false,
             return_pointer_popped: None,
             sse_regparm: false,
-        })
+        });
+        if let TypeKind::Function(id) = self.types.kind(ty) {
+            if keep {
+                self.types.record_params_written(id, written.clone());
+            }
+            self.types.record_prototype(id, written);
+        }
+        ty
     }
 
     /// Whether a parameter of a prototype was declared with a storage class it may not have.
@@ -1185,7 +1197,9 @@ impl Checker<'_> {
     }
 
     /// The parameter types of a prototype, adjusted the way a parameter is.
-    fn prototype(&mut self, params: ast::ParamList) -> Vec<TypeId> {
+    ///
+    /// What each parameter was written as goes in `as_written`, one per parameter in order.
+    fn prototype(&mut self, params: ast::ParamList, as_written: &mut Vec<Written>) -> Vec<TypeId> {
         let ast = self.ast;
         let list = &ast[params];
         // A prototype is a scope of its own, which is what makes the `n` in
@@ -1196,6 +1210,7 @@ impl Checker<'_> {
         let mut types = Vec::with_capacity(list.len());
         let mut declared = Vec::new();
         for (index, param) in list.iter().enumerate() {
+            let mark = self.types.prototypes_mark();
             let ty = match param.specs {
                 Some(specs) => {
                     let ty = self.build_type(
@@ -1296,9 +1311,15 @@ impl Checker<'_> {
             }
             // The typedef name the parameter was written with, which the type does not keep and
             // which a debugger printing the parameter says in place of what the name stands for.
-            if let Some((name, of)) = param.specs.and_then(|specs| self.spelled_with(specs)) {
+            let named = param.specs.and_then(|specs| self.spelled_with(specs));
+            if let Some((name, of)) = named {
                 self.tast.record_spelling(decl, name, of);
             }
+            // Copied rather than taken, since they are a part of the declarator this prototype
+            // is in as well.
+            let inner = self.types.prototypes_since(mark);
+            self.tast.record_prototypes(decl, inner);
+            as_written.push(Written { ty: object, spelled: named });
             declared.push(decl);
         }
         self.scopes.pop();

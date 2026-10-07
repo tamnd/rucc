@@ -459,6 +459,9 @@ impl<'a> Checker<'a> {
         let ast = self.ast;
         self.refuse_unimplemented_attributes();
         for &decl in ast.top_level() {
+            // What a body's casts wrote is read by no declaration, and is dropped here rather
+            // than carried to the end of the unit.
+            self.types.forget_prototypes();
             self.check_decl(decl);
         }
         self.check_resolvers();
