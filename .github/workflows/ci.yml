@@ -557,12 +557,16 @@ jobs:
   # Then rucc builds the SQLite shell at -O0 and -O2 (#2865), and each build runs a fixed workload
   # under both engines and must give the output of the shell that clang from wasi-sdk 34 builds.
   # In the Wasmtime runs, each program and each shell is also linked by the linker inside rucc
-  # (#2867). tests/wasm-link/same.sh holds that module to the `wasm-ld` module byte for byte, apart
-  # from the DWARF sections, and the module runs too. The job installs lld 23, the `wasm-ld` of
-  # wasi-sdk 34, because lld 21 puts the data before the stack and writes other bytes. The job also
-  # runs the wasm32-none subset of rung 0 (#3137): the programs that need no C library, linked with
-  # tests/wasm-none/start.c and run under Wasmtime with tests/wasm-none/host.c as their import
-  # module. The same checks of the objects and of the linker inside rucc apply.
+  # (#2867). tests/wasm-link/same.sh holds that module to the `wasm-ld` module byte for byte, with
+  # the DWARF sections that the C library brings, and the module runs too. The job installs lld 23,
+  # the `wasm-ld` of wasi-sdk 34, because lld 21 puts the data before the stack and writes other
+  # bytes. The job also runs the wasm32-none subset of rung 0 (#3137): the programs that need no C
+  # library, linked with tests/wasm-none/start.c and run under Wasmtime with tests/wasm-none/host.c
+  # as their import module. The same checks of the objects and of the linker inside rucc apply.
+  # Last, the test of `-g` (#3149) runs with lld 23 and its `llvm-dwarfdump` as the wasi-sdk: a
+  # program that traps, built with `-g` and linked by `wasm-ld` and by the linker inside rucc, must
+  # give the same module, `llvm-dwarfdump --verify` must take it, and the Wasmtime backtrace must
+  # give the file and the line of each frame.
   wasm:
     name: wasm32-wasip1 rung 0 and SQLite
     needs: quick
@@ -614,6 +618,14 @@ jobs:
         run: |
           cargo xtask builtins --target wasm32-none
           tests/rung0/run.sh "$PWD/target/release/rucc" wasm32-none
+      - name: run the -g test with lld 23 and Wasmtime
+        env:
+          WASI_SDK_PATH: /usr/lib/llvm-23
+        run: |
+          set -euo pipefail
+          test -x "$WASI_SDK_PATH/bin/wasm-ld"
+          test -x "$WASI_SDK_PATH/bin/llvm-dwarfdump"
+          cargo test --release -p rucc --test wasm_debug -- --nocapture
       - name: fetch the sqlite amalgamation
         run: |
           curl -fsSL -o sqlite.tar.gz https://sqlite.org/2026/sqlite-autoconf-3530400.tar.gz
