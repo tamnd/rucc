@@ -85,6 +85,7 @@ pub struct Elsewhere {
     based: bool,
     defined: Set<Symbol>,
     aligned: Map<Symbol, u32>,
+    unstubbed: Set<Symbol>,
 }
 
 /// Which pointer a name on COFF is reached through, when it is reached through one.
@@ -478,6 +479,36 @@ impl Elsewhere {
             .map(|id| module[id].name);
         self.names.extend(funcs.chain(globals));
         self
+    }
+
+    /// The functions that a call reaches through the global offset table and not through a stub of
+    /// the procedure linkage table, which is `-fno-plt`.
+    ///
+    /// These are the functions that can be in another object: a declared function that is not
+    /// hidden or protected, and under `-fPIC` each function that another object can replace. The
+    /// call reads the address from the slot and calls through it, `call *f@GOTPCREL(%rip)` on
+    /// x86-64 and `adrp`, `ldr` and `blr` on AArch64, as gcc does. With `-z now` the loader fills
+    /// each slot at startup, and no call goes through a stub.
+    #[must_use]
+    pub fn without_plt(mut self, module: &Module, pic: Pic) -> Self {
+        self.unstubbed = module
+            .funcs()
+            .filter(|&id| {
+                let func = &module[id];
+                (func.is_declaration()
+                    && (func.visibility == Visibility::Default || func.linkage == Linkage::Weak))
+                    || pic.replaceable(func.linkage, func.visibility)
+            })
+            .map(|id| module[id].name)
+            .collect();
+        self
+    }
+
+    /// Whether a call to that name reads the address from the global offset table. See
+    /// [`Self::without_plt`].
+    #[must_use]
+    pub fn unstubbed(&self, name: Symbol) -> bool {
+        self.unstubbed.contains(&name)
     }
 
     /// The same set for i386 position independent code, which reaches every name from the global

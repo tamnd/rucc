@@ -1532,6 +1532,19 @@ fn generate(
     } else {
         elsewhere
     };
+    // `-fno-plt`, on ELF. gcc does it on x86-64 for each link, and on AArch64 only in position
+    // independent code. i386 keeps the PLT for now.
+    let elsewhere = if !opts.plt
+        && target.tuple.os().object_format() == Some(ObjectFormat::Elf)
+        && match target.tuple.arch() {
+            Arch::X86_64 => true,
+            Arch::Aarch64 => pic != IrPic::Absolute,
+            _ => false,
+        } {
+        elsewhere.without_plt(module, pic)
+    } else {
+        elsewhere
+    };
     // Asked of the module the code is made from, since a use the optimizer took away is one gcc
     // never asks about either.
     let indirect = Elsewhere::needs_indirect(module);
