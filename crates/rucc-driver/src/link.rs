@@ -531,10 +531,10 @@ impl Linker {
 
 /// The names to look for, in the order section 4.9 gives.
 ///
-/// `mold` first because it is dramatically faster, and a compiler that is twice the speed of
-/// another one while the link takes twelve seconds has not helped anybody. Then `lld`, then the
-/// platform's own. Each is looked for under both the bare name and the `ld.` prefix, because a
-/// distribution installs `mold` under its own name and `ld.mold` for exactly this lookup.
+/// On a Linux machine, a program for that machine is linked by its own `ld` first, as GCC does it.
+/// Otherwise `mold` is first because it is dramatically faster, then `lld`, then the platform's
+/// own. Each is looked for under both the bare name and the `ld.` prefix, because a distribution
+/// installs `mold` under its own name and `ld.mold` for exactly this lookup.
 #[must_use]
 pub fn order(target: Triple, opts: &LinkOptions) -> Vec<String> {
     if let Some(named) = &opts.use_ld {
@@ -577,14 +577,33 @@ pub fn order(target: Triple, opts: &LinkOptions) -> Vec<String> {
     }
     match target.os {
         Os::Windows => vec!["lld-link".to_owned(), "link.exe".to_owned()],
-        _ => vec![
-            "ld.mold".to_owned(),
-            "mold".to_owned(),
-            "ld.lld".to_owned(),
-            "lld".to_owned(),
-            "ld".to_owned(),
-        ],
+        _ => elf_order(target, Triple::host()),
     }
+}
+
+/// The ELF linkers, with the host as a parameter so that both orders are testable on one machine.
+fn elf_order(target: Triple, host: Option<Triple>) -> Vec<String> {
+    let mut names = vec![
+        "ld.mold".to_owned(),
+        "mold".to_owned(),
+        "ld.lld".to_owned(),
+        "lld".to_owned(),
+        "ld".to_owned(),
+    ];
+    // A Linux program for this machine is linked by GNU ld first, as GCC links it, so that a build
+    // gets the same linker with rucc as with GCC. `-fuse-ld=mold` and `-fuse-ld=lld` are there for
+    // speed. The machine's `ld` reads only its own architecture, so a link for another one keeps
+    // the order above. Document 18 Q5 of the Linux plan.
+    if target.os == Os::Linux && host.is_some_and(|host| runs_on(host, target)) {
+        names.rotate_right(1);
+    }
+    names
+}
+
+/// Whether the `ld` of the host reads objects of the target. The x86-64 `ld` links `-m32` too.
+fn runs_on(host: Triple, target: Triple) -> bool {
+    host.os == Os::Linux
+        && (host.arch == target.arch || (host.arch, target.arch) == (Arch::X86_64, Arch::X86))
 }
 
 /// Whether this is a Windows target in Microsoft's environment, which is linked by `lld-link`.
@@ -1964,14 +1983,23 @@ fn runtime_items(opts: &LinkOptions, runtime: &[PathBuf], ours: Option<&Path>) -
     args
 }
 
-/// Where a gcc on this machine keeps `crtbegin.o`, `crtend.o` and `libgcc.a`, newest first.
+/// Where a gcc on this machine keeps `crtbegin.o`, `crtend.o` and `libgcc.a`.
 ///
 /// This is not where the C library's files are. A distribution puts them under a directory named
-/// for the gcc version, and there may be several, so the answer is every one that exists with the
-/// highest version in front. Newest first because a newer `libgcc` is a superset of an older one
-/// and because that is the one the C library on the same machine was built against.
+/// for the gcc version, and there may be several. The answer is the newest one that holds
+/// `libgcc.a`, because GCC links with its own directory and no other. A library that is only in the
+/// directory of an old GCC is not found by GCC, so it is not found here. A newer directory with no
+/// `libgcc.a` is skipped, because Ubuntu makes one for the C++ headers of a GCC that is not
+/// installed.
 #[must_use]
 pub fn runtime_dirs(target: Triple, sysroot: Option<&Path>) -> Vec<PathBuf> {
+    let all = gcc_dirs(target, sysroot);
+    let newest = all.iter().find(|dir| dir.join("libgcc.a").is_file()).or(all.first());
+    newest.cloned().into_iter().collect()
+}
+
+/// Each directory of a gcc on this machine, newest first.
+fn gcc_dirs(target: Triple, sysroot: Option<&Path>) -> Vec<PathBuf> {
     let libc = match target.env {
         Env::Musl => "musl",
         Env::None | Env::Gnu | Env::Msvc => "gnu",
@@ -2250,7 +2278,7 @@ pub fn search_dirs(link: &LinkOptions, target: Triple) -> Vec<PathBuf> {
     }
     // The directory of the newest GCC comes before the system ones, as in GCC. It holds
     // `libgcc.a` and `crtbegin.o`, which a build system asks for by name.
-    dirs.extend(runtime_dirs(target, link.sysroot.as_deref()).into_iter().take(1));
+    dirs.extend(runtime_dirs(target, link.sysroot.as_deref()));
     dirs.extend(candidates(target, link.sysroot.as_deref()));
     dirs
 }
@@ -2476,8 +2504,17 @@ mod tests {
     }
 
     #[test]
-    fn the_fast_one_is_looked_for_first_and_the_platforms_own_last() {
-        let names = order(linux(), &LinkOptions::default());
+    fn gnu_ld_links_for_its_own_machine_and_the_fast_one_is_first_for_another() {
+        let x86 = Triple::new(Arch::X86, Os::Linux, Env::Gnu);
+        let arm = Triple::new(Arch::Aarch64, Os::Linux, Env::Gnu);
+        let first = |target: Triple, host: Triple| elf_order(target, Some(host)).remove(0);
+        assert_eq!(first(linux(), linux()), "ld");
+        assert_eq!(first(x86, linux()), "ld", "the x86-64 ld links -m32");
+        assert_eq!(first(arm, arm), "ld");
+        assert_eq!(first(arm, linux()), "ld.mold");
+        assert_eq!(first(linux(), arm), "ld.mold");
+        let mac = Triple::new(Arch::Aarch64, Os::Darwin, Env::None);
+        let names = elf_order(arm, Some(mac));
         assert_eq!(names.first().map(String::as_str), Some("ld.mold"));
         assert_eq!(names.last().map(String::as_str), Some("ld"));
     }
