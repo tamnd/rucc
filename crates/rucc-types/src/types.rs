@@ -131,6 +131,33 @@ pub struct EnumInfo {
     /// What `__attribute__((warn_if_not_aligned(n)))` on it asked a member of its type to sit at
     /// a multiple of. See [`RecordInfo::warn_if_not_aligned`].
     pub warn_if_not_aligned: Option<NonZeroU32>,
+    /// The two representations, where this is the type `__attribute__((hardbool))` made of an
+    /// integer type, and [`None`] for every enumeration the program declared.
+    ///
+    /// gcc builds that type as an enumeration over the integer type and so does this, which is
+    /// what gives it the integer's size, alignment and place in a call for nothing. What it has
+    /// that no other enumeration has is the rule about its values, and that is read off here.
+    pub hardbool: Option<Hardbool>,
+}
+
+/// What `__attribute__((hardbool(false_value, true_value)))` made an integer type into.
+///
+/// A value of the type stands for a `bool`, and these are the two bit patterns that stand for
+/// one. Anything else in an object of the type is a value that was never written as one, and
+/// reading it traps.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Hardbool {
+    /// What `false` is stored as, in the integer type.
+    pub false_value: i128,
+    /// What `true` is stored as, which is never the same.
+    pub true_value: i128,
+    /// The two arguments as the program wrote them, each with the type it was written in, and
+    /// [`None`] for one it left out.
+    ///
+    /// A bit-field of the type narrower than the type takes the attribute again at its own width,
+    /// which is how gcc lays one out: a value written for the whole type and cut down to the
+    /// field's width is what gcc warns about, in terms of what was written.
+    pub written: [Option<(i128, TypeId)>; 2],
 }
 
 /// One enumerator of an enumeration.
@@ -533,8 +560,38 @@ impl Types {
             fixed: false,
             enumerators: Vec::new(),
             warn_if_not_aligned: None,
+            hardbool: None,
         });
         id
+    }
+
+    /// The type `__attribute__((hardbool))` makes of an unqualified integer type.
+    ///
+    /// A new one every time, because gcc makes a distinct type of each application: two typedefs
+    /// that say the same thing are two types, and neither is compatible with the other.
+    ///
+    /// # Panics
+    ///
+    /// Panics past four billion enumeration declarations in one translation unit.
+    pub fn hardbool(&mut self, underlying: TypeId, hardbool: Hardbool) -> TypeId {
+        let id = self.declare_enum(None);
+        self.complete_enum(id, underlying, true);
+        self.enums[id.0 as usize].hardbool = Some(hardbool);
+        self.enumeration(id)
+    }
+
+    /// The two representations of a type `__attribute__((hardbool))` made, seen through its
+    /// typedefs, its qualifiers and an `_Atomic`, and [`None`] for every other type.
+    #[must_use]
+    pub fn hardbool_of(&self, id: TypeId) -> Option<Hardbool> {
+        let mut ty = self.canonical(id);
+        if let TypeKind::Atomic(inner) = self.kind(ty) {
+            ty = self.canonical(inner);
+        }
+        match self.kind(ty) {
+            TypeKind::Enum(id) => self.enum_info(id).hardbool,
+            _ => None,
+        }
     }
 
     /// The type of a declared enumeration.

@@ -43,8 +43,8 @@ use rucc_sema::{
 use rucc_target::{Pass, TargetInfo};
 use rucc_tuple::Arch;
 use rucc_types::{
-    ArrayLen, Extent, Qualifiers, RecordId, RecordKind, TypeId, TypeKind, Types, VlaId,
-    integer_info, pointee,
+    ArrayLen, Extent, Hardbool, IntKind, IntegerInfo, Qualifiers, RecordId, RecordKind, TypeId, TypeKind, Types,
+    VlaId, integer_info, pointee,
 };
 
 use crate::abi::{self, Plan, Travel};
@@ -5698,8 +5698,40 @@ impl<'u> Body<'_, 'u> {
                 };
                 Some(self.swapped(loaded, place.reverse, span))
             }
-            Where::Bits(addr, run) => Some(self.read_bits(addr, run, place.ty, ty, span)),
+            Where::Bits(addr, run) => {
+                let value = self.read_bits(addr, run, place.ty, ty, span);
+                Some(self.hardbool_widened(value, run.width, place.ty, span))
+            }
         }
+    }
+
+    /// A run of bits of a type `__attribute__((hardbool))` made, as a representation of the
+    /// whole type.
+    ///
+    /// A bit-field narrower than its type holds the two representations cut down to its width,
+    /// which is what gcc's narrower type for the member has, so the one that was read is put back
+    /// as the one it was cut down from. Anything else is left alone, to be caught where it decays:
+    /// it is in the field's range, where neither representation of the whole type can be unless
+    /// cutting it down left it as it was.
+    fn hardbool_widened(&mut self, value: Value, width: u32, ty: TypeId, span: Span) -> Value {
+        let Some(hardbool) = self.types().hardbool_of(ty) else { return value };
+        let signed = repr::is_signed(self.types(), self.target(), ty);
+        let narrower = IntegerInfo::new(signed, width);
+        let truth = narrower.wrap(hardbool.true_value);
+        let falsity = narrower.wrap(hardbool.false_value);
+        if truth == hardbool.true_value && falsity == hardbool.false_value {
+            return value;
+        }
+        let out = self.func[value].ty;
+        let mut build = self.build(span);
+        let cut_true = build.iconst(out, truth);
+        let cut_false = build.iconst(out, falsity);
+        let whole_true = build.iconst(out, hardbool.true_value);
+        let whole_false = build.iconst(out, hardbool.false_value);
+        let is_true = build.icmp(IntPred::Eq, value, cut_true);
+        let is_false = build.icmp(IntPred::Eq, value, cut_false);
+        let other = build.select(is_false, whole_false, value);
+        build.select(is_true, whole_true, other)
     }
 
     /// Writes a place, answering with the bits that went into a bit-field.
@@ -5745,7 +5777,9 @@ impl<'u> Body<'_, 'u> {
     /// so and gets back what it wrote.
     fn write_back(&mut self, place: Place, value: Value, want: bool, span: Span) -> Value {
         let kept = self.write(place, value, span);
-        if !want {
+        // A type `hardbool` made is read back as the representation that was written, which
+        // [`Self::hardbool_widened`] sees to on every read and which is what was written here.
+        if !want || self.types().hardbool_of(place.ty).is_some() {
             return value;
         }
         let (Some(kept), Where::Bits(_, run)) = (kept, place.at) else { return value };
@@ -6476,6 +6510,10 @@ impl<'u> Body<'_, 'u> {
                 Some(self.coerce(value, from, ty, span))
             }
             Conversion::Bool => Some(self.bit(operand)),
+            Conversion::Hardbool => {
+                let value = self.eval(operand)?;
+                Some(self.coerce(value, from, ty, span))
+            }
             Conversion::NullPointer => {
                 self.eval(operand);
                 let address = self.address;
@@ -6498,6 +6536,9 @@ impl<'u> Body<'_, 'u> {
 
     /// One scalar type to another, which is what a cast and an argument both do.
     fn coerce(&mut self, value: Value, from: TypeId, to: TypeId, span: Span) -> Value {
+        if let Some(value) = self.hardbool_coerce(value, from, to, span) {
+            return value;
+        }
         let types = self.unit.types;
         let target = self.unit.target;
         let Some(into) = repr::value_type(types, target, to) else {
@@ -6552,6 +6593,70 @@ impl<'u> Body<'_, 'u> {
                 value
             }
         }
+    }
+
+    /// A conversion out of or into a type `__attribute__((hardbool))` made, and [`None`] where
+    /// neither side is one.
+    ///
+    /// Out of one is the `bool` the representation stands for, and a representation that is
+    /// neither of the two stops the program, which is the hardening. Into one is the conversion to
+    /// `bool` and then the representation of the answer. Between two with the same pair of
+    /// representations nothing happens, since that is a copy and gcc checks nothing for one.
+    fn hardbool_coerce(
+        &mut self,
+        value: Value,
+        from: TypeId,
+        to: TypeId,
+        span: Span,
+    ) -> Option<Value> {
+        let types = self.unit.types;
+        let (out_of, into) = (types.hardbool_of(from), types.hardbool_of(to));
+        if out_of.is_none() && into.is_none() {
+            return None;
+        }
+        if out_of == into {
+            return Some(value);
+        }
+        let boolean = types.boolean();
+        let bit = match out_of {
+            Some(hardbool) => self.decayed(value, hardbool, span),
+            None => self.coerce(value, from, boolean, span),
+        };
+        Some(match into {
+            Some(hardbool) => self.hardbool_of_bit(bit, hardbool, to, span),
+            None => self.coerce(bit, boolean, to, span),
+        })
+    }
+
+    /// The `bool` a representation of a type `hardbool` made stands for, and a stop where it is
+    /// neither of the two, which is gcc's `__builtin_trap` in the same place.
+    fn decayed(&mut self, value: Value, hardbool: Hardbool, span: Span) -> Value {
+        let ty = self.func[value].ty;
+        let mut build = self.build(span);
+        let truth = build.iconst(ty, hardbool.true_value);
+        let falsity = build.iconst(ty, hardbool.false_value);
+        let is_true = build.icmp(IntPred::Eq, value, truth);
+        let is_false = build.icmp(IntPred::Eq, value, falsity);
+        let held = build.binary(Opcode::Or, is_true, is_false, Flags::NONE);
+        let fine = self.new_block();
+        let broken = self.new_block();
+        self.br_if(held, fine, broken, span);
+        self.ssa.seal(self.func, broken);
+        self.at = Some(broken);
+        self.build(span).inst(InstData::new(Opcode::Trap), &[]);
+        self.build(span).unreachable();
+        self.ssa.seal(self.func, fine);
+        self.at = Some(fine);
+        is_true
+    }
+
+    /// The representation of a `bool` in a type `hardbool` made.
+    fn hardbool_of_bit(&mut self, bit: Value, hardbool: Hardbool, to: TypeId, span: Span) -> Value {
+        let into = self.value_type(to, span);
+        let mut build = self.build(span);
+        let truth = build.iconst(into, hardbool.true_value);
+        let falsity = build.iconst(into, hardbool.false_value);
+        build.select(bit, truth, falsity)
     }
 
     /// A prefix or postfix operator.
@@ -6652,7 +6757,19 @@ impl<'u> Body<'_, 'u> {
         let old = self.read(place, span)?;
         let out = self.func[old].ty;
 
-        let new = if out.is_ptr() {
+        let new = if let Some(hardbool) = self.types().hardbool_of(ty) {
+            // A type `hardbool` made, whose `++` is gcc's store of the true representation with
+            // nothing read, and whose `--` is the other one of what was read, which is checked.
+            if up {
+                self.build(span).iconst(out, hardbool.true_value)
+            } else {
+                let bit = self.decayed(old, hardbool, span);
+                let mut build = self.build(span);
+                let truth = build.iconst(out, hardbool.true_value);
+                let falsity = build.iconst(out, hardbool.false_value);
+                build.select(bit, falsity, truth)
+            }
+        } else if out.is_ptr() {
             let pointee = match self.types().kind(self.types().canonical(ty)) {
                 TypeKind::Pointer(pointee) => pointee,
                 _ => ty,
@@ -6739,6 +6856,14 @@ impl<'u> Body<'_, 'u> {
             return Step::Walk { steps, signed: false, size, back: !up };
         }
         let op = if up { BinaryOp::Add } else { BinaryOp::Sub };
+        // A type `hardbool` made steps as the `bool` it stands for, which is an addition at `int`
+        // and a conversion back.
+        if self.types().hardbool_of(ty).is_some() {
+            let computation = self.types().int(IntKind::Int);
+            let at = self.value_type(computation, span);
+            let right = self.build(span).iconst(at, 1);
+            return Step::Arithmetic { op, right, computation };
+        }
         let right = if into.lane().is_float() {
             let format = repr::float_format_of(self.types(), self.target(), ty);
             let bits = format.map_or(0, |format| Real::from_signed(1, format).0.to_bits());
@@ -8998,6 +9123,7 @@ impl<'u> Body<'_, 'u> {
                 // the addition and not an addition in the byte the object is stored in.
                 if !into.is_int()
                     || into == Type::I1
+                    || self.types().hardbool_of(ty).is_some()
                     || !rucc_types::is_integer(self.types(), computation)
                 {
                     return None;

@@ -531,6 +531,9 @@ impl Checker<'_> {
             Some(width) => Some(self.bit_width(ty, width, subject)?),
             None => None,
         };
+        if let Some(width) = bits {
+            self.hardbool_bit_field(ty, width, subject.span);
+        }
         // A member carries its own `packed` and `aligned`, which are not the record's: `packed`
         // on one member takes the padding out in front of that member alone, and `aligned` on
         // one raises where it sits. GCC takes them on the member's declaration and on its
@@ -561,6 +564,7 @@ impl Checker<'_> {
             // behind for the rest of the file even where the member declares nothing, which is
             // what gcc does with the same program.
             let ty = self.specified_type(field.specs, subject, MEMBER);
+            let ty = self.hardened(ty, self.ast[field.specs].attrs);
             // A member with no declarator is an unnamed bit-field, or an anonymous member, whose
             // members are reached as if they were written here. Anything else declares nothing at
             // all, which gcc warns about and accepts.
@@ -580,6 +584,9 @@ impl Checker<'_> {
         let span = if node.name.is_some() { node.name_span } else { field.span };
         let subject = Subject { name: node.name, span };
         let ty = self.build_type(field.specs, declarator, MEMBER);
+        // `hardbool` makes a different type of the one written, on a member as on a variable.
+        let ty = self.hardened(ty, self.ast[field.specs].attrs);
+        let ty = self.hardened(ty, field.attrs);
         // `int (*hook)(void) __attribute__((indirect_return));`, where a function type attribute
         // is written after the declarator and belongs to the function the member points at, as
         // it does on a declaration.

@@ -747,7 +747,7 @@ impl Checker<'_> {
         } else {
             ty
         };
-        // `mode` and `vector_size` change which type this declares rather than how that type is
+        // `mode`, `hardbool` and `vector_size` change which type this declares rather than how that type is
         // laid out, so they are applied before anything else reads the type, and before the
         // typedef below takes its early exit: a typedef is where either is nearly always written.
         let ty = self.retyped(ty, self.ast[specs].attrs);

@@ -1049,6 +1049,13 @@ pub enum Conversion {
     /// lane asks for is an arithmetic conversion of its own underneath this one, so that the
     /// two questions are answered where each of them is usually answered.
     Broadcast,
+    /// A value of a type `__attribute__((hardbool))` made becoming the `bool` it stands for, or a
+    /// `bool` becoming the representation such a type has for it.
+    ///
+    /// Neither is [`Conversion::Bool`] or [`Conversion::Arithmetic`], because neither is a
+    /// comparison against zero or a change of width: the representation of `false` may be any
+    /// number at all, and one that is neither of the two traps on its way out.
+    Hardbool,
 }
 
 impl Conversion {
@@ -1065,6 +1072,7 @@ impl Conversion {
             Conversion::NullPointer => "null-pointer",
             Conversion::Void => "void",
             Conversion::Broadcast => "broadcast",
+            Conversion::Hardbool => "hardbool",
         }
     }
 }

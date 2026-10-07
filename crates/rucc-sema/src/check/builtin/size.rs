@@ -495,9 +495,11 @@ const fn through(kind: Conversion) -> bool {
         | Conversion::Pointer
         | Conversion::NullPointer
         | Conversion::Void => true,
-        Conversion::Lvalue | Conversion::Arithmetic | Conversion::Bool | Conversion::Broadcast => {
-            false
-        }
+        Conversion::Lvalue
+        | Conversion::Arithmetic
+        | Conversion::Bool
+        | Conversion::Broadcast
+        | Conversion::Hardbool => false,
     }
 }
 

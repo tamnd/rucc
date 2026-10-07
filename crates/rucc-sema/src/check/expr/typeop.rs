@@ -45,7 +45,7 @@ use crate::check::Checker;
 use crate::check::expr::{Callee, Target};
 use crate::decl::InitEntry;
 use crate::eval;
-use crate::expr::{Category, Expr, ExprId, ExprKind};
+use crate::expr::{Category, Conversion, Expr, ExprId, ExprKind};
 use crate::tast::Const;
 
 /// One step of an `offsetof` path, and what walking it added to the offset.
@@ -640,7 +640,12 @@ impl Checker<'_> {
         // why a `const int` matches `int`.
         let control = self.expr(control);
         let control = self.value(control);
-        let controlling = self.tast[control].ty;
+        // Except that gcc chooses by a type `hardbool` made and not by the `bool` it decays to,
+        // which is the one place it stops short of the decay.
+        let controlling = match self.tast[control].kind {
+            ExprKind::Convert { kind: Conversion::Hardbool, operand } => self.tast[operand].ty,
+            _ => self.tast[control].ty,
+        };
 
         let mut chosen = None;
         let mut fallback = None;

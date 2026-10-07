@@ -79,6 +79,7 @@ mod expr;
 mod extern_access;
 mod extname;
 mod format;
+mod hardbool;
 mod init;
 mod noinit;
 mod shared;

@@ -2148,13 +2148,15 @@ impl Checker<'_> {
 
     /// The type an attribute list declares, which is not always the type that was written.
     ///
-    /// Two attributes change that and both are read here, in the order they compose. `mode` picks
-    /// a different scalar and `vector_size` makes lanes of a scalar, so a declaration carrying
-    /// both wants the mode applied first and the lanes counted against what it gave. Everything
-    /// that reads a declared type reads it through here, so neither of them can be missed at one
-    /// of the three places a type is declared.
+    /// Three attributes change that and all three are read here, in the order they compose.
+    /// `mode` picks a different scalar, `hardbool` makes a boolean of an integer and `vector_size`
+    /// makes lanes of a scalar, so a declaration carrying them wants the mode applied first, the
+    /// boolean made of what it gave and the lanes counted last. Everything that reads a declared
+    /// type reads it through here, so none of them can be missed at one of the three places a type
+    /// is declared.
     pub(in crate::check) fn retyped(&mut self, ty: TypeId, attrs: AttrList) -> TypeId {
         let ty = self.moded(ty, attrs);
+        let ty = self.hardened(ty, attrs);
         self.vectorized(ty, attrs)
     }
 
@@ -3074,7 +3076,8 @@ impl Checker<'_> {
             return None;
         }
         let canonical = self.types.canonical(elem);
-        let boolean = matches!(eval::bare(&self.types, elem), TypeKind::Bool);
+        let boolean = matches!(eval::bare(&self.types, elem), TypeKind::Bool)
+            || self.types.hardbool_of(elem).is_some();
         if !is_arithmetic(&self.types, canonical) || boolean {
             let what = "invalid vector type for attribute 'vector_size'";
             let note = "a lane is one of the arithmetic types, and is not a bool";
