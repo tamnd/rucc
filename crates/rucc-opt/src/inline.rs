@@ -95,7 +95,8 @@ use rucc_base::hash::{Map, Set};
 use rucc_base::{Interner, Symbol};
 use rucc_cost::heuristics::{
     INLINE_CALL_TIME, INLINE_CALLED_ONCE_INSNS, INLINE_CALLED_ONCE_LOOP_DEPTH, INLINE_EARLY_INSNS,
-    INLINE_FRAME_GROWTH, INLINE_FRAME_GROWTH_CONSERVE, INLINE_INSNS_AUTO, INLINE_LARGE_FRAME,
+    INLINE_EARLY_INSNS_O3, INLINE_FRAME_GROWTH, INLINE_FRAME_GROWTH_CONSERVE, INLINE_INSNS_AUTO,
+    INLINE_INSNS_AUTO_O3, INLINE_INSNS_SINGLE, INLINE_INSNS_SINGLE_O3, INLINE_LARGE_FRAME,
     INLINE_LARGE_FRAME_CONSERVE,
 };
 use rucc_ir::{
@@ -330,8 +331,42 @@ impl InlineFailure {
     }
 }
 
-/// Inlines every call to an `always_inline` function that can be, and with a `limit` every call to
-/// a function declared `inline` whose body is no larger than that, every call to a function whose
+/// gcc's limits on the inliner at one level, which are the same at every level but `-O3`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Limits {
+    /// The largest body a callee declared `inline` may have. gcc's `max-inline-insns-single`.
+    pub single: u32,
+    /// How much a call to a function nobody declared `inline` may grow its caller. gcc's
+    /// `max-inline-insns-auto`.
+    pub auto: u32,
+    /// How much a call may grow a caller it is not hot in. gcc's `early-inlining-insns`.
+    pub early: u32,
+}
+
+impl Limits {
+    /// gcc's numbers at `-O1`, `-O2` and `-Os`, with what `--param` set.
+    #[must_use]
+    pub fn o2() -> Self {
+        Self {
+            single: rucc_cost::param!(INLINE_INSNS_SINGLE),
+            auto: rucc_cost::param!(INLINE_INSNS_AUTO),
+            early: rucc_cost::param!(INLINE_EARLY_INSNS),
+        }
+    }
+
+    /// gcc's numbers at `-O3`, where each of the three is larger.
+    #[must_use]
+    pub fn o3() -> Self {
+        Self {
+            single: rucc_cost::param!(INLINE_INSNS_SINGLE_O3),
+            auto: rucc_cost::param!(INLINE_INSNS_AUTO_O3),
+            early: rucc_cost::param!(INLINE_EARLY_INSNS_O3),
+        }
+    }
+}
+
+/// Inlines every call to an `always_inline` function that can be, and with `limit` every call to
+/// a function declared `inline` whose body is no larger than it allows, every call to a function whose
 /// body is no larger than the call and, when `once` says so, the one call to a `static` function
 /// called once, and says what it did where.
 ///
@@ -349,7 +384,7 @@ impl InlineFailure {
 pub fn run(
     module: &mut Module,
     names: &Interner,
-    limit: Option<u32>,
+    limit: Option<Limits>,
     once: bool,
     isa: Isa,
     growth: Growth,
@@ -426,7 +461,8 @@ pub fn run(
     let wanted = classify(module, &Set::default());
     let mut done = Vec::new();
     let convention = Convention::of(module);
-    let most = limit.map_or(0, |limit| usize::try_from(limit).unwrap_or(usize::MAX));
+    let most = limit.map_or(0, |limit| usize::try_from(limit.single).unwrap_or(usize::MAX));
+    let limits = limit.unwrap_or_else(Limits::o2);
     // The frames the functions have before anything is inlined into them, which is what the second
     // pass measures a caller's frame against, as the first measures each caller's own.
     let own: Map<FuncId, u64> = if second_pass.is_some() {
@@ -453,6 +489,8 @@ pub fn run(
             wanted,
             convention,
             limit: most,
+            auto: limits.auto,
+            early: limits.early,
             isa,
             names,
             growth,
@@ -495,6 +533,8 @@ pub fn run(
             wanted: &wanted,
             convention,
             limit: most,
+            auto: limits.auto,
+            early: limits.early,
             isa,
             names,
             growth,
@@ -704,6 +744,10 @@ struct How<'a> {
     convention: Convention,
     /// How many instructions a callee declared `inline` may have.
     limit: usize,
+    /// How much a call to a function nobody declared `inline` may grow its caller.
+    auto: u32,
+    /// How much a call may grow a caller it is not hot in whatever else is known.
+    early: u32,
     /// What a function without a `target` attribute of its own is built for.
     isa: Isa,
     /// What the names in the module are read from.
@@ -947,10 +991,7 @@ fn settle(
             Kind::Small => 2 + module[id][module[id][call].args].len(),
             // gcc's limit is on the growth, the body less the call it replaces, and a growth as
             // large as the limit is refused.
-            Kind::Auto => {
-                rucc_cost::param!(INLINE_INSNS_AUTO) as usize
-                    + module[id][module[id][call].args].len()
-            }
+            Kind::Auto => how.auto as usize + module[id][module[id][call].args].len(),
         };
         let (mut large, cut) = match kind {
             Kind::Asks => {
@@ -1783,7 +1824,7 @@ impl Pool {
 ///
 /// The copy costs the body less the call it replaces, a call being one instruction and one more
 /// for each argument. gcc's early inliner takes a copy that grows the caller by no more than
-/// [`INLINE_EARLY_INSNS`] before it has worked out which functions are cold, holding a body that
+/// [`INLINE_EARLY_INSNS`], or [`INLINE_EARLY_INSNS_O3`] at `-O3`, before it has worked out which functions are cold, holding a body that
 /// makes calls of its own to that for each of them and itself together. What it leaves, the later
 /// inliner takes into a caller that is not hot only when the program does not grow, which is
 /// `growth_positive_p`. A `static` body nothing reaches but its calls goes away once every call
@@ -1798,7 +1839,7 @@ fn grows(func: &Func, call: Inst, callee: &Func, size: usize, how: &How<'_>) -> 
             matches!(callee[inst].opcode, Opcode::Call | Opcode::CallIndirect | Opcode::TailCall)
         })
         .count();
-    if growth * (calls + 1) <= rucc_cost::param!(INLINE_EARLY_INSNS) as usize {
+    if growth * (calls + 1) <= how.early as usize {
         return false;
     }
     let removable = callee.linkage == Linkage::Internal
@@ -3151,6 +3192,7 @@ target datalayout = "e-p:64:64-i64:64-f80:128-S128"
 
     /// The same, with the called once half on or off, and with what the step said about it.
     fn inlined_with(body: &str, limit: Option<u32>, once: bool) -> (String, String) {
+        let limit = limit.map(|single| Limits { single, ..Limits::o2() });
         let mut names = Interner::new();
         let text = format!("{HEAD}{body}");
         let mut module = rucc_ir::parse(&text, &mut names).expect("the fixture parses");
@@ -4030,7 +4072,7 @@ block0(%0: i32):
             run(
                 &mut module,
                 &names,
-                Some(70),
+                Some(Limits { single: 70, ..Limits::o2() }),
                 true,
                 Isa::baseline(),
                 Growth::CONSERVE,

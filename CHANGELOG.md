@@ -17,6 +17,7 @@ All notable changes are recorded here. The format follows [Keep a Changelog](htt
 - `__attribute__((nonnull_if_nonzero(p, n)))`, gcc 15's conditional `nonnull` that glibc 2.42 writes on `memcpy` and the rest of `<string.h>`, is taken without a word. Like `nonnull` nothing is assumed from it. Its numbers are checked as gcc checks them, in its words: the first has to name a pointer parameter and the others integer ones, and the wrong number of arguments is refused (E0846).
 - The first inliner pass no longer copies a call that `main` makes outside its loops when the copy grows the program, since `main` runs once and gcc 16 does not think of such a call as hot. A setter `main` calls four times now stays four calls at `-O2`, as with gcc (#3247).
 - `[[gnu::musttail]] return f(x);`, gcc 15's tail call that is a promise rather than an optimization, also spelled `__attribute__((musttail))` and `[[clang::musttail]]`: the call is a jump at every optimization level, so a chain of them runs in one frame. A call that cannot be made is an error (`E0847`) in gcc's words, and the attribute anywhere but in front of a `return` is ignored with gcc's warning.
+- At `-O3` the inliner takes gcc's limits for that level, 30 for `max-inline-insns-auto` and 14 for `early-inlining-insns`, where `-O2` has 15 and 6. A `static` function with a loop of eight lines called from three places, and a setter `main` calls four times, are copied at `-O3` and stay calls at `-O2`, as with gcc 16 (#3291).
 
 ### Changed
 
