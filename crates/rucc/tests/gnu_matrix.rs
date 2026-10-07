@@ -927,3 +927,25 @@ fn the_promises_and_the_tool_hints_gcc_answers_yes_for_are_taken_without_a_word(
     );
     assert_eq!(got, "");
 }
+
+/// An array's qualifiers are its element's, and `__builtin_types_compatible_p` takes them off with
+/// the top level ones, as gcc 16 does. The kernel's `container_of` leans on it in camss, where
+/// `to_vfe` passes a pointer to `const struct vfe_line []` for a member that is an array of four.
+#[test]
+fn types_compatible_p_takes_an_arrays_qualifiers_off_with_the_element() {
+    let got = said(
+        "compatible-array-quals",
+        "struct l { int id; };\n\
+         struct d { struct l line[4]; };\n\
+         _Static_assert(__builtin_types_compatible_p(const struct l[], struct l[4]), \"a\");\n\
+         _Static_assert(__builtin_types_compatible_p(const int[2][3], int[2][3]), \"b\");\n\
+         _Static_assert(__builtin_types_compatible_p(volatile int[], int[3]), \"c\");\n\
+         _Static_assert(!__builtin_types_compatible_p(const int *, int *), \"d\");\n\
+         void f(struct l *p) {\n\
+             _Static_assert(__builtin_types_compatible_p(\n\
+                 typeof(*(const struct l (*)[]) &p[-p->id]),\n\
+                 typeof(((struct d *)0)->line)), \"e\");\n\
+         }\n",
+    );
+    assert!(got.is_empty(), "{got}");
+}

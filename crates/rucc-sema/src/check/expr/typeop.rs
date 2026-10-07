@@ -1004,9 +1004,11 @@ impl Checker<'_> {
         let a = self.type_name(a);
         let b = self.type_name(b);
         // The top level qualifiers come off, which is what gcc documents and what makes
-        // `__builtin_types_compatible_p(const int, int)` answer one.
-        let a = self.types.unqualified(a);
-        let b = self.types.unqualified(b);
+        // `__builtin_types_compatible_p(const int, int)` answer one. An array's are its
+        // element's, so they come off there too, which is how the kernel's `container_of` takes
+        // a pointer to `const struct vfe_line []` for a member that is `struct vfe_line [4]`.
+        let a = self.types.unqualified_object(a);
+        let b = self.types.unqualified_object(b);
         let same = compatible(&self.types, a, b);
         let int = self.int();
         self.constant(Const::Int(i128::from(same)), int, span)
