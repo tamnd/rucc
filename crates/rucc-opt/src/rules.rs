@@ -22,4 +22,4 @@ pub mod select;
 pub mod strength;
 pub mod width;
 
-pub use rucc_base::rules::{Guard, Match, Node, Piece, Rule, Subject, Table};
+pub use rucc_base::rules::{Guard, Match, Node, Opening, Piece, Rule, Subject, Table};

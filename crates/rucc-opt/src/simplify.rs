@@ -207,6 +207,7 @@
 //! four instructions the magnitude was built out of. Same litter, same reason, same pass takes it
 //! out.
 
+use std::cell::RefCell;
 use std::cmp::Ordering;
 use std::sync::OnceLock;
 
@@ -220,7 +221,7 @@ use rucc_ir::{
 use crate::cfg::Cfg;
 use crate::discharge::constant;
 use crate::rules::{
-    Match, Piece, Subject, Table, canonical, compare, identities, select, strength, width,
+    Match, Opening, Piece, Subject, Table, canonical, compare, identities, select, strength, width,
 };
 use crate::uses::{chase, count, substitute};
 use crate::{Analyses, Analysis, Fuel, Pass, Preserved, Stats};
@@ -378,6 +379,20 @@ const TABLES: [(&Table, &[Plan]); 6] = [
     (&select::TABLE, &SELECT),
     (&canonical::TABLE, &CANONICAL),
 ];
+
+/// What the root of each of [`TABLES`] says about a head, by where its name is and how many
+/// operands it has, with nothing for a table no rule of which starts with it.
+type Openings = [Option<Opening<'static>>; TABLES.len()];
+
+thread_local! {
+    // The openings of the tables, kept from one run to the next. Every instruction of every run
+    // asked the root of all six for its head, and those are the widest nodes in the tries, so the
+    // searches were a third of what looking for a rewrite cost on lz4.c at -O2,
+    // tamnd/rucc#3052. A head is a name out of the vocabulary, which is a static string, so where
+    // it is and how long it is says which one it is, and there are only as many of them as the
+    // vocabulary has.
+    static OPENINGS: RefCell<Map<(usize, usize, usize), Openings>> = RefCell::new(Map::default());
+}
 
 /// How many rewrites one instruction gets in one run. Two is what a comparison with the constant
 /// on the left needs, one to turn it round and one for the rule about the constant, and the rest
@@ -734,11 +749,18 @@ fn identity(
     // operands are shown, so it is worked out once. Most instructions open none of the tables or
     // only one, and asking each table's root first saves every walk under every plan of the rest.
     // What the root said is kept for the walks, which start under it.
-    let root = Terms::new(func, inst, PLAIN, address);
-    let head = root.head(Term::Root);
+    let head = Terms::new(func, inst, PLAIN, address).root_head();
+    let key = head.map_or((0, 0, 0), |(name, arity)| (name.as_ptr() as usize, name.len(), arity));
+    let openings = OPENINGS.with(|cache| {
+        *cache
+            .borrow_mut()
+            .entry(key)
+            .or_insert_with(|| TABLES.map(|(table, _)| table.opening(head)))
+    });
     for (table, opening, plan) in TABLES
         .into_iter()
-        .filter_map(|(table, plans)| Some((table, table.opening(head)?, plans)))
+        .zip(openings)
+        .filter_map(|((table, plans), opening)| Some((table, opening?, plans)))
         .flat_map(|(table, opening, plans)| plans.iter().map(move |&plan| (table, opening, plan)))
     {
         let terms = Terms::new(func, inst, plan, address);

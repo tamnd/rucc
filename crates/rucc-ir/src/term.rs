@@ -131,6 +131,19 @@ impl<'a> Terms<'a> {
         head_of(self.func, inst, self.address)
     }
 
+    /// The head of the root, which is what [`Subject::head`] says about [`Term::Root`] with the
+    /// name kept as the static string it is, so that a caller can hold on to it past this view of
+    /// the instruction.
+    #[must_use]
+    pub fn root_head(&self) -> Option<(&'static str, usize)> {
+        let name = head_of(self.func, self.root, self.address)?;
+        let data = &self.func[self.root];
+        // A constant has no operands and its term has one, which is the constant, so it is the
+        // one instruction whose arity is not the length of its operand list.
+        let arity = if data.opcode == Opcode::IConst { 1 } else { self.args(self.root).len() };
+        Some((name, arity))
+    }
+
     /// The value operands of an instruction.
     fn args(&self, inst: Inst) -> &[Value] {
         &self.func[self.func[inst].args]
@@ -255,15 +268,7 @@ impl Subject for Terms<'_> {
 
     fn head(&self, node: Term) -> Option<(&str, usize)> {
         match node {
-            Term::Root => {
-                let name = head_of(self.func, self.root, self.address)?;
-                let data = &self.func[self.root];
-                // A constant has no operands and its term has one, which is the constant, so it
-                // is the one instruction whose arity is not the length of its operand list.
-                let arity =
-                    if data.opcode == Opcode::IConst { 1 } else { self.args(self.root).len() };
-                Some((name, arity))
-            }
+            Term::Root => self.root_head(),
             Term::Arg(index) => {
                 let value = self.arg_value(index)?;
                 match self.plan[usize::from(index)] {
