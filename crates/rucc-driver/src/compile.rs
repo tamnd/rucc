@@ -10571,10 +10571,16 @@ float through_a_union(union u *p) { p->i = 1; return p->f; }\n";
             "double f(double x) { return __builtin_ceil(x); }\n",
             "float g(float x) { return __builtin_floorf(x); }\n",
             "double h(double x, double y) { return __builtin_fmax(x, y); }\n",
+            "float r(float x) { return __builtin_sqrtf(x); }\n",
+            "double s(void) { return __builtin_sqrt(4.0); }\n",
         ));
         assert!(text.contains("call @ceil("), "{text}");
         assert!(text.contains("call @floorf("), "{text}");
         assert!(text.contains("call @fmax("), "{text}");
+        // The square roots are calls whatever they are handed, the constant included, until the
+        // root of a constant is something the compiler works out.
+        assert!(text.contains("call @sqrtf("), "{text}");
+        assert!(text.contains("call @sqrt("), "{text}");
 
         // The two the rounding mode decides are calls even when the argument is a constant, since
         // what they answer is not known until the program runs. gcc refuses a static initializer

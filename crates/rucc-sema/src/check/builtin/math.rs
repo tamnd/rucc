@@ -240,6 +240,21 @@ mod tests {
         }
     }
 
+    /// A square root is correctly rounded, so gcc folds one of a constant, but the answer for a
+    /// constant is not something [`Float`] computes yet. Until it does the three are calls to the
+    /// library and never rows of the table, which is the same answer as a value that is not a
+    /// constant gets.
+    #[test]
+    fn the_square_roots_are_calls_to_the_library_and_not_folded() {
+        for suffix in ["", "f", "l"] {
+            let spelled = format!("__builtin_sqrt{suffix}");
+            let feature = rucc_gnu::lookup(Kind::Builtin, &spelled).expect("in the table");
+            assert_eq!(feature.status, Status::Implemented, "{spelled}");
+            assert_eq!(feature.library, format!("sqrt{suffix}"), "{spelled}");
+            assert!(!FAMILY.iter().any(|row| row.builtin == spelled), "{spelled} folds");
+        }
+    }
+
     /// The names are what the lookup searches, so a name written twice is a second row nothing
     /// can ever reach, and a prefixed spelling that is not the plain name with the prefix on it
     /// is a row that answers for one function under the type of another.
