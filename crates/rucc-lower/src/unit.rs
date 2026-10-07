@@ -1363,7 +1363,8 @@ impl Unit<'_> {
         let copied = body.is_some() && self.out_of_line(decl, node.inline);
         // Under GNU's reading the copy is for the inliner and nothing else. See
         // [`Self::out_of_line`].
-        if copied && node.flags.contains(DeclFlags::GNU_INLINE) {
+        let inline_only = copied && node.flags.contains(DeclFlags::GNU_INLINE);
+        if inline_only {
             func.attrs.set |= AttrSet::INLINE_ONLY;
         }
         // The backend writes a small constant `memcpy` it finds after inlining as moves, which is
@@ -1376,7 +1377,11 @@ impl Unit<'_> {
         // definition this unit neither emits nor calls is a declaration here, since C 6.7.4p7
         // sends the calls to whatever unit holds the external definition, so it is not this
         // file's to describe. That is the condition the body is lowered under, a few lines below.
-        func.visibility = self.seen(decl, body.is_some() && (node.inline.emits() || copied));
+        // A copy that is only for the inliner is not emitted either, so a call that stays is a
+        // call to the library. glibc's fortify wrappers are these, and with `-fvisibility=hidden`
+        // a hidden `memcpy` is a name that the link cannot find.
+        func.visibility =
+            self.seen(decl, body.is_some() && (node.inline.emits() || (copied && !inline_only)));
         // An inline copy made for this unit's own calls is not the definition another DLL would
         // be sent to, so it is not exported, and it is not imported either, since it is here.
         func.dll = match self.dll(decl, body.is_some() && node.inline.emits()) {

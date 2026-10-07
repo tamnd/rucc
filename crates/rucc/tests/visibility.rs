@@ -249,3 +249,24 @@ int get(void) { called(); return used + marked + plain; }
         assert!(!text.contains(&format!("\t{name}\n")), "{name}: {text}");
     }
 }
+
+/// A `gnu_inline` body is for the inliner, and the name is still the one in the C library. This
+/// is how glibc writes each `_FORTIFY_SOURCE` wrapper, so the flag must not make the call that is
+/// left hidden. If it does, the link cannot find `strcpy`.
+#[test]
+fn the_flag_does_not_reach_a_gnu_inline_wrapper() {
+    let text = asm(
+        "gnu-inline",
+        &["-fvisibility=hidden", "-O2"],
+        "\
+extern char *strcpy(char *, const char *);
+extern __inline __attribute__((__always_inline__, __gnu_inline__, __artificial__)) char *
+strcpy(char *d, const char *s) { return __builtin___strcpy_chk(d, s, __builtin_object_size(d, 1)); }
+void put(char *d, const char *s) { strcpy(d, s); }
+",
+    );
+
+    assert!(text.contains("strcpy"), "the call is still there: {text}");
+    assert!(!text.contains("\t.hidden\tstrcpy\n"), "{text}");
+    assert!(text.contains("\t.hidden\tput\n"), "{text}");
+}
