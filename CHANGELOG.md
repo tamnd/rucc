@@ -49,6 +49,7 @@ All notable changes are recorded here. The format follows [Keep a Changelog](htt
 
 ### Fixed
 
+- The bound on a runaway macro expansion is counted for each invocation the user wrote rather than for each stretch of the file between two directives, so the kernel's ice_common.c, which calls `pack_fields` six times in one stretch, preprocesses again, while one invocation that doubles itself without end still stops with E0310 (#3331).
 - The AArch64 assembler reads and encodes the single lane loads and stores of a list, `st4 {v19.s,v20.s,v21.s,v22.s}[0],[x0],#16` and the like, which the kernel's poly1305-core.S ends with. (#3323)
 - `-ffixed-q16` and the other spellings of an AArch64 vector register keep that register out of the allocator, so the kernel's aegis128-neon builds with the S-box it loads into `v16` to `v31` left alone. (#3322)
 - An `asm` operand can be a vector, carried in the floating point type of its width, so `"w" (p)` for a `uint64x2_t` lands in a vector register on AArch64 and the kernel's xor-eor3 builds. (#3320)

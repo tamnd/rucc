@@ -656,6 +656,26 @@ mod tests {
         assert!(pp.errors().is_empty(), "the standard's example is well formed");
     }
 
+    /// The bound on a runaway expansion is for one invocation, so a line with many large but
+    /// honest invocations gets through while one that doubles itself a dozen times does not.
+    /// The kernel's `pack_fields` is the first kind, called six times between two directives.
+    #[test]
+    fn the_expansion_bound_counts_each_invocation_on_its_own() {
+        let mut pp = Pp::new();
+        pp.define("A0 x");
+        for n in 1..=12 {
+            pp.define(&format!("A{n} A{m} A{m}", m = n - 1));
+        }
+        let out = pp.expand("A9 A9 A9 A9 A9 A9 A9 A9");
+        assert_eq!(out.len(), 8 * 512);
+        assert!(pp.errors().is_empty(), "eight invocations of a fair size are fine");
+
+        pp.expand("A12");
+        let errors = pp.errors();
+        assert_eq!(errors.len(), 1, "{errors:?}");
+        assert_eq!(errors[0].code, Some("E0310"));
+    }
+
     #[test]
     fn milestone_is_recorded() {
         assert!(MILESTONE.starts_with('M'));
