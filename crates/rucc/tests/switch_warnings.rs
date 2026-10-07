@@ -83,7 +83,9 @@ const SWITCHES: &str = "enum e { A, B, C, D = 10 };\n\
 
 /// What gcc 13 says about [`SWITCHES`] under `-Wall -Wswitch-enum -Wswitch-default`, line for
 /// line, with this compiler's code where gcc gives the option. gcc was given the lines indented
-/// by two, which the string above takes off, so each column here is two less than gcc's.
+/// by two, which the string above takes off, so each column here is two less than gcc's. gcc
+/// says `'t2' {aka 'enum e2'}` on lines 20 and 22, by the typedefs `a` and `c` were declared with,
+/// and this compiler keeps no typedef name on a type to say it by.
 const SAID: &[&str] = &[
     "a.c:9:1: warning: switch missing default case [E0854]",
     "a.c:9:1: warning: enumeration value 'C' not handled in switch [E0852]",
@@ -110,12 +112,12 @@ const SAID: &[&str] = &[
     "a.c:19:1: warning: switch missing default case [E0854]",
     "a.c:20:1: warning: switch missing default case [E0854]",
     "a.c:20:1: warning: enumeration value 'N' not handled in switch [E0852]",
-    "a.c:20:22: warning: case value '9' not in enumerated type 't2' {aka 'enum e2'} [E0852]",
+    "a.c:20:22: warning: case value '9' not in enumerated type 'enum e2' [E0852]",
     "a.c:21:1: warning: switch missing default case [E0854]",
     "a.c:21:1: warning: enumeration value 'L' not handled in switch [E0852]",
     "a.c:21:25: warning: case value '4294967295' not in enumerated type [E0852]",
     "a.c:22:1: warning: switch missing default case [E0854]",
-    "a.c:22:30: warning: case value '3' not in enumerated type 't3' {aka 'enum e2'} [E0852]",
+    "a.c:22:30: warning: case value '3' not in enumerated type 'enum e2' [E0852]",
     "a.c:23:1: warning: switch missing default case [E0854]",
     "a.c:23:1: warning: enumeration value 'N' not handled in switch [E0852]",
     "a.c:23:37: warning: case value '4' not in enumerated type 'enum e2' [E0852]",

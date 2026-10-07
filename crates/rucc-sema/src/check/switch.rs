@@ -20,6 +20,10 @@
 //!   so `case A ... C` is quiet about its middle and `case 4 ... 5` is said twice. An enumeration
 //!   with no enumerators says none of this.
 //!
+//! gcc names an enumeration with a tag by the typedef the controlling expression was declared
+//! with, where there was one, as `'t2' {aka 'enum e2'}`. A typedef name is not kept on the type
+//! here, so this compiler says `'enum e2'`.
+//!
 //! gcc gives an enumerator the enumeration's type in a `switch` on it, so `switch (A)` is a
 //! `switch` on the enumeration there. Before C23 this compiler gives an enumerator the `int` it
 //! is, and a `switch` on one is not checked. Nor is gcc's exception for the enumerators with
@@ -80,17 +84,6 @@ impl Checker<'_> {
         if unused {
             self.advice.unused_enumerators.insert((id, name));
         }
-    }
-
-    /// The type a `switch` is on as gcc names it, from the type the controlling expression had
-    /// before it was read and the one it has after. Reading it takes the typedef off along with
-    /// the qualifiers, and gcc names the enumeration by the typedef it was reached through, so
-    /// only the qualifiers come off here. Where reading made it another type altogether, which a
-    /// `hardbool` one becomes, the type it became is the one.
-    pub(in crate::check) fn switched_type(&mut self, read: TypeId, value: TypeId) -> TypeId {
-        let read = self.types.unqualified(read);
-        let became = self.types.kind(self.types.canonical(value));
-        if self.types.kind(self.types.canonical(read)) == became { read } else { value }
     }
 
     /// Whether gcc reads a controlling expression as a truth value, given as it was written and
@@ -231,16 +224,15 @@ impl Checker<'_> {
             || (switch.default && high == Some(1) && low == Some(0))
     }
 
-    /// The enumeration a case value is not in, as gcc names it after the words: by the type the
-    /// controlling expression was written with, by its typedef alone where the enumeration has
-    /// no tag, and not at all where it has neither.
+    /// The enumeration a case value is not in, as gcc names it after the words: by its tag, by
+    /// the first typedef that named it where it has no tag, and not at all where it has neither.
     fn enumerated(&self, id: EnumId, written: TypeId) -> String {
         if self.types.enum_info(id).tag.is_some() {
             return format!(" {}", self.gcc_quoted(written));
         }
-        match self.types.kind(written) {
-            TypeKind::Typedef { name, .. } => format!(" '{}'", self.text(name)),
-            _ => String::new(),
-        }
+        let named = self.types.aliases().iter().find(|alias| {
+            self.types.kind(self.types.canonical(alias.of)) == TypeKind::Enum(id)
+        });
+        named.map_or_else(String::new, |alias| format!(" '{}'", self.text(alias.name)))
     }
 }

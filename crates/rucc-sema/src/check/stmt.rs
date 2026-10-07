@@ -738,9 +738,9 @@ impl Checker<'_> {
     fn switch(&mut self, scrutinee: ast::ExprId, body: ast::StmtId, span: Span) -> Stmt {
         let at = self.ast.expr_span(scrutinee);
         let cond = self.expr(scrutinee);
-        let read = self.tast[cond].ty;
         let cond = self.value(cond);
-        let written = self.switched_type(read, self.tast[cond].ty);
+        // A cast to `const enum e` is a `switch` on `enum e` to gcc.
+        let written = self.types.unqualified(self.tast[cond].ty);
         let boolean = self.truth_valued(scrutinee, cond);
         // Read before the promotion and not after it, because the range a case value is measured
         // against is the one that was written. `switch (c)` on a `char` and `case 300` is worth
