@@ -2145,7 +2145,7 @@ fn describe(
         // A single dot when the process could not say where it was, which is a directory name every
         // debugger understands and which leaves a relative file name meaning what it already meant.
         dir: rewrite(opts.working_dir.as_deref().unwrap_or(".")),
-        producer: format!("rucc {}", crate::VERSION),
+        producer: producer(opts),
         files,
         types: origin.meaning.types.clone(),
         funcs,
@@ -2173,6 +2173,16 @@ fn describe(
         rucc_session::Compress::Zstd => rucc_object::Compress::Zstd,
     };
     Ok(info)
+}
+
+/// What `DW_AT_producer` says: the name, the version and the recorded flags.
+fn producer(opts: &Options) -> String {
+    let mut text = format!("rucc {}", crate::VERSION);
+    for switch in &opts.switches {
+        text.push(' ');
+        text.push_str(switch);
+    }
+    text
 }
 
 /// The debug information of a wasm object, as [`describe`] makes it for a native one: the line
@@ -2352,7 +2362,7 @@ fn describe_wasm(
     let unit = rucc_debug::Unit {
         name: rewrite(origin.name),
         dir: rewrite(opts.working_dir.as_deref().unwrap_or(".")),
-        producer: format!("rucc {}", crate::VERSION),
+        producer: producer(opts),
         files,
         types: origin.meaning.types.clone(),
         funcs,

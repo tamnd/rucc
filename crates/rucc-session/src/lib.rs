@@ -2054,6 +2054,11 @@ pub struct Options {
     /// The version of DWARF that debug information is written in, which is 5 unless `-gdwarf-4`
     /// asked for 4. Only 4 and 5 are ever here.
     pub dwarf_version: u8,
+    /// The flags that `DW_AT_producer` names after the version, as gcc does with
+    /// `-grecord-gcc-switches`. That is on by default in gcc, so it is here too, and
+    /// `-gno-record-gcc-switches` leaves this empty. Paths, macros, warnings and link flags are not
+    /// in it, so two builds in two directories still give the same objects.
+    pub switches: Vec<String>,
     /// The directory the compiler ran in, which is what `DW_AT_comp_dir` says.
     ///
     /// A debugger joins it onto every file name in the line table that is relative, and the names
@@ -2811,6 +2816,7 @@ impl Options {
             races: Races::default(),
             emit: EmitKind::default(),
             debug_info: false,
+            switches: Vec::new(),
             dwarf_version: 5,
             working_dir: None,
             config_files: Vec::new(),

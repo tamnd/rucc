@@ -269,7 +269,7 @@ options:
   -fpass-fuel=<pass>=<n>, -fpass-fuel-global=<n>   stop a pass, or all of them, after n
   -fdisable-<pass>[=<funcs>], -fenable-<pass>[=<funcs>]   run a pass on some functions only
   -g -g0 -gdwarf-5, -fno-omit-frame-pointer, -m[no-]omit-leaf-frame-pointer, -mno-red-zone   debug info, frame pointer, red zone
-  -gz[=none|zlib|zlib-gnu] -gno-split-dwarf   compress the debug sections, zlib when bare
+  -gz[=none|zlib|zlib-gnu] -gno-split-dwarf -g[no-]record-gcc-switches   compress the debug sections, zlib when bare, the flags in DW_AT_producer
   -flto[=auto|jobserver|<n>] -fno-lto -ffat-lto-objects   keep the module in the object, not read at link time yet
   -fprofile-use[=<path>] -fprofile-dir=<dir> --coverage   read, and counted for gcov
   -f[no-]stack-protector[-strong|-all|-explicit], -f[no-]stack-clash-protection, -fcf-protection=<edges>, -fhardened
@@ -705,6 +705,41 @@ fn starting_target(host: Option<Triple>, args: &[String]) -> Result<Triple, CliE
     }
 }
 
+/// The flags that `DW_AT_producer` records, in the order of the command line.
+///
+/// This is the gcc rule in a short form. gcc records the flags that change the code: `-f`, `-m`,
+/// `-O`, `-g`, `-std=` and `-ansi`. It does not record a flag that names a path or a macro, a
+/// warning, a flag for the output or the link, or a flag for the diagnostics. A path in the
+/// producer would make two builds in two directories give different objects.
+fn switches(args: &[String]) -> Vec<String> {
+    // The flags that take the next word as their value. The value is skipped with the flag.
+    const SEPARATE: &str = "-o -I -D -U -include -imacros -idirafter -iprefix -iwithprefix \
+        -iwithprefixbefore -isystem -iquote -isysroot -imultilib -MF -MT -MQ -x -Xlinker \
+        -Xassembler -Xpreprocessor -L -l -u -T -z -B -e -aux-info --sysroot -arch -target";
+    // The `-f` flags that name a path or that are about the diagnostics, as prefixes.
+    const NOT_RECORDED: &str = "-ffile-prefix-map= -fdebug-prefix-map= -fmacro-prefix-map= \
+        -fprofile-prefix-map= -fdiagnostics- -fno-diagnostics- -fmessage-length= -fmax-errors= \
+        -fdump- -fopt-info -fuse-ld= -fcolor-diagnostics -fno-color-diagnostics";
+    let mut out = Vec::new();
+    let mut words = args.iter();
+    while let Some(arg) = words.next() {
+        let arg = arg.as_str();
+        if SEPARATE.split_whitespace().any(|flag| flag == arg) {
+            words.next();
+            continue;
+        }
+        let code = arg.starts_with("-f") || arg.starts_with("-m") || arg.starts_with("-O");
+        let debug = arg.starts_with("-g") && !arg.ends_with("record-gcc-switches");
+        let dialect = arg.starts_with("-std=") || arg == "-ansi";
+        if (code || debug || dialect)
+            && !NOT_RECORDED.split_whitespace().any(|skip| arg.starts_with(skip))
+        {
+            out.push(arg.to_owned());
+        }
+    }
+    out
+}
+
 /// Where the configuration files are: `<prefix>/lib/rucc` beside the binary in `<prefix>/bin`,
 /// and then `/etc/rucc`.
 fn config_dirs() -> Vec<PathBuf> {
@@ -788,6 +823,19 @@ pub fn parse_args(args: &[String]) -> Result<Action, CliError> {
     // line that compiles four files should give the same answer for all four.
     opts.working_dir = std::env::current_dir().ok().map(|dir| dir.to_string_lossy().into_owned());
     opts.config_files = configs;
+    // The last of the two flags wins, and gcc records the flags when neither is given.
+    let record = args
+        .iter()
+        .rev()
+        .find_map(|arg| match arg.as_str() {
+            "-grecord-gcc-switches" => Some(true),
+            "-gno-record-gcc-switches" => Some(false),
+            _ => None,
+        })
+        .unwrap_or(true);
+    if record {
+        opts.switches = switches(args);
+    }
     let mut inputs: Vec<Input> = Vec::new();
     let mut print_config = false;
     let mut print_pipeline = false;
@@ -1087,6 +1135,8 @@ pub fn parse_args(args: &[String]) -> Result<Action, CliError> {
             // that does not appear is the plainest change of that kind there is. The negative
             // spelling is taken, because putting it all in the object is what happens anyway.
             "-gno-split-dwarf" => {}
+            // Read before the loop, see `switches`.
+            "-grecord-gcc-switches" | "-gno-record-gcc-switches" => {}
             "-gsplit-dwarf" => {
                 return Err(err(format!(
                     "{arg}: this compiler writes no separate `.dwo` file, and a build that \
@@ -7689,6 +7739,58 @@ mod tests {
             assert!(said[0].starts_with("linker hardening options"), "{other}: {said:?}");
         }
         assert!(notes(&[LINUX, "-c", "-O2", "-fhardened", "-Wl,-z,lazy", "a.c"]).is_empty());
+    }
+
+    /// The Ubuntu flag line, with the paths, the macros, the warnings and the link flags left out,
+    /// in the order the line has them.
+    #[test]
+    fn the_producer_records_the_flags_that_change_the_code() {
+        let line = [
+            "-Wdate-time",
+            "-D_FORTIFY_SOURCE=3",
+            "-g",
+            "-O2",
+            "-fno-omit-frame-pointer",
+            "-ffile-prefix-map=/home/tam=.",
+            "-flto=auto",
+            "-ffat-lto-objects",
+            "-fstack-protector-strong",
+            "-fstack-clash-protection",
+            "-Wformat",
+            "-Werror=format-security",
+            "-fcf-protection",
+            "-I",
+            "include",
+            "-o",
+            "a.o",
+            "-c",
+            "-Xlinker",
+            "-zrelro",
+            "-Wl,-z,now",
+            "-std=gnu11",
+            "a.c",
+        ];
+        let (opts, _) = compile(&line);
+        assert_eq!(
+            opts.switches,
+            [
+                "-g",
+                "-O2",
+                "-fno-omit-frame-pointer",
+                "-flto=auto",
+                "-ffat-lto-objects",
+                "-fstack-protector-strong",
+                "-fstack-clash-protection",
+                "-fcf-protection",
+                "-std=gnu11",
+            ]
+        );
+
+        let (opts, _) = compile(&["-c", "-g", "-O2", "-gno-record-gcc-switches", "a.c"]);
+        assert!(opts.switches.is_empty(), "{:?}", opts.switches);
+        let (opts, _) =
+            compile(&["-c", "-gno-record-gcc-switches", "-O2", "-grecord-gcc-switches", "a.c"]);
+        assert_eq!(opts.switches, ["-O2"], "the last one wins, and neither is recorded");
     }
 
     /// Five flags rather than one with an argument, which is how gcc spells them, and the negative
