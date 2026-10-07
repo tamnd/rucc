@@ -1779,9 +1779,7 @@ mod tests {
     /// of the two a diagnostic is. gcc 14 turned several of these from warnings into errors and
     /// the difference is the whole point of some of the tests below.
     fn reported(checker: &Checker<'_>) -> Vec<String> {
-        said(checker)
-            .map(|d| format!("{}: {}", d.severity.as_str(), d.message))
-            .collect()
+        said(checker).map(|d| format!("{}: {}", d.severity.as_str(), d.message)).collect()
     }
 
     #[test]
