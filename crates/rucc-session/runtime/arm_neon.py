@@ -209,7 +209,8 @@ INTRO = """
  * vector. Each one gives the same bytes as gcc's own header for the same inputs, which is checked
  * by calling every one of them. What is not here yet is the saturating and rounding shifts and
  * multiplies, the square roots and estimates, fused multiply add, the lane forms of multiply, the
- * half precision and bfloat types, and the crypto and dot product extensions. */
+ * half precision and bfloat types, and the crypto and dot product extensions apart from the 64 bit
+ * carry-less product, which the kernel's CRC code uses. */
 """
 
 
@@ -236,6 +237,7 @@ def emit():
     w("typedef uint8_t poly8_t;")
     w("typedef uint16_t poly16_t;")
     w("typedef uint64_t poly64_t;")
+    w("typedef unsigned __int128 poly128_t;")
     w("")
     for q in QS:
         for e in ALL:
@@ -739,6 +741,33 @@ def emit():
             "return __r;",
         ],
     )
+    # The same at 64 bits, which is PMULL and PMULL2 from the crypto extension.
+    fn(
+        "poly128_t",
+        "vmull_p64",
+        "poly64_t a, poly64_t b",
+        [
+            "poly128_t __r = 0;",
+            "for (int k = 0; k < 64; k++)",
+            "  if (b >> k & 1) __r ^= (poly128_t)a << k;",
+            "return __r;",
+        ],
+    )
+    fn("poly128_t", "vmull_high_p64", "poly64x2_t a, poly64x2_t b", "return vmull_p64(a[1], b[1]);")
+    for e in ALL:
+        v = vt(e, True)
+        fn(
+            v,
+            f"vreinterpretq_{e}_p128",
+            "poly128_t v",
+            f"{v} r; __builtin_memcpy(&r, &v, sizeof r); return r;",
+        )
+        fn(
+            "poly128_t",
+            f"vreinterpretq_p128_{e}",
+            f"{v} v",
+            "poly128_t r; __builtin_memcpy(&r, &v, sizeof r); return r;",
+        )
 
     section("Conversions between integers and floats, where a value out of range saturates.")
     for q in QS:
