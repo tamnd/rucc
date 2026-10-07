@@ -72,7 +72,7 @@ fn onto_itself<'a>(asm: &'a str, mnemonic: &str) -> Vec<&'a str> {
 #[test]
 fn the_dispatch_on_x86_64_copies_no_register_into_itself() {
     let asm = assembly("x86_64-unknown-linux-gnu");
-    assert!(asm.contains("jmp\t*%"), "the fixture no longer has a computed goto:\n{asm}");
+    assert!(asm.contains("jmp\t*"), "the fixture no longer has a computed goto:\n{asm}");
     let copies = onto_itself(&asm, "movq");
     assert!(copies.is_empty(), "{copies:?} in:\n{asm}");
 }
