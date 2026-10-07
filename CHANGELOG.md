@@ -4,6 +4,10 @@ All notable changes are recorded here. The format follows [Keep a Changelog](htt
 
 ## Unreleased
 
+## 0.28.0
+
+This release ends WA7 (#2869). `wasm32-none` is at tier 2, with a rung 0 subset under Wasmtime 49 and a test host. rucc assembles its own `-S` text for wasm to the same object. `-g` on a wasm target writes DWARF with the line table, the types, the functions and the locations of their parameters and locals, and the linker inside rucc keeps it. rucc ships `<wasm_simd128.h>`. The decision on wasm64 is recorded in #3201: no target row now. The release also has AArch64 code generation work that makes the output closer to gcc, and the assembler and `asm` work that the arm64 kernel needs.
+
 ### Added
 
 - The wasm DWARF says where each declaration in a function is (#3195). A declaration in the frame, such as an array or a variable whose address is taken, is at an offset from the frame base at each optimization level, and the frame base is the wasm local that holds the bottom of the frame, as `DW_OP_WASM_location`. At -O0 a parameter or a scalar is in the wasm local of its value, or is its number when it is a constant, and a declaration that the code changes, such as a loop counter, has a location list with the local that holds it over each part of the code. At -O1 and above a declaration that is not in the frame has no location yet. The holding analysis that gives the value of a declaration at the top of each block moves from rucc-codegen to rucc-ir, so that both back ends read it. `llvm-dwarfdump --verify` takes the object at -O0 and -O2. Under lldb and Wasmtime 49, a parameter and an array show their values. A local that Wasmtime keeps in a register can show as not available after its last use, which a module from clang shows too.
