@@ -291,9 +291,8 @@ options:
   -ffile-prefix-map=<old>=<new>   rewrite that front of every path we put in the output
   -fmacro-prefix-map= -fdebug-prefix-map= -fprofile-prefix-map=   the same, one output each
   -pthread               build for more than one thread, and link the library for it
-  -dumpmachine -dumpversion -print-multiarch -print-search-dirs   what this compiler is
-  -print-file-name=<name> -print-prog-name=<name>   where a file or a program is
-  -print-libgcc-file-name -print-multi-os-directory   where the GCC runtime and the libraries are
+  -dumpmachine -dumpversion -print-multiarch -print-multi-os-directory -print-search-dirs   what this compiler is
+  -print-file-name=<name> -print-prog-name=<name> -print-libgcc-file-name   where a file or a program is
   -print-sysroot         the root the headers and the libraries are read under
   -print-sysroot-provenance   every input under it, where it came from and its licence
   -print-sysroot-digest   the sha256 of that record, which names the whole sysroot in one line
