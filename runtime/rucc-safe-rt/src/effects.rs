@@ -88,6 +88,7 @@ use core::ffi::c_void;
 use crate::alloc;
 use crate::fail::Judgement;
 use crate::plane::{self, GRANULE};
+use crate::recover;
 
 /// Which group of interposed function a row belongs to.
 ///
@@ -317,6 +318,25 @@ pub fn range(site: &'static str, addr: *const c_void, len: usize) {
         // and the last one is where the call went too far.
         crate::fail::refused_at(Judgement::Access, site, last);
     }
+    let end = asked(&region, at);
+    if last >= end {
+        // The first byte nobody asked for, which is where the call went too far even though the
+        // plane says the rounding is the instance's.
+        crate::fail::refused_at(Judgement::Access, site, end);
+    }
+}
+
+/// Where the bytes the instance holding `at` was asked for end.
+///
+/// The planes are per granule and the allocator rounds a request up to a whole number of them, so
+/// a ten byte block owns sixteen as far as the plane can tell and a copy of eleven bytes into it is
+/// document 03's S1 landing in storage nobody else owns. The header says how much was asked for,
+/// which is what [`crate::check::bounds`] holds an ordinary access to, and a wrapper is held to the
+/// same thing. Where there is no header to believe the run of the plane is the answer, as before.
+///
+/// `at` has to be inside `region`.
+fn asked(region: &alloc::Region, at: usize) -> usize {
+    recover::extent(region, at).map_or(usize::MAX, |(lo, ext)| lo.wrapping_add(ext))
 }
 
 /// The length of a NUL terminated string, checked as it is discovered.
@@ -540,6 +560,9 @@ struct Watch {
     watched: Option<(alloc::Region, plane::Version)>,
     /// Where the walk started, which is the one byte judged without starting a granule.
     start: usize,
+    /// Where the bytes the instance was asked for end, which can be in the middle of a granule and
+    /// so is compared against every byte rather than only at a boundary.
+    end: usize,
 }
 
 impl Watch {
@@ -550,7 +573,8 @@ impl Watch {
             // plane asks for.
             (region, unsafe { region.plane.version(start) })
         });
-        Self { watched, start }
+        let end = watched.map_or(usize::MAX, |(region, _)| asked(&region, start));
+        Self { watched, start, end }
     }
 
     /// Judges one byte of the walk, if it is one the plane could have changed its answer at.
@@ -564,6 +588,9 @@ impl Watch {
     /// When the byte is not in the live instance the walk started in.
     fn step(self, site: &'static str, at: usize) {
         let Some((region, instance)) = self.watched else { return };
+        if at >= self.end {
+            crate::fail::refused_at(Judgement::Access, site, at);
+        }
         if at != self.start && at % GRANULE != 0 {
             return;
         }
