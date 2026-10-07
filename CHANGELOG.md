@@ -63,6 +63,7 @@ This release ends S5 (#431), the full plane set of the safe memory work. The typ
 
 ### Fixed
 
+- A file that defines variables and no functions gets its `-g` unit, with the variables and their types and no address range, as gcc writes it, so the kernel's BTF has the types of a file that is only tables (#3353)
 - The `-g` type entries match what gcc writes, so pahole reads the same BTF from both: a typedef over another typedef names it, only types a function or variable reaches are written, each prototype keeps the parameter spelling its own declaration wrote, an unnamed bit-field has no member, an enumeration never completed is a declaration, and an array of arrays is one entry with a range per dimension (#3352)
 - `<arm_neon.h>` has `vmul_p8` and `vmulq_p8`, the 8 bit carry-less product the kernel's raid6 neon code uses (#3342)
 - `__builtin_object_size` of a member reached through a pointer the function set itself, such as nouveau's `__member_size(args->data)` over a stack buffer, is left for the IR and answered from that buffer at -O2 like gcc, and a size not known yet that is divided down no longer warns that it does not fit (#3341)

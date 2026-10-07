@@ -249,16 +249,19 @@ impl gimli::write::RelocateWriter for Section {
 
 /// The sections a unit's debug information goes in.
 ///
-/// The result is empty when nothing in the unit has a row, which is a file of declarations and a
-/// file whose every function was dropped. An empty `.debug_line` is worse than no section at all,
-/// since a reader would find a unit covering no addresses and have to decide what that meant.
+/// The result is empty when nothing in the unit has a row and the unit defines no variable, which
+/// is a file of declarations and a file whose every function was dropped. A file that defines only
+/// variables gets a unit with no address range, as gcc writes it, because its variables and their
+/// types are described there and the kernel's BTF is read from those entries: a table of `const`
+/// structures in a file with no code would otherwise have its types missing from the BTF.
 ///
 /// # Errors
 ///
 /// [`Error::Refused`] for anything the DWARF writer objected to. Every value it is handed here came
 /// out of this compiler, so that is a bug here rather than a program's mistake.
 pub fn write(unit: &Unit) -> Result<Info, Error> {
-    if unit.funcs.iter().all(|func| func.rows.is_empty()) {
+    let code = unit.funcs.iter().any(|func| !func.rows.is_empty());
+    if !code && unit.globals.is_empty() {
         return Ok(Info::default());
     }
     let version = match unit.version {
@@ -331,7 +334,7 @@ pub fn write(unit: &Unit) -> Result<Info, Error> {
         })
         .collect();
     dwarf.unit.line_program = program;
-    let covers = dwarf.unit.ranges.add(gimli::write::RangeList(ranges));
+    let covers = code.then(|| dwarf.unit.ranges.add(gimli::write::RangeList(ranges)));
     let root = dwarf.unit.root();
     let mut said = Vec::with_capacity(3);
     for (attr, val) in [
@@ -365,11 +368,13 @@ pub fn write(unit: &Unit) -> Result<Info, Error> {
         root.set(attr, val);
     }
     root.set(gimli::DW_AT_stmt_list, gimli::write::AttributeValue::LineProgramRef);
-    root.set(gimli::DW_AT_ranges, gimli::write::AttributeValue::RangeListRef(covers));
+    if let Some(covers) = covers {
+        root.set(gimli::DW_AT_ranges, gimli::write::AttributeValue::RangeListRef(covers));
+    }
     // A DWARF 4 range or location list is measured from the unit's base address, which is its low
     // PC. Every address in the lists here is a relocation to where a function went, so the base is
     // zero, and writing it says so to a reader that would otherwise have no base at all.
-    if unit.version == Version::Four {
+    if code && unit.version == Version::Four {
         let zero = gimli::write::Address::Constant(0);
         root.set(gimli::DW_AT_low_pc, gimli::write::AttributeValue::Address(zero));
     }
@@ -581,12 +586,28 @@ mod tests {
         assert!(unit(&five).bytes.contains(&c11));
     }
 
-    /// A file with nothing to say writes no sections rather than empty ones.
+    /// A file with no code and no variables writes no sections rather than empty ones.
     #[test]
     fn a_unit_with_no_rows_writes_nothing() {
         let mut unit = one();
         unit.funcs[0].rows.clear();
         assert_eq!(write(&unit).expect("sections"), Info::default());
+    }
+
+    /// A file that defines only variables still describes them, in a unit with no address range,
+    /// which is how gcc writes one and what pahole reads a table of structures' types out of.
+    #[test]
+    fn a_unit_of_only_variables_describes_them_and_covers_no_code() {
+        let mut unit = one();
+        unit.funcs.clear();
+        unit.globals =
+            vec![Global { name: "table".to_owned(), ty: None, decl: None, external: true }];
+        let info = write(&unit).expect("sections");
+        let names: Vec<&str> = info.chunks.iter().map(|chunk| chunk.name.as_str()).collect();
+        assert!(names.contains(&".debug_info"), "{names:?}");
+        assert!(!names.contains(&".debug_rnglists"), "{names:?}");
+        let held = info.chunks.iter().find(|chunk| chunk.name == ".debug_info").expect("a unit");
+        assert!(held.relocs.iter().any(|reloc| reloc.symbol == "table"));
     }
 
     /// A row naming a file the unit does not have is refused rather than written as something else.
