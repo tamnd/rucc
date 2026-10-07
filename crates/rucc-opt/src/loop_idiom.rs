@@ -151,7 +151,7 @@ impl Pass for LoopIdiom {
         let mut plans = Vec::new();
         {
             let mut scev = Scev::new(func, cfg, loops);
-            let mut ranges = Ranges::new(func, cfg, doms);
+            let mut ranges = Ranges::new(func, cfg, doms).knowing(loops);
             for id in loops.all() {
                 match planned(func, cfg, doms, loops, &mut scev, &mut ranges, id) {
                     Ok(Some(plan)) => plans.push(plan),

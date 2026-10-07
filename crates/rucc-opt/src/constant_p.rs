@@ -260,8 +260,8 @@ fn known(func: &Func, an: &Analyses) -> Vec<Inst> {
     if asked.is_empty() {
         return asked;
     }
-    let (cfg, dom) = (an.cfg(func), an.dominators(func));
-    let mut ranges = Ranges::new(func, cfg, dom);
+    let cfg = an.cfg(func);
+    let mut ranges = Ranges::cached(func, an);
     asked
         .into_iter()
         .filter(|&inst| {

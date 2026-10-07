@@ -247,8 +247,7 @@ struct Keep {
 fn answers(func: &Func, an: &mut Analyses, stats: &mut Stats) -> Plan {
     let mut plan = Plan::default();
     let cfg = an.cfg(func);
-    let dom = an.dominators(func);
-    let mut ranges = Ranges::new(func, cfg, dom);
+    let mut ranges = Ranges::cached(func, an);
     for block in func.blocks() {
         if !cfg.reaches(block) {
             continue;

@@ -430,6 +430,19 @@ impl Range {
         if self.is_empty() {
             return self;
         }
+        // The two the solver in sccp hands over for every operand it reads, a constant and a value
+        // nothing is known about, come out of the walk below as these, and taking them here saves
+        // that walk and the merge after it, tamnd/rucc#3052.
+        if bits.unknown == 0 {
+            let value = bits.value;
+            if self.pairs().iter().any(|&(lo, hi)| lo <= value && value <= hi) {
+                return Self::exactly(value, self.width);
+            }
+            return Self::empty(self.width);
+        }
+        if bits == self.bits && self.is_full() {
+            return self;
+        }
 
         // Everything the bits allow is between their least and their greatest, so an interval
         // outside that is empty and one that straddles the edge shrinks to fit. Then the ends
@@ -863,6 +876,22 @@ mod tests {
         assert_eq!(range.unsigned_bounds(), Some((0, 0b1111_1000)));
         assert!(range.contains(0b1111_1000));
         assert!(!range.contains(0b1111_1001));
+    }
+
+    #[test]
+    fn a_constant_narrows_to_itself_and_nothing_known_leaves_a_range_as_it_was() {
+        for value in 0..=0xff {
+            let exact = Bits::exactly(value, 8);
+            assert_eq!(Range::full(8).narrow(exact), Range::exactly(value, 8));
+            let inside = (10..=20).contains(&value);
+            let narrowed = Range::between(10, 20, 8).narrow(exact);
+            assert_eq!(narrowed, if inside { Range::exactly(value, 8) } else { Range::empty(8) });
+        }
+        assert_eq!(Range::full(8).narrow(Bits::unknown(8)), Range::full(8));
+        assert_eq!(
+            Range::full(128).narrow(Bits::exactly(u128::MAX, 128)),
+            Range::exactly(u128::MAX, 128)
+        );
     }
 
     #[test]

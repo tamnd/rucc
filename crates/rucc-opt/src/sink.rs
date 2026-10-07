@@ -178,7 +178,7 @@ impl Pass for Sink {
         let mut plans = Vec::new();
         {
             let mut scev = Scev::new(func, cfg, loops);
-            let mut ranges = Ranges::new(func, cfg, doms);
+            let mut ranges = Ranges::new(func, cfg, doms).knowing(loops);
             for id in loops.all() {
                 sweep(func, cfg, doms, loops, &mut scev, &mut ranges, id, &mut plans, &mut stats);
             }

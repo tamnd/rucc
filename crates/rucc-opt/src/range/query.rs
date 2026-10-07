@@ -82,6 +82,7 @@ use rucc_ir::{Block, Def, Extra, Flags, Func, Inst, IntPred, Opcode, Value};
 
 use super::ops::{self, Checked, Truth, Undo};
 use super::{PAIRS, Range};
+use crate::Analyses;
 use crate::cfg::Cfg;
 use crate::dom::Dominators;
 use crate::loops::Loops;
@@ -309,6 +310,10 @@ pub struct Ranges<'a> {
     loops: Option<Loops>,
     /// The loop tree the caller already had, which is read instead of building one.
     given: Option<&'a Loops>,
+    /// The cache the graph and the dominators came from, which builds the loop tree there the
+    /// first time a counter is asked about, so the next analysis made out of the same cache reads
+    /// the same one. See [`Ranges::cached`].
+    shared: Option<&'a Analyses>,
 }
 
 impl<'a> Ranges<'a> {
@@ -338,6 +343,7 @@ impl<'a> Ranges<'a> {
             joins: 0,
             loops: None,
             given: None,
+            shared: None,
         }
     }
 
@@ -353,6 +359,21 @@ impl<'a> Ranges<'a> {
     pub fn knowing(mut self, loops: &'a Loops) -> Self {
         self.given = Some(loops);
         self
+    }
+
+    /// The analysis of this function, with the graph and the dominators out of the cache, and the
+    /// loop tree out of it too the first time a counter is asked about.
+    ///
+    /// The tree in the cache is the one [`Ranges::new`] would build out of the same graph and
+    /// dominators, so what changes is only who keeps it. What it is for is a pass that makes a
+    /// fresh analysis per candidate, which built a tree of the whole function for each one that
+    /// got as far as a counter. phiopt was that caller, and the trees were most of what it cost on
+    /// lz4.c at `-O1`. tamnd/rucc#3052.
+    #[must_use]
+    pub fn cached(func: &'a Func, an: &'a Analyses) -> Self {
+        let mut ranges = Self::new(func, an.cfg(func), an.dominators(func));
+        ranges.shared = Some(an);
+        ranges
     }
 
     /// What the queries have done so far.
@@ -576,9 +597,10 @@ impl<'a> Ranges<'a> {
         if !ty.is_int() || !ty.is_scalar() {
             return None;
         }
-        let loops = match self.given {
-            Some(loops) => loops,
-            None => &*self.loops.get_or_insert_with(|| Loops::new(self.cfg, self.dom)),
+        let loops = match (self.given, self.shared) {
+            (Some(loops), _) => loops,
+            (None, Some(an)) => an.loops(self.func),
+            (None, None) => &*self.loops.get_or_insert_with(|| Loops::new(self.cfg, self.dom)),
         };
         let id = loops.innermost(block)?;
         if loops.header(id) != block {

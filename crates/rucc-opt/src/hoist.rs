@@ -353,7 +353,7 @@ impl Pass for Hoist {
                 // Beside the evolution rather than instead of it. What the counter does each time
                 // round is scalar evolution's answer and how large the value it stops at can be is
                 // the ranges' answer, and a counter as wide as the arithmetic needs both.
-                let mut ranges = Ranges::new(func, cfg, doms);
+                let mut ranges = Ranges::new(func, cfg, doms).knowing(loops);
                 let mut cx = Sweep { func, cfg, doms, loops, scev: &mut scev, ranges: &mut ranges };
                 for id in loops.all() {
                     cx.sweep(id, fresh.as_deref(), &mut plans, &mut stats);
