@@ -949,3 +949,35 @@ fn types_compatible_p_takes_an_arrays_qualifiers_off_with_the_element() {
     );
     assert!(got.is_empty(), "{got}");
 }
+
+/// gcc fills an array that lives for the whole program from a compound literal of the same array
+/// type as if its braces had been written there, which is how the kernel's FCoE headers spell a
+/// MAC address, and refuses it in a local and where the array types differ.
+#[test]
+fn a_static_array_takes_a_compound_literal_of_its_own_type() {
+    let got = ir(
+        "array-literal-init",
+        &[],
+        "typedef unsigned char u8;\n\
+         u8 a[6] = ((u8[6]){ 1, 0x10, 0x18 });\n\
+         struct s { int k; u8 m[3]; } c = { 7, ((const u8[3]){ [1] = 9 }) };\n\
+         u8 b[] = (u8[]){ 4, 5, 6 };\n\
+         int f(void) { static u8 l[2] = (u8[2]){ 3, 2 }; return l[0]; }\n",
+    );
+    for want in [
+        "global @a : bytes 6 = { i8 1, i8 16, i8 24, zero 3 }",
+        "global @c : bytes 8 = { i32 7, zero 1, i8 9, zero 2 }",
+        "global @b : bytes 3 = { i8 4, i8 5, i8 6 }",
+        "bytes 2 = { i8 3, i8 2 }",
+    ] {
+        assert!(got.contains(want), "{want} is missing from:\n{got}");
+    }
+    for refused in [
+        "typedef unsigned char u8;\nu8 a[8] = (u8[6]){ 1 };\n",
+        "typedef unsigned char u8;\nsigned char a[6] = (u8[6]){ 1 };\n",
+        "typedef unsigned char u8;\nvoid f(void) { u8 a[6] = (u8[6]){ 1 }; }\n",
+    ] {
+        let out = compile("array-literal-refused", &["--emit=ir"], refused);
+        assert!(!out.status.success(), "the compiler took:\n{refused}");
+    }
+}

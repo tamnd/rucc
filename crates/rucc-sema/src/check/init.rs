@@ -425,9 +425,13 @@ impl<'a> Checker<'a> {
                 self.store_scalar(w, place, value, span);
                 1
             }
+            Kind::Array { .. } if w.is_static && self.array_literal(expr).is_some() => {
+                self.literal_init(w, place, expr, span)
+            }
             Kind::Array { .. } => {
                 // There is no value of array type, so a string literal is the only thing that
-                // can be written here without braces.
+                // can be written here without braces, and a compound literal is the one more
+                // gcc allows in an object that lives for the whole program.
                 self.report(Diagnostic::error("invalid initializer", span).with_code("E0616"));
                 w.poisoned = true;
                 0
@@ -705,6 +709,14 @@ impl<'a> Checker<'a> {
                     self.elide(w, sub, kind, items, item.span);
                 }
             }
+            // A flexible array member is not filled whole this way, gcc walks into it instead.
+            Kind::Array { len: Some(_), .. }
+                if w.is_static && self.array_literal(expr).is_some() =>
+            {
+                items.bump();
+                let reached = self.literal_init(w, sub, expr, item.span);
+                w.reach(sub, kind, reached);
+            }
             Kind::Array { .. } => {
                 self.elide(w, sub, kind, items, item.span);
             }
@@ -946,6 +958,51 @@ impl<'a> Checker<'a> {
         let value = self.cut_to_fit(value, len, span);
         w.store(place, value);
         written + 1
+    }
+
+    /// The type name and the braces of a compound literal, when that is what was written.
+    fn array_literal(&self, expr: ast::ExprId) -> Option<(ast::TypeNameId, ast::InitItemList)> {
+        match self.ast[expr] {
+            ast::Expr::CompoundLiteral { ty, init } => match self.ast[init] {
+                ast::Init::List(list) => Some((ty, list)),
+                ast::Init::Expr(_) => None,
+            },
+            ast::Expr::Extension(inner) => self.array_literal(inner),
+            _ => None,
+        }
+    }
+
+    /// A compound literal of array type filling an array that lives for the whole program.
+    ///
+    /// gcc takes `static u8 mac[6] = ((u8[6]){ 1, 2 });` as if the braces had been written on
+    /// their own, which is how the kernel's FCoE headers spell a MAC address, and it refuses the
+    /// same thing in a local and a literal whose array type is not the one being filled. The
+    /// qualifiers come off the elements first, so a `const u8 [6]` fills a `u8 [6]`. Gives back
+    /// the literal's length, which is the length of an array whose length it decides.
+    fn literal_init(&mut self, w: &mut Walk, place: Place, expr: ast::ExprId, span: Span) -> u64 {
+        let Some((name, list)) = self.array_literal(expr) else { return 0 };
+        let written = self.type_name(name);
+        if !matches!(self.kind_of(written), Kind::Array { .. }) {
+            self.report(Diagnostic::error("invalid initializer", span).with_code("E0616"));
+            w.poisoned = true;
+            return 0;
+        }
+        // The literal's own place, so an unsized one counts what was written and is not taken
+        // for a flexible array member, which is the caller's business.
+        let inner = Place { ty: written, part: Part::Root, ..place };
+        let reached = self.braced(w, inner, list, span, false);
+        let written = self.complete(written, reached);
+        let (target, source) =
+            (self.types.unqualified_object(place.ty), self.types.unqualified_object(written));
+        if !compatible(&self.types, target, source) {
+            self.report(Diagnostic::error("invalid initializer", span).with_code("E0616"));
+            w.poisoned = true;
+            return 0;
+        }
+        match self.kind_of(written) {
+            Kind::Array { len: Some(len), .. } => len,
+            _ => reached,
+        }
     }
 
     /// The same literal with the type of the array it is filling, when the array is the smaller
