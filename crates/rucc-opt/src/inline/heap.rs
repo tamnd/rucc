@@ -51,8 +51,7 @@ use rucc_target::TargetInfo;
 use super::summary::Summary;
 use super::{
     ASKED_DEPTH, CUT, How, INLINED, InlineFailure, Kind, Pool, calls_twice, fits, folded_size,
-    frame, grows, made_of_params, passed, passes_asked, resolved, specialized_size, splice,
-    summed_size, summed_time,
+    frame, grows, made_of_params, passed, passes_asked, resolved, splice, summed_size, summed_time,
 };
 use crate::Stats;
 use crate::callgraph::CallGraph;
@@ -474,7 +473,7 @@ impl Heap<'_> {
         let (callee, kind) = self.callee(module, caller, call)?;
         let func = &module[caller];
         let target = &module[callee];
-        let names = self.how.names;
+        let (how, names) = (self.how, self.how.names);
         let values = passed(func, call, target);
         let args = func[func[call].args].len();
         let version = self.version(callee);
@@ -503,7 +502,7 @@ impl Heap<'_> {
                         let (mut body, cut) =
                             summed_size(&profile.summary, target, values.clone(), weighed);
                         if body > plain {
-                            body = body.min(specialized_size(target, &values, weighed));
+                            body = body.min(how.specialized_size(module, callee, &values, weighed));
                         }
                         let copied = summed_time(
                             &profile.summary,
