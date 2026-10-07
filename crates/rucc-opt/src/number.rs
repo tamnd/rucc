@@ -123,7 +123,6 @@ use rucc_base::Symbol;
 use rucc_base::hash::{Map, Set};
 use rucc_ir::{Block, Def, Extra, Flags, FloatPred, Func, Inst, IntPred, Opcode, Sig, Type, Value};
 
-use crate::cfg::Cfg;
 use crate::purity::{Callee, Facts};
 use crate::uses::substitute;
 use crate::{Analyses, Analysis, Fuel, Pass, Preserved, Stats};
@@ -180,9 +179,8 @@ impl Pass for Number {
         // The blocks with a dominator before the blocks it dominates, so an instruction found in
         // `across` is always above the one looking it up. A block nothing reaches comes last and
         // only ever uses its own table, because dominance says nothing useful about it.
-        let cfg = Cfg::new(func);
+        let order: Vec<Block> = an.cfg(func).reverse_postorder().collect();
         let dom = an.dominators(func);
-        let order: Vec<Block> = cfg.reverse_postorder().collect();
         let reached: Set<Block> = order.iter().copied().collect();
         let blocks: Vec<Block> = order
             .into_iter()
