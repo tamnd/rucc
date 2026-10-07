@@ -4,6 +4,10 @@ All notable changes are recorded here. The format follows [Keep a Changelog](htt
 
 ## Unreleased
 
+### Changed
+
+- Jump threading keeps the loop forest after a thread between two blocks of one loop when the loop is still a loop afterwards, where it threw the forest away and built it again, with the graph and the dominators, after every thread inside a loop (#3052). The pass now walks the loop from the new target and keeps the forest if the walk gets back to the block the edge used to go through without that edge. It also works out which blocks have values read below them only when an edge first asks, since most runs ask nothing. lz4 at `-O1` runs 16% fewer instructions and at `-O2` 12% fewer, and every object is the same as before.
+
 ### Fixed
 
 - A register an AArch64 `asm` template only reads, in a store, a compare, a branch, an `msr` or a `prfm`, is no longer taken from the allocator, so the kernel's `crash_setup_regs` compiles instead of panicking. (#3211)
