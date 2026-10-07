@@ -1886,10 +1886,10 @@ static ENCODINGS: &[Encoding] = &[
     // jump and a push are, since there is no form of it that calls a thirty two bit address.
     bytes("call", &R, Long, &[0xFF], ext(0, 2), NO_IMM),
     // And through an address, which is the jump's other row seen from one place along. This
-    // compiler loads the address into a register and calls the register, so it writes the row
-    // above and never this one, and a file written by hand writes the load and the call as one
-    // instruction because it can: `call *(%rax)` in libgmp's `tests/amd64call.asm` calls whatever
-    // the global offset table entry it just loaded points at.
+    // compiler writes it when a load of the pointer and the call through it are folded into one,
+    // which is `call_mem`, and a file written by hand writes it because it can: `call *(%rax)` in
+    // libgmp's `tests/amd64call.asm` calls whatever the global offset table entry it just loaded
+    // points at.
     bytes("call", &M, Long, &[0xFF], ext(0, 2), NO_IMM),
     // What a condition and the block layout come to. The test is a comparison against zero that
     // names the same register twice, so both of its arguments are the one operand.

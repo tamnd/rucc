@@ -190,7 +190,11 @@ fn probe() {
         args.extend(extra);
         let (ok, said) = run(&dir, &args);
         let out = Command::new(dir.join("prog")).output().expect("run");
-        report.push_str(&format!("{extra:?} {ok} {said} {:?} {}\n", out.status, String::from_utf8_lossy(&out.stdout)));
+        report.push_str(&format!(
+            "{extra:?} {ok} {said} {:?} {}\n",
+            out.status,
+            String::from_utf8_lossy(&out.stdout)
+        ));
         let mut args = vec!["-O2", "-S", "a.c", "-o", "a.s"];
         args.extend(extra);
         run(&dir, &args);
