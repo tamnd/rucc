@@ -1,7 +1,13 @@
 //! The `rucc` binary.
 //!
 //! Deliberately empty. Everything lives in `rucc-driver` so that the whole driver, including
-//! argument parsing and the exit code, is reachable from a test without spawning a process.
+//! argument parsing and the exit code, is reachable from a test without spawning a process. The
+//! one thing here is the allocator, which only a process can choose.
+
+mod pool;
+
+#[global_allocator]
+static POOL: pool::Pool = pool::Pool;
 
 fn main() -> std::process::ExitCode {
     let mut args = std::env::args();
