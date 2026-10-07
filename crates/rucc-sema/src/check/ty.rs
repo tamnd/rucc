@@ -1222,6 +1222,7 @@ impl Checker<'_> {
                 self.extern_access(&[ast[specs].attrs, param.attrs], None, span);
                 self.shared_section(&[ast[specs].attrs, param.attrs], DeclKind::Type);
                 self.string_arg(&[ast[specs].attrs, param.attrs], ty);
+                self.nonnull_if_nonzero(&[ast[specs].attrs, param.attrs], ty);
                 self.assume_misplaced(&[ast[specs].attrs, param.attrs], false, span);
             }
 

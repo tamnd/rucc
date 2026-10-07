@@ -82,6 +82,7 @@ mod format;
 mod hardbool;
 mod init;
 mod noinit;
+mod nonnull_if;
 mod shared;
 mod sse_regparm;
 mod stmt;

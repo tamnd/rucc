@@ -17,11 +17,42 @@ use crate::expr::{Category, Expr, ExprId, ExprKind};
 use crate::scope::Binding;
 
 /// What one argument of the attribute turned out to be, before it is held against the function.
-enum Position {
+pub(in crate::check) enum Position {
     /// An integer constant, with how gcc prints it, suffix and all.
     Number(i128, String),
     /// Something gcc has already said what is wrong with.
     Refused,
+}
+
+/// Which argument of which attribute a position is, which is how gcc's `positional_argument`
+/// starts everything it says about one: an attribute that takes more than one names the argument
+/// by its number, and one that takes a single argument does not.
+#[derive(Clone, Copy)]
+pub(in crate::check) struct Lead {
+    /// The attribute, as gcc spells it.
+    pub name: &'static str,
+    /// Which of its arguments, counted from one, for an attribute that takes more than one.
+    pub argno: Option<usize>,
+}
+
+impl Lead {
+    /// The words a diagnostic about the argument starts with.
+    fn words(self) -> String {
+        match self.argno {
+            Some(argno) => format!("'{}' attribute argument {argno}", self.name),
+            None => format!("'{}' attribute argument", self.name),
+        }
+    }
+}
+
+/// What the parameter a position names has to be.
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub(in crate::check) enum Wanted {
+    /// A pointer, which is gcc's `POINTER_TYPE`.
+    Pointer,
+    /// An integer other than `bool`, which is gcc's `INTEGER_TYPE` as `positional_argument` reads
+    /// it: an enumeration and a character type are integers there and a `bool` is not.
+    Integer,
 }
 
 impl Checker<'_> {
@@ -54,15 +85,16 @@ impl Checker<'_> {
                     self.report(Diagnostic::warning(what, attr.span).with_code("E0703"));
                     continue;
                 };
-                if let Position::Number(value, spelled) = self.position(attr, args[0]) {
-                    self.names_a_pointer(attr, function, value, &spelled);
+                let lead = Lead { name: "null_terminated_string_arg", argno: None };
+                if let Position::Number(value, spelled) = self.position(attr, args[0], lead) {
+                    self.names_a(attr, function, value, &spelled, lead, Wanted::Pointer);
                 }
             }
         }
     }
 
     /// The function a declaration of that type declares, or the one a pointer of it points at.
-    fn function_type(&self, ty: TypeId) -> Option<FunctionId> {
+    pub(in crate::check) fn function_type(&self, ty: TypeId) -> Option<FunctionId> {
         let function = |ty: TypeId| match self.types.kind(self.types.canonical(ty)) {
             TypeKind::Function(id) => Some(id),
             _ => None,
@@ -79,9 +111,14 @@ impl Checker<'_> {
     /// A lone name stays a name in the parser, so it is looked up here: an enumerator is its
     /// value, an object or a function is the expression it would be, and a name nothing declared
     /// is gcc's error about it and then its warning that the argument is invalid.
-    fn position(&mut self, attr: Attribute, arg: AttrArg) -> Position {
+    pub(in crate::check) fn position(
+        &mut self,
+        attr: Attribute,
+        arg: AttrArg,
+        lead: Lead,
+    ) -> Position {
         let invalid = |checker: &mut Self| {
-            let what = "'null_terminated_string_arg' attribute argument is invalid";
+            let what = format!("{} is invalid", lead.words());
             checker.report(Diagnostic::warning(what, attr.span).with_code("E0703"));
             Position::Refused
         };
@@ -120,32 +157,32 @@ impl Checker<'_> {
                 }
             },
         };
-        self.number(attr, expr, named)
+        self.number(attr, expr, named, lead)
     }
 
     /// The number an argument that checked is, promoted the way gcc promotes it first.
-    fn number(&mut self, attr: Attribute, expr: ExprId, named: Option<String>) -> Position {
+    fn number(
+        &mut self,
+        attr: Attribute,
+        expr: ExprId,
+        named: Option<String>,
+        lead: Lead,
+    ) -> Position {
         if matches!(self.tast[expr].kind, ExprKind::Error) {
-            let what = "'null_terminated_string_arg' attribute argument is invalid";
+            let what = format!("{} is invalid", lead.words());
             self.report(Diagnostic::warning(what, attr.span).with_code("E0703"));
             return Position::Refused;
         }
         let value = self.conv().promote(expr);
         let ty = self.tast[value].ty;
         if !rucc_types::is_integer(&self.types, self.types.canonical(ty)) {
-            let what = format!(
-                "'null_terminated_string_arg' attribute argument has type {}",
-                self.gcc_quoted(ty)
-            );
+            let what = format!("{} has type {}", lead.words(), self.gcc_quoted(ty));
             self.report(Diagnostic::warning(what, attr.span).with_code("E0703"));
             return Position::Refused;
         }
         let Ok(number) = self.eval_integer(value) else {
             let quoted = named.map_or_else(String::new, |named| format!(" '{named}'"));
-            let what = format!(
-                "'null_terminated_string_arg' attribute argument value{quoted} is not an integer \
-                 constant"
-            );
+            let what = format!("{} value{quoted} is not an integer constant", lead.words());
             self.report(Diagnostic::warning(what, attr.span).with_code("E0703"));
             return Position::Refused;
         };
@@ -164,49 +201,59 @@ impl Checker<'_> {
         }
     }
 
-    /// What gcc says when the number does not name a pointer parameter of the function.
+    /// What gcc says when the number does not name a parameter of the function of the kind the
+    /// attribute wants, and whether it does.
     ///
     /// Zero names nothing, since the parameters are counted from one. A function declared
     /// without a prototype has parameters nobody can count, and any other number is taken.
     /// Otherwise the number has to be one of the parameters, the `...` not being one, and the
-    /// parameter has to be a pointer.
-    fn names_a_pointer(
+    /// parameter has to be what is wanted.
+    pub(in crate::check) fn names_a(
         &mut self,
         attr: Attribute,
         function: FunctionId,
         value: i128,
         spelled: &str,
-    ) {
+        lead: Lead,
+        wanted: Wanted,
+    ) -> bool {
         let warn = |checker: &mut Self, what: String| {
             checker.report(Diagnostic::warning(what, attr.span).with_code("E0703"));
+            false
         };
+        let words = lead.words();
         if value == 0 {
-            let what = format!(
-                "'null_terminated_string_arg' attribute argument value '{spelled}' does not refer \
-                 to a function parameter"
-            );
+            let what =
+                format!("{words} value '{spelled}' does not refer to a function parameter");
             return warn(self, what);
         }
         let signature = self.types.signature(function);
         if !signature.prototyped {
-            return;
+            return true;
         }
         let params = signature.params.clone();
         let Some(&param) = usize::try_from(value).ok().and_then(|n| params.get(n - 1)) else {
             let what = format!(
-                "'null_terminated_string_arg' attribute argument value '{spelled}' exceeds the \
-                 number of function parameters {}",
+                "{words} value '{spelled}' exceeds the number of function parameters {}",
                 params.len()
             );
             return warn(self, what);
         };
-        if !matches!(self.types.kind(self.types.canonical(param)), TypeKind::Pointer(_)) {
+        let kind = self.types.kind(self.types.canonical(param));
+        let matches = match wanted {
+            Wanted::Pointer => matches!(kind, TypeKind::Pointer(_)),
+            Wanted::Integer => {
+                rucc_types::is_integer(&self.types, self.types.canonical(param))
+                    && !matches!(kind, TypeKind::Bool)
+            }
+        };
+        if !matches {
             let what = format!(
-                "'null_terminated_string_arg' attribute argument value '{spelled}' refers to \
-                 parameter type {}",
+                "{words} value '{spelled}' refers to parameter type {}",
                 self.gcc_quoted(param)
             );
-            warn(self, what);
+            return warn(self, what);
         }
+        true
     }
 }
