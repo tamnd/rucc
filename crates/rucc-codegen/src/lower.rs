@@ -630,7 +630,9 @@ fn byte_inputs_pinned(
 /// mean something else on AArch64: `Q` is an address in one register there rather than one of four
 /// registers, and `a` to `d` name nothing. So an AArch64 statement is taken only with the letters
 /// the two agree on, which are a register, a constant, memory, the immediate ranges and a matching
-/// number, and anything else is refused rather than read as x86. `w` and `Q` are the exceptions.
+/// number, and anything else is refused rather than read as x86. `w`, `Q` and `Z` are the
+/// exceptions. `Z` is a thirty two bit immediate on x86 and the zero register on AArch64, which
+/// the caller spells as `xzr` or `wzr` for a zero and puts in a register for anything else.
 /// `w` is a register on both, and which file it is in is decided by the caller with
 /// [`vector_letter`]. `Q` is read as `m` by the caller before the list is read. A
 /// register the front end named in braces is read against AArch64's own names, so what is inside
@@ -650,7 +652,7 @@ fn shared_letters(constraint: &str) -> bool {
         _ => matches!(
             c,
             '=' | '+' | '&' | '%' | 'r' | 'w' | 'Q' | 'm' | 'o' | 'V' | 'g' | 'X' | 'i' | 'n'
-                | 'p' | 'I'..='N' | '0'..='9'
+                | 'p' | 'Z' | 'I'..='N' | '0'..='9'
         ),
     })
 }
@@ -5990,6 +5992,8 @@ impl<'a> Lowering<'a> {
                     && operand.tied.is_none()
                     && operand.immediate
                     && match (self.bare_number(value), operand.range) {
+                        // `Z` on AArch64 is the zero register, which only a zero can be.
+                        (_, Some('Z')) if a64 => self.zero(value),
                         (Some(number), range) => a64 || in_range(range, number),
                         // The two thirty two bit letters take an address too, which fits under the
                         // code models gcc takes them in.
@@ -6309,8 +6313,24 @@ impl<'a> Lowering<'a> {
                     continue;
                 }
                 let value = operand.value.ok_or_else(refused)?;
+                // A zero handed to `rZ` on AArch64 is the zero register, named at the width of
+                // its type, and so is a zero under `%w` or `%x` whatever the letter was, which is
+                // what gcc writes. The kernel's `smp_store_release` stores a null pointer as
+                // `stlr xzr, [x0]`. Any other number under `%w` or `%x` is the number, which is
+                // how `atomic_add` writes `add w0, w0, 1` against `"Ir"`.
+                if a64
+                    && matches!(modifier, None | Some('w' | 'x'))
+                    && self.zero(value)
+                    && (modifier.is_some() || operand.range == Some('Z'))
+                {
+                    let bits = held_bits(self.source[value].ty, self.address_bits());
+                    let wide = modifier == Some('x') || (modifier.is_none() && bits == 64);
+                    text.push_str(if wide { "xzr" } else { "wzr" });
+                    continue;
+                }
                 let bare = match modifier {
                     None => false,
+                    Some('w' | 'x') if a64 => false,
                     Some('c' | 'P' | 'p' | 'a') => true,
                     // The constant negated and bare, for the other half of an `add` written
                     // as a `sub`. A name has no negative, so only a number is taken.
@@ -7579,6 +7599,19 @@ impl<'a> Lowering<'a> {
         }
         let spare = 128 - width;
         Some(((bits << spare) as i128) >> spare)
+    }
+
+    /// Whether that value is a zero, a null pointer among them, which is what AArch64 spells as
+    /// the zero register in a template.
+    fn zero(&self, value: Value) -> bool {
+        if let Def::Result { inst, .. } = self.source[value].def {
+            if self.source[inst].opcode == Opcode::IntToPtr {
+                if let [number] = self.source[self.source[inst].args] {
+                    return self.bare_number(number) == Some(0);
+                }
+            }
+        }
+        self.bare_number(value) == Some(0)
     }
 
     /// A register holding a value the program has no claim on, written as a zero.
