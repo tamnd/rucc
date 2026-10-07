@@ -274,6 +274,15 @@ pub struct Table {
     pub rules: &'static [Rule],
 }
 
+/// What [`Table::opening`] found at the root of the trie for one head.
+#[derive(Debug, Clone, Copy)]
+pub struct Opening<'h> {
+    /// The head, which is what the walk pushes the arguments of the term by.
+    head: Option<(&'h str, usize)>,
+    /// The root's branch on it, if it has one.
+    branch: Option<u32>,
+}
+
 /// What a successful match found.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Match<N> {
@@ -326,11 +335,43 @@ impl Table {
     /// does not depend on how its operands are shown.
     #[must_use]
     pub fn opens(&self, head: Option<(&str, usize)>) -> bool {
+        self.opening(head).is_some()
+    }
+
+    /// What the root of the trie says about a term with this head, or nothing when that is that
+    /// no rule matches it, which is [`Table::opens`] with the branch it found kept.
+    ///
+    /// A caller that matches one term under several ways of showing its operands hands this to
+    /// [`Table::find_opened`] for each of them. The head of the term is the same under every one,
+    /// so the root's branch on it is too, and finding it again for each was a search of the
+    /// largest node in the trie and a question to the subject for every way tried.
+    /// tamnd/rucc#3052.
+    #[must_use]
+    pub fn opening<'h>(&self, head: Option<(&'h str, usize)>) -> Option<Opening<'h>> {
         let root = &self.nodes[0];
-        !root.ints.is_empty()
+        let branch = head.and_then(|(name, arity)| root.branch(name, arity));
+        let open = branch.is_some()
+            || !root.ints.is_empty()
             || !root.same.is_empty()
-            || root.wildcard.is_some()
-            || head.is_some_and(|(name, arity)| root.branch(name, arity).is_some())
+            || root.wildcard.is_some();
+        open.then_some(Opening { head, branch })
+    }
+
+    /// [`Table::find_in`] for a term whose root [`Table::opening`] already looked at.
+    ///
+    /// The opening has to be of this table and of the head this subject gives the term, which is
+    /// what makes the walk the one [`Table::find_in`] would have made.
+    pub fn find_opened<S: Subject>(
+        &self,
+        subject: &S,
+        term: S::Node,
+        opening: Opening<'_>,
+        left: &mut Vec<S::Node>,
+        bindings: &mut Vec<S::Node>,
+    ) -> Option<usize> {
+        left.clear();
+        bindings.clear();
+        self.ask(subject, 0, (term, opening.head), opening.branch, left, bindings)
     }
 
     /// The rule a match found, which is the one thing every caller wants out of it.
@@ -356,12 +397,27 @@ impl Table {
         let Some(term) = left.pop() else {
             return self.accept(subject, at, bindings);
         };
-        let node = &self.nodes[at];
         let head = subject.head(term);
+        let branch = head.and_then(|(name, arity)| self.nodes[at].branch(name, arity));
+        self.ask(subject, at, (term, head), branch, left, bindings)
+    }
+
+    /// The questions a node asks of one term, with the branch on its head already found, in the
+    /// order that makes the most specific rule the one that fires.
+    fn ask<S: Subject>(
+        &self,
+        subject: &S,
+        at: usize,
+        (term, head): (S::Node, Option<(&str, usize)>),
+        branch: Option<u32>,
+        left: &mut Vec<S::Node>,
+        bindings: &mut Vec<S::Node>,
+    ) -> Option<usize> {
+        let node = &self.nodes[at];
 
         // The head of the term, which is the question nearly every branch of nearly every node
         // is about and the one that has to be found rather than looked for.
-        if let Some(next) = head.and_then(|(name, arity)| node.branch(name, arity)) {
+        if let Some(next) = branch {
             if let Some(rule) = self.take(subject, next, (term, head), left, bindings) {
                 return Some(rule);
             }
@@ -663,6 +719,30 @@ mod tests {
         let second = terms.app("v1", &[]);
         let term = terms.app("sub", &[first, second]);
         assert_eq!(TABLE.find(&terms, term), None);
+    }
+
+    /// A walk that starts from what the root said finds what a walk from the top finds, for a
+    /// term a rule fires on, one where the guards refuse, and one the root branches on that no
+    /// rule takes. A head the root has no branch for opens nothing.
+    #[test]
+    fn a_walk_from_the_opening_finds_what_a_walk_from_the_top_does() {
+        let mut terms = Terms::default();
+        let zero = terms.constant(0);
+        let fires = add(&mut terms, zero);
+        let negative = terms.constant(-1);
+        let refused = add(&mut terms, negative);
+        let x = terms.app("v0", &[]);
+        let both = terms.app("and", &[x, x]);
+        let (mut left, mut bindings) = (Vec::new(), Vec::new());
+        for term in [fires, refused, both] {
+            let opening = TABLE.opening(terms.head(term)).expect("the root branches on it");
+            let from_top = TABLE.find_in(&terms, term, &mut left, &mut bindings);
+            let from_top = from_top.map(|rule| (rule, bindings.clone()));
+            let opened = TABLE.find_opened(&terms, term, opening, &mut left, &mut bindings);
+            assert_eq!(opened.map(|rule| (rule, bindings.clone())), from_top);
+        }
+        assert!(TABLE.opening(Some(("sub", 2))).is_none());
+        assert!(TABLE.opening(None).is_none());
     }
 
     /// The same guard against an operand that is not a constant at all. A guard is a claim about
