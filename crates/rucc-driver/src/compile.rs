@@ -3006,6 +3006,38 @@ mod tests {
         assert!(said.contains("arm_neon.h is for AArch64"), "{said}");
     }
 
+    /// The wasm SIMD intrinsics as a program uses them: a load at any alignment, lane arithmetic,
+    /// a shuffle with literal lane indices, a lane taken out and a store. The header asks for no
+    /// `-msimd128`, as each function is C over the lanes of a GNU vector, and the program is
+    /// lowered here so that a vector operation the lowering does not have is a failure.
+    #[test]
+    fn the_shipped_wasm_simd128_lowers_on_a_wasm_target() {
+        let mut opts = freestanding();
+        opts.target = "wasm32-wasip1".parse::<Triple>().unwrap();
+        opts.emit = EmitKind::Ir;
+        let source = concat!(
+            "#include <wasm_simd128.h>\n",
+            "float step(const void *in, void *out, v128_t k) {\n",
+            "  v128_t v = wasm_i16x8_add_sat(wasm_v128_load(in), k);\n",
+            "  v = wasm_i16x8_shuffle(v, k, 0, 9, 2, 11, 4, 13, 6, 15);\n",
+            "  v = wasm_f32x4_nearest(wasm_f32x4_convert_i32x4(wasm_i32x4_shl(v, 3)));\n",
+            "  wasm_v128_store(out, v);\n",
+            "  return wasm_f32x4_extract_lane(v, 2);\n",
+            "}\n",
+        );
+        let result = run(&opts, source);
+        assert_eq!(result.messages, Vec::<String>::new(), "expected this to compile:\n{source}");
+        assert!(result.text().contains("func @step("), "{}", result.text());
+    }
+
+    /// Off wasm the header says so, rather than failing on a builtin the target does not have.
+    #[test]
+    fn the_shipped_wasm_simd128_refuses_another_target() {
+        let result = run(&freestanding(), "#include <wasm_simd128.h>\n");
+        let said = result.messages.join("\n");
+        assert!(said.contains("wasm_simd128.h is for WebAssembly"), "{said}");
+    }
+
     /// The float header omits four square roots and SSE2 omits the matching two, for the reason
     /// both headers write down. A later change that quietly defines one as an approximation
     /// would be a wrong answer nobody sees, so the absence is held in place here.
@@ -3430,16 +3462,15 @@ mod tests {
     /// an assertion about how much `<mmintrin.h>` defines, which is not what is being asked.
     #[test]
     fn every_shipped_header_can_be_included_twice() {
-        // This is x86-64, and `<arm_neon.h>` and `<arm_acle.h>` are for AArch64 only, so they are
-        // held to the same thing by the AArch64 test below. `<intrin.h>`, `<setjmp.h>`,
-        // `<tgmath.h>` and `<vadefs.h>` wrap the library's, which they go on to find, and there is
-        // no library here.
+        // This is x86-64, and `<arm_neon.h>` and `<arm_acle.h>` are for AArch64 only and
+        // `<wasm_simd128.h>` is for wasm only, so they are held to the same thing by the tests
+        // below. `<intrin.h>`, `<setjmp.h>`, `<tgmath.h>` and `<vadefs.h>` wrap the library's,
+        // which they go on to find, and there is no library here.
+        let elsewhere = ["arm_acle.h", "arm_neon.h", "wasm_simd128.h"];
+        let wrappers = ["intrin.h", "setjmp.h", "tgmath.h", "vadefs.h"];
         let once: String = rucc_session::runtime::names()
             .iter()
-            .filter(|name| {
-                !["arm_acle.h", "arm_neon.h", "intrin.h", "setjmp.h", "tgmath.h", "vadefs.h"]
-                    .contains(*name)
-            })
+            .filter(|name| !elsewhere.contains(*name) && !wrappers.contains(*name))
             .map(|name| format!("#include <{name}>\n"))
             .collect();
         let twice = once.repeat(2);
@@ -3458,6 +3489,20 @@ mod tests {
         };
         let neon = "#include <arm_neon.h>\n#include <arm_acle.h>\n";
         assert_eq!(tree(&format!("{neon}int x;\n")), tree(&format!("{neon}{neon}int x;\n")));
+
+        let mut opts = freestanding();
+        opts.target = "wasm32-wasip1".parse::<Triple>().unwrap();
+        let tree = |source: &str| {
+            let result = run(&opts, source);
+            assert_eq!(
+                result.messages,
+                Vec::<String>::new(),
+                "expected this to compile:\n{source}"
+            );
+            result.text().to_owned()
+        };
+        let simd = "#include <wasm_simd128.h>\n";
+        assert_eq!(tree(&format!("{simd}int x;\n")), tree(&format!("{simd}{simd}int x;\n")));
     }
 
     #[test]

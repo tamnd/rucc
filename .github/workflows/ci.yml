@@ -611,6 +611,10 @@ jobs:
         env:
           LLVM_MC: /usr/lib/llvm-23/bin/llvm-mc
         run: tests/wasm-asm/run.sh "$PWD/target/release/rucc" wasm32-wasip1
+      # Every function of the shipped wasm_simd128.h over the edge values of each lane type, held to
+      # the answers of clang 23 at -O0 and -O2 (#3190).
+      - name: run the wasm_simd128.h functions under Wasmtime
+        run: tests/wasm-simd/run.sh "$PWD/target/release/rucc" wasm32-wasip1
       - name: run the wasm32-none subset of rung 0 under Wasmtime
         env:
           VALIDATE: wasm-tools validate
