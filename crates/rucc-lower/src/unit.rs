@@ -1052,13 +1052,16 @@ impl Unit<'_> {
             Definition::Declared => None,
             Definition::Tentative => Some(self.zeros(size)),
             Definition::Defined => {
-                let (data, covered) = self.image(init, size, span);
                 // The object is as large as its image when the image is the larger of the two.
                 // A structure whose last member is a flexible array is the only way that
                 // happens: `sizeof` answers without the array and an initializer that fills it
                 // makes an object big enough to hold what was written. C 6.7.2.1p18 leaves the
                 // size to the implementation, gcc grows the object, and this does the same
-                // rather than hand the linker a size the image does not fit in.
+                // rather than hand the linker a size the image does not fit in. The elements
+                // count whatever is in them, so `{ { "ecv", 4 }, {} }` is two of them even though
+                // the second writes nothing, and the extent is what says so.
+                let size = size.max(self.tast.extent(decl));
+                let (data, covered) = self.image(init, size, span);
                 global.size = size.max(covered);
                 Some(data)
             }
