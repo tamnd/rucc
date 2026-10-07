@@ -269,6 +269,9 @@ impl Pass for Thread {
         // of section 23.4 adds up, and how many copies there have been.
         let mut paths: Map<Block, u32> = Map::default();
         let mut copies = 0;
+        // The blocks a thread left with no way in since the graph in the cache was built, which
+        // that graph still says are reached. See [`strand`].
+        let mut stranded: Set<Block> = Set::default();
         'blocks: for block in func.blocks().collect::<Vec<Block>>() {
             if block == entry || func[block].params.is_empty() {
                 continue;
@@ -332,8 +335,10 @@ impl Pass for Thread {
                     break 'blocks;
                 }
                 // Asked before the edge moves, since what it asks about is the graph the forest was
-                // built on.
-                let kept = free.is_some() && settled(an, func, &edges, from, block, at, call.block);
+                // built on. A block on no cycle is asked about again once it has.
+                let alone = free.is_some() && acyclic(an.loops(func), block);
+                let kept = free.is_some()
+                    && (alone || settled(an, func, &edges, &stranded, from, block, at, call.block));
                 // The record has to follow the edge, so that a block further down the walk sees the
                 // predecessor it now has. That is what lets one thread make the next one possible
                 // within the single walk this pass is.
@@ -348,6 +353,7 @@ impl Pass for Thread {
                 } else {
                     let (copy, out) = copy(func, block, at, call, &subst);
                     edges.entry(call.block).or_default().push((copy, out));
+                    edges.entry(copy).or_default().push((from, at));
                     paths.insert(copy, path);
                     copies += 1;
                     // The merges put parameters on blocks further down, and a parameter something
@@ -360,8 +366,11 @@ impl Pass for Thread {
                 // clears the cache after the pass returns, which is too late for the next edge.
                 // Unless the forest is still right, which rebuilding after each of hundreds of
                 // threads in one function would otherwise spend most of the pass finding out.
+                let kept =
+                    kept && (!alone || strand(func, an, &edges, &mut stranded, block, entry));
                 if !kept {
                     an.clear();
+                    stranded.clear();
                 }
                 threaded = true;
             }
@@ -440,12 +449,14 @@ impl Thread {
 /// edges leave a loop, and nothing here asks either.
 ///
 /// The graph in the cache can be one from before a thread this already said yes to. What blocks
-/// it reaches is still right, which is all this asks of it. An edge that is on a cycle is
-/// [`within`]'s to answer.
+/// it reaches is still right once the ones in `stranded` are taken out, which is all this asks of
+/// it. An edge that is on a cycle is [`within`]'s to answer.
+#[allow(clippy::too_many_arguments)]
 fn settled(
     an: &Analyses,
     func: &Func,
     edges: &Edges,
+    stranded: &Set<Block>,
     from: Block,
     block: Block,
     at: Idx<BlockCall>,
@@ -457,9 +468,65 @@ fn settled(
     }
     let cfg = an.cfg(func);
     edges.get(&block).is_some_and(|list| {
-        list.iter()
-            .any(|&(pred, slot)| slot != at && cfg.reaches(pred) && !together(loops, pred, block))
+        list.iter().any(|&(pred, slot)| {
+            slot != at
+                && cfg.reaches(pred)
+                && !stranded.contains(&pred)
+                && !together(loops, pred, block)
+        })
     })
+}
+
+/// Whether a block is on no cycle, so that the forest says nothing of it but that.
+fn acyclic(loops: &Loops, block: Block) -> bool {
+    loops.innermost(block).is_none() && !loops.is_irreducible(block)
+}
+
+/// Whether the edge just threaded past `block`, a block on no cycle, left the loop forest the
+/// answer it was, with every block nothing reaches any more put in `stranded`.
+///
+/// No cycle went through the edge, since `block` is on none, and none goes through the edge that
+/// replaced it, since that would have been a cycle through `block` before. So the cycles are the
+/// same, and so is every way into each of them that comes from a block still reached. What can
+/// change is which blocks are reached at all: `block` once the last edge into it from a reached
+/// block is gone, and then whatever nothing else reached. A block on no cycle is in no loop and no
+/// irreducible region whether it is reached or not, so the forest says the same of it either way,
+/// and what does change is the graph's answer to whether it is reached, which is what `stranded`
+/// is kept for. A block on a cycle that stops being reached takes its loop with it, and telling
+/// whether it does would be the walk the forest is, so meeting one at all is a forest built again.
+///
+/// The edge has moved by now, so the record of edges is the function as it is. The cached graph and
+/// forest are of the function before it, which is what the walk wants to ask about.
+///
+/// On lz4.c at -O2 these were some of the threads that built the graph, the tree and the forest
+/// again for a function whose loops had not changed. tamnd/rucc#3052.
+fn strand(
+    func: &Func,
+    an: &Analyses,
+    edges: &Edges,
+    stranded: &mut Set<Block>,
+    block: Block,
+    entry: Block,
+) -> bool {
+    let (cfg, loops) = (an.cfg(func), an.loops(func));
+    let mut work = vec![block];
+    while let Some(at) = work.pop() {
+        if at == entry || !cfg.reaches(at) || stranded.contains(&at) {
+            continue;
+        }
+        if !acyclic(loops, at) {
+            return false;
+        }
+        let reached = |pred: Block| cfg.reaches(pred) && !stranded.contains(&pred);
+        if edges.get(&at).is_some_and(|list| list.iter().any(|&(pred, _)| reached(pred))) {
+            continue;
+        }
+        stranded.insert(at);
+        if let Some(term) = func.terminator(at) {
+            work.extend(func.target_list(term).iter().map(|slot| func[slot].block));
+        }
+    }
+    true
 }
 
 /// Whether threading the edge at `at` from `from` past `block` to `into`, where `from` and `block`
@@ -479,8 +546,13 @@ fn settled(
 /// `into` by the new edge, and `into` reaches `block` and from there what `block` reached. So the
 /// same blocks are in the same loops at every level.
 ///
-/// With no irreducible region, every loop is entered at its header and nowhere else, before and
-/// after, so the header still dominates the rest and is the header the forest finds. A latch is a
+/// With no irreducible region inside that loop, every loop there and around it is entered at its
+/// header and nowhere else, before and after, so the header still dominates the rest and is the
+/// header the forest finds. An irreducible region anywhere else stays one, with the same blocks.
+/// None is around that loop, since the forest does not look inside a region like that for loops.
+/// One beside it has the same cycles, because every edge that moved is inside the loop, and no
+/// block comes to dominate the rest of it, because every path now is a path there was before with
+/// `block` left out of it, so whatever dominates a block now dominated it then. A latch is a
 /// block with an edge to its loop's header, and the edge `from` loses cannot have been one, since
 /// [`allowed`] refused a latch. The edge it gains would make it one if `into` headed a loop `from`
 /// is in, so that is refused here. Every block reached is still reached, by the same argument as in
@@ -497,11 +569,14 @@ fn within(
     at: Idx<BlockCall>,
     into: Block,
 ) -> bool {
-    if !loops.irreducible().is_empty() {
-        return false;
-    }
     let around = || std::iter::successors(loops.innermost(from), |&id| loops.parent(id));
     let Some(both) = around().find(|&id| loops.contains(id, block)) else { return false };
+    // Only a region inside the loop, since one anywhere else stays as it was. On lz4.c at `-O2`
+    // asking about the whole function was more than half the threads that built the forest again.
+    // tamnd/rucc#3052.
+    if loops.irreducible().iter().any(|&odd| loops.contains(both, odd)) {
+        return false;
+    }
     if !loops.contains(both, into) || around().any(|id| loops.header(id) == into) {
         return false;
     }
@@ -1035,11 +1110,11 @@ fn allowed(loops: &Loops, from: Block, into: Block, copies: bool) -> bool {
 mod tests {
     use rucc_base::Interner;
     use rucc_ir::{
-        Block, Builder, Flags, Func, IntPred, MemInfo, MemOrder, Opcode, Restrict, Signature, Type,
-        Value,
+        Block, BlockCall, Builder, Flags, Func, IntPred, MemInfo, MemOrder, Opcode, Restrict,
+        Signature, Type, Value, ValueList,
     };
 
-    use rucc_base::hash::Map;
+    use rucc_base::hash::{Map, Set};
     use rucc_ir::{Module, verify_func};
     use rucc_target::{TargetInfo, Triple};
 
@@ -1124,6 +1199,56 @@ mod tests {
             build.ret(&[]);
         }
         (func, [sent[0], sent[1]])
+    }
+
+    /// Points the one edge out of a block at another block, carrying nothing, the way a thread
+    /// would have.
+    fn point(func: &mut Func, from: usize, to: usize) {
+        let term = func.terminator(Block::from_usize(from)).expect("every block here has one");
+        let at = func.target_list(term).iter().next().expect("a jump has one edge");
+        let call = func[at];
+        let block = Block::from_usize(to);
+        func.set_block_call(at, BlockCall { block, args: ValueList::EMPTY, ..call });
+    }
+
+    /// Whether the forest built before the arms of `func` were pointed at `to` still holds once
+    /// they are, and what that left with no way in.
+    fn stranding(mut func: Func, to: [usize; 2]) -> (bool, Vec<usize>) {
+        let an = crate::machine::fixtures::analyses();
+        an.loops(&func);
+        point(&mut func, 1, to[0]);
+        point(&mut func, 2, to[1]);
+        let edges = crate::simplify_cfg::incoming(&func);
+        let mut stranded = Set::default();
+        let (join, entry) = (Block::from_usize(3), Block::from_usize(0));
+        let kept = super::strand(&func, &an, &edges, &mut stranded, join, entry);
+        let mut left: Vec<usize> = stranded.into_iter().map(Block::index).collect();
+        left.sort_unstable();
+        (kept, left)
+    }
+
+    #[test]
+    fn a_join_both_arms_were_threaded_past_is_stranded_and_the_forest_kept() {
+        let (func, _) = diamond(1, 2);
+        // Each arm still reaches the side it was pointed at, so only the join goes.
+        assert_eq!(stranding(func, [4, 5]), (true, vec![3]));
+        // Both arms to one side, and the other side goes with the join.
+        let (func, _) = diamond(1, 2);
+        assert_eq!(stranding(func, [4, 4]), (true, vec![3, 5]));
+    }
+
+    #[test]
+    fn a_loop_only_a_stranded_join_reached_is_a_forest_built_again() {
+        let (mut func, _) = diamond(1, 2);
+        // Block 5 goes round itself until it leaves for block 4, so pointing both arms at block
+        // 4 takes away the only way into a loop.
+        let no = Block::from_usize(5);
+        let term = func.terminator(no).expect("block 5 returns");
+        func.remove_inst(term);
+        let mut build = Builder::new(&mut func, no);
+        let again = build.iconst(Type::int(1), 1);
+        build.br_if(again, no, &[], Block::from_usize(4), &[]);
+        assert!(!stranding(func, [4, 4]).0);
     }
 
     #[test]
