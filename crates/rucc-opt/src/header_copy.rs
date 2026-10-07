@@ -651,9 +651,7 @@ fn merge(func: &mut Func, job: &Job, copy: Block, value: Value, arrived: Value) 
 fn settle(func: &mut Func, an: &mut Analyses, copies: &[Block], stats: &mut Stats) -> bool {
     let mut out: Vec<(Inst, BlockCall, bool)> = Vec::new();
     {
-        let cfg = an.cfg(func);
-        let dom = an.dominators(func);
-        let mut ranges = Ranges::new(func, cfg, dom);
+        let mut ranges = Ranges::cached(func, an);
         for &copy in copies {
             let Some(term) = func.terminator(copy) else { continue };
             let cond = func[func[term].args][0];

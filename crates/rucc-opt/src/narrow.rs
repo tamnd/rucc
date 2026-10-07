@@ -192,7 +192,7 @@ fn cleared(func: &Func, an: &Analyses) -> Vec<Inst> {
     if asked.is_empty() {
         return Vec::new();
     }
-    let mut ranges = Ranges::new(func, an.cfg(func), an.dominators(func));
+    let mut ranges = Ranges::cached(func, an);
     let mut cleared = Vec::new();
     for (inst, left, right, ty) in asked {
         // The most negative narrow value and minus one, as bit patterns. A range keeps its

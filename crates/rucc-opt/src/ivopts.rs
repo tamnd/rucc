@@ -228,7 +228,7 @@ impl Pass for Ivopts {
         let mut tallies = Vec::new();
         {
             let mut scev = Scev::new(func, cfg, loops);
-            let mut ranges = Ranges::new(func, cfg, doms);
+            let mut ranges = Ranges::new(func, cfg, doms).knowing(loops);
             let readers = OnceCell::new();
             let it = Loop { func, loops, doms, cfg, machine, table, readers };
             for id in loops.all() {

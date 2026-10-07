@@ -773,12 +773,10 @@ fn implied(func: &Func, an: &mut Analyses, shape: &Diamond) -> Vec<Option<usize>
     if asking.is_empty() {
         return answers;
     }
-    // Cloned because the two are held at once and the cache hands out one borrow at a time. It is
-    // paid for only by a diamond that got this far, which the two gates above have already made
-    // rare, and section 22.7 is where the cost of this query was budgeted.
-    let cfg = an.cfg(func);
-    let dom = an.dominators(func);
-    let mut ranges = Ranges::new(func, cfg, dom);
+    // Paid for only by a diamond that got this far, which the two gates above have already made
+    // rare, and section 22.7 is where the cost of this query was budgeted. The loop tree comes out
+    // of the cache, which keeps it until a conversion, rather than one being built per diamond.
+    let mut ranges = Ranges::cached(func, an);
     for index in asking {
         let pair = [shape.args[0][index], shape.args[1][index]];
         for side in 0..2 {
