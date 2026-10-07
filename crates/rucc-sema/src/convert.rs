@@ -298,8 +298,14 @@ impl Conv<'_> {
     }
 
     /// Writes an arithmetic conversion, or nothing where the type is already the one wanted.
+    ///
+    /// The canonical forms are compared as well, for the reason [`Self::to_type`] gives. A vector
+    /// typedef with `aligned` on it promotes to the vector it names, and `<wasm_simd128.h>` writes
+    /// every one of its types that way, so `-(__u8x16)a` and `(__u8x16)a << n` were a conversion
+    /// between a name and what it names, which is not a shape anything lowers.
     fn arithmetic(&mut self, expr: ExprId, ty: TypeId) -> ExprId {
-        if self.tast[expr].ty == ty {
+        let from = self.tast[expr].ty;
+        if from == ty || self.types.canonical(from) == self.types.canonical(ty) {
             return expr;
         }
         self.write(Conversion::Arithmetic, expr, ty)
