@@ -685,22 +685,49 @@ impl Triple {
         // Alpine and defaulting to `x86_64-unknown-linux-gnu` describes a machine it is not
         // running on: musl and glibc disagree about `int_fast16_t` among other things, and a
         // header that is written out of the predefined type names picks the disagreement up.
-        // The libc rucc itself was linked against is the best evidence available about the one
-        // the code it compiles will be linked against, and it is right on every machine where
-        // rucc was built for the machine it runs on.
-        let linux = if cfg!(target_env = "musl") { Env::Musl } else { Env::Gnu };
+        // The files on the machine come first, because the release binary is a static musl
+        // binary and it runs on glibc systems too. The libc rucc itself was linked against is
+        // the answer only when the machine has neither.
+        let built = if cfg!(target_env = "musl") { Env::Musl } else { Env::Gnu };
         // Windows is gnu whichever ABI rucc itself was built for. An `rucc.exe` built with MSVC
         // still has no Windows SDK to link against on a fresh machine, and it can fetch the
         // mingw-w64 sysroot, so `rucc hello.c` works there only if the default is the one it can
         // fetch. `--target=x86_64-windows-msvc` is still there for somebody who has the SDK.
         let (os, env) = match std::env::consts::OS {
-            "linux" => (Os::Linux, linux),
+            "linux" => (Os::Linux, linux_libc(arch).unwrap_or(built)),
             "macos" => (Os::Darwin, Env::None),
             "windows" => (Os::Windows, Env::Gnu),
             _ => return None,
         };
         Some(Self::new(arch, os, env))
     }
+}
+
+/// The C library of this Linux machine, read once from the files that are on it.
+fn linux_libc(arch: Arch) -> Option<Env> {
+    static FOUND: std::sync::OnceLock<Option<Env>> = std::sync::OnceLock::new();
+    *FOUND.get_or_init(|| libc_under(std::path::Path::new("/"), arch))
+}
+
+/// The C library of the Linux tree at `root`, or `None` when it has neither.
+///
+/// glibc first, because a glibc system can have the musl loader too: Ubuntu's `musl` package
+/// installs it. The glibc test is `libc.so.6` and not the loader, because Alpine's gcompat puts a
+/// file at the glibc loader path and has no `libc.so.6`. tamnd/rucc#3276.
+fn libc_under(root: &std::path::Path, arch: Arch) -> Option<Env> {
+    let (multiarch, musl) = match arch {
+        Arch::X86_64 => ("x86_64-linux-gnu", "x86_64"),
+        Arch::Aarch64 => ("aarch64-linux-gnu", "aarch64"),
+        Arch::Riscv64 => ("riscv64-linux-gnu", "riscv64"),
+        Arch::X86 => ("i386-linux-gnu", "i386"),
+        Arch::Wasm32 => return None,
+    };
+    let multiarch = [format!("lib/{multiarch}"), format!("usr/lib/{multiarch}")];
+    let dirs = ["lib64", "usr/lib64", "lib", "usr/lib"].map(String::from);
+    if multiarch.iter().chain(&dirs).any(|dir| root.join(dir).join("libc.so.6").exists()) {
+        return Some(Env::Gnu);
+    }
+    root.join(format!("lib/ld-musl-{musl}.so.1")).exists().then_some(Env::Musl)
 }
 
 impl fmt::Display for Triple {
@@ -2097,6 +2124,36 @@ mod tests {
         assert_eq!(of("x86_64-pc-windows-msvc").timing, linux.timing);
 
         assert!(of("aarch64-unknown-linux-gnu").timing.is_none(), "nobody has measured it here");
+    }
+
+    /// The default row follows the C library of the machine, whichever one rucc was built with.
+    #[test]
+    fn the_host_libc_is_read_from_the_machine() {
+        let root = std::env::temp_dir().join(format!("rucc-host-libc-{}", std::process::id()));
+        let tree = |files: &[&str]| {
+            let _ = std::fs::remove_dir_all(&root);
+            for file in files {
+                let path = root.join(file);
+                std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+                std::fs::write(&path, b"").unwrap();
+            }
+        };
+        let cases: [(&[&str], Option<Env>); 6] = [
+            (&["lib/x86_64-linux-gnu/libc.so.6", "lib64/ld-linux-x86-64.so.2"], Some(Env::Gnu)),
+            (&["lib64/libc.so.6"], Some(Env::Gnu)),
+            (&["usr/lib/libc.so.6"], Some(Env::Gnu)),
+            (&["lib/x86_64-linux-gnu/libc.so.6", "lib/ld-musl-x86_64.so.1"], Some(Env::Gnu)),
+            (&["lib/ld-musl-x86_64.so.1", "lib64/ld-linux-x86-64.so.2"], Some(Env::Musl)),
+            (&["etc/os-release"], None),
+        ];
+        for (files, want) in cases {
+            tree(files);
+            assert_eq!(libc_under(&root, Arch::X86_64), want, "{files:?}");
+        }
+        tree(&["lib/ld-musl-aarch64.so.1"]);
+        assert_eq!(libc_under(&root, Arch::Aarch64), Some(Env::Musl));
+        assert_eq!(libc_under(&root, Arch::X86_64), None);
+        let _ = std::fs::remove_dir_all(&root);
     }
 
     #[test]
