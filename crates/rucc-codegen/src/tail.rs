@@ -184,7 +184,7 @@ pub(crate) fn twice(func: &Func, inst: Inst, names: &Interner, elsewhere: &Elsew
 /// Whether that call can come back by an indirect jump rather than a `ret`, because the type it
 /// was made through or its callee's said `indirect_return`.
 pub(crate) fn jumps_back(func: &Func, inst: Inst, elsewhere: &Elsewhere) -> bool {
-    if func[inst].flags.contains(rucc_ir::Flags::INDIRECT_RETURN) {
+    if func[inst].flags.contains(Flags::INDIRECT_RETURN) {
         return true;
     }
     let Extra::Call(info) = func[inst].extra else { return false };
@@ -241,7 +241,7 @@ pub fn mark(
             }
             None => continue,
         };
-        let ret = *insts.last().expect("the call is followed by its return");
+        let Some(&ret) = insts.last() else { continue };
         left.extend(func.successors(ret).map(|target| target.block));
         func.remove_inst(ret);
         func[call].opcode = Opcode::TailCall;
