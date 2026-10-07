@@ -323,6 +323,27 @@ pub struct FrameInsts {
     /// What the speculation hardening flags turn indirect branches and returns into, or `None` on
     /// a target where nothing does. See [`Thunks`].
     pub thunks: Option<Thunks>,
+    /// The call and the jump that read where they go out of memory, which a load of a pointer and
+    /// a call or a tail jump through it are folded into, or `None` on a target that has no such
+    /// call. See [`Through`].
+    pub through: Option<Through>,
+}
+
+/// A load of a whole word into a register, a call and a jump through that register, and the same
+/// call and jump reading the word out of memory themselves.
+///
+/// What `p->fn(x)` comes to on x86-64 is a load of the pointer into a register and a call through
+/// the register, and gcc writes the two as one `call *8(%rdi)`. The machine has the instruction and
+/// it saves a register as well as an instruction, so the pass that folds them is told the five
+/// names here and nothing else about the machine.
+#[derive(Debug, Clone, Copy)]
+pub struct Through {
+    /// The load of a whole register's worth of memory, which is what puts a pointer in one.
+    pub load: &'static str,
+    /// A call through a register, and the same call through memory.
+    pub call: (&'static str, &'static str),
+    /// A jump through a register, and the same jump through memory.
+    pub jump: (&'static str, &'static str),
 }
 
 /// What `-mindirect-branch=`, `-mindirect-branch-cs-prefix`, `-mfunction-return=` and

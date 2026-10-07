@@ -65,7 +65,7 @@ fn main() {
                 continue;
             }
             let has = |kind: fn(&Arg) -> bool| inst.args.iter().any(kind);
-            let mems = if has(|arg| matches!(arg, Arg::Mem)) {
+            let mems = if has(|arg| matches!(arg, Arg::Mem | Arg::Indirect)) {
                 addresses()
             } else {
                 vec![(Addr::default(), String::new())]
@@ -160,6 +160,10 @@ fn main() {
                                 Arg::Mem => {
                                     values.push(Value::Mem(*addr));
                                     text.push(addr_text.clone());
+                                }
+                                Arg::Indirect => {
+                                    values.push(Value::Mem(*addr));
+                                    text.push(format!("*{addr_text}"));
                                 }
                                 Arg::Symbol | Arg::Label => unreachable!("filtered above"),
                             }

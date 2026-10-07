@@ -592,6 +592,8 @@ pub static FRAME: FrameInsts = FrameInsts {
     step_bits: None,
     reaches: None,
     thunks: Some(THUNKS),
+    // The load in front of a call here is the thirty two bit one, which the fold does not know.
+    through: None,
 };
 
 /// What the speculation hardening flags rewrite branches into on i386.
@@ -660,7 +662,7 @@ fn machine_touches_mem(name: &str) -> bool {
 
 #[must_use]
 fn machine_calls(name: &str) -> bool {
-    form_here(name) == Some(Form::Call)
+    matches!(form_here(name), Some(Form::Call | Form::CallMem))
 }
 
 #[must_use]

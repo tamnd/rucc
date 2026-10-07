@@ -633,10 +633,12 @@ _Static_assert(__has_attribute(nocf_check), \"nocf_check\");
         assert_eq!(count(name, "endbr64"), 1, "{name}\n{text}");
     }
     assert_eq!(count("calls", "notrack call *%"), 2, "{text}");
-    assert_eq!(count("calls", "call *%"), 1, "{text}");
+    // The plain ones read the pointer out of memory themselves, as gcc writes them, and the ones
+    // with the prefix are left going through a register.
+    assert_eq!(count("calls", "call *plain(%rip)"), 1, "{text}");
     assert_eq!(count("tail", "notrack jmp *%"), 1, "{text}");
     assert_eq!(count("late", "notrack call *%"), 1, "{text}");
-    assert_eq!(count("late", "jmp *%"), 1, "the plain tail jump has no prefix\n{text}");
+    assert_eq!(count("late", "jmp *plain(%rip)"), 1, "the plain tail jump has no prefix\n{text}");
 
     // The object the compiler writes itself, whose call through `p1` starts with the prefix byte
     // in front of the call's opcode.

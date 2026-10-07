@@ -195,6 +195,7 @@ pub mod slots;
 pub mod split;
 pub use rucc_legalize::switch;
 pub mod tail;
+pub mod through;
 pub mod thunks;
 pub mod trailing;
 pub mod usage;

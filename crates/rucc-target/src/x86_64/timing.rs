@@ -181,6 +181,8 @@ fn plain(form: Form) -> Timing {
         // number here is the one that matters for ordering: it takes the one branch unit.
         Jcc | Jmp | JmpAway => (1, Unit::Branch),
         JmpReg | Call | Ret | RetPop => (2, Unit::Branch),
+        // The same two with the address read first, which is a load in front of the branch.
+        JmpMem | CallMem => (LOAD + 2, Unit::Branch),
         // A read or write of a memory location the whole machine agrees about. The locked forms
         // are tens of cycles and the number here is a floor on that rather than a measurement,
         // because what a scheduler needs to know about them is that they are expensive and that

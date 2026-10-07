@@ -1034,7 +1034,9 @@ impl Assembler<'_> {
                         Value::Reg(self.phys(operands[defs(operands)], spelled)?, Width::Quad)
                     }
                     Arg::Imm => Value::Imm(data.imm.map_or(0, |imm| self.func[imm].0)),
-                    Arg::Mem => {
+                    // The address a call or a jump reads where it goes from is the same bytes as
+                    // any other address, and the star in its text is nothing in them.
+                    Arg::Mem | Arg::Indirect => {
                         let amode = data.mem.map(|mem| self.func[mem]);
                         let (addr, symbol) = self.addr(operands, amode.as_ref(), spelled)?;
                         if let Some(symbol) = symbol {

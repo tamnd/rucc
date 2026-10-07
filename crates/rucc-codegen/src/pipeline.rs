@@ -63,6 +63,7 @@ use crate::shorten;
 use crate::slots::{self, Slots};
 use crate::split;
 use crate::tail;
+use crate::through;
 use crate::thunks;
 use crate::trailing;
 use crate::usage::{StackUsage, Usage};
@@ -1419,6 +1420,15 @@ pub fn compile_recording(
         x87_returned: if abi::back_on_x87(&types) { types.len() } else { 0 },
     };
     zero::apply(&mut func, zeroing, files, machine.shapes, &machine.file, names);
+
+    // A call or a tail jump through a pointer a load has just read reads the pointer itself, after
+    // the tail calls because a jump is only a jump once that has made it one. Not when a thunk is
+    // asked for, because a thunk is named after the register a branch goes through, and the same
+    // levels that read a reload out of the frame. See [`crate::through`].
+    if flags.reloads && !speculation.any() {
+        let stack = machine.conv.stack_pointer;
+        through::fold(&mut func, machine.insts, machine.shapes, stack, names);
+    }
 
     // After the tail jumps, because a `ret` that became a jump to a callee is a direct jump and no
     // longer a return, and after everything else for the reason in [`crate::thunks`]: the thunk a
