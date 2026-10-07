@@ -254,9 +254,11 @@ options:
   -I-, -iprefix <p>, -iwithprefix[before] <dir>   the older spellings of those
   -include <file>, -imacros <file>    read <file> first, the second for its macros only
   --sysroot=<dir>        look for the library's headers under <dir>, -isysroot too
+  --gcc-toolchain=<dir>  link with the GCC runtime under <dir>/lib/gcc
   -P, -dM                with -E: leave out the markers, or dump the macros
   -M -MM -MD -MMD        write a make rule for the source, the last two compile as well
   -MF <file> -MT <t> -MQ <t> -MP   where the rule goes, what it builds, targets with no recipe
+  -MG                    with -M or -MM, a header that is not found is one the build makes
   -std=<dialect>, -trigraphs   c89 through c2y and the gnu spellings, trigraphs in any of them
   -fgnuc-version=<v> -fgnu-as-version=<v> -fms-compatibility-version=<v>   claim GCC, gas or MSVC
   -x <lang>              treat later inputs as <lang>, or none to stop
@@ -1768,6 +1770,10 @@ pub fn parse_args(args: &[String]) -> Result<Action, CliError> {
             _ if arg.starts_with("--sysroot=") => {
                 sysroot = Some(PathBuf::from(&arg["--sysroot=".len()..]));
             }
+            // clang's flag for the GCC a link takes `crtbegin.o` and `libgcc.a` from.
+            _ if arg.starts_with("--gcc-toolchain=") => {
+                link.gcc_toolchain = Some(PathBuf::from(&arg["--gcc-toolchain=".len()..]));
+            }
             _ if arg.starts_with("--target=") => {
                 let t = &arg["--target=".len()..];
                 // The same string again, as the model that has room for a libc version. A spelling
@@ -2831,6 +2837,14 @@ pub fn parse_args(args: &[String]) -> Result<Action, CliError> {
                     "{arg}: this compiler emits the small, kernel and tiny code models and no other, \
                      see spec/04-driver-and-cli.md section 4.3"
                 )));
+            }
+            // GCC prints its spec strings. This compiler has none, and the questions a script
+            // reads them for have their own flags.
+            "-dumpspecs" => {
+                return Err(err(
+                    "-dumpspecs: this compiler has no spec strings to print. Use -dumpmachine, \
+                     -dumpversion, -print-search-dirs or -v for what a script reads from them",
+                ));
             }
             // GCC's own scripting language for how the driver builds a command line.
             // `spec/04-driver-and-cli.md` section 4.4 settles that we will not have it, so a
@@ -9302,6 +9316,7 @@ mod tests {
         assert!(user.contains("config.h") && !user.contains("gen/sys.h"), "{user}");
         // A compile cannot go on without the header.
         assert_eq!(refused(&["-MG", "-c", "a.c"]), "-MG may only be used with -M or -MM");
+        assert!(refused(&["-dumpspecs"]).contains("-dumpmachine"));
         assert_eq!(refused(&["-MD", "-MG", "-c", "a.c"]), "-MG may only be used with -M or -MM");
     }
 
