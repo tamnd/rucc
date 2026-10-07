@@ -16,8 +16,8 @@
 //! because a typedef name is still a perfectly good label name.
 
 use rucc_ast::{
-    Asm, AsmId, AsmOperand, AsmOperandList, AsmQuals, AttrList, AttrSyntax, Attribute, Expr, ExprId, ForInit, Stmt,
-    StmtId, StmtList, StrList, SymbolList,
+    Asm, AsmId, AsmOperand, AsmOperandList, AsmQuals, AttrList, AttrSyntax, Attribute, Expr,
+    ExprId, ForInit, Stmt, StmtId, StmtList, StrList, SymbolList,
 };
 use rucc_base::Symbol;
 use rucc_diag::Span;

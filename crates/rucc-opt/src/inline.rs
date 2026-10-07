@@ -2356,11 +2356,8 @@ fn copy(
     };
     // A `musttail` call in the callee is in tail position there and is not here, unless the call
     // being replaced was one too, which is where gcc keeps the promise as well.
-    let dropped = if func[call].flags.contains(Flags::MUST_TAIL) {
-        Flags::NONE
-    } else {
-        Flags::MUST_TAIL
-    };
+    let dropped =
+        if func[call].flags.contains(Flags::MUST_TAIL) { Flags::NONE } else { Flags::MUST_TAIL };
     let mut made = Vec::new();
     pool.site += 1;
     for from in callee.blocks() {

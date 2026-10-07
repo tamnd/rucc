@@ -226,7 +226,8 @@ pub fn mark(
         let insts: Vec<Inst> = func.insts(block).collect();
         let call = match insts.iter().copied().find(|&inst| must(func, inst)) {
             Some(call) => {
-                let why = stopped.or_else(|| misplaced(func, &insts, call, elsewhere, guarded, indirect));
+                let why =
+                    stopped.or_else(|| misplaced(func, &insts, call, elsewhere, guarded, indirect));
                 if let Some(reason) = why {
                     return Err(Unsupported::MustTail { inst: call, reason });
                 }
@@ -280,7 +281,11 @@ fn misplaced(
         let results: Vec<Value> = func[call].results().collect();
         let read =
             after.iter().any(|&inst| func[func[inst].args].iter().any(|arg| results.contains(arg)));
-        return Some(if read { "return value changed after call" } else { "code between call and return" });
+        return Some(if read {
+            "return value changed after call"
+        } else {
+            "code between call and return"
+        });
     };
     let Some(returned) = returned(func, ret) else { return Some("code between call and return") };
     if let Some(reason) = misfit(func, call, &returned) {
@@ -479,8 +484,8 @@ mod tests {
     };
 
     use super::{UNABLE, asked, comes_back, mark, refusal};
-    use crate::lower::Unsupported;
     use crate::elsewhere::Elsewhere;
+    use crate::lower::Unsupported;
 
     /// `int f(int a) { return g(a); }`, and whatever `between` puts in front of the return.
     fn caller(

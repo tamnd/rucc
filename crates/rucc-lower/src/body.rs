@@ -6173,7 +6173,9 @@ impl<'u> Body<'_, 'u> {
                 let place = self.place(expr);
                 self.read(place, span)
             }
-            ExprKind::Call { callee, args } => self.call(callee, args, tast.is_must_tail(expr), span),
+            ExprKind::Call { callee, args } => {
+                self.call(callee, args, tast.is_must_tail(expr), span)
+            }
             ExprKind::Unary { op, operand } => self.unary(op, operand, ty, span),
             ExprKind::Binary { op, lhs, rhs } => self.binary(op, lhs, rhs, ty, span),
             ExprKind::Assign { op, computation, lhs, rhs } => {
