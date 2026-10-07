@@ -33,6 +33,10 @@
 //! wherever it liked, so the rows for `mmap`, `munmap` and `mremap` place it in an arena of our own
 //! instead, and the unmapping ends the instance there rather than handing the range back.
 //!
+//! [`stack`] is the init plane for the one kind of storage no region covers, a local on the stack.
+//! The compiler begins the locals whose address never leaves their function, so a read of one that
+//! nothing wrote is refused the way a read of a fresh allocation is.
+//!
 //! [`frame`] is section 5.3's call frame, which is where the capability of a pointer argument
 //! travels. It travels beside the call rather than in the pointer because an instrumented
 //! function's calling convention does not change, and that is the property the boundary is made
@@ -207,6 +211,8 @@ pub mod recover;
 pub mod report;
 #[cfg(unix)]
 pub mod restrict;
+#[cfg(unix)]
+pub mod stack;
 #[cfg(unix)]
 pub mod sync;
 #[cfg(unix)]

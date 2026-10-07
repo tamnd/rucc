@@ -343,6 +343,9 @@ pub fn render(out: &mut Text, row: &Descriptor, facts: &Facts<'_>) {
     out.hex(addr).text("\n");
 
     match owner(addr) {
+        Owner::Elsewhere if stacked(addr) => {
+            out.text("  which is on this thread's stack\n");
+        }
         Owner::Elsewhere => {
             out.text("  which is not in the heap this monitor watches\n");
         }
@@ -400,6 +403,19 @@ pub fn emit(text: &str) {
         }
         write(2, text.as_ptr().cast(), text.len());
     }
+}
+
+/// Whether the address is on the stack of the thread reporting, which [`crate::stack`] knows once
+/// a local has been begun on it.
+#[cfg(unix)]
+fn stacked(addr: usize) -> bool {
+    crate::stack::mine(addr)
+}
+
+/// The same where there is no stack plane.
+#[cfg(not(unix))]
+const fn stacked(_: usize) -> bool {
+    false
 }
 
 /// Stops the program and does not come back.
