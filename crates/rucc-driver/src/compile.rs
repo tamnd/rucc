@@ -1432,7 +1432,7 @@ fn generate(
         // frame for checks that are about to be discharged. `rucc_safety::handover` is the rule and
         // the pass both, and the census in `--emit=safety-summary` reads the same rule, so the
         // buckets it prints describe the code that was actually built.
-        rucc_safety::handover::arrange(module);
+        rucc_safety::handover::arrange(module, names);
         rucc_safety::lower(module, names);
         if let Err(errors) = rucc_ir::verify(module, names) {
             return Err(errors
