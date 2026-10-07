@@ -234,6 +234,10 @@ impl<'a> Entry<'a> {
         let mut immediate = false;
         let mut open = false;
         let mut range = None;
+        // Whether the constraint is `p`, which is kept as the range letter even though any
+        // constant goes, because AArch64 has no address a constant is and gcc puts one in a
+        // register there.
+        let mut address = false;
 
         let mut rest = text.char_indices().peekable();
         while let Some((at, letter)) = rest.next() {
@@ -278,6 +282,7 @@ impl<'a> Entry<'a> {
                         immediate = true;
                         open = true;
                     }
+                    address |= letter == 'p';
                 }
                 // The immediate ranges, which are `I` through `P` on x86 and are a constant
                 // wherever they are read.
@@ -340,7 +345,7 @@ impl<'a> Entry<'a> {
             named,
             early,
             immediate,
-            range: if open { None } else { range },
+            range: if open { address.then_some('p') } else { range },
         })
     }
 }
