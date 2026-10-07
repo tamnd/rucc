@@ -33,7 +33,7 @@
 
 use rucc_base::Interner;
 use rucc_mir as mir;
-use rucc_target::{FrameInsts, MachineInsts, PhysReg};
+use rucc_target::{FrameInsts, MachineInsts, PhysReg, RegClass};
 
 /// Folds every load that only puts a pointer in front of a call or a tail jump through it into
 /// that call or jump, and gives back how many it folded.
@@ -94,25 +94,29 @@ fn feeding(
 ) -> Option<mir::Inst> {
     let operands = &func[func[branch].operands];
     let defs = mir::defs(operands);
-    let target = operands.get(defs)?.reg;
-    target.phys()?;
+    let pointer = operands.get(defs)?;
+    pointer.reg.phys()?;
+    // The register and its file together, since the files are numbered from nought alike and a
+    // call that destroys `%xmm12` would otherwise be taken for one that destroys `%r12`.
+    let target = (pointer.reg, pointer.class);
+    let names_target = |operand: &mir::Operand| (operand.reg, operand.class) == target;
     // A call writes the register when the callee may destroy it, which is what says nothing after
     // the call wants what the load put there, and it must not be an argument as well.
-    if calls && !operands[..defs].iter().any(|operand| operand.reg == target) {
+    if calls && !operands[..defs].iter().any(names_target) {
         return None;
     }
-    if operands[defs + 1..].iter().any(|operand| operand.reg == target) {
+    if operands[defs + 1..].iter().any(names_target) {
         return None;
     }
-    let mut written: Vec<mir::Reg> = Vec::new();
+    let mut written: Vec<(mir::Reg, RegClass)> = Vec::new();
     let mut popped = false;
     for &inst in before.iter().rev() {
         let data = &func[inst];
         let read = &func[data.operands];
-        if data.opcode == load && read.first().is_some_and(|first| first.reg == target) {
+        if data.opcode == load && read.first().is_some_and(names_target) {
             // The address has to be the same address at the branch as it was at the load.
             let address = &read[1..];
-            if address.iter().any(|operand| written.contains(&operand.reg)) {
+            if address.iter().any(|operand| written.contains(&(operand.reg, operand.class))) {
                 return None;
             }
             if popped && address.iter().any(|operand| operand.reg.phys() == Some(stack)) {
@@ -124,7 +128,7 @@ fn feeding(
             }
             return Some(inst);
         }
-        if read.iter().any(|operand| operand.reg == target) {
+        if read.iter().any(names_target) {
             return None;
         }
         // A pop reads the stack and writes nothing in memory, so the word the load read is still
@@ -135,8 +139,8 @@ fn feeding(
         } else if machine.calls(name) || !machine.has(name) || machine.touches_mem(name) {
             return None;
         }
-        written
-            .extend(read.iter().filter(|operand| operand.role.is_def()).map(|operand| operand.reg));
+        let defined = read.iter().filter(|operand| operand.role.is_def());
+        written.extend(defined.map(|operand| (operand.reg, operand.class)));
     }
     None
 }
@@ -166,7 +170,7 @@ fn join(func: &mut mir::Func, from: mir::Inst, branch: mir::Inst, into: mir::Opc
 mod tests {
     use rucc_base::Interner;
     use rucc_mir::{BlockCall, Func, Mem, Opcode, Operand, Reg};
-    use rucc_target::x86_64::{FRAME, GPR, MACHINE, R11, RAX, RBX, RCX, RDI, RSI, RSP};
+    use rucc_target::x86_64::{FRAME, GPR, MACHINE, R11, R12, RAX, RBX, RCX, RDI, RSI, RSP, XMM};
 
     use super::fold;
 
@@ -274,6 +278,27 @@ mod tests {
         // `%rbx` survives the call, so something after it may still want the pointer.
         let call = op(&mut names, "call_reg");
         func.build(block, call).def(phys(RAX), GPR).uses(phys(RBX), GPR).finish();
+        func.build(block, op(&mut names, "ret")).finish();
+        assert_eq!(folded(&mut names, func).0, 0);
+    }
+
+    #[test]
+    fn a_call_that_destroys_the_vector_register_of_the_same_number_leaves_the_pointer_alone() {
+        let mut names = Interner::new();
+        let mut func = Func::new(names.intern("f"));
+        let block = func.create_block();
+        let load = op(&mut names, "mov_rm_64");
+        func.build(block, load)
+            .def(phys(R12), GPR)
+            .mem(Mem::at(Operand::read(phys(RSP), GPR)))
+            .finish();
+        // Every call destroys `%xmm12`, which is numbered as `%r12` is, and `%r12` survives it.
+        let call = op(&mut names, "call_reg");
+        func.build(block, call)
+            .def(phys(RAX), GPR)
+            .def(phys(R12), XMM)
+            .uses(phys(R12), GPR)
+            .finish();
         func.build(block, op(&mut names, "ret")).finish();
         assert_eq!(folded(&mut names, func).0, 0);
     }
