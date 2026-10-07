@@ -208,10 +208,10 @@ fn a_variable_length_array_walks_its_pages_with_no_flag_passed() {
         lines.iter().position(|line| line.starts_with(what)).unwrap_or_else(|| panic!("{lines:?}"))
     };
     // Where it is going, worked out from the bytes before the stack pointer moves, and then a page
-    // at a time with the question behind each step.
+    // at a time with the question in front of each step.
     let limit = at("subq\t%r");
-    assert_eq!(lines[limit + 1], "subq\t$4096, %rsp", "{lines:?}");
-    assert!(lines[limit + 2].starts_with("cmpq\t%r"), "{lines:?}");
+    assert!(lines[limit + 1].starts_with("cmpq\t%r"), "{lines:?}");
+    assert_eq!(lines[limit + 3], "subq\t$4096, %rsp", "{lines:?}");
     assert!(lines.contains(&"orb\t$0, (%rsp)"), "{lines:?}");
     // And nothing was handed to the routine, since this function's own frame is small.
     assert!(!lines.iter().any(|line| line.contains("chkstk")), "{lines:?}");
