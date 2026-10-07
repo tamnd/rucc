@@ -84,6 +84,16 @@
 //! takes it, and a function that a smaller one calls once is called once per copy of the smaller
 //! one by then.
 //!
+//! A round after that takes a `static` function called from more than one place when copying it
+//! into every caller leaves the program no larger, which is gcc's
+//! `want_inline_function_to_all_callers_p` (tamnd/rucc#3150). It comes after so that a body is
+//! weighed with what it called once already in it. Each copy costs the body as the constants its
+//! call passes leave it, weighed as gcc weighs it and read off the summary, less the call it
+//! replaces, and the copies together are weighed against the body, which goes once the last of
+//! them is in. gcc copies none of the calls unless it can copy every one, so a call too many loops
+//! deep, in a function that asked not to be optimized or built for less than the callee, or a
+//! callee that calls itself, keeps them all calls.
+//!
 //! A body that takes the address of one of its own labels is copied with the label, so each copy
 //! has an address of its own, which is what gcc does and what `990208-1.c` checks. A body that
 //! jumps to such an address, or whose labels a static table holds, is refused, since the copy
@@ -134,6 +144,8 @@ const INLINED: &str = "always_inline call inlined";
 const HINT_INLINED: &str = "inline call inlined";
 
 const ONCE_INLINED: &str = "call to a static function called once inlined";
+
+const ALL_INLINED: &str = "call to a static function inlined into all its callers";
 
 const ASKS_INLINED: &str = "call passing a constant __builtin_constant_p asks about inlined";
 
@@ -561,6 +573,13 @@ pub fn run(
         second.retain(|_, &mut (_, kind)| kind == Kind::Once);
         round(module, &second, &mut done, None);
         wanted.extend(second);
+        // gcc weighs a function for all its callers as it is by then, with what it called once
+        // already in it, so this round waits for that one and for its bodies to go.
+        while bury(module, &wanted) {}
+        let mut all = classify(module, &to_all_callers(module, names, isa));
+        all.retain(|_, &mut (_, kind)| kind == Kind::Once);
+        round(module, &all, &mut done, None);
+        wanted.extend(all);
     }
     if !wanted.is_empty() {
         bury(module, &wanted);
@@ -648,6 +667,97 @@ fn called_once(module: &Module) -> Set<Symbol> {
         .filter(|&(name, count)| count == 1 && !elsewhere.contains(&name))
         .map(|(name, _)| name)
         .collect()
+}
+
+/// The `static` functions reached by more than one direct call and in no other way whose copies,
+/// one into each caller, come to no more than the body, which goes once they are all in. That is
+/// gcc's `want_inline_function_to_all_callers_p`.
+///
+/// A copy costs the body as the constants its call passes leave it, read off the summary, less the
+/// call it replaces, and the sum is weighed against the body with nothing known, which is what
+/// gcc's `growth_positive_p` asks. Both sides are weighed as gcc's `estimate_num_insns` weighs
+/// them, since a call is one and one more for each argument and for the result to gcc. Counted as
+/// one apiece, a body that only passes six arguments on looked smaller than the call of one
+/// argument it replaced, and SQLite grew by two percent at `-O1` with copies gcc does not make.
+/// gcc takes none of the calls unless it can take every one, which is `check_callers`, so a
+/// function is left out when one of its calls is in itself, in a function that asked not to be
+/// optimized, in one built for less than the callee, or more than
+/// `max-inline-functions-called-once-loop-depth` loops deep. One called from another this round
+/// may take is left out as well, since copying that one copies the call and the count is off.
+/// Whether it is a function that may be inlined at all is for the caller to ask, as with
+/// [`called_once`].
+fn to_all_callers(module: &Module, names: &Interner, isa: Isa) -> Set<Symbol> {
+    let (counts, elsewhere) = references(module);
+    let mut wanted: Map<Symbol, FuncId> = Map::default();
+    for id in module.funcs() {
+        let func = &module[id];
+        if !func.is_declaration()
+            && func.linkage == Linkage::Internal
+            && !func.attrs.set.contains(AttrSet::USED)
+            && !elsewhere.contains(&func.name)
+            && counts.get(&func.name).is_some_and(|&count| count > 1)
+        {
+            wanted.insert(func.name, id);
+        }
+    }
+    if wanted.is_empty() {
+        return Set::default();
+    }
+    let mut sites: Map<Symbol, Vec<(FuncId, Block, Inst)>> = Map::default();
+    for id in module.funcs() {
+        let func = &module[id];
+        for block in func.blocks() {
+            for inst in func.insts(block) {
+                let Extra::Call(info) = func[inst].extra else { continue };
+                if func[inst].opcode != Opcode::Call {
+                    continue;
+                }
+                if let Some(name) = func[info].callee.filter(|name| wanted.contains_key(name)) {
+                    sites.entry(name).or_default().push((id, block, inst));
+                }
+            }
+        }
+    }
+    let mut chosen = Set::default();
+    for (name, calls) in sites {
+        let id = wanted[&name];
+        let callee = &module[id];
+        let refused = |caller: FuncId| {
+            let func = &module[caller];
+            caller == id
+                || wanted.contains_key(&func.name)
+                || func.attrs.set.contains(AttrSet::OPTNONE)
+                || callee.target.is_some_and(|wanted| !func.target.unwrap_or(isa).covers(wanted))
+        };
+        if calls.iter().any(|&(caller, ..)| refused(caller)) {
+            continue;
+        }
+        let summary = summary::Summary::of(callee, names, None);
+        let mut growth = 0_i64;
+        for &(caller, _, call) in &calls {
+            let func = &module[caller];
+            let (copy, _) = summed_size(&summary, callee, passed(func, call, callee), Some(names));
+            // gcc counts the result of a call it has a place for, which is one that has a result.
+            let cost = weight(func, call, names, func[call].results().next().is_some());
+            growth += i64::try_from(copy).unwrap_or(i64::MAX) - i64::try_from(cost).unwrap_or(0);
+        }
+        // The body is weighed the way its copies are, as a copy no constant cuts down.
+        let (whole, _) = summed_size(&summary, callee, Map::default(), Some(names));
+        if growth > i64::try_from(whole).unwrap_or(i64::MAX) {
+            continue;
+        }
+        // Counted as [`settle`] counts, so a block in one loop is one deep.
+        let deep = calls.iter().any(|&(caller, block, _)| {
+            let cfg = Cfg::new(&module[caller]);
+            let loops = Loops::new(&cfg, &Dominators::new(&cfg));
+            let depth = loops.innermost(block).map_or(0, |inner| loops.depth(inner) + 1);
+            depth > rucc_cost::param!(INLINE_CALLED_ONCE_LOOP_DEPTH)
+        });
+        if !deep {
+            chosen.insert(name);
+        }
+    }
+    chosen
 }
 
 /// How many direct calls the module makes to each name, and the names it reaches any other way.
@@ -1080,6 +1190,11 @@ fn settle(
                 stats.optimized(match kind {
                     Kind::Always => INLINED,
                     Kind::Hinted => HINT_INLINED,
+                    // The calls were counted when the round began, so a function called from
+                    // more than one place then is one the round takes into all its callers.
+                    Kind::Once if how.calls.get(&module[callee].name).is_some_and(|&n| n > 1) => {
+                        ALL_INLINED
+                    }
                     Kind::Once => ONCE_INLINED,
                     Kind::Asks => ASKS_INLINED,
                     Kind::Small => SMALL_INLINED,
@@ -3913,9 +4028,10 @@ block0(%0: i32):
         assert!(!out.contains("linkage(internal)"), "{out}");
     }
 
-    /// Called from two places it is a function nobody declared `inline`, which stays a call.
+    /// Called from two places, each copy is no larger than the call it replaces, so both go in and
+    /// the function goes, as gcc copies it into all its callers.
     #[test]
-    fn a_static_function_called_twice_stays_a_call() {
+    fn a_static_function_called_twice_goes_into_both_when_that_is_no_larger() {
         let twice = ONCE.replace(
             "    %1 = call @scale(%0) : (i32) -> i32\n    return %1",
             "    %1 = call @scale(%0) : (i32) -> i32\n    %2 = call @scale(%1) : (i32) -> i32\n    \
@@ -3923,7 +4039,138 @@ block0(%0: i32):
         );
         assert_ne!(twice, ONCE);
         let out = inlined_under(&twice, Some(70));
-        assert_eq!(out.matches("call @scale").count(), 2, "{out}");
+        assert!(!out.contains("call @scale"), "{out}");
+        assert!(!out.contains("linkage(internal)"), "{out}");
+    }
+
+    /// A `static` function with a cheap arm a flag picks and a longer tail, called from three
+    /// places, two of which pass the flag for the cheap arm.
+    const PICK: &str = r#"
+func @pick(i1, i32) -> i32, linkage(internal) {
+block0(%0: i1, %1: i32):
+    br_if %0, block1, block2
+block1:
+    return %1
+block2:
+    %2 = iconst.i32 3
+    %3 = mul.i32 %1, %2
+    %4 = iconst.i32 7
+    %5 = add.i32 %3, %4
+    %6 = iconst.i32 5
+    %7 = xor.i32 %5, %6
+    %8 = iconst.i32 9
+    %9 = mul.i32 %7, %8
+    %10 = add.i32 %9, %1
+    %11 = xor.i32 %10, %3
+    %12 = mul.i32 %11, %5
+    %13 = add.i32 %12, %7
+    %14 = xor.i32 %13, %9
+    %15 = mul.i32 %14, %10
+    %16 = add.i32 %15, %11
+    %17 = xor.i32 %16, %12
+    return %17
+}
+
+func @f(i32) -> i32, linkage(external) {
+block0(%0: i32):
+    %1 = iconst.i1 -1
+    %2 = call @pick(%1, %0) : (i1, i32) -> i32
+    return %2
+}
+
+func @g(i32) -> i32, linkage(external) {
+block0(%0: i32):
+    %1 = iconst.i1 -1
+    %2 = call @pick(%1, %0) : (i1, i32) -> i32
+    return %2
+}
+
+func @k(i32, i1) -> i32, linkage(external) {
+block0(%0: i32, %1: i1):
+    %2 = call @pick(%1, %0) : (i1, i32) -> i32
+    return %2
+}
+"#;
+
+    /// The two cheap copies cost less than their calls and the third costs less than the body that
+    /// goes, so every call goes in and the function goes, which is what gcc 16 does at `-O1`.
+    #[test]
+    fn a_static_function_goes_into_all_its_callers_when_that_is_no_larger() {
+        let (out, said) = inlined_with(PICK, Some(2), true);
+        assert!(!out.contains("call @pick"), "{out}");
+        assert!(!out.contains("linkage(internal)"), "{out}");
+        assert_eq!(said.matches(ALL_INLINED).count(), 3, "{said}");
+        let (out, _) = inlined_with(PICK, None, true);
+        assert_eq!(out.matches("call @pick").count(), 3, "{out}");
+    }
+
+    /// Without the flag in `f` its copy is the whole body too, and the three copies come to more
+    /// than the body, so none of the calls goes in, not even the cheap one in `g`.
+    #[test]
+    fn a_static_function_whose_copies_grow_the_program_keeps_all_its_calls() {
+        let unknown = PICK.replace(
+            "@f(i32) -> i32, linkage(external) {\nblock0(%0: i32):\n    %1 = iconst.i1 -1\n",
+            "@f(i32, i1) -> i32, linkage(external) {\nblock0(%0: i32, %1: i1):\n",
+        );
+        assert_ne!(unknown, PICK);
+        let out = inlined_under(&unknown, Some(2));
+        assert_eq!(out.matches("call @pick").count(), 3, "{out}");
+    }
+
+    /// A body that only passes its argument on with five more is eight to gcc, a call and six
+    /// arguments and the result, where each call of it is three, so three copies come to more
+    /// than the body and gcc 16 keeps the three calls at `-O1`. Counted one to an instruction the
+    /// copy was smaller than the call.
+    #[test]
+    fn a_static_function_that_passes_more_than_it_is_given_stays_a_call() {
+        let wrap = r#"
+func @sink(i32, i32, i32, i32, i32, i32) -> i32, linkage(external);
+
+func @wrap(i32) -> i32, linkage(internal) {
+block0(%0: i32):
+    %1 = iconst.i32 1
+    %2 = iconst.i32 2
+    %3 = iconst.i32 3
+    %4 = iconst.i32 4
+    %5 = iconst.i32 5
+    %6 = call @sink(%0, %1, %2, %3, %4, %5) : (i32, i32, i32, i32, i32, i32) -> i32
+    return %6
+}
+
+func @f(i32) -> i32, linkage(external) {
+block0(%0: i32):
+    %1 = call @wrap(%0) : (i32) -> i32
+    return %1
+}
+
+func @g(i32) -> i32, linkage(external) {
+block0(%0: i32):
+    %1 = call @wrap(%0) : (i32) -> i32
+    return %1
+}
+
+func @k(i32) -> i32, linkage(external) {
+block0(%0: i32):
+    %1 = call @wrap(%0) : (i32) -> i32
+    return %1
+}
+"#;
+        let (out, said) = inlined_with(wrap, Some(2), true);
+        assert_eq!(out.matches("call @wrap").count(), 3, "{out}");
+        assert!(!said.contains(ALL_INLINED), "{said}");
+    }
+
+    /// A caller that asked not to be optimized keeps its call, and gcc copies none of the calls
+    /// when it cannot copy every one.
+    #[test]
+    fn a_static_function_one_caller_keeps_stays_a_call_in_every_caller() {
+        let kept = PICK.replace(
+            "@k(i32, i1) -> i32, linkage(external) {",
+            "@k(i32, i1) -> i32, linkage(external), attrs(optnone) {",
+        );
+        assert_ne!(kept, PICK);
+        let out = inlined_under(&kept, Some(2));
+        assert_eq!(out.matches("call @pick").count(), 3, "{out}");
     }
 
     /// One another object can call keeps its copy, so inlining the call here would only grow the
