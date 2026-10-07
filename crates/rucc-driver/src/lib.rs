@@ -729,7 +729,10 @@ fn switches(args: &[String]) -> Vec<String> {
             continue;
         }
         let code = arg.starts_with("-f") || arg.starts_with("-m") || arg.starts_with("-O");
-        let debug = arg.starts_with("-g") && !arg.ends_with("record-gcc-switches");
+        // `-gz` is a driver flag in gcc, so the compiler proper does not see it and does not record it.
+        let debug = arg.starts_with("-g")
+            && !arg.ends_with("record-gcc-switches")
+            && !arg.starts_with("-gz");
         let dialect = arg.starts_with("-std=") || arg == "-ansi";
         if (code || debug || dialect)
             && !NOT_RECORDED.split_whitespace().any(|skip| arg.starts_with(skip))
@@ -7791,6 +7794,8 @@ mod tests {
         let (opts, _) =
             compile(&["-c", "-gno-record-gcc-switches", "-O2", "-grecord-gcc-switches", "a.c"]);
         assert_eq!(opts.switches, ["-O2"], "the last one wins, and neither is recorded");
+        let (opts, _) = compile(&["-c", "-g", "-gz=none", "a.c"]);
+        assert_eq!(opts.switches, ["-g"], "-gz does not change the code and is not recorded");
     }
 
     /// Five flags rather than one with an argument, which is how gcc spells them, and the negative
