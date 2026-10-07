@@ -1365,6 +1365,7 @@ fn generate(
     }
     let flags = pipeline::Flags {
         frame_pointer: opts.keeps_frame_pointer(),
+        leaf_frame_pointer: opts.leaf_frame_pointer,
         red_zone: opts.red_zone,
         code_model: opts.code_model,
         vector: opts.vector,
