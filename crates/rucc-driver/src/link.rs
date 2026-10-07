@@ -2212,7 +2212,7 @@ pub fn candidates(target: Triple, sysroot: Option<&Path>) -> Vec<PathBuf> {
 /// build system pastes into a path when it is looking for a library itself.
 ///
 /// Debian files 32-bit x86 under `i386-linux-gnu`, not under the `i686` of the triple, so that
-/// one is different from [`gnu_name`].
+/// one is different from `gnu_name`.
 #[must_use]
 pub fn multiarch(target: Triple) -> String {
     match target.arch {

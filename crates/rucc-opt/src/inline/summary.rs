@@ -111,7 +111,8 @@ impl Summary {
     pub(super) fn of(func: &Func, names: &Interner, frequency: Option<&Map<Block, f64>>) -> Self {
         let Some(entry) = func.entry() else { return Self::inexact() };
         let params = func[entry].params.clone();
-        if params.len() > 64 {
+        let wide = params.len() > 64; // not a threshold: a mask is a u64, one bit a parameter
+        if wide {
             return Self::inexact();
         }
         let mut summary = Self { params, exact: true, ..Self::inexact() };
