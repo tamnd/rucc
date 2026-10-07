@@ -254,11 +254,9 @@ options:
   -I-, -iprefix <p>, -iwithprefix[before] <dir>   the older spellings of those
   -include <file>, -imacros <file>    read <file> first, the second for its macros only
   --sysroot=<dir>        look for the library's headers under <dir>, -isysroot too
-  --gcc-toolchain=<dir>  link with the GCC runtime under <dir>/lib/gcc
   -P, -dM                with -E: leave out the markers, or dump the macros
   -M -MM -MD -MMD        write a make rule for the source, the last two compile as well
-  -MF <file> -MT <t> -MQ <t> -MP   where the rule goes, what it builds, targets with no recipe
-  -MG                    with -M or -MM, a header that is not found is one the build makes
+  -MF <file> -MT <t> -MQ <t> -MP -MG   where the rule goes, what it builds, targets with no recipe, missing headers
   -std=<dialect>, -trigraphs   c89 through c2y and the gnu spellings, trigraphs in any of them
   -fgnuc-version=<v> -fgnu-as-version=<v> -fms-compatibility-version=<v>   claim GCC, gas or MSVC
   -x <lang>              treat later inputs as <lang>, or none to stop
@@ -277,7 +275,7 @@ options:
   -f[no-]stack-protector[-strong|-all|-explicit], -f[no-]stack-clash-protection, -fcf-protection=<edges>
   -ffunction-sections -fdata-sections   a section per function or variable, for --gc-sections
   -fvisibility=<what>    default, hidden, internal or protected, when nothing in the source said
-  -l<name>, -L <dir>, -B <dir>   link a library, where to look for one, where our own tools are
+  -l<name>, -L <dir>, -B <dir>, --gcc-toolchain=<dir>   a library, where to look for one, our tools, the GCC
   -fPIC -fpic -fPIE -fpie, -pipe   what it does anyway, and -f[no-]common as the target's cc
   -f[no-]strict-aliasing, -f[no-]delete-null-pointer-checks   what it assumes anyway
   -static -shared -pie -no-pie -nostdlib -nostartfiles -nodefaultlibs -rdynamic -s   how to link
