@@ -456,8 +456,8 @@ impl<'a> Assembler<'a> {
             // Macros, conditions and repetition, which the assembler's macro layer reads. The
             // template goes to it the same way one with an instruction does, since a macro
             // defined here is meant for the templates further down the unit.
-            ".macro" | ".endm" | ".purgem" | ".exitm" | ".rept" | ".irp" | ".irpc" | ".endr"
-            | ".altmacro" | ".noaltmacro" | ".else" | ".elseif" | ".endif" => {
+            ".macro" | ".endm" | ".purgem" | ".exitm" | ".rept" | ".rep" | ".irp" | ".irpc"
+            | ".endr" | ".altmacro" | ".noaltmacro" | ".else" | ".elseif" | ".endif" => {
                 return Err(Failed::Instruction(name.to_owned()));
             }
             _ if name.starts_with(".if") => return Err(Failed::Instruction(name.to_owned())),

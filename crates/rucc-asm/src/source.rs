@@ -763,10 +763,14 @@ impl Reader {
                 self.registers.insert(word.to_owned(), register);
                 return Ok(());
             }
-            if let Some(text) = self.wide_part(word, &self.renamed(rest)) {
+            let renamed = self.renamed(rest);
+            if let Some(text) = self.wide_part(word, &renamed) {
                 return self.a64(&text);
             }
-            if let Some(text) = self.literal(word, &self.renamed(rest)) {
+            if let Some(text) = self.literal(word, &renamed) {
+                return self.a64(&text);
+            }
+            if let Some(text) = self.label_sum(word, &renamed) {
                 return self.a64(&text);
             }
             if self.registers.is_empty() && !rest.contains('#') && !rest.contains(['(', ' ']) {
@@ -1004,9 +1008,14 @@ impl Reader {
     /// takes the operators that leave a symbol for a relocation. `:abs_gN:` and `:abs_gN_nc:` are
     /// bits `16N` to `16N + 15` of the number, the first checking that nothing is above them.
     /// `:abs_gN_s:` is the signed version, which makes a `movz` of a negative number a `movn` of
-    /// its complement, as GNU as does. Anything that is not a number here, a symbol say, is left
-    /// for the reader.
-    fn wide_part(&self, word: &str, rest: &str) -> Option<String> {
+    /// its complement, as GNU as does.
+    ///
+    /// The number may be a name set to labels, as the kernel's `tramp_alias` in entry.S sets
+    /// `.Lalias` to `TRAMP_VALIAS + tramp_exit - .entry.tramp.text`, a label further down less the
+    /// start of its section. Such a number is the one the last pass put the labels at, and is only
+    /// checked to fit when nothing in it was guessed, since a guess the next pass corrects can be
+    /// anything. Anything that is not a number here, a symbol say, is left for the reader.
+    fn wide_part(&mut self, word: &str, rest: &str) -> Option<String> {
         let word = word.to_ascii_lowercase();
         if !matches!(word.as_str(), "movz" | "movk" | "movn") {
             return None;
@@ -1022,7 +1031,7 @@ impl Reader {
         if !matches!(kind, "" | "_nc" | "_s") || (kind == "_s" && group == 3) {
             return None;
         }
-        let value = Parser {
+        let flat = Parser {
             text: text.trim(),
             at: 0,
             here: (0, 0),
@@ -1031,10 +1040,19 @@ impl Reader {
             guessed: None,
         }
         .whole()
-        .ok()?
-        .flat()?;
+        .ok()
+        .and_then(|sum| sum.flat());
+        let guessed = self.guessed.len();
+        let value = match flat {
+            Some(value) => value,
+            None => {
+                let sum = self.expression(text).ok()?;
+                self.absolute(&sum)?
+            }
+        };
+        let sure = self.guessed.len() == guessed;
         let shift = 16 * group;
-        let fits = |value: i64| shift + 16 >= 64 || value >> (shift + 16) == 0;
+        let fits = |value: i64| !sure || shift + 16 >= 64 || value >> (shift + 16) == 0;
         let (word, part) = match kind {
             "_s" if word == "movz" && value < 0 => {
                 if !fits(!value) {
@@ -1047,6 +1065,52 @@ impl Reader {
             _ => (word.as_str(), value >> shift & 0xffff),
         };
         Some(format!("{word} {register}, #{part}, lsl #{shift}"))
+    }
+
+    /// The label of a branch or of `adr` with a sum added to it that comes to a number, written as
+    /// the label and that number.
+    ///
+    /// The reader takes a label and a number after it. The KVM vectors in hyp-entry.S branch to
+    /// `__kvm_hyp_vector + (1b - 0b + KVM_VECTOR_PREAMBLE)`, which is the same place in the other
+    /// table, and the distance between two labels of this section is a number here.
+    fn label_sum(&mut self, word: &str, rest: &str) -> Option<String> {
+        const CONDS: [&str; 18] = [
+            "eq", "ne", "cs", "hs", "cc", "lo", "mi", "pl", "vs", "vc", "hi", "ls", "ge", "lt",
+            "gt", "le", "al", "nv",
+        ];
+        let word = word.to_ascii_lowercase();
+        let cond = word.strip_prefix('b').map(|cond| cond.strip_prefix('.').unwrap_or(cond));
+        let labels = ["b", "bl", "cbz", "cbnz", "tbz", "tbnz", "adr", "adrp"];
+        if !labels.contains(&word.as_str()) && !cond.is_some_and(|cond| CONDS.contains(&cond)) {
+            return None;
+        }
+        let mut depth = 0;
+        let mut cut = 0;
+        for (at, c) in rest.char_indices() {
+            match c {
+                '(' | '[' | '{' => depth += 1,
+                ')' | ']' | '}' => depth -= 1,
+                ',' if depth == 0 => cut = at + 1,
+                _ => {}
+            }
+        }
+        let (before, last) = (&rest[..cut], rest[cut..].trim());
+        let end = last.find(|c: char| !(c.is_ascii_alphanumeric() || "_.$".contains(c)))?;
+        let (name, sum) = (&last[..end], last[end..].trim_start());
+        let symbolic = name.starts_with(|c: char| c.is_ascii_alphabetic() || "_.$".contains(c));
+        if !symbolic || self.values.contains_key(name) {
+            return None;
+        }
+        let negative = match sum.as_bytes().first() {
+            Some(b'+') => false,
+            Some(b'-') => true,
+            _ => return None,
+        };
+        let added = self.expression(&sum[1..]).ok()?;
+        let added = self.absolute(&added)?;
+        let added = if negative { added.wrapping_neg() } else { added };
+        let sign = if added < 0 { '-' } else { '+' };
+        Some(format!("{word} {before}{name}{sign}{}", added.unsigned_abs()))
     }
 
     /// The operands with the names this file gave registers, and with the numbers it set when
@@ -3470,10 +3534,20 @@ impl Reader {
                 }
             }
         }
+        // The name of a section is where it starts, which the end of the last pass recorded under
+        // the name it gives the section's start, and which is known once the section is open.
+        // Either is still a guess, which the end of the pass checks, in case a label of that
+        // name turns up further down.
+        let section = || {
+            let start = self.guesses.get(&format!("{held}\u{1}start")).copied();
+            let open = self.named.get(&held).map(|&part| Held::In { part, offset: 0 });
+            start.or(open).filter(|_| self.elf())
+        };
         let guess = self
             .guesses
             .get(&held)
             .copied()
+            .or_else(section)
             .unwrap_or(Held::In { part: self.here, offset: self.at() });
         let seen = self.unrelaxed(&held, guess);
         guessed.push((held, guess));
@@ -6390,6 +6464,41 @@ _tls$tlv$init:
         );
         // A number too wide for a checked group is refused, as GNU as refuses it.
         assert!(super::read("\tmovz x0, :abs_g0:0x10000\n", Arch::Aarch64).is_err());
+    }
+
+    #[test]
+    fn a_wide_move_of_a_name_set_to_labels_is_worked_out() {
+        // The kernel's `tramp_alias`, where the label is further down, in a section whose name
+        // stands for its start. The words are what llvm-mc writes for the same text.
+        let read = aarch64(concat!(
+            "\t.text\n\t.macro tramp_alias, dst, sym\n",
+            "\t.set .Lalias\\@, (0xffff800080000000 + 0x10000) + \\sym - .entry.tramp.text\n",
+            "\tmovz \\dst, :abs_g2_s:.Lalias\\@\n\tmovk \\dst, :abs_g1_nc:.Lalias\\@\n",
+            "\tmovk \\dst, :abs_g0_nc:.Lalias\\@\n\t.endm\n",
+            "f:\ttramp_alias x29, tramp_exit\n\tret\n",
+            "\t.pushsection \".entry.tramp.text\", \"ax\"\n\tnop\n\tnop\ntramp_exit:\n\tret\n\t.popsection\n",
+        ));
+        assert_eq!(words(&read, ".text"), [0x92cf_fffd, 0xf2b0_003d, 0xf280_011d, 0xd65f_03c0]);
+    }
+
+    #[test]
+    fn a_branch_to_a_label_and_a_sum_of_labels_is_the_label_and_a_number() {
+        // The KVM vectors of hyp-entry.S, each of which branches to the same place in another
+        // table. The addends are the ones llvm-mc writes.
+        let read = aarch64(concat!(
+            "\t.text\n.macro hyp_ventry\n\t.align 7\n1:\tnop\n\tnop\n",
+            "\tb __kvm_hyp_vector + (1b - 0b + (2 * 4))\n.endm\n",
+            "\t.align 11\n0:\n\t.rept 4\n\thyp_ventry\n\t.endr\n",
+        ));
+        let relocs: Vec<_> =
+            relocs(&read, ".text").into_iter().map(|(at, _, _, addend)| (at, addend)).collect();
+        assert_eq!(relocs, [(8, 8), (0x88, 0x88), (0x108, 0x108), (0x188, 0x188)]);
+    }
+
+    #[test]
+    fn rep_is_rept() {
+        let read = aarch64("\t.text\n\t.rep 3\n\t.word 0xe7fddef1\n\t.endr\n");
+        assert_eq!(words(&read, ".text"), [0xe7fd_def1; 3]);
     }
 
     #[test]
