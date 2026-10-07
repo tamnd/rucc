@@ -391,6 +391,27 @@ fn register(name: &str) -> Option<Value> {
         }
         return Some(Value::Vector(Arrangement::named(lanes)?, register));
     }
+    // A vector register of SVE, and a predicate register with the size of its lanes or without.
+    if let Some(number) = name.strip_prefix('z').and_then(|digits| numbered(digits, 32)) {
+        return Some(Value::Z(number));
+    }
+    if let Some(rest) = name.strip_prefix('p') {
+        let (digits, lanes) = match rest.split_once('.') {
+            Some((digits, lanes)) => (digits, Some(lanes)),
+            None => (rest, None),
+        };
+        if let Some(number) = numbered(digits, 16) {
+            let lanes = match lanes {
+                None => None,
+                Some("b") => Some(Scalar::B),
+                Some("h") => Some(Scalar::H),
+                Some("s") => Some(Scalar::S),
+                Some("d") => Some(Scalar::D),
+                Some(_) => return None,
+            };
+            return Some(Value::Pred(number, lanes));
+        }
+    }
     let (first, number) = name.split_at(name.char_indices().nth(1)?.0);
     Some(match first {
         "x" => Value::Gpr(Width::X, numbered(number, 31)?),
@@ -605,6 +626,10 @@ fn address(piece: &str, symbol: &mut Named) -> Result<Addr, Error> {
         }
         [imm] if imm.starts_with('#') || immediate(imm).is_some() => {
             Offset::Imm(immediate(imm).ok_or_else(|| error(piece))?)
+        }
+        // A number of vector lengths, which the SVE loads and stores of a whole register take.
+        [imm, vl] if vl.split_whitespace().map(str::to_ascii_lowercase).eq(["mul", "vl"]) => {
+            Offset::Vl(immediate(imm).ok_or_else(|| error(piece))?)
         }
         [index, rest @ ..] => {
             let (width, reg) = match register(&index.to_ascii_lowercase()) {
