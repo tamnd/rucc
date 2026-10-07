@@ -102,25 +102,40 @@ const WEAKNESSES: &[Weakness] = &[
 /// mistaken for rows that passed.
 const ABSENT: &[(u32, &str)] = &[(125, "S1"), (787, "S1, S4"), (908, "Y6"), (362, "C1, C2, C3")];
 
-/// Cases where both halves do something else wrong before they reach the mistake under test.
+/// Cases whose result says nothing about the mistake they are filed under.
 ///
-/// Juliet's good halves are meant to be the same program with the mistake taken out, and now and
+/// Two ways for that to happen, which [`Fault`] tells apart. Juliet's good halves are meant to be the same program with the mistake taken out, and now and
 /// then they keep a different one, which the bad half has as well and reaches first. A report from
 /// a case like that is the monitor being right about the other mistake, and it says nothing either
 /// way about the one the case is filed under: counting the good half as a false positive would be
 /// the suite's mistake charged to the compiler, and counting the bad half as detected would be
 /// credit for a mistake the program never got to. So a case under one of these whose good half
-/// reported is set aside whole. Each entry says what both halves do, so that it can be checked
-/// against the source by anybody who doubts it, and a good half that reports and is not under one
-/// of these is a false positive.
+/// reported is set aside whole. And a bad half can do nothing wrong at all on this target or with
+/// what this task can give it, so a case like that whose bad half was silent is set aside too,
+/// since there was nothing there to detect. Each entry says what the halves do, so that it can be
+/// checked against the source by anybody who doubts it, and a good half that reports and is not
+/// under one of these is a false positive.
 #[derive(Debug)]
 struct Excuse {
     /// The test ids it covers start with one of these.
     prefixes: &'static [&'static str],
     /// And end with this flow variant, when the excuse is about one variant rather than a family.
     variant: Option<&'static str>,
-    /// What both halves do wrong.
+    /// Which of the two it is.
+    fault: Fault,
+    /// What the halves do.
     why: &'static str,
+}
+
+/// What is wrong with a case an [`Excuse`] covers.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Fault {
+    /// Both halves make some other mistake first, so the case is set aside when its good half
+    /// reported.
+    Both,
+    /// The bad half makes no mistake here, so the case is set aside when neither half reported. A
+    /// good half that did is still a false positive.
+    Neither,
 }
 
 impl Excuse {
@@ -131,11 +146,12 @@ impl Excuse {
     }
 }
 
-/// Every case known to be wrong in its own right before it gets to its mistake.
+/// Every case known to make some other mistake first, or to make none on this target.
 const EXCUSES: &[Excuse] = &[
     Excuse {
         prefixes: &["CWE843_Type_Confusion__"],
         variant: None,
+        fault: Fault::Both,
         why: "both halves point at a local declared in a block and read it after the block has \
               closed, which is a use after the end of its lifetime (row T4)",
     },
@@ -147,8 +163,31 @@ const EXCUSES: &[Excuse] = &[
             "CWE127_Buffer_Underread__",
         ],
         variant: Some("_32"),
+        fault: Fault::Both,
         why: "both halves read the pointer they are about to overwrite through a second pointer to \
               it before anything has written it, which is a read of a local nothing wrote (row Y6)",
+    },
+    Excuse {
+        prefixes: &[
+            "CWE122_Heap_Based_Buffer_Overflow__sizeof_double_",
+            "CWE122_Heap_Based_Buffer_Overflow__sizeof_int64_t_",
+            "CWE122_Heap_Based_Buffer_Overflow__sizeof_struct_",
+        ],
+        variant: None,
+        fault: Fault::Neither,
+        why: "the bad half allocates the size of a pointer for an object of eight bytes, and on a \
+              64 bit target a pointer is eight bytes, so it is given all it uses",
+    },
+    Excuse {
+        prefixes: &[
+            "CWE121_Stack_Based_Buffer_Overflow__CWE129_connect_socket_",
+            "CWE122_Heap_Based_Buffer_Overflow__c_CWE129_connect_socket_",
+            "CWE126_Buffer_Overread__CWE129_connect_socket_",
+        ],
+        variant: None,
+        fault: Fault::Neither,
+        why: "the bad half reads its index from a server on the loopback that nothing here runs, \
+              so it keeps the -1 it started with, and its own check turns that away",
     },
 ];
 
@@ -194,8 +233,7 @@ struct Tally {
     detected: usize,
     missed: Vec<String>,
     false_positive: Vec<String>,
-    /// Cases set aside because both halves did something else wrong first, under the excuse that
-    /// says what.
+    /// Cases set aside under an [`Excuse`], with the excuse that says why.
     excused: Vec<(&'static Excuse, Vec<String>)>,
     unbuilt: Vec<String>,
 }
@@ -485,12 +523,17 @@ const SUPPORT: [&str; 2] = ["io.c", "std_thread.c"];
 ///
 /// One driver for every case, with the two names it calls bound to the case's own functions when
 /// the case is linked, so that it is compiled once rather than once per case. It is compiled by the
-/// system compiler and is not instrumented, and it touches no memory a case owns.
+/// system compiler and is not instrumented, and it touches no memory a case owns. It seeds `rand`
+/// when [`SEEDED`] says what with, for the reason [`SEED`] gives.
 const DRIVER: &str = "\
+#include <stdlib.h>
 void juliet_bad(void);
 void juliet_good(void);
 int main(int argc, char **argv)
 {
+    const char *seed = getenv(\"JULIET_SEED\");
+    if (seed && *seed)
+        srand((unsigned)atoi(seed));
     if (argc > 1 && argv[1][0] == 'b')
         juliet_bad();
     else
@@ -534,6 +577,19 @@ const LOW: &[u32] = &[124, 127];
 /// The variable the environment sources read.
 const ENVIRONMENT: &str = "ADD";
 
+/// The seed the cases that take their number from `rand` are given, under [`SEEDED`].
+///
+/// Juliet's `main` seeds `rand` with the time and the driver here does not, so an unseeded run
+/// starts glibc's generator where it always starts it, and the first number `RAND32` makes out of
+/// that is negative. That is the number a CWE-124 or CWE-127 case wants and none of the others do:
+/// they check for a negative index and turn it away, and the case is a miss nobody could have
+/// caught. Four is the first seed whose first `RAND32` is past the end of a ten element buffer, so
+/// the cases under the two CWEs in [`LOW`] are left unseeded and the rest are given it.
+const SEED: u32 = 4;
+
+/// The variable the driver reads its seed from.
+const SEEDED: &str = "JULIET_SEED";
+
 /// One case at one tier: link it, run each half, and say what each did.
 ///
 /// A half reported when the banner is anywhere in what it wrote, whatever its status. Otherwise it
@@ -541,7 +597,8 @@ const ENVIRONMENT: &str = "ADD";
 /// anything else did.
 ///
 /// Each half is given [`HIGH`], or minus one under one of the [`LOW`] CWEs, on its standard input
-/// and in [`ENVIRONMENT`].
+/// and in [`ENVIRONMENT`], and a case that takes its number from `rand` is given [`SEED`] in
+/// [`SEEDED`] when it is not under one of those.
 fn one() -> String {
     format!(
         "\
@@ -556,11 +613,12 @@ if ! gcc -no-pie \"$tier/$id\"/*.o \"$tier\"/support/*.o \"$out/driver.o\" safe-
     exit 0
 fi
 case $id in
-{low}) input=-1 ;;
-*) input={HIGH} ;;
+{low}) input=-1 seed= ;;
+*_rand_*) input={HIGH} seed={SEED} ;;
+*) input={HIGH} seed= ;;
 esac
 half() {{
-    printf '%s\\n' \"$input\" | {ENVIRONMENT}=\"$input\" timeout {SECONDS} \"$program\" \"$1\" \\
+    printf '%s\\n' \"$input\" | {ENVIRONMENT}=\"$input\" {SEEDED}=\"$seed\" timeout {SECONDS} \"$program\" \"$1\" \\
         >\"$program.$1\" 2>&1
     status=$?
     if grep -q '{BANNER}' \"$program.$1\"; then
@@ -626,9 +684,9 @@ struct Report {
 /// A case is detected when its bad half reported and missed when it did not, whatever else it did:
 /// a bad half the hardware stopped is a case the monitor missed and the processor caught. A case
 /// is a false positive when its good half reported, which can be true of a detected case as well,
-/// so the three counts are not meant to add up to the total. A case under an [`Excuse`] whose good
-/// half reported is set aside and is in none of the three, and so is a case that did not compile
-/// or link, and both are listed apart.
+/// so the three counts are not meant to add up to the total. A case an [`Excuse`] covers, with the
+/// halves its [`Fault`] says, is set aside and is in none of the three, and so is a case that did
+/// not compile or link, and both are listed apart.
 fn report(
     chosen: &[&Weakness],
     cases: &[Case],
@@ -641,8 +699,12 @@ fn report(
             let tally = tallies.entry((case.cwe, tier)).or_default();
             match outcomes.get(&(tier, case.id.as_str())) {
                 Some(Outcome::Ran { bad, good }) => {
-                    let excuse = EXCUSES.iter().find(|e| e.covers(&case.id));
-                    if let (Half::Reported, Some(excuse)) = (good, excuse) {
+                    let excuse =
+                        EXCUSES.iter().find(|e| e.covers(&case.id)).filter(|e| match e.fault {
+                            Fault::Both => *good == Half::Reported,
+                            Fault::Neither => *bad != Half::Reported && *good != Half::Reported,
+                        });
+                    if let Some(excuse) = excuse {
                         match tally.excused.iter_mut().find(|(e, _)| std::ptr::eq(*e, excuse)) {
                             Some((_, ids)) => ids.push(case.id.clone()),
                             None => tally.excused.push((excuse, vec![case.id.clone()])),
@@ -798,8 +860,14 @@ mod tests {
     #[test]
     fn a_half_is_given_the_number_that_makes_its_bad_half_go_wrong() {
         let one = one();
-        assert!(one.contains("CWE124_*|CWE127_*) input=-1 ;;\n*) input=10 ;;"));
-        assert!(one.contains("printf '%s\\n' \"$input\" | ADD=\"$input\" timeout 10 "));
+        assert!(one.contains(
+            "CWE124_*|CWE127_*) input=-1 seed= ;;\n*_rand_*) input=10 seed=4 ;;\n*) input=10 seed= ;;"
+        ));
+        assert!(one.contains(
+            "printf '%s\\n' \"$input\" | ADD=\"$input\" JULIET_SEED=\"$seed\" timeout 10 "
+        ));
+        // The driver reads the seed out of the variable the script puts it in.
+        assert!(DRIVER.contains(&format!("getenv(\"{SEEDED}\")")));
     }
 
     #[test]
@@ -855,6 +923,39 @@ mod tests {
         assert!(report.summary.contains("CWE-843 detect: 1 cases set aside, both halves point"));
         assert!(
             report.full.contains("  detect set aside (1):\n    CWE843_Type_Confusion__char_01\n")
+        );
+    }
+
+    #[test]
+    fn a_case_with_no_mistake_on_this_target_is_set_aside_only_when_nothing_reported() {
+        let quiet = Case {
+            id: "CWE122_Heap_Based_Buffer_Overflow__sizeof_double_01".to_owned(),
+            cwe: 122,
+            files: Vec::new(),
+        };
+        let noisy = Case {
+            id: "CWE122_Heap_Based_Buffer_Overflow__sizeof_double_02".to_owned(),
+            cwe: 122,
+            files: Vec::new(),
+        };
+        let weakness = WEAKNESSES.iter().find(|w| w.cwe == 122).expect("122 is in the table");
+        let mut outcomes = BTreeMap::new();
+        for tier in TIERS {
+            outcomes.insert(
+                (tier, quiet.id.as_str()),
+                Outcome::Ran { bad: Half::Silent, good: Half::Silent },
+            );
+            // A good half that reported is a false positive whatever the bad half did, and is
+            // counted as one rather than hidden under the excuse.
+            outcomes.insert(
+                (tier, noisy.id.as_str()),
+                Outcome::Ran { bad: Half::Silent, good: Half::Reported },
+            );
+        }
+        let report = report(&[weakness], &[quiet.clone(), noisy.clone()], &outcomes, "-O2");
+        assert!(report.summary.contains("detect        2         0       1       1          1"));
+        assert!(
+            report.summary.contains("CWE-122 detect: 1 cases set aside, the bad half allocates")
         );
     }
 
