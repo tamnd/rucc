@@ -78,6 +78,7 @@ const OPTIONS: &[(&str, &str)] = &[
     ("E0853", "switch-enum"),
     ("E0854", "switch-default"),
     ("E0855", "switch-bool"),
+    ("E0857", "maybe-musttail-local-addr"),
     ("W0331", "cpp"),
     ("W0333", "invalid-memory-model"),
     ("W0334", "expansion-to-defined"),
@@ -130,6 +131,10 @@ const QUIET: &[(&str, &str)] = &[
     ("switch", "switch"),
     ("unknown-pragmas", "unknown-pragmas"),
 ];
+
+/// The options gcc leaves off until they are named or `-Wextra` is given, which `-Wall` does
+/// not turn on. Sorted.
+const EXTRA: &[&str] = &["maybe-musttail-local-addr"];
 
 /// The options gcc leaves off until they are named, which `-Wall` does not turn on. Sorted.
 const NAMED_ONLY: &[&str] = &["switch-default", "switch-enum"];
@@ -221,11 +226,14 @@ impl Named {
     /// Whether a warning that is off until asked for was asked for, which every other warning
     /// is. The name has to be asked for itself or through its group, and the group must not have
     /// been turned off, since `-Wno-format` silences `-Wformat-extra-args` along with the rest.
-    /// One of [`OWN`] asked for itself is asked for whatever its group was told, and one of
-    /// [`NAMED_ONLY`] is only asked for by name.
+    /// One of [`OWN`] asked for itself is asked for whatever its group was told, one of
+    /// [`NAMED_ONLY`] is only asked for by name, and one of [`EXTRA`] by name or by `-Wextra`.
     fn asked(&self, name: &str) -> bool {
         if NAMED_ONLY.binary_search(&name).is_ok() {
             return self.on.contains(name);
+        }
+        if EXTRA.binary_search(&name).is_ok() {
+            return self.on.contains(name) || self.on.contains("extra");
         }
         let Ok(at) = QUIET.binary_search_by(|&(known, _)| known.cmp(name)) else { return true };
         if self.on.contains(name) && OWN.contains(&name) {
@@ -573,6 +581,28 @@ mod tests {
         assert!(named.promoted(&warning("E0853"), false));
         named.flag("switch-default");
         assert!(!named.silenced(&warning("E0854")));
+    }
+
+    /// `-Wmaybe-musttail-local-addr` waits for `-Wextra` or its own name, and `-Wall` is neither.
+    #[test]
+    fn what_wextra_turns_on_waits_for_it() {
+        assert!(EXTRA.windows(2).all(|pair| pair[0] < pair[1]));
+        let maybe = warning("E0857");
+        let mut named = Named::default();
+        assert!(named.silenced(&maybe));
+        named.flag("all");
+        assert!(named.silenced(&maybe));
+        named.flag("extra");
+        assert!(!named.silenced(&maybe));
+        named.flag("no-maybe-musttail-local-addr");
+        assert!(named.silenced(&maybe));
+        let mut named = Named::default();
+        named.flag("maybe-musttail-local-addr");
+        assert!(!named.silenced(&maybe));
+        let mut named = Named::default();
+        named.flag("extra");
+        named.flag("no-extra");
+        assert!(named.silenced(&maybe));
     }
 
     #[test]

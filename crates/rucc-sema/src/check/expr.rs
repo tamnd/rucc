@@ -543,6 +543,7 @@ impl Checker<'_> {
             );
             return self.poison(span);
         };
+        self.note_subscripted(base);
         if !is_integer(&self.types, self.tast[index].ty) {
             self.report(
                 Diagnostic::error("array subscript is not an integer", span).with_code("E0504"),
@@ -1256,6 +1257,7 @@ impl Checker<'_> {
             self.report(Diagnostic::error(what, span).with_code("E0712"));
             return self.poison(span);
         }
+        self.note_addressed(operand);
         let ty = self.types.pointer(self.tast[operand].ty);
         let node = ExprKind::Unary { op: UnaryOp::AddrOf, operand };
         self.tast.expr(Expr::new(node, ty, Category::Rvalue), span)
@@ -2562,7 +2564,9 @@ impl Checker<'_> {
             );
             return self.poison(span);
         }
-        self.conv().value(expr)
+        let value = self.conv().value(expr);
+        self.note_decayed(value);
+        value
     }
 
     /// Whether a type is a structure or union that has been declared and not defined.

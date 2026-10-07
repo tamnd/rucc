@@ -235,7 +235,7 @@ fn a_pointer_into_the_frame_is_warned_about_in_gcc_s_words() {
     ];
     for def in quiet {
         let source = format!("{lead}{def}\n");
-        let (ok, _, err) = compile("quiet", X86_64, &["-Wall", "-Wextra"], &source);
+        let (ok, _, err) = compile("quiet", X86_64, &["-Wall"], &source);
         assert!(ok, "{def}\n{err}");
         assert_eq!(err, "", "{def}");
     }
@@ -253,4 +253,209 @@ fn a_pointer_into_the_frame_is_warned_about_in_gcc_s_words() {
     let (ok, _, err) = compile("error", X86_64, &["-Werror=musttail-local-addr"], &one);
     assert!(!ok);
     assert!(err.contains("error: address of parameter 'a' passed"), "{err}");
+}
+
+/// gcc 15's own test of `-Wmaybe-musttail-local-addr`, `c-c++-common/musttail30.c`, with the
+/// `dg-warning` comments taken off, which are what [`PASSED`] and [`ESCAPED`] say, and two
+/// functions of this compiler's after it: a parameter whose address is taken after the call, an
+/// array that is only indexed, one whose element's address is computed, and the variable declared
+/// last being the one named.
+const ESCAPES: &str = r"int foo (int, void *);
+int bar (int, int *);
+struct S { int a, b, c; };
+struct T { int d; struct S e; };
+
+int
+baz (int x, void *y)
+{
+  [[gnu::musttail]] return bar (2, &x);
+}
+
+int
+qux (int x, void *y)
+{
+  __label__ lab;
+  lab:;
+  if (*(int *) y == 1)
+    [[gnu::musttail]] return foo (1, &&lab);
+  if (x == 1)
+    [[gnu::musttail]] return foo (3, 0);
+  else if (x == 2)
+    {
+      {
+        int a = 42;
+        bar (4, &a);
+      }
+      [[gnu::musttail]] return bar (5, 0);
+    }
+  else if (x == 3)
+    {
+      int a = 42;
+      bar (4, &a);
+      [[gnu::musttail]] return bar (6, 0);
+    }
+  else if (x == 4)
+    {
+      int a = 42;
+      [[gnu::musttail]] return bar (7, &a);
+    }
+  else if (x == 5)
+    {
+      struct T b;
+      [[gnu::musttail]] return bar (8, &b.e.b);
+    }
+  else if (x == 6)
+    {
+      struct T b;
+      bar (9, &b.e.a);
+      [[gnu::musttail]] return bar (10, 0);
+    }
+  else if (x == 7)
+    {
+      {
+        struct T b;
+        bar (9, &b.e.a);
+      }
+      [[gnu::musttail]] return bar (11, 0);
+    }
+  else if (x == 8)
+    {
+      {
+        int a = 42;
+        bar (4, &a);
+      }
+      [[gnu::musttail]] return foo (12, 0);
+    }
+  else if (x == 9)
+    {
+      int a = 42;
+      bar (4, &a);
+      [[gnu::musttail]] return foo (13, 0);
+    }
+  else if (x == 10)
+    {
+      int a = 42;
+      [[gnu::musttail]] return foo (14, &a);
+    }
+  else if (x == 11)
+    {
+      struct T b;
+      [[gnu::musttail]] return foo (15, &b.e.b);
+    }
+  else if (x == 12)
+    {
+      struct T b;
+      bar (9, &b.e.a);
+      [[gnu::musttail]] return foo (16, 0);
+    }
+  else if (x == 13)
+    {
+      {
+        struct T b;
+        bar (9, &b.e.a);
+      }
+      [[gnu::musttail]] return foo (17, 0);
+    }
+  return 0;
+}
+
+int
+corge (int x, void *y)
+{
+  if (*(int *) y == 1)
+    bar (18, &x);
+  [[gnu::musttail]] return bar (2, 0);
+}
+
+int
+late (int x, int i)
+{
+  int b[4], c[4];
+  b[1] = 0;
+  if (x)
+    [[gnu::musttail]] return bar (19, 0);
+  bar (20, &c[i]);
+  [[gnu::musttail]] return foo (21, &c[i]);
+  bar (22, &x);
+  return b[1];
+}
+
+int
+last (int x)
+{
+  int a, d[2];
+  bar (23, &a);
+  bar (24, d);
+  {
+    int e;
+    bar (25, &e);
+    [[gnu::musttail]] return bar (26, 0);
+  }
+  return 0;
+}
+";
+
+/// What gcc 15 says under `-Wmusttail-local-addr` about [`ESCAPES`], without the columns, which
+/// is said as each call is read where the rest is said once its function has been.
+const PASSED: &[&str] = &[
+    "a.c:9: warning: address of parameter 'x' passed to 'musttail' call argument [E0850]",
+    "a.c:18: warning: address of label passed to 'musttail' call argument [E0850]",
+    "a.c:38: warning: address of automatic variable 'a' passed to 'musttail' call argument [E0850]",
+    "a.c:43: warning: address of automatic variable 'b' passed to 'musttail' call argument [E0850]",
+    "a.c:76: warning: address of automatic variable 'a' passed to 'musttail' call argument [E0850]",
+    "a.c:81: warning: address of automatic variable 'b' passed to 'musttail' call argument [E0850]",
+];
+
+/// What it says under `-Wmaybe-musttail-local-addr`, without the columns.
+const ESCAPED: &[&str] = &[
+    "a.c:33: warning: address of automatic variable 'a' can escape to 'musttail' call [E0857]",
+    "a.c:49: warning: address of automatic variable 'b' can escape to 'musttail' call [E0857]",
+    "a.c:71: warning: address of automatic variable 'a' can escape to 'musttail' call [E0857]",
+    "a.c:87: warning: address of automatic variable 'b' can escape to 'musttail' call [E0857]",
+    "a.c:105: warning: address of parameter 'x' can escape to 'musttail' call [E0857]",
+    "a.c:114: warning: address of parameter 'x' can escape to 'musttail' call [E0857]",
+    "a.c:116: warning: address of automatic variable 'c' can escape to 'musttail' call [E0857]",
+    "a.c:130: warning: address of automatic variable 'e' can escape to 'musttail' call [E0857]",
+];
+
+/// The lines about the frame, without their columns, which gcc takes from the call as it has
+/// rewritten it.
+fn frame_lines(err: &str) -> Vec<String> {
+    err.lines()
+        .filter(|line| line.contains("[E0850]") || line.contains("[E0857]"))
+        .map(|line| {
+            let mut parts: Vec<&str> = line.splitn(4, ':').collect();
+            parts.remove(2);
+            parts.join(":")
+        })
+        .collect()
+}
+
+/// gcc 15's `-Wmaybe-musttail-local-addr`, which `-Wextra` turns on: a call handed no address
+/// in the frame is warned about once where the function took the address of a variable still
+/// in scope at the call, or of a parameter, at any level of optimization, and the calls are made
+/// all the same.
+#[test]
+fn an_address_that_escaped_before_the_jump_is_warned_about_in_gcc_s_words() {
+    let mut both: Vec<&str> = PASSED.iter().chain(ESCAPED).copied().collect();
+    both.sort_by_key(|line| line[4..].split(':').next().unwrap().parse::<u32>().unwrap());
+    for flags in [&["-O0", "-Wextra"][..], &["-O2", "-Wmaybe-musttail-local-addr"][..]] {
+        let (ok, text, err) = compile("escape", X86_64, flags, ESCAPES);
+        assert!(ok, "{flags:?}\n{err}");
+        let said = frame_lines(&err);
+        let mut sorted = said.clone();
+        sorted.sort_by_key(|line| line[4..].split(':').next().unwrap().parse::<u32>().unwrap());
+        assert_eq!(sorted, both, "{flags:?}\n{err}");
+        assert_eq!(err.matches("warning:").count(), said.len(), "{flags:?}\n{err}");
+        assert!(body(&text, "corge").contains(&"jmp bar".to_owned()), "{flags:?}\n{text}");
+    }
+    for flags in [&["-Wall"][..], &["-Wextra", "-Wno-maybe-musttail-local-addr"][..]] {
+        let (ok, _, err) = compile("escape-off", X86_64, flags, ESCAPES);
+        assert!(ok, "{flags:?}\n{err}");
+        assert_eq!(frame_lines(&err), PASSED, "{flags:?}\n{err}");
+    }
+    let (ok, _, err) =
+        compile("escape-error", X86_64, &["-Werror=maybe-musttail-local-addr"], ESCAPES);
+    assert!(!ok, "{err}");
+    assert!(err.contains("error: address of parameter 'x' can escape to 'musttail' call"), "{err}");
 }
