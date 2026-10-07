@@ -207,6 +207,13 @@ impl Flags {
     /// how the callee comes back does not depend on how it was reached.
     pub const INDIRECT_RETURN: Self = Self(1 << 22);
 
+    /// A call a `musttail` return gives back, which the code generator has to make as a jump and
+    /// refuses in gcc's words where it cannot. A promise the program's stack depends on rather
+    /// than a fact or a licence, so nothing drops it but the inliner, which drops it on a copy of
+    /// the call that is no longer where it was written. Legal on all three spellings, since one
+    /// stays one when a pass works out where it goes and becomes a `tail_call` when it is made.
+    pub const MUST_TAIL: Self = Self(1 << 23);
+
     /// Every flag that tells the optimizer to leave an access exactly where it is.
     pub const KEEP: Self = Self(Self::VOLATILE.0 | Self::SEG_FS.0 | Self::SEG_GS.0);
 
@@ -306,11 +313,13 @@ impl Flags {
             // that could ever be inside it.
             //
             // `NOTRACK` is on all three, which its own comment says why.
-            Opcode::Call => {
-                Self::NOFREE.union(Self::HEAP).union(Self::NOTRACK).union(Self::INDIRECT_RETURN)
-            }
+            Opcode::Call => Self::NOFREE
+                .union(Self::HEAP)
+                .union(Self::NOTRACK)
+                .union(Self::INDIRECT_RETURN)
+                .union(Self::MUST_TAIL),
             Opcode::TailCall | Opcode::CallIndirect => {
-                Self::NOFREE.union(Self::NOTRACK).union(Self::INDIRECT_RETURN)
+                Self::NOFREE.union(Self::NOTRACK).union(Self::INDIRECT_RETURN).union(Self::MUST_TAIL)
             }
             // On the three checks `rucc-safety` emits and on nothing else. What they say is about
             // the bytes a check names, so an instruction that names no bytes has no room for them.
@@ -397,6 +406,7 @@ static NAMED: &[(Flags, &str)] = &[
     (Flags::NOMEM, "nomem"),
     (Flags::NOTRACK, "notrack"),
     (Flags::INDIRECT_RETURN, "indirect_return"),
+    (Flags::MUST_TAIL, "musttail"),
 ];
 
 /// How strongly an atomic operation is ordered against everything around it.
@@ -860,6 +870,16 @@ mod tests {
             Flags::INDIRECT_RETURN.union(Flags::NOTRACK).to_string(),
             ".notrack.indirect_return"
         );
+    }
+
+    #[test]
+    fn musttail_goes_on_a_call_and_nowhere_else() {
+        for opcode in Opcode::all() {
+            let call = matches!(opcode, Opcode::Call | Opcode::TailCall | Opcode::CallIndirect);
+            assert_eq!(Flags::legal_on(opcode).contains(Flags::MUST_TAIL), call, "{opcode}");
+        }
+        assert_eq!(Flags::from_name("musttail"), Some(Flags::MUST_TAIL));
+        assert!(!Flags::FAST.contains(Flags::MUST_TAIL));
     }
 
     #[test]

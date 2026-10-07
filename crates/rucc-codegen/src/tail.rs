@@ -45,11 +45,12 @@
 //! analysis would let through, which costs a few calls and nothing else.
 
 use rucc_base::{Interner, Symbol};
-use rucc_ir::{Abi, AttrSet, Block, Extra, Func, Inst, Opcode, Value};
+use rucc_ir::{Abi, AttrSet, Block, Extra, Flags, Func, Inst, Opcode, Value};
 use rucc_mir as mir;
 use rucc_target::{BranchInsts, FrameInsts, RegClass};
 
 use crate::elsewhere::Elsewhere;
+use crate::lower::Unsupported;
 
 /// One call [`crate::lower`] built for a `tail_call`, and the pseudos that leave its answer where
 /// the caller's answer goes.
@@ -59,6 +60,9 @@ pub struct Tail {
     pub call: mir::Inst,
     /// The return pseudos behind it, which write nothing and go with the call.
     pub returns: Vec<mir::Inst>,
+    /// The `tail_call` it was built for, when `musttail` asked for that, which makes a call that
+    /// cannot become a jump an error.
+    pub must: Option<Inst>,
 }
 
 /// Why no call in this function can be made in tail position, or `None` when one can.
@@ -68,13 +72,33 @@ pub struct Tail {
 /// is [`comes_back`]'s rule, and the inliner asks the same one of a callee.
 #[must_use]
 pub fn refusal(func: &Func, names: &Interner, elsewhere: &Elsewhere) -> Option<&'static str> {
+    refused(func, names, elsewhere, true).map(|(why, _)| why)
+}
+
+/// What gcc says when a reason of its own stops a `musttail` call, and what [`mark`] says when
+/// the machine or the command line does.
+pub const UNABLE: &str = "target is not able to optimize the call into a sibling call";
+
+/// [`refusal`]'s reason, and what gcc says when the same thing stops a `musttail` call.
+///
+/// `locals` is whether a local in the frame is a reason, which it is not for a `musttail` call.
+/// gcc ends the lifetime of every local before the jump, so a callee handed a pointer to one is
+/// the program's mistake. A local whose size is only known when it runs is a reason for both,
+/// as in gcc.
+fn refused(
+    func: &Func,
+    names: &Interner,
+    elsewhere: &Elsewhere,
+    locals: bool,
+) -> Option<(&'static str, &'static str)> {
     if func.attrs.set.contains(AttrSet::NAKED) {
-        return Some("the function is naked and writes its own ending");
+        return Some(("the function is naked and writes its own ending", UNABLE));
     }
     let sret =
         func.signature().params.first().is_some_and(|param| matches!(param.abi, Abi::Sret { .. }));
     if sret {
-        return Some("the function gives its answer back through memory it was handed");
+        let why = "the function gives its answer back through memory it was handed";
+        return Some((why, "callee returns a structure"));
     }
     // A static chain travels in a register the tail call sequence knows nothing about, and the
     // functions that pass or take one are nested functions and the functions around them, which
@@ -84,23 +108,46 @@ pub fn refusal(func: &Func, names: &Interner, elsewhere: &Elsewhere) -> Option<&
         .chain(std::iter::once(func.signature()))
         .any(|signature| signature.params.iter().any(|param| param.abi == Abi::Chain));
     if chained {
-        return Some("the function passes or takes the static chain of a nested function");
+        let why = "the function passes or takes the static chain of a nested function";
+        return Some((why, "nested function"));
     }
     for block in func.blocks() {
         for inst in func.insts(block) {
             match func[inst].opcode {
-                Opcode::Alloca => return Some("a local lives in the frame"),
-                Opcode::VaStart => return Some("the function reads its own variable arguments"),
-                Opcode::ApplyArgs => return Some("the function keeps its arguments in the frame"),
-                Opcode::SetjmpMarker => return Some("the function saves a place to come back to"),
+                Opcode::Alloca if locals || !func[func[inst].args].is_empty() => {
+                    return Some(("a local lives in the frame", "caller uses alloca"));
+                }
+                Opcode::VaStart => {
+                    let why = "the function reads its own variable arguments";
+                    return Some((why, "caller uses stdargs"));
+                }
+                Opcode::ApplyArgs => {
+                    return Some(("the function keeps its arguments in the frame", UNABLE));
+                }
+                Opcode::SetjmpMarker => {
+                    let why = "the function saves a place to come back to";
+                    return Some((why, "caller uses setjmp"));
+                }
                 Opcode::Call if twice(func, inst, names, elsewhere) => {
-                    return Some("the function calls something that comes back twice");
+                    let why = "the function calls something that comes back twice";
+                    return Some((why, "caller uses setjmp"));
                 }
                 _ => (),
             }
         }
     }
     None
+}
+
+/// The first call `musttail` asked for, if there is one.
+#[must_use]
+pub fn asked(func: &Func) -> Option<Inst> {
+    func.blocks().flat_map(|block| func.insts(block)).find(|&inst| must(func, inst))
+}
+
+/// Whether that is a call `musttail` asked for.
+fn must(func: &Func, inst: Inst) -> bool {
+    func[inst].flags.contains(Flags::MUST_TAIL)
 }
 
 /// Whether control can come back into this function a second time from one call, through a
@@ -147,6 +194,10 @@ pub(crate) fn jumps_back(func: &Func, inst: Inst, elsewhere: &Elsewhere) -> bool
 /// Turns every call in tail position into a `tail_call`, unless [`refusal`] has a reason not to,
 /// and says how many it turned.
 ///
+/// `optional` is whether to turn any but the calls `musttail` asked for, which is
+/// `-foptimize-sibling-calls`. One it asked for is turned whatever that says and whatever local
+/// is in the frame, and one that cannot be is an error, with gcc's reason for it.
+///
 /// `guarded` is `-fcf-protection=full` in a function whose own type is not `indirect_return`.
 /// There a call that can come back by a jump stays a call, as in gcc: the jump would land in
 /// this function's caller, past a call that has no landing pad after it, since that caller did
@@ -154,32 +205,43 @@ pub(crate) fn jumps_back(func: &Func, inst: Inst, elsewhere: &Elsewhere) -> bool
 ///
 /// `indirect` is whether a call through a pointer may become a jump through it, which it may not
 /// under AArch64 `bti`, where the callee's `bti c` lets in a jump only from `x16` or `x17`.
+///
+/// # Errors
+///
+/// A call `musttail` asked for that cannot be made in tail position.
 pub fn mark(
     func: &mut Func,
     names: &Interner,
     elsewhere: &Elsewhere,
     guarded: bool,
     indirect: bool,
-) -> usize {
-    if refusal(func, names, elsewhere).is_some() {
-        return 0;
-    }
+    optional: bool,
+) -> Result<usize, Unsupported> {
+    let optional = optional && refusal(func, names, elsewhere).is_none();
+    let stopped = refused(func, names, elsewhere, false).map(|(_, said)| said);
     let blocks: Vec<_> = func.blocks().collect();
     let mut marked = 0;
     let mut left = Vec::new();
     for block in blocks {
         let insts: Vec<Inst> = func.insts(block).collect();
-        let [.., call, ret] = insts[..] else { continue };
-        let Some(returned) = returned(func, ret) else { continue };
-        if !in_tail_position(func, call, &returned) {
-            continue;
-        }
-        if guarded && jumps_back(func, call, elsewhere) {
-            continue;
-        }
-        if !indirect && func[call].opcode == Opcode::CallIndirect {
-            continue;
-        }
+        let call = match insts.iter().copied().find(|&inst| must(func, inst)) {
+            Some(call) => {
+                let why = stopped.or_else(|| misplaced(func, &insts, call, elsewhere, guarded, indirect));
+                if let Some(reason) = why {
+                    return Err(Unsupported::MustTail { inst: call, reason });
+                }
+                call
+            }
+            None if optional => {
+                let [.., call, _] = insts[..] else { continue };
+                if misplaced(func, &insts, call, elsewhere, guarded, indirect).is_some() {
+                    continue;
+                }
+                call
+            }
+            None => continue,
+        };
+        let ret = *insts.last().expect("the call is followed by its return");
         left.extend(func.successors(ret).map(|target| target.block));
         func.remove_inst(ret);
         func[call].opcode = Opcode::TailCall;
@@ -197,7 +259,36 @@ pub fn mark(
     for block in left.into_iter().filter(|block| !reached.contains(block)) {
         func.remove_block(block);
     }
-    marked
+    Ok(marked)
+}
+
+/// Why that call cannot be made in tail position, in gcc's words, or `None` when it can.
+///
+/// It has to be the last thing in its block but the end of the block, and that has to give
+/// back what the call did, which is what [`returned`] and [`misfit`] ask.
+fn misplaced(
+    func: &Func,
+    insts: &[Inst],
+    call: Inst,
+    elsewhere: &Elsewhere,
+    guarded: bool,
+    indirect: bool,
+) -> Option<&'static str> {
+    let at = insts.iter().position(|&inst| inst == call).expect("the call is in the block");
+    let after = &insts[at + 1..];
+    let &[ret] = after else {
+        let results: Vec<Value> = func[call].results().collect();
+        let read =
+            after.iter().any(|&inst| func[func[inst].args].iter().any(|arg| results.contains(arg)));
+        return Some(if read { "return value changed after call" } else { "code between call and return" });
+    };
+    let Some(returned) = returned(func, ret) else { return Some("code between call and return") };
+    if let Some(reason) = misfit(func, call, &returned) {
+        return Some(reason);
+    }
+    let unable = guarded && jumps_back(func, call, elsewhere)
+        || !indirect && func[call].opcode == Opcode::CallIndirect;
+    unable.then_some(UNABLE)
 }
 
 /// What the function gives back when that instruction ends its block, or `None` when it does not
@@ -223,8 +314,8 @@ fn returned(func: &Func, ret: Inst) -> Option<Vec<Value>> {
     }
 }
 
-/// Whether that call, at the end of its block, is one the caller could jump to when the function
-/// then gives back what `returned` holds.
+/// Why that call, at the end of its block, is not one the caller could jump to when the function
+/// then gives back what `returned` holds, in gcc's words, or `None` when it is one.
 ///
 /// A call to a name or through a pointer, and what is given back is the call's results, in order,
 /// and nothing else, and the two signatures say the same about them, so the callee leaves the
@@ -232,15 +323,15 @@ fn returned(func: &Func, ret: Inst) -> Option<Vec<Value>> {
 /// nothing can also drop what the callee gives back, when that is in an integer register, where
 /// the caller's caller does not look. One on the x87 stack would be left there for a caller that
 /// expects the stack empty.
-fn in_tail_position(func: &Func, call: Inst, returned: &[Value]) -> bool {
-    let Extra::Call(info) = func[call].extra else { return false };
+fn misfit(func: &Func, call: Inst, returned: &[Value]) -> Option<&'static str> {
+    let Extra::Call(info) = func[call].extra else { return Some(UNABLE) };
     let info = func[info];
     // A `call` names its callee and a `call_indirect` never does, and a `tail_call` tells the two
     // apart by the same thing.
     match func[call].opcode {
         Opcode::Call if info.callee.is_some() => (),
         Opcode::CallIndirect if info.callee.is_none() => (),
-        _ => return false,
+        _ => return Some(UNABLE),
     }
     let callee = &func[info.signature];
     let dropped = returned.is_empty()
@@ -248,7 +339,7 @@ fn in_tail_position(func: &Func, call: Inst, returned: &[Value]) -> bool {
         && callee.returns.iter().all(|param| param.ty.is_int() || param.ty.is_ptr());
     let results: Vec<Value> = func[call].results().collect();
     if returned != results.as_slice() && !dropped {
-        return false;
+        return Some("call and return value are different");
     }
     // And the two are of one convention. A jump leaves the callee to return straight to this
     // function's caller, who restores what its own convention says the callee kept. An `ms_abi`
@@ -256,13 +347,17 @@ fn in_tail_position(func: &Func, call: Inst, returned: &[Value]) -> bool {
     // vector registers as the SysV callee left them, which its caller counted on it keeping, and
     // the arguments would be in the other registers besides. gcc makes no sibling call across
     // the difference either.
-    //
+    if callee.convention != func.signature().convention {
+        return Some(UNABLE);
+    }
     // Nor is one whose callee takes the arguments off the stack, which is i386 `stdcall` and
     // `fastcall`. The callee returns with `ret $n` for its own arguments, where this function's
     // caller wants this function's taken off, and the two are the same number only by chance.
-    callee.convention == func.signature().convention
-        && !callee.convention.callee_pops()
-        && (dropped || callee.returns == func.signature().returns)
+    if callee.convention.callee_pops() {
+        return Some("inconsistent number of popped arguments");
+    }
+    let same = dropped || callee.returns == func.signature().returns;
+    (!same).then_some("call and return value are different")
 }
 
 /// Turns each [`Tail`] that can be into the epilogue and a jump, and says how many it turned.
@@ -270,14 +365,25 @@ fn in_tail_position(func: &Func, call: Inst, returned: &[Value]) -> bool {
 /// Nothing happens on a machine with no jump to a name, which is what [`FrameInsts::away`] says.
 /// A call through a pointer becomes the jump through a register that `branch` names, which is the
 /// one a computed `goto` is selected as.
+///
+/// # Errors
+///
+/// A call `musttail` asked for that cannot become a jump, in gcc's words.
 pub fn jumps(
     func: &mut mir::Func,
     tails: &[Tail],
     insts: &FrameInsts,
     branch: &BranchInsts,
     names: &mut Interner,
-) -> usize {
-    let Some(away) = insts.away else { return 0 };
+) -> Result<usize, Unsupported> {
+    let failed = |tail: &Tail| match tail.must {
+        Some(inst) => Err(Unsupported::MustTail { inst, reason: "tail call production failed" }),
+        None => Ok(()),
+    };
+    let Some(away) = insts.away else {
+        tails.iter().try_for_each(failed)?;
+        return Ok(0);
+    };
     let ret = mir::Opcode::new(names.intern(&format!("{}{}", insts.prefix, insts.ret)));
     let away = mir::Opcode::new(names.intern(&format!("{}{away}", insts.prefix)));
     let through = mir::Opcode::new(names.intern(&format!("{}{}", branch.prefix, branch.indirect)));
@@ -287,7 +393,10 @@ pub fn jumps(
         mir::Opcode::new(names.intern(&format!("{}{}_notrack", branch.prefix, branch.indirect)));
     let mut jumped = 0;
     for tail in tails {
-        let Some((last, callee)) = ending(func, tail, ret) else { continue };
+        let Some((last, callee)) = ending(func, tail, ret) else {
+            failed(tail)?;
+            continue;
+        };
         let span = func.span(tail.call);
         let operands = func[func[tail.call].operands].to_vec();
         let notrack = names.resolve(func[tail.call].opcode.name()).ends_with("_notrack");
@@ -315,7 +424,7 @@ pub fn jumps(
         func.set_span(last, span);
         jumped += 1;
     }
-    jumped
+    Ok(jumped)
 }
 
 /// Where a tail call goes, which is a name or the register the call read its address from.
@@ -369,7 +478,8 @@ mod tests {
         Value,
     };
 
-    use super::{comes_back, mark, refusal};
+    use super::{UNABLE, asked, comes_back, mark, refusal};
+    use crate::lower::Unsupported;
     use crate::elsewhere::Elsewhere;
 
     /// `int f(int a) { return g(a); }`, and whatever `between` puts in front of the return.
@@ -402,6 +512,18 @@ mod tests {
         func
     }
 
+    /// Marks the first call in the function as one `musttail` asked for, and gives it back.
+    fn must(func: &mut Func) -> rucc_ir::Inst {
+        let call = func
+            .blocks()
+            .flat_map(|block| func.insts(block))
+            .find(|&inst| func[inst].opcode == Opcode::Call)
+            .expect("a call");
+        func[call].flags = Flags::MUST_TAIL;
+        assert_eq!(asked(func), Some(call));
+        call
+    }
+
     fn opcodes(func: &Func) -> Vec<Opcode> {
         func.blocks().flat_map(|block| func.insts(block).map(|inst| func[inst].opcode)).collect()
     }
@@ -412,7 +534,7 @@ mod tests {
     fn a_call_to_the_other_convention_stays_a_call() {
         let mut names = Interner::new();
         let mut func = caller_of(&mut names, rucc_target::Convention::Ms, |_, _, got| got);
-        assert_eq!(mark(&mut func, &names, &Elsewhere::default(), false, true), 0);
+        assert_eq!(mark(&mut func, &names, &Elsewhere::default(), false, true, true), Ok(0));
         assert_eq!(opcodes(&func), [Opcode::Call, Opcode::Return]);
     }
 
@@ -420,7 +542,7 @@ mod tests {
     fn a_call_whose_answer_is_returned_becomes_a_tail_call() {
         let mut names = Interner::new();
         let mut func = caller(&mut names, |_, _, got| got);
-        assert_eq!(mark(&mut func, &names, &Elsewhere::default(), false, true), 1);
+        assert_eq!(mark(&mut func, &names, &Elsewhere::default(), false, true, true), Ok(1));
         assert_eq!(opcodes(&func), [Opcode::TailCall]);
     }
 
@@ -432,11 +554,11 @@ mod tests {
         let mut func = caller(&mut names, |_, _, got| got);
         let call = func.blocks().flat_map(|block| func.insts(block)).next().expect("the call");
         func[call].flags = Flags::INDIRECT_RETURN;
-        assert_eq!(mark(&mut func, &names, &Elsewhere::default(), true, true), 0);
-        assert_eq!(mark(&mut func, &names, &Elsewhere::default(), false, true), 1);
+        assert_eq!(mark(&mut func, &names, &Elsewhere::default(), true, true, true), Ok(0));
+        assert_eq!(mark(&mut func, &names, &Elsewhere::default(), false, true, true), Ok(1));
         // And a plain call is a tail call under the guard as well.
         let mut func = caller(&mut names, |_, _, got| got);
-        assert_eq!(mark(&mut func, &names, &Elsewhere::default(), true, true), 1);
+        assert_eq!(mark(&mut func, &names, &Elsewhere::default(), true, true, true), Ok(1));
     }
 
     /// `int f(int (*g)(int), int a) { return g(a); }` is a tail call too, one that names nobody
@@ -465,7 +587,7 @@ mod tests {
         let got = func[call].first_result.expect("an integer comes back");
         Builder::new(&mut func, block).ret(&[got]);
 
-        assert_eq!(mark(&mut func, &names, &Elsewhere::default(), false, true), 1);
+        assert_eq!(mark(&mut func, &names, &Elsewhere::default(), false, true, true), Ok(1));
         assert_eq!(opcodes(&func), [Opcode::TailCall]);
         assert_eq!(func[func[call].args], [address, arg]);
     }
@@ -498,7 +620,7 @@ mod tests {
     fn a_call_that_jumps_to_a_return_of_its_answer_becomes_a_tail_call() {
         let mut names = Interner::new();
         let mut func = joined(&mut names, false);
-        assert_eq!(mark(&mut func, &names, &Elsewhere::default(), false, true), 1);
+        assert_eq!(mark(&mut func, &names, &Elsewhere::default(), false, true, true), Ok(1));
         assert_eq!(opcodes(&func), [Opcode::TailCall]);
     }
 
@@ -506,7 +628,7 @@ mod tests {
     fn a_call_that_jumps_to_work_on_its_answer_stays_a_call() {
         let mut names = Interner::new();
         let mut func = joined(&mut names, true);
-        assert_eq!(mark(&mut func, &names, &Elsewhere::default(), false, true), 0);
+        assert_eq!(mark(&mut func, &names, &Elsewhere::default(), false, true, true), Ok(0));
         assert_eq!(opcodes(&func), [Opcode::Call, Opcode::Jump, Opcode::Add, Opcode::Return]);
     }
 
@@ -527,7 +649,7 @@ mod tests {
     fn a_void_function_drops_an_integer_answer_and_jumps() {
         let mut names = Interner::new();
         let mut func = dropping(&mut names, Type::int(32));
-        assert_eq!(mark(&mut func, &names, &Elsewhere::default(), false, true), 1);
+        assert_eq!(mark(&mut func, &names, &Elsewhere::default(), false, true, true), Ok(1));
         assert_eq!(opcodes(&func), [Opcode::TailCall]);
     }
 
@@ -537,7 +659,7 @@ mod tests {
     fn a_void_function_keeps_the_call_when_the_answer_is_a_float() {
         let mut names = Interner::new();
         let mut func = dropping(&mut names, Type::float(Float::F64));
-        assert_eq!(mark(&mut func, &names, &Elsewhere::default(), false, true), 0);
+        assert_eq!(mark(&mut func, &names, &Elsewhere::default(), false, true, true), Ok(0));
         assert_eq!(opcodes(&func), [Opcode::Call, Opcode::Return]);
     }
 
@@ -547,7 +669,7 @@ mod tests {
         let mut func = caller(&mut names, |func, block, got| {
             Builder::new(func, block).binary(Opcode::Add, got, got, Flags::default())
         });
-        assert_eq!(mark(&mut func, &names, &Elsewhere::default(), false, true), 0);
+        assert_eq!(mark(&mut func, &names, &Elsewhere::default(), false, true, true), Ok(0));
         assert_eq!(opcodes(&func), [Opcode::Call, Opcode::Add, Opcode::Return]);
     }
 
@@ -562,7 +684,7 @@ mod tests {
             refusal(&func, &names, &Elsewhere::default()),
             Some("a local lives in the frame")
         );
-        assert_eq!(mark(&mut func, &names, &Elsewhere::default(), false, true), 0);
+        assert_eq!(mark(&mut func, &names, &Elsewhere::default(), false, true, true), Ok(0));
     }
 
     #[test]
@@ -578,7 +700,7 @@ mod tests {
             refusal(&func, &names, &Elsewhere::default()),
             Some("the function calls something that comes back twice")
         );
-        assert_eq!(mark(&mut func, &names, &Elsewhere::default(), false, true), 0);
+        assert_eq!(mark(&mut func, &names, &Elsewhere::default(), false, true, true), Ok(0));
     }
 
     #[test]
@@ -593,5 +715,63 @@ mod tests {
         assert!(comes_back(&func, &names, &Elsewhere::default()));
         let plain = caller(&mut names, |_, _, got| got);
         assert!(!comes_back(&plain, &names, &Elsewhere::default()));
+    }
+
+    /// A call `musttail` asked for is made without `-foptimize-sibling-calls` and with a local in
+    /// the frame, whose lifetime gcc ends before the jump. An ordinary one in the same place is
+    /// not.
+    #[test]
+    fn a_musttail_call_is_made_where_an_ordinary_one_is_not() {
+        let mut names = Interner::new();
+        let mut func = caller(&mut names, |_, _, got| got);
+        assert_eq!(mark(&mut func, &names, &Elsewhere::default(), false, true, false), Ok(0));
+        must(&mut func);
+        assert_eq!(mark(&mut func, &names, &Elsewhere::default(), false, true, false), Ok(1));
+        assert_eq!(opcodes(&func), [Opcode::TailCall]);
+
+        let i32 = Type::int(32);
+        let mut func =
+            Func::new(names.intern("f"), Signature::new().with_params(&[i32]).with_returns(&[i32]));
+        let block = func.create_block();
+        let arg = func.append_param(block, i32);
+        Builder::new(&mut func, block).value(InstData::new(Opcode::Alloca), Type::PTR);
+        let sig = func.add_signature(Signature::new().with_params(&[i32]).with_returns(&[i32]));
+        let callee = names.intern("g");
+        let call = Builder::new(&mut func, block).call(callee, sig, &[arg]);
+        let got = func[call].first_result.expect("an integer comes back");
+        Builder::new(&mut func, block).ret(&[got]);
+        assert_eq!(mark(&mut func, &names, &Elsewhere::default(), false, true, true), Ok(0));
+        must(&mut func);
+        assert_eq!(mark(&mut func, &names, &Elsewhere::default(), false, true, true), Ok(1));
+        assert_eq!(opcodes(&func), [Opcode::Alloca, Opcode::TailCall]);
+    }
+
+    /// One that cannot be made is an error, with gcc's reason for it.
+    #[test]
+    fn a_musttail_call_that_cannot_be_made_says_why_in_gcc_s_words() {
+        let mut names = Interner::new();
+        let setjmp = names.intern("_setjmp");
+        let cases: [(Func, &str); 3] = [
+            (
+                caller(&mut names, |func, block, got| {
+                    Builder::new(func, block).binary(Opcode::Add, got, got, Flags::default())
+                }),
+                "return value changed after call",
+            ),
+            (caller_of(&mut names, rucc_target::Convention::Ms, |_, _, got| got), UNABLE),
+            (
+                caller(&mut names, |func, block, got| {
+                    let sig = func.add_signature(Signature::new().with_returns(&[Type::int(32)]));
+                    Builder::new(func, block).call(setjmp, sig, &[]);
+                    got
+                }),
+                "caller uses setjmp",
+            ),
+        ];
+        for (mut func, reason) in cases {
+            let inst = must(&mut func);
+            let made = mark(&mut func, &names, &Elsewhere::default(), false, true, true);
+            assert_eq!(made, Err(Unsupported::MustTail { inst, reason }));
+        }
     }
 }

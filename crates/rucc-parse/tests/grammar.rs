@@ -105,7 +105,7 @@ fn body_of(out: &Parsed, decl: Decl) -> Vec<Stmt> {
 fn returned(out: &Parsed) -> Expr {
     let decl = only_decl(out);
     let stmts = body_of(out, decl);
-    let Stmt::Return(Some(value)) = stmts[0] else { panic!("expected a return") };
+    let Stmt::Return(Some(value), _) = stmts[0] else { panic!("expected a return") };
     out.ast[value]
 }
 
@@ -192,7 +192,7 @@ fn the_typedef_decides_the_cast_from_the_multiplication() {
 
     let out = parsed("typedef int A; int f(void) { return (A)*b; }");
     let stmts = body_of(&out, out.ast[out.ast.top_level()[1]]);
-    let Stmt::Return(Some(value)) = stmts[0] else { panic!("expected a return") };
+    let Stmt::Return(Some(value), _) = stmts[0] else { panic!("expected a return") };
     assert!(matches!(out.ast[value], Expr::Cast { .. }), "{:?}", out.ast[value]);
 }
 
@@ -318,7 +318,7 @@ fn the_statements_are_all_here() {
     assert!(matches!(stmts[5], Stmt::Switch { .. }));
     assert!(matches!(stmts[6], Stmt::Compound(_)));
     assert!(matches!(stmts[7], Stmt::Label { .. }));
-    assert!(matches!(stmts[8], Stmt::Return(None)));
+    assert!(matches!(stmts[8], Stmt::Return(None, _)));
 }
 
 #[test]
@@ -915,7 +915,7 @@ fn a_parameter_is_in_scope_in_the_body() {
     // and `T * x` would be a declaration rather than a multiplication.
     let out = parsed("typedef int T; int f(int T) { return T * 2; }");
     let stmts = body_of(&out, out.ast[out.ast.top_level()[1]]);
-    let Stmt::Return(Some(value)) = stmts[0] else { panic!("expected a return") };
+    let Stmt::Return(Some(value), _) = stmts[0] else { panic!("expected a return") };
     assert!(matches!(out.ast[value], Expr::Binary { op: BinaryOp::Mul, .. }));
 }
 
@@ -933,7 +933,7 @@ fn a_broken_statement_does_not_cost_the_rest_of_the_block() {
     assert!(out.failed());
     let stmts = body_of(&out, only_decl(&out));
     assert_eq!(stmts.len(), 3);
-    assert!(matches!(stmts[2], Stmt::Return(None)));
+    assert!(matches!(stmts[2], Stmt::Return(None, _)));
 }
 
 #[test]

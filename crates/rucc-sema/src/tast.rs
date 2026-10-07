@@ -229,6 +229,7 @@ pub struct Tast {
     patchable: Map<DeclId, (u32, u32)>,
     wasm_names: Map<DeclId, WasmNames>,
     ifuncs: Set<DeclId>,
+    must_tail: Set<ExprId>,
     fentry_names: Map<DeclId, StrId>,
     fentry_sections: Map<DeclId, StrId>,
     symvers: Map<DeclId, Vec<(String, Span)>>,
@@ -657,6 +658,21 @@ impl Tast {
     #[must_use]
     pub fn ifuncs(&self) -> Vec<DeclId> {
         self.ifuncs.iter().copied().collect()
+    }
+
+    /// Records that this call is the one a `musttail` return gives back, which has to be made as
+    /// a jump.
+    ///
+    /// A set beside the tree rather than a field of every call, since one call in a few hundred
+    /// thousand is written this way.
+    pub fn add_must_tail(&mut self, call: ExprId) {
+        self.must_tail.insert(call);
+    }
+
+    /// Whether this call has to be made as a jump.
+    #[must_use]
+    pub fn is_must_tail(&self, call: ExprId) -> bool {
+        self.must_tail.contains(&call)
     }
 
     /// The arguments an `alloc_size` attribute named on this function, and nothing for almost
