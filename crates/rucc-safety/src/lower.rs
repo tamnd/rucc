@@ -154,6 +154,9 @@ fn calls(
     objects: &crate::slot::Objects,
     table: &mut Vec<Descriptor>,
 ) {
+    // First, because which locals the stack plane is told about is read off the init checks, and
+    // those are calls once the walk below has been.
+    crate::local::begin(func, names, word);
     let insts: Vec<Inst> = func.blocks().flat_map(|block| func.insts(block)).collect();
     let pairs = pairs(func, &insts);
     let fused: Set<Inst> = pairs.values().copied().collect();
@@ -986,7 +989,7 @@ fn label(index: usize) -> String {
 }
 
 /// Puts an integer constant in front of `inst` and gives back what it produced.
-fn konst(func: &mut Func, inst: Inst, imm: Imm, ty: Type) -> Value {
+pub(crate) fn konst(func: &mut Func, inst: Inst, imm: Imm, ty: Type) -> Value {
     let span = func.span(inst);
     let extra = Extra::Imm(func.add_imm(imm));
     let made = func.create_inst(InstData { extra, ..InstData::new(Opcode::IConst) }, &[ty], span);

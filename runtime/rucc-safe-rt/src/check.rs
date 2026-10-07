@@ -544,6 +544,23 @@ pub unsafe fn carry(dst: *const c_void, src: *const c_void, len: usize) {
     unsafe { region.types.set(dst, len, types::UNTYPED) }
 }
 
+/// The init half of judgement J1 for an address no region covers, which is a local of this
+/// thread's stack when the compiler began one there and nothing at all otherwise.
+///
+/// The type plane is not asked. A stack has none, and a local the compiler can see the whole of is
+/// one whose every access the front end already typed.
+///
+/// # Safety
+///
+/// As [`bounds`].
+unsafe fn local(addr: usize, size: usize, descriptor: *const Descriptor) {
+    // SAFETY: the address is never read through.
+    if !unsafe { crate::stack::allows(addr, size) } {
+        // SAFETY: as in `bounds`.
+        unsafe { crate::fail::report(descriptor, Some(addr)) }
+    }
+}
+
 /// Judgement J1, the init half: every byte this access is about to read has been written.
 ///
 /// Document 03's Y6, and the kernel infoleak of CWE-200 with it. What it catches is a read of a
@@ -566,7 +583,10 @@ pub unsafe fn carry(dst: *const c_void, src: *const c_void, len: usize) {
 /// As [`bounds`].
 pub unsafe fn filled(addr: *const c_void, size: usize, descriptor: *const Descriptor) {
     let addr = addr as usize;
-    let Some(region) = alloc::covering(addr) else { return };
+    let Some(region) = alloc::covering(addr) else {
+        // SAFETY: as in `bounds`.
+        return unsafe { local(addr, size, descriptor) };
+    };
     // SAFETY: the range is clipped to the region, whose init plane covers every byte of it.
     if !unsafe { region.init.allows(addr, clipped(&region, addr, size)) } {
         // SAFETY: as in `bounds`.
@@ -608,7 +628,10 @@ pub unsafe fn filled(addr: *const c_void, size: usize, descriptor: *const Descri
 /// As [`bounds`]. `ty` is a plane vocabulary entry and is not an address.
 pub unsafe fn allowed(addr: *const c_void, size: usize, ty: TypeId, descriptor: *const Descriptor) {
     let addr = addr as usize;
-    let Some(region) = alloc::covering(addr) else { return };
+    let Some(region) = alloc::covering(addr) else {
+        // SAFETY: as in `bounds`.
+        return unsafe { local(addr, size, descriptor) };
+    };
     const { assert!(types::GRANULE == init::SPAN) };
     if addr % types::GRANULE + size <= types::GRANULE {
         // SAFETY: the region covers `addr` and is page aligned at both ends, so it covers the whole
@@ -660,7 +683,14 @@ pub unsafe fn swept(
     descriptor: *const Descriptor,
 ) {
     let addr = addr as usize;
-    let Some(region) = alloc::covering(addr) else { return };
+    let Some(region) = alloc::covering(addr) else {
+        // SAFETY: the address is never read through.
+        if init && !unsafe { crate::stack::sweeps(addr, size) } {
+            // SAFETY: as in `bounds`.
+            unsafe { crate::fail::report(descriptor, Some(addr)) }
+        }
+        return;
+    };
     let size = clipped(&region, addr, size);
     // SAFETY: as in `allowed`.
     let held = unsafe {
@@ -703,8 +733,22 @@ pub unsafe fn stepped(
     descriptor: *const Descriptor,
 ) {
     let addr = addr as usize;
-    let Some(region) = alloc::covering(addr) else { return };
     let last = addr.saturating_add(span);
+    let Some(region) = alloc::covering(addr) else {
+        if !init {
+            return;
+        }
+        let mut at = addr;
+        while at.saturating_add(width) <= last {
+            // SAFETY: as in `bounds`.
+            unsafe { local(at, width, descriptor) };
+            if step == 0 {
+                break;
+            }
+            at = at.saturating_add(step);
+        }
+        return;
+    };
     let ask = |at: usize| {
         // An access inside one granule is one slot of each plane, and a slot that answers for the
         // whole granule answers for every access inside it, which is one load and one compare a
@@ -804,7 +848,10 @@ pub unsafe fn stepped(
 /// `addr` is whatever the program computed and is never read through.
 pub unsafe fn wrote(addr: *const c_void, size: usize) {
     let addr = addr as usize;
-    let Some(region) = alloc::covering(addr) else { return };
+    let Some(region) = alloc::covering(addr) else {
+        // SAFETY: the caller's contract, which is the one this has.
+        return unsafe { crate::stack::wrote(addr, size) };
+    };
     // SAFETY: as in `filled`.
     unsafe { region.init.set(addr, clipped(&region, addr, size)) }
 }
@@ -828,7 +875,12 @@ pub unsafe fn wrote(addr: *const c_void, size: usize) {
 /// Neither address is read through. They may overlap, and the answer is the same either way.
 pub unsafe fn spread(dst: *const c_void, src: *const c_void, len: usize) {
     let (dst, src) = (dst as usize, src as usize);
-    let Some(region) = alloc::covering(dst) else { return };
+    let Some(region) = alloc::covering(dst) else {
+        // A copy onto the stack marks what it covered as written whatever it read, which is the
+        // permissive direction again.
+        // SAFETY: the caller's contract, which is the one this has.
+        return unsafe { crate::stack::wrote(dst, len) };
+    };
     let len = clipped(&region, dst, len);
     if region.holds(src) && region.holds(src.wrapping_add(len.saturating_sub(1))) {
         // SAFETY: both ranges are inside the region, whose init plane covers every byte of it.
