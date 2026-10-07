@@ -82,8 +82,8 @@ impl Class {
 ///
 /// Every call in the unit lands in exactly one of the five numbers, so they add up and a reader
 /// can see the denominator instead of taking a percentage on faith. That includes calls to this
-/// compiler's own interposition wrappers, which are counted as `outside`, because a wrapper really
-/// is a function in another translation unit whose checks this build cannot see.
+/// compiler's own interposition wrappers, which are counted as `checked`: a wrapper is in another
+/// translation unit, but it is one this build knows takes its frame and judges what it finds there.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub struct Frames {
     /// The callee is defined here and has no checks left, so it never reads a frame.
@@ -301,7 +301,7 @@ pub fn summarize(
 
     // What every function this unit defines still has to check, which is what decides whether a
     // call into it wants a frame.
-    let left = handover::remaining(module);
+    let left = handover::remaining(module, names);
     // The wrappers are ours and are not the boundary this build failed to model, so they do not
     // belong on the unwrapped list even though every one of them is an undefined symbol here.
     let mut external: Vec<Symbol> = Vec::new();

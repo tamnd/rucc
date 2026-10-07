@@ -87,6 +87,8 @@ use core::ffi::c_void;
 
 use crate::alloc;
 use crate::fail::Judgement;
+use crate::frame::Frame;
+use crate::layout::Cap;
 use crate::plane::{self, GRANULE};
 use crate::recover;
 
@@ -293,10 +295,16 @@ pub struct Row {
 /// `site` is what the report says the refusal was about, and the generator builds it out of the
 /// row, so it names the function and the argument rather than a line inside this crate.
 ///
+/// `cap` is what the caller handed over for the argument, which is the bottom capability when it
+/// handed nothing. A local or a variable is in storage no region covers, so the planes have nothing
+/// to say about a copy into one and the capability the compiler made where the pointer was taken is
+/// the only thing that knows how big it is. That is believed the way [`crate::check::bounds`]
+/// believes it, which is only when it is named and only when it says no.
+///
 /// # Panics
 ///
 /// When the range is refused, which says what happened and stops the program.
-pub fn range(site: &'static str, addr: *const c_void, len: usize) {
+pub fn range(site: &'static str, addr: *const c_void, len: usize, cap: Cap) {
     // A call that moves no bytes touches nothing. `memcpy(p, q, 0)` with a null `p` is written by
     // real programs and is not a bug, so checking the first byte of a zero length range would be a
     // false positive on an address the call never reads.
@@ -304,6 +312,9 @@ pub fn range(site: &'static str, addr: *const c_void, len: usize) {
         return;
     }
     let at = addr as usize;
+    if cap.is_named() && !cap.covers(at as u64, len as u64) {
+        crate::fail::refused_at(Judgement::Access, site, past(cap, at));
+    }
     let Some(region) = alloc::covering(at) else { return };
     // SAFETY: the address is inside the region the plane was built over, which is what reading the
     // plane asks for, and finding that region by the address is what says so.
@@ -339,6 +350,99 @@ fn asked(region: &alloc::Region, at: usize) -> usize {
     recover::extent(region, at).map_or(usize::MAX, |(lo, ext)| lo.wrapping_add(ext))
 }
 
+/// Where the object `cap` names ends, or nowhere when it is not one the compiler named.
+fn named_end(cap: Cap) -> usize {
+    if cap.is_named() { cap.lo.wrapping_add(cap.ext) as usize } else { usize::MAX }
+}
+
+/// The first byte of a range starting at `at` that `cap` does not permit, which is `at` itself
+/// when the range starts outside the object and the object's end when it starts inside.
+fn past(cap: Cap, at: usize) -> usize {
+    if (at as u64).wrapping_sub(cap.lo) < cap.ext { named_end(cap) } else { at }
+}
+
+/// Whether the frame has a place for an argument of a row, which is whether it is a pointer.
+///
+/// The frame holds the pointer parameters of the declaration in order and nothing else, which is
+/// what `rucc_safety::handover::pointers` hands over, so where an argument's capability is depends
+/// on how many pointers come before it and not on how many arguments do. A trait rather than a
+/// test on the spelling, because the row's types are what the declaration's types are.
+#[doc(hidden)]
+pub trait Passed {
+    /// Whether the frame has a place for an argument of this type.
+    const POINTER: bool;
+}
+
+impl<T: ?Sized> Passed for *const T {
+    const POINTER: bool = true;
+}
+
+impl<T: ?Sized> Passed for *mut T {
+    const POINTER: bool = true;
+}
+
+/// The types a row has that are not pointers, none of which the frame has a place for.
+macro_rules! scalars {
+    ($($ty:ty),+) => {
+        $(
+            impl Passed for $ty {
+                const POINTER: bool = false;
+            }
+        )+
+    };
+}
+
+scalars!(i8, u8, i16, u16, i32, u32, i64, u64, isize, usize);
+
+/// Where in the caller's frame the capability of the argument called `arg` is.
+///
+/// `names` is every argument of the row and `pointers` says which of them are pointers, in the
+/// same order. Worked out when the crate is compiled, since all three are spelled in the row, and
+/// past the end of the frame for a name the row does not have, which reads as the bottom capability
+/// rather than as somebody else's.
+#[doc(hidden)]
+#[must_use]
+pub const fn slot(names: &[&str], pointers: &[bool], arg: &str) -> usize {
+    let mut at = 0;
+    let mut nth = 0;
+    while nth < names.len() {
+        if same(names[nth].as_bytes(), arg.as_bytes()) {
+            return at;
+        }
+        if pointers[nth] {
+            at += 1;
+        }
+        nth += 1;
+    }
+    usize::MAX
+}
+
+/// Whether two names are the same, which `==` on a `str` cannot say in a `const fn`.
+const fn same(a: &[u8], b: &[u8]) -> bool {
+    if a.len() != b.len() {
+        return false;
+    }
+    let mut at = 0;
+    while at < a.len() {
+        if a[at] != b[at] {
+            return false;
+        }
+        at += 1;
+    }
+    true
+}
+
+/// The capability the caller handed over at `at` for a pointer that arrived as `addr`.
+///
+/// The bottom capability when there was no frame, which is a call from code that was not
+/// instrumented or from a call site that cleared it, and [`Cap::beside`] for the reason it is
+/// there: a pointer that arrives outside the object it is said to belong to is not believed.
+#[doc(hidden)]
+#[must_use]
+pub fn given(frame: Option<&Frame>, at: usize, addr: usize) -> Cap {
+    frame.map_or(Cap::BOTTOM, |frame| frame.arg(at).beside(addr as u64))
+}
+
 /// The length of a NUL terminated string, checked as it is discovered.
 ///
 /// Section 10.3's discovered extent. There is no length to compare against up front, so the walk
@@ -349,7 +453,8 @@ fn asked(region: &alloc::Region, at: usize) -> usize {
 /// per byte, which makes the check a sixteenth of the cost of the walk it is riding along with.
 ///
 /// A string that is not in the heap this monitor watches is measured and not judged, the same way
-/// an ordinary access to one is.
+/// an ordinary access to one is, unless `cap` names the object it is in, which is [`range`]'s
+/// reason for believing it.
 ///
 /// # Panics
 ///
@@ -360,9 +465,9 @@ fn asked(region: &alloc::Region, at: usize) -> usize {
 /// `addr` is a pointer the program passed to a string function. It is read from, one byte at a
 /// time, and each byte is inside an instance this monitor owns or outside its heap entirely.
 #[must_use]
-pub unsafe fn scan(site: &'static str, addr: *const c_void) -> usize {
+pub unsafe fn scan(site: &'static str, addr: *const c_void, cap: Cap) -> usize {
     // SAFETY: this function's contract is the one below, with no limit on the walk.
-    unsafe { scan_within(site, addr, usize::MAX) }
+    unsafe { scan_within(site, addr, usize::MAX, cap) }
 }
 
 /// The same, for a function that stops at a count as well as at a terminator.
@@ -380,9 +485,14 @@ pub unsafe fn scan(site: &'static str, addr: *const c_void) -> usize {
 ///
 /// As [`scan`], except that no more than `limit` bytes are read.
 #[must_use]
-pub unsafe fn scan_within(site: &'static str, addr: *const c_void, limit: usize) -> usize {
+pub unsafe fn scan_within(
+    site: &'static str,
+    addr: *const c_void,
+    limit: usize,
+    cap: Cap,
+) -> usize {
     let start = addr as usize;
-    let watch = Watch::on(start);
+    let watch = Watch::on(start, cap);
     let mut len = 0;
     while len < limit {
         let at = start.wrapping_add(len);
@@ -421,15 +531,15 @@ pub unsafe fn scan_within(site: &'static str, addr: *const c_void, limit: usize)
 /// byte at a time and the destination is not read or written at all, only judged.
 #[must_use]
 pub unsafe fn copied(
-    dst_site: &'static str,
-    src_site: &'static str,
+    sites: [&'static str; 2],
     dst: *mut c_void,
     src: *const c_void,
     limit: usize,
+    caps: [Cap; 2],
 ) -> usize {
     // SAFETY: this function's contract is the one below, with the write starting where the caller
     // said the destination does.
-    unsafe { walk(dst_site, src_site, dst as usize, src as usize, limit) }
+    unsafe { walk(sites, dst as usize, src as usize, limit, caps) }
 }
 
 /// The same, for a function that writes after what the destination already holds.
@@ -453,17 +563,18 @@ pub unsafe fn copied(
 /// As [`copied`], except that the destination is read as far as its own terminator.
 #[must_use]
 pub unsafe fn appended(
-    dst_site: &'static str,
-    src_site: &'static str,
+    sites: [&'static str; 2],
     dst: *mut c_void,
     src: *const c_void,
     limit: usize,
+    caps: [Cap; 2],
 ) -> usize {
     // SAFETY: the destination is a string, which is what the call was handed.
-    let held = unsafe { scan(dst_site, dst.cast_const()) };
-    // SAFETY: as `copied`, from the byte the string already there ends at.
+    let held = unsafe { scan(sites[0], dst.cast_const(), caps[0]) };
+    // SAFETY: as `copied`, from the byte the string already there ends at, which is still inside
+    // the object the destination's capability names.
     let added =
-        unsafe { walk(dst_site, src_site, (dst as usize).wrapping_add(held), src as usize, limit) };
+        unsafe { walk(sites, (dst as usize).wrapping_add(held), src as usize, limit, caps) };
     held.wrapping_add(added)
 }
 
@@ -473,14 +584,14 @@ pub unsafe fn appended(
 ///
 /// As [`copied`].
 unsafe fn walk(
-    dst_site: &'static str,
-    src_site: &'static str,
+    [dst_site, src_site]: [&'static str; 2],
     dst: usize,
     src: usize,
     limit: usize,
+    [dst_cap, src_cap]: [Cap; 2],
 ) -> usize {
-    let to = Watch::on(dst);
-    let from = Watch::on(src);
+    let to = Watch::on(dst, dst_cap);
+    let from = Watch::on(src, src_cap);
     let mut len = 0;
     while len < limit {
         let read = src.wrapping_add(len);
@@ -522,17 +633,25 @@ unsafe fn walk(
 /// `addr` is what the program is about to pass to a scatter or gather syscall. Its elements are
 /// read, which is what the kernel is about to do with them.
 #[must_use]
-pub unsafe fn vectors(site: &'static str, addr: *const c_void, count: i32, kind: Kind) -> usize {
+pub unsafe fn vectors(
+    site: &'static str,
+    addr: *const c_void,
+    count: i32,
+    kind: Kind,
+    cap: Cap,
+) -> usize {
     let Ok(count) = usize::try_from(count) else { return 0 };
     let each = size_of::<Iovec>();
-    range(site, addr, count.saturating_mul(each));
+    range(site, addr, count.saturating_mul(each), cap);
 
     let mut total = 0_usize;
     for at in 0..count {
         // SAFETY: the array has been judged for the whole of `count`, which is what the read of one
         // element inside it asks for.
         let entry = unsafe { addr.cast::<Iovec>().add(at).read() };
-        range(site, entry.base.cast_const(), entry.len);
+        // The bottom capability, since what the caller handed over is the array's and an element
+        // is a pointer it read out of memory rather than one it was given.
+        range(site, entry.base.cast_const(), entry.len, Cap::BOTTOM);
         if kind == Kind::Writes {
             // SAFETY: the buffer has just been judged, as in the `writes` clause of a wrapper.
             unsafe { crate::check::wrote(entry.base.cast_const(), entry.len) };
@@ -561,20 +680,22 @@ struct Watch {
     /// Where the walk started, which is the one byte judged without starting a granule.
     start: usize,
     /// Where the bytes the instance was asked for end, which can be in the middle of a granule and
-    /// so is compared against every byte rather than only at a boundary.
+    /// so is compared against every byte rather than only at a boundary. For a local or a variable
+    /// it is where the object the caller's capability names ends, and it is the only thing a walk
+    /// over one is held to.
     end: usize,
 }
 
 impl Watch {
-    /// What the plane says about the byte a walk is about to start at.
-    fn on(start: usize) -> Self {
+    /// What the plane and the caller's capability say about the byte a walk is about to start at.
+    fn on(start: usize, cap: Cap) -> Self {
         let watched = alloc::covering(start).map(|region| {
             // SAFETY: the region is the one that covers this address, which is what reading the
             // plane asks for.
             (region, unsafe { region.plane.version(start) })
         });
-        let end = watched.map_or(usize::MAX, |(region, _)| asked(&region, start));
-        Self { watched, start, end }
+        let asked = watched.map_or(usize::MAX, |(region, _)| asked(&region, start));
+        Self { watched, start, end: asked.min(named_end(cap)) }
     }
 
     /// Judges one byte of the walk, if it is one the plane could have changed its answer at.
@@ -587,10 +708,10 @@ impl Watch {
     ///
     /// When the byte is not in the live instance the walk started in.
     fn step(self, site: &'static str, at: usize) {
-        let Some((region, instance)) = self.watched else { return };
         if at >= self.end {
             crate::fail::refused_at(Judgement::Access, site, at);
         }
+        let Some((region, instance)) = self.watched else { return };
         if at != self.start && at % GRANULE != 0 {
             return;
         }
@@ -727,6 +848,10 @@ macro_rules! interpose {
                 )]
                 #[unsafe(export_name = concat!("__rucc_wrap_", stringify!($name)))]
                 pub unsafe extern "C" fn $name($($arg: $ty),*) -> $ret {
+                    // Nothing here reads the frame the call site published, and it is taken
+                    // anyway, since one left where it is would be believed by the next
+                    // instrumented function this thread enters.
+                    let _ = $crate::frame::take();
                     // SAFETY: this wrapper's contract is the one it calls, passed straight on.
                     unsafe { super::$name($($arg),*) }
                 }
@@ -781,6 +906,10 @@ macro_rules! interpose {
                 )]
                 #[unsafe(export_name = concat!("__rucc_wrap_", stringify!($name)))]
                 pub unsafe extern "C" fn $name($($arg: $ty),*) -> $ret {
+                    // Nothing here reads the frame the call site published, and it is taken
+                    // anyway, since one left where it is would be believed by the next
+                    // instrumented function this thread enters.
+                    let _ = $crate::frame::take();
                     // SAFETY: this wrapper's contract is the one it calls, passed straight on.
                     unsafe { super::$name($($arg),*) }
                 }
@@ -810,8 +939,15 @@ macro_rules! interpose {
             /// the C library would have done. The judgements happen first, so a range this monitor
             /// owns and the call would have run off is refused rather than performed.
             pub unsafe fn $name($($arg: $ty),*) -> $ret {
+                // Every argument's name and whether it is a pointer, which together say where in
+                // the caller's frame each one's capability is.
+                const NAMES: &[&str] = &[$(stringify!($arg)),*];
+                const POINTERS: &[bool] = &[$(<$ty as $crate::effects::Passed>::POINTER),*];
+                // Taken here and not in the symbol the call site reaches, so that a test calling
+                // this can publish a frame and see it read.
+                let given = $crate::frame::take();
                 $(
-                    $crate::__judge!($kind, $name, $target, $($len),+);
+                    $crate::__judge!($kind, $name, given, $target, $($len),+);
                 )+
                 $body
             }
@@ -888,28 +1024,49 @@ macro_rules! __site {
 #[doc(hidden)]
 #[macro_export]
 macro_rules! __judge {
-    (reads, $name:ident, $arg:ident, nul) => {
+    (reads, $name:ident, $frame:ident, $arg:ident, nul) => {
         // SAFETY: the pointer is one the program passed to a string function, which is what this
         // reads it as.
-        let _ = unsafe { $crate::effects::scan($crate::__site!($name, $arg), $arg.cast()) };
-    };
-    (reads, $name:ident, $arg:ident, nul, $limit:tt) => {
-        // SAFETY: as the unbounded arm, and reading fewer bytes than it would.
         let _ = unsafe {
-            $crate::effects::scan_within($crate::__site!($name, $arg), $arg.cast(), $limit)
+            $crate::effects::scan(
+                $crate::__site!($name, $arg),
+                $arg.cast(),
+                $crate::__given!($frame, $arg),
+            )
         };
     };
-    (reads, $name:ident, $arg:ident, $len:tt) => {
-        $crate::effects::range($crate::__site!($name, $arg), $arg.cast(), $len);
+    (reads, $name:ident, $frame:ident, $arg:ident, nul, $limit:tt) => {
+        // SAFETY: as the unbounded arm, and reading fewer bytes than it would.
+        let _ = unsafe {
+            $crate::effects::scan_within(
+                $crate::__site!($name, $arg),
+                $arg.cast(),
+                $limit,
+                $crate::__given!($frame, $arg),
+            )
+        };
     };
-    (writes, $name:ident, $arg:ident, nul $(, $limit:tt)?) => {
+    (reads, $name:ident, $frame:ident, $arg:ident, $len:tt) => {
+        $crate::effects::range(
+            $crate::__site!($name, $arg),
+            $arg.cast(),
+            $len,
+            $crate::__given!($frame, $arg),
+        );
+    };
+    (writes, $name:ident, $frame:ident, $arg:ident, nul $(, $limit:tt)?) => {
         compile_error!(
             "a written extent cannot be discovered from the destination, since the NUL that would \
              say where it ends is what the call is about to write. Use copies or appends."
         );
     };
-    (writes, $name:ident, $arg:ident, $len:tt) => {
-        $crate::effects::range($crate::__site!($name, $arg), $arg.cast(), $len);
+    (writes, $name:ident, $frame:ident, $arg:ident, $len:tt) => {
+        $crate::effects::range(
+            $crate::__site!($name, $arg),
+            $arg.cast(),
+            $len,
+            $crate::__given!($frame, $arg),
+        );
         // SAFETY: the range has just been judged, so it is inside one live instance or outside
         // this monitor's heap, and the plane write passes over an address no region covers.
         unsafe { $crate::check::wrote($arg.cast(), $len) };
@@ -918,9 +1075,19 @@ macro_rules! __judge {
         // SAFETY: as above, over the aux, which described pointers these bytes have replaced.
         unsafe { $crate::check::erase($arg.cast(), $len) };
     };
-    (moves, $name:ident, $dst:ident, $src:ident, $len:tt) => {
-        $crate::effects::range($crate::__site!($name, $dst), $dst.cast(), $len);
-        $crate::effects::range($crate::__site!($name, $src), $src.cast(), $len);
+    (moves, $name:ident, $frame:ident, $dst:ident, $src:ident, $len:tt) => {
+        $crate::effects::range(
+            $crate::__site!($name, $dst),
+            $dst.cast(),
+            $len,
+            $crate::__given!($frame, $dst),
+        );
+        $crate::effects::range(
+            $crate::__site!($name, $src),
+            $src.cast(),
+            $len,
+            $crate::__given!($frame, $src),
+        );
         // SAFETY: both ranges have just been judged, as in the `writes` arm.
         unsafe { $crate::check::spread($dst.cast(), $src.cast(), $len) };
         // SAFETY: as above, over the type plane, which is the one C names `memcpy` in.
@@ -928,16 +1095,16 @@ macro_rules! __judge {
         // SAFETY: as above, over the aux, which holds the capability of every pointer being moved.
         unsafe { $crate::check::relocate($dst.cast(), $src.cast(), $len) };
     };
-    (copies, $name:ident, $dst:ident, $src:ident) => {
+    (copies, $name:ident, $frame:ident, $dst:ident, $src:ident) => {
         // SAFETY: both pointers are ones the program passed to a string function, which is what
         // this walks them as, and only the source is read.
         let written = unsafe {
             $crate::effects::copied(
-                $crate::__site!($name, $dst),
-                $crate::__site!($name, $src),
+                [$crate::__site!($name, $dst), $crate::__site!($name, $src)],
                 $dst.cast(),
                 $src.cast(),
                 usize::MAX,
+                [$crate::__given!($frame, $dst), $crate::__given!($frame, $src)],
             )
         };
         // The terminator as well, which is the byte the walk judged past the length it returned.
@@ -950,15 +1117,15 @@ macro_rules! __judge {
         // SAFETY: as above, over the aux, as in `writes`.
         unsafe { $crate::check::erase($dst.cast(), written.wrapping_add(1)) };
     };
-    (appends, $name:ident, $dst:ident, $src:ident) => {
+    (appends, $name:ident, $frame:ident, $dst:ident, $src:ident) => {
         // SAFETY: as the `copies` arm, and the destination is a string as well.
         let written = unsafe {
             $crate::effects::appended(
-                $crate::__site!($name, $dst),
-                $crate::__site!($name, $src),
+                [$crate::__site!($name, $dst), $crate::__site!($name, $src)],
                 $dst.cast(),
                 $src.cast(),
                 usize::MAX,
+                [$crate::__given!($frame, $dst), $crate::__given!($frame, $src)],
             )
         };
         // From the destination rather than from where the write starts, because the bytes of the
@@ -973,15 +1140,15 @@ macro_rules! __judge {
         // SAFETY: as the `copies` arm.
         unsafe { $crate::check::erase($dst.cast(), written.wrapping_add(1)) };
     };
-    (appends, $name:ident, $dst:ident, $src:ident, $limit:tt) => {
+    (appends, $name:ident, $frame:ident, $dst:ident, $src:ident, $limit:tt) => {
         // SAFETY: as the unbounded arm, and reading fewer bytes of the source than it would.
         let written = unsafe {
             $crate::effects::appended(
-                $crate::__site!($name, $dst),
-                $crate::__site!($name, $src),
+                [$crate::__site!($name, $dst), $crate::__site!($name, $src)],
                 $dst.cast(),
                 $src.cast(),
                 $limit,
+                [$crate::__given!($frame, $dst), $crate::__given!($frame, $src)],
             )
         };
         // SAFETY: as the unbounded arm.
@@ -993,20 +1160,52 @@ macro_rules! __judge {
         // SAFETY: as the unbounded arm.
         unsafe { $crate::check::erase($dst.cast(), written.wrapping_add(1)) };
     };
-    (scatters, $name:ident, $arg:ident, $count:tt) => {
+    (scatters, $name:ident, $frame:ident, $arg:ident, $count:tt) => {
         let site = $crate::__site!($name, $arg);
         // SAFETY: the pointer is the array the program is about to hand a syscall, and reading its
         // elements is what the kernel is about to do.
         let _ = unsafe {
-            $crate::effects::vectors(site, $arg.cast(), $count, $crate::effects::Kind::Writes)
+            $crate::effects::vectors(
+                site,
+                $arg.cast(),
+                $count,
+                $crate::effects::Kind::Writes,
+                $crate::__given!($frame, $arg),
+            )
         };
     };
-    (gathers, $name:ident, $arg:ident, $count:tt) => {
+    (gathers, $name:ident, $frame:ident, $arg:ident, $count:tt) => {
         let site = $crate::__site!($name, $arg);
         // SAFETY: as the `scatters` arm, which is the same array read the same way.
         let _ = unsafe {
-            $crate::effects::vectors(site, $arg.cast(), $count, $crate::effects::Kind::Reads)
+            $crate::effects::vectors(
+                site,
+                $arg.cast(),
+                $count,
+                $crate::effects::Kind::Reads,
+                $crate::__given!($frame, $arg),
+            )
         };
+    };
+}
+
+/// The capability the caller handed over for one argument of the row being expanded.
+///
+/// Split out of [`crate::__judge`] because every arm of that wants it. The position is worked out
+/// in a constant, out of the `NAMES` and `POINTERS` the row's function declares, so a wrapper pays
+/// for reading one slot of the frame and nothing to find which.
+#[doc(hidden)]
+#[macro_export]
+macro_rules! __given {
+    ($frame:ident, $arg:ident) => {
+        $crate::effects::given(
+            $frame.as_ref(),
+            {
+                const AT: usize = $crate::effects::slot(NAMES, POINTERS, stringify!($arg));
+                AT
+            },
+            $arg as usize,
+        )
     };
 }
 
@@ -1271,6 +1470,45 @@ mod tests {
         out.is_err()
     }
 
+    #[test]
+    fn a_capability_is_found_by_the_pointers_before_it_and_not_by_the_arguments() {
+        let names = &["fd", "buf", "count", "iov"];
+        let pointers = &[false, true, false, true];
+        assert_eq!(slot(names, pointers, "buf"), 0);
+        assert_eq!(slot(names, pointers, "iov"), 1);
+        assert_eq!(slot(names, pointers, "nothing"), usize::MAX);
+    }
+
+    #[test]
+    fn a_range_outside_the_heap_is_held_to_the_object_its_capability_names() {
+        let mut local = [0_u8; 50];
+        let at = local.as_mut_ptr().cast_const().cast::<c_void>();
+        let cap = recover::object(at, 50, Class::Automatic);
+        let from = |offset: usize| at.cast::<u8>().wrapping_add(offset).cast::<c_void>();
+        assert!(!refused(|| range("t", at, 50, cap)));
+        assert!(!refused(|| range("t", from(10), 40, cap.beside(from(10) as u64))));
+        assert!(refused(|| range("t", at, 51, cap)));
+        assert!(refused(|| range("t", from(10), 41, cap.beside(from(10) as u64))));
+        // Without one it is measured and not judged, which is what it always was.
+        assert!(!refused(|| range("t", at, 51, Cap::BOTTOM)));
+    }
+
+    #[test]
+    fn a_string_outside_the_heap_is_walked_no_further_than_its_object() {
+        let open = [b'a'; 8];
+        let at = open.as_ptr().cast::<c_void>();
+        let cap = recover::object(at, 8, Class::Automatic);
+        assert!(refused(|| {
+            // SAFETY: the walk is refused at the first byte past the array, before reading it.
+            let _ = unsafe { scan("t", at, cap) };
+        }));
+        let ended = *b"aaaaaaa\0";
+        let at = ended.as_ptr().cast::<c_void>();
+        let cap = recover::object(at, 8, Class::Automatic);
+        // SAFETY: there is a terminator inside the array.
+        assert_eq!(unsafe { scan("t", at, cap) }, 7);
+    }
+
     /// The address `offset` bytes into an instance.
     fn at(ptr: *mut c_void, offset: usize) -> *const c_void {
         ptr.cast::<u8>().wrapping_add(offset).cast()
@@ -1293,9 +1531,9 @@ mod tests {
         let _turn = turn();
         // The case that has to be silent, which is every correct call a real program makes.
         let ptr = alloc(64);
-        assert!(!refused(|| range("t", at(ptr, 0), 64)));
-        assert!(!refused(|| range("t", at(ptr, 32), 32)));
-        assert!(!refused(|| range("t", at(ptr, 63), 1)));
+        assert!(!refused(|| range("t", at(ptr, 0), 64, Cap::BOTTOM)));
+        assert!(!refused(|| range("t", at(ptr, 32), 32, Cap::BOTTOM)));
+        assert!(!refused(|| range("t", at(ptr, 63), 1, Cap::BOTTOM)));
         // SAFETY: `ptr` is a live instance.
         unsafe { dealloc(ptr) };
     }
@@ -1305,8 +1543,8 @@ mod tests {
         let _turn = turn();
         // The bug the movement group exists to catch: a length argument larger than the buffer.
         let ptr = alloc(64);
-        assert!(refused(|| range("t", at(ptr, 0), 65)));
-        assert!(refused(|| range("t", at(ptr, 32), 64)));
+        assert!(refused(|| range("t", at(ptr, 0), 65, Cap::BOTTOM)));
+        assert!(refused(|| range("t", at(ptr, 32), 64, Cap::BOTTOM)));
         // SAFETY: `ptr` is a live instance.
         unsafe { dealloc(ptr) };
     }
@@ -1316,10 +1554,10 @@ mod tests {
         let _turn = turn();
         // A `memcpy` into a buffer that was freed while something still held a pointer to it.
         let ptr = alloc(64);
-        assert!(!refused(|| range("t", at(ptr, 0), 64)));
+        assert!(!refused(|| range("t", at(ptr, 0), 64, Cap::BOTTOM)));
         // SAFETY: `ptr` is a live instance.
         unsafe { dealloc(ptr) };
-        assert!(refused(|| range("t", at(ptr, 0), 64)));
+        assert!(refused(|| range("t", at(ptr, 0), 64, Cap::BOTTOM)));
     }
 
     #[test]
@@ -1331,8 +1569,8 @@ mod tests {
         let ptr = alloc(64);
         // SAFETY: `ptr` is a live instance, freed once and then only used as an address.
         unsafe { dealloc(ptr) };
-        assert!(!refused(|| range("t", at(ptr, 0), 0)));
-        assert!(!refused(|| range("t", core::ptr::null(), 0)));
+        assert!(!refused(|| range("t", at(ptr, 0), 0, Cap::BOTTOM)));
+        assert!(!refused(|| range("t", core::ptr::null(), 0, Cap::BOTTOM)));
     }
 
     #[test]
@@ -1342,8 +1580,8 @@ mod tests {
         // own heap, and reporting on one of these would be a false positive.
         let mut local = [0_u8; 64];
         let addr: *const c_void = local.as_mut_ptr().cast();
-        assert!(!refused(|| range("t", addr, 64)));
-        assert!(!refused(|| range("t", addr, 1 << 20)));
+        assert!(!refused(|| range("t", addr, 64, Cap::BOTTOM)));
+        assert!(!refused(|| range("t", addr, 1 << 20, Cap::BOTTOM)));
     }
 
     #[test]
@@ -1353,10 +1591,10 @@ mod tests {
         let ptr = alloc(64);
         put(ptr, b"hello", true);
         // SAFETY: the string is inside a live instance and is terminated.
-        assert_eq!(unsafe { scan("t", at(ptr, 0)) }, 5);
+        assert_eq!(unsafe { scan("t", at(ptr, 0), Cap::BOTTOM) }, 5);
         put(ptr, b"", true);
         // SAFETY: as above.
-        assert_eq!(unsafe { scan("t", at(ptr, 0)) }, 0);
+        assert_eq!(unsafe { scan("t", at(ptr, 0), Cap::BOTTOM) }, 0);
         // SAFETY: `ptr` is a live instance.
         unsafe { dealloc(ptr) };
     }
@@ -1374,7 +1612,7 @@ mod tests {
         }
         assert!(refused(|| {
             // SAFETY: the walk is what is being tested, and it stops at the end of the instance.
-            let _ = unsafe { scan("t", at(ptr, 0)) };
+            let _ = unsafe { scan("t", at(ptr, 0), Cap::BOTTOM) };
         }));
         // SAFETY: `ptr` is a live instance.
         unsafe { dealloc(ptr) };
@@ -1391,7 +1629,7 @@ mod tests {
         assert!(refused(|| {
             // SAFETY: the bytes are still mapped, which is what makes this a bug rather than a
             // crash.
-            let _ = unsafe { scan("t", at(ptr, 0)) };
+            let _ = unsafe { scan("t", at(ptr, 0), Cap::BOTTOM) };
         }));
     }
 
@@ -1404,12 +1642,12 @@ mod tests {
         let to = alloc(64);
         put(from, b"hello", true);
         // SAFETY: both are live instances and the destination has room for the source.
-        assert_eq!(unsafe { copied("dst", "src", to, from, usize::MAX) }, 5);
+        assert_eq!(unsafe { copied(["dst", "src"], to, from, usize::MAX, [Cap::BOTTOM; 2]) }, 5);
         put(to, b"one", true);
         // Three already there and five added, because an append is measured from the destination
         // and not from the byte the write starts at.
         // SAFETY: as above, from the byte the destination's own string ends at.
-        assert_eq!(unsafe { appended("dst", "src", to, from, usize::MAX) }, 8);
+        assert_eq!(unsafe { appended(["dst", "src"], to, from, usize::MAX, [Cap::BOTTOM; 2]) }, 8);
         // SAFETY: both are live instances.
         unsafe {
             dealloc(from);
@@ -1428,7 +1666,7 @@ mod tests {
         put(to, b"", true);
         // Nothing already there, so the answer is the four the walk read.
         // SAFETY: both are live instances and the walk reads four bytes of the source.
-        assert_eq!(unsafe { appended("dst", "src", to, from, 4) }, 4);
+        assert_eq!(unsafe { appended(["dst", "src"], to, from, 4, [Cap::BOTTOM; 2]) }, 4);
         // SAFETY: both are live instances.
         unsafe {
             dealloc(from);
@@ -1446,7 +1684,7 @@ mod tests {
         put(from, b"a string that is longer than sixteen bytes", true);
         assert!(refused(|| {
             // SAFETY: the destination is judged as the source is walked, and it is not written.
-            let _ = unsafe { copied("dst", "src", to, from, usize::MAX) };
+            let _ = unsafe { copied(["dst", "src"], to, from, usize::MAX, [Cap::BOTTOM; 2]) };
         }));
         // SAFETY: both are live instances.
         unsafe {
@@ -1461,7 +1699,7 @@ mod tests {
         // A string literal, which is where most of the strings in a program are.
         let text = b"hello\0";
         // SAFETY: the bytes are a live local and are terminated.
-        assert_eq!(unsafe { scan("t", text.as_ptr().cast()) }, 5);
+        assert_eq!(unsafe { scan("t", text.as_ptr().cast(), Cap::BOTTOM) }, 5);
     }
 
     /// The clauses [`every_writing_clause_maintains_the_planes_a_wrapper_owes`] runs a real row
@@ -1694,7 +1932,7 @@ mod tests {
         let array = [Iovec { base: buffer, len: 64 }];
 
         // SAFETY: the array is a live local of one element and the buffer is a live instance.
-        let total = unsafe { vectors("t", array.as_ptr().cast(), 1, Kind::Writes) };
+        let total = unsafe { vectors("t", array.as_ptr().cast(), 1, Kind::Writes, Cap::BOTTOM) };
         assert_eq!(total, 64);
 
         assert!(written(buffer, 64), "the kernel's write is recorded as one");

@@ -743,6 +743,78 @@ mod tests {
         }
     }
 
+    /// Runs a wrapper the way an instrumented caller calls it, with `caps` published in a frame,
+    /// and says whether it refused.
+    fn handed(caps: &[crate::layout::Cap], call: impl FnOnce()) -> bool {
+        let mut frame = crate::frame::Frame::EMPTY;
+        frame.argc = u16::try_from(caps.len()).expect("a handful of arguments");
+        frame.args[..caps.len()].copy_from_slice(caps);
+        // SAFETY: the frame is a local of this function and outlives the call it is published for.
+        unsafe { crate::frame::publish(&raw mut frame) };
+        let out = refused(call);
+        // Taken whether or not the call was refused, since taking is the first thing it does.
+        assert!(crate::frame::current().is_null(), "the wrapper left the frame where it was");
+        out
+    }
+
+    #[test]
+    fn a_copy_past_a_local_the_caller_named_is_refused_and_one_inside_it_is_not() {
+        let _turn = turn();
+        // A local is in storage no region covers, so the planes have nothing to say about it. What
+        // the caller handed over in the frame is the only thing that knows it is fifty bytes.
+        let mut small = [0_u8; 50];
+        let mut big = [b'A'; 100];
+        big[60] = 0;
+        let to: *mut c_void = small.as_mut_ptr().cast();
+        let from: *mut c_void = big.as_mut_ptr().cast();
+        let local = |at: *mut c_void, size| {
+            crate::recover::object(at.cast_const(), size, crate::layout::Class::Automatic)
+        };
+        let (dst, src) = (local(to, 50), local(from, 100));
+        assert!(handed(&[dst, src], || {
+            // SAFETY: the destination is judged before anything is written.
+            let _ = unsafe { memcpy(to, from, 100) };
+        }));
+        assert!(!handed(&[dst, src], || {
+            // SAFETY: fifty bytes into fifty.
+            let _ = unsafe { memcpy(to, from, 50) };
+        }));
+        assert!(handed(&[dst, src], || {
+            // SAFETY: as above, over a walk that leaves the destination at byte fifty.
+            let _ = unsafe { strcpy(to.cast(), from.cast()) };
+        }));
+        // The source comes first in `bcopy`, and so does its capability, which is the position of
+        // the pointer among the pointers rather than the name of the argument.
+        assert!(handed(&[src, dst], || {
+            // SAFETY: as the first.
+            unsafe { bcopy(from, to, 100) };
+        }));
+        assert!(!handed(&[src, dst], || {
+            // SAFETY: as the second.
+            unsafe { bcopy(from, to, 50) };
+        }));
+    }
+
+    #[test]
+    fn a_capability_for_some_other_object_is_not_believed() {
+        let _turn = turn();
+        // A caller whose frame describes a different object than the pointer it passed has either
+        // gone wrong already or is describing somebody else, and a refusal must never come out of
+        // the second. So the copy goes ahead the way a copy into a local always used to.
+        let mut small = [0_u8; 50];
+        let mut other = [0_u8; 8];
+        let to: *mut c_void = small.as_mut_ptr().cast();
+        let cap = crate::recover::object(
+            other.as_mut_ptr().cast_const().cast(),
+            8,
+            crate::layout::Class::Automatic,
+        );
+        assert!(!handed(&[cap], || {
+            // SAFETY: twenty bytes into fifty.
+            let _ = unsafe { memset(to, 0, 20) };
+        }));
+    }
+
     #[test]
     fn a_copy_of_a_string_that_has_no_terminator_is_refused_over_its_source() {
         let _turn = turn();

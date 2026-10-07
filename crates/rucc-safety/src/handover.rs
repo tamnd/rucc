@@ -24,6 +24,10 @@
 //! what is live at that point is the previous call's, and a callee entered holding capabilities
 //! belonging to some other call is worse than one entered holding none.
 //!
+//! The one callee this unit does not define and still knows about is a wrapper `crate::wrap` sent a
+//! call to. `rucc-safe-rt` defines every one of them and every one of them takes its frame, so a
+//! call to one is sorted as a callee that still checks something, which is what it is.
+//!
 //! A call that hands no pointer over is none of the four, because there was never a capability for
 //! it to carry. It is counted separately rather than folded into the first bucket so that the four
 //! that remain are all about the callee and the denominator is visible.
@@ -129,8 +133,8 @@
 //! is not so is a function with checks and no pointer parameters, which takes nothing, and it is a
 //! box on tamnd/rucc#1241 rather than something to paper over here.
 
-use rucc_base::Symbol;
 use rucc_base::hash::Map;
+use rucc_base::{Interner, Symbol};
 use rucc_ir::{Def, Doms, Extra, Func, Imm, Inst, InstData, Module, Opcode, Type, Value};
 
 use crate::frame::ARGS;
@@ -160,20 +164,28 @@ pub enum Frame {
 /// the same either way. A name missing from the table is a name this unit does not define, which is
 /// what [`wanted`] reads it as.
 ///
+/// A wrapper `crate::wrap` sent a call to counts one too, though nothing here defines it. It is
+/// `rucc-safe-rt`'s, it takes its frame, and it judges the range it was handed against the
+/// capability it finds there, which for a local is the only thing that knows how big the local is:
+/// no region covers the stack, so the planes the wrapper otherwise asks have nothing to say. A
+/// clear in front of the call was a `memcpy` into a local that nothing judged at all.
+///
 /// A function that returns the address of one of its own locals counts one more, because that is
 /// a capability it will yield whether or not any check is left in it, and a caller that cleared
 /// instead of publishing would never read it. That is row T4 once the optimizer has taken out every
 /// check in the function, which in the usual shape of the bug it has.
 #[must_use]
-pub fn remaining(module: &Module) -> Map<Symbol, usize> {
-    module
-        .funcs()
-        .filter(|&id| !module[id].is_declaration())
-        .map(|id| {
-            let func = &module[id];
-            (func.name, checks_left(func) + usize::from(returns_a_local(func)))
-        })
-        .collect()
+pub fn remaining(module: &Module, names: &Interner) -> Map<Symbol, usize> {
+    // Found rather than interned, since a wrapper this unit never names is one no call goes to.
+    let wrappers = crate::wrap::INTERPOSED
+        .iter()
+        .filter_map(|name| names.find(&[crate::wrap::PREFIX, name].concat()))
+        .map(|symbol| (symbol, 1));
+    let defined = module.funcs().filter(|&id| !module[id].is_declaration()).map(|id| {
+        let func = &module[id];
+        (func.name, checks_left(func) + usize::from(returns_a_local(func)))
+    });
+    wrappers.chain(defined).collect()
 }
 
 /// Whether some `return` in `func` gives back the address of a local of a fixed size.
@@ -276,11 +288,11 @@ pub fn checks_left(func: &Func) -> usize {
 /// is how many capabilities stop being a plane walk, describing a build nobody ships. Running after
 /// the lowering would be later still, but by then a check is a call and a capability is a stack slot
 /// and neither of them is a thing to reason about.
-pub fn arrange(module: &mut Module) -> usize {
+pub fn arrange(module: &mut Module, names: &Interner) -> usize {
     // The whole module before any of it is touched, because a callee is allowed to be defined after
     // its caller and the answer has to be the same either way. Nothing below changes a check count:
     // the callee side rewrites capabilities and the caller side adds them, and a check is neither.
-    let left = remaining(module);
+    let left = remaining(module, names);
     let word = Type::int(module.datalayout.pointer_bits);
     let mut published = 0;
     for id in module.funcs() {
@@ -612,7 +624,6 @@ fn all(func: &Func) -> Vec<Inst> {
 
 #[cfg(test)]
 mod tests {
-    use rucc_base::Interner;
     use rucc_ir::{Builder, CallInfo, InstData, MemInfo, MemOrder, Restrict, Signature, Type};
     use rucc_target::{Arch, Env, Os, TargetInfo, Triple};
 
@@ -805,7 +816,7 @@ mod tests {
         let mut names = Interner::new();
         let mut module = unit(&mut names);
         module.add_func(caller(&mut names, "f", Some("g"), three(), true));
-        arrange(&mut module);
+        arrange(&mut module, &names);
         let func = &module[module.funcs().next().expect("the module defines one")];
         assert_eq!(count(func, Opcode::CapOf), 0);
         assert_eq!(count(func, Opcode::CapArg), 1);
@@ -819,7 +830,7 @@ mod tests {
         let mut names = Interner::new();
         let mut module = unit(&mut names);
         module.add_func(caller(&mut names, "f", Some("g"), three(), true));
-        assert_eq!(arrange(&mut module), 0);
+        assert_eq!(arrange(&mut module, &names), 0);
         let func = &module[module.funcs().next().expect("the module defines one")];
         assert_eq!(count(func, Opcode::CapClear), 1);
         assert_eq!(count(func, Opcode::CapPublish), 0);
@@ -834,7 +845,7 @@ mod tests {
         let mut module = unit(&mut names);
         module.add_func(caller(&mut names, "f", Some("g"), three(), true));
         module.add_func(caller(&mut names, "g", Some("h"), three(), true));
-        assert_eq!(arrange(&mut module), 1);
+        assert_eq!(arrange(&mut module, &names), 1);
         let func = &module[module.funcs().next().expect("the module defines two")];
         assert_eq!(count(func, Opcode::CapPublish), 1);
         assert_eq!(count(func, Opcode::CapClear), 0);
@@ -871,7 +882,7 @@ mod tests {
         b.ret(&[]);
         module.add_func(func);
         module.add_func(caller(&mut names, "g", Some("h"), three(), true));
-        assert_eq!(arrange(&mut module), 0);
+        assert_eq!(arrange(&mut module, &names), 0);
         let func = &module[module.funcs().next().expect("the module defines two")];
         assert_eq!(count(func, Opcode::CapPublish), 0);
         assert_eq!(count(func, Opcode::CapClear), 1);
@@ -885,7 +896,7 @@ mod tests {
         let mut module = unit(&mut names);
         module.add_func(caller(&mut names, "f", Some("g"), three(), false));
         module.add_func(caller(&mut names, "g", Some("h"), three(), true));
-        assert_eq!(arrange(&mut module), 0);
+        assert_eq!(arrange(&mut module, &names), 0);
         let func = &module[module.funcs().next().expect("the module defines two")];
         assert_eq!(count(func, Opcode::CapPublish), 0);
         assert_eq!(count(func, Opcode::CapNull), 0);
@@ -898,7 +909,7 @@ mod tests {
         let mut module = unit(&mut names);
         module.add_func(caller(&mut names, "f", Some("g"), three(), true));
         module.add_func(caller(&mut names, "g", Some("h"), three(), false));
-        assert_eq!(arrange(&mut module), 0);
+        assert_eq!(arrange(&mut module, &names), 0);
         let func = &module[module.funcs().next().expect("the module defines two")];
         assert_eq!(count(func, Opcode::CapPublish), 0);
         assert_eq!(count(func, Opcode::CapClear), 0);
@@ -911,7 +922,7 @@ mod tests {
         let mut module = unit(&mut names);
         module.add_func(caller(&mut names, "f", Some("g"), three(), true));
         module.add_func(caller(&mut names, "g", Some("h"), three(), true));
-        arrange(&mut module);
+        arrange(&mut module, &names);
         let func = &module[module.funcs().next().expect("the module defines two")];
         let publish = all(func)
             .into_iter()
@@ -1015,7 +1026,7 @@ mod tests {
         // parameter and becomes a `cap_arg`, which is what leaves nothing of the opcode behind.
         let mut names = Interner::new();
         let mut module = both_ends(&mut names, true);
-        assert_eq!(arrange(&mut module), 1);
+        assert_eq!(arrange(&mut module, &names), 1);
         let func = &module[module.funcs().next().expect("the module defines two")];
         assert_eq!(count(func, Opcode::CapResult), 1);
         assert_eq!(count(func, Opcode::CapOf), 0);
@@ -1032,7 +1043,7 @@ mod tests {
         // than one: a cleared call has no frame, so there would be nothing in the slot to read.
         let mut names = Interner::new();
         let mut module = both_ends(&mut names, true);
-        arrange(&mut module);
+        arrange(&mut module, &names);
         let func = &module[module.funcs().next().expect("the module defines two")];
         assert!(crate::frame::given(func, the(func, Opcode::CapResult)));
     }
@@ -1043,7 +1054,7 @@ mod tests {
         // pointer handed along a chain of functions asks the plane once however long the chain is.
         let mut names = Interner::new();
         let mut module = both_ends(&mut names, true);
-        arrange(&mut module);
+        arrange(&mut module, &names);
         let func = &module[module.funcs().next().expect("the module defines two")];
         assert_eq!(count(func, Opcode::CapYield), 1);
         let args = operands(func, Opcode::CapYield);
@@ -1060,7 +1071,7 @@ mod tests {
         // recovery it was doing anyway.
         let mut names = Interner::new();
         let mut module = both_ends(&mut names, false);
-        arrange(&mut module);
+        arrange(&mut module, &names);
         let func = &module[module.funcs().next().expect("the module defines two")];
         assert_eq!(count(func, Opcode::CapResult), 0);
         assert_eq!(count(func, Opcode::CapYield), 0);
@@ -1093,7 +1104,7 @@ mod tests {
         let mut module = unit(&mut names);
         module.add_func(asking(&mut names));
         module.add_func(passing_on(&mut names, "g", Some("h"), true));
-        assert_eq!(arrange(&mut module), 1);
+        assert_eq!(arrange(&mut module, &names), 1);
         let func = &module[module.funcs().next().expect("the module defines two")];
         assert_eq!(count(func, Opcode::CapPublish), 1);
         assert_eq!(operands(func, Opcode::CapPublish).len(), 1);
@@ -1120,19 +1131,13 @@ mod tests {
         func
     }
 
-    #[test]
-    fn a_local_handed_to_a_callee_that_checks_travels_with_no_check_left_in_the_caller() {
-        // The shape -O2 leaves when the caller's only store into its buffer was in bounds and was
-        // discharged: nothing in the caller holds a capability, and the callee still checks. The
-        // callee cannot recover a stack address, so the caller makes the local's capability at the
-        // call, over the local itself for the pointer into its middle as well.
-        let mut names = Interner::new();
-        let mut module = unit(&mut names);
+    /// A function `f` that hands `callee` a local and a pointer into its middle, and checks nothing.
+    fn handing_a_local(names: &mut Interner, callee: &str) -> (Func, Value) {
         let mut func = Func::new(names.intern("f"), Signature::new());
         let entry = func.create_block();
         let sig = func.add_signature(three());
         let varargs = func.push_abis(&[]);
-        let callee = Some(names.intern("g"));
+        let callee = Some(names.intern(callee));
         let info = func.add_call(CallInfo { callee, signature: sig, varargs });
         let mem = MemInfo {
             size: 8,
@@ -1151,10 +1156,13 @@ mod tests {
         let args = b.func().push_values(&[local, four, inside]);
         b.inst(InstData { args, extra: Extra::Call(info), ..InstData::new(Opcode::Call) }, &[]);
         b.ret(&[]);
-        module.add_func(func);
-        module.add_func(caller(&mut names, "g", Some("h"), three(), true));
-        assert_eq!(arrange(&mut module), 1);
-        let func = &module[module.funcs().next().expect("the module defines two")];
+        (func, local)
+    }
+
+    /// Whether the first function of `module` publishes the capability of `local` for both of the
+    /// pointers it hands over, and clears nothing.
+    fn publishes_the_local(module: &Module, local: Value) {
+        let func = &module[module.funcs().next().expect("the module defines one")];
         assert_eq!(count(func, Opcode::CapClear), 0);
         let caps = operands(func, Opcode::CapPublish);
         assert_eq!(caps.len(), 2);
@@ -1166,6 +1174,36 @@ mod tests {
     }
 
     #[test]
+    fn a_local_handed_to_a_callee_that_checks_travels_with_no_check_left_in_the_caller() {
+        // The shape -O2 leaves when the caller's only store into its buffer was in bounds and was
+        // discharged: nothing in the caller holds a capability, and the callee still checks. The
+        // callee cannot recover a stack address, so the caller makes the local's capability at the
+        // call, over the local itself for the pointer into its middle as well.
+        let mut names = Interner::new();
+        let mut module = unit(&mut names);
+        let (func, local) = handing_a_local(&mut names, "g");
+        module.add_func(func);
+        module.add_func(caller(&mut names, "g", Some("h"), three(), true));
+        assert_eq!(arrange(&mut module, &names), 1);
+        publishes_the_local(&module, local);
+    }
+
+    #[test]
+    fn a_local_handed_to_a_wrapper_travels_though_nothing_here_defines_the_wrapper() {
+        // `memcpy` into a local, redirected to its wrapper. The wrapper is not in this unit, and it
+        // is still one that takes its frame, so the call publishes rather than clears. A clear was
+        // a copy into the stack that nothing judged, since no region covers it.
+        let mut names = Interner::new();
+        let mut module = unit(&mut names);
+        let (func, local) = handing_a_local(&mut names, "__rucc_wrap_memcpy");
+        module.add_func(func);
+        let wrapper = names.find("__rucc_wrap_memcpy").expect("the call names it");
+        assert_eq!(remaining(&module, &names).get(&wrapper), Some(&1));
+        assert_eq!(arrange(&mut module, &names), 1);
+        publishes_the_local(&module, local);
+    }
+
+    #[test]
     fn a_function_returning_its_own_local_yields_its_capability_with_no_check_left() {
         // Row T4 at -O2, where the optimizer has taken every check out of the function that lets
         // its local escape. It still counts as one that answers, and it makes the capability it
@@ -1174,8 +1212,9 @@ mod tests {
         let mut module = unit(&mut names);
         module.add_func(asking(&mut names));
         module.add_func(escaping(&mut names));
-        assert_eq!(remaining(&module).get(&names.intern("g")), Some(&1));
-        assert_eq!(arrange(&mut module), 1);
+        let g = names.intern("g");
+        assert_eq!(remaining(&module, &names).get(&g), Some(&1));
+        assert_eq!(arrange(&mut module, &names), 1);
         let mut funcs = module.funcs();
         let f = &module[funcs.next().expect("the module defines two")];
         assert_eq!(count(f, Opcode::CapResult), 1);
