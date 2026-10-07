@@ -2245,6 +2245,10 @@ pub struct Options {
     /// Off by default, which is gcc's default. Distributions that build with it build everything
     /// with it, because the hole is in whichever function was left out.
     pub stack_clash: bool,
+    /// Whether a call to a function in another object goes through a stub of the procedure
+    /// linkage table, which `-fno-plt` turns off. Without the stub the call reads the address from
+    /// the global offset table. Arch builds each package with `-fno-plt`.
+    pub plt: bool,
     /// Which control flow transfers are checked, from `-fcf-protection=`.
     ///
     /// See [`Control`]. Off by default, which is gcc's default on these targets, and on again in
@@ -2842,6 +2846,7 @@ impl Options {
             stack_reuse: None,
             protector: Protector::default(),
             stack_clash: false,
+            plt: true,
             control: Control::default(),
             branch_protection: BranchProtection::default(),
             manual_endbr: false,

@@ -273,7 +273,7 @@ options:
   -flto[=auto|jobserver|<n>] -fno-lto -ffat-lto-objects   keep the module in the object, not read at link time yet
   -fprofile-use[=<path>] -fprofile-dir=<dir> --coverage   read, and counted for gcov
   -f[no-]stack-protector[-strong|-all|-explicit], -f[no-]stack-clash-protection, -fcf-protection=<edges>
-  -ffunction-sections -fdata-sections   a section per function or variable, for --gc-sections
+  -ffunction-sections -fdata-sections, -fno-plt   a section per function or variable, for --gc-sections, calls through the GOT
   -fvisibility=<what>    default, hidden, internal or protected, when nothing in the source said
   -l<name>, -L <dir>, -B <dir>, --gcc-toolchain=<dir>   a library, where to look for one, our tools, the GCC
   -fPIC -fpic -fPIE -fpie, -pipe   what it does anyway, and -f[no-]common as the target's cc
@@ -1308,6 +1308,9 @@ pub fn parse_args(args: &[String]) -> Result<Action, CliError> {
             // frame rather than about the function, so it is a switch rather than a level.
             "-fstack-clash-protection" => opts.stack_clash = true,
             "-fno-stack-clash-protection" => opts.stack_clash = false,
+            // Arch and Fedora build with this. The call reads the address from the GOT.
+            "-fno-plt" => opts.plt = false,
+            "-fplt" => opts.plt = true,
             // The third of them, and the one that is a question with an argument rather than a
             // family of spellings, because what it asks about is which of the two edges of a
             // control flow transfer is checked. Bare is both of them, which is what gcc does.
@@ -7511,6 +7514,17 @@ mod tests {
         let (opts, _) =
             compile(&["-c", "-momit-leaf-frame-pointer", "-mno-omit-leaf-frame-pointer", "a.c"]);
         assert!(opts.leaf_frame_pointer, "the last one wins");
+    }
+
+    /// A call goes through the PLT unless the line says `-fno-plt`, and the last one wins.
+    #[test]
+    fn the_plt_flag_is_read_in_both_directions() {
+        let (opts, _) = compile(&["-c", "a.c"]);
+        assert!(opts.plt, "gcc calls through the PLT unless it was asked not to");
+        let (opts, _) = compile(&["-c", "-fno-plt", "a.c"]);
+        assert!(!opts.plt);
+        let (opts, _) = compile(&["-c", "-fno-plt", "-fplt", "a.c"]);
+        assert!(opts.plt, "the last one wins");
     }
 
     /// Five flags rather than one with an argument, which is how gcc spells them, and the negative

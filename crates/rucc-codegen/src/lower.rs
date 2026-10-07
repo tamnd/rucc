@@ -2521,6 +2521,14 @@ impl<'a> Lowering<'a> {
                     self.through_slot(inst, slot, symbol, reg)?;
                     abi::Callee::Through(reg)
                 }
+                // `-fno-plt`: the address from the global offset table, and a call through it.
+                // On x86-64 `crate::through` makes the two one `call *f@GOTPCREL(%rip)` above
+                // `-O0`.
+                None if self.elsewhere.unstubbed(symbol) => {
+                    let reg = self.out.new_vreg(self.gpr);
+                    self.reach(inst, symbol, reg, true);
+                    abi::Callee::Through(reg)
+                }
                 None => abi::Callee::Named(symbol),
             }
         };
@@ -3829,10 +3837,17 @@ impl<'a> Lowering<'a> {
             return self.through_slot(inst, slot, symbol, reg);
         }
 
-        let block = self.at.expect("a block is being filled");
         let reg = self.new_reg(result);
-        let span = self.source.span(inst);
         let far = self.elsewhere.holds(symbol);
+        self.reach(inst, symbol, reg, far);
+        Ok(())
+    }
+
+    /// The address of a name into `reg`, from the instruction pointer, or from the slot of the
+    /// global offset table when `far` says so.
+    fn reach(&mut self, inst: Inst, symbol: Symbol, reg: mir::Reg, far: bool) {
+        let block = self.at.expect("a block is being filled");
+        let span = self.source.span(inst);
         let symbols = self.selector.symbols;
         match if far { symbols.far } else { symbols.near } {
             Reach::Mode(name) => {
@@ -3846,7 +3861,6 @@ impl<'a> Lowering<'a> {
                 self.out.build(block, opcode).at(span).def(reg, self.gpr).symbol(symbol).finish();
             }
         }
-        Ok(())
     }
 
     /// The address of a name on COFF that is reached through a pointer, into `reg`.
