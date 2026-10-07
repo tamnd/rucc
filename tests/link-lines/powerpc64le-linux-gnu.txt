@@ -24,10 +24,8 @@ sysroot   <cache>/sysroots/powerpc64le-linux-gnu
   -z
   relro
   -z
-  now
-  -z
   noexecstack
-  --build-id=none
+  --build-id
   <cache>/sysroots/powerpc64le-linux-gnu/lib/Scrt1.o
   <cache>/sysroots/powerpc64le-linux-gnu/lib/crti.o
   -L<cache>/sysroots/powerpc64le-linux-gnu/lib
@@ -52,10 +50,8 @@ sysroot   <cache>/sysroots/powerpc64le-linux-gnu
   -z
   relro
   -z
-  now
-  -z
   noexecstack
-  --build-id=none
+  --build-id
   <cache>/sysroots/powerpc64le-linux-gnu/lib/crt1.o
   <cache>/sysroots/powerpc64le-linux-gnu/lib/crti.o
   -L<cache>/sysroots/powerpc64le-linux-gnu/lib
@@ -78,10 +74,8 @@ sysroot   <cache>/sysroots/powerpc64le-linux-gnu
   -z
   relro
   -z
-  now
-  -z
   noexecstack
-  --build-id=none
+  --build-id
   <cache>/sysroots/powerpc64le-linux-gnu/lib/crti.o
   -L<cache>/sysroots/powerpc64le-linux-gnu/lib
   -L<cache>/stubs/powerpc64le-linux-gnu

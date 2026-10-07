@@ -24,10 +24,8 @@ sysroot   <cache>/sysroots/i686-linux-gnu
   -z
   relro
   -z
-  now
-  -z
   noexecstack
-  --build-id=none
+  --build-id
   <cache>/sysroots/i686-linux-gnu/lib/Scrt1.o
   <cache>/sysroots/i686-linux-gnu/lib/crti.o
   -L<cache>/sysroots/i686-linux-gnu/lib
@@ -52,10 +50,8 @@ sysroot   <cache>/sysroots/i686-linux-gnu
   -z
   relro
   -z
-  now
-  -z
   noexecstack
-  --build-id=none
+  --build-id
   <cache>/sysroots/i686-linux-gnu/lib/crt1.o
   <cache>/sysroots/i686-linux-gnu/lib/crti.o
   -L<cache>/sysroots/i686-linux-gnu/lib
@@ -78,10 +74,8 @@ sysroot   <cache>/sysroots/i686-linux-gnu
   -z
   relro
   -z
-  now
-  -z
   noexecstack
-  --build-id=none
+  --build-id
   <cache>/sysroots/i686-linux-gnu/lib/crti.o
   -L<cache>/sysroots/i686-linux-gnu/lib
   -L<cache>/stubs/i686-linux-gnu

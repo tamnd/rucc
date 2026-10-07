@@ -1578,6 +1578,9 @@ fn line_for(
         // alongside by default on some distributions, and asking for this one is what stops a link
         // from carrying a table nothing has needed since 2006.
         "--hash-style=gnu".to_owned(),
+        // The note that `debuginfod`, `systemd-coredump` and the distribution debug packages use
+        // to find the debug information of a program. Each distribution GCC passes it.
+        "--build-id".to_owned(),
     ];
 
     let pie = opts.pie.unwrap_or(!opts.is_static && !opts.shared);
@@ -2586,6 +2589,14 @@ mod tests {
         let args = line(linux(), &opts, &one("a.o"), "a.out").expect("a line");
         assert!(args.windows(2).any(|pair| pair == ["-z", "now"]), "{args:?}");
         assert!(args.windows(2).any(|pair| pair == ["-z", "relro"]), "{args:?}");
+    }
+
+    /// A program has a build ID, as with each distribution GCC, and binds lazily unless asked.
+    #[test]
+    fn a_program_has_a_build_id_and_binds_lazily() {
+        let args = line(linux(), &LinkOptions::default(), &one("a.o"), "a.out").expect("a line");
+        assert!(args.iter().any(|a| a == "--build-id"), "{args:?}");
+        assert!(!args.iter().any(|a| a == "now"), "{args:?}");
     }
 
     /// Kbuild's `built-in.o`, which is objects joined into an object and is linked again later.

@@ -16,10 +16,8 @@ sysroot   <cache>/sysroots/aarch64-linux-musl
   -z
   relro
   -z
-  now
-  -z
   noexecstack
-  --build-id=none
+  --build-id
   <cache>/sysroots/aarch64-linux-musl/lib/crt1.o
   <cache>/sysroots/aarch64-linux-musl/lib/crti.o
   -L<cache>/sysroots/aarch64-linux-musl/lib
@@ -42,10 +40,8 @@ sysroot   <cache>/sysroots/aarch64-linux-musl
   -z
   relro
   -z
-  now
-  -z
   noexecstack
-  --build-id=none
+  --build-id
   <cache>/sysroots/aarch64-linux-musl/lib/rcrt1.o
   <cache>/sysroots/aarch64-linux-musl/lib/crti.o
   -L<cache>/sysroots/aarch64-linux-musl/lib
@@ -68,10 +64,8 @@ sysroot   <cache>/sysroots/aarch64-linux-musl
   -z
   relro
   -z
-  now
-  -z
   noexecstack
-  --build-id=none
+  --build-id
   <cache>/sysroots/aarch64-linux-musl/lib/Scrt1.o
   <cache>/sysroots/aarch64-linux-musl/lib/crti.o
   -L<cache>/sysroots/aarch64-linux-musl/lib
@@ -94,10 +88,8 @@ sysroot   <cache>/sysroots/aarch64-linux-musl
   -z
   relro
   -z
-  now
-  -z
   noexecstack
-  --build-id=none
+  --build-id
   <cache>/sysroots/aarch64-linux-musl/lib/crt1.o
   <cache>/sysroots/aarch64-linux-musl/lib/crti.o
   -L<cache>/sysroots/aarch64-linux-musl/lib
@@ -118,10 +110,8 @@ sysroot   <cache>/sysroots/aarch64-linux-musl
   -z
   relro
   -z
-  now
-  -z
   noexecstack
-  --build-id=none
+  --build-id
   <cache>/sysroots/aarch64-linux-musl/lib/crti.o
   -L<cache>/sysroots/aarch64-linux-musl/lib
   main.o

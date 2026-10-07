@@ -24,10 +24,8 @@ sysroot   <cache>/sysroots/armv7-linux-gnueabihf
   -z
   relro
   -z
-  now
-  -z
   noexecstack
-  --build-id=none
+  --build-id
   <cache>/sysroots/armv7-linux-gnueabihf/lib/Scrt1.o
   <cache>/sysroots/armv7-linux-gnueabihf/lib/crti.o
   -L<cache>/sysroots/armv7-linux-gnueabihf/lib
@@ -52,10 +50,8 @@ sysroot   <cache>/sysroots/armv7-linux-gnueabihf
   -z
   relro
   -z
-  now
-  -z
   noexecstack
-  --build-id=none
+  --build-id
   <cache>/sysroots/armv7-linux-gnueabihf/lib/crt1.o
   <cache>/sysroots/armv7-linux-gnueabihf/lib/crti.o
   -L<cache>/sysroots/armv7-linux-gnueabihf/lib
@@ -78,10 +74,8 @@ sysroot   <cache>/sysroots/armv7-linux-gnueabihf
   -z
   relro
   -z
-  now
-  -z
   noexecstack
-  --build-id=none
+  --build-id
   <cache>/sysroots/armv7-linux-gnueabihf/lib/crti.o
   -L<cache>/sysroots/armv7-linux-gnueabihf/lib
   -L<cache>/stubs/armv7-linux-gnueabihf

@@ -16,10 +16,8 @@ sysroot   <cache>/sysroots/armv7-linux-musleabihf
   -z
   relro
   -z
-  now
-  -z
   noexecstack
-  --build-id=none
+  --build-id
   <cache>/sysroots/armv7-linux-musleabihf/lib/crt1.o
   <cache>/sysroots/armv7-linux-musleabihf/lib/crti.o
   -L<cache>/sysroots/armv7-linux-musleabihf/lib
@@ -42,10 +40,8 @@ sysroot   <cache>/sysroots/armv7-linux-musleabihf
   -z
   relro
   -z
-  now
-  -z
   noexecstack
-  --build-id=none
+  --build-id
   <cache>/sysroots/armv7-linux-musleabihf/lib/rcrt1.o
   <cache>/sysroots/armv7-linux-musleabihf/lib/crti.o
   -L<cache>/sysroots/armv7-linux-musleabihf/lib
@@ -68,10 +64,8 @@ sysroot   <cache>/sysroots/armv7-linux-musleabihf
   -z
   relro
   -z
-  now
-  -z
   noexecstack
-  --build-id=none
+  --build-id
   <cache>/sysroots/armv7-linux-musleabihf/lib/Scrt1.o
   <cache>/sysroots/armv7-linux-musleabihf/lib/crti.o
   -L<cache>/sysroots/armv7-linux-musleabihf/lib
@@ -94,10 +88,8 @@ sysroot   <cache>/sysroots/armv7-linux-musleabihf
   -z
   relro
   -z
-  now
-  -z
   noexecstack
-  --build-id=none
+  --build-id
   <cache>/sysroots/armv7-linux-musleabihf/lib/crt1.o
   <cache>/sysroots/armv7-linux-musleabihf/lib/crti.o
   -L<cache>/sysroots/armv7-linux-musleabihf/lib
@@ -118,10 +110,8 @@ sysroot   <cache>/sysroots/armv7-linux-musleabihf
   -z
   relro
   -z
-  now
-  -z
   noexecstack
-  --build-id=none
+  --build-id
   <cache>/sysroots/armv7-linux-musleabihf/lib/crti.o
   -L<cache>/sysroots/armv7-linux-musleabihf/lib
   main.o
