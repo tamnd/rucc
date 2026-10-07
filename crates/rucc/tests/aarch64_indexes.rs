@@ -19,6 +19,11 @@ int byte(int i) { return bytes[i]; }
 double real(double *p, int i) { return p[i]; }
 void bump(long *p, int i) { p[i] += 7; }
 long both(long *p, int i) { return p[i] + i; }
+long walk(long *p, int i, long n) {
+  long s = p[i], j = i;
+  while (s < n) { s += j; j += 2; }
+  return s;
+}
 ";
 
 fn listing() -> String {
@@ -85,4 +90,15 @@ fn an_index_something_else_reads_keeps_its_widening() {
     let both = body(&text, "both");
     assert!(both.iter().any(|line| line.starts_with("sxtw x")), "{text}");
     assert!(both.iter().any(|line| line.ends_with(", lsl #3]")), "{text}");
+}
+
+/// The widened subscript is where a loop starts counting, which an edge carries into the loop and
+/// no instruction reads. It is wanted as a number all the same, so its `sxtw` stays. With it gone
+/// the loop's counter started from nothing and the allocator refused the function.
+#[test]
+fn an_index_carried_into_a_loop_keeps_its_widening() {
+    let text = listing();
+    let walk = body(&text, "walk");
+    assert!(walk.iter().any(|line| line.starts_with("sxtw x")), "{text}");
+    assert!(walk.iter().any(|line| line.ends_with(", lsl #3]")), "{text}");
 }

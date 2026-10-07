@@ -33,6 +33,7 @@ All notable changes are recorded here. The format follows [Keep a Changelog](htt
 
 ### Fixed
 
+- An AArch64 variable's address that a loop is handed as where it starts keeps its `add` of the low twelve bits, and so does a widened array index handed to a loop the same way. The fold that moves those into the loads and stores counted the readers among the instructions and missed the edge into the loop, so the loop started from the page and not the variable. The 7.2 arm64 kernel put its first clocksource there and oopsed in `timekeeping_init`. (#3238)
 - A label in front of a conditional directive, as in `0: .ifc \pn, p64`, is defined when the line is reached in code that is assembled. The assembler used to drop it, and the arm64 GHASH code of 6.12, which goes back to it with `0b`, did not assemble. (#3231)
 - A register an AArch64 `asm` template only reads, in a store, a compare, a branch, an `msr` or a `prfm`, is no longer taken from the allocator, so the kernel's `crash_setup_regs` compiles instead of panicking. (#3211)
 - `-fdisable-<pass>` and `-fdisable-<pass>=<function>` no longer turn off `expect` or `constant-p`, which the compile cannot do without and `-fno-<pass>` already kept (#3220). Turning either off made a program that calls `__builtin_expect` stop with E0653 and one that calls `__builtin_constant_p` fail to link, which the pass-off run of rucc-corpus counted against the pass.

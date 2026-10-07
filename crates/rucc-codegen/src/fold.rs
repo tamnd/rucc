@@ -809,13 +809,15 @@ pub fn pages(func: &mut mir::Func, names: &mut Interner, elsewhere: &Elsewhere) 
             }
         }
     }
+    let carried = carried(func);
     let mut folded = 0;
     for inst in addresses {
         let Some(symbol) = func[inst].symbol else { continue };
         let Some(&written) = func[func[inst].operands].first() else { continue };
         let Some(align) = elsewhere.aligned(symbol) else { continue };
-        // A register written anywhere else may be read as something other than this address.
-        if writes.get(&written.reg) != Some(&1) {
+        // A register written anywhere else may be read as something other than this address,
+        // and one an edge carries is read as the address by the block it goes to.
+        if writes.get(&written.reg) != Some(&1) || carried.contains(&written.reg) {
             continue;
         }
         let Some(readers) = reads.get(&written.reg).filter(|readers| !readers.is_empty()) else {
@@ -853,6 +855,15 @@ pub fn pages(func: &mut mir::Func, names: &mut Interner, elsewhere: &Elsewhere) 
         folded += 1;
     }
     folded
+}
+
+/// The registers the edges of the function carry, each of which the block at the other end reads
+/// as one of its parameters. No instruction's operands show those reads, so a fold that takes the
+/// instruction writing one of these away has to know about them.
+fn carried(func: &mir::Func) -> Set<mir::Reg> {
+    func.blocks()
+        .flat_map(|block| func[block].succs.iter().flat_map(|call| call.args.iter().copied()))
+        .collect()
 }
 
 /// The offset into the variable and the size of one reader of its address, when the reader can
@@ -936,10 +947,11 @@ pub fn indexes(func: &mut mir::Func, names: &mut Interner) -> usize {
         }
         from.reg.is_virtual().then_some((*inst, *from))
     };
+    let carried = carried(func);
     let mut folded = 0;
     for (reg, readers) in indexed {
         // Every read of the index is one of these accesses, once each and all of one size.
-        if reads.get(&reg).map_or(0, Vec::len) != readers.len() {
+        if reads.get(&reg).map_or(0, Vec::len) != readers.len() || carried.contains(&reg) {
             continue;
         }
         let size = sizes[&func[readers[0]].opcode];
@@ -966,6 +978,7 @@ pub fn indexes(func: &mut mir::Func, names: &mut Interner) -> usize {
         for (opcode, how) in [(signed, mir::Widen::Signed), (unsigned, mir::Widen::Unsigned)] {
             if let Some((inst, from)) = only(func, wide, opcode)
                 && reads.get(&wide).map_or(0, Vec::len) == read_by
+                && !carried.contains(&wide)
             {
                 gone.push(inst);
                 index = Some(from);
