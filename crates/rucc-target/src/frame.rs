@@ -251,7 +251,7 @@ pub struct FrameInsts {
     /// of them is a value the program named.
     pub differ: &'static str,
     /// Compares two general purpose registers as unsigned numbers and writes whether the first is
-    /// below the second into a third.
+    /// at or above the second into a third.
     ///
     /// Here for the same reason [`Self::differ`] is, and asked for by the one loop that walks a
     /// distance nothing knew when it was written, which is the pages a variable length array takes.
@@ -263,7 +263,7 @@ pub struct FrameInsts {
     /// Unsigned because both registers hold addresses. A stack that has grown past the middle of
     /// the address space is one where a signed comparison of two stack pointers says the wrong
     /// thing, and nothing about a guard page cares which half of the space it is in.
-    pub below: &'static str,
+    pub not_below: &'static str,
     /// Jumps to the name it is given, which is how a tail call ends, or `None` on a target where
     /// nothing writes one yet and every call in tail position stays a call.
     pub away: Option<&'static str>,

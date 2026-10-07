@@ -1221,10 +1221,10 @@ impl Writer<'_> {
         self.func.append_inst(block, inst);
         *self.func.succs_mut(block) = vec![BlockCall::to(question)];
 
-        let below = self.opcode(self.insts.below);
+        let not_below = self.opcode(self.insts.not_below);
         let inst = self
             .func
-            .build_loose(below)
+            .build_loose(not_below)
             .def(Reg::physical(flag), class)
             .uses(Reg::physical(sp), class)
             .uses(Reg::physical(limit), class)
@@ -1236,9 +1236,10 @@ impl Writer<'_> {
         );
         let inst = self.func.build_loose(cond).uses(Reg::physical(flag), class).finish();
         self.func.append_inst(question, inst);
-        // The first arm is the one taken when the condition held, and the condition is that less
-        // than a page is left, so the first arm is the rest of the block.
-        *self.func.succs_mut(question) = vec![BlockCall::to(done), BlockCall::to(step)];
+        // The first arm is the one taken when the condition held, and the condition is that a whole
+        // page is still to come, so the first arm is the step. The layout puts the first arm next
+        // and jumps out on the other, which is the order `hardening-check` looks for.
+        *self.func.succs_mut(question) = vec![BlockCall::to(step), BlockCall::to(done)];
 
         let inst = self.sub(probing.probe.interval);
         self.func.append_inst(step, inst);

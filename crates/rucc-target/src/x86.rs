@@ -580,7 +580,7 @@ pub static FRAME: FrameInsts = FrameInsts {
     iret: None,
     clear_direction: None,
     differ: "cmp_set_ne_32",
-    below: "cmp_set_b_32",
+    not_below: "cmp_set_ae_32",
     away: Some("jmp_away"),
     call: "call",
     probe: Some(crate::x86_64::PROBE),
@@ -983,7 +983,7 @@ mod tests {
             FRAME.sum,
             FRAME.ret,
             FRAME.differ,
-            FRAME.below,
+            FRAME.not_below,
             FRAME.call,
         ];
         names.extend(FRAME.away);
