@@ -189,7 +189,8 @@ const FLAGS: &str = "enum __attribute__((flag_enum)) f { R = 1, W = 2, X = 4 };\
     }\n";
 
 /// What `flag_enum` changes is that a case value no enumerator has is not said, which is all
-/// it changes: an enumerator left out still is, and an enumeration without it is as before.
+/// it changes: an enumerator left out still is, `W` among them though `R | W` has its bit, and
+/// an enumeration without it is as before.
 #[test]
 fn a_flag_enum_is_quiet_about_its_combined_values() {
     let (ok, said) = compile("flag", &["-Wall", "-Wswitch-enum"], FLAGS);
@@ -197,6 +198,7 @@ fn a_flag_enum_is_quiet_about_its_combined_values() {
     assert_eq!(
         switch_lines(&said),
         [
+            "a.c:6:1: warning: enumeration value 'W' not handled in switch [E0852]",
             "a.c:6:1: warning: enumeration value 'X' not handled in switch [E0852]",
             "a.c:7:1: warning: enumeration value 'G1' not handled in switch [E0853]",
             "a.c:7:1: warning: enumeration value 'G2' not handled in switch [E0853]",
