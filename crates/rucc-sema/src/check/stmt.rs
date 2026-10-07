@@ -48,6 +48,7 @@ use rucc_types::{IntegerInfo, Qualifiers, TypeId, is_integer, is_pointer, is_rec
 
 use crate::asm::{Asm, AsmOperand, AsmOperandList, FileAsm, LabelList, in_a_register};
 use crate::check::expr::Target;
+use crate::check::switch::Switched;
 use crate::check::{Checker, Promoted};
 use crate::decl::{DeclId, DeclList};
 use crate::eval;
@@ -272,7 +273,7 @@ impl Checker<'_> {
                 let then = self.stmt(then);
                 Stmt::If { cond, then, otherwise: otherwise.map(|id| self.stmt(id)) }
             }
-            ast::Stmt::Switch { scrutinee, body } => self.switch(scrutinee, body),
+            ast::Stmt::Switch { scrutinee, body } => self.switch(scrutinee, body, span),
             ast::Stmt::While { cond, body } => {
                 let cond = self.controlling(cond);
                 Stmt::While { cond, body: self.loop_body(body) }
@@ -734,10 +735,13 @@ impl Checker<'_> {
     }
 
     /// `switch (cond) body`, with the case table collected while the body is walked.
-    fn switch(&mut self, scrutinee: ast::ExprId, body: ast::StmtId) -> Stmt {
+    fn switch(&mut self, scrutinee: ast::ExprId, body: ast::StmtId, span: Span) -> Stmt {
         let at = self.ast.expr_span(scrutinee);
         let cond = self.expr(scrutinee);
         let cond = self.value(cond);
+        // A cast to `const enum e` is a `switch` on `enum e` to gcc.
+        let written = self.types.unqualified(self.tast[cond].ty);
+        let boolean = self.truth_valued(scrutinee, cond);
         // Read before the promotion and not after it, because the range a case value is measured
         // against is the one that was written. `switch (c)` on a `char` and `case 300` is worth
         // saying, and by the time the promotion has run there is nothing left to say it about.
@@ -768,6 +772,17 @@ impl Checker<'_> {
         let Some(switch) = self.body.as_mut().and_then(|state| state.switches.pop()) else {
             return Stmt::Error;
         };
+        if !self.is_poisoned(cond) {
+            self.switch_warnings(&Switched {
+                written,
+                cond,
+                boolean,
+                cases: &switch.cases,
+                spans: &switch.spans,
+                default: switch.default.is_some(),
+                at: span,
+            });
+        }
         let cases = self.tast.add_cases(&switch.cases);
         for &labelled in &switch.labels {
             let Stmt::Case { case: entry, body } = self.tast[labelled] else {
@@ -1734,12 +1749,18 @@ mod tests {
         printer.finish()
     }
 
+    /// What was reported, leaving out what gcc says about a whole `switch`, which the driver
+    /// keeps or drops by name and which every `switch` here without a `default` would otherwise
+    /// add to. `check/switch.rs` has its own tests, end to end.
+    fn said<'c>(checker: &'c Checker<'_>) -> impl Iterator<Item = &'c Diagnostic> {
+        checker.errors.diagnostics().iter().filter(|d| {
+            !d.code.is_some_and(|code| ["E0852", "E0853", "E0854", "E0855"].contains(&code))
+        })
+    }
+
     /// What was reported, as the messages alone, notes included.
     fn messages(checker: &Checker<'_>) -> Vec<String> {
-        checker
-            .errors
-            .diagnostics()
-            .iter()
+        said(checker)
             .flat_map(|d| {
                 std::iter::once(d.message.clone())
                     .chain(d.children.iter().map(|n| n.message.clone()))
@@ -1758,12 +1779,7 @@ mod tests {
     /// of the two a diagnostic is. gcc 14 turned several of these from warnings into errors and
     /// the difference is the whole point of some of the tests below.
     fn reported(checker: &Checker<'_>) -> Vec<String> {
-        checker
-            .errors
-            .diagnostics()
-            .iter()
-            .map(|d| format!("{}: {}", d.severity.as_str(), d.message))
-            .collect()
+        said(checker).map(|d| format!("{}: {}", d.severity.as_str(), d.message)).collect()
     }
 
     #[test]
@@ -1816,7 +1832,7 @@ mod tests {
         let id = c.check_stmt(void, stmt);
 
         assert_eq!(dump(&c, id), "expr\n  const 1 : int\n");
-        assert!(c.errors.is_empty());
+        assert!(messages(&c).is_empty());
     }
 
     #[test]
@@ -1836,7 +1852,7 @@ mod tests {
             dump(&c, id),
             "expr\n  stmt-expr : int\n    block\n      expr\n        const 1 : int\n"
         );
-        assert!(c.errors.is_empty());
+        assert!(messages(&c).is_empty());
     }
 
     #[test]
@@ -1851,7 +1867,7 @@ mod tests {
         let id = c.check_stmt(void, stmt);
 
         assert_eq!(dump(&c, id), "expr\n  stmt-expr : void\n    block\n");
-        assert!(c.errors.is_empty());
+        assert!(messages(&c).is_empty());
     }
 
     #[test]
@@ -1897,7 +1913,7 @@ mod tests {
         let mut c = f.checker();
         let void = c.types.void();
         c.check_stmt(void, loop_stmt);
-        assert!(c.errors.is_empty(), "got {:?}", messages(&c));
+        assert!(messages(&c).is_empty(), "got {:?}", messages(&c));
 
         let mut c = f.checker();
         c.cx.pedantic = true;
@@ -1936,7 +1952,7 @@ mod tests {
         let mut c = f.checker();
         let void = c.types.void();
         c.check_stmt(void, switch);
-        assert!(c.errors.is_empty(), "got {:?}", messages(&c));
+        assert!(messages(&c).is_empty(), "got {:?}", messages(&c));
 
         let mut c = f.checker();
         let void = c.types.void();
@@ -1957,7 +1973,7 @@ mod tests {
         let id = c.check_stmt(void, body);
 
         assert_eq!(dump(&c, id), "block\n  goto #0 done\n  label #0 done\n    empty\n");
-        assert!(c.errors.is_empty());
+        assert!(messages(&c).is_empty());
     }
 
     #[test]
@@ -2040,7 +2056,7 @@ mod tests {
         let void = c.types.void();
         c.check_stmt(void, body);
 
-        assert!(c.errors.is_empty(), "got {:?}", messages(&c));
+        assert!(messages(&c).is_empty(), "got {:?}", messages(&c));
     }
 
     #[test]
@@ -2062,7 +2078,7 @@ mod tests {
         let void = c.types.void();
         c.check_stmt(void, body);
 
-        assert!(c.errors.is_empty(), "got {:?}", messages(&c));
+        assert!(messages(&c).is_empty(), "got {:?}", messages(&c));
     }
 
     #[test]
@@ -2099,7 +2115,7 @@ mod tests {
         let void = c.types.void();
         let id = c.check_stmt(void, body);
 
-        assert!(c.errors.is_empty(), "got {:?}", messages(&c));
+        assert!(messages(&c).is_empty(), "got {:?}", messages(&c));
         assert_eq!(
             dump(&c, id),
             "block\n  block\n    empty\n    goto #0 done\n    label #0 done\n      empty\n  \
@@ -2166,7 +2182,7 @@ mod tests {
         let void = c.types.void();
         let id = c.check_stmt(void, switch);
 
-        assert!(c.errors.is_empty(), "got {:?}", messages(&c));
+        assert!(messages(&c).is_empty(), "got {:?}", messages(&c));
         assert_eq!(
             dump(&c, id),
             "switch\n  cond\n    const 0 : int\n  cases\n    case #0 1\n    case #1 4 ... 6\n    \
@@ -2189,7 +2205,7 @@ mod tests {
         let void = c.types.void();
         let id = c.check_stmt(void, switch);
 
-        assert!(c.errors.is_empty(), "got {:?}", messages(&c));
+        assert!(messages(&c).is_empty(), "got {:?}", messages(&c));
         assert_eq!(
             dump(&c, id),
             "switch\n  cond\n    const 0 : int\n  cases\n    case #0 1\n    case #1 2\n  body\n    \
@@ -2313,7 +2329,7 @@ mod tests {
         let void = c.types.void();
         let id = c.check_stmt(void, outer);
 
-        assert!(c.errors.is_empty(), "got {:?}", messages(&c));
+        assert!(messages(&c).is_empty(), "got {:?}", messages(&c));
         assert_eq!(
             dump(&c, id),
             "switch\n  cond\n    const 0 : int\n  cases\n    case #1 1\n  body\n    block\n      \
@@ -2361,7 +2377,7 @@ mod tests {
         let void = c.types.void();
         c.check_stmt(void, stmt);
 
-        assert!(c.errors.is_empty(), "got {:?}", messages(&c));
+        assert!(messages(&c).is_empty(), "got {:?}", messages(&c));
     }
 
     #[test]
@@ -2375,6 +2391,6 @@ mod tests {
         let id = c.check_stmt(long, stmt);
 
         assert_eq!(dump(&c, id), "return\n  convert arithmetic : long\n    const 1 : int\n");
-        assert!(c.errors.is_empty());
+        assert!(messages(&c).is_empty());
     }
 }

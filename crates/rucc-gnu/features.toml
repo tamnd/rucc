@@ -737,8 +737,8 @@ kind = "attribute"
 gcc_version = "2.0"
 status = "implemented"
 used_by = ["linux", "glibc", "systemd"]
-tests = ["tests/accept/attributes-that-ask-for-nothing-this-compiler-does.c", "rucc-pp::the_kernel_s_compiler_attributes_are_answered_the_way_gcc_answers_them"]
-notes = "What it asks for is that the unused warnings keep quiet about the name, and this compiler gives none of them, so taking it and doing nothing is the whole of it. It becomes work the day `-Wunused-variable` does."
+tests = ["tests/accept/attributes-that-ask-for-nothing-this-compiler-does.c", "rucc-pp::the_kernel_s_compiler_attributes_are_answered_the_way_gcc_answers_them", "rucc::a_switch_is_warned_about_in_gcc_s_words_order_and_places"]
+notes = "What it asks for is that the unused warnings keep quiet about the name, and this compiler gives none of them, so taking it and doing nothing is the whole of it, except on an enumerator, where it keeps `-Wswitch` and `-Wswitch-enum` quiet about a `switch` that leaves the enumerator out, as in gcc. It becomes more work the day `-Wunused-variable` does."
 
 [[feature]]
 name = "expected_throw"
@@ -1801,8 +1801,8 @@ gcc_version = "10.0"
 status = "implemented"
 value = "202311"
 used_by = []
-tests = ["tests/accept/attributes-that-ask-for-nothing-this-compiler-does.c"]
-notes = "The standard's `unused`, and taken the same way, since this compiler gives none of the warnings it silences."
+tests = ["tests/accept/attributes-that-ask-for-nothing-this-compiler-does.c", "rucc::a_switch_is_warned_about_in_gcc_s_words_order_and_places"]
+notes = "The standard's `unused`, and taken the same way. On an enumerator it keeps `-Wswitch` and `-Wswitch-enum` quiet about a `switch` that leaves it out, as in gcc, and otherwise this compiler gives none of the warnings it silences."
 
 [[feature]]
 name = "nodiscard"

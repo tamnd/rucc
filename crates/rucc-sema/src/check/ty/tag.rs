@@ -924,6 +924,7 @@ impl Checker<'_> {
             };
             self.scopes.declare(name, Binding::Enumerator { value, ty });
             self.read_deprecated_enumerator(name, value, ty, enumerator.attrs, span);
+            self.read_unused_enumerator(id, name, enumerator.attrs);
         }
     }
 
