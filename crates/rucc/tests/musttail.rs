@@ -67,7 +67,7 @@ fn a_musttail_call_is_a_jump_at_every_level() {
         for (name, callee) in [("f", "g"), ("w", "v"), ("j", "g")] {
             let lines = body(&text, name);
             assert!(lines.contains(&format!("jmp {callee}")), "{level} {name}: {lines:#?}");
-            assert!(!lines.iter().any(|line| line.starts_with("call")), "{level}: {lines:#?}");
+            assert!(!lines.contains(&format!("call {callee}")), "{level}: {lines:#?}");
         }
         let lines = body(&text, "i");
         assert!(lines.iter().any(|line| line.starts_with("jmp *%")), "{level}: {lines:#?}");

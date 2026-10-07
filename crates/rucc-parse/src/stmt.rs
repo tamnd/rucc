@@ -16,7 +16,7 @@
 //! because a typedef name is still a perfectly good label name.
 
 use rucc_ast::{
-    Asm, AsmId, AsmOperand, AsmOperandList, AsmQuals, AttrList, AttrSyntax, Expr, ExprId, ForInit, Stmt,
+    Asm, AsmId, AsmOperand, AsmOperandList, AsmQuals, AttrList, AttrSyntax, Attribute, Expr, ExprId, ForInit, Stmt,
     StmtId, StmtList, StrList, SymbolList,
 };
 use rucc_base::Symbol;
@@ -132,16 +132,17 @@ impl Parser<'_> {
     fn ignored_on_statement(&mut self, attrs: AttrList, span: Span) {
         let musttail = self.cx.interner.find("musttail");
         let spaces = ["gnu", "__gnu__", "clang"].map(|space| self.cx.interner.find(space));
-        let mut others = false;
-        for attr in self.ast[attrs].to_vec() {
-            let spaced = attr.namespace.is_none_or(|space| spaces.contains(&Some(space)));
-            if spaced && Some(attr.name) == musttail && attr.syntax != AttrSyntax::Declspec {
-                self.warn("E0703", "'musttail' attribute ignored", attr.span);
-            } else {
-                others = true;
-            }
+        let is_musttail = |attr: &Attribute| {
+            attr.namespace.is_none_or(|space| spaces.contains(&Some(space)))
+                && Some(attr.name) == musttail
+                && attr.syntax != AttrSyntax::Declspec
+        };
+        let ignored: Vec<Span> =
+            self.ast[attrs].iter().filter(|attr| is_musttail(attr)).map(|attr| attr.span).collect();
+        for span in &ignored {
+            self.warn("E0703", "'musttail' attribute ignored", *span);
         }
-        if others {
+        if ignored.len() < self.ast[attrs].len() {
             self.warn("E0411", "attributes on this statement are ignored", span);
         }
     }
