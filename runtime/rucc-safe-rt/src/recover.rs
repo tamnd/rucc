@@ -358,7 +358,7 @@ pub fn witness(addr: *const c_void) -> Origin {
 #[must_use]
 pub fn argument(carried: Cap, addr: *const c_void) -> Cap {
     if !carried.is_bottom() {
-        return carried;
+        return carried.beside(addr as u64);
     }
     if addr.is_null() {
         return Cap::NULL;
@@ -560,6 +560,22 @@ fn word(class: u32, flags: u8) -> Meta {
     Meta::new(class, perm::READ | perm::WRITE, 0).with_flags(flags)
 }
 
+/// The capability of an object the compiler could see, `size` bytes at `base`.
+///
+/// A local is [`Class::Automatic`] and a variable the unit defines is [`Class::Static`]. Neither
+/// has a header or a plane entry, so the version is [`plane::FOREIGN`], which is the one that says
+/// the storage is real and nothing here versions it, and [`Meta::NAMED`] is what the bounds check
+/// reads. Not counted, for the reason [`made`] is not: the bounds came from where the pointer was
+/// made rather than from a pointer something lost track of.
+#[must_use]
+pub fn object(base: *const c_void, size: usize, class: Class) -> Cap {
+    if base.is_null() {
+        return Cap::NULL;
+    }
+    let meta = Meta::new(class, perm::READ | perm::WRITE, 0).with_flags(Meta::NAMED);
+    Cap::new(base as u64, size as u64, plane::FOREIGN, meta)
+}
+
 /// The capability for an address nothing is known about.
 ///
 /// Bounds over the whole address space, which is the only honest answer, and [`Meta::WIDE`] so
@@ -616,6 +632,36 @@ pub mod exports {
     #[unsafe(no_mangle)]
     pub unsafe extern "C" fn __rucc_cap_made(out: *mut Cap, base: *const c_void) {
         let cap = super::made(base);
+        // SAFETY: the caller's slot, which the contract above says is writable and aligned.
+        unsafe { out.write(cap) }
+    }
+
+    /// The capability of a local of `size` bytes at `base`, which is [`super::object`].
+    ///
+    /// The same first two arguments as [`__rucc_cap_made`], and the size the compiler knows as the
+    /// third, because there is no header to read it out of.
+    ///
+    /// # Safety
+    ///
+    /// `out` is a writable, aligned [`Cap`] sized slot. `base` is only ever recorded, never read
+    /// through.
+    #[unsafe(no_mangle)]
+    pub unsafe extern "C" fn __rucc_cap_local(out: *mut Cap, base: *const c_void, size: usize) {
+        let cap = super::object(base, size, crate::layout::Class::Automatic);
+        // SAFETY: the caller's slot, which the contract above says is writable and aligned.
+        unsafe { out.write(cap) }
+    }
+
+    /// The capability of a variable the unit defines, `size` bytes at `base`.
+    ///
+    /// [`__rucc_cap_local`] for static storage.
+    ///
+    /// # Safety
+    ///
+    /// As [`__rucc_cap_local`].
+    #[unsafe(no_mangle)]
+    pub unsafe extern "C" fn __rucc_cap_static(out: *mut Cap, base: *const c_void, size: usize) {
+        let cap = super::object(base, size, crate::layout::Class::Static);
         // SAFETY: the caller's slot, which the contract above says is writable and aligned.
         unsafe { out.write(cap) }
     }

@@ -158,7 +158,7 @@ pub unsafe fn load(dest: Cap, at: *const c_void, value: *const c_void) -> Cap {
     };
     match read {
         Read::Nothing => nothing(dest, value),
-        Read::Whole(cap) => cap,
+        Read::Whole(cap) => cap.beside(value as u64),
         Read::Header { ver, meta } => header(ver, meta, value),
     }
 }

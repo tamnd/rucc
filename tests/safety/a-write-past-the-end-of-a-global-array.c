@@ -1,8 +1,7 @@
 /* row: S3 */
 /* refuse: J1 */
-/* gap: #431 */
-/* Static storage is one instance per object that lives for the whole run, so it is the easiest
-   of the three to give a capability to and the one nothing writes a plane entry for yet. */
+/* Static storage is one object per variable that lives for the whole run, and the compiler knows
+   its size where it takes its address, so the capability it builds there is exact. */
 int table[16];
 
 int main(void) {
