@@ -299,7 +299,9 @@ pub struct Row {
 /// handed nothing. A local or a variable is in storage no region covers, so the planes have nothing
 /// to say about a copy into one and the capability the compiler made where the pointer was taken is
 /// the only thing that knows how big it is. That is believed the way [`crate::check::bounds`]
-/// believes it, which is only when it is named and only when it says no.
+/// believes it, which is only when it is named and only when it says no, and only about a range
+/// that reaches the object at all. A range wholly outside it is a capability describing somebody
+/// else as far as this can tell, and [`touches`] is where that is decided.
 ///
 /// # Panics
 ///
@@ -312,7 +314,7 @@ pub fn range(site: &'static str, addr: *const c_void, len: usize, cap: Cap) {
         return;
     }
     let at = addr as usize;
-    if cap.is_named() && !cap.covers(at as u64, len as u64) {
+    if cap.is_named() && touches(cap, at, len) && !cap.covers(at as u64, len as u64) {
         crate::fail::refused_at(Judgement::Access, site, past(cap, at));
     }
     let Some(region) = alloc::covering(at) else { return };
@@ -350,15 +352,44 @@ fn asked(region: &alloc::Region, at: usize) -> usize {
     recover::extent(region, at).map_or(usize::MAX, |(lo, ext)| lo.wrapping_add(ext))
 }
 
-/// Where the object `cap` names ends, or nowhere when it is not one the compiler named.
-fn named_end(cap: Cap) -> usize {
-    if cap.is_named() { cap.lo.wrapping_add(cap.ext) as usize } else { usize::MAX }
+/// Whether `len` bytes from `at` reach the object `cap` names, counting a start one past its end.
+///
+/// What tells a pointer that went wrong from a capability that describes somebody else, which is
+/// the question [`Cap::beside`] answers for a capability that travelled with nothing but the
+/// address to go on. A wrapper also has the length. A range that starts before the object and runs
+/// into it is the underwrite of document 03's S8, `memcpy(buf - 8, src, n)`, and the start alone
+/// cannot tell that from a pointer into some unrelated object. The bytes can, because two distinct
+/// objects do not overlap, so a range from one of them that reaches into the other has left the
+/// first whichever of the two the capability was really about.
+fn touches(cap: Cap, at: usize, len: usize) -> bool {
+    let (at, lo) = (at as u64, cap.lo);
+    at.wrapping_sub(lo) <= cap.ext || (at < lo && lo - at < len as u64)
+}
+
+/// Where a walk from `start` has to stop to stay out of trouble with the object `cap` names, or
+/// nowhere when it is not one the compiler named or `start` is past it.
+///
+/// Its end for a walk that starts inside, and its first byte for one that starts before it, by
+/// the argument [`touches`] makes: a walk from below that reaches the object has written or read
+/// both sides of its first byte, and only one of those was ever the program's.
+fn named_end(cap: Cap, start: usize) -> usize {
+    if !cap.is_named() {
+        return usize::MAX;
+    }
+    let (at, lo) = (start as u64, cap.lo);
+    if at.wrapping_sub(lo) <= cap.ext {
+        lo.wrapping_add(cap.ext) as usize
+    } else if at < lo {
+        lo as usize
+    } else {
+        usize::MAX
+    }
 }
 
 /// The first byte of a range starting at `at` that `cap` does not permit, which is `at` itself
 /// when the range starts outside the object and the object's end when it starts inside.
 fn past(cap: Cap, at: usize) -> usize {
-    if (at as u64).wrapping_sub(cap.lo) < cap.ext { named_end(cap) } else { at }
+    if (at as u64).wrapping_sub(cap.lo) < cap.ext { named_end(cap, at) } else { at }
 }
 
 /// Whether the frame has a place for an argument of a row, which is whether it is a pointer.
@@ -432,15 +463,17 @@ const fn same(a: &[u8], b: &[u8]) -> bool {
     true
 }
 
-/// The capability the caller handed over at `at` for a pointer that arrived as `addr`.
+/// The capability the caller handed over at `at`.
 ///
 /// The bottom capability when there was no frame, which is a call from code that was not
-/// instrumented or from a call site that cleared it, and [`Cap::beside`] for the reason it is
-/// there: a pointer that arrives outside the object it is said to belong to is not believed.
+/// instrumented or from a call site that cleared it. A pointer that arrives outside the object it
+/// is said to belong to is not dropped here the way [`Cap::beside`] drops one, because a wrapper
+/// knows how many bytes it is about to touch and [`touches`] can say more with those than the
+/// address can alone.
 #[doc(hidden)]
 #[must_use]
-pub fn given(frame: Option<&Frame>, at: usize, addr: usize) -> Cap {
-    frame.map_or(Cap::BOTTOM, |frame| frame.arg(at).beside(addr as u64))
+pub fn given(frame: Option<&Frame>, at: usize) -> Cap {
+    frame.map_or(Cap::BOTTOM, |frame| frame.arg(at))
 }
 
 /// The length of a NUL terminated string, checked as it is discovered.
@@ -695,7 +728,7 @@ impl Watch {
             (region, unsafe { region.plane.version(start) })
         });
         let asked = watched.map_or(usize::MAX, |(region, _)| asked(&region, start));
-        Self { watched, start, end: asked.min(named_end(cap)) }
+        Self { watched, start, end: asked.min(named_end(cap, start)) }
     }
 
     /// Judges one byte of the walk, if it is one the plane could have changed its answer at.
@@ -1204,7 +1237,6 @@ macro_rules! __given {
                 const AT: usize = $crate::effects::slot(NAMES, POINTERS, stringify!($arg));
                 AT
             },
-            $arg as usize,
         )
     };
 }
@@ -1486,9 +1518,9 @@ mod tests {
         let cap = recover::object(at, 50, Class::Automatic);
         let from = |offset: usize| at.cast::<u8>().wrapping_add(offset).cast::<c_void>();
         assert!(!refused(|| range("t", at, 50, cap)));
-        assert!(!refused(|| range("t", from(10), 40, cap.beside(from(10) as u64))));
+        assert!(!refused(|| range("t", from(10), 40, cap)));
         assert!(refused(|| range("t", at, 51, cap)));
-        assert!(refused(|| range("t", from(10), 41, cap.beside(from(10) as u64))));
+        assert!(refused(|| range("t", from(10), 41, cap)));
         // Without one it is measured and not judged, which is what it always was.
         assert!(!refused(|| range("t", at, 51, Cap::BOTTOM)));
     }
@@ -1507,6 +1539,42 @@ mod tests {
         let cap = recover::object(at, 8, Class::Automatic);
         // SAFETY: there is a terminator inside the array.
         assert_eq!(unsafe { scan("t", at, cap) }, 7);
+    }
+
+    #[test]
+    fn a_range_that_starts_before_an_object_is_held_to_it_only_when_it_reaches_it() {
+        // The object is the middle thirty two bytes of the array, so there is room on both sides
+        // of it that belongs to nobody the capability knows about.
+        let mut room = [0_u8; 64];
+        let base = room.as_mut_ptr().cast_const().cast::<c_void>();
+        let from = |offset: usize| base.cast::<u8>().wrapping_add(offset).cast::<c_void>();
+        let cap = recover::object(from(16), 32, Class::Automatic);
+        // The underwrite: eight bytes before the object and on into it.
+        assert!(refused(|| range("t", from(8), 16, cap)));
+        assert!(refused(|| range("t", from(8), 9, cap)));
+        // A range that stops short of it is about some other object, and so is one past its end
+        // by more than one.
+        assert!(!refused(|| range("t", from(8), 8, cap)));
+        assert!(!refused(|| range("t", from(0), 8, cap)));
+        assert!(!refused(|| range("t", from(49), 8, cap)));
+        // One past the end is still the object's, as it always was.
+        assert!(refused(|| range("t", from(48), 1, cap)));
+    }
+
+    #[test]
+    fn a_string_that_starts_before_an_object_is_refused_where_it_runs_into_it() {
+        let mut room = [b'a'; 64];
+        room[63] = 0;
+        let base = room.as_ptr();
+        let cap = recover::object(base.wrapping_add(16).cast(), 32, Class::Automatic);
+        assert!(refused(|| {
+            // SAFETY: the walk is refused at the object's first byte, inside the array.
+            let _ = unsafe { scan("t", base.wrapping_add(8).cast(), cap) };
+        }));
+        room[12] = 0;
+        let base = room.as_ptr();
+        // SAFETY: there is a terminator before the object starts.
+        assert_eq!(unsafe { scan("t", base.wrapping_add(8).cast(), cap) }, 4);
     }
 
     /// The address `offset` bytes into an instance.

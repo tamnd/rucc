@@ -816,6 +816,32 @@ mod tests {
     }
 
     #[test]
+    fn a_copy_that_starts_before_a_local_the_caller_named_is_refused() {
+        let _turn = turn();
+        // Juliet's CWE-124: the pointer is eight bytes before the buffer, so it is outside the
+        // object its capability names, and the copy runs from there into the buffer. Dropping the
+        // capability for being somewhere else let all of it through.
+        let mut room = [0_u8; 64];
+        let from = [b'A'; 32];
+        let base: *mut u8 = room.as_mut_ptr();
+        let cap = crate::recover::object(
+            base.wrapping_add(16).cast_const().cast(),
+            32,
+            crate::layout::Class::Automatic,
+        );
+        let to: *mut c_void = base.wrapping_add(8).cast();
+        let src: *const c_void = from.as_ptr().cast();
+        assert!(handed(&[cap], || {
+            // SAFETY: thirty two bytes of the sixty four the array has, refused before the copy.
+            let _ = unsafe { memcpy(to, src, 32) };
+        }));
+        assert!(!handed(&[cap], || {
+            // SAFETY: eight bytes that stop where the object starts.
+            let _ = unsafe { memcpy(to, src, 8) };
+        }));
+    }
+
+    #[test]
     fn a_copy_of_a_string_that_has_no_terminator_is_refused_over_its_source() {
         let _turn = turn();
         // The other direction. Here the destination is enormous and the source is the problem, and
