@@ -210,39 +210,78 @@ fn takes_label(mnemonic: &str) -> bool {
 }
 
 /// A list of vector registers, `{v0.16b, v1.16b}` or `{v0.16b - v3.16b}`, which have to follow
-/// each other and be of one arrangement. The one after `v31` is `v0`.
+/// each other and be of one arrangement. The one after `v31` is `v0`. With an index after it,
+/// `{v0.s, v1.s}[1]`, the registers name a lane size rather than an arrangement, and the list is
+/// that lane of each.
 fn list(piece: &str) -> Result<Value, Error> {
-    let inner = piece.strip_prefix('{').and_then(|inner| inner.strip_suffix('}'));
-    let inner = inner.ok_or_else(|| error(piece))?.to_ascii_lowercase();
-    let vector = |name: &str| match register(name.trim()) {
-        Some(Value::Vector(arrangement, number)) => Ok((arrangement, number)),
-        _ => Err(error(piece)),
+    /// What every register in the list is read as.
+    #[derive(Clone, Copy, PartialEq)]
+    enum Kind {
+        Whole(Arrangement),
+        Lane(Scalar),
+    }
+
+    let (braced, index) = match piece.strip_suffix(']').and_then(|rest| rest.rsplit_once('[')) {
+        Some((braced, index)) => {
+            let index = number(index.trim()).and_then(|index| u8::try_from(index).ok());
+            (braced.trim_end(), Some(index.ok_or_else(|| error(piece))?))
+        }
+        None => (piece, None),
     };
-    let (arrangement, first, count) = match inner.split_once('-') {
+    let inner = braced.strip_prefix('{').and_then(|inner| inner.strip_suffix('}'));
+    let inner = inner.ok_or_else(|| error(piece))?.to_ascii_lowercase();
+    let vector = |name: &str| {
+        let name = name.trim();
+        let lane = |(digits, lane): (&str, &str)| {
+            let scalar = match lane {
+                "b" => Scalar::B,
+                "h" => Scalar::H,
+                "s" => Scalar::S,
+                "d" => Scalar::D,
+                _ => return None,
+            };
+            Some((Kind::Lane(scalar), numbered(digits, 32)?))
+        };
+        let found = match index {
+            Some(_) => name.strip_prefix('v').and_then(|rest| rest.split_once('.')).and_then(lane),
+            None => match register(name) {
+                Some(Value::Vector(arrangement, number)) => {
+                    Some((Kind::Whole(arrangement), number))
+                }
+                _ => None,
+            },
+        };
+        found.ok_or_else(|| error(piece))
+    };
+    let (kind, first, count) = match inner.split_once('-') {
         Some((from, to)) => {
-            let ((arrangement, first), (other, last)) = (vector(from)?, vector(to)?);
-            if other != arrangement {
+            let ((kind, first), (other, last)) = (vector(from)?, vector(to)?);
+            if other != kind {
                 return Err(error(piece));
             }
-            (arrangement, first, (last + 32 - first) % 32 + 1)
+            (kind, first, (last + 32 - first) % 32 + 1)
         }
         None => {
             let mut names = inner.split(',');
-            let (arrangement, first) = vector(names.next().unwrap_or(""))?;
+            let (kind, first) = vector(names.next().unwrap_or(""))?;
             let mut count = 1;
             for name in names {
-                if vector(name)? != (arrangement, (first + count) % 32) {
+                if vector(name)? != (kind, (first + count) % 32) {
                     return Err(error(piece));
                 }
                 count += 1;
             }
-            (arrangement, first, count)
+            (kind, first, count)
         }
     };
     if count > 4 {
         return Err(error(piece));
     }
-    Ok(Value::List(arrangement, first, count))
+    Ok(match (kind, index) {
+        (Kind::Whole(arrangement), None) => Value::List(arrangement, first, count),
+        (Kind::Lane(scalar), Some(index)) => Value::Lanes(scalar, first, count, index),
+        _ => return Err(error(piece)),
+    })
 }
 
 /// The operands, split at the commas that are not inside an address.

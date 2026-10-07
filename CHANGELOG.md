@@ -45,6 +45,7 @@ All notable changes are recorded here. The format follows [Keep a Changelog](htt
 
 ### Fixed
 
+- The AArch64 assembler reads and encodes the single lane loads and stores of a list, `st4 {v19.s,v20.s,v21.s,v22.s}[0],[x0],#16` and the like, which the kernel's poly1305-core.S ends with. (#3323)
 - `-ffixed-q16` and the other spellings of an AArch64 vector register keep that register out of the allocator, so the kernel's aegis128-neon builds with the S-box it loads into `v16` to `v31` left alone. (#3322)
 - An `asm` operand can be a vector, carried in the floating point type of its width, so `"w" (p)` for a `uint64x2_t` lands in a vector register on AArch64 and the kernel's xor-eor3 builds. (#3320)
 - A `const` object with a constant initializer is taken as a case label, and in a static assertion inside a function, once `-O1` or above is given, the way gcc folds it there, so the kernel's msm dp_ctrl builds. At `-O0` both stay errors as in gcc, and `-pedantic` warns in gcc's words (`E0848`, `E0849`). (#3318)
