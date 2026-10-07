@@ -39,6 +39,7 @@ All notable changes are recorded here. The format follows [Keep a Changelog](htt
 
 ### Fixed
 
+- A link for a WASI target with `--sysroot` uses the WASI link line, and reads the start files and the archives out of `lib/<tuple>` when the tree has that directory, as the wasi-sysroot of wasi-sdk does. Before this, the link failed with "there is no link line for wasm32-unknown-wasip1-none in this compiler yet". (#3259)
 - `__builtin_object_size` with kind 1 or 3 answers for the member an address is in after the function asking has been inlined, as gcc does. Lowering marks the add that steps to a member with the member's size and the answers after inlining read it. Kind 1 used to answer with what was left of the whole object and kind 3 was not answered, so the kernel's fortified `strcpy` and `strncpy` let a copy past the end of a member through, and the `lib/test_fortify` builds that must be refused were built. (#3252)
 - Under `-fsafety`, a variable length array and the buffer `__builtin_alloca` gives back are held to the size they were given. Both used to get the capability of the whole address space, so an overflow of one, inside the function or through `memcpy` and the other wrappers, was never refused. (#3251)
 - Under `-fsafety`, `memcpy`, `strcpy`, `strlen` and the other interposed functions are held to the size of a local or a variable they are handed, not only to the heap's. A call to a wrapper now publishes the caller's capabilities rather than clearing the frame, and every wrapper takes it. (#3249)

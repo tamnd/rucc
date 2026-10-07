@@ -66,6 +66,7 @@ pub struct Sysroot {
     target: TargetTuple,
     root: PathBuf,
     stubs: PathBuf,
+    lib: PathBuf,
 }
 
 impl Sysroot {
@@ -80,7 +81,8 @@ impl Sysroot {
         let key = target.to_canonical_string();
         let root = cache.join("sysroots").join(&key);
         let stubs = cache.join("stubs").join(&key);
-        Sysroot { target, root, stubs }
+        let lib = root.join("lib");
+        Sysroot { target, root, stubs, lib }
     }
 
     /// A sysroot rooted at a directory the user named, with `--sysroot` or `-isysroot`.
@@ -92,7 +94,18 @@ impl Sysroot {
     #[must_use]
     pub fn at(root: PathBuf, target: TargetTuple) -> Self {
         let stubs = root.join("lib");
-        Sysroot { target, root, stubs }
+        let lib = stubs.clone();
+        Sysroot { target, root, stubs, lib }
+    }
+
+    /// The same sysroot with its link inputs in `dir` rather than in `lib`.
+    ///
+    /// For a tree with a directory of libraries for each target below `lib`, which is how the
+    /// wasi-sysroot of wasi-sdk is laid out: `lib/wasm32-wasip1/crt1-command.o` and
+    /// `lib/wasm32-wasip1/libc.a`. tamnd/rucc#3259.
+    #[must_use]
+    pub fn with_lib(self, dir: PathBuf) -> Self {
+        Sysroot { lib: dir, ..self }
     }
 
     /// The target this sysroot is for.
@@ -176,7 +189,7 @@ impl Sysroot {
     /// compiler's own runtime for this target.
     #[must_use]
     pub fn lib(&self) -> PathBuf {
-        self.root.join("lib")
+        self.lib.clone()
     }
 
     /// Where the stub libraries a glibc link reads are, which is `<cache>/stubs/<canonical tuple>`
