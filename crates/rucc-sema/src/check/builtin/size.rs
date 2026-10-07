@@ -383,8 +383,16 @@ impl Checker<'_> {
 
     /// Whether the address reads a local of the function being checked, which is the one place a
     /// pointer can come from that the IR has every assignment of in front of it.
+    ///
+    /// The pointer may be under a member, a subscript or a dereference, as in `p->data`, whose
+    /// object is the one `p` was set to. The walk has no answer for a flexible array reached that
+    /// way, and gcc's at `-O2` is what is left of that object, which the IR can work out. The
+    /// kernel's nouveau sizes a request on the stack with `__member_size(args->data)`.
     fn local(&self, expr: ExprId) -> bool {
         match self.tast[expr].kind {
+            ExprKind::Member { .. }
+            | ExprKind::Subscript { .. }
+            | ExprKind::Unary { op: UnaryOp::Deref | UnaryOp::AddrOf, .. } => self.set_here(expr),
             ExprKind::Decl(id) => {
                 let decl = &self.tast[id];
                 decl.kind == DeclKind::Object
@@ -394,6 +402,38 @@ impl Checker<'_> {
             ExprKind::Cast(inner) | ExprKind::Convert { operand: inner, .. } => self.local(inner),
             ExprKind::Binary { lhs, rhs, .. } => self.local(lhs) || self.local(rhs),
             ExprKind::Cond { then, otherwise, .. } => self.local(then) || self.local(otherwise),
+            _ => false,
+        }
+    }
+
+    /// Whether this place is reached through a pointer this function set, a local that is not a
+    /// parameter. A parameter's object is only known once the call is inlined, and a place named
+    /// rather than reached through a pointer has the size its type says, so both are answered here.
+    fn set_here(&self, expr: ExprId) -> bool {
+        match self.tast[expr].kind {
+            ExprKind::Member { base, .. }
+            | ExprKind::Unary { op: UnaryOp::AddrOf, operand: base } => self.set_here(base),
+            ExprKind::Subscript { base, .. } => match self.decayed(base) {
+                Some(array) => self.set_here(array),
+                None => self.pointer_set_here(base),
+            },
+            ExprKind::Unary { op: UnaryOp::Deref, operand } => self.pointer_set_here(operand),
+            _ => false,
+        }
+    }
+
+    /// Whether this pointer is a local of the function, not a parameter, read as it is.
+    fn pointer_set_here(&self, expr: ExprId) -> bool {
+        match self.tast[expr].kind {
+            ExprKind::Decl(id) => {
+                let decl = &self.tast[id];
+                decl.kind == DeclKind::Object
+                    && decl.duration == StorageDuration::Automatic
+                    && !self.is_parameter(id)
+            }
+            ExprKind::Cast(inner) | ExprKind::Convert { operand: inner, .. } => {
+                self.pointer_set_here(inner)
+            }
             _ => false,
         }
     }
