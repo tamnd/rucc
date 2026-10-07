@@ -1626,12 +1626,14 @@ fn line_for(
     for dir in &opts.search {
         args.push(format!("-L{}", dir.display()));
     }
-    for dir in &dirs {
-        args.push(format!("-L{}", dir.display()));
-    }
     // Where `libgcc.a` and `libgcc_eh.a` are, which is not where the C library is. Nothing is
     // added when there is no gcc on the machine, and then the `-l` names below are left off too.
+    // It comes before the system directories, as in GCC, so a library that GCC ships in its own
+    // directory is the one that the link takes.
     for dir in &runtime {
+        args.push(format!("-L{}", dir.display()));
+    }
+    for dir in &dirs {
         args.push(format!("-L{}", dir.display()));
     }
 
@@ -2260,9 +2262,26 @@ pub fn multi_os_directory(target: Triple, sysroot: Option<&Path>) -> &'static st
     if real("/usr/lib64") && has_libc("/usr/lib64") { "../lib64" } else { "../lib" }
 }
 
-/// The candidates that are there.
+/// The candidates that GCC on this machine searches.
+///
+/// That is all of them, less the word size directory when it is not the one that
+/// [`multi_os_directory`] names. Arch Linux has `/usr/lib64` as a link to `/usr/lib`, and Debian has
+/// one with only the loader in it. GCC does not search either one, so a build system that reads the
+/// link line finds the same directories with both compilers.
+fn system_dirs(target: Triple, sysroot: Option<&Path>) -> Vec<PathBuf> {
+    let multi_os = multi_os_directory(target, sysroot);
+    let skipped: &[&str] = match multi_os {
+        "../lib64" | "../lib32" => &[],
+        _ if target.arch == Arch::X86 => &["/usr/lib32", "/lib32"],
+        _ => &["/usr/lib64", "/lib64"],
+    };
+    let skipped: Vec<PathBuf> = skipped.iter().map(|dir| under(sysroot, dir)).collect();
+    candidates(target, sysroot).into_iter().filter(|dir| !skipped.contains(dir)).collect()
+}
+
+/// The system directories that are there.
 fn library_dirs(target: Triple, sysroot: Option<&Path>) -> Vec<PathBuf> {
-    candidates(target, sysroot).into_iter().filter(|dir| dir.is_dir()).collect()
+    system_dirs(target, sysroot).into_iter().filter(|dir| dir.is_dir()).collect()
 }
 
 /// Where a library is looked for, in the order it is looked for in.
@@ -2299,7 +2318,7 @@ pub fn search_dirs(link: &LinkOptions, target: Triple) -> Vec<PathBuf> {
     // The directory of the newest GCC comes before the system ones, as in GCC. It holds
     // `libgcc.a` and `crtbegin.o`, which a build system asks for by name.
     dirs.extend(gcc_runtime(target, link));
-    dirs.extend(candidates(target, link.sysroot.as_deref()));
+    dirs.extend(system_dirs(target, link.sysroot.as_deref()));
     dirs
 }
 
@@ -3009,6 +3028,25 @@ mod tests {
         assert!(dirs.contains(&PathBuf::from("/usr/lib/i386-linux-gnu")), "{dirs:?}");
         assert!(dirs.contains(&PathBuf::from("/usr/lib32")), "{dirs:?}");
         assert!(!dirs.contains(&PathBuf::from("/usr/lib64")), "{dirs:?}");
+    }
+
+    #[test]
+    fn the_word_size_directory_is_searched_only_where_gcc_searches_it() {
+        let arch = a_machine("arch", &["usr/lib/libc.so.6", "usr/lib64/ld-linux-x86-64.so.2"]);
+        let dirs = library_dirs(linux(), Some(&arch));
+        assert_eq!(dirs, [arch.join("usr/lib")]);
+        let fedora = a_machine("fedora64", &["usr/lib64/libc.so.6", "usr/lib/libc.so.6"]);
+        let dirs = library_dirs(linux(), Some(&fedora));
+        assert_eq!(dirs, [fedora.join("usr/lib64"), fedora.join("usr/lib")]);
+        let gcc = fedora.join("usr/lib/gcc/x86_64-redhat-linux/16");
+        fs::create_dir_all(&gcc).expect("a directory");
+        fs::write(gcc.join("libgcc.a"), b"").expect("a file");
+        let opts = LinkOptions { sysroot: Some(fedora.clone()), ..LinkOptions::default() };
+        let dirs = search_dirs(&opts, linux());
+        assert_eq!(dirs.first(), Some(&gcc), "{dirs:?}");
+        for root in [arch, fedora] {
+            fs::remove_dir_all(&root).expect("clean up");
+        }
     }
 
     #[test]
