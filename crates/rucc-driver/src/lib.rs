@@ -4244,6 +4244,12 @@ fn link_all(opts: &Options, plan: &Plan, link: &LinkOptions, verbose: bool) -> i
     // And before that, whether this link has a line at all and whether what it reads is on the
     // machine. Both are answerable now, and a target whose sysroot has not been built is worth
     // saying so about before the compilation rather than after it.
+    // First of all, whether there is code for this target. A target with no back end has no
+    // runtime either, so the preflight would name the missing runtime and a command that fails.
+    let compiles = plan.jobs.iter().any(|job| job.phases.contains(&Phase::Compile));
+    if let Some(why) = compiles.then(|| compile::no_back_end(opts.target)).flatten() {
+        return complain(why);
+    }
     if let Err(why) = link::preflight(opts.target, link) {
         return complain(why);
     }

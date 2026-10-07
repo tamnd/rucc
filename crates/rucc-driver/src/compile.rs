@@ -1177,6 +1177,26 @@ struct Origin<'a> {
     meaning: &'a crate::shapes::Meaning,
 }
 
+/// Why there is no code for this target, or `None` when there is a back end for it.
+///
+/// Asked by the link before anything is compiled, because a link for a target with no back end
+/// would otherwise stop first at the missing `librucc_builtins.a`, and the command that the
+/// message names fails for the same reason. tamnd/rucc#3276.
+pub(crate) fn no_back_end(target: Triple) -> Option<String> {
+    if target.arch.is_wasm() {
+        return None;
+    }
+    let info = TargetInfo::new(target);
+    Machine::for_target(&info).is_none().then(|| nothing_to_generate(&info.tuple))
+}
+
+/// The one message for a target with no back end, from the link and from the compile.
+fn nothing_to_generate(tuple: &dyn std::fmt::Display) -> String {
+    format!(
+        "there is no back end for {tuple} in this compiler yet, so there is nothing to generate"
+    )
+}
+
 fn generate(
     module: &mut rucc_ir::Module,
     names: &mut Interner,
@@ -1281,10 +1301,7 @@ fn generate(
         return Ok(Artifact::Object { bytes: written.bytes, defines: written.defines });
     }
     let Some(machine) = Machine::for_target(target) else {
-        return Err(vec![unsupported(&format!(
-            "there is no back end for {} in this compiler yet, so there is nothing to generate",
-            target.tuple
-        ))]);
+        return Err(vec![unsupported(&nothing_to_generate(&target.tuple))]);
     };
     // Refused rather than dropped. A command line that asks for a stack protector on a target
     // that has nowhere to keep the word one is compared against would otherwise get code with no
@@ -4888,6 +4905,18 @@ decl #0 x : int object external static defined
         assert!(result.failed());
         assert!(result.messages[0].contains("no back end for riscv64"), "{:?}", result.messages);
         assert!(result.text().is_empty());
+    }
+
+    /// The link asks the same question before it compiles, and a target with a back end, wasm
+    /// included, has no answer.
+    #[test]
+    fn the_link_can_ask_whether_a_target_has_a_back_end() {
+        let riscv = "riscv64-unknown-linux-gnu".parse::<Triple>().unwrap();
+        let why = no_back_end(riscv).unwrap();
+        assert!(why.contains("no back end for riscv64"), "{why}");
+        for tuple in ["x86_64-unknown-linux-gnu", "aarch64-unknown-linux-gnu", "wasm32-wasip1"] {
+            assert_eq!(no_back_end(tuple.parse::<Triple>().unwrap()), None, "{tuple}");
+        }
     }
 
     /// A wasm target reads, checks and lowers the program, and the wasm back end writes the
