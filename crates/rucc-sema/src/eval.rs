@@ -115,6 +115,7 @@ pub struct Eval<'a> {
     deferred: bool,
     literals: bool,
     objects: bool,
+    optimized: bool,
     read_object: bool,
     depth: u32,
 }
@@ -146,6 +147,7 @@ impl<'a> Eval<'a> {
             deferred: false,
             literals: false,
             objects: false,
+            optimized: false,
             read_object: false,
             depth: 0,
         }
@@ -158,7 +160,7 @@ impl<'a> Eval<'a> {
     /// array and an initializer for an object with static storage. `const int n = 4; char b[n];`
     /// is an array of four there rather than a variable length array, and `static int x = n;`
     /// compiles, while `_Static_assert (n == 4, "")`, a `case n:` and `enum { e = n }` are refused
-    /// by gcc 16 in every dialect. The object has to be `const` and not `volatile`, of an integer
+    /// by gcc 16 in every dialect at `-O0`. [`Self::optimized`] is the reading it takes above that. The object has to be `const` and not `volatile`, of an integer
     /// type, and initialized with something that is itself a constant. One with automatic storage
     /// counts only where that initializer is an integer constant expression the strict way, so
     /// `const int m = n + 1;` in a body is not one, and one with static storage counts where its
@@ -169,6 +171,22 @@ impl<'a> Eval<'a> {
     #[must_use]
     pub fn objects(mut self, objects: bool) -> Eval<'a> {
         self.objects = objects;
+        self
+    }
+
+    /// The same reading, for a case label or a static assertion in a body when gcc optimizes.
+    ///
+    /// gcc folds a `const` object to its value everywhere it folds once `-O` is given, whatever
+    /// the dialect, and a case label and a static assertion in a body are two places it folds
+    /// before it asks for a constant. So `const u32 hbr2 = 540000;` makes `case hbr2:` a label
+    /// at `-O2` and an error at `-O0`, which is what the kernel's msm DisplayPort driver writes.
+    /// An automatic object counts where its initializer folds this way too, so `const int m = n +
+    /// 1;` after `const int n = 4;` does. A static assertion at file scope, an enumerator, a
+    /// bit-field width and an alignment are not folded first, so they keep the stricter rule.
+    #[must_use]
+    pub fn optimized(mut self, optimized: bool) -> Eval<'a> {
+        self.objects |= optimized;
+        self.optimized = optimized;
         self
     }
 
@@ -1022,8 +1040,9 @@ impl<'a> Eval<'a> {
             return None;
         }
         // An automatic object's initializer is kept as written, so it counts only where it is a
-        // constant without this reading, which is where gcc draws the line as well.
-        self.objects = !automatic;
+        // constant without this reading, which is where gcc draws the line as well until it
+        // optimizes, when it folds that initializer too.
+        self.objects = !automatic || self.optimized;
         self.depth += 1;
         let value = self.eval(entry.value);
         self.depth -= 1;

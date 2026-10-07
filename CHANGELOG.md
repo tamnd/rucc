@@ -44,6 +44,7 @@ All notable changes are recorded here. The format follows [Keep a Changelog](htt
 
 ### Fixed
 
+- A `const` object with a constant initializer is taken as a case label, and in a static assertion inside a function, once `-O1` or above is given, the way gcc folds it there, so the kernel's msm dp_ctrl builds. At `-O0` both stay errors as in gcc, and `-pedantic` warns in gcc's words (`E0848`, `E0849`). (#3318)
 - Under `-fsafety`, a loop the optimizer splits into a half with no checks and a half with all of them no longer runs into the rounding of a heap block in the unchecked half. The split was made at how much of the block the lifetime plane covers, which is the block rounded up to its size class, so eleven bytes copied one at a time into `malloc(10)` were refused at -O0 and went through at -O2. It is now made at what the block's header says was asked for. Juliet's CWE-122 CWE193 loop cases have this shape. (#3317)
 - An array that lives for the whole program can be initialized from a compound literal of its own array type, as gcc allows, which is how the kernel's FCoE headers spell their MAC addresses, so fcoe_ctlr and qedf_fip build. (#3314)
 - `__builtin_types_compatible_p` takes the qualifiers off an array's elements along with the top level ones, as gcc does, so the kernel's `container_of` in camss (`to_vfe` and `to_ispif`) no longer fails its static assert and camss-vfe, camss-ispif, camss-vfe-17x and camss-vfe-gen1 build. (#3311)

@@ -981,3 +981,39 @@ fn a_static_array_takes_a_compound_literal_of_its_own_type() {
         assert!(!out.status.success(), "the compiler took:\n{refused}");
     }
 }
+
+/// gcc folds a `const` object to its value in a case label and in a static assertion in a body
+/// once it optimizes, which the kernel's msm DisplayPort driver leans on with `case
+/// link_rate_hbr2:`, and refuses both at `-O0`. `-pedantic` says so at each one.
+#[test]
+fn a_const_object_is_a_case_label_when_optimizing() {
+    let source = "static const int n = 4;\n\
+                  int f(int x) {\n\
+                      const unsigned hbr2 = 540000;\n\
+                      const int m = n + 1;\n\
+                      _Static_assert(m == 5, \"m\");\n\
+                      switch (x) { case hbr2: return 1; case m: return 2; case 6 ... n + 3: return 3; }\n\
+                      return 0;\n\
+                  }\n";
+    let got = ir("const-case-o2", &["-O2"], source);
+    assert!(got.contains("540000"), "the label is missing from:\n{got}");
+    let out = compile("const-case-o0", &["--emit=ir", "-O0"], source);
+    let said = String::from_utf8_lossy(&out.stderr);
+    assert!(!out.status.success(), "-O0 took the labels");
+    assert_eq!(lines_with(&said, "case label does not reduce to an integer constant").len(), 3);
+    let said = said_with("const-case-pedantic", &["-O2", "-pedantic"], source);
+    assert_eq!(lines_with(&said, "case label is not an integer constant expression").len(), 3);
+    assert_eq!(
+        lines_with(&said, "static assertion is not an integer constant expression").len(),
+        1
+    );
+    for refused in [
+        "int f(int x, int k) { const int c = k; switch (x) { case c: return 1; } return 0; }\n",
+        "int f(int x) { volatile const int v = 1; switch (x) { case v: return 1; } return 0; }\n",
+        "static const int n = 4;\n_Static_assert(n == 4, \"\");\n",
+        "static const int n = 4;\nenum { e = n };\n",
+    ] {
+        let out = compile("const-case-refused", &["--emit=ir", "-O2"], refused);
+        assert!(!out.status.success(), "the compiler took:\n{refused}");
+    }
+}

@@ -853,8 +853,16 @@ impl Checker<'_> {
         let at = self.ast.expr_span(value);
         let value = self.expr(value);
         let value = self.value(value);
-        let folded = match self.eval_integer(value) {
-            Ok(folded) => folded,
+        let folded = match self.eval_folded_integer(value) {
+            Ok((folded, read_object)) => {
+                if read_object && self.cx.pedantic {
+                    self.report(
+                        Diagnostic::warning("case label is not an integer constant expression", at)
+                            .with_code("E0848"),
+                    );
+                }
+                folded
+            }
             Err(failed) => {
                 if !failed.poisoned {
                     self.report(
