@@ -316,6 +316,23 @@ impl Table {
         self.run(subject, 0, left, bindings)
     }
 
+    /// Whether a term with this head could match any rule at all, which is a question about the
+    /// root of the trie alone.
+    ///
+    /// A walk whose first node has no branch for the head, no constant to compare against, no
+    /// repeat to look for and no wildcard gives up at that node, so a false here is the answer
+    /// [`Table::find`] would have given without the walk. A caller that matches one term under
+    /// several ways of showing its operands asks this once, since the head of the term itself
+    /// does not depend on how its operands are shown.
+    #[must_use]
+    pub fn opens(&self, head: Option<(&str, usize)>) -> bool {
+        let root = &self.nodes[0];
+        !root.ints.is_empty()
+            || !root.same.is_empty()
+            || root.wildcard.is_some()
+            || head.is_some_and(|(name, arity)| root.branch(name, arity).is_some())
+    }
+
     /// The rule a match found, which is the one thing every caller wants out of it.
     #[must_use]
     pub fn rule<N>(&self, found: &Match<N>) -> &Rule {
@@ -630,6 +647,22 @@ mod tests {
         let term = add(&mut terms, near);
         let found = TABLE.find(&terms, term).expect("a rule fires");
         assert_eq!(TABLE.rule(&found).head(), Some("add_immediate"));
+    }
+
+    /// A head the root has no branch for opens nothing, and one it has a branch for opens the
+    /// table even when no rule under the branch goes on to fire.
+    #[test]
+    fn only_a_head_the_root_branches_on_opens_the_table() {
+        assert!(TABLE.opens(Some(("add", 2))));
+        assert!(TABLE.opens(Some(("and", 2))));
+        assert!(!TABLE.opens(Some(("add", 3))));
+        assert!(!TABLE.opens(Some(("sub", 2))));
+        assert!(!TABLE.opens(None));
+        let mut terms = Terms::default();
+        let first = terms.app("v0", &[]);
+        let second = terms.app("v1", &[]);
+        let term = terms.app("sub", &[first, second]);
+        assert_eq!(TABLE.find(&terms, term), None);
     }
 
     /// The same guard against an operand that is not a constant at all. A guard is a claim about

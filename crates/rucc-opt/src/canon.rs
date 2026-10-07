@@ -267,7 +267,17 @@ fn closed(func: &mut Func, an: &mut Analyses, fuel: &mut Fuel, stats: &mut Stats
         if !fuel.take() {
             return false;
         }
-        let edited = close(func, dom, loops, &job);
+        // Only the blocks with an edge into one that grows a parameter have an argument to add,
+        // and the graph says which those are. In the order of the layout, which is the order a
+        // walk of every terminator would have met them in. On lz4 that walk was the most of what
+        // this pass cost, once per value repaired. tamnd/rucc#3052.
+        let cfg = an.cfg(func);
+        let mut from: Vec<Block> =
+            job.at.iter().flat_map(|&block| cfg.predecessors(block)).copied().collect();
+        from.sort_unstable_by_key(|block| leaving.place[block.index()]);
+        from.dedup();
+        let terms = from.into_iter().filter_map(|block| func.terminator(block)).collect();
+        let edited = close_from(func, dom, loops, &job, terms);
         leaving.refresh(func, loops, &edited);
         stats.optimized(CLOSED);
         // Every edge is where it was. A parameter appeared on some blocks and the edges into them
@@ -578,6 +588,20 @@ fn reaching(
 ///
 /// What comes back is every block whose instructions it edited.
 pub(crate) fn close(func: &mut Func, dom: &Dominators, loops: &Loops, job: &Leak) -> Vec<Block> {
+    let terms = terminators(func);
+    close_from(func, dom, loops, job, terms)
+}
+
+/// [`close`], handed the terminators that may branch to a block that grows a parameter, in the
+/// order of the layout. Any other terminator has nothing to hand over, so leaving it out changes
+/// nothing.
+fn close_from(
+    func: &mut Func,
+    dom: &Dominators,
+    loops: &Loops,
+    job: &Leak,
+    terms: Vec<Inst>,
+) -> Vec<Block> {
     let ty = func[job.value].ty;
     let param: Map<Block, Value> =
         job.at.iter().map(|&block| (block, func.append_param(block, ty))).collect();
@@ -589,7 +613,7 @@ pub(crate) fn close(func: &mut Func, dom: &Dominators, loops: &Loops, job: &Leak
     let mut edited = Vec::new();
     // Each edge in hands over whatever the value is called at the end of the block it leaves, which
     // is the value itself on the way out of the loop and a parameter written above on the joins.
-    for term in terminators(func) {
+    for term in terms {
         let Some(from) = func.block_of(term) else { continue };
         let hand = name(from);
         for at in func.target_list(term).iter() {

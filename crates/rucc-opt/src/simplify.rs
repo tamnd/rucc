@@ -728,8 +728,15 @@ fn identity(
 ) -> Option<(Rewrite, &'static str)> {
     let result = func[inst].first_result?;
     let (left, found) = stacks;
-    for (table, plan) in
-        TABLES.into_iter().flat_map(|(table, plans)| plans.iter().map(move |&plan| (table, plan)))
+    // The head of the instruction is the same under every plan, since a plan only says how the
+    // operands are shown, so it is worked out once. Most instructions open none of the tables or
+    // only one, and asking each table's root first saves every walk under every plan of the rest.
+    let root = Terms::new(func, inst, PLAIN, address);
+    let head = root.head(Term::Root);
+    for (table, plan) in TABLES
+        .into_iter()
+        .filter(|(table, _)| table.opens(head))
+        .flat_map(|(table, plans)| plans.iter().map(move |&plan| (table, plan)))
     {
         let terms = Terms::new(func, inst, plan, address);
         let Some(rule) = table.find_in(&terms, Term::Root, left, &mut found.bindings) else {
