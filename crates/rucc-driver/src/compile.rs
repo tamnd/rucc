@@ -3774,6 +3774,29 @@ decl #0 x : int object external static defined
         assert!(aligned.contains("align 16"), "{aligned}");
     }
 
+    /// An operator that promotes its operand, over a vector typedef that has `aligned` on it.
+    ///
+    /// The integer promotions take the typedef to the vector it names, and the two are one type, so
+    /// there is nothing to convert. A conversion between them was written all the same and the
+    /// lowering had no shape for it, so a negation and a shift each said "this vector expression is
+    /// not supported yet". `<wasm_simd128.h>` puts `aligned(16)` on every vector type it declares,
+    /// so every shift in it was one of these.
+    #[test]
+    fn a_promoted_operand_of_an_aligned_vector_typedef_is_the_vector_itself() {
+        let source = concat!(
+            "typedef unsigned char u8x16 __attribute__((__vector_size__(16), __aligned__(16)));\n",
+            "typedef int i32x4 __attribute__((__vector_size__(16), __aligned__(16)));\n",
+            "i32x4 neg(i32x4 a) { return (i32x4)(-(u8x16)a); }\n",
+            "i32x4 not(i32x4 a) { return (i32x4)(~(u8x16)a); }\n",
+            "i32x4 shl(i32x4 a, unsigned n) { return (i32x4)((u8x16)a << (n & 7)); }\n",
+            "u8x16 shr(u8x16 a, unsigned n) { u8x16 r = a >> n; return r; }\n",
+        );
+        let text = ir(source);
+        for name in ["@neg", "@not", "@shl", "@shr"] {
+            assert!(text.contains(name), "{text}");
+        }
+    }
+
     /// The same attribute on a declaration rather than on a type, which asks that this object or
     /// this function be at a multiple of that, and which is where a program that has to hand a
     /// buffer to hardware or keep two counters off one cache line writes it.
