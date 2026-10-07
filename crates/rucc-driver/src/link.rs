@@ -636,7 +636,7 @@ fn msvc_sysroot(target: Triple, opts: &LinkOptions) -> Result<Sysroot, Error> {
 fn cross_order(target: Triple) -> Vec<String> {
     let mut names = vec!["ld.lld".to_owned(), "lld".to_owned()];
     match (target.os, target.env) {
-        (Os::Linux, _) => names.push(format!("{}-ld", multiarch(target))),
+        (Os::Linux, _) => names.push(format!("{}-ld", gnu_name(target))),
         (Os::Windows, Env::Gnu) => names.push(format!("{}-w64-mingw32-ld", target.arch.as_str())),
         _ => {}
     }
@@ -834,7 +834,7 @@ fn distro_for(target: Triple, opts: &LinkOptions, host: Option<Triple>) -> Optio
         return None;
     }
     let usr = opts.usr.as_deref()?;
-    let name = multiarch(target);
+    let name = gnu_name(target);
     let root = usr.join(&name);
     if !root.join("include").is_dir() || !root.join("lib").is_dir() {
         return None;
@@ -1993,6 +1993,14 @@ pub fn runtime_dirs(target: Triple, sysroot: Option<&Path>) -> Vec<PathBuf> {
             found.extend(newest_first(&under(sysroot, &format!("{base}/{name}"))));
         }
     }
+    // A 64-bit GCC with the 32-bit multilib keeps the `-m32` runtime in a `32` directory under its
+    // own, for example `/usr/lib/gcc/x86_64-linux-gnu/13/32`.
+    if target.arch == Arch::X86 {
+        for name in ["x86_64-linux-gnu", "x86_64-pc-linux-gnu", "x86_64-redhat-linux"] {
+            let dirs = newest_first(&under(sysroot, &format!("/usr/lib/gcc/{name}")));
+            found.extend(dirs.into_iter().map(|dir| dir.join("32")).filter(|dir| dir.is_dir()));
+        }
+    }
     found
 }
 
@@ -2132,11 +2140,14 @@ fn loader(target: Triple) -> &'static str {
 #[must_use]
 pub fn candidates(target: Triple, sysroot: Option<&Path>) -> Vec<PathBuf> {
     let multiarch = multiarch(target);
+    // The multilib directory: `lib64` for a 64-bit target on Fedora, and `lib32` for `-m32` on
+    // Debian, where the `gcc-multilib` package puts the 32-bit C library.
+    let multilib = if target.arch == Arch::X86 { "32" } else { "64" };
     [
         format!("/usr/lib/{multiarch}"),
         format!("/lib/{multiarch}"),
-        "/usr/lib64".to_owned(),
-        "/lib64".to_owned(),
+        format!("/usr/lib{multilib}"),
+        format!("/lib{multilib}"),
         "/usr/lib".to_owned(),
         "/lib".to_owned(),
     ]
@@ -2149,13 +2160,56 @@ pub fn candidates(target: Triple, sysroot: Option<&Path>) -> Vec<PathBuf> {
 ///
 /// `x86_64-linux-gnu` and its friends, which is what `gcc -print-multiarch` prints and what a
 /// build system pastes into a path when it is looking for a library itself.
+///
+/// Debian files 32-bit x86 under `i386-linux-gnu`, not under the `i686` of the triple, so that
+/// one is different from [`gnu_name`].
 #[must_use]
 pub fn multiarch(target: Triple) -> String {
-    let libc = match target.env {
+    match target.arch {
+        Arch::X86 => format!("i386-linux-{}", libc_word(target)),
+        _ => gnu_name(target),
+    }
+}
+
+/// The name a cross binutils and a cross tree of a distribution use, for example
+/// `i686-linux-gnu-ld` and `/usr/i686-linux-gnu`.
+fn gnu_name(target: Triple) -> String {
+    format!("{}-linux-{}", target.arch.as_str(), libc_word(target))
+}
+
+/// The last word of the Linux names of the target.
+fn libc_word(target: Triple) -> &'static str {
+    match target.env {
         Env::Musl => "musl",
         Env::None | Env::Gnu | Env::Msvc => "gnu",
+    }
+}
+
+/// What `-print-multi-os-directory` prints: where the libraries of the target are, from the
+/// directory GCC keeps its own files in.
+///
+/// GCC builds the answer in. Debian, Ubuntu, Arch and Alpine give `../lib`, and Fedora and the
+/// other Red Hat systems give `../lib64` for a 64-bit target. For `-m32`, Debian gives `../lib32`
+/// and Fedora gives `../lib`. This compiler reads the machine to get the same answers.
+#[must_use]
+pub fn multi_os_directory(target: Triple, sysroot: Option<&Path>) -> &'static str {
+    if target.os != Os::Linux {
+        return "../lib";
+    }
+    let real =
+        |dir: &str| fs::symlink_metadata(under(sysroot, dir)).is_ok_and(|meta| meta.is_dir());
+    if target.arch == Arch::X86 {
+        return if real("/usr/lib32") { "../lib32" } else { "../lib" };
+    }
+    let has_libc = |dir: &str| {
+        let dir = under(sysroot, dir);
+        dir.join("libc.so.6").is_file() || dir.join("libc.so").is_file()
     };
-    format!("{}-linux-{libc}", target.arch.as_str())
+    let multiarch = multiarch(target);
+    if has_libc(&format!("/usr/lib/{multiarch}")) || has_libc(&format!("/lib/{multiarch}")) {
+        return "../lib";
+    }
+    if real("/usr/lib64") && has_libc("/usr/lib64") { "../lib64" } else { "../lib" }
 }
 
 /// The candidates that are there.
@@ -2194,6 +2248,9 @@ pub fn search_dirs(link: &LinkOptions, target: Triple) -> Vec<PathBuf> {
         dirs.push(distro.lib());
         return dirs;
     }
+    // The directory of the newest GCC comes before the system ones, as in GCC. It holds
+    // `libgcc.a` and `crtbegin.o`, which a build system asks for by name.
+    dirs.extend(runtime_dirs(target, link.sysroot.as_deref()).into_iter().take(1));
     dirs.extend(candidates(target, link.sysroot.as_deref()));
     dirs
 }
@@ -2825,6 +2882,76 @@ mod tests {
         fs::create_dir_all(&dir).expect("a temporary directory");
         fs::write(dir.join("libgcc.a"), b"not really an archive").expect("a file in it");
         dir
+    }
+
+    /// A tree with files at those paths, to stand for a machine.
+    fn a_machine(name: &str, files: &[&str]) -> PathBuf {
+        let root = std::env::temp_dir().join(format!("rucc-machine-{name}-{}", std::process::id()));
+        for file in files {
+            let path = root.join(file);
+            fs::create_dir_all(path.parent().expect("a directory")).expect("a directory");
+            fs::write(&path, b"").expect("a file");
+        }
+        root
+    }
+
+    #[test]
+    fn the_print_questions_find_the_files_of_the_newest_gcc() {
+        let root = a_machine(
+            "gcc",
+            &[
+                "usr/lib/gcc/x86_64-linux-gnu/9/libgcc.a",
+                "usr/lib/gcc/x86_64-linux-gnu/13/libgcc.a",
+                "usr/lib/gcc/x86_64-linux-gnu/13/crtbegin.o",
+                "usr/lib/gcc/x86_64-linux-gnu/13/32/libgcc.a",
+                "usr/lib/x86_64-linux-gnu/crt1.o",
+            ],
+        );
+        let opts = LinkOptions { sysroot: Some(root.clone()), ..LinkOptions::default() };
+        let gcc = root.join("usr/lib/gcc/x86_64-linux-gnu/13");
+        assert_eq!(find_in_search(&opts, linux(), "libgcc.a"), Some(gcc.join("libgcc.a")));
+        assert_eq!(find_in_search(&opts, linux(), "crtbegin.o"), Some(gcc.join("crtbegin.o")));
+        assert_eq!(
+            find_in_search(&opts, linux(), "crt1.o"),
+            Some(root.join("usr/lib/x86_64-linux-gnu/crt1.o"))
+        );
+        // Only the newest GCC is searched, so an old one cannot give a file.
+        let dirs = search_dirs(&opts, linux());
+        assert!(!dirs.contains(&root.join("usr/lib/gcc/x86_64-linux-gnu/9")), "{dirs:?}");
+        // `-m32` takes the `32` directory of the 64-bit GCC.
+        let x86 = Triple::new(Arch::X86, Os::Linux, Env::Gnu);
+        assert_eq!(find_in_search(&opts, x86, "libgcc.a"), Some(gcc.join("32/libgcc.a")));
+        fs::remove_dir_all(&root).expect("clean up");
+    }
+
+    #[test]
+    fn the_32_bit_libraries_are_where_debian_puts_them() {
+        let x86 = Triple::new(Arch::X86, Os::Linux, Env::Gnu);
+        assert_eq!(multiarch(x86), "i386-linux-gnu");
+        // The cross tools and the cross tree keep the name of the triple.
+        assert_eq!(gnu_name(x86), "i686-linux-gnu");
+        assert!(cross_order(x86).contains(&"i686-linux-gnu-ld".to_owned()));
+        let dirs = candidates(x86, None);
+        assert!(dirs.contains(&PathBuf::from("/usr/lib/i386-linux-gnu")), "{dirs:?}");
+        assert!(dirs.contains(&PathBuf::from("/usr/lib32")), "{dirs:?}");
+        assert!(!dirs.contains(&PathBuf::from("/usr/lib64")), "{dirs:?}");
+    }
+
+    #[test]
+    fn the_multi_os_directory_is_the_one_the_distribution_uses() {
+        let x86 = Triple::new(Arch::X86, Os::Linux, Env::Gnu);
+        let debian =
+            a_machine("debian", &["usr/lib/x86_64-linux-gnu/libc.so.6", "usr/lib32/libc.so.6"]);
+        assert_eq!(multi_os_directory(linux(), Some(&debian)), "../lib");
+        assert_eq!(multi_os_directory(x86, Some(&debian)), "../lib32");
+        let fedora = a_machine("fedora", &["usr/lib64/libc.so.6", "usr/lib/libc.so.6"]);
+        assert_eq!(multi_os_directory(linux(), Some(&fedora)), "../lib64");
+        assert_eq!(multi_os_directory(x86, Some(&fedora)), "../lib");
+        let alpine = a_machine("alpine", &["usr/lib/libc.so"]);
+        assert_eq!(multi_os_directory(linux(), Some(&alpine)), "../lib");
+        for root in [debian, fedora, alpine] {
+            fs::remove_dir_all(&root).expect("clean up");
+        }
     }
 
     #[test]
