@@ -4,7 +4,7 @@ An optimizing C compiler written in Rust.
 
 The goal is a compiler that builds real software without patches, generates code that stands up next to `gcc -O2`, and runs on every platform its users do. The target ladder goes SQLite, then a mid tier of well known C projects, then PostgreSQL, then the Linux kernel. Nothing on that ladder is allowed a source patch. If a project needs one, the compiler is wrong.
 
-This is early. Nothing compiles C yet. What exists is the workspace, the layer rule that keeps it modular, the driver skeleton, and CI that is green on Linux, macOS and Windows from the first commit. The full technical design is written down in [`spec/`](spec/) before it is built, and the milestones that build it are tracked as issues.
+rucc builds real programs today. On Linux x86-64, GNU make built by rucc passes its own test suite, SQLite built at `-O2` runs its speed test with the correct result, and the real corpus builds 74 projects with no source patch. The full technical design is written down in [`spec/`](spec/), and the milestones that build it are tracked as issues.
 
 ## Why another C compiler
 
@@ -35,27 +35,14 @@ Every one of those is a number that can be measured and can come out wrong. [`sp
 
 ## Status
 
-M0 and M1 are done, tagged v0.1.0 and v0.2.0. M0 was the workspace, the layer rule, the driver's argument parsing and phase plan, the job scheduler, and CI on Linux, macOS and Windows. M1 is the preprocessor, and it is finished: all five translation phases, hide set macro expansion, the full directive set including `_Pragma` and `#embed`, include resolution with `#include_next`, `#pragma once` and the multiple include optimization, the `__has_*` family, and predefined macros generated from the target description. A diagnostic names every macro it came out of, in the order a reader wants them.
+The current version is 0.28. These results are from Linux x86-64 on 7 October 2026, with rucc 0.28.0 and GCC 13.3 on the same machine:
 
-`rucc -E a.c` is a real preprocessor. Its output is diffed against the reference compiler over the glibc and musl header sets on every commit. `rucc a.c` still prints the phase plan and then tells you the phases after preprocessing are not implemented, because the parser is M2. That is the honest summary.
+1. GNU make 4.4.1 built by rucc passes its 1431 tests.
+2. SQLite 3.53.4 built by rucc at `-O2` runs speedtest1 with the correct result. The program is 22% slower than the GCC build, and rucc compiles `sqlite3.c` at `-O2` in about one third of the GCC time.
+3. Lua 5.4.7 built by rucc runs its scripts, and at `-O0` GDB shows each variable and each frame, as with GCC.
+4. PIE, static, static PIE and shared programs run. Cross builds for aarch64 and i686 Linux with glibc, and for musl with `-static`, run under qemu or on the machine.
 
-```
-$ rucc --print-config
-version: 0.2.0
-target: x86_64-unknown-linux-gnu
-arch: x86_64
-os: linux
-env: gnu
-object-format: elf
-pointer-width: 64
-long-width: 64
-long-double-width: 128
-endian: little
-char-signed: true
-opt-level: -O0
-emit: exe
-debug-info: false
-```
+The Linux gaps are tracked as the milestones L0 to L9 (#3275 to #3284). The largest are the `-v` banner that build systems read to find GCC, the flags in the distribution flag lines that rucc refuses, TLS models other than initial exec, and the debug information at `-O2`.
 
 The twelve milestones are in [`spec/17-milestones.md`](spec/17-milestones.md) and are tracked as issues. Three of them are sane stopping points: M5 is a correct, fast, optimizing compiler that builds SQLite; M9 adds PostgreSQL on three hosts and three targets; M11 is the kernel.
 
