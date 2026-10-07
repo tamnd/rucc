@@ -221,6 +221,13 @@ impl Flags {
     /// nothing after that pass sees.
     pub const COUNTED: Self = Self(1 << 24);
 
+    /// A `return` written inside an `if`, inside an arm of `?:` or on the right of `&&` or `||`,
+    /// which is where gcc's front end guesses a `return` is not taken. A fact about the source and
+    /// not a licence, which the branch predictor reads because where a `return` was written is gone
+    /// by the time there is a graph, and a pass that drops it loses a guess and nothing else. Legal
+    /// on a `return` alone.
+    pub const EARLY: Self = Self(1 << 25);
+
     /// Every flag that tells the optimizer to leave an access exactly where it is.
     pub const KEEP: Self = Self(Self::VOLATILE.0 | Self::SEG_FS.0 | Self::SEG_GS.0);
 
@@ -339,6 +346,7 @@ impl Flags {
             // `nuw` on an address that moves forward inside its object, which is what lets a back
             // end put the offset in the offset field of a load or a store.
             Opcode::PtrAdd => Self::NOALIAS.union(Self::NUW).union(Self::COUNTED),
+            Opcode::Return => Self::EARLY,
             _ => Self::NONE,
         }
     }
@@ -416,6 +424,7 @@ static NAMED: &[(Flags, &str)] = &[
     (Flags::INDIRECT_RETURN, "indirect_return"),
     (Flags::MUST_TAIL, "musttail"),
     (Flags::COUNTED, "counted"),
+    (Flags::EARLY, "early"),
 ];
 
 /// How strongly an atomic operation is ordered against everything around it.
@@ -879,6 +888,16 @@ mod tests {
             Flags::INDIRECT_RETURN.union(Flags::NOTRACK).to_string(),
             ".notrack.indirect_return"
         );
+    }
+
+    #[test]
+    fn early_goes_on_a_return_and_nowhere_else() {
+        for opcode in Opcode::all() {
+            let early = opcode == Opcode::Return;
+            assert_eq!(Flags::legal_on(opcode).contains(Flags::EARLY), early, "{opcode}");
+        }
+        assert_eq!(Flags::from_name("early"), Some(Flags::EARLY));
+        assert_eq!(Flags::EARLY.to_string(), ".early");
     }
 
     #[test]

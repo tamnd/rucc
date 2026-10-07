@@ -64,6 +64,7 @@ const MOVED: &[(&str, &str, &[&str], u32)] = &[
     ("predict-negative-return", "returns", &["-O2"], 49),
     ("predict-null-return", "returns", &["-O2"], 35),
     ("predict-call-not-taken", "tail-call-self", &["-O2"], 33),
+    ("predict-early-return", "early-return", &["-O3"], 33),
     ("max-predicted-iterations", "dispatch-direct", &["-O2"], 800),
     ("loop-reserved-regs", "shift-xor", &["-O2"], 16),
     ("licm-expensive", "early-exit", &["-O2"], 0),

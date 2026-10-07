@@ -70,21 +70,19 @@ fn tail() -> String {
     tail
 }
 
-/// Checks which callers keep a call to `pick` and which say the constants they pass cut it down,
-/// at `-O2` and at `-O3`.
+/// Checks which callers keep a call to `pick` and which say the constants they pass cut it down, at
+/// `-O2` and at `-O3`.
 ///
-/// At `-O3` the tail is copied into the callers that keep it at `-O2` as well, where gcc 16 calls
-/// `pick.part.0`. rucc does not have gcc's guess that an early `return` is not taken, so it guesses
-/// the tail runs half the time rather than two thirds, and the copy saves more of a smaller total
-/// than `inline-min-speedup` asks. That goes away with tamnd/rucc#3182.
-fn check(what: &str, source: &str, copied: &[&str], called: &[&str]) {
+/// Where `o3` is true the callers that keep the call at `-O2` have the tail copied in at `-O3`, and
+/// where it is false they keep it at both levels.
+fn check(what: &str, source: &str, copied: &[&str], called: &[&str], o3: bool) {
     for level in ["-O2", "-O3"] {
         let (listing, said) = compiled(what, level, source);
         for function in copied {
             assert_eq!(picks(&listing, function), 0, "{function} at {level}:\n{listing}\n{said}");
             assert!(said.contains(&format!("one.c: {function}: {CUT}")), "{function}:\n{said}");
         }
-        let left = usize::from(level == "-O2");
+        let left = usize::from(level == "-O2" || !o3);
         for function in called {
             let picked = picks(&listing, function);
             assert_eq!(picked, left, "{function} at {level}:\n{listing}\n{said}");
@@ -93,6 +91,11 @@ fn check(what: &str, source: &str, copied: &[&str], called: &[&str]) {
 }
 
 /// An `if` on the mode. `h` takes the cheap arm for its first call and the tail for its second.
+///
+/// The tail stays a call at `-O3` too. The `return` in the `if` is guessed not taken, so the tail
+/// is guessed to run two times in three, and copying it saves less of the call than
+/// `inline-min-speedup-o3` asks. gcc 16 makes the same guess and keeps the same calls, to the whole
+/// function with `-fno-partial-inlining` and to `pick.part.0` without it (tamnd/rucc#3182).
 #[test]
 fn a_call_passing_the_mode_of_the_cheap_arm_is_copied() {
     let source = format!(
@@ -102,11 +105,16 @@ fn a_call_passing_the_mode_of_the_cheap_arm_is_copied() {
          int h(int x) {{ return pick(0, x) + pick(1, x + 1); }}\n",
         tail()
     );
-    check("if", &source, &["f"], &["g", "h"]);
+    check("if", &source, &["f"], &["g", "h"], false);
 }
 
 /// A `switch` on the mode with two cheap arms. `k` passes a mode for the tail and `h` passes one
 /// that is not known, so neither is cut down and neither says so.
+///
+/// At `-O3` the tail is copied into both. A `case` that returns is not inside a test the way an arm
+/// of an `if` is, so nothing guesses it is not taken, and gcc 16 with `-fno-partial-inlining`
+/// copies the tail into both as well. Without that flag it calls `pick.part.0`, the tail it split
+/// off.
 #[test]
 fn a_switch_on_the_mode_is_cut_to_the_arm_the_call_picks() {
     let source = format!(
@@ -118,7 +126,7 @@ fn a_switch_on_the_mode_is_cut_to_the_arm_the_call_picks() {
          int h(int x, int m) {{ return pick(m, x); }}\n",
         tail()
     );
-    check("switch", &source, &["f", "g"], &["k", "h"]);
+    check("switch", &source, &["f", "g"], &["k", "h"], true);
     let (_, said) = compiled("switch", "-O2", &source);
     assert!(!said.contains(&format!("one.c: k: {CUT}")), "{said}");
     assert!(!said.contains(&format!("one.c: h: {CUT}")), "{said}");

@@ -369,7 +369,7 @@ block0(%0: i32):
 
 block1:
     %3 = iconst.i32 1
-    return %3
+    return.early %3
 
 block2:
     unreachable

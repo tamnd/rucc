@@ -16,13 +16,13 @@ block0:
 func @never() -> i32, linkage(external) {
 block0:
     %0 = iconst.i32 1
-    return %0
+    return.early %0
 }
 
 func @floating() -> i32, linkage(external) {
 block0:
     %0 = iconst.i32 1
-    return %0
+    return.early %0
 }
 
 func @jumped_into(i32) -> i32, linkage(external) {
@@ -53,7 +53,7 @@ block0:
 
 block1:
     %4 = iconst.i32 1
-    return %4
+    return.early %4
 
 block2:
     %5 = iconst.i32 0
@@ -67,7 +67,7 @@ block0(%0: i32):
     %3 = iconst.i32 0
     %4 = icmp ne %0, %3
     %5 = iconst.i32 1
-    return %5
+    return.early %5
 }
 
 func @skipped(ptr) -> i32, linkage(external) {
@@ -81,5 +81,5 @@ block0(%0: i32):
     %1 = iconst.i32 0
     %2 = icmp ne %0, %1
     %3 = iconst.i32 1
-    return %3
+    return.early %3
 }

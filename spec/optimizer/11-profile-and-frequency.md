@@ -71,14 +71,16 @@ the earliest applicable one wins, which is why the file's header comment
 combines multiple independent predictions into one probability rather than picking. GCC computes
 both and uses first-match by default.
 
-**What rucc builds.** Ten predictors, not 55, dropping every Fortran-specific one (there are ten)
+**What rucc builds.** Eleven predictors, not 55, dropping every Fortran-specific one (there are ten)
 and every one below a 65% hit rate, on the grounds that a 59% predictor moves a probability by
 nine points and no downstream decision changes.
 
-The ten: `__builtin_expect` and `__builtin_expect_with_probability`; `noreturn` and `cold`
-attributes; loop exit not taken; loop guard taken; the pointer-null heuristic; negative return;
-null return; call not taken; and `continue` taken. First match, ordered exactly as above, with
-`__builtin_expect` first because a user who wrote it means it.
+The eleven: `__builtin_expect` and `__builtin_expect_with_probability`; `noreturn` and `cold`
+attributes; loop exit not taken; loop guard taken; the pointer-null heuristic; negative return; null
+return; call not taken; `continue` taken; and early return not taken. First match, ordered exactly
+as above, with `__builtin_expect` first because a user who wrote it means it.
+
+The eleventh, early return not taken, is gcc's `PRED_TREE_EARLY_RETURN` at 66% and came after the other ten, because the inliner weighs what a call saves by how often each block of the callee runs, and without it a function that returns on a test and otherwise does a long tail of work looked half as likely to run the tail as gcc thinks it is (tamnd/rucc#3182). It is asked last. A `return` written inside an arm of an `if` or of a `?:`, or on the right of `&&` or `||`, is the one gcc guesses is not taken, and where it was written is gone by the time there is a graph, so the front end marks the `return` with the `early` flag and the predictor reads it. The guess is on every edge that enters the part of the function a marked `return` post-dominates, and two arms that each reach one cancel out, as gcc prunes them.
 
 Two of those deserve comment. `noreturn` is the one that makes error paths cold, which is what
 makes the whole hot/cold split work on real C, because C's error handling is `if (x) { report();

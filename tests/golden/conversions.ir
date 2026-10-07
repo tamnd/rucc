@@ -73,7 +73,7 @@ block3:
     %12 = iconst.i1 -1
     %13 = xor %11, %12
     %14 = zext.i32 %13
-    return %14
+    return.early %14
 
 block4:
     %15 = iconst.i64 0

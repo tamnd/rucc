@@ -532,6 +532,14 @@ pub const PREDICT_CALL_NOT_TAKEN: u32 = 67;
 /// that goes round again without reaching the bottom.
 pub const PREDICT_CONTINUE_TAKEN: u32 = 67;
 
+/// How often a `return` written inside a test is the edge not taken, in percent, per section 11.2.
+///
+/// GCC's `PRED_TREE_EARLY_RETURN`. The front end marks such a `return` and the predictor reads the
+/// mark, since where a `return` was written is gone by the time there is a graph to predict on. It
+/// came after the other ten, for the inliner, which weighs what a call saves by how often each
+/// block of the callee runs (tamnd/rucc#3182).
+pub const PREDICT_EARLY_RETURN: u32 = 66;
+
 /// How many iterations a loop is predicted to run when nothing measured it, per section 11.2.
 ///
 /// GCC's `max-predicted-iterations`. It is a cap and not an estimate: the frequency of a loop
@@ -1324,6 +1332,14 @@ pub const ALL: &[Constant] = &[
         unit: "percent",
         document: "11.2",
         gcc: "PRED_CONTINUE",
+        provenance: Provenance::Gcc,
+    },
+    Constant {
+        name: "PREDICT_EARLY_RETURN",
+        value: 66,
+        unit: "percent",
+        document: "11.2",
+        gcc: "PRED_TREE_EARLY_RETURN",
         provenance: Provenance::Gcc,
     },
     Constant {
