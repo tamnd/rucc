@@ -42,6 +42,7 @@ All notable changes are recorded here. The format follows [Keep a Changelog](htt
 
 ### Fixed
 
+- Scalar replacement no longer keeps a local in memory when a narrow read leaves bytes of a width no machine has, such as the seven a `u8` read leaves of an `unsigned long` written through a union. Those bytes are now pieces of one, two and four, so bcachefs's `BUILD_BUG_ON` on `((union ulong_byte_assert){ .ulong = 1UL << BUCKET_LOCK_BITNR }).byte` folds as it does with gcc (#3297).
 - `\(`, `\[`, `\{` and `\%` in a string or character constant are the character itself with no warning, as gcc has them, and only `-pedantic` says "unknown escape sequence". bcachefs writes `"d_ino_hardlimit\%llu\n"` and was refused under `-Werror` (#3295).
 - A test against null of an address read out of a `const` table now folds once the read does, when the module gives that name a body. `BUILD_BUG_ON (!table[i].member)` on a string or a function pointer kept its call to the `error` function, so the 7.2.8 arm64 allmodconfig refused madera.c and rtw89's sar.c. (#3294)
 - A constant that does not fit the type it is converted to is no longer warned about inside `sizeof`, `_Alignof` or `typeof`, where nothing evaluates it, as gcc holds it back too. The kernel's s5k5baf counts its 16 bit register values with `sizeof((char[]){ seq })`, and the `-Werror` arm64 allmodconfig refused it. (#3293)

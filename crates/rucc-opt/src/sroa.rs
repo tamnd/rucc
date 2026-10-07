@@ -10,14 +10,16 @@
 //! use that could read the bytes behind its back.
 //!
 //! The pieces come from the loads and stores. Every access starts and ends at a cut, and the bytes
-//! between two neighbouring cuts that some access covers are one piece. An access that covers one
-//! piece reads or writes that piece, converting between an integer and a pointer or a float of the
-//! same width where the two sides disagree. An access that covers several is an integer read or
-//! written as its pieces shifted into place, which is what `struct P q = p;` followed by a read of
-//! `q.x` looks like once the copy has been through here, and it is only done on a little endian
-//! target where the byte at the lowest address is the low one. Anything else that overlaps without
-//! lining up, a float written over half of an integer, keeps the local in memory. That is the
-//! partial overlap disqualification of section 18.2, and it is correctness rather than taste.
+//! between two neighbouring cuts that some access covers are one piece, or, where no access is
+//! exactly those bytes and they are not a width a machine has, the pieces of one, two, four and
+//! eight bytes that tile them. An access that covers one piece reads or writes that piece,
+//! converting between an integer and a pointer or a float of the same width where the two sides
+//! disagree. An access that covers several is an integer read or written as its pieces shifted into
+//! place, which is what `struct P q = p;` followed by a read of `q.x` looks like once the copy has
+//! been through here, and it is only done on a little endian target where the byte at the lowest
+//! address is the low one. Anything else that overlaps without lining up, a float written over half
+//! of an integer, keeps the local in memory. That is the partial overlap disqualification of
+//! section 18.2, and it is correctness rather than taste.
 //!
 //! A `memset` writes its byte into every piece it covers. A `memcpy` into the local reads each
 //! piece it covers from the source, and one out of it writes each piece it covers to the
@@ -780,11 +782,27 @@ fn pieces(uses: &[(Inst, Use)], target: Target) -> Result<Vec<Piece>, &'static s
             continue;
         }
         let ty = match exact {
-            Some(ty) => ty,
-            None if matches!(size, 1 | 2 | 4 | 8) => integer(size),
-            None => return Err(OVERLAP),
+            Some(ty) => Some(ty),
+            None if matches!(size, 1 | 2 | 4 | 8) => Some(integer(size)),
+            None => None,
         };
-        pieces.push(Piece { at, size, ty });
+        if let Some(ty) = ty {
+            pieces.push(Piece { at, size, ty });
+            continue;
+        }
+        // Bytes no access names exactly are integer pieces of the widths a machine has, so the
+        // seven bytes a `u8` read leaves of an `unsigned long` written through a union are one,
+        // two and four. bcachefs asserts at build time that the lock bit lands in the first byte
+        // that way.
+        let mut start = at;
+        while start < at + size {
+            let mut width = WIDEST_FILLER;
+            while start % width != 0 || start + width > at + size {
+                width /= 2;
+            }
+            pieces.push(Piece { at: start, size: width, ty: integer(width) });
+            start += width;
+        }
     }
 
     for &(at, size, ty) in &scalars {
@@ -1828,6 +1846,26 @@ block2:
         assert_eq!(count_of(func, Opcode::ZExt), 2);
         assert_eq!(count_of(func, Opcode::Shl), 1);
         assert_eq!(count_of(func, Opcode::Or), 1);
+    }
+
+    #[test]
+    fn the_bytes_a_narrow_read_leaves_are_pieces_a_machine_has() {
+        // bcachefs's `((union ulong_byte_assert){ .ulong = 1UL << 0 }).byte`, a `u64` written and
+        // its first byte read. The other seven bytes are pieces of one, two and four.
+        let text = wrap(
+            "(i64) -> i8",
+            "block0(%0: i64):
+    %1 = alloca, size 8, align 8
+    store %0 -> %1, align 8
+    %2 = load.i8 %1, align 1
+    return %2
+",
+        );
+        let (module, stats) = run(&text);
+        assert!(stats.changed());
+        let func = body(&module);
+        assert_eq!(count_of(func, Opcode::Alloca), 0);
+        assert_eq!(count_of(func, Opcode::Trunc), 4);
     }
 
     #[test]
