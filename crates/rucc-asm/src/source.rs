@@ -6598,6 +6598,20 @@ _tls$tlv$init:
     }
 
     #[test]
+    fn a_label_in_front_of_a_conditional_is_defined() {
+        // The GHASH loop of 6.12's ghash-ce-core.S, which goes back to a label written on the
+        // `.ifc` line whichever way the test goes. The words are the ones llvm-mc writes.
+        let assembled = aarch64(concat!(
+            "\t.text\n.macro m pn\n0:\t.ifc \\pn, p64\n\tnop\n\t.endif\n\tcbnz w0, 0b\n.endm\n",
+            "\tm p64\n\tm p8\n",
+        ));
+        assert_eq!(words(&assembled, ".text"), [0xd503_201f, 0x35ff_ffe0, 0x3500_0000]);
+        // One in code that is not assembled is not there.
+        let refused = read("\t.text\n.if 0\n3: .if 1\n.endif\n.endif\n\tb 3b\n", Arch::Aarch64);
+        assert!(refused.unwrap_err().why.contains("'3b'"));
+    }
+
+    #[test]
     fn rep_is_rept() {
         let read = aarch64("\t.text\n\t.rep 3\n\t.word 0xe7fddef1\n\t.endr\n");
         assert_eq!(words(&read, ".text"), [0xe7fd_def1; 3]);
