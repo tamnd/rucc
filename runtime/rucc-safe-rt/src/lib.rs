@@ -180,6 +180,8 @@ pub mod adopt;
 pub mod alloc;
 pub mod aux_slot;
 #[cfg(unix)]
+pub mod call;
+#[cfg(unix)]
 pub mod cap;
 #[cfg(unix)]
 pub mod check;
