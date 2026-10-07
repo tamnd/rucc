@@ -1231,13 +1231,10 @@ macro_rules! __judge {
 #[macro_export]
 macro_rules! __given {
     ($frame:ident, $arg:ident) => {
-        $crate::effects::given(
-            $frame.as_ref(),
-            {
-                const AT: usize = $crate::effects::slot(NAMES, POINTERS, stringify!($arg));
-                AT
-            },
-        )
+        $crate::effects::given($frame.as_ref(), {
+            const AT: usize = $crate::effects::slot(NAMES, POINTERS, stringify!($arg));
+            AT
+        })
     };
 }
 
