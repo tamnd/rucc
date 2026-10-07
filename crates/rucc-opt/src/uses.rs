@@ -20,10 +20,8 @@ use rucc_ir::{Block, Func, Inst, Value};
 #[must_use]
 pub fn count(func: &Func) -> Vec<u32> {
     let mut uses = vec![0u32; func.counts().values];
-    for block in func.blocks().collect::<Vec<Block>>() {
-        for inst in func.insts(block).collect::<Vec<Inst>>() {
-            operands(func, inst, |value| uses[value.index()] += 1);
-        }
+    for inst in func.blocks().flat_map(|block| func.insts(block)) {
+        operands(func, inst, |value| uses[value.index()] += 1);
     }
     uses
 }
@@ -57,11 +55,19 @@ pub fn operands(func: &Func, inst: Inst, mut each: impl FnMut(Value)) {
 /// what makes the cost of the walk independent of how much the pass did.
 pub fn substitute(func: &mut Func, forward: &Map<Value, Value>) {
     let with = |value: Value| chase(forward, value);
+    // One list of instructions and one of edges, filled again for each block and each terminator,
+    // where a list was made for each of them. tamnd/rucc#3052.
+    let mut insts = Vec::new();
+    let mut calls = Vec::new();
     for block in func.blocks().collect::<Vec<Block>>() {
-        for inst in func.insts(block).collect::<Vec<Inst>>() {
+        insts.clear();
+        insts.extend(func.insts(block));
+        for &inst in &insts {
             let args = func[inst].args;
             func.rewrite(args, with);
-            for call in func.successors(inst).collect::<Vec<_>>() {
+            calls.clear();
+            calls.extend(func.successors(inst));
+            for call in &calls {
                 func.rewrite(call.args, with);
             }
         }

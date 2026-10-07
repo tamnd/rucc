@@ -686,7 +686,9 @@ pub(crate) type Edges = Map<Block, Vec<(Block, Idx<BlockCall>)>>;
 /// Shared with [`crate::thread`], which edits edges as well and so wants the slot in the pool for
 /// the same reason this step does.
 pub(crate) fn incoming(func: &Func) -> Edges {
-    let mut edges: Edges = Map::default();
+    // Room for every block from the start, rather than the table growing and hashing all of it
+    // again on the way. Nothing walks it in order, so how big it is changes nothing it answers.
+    let mut edges: Edges = Map::with_capacity_and_hasher(func.counts().blocks, Default::default());
     for block in func.blocks() {
         let Some(term) = func.terminator(block) else { continue };
         for at in func.target_list(term).iter() {
