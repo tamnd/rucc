@@ -114,7 +114,9 @@ pub use crate::record::{
     Extent, Field, FieldDecl, RecordError, RecordLayout, RecordOptions, VariableLayout,
     layout_record,
 };
-pub use crate::types::{Alias, EnumInfo, Enumerator, Hardbool, RecordInfo, Spelled, TypeId, Types};
+pub use crate::types::{
+    Alias, EnumInfo, Enumerator, Hardbool, Prototype, RecordInfo, Spelled, TypeId, Types, Written,
+};
 
 /// The milestone in `spec/17-milestones.md` that fills this crate in.
 pub const MILESTONE: &str = "M2";
@@ -501,9 +503,9 @@ mod tests {
         let mut interner = Interner::new();
         let mut types = Types::new();
         let int = types.int(IntKind::Int);
-        types.alias(interner.intern("int32_t"), int);
-        types.alias(interner.intern("word"), int);
-        types.alias(interner.intern("int32_t"), int);
+        types.alias(interner.intern("int32_t"), int, None);
+        types.alias(interner.intern("word"), int, None);
+        types.alias(interner.intern("int32_t"), int, None);
         let names: Vec<_> =
             types.aliases().iter().map(|had| interner.resolve(had.name).to_owned()).collect();
         assert_eq!(names, ["int32_t", "word"], "the same name twice is one entry");

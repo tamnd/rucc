@@ -275,7 +275,9 @@ impl Checker<'_> {
                 }
             };
             let spelled = self.spelled_with(field.specs);
+            let mark = self.types.prototypes_mark();
             let Some((decl, at)) = self.member_decl(field) else { continue };
+            let prototypes = self.types.take_prototypes(mark);
             // An anonymous member's names are reached as if they were written here, so they clash
             // with the record's own the same way. The kernel's `struct pi_desc` once had a `rsvd`
             // both inside its anonymous union and after it, which gcc refuses.
@@ -296,6 +298,9 @@ impl Checker<'_> {
             // Kept for the debug information, which names the typedef where the program did.
             if let (Some(member), Some((name, of))) = (decl.name, spelled) {
                 self.types.record_member_spelling(Spelled { record: id, member, name, of });
+            }
+            if let Some(member) = decl.name {
+                self.types.record_member_prototypes(id, member, prototypes);
             }
             self.annotate_member(id, field);
             if let Some(name) = decl.name {

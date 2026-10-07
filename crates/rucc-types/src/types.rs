@@ -181,6 +181,10 @@ pub struct Alias {
     /// The type it was written for, which is the same type the name resolves to rather than a
     /// type of its own.
     pub of: TypeId,
+    /// The typedef name the declaration's specifiers named and the type that name stood for, if
+    /// they named one: `typedef __u64 u64;` is `u64` written over `__u64`, which gcc keeps and
+    /// pahole reads, so the kernel's BTF says `u64` is `__u64` rather than `long long unsigned int`.
+    pub spelled: Option<(Symbol, TypeId)>,
 }
 
 /// A record member written with a typedef name, and the name it was written with.
@@ -196,6 +200,22 @@ pub struct Spelled {
     pub of: TypeId,
 }
 
+/// One parameter of a prototype as it was written.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Written {
+    /// The parameter's type with its qualifiers, which the function type leaves off: the `const`
+    /// in `int (*f)(const size_t n)` is not part of the signature and is part of what was written.
+    pub ty: TypeId,
+    /// The typedef name its specifiers named and the type the name stood for, if they named one.
+    pub spelled: Option<(Symbol, TypeId)>,
+}
+
+/// A prototype one declarator wrote, and how it wrote each of its parameters.
+///
+/// A function type is interned, so `void (*)(u32)` and `void (*)(unsigned int)` are one type, and
+/// which of the two a declaration wrote is kept beside the declaration as a list of these.
+pub type Prototype = (FunctionId, Vec<Written>);
+
 /// Every type in one translation unit.
 #[derive(Debug)]
 pub struct Types {
@@ -207,6 +227,14 @@ pub struct Types {
     enums: Vec<EnumInfo>,
     aliases: Vec<Alias>,
     spelled: Vec<Spelled>,
+    params_written: Map<FunctionId, Vec<Written>>,
+    /// The prototypes written since the declaration being read began. See
+    /// [`Types::prototypes_mark`].
+    pending: Vec<Prototype>,
+    /// The prototypes each record member's declarator wrote, keyed by the record and the member.
+    member_prototypes: Map<(RecordId, Symbol), Vec<Prototype>>,
+    /// The prototypes each file-scope typedef's declarator wrote.
+    alias_prototypes: Map<Symbol, Vec<Prototype>>,
     void: TypeId,
     boolean: TypeId,
     ints: [TypeId; 13],
@@ -236,6 +264,10 @@ impl Types {
             enums: Vec::new(),
             aliases: Vec::new(),
             spelled: Vec::new(),
+            params_written: Map::default(),
+            pending: Vec::new(),
+            member_prototypes: Map::default(),
+            alias_prototypes: Map::default(),
             // Fixed up immediately below. There is no id to put here before the table exists,
             // and an `Option` on each of them would be paid for on every read for the sake of
             // four lines of construction.
@@ -670,11 +702,11 @@ impl Types {
     /// What the list cannot answer is which of two names a particular declaration was written
     /// with, since that is a fact about the declaration and this is a fact about the type. A
     /// reader gets the names the program wrote and what each one stands for, and no more.
-    pub fn alias(&mut self, name: Symbol, of: TypeId) {
+    pub fn alias(&mut self, name: Symbol, of: TypeId, spelled: Option<(Symbol, TypeId)>) {
         if self.aliases.iter().any(|had| had.name == name && had.of == of) {
             return;
         }
-        self.aliases.push(Alias { name, of });
+        self.aliases.push(Alias { name, of, spelled });
     }
 
     /// Every typedef name the program wrote, in the order it wrote them.
@@ -697,6 +729,93 @@ impl Types {
     #[must_use]
     pub fn member_spellings(&self) -> &[Spelled] {
         &self.spelled
+    }
+
+    /// Records how a prototype's parameters were written, one entry per parameter.
+    ///
+    /// Beside the table for the reason member spellings are. A function type is interned, so
+    /// `ssize_t (*)(size_t)`, `long (*)(unsigned long)` and `long (*)(const unsigned long)` are
+    /// one signature, and what the first prototype of it wrote is what is kept. gcc keeps all
+    /// three, as three types, and a program writing one signature two ways in one unit is rare
+    /// enough that the first is nearly always the only one.
+    pub fn record_params_written(&mut self, function: FunctionId, written: Vec<Written>) {
+        self.params_written.entry(function).or_insert(written);
+    }
+
+    /// Records how one prototype's parameters were written, for the declaration being read.
+    pub fn record_prototype(&mut self, function: FunctionId, written: Vec<Written>) {
+        self.pending.push((function, written));
+    }
+
+    /// Where the prototypes of a declaration about to be read will start.
+    ///
+    /// A declarator may hold several prototypes, `void (*f)(void (*g)(u32))` has two, and a
+    /// declaration nested in it reads its own: a parameter's list is a part of the declarator it
+    /// is in, and a member of a record written in the specifiers is not. So a reader takes a mark,
+    /// reads the declarator, and then takes or copies what came after the mark.
+    #[must_use]
+    pub fn prototypes_mark(&self) -> usize {
+        self.pending.len()
+    }
+
+    /// The prototypes written since `mark`, left in place for the declaration around this one.
+    #[must_use]
+    pub fn prototypes_since(&self, mark: usize) -> Vec<Prototype> {
+        self.pending.get(mark..).map_or_else(Vec::new, <[Prototype]>::to_vec)
+    }
+
+    /// The prototypes written since `mark`, taken out, since nothing around this declaration
+    /// wrote them.
+    pub fn take_prototypes(&mut self, mark: usize) -> Vec<Prototype> {
+        if mark >= self.pending.len() {
+            return Vec::new();
+        }
+        self.pending.split_off(mark)
+    }
+
+    /// Forgets every prototype not yet taken, which is what is left over from a cast or a
+    /// `sizeof` that no declaration reads.
+    pub fn forget_prototypes(&mut self) {
+        self.pending.clear();
+    }
+
+    /// Records the prototypes a record member's declarator wrote.
+    pub fn record_member_prototypes(
+        &mut self,
+        record: RecordId,
+        member: Symbol,
+        written: Vec<Prototype>,
+    ) {
+        if !written.is_empty() {
+            self.member_prototypes.entry((record, member)).or_insert(written);
+        }
+    }
+
+    /// The prototypes each record member's declarator wrote.
+    #[must_use]
+    pub fn member_prototypes(&self) -> &Map<(RecordId, Symbol), Vec<Prototype>> {
+        &self.member_prototypes
+    }
+
+    /// Records the prototypes a file-scope typedef's declarator wrote. The first wins, as it does
+    /// for [`Types::alias`].
+    pub fn record_alias_prototypes(&mut self, name: Symbol, written: Vec<Prototype>) {
+        if !written.is_empty() {
+            self.alias_prototypes.entry(name).or_insert(written);
+        }
+    }
+
+    /// The prototypes each file-scope typedef's declarator wrote.
+    #[must_use]
+    pub fn alias_prototypes(&self) -> &Map<Symbol, Vec<Prototype>> {
+        &self.alias_prototypes
+    }
+
+    /// How a function type's parameters were first written, or nothing when no prototype of it
+    /// wrote anything its signature does not already say.
+    #[must_use]
+    pub fn params_written(&self, function: FunctionId) -> &[Written] {
+        self.params_written.get(&function).map_or(&[], Vec::as_slice)
     }
 
     /// A typedef name standing for `underlying`.

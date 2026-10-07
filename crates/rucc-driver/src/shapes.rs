@@ -60,7 +60,8 @@ use rucc_diag::{SourceMap, Span};
 use rucc_sema::{DeclId, DeclKind, Linkage, Stmt, StmtId, StorageDuration, Tast};
 use rucc_target::TargetInfo;
 use rucc_types::{
-    ArrayLen, IntKind, Qualifiers, RecordId, RecordKind, Type, TypeId, TypeKind, Types,
+    ArrayLen, FunctionId, IntKind, Prototype, Qualifiers, RecordId, RecordKind, Type, TypeId,
+    TypeKind, Types,
 };
 
 /// Everything the debug information says about what a unit's addresses mean.
@@ -197,6 +198,7 @@ pub(crate) fn collect(
     sources: &SourceMap,
 ) -> Meaning {
     let mut walk = Walk {
+        tast,
         types,
         target,
         names,
@@ -205,8 +207,10 @@ pub(crate) fn collect(
         tags: Map::default(),
         spellings: Map::default(),
         written: types.aliases().iter().map(|alias| (alias.name, alias.of)).collect(),
+        chained: Map::default(),
         aliases: Map::default(),
         through: Map::default(),
+        context: Vec::new(),
         members: types
             .member_spellings()
             .iter()
@@ -217,6 +221,11 @@ pub(crate) fn collect(
     // checker saw them in.
     for &(decl, name, of) in tast.spellings() {
         walk.spellings.entry(decl).or_insert((name, of));
+    }
+    for alias in types.aliases() {
+        if let Some(over) = alias.spelled {
+            walk.chained.entry(alias.name).or_insert(over);
+        }
     }
     let mut funcs = Map::default();
     let mut objects = Map::default();
@@ -292,12 +301,9 @@ pub(crate) fn collect(
         let scope = nests.which.get(&raw).copied();
         locals.insert(raw, Named { name, file: at.name.to_owned(), line: at.line, ty, scope });
     }
-    // The rest of the typedef names last, which are the ones no declaration above was written
-    // with, so that nothing else waits behind a name that may turn out to stand for a type nothing
-    // else mentions.
-    for &alias in types.aliases() {
-        walk.alias(alias.name, alias.of);
-    }
+    // A typedef name nothing above was written with gets no entry, which is what gcc does. The
+    // kernel's BTF is pahole's reading of this, and a name only one compiler describes is a
+    // difference in it.
     Meaning { types: walk.out, funcs, objects, locals, scopes: nests.out }
 }
 
@@ -413,6 +419,7 @@ fn symbol(tast: &Tast, names: &Interner, id: DeclId) -> Option<String> {
 
 /// The walk over the checker's types, building the table as it goes.
 struct Walk<'a> {
+    tast: &'a Tast,
     types: &'a Types,
     target: &'a TargetInfo,
     names: &'a Interner,
@@ -438,6 +445,10 @@ struct Walk<'a> {
     /// Every typedef name written at file scope and the type it stands for, which are the only
     /// names a declaration can point at, since those are the only ones that get an entry.
     written: Set<(Symbol, TypeId)>,
+    /// The typedef name each typedef name was written over, for the ones that were, and the type
+    /// that name stood for. The first declaration of a name is the one that counts, which is the
+    /// one gcc describes.
+    chained: Map<Symbol, (Symbol, TypeId)>,
     /// Which entry each typedef name went in, once it has one.
     aliases: Map<(Symbol, TypeId), Option<usize>>,
     /// What each type built over a typedef name came out as, which is [`Walk::memo`] for the
@@ -448,6 +459,11 @@ struct Walk<'a> {
     /// The typedef name each record member named its type with, for the ones that did, keyed by
     /// the record and the member's name.
     members: Map<(RecordId, Symbol), (Symbol, TypeId)>,
+    /// The prototypes the declaration being walked wrote, which say how each function type in it
+    /// wrote its parameters. A type with one of them inside is walked again for each declaration
+    /// rather than shared through [`Walk::memo`], since `void (*)(u32)` and
+    /// `void (*)(unsigned int)` are one type and two entries, the way gcc writes them.
+    context: Vec<Prototype>,
 }
 
 impl Walk<'_> {
@@ -492,9 +508,40 @@ impl Walk<'_> {
 
     /// Which entry a declaration's type is, going through the typedef name it was written with.
     fn declared(&mut self, id: DeclId, ty: TypeId) -> Option<usize> {
-        match self.spellings.get(&id) {
-            Some(&(name, of)) => self.over(ty, name, of),
-            None => self.told(ty),
+        let written = self.tast.prototypes(id).to_vec();
+        self.within(written, |walk| match walk.spellings.get(&id) {
+            Some(&(name, of)) => walk.over(ty, name, of),
+            None => walk.told(ty),
+        })
+    }
+
+    /// Walks with the prototypes one declaration wrote in hand, and puts back the ones the
+    /// declaration around it wrote afterwards.
+    fn within<T>(&mut self, written: Vec<Prototype>, walk: impl FnOnce(&mut Self) -> T) -> T {
+        let outer = std::mem::replace(&mut self.context, written);
+        let answer = walk(self);
+        self.context = outer;
+        answer
+    }
+
+    /// Whether a type has a function type inside it that the declaration being walked wrote, which
+    /// is a type that may be a different entry for each declaration. Records are not looked into,
+    /// since their members are walked with prototypes of their own.
+    fn steered(&self, id: TypeId) -> bool {
+        if self.context.is_empty() {
+            return false;
+        }
+        match self.types.kind(id) {
+            TypeKind::Pointer(to) | TypeKind::Atomic(to) => self.steered(to),
+            TypeKind::Array { elem, .. } => self.steered(elem),
+            TypeKind::Typedef { underlying, .. } => self.steered(underlying),
+            TypeKind::Function(which) => {
+                let signature = self.types.signature(which);
+                self.context.iter().any(|(wrote, _)| *wrote == which)
+                    || self.steered(signature.ret)
+                    || signature.params.iter().any(|&param| self.steered(param))
+            }
+            _ => false,
         }
     }
 
@@ -502,8 +549,9 @@ impl Walk<'_> {
     ///
     /// The type is walked the way a declarator builds it, through the qualifiers, the pointers
     /// and the arrays, so `const size_type` is a const over the `size_type` entry and
-    /// `size_type *` a pointer to it, which is what gcc writes. A function type is not walked
-    /// into, because its parameters were not written with the name, and a record is not either.
+    /// `size_type *` a pointer to it, which is what gcc writes. A function type is walked into for
+    /// what it returns, which is what `size_type (*f)(int)` wrote the name for, and not for its
+    /// parameters, which were written with names of their own. A record is not walked into.
     /// Where the name's type is nowhere to be found the answer is the type itself, which is what
     /// happens when the checker had its say after the name was read: `name a[] = {1, 2}` with
     /// `name` an array of unknown length is an array of two, and the name does not stand for it.
@@ -528,6 +576,9 @@ impl Walk<'_> {
 
     /// The same, for a type that may have no identifier of its own. See [`Walk::shaped`].
     fn walked(&mut self, ty: Type, id: TypeId, name: Symbol, of: TypeId) -> Option<usize> {
+        if self.steered(id) {
+            return self.layered_over(ty, id, name, of);
+        }
         if let Some(&known) = self.through.get(&(ty, name, of)) {
             return known;
         }
@@ -574,6 +625,7 @@ impl Walk<'_> {
                 };
                 Shape::Array { of: self.over(elem, name, of)?, count }
             }
+            TypeKind::Function(which) => self.subroutine(which, Some((name, of)))?,
             _ => return self.shaped(ty, id),
         };
         let at = self.out.len();
@@ -590,13 +642,34 @@ impl Walk<'_> {
         if let Some(&at) = self.aliases.get(&(name, of)) {
             return at;
         }
-        let at = self.told_or_void(of).map(|of| {
+        // A typedef with an attribute is a type of its own that carries the name, and its entry is
+        // the name's entry. Writing one over the other would be the name pointing at itself.
+        if let TypeKind::Typedef { name: carried, .. } = self.types.kind(of)
+            && carried == name
+        {
+            let at = self.told(of);
+            self.aliases.insert((name, of), at);
+            return at;
+        }
+        let written = self.types.alias_prototypes().get(&name).cloned().unwrap_or_default();
+        let under = self.within(written, |walk| walk.under(name, of));
+        let at = under.map(|of| {
             let name = self.spelled(name);
             self.out.push(Shape::Alias { name, of });
             self.out.len() - 1
         });
         self.aliases.insert((name, of), at);
         at
+    }
+
+    /// What a typedef name's entry points at: the name it was written over where there was one,
+    /// so `typedef __u64 u64;` is `u64` over `__u64` over `long long unsigned int`, the chain gcc
+    /// writes, and the type itself where there was not.
+    fn under(&mut self, name: Symbol, of: TypeId) -> Option<Option<usize>> {
+        match self.chained.get(&name).copied() {
+            Some((over, stood)) => self.over_or_void(of, over, stood),
+            None => self.told_or_void(of),
+        }
     }
 
     /// A type, where `void` is an answer rather than a failure.
@@ -625,6 +698,9 @@ impl Walk<'_> {
     /// depends on the qualifiers, so the type a level of the chain stands for and the identifier
     /// the chain started from agree about every number here.
     fn shaped(&mut self, ty: Type, id: TypeId) -> Option<usize> {
+        if self.steered(id) {
+            return self.layered(ty, id);
+        }
         if let Some(&known) = self.memo.get(&ty) {
             return known;
         }
@@ -683,7 +759,7 @@ impl Walk<'_> {
                 Some(Shape::Base { name: "_Bool".to_owned(), encoding: Encoding::Boolean, size: 1 })
             }
             TypeKind::Int(int) => Some(Shape::Base {
-                name: int.as_str().to_owned(),
+                name: gnu_name(int).to_owned(),
                 encoding: reading(int, self.target),
                 size: self.size(id)?,
             }),
@@ -726,29 +802,18 @@ impl Walk<'_> {
                 };
                 Some(Shape::Array { of, count })
             }
-            TypeKind::Function(which) => {
-                let signature = self.types.signature(which).clone();
-                let returns = self.told_or_void(signature.ret)?;
-                let mut params = Vec::with_capacity(signature.params.len());
-                for &ty in &signature.params {
-                    // No place, because this is a function type rather than a function: nothing
-                    // here is code and there is no frame for a parameter of it to be in.
-                    params.push(Param { name: None, ty: self.told(ty)?, spot: None });
-                }
-                Some(Shape::Subroutine(Sig {
-                    returns,
-                    params,
-                    variadic: signature.variadic,
-                    prototyped: signature.prototyped,
-                }))
-            }
+            TypeKind::Function(which) => self.subroutine(which, None),
             TypeKind::Enum(which) => {
                 let info = self.types.enum_info(which);
                 let name = info.tag.map(|tag| self.spelled(tag));
-                let underlying = info.underlying?;
+                // One with no underlying type yet is one nothing has completed, and it is still
+                // a name a pointer or a prototype can mention.
+                let Some(underlying) = info.underlying else {
+                    return Some(Shape::Enumeration { name, of: None, size: None, values: vec![] });
+                };
                 let listed = info.enumerators.clone();
-                let size = self.size(underlying)?;
-                let of = self.told(underlying)?;
+                let size = Some(self.size(underlying)?);
+                let of = Some(self.told(underlying)?);
                 let values = listed
                     .iter()
                     .map(|one| Constant { name: self.spelled(one.name), value: one.value })
@@ -756,12 +821,57 @@ impl Walk<'_> {
                 Some(Shape::Enumeration { name, of, size, values })
             }
             TypeKind::Typedef { name, underlying, .. } => {
-                let of = self.told_or_void(underlying)?;
+                let written = self.types.alias_prototypes().get(&name).cloned().unwrap_or_default();
+                let of = self.within(written, |walk| walk.under(name, underlying))?;
                 Some(Shape::Alias { name: self.spelled(name), of })
             }
             // Handled by the caller, where the entry exists before the members are walked.
             TypeKind::Record(_) => None,
         }
+    }
+
+    /// A function type, which is what a pointer to a function points at.
+    ///
+    /// What it returns goes through the typedef name the declaration was written with, when the
+    /// caller has one, and each parameter as it was written, with its qualifiers and through the
+    /// name its own specifiers named, which the checker keeps beside the signature. So
+    /// `ssize_t (*read)(struct file *, const size_t)` says `ssize_t` and `const size_t` where gcc
+    /// does, and the kernel's BTF has the same prototype from both compilers.
+    fn subroutine(
+        &mut self,
+        which: FunctionId,
+        returned: Option<(Symbol, TypeId)>,
+    ) -> Option<Shape> {
+        let signature = self.types.signature(which).clone();
+        let returns = match returned {
+            Some((name, of)) => self.over_or_void(signature.ret, name, of),
+            None => self.told_or_void(signature.ret),
+        }?;
+        // What this declaration wrote, and the last of them where it wrote one twice, failing that
+        // what the first prototype of the type in the unit wrote.
+        let wrote = self.context.iter().rev().find(|(wrote, _)| *wrote == which);
+        let written = match wrote {
+            Some((_, written)) => written.clone(),
+            None => self.types.params_written(which).to_vec(),
+        };
+        let mut params = Vec::with_capacity(signature.params.len());
+        for (index, &ty) in signature.params.iter().enumerate() {
+            let one = written.get(index);
+            let ty = one.map_or(ty, |one| one.ty);
+            let ty = match one.and_then(|one| one.spelled) {
+                Some((name, of)) => self.over(ty, name, of),
+                None => self.told(ty),
+            }?;
+            // No place, because this is a function type rather than a function: nothing here is
+            // code and there is no frame for a parameter of it to be in.
+            params.push(Param { name: None, ty, spot: None });
+        }
+        Some(Shape::Subroutine(Sig {
+            returns,
+            params,
+            variadic: signature.variadic,
+            prototyped: signature.prototyped,
+        }))
     }
 
     /// A `struct` or a `union`, whose entry is written before its members are looked at.
@@ -788,15 +898,26 @@ impl Walk<'_> {
         let fields = self.types.record_info(record).fields.clone();
         let mut members = Vec::with_capacity(fields.len());
         for field in &fields {
+            // An unnamed bit-field is padding the program spelled out, and gcc writes no member
+            // for it. pahole would otherwise put a nameless member in the kernel's BTF that the
+            // build with gcc does not have.
+            if field.name.is_none() && field.bits.is_some() {
+                continue;
+            }
             // A member whose type has no entry is left out and the rest of the record stands. See
             // the module documentation: the alternative loses every function that mentions the
             // record, which in a real program is a far larger hole than one field.
             let spelled =
                 field.name.and_then(|member| self.members.get(&(record, member)).copied());
-            let ty = match spelled {
-                Some((name, of)) => self.over(field.ty, name, of),
-                None => self.told(field.ty),
-            };
+            let written = field
+                .name
+                .and_then(|member| self.types.member_prototypes().get(&(record, member)))
+                .cloned()
+                .unwrap_or_default();
+            let ty = self.within(written, |walk| match spelled {
+                Some((name, of)) => walk.over(field.ty, name, of),
+                None => walk.told(field.ty),
+            });
             let Some(ty) = ty else { continue };
             let bits = match field.bits {
                 Some(width) => match u64::try_from(field.bit_offset()) {
@@ -822,6 +943,24 @@ impl Walk<'_> {
     /// A name, as the program wrote it.
     fn spelled(&self, name: Symbol) -> String {
         self.names.resolve(name).to_owned()
+    }
+}
+
+/// What an integer type is called, which is what gcc calls it rather than the shortest spelling.
+///
+/// `unsigned long` is `long unsigned int` to gcc, and a reader matching types by name across two
+/// compilers, which pahole does when it writes the kernel's BTF and which every BPF program built
+/// against that BTF does after it, sees two types where there is one if the names differ.
+fn gnu_name(int: IntKind) -> &'static str {
+    match int {
+        IntKind::Short => "short int",
+        IntKind::UShort => "short unsigned int",
+        IntKind::Long => "long int",
+        IntKind::ULong => "long unsigned int",
+        IntKind::LongLong => "long long int",
+        IntKind::ULongLong => "long long unsigned int",
+        IntKind::UInt128 => "__int128 unsigned",
+        _ => int.as_str(),
     }
 }
 

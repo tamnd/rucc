@@ -63,9 +63,12 @@ pub(crate) fn describe(
     globals: &[Global],
     frames: bool,
 ) -> Result<(), Error> {
-    let ids = kinds(dwarf, shapes);
+    let wanted = wanted(shapes, funcs, globals, frames);
+    let ids = kinds(dwarf, shapes, &wanted);
     for (shape, &id) in shapes.iter().zip(&ids) {
-        fill(dwarf, shape, id, &ids)?;
+        if let Some(id) = id {
+            fill(dwarf, shape, id, &ids, shapes)?;
+        }
     }
     for (index, func) in funcs.iter().enumerate() {
         let Some(sig) = &func.sig else { continue };
@@ -77,10 +80,67 @@ pub(crate) fn describe(
     Ok(())
 }
 
-/// An entry for every type, holding its tag and nothing else yet.
-fn kinds(dwarf: &mut gimli::write::DwarfUnit, shapes: &[Shape]) -> Vec<UnitEntryId> {
+/// Which types something written in the unit names, directly or through another type.
+///
+/// The table has a type for everything the program declared, and gcc describes only the ones a
+/// function or a variable it emitted reaches. The rest are bytes nothing reads, and in the kernel
+/// they are worse than that: pahole writes every named type it finds into the BTF, so a `static
+/// inline` in a header that this unit never called would put its types in the kernel's BTF where
+/// the build with gcc has none.
+///
+/// An array of arrays is followed straight to its element, since [`elements`] writes it as one
+/// entry and the arrays in between have none of their own.
+fn wanted(shapes: &[Shape], funcs: &[Function], globals: &[Global], frames: bool) -> Vec<bool> {
+    let mut wanted = vec![false; shapes.len()];
+    let mut work: Vec<usize> = Vec::new();
+    let signature = |sig: &Sig, work: &mut Vec<usize>| {
+        work.extend(sig.returns);
+        work.extend(sig.params.iter().map(|param| param.ty));
+    };
+    for func in funcs {
+        let Some(sig) = &func.sig else { continue };
+        signature(sig, &mut work);
+        let frames = frames || func.frame_local.is_some();
+        let said = func.locals.iter().filter(|local| sayable(&local.spot, frames));
+        work.extend(said.filter_map(|local| local.ty));
+    }
+    work.extend(globals.iter().filter_map(|global| global.ty));
+    while let Some(at) = work.pop() {
+        let Some(shape) = shapes.get(at) else { continue };
+        if std::mem::replace(&mut wanted[at], true) {
+            continue;
+        }
+        match shape {
+            Shape::Base { .. } => {}
+            Shape::Pointer { to, .. } => work.extend(*to),
+            Shape::Array { of, .. } => {
+                let mut of = *of;
+                while let Some(Shape::Array { of: inner, .. }) = shapes.get(of) {
+                    of = *inner;
+                }
+                work.push(of);
+            }
+            Shape::Record { members, .. } => {
+                work.extend(members.iter().flatten().map(|member| member.ty));
+            }
+            Shape::Enumeration { of, .. }
+            | Shape::Alias { of, .. }
+            | Shape::Qualified { of, .. } => work.extend(*of),
+            Shape::Subroutine(sig) => signature(sig, &mut work),
+        }
+    }
+    wanted
+}
+
+/// An entry for every type something names, holding its tag and nothing else yet.
+fn kinds(
+    dwarf: &mut gimli::write::DwarfUnit,
+    shapes: &[Shape],
+    wanted: &[bool],
+) -> Vec<Option<UnitEntryId>> {
     let root = dwarf.unit.root();
-    shapes.iter().map(|shape| dwarf.unit.add(root, tag(shape))).collect()
+    let entries = shapes.iter().zip(wanted);
+    entries.map(|(shape, &wanted)| wanted.then(|| dwarf.unit.add(root, tag(shape)))).collect()
 }
 
 /// Which DWARF tag a shape is written as.
@@ -106,7 +166,8 @@ fn fill(
     dwarf: &mut gimli::write::DwarfUnit,
     shape: &Shape,
     at: UnitEntryId,
-    ids: &[UnitEntryId],
+    ids: &[Option<UnitEntryId>],
+    shapes: &[Shape],
 ) -> Result<(), Error> {
     match shape {
         Shape::Base { name, encoding, size } => {
@@ -119,7 +180,7 @@ fn fill(
             bytes(dwarf, at, *size);
             points(dwarf, at, *to, ids)?;
         }
-        Shape::Array { of, count } => elements(dwarf, at, *of, *count, ids)?,
+        Shape::Array { of, count } => elements(dwarf, at, *of, *count, ids, shapes)?,
         Shape::Record { name, size, members, .. } => {
             if let Some(name) = name {
                 title(dwarf, at, name);
@@ -143,8 +204,11 @@ fn fill(
             if let Some(name) = name {
                 title(dwarf, at, name);
             }
-            bytes(dwarf, at, *size);
-            points(dwarf, at, Some(*of), ids)?;
+            match size {
+                Some(size) => bytes(dwarf, at, *size),
+                None => flag(dwarf, at, gimli::DW_AT_declaration),
+            }
+            points(dwarf, at, *of, ids)?;
             for value in values {
                 counted(dwarf, at, value);
             }
@@ -205,7 +269,7 @@ fn defined(
     sig: &Sig,
     index: usize,
     files: &[FileId],
-    ids: &[UnitEntryId],
+    ids: &[Option<UnitEntryId>],
     frames: bool,
 ) -> Result<(), Error> {
     let root = dwarf.unit.root();
@@ -366,7 +430,7 @@ fn kept(
     at: UnitEntryId,
     local: &Local,
     files: &[FileId],
-    ids: &[UnitEntryId],
+    ids: &[Option<UnitEntryId>],
     which: usize,
     frames: bool,
 ) -> Result<(), Error> {
@@ -506,7 +570,7 @@ fn held_at(
     global: &Global,
     symbol: usize,
     files: &[FileId],
-    ids: &[UnitEntryId],
+    ids: &[Option<UnitEntryId>],
 ) -> Result<(), Error> {
     let root = dwarf.unit.root();
     let at = dwarf.unit.add(root, gimli::DW_TAG_variable);
@@ -555,7 +619,7 @@ fn takes(
     dwarf: &mut gimli::write::DwarfUnit,
     at: UnitEntryId,
     sig: &Sig,
-    ids: &[UnitEntryId],
+    ids: &[Option<UnitEntryId>],
     which: Option<usize>,
     frames: bool,
 ) -> Result<(), Error> {
@@ -585,7 +649,7 @@ fn held(
     dwarf: &mut gimli::write::DwarfUnit,
     at: UnitEntryId,
     member: &Member,
-    ids: &[UnitEntryId],
+    ids: &[Option<UnitEntryId>],
 ) -> Result<(), Error> {
     let child = dwarf.unit.add(at, gimli::DW_TAG_member);
     if let Some(name) = &member.name {
@@ -636,18 +700,33 @@ fn counted(dwarf: &mut gimli::write::DwarfUnit, at: UnitEntryId, value: &Constan
 /// flexible array member and an array of unknown length both look like and is what gcc writes for
 /// them. The array whose length is an expression ends up here too, and DWARF could describe that
 /// one properly, which is worth doing and is not done yet.
+///
+/// An array of arrays is one entry with a child per dimension, outermost first, over the element
+/// the innermost holds, which is how gcc writes `int m[3][4]`. pahole reads that as an array of
+/// twelve, BTF having no way to say two dimensions, and reads an array of arrays as two arrays, so
+/// the kernel's BTF has a different type for every such member unless both compilers write the
+/// same thing. An array under a typedef name is not looked through, since gcc does not either.
 fn elements(
     dwarf: &mut gimli::write::DwarfUnit,
     at: UnitEntryId,
     of: usize,
     count: Option<u64>,
-    ids: &[UnitEntryId],
+    ids: &[Option<UnitEntryId>],
+    shapes: &[Shape],
 ) -> Result<(), Error> {
+    let mut counts = vec![count];
+    let mut of = of;
+    while let Some(Shape::Array { of: inner, count }) = shapes.get(of) {
+        counts.push(*count);
+        of = *inner;
+    }
     points(dwarf, at, Some(of), ids)?;
-    let child = dwarf.unit.add(at, gimli::DW_TAG_subrange_type);
-    if let Some(count) = count.filter(|&count| count > 0) {
-        let last = AttributeValue::Udata(count - 1);
-        dwarf.unit.get_mut(child).set(gimli::DW_AT_upper_bound, last);
+    for count in counts {
+        let child = dwarf.unit.add(at, gimli::DW_TAG_subrange_type);
+        if let Some(count) = count.filter(|&count| count > 0) {
+            let last = AttributeValue::Udata(count - 1);
+            dwarf.unit.get_mut(child).set(gimli::DW_AT_upper_bound, last);
+        }
     }
     Ok(())
 }
@@ -657,10 +736,10 @@ fn points(
     dwarf: &mut gimli::write::DwarfUnit,
     at: UnitEntryId,
     of: Option<usize>,
-    ids: &[UnitEntryId],
+    ids: &[Option<UnitEntryId>],
 ) -> Result<(), Error> {
     let Some(of) = of else { return Ok(()) };
-    let Some(&target) = ids.get(of) else {
+    let Some(&Some(target)) = ids.get(of) else {
         let why = format!("an entry names type {of}, which is not one");
         return Err(Error::Refused { why });
     };
@@ -1261,10 +1340,13 @@ mod tests {
     #[test]
     fn an_enumeration_names_its_enumerators() {
         let mut unit = one();
+        let at = unit.types.len();
+        unit.globals =
+            vec![Global { name: "paint".to_owned(), ty: Some(at), decl: None, external: true }];
         unit.types.push(Shape::Enumeration {
             name: Some("color".to_owned()),
-            of: 0,
-            size: 4,
+            of: Some(0),
+            size: Some(4),
             values: vec![
                 Constant { name: "red".to_owned(), value: 0 },
                 Constant { name: "green".to_owned(), value: -1 },
@@ -1280,10 +1362,13 @@ mod tests {
     #[test]
     fn an_enumerator_too_wide_for_a_form_is_left_out() {
         let mut unit = one();
+        let at = unit.types.len();
+        unit.globals =
+            vec![Global { name: "span".to_owned(), ty: Some(at), decl: None, external: true }];
         unit.types.push(Shape::Enumeration {
             name: Some("wide".to_owned()),
-            of: 0,
-            size: 16,
+            of: Some(0),
+            size: Some(16),
             values: vec![
                 Constant { name: "small".to_owned(), value: 1 },
                 Constant { name: "huge".to_owned(), value: i128::from(u64::MAX) + 1 },
@@ -1292,6 +1377,21 @@ mod tests {
         let names = named(&write(&unit).expect("sections"));
         assert!(names.contains(&"small".to_owned()), "{names:?}");
         assert!(!names.contains(&"huge".to_owned()), "{names:?}");
+    }
+
+    /// A type that no function, local or variable reaches is not written, as gcc leaves it out.
+    #[test]
+    fn a_type_nothing_reaches_is_left_out() {
+        let mut unit = one();
+        unit.types.push(Shape::Enumeration {
+            name: Some("unused".to_owned()),
+            of: Some(0),
+            size: Some(4),
+            values: vec![Constant { name: "never".to_owned(), value: 0 }],
+        });
+        let names = named(&write(&unit).expect("sections"));
+        assert!(!names.contains(&"unused".to_owned()), "{names:?}");
+        assert!(!names.contains(&"never".to_owned()), "{names:?}");
     }
 
     /// Where in a function each relocation against it asks the linker for, in the order they were

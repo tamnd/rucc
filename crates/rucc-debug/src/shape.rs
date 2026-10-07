@@ -148,14 +148,15 @@ pub enum Shape {
     Enumeration {
         /// Its tag, absent for one the program left anonymous.
         name: Option<String>,
-        /// Which of the unit's [`types`](crate::Unit::types) the enumerators are held in.
-        of: usize,
-        /// How many bytes it is.
-        size: u64,
+        /// Which of the unit's [`types`](crate::Unit::types) the enumerators are held in, and
+        /// nothing for an enumeration that has not been completed, which is a thing a C program
+        /// can mention but cannot have an object of. That one is written as a declaration, which
+        /// is what gcc writes for the `enum irqchip_irq_state` the kernel's `struct irq_chip`
+        /// names before anything says what is in it.
+        of: Option<usize>,
+        /// How many bytes it is, and nothing where [`Shape::Enumeration::of`] is nothing.
+        size: Option<u64>,
         /// The enumerators in the order the program wrote them.
-        ///
-        /// Empty for an enumeration that has not been completed, which is a thing a C program can
-        /// mention but cannot have an object of.
         values: Vec<Constant>,
     },
     /// A `typedef` name for another type.
