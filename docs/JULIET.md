@@ -76,6 +76,6 @@ The run before this one went with tamnd/rucc#3286 and missed 2,464 cases. tamnd/
 
 | Date | Commit | Level | Cases | Seconds |
 | --- | --- | --- | ---: | ---: |
-| 2026-10-07 | tamnd/rucc#3318 | -O2 | 8,654 | 3,900 |
+| 2026-10-07 | tamnd/rucc#3329 | -O2 | 8,654 | 3,900 |
 
 The run was on the Linux box, with every case built once per tier and both halves run as many at a time as it has processors, on a machine shared with other work whose load stayed between 12 and 19. Building the three tiers took about 20 minutes and running them about 45. The excuse that sets aside the two variant 32 socket cases was fixed after that run, so the CWE-121 and CWE-126 rows come from a second run of only those two at the same commit, which changed nothing else in them. The full list of missed ids, case by case and tier by tier, is what `cargo xtask juliet` writes to `target/juliet/report.txt`, and `cargo xtask juliet 121 126` takes only the CWEs it is given when only those need another look.
