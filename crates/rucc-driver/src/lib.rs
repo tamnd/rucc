@@ -4140,6 +4140,11 @@ fn compile_all(opts: &Options, plan: &Plan) -> i32 {
         failed |= !write_note(job, &result.note, &mut stderr);
         if result.failed() {
             failed = true;
+            // gcc and clang leave the rule behind for a file that got through the preprocessor and
+            // then failed, and kbuild reads it after a command it expects to fail.
+            if opts.deps.emit && result.preprocessed {
+                let _ = write_deps(opts, plan, job, &result.deps, &mut stderr);
+            }
             continue;
         }
         // `-MD` and `-MMD` write the rule beside the object and let the compilation happen, so
@@ -4294,6 +4299,11 @@ fn link_all(opts: &Options, plan: &Plan, link: &LinkOptions, verbose: bool) -> i
             failed |= !write_note(job, &result.note, &mut stderr);
             if result.failed() {
                 failed = true;
+                // gcc and clang leave the rule behind for a file that got through the preprocessor and
+                // then failed, and kbuild reads it after a command it expects to fail.
+                if opts.deps.emit && result.preprocessed {
+                    let _ = write_deps(opts, plan, job, &result.deps, &mut stderr);
+                }
                 continue;
             }
             // A `-MD` on a command line that links writes the rule next to the executable and
@@ -4478,6 +4488,11 @@ fn archive_all(opts: &Options, plan: &Plan) -> i32 {
             failed |= !write_note(plan_job, &result.note, &mut stderr);
             if result.failed() {
                 failed = true;
+                // gcc and clang leave the rule behind for a file that got through the preprocessor and
+                // then failed, and kbuild reads it after a command it expects to fail.
+                if opts.deps.emit && result.preprocessed {
+                    let _ = write_deps(opts, plan, plan_job, &result.deps, &mut stderr);
+                }
                 continue;
             }
             if opts.deps.emit {
@@ -8949,6 +8964,29 @@ mod tests {
         // And the `-o` went to the file the rule replaced, which is left empty rather than
         // absent because a makefile that named it as a target will look for it.
         assert_eq!(std::fs::read(tree.path("a.i")).expect("the output should exist"), b"");
+    }
+
+    #[test]
+    fn a_file_that_fails_after_the_preprocessor_still_gets_its_rule() {
+        // kbuild's lib/test_fortify compiles code that has to be refused with `-Wp,-MMD,` and
+        // hands the rule to `fixdep` afterwards. gcc and clang both leave it behind for an error
+        // the preprocessor did not see, and neither does for a header that was not found.
+        let tree = TempTree::new(
+            "failed",
+            &[
+                ("bad.c", "#include \"one.h\"\nint f(void) { return y; }\n"),
+                ("one.h", "#define X 0\n"),
+                ("lost.c", "#include \"nope.h\"\nint x;\n"),
+            ],
+        );
+        let (bad, lost) = (tree.path("bad.d"), tree.path("lost.d"));
+        let flag = format!("-Wp,-MMD,{bad}");
+        assert_ne!(run(&args(&[&flag, "-c", "-o", &tree.path("bad.o"), &tree.path("bad.c")])), 0);
+        let text = std::fs::read_to_string(&bad).expect("the rule should have been written");
+        assert!(text.contains("one.h"), "{text}");
+        let flag = format!("-Wp,-MMD,{lost}");
+        assert_ne!(run(&args(&[&flag, "-c", "-o", &tree.path("lost.o"), &tree.path("lost.c")])), 0);
+        assert!(!std::path::Path::new(&lost).exists());
     }
 
     #[test]

@@ -33,6 +33,7 @@ All notable changes are recorded here. The format follows [Keep a Changelog](htt
 
 ### Fixed
 
+- A file that gets through the preprocessor and then fails to compile still writes the rule `-MD`, `-MMD` or `-Wp,-MMD,` asked for, as gcc and clang do. kbuild's `lib/test_fortify` compiles code that has to be refused and runs `fixdep` on the rule afterwards, which stopped the build of the Debian arm64 config. A header that is not found still leaves no rule. (#3239)
 - An AArch64 variable's address that a loop is handed as where it starts keeps its `add` of the low twelve bits, and so does a widened array index handed to a loop the same way. The fold that moves those into the loads and stores counted the readers among the instructions and missed the edge into the loop, so the loop started from the page and not the variable. The 7.2 arm64 kernel put its first clocksource there and oopsed in `timekeeping_init`. (#3238)
 - A label in front of a conditional directive, as in `0: .ifc \pn, p64`, is defined when the line is reached in code that is assembled. The assembler used to drop it, and the arm64 GHASH code of 6.12, which goes back to it with `0b`, did not assemble. (#3231)
 - A register an AArch64 `asm` template only reads, in a store, a compare, a branch, an `msr` or a `prfm`, is no longer taken from the allocator, so the kernel's `crash_setup_regs` compiles instead of panicking. (#3211)
