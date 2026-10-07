@@ -346,12 +346,23 @@ pub struct Span {
 pub enum Held {
     /// This far from the function's frame base, which is a negative number for anything in the
     /// frame, since the frame base is the stack pointer the caller had and a frame is below that.
+    /// On wasm the frame base is the bottom of the frame, and the number is positive.
     Frame(i64),
     /// In this register, by the number this target's DWARF register numbering gives it.
     ///
     /// Not the register number the back end uses. The two agree on some targets and not on others,
     /// and the translation is the caller's, because the caller is what knows which target this is.
     Reg(u16),
+    /// In this local of a wasm function, by its index, which counts the parameters first.
+    ///
+    /// Written as `DW_OP_WASM_location 0x0` and the index, then `DW_OP_stack_value`, which is what
+    /// clang writes: the operation gives the value of the local and not an address.
+    Local(u32),
+    /// Nowhere, because the value is this number, which the back end writes where it is used.
+    ///
+    /// A constant has no local and no register of its own on wasm at `-O0`, and a debugger still
+    /// shows `int i = 0;` as zero, so the number goes in the expression with `DW_OP_stack_value`.
+    Constant(u64),
 }
 
 /// Where in the source something was declared.

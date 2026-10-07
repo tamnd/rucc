@@ -11,22 +11,27 @@
 //!
 //! The answer is the value the last assignment on every path into the block gave the declaration.
 //! An assignment is where a named value was computed, a block parameter a declaration is the value
-//! of, or a start [`rucc_ir::Func::start_place`] says is still somewhere. A block whose paths in
+//! of, or a start [`Func::start_place`] says is still somewhere. A block whose paths in
 //! disagree, or one no path reaches, has no answer, and the back end reads that as nothing to
 //! choose by rather than as a choice.
+//!
+//! Both back ends read it. The native one picks between two registers with it, and the wasm one
+//! uses it to say which local a declaration is in at the top of each block, since at `-O0` each
+//! value has a local of its own and the question there is only which value is the declaration.
 
 use std::collections::VecDeque;
 
 use rucc_base::hash::Map;
-use rucc_ir::{Block, Def, Func, Inst, Value};
 
-/// The value each declaration that has more than one of them holds at the top of each block, where
-/// every path in agrees, as the declaration, the block and the value, sorted.
+use crate::{Block, Def, Func, Inst, Value};
+
+/// Every place a declaration is given a value, as the block, the instruction it is given the value
+/// after, or `None` for the top of the block, and the value.
 ///
-/// Only a declaration with more than one value is asked about, since a declaration with one cannot
-/// be holding the wrong one of them, and the list would otherwise be every local times every block.
+/// A place is where a named value was computed, a block parameter a declaration is the value of,
+/// or a start [`Func::start_place`] says is still somewhere. A block a pass took out is not one.
 #[must_use]
-pub fn on_entry(func: &Func) -> Vec<(u32, Block, Value)> {
+pub fn assignments(func: &Func) -> Map<u32, Vec<(Block, Option<Inst>, Value)>> {
     let mut assigned: Map<u32, Vec<(Block, Option<Inst>, Value)>> = Map::default();
     for value in func.values() {
         let place = match func[value].def {
@@ -49,6 +54,17 @@ pub fn on_entry(func: &Func) -> Vec<(u32, Block, Value)> {
             }
         }
     }
+    assigned
+}
+
+/// The value each declaration that has more than one of them holds at the top of each block, where
+/// every path in agrees, as the declaration, the block and the value, sorted.
+///
+/// Only a declaration with more than one value is asked about, since a declaration with one cannot
+/// be holding the wrong one of them, and the list would otherwise be every local times every block.
+#[must_use]
+pub fn on_entry(func: &Func) -> Vec<(u32, Block, Value)> {
+    let mut assigned = assignments(func);
     assigned.retain(|_, all| all.iter().any(|&(_, _, value)| value != all[0].2));
     if assigned.is_empty() {
         return Vec::new();
@@ -164,8 +180,8 @@ impl Held {
 
 #[cfg(test)]
 mod tests {
+    use crate::{Builder, Signature, Start, Type};
     use rucc_base::Symbol;
-    use rucc_ir::{Builder, Signature, Start, Type};
 
     use super::*;
 
@@ -190,10 +206,10 @@ mod tests {
         Builder::new(&mut func, head).jump(body, &[]);
         let mut build = Builder::new(&mut func, body);
         let one = build.iconst(Type::int(32), 1);
-        let next = build.binary(rucc_ir::Opcode::Add, i, one, rucc_ir::Flags::NONE);
+        let next = build.binary(crate::Opcode::Add, i, one, crate::Flags::NONE);
         build.jump(after, &[]);
         let mut build = Builder::new(&mut func, after);
-        let done = build.icmp(rucc_ir::IntPred::Eq, i, next);
+        let done = build.icmp(crate::IntPred::Eq, i, next);
         build.br_if(done, exit, &[], head, &[next]);
         Builder::new(&mut func, exit).ret(&[]);
         for value in [zero, i, next] {

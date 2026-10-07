@@ -20,13 +20,15 @@ use crate::emit::{self, Code};
 use crate::irreducible::Node;
 use crate::rules;
 use crate::structure::Shape;
-use crate::{Lines, Notes, Unit, functype, is_pair, valtype};
+use crate::{Kept, Lines, Notes, Unit, functype, is_pair, valtype};
 
 mod builtin;
 mod color;
 mod pair;
+mod places;
 mod stackify;
 
+use places::Mark;
 use stackify::Trees;
 
 type Result<T> = std::result::Result<T, String>;
@@ -194,10 +196,14 @@ pub(crate) fn function(unit: &mut Unit<'_>, id: FuncId, symbol: u32) -> Result<F
         inverted: None,
         signed: Set::default(),
         rows: None,
+        marks: None,
         span: Span::DUMMY,
     };
     if lower.unit.lines.is_some() {
         lower.rows = Some(Vec::new());
+        if !lower.unit.optimize {
+            lower.marks = Some(Vec::new());
+        }
     }
     if unit_notes {
         let (values, blocks) = rucc_ir::numbers(func);
@@ -237,6 +243,10 @@ pub(crate) fn function(unit: &mut Unit<'_>, id: FuncId, symbol: u32) -> Result<F
             _ => locals.push((1, ty)),
         }
     }
+    let kept = match lower.rows {
+        Some(_) => lower.places(lower.marks.as_deref()),
+        None => Vec::new(),
+    };
     if let (Some(lines), Some(rows)) = (lower.unit.lines.as_mut(), lower.rows.take()) {
         // The offsets in the line table count from the start of the body, and the declarations of
         // the locals come before the code.
@@ -249,7 +259,11 @@ pub(crate) fn function(unit: &mut Unit<'_>, id: FuncId, symbol: u32) -> Result<F
         let head = u32::try_from(head.len()).expect("a short head");
         let len = u32::try_from(lower.code.bytes.len()).expect("a function body under 4 GiB");
         let rows = rows.into_iter().map(|(at, span)| (head + at, span)).collect();
-        lines.push(Lines { rows, len: head + len });
+        let kept = kept
+            .into_iter()
+            .map(|kept| Kept { over: kept.over.map(|(at, len)| (head + at, len)), ..kept })
+            .collect();
+        lines.push(Lines { rows, len: head + len, frame: lower.frame.fp, kept });
     }
     Ok(Function { symbol, locals, code: lower.code.bytes, fixups: lower.code.fixups, export })
 }
@@ -299,6 +313,9 @@ struct Lower<'u, 'a> {
     /// The offset in the code of each run of instructions and the span of the IR instruction that
     /// the run comes from, when `-g` asks for the line table. See [`Self::at`].
     rows: Option<Vec<(u32, Span)>>,
+    /// The offsets in the code that the places of the declarations are measured by, when `-g` asks
+    /// for the debug information at `-O0`. See `places.rs`.
+    marks: Option<Vec<(u32, Mark)>>,
     /// The span of the IR instruction whose code is written now.
     span: Span,
 }
@@ -568,6 +585,17 @@ impl Lower<'_, '_> {
                 same
             });
         }
+        // A mark moves as a row does, and two marks at one place are both kept.
+        if let Some(marks) = self.marks.as_mut() {
+            let (start, end) = (gone.start as u32, gone.end as u32);
+            for (at, _) in marks.iter_mut() {
+                if *at >= end {
+                    *at -= end - start;
+                } else if *at > start {
+                    *at = start;
+                }
+            }
+        }
         let Some(annotate) = self.annotate.as_mut() else { return };
         for (at, _) in &mut annotate.notes.marks {
             if *at >= gone.end {
@@ -628,6 +656,7 @@ impl Lower<'_, '_> {
             return Err("a block has no terminator".into());
         };
         let caught = self.caught(term);
+        self.mark_code(Mark::Top(block));
         for inst in func.insts(block) {
             if inst != term
                 && !self.trees.moved.contains(&inst)
@@ -635,8 +664,10 @@ impl Lower<'_, '_> {
             {
                 self.root = Some(inst);
                 self.inst(inst)?;
+                self.mark_code(Mark::After(inst));
             }
         }
+        self.mark_code(Mark::Term(block));
         self.root = Some(term);
         self.at(func.span(term));
         match func[term].opcode {
@@ -1631,6 +1662,14 @@ impl Lower<'_, '_> {
         let done = self.select(inst);
         self.at(outer);
         done
+    }
+
+    /// Put `mark` at the end of the code, when the places of the declarations are asked for.
+    fn mark_code(&mut self, mark: Mark) {
+        if let Some(marks) = self.marks.as_mut() {
+            let at = u32::try_from(self.code.bytes.len()).expect("a function body under 4 GiB");
+            marks.push((at, mark));
+        }
     }
 
     /// Start a row for `span` at the end of the code, when the line table is asked for, and give

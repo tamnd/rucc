@@ -39,6 +39,7 @@ mod facts;
 mod fixtures;
 mod flags;
 mod func;
+pub mod holding;
 mod inst;
 mod module;
 mod opcode;

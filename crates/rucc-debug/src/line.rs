@@ -160,6 +160,13 @@ pub struct Function {
     ///
     /// Parameters are not among them, whether or not they have a slot. See [`Local`].
     pub locals: Vec<Local>,
+    /// The wasm local that holds the bottom of the frame, for a wasm function that has a frame.
+    ///
+    /// Its `DW_AT_frame_base` is then that local, as `DW_OP_WASM_location 0x0` and the index with
+    /// `DW_OP_stack_value`, which is what clang writes, and a local in the frame is a
+    /// `DW_OP_fbreg` from it whatever [`Unit::frames`] says. A wasm function has no call frame
+    /// table, so the call frame address is not an answer there.
+    pub frame_local: Option<u32>,
     /// The inner scopes of the function, each after the scope it is written inside.
     ///
     /// The function's own body is not one of them, for the reason [`Scope`] gives. A scope nothing
