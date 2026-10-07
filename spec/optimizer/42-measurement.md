@@ -159,6 +159,14 @@ pass whose only value is what it enables downstream measures as valuable, correc
 attribution to it specifically is not recoverable from this experiment. When that attribution matters,
 the experiment is a firing count in the downstream pass with and without the upstream one.
 
+### The first run
+
+The pass-off was run on 6 October 2026, tamnd/rucc#2968, over the 3500 cases of rucc-corpus at `-O2` against gcc 16, with rucc built from main at `a52b6c74`. Each of the 43 passes was turned off with `-fdisable-<pass>`, one at a time, and only the cases whose assembly changed were built and run. Like the sweep of section 40.14 it counts instructions retired and the size of the text rather than run time, and calls a pass by what turning it off does to the cases it changed: it pays when off costs on one of the two by more than 0.1% and saves on neither, trades when off saves on one and costs on the other, costs when off saves and costs nothing, and is flat when the assembly changes and neither moves. The corpus page, [experiments/00-pass-off](https://github.com/tamnd/rucc-corpus/blob/main/experiments/00-pass-off/README.md), has every pass with its facets and compile time, and `results.json` next to it has the same for a tool. `cargo xtask passoff` runs it again.
+
+24 passes pay, 7 trade and 3 cost. No pass that can be turned off made a case print the wrong answer. The three that cost are each the warning of the last refinement above the other way round, a pass that is right in itself and leaves a shape a later part of the compiler handles badly: `widen` leaves a 64-bit index that has the address of a `static` array taken again on every trip (tamnd/rucc#3185), `dce` leaves an add between the compare that ends a loop and its branch, which then goes through `setl` and `testb` (tamnd/rucc#3186), and `redundant-load` raises the pressure in a loop enough that its accumulator loses its register (tamnd/rucc#3187). Each is a fix after the pass and not a reason to drop it, and the next run should call each of them pays or flat.
+
+`expect` and `constant-p` could not be measured, since `-fdisable-` turned off the two passes `-fno-` keeps as required and the cases using them stopped compiling or linking. That was a bug in the gate (tamnd/rucc#3189), and a required pass is out of reach of both flags now, as section 41.6 says. `lanes`, `hoist`, `plane-sink`, `split`, `discharge`, `dead-plane` and `coalesce` change the assembly of no case at `-O2`. That alone says nothing about whether they can go, since another pass may do their work here or the corpus may lack their shape, and the firing counts of tamnd/rucc#404 are what settle it.
+
 ## 42.5 The experiment list
 
 Collected from documents 11 through 41. The column "settles" says which decision the result changes,
