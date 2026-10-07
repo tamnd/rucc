@@ -272,7 +272,7 @@ options:
   -gz[=none|zlib|zlib-gnu] -gno-split-dwarf   compress the debug sections, zlib when bare
   -flto[=auto|jobserver|<n>] -fno-lto -ffat-lto-objects   keep the module in the object, not read at link time yet
   -fprofile-use[=<path>] -fprofile-dir=<dir> --coverage   read, and counted for gcov
-  -f[no-]stack-protector[-strong|-all|-explicit], -f[no-]stack-clash-protection, -fcf-protection=<edges>
+  -f[no-]stack-protector[-strong|-all|-explicit], -f[no-]stack-clash-protection, -fcf-protection=<edges>, -fhardened
   -ffunction-sections -fdata-sections, -fno-plt   a section per function or variable, for --gc-sections, calls through the GOT
   -fvisibility=<what>    default, hidden, internal or protected, when nothing in the source said
   -l<name>, -L <dir>, -B <dir>, --gcc-toolchain=<dir>   a library, where to look for one, our tools, the GCC
@@ -827,6 +827,8 @@ pub fn parse_args(args: &[String]) -> Result<Action, CliError> {
     // Whether `-static-pie` was written, which is the one way to ask for a static program that
     // moves itself. `-static` with `-pie` is not that, and is weighed after the loop.
     let mut static_pie = false;
+    // `-fhardened`, which is weighed after the loop against each flag the line names.
+    let mut hardened = false;
     let mut query: Option<Query> = None;
     // `--version`, answered after the loop because the banner names the GCC release claimed and
     // `-fgnuc-version=` may come after it.
@@ -1311,6 +1313,9 @@ pub fn parse_args(args: &[String]) -> Result<Action, CliError> {
             // Arch and Fedora build with this. The call reads the address from the GOT.
             "-fno-plt" => opts.plt = false,
             "-fplt" => opts.plt = true,
+            // GCC 14's set of the flags above and a few more. See `harden`.
+            "-fhardened" => hardened = true,
+            "-fno-hardened" => hardened = false,
             // The third of them, and the one that is a question with an argument rather than a
             // family of spellings, because what it asks about is which of the two edges of a
             // control flow transfer is checked. Bare is both of them, which is what gcc does.
@@ -3633,6 +3638,9 @@ pub fn parse_args(args: &[String]) -> Result<Action, CliError> {
     if print_params {
         return Ok(Action::PrintParams(opts.params));
     }
+    if hardened {
+        harden(&mut opts, &mut link, args, &mut notes)?;
+    }
     let plan = Plan::new(&opts, &inputs, output.as_deref()).map_err(|e| err(e.message))?;
     if print_plan {
         return Ok(Action::PrintPlan {
@@ -3655,6 +3663,111 @@ pub fn parse_args(args: &[String]) -> Result<Action, CliError> {
         verbose,
         notes,
     })
+}
+
+/// `-fhardened`, as GCC 14 and later do it.
+///
+/// The flag turns on each item of this list that the command line does not name: `_FORTIFY_SOURCE=3`
+/// at `-O1` and above, `_GLIBCXX_ASSERTIONS`, `-ftrivial-auto-var-init=zero`,
+/// `-fstack-protector-strong`, `-fstack-clash-protection`, `-fcf-protection=full` on x86, and
+/// `-z now` and `-z relro` on the link. PIE is the default here already. An item that the line names
+/// stays as the line says, and a warning says so, with the words that gcc uses. `-Wno-hardened`
+/// stops the warnings. gcc supports the flag only on GNU/Linux, and so does rucc.
+fn harden(
+    opts: &mut Options,
+    link: &mut LinkOptions,
+    args: &[String],
+    notes: &mut Vec<String>,
+) -> Result<(), CliError> {
+    use rucc_target::{Arch, Env, Os};
+    if opts.target.os != Os::Linux || opts.target.env != Env::Gnu {
+        return Err(err(format!("-fhardened is not supported for {}", opts.target)));
+    }
+    let warn = args.iter().rev().find_map(|arg| match arg.as_str() {
+        "-Whardened" => Some(true),
+        "-Wno-hardened" => Some(false),
+        _ => None,
+    });
+    let mut note = |text: String| {
+        if warn.unwrap_or(true) {
+            notes.push(format!("{text} [-Whardened]"));
+        }
+    };
+    let named = |prefixes: &[&str]| {
+        args.iter().any(|arg| prefixes.iter().any(|prefix| arg.starts_with(prefix)))
+    };
+    let given =
+        |list: &[String], name: &str| list.iter().any(|item| item.split('=').next() == Some(name));
+    let skipped = |what: &str| {
+        format!(
+            "'{what}' is not enabled by -fhardened because it was specified on the command line"
+        )
+    };
+
+    if given(&opts.defines, "_FORTIFY_SOURCE") || given(&opts.undefines, "_FORTIFY_SOURCE") {
+        note(
+            "'_FORTIFY_SOURCE' is not enabled by -fhardened because it was specified in -D or -U"
+                .to_owned(),
+        );
+    } else if opts.opt_level == rucc_session::OptLevel::O0 {
+        note(
+            "'_FORTIFY_SOURCE' is not enabled by -fhardened because optimizations are turned off"
+                .to_owned(),
+        );
+    } else {
+        opts.defines.push("_FORTIFY_SOURCE=3".to_owned());
+    }
+    if !given(&opts.defines, "_GLIBCXX_ASSERTIONS")
+        && !given(&opts.undefines, "_GLIBCXX_ASSERTIONS")
+    {
+        opts.defines.push("_GLIBCXX_ASSERTIONS".to_owned());
+    }
+    if named(&["-ftrivial-auto-var-init="]) {
+        note(skipped("-ftrivial-auto-var-init=zero"));
+    } else {
+        opts.auto_var_init = Some(0);
+    }
+    if named(&["-fstack-protector", "-fno-stack-protector"]) {
+        note(skipped("-fstack-protector-strong"));
+    } else {
+        opts.protector = Protector::Strong;
+    }
+    // gcc says nothing when the line names this one.
+    if !named(&["-fstack-clash-protection", "-fno-stack-clash-protection"]) {
+        opts.stack_clash = true;
+    }
+    if matches!(opts.target.arch, Arch::X86_64 | Arch::X86) {
+        if named(&["-fcf-protection", "-fno-cf-protection"]) {
+            note(skipped("-fcf-protection=full"));
+        } else {
+            opts.control = Control::Full;
+        }
+    }
+
+    // The link. gcc leaves out `-z now` and `-z relro` when the line asks for a link that is not
+    // a PIE, or asks the linker for lazy binding or for no relro.
+    let mut words = Vec::new();
+    for (i, arg) in args.iter().enumerate() {
+        if let Some(list) = arg.strip_prefix("-Wl,") {
+            words.extend(list.split(','));
+        } else if arg == "-Xlinker" {
+            words.extend(args.get(i + 1).map(String::as_str));
+        }
+    }
+    let weaker = words.iter().any(|word| matches!(*word, "-zlazy" | "-znorelro"))
+        || words.windows(2).any(|pair| pair[0] == "-z" && matches!(pair[1], "lazy" | "norelro"));
+    if link.pie == Some(false) || link.is_static || link.shared || link.relocatable || weaker {
+        if opts.emit == EmitKind::Executable {
+            note(
+                "linker hardening options not enabled by -fhardened because other link options \
+                 were specified on the command line"
+                    .to_owned(),
+            );
+        }
+    } else {
+        link.hardened = true;
+    }
+    Ok(())
 }
 
 /// What `--fetch <tuple>` asked for, or why it is not a thing that can be done.
@@ -7525,6 +7638,57 @@ mod tests {
         assert!(!opts.plt);
         let (opts, _) = compile(&["-c", "-fno-plt", "-fplt", "a.c"]);
         assert!(opts.plt, "the last one wins");
+    }
+
+    /// `-fhardened` turns on each item of gcc's list, on x86-64 GNU/Linux at `-O2`.
+    #[test]
+    fn the_hardened_flag_turns_on_gcc_s_list() {
+        let (opts, _) = compile(&[LINUX, "-c", "-O2", "-fhardened", "a.c"]);
+        assert!(opts.defines.iter().any(|d| d == "_FORTIFY_SOURCE=3"), "{:?}", opts.defines);
+        assert!(opts.defines.iter().any(|d| d == "_GLIBCXX_ASSERTIONS"), "{:?}", opts.defines);
+        assert_eq!(opts.auto_var_init, Some(0));
+        assert_eq!(opts.protector, Protector::Strong);
+        assert!(opts.stack_clash);
+        assert_eq!(opts.control, Control::Full);
+        assert!(notes(&[LINUX, "-c", "-O2", "-fhardened", "a.c"]).is_empty());
+        let (link, _) = linking(&[LINUX, "-O2", "-fhardened", "a.c"]);
+        assert!(link.hardened);
+        let (opts, _) = compile(&[LINUX, "-c", "-O2", "-fhardened", "-fno-hardened", "a.c"]);
+        assert_eq!(opts.protector, Protector::None, "the last one wins");
+
+        // AArch64 has no control flow protection in the list.
+        let (opts, _) = compile(&["--target=aarch64-unknown-linux-gnu", "-c", "-fhardened", "a.c"]);
+        assert_eq!(opts.control, Control::None);
+        assert_eq!(opts.protector, Protector::Strong);
+
+        let musl = refused(&["--target=x86_64-unknown-linux-musl", "-c", "-fhardened", "a.c"]);
+        assert!(musl.contains("-fhardened"), "{musl}");
+    }
+
+    /// A flag that the line names wins over `-fhardened`, and a warning says so, in gcc's words.
+    #[test]
+    fn a_named_flag_wins_over_the_hardened_flag_with_a_warning() {
+        let line = [LINUX, "-c", "-O0", "-fhardened", "-fstack-protector", "-fcf-protection=none"];
+        let (opts, _) = compile(&[&line[..], &["a.c"]].concat());
+        assert_eq!(opts.protector, Protector::Buffers);
+        assert_eq!(opts.control, Control::None);
+        assert!(!opts.defines.iter().any(|d| d.starts_with("_FORTIFY_SOURCE")));
+        let said = notes(&[&line[..], &["a.c"]].concat());
+        assert_eq!(said.len(), 3, "{said:?}");
+        assert!(said[0].contains("because optimizations are turned off"), "{said:?}");
+        assert!(said.iter().all(|note| note.ends_with("[-Whardened]")), "{said:?}");
+        assert!(notes(&[&line[..], &["-Wno-hardened", "a.c"]].concat()).is_empty());
+
+        let said = notes(&[LINUX, "-c", "-O2", "-D_FORTIFY_SOURCE=2", "-fhardened", "a.c"]);
+        assert!(said[0].contains("specified in -D or -U"), "{said:?}");
+
+        for other in ["-static", "-no-pie", "-Wl,-z,lazy"] {
+            let (link, _) = linking(&[LINUX, "-O2", "-fhardened", other, "a.c"]);
+            assert!(!link.hardened, "{other}");
+            let said = notes(&[LINUX, "-O2", "-fhardened", other, "a.c"]);
+            assert!(said[0].starts_with("linker hardening options"), "{other}: {said:?}");
+        }
+        assert!(notes(&[LINUX, "-c", "-O2", "-fhardened", "-Wl,-z,lazy", "a.c"]).is_empty());
     }
 
     /// Five flags rather than one with an argument, which is how gcc spells them, and the negative
