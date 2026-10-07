@@ -502,6 +502,12 @@ struct Reader {
     /// an instruction name the register that way, and the kernel's crypto code names nearly every
     /// register it uses so, setting the same name again as it rotates them round a loop.
     registers: Map<String, String>,
+    /// The constants `ldr x0, =value` put in a literal pool on AArch64 that no `.ltorg` has
+    /// written yet, each with the part it goes at the end of, the label the load reads, and its
+    /// width.
+    literals: Vec<(usize, String, String, u8)>,
+    /// How many labels for a literal pool have been made, so the next one is new.
+    literal_labels: usize,
     /// The numbered entries a relocation names, which are kept in the symbol table so that the
     /// relocation has something to point at. That is a numbered local label or a set name reached
     /// from another section, and is rare.
@@ -634,7 +640,13 @@ impl Reader {
         if commenting {
             return Err(self.bad("a block comment was opened and never closed"));
         }
-        self.finish_macros()
+        self.finish_macros()?;
+        // A pool no `.ltorg` wrote goes at the end of its section, as gas puts it.
+        while let Some(&(part, ..)) = self.literals.first() {
+            self.go(part);
+            self.literal_pool()?;
+        }
+        Ok(())
     }
 
     /// One line without its comments.
@@ -714,7 +726,14 @@ impl Reader {
         if text.is_empty() {
             return Ok(());
         }
-        let (word, rest) = match text.find(char::is_whitespace) {
+        // A directive's name ends at a bracket as well, since the arm64 kernel writes `.inst(x)`
+        // with no blank so that it reads as one argument of a macro.
+        let cut = if text.starts_with('.') {
+            text.find(|ch: char| ch.is_whitespace() || ch == '(')
+        } else {
+            text.find(char::is_whitespace)
+        };
+        let (word, rest) = match cut {
             Some(cut) => (&text[..cut], text[cut..].trim()),
             None => (text, ""),
         };
@@ -747,10 +766,13 @@ impl Reader {
             if let Some(text) = self.wide_part(word, &self.renamed(rest)) {
                 return self.a64(&text);
             }
-            if self.registers.is_empty() && !rest.contains('#') {
+            if let Some(text) = self.literal(word, &self.renamed(rest)) {
+                return self.a64(&text);
+            }
+            if self.registers.is_empty() && !rest.contains('#') && !rest.contains(['(', ' ']) {
                 return self.a64(text);
             }
-            let rest = self.worked_out(&self.renamed(rest));
+            let rest = self.worked_out(&self.bare_sums(&self.renamed(rest)));
             return self.a64(&format!("{word} {rest}"));
         }
         // A prefix written on the same line as the instruction it goes in front of, which is how a
@@ -858,6 +880,117 @@ impl Reader {
         out
     }
 
+    /// The operands of an AArch64 instruction with every immediate written without its `#` that is
+    /// arithmetic worked out and written with one.
+    ///
+    /// GNU as takes an immediate with no `#` in front of it, and the kernel writes some that way:
+    /// `subs count, count, 128 + 16` in `memcpy.S`, and `cmp x0, ((0b0001))` once the preprocessor
+    /// has been over a constant handed to a macro in `el2_setup.h`. An operand inside brackets or
+    /// braces is an address or a list and is left alone, and so is one that is not all numbers.
+    fn bare_sums(&self, rest: &str) -> String {
+        let mut out = String::with_capacity(rest.len());
+        let mut depth = 0i32;
+        let mut start = 0;
+        let mut pieces = Vec::new();
+        for (at, c) in rest.char_indices() {
+            match c {
+                '[' | '{' | '(' => depth += 1,
+                ']' | '}' | ')' => depth -= 1,
+                ',' if depth == 0 => {
+                    pieces.push(&rest[start..at]);
+                    start = at + 1;
+                }
+                _ => {}
+            }
+        }
+        pieces.push(&rest[start..]);
+        for (index, piece) in pieces.iter().enumerate() {
+            if index > 0 {
+                out.push(',');
+            }
+            let text = piece.trim();
+            let sum = text.starts_with(|c: char| c == '(' || c == '~' || c.is_ascii_digit())
+                && text.contains(['(', '+', '-', '*', '/', '<', '>', '|', '&', '^', '~', ' '])
+                && !text.contains(['[', '{', ':', '#']);
+            let number = sum
+                .then(|| {
+                    Parser {
+                        text,
+                        at: 0,
+                        here: (0, 0),
+                        values: Some(&self.values),
+                        reader: None,
+                        guessed: None,
+                    }
+                    .whole()
+                    .ok()?
+                    .flat()
+                })
+                .flatten();
+            match number {
+                Some(number) => out.push_str(&format!(" #{number}")),
+                None => out.push_str(piece),
+            }
+        }
+        out
+    }
+
+    /// A load of a constant, `ldr x0, =value`, as a load of a word in a literal pool or a move.
+    ///
+    /// gas writes a number a `mov` can hold as that `mov`, and puts anything else, a symbol say,
+    /// in a pool that `.ltorg` writes out, or the end of the section when nothing does. The arm64
+    /// kernel's `head.S` loads the address of `__primary_switched` this way.
+    fn literal(&mut self, word: &str, rest: &str) -> Option<String> {
+        if !word.eq_ignore_ascii_case("ldr") {
+            return None;
+        }
+        let (register, value) = rest.split_once(',')?;
+        let value = value.trim().strip_prefix('=')?.trim();
+        let register = register.trim();
+        let width = match register.as_bytes().first()? {
+            b'x' | b'X' => 8,
+            b'w' | b'W' => 4,
+            _ => return None,
+        };
+        let number = Parser {
+            text: value,
+            at: 0,
+            here: (0, 0),
+            values: Some(&self.values),
+            reader: None,
+            guessed: None,
+        }
+        .whole()
+        .ok()
+        .and_then(|sum| sum.flat());
+        if let Some(number) = number {
+            let number = if width == 4 { i64::from(number as u32) } else { number };
+            let moved = format!("mov {register}, #{number}");
+            let line = aarch64::read(&moved).ok()?;
+            if aarch64::encode(&line.mnemonic, &line.values).is_ok() {
+                return Some(moved);
+            }
+        }
+        let label = format!(".Lrucc_literal{}", self.literal_labels);
+        self.literal_labels += 1;
+        self.literals.push((self.here, label.clone(), value.to_owned(), width));
+        Some(format!("ldr {register}, {label}"))
+    }
+
+    /// The literal pool of the part being written to, after the code that loads from it.
+    fn literal_pool(&mut self) -> Result<(), Trouble> {
+        let here = self.here;
+        let (pool, rest) =
+            std::mem::take(&mut self.literals).into_iter().partition(|(part, ..)| *part == here);
+        self.literals = rest;
+        for (_, label, value, width) in pool {
+            self.align("balign", &[width.to_string()])?;
+            self.label(&label)?;
+            self.data(&[value], width)?;
+        }
+        Ok(())
+    }
+
     /// A wide move of sixteen bits out of a number, `movz x0, :abs_g3:0x1234`, as the plain move
     /// it is, `movz x0, #0x1234 >> 48 & 0xffff, lsl #48` with the number worked out.
     ///
@@ -937,6 +1070,15 @@ impl Reader {
                 out.push_str(word);
             } else if let Some(register) = self.registers.get(word) {
                 out.push_str(register);
+            } else if let Some((register, lanes)) = word
+                .split_once('.')
+                .and_then(|(name, lanes)| Some((self.registers.get(name)?, lanes)))
+            {
+                // A vector register named with its lanes, `k0.4s` after `k0 .req v0`, which is how
+                // the arm64 kernel's SHA-1 names its round constants.
+                out.push_str(register);
+                out.push('.');
+                out.push_str(lanes);
             } else if let Some(&value) = self.values.get(word).filter(|_| numbers) {
                 match value < 0 {
                     true => out.push_str(&format!("({value})")),
@@ -1825,6 +1967,10 @@ impl Reader {
                 self.go(back);
             }
 
+            "ltorg" | "pool" if self.aarch64 => self.literal_pool()?,
+            // An instruction written as its number, which is how the arm64 kernel writes one the
+            // assembler may not know.
+            "inst" if self.aarch64 => self.data(&args, 4)?,
             "byte" => self.data(&args, 1)?,
             // `.word` is two bytes on x86-64 and four on AArch64, where a word is an instruction.
             "word" if self.aarch64 => self.data(&args, 4)?,
@@ -6166,6 +6312,38 @@ _tls$tlv$init:
             words(&read, ".text"),
             [0xd280_1800, 0x9100_2021, 0xd280_00a2, 0xf940_0883, 0xa9be_7bfd, 0xd503_245f]
         );
+    }
+
+    #[test]
+    fn an_aarch64_load_of_a_literal_is_a_move_or_a_word_in_the_pool() {
+        // What the arm64 kernel's head.S and the hypervisor's vectors write, and the words llvm-mc
+        // writes for the same text: a number a `mov` takes is the `mov`, and anything else is a
+        // word in the pool `.ltorg` puts down, or the one at the end of the section.
+        let read = aarch64(concat!(
+            "\tldr x0, =0x1234\n\tldr x1, =0x123456789abcdef0\n\tldr w2, =sym\n\tb 1f\n",
+            "\t.ltorg\n1:\t.inst(0xd503201f)\n\t.inst 0xd503233f\n",
+            "k0 .req v0\n\tdup k0.4s, w6\n\tadd x3, x3, 128 + 16\n\tldr x4, =0x1122334455667788\n",
+        ));
+        assert_eq!(
+            words(&read, ".text"),
+            [
+                0xd282_4680,
+                0x5800_0061,
+                0x1800_0082,
+                0x1400_0004,
+                0x9abc_def0,
+                0x1234_5678,
+                0,
+                0xd503_201f,
+                0xd503_233f,
+                0x4e04_0cc0,
+                0x9102_4063,
+                0x5800_0024,
+                0x5566_7788,
+                0x1122_3344
+            ]
+        );
+        assert_eq!(relocs(&read, ".text"), [(24, "sym", Reference::Address { bytes: 4 }, 0)]);
     }
 
     #[test]

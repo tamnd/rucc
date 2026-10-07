@@ -110,6 +110,9 @@ pub enum Arrangement {
     D1,
     /// Two eight byte lanes, `v0.2d`.
     D2,
+    /// One sixteen byte lane, `v0.1q`, which only the polynomial multiply of two doublewords
+    /// writes.
+    Q1,
 }
 
 impl Arrangement {
@@ -125,6 +128,7 @@ impl Arrangement {
             "4s" => Arrangement::S4,
             "1d" => Arrangement::D1,
             "2d" => Arrangement::D2,
+            "1q" => Arrangement::Q1,
             _ => return None,
         })
     }
@@ -141,6 +145,7 @@ impl Arrangement {
             Arrangement::S4 => "4s",
             Arrangement::D1 => "1d",
             Arrangement::D2 => "2d",
+            Arrangement::Q1 => "1q",
         }
     }
 }
@@ -397,7 +402,7 @@ pub enum Value {
     Symbol(Operator),
     /// Which accesses a barrier orders, as the number the encoding gives it. `ish` is eleven.
     Barrier(u8),
-    /// A system register, as the fifteen bits `mrs` and `msr` carry for it.
+    /// A system register, as the sixteen bits `mrs` and `msr` carry for it.
     System(u16),
     /// What a `prfm` is asked to do, as the five bits the encoding gives it. `pldl1keep` is zero.
     Prefetch(u8),
@@ -685,6 +690,60 @@ impl At<'_> {
         Error::Register { mnemonic: self.mnemonic.to_owned() }
     }
 
+    /// The memory copy and set instructions, `cpyfp [x0]!, [x1]!, x2!` and `setp [x0]!, x1!, x2`,
+    /// each of which is written three times, for the start, the middle and the end of the work.
+    /// The letters after that say which accesses are unprivileged and which do not stream.
+    fn mops(self, values: &[Value]) -> Result<Option<u32>, Error> {
+        const COPY: [&str; 16] = [
+            "", "wt", "rt", "t", "wn", "wtwn", "rtwn", "twn", "rn", "wtrn", "rtrn", "trn", "n",
+            "wtn", "rtn", "tn",
+        ];
+        const SET: [&str; 4] = ["", "t", "n", "tn"];
+        let m = self.mnemonic;
+        let (base, rest, copy) = if let Some(rest) = m.strip_prefix("cpyf") {
+            (0x1900_0400, rest, true)
+        } else if let Some(rest) = m.strip_prefix("cpy") {
+            (0x1D00_0400, rest, true)
+        } else if let Some(rest) = m.strip_prefix("setg") {
+            (0x1DC0_0400, rest, false)
+        } else if let Some(rest) = m.strip_prefix("set") {
+            (0x19C0_0400, rest, false)
+        } else {
+            return Ok(None);
+        };
+        let stage = match rest.get(..1) {
+            Some("p") => 0,
+            Some("m") => 1,
+            Some("e") => 2,
+            _ => return Ok(None),
+        };
+        let options: &[&str] = if copy { &COPY } else { &SET };
+        let Some(option) = options.iter().position(|&option| option == &rest[1..]) else {
+            return Ok(None);
+        };
+        let option = option as u32;
+        let walked = |value: &Value| match value {
+            Value::Mem(Addr { base, offset: Offset::Imm(0), mode: Mode::Pre }) if *base != 31 => {
+                Ok(u32::from(*base))
+            }
+            _ => Err(self.register()),
+        };
+        let x = |value: &Value| match value {
+            Value::Gpr(Width::X, reg) => Ok(u32::from(*reg)),
+            _ => Err(self.register()),
+        };
+        let word = match (copy, values) {
+            (true, [d, s, n]) => {
+                base | stage << 22 | option << 12 | walked(s)? << 16 | x(n)? << 5 | walked(d)?
+            }
+            (false, [d, n, s]) => {
+                base | (stage << 2 | option) << 12 | x(s)? << 16 | x(n)? << 5 | walked(d)?
+            }
+            _ => return Err(self.unwritten()),
+        };
+        Ok(Some(word))
+    }
+
     /// A general register where thirty one is the zero register.
     fn zr(self, value: &Value) -> Result<(Width, u32), Error> {
         match *value {
@@ -740,6 +799,9 @@ impl At<'_> {
                 }
                 _ => Err(self.unwritten()),
             };
+        }
+        if let Some(word) = self.mops(values)? {
+            return Ok((word, None));
         }
         let word = match m {
             "add" => return self.arith(false, false, values),
@@ -1048,7 +1110,7 @@ impl At<'_> {
                     if width != Width::X {
                         return Err(self.register());
                     }
-                    0xd530_0000 | u32::from(*field & 0x7fff) << 5 | rt
+                    0xd520_0000 | u32::from(*field) << 5 | rt
                 }
                 _ => return Err(self.unwritten()),
             },
@@ -1072,7 +1134,7 @@ impl At<'_> {
                     if width != Width::X {
                         return Err(self.register());
                     }
-                    0xd510_0000 | u32::from(*field & 0x7fff) << 5 | rt
+                    0xd500_0000 | u32::from(*field) << 5 | rt
                 }
                 _ => return Err(self.unwritten()),
             },
@@ -1728,7 +1790,15 @@ impl At<'_> {
             Value::Fp(_, number) if !prefetch => (self.access(t)?, u32::from(number)),
             _ => return Err(self.unwritten()),
         };
-        let unscaled_only = m.starts_with("ldur") || m.starts_with("stur") || m == "prfum";
+        // `ldtr` and `sttr` are the unprivileged accesses, which the kernel reads and writes user
+        // memory with. They take the unscaled offset and nothing else, with `10` where `ldur` has
+        // `00`, and only the general purpose registers.
+        let unprivileged = m.starts_with("ldtr") || m.starts_with("sttr");
+        if unprivileged && access.v != 0 {
+            return Err(self.register());
+        }
+        let unscaled_only =
+            m.starts_with("ldur") || m.starts_with("stur") || m == "prfum" || unprivileged;
         let front = access.size << 30 | 0b111 << 27 | access.v << 26 | access.opc << 22 | rt;
         let addr = match place {
             Value::Mem(addr) => *addr,
@@ -1757,7 +1827,7 @@ impl At<'_> {
                     front | 1 << 24 | (scaled as u32) << 10 | rn << 5
                 } else {
                     let imm9 = signed(imm, 9).ok_or_else(|| self.immediate(imm))?;
-                    front | imm9 << 12 | rn << 5
+                    front | imm9 << 12 | u32::from(unprivileged) << 11 | rn << 5
                 }
             }
             (Offset::Imm(imm), mode) if !unscaled_only && !prefetch => {
@@ -1808,7 +1878,10 @@ impl At<'_> {
         let m = self.mnemonic;
         let load = m.starts_with("ld");
         let base = m.strip_prefix("ld").or_else(|| m.strip_prefix("st")).unwrap_or(m);
-        let base = base.strip_prefix("ur").or_else(|| base.strip_prefix('r'));
+        let base = base
+            .strip_prefix("ur")
+            .or_else(|| base.strip_prefix("tr"))
+            .or_else(|| base.strip_prefix('r'));
         let Some(base) = base else {
             return Err(self.unwritten());
         };
@@ -2189,6 +2262,39 @@ mod tests {
         }
         assert!(encode("crc32c", &[Value::Gpr(Width::W, 0); 3]).is_err());
         assert!(encode("crc32cq", &[Value::Gpr(Width::W, 0); 3]).is_err());
+    }
+
+    #[test]
+    fn the_crypto_and_memory_copy_words_are_the_words_llvm_mc_writes() {
+        for (text, word) in [
+            ("aese v3.16b, v5.16b", 0x4e28_48a3),
+            ("aesimc v0.16b, v1.16b", 0x4e28_7820),
+            ("sha1h s3, s5", 0x5e28_08a3),
+            ("sha1c q3, s5, v7.4s", 0x5e07_00a3),
+            ("sha256h2 q3, q5, v7.4s", 0x5e07_50a3),
+            ("sha512su1 v3.2d, v5.2d, v7.2d", 0xce67_88a3),
+            ("eor3 v0.16b, v1.16b, v2.16b, v3.16b", 0xce02_0c20),
+            ("xar v0.2d, v1.2d, v2.2d, #10", 0xce82_2820),
+            ("pmull v3.1q, v5.1d, v7.1d", 0x0ee7_e0a3),
+            ("pmull2 v3.1q, v5.2d, v7.2d", 0x4ee7_e0a3),
+            ("cpyfp [x3]!, [x5]!, x7!", 0x1905_04e3),
+            ("cpyertrn [x0]!, [x1]!, x2!", 0x1d81_a440),
+            ("setp [x3]!, x5!, x7", 0x19c7_04a3),
+            ("setgmtn [x3]!, x5!, xzr", 0x1ddf_74a3),
+            ("ldtr x1, [x2, #8]", 0xf840_8841),
+            ("sttrb w1, [x2, #-3]", 0x381f_d841),
+            ("msr s0_3_c1_c0_0, x5", 0xd503_1005),
+            ("mrs x5, s3_0_c15_c2_0", 0xd538_f205),
+        ] {
+            let line = read(text).expect("a line");
+            let got = encode(&line.mnemonic, &line.values).expect("a word");
+            assert_eq!((got.word, got.fixup), (word, None), "{text}");
+        }
+        // Shapes the instructions do not have, which llvm-mc refuses too.
+        for text in ["add v0.1q, v1.1q, v2.1q", "cpyfp [x3], [x5]!, x7!", "setp [x3]!, w5!, x7"] {
+            let line = read(text).expect("a line");
+            assert!(encode(&line.mnemonic, &line.values).is_err(), "{text}");
+        }
     }
 
     #[test]

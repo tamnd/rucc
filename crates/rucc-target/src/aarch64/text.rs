@@ -1167,10 +1167,10 @@ pub enum Missing {
     Mem,
 }
 
-/// The fifteen bits `mrs` carries for `tpidr_el0`, which is where the thread pointer is.
+/// The sixteen bits `mrs` carries for `tpidr_el0`, which is where the thread pointer is.
 const TPIDR_EL0: u16 = system_field([3, 3, 13, 0, 2]);
 
-/// The fifteen bits `mrs` carries for `sp_el0`, which is where an arm64 kernel keeps the task.
+/// The sixteen bits `mrs` carries for `sp_el0`, which is where an arm64 kernel keeps the task.
 const SP_EL0: u16 = system_field([3, 0, 4, 1, 0]);
 
 /// The low `bits` of a constant, which is where a field mask of a thirty two bit register is
