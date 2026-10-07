@@ -20,7 +20,9 @@
 //! is the list of promises the claim makes.
 
 use rucc_base::float::Format;
-use rucc_session::{GnucVersion, Math, MscVersion, OptLevel, Options, Pic, Std};
+use rucc_session::{
+    Control, GnucVersion, Math, MscVersion, OptLevel, Options, Pic, Protector, Std,
+};
 use rucc_target::{
     Arch, BranchProtection, CodeModel, Env, Feature, Isa, ObjectFormat, Os, Preview, SignReturn,
     TargetInfo, Triple, wasm,
@@ -169,6 +171,12 @@ pub struct Predef {
     /// `__ARM_FEATURE_PAC_DEFAULT` on AArch64. The kernel's assembly reads both to write the same
     /// note the compiler writes for C.
     pub branch_protection: BranchProtection,
+    /// Which functions get a stack protector, which decides `__SSP__` and the three macros like it.
+    /// glibc reads them to decide how to build its own code that must not have a canary.
+    pub protector: Protector,
+    /// What `-fcf-protection=` asked for, which decides `__CET__` on x86. Assembly reads it to put
+    /// `endbr64` at each entry and to write the note that the C code gets from the compiler.
+    pub control: Control,
     /// Whether the file is assembly on its way to the assembler, `.S` or `-x assembler-with-cpp`.
     /// It defines `__ASSEMBLER__`, which every header that is also read from assembly tests to
     /// leave its C declarations out, and it takes away the macros that describe the C language
@@ -204,6 +212,8 @@ impl Predef {
             vector: true,
             strict_align: false,
             branch_protection: BranchProtection::default(),
+            protector: Protector::None,
+            control: Control::None,
             assembler: false,
         }
     }
@@ -241,6 +251,8 @@ impl Predef {
             vector: opts.vector,
             strict_align: opts.strict_align,
             branch_protection: opts.branch_protection,
+            protector: opts.protector,
+            control: opts.control,
             assembler: false,
         }
     }
@@ -301,6 +313,7 @@ pub(crate) fn built_in(target: &TargetInfo, opts: &Predef) -> String {
     dialect(&mut d, target, opts);
     optimization(&mut d, opts);
     platform(&mut d, target, opts);
+    hardening(&mut d, target, opts);
     sizes(&mut d, target);
     integers(&mut d, target);
     floats(&mut d, target, opts);
@@ -921,6 +934,33 @@ fn platform(d: &mut Defs, target: &TargetInfo, opts: &Predef) {
             d.set("__PIE__", "2");
             d.set("__pie__", "2");
         }
+    }
+}
+
+/// The stack protector level and the control flow protection mode, with the values gcc 16 gives.
+///
+/// These are defined for assembly too, as gcc does, because an assembly file that has `endbr64`
+/// at each entry and the property note only when `__CET__` says so is the usual way to write one.
+fn hardening(d: &mut Defs, target: &TargetInfo, opts: &Predef) {
+    match opts.protector {
+        Protector::None => {}
+        Protector::Buffers => d.set("__SSP__", "1"),
+        Protector::All => d.set("__SSP_ALL__", "2"),
+        Protector::Strong => d.set("__SSP_STRONG__", "3"),
+        Protector::Explicit => d.set("__SSP_EXPLICIT__", "4"),
+    }
+    // A set of bits: 1 is the branch half, 2 is the return half and 8 is `check`. gcc defines it
+    // only on x86, and the AArch64 form of the question is `-mbranch-protection=`.
+    let x86 = matches!(target.tuple.arch(), tuple::Arch::X86_64 | tuple::Arch::X86);
+    let bits = match opts.control {
+        Control::None => None,
+        Control::Branch => Some("1"),
+        Control::Return => Some("2"),
+        Control::Full => Some("3"),
+        Control::Check => Some("8"),
+    };
+    if let Some(bits) = bits.filter(|_| x86) {
+        d.set("__CET__", bits);
     }
 }
 
@@ -2628,6 +2668,44 @@ mod tests {
             assert!(has(&text, "#define __ARM_FEATURE_BTI_DEFAULT 1"), "{text}");
             assert!(has(&text, &format!("#define __ARM_FEATURE_PAC_DEFAULT {pac}")), "{text}");
         }
+    }
+
+    /// The values are the ones gcc 16 gives on Arch Linux, for C and for assembly.
+    #[test]
+    fn the_stack_protector_and_cet_macros_have_gcc_s_values() {
+        let x86 = TargetInfo::new("x86_64-unknown-linux-gnu".parse().expect("a triple"));
+        let plain = built_in(&x86, &Predef::new());
+        assert!(!plain.contains("__SSP"), "{plain}");
+        assert!(!plain.contains("__CET__"), "{plain}");
+        for (protector, line) in [
+            (Protector::Buffers, "#define __SSP__ 1"),
+            (Protector::All, "#define __SSP_ALL__ 2"),
+            (Protector::Strong, "#define __SSP_STRONG__ 3"),
+            (Protector::Explicit, "#define __SSP_EXPLICIT__ 4"),
+        ] {
+            for assembler in [false, true] {
+                let text = built_in(&x86, &Predef { protector, assembler, ..Predef::new() });
+                assert!(has(&text, line), "{protector}: {text}");
+                assert_eq!(text.matches("__SSP").count(), 1, "{protector}: {text}");
+            }
+        }
+        for (control, bits) in [
+            (Control::Branch, "1"),
+            (Control::Return, "2"),
+            (Control::Full, "3"),
+            (Control::Check, "8"),
+        ] {
+            for triple in ["x86_64-unknown-linux-gnu", "i686-unknown-linux-gnu"] {
+                let target = TargetInfo::new(triple.parse().expect("a triple"));
+                for assembler in [false, true] {
+                    let text = built_in(&target, &Predef { control, assembler, ..Predef::new() });
+                    assert!(has(&text, &format!("#define __CET__ {bits}")), "{triple}: {text}");
+                }
+            }
+        }
+        let arm = TargetInfo::new("aarch64-unknown-linux-gnu".parse().expect("a triple"));
+        let text = built_in(&arm, &Predef { control: Control::Full, ..Predef::new() });
+        assert!(!text.contains("__CET__"), "gcc defines it only on x86");
     }
 
     #[test]
