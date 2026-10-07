@@ -3560,6 +3560,38 @@ signature = "long double(long double)"
 library = "nearbyintl"
 used_by = ["glibc", "musl"]
 tests = ["rucc-sema::the_two_that_read_the_rounding_mode_are_called_and_not_folded", "rucc-driver::a_math_library_builtin_of_anything_else_is_a_call_to_the_library"]
+
+[[feature]]
+name = "__builtin_sqrt"
+kind = "builtin"
+gcc_version = "2.0"
+status = "implemented"
+signature = "double(double)"
+library = "sqrt"
+used_by = ["wasm_simd128.h"]
+tests = ["rucc-sema::the_square_roots_are_calls_to_the_library_and_not_folded", "rucc-driver::a_math_library_builtin_of_anything_else_is_a_call_to_the_library"]
+notes = "A call to the library function, which gives the correctly rounded root and sets errno for a negative argument. gcc folds a constant argument and writes the instruction where the target has one and errno is not asked for, and rucc does neither yet."
+
+[[feature]]
+name = "__builtin_sqrtf"
+kind = "builtin"
+gcc_version = "2.0"
+status = "implemented"
+signature = "float(float)"
+library = "sqrtf"
+used_by = ["wasm_simd128.h"]
+tests = ["rucc-sema::the_square_roots_are_calls_to_the_library_and_not_folded", "rucc-driver::a_math_library_builtin_of_anything_else_is_a_call_to_the_library"]
+
+[[feature]]
+name = "__builtin_sqrtl"
+kind = "builtin"
+gcc_version = "2.0"
+status = "implemented"
+signature = "long double(long double)"
+library = "sqrtl"
+used_by = ["wasm_simd128.h"]
+tests = ["rucc-sema::the_square_roots_are_calls_to_the_library_and_not_folded", "rucc-driver::a_math_library_builtin_of_anything_else_is_a_call_to_the_library"]
+
 [[feature]]
 name = "__builtin_fmax"
 kind = "builtin"

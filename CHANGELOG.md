@@ -6,6 +6,7 @@ All notable changes are recorded here. The format follows [Keep a Changelog](htt
 
 ### Added
 
+- `__builtin_sqrt`, `__builtin_sqrtf` and `__builtin_sqrtl`, which gcc has had since 2.0. Each one is a call to the library function of the same name without the prefix, as `__builtin_rint` is. gcc folds the root of a constant and rucc does not do that yet, so the root of a constant is a call too.
 - The assembler takes the `:abs_g0:` to `:abs_g3:` operators, with `_nc` and `_s`, on a `movz`, `movk` or `movn` of a constant, which is how the arm64 `mov_q` macro builds a 64-bit number, and the preprocessor no longer puts a space between a macro that names a register and the `.4s` after it. (#3183)
 - `-mstrict-align` on AArch64, which the arm64 kernel passes for `pi/map_range.c`. A load or store less aligned than its width is split into pieces as wide as its alignment, a copy moves no wider than its sides are aligned, and `__ARM_FEATURE_UNALIGNED` is left undefined. (#3181)
 - A directive inside the arguments of a call through an object-like macro that names a function-like one, as the arm64 SMMU driver writes around `cpu_to_le64`, is read as part of the arguments. A static initializer may read the value of a scalar compound literal, which the STM32 clock tables do. `-femit-struct-debug-reduced` and `-femit-struct-debug-detailed=` are taken. (#3179)
