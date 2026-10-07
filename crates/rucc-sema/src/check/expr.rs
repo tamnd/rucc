@@ -2194,12 +2194,16 @@ impl Checker<'_> {
             );
             return;
         }
+        // A function type has no qualifiers to keep, so a `const void *` made into a pointer to a
+        // function drops nothing, and gcc says nothing about it. The kernel does that with the
+        // `data` of every match table, `fn = of_device_get_match_data(dev)`, under `-Werror`.
+        let keeps = is_function(&self.types, a);
         for (qual, name) in [
             (Qualifiers::CONST, "const"),
             (Qualifiers::VOLATILE, "volatile"),
             (Qualifiers::RESTRICT, "restrict"),
         ] {
-            if source_quals.has(qual) && !target_quals.has(qual) {
+            if source_quals.has(qual) && !target_quals.has(qual) && !keeps {
                 let what = match to {
                     Target::Assignment => "assignment".to_owned(),
                     Target::Argument { index, function } => {
@@ -3615,6 +3619,41 @@ mod tests {
         c.check_expr(assign);
 
         assert_eq!(message(&c), "assignment discards 'const' qualifier from pointer target type");
+    }
+
+    /// A function has no qualifiers to lose, so the kernel's `fn = of_device_get_match_data(dev)`,
+    /// a `const void *` made into a pointer to a function, is as quiet as it is with gcc.
+    #[test]
+    fn a_const_void_pointer_made_into_a_function_pointer_drops_nothing() {
+        let mut f = Fixture::new();
+        let p = f.name("p");
+        let q = f.name("q");
+        let left = f.expr(ast::Expr::Name(p));
+        let right = f.expr(ast::Expr::Name(q));
+        let assign = f.assign(None, left, right);
+
+        let mut c = f.checker();
+        let int = c.types.int(IntKind::Int);
+        let function = c.types.function(FunctionType {
+            ret: int,
+            params: vec![int],
+            variadic: false,
+            prototyped: true,
+            convention: rucc_target::Convention::Target,
+            nocf: false,
+            indirect_return: false,
+            return_pointer_popped: None,
+            sse_regparm: false,
+        });
+        let void = c.types.void();
+        let constant = c.types.qualified(void, Qualifiers::CONST.with(Qualifiers::VOLATILE));
+        let to_function = c.types.pointer(function);
+        let to_const = c.types.pointer(constant);
+        c.declare_object(p, to_function, Span::DUMMY);
+        c.declare_object(q, to_const, Span::DUMMY);
+        c.check_expr(assign);
+
+        assert_eq!(messages(&c), Vec::<String>::new());
     }
 
     /// A pointer into `__seg_gs` and an ordinary one reach different memory with the same
