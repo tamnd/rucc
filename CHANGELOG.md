@@ -6,6 +6,7 @@ All notable changes are recorded here. The format follows [Keep a Changelog](htt
 
 ### Added
 
+- `<arm_neon.h>` has `poly128_t`, `vmull_p64`, `vmull_high_p64` and the `p128` reinterpretations, which the kernel's AArch64 CRC64 code uses. (#3206)
 - On AArch64 an `asm` operand under `"p"` is always a register, a constant address included, and `%a` spells it `[x0]`, so the kernel's `prefetch` builds. `ldnp` and `stnp` assemble too. (#3205)
 - An AArch64 `asm` constant under `I`, `J`, `K`, `L`, `M` or `N` is written into the text only when gcc's letter takes it, and goes in a register otherwise, so the kernel's `cmpxchg` of a zero against `"Lr"` is no longer `eor x2, x1, 0`. The assembler reads `ldxp` and `stxp` with their ordered forms, `rdvl`, `rdsvl`, `addvl` and `addpl`, and the unprivileged atomics the kernel's futexes use, `ldtadd`, `ldtclr`, `ldtset`, `swpt`, `cast` and `caspt`. (#3203)
 - The AArch64 assembler passes over `.cpu` as it does `.arch`, and reads a sum with spaces after a relocation specifier, as in `:lo12:aes_enc_tab + 1`, which the arm64 kernel's `adr_l` writes. (#3200)

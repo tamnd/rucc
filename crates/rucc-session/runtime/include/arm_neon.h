@@ -17,7 +17,8 @@
  * vector. Each one gives the same bytes as gcc's own header for the same inputs, which is checked
  * by calling every one of them. What is not here yet is the saturating and rounding shifts and
  * multiplies, the square roots and estimates, fused multiply add, the lane forms of multiply, the
- * half precision and bfloat types, and the crypto and dot product extensions. */
+ * half precision and bfloat types, and the crypto and dot product extensions apart from the 64 bit
+ * carry-less product, which the kernel's CRC code uses. */
 
 #ifndef __RUCC_ARM_NEON_H
 #define __RUCC_ARM_NEON_H
@@ -33,6 +34,7 @@ typedef double float64_t;
 typedef uint8_t poly8_t;
 typedef uint16_t poly16_t;
 typedef uint64_t poly64_t;
+typedef unsigned __int128 poly128_t;
 
 typedef __Int8x8_t int8x8_t;
 typedef __Int16x4_t int16x4_t;
@@ -9980,6 +9982,145 @@ static __inline__ poly16x8_t vmull_p8(poly8x8_t __a, poly8x8_t __b) {
   for (int __i = 0; __i < 8; __i++)
     for (int __k = 0; __k < 8; __k++)
       if (__b[__i] >> __k & 1) __r[__i] ^= (uint16_t)(__a[__i] << __k);
+  return __r;
+}
+static __inline__ poly128_t vmull_p64(poly64_t __a, poly64_t __b) {
+  poly128_t __r = 0;
+  for (int __k = 0; __k < 64; __k++)
+    if (__b >> __k & 1) __r ^= (poly128_t)__a << __k;
+  return __r;
+}
+static __inline__ poly128_t vmull_high_p64(poly64x2_t __a, poly64x2_t __b) {
+  return vmull_p64(__a[1], __b[1]);
+}
+static __inline__ int8x16_t vreinterpretq_s8_p128(poly128_t __v) {
+  int8x16_t __r;
+  __builtin_memcpy(&__r, &__v, sizeof __r);
+  return __r;
+}
+static __inline__ poly128_t vreinterpretq_p128_s8(int8x16_t __v) {
+  poly128_t __r;
+  __builtin_memcpy(&__r, &__v, sizeof __r);
+  return __r;
+}
+static __inline__ int16x8_t vreinterpretq_s16_p128(poly128_t __v) {
+  int16x8_t __r;
+  __builtin_memcpy(&__r, &__v, sizeof __r);
+  return __r;
+}
+static __inline__ poly128_t vreinterpretq_p128_s16(int16x8_t __v) {
+  poly128_t __r;
+  __builtin_memcpy(&__r, &__v, sizeof __r);
+  return __r;
+}
+static __inline__ int32x4_t vreinterpretq_s32_p128(poly128_t __v) {
+  int32x4_t __r;
+  __builtin_memcpy(&__r, &__v, sizeof __r);
+  return __r;
+}
+static __inline__ poly128_t vreinterpretq_p128_s32(int32x4_t __v) {
+  poly128_t __r;
+  __builtin_memcpy(&__r, &__v, sizeof __r);
+  return __r;
+}
+static __inline__ int64x2_t vreinterpretq_s64_p128(poly128_t __v) {
+  int64x2_t __r;
+  __builtin_memcpy(&__r, &__v, sizeof __r);
+  return __r;
+}
+static __inline__ poly128_t vreinterpretq_p128_s64(int64x2_t __v) {
+  poly128_t __r;
+  __builtin_memcpy(&__r, &__v, sizeof __r);
+  return __r;
+}
+static __inline__ uint8x16_t vreinterpretq_u8_p128(poly128_t __v) {
+  uint8x16_t __r;
+  __builtin_memcpy(&__r, &__v, sizeof __r);
+  return __r;
+}
+static __inline__ poly128_t vreinterpretq_p128_u8(uint8x16_t __v) {
+  poly128_t __r;
+  __builtin_memcpy(&__r, &__v, sizeof __r);
+  return __r;
+}
+static __inline__ uint16x8_t vreinterpretq_u16_p128(poly128_t __v) {
+  uint16x8_t __r;
+  __builtin_memcpy(&__r, &__v, sizeof __r);
+  return __r;
+}
+static __inline__ poly128_t vreinterpretq_p128_u16(uint16x8_t __v) {
+  poly128_t __r;
+  __builtin_memcpy(&__r, &__v, sizeof __r);
+  return __r;
+}
+static __inline__ uint32x4_t vreinterpretq_u32_p128(poly128_t __v) {
+  uint32x4_t __r;
+  __builtin_memcpy(&__r, &__v, sizeof __r);
+  return __r;
+}
+static __inline__ poly128_t vreinterpretq_p128_u32(uint32x4_t __v) {
+  poly128_t __r;
+  __builtin_memcpy(&__r, &__v, sizeof __r);
+  return __r;
+}
+static __inline__ uint64x2_t vreinterpretq_u64_p128(poly128_t __v) {
+  uint64x2_t __r;
+  __builtin_memcpy(&__r, &__v, sizeof __r);
+  return __r;
+}
+static __inline__ poly128_t vreinterpretq_p128_u64(uint64x2_t __v) {
+  poly128_t __r;
+  __builtin_memcpy(&__r, &__v, sizeof __r);
+  return __r;
+}
+static __inline__ float32x4_t vreinterpretq_f32_p128(poly128_t __v) {
+  float32x4_t __r;
+  __builtin_memcpy(&__r, &__v, sizeof __r);
+  return __r;
+}
+static __inline__ poly128_t vreinterpretq_p128_f32(float32x4_t __v) {
+  poly128_t __r;
+  __builtin_memcpy(&__r, &__v, sizeof __r);
+  return __r;
+}
+static __inline__ float64x2_t vreinterpretq_f64_p128(poly128_t __v) {
+  float64x2_t __r;
+  __builtin_memcpy(&__r, &__v, sizeof __r);
+  return __r;
+}
+static __inline__ poly128_t vreinterpretq_p128_f64(float64x2_t __v) {
+  poly128_t __r;
+  __builtin_memcpy(&__r, &__v, sizeof __r);
+  return __r;
+}
+static __inline__ poly8x16_t vreinterpretq_p8_p128(poly128_t __v) {
+  poly8x16_t __r;
+  __builtin_memcpy(&__r, &__v, sizeof __r);
+  return __r;
+}
+static __inline__ poly128_t vreinterpretq_p128_p8(poly8x16_t __v) {
+  poly128_t __r;
+  __builtin_memcpy(&__r, &__v, sizeof __r);
+  return __r;
+}
+static __inline__ poly16x8_t vreinterpretq_p16_p128(poly128_t __v) {
+  poly16x8_t __r;
+  __builtin_memcpy(&__r, &__v, sizeof __r);
+  return __r;
+}
+static __inline__ poly128_t vreinterpretq_p128_p16(poly16x8_t __v) {
+  poly128_t __r;
+  __builtin_memcpy(&__r, &__v, sizeof __r);
+  return __r;
+}
+static __inline__ poly64x2_t vreinterpretq_p64_p128(poly128_t __v) {
+  poly64x2_t __r;
+  __builtin_memcpy(&__r, &__v, sizeof __r);
+  return __r;
+}
+static __inline__ poly128_t vreinterpretq_p128_p64(poly64x2_t __v) {
+  poly128_t __r;
+  __builtin_memcpy(&__r, &__v, sizeof __r);
   return __r;
 }
 
