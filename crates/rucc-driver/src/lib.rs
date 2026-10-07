@@ -277,7 +277,7 @@ options:
   -ffunction-sections -fdata-sections, -fno-plt   a section per function or variable, for --gc-sections, calls through the GOT
   -fvisibility=<what>    default, hidden, internal or protected, when nothing in the source said
   -l<name>, -L <dir>, -B <dir>, --gcc-toolchain=<dir>, -specs=<file>   a library, where to look for one, our tools, the GCC, the flags of a dpkg or Red Hat spec file
-  -fPIC -fpic -fPIE -fpie, -pipe   what it does anyway, and -f[no-]common as the target's cc
+  -fPIC -fpic -fPIE -fpie, -pipe, -mtls-dialect=   what it does anyway, and -f[no-]common as the target's cc
   -f[no-]strict-aliasing, -f[no-]delete-null-pointer-checks   what it assumes anyway
   -static -shared -pie -no-pie -nostdlib -nostartfiles -nodefaultlibs -rdynamic -s   how to link
   -Wl,<arg> -Xlinker <arg> -fuse-ld=<name>, -Wa,<arg> -Xassembler <arg>   the linker, the assembler
@@ -2709,6 +2709,24 @@ pub fn parse_args(args: &[String]) -> Result<Action, CliError> {
                 };
                 opts.speculation.after_return = after_return;
                 opts.speculation.after_jump = after_jump;
+            }
+            // How a thread-local variable in one of the two dynamic models is reached: through
+            // `__tls_get_addr`, or through a TLS descriptor. Fedora passes `gnu2` on each x86-64
+            // compile. This compiler writes the initial exec sequence for each thread-local
+            // variable (`thread_address` in the code generator), and the dialect does not change
+            // that sequence, as in gcc with `-ftls-model=initial-exec`. So the value is checked and
+            // there is nothing more to do until the dynamic models come (#1104).
+            _ if arg.starts_with("-mtls-dialect=")
+                && (x86 || arch == rucc_target::Arch::Aarch64) =>
+            {
+                let value = &arg["-mtls-dialect=".len()..];
+                let choices: &[&str] = if x86 { &["gnu", "gnu2"] } else { &["desc", "trad"] };
+                if !choices.contains(&value) {
+                    return Err(err(format!(
+                        "bad value `{value}` for `-mtls-dialect=`, which is {} on this target",
+                        choices.join(" or ")
+                    )));
+                }
             }
             // Whether a `switch` may become a table, which the kernel turns off beside the thunks
             // because a jump through a table is an indirect branch that goes through no thunk.
@@ -7650,6 +7668,25 @@ mod tests {
         assert_eq!(opts.frame_pointer, Some(false), "the last one wins, as it does in gcc");
         assert!(!opts.keeps_frame_pointer(), "and it wins over the level too");
         assert!(opts.red_zone);
+    }
+
+    /// The Fedora line passes `-mtls-dialect=gnu2` on x86-64. Each target takes the values that
+    /// gcc takes for it, and refuses the others.
+    #[test]
+    fn the_tls_dialect_is_checked_for_the_target() {
+        for value in ["gnu", "gnu2"] {
+            let flag = format!("-mtls-dialect={value}");
+            compile(&["--target=x86_64-linux-gnu", &flag, "-c", "a.c"]);
+            compile(&["--target=i686-linux-gnu", &flag, "-c", "a.c"]);
+            let why = refused(&["--target=aarch64-linux-gnu", &flag, "-c", "a.c"]);
+            assert!(why.contains("desc or trad"), "{why}");
+        }
+        for value in ["desc", "trad"] {
+            let flag = format!("-mtls-dialect={value}");
+            compile(&["--target=aarch64-linux-gnu", &flag, "-c", "a.c"]);
+            let why = refused(&["--target=x86_64-linux-gnu", &flag, "-c", "a.c"]);
+            assert!(why.contains("gnu or gnu2"), "{why}");
+        }
     }
 
     /// The Ubuntu line: both frame pointer flags, and the leaf one is read in both directions.
