@@ -254,7 +254,7 @@ fn split(func: &mut Func, inst: Inst, (sum, over): (Imm, bool), forward: &mut Ma
 }
 
 /// Turns the instruction into the constant it was worked out to be, keeping its result value.
-fn write(func: &mut Func, inst: Inst, folded: Imm) {
+pub(crate) fn write(func: &mut Func, inst: Inst, folded: Imm) {
     let ty = func[result_of(func, inst)].ty;
     let at = func.add_imm(folded);
     let data = &mut func[inst];
@@ -290,21 +290,8 @@ pub fn addresses(module: &mut Module) -> usize {
         let mut found = Vec::new();
         for block in func.blocks() {
             for inst in func.insts(block) {
-                let data = &func[inst];
-                let Extra::IntPred(pred) = data.extra else { continue };
-                if data.opcode != Opcode::ICmp || !matches!(pred, IntPred::Eq | IntPred::Ne) {
-                    continue;
-                }
-                let &[lhs, rhs] = &func[data.args] else { continue };
-                let null = |value| {
-                    cast(func, value)
-                        .or_else(|| constant(func, value))
-                        .is_some_and(|(imm, _)| imm.unsigned() == 0)
-                };
-                let defined = |value| named(func, value).is_some_and(|name| defined(module, name));
-                if (defined(lhs) && null(rhs)) || (null(lhs) && defined(rhs)) {
-                    let ty = func[result_of(func, inst)].ty;
-                    found.push((inst, Imm::int(i128::from(pred == IntPred::Ne), ty)));
+                if let Some(answer) = against_null(func, inst, |name| defined(module, name)) {
+                    found.push((inst, answer));
                 }
             }
         }
@@ -316,6 +303,32 @@ pub fn addresses(module: &mut Module) -> usize {
     decided
 }
 
+/// The answer to `&f == NULL` or `&f != NULL`, when the instruction is one of those and `defined`
+/// says `f` has a body.
+pub(crate) fn against_null(
+    func: &Func,
+    inst: Inst,
+    defined: impl Fn(Symbol) -> bool,
+) -> Option<Imm> {
+    let data = &func[inst];
+    let Extra::IntPred(pred) = data.extra else { return None };
+    if data.opcode != Opcode::ICmp || !matches!(pred, IntPred::Eq | IntPred::Ne) {
+        return None;
+    }
+    let &[lhs, rhs] = &func[data.args] else { return None };
+    let null = |value| {
+        cast(func, value)
+            .or_else(|| constant(func, value))
+            .is_some_and(|(imm, _)| imm.unsigned() == 0)
+    };
+    let defined = |value| named(func, value).is_some_and(&defined);
+    if (defined(lhs) && null(rhs)) || (null(lhs) && defined(rhs)) {
+        let ty = func[result_of(func, inst)].ty;
+        return Some(Imm::int(i128::from(pred == IntPred::Ne), ty));
+    }
+    None
+}
+
 /// The name whose address this value is, if it is one.
 fn named(func: &Func, value: Value) -> Option<Symbol> {
     let Def::Result { inst, .. } = func[value].def else { return None };
@@ -325,7 +338,7 @@ fn named(func: &Func, value: Value) -> Option<Symbol> {
 }
 
 /// Whether this module gives the name a body, a function's or an object's.
-fn defined(module: &Module, name: Symbol) -> bool {
+pub(crate) fn defined(module: &Module, name: Symbol) -> bool {
     match module.lookup(name) {
         Some(SymbolRef::Func(id)) => !module[id].is_declaration(),
         Some(SymbolRef::Global(id)) => !module[id].is_declaration(),

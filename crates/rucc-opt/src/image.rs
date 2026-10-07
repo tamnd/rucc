@@ -76,6 +76,14 @@
 //! for: `split_ops.add (vq, ...)` in drivers/virtio/virtio_ring.c reads a member of a `static
 //! const` structure, and gcc calls `virtqueue_add_split` there directly and then inlines it.
 //!
+//! A name answered this way is often tested against null straight after, since the kernel checks
+//! its tables with `BUILD_BUG_ON (!table[i].member)`: madera's mixer names and rtw89's SAR
+//! handlers are both read like that. The test is a call to a function declared `error` that has to
+//! be gone by the end, and `crate::fold::addresses` decided every such test before the pipeline
+//! began, when the load was still a load. So the pass decides it here too, for a name the module
+//! gives a body, which is the rule that function keeps and gcc's under
+//! `-fno-delete-null-pointer-checks`.
+//!
 //! # A call through an address that is a name
 //!
 //! A call through a pointer that turns out to be the address of a function is a call to that
@@ -99,7 +107,7 @@
 use std::collections::hash_map::Entry;
 
 use rucc_base::Symbol;
-use rucc_base::hash::Map;
+use rucc_base::hash::{Map, Set};
 use rucc_ir::{
     Block, Datum, Def, Extra, Flags, Func, Imm, Inst, InstData, MemInfo, MemOrder, Module, Opcode,
     Pic, Restrict, Signature, SymbolRef, Type, Value,
@@ -113,6 +121,9 @@ const FOLDED: &str = "load from a read only object folded to what it was initial
 
 /// Recorded once for each load of a pointer that became the name it was initialized to.
 const NAMED: &str = "load from a read only object folded to the address it was initialized to";
+
+/// Recorded once for each test of a name against null that became the answer.
+const NOT_NULL: &str = "test of an address with a body against null folded";
 
 /// Recorded once for each call through a pointer that became a call by name.
 const DIRECT: &str = "call through the address of a function made a direct call";
@@ -221,6 +232,22 @@ pub(crate) fn settle(func: &mut Func, images: &Images, fuel: &mut Fuel, stats: &
             data.flags = Flags::NONE;
             data.args = rucc_ir::ValueList::EMPTY;
             data.extra = extra;
+        }
+    }
+    for &block in &blocks {
+        let insts: Vec<Inst> = func.insts(block).collect();
+        for inst in insts {
+            let bodies = &images.bodies;
+            let Some(answer) = crate::fold::against_null(func, inst, |name| bodies.contains(&name))
+            else {
+                continue;
+            };
+            if !fuel.take() {
+                stats.missed(NO_FUEL);
+                continue;
+            }
+            crate::fold::write(func, inst, answer);
+            stats.optimized(NOT_NULL);
         }
     }
     for &block in &blocks {
@@ -478,6 +505,9 @@ pub struct Images {
     /// The signature of every function the module defines or declares, which is what a call
     /// through the address of one has to have been made with to become a call to it.
     signatures: Map<Symbol, Signature>,
+    /// Every name the module gives a body, a function's or an object's, whose address is never
+    /// null.
+    bodies: Set<Symbol>,
 }
 
 impl Images {
@@ -506,11 +536,18 @@ impl Images {
             .map(|id| (module[id].name, module[id].signature().clone()))
             .filter(|&(name, _)| matches!(module.lookup(name), Some(SymbolRef::Func(_))))
             .collect();
+        let bodies = module
+            .funcs()
+            .map(|id| module[id].name)
+            .chain(module.globals().map(|id| module[id].name))
+            .filter(|&name| crate::fold::defined(module, name))
+            .collect();
         Self {
             objects,
             little_endian: module.datalayout.little_endian,
             pointer: u64::from(module.datalayout.pointer_bits.div_ceil(8)),
             signatures,
+            bodies,
         }
     }
 
