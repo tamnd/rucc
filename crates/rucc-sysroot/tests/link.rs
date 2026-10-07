@@ -133,7 +133,10 @@ fn the_libc_the_target_names_picks_the_line() {
     // are not, which is why the dispatch is one function.
     let gnu =
         LinkLine::for_target(&sysroot("x86_64-linux-gnu"), LinkMode::Dynamic, Some(&builtins()));
-    assert_eq!(names(&gnu.libraries), ["libc.so", "libc_nonshared.a", "librucc_builtins.a"]);
+    assert_eq!(
+        names(&gnu.libraries),
+        ["libc.so", "libc_nonshared.a", "ld.so", "librucc_builtins.a"]
+    );
     // The stub is the one the driver writes beside the sysroot and the archive is the sysroot's.
     let dirs: Vec<_> = gnu.libraries.iter().filter_map(|path| path.parent()).collect();
     let tuple = "x86_64-linux-gnu";
@@ -148,7 +151,7 @@ fn the_libc_the_target_names_picks_the_line() {
     );
     assert_eq!(
         names(&old.libraries),
-        ["libc.so", "libc_nonshared.a", "libc_nonshared_stat.a", "librucc_builtins.a"]
+        ["libc.so", "libc_nonshared.a", "libc_nonshared_stat.a", "ld.so", "librucc_builtins.a"]
     );
     let new = LinkLine::for_target(
         &sysroot("x86_64-linux-gnu.2.33"),

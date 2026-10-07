@@ -9,8 +9,9 @@
 //! ```
 //!
 //! `<abilists>` is the directory `bin/abilist` in `tamnd/rucc-cross` fills, one subdirectory per
-//! architecture holding `libc.abilist`, `libm.abilist` and `librt.abilist`. `<into>` gets
-//! `libc.blob`, `libm.blob` and `librt.blob`, and one line is printed per blob with its size.
+//! architecture holding `libc.abilist`, `libm.abilist`, `librt.abilist` and `ld.abilist`. `<into>`
+//! gets `libc.blob`, `libm.blob`, `librt.blob` and `ld.blob`, and one line is printed per blob with
+//! its size.
 //!
 //! Every architecture in [`rucc_stub::glibc::ARCHITECTURES`] has to be there. A blob missing one
 //! would pass every test on the machines that have the others and fail on the first link for the one
