@@ -41,10 +41,9 @@ const SCALAR_NAMES: &[&str] = &[
 /// lanes, an element of one, or a list of them, the moves of a pattern into a vector register,
 /// and the integer instructions on one scalar doubleword.
 pub(super) fn wanted(mnemonic: &str, values: &[Value]) -> bool {
-    values
-        .iter()
-        .any(|value| matches!(value, Value::Vector(..) | Value::Element(..) | Value::List(..)))
-        || matches!(mnemonic, "movi" | "mvni" | "sha1h")
+    values.iter().any(|value| {
+        matches!(value, Value::Vector(..) | Value::Element(..) | Value::List(..) | Value::Lanes(..))
+    }) || matches!(mnemonic, "movi" | "mvni" | "sha1h")
         || (matches!(values.first(), Some(Value::Fp(Scalar::D, _)))
             && SCALAR_NAMES.contains(&mnemonic))
         || (matches!(values, [Value::Fp(Scalar::S | Scalar::D, _), Value::Fp(..), ..])
@@ -1275,6 +1274,9 @@ impl At<'_> {
         let m = self.mnemonic;
         let (list, rest) = match values {
             [Value::List(a, t, count), rest @ ..] => ((*a, *t, *count), rest),
+            [Value::Lanes(scalar, t, count, index), rest @ ..] => {
+                return self.lanes((*scalar, *t, *count, *index), rest);
+            }
             _ => return Ok(None),
         };
         let (a, t, count) = list;
@@ -1309,12 +1311,52 @@ impl At<'_> {
             }
             _ => return Ok(None),
         };
-        let word = word | u32::from(t);
+        self.addressed(word | u32::from(t), bytes, rest).map(Some)
+    }
+
+    /// The loads and stores of one lane of each register in a list, `st4 {v0.s - v3.s}[0], [x0]`,
+    /// which poly1305's arm64 code writes its answer out with.
+    fn lanes(self, list: (Scalar, u8, u8, u8), rest: &[Value]) -> Result<Option<u32>, Error> {
+        let m = self.mnemonic;
+        let (scalar, t, count, index) = list;
+        let wanted = match m {
+            "ld1" | "st1" | "ld2" | "st2" | "ld3" | "st3" | "ld4" | "st4" => m.as_bytes()[2] - b'0',
+            _ => return Ok(None),
+        };
+        if count != wanted {
+            return Err(self.register());
+        }
+        let load = u32::from(m.starts_with("ld"));
+        let index = u32::from(index);
+        // The index goes in `Q`, `S` and `size` read as four bits, as high in them as the lane is
+        // wide, and what is left under it says the lane size.
+        let (opcode, at, lane) = match scalar {
+            Scalar::B if index < 16 => (0b000, index, 1),
+            Scalar::H if index < 8 => (0b010, index << 1, 2),
+            Scalar::S if index < 4 => (0b100, index << 2, 4),
+            Scalar::D if index < 2 => (0b100, index << 3 | 1, 8),
+            _ => return Err(self.immediate(i64::from(index))),
+        };
+        let (three, pair) = ((u32::from(count) - 1) >> 1, (u32::from(count) - 1) & 1);
+        let word = 0x0D00_0000
+            | (at >> 3) << 30
+            | load << 22
+            | pair << 21
+            | (opcode | three) << 13
+            | (at >> 2 & 1) << 12
+            | (at & 3) << 10
+            | u32::from(t);
+        self.addressed(word, u32::from(count) * lane, rest).map(Some)
+    }
+
+    /// A load or store of a list with its address put in: a base alone, or a base moved on
+    /// afterwards by `bytes` or by a register.
+    fn addressed(self, word: u32, bytes: u32, rest: &[Value]) -> Result<u32, Error> {
         let base = |addr: &Addr| u32::from(addr.base) << 5;
         // A post-indexed form is bit twenty three and a register in the field where the plain one
         // has zero, where thirty one means the base moves by the size of what was accessed.
         let post = 0x0080_0000;
-        Ok(Some(match rest {
+        Ok(match rest {
             [Value::Mem(addr @ Addr { offset: Offset::Imm(0), mode: Mode::Offset, .. })] => {
                 word | base(addr)
             }
@@ -1329,7 +1371,7 @@ impl At<'_> {
                 Value::Gpr(Width::X, r),
             ] if *r < 31 => word | post | u32::from(*r) << 16 | base(addr),
             _ => return Err(self.unwritten()),
-        }))
+        })
     }
 }
 
@@ -1378,6 +1420,39 @@ mod tests {
         }
         assert!(count > 1500, "neon.txt has only {count} lines");
         assert!(wrong.is_empty(), "{} of {count} lines differ:\n{}", wrong.len(), wrong.join("\n"));
+    }
+
+    /// The words llvm-mc gives for these, which is the one encoding the architecture has for each.
+    #[test]
+    fn a_lane_of_each_register_in_a_list_is_loaded_and_stored() {
+        for (text, want) in [
+            ("st4 {v19.s,v20.s,v21.s,v22.s}[0],[x0],#16", 0x0dbf_a013),
+            ("st1 {v23.s}[0],[x0]", 0x0d00_8017),
+            ("st1 {v0.b}[15],[x1]", 0x4d00_1c20),
+            ("ld1 {v1.h}[7],[x2],#2", 0x4ddf_5841),
+            ("ld2 {v2.s,v3.s}[3],[x3]", 0x4d60_9062),
+            ("ld3 {v4.d,v5.d,v6.d}[1],[x4],x5", 0x4dc5_a484),
+            ("ld4 {v31.b,v0.b,v1.b,v2.b}[9],[sp],#4", 0x4dff_27ff),
+            ("st2 {v8.h,v9.h}[2],[x6],#4", 0x0dbf_50c8),
+            ("st3 {v10.b,v11.b,v12.b}[5],[x7],x8", 0x0d88_34ea),
+            ("st1 {v13.d}[1],[x9],#8", 0x4d9f_852d),
+            ("ld1 {v14.s}[1],[x10]", 0x0d40_914e),
+            ("st4 {v16.d - v19.d}[0],[x11],#32", 0x0dbf_a570),
+        ] {
+            assert_eq!(word(text), Ok(want), "{text}");
+        }
+        for text in [
+            "st1 {v0.s}[4],[x0]",
+            "st1 {v0.d}[2],[x0]",
+            "st2 {v0.s}[0],[x0]",
+            "st1 {v0.s}[0],[x0],#8",
+            "st1 {v0.4s}[0],[x0]",
+            "st1 {v0.s,v2.s}[0],[x0]",
+            "st1 {v0.s},[x0]",
+            "ld1r {v0.s}[0],[x0]",
+        ] {
+            assert!(word(text).is_err(), "{text}");
+        }
     }
 
     #[test]

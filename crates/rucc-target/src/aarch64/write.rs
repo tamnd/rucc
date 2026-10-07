@@ -90,6 +90,16 @@ fn operand(line: &mut String, value: &Value, named: Named<'_>) {
             }
             line.push('}');
         }
+        Value::Lanes(scalar, first, count, index) => {
+            line.push('{');
+            for at in 0..count {
+                if at > 0 {
+                    line.push_str(", ");
+                }
+                let _ = write!(line, "v{}.{}", (first + at) % 32, lane_letter(scalar));
+            }
+            let _ = write!(line, "}}[{index}]");
+        }
         Value::Imm(imm) => {
             let _ = write!(line, "#{imm}");
         }

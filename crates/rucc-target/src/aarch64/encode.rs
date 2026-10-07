@@ -388,6 +388,9 @@ pub enum Value {
     /// arrangement, the first register, and how many there are. The one after thirty one is
     /// zero.
     List(Arrangement, u8, u8),
+    /// One lane of each register in a list, `{v0.s, v1.s}[1]`: the lane size, the first register,
+    /// how many there are, and the index.
+    Lanes(Scalar, u8, u8, u8),
     /// A number.
     Imm(i64),
     /// A floating point number, which only `fmov` and the comparisons with zero take.
