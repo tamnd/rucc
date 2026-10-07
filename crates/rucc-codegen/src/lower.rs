@@ -714,22 +714,111 @@ fn spelled_registers(template: &str, gpr: RegClass, sse: RegClass) -> Vec<(PhysR
     found
 }
 
-/// The AArch64 registers a template names in its text, `x16` in `mov x16, %0` or `lr` in a
+/// The AArch64 registers a template may write by name, `x16` in `mov x16, %0` or `lr` in a
 /// `blr`, each with its file.
 ///
 /// A register has no prefix there, so a name is any word of the text that reads as one. A word
-/// straight after a `%` is an operand, `%w0` or `%x1`, and is left out.
+/// straight after a `%` is an operand, `%w0` or `%x1`, and is left out. A line that stores,
+/// compares, branches, writes a system register or prefetches only reads the registers it names,
+/// apart from the status register of a store exclusive and a base it writes back, so the rest of
+/// that line is left out too. The kernel's `crash_setup_regs` stores every register with `stp`
+/// and hands its three operands to the allocator, which has nothing left for them if all thirty
+/// one count as written. Any other line is taken to write every register it names.
 fn spelled_registers_a64(template: &str) -> Vec<(PhysReg, RegClass)> {
+    let mut text = template.to_string();
+    while let Some(open) = text.find("/*") {
+        let close = text[open..].find("*/").map_or(text.len(), |at| open + at + 2);
+        text.replace_range(open..close, " ");
+    }
+    let mut found = Vec::new();
+    for line in text.split(['\n', ';']) {
+        let line = line.split("//").next().unwrap_or_default();
+        for reg in written_a64(line) {
+            if !found.contains(&reg) {
+                found.push(reg);
+            }
+        }
+    }
+    found
+}
+
+/// The registers one line of an AArch64 template may write by name, as [`spelled_registers_a64`]
+/// decides it.
+fn written_a64(line: &str) -> Vec<(PhysReg, RegClass)> {
+    let mut rest = line.trim_start();
+    // Labels in front of the instruction, `1:` or `name:`.
+    while let Some(colon) = rest.find(':') {
+        let label = &rest[..colon];
+        if label.is_empty()
+            || !label.chars().all(|c| c.is_ascii_alphanumeric() || "_.$".contains(c))
+        {
+            break;
+        }
+        rest = rest[colon + 1..].trim_start();
+    }
+    let mnemonic = rest.split(|c: char| c.is_whitespace()).next().unwrap_or_default();
+    let operands = &rest[mnemonic.len()..];
+    let mnemonic = mnemonic.to_ascii_lowercase();
+    let store = mnemonic.starts_with("st");
+    let reads = store
+        || mnemonic.starts_with("b.")
+        || matches!(
+            mnemonic.as_str(),
+            "cmp"
+                | "cmn"
+                | "tst"
+                | "ccmp"
+                | "ccmn"
+                | "fcmp"
+                | "fcmpe"
+                | "fccmp"
+                | "fccmpe"
+                | "msr"
+                | "prfm"
+                | "prfum"
+                | "b"
+                | "cbz"
+                | "cbnz"
+                | "tbz"
+                | "tbnz"
+                | "br"
+                | "ret"
+        );
+    if !reads {
+        return registers_a64(rest);
+    }
+    let mut written = Vec::new();
+    // A store exclusive writes whether it stored into its first operand.
+    let exclusive = mnemonic.strip_prefix("st").is_some_and(|tail| {
+        let tail = tail.strip_prefix('l').unwrap_or(tail);
+        matches!(tail, "xr" | "xrb" | "xrh" | "xp") || tail.starts_with("64bv")
+    });
+    if exclusive {
+        written.extend(registers_a64(operands.split(',').next().unwrap_or_default()).first());
+    }
+    // A base written back, `[x0, #16]!` or `[x0], #16`.
+    if let (Some(open), Some(close)) = (operands.find('['), operands.find(']')) {
+        let after = operands[close + 1..].trim_start();
+        if open < close && (after.starts_with('!') || after.starts_with(',')) {
+            written.extend(registers_a64(&operands[open + 1..close]).first());
+        }
+    }
+    written
+}
+
+/// Every register a piece of AArch64 text names, in order, leaving out a word straight after a
+/// `%`.
+fn registers_a64(text: &str) -> Vec<(PhysReg, RegClass)> {
     let mut found = Vec::new();
     let mut previous = ' ';
     let mut start = None;
-    for (at, c) in template.char_indices().chain([(template.len(), ' ')]) {
+    for (at, c) in text.char_indices().chain([(text.len(), ' ')]) {
         let word = c.is_ascii_alphanumeric() || c == '_';
         match (word, start) {
             (true, None) => start = Some((at, previous == '%')),
             (false, Some((from, operand))) => {
                 start = None;
-                if let Some(reg) = aarch64::named(&template[from..at]).filter(|_| !operand) {
+                if let Some(reg) = aarch64::named(&text[from..at]).filter(|_| !operand) {
                     if !found.contains(&reg) {
                         found.push(reg);
                     }

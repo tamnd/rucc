@@ -4,6 +4,10 @@ All notable changes are recorded here. The format follows [Keep a Changelog](htt
 
 ## Unreleased
 
+### Fixed
+
+- A register an AArch64 `asm` template only reads, in a store, a compare, a branch, an `msr` or a `prfm`, is no longer taken from the allocator, so the kernel's `crash_setup_regs` compiles instead of panicking. (#3211)
+
 ## 0.28.0
 
 This release ends WA7 (#2869). `wasm32-none` is at tier 2, with a rung 0 subset under Wasmtime 49 and a test host. rucc assembles its own `-S` text for wasm to the same object. `-g` on a wasm target writes DWARF with the line table, the types, the functions and the locations of their parameters and locals, and the linker inside rucc keeps it. rucc ships `<wasm_simd128.h>`. The decision on wasm64 is recorded in #3201: no target row now. The release also has AArch64 code generation work that makes the output closer to gcc, and the assembler and `asm` work that the arm64 kernel needs.
