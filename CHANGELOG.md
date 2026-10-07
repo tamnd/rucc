@@ -42,6 +42,7 @@ All notable changes are recorded here. The format follows [Keep a Changelog](htt
 - The inliner splits the block of a call it takes by relinking the instructions after the call into the new block in one go, with `Func::move_after`, rather than taking each out and appending it. Taking an instruction out and putting it back shifted the function's whole list of declarations twice. monocypher.c at -O2 takes 17% fewer instructions to compile, with the same objects with and without `-g` (#3285).
 - Jump threading keeps the cached loop forest when a thread leaves a block with no way in that is on no cycle, and when the only irreducible regions are outside the loop it moved edges in. lz4.c at -O2 compiles in 1.5% fewer instructions, with the same output (#3302)
 - licm works out register pressure only when a cheap hoist asks for it, and the dominator tree takes its postorder from the graph instead of walking it again. lz4.c at `-O2` compiles in 1.8% fewer instructions and duktape.c in 1.5% fewer, with byte-identical output (#3319).
+- Value numbering keeps its per-block tables between blocks instead of making them again for each one, which takes about half a percent off the instructions an O2 build of lz4 or duktape costs. (#3324)
 
 ### Fixed
 

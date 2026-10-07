@@ -194,19 +194,26 @@ impl Pass for Number {
         // compared as in `across`. Two blocks each have their own `iconst 8`, and an add of
         // the one in each block is the same add.
         let mut constants: Map<Key, Value> = Map::default();
+        // What each block has found so far, emptied at the top of the next one rather than made
+        // again, so a block keeps the room the ones before it grew. Nothing walks either table in
+        // order. tamnd/rucc#3052.
+        let mut seen: Map<Key, Value> = Map::default();
+        // The signature is beside the result rather than in the key, because a signature is pushed
+        // per call site and never interned, so two calls written the same way have two indices and
+        // comparing the indices would answer no to every question asked here. It is compared by
+        // value on a hit, which is once per duplicate rather than once per call.
+        let mut calls: Map<CallKey, (Sig, Value)> = Map::default();
+        let mut insts = Vec::new();
         for block in blocks {
-            let mut seen: Map<Key, Value> = Map::default();
-            // The signature is beside the result rather than in the key, because a signature is
-            // pushed per call site and never interned, so two calls written the same way have two
-            // indices and comparing the indices would answer no to every question asked here. It
-            // is compared by value on a hit, which is once per duplicate rather than once per
-            // call.
-            let mut calls: Map<CallKey, (Sig, Value)> = Map::default();
+            seen.clear();
+            calls.clear();
             // How many times memory has been written since the top of the block, which is what a
             // `pure` call's answer is good for. Taken before the instruction runs, because a call
             // that reads memory reads the version it was handed.
             let mut memory = 0u32;
-            for inst in func.insts(block).collect::<Vec<Inst>>() {
+            insts.clear();
+            insts.extend(func.insts(block));
+            for &inst in &insts {
                 if let Some((key, signature, result)) =
                     call_key(func, facts, &decided.same, inst, memory)
                 {
