@@ -62,18 +62,19 @@ impl Checker<'_> {
                 for (index, &arg) in args.iter().enumerate() {
                     let lead = Lead { name: NAME, argno: Some(index + 1) };
                     let wanted = if index == 0 { Wanted::Pointer } else { Wanted::Integer };
-                    if let Position::Number(value, spelled) = self.position(attr, arg, lead)
-                        && self.names_a(attr, function, value, &spelled, lead, wanted)
-                        && let Ok(value) = usize::try_from(value)
-                    {
-                        numbers.push(value);
+                    if let Position::Number(value, spelled) = self.position(attr, arg, lead) {
+                        if self.names_a(attr, function, value, &spelled, lead, wanted) {
+                            if let Ok(value) = usize::try_from(value) {
+                                numbers.push(value);
+                            }
+                        }
                     }
                 }
-                if let [pointer, count, rest @ ..] = numbers.as_slice()
-                    && numbers.len() == args.len()
-                {
-                    let other = rest.first().copied();
-                    taken.push(Conditional { pointer: *pointer, count: *count, other });
+                if numbers.len() == args.len() {
+                    if let [pointer, count, rest @ ..] = numbers.as_slice() {
+                        let other = rest.first().copied();
+                        taken.push(Conditional { pointer: *pointer, count: *count, other });
+                    }
                 }
             }
         }
