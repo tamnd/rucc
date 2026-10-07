@@ -44,6 +44,7 @@ use crate::scope::Binding;
 
 /// A `musttail` call `-Wmusttail-local-addr` said nothing about, waiting for the end of its
 /// function to be warned about under `-Wmaybe-musttail-local-addr` or not.
+#[derive(Debug)]
 pub(in crate::check) struct Tail {
     /// Where the call is.
     at: Span,
