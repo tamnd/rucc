@@ -2371,7 +2371,7 @@ impl Checker<'_> {
         // `hardbool` made is converted to through `bool` and is left out for the same reason.
         if matches!(eval::bare(&self.types, target), TypeKind::Bool)
             || self.types.hardbool_of(target).is_some()
-            || self.answered_late.contains(&value)
+            || self.late(value)
             || self.not_taken > 0
             || self.unevaluated > 0
         {
@@ -2395,6 +2395,26 @@ impl Checker<'_> {
         let message =
             format!("{what} from '{from}' to '{to}' changes value from '{was}' to '{now}'");
         self.report(Diagnostic::warning(message, span).with_code("E0524"));
+    }
+
+    /// Whether a constant has in it one this compiler answered where gcc answers in a later pass,
+    /// which gcc has no number for while it checks the program and so never warns about, even
+    /// with arithmetic on top: nouveau writes `__member_size(args->data) / sizeof(*args->data)`
+    /// into a `u8`.
+    fn late(&self, value: ExprId) -> bool {
+        if self.answered_late.contains(&value) {
+            return true;
+        }
+        match self.tast[value].kind {
+            ExprKind::Cast(inner)
+            | ExprKind::Convert { operand: inner, .. }
+            | ExprKind::Unary { operand: inner, .. } => self.late(inner),
+            ExprKind::Binary { lhs, rhs, .. } => self.late(lhs) || self.late(rhs),
+            ExprKind::Cond { cond, then, otherwise } => {
+                self.late(cond) || self.late(then) || self.late(otherwise)
+            }
+            _ => false,
+        }
     }
 
     /// The default argument promotions, 6.5.2.2p6.
