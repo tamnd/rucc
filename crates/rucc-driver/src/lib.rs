@@ -705,6 +705,66 @@ fn starting_target(host: Option<Triple>, args: &[String]) -> Result<Triple, CliE
     }
 }
 
+/// Where the configuration files are: `<prefix>/lib/rucc` beside the binary in `<prefix>/bin`,
+/// and then `/etc/rucc`.
+fn config_dirs() -> Vec<PathBuf> {
+    let mut dirs = Vec::new();
+    if let Some(prefix) = std::env::current_exe().ok().and_then(|exe| {
+        exe.parent().and_then(std::path::Path::parent).map(std::path::Path::to_path_buf)
+    }) {
+        dirs.push(prefix.join("lib").join("rucc"));
+    }
+    if !cfg!(windows) {
+        dirs.push(PathBuf::from("/etc/rucc"));
+    }
+    dirs
+}
+
+/// The command line with the flags of the configuration files in front of it, and the files.
+///
+/// A distribution sets its defaults in `<row>.cfg`, for example `/etc/rucc/x86_64-linux-gnu.cfg`
+/// with the hardening flags that its GCC turns on. The row is the one of `--target=`, or the
+/// default row. Each file holds flags, and `#` starts a comment that goes to the end of the line.
+/// The flags come before the command line, so the command line can turn each one off. A later
+/// file comes after an earlier one, so `/etc` wins over the install. `--no-default-config` reads
+/// no file, as in clang. Section 10.3 of the Linux plan.
+///
+/// # Errors
+///
+/// A file that is there and cannot be read.
+fn with_config(
+    args: Vec<String>,
+    dirs: &[PathBuf],
+) -> Result<(Vec<String>, Vec<String>), CliError> {
+    if args.iter().any(|arg| arg == "--no-default-config") {
+        return Ok((args, Vec::new()));
+    }
+    let named = args.iter().rev().find_map(|arg| arg.strip_prefix("--target="));
+    let target = match named {
+        Some(named) => named.parse::<Triple>().ok(),
+        None => Triple::host(),
+    };
+    let Some(target) = target else { return Ok((args, Vec::new())) };
+    let row = target.tuple().to_canonical_string();
+    let mut words = Vec::new();
+    let mut files = Vec::new();
+    for dir in dirs {
+        let path = dir.join(format!("{row}.cfg"));
+        if !path.is_file() {
+            continue;
+        }
+        let text =
+            std::fs::read_to_string(&path).map_err(|e| err(format!("{}: {e}", path.display())))?;
+        words.extend(text.lines().flat_map(|line| {
+            let flags = line.split('#').next().unwrap_or_default();
+            flags.split_whitespace().map(str::to_owned).collect::<Vec<_>>()
+        }));
+        files.push(path.display().to_string());
+    }
+    words.extend(args);
+    Ok((words, files))
+}
+
 /// Parses a command line, without the program name.
 ///
 /// # Errors
@@ -713,6 +773,7 @@ fn starting_target(host: Option<Triple>, args: &[String]) -> Result<Triple, CliE
 /// can attempt.
 pub fn parse_args(args: &[String]) -> Result<Action, CliError> {
     let expanded = preprocessor_args(&response_files(args)?);
+    let (expanded, configs) = with_config(expanded, &config_dirs())?;
     let args = expanded.as_slice();
     let host = match starting_target(Triple::host(), args) {
         Ok(target) => target,
@@ -726,6 +787,7 @@ pub fn parse_args(args: &[String]) -> Result<Action, CliError> {
     // this is the one layer that is allowed to look at the process it is in, and because a command
     // line that compiles four files should give the same answer for all four.
     opts.working_dir = std::env::current_dir().ok().map(|dir| dir.to_string_lossy().into_owned());
+    opts.config_files = configs;
     let mut inputs: Vec<Input> = Vec::new();
     let mut print_config = false;
     let mut print_pipeline = false;
@@ -1645,6 +1707,8 @@ pub fn parse_args(args: &[String]) -> Result<Action, CliError> {
             // About temporary files rather than about code. There is nothing between the phases of
             // one compilation here to write to a file in the first place.
             "-pipe" => {}
+            // Read before the loop, by `with_config`.
+            "--no-default-config" => {}
             // Preprocess the input, which a C compile always does. GCC has it for Fortran, and
             // meson writes it when it asks a compiler for its predefined macros.
             "-cpp" => {}
@@ -4997,12 +5061,15 @@ fn verbose_banner(opts: &Options) -> String {
         .and_then(|exe| exe.parent().map(std::path::Path::to_path_buf))
         .unwrap_or_default();
     let threads = if opts.target.arch.is_wasm() { "single" } else { "posix" };
-    format!(
+    let mut text = format!(
         "rucc version {VERSION} (gcc version {} compatible)\nTarget: {}\nThread model: {threads}\nInstalledDir: {}\n",
         opts.gnuc,
         opts.target.tuple().to_canonical_string(),
         installed.display()
-    )
+    );
+    // The line clang prints for each file it read flags from.
+    text.extend(opts.config_files.iter().map(|file| format!("Configuration file: {file}\n")));
+    text
 }
 
 /// The first line of what gas prints for `--version`, which is all of what this compiler prints.
@@ -8042,6 +8109,55 @@ mod tests {
 
     fn refused(s: &[&str]) -> String {
         parse_args(&args(s)).expect_err("expected a refusal").message
+    }
+
+    #[test]
+    fn a_configuration_file_puts_its_flags_before_the_command_line() {
+        let tree = TempTree::new(
+            "config",
+            &[
+                (
+                    "install/x86_64-linux-gnu.cfg",
+                    "-fstack-protector-strong # the default\n\n-D_FORTIFY_SOURCE=3 -O2\n",
+                ),
+                ("etc/x86_64-linux-gnu.cfg", "-fcf-protection\n"),
+                ("etc/aarch64-linux-gnu.cfg", "-mbranch-protection=standard\n"),
+            ],
+        );
+        let dirs = [PathBuf::from(tree.path("install")), PathBuf::from(tree.path("etc"))];
+        let line = |words: &[&str]| with_config(args(words), &dirs).expect("the files read");
+        let (words, files) = line(&["--target=x86_64-linux-gnu", "-fno-stack-protector", "a.c"]);
+        assert_eq!(
+            words,
+            args(&[
+                "-fstack-protector-strong",
+                "-D_FORTIFY_SOURCE=3",
+                "-O2",
+                "-fcf-protection",
+                "--target=x86_64-linux-gnu",
+                "-fno-stack-protector",
+                "a.c"
+            ])
+        );
+        assert_eq!(files.len(), 2, "{files:?}");
+        assert!(files[0].ends_with("x86_64-linux-gnu.cfg") && files[0].contains("install"));
+        // The row of the target, and no file for a row that has none.
+        let (words, _) = line(&["--target=aarch64-unknown-linux-gnu", "a.c"]);
+        assert_eq!(words[0], "-mbranch-protection=standard");
+        let (words, files) = line(&["--target=riscv64-linux-gnu", "a.c"]);
+        assert_eq!((words.len(), files.len()), (2, 0));
+        // clang's flag to read none.
+        let (words, files) = line(&["--target=x86_64-linux-gnu", "--no-default-config", "a.c"]);
+        assert_eq!((words.len(), files.len()), (3, 0));
+        // `-v` names each file it read.
+        let mut opts = Options::new("x86_64-linux-gnu".parse().unwrap());
+        opts.config_files = vec!["/etc/rucc/x86_64-linux-gnu.cfg".to_owned()];
+        let banner = verbose_banner(&opts);
+        assert!(
+            banner.ends_with("\nConfiguration file: /etc/rucc/x86_64-linux-gnu.cfg\n"),
+            "{banner}"
+        );
+        assert!(parse_args(&args(&["--no-default-config", "-c", "a.c"])).is_ok());
     }
 
     #[test]

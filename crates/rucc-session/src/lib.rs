@@ -2063,6 +2063,9 @@ pub struct Options {
     /// test does not depend on where it was run from. [`None`] when the process could not say, which
     /// is written out as a single dot.
     pub working_dir: Option<String>,
+    /// The configuration files the driver read flags from, in the order it read them. `-v`
+    /// prints them, so a user can see where a flag that is not on the command line came from.
+    pub config_files: Vec<String>,
     /// How the debug sections are compressed, from `-gz`.
     ///
     /// Nothing reads this yet, because nothing compresses a debug section yet. There are sections
@@ -2800,6 +2803,7 @@ impl Options {
             debug_info: false,
             dwarf_version: 5,
             working_dir: None,
+            config_files: Vec::new(),
             compress: Compress::None,
             lto: Lto::default(),
             profile_data: Profile::default(),
