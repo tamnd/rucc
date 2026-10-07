@@ -1842,6 +1842,11 @@ pub struct Deps {
     /// rule names a file that is gone and no rule makes it, and the build stops on a header that
     /// nothing needs any more.
     pub phony: bool,
+    /// Whether a header that is not found is a file the build makes later, from `-MG`.
+    ///
+    /// The header goes in the rule by the name the `#include` wrote, and there is no error. GCC
+    /// takes it only with `-M` and `-MM`, and so does this.
+    pub generated: bool,
 }
 
 impl Default for Deps {
@@ -1853,6 +1858,7 @@ impl Default for Deps {
             file: None,
             targets: Vec::new(),
             phony: false,
+            generated: false,
         }
     }
 }

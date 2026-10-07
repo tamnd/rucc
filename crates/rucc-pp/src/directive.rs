@@ -991,11 +991,26 @@ impl Preprocessor {
         let (form, relative_to, from) = self.where_to_look(&header, is_next, cx);
         let found = cx.search.resolve(cx.fs, &header.name, form, relative_to.as_deref(), from);
         let Some(found) = found else {
+            if cx.generated_headers {
+                self.generated(&header.name, header.angled);
+                return;
+            }
             let tried = cx.search.tried(&header.name, form, relative_to.as_deref(), from);
             self.not_found(&header.name, hash, &tried, cx.search.missing_system());
             return;
         };
         self.read(found, hash, out, cx, names);
+    }
+
+    /// Records a header that `-MG` says the build makes later.
+    ///
+    /// The name is the one the `#include` wrote, with no directory in front, as GCC writes it. An
+    /// angled name counts as a system header, so `-MM` leaves it out, as it does in GCC.
+    fn generated(&mut self, name: &str, angled: bool) {
+        let path = PathBuf::from(name);
+        if self.dep_ids.insert(path.clone()) {
+            self.deps.push(Dependency { path, is_system: angled });
+        }
     }
 
     /// Reports an include of a file that is not anywhere the search looked.

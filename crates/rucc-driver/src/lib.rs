@@ -1091,6 +1091,7 @@ pub fn parse_args(args: &[String]) -> Result<Action, CliError> {
                 opts.deps.system_headers = false;
             }
             "-MP" => opts.deps.phony = true,
+            "-MG" => opts.deps.generated = true,
             // These three take a word and only in the separated form, which is how GCC spells
             // them and how every build system writes them.
             "-MF" | "-MT" | "-MQ" => {
@@ -3461,6 +3462,11 @@ pub fn parse_args(args: &[String]) -> Result<Action, CliError> {
     // phase being the preprocessor is what makes that true without a second rule for it.
     if opts.deps.instead_of_compiling {
         opts.emit = EmitKind::Preprocessed;
+    }
+    // A missing header is not an error only when the run stops at the rule. A compile cannot
+    // continue without the header. GCC gives the same error.
+    if opts.deps.generated && !opts.deps.instead_of_compiling {
+        return Err(err("-MG may only be used with -M or -MM"));
     }
     if !nostdinc {
         opts.search.push_system(runtime::DIR);
@@ -9267,6 +9273,36 @@ mod tests {
         assert_eq!(code, 0);
         let text = std::fs::read_to_string(&out).expect("the rule should have been written");
         assert_eq!(text.split_whitespace().filter(|n| n.ends_with("g.h")).count(), 1, "{text}");
+    }
+
+    #[test]
+    fn a_header_the_build_makes_later_is_in_the_rule_by_its_written_name() {
+        let tree = TempTree::new(
+            "generated",
+            &[
+                (
+                    "a.c",
+                    "#include \"config.h\"\n#include <gen/sys.h>\n#include \"real.h\"\nint x;\n",
+                ),
+                ("real.h", ""),
+            ],
+        );
+        let rule = |flag: &str| {
+            let out = tree.path(&format!("{flag}.d"));
+            let line = [flag, "-MG", "-MF", &out, "-o", &tree.path("a.i"), &tree.path("a.c")];
+            assert_eq!(run(&args(&line)), 0);
+            std::fs::read_to_string(&out).expect("the rule should have been written")
+        };
+        let all = rule("-M");
+        let words: Vec<&str> = all.split_whitespace().collect();
+        assert!(words.contains(&"config.h") && words.contains(&"gen/sys.h"), "{all}");
+        assert!(words.iter().any(|w| w.ends_with("real.h")), "{all}");
+        // `-MM` leaves out an angled name, as GCC does.
+        let user = rule("-MM");
+        assert!(user.contains("config.h") && !user.contains("gen/sys.h"), "{user}");
+        // A compile cannot go on without the header.
+        assert_eq!(refused(&["-MG", "-c", "a.c"]), "-MG may only be used with -M or -MM");
+        assert_eq!(refused(&["-MD", "-MG", "-c", "a.c"]), "-MG may only be used with -M or -MM");
     }
 
     #[test]
