@@ -56,10 +56,12 @@
 //! aligned than it says takes the larger alignment, and an extension of a truncation is what was
 //! truncated when the bits the truncation dropped are known to be what the extension puts back.
 
+use std::cell::RefCell;
+
 use rucc_base::hash::{Map, Set};
 use rucc_ir::{
-    Block, Extra, Flags, Func, Imm, Inst, InstData, MemInfo, MemOrder, Opcode, Type, Value,
-    ValueList,
+    Block, Extra, Flags, Func, Imm, Inst, InstData, IntPred, MemInfo, MemOrder, Opcode, Type,
+    Value, ValueList,
 };
 
 use crate::range::ops::{self, Truth};
@@ -507,27 +509,66 @@ impl<'a> Solver<'a> {
             return nothing(ty);
         }
         // Every opcode the table reads takes one operand or two.
-        let mut ranges = [Range::empty(1); 2];
-        if args.len() > ranges.len() {
+        let mut known = [(0, Bits::unknown(1)); 2];
+        if args.len() > known.len() {
             return nothing(ty);
         }
         for (at, &arg) in args.iter().enumerate() {
             let arg_ty = self.func[arg].ty;
             match self.facts[arg.index()] {
                 Fact::Undefined => return Fact::Undefined,
-                Fact::Known(bits) if tracked(arg_ty) => {
-                    ranges[at] = Range::full(followed(arg_ty)).narrow(bits);
-                }
+                Fact::Known(bits) if tracked(arg_ty) => known[at] = (followed(arg_ty), bits),
                 _ => return nothing(ty),
             }
         }
-        let range = arithmetic(data, &ranges[..args.len()], width);
-        match range {
-            Some(range) if range.is_empty() => Fact::Undefined,
-            Some(range) if range.width() == width => Fact::Known(range.bits()),
-            _ => nothing(ty),
-        }
+        let pred = match data.extra {
+            Extra::IntPred(pred) => Some(pred),
+            _ => None,
+        };
+        let asked =
+            Asked { opcode: data.opcode, flags: data.flags, pred, width, known, args: args.len() };
+        ANSWERS.with_borrow_mut(|answers| {
+            if let Some(&fact) = answers.get(&asked) {
+                return fact;
+            }
+            let ranges = known.map(|(width, bits)| Range::full(width).narrow(bits));
+            let fact = match arithmetic(data, &ranges[..args.len()], width) {
+                Some(range) if range.is_empty() => Fact::Undefined,
+                Some(range) if range.width() == width => Fact::Known(range.bits()),
+                _ => nothing(ty),
+            };
+            if answers.len() >= ANSWERED {
+                answers.clear();
+            }
+            answers.insert(asked, fact);
+            fact
+        })
     }
+}
+
+/// Everything the range table reads to work out a result: the operation, its flags and the
+/// predicate of a comparison, the width of the result, and the width and the known bits of each
+/// operand. The same question has the same answer, which is what lets [`ANSWERS`] keep it.
+#[derive(Clone, Copy, PartialEq, Eq, Hash)]
+struct Asked {
+    opcode: Opcode,
+    flags: Flags,
+    pred: Option<IntPred>,
+    width: u32,
+    known: [(u32, Bits); 2],
+    args: usize,
+}
+
+/// How many answers [`ANSWERS`] holds before it starts over.
+const ANSWERED: usize = 1 << 16;
+
+thread_local! {
+    // The range table's answers, kept from one run to the next. An inlining decision runs this
+    // pass on a copy of a callee for each call it weighs, and the copies ask the same questions
+    // over and over: on monocypher at -O2 working the answers out again was a quarter of the
+    // compile, tamnd/rucc#3052. A result whose range is empty or of another width is kept as the
+    // fact it becomes, which only reads the width, so the answer does not depend on the type.
+    static ANSWERS: RefCell<Map<Asked, Fact>> = RefCell::new(Map::default());
 }
 
 /// Whether the transfer for this opcode is the range table's, which is the list of operations
