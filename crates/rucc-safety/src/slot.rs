@@ -150,7 +150,7 @@ const WORD: u64 = 8;
 
 /// The variables a module defines whose bounds a capability may be built out of, by name and size.
 ///
-/// [`objects`] is what decides which ones, and [`named`] is what reads it.
+/// [`objects`] is what decides which ones, and `named` is what reads it.
 pub type Objects = Map<Symbol, u64>;
 
 /// The variables of `module` a `global_addr` can be given a capability of its own for.

@@ -3,7 +3,7 @@
 //! Design: `spec/cross-compile/13-distribution.md` section 13.8 and the WASI notes of WA5
 //! (tamnd/rucc#2867). A sysroot is a `.tar.gz`, and rucc running as a wasm module cannot start
 //! `tar` to unpack one. A gzip member is a short header, a deflate stream, and the checksum and the
-//! length of what the stream gives. The deflate stream is the part that [`crate::inflate`] already
+//! length of what the stream gives. The deflate stream is the part that [`crate::inflate()`] already
 //! reads, so this module reads the header and checks the two numbers at the end.
 //!
 //! A file can hold more than one member, one after the other, and the result is the members joined.

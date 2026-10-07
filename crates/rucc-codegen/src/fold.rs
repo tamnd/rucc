@@ -776,7 +776,7 @@ const LOW_BITS: [(&str, u32); 21] = [
 /// ```
 ///
 /// All the readers or none of them, for the reason [`addresses`] gives: one reader that cannot
-/// take it keeps the `add`, and then the others save nothing. A reader is one of [`LOW_BITS`] that
+/// take it keeps the `add`, and then the others save nothing. A reader is one of `LOW_BITS` that
 /// reads the address as its base and nothing else, with no index beside it.
 ///
 /// The load scales the twelve bits by the size it reads, so the variable has to be aligned to that

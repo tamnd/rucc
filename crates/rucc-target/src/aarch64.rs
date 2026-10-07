@@ -364,7 +364,7 @@ fn copies_low(name: &str) -> bool {
 ///
 /// The test compares the condition register with zero and the two branches read the answer, the
 /// way the x86 description has it. This machine also has `cbz` and `cbnz`, which are the test and
-/// the branch in one instruction, and [`ZERO`] says when the layout writes those instead. They
+/// the branch in one instruction, and `ZERO` says when the layout writes those instead. They
 /// reach a megabyte either side, which is what `b.eq` reaches too, so a function the one cannot
 /// cross is one the other could not cross either.
 pub static BRANCH: BranchInsts = BranchInsts {
