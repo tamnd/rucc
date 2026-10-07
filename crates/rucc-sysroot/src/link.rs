@@ -332,6 +332,11 @@ impl LinkLine {
     /// headers inline the call, and not at -O0. A target with no pin is the newest release and
     /// does not get it.
     ///
+    /// The loader comes last, as in glibc's script. `ld.so` in the stubs is a script with the
+    /// loader's stub inside `AS_NEEDED`, so a program gets the loader in `DT_NEEDED` only when it
+    /// uses one of its names. On AArch64, Arm, RISC-V and LoongArch the stack protector reads
+    /// `__stack_chk_guard`, and the loader exports it there.
+    ///
     /// `libm.so` is not on the line, and that is a decision. glibc's `libm` is real code and a
     /// program that wants it passes `-lm`, which every build system that does arithmetic already
     /// does, so putting it on every line would record a dependency the program does not have.
@@ -350,6 +355,7 @@ impl LinkLine {
             if version.is_some_and(|version| !version.at_least(STAT_IN_LIBC)) {
                 libraries.push(lib.join("libc_nonshared_stat.a"));
             }
+            libraries.push(sysroot.stubs().join("ld.so"));
         }
         libraries.extend(ours(builtins));
         LinkLine { start: start_files(&lib, mode), libraries, end: vec![lib.join("crtn.o")] }

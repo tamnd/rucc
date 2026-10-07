@@ -33,6 +33,7 @@ sysroot   <cache>/sysroots/x86_64-linux-gnux32
   main.o
   <cache>/stubs/x86_64-linux-gnux32/libc.so
   <cache>/sysroots/x86_64-linux-gnux32/lib/libc_nonshared.a
+  <cache>/stubs/x86_64-linux-gnux32/ld.so
   <builtins>/librucc_builtins.a
   <cache>/sysroots/x86_64-linux-gnux32/lib/crtn.o
 
@@ -59,6 +60,7 @@ sysroot   <cache>/sysroots/x86_64-linux-gnux32
   main.o
   <cache>/stubs/x86_64-linux-gnux32/libc.so
   <cache>/sysroots/x86_64-linux-gnux32/lib/libc_nonshared.a
+  <cache>/stubs/x86_64-linux-gnux32/ld.so
   <builtins>/librucc_builtins.a
   <cache>/sysroots/x86_64-linux-gnux32/lib/crtn.o
 
@@ -82,5 +84,6 @@ sysroot   <cache>/sysroots/x86_64-linux-gnux32
   main.o
   <cache>/stubs/x86_64-linux-gnux32/libc.so
   <cache>/sysroots/x86_64-linux-gnux32/lib/libc_nonshared.a
+  <cache>/stubs/x86_64-linux-gnux32/ld.so
   <builtins>/librucc_builtins.a
   <cache>/sysroots/x86_64-linux-gnux32/lib/crtn.o

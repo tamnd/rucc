@@ -5,8 +5,8 @@
 //!
 //! # What is carried
 //!
-//! Three blobs in the format of [`crate::blob`], one per library that has code in it on a current
-//! glibc: `libc`, `libm` and `librt`. Each holds the eight architectures in [`ARCHITECTURES`], packed
+//! Four blobs in the format of [`crate::blob`], one per library that has code in it on a current
+//! glibc: `libc`, `libm`, `librt` and `ld`, which is the loader. Each holds the eight architectures in [`ARCHITECTURES`], packed
 //! from the `abilist` files of the newest glibc `tamnd/rucc-cross` pins, and since an `abilist` says
 //! which release added every name, the newest one describes every older release too. They are
 //! compiled into the binary, which is what makes a stub something the compiler writes rather than
@@ -19,19 +19,24 @@
 //! # What is written
 //!
 //! [`stubs`] is every file a glibc link line wants from this crate for one target: `libc.so`,
-//! `libm.so` and `librt.so` out of the blobs, cut at the release the target asked for, and the empty
-//! compatibility libraries of [`crate::compat()`]. The file names are what `-l` opens and the
-//! `SONAME`s inside them are what the loader will be asked for, which differ, and [`Library::file`]
-//! and [`Library::soname`] are the two columns.
+//! `libm.so` and `librt.so` out of the blobs, cut at the release the target asked for, the loader,
+//! and the empty compatibility libraries of [`crate::compat()`]. The file names are what `-l` opens
+//! and the `SONAME`s inside them are what the loader will be asked for, which differ, and
+//! [`Library::file`] and [`Library::soname`] are the two columns.
+//!
+//! The loader is written under its `SONAME`, which is a different name on each port, and `ld.so`
+//! beside it is a linker script with the one line `INPUT ( AS_NEEDED ( <soname> ) )`. glibc's own
+//! `libc.so` names the loader in the same way. A program needs it for `__tls_get_addr`, and on
+//! AArch64, Arm, RISC-V and LoongArch for `__stack_chk_guard`, which the loader exports there and
+//! not libc. A program that uses none of its names does not get it in
+//! `DT_NEEDED`.
 //!
 //! Not written here: `libc_nonshared.a` and the start files, which are compiled code out of glibc's
-//! own build and come with the fetched sysroot, and the loader's own library, whose `abilist` this
-//! does not carry yet. A program that refers to a name only the loader exports, which in practice is
-//! `__tls_get_addr` from a shared object's thread locals, gets an undefined symbol at link time.
+//! own build and come with the fetched sysroot.
 
 use core::fmt;
 
-use rucc_tuple::{Arch, DataModel, Env, Os, TargetTuple};
+use rucc_tuple::{Abi, Arch, DataModel, Env, Os, TargetTuple};
 
 use crate::blob::{self, Blob};
 use crate::compat::{Form, compat};
@@ -45,31 +50,33 @@ pub struct Library {
     /// What `-l` opens, so what the stub is written as.
     pub file: &'static str,
     /// What the loader is told to find, so what goes into `DT_NEEDED` of a program linked against it.
-    pub soname: &'static str,
+    /// [`None`] for the loader, whose name is the target's, from [`loader`].
+    pub soname: Option<&'static str>,
     /// The packed description.
     blob: &'static [u8],
 }
 
-/// The three libraries, in the order a link line would name them.
+/// The four libraries, in the order a link line would name them.
 pub const LIBRARIES: &[Library] = &[
     Library {
         name: "libc",
         file: "libc.so",
-        soname: "libc.so.6",
+        soname: Some("libc.so.6"),
         blob: include_bytes!("../glibc/libc.blob"),
     },
     Library {
         name: "libm",
         file: "libm.so",
-        soname: "libm.so.6",
+        soname: Some("libm.so.6"),
         blob: include_bytes!("../glibc/libm.blob"),
     },
     Library {
         name: "librt",
         file: "librt.so",
-        soname: "librt.so.1",
+        soname: Some("librt.so.1"),
         blob: include_bytes!("../glibc/librt.blob"),
     },
+    Library { name: "ld", file: "ld.so", soname: None, blob: include_bytes!("../glibc/ld.blob") },
 ];
 
 /// The architectures in every blob, spelled the way `bin/abilist` names its directories.
@@ -115,6 +122,31 @@ pub fn architecture(target: TargetTuple) -> Option<&'static str> {
     }
 }
 
+/// The `SONAME` of the loader for a target that [`architecture`] gives a section for.
+///
+/// It is the file name of the path in `rucc_sysroot::link::glibc_loader`, and the reasons for each
+/// row are given there. The two have to agree, because the stub tells the linker what to put in
+/// `DT_NEEDED` and the path is what the kernel opens.
+#[must_use]
+pub fn loader(target: TargetTuple) -> Option<&'static str> {
+    let hard = matches!(target.resolved_abi(), Abi::DoubleFloat);
+    let name = match architecture(target)? {
+        "x86_64" => "ld-linux-x86-64.so.2",
+        "x86" => "ld-linux.so.2",
+        "aarch64" => "ld-linux-aarch64.so.1",
+        "arm" if hard => "ld-linux-armhf.so.3",
+        "arm" => "ld-linux.so.3",
+        "riscv64" if hard => "ld-linux-riscv64-lp64d.so.1",
+        "riscv64" => "ld-linux-riscv64-lp64.so.1",
+        "powerpc64" => "ld64.so.2",
+        "s390x" => "ld64.so.1",
+        "loongarch64" if hard => "ld-linux-loongarch-lp64d.so.1",
+        "loongarch64" => "ld-linux-loongarch-lp64s.so.1",
+        _ => return None,
+    };
+    Some(name)
+}
+
 /// One file of a glibc sysroot that this crate writes.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct File {
@@ -143,13 +175,20 @@ pub fn stubs(target: TargetTuple, minor: u32) -> Result<Vec<File>, Error> {
             .description()
             .and_then(|blob| blob.exports_at(arch, &ceiling))
             .map_err(|why| Error::Blob { library: library.name, why })?;
-        let mut stub = Stub::new(library.soname);
+        let soname = library.soname.or_else(|| loader(target)).ok_or(Error::NoPort { target })?;
+        let mut stub = Stub::new(soname);
         for symbol in exports.symbols {
             stub.export(symbol);
         }
         let bytes = crate::write(&stub, target)
             .map_err(|why| Error::Write { library: library.name, why })?;
-        out.push(File { name: library.file.to_owned(), bytes });
+        if library.soname.is_some() {
+            out.push(File { name: library.file.to_owned(), bytes });
+        } else {
+            out.push(File { name: soname.to_owned(), bytes });
+            let script = format!("INPUT ( AS_NEEDED ( {soname} ) )\n");
+            out.push(File { name: library.file.to_owned(), bytes: script.into_bytes() });
+        }
     }
     for one in compat(target) {
         // Every glibc entry is a shared object, and an archive here would be a musl row reaching a
@@ -252,7 +291,7 @@ mod tests {
     }
 
     #[test]
-    fn a_glibc_target_gets_three_real_stubs_and_the_empty_four() {
+    fn a_glibc_target_gets_four_real_stubs_and_the_empty_four() {
         let files = stubs(target("x86_64-linux-gnu"), 39).expect("x86_64 writes");
         let names: Vec<&str> = files.iter().map(|file| file.name.as_str()).collect();
         assert_eq!(
@@ -261,6 +300,8 @@ mod tests {
                 "libc.so",
                 "libm.so",
                 "librt.so",
+                "ld-linux-x86-64.so.2",
+                "ld.so",
                 "libpthread.so",
                 "libdl.so",
                 "libutil.so",
@@ -269,6 +310,29 @@ mod tests {
         );
         // The same request twice is the same bytes, which is claim 5 of document 02.
         assert_eq!(files, stubs(target("x86_64-linux-gnu"), 39).expect("again"));
+    }
+
+    /// The stack protector's guard is a variable in the loader on four ports and a field of the
+    /// thread block on the other four, which have nothing to export. The script names the stub
+    /// under its `SONAME`.
+    #[test]
+    fn the_loader_stub_has_the_guard_where_glibc_puts_it_there() {
+        let ld = LIBRARIES[3].description().expect("ld reads");
+        let has = |arch: &str, name: &str| {
+            let exports = ld.exports_at(arch, "GLIBC_2.39").expect("every architecture");
+            exports.symbols.iter().any(|symbol| symbol.name == name)
+        };
+        for arch in ARCHITECTURES {
+            let guard = matches!(*arch, "aarch64" | "arm" | "riscv64" | "loongarch64");
+            assert_eq!(has(arch, "__stack_chk_guard"), guard, "{arch}");
+            // s390x calls its own `__tls_get_offset` and not the name every other port has.
+            let tls = if *arch == "s390x" { "__tls_get_offset" } else { "__tls_get_addr" };
+            assert!(has(arch, tls), "{arch}");
+        }
+        let files = stubs(target("aarch64-linux-gnu"), 39).expect("aarch64 writes");
+        let script = files.iter().find(|file| file.name == "ld.so").expect("the script");
+        assert_eq!(script.bytes, b"INPUT ( AS_NEEDED ( ld-linux-aarch64.so.1 ) )\n");
+        assert!(files.iter().any(|file| file.name == "ld-linux-aarch64.so.1"));
     }
 
     #[test]

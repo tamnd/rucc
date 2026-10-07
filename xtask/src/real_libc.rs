@@ -255,7 +255,7 @@ fn abilist(args: &[String], arch: &str) -> Option<PathBuf> {
 
 /// Repacks the glibc blobs `rucc-stub` compiles in, out of the abilists `bin/abilist` extracts.
 ///
-/// Run by hand when `tamnd/rucc-cross` moves its glibc pin, and the three files it rewrites are then
+/// Run by hand when `tamnd/rucc-cross` moves its glibc pin, and the four files it rewrites are then
 /// committed. The directory is the first argument or `RUCC_ABILISTS`, the same as for `real-libc`,
 /// and it has to hold every architecture, because a blob missing one would fail the first link for
 /// that architecture and nothing before it.

@@ -3876,6 +3876,28 @@ mod tests {
         assert!(cross_for(host, &bare, Some(host)).is_none());
     }
 
+    /// The loader stub names the file that the program names as its interpreter. Two tables give
+    /// the two names, and a difference would give a program that the kernel starts and that the
+    /// loader then cannot find its own library for.
+    #[test]
+    fn the_loader_stub_is_the_interpreter_the_line_names() {
+        for spelling in [
+            "x86_64-linux-gnu",
+            "i686-linux-gnu",
+            "aarch64-linux-gnu",
+            "armv7-linux-gnueabihf",
+            "riscv64-linux-gnu",
+            "powerpc64le-linux-gnu",
+            "s390x-linux-gnu",
+            "loongarch64-linux-gnu",
+        ] {
+            let tuple: TargetTuple = spelling.parse().expect("a tuple the table knows");
+            let path = rucc_sysroot::link::glibc_loader(tuple);
+            let name = rucc_stub::glibc::loader(tuple).expect("a port with a description");
+            assert_eq!(Path::new(path).file_name(), Some(std::ffi::OsStr::new(name)), "{spelling}");
+        }
+    }
+
     #[test]
     fn a_glibc_cross_link_writes_its_stubs_beside_the_sysroot_once() {
         let cache = std::env::temp_dir().join(format!("rucc-link-stubs-{}", std::process::id()));
@@ -3892,6 +3914,10 @@ mod tests {
         let bytes = fs::read(&libc).expect("libc.so was written");
         assert!(bytes.starts_with(b"\x7fELF"));
         assert!(dir.join("libm.so").is_file());
+        // The loader under its own name, and the script that the link line names.
+        assert!(dir.join("ld-linux-x86-64.so.2").is_file());
+        let script = fs::read_to_string(dir.join("ld.so")).expect("ld.so was written");
+        assert_eq!(script, "INPUT ( AS_NEEDED ( ld-linux-x86-64.so.2 ) )\n");
         // 2.28 is before the release that emptied libpthread, so there is no empty one to write.
         assert!(!dir.join("libpthread.so").exists());
         // The second time finds the same bytes and leaves the file alone, which is what keeps a
