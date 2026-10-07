@@ -48,12 +48,15 @@
 //! asks about the sixteen bytes of `buf` once the fortified `strcpy` is inlined, where gcc asks
 //! the same. Where the walk gets to an object without passing one, the whole object is an answer
 //! no smaller than the member for the largest, so the first kind's answer stands for the second,
-//! and for the smallest it could be too big, so there the fourth kind is not known. Once every
-//! question is answered the members are taken off, so no pass after this sees one.
+//! and for the smallest it could be too big, so there the fourth kind is not known. A step whose
+//! count the program worked out, which lowering marks `counted`, is not taken off the member,
+//! since gcc's early pass asks before any constant reaches it, and only what is left of the whole
+//! object can make the answer smaller. Once every question is answered the members and the marks
+//! are taken off, so no pass after this sees one.
 
 use rucc_ir::{
-    AllocSize, AttrSet, Def, Extra, Func, FuncId, Imm, Inst, InstData, IntPred, Module, Opcode,
-    Pic, SymbolRef, Type, Value,
+    AllocSize, AttrSet, Def, Extra, Flags, Func, FuncId, Imm, Inst, InstData, IntPred, Module,
+    Opcode, Pic, SymbolRef, Type, Value,
 };
 
 use std::cell::RefCell;
@@ -149,13 +152,14 @@ pub fn answer(module: &mut Module, pic: Pic, look: bool) -> usize {
     answered
 }
 
-/// Takes every `Extra::Member` off, which nothing after the questions reads.
+/// Takes every `Extra::Member` and every `counted` off, which nothing after the questions reads.
 fn forget(func: &mut Func) {
     for block in func.blocks().collect::<Vec<_>>() {
         for inst in func.insts(block).collect::<Vec<_>>() {
             if let Extra::Member(_) = func[inst].extra {
                 func[inst].extra = Extra::None;
             }
+            func[inst].flags = func[inst].flags.without(Flags::COUNTED);
         }
     }
 }
@@ -336,8 +340,24 @@ impl Walk<'_> {
                     }
                     Opcode::PtrAdd => {
                         let base = *args.first().ok_or(())?;
-                        let (imm, ty) = self.number(*args.get(1).ok_or(())?, 4).ok_or(())?;
+                        let count = *args.get(1).ok_or(())?;
+                        let (imm, ty) = self.number(count, 4).ok_or(())?;
                         let step = u64::try_from(imm.signed(ty)).map_err(|_| ())?;
+                        // A count the program worked out, even one that comes to a constant, is
+                        // not known when gcc's early pass asks about the member, so it answers
+                        // with all of the member and the step is taken off only what is left of
+                        // the whole object. metronomefb clears `args + i` with `i` one and a size
+                        // that runs into the `csum` after it, and gcc says nothing.
+                        if ask.closest && largest && data.flags.contains(Flags::COUNTED) {
+                            let Some(member) = self.left(base, ask, depth, on)? else {
+                                return Ok(None);
+                            };
+                            let whole = Ask { closest: false, ..ask };
+                            return Ok(Some(match self.left(value, whole, depth, on) {
+                                Ok(Some(whole)) => member.min(whole),
+                                _ => member,
+                            }));
+                        }
                         match self.left(base, ask, depth, on)? {
                             Some(left) => Ok(Some(left.saturating_sub(step))),
                             // A pointer moved forward each time round a loop may end up anywhere
@@ -1058,5 +1078,44 @@ block0:
         answer(&mut module, Pic::Executable, true);
         let text = rucc_ir::print(&module, &names);
         assert!(!text.contains("member"), "{text}");
+    }
+
+    /// A `ptr_add` whose count the program worked out leaves the closest kinds with all of the
+    /// member it moved in, or what is left of the whole object where that is less, and the flag is
+    /// gone once the questions are answered. The numbers are what gcc 16 answers at `-O2` for
+    /// `s.args + i` and `buf + i` with `i` a local holding one.
+    #[test]
+    fn a_counted_step_inside_a_member_is_somewhere_in_all_of_it() {
+        let body = "
+global @g : bytes 66 = { zero 66 }, align 2, linkage(external)
+global @b : bytes 16 = { zero 16 }, align 1, linkage(external)
+
+func @f(), linkage(external) {
+block0:
+    %0 = global_addr @g
+    %1 = iconst.i64 2
+    %2 = ptr_add %0, %1, member 62
+    %3 = ptr_add.counted %2, %1
+    %4 = object_size.i64 %3, kind 1
+    call @use(%4) : (i64)
+    %5 = object_size.i64 %3, kind 0
+    call @use(%5) : (i64)
+    %6 = ptr_add %2, %1
+    %7 = object_size.i64 %6, kind 1
+    call @use(%7) : (i64)
+    %8 = global_addr @b
+    %9 = iconst.i64 1
+    %10 = ptr_add.counted %8, %9
+    %11 = object_size.i64 %10, kind 1
+    call @use(%11) : (i64)
+    return
+}
+";
+        assert_eq!(answers(body, true), [62, 62, 60, 15]);
+        let mut names = Interner::new();
+        let mut module = rucc_ir::parse(&format!("{HEAD}{body}"), &mut names).expect("parses");
+        answer(&mut module, Pic::Executable, true);
+        let text = rucc_ir::print(&module, &names);
+        assert!(!text.contains("counted"), "{text}");
     }
 }

@@ -320,6 +320,12 @@ impl Checker<'_> {
                 if self.through_pointer(base) && (union || last && self.flexible(field.ty, level)) {
                     return Some(reach.member(field.offset, None));
                 }
+                // A record ending in a flexible array goes on past its type, and so does every
+                // record holding it that ends in it too. Where that runs all the way out to the
+                // pointer, the closest object is what the pointer points at, as gcc walks it.
+                if self.types.ends_flexible(field.ty) && self.open_to_pointer(base) {
+                    return Some(reach.member(field.offset, None));
+                }
                 Some(reach.member(field.offset, Some(size?)))
             }
             ExprKind::Subscript { base, index } => {
@@ -388,6 +394,19 @@ impl Checker<'_> {
             ExprKind::Cast(inner) | ExprKind::Convert { operand: inner, .. } => self.local(inner),
             ExprKind::Binary { lhs, rhs, .. } => self.local(lhs) || self.local(rhs),
             ExprKind::Cond { then, otherwise, .. } => self.local(then) || self.local(otherwise),
+            _ => false,
+        }
+    }
+
+    /// Whether this lvalue is what a pointer points at, or a member of that whose record ends in a
+    /// flexible array, or a member of that again, so that nothing between it and the pointer has
+    /// a size the program cannot run past.
+    fn open_to_pointer(&self, expr: ExprId) -> bool {
+        match self.tast[expr].kind {
+            _ if self.through_pointer(expr) => true,
+            ExprKind::Member { base, .. } => {
+                self.types.ends_flexible(self.tast[expr].ty) && self.open_to_pointer(base)
+            }
             _ => false,
         }
     }
