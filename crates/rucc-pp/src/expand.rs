@@ -27,13 +27,19 @@ use crate::macros::{Builtin, MacroDef, MacroTable};
 use crate::token::Tok;
 use crate::trace::{TraceId, Traces};
 
-/// A backstop against a replacement list that grows without bound.
+/// A backstop against a replacement list that grows without bound, counted in tokens looked at
+/// for one macro invocation the user wrote.
 ///
 /// Hide sets guarantee that expansion terminates, but they say nothing about how large the
 /// result gets, and a short chain of macros that each mention the next one twice produces a
-/// megabyte from four lines. Real code never comes near this; input designed to hang the
-/// compiler does, and `spec/19-risks.md` asks for a bound rather than a hang.
-const MAX_STEPS: usize = 1 << 24;
+/// megabyte from four lines. Input designed to hang the compiler comes near this, and
+/// `spec/19-risks.md` asks for a bound rather than a hang. Real code comes within a factor of
+/// three: the kernel's `pack_fields` checks every field of a table against the one before it for
+/// each table size up to fifty, which is over a million tokens out and six million looked at. A
+/// file can call it several times between two directives, which is why the count starts again
+/// at each invocation rather than at each stretch of the file. Smaller under test, so that a
+/// test can reach it quickly.
+const MAX_STEPS: usize = if cfg!(test) { 1 << 12 } else { 1 << 24 };
 
 /// Macro expansion state that outlives a single expansion.
 ///
@@ -240,6 +246,11 @@ impl<'a> Run<'a> {
         let mut out: Vec<Tok> = Vec::with_capacity(pending.len());
 
         while let Some(tok) = pending.pop() {
+            // A token the user wrote, reached outside any substitution, is past everything the
+            // invocations before it produced, since their output goes in front of it.
+            if self.current == TraceId::NONE && tok.trace == TraceId::NONE {
+                self.steps = 0;
+            }
             self.steps += 1;
             if self.steps > MAX_STEPS {
                 let d = Diagnostic::error("macro expansion is too large", tok.report_span())
