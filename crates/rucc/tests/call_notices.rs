@@ -190,6 +190,29 @@ int ksm(void) {{
     }
 }
 
+/// A byte read out of a number written through a union is the byte the target puts first, which
+/// is what fs/bcachefs/buckets.h checks of its lock bit with
+/// `BUILD_BUG_ON(!((union ulong_byte_assert) { .ulong = 1UL << BUCKET_LOCK_BITNR }).byte)`. The
+/// half and the byte after it come out of the same number.
+#[test]
+fn a_build_bug_on_a_byte_of_a_union_says_nothing() {
+    let source = format!(
+        "{KERNEL}union ulong_byte_assert {{ unsigned long ulong; unsigned char byte; }};
+union halves {{ unsigned long ulong; unsigned short half; unsigned char bytes[8]; }};
+void bucket_unlock(void) {{
+	BUILD_BUG_ON(!((union ulong_byte_assert) {{ .ulong = 1UL << 0 }}).byte);
+	BUILD_BUG_ON(((union halves) {{ .ulong = 0x30201UL }}).half != 0x201);
+	BUILD_BUG_ON(((union halves) {{ .ulong = 0x30201UL }}).bytes[2] != 3);
+}}
+"
+    );
+    for level in ["-O1", "-O2", "-Os", "-O3"] {
+        let (ok, _, said) = compile(&format!("union-byte{level}"), &[level], &source);
+        assert!(ok, "{level}: {said}");
+        assert!(said.is_empty(), "{level}: {said}");
+    }
+}
+
 /// A case pins the value it switches on even in a function that tests that value in many blocks,
 /// which is what `savic_read` in arch/x86/kernel/apic/x2apic_savic.c leans on with
 /// `BUILD_BUG_ON(reg != APIC_ICR)` under `case APIC_ICR`, among four case ranges.
