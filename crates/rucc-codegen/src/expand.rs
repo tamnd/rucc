@@ -1577,11 +1577,14 @@ pub const MOVE: usize = 8;
 
 /// One `memcpy`, as a load and a store for each word of it.
 ///
-/// Each word is read and then written before the next is read, rather than every read being built
-/// before any write the way [`crate::varargs`] copies a list. A `memcpy` is the copy whose two
-/// sides the front end promises do not overlap, so what is at the source when the last word is read
-/// is what was there when the first was, and reading a word at a time costs one register where
-/// reading all of them first would cost as many registers as the copy has words.
+/// The words are read two at a time and each two written before the next two are read, rather
+/// than every read being built before any write the way [`crate::varargs`] copies a list. A
+/// `memcpy` is the copy whose two sides the front end promises do not overlap, so what is at the
+/// source when the last word is read is what was there when the first was. Two at a time costs two
+/// registers where reading all of them first would cost as many as the copy has words, and it is
+/// what gcc writes: two loads next to each other and two stores next to each other, which AArch64
+/// does as one `ldp` and one `stp`. A word at a time would leave a store between every two loads,
+/// and nothing after allocation can move a load above a store.
 fn copy(func: &mut Func, names: &mut Interner, inst: Inst, word: u32, unaligned: bool) {
     let Some(bulk) = func.bulk(inst) else { return };
     let (into, from) = (bulk.to, bulk.with);
@@ -1591,13 +1594,18 @@ fn copy(func: &mut Func, names: &mut Interner, inst: Inst, word: u32, unaligned:
     let Some(plan) = chunks(info, word, unaligned).filter(|_| bulk.length.is_none()) else {
         return library(func, names, inst, Opcode::Memcpy, word);
     };
-    for (at, width) in plan {
-        let ty = Type::int(width * 8);
-        let access = MemInfo { size: u64::from(width), align: width.min(info.align), ..info };
-        let there = stepped(func, inst, from, at);
-        let word = read(func, inst, there, access, ty);
-        let here = stepped(func, inst, into, at);
-        write(func, inst, word, here, access);
+    for two in plan.chunks(2) {
+        let mut read_two = Vec::with_capacity(2);
+        for &(at, width) in two {
+            let ty = Type::int(width * 8);
+            let access = MemInfo { size: u64::from(width), align: width.min(info.align), ..info };
+            let there = stepped(func, inst, from, at);
+            read_two.push((at, access, read(func, inst, there, access, ty)));
+        }
+        for (at, access, word) in read_two {
+            let here = stepped(func, inst, into, at);
+            write(func, inst, word, here, access);
+        }
     }
     func.remove_inst(inst);
 }
