@@ -21,6 +21,11 @@
 //!   says nothing about it below `-Wformat-security`. Both arms of a conditional are read, and a
 //!   call to a function marked `format_arg`, which is how `gettext` hands a translation back, is
 //!   read through to the literal it was handed.
+//! * A conditional whose condition is a constant is only the arm it picks, as gcc folds it before
+//!   reading the format, so `__builtin_types_compatible_p (typeof (x), int) ? "%i" : "%lu"` is
+//!   not a mismatch whatever `x` is. Where both arms are read, arguments left over and an empty
+//!   format are said only when no arm read the arguments it was handed and every arm is a
+//!   literal, since `p ? "%s:%s" : "%s"` passes the second argument for the first arm alone.
 //! * Each argument is judged after the default argument promotions, so a `float` is a `double`
 //!   and a `char` is an `int`, and signedness is not judged at all, since that is
 //!   `-Wformat-signedness`. `long` and `long long` are two types even where they are one width,
@@ -228,6 +233,27 @@ struct Reading<'a> {
 /// A directive asked for something that ended the reading of the format, and has said so.
 struct Stop;
 
+/// What the literals a format may be came to, for the warnings that wait until all are read.
+#[derive(Default)]
+struct Leaves {
+    /// One of them read what it was handed, or was not a literal at all, which quiets the rest.
+    settled: bool,
+    /// One left arguments over.
+    extra: bool,
+    /// One was numbered and left arguments over.
+    dollar_extra: bool,
+    /// One was empty.
+    empty: bool,
+    /// Whether any literal was read at all.
+    read: bool,
+    /// The last literal read that is the format or an arm of its conditional, which is where gcc
+    /// says all three. One inside a conditional inside that has no place of its own there, and
+    /// where every one is, the whole format is the place.
+    last: Option<Span>,
+    /// How many conditionals the literal being read is inside.
+    depth: usize,
+}
+
 impl Checker<'_> {
     /// Reads a `format(archetype, string, first)` attribute, for an archetype this checks.
     pub(in crate::check) fn format_attribute(&mut self, attr: Attribute) -> Option<Format> {
@@ -321,7 +347,24 @@ impl Checker<'_> {
             0 => (&[][..], false),
             first => (args.get(first - 1..).unwrap_or(&[]), true),
         };
-        self.format_string(string, format, rest, checked, call);
+        let mut leaves = Leaves::default();
+        self.format_string(string, format, rest, checked, call, &mut leaves);
+        if leaves.settled || !leaves.read {
+            return;
+        }
+        let last = leaves.last.unwrap_or_else(|| self.tast.expr_span(string));
+        if leaves.extra {
+            let said = Diagnostic::warning("too many arguments for format", last);
+            self.report(said.with_code(EXTRA_ARGS));
+        }
+        if leaves.dollar_extra {
+            let said = Diagnostic::warning("unused arguments in '$'-style format", last);
+            self.report(said.with_code(EXTRA_ARGS));
+        }
+        if leaves.empty {
+            let what = format!("zero-length {} format string", format.family.archetype());
+            self.report(Diagnostic::warning(what, last).with_code(ZERO_LENGTH));
+        }
     }
 
     /// Finds the literal a format argument is, through a conditional and a `format_arg` call.
@@ -332,6 +375,7 @@ impl Checker<'_> {
         args: &[ExprId],
         checked: bool,
         call: Span,
+        leaves: &mut Leaves,
     ) {
         let mut at = string;
         while let ExprKind::Convert { operand, .. } | ExprKind::Cast(operand) = self.tast[at].kind {
@@ -359,29 +403,67 @@ impl Checker<'_> {
                     used: vec![false; args.len()],
                     numbered: None,
                 };
-                self.read_format(text, &mut reading);
+                leaves.read = true;
+                if leaves.depth <= 1 {
+                    leaves.last = Some(span);
+                }
+                self.read_format(text, &mut reading, leaves);
             }
-            ExprKind::Cond { then, otherwise, .. } => {
-                self.format_string(then, format, args, checked, call);
-                self.format_string(otherwise, format, args, checked, call);
+            ExprKind::Cond { cond, then, otherwise } => {
+                leaves.depth += 1;
+                match self.eval().integer(cond).ok() {
+                    Some(0) => self.format_string(otherwise, format, args, checked, call, leaves),
+                    Some(_) => self.format_string(then, format, args, checked, call, leaves),
+                    // gcc folds a conditional whose arms are the same literal to the literal.
+                    None if self.same_literal(then, otherwise) => {
+                        self.format_string(then, format, args, checked, call, leaves);
+                    }
+                    None => {
+                        self.format_string(then, format, args, checked, call, leaves);
+                        self.format_string(otherwise, format, args, checked, call, leaves);
+                    }
+                }
+                leaves.depth -= 1;
             }
             ExprKind::Call { callee, args: inner } => {
-                let Some(decl) = self.called_decl(callee) else { return };
-                let Some(&number) = self.advice.format_arg.get(&decl) else { return };
-                let inner = self.tast[inner].to_vec();
-                if let Some(&arg) = number.checked_sub(1).and_then(|at| inner.get(at)) {
-                    self.format_string(arg, format, args, checked, call);
+                let marked = self.called_decl(callee).and_then(|decl| {
+                    let number = *self.advice.format_arg.get(&decl)?;
+                    self.tast[inner].get(number.checked_sub(1)?).copied()
+                });
+                match marked {
+                    Some(arg) => self.format_string(arg, format, args, checked, call, leaves),
+                    None => leaves.settled = true,
                 }
             }
-            _ => {}
+            _ => leaves.settled = true,
         }
     }
 
-    /// Reads one literal format, then says what is left over.
-    fn read_format(&mut self, mut text: Text, reading: &mut Reading<'_>) {
+    /// Whether two expressions are string literals with the same elements.
+    fn same_literal(&self, one: ExprId, other: ExprId) -> bool {
+        let literal = |mut at: ExprId| {
+            while let ExprKind::Convert { operand, .. } | ExprKind::Cast(operand) =
+                self.tast[at].kind
+            {
+                at = operand;
+            }
+            match self.tast[at].kind {
+                ExprKind::Str(id) => Some(&self.tast[id]),
+                _ => None,
+            }
+        };
+        match (literal(one), literal(other)) {
+            (Some(one), Some(other)) => {
+                one.encoding == other.encoding && one.elements == other.elements
+            }
+            _ => false,
+        }
+    }
+
+    /// Reads one literal format, then notes what it left over.
+    fn read_format(&mut self, mut text: Text, reading: &mut Reading<'_>, leaves: &mut Leaves) {
         if text.chars.is_empty() {
-            let what = format!("zero-length {} format string", reading.family.archetype());
-            self.report(Diagnostic::warning(what, text.literal).with_code(ZERO_LENGTH));
+            leaves.empty = true;
             return;
         }
         if let Some(nul) = text.chars.iter().position(|&unit| unit == 0) {
@@ -402,15 +484,19 @@ impl Checker<'_> {
             };
             match read {
                 Ok(next) => at = next,
-                Err(Stop) => return,
+                Err(Stop) => {
+                    leaves.settled = true;
+                    return;
+                }
             }
         }
-        self.left_over(&text, reading);
+        self.left_over(&text, reading, leaves);
     }
 
-    /// Says what the format did not read, once it has all been read.
-    fn left_over(&mut self, text: &Text, reading: &Reading<'_>) {
+    /// Notes what the format did not read, once it has all been read.
+    fn left_over(&mut self, text: &Text, reading: &Reading<'_>, leaves: &mut Leaves) {
         if !reading.checked {
+            leaves.settled = true;
             return;
         }
         if reading.numbered == Some(true) {
@@ -424,13 +510,14 @@ impl Checker<'_> {
                 self.report(Diagnostic::warning(what, text.literal).with_code(FORMAT));
             }
             if reading.args.len() > last + 1 {
-                let said =
-                    Diagnostic::warning("unused arguments in '$'-style format", text.literal);
-                self.report(said.with_code(EXTRA_ARGS));
+                leaves.dollar_extra = true;
+            } else {
+                leaves.settled = true;
             }
         } else if reading.next < reading.args.len() {
-            let said = Diagnostic::warning("too many arguments for format", text.literal);
-            self.report(said.with_code(EXTRA_ARGS));
+            leaves.extra = true;
+        } else {
+            leaves.settled = true;
         }
     }
 
