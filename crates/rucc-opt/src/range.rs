@@ -130,7 +130,7 @@ pub const MAX_BITS: u32 = 128;
 /// A set bit in `unknown` means that bit could be either. A clear one means `value` has it. The
 /// two are kept canonical, so a bit that is unknown is zero in `value`, which makes equality mean
 /// what it looks like.
-#[derive(Clone, Copy, PartialEq, Eq)]
+#[derive(Clone, Copy, PartialEq, Eq, Hash)]
 pub struct Bits {
     value: u128,
     unknown: u128,
