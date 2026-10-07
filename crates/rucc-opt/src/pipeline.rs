@@ -1412,7 +1412,12 @@ pub fn run(module: &mut Module, names: &mut Interner, opts: &Options) -> Report 
             // `-fenable-<pass>=<function>` can put one back while somebody is looking at it.
             let held = module[id].attrs.set.contains(AttrSet::OPTNONE);
             let default = default && (!held || O0.contains(&name));
-            if !opts.gates.allows(name, default, id.raw(), names.resolve(module[id].name)) {
+            // A gate has no say over a pass the level chose that the compile cannot do without,
+            // the same as `-fno-<pass>`. Turning one off is a compile that stops on a construct
+            // the program never wrote, not one without the pass (tamnd/rucc#3189).
+            let kept = default && required(name);
+            if !kept && !opts.gates.allows(name, default, id.raw(), names.resolve(module[id].name))
+            {
                 // No remark either. A pass that did not run on a function has nothing to say
                 // about it, and a record saying it found nothing would read as a pass that
                 // looked.
@@ -2173,7 +2178,12 @@ mod tests {
             opts.gates.add(false, pass.name()).expect("a pass in the list is a pass that exists");
         }
         let report = super::run(&mut module, &mut names, &opts);
-        assert!(report.remarks.is_empty(), "a pass that did not run has nothing to report");
+        // `expect` and `constant-p` run whatever a gate says, since the compile cannot do without
+        // them (tamnd/rucc#3189).
+        assert!(
+            report.remarks.iter().all(|it| super::required(it.pass)),
+            "a pass that did not run has nothing to report"
+        );
         assert_eq!(spent(&report, "fold"), Some(0), "the pass is still in the pipeline");
         assert_eq!(rucc_ir::print(&module, &names), before);
     }

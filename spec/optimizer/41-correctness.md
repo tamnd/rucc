@@ -309,6 +309,8 @@ rucc should have `-fdisable-<pass>[=<range>]` and `-fenable-<pass>[=<range>]` fr
 there is more than one pass. The cost is a lookup in the pass manager and it repays itself the first
 time a wrong-code bug is reported against a program that takes two minutes to compile.
 
+A pass the compile cannot do without is out of reach of both flags, as it is of `-fno-<pass>`. `expect` and `constant-p` remove instructions nothing after them lowers, so turning either off is not a compile without the pass but one that stops on a construct the program never wrote, and a bisection would stop there for no reason (tamnd/rucc#3189).
+
 Alongside it: `-fopt-info` (`gcc/doc/invoke.texi:20403`) for what fired, and the per-pass dumps of
 spec 09. The three together are the debugging interface, and rucc's advantage is that it can make the
 dumps stable and diffable by construction rather than as an afterthought.

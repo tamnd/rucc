@@ -19,6 +19,7 @@ All notable changes are recorded here. The format follows [Keep a Changelog](htt
 ### Fixed
 
 - A register an AArch64 `asm` template only reads, in a store, a compare, a branch, an `msr` or a `prfm`, is no longer taken from the allocator, so the kernel's `crash_setup_regs` compiles instead of panicking. (#3211)
+- `-fdisable-<pass>` and `-fdisable-<pass>=<function>` no longer turn off `expect` or `constant-p`, which the compile cannot do without and `-fno-<pass>` already kept (#3220). Turning either off made a program that calls `__builtin_expect` stop with E0653 and one that calls `__builtin_constant_p` fail to link, which the pass-off run of rucc-corpus counted against the pass.
 
 ## 0.28.0
 

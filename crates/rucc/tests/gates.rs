@@ -66,6 +66,25 @@ fn ir(what: &str, flags: &[&str]) -> String {
     String::from_utf8(out.stdout).expect("what the compiler writes is text")
 }
 
+/// The assembly the compiler writes for that source under these flags.
+fn assembly(what: &str, flags: &[&str], source: &str) -> String {
+    let dir = std::env::temp_dir().join(format!("rucc-gates-{}-{what}", std::process::id()));
+    std::fs::create_dir_all(&dir).expect("a temporary directory can be created");
+    let path = dir.join("one.c");
+    std::fs::write(&path, source).expect("the fixture can be written");
+    let out = Command::new(env!("CARGO_BIN_EXE_rucc"))
+        .arg(format!("--target={TARGET}"))
+        .args(["-S", "-o", "-"])
+        .args(flags)
+        .arg(&path)
+        .output()
+        .expect("the compiler is built before its own tests run");
+    let said = String::from_utf8_lossy(&out.stderr).into_owned();
+    let _ = std::fs::remove_dir_all(&dir);
+    assert!(out.status.success(), "the compiler refused the fixture with {flags:?}:\n{said}");
+    String::from_utf8(out.stdout).expect("what the compiler writes is text")
+}
+
 /// The body of one function of the module, which is what a gate makes different.
 fn body<'a>(ir: &'a str, name: &str) -> &'a str {
     let head = format!("func @{name}(");
@@ -143,4 +162,22 @@ fn a_gate_that_names_a_pass_this_compiler_does_not_have_is_refused() {
     let _ = std::fs::remove_dir_all(path.parent().expect("the fixture is in a directory"));
     assert!(!out.status.success(), "a misspelled pass name was accepted");
     assert!(said.contains("not a pass this compiler has"), "{said}");
+}
+
+/// `expect` and `constant-p` remove what nothing after them lowers, so a gate leaves them on as
+/// `-fno-<pass>` does and the listing is the one the compiler writes without the flag. Before
+/// tamnd/rucc#3189 the first stopped with E0653 and the second left in the call the answer removes.
+#[test]
+fn a_gate_does_not_turn_off_a_pass_the_compile_needs() {
+    let source = "int far(void);\n\
+                  int f(int x) {\n\
+                  \x20   if (__builtin_expect(x > 3, 0))\n\
+                  \x20       return __builtin_constant_p(x) ? 1 : far();\n\
+                  \x20   return 0;\n\
+                  }\n";
+    let plain = assembly("required", &["-O2"], source);
+    assert!(plain.contains("far"), "{plain}");
+    for flag in ["-fdisable-expect", "-fdisable-constant-p", "-fdisable-expect=f"] {
+        assert_eq!(assembly("required", &["-O2", flag], source), plain, "{flag}");
+    }
 }
