@@ -386,8 +386,11 @@ impl Preprocessor {
         let depth_on_entry = self.conds.len();
         // Consecutive text lines are expanded as one run rather than line by line, because a
         // function-like macro invocation may span lines. A directive is where the run ends,
-        // except a conditional one in the middle of an invocation's arguments: that is undefined
-        // behaviour, but GCC takes the branch and carries on collecting, and toybox counts on it.
+        // except one in the middle of an invocation's arguments: that is undefined behaviour,
+        // but GCC runs the directive and carries on collecting. toybox counts on it for a
+        // conditional, and the kernel for a `#define`, as nouveau's `struct_group_tagged` does
+        // with the values of the fields it holds. A definition changes what the text before
+        // the invocation means, so that much is expanded first.
         let mut text: Vec<Tok> = Vec::new();
         let mut body: Vec<PpToken> = Vec::new();
         let mut scan = Scan::Start;
@@ -414,10 +417,15 @@ impl Preprocessor {
             if directive {
                 body.clear();
                 let name_tok = reader.next(cx.interner);
-                if !(is_conditional(ident_of(&name_tok), names)
-                    && open_invocation(&text, &self.macros))
-                {
-                    self.flush(&mut text, out, cx, names);
+                let name = ident_of(&name_tok);
+                match open_invocation(&text, &self.macros) {
+                    Some(_) if is_conditional(name, names) => {}
+                    Some(at) if name == Some(names.define) || name == Some(names.undef) => {
+                        let open = text.split_off(at);
+                        self.flush(&mut text, out, cx, names);
+                        text = open;
+                    }
+                    _ => self.flush(&mut text, out, cx, names),
                 }
                 // The null directive. A line of just `#` is legal and does nothing, and there
                 // is a surprising amount of it in real headers as a visual separator.
@@ -2031,11 +2039,12 @@ fn is_conditional(name: Option<Symbol>, names: &Names) -> bool {
         || is_alternative(Some(name), names)
 }
 
-/// Whether `text` ends partway through the arguments of a function-like macro, that is with a
+/// Where `text` is partway through the arguments of a function-like macro, that is with a
 /// parenthesis still open right after the name of one, or after the name of an object-like macro
 /// that ends in the name of one. The kernel's `cpu_to_le64` is `__cpu_to_le64`, and arm64's SMMU
-/// driver has an `#ifdef __BIG_ENDIAN` inside the parentheses after it.
-fn open_invocation(text: &[Tok], macros: &MacroTable) -> bool {
+/// driver has an `#ifdef __BIG_ENDIAN` inside the parentheses after it. The answer is the name
+/// in front of the outermost such parenthesis.
+fn open_invocation(text: &[Tok], macros: &MacroTable) -> Option<usize> {
     let mut open: Vec<usize> = Vec::new();
     for (at, tok) in text.iter().enumerate() {
         if tok.is(Punct::LParen) {
@@ -2044,7 +2053,9 @@ fn open_invocation(text: &[Tok], macros: &MacroTable) -> bool {
             open.pop();
         }
     }
-    open.iter().any(|&at| at > 0 && text[at - 1].ident().is_some_and(|name| calls(name, macros)))
+    open.into_iter()
+        .find(|&at| at > 0 && text[at - 1].ident().is_some_and(|name| calls(name, macros)))
+        .map(|at| at - 1)
 }
 
 /// Whether a parenthesis after `name` is the start of a function-like macro's arguments once
@@ -2871,6 +2882,21 @@ mod tests {
         assert_eq!(clean(src), "[1 | 4]");
         // A name defined as itself is still only a name.
         assert_eq!(clean("#define S S\nS(1,\n#ifdef X\n2\n#endif\n)\n"), "S(1, )");
+    }
+
+    #[test]
+    fn a_definition_inside_the_arguments_of_an_invocation_is_made_where_it_stands() {
+        // nouveau's `nvif/ioctl.h` defines the values of each field inside the
+        // `struct_group_tagged(...)` that holds it, and xe defines a helper inside the
+        // parentheses of the table it is used in.
+        let src = "#define G(...) struct { __VA_ARGS__ } g;\nG(\nint a;\n#define V 1\n#define W 2\n\
+                   #undef W\nint b;\n)\nV W\n";
+        assert_eq!(clean(src), "struct { int a; int b; } g; 1 W");
+        let src = "#define T(...) { __VA_ARGS__ }\nT(1,\n#define D(x) (x * 2)\nD(3), 4)\n";
+        assert_eq!(clean(src), "{ 1, (3 * 2), 4 }");
+        // The text in front of the invocation is read before the definition is made.
+        let src = "#define F(...) __VA_ARGS__\nL F(L,\n#define L 9\nL)\n";
+        assert_eq!(clean(src), "L 9, 9");
     }
 
     #[test]
