@@ -776,7 +776,8 @@ impl Reader {
             if self.registers.is_empty() && !rest.contains('#') && !rest.contains(['(', ' ']) {
                 return self.a64(text);
             }
-            let rest = self.worked_out(&self.bare_sums(&self.renamed(rest)));
+            let rest = self.bare_sums(&self.renamed(rest));
+            let rest = self.worked_out(&rest);
             return self.a64(&format!("{word} {rest}"));
         }
         // A prefix written on the same line as the instruction it goes in front of, which is how a
@@ -831,8 +832,10 @@ impl Reader {
     /// `#((0x40) | (0x80))` for two, and the `bti` macro it has for an assembler that does not
     /// know the instruction, which sets `.L__bti_targets_c` to 34 and writes `hint #.L__bti_targets_c`. An immediate
     /// runs to the comma or the bracket that ends it. One that names a label, or `:lo12:` and the
-    /// like, is left for the reader, which says what it makes of it.
-    fn worked_out(&self, rest: &str) -> String {
+    /// like, is left for the reader, which says what it makes of it, unless the labels in it cancel:
+    /// the trampoline vectors in the kernel's entry.S prefetch `[x30, #(1b - \vector_start)]`, the
+    /// distance of one vector from the start of the table.
+    fn worked_out(&mut self, rest: &str) -> String {
         let mut pieces = rest.split('#');
         let mut out = String::with_capacity(rest.len());
         out.push_str(pieces.next().unwrap_or(""));
@@ -875,6 +878,10 @@ impl Reader {
                     .flat()
                 })
                 .flatten();
+            let number = match number {
+                None if !plain => self.expression(text).ok().and_then(|sum| self.absolute(&sum)),
+                number => number,
+            };
             match number {
                 Some(number) => out.push_str(&number.to_string()),
                 None => out.push_str(immediate),
@@ -2055,6 +2062,7 @@ impl Reader {
             "asciz" | "string" => self.text_bytes(&args, true)?,
 
             "incbin" => self.incbin(&args)?,
+            "reloc" => self.reloc(&args)?,
 
             "space" | "skip" | "zero" => {
                 if args.is_empty() || args.len() > 2 {
@@ -2908,6 +2916,60 @@ impl Reader {
                 line: self.line,
             });
         }
+        Ok(())
+    }
+
+    /// `.reloc`, a relocation asked for by name at a place in this section that was written
+    /// already, which is how the kernel's KVM build lists the addresses its hypervisor code holds:
+    /// `.word 0` and then `.reloc 0, R_AARCH64_PREL32, __hyp_section_.text + 0x18`.
+    ///
+    /// Only the relocations that fill bytes of data with an address or a distance are taken, and
+    /// they are written as the same expression would be in `.long` or `.quad` at that place, so the
+    /// writer picks the same relocation the name asks for.
+    fn reloc(&mut self, args: &[String]) -> Result<(), Trouble> {
+        let [place, name, rest @ ..] = args else {
+            return Err(self.bad(".reloc wants a place, a relocation and an expression"));
+        };
+        let name = name.trim();
+        let (width, relative) = match name {
+            "R_AARCH64_ABS64" | "R_X86_64_64" | "BFD_RELOC_64" => (8, false),
+            "R_AARCH64_ABS32" | "R_X86_64_32" | "R_386_32" | "BFD_RELOC_32" => (4, false),
+            "R_AARCH64_ABS16" | "R_X86_64_16" | "R_386_16" | "BFD_RELOC_16" => (2, false),
+            "R_AARCH64_PREL64" | "R_X86_64_PC64" | "BFD_RELOC_64_PCREL" => (8, true),
+            "R_AARCH64_PREL32" | "R_X86_64_PC32" | "R_386_PC32" | "BFD_RELOC_32_PCREL" => (4, true),
+            "R_AARCH64_PREL16" | "R_X86_64_PC16" | "R_386_PC16" | "BFD_RELOC_16_PCREL" => (2, true),
+            _ => {
+                let what = format!("'.reloc' of '{name}', which is not a relocation of data");
+                return Err(self.bad(&what));
+            }
+        };
+        let at = self.origin(place)?;
+        if at + width > self.at() {
+            let what = format!(".reloc at {at}, past the bytes this section has so far");
+            return Err(self.bad(&what));
+        }
+        let mut sum = match rest {
+            [] => Sum::default(),
+            [one] => self.expression(one)?,
+            _ => return Err(self.bad(".reloc wants one expression after the relocation")),
+        };
+        let part = self.here;
+        if relative {
+            sum.terms.push(Term { coeff: -1, what: What::Here { part, at: at as i64 } });
+        }
+        self.fixups.push(Fixup {
+            part,
+            at,
+            width: width as u8,
+            sum,
+            reach: Reach::Near,
+            slot: Reference::Got,
+            branch: None,
+            jump: false,
+            field: None,
+            leb: None,
+            line: self.line,
+        });
         Ok(())
     }
 
@@ -6493,6 +6555,46 @@ _tls$tlv$init:
         let relocs: Vec<_> =
             relocs(&read, ".text").into_iter().map(|(at, _, _, addend)| (at, addend)).collect();
         assert_eq!(relocs, [(8, 8), (0x88, 0x88), (0x108, 0x108), (0x188, 0x188)]);
+    }
+
+    #[test]
+    fn reloc_asks_for_a_relocation_at_a_place_written_already() {
+        // What the KVM build's gen-hyprel writes for each address the hypervisor code holds.
+        let assembled = aarch64(concat!(
+            ".data\n.pushsection .hyp.reloc, \"a\"\n.global __hyp_section_.text\n",
+            ".word 0\n.reloc 0, R_AARCH64_PREL32, __hyp_section_.text + 0x18\n",
+            ".word 0\n.reloc 4, R_AARCH64_PREL32, __hyp_section_.text + 0x2c\n",
+            ".quad 0\n.reloc 8, R_AARCH64_ABS64, foo + 4\n.popsection\n",
+        ));
+        let relocs: Vec<_> = relocs(&assembled, ".hyp.reloc")
+            .into_iter()
+            .map(|(at, name, _, addend)| (at, name, addend))
+            .collect();
+        assert_eq!(
+            relocs,
+            [(0, "__hyp_section_.text", 0x18), (4, "__hyp_section_.text", 0x2c), (8, "foo", 4)]
+        );
+        for text in [
+            ".data\n.word 0\n.reloc 0, R_AARCH64_CALL26, foo\n",
+            ".data\n.word 0\n.reloc 4, R_AARCH64_PREL32, foo\n",
+        ] {
+            assert!(read(text, Arch::Aarch64).is_err(), "{text}");
+        }
+    }
+
+    #[test]
+    fn an_offset_that_is_the_distance_between_two_labels_is_a_number() {
+        // The trampoline vectors of entry.S prefetch from where each one is in the table. The words
+        // are the ones llvm-mc writes.
+        let read = aarch64(concat!(
+            "\t.text\n\t.align 7\nvs:\n\t.rept 2\n\t.align 7\n1:\tnop\n",
+            "\tprfm plil1strm, [x30, #(1b - vs)]\n\tldr x0, [x1, #(1b - vs)]\n\t.endr\n",
+            "\tprfm plil1strm, [x30, #(2f - vs)]\n\t.align 7\n2:\tnop\n",
+        ));
+        let words = words(&read, ".text");
+        assert_eq!(words[..3], [0xd503_201f, 0xf980_03c9, 0xf940_0020]);
+        assert_eq!(words[32..35], [0xd503_201f, 0xf980_43c9, 0xf940_4020]);
+        assert_eq!(words[35], 0xf980_83c9);
     }
 
     #[test]

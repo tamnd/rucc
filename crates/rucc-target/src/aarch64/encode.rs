@@ -413,6 +413,9 @@ pub enum Value {
     /// A predicate register of SVE, `p0`, and the size of its lanes when the text gave one, as in
     /// `p0.b`.
     Pred(u8, Option<Scalar>),
+    /// A slice of the SME array `za`, chosen by one of `w12` to `w15` and a number added to it,
+    /// as in `za[w12, #0]`, kept as the register's number and the number.
+    Za(u8, u8),
     /// A field of the processor state `msr` writes an immediate to, as where it is in the table of
     /// them. `daifset` is one.
     Pstate(u8),
@@ -765,10 +768,31 @@ impl At<'_> {
             ("ldr" | "str", [Value::Pred(t, None), Value::Mem(addr)]) => {
                 0x8580_0000 | store | self.vector_lengths(addr)? | u32::from(*t)
             }
+            // The SME array is loaded and stored a slice at a time, and the address moves by as
+            // many vector lengths as the slice number does, which the text writes twice.
+            ("ldr" | "str", [Value::Za(v, slice), Value::Mem(addr)]) => {
+                let times = match addr.offset {
+                    Offset::Imm(0) => 0,
+                    Offset::Vl(times) => times,
+                    _ => return Err(self.unwritten()),
+                };
+                if addr.mode != Mode::Offset || times != i64::from(*slice) {
+                    return Err(self.unwritten());
+                }
+                let store = if m == "str" { 0x0020_0000 } else { 0 };
+                0xe100_0000
+                    | store
+                    | u32::from(v - 12) << 13
+                    | u32::from(addr.base) << 5
+                    | u32::from(*slice)
+            }
             ("pfalse", [Value::Pred(d, Some(Scalar::B))]) => 0x2518_e400 | u32::from(*d),
             ("rdffr", [Value::Pred(d, Some(Scalar::B))]) => 0x2519_f000 | u32::from(*d),
             ("wrffr", [Value::Pred(n, Some(Scalar::B))]) => 0x2528_9000 | u32::from(*n) << 5,
-            _ if values.iter().any(|value| matches!(value, Value::Z(_) | Value::Pred(..))) => {
+            _ if values
+                .iter()
+                .any(|value| matches!(value, Value::Z(_) | Value::Pred(..) | Value::Za(..))) =>
+            {
                 return Err(self.unwritten());
             }
             _ => return Ok(None),
@@ -2474,6 +2498,11 @@ mod tests {
             ("pfalse p3.b", 0x2518_e403),
             ("rdffr p2.b", 0x2519_f002),
             ("wrffr p4.b", 0x2528_9080),
+            // A slice of the SME array, which is how the kernel saves and loads `za`.
+            ("str za[w12, #0], [x0]", 0xe120_0000),
+            ("ldr za[w12, 0], [x3]", 0xe100_0060),
+            ("str za[w15, 3], [x9, #3, mul vl]", 0xe120_6123),
+            ("ldr za[w13, #0], [sp]", 0xe100_23e0),
         ] {
             let line = read(text).expect("a line");
             let got = encode(&line.mnemonic, &line.values).expect("a word");
@@ -2491,9 +2520,15 @@ mod tests {
             "pfalse p0.h",
             "wrffr p0",
             "ldr x0, [x1, #1, mul vl]",
+            "ldr za[w11, 0], [x0]",
+            "ldr za[w12, 16], [x0, #16, mul vl]",
+            "ldr za[w12, 1], [x0, #2, mul vl]",
+            "ldr za[w12, 1], [x0]",
+            "ldr za[x12, 0], [x0]",
         ] {
-            let line = read(text).expect("a line");
-            assert!(encode(&line.mnemonic, &line.values).is_err(), "{text}");
+            let refused =
+                read(text).map_or(true, |line| encode(&line.mnemonic, &line.values).is_err());
+            assert!(refused, "{text}");
         }
     }
 

@@ -302,6 +302,9 @@ fn operand(piece: &str, symbol: &mut Named) -> Result<Value, Error> {
         }
         return Err(error(piece));
     }
+    if let Some(inside) = lower.strip_prefix("za[").and_then(|rest| rest.strip_suffix(']')) {
+        return za(inside).ok_or_else(|| error(piece));
+    }
     if let Some(value) = modifier(&lower)? {
         return Ok(value);
     }
@@ -315,6 +318,15 @@ fn operand(piece: &str, symbol: &mut Named) -> Result<Value, Error> {
         return Ok(Value::Prefetch(operation));
     }
     reference(piece, symbol).map(Value::Symbol)
+}
+
+/// A slice of the SME array from inside its brackets, `w12, #0`, where the register is one of
+/// `w12` to `w15` and the number is below sixteen.
+fn za(inside: &str) -> Option<Value> {
+    let (register, slice) = inside.split_once(',')?;
+    let register = register.trim().strip_prefix('w').and_then(|digits| numbered(digits, 16))?;
+    let slice = u8::try_from(immediate(slice.trim())?).ok().filter(|&slice| slice < 16)?;
+    (register >= 12).then_some(Value::Za(register, slice))
 }
 
 /// A shift or an extension, with its amount.
