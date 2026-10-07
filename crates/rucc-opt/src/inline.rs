@@ -801,6 +801,9 @@ fn settle(
     // The caller's own locals, before anything is copied into it, which is what the growth of its
     // frame is measured against.
     let own = frame(&module[id], module.datalayout);
+    // The frame as it was last measured and every local a splice has copied in since, which is
+    // never less than the frame it now has. See the bound in the loop below.
+    let mut grown = own;
     // The calls as the function was written. A call that arrives inside a body being inlined is
     // one the callee's own settling already had its chance at. A function that asked not to be
     // optimized is left with its calls, except for the ones that are a promise.
@@ -954,19 +957,24 @@ fn settle(
         // The bound first, since `frame` runs the scalar replacement's analysis over the whole
         // caller and a caller that takes hundreds of calls would run it once for each of them. The
         // bound is never less than the frame, so a call that fits under it fits, and the frame is
-        // only worked out for the calls the bound cannot let through.
+        // only worked out again for the calls the bound cannot let through. That is how the heap
+        // keeps its frames too, and on duktape.c at `-O2` measuring the frame for each call was
+        // most of what this pass cost. tamnd/rucc#3052.
         if kind != Kind::Always {
             let body = pool.growth(&module[callee], module.datalayout);
-            if !fits(own, frame_bound(&module[id]), body, how.growth)
-                && !fits(own, frame(&module[id], module.datalayout), body, how.growth)
-            {
-                stats.missed(why(InlineFailure::Frame));
-                continue;
+            if !fits(own, grown, body, how.growth) {
+                grown = frame(&module[id], module.datalayout);
+                if !fits(own, grown, body, how.growth) {
+                    stats.missed(why(InlineFailure::Frame));
+                    continue;
+                }
             }
         }
+        let mark = module[id].counts().insts;
         match splice(module, id, call, callee, how.convention, kind, &mut pool) {
             Ok(()) => {
                 spliced = true;
+                grown += made(&module[id], mark);
                 // A pointer to an `always_inline` function handed to a body that calls through it
                 // is a direct call once the body is in, and gcc inlines that one as well. The
                 // kernel's `__inline_bsearch` is given `patch_cmp` that way in `poke_int3_handler`,
@@ -1731,12 +1739,13 @@ fn frame(func: &Func, layout: DataLayout) -> u64 {
         .sum()
 }
 
-/// Every byte of locals a body keeps, the ones [`frame`] leaves out as gone included, so never
-/// less than its frame. It is one walk with nothing to analyze, which is what makes it worth asking
-/// before [`frame`].
-fn frame_bound(func: &Func) -> u64 {
-    func.blocks()
-        .flat_map(|block| func.insts(block))
+/// Every byte of the locals made in a body since it had `mark` instructions, the ones [`frame`]
+/// would leave out as gone included. A splice adds to the frame only the locals it copies in, so
+/// the frame before it and this are never less than the frame after it.
+fn made(func: &Func, mark: usize) -> u64 {
+    (mark..func.counts().insts)
+        .map(Inst::from_usize)
+        .filter(|&inst| func.block_of(inst).is_some())
         .filter(|&inst| func[inst].opcode == Opcode::Alloca && func[inst].args.is_empty())
         .filter_map(|inst| match func[inst].extra {
             Extra::Mem(mem) => Some(func[mem].size),
