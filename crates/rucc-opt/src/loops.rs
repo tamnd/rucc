@@ -419,8 +419,9 @@ impl<'a> Build<'a> {
     fn components(&mut self, region: &[Block]) -> Vec<Vec<Block>> {
         let mut found = Vec::new();
         let mut next = 0;
-        let mut component: Vec<Block> = Vec::new();
-        let mut walk: Vec<(Block, usize)> = Vec::new();
+        // Each block of the region is on each stack at most once, so neither grows past this.
+        let mut component: Vec<Block> = Vec::with_capacity(region.len());
+        let mut walk: Vec<(Block, usize)> = Vec::with_capacity(region.len());
         for &start in region {
             if self.index[start.index()] != UNVISITED {
                 continue;
