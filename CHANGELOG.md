@@ -6,6 +6,7 @@ All notable changes are recorded here. The format follows [Keep a Changelog](htt
 
 ### Added
 
+- Under `-fsafety`, `mmap`, `mmap64`, `munmap` and `mremap` are interposed. A mapping is placed in an arena the runtime reserves and is an instance there the way an allocation is, so a read or write through a pointer into a mapping after `munmap` is refused as J1 instead of faulting or reaching whatever was mapped there since. A mapping an allocator hands to `__rucc_alloc_adopt` is carved in place. (#3226)
 - The assembler works out a wide move of part of a name set to labels, as the arm64 kernel's `tramp_alias` in entry.S sets `.Lalias` to a constant plus a label further down less the start of its section, and a section's name in such a sum is where the section starts. The label of an AArch64 branch or `adr` may have a sum of labels added to it that comes to a number, as hyp-entry.S branches to `__kvm_hyp_vector + (1b - 0b + KVM_VECTOR_PREAMBLE)`. `.rep` is read as `.rept`, which kuser32.S uses. (#3225)
 - The AArch64 assembler reads the SVE registers `z0` to `z31` and `p0` to `p15`, and assembles the instructions the arm64 kernel saves and restores SVE state with: `ldr` and `str` of a whole `z` or `p` register at `#n, mul vl` from a base, `pfalse`, `rdffr` and `wrffr`. fpsimd.c, entry-common.c and the KVM switch code build. (#3223)
 - Two neighbouring float, double or `long double` loads or stores on AArch64 are one `ldp` or `stp` of `s`, `d` or `q` registers, as gcc writes them. (#3213)

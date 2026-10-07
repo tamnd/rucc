@@ -1,9 +1,8 @@
 /* row: T6 */
 /* refuse: J1 */
-/* gap: #431 */
-/* Mappings are storage instances the same way allocations are, and the allocator interposition
-   API is what tells the runtime that one began and ended. Until mmap and munmap are wrapped this
-   memory is outside the heap the monitor watches and its unmapping is invisible. */
+/* A mapping is a storage instance the way an allocation is. The runtime places it in an arena of
+   its own, so the plane covers it, and munmap ends the instance there and keeps the range, so the
+   read below is refused before it can fault or reach whatever the kernel mapped there since. */
 void *mmap(void *at, unsigned long length, int protection, int flags, int fd, long offset);
 int munmap(void *at, unsigned long length);
 

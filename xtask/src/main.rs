@@ -781,6 +781,7 @@ const INTERPOSE_ROWS: &[&str] = &[
     "runtime/rucc-safe-rt/src/wrap.rs",
     "runtime/rucc-safe-rt/src/syscall.rs",
     "runtime/rucc-safe-rt/src/sync.rs",
+    "runtime/rucc-safe-rt/src/mapping.rs",
 ];
 
 /// Where the compiler's copy of the same names is written.

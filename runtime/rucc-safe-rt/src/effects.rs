@@ -632,6 +632,10 @@ impl Watch {
 /// there so that the row still says in a line what it is for, and so that it lands in the table
 /// every other ordering row lands in.
 ///
+/// A row in the `Allocation` group has no clause at all. `mmap`, `munmap` and `mremap` begin and
+/// end instances rather than read or write a range an argument names, so there is nothing to judge
+/// before the call and the whole of the row is its body, which is where the planes are told.
+///
 /// A write cannot take a discovered extent of its own, and saying so is a compile error naming the
 /// row: the NUL that would say where a written range ends is the byte the call is about to write.
 /// `copies` and `appends` exist because that is the shape those functions really have, which is a
@@ -692,6 +696,60 @@ macro_rules! interpose {
             $(
                 #[doc = concat!(
                     "`", stringify!($name), "`, with its ordering edge taken.\n\n",
+                    "# Safety\n\nThis is `", stringify!($name), "`."
+                )]
+                #[unsafe(export_name = concat!("__rucc_wrap_", stringify!($name)))]
+                pub unsafe extern "C" fn $name($($arg: $ty),*) -> $ret {
+                    // SAFETY: this wrapper's contract is the one it calls, passed straight on.
+                    unsafe { super::$name($($arg),*) }
+                }
+            )+
+        }
+    };
+    (
+        group: Allocation;
+        $(
+            $(#[$note:meta])*
+            fn $name:ident($($arg:ident: $ty:ty),* $(,)?) -> $ret:ty
+            $body:block
+        )+
+    ) => {
+        $(
+            $(#[$note])*
+            ///
+            /// # Safety
+            ///
+            /// The arguments are whatever the program passed, and what this does with them is what
+            /// the C library would have done. Nothing is judged before the call, because what these
+            /// rows do is begin and end instances rather than touch a range.
+            pub unsafe fn $name($($arg: $ty),*) -> $ret $body
+        )+
+
+        /// Every row above, as data.
+        ///
+        /// The effects are empty for the reason the ordering group's are. What these rows do is on
+        /// the planes rather than on a range an argument names.
+        pub static TABLE: &[$crate::effects::Row] = &[
+            $(
+                $crate::effects::Row {
+                    name: stringify!($name),
+                    wrapper: concat!("__rucc_wrap_", stringify!($name)),
+                    group: $crate::effects::Group::Allocation,
+                    effects: &[],
+                }
+            ),+
+        ];
+
+        /// The symbols a redirected call site is compiled against.
+        ///
+        /// Separate from the functions above for the reason the other groups' are.
+        #[cfg(not(test))]
+        pub mod exports {
+            use super::*;
+
+            $(
+                #[doc = concat!(
+                    "`", stringify!($name), "`, with the instances it makes and ends recorded.\n\n",
                     "# Safety\n\nThis is `", stringify!($name), "`."
                 )]
                 #[unsafe(export_name = concat!("__rucc_wrap_", stringify!($name)))]
