@@ -388,6 +388,14 @@
       (x64.sar_ri_32 x k)
       (spec (= (bvashr x k) (result))))
 
+(rule (lower (shl.i8 (value.i8 x) (value.i8 y)))
+      (x64.shl_rcl_32 x (x64.and_ri_32 y 7))
+      (spec (= (bvshl x (bvand y 7)) (result))))
+
+(rule (lower (shl.i16 (value.i16 x) (value.i16 y)))
+      (x64.shl_rcl_32 x (x64.and_ri_32 y 15))
+      (spec (= (bvshl x (bvand y 15)) (result))))
+
 (rule (lower (shl.i32 (value.i32 x) (value.i32 y)))
       (x64.shl_rcl_32 x y)
       (spec (= (bvshl x (bvand y 31)) (result))))
