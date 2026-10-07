@@ -48,6 +48,9 @@ pub struct Context<'a> {
     /// command line is what builds this. The parser keeps the same flag in the same place for
     /// the same reason.
     pub pedantic: bool,
+    /// Whether a header that is not found is one the build makes later, from `-MG`. It goes in
+    /// the dependencies by the name the `#include` wrote, and there is no error.
+    pub generated_headers: bool,
 }
 
 impl<'a> Context<'a> {
@@ -66,6 +69,7 @@ impl<'a> Context<'a> {
             lex: Options::new(),
             max_include_depth: 200,
             pedantic: false,
+            generated_headers: false,
         }
     }
 }

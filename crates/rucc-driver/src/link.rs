@@ -103,6 +103,10 @@ pub struct LinkOptions {
     pub prefixes: Vec<PathBuf>,
     /// `--sysroot=<dir>`, which prefixes the directories this looks in.
     pub sysroot: Option<PathBuf>,
+    /// `--gcc-toolchain=<dir>`, the prefix a GCC is installed under, as in clang. Its
+    /// `lib/gcc/<triple>/<version>` is the GCC directory of a native link, in place of the one
+    /// on the machine.
+    pub gcc_toolchain: Option<PathBuf>,
     /// Where the generated sysroots are, which is [`crate::cache::dir`] on a real command line.
     ///
     /// [`None`] is a caller that was not given one, which outside a test is nothing, and then there
@@ -1550,7 +1554,7 @@ fn line_for(
     // the C library keeps its own, and where our runtime is if it was built for this target.
     let runtime = match distro {
         Some(distro) => distro.gcc,
-        None => runtime_dirs(target, root),
+        None => gcc_runtime(target, opts),
     };
     let ours = if opts.no_builtins_lib { None } else { builtins_archive(target, &opts.prefixes) };
     let mut args = vec![
@@ -1993,13 +1997,29 @@ fn runtime_items(opts: &LinkOptions, runtime: &[PathBuf], ours: Option<&Path>) -
 /// installed.
 #[must_use]
 pub fn runtime_dirs(target: Triple, sysroot: Option<&Path>) -> Vec<PathBuf> {
-    let all = gcc_dirs(target, sysroot);
-    let newest = all.iter().find(|dir| dir.join("libgcc.a").is_file()).or(all.first());
-    newest.cloned().into_iter().collect()
+    let bases = ["/usr/lib/gcc", "/usr/lib64/gcc", "/usr/local/lib/gcc"];
+    newest(&gcc_dirs(target, sysroot, &bases))
 }
 
-/// Each directory of a gcc on this machine, newest first.
-fn gcc_dirs(target: Triple, sysroot: Option<&Path>) -> Vec<PathBuf> {
+/// The GCC directory of a native link: the one under `--gcc-toolchain=` when the command line
+/// named one, and the newest on the machine when it did not.
+fn gcc_runtime(target: Triple, opts: &LinkOptions) -> Vec<PathBuf> {
+    match &opts.gcc_toolchain {
+        Some(prefix) => {
+            newest(&gcc_dirs(target, Some(prefix.as_path()), &["/lib/gcc", "/lib64/gcc"]))
+        }
+        None => runtime_dirs(target, opts.sysroot.as_deref()),
+    }
+}
+
+/// The first of those directories that holds `libgcc.a`, or the first of all if none does.
+fn newest(all: &[PathBuf]) -> Vec<PathBuf> {
+    let found = all.iter().find(|dir| dir.join("libgcc.a").is_file()).or(all.first());
+    found.cloned().into_iter().collect()
+}
+
+/// Each directory of a gcc under those bases, newest first.
+fn gcc_dirs(target: Triple, sysroot: Option<&Path>, bases: &[&str]) -> Vec<PathBuf> {
     let libc = match target.env {
         Env::Musl => "musl",
         Env::None | Env::Gnu | Env::Msvc => "gnu",
@@ -2016,7 +2036,7 @@ fn gcc_dirs(target: Triple, sysroot: Option<&Path>) -> Vec<PathBuf> {
         format!("{arch}-alpine-linux-{libc}"),
     ];
     let mut found = Vec::new();
-    for base in ["/usr/lib/gcc", "/usr/lib64/gcc", "/usr/local/lib/gcc"] {
+    for base in bases {
         for name in &names {
             found.extend(newest_first(&under(sysroot, &format!("{base}/{name}"))));
         }
@@ -2025,7 +2045,7 @@ fn gcc_dirs(target: Triple, sysroot: Option<&Path>) -> Vec<PathBuf> {
     // own, for example `/usr/lib/gcc/x86_64-linux-gnu/13/32`.
     if target.arch == Arch::X86 {
         for name in ["x86_64-linux-gnu", "x86_64-pc-linux-gnu", "x86_64-redhat-linux"] {
-            let dirs = newest_first(&under(sysroot, &format!("/usr/lib/gcc/{name}")));
+            let dirs = newest_first(&under(sysroot, &format!("{}/{name}", bases[0])));
             found.extend(dirs.into_iter().map(|dir| dir.join("32")).filter(|dir| dir.is_dir()));
         }
     }
@@ -2278,7 +2298,7 @@ pub fn search_dirs(link: &LinkOptions, target: Triple) -> Vec<PathBuf> {
     }
     // The directory of the newest GCC comes before the system ones, as in GCC. It holds
     // `libgcc.a` and `crtbegin.o`, which a build system asks for by name.
-    dirs.extend(runtime_dirs(target, link.sysroot.as_deref()));
+    dirs.extend(gcc_runtime(target, link));
     dirs.extend(candidates(target, link.sysroot.as_deref()));
     dirs
 }
@@ -2958,6 +2978,23 @@ mod tests {
         // `-m32` takes the `32` directory of the 64-bit GCC.
         let x86 = Triple::new(Arch::X86, Os::Linux, Env::Gnu);
         assert_eq!(find_in_search(&opts, x86, "libgcc.a"), Some(gcc.join("32/libgcc.a")));
+        fs::remove_dir_all(&root).expect("clean up");
+    }
+
+    #[test]
+    fn a_gcc_named_with_gcc_toolchain_is_the_one_the_link_uses() {
+        let root = a_machine(
+            "toolchain",
+            &[
+                "lib/gcc/x86_64-pc-linux-gnu/16.1.0/libgcc.a",
+                "lib/gcc/x86_64-pc-linux-gnu/16.1.0/crtbegin.o",
+            ],
+        );
+        let opts = LinkOptions { gcc_toolchain: Some(root.clone()), ..LinkOptions::default() };
+        let gcc = root.join("lib/gcc/x86_64-pc-linux-gnu/16.1.0");
+        assert_eq!(find_in_search(&opts, linux(), "libgcc.a"), Some(gcc.join("libgcc.a")));
+        let args = line(linux(), &opts, &one("a.o"), "a.out").expect("a line");
+        assert!(args.contains(&format!("-L{}", gcc.display())), "{args:?}");
         fs::remove_dir_all(&root).expect("clean up");
     }
 

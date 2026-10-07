@@ -256,7 +256,7 @@ options:
   --sysroot=<dir>        look for the library's headers under <dir>, -isysroot too
   -P, -dM                with -E: leave out the markers, or dump the macros
   -M -MM -MD -MMD        write a make rule for the source, the last two compile as well
-  -MF <file> -MT <t> -MQ <t> -MP   where the rule goes, what it builds, targets with no recipe
+  -MF <file> -MT <t> -MQ <t> -MP -MG   where the rule goes, what it builds, targets with no recipe, missing headers
   -std=<dialect>, -trigraphs   c89 through c2y and the gnu spellings, trigraphs in any of them
   -fgnuc-version=<v> -fgnu-as-version=<v> -fms-compatibility-version=<v>   claim GCC, gas or MSVC
   -x <lang>              treat later inputs as <lang>, or none to stop
@@ -275,7 +275,7 @@ options:
   -f[no-]stack-protector[-strong|-all|-explicit], -f[no-]stack-clash-protection, -fcf-protection=<edges>
   -ffunction-sections -fdata-sections   a section per function or variable, for --gc-sections
   -fvisibility=<what>    default, hidden, internal or protected, when nothing in the source said
-  -l<name>, -L <dir>, -B <dir>   link a library, where to look for one, where our own tools are
+  -l<name>, -L <dir>, -B <dir>, --gcc-toolchain=<dir>   a library, where to look for one, our tools, the GCC
   -fPIC -fpic -fPIE -fpie, -pipe   what it does anyway, and -f[no-]common as the target's cc
   -f[no-]strict-aliasing, -f[no-]delete-null-pointer-checks   what it assumes anyway
   -static -shared -pie -no-pie -nostdlib -nostartfiles -nodefaultlibs -rdynamic -s   how to link
@@ -1091,6 +1091,7 @@ pub fn parse_args(args: &[String]) -> Result<Action, CliError> {
                 opts.deps.system_headers = false;
             }
             "-MP" => opts.deps.phony = true,
+            "-MG" => opts.deps.generated = true,
             // These three take a word and only in the separated form, which is how GCC spells
             // them and how every build system writes them.
             "-MF" | "-MT" | "-MQ" => {
@@ -1766,6 +1767,10 @@ pub fn parse_args(args: &[String]) -> Result<Action, CliError> {
             }
             _ if arg.starts_with("--sysroot=") => {
                 sysroot = Some(PathBuf::from(&arg["--sysroot=".len()..]));
+            }
+            // clang's flag for the GCC a link takes `crtbegin.o` and `libgcc.a` from.
+            _ if arg.starts_with("--gcc-toolchain=") => {
+                link.gcc_toolchain = Some(PathBuf::from(&arg["--gcc-toolchain=".len()..]));
             }
             _ if arg.starts_with("--target=") => {
                 let t = &arg["--target=".len()..];
@@ -2831,6 +2836,14 @@ pub fn parse_args(args: &[String]) -> Result<Action, CliError> {
                      see spec/04-driver-and-cli.md section 4.3"
                 )));
             }
+            // GCC prints its spec strings. This compiler has none, and the questions a script
+            // reads them for have their own flags.
+            "-dumpspecs" => {
+                return Err(err(
+                    "-dumpspecs: this compiler has no spec strings to print. Use -dumpmachine, \
+                     -dumpversion, -print-search-dirs or -v for what a script reads from them",
+                ));
+            }
             // GCC's own scripting language for how the driver builds a command line.
             // `spec/04-driver-and-cli.md` section 4.4 settles that we will not have it, so a
             // build reaching for it is told which flags do the same job.
@@ -3461,6 +3474,11 @@ pub fn parse_args(args: &[String]) -> Result<Action, CliError> {
     // phase being the preprocessor is what makes that true without a second rule for it.
     if opts.deps.instead_of_compiling {
         opts.emit = EmitKind::Preprocessed;
+    }
+    // A missing header is not an error only when the run stops at the rule. A compile cannot
+    // continue without the header. GCC gives the same error.
+    if opts.deps.generated && !opts.deps.instead_of_compiling {
+        return Err(err("-MG may only be used with -M or -MM"));
     }
     if !nostdinc {
         opts.search.push_system(runtime::DIR);
@@ -9267,6 +9285,37 @@ mod tests {
         assert_eq!(code, 0);
         let text = std::fs::read_to_string(&out).expect("the rule should have been written");
         assert_eq!(text.split_whitespace().filter(|n| n.ends_with("g.h")).count(), 1, "{text}");
+    }
+
+    #[test]
+    fn a_header_the_build_makes_later_is_in_the_rule_by_its_written_name() {
+        let tree = TempTree::new(
+            "generated",
+            &[
+                (
+                    "a.c",
+                    "#include \"config.h\"\n#include <gen/sys.h>\n#include \"real.h\"\nint x;\n",
+                ),
+                ("real.h", ""),
+            ],
+        );
+        let rule = |flag: &str| {
+            let out = tree.path(&format!("{flag}.d"));
+            let line = [flag, "-MG", "-MF", &out, "-o", &tree.path("a.i"), &tree.path("a.c")];
+            assert_eq!(run(&args(&line)), 0);
+            std::fs::read_to_string(&out).expect("the rule should have been written")
+        };
+        let all = rule("-M");
+        let words: Vec<&str> = all.split_whitespace().collect();
+        assert!(words.contains(&"config.h") && words.contains(&"gen/sys.h"), "{all}");
+        assert!(words.iter().any(|w| w.ends_with("real.h")), "{all}");
+        // `-MM` leaves out an angled name, as GCC does.
+        let user = rule("-MM");
+        assert!(user.contains("config.h") && !user.contains("gen/sys.h"), "{user}");
+        // A compile cannot go on without the header.
+        assert_eq!(refused(&["-MG", "-c", "a.c"]), "-MG may only be used with -M or -MM");
+        assert!(refused(&["-dumpspecs"]).contains("-dumpmachine"));
+        assert_eq!(refused(&["-MD", "-MG", "-c", "a.c"]), "-MG may only be used with -M or -MM");
     }
 
     #[test]
