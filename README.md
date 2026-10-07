@@ -35,7 +35,7 @@ Every one of those is a number that can be measured and can come out wrong. [`sp
 
 ## Status
 
-The current version is 0.28. These results are from Linux x86-64 on 7 October 2026, with rucc 0.28.0 and GCC 13.3 on the same machine:
+The current version is 0.29. These results are from Linux x86-64 on 7 October 2026, with rucc 0.28.0 and GCC 13.3 on the same machine:
 
 1. GNU make 4.4.1 built by rucc passes its 1431 tests.
 2. SQLite 3.53.4 built by rucc at `-O2` runs speedtest1 with the correct result. The program is 22% slower than the GCC build, and rucc compiles `sqlite3.c` at `-O2` in about one third of the GCC time.
