@@ -446,12 +446,17 @@ impl<'a> Build<'a> {
                 }
                 if self.low[block.index()] == self.index[block.index()] {
                     let start = component.iter().rposition(|&b| b == block).expect("on the stack");
-                    let members: Vec<Block> = component.split_off(start);
-                    for &member in &members {
+                    for &member in &component[start..] {
                         self.stacked[member.index()] = false;
                     }
-                    if members.len() > 1 || self.cfg.successors(block).contains(&block) {
-                        found.push(members);
+                    // Only a cycle is taken off as a list of its own. Most components are one
+                    // block with no edge to itself, and a list made for each of them only to be
+                    // dropped was an allocation for each block at each level of nesting.
+                    // tamnd/rucc#3052.
+                    if component.len() - start > 1 || self.cfg.successors(block).contains(&block) {
+                        found.push(component.split_off(start));
+                    } else {
+                        component.truncate(start);
                     }
                 }
                 if let Some(&(above, _)) = walk.last() {
