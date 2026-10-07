@@ -204,13 +204,14 @@ int sw(int x) {
 }
 ";
 
-/// A jump table under the kernel model is the one objtool reads: loaded by its own address with the
-/// index scaled by eight, and each cell the address of an arm in eight bytes. The distances from
-/// the table that position independent code uses are a table objtool says it cannot find.
+/// A jump table under the kernel model is the one objtool reads: read by the jump at its own
+/// address with the index scaled by eight, as gcc writes `jmp *.L4(,%rdi,8)`, and each cell the
+/// address of an arm in eight bytes. The distances from the table that position independent code
+/// uses are a table objtool says it cannot find.
 #[test]
 fn a_kernel_model_jump_table_holds_addresses_where_objtool_looks() {
     let text = asm("table", &["-mcmodel=kernel", "-fno-pic", "-O2"], SWITCH);
-    assert!(text.contains("movq\t.Lsw_j0(,%rax,8), %rax"), "{text}");
+    assert!(text.contains("jmp\t*.Lsw_j0(,%rax,8)"), "{text}");
     let cells = text.lines().skip_while(|line| *line != ".Lsw_j0:").skip(1);
     let cells: Vec<&str> = cells.take_while(|line| line.starts_with("\t.quad")).collect();
     assert_eq!(cells.len(), 12, "{text}");
@@ -222,7 +223,7 @@ fn a_kernel_model_jump_table_holds_addresses_where_objtool_looks() {
     let (ok, object, err) = run("table-object", &line, SWITCH);
     assert!(ok, "{err}");
     let types = relocation_types(&object);
-    // `R_X86_64_64` for each cell, `R_X86_64_32S` for the load, and no distance at all.
+    // `R_X86_64_64` for each cell, `R_X86_64_32S` for the jump, and no distance at all.
     assert_eq!(types.iter().filter(|&&kind| kind == 1).count(), 12, "{types:?}");
     assert!(types.contains(&SIGNED) && !types.contains(&2), "{types:?}");
 }
