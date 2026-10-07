@@ -96,8 +96,14 @@ fn a_musttail_call_is_a_jump_at_every_level() {
 #[test]
 fn a_chain_of_musttail_calls_runs_in_one_frame() {
     let source = "long odd(long n, long acc);
-long even(long n, long acc) { if (n == 0) return acc; [[gnu::musttail]] return odd(n - 1, acc + 1); }
-long odd(long n, long acc) { if (n == 0) return -acc; [[gnu::musttail]] return even(n - 1, acc + 2); }
+long even(long n, long acc) {
+  if (n == 0) return acc;
+  [[gnu::musttail]] return odd(n - 1, acc + 1);
+}
+long odd(long n, long acc) {
+  if (n == 0) return -acc;
+  [[gnu::musttail]] return even(n - 1, acc + 2);
+}
 int main(void) { return even(10000000, 0) == 15000000 ? 0 : 1; }
 ";
     let dir = dir("run");
