@@ -1017,6 +1017,13 @@ pub fn compile_recording(
         ..base
     };
 
+    // In front of the question below, which only takes a comparison that is the instruction in
+    // front of its branch, and before allocation, for the same reason that question is. Not at
+    // `-O0`, for the reason the reloads are not.
+    if flags.reloads {
+        layout::sink(&mut func, machine.branch, machine.flags, names);
+    }
+
     // Before allocation as well, and asked here rather than where it is used because what it asks
     // is whether anything but the branch reads the byte a comparison wrote. A virtual register is
     // written once and a physical one is not, so after allocation that question no longer has an
