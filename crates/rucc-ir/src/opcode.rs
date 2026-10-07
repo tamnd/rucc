@@ -1451,6 +1451,8 @@ pub enum ExtraKind {
     Depth,
     /// Which of the four object size questions.
     Question,
+    /// How long the member is that an address is of.
+    Member,
     /// Which lane.
     Lane,
     /// Which lanes, in which order.
@@ -1491,6 +1493,7 @@ impl ExtraKind {
             Self::Prefetch => "a prefetch hint",
             Self::Depth => "a depth",
             Self::Question => "an object size question",
+            Self::Member => "the size of a member",
             Self::Targets => "branch targets",
             Self::Call => "a call",
             Self::Switch => "a switch",

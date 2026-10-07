@@ -42,10 +42,14 @@
 //! is answered with the size the call asked for, multiplied out and less the offset in front of the
 //! question, as gcc 16 answers it from `-O1` up. See `Walk::running` for which shapes.
 //!
-//! The closest member, which is the low bit of the kind, is not something the IR remembers. The
-//! whole object is an answer no smaller than the member for the largest, so the first kind's answer
-//! stands for the second. For the smallest it could be too big, so the fourth kind is not known
-//! here and only the checker ever answers it.
+//! The closest member, which is the low bit of the kind, is what a `ptr_add` that lowering wrote
+//! for stepping to a member says, as `Extra::Member`. An address the walk finds to be one of
+//! those, or one a constant further on, is in that member, which is how `strcpy (inst.buf, s)`
+//! asks about the sixteen bytes of `buf` once the fortified `strcpy` is inlined, where gcc asks
+//! the same. Where the walk gets to an object without passing one, the whole object is an answer
+//! no smaller than the member for the largest, so the first kind's answer stands for the second,
+//! and for the smallest it could be too big, so there the fourth kind is not known. Once every
+//! question is answered the members are taken off, so no pass after this sees one.
 
 use rucc_ir::{
     AllocSize, AttrSet, Def, Extra, Func, FuncId, Imm, Inst, InstData, IntPred, Module, Opcode,
@@ -108,10 +112,11 @@ pub fn answer(module: &mut Module, pic: Pic, look: bool) -> usize {
                     };
                     let address = func[func[inst].args][0];
                     let (kind, dynamic) = (asked & 3, asked & DYNAMIC != 0);
-                    let largest = kind & 2 == 0;
-                    let known = match (look, kind) {
-                        (false, _) | (_, 3) => None,
-                        _ => walk.left(address, largest, DEPTH, &mut Vec::new()).ok().flatten(),
+                    let ask = Ask { largest: kind & 2 == 0, closest: kind & 1 == 1 };
+                    let largest = ask.largest;
+                    let known = match look {
+                        false => None,
+                        true => walk.left(address, ask, DEPTH, &mut Vec::new()).ok().flatten(),
                     };
                     let unknown = if largest { -1 } else { 0 };
                     let answer = match known {
@@ -138,7 +143,30 @@ pub fn answer(module: &mut Module, pic: Pic, look: bool) -> usize {
             answered += 1;
         }
     }
+    for id in module.funcs().collect::<Vec<FuncId>>() {
+        forget(&mut module[id]);
+    }
     answered
+}
+
+/// Takes every `Extra::Member` off, which nothing after the questions reads.
+fn forget(func: &mut Func) {
+    for block in func.blocks().collect::<Vec<_>>() {
+        for inst in func.insts(block).collect::<Vec<_>>() {
+            if let Extra::Member(_) = func[inst].extra {
+                func[inst].extra = Extra::None;
+            }
+        }
+    }
+}
+
+/// Which of the four questions a walk answers.
+#[derive(Clone, Copy)]
+struct Ask {
+    /// The largest answer rather than the smallest.
+    largest: bool,
+    /// The closest member rather than the whole object.
+    closest: bool,
 }
 
 /// The bit above the two of the kind that says the question was asked with
@@ -250,7 +278,8 @@ impl Walk<'_> {
     /// How many bytes there are from this address to the end of its object.
     ///
     /// `on` is the block parameters whose answer is being worked out, which is how a loop is seen.
-    fn left(&self, value: Value, largest: bool, depth: u32, on: &mut Vec<Value>) -> Left {
+    fn left(&self, value: Value, ask: Ask, depth: u32, on: &mut Vec<Value>) -> Left {
+        let largest = ask.largest;
         let depth = depth.checked_sub(1).ok_or(())?;
         match self.func[value].def {
             Def::Param { block, index } => {
@@ -278,7 +307,7 @@ impl Walk<'_> {
                             continue;
                         }
                         let arg = *self.func[call.args].get(index as usize).ok_or(())?;
-                        all = both(all, self.left(arg, largest, depth, on), largest);
+                        all = both(all, self.left(arg, ask, depth, on), largest);
                     }
                 }
                 on.pop();
@@ -290,14 +319,26 @@ impl Walk<'_> {
                 match data.opcode {
                     Opcode::Select => {
                         let (then, other) = (*args.get(1).ok_or(())?, *args.get(2).ok_or(())?);
-                        let then = self.left(then, largest, depth, on);
-                        both(then, self.left(other, largest, depth, on), largest)
+                        let then = self.left(then, ask, depth, on);
+                        both(then, self.left(other, ask, depth, on), largest)
+                    }
+                    // The start of a member, which is the closest object to an address in it.
+                    Opcode::PtrAdd if ask.closest && matches!(data.extra, Extra::Member(_)) => {
+                        let Extra::Member(size) = data.extra else { return Err(()) };
+                        Ok(Some(u64::from(size)))
+                    }
+                    // An object reached without passing the start of a member, which for the
+                    // smallest answer about the closest member may be too big.
+                    Opcode::Alloca | Opcode::GlobalAddr | Opcode::Call
+                        if ask.closest && !largest =>
+                    {
+                        Err(())
                     }
                     Opcode::PtrAdd => {
                         let base = *args.first().ok_or(())?;
                         let (imm, ty) = self.number(*args.get(1).ok_or(())?, 4).ok_or(())?;
                         let step = u64::try_from(imm.signed(ty)).map_err(|_| ())?;
-                        match self.left(base, largest, depth, on)? {
+                        match self.left(base, ask, depth, on)? {
                             Some(left) => Ok(Some(left.saturating_sub(step))),
                             // A pointer moved forward each time round a loop may end up anywhere
                             // further along, so there is no smallest.
@@ -331,7 +372,7 @@ impl Walk<'_> {
                     // slot rather than becoming a value, and the question is asked of the load.
                     Opcode::Load => {
                         let put = self.only_store(*args.first().ok_or(())?, inst).ok_or(())?;
-                        self.left(put, largest, depth, on)
+                        self.left(put, ask, depth, on)
                     }
                     // What an allocator gave back, where the attribute on it says which arguments
                     // are the size and each of them is a constant here.
@@ -977,5 +1018,45 @@ block0:
 }
 ";
         assert_eq!(answers(body, true), [0, -1]);
+    }
+
+    /// An address lowering marked as the start of a member, or one a constant into it, has what
+    /// is left of the member for the closest kinds and what is left of the whole object for the
+    /// others. Without a mark on the way the smallest closest answer is not known, and the marks
+    /// are gone once the questions are answered. The numbers are what gcc 16 answers at `-O2`.
+    #[test]
+    fn the_closest_member_is_the_one_lowering_marked() {
+        let body = "
+global @g : bytes 40 = { zero 40 }, align 4, linkage(external)
+
+func @f(), linkage(external) {
+block0:
+    %0 = global_addr @g
+    %1 = iconst.i64 4
+    %2 = ptr_add %0, %1, member 16
+    %3 = object_size.i64 %2, kind 1
+    call @use(%3) : (i64)
+    %4 = object_size.i64 %2, kind 3
+    call @use(%4) : (i64)
+    %5 = object_size.i64 %2, kind 0
+    call @use(%5) : (i64)
+    %6 = iconst.i64 2
+    %7 = ptr_add %2, %6
+    %8 = object_size.i64 %7, kind 1
+    call @use(%8) : (i64)
+    %9 = ptr_add %0, %1
+    %10 = object_size.i64 %9, kind 1
+    call @use(%10) : (i64)
+    %11 = object_size.i64 %9, kind 3
+    call @use(%11) : (i64)
+    return
+}
+";
+        assert_eq!(answers(body, true), [16, 16, 36, 14, 36, 0]);
+        let mut names = Interner::new();
+        let mut module = rucc_ir::parse(&format!("{HEAD}{body}"), &mut names).expect("parses");
+        answer(&mut module, Pic::Executable, true);
+        let text = rucc_ir::print(&module, &names);
+        assert!(!text.contains("member"), "{text}");
     }
 }

@@ -278,6 +278,7 @@ enum PendingExtra<'a> {
     Prefetch(PrefetchHint),
     Depth(u32),
     Question(u8),
+    Member(u32),
     Lane(u8),
     Shuffle(Shuffle),
     Class(StorageClass),
@@ -1003,9 +1004,16 @@ impl<'a, 'n> Parser<'a, 'n> {
 
         let mut args = Vec::new();
         let extra = match opcode.extra_kind() {
-            ExtraKind::None => {
+            // `ptr_add %0, %1, member 16` is the address of a member sixteen bytes long, which
+            // only a `ptr_add` may say and which it may leave out. No opcode carries one always.
+            ExtraKind::None | ExtraKind::Member => {
                 args = self.value_list()?;
-                PendingExtra::None
+                if opcode == Opcode::PtrAdd && self.eat(",") {
+                    self.expect("member")?;
+                    PendingExtra::Member(self.u32()?)
+                } else {
+                    PendingExtra::None
+                }
             }
             ExtraKind::Imm => PendingExtra::Imm(self.imm_text()?),
             ExtraKind::Symbol => {
@@ -1650,6 +1658,7 @@ impl<'a, 'n> Parser<'a, 'n> {
             PendingExtra::Prefetch(hint) => Extra::Prefetch(*hint),
             PendingExtra::Depth(depth) => Extra::Depth(*depth),
             PendingExtra::Question(kind) => Extra::Question(*kind),
+            PendingExtra::Member(size) => Extra::Member(*size),
             PendingExtra::Lane(lane) => Extra::Lane(*lane),
             PendingExtra::Shuffle(shuffle) => Extra::Shuffle(*shuffle),
             PendingExtra::Class(class) => Extra::Class(*class),

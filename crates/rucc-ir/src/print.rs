@@ -745,6 +745,10 @@ impl<'a> Printer<'a> {
                 self.value_list_spaced(args);
                 let _ = write!(self.out, ", kind {kind}");
             }
+            Extra::Member(size) => {
+                self.value_list_spaced(args);
+                let _ = write!(self.out, ", member {size}");
+            }
             Extra::Lane(lane) => {
                 self.value_list_spaced(args);
                 let _ = write!(self.out, ", lane {lane}");

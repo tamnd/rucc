@@ -532,7 +532,9 @@ impl<'a> Verifier<'a> {
             let names: Vec<&str> = stray.iter().map(|(_, name)| name).collect();
             self.error(format!("{} does not read `{}`", opcode.name(), names.join("`, `")));
         }
-        if data.extra.kind() != opcode.extra_kind() {
+        // A `ptr_add` may say how long the member it is the address of is, and may say nothing.
+        let member = opcode == Opcode::PtrAdd && matches!(data.extra, Extra::Member(_));
+        if data.extra.kind() != opcode.extra_kind() && !member {
             // An instruction carrying some other opcode's payload prints as text the parser
             // cannot read, so this is caught here rather than found as a round trip failure.
             self.error(format!(
@@ -721,6 +723,7 @@ impl<'a> Verifier<'a> {
                 }
                 return;
             }
+            Extra::Member(_) => return,
             Extra::Prefetch(hint) => {
                 if !hint.is_valid() {
                     self.error(format!(
