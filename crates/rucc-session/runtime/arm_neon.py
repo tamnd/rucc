@@ -741,6 +741,22 @@ def emit():
             "return __r;",
         ],
     )
+    # The same kept to 8 bits a lane, which is PMUL. The kernel's raid6 neon code multiplies in
+    # GF(2^8) with it.
+    for q in QS:
+        v = vt("p8", q)
+        fn(
+            v,
+            name("vmul", "p8", q),
+            f"{v} a, {v} b",
+            [
+                f"{v} __r = {{0}};",
+                f"for (int i = 0; i < {lanes('p8', q)}; i++)",
+                "  for (int k = 0; k < 8; k++)",
+                "    if (b[i] >> k & 1) __r[i] ^= (uint8_t)(a[i] << k);",
+                "return __r;",
+            ],
+        )
     # The same at 64 bits, which is PMULL and PMULL2 from the crypto extension.
     fn(
         "poly128_t",

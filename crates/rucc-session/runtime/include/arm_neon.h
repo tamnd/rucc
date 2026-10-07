@@ -9984,6 +9984,20 @@ static __inline__ poly16x8_t vmull_p8(poly8x8_t __a, poly8x8_t __b) {
       if (__b[__i] >> __k & 1) __r[__i] ^= (uint16_t)(__a[__i] << __k);
   return __r;
 }
+static __inline__ poly8x8_t vmul_p8(poly8x8_t __a, poly8x8_t __b) {
+  poly8x8_t __r = {0};
+  for (int __i = 0; __i < 8; __i++)
+    for (int __k = 0; __k < 8; __k++)
+      if (__b[__i] >> __k & 1) __r[__i] ^= (uint8_t)(__a[__i] << __k);
+  return __r;
+}
+static __inline__ poly8x16_t vmulq_p8(poly8x16_t __a, poly8x16_t __b) {
+  poly8x16_t __r = {0};
+  for (int __i = 0; __i < 16; __i++)
+    for (int __k = 0; __k < 8; __k++)
+      if (__b[__i] >> __k & 1) __r[__i] ^= (uint8_t)(__a[__i] << __k);
+  return __r;
+}
 static __inline__ poly128_t vmull_p64(poly64_t __a, poly64_t __b) {
   poly128_t __r = 0;
   for (int __k = 0; __k < 64; __k++)

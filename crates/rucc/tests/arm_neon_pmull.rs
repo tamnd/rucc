@@ -1,5 +1,6 @@
 //! The 64 bit carry-less product of `<arm_neon.h>`, `vmull_p64` and `vmull_high_p64`, and the
-//! `poly128_t` it gives back, which the kernel's lib/crc/arm64/crc64-neon.c is written with.
+//! `poly128_t` it gives back, which the kernel's lib/crc/arm64/crc64-neon.c is written with, and
+//! the 8 bit one kept to 8 bits, `vmul_p8` and `vmulq_p8`, which its raid6 neon code is.
 //!
 //! The products are checked against what clang's build of the same file printed on an arm64 Mac,
 //! where the instruction is PMULL, and only run on one. That the header compiles for Linux is
@@ -23,6 +24,12 @@ int main(void) {
   uint64x2_t a = { xs[0], xs[2] }, b = { xs[1], xs[3] };
   show(vmull_high_p64(vreinterpretq_p64_u64(a), vreinterpretq_p64_u64(b)));
   show(vreinterpretq_p128_u64(a));
+  uint8_t bs[32];
+  for (int i = 0; i < 32; i++) bs[i] = (uint8_t)(xs[2] >> (i % 8 * 8)) * (uint8_t)(i + 1) ^ (uint8_t)(xs[i % 4] >> 56);
+  uint8x16_t c = vld1q_u8(bs), d = vld1q_u8(bs + 16);
+  show(vreinterpretq_p128_p8(vmulq_p8(vreinterpretq_p8_u8(c), vreinterpretq_p8_u8(d))));
+  poly8x8_t e = vmul_p8(vreinterpret_p8_u8(vget_low_u8(d)), vreinterpret_p8_u8(vget_high_u8(c)));
+  show(vreinterpretq_p128_u64(vcombine_u64(vreinterpret_u64_p8(e), vdup_n_u64(0))));
   return 0;
 }
 "#;
@@ -35,6 +42,8 @@ const EXPECTED: &str = "0000000000000000ffffffffffffffff
 0000000000000000ffffffffffffffff
 59b43f54e69eb3e059b43f54e69eb3e0
 eadc41fd2ba3d4200000000000000001
+f5d4b4b11595400035d4743115154000
+00000000000000006594c419edad4000
 ";
 
 /// A directory of this test's own with the source in it.
