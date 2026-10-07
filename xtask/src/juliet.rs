@@ -104,17 +104,17 @@ const ABSENT: &[(u32, &str)] = &[(125, "S1"), (787, "S1, S4"), (908, "Y6"), (362
 
 /// Cases whose result says nothing about the mistake they are filed under.
 ///
-/// Two ways for that to happen, which [`Fault`] tells apart. Juliet's good halves are meant to be the same program with the mistake taken out, and now and
-/// then they keep a different one, which the bad half has as well and reaches first. A report from
-/// a case like that is the monitor being right about the other mistake, and it says nothing either
-/// way about the one the case is filed under: counting the good half as a false positive would be
-/// the suite's mistake charged to the compiler, and counting the bad half as detected would be
-/// credit for a mistake the program never got to. So a case under one of these whose good half
-/// reported is set aside whole. And a bad half can do nothing wrong at all on this target or with
-/// what this task can give it, so a case like that whose bad half was silent is set aside too,
-/// since there was nothing there to detect. Each entry says what the halves do, so that it can be
-/// checked against the source by anybody who doubts it, and a good half that reports and is not
-/// under one of these is a false positive.
+/// Two ways for that to happen, which [`Fault`] tells apart. Juliet's good halves are meant to be
+/// the same program with the mistake taken out, and now and then they keep a different one, which
+/// the bad half has as well and reaches first. A report from a case like that is the monitor being
+/// right about the other mistake, and it says nothing either way about the one the case is filed
+/// under: counting the good half as a false positive would be the suite's mistake charged to the
+/// compiler, and counting the bad half as detected would be credit for a mistake the program never
+/// got to. So a case under one of these whose good half reported is set aside whole. And a bad half
+/// can do nothing wrong at all on this target or with what this task can give it, so a case like
+/// that whose bad half was silent is set aside too, since there was nothing there to detect. Each
+/// entry says what the halves do, so that it can be checked against the source by anybody who
+/// doubts it, and a good half that reports and is not under one of these is a false positive.
 #[derive(Debug)]
 struct Excuse {
     /// The test ids it covers start with one of these.
@@ -206,6 +206,17 @@ const EXCUSES: &[Excuse] = &[
               which goes wrong only when malloc fails, and here it does not",
     },
 ];
+
+/// The excuse that sets this case aside, given what its halves did, if any does.
+///
+/// A case can be under more than one, as a variant 32 case of a socket family is, and the one that
+/// fits what the halves did is the one that counts, whichever comes first in the table.
+fn excused(id: &str, bad: Half, good: Half) -> Option<&'static Excuse> {
+    EXCUSES.iter().filter(|e| e.covers(id)).find(|e| match e.fault {
+        Fault::Both => good == Half::Reported,
+        Fault::Neither => bad != Half::Reported && good != Half::Reported,
+    })
+}
 
 /// One Juliet case.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -742,11 +753,7 @@ fn report(
             let tally = tallies.entry((case.cwe, tier)).or_default();
             match outcomes.get(&(tier, case.id.as_str())) {
                 Some(Outcome::Ran { bad, good }) => {
-                    let excuse =
-                        EXCUSES.iter().find(|e| e.covers(&case.id)).filter(|e| match e.fault {
-                            Fault::Both => *good == Half::Reported,
-                            Fault::Neither => *bad != Half::Reported && *good != Half::Reported,
-                        });
+                    let excuse = excused(&case.id, *bad, *good);
                     if let Some(excuse) = excuse {
                         match tally.excused.iter_mut().find(|(e, _)| std::ptr::eq(*e, excuse)) {
                             Some((_, ids)) => ids.push(case.id.clone()),
@@ -1013,5 +1020,15 @@ mod tests {
         assert!(!excuse.covers("CWE121_Stack_Based_Buffer_Overflow__CWE805_char_declare_loop_31"));
         assert!(!excuse.covers("CWE122_Heap_Based_Buffer_Overflow__c_CWE805_char_loop_32"));
         assert!(excuse.covers("CWE476_NULL_Pointer_Dereference__int_32"));
+    }
+
+    #[test]
+    fn a_case_under_two_excuses_is_set_aside_by_the_one_that_fits() {
+        let id = "CWE121_Stack_Based_Buffer_Overflow__CWE129_connect_socket_32";
+        let quiet = excused(id, Half::Silent, Half::Silent).expect("the socket excuse fits");
+        assert_eq!(quiet.fault, Fault::Neither);
+        let both = excused(id, Half::Reported, Half::Reported).expect("the variant excuse fits");
+        assert_eq!(both.variant, Some("_32"));
+        assert!(excused(id, Half::Reported, Half::Silent).is_none());
     }
 }
