@@ -422,6 +422,26 @@ fn a_conditional_format_is_judged_as_gcc_judges_it() {
     assert_eq!(lines_with(&got, "warning:").len(), 7, "{got}");
 }
 
+/// gcc says nothing about what evaluating an operand would do when nothing evaluates it, and
+/// s5k5baf counts its 16 bit values with `sizeof((char[]){ seq })`, which is `-Werror` built.
+#[test]
+fn a_constant_that_does_not_fit_is_not_said_where_nothing_evaluates_it() {
+    let got = said_with(
+        "overflow-unevaluated",
+        &[],
+        "#define NSEQ(seq...) sizeof((char[]){ seq }), seq\n\
+         unsigned short a[] = { NSEQ(0x4000, 454, 6000) };\n\
+         __typeof__((char){ 300 }) e;\n\
+         int f = __alignof__((char){ 300 });\n\
+         int g = sizeof((char)0 + (char){ 300 });\n\
+         char h[] = { 454 };\n",
+    );
+    let line = ":6:14: warning: overflow in conversion from 'int' to 'char' changes value from \
+                '454' to '-58'";
+    assert_eq!(lines_with(&got, line).len(), 1, "{got}");
+    assert_eq!(lines_with(&got, "warning:").len(), 1, "{got}");
+}
+
 #[test]
 fn a_call_without_its_sentinel_is_said_under_wall() {
     let source = "#include <stddef.h>\n\

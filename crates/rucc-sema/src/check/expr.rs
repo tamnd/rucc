@@ -2359,6 +2359,11 @@ impl Checker<'_> {
     /// A conversion to a floating type is not warned about either. A number too large for a
     /// `float` becomes an infinity, which is a value the type has, and gcc says nothing about
     /// `float f = 1e300;`.
+    ///
+    /// Nor is one in an operand nothing evaluates, the arm a constant condition does not take or
+    /// the operand of `sizeof`, `_Alignof` or `typeof`, where gcc holds back every warning about
+    /// what evaluating would do. The kernel's s5k5baf counts a list of 16 bit values with
+    /// `sizeof((char[]){ seq })`, and a value that does not fit a `char` there is not a mistake.
     fn warn_overflow(&mut self, value: ExprId, target: TypeId) {
         // `bool` is left out because converting to it is a comparison against zero and not a
         // truncation, so `bool b = 2;` loses nothing and gcc warns about neither. A type
@@ -2367,6 +2372,7 @@ impl Checker<'_> {
             || self.types.hardbool_of(target).is_some()
             || self.answered_late.contains(&value)
             || self.not_taken > 0
+            || self.unevaluated > 0
         {
             return;
         }
