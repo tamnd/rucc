@@ -1021,7 +1021,7 @@ pub fn compile_recording(
     // is whether anything but the branch reads the byte a comparison wrote. A virtual register is
     // written once and a physical one is not, so after allocation that question no longer has an
     // answer.
-    let fusable = layout::fusable(&func, machine.branch, names);
+    let mut fusable = layout::fusable(&func, machine.branch, names);
     // The same question about the selects on a comparison's byte, asked here for the same reason.
     let choosable = choice::fusable(&func, machine.branch, names);
 
@@ -1273,7 +1273,10 @@ pub fn compile_recording(
         sign: flags.branch.sign,
         ..Convention::new(machine.conv, machine.insts)
     };
-    let moves = finish(&mut func, &allocation, &frame, &stack, convention, names);
+    let (moves, loops) = finish(&mut func, &allocation, &frame, &stack, convention, names);
+    // The comparison in each loop that walks the stack is written after the question above was
+    // asked, and only the branch behind it reads its byte, so it can be joined with that branch.
+    fusable.extend(loops);
 
     // After the moves are written, because a spill and the reload of it are written by different
     // decisions of the allocator and what stands between the two is settled by the function they

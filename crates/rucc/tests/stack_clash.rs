@@ -202,23 +202,43 @@ fn a_frame_is_taken_in_one_subtraction_until_the_flag_asks_otherwise() {
 /// A variable length array walks its pages too, which the prologue cannot do for it.
 ///
 /// The bytes are in a register, so where the stack pointer is going is worked out from it before
-/// the stack pointer moves, and then the walk steps a page and asks whether it has arrived. The
-/// touch is behind the question, so the only page written is one the array reaches, and the step
-/// that overshoots is put back at the end.
+/// the stack pointer moves. Then the walk asks whether a whole page is still to come, and steps and
+/// touches one if it is. The touch is behind the step, so the only page written is one the array
+/// reaches, and what is left at the end is less than a page.
+///
+/// The question comes first and the comparison jumps on the flags, as in gcc's loop. That is the
+/// sequence `hardening-check` looks for, and with the step first it finds nothing and says
+/// "unknown" for a program that gcc's build gets "yes" for.
 #[test]
 fn a_variable_length_array_walks_the_pages_it_takes() {
+    for level in ["-O0", "-O2"] {
+        let text = asm("growing", &["-fstack-clash-protection", level], GROWING);
+        let lines = insts(&text, "one");
+        let at = |what: &str| {
+            lines
+                .iter()
+                .position(|line| line.starts_with(what))
+                .unwrap_or_else(|| panic!("{lines:?}"))
+        };
+        // A page above where it is going, worked out from the bytes rather than from a constant.
+        let limit = at("subq\t%r");
+        let (_, reg) = lines[limit].split_once(", ").expect("a subtraction of two registers");
+        assert!(reg == "%r10" || reg == "%r11", "{level}: {lines:?}");
+        assert_eq!(lines[limit - 1], format!("leaq\t4096(%rsp), {reg}"), "{level}: {lines:?}");
+        // The question, then one page and its touch, then back to the question.
+        assert_eq!(lines[limit + 1], format!("cmpq\t{reg}, %rsp"), "{level}: {lines:?}");
+        assert!(lines[limit + 2].starts_with("jb\t"), "{level}: {lines:?}");
+        assert_eq!(lines[limit + 3], "subq\t$4096, %rsp", "{level}: {lines:?}");
+        assert_eq!(lines[limit + 4], "orb\t$0, (%rsp)", "{level}: {lines:?}");
+        assert!(lines[limit + 5].starts_with("jmp\t"), "{level}: {lines:?}");
+        // And the stack pointer put on the end of the array once less than a page is left.
+        assert!(
+            lines.contains(&format!("leaq\t-4096({reg}), %rsp").as_str()),
+            "{level}: {lines:?}"
+        );
+    }
     let text = asm("growing", &["-fstack-clash-protection"], GROWING);
     let lines = insts(&text, "one");
-    let at = |what: &str| {
-        lines.iter().position(|line| line.starts_with(what)).unwrap_or_else(|| panic!("{lines:?}"))
-    };
-    // Where it is going, worked out from the bytes rather than from a constant.
-    let limit = at("subq\t%r");
-    assert!(lines[limit].ends_with(", %r10") || lines[limit].ends_with(", %r11"), "{lines:?}");
-    // One page, the question, and the touch on the arm that says there is more to come.
-    assert_eq!(lines[limit + 1], "subq\t$4096, %rsp", "{lines:?}");
-    assert!(lines[limit + 2].starts_with("cmpq\t%r"), "{lines:?}");
-    assert!(lines.contains(&"orb\t$0, (%rsp)"), "{lines:?}");
 
     // The prologue of this function touches nothing, because its own frame is small. Every touch
     // in it belongs to the walk.
