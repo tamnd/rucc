@@ -42,9 +42,9 @@ use Form::{
     Acquire, Address, Alu, AluI, AluShift, ArgVal, ArgValFp, Barrier, BrCond, Call, Cmp, CmpI,
     CmpSet, CmpSetI, CompareSwap, Convert, Csel, FAlu, FCmp, FCmpSet, FConvert, FMove, FUnary,
     FetchOp, FpToInt, Insert, IntToFp, Jcc, Jump, JumpAway, JumpReg, JumpZero, Lea, Load, LoadFp,
-    LoadImm, LoadPair, Move, MulAdd, Nop, Pop, PopPair, Prefetch, Probe, Push, PushPair, Release,
-    Ret, RetVal, RetVal2, RetVal2Fp, RetVal3Fp, RetVal4Fp, RetValFp, Select, Set, SetBits, Store,
-    StoreFp, StorePair, Swap, Template, Test, Trap, Unary,
+    LoadImm, LoadPair, LoadPairFp, Move, MulAdd, Nop, Pop, PopPair, Prefetch, Probe, Push,
+    PushPair, Release, Ret, RetVal, RetVal2, RetVal2Fp, RetVal3Fp, RetVal4Fp, RetValFp, Select,
+    Set, SetBits, Store, StoreFp, StorePair, StorePairFp, Swap, Template, Test, Trap, Unary,
 };
 
 /// The operand vector one machine instruction has.
@@ -114,6 +114,10 @@ pub enum Form {
     LoadFp,
     /// [`Form::Store`] out of the other register file.
     StoreFp,
+    /// [`Form::LoadPair`] into the other register file.
+    LoadPairFp,
+    /// [`Form::StorePair`] out of the other register file.
+    StorePairFp,
     /// A destination and two sources in the other register file.
     FAlu,
     /// A destination and one source in the other register file.
@@ -242,6 +246,7 @@ static TWO_READ: [OperandDesc; 2] = [OperandDesc::read(GPR), OperandDesc::read(G
 static ONE_READ: [OperandDesc; 1] = [OperandDesc::read(GPR)];
 static ONE_WRITTEN_FP: [OperandDesc; 1] = [OperandDesc::write(FPR)];
 static ONE_READ_FP: [OperandDesc; 1] = [OperandDesc::read(FPR)];
+static TWO_WRITTEN_FP: [OperandDesc; 2] = [OperandDesc::write(FPR), OperandDesc::write(FPR)];
 static FP_TO_FP: [OperandDesc; 2] = [OperandDesc::write(FPR), OperandDesc::read(FPR)];
 static TWO_FP_TO_FP: [OperandDesc; 3] =
     [OperandDesc::write(FPR), OperandDesc::read(FPR), OperandDesc::read(FPR)];
@@ -305,6 +310,8 @@ impl Form {
             PopPair | LoadPair => &TWO_WRITTEN,
             LoadFp | ArgValFp => &ONE_WRITTEN_FP,
             StoreFp => &ONE_READ_FP,
+            LoadPairFp => &TWO_WRITTEN_FP,
+            StorePairFp => &TWO_FP_READ,
             FUnary | FMove | FConvert => &FP_TO_FP,
             FAlu => &TWO_FP_TO_FP,
             IntToFp => &GPR_TO_FP,
@@ -334,7 +341,16 @@ impl Form {
     pub fn takes_mem(self) -> bool {
         matches!(
             self,
-            Lea | Load | Store | LoadPair | StorePair | LoadFp | StoreFp | Probe | Prefetch
+            Lea | Load
+                | Store
+                | LoadPair
+                | StorePair
+                | LoadFp
+                | StoreFp
+                | LoadPairFp
+                | StorePairFp
+                | Probe
+                | Prefetch
         )
     }
 
@@ -353,6 +369,8 @@ impl Form {
                 | StorePair
                 | LoadFp
                 | StoreFp
+                | LoadPairFp
+                | StorePairFp
                 | Push
                 | Pop
                 | PushPair
@@ -678,6 +696,12 @@ pub static INSTS: &[(&str, Form)] = &[
     ("str_f32", StoreFp),
     ("str_f64", StoreFp),
     ("str_f128", StoreFp),
+    ("ldp_f32", LoadPairFp),
+    ("ldp_f64", LoadPairFp),
+    ("ldp_f128", LoadPairFp),
+    ("stp_f32", StorePairFp),
+    ("stp_f64", StorePairFp),
+    ("stp_f128", StorePairFp),
     // Floating point arithmetic.
     ("fadd_f32", FAlu),
     ("fadd_f64", FAlu),

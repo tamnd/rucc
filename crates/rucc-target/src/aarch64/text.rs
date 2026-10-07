@@ -636,6 +636,12 @@ static TEXT: &[(&str, &[Written])] = &[
     ("str_f32", &[spell("str", &[Fp(0, S), Mem])]),
     ("str_f64", &[spell("str", &[Fp(0, D), Mem])]),
     ("str_f128", &[spell("str", &[Fp(0, Q), Mem])]),
+    ("ldp_f32", &[spell("ldp", &[Fp(0, S), Fp(1, S), Mem])]),
+    ("ldp_f64", &[spell("ldp", &[Fp(0, D), Fp(1, D), Mem])]),
+    ("ldp_f128", &[spell("ldp", &[Fp(0, Q), Fp(1, Q), Mem])]),
+    ("stp_f32", &[spell("stp", &[Fp(0, S), Fp(1, S), Mem])]),
+    ("stp_f64", &[spell("stp", &[Fp(0, D), Fp(1, D), Mem])]),
+    ("stp_f128", &[spell("stp", &[Fp(0, Q), Fp(1, Q), Mem])]),
     // Floating point arithmetic.
     ("fadd_f32", &[spell("fadd", &[Fp(0, S), Fp(1, S), Fp(2, S)])]),
     ("fadd_f64", &[spell("fadd", &[Fp(0, D), Fp(1, D), Fp(2, D)])]),

@@ -95,8 +95,8 @@ fn plain(form: Form) -> Timing {
         Prefetch => (1, Unit::Load),
         Push | PushPair => (1, Unit::Store),
         Pop | PopPair => (LOAD, Unit::Load),
-        LoadFp => (LOAD + 1, Unit::Load),
-        StoreFp => (1, Unit::Store),
+        LoadFp | LoadPairFp => (LOAD + 1, Unit::Load),
+        StoreFp | StorePairFp => (1, Unit::Store),
         // Floating point. An addition is two cycles and a multiply three on this core, and the
         // multiply is overridden in `slow` so this is the addition's number. The divides and the
         // square roots are there as well.

@@ -4,7 +4,8 @@
 //! A structure of two longs read for a sum, or written from two arguments, is two accesses at one
 //! base with offsets a word apart, and the machine does both in one instruction. A copy that loads
 //! and stores in turn is left alone, since there is no alias information after allocation and the
-//! second load cannot move above the first store.
+//! second load cannot move above the first store. Floats, doubles and `long double` pair the
+//! same way, into `ldp` and `stp` of `s`, `d` and `q` registers.
 
 use std::process::Command;
 use std::sync::atomic::{AtomicUsize, Ordering};
@@ -17,6 +18,10 @@ void st4(int *q, int x, int y) { q[2] = x; q[3] = y; }
 void cp(struct p *d, const struct p *s) { *d = *s; }
 long arr(long *a) { return a[0] * a[1] + a[2] * a[3]; }
 long far(long *a) { return a[0] + a[100]; }
+void dst(double *d, double x, double y) { d[0] = x; d[1] = y; }
+float fs(float *f) { return f[2] * f[3]; }
+void qst(long double *d, long double x, long double y) { d[2] = x; d[3] = y; }
+void mix(double *d, double a, long b) { d[0] = a; d[1] = (double)b; }
 ";
 
 fn compile(flags: &[&str]) -> std::process::Output {
@@ -59,6 +64,9 @@ fn neighbouring_words_are_one_instruction() {
         ("st", &["stp x1, x2, [x0]", "ret"][..]),
         ("ld", &["ldp x1, x0, [x0]", "add x0, x1, x0", "ret"][..]),
         ("st4", &["stp w1, w2, [x0, #8]", "ret"][..]),
+        ("dst", &["stp d0, d1, [x0]", "ret"][..]),
+        ("fs", &["ldp s0, s1, [x0, #8]", "fmul s0, s0, s1", "ret"][..]),
+        ("qst", &["stp q0, q1, [x0, #32]", "ret"][..]),
     ] {
         assert_eq!(body(&text, name), lines, "{name}:\n{text}");
     }
@@ -72,7 +80,8 @@ fn neighbouring_words_are_one_instruction() {
 #[test]
 fn what_cannot_be_paired_is_left_alone() {
     let text = listing();
-    for name in ["cp", "far"] {
+    // In `mix` the register the first store reads is written again before the second.
+    for name in ["cp", "far", "mix"] {
         let body = body(&text, name);
         assert!(
             !body.iter().any(|line| line.starts_with("ldp") || line.starts_with("stp")),

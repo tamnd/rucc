@@ -4,6 +4,10 @@ All notable changes are recorded here. The format follows [Keep a Changelog](htt
 
 ## Unreleased
 
+### Added
+
+- Two neighbouring float, double or `long double` loads or stores on AArch64 are one `ldp` or `stp` of `s`, `d` or `q` registers, as gcc writes them. (#3213)
+
 ### Changed
 
 - Jump threading keeps the loop forest after a thread between two blocks of one loop when the loop is still a loop afterwards, where it threw the forest away and built it again, with the graph and the dominators, after every thread inside a loop (#3052). The pass now walks the loop from the new target and keeps the forest if the walk gets back to the block the edge used to go through without that edge. It also works out which blocks have values read below them only when an edge first asks, since most runs ask nothing. lz4 at `-O1` runs 16% fewer instructions and at `-O2` 12% fewer, and every object is the same as before.

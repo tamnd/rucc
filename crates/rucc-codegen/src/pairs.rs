@@ -38,11 +38,19 @@ use rucc_mir::{Flags, Func, Inst, Mem, Opcode, Operand};
 use rucc_target::{MachineInsts, PhysReg};
 
 /// The single loads and stores on AArch64, the pair each one goes into, and the size of the word.
-pub const A64_PAIRS: [(&str, &str, i32); 4] = [
+/// The floating point and vector ones pair the same way, into `ldp` and `stp` of `s`, `d` and `q`
+/// registers, which is how gcc copies a structure of two doubles.
+pub const A64_PAIRS: [(&str, &str, i32); 10] = [
     ("a64.ldr_32", "a64.ldp_32", 4),
     ("a64.ldr_64", "a64.ldp_64", 8),
     ("a64.str_32", "a64.stp_32", 4),
     ("a64.str_64", "a64.stp_64", 8),
+    ("a64.ldr_f32", "a64.ldp_f32", 4),
+    ("a64.ldr_f64", "a64.ldp_f64", 8),
+    ("a64.ldr_f128", "a64.ldp_f128", 16),
+    ("a64.str_f32", "a64.stp_f32", 4),
+    ("a64.str_f64", "a64.stp_f64", 8),
+    ("a64.str_f128", "a64.stp_f128", 16),
 ];
 
 /// How many instructions past the first access the second is looked for in.
@@ -158,7 +166,7 @@ fn access(
 /// Whether the second access can be put together with the first, across what stands between.
 fn partners(func: &Func, first: &Access, second: &Access, between: &[Inst]) -> bool {
     let (pair, size) = first.pair;
-    if second.pair.0 != pair || second.base.reg != first.base.reg {
+    if second.pair.0 != pair || !same(&second.base, &first.base) {
         return false;
     }
     if first.disp.abs_diff(second.disp) != size.unsigned_abs() {
@@ -169,19 +177,28 @@ fn partners(func: &Func, first: &Access, second: &Access, between: &[Inst]) -> b
         return false;
     }
     let load = first.value.role.is_def();
-    if load && (first.value.reg == first.base.reg || first.value.reg == second.value.reg) {
+    if load && (same(&first.value, &first.base) || same(&first.value, &second.value)) {
         return false;
     }
     between.iter().all(|&inst| {
         func[func[inst].operands].iter().all(|operand| {
-            let reg = operand.reg;
             let writes = operand.role.is_def();
-            if writes && reg == first.base.reg {
+            if writes && same(operand, &first.base) {
                 return false;
             }
-            if load { reg != second.value.reg } else { !(writes && reg == first.value.reg) }
+            if load {
+                !same(operand, &second.value)
+            } else {
+                !(writes && same(operand, &first.value))
+            }
         })
     })
+}
+
+/// Whether two operands are the same register, which takes the file as well as the number, since
+/// `x1` and `v1` are both register one.
+fn same(a: &Operand, b: &Operand) -> bool {
+    a.reg == b.reg && a.class == b.class
 }
 
 /// The one instruction the two accesses become, loose, with the first one's flags and place in
