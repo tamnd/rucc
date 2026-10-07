@@ -34,7 +34,7 @@ use rucc_base::hash::{Map, Set};
 use rucc_cost::heuristics::{INLINE_CALL_TIME, INLINE_SUMMARY_CLAUSES};
 use rucc_ir::{Block, Def, Func, Imm, Inst, Opcode, Type, Value};
 
-use super::{computed, goes_to, weight};
+use super::{Readers, computed, goes_to, weight};
 use crate::cfg::Cfg;
 
 /// The parameters something needs known, one bit for each, or nothing when no set of them does.
@@ -118,12 +118,9 @@ impl Summary {
         for (at, &param) in summary.params.iter().enumerate() {
             summary.masks.insert(param, 1 << at);
         }
-        let readers = readers(func);
-        let only = |value: Option<Value>, fits: &dyn Fn(Opcode, usize) -> bool| {
-            value
-                .and_then(|value| readers.get(&value))
-                .is_some_and(|readers| readers.iter().all(|&(opcode, at)| fits(opcode, at)))
-        };
+        let readers = Readers::of(func);
+        let only =
+            |value: Option<Value>, fits: &dyn Fn(Opcode, usize) -> bool| readers.only(value, fits);
         let address = |opcode: Opcode, at: usize| {
             matches!((opcode, at), (Opcode::Load, 0) | (Opcode::Store, 1))
         };
@@ -243,7 +240,7 @@ impl Summary {
                 if unless[0] == Some(0) {
                     continue;
                 }
-                let read = data.results().any(|result| readers.contains_key(&result));
+                let read = data.results().any(|result| readers.read(result));
                 let cost = weight(func, inst, names, read);
                 // A call takes longer than its size says, which is gcc's `eni_time_weights`.
                 let waits = match data.opcode {
@@ -381,23 +378,6 @@ impl Summary {
         let needs = func[data.args].iter().try_fold(0, |all, arg| Some(all | self.masks.get(arg)?));
         (data.results == 1 && needs.is_some_and(|needs| needs & !known == 0)).then_some(inst)
     }
-}
-
-/// Who reads each value and as which operand, the argument of a jump to a block being read by a
-/// jump at no operand. See [`super::folded`].
-fn readers(func: &Func) -> Map<Value, Vec<(Opcode, usize)>> {
-    let mut readers: Map<Value, Vec<(Opcode, usize)>> = Map::default();
-    for inst in func.blocks().flat_map(|block| func.insts(block)) {
-        for (at, &arg) in func[func[inst].args].iter().enumerate() {
-            readers.entry(arg).or_default().push((func[inst].opcode, at));
-        }
-        for call in func.successors(inst) {
-            for &arg in &func[call.args] {
-                readers.entry(arg).or_default().push((Opcode::Jump, usize::MAX));
-            }
-        }
-    }
-    readers
 }
 
 /// The two sets of parameters either of which folds an instruction away, the one being enough on

@@ -1260,6 +1260,69 @@ fn folded_size(
     folded(func, known, values, weighed, None).0
 }
 
+/// Who reads each value and as which operand, the argument of a jump to a block being read by a
+/// jump at no operand.
+///
+/// The lists are laid end to end by value number, counted first and filled after. A list for each
+/// value in a map was an allocation for each value of every body the inliner weighs, and it weighs
+/// thousands. tamnd/rucc#3052.
+struct Readers {
+    /// Where the readers of each value start, with one more on the end for where the last stop.
+    start: Vec<u32>,
+    /// The readers, in the order the blocks have them.
+    list: Vec<(Opcode, usize)>,
+}
+
+impl Readers {
+    fn of(func: &Func) -> Self {
+        let mut start = vec![0u32; func.counts().values + 1];
+        Self::walk(func, |arg, _| start[arg.index() + 1] += 1);
+        for index in 1..start.len() {
+            start[index] += start[index - 1];
+        }
+        let mut next = start.clone();
+        let mut list = vec![(Opcode::Jump, 0); start[start.len() - 1] as usize];
+        Self::walk(func, |arg, read| {
+            list[next[arg.index()] as usize] = read;
+            next[arg.index()] += 1;
+        });
+        Self { start, list }
+    }
+
+    /// Every read of a value in the blocks of a body, with the opcode reading it and which operand
+    /// it is.
+    fn walk(func: &Func, mut each: impl FnMut(Value, (Opcode, usize))) {
+        for inst in func.blocks().flat_map(|block| func.insts(block)) {
+            for (at, &arg) in func[func[inst].args].iter().enumerate() {
+                each(arg, (func[inst].opcode, at));
+            }
+            for call in func.successors(inst) {
+                for &arg in &func[call.args] {
+                    each(arg, (Opcode::Jump, usize::MAX));
+                }
+            }
+        }
+    }
+
+    fn of_value(&self, value: Value) -> &[(Opcode, usize)] {
+        &self.list[self.start[value.index()] as usize..self.start[value.index() + 1] as usize]
+    }
+
+    /// Whether anything reads the value.
+    fn read(&self, value: Value) -> bool {
+        !self.of_value(value).is_empty()
+    }
+
+    /// Whether the value is read and every reader is one `fits` takes. A value nothing reads is
+    /// not one whose readers all fit.
+    fn only(&self, value: Option<Value>, fits: &dyn Fn(Opcode, usize) -> bool) -> bool {
+        value.is_some_and(|value| {
+            let readers = self.of_value(value);
+            !readers.is_empty() && readers.iter().all(|&(opcode, at)| fits(opcode, at))
+        })
+    }
+}
+
 /// What [`folded_size`] counts, with how long it takes as well, which is each instruction counted
 /// weighed by how often `frequency` says its block runs.
 fn folded(
@@ -1273,22 +1336,9 @@ fn folded(
     // Who reads each value and as which operand, for what is part of the instruction reading it
     // once there is code: an address a load or a store takes, the index it scales, and the
     // comparison a branch tests.
-    let mut readers: Map<Value, Vec<(Opcode, usize)>> = Map::default();
-    for inst in func.blocks().flat_map(|block| func.insts(block)) {
-        for (at, &arg) in func[func[inst].args].iter().enumerate() {
-            readers.entry(arg).or_default().push((func[inst].opcode, at));
-        }
-        for call in func.successors(inst) {
-            for &arg in &func[call.args] {
-                readers.entry(arg).or_default().push((Opcode::Jump, usize::MAX));
-            }
-        }
-    }
-    let only = |value: Option<Value>, fits: &dyn Fn(Opcode, usize) -> bool| {
-        value
-            .and_then(|value| readers.get(&value))
-            .is_some_and(|readers| readers.iter().all(|&(opcode, at)| fits(opcode, at)))
-    };
+    let readers = Readers::of(func);
+    let only =
+        |value: Option<Value>, fits: &dyn Fn(Opcode, usize) -> bool| readers.only(value, fits);
     let address =
         |opcode: Opcode, at: usize| matches!((opcode, at), (Opcode::Load, 0) | (Opcode::Store, 1));
     let cfg = Cfg::new(func);
@@ -1392,7 +1442,7 @@ fn folded(
                 _ => false,
             };
             if !costless {
-                let read = data.results().any(|result| readers.contains_key(&result));
+                let read = data.results().any(|result| readers.read(result));
                 let cost = weighed.map_or(1, |names| weight(func, inst, names, read));
                 work += cost;
                 let often = frequency.and_then(|it| it.get(&block)).copied().unwrap_or(1.0);
