@@ -379,6 +379,17 @@ impl std::fmt::Display for Error {
                 // There is no sentence for wasm-ld here, because a wasm link that finds none is
                 // done by the linker inside rucc.
                 write!(f, "no linker was found; tried {}", tried.join(", "))?;
+                // The native ELF line, where GNU ld is the linker that the machine is most likely
+                // to have and one package gives it. Apple's `ld` is on the Darwin list too, and
+                // `ld64.lld` is there with it. tamnd/rucc#3276.
+                let gnu = |name: &str| tried.iter().any(|tried| tried == name);
+                if gnu("ld") && !gnu("ld64.lld") {
+                    return write!(
+                        f,
+                        ". Install the binutils package, which has ld, and it has that name on \
+                         Debian, Ubuntu, Fedora, Arch and Alpine"
+                    );
+                }
                 // Only when lld was one of the names, because that is the linker every cross
                 // target here is linked with and the one there is a single answer for.
                 if tried.iter().any(|name| is_lld(name)) {
@@ -3469,8 +3480,17 @@ mod tests {
     fn no_linker_says_where_to_get_lld_only_when_lld_was_looked_for() {
         let cross = Error::NoLinker { tried: vec!["ld.lld".to_owned(), "lld".to_owned()] };
         assert!(cross.to_string().contains("lld 19 or newer"), "{cross}");
-        let native = Error::NoLinker { tried: vec!["ld".to_owned()] };
-        assert_eq!(native.to_string(), "no linker was found; tried ld");
+        let mac = Error::NoLinker { tried: vec!["ld".to_owned(), "ld64.lld".to_owned()] };
+        assert!(!mac.to_string().contains("binutils"), "{mac}");
+    }
+
+    #[test]
+    fn no_linker_on_the_native_elf_line_names_binutils() {
+        let names = ["ld.mold", "mold", "ld.lld", "lld", "ld"];
+        let native = Error::NoLinker { tried: names.map(str::to_owned).to_vec() };
+        let said = native.to_string();
+        assert!(said.contains("Install the binutils package"), "{said}");
+        assert!(!said.contains("lld 19"), "{said}");
     }
 
     #[test]
