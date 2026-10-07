@@ -39,7 +39,7 @@
 //! above, so the pad is written after it and not where the prologue's own pad is written.
 
 use rucc_base::Interner;
-use rucc_base::hash::Map;
+use rucc_base::hash::{Map, Set};
 use rucc_mir as mir;
 use rucc_target::{BranchInsts, FrameInsts, RegClass};
 
@@ -254,6 +254,7 @@ pub fn indirect(
 
     // And the moves themselves, once every label has asked for what it wants, since what one label
     // asks for is what another may already have asked the same branch for.
+    let mut made: Vec<(mir::Block, mir::Inst)> = Vec::new();
     for (branch, moves) in branches.iter().zip(&writes) {
         let last = func.terminator(*branch).expect("a block that ends in a jump");
         for &(home, arg, class) in moves {
@@ -265,9 +266,11 @@ pub fn indirect(
             let opcode = mir::Opcode::new(names.intern(&format!("{}{name}", frame.prefix)));
             let inst = func.build_loose(opcode).def(home, class).uses(arg, class).finish();
             func.insert_before(last, inst);
+            made.push((*branch, inst));
         }
     }
     rename(func, &renamed);
+    at_source(func, &made);
 
     // And the addresses, which is the half of this that is not about edges. Every `&&label` in the
     // function names a block, and a label with a block in front of it now begins at that block, so
@@ -535,6 +538,106 @@ fn in_place(
         }
     }
     renamed
+}
+
+/// Writes a value a branch works out for a label into the register the label is given it in, where
+/// it is worked out, and takes out the move that copied it there. Gives back how many moves went.
+///
+/// An interpreter's handler steps on to the next instruction and jumps to it, which is `op++` and
+/// `goto *op->opcode`. The step is a new value, and the move in front of the jump copies it into
+/// the register the next handler reads the step pointer in. The allocator does not see that the
+/// two belong in one register, since a copy is not something it is asked to keep together, so every
+/// handler of Postgres' `ExecInterpExpr` ended in `leaq 24(%rcx), %rdi`, the load through `%rdi`
+/// and `movq %rdi, %rcx`, where gcc writes `addq $24, %rcx`. tamnd/rucc#1994.
+///
+/// That register is written by the moves in front of the jump and read only by the labels, so it
+/// may be written earlier in the same block as long as nothing in between reads what it held or
+/// writes it, which is what is checked:
+///
+/// - The value is written once in the function, by an instruction in the branch's own block in
+///   front of the move, that writes it as any register at all and names no register outright.
+/// - Every read of it is in that block, between that instruction and the move, so renaming those
+///   reads is renaming all of them.
+/// - Nothing in between, and nothing in that instruction but a read, names the register the move
+///   writes. A read in the instruction itself is fine, since an instruction reads its sources
+///   before it writes an answer that is not written early.
+/// - It is not itself one of those registers, which another move may have written there first.
+fn at_source(func: &mut mir::Func, made: &[(mir::Block, mir::Inst)]) -> usize {
+    let homes: Set<mir::Reg> =
+        made.iter().map(|&(_, copy)| func[func[copy].operands][0].reg).collect();
+    let mut writes: Map<mir::Reg, usize> = Map::default();
+    let mut reads: Map<mir::Reg, usize> = Map::default();
+    for block in func.blocks() {
+        for param in &func[block].params {
+            *writes.entry(param.reg).or_default() += 1;
+        }
+        for inst in func.insts(block) {
+            for operand in &func[func[inst].operands] {
+                let count = if operand.role.is_def() { &mut writes } else { &mut reads };
+                *count.entry(operand.reg).or_default() += 1;
+            }
+        }
+        for call in &func[block].succs {
+            for &arg in &call.args {
+                *reads.entry(arg).or_default() += 1;
+            }
+        }
+    }
+    let mut gone = 0;
+    for &(block, copy) in made {
+        let &[to, from] = &func[func[copy].operands] else { continue };
+        let (home, value) = (to.reg, from.reg);
+        if !value.is_virtual() || homes.contains(&value) || writes.get(&value) != Some(&1) {
+            continue;
+        }
+        let insts: Vec<mir::Inst> = func.insts(block).collect();
+        let Some(end) = insts.iter().position(|&inst| inst == copy) else { continue };
+        let Some(start) = insts[..end].iter().position(|&inst| {
+            func[func[inst].operands]
+                .iter()
+                .any(|operand| operand.reg == value && operand.role.is_def())
+        }) else {
+            continue;
+        };
+        let plain = func[func[insts[start]].operands].iter().all(|operand| {
+            let answer = operand.role == mir::Role::Def
+                && operand.class == to.class
+                && matches!(operand.constraint, mir::Constraint::Reg | mir::Constraint::Reuse(_));
+            operand.reg.is_virtual()
+                && (operand.reg != value || answer)
+                && (operand.reg != home || !operand.role.is_def())
+        });
+        let between = &insts[start + 1..end];
+        if !plain || between.iter().any(|&inst| naming(func, inst, home) > 0) {
+            continue;
+        }
+        let local: usize = between.iter().map(|&inst| naming(func, inst, value)).sum();
+        if reads.get(&value) != Some(&(local + 1)) {
+            continue;
+        }
+        for &inst in &insts[start..end] {
+            let operands = func[inst].operands;
+            for operand in &mut func[operands] {
+                if operand.reg == value {
+                    operand.reg = home;
+                }
+            }
+        }
+        // A variable the value was is the register now, for the debugger's sake.
+        for named in &mut func.named {
+            if named.1 == value {
+                named.1 = home;
+            }
+        }
+        func.remove_inst(copy);
+        gone += 1;
+    }
+    gone
+}
+
+/// How many of the instruction's operands name the register.
+fn naming(func: &mir::Func, inst: mir::Inst, reg: mir::Reg) -> usize {
+    func[func[inst].operands].iter().filter(|operand| operand.reg == reg).count()
 }
 
 /// Reads each register [`in_place`] took off a label as the register it was given in instead,
@@ -882,6 +985,56 @@ mod tests {
         assert!(!mentions(&func, given));
         let text = mir::print_func(&func, &names, &REGS);
         assert_eq!(text.matches("x64.mov_rr_64").count(), 1, "{text}");
+    }
+
+    /// A label given a step pointer that steps it on and jumps where the next step says, which is
+    /// `op++` and `goto *op->opcode`, reading what it was given at `then` as well.
+    fn stepping(then: bool) -> (Interner, mir::Func, mir::Reg) {
+        let mut names = Interner::new();
+        let mut func = mir::Func::new(names.intern("f"));
+        let head = func.create_block();
+        let label = func.create_block();
+        let state = func.append_param(head, GPR);
+        let given = func.append_param(label, GPR);
+        dispatch(&mut func, &mut names, head, label, vec![state]);
+        let lea = mir::Opcode::new(names.intern("x64.lea_64"));
+        let load = mir::Opcode::new(names.intern("x64.mov_rm_64"));
+        let test = mir::Opcode::new(names.intern("x64.test_rr_64"));
+        let jump = mir::Opcode::new(names.intern("x64.jmp_reg"));
+        let next = func.new_vreg(GPR);
+        let to = func.new_vreg(GPR);
+        let stepped = mir::Mem { disp: 24, ..mir::Mem::at(mir::Operand::read(given, GPR)) };
+        func.build(label, lea).def(next, GPR).mem(stepped).finish();
+        if then {
+            func.build(label, test).uses(given, GPR).uses(given, GPR).finish();
+        }
+        let at = mir::Mem::at(mir::Operand::read(next, GPR));
+        func.build(label, load).def(to, GPR).mem(at).finish();
+        func.build(label, jump).operand(mir::Operand::read(to, GPR)).finish();
+        func.succs_mut(label).push(mir::BlockCall::with(label, vec![next]));
+        (names, func, next)
+    }
+
+    #[test]
+    fn a_step_a_label_makes_for_the_next_is_made_in_the_register_the_next_reads() {
+        let (mut names, mut func, next) = stepping(false);
+        assert_eq!(indirect(&mut func, &BRANCH, &FRAME, &mut names), 1);
+        // The `lea` writes the register the label reads the pointer in, so the label's jump has no
+        // move in front of it and the head's is the only one.
+        assert!(!mentions(&func, next));
+        let text = mir::print_func(&func, &names, &REGS);
+        assert_eq!(text.matches("x64.mov_rr_64").count(), 1, "{text}");
+    }
+
+    #[test]
+    fn a_step_made_while_the_old_pointer_is_still_wanted_is_moved_across() {
+        let (mut names, mut func, next) = stepping(true);
+        assert_eq!(indirect(&mut func, &BRANCH, &FRAME, &mut names), 1);
+        // The `test` reads the old pointer after the step is made, so the step cannot go into the
+        // register the old pointer is in until the move in front of the jump.
+        assert!(mentions(&func, next));
+        let text = mir::print_func(&func, &names, &REGS);
+        assert_eq!(text.matches("x64.mov_rr_64").count(), 2, "{text}");
     }
 
     #[test]
