@@ -593,6 +593,10 @@ pub enum Extra {
     Depth(u32),
     /// Which question an `object_size` asks, from zero to three.
     Question(u8),
+    /// How many bytes long the member is whose address a `ptr_add` is, which is the answer to the
+    /// `object_size` questions about the closest member. A `ptr_add` carries this or nothing, and
+    /// nothing after `rucc_opt::objsize` sees it.
+    Member(u32),
     /// Which lane, for `extractlane` and `insertlane`.
     Lane(u8),
     /// Which lanes in which order, for `shuffle`. See [`Shuffle`].
@@ -636,6 +640,7 @@ impl Extra {
             Self::Prefetch(_) => ExtraKind::Prefetch,
             Self::Depth(_) => ExtraKind::Depth,
             Self::Question(_) => ExtraKind::Question,
+            Self::Member(_) => ExtraKind::Member,
             Self::Lane(_) => ExtraKind::Lane,
             Self::Shuffle(_) => ExtraKind::Shuffle,
             Self::Targets(_) => ExtraKind::Targets,

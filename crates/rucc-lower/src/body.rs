@@ -590,13 +590,28 @@ struct Place {
     /// of one swaps the bytes it loaded and a write swaps the bytes before it stores them, and a
     /// bit-field carries the same answer in its [`Run`] instead.
     reverse: bool,
+    /// How long the member at the start of its record is, when this is one, for the questions
+    /// about the closest member that `object_size` asks of its address.
+    ///
+    /// A member further in has the `ptr_add` that steps to it say so, and one at the start of its
+    /// record has no instruction of its own until its address is taken, which is where
+    /// [`Body::taken`] writes one.
+    first: Option<u32>,
 }
 
 impl Place {
     /// A place that is not a member of a union, which is every place but the ones [`Body::member`]
     /// builds out of one.
     const fn new(at: Where, ty: TypeId) -> Self {
-        Self { at, ty, punned: false, owns: 0, restrict: Restrict::NONE, reverse: false }
+        Self {
+            at,
+            ty,
+            punned: false,
+            owns: 0,
+            restrict: Restrict::NONE,
+            reverse: false,
+            first: None,
+        }
     }
 }
 
@@ -5490,13 +5505,64 @@ impl<'u> Body<'_, 'u> {
             };
         }
         let addr = self.offset(addr, byte, span);
+        let last = self.types().record_info(id).fields.len() == field as usize + 1;
+        let closest = self.closest(kind, last, ty);
+        if byte != 0 {
+            if let Some(size) = closest {
+                self.measured(addr, size);
+            }
+        }
         Place {
             punned,
             owns,
             restrict: place.restrict,
             reverse,
+            first: closest.filter(|_| byte == 0),
             ..Place::new(Where::Addr(addr), ty)
         }
+    }
+
+    /// How long a member is for the questions about the closest member, where its type says.
+    ///
+    /// Not for a member of a union, nor for an array at the end of a structure, which a program
+    /// may allocate past the end of: which of those count is `-fstrict-flex-arrays` and the
+    /// member's own attribute, which the checker reads, so the IR is told nothing and answers
+    /// with the whole object. Nothing for a member with no bytes either, since the kernel puts
+    /// those in the middle of a structure as markers to copy from and up to.
+    fn closest(&self, kind: RecordKind, last: bool, ty: TypeId) -> Option<u32> {
+        if kind == RecordKind::Union || last && is_array(self.types(), ty) {
+            return None;
+        }
+        let size = repr::size_of(self.types(), self.target(), ty);
+        u32::try_from(size).ok().filter(|&size| size != 0)
+    }
+
+    /// Writes on the `ptr_add` that stepped to a member how long the member is.
+    fn measured(&mut self, addr: Value, size: u32) {
+        if let Def::Result { inst, .. } = self.func[addr].def {
+            let data = &mut self.func[inst];
+            if data.opcode == Opcode::PtrAdd && data.extra == Extra::None {
+                data.extra = Extra::Member(size);
+            }
+        }
+    }
+
+    /// The address of a place whose address the program takes, which for a member at the start
+    /// of its record is a `ptr_add` of nothing that says how long the member is. The address of
+    /// the record is the same number and has the record's length.
+    fn taken(&mut self, place: Place, span: Span) -> Value {
+        let addr = self.address_of(place, span);
+        let Some(size) = place.first else { return addr };
+        let address = self.address;
+        let mut build = self.build(span);
+        let zero = build.iconst(address, 0);
+        let args = build.func().push_values(&[addr, zero]);
+        let data = InstData { args, extra: Extra::Member(size), ..InstData::new(Opcode::PtrAdd) };
+        let moved = build.value(data, Type::PTR);
+        if let Some(align) = self.alignment(addr) {
+            self.aligns(moved, align);
+        }
+        moved
     }
 
     /// The address a recipe from the layout says a member is at, past the record's own.
@@ -6558,7 +6624,7 @@ impl<'u> Body<'_, 'u> {
             }
             Conversion::ArrayDecay | Conversion::FunctionDecay => {
                 let place = self.place(operand);
-                Some(self.address_of(place, span))
+                Some(self.taken(place, span))
             }
             Conversion::Arithmetic | Conversion::Pointer => {
                 if let Some(value) = self.complex_to_real(operand, ty, span) {
@@ -6751,7 +6817,7 @@ impl<'u> Body<'_, 'u> {
             }
             UnaryOp::AddrOf => {
                 let place = self.place(operand);
-                Some(self.address_of(place, span))
+                Some(self.taken(place, span))
             }
             UnaryOp::PreInc | UnaryOp::PreDec | UnaryOp::PostInc | UnaryOp::PostDec => {
                 self.step_by_one(op, operand, span)
