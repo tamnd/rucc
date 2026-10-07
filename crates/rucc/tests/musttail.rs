@@ -459,3 +459,116 @@ fn an_address_that_escaped_before_the_jump_is_warned_about_in_gcc_s_words() {
     assert!(!ok, "{err}");
     assert!(err.contains("error: address of parameter 'x' can escape to 'musttail' call"), "{err}");
 }
+
+/// Two functions that hand thirteen arguments back and forth, most of them on the stack and in a
+/// new order each time: two `long`s swapped and three rotated, two structures of four words
+/// swapped after one of them was written to, and two `long double`s swapped. A loop that does the
+/// same to locals says what should come back.
+const SHUFFLED: &str = r"struct big { long a, b, c, d; };
+#define PARAMS long n, long a, long b, long c, long d, long e, long f, long g, long h, \
+    struct big s, struct big t, long double x, long double y
+#define DONE (a + 3 * f + 5 * g + 7 * h + 11 * s.a + 13 * t.d + 17 * (long)x - (long)y + c + d + e)
+long odd(PARAMS);
+long even(PARAMS) {
+  if (n == 0) return DONE;
+  s.a += g;
+  [[gnu::musttail]] return odd(n - 1, b, a, c, d, e, h, f, g, t, s, y, x + 1);
+}
+long odd(PARAMS) {
+  if (n == 0) return -DONE;
+  t.d -= f;
+  [[gnu::musttail]] return even(n - 1, a, b, c, d, e, g, h, f, s, t, x, y - 2);
+}
+static long model(PARAMS) {
+  for (int which = 0;; which ^= 1, n--) {
+    if (which == 0) {
+      if (n == 0) return DONE;
+      s.a += g;
+      long swap = a; a = b; b = swap;
+      long rot = f; f = h; h = g; g = rot;
+      struct big other = s; s = t; t = other;
+      long double was = x; x = y; y = was + 1;
+    } else {
+      if (n == 0) return -DONE;
+      t.d -= f;
+      long rot = f; f = g; g = h; h = rot;
+      y = y - 2;
+    }
+  }
+}
+int main(void) {
+  struct big s = {1, 2, 3, 4}, t = {5, 6, 7, 8};
+  long want = model(1000001, 1, 2, 3, 4, 5, 6, 7, 8, s, t, 9.5L, 10.25L);
+  long got = even(1000001, 1, 2, 3, 4, 5, 6, 7, 8, s, t, 9.5L, 10.25L);
+  return got == want ? 0 : 1;
+}
+";
+
+/// A `musttail` call that passes arguments on the stack writes them where the caller's own came,
+/// as gcc does, so the chain above runs in one frame with every argument where its callee looks.
+#[cfg(all(target_arch = "x86_64", target_os = "linux"))]
+#[test]
+fn a_musttail_call_passes_arguments_on_the_stack_where_its_caller_was_handed_them() {
+    for level in ["-O0", "-O2"] {
+        let dir = dir(&format!("shuffled{level}"));
+        std::fs::write(dir.join("a.c"), SHUFFLED).expect("the fixture can be written");
+        let out = Command::new(env!("CARGO_BIN_EXE_rucc"))
+            .current_dir(&dir)
+            .args([level, "a.c", "-o", "a"])
+            .output()
+            .expect("the compiler is built before its own tests run");
+        assert!(out.status.success(), "{level}\n{}", String::from_utf8_lossy(&out.stderr));
+        let ran = Command::new(dir.join("a")).status().expect("what was linked can be run");
+        let _ = std::fs::remove_dir_all(&dir);
+        assert_eq!(ran.code(), Some(0), "{level}: the arguments did not arrive where they went");
+    }
+}
+
+/// The same on i386, where every argument is on the stack, on Windows x64, where every call
+/// reserves the callee thirty two bytes of the caller's, and gcc's refusal of a callee that
+/// takes more than the caller was handed.
+#[test]
+fn a_musttail_call_on_the_stack_is_a_jump_where_gcc_makes_one() {
+    let i386 = "i386-unknown-linux-gnu";
+    let swapped = "int g(int, int); int f(int a, int b) { [[gnu::musttail]] return g(b, a); }
+long long h(int, long long); int k(int);
+long long j(long long a, int b, int c) { [[gnu::musttail]] return h(b + c, a); }
+int l(int a, int b, int c) { [[gnu::musttail]] return k(c); }
+";
+    for level in ["-O0", "-O2"] {
+        let (ok, text, err) = compile("x86-args", i386, &[level, "-fno-pic"], swapped);
+        assert!(ok, "{level}\n{err}");
+        for (name, callee) in [("f", "g"), ("j", "h"), ("l", "k")] {
+            let lines = body(&text, name);
+            assert!(lines.contains(&format!("jmp {callee}")), "{level} {name}: {lines:#?}");
+            assert!(!lines.iter().any(|line| line.starts_with("call")), "{level}: {lines:#?}");
+        }
+
+        let win = "int g(int); int f(int a) { [[gnu::musttail]] return g(a + 1); }
+int h(int, int, int, int, int, int);
+int i(int a, int b, int c, int d, int e, int f) { [[gnu::musttail]] return h(f, e, d, c, b, a); }
+";
+        let (ok, text, err) = compile("win-args", "x86_64-pc-windows-gnu", &[level], win);
+        assert!(ok, "{level}\n{err}");
+        for (name, callee) in [("f", "g"), ("i", "h")] {
+            let lines = body(&text, name);
+            assert!(lines.contains(&format!("jmp {callee}")), "{level} {name}: {lines:#?}");
+        }
+
+        let more = [
+            (i386, "int g(int, int); int f(int a) { [[gnu::musttail]] return g(a, a); }\n"),
+            (
+                X86_64,
+                "int g(int, int, int, int, int, int, int);
+int f(int a) { [[gnu::musttail]] return g(a, a, a, a, a, a, a); }\n",
+            ),
+        ];
+        for (target, source) in more {
+            let (ok, _, err) = compile("more-args", target, &[level, "-fno-pic"], source);
+            assert!(!ok, "{level} {target}");
+            let said = "error: cannot tail-call: callee required more stack slots than the caller";
+            assert!(err.contains(said), "{level} {target}\n{err}");
+            assert_eq!(err.matches("error:").count(), 1, "{level} {target}\n{err}");
+        }
+    }
+}

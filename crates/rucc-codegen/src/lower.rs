@@ -1393,6 +1393,9 @@ pub struct Stack {
     /// as i386 System V does, and nothing anywhere else. See
     /// `rucc_abi::ReturnPointer::FirstArgumentPopped`.
     pub popped: u32,
+    /// How many bytes of argument area the caller gave the function, which is where a `musttail`
+    /// call that passes arguments on the stack writes them. See [`abi::Arrived::area`].
+    pub incoming: u32,
 }
 
 impl Stack {
@@ -2112,7 +2115,7 @@ impl<'a> Lowering<'a> {
             // it.
             match self.source[inst].opcode {
                 Opcode::Call | Opcode::CallIndirect => {
-                    self.called(inst)?;
+                    self.called(inst, false)?;
                     continue;
                 }
                 // The exception a landing pad was entered with, which the unwinder left in the
@@ -2493,7 +2496,10 @@ impl<'a> Lowering<'a> {
     /// behind it, and everything after that is the same: where each argument goes, where the value
     /// comes back and which registers are gone across it are the convention's answers and the
     /// convention does not ask what is being called.
-    fn called(&mut self, inst: Inst) -> Result<u32, Unsupported> {
+    ///
+    /// `forwarded` is a `musttail` call, whose arguments in memory go up the area this function
+    /// was handed its own in. See [`abi::Calling::forwarded`].
+    fn called(&mut self, inst: Inst, forwarded: bool) -> Result<abi::Made, Unsupported> {
         let data = &self.source[inst];
         let Extra::Call(info) = data.extra else { return Err(self.unsupported(inst)) };
         let info = self.source[info];
@@ -2601,6 +2607,7 @@ impl<'a> Lowering<'a> {
             named: named.len(),
             at: self.source.span(inst),
             linked: linked.map(|got| (got, x86_64::RBX)),
+            forwarded,
         };
         // The callee's convention and not this function's, since the two differ when either was
         // written `ms_abi` or `sysv_abi`: where the arguments go, what the callee leaves alone and
@@ -2668,7 +2675,7 @@ impl<'a> Lowering<'a> {
                 let into = self.through(into);
                 self.x87_at("fstp_t", span, into);
             }
-            return Ok(made.outgoing);
+            return Ok(made);
         }
         // A `float` or a `double` on i386, which is on the same stack, and which is taken off it
         // through the crossing bytes into the vector register the rest of the function reads it in.
@@ -2683,13 +2690,13 @@ impl<'a> Lowering<'a> {
             let load = self.named(get);
             let sse = self.conv.sse_class;
             self.out.build(block, load).at(span).def(reg, sse).mem(across).finish();
-            return Ok(made.outgoing);
+            return Ok(made);
         }
         for (result, &reg) in results.into_iter().zip(&made.results) {
             self.sized(reg, self.source[result].ty);
             self.regs[result.index()] = Some(reg);
         }
-        Ok(made.outgoing)
+        Ok(made)
     }
 
     /// One `tail_call`, as the call and a return of what it gave back.
@@ -2699,9 +2706,18 @@ impl<'a> Lowering<'a> {
     /// and when the answer comes back in registers, since one on the x87 stack is taken off and put
     /// back by instructions after the call. A call that is not written down stays a call and a
     /// return, which is what the IR said before `crate::tail::mark` read it.
+    ///
+    /// A `musttail` call may also put arguments in memory, which it writes where this function's
+    /// own arrived, the way gcc does: the callee finds them above the same return address. That is
+    /// only a jump, never a call, so a call that is not one is refused rather than left a call.
     fn tail_called(&mut self, inst: Inst) -> Result<(), Unsupported> {
-        let kept = self.stack.kept;
-        let outgoing = self.called(inst)?;
+        let (kept, calls) = (self.stack.kept, self.stack.calls);
+        let must = self.source[inst].flags.contains(Flags::MUST_TAIL).then_some(inst);
+        let made = self.called(inst, must.is_some())?;
+        let outgoing = made.outgoing;
+        // What it put in memory fits in the area this function was handed, which is gcc's rule,
+        // and was written there rather than copied by a call to the runtime, which writes down.
+        let forwarded = made.forwarded.filter(|_| made.area <= self.stack.incoming);
         let block = self.at.expect("a block is being filled");
         let call = self.out.terminator(block).expect("the call just built");
         if self.out[call].symbol.is_none() {
@@ -2719,19 +2735,24 @@ impl<'a> Lowering<'a> {
         // Not a call through the procedure linkage table, whose entry reads `%ebx` after the
         // epilogue has put the caller's back in it. gcc makes no such call a jump either.
         let linked = self.out[call].flags.contains(mir::Flags::PLT);
-        let must = self.source[inst].flags.contains(Flags::MUST_TAIL).then_some(inst);
-        if outgoing == 0 && !x87 && !linked && self.sret().is_none() {
+        let jumps = outgoing == 0 || forwarded.is_some();
+        if jumps && !x87 && !linked && self.sret().is_none() {
             let returns =
                 std::iter::successors(self.out.next_inst(call), |&at| self.out.next_inst(at))
                     .collect();
             self.stack.tails.push(crate::tail::Tail { call, returns, must });
             self.stack.kept = kept;
+            if outgoing != 0 {
+                self.stack.calls = calls;
+                self.stack.arguments.extend(forwarded.into_iter().flatten());
+            }
         } else if let Some(inst) = must {
-            // gcc's words where it has the same reason. It also jumps to a callee that takes no
-            // more of the stack for its arguments than this function was given, which this does
-            // not do yet, so that one is in words of this compiler's.
-            let reason = if outgoing != 0 {
-                "the callee takes arguments on the stack, which no tail call here passes yet"
+            // gcc's words where it has the same reason, and this compiler's for the copy.
+            let reason = if made.area > self.stack.incoming {
+                "callee required more stack slots than the caller"
+            } else if outgoing != 0 && !jumps {
+                "a structure the callee takes on the stack is copied by a call, which no tail call \
+                 here makes yet"
             } else if self.sret().is_some() {
                 "callee returns a structure"
             } else {
@@ -4048,6 +4069,7 @@ impl<'a> Lowering<'a> {
             named: 1,
             at: span,
             linked: None,
+            forwarded: false,
         };
         let made = abi::call(&mut self.out, block, &what, self.conv, self.selector.abi, self.names)
             .map_err(|refused| Unsupported::Call { inst, refused })?;
@@ -8120,6 +8142,7 @@ impl<'a> Lowering<'a> {
             self.varargs = Some(Varargs::Pointer { incoming });
         }
         self.stack.arguments.extend(arrived.stack);
+        self.stack.incoming = arrived.area;
         for &(index, up) in &arrived.bytes {
             let Some(&param) = params.get(index) else { continue };
             for decl in self.source.param_decls(param) {
@@ -8463,6 +8486,7 @@ impl<'a> Lowering<'a> {
             named: args.len(),
             at: span,
             linked: None,
+            forwarded: false,
         };
         let apart = CallRegs { shared_positions: false, shadow: 0, ..*self.conv };
         let conv = if windows { &apart } else { self.conv };

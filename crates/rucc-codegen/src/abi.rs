@@ -335,6 +335,10 @@ pub struct Arrived {
     /// the walk over the registers stopped, which is a position rather than a size, until the named
     /// parameters have used every register and the two agree again.
     pub beyond: u32,
+    /// How many bytes of the caller's argument area the named parameters took, shadow space and
+    /// all, which is the most a `musttail` call from this function may write its own arguments
+    /// into. gcc's `crtl->args.size`.
+    pub area: u32,
     /// The argument registers left over for the arguments the signature does not name, as the
     /// register each was bound into and how far up the save area its slot is.
     ///
@@ -425,8 +429,9 @@ pub fn entry(
         true => conv.word * u32::try_from(reached).unwrap_or(0),
         false => places.size(),
     };
-    let mut arrived =
-        Arrived { regs: Vec::with_capacity(params.len()), took, beyond, ..Arrived::default() };
+    let regs = Vec::with_capacity(params.len());
+    let area = places.size();
+    let mut arrived = Arrived { regs, took, beyond, area, ..Arrived::default() };
     // The registers the named parameters arrived in, each with its file, since a register number
     // only means something within one: `xmm1` and `rcx` are both register one.
     let mut bound = Vec::new();
@@ -683,6 +688,11 @@ pub struct Made {
     /// and [`pin`] does once the stack pointer is back where the frame keeps it. Empty for every
     /// other call.
     pub late: Vec<(mir::Reg, PhysReg, RegClass, Type)>,
+    /// Every store into the caller's argument area of a call [`Calling::forwarded`] asked for,
+    /// with how far up the area it writes, which is what `arguments` on `crate::lower::Stack`
+    /// holds. `None` for every other call, and for one whose bytes the runtime copied, since its
+    /// copy is a call of its own and writes down the outgoing area.
+    pub forwarded: Option<Vec<(mir::Inst, u32)>>,
 }
 
 /// Which of a call's values could not be passed, and why.
@@ -757,6 +767,12 @@ pub struct Calling<'a> {
     /// jumps through `name@GOT(%ebx)`. `None` everywhere else, and for a call through a register,
     /// which never reaches the table.
     pub linked: Option<(mir::Reg, PhysReg)>,
+    /// Whether what goes to memory goes up the area this function's own caller passed its
+    /// arguments in rather than down the outgoing one, which is a `musttail` call that becomes a
+    /// jump: by the time the callee reads its arguments this frame is gone and the area is the
+    /// one its return address is under. Where that area is from the stack pointer is the frame's
+    /// answer, so the stores are left for [`crate::finish`] and listed in [`Made::forwarded`].
+    pub forwarded: bool,
 }
 
 /// Builds one call: what it passes, what comes back, and what it destroys.
@@ -779,7 +795,7 @@ pub fn call(
     insts: &Insts,
     names: &mut Interner,
 ) -> Result<Made, Refused> {
-    let &Calling { callee, args, returns, variadic, named, at: span, linked } = made;
+    let &Calling { callee, args, returns, variadic, named, at: span, linked, forwarded } = made;
     // Where everything goes, worked out before anything is built, so that a call this cannot make
     // leaves no half of one behind.
     let mut places = Places::new(conv);
@@ -936,11 +952,18 @@ pub fn call(
     // is written straight in rather than left for [`crate::finish`]: the outgoing area is at the
     // bottom of the frame because that is where the callee looks for it, and the bottom of the
     // frame is where the stack pointer already is.
+    // A call that forwards writes over the caller's arguments, so the offset waits for the frame,
+    // and where it is the words of every object are read before any of them is written: one of
+    // them can be this function's own parameter, whose bytes are where another argument goes.
+    let mut stores = forwarded.then(Vec::new);
+    let mut words = Vec::new();
     for (reg, class, store, up) in on_stack {
         let sp = mir::Operand::read(mir::Reg::physical(conv.stack_pointer), conv.int_class);
-        let up = i32::try_from(up).expect("an argument area under two gigabytes");
+        let at = i32::try_from(up).expect("an argument area under two gigabytes");
+        let at = if forwarded { 0 } else { at };
         let build = out.build(block, mir::Opcode::new(store)).at(span);
-        build.uses(reg, class).mem(mir::Mem::at(sp).plus(up)).finish();
+        let made = build.uses(reg, class).mem(mir::Mem::at(sp).plus(at)).finish();
+        stores.iter_mut().for_each(|stores| stores.push((made, up)));
     }
 
     // How many bytes the copies below needed for calls of their own, which is nothing on a
@@ -960,6 +983,7 @@ pub fn call(
         let Some(plan) = plan else {
             let what = Copying { from, up, count, span, linked };
             nested = nested.max(by_runtime(out, block, conv, insts, names, what));
+            stores = None;
             continue;
         };
         for (at, width) in plan {
@@ -975,11 +999,13 @@ pub fn call(
             let store = names.intern(
                 (insts.store)(ty).ok_or(Refused { argument: None, missing: Missing::Width })?,
             );
-            let sp = mir::Operand::read(mir::Reg::physical(conv.stack_pointer), conv.int_class);
-            let build = out.build(block, mir::Opcode::new(store)).at(span);
-            build.uses(word, conv.int_class).mem(mir::Mem::at(sp).plus(up + at)).finish();
+            words.push((word, store, up + at));
+            if !forwarded {
+                stored(out, block, conv, span, words.drain(..), None);
+            }
         }
     }
+    stored(out, block, conv, span, words.drain(..), stores.as_mut());
 
     // And the second copy of each float the callee has no prototype for, which is one `movq` out of
     // the vector register it is already in. What the callee reads out of the general purpose
@@ -1104,7 +1130,29 @@ pub fn call(
             false => moved(out, block, names, conv, reg, true),
         })
         .collect();
-    Ok(Made { results, outgoing: places.size().max(nested), area: places.size(), late })
+    let outgoing = places.size().max(nested);
+    Ok(Made { results, outgoing, area: places.size(), late, forwarded: stores })
+}
+
+/// Writes words a call passes into the argument area, each a register, its store and how far up
+/// the area it goes, and lists them in `forwarded` when that is the area they go to.
+fn stored(
+    out: &mut mir::Func,
+    block: mir::Block,
+    conv: &CallRegs,
+    span: Span,
+    words: impl Iterator<Item = (mir::Reg, Symbol, i32)>,
+    mut forwarded: Option<&mut Vec<(mir::Inst, u32)>>,
+) {
+    for (word, store, up) in words {
+        let sp = mir::Operand::read(mir::Reg::physical(conv.stack_pointer), conv.int_class);
+        let at = if forwarded.is_some() { 0 } else { up };
+        let build = out.build(block, mir::Opcode::new(store)).at(span);
+        let made = build.uses(word, conv.int_class).mem(mir::Mem::at(sp).plus(at)).finish();
+        if let Some(forwarded) = forwarded.as_deref_mut() {
+            forwarded.push((made, u32::try_from(up).expect("a place up the argument area")));
+        }
+    }
 }
 
 /// Says the registers a call's result came back in hold it, for a call [`Made::late`] is not
@@ -1201,6 +1249,7 @@ fn by_runtime(
         named: args.len(),
         at: span,
         linked,
+        forwarded: false,
     };
     // Three pointer sized arguments and nothing coming back is a call every convention here has
     // registers for, so the only way this could refuse is a convention with fewer than three
@@ -1718,6 +1767,7 @@ mod tests {
             named,
             at: Span::DUMMY,
             linked: None,
+            forwarded: false,
         };
         let made = call(&mut out, block, &what, conv, &X86_64, &mut names);
         (names, out, made)
@@ -1880,6 +1930,7 @@ mod tests {
             named: passed.len(),
             at: Span::DUMMY,
             linked: None,
+            forwarded: false,
         };
         call(&mut out, block, &what, &SYSV, &X86_64, &mut names)
             .expect("one integer fits in a register");
@@ -1946,6 +1997,7 @@ mod tests {
             named: args.len(),
             at: Span::DUMMY,
             linked: None,
+            forwarded: false,
         };
         let made = call(&mut out, block, &what, conv, &X86_64, &mut names);
         (names, out, made)
