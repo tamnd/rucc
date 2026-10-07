@@ -47,7 +47,7 @@ mod write;
 
 pub use crate::aarch64::encode::{
     Addr, Arrangement, Cond, Encoded, Error, Extend, Fixup, Mode, Offset, Operator, Scalar, Shift,
-    Value, Width, encode,
+    Value, Width, encode, takes,
 };
 pub use crate::aarch64::insts::{ADDRESSES, Form, INSTS, TEMPLATE, address, form};
 pub use crate::aarch64::read::{Error as ReadError, Line, read};

@@ -940,6 +940,42 @@ impl At<'_> {
             "ldxr" | "ldxrb" | "ldxrh" | "ldaxr" | "ldaxrb" | "ldaxrh" | "ldar" | "ldarb"
             | "ldarh" | "stlr" | "stlrb" | "stlrh" => self.exclusive(None, values)?,
             "ldapr" | "ldaprb" | "ldaprh" => self.rcpc(values)?,
+            "ldxp" | "ldaxp" => self.exclusive_pair(None, values)?,
+            "stxp" | "stlxp" => match values {
+                [s, rest @ ..] => {
+                    let (width, rs) = self.zr(s)?;
+                    if width != Width::W {
+                        return Err(self.register());
+                    }
+                    self.exclusive_pair(Some(rs), rest)?
+                }
+                [] => return Err(self.unwritten()),
+            },
+            // How long a vector is, in bytes or in predicate bits, times a number, which the
+            // kernel reads to size the state of SVE and SME it saves.
+            "rdvl" | "rdsvl" => match values {
+                [d, Value::Imm(imm)] => {
+                    let (width, rd) = self.zr(d)?;
+                    if width != Width::X {
+                        return Err(self.register());
+                    }
+                    let base = if m == "rdvl" { 0x04bf_5000 } else { 0x04bf_5800 };
+                    base | self.vector_times(*imm)? << 5 | rd
+                }
+                _ => return Err(self.unwritten()),
+            },
+            "addvl" | "addpl" => match values {
+                [d, n, Value::Imm(imm)] => {
+                    let (width, rd) = self.sp(d)?;
+                    let (other, rn) = self.sp(n)?;
+                    if width != Width::X || other != Width::X {
+                        return Err(self.register());
+                    }
+                    let base = if m == "addvl" { 0x0420_5000 } else { 0x0460_5000 };
+                    base | rn << 16 | self.vector_times(*imm)? << 5 | rd
+                }
+                _ => return Err(self.unwritten()),
+            },
             "stxr" | "stxrb" | "stxrh" | "stlxr" | "stlxrb" | "stlxrh" => match values {
                 [s, rest @ ..] => {
                     let (width, rs) = self.zr(s)?;
@@ -2000,6 +2036,41 @@ impl At<'_> {
             | rt)
     }
 
+    /// The exclusive loads and stores of two registers, which take a bare base the way the ones of
+    /// one do and are the halves of the kernel's sixteen byte `cmpxchg`.
+    fn exclusive_pair(self, status: Option<u32>, values: &[Value]) -> Result<u32, Error> {
+        let [t, t2, Value::Mem(addr)] = values else {
+            return Err(self.unwritten());
+        };
+        if addr.offset != Offset::Imm(0) || addr.mode != Mode::Offset {
+            return Err(self.unwritten());
+        }
+        let (width, rt) = self.zr(t)?;
+        let (other, rt2) = self.zr(t2)?;
+        if other != width {
+            return Err(self.register());
+        }
+        let m = self.mnemonic;
+        let load = u32::from(m.starts_with("ld"));
+        let ordered = u32::from(m.starts_with("lda") || m.starts_with("stl"));
+        Ok(u32::from(width == Width::X) << 30
+            | 0x8820_0000
+            | load << 22
+            | status.unwrap_or(31) << 16
+            | ordered << 15
+            | rt2 << 10
+            | u32::from(addr.base) << 5
+            | rt)
+    }
+
+    /// The six bit signed multiple `rdvl` and `addvl` take.
+    fn vector_times(self, imm: i64) -> Result<u32, Error> {
+        if !(-32..=31).contains(&imm) {
+            return Err(self.immediate(imm));
+        }
+        Ok((imm & 0x3f) as u32)
+    }
+
     /// The loads that acquire only against the stores that release, which ARMv8.3 added and a
     /// kernel built with link time optimization reads every `READ_ONCE` with.
     fn rcpc(self, values: &[Value]) -> Result<u32, Error> {
@@ -2107,6 +2178,35 @@ fn wide_move(width: Width, rd: u32, value: u64) -> Option<u32> {
     let inverted = !value & mask(width);
     let (hw, imm) = single(inverted)?;
     Some(width.sf() << 31 | 0x1280_0000 | hw << 21 | imm << 5 | rd)
+}
+
+/// Whether one of gcc's AArch64 immediate letters in an `asm` constraint takes that constant, as
+/// gcc decides it. `I` and `J` are what `add` and `sub` carry, twelve bits shifted by nothing or
+/// by twelve, `K` and `L` are the patterns a thirty two and a sixty four bit logical instruction
+/// carry, and `M` and `N` are what one `mov` writes at each width. A constant a letter does not
+/// take goes in a register, which is the `r` the kernel's atomics write next to every one of them.
+/// Any other letter takes any constant.
+pub fn takes(letter: char, number: i128) -> bool {
+    let add =
+        |n: i128| (0..=0xfff).contains(&n) || (n & 0xfff == 0 && (0..=0xff_f000).contains(&n));
+    let bits = |width: Width| match (i64::try_from(number), u64::try_from(number)) {
+        (Ok(signed), _) => narrow(signed, width),
+        (_, Ok(unsigned)) if width == Width::X => Some(unsigned),
+        _ => None,
+    };
+    let logical = |width: Width| bits(width).is_some_and(|value| bitmask(value, width).is_some());
+    let moved = |width: Width| {
+        logical(width) || bits(width).is_some_and(|value| wide_move(width, 0, value).is_some())
+    };
+    match letter {
+        'I' => add(number),
+        'J' => add(-number),
+        'K' => logical(Width::W),
+        'L' => logical(Width::X),
+        'M' => moved(Width::W),
+        'N' => moved(Width::X),
+        _ => true,
+    }
 }
 
 /// The three fields a logical instruction carries a pattern of bits in, when it can carry that
@@ -2262,6 +2362,47 @@ mod tests {
         }
         assert!(encode("crc32c", &[Value::Gpr(Width::W, 0); 3]).is_err());
         assert!(encode("crc32cq", &[Value::Gpr(Width::W, 0); 3]).is_err());
+    }
+
+    #[test]
+    fn the_pair_exclusives_vector_lengths_and_unprivileged_atomics_are_llvm_mc_words() {
+        for (text, word) in [
+            ("ldxp x4, x3, [x0]", 0xc87f_0c04),
+            ("ldaxp x4, x3, [x0]", 0xc87f_8c04),
+            ("ldxp w4, w3, [x0]", 0x887f_0c04),
+            ("stxp w5, x4, x3, [x0]", 0xc825_0c04),
+            ("stlxp w5, x4, x3, [x0]", 0xc825_8c04),
+            ("rdvl x5, #-32", 0x04bf_5405),
+            ("rdsvl x1, #1", 0x04bf_5821),
+            ("addvl sp, sp, #-2", 0x043f_57df),
+            ("addpl x0, x1, #3", 0x0461_5060),
+            ("cast x0, x2, [x3]", 0xc980_7c62),
+            ("casalt x0, x2, [x3]", 0xc9c0_fc62),
+            ("caspalt x0, x1, x2, x3, [x4]", 0x49c0_fc82),
+            ("ldtadd w0, w1, [x2]", 0x1920_0441),
+            ("ldtaddal x0, x1, [x2]", 0x59e0_0441),
+            ("ldtclr x0, x1, [x2]", 0x5920_1441),
+            ("swptal w0, w1, [x2]", 0x19e0_8441),
+            ("sttclrl w0, [x2]", 0x1960_145f),
+            ("sttset x0, [x2]", 0x5920_345f),
+        ] {
+            let line = read(text).expect("a line");
+            let got = encode(&line.mnemonic, &line.values).expect("a word");
+            assert_eq!((got.word, got.fixup), (word, None), "{text}");
+        }
+        // What the instructions do not have, which llvm-mc refuses too.
+        for text in [
+            "ldxp x4, w3, [x0]",
+            "stxp x5, x4, x3, [x0]",
+            "rdvl w0, #1",
+            "rdvl x0, #32",
+            "casalt w0, w2, [x3]",
+            "ldteor x0, x1, [x2]",
+            "ldtaddb w0, w1, [x2]",
+        ] {
+            let line = read(text).expect("a line");
+            assert!(encode(&line.mnemonic, &line.values).is_err(), "{text}");
+        }
     }
 
     #[test]

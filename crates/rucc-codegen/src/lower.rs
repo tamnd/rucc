@@ -5994,6 +5994,9 @@ impl<'a> Lowering<'a> {
                     && match (self.bare_number(value), operand.range) {
                         // `Z` on AArch64 is the zero register, which only a zero can be.
                         (_, Some('Z')) if a64 => self.zero(value),
+                        // AArch64's letters are gcc's for that machine, and a constant one
+                        // of them does not take goes in a register.
+                        (Some(number), Some(letter)) if a64 => aarch64::takes(letter, number),
                         (Some(number), range) => a64 || in_range(range, number),
                         // The two thirty two bit letters take an address too, which fits under the
                         // code models gcc takes them in.
