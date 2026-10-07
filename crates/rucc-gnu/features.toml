@@ -1235,6 +1235,15 @@ tests = ["rucc::a_musttail_call_is_a_jump_at_every_level", "rucc::a_chain_of_mus
 notes = "`[[gnu::musttail]] return f(x);`, also spelled `__attribute__((musttail))` and `[[clang::musttail]]`: the call is made as a jump once the frame is given back, at every level of optimization, so an interpreter written as one function per instruction runs in one frame. The locals of the caller end before the jump, so one in the frame does not stop it, as in gcc. A call that cannot be made is an error (`E0847`) in gcc's words at the call: a value that is not a call, an answer that changes after the call, a caller with variable arguments, `setjmp` or a variable length array, a structure given back through memory, a callee of another calling convention, and a machine with no jump to a name. One that would pass arguments on the stack is refused too, where gcc makes it when the caller was handed as many, so on i386 it is only a call that takes none. The attribute anywhere but in front of a `return` is ignored with gcc's warning, as is one mixed with others, and it takes no arguments. An argument that is the address of something in the frame the jump gives back is warned about in gcc's words (`E0850`, `-Wmusttail-local-addr`, on by default), once for each. gcc's `-Wmaybe-musttail-local-addr`, about an address that escaped earlier, is not given."
 
 [[feature]]
+name = "flag_enum"
+kind = "attribute"
+gcc_version = "15.0"
+status = "implemented"
+used_by = []
+tests = ["rucc::a_flag_enum_is_quiet_about_its_combined_values", "rucc::a_flag_enum_anywhere_else_is_said_in_gcc_s_words"]
+notes = "`enum __attribute__((flag_enum)) f { R = 1, W = 2 };`, also spelled `[[gnu::flag_enum]]` and `[[clang::flag_enum]]`, written about the enumeration or after its closing brace: the values of the enumeration are bits a program combines, so a `switch` on one is not warned about for a case value such as `R | W` that is no enumerator's, which `-Wswitch` says otherwise. An enumerator no case covers is still said. On a type that is not an enumeration it is ignored with gcc's warning, and it takes no arguments. gcc also takes it on a declaration or a typedef of an enumeration, as being about a variant of the type, and here it is taken there and changes nothing."
+
+[[feature]]
 name = "vector_size"
 kind = "attribute"
 gcc_version = "3.1"

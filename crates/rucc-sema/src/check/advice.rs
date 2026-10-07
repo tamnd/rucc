@@ -108,6 +108,9 @@ pub(in crate::check) struct Advice {
     /// Enumerators marked `unused` or `[[maybe_unused]]`, by their enumeration and name, which a
     /// `switch` that leaves them out is quiet about, for `check/switch.rs`.
     pub(in crate::check) unused_enumerators: Set<(EnumId, Symbol)>,
+    /// Enumerations marked `flag_enum`, whose values a `switch` may combine, for
+    /// `check/switch.rs`.
+    pub(in crate::check) flag_enums: Set<EnumId>,
 }
 
 /// What `deprecated` and `unavailable` asked to have said at a use of a name.

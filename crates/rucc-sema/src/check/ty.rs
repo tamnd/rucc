@@ -719,6 +719,7 @@ impl Checker<'_> {
         self.built.defined.insert(ty);
         self.record_body(id, kind, members, attrs, pragmas, span);
         self.read_deprecated_tag(ty, attrs, span);
+        self.flag_enum_misplaced(&[attrs], ty);
         match again {
             Some(first) => self.redefined(first, ty, span),
             None => ty,
@@ -776,6 +777,7 @@ impl Checker<'_> {
             self.types.make_enum_checked(id, asked);
         }
         self.read_deprecated_tag(ty, attrs, span);
+        self.read_flag_enum(id, attrs);
         match again {
             Some(first) => self.redefined(first, ty, span),
             None => ty,

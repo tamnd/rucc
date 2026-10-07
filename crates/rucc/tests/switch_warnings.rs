@@ -173,3 +173,85 @@ fn an_error_of_switch_enum_follows_the_name_the_warning_was_said_under() {
     assert!(said.contains("a.c:10:1: error: enumeration value 'B' not handled"), "{said}");
     assert!(said.contains("a.c:9:1: warning: enumeration value 'C' not handled"), "{said}");
 }
+
+/// Enumerations whose values are bits, marked `flag_enum` in each of gcc 15's spellings and
+/// places, and one that is not, beside it.
+const FLAGS: &str = "enum __attribute__((flag_enum)) f { R = 1, W = 2, X = 4 };\n\
+    enum g { G1 = 1, G2 = 2 } __attribute__((flag_enum));\n\
+    enum [[clang::flag_enum]] h { H1 = 1 };\n\
+    enum p { P1 = 1, P2 = 2 };\n\
+    int f(enum f a, enum g b, enum h c, enum p d) {\n\
+      switch (a) { case R: case R | W: case 8: return 1; }\n\
+      switch (b) { case G1 | G2: return 2; default: return 3; }\n\
+      switch (c) { case H1: case 3: return 4; }\n\
+      switch (d) { case P1: case P2: case P1 | P2: return 5; }\n\
+      return 0;\n\
+    }\n";
+
+/// What `flag_enum` changes is that a case value no enumerator has is not said, which is all
+/// it changes: an enumerator left out still is, `W` among them though `R | W` has its bit, and
+/// an enumeration without it is as before.
+#[test]
+fn a_flag_enum_is_quiet_about_its_combined_values() {
+    let (ok, said) = compile("flag", &["-Wall", "-Wswitch-enum"], FLAGS);
+    assert!(ok, "{said}");
+    assert_eq!(
+        switch_lines(&said),
+        [
+            "a.c:6:1: warning: enumeration value 'W' not handled in switch [E0852]",
+            "a.c:6:1: warning: enumeration value 'X' not handled in switch [E0852]",
+            "a.c:7:1: warning: enumeration value 'G1' not handled in switch [E0853]",
+            "a.c:7:1: warning: enumeration value 'G2' not handled in switch [E0853]",
+            "a.c:9:32: warning: case value '3' not in enumerated type 'enum p' [E0852]",
+        ],
+        "{said}"
+    );
+    assert!(!said.contains("flag_enum"), "{said}");
+    // gcc 14 has never heard of it, and says so, and its enumerations are as any other.
+    let (ok, said) = compile("flag-old", &["-Wall", "-fgnuc-version=14.2.0"], FLAGS);
+    assert!(ok, "{said}");
+    assert!(said.contains("a.c:1:21: warning: 'flag_enum' attribute directive ignored"), "{said}");
+    assert!(said.contains("a.c:6:22: warning: case value '3' not in enumerated type"), "{said}");
+    assert!(said.contains("a.c:6:34: warning: case value '8' not in enumerated type"), "{said}");
+}
+
+/// The lines of what was said that are about `flag_enum`, each without its column, which gcc
+/// takes from where it was reading and this compiler from the attribute.
+fn flag_enum_lines(said: &str) -> Vec<String> {
+    said.lines()
+        .filter(|line| line.contains("flag_enum"))
+        .map(|line| {
+            let mut parts: Vec<&str> = line.splitn(4, ':').collect();
+            parts.remove(2);
+            parts.join(":")
+        })
+        .collect()
+}
+
+/// `flag_enum` about a type that is not an enumeration is ignored with gcc 15's warning, and
+/// about a declaration or a typedef of an enumeration it is taken without one. An argument to it
+/// is an error.
+#[test]
+fn a_flag_enum_anywhere_else_is_said_in_gcc_s_words() {
+    let source = "struct s { int i; } __attribute__((flag_enum));\n\
+        int x __attribute__((flag_enum));\n\
+        typedef int t __attribute__((flag_enum));\n\
+        [[gnu::flag_enum]] long z;\n\
+        void fn(void) __attribute__((flag_enum));\n\
+        enum e { E } y __attribute__((flag_enum));\n\
+        typedef enum { T1 = 1 } tt __attribute__((flag_enum));\n";
+    let (ok, said) = compile("flag-misplaced", &[], source);
+    assert!(ok, "{said}");
+    let ignored = " warning: 'flag_enum' attribute ignored on non-enum [E0703]";
+    let expected: Vec<String> = (1..=5).map(|line| format!("a.c:{line}:{ignored}")).collect();
+    assert_eq!(flag_enum_lines(&said), expected, "{said}");
+    let (ok, said) = compile("flag-quiet", &["-Wno-attributes"], source);
+    assert!(ok && !said.contains("flag_enum"), "{said}");
+    let (ok, said) = compile("flag-arity", &[], "enum q { Q } __attribute__((flag_enum(1)));\n");
+    assert!(!ok, "{said}");
+    assert!(
+        said.contains("error: wrong number of arguments specified for 'flag_enum' attribute"),
+        "{said}"
+    );
+    assert!(said.contains("expected 0, found 1"), "{said}");
+}
