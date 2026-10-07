@@ -2154,7 +2154,12 @@ impl Checker<'_> {
         let is_static = duration != StorageDuration::Automatic;
         match deduce {
             Some(quals) => self.init_deduced(name, is_static, init, constant, quals, span),
-            None => self.init_object(ty, name, is_static, init, constant, span),
+            None => {
+                let (entries, ty, extent) =
+                    self.init_object(ty, name, is_static, init, constant, span)?;
+                self.tast.set_extent(decl, extent);
+                Some((entries, ty))
+            }
         }
     }
 

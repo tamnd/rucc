@@ -198,6 +198,10 @@ struct Walk {
     /// The value of the element the cursor is on, checked once however many levels look at its
     /// type on the way down.
     cached: Option<(usize, ExprId)>,
+    /// How far into the object the elements of a flexible array member reach, and zero when none
+    /// were written. An element that is all zeroes has no entry, and `{}` is how the kernel ends
+    /// a table it keeps in one, so the entries alone would leave the last elements out.
+    extent: u64,
 }
 
 impl Walk {
@@ -210,6 +214,15 @@ impl Walk {
             constant,
             poisoned: false,
             cached: None,
+            extent: 0,
+        }
+    }
+
+    /// Notes that `reached` elements of the array at `place` were written, which grows the
+    /// object when that array is a flexible array member.
+    fn reach(&mut self, place: Place, kind: Kind, reached: u64) {
+        if let (Kind::Array { len: None, size, .. }, Part::Field(_)) = (kind, place.part) {
+            self.extent = self.extent.max(place.offset + reached * size);
         }
     }
 
@@ -226,10 +239,12 @@ impl Walk {
 }
 
 impl<'a> Checker<'a> {
-    /// The values an initializer stores, and the type the object ended up with.
+    /// The values an initializer stores, the type the object ended up with, and how far into
+    /// the object the elements of a flexible array member reach.
     ///
     /// The type comes back because `int a[] = { 1, 2, 3 }` declares an `int[3]` and the three is
-    /// not written anywhere but here.
+    /// not written anywhere but here. The reach comes back because an element of a flexible
+    /// array member that is all zeroes has no entry and still makes the object larger.
     pub(in crate::check) fn init_object(
         &mut self,
         ty: TypeId,
@@ -238,7 +253,7 @@ impl<'a> Checker<'a> {
         init: ast::InitId,
         constant: bool,
         span: Span,
-    ) -> Option<(InitList, TypeId)> {
+    ) -> Option<(InitList, TypeId, u64)> {
         if self.is_variable_length(ty) {
             // The size is not known until the declaration is reached, so there is nothing for a
             // value to be placed in relative to. C23 lets `= {}` through because zeroing an
@@ -270,7 +285,7 @@ impl<'a> Checker<'a> {
             return None;
         }
         let ty = self.complete(ty, reached);
-        Some((self.tast.add_init_entries(&w.entries), ty))
+        Some((self.tast.add_init_entries(&w.entries), ty, w.extent))
     }
 
     /// The value an initializer stores and the type it deduced for the object it stores it in.
@@ -345,10 +360,12 @@ impl<'a> Checker<'a> {
             return self.poison(span);
         }
         let is_static = self.scopes.at_file_scope();
-        let Some((entries, ty)) = self.init_object(ty, None, is_static, init, false, span) else {
+        let Some((entries, ty, extent)) = self.init_object(ty, None, is_static, init, false, span)
+        else {
             return self.poison(span);
         };
         let decl = self.literal_decl(ty, entries, span);
+        self.tast.set_extent(decl, extent);
         self.tast.expr(Expr::new(ExprKind::CompoundLiteral(decl), ty, Category::Lvalue), span)
     }
 
@@ -500,6 +517,7 @@ impl<'a> Checker<'a> {
             items.bump();
         }
         w.stack.pop();
+        w.reach(place, kind, reached);
         Some(reached)
     }
 
@@ -624,6 +642,7 @@ impl<'a> Checker<'a> {
             }
         }
         w.stack.pop();
+        w.reach(place, kind, high);
         high
     }
 
@@ -669,7 +688,8 @@ impl<'a> Checker<'a> {
             }
             Kind::Array { .. } if self.is_string(expr) => {
                 items.bump();
-                self.string_init(w, sub, expr, item.span);
+                let reached = self.string_init(w, sub, expr, item.span);
+                w.reach(sub, kind, reached);
             }
             // A vector is filled like an array of its lanes and is also a value, which an array
             // is not, so a whole one written here takes the whole sub-object rather than

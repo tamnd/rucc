@@ -11620,6 +11620,25 @@ block0(%0: ptr, %1: i32):
     }
 
     #[test]
+    fn an_element_of_a_flexible_array_member_that_writes_nothing_still_counts() {
+        // `{}` writes no entry and is still an element, which is how the kernel's early command
+        // line parser ends each table of fields it keeps in a flexible array member. The object
+        // used to stop at the last entry, the walk over the fields ran into whatever came next,
+        // and every `arm64.*` and `nokaslr` option was dropped on arm64. gcc and clang give
+        // these 40, 40, 72 and 12 bytes.
+        let text = ir(concat!(
+            "struct d { char n[4]; struct { char m[2]; long f; } fields[]; };\n",
+            "struct d one = { \"ab\", { { \"x\", 1 }, {} } };\n",
+            "struct d zero = { \"ab\", { { \"x\", 1 }, { 0 } } };\n",
+            "struct d far = { \"ab\", .fields[3] = {} };\n",
+            "struct e { int a; int b[]; } elided = { 1, 2, 0 };\n",
+        ));
+        for (name, size) in [("one", 40), ("zero", 40), ("far", 72), ("elided", 12)] {
+            assert!(text.contains(&format!("global @{name} : bytes {size} = ")), "{name}: {text}");
+        }
+    }
+
+    #[test]
     fn a_definition_takes_a_parameter_it_left_unnamed() {
         // The entry block's parameters are the definition's, and one the front end dropped for
         // having no name left the two lists different lengths, which the walk read as an

@@ -234,6 +234,7 @@ pub struct Tast {
     symvers: Map<DeclId, Vec<(String, Span)>>,
     defined_at: Map<DeclId, Span>,
     notices: Map<DeclId, Notices>,
+    extents: Map<DeclId, u64>,
     asms: Vec<Asm>,
     file_asms: Vec<FileAsm>,
 
@@ -543,6 +544,21 @@ impl Tast {
     /// the second of two on one declaration the first, which is what gcc does.
     pub fn record_patchable(&mut self, decl: DeclId, total: u32, before: u32) {
         self.patchable.insert(decl, (total, before));
+    }
+
+    /// Records how far into an object its initializer wrote the elements of a flexible array
+    /// member, which is nothing to record when it wrote none.
+    pub fn set_extent(&mut self, decl: DeclId, extent: u64) {
+        if extent > 0 {
+            self.extents.insert(decl, extent);
+        }
+    }
+
+    /// How large the initializer of an object makes it, which is more than its type when a
+    /// flexible array member was given elements and zero for everything else.
+    #[must_use]
+    pub fn extent(&self, decl: DeclId) -> u64 {
+        self.extents.get(&decl).copied().unwrap_or(0)
     }
 
     /// The total and the part in front of the label a `patchable_function_entry` attribute asked
