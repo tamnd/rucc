@@ -131,6 +131,12 @@ jobs:
             os: ubuntu-24.04
           - target: aarch64-unknown-linux-gnu
             os: ubuntu-24.04-arm
+          # Static binaries, which start on each Linux system with any C library or none. The gnu
+          # rows above stay for one release beside them. tamnd/rucc#3276.
+          - target: x86_64-unknown-linux-musl
+            os: ubuntu-24.04
+          - target: aarch64-unknown-linux-musl
+            os: ubuntu-24.04-arm
           - target: aarch64-apple-darwin
             os: macos-26
           - target: x86_64-apple-darwin
@@ -155,6 +161,17 @@ jobs:
       # above produced.
       - name: size
         run: cargo xtask size --target ${{ matrix.target }} --no-build
+      # A musl binary with a loader or a needed library is not the static binary that the
+      # release says it is, and it would not start on a system without that file. Rust makes a
+      # static PIE, which has a dynamic section and no loader, so the check is for those two.
+      - name: the musl binary is static
+        if: endsWith(matrix.target, '-musl')
+        run: |
+          set -euo pipefail
+          binary="target/${{ matrix.target }}/release/rucc"
+          readelf -lW "$binary" | grep INTERP && { echo "rucc asks for a loader"; exit 1; }
+          readelf -d "$binary" | grep NEEDED && { echo "rucc needs the libraries above"; exit 1; }
+          "$binary" --version
       # The +crt-static in .cargo/config.toml is what keeps the C runtime out of rucc.exe, and
       # a RUSTFLAGS set anywhere replaces it without a word. So the import table of what was just
       # built is read, and any DLL of the Visual C++ runtime or the Universal CRT in it fails the
@@ -277,6 +294,23 @@ jobs:
           "$rucc" --target=x86_64-windows-gnu hello.c -o hello.exe
           file hello.exe
           file hello.exe | grep -q 'PE32+ executable'
+      - uses: actions/download-artifact@v8.0.1
+        with:
+          name: dist-x86_64-unknown-linux-musl
+          path: musl
+      # The static musl binary on a glibc system must build for the glibc row, because that is
+      # the C library the user has. So the row it prints and the program it links are checked.
+      - name: hello world for this machine from the musl archive
+        run: |
+          set -euo pipefail
+          mkdir static
+          tar -xzf musl/*.tar.gz -C static
+          rucc=$(echo static/*/rucc)
+          "$rucc" -dumpmachine
+          "$rucc" -dumpmachine | grep -q 'linux-gnu'
+          printf '#include <stdio.h>\nint main(void) { puts("hello"); return 0; }\n' > native.c
+          "$rucc" native.c -o native
+          ./native | grep -q '^hello$'
 
   publish:
     name: publish
