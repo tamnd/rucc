@@ -44,6 +44,8 @@ pub struct Machine {
     counts: &'static [CountInst],
     /// Whether a `select` of a pointer or a float is lowered. See `TargetInfo::selects_any`.
     selects_any: bool,
+    /// How many bits a pointer has, which is also how wide the index of an address is.
+    pointer_bits: u32,
 }
 
 impl Machine {
@@ -58,6 +60,7 @@ impl Machine {
         Self::with(rucc_cost::for_tuple(module.tuple), Goal::for_size(level.is_size()))
             .counting(target.counts)
             .selecting_any(target.selects_any)
+            .pointing(target.pointer_width)
     }
 
     /// The same machine with the extensions the module is built for, which is what `-m` and
@@ -86,6 +89,22 @@ impl Machine {
         Self { selects_any, ..self }
     }
 
+    /// The same machine with pointers of that many bits, which is what a test that builds one by
+    /// hand wants. [`Machine::of`] takes the target's, and [`Machine::with`] starts at 64.
+    #[must_use]
+    pub const fn pointing(self, pointer_bits: u32) -> Self {
+        Self { pointer_bits, ..self }
+    }
+
+    /// How many bits a pointer has on this target.
+    ///
+    /// An index added to a pointer is as wide as the pointer, so a counter of that width indexes an
+    /// address with no extension in front of it. That is 32 bits on wasm32 and 64 on the others.
+    #[must_use]
+    pub const fn pointer_bits(self) -> u32 {
+        self.pointer_bits
+    }
+
     /// Whether the code generator lowers a `select` of a value of this type.
     ///
     /// Every target lowers one of an integer of 8, 16, 32 or 64 bits, which are the four widths
@@ -110,7 +129,7 @@ impl Machine {
     /// no back end for.
     #[must_use]
     pub const fn with(costs: Option<&'static dyn TargetCosts>, goal: Goal) -> Self {
-        Self { costs, goal, isa: Isa::NONE, counts: &[], selects_any: false }
+        Self { costs, goal, isa: Isa::NONE, counts: &[], selects_any: false, pointer_bits: 64 }
     }
 
     /// A machine nobody has a cost table for, which is what a test that does not care wants.

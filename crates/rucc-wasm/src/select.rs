@@ -1588,9 +1588,13 @@ impl Lower<'_, '_> {
         }
     }
 
-    /// Push an integer of either width as an `i32`, which is what an address and a length are.
+    /// Push an integer of either width as an `i32`, which is what an address and a length are. A
+    /// wide constant is written as its low half, with no `i32.wrap_i64` after it.
     fn push_i32(&mut self, value: Value) -> Result<()> {
-        if self.wide(value) {
+        if let (true, Some(bits)) = (self.wide(value), self.constant(value)) {
+            self.code.i32_const(bits as u32 as i32);
+            Ok(())
+        } else if self.wide(value) {
             self.push(value)?;
             self.code.op(emit::I32_WRAP_I64);
             Ok(())
@@ -1919,8 +1923,7 @@ impl Lower<'_, '_> {
             Opcode::PtrAdd => {
                 self.push(arg(0))?;
                 if self.wide(arg(1)) {
-                    self.push(arg(1))?;
-                    self.code.op(emit::I32_WRAP_I64);
+                    self.push_i32(arg(1))?;
                 } else {
                     self.push_s(arg(1))?;
                 }

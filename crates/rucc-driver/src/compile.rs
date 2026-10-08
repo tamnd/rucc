@@ -5057,6 +5057,27 @@ decl #0 x : int object external static defined
         assert!(!text.contains("\tbr_table"), "{text}");
     }
 
+    /// A loop that reads and writes the same element of a static array walks a pointer on wasm.
+    ///
+    /// wasm32 has a cost table, so ivopts runs. A load has no index and no scale, so the scaled
+    /// index costs a shift and an add at each of the two uses, and one pointer costs less. The step
+    /// of the pointer is one `i32.const`, with no `i32.wrap_i64` (tamnd/rucc#3262).
+    #[test]
+    fn a_loop_over_a_static_array_walks_a_pointer_on_wasm() {
+        let source = "static long long s[256];\n\
+                      void step(void) { for (int i = 0; i < 256; i++) s[i] = s[i] * 3 + 1; }\n";
+        let mut opts = options();
+        opts.target = "wasm32-wasip1".parse::<Triple>().unwrap();
+        opts.emit = EmitKind::Asm;
+        opts.opt_level = rucc_session::OptLevel::O2;
+        let result = run(&opts, source);
+        assert_eq!(result.messages, Vec::<String>::new());
+        let text = result.text();
+        assert!(text.contains("\ti32.const\t8\n\ti32.add"), "{text}");
+        assert!(!text.contains("\ti32.shl"), "{text}");
+        assert!(!text.contains("\ti32.wrap_i64"), "{text}");
+    }
+
     /// The tree form is a stage of the wasm back end, and a native target refuses it.
     #[test]
     fn a_native_target_refuses_the_wasm_tree_form() {

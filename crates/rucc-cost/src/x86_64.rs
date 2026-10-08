@@ -1,7 +1,6 @@
 //! The two cost tables for x86-64, and what the target answers about tuning.
 //!
-//! One file per target, per section 40.12, and this is the only one because x86-64 is the only back
-//! end rucc has. Two tables, per section 40.3, because optimizing for size is a different table
+//! One file per target, per section 40.12. `crate::wasm32` is the other one. Two tables, per section 40.3, because optimizing for size is a different table
 //! rather than a weighting applied to the speed one.
 //!
 //! # What the numbers mean in each table

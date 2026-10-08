@@ -546,13 +546,14 @@ fn consider(
     }) {
         cands.retain(|cand| cand.origin != Origin::Countdown);
     }
-    prune(&mut cands, table, &groups, stats);
+    let index = machine.pointer_bits();
+    prune(&mut cands, table, index, &groups, stats);
     for _ in &cands {
         stats.note(CANDIDATE);
     }
 
     let room = machine.allocatable(RegClass::Integer).unwrap_or(0);
-    let chosen = select(table, &groups, &cands, room);
+    let chosen = select(table, index, &groups, &cands, room);
     for _ in &chosen {
         stats.note(CHOSEN);
     }
@@ -1006,15 +1007,21 @@ fn countdown(func: &Func, count: Count, groups: &[Group]) -> Option<Chrec> {
 /// Section 28.2's third parameter, `iv-always-prune-cand-set-bound`. Below it the set is small
 /// enough that carrying a useless candidate costs nothing, and above it every candidate is a
 /// column in a search that is cubic in the count.
-fn prune(cands: &mut Vec<Cand>, table: &CostTable, groups: &[Group], stats: &mut Stats) {
+fn prune(
+    cands: &mut Vec<Cand>,
+    table: &CostTable,
+    index: u32,
+    groups: &[Group],
+    stats: &mut Stats,
+) {
     if cands.len() <= rucc_cost::param!(heuristics::IV_ALWAYS_PRUNE_CAND_SET_BOUND) {
         return;
     }
     let mut wanted = vec![false; cands.len()];
     for one in groups {
         let best = (0..cands.len())
-            .filter(|&at| !serve(table, one, &cands[at]).is_infinite())
-            .min_by_key(|&at| serve(table, one, &cands[at]));
+            .filter(|&at| !serve(table, index, one, &cands[at]).is_infinite())
+            .min_by_key(|&at| serve(table, index, one, &cands[at]));
         if let Some(at) = best {
             wanted[at] = true;
         }
@@ -1035,7 +1042,7 @@ fn prune(cands: &mut Vec<Cand>, table: &CostTable, groups: &[Group], stats: &mut
 /// [`Cost::INFINITE`] means the candidate cannot express it at all, which is not the same as
 /// expressing it expensively and is the answer whenever the two sequences are not related by a
 /// number this pass can write down.
-fn serve(table: &CostTable, group: &Group, cand: &Cand) -> Cost {
+fn serve(table: &CostTable, index: u32, group: &Group, cand: &Cand) -> Cost {
     // Section 28.4's rewrite, priced. The exit test can be asked of any variable that moves by a
     // step this pass can multiply out, because the limit is that step times the trip count and it
     // is worked out once before the loop. So what the test costs inside the loop is the
@@ -1086,7 +1093,7 @@ fn serve(table: &CostTable, group: &Group, cand: &Cand) -> Cost {
     match group.kind {
         Kind::Address => {
             address_cost_on(table, scale, rest, anchored)
-                + index_cost(table, cand.chrec.ty)
+                + index_cost(table, cand.chrec.ty, index)
                 + base_cost(table, left)
         }
         // A value measured from a pointer is a pointer, and neither kind of value use is one.
@@ -1142,21 +1149,19 @@ fn base_cost(table: &CostTable, left: Option<Anchor>) -> Cost {
 
 /// What reading this candidate as the index of an addressing mode costs before the mode itself.
 ///
-/// An index register is a pointer wide on every one of rucc's targets, so a candidate counting in
-/// something narrower is extended first and the extension is an instruction. A candidate already
-/// that wide pays nothing, and neither does a pointer, which is what a group's own candidate is.
+/// An index register is a pointer wide, and `index` is that width in bits: 64 on the native targets
+/// and 32 on wasm32. A candidate counting in something narrower is extended first and the extension
+/// is an instruction. A candidate already that wide pays nothing, and neither does a pointer, which
+/// is what a group's own candidate is. On wasm32 an `int` counter is already that wide, so a loop
+/// that keeps its counter for another use indexes off it instead of walking a second pointer.
 ///
 /// Per use, like everything else `serve` answers, and that is the pessimistic reading: two uses a
 /// block apart share one extension in the emitted code and this charges for two. The direction is
 /// deliberate. What it overprices is keeping the counter, which is the side section 28.7 says to
 /// be careful about being wrong on, and a group large enough for the difference to decide
 /// anything is a group where the pointer was going to win regardless.
-fn index_cost(table: &CostTable, ty: Type) -> Cost {
-    if ty.is_int() && ty.bits() < Width::W64.bits() {
-        Cost::cycles(table.movsx)
-    } else {
-        Cost::ZERO
-    }
+fn index_cost(table: &CostTable, ty: Type, index: u32) -> Cost {
+    if ty.is_int() && ty.bits() < index { Cost::cycles(table.movsx) } else { Cost::ZERO }
 }
 
 /// How many of the candidate's steps make one of the group's, when it is a whole number of them.
@@ -1294,9 +1299,10 @@ fn width(_rest: Plain) -> Width {
 /// an `add` is the unit the preference is in whether or not it is written that way, and writing it
 /// that way is what makes the constant mean the same thing on a table it was not chosen against.
 ///
-/// It changes no number today. x86-64 is the only target with a table, and both of its goals put an
-/// `add` at one unit, the speed one because that is the latency and the size one because `bytes(2)`
-/// is a cycle where the two meet. So the raw three was already three increments at `-O2` and at
+/// It changes no number today. x86-64 and wasm32 are the targets with a table, and both goals of
+/// each put an `add` at one unit. On x86-64 the speed one has it because that is the latency and
+/// the size one because `bytes(2)` is a cycle where the two meet, and on wasm32 an `add` is one
+/// host instruction and one byte. So the raw three was already three increments at `-O2` and at
 /// `-Os`, by coincidence rather than by construction, and the next table anybody writes is where
 /// the difference shows up.
 ///
@@ -1326,6 +1332,7 @@ fn upkeep(table: &CostTable, cand: &Cand) -> Cost {
 /// expensive set, it is not an answer.
 fn total(
     table: &CostTable,
+    index: u32,
     groups: &[Group],
     cands: &[Cand],
     set: &[usize],
@@ -1333,7 +1340,7 @@ fn total(
 ) -> Option<Cost> {
     let mut cost = Cost::ZERO;
     for group in groups {
-        let best = set.iter().map(|&at| serve(table, group, &cands[at])).min()?;
+        let best = set.iter().map(|&at| serve(table, index, group, &cands[at])).min()?;
         if best.is_infinite() {
             return None;
         }
@@ -1359,7 +1366,13 @@ fn total(
 /// whichever single change, an addition or a removal, most reduces the total, and stops when
 /// nothing does. Not exhaustive even below `iv-consider-all-candidates-bound`, per section 28.3,
 /// because what the exhaustive search is worth over the greedy one has never been published.
-fn select(table: &CostTable, groups: &[Group], cands: &[Cand], room: u32) -> Vec<usize> {
+fn select(
+    table: &CostTable,
+    index: u32,
+    groups: &[Group],
+    cands: &[Cand],
+    room: u32,
+) -> Vec<usize> {
     let mut set: Vec<usize> =
         (0..cands.len()).filter(|&at| cands[at].origin == Origin::Original).collect();
 
@@ -1368,7 +1381,7 @@ fn select(table: &CostTable, groups: &[Group], cands: &[Cand], room: u32) -> Vec
     // addresses. Every group got a candidate made for it in `candidates`, so adding that one back
     // is always enough to make the starting set an answer.
     for group in groups {
-        let served = set.iter().any(|&at| !serve(table, group, &cands[at]).is_infinite());
+        let served = set.iter().any(|&at| !serve(table, index, group, &cands[at]).is_infinite());
         if served {
             continue;
         }
@@ -1382,11 +1395,11 @@ fn select(table: &CostTable, groups: &[Group], cands: &[Cand], room: u32) -> Vec
     set.sort_unstable();
     set.dedup();
 
-    let Some(mut best) = total(table, groups, cands, &set, room) else { return set };
+    let Some(mut best) = total(table, index, groups, cands, &set, room) else { return set };
     loop {
         let mut moved = None;
         let mut take = |tried: Vec<usize>| {
-            let Some(cost) = total(table, groups, cands, &tried, room) else { return };
+            let Some(cost) = total(table, index, groups, cands, &tried, room) else { return };
             if cost < best {
                 best = cost;
                 moved = Some(tried);
@@ -2550,11 +2563,13 @@ mod tests {
             origin: Origin::Original,
         };
         let mode = table.addr_cost(AddrMode::BaseIndexScale);
-        assert_eq!(serve(table, &group, &counting(Type::int(64))), mode);
+        assert_eq!(serve(table, 64, &group, &counting(Type::int(64))), mode);
         assert_eq!(
-            serve(table, &group, &counting(Type::int(32))),
+            serve(table, 64, &group, &counting(Type::int(32))),
             mode + Cost::cycles(table.movsx)
         );
+        // Where a pointer is 32 bits, as on wasm32, the `i32` counter is already an index.
+        assert_eq!(serve(table, 32, &group, &counting(Type::int(32))), mode);
     }
 
     #[test]
@@ -2621,12 +2636,16 @@ mod tests {
             Cand { chrec: moving(-1), origin: Origin::Countdown },
         ];
         let room = 8;
-        let cost = |set: &[usize]| total(table, &groups, &cands, set, room).unwrap();
+        let cost = |set: &[usize]| total(table, 64, &groups, &cands, set, room).unwrap();
 
         assert_eq!(cost(&[0, 1]), cost(&[0]), "adding it next to the counter is a wash");
-        assert_eq!(total(table, &groups, &cands, &[], room), None, "and nothing serves nothing");
+        assert_eq!(
+            total(table, 64, &groups, &cands, &[], room),
+            None,
+            "and nothing serves nothing"
+        );
         assert!(cost(&[1]) < cost(&[0]), "yet the exchange itself is worth making");
-        assert_eq!(select(table, &groups, &cands, room), vec![1]);
+        assert_eq!(select(table, 64, &groups, &cands, room), vec![1]);
     }
 
     #[test]
@@ -2799,13 +2818,13 @@ mod tests {
             },
             origin: Origin::Original,
         };
-        assert_eq!(serve(table, &group, &own), table.addr_cost(AddrMode::Base));
+        assert_eq!(serve(table, 64, &group, &own), table.addr_cost(AddrMode::Base));
         assert_eq!(
-            serve(table, &group, &counter),
+            serve(table, 64, &group, &counter),
             table.addr_cost(AddrMode::BaseIndexScale) + Cost::cycles(table.lea)
         );
         group.kind = super::Kind::Compare;
-        assert_eq!(serve(table, &group, &counter), Cost::INFINITE);
+        assert_eq!(serve(table, 64, &group, &counter), Cost::INFINITE);
     }
 
     /// `p[i + k]` for a `k` the loop was handed, which is #983.
