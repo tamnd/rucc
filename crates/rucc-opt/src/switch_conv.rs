@@ -37,6 +37,10 @@
 //! arithmetic and the run that covers a whole type right. Writing a second range check here would
 //! be a second place for section 24.6's overflow to be got wrong.
 //!
+//! The next `simplify-cfg` makes such a `switch` a `br_if` on that one unsigned comparison, so that
+//! the passes that read a branch see it. The second `phiopt` then makes the arm and the default
+//! one `select` where both only work out a value, which is what clang writes for this shape.
+//!
 //! The default is untouched for the reason section 24.6 gives, which is that the default is never
 //! dropped. A value that matches no case went to the default before this ran and goes to the same
 //! place afterwards, because the edge it goes down is the same edge.

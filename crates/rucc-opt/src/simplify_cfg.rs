@@ -161,7 +161,8 @@ use std::collections::VecDeque;
 use rucc_base::Idx;
 use rucc_base::hash::{Map, Set};
 use rucc_ir::{
-    Block, BlockCall, Def, Extra, Func, Imm, Inst, InstData, Opcode, SwitchInfo, Type, Value,
+    Block, BlockCall, Def, Extra, Func, Hint, Imm, Inst, InstData, IntPred, Opcode, SwitchInfo,
+    Type, Value,
 };
 
 use crate::copy::addressed;
@@ -255,6 +256,10 @@ impl Pass for SimplifyCfg {
         // nobody can see and charge the two steps below for walking blocks that are not there.
         sweep(func, an, &mut stats);
         let undefaulted = undefault(func, fuel, &mut stats);
+        // After the defaults, because a default made one of the cases can leave the rest one run.
+        if range_branches(func, fuel, &mut stats) {
+            an.clear();
+        }
         if unnegate(func, fuel, &mut stats) {
             an.clear();
         }
@@ -413,6 +418,116 @@ fn undefault(func: &mut Func, fuel: &mut Fuel, stats: &mut Stats) -> bool {
         changed = true;
     }
     changed
+}
+
+/// Recorded once for each `switch` whose cases were one run of values going to one place.
+const RANGED: &str = "switch whose cases are one run of values going to one place made a branch on \
+                      one compare";
+
+/// Recorded for such a `switch` that would have been made a branch if there had been fuel.
+const NO_FUEL_RANGED: &str =
+    "switch whose cases are one run of values going to one place kept, the pass ran out of fuel";
+
+/// Turns a `switch` whose cases all go to one place, and whose case values are one run with no
+/// hole in it, into a branch on one unsigned compare, and says whether any turned.
+///
+/// `switch (x) { case 0: ... case 15: return x + 1; default: return 0; }` is a branch on
+/// `x - low <= high - low` at the end, because the lowering writes a run of cases as one
+/// subtraction and one unsigned compare. While it stays a `switch` in the middle end, no pass that
+/// reads a `br_if` sees it. `crate::phiopt` is the pass that matters: the two arms above are a
+/// diamond that is one `select`, and as a `switch` it stayed a branch. `crate::switch_conv` leaves
+/// exactly this shape, so every switch it turns into arithmetic came out as a branch that a stream
+/// of values mispredicts (tamnd/rucc#3262). LLVM does the same in `turnSwitchRangeIntoICmp`.
+///
+/// The labels are read with the sign of the switch's type and sorted, and the subtraction wraps,
+/// so a run that crosses zero is one run. A run that covers every value of the type leaves the
+/// default nothing, and is left for the lowering. One case is an equality, and a run from zero has
+/// no subtraction. Where every case edge has a hint, the edge to the run carries their sum.
+fn range_branches(func: &mut Func, fuel: &mut Fuel, stats: &mut Stats) -> bool {
+    let mut changed = false;
+    for block in func.blocks().collect::<Vec<Block>>() {
+        let Some(term) = func.terminator(block) else { continue };
+        let Extra::Switch(info) = func[term].extra else { continue };
+        let Some(&value) = func[func[term].args].first() else { continue };
+        let calls: Vec<BlockCall> = func[func[info].targets].to_vec();
+        let Some((&default, cases)) = calls.split_first() else { continue };
+        let Some(&first) = cases.first() else { continue };
+        let same =
+            |call: &BlockCall| call.block == first.block && func[call.args] == func[first.args];
+        if !cases.iter().all(same) || same(&default) {
+            continue;
+        }
+        let ty = func[value].ty;
+        if !ty.is_int() || ty.bits() >= 128 {
+            continue;
+        }
+        let mut labels: Vec<i128> =
+            func[func[info].cases].iter().map(|case| case.signed(ty)).collect();
+        labels.sort_unstable();
+        if labels.windows(2).any(|pair| pair[1] != pair[0] + 1) {
+            continue;
+        }
+        let (low, high) = (labels[0], labels[labels.len() - 1]);
+        let span = high - low;
+        if !u128::try_from(span).is_ok_and(|span| span < (1u128 << ty.bits()) - 1) {
+            continue;
+        }
+        if !fuel.take() {
+            stats.missed(NO_FUEL_RANGED);
+            continue;
+        }
+        let cond = if span == 0 {
+            let low = constant_before(func, term, ty, low);
+            compare_before(func, term, IntPred::Eq, value, low)
+        } else {
+            let from = if low == 0 {
+                value
+            } else {
+                let low = constant_before(func, term, ty, low);
+                let args = func.push_values(&[value, low]);
+                emit_before(func, term, InstData { args, ..InstData::new(Opcode::Sub) }, ty)
+            };
+            let span = constant_before(func, term, ty, span);
+            compare_before(func, term, IntPred::Ule, from, span)
+        };
+        let hints: Option<u32> = cases.iter().map(|call| call.hint.taken()).sum();
+        let hint = hints.map_or(Hint::NONE, Hint::parts);
+        let targets = func.push_block_calls(&[BlockCall { hint, ..first }, default]);
+        let args = func.push_values(&[cond]);
+        let data = &mut func[term];
+        data.opcode = Opcode::BrIf;
+        data.args = args;
+        data.extra = Extra::Targets(targets);
+        stats.optimized(RANGED);
+        changed = true;
+    }
+    changed
+}
+
+/// An integer constant of that type, written just before `before`.
+fn constant_before(func: &mut Func, before: Inst, ty: Type, value: i128) -> Value {
+    let at = func.add_imm(Imm::int(value, ty));
+    emit_before(
+        func,
+        before,
+        InstData { extra: Extra::Imm(at), ..InstData::new(Opcode::IConst) },
+        ty,
+    )
+}
+
+/// A compare of two integers, written just before `before`.
+fn compare_before(func: &mut Func, before: Inst, pred: IntPred, a: Value, b: Value) -> Value {
+    let args = func.push_values(&[a, b]);
+    let data = InstData { args, extra: Extra::IntPred(pred), ..InstData::new(Opcode::ICmp) };
+    emit_before(func, before, data, Type::I1)
+}
+
+/// One instruction with one result, written just before `before` with its source position.
+fn emit_before(func: &mut Func, before: Inst, data: InstData, ty: Type) -> Value {
+    let span = func.span(before);
+    let inst = func.create_inst(data, &[ty], span);
+    func.insert_before(inst, before);
+    func[inst].first_result.expect("one result was asked for")
 }
 
 /// Turns a branch on `!c` into a branch on `c` with its arms the other way round, and says
@@ -1786,6 +1901,78 @@ block2:
         let stats = simplify(&mut func);
         assert_eq!(stats.count(Kind::Optimized, super::FOLDED), 1);
         assert_eq!(blocks(&func), [0]);
+    }
+
+    /// A function that switches on a parameter of type `ty`, every case going to block 1 and the
+    /// default to block 2, after the pass.
+    fn ranged(ty: Type, labels: &[i128]) -> (Func, Stats) {
+        let mut names = Interner::new();
+        let signature = Signature::new().with_params(&[ty]);
+        let mut func = Func::new(names.intern("f"), signature);
+        let entry = func.create_block();
+        let hit = func.create_block();
+        let miss = func.create_block();
+        let value = func.append_param(entry, ty);
+        let cases: Vec<(i128, Block)> = labels.iter().map(|&label| (label, hit)).collect();
+        Builder::new(&mut func, entry).switch(value, miss, &cases);
+        Builder::new(&mut func, hit).ret(&[]);
+        Builder::new(&mut func, miss).ret(&[]);
+        let stats = simplify(&mut func);
+        (func, stats)
+    }
+
+    /// The opcodes of the entry block, and the predicate of the compare in it if it has one.
+    fn entry_ops(func: &Func) -> (Vec<Opcode>, Option<IntPred>) {
+        let entry = Block::from_usize(0);
+        let ops = func.insts(entry).map(|inst| func[inst].opcode).collect();
+        let pred = func.insts(entry).find_map(|inst| match func[inst].extra {
+            Extra::IntPred(pred) => Some(pred),
+            _ => None,
+        });
+        (ops, pred)
+    }
+
+    #[test]
+    fn a_switch_whose_cases_are_one_run_to_one_place_is_one_unsigned_compare() {
+        let (func, stats) = ranged(Type::int(32), &[6, 3, 5, 4]);
+        assert_eq!(stats.count(Kind::Optimized, super::RANGED), 1);
+        let (ops, pred) = entry_ops(&func);
+        let want = [Opcode::IConst, Opcode::Sub, Opcode::IConst, Opcode::ICmp, Opcode::BrIf];
+        assert_eq!(ops, want);
+        assert_eq!(pred, Some(IntPred::Ule));
+        assert_eq!(goes_to(&func, 0), [1, 2]);
+    }
+
+    #[test]
+    fn a_run_from_zero_has_no_subtraction_and_one_case_is_an_equality() {
+        let (func, _) = ranged(Type::int(32), &[0, 1, 2]);
+        assert_eq!(
+            entry_ops(&func),
+            (vec![Opcode::IConst, Opcode::ICmp, Opcode::BrIf], Some(IntPred::Ule))
+        );
+        let (func, _) = ranged(Type::int(32), &[7]);
+        assert_eq!(
+            entry_ops(&func),
+            (vec![Opcode::IConst, Opcode::ICmp, Opcode::BrIf], Some(IntPred::Eq))
+        );
+    }
+
+    #[test]
+    fn a_run_that_crosses_zero_is_one_run() {
+        let (func, stats) = ranged(Type::int(32), &[-1, 0, 1]);
+        assert_eq!(stats.count(Kind::Optimized, super::RANGED), 1);
+        assert_eq!(entry_ops(&func).1, Some(IntPred::Ule));
+    }
+
+    #[test]
+    fn a_run_with_a_hole_or_over_the_whole_type_keeps_its_switch() {
+        let (func, stats) = ranged(Type::int(32), &[1, 3]);
+        assert_eq!(stats.count(Kind::Optimized, super::RANGED), 0);
+        assert_eq!(terminator(&func, 0), Opcode::Switch);
+        let every: Vec<i128> = (-128..128).collect();
+        let (func, stats) = ranged(Type::int(8), &every);
+        assert_eq!(stats.count(Kind::Optimized, super::RANGED), 0);
+        assert_eq!(terminator(&func, 0), Opcode::Switch);
     }
 
     #[test]
