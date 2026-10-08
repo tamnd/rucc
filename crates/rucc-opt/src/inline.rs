@@ -993,11 +993,14 @@ fn settle(
     }
     state.insert(id, State::Settling);
     // The caller's own locals, before anything is copied into it, which is what the growth of its
-    // frame is measured against.
-    let own = frame(&module[id], module.datalayout);
+    // frame is measured against. Measured the first time a call asks or just before the first
+    // splice, whichever comes first, which is the same answer as measuring here since nothing has
+    // changed the caller yet. Most callers have no call this pass takes, and the measure runs the
+    // scalar replacement's analysis over the whole of them. tamnd/rucc#3052.
+    let mut own: Option<u64> = None;
     // The frame as it was last measured and every local a splice has copied in since, which is
     // never less than the frame it now has. See the bound in the loop below.
-    let mut grown = own;
+    let mut grown = 0;
     // The calls as the function was written. A call that arrives inside a body being inlined is
     // one the callee's own settling already had its chance at. A function that asked not to be
     // optimized is left with its calls, except for the ones that are a promise.
@@ -1158,6 +1161,10 @@ fn settle(
         // only worked out again for the calls the bound cannot let through. That is how the heap
         // keeps its frames too, and on duktape.c at `-O2` measuring the frame for each call was
         // most of what this pass cost. tamnd/rucc#3052.
+        let own = *own.get_or_insert_with(|| {
+            grown = frame(&module[id], module.datalayout);
+            grown
+        });
         if kind != Kind::Always {
             let body = pool.growth(&module[callee], module.datalayout);
             if !fits(own, grown, body, how.growth) {
