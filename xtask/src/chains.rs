@@ -23,6 +23,10 @@ const DIRS: &[&str] = &["crates", "runtime", "build-tools", "xtask"];
 /// this file does not trip its own check.
 const AND_LET: &str = "\x26\x26 let ";
 
+/// How many lines from an `if let` or a `while let` are read for its condition, which is more than
+/// rustfmt spreads one over in this tree.
+const CONDITION_LINES: usize = 40;
+
 /// Checks every Rust file under [`DIRS`] for a let chain.
 pub(crate) fn chains() -> Result<()> {
     let root = root();
@@ -67,14 +71,14 @@ fn chained(text: &str) -> Vec<usize> {
             continue;
         }
         // The condition, from here up to the brace that opens the body, which rustfmt may have
-        // spread over several lines.
-        let mut condition = String::new();
-        for more in &lines[at..] {
+        // spread over several lines. A line can end with the brace of a struct pattern too, so
+        // the lines go to [`joined`] together, and it finds the brace of the body.
+        // The first line starts at the keyword, so that the brace of an `} else` before it does
+        // not count.
+        let mut condition = format!("{trimmed}\n");
+        for more in lines[at + 1..].iter().take(CONDITION_LINES) {
             condition.push_str(more);
             condition.push('\n');
-            if more.trim_end().ends_with('{') {
-                break;
-            }
         }
         if joined(&condition) {
             found.push(at + 1);
@@ -95,9 +99,10 @@ fn joined(condition: &str) -> bool {
         match b {
             b'(' | b'[' => depth += 1,
             b')' | b']' => depth -= 1,
-            // The brace that opens the body is where the condition ends. One inside a bracket is a
-            // struct literal or a block in an argument.
-            b'{' if depth == 0 => return false,
+            // The brace that opens the body is where the condition ends. One before the `=` is a
+            // struct pattern, and one inside a bracket is a struct literal or a block in an
+            // argument.
+            b'{' if depth == 0 && after => return false,
             b'{' => depth += 1,
             b'}' => depth -= 1,
             b'=' if depth == 0
@@ -140,6 +145,30 @@ mod tests {
     #[test]
     fn a_condition_after_a_let_on_one_line_is_a_chain() {
         assert_eq!(chained("while let Some(x) = it.next() \x26\x26 x > 3 {\n}\n"), [1]);
+    }
+
+    #[test]
+    fn a_condition_after_a_struct_pattern_is_a_chain() {
+        let text = "if let Kind::Named { name: carried, .. } = kind(of)\n    \x26\x26 carried == name\n{\n}\n";
+        assert_eq!(chained(text), [1]);
+    }
+
+    #[test]
+    fn a_condition_after_a_struct_pattern_on_its_own_lines_is_a_chain() {
+        let text = "if let Kind::Named {\n    name: carried,\n    ..\n} = kind(of)\n    \x26\x26 carried == name\n{\n}\n";
+        assert_eq!(chained(text), [1]);
+    }
+
+    #[test]
+    fn an_else_if_let_with_a_conjunction_in_its_body_is_not_a_chain() {
+        let text = "if a {\n} else if let Some(x) = next {\n    b \x26\x26 c;\n}\n";
+        assert!(chained(text).is_empty());
+    }
+
+    #[test]
+    fn a_struct_pattern_alone_is_not_a_chain() {
+        let text = "if let Kind::Named { name, .. } = kind(of) {\n    a \x26\x26 b;\n}\n";
+        assert!(chained(text).is_empty());
     }
 
     #[test]

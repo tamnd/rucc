@@ -644,8 +644,7 @@ impl Walk<'_> {
         }
         // A typedef with an attribute is a type of its own that carries the name, and its entry is
         // the name's entry. Writing one over the other would be the name pointing at itself.
-        if let TypeKind::Typedef { name: carried, .. } = self.types.kind(of)
-            && carried == name
+        if matches!(self.types.kind(of), TypeKind::Typedef { name: carried, .. } if carried == name)
         {
             let at = self.told(of);
             self.aliases.insert((name, of), at);
