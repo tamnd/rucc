@@ -25,6 +25,10 @@
 //! And whether the vector registers are there to keep a value in, which is not on the module at all
 //! but on the command line, and is here so that `crate::sroa` can ask it the same way.
 //!
+//! And which functions a call to can come back twice, which `crate::tailrec` asks. That one needs
+//! the names as well as the module, because `setjmp` is known by its name, so it is added by
+//! [`Outside::knowing_twice`] rather than by [`Outside::of`].
+//!
 //! # Why a copy and not a borrow
 //!
 //! The same argument `crate::image` makes, and the pipeline does the same thing with the result: one
@@ -43,8 +47,8 @@
 //! conservative direction, so a test or a tool that builds a cache without a pipeline is slower
 //! rather than wrong.
 
-use rucc_base::Symbol;
-use rucc_base::hash::Map;
+use rucc_base::hash::{Map, Set};
+use rucc_base::{Interner, Symbol};
 use rucc_ir::{Attrs, DataLayout, Meta, Module};
 
 /// What one name in the module refers to, as much of it as the oracle asks about.
@@ -70,6 +74,9 @@ pub struct Outside {
     /// Whether a sixteen byte vector of four `int` or two `long` may be a value. See
     /// [`Self::with_vectors`].
     vectors: bool,
+    /// The functions a call to can come back twice, or nothing when this was built without the
+    /// names. See [`Self::knowing_twice`].
+    twice: Option<Set<Symbol>>,
 }
 
 impl Outside {
@@ -88,7 +95,28 @@ impl Outside {
         }
         // In the order the module has them, so a node's own index is where its parent sits here.
         let parents = module.metadata().map(|node| module[node].parent()).collect();
-        Self { names, parents, layout: Some(module.datalayout), vectors: false }
+        Self { names, parents, layout: Some(module.datalayout), vectors: false, twice: None }
+    }
+
+    /// The same facts, with the functions of the module that a call to can come back twice, which
+    /// is what [`Module::returns_twice`] says of each name.
+    #[must_use]
+    pub fn knowing_twice(self, module: &Module, names: &Interner) -> Self {
+        let twice = module
+            .funcs()
+            .map(|id| module[id].name)
+            .filter(|&name| module.returns_twice(name, names))
+            .collect();
+        Self { twice: Some(twice), ..self }
+    }
+
+    /// Whether a call to that name can come back twice.
+    ///
+    /// True for every name when this was built without the names, which is the conservative
+    /// answer.
+    #[must_use]
+    pub fn may_return_twice(&self, name: Symbol) -> bool {
+        self.twice.as_ref().is_none_or(|twice| twice.contains(&name))
     }
 
     /// The same facts, saying the module is built for an x86-64 with SSE2, where the back end
