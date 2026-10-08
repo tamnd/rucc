@@ -693,9 +693,8 @@ pub const IV_ALWAYS_PRUNE_CAND_SET_BOUND: usize = 10;
 /// turn and nothing else, so an `add` is the unit this preference is in whether or not it is
 /// written that way.
 ///
-/// Writing it that way changes no number today. x86-64 is the only target with a table, and both of
-/// its goals put an `add` at one unit, the speed one because that is the latency and the size one
-/// because `bytes(2)` is a cycle where the two meet. What it buys is that the constant still means
+/// Writing it that way changes no number today. x86-64 and wasm32 are the targets with a table,
+/// and both goals of each put an `add` at one unit. What it buys is that the constant still means
 /// three increments on the next table anybody writes, rather than three of whatever that table
 /// happens to call a unit.
 ///

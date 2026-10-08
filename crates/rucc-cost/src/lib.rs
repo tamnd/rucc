@@ -39,6 +39,7 @@ pub mod cycles;
 pub mod heuristics;
 pub mod table;
 pub mod tune;
+pub mod wasm32;
 pub mod x86_64;
 
 pub use cost::{Complexity, Cost};
@@ -186,19 +187,20 @@ pub trait TargetCosts: Send + Sync {
 
 /// The costs for a target, or nothing for one nobody has written a table for.
 ///
-/// x86-64 is the only answer today, because it is the only back end rucc has. The function exists
-/// anyway so that the second target is a file and a match arm rather than a redesign.
+/// x86-64 and wasm32 have tables. The function exists so that each target is a file and a match
+/// arm rather than a redesign.
 #[must_use]
 pub fn for_arch(arch: Arch) -> Option<&'static dyn TargetCosts> {
     match arch {
         Arch::X86_64 => Some(x86_64::COSTS),
+        Arch::Wasm32 => Some(wasm32::COSTS),
         _ => None,
     }
 }
 
 /// The costs for the target a tuple names, which is what a caller holding a module asks.
 ///
-/// Two enumerations name the same three machines. `rucc_tuple::Arch` is what a target tuple
+/// Two enumerations name the same machines. `rucc_tuple::Arch` is what a target tuple
 /// carries and it can spell architectures rucc has no back end for, and [`Arch`] is what the cost
 /// tables are keyed by because it is the list of architectures a back end exists for. So the
 /// mapping is partial, and everything it does not name answers the same as an architecture with a
@@ -212,6 +214,7 @@ pub fn for_tuple(tuple: TargetTuple) -> Option<&'static dyn TargetCosts> {
         rucc_tuple::Arch::X86_64 => Arch::X86_64,
         rucc_tuple::Arch::Aarch64 => Arch::Aarch64,
         rucc_tuple::Arch::Riscv64 => Arch::Riscv64,
+        rucc_tuple::Arch::Wasm32 => Arch::Wasm32,
         _ => return None,
     };
     for_arch(arch)
@@ -227,6 +230,14 @@ mod tests {
         let costs = for_arch(Arch::X86_64).expect("x86-64 is the back end rucc has");
         assert_eq!(costs.name(), "x86-64");
         assert!(!costs.table(Goal::Speed).add.is_infinite());
+    }
+
+    #[test]
+    fn a_wasm_tuple_gets_the_wasm_costs() {
+        let tuple: rucc_tuple::TargetTuple = "wasm32-wasip1".parse().expect("a tuple rucc knows");
+        let costs = super::for_tuple(tuple).expect("wasm32 has a table");
+        assert_eq!(costs.name(), "wasm32");
+        assert_eq!(for_arch(Arch::Wasm32).map(|c| c.name()), Some("wasm32"));
     }
 
     #[test]

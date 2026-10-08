@@ -104,8 +104,8 @@ pub enum Arch {
     Riscv64,
     /// 32-bit x86, the i386 of the psABI and the i686 of a triple, which issue #2247 brings up.
     X86,
-    /// 32-bit WebAssembly. The front end knows it and there is no backend yet, so the driver
-    /// stops before code generation. Design: #2863, and the WebAssembly plan, decision D1.
+    /// 32-bit WebAssembly. The back end is the `rucc-wasm` crate. Design: #2863, and the
+    /// WebAssembly plan, decision D1.
     Wasm32,
 }
 
