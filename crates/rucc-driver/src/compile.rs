@@ -4995,6 +4995,27 @@ decl #0 x : int object external static defined
         assert!(result.text().is_empty());
     }
 
+    /// A loop that counts bits is one count on wasm, as on a native target with the instruction.
+    ///
+    /// WebAssembly has `popcnt`, `clz` and `ctz` at both widths in its first version, so the loop
+    /// deletion pass takes the loop out at `-O2` and the back end writes the one operator. clang
+    /// does the same. Before the target had a table of its counts the loop stayed (tamnd/rucc#3262).
+    #[test]
+    fn a_loop_that_counts_bits_is_one_count_on_wasm() {
+        let source = "int ones(unsigned x) { int n = 0; while (x) { x &= x - 1; n++; } return n; }\n\
+                      int width(unsigned long long x) { int n = 0; while (x) { x >>= 1; n++; } return n; }\n";
+        let mut opts = options();
+        opts.target = "wasm32-wasip1".parse::<Triple>().unwrap();
+        opts.emit = EmitKind::Asm;
+        opts.opt_level = rucc_session::OptLevel::O2;
+        let result = run(&opts, source);
+        assert_eq!(result.messages, Vec::<String>::new());
+        let text = result.text();
+        assert!(text.contains("\ti32.popcnt"), "{text}");
+        assert!(text.contains("\ti64.clz"), "{text}");
+        assert!(!text.contains("\tloop"), "{text}");
+    }
+
     /// The tree form is a stage of the wasm back end, and a native target refuses it.
     #[test]
     fn a_native_target_refuses_the_wasm_tree_form() {
