@@ -249,7 +249,7 @@ options:
   -S                     compile only, emit assembly
   -E                     preprocess only
   -o <file>              write output to <file>, or to standard output for -
-  -D <name>[=<value>], -U <name>      define a macro, or undefine one after every -D
+  -D <name>[=<value>], -U <name>      define or undefine a macro, in command line order
   -I <dir>               add <dir> to the include search path
   -iquote -isystem -idirafter <dir>   the other chains, -nostdinc drops ours
   -I-, -iprefix <p>, -iwithprefix[before] <dir>   the older spellings of those
@@ -742,6 +742,13 @@ fn switches(args: &[String]) -> Vec<String> {
         }
     }
     out
+}
+
+/// The name of the macro that `-D` defines: what comes before the `=` and before the `(` of a
+/// function-like macro.
+fn macro_name(define: &str) -> &str {
+    let name = define.split('=').next().unwrap_or_default();
+    name.split('(').next().unwrap_or_default()
 }
 
 /// Where the configuration files are: `<prefix>/lib/rucc` beside the binary in `<prefix>/bin`,
@@ -1496,12 +1503,19 @@ pub fn parse_args(args: &[String]) -> Result<Action, CliError> {
             // `-DFOO`, `-D FOO` and the same for `-U` and `-I`. Both forms are in wide use
             // and a build system may produce either, so both are read here rather than
             // being normalised by whatever generated the command line.
+            // GCC reads -D and -U in command line order, so the last one for a name decides. A
+            // makefile that writes `-U_FORTIFY_SOURCE -D_FORTIFY_SOURCE=2` after the flags of a
+            // distribution gets level 2. So each flag takes back an earlier flag of the other
+            // kind for the same name.
             _ if arg.starts_with("-D") => {
                 let value = joined_or_next(arg, 2, args, &mut i)?;
+                let name = macro_name(&value).to_owned();
+                opts.undefines.retain(|undefine| *undefine != name);
                 opts.defines.push(value);
             }
             _ if arg.starts_with("-U") => {
                 let value = joined_or_next(arg, 2, args, &mut i)?;
+                opts.defines.retain(|define| macro_name(define) != value);
                 opts.undefines.push(value);
             }
             _ if arg.starts_with("-I") => {
@@ -7084,6 +7098,20 @@ mod tests {
         let (opts, _) = compile(&["-DFOO=1", "-D", "BAR", "-UBAZ", "-U", "QUX", "a.c"]);
         assert_eq!(opts.defines, ["FOO=1", "BAR"]);
         assert_eq!(opts.undefines, ["BAZ", "QUX"]);
+    }
+
+    #[test]
+    fn the_last_dash_d_or_dash_u_for_a_name_decides() {
+        let line = ["-D_FORTIFY_SOURCE=3", "-U_FORTIFY_SOURCE", "-D_FORTIFY_SOURCE=2", "a.c"];
+        let (opts, _) = compile(&line);
+        assert_eq!(opts.defines, ["_FORTIFY_SOURCE=2"]);
+        assert!(opts.undefines.is_empty());
+        let (opts, _) = compile(&["-DF(x)=x", "-DG", "-UF", "-UG", "-DG=2", "a.c"]);
+        assert_eq!(opts.defines, ["G=2"]);
+        assert_eq!(opts.undefines, ["F"]);
+        let (opts, _) = compile(&["-DX=1", "-DX=2", "-UY", "a.c"]);
+        assert_eq!(opts.defines, ["X=1", "X=2"]);
+        assert_eq!(opts.undefines, ["Y"]);
     }
 
     #[test]

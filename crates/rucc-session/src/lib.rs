@@ -2674,7 +2674,8 @@ pub struct Options {
     pub os_version: Option<rucc_tuple::Version>,
     /// `-D` in command line order. `FOO` means `FOO=1`, as GCC has it.
     pub defines: Vec<String>,
-    /// `-U` in command line order, applied after the defines because `-U` wins.
+    /// `-U` in command line order, applied after the defines. A `-D` after a `-U` of the same
+    /// name takes the `-U` back, and a `-U` takes back each `-D` before it, as GCC reads them.
     pub undefines: Vec<String>,
     /// Where a header is looked for.
     pub search: SearchPath,
