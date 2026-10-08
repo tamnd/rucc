@@ -383,6 +383,13 @@ pub struct Checker<'a> {
     /// What has been said about a name in `#pragma GCC target` gcc does not know, which every
     /// function after the line carries and which is said once, as gcc says it once.
     pub(in crate::check) refused_pragmas: rucc_base::hash::Set<String>,
+    /// What [`Checker::gnu_name`] answered for each attribute name it has been asked about.
+    ///
+    /// A declaration is asked about its attributes a dozen times over, once by each reader that
+    /// wants one of them, and every glibc prototype carries two or three. Finding the name in the
+    /// table each time was most of the four percent the table took of compiling c4.c at `-O0`.
+    /// tamnd/rucc#3052.
+    pub(in crate::check) gnu_names: std::cell::RefCell<rucc_base::hash::Map<Symbol, &'static str>>,
 }
 
 impl<'a> Checker<'a> {
@@ -412,6 +419,7 @@ impl<'a> Checker<'a> {
             out_of_sight: rucc_base::hash::Map::default(),
             registers: rucc_base::hash::Set::default(),
             refused_pragmas: rucc_base::hash::Set::default(),
+            gnu_names: std::cell::RefCell::default(),
         };
         checker.declare_type_names();
         checker

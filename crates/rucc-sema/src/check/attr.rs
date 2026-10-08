@@ -234,7 +234,10 @@ impl Checker<'_> {
         if attr.namespace.is_some_and(|ns| self.text(ns) != "gnu") {
             return "";
         }
-        match rucc_gnu::lookup(Kind::Attribute, self.text(attr.name)) {
+        if let Some(&name) = self.gnu_names.borrow().get(&attr.name) {
+            return name;
+        }
+        let name = match rucc_gnu::lookup(Kind::Attribute, self.text(attr.name)) {
             Some(row)
                 if matches!(row.status, Status::Implemented | Status::Partial)
                     && row.is_known_to(self.cx.gnuc) =>
@@ -242,7 +245,9 @@ impl Checker<'_> {
                 row.name
             }
             _ => "",
-        }
+        };
+        self.gnu_names.borrow_mut().insert(attr.name, name);
+        name
     }
 
     /// Refuses every GNU attribute in the unit that the table says would be wrong code to ignore.
