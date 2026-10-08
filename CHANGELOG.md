@@ -4,6 +4,10 @@ All notable changes are recorded here. The format follows [Keep a Changelog](htt
 
 ## Unreleased
 
+### Changed
+
+- The round that inlines a static function into all its callers builds each caller's loop forest once instead of once per call it asks about, which takes duktape.c -O1 down 2.9% in instructions (#3386)
+
 ## 0.29.1
 
 This release closes four of the five gaps that the review of rucc-corpus on wasm32 found (#3262). A self tail call is a loop, a bit counting loop is one `popcnt`, `clz` or `ctz`, a switch whose answers are addresses is a table on wasm32, and a switch after conversion is a `select`. All but the table are in the shared optimizer, so every target gets them. The release also has `musttail` calls with arguments on the stack and a change to the inliner for `static` functions with more than one caller.
@@ -17,6 +21,21 @@ This release closes four of the five gaps that the review of rucc-corpus on wasm
 - A call of a function to itself whose result is returned is a jump to the top of the function at `-O2`, `-O3`, `-Os` and `-Oz`, as gcc's `tailr` pass makes it. On wasm32, which has no tail calls, such a recursion no longer adds a frame for each step, and tail-dispatch.rotate of rucc-corpus runs in 0.93 ms where it took 18.8 ms. A function with a local in its frame, `alloca`, `va_start` or a call that can return twice keeps the call. `-fno-optimize-sibling-calls` turns the pass off, as for gcc. (#3369)
 - A `musttail` call that passes arguments on the stack is made, as gcc makes it: the arguments go where the caller was handed its own and the call is a jump. That is every call on i386, one past the sixth argument on x86-64 and every one on Windows x64. A callee that takes more of the stack than the caller was handed is refused with gcc's `callee required more stack slots than the caller`.
 - The inliner copies a `static` function into all its callers when the copies, weighed as gcc weighs them with the constants each call passes, come to no more than the body that goes, which is gcc's `want_inline_function_to_all_callers_p`. The corpus at `-O1` loses 11 percent of its text in the 154 cases it changes (#3378)
+
+### Changed
+
+- Jump threading finds the loop forest again over just the loop a thread changed instead of clearing every analysis, so lz4.c at -O2 compiles in 12% fewer instructions with identical output (#3366)
+- Rule tries answer a node with no head branch or with one without building a key and searching, which saves a little on every rewrite walk (#3371)
+- Build the table of fusable comparisons once per function instead of five times. Duktape compiles 4.8% faster at -O1 and 1.5% at -O2, with byte-identical output (#3375)
+- Read what the register allocators ask of a function once per function rather than once per try. Duktape compiles 6.8% faster at -O1 and 2.7% at -O2, with byte-identical output (#3376)
+- Intern the back end's machine opcode names by where their two static halves are, so a name is built and hashed once per compilation rather than once per use. Duktape compiles 1.9% faster at -O1, with byte-identical output (#3381)
+- Line starts in a source file are found a word at a time, the lexer skips an empty splice report, and a spelling is interned without checking its UTF-8 twice, which takes duktape.c -O1 down 0.9% in instructions (#3382)
+- The inliner measures a caller's own frame the first time a call reaches the frame check instead of up front, which skips the scalar replacement's analysis for callers with no call to take and takes duktape.c -O1 down 1.1% in instructions (#3383)
+
+### Fixed
+
+- A file that defines variables and no functions gets its `-g` unit, with the variables and their types and no address range, as gcc writes it, so the kernel's BTF has the types of a file that is only tables (#3353)
+- The `-g` type entries match what gcc writes, so pahole reads the same BTF from both: a typedef over another typedef names it, only types a function or variable reaches are written, each prototype keeps the parameter spelling its own declaration wrote, an unnamed bit-field has no member, an enumeration never completed is a declaration, and an array of arrays is one entry with a range per dimension (#3352)
 
 ## 0.29.0
 
@@ -71,19 +90,9 @@ This release ends S5 (#431), the full plane set of the safe memory work. The typ
 - Value numbering keeps its per-block tables between blocks instead of making them again for each one, which takes about half a percent off the instructions an O2 build of lz4 or duktape costs. (#3324)
 - Jump threading keeps the loop forest across a thread inside a loop whenever the loop still goes round without the edge, rather than only when the new target gets back to the block it skipped, which takes about 4% off an O2 build of lz4 and 6% off an O1 one. (#3325)
 - Simplify keeps what the root of each rule table says about an instruction head in a thread local map, rather than searching all six roots for every instruction in every run. Output is unchanged and compiles take about 2 to 3% fewer instructions (#3338).
-- Jump threading finds the loop forest again over just the loop a thread changed instead of clearing every analysis, so lz4.c at -O2 compiles in 12% fewer instructions with identical output (#3366)
-- Rule tries answer a node with no head branch or with one without building a key and searching, which saves a little on every rewrite walk (#3371)
-- Build the table of fusable comparisons once per function instead of five times. Duktape compiles 4.8% faster at -O1 and 1.5% at -O2, with byte-identical output (#3375)
-- Read what the register allocators ask of a function once per function rather than once per try. Duktape compiles 6.8% faster at -O1 and 2.7% at -O2, with byte-identical output (#3376)
-- Intern the back end's machine opcode names by where their two static halves are, so a name is built and hashed once per compilation rather than once per use. Duktape compiles 1.9% faster at -O1, with byte-identical output (#3381)
-- Line starts in a source file are found a word at a time, the lexer skips an empty splice report, and a spelling is interned without checking its UTF-8 twice, which takes duktape.c -O1 down 0.9% in instructions (#3382)
-- The inliner measures a caller's own frame the first time a call reaches the frame check instead of up front, which skips the scalar replacement's analysis for callers with no call to take and takes duktape.c -O1 down 1.1% in instructions (#3383)
-- The round that inlines a static function into all its callers builds each caller's loop forest once instead of once per call it asks about, which takes duktape.c -O1 down 2.9% in instructions (#3386)
 
 ### Fixed
 
-- A file that defines variables and no functions gets its `-g` unit, with the variables and their types and no address range, as gcc writes it, so the kernel's BTF has the types of a file that is only tables (#3353)
-- The `-g` type entries match what gcc writes, so pahole reads the same BTF from both: a typedef over another typedef names it, only types a function or variable reaches are written, each prototype keeps the parameter spelling its own declaration wrote, an unnamed bit-field has no member, an enumeration never completed is a declaration, and an array of arrays is one entry with a range per dimension (#3352)
 - `<arm_neon.h>` has `vmul_p8` and `vmulq_p8`, the 8 bit carry-less product the kernel's raid6 neon code uses (#3342)
 - `__builtin_object_size` of a member reached through a pointer the function set itself, such as nouveau's `__member_size(args->data)` over a stack buffer, is left for the IR and answered from that buffer at -O2 like gcc, and a size not known yet that is divided down no longer warns that it does not fit (#3341)
 - The AArch64 assembler takes `:abs_g0:` to `:abs_g3:`, the `_nc` and the `_s` operators on a symbol in `movz`, `movk` and `movn`, leaving the `R_AARCH64_MOVW_UABS` and `R_AARCH64_MOVW_SABS` relocations, and writes `.short sym` and `.short sym - .` as `R_AARCH64_ABS16` and `R_AARCH64_PREL16`, so the arm64 kernel's reloc_test_syms.S assembles to the same words and relocations llvm-mc writes (#3335).
