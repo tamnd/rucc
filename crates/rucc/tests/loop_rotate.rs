@@ -1,12 +1,13 @@
-//! A loop whose test is at the top and whose last block only steps it on is laid out with the test
-//! last, so that each time round is one jump rather than two.
+//! A loop tested at the top whose last block only steps it on is laid out with the test last, so
+//! that each time round takes one jump rather than two or three.
 //!
-//! Issue 1994. The carry loop of Postgres' `accum_sum_carry` came out as the test, the body, a
-//! `cmpq` and a `je` out of the loop, then a block that copies the carry for the next turn and a
-//! `jmp` back to the top, so every turn ran a branch that was not taken and a jump that was.
-//! `loop_rotate.c` is that loop and the inner loops of `mul_var` and `accum_sum_add`, which are
-//! one block each and are here so that they stay closed by their test. The unit tests in
-//! `rucc-codegen` cover the layout. This runs the compiler and reads the jumps it wrote.
+//! Issue 1994. The carry loop of Postgres' `accum_sum_carry` came out with a block after its exit
+//! test that copies the carry for the next turn and jumps back to the top, so a digit with no
+//! carry took a jump to the arm that clears it, a jump back to the store and the jump back to the
+//! top. `loop_rotate.c` is that loop and the inner loops of `mul_var` and `accum_sum_add`, which
+//! are one block each and are here so that they stay that way. The unit tests in `rucc-codegen`
+//! cover the layout. This runs the compiler, reads the blocks and jumps it wrote, and counts the
+//! jumps taken on every way round each loop.
 
 use std::process::Command;
 
@@ -35,29 +36,77 @@ fn body<'a>(asm: &'a str, name: &str) -> Vec<&'a str> {
         .collect()
 }
 
-/// Every conditional jump in the lines that goes to a label above it, which is a loop closed by
-/// its own test.
-fn tested_back<'a>(lines: &[&'a str]) -> Vec<&'a str> {
+/// The blocks of a function's lines as edges `(from, to, taken)`, where `taken` is false for
+/// the fall into the next label.
+fn edges(lines: &[&str]) -> Vec<(String, String, bool)> {
     let mut found = Vec::new();
-    for (at, line) in lines.iter().enumerate() {
-        let Some((op, to)) = line.split_once('\t') else { continue };
-        if !op.starts_with('j') || op == "jmp" {
+    let mut here: Option<String> = None;
+    let mut falls = false;
+    for line in lines {
+        if let Some(label) = line.strip_suffix(':') {
+            if let Some(from) = here.as_ref().filter(|_| falls) {
+                found.push((from.clone(), label.to_owned(), false));
+            }
+            here = Some(label.to_owned());
+            falls = true;
             continue;
         }
-        let label = format!("{to}:");
-        if lines[..at].contains(&label.as_str()) {
-            found.push(*line);
+        let Some(from) = here.as_ref() else { continue };
+        let (op, to) = line.split_once('\t').unwrap_or((*line, ""));
+        if op.starts_with('j') {
+            found.push((from.clone(), to.to_owned(), true));
+            falls = op != "jmp";
+        } else if op == "ret" {
+            falls = false;
         }
     }
     found
 }
 
+/// How many jumps are taken on each way round a loop in the edges, one count for each cycle
+/// that does not pass through a block twice.
+fn turns(edges: &[(String, String, bool)]) -> Vec<usize> {
+    fn walk(
+        edges: &[(String, String, bool)],
+        start: &str,
+        path: &mut Vec<String>,
+        taken: usize,
+        found: &mut Vec<usize>,
+    ) {
+        let at = path.last().expect("a walk has a block").clone();
+        for (from, to, jumps) in edges {
+            if *from != at {
+                continue;
+            }
+            let taken = taken + usize::from(*jumps);
+            if to == start {
+                found.push(taken);
+            } else if to.as_str() > start && !path.contains(to) {
+                path.push(to.clone());
+                walk(edges, start, path, taken, found);
+                path.pop();
+            }
+        }
+    }
+    let mut found = Vec::new();
+    let mut starts: Vec<&String> = edges.iter().map(|(from, _, _)| from).collect();
+    starts.sort();
+    starts.dedup();
+    for start in starts {
+        walk(edges, start, &mut vec![start.clone()], 0, &mut found);
+    }
+    found
+}
+
 #[test]
-fn the_numeric_loops_are_closed_by_their_test() {
+fn every_way_round_the_numeric_loops_takes_one_jump() {
     let asm = assembly();
     for name in ["carry_inner", "mul_inner", "accum_inner"] {
-        let lines = body(&asm, name);
-        assert!(lines.iter().any(|line| line.starts_with('j')), "{name} has no loop:\n{asm}");
-        assert!(!tested_back(&lines).is_empty(), "{name} jumps back without a test:\n{asm}");
+        let turns = turns(&edges(&body(&asm, name)));
+        assert!(!turns.is_empty(), "{name} has no loop:\n{asm}");
+        assert!(
+            turns.iter().all(|&taken| taken == 1),
+            "{name} goes round in {turns:?} jumps:\n{asm}"
+        );
     }
 }
