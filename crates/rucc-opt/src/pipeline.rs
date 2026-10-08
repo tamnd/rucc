@@ -1406,6 +1406,9 @@ pub fn run(module: &mut Module, names: &mut Interner, opts: &Options) -> Report 
         // Whether a table may hold how far a name is from it, which wants a four byte relocation
         // measured from where it is written. See `crate::switch_conv`.
         let measures = TargetInfo::for_tuple(module.tuple).relative_tables;
+        // And whether it may hold the whole address of a name, which wants an address no loader
+        // has to write. See `crate::switch_conv` too.
+        let addresses = TargetInfo::for_tuple(module.tuple).absolute_tables;
         let started = Instant::now();
         for id in module.funcs() {
             if module[id].is_declaration() {
@@ -1448,8 +1451,9 @@ pub fn run(module: &mut Module, names: &mut Interner, opts: &Options) -> Report 
                     .touching(Arc::clone(&modref))
             });
             let pointer_bits = module.datalayout.pointer_bits;
-            let mut data =
-                readonly::ReadOnly::new(names, &taken, pointer_bits, tables).measuring(measures);
+            let mut data = readonly::ReadOnly::new(names, &taken, pointer_bits, tables)
+                .measuring(measures)
+                .addressing(addresses);
             let stats = pass.run_emitting(&mut module[id], an, &mut fuel, &mut data);
             tables = data.next();
             for table in data.into_tables() {
@@ -1584,6 +1588,9 @@ fn add_table(module: &mut Module, table: readonly::Table) {
         .map(|(at, &cell)| match table.to.get(at).copied().flatten() {
             // Measured from the cell, which is `at` cells into the table, so that much is added
             // back to make it the distance from the table.
+            Some(symbol) if table.whole => {
+                Datum::Addr(module.add_reloc(Reloc { symbol, addend: cell as i64, size: bytes }))
+            }
             Some(symbol) => {
                 let addend = cell as i64 + at as i64 * i64::from(bytes);
                 Datum::Away(module.add_reloc(Reloc { symbol, addend, size: bytes }))

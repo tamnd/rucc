@@ -31,6 +31,9 @@ pub struct Table {
     /// cell is only a number. A cell with a name here is that name's address less the address of
     /// the cell's own table, plus its number, which the linker works out.
     pub to: Vec<Option<Symbol>>,
+    /// Whether a cell with a name in [`Table::to`] is that name's whole address plus its number,
+    /// rather than the distance from the table. The linker works that out too.
+    pub whole: bool,
 }
 
 /// Where a pass puts the tables it asks for, until the pipeline takes them.
@@ -40,6 +43,7 @@ pub struct ReadOnly<'a> {
     taken: &'a Set<Symbol>,
     pointer_bits: u32,
     measures: bool,
+    addresses: bool,
     next: u32,
     tables: Vec<Table>,
 }
@@ -57,7 +61,15 @@ impl<'a> ReadOnly<'a> {
         pointer_bits: u32,
         next: u32,
     ) -> Self {
-        Self { names, taken, pointer_bits, measures: false, next, tables: Vec::new() }
+        Self {
+            names,
+            taken,
+            pointer_bits,
+            measures: false,
+            addresses: false,
+            next,
+            tables: Vec::new(),
+        }
     }
 
     /// The same place, able to hold a table of distances when `measures` is true.
@@ -65,6 +77,24 @@ impl<'a> ReadOnly<'a> {
     pub const fn measuring(mut self, measures: bool) -> Self {
         self.measures = measures;
         self
+    }
+
+    /// The same place, able to hold a table of whole addresses when `addresses` is true.
+    #[must_use]
+    pub const fn addressing(mut self, addresses: bool) -> Self {
+        self.addresses = addresses;
+        self
+    }
+
+    /// Whether a cell may be the whole address of a name, which [`ReadOnly::addresses_of`] makes.
+    ///
+    /// That needs an address the linker writes once and nothing changes when the program is
+    /// loaded. wasm32 is such a target, because its data is placed when it is linked and its back
+    /// end writes no position independent code. On a target where the loader has to write such a
+    /// cell, the table cannot be read only, so the pipeline says no there.
+    #[must_use]
+    pub const fn addresses(&self) -> bool {
+        self.addresses
     }
 
     /// Whether a cell may be how far a name is from its table, which [`ReadOnly::distances`]
@@ -91,7 +121,7 @@ impl<'a> ReadOnly<'a> {
     /// spell anything.
     pub fn table(&mut self, ty: Type, cells: Vec<i128>) -> Symbol {
         let name = self.name();
-        self.tables.push(Table { name, ty, cells, to: Vec::new() });
+        self.tables.push(Table { name, ty, cells, to: Vec::new(), whole: false });
         name
     }
 
@@ -105,7 +135,22 @@ impl<'a> ReadOnly<'a> {
         let name = self.name();
         let cells = to.iter().map(|cell| cell.map_or(0, |(_, bytes)| bytes)).collect();
         let to = to.iter().map(|cell| cell.map(|(name, _)| name)).collect();
-        self.tables.push(Table { name, ty: Type::int(32), cells, to });
+        self.tables.push(Table { name, ty: Type::int(32), cells, to, whole: false });
+        name
+    }
+
+    /// Asks for a table of the addresses of names and gets back the name to load from it by.
+    ///
+    /// Cell `k` is as wide as an address and holds the address of the name in `to[k]` plus the
+    /// bytes beside it, and zero where `to[k]` is `None`, which is a hole nothing reads. Only asked
+    /// for where [`ReadOnly::addresses`] says it may be, and named the way [`ReadOnly::table`]
+    /// names one.
+    pub fn addresses_of(&mut self, to: &[Option<(Symbol, i128)>]) -> Symbol {
+        let name = self.name();
+        let cells = to.iter().map(|cell| cell.map_or(0, |(_, bytes)| bytes)).collect();
+        let to = to.iter().map(|cell| cell.map(|(name, _)| name)).collect();
+        let ty = Type::int(self.pointer_bits);
+        self.tables.push(Table { name, ty, cells, to, whole: true });
         name
     }
 
