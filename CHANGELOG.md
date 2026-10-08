@@ -4,6 +4,10 @@ All notable changes are recorded here. The format follows [Keep a Changelog](htt
 
 ## Unreleased
 
+## 0.29.3
+
+The release workflow for 0.29.2 stopped at the check of the tag and published nothing, so this release also carries the changes of 0.29.2 and of the three releases before it. The cause was a test that shared a temporary directory with another test, and #3399 fixes it and two more of the same kind. The release also reads each header from the disk once per run, and lays out a loop with its test at the end, as gcc does.
+
 ### Changed
 
 - Read each header from the disk once per run, stop probing the disk for paths under `<builtin>`, and resolve each include directory once instead of every header path, which halves the system calls of a compile that includes the C library (#3398)
