@@ -24,6 +24,7 @@
 //! not. rucc requires a single latch as a canonical form instead, and the canonicalizer in
 //! document 26 creates one, which is an edit rather than a guess and is always right.
 
+use rucc_base::hash::Set;
 use rucc_ir::{Block, Def, Func, Value};
 
 use crate::cfg::Cfg;
@@ -88,10 +89,127 @@ impl Loops {
     /// people write. Section 7.8 says this is not the part of loop analysis to worry about.
     #[must_use]
     pub fn new(cfg: &Cfg, doms: &Dominators) -> Self {
-        let mut build = Build::new(cfg, doms);
+        let whole = Whole { cfg, doms };
+        let mut build = Build::new(whole, cfg.capacity());
         let region: Vec<Block> = cfg.postorder().to_vec();
         build.region(&region, None);
         build.finish()
+    }
+
+    /// The forest again after edges out of blocks of the outermost loop `root` moved, worked out
+    /// over the blocks of that loop rather than over the function, and the blocks of it that
+    /// control no longer reaches.
+    ///
+    /// The edges that moved have to have been ones out of blocks of the loop, to blocks the loop
+    /// already reached, and nothing else may have changed since the forest was built. The edges
+    /// now are what `successors` and `predecessors` say, `reached` says whether a block outside
+    /// the loop is one control reaches, and `capacity` is one past the highest block number.
+    ///
+    /// No cycle goes through a block outside the loop that did not before, because the edges that
+    /// moved went to blocks the loop got to anyway, so a cycle that took a new edge was a cycle
+    /// before by the way round that edge stood for. The rest of the forest is then the same, and
+    /// only the loop's own part of it is found again. Every way into the loop arrived at its
+    /// header, and the edges that moved are all inside it, so the blocks of it control still
+    /// reaches are the ones its header gets to without leaving it.
+    ///
+    /// The other half is telling a loop from an irreducible region without a dominator tree.
+    /// A component is a loop when exactly one of its blocks has a way in from outside it, from a
+    /// block control reaches, and that block is its header. With one such block every path in
+    /// passes it, so it dominates the rest, and it is the nearest block that dominates all of
+    /// them, which is the header [`Loops::new`] finds. With two, a block of the component that
+    /// dominated both would be on the path to the outside block that leads into the second, and
+    /// that block would then be on a cycle with the component and so in it, which it is not. The
+    /// same holds below a loop's header for the loops nested in it, because every path to a block
+    /// of a loop arrives through its header and the shortest way on from there stays in the loop.
+    ///
+    /// On lz4.c at `-O2` jump threading built the graph, the tree and the forest again over the
+    /// whole function for every thread that took a block out of a loop, and the loops those were
+    /// in were a sixth of the blocks of their functions. tamnd/rucc#3052.
+    pub(crate) fn rebuild(
+        &mut self,
+        root: LoopId,
+        capacity: usize,
+        successors: impl Fn(Block) -> Vec<Block>,
+        predecessors: impl Fn(Block) -> Vec<Block>,
+        reached: impl Fn(Block) -> bool,
+    ) -> Vec<Block> {
+        let header = self.header(root);
+        let old = std::mem::take(&mut self.loops[root.index()].blocks);
+        let capacity = capacity.max(self.innermost.len());
+        let mut member = vec![false; capacity];
+        for &block in &old {
+            member[block.index()] = true;
+        }
+        let mut live = vec![false; capacity];
+        let mut edges = vec![Vec::new(); capacity];
+        live[header.index()] = true;
+        let mut work = vec![header];
+        while let Some(block) = work.pop() {
+            let next = successors(block);
+            for &to in &next {
+                if member[to.index()] && !live[to.index()] {
+                    live[to.index()] = true;
+                    work.push(to);
+                }
+            }
+            edges[block.index()] = next;
+        }
+        let mut ways = vec![Vec::new(); capacity];
+        let mut region = Vec::new();
+        let mut gone = Vec::new();
+        for &block in &old {
+            if !live[block.index()] {
+                gone.push(block);
+                continue;
+            }
+            region.push(block);
+            ways[block.index()] = predecessors(block)
+                .into_iter()
+                .filter(
+                    |&pred| if member[pred.index()] { live[pred.index()] } else { reached(pred) },
+                )
+                .collect();
+        }
+
+        // The forest without the loop. A loop is numbered after the loop around it, so one pass
+        // in order finds every loop nested in it.
+        let mut dropped = vec![false; self.loops.len()];
+        let mut renumbered = vec![None; self.loops.len()];
+        let mut loops = Vec::with_capacity(self.loops.len());
+        for (index, data) in std::mem::take(&mut self.loops).into_iter().enumerate() {
+            dropped[index] =
+                index == root.index() || data.parent.is_some_and(|parent| dropped[parent.index()]);
+            if !dropped[index] {
+                renumbered[index] = Some(LoopId(loops.len() as u32));
+                loops.push(data);
+            }
+        }
+        let renumber = |id: LoopId| renumbered[id.index()];
+        for data in &mut loops {
+            data.parent = data.parent.and_then(renumber);
+            data.children.retain(|&child| renumber(child).is_some());
+            for child in &mut data.children {
+                *child = renumber(*child).expect("a loop kept is kept with its children");
+            }
+        }
+        let mut innermost = std::mem::take(&mut self.innermost);
+        innermost.resize(capacity, None);
+        for slot in &mut innermost {
+            *slot = slot.and_then(renumber);
+        }
+        let roots = self.roots.iter().filter_map(|&id| renumber(id)).collect();
+        let mut irreducible = std::mem::take(&mut self.irreducible);
+        irreducible.retain(|block| !member[block.index()]);
+
+        let within = Within { edges, ways };
+        let mut build = Build::new(&within, capacity);
+        build.loops = loops;
+        build.innermost = innermost;
+        build.roots = roots;
+        build.irreducible = irreducible;
+        build.region(&region, None);
+        *self = build.finish();
+        gone
     }
 
     /// How many loops there are, counting nested ones.
@@ -289,10 +407,91 @@ impl Loops {
     }
 }
 
-/// The state of one construction, which recurses into what it finds.
-struct Build<'a> {
+/// What a construction reads off the graph it is finding the loops of. It is a handle copied
+/// into the construction, so that a whole function's graph is one load away as it was before
+/// there were two kinds of graph.
+trait Shape<'a>: Copy {
+    /// The blocks control goes to from this one.
+    fn successors(self, block: Block) -> &'a [Block];
+
+    /// What a strongly connected component with a cycle in it is.
+    fn head(self, component: &[Block]) -> Head;
+}
+
+/// What a component with a cycle in it turned out to be.
+enum Head {
+    /// A loop, with the block every way into it arrives at.
+    Loop(Block),
+    /// A region with more than one way in.
+    Irreducible,
+    /// Blocks control does not reach, which the forest says nothing about.
+    Unreached,
+}
+
+/// A whole function, read off its graph and its dominator tree.
+#[derive(Clone, Copy)]
+struct Whole<'a> {
     cfg: &'a Cfg,
     doms: &'a Dominators,
+}
+
+impl<'a> Shape<'a> for Whole<'a> {
+    fn successors(self, block: Block) -> &'a [Block] {
+        self.cfg.successors(block)
+    }
+
+    fn head(self, component: &[Block]) -> Head {
+        // The nearest block dominating all of it. If it is one of the component's own blocks
+        // then every path in arrives there, because a block outside the component that the
+        // header dominates is a block the header reaches and that reaches back into the
+        // component, which would put it in the component. So a header inside means one way in,
+        // which is what reducible means.
+        match component
+            .iter()
+            .copied()
+            .try_fold(component[0], |a, b| self.doms.nearest_common_dominator(a, b))
+        {
+            None => Head::Unreached,
+            Some(header) if component.contains(&header) => Head::Loop(header),
+            Some(_) => Head::Irreducible,
+        }
+    }
+}
+
+/// The blocks of one loop after edges inside it moved, read off the edges as they are now. See
+/// [`Loops::rebuild`].
+struct Within {
+    /// Where each block of the loop that control still reaches goes, by block number.
+    edges: Vec<Vec<Block>>,
+    /// Where control arrives at each of those blocks from, counting only blocks it reaches.
+    ways: Vec<Vec<Block>>,
+}
+
+impl<'a> Shape<'a> for &'a Within {
+    fn successors(self, block: Block) -> &'a [Block] {
+        &self.edges[block.index()]
+    }
+
+    fn head(self, component: &[Block]) -> Head {
+        // The entry block is never branched to, so it is on no cycle and is never in one of these.
+        let inside: Set<Block> = component.iter().copied().collect();
+        let mut entered = component
+            .iter()
+            .copied()
+            .filter(|&block| self.ways[block.index()].iter().any(|pred| !inside.contains(pred)));
+        match (entered.next(), entered.next()) {
+            (Some(header), None) => Head::Loop(header),
+            (None, _) => Head::Unreached,
+            (Some(_), Some(_)) => Head::Irreducible,
+        }
+    }
+}
+
+/// The state of one construction, which recurses into what it finds.
+struct Build<'a, S: Shape<'a>> {
+    shape: S,
+    /// The graph `shape` reads off, which outlives the construction.
+    graph: std::marker::PhantomData<&'a ()>,
     loops: Vec<LoopData>,
     innermost: Vec<Option<LoopId>>,
     roots: Vec<LoopId>,
@@ -312,12 +511,11 @@ struct Build<'a> {
 /// A block Tarjan's walk has not numbered yet.
 const UNVISITED: u32 = u32::MAX;
 
-impl<'a> Build<'a> {
-    fn new(cfg: &'a Cfg, doms: &'a Dominators) -> Self {
-        let blocks = cfg.capacity();
+impl<'a, S: Shape<'a>> Build<'a, S> {
+    fn new(shape: S, blocks: usize) -> Self {
         Self {
-            cfg,
-            doms,
+            shape,
+            graph: std::marker::PhantomData,
             loops: Vec::new(),
             innermost: vec![None; blocks],
             roots: Vec::new(),
@@ -346,22 +544,14 @@ impl<'a> Build<'a> {
         }
 
         for component in components {
-            // The nearest block dominating all of it. If it is one of the component's own
-            // blocks then every path in arrives there, because a block outside the component
-            // that the header dominates is a block the header reaches and that reaches back
-            // into the component, which would put it in the component. So a header inside means
-            // one way in, which is what reducible means.
-            let Some(header) = component
-                .iter()
-                .copied()
-                .try_fold(component[0], |a, b| self.doms.nearest_common_dominator(a, b))
-            else {
-                continue;
+            let header = match self.shape.head(&component) {
+                Head::Loop(header) => header,
+                Head::Irreducible => {
+                    self.irreducible.extend_from_slice(&component);
+                    continue;
+                }
+                Head::Unreached => continue,
             };
-            if !component.contains(&header) {
-                self.irreducible.extend_from_slice(&component);
-                continue;
-            }
             let id = self.record(header, component, parent);
             let inner: Vec<Block> =
                 self.loops[id.index()].blocks.iter().copied().filter(|&b| b != header).collect();
@@ -383,10 +573,10 @@ impl<'a> Build<'a> {
             // Every block of the loop belongs to it until an inner call says otherwise, and an
             // inner call runs after this, so the last writer is the innermost loop.
             self.innermost[block.index()] = Some(id);
-            if self.cfg.successors(block).contains(&header) {
+            if self.shape.successors(block).contains(&header) {
                 latches.push(block);
             }
-            for &next in self.cfg.successors(block) {
+            for &next in self.shape.successors(block) {
                 if !self.member[next.index()] {
                     exits.push(Exit { from: block, to: next });
                 }
@@ -429,7 +619,7 @@ impl<'a> Build<'a> {
             self.enter(start, &mut next, &mut component);
             walk.push((start, 0));
             while let Some((block, step)) = walk.pop() {
-                let successors = self.cfg.successors(block);
+                let successors = self.shape.successors(block);
                 if step < successors.len() {
                     let next_block = successors[step];
                     walk.push((block, step + 1));
@@ -454,7 +644,8 @@ impl<'a> Build<'a> {
                     // block with no edge to itself, and a list made for each of them only to be
                     // dropped was an allocation for each block at each level of nesting.
                     // tamnd/rucc#3052.
-                    if component.len() - start > 1 || self.cfg.successors(block).contains(&block) {
+                    if component.len() - start > 1 || self.shape.successors(block).contains(&block)
+                    {
                         found.push(component.split_off(start));
                     } else {
                         component.truncate(start);
@@ -686,5 +877,79 @@ mod tests {
         let id = loops.roots()[0];
         assert!(loops.is_invariant(&func, id, outside));
         assert!(!loops.is_invariant(&func, id, inside));
+    }
+
+    /// A forest as what it says about each loop: its header, blocks, latches and the header of the
+    /// loop around it, and then the irreducible blocks.
+    type Outline = (Vec<(usize, Vec<usize>, Vec<usize>, Option<usize>)>, Vec<usize>);
+
+    /// The outline of a forest, in an order that does not hang on the order the loops were found
+    /// in.
+    fn outline(loops: &Loops) -> Outline {
+        let mut all: Vec<_> = loops
+            .all()
+            .map(|id| {
+                let mut latches: Vec<usize> = loops.latches(id).iter().map(|b| b.index()).collect();
+                latches.sort_unstable();
+                let around = loops.parent(id).map(|parent| loops.header(parent).index());
+                (loops.header(id).index(), blocks(loops, id), latches, around)
+            })
+            .collect();
+        all.sort_unstable();
+        let mut irreducible: Vec<usize> = loops.irreducible().iter().map(|b| b.index()).collect();
+        irreducible.sort_unstable();
+        (all, irreducible)
+    }
+
+    /// Finds the forest of `before` again over the loop around `block` once the graph is `after`,
+    /// checks it is the forest built from nothing over `after`, and gives back what it said nothing
+    /// reaches now.
+    fn rebuilt(before: &[&[usize]], after: &[&[usize]], block: usize) -> Vec<usize> {
+        let (_, mut loops) = forest(before);
+        let (cfg, fresh) = forest(after);
+        let mut root = loops.innermost(b(block)).unwrap();
+        while let Some(parent) = loops.parent(root) {
+            root = parent;
+        }
+        let mut gone: Vec<usize> = loops
+            .rebuild(
+                root,
+                cfg.capacity(),
+                |block| cfg.successors(block).to_vec(),
+                |block| cfg.predecessors(block).to_vec(),
+                |block| cfg.reaches(block),
+            )
+            .iter()
+            .map(|b| b.index())
+            .collect();
+        gone.sort_unstable();
+        assert_eq!(outline(&loops), outline(&fresh));
+        gone
+    }
+
+    #[test]
+    fn a_rebuild_over_a_loop_drops_the_block_threaded_past() {
+        // The inner loop 2 -> 3 -> 2 inside 1, where 3 goes back to 1 through 4 and the edge from
+        // 3 now goes to 1 itself.
+        let before: &[&[usize]] = &[&[1], &[2, 5], &[3], &[2, 4], &[1], &[]];
+        let after: &[&[usize]] = &[&[1], &[2, 5], &[3], &[2, 1], &[1], &[]];
+        assert_eq!(rebuilt(before, after, 3), [4]);
+    }
+
+    #[test]
+    fn a_rebuild_over_a_loop_finds_a_loop_inside_it_gone() {
+        // The inner loop 2 -> 3 -> 2 inside 1, where 3 got back to 2 only through 4, and 2 now
+        // goes past 3 and 4 to 1 by way of 5.
+        let before: &[&[usize]] = &[&[1], &[2, 6], &[3], &[4, 5], &[2], &[1], &[]];
+        let after: &[&[usize]] = &[&[1], &[2, 6], &[5], &[4, 5], &[2], &[1], &[]];
+        assert_eq!(rebuilt(before, after, 2), [3, 4]);
+    }
+
+    #[test]
+    fn a_rebuild_over_a_loop_finds_a_new_loop_inside_it() {
+        // 1 -> 2 -> 3 -> 1, where 3 also goes to 4 and 4 back to 1, and 4 now goes to 2 instead.
+        let before: &[&[usize]] = &[&[1], &[2, 5], &[3], &[1, 4], &[1], &[]];
+        let after: &[&[usize]] = &[&[1], &[2, 5], &[3], &[1, 4], &[2], &[]];
+        assert_eq!(rebuilt(before, after, 4), Vec::<usize>::new());
     }
 }

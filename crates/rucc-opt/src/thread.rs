@@ -340,6 +340,10 @@ impl Pass for Thread {
                 let alone = free.is_some() && acyclic(an.loops(func), block);
                 let kept = free.is_some()
                     && (alone || settled(an, func, &edges, &stranded, from, block, at, call.block));
+                // The outermost loop the edge is in, when the forest is not kept as it is, which is
+                // what [`rebuild`] finds it again over.
+                let around =
+                    (free.is_some() && !kept).then(|| outermost(an.loops(func), from, block));
                 // The record has to follow the edge, so that a block further down the walk sees the
                 // predecessor it now has. That is what lets one thread make the next one possible
                 // within the single walk this pass is.
@@ -369,7 +373,11 @@ impl Pass for Thread {
                 // threads in one function would otherwise spend most of the pass finding out.
                 let kept =
                     kept && (!alone || strand(func, an, &edges, &mut stranded, block, entry));
-                if !kept {
+                let rebuilt = !kept
+                    && around
+                        .flatten()
+                        .is_some_and(|root| rebuild(func, an, &edges, &mut stranded, root, entry));
+                if !kept && !rebuilt {
                     an.clear();
                     stranded.clear();
                 }
@@ -528,6 +536,112 @@ fn strand(
         }
     }
     true
+}
+
+/// The outermost loop `from` is in, when `block` is in it too.
+fn outermost(loops: &Loops, from: Block, block: Block) -> Option<LoopId> {
+    let mut root = loops.innermost(from)?;
+    while let Some(parent) = loops.parent(root) {
+        root = parent;
+    }
+    loops.contains(root, block).then_some(root)
+}
+
+/// Finds the forest again over the outermost loop `root` after a thread that copied nothing moved
+/// an edge out of one of its blocks, with every block nothing reaches any more put in `stranded`,
+/// or says it could not.
+///
+/// The edge went to a block the loop got to anyway, through the block threaded past, so
+/// [`Loops::rebuild`] has what it asks for. What it gives back is the blocks of the loop nothing
+/// reaches now, and a block they went to that nothing else reaches goes with them, which is
+/// [`strand`]'s walk, and a block on a cycle among those is the whole forest built again. The
+/// graph in the cache stays the one from before, which is right about what is reached once the
+/// blocks in `stranded` are taken out, and that is all anything here asks of it.
+fn rebuild(
+    func: &Func,
+    an: &mut Analyses,
+    edges: &Edges,
+    stranded: &mut Set<Block>,
+    root: LoopId,
+    entry: Block,
+) -> bool {
+    let mut loops = an.take_loops(func);
+    let mut inside = vec![false; func.counts().blocks];
+    for &block in loops.blocks(root) {
+        inside[block.index()] = true;
+    }
+    let gone = {
+        let cfg = an.cfg(func);
+        loops.rebuild(
+            root,
+            func.counts().blocks,
+            |block| targets(func, block),
+            |block| {
+                edges
+                    .get(&block)
+                    .map_or_else(Vec::new, |list| list.iter().map(|&(pred, _)| pred).collect())
+            },
+            |block| cfg.reaches(block) && !stranded.contains(&block),
+        )
+    };
+    an.keep_loops(loops);
+    stranded.extend(gone.iter().copied());
+    // A block of the loop is one the rebuild said is reached or put in `gone`, so the walk only
+    // has the ones outside it to look at, and [`strand`] would give up on the ones still reached
+    // for being on a cycle.
+    for &block in &gone {
+        for next in targets(func, block) {
+            if !inside[next.index()] && !strand(func, an, edges, stranded, next, entry) {
+                return false;
+            }
+        }
+    }
+    #[cfg(debug_assertions)]
+    assert_eq!(
+        shape(an.loops(func)),
+        shape(&fresh(func)),
+        "the forest found again over one loop is not the forest of the function"
+    );
+    true
+}
+
+/// Where control goes from a block, as the function has it now.
+fn targets(func: &Func, block: Block) -> Vec<Block> {
+    func.terminator(block).map_or_else(Vec::new, |term| {
+        func.target_list(term).iter().map(|slot| func[slot].block).collect()
+    })
+}
+
+/// The forest of a function built from nothing, for [`rebuild`] to check itself against.
+#[cfg(debug_assertions)]
+fn fresh(func: &Func) -> Loops {
+    let cfg = Cfg::new(func);
+    Loops::new(&cfg, &Dominators::new(&cfg))
+}
+
+/// What jump threading asks of a forest, in an order that does not depend on the order the
+/// loops were found in: each loop's header, blocks, latches and the header of the loop around
+/// it, and the irreducible blocks.
+#[cfg(debug_assertions)]
+type Forest = (Vec<(Block, Vec<Block>, Vec<Block>, Option<Block>)>, Vec<Block>);
+
+/// A forest as a [`Forest`].
+#[cfg(debug_assertions)]
+fn shape(loops: &Loops) -> Forest {
+    let sorted = |list: &[Block]| {
+        let mut list = list.to_vec();
+        list.sort_unstable();
+        list
+    };
+    let mut all: Vec<_> = loops
+        .all()
+        .map(|id| {
+            let around = loops.parent(id).map(|parent| loops.header(parent));
+            (loops.header(id), sorted(loops.blocks(id)), sorted(loops.latches(id)), around)
+        })
+        .collect();
+    all.sort_unstable();
+    (all, sorted(loops.irreducible()))
 }
 
 /// Whether threading the edge at `at` from `from` past `block` to `into`, where `from` and `block`
