@@ -96,8 +96,12 @@ fn leb(bytes: &[u8], at: &mut usize) -> u64 {
     out
 }
 
-/// What each abbreviation code says: the tag, whether it has children, and its attributes.
-fn abbreviations(bytes: &[u8]) -> HashMap<u64, (u64, bool, Vec<(u64, u64)>)> {
+/// What one abbreviation says: the tag, whether it has children, and its attributes as pairs of
+/// name and form.
+type Abbreviation = (u64, bool, Vec<(u64, u64)>);
+
+/// What each abbreviation code says.
+fn abbreviations(bytes: &[u8]) -> HashMap<u64, Abbreviation> {
     let mut out = HashMap::new();
     let mut at = 0;
     loop {
