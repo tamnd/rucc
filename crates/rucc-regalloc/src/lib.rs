@@ -129,7 +129,8 @@ pub fn run_with(
 ) -> Allocation {
     let order = order::Order::of(func);
     let live = live::Live::of(func, &order);
-    let assignment = decide(func, &order, &live, env, allocator);
+    let facts = assign::Facts::of(func, &order);
+    let assignment = decide(func, &order, &live, env, allocator, &facts);
     write(func, assignment, env, order, live, called, verify)
 }
 
@@ -161,11 +162,12 @@ pub fn run_either(
 ) -> Allocation {
     let order = order::Order::of(func);
     let live = live::Live::of(func, &order);
-    let tried = decide(func, &order, &live, wide, allocator);
+    let facts = assign::Facts::of(func, &order);
+    let tried = decide(func, &order, &live, wide, allocator, &facts);
     if rewrite::fits(func, &tried, wide) {
         return write(func, tried, wide, order, live, called, verify);
     }
-    let assignment = decide(func, &order, &live, env, allocator);
+    let assignment = decide(func, &order, &live, env, allocator, &facts);
     write(func, assignment, env, order, live, called, verify)
 }
 
@@ -176,10 +178,11 @@ fn decide(
     live: &live::Live,
     env: &assign::Env,
     allocator: Allocator,
+    facts: &assign::Facts,
 ) -> assign::Assignment {
     match allocator {
-        Allocator::Single => assign::assign(func, order, live, env),
-        Allocator::Backtracking => backtrack::assign(func, order, live, env),
+        Allocator::Single => assign::scan(func, live, env, facts),
+        Allocator::Backtracking => backtrack::tries(func, order, live, env, facts),
     }
 }
 

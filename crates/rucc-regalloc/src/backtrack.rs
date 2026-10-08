@@ -134,16 +134,30 @@ struct Value<'a> {
 /// so does one where the linear scan's answer has the lower [`cost`].
 #[must_use]
 pub fn assign(func: &Func, order: &Order, live: &Live, env: &Env) -> Assignment {
-    let linear = assign::assign(func, order, live, env);
-    let mut best = cost(func, order, &linear);
+    tries(func, order, live, env, &assign::Facts::of(func, order))
+}
+
+/// The same, over what was already read off the function.
+pub(crate) fn tries(
+    func: &Func,
+    order: &Order,
+    live: &Live,
+    env: &Env,
+    facts: &assign::Facts,
+) -> Assignment {
+    let costs = costs(func);
+    let linear = assign::scan(func, live, env, facts);
+    let mut best = spent(func, &costs, &facts.reuses, &linear);
     let mut kept = linear;
-    let pressure = Pressure::of(func, order, live, env);
+    let pressure = Pressure::with(func, order, live, env, &facts.forced, &facts.blocked);
     let spilled = spill::choose(func, live, &pressure);
     // With nothing sent ahead the second try would be the first one again.
     let tries: &[&[Reg]] = if spilled.is_empty() { &[&[]] } else { &[&[], &spilled] };
     for &early in tries {
-        let Some(ours) = placed(func, order, live, env, BUDGET, early) else { break };
-        let spent = cost(func, order, &ours);
+        let Some(ours) = placed(func, order, live, env, BUDGET, early, facts, &costs) else {
+            break;
+        };
+        let spent = spent(func, &costs, &facts.reuses, &ours);
         if spent <= best {
             best = spent;
             kept = ours;
@@ -167,7 +181,12 @@ pub fn assign(func: &Func, order: &Order, live: &Live, env: &Env) -> Assignment 
 /// [`Reg::virtual_reg`] does.
 #[must_use]
 pub fn cost(func: &Func, order: &Order, assignment: &Assignment) -> u128 {
-    let costs = costs(func);
+    spent(func, &costs(func), &assign::reuses(func, order), assignment)
+}
+
+/// The same, with what each value costs on the stack and the answers written over a source
+/// already read off the function.
+fn spent(func: &Func, costs: &[u128], reuses: &[Option<Reuse>], assignment: &Assignment) -> u128 {
     let mut total = 0;
     for (reg, place) in assignment.placed() {
         if !matches!(place, Place::Reg(_)) {
@@ -192,7 +211,7 @@ pub fn cost(func: &Func, order: &Order, assignment: &Assignment) -> u128 {
         total += 2 * weights.get(&save.inst).copied().unwrap_or(1);
     }
     let commuted: Set<Inst> = assignment.commuted().iter().copied().collect();
-    for (number, reuse) in assign::reuses(func, order).iter().enumerate() {
+    for (number, reuse) in reuses.iter().enumerate() {
         let Some(reuse) = reuse else { continue };
         let answer = Reg::virtual_reg(u32::try_from(number).expect("a register number"));
         let tied = if commuted.contains(&reuse.inst) { reuse.second } else { Some(reuse.source) };
@@ -218,9 +237,10 @@ pub fn within(
     env: &Env,
     budget: u64,
 ) -> Option<Assignment> {
-    placed(func, order, live, env, budget, &[])
+    placed(func, order, live, env, budget, &[], &assign::Facts::of(func, order), &costs(func))
 }
 
+#[allow(clippy::too_many_arguments)]
 fn placed(
     func: &Func,
     order: &Order,
@@ -228,16 +248,13 @@ fn placed(
     env: &Env,
     budget: u64,
     early: &[Reg],
+    facts: &assign::Facts,
+    costs: &[u128],
 ) -> Option<Assignment> {
-    let blocked = assign::blocked(func, order);
-    let forced = assign::forced(func);
-    let reuses = assign::reuses(func, order);
-    let hints = assign::hints(func);
-    let passed = assign::passed(func);
+    let assign::Facts { blocked, forced, reuses, hints, passed } = facts;
     let received = received(func);
-    let reused = reused(&reuses);
-    let seconds = seconds(&reuses);
-    let costs = costs(func);
+    let reused = reused(reuses);
+    let seconds = seconds(reuses);
     let saveable = saveable(func, order);
 
     let count = func.vregs();
@@ -259,8 +276,8 @@ fn placed(
 
     let mut state = State {
         live,
-        blocked: &blocked,
-        reuses: &reuses,
+        blocked,
+        reuses,
         values: &values,
         held: Vec::new(),
         pieces: Vec::new(),
@@ -381,7 +398,7 @@ fn placed(
     if state.work > state.budget {
         return None;
     }
-    state.settle(&reused, &passed, &received);
+    state.settle(&reused, passed, &received);
     if state.work > state.budget {
         return None;
     }
@@ -1027,7 +1044,9 @@ mod tests {
         let pressure = Pressure::of(&func, &order, &live, &env);
         let early = spill::choose(&func, &live, &pressure);
         assert_eq!(early, [once]);
-        let assignment = placed(&func, &order, &live, &env, BUDGET, &early).expect("in budget");
+        let facts = assign::Facts::of(&func, &order);
+        let assignment = placed(&func, &order, &live, &env, BUDGET, &early, &facts, &costs(&func))
+            .expect("in budget");
         let problems = check::check(&func, &order, &live, &assignment);
         assert!(problems.is_empty(), "{}", check::report(&problems));
         assert_eq!(named(assignment.place(once)), "slot");
@@ -1066,7 +1085,9 @@ mod tests {
         let env = narrow(2);
         let order = Order::of(&func);
         let live = Live::of(&func, &order);
-        let assignment = placed(&func, &order, &live, &env, BUDGET, &[step]).expect("in budget");
+        let facts = assign::Facts::of(&func, &order);
+        let assignment = placed(&func, &order, &live, &env, BUDGET, &[step], &facts, &costs(&func))
+            .expect("in budget");
         let problems = check::check(&func, &order, &live, &assignment);
         assert!(problems.is_empty(), "{}", check::report(&problems));
         assert_ne!(named(assignment.place(step)), "slot");
