@@ -43,7 +43,8 @@ use rucc_target::{Isa, TargetInfo};
 use crate::{
     Analyses, CallGraph, Fuel, Gates, Machine, Pass, Preserved, Stats, adce, constant_p, dce, dse,
     extents, heap, image, inline, ipasra, ipcp, ipvrp, lanes, libcall, load, loop_idiom, modref,
-    nofree, number, objsize, outside, params, pass, purity, readonly, reload, sroa, vectorize,
+    nofree, number, objsize, outside, params, pass, purity, readonly, reload, sroa, tailrec,
+    vectorize,
 };
 
 /// The passes that read a summary [`nofree::annotate`], [`extents::annotate`],
@@ -74,8 +75,11 @@ const READS_SUMMARIES: &[&str] = &[
 /// document 17 both want one, and neither is written. A pass left off here builds its oracle on an
 /// empty table, which answers `May` to every question it would have used the module for, so what
 /// forgetting a name costs is a missed optimization rather than a wrong answer.
+///
+/// [`tailrec`] reads it for a different fact, which is the functions a call to can come back twice.
+/// With the empty table every call can, so forgetting it there costs every loop the pass makes.
 const READS_OUTSIDE: &[&str] =
-    &[load::NAME, reload::NAME, sroa::NAME, dse::NAME, lanes::NAME, vectorize::NAME];
+    &[load::NAME, reload::NAME, sroa::NAME, dse::NAME, lanes::NAME, vectorize::NAME, tailrec::NAME];
 
 /// Which passes ask what a call is allowed to do.
 ///
@@ -422,6 +426,7 @@ const O2: &[&str] = &[
     "sccp",
     "narrow",
     "simplify",
+    "tail-recursion",
     "switch-conv",
     "short-circuit",
     "thread",
@@ -490,6 +495,7 @@ const O3: &[&str] = &[
     "sccp",
     "narrow",
     "simplify",
+    "tail-recursion",
     "switch-conv",
     "short-circuit",
     "thread",
@@ -591,6 +597,7 @@ const OS: &[&str] = &[
     "sccp",
     "narrow",
     "simplify",
+    "tail-recursion",
     "switch-conv",
     "short-circuit-free",
     "thread",
@@ -643,6 +650,7 @@ const OZ: &[&str] = &[
     "sccp",
     "narrow",
     "simplify",
+    "tail-recursion",
     "switch-conv",
     "short-circuit-free",
     "thread",
@@ -1194,7 +1202,7 @@ pub fn run(module: &mut Module, names: &mut Interner, opts: &Options) -> Report 
     // is correct against that.
     let outside = if passes.iter().any(|pass| READS_OUTSIDE.contains(&pass.name())) {
         let sse2 = rucc_target::Feature::named("sse2").is_some_and(|it| opts.isa.has(it));
-        Arc::new(outside::Outside::of(module).with_vectors(sse2))
+        Arc::new(outside::Outside::of(module).with_vectors(sse2).knowing_twice(module, names))
     } else {
         Arc::default()
     };

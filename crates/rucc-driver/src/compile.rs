@@ -1053,7 +1053,7 @@ fn optimize(
         true => replaceable(target, opts),
         false => IrPic::Executable,
     };
-    settings.toggles.clone_from(&opts.passes);
+    settings.toggles = crate::toggles(opts);
     // The same pair the front end reads a call to a standard name with, which is section 20.1's
     // three way split: `-ffreestanding` says the library is not there, `-fno-builtin` says it is
     // there and is not to be assumed to do what the standard says, and a fold that leaves behind a

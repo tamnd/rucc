@@ -6,6 +6,7 @@ All notable changes are recorded here. The format follows [Keep a Changelog](htt
 
 ### Added
 
+- A call of a function to itself whose result is returned is a jump to the top of the function at `-O2`, `-O3`, `-Os` and `-Oz`, as gcc's `tailr` pass makes it. On wasm32, which has no tail calls, such a recursion no longer adds a frame for each step, and tail-dispatch.rotate of rucc-corpus runs in 0.93 ms where it took 18.8 ms. A function with a local in its frame, `alloca`, `va_start` or a call that can return twice keeps the call. `-fno-optimize-sibling-calls` turns the pass off, as for gcc. (#3369)
 - A `musttail` call that passes arguments on the stack is made, as gcc makes it: the arguments go where the caller was handed its own and the call is a jump. That is every call on i386, one past the sixth argument on x86-64 and every one on Windows x64. A callee that takes more of the stack than the caller was handed is refused with gcc's `callee required more stack slots than the caller`.
 
 ## 0.29.0

@@ -185,6 +185,7 @@ pub mod sroa;
 pub mod stats;
 pub mod subscript;
 pub mod switch_conv;
+pub mod tailrec;
 #[cfg(test)]
 mod testing;
 pub mod thread;

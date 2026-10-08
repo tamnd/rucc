@@ -4206,6 +4206,23 @@ fn sysroot_manifest(opts: &Options, link: &LinkOptions) -> Result<Option<Manifes
     }
 }
 
+/// The passes the command line added and removed, in the order it did.
+///
+/// `-f<pass>` and `-fno-<pass>` as they were given, after what `-foptimize-sibling-calls` and its
+/// `-fno-` form say about the pass that makes a loop of a call a function makes to itself. gcc
+/// puts its `tailr` pass under that flag, and so does this. The flag goes first, so a pass named on
+/// its own has the last word. It adds no pass at `-O0`, where gcc runs none.
+pub(crate) fn toggles(opts: &Options) -> Vec<(String, bool)> {
+    let mut toggles = Vec::with_capacity(opts.passes.len() + 1);
+    if let Some(on) = opts.sibling_calls
+        && (!on || opts.opt_level != rucc_session::OptLevel::O0)
+    {
+        toggles.push((rucc_opt::tailrec::NAME.to_owned(), on));
+    }
+    toggles.extend(opts.passes.iter().cloned());
+    toggles
+}
+
 /// Renders the passes this level will run, in order, with what each one does.
 ///
 /// The level is the whole of the answer unless a `-f` flag edited it, which is section 9.1 of
@@ -4214,7 +4231,7 @@ fn sysroot_manifest(opts: &Options, link: &LinkOptions) -> Result<Option<Manifes
 #[must_use]
 pub fn print_pipeline(opts: &Options) -> String {
     let mut settings = rucc_opt::Options::for_level(opts.opt_level);
-    settings.toggles.clone_from(&opts.passes);
+    settings.toggles = toggles(opts);
     settings.global_fuel = opts.pass_fuel_global;
     for (on, spec) in &opts.pass_gates {
         // Every spelling was checked while the arguments were parsed, so there is nothing here
@@ -5792,6 +5809,20 @@ mod tests {
 
         let (one, _) = compile(&["-c", "-O1", "a.c"]);
         assert!(!one.opt_level.sibling_calls(), "gcc leaves them off at -O1");
+    }
+
+    /// gcc's `tailr` is under the same flag, so the pass that makes a loop of a call a function
+    /// makes to itself goes on and off with it, and a pass named on its own has the last word.
+    #[test]
+    fn the_sibling_calls_flag_turns_the_tail_recursion_pass_on_and_off() {
+        let name = rucc_opt::tailrec::NAME;
+        let listed = |args: &[&str]| print_pipeline(&compile(args).0).contains(name);
+        assert!(listed(&["-c", "-O2", "a.c"]), "the level has it");
+        assert!(!listed(&["-c", "-O2", "-fno-optimize-sibling-calls", "a.c"]));
+        assert!(listed(&["-c", "-O1", "-foptimize-sibling-calls", "a.c"]));
+        assert!(!listed(&["-c", "-O0", "-foptimize-sibling-calls", "a.c"]), "gcc runs none at -O0");
+        let named = ["-c", "-O2", "-fno-optimize-sibling-calls", "-ftail-recursion", "a.c"];
+        assert!(listed(&named), "the pass named on its own wins");
     }
 
     /// Whether the timing model is worth holding an instruction back over, which is a `-Z` because

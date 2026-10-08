@@ -118,6 +118,7 @@ pub static PASSES: &[&dyn Pass] = &[
     &crate::short_circuit::ANY,
     &crate::short_circuit::FREE,
     &crate::switch_conv::SwitchConv,
+    &crate::tailrec::TailRecursion,
     &crate::canon::Canon,
     &crate::header_copy::SPEED,
     &crate::header_copy::SIZE,
