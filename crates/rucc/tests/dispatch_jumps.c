@@ -1,7 +1,6 @@
 /* An interpreter whose jumps go to a step by number, as the jump steps of Postgres'
  * ExecInterpExpr do. A step is 64 bytes, so the step a jump goes to is the steps plus the number
  * shifted by six, and the number is read off the step the jump leaves. */
-#include <stdio.h>
 
 struct step {
     int kind;
@@ -45,6 +44,8 @@ done:
 }
 
 #ifdef RUN
+#include <stdio.h>
+
 int main(void) {
     static const long zero = 0, one = 1, a = 1, b = 10, c = 100, d = 1000;
     struct step steps[] = {

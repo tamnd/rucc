@@ -6,8 +6,11 @@
 //! added could be in that register, since `op` is read for the last time when the number is read
 //! off it. The copy of `steps` in front of the `add` went over the number and the jump went to
 //! `steps` plus `steps`, which crashed the server on the first query that took such a jump.
-//! `dispatch_jumps.c` has that shape. The unit tests in `rucc-codegen` cover the pass. This runs
-//! the compiler and the program it wrote.
+//! `dispatch_jumps.c` has that shape. Whether the number lands in that register depends on what
+//! else the whole of `ExecInterpExpr` keeps in registers, and here the `add` comes out as a `lea`
+//! into a register that is free, so the unit test in `rucc-codegen` is the one that holds the
+//! pass to the rule. This runs the compiler and the program it wrote, so a jump of this shape that
+//! goes wrong some other way is caught too.
 
 use std::process::Command;
 
