@@ -17,6 +17,14 @@
 //! comparison would have set on its way past. This is the common one by a long way: at `-O2` over
 //! the SQLite amalgamation there are 2250 of these and 0 of the other shape.
 //!
+//! The layout's own test of a byte something arithmetic has just worked out is the same shape
+//! again. `if (i >= 0 && i < n)` with both sides cheap comes out of the middle end as two
+//! comparisons that keep their bytes, an `and` of the two bytes and a branch on what the `and`
+//! wrote, and the layout writes that branch as a test of the byte against itself and a jump. The
+//! test asks what a comparison against zero asks, so the `and` has answered it already. rucc
+//! 0.24.8 wrote 648 of these pairs at `-O2` over the SQLite amalgamation, and Postgres' `add_abs`
+//! and `sub_abs` each had two in the loop over the digits.
+//!
 //! # Why it runs after the layout rather than before
 //!
 //! Because this is the second pass to work on a pair of instructions whose middle has to stay
@@ -275,8 +283,12 @@ impl Left {
             How::Made { asks, read, imm } => {
                 *asks == entry.asks && *read == asked && *imm == against
             }
+            // A comparison with one register and no constant is a test of the register against
+            // itself, which is how the layout writes a branch on a byte, and it asks what a
+            // comparison of that register against zero asks.
             How::Zeroed { width, covers } => {
-                if against != Some(0) || self.about != asked {
+                let zero = against == Some(0) || (against.is_none() && asked.len() == 1);
+                if !zero || self.about != asked {
                     return false;
                 }
                 let [(index, _)] = reads(func, inst)[..] else { return false };
@@ -534,6 +546,55 @@ mod tests {
 
         assert_eq!(takes(&mut func, &mut names), 1);
         assert_eq!(shape(&func, &names, block), ["and_ri_32", "jcc_l"]);
+    }
+
+    /// The branch the layout writes on a byte, after an `and` of two bytes that comparisons kept.
+    /// The test of the byte against itself asks what a comparison of it against zero asks, so it
+    /// goes and the jump reads what the `and` left.
+    #[test]
+    fn the_layouts_test_of_a_byte_an_and_just_wrote_goes() {
+        for bitwise in ["and_rr_8", "or_rr_8", "xor_rr_8"] {
+            let (mut names, mut func, block) = empty();
+            let value = func.new_vreg(GPR);
+            let first = func.new_vreg(GPR);
+            let second = func.new_vreg(GPR);
+            let limit = func.new_vreg(GPR);
+            let ge = op(&mut names, "cmp_set_ge_ri_32");
+            let l = op(&mut names, "cmp_set_l_32");
+            let both = op(&mut names, bitwise);
+            let test = op(&mut names, "test_rr_8");
+            let jump = op(&mut names, "jcc_e");
+            func.build(block, ge).def(first, GPR).uses(value, GPR).imm(0).finish();
+            func.build(block, l).def(second, GPR).uses(value, GPR).uses(limit, GPR).finish();
+            func.build(block, both).def(first, GPR).uses(first, GPR).uses(second, GPR).finish();
+            func.build(block, test).uses(first, GPR).finish();
+            func.build(block, jump).finish();
+
+            assert_eq!(takes(&mut func, &mut names), 1, "{bitwise}");
+            assert_eq!(
+                shape(&func, &names, block),
+                ["cmp_set_ge_ri_32", "cmp_set_l_32", bitwise, "jcc_e"]
+            );
+        }
+    }
+
+    /// The same test of a byte when what wrote it last was a comparison that kept it rather than
+    /// arithmetic. What the condition state holds is the answer to the comparison and not whether
+    /// the byte is zero, so the test stays.
+    #[test]
+    fn the_layouts_test_of_a_byte_a_comparison_kept_stays() {
+        let (mut names, mut func, block) = empty();
+        let value = func.new_vreg(GPR);
+        let byte = func.new_vreg(GPR);
+        let l = op(&mut names, "cmp_set_l_ri_32");
+        let test = op(&mut names, "test_rr_8");
+        let jump = op(&mut names, "jcc_e");
+        func.build(block, l).def(byte, GPR).uses(value, GPR).imm(10).finish();
+        func.build(block, test).uses(byte, GPR).finish();
+        func.build(block, jump).finish();
+
+        assert_eq!(takes(&mut func, &mut names), 0);
+        assert_eq!(shape(&func, &names, block), ["cmp_set_l_ri_32", "test_rr_8", "jcc_e"]);
     }
 
     /// The same three instructions with a subtraction in front. The condition is behind the

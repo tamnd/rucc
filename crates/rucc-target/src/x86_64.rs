@@ -945,7 +945,7 @@ fn writes_flags(name: &str) -> bool {
 /// Every comparison this machine makes, and what is left of one it has already made.
 ///
 /// Ten conditions at four widths against a register and against a constant, which is eighty, and
-/// then the eight that keep no answer. What a comparison asks is the name of the one that keeps
+/// then the twelve that keep no answer. What a comparison asks is the name of the one that keeps
 /// nothing, so the eighty and the eight meet in the middle: a program that compares and keeps the
 /// byte, and then compares the same two registers and branches, is two rows here that agree.
 ///
@@ -958,10 +958,13 @@ fn writes_flags(name: &str) -> bool {
 /// Leaving them out costs a saving that is not taken and keeps the pass from taking one that is
 /// not there.
 ///
-/// The eight tests of a register against a constant ask what `test` asks, and there is no row for
-/// that one on its own since the layout is all that writes it. Two of them that agree are an `and`
-/// asked about twice, which is as much the same question as two comparisons are.
-static COMPARES: [Compare; 96] = [
+/// The eight tests of a register against a constant ask what `test` asks, and two of them that
+/// agree are an `and` asked about twice, which is as much the same question as two comparisons
+/// are. The four tests of a register against itself keep nothing and ask what a comparison of
+/// the register against zero asks. The layout writes the narrowest one as its branch on a byte,
+/// before the pass that reads this table runs, and they are here so that the pass can see that a
+/// test of a byte an `and` just wrote asks what the `and` has already answered.
+static COMPARES: [Compare; 100] = [
     Compare { name: "cmp_set_e_8", asks: "cmp_rr_8", kept: Some("set_e") },
     Compare { name: "cmp_set_e_16", asks: "cmp_rr_16", kept: Some("set_e") },
     Compare { name: "cmp_set_e_32", asks: "cmp_rr_32", kept: Some("set_e") },
@@ -1050,6 +1053,10 @@ static COMPARES: [Compare; 96] = [
     Compare { name: "test_set_ne_ri_16", asks: "test_ri_16", kept: Some("set_ne") },
     Compare { name: "test_set_ne_ri_32", asks: "test_ri_32", kept: Some("set_ne") },
     Compare { name: "test_set_ne_ri_64", asks: "test_ri_64", kept: Some("set_ne") },
+    Compare { name: "test_rr_8", asks: "test_rr_8", kept: None },
+    Compare { name: "test_rr_16", asks: "test_rr_16", kept: None },
+    Compare { name: "test_rr_32", asks: "test_rr_32", kept: None },
+    Compare { name: "test_rr_64", asks: "test_rr_64", kept: None },
     Compare { name: "cmp_rr_8", asks: "cmp_rr_8", kept: None },
     Compare { name: "cmp_rr_16", asks: "cmp_rr_16", kept: None },
     Compare { name: "cmp_rr_32", asks: "cmp_rr_32", kept: None },
@@ -2026,7 +2033,10 @@ mod tests {
         let comparisons: Vec<&str> = INSTS
             .iter()
             .filter(|&&(_, shape)| {
-                matches!(shape, Form::CmpSet | Form::CmpSetRi | Form::Cmp | Form::CmpRi)
+                matches!(
+                    shape,
+                    Form::CmpSet | Form::CmpSetRi | Form::Test | Form::Cmp | Form::CmpRi
+                )
             })
             .map(|&(opcode, _)| opcode)
             .collect();
