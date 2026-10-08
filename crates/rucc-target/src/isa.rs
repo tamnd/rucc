@@ -181,7 +181,7 @@ pub static FEATURES: &[Row] = &[
     named("widekl", &["kl"]),
     named("ptwrite", &[]),
     named("sgx", &[]),
-    named("shstk", &[]),
+    yes("shstk", &[]),
     named("wbnoinvd", &[]),
     named("pconfig", &[]),
     named("cmpccxadd", &[]),
@@ -245,9 +245,9 @@ impl Feature {
 
     /// Whether this compiler provides what the name stands for.
     ///
-    /// The SSE line up to 4.2, the population count, the CRC-32C step, and the three the baseline
-    /// already has. For those the headers have the intrinsics and the assembler has the
-    /// instructions. For every other name gcc knows, a program can say it and have it remembered,
+    /// The SSE line up to 4.2, the population count, the CRC-32C step, `xsave`, the shadow stack
+    /// instructions of `shstk`, and the three the baseline already has. For those the headers have
+    /// the intrinsics and the assembler has the instructions. For every other name gcc knows, a program can say it and have it remembered,
     /// which is what an attribute on a function built for a processor chosen at run time needs, but
     /// the command line may not turn it on for a whole unit and no macro claims it.
     ///
@@ -900,6 +900,12 @@ mod tests {
         assert_eq!(macros(&["xsave"]), said(&["FXSR", "MMX", "SSE", "SSE2", "XSAVE"]));
         assert!(Feature::named("xsave").unwrap().honoured());
         assert!(!Feature::named("xsaveopt").unwrap().honoured());
+    }
+
+    #[test]
+    fn shstk_is_honoured_and_brings_nothing_with_it() {
+        assert_eq!(macros(&["shstk"]), said(&["FXSR", "MMX", "SSE", "SSE2", "SHSTK"]));
+        assert!(Feature::named("shstk").unwrap().honoured());
     }
 
     #[test]

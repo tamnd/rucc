@@ -33,6 +33,7 @@
  * call it. See `tamnd/rucc#2003` and `tamnd/rucc#2045`.
  *
  * `<xsaveintrin.h>` is reached the same way and for the same reason, and holds `_xgetbv`.
+ * `<cetintrin.h>` is too, and holds the shadow stack instructions that pcre2's JIT calls.
  *
  * So are the AVX-512 headers, which hold what PostgreSQL's AVX-512 CRC32C and population count
  * call and nothing more yet. See `tamnd/rucc#1988`.
@@ -58,6 +59,7 @@
 #include <smmintrin.h>
 
 #include <xsaveintrin.h>
+#include <cetintrin.h>
 
 /* Unguarded for the same reason. Each function is built for its own extension, and a macro among
  * them writes instructions only where it is used, which is inside a function built for it. */
