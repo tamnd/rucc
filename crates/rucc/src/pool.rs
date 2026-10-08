@@ -205,6 +205,37 @@ unsafe impl GlobalAlloc for Pool {
     }
 }
 
+/// Asks the C library's allocator to keep the memory a compile gives back instead of returning it
+/// to the kernel, for the blocks [`Pool`] passes on to it.
+///
+/// Out of the box glibc maps each block of 128 KiB or more on its own and unmaps it on free, and
+/// it trims the top of the heap as soon as 128 KiB of it is free. A compile grows a token list or
+/// a table of a function past that again and again, so each growth was a fresh mapping whose
+/// pages all faulted in from zero, and the regions of the pool were one mapping each as well.
+/// With the heap allowed to keep 32 MiB of slack and to hold blocks up to 32 MiB, duktape.c at
+/// `-O0` takes about a quarter fewer page faults and a third less system time. The 32 MiB is the
+/// most glibc lets a heap block be on a 64 bit target. tamnd/rucc#3052.
+#[cfg(all(target_os = "linux", target_env = "gnu"))]
+pub(crate) fn keep_freed_memory() {
+    use std::ffi::c_int;
+    unsafe extern "C" {
+        fn mallopt(param: c_int, value: c_int) -> c_int;
+    }
+    const M_TOP_PAD: c_int = -2;
+    const M_MMAP_THRESHOLD: c_int = -3;
+    const SLACK: c_int = 32 << 20;
+    // SAFETY: `mallopt` only sets the allocator's parameters, which the C library allows at any
+    // time, and nothing has been allocated by another thread yet because there is none.
+    unsafe {
+        mallopt(M_MMAP_THRESHOLD, SLACK);
+        mallopt(M_TOP_PAD, SLACK);
+    }
+}
+
+/// Nothing to tune on a C library this does not know the parameters of.
+#[cfg(not(all(target_os = "linux", target_env = "gnu")))]
+pub(crate) fn keep_freed_memory() {}
+
 #[cfg(test)]
 mod tests {
     use super::*;
