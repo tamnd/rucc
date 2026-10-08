@@ -6,6 +6,7 @@ All notable changes are recorded here. The format follows [Keep a Changelog](htt
 
 ### Added
 
+- `phiopt` makes a branch to two blocks that each end in `return` one `select` and one `return`, as LLVM does in `SimplifyCondBranchToTwoReturns`. A switch in a function that is not inlined is now a `cmov` on x86-64, a `csel` on aarch64 and a `select` on wasm32. The compare moves down next to the select. (#3384)
 - `simplify-cfg` makes a switch whose cases are one run of values to one place a branch on one unsigned compare, so `phiopt` can make a converted switch a `select`. `switch-dispatch.constant-arms.unpredictable` on wasm32 runs in about half the time (#3380).
 - On wasm32, a switch whose answers are the addresses of read-only data is a range check and a load from a table of those addresses, in place of a chain of compares. The `switch-dispatch.names` case of rucc-corpus runs 387 M operators in place of 705 M (#3374).
 - On wasm32 a loop that counts bits is one `popcnt`, `clz` or `ctz` at `-O2`, as on a native target that has the instruction. The target now has a table of the counts that are one operator, which the loop deletion pass reads. `while (x) { x &= x - 1; n++; }` and the three other bit loops of rucc-corpus run in 0.6 times the time of clang's build, where they took 2.75 times. (#3372)

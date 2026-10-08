@@ -311,6 +311,12 @@ impl Pass for SimplifyCfg {
                 sweep(func, an, &mut stats);
             }
         }
+        // Again, because the cases of `case 0: case 1: return x;` each go to a block that only
+        // jumps to the next one, and they all go to one block only now that the forwarders are out
+        // of the way. Without this the switch reaches the second `phiopt` as a switch.
+        if range_branches(func, fuel, &mut stats) {
+            an.clear();
+        }
         stats
     }
 }
@@ -1962,6 +1968,34 @@ block2:
         let (func, stats) = ranged(Type::int(32), &[-1, 0, 1]);
         assert_eq!(stats.count(Kind::Optimized, super::RANGED), 1);
         assert_eq!(entry_ops(&func).1, Some(IntPred::Ule));
+    }
+
+    /// `case 0: case 1: case 2:` as the front end writes it, each case a block that only jumps to
+    /// the next. The cases go to one place only after the forwarders go.
+    #[test]
+    fn cases_that_fall_through_to_one_arm_are_one_run() {
+        let mut names = Interner::new();
+        let ty = Type::int(32);
+        let signature = Signature::new().with_params(&[ty]);
+        let mut func = Func::new(names.intern("f"), signature);
+        let entry = func.create_block();
+        let miss = func.create_block();
+        let steps: Vec<Block> = (0..3).map(|_| func.create_block()).collect();
+        let hit = func.create_block();
+        let value = func.append_param(entry, ty);
+        let cases: Vec<(i128, Block)> = (0..).zip(steps.iter().copied()).collect();
+        Builder::new(&mut func, entry).switch(value, miss, &cases);
+        Builder::new(&mut func, miss).ret(&[]);
+        for (at, &step) in steps.iter().enumerate() {
+            Builder::new(&mut func, step).jump(*steps.get(at + 1).unwrap_or(&hit), &[]);
+        }
+        Builder::new(&mut func, hit).ret(&[]);
+        let stats = simplify(&mut func);
+        assert_eq!(stats.count(Kind::Optimized, super::RANGED), 1);
+        assert_eq!(
+            entry_ops(&func),
+            (vec![Opcode::IConst, Opcode::ICmp, Opcode::BrIf], Some(IntPred::Ule))
+        );
     }
 
     #[test]
