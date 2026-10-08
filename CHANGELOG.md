@@ -71,6 +71,7 @@ This release ends S5 (#431), the full plane set of the safe memory work. The typ
 - Build the table of fusable comparisons once per function instead of five times. Duktape compiles 4.8% faster at -O1 and 1.5% at -O2, with byte-identical output (#3375)
 - Read what the register allocators ask of a function once per function rather than once per try. Duktape compiles 6.8% faster at -O1 and 2.7% at -O2, with byte-identical output (#3376)
 - Intern the back end's machine opcode names by where their two static halves are, so a name is built and hashed once per compilation rather than once per use. Duktape compiles 1.9% faster at -O1, with byte-identical output (#3381)
+- Line starts in a source file are found a word at a time, the lexer skips an empty splice report, and a spelling is interned without checking its UTF-8 twice, which takes duktape.c -O1 down 0.9% in instructions (#3382)
 
 ### Fixed
 
