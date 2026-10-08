@@ -94,14 +94,44 @@ fn back_edges(asm: &str) -> Vec<Vec<String>> {
     edges
 }
 
-/// Whether an instruction copies one register into another. A move that widens, such as
-/// `movslq`, makes a value the loop did not have before it and is not a copy.
-fn copy(inst: &str) -> bool {
-    let Some((opcode, operands)) = inst.split_once(char::is_whitespace) else { return false };
-    matches!(opcode, "mov" | "movb" | "movw" | "movl" | "movq")
-        && operands.split(',').all(|operand| operand.trim().starts_with('%'))
+/// The register an instruction copies another register into, if it is a copy. A move that widens,
+/// such as `movslq`, makes a value the loop did not have before it and is not a copy.
+fn copy(inst: &str) -> Option<String> {
+    let (opcode, operands) = inst.split_once(char::is_whitespace)?;
+    let operands: Vec<&str> = operands.split(',').map(str::trim).collect();
+    if !matches!(opcode, "mov" | "movb" | "movw" | "movl" | "movq")
+        || !operands.iter().all(|operand| operand.starts_with('%'))
+    {
+        return None;
+    }
+    operands.last().map(|to| family(to))
 }
 
+/// The name of a register without its width, so that `%eax`, `%rax` and `%al` are all `a` and
+/// `%r9d` and `%r9` are both `9`.
+fn family(reg: &str) -> String {
+    let reg = reg.trim_start_matches('%');
+    let digits: String = reg.chars().skip(1).take_while(char::is_ascii_digit).collect();
+    if reg.starts_with('r') && !digits.is_empty() {
+        return digits;
+    }
+    let reg = reg.strip_prefix(['r', 'e']).unwrap_or(reg);
+    reg.trim_end_matches(['x', 'l']).to_owned()
+}
+
+/// The registers an instruction names, by family.
+fn names(inst: &str) -> Vec<String> {
+    inst.split('%')
+        .skip(1)
+        .map(|rest| {
+            family(&rest.chars().take_while(char::is_ascii_alphanumeric).collect::<String>())
+        })
+        .collect()
+}
+
+/// A copy that the rest of the turn reads is a copy into a scratch register, such as the one that
+/// keeps the counter while `and` writes over its operand. A copy that nothing reads before the jump
+/// is read only on the next turn, and that is a value the loop carries in two registers.
 #[test]
 fn the_sum_and_the_counter_are_not_copied_on_the_way_round() {
     for level in ["-O2", "-Os"] {
@@ -109,10 +139,12 @@ fn the_sum_and_the_counter_are_not_copied_on_the_way_round() {
         let edges = back_edges(&asm);
         assert!(!edges.is_empty(), "no loop at {level}:\n{asm}");
         for edge in edges {
-            assert!(
-                !edge.iter().any(|inst| copy(inst)),
-                "a copy on the back edge at {level}: {edge:?}\n{asm}"
-            );
+            // The edge runs from the jump back, so the instructions after a copy are before it.
+            let carried = edge.iter().enumerate().any(|(at, inst)| {
+                copy(inst)
+                    .is_some_and(|to| !edge[..at].iter().any(|later| names(later).contains(&to)))
+            });
+            assert!(!carried, "a copy on the back edge at {level}: {edge:?}\n{asm}");
         }
     }
 }

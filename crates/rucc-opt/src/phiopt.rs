@@ -308,6 +308,18 @@
 //! branch. The margin was a quarter until #1902 timed a diamond at known rates and found the branch
 //! losing at ninety and ninety five and winning only at ninety nine.
 //!
+//! # Two returns
+//!
+//! A branch to two blocks that each only work out a value and return it has no join, so it is not
+//! a diamond. `int f(int v) { switch (v) { case 0: return 1; ... default: return 0; } }` is that
+//! shape once `switch-conv` and `simplify-cfg` have made the range check a branch, and clang writes
+//! one `select` and one return for it. LLVM does the same in `SimplifyCondBranchToTwoReturns`.
+//!
+//! Here the two returns are given one block to return from, which takes the returned values as its
+//! parameters, and each arm jumps to it. That is a diamond, and every rule below is asked about it
+//! as about any other. Where one of them refuses, the two returns are put back as they were, so a
+//! branch that stays a branch keeps a return on each side and no jump to a shared one.
+//!
 //! # Which level, and how many times
 //!
 //! Every level that optimizes, which is section 22.2's `-O1` and above.
@@ -328,8 +340,8 @@
 
 use rucc_cost::heuristics;
 use rucc_ir::{
-    Block, Builder, Def, Extra, Flags, Func, Imm, Inst, InstData, IntPred, MemInfo, MemOrder,
-    Opcode, Type, Value,
+    Block, BlockCall, Builder, Def, Extra, Flags, Func, Imm, Inst, InstData, IntPred, MemInfo,
+    MemOrder, Opcode, Type, Value,
 };
 
 use crate::alias::{self, Escapes, Origin};
@@ -427,7 +439,21 @@ impl Pass for PhiOpt {
             if !cfg.reaches(head) {
                 continue;
             }
-            let Some(shape) = diamond(func, cfg, head) else { continue };
+            let mut joined = None;
+            let shape = match diamond(func, cfg, head) {
+                Some(shape) => shape,
+                None => {
+                    let Some(ends) = two_returns(func, cfg, head) else { continue };
+                    joined = Some(join_returns(func, ends));
+                    an.clear();
+                    let cfg = an.cfg(func);
+                    let Some(shape) = diamond(func, cfg, head) else {
+                        unjoin(func, an, joined);
+                        continue;
+                    };
+                    shape
+                }
+            };
             let store = storing(func, machine, &shape, &mut frame);
             // Before the refusals rather than after, because one of them is about a value having a
             // width a select is lowered at, and a value the condition settles gets no select at all.
@@ -436,6 +462,7 @@ impl Pass for PhiOpt {
             let implied = implied(func, an, &shape);
             if let Some(reason) = refused(func, machine, &shape, store.as_ref(), &implied) {
                 stats.missed(reason);
+                unjoin(func, an, joined);
                 continue;
             }
             let plan = factoring(func, machine, &shape, &implied);
@@ -461,6 +488,7 @@ impl Pass for PhiOpt {
                     .any(|&count| count > rucc_cost::param!(heuristics::PHIOPT_ARM_INSTRUCTIONS))
                 {
                     stats.missed(ARMS_TOO_LONG);
+                    unjoin(func, an, joined);
                     continue;
                 }
                 // The first edge out of the head, which is the arm taken when the condition holds,
@@ -469,6 +497,7 @@ impl Pass for PhiOpt {
                 // number is near even and the other edge is its complement.
                 if !unpredictable(an.frequencies(func).taken(head, 0)) {
                     stats.missed(BRANCH_IS_PREDICTED);
+                    unjoin(func, an, joined);
                     continue;
                 }
             }
@@ -477,6 +506,7 @@ impl Pass for PhiOpt {
                 // threading gives: a budget that has reached zero will not have anything in it at
                 // the next block either, and the refusals above are the counts worth being true.
                 stats.missed(NO_FUEL);
+                unjoin(func, an, joined);
                 break;
             }
             let loads = shape
@@ -575,6 +605,81 @@ pub(crate) fn diamond(func: &Func, cfg: &Cfg, head: Block) -> Option<Diamond> {
         args[index] = func[carried].to_vec();
     }
     Some(Diamond { head, cond, join, arms, args })
+}
+
+/// The block a branch to two returns was given to return from, and the two returns it replaced,
+/// each with its instruction as it was.
+struct Joined {
+    join: Block,
+    ends: [(Inst, InstData); 2],
+}
+
+/// The two returns a branch goes to, when each side is a block of its own that ends in one.
+///
+/// The sides are held to what [`passes_through`] holds an arm to, except that the arm returns
+/// rather than jumps: no parameters, no name an image can hold, and the head as the one way in.
+/// Both return at least one value and the same types, since the block they are given takes them
+/// as its parameters, and a pair of returns of nothing has no value to select.
+fn two_returns(func: &Func, cfg: &Cfg, head: Block) -> Option<[Inst; 2]> {
+    let entry = cfg.entry()?;
+    let term = func.terminator(head)?;
+    if func[term].opcode != Opcode::BrIf {
+        return None;
+    }
+    let mut targets = func.successors(term);
+    let sides = [targets.next()?.block, targets.next()?.block];
+    if sides[0] == sides[1] {
+        return None;
+    }
+    let mut ends = [term; 2];
+    for (end, &block) in ends.iter_mut().zip(&sides) {
+        if block == entry || !func[block].params.is_empty() || func.block_name(block).is_some() {
+            return None;
+        }
+        match cfg.predecessors(block) {
+            [only] if *only == head => {}
+            _ => return None,
+        }
+        *end = func.terminator(block)?;
+        if func[*end].opcode != Opcode::Return || func[func[*end].args].is_empty() {
+            return None;
+        }
+    }
+    let [one, two] = ends.map(|end| func[func[end].args].iter().map(|&value| func[value].ty));
+    one.eq(two).then_some(ends)
+}
+
+/// Points the two returns at one new block that returns what they did, and answers what to put
+/// back if the diamond that makes is refused.
+fn join_returns(func: &mut Func, ends: [Inst; 2]) -> Joined {
+    let span = func.span(ends[0]);
+    let join = func.create_block();
+    let types: Vec<Type> = func[func[ends[0]].args].iter().map(|&value| func[value].ty).collect();
+    let params: Vec<Value> = types.iter().map(|&ty| func.append_param(join, ty)).collect();
+    Builder::new(func, join).at(span).ret(&params);
+    let saved = ends.map(|end| (end, func[end]));
+    for end in ends {
+        let carried = func[func[end].args].to_vec();
+        let carried = func.push_values(&carried);
+        let targets = func.push_block_calls(&[BlockCall::new(join, carried)]);
+        let empty = func.push_values(&[]);
+        let data = &mut func[end];
+        data.opcode = Opcode::Jump;
+        data.args = empty;
+        data.extra = Extra::Targets(targets);
+    }
+    Joined { join, ends: saved }
+}
+
+/// Puts back the two returns [`join_returns`] replaced, where there were any, and removes the
+/// block it made.
+fn unjoin(func: &mut Func, an: &mut Analyses, joined: Option<Joined>) {
+    let Some(joined) = joined else { return };
+    for (end, data) in joined.ends {
+        func[end] = data;
+    }
+    func.remove_block(joined.join);
+    an.clear();
 }
 
 /// Where this side of the branch ends up, when it is a block whose only job is to get there.
@@ -1395,6 +1500,7 @@ fn convert(
             }
         }
     }
+    lower_condition(func, shape.head, shape.cond);
     let mut build = Builder::new(func, shape.head).at(span);
     let mut args = Vec::with_capacity(shape.args[0].len());
     for (index, (&then, &other)) in shape.args[0].iter().zip(&shape.args[1]).enumerate() {
@@ -1442,6 +1548,28 @@ fn convert(
     for &arm in shape.arms.iter().flatten() {
         func.remove_block(arm);
     }
+}
+
+/// Moves the compare the branch was on down to the end of the head, after the work the arms did,
+/// where nothing between it and the selects reads it.
+///
+/// The selects read the compare, and on x86-64 an arm's `add` between the two clobbers the flags
+/// the compare set. The back end then keeps the bit with `setcc` and tests it again before the
+/// `cmov`, which is three instructions where a compare next to its `cmov` is none.
+fn lower_condition(func: &mut Func, head: Block, cond: Value) {
+    let Def::Result { inst, .. } = func[cond].def else { return };
+    if !matches!(func[inst].opcode, Opcode::ICmp | Opcode::FCmp)
+        || func.block_of(inst) != Some(head)
+    {
+        return;
+    }
+    let after: Vec<Inst> =
+        std::iter::successors(func.next_inst(inst), |&at| func.next_inst(at)).collect();
+    if after.is_empty() || after.iter().any(|&at| func[func[at].args].contains(&cond)) {
+        return;
+    }
+    func.remove_inst(inst);
+    func.append_inst(head, inst);
 }
 
 /// Writes one copy of a factored chain, from the select at the bottom up to the level the join
@@ -1616,6 +1744,62 @@ mod tests {
         assert_eq!(blocks(&func), vec![0, 1, 2, 3]);
     }
 
+    /// `x < y ? x + 1 : y - 7`, written as a return on each side and no block both reach.
+    ///
+    /// Block 0 is the head and takes the two values it compares, and blocks 1 and 2 each work one
+    /// value out and return it. With `divide` the first arm is `x / y`, which may trap.
+    fn two_returns(divide: bool) -> Func {
+        let mut names = Interner::new();
+        let signature = Signature::new().with_params(&[Type::int(32), Type::int(32)]);
+        let mut func = Func::new(names.intern("f"), signature);
+        let head = func.create_block();
+        let left = func.append_param(head, Type::int(32));
+        let right = func.append_param(head, Type::int(32));
+        let arms = [func.create_block(), func.create_block()];
+        let mut build = Builder::new(&mut func, head);
+        let test = build.icmp(IntPred::Slt, left, right);
+        build.br_if(test, arms[0], &[], arms[1], &[]);
+        let mut build = Builder::new(&mut func, arms[0]);
+        let value = if divide {
+            build.binary(Opcode::SDiv, left, right, Flags::NONE)
+        } else {
+            let one = build.iconst(Type::int(32), 1);
+            build.binary(Opcode::Add, left, one, Flags::NONE)
+        };
+        build.ret(&[value]);
+        let mut build = Builder::new(&mut func, arms[1]);
+        let seven = build.iconst(Type::int(32), 7);
+        let value = build.binary(Opcode::Sub, right, seven, Flags::NONE);
+        build.ret(&[value]);
+        func
+    }
+
+    #[test]
+    fn a_branch_to_two_returns_is_one_select_and_one_return() {
+        let mut func = two_returns(false);
+        let stats = phiopt(&mut func);
+        assert_eq!(stats.count(Kind::Optimized, super::CONVERTED), 1);
+        // The arms are gone, and the head jumps to the block made for the two returns, which
+        // `simplify-cfg` merges into it.
+        assert_eq!(blocks(&func), [0, 3]);
+        assert_eq!(goes_to(&func, 0), [3]);
+        assert_eq!(opcodes(&func, 3), [Opcode::Return]);
+        // The compare moved down past the arms' work to sit next to the select that reads it.
+        let head = opcodes(&func, 0);
+        assert_eq!(head[head.len() - 3..], [Opcode::ICmp, Opcode::Select, Opcode::Jump]);
+    }
+
+    #[test]
+    fn a_branch_to_two_returns_that_is_refused_keeps_both_returns() {
+        let mut func = two_returns(true);
+        let stats = phiopt(&mut func);
+        assert_eq!(stats.count(Kind::Missed, super::ARM_MAY_TRAP), 1);
+        assert_eq!(stats.count(Kind::Optimized, super::CONVERTED), 0);
+        assert_eq!(blocks(&func), [0, 1, 2]);
+        assert_eq!(opcodes(&func, 1), [Opcode::SDiv, Opcode::Return]);
+        assert_eq!(opcodes(&func, 2), [Opcode::IConst, Opcode::Sub, Opcode::Return]);
+    }
+
     #[test]
     fn a_diamond_whose_arms_are_empty_becomes_a_select() {
         let mut func = empty_arms();
@@ -1624,7 +1808,8 @@ mod tests {
         // The two constants moved up with the arms, and the select is what the branch was.
         assert_eq!(
             opcodes(&func, 0),
-            vec![Opcode::ICmp, Opcode::IConst, Opcode::IConst, Opcode::Select, Opcode::Jump]
+            vec![Opcode::IConst, Opcode::IConst, Opcode::ICmp, Opcode::Select, Opcode::Jump],
+            "the compare moves down to the select"
         );
         assert_eq!(goes_to(&func, 0), vec![3]);
         assert_eq!(blocks(&func), vec![0, 3]);
@@ -3116,13 +3301,13 @@ mod tests {
             opcodes(&func, 0),
             vec![
                 Opcode::IConst,
-                Opcode::ICmp,
                 Opcode::Add,
                 Opcode::Sub,
+                Opcode::ICmp,
                 Opcode::Select,
                 Opcode::Jump
             ],
-            "both operations hoisted and a select between their answers"
+            "both operations hoisted, the compare moved down, and a select between their answers"
         );
     }
 

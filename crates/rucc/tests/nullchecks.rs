@@ -83,12 +83,14 @@ fn body<'a>(text: &'a str, name: &str) -> Vec<&'a str> {
 
 /// Whether that function still asks the question the source asked.
 ///
-/// Both halves are wanted. A comparison nothing branches on is a comparison a later pass will
-/// remove, and a branch on something else is not this test, so the answer is that there is a
-/// comparison and that something goes two ways.
+/// Both halves are wanted. A comparison nothing reads is a comparison a later pass will remove, and
+/// a branch on something else is not this test, so the answer is that there is a comparison and
+/// that something goes two ways on it. That is a `br_if`, or a `select` when phiopt made the two
+/// returns one.
 fn tests_the_pointer(text: &str, name: &str) -> bool {
     let body = body(text, name);
-    body.iter().any(|line| line.contains("icmp")) && body.iter().any(|line| line.contains("br_if"))
+    body.iter().any(|line| line.contains("icmp"))
+        && body.iter().any(|line| line.contains("br_if") || line.contains("select"))
 }
 
 #[test]

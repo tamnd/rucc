@@ -4214,10 +4214,10 @@ fn sysroot_manifest(opts: &Options, link: &LinkOptions) -> Result<Option<Manifes
 /// its own has the last word. It adds no pass at `-O0`, where gcc runs none.
 pub(crate) fn toggles(opts: &Options) -> Vec<(String, bool)> {
     let mut toggles = Vec::with_capacity(opts.passes.len() + 1);
-    if let Some(on) = opts.sibling_calls
-        && (!on || opts.opt_level != rucc_session::OptLevel::O0)
-    {
-        toggles.push((rucc_opt::tailrec::NAME.to_owned(), on));
+    if let Some(on) = opts.sibling_calls {
+        if !on || opts.opt_level != rucc_session::OptLevel::O0 {
+            toggles.push((rucc_opt::tailrec::NAME.to_owned(), on));
+        }
     }
     toggles.extend(opts.passes.iter().cloned());
     toggles

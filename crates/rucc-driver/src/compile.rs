@@ -5975,13 +5975,16 @@ decl #0 x : int object external static defined
     /// with the number of labels, so sixteen and a hundred and sixty compile to the same thing.
     ///
     /// The comparison is unsigned because the range check is the label minus the lowest one, which
-    /// is a count and not a number the program wrote.
+    /// is a count and not a number the program wrote. The default and the addition are then one
+    /// `cmov` on that comparison and no branch, as clang writes it (tamnd/rucc#3262).
     #[test]
     fn a_switch_whose_arms_are_a_function_of_the_label_is_a_range_check_and_arithmetic() {
         let arms: String =
             (0..16).map(|k| format!("case {k}: return {};", k + 1)).collect::<Vec<_>>().join(" ");
         let text = optimized(&format!("int f(int x) {{ switch (x) {{ {arms} }} return 0; }}\n"));
-        assert!(text.contains("\tcmpl\t$15, %edi\n\tja\t"), "{text}");
+        assert!(text.contains("\tcmpl\t$15, "), "{text}");
+        assert!(text.contains("\tcmovbel\t"), "{text}");
+        assert!(!text.contains("\tja\t"), "{text}");
         assert!(text.contains("\taddl\t$1, %edi"), "{text}");
         assert_eq!(text.matches("\tcmp").count(), 1, "{text}");
     }

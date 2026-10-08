@@ -4,6 +4,9 @@
 //! `b.eq` or `b.ne`, which is two instructions where the machine has one. `cbz` reaches as far as
 //! `b.eq` does, so the layout of a function has nothing new to worry about. A comparison against
 //! any other constant still sets the flags and branches on them.
+//!
+//! Each arm of the fixture that returns has a division in it. A division can trap, so phiopt does
+//! not make the two returns one `csel`, and the branch stays for the test to read.
 
 use std::process::Command;
 use std::sync::atomic::{AtomicUsize, Ordering};
@@ -12,15 +15,15 @@ const SOURCE: &str = "\
 struct node { struct node *next; long v; };
 extern void f(void);
 long walk(struct node *n) { long s = 0; while (n) { s += n->v; n = n->next; } return s; }
-int truth(int x, int y) { if (x) return y + 1; return y - 1; }
-long wide(long x, long y) { if (x == 0) return y; return y * 5; }
-int narrow(unsigned x, int y) { if (x != 0) return y * 7; return y; }
-int boolean(_Bool b, int y) { if (b) return y * 3; return y; }
+int truth(int x, int y) { if (x) return y / x; return y - 1; }
+long wide(long x, long y) { if (x == 0) return y; return y / x; }
+int narrow(unsigned x, int y) { if (x != 0) return y / x; return y; }
+int boolean(_Bool b, int y, int z) { if (b) return y / z; return y; }
 void guard(int *p) { if (!p) return; f(); }
-int seven(int x, int y) { if (x == 7) return y * 7; return y; }
+int seven(int x, int y, int z) { if (x == 7) return y / z; return y; }
 long sum(int *a, unsigned n) { long s = 0; for (unsigned i = 0; i < n; i++) s += a[i]; return s; }
-int one(unsigned x, int y) { if (x >= 1) return y * 3; return y; }
-int below(unsigned long x, int y) { if (x < 1) return y * 3; return y; }
+int one(unsigned x, int y) { if (x >= 1) return y / x; return y; }
+int below(unsigned long x, int y) { if (x < 1) return y * 3; return y / x; }
 ";
 
 fn compile(flags: &[&str]) -> std::process::Output {
