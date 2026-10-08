@@ -973,6 +973,14 @@ pub struct TargetInfo {
     /// x86-64 ELF, which is the one output whose writer has been taught that relocation for data.
     /// Everywhere else a jump table holds whole addresses.
     pub relative_tables: bool,
+    /// Whether a table in read only data may hold the whole address of a name, which the linker
+    /// writes once and no loader writes again.
+    ///
+    /// wasm32, whose data is placed in linear memory when the program is linked and whose back end
+    /// writes no position independent code. On the other targets the code is position
+    /// independent, so a whole address in data is a word the loader writes at startup, and the
+    /// table could not stay read only.
+    pub absolute_tables: bool,
     /// How bit-fields are allocated into storage, which is the one record layout question where
     /// two targets in this table run different algorithms rather than the same one over different
     /// numbers.
@@ -1374,6 +1382,7 @@ impl TargetInfo {
                 || (target.arch() == tuple::Arch::Aarch64
                     && target.object_format() == tuple::ObjectFormat::Elf),
             relative_tables: x86_64_elf(target, layout.pointer_size),
+            absolute_tables: matches!(target.arch(), tuple::Arch::Wasm32),
             bit_field_style: bit_field_style(target),
             unnamed_bit_field_aligns: unnamed_bit_field_aligns(target),
             // The environment and not the operating system, so `x86_64-windows-gnu` keeps GCC's

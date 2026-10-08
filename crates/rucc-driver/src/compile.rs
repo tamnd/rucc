@@ -5016,6 +5016,26 @@ decl #0 x : int object external static defined
         assert!(!text.contains("\tloop"), "{text}");
     }
 
+    /// A switch whose answers are the addresses of strings is a load from a table of those
+    /// addresses on wasm, because a wasm data address is a whole number in the table.
+    #[test]
+    fn a_switch_of_names_is_a_table_of_addresses_on_wasm() {
+        let source = "const char *name(int k) {\n\
+                      switch (k) { case 0: return \"zero\"; case 1: return \"one\"; case 2: return \"two\";\n\
+                      case 3: return \"three\"; case 4: return \"four\"; case 5: return \"five\";\n\
+                      default: return \"many\"; } }\n";
+        let mut opts = options();
+        opts.target = "wasm32-wasip1".parse::<Triple>().unwrap();
+        opts.emit = EmitKind::Asm;
+        opts.opt_level = rucc_session::OptLevel::O2;
+        let result = run(&opts, source);
+        assert_eq!(result.messages, Vec::<String>::new());
+        let text = result.text();
+        assert!(text.contains("CSWTCH"), "{text}");
+        assert!(text.contains("\t.int32\t.Lstr"), "{text}");
+        assert!(!text.contains("\ti32.eq"), "{text}");
+    }
+
     /// The tree form is a stage of the wasm back end, and a native target refuses it.
     #[test]
     fn a_native_target_refuses_the_wasm_tree_form() {

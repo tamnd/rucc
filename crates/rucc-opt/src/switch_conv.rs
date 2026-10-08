@@ -134,6 +134,14 @@
 //!
 //! The sum is made as an integer and turned back into a pointer, rather than added to the table's
 //! address, because the answer is not in the table and `crate::alias::origin` would say it was.
+//!
+//! wasm32 needs no distance. Its data is placed in linear memory when the program is linked, and
+//! the back end writes no position independent code, so a cell can hold the whole address and no
+//! loader ever writes it again. That is what clang writes there, and `crate::ReadOnly` says so.
+//! The cell is as wide as an address and the answer is the load, made a pointer. The answers are
+//! held to the same names as for a distance, because those are the ones known to be data this file
+//! defines. Before this a `switch` of sixteen names on wasm was sixteen compares, and the
+//! rucc-corpus case of it took three times as long as clang's build (tamnd/rucc#3262).
 
 use std::cmp::Ordering;
 
@@ -159,6 +167,10 @@ const TABLED: &str = "switch replaced by a range check and a load from a table o
 /// What is reported when a `switch` becomes a load from a table of how far its answers are.
 const PLACED: &str =
     "switch replaced by a range check and a load from a table of how far away its answers are";
+
+/// What is reported when a `switch` becomes a load from a table of where its answers are.
+const ADDRESSED: &str =
+    "switch replaced by a range check and a load from a table of the addresses of its answers";
 
 /// What is reported when the pass ran out of fuel with a `switch` it was about to convert.
 const NO_FUEL: &str = "switch left alone, the pass ran out of fuel";
@@ -256,11 +268,12 @@ fn convert(
         .collect();
 
     let index_bits = data.as_ref().map(|data| data.pointer_bits());
+    let whole = data.as_ref().is_some_and(|data| !data.measures() && data.addresses());
     let near = near(func, an, data.as_deref());
     let small = an.machine().goal() == Goal::Size;
     let mut plans = Vec::new();
     for inst in found {
-        match plan(func, cfg, inst, index_bits, small, &near) {
+        match plan(func, cfg, inst, index_bits, small, whole, &near) {
             Ok(plan) => plans.push(plan),
             Err(why) => stats.missed(why),
         }
@@ -276,11 +289,13 @@ fn convert(
             (How::Table { cell, cells, .. }, Some(data)) => {
                 Some(data.table(cell.ty, cells.clone()))
             }
+            (How::Distances { to, whole: true, .. }, Some(data)) => Some(data.addresses_of(to)),
             (How::Distances { to, .. }, Some(data)) => Some(data.distances(to)),
             _ => None,
         };
         stats.optimized(match (&plan.how, table) {
             (_, None) => CONVERTED,
+            (How::Distances { whole: true, .. }, Some(_)) => ADDRESSED,
             (How::Distances { .. }, Some(_)) => PLACED,
             (_, Some(_)) => TABLED,
         });
@@ -295,11 +310,11 @@ fn convert(
 
 /// The names an answer may be the address of, when a table may hold how far away they are.
 ///
-/// Empty when it may not, which is on a target with no four byte distance or for a caller with
-/// nowhere to put a table. Only the names this function takes the address of are asked about,
+/// Empty when it may not, which is on a target with neither a four byte distance nor a whole
+/// address a loader never writes, or for a caller with nowhere to put a table. Only the names this function takes the address of are asked about,
 /// since no other name can be an answer.
 fn near(func: &Func, an: &Analyses, data: Option<&ReadOnly<'_>>) -> Set<Symbol> {
-    if !data.is_some_and(ReadOnly::measures) {
+    if !data.is_some_and(|data| data.measures() || data.addresses()) {
         return Set::default();
     }
     let images = an.images();
@@ -373,7 +388,8 @@ enum How {
         /// The width of an index into the table, which is a word on the target.
         index_bits: u32,
     },
-    /// As the table's address plus cell `label - low`, which is how far the answer is from it.
+    /// As the table's address plus cell `label - low`, which is how far the answer is from it, or
+    /// where `whole` is set, as cell `label - low` alone, which is the answer's address.
     Distances {
         /// The lowest label, which is cell zero.
         low: i128,
@@ -382,6 +398,9 @@ enum How {
         to: Vec<Option<(Symbol, i128)>>,
         /// The width of an index into the table, which is a word on the target.
         index_bits: u32,
+        /// Whether a cell is the whole address and as wide as one, rather than four bytes of
+        /// distance.
+        whole: bool,
     },
 }
 
@@ -397,14 +416,16 @@ struct Cell {
 /// What one `switch` becomes, or why it stays as it is.
 ///
 /// `index_bits` is the width of an address when a table may be made and `None` when it may not,
-/// `small` is whether the goal is size, which is what narrows a cell, and `near` is the names a
-/// table may hold the distance to.
+/// `small` is whether the goal is size, which is what narrows a cell, `whole` is whether a table of
+/// addresses holds them whole rather than as distances, and `near` is the names a table may hold
+/// the distance to or the address of.
 fn plan(
     func: &Func,
     cfg: &Cfg,
     inst: Inst,
     index_bits: Option<u32>,
     small: bool,
+    whole: bool,
     near: &Set<Symbol>,
 ) -> Result<Plan, &'static str> {
     let Extra::Switch(info) = func[inst].extra else { return Err(ARMS_DIFFER) };
@@ -522,7 +543,7 @@ fn plan(
         }
         let fill = fallback(func, default, hands, &args, answer)
             .and_then(|given| place(func, given, near));
-        distances(&labels, &places, ty, index_bits, fill)?
+        distances(&labels, &places, ty, index_bits, whole, fill)?
     } else {
         let mut answers = Vec::with_capacity(handed.len());
         for args in &handed {
@@ -695,12 +716,14 @@ fn table(
 ///
 /// The same as [`table`] but for what a cell is, which is four bytes whatever the label is. It is
 /// how far the answer is from the table, and nothing in one program is four gigabytes from
-/// anything else in it. A hole with nothing to fill it is `None`, a cell nothing reads.
+/// anything else in it. Where `whole` is set a cell is the answer's address instead, as wide as an
+/// address. A hole with nothing to fill it is `None`, a cell nothing reads.
 fn distances(
     labels: &[i128],
     places: &[(Symbol, i128)],
     ty: Type,
     index_bits: u32,
+    whole: bool,
     fill: Option<(Symbol, i128)>,
 ) -> Result<(How, Vec<i128>), &'static str> {
     if ty.bits() > 64 {
@@ -709,7 +732,7 @@ fn distances(
     let (low, to) = spread(labels, places)?;
     let holes = if fill.is_some() { holes(low, &to) } else { Vec::new() };
     let to = to.into_iter().map(|cell| cell.or(fill)).collect();
-    Ok((How::Distances { low, to, index_bits }, holes))
+    Ok((How::Distances { low, to, index_bits, whole }, holes))
 }
 
 /// The answers laid out by label from the lowest one, with `None` in the holes, and the lowest
@@ -940,6 +963,11 @@ fn apply(func: &mut Func, plan: &Plan, table: Option<Symbol>) {
                 (false, true) => builder.unary(Opcode::SExt, read, ty),
                 (false, false) => builder.unary(Opcode::ZExt, read, ty),
             }
+        }
+        (&How::Distances { low, index_bits, whole: true, .. }, Some(name)) => {
+            let word = Type::int(index_bits);
+            let (_, read) = look_up(&mut builder, plan, name, low, word, index_bits);
+            builder.unary(Opcode::IntToPtr, read, Type::PTR)
         }
         (&How::Distances { low, index_bits, .. }, Some(name)) => {
             far(&mut builder, plan, name, low, index_bits)
@@ -1916,6 +1944,73 @@ mod tests {
     fn an_answer_that_is_not_read_only_data_keeps_its_switch() {
         let mut pointing = pointing(&[0, 1, 2, 3], Some(2), 0);
         let (stats, tables) = placed(&mut pointing, true);
+        assert!(!fired(&stats));
+        assert!(tables.is_empty());
+        assert_eq!(stats.count(Kind::Missed, PLACE_IS_ODD), 1, "{stats:?}");
+    }
+
+    /// Runs the pass the way the pipeline does on wasm32, where a cell may be a whole address of
+    /// four bytes and not a distance.
+    fn addressed(pointing: &mut Pointing) -> (Stats, Vec<Table>) {
+        let taken = Set::default();
+        let mut data = ReadOnly::new(&mut pointing.names, &taken, 32, 0).addressing(true);
+        let images = Arc::new(Images::of(&pointing.module, Pic::Executable));
+        let mut an = crate::Analyses::new(crate::Machine::with(None, Goal::Speed)).reading(images);
+        let stats =
+            SwitchConv.run_emitting(&mut pointing.func, &mut an, &mut Fuel::unlimited(), &mut data);
+        (stats, data.into_tables())
+    }
+
+    /// The table of where the answers are holds them whole where no loader writes an address, and
+    /// the answer is the load and nothing added to it.
+    #[test]
+    fn answers_that_are_addresses_are_a_table_of_them_where_no_loader_writes_one() {
+        let mut pointing = pointing(&[0, 1, 2, 3], None, 0);
+        let (stats, tables) = addressed(&mut pointing);
+        assert_eq!(stats.count(Kind::Optimized, super::ADDRESSED), 1, "{stats:?}");
+        assert_eq!(tables.len(), 1);
+        assert!(tables[0].whole);
+        assert_eq!(tables[0].ty, i32());
+        assert_eq!(tables[0].cells, [0, 0, 0, 0]);
+        let want: Vec<Option<Symbol>> = pointing.places[..4].iter().copied().map(Some).collect();
+        assert_eq!(tables[0].to, want);
+        let func = &pointing.func;
+        let arm = arm(func);
+        // The label is as wide as an address on this target, so it is not widened first.
+        let mut want = LOOKUP[1..].to_vec();
+        want.extend([Opcode::IntToPtr, Opcode::Return]);
+        assert_eq!(opcodes(func, arm), want);
+        for label in 0..4 {
+            let place = pointing.places[label as usize];
+            assert_eq!(looked_up(func, arm, label, &tables), spot(place));
+        }
+    }
+
+    /// `&s[k]` and a hole the default fills, with whole addresses: the bytes into a name are in
+    /// the cell, and the hole holds where the default points.
+    #[test]
+    fn a_whole_address_keeps_the_bytes_into_its_name_and_fills_a_hole() {
+        let mut pointing = pointing(&[1, 2, 4, 5], None, 4);
+        let (stats, tables) = addressed(&mut pointing);
+        assert!(fired(&stats));
+        assert!(tables[0].whole);
+        assert_eq!(tables[0].cells, [0, 4, 0, 8, 12]);
+        let places = &pointing.places;
+        let want = [places[0], places[1], places[4], places[2], places[3]].map(Some);
+        assert_eq!(tables[0].to, want);
+        let arm = arm(&pointing.func);
+        for (label, place, bytes) in [(1, 0, 0), (2, 1, 4), (3, 4, 0), (4, 2, 8), (5, 3, 12)] {
+            let got = looked_up(&pointing.func, arm, label, &tables);
+            assert_eq!(got, spot(places[place]) + bytes, "{label}");
+        }
+    }
+
+    /// A name the program writes to is not in the images, so it is not an answer a table holds
+    /// whole either.
+    #[test]
+    fn an_answer_that_is_not_read_only_data_keeps_its_switch_where_addresses_are_whole() {
+        let mut pointing = pointing(&[0, 1, 2, 3], Some(2), 0);
+        let (stats, tables) = addressed(&mut pointing);
         assert!(!fired(&stats));
         assert!(tables.is_empty());
         assert_eq!(stats.count(Kind::Missed, PLACE_IS_ODD), 1, "{stats:?}");
