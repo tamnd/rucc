@@ -4,6 +4,10 @@ All notable changes are recorded here. The format follows [Keep a Changelog](htt
 
 ## Unreleased
 
+## 0.29.2
+
+The release workflows for 0.28.0, 0.29.0 and 0.29.1 stopped at the check of the tag and published nothing, so this release also carries their changes. #3388 fixed the Debian 11 packages that stopped 0.29.0, and #3394 fixed the test that stopped 0.29.1. #3396 fixed a test that failed at random. The work since 0.29.1 is for speed. wasm32 has a cost table, so ivopts and the other passes that need a price run on it (#3262). The register allocator, the inliner and the checker do less work for each function, and x86-64 keeps one more register free in a function that spills.
+
 ### Changed
 
 - The round that inlines a static function into all its callers builds each caller's loop forest once instead of once per call it asks about, which takes duktape.c -O1 down 2.9% in instructions (#3386)
