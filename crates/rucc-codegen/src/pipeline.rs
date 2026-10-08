@@ -1017,20 +1017,24 @@ pub fn compile_recording(
         ..base
     };
 
+    // The comparisons a branch may be folded into, which the passes on branches and selects
+    // below each ask about.
+    let fused = layout::Fused::new(machine.branch, names);
+
     // In front of the question below, which only takes a comparison that is the instruction in
     // front of its branch, and before allocation, for the same reason that question is. Not at
     // `-O0`, for the reason the reloads are not.
     if flags.reloads {
-        layout::sink(&mut func, machine.branch, machine.flags, names);
+        layout::sink(&mut func, machine.branch, &fused, machine.flags, names);
     }
 
     // Before allocation as well, and asked here rather than where it is used because what it asks
     // is whether anything but the branch reads the byte a comparison wrote. A virtual register is
     // written once and a physical one is not, so after allocation that question no longer has an
     // answer.
-    let mut fusable = layout::fusable(&func, machine.branch, names);
+    let mut fusable = layout::fusable(&func, machine.branch, &fused, names);
     // The same question about the selects on a comparison's byte, asked here for the same reason.
-    let choosable = choice::fusable(&func, machine.branch, names);
+    let choosable = choice::fusable(&func, machine.branch, &fused, names);
 
     // In front of the splitting below, because what it does is take the values off the edges out of
     // a computed `goto` and the splitting has no answer for one of those: the block they leave ends
@@ -1361,13 +1365,21 @@ pub fn compile_recording(
 
     // Last, because everything before this finds the blocks a function returns from by looking
     // for the ones that go nowhere, and after this a block that falls through goes nowhere too.
-    layout::blocks(&mut func, machine.branch, names, &fusable, flags.reorder);
+    layout::blocks(&mut func, machine.branch, &fused, names, &fusable, flags.reorder);
 
     // After the layout for the reason the branches wait for it: a select that reads what a
     // comparison left is a pair with nothing allowed between, and nothing past here puts anything
     // there. Before the compare pass, since the comparison this keeps is one that pass may find
     // was already made.
-    choice::moves(&mut func, machine.branch, machine.flags, machine.shapes, names, &choosable);
+    choice::moves(
+        &mut func,
+        machine.branch,
+        &fused,
+        machine.flags,
+        machine.shapes,
+        names,
+        &choosable,
+    );
 
     // After the layout rather than before it, which is the whole of what makes it safe. What a
     // comparison leaves for the instruction behind it to read is not a register and nothing may

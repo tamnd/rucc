@@ -54,6 +54,7 @@ use rucc_mir::{self as mir, Role};
 use rucc_target::{BranchInsts, FlagInsts, Fusion, MachineInsts};
 
 use crate::changes::{self, Changes, Plan};
+use crate::layout::Fused;
 
 /// The comparisons whose byte only selects in the same block read, each with how many do.
 ///
@@ -68,9 +69,10 @@ use crate::changes::{self, Changes, Plan};
 pub fn fusable(
     func: &mir::Func,
     insts: &BranchInsts,
+    fused: &Fused,
     names: &mut Interner,
 ) -> Map<mir::Inst, usize> {
-    let compares = compares(insts, names);
+    let compares = &fused.0;
     let selects = selects(insts, names);
     let reads = changes::Reads::of(func);
     let mut found = Map::default();
@@ -108,6 +110,7 @@ pub fn fusable(
 pub fn moves(
     func: &mut mir::Func,
     insts: &BranchInsts,
+    fused: &Fused,
     flags: &FlagInsts,
     machine: &MachineInsts,
     names: &mut Interner,
@@ -118,7 +121,7 @@ pub fn moves(
     }
     // Every name the rewrite could want, before the walk rather than inside it, for the reason the
     // compare pass gives: the walk reads names out of the interner while it edits the function.
-    let compares = compares(insts, names);
+    let compares = &fused.0;
     let kept: Map<&str, mir::Opcode> =
         insts.fused.iter().map(|fusion| (fusion.cmp, opcode(insts, names, fusion.cmp))).collect();
     let chosen: Map<(mir::Opcode, &str), mir::Opcode> = insts
@@ -293,11 +296,6 @@ fn flags_only(func: &mir::Func, compare: mir::Inst, cmp: mir::Opcode) -> Plan {
     Plan { opcode: cmp, ..plan }
 }
 
-/// The comparisons that keep a byte, by opcode, each with its entry in the branch table.
-fn compares(insts: &BranchInsts, names: &mut Interner) -> Map<mir::Opcode, &'static Fusion> {
-    insts.fused.iter().map(|fusion| (opcode(insts, names, fusion.set), fusion)).collect()
-}
-
 /// The selects that test a byte, by opcode.
 fn selects(insts: &BranchInsts, names: &mut Interner) -> Vec<mir::Opcode> {
     let mut found: Vec<mir::Opcode> =
@@ -332,8 +330,9 @@ mod tests {
 
     /// Both halves of the pass, the way the pipeline runs them, with nothing in between.
     fn fuse(func: &mut mir::Func, names: &mut Interner) -> usize {
-        let found = fusable(func, &BRANCH, names);
-        moves(func, &BRANCH, &FLAGS, &MACHINE, names, &found)
+        let fused = Fused::new(&BRANCH, names);
+        let found = fusable(func, &BRANCH, &fused, names);
+        moves(func, &BRANCH, &fused, &FLAGS, &MACHINE, names, &found)
     }
 
     /// What every instruction in a block came to, as opcodes with the target's prefix taken off.
@@ -565,7 +564,8 @@ mod tests {
         let found: Map<_, _> =
             [(func.insts(block).next().expect("the comparison"), 1)].into_iter().collect();
 
-        assert_eq!(moves(&mut func, &BRANCH, &FLAGS, &MACHINE, &mut names, &found), 0);
+        let fused = Fused::new(&BRANCH, &mut names);
+        assert_eq!(moves(&mut func, &BRANCH, &fused, &FLAGS, &MACHINE, &mut names, &found), 0);
         assert_eq!(shape(&func, &names, block), ["cmp_set_l_32", "mov_rr_64", "test_cmov_ne_32"]);
     }
 

@@ -133,11 +133,12 @@ const SCALE: u128 = mir::Weight::SCALE as u128;
 pub fn blocks(
     func: &mut mir::Func,
     insts: &BranchInsts,
+    fused: &Fused,
     names: &mut Interner,
     fusable: &Set<mir::Inst>,
     reorder: bool,
 ) {
-    let table = table(insts, names);
+    let table = &fused.0;
     let near = near(func, insts, names);
     let mut order = if reorder { traces(func) } else { order(func) };
     let mut split = partition(func, &mut order);
@@ -724,18 +725,33 @@ fn along(
     best.map(|call| call.block)
 }
 
-/// The comparisons a branch may be folded into, which [`blocks`] can then find by opcode.
+/// The comparisons a branch may be folded into, which [`sink`], [`fusable`] and [`blocks`] find
+/// by opcode.
 ///
 /// One entry per name the target's table holds, interned once for the function rather than once
-/// per block, since a block that ends in a branch is most of the blocks there are.
-fn table(insts: &BranchInsts, names: &mut Interner) -> Map<mir::Opcode, &'static Fusion> {
-    insts
-        .fused
-        .iter()
-        .map(|fusion| {
-            (mir::Opcode::new(names.intern(&format!("{}{}", insts.prefix, fusion.set))), fusion)
-        })
-        .collect()
+/// per block, since a block that ends in a branch is most of the blocks there are. Built by the
+/// caller and handed to all three, and to the two in [`crate::choice`] that ask the same thing of
+/// selects, rather than built by each. The table is 176 names on x86-64, and interning all of them
+/// five times for every function was nearly five percent of compiling Duktape at `-O1`.
+#[derive(Debug)]
+pub struct Fused(pub(crate) Map<mir::Opcode, &'static Fusion>);
+
+impl Fused {
+    /// The table for `insts`, with its names in `names`.
+    #[must_use]
+    pub fn new(insts: &BranchInsts, names: &mut Interner) -> Self {
+        let mut name = String::from(insts.prefix);
+        let table = insts
+            .fused
+            .iter()
+            .map(|fusion| {
+                name.truncate(insts.prefix.len());
+                name.push_str(fusion.set);
+                (mir::Opcode::new(names.intern(&name)), fusion)
+            })
+            .collect();
+        Fused(table)
+    }
 }
 
 /// Whether the function is short enough for a jump in [`BranchInsts::bits`] to reach from any of
@@ -810,8 +826,13 @@ fn lines(text: &str) -> Option<usize> {
 /// comparison and the branch, and a comparison that is no longer the instruction in front of the
 /// branch is not one the flags survive to, so [`blocks`] checks that again on what it finds.
 #[must_use]
-pub fn fusable(func: &mir::Func, insts: &BranchInsts, names: &mut Interner) -> Set<mir::Inst> {
-    let table = table(insts, names);
+pub fn fusable(
+    func: &mir::Func,
+    insts: &BranchInsts,
+    fused: &Fused,
+    names: &mut Interner,
+) -> Set<mir::Inst> {
+    let table = &fused.0;
     let branch = mir::Opcode::new(names.intern(&format!("{}{}", insts.prefix, insts.cond)));
     let reads = crate::changes::Reads::of(func);
     let mut found = Set::default();
@@ -856,10 +877,11 @@ pub fn fusable(func: &mir::Func, insts: &BranchInsts, names: &mut Interner) -> S
 pub fn sink(
     func: &mut mir::Func,
     insts: &BranchInsts,
+    fused: &Fused,
     flags: &FlagInsts,
     names: &mut Interner,
 ) -> usize {
-    let table = table(insts, names);
+    let table = &fused.0;
     let branch = mir::Opcode::new(names.intern(&format!("{}{}", insts.prefix, insts.cond)));
     let template = mir::Opcode::new(names.intern(&format!("{}{}", insts.prefix, insts.goto)));
     let blocks: Vec<mir::Block> = func.blocks().collect();
@@ -935,7 +957,7 @@ struct Writer<'a> {
     func: &'a mut mir::Func,
     insts: &'a BranchInsts,
     names: &'a mut Interner,
-    table: Map<mir::Opcode, &'static Fusion>,
+    table: &'a Map<mir::Opcode, &'static Fusion>,
     fusable: &'a Set<mir::Inst>,
     /// Whether a jump on one bit reaches across the whole function. See [`near`].
     near: bool,
@@ -1243,8 +1265,9 @@ mod tests {
     fn laid_out(func: &mut mir::Func, names: &mut Interner) -> Vec<String> {
         // Both halves, in the order the pipeline runs them, so that a test which builds a
         // comparison in front of its branch sees what a compiled function would see.
-        let fusable = fusable(func, &BRANCH, names);
-        blocks(func, &BRANCH, names, &fusable, false);
+        let fused = Fused::new(&BRANCH, names);
+        let fusable = fusable(func, &BRANCH, &fused, names);
+        blocks(func, &BRANCH, &fused, names, &fusable, false);
         mir::print_func(func, names, &REGS)
             .lines()
             .filter(|line| !line.trim().is_empty() && !line.starts_with("mfunc") && *line != "}")
@@ -1502,8 +1525,9 @@ mod tests {
         let (mut names, mut func, made) = blank(3);
         branch(&mut func, &mut names, made[0], &[made[1], made[2]]);
 
-        let fusable = fusable(&func, &BRANCH, &mut names);
-        blocks(&mut func, &BRANCH, &mut names, &fusable, false);
+        let fused = Fused::new(&BRANCH, &mut names);
+        let fusable = fusable(&func, &BRANCH, &fused, &mut names);
+        blocks(&mut func, &BRANCH, &fused, &mut names, &fusable, false);
 
         let test = func.insts(made[0]).next().expect("a test");
         let operands = func[test].operands;
@@ -1515,8 +1539,9 @@ mod tests {
         let (mut names, mut func, made) = blank(4);
         *func.succs_mut(made[0]) = vec![BlockCall::to(made[3])];
 
-        let fusable = fusable(&func, &BRANCH, &mut names);
-        blocks(&mut func, &BRANCH, &mut names, &fusable, false);
+        let fused = Fused::new(&BRANCH, &mut names);
+        let fusable = fusable(&func, &BRANCH, &fused, &mut names);
+        blocks(&mut func, &BRANCH, &fused, &mut names, &fusable, false);
 
         // Blocks one and two are reached by nothing, so they go last, in the order they were
         // made. Deleting one would be a decision about what the program does, and this pass has
@@ -1529,8 +1554,9 @@ mod tests {
         let mut names = Interner::new();
         let mut func = mir::Func::new(names.intern("f"));
 
-        let fusable = fusable(&func, &BRANCH, &mut names);
-        blocks(&mut func, &BRANCH, &mut names, &fusable, false);
+        let fused = Fused::new(&BRANCH, &mut names);
+        let fusable = fusable(&func, &BRANCH, &fused, &mut names);
+        blocks(&mut func, &BRANCH, &fused, &mut names, &fusable, false);
 
         assert_eq!(func.block_count(), 0);
     }
@@ -1541,8 +1567,9 @@ mod tests {
         let (mut names, mut func, made) = blank(4);
         branch(&mut func, &mut names, made[0], &[made[1], made[2], made[3]]);
 
-        let fusable = fusable(&func, &BRANCH, &mut names);
-        blocks(&mut func, &BRANCH, &mut names, &fusable, false);
+        let fused = Fused::new(&BRANCH, &mut names);
+        let fusable = fusable(&func, &BRANCH, &fused, &mut names);
+        blocks(&mut func, &BRANCH, &fused, &mut names, &fusable, false);
     }
 
     #[test]
@@ -1553,8 +1580,9 @@ mod tests {
         func.build(made[0], opcode).finish();
         *func.succs_mut(made[0]) = vec![BlockCall::to(made[1]), BlockCall::to(made[2])];
 
-        let fusable = fusable(&func, &BRANCH, &mut names);
-        blocks(&mut func, &BRANCH, &mut names, &fusable, false);
+        let fused = Fused::new(&BRANCH, &mut names);
+        let fusable = fusable(&func, &BRANCH, &fused, &mut names);
+        blocks(&mut func, &BRANCH, &fused, &mut names, &fusable, false);
     }
 
     /// Puts a comparison and a branch on its answer at the end of a block.
@@ -1721,7 +1749,8 @@ mod tests {
     fn a_comparison_that_is_no_longer_in_front_of_its_branch_keeps_its_test() {
         let (mut names, mut func, made) = blank(3);
         compare(&mut func, &mut names, made[0], &[made[1], made[2]]);
-        let fusable = fusable(&func, &BRANCH, &mut names);
+        let fused = Fused::new(&BRANCH, &mut names);
+        let fusable = fusable(&func, &BRANCH, &fused, &mut names);
         assert_eq!(fusable.len(), 1, "the comparison is one the byte's count allows");
 
         let branch = func.terminator(made[0]).expect("a block with two arms has a branch");
@@ -1732,7 +1761,7 @@ mod tests {
             .operand(Operand::read(Reg::physical(RAX), GPR))
             .finish();
         func.insert_before(branch, reload);
-        blocks(&mut func, &BRANCH, &mut names, &fusable, false);
+        blocks(&mut func, &BRANCH, &fused, &mut names, &fusable, false);
         let text = mir::print_func(&func, &names, &REGS);
 
         assert!(text.contains("x64.cmp_set_l_32"), "{text}");
@@ -1763,7 +1792,8 @@ mod tests {
         compare(&mut func, &mut names, made[0], &[made[1], made[2]]);
         between(&mut func, &mut names, made[0], "x64.add_ri_64");
 
-        assert_eq!(sink(&mut func, &BRANCH, &FLAGS, &mut names), 1);
+        let fused = Fused::new(&BRANCH, &mut names);
+        assert_eq!(sink(&mut func, &BRANCH, &fused, &FLAGS, &mut names), 1);
         let text = laid_out(&mut func, &mut names);
 
         assert!(text[1].contains("x64.add_ri_64"), "{text:?}");
@@ -1779,7 +1809,8 @@ mod tests {
         compare(&mut func, &mut names, made[0], &[made[1], made[2]]);
         between(&mut func, &mut names, made[0], "x64.adc_ri_64");
 
-        assert_eq!(sink(&mut func, &BRANCH, &FLAGS, &mut names), 0);
+        let fused = Fused::new(&BRANCH, &mut names);
+        assert_eq!(sink(&mut func, &BRANCH, &fused, &FLAGS, &mut names), 0);
         let text = laid_out(&mut func, &mut names);
 
         assert!(text[1].contains("x64.cmp_set_l_32"), "{text:?}");
@@ -1808,7 +1839,8 @@ mod tests {
         func.build(made[0], opcode).operand(Operand::read(byte, GPR)).finish();
         *func.succs_mut(made[0]) = vec![BlockCall::to(made[1]), BlockCall::to(made[2])];
 
-        assert_eq!(sink(&mut func, &BRANCH, &FLAGS, &mut names), 0);
+        let fused = Fused::new(&BRANCH, &mut names);
+        assert_eq!(sink(&mut func, &BRANCH, &fused, &FLAGS, &mut names), 0);
         let first = func.insts(made[0]).next().expect("the comparison");
         assert_eq!(func[first].opcode, Opcode::new(names.intern("x64.cmp_set_l_mi_32")));
     }
@@ -1816,8 +1848,9 @@ mod tests {
     /// Laying the blocks out along the traces the weights say, which is what every level above
     /// `-O0` asks for.
     fn traced(func: &mut mir::Func, names: &mut Interner) -> Vec<String> {
-        let fusable = fusable(func, &BRANCH, names);
-        blocks(func, &BRANCH, names, &fusable, true);
+        let fused = Fused::new(&BRANCH, names);
+        let fusable = fusable(func, &BRANCH, &fused, names);
+        blocks(func, &BRANCH, &fused, names, &fusable, true);
         mir::print_func(func, names, &REGS)
             .lines()
             .filter(|line| !line.trim().is_empty() && !line.starts_with("mfunc") && *line != "}")
