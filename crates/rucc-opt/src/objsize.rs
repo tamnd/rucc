@@ -42,6 +42,16 @@
 //! is answered with the size the call asked for, multiplied out and less the offset in front of the
 //! question, as gcc 16 answers it from `-O1` up. See `Walk::running` for which shapes.
 //!
+//! The dynamic spelling of a kind that asks for the largest answer has one more way to an answer.
+//! Where every way to the address starts at the same fixed local or the same global, the answer is
+//! the size of that object less how far into it the address is, worked out when the program runs
+//! and never below zero. On the way any step is followed, whatever its count and its direction, and
+//! so is a library call that gives back an address in the object its first argument is in: a copy
+//! or a fill, the `p` spellings that give back the end of what they wrote, the `_chk` form of each,
+//! and `strchr (s, 0)`, which gcc reads as `s + strlen (s)`. This is how gcc 16 answers it from
+//! `-O1` up, and tcc's `c2str`, which reads each line with `fgets (p, sizeof l - (p - l), fp)` at
+//! a `p` a loop moves, gets `__fgets_chk` from both compilers this way. See `Walk::within`.
+//!
 //! The closest member, which is the low bit of the kind, is what a `ptr_add` that lowering wrote
 //! for stepping to a member says, as `Extra::Member`. An address the walk finds to be one of
 //! those, or one a constant further on, is in that member, which is how `strcpy (inst.buf, s)`
@@ -62,6 +72,7 @@ use rucc_ir::{
 use std::cell::RefCell;
 
 use rucc_base::hash::{Map, Set};
+use rucc_base::{Interner, Symbol};
 use rucc_ir::Block;
 
 use crate::Cfg;
@@ -77,7 +88,16 @@ const DEPTH: u32 = 16;
 /// `look` is false at `-O0`, where every question is answered as not known. A function that
 /// `optimize ("O0")` holds to that level is answered the same way whatever `look` is, since gcc
 /// reads the level off the function the question is in.
-pub fn answer(module: &mut Module, pic: Pic, look: bool) -> usize {
+///
+/// `library` is the names a call may be read as the standard function under: `None` with
+/// `-fno-builtin`, and otherwise every name but the ones `-fno-builtin-<name>` took away.
+pub fn answer(
+    module: &mut Module,
+    names: &Interner,
+    library: Option<&[String]>,
+    pic: Pic,
+    look: bool,
+) -> usize {
     let mut answered = 0;
     for id in module.funcs().collect::<Vec<FuncId>>() {
         if module[id].is_declaration() {
@@ -98,6 +118,8 @@ pub fn answer(module: &mut Module, pic: Pic, look: bool) -> usize {
                 cfg: &cfg,
                 dom: &dom,
                 pic,
+                names,
+                library,
                 live: Set::default(),
                 numbers: RefCell::default(),
             };
@@ -130,7 +152,9 @@ pub fn answer(module: &mut Module, pic: Pic, look: bool) -> usize {
                             .results()
                             .next()
                             .and_then(|result| walk.running(address, func[result].ty, DEPTH))
-                            .map_or(Answer::Known(unknown), Answer::Running),
+                            .map(Answer::Running)
+                            .or_else(|| largest.then(|| walk.within(address, inst, ask)).flatten())
+                            .unwrap_or(Answer::Known(unknown)),
                         None => Answer::Known(unknown),
                     };
                     (inst, answer)
@@ -142,6 +166,7 @@ pub fn answer(module: &mut Module, pic: Pic, look: bool) -> usize {
             match answer {
                 Answer::Known(number) => write(func, inst, number),
                 Answer::Running(running) => build(func, inst, running),
+                Answer::Within(object, size) => measure(func, inst, object, size),
             }
             answered += 1;
         }
@@ -186,6 +211,18 @@ enum Answer {
     Known(i128),
     /// The size an allocator was asked for, worked out where the question is.
     Running(Running),
+    /// The size of the object the address is in, less how far in the address is, worked out where
+    /// the question is.
+    Within(Object, u64),
+}
+
+/// The object an address is in, as [`Walk::within`] found it.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum Object {
+    /// A fixed local, which is the `alloca` that made it.
+    Local(Value),
+    /// A global, by its name.
+    Global(Symbol),
 }
 
 /// An address that is what an allocator gave back with a constant number of bytes added, as
@@ -258,6 +295,52 @@ fn build(func: &mut Func, inst: Inst, running: Running) {
     func.remove_inst(inst);
 }
 
+/// Puts the size of the object less how far into it the address is in place of the question, and
+/// never below zero, which is what gcc 16 answers `__builtin_dynamic_object_size (p, 1)` with for
+/// a `p` that a loop moves through a local array.
+fn measure(func: &mut Func, inst: Inst, object: Object, size: u64) {
+    let result = func[inst].results().next().expect("an object size is one value");
+    let ty = func[result].ty;
+    let address = func[func[inst].args][0];
+    let span = func.span(inst);
+    let made = |func: &mut Func, data: InstData, ty: Type| {
+        let at = func.create_inst(data, &[ty], span);
+        func.insert_before(at, inst);
+        func[at].results().next().expect("one result was asked for")
+    };
+    let start = match object {
+        Object::Local(start) => start,
+        // The address of a global is taken again here, since the one the walk passed may be in a
+        // block that does not come before the question.
+        Object::Global(name) => made(
+            func,
+            InstData { extra: Extra::Symbol(name), ..InstData::new(Opcode::GlobalAddr) },
+            Type::PTR,
+        ),
+    };
+    let args = func.push_values(&[address]);
+    let at = made(func, InstData { args, ..InstData::new(Opcode::PtrToInt) }, ty);
+    let args = func.push_values(&[start]);
+    let from = made(func, InstData { args, ..InstData::new(Opcode::PtrToInt) }, ty);
+    let args = func.push_values(&[at, from]);
+    let offset = made(func, InstData { args, ..InstData::new(Opcode::Sub) }, ty);
+    let imm = func.add_imm(Imm::int(i128::from(size), ty.lane()));
+    let size = made(func, InstData { extra: Extra::Imm(imm), ..InstData::new(Opcode::IConst) }, ty);
+    let imm = func.add_imm(Imm::int(0, ty.lane()));
+    let zero = made(func, InstData { extra: Extra::Imm(imm), ..InstData::new(Opcode::IConst) }, ty);
+    let args = func.push_values(&[size, offset]);
+    let test =
+        InstData { args, extra: Extra::IntPred(IntPred::Ugt), ..InstData::new(Opcode::ICmp) };
+    let room = made(func, test, ty.with_lane(Type::I1));
+    let args = func.push_values(&[size, offset]);
+    let left = made(func, InstData { args, ..InstData::new(Opcode::Sub) }, ty);
+    let args = func.push_values(&[room, left, zero]);
+    let answer = made(func, InstData { args, ..InstData::new(Opcode::Select) }, ty);
+    let forward: Map<_, _> = [(result, answer)].into_iter().collect();
+    crate::uses::substitute(func, &forward);
+    func.remove_inst(inst);
+}
+
 /// What a walk over one function reads.
 struct Walk<'a> {
     module: &'a Module,
@@ -265,6 +348,9 @@ struct Walk<'a> {
     cfg: &'a Cfg,
     dom: &'a Dominators,
     pic: Pic,
+    names: &'a Interner,
+    /// The names a call may be read as the standard function under, as [`answer`] says.
+    library: Option<&'a [String]>,
     /// The edges a branch on something already a constant here does not rule out, or empty
     /// while that is still being worked out, which counts every edge.
     live: Set<(Block, Block)>,
@@ -671,6 +757,148 @@ impl Walk<'_> {
             _ => None,
         }
     }
+
+    /// The object every way to the address starts in, with its size, for an answer worked out
+    /// when the program runs from how far into it the address is.
+    ///
+    /// The local has to be made before the question on every way to it, so that its address is
+    /// there to subtract. A global is one whose size `extents::vouched` stands behind. The closest
+    /// member is the object found, which is no smaller than any member the address is in, except
+    /// where the walk passes the start of a member, which this leaves as not known.
+    fn within(&self, value: Value, question: Inst, ask: Ask) -> Option<Answer> {
+        let object = self.object(value, ask, DEPTH, &mut Vec::new()).ok()??;
+        let size = match object {
+            Object::Local(start) => {
+                let Def::Result { inst, .. } = self.func[start].def else { return None };
+                if !self.precedes(inst, question) {
+                    return None;
+                }
+                let Extra::Mem(mem) = self.func[inst].extra else { return None };
+                self.func[mem].size
+            }
+            Object::Global(name) => {
+                let Some(SymbolRef::Global(id)) = self.module.lookup(name) else { return None };
+                let global = &self.module[id];
+                if !vouched(global, self.pic) {
+                    return None;
+                }
+                global.size
+            }
+        };
+        Some(Answer::Within(object, size))
+    }
+
+    /// The object an address is in, as [`Found`] says.
+    ///
+    /// `on` is the block parameters whose answer is being worked out, as in [`Walk::left`].
+    fn object(&self, value: Value, ask: Ask, depth: u32, on: &mut Vec<Value>) -> Found {
+        let depth = depth.checked_sub(1).ok_or(())?;
+        match self.func[value].def {
+            Def::Param { block, index } => {
+                if on.contains(&value) {
+                    return Ok(None);
+                }
+                let preds = self.cfg.predecessors(block);
+                if preds.is_empty() {
+                    return Err(());
+                }
+                on.push(value);
+                let mut all = Ok(None);
+                for &pred in preds {
+                    if !self.taken(pred, block) {
+                        continue;
+                    }
+                    let term = self.func.terminator(pred).ok_or(())?;
+                    for call in self.func.successors(term).collect::<Vec<_>>() {
+                        if call.block != block {
+                            continue;
+                        }
+                        let arg = *self.func[call.args].get(index as usize).ok_or(())?;
+                        all = same(all, self.object(arg, ask, depth, on));
+                    }
+                }
+                on.pop();
+                all
+            }
+            Def::Result { inst, .. } => {
+                let data = &self.func[inst];
+                let args = &self.func[data.args];
+                match data.opcode {
+                    Opcode::Select => {
+                        let (then, other) = (*args.get(1).ok_or(())?, *args.get(2).ok_or(())?);
+                        let then = self.object(then, ask, depth, on);
+                        same(then, self.object(other, ask, depth, on))
+                    }
+                    Opcode::PtrAdd if ask.closest && matches!(data.extra, Extra::Member(_)) => {
+                        Err(())
+                    }
+                    Opcode::PtrAdd => self.object(*args.first().ok_or(())?, ask, depth, on),
+                    Opcode::Alloca if args.is_empty() => Ok(Some(Object::Local(value))),
+                    Opcode::GlobalAddr => {
+                        let Extra::Symbol(name) = data.extra else { return Err(()) };
+                        Ok(Some(Object::Global(name)))
+                    }
+                    Opcode::Load => {
+                        let put = self.only_store(*args.first().ok_or(())?, inst).ok_or(())?;
+                        self.object(put, ask, depth, on)
+                    }
+                    Opcode::Call => self.object(self.into(inst).ok_or(())?, ask, depth, on),
+                    _ => Err(()),
+                }
+            }
+        }
+    }
+
+    /// The argument a library call gives back an address in the object of, for the calls that do
+    /// that whatever they are given.
+    ///
+    /// A copy or a fill gives back where it wrote, and the `p` spellings give back the end of what
+    /// they wrote. `strchr (s, 0)` gives back the end of `s`. A `strchr` for any other character
+    /// may give back a null pointer, and gcc does not follow it either.
+    fn into(&self, call: Inst) -> Option<Value> {
+        let library = self.library?;
+        let data = &self.func[call];
+        let Extra::Call(info) = data.extra else { return None };
+        let callee = self.func[info].callee?;
+        // The front end calls a `_chk` function that a fortified header names without declaring
+        // it, so the module has nothing for that name.
+        let spelled = match self.module.lookup(callee) {
+            Some(SymbolRef::Func(id)) => self.module[id].spelled.unwrap_or(callee),
+            None => callee,
+            Some(_) => return None,
+        };
+        let name = self.names.resolve(spelled);
+        if library.iter().any(|it| it == name) {
+            return None;
+        }
+        let args = &self.func[data.args];
+        match name {
+            "memcpy" | "memmove" | "memset" | "mempcpy" | "strcpy" | "stpcpy" | "strncpy"
+            | "stpncpy" | "strcat" | "strncat" | "__memcpy_chk" | "__memmove_chk"
+            | "__memset_chk" | "__mempcpy_chk" | "__strcpy_chk" | "__stpcpy_chk"
+            | "__strncpy_chk" | "__stpncpy_chk" | "__strcat_chk" | "__strncat_chk" => {
+                args.first().copied()
+            }
+            "strchr" | "index" => {
+                let (imm, _) = self.number(*args.get(1)?, 4)?;
+                (imm.unsigned() == 0).then_some(args[0])
+            }
+            _ => None,
+        }
+    }
+}
+
+/// What one walk of [`Walk::object`] found: `Err` where the address may be in more than one object
+/// or in one the walk cannot see, `Ok(None)` where the only way to it is round a loop back to
+/// itself, and otherwise the object.
+type Found = Result<Option<Object>, ()>;
+
+/// Two answers for one choice, which have to be the same object.
+fn same(one: Found, other: Found) -> Found {
+    match (one?, other?) {
+        (Some(one), Some(other)) if one != other => Err(()),
+        (one, other) => Ok(one.or(other)),
+    }
 }
 
 /// The arguments of a call that `alloc_size` says multiply to the size of what it returns, and
@@ -713,7 +941,7 @@ target datalayout = \"e-p:64:64-i64:64-f80:128-S128\"
         let mut names = Interner::new();
         let text = format!("{HEAD}{body}");
         let mut module = rucc_ir::parse(&text, &mut names).expect("the fixture parses");
-        answer(&mut module, Pic::Executable, look);
+        answer(&mut module, &names, Some(&[]), Pic::Executable, look);
         if let Err(errors) = rucc_ir::verify(&module, &names) {
             panic!("the answers left invalid IR, {errors:?}\n{}", rucc_ir::print(&module, &names));
         }
@@ -780,7 +1008,7 @@ block0(%0: i64):
         assert_eq!(answers(body, false), [10, -1, 0, -1, 10, -1, -1, -1]);
         let mut names = Interner::new();
         let mut module = rucc_ir::parse(&format!("{HEAD}{body}"), &mut names).expect("parses");
-        answer(&mut module, Pic::Executable, true);
+        answer(&mut module, &names, Some(&[]), Pic::Executable, true);
         let text = rucc_ir::print(&module, &names);
         assert!(text.contains("icmp ugt %0, "), "{text}");
         assert!(text.contains("= sub %0, "), "{text}");
@@ -1016,6 +1244,106 @@ block2:
         assert_eq!(answers(&forward.replace("STEP", "-1"), true), [-1, 0]);
     }
 
+    /// The module once every question is answered, printed, with `library` as [`answer`] takes it.
+    fn printed(body: &str, library: Option<&[String]>) -> String {
+        let mut names = Interner::new();
+        let mut module = rucc_ir::parse(&format!("{HEAD}{body}"), &mut names).expect("parses");
+        answer(&mut module, &names, library, Pic::Executable, true);
+        if let Err(errors) = rucc_ir::verify(&module, &names) {
+            panic!("the answers left invalid IR, {errors:?}\n{}", rucc_ir::print(&module, &names));
+        }
+        rucc_ir::print(&module, &names)
+    }
+
+    /// The dynamic spelling of a kind that asks for the largest answer, about an address every way
+    /// to which starts at one fixed local or one global, is the size of that object less how far
+    /// in the address is, worked out when the program runs. The walk goes through a step of any
+    /// count, a copy that gives back where it wrote and `strchr (s, 0)`, and round a loop. The copy
+    /// here is a `_chk` call with no declaration, as the front end writes it for a fortified header.
+    /// The static spelling of the same question is not known. This is what gcc 16 does at `-O2`.
+    #[test]
+    fn an_address_somewhere_in_one_object_is_measured_when_the_program_runs() {
+        let body = "
+global @g : bytes 32 = { zero 32 }, align 1, linkage(external)
+func @strchr(ptr, i32) -> ptr, linkage(external);
+
+func @f(ptr, i64), linkage(external) {
+block0(%0: ptr, %1: i64):
+    %2 = alloca, size 1000, align 16
+    jump block1(%2)
+
+block1(%3: ptr):
+    %4 = object_size.i64 %3, kind 5
+    call @use(%4) : (i64)
+    %5 = object_size.i64 %3, kind 1
+    call @use(%5) : (i64)
+    %6 = iconst.i32 0
+    %7 = call @strchr(%3, %6) : (ptr, i32) -> ptr
+    %8 = iconst.i64 -1
+    %9 = ptr_add %7, %8
+    %10 = call @__strcpy_chk(%9, %0, %8) : (ptr, ptr, i64) -> ptr
+    %11 = ptr_add %10, %1
+    %12 = iconst.i64 0
+    %13 = icmp ne %1, %12
+    br_if %13, block1(%11), block2
+
+block2:
+    %14 = global_addr @g
+    %15 = ptr_add %14, %1
+    %16 = object_size.i64 %15, kind 4
+    call @use(%16) : (i64)
+    return
+}
+";
+        assert_eq!(answers(body, true), [-1]);
+        assert_eq!(answers(body, false), [-1, -1, -1]);
+        let text = printed(body, Some(&[]));
+        assert_eq!(text.matches("ptrtoint").count(), 4, "{text}");
+        assert_eq!(text.matches("icmp ugt").count(), 2, "{text}");
+        assert!(text.contains("iconst.i64 1000") && text.contains("iconst.i64 32"), "{text}");
+    }
+
+    /// An address that may be in either of two objects, one a `strchr` gave back for a character
+    /// that may not be there, and one in a global the linker may take from somewhere else are not
+    /// measured. Neither is one a copy gave back under `-fno-builtin`, nor under
+    /// `-fno-builtin-strcpy`, since the call may then be to anything.
+    #[test]
+    fn an_address_that_may_be_in_another_object_is_not_measured() {
+        let body = "
+global @w : bytes 8 = { zero 8 }, align 1, linkage(weak)
+func @strchr(ptr, i32) -> ptr, linkage(external);
+func @strcpy(ptr, ptr) -> ptr, linkage(external);
+
+func @f(i1, i64, ptr), linkage(external) {
+block0(%0: i1, %1: i64, %2: ptr):
+    %3 = alloca, size 10, align 1
+    %4 = alloca, size 20, align 1
+    %5 = select.ptr %0, %3, %4
+    %6 = ptr_add %5, %1
+    %7 = object_size.i64 %6, kind 4
+    call @use(%7) : (i64)
+    %8 = iconst.i32 97
+    %9 = call @strchr(%3, %8) : (ptr, i32) -> ptr
+    %10 = ptr_add %9, %1
+    %11 = object_size.i64 %10, kind 4
+    call @use(%11) : (i64)
+    %12 = global_addr @w
+    %13 = ptr_add %12, %1
+    %14 = object_size.i64 %13, kind 4
+    call @use(%14) : (i64)
+    %15 = call @strcpy(%3, %2) : (ptr, ptr) -> ptr
+    %16 = ptr_add %15, %1
+    %17 = object_size.i64 %16, kind 4
+    call @use(%17) : (i64)
+    return
+}
+";
+        assert_eq!(answers(body, true), [-1, -1, -1]);
+        assert_eq!(printed(body, Some(&[])).matches("ptrtoint").count(), 2);
+        assert_eq!(printed(body, None).matches("ptrtoint").count(), 0);
+        assert_eq!(printed(body, Some(&["strcpy".to_owned()])).matches("ptrtoint").count(), 0);
+    }
+
     /// An address past the end of its object has nothing left, and a global the linker may take
     /// from somewhere else is not one whose size this module knows.
     #[test]
@@ -1075,7 +1403,7 @@ block0:
         assert_eq!(answers(body, true), [16, 16, 36, 14, 36, 0]);
         let mut names = Interner::new();
         let mut module = rucc_ir::parse(&format!("{HEAD}{body}"), &mut names).expect("parses");
-        answer(&mut module, Pic::Executable, true);
+        answer(&mut module, &names, Some(&[]), Pic::Executable, true);
         let text = rucc_ir::print(&module, &names);
         assert!(!text.contains("member"), "{text}");
     }
@@ -1114,7 +1442,7 @@ block0:
         assert_eq!(answers(body, true), [62, 62, 60, 15]);
         let mut names = Interner::new();
         let mut module = rucc_ir::parse(&format!("{HEAD}{body}"), &mut names).expect("parses");
-        answer(&mut module, Pic::Executable, true);
+        answer(&mut module, &names, Some(&[]), Pic::Executable, true);
         let text = rucc_ir::print(&module, &names);
         assert!(!text.contains("counted"), "{text}");
     }
