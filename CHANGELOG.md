@@ -7,6 +7,7 @@ All notable changes are recorded here. The format follows [Keep a Changelog](htt
 ### Changed
 
 - The round that inlines a static function into all its callers builds each caller's loop forest once instead of once per call it asks about, which takes duktape.c -O1 down 2.9% in instructions (#3386)
+- The register allocator builds the per-instruction weight map once per allocation, not once per try. The spill phase reuses the costs and forced values the allocator already read, and the placement loop finds values sent ahead through a table indexed by register number. (#3389)
 
 ## 0.29.1
 
