@@ -38,10 +38,13 @@ impl Hasher for Mix {
     }
 
     fn write(&mut self, bytes: &[u8]) {
-        for chunk in bytes.chunks(8) {
-            let mut word = [0; 8];
-            word[..chunk.len()].copy_from_slice(chunk);
-            self.mix(u64::from_le_bytes(word));
+        let mut words = bytes.chunks_exact(8);
+        for word in &mut words {
+            self.mix(u64::from_le_bytes(word.try_into().expect("a chunk of eight")));
+        }
+        let rest = words.remainder();
+        if !rest.is_empty() {
+            self.mix(short_word(rest));
         }
     }
 
@@ -66,6 +69,29 @@ impl Hasher for Mix {
     }
 }
 
+/// One to seven bytes as the little endian word they are the bottom of, the rest of it zero.
+///
+/// The same word copying them into a zeroed array of eight would make, read with at most three
+/// loads. The copy was a call to `memcpy` for every word of every name the compiler hashed,
+/// because its length is only known at run time.
+#[inline]
+fn short_word(bytes: &[u8]) -> u64 {
+    let len = bytes.len();
+    debug_assert!((1..8).contains(&len));
+    if len >= 4 {
+        // The two halves overlap when there are fewer than eight, and agree where they do.
+        let low = u32::from_le_bytes(bytes[..4].try_into().expect("four bytes"));
+        let high = u32::from_le_bytes(bytes[len - 4..].try_into().expect("four bytes"));
+        u64::from(low) | (u64::from(high) << (8 * (len - 4)))
+    } else {
+        // The first, middle and last byte, which are the only ones there are for one to three.
+        let middle = len / 2;
+        u64::from(bytes[0])
+            | (u64::from(bytes[middle]) << (8 * middle))
+            | (u64::from(bytes[len - 1]) << (8 * (len - 1)))
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use std::hash::{BuildHasher, BuildHasherDefault};
@@ -74,6 +100,17 @@ mod tests {
 
     /// The same key hashes the same way every time, and a map and a set built with it find what
     /// was put in them.
+    /// Each short tail reads as the word a zero padded copy of it would be.
+    #[test]
+    fn a_short_tail_is_the_word_its_padded_copy_would_be() {
+        let bytes = [0x11, 0x22, 0x33, 0x44, 0x55, 0x66, 0x77];
+        for len in 1..8 {
+            let mut word = [0; 8];
+            word[..len].copy_from_slice(&bytes[..len]);
+            assert_eq!(super::short_word(&bytes[..len]), u64::from_le_bytes(word), "{len} bytes");
+        }
+    }
+
     #[test]
     fn a_key_hashes_the_same_way_every_time_and_is_found_again() {
         let build = BuildHasherDefault::<Mix>::default();
