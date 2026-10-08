@@ -121,7 +121,10 @@ const SCALE: u128 = mir::Weight::SCALE as u128;
 
 /// Puts a function's blocks in an order and writes the jumps that order needs.
 ///
-/// Run last, after [`crate::finish`].
+/// Run last, after [`crate::finish`]. `walks` is the comparison in each loop [`crate::finish`]
+/// wrote to walk the stack a page at a time, and a loop with one of those in it keeps the order it
+/// was written in, which asks before it steps. That is the shape gcc writes and the one
+/// `hardening-check` looks for, and turned round it finds nothing.
 ///
 /// # Panics
 ///
@@ -136,11 +139,18 @@ pub fn blocks(
     fused: &Fused,
     names: &mut Interner,
     fusable: &Set<mir::Inst>,
+    walks: &[mir::Inst],
     reorder: bool,
 ) {
     let table = &fused.0;
     let near = near(func, insts, names);
-    let mut order = if reorder { traces(func) } else { order(func) };
+    let mut walking = vec![false; func.block_count()];
+    if !walks.is_empty() {
+        for block in func.blocks() {
+            walking[block.index()] = func.insts(block).any(|inst| walks.contains(&inst));
+        }
+    }
+    let mut order = if reorder { traces(func, &walking) } else { order(func) };
     let mut split = partition(func, &mut order);
     let cold = split.map_or_else(Set::default, |first| order[first..].iter().copied().collect());
     let mut writer = Writer { func, insts, names, table, fusable, near, cold };
@@ -519,7 +529,7 @@ const ROUNDS: [(u64, u64); 4] = [(4_000, 5_000), (2_000, 2_000), (1_000, 500), (
 /// What that does not cover is a loop whose header is its exit test and whose body is cold, where
 /// GCC would duplicate the header. Section 38.4 says the first version should not copy code and
 /// this does not.
-fn traces(func: &mir::Func) -> Vec<mir::Block> {
+fn traces(func: &mir::Func, walking: &[bool]) -> Vec<mir::Block> {
     // Where the shape of the graph would have put each block, which is what decides between two
     // blocks that run equally often. Most branches in most functions have nothing to predict them
     // by and come out even, so without this the seed order between them would be the order the
@@ -600,7 +610,7 @@ fn traces(func: &mir::Func) -> Vec<mir::Block> {
                     }
                 }
                 let Some(next) = next else {
-                    rotate(func, &mut trace, &seen, &starts, &mut inside);
+                    rotate(func, &mut trace, &seen, &starts, &mut inside, walking);
                     break;
                 };
                 block = next;
@@ -640,12 +650,16 @@ fn traces(func: &mir::Func) -> Vec<mir::Block> {
 /// the ones [`connect`] can put next. Ties go to the first block from the head, as in gcc. A
 /// block with more arms than a branch has is a jump through a register or an `asm goto`, which
 /// cannot fall into any of them, and is never the block the loop is left from.
+///
+/// A loop through a block `walking` marks is the walk of the stack under a variable length array,
+/// which [`blocks`] says why it keeps as it is.
 fn rotate(
     func: &mir::Func,
     trace: &mut [mir::Block],
     seen: &[bool],
     starts: &[bool],
     inside: &mut [bool],
+    walking: &[bool],
 ) {
     let Some(&last) = trace.last() else { return };
     let Some(back) = func[last].succs.iter().max_by_key(|call| call.weight) else { return };
@@ -658,6 +672,9 @@ fn rotate(
         return;
     }
     let cycle = &mut trace[at..];
+    if cycle.iter().any(|block| walking[block.index()]) {
+        return;
+    }
     for &block in cycle.iter() {
         inside[block.index()] = true;
     }
@@ -1344,7 +1361,7 @@ mod tests {
         // comparison in front of its branch sees what a compiled function would see.
         let fused = Fused::new(&BRANCH, names);
         let fusable = fusable(func, &BRANCH, &fused, names);
-        blocks(func, &BRANCH, &fused, names, &fusable, false);
+        blocks(func, &BRANCH, &fused, names, &fusable, &[], false);
         mir::print_func(func, names, &REGS)
             .lines()
             .filter(|line| !line.trim().is_empty() && !line.starts_with("mfunc") && *line != "}")
@@ -1604,7 +1621,7 @@ mod tests {
 
         let fused = Fused::new(&BRANCH, &mut names);
         let fusable = fusable(&func, &BRANCH, &fused, &mut names);
-        blocks(&mut func, &BRANCH, &fused, &mut names, &fusable, false);
+        blocks(&mut func, &BRANCH, &fused, &mut names, &fusable, &[], false);
 
         let test = func.insts(made[0]).next().expect("a test");
         let operands = func[test].operands;
@@ -1618,7 +1635,7 @@ mod tests {
 
         let fused = Fused::new(&BRANCH, &mut names);
         let fusable = fusable(&func, &BRANCH, &fused, &mut names);
-        blocks(&mut func, &BRANCH, &fused, &mut names, &fusable, false);
+        blocks(&mut func, &BRANCH, &fused, &mut names, &fusable, &[], false);
 
         // Blocks one and two are reached by nothing, so they go last, in the order they were
         // made. Deleting one would be a decision about what the program does, and this pass has
@@ -1633,7 +1650,7 @@ mod tests {
 
         let fused = Fused::new(&BRANCH, &mut names);
         let fusable = fusable(&func, &BRANCH, &fused, &mut names);
-        blocks(&mut func, &BRANCH, &fused, &mut names, &fusable, false);
+        blocks(&mut func, &BRANCH, &fused, &mut names, &fusable, &[], false);
 
         assert_eq!(func.block_count(), 0);
     }
@@ -1646,7 +1663,7 @@ mod tests {
 
         let fused = Fused::new(&BRANCH, &mut names);
         let fusable = fusable(&func, &BRANCH, &fused, &mut names);
-        blocks(&mut func, &BRANCH, &fused, &mut names, &fusable, false);
+        blocks(&mut func, &BRANCH, &fused, &mut names, &fusable, &[], false);
     }
 
     #[test]
@@ -1659,7 +1676,7 @@ mod tests {
 
         let fused = Fused::new(&BRANCH, &mut names);
         let fusable = fusable(&func, &BRANCH, &fused, &mut names);
-        blocks(&mut func, &BRANCH, &fused, &mut names, &fusable, false);
+        blocks(&mut func, &BRANCH, &fused, &mut names, &fusable, &[], false);
     }
 
     /// Puts a comparison and a branch on its answer at the end of a block.
@@ -1838,7 +1855,7 @@ mod tests {
             .operand(Operand::read(Reg::physical(RAX), GPR))
             .finish();
         func.insert_before(branch, reload);
-        blocks(&mut func, &BRANCH, &fused, &mut names, &fusable, false);
+        blocks(&mut func, &BRANCH, &fused, &mut names, &fusable, &[], false);
         let text = mir::print_func(&func, &names, &REGS);
 
         assert!(text.contains("x64.cmp_set_l_32"), "{text}");
@@ -1927,7 +1944,7 @@ mod tests {
     fn traced(func: &mut mir::Func, names: &mut Interner) -> Vec<String> {
         let fused = Fused::new(&BRANCH, names);
         let fusable = fusable(func, &BRANCH, &fused, names);
-        blocks(func, &BRANCH, &fused, names, &fusable, true);
+        blocks(func, &BRANCH, &fused, names, &fusable, &[], true);
         mir::print_func(func, names, &REGS)
             .lines()
             .filter(|line| !line.trim().is_empty() && !line.starts_with("mfunc") && *line != "}")

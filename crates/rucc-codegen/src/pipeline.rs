@@ -1311,7 +1311,7 @@ pub fn compile_recording(
     let (moves, loops) = finish(&mut func, &allocation, &frame, &stack, convention, names);
     // The comparison in each loop that walks the stack is written after the question above was
     // asked, and only the branch behind it reads its byte, so it can be joined with that branch.
-    fusable.extend(loops);
+    fusable.extend(loops.iter().copied());
 
     // After the moves are written, because a spill and the reload of it are written by different
     // decisions of the allocator and what stands between the two is settled by the function they
@@ -1389,7 +1389,7 @@ pub fn compile_recording(
 
     // Last, because everything before this finds the blocks a function returns from by looking
     // for the ones that go nowhere, and after this a block that falls through goes nowhere too.
-    layout::blocks(&mut func, machine.branch, &fused, names, &fusable, flags.reorder);
+    layout::blocks(&mut func, machine.branch, &fused, names, &fusable, &loops, flags.reorder);
 
     // After the layout for the reason the branches wait for it: a select that reads what a
     // comparison left is a pair with nothing allowed between, and nothing past here puts anything
