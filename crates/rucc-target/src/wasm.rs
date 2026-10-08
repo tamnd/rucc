@@ -20,6 +20,7 @@
 use std::fmt;
 
 use crate::Preview;
+use crate::counts::{BitCount, CountInst};
 
 /// One WebAssembly feature.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
@@ -355,6 +356,32 @@ impl fmt::Display for Cpu {
     }
 }
 
+/// The counts WebAssembly has an instruction for, which are all three at both widths.
+///
+/// `i32.popcnt`, `i32.clz` and `i32.ctz` and their `i64` forms are in the first version of the
+/// format, so no feature names them. All of them answer the width for a zero, as the IR counts do.
+/// The back end selects each one as one operator and never writes a count out as arithmetic, so
+/// the only reader of this table is the loop deletion pass, which turns a loop that counts bits
+/// into one count where the table says the count is cheap. Without the table a loop such as
+/// `while (x) { x &= x - 1; n++; }` stayed a loop on wasm while clang wrote `i32.popcnt`.
+pub const COUNTS: &[CountInst] = &[
+    CountInst { of: BitCount::Ones, feature: "", widths: &[32, 64], guarded: false, vector: false },
+    CountInst {
+        of: BitCount::LeadingZeros,
+        feature: "",
+        widths: &[32, 64],
+        guarded: false,
+        vector: false,
+    },
+    CountInst {
+        of: BitCount::TrailingZeros,
+        feature: "",
+        widths: &[32, 64],
+        guarded: false,
+        vector: false,
+    },
+];
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -363,6 +390,19 @@ mod tests {
         let mut names: Vec<String> = set.macros().collect();
         names.sort();
         names
+    }
+
+    /// Every count is one operator at both widths with no feature, and nothing is guarded or goes
+    /// through a vector register.
+    #[test]
+    fn every_bit_count_is_one_operator_at_both_widths() {
+        use crate::isa::Isa;
+        for of in [BitCount::Ones, BitCount::LeadingZeros, BitCount::TrailingZeros] {
+            for bits in [32, 64] {
+                assert!(CountInst::in_one(COUNTS, of, bits, Isa::NONE), "{of:?} {bits}");
+            }
+            assert!(!CountInst::in_one(COUNTS, of, 16, Isa::NONE), "{of:?} 16");
+        }
     }
 
     #[test]
