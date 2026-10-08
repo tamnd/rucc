@@ -148,6 +148,11 @@ impl<'a> Lexer<'a> {
     /// a macro definition and expects it to keep working, and the space is invisible in an
     /// editor, so the one time it does change the meaning nobody can see why.
     fn report_loose_splices(&mut self) {
+        // Asked after every token, and almost every file has none, so the list is not taken
+        // and dropped for nothing.
+        if !self.cursor.has_loose_splices() {
+            return;
+        }
         for at in self.cursor.take_loose_splices() {
             let span = Span::new(self.file_start + at, self.file_start + at + 1);
             self.diagnostics.push(Diagnostic::warning(
@@ -322,8 +327,10 @@ impl<'a> Lexer<'a> {
         } else {
             &self.cursor.bytes()[start as usize..end as usize]
         };
-        if std::str::from_utf8(bytes).is_ok() {
-            return interner.intern_bytes(bytes);
+        // Interned as the text it is checked to be, since that is what interning the bytes
+        // would check again before doing the same.
+        if let Ok(text) = std::str::from_utf8(bytes) {
+            return interner.intern(text);
         }
         if matches!(kind, PpTokenKind::StringLit | PpTokenKind::CharConst) {
             return interner.intern_bytes(bytes);

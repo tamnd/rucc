@@ -164,6 +164,11 @@ impl<'a> Cursor<'a> {
             && self.splice_at(p).is_some()
     }
 
+    /// Whether a splice with whitespace after the backslash has been passed since the last take.
+    pub(crate) fn has_loose_splices(&self) -> bool {
+        !self.loose_splices.is_empty()
+    }
+
     /// Takes the offsets of splices that had whitespace after the backslash.
     ///
     /// The lexer drains this after every token and turns each one into a warning. The trailing

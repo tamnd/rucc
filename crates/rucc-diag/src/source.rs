@@ -306,13 +306,38 @@ impl SourceFile {
             // costs a reallocation, not a correctness problem.
             let mut starts = Vec::with_capacity(bytes.len() / 24 + 1);
             starts.push(self.start);
-            for (at, _) in bytes.iter().enumerate().filter(|&(_, &b)| b == b'\n') {
+            let mut open = |at: usize| {
                 let next = self.start + u32::try_from(at).unwrap_or(u32::MAX - 1) + 1;
                 // A newline as the very last byte ends the last line, it does not open an
                 // empty one. Every other newline opens a line, including one followed
                 // immediately by another newline.
                 if next < self.end {
                     starts.push(next);
+                }
+            };
+            // Eight bytes at a time, and only a word with a newline in it is read a byte at a
+            // time. A line is tens of bytes long, so most words have none, and the test for one
+            // is the usual one for a zero byte, after an exclusive or that makes each newline
+            // zero. It can be wrong only in saying yes, which costs a look and nothing more.
+            const ONES: u64 = u64::from_ne_bytes([0x01; 8]);
+            const HIGH: u64 = u64::from_ne_bytes([0x80; 8]);
+            const NEWLINES: u64 = u64::from_ne_bytes([b'\n'; 8]);
+            let mut words = bytes.chunks_exact(8);
+            let mut at = 0;
+            for word in &mut words {
+                let x = u64::from_ne_bytes(word.try_into().expect("eight bytes")) ^ NEWLINES;
+                if x.wrapping_sub(ONES) & !x & HIGH != 0 {
+                    for (i, &b) in word.iter().enumerate() {
+                        if b == b'\n' {
+                            open(at + i);
+                        }
+                    }
+                }
+                at += 8;
+            }
+            for (i, &b) in words.remainder().iter().enumerate() {
+                if b == b'\n' {
+                    open(at + i);
                 }
             }
             starts
