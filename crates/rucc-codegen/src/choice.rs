@@ -305,8 +305,8 @@ fn selects(insts: &BranchInsts, names: &mut Interner) -> Vec<mir::Opcode> {
 }
 
 /// The opcode of that name on this target.
-fn opcode(insts: &BranchInsts, names: &mut Interner, name: &str) -> mir::Opcode {
-    mir::Opcode::new(names.intern(&format!("{}{name}", insts.prefix)))
+fn opcode(insts: &BranchInsts, names: &mut Interner, name: &'static str) -> mir::Opcode {
+    mir::Opcode::new(names.join(insts.prefix, name))
 }
 
 #[cfg(test)]
@@ -325,7 +325,7 @@ mod tests {
 
     /// The opcode of that name on this target.
     fn op(names: &mut Interner, name: &str) -> mir::Opcode {
-        opcode(&BRANCH, names, name)
+        mir::Opcode::new(names.intern(&format!("{}{name}", BRANCH.prefix)))
     }
 
     /// Both halves of the pass, the way the pipeline runs them, with nothing in between.

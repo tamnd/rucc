@@ -290,7 +290,7 @@ pub fn itself(func: &mut Func, frame: &FrameInsts, names: &mut Interner) -> usiz
             let class = to.class;
             let mov = *movs.entry(class.number()).or_insert_with(|| {
                 let moves = frame.moves(class)?;
-                Some(Opcode::new(names.intern(&format!("{}{}", frame.prefix, moves.mov))))
+                Some(Opcode::new(names.join(frame.prefix, moves.mov)))
             });
             if mov == Some(func[inst].opcode) {
                 gone.push(inst);
@@ -508,7 +508,7 @@ fn copy(
     from: PhysReg,
 ) -> Inst {
     let moves = frame.moves(class).expect("a class the target says how to move");
-    let mov = Opcode::new(names.intern(&format!("{}{}", frame.prefix, moves.mov)));
+    let mov = Opcode::new(names.join(frame.prefix, moves.mov));
     func.build_loose(mov).def(Reg::physical(to), class).uses(Reg::physical(from), class).finish()
 }
 

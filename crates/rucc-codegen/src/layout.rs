@@ -186,8 +186,7 @@ pub fn blocks(
 /// and a block whose address an instruction takes stays reached as well, since the address is a
 /// way in that no arm of that block shows.
 pub fn forward(func: &mut mir::Func, insts: &BranchInsts, names: &mut Interner) -> usize {
-    let mut opcode =
-        |name: &str| mir::Opcode::new(names.intern(&format!("{}{name}", insts.prefix)));
+    let mut opcode = |name: &'static str| mir::Opcode::new(names.join(insts.prefix, name));
     let branch = opcode(insts.cond);
     let indirect = opcode(insts.indirect);
     let goto = opcode(insts.goto);
@@ -740,15 +739,10 @@ impl Fused {
     /// The table for `insts`, with its names in `names`.
     #[must_use]
     pub fn new(insts: &BranchInsts, names: &mut Interner) -> Self {
-        let mut name = String::from(insts.prefix);
         let table = insts
             .fused
             .iter()
-            .map(|fusion| {
-                name.truncate(insts.prefix.len());
-                name.push_str(fusion.set);
-                (mir::Opcode::new(names.intern(&name)), fusion)
-            })
+            .map(|fusion| (mir::Opcode::new(names.join(insts.prefix, fusion.set)), fusion))
             .collect();
         Fused(table)
     }
@@ -765,7 +759,7 @@ fn near(func: &mir::Func, insts: &BranchInsts, names: &mut Interner) -> bool {
     if insts.bits.is_empty() {
         return false;
     }
-    let template = mir::Opcode::new(names.intern(&format!("{}{}", insts.prefix, insts.goto)));
+    let template = mir::Opcode::new(names.join(insts.prefix, insts.goto));
     let mut count = 0;
     for block in func.blocks() {
         for inst in func.insts(block) {
@@ -833,7 +827,7 @@ pub fn fusable(
     names: &mut Interner,
 ) -> Set<mir::Inst> {
     let table = &fused.0;
-    let branch = mir::Opcode::new(names.intern(&format!("{}{}", insts.prefix, insts.cond)));
+    let branch = mir::Opcode::new(names.join(insts.prefix, insts.cond));
     let reads = crate::changes::Reads::of(func);
     let mut found = Set::default();
     for block in func.blocks() {
@@ -882,8 +876,8 @@ pub fn sink(
     names: &mut Interner,
 ) -> usize {
     let table = &fused.0;
-    let branch = mir::Opcode::new(names.intern(&format!("{}{}", insts.prefix, insts.cond)));
-    let template = mir::Opcode::new(names.intern(&format!("{}{}", insts.prefix, insts.goto)));
+    let branch = mir::Opcode::new(names.join(insts.prefix, insts.cond));
+    let template = mir::Opcode::new(names.join(insts.prefix, insts.goto));
     let blocks: Vec<mir::Block> = func.blocks().collect();
     let mut moved = 0;
     for block in blocks {
@@ -1224,8 +1218,8 @@ impl Writer<'_> {
 
     /// The opcode of that name on this target, which is the name with the target's prefix in
     /// front of it.
-    fn opcode(&mut self, name: &str) -> mir::Opcode {
-        mir::Opcode::new(self.names.intern(&format!("{}{name}", self.insts.prefix)))
+    fn opcode(&mut self, name: &'static str) -> mir::Opcode {
+        mir::Opcode::new(self.names.join(self.insts.prefix, name))
     }
 }
 

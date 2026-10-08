@@ -114,7 +114,7 @@ pub fn redundant(
         .compares
         .iter()
         .filter_map(|entry| entry.kept)
-        .map(|kept| (kept, mir::Opcode::new(names.intern(&format!("{}{kept}", insts.prefix)))))
+        .map(|kept| (kept, mir::Opcode::new(names.join(insts.prefix, kept))))
         .collect();
     let names = &*names;
     let mut counts = changes::Reads::of(func);

@@ -367,9 +367,8 @@ pub fn apply(
     let clear_vector =
         if extension >= Some(Extension::Avx) { "vxorps_rr" } else { plan.clear_vector };
 
-    let opcode = |names: &mut Interner, name: &str| {
-        mir::Opcode::new(names.intern(&format!("{}{name}", insts.prefix)))
-    };
+    let opcode =
+        |names: &mut Interner, name: &'static str| mir::Opcode::new(names.join(insts.prefix, name));
     // In gcc's order, which puts the vector registers that are cleared all at once in front of
     // everything, then the x87 stack, then one register at a time, and the masks last.
     let mut written: Vec<Write> = Vec::new();

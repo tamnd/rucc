@@ -392,9 +392,9 @@ pub fn jumps(
         tails.iter().try_for_each(failed)?;
         return Ok(0);
     };
-    let ret = mir::Opcode::new(names.intern(&format!("{}{}", insts.prefix, insts.ret)));
-    let away = mir::Opcode::new(names.intern(&format!("{}{away}", insts.prefix)));
-    let through = mir::Opcode::new(names.intern(&format!("{}{}", branch.prefix, branch.indirect)));
+    let ret = mir::Opcode::new(names.join(insts.prefix, insts.ret));
+    let away = mir::Opcode::new(names.join(insts.prefix, away));
+    let through = mir::Opcode::new(names.join(branch.prefix, branch.indirect));
     // The same jump with the `notrack` prefix, for a call that had it. The name is the one
     // `crate::lower` gives the call, the plain one's with `_notrack` after it.
     let untracked =
