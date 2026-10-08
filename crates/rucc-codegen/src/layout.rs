@@ -114,7 +114,7 @@ use std::collections::BinaryHeap;
 use rucc_base::Interner;
 use rucc_base::hash::{Map, Set};
 use rucc_mir as mir;
-use rucc_target::{BranchInsts, Fusion, Role};
+use rucc_target::{BranchInsts, FlagInsts, Fusion, Role};
 
 /// The scale a weight is in, which is what a share of a block is worked out against.
 const SCALE: u128 = mir::Weight::SCALE as u128;
@@ -837,6 +837,99 @@ pub fn fusable(func: &mir::Func, insts: &BranchInsts, names: &mut Interner) -> S
     found
 }
 
+/// Moves the comparison a branch reads the answer of down to the branch, when something else was
+/// written between the two, and gives back how many it moved.
+///
+/// [`fusable`] only takes a comparison that is the instruction in front of its branch, and nothing
+/// above this keeps the two together. A loop that counts and walks a pointer at once comes out of
+/// the passes above with the step of the pointer between the test of the count and the branch on
+/// it, which is `cmpl`, `setl`, `addq $16`, `testb` and `jne` at the bottom of every turn where two
+/// instructions would do. Postgres' tuple deforming loop was three of those.
+///
+/// The comparison is the instruction that writes the byte the branch reads. It goes down when
+/// nothing between it and the branch reads the flags it left, names a register the machine fixed,
+/// or reads or writes what it reads or writes, and when it reads memory, when nothing in between
+/// touches memory either. An instruction that writes the flags is no reason to stay, since the
+/// comparison writes them again below it and nothing reads them in between. Run before allocation,
+/// where a register is written once, so that the question about what reads and writes it has an
+/// answer, and before [`fusable`], which is asked about the order this leaves.
+pub fn sink(
+    func: &mut mir::Func,
+    insts: &BranchInsts,
+    flags: &FlagInsts,
+    names: &mut Interner,
+) -> usize {
+    let table = table(insts, names);
+    let branch = mir::Opcode::new(names.intern(&format!("{}{}", insts.prefix, insts.cond)));
+    let template = mir::Opcode::new(names.intern(&format!("{}{}", insts.prefix, insts.goto)));
+    let blocks: Vec<mir::Block> = func.blocks().collect();
+    let mut moved = 0;
+    for block in blocks {
+        let order: Vec<mir::Inst> = func.insts(block).collect();
+        let Some((&last, above)) = order.split_last() else { continue };
+        if func[last].opcode != branch {
+            continue;
+        }
+        let Some(byte) = func[func[last].operands].first().filter(|operand| !operand.role.is_def())
+        else {
+            continue;
+        };
+        let byte = byte.reg;
+        if !byte.is_virtual() {
+            continue;
+        }
+        let writes = |inst: mir::Inst| {
+            func[func[inst].operands]
+                .iter()
+                .any(|operand| operand.reg == byte && operand.role.is_def())
+        };
+        let Some(at) = above.iter().rposition(|&inst| writes(inst)) else { continue };
+        let compare = above[at];
+        let between = &above[at + 1..];
+        if between.is_empty() || !table.contains_key(&func[compare].opcode) {
+            continue;
+        }
+        if between.iter().all(|&inst| passes(func, flags, names, template, compare, inst)) {
+            func.remove_inst(compare);
+            func.insert_before(last, compare);
+            moved += 1;
+        }
+    }
+    moved
+}
+
+/// Whether a comparison can be moved down past that instruction. See [`sink`].
+fn passes(
+    func: &mir::Func,
+    flags: &FlagInsts,
+    names: &Interner,
+    template: mir::Opcode,
+    compare: mir::Inst,
+    inst: mir::Inst,
+) -> bool {
+    let data = func[inst];
+    if data.opcode == template || data.flags.contains(mir::Flags::VOLATILE) {
+        return false;
+    }
+    if data.mem.is_some() && func[compare].mem.is_some() {
+        return false;
+    }
+    // A name the target does not know may read them.
+    let Some(bare) = names.resolve(data.opcode.name()).strip_prefix(flags.prefix) else {
+        return false;
+    };
+    if flags.reads(bare).is_some() && !flags.asks_what_it_reads(bare) {
+        return false;
+    }
+    let ours = &func[func[compare].operands];
+    func[data.operands].iter().all(|operand| {
+        operand.reg.is_virtual()
+            && !ours
+                .iter()
+                .any(|our| our.reg == operand.reg && (our.role.is_def() || operand.role.is_def()))
+    })
+}
+
 /// The one thing that writes an instruction here, over the function it writes into.
 struct Writer<'a> {
     func: &'a mut mir::Func,
@@ -1117,7 +1210,7 @@ impl Writer<'_> {
 #[cfg(test)]
 mod tests {
     use rucc_mir::{BlockCall, Mem, Opcode, Operand, Reg};
-    use rucc_target::x86_64::{BRANCH, GPR, RAX, RCX, REGS};
+    use rucc_target::x86_64::{BRANCH, FLAGS, GPR, RAX, RCX, REGS};
 
     use super::*;
 
@@ -1645,6 +1738,79 @@ mod tests {
         assert!(text.contains("x64.cmp_set_l_32"), "{text}");
         assert!(text.contains("x64.test_rr_8"), "{text}");
         assert!(!text.contains("x64.cmp_rr_32"), "{text}");
+    }
+
+    /// Puts an instruction of that name between the comparison at the end of a block and its
+    /// branch, writing one new register from another, the way the step of a walked pointer is.
+    fn between(func: &mut mir::Func, names: &mut Interner, block: mir::Block, name: &str) {
+        let branch = func.terminator(block).expect("a block with two arms has a branch");
+        let (walked, stepped) = (func.new_vreg(GPR), func.new_vreg(GPR));
+        let opcode = Opcode::new(names.intern(name));
+        let inst = func
+            .build_loose(opcode)
+            .def(stepped, GPR)
+            .operand(Operand::read(walked, GPR))
+            .imm(16)
+            .finish();
+        func.insert_before(branch, inst);
+    }
+
+    /// A loop that counts and walks a pointer, whose step came out between the comparison and the
+    /// branch, which is the comparison and a jump once the comparison has gone down past it.
+    #[test]
+    fn a_comparison_with_a_step_between_it_and_its_branch_goes_down_to_the_branch() {
+        let (mut names, mut func, made) = blank(3);
+        compare(&mut func, &mut names, made[0], &[made[1], made[2]]);
+        between(&mut func, &mut names, made[0], "x64.add_ri_64");
+
+        assert_eq!(sink(&mut func, &BRANCH, &FLAGS, &mut names), 1);
+        let text = laid_out(&mut func, &mut names);
+
+        assert!(text[1].contains("x64.add_ri_64"), "{text:?}");
+        assert_eq!(text[2..4], ["x64.cmp_rr_32 $rax, $rcx", "x64.jcc_ge block2, block1"]);
+        assert!(!text.iter().any(|line| line.starts_with("x64.test_rr_8")), "{text:?}");
+    }
+
+    /// The same block with an add with carry in between, which reads the flags the comparison
+    /// left, so the comparison stays where it is and the branch tests the byte.
+    #[test]
+    fn a_comparison_does_not_go_down_past_what_reads_the_flags_it_left() {
+        let (mut names, mut func, made) = blank(3);
+        compare(&mut func, &mut names, made[0], &[made[1], made[2]]);
+        between(&mut func, &mut names, made[0], "x64.adc_ri_64");
+
+        assert_eq!(sink(&mut func, &BRANCH, &FLAGS, &mut names), 0);
+        let text = laid_out(&mut func, &mut names);
+
+        assert!(text[1].contains("x64.cmp_set_l_32"), "{text:?}");
+        assert!(text.iter().any(|line| line.starts_with("x64.test_rr_8")), "{text:?}");
+    }
+
+    /// A comparison that reads memory and a store in between, which may be a store to what it
+    /// read, so the comparison stays where it is.
+    #[test]
+    fn a_comparison_of_memory_does_not_go_down_past_a_store() {
+        let (mut names, mut func, made) = blank(3);
+        let byte = func.new_vreg(GPR);
+        let opcode = Opcode::new(names.intern("x64.cmp_set_l_mi_32"));
+        func.build(made[0], opcode)
+            .def(byte, GPR)
+            .mem(Mem { disp: 24, ..Mem::at(Operand::read(Reg::physical(RCX), GPR)) })
+            .imm(7)
+            .finish();
+        let (value, base) = (func.new_vreg(GPR), func.new_vreg(GPR));
+        let opcode = Opcode::new(names.intern("x64.mov_mr_64"));
+        func.build(made[0], opcode)
+            .operand(Operand::read(value, GPR))
+            .mem(Mem::at(Operand::read(base, GPR)))
+            .finish();
+        let opcode = Opcode::new(names.intern("x64.br_cond_8"));
+        func.build(made[0], opcode).operand(Operand::read(byte, GPR)).finish();
+        *func.succs_mut(made[0]) = vec![BlockCall::to(made[1]), BlockCall::to(made[2])];
+
+        assert_eq!(sink(&mut func, &BRANCH, &FLAGS, &mut names), 0);
+        let first = func.insts(made[0]).next().expect("the comparison");
+        assert_eq!(func[first].opcode, Opcode::new(names.intern("x64.cmp_set_l_mi_32")));
     }
 
     /// Laying the blocks out along the traces the weights say, which is what every level above
