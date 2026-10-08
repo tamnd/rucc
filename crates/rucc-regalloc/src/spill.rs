@@ -54,9 +54,20 @@ struct Candidate<'a> {
 /// earlier pass could have built.
 #[must_use]
 pub fn choose(func: &Func, live: &Live, pressure: &Pressure) -> Vec<Reg> {
-    let costs = backtrack::costs(func);
+    with(func, live, pressure, &backtrack::costs(func), &assign::forced(func))
+}
+
+/// The same, with what each value costs on the stack and the values that go there anyway already
+/// read off the function, as the allocator has them by the time it asks.
+pub(crate) fn with(
+    func: &Func,
+    live: &Live,
+    pressure: &Pressure,
+    costs: &[u128],
+    stack: &[Reg],
+) -> Vec<Reg> {
     let mut forced = vec![false; func.vregs()];
-    for reg in assign::forced(func) {
+    for &reg in stack {
         forced[index(reg)] = true;
     }
     let mut classes: BTreeMap<RegClass, Vec<Candidate<'_>>> = BTreeMap::new();

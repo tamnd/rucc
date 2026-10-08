@@ -146,18 +146,19 @@ pub(crate) fn tries(
     facts: &assign::Facts,
 ) -> Assignment {
     let costs = costs(func);
+    let weights = weights(func);
     let linear = assign::scan(func, live, env, facts);
-    let mut best = spent(func, &costs, &facts.reuses, &linear);
+    let mut best = spent(func, &costs, &weights, &facts.reuses, &linear);
     let mut kept = linear;
     let pressure = Pressure::with(func, order, live, env, &facts.forced, &facts.blocked);
-    let spilled = spill::choose(func, live, &pressure);
+    let spilled = spill::with(func, live, &pressure, &costs, &facts.forced);
     // With nothing sent ahead the second try would be the first one again.
     let tries: &[&[Reg]] = if spilled.is_empty() { &[&[]] } else { &[&[], &spilled] };
     for &early in tries {
         let Some(ours) = placed(func, order, live, env, BUDGET, early, facts, &costs) else {
             break;
         };
-        let spent = spent(func, &costs, &facts.reuses, &ours);
+        let spent = spent(func, &costs, &weights, &facts.reuses, &ours);
         if spent <= best {
             best = spent;
             kept = ours;
@@ -181,24 +182,40 @@ pub(crate) fn tries(
 /// [`Reg::virtual_reg`] does.
 #[must_use]
 pub fn cost(func: &Func, order: &Order, assignment: &Assignment) -> u128 {
-    spent(func, &costs(func), &assign::reuses(func, order), assignment)
+    spent(func, &costs(func), &weights(func), &assign::reuses(func, order), assignment)
 }
 
-/// The same, with what each value costs on the stack and the answers written over a source
-/// already read off the function.
-fn spent(func: &Func, costs: &[u128], reuses: &[Option<Reuse>], assignment: &Assignment) -> u128 {
-    let mut total = 0;
-    for (reg, place) in assignment.placed() {
-        if !matches!(place, Place::Reg(_)) {
-            total += costs[index(reg)];
-        }
-    }
+/// How often the block of each instruction runs, never less than once.
+fn weights(func: &Func) -> Map<Inst, u128> {
     let mut weights = Map::default();
     for block in func.blocks() {
         let weight = u128::from(func[block].weight.raw().max(1));
         for inst in func.insts(block) {
             weights.insert(inst, weight);
         }
+    }
+    weights
+}
+
+/// The same, with what each value costs on the stack, how often each instruction runs and the
+/// answers written over a source already read off the function. The weights are the same for
+/// every answer, and building them again for each of the three a function is weighed under was
+/// a map of every instruction each time. tamnd/rucc#3052.
+fn spent(
+    func: &Func,
+    costs: &[u128],
+    weights: &Map<Inst, u128>,
+    reuses: &[Option<Reuse>],
+    assignment: &Assignment,
+) -> u128 {
+    let mut total = 0;
+    for (reg, place) in assignment.placed() {
+        if !matches!(place, Place::Reg(_)) {
+            total += costs[index(reg)];
+        }
+    }
+    for block in func.blocks() {
+        let weight = u128::from(func[block].weight.raw().max(1));
         for call in &func[block].succs {
             for (&arg, param) in call.args.iter().zip(&func[call.block].params) {
                 if assignment.place(arg) != assignment.place(param.reg) {
@@ -258,6 +275,12 @@ fn placed(
     let saveable = saveable(func, order);
 
     let count = func.vregs();
+    // By number, since the queue asks about every value it pops and a function with hundreds of
+    // values sent ahead searched the list for each of them. tamnd/rucc#3052.
+    let mut ahead = vec![false; count];
+    for &reg in early {
+        ahead[index(reg)] = true;
+    }
     let mut values: Vec<Option<Value<'_>>> = vec![None; count];
     let mut queue = BinaryHeap::new();
     for (number, reuse) in reuses.iter().enumerate() {
@@ -297,7 +320,7 @@ fn placed(
             assignment.spill(value.reg, value.class);
             continue;
         }
-        if early.contains(&value.reg) {
+        if ahead[number] {
             sent.push(value);
             continue;
         }
