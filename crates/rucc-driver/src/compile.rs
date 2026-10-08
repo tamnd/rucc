@@ -5036,6 +5036,27 @@ decl #0 x : int object external static defined
         assert!(!text.contains("\ti32.eq"), "{text}");
     }
 
+    /// A switch that conversion makes a range check and an addition is a `select` on wasm once it
+    /// is inlined, because `simplify-cfg` makes the range check a branch that `phiopt` reads.
+    #[test]
+    fn a_converted_switch_in_a_loop_is_a_select_on_wasm() {
+        let source = "static int next(int v) {\n\
+                      switch (v) { case 0: return 1; case 1: return 2; case 2: return 3;\n\
+                      case 3: return 4; case 4: return 5; default: return 0; } }\n\
+                      long long sum(const int *p, int n) {\n\
+                      long long t = 0; for (int i = 0; i < n; i++) t += next(p[i]); return t; }\n";
+        let mut opts = options();
+        opts.target = "wasm32-wasip1".parse::<Triple>().unwrap();
+        opts.emit = EmitKind::Asm;
+        opts.opt_level = rucc_session::OptLevel::O2;
+        let result = run(&opts, source);
+        assert_eq!(result.messages, Vec::<String>::new());
+        let text = result.text();
+        assert!(text.contains("\ti32.le_u"), "{text}");
+        assert!(text.contains("\ti32.select"), "{text}");
+        assert!(!text.contains("\tbr_table"), "{text}");
+    }
+
     /// The tree form is a stage of the wasm back end, and a native target refuses it.
     #[test]
     fn a_native_target_refuses_the_wasm_tree_form() {
