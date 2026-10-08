@@ -8,6 +8,7 @@ All notable changes are recorded here. The format follows [Keep a Changelog](htt
 
 - The round that inlines a static function into all its callers builds each caller's loop forest once instead of once per call it asks about, which takes duktape.c -O1 down 2.9% in instructions (#3386)
 - The register allocator builds the per-instruction weight map once per allocation, not once per try. The spill phase reuses the costs and forced values the allocator already read, and the placement loop finds values sent ahead through a table indexed by register number. (#3389)
+- The optimizer folds a shift right through a truncation that drops no set bit into one wide shift. `(unsigned)(x >> 32) / 8` on a 64 bit `x` is now one shift by 35, and its zero extension back to 64 bits is the same shift (#3390).
 
 ## 0.29.1
 
