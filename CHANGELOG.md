@@ -14,6 +14,7 @@ All notable changes are recorded here. The format follows [Keep a Changelog](htt
 - wasm32 has a cost table, so ivopts, widen and the other passes that need a price now run on it. A wasm load has only a base and an offset, so the table has no address mode with an index. On rucc-corpus at O2 this takes 67 programs that run more than a million operators down in fuel, and none up (#3392).
 - The checker keeps what each attribute name is in the GNU table after the first lookup, instead of searching the table again for every reader of every declaration, which takes c4.c -O0 down 9.6% and duktape.c -O0 down 2.8% in instructions (#3393)
 - The test of the walk of a variable length array under `-fstack-clash-protection` looks for the comparison and branch that the layout fuses, and no longer for `cmp_set_a_64`. It was the one failure that stopped the release of 0.29.1 (#3394).
+- The two tests in `noinit.rs` that both used a directory named `split` each have their own, so one no longer removes the directory of the other while it runs (#3396).
 
 ## 0.29.1
 
