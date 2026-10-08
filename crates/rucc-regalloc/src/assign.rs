@@ -607,6 +607,16 @@ struct Blocked {
 }
 
 impl Blocked {
+    /// What an operand insisting on `at` says about it at that point.
+    fn of(operand: &Operand, at: PhysReg, point: Point) -> Self {
+        let by = operand.reg.is_virtual().then_some(operand.reg);
+        let above = match operand.constraint {
+            Constraint::Above(above) => Some(above),
+            _ => None,
+        };
+        Self { class: operand.class, at, point, by, above }
+    }
+
     /// Whether this is in the way of a value of that width, which it is unless it writes only
     /// above everything the value takes.
     fn reaches(&self, width: Option<u8>) -> bool {
@@ -1056,87 +1066,93 @@ impl Facts {
 /// writes one except an instruction that has to, and it has to for the length of that one
 /// instruction, which is the same statement a fixed constraint makes.
 pub(crate) fn blocked(func: &Func, order: &Order) -> Blocks {
-    let mut blocked = Vec::new();
-    let mut claimed: Vec<(RegClass, PhysReg)> = Vec::new();
+    let mut found = Vec::new();
+    // Each register an instruction insists on, and whether an operand writes it there.
+    let mut claimed: Vec<(RegClass, PhysReg, bool)> = Vec::new();
     for block in func.blocks() {
         for inst in func.insts(block) {
+            let (early, late) = (order.early(inst), order.late(inst));
             let operands = &func[func[inst].operands];
             claimed.clear();
+            // Both points, whether or not an operand is at them. A register an instruction reads
+            // and does not write is still gone by the time the instruction is done as far as
+            // anything here knows, which is what stops the value a call is passed in `rdi` from
+            // staying in `rdi` over the call.
+            //
+            // A walk of the operands for each point rather than one for each register they name
+            // and each point. A call names a dozen registers among its operands, and asking every
+            // operand about every one of them was most of the time this took. tamnd/rucc#3052.
             for operand in operands {
-                if let Some(at) = insisted(operand) {
-                    let key = (operand.class, at);
-                    if !claimed.contains(&key) {
-                        claimed.push(key);
-                    }
+                let Some(at) = insisted(operand) else { continue };
+                let (class, written) = (operand.class, operand.role.is_def());
+                match claimed.iter_mut().find(|&&mut (c, a, _)| (c, a) == (class, at)) {
+                    Some(key) => key.2 |= written,
+                    None => claimed.push((class, at, written)),
+                }
+                if operand.role != Role::Def {
+                    found.push(Blocked::of(operand, at, early));
                 }
             }
-            for &(class, at) in &claimed {
-                // Both points, whether or not an operand is at them. A register an instruction
-                // reads and does not write is still gone by the time the instruction is done as far
-                // as anything here knows, which is what stops the value a call is passed in `rdi`
-                // from staying in `rdi` over the call.
-                for (point, role) in [(order.early(inst), Role::Use), (order.late(inst), Role::Def)]
-                {
-                    let mut named = false;
-                    for operand in operands {
-                        let mine = insisted(operand) == Some(at) && operand.class == class;
-                        if !mine || !(operand.role == role || operand.role == Role::EarlyDef) {
-                            continue;
-                        }
-                        named = true;
-                        let by = operand.reg.is_virtual().then_some(operand.reg);
-                        let above = match operand.constraint {
-                            Constraint::Above(above) => Some(above),
-                            _ => None,
-                        };
-                        blocked.push(Blocked { class, at, point, by, above });
-                    }
-                    // A register no operand names where the operands are read is one the
-                    // instruction writes and does not read, which is what a clobber is, and the
-                    // seven registers a call destroys are the whole of why that case is worth
-                    // separating. Such a register is free right up to the point it is written, so a
-                    // value whose last read is this instruction may sit in one: it is read before
-                    // the instruction writes anything, the way any other operand is. Blocking it
-                    // where the operands are read as well would take every caller saved register
-                    // away from the value a call is passed, which is a value that dies at the call
-                    // and pays for a callee saved register it holds for two instructions. Anything
-                    // living past the instruction is still refused, by the block below.
-                    //
-                    // This is where a target's early definitions are paid for. An instruction that
-                    // fills a register before it has finished reading has to say so, because that
-                    // is the one thing a plain definition here no longer covers: a division on
-                    // x86-64 is a sign extension and then the division itself, so `rdx` is gone
-                    // before the divisor is read, and a divisor that went there would be read as
-                    // the dividend's own sign bits. `rucc_target::x86_64` writes both of them down
-                    // as early definitions for exactly that reason.
-                    if !named && role == Role::Def {
-                        blocked.push(Blocked { class, at, point, by: None, above: None });
-                    }
+            for operand in operands {
+                let Some(at) = insisted(operand) else { continue };
+                if operand.role.is_def() {
+                    found.push(Blocked::of(operand, at, late));
+                }
+            }
+            // A register no operand names where the operands are read is one the instruction
+            // writes and does not read, which is what a clobber is, and the seven registers a call
+            // destroys are the whole of why that case is worth separating. Such a register is free
+            // right up to the point it is written, so a value whose last read is this instruction
+            // may sit in one: it is read before the instruction writes anything, the way any other
+            // operand is. Blocking it where the operands are read as well would take every caller
+            // saved register away from the value a call is passed, which is a value that dies at
+            // the call and pays for a callee saved register it holds for two instructions.
+            // Anything living past the instruction is still refused, by the block below.
+            //
+            // This is where a target's early definitions are paid for. An instruction that fills a
+            // register before it has finished reading has to say so, because that is the one thing
+            // a plain definition here no longer covers: a division on x86-64 is a sign extension
+            // and then the division itself, so `rdx` is gone before the divisor is read, and a
+            // divisor that went there would be read as the dividend's own sign bits.
+            // `rucc_target::x86_64` writes both of them down as early definitions for exactly
+            // that reason.
+            for &(class, at, written) in &claimed {
+                if !written {
+                    found.push(Blocked { class, at, point: late, by: None, above: None });
                 }
             }
         }
     }
-    // Program order already has the points ascending, but the registers one instruction claims are
-    // walked outside the two points rather than inside them, so the list arrives in order by
-    // instruction and not by register. A sort by the key the lookup searches on is what makes it
-    // searchable, and it is stable so two constraints on one register at one point keep the order
-    // the instruction wrote them in.
-    blocked.sort_by_key(|one: &Blocked| (one.class, one.at, one.point));
+    // Program order has the points ascending and each instruction puts down its early point
+    // before its late one, so the list arrives in order by point and not by register. Dealing it
+    // out by register, each register's in the order they came, is what makes it searchable and
+    // leaves two constraints on one register at one point in the order the instruction wrote them
+    // in. A count of each register's rather than a sort, since the registers are a few dozen and
+    // the constraints are every call's, and the sort was a third of the time this took.
+    let stride = found.iter().map(|one| usize::from(one.at.number()) + 1).max().unwrap_or(0);
+    let classes = found.iter().map(|one| usize::from(one.class.number()) + 1).max().unwrap_or(0);
+    let key =
+        |one: &Blocked| usize::from(one.class.number()) * stride + usize::from(one.at.number());
+    let mut spans = vec![(0, 0); classes * stride];
+    for one in &found {
+        spans[key(one)].1 += 1;
+    }
+    let mut start = 0;
+    for span in &mut spans {
+        let count = span.1;
+        *span = (start, start);
+        start += count;
+    }
+    let mut blocked = found.clone();
+    for one in found {
+        let span = &mut spans[key(&one)];
+        blocked[span.1] = one;
+        span.1 += 1;
+    }
     let widths = (0..func.vregs())
         .map(|number| func.width(Reg::virtual_reg(u32::try_from(number).ok()?)))
         .collect();
     let points = blocked.iter().map(|one| one.point).collect();
-    let stride = blocked.iter().map(|one| usize::from(one.at.number()) + 1).max().unwrap_or(0);
-    let classes = blocked.last().map_or(0, |one| usize::from(one.class.number()) + 1);
-    let mut spans = vec![(0, 0); classes * stride];
-    for (index, one) in blocked.iter().enumerate() {
-        let key = usize::from(one.class.number()) * stride + usize::from(one.at.number());
-        let span = &mut spans[key];
-        if span.1 == 0 {
-            span.0 = index;
-        }
-        span.1 = index + 1;
-    }
     Blocks { all: blocked, points, spans, stride, widths }
 }
 
