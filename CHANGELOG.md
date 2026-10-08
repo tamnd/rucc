@@ -4,6 +4,10 @@ All notable changes are recorded here. The format follows [Keep a Changelog](htt
 
 ## Unreleased
 
+## 0.29.1
+
+This release closes four of the five gaps that the review of rucc-corpus on wasm32 found (#3262). A self tail call is a loop, a bit counting loop is one `popcnt`, `clz` or `ctz`, a switch whose answers are addresses is a table on wasm32, and a switch after conversion is a `select`. All but the table are in the shared optimizer, so every target gets them. The release also has `musttail` calls with arguments on the stack and a change to the inliner for `static` functions with more than one caller.
+
 ### Added
 
 - `phiopt` makes a branch to two blocks that each end in `return` one `select` and one `return`, as LLVM does in `SimplifyCondBranchToTwoReturns`. A switch in a function that is not inlined is now a `cmov` on x86-64, a `csel` on aarch64 and a `select` on wasm32. The compare moves down next to the select. (#3384)

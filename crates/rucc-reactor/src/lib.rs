@@ -33,7 +33,7 @@
 //! stay between runs, so the sysroot is installed once. A trap, which a panic is on this target,
 //! ends the instance, and the host makes a new one.
 
-#![doc(html_root_url = "https://docs.rs/rucc-reactor/0.29.0")]
+#![doc(html_root_url = "https://docs.rs/rucc-reactor/0.29.1")]
 
 use std::cell::RefCell;
 
