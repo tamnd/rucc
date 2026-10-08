@@ -22,6 +22,12 @@ echo "release test on $PRETTY_NAME, $(uname -m)"
 case $ID in
 ubuntu | debian)
 	export DEBIAN_FRONTEND=noninteractive
+	# The Debian 11 security pool on deb.debian.org gives 404 for packages that its index still
+	# names, so Debian 11 gets its packages from archive.debian.org.
+	if [ "${VERSION_CODENAME:-}" = bullseye ]; then
+		printf '%s\n' 'deb http://archive.debian.org/debian bullseye main' \
+			'deb http://archive.debian.org/debian-security bullseye-security main' >/etc/apt/sources.list
+	fi
 	apt-get update -qq
 	apt-get install -y -qq libc6-dev binutils >/dev/null
 	;;
