@@ -78,6 +78,7 @@ This release ends S5 (#431), the full plane set of the safe memory work. The typ
 - Intern the back end's machine opcode names by where their two static halves are, so a name is built and hashed once per compilation rather than once per use. Duktape compiles 1.9% faster at -O1, with byte-identical output (#3381)
 - Line starts in a source file are found a word at a time, the lexer skips an empty splice report, and a spelling is interned without checking its UTF-8 twice, which takes duktape.c -O1 down 0.9% in instructions (#3382)
 - The inliner measures a caller's own frame the first time a call reaches the frame check instead of up front, which skips the scalar replacement's analysis for callers with no call to take and takes duktape.c -O1 down 1.1% in instructions (#3383)
+- The round that inlines a static function into all its callers builds each caller's loop forest once instead of once per call it asks about, which takes duktape.c -O1 down 2.9% in instructions (#3386)
 
 ### Fixed
 
