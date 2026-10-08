@@ -34,6 +34,10 @@ The release workflows for 0.28.0, 0.29.0 and 0.29.1 stopped at the check of the 
 - The test of the walk of a variable length array under `-fstack-clash-protection` looks for the comparison and branch that the layout fuses, and no longer for `cmp_set_a_64`. It was the one failure that stopped the release of 0.29.1 (#3394).
 - The two tests in `noinit.rs` that both used a directory named `split` each have their own, so one no longer removes the directory of the other while it runs (#3396).
 
+### Fixed
+
+- A computed goto whose handler works out the next step with an add that writes over some other value, such as `op = &steps[op->jumpdone]` in Postgres' `ExecInterpExpr`, keeps a register of its own for the step. Written straight into the register the next handler reads it in, the copy of `steps` in front of the add could go over the step number, and the Postgres server built at `-O2` crashed on the first query that took such a jump (#1994).
+
 ## 0.29.1
 
 This release closes four of the five gaps that the review of rucc-corpus on wasm32 found (#3262). A self tail call is a loop, a bit counting loop is one `popcnt`, `clz` or `ctz`, a switch whose answers are addresses is a table on wasm32, and a switch after conversion is a `select`. All but the table are in the shared optimizer, so every target gets them. The release also has `musttail` calls with arguments on the stack and a change to the inliner for `static` functions with more than one caller.

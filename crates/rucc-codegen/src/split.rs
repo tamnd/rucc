@@ -564,7 +564,13 @@ fn in_place(
 /// writes it, which is what is checked:
 ///
 /// - The value is written once in the function, by an instruction in the branch's own block in
-///   front of the move, that writes it as any register at all and names no register outright.
+///   front of the move, that writes it as any register at all and names no register outright. An
+///   answer written over one of the instruction's sources is taken only when that source is the
+///   register the move writes. The allocator widens one two address write of each value to cover
+///   the reads of its instruction, and the register the move writes has a write in every handler,
+///   so a write over some other source, such as `&steps[op->jumpdone]` over `steps`, could share
+///   a register with the instruction's other source and have it copied over before the add read
+///   it.
 /// - Every read of it is in that block, between that instruction and the move, so renaming those
 ///   reads is renaming all of them.
 /// - Nothing in between, and nothing in that instruction but a read, names the register the move
@@ -616,10 +622,16 @@ fn at_source(func: &mut mir::Func, made: &[(mir::Block, mir::Inst)], steps: &Ste
         }) else {
             continue;
         };
-        let plain = func[func[insts[start]].operands].iter().all(|operand| {
-            let answer = operand.role == mir::Role::Def
-                && operand.class == to.class
-                && matches!(operand.constraint, mir::Constraint::Reg | mir::Constraint::Reuse(_));
+        let operands = &func[func[insts[start]].operands];
+        let plain = operands.iter().all(|operand| {
+            let written = match operand.constraint {
+                mir::Constraint::Reg => true,
+                mir::Constraint::Reuse(at) => {
+                    operands.get(usize::from(at)).is_some_and(|source| source.reg == home)
+                }
+                _ => false,
+            };
+            let answer = operand.role == mir::Role::Def && operand.class == to.class && written;
             operand.reg.is_virtual()
                 && (operand.reg != value || answer)
                 && (operand.reg != home || !operand.role.is_def())
@@ -1232,6 +1244,42 @@ mod tests {
         assert_eq!(indirect(&mut func, &BRANCH, &FRAME, &SHORT, &FLAGS, &mut names), 1);
         // The `test` reads the old pointer and the step both, so the step cannot go into the
         // register the old pointer is in until the move in front of the jump.
+        assert!(mentions(&func, next));
+        let text = mir::print_func(&func, &names, &REGS);
+        assert_eq!(text.matches("x64.mov_rr_64").count(), 2, "{text}");
+    }
+
+    #[test]
+    fn a_step_written_over_some_other_source_keeps_a_register_of_its_own() {
+        let mut names = Interner::new();
+        let mut func = mir::Func::new(names.intern("f"));
+        let head = func.create_block();
+        let label = func.create_block();
+        let state = func.append_param(head, GPR);
+        let given = func.append_param(label, GPR);
+        dispatch(&mut func, &mut names, head, label, vec![state]);
+        // `op = &steps[op->jumpdone]`, where the `add` writes its answer over `steps`. Renamed, it
+        // would be written over `steps` into the register `op` is in, which `jumpdone` may be
+        // given once `op` has been read for the last time, and the copy of `steps` in front of
+        // the `add` would go over it.
+        let load = mir::Opcode::new(names.intern("x64.mov_rm_64"));
+        let add = mir::Opcode::new(names.intern("x64.add_rr_64"));
+        let jump = mir::Opcode::new(names.intern("x64.jmp_reg"));
+        let (steps, done, next, to) =
+            (func.new_vreg(GPR), func.new_vreg(GPR), func.new_vreg(GPR), func.new_vreg(GPR));
+        let at = |disp| mir::Mem { disp, ..mir::Mem::at(mir::Operand::read(given, GPR)) };
+        func.build(label, load).def(steps, GPR).mem(at(0)).finish();
+        func.build(label, load).def(done, GPR).mem(at(32)).finish();
+        let answer = mir::Operand::write(next, GPR).with(mir::Constraint::Reuse(1));
+        func.build(label, add).operand(answer).uses(steps, GPR).uses(done, GPR).finish();
+        func.build(label, load)
+            .def(to, GPR)
+            .mem(mir::Mem::at(mir::Operand::read(next, GPR)))
+            .finish();
+        func.build(label, jump).operand(mir::Operand::read(to, GPR)).finish();
+        func.succs_mut(label).push(mir::BlockCall::with(label, vec![next]));
+
+        assert_eq!(indirect(&mut func, &BRANCH, &FRAME, &SHORT, &FLAGS, &mut names), 1);
         assert!(mentions(&func, next));
         let text = mir::print_func(&func, &names, &REGS);
         assert_eq!(text.matches("x64.mov_rr_64").count(), 2, "{text}");
