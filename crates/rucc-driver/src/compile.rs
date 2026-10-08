@@ -5989,6 +5989,20 @@ decl #0 x : int object external static defined
         assert_eq!(text.matches("\tcmp").count(), 1, "{text}");
     }
 
+    /// The high half of a 64 bit value divided by eight and widened again is one shift by 35.
+    ///
+    /// The front end writes a shift by 32, a truncation, a shift by 3 and a zero extension. The
+    /// truncation drops nothing the first shift can leave set, so the four are one shift, as gcc
+    /// and clang write it (tamnd/rucc#3262).
+    #[test]
+    fn the_high_half_of_a_value_divided_by_eight_is_one_shift() {
+        let text = optimized(
+            "unsigned long long f(unsigned long long x) { return (unsigned)(x >> 32) / 8; }\n",
+        );
+        assert!(text.contains("\tshrq\t$35, "), "{text}");
+        assert_eq!(text.matches("\tshr").count(), 1, "{text}");
+    }
+
     /// The same `switch` with one arm off the line, which is a table and not arithmetic.
     ///
     /// The answers being a line is what licenses the addition, since it answers for every label in

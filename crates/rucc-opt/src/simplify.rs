@@ -13,7 +13,7 @@
 //! # The rewrites
 //!
 //! Two kinds. The rules of `rules/`, one file per tier, which are matched against every
-//! instruction and are where anything new goes, and four rewrites written out by hand below them.
+//! instruction and are where anything new goes, and six rewrites written out by hand below them.
 //!
 //! ## The rules
 //!
@@ -79,7 +79,7 @@
 //! rewrite that turns one written in the source into it, because the walk has already gone past
 //! the place it was built and would not come back to it.
 //!
-//! ## The five written by hand
+//! ## The six written by hand
 //!
 //! Four are about comparisons, and those four are here rather than in `rules/` for the same
 //! reason: what each one is, is one statement quantified over the predicates, and the rule language
@@ -189,6 +189,24 @@
 //! them fit. An `add` is not taken there, because a carry out of the low bits reaches the lane. At
 //! the bottom, an extension from `w` bits is the value it extended.
 //!
+//! ### A shift through a narrowing
+//!
+//! `(unsigned)(x >> 32) / 8` on a 64 bit `x` lowers to `lshr.i32 (trunc.i32 (lshr.i64 x 32)) 3`,
+//! and the `zext.i64` of that is what `total += ...` adds. The inner shift leaves 32 bits, so the
+//! truncation loses nothing, and the two shifts are one: `trunc.i32 (lshr.i64 x 35)`. The
+//! extension then gives back a value whose high 32 bits are clear already, so it is `lshr.i64 x
+//! 35` itself. A loop that did five operations on each element does one (tamnd/rucc#3262).
+//!
+//! In general, for a shift right by `a` of a `W` bit value, truncated to `N` bits:
+//!
+//! - When `a` is `W - N` or more, nothing the truncation drops is set. A further shift right by
+//!   `b` at `N` bits is then the truncation of a shift by `a + b` at `W` bits, and it is zero when
+//!   `a + b` reaches `W`.
+//! - For the same reason, an extension of the truncation back to `W` bits is the shift.
+//!
+//! These are written by hand because each pattern is three instructions deep, and the rule tables
+//! expand an operand one level and no further.
+//!
 //! # Why it needs dead code elimination after it
 //!
 //! The rewrite turns the `xor` into the comparison and leaves the original comparison where it
@@ -245,11 +263,17 @@ const MAGNITUDE: &str = "comparison against a value whose sign bit is clear sett
 const NO_FUEL_MAGNITUDE: &str =
     "comparison against a magnitude left alone, the pass ran out of fuel";
 
-/// Recorded once for each floating point comparison a constant or a repeated operand settles.
+/// Recorded once for each lane read back out of a packed pair.
 const LANE: &str = "lane read back out of a pair packed into a wider integer";
 
 /// Recorded for one of those that would have folded if there had been fuel for it.
 const NO_FUEL_LANE: &str = "lane read out of a packed pair left alone, the pass ran out of fuel";
+
+/// Recorded once for each shift whose operand is a shift through a narrowing.
+const NARROWED: &str = "shift through a narrowing folded into the wide shift";
+
+/// Recorded for one of those that would have folded if there had been fuel for it.
+const NO_FUEL_NARROWED: &str = "shift through a narrowing left alone, the pass ran out of fuel";
 
 /// Recorded once for each floating point comparison a constant or a repeated operand settles.
 const BOUNDED: &str = "floating point comparison settled by a constant or by one operand twice";
@@ -609,6 +633,9 @@ impl<'a> Finder<'a> {
         }
         if let Some(lane) = packed_lane(func, inst) {
             return Some((Found::Lane(lane), LANE, NO_FUEL_LANE));
+        }
+        if let Some(rewrite) = narrowed_shift(func, inst) {
+            return Some((Found::Rule(rewrite), NARROWED, NO_FUEL_NARROWED));
         }
         let (rewrite, pattern) = identity(func, inst, self.address, &mut self.stacks)?;
         Some((Found::Rule(rewrite), pattern, NO_FUEL_RULE))
@@ -1362,6 +1389,77 @@ fn lane_at(func: &Func, value: Value, at: u32, width: u32, depth: u32) -> Option
         }
         _ => None,
     }
+}
+
+/// What a shift right or a zero extension of a truncated shift right is, when the truncation
+/// drops no bit that can be set.
+///
+/// The first is `lshr.iN (trunc.iN (lshr.iW x a)) b`, which is `trunc.iN (lshr.iW x (a + b))`
+/// or zero. The second is `zext.iW (trunc.iN (lshr.iW x a))`, which is the inner shift. Both need
+/// `a` to be `W - N` or more, so that the inner shift leaves `N` bits or fewer.
+fn narrowed_shift(func: &Func, inst: Inst) -> Option<Rewrite> {
+    let data = &func[inst];
+    let ty = func[data.first_result?].ty;
+    if !ty.is_int() || !ty.is_scalar() {
+        return None;
+    }
+    let args = &func[data.args];
+    match data.opcode {
+        Opcode::LShr => {
+            let narrow = ty.bits();
+            let b = u32::try_from(constant(func, *args.get(1)?)?).ok()?;
+            if b == 0 || b >= narrow {
+                return None;
+            }
+            let (x, a, wide) = narrowed(func, *args.first()?, narrow)?;
+            if a + b >= wide {
+                return Some(Rewrite::Constant(0));
+            }
+            let shift = Nested {
+                opcode: Opcode::LShr,
+                pred: None,
+                bits: wide,
+                args: vec![
+                    Operand::Value(x),
+                    Operand::Constant { number: i128::from(a + b), bits: wide },
+                ],
+            };
+            Some(Rewrite::Converted {
+                opcode: Opcode::Trunc,
+                from: Operand::Built(Box::new(shift)),
+            })
+        }
+        Opcode::ZExt => {
+            let truncated = *args.first()?;
+            let narrow = func[truncated].ty.bits();
+            let Def::Result { inst: truncation, .. } = func[truncated].def else { return None };
+            let shifted = *func[func[truncation].args].first()?;
+            if func[shifted].ty != ty {
+                return None;
+            }
+            narrowed(func, truncated, narrow)?;
+            Some(Rewrite::Value(shifted))
+        }
+        _ => None,
+    }
+}
+
+/// The value, the shift and the wide width of a `trunc.iN (lshr.iW x a)` with `a` at least
+/// `W - N` and below `W`, which is a truncation that drops no bit that can be set.
+fn narrowed(func: &Func, value: Value, narrow: u32) -> Option<(Value, u32, u32)> {
+    let Def::Result { inst, .. } = func[value].def else { return None };
+    if func[inst].opcode != Opcode::Trunc {
+        return None;
+    }
+    let shifted = *func[func[inst].args].first()?;
+    let ty = func[shifted].ty;
+    if !ty.is_int() || !ty.is_scalar() {
+        return None;
+    }
+    let wide = ty.bits();
+    let (Opcode::LShr, [x, a]) = producer(func, shifted)? else { return None };
+    let a = u32::try_from(constant(func, a)?).ok()?;
+    (wide > narrow && a + narrow >= wide && a < wide).then_some((x, a, wide))
 }
 
 /// Where a pair of operands can stand in relation to each other, as one bit each.
@@ -2798,6 +2896,64 @@ mod tests {
         let (mut func, block, _, b) = packed(Opcode::Add, 32, Some(32));
         simplify(&mut func);
         assert_ne!(returned(&func, block), b);
+    }
+
+    /// `zext.i64 (lshr.i32 (trunc.i32 (lshr.i64 x inner)) outer)`, which is what
+    /// `(u64)((unsigned)(x >> inner) >> outer)` lowers to, returned from a function of `x`.
+    fn shifted_through(inner: i128, outer: i128) -> (Func, Block, Value) {
+        let (narrow, wide) = (Type::int(32), Type::int(64));
+        let (_, mut func, block) = one_block(wide);
+        let x = func.append_param(block, wide);
+        let mut build = Builder::new(&mut func, block);
+        let amount = build.iconst(wide, inner);
+        let high = build.binary(Opcode::LShr, x, amount, Flags::NONE);
+        let high = build.unary(Opcode::Trunc, high, narrow);
+        let amount = build.iconst(narrow, outer);
+        let quotient = build.binary(Opcode::LShr, high, amount, Flags::NONE);
+        let widened = build.unary(Opcode::ZExt, quotient, wide);
+        build.ret(&[widened]);
+        (func, block, x)
+    }
+
+    /// The high half of a 64 bit value divided by eight and widened again is one shift of the
+    /// value by 35, which is tamnd/rucc#3262.
+    #[test]
+    fn a_shift_through_a_narrowing_that_drops_nothing_is_one_wide_shift() {
+        let (mut func, block, x) = shifted_through(32, 3);
+        assert!(simplify(&mut func));
+        let result = returned(&func, block);
+        assert_eq!(came_from(&func, result).0, Opcode::LShr);
+        let args = operands(&func, result);
+        assert_eq!(args[0], x);
+        assert_eq!(number(&func, args[1]), 35);
+        assert_eq!(func[result].ty, Type::int(64));
+    }
+
+    /// A shift that moves every bit the inner one left out of the value is zero.
+    #[test]
+    fn a_shift_through_a_narrowing_past_every_bit_is_zero() {
+        let (mut func, block, _) = shifted_through(40, 30);
+        assert!(simplify(&mut func));
+        let result = returned(&func, block);
+        let (opcode, _) = came_from(&func, result);
+        if opcode == Opcode::ZExt {
+            assert_eq!(number(&func, operands(&func, result)[0]), 0);
+        } else {
+            assert_eq!(number(&func, result), 0);
+        }
+    }
+
+    /// An inner shift that leaves more bits than the truncation keeps is not folded, because the
+    /// truncation drops a bit that can be set and the wide shift would bring it back.
+    #[test]
+    fn a_shift_through_a_narrowing_that_drops_a_bit_is_left_alone() {
+        let (mut func, block, x) = shifted_through(31, 3);
+        simplify(&mut func);
+        let result = returned(&func, block);
+        assert_eq!(came_from(&func, result).0, Opcode::ZExt);
+        let quotient = operands(&func, result)[0];
+        assert_eq!(came_from(&func, quotient).0, Opcode::LShr);
+        assert_ne!(operands(&func, quotient)[0], x);
     }
 
     /// Truncating an extension back to the width it came from is the value that was there.
