@@ -97,6 +97,7 @@ pub(crate) fn lower(unit: &mut Unit<'_>, decl: DeclId, func: &mut Func, plan: &P
         marks: Vec::new(),
         cleanups: Vec::new(),
         ends: Vec::new(),
+        temps: Vec::new(),
         next_scope: 0,
         pinned: Set::default(),
         landings: Map::default(),
@@ -760,9 +761,26 @@ struct Body<'a, 'u> {
     /// Built as the declarations are reached, for the reason the list above is, and here that
     /// reason is the conservative direction as well: a local a jump went over has no marker, and a
     /// local with no marker is one whose bytes are never handed to anything else. `None` is a
-    /// scope that ends nothing, which is the scope of a statement expression, whose value may be
-    /// one of its own objects and is read after the scope is closed.
+    /// scope that ends nothing, which is the scope of a statement expression in a build whose
+    /// locals do not share, since its value may be one of its own objects and is read after the
+    /// scope is closed.
     ends: Vec<Option<Vec<Value>>>,
+    /// The slots whose lifetime ends with the statement the walk is in.
+    ///
+    /// Every slot an expression asks [`Body::scratch`] for is one: the object a call returns, a
+    /// vector worked out somewhere, the copy an argument travels in. C gives each of those
+    /// automatic storage until the end of the full expression it was made for (C11 6.2.4), and
+    /// nothing can name it after that. The locals of a statement expression come here as well
+    /// rather than ending with its braces, because the value of one may be one of them and the
+    /// expression around it reads that value after the braces have closed.
+    ///
+    /// Each statement ends what was added while it was walked, which is never before the end of
+    /// the full expression and is the one place the walk knows it is past it. That is what lets
+    /// the slots of two calls in two statements be the same bytes: the intrinsics of an AVX-512
+    /// loop are calls and macros that return a 64 byte vector, and with no end on any of those
+    /// slots Postgres' `pg_comp_crc32c_avx512` had a frame of 1920 bytes where gcc has none.
+    /// Empty and never added to unless locals may share bytes.
+    temps: Vec<Value>,
     /// How many scopes have been opened, which is what gives the next one a name of its own.
     next_scope: u32,
     /// The scopes an `__builtin_alloca` has taken out of the business of giving the stack back.
@@ -1295,14 +1313,18 @@ impl<'u> Body<'_, 'u> {
         let mem = self.func.add_mem(info);
         let data = InstData { extra: Extra::Mem(mem), ..InstData::new(Opcode::Alloca) };
         let first = self.func.insts(entry).next();
-        match first {
+        let slot = match first {
             Some(first) => {
                 let inst = self.func.create_inst(data, &[Type::PTR], span);
                 self.func.insert_before(inst, first);
                 self.func[inst].results().next().expect("an alloca produces its address")
             }
             None => Builder::new(self.func, entry).at(span).value(data, Type::PTR),
+        };
+        if self.sharing() {
+            self.temps.push(slot);
         }
+        slot
     }
 
     /// A stack slot whose size is not known until the walk gets there, which is what an object
@@ -1364,15 +1386,33 @@ impl<'u> Body<'_, 'u> {
         self.ends.push(Some(Vec::new()));
     }
 
-    /// Opens a scope whose locals are never said to end, which is what a statement expression
-    /// needs. Its value is read after the scope is closed and may be an object declared in it,
-    /// `({ struct s s = f(); s; })`, so the bytes of that object are still wanted when the walk
-    /// leaves the scope.
+    /// Opens a scope whose locals are not said to end where it closes, which is what a statement
+    /// expression needs. Its value is read after the scope is closed and may be an object
+    /// declared in it, `({ struct s s = f(); s; })`, so the bytes of that object are still wanted
+    /// when the walk leaves the scope. Where locals may share bytes, [`Body::close_kept`] hands
+    /// them to the statement the expression is in, and otherwise they never end.
     fn open_keeping(&mut self) {
         self.open();
-        if let Some(last) = self.ends.last_mut() {
-            *last = None;
+        if !self.sharing() {
+            if let Some(last) = self.ends.last_mut() {
+                *last = None;
+            }
         }
+    }
+
+    /// Closes the scope of a statement expression, which is [`Body::close`] with the ends of its
+    /// locals left to the statement the expression is in. See [`Body::temps`].
+    fn close_kept(&mut self, span: Span) {
+        let kept = self.ends.last_mut().and_then(Option::take);
+        self.temps.extend(kept.unwrap_or_default());
+        self.close(span);
+    }
+
+    /// Whether the slots of expressions end with their statements, which is whether locals may
+    /// share bytes at all. The safety instrumentation reads every `lifetime_end` as the point a
+    /// pointer stops being usable and never shares, so it is not given these.
+    fn sharing(&self) -> bool {
+        self.unit.lifetimes && self.unit.share
     }
 
     /// Closes the innermost scope, running the handlers it owes and giving back what it grew the
@@ -2222,12 +2262,22 @@ impl<'u> Body<'_, 'u> {
 
     // Statements.
 
-    /// One statement.
+    /// One statement, and then the end of the slots its expressions asked for. See
+    /// [`Body::temps`].
     fn stmt(&mut self, id: StmtId) {
         if self.at.is_none() {
             self.unreachable_stmt(id);
             return;
         }
+        let made = self.temps.len();
+        self.statement(id);
+        let ending = self.temps.split_off(made);
+        let span = self.tast().stmt_span(id);
+        self.end_lifetimes(&ending, span);
+    }
+
+    /// One statement the walk can reach.
+    fn statement(&mut self, id: StmtId) {
         let tast = self.tast();
         let span = tast.stmt_span(id);
         match tast[id] {
@@ -4392,7 +4442,7 @@ impl<'u> Body<'_, 'u> {
                         Where::Addr(self.poison(Type::PTR, span))
                     }
                 };
-                self.close(span);
+                self.close_kept(span);
                 Place::new(at, ty)
             }
             // `(janet_panic("..."), janet_wrap_nil())`, which is a structure or a union that a
@@ -6270,7 +6320,7 @@ impl<'u> Body<'_, 'u> {
             ExprKind::StmtExpr(body) => {
                 let last = self.statements(body);
                 let value = last.and_then(|last| self.eval(last));
-                self.close(span);
+                self.close_kept(span);
                 value
             }
             ExprKind::LabelAddr(label) => self.label_addr(label, span),
