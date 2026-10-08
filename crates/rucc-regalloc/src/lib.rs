@@ -131,6 +131,7 @@ pub fn run_with(
     let live = live::Live::of(func, &order);
     let facts = assign::Facts::of(func, &order);
     let assignment = decide(func, &order, &live, env, allocator, &facts);
+    commute(func, &assignment);
     write(func, assignment, env, order, live, called, verify)
 }
 
@@ -160,15 +161,50 @@ pub fn run_either(
     verify: bool,
     allocator: Allocator,
 ) -> Allocation {
+    run_first(func, &[wide], env, called, verify, allocator).0
+}
+
+/// Allocates registers with the first of `tried` whose answer [`rewrite::fits`], and with `env`
+/// where none of them does, and hands back which one it was.
+///
+/// This is [`run_either`] with more than one way of handing the scratch registers out. On x86-64
+/// the first hands out both, the second hands out `r11` and holds `r10` back, and `env` holds both
+/// back. A function that spills has to read its spilled values back into something, so it never
+/// gets the first, but one register is enough for that nearly everywhere. Before the second was
+/// there such a function lost both, and the hot loop of Postgres' tuple deforming read three values
+/// off the stack on every turn while `r11` sat idle. tamnd/rucc#1994.
+///
+/// The environment comes back because a pass after allocation that looks for the allocator's
+/// reloads into a scratch register has to know which registers stayed scratch. A load into one the
+/// allocator handed out may be bringing back a value that is still wanted in another block.
+///
+/// # Panics
+///
+/// As [`run`].
+pub fn run_first<'a>(
+    func: &mut rucc_mir::Func,
+    tried: &[&'a assign::Env],
+    env: &'a assign::Env,
+    called: &str,
+    verify: bool,
+    allocator: Allocator,
+) -> (Allocation, &'a assign::Env) {
     let order = order::Order::of(func);
     let live = live::Live::of(func, &order);
     let facts = assign::Facts::of(func, &order);
-    let tried = decide(func, &order, &live, wide, allocator, &facts);
-    if rewrite::fits(func, &tried, wide) {
-        return write(func, tried, wide, order, live, called, verify);
+    for &wide in tried {
+        let assignment = decide(func, &order, &live, wide, allocator, &facts);
+        // Turned round before the question, since which operand an answer is written over is part
+        // of how many scratch registers an instruction wants, and back again when the answer is no.
+        commute(func, &assignment);
+        if rewrite::fits(func, &assignment, wide) {
+            return (write(func, assignment, wide, order, live, called, verify), wide);
+        }
+        commute(func, &assignment);
     }
     let assignment = decide(func, &order, &live, env, allocator, &facts);
-    write(func, assignment, env, order, live, called, verify)
+    commute(func, &assignment);
+    (write(func, assignment, env, order, live, called, verify), env)
 }
 
 /// Where every value goes, with the allocator asked for.
@@ -186,8 +222,20 @@ fn decide(
     }
 }
 
+/// Swaps the two sources of every instruction whose answer the assignment wrote over the second.
+///
+/// That makes it an ordinary reuse of the first, so the checker, the trace and the rewrite read it
+/// as one. Liveness does not care which way round two uses are. Doing it twice puts the sources
+/// back.
+fn commute(func: &mut rucc_mir::Func, assignment: &assign::Assignment) {
+    for &inst in assignment.commuted() {
+        let list = func[inst].operands;
+        func[list].swap(1, 2);
+    }
+}
+
 /// Makes a decision true in the function, checking it on the way in and the rewrite on the way out
-/// in a build that asks for that.
+/// in a build that asks for that. The sources the decision wrote over have already been swapped.
 fn write(
     func: &mut rucc_mir::Func,
     mut assignment: assign::Assignment,
@@ -198,13 +246,6 @@ fn write(
     verify: bool,
 ) -> Allocation {
     let checking = verify || cfg!(debug_assertions);
-    // An answer that went over the second source of an instruction that reads its sources either
-    // way round. Swapping them makes it an ordinary reuse of the first, so the checker, the trace
-    // and the rewrite read it as one. Liveness does not care which way round two uses are.
-    for &inst in assignment.commuted() {
-        let list = func[inst].operands;
-        func[list].swap(1, 2);
-    }
     if checking {
         let problems = check::check(func, &order, &live, &assignment);
         assert!(problems.is_empty(), "in '{called}': {}", check::report(&problems));
@@ -313,6 +354,45 @@ mod tests {
 
         assert_eq!(allocation.assignment.spilled(), 1);
         assert_eq!(allocation.edits.len(), 2);
+    }
+
+    #[test]
+    fn a_function_that_spills_keeps_one_scratch_register_back_rather_than_two() {
+        let mut names = Interner::new();
+        let (mut func, _) = three_at_once(&mut names);
+
+        // The wide answer spills a value it has nothing to read back into. The middle one spills
+        // the same value and reads it back into the one register it holds back, and has a register
+        // more than the narrow one to hand out, so it is the one written.
+        let wide = assign::Env::new().with(GPR, &SYSV.int_order[..2], &[]);
+        let middle = assign::Env::new().with(GPR, &SYSV.int_order[..2], &SYSV.int_order[2..3]);
+        let env = assign::Env::new().with(GPR, &SYSV.int_order[..1], &SYSV.int_order[1..3]);
+        let (allocation, used) =
+            run_first(&mut func, &[&wide, &middle], &env, "test", true, Allocator::Single);
+
+        assert!(std::ptr::eq(used, &middle));
+        assert_eq!(allocation.assignment.spilled(), 1);
+        let through = assign::Place::Reg(RDX);
+        assert!(allocation.edits.iter().any(|edit| edit.mov.to == through), "{allocation:?}");
+    }
+
+    #[test]
+    fn an_instruction_reading_two_spilled_values_is_given_both_scratch_registers() {
+        let mut names = Interner::new();
+        let (mut func, _) = three_at_once(&mut names);
+
+        // One register to hand out either way, so two of the three values are on the stack where
+        // the last instruction reads all three. The one register the middle answer holds back is
+        // not enough for that, and borrowing another would put a third value in memory and bring
+        // it back around the instruction, so the function is allocated with both held back.
+        let middle = assign::Env::new().with(GPR, &SYSV.int_order[..1], &SYSV.int_order[1..2]);
+        let env = assign::Env::new().with(GPR, &SYSV.int_order[..1], &SYSV.int_order[1..3]);
+        let (allocation, used) =
+            run_first(&mut func, &[&middle], &env, "test", true, Allocator::Single);
+
+        assert!(std::ptr::eq(used, &env));
+        assert_eq!(allocation.assignment.spilled(), 2);
+        assert_eq!(allocation.assignment.slots().len(), 2, "{allocation:?}");
     }
 
     #[test]

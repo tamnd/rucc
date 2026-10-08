@@ -10,6 +10,7 @@ All notable changes are recorded here. The format follows [Keep a Changelog](htt
 - The register allocator builds the per-instruction weight map once per allocation, not once per try. The spill phase reuses the costs and forced values the allocator already read, and the placement loop finds values sent ahead through a table indexed by register number. (#3389)
 - The optimizer folds a shift right through a truncation that drops no set bit into one wide shift. `(unsigned)(x >> 32) / 8` on a 64 bit `x` is now one shift by 35, and its zero extension back to 64 bits is the same shift (#3390).
 - The register allocator reads the registers each instruction insists on in one walk of its operands per point, not one per register, and orders them with a count instead of a sort. That takes duktape.c -O0 down 2.5% and monocypher.c -O0 down 4.4% in instructions (#3391)
+- On x86-64 a function that spills is given `r11` and holds only `r10` back to read its spilled values into, where it used to hold both back. Postgres' tuple deforming loop read three values off the stack on every turn while `r11` sat idle. One register is enough unless an instruction reads two spilled values at once or an edge hands a spilled value to a spilled parameter while a cycle is using it, and such a function is allocated again with both held back. The fold of a reload into the instruction that reads it now only takes loads into a register that stayed scratch for that function, so a value brought back after a call into a register the allocator handed out keeps its load. (#1994)
 
 ## 0.29.1
 

@@ -114,6 +114,10 @@ pub struct Machine {
     /// machine whose scratch registers are ones the callee would have to save. See
     /// [`rucc_regalloc::run_either`].
     pub wide: Option<[Env; 2]>,
+    /// [`Machine::wide`] with one general purpose scratch register held back rather than none,
+    /// which is what a function that spills is tried with before it is given neither. `None` where
+    /// [`Machine::wide`] is. See [`rucc_regalloc::run_first`].
+    pub middle: Option<[Env; 2]>,
 }
 
 /// The scratch registers held back from the allocator on x86-64.
@@ -201,6 +205,15 @@ impl Machine {
         let every: Vec<PhysReg> = conv.int_order.to_vec();
         let spared_every: Vec<PhysReg> =
             every.iter().copied().chain([conv.frame_pointer]).collect();
+        // `r11` handed out and `r10` held back, which is enough for a function that reads its
+        // spilled values back one at a time, and that is nearly every function that spills.
+        let held = &SCRATCH[..1];
+        let middle = |order: &[PhysReg]| {
+            Env::new().with(x86_64::GPR, order, held).with(x86_64::XMM, &sse_order, &sse_scratch)
+        };
+        let some: Vec<PhysReg> =
+            conv.int_order.iter().copied().filter(|reg| !held.contains(reg)).collect();
+        let spared_some: Vec<PhysReg> = some.iter().copied().chain([conv.frame_pointer]).collect();
         Self {
             conv,
             file: x86_64::REGS,
@@ -215,6 +228,7 @@ impl Machine {
             env: env(&order),
             spare: Some(env(&spared)),
             wide: Some([wide(&every), wide(&spared_every)]),
+            middle: Some([middle(&some), middle(&spared_some)]),
         }
     }
 
@@ -248,6 +262,7 @@ impl Machine {
             ),
             spare: None,
             wide: None,
+            middle: None,
         }
     }
 
@@ -283,6 +298,7 @@ impl Machine {
             spare: None,
             // Nor this. Its scratch registers are two a call preserves.
             wide: None,
+            middle: None,
         }
     }
 
@@ -1117,17 +1133,20 @@ pub fn compile_recording(
     // the pages of a frame that grows writes into one in the middle of the body. The rest of what
     // this file puts in a scratch register goes in the prologue, before anything the allocator
     // placed is live.
-    let wide = machine
-        .wide
+    let handed = !naked && !saves_all && !layout.grows && guard.is_none();
+    let which = usize::from(spare.is_some());
+    let wide = machine.wide.as_ref().filter(|_| handed).map(|envs| &envs[which]);
+    // And one of them handed out where both cannot be, which is a function that spills. Only with
+    // the backtracking allocator, since the single pass one spills whatever it cannot place at once
+    // and allocating such a function three times is time `-O0` is not asking to spend.
+    let middle = machine
+        .middle
         .as_ref()
-        .filter(|_| !naked && !saves_all && !layout.grows && guard.is_none())
-        .map(|[plain, spared]| if spare.is_some() { spared } else { plain });
-    let allocation = match wide {
-        Some(wide) => {
-            rucc_regalloc::run_either(&mut func, wide, env, &called, flags.verify, allocator)
-        }
-        None => rucc_regalloc::run_with(&mut func, env, &called, flags.verify, allocator),
-    };
+        .filter(|_| handed && allocator == Allocator::Backtracking)
+        .map(|envs| &envs[which]);
+    let tried: Vec<&Env> = wide.into_iter().chain(middle).collect();
+    let (allocation, used) =
+        rucc_regalloc::run_first(&mut func, &tried, env, &called, flags.verify, allocator);
     recording.pressure.record(&called, Cost::of(&allocation));
 
     // After allocation, because the largest area in most frames is the spill slots and nothing
@@ -1216,6 +1235,11 @@ pub fn compile_recording(
     func.sharing = framed.iter().map(|&(decl, _, _)| decl).collect();
 
     let scratch = machine.env.scratch(machine.conv.int_class);
+    // The ones nothing was allocated to, which is fewer than `scratch` in a function that was given
+    // some of them. What goes into a scratch register in the prologue is in before any value is,
+    // and what goes into one in the body has to go into one of these.
+    let int = machine.conv.int_class;
+    let held = used.scratch(int);
     let protect = guard.map(|guard| Protect { guard, branch: machine.branch, scratch: guarded });
     // A target with no instruction that touches a page without changing it does nothing about the
     // flag, which is the same answer the protector gives on a target with nowhere to keep its word.
@@ -1305,7 +1329,7 @@ pub fn compile_recording(
     // the instructions, for the reason the cleanup is. Not at `-O0`, whose output is the one
     // somebody reads a variable's slot out of in a debugger and expects to see read.
     if flags.reloads {
-        copies::reloads(&mut func, &moves, machine.shapes, scratch, names);
+        copies::reloads(&mut func, &moves, machine.shapes, (int, held), names);
     }
 
     // After the allocator's moves are cleaned up, because a number written twice into one register
@@ -1323,7 +1347,7 @@ pub fn compile_recording(
 
     // After the moves are cleaned up, since that pass follows what the scratch registers hold, and
     // before the schedule, which should see the extra `add` as the instruction it is.
-    far(&mut func, machine.insts, machine.conv, scratch, names);
+    far(&mut func, machine.insts, machine.conv, held, names);
 
     // After the allocator's moves have been cleaned up, because a schedule chosen around a move
     // that is about to be taken out is a schedule built around an instruction that is not in the

@@ -317,8 +317,11 @@ pub fn itself(func: &mut Func, frame: &FrameInsts, names: &mut Interner) -> usiz
 /// in the comparison. tamnd/rucc#1994.
 ///
 /// Only a load the allocator asked for, which is what `moves` says, and only into a scratch
-/// register. Nothing lives in one of those into another block, so whether the value is wanted
-/// past the instruction is a question about the rest of the block. Only the allocator's moves
+/// register of the class `scratch` names. Nothing lives in one of those into another block, so
+/// whether the value is wanted past the instruction is a question about the rest of the block. A
+/// register the allocator handed out is not one, even where it is held back from other functions:
+/// a load into it may be a value coming back from where it waited around a call, and that value
+/// can be wanted in the next block. Only the allocator's moves
 /// into registers may stand between the load and the instruction, since none of them writes
 /// memory, and none of them may write the register the load did.
 ///
@@ -329,7 +332,7 @@ pub fn reloads(
     func: &mut Func,
     moves: &Moves,
     machine: &MachineInsts,
-    scratch: &[PhysReg],
+    scratch: (RegClass, &[PhysReg]),
     names: &mut Interner,
 ) -> usize {
     let mut done = 0;
@@ -338,10 +341,10 @@ pub fn reloads(
         for (at, &load) in insts.iter().enumerate() {
             let Some(edit) = moves.at(load) else { continue };
             let (Place::Reg(reg), Place::Slot(_)) = (edit.mov.to, edit.mov.from) else { continue };
-            if !scratch.contains(&reg) {
+            let class = edit.class;
+            if class != scratch.0 || !scratch.1.contains(&reg) {
                 continue;
             }
-            let class = edit.class;
             let Some(user) = reader(func, moves, &insts[at + 1..], class, reg) else { continue };
             if wanted(func, &insts[at + 1..], user, class, reg) {
                 continue;
@@ -1067,7 +1070,7 @@ mod tests {
     /// The pass that reads a reload in the instruction that wanted it, with the two registers
     /// x86-64 holds back.
     fn reloads(func: &mut Func, moves: &Moves, names: &mut Interner) -> usize {
-        super::reloads(func, moves, &MACHINE, &[R10, R11], names)
+        super::reloads(func, moves, &MACHINE, (GPR, &[R10, R11]), names)
     }
 
     /// A comparison of two registers, which is what the selector writes for a loop's test.
