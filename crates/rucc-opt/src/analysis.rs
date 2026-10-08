@@ -35,13 +35,14 @@
 use std::cell::OnceCell;
 use std::sync::Arc;
 
-use rucc_ir::Func;
+use rucc_ir::{Block, Func};
 
 use crate::image::Images;
 use crate::machine::Machine;
 use crate::modref::Summaries;
 use crate::outside::Outside;
-use crate::predict::Callees;
+use crate::predict::{Callees, Predictions};
+use crate::profile::Probability;
 use crate::purity::Facts;
 use crate::{
     Cfg, ControlDependence, Dominators, Frequencies, Frontiers, Liveness, Loops, PostDominators,
@@ -410,6 +411,28 @@ impl Analyses {
         self.frequencies.get_or_init(|| {
             Frequencies::of(func, self.cfg(func), self.loops(func), &Callees::nothing())
         })
+    }
+
+    /// The predicted probability of the edge at that position out of one block, the same number
+    /// [`Frequencies::taken`] gives.
+    ///
+    /// When the frequencies are not here this predicts the one branch and leaves them unbuilt, so a
+    /// pass that asks about a branch after each change it makes does not pay for a whole function's
+    /// worth of predictions and block counts each time.
+    pub fn taken(&self, func: &Func, block: Block, index: usize) -> Probability {
+        if let Some(frequencies) = self.frequencies.get() {
+            return frequencies.taken(block, index);
+        }
+        let post = || self.post_dominators(func);
+        Predictions::one(
+            func,
+            self.cfg(func),
+            self.loops(func),
+            &post,
+            &Callees::nothing(),
+            block,
+            index,
+        )
     }
 
     /// What is live at the edges of every block, computed if it is not here.
