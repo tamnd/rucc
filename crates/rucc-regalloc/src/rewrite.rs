@@ -401,9 +401,7 @@ fn borrows(func: &Func, assignment: &Assignment, env: &Env) -> bool {
             // Borrowing takes a slot off the assignment, and the answer is no as soon as one is
             // taken, so one copy serves every instruction asked about.
             let copy = copy.get_or_insert_with(|| assignment.clone());
-            let mut spare = Spare::default();
-            let _ = legalize::instruction(func, copy, env, &mut spare, inst);
-            if spare.iter().any(|slots| !slots.is_empty()) {
+            if legalize::probe(func, copy, env, &mut Spare::default(), inst) {
                 return true;
             }
         }
