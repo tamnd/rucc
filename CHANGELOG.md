@@ -7,6 +7,7 @@ All notable changes are recorded here. The format follows [Keep a Changelog](htt
 ### Changed
 
 - `cargo xtask chains` finds a let chain whose `if let` has a struct pattern, and the one of that kind in `crates/rucc-driver/src/shapes.rs` is now `matches!` with a guard, so the workspace builds with Rust 1.85 again (#3401).
+- The hasher reads the last few bytes of a key with two overlapping loads instead of copying them into a padded word, which was a call to memcpy for nearly every key it hashed. The hashes are the same numbers. On duktape.c a compile at `-O0` runs about 1.8 percent fewer instructions (#3402).
 
 ## 0.29.3
 
