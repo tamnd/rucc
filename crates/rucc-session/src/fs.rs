@@ -464,9 +464,15 @@ impl SearchPath {
 /// than in a [`FileSystem`] implementation on purpose. They are not files, they belong to
 /// every implementation of the trait equally, and the only way to reach them is through a
 /// search path entry spelled [`runtime::DIR`], which no real directory can be spelled as.
+///
+/// A path under [`runtime::DIR`] that is not a shipped header is not found, and the disk is not
+/// asked. Every `#include <...>` that ends up in the system directories walks past that entry
+/// first, so asking would be one failed open per header for a name nothing on disk can have,
+/// which on a file that includes the C library was 118 of them. tamnd/rucc#3052.
 fn open(fs: &dyn FileSystem, path: &Path) -> io::Result<SourceBytes> {
     match runtime::read(path) {
         Some(bytes) => Ok(bytes),
+        None if path.starts_with(runtime::DIR) => Err(io::ErrorKind::NotFound.into()),
         None => fs.read(path),
     }
 }
