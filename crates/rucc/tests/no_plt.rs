@@ -61,7 +61,7 @@ fn x86_64_calls_through_the_got() {
         let near = uses(&text, "near");
         assert!(near.iter().all(|line| !line.contains("GOTPCREL")), "{level}:\n{text}");
     }
-    let text = asm("x86_64-unknown-linux-gnu", "pic", &["-O2", "-fPIC", "-fno-plt"]);
+    let text = asm("x86_64-unknown-linux-gnu", "x86-64-pic", &["-O2", "-fPIC", "-fno-plt"]);
     assert!(uses(&text, "other").iter().all(|line| line.contains("GOTPCREL")), "pic:\n{text}");
 }
 
@@ -75,7 +75,7 @@ fn x86_64_calls_through_the_plt_by_default() {
 
 #[test]
 fn aarch64_calls_through_the_got_in_position_independent_code() {
-    let text = asm("aarch64-unknown-linux-gnu", "pic", &["-O2", "-fPIC", "-fno-plt"]);
+    let text = asm("aarch64-unknown-linux-gnu", "aarch64-pic", &["-O2", "-fPIC", "-fno-plt"]);
     assert!(text.contains(":got:other"), "pic:\n{text}");
     assert!(text.contains(":got_lo12:other"), "pic:\n{text}");
     assert!(text.contains("blr"), "pic:\n{text}");
