@@ -860,8 +860,14 @@ impl Walk<'_> {
         let data = &self.func[call];
         let Extra::Call(info) = data.extra else { return None };
         let callee = self.func[info].callee?;
-        let Some(SymbolRef::Func(id)) = self.module.lookup(callee) else { return None };
-        let name = self.names.resolve(self.module[id].spelled.unwrap_or(callee));
+        // The front end calls a `_chk` function that a fortified header names without declaring
+        // it, so the module has nothing for that name.
+        let spelled = match self.module.lookup(callee) {
+            Some(SymbolRef::Func(id)) => self.module[id].spelled.unwrap_or(callee),
+            None => callee,
+            Some(_) => return None,
+        };
+        let name = self.names.resolve(spelled);
         if library.iter().any(|it| it == name) {
             return None;
         }
@@ -1252,14 +1258,14 @@ block2:
     /// The dynamic spelling of a kind that asks for the largest answer, about an address every way
     /// to which starts at one fixed local or one global, is the size of that object less how far
     /// in the address is, worked out when the program runs. The walk goes through a step of any
-    /// count, a copy that gives back where it wrote and `strchr (s, 0)`, and round a loop. The
-    /// static spelling of the same question is not known. This is what gcc 16 does at `-O2`.
+    /// count, a copy that gives back where it wrote and `strchr (s, 0)`, and round a loop. The copy
+    /// here is a `_chk` call with no declaration, as the front end writes it for a fortified header.
+    /// The static spelling of the same question is not known. This is what gcc 16 does at `-O2`.
     #[test]
     fn an_address_somewhere_in_one_object_is_measured_when_the_program_runs() {
         let body = "
 global @g : bytes 32 = { zero 32 }, align 1, linkage(external)
 func @strchr(ptr, i32) -> ptr, linkage(external);
-func @strcpy(ptr, ptr) -> ptr, linkage(external);
 
 func @f(ptr, i64), linkage(external) {
 block0(%0: ptr, %1: i64):
@@ -1275,7 +1281,7 @@ block1(%3: ptr):
     %7 = call @strchr(%3, %6) : (ptr, i32) -> ptr
     %8 = iconst.i64 -1
     %9 = ptr_add %7, %8
-    %10 = call @strcpy(%9, %0) : (ptr, ptr) -> ptr
+    %10 = call @__strcpy_chk(%9, %0, %8) : (ptr, ptr, i64) -> ptr
     %11 = ptr_add %10, %1
     %12 = iconst.i64 0
     %13 = icmp ne %1, %12
