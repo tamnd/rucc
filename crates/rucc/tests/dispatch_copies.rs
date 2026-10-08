@@ -32,9 +32,12 @@ done:
 ";
 
 /// The assembly the compiler writes for the fixture for that target.
-fn assembly(target: &str) -> String {
-    let dir =
-        std::env::temp_dir().join(format!("rucc-dispatch-copies-{}-{target}", std::process::id()));
+///
+/// `what` keeps the directory of one test apart from that of another test that runs at the same
+/// time for the same target.
+fn assembly(what: &str, target: &str) -> String {
+    let dir = std::env::temp_dir()
+        .join(format!("rucc-dispatch-copies-{}-{what}-{target}", std::process::id()));
     std::fs::create_dir_all(&dir).expect("a temporary directory can be created");
     let path: PathBuf = dir.join("dispatch.c");
     std::fs::write(&path, SOURCE).expect("the fixture can be written");
@@ -71,7 +74,7 @@ fn onto_itself<'a>(asm: &'a str, mnemonic: &str) -> Vec<&'a str> {
 
 #[test]
 fn the_dispatch_on_x86_64_copies_no_register_into_itself() {
-    let asm = assembly("x86_64-unknown-linux-gnu");
+    let asm = assembly("itself", "x86_64-unknown-linux-gnu");
     assert!(asm.contains("jmp\t*"), "the fixture no longer has a computed goto:\n{asm}");
     let copies = onto_itself(&asm, "movq");
     assert!(copies.is_empty(), "{copies:?} in:\n{asm}");
@@ -79,7 +82,7 @@ fn the_dispatch_on_x86_64_copies_no_register_into_itself() {
 
 #[test]
 fn the_dispatch_on_aarch64_copies_no_register_into_itself() {
-    let asm = assembly("aarch64-unknown-linux-gnu");
+    let asm = assembly("itself", "aarch64-unknown-linux-gnu");
     assert!(has(&asm, "br"), "the fixture no longer has a computed goto:\n{asm}");
     // The whole register only. A copy of `w0` into itself clears the top half and is not nothing.
     let whole = |line: &&str| line.split_whitespace().nth(1).is_some_and(|to| to.starts_with('x'));
@@ -103,7 +106,7 @@ fn between_registers(line: &str) -> bool {
 /// in front of the jump.
 #[test]
 fn the_dispatch_on_x86_64_works_each_value_out_in_the_register_it_is_carried_in() {
-    let asm = assembly("x86_64-unknown-linux-gnu");
+    let asm = assembly("carried", "x86_64-unknown-linux-gnu");
     let handlers: Vec<&str> = asm.split("\n.Llbl.").skip(1).collect();
     assert_eq!(handlers.len(), 4, "the fixture has four handlers:\n{asm}");
     for handler in handlers {

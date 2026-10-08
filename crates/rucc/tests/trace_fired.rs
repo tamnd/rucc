@@ -80,7 +80,7 @@ fn every_pass_that_ran_is_in_the_trace_whether_it_fired_or_not() {
 
 #[test]
 fn a_pass_that_fired_says_what_it_did_and_how_many_times() {
-    let line = trace("o2", "-O2");
+    let line = trace("fired-o2", "-O2");
     let fired = fired(&line);
     assert!(
         fired.contains(
