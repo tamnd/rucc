@@ -8,22 +8,55 @@
 //! here rather than in `rucc-session` is what keeps the layer rule true: a preprocessor test
 //! is a map from path to bytes and cannot accidentally read the machine it runs on.
 
+use std::ffi::OsString;
 use std::io;
 use std::path::{Path, PathBuf};
+use std::sync::{Mutex, PoisonError};
 
+use rucc_base::hash::Map;
 use rucc_diag::{Diagnostic, Severity, SourceBytes, SourceMap};
 use rucc_pp::{Context, Dependency, Predef, Preprocessor, PrintOptions};
 use rucc_session::{FileSystem, Options, Session};
 
 /// The file system the compiler reads through when it is a compiler rather than a library.
-#[derive(Debug, Clone, Copy, Default)]
-pub struct OsFileSystem;
+///
+/// It remembers what it was told for as long as it lives, which is one run of the driver. A
+/// guarded header is still searched for every time it is included, because the guard is a fact
+/// about the file the search finds, and the search reads every path it tries. On `c4.c` that was
+/// `bits/types.h` read from the disk 18 times and `features.h` 15 times, 128 opens for 79 files,
+/// and 290 failed opens for 159 paths that were not there. So a path that was read is not read
+/// again and a path that was not there is not asked about again. Nothing in one run writes a header
+/// another part of it reads, which is what makes that safe. tamnd/rucc#3052.
+#[derive(Debug, Default)]
+pub struct OsFileSystem {
+    /// What each path read as, or the error number it was not found with.
+    ///
+    /// By the bytes of the path rather than by the path, because hashing a [`Path`] splits it
+    /// into its components first, and two spellings of one path that miss each other here are
+    /// only a second read.
+    read: Mutex<Map<OsString, Result<SourceBytes, i32>>>,
+    /// Every directory [`OsFileSystem::directory`] has resolved, by the spelling it was asked
+    /// about.
+    directories: Mutex<Map<OsString, Option<PathBuf>>>,
+}
 
 impl OsFileSystem {
-    /// The one value of this type.
+    /// A file system that has read nothing yet.
     #[must_use]
     pub fn new() -> OsFileSystem {
-        OsFileSystem
+        OsFileSystem::default()
+    }
+
+    /// A directory with its links and `..` resolved, from the disk the first time and from
+    /// memory after that.
+    fn directory(&self, dir: &Path) -> Option<PathBuf> {
+        let mut known = self.directories.lock().unwrap_or_else(PoisonError::into_inner);
+        if let Some(resolved) = known.get(dir.as_os_str()) {
+            return resolved.clone();
+        }
+        let resolved = std::fs::canonicalize(dir).ok();
+        known.insert(dir.as_os_str().to_owned(), resolved.clone());
+        resolved
     }
 }
 
@@ -33,7 +66,29 @@ impl FileSystem for OsFileSystem {
         // compiler still has to have an opinion about, and phase 1 is where that opinion
         // belongs, not here. Whether the bytes are a mapping or a buffer is `map`'s decision
         // and is invisible from here.
-        crate::map::read(path)
+        //
+        // Only a file that is not there is remembered as an error, by its number, so that the
+        // message for it the second time is the message the system gave the first time. Any
+        // other error is asked about again, since it may not be one the next time.
+        if let Some(known) =
+            self.read.lock().unwrap_or_else(PoisonError::into_inner).get(path.as_os_str())
+        {
+            return known.clone().map_err(io::Error::from_raw_os_error);
+        }
+        let read = crate::map::read(path);
+        let known = match &read {
+            Ok(bytes) => Ok(bytes.clone()),
+            Err(e) if e.kind() == io::ErrorKind::NotFound => match e.raw_os_error() {
+                Some(code) => Err(code),
+                None => return read,
+            },
+            Err(_) => return read,
+        };
+        self.read
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .insert(path.as_os_str().to_owned(), known);
+        read
     }
 
     fn identity(&self, path: &Path) -> PathBuf {
@@ -42,7 +97,26 @@ impl FileSystem for OsFileSystem {
         // to one header gives one answer. It fails only if the file is not there, and this is
         // asked about files that have just been read, so the fallback is for a file that was
         // deleted between the two calls and it does not matter what it says.
-        std::fs::canonicalize(path).unwrap_or_else(|_| rucc_session::path_key(path))
+        //
+        // The directory is resolved once and remembered, and only the last component is asked
+        // about after that. Resolving the whole path is one `readlink` per component, every
+        // header sits in one of a few directories, and on a file that includes the C library
+        // that was 577 calls, every one of them for a component that was not a link. A header
+        // that is a link itself is resolved in full. tamnd/rucc#3052.
+        let resolved = match (path.parent(), path.file_name()) {
+            (Some(dir), Some(name)) if !dir.as_os_str().is_empty() => {
+                match std::fs::symlink_metadata(path) {
+                    Ok(meta) if !meta.file_type().is_symlink() => {
+                        self.directory(dir).map(|dir| dir.join(name))
+                    }
+                    _ => None,
+                }
+            }
+            _ => None,
+        };
+        resolved
+            .or_else(|| std::fs::canonicalize(path).ok())
+            .unwrap_or_else(|| rucc_session::path_key(path))
     }
 }
 
