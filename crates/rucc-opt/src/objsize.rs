@@ -766,7 +766,7 @@ impl Walk<'_> {
     /// member is the object found, which is no smaller than any member the address is in, except
     /// where the walk passes the start of a member, which this leaves as not known.
     fn within(&self, value: Value, question: Inst, ask: Ask) -> Option<Answer> {
-        let object = self.object(value, ask, DEPTH, &mut Vec::new()).ok()??;
+        let object = self.object(value, ask, DEPTH, &mut Set::default()).ok()??;
         let size = match object {
             Object::Local(start) => {
                 let Def::Result { inst, .. } = self.func[start].def else { return None };
@@ -790,19 +790,22 @@ impl Walk<'_> {
 
     /// The object an address is in, as [`Found`] says.
     ///
-    /// `on` is the block parameters whose answer is being worked out, as in [`Walk::left`].
-    fn object(&self, value: Value, ask: Ask, depth: u32, on: &mut Vec<Value>) -> Found {
+    /// `seen` is each value the walk has been to. A value it comes to again adds nothing, since
+    /// what it found the first time is in the answer already. This is also how a loop is seen. A
+    /// walk that went to each value once for each way to it would take time that grows as a power
+    /// of the number of joins, and the interpreter loop of lua has enough of them that it did not
+    /// end.
+    fn object(&self, value: Value, ask: Ask, depth: u32, seen: &mut Set<Value>) -> Found {
         let depth = depth.checked_sub(1).ok_or(())?;
+        if !seen.insert(value) {
+            return Ok(None);
+        }
         match self.func[value].def {
             Def::Param { block, index } => {
-                if on.contains(&value) {
-                    return Ok(None);
-                }
                 let preds = self.cfg.predecessors(block);
                 if preds.is_empty() {
                     return Err(());
                 }
-                on.push(value);
                 let mut all = Ok(None);
                 for &pred in preds {
                     if !self.taken(pred, block) {
@@ -814,10 +817,13 @@ impl Walk<'_> {
                             continue;
                         }
                         let arg = *self.func[call.args].get(index as usize).ok_or(())?;
-                        all = same(all, self.object(arg, ask, depth, on));
+                        all = same(all, self.object(arg, ask, depth, seen));
+                        // One way that is not known is enough, and the rest need not be walked.
+                        if all.is_err() {
+                            return all;
+                        }
                     }
                 }
-                on.pop();
                 all
             }
             Def::Result { inst, .. } => {
@@ -826,13 +832,13 @@ impl Walk<'_> {
                 match data.opcode {
                     Opcode::Select => {
                         let (then, other) = (*args.get(1).ok_or(())?, *args.get(2).ok_or(())?);
-                        let then = self.object(then, ask, depth, on);
-                        same(then, self.object(other, ask, depth, on))
+                        let then = self.object(then, ask, depth, seen);
+                        same(then, self.object(other, ask, depth, seen))
                     }
                     Opcode::PtrAdd if ask.closest && matches!(data.extra, Extra::Member(_)) => {
                         Err(())
                     }
-                    Opcode::PtrAdd => self.object(*args.first().ok_or(())?, ask, depth, on),
+                    Opcode::PtrAdd => self.object(*args.first().ok_or(())?, ask, depth, seen),
                     Opcode::Alloca if args.is_empty() => Ok(Some(Object::Local(value))),
                     Opcode::GlobalAddr => {
                         let Extra::Symbol(name) = data.extra else { return Err(()) };
@@ -840,9 +846,9 @@ impl Walk<'_> {
                     }
                     Opcode::Load => {
                         let put = self.only_store(*args.first().ok_or(())?, inst).ok_or(())?;
-                        self.object(put, ask, depth, on)
+                        self.object(put, ask, depth, seen)
                     }
-                    Opcode::Call => self.object(self.into(inst).ok_or(())?, ask, depth, on),
+                    Opcode::Call => self.object(self.into(inst).ok_or(())?, ask, depth, seen),
                     _ => Err(()),
                 }
             }
@@ -1342,6 +1348,49 @@ block0(%0: i1, %1: i64, %2: ptr):
         assert_eq!(printed(body, Some(&[])).matches("ptrtoint").count(), 2);
         assert_eq!(printed(body, None).matches("ptrtoint").count(), 0);
         assert_eq!(printed(body, Some(&["strcpy".to_owned()])).matches("ptrtoint").count(), 0);
+    }
+
+    /// Each value is walked once. Here the address goes through seven joins with sixteen ways into
+    /// each, so a walk that went once for each way to a value would take more than two hundred
+    /// million steps. lua's interpreter loop has joins like these, and its build did not end.
+    #[test]
+    fn a_walk_through_many_joins_goes_to_each_value_once() {
+        let mut body = String::from(
+            "func @strchr(ptr, i32) -> ptr, linkage(external);\n\n\
+             func @f(i1), linkage(external) {\n\
+             block0(%0: i1):\n    %1 = alloca, size 100, align 16\n    %2 = iconst.i32 0\n    \
+             jump block1(%1)\n",
+        );
+        let mut value = 3;
+        let mut block = 1;
+        for _ in 0..7 {
+            let (address, found) = (value, value + 1);
+            value += 2;
+            let next = block + 31;
+            body += &format!("\nblock{block}(%{address}: ptr):\n");
+            body += &format!("    %{found} = call @strchr(%{address}, %2) : (ptr, i32) -> ptr\n");
+            body += &format!("    br_if %0, block{}, block{}\n", block + 16, block + 1);
+            for way in 1..15 {
+                body += &format!(
+                    "\nblock{}:\n    br_if %0, block{}, block{}\n",
+                    block + way,
+                    block + way + 16,
+                    block + way + 1
+                );
+            }
+            for way in 15..31 {
+                body += &format!("\nblock{}:\n    jump block{next}(%{found})\n", block + way);
+            }
+            block = next;
+        }
+        body += &format!(
+            "\nblock{block}(%{value}: ptr):\n    %{} = object_size.i64 %{value}, kind 5\n    \
+             call @use(%{}) : (i64)\n    return\n}}\n",
+            value + 1,
+            value + 1
+        );
+        let text = printed(&body, Some(&[]));
+        assert_eq!(text.matches("ptrtoint").count(), 2, "{text}");
     }
 
     /// An address past the end of its object has nothing left, and a global the linker may take
