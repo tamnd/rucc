@@ -719,6 +719,11 @@ fn to_all_callers(module: &Module, names: &Interner, isa: Isa) -> Set<Symbol> {
         }
     }
     let mut chosen = Set::default();
+    // The loops of each caller, built the first time one of its calls is asked about. Nothing
+    // here edits the module, and a caller that calls a dozen of these functions built its forest
+    // once for each of the calls, which on duktape.c at `-O1` was two percent of the compile.
+    // tamnd/rucc#3052.
+    let mut forests: Map<FuncId, Loops> = Map::default();
     for (name, calls) in sites {
         let id = wanted[&name];
         let callee = &module[id];
@@ -748,8 +753,10 @@ fn to_all_callers(module: &Module, names: &Interner, isa: Isa) -> Set<Symbol> {
         }
         // Counted as [`settle`] counts, so a block in one loop is one deep.
         let deep = calls.iter().any(|&(caller, block, _)| {
-            let cfg = Cfg::new(&module[caller]);
-            let loops = Loops::new(&cfg, &Dominators::new(&cfg));
+            let loops = forests.entry(caller).or_insert_with(|| {
+                let cfg = Cfg::new(&module[caller]);
+                Loops::new(&cfg, &Dominators::new(&cfg))
+            });
             let depth = loops.innermost(block).map_or(0, |inner| loops.depth(inner) + 1);
             depth > rucc_cost::param!(INLINE_CALLED_ONCE_LOOP_DEPTH)
         });
