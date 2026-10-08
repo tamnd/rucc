@@ -682,6 +682,8 @@ impl Heap<'_> {
     ) {
         let share = self.how.share;
         let mut pool = self.pools.remove(&caller).unwrap_or(Pool { on: share, ..Pool::default() });
+        // The caller may have been cleaned up since its last splice, which can take accesses out.
+        pool.highest = None;
         let mut stats = self.stats.remove(&caller).unwrap_or_default();
         let mark = module[caller].counts().insts;
         let outcome = match self.refused(module, caller, call, &weighed, &pool) {

@@ -1881,6 +1881,11 @@ struct Pool {
     site: u32,
     /// The slots so far, each with its size and the last splice that took it.
     slots: Vec<(Inst, u64, u32)>,
+    /// The largest clique the caller's accesses name, worked out at the first splice and kept up
+    /// to date by each one after it, which only adds accesses. Working it out again for each splice
+    /// walked the whole caller each time, and blake2b.c at `-O2` inlines `rotr64` into one body
+    /// close to four hundred times. Whoever edits the caller between splices empties it.
+    highest: Option<u16>,
 }
 
 impl Pool {
@@ -2496,7 +2501,8 @@ fn copy(
     let entry = func.entry().expect("a function with a call in it has a body");
     // Taken before anything of the callee's is in the caller, whose payloads until they are mapped
     // below are the callee's numbers and would be read as the caller's.
-    let past = highest_clique(func);
+    let past = *pool.highest.get_or_insert_with(|| highest_clique(func));
+    let mark = func.counts().insts;
     // Where an unwind out of the call went, and where a return from it went, when a `cleanup`
     // handler's scope gave it a pad. Read before the block is split, since the split moves the
     // branch that says so.
@@ -2736,6 +2742,12 @@ fn copy(
     crate::uses::substitute_all(func, &forward);
     func.remove_inst(call);
     func.append_inst(block, jump);
+    // What the splice took out is the call and the branch on its unwind, none of which names a
+    // clique, so the largest one now is the largest before or one of the accesses just made.
+    let added = (mark..func.counts().insts)
+        .map(Inst::from_usize)
+        .filter(|&inst| func.block_of(inst).is_some());
+    pool.highest = Some(past.max(clique_of(func, added)));
 
     // An unwind out of any of those calls passes through the call that was inlined, so it owes
     // what that call's pad does. Each one gets the edge the lowering gives a call in a handler's
@@ -2948,15 +2960,18 @@ fn rescoped(info: MemInfo, past: u16) -> MemInfo {
 
 /// The largest clique any access of `func` names, which is zero when it names none.
 fn highest_clique(func: &Func) -> u16 {
+    clique_of(func, func.blocks().flat_map(|block| func.insts(block)))
+}
+
+/// The largest clique those instructions of `func` name, which is zero when they name none.
+fn clique_of(func: &Func, insts: impl Iterator<Item = Inst>) -> u16 {
     let mut highest = 0;
-    for block in func.blocks() {
-        for inst in func.insts(block) {
-            let mem = match func[inst].extra {
-                Extra::Mem(mem) | Extra::Rmw(_, mem) => mem,
-                _ => continue,
-            };
-            highest = highest.max(func[mem].restrict.clique);
-        }
+    for inst in insts {
+        let mem = match func[inst].extra {
+            Extra::Mem(mem) | Extra::Rmw(_, mem) => mem,
+            _ => continue,
+        };
+        highest = highest.max(func[mem].restrict.clique);
     }
     highest
 }
