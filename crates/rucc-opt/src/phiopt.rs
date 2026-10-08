@@ -495,7 +495,7 @@ impl Pass for PhiOpt {
                 // because `Cfg::successors` is in the order the terminator names its targets. Which
                 // of the two is asked about does not matter, since the question is whether the
                 // number is near even and the other edge is its complement.
-                if !unpredictable(an.frequencies(func).taken(head, 0)) {
+                if !unpredictable(an.taken(func, head, 0)) {
                     stats.missed(BRANCH_IS_PREDICTED);
                     unjoin(func, an, joined);
                     continue;

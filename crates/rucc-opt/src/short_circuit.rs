@@ -265,7 +265,7 @@ impl Pass for ShortCircuit {
                         // The first edge out of the head. Which of the two is asked about does not
                         // matter, since the question is whether the number is near even and the
                         // other edge is its complement.
-                        if !unpredictable(an.frequencies(func).taken(head, 0)) {
+                        if !unpredictable(an.taken(func, head, 0)) {
                             stats.missed(BRANCH_IS_PREDICTED);
                             continue 'heads;
                         }

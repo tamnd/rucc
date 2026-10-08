@@ -9,6 +9,7 @@ All notable changes are recorded here. The format follows [Keep a Changelog](htt
 - `cargo xtask chains` finds a let chain whose `if let` has a struct pattern, and the one of that kind in `crates/rucc-driver/src/shapes.rs` is now `matches!` with a guard, so the workspace builds with Rust 1.85 again (#3401).
 - The hasher reads the last few bytes of a key with two overlapping loads instead of copying them into a padded word, which was a call to memcpy for nearly every key it hashed. The hashes are the same numbers. On duktape.c a compile at `-O0` runs about 1.8 percent fewer instructions (#3402).
 - The driver asks glibc to keep the memory a compile frees on the heap, blocks of up to 32 MiB and 32 MiB of slack at the top, where each block of 128 KiB or more was its own mapping and every growth of a large table faulted its pages in from zero. On duktape.c at `-O0` page faults go from 30798 to 22664 and kernel cycles from 484M to 376M (#3403).
+- Phiopt and short-circuit predict the one branch they ask about instead of building the block frequencies of the whole function again after each change, and the early return predictor walks the post-dominator tree from the blocks it asks about instead of binding every block. On lz4hc.c at `-O2` the compile runs 12.4 percent fewer instructions (#3404).
 
 ## 0.29.3
 

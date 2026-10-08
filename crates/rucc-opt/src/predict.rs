@@ -58,6 +58,8 @@
 //! part, which is the branch whose arm returns and not the branches inside that arm, and two arms
 //! that each reach a marked `return` of their own cancel out.
 
+use std::cell::OnceCell;
+
 use rucc_base::Symbol;
 use rucc_base::hash::Map;
 use rucc_cost::heuristics::{
@@ -245,13 +247,17 @@ impl Predictions {
         let mut edges: Vec<Vec<Probability>> = vec![Vec::new(); width];
         let mut by = vec![Predictor::Nothing; width];
         let returns = returning(func, cfg);
-        let early = Early::of(func, cfg);
+        // Built the first time a branch gets as far as the early return predictor, which is the
+        // only one that can need a post-dominator tree.
+        let early = OnceCell::new();
+        let ends =
+            |at: Block, from: Block| early.get_or_init(|| Early::of(func, cfg)).ends(at, from);
 
         for block in func.blocks() {
             let Some(term) = func.terminator(block) else { continue };
             let succs = cfg.successors(block);
             if succs.len() == 2 && func[term].opcode == Opcode::BrIf {
-                let (taken, who) = branch(func, cfg, loops, callees, &returns, &early, block);
+                let (taken, who) = branch(func, cfg, loops, callees, &returns, &ends, block);
                 edges[block.index()] = vec![taken, taken.complement()];
                 by[block.index()] = who;
                 continue;
@@ -262,6 +268,42 @@ impl Predictions {
         }
 
         Self { edges, by }
+    }
+
+    /// The probability of the edge at that position out of one block, which is what
+    /// [`Predictions::of`] would say about it, without predicting every other branch as well.
+    ///
+    /// For a pass that asks about one branch, changes the function and asks about the next. Asking
+    /// [`Predictions::of`] after each change predicted the whole function each time, and on
+    /// lz4hc.c at `-O2` that was a fifth of the compile, from phiopt and short-circuit alone. The
+    /// post-dominator tree is asked for only when the branch gets as far as the early return
+    /// predictor and a `return` is marked, so a caller that keeps one hands over the one it has.
+    #[must_use]
+    pub fn one<'a>(
+        func: &Func,
+        cfg: &Cfg,
+        loops: &Loops,
+        post: &dyn Fn() -> &'a PostDominators,
+        callees: &Callees,
+        block: Block,
+        index: usize,
+    ) -> Probability {
+        let Some(term) = func.terminator(block) else { return Probability::never() };
+        let returns = returning(func, cfg);
+        let succs = cfg.successors(block);
+        let edges = if succs.len() == 2 && func[term].opcode == Opcode::BrIf {
+            let any = OnceCell::new();
+            let ends = |at: Block, from: Block| {
+                *any.get_or_init(|| cfg.postorder().iter().any(|&block| marked(func, block)))
+                    && Early::bound(func, cfg, post(), at)
+                        .is_some_and(|ret| Early::bound(func, cfg, post(), from) != Some(ret))
+            };
+            let (taken, _) = branch(func, cfg, loops, callees, &returns, &ends, block);
+            vec![taken, taken.complement()]
+        } else {
+            share(func, cfg, callees, &returns, block, term).0
+        };
+        edges.get(index).copied().unwrap_or_else(Probability::never)
     }
 
     /// The probability of each edge out of this block, in [`Cfg::successors`] order.
@@ -302,7 +344,7 @@ fn branch(
     loops: &Loops,
     callees: &Callees,
     returns: &[bool],
-    early: &Early,
+    ends: &dyn Fn(Block, Block) -> bool,
     block: Block,
 ) -> (Probability, Predictor) {
     let succs = cfg.successors(block);
@@ -382,7 +424,7 @@ fn branch(
         );
     }
 
-    let ends = |at: Block| early.ends(at, block);
+    let ends = |at: Block| ends(at, block);
     if ends(first) != ends(second) {
         return (
             toward(!ends(first), rucc_cost::param!(PREDICT_EARLY_RETURN)),
@@ -391,6 +433,13 @@ fn branch(
     }
 
     (Probability::even(), Predictor::Nothing)
+}
+
+/// Whether the block ends in a `return` the front end marked [`Flags::EARLY`].
+fn marked(func: &Func, block: Block) -> bool {
+    func.terminator(block).is_some_and(|term| {
+        func[term].opcode == Opcode::Return && func[term].flags.contains(Flags::EARLY)
+    })
 }
 
 /// The `return` marked [`Flags::EARLY`] that every path from each block reaches, which is what the
@@ -408,11 +457,7 @@ struct Early {
 impl Early {
     /// Binds every block, or none when no `return` is marked, which costs no post-dominator tree.
     fn of(func: &Func, cfg: &Cfg) -> Self {
-        let marked = |block: Block| {
-            func.terminator(block).is_some_and(|term| {
-                func[term].opcode == Opcode::Return && func[term].flags.contains(Flags::EARLY)
-            })
-        };
+        let marked = |block: Block| marked(func, block);
         let mut bound = vec![None; cfg.capacity()];
         if !cfg.postorder().iter().any(|&block| marked(block)) {
             return Self { bound };
@@ -438,6 +483,19 @@ impl Early {
             }
         }
         Self { bound }
+    }
+
+    /// The marked `return` one block is bound to, found by walking up the tree from it, which is
+    /// what [`Early::of`] works out for that block without working it out for every other.
+    fn bound(func: &Func, cfg: &Cfg, pdoms: &PostDominators, block: Block) -> Option<Block> {
+        if !cfg.reaches(block) {
+            return None;
+        }
+        let mut at = block;
+        while let Some(up) = pdoms.immediate_post_dominator(at) {
+            at = up;
+        }
+        marked(func, at).then_some(at)
     }
 
     /// Whether the edge from `from` to `at` enters the part of the function a marked `return`
@@ -753,7 +811,7 @@ mod tests {
 
     use super::{Callees, Predictions, Predictor};
     use crate::cfg::Cfg;
-    use crate::dom::Dominators;
+    use crate::dom::{Dominators, PostDominators};
     use crate::loops::Loops;
     use crate::profile::{Probability, Quality};
 
@@ -765,10 +823,20 @@ mod tests {
         (cfg, loops)
     }
 
-    /// Predicts with nothing known about any callee, which is what a function pass has.
+    /// Predicts with nothing known about any callee, which is what a function pass has, and checks
+    /// on every shape a test builds that asking about one branch gives what predicting them all does.
     fn predict(func: &Func) -> (Predictions, Cfg) {
         let (cfg, loops) = shape(func);
         let seen = Predictions::of(func, &cfg, &loops, &Callees::nothing());
+        for block in func.blocks() {
+            for index in 0..=cfg.successors(block).len() {
+                let post = std::cell::OnceCell::new();
+                let post = || post.get_or_init(|| PostDominators::new(&cfg));
+                let one =
+                    Predictions::one(func, &cfg, &loops, &post, &Callees::nothing(), block, index);
+                assert_eq!(one, seen.taken(block, index), "{block:?} edge {index}");
+            }
+        }
         (seen, cfg)
     }
 
