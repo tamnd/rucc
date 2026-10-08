@@ -113,6 +113,37 @@ pub fn instruction(
     spare: &mut Spare,
     inst: Inst,
 ) -> Legal {
+    legalize(func, assignment, env, spare, inst, false)
+}
+
+/// Whether [`instruction`] would borrow a register at `inst`, which is whether it takes a slot for
+/// one off `spare`.
+///
+/// It asks the same code rather than a second count of the same thing, and differs only where
+/// there is nothing to borrow. [`instruction`] panics there, and this answers yes, since an
+/// instruction that wants a register its class has not got wants one all the same. The question
+/// is asked of a class that holds one register back, by [`crate::rewrite::fits`], which then
+/// allocates the function with two held back, and there it may well find a register free.
+pub(crate) fn probe(
+    func: &Func,
+    assignment: &mut Assignment,
+    env: &Env,
+    spare: &mut Spare,
+    inst: Inst,
+) -> bool {
+    let _ = legalize(func, assignment, env, spare, inst, true);
+    spare.iter().any(|slots| !slots.is_empty())
+}
+
+/// [`instruction`], and [`probe`] where `probing` is set.
+fn legalize(
+    func: &Func,
+    assignment: &mut Assignment,
+    env: &Env,
+    spare: &mut Spare,
+    inst: Inst,
+    probing: bool,
+) -> Legal {
     let list = func[inst].operands;
     let mut operands: Vec<Operand> = func[list].to_vec();
     let mut before = Moves::new();
@@ -147,6 +178,7 @@ pub fn instruction(
         }
     }
     let mut scratch = Scratch::new(env, assignment, spare, claimed);
+    scratch.probing = probing;
 
     // The operands already in a register go first, so every move that reads a register the
     // assignment gave out is made before any value is read in off the stack. That is what lets a
@@ -463,6 +495,8 @@ struct Scratch<'a> {
     saves: Moves,
     /// The moves that bring it back, which go behind everything else.
     restores: Moves,
+    /// Whether this is [`probe`], which is told that a class with nothing to borrow borrowed.
+    probing: bool,
 }
 
 impl<'a> Scratch<'a> {
@@ -481,6 +515,7 @@ impl<'a> Scratch<'a> {
             borrowed: Vec::new(),
             saves: Vec::new(),
             restores: Vec::new(),
+            probing: false,
         }
     }
 
@@ -508,15 +543,24 @@ impl<'a> Scratch<'a> {
     /// # Panics
     ///
     /// Panics if the class has no register the instruction has not already claimed, which is an
-    /// instruction naming every register of a file at once.
+    /// instruction naming every register of a file at once. A probe is given a register the
+    /// instruction holds instead, since what it wants to know is only that a slot was taken, and
+    /// panics only on a class with no registers at all.
     fn borrow(&mut self, class: RegClass) -> PhysReg {
         let index = usize::from(class.number());
         let order = self.env.order(class);
-        let at = *order
+        let free = order
             .iter()
             .find(|&&reg| !self.claimed.names(class, reg))
-            .or_else(|| order.iter().find(|&&reg| self.claimed.passes_through(class, reg)))
-            .expect("an instruction naming every register of its class at once");
+            .or_else(|| order.iter().find(|&&reg| self.claimed.passes_through(class, reg)));
+        let at = *match free {
+            Some(reg) => reg,
+            None if self.probing => order
+                .first()
+                .or_else(|| self.env.scratch(class).first())
+                .expect("a class with no registers in it"),
+            None => panic!("an instruction naming every register of its class at once"),
+        };
 
         if self.borrowed.len() <= index {
             self.borrowed.resize(index + 1, 0);

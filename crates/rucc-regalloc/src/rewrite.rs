@@ -52,7 +52,7 @@
 //! temporary is a fact only this crate has.
 
 use rucc_base::hash::Map;
-use rucc_mir::{Block, Func, Inst, Param, Reg};
+use rucc_mir::{Block, Constraint, Func, Inst, Param, Reg};
 use rucc_target::RegClass;
 
 use crate::assign::{Assignment, Env, Place};
@@ -263,7 +263,8 @@ fn edge(assignment: &Assignment, env: &Env, params: &[Param], args: &[Reg], at: 
             .collect();
         let scratch = env.scratch(class);
         let cycle = scratch.first().map(|&reg| Place::Reg(reg));
-        for mov in moves::sequence(&parallel, cycle) {
+        let order = moves::sequence(&parallel, cycle);
+        for (index, mov) in order.iter().enumerate() {
             let (Some(to), Some(from)) = (mov.to, mov.from) else {
                 panic!(
                     "a class whose values go round in a cycle on an edge and which has no scratch \
@@ -274,11 +275,14 @@ fn edge(assignment: &Assignment, env: &Env, params: &[Param], args: &[Reg], at: 
             match (mov.to, mov.from) {
                 // No machine here moves one piece of memory into another, so the value goes
                 // through a register, and it is a second scratch rather than the one the ordering
-                // above may be holding a value in for the length of a cycle.
+                // above may be holding a value in for the length of a cycle. A class that holds
+                // only one back uses that one where no cycle is holding it, and [`fits`] said it
+                // never is here.
                 (Place::Slot(_), Place::Slot(_)) => {
-                    let through = Place::Reg(*scratch.get(1).expect(
-                        "a class passing a spilled value to a spilled parameter and having only \
-                         one scratch register",
+                    let free = || scratch.first().filter(|_| !busy(&order, index, cycle));
+                    let through = Place::Reg(*scratch.get(1).or_else(free).expect(
+                        "a class passing a spilled value to a spilled parameter while its one \
+                         scratch register breaks a cycle",
                     ));
                     edits.push(Edit { at, mov: Move::new(through, mov.from), class });
                     edits.push(Edit { at, mov: Move::new(mov.to, through), class });
@@ -293,15 +297,24 @@ fn edge(assignment: &Assignment, env: &Env, params: &[Param], args: &[Reg], at: 
 /// Whether the rewrite can write an assignment down with no more than the scratch registers `env`
 /// holds back.
 ///
-/// Only a class that holds none back can fail. A value of that class on the stack has nowhere to
-/// be read into at an instruction that wants it, and an edge whose moves of that class go round in
-/// a cycle has nowhere to keep one value while the others move. Those are the only two things the
-/// rewrite takes a scratch register for, so an assignment with neither is one it never asks for one
-/// in. A slot a value waits in around a call is not either of them, since the value is in its
-/// register on both sides and the moves are between that register and the slot.
+/// Only a class that holds fewer than two back can fail. A value of a class that holds none back
+/// on the stack has nowhere to be read into at an instruction that wants it, and an edge whose
+/// moves of that class go round in a cycle has nowhere to keep one value while the others move.
+/// Those are the only two things the rewrite takes a scratch register for, so an assignment with
+/// neither is one it never asks for one in. A slot a value waits in around a call is not either of
+/// them, since the value is in its register on both sides and the moves are between that register
+/// and the slot.
+///
+/// A class that holds one back has somewhere for all of that, and runs out at the two places that
+/// want a second. One is an instruction that wants two at once, which [`legalize`] would answer by
+/// borrowing a register and putting what was in it away around the instruction. That is two memory
+/// accesses where the class that holds two back has a register free, so it counts as not fitting.
+/// The other is an edge passing a spilled value to a spilled parameter while the one register is
+/// keeping a value of a cycle.
 #[must_use]
 pub fn fits(func: &Func, assignment: &Assignment, env: &Env) -> bool {
     let bare = |class: RegClass| env.scratch(class).is_empty();
+    let short = |class: RegClass| env.scratch(class).len() < 2;
     let slots = assignment.slots();
     let stacked = assignment.placed().any(|(_, at)| match at {
         Place::Slot(slot) => usize::try_from(slot)
@@ -317,12 +330,14 @@ pub fn fits(func: &Func, assignment: &Assignment, env: &Env) -> bool {
         for call in &func[block].succs {
             let params = &func[call.block].params;
             let mut classes: Vec<RegClass> =
-                params.iter().map(|param| param.class).filter(|&class| bare(class)).collect();
+                params.iter().map(|param| param.class).filter(|&class| short(class)).collect();
             classes.sort_unstable();
             classes.dedup();
             for class in classes {
-                // The ordering is given a place that is not one to break a cycle with, so a move
-                // out of it in what comes back is where it would have taken a scratch register.
+                // A class with nothing held back is given a place that is not one to break a cycle
+                // with, so a move out of it in what comes back is where it would have taken a
+                // scratch register.
+                let cycle = env.scratch(class).first().map(|&reg| Place::Reg(reg));
                 let parallel: Vec<Move<Option<Place>>> = params
                     .iter()
                     .zip(&call.args)
@@ -331,13 +346,67 @@ pub fn fits(func: &Func, assignment: &Assignment, env: &Env) -> bool {
                         Move::new(Some(place(assignment, param.reg)), Some(place(assignment, arg)))
                     })
                     .collect();
-                if moves::sequence(&parallel, None).iter().any(|mov| mov.from.is_none()) {
+                let order = moves::sequence(&parallel, cycle);
+                let wanting = |(index, mov): (usize, &Move<Option<Place>>)| match (mov.to, mov.from)
+                {
+                    (_, None) => true,
+                    (Some(Place::Slot(_)), Some(Place::Slot(_))) => busy(&order, index, cycle),
+                    _ => false,
+                };
+                if order.iter().enumerate().any(wanting) {
                     return false;
                 }
             }
         }
     }
-    true
+    !borrows(func, assignment, env)
+}
+
+/// Whether the place an edge's moves break cycles with holds a value at that move of their order,
+/// which it does from the move that fills it to the last one that reads it.
+fn busy(order: &[Move<Option<Place>>], index: usize, cycle: Option<Place>) -> bool {
+    order[..index].iter().any(|mov| mov.to == cycle)
+        && order[index..].iter().any(|mov| mov.from == cycle)
+}
+
+/// Whether some instruction would borrow a register of a class that holds only one back.
+///
+/// Asked of [`legalize`] itself rather than worked out again here, since how many registers an
+/// instruction wants turns on which operands it names and which one its answer is written over,
+/// and a second count of that would be free to disagree with the first. Only an instruction that
+/// could want two is asked, which is one with two operands of such a class on the stack, or one on
+/// the stack and a register of the class named outright, which the one held back may be.
+fn borrows(func: &Func, assignment: &Assignment, env: &Env) -> bool {
+    let short = |class: RegClass| env.scratch(class).len() == 1;
+    if !assignment.slots().iter().any(|&class| short(class)) {
+        return false;
+    }
+    let mut copy: Option<Assignment> = None;
+    for block in func.blocks() {
+        for inst in func.insts(block) {
+            let operands = &func[func[inst].operands];
+            let stacked = operands
+                .iter()
+                .filter(|operand| short(operand.class))
+                .filter(|operand| matches!(place(assignment, operand.reg), Place::Slot(_)))
+                .count();
+            let named = operands.iter().any(|operand| {
+                short(operand.class)
+                    && (operand.reg.phys().is_some()
+                        || matches!(operand.constraint, Constraint::Fixed(_)))
+            });
+            if stacked == 0 || (stacked == 1 && !named) {
+                continue;
+            }
+            // Borrowing takes a slot off the assignment, and the answer is no as soon as one is
+            // taken, so one copy serves every instruction asked about.
+            let copy = copy.get_or_insert_with(|| assignment.clone());
+            if legalize::probe(func, copy, env, &mut Spare::default(), inst) {
+                return true;
+            }
+        }
+    }
+    false
 }
 
 /// How many edges arrive in each block.
@@ -831,6 +900,64 @@ mod tests {
                 "end of 0: slot1 = rdx",
             ]
         );
+    }
+
+    /// A class that holds one register back hands a spilled value to a spilled parameter through
+    /// it, since nothing on that edge goes round in a cycle and the register is free.
+    #[test]
+    fn a_spilled_value_handed_to_a_spilled_parameter_goes_through_the_one_scratch_register() {
+        let mut names = Interner::new();
+        let mut func = Func::new(names.intern("f"));
+        let opcode = Opcode::new(names.intern("x64.nop"));
+        let head = func.create_block();
+        let body = func.create_block();
+        let first = func.new_vreg(GPR);
+        let second = func.new_vreg(GPR);
+        func.build(head, opcode).def(first, GPR).finish();
+        func.build(head, opcode).def(second, GPR).finish();
+        let left = func.append_param(body, GPR);
+        let right = func.append_param(body, GPR);
+        *func.succs_mut(head) = vec![BlockCall::with(body, vec![first, second])];
+        func.build(body, opcode).uses(left, GPR).uses(right, GPR).finish();
+
+        let one = Env::new().with(GPR, &SYSV.int_order[..1], &SYSV.int_order[1..2]);
+        let order = Order::of(&func);
+        let live = Live::of(&func, &order);
+        assert!(fits(&func, &assign(&func, &order, &live, &one), &one));
+        assert_eq!(
+            run(&mut func, &one),
+            [
+                "after 1: slot0 = rcx",
+                "before 2: rcx = slot1",
+                "end of 0: rcx = slot0",
+                "end of 0: slot1 = rcx",
+            ]
+        );
+    }
+
+    /// Two spilled values read by one instruction want two registers, and a class that holds one
+    /// back would have to borrow the second, so the assignment does not fit.
+    #[test]
+    fn an_instruction_reading_two_spilled_values_does_not_fit_one_scratch_register() {
+        let mut names = Interner::new();
+        let mut func = Func::new(names.intern("f"));
+        let opcode = Opcode::new(names.intern("x64.nop"));
+        let block = func.create_block();
+        let values = [(); 3].map(|()| func.new_vreg(GPR));
+        for value in values {
+            func.build(block, opcode).def(value, GPR).finish();
+        }
+        func.build(block, opcode)
+            .uses(values[0], GPR)
+            .uses(values[1], GPR)
+            .uses(values[2], GPR)
+            .finish();
+
+        let order = Order::of(&func);
+        let live = Live::of(&func, &order);
+        let one = Env::new().with(GPR, &SYSV.int_order[..1], &SYSV.int_order[1..2]);
+        assert!(!fits(&func, &assign(&func, &order, &live, &one), &one));
+        assert!(fits(&func, &assign(&func, &order, &live, &narrow(1)), &narrow(1)));
     }
 
     /// Three values read and none written wants a third register, which is tamnd/rucc#913.
