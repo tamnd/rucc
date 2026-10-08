@@ -34,7 +34,7 @@ pub fn trap(
     if !shapes.calls(names.resolve(func[inst].opcode.name())) {
         return;
     }
-    let trap = mir::Opcode::new(names.intern(&format!("{}{}", selector.prefix(), selector.trap)));
+    let trap = mir::Opcode::new(names.join(selector.prefix(), selector.trap));
     let span = func.span(inst);
     let stop = func.build_loose(trap).at(span).finish();
     func.insert_after(inst, stop);

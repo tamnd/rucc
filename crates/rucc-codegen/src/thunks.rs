@@ -49,8 +49,7 @@ pub fn harden(func: &mut mir::Func, insts: &FrameInsts, asked: Speculation, name
     if !asked.any() {
         return;
     }
-    let mut opcode =
-        |name: &str| mir::Opcode::new(names.intern(&format!("{}{name}", insts.prefix)));
+    let mut opcode = |name: &'static str| mir::Opcode::new(names.join(insts.prefix, name));
     let ret = opcode(insts.ret);
     let away = insts.away.map(&mut opcode);
     let call_through = opcode(thunks.call_through);
@@ -100,7 +99,7 @@ pub fn harden(func: &mut mir::Func, insts: &FrameInsts, asked: Speculation, name
                     (false, false) => jump,
                     (false, true) => jump_padded,
                 };
-                func[inst].symbol = Some(names.intern(&format!("{}{name}", thunks.indirect)));
+                func[inst].symbol = Some(names.join(thunks.indirect, name));
             }
             !calls && asked.after_jump
         } else {

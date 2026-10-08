@@ -53,8 +53,7 @@ pub fn fold(
     names: &mut Interner,
 ) -> usize {
     let Some(through) = insts.through else { return 0 };
-    let mut opcode =
-        |name: &str| mir::Opcode::new(names.intern(&format!("{}{name}", insts.prefix)));
+    let mut opcode = |name: &'static str| mir::Opcode::new(names.join(insts.prefix, name));
     let load = opcode(through.load);
     let pop = opcode(insts.pop);
     let (call, call_mem) = (opcode(through.call.0), opcode(through.call.1));

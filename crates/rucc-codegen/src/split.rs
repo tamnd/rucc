@@ -164,7 +164,7 @@ pub fn indirect(
     flags: &FlagInsts,
     names: &mut Interner,
 ) -> usize {
-    let jump = mir::Opcode::new(names.intern(&format!("{}{}", branch.prefix, branch.indirect)));
+    let jump = mir::Opcode::new(names.join(branch.prefix, branch.indirect));
     let branches: Vec<mir::Block> = func
         .blocks()
         .filter(|&block| func.terminator(block).is_some_and(|last| func[last].opcode == jump))
@@ -265,16 +265,15 @@ pub fn indirect(
                 continue;
             }
             let name = frame.moves(class).expect("a class this machine can move").mov;
-            let opcode = mir::Opcode::new(names.intern(&format!("{}{name}", frame.prefix)));
+            let opcode = mir::Opcode::new(names.join(frame.prefix, name));
             let inst = func.build_loose(opcode).def(home, class).uses(arg, class).finish();
             func.insert_before(last, inst);
             made.push((*branch, inst));
         }
     }
     rename(func, &renamed);
-    let lea = mir::Opcode::new(names.intern(&format!("{}{}", frame.prefix, frame.lea)));
-    let mut opcode =
-        |name: &str| mir::Opcode::new(names.intern(&format!("{}{name}", short.prefix)));
+    let lea = mir::Opcode::new(names.join(frame.prefix, frame.lea));
+    let mut opcode = |name: &'static str| mir::Opcode::new(names.join(short.prefix, name));
     let spreads = short
         .spreading
         .iter()
@@ -321,7 +320,7 @@ pub fn after_calls(
     names: &mut Interner,
 ) -> usize {
     let Some(name) = landing else { return 0 };
-    let opcode = mir::Opcode::new(names.intern(&format!("{}{name}", frame.prefix)));
+    let opcode = mir::Opcode::new(names.join(frame.prefix, name));
     let calls: Vec<mir::Inst> = func
         .blocks()
         .flat_map(|block| func.insts(block))
@@ -354,7 +353,7 @@ pub fn pads(
     names: &mut Interner,
 ) -> usize {
     let Some(name) = landing else { return 0 };
-    let opcode = mir::Opcode::new(names.intern(&format!("{}{name}", frame.prefix)));
+    let opcode = mir::Opcode::new(names.join(frame.prefix, name));
     let mut addressed: Vec<mir::Block> = Vec::new();
     for block in func.blocks() {
         for inst in func.insts(block) {

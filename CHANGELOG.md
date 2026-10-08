@@ -68,6 +68,7 @@ This release ends S5 (#431), the full plane set of the safe memory work. The typ
 - Rule tries answer a node with no head branch or with one without building a key and searching, which saves a little on every rewrite walk (#3371)
 - Build the table of fusable comparisons once per function instead of five times. Duktape compiles 4.8% faster at -O1 and 1.5% at -O2, with byte-identical output (#3375)
 - Read what the register allocators ask of a function once per function rather than once per try. Duktape compiles 6.8% faster at -O1 and 2.7% at -O2, with byte-identical output (#3376)
+- Intern the back end's machine opcode names by where their two static halves are, so a name is built and hashed once per compilation rather than once per use. Duktape compiles 1.9% faster at -O1, with byte-identical output (#3381)
 
 ### Fixed
 

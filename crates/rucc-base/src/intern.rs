@@ -143,6 +143,10 @@ pub struct Interner {
     /// is the same symbol. Kept apart from `map` because two spellings that are not text can
     /// read the same lossily and still have to be told apart.
     raw_map: Map<Box<[u8]>, Symbol>,
+    /// What [`Interner::join`] made of two spellings, keyed by where each of them is and how long
+    /// it is. Both are `'static`, so the place says what is there for as long as the program runs,
+    /// and a place is cheaper to hash than the text it holds.
+    joined: Map<[usize; 4], Symbol>,
 }
 
 impl Default for Interner {
@@ -166,6 +170,7 @@ impl Interner {
             map: Map::with_capacity_and_hasher(cap, Default::default()),
             raw: Map::default(),
             raw_map: Map::default(),
+            joined: Map::default(),
         };
         for name in RESERVED {
             interner.intern(name);
@@ -188,6 +193,25 @@ impl Interner {
         let sym = Symbol(Idx::from_usize(self.spans.len()));
         self.spans.push((start, end));
         self.map.insert(s.into(), sym);
+        sym
+    }
+
+    /// Interns `prefix` followed by `name`, returning the existing symbol if it has been seen.
+    ///
+    /// The same answer as interning the two written together, without writing them together
+    /// after the first time. The back end asks this for each machine opcode it puts in each
+    /// function, which is the target's prefix in front of a name out of one of its tables, and
+    /// both halves are the same few hundred static strings every time.
+    pub fn join(&mut self, prefix: &'static str, name: &'static str) -> Symbol {
+        let key = [prefix.as_ptr().addr(), prefix.len(), name.as_ptr().addr(), name.len()];
+        if let Some(&sym) = self.joined.get(&key) {
+            return sym;
+        }
+        let mut spelling = String::with_capacity(prefix.len() + name.len());
+        spelling.push_str(prefix);
+        spelling.push_str(name);
+        let sym = self.intern(&spelling);
+        self.joined.insert(key, sym);
         sym
     }
 
@@ -373,6 +397,18 @@ mod tests {
         let text = i.intern("hello");
         assert_eq!(i.intern_bytes(b"hello"), text);
         assert_eq!(i.resolve_bytes(text), b"hello");
+    }
+
+    #[test]
+    fn a_joined_spelling_is_the_symbol_of_the_two_written_together() {
+        let mut i = Interner::new();
+        let whole = i.intern("x64.mov_rr_64");
+        assert_eq!(i.join("x64.", "mov_rr_64"), whole);
+        assert_eq!(i.join("x64.", "mov_rr_64"), whole);
+        // The same text from two places is still the one symbol.
+        let (prefix, name) = "x64.mov_rr_64".split_at(4);
+        assert_eq!(i.join(prefix, name), whole);
+        assert_ne!(i.join("x64.", "mov_rr_32"), whole);
     }
 
     #[test]

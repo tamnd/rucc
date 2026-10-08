@@ -452,7 +452,7 @@ pub fn far(
     names: &mut Interner,
 ) {
     let Some(reaches) = insts.reaches else { return };
-    let lea = Opcode::new(names.intern(&format!("{}{}", insts.prefix, insts.lea)));
+    let lea = Opcode::new(names.join(insts.prefix, insts.lea));
     let frame = [conv.stack_pointer, conv.frame_pointer];
     let all: Vec<Inst> = func.blocks().flat_map(|block| func.insts(block)).collect();
     for inst in all {
@@ -516,8 +516,8 @@ pub fn far(
         };
         let class = conv.int_class;
         if saved {
-            let push = Opcode::new(names.intern(&format!("{}{}", insts.prefix, insts.push)));
-            let pop = Opcode::new(names.intern(&format!("{}{}", insts.prefix, insts.pop)));
+            let push = Opcode::new(names.join(insts.prefix, insts.push));
+            let pop = Opcode::new(names.join(insts.prefix, insts.pop));
             let push = func.build_loose(push).uses(Reg::physical(into), class).finish();
             func.insert_before(inst, push);
             let pop = func.build_loose(pop).def(Reg::physical(into), class).finish();
@@ -1117,9 +1117,7 @@ impl Writer<'_> {
             .finish();
         self.func.append_inst(body, inst);
         self.loops.push(inst);
-        let cond = Opcode::new(
-            self.names.intern(&format!("{}{}", probing.branch.prefix, probing.branch.cond)),
-        );
+        let cond = Opcode::new(self.names.join(probing.branch.prefix, probing.branch.cond));
         let inst = self.func.build_loose(cond).uses(Reg::physical(byte), class).finish();
         self.func.append_inst(body, inst);
         // The first arm is the one taken when the condition held, and the condition is that the
@@ -1231,9 +1229,7 @@ impl Writer<'_> {
             .finish();
         self.func.append_inst(question, inst);
         self.loops.push(inst);
-        let cond = Opcode::new(
-            self.names.intern(&format!("{}{}", probing.branch.prefix, probing.branch.cond)),
-        );
+        let cond = Opcode::new(self.names.join(probing.branch.prefix, probing.branch.cond));
         let inst = self.func.build_loose(cond).uses(Reg::physical(flag), class).finish();
         self.func.append_inst(question, inst);
         // The first arm is the one taken when the condition held, and the condition is that a whole
@@ -1298,9 +1294,7 @@ impl Writer<'_> {
 
         let failed = self.func.create_block();
         let ok = self.func.create_block();
-        let cond = Opcode::new(
-            self.names.intern(&format!("{}{}", protect.branch.prefix, protect.branch.cond)),
-        );
+        let cond = Opcode::new(self.names.join(protect.branch.prefix, protect.branch.cond));
         let inst = self.func.build_loose(cond).uses(Reg::physical(theirs), class).finish();
         self.func.append_inst(block, inst);
         // The first arm is the one taken when the condition held, and the condition is that the
@@ -1654,7 +1648,7 @@ impl Writer<'_> {
     }
 
     /// Reads a register out of the frame with that load.
-    fn load_as(&mut self, load: &str, class: RegClass, reg: PhysReg, at: i32) -> Inst {
+    fn load_as(&mut self, load: &'static str, class: RegClass, reg: PhysReg, at: i32) -> Inst {
         let load = self.opcode(load);
         let base = Operand::read(Reg::physical(self.base), self.conv.int_class);
         self.func
@@ -1691,7 +1685,7 @@ impl Writer<'_> {
     }
 
     /// Writes a register into the frame with that store.
-    fn store_as(&mut self, store: &str, class: RegClass, reg: PhysReg, at: i32) -> Inst {
+    fn store_as(&mut self, store: &'static str, class: RegClass, reg: PhysReg, at: i32) -> Inst {
         let store = self.opcode(store);
         let base = Operand::read(Reg::physical(self.base), self.conv.int_class);
         self.func
@@ -1808,8 +1802,8 @@ impl Writer<'_> {
 
     /// The opcode of that name, in the machine IR's spelling, which is the target's prefix and
     /// then the name the target gave.
-    fn opcode(&mut self, name: &str) -> Opcode {
-        Opcode::new(self.names.intern(&format!("{}{name}", self.insts.prefix)))
+    fn opcode(&mut self, name: &'static str) -> Opcode {
+        Opcode::new(self.names.join(self.insts.prefix, name))
     }
 }
 

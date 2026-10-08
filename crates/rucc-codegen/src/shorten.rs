@@ -204,9 +204,8 @@ pub fn shorter(
     let wanted = wanted.chain(short.stepping.iter().map(|entry| entry.into));
     let wanted = wanted.chain(short.copying.iter().map(|entry| entry.into));
     let wanted = wanted.chain(short.spreading.iter().map(|entry| entry.into));
-    let opcodes: Vec<(&'static str, mir::Opcode)> = wanted
-        .map(|into| (into, mir::Opcode::new(names.intern(&format!("{}{into}", short.prefix)))))
-        .collect();
+    let opcodes: Vec<(&'static str, mir::Opcode)> =
+        wanted.map(|into| (into, mir::Opcode::new(names.join(short.prefix, into)))).collect();
     let names = &*names;
     let mut counts = changes::Reads::of(func);
     let mut took = 0;

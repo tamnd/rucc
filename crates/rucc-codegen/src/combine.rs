@@ -1508,7 +1508,7 @@ fn quiet(
 /// store was storing and what takes that operand's place is one operand as well.
 fn updated(func: &Func, machine: &MachineInsts, names: &mut Interner, run: &Run) -> Plan {
     let operands = func[func[run.store].operands].to_vec();
-    let into = names.intern(&format!("{}{}", machine.prefix, run.update.into));
+    let into = names.join(machine.prefix, run.update.into);
     Plan {
         opcode: Opcode::new(into),
         operands: [run.kept].into_iter().chain(operands[1..].iter().copied()).collect(),
@@ -1527,7 +1527,7 @@ fn updated(func: &Func, machine: &MachineInsts, names: &mut Interner, run: &Run)
 /// is what makes sure there is a place for each of them to move to.
 fn bumped(func: &Func, machine: &MachineInsts, names: &mut Interner, run: &Bumped) -> Plan {
     let operands = func[func[run.store].operands][1..].to_vec();
-    let into = names.intern(&format!("{}{}", machine.prefix, run.bump.into));
+    let into = names.join(machine.prefix, run.bump.into);
     let back = |at: Option<u8>| at.map(|at| at - 1);
     Plan {
         opcode: Opcode::new(into),

@@ -837,7 +837,7 @@ pub fn reach(
     insts: &FrameInsts,
     names: &mut Interner,
 ) -> Reach {
-    let lea = Opcode::new(names.intern(&format!("{}{}", insts.prefix, insts.lea)));
+    let lea = Opcode::new(names.join(insts.prefix, insts.lea));
     let mut through: Vec<Option<Carried>> = vec![None; count];
     // A local one of whose addresses this could not read at all, which stays out whatever the rest
     // of the list says about it.
@@ -1125,7 +1125,7 @@ mod tests {
         fn new() -> (Self, Block) {
             let mut names = Interner::new();
             let func = Func::new(names.intern("f"));
-            let lea = Opcode::new(names.intern(&format!("{}{}", FRAME.prefix, FRAME.lea)));
+            let lea = Opcode::new(names.join(FRAME.prefix, FRAME.lea));
             let nop = Opcode::new(names.intern("x64.nop"));
             let end = Opcode::new(names.intern("x64.lifetime_end"));
             let mut building =

@@ -316,9 +316,9 @@ pub fn addresses(
     model: CodeModel,
 ) -> usize {
     let absolute = model == CodeModel::Kernel;
-    let lea = mir::Opcode::new(names.intern(&format!("{}{}", insts.prefix, insts.lea)));
-    let sum = mir::Opcode::new(names.intern(&format!("{}{}", insts.prefix, insts.sum)));
-    let step = mir::Opcode::new(names.intern(&format!("{}{}", insts.prefix, insts.add)));
+    let lea = mir::Opcode::new(names.join(insts.prefix, insts.lea));
+    let sum = mir::Opcode::new(names.join(insts.prefix, insts.sum));
+    let step = mir::Opcode::new(names.join(insts.prefix, insts.add));
     let mut reads = Reads::of(func);
     let mut held = pending.held();
     // The moves are kept here and made once at the end, since nothing reads the lists before then
@@ -428,8 +428,8 @@ pub fn offsets(
     machine: &MachineInsts,
     names: &mut Interner,
 ) -> usize {
-    let add = mir::Opcode::new(names.intern(&format!("{}{}", insts.prefix, insts.add)));
-    let sub = mir::Opcode::new(names.intern(&format!("{}{}", insts.prefix, insts.sub)));
+    let add = mir::Opcode::new(names.join(insts.prefix, insts.add));
+    let sub = mir::Opcode::new(names.join(insts.prefix, insts.sub));
     let mut reads = Reads::of(func);
     let mut moved = 0;
     for block in func.blocks().collect::<Vec<_>>() {
@@ -690,7 +690,7 @@ fn named_alone(address: mir::Amode) -> bool {
 /// write the first is that it is gcc's output, and that a kernel link checks every address of this
 /// kind fits in the top 2 GiB, which is the promise the model makes. tamnd/rucc#2275.
 pub fn absolute(func: &mut mir::Func, insts: &FrameInsts, names: &mut Interner) -> usize {
-    let lea = mir::Opcode::new(names.intern(&format!("{}{}", insts.prefix, insts.lea)));
+    let lea = mir::Opcode::new(names.join(insts.prefix, insts.lea));
     let mut marked = 0;
     for block in func.blocks().collect::<Vec<_>>() {
         for inst in func.insts(block).collect::<Vec<_>>() {
@@ -1137,7 +1137,7 @@ fn absolute_table(
         return None;
     }
     let moves = insts.moves(to.class)?;
-    let opcode = mir::Opcode::new(names.intern(&format!("{}{}", insts.prefix, moves.load)));
+    let opcode = mir::Opcode::new(names.join(insts.prefix, moves.load));
     let span = func.span(load);
     let mem = mir::Mem {
         index: Some(index),
