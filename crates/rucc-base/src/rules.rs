@@ -145,6 +145,15 @@ impl Node {
     /// branch cost.
     #[must_use]
     pub fn branch(&self, head: &str, arity: usize) -> Option<u32> {
+        // Most nodes have no branch on a head or only the one, two thirds and a fifth of the nodes
+        // of the simplifier's table, and the walk asks every node it passes. For those, making the
+        // key copied the name only to compare it against nothing, or against one name that
+        // comparing the two directly answers as well. tamnd/rucc#3052.
+        match self.heads {
+            [] => return None,
+            [(_, name, count, next)] => return (*count == arity && *name == head).then_some(*next),
+            _ => {}
+        }
         // The same number as `Node::key`, made with one copy rather than a byte at a time.
         let mut bytes = [0; 16];
         let take = head.len().min(16);

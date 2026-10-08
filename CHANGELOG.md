@@ -61,6 +61,7 @@ This release ends S5 (#431), the full plane set of the safe memory work. The typ
 - Jump threading keeps the loop forest across a thread inside a loop whenever the loop still goes round without the edge, rather than only when the new target gets back to the block it skipped, which takes about 4% off an O2 build of lz4 and 6% off an O1 one. (#3325)
 - Simplify keeps what the root of each rule table says about an instruction head in a thread local map, rather than searching all six roots for every instruction in every run. Output is unchanged and compiles take about 2 to 3% fewer instructions (#3338).
 - Jump threading finds the loop forest again over just the loop a thread changed instead of clearing every analysis, so lz4.c at -O2 compiles in 12% fewer instructions with identical output (#3366)
+- Rule tries answer a node with no head branch or with one without building a key and searching, which saves a little on every rewrite walk (#3371)
 
 ### Fixed
 
