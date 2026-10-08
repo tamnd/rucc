@@ -639,11 +639,12 @@ pub(crate) struct Reuse {
 /// since that is a target description that does not describe the target the function is for.
 #[must_use]
 pub fn assign(func: &Func, order: &Order, live: &Live, env: &Env) -> Assignment {
-    let blocked = blocked(func, order);
-    let forced = forced(func);
-    let reuses = reuses(func, order);
-    let hints = hints(func);
-    let passed = passed(func);
+    scan(func, live, env, &Facts::of(func, order))
+}
+
+/// The same, over what was already read off the function.
+pub(crate) fn scan(func: &Func, live: &Live, env: &Env, facts: &Facts) -> Assignment {
+    let Facts { blocked, forced, reuses, hints, passed } = facts;
 
     let mut intervals = Vec::with_capacity(func.vregs());
     for (number, reuse) in reuses.iter().enumerate() {
@@ -676,7 +677,7 @@ pub fn assign(func: &Func, order: &Order, live: &Live, env: &Env) -> Assignment 
             interval.class.number()
         );
         let reuse = reuses[index(interval.reg)];
-        let coalesced = |source| coalesce(&assignment, &active, &blocked, live, interval, source);
+        let coalesced = |source| coalesce(&assignment, &active, blocked, live, interval, source);
         let first = reuse.and_then(|reuse| coalesced(reuse.source));
         let second = reuse.and_then(|reuse| reuse.second).and_then(coalesced);
         // An instruction that reads its sources either way round can write over the second one
@@ -708,7 +709,7 @@ pub fn assign(func: &Func, order: &Order, live: &Live, env: &Env) -> Assignment 
         // one move at the cost of another.
         let hinted = hints[index(interval.reg)].iter().copied().find(|&at| {
             env.order(interval.class).contains(&at)
-                && available(&active, &blocked, interval, at, None, Want::Clear)
+                && available(&active, blocked, interval, at, None, Want::Clear)
         });
         // A register nobody else wants anywhere near this value first, and one somebody wants
         // somewhere the value never goes only when there is no other. Both are correct and the
@@ -718,7 +719,7 @@ pub fn assign(func: &Func, order: &Order, live: &Live, env: &Env) -> Assignment 
             env.order(interval.class)
                 .iter()
                 .copied()
-                .find(|&at| available(&active, &blocked, interval, at, None, want))
+                .find(|&at| available(&active, blocked, interval, at, None, want))
         };
         let chosen =
             two_address.or(hinted).or_else(|| scan(Want::Clear)).or_else(|| scan(Want::Allowed));
@@ -727,7 +728,7 @@ pub fn assign(func: &Func, order: &Order, live: &Live, env: &Env) -> Assignment 
                 assignment.places[index(interval.reg)] = Some(Place::Reg(at));
                 active.push(interval.reg, interval.class, interval.range, interval.area, at);
             }
-            None => spill_one(&mut assignment, &mut active, &blocked, interval),
+            None => spill_one(&mut assignment, &mut active, blocked, interval),
         }
     }
     assignment
@@ -1013,6 +1014,39 @@ fn spill_one<'a>(
             active.push(interval.reg, interval.class, interval.range, interval.area, at);
         }
         None => assignment.spill(interval.reg, interval.class),
+    }
+}
+
+/// What the allocators read off a function before they place anything, none of which depends on
+/// the registers they are handed.
+///
+/// Read once for a function rather than once for each try at it. [`crate::run_either`] tries two
+/// sets of registers, and for each the backtracking allocator runs the linear scan, counts the
+/// pressure and makes one or two answers of its own, and each of those read all of this again.
+/// The constraints alone were four percent of compiling Duktape at `-O1`.
+pub(crate) struct Facts {
+    /// See [`blocked`].
+    pub(crate) blocked: Blocks,
+    /// See [`forced`].
+    pub(crate) forced: Vec<Reg>,
+    /// See [`reuses`].
+    pub(crate) reuses: Vec<Option<Reuse>>,
+    /// See [`hints`].
+    pub(crate) hints: Vec<Vec<PhysReg>>,
+    /// See [`passed`].
+    pub(crate) passed: Vec<Vec<Reg>>,
+}
+
+impl Facts {
+    /// Everything of the function the allocators ask about.
+    pub(crate) fn of(func: &Func, order: &Order) -> Self {
+        Self {
+            blocked: blocked(func, order),
+            forced: forced(func),
+            reuses: reuses(func, order),
+            hints: hints(func),
+            passed: passed(func),
+        }
     }
 }
 

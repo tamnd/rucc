@@ -34,7 +34,7 @@
 use rucc_mir::{Func, Reg};
 use rucc_target::RegClass;
 
-use crate::assign::{self, Env};
+use crate::assign::{self, Blocks, Env};
 use crate::live::{Area, Live};
 use crate::order::{Order, Point};
 
@@ -56,9 +56,22 @@ impl Pressure {
     /// memory to have handed it.
     #[must_use]
     pub fn of(func: &Func, order: &Order, live: &Live, env: &Env) -> Self {
+        Self::with(func, order, live, env, &assign::forced(func), &assign::blocked(func, order))
+    }
+
+    /// The same, over the values the instructions send to the stack and the registers they insist
+    /// on, already read off the function.
+    pub(crate) fn with(
+        func: &Func,
+        order: &Order,
+        live: &Live,
+        env: &Env,
+        spilled: &[Reg],
+        blocked: &Blocks,
+    ) -> Self {
         let points = usize::try_from(order.points()).expect("a point count");
         let mut forced = vec![false; func.vregs()];
-        for reg in assign::forced(func) {
+        for &reg in spilled {
             forced[index(reg)] = true;
         }
         // One more entry than there are points, so the end of a piece that reaches the last point
@@ -110,7 +123,7 @@ impl Pressure {
             .collect();
         // Sorted by class, register and point, so an instruction that names one register twice at
         // one point is two entries next to each other, and it is one register taken.
-        let mut taken: Vec<_> = assign::blocked(func, order).taken().collect();
+        let mut taken: Vec<_> = blocked.taken().collect();
         taken.dedup();
         for (class, reg, point) in taken {
             let Some(row) = room.get_mut(usize::from(class.number())) else { continue };
