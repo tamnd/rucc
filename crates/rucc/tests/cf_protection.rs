@@ -237,3 +237,60 @@ fn a_target_with_nowhere_to_record_it_is_refused() {
     assert!(!ok, "a flag that cannot be honoured is news rather than nothing");
     assert!(err.contains("-fcf-protection=full is not supported"), "{err}");
 }
+
+/// An assembly file that a person wrote, with `endbr64` at each entry and the note from `<cet.h>`.
+const HAND: &str = "\
+#include <cet.h>
+\t.text
+\t.globl\tf
+\t.type\tf, @function
+f:
+\t_CET_ENDBR
+\tret
+";
+
+/// The object that the compiler makes from an assembly file under those flags.
+fn assembled(what: &str, flags: &[&str]) -> Vec<u8> {
+    let dir = std::env::temp_dir().join(format!("rucc-cf-{}-{what}", std::process::id()));
+    std::fs::create_dir_all(&dir).expect("a temporary directory can be created");
+    let source = dir.join("hand.S");
+    let object = dir.join("hand.o");
+    std::fs::write(&source, HAND).expect("the fixture can be written");
+    let out = Command::new(env!("CARGO_BIN_EXE_rucc"))
+        .arg(format!("--target={TARGET}"))
+        .arg("-c")
+        .args(flags)
+        .arg(&source)
+        .arg("-o")
+        .arg(&object)
+        .output()
+        .expect("the compiler is built before its own tests run");
+    assert!(out.status.success(), "{}", String::from_utf8_lossy(&out.stderr));
+    let bytes = std::fs::read(&object).expect("the object was written");
+    let _ = std::fs::remove_dir_all(&dir);
+    bytes
+}
+
+/// Whether the bytes hold that run of bytes.
+fn holds(bytes: &[u8], run: &[u8]) -> bool {
+    bytes.windows(run.len()).any(|window| window == run)
+}
+
+/// `<cet.h>` gives an assembly file the landing pad and the note, as gcc's header does.
+///
+/// libsodium includes the header in its assembly files when its configure script finds it. Without
+/// it the files have no note, and the linker turns off both halves for the whole library.
+#[test]
+fn an_assembly_file_gets_the_landing_pad_and_the_note_from_cet_h() {
+    let endbr = [0xf3, 0x0f, 0x1e, 0xfa];
+    // The key, the length of the value and the value.
+    let property = |bits: u8| [0x02, 0x00, 0x00, 0xc0, 4, 0, 0, 0, bits, 0, 0, 0];
+    let full = assembled("hand-full", &["-fcf-protection"]);
+    assert!(holds(&full, &endbr), "the pad is there");
+    assert!(holds(&full, &property(3)), "the note says both halves");
+    let ret = assembled("hand-return", &["-fcf-protection=return"]);
+    assert!(!holds(&ret, &endbr), "no pad when only the return half is asked for");
+    assert!(holds(&ret, &property(2)), "the note says the return half");
+    let none = assembled("hand-none", &[]);
+    assert!(!holds(&none, &endbr) && !holds(&none, b"GNU\0"), "nothing without the flag");
+}
