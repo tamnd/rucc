@@ -1,11 +1,12 @@
-//! A loop whose test is at the top and whose step is a block of its own is laid out with the test
+//! A loop whose test is at the top and whose last block only steps it on is laid out with the test
 //! last, so that each time round is one jump rather than two.
 //!
-//! Issue 1994. The inner loops of `mul_var` and `accum_sum_add` in Postgres' `numeric.c` came out
-//! as the body, a `cmpl` and a `jge` out of the loop, then the step of the walked pointer and a
+//! Issue 1994. The carry loop of Postgres' `accum_sum_carry` came out as the test, the body, a
+//! `cmpq` and a `je` out of the loop, then a block that copies the carry for the next turn and a
 //! `jmp` back to the top, so every turn ran a branch that was not taken and a jump that was.
-//! `loop_rotate.c` is those two loops. The unit tests in `rucc-codegen` cover the layout. This runs
-//! the compiler and reads the jumps it wrote.
+//! `loop_rotate.c` is that loop and the inner loops of `mul_var` and `accum_sum_add`, which are
+//! one block each and are here so that they stay closed by their test. The unit tests in
+//! `rucc-codegen` cover the layout. This runs the compiler and reads the jumps it wrote.
 
 use std::process::Command;
 
@@ -34,11 +35,15 @@ fn body<'a>(asm: &'a str, name: &str) -> Vec<&'a str> {
         .collect()
 }
 
-/// Every `jmp` in the lines that goes to a label above it.
-fn jumps_back<'a>(lines: &[&'a str]) -> Vec<&'a str> {
+/// Every conditional jump in the lines that goes to a label above it, which is a loop closed by
+/// its own test.
+fn tested_back<'a>(lines: &[&'a str]) -> Vec<&'a str> {
     let mut found = Vec::new();
     for (at, line) in lines.iter().enumerate() {
-        let Some(to) = line.strip_prefix("jmp\t") else { continue };
+        let Some((op, to)) = line.split_once('\t') else { continue };
+        if !op.starts_with('j') || op == "jmp" {
+            continue;
+        }
         let label = format!("{to}:");
         if lines[..at].contains(&label.as_str()) {
             found.push(*line);
@@ -48,12 +53,11 @@ fn jumps_back<'a>(lines: &[&'a str]) -> Vec<&'a str> {
 }
 
 #[test]
-fn the_numeric_loops_jump_back_only_on_their_test() {
+fn the_numeric_loops_are_closed_by_their_test() {
     let asm = assembly();
-    for name in ["mul_inner", "accum_inner"] {
+    for name in ["carry_inner", "mul_inner", "accum_inner"] {
         let lines = body(&asm, name);
         assert!(lines.iter().any(|line| line.starts_with('j')), "{name} has no loop:\n{asm}");
-        let back = jumps_back(&lines);
-        assert!(back.is_empty(), "{name} jumps back with {back:?}:\n{asm}");
+        assert!(!tested_back(&lines).is_empty(), "{name} jumps back without a test:\n{asm}");
     }
 }
