@@ -7,6 +7,7 @@ All notable changes are recorded here. The format follows [Keep a Changelog](htt
 ### Changed
 
 - Read each header from the disk once per run, stop probing the disk for paths under `<builtin>`, and resolve each include directory once instead of every header path, which halves the system calls of a compile that includes the C library (#3398)
+- A loop tested at the top whose step is a block of its own is laid out with its test last at `-O1` and above, the way gcc's block reordering rotates one. Each time round is then the jump back on the test rather than a branch out that is not taken and a jump back that is. The carry loop of Postgres' `accum_sum_carry`, whose step copies the carry for the next turn, was that shape. (#1994)
 
 ## 0.29.2
 

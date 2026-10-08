@@ -121,7 +121,10 @@ const SCALE: u128 = mir::Weight::SCALE as u128;
 
 /// Puts a function's blocks in an order and writes the jumps that order needs.
 ///
-/// Run last, after [`crate::finish`].
+/// Run last, after [`crate::finish`]. `walks` is the comparison in each loop [`crate::finish`]
+/// wrote to walk the stack a page at a time, and a loop with one of those in it keeps the order it
+/// was written in, which asks before it steps. That is the shape gcc writes and the one
+/// `hardening-check` looks for, and turned round it finds nothing.
 ///
 /// # Panics
 ///
@@ -136,11 +139,18 @@ pub fn blocks(
     fused: &Fused,
     names: &mut Interner,
     fusable: &Set<mir::Inst>,
+    walks: &[mir::Inst],
     reorder: bool,
 ) {
     let table = &fused.0;
     let near = near(func, insts, names);
-    let mut order = if reorder { traces(func) } else { order(func) };
+    let mut walking = vec![false; func.block_count()];
+    if !walks.is_empty() {
+        for block in func.blocks() {
+            walking[block.index()] = func.insts(block).any(|inst| walks.contains(&inst));
+        }
+    }
+    let mut order = if reorder { traces(func, &walking) } else { order(func) };
     let mut split = partition(func, &mut order);
     let cold = split.map_or_else(Set::default, |first| order[first..].iter().copied().collect());
     let mut writer = Writer { func, insts, names, table, fusable, near, cold };
@@ -507,17 +517,19 @@ const ROUNDS: [(u64, u64); 4] = [(4_000, 5_000), (2_000, 2_000), (1_000, 500), (
 ///
 /// # Loop rotation, and where it comes from
 ///
-/// Section 38.4 asks for the loop to be rotated so that its exit is the last block of the trace,
-/// and there is no step here that does it. It falls out of the walk instead: a trace that enters
-/// a loop header follows the body, reaches the latch, finds that the latch's likeliest arm is the
-/// header it has already laid out, and stops. The exit is then a seed of its own and comes next.
-/// That is the rotated order, back edge running backwards and exit falling through, arrived at
-/// from the greedy rule rather than from a rule about loops.
+/// Section 38.4 asks for the loop to be rotated so that its exit is the last block of the trace.
+/// Most of the time that falls out of the walk: a trace that enters a loop header follows the
+/// body, reaches the latch, finds that the latch's likeliest arm is the header it has already laid
+/// out, and stops. When the latch is where the test is, the exit is then a seed of its own and
+/// comes next, which is the rotated order, back edge running backwards and exit falling through.
+/// When the test is in the header and the latch is a block of its own, the walk leaves the test
+/// in the middle and the latch jumping back, and [`rotate`] turns the loop round so that the test
+/// is last.
 ///
 /// What that does not cover is a loop whose header is its exit test and whose body is cold, where
 /// GCC would duplicate the header. Section 38.4 says the first version should not copy code and
 /// this does not.
-fn traces(func: &mir::Func) -> Vec<mir::Block> {
+fn traces(func: &mir::Func, walking: &[bool]) -> Vec<mir::Block> {
     // Where the shape of the graph would have put each block, which is what decides between two
     // blocks that run equally often. Most branches in most functions have nothing to predict them
     // by and come out even, so without this the seed order between them would be the order the
@@ -541,6 +553,10 @@ fn traces(func: &mir::Func) -> Vec<mir::Block> {
     // it starts its first trace there rather than wherever the weights happen to point. That is
     // how a chain of comparisons whose tail cools off below the threshold stays a straight line.
     let mut reached = vec![0; func.block_count()];
+    // The blocks a trace already found starts at, which [`rotate`] prefers to leave a loop for,
+    // and the blocks of the loop it is turning, which it leaves alone.
+    let mut starts = vec![false; func.block_count()];
+    let mut inside = vec![false; func.block_count()];
 
     for (likely, often) in ROUNDS {
         // The exec threshold as a number rather than a fraction. In a hundred and twenty eight
@@ -593,13 +609,97 @@ fn traces(func: &mir::Func) -> Vec<mir::Block> {
                         });
                     }
                 }
-                let Some(next) = next else { break };
+                let Some(next) = next else {
+                    rotate(func, &mut trace, &seen, &starts, &mut inside, walking);
+                    break;
+                };
                 block = next;
+            }
+            if let Some(&first) = trace.first() {
+                starts[first.index()] = true;
             }
             found.push(trace);
         }
     }
     connect(func, found)
+}
+
+/// Turns the loop a trace ends in so that the block the loop is left from comes last.
+///
+/// Design: `gcc/bb-reorder.cc`, `rotate_loop`, and the test in front of the call to it in
+/// `find_traces_1_round`.
+///
+/// A trace ends in a loop when the arm its last block most often takes runs back to a block
+/// earlier in the same trace. The walk got there by falling from that block through each of the
+/// others in turn, so the loop comes out as its head, then its body, then the block that jumps
+/// back, and the branch that leaves the loop is wherever the test was. When the test is at the
+/// top and the step is a block of its own, which is what a `for` loop with a pointer or an index
+/// stepped after the test leaves behind, every time round costs the branch out that is not taken
+/// and the jump back that is. Turned so that the block with the way out is last, the blocks that
+/// came after it fall into the head, the test at the bottom jumps backwards while the loop goes
+/// on, and the way out falls into whatever is laid out next. That is one jump each time round
+/// rather than two, paid for with a jump into the loop each time it is entered.
+///
+/// So it is only done for a loop that goes round at least four times each time it is entered on
+/// average, which is gcc's test: the arm back has to be taken more than four fifths of the times
+/// the head runs. Never for a block that goes round itself, which has nothing to turn, nor for a
+/// loop whose head is the entry, which has to stay where the function starts.
+///
+/// The way out is the hottest arm from a block of the loop to a block outside it, preferring one
+/// to a block not laid out yet or to the first block of a trace already found, since those are
+/// the ones [`connect`] can put next. Ties go to the first block from the head, as in gcc. A
+/// block with more arms than a branch has is a jump through a register or an `asm goto`, which
+/// cannot fall into any of them, and is never the block the loop is left from.
+///
+/// A loop through a block `walking` marks is the walk of the stack under a variable length array,
+/// which [`blocks`] says why it keeps as it is.
+fn rotate(
+    func: &mir::Func,
+    trace: &mut [mir::Block],
+    seen: &[bool],
+    starts: &[bool],
+    inside: &mut [bool],
+    walking: &[bool],
+) {
+    let Some(&last) = trace.last() else { return };
+    let Some(back) = func[last].succs.iter().max_by_key(|call| call.weight) else { return };
+    let head = back.block;
+    let Some(at) = trace.iter().position(|&block| block == head) else { return };
+    if head == last || Some(head) == func.entry() {
+        return;
+    }
+    if u128::from(back.weight.raw()) * 5 <= u128::from(func[head].weight.raw()) * 4 {
+        return;
+    }
+    let cycle = &mut trace[at..];
+    if cycle.iter().any(|block| walking[block.index()]) {
+        return;
+    }
+    for &block in cycle.iter() {
+        inside[block.index()] = true;
+    }
+    let mut best: Option<(bool, mir::Weight, usize)> = None;
+    for (index, &block) in cycle.iter().enumerate() {
+        if func[block].succs.len() > 2 {
+            continue;
+        }
+        for call in &func[block].succs {
+            let to = call.block.index();
+            if inside[to] {
+                continue;
+            }
+            let preferred = !seen[to] || starts[to];
+            if best.is_none_or(|(was, weight, _)| (preferred, call.weight) > (was, weight)) {
+                best = Some((preferred, call.weight, index));
+            }
+        }
+    }
+    for &block in cycle.iter() {
+        inside[block.index()] = false;
+    }
+    if let Some((_, _, index)) = best {
+        cycle.rotate_left(index + 1);
+    }
 }
 
 /// The traces run together into one order, each one followed where possible by the trace control
@@ -1261,7 +1361,7 @@ mod tests {
         // comparison in front of its branch sees what a compiled function would see.
         let fused = Fused::new(&BRANCH, names);
         let fusable = fusable(func, &BRANCH, &fused, names);
-        blocks(func, &BRANCH, &fused, names, &fusable, false);
+        blocks(func, &BRANCH, &fused, names, &fusable, &[], false);
         mir::print_func(func, names, &REGS)
             .lines()
             .filter(|line| !line.trim().is_empty() && !line.starts_with("mfunc") && *line != "}")
@@ -1521,7 +1621,7 @@ mod tests {
 
         let fused = Fused::new(&BRANCH, &mut names);
         let fusable = fusable(&func, &BRANCH, &fused, &mut names);
-        blocks(&mut func, &BRANCH, &fused, &mut names, &fusable, false);
+        blocks(&mut func, &BRANCH, &fused, &mut names, &fusable, &[], false);
 
         let test = func.insts(made[0]).next().expect("a test");
         let operands = func[test].operands;
@@ -1535,7 +1635,7 @@ mod tests {
 
         let fused = Fused::new(&BRANCH, &mut names);
         let fusable = fusable(&func, &BRANCH, &fused, &mut names);
-        blocks(&mut func, &BRANCH, &fused, &mut names, &fusable, false);
+        blocks(&mut func, &BRANCH, &fused, &mut names, &fusable, &[], false);
 
         // Blocks one and two are reached by nothing, so they go last, in the order they were
         // made. Deleting one would be a decision about what the program does, and this pass has
@@ -1550,7 +1650,7 @@ mod tests {
 
         let fused = Fused::new(&BRANCH, &mut names);
         let fusable = fusable(&func, &BRANCH, &fused, &mut names);
-        blocks(&mut func, &BRANCH, &fused, &mut names, &fusable, false);
+        blocks(&mut func, &BRANCH, &fused, &mut names, &fusable, &[], false);
 
         assert_eq!(func.block_count(), 0);
     }
@@ -1563,7 +1663,7 @@ mod tests {
 
         let fused = Fused::new(&BRANCH, &mut names);
         let fusable = fusable(&func, &BRANCH, &fused, &mut names);
-        blocks(&mut func, &BRANCH, &fused, &mut names, &fusable, false);
+        blocks(&mut func, &BRANCH, &fused, &mut names, &fusable, &[], false);
     }
 
     #[test]
@@ -1576,7 +1676,7 @@ mod tests {
 
         let fused = Fused::new(&BRANCH, &mut names);
         let fusable = fusable(&func, &BRANCH, &fused, &mut names);
-        blocks(&mut func, &BRANCH, &fused, &mut names, &fusable, false);
+        blocks(&mut func, &BRANCH, &fused, &mut names, &fusable, &[], false);
     }
 
     /// Puts a comparison and a branch on its answer at the end of a block.
@@ -1755,7 +1855,7 @@ mod tests {
             .operand(Operand::read(Reg::physical(RAX), GPR))
             .finish();
         func.insert_before(branch, reload);
-        blocks(&mut func, &BRANCH, &fused, &mut names, &fusable, false);
+        blocks(&mut func, &BRANCH, &fused, &mut names, &fusable, &[], false);
         let text = mir::print_func(&func, &names, &REGS);
 
         assert!(text.contains("x64.cmp_set_l_32"), "{text}");
@@ -1844,7 +1944,7 @@ mod tests {
     fn traced(func: &mut mir::Func, names: &mut Interner) -> Vec<String> {
         let fused = Fused::new(&BRANCH, names);
         let fusable = fusable(func, &BRANCH, &fused, names);
-        blocks(func, &BRANCH, &fused, names, &fusable, true);
+        blocks(func, &BRANCH, &fused, names, &fusable, &[], true);
         mir::print_func(func, names, &REGS)
             .lines()
             .filter(|line| !line.trim().is_empty() && !line.starts_with("mfunc") && *line != "}")
@@ -1890,12 +1990,13 @@ mod tests {
         assert_eq!(order_of(&func), [0, 1, 2]);
     }
 
-    /// A loop comes out as its header, its body and then its exit, with the back edge backwards.
+    /// A loop tested at the top comes out turned round, with the test last and the exit behind it.
     ///
-    /// Nothing here rotates anything. The trace walks out of the header into the body because the
-    /// body is where the header nearly always goes, stops at the latch because the header it
-    /// wants next is already laid out, and the exit is picked up as the next seed. That is the
-    /// order a branch predictor's static guess expects and it is what the greedy rule gives.
+    /// The trace walks out of the header into the body because the body is where the header
+    /// nearly always goes, and stops at the latch because the header it wants next is already laid
+    /// out. Left like that, every time round would be the test's branch not taken and the latch's
+    /// jump back taken. Turned, the latch falls into the test and the test jumps back, and the
+    /// jump that costs is the one into the loop.
     #[test]
     fn a_loop_is_laid_out_with_its_exit_behind_it_and_its_back_edge_running_backwards() {
         let (mut names, mut func, made) = blank(4);
@@ -1909,20 +2010,70 @@ mod tests {
 
         let text = traced(&mut func, &mut names);
 
-        assert_eq!(order_of(&func), [0, 1, 2, 3]);
+        assert_eq!(order_of(&func), [0, 2, 1, 3]);
         assert_eq!(
             text,
             [
                 "block0:",
-                "block1",
+                "x64.jmp block2",
                 "block1:",
-                "x64.test_rr_8 $rax",
-                "x64.jcc_e block3, block2",
+                "block2",
                 "block2:",
-                "x64.jmp block1",
+                "x64.test_rr_8 $rax",
+                "x64.jcc_ne block1, block3",
                 "block3:",
             ]
         );
+    }
+
+    /// A loop whose test is already in the block that jumps back is left the way the walk laid it.
+    #[test]
+    fn a_loop_tested_at_the_bottom_is_not_turned() {
+        let (mut names, mut func, made) = blank(4);
+        *func.succs_mut(made[0]) = vec![BlockCall::to(made[1])];
+        *func.succs_mut(made[1]) = vec![BlockCall::to(made[2])];
+        branch(&mut func, &mut names, made[2], &[made[1], made[3]]);
+        runs(&mut func, made[0], 10_000, &[10_000]);
+        runs(&mut func, made[1], 100_000, &[100_000]);
+        runs(&mut func, made[2], 100_000, &[90_000, 10_000]);
+        runs(&mut func, made[3], 10_000, &[]);
+
+        traced(&mut func, &mut names);
+
+        assert_eq!(order_of(&func), [0, 1, 2, 3]);
+    }
+
+    /// A loop that goes round twice each time it is entered pays for the jump into it about as
+    /// often as it would save the one back, and is left alone.
+    #[test]
+    fn a_loop_that_hardly_goes_round_is_not_turned() {
+        let (mut names, mut func, made) = blank(4);
+        *func.succs_mut(made[0]) = vec![BlockCall::to(made[1])];
+        branch(&mut func, &mut names, made[1], &[made[2], made[3]]);
+        *func.succs_mut(made[2]) = vec![BlockCall::to(made[1])];
+        runs(&mut func, made[0], 10_000, &[10_000]);
+        runs(&mut func, made[1], 30_000, &[20_000, 10_000]);
+        runs(&mut func, made[2], 20_000, &[20_000]);
+        runs(&mut func, made[3], 10_000, &[]);
+
+        traced(&mut func, &mut names);
+
+        assert_eq!(order_of(&func), [0, 1, 2, 3]);
+    }
+
+    /// A loop whose head is the entry stays where it is, since the function starts there.
+    #[test]
+    fn a_loop_whose_head_is_the_entry_is_not_turned() {
+        let (mut names, mut func, made) = blank(3);
+        branch(&mut func, &mut names, made[0], &[made[1], made[2]]);
+        *func.succs_mut(made[1]) = vec![BlockCall::to(made[0])];
+        runs(&mut func, made[0], 100_000, &[90_000, 10_000]);
+        runs(&mut func, made[1], 90_000, &[90_000]);
+        runs(&mut func, made[2], 10_000, &[]);
+
+        traced(&mut func, &mut names);
+
+        assert_eq!(order_of(&func), [0, 1, 2]);
     }
 
     /// A block reached only from the cold arm is laid out behind everything the trunk reaches.
@@ -2041,7 +2192,8 @@ mod tests {
         runs(&mut func, made[2], 90_000, &[90_000]);
         runs(&mut func, made[3], 10_000, &[]);
         traced(&mut func, &mut names);
-        assert_eq!(heads(&func), [made[1]]);
+        // The loop is turned so that its test is last, and the jump back lands on the body.
+        assert_eq!(heads(&func), [made[2]]);
 
         let (mut names, mut func, made) = blank(4);
         branch(&mut func, &mut names, made[0], &[made[1], made[2]]);

@@ -63,7 +63,8 @@ fn a_branch_on_one_bit_is_one_instruction() {
         ("top", "tbnz w0, #31, "),
         ("sign", "tbnz x0, #63, "),
         ("clear", "tbz x0, #40, "),
-        ("scan", "tbnz x2, #0, "),
+        // The loop is rotated, so its test is at the bottom and goes back round while the bit is clear.
+        ("scan", "tbz x2, #0, "),
         ("lines", "tbnz w0, #3, "),
     ] {
         let body = body(&text, name);
