@@ -11,6 +11,9 @@ const TARGETS: [&str; 3] =
     ["x86_64-unknown-linux-gnu", "aarch64-unknown-linux-gnu", "i686-unknown-linux-gnu"];
 
 /// A directory of this test's own, empty.
+///
+/// The tests in this file run at the same time in one process, so no two of them can give the same
+/// `what`. If they do, one of them removes the directory of the other.
 fn dir(what: &str) -> PathBuf {
     let dir = std::env::temp_dir().join(format!("rucc-noinit-{}-{what}", std::process::id()));
     let _ = std::fs::remove_dir_all(&dir);
@@ -271,7 +274,7 @@ fn the_object_has_the_same_sections() {
             "{what}"
         );
     }
-    let headers = object("split", "a.c", source, &["-O2", "-fdata-sections"]);
+    let headers = object("split-object", "a.c", source, &["-O2", "-fdata-sections"]);
     let find = |name: &str| {
         headers.iter().find(|header| header.name == name).unwrap_or_else(|| panic!("{headers:?}"))
     };
