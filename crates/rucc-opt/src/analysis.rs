@@ -370,6 +370,19 @@ impl Analyses {
         self.loops.get_or_init(|| Loops::new(self.cfg(func), self.dominators(func)))
     }
 
+    /// The loop forest taken out of the cache, so that a pass can change it along with the
+    /// function and put it back with [`Analyses::keep_loops`].
+    pub(crate) fn take_loops(&mut self, func: &Func) -> Loops {
+        self.loops(func);
+        self.loops.take().expect("the forest was just built")
+    }
+
+    /// Puts back a forest [`Analyses::take_loops`] took out, which has to be about the function as
+    /// it is now.
+    pub(crate) fn keep_loops(&mut self, loops: Loops) {
+        self.loops = OnceCell::from(loops);
+    }
+
     /// The dominance frontier of every block, computed if it is not already here.
     pub fn frontiers(&self, func: &Func) -> &Frontiers {
         self.frontiers.get_or_init(|| Frontiers::new(self.cfg(func), self.dominators(func)))

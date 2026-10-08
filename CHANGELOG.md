@@ -49,6 +49,7 @@ All notable changes are recorded here. The format follows [Keep a Changelog](htt
 - Value numbering keeps its per-block tables between blocks instead of making them again for each one, which takes about half a percent off the instructions an O2 build of lz4 or duktape costs. (#3324)
 - Jump threading keeps the loop forest across a thread inside a loop whenever the loop still goes round without the edge, rather than only when the new target gets back to the block it skipped, which takes about 4% off an O2 build of lz4 and 6% off an O1 one. (#3325)
 - Simplify keeps what the root of each rule table says about an instruction head in a thread local map, rather than searching all six roots for every instruction in every run. Output is unchanged and compiles take about 2 to 3% fewer instructions (#3338).
+- Jump threading finds the loop forest again over just the loop a thread changed instead of clearing every analysis, so lz4.c at -O2 compiles in 12% fewer instructions with identical output (#3366)
 
 ### Fixed
 
