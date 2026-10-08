@@ -10,6 +10,7 @@ mod pool;
 static POOL: pool::Pool = pool::Pool;
 
 fn main() -> std::process::ExitCode {
+    pool::keep_freed_memory();
     let mut args = std::env::args();
     let program = args.next().unwrap_or_default();
     let args: Vec<String> = args.collect();
