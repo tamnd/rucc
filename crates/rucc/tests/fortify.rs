@@ -60,6 +60,30 @@ int main(int argc, char **argv) {
 }
 "#;
 
+/// A pointer that a loop moves along a local buffer, the way tcc's `c2str` reads its lines. Each
+/// trip writes one byte and moves to the end of the string. Level 3 knows how much of the buffer
+/// is left when the program runs, as with GCC.
+const MOVED: &str = r#"
+#include <stdio.h>
+#include <stdlib.h>
+#include <string.h>
+
+int main(int argc, char **argv) {
+    char b[16], *p = b;
+    int trips = atoi(argv[2]);
+    int n = atoi(argv[3]);
+    char big[64];
+    memset(big, 'x', sizeof big - 1);
+    big[63] = 0;
+    for (int i = 0; i < trips; i++)
+        p = strchr(strcpy(p, "y"), 0);
+    if (!strcmp(argv[1], "strcpy")) strcpy(p, big + 63 - n);
+    else { FILE *f = fopen("/dev/zero", "r"); if (!fgets(p, n, f)) return 3; }
+    printf("ran %d\n", b[0]);
+    return 0;
+}
+"#;
+
 /// The message from glibc for a write past the end of a buffer.
 const OVERFLOWED: &str = "buffer overflow detected";
 
@@ -148,6 +172,21 @@ fn level_3_checks_a_buffer_with_a_size_known_at_run_time() {
     assert!(ok && said.contains("ran"), "level 2 has no size for the buffer: {said}");
     let (ok, said) = run(&three, &["8", "16"]);
     assert!(!ok && said.contains(OVERFLOWED), "{said}");
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// After four trips there are twelve bytes left of sixteen. Level 3 lets eight through and stops
+/// sixteen, for `strcpy` and for `fgets`.
+#[test]
+fn level_3_checks_a_pointer_a_loop_moved_along_a_buffer() {
+    let dir = dir("moved");
+    let three = build(&dir, MOVED, 3);
+    for case in ["strcpy", "fgets"] {
+        let (ok, said) = run(&three, &[case, "4", "8"]);
+        assert!(ok && said.contains("ran"), "{case} 8: {said}");
+        let (ok, said) = run(&three, &[case, "4", "16"]);
+        assert!(!ok && said.contains(OVERFLOWED), "{case} 16: {said}");
+    }
     let _ = std::fs::remove_dir_all(&dir);
 }
 

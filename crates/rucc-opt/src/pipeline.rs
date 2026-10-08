@@ -1141,7 +1141,8 @@ pub fn run(module: &mut Module, names: &mut Interner, opts: &Options) -> Report 
     // front end left for the IR and nothing after this is allowed to see one. The walk is skipped
     // at `-O0`, which answers every question as not known, the way gcc does at that level, and
     // for every function `optimize ("O0")` holds to that level whatever this one is.
-    objsize::answer(module, opts.interposition, opts.level != OptLevel::O0);
+    let library = opts.builtins.then_some(opts.no_builtin.as_slice());
+    objsize::answer(module, names, library, opts.interposition, opts.level != OptLevel::O0);
     // Right behind it, and for the same kind of reason: `BUILD_BUG_ON (fn == NULL)` is a call to a
     // function declared `error` that has to be gone by the end, and whether `fn` has a body is a
     // fact about the module that no pass after this can see. Above `-O0` only, which is where the
