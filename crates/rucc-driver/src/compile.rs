@@ -5653,8 +5653,10 @@ decl #0 x : int object external static defined
     /// The pages the prologue takes are touched by the prologue. The pages the array takes are
     /// however many the size worked out to, so touching them is a loop written around the
     /// declaration rather than anything a prologue can do. What says the loop is there is the
-    /// ordered comparison it ends each step with, which nothing else in a function writes, and the
-    /// touch behind it. Without the flag the declaration is still the one subtraction it always was.
+    /// comparison of the stack pointer with the limit that each step starts with, and the touch
+    /// behind it. The layout fuses that comparison with its branch, so the loop leaves when the
+    /// stack pointer is below the limit. Without the flag the declaration is still the one
+    /// subtraction it always was.
     #[test]
     fn a_variable_length_array_walks_its_pages_where_every_page_of_the_frame_is_to_be_touched() {
         let mut opts = options();
@@ -5662,12 +5664,14 @@ decl #0 x : int object external static defined
         let source = "void a(int n) { int v[n]; v[0] = 1; }\n";
         let plain = run(&opts, source);
         assert!(!plain.failed(), "{:?}", plain.messages);
-        assert!(!plain.text().contains("cmp_set_a_64"), "{}", plain.text());
+        assert!(!plain.text().contains("cmp_rr_64 $rsp"), "{}", plain.text());
+        assert!(!plain.text().contains("or_mi_8"), "{}", plain.text());
 
         opts.stack_clash = true;
         let result = run(&opts, source);
         assert!(!result.failed(), "{:?}", result.messages);
-        assert!(result.text().contains("cmp_set_a_64"), "{}", result.text());
+        assert!(result.text().contains("cmp_rr_64 $rsp, $r10"), "{}", result.text());
+        assert!(result.text().contains("jcc_b"), "{}", result.text());
         assert!(result.text().contains("or_mi_8"), "{}", result.text());
     }
 
