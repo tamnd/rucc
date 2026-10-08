@@ -6,6 +6,7 @@ All notable changes are recorded here. The format follows [Keep a Changelog](htt
 
 ### Added
 
+- `simplify-cfg` makes a switch whose cases are one run of values to one place a branch on one unsigned compare, so `phiopt` can make a converted switch a `select`. `switch-dispatch.constant-arms.unpredictable` on wasm32 runs in about half the time (#3380).
 - On wasm32, a switch whose answers are the addresses of read-only data is a range check and a load from a table of those addresses, in place of a chain of compares. The `switch-dispatch.names` case of rucc-corpus runs 387 M operators in place of 705 M (#3374).
 - On wasm32 a loop that counts bits is one `popcnt`, `clz` or `ctz` at `-O2`, as on a native target that has the instruction. The target now has a table of the counts that are one operator, which the loop deletion pass reads. `while (x) { x &= x - 1; n++; }` and the three other bit loops of rucc-corpus run in 0.6 times the time of clang's build, where they took 2.75 times. (#3372)
 - A call of a function to itself whose result is returned is a jump to the top of the function at `-O2`, `-O3`, `-Os` and `-Oz`, as gcc's `tailr` pass makes it. On wasm32, which has no tail calls, such a recursion no longer adds a frame for each step, and tail-dispatch.rotate of rucc-corpus runs in 0.93 ms where it took 18.8 ms. A function with a local in its frame, `alloca`, `va_start` or a call that can return twice keeps the call. `-fno-optimize-sibling-calls` turns the pass off, as for gcc. (#3369)
