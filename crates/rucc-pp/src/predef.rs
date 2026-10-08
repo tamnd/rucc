@@ -152,7 +152,8 @@ pub struct Predef {
     pub exceptions: bool,
     /// `-D` in command line order. `FOO` means `FOO=1`, as GCC has it.
     pub defines: Vec<String>,
-    /// `-U` in command line order, applied after the defines.
+    /// `-U` in command line order, applied after the defines. No define comes after an undefine
+    /// of its name on the command line, because the driver takes the undefine back.
     pub undefines: Vec<String>,
     /// The instruction set extensions the unit is built for, which decides `__SSE4_2__` and the
     /// rest of that family on x86-64 and nothing anywhere else.
@@ -324,8 +325,9 @@ pub(crate) fn built_in(target: &TargetInfo, opts: &Predef) -> String {
 /// `-D` and `-U`, as the text of a file.
 ///
 /// Empty when there are none, so that the caller can skip adding a file that would say
-/// nothing. The undefines come last whatever order they were written in, because `-U` beats
-/// `-D` in GCC no matter which side of it the `-D` was on.
+/// nothing. GCC reads `-D` and `-U` in command line order, and the driver takes back an earlier
+/// flag of the other kind for the same name. So no define comes after an undefine of its name, and
+/// the undefines can come last.
 pub(crate) fn command_line(opts: &Predef) -> String {
     let mut d = Defs::new();
     for define in &opts.defines {
