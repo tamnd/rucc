@@ -239,70 +239,77 @@ impl Liveness {
     #[must_use]
     pub fn of(func: &Func, cfg: &Cfg) -> Self {
         let blocks = cfg.capacity();
-        let mut live_in = vec![Set::default(); blocks];
-        let mut live_out = vec![Set::default(); blocks];
+        let live_in = vec![Set::default(); blocks];
+        let live_out = vec![Set::default(); blocks];
 
         // What each block reads before it writes, and what it writes, parameters included. Live in
         // is then live out with the second taken out and the first put in, which is what walking
         // the block backwards gives without walking it.
         let order: Vec<Block> = cfg.postorder().to_vec();
-        let mut reads: Vec<Vec<Value>> = vec![Vec::new(); blocks];
-        let mut writes: Vec<Vec<Value>> = vec![Vec::new(); blocks];
-        let mut defined = Set::default();
-        let mut read = Set::default();
-        for &block in &order {
-            let at = block.index();
-            for &param in &func[block].params {
-                defined.insert(param);
-                writes[at].push(param);
-            }
-            for inst in func.insts(block) {
-                let data = &func[inst];
-                let branches = func.successors(inst).flat_map(|call| &func[call.args]);
-                for &arg in func[data.args].iter().chain(branches) {
-                    if !defined.contains(arg) && read.insert(arg) {
-                        reads[at].push(arg);
-                    }
-                }
-                for result in data.results() {
-                    defined.insert(result);
-                    writes[at].push(result);
-                }
-            }
-            for &value in &writes[at] {
-                defined.remove(value);
-            }
-            for &value in &reads[at] {
-                read.remove(value);
-            }
-        }
+        let (reads, writes) = effects(func, &order);
+        let mut live = Self { live_in, live_out };
+        live.settle(cfg, &order, &reads, &writes);
+        live
+    }
 
+    /// The same after a change that left what is live at the edges of every block outside
+    /// `blocks` as it was, worked out again over those blocks alone.
+    ///
+    /// For a pass that moved instructions around inside a region and knows nothing outside it can
+    /// have a different answer. Loop invariant motion is the one: a hoist takes instructions out
+    /// of a loop and into its preheader, and the only blocks where what is live can change are
+    /// those. Working the whole function out again for each loop that asks after one was most of
+    /// what the pass cost on lz4hc.c at `-O2`.
+    ///
+    /// The region starts from nothing and is settled against the blocks around it, so a value no
+    /// longer live in it goes, which starting from what it had would never find out.
+    pub fn refresh(&mut self, func: &Func, cfg: &Cfg, blocks: &[Block]) {
+        let mut inside = vec![false; cfg.capacity()];
+        for &block in blocks {
+            inside[block.index()] = true;
+        }
+        let order: Vec<Block> =
+            cfg.postorder().iter().copied().filter(|block| inside[block.index()]).collect();
+        for &block in &order {
+            self.live_in[block.index()].clear();
+            self.live_out[block.index()].clear();
+        }
+        let (reads, writes) = effects(func, &order);
+        self.settle(cfg, &order, &reads, &writes);
+    }
+
+    /// The fixpoint over the blocks in `order`, with what each reads and writes at the same place
+    /// in the two lists, and the live-in of every block outside them taken as it stands.
+    fn settle(&mut self, cfg: &Cfg, order: &[Block], reads: &[Vec<Value>], writes: &[Vec<Value>]) {
         // Postorder, so a block is reached after the blocks it branches to wherever the graph
         // allows one order to do that. A loop is what makes a second round necessary, and the
         // second round is only the blocks something changed under.
-        let mut stale = vec![true; blocks];
+        let mut stale = vec![false; cfg.capacity()];
+        for &block in order {
+            stale[block.index()] = true;
+        }
         let mut set = Set::default();
         let mut again = true;
         while again {
             again = false;
-            for &block in &order {
+            for (place, &block) in order.iter().enumerate() {
                 let at = block.index();
                 if !std::mem::take(&mut stale[at]) {
                     continue;
                 }
                 set.clear();
                 for &successor in cfg.successors(block) {
-                    set.union_with(&live_in[successor.index()]);
+                    set.union_with(&self.live_in[successor.index()]);
                 }
-                live_out[at].clone_from(&set);
-                for &value in &writes[at] {
+                self.live_out[at].clone_from(&set);
+                for &value in &writes[place] {
                     set.remove(value);
                 }
-                for &value in &reads[at] {
+                for &value in &reads[place] {
                     set.insert(value);
                 }
-                if live_in[at] != set {
-                    live_in[at].clone_from(&set);
+                if self.live_in[at] != set {
+                    self.live_in[at].clone_from(&set);
                     for &pred in cfg.predecessors(block) {
                         stale[pred.index()] = true;
                         again = true;
@@ -310,8 +317,6 @@ impl Liveness {
                 }
             }
         }
-
-        Self { live_in, live_out }
     }
 
     /// How many of what is live when control arrives at the block fall in each group.
@@ -429,6 +434,41 @@ impl LiveHere<'_> {
     pub fn iter(&self) -> impl Iterator<Item = Value> + use<'_> {
         self.set.iter()
     }
+}
+
+/// What each block reads before it writes and what it writes, parameters included, at the place
+/// in the two lists the block has in `order`.
+fn effects(func: &Func, order: &[Block]) -> (Vec<Vec<Value>>, Vec<Vec<Value>>) {
+    let mut reads: Vec<Vec<Value>> = vec![Vec::new(); order.len()];
+    let mut writes: Vec<Vec<Value>> = vec![Vec::new(); order.len()];
+    let mut defined = Set::default();
+    let mut read = Set::default();
+    for (at, &block) in order.iter().enumerate() {
+        for &param in &func[block].params {
+            defined.insert(param);
+            writes[at].push(param);
+        }
+        for inst in func.insts(block) {
+            let data = &func[inst];
+            let branches = func.successors(inst).flat_map(|call| &func[call.args]);
+            for &arg in func[data.args].iter().chain(branches) {
+                if !defined.contains(arg) && read.insert(arg) {
+                    reads[at].push(arg);
+                }
+            }
+            for result in data.results() {
+                defined.insert(result);
+                writes[at].push(result);
+            }
+        }
+        for &value in &writes[at] {
+            defined.remove(value);
+        }
+        for &value in &reads[at] {
+            read.remove(value);
+        }
+    }
+    (reads, writes)
 }
 
 /// Walks one block backwards, taking out what each instruction defines and putting in what it
