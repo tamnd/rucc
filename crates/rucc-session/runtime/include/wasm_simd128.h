@@ -52,47 +52,6 @@ typedef int __i32x2 __attribute__((__vector_size__(8), __aligned__(8)));
 typedef unsigned int __u32x2 __attribute__((__vector_size__(8), __aligned__(8)));
 typedef float __f32x2 __attribute__((__vector_size__(8), __aligned__(8)));
 
-/* A float rounded to an integer in C. Wasm rounds each operation to the nearest even, so adding
- * 2^23 to a float below it and taking it away again leaves the nearest integer, ties to even.
- * The other roundings start from that one. The sign of the answer is the sign of the operand,
- * which keeps -0.0 and the negative numbers that round to zero. A NaN comes back quiet. */
-static __inline__ float __rucc_wasm_nearest_f32(float __x) {
-  float __a = __builtin_fabsf(__x);
-  if (__a < 0x1p23f) return __builtin_copysignf((__a + 0x1p23f) - 0x1p23f, __x);
-  return __x != __x ? __x + __x : __x;
-}
-static __inline__ float __rucc_wasm_floor_f32(float __x) {
-  float __r = __rucc_wasm_nearest_f32(__x);
-  return __builtin_copysignf(__r > __x ? __r - 1.0f : __r, __x);
-}
-static __inline__ float __rucc_wasm_ceil_f32(float __x) {
-  float __r = __rucc_wasm_nearest_f32(__x);
-  return __builtin_copysignf(__r < __x ? __r + 1.0f : __r, __x);
-}
-static __inline__ float __rucc_wasm_trunc_f32(float __x) {
-  float __a = __builtin_fabsf(__x);
-  float __r = __rucc_wasm_nearest_f32(__a);
-  return __builtin_copysignf(__r > __a ? __r - 1.0f : __r, __x);
-}
-static __inline__ double __rucc_wasm_nearest_f64(double __x) {
-  double __a = __builtin_fabs(__x);
-  if (__a < 0x1p52) return __builtin_copysign((__a + 0x1p52) - 0x1p52, __x);
-  return __x != __x ? __x + __x : __x;
-}
-static __inline__ double __rucc_wasm_floor_f64(double __x) {
-  double __r = __rucc_wasm_nearest_f64(__x);
-  return __builtin_copysign(__r > __x ? __r - 1.0 : __r, __x);
-}
-static __inline__ double __rucc_wasm_ceil_f64(double __x) {
-  double __r = __rucc_wasm_nearest_f64(__x);
-  return __builtin_copysign(__r < __x ? __r + 1.0 : __r, __x);
-}
-static __inline__ double __rucc_wasm_trunc_f64(double __x) {
-  double __a = __builtin_fabs(__x);
-  double __r = __rucc_wasm_nearest_f64(__a);
-  return __builtin_copysign(__r > __a ? __r - 1.0 : __r, __x);
-}
-
 /* Loads and stores. Through memcpy, since none of them has to be aligned. */
 static __inline__ v128_t wasm_v128_load(const void *__mem) {
   v128_t __r;
@@ -961,25 +920,25 @@ static __inline__ v128_t wasm_f32x4_sqrt(v128_t __a) {
 static __inline__ v128_t wasm_f32x4_ceil(v128_t __a) {
   __f32x4 __x = (__f32x4)__a;
   __f32x4 __r;
-  for (int __i = 0; __i < 4; __i++) __r[__i] = __rucc_wasm_ceil_f32(__x[__i]);
+  for (int __i = 0; __i < 4; __i++) __r[__i] = __builtin_ceilf(__x[__i]);
   return (v128_t)__r;
 }
 static __inline__ v128_t wasm_f32x4_floor(v128_t __a) {
   __f32x4 __x = (__f32x4)__a;
   __f32x4 __r;
-  for (int __i = 0; __i < 4; __i++) __r[__i] = __rucc_wasm_floor_f32(__x[__i]);
+  for (int __i = 0; __i < 4; __i++) __r[__i] = __builtin_floorf(__x[__i]);
   return (v128_t)__r;
 }
 static __inline__ v128_t wasm_f32x4_trunc(v128_t __a) {
   __f32x4 __x = (__f32x4)__a;
   __f32x4 __r;
-  for (int __i = 0; __i < 4; __i++) __r[__i] = __rucc_wasm_trunc_f32(__x[__i]);
+  for (int __i = 0; __i < 4; __i++) __r[__i] = __builtin_truncf(__x[__i]);
   return (v128_t)__r;
 }
 static __inline__ v128_t wasm_f32x4_nearest(v128_t __a) {
   __f32x4 __x = (__f32x4)__a;
   __f32x4 __r;
-  for (int __i = 0; __i < 4; __i++) __r[__i] = __rucc_wasm_nearest_f32(__x[__i]);
+  for (int __i = 0; __i < 4; __i++) __r[__i] = __builtin_rintf(__x[__i]);
   return (v128_t)__r;
 }
 static __inline__ v128_t wasm_f32x4_add(v128_t __a, v128_t __b) {
@@ -1037,25 +996,25 @@ static __inline__ v128_t wasm_f64x2_sqrt(v128_t __a) {
 static __inline__ v128_t wasm_f64x2_ceil(v128_t __a) {
   __f64x2 __x = (__f64x2)__a;
   __f64x2 __r;
-  for (int __i = 0; __i < 2; __i++) __r[__i] = __rucc_wasm_ceil_f64(__x[__i]);
+  for (int __i = 0; __i < 2; __i++) __r[__i] = __builtin_ceil(__x[__i]);
   return (v128_t)__r;
 }
 static __inline__ v128_t wasm_f64x2_floor(v128_t __a) {
   __f64x2 __x = (__f64x2)__a;
   __f64x2 __r;
-  for (int __i = 0; __i < 2; __i++) __r[__i] = __rucc_wasm_floor_f64(__x[__i]);
+  for (int __i = 0; __i < 2; __i++) __r[__i] = __builtin_floor(__x[__i]);
   return (v128_t)__r;
 }
 static __inline__ v128_t wasm_f64x2_trunc(v128_t __a) {
   __f64x2 __x = (__f64x2)__a;
   __f64x2 __r;
-  for (int __i = 0; __i < 2; __i++) __r[__i] = __rucc_wasm_trunc_f64(__x[__i]);
+  for (int __i = 0; __i < 2; __i++) __r[__i] = __builtin_trunc(__x[__i]);
   return (v128_t)__r;
 }
 static __inline__ v128_t wasm_f64x2_nearest(v128_t __a) {
   __f64x2 __x = (__f64x2)__a;
   __f64x2 __r;
-  for (int __i = 0; __i < 2; __i++) __r[__i] = __rucc_wasm_nearest_f64(__x[__i]);
+  for (int __i = 0; __i < 2; __i++) __r[__i] = __builtin_rint(__x[__i]);
   return (v128_t)__r;
 }
 static __inline__ v128_t wasm_f64x2_add(v128_t __a, v128_t __b) {

@@ -1550,8 +1550,12 @@ block0(%0: ptr, %1: i32):
 fn body_of(text: &str, name: &str, optimize: bool) -> String {
     let mut names = Interner::new();
     let module = rucc_ir::parse(text, &mut names).expect("the IR parses");
-    let options =
-        rucc_wasm::Options { features: Cpu::Lime1.features(), optimize, thread_context: false };
+    let options = rucc_wasm::Options {
+        features: Cpu::Lime1.features(),
+        optimize,
+        thread_context: false,
+        math_errno: false,
+    };
     let object = rucc_wasm::translate(&module, &names, options).unwrap();
     let listing = rucc_wasm::assembly(&object).unwrap();
     let start = listing.find(&format!("\n{name}:\n")).expect("the function is in the listing");
@@ -1894,7 +1898,8 @@ fn bulk_body_of(text: &str, name: &str, features: Features) -> String {
     let mut names = Interner::new();
     let mut module = rucc_ir::parse(text, &mut names).expect("the IR parses");
     rucc_wasm::bulk(&mut module, &names, features);
-    let options = rucc_wasm::Options { features, optimize: true, thread_context: false };
+    let options =
+        rucc_wasm::Options { features, optimize: true, thread_context: false, math_errno: false };
     let object = rucc_wasm::translate(&module, &names, options).unwrap();
     let listing = rucc_wasm::assembly(&object).unwrap();
     let start = listing.find(&format!("\n{name}:\n")).expect("the function is in the listing");
@@ -2516,6 +2521,7 @@ fn the_thread_context_reaches_the_stack_pointer_and_the_tls_base_through_calls()
         features: Cpu::Lime1.features(),
         optimize: true,
         thread_context,
+        math_errno: false,
     };
     let object = rucc_wasm::translate(&module, &names, options(true)).unwrap();
     let listing = rucc_wasm::assembly(&object).unwrap();
@@ -2573,7 +2579,8 @@ fn the_text_reads_back_into_the_same_object() {
         for optimize in [false, true] {
             for thread_context in [false, true] {
                 let features = Cpu::Lime1.features();
-                let options = rucc_wasm::Options { features, optimize, thread_context };
+                let options =
+                    rucc_wasm::Options { features, optimize, thread_context, math_errno: false };
                 let object = rucc_wasm::translate(&module, &names, options).unwrap();
                 let listing = rucc_wasm::assembly(&object).unwrap();
                 let read = rucc_wasm::assemble(&listing)

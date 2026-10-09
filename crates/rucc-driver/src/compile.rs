@@ -1304,6 +1304,7 @@ fn generate(
             features: opts.wasm,
             optimize: opts.opt_level.runs_optimizer(),
             thread_context,
+            math_errno: opts.math.errno,
         };
         if matches!(opts.emit, EmitKind::WasmTree) {
             return rucc_wasm::tree(module, names, wasm).map(Artifact::Text).map_err(refused);

@@ -71,10 +71,14 @@ pub(crate) const I32_ROTR: u8 = 0x78;
 /// What an `i32` arithmetic opcode is plus this is the `i64` one, from `clz` to `rotr`.
 pub(crate) const I64_FROM_I32: u8 = 0x12;
 
+pub(crate) const F32_ABS: u8 = 0x8b;
 pub(crate) const F32_NEG: u8 = 0x8c;
 pub(crate) const F32_ADD: u8 = 0x92;
+pub(crate) const F32_COPYSIGN: u8 = 0x98;
+pub(crate) const F64_ABS: u8 = 0x99;
 pub(crate) const F64_NEG: u8 = 0x9a;
 pub(crate) const F64_ADD: u8 = 0xa0;
+pub(crate) const F64_COPYSIGN: u8 = 0xa6;
 
 pub(crate) const I32_WRAP_I64: u8 = 0xa7;
 pub(crate) const I64_EXTEND_I32_S: u8 = 0xac;

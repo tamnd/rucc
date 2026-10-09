@@ -119,12 +119,16 @@ pub struct Options {
     /// thread-local variable is an offset from the TLS base and not a place in memory. That is
     /// section 5.8 of the WebAssembly notes.
     pub thread_context: bool,
+    /// Whether `sqrt` and `sqrtf` must set `errno` for a negative operand, as `-fmath-errno`
+    /// asks. A call to them then stays a call and is not `f64.sqrt` or `f32.sqrt`. The other
+    /// maths functions that have an instruction never set `errno`.
+    pub math_errno: bool,
 }
 
 impl From<Features> for Options {
     /// The options of `-O0` with `features`.
     fn from(features: Features) -> Self {
-        Options { features, optimize: false, thread_context: false }
+        Options { features, optimize: false, thread_context: false, math_errno: false }
     }
 }
 
@@ -408,6 +412,7 @@ fn translate_with(
         features,
         optimize: options.optimize,
         thread_context: options.thread_context,
+        math_errno: options.math_errno,
         out: wasm::Module::default(),
         functions: Map::default(),
         data: Map::default(),
@@ -663,6 +668,8 @@ pub(crate) struct Unit<'a> {
     /// Whether the stack pointer and the TLS base are reached through calls. See
     /// [`Options::thread_context`].
     pub(crate) thread_context: bool,
+    /// Whether `sqrt` stays a call. See [`Options::math_errno`].
+    pub(crate) math_errno: bool,
     pub(crate) out: wasm::Module,
     /// The function symbols, by the name in the object.
     functions: Map<String, (u32, u32)>,

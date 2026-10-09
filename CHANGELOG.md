@@ -12,6 +12,7 @@ All notable changes are recorded here. The format follows [Keep a Changelog](htt
 ### Added
 
 - `btf_decl_tag` is written into the debugging information the way gcc 16 writes it: a chain of `DW_TAG_GNU_annotation` entries under the unit, named `btf_decl_tag` and holding the tag's string, that a function, a variable, a parameter, a local or a member points at with `DW_AT_GNU_annotation`. A chain is written once for everything with the same tags, and a declaration seen again keeps the tags of every declaration in the order gcc's merge leaves them. pahole reads these into the kernel's BTF. gcc's own `dwarf-btf-decl-tag-*.c` counts are held against it. `btf_type_tag` is still checked and not written.
+- On a wasm target, a call to `sqrt`, `ceil`, `floor`, `trunc`, `rint`, `nearbyint`, `fabs` or `copysign`, to the `f` form of each, or to the `__builtin_` spelling of each, is the wasm instruction, as clang writes it. The plain spelling stays a call under `-fno-builtin`, `-ffreestanding` and `-fno-builtin-` of the name, and where the module defines the function. Under `-fmath-errno`, `sqrt` is the instruction and a call when the answer is a NaN. At O1 and above, the integer masks that the optimizer makes of `fabs` and `copysign` are `abs`, `copysign` and `neg` again. `wasm_simd128.h` rounds with these builtins and no longer by hand (#3440).
 
 ### Fixed
 
