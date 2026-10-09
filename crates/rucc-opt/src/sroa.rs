@@ -44,7 +44,9 @@
 //! whether this build is one. A read of four or eight bytes at a lane is an `extractlane`, and a
 //! write of one is an `insertlane`, which reads the vector the way a store of part of a piece
 //! would. A copy of the whole sixteen bytes is a load or a store of the vector. Anything else
-//! keeps the local in memory, as a narrower lane or a lane read across two would.
+//! keeps the local in memory, as a narrower lane or a lane read across two would. On wasm with
+//! SIMD128, a read or a write of one or two bytes at a lane is a lane as well, because wasm has
+//! lanes of `i8` and `i16`, and a float read or written at a lane of its width is a float lane.
 //!
 //! This is what `<emmintrin.h>` code looks like after inlining: every intrinsic is a vector
 //! operator on copies of its operands, or a walk over the lanes of one, and tamnd/rucc#2320 is the
@@ -152,7 +154,36 @@ impl Pass for Sroa {
             .filter(|&inst| func[inst].opcode == Opcode::Alloca && func[func[inst].args].is_empty())
             .collect();
         let mut readers = Readers::new(func);
+        let graph = Graph { cfg, frontiers, entry, layout: &layout, pre: &pre, last: &last };
+        let mut done: Set<Inst> = Set::default();
+        // On wasm, the vectors first, and again until there are no more. A copy out of a vector
+        // that is now a value is a store of the vector, so the local it copies to is a vector
+        // too. In the order of the allocas, a local that `<wasm_simd128.h>` copies a vector
+        // into and then writes one lane of is often first, and with only copies and the lane to
+        // look at it is cut into integers at the lane.
+        let mut again = target.simd128;
+        while again {
+            let before = done.len();
+            for &alloca in &allocas {
+                if done.contains(&alloca) {
+                    continue;
+                }
+                let Ok(Some(plan)) = plan(func, &rpo, &mut readers, alloca, target) else {
+                    continue;
+                };
+                if !plan.vector || !fuel.take() {
+                    continue;
+                }
+                Rewrite::new(func, entry, &plan, target).run(func, graph, &mut readers);
+                stats.optimized(SCALARIZED);
+                done.insert(alloca);
+            }
+            again = done.len() > before;
+        }
         for alloca in allocas {
+            if done.contains(&alloca) {
+                continue;
+            }
             let plan = match plan(func, &rpo, &mut readers, alloca, target) {
                 Ok(Some(plan)) => plan,
                 Ok(None) => continue,
@@ -165,9 +196,7 @@ impl Pass for Sroa {
                 stats.missed(NO_FUEL);
                 continue;
             }
-            let mut rewrite = Rewrite::new(func, entry, &plan, target);
-            let graph = Graph { cfg, frontiers, entry, layout: &layout, pre: &pre, last: &last };
-            rewrite.run(func, graph, &mut readers);
+            Rewrite::new(func, entry, &plan, target).run(func, graph, &mut readers);
             stats.optimized(SCALARIZED);
         }
         stats
@@ -509,7 +538,7 @@ fn plan(
     let vector = scalar(|_, ty| ty.is_vector())
         || scalar(|_, ty| is_quad(ty))
             && scalar(|width, ty| !is_quad(ty) && matches!(width, 4 | 8));
-    let pieces = if vector { whole(&uses, size)? } else { pieces(&uses, target)? };
+    let pieces = if vector { whole(&uses, size, target)? } else { pieces(&uses, target)? };
     Ok(Some(Plan { alloca, pieces, vector, uses, derived, ends }))
 }
 
@@ -729,8 +758,11 @@ fn convertible(from: Type, to: Type, pointer: Option<u64>) -> bool {
 }
 
 /// The one vector piece of a local that is read or written whole as a vector, or why it has to
-/// stay in memory.
-fn whole(uses: &[(Inst, Use)], size: u64) -> Result<Vec<Piece>, &'static str> {
+/// stay in memory. wasm has lanes of one and two bytes as well, so there a read or a write of a
+/// `char` or a `short` lane is a lane too.
+fn whole(uses: &[(Inst, Use)], size: u64, target: Target) -> Result<Vec<Piece>, &'static str> {
+    let lane_width =
+        |width: u64| matches!(width, 4 | 8) || target.simd128 && matches!(width, 1 | 2);
     let mut ty = None;
     let mut lane = None;
     for (_, found) in uses {
@@ -742,7 +774,7 @@ fn whole(uses: &[(Inst, Use)], size: u64) -> Result<Vec<Piece>, &'static str> {
             // The vector copied whole as the float the calling convention passes it as, which
             // is the same register and so only a bitcast away.
             Some((_, _, it)) if is_quad(it) && at == 0 && width == size => {}
-            Some((..)) if matches!(width, 4 | 8) && at % width == 0 => {
+            Some((..)) if lane_width(width) && at % width == 0 => {
                 lane.get_or_insert(width);
             }
             Some(_) => return Err(OVERLAP),
@@ -752,7 +784,7 @@ fn whole(uses: &[(Inst, Use)], size: u64) -> Result<Vec<Piece>, &'static str> {
     }
     // Only the float and lanes of it, so the vector is lanes as wide as the first one.
     let lanes = |width: u64| {
-        let count = u32::try_from(size / width).expect("a lane is four or eight bytes");
+        let count = u32::try_from(size / width).expect("a lane is at least one byte");
         Type::vector(integer(width), count)
     };
     let ty = match (ty, lane) {
@@ -1192,11 +1224,24 @@ impl<'a> Rewrite<'a> {
         forward: &mut Map<Value, Value>,
     ) -> bool {
         let whole = self.plan.pieces[0].ty;
-        // The vector as lanes of the access's width, and which lane the access is.
-        let shape = |at: u64, size: u64| {
-            let lanes = u32::try_from(16 / size).expect("a lane is four or eight bytes");
+        // The vector as lanes of the access's width, and which lane the access is. wasm has a lane
+        // of each float type, so there a float access is a float lane and needs no conversion.
+        let simd128 = self.target.simd128;
+        let lane_of = |size: u64, ty: Type| {
+            if simd128
+                && ty.is_float()
+                && matches!(ty.bits(), 32 | 64)
+                && u64::from(ty.bits()) == size * 8
+            {
+                ty
+            } else {
+                integer(size)
+            }
+        };
+        let shape = |at: u64, size: u64, ty: Type| {
+            let lanes = u32::try_from(16 / size).expect("a lane is at least one byte");
             let lane = u8::try_from(at / size).expect("a lane of a sixteen byte vector");
-            (Type::vector(integer(size), lanes), lane)
+            (Type::vector(lane_of(size, ty), lanes), lane)
         };
         match found {
             Use::Load { at, size, ty } => {
@@ -1205,7 +1250,7 @@ impl<'a> Rewrite<'a> {
                 let read = if size == WHOLE {
                     convert(func, inst, value, whole, ty)
                 } else {
-                    let (lanes, lane) = shape(at, size);
+                    let (lanes, lane) = shape(at, size, ty);
                     let vector = convert(func, inst, value, whole, lanes);
                     let args = func.push_values(&[vector]);
                     let data = InstData {
@@ -1213,8 +1258,8 @@ impl<'a> Rewrite<'a> {
                         extra: Extra::Lane(lane),
                         ..InstData::new(Opcode::ExtractLane)
                     };
-                    let one = emit(func, inst, data, integer(size));
-                    convert(func, inst, one, integer(size), ty)
+                    let one = emit(func, inst, data, lanes.lane());
+                    convert(func, inst, one, lanes.lane(), ty)
                 };
                 forward.insert(result, read);
             }
@@ -1222,10 +1267,10 @@ impl<'a> Rewrite<'a> {
                 let written = if size == WHOLE {
                     convert(func, inst, value, ty, whole)
                 } else {
-                    let (lanes, lane) = shape(at, size);
+                    let (lanes, lane) = shape(at, size, ty);
                     let before = self.value(func, 0, &current.values);
                     let vector = convert(func, inst, before, whole, lanes);
-                    let one = convert(func, inst, value, ty, integer(size));
+                    let one = convert(func, inst, value, ty, lanes.lane());
                     let args = func.push_values(&[vector, one]);
                     let data = InstData {
                         args,
@@ -2124,6 +2169,66 @@ block2:
         assert_eq!(func[imm].bits(), 0x3f3f_3f3f);
         let result = func[splat].first_result.expect("a splat produces its value");
         assert_eq!(func[result].ty, Type::vector(Type::int(32), 4));
+    }
+
+    /// `wasm_i16x8_replace_lane` copies its vector into a local, writes one `short` lane, and copies
+    /// it out. The local it writes is the first one, and on its own it is only copies and a lane,
+    /// so it becomes a vector only once the vector it copies from is one. Each of the three is
+    /// then the same value, and the lane is one `insertlane` of an `i16` lane.
+    #[test]
+    fn on_wasm_a_local_copied_from_a_vector_and_written_at_a_short_lane_is_a_vector() {
+        let text = "block0(%0: ptr, %1: i16):
+    %2 = alloca, size 16, align 16
+    %3 = alloca, size 16, align 16
+    %4 = alloca, size 16, align 16
+    %5 = load.i16x8 %0, align 16
+    store %5 -> %3, align 16
+    memcpy %2, %3, size 16, align 16
+    %6 = iconst.i32 4
+    %7 = ptr_add %2, %6
+    store %1 -> %7, align 2
+    memcpy %4, %2, size 16, align 16
+    %8 = load.i16x8 %4, align 16
+    store %8 -> %0, align 16
+    return
+";
+        let (module, stats) = on_simd128("(ptr, i16)", text);
+        assert_eq!(stats.count(Kind::Optimized, SCALARIZED), 3);
+        let func = body(&module);
+        assert_eq!(count_of(func, Opcode::Alloca), 0);
+        assert_eq!(count_of(func, Opcode::ExtractLane), 0);
+        let insert = func
+            .blocks()
+            .flat_map(|block| func.insts(block))
+            .find(|&inst| func[inst].opcode == Opcode::InsertLane)
+            .expect("one insertlane");
+        assert_eq!(func[insert].extra, Extra::Lane(2));
+        let result = func[insert].first_result.expect("an insertlane produces its vector");
+        assert_eq!(func[result].ty, Type::vector(Type::int(16), 8));
+        assert_eq!(count_of(func, Opcode::InsertLane), 1);
+    }
+
+    /// A float written at a lane of a float vector on wasm is a float lane, which wasm has, and
+    /// not an integer lane of the same bits.
+    #[test]
+    fn on_wasm_a_float_written_at_a_lane_is_a_float_lane() {
+        let text = "block0(%0: ptr, %1: f32):
+    %2 = alloca, size 16, align 16
+    %3 = load.f32x4 %0, align 16
+    store %3 -> %2, align 16
+    %4 = iconst.i32 8
+    %5 = ptr_add %2, %4
+    store %1 -> %5, align 4
+    %6 = load.f32x4 %2, align 16
+    store %6 -> %0, align 16
+    return
+";
+        let (module, stats) = on_simd128("(ptr, f32)", text);
+        assert_eq!(stats.count(Kind::Optimized, SCALARIZED), 1);
+        let func = body(&module);
+        assert_eq!(count_of(func, Opcode::Alloca), 0);
+        assert_eq!(count_of(func, Opcode::Bitcast), 0);
+        assert_eq!(count_of(func, Opcode::InsertLane), 1);
     }
 
     /// wasm has no register for the sixteen byte float, so a vector copied as one stays in memory.

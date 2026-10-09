@@ -157,6 +157,67 @@ fn with_simd128_a_vector_local_stays_a_value() {
     );
 }
 
+/// Vectors built from their lanes, a lane put in or read out, and the negation and the bitwise
+/// not, through `<wasm_simd128.h>` and as GNU vector operators.
+const BUILT: &str = "\
+#include <wasm_simd128.h>
+typedef int v4si __attribute__((vector_size(16)));
+v128_t neg(v128_t a) { return wasm_i32x4_neg(a); }
+v128_t not(v128_t a) { return wasm_v128_not(a); }
+v128_t splat(int16_t x) { return wasm_i16x8_splat(x); }
+v128_t make(float a, float b, float c, float d) { return wasm_f32x4_make(a, b, c, d); }
+v128_t konst(void) { return wasm_i32x4_const(1, 2, 3, 4); }
+v128_t put(v128_t v, int8_t x) { return wasm_i8x16_replace_lane(v, 5, x); }
+int8_t get_s(v128_t v) { return wasm_i8x16_extract_lane(v, 3); }
+uint16_t get_u(v128_t v) { return wasm_u16x8_extract_lane(v, 1); }
+v4si minus(v4si a) { return -a; }
+v4si inv(v4si a) { return ~a; }
+v4si four(int x) { return (v4si){x, x, x, x}; }
+";
+
+/// Each function of [`BUILT`] is the instructions that clang 23 writes for it at `-O2`, with a
+/// `return` at the end where clang falls through. A vector of one value is a `splat`, a vector of
+/// values is a `splat` and a `replace_lane` for each other lane, a vector of constants is one
+/// `v128.const`, and a `signed char` lane that is returned is read with `extract_lane_s`.
+#[test]
+fn with_simd128_a_vector_built_from_its_lanes_is_what_clang_writes() {
+    let out = assembly(BUILT, &["-msimd128"]);
+    assert!(out.status.success(), "{}", String::from_utf8_lossy(&out.stderr));
+    let text = String::from_utf8(out.stdout).unwrap();
+    let want: [(&str, &[&str]); 11] = [
+        ("neg", &["local.get\t0", "i32x4.neg"]),
+        ("not", &["local.get\t0", "v128.not"]),
+        ("splat", &["local.get\t0", "i16x8.splat"]),
+        (
+            "make",
+            &[
+                "local.get\t0",
+                "f32x4.splat",
+                "local.get\t1",
+                "f32x4.replace_lane\t1",
+                "local.get\t2",
+                "f32x4.replace_lane\t2",
+                "local.get\t3",
+                "f32x4.replace_lane\t3",
+            ],
+        ),
+        ("konst", &["v128.const\t1, 2, 3, 4"]),
+        ("put", &["local.get\t0", "local.get\t1", "i8x16.replace_lane\t5"]),
+        ("get_s", &["local.get\t0", "i8x16.extract_lane_s\t3"]),
+        ("get_u", &["local.get\t0", "i16x8.extract_lane_u\t1"]),
+        ("minus", &["local.get\t0", "i32x4.neg"]),
+        ("inv", &["local.get\t0", "v128.not"]),
+        ("four", &["local.get\t0", "i32x4.splat"]),
+    ];
+    for (name, ops) in want {
+        let code: Vec<&str> = body(&text, name)
+            .into_iter()
+            .filter(|op| !op.starts_with('.') && *op != "return")
+            .collect();
+        assert_eq!(code, ops, "{name}");
+    }
+}
+
 /// A program that does each operator on vectors of edge values, and the same operator on each
 /// lane as a scalar, and exits with 1 if a lane differs. The scalar side is in a function that is
 /// not inlined, so it is plain scalar code. A compare gives -1 or 0 in each lane. Every second lane

@@ -207,6 +207,16 @@
 //! These are written by hand because each pattern is three instructions deep, and the rule tables
 //! expand an operand one level and no further.
 //!
+//! ### A bitcast back to where it started
+//!
+//! A bitcast keeps every bit, so `bitcast.T (bitcast.U x)` is `x` when `x` is a `T`, and a bitcast
+//! to the type its operand already has is the operand. [`crate::sroa`] leaves the pair in a vector
+//! on wasm that it keeps as one value and writes lane by lane in another shape, which is what
+//! `(v4si){a, a, a, a}` is after `<wasm_simd128.h>` copies it into its own vector type. Without
+//! this, the back end sees the chain of lane writes cut into pieces and writes each lane where
+//! clang writes one `i32x4.splat`. It is written by hand because the rule tables do not compare
+//! two types.
+//!
 //! # Why it needs dead code elimination after it
 //!
 //! The rewrite turns the `xor` into the comparison and leaves the original comparison where it
@@ -268,6 +278,13 @@ const LANE: &str = "lane read back out of a pair packed into a wider integer";
 
 /// Recorded for one of those that would have folded if there had been fuel for it.
 const NO_FUEL_LANE: &str = "lane read out of a packed pair left alone, the pass ran out of fuel";
+
+/// Recorded once for each bitcast that gives back the type its operand was cast from.
+const ROUND_TRIP: &str = "bitcast back to the type of the value it was cast from";
+
+/// Recorded for one of those that would have folded if there had been fuel for it.
+const NO_FUEL_ROUND_TRIP: &str =
+    "bitcast back to the first type left alone, the pass ran out of fuel";
 
 /// Recorded once for each shift whose operand is a shift through a narrowing.
 const NARROWED: &str = "shift through a narrowing folded into the wide shift";
@@ -478,7 +495,8 @@ impl Pass for Simplify {
 
     fn describe(&self) -> &'static str {
         "the identities, the strength reductions, the canonicalisations, the four comparison \
-         rewrites written by hand, and a lane read back out of a packed pair"
+         rewrites written by hand, a lane read back out of a packed pair, and a bitcast back to \
+         where it started"
     }
 
     fn preserves(&self) -> Preserved {
@@ -636,6 +654,9 @@ impl<'a> Finder<'a> {
         }
         if let Some(rewrite) = narrowed_shift(func, inst) {
             return Some((Found::Rule(rewrite), NARROWED, NO_FUEL_NARROWED));
+        }
+        if let Some(value) = round_trip(func, inst) {
+            return Some((Found::Rule(Rewrite::Value(value)), ROUND_TRIP, NO_FUEL_ROUND_TRIP));
         }
         let (rewrite, pattern) = identity(func, inst, self.address, &mut self.stacks)?;
         Some((Found::Rule(rewrite), pattern, NO_FUEL_RULE))
@@ -1318,6 +1339,29 @@ fn packed_lane(func: &Func, inst: Inst) -> Option<Value> {
         }
     }
     low_lane(func, from, width, LANE_DEPTH)
+}
+
+/// The value a bitcast gives back unchanged.
+///
+/// A bitcast keeps every bit, so a bitcast to the type its operand already has is that operand,
+/// and so is a bitcast of a bitcast back to the type the first one started from. The second is
+/// what [`crate::sroa`] leaves in a vector that it keeps as one value and writes in another
+/// shape: each lane goes in through a bitcast to the shape of the write and comes back through a
+/// bitcast to the shape of the local. Without this, the back end sees a chain of lane writes cut
+/// into pieces and cannot see the vector that the chain builds.
+fn round_trip(func: &Func, inst: Inst) -> Option<Value> {
+    let data = &func[inst];
+    if data.opcode != Opcode::Bitcast {
+        return None;
+    }
+    let ty = func[data.first_result?].ty;
+    let &[from] = &func[data.args] else { return None };
+    if func[from].ty == ty {
+        return Some(from);
+    }
+    let Def::Result { inst, .. } = func[from].def else { return None };
+    let &[first] = &func[func[inst].args] else { return None };
+    (func[inst].opcode == Opcode::Bitcast && func[first].ty == ty).then_some(first)
 }
 
 /// How many instructions the lane walk goes through before it gives up.
@@ -2896,6 +2940,33 @@ mod tests {
         let (mut func, block, _, b) = packed(Opcode::Add, 32, Some(32));
         simplify(&mut func);
         assert_ne!(returned(&func, block), b);
+    }
+
+    /// A bitcast back to the type its operand was cast from is that operand, and so is a bitcast
+    /// to the type its operand has. A bitcast to a third type is a different value and stays.
+    #[test]
+    fn a_bitcast_back_to_where_it_started_is_the_first_value() {
+        let (bytes, words) = (Type::vector(Type::int(8), 16), Type::vector(Type::int(32), 4));
+        let cast = |twice: Type| {
+            let mut names = Interner::new();
+            let name = names.intern("f");
+            let signature = Signature::new().with_params(&[words]).with_returns(&[twice]);
+            let mut func = Func::new(name, signature);
+            let block = func.create_block();
+            let x = func.append_param(block, words);
+            let mut build = Builder::new(&mut func, block);
+            let once = build.unary(Opcode::Bitcast, x, bytes);
+            let back = build.unary(Opcode::Bitcast, once, twice);
+            build.ret(&[back]);
+            (func, block, x)
+        };
+        let (mut func, block, x) = cast(words);
+        assert!(simplify(&mut func));
+        assert_eq!(returned(&func, block), x);
+        let (mut func, block, x) = cast(Type::vector(Type::int(16), 8));
+        simplify(&mut func);
+        assert_ne!(returned(&func, block), x);
+        assert_eq!(came_from(&func, returned(&func, block)).0, Opcode::Bitcast);
     }
 
     /// `zext.i64 (lshr.i32 (trunc.i32 (lshr.i64 x inner)) outer)`, which is what

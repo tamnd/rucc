@@ -4682,6 +4682,9 @@ impl<'u> Body<'_, 'u> {
             // identity and sema leaves no node for it.
             ExprKind::Unary { op, operand } => {
                 let from = self.vector_addr(operand, span);
+                if self.whole_unary(op, lane, lanes, at, from, span) {
+                    return;
+                }
                 for index in 0..lanes {
                     let a = self.lane(from, index, stride, lane, span);
                     let value = self.negate(op, a, lane, span);
@@ -4997,6 +5000,49 @@ impl<'u> Body<'_, 'u> {
             None => build.load(whole, right, info, Flags::NONE),
         };
         let value = build.binary(opcode, a, b, Flags::NONE);
+        build.store(value, at, info, Flags::NONE);
+        true
+    }
+
+    /// `-v` or `~v` on a vector of sixteen bytes done on the whole vector at once, on wasm32 with
+    /// `-msimd128`, and whether it was. A negation is a subtraction from zero, or an `fneg` for
+    /// float lanes, and `~v` is an `xor` with all ones, which the back end writes as one `neg` or
+    /// one `v128.not`.
+    fn whole_unary(
+        &mut self,
+        op: UnaryOp,
+        lane: TypeId,
+        lanes: u64,
+        at: Value,
+        from: Value,
+        span: Span,
+    ) -> bool {
+        if !self.target().simd128 || !matches!(op, UnaryOp::Minus | UnaryOp::BitNot) {
+            return false;
+        }
+        let one = self.value_type(lane, span);
+        let int = one.is_int() && matches!(one.bits(), 8 | 16 | 32 | 64);
+        let float = one.is_float() && matches!(one.bits(), 32 | 64);
+        if u64::from(one.bits()) * lanes != 128 || !(int || float && op == UnaryOp::Minus) {
+            return false;
+        }
+        let whole = Type::vector(one, u32::try_from(lanes).unwrap_or(0));
+        let info = untyped(repr::align_of(self.types(), self.target(), lane));
+        let bits = if op == UnaryOp::Minus { 0 } else { -1 };
+        let fill = int.then(|| self.func.add_imm(Imm::int(bits, one)));
+        let mut build = self.build(span);
+        let a = build.load(whole, from, info, Flags::NONE);
+        let value = match fill {
+            None => build.unary(Opcode::FNeg, a, whole),
+            Some(fill) => {
+                let data = InstData { extra: Extra::Imm(fill), ..InstData::new(Opcode::Splat) };
+                let fill = build.value(data, whole);
+                match op {
+                    UnaryOp::Minus => build.binary(Opcode::Sub, fill, a, Flags::NONE),
+                    _ => build.binary(Opcode::Xor, a, fill, Flags::NONE),
+                }
+            }
+        };
         build.store(value, at, info, Flags::NONE);
         true
     }

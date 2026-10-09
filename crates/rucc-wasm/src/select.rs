@@ -113,8 +113,16 @@ fn va_layout(extra: impl Iterator<Item = (Type, Abi)>) -> Result<(Vec<u32>, u32,
 }
 
 /// The count of a vector shift that is the same in each lane. See [`Lower::uniform`].
+#[derive(PartialEq, Eq)]
 enum Uniform {
     Imm(u64),
+    Value(Value),
+}
+
+/// One lane of a vector that a chain of `insertlane` builds. See [`Lower::built`].
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum Lane {
+    Bits(u128),
     Value(Value),
 }
 
@@ -1152,7 +1160,8 @@ impl Lower<'_, '_> {
         }
         // A vector shift by a count that is the same in each lane reads the one scalar, or
         // nothing when the count is a constant. The vector of the count is then not read.
-        let shift = matches!(self.func[inst].opcode, Opcode::Shl | Opcode::LShr | Opcode::AShr);
+        let opcode = self.func[inst].opcode;
+        let shift = matches!(opcode, Opcode::Shl | Opcode::LShr | Opcode::AShr);
         if shift && args.len() == 2 && self.ty(args[1]).is_vector() {
             match self.uniform(args[1]) {
                 Some(Uniform::Imm(_)) => args.truncate(1),
@@ -1160,7 +1169,37 @@ impl Lower<'_, '_> {
                 None => {}
             }
         }
+        // A vector built lane by lane reads the values of its lanes and not the vector before.
+        // A negation and a bitwise not do not read the vector of zeros or of ones.
+        if opcode == Opcode::InsertLane {
+            let built = self.results(inst).first().and_then(|&vector| self.built(vector));
+            if let Some(lanes) = built {
+                return pushed(&lanes);
+            }
+        }
+        if opcode == Opcode::Sub && args.len() == 2 && self.zeros(args[0]) {
+            args.remove(0);
+        }
+        if opcode == Opcode::Xor && args.len() == 2 {
+            if self.ones(args[1]) {
+                args.truncate(1);
+            } else if self.ones(args[0]) {
+                args.remove(0);
+            }
+        }
         args
+    }
+
+    /// Whether `vector` is a vector with every bit zero.
+    fn zeros(&self, vector: Value) -> bool {
+        self.ty(vector).is_vector() && self.uniform(vector) == Some(Uniform::Imm(0))
+    }
+
+    /// Whether `vector` is a vector with every bit one.
+    fn ones(&self, vector: Value) -> bool {
+        let ty = self.ty(vector);
+        let all = u64::MAX >> (64 - ty.bits().clamp(1, 64));
+        ty.is_vector() && self.uniform(vector) == Some(Uniform::Imm(all))
     }
 
     /// The address of a load or a store split into the base that its code pushes and what goes
@@ -1409,7 +1448,7 @@ impl Lower<'_, '_> {
             | Opcode::AtomicRmw
             | Opcode::Cmpxchg
             | Opcode::ZExt => true,
-            Opcode::Load => !self.signed.contains(&value),
+            Opcode::Load | Opcode::ExtractLane => !self.signed.contains(&value),
             Opcode::SAddOverflow
             | Opcode::UAddOverflow
             | Opcode::SSubOverflow
@@ -1427,13 +1466,35 @@ impl Lower<'_, '_> {
     /// `i32.load16_s` do in the same instruction. So a load is written signed when more of its
     /// uses read it sign extended than zero extended, as clang does for a `signed char` that is
     /// only compared or widened. The other uses read only the low bits, which are the same in both
-    /// forms. An atomic load has no signed form in wasm and stays as it is.
+    /// forms. An atomic load has no signed form in wasm and stays as it is. A lane of 8 or 16 bits
+    /// read out of a vector is the same, with `extract_lane_u` and `extract_lane_s`.
     fn signed_loads(&self) -> Set<Value> {
         let func = self.func;
         let mut votes: Map<Value, i32> = Map::default();
+        let mut cast = |value: Value, vote: i32| {
+            let Some((def, _)) = self.def(value) else { return };
+            if matches!(func[def].opcode, Opcode::Load | Opcode::ExtractLane)
+                && matches!(self.narrow(value), Some(8 | 16))
+            {
+                *votes.entry(value).or_default() += vote;
+            }
+        };
         for block in func.blocks() {
             for inst in func.insts(block) {
                 let data = &func[inst];
+                // A value returned as a `signed char` or a `short` is extended by the ABI.
+                if data.opcode == Opcode::Return {
+                    let sig = func.signature();
+                    let abis = sig.returns.iter().filter(|p| !p.ty.is_mem() && !p.ty.is_void());
+                    for (&value, ret) in self.args(inst).iter().zip(abis) {
+                        match ret.abi {
+                            Abi::Sext => cast(value, 1),
+                            Abi::Zext => cast(value, -1),
+                            _ => {}
+                        }
+                    }
+                    continue;
+                }
                 // The vote of the use, and how many of its first operands it extends. A shift
                 // extends only the value that it shifts.
                 let (vote, count) = match (data.opcode, data.extra) {
@@ -1448,12 +1509,7 @@ impl Lower<'_, '_> {
                     _ => continue,
                 };
                 for value in self.inputs(inst).into_iter().take(count) {
-                    let Some((def, _)) = self.def(value) else { continue };
-                    if func[def].opcode == Opcode::Load
-                        && matches!(self.narrow(value), Some(8 | 16))
-                    {
-                        *votes.entry(value).or_default() += vote;
-                    }
+                    cast(value, vote);
                 }
             }
         }
@@ -2978,6 +3034,23 @@ impl Lower<'_, '_> {
         let extra = self.func[inst].extra;
         match opcode {
             Opcode::Call | Opcode::CallIndirect => self.call(inst, false)?,
+            Opcode::Sub | Opcode::FNeg if opcode == Opcode::FNeg || self.zeros(args[0]) => {
+                let shape = simd_shape(self.ty(results[0]))?;
+                self.push(args[args.len() - 1])?;
+                self.simd(&format!("{shape}.neg"))?;
+                self.set(results[0]);
+            }
+            Opcode::Xor if self.ones(args[0]) || self.ones(args[1]) => {
+                simd_shape(self.ty(results[0]))?;
+                self.push(if self.ones(args[1]) { args[0] } else { args[1] })?;
+                self.simd("v128.not")?;
+                self.set(results[0]);
+            }
+            Opcode::InsertLane if self.built(results[0]).is_some() => {
+                let lanes = self.built(results[0]).ok_or("a vector built lane by lane")?;
+                self.vector_of(self.ty(results[0]), &lanes)?;
+                self.set(results[0]);
+            }
             Opcode::Add
             | Opcode::Sub
             | Opcode::Mul
@@ -3132,7 +3205,11 @@ impl Lower<'_, '_> {
             Opcode::ExtractLane => {
                 let Extra::Lane(lane) = extra else { return Err("an extractlane".into()) };
                 let shape = simd_shape(self.ty(args[0]))?;
-                let narrow = if self.ty(args[0]).bits() < 32 { "_u" } else { "" };
+                let narrow = match self.ty(args[0]).bits() < 32 {
+                    true if self.signed.contains(&results[0]) => "_s",
+                    true => "_u",
+                    false => "",
+                };
                 self.push(args[0])?;
                 self.simd(&format!("{shape}.extract_lane{narrow}"))?;
                 self.code.op(lane);
@@ -3210,6 +3287,117 @@ impl Lower<'_, '_> {
             |value| !self.trees.stacked.contains(&value) && !self.trees.teed.contains_key(&value);
         let local = *self.local.get(&from)?;
         (plain(from) && plain(to) && self.local.get(&to) == Some(&local)).then_some(local)
+    }
+
+    /// The lanes of a vector that a chain of `insertlane` builds on a `splat` of a constant, which
+    /// is how the IR writes a vector of values such as `(v4si){a, b, c, d}`. A lane that a later
+    /// `insertlane` writes again takes the later value. A lane that is a constant is its bits.
+    fn built(&self, vector: Value) -> Option<Vec<Lane>> {
+        let ty = self.ty(vector);
+        if !ty.is_vector() {
+            return None;
+        }
+        let mut lanes = vec![None; ty.lanes() as usize];
+        let mut at = vector;
+        loop {
+            let (inst, _) = self.def(at)?;
+            match (self.func[inst].opcode, self.func[inst].extra) {
+                (Opcode::InsertLane, Extra::Lane(lane)) => {
+                    let &[into, value] = &self.args(inst)[..] else { return None };
+                    let slot = lanes.get_mut(usize::from(lane))?;
+                    if slot.is_none() {
+                        *slot = Some(self.bits(value).map_or(Lane::Value(value), Lane::Bits));
+                    }
+                    at = into;
+                }
+                (Opcode::Splat, Extra::Imm(imm)) => {
+                    let bits = Lane::Bits(self.func[imm].bits());
+                    return Some(lanes.into_iter().map(|lane| lane.unwrap_or(bits)).collect());
+                }
+                (Opcode::Bitcast, _) => {
+                    let bits = Lane::Bits(self.splat_as(self.args(inst)[0], ty.lane().bits())?);
+                    return Some(lanes.into_iter().map(|lane| lane.unwrap_or(bits)).collect());
+                }
+                _ => return None,
+            }
+        }
+    }
+
+    /// The bits of one lane of `width` bits in a splat of a constant read in another shape. A
+    /// lane that is a whole number of the splat's lanes is that lane repeated. Any other width
+    /// cuts a lane and gives no answer here.
+    fn splat_as(&self, splat: Value, width: u32) -> Option<u128> {
+        let (inst, _) = self.def(splat)?;
+        let (Opcode::Splat, Extra::Imm(imm)) = (self.func[inst].opcode, self.func[inst].extra)
+        else {
+            return None;
+        };
+        let from = self.ty(splat).lane().bits();
+        if from == 0 || width % from != 0 || width > 64 {
+            return None;
+        }
+        let mask = if from >= 128 { u128::MAX } else { (1u128 << from) - 1 };
+        let lane = self.func[imm].bits() & mask;
+        Some((0..width / from).fold(0, |bits, at| bits | lane << (at * from)))
+    }
+
+    /// The bits of an integer or float constant.
+    fn bits(&self, value: Value) -> Option<u128> {
+        let (inst, _) = self.def(value)?;
+        match (self.func[inst].opcode, self.func[inst].extra) {
+            (Opcode::IConst | Opcode::FConst, Extra::Imm(imm)) => Some(self.func[imm].bits()),
+            _ => None,
+        }
+    }
+
+    /// The vector of type `ty` with these lanes, as clang writes it. When each lane is a constant
+    /// it is one `v128.const`. Otherwise it is a `splat` of the value that most lanes have and a
+    /// `replace_lane` for each other lane, or a `v128.const` of the constant lanes and a
+    /// `replace_lane` for each other lane when that is fewer instructions.
+    fn vector_of(&mut self, ty: Type, lanes: &[Lane]) -> Result<()> {
+        let shape = simd_shape(ty)?;
+        let width = (ty.bits() / 8) as usize;
+        let constant = |lane: &Lane| match lane {
+            Lane::Bits(bits) => *bits,
+            Lane::Value(_) => 0,
+        };
+        let splat = match splatted(lanes) {
+            Some(value) => {
+                self.push(value)?;
+                self.simd(&format!("{shape}.splat"))?;
+                Some(value)
+            }
+            None => {
+                let mut bytes = [0u8; 16];
+                for (at, lane) in lanes.iter().enumerate() {
+                    let bits = constant(lane).to_le_bytes();
+                    bytes[at * width..(at + 1) * width].copy_from_slice(&bits[..width]);
+                }
+                self.v128_const(&bytes);
+                None
+            }
+        };
+        for (at, &lane) in lanes.iter().enumerate() {
+            let skip = match lane {
+                Lane::Value(value) => splat == Some(value),
+                Lane::Bits(_) => splat.is_none(),
+            };
+            if skip {
+                continue;
+            }
+            match lane {
+                Lane::Value(value) => self.push(value)?,
+                Lane::Bits(bits) => match (ty.lane().is_float(), width) {
+                    (true, 4) => self.code.f32_const(bits as u32),
+                    (true, _) => self.code.f64_const(bits as u64),
+                    (false, 8) => self.code.i64_const(bits as i64),
+                    (false, _) => self.code.i32_const(bits as i32),
+                },
+            }
+            self.simd(&format!("{shape}.replace_lane"))?;
+            self.code.op(u8::try_from(at).map_err(|_| "a lane past 255")?);
+        }
+        Ok(())
     }
 
     /// A `v128.const` of these sixteen bytes.
@@ -3599,4 +3787,36 @@ impl Lower<'_, '_> {
         self.set(result);
         Ok(())
     }
+}
+
+/// The value that the code of a vector built from these lanes starts with a `splat` of, when it
+/// starts with one. That is the value that most lanes have, when the `splat` and the
+/// `replace_lane` for each other lane are no more instructions than a `v128.const` and a
+/// `replace_lane` for each lane that is not a constant.
+fn splatted(lanes: &[Lane]) -> Option<Value> {
+    let count = |of: Lane| lanes.iter().filter(|&&lane| lane == of).count();
+    let most = lanes
+        .iter()
+        .filter(|lane| matches!(lane, Lane::Value(_)))
+        .copied()
+        .reduce(|best, lane| if count(lane) > count(best) { lane } else { best });
+    let values = lanes.iter().filter(|lane| matches!(lane, Lane::Value(_))).count();
+    match most {
+        Some(Lane::Value(value)) if 2 + lanes.len() - count(Lane::Value(value)) <= 1 + values => {
+            Some(value)
+        }
+        _ => None,
+    }
+}
+
+/// The values that the code of a vector built from these lanes pushes, in the order it pushes
+/// them. The value of the `splat` is pushed once, and each other value once for each lane it is
+/// in.
+fn pushed(lanes: &[Lane]) -> Vec<Value> {
+    let splat = splatted(lanes);
+    let rest = lanes.iter().filter_map(|&lane| match lane {
+        Lane::Value(value) if Some(value) != splat => Some(value),
+        _ => None,
+    });
+    splat.into_iter().chain(rest).collect()
 }

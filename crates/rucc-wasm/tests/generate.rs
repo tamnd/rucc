@@ -2688,8 +2688,9 @@ fn the_dwarf_sections_go_in_the_object_with_their_relocations() {
 }
 
 /// Lanes put in, moved and taken out of a `v128`. The narrow lanes check that a lane taken out
-/// with `extract_lane_u` is a value that a compare, a `sext` and a `zext` read correctly. `main`
-/// exits with 10 + 8 - 2 + 1 + 9, which is 26.
+/// with `extract_lane_u` is a value that a compare, a `sext` and a `zext` read correctly. A lane
+/// put in as a constant is part of the `v128.const`, as clang writes it. `main` exits with
+/// 10 + 8 - 2 + 1 + 9, which is 26.
 const LANES: &str = r#"; ModuleID = 'lanes.c'
 ; format 0
 target triple = "wasm32-unknown-wasip1"
@@ -2729,11 +2730,11 @@ fn the_lanes_of_a_v128_are_put_in_moved_and_taken_out() {
     let simd = Cpu::Lime1.features().with(Feature::Simd128);
     let text = assembly_for(LANES, simd);
     for want in [
-        "i32x4.replace_lane\t2",
+        "v128.const\t5, 5, 7, 5",
         "i32x4.add",
         "i8x16.shuffle\t8, 9, 10, 11, 0, 1, 2, 3, 4, 5, 6, 7, 12, 13, 14, 15",
         "i32x4.extract_lane\t1",
-        "i16x8.replace_lane\t6",
+        "v128.const\t-65538, -65538, -65538, -131063",
         "i16x8.extract_lane_u\t0",
     ] {
         assert!(text.contains(want), "no `{want}` in\n{text}");
