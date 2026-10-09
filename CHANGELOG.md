@@ -28,6 +28,7 @@ All notable changes are recorded here. The format follows [Keep a Changelog](htt
 - When a two address instruction reads a spilled value as the source it writes over, the value is now loaded straight into the answer's register. Before, it went into a scratch register first and was then copied over. On i386 that cuts zstd's huf_decompress.c from 12353 instructions to 12037 and its zstd_decompress_block.c from 17210 to 16944, and x86-64 gets smaller too (#3514).
 - A copy of a register into a scratch register, which the cleanup writes where a reload finds its word already in a register, is now gone. The instructions after it read the original register instead. That takes out more than half of the `movl %edi, %esi` copies in i386 output, saving 120 instructions in the 7.2.8 X32 md.c and 55 in zstd's huf_decompress.c (#3516).
 - A `long long` add or subtract on i386 where one low half is zero no longer works out a carry, and a high half that is zero no longer adds a zero. The kernel's `readq` there is `low + ((u64)high << 32)`, and it is now the two loads, where it was a `cmp`, a `setb`, a `movzbl` and two adds. `a - ((u64)b << 32)` is one `subl` (#3521).
+- An inline assembly operand in memory that is a constant past a pointer is read at that displacement from the pointer, as gcc writes it, rather than through a register the sum was put in first. The kernel's atomics and bit operations are `"+m" (v->counter)` and `"+m" (*(addr + nr / 8))`, and each one was an `add` of the offset in front of the `lock` (#3522).
 
 ### Added
 

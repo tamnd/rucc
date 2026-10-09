@@ -1550,6 +1550,9 @@ struct Lowering<'a> {
     /// How many times each IR value is read, which is what says whether an instruction may be
     /// folded into the one that reads it.
     uses: Vec<u32>,
+    /// How many of those reads are an address handed to inline assembly as an operand in memory,
+    /// or a constant added to it that is. See [`Self::stepped`].
+    in_memory: Vec<u32>,
     /// The block being filled.
     at: Option<mir::Block>,
     /// The IR block being filled, which is the one [`Self::at`] came from.
@@ -1752,16 +1755,41 @@ impl<'a> Lowering<'a> {
         let counts = source.counts();
         let name = source.name;
         let mut uses = vec![0; counts.values];
+        let mut in_memory = vec![0; counts.values];
         for block in source.blocks() {
             for inst in source.insts(block) {
                 for &arg in &source[source[inst].args] {
                     uses[arg.index()] += 1;
+                }
+                if let Extra::Asm(asm) = source[inst].extra {
+                    let constraints = names.resolve(source[asm].constraints);
+                    let results: Vec<Value> = source[inst].results().collect();
+                    let args = &source[source[inst].args];
+                    let operands = AsmOperands::read(constraints, &results, args);
+                    for operand in operands.iter().flat_map(AsmOperands::iter) {
+                        if let Some(value) = operand.value.filter(|_| operand.memory) {
+                            in_memory[value.index()] += 1;
+                        }
+                    }
                 }
                 for call in source.successors(inst) {
                     for &arg in &source[call.args] {
                         uses[arg.index()] += 1;
                     }
                 }
+            }
+        }
+        // A constant past a pointer that folds into the assembly in turn, read backwards so that a
+        // row of them is counted from the far end in.
+        let insts: Vec<Inst> = source.blocks().flat_map(|block| source.insts(block)).collect();
+        for &inst in insts.iter().rev() {
+            let &[pointer, step] = &source[source[inst].args] else { continue };
+            let Some(sum) = source[inst].results().next() else { continue };
+            let constant = matches!(source[step].def,
+                Def::Result { inst, .. } if source[inst].opcode == Opcode::IConst);
+            let folds = uses[sum.index()] > 0 && uses[sum.index()] == in_memory[sum.index()];
+            if source[inst].opcode == Opcode::PtrAdd && constant && folds {
+                in_memory[pointer.index()] += 1;
             }
         }
         let mut out = mir::Func::new(name);
@@ -1784,6 +1812,7 @@ impl<'a> Lowering<'a> {
             crossed: 0,
             blocks: vec![None; counts.blocks],
             uses,
+            in_memory,
             at: None,
             filling: None,
             hold,
@@ -6665,12 +6694,20 @@ impl<'a> Lowering<'a> {
                 match self.near_name(value).filter(|_| local.is_none() && segment.is_none()) {
                     Some((symbol, disp)) => Some(mir::Mem { disp, ..mir::Mem::of(symbol) }),
                     None => {
-                        let base = match local {
-                            Some(_) => mir::Reg::physical(self.conv.stack_pointer),
-                            None => self.reg_of(value)?,
+                        // A constant added to a pointer is the displacement, as gcc writes it. The
+                        // kernel's atomics are `"m" (v->counter)`, and a counter that is not first
+                        // in its struct was an `add` into a register of its own in front of every
+                        // `lock incl`.
+                        let (base, disp) = match local {
+                            Some(_) => (mir::Reg::physical(self.conv.stack_pointer), 0),
+                            None => match self.stepped(value) {
+                                Some((pointer, disp)) => (self.reg_of(pointer)?, disp),
+                                None => (self.reg_of(value)?, 0),
+                            },
                         };
                         Some(mir::Mem {
                             segment,
+                            disp,
                             ..mir::Mem::at(mir::Operand::read(base, self.gpr))
                         })
                     }
@@ -6782,6 +6819,41 @@ impl<'a> Lowering<'a> {
         let marker = self.named("lifetime_end");
         let made = self.out.build(block, marker).at(span).finish();
         self.stack.ends.push((made, index));
+    }
+
+    /// The pointer a value is a constant past and how far, for one a `ptr_add` of a constant that
+    /// fits a displacement defined and that nothing but inline assembly reads as an address in
+    /// memory.
+    ///
+    /// Anything else that reads it wants it in a register anyway, and the pointer and the sum are
+    /// then two registers live where there was one. Two `clear_bit` calls on one word share the
+    /// sum, and both fold.
+    fn stepped(&self, value: Value) -> Option<(Value, i32)> {
+        if self.uses[value.index()] != self.in_memory[value.index()] {
+            return None;
+        }
+        // Down a row of them as well, since `addr + nr / 8` on `&p->flags` is one constant past
+        // another and the first is what the other bit operations on the word share.
+        let (mut pointer, mut disp) = (value, 0i128);
+        // Not from a name, which is either reached as itself or, in position independent code,
+        // built in one piece with the sum that is left unread here, and the piece stays.
+        while let Some((under, step)) = self.step(pointer) {
+            if self.local_of(under).is_some() || self.named_address(under).is_some() {
+                break;
+            }
+            (pointer, disp) = (under, disp.checked_add(step)?);
+        }
+        (pointer != value).then_some((pointer, i32::try_from(disp).ok()?))
+    }
+
+    /// The pointer a `ptr_add` of a constant adds to and the constant.
+    fn step(&self, value: Value) -> Option<(Value, i128)> {
+        let Def::Result { inst, .. } = self.source[value].def else { return None };
+        if self.source[inst].opcode != Opcode::PtrAdd {
+            return None;
+        }
+        let &[pointer, step] = &self.source[self.source[inst].args] else { return None };
+        Some((pointer, self.folded(step)?))
     }
 
     /// The object in this function's frame a value is the address of, for one an `alloca` of a
