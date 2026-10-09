@@ -509,6 +509,14 @@ fn defined_in(func: &Func, loops: &Loops, id: LoopId, value: Value) -> bool {
 /// not all come after the definition, where the value is genuinely absent on one way out. Blocks
 /// inside the loop are left out for a different reason: inside the loop the definition is the only
 /// name the value has, so a merge there would only hand the value to itself.
+///
+/// A result of an `asm goto` is written by the instruction that ends its block, so it exists in the
+/// blocks that instruction branches to but cannot be an argument on its own edges, which is the
+/// rule [`crate::simplify_cfg`] keeps too. A block it branches to straight from there gets no
+/// parameter, and the blocks after it are asked instead, where the edge in is one that can carry
+/// the value. A use in the block passed over keeps naming the result, which it may, and `first`
+/// leaves such a use alone since no placement covers it. The kernel's `get_user` in a loop is this,
+/// in spidev's ioctl when nothing initializes the stack.
 fn caught(
     func: &Func,
     dom: &Dominators,
@@ -518,6 +526,12 @@ fn caught(
     value: Value,
 ) -> Vec<Block> {
     let Some(from) = defining(func, value) else { return Vec::new() };
+    let written: Vec<Block> = match func[value].def {
+        Def::Result { inst, .. } if func.is_terminator(inst) => {
+            func.successors(inst).map(|call| call.block).collect()
+        }
+        _ => Vec::new(),
+    };
     let mut at = Vec::new();
     let mut seen: Set<Block> = Set::default();
     let mut queue: Vec<Block> = Vec::new();
@@ -528,6 +542,15 @@ fn caught(
     }
     while let Some(block) = queue.pop() {
         if loops.contains(id, block) || !dom.dominates(from, block) {
+            continue;
+        }
+        if written.contains(&block) {
+            let Some(term) = func.terminator(block) else { continue };
+            for call in func.successors(term) {
+                if seen.insert(call.block) {
+                    queue.push(call.block);
+                }
+            }
             continue;
         }
         at.push(block);

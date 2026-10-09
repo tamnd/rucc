@@ -45,6 +45,7 @@ The release workflows for 0.28.0, 0.29.0 and 0.29.1 stopped at the check of the 
 
 ### Fixed
 
+- Loop canonicalization no longer passes an `asm goto` output as an argument on the asm's own label edge when the label leaves a loop. The output is written by the instruction that ends the block, so it can only be used in the blocks it branches to, and the verifier refused the function as an internal error. The arm64 kernel's `get_user` is this shape and spidev's ioctl reads its arguments with it in a loop. (#3410)
 - A computed goto whose handler works out the next step with an add that writes over some other value, such as `op = &steps[op->jumpdone]` in Postgres' `ExecInterpExpr`, keeps a register of its own for the step. Written straight into the register the next handler reads it in, the copy of `steps` in front of the add could go over the step number, and the Postgres server built at `-O2` crashed on the first query that took such a jump (#1994).
 
 ## 0.29.1
