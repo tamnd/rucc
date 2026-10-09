@@ -583,6 +583,22 @@ impl Fixup {
         }
     }
 
+    /// Whether it reaches a thread-local variable, which makes the name it reaches one.
+    #[must_use]
+    pub fn thread(self) -> bool {
+        matches!(
+            self,
+            Fixup::GotTprelPage21
+                | Fixup::GotTprelLo12Nc
+                | Fixup::TprelHi12
+                | Fixup::TprelLo12Nc
+                | Fixup::TlsdescAdrPage21
+                | Fixup::TlsdescLd64Lo12
+                | Fixup::TlsdescAddLo12
+                | Fixup::TlsdescCall
+        )
+    }
+
     /// The word with the number filled in, or `None` when the number does not fit.
     ///
     /// For the branches, the literal load and `adr` the number is the distance in bytes from the

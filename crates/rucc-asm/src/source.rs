@@ -4964,6 +4964,13 @@ impl Reader {
             }
         };
         if let Some(&sym) = self.known.get(&name) {
+            // gas marks a name a thread-local field reaches as thread-local, defined here or not,
+            // and a linker refuses a TLS definition that a plain name refers to. On Mach-O the
+            // slot holds the address of the variable's descriptor, which is a plain name there.
+            let thread = field.thread() && !self.macho;
+            if thread && matches!(self.syms[sym].sort, Sort::Untyped | Sort::Object) {
+                self.syms[sym].sort = Sort::Thread;
+            }
             if self.syms[sym].numbered && self.syms[sym].at != Held::Undefined {
                 self.relocated.insert(sym);
             } else if self.syms[sym].numbered {
@@ -6481,6 +6488,11 @@ _tls$tlv$init:
                 (12, "counter", Reference::Field(aarch64::Fixup::TlsdescCall), 0),
             ]
         );
+        // The name is thread-local though it is not defined here, as gas writes it, or a linker
+        // refuses the definition in another object. The same for the initial exec slot.
+        assert_eq!(name(&read, "counter").sort, Sort::Thread);
+        let read = aarch64("f:\tadrp x0, :gottprel:other\n\tldr x0, [x0, :gottprel_lo12:other]\n");
+        assert_eq!(name(&read, "other").sort, Sort::Thread);
     }
 
     #[test]
