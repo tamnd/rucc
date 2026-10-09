@@ -224,8 +224,8 @@ pub(crate) fn reads_only(func: &Func, inst: Inst) -> bool {
 /// anything can tell happened.
 ///
 /// A tail call never reaches here, because it is a terminator and the verdict says so first.
-/// Inline assembly reaches here and is [`crate::Purity::Opaque`], which is what keeps the
-/// assertion below true.
+/// Inline assembly reaches here and is [`crate::Purity::Opaque`], so it is never removed as a
+/// call. [`quiet`] is what removes one.
 fn does_nothing(func: &Func, inst: Inst, facts: &Facts) -> bool {
     Callee::of(func, inst)
         .is_some_and(|callee| facts.purity_of(callee).can_be_deleted_when_unused())
@@ -242,6 +242,24 @@ pub(crate) fn removable(func: &Func, inst: Inst, facts: &Facts) -> bool {
         || reads_only(func, inst)
         || does_nothing(func, inst, facts)
         || answered(func, inst)
+        || quiet(func, inst)
+}
+
+/// Whether this is inline assembly that can go when nothing reads what it wrote.
+///
+/// gcc's rule, which is that a statement not written `volatile` is there for its outputs. One with
+/// no outputs at all was made `volatile` when it was read, as gcc makes it. Anything in memory is
+/// left alone, as is a `memory` clobber, since either is a write nobody here is counting the
+/// readers of, and so is `asm goto`, which is a jump. What is left is the kernel's `RELOC_HIDE`,
+/// `__asm__ ("" : "=r" (p) : "0" (v))`, which every bit operation runs once for the sanitizer hook
+/// that is empty in a build without the sanitizer, and which cost a copy of the address each time.
+fn quiet(func: &Func, inst: Inst) -> bool {
+    let data = &func[inst];
+    let Extra::Asm(info) = data.extra else { return false };
+    data.opcode == Opcode::InlineAsm
+        && !data.flags.contains(Flags::VOLATILE)
+        && data.flags.contains(Flags::NOMEM)
+        && func[info].targets.is_empty()
 }
 
 /// Whether this is a `check_written` the program already answered, because every way here wrote
@@ -270,10 +288,6 @@ fn verdict(func: &Func, inst: Inst, uses: &[u32], facts: &Facts) -> Verdict {
     if !removable(func, inst, facts) {
         return Verdict::Effects;
     }
-    debug_assert!(
-        data.opcode != Opcode::InlineAsm,
-        "inline assembly has effects and cannot reach here"
-    );
     Verdict::Dead
 }
 
