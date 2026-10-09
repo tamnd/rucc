@@ -584,6 +584,27 @@ impl Pieces {
         owners.dedup();
         Some(owners)
     }
+
+    /// Whether `clash` holds of any value with a piece that touches the area, which is
+    /// [`Pieces::owners`] without the list, or `None` where that would be.
+    pub(crate) fn any_owner(
+        &self,
+        area: Area<'_>,
+        mut clash: impl FnMut(Reg) -> bool,
+    ) -> Option<bool> {
+        if self.broken {
+            return None;
+        }
+        for piece in area.pieces() {
+            let below = self.list.partition_point(|&(start, _, _)| start <= piece.end);
+            let touching =
+                self.list[..below].iter().rev().take_while(|&&(_, end, _)| end >= piece.start);
+            if touching.map(|&(_, _, owner)| owner).any(&mut clash) {
+                return Some(true);
+            }
+        }
+        Some(false)
+    }
 }
 
 /// A register an instruction insists on, and where it insists on it.
