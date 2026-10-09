@@ -112,6 +112,12 @@ fn va_layout(extra: impl Iterator<Item = (Type, Abi)>) -> Result<(Vec<u32>, u32,
     Ok((offsets, at, most))
 }
 
+/// The count of a vector shift that is the same in each lane. See [`Lower::uniform`].
+enum Uniform {
+    Imm(u64),
+    Value(Value),
+}
+
 /// How the SIMD instructions of wasm name a vector type of sixteen bytes: `i32x4` for four `i32`
 /// lanes, and `f64x2` for two `f64` lanes.
 fn simd_shape(ty: Type) -> Result<String> {
@@ -1144,6 +1150,16 @@ impl Lower<'_, '_> {
         if let Some(folded) = self.folded(inst) {
             args[folded.at] = folded.base;
         }
+        // A vector shift by a count that is the same in each lane reads the one scalar, or
+        // nothing when the count is a constant. The vector of the count is then not read.
+        let shift = matches!(self.func[inst].opcode, Opcode::Shl | Opcode::LShr | Opcode::AShr);
+        if shift && args.len() == 2 && self.ty(args[1]).is_vector() {
+            match self.uniform(args[1]) {
+                Some(Uniform::Imm(_)) => args.truncate(1),
+                Some(Uniform::Value(count)) => args[1] = count,
+                None => {}
+            }
+        }
         args
     }
 
@@ -1659,7 +1675,10 @@ impl Lower<'_, '_> {
         }
         let pred = if self.inverted == Some(inst) { pred.inverse() } else { pred };
         let &[a, b] = &self.args(inst)[..] else { return None };
-        if !matches!(pred, IntPred::Eq | IntPred::Ne) || is_pair(self.ty(a)) {
+        if !matches!(pred, IntPred::Eq | IntPred::Ne)
+            || is_pair(self.ty(a))
+            || self.ty(a).is_vector()
+        {
             return None;
         }
         if self.is_zero(b) {
@@ -2949,6 +2968,11 @@ impl Lower<'_, '_> {
     /// bitwise operations, because those wrap. Each lane of a `v128` holds its value in the low bits,
     /// so an `extractlane` of a narrow lane gives a value whose high bits are zero, which is a valid
     /// form of a narrow value here.
+    ///
+    /// A vector of `i1` is the mask that a SIMD compare gives: a `v128` with the same number of
+    /// lanes, each lane all ones or zero. A vector of `i1` comes only from a compare of a vector of
+    /// sixteen bytes, so each lane of the mask is as wide as each lane of the vectors compared, and
+    /// a `sext` of it to a vector of sixteen bytes changes nothing.
     fn vector(&mut self, inst: Inst, args: &[Value], results: &[Value]) -> Result<()> {
         let opcode = self.func[inst].opcode;
         let extra = self.func[inst].extra;
@@ -2984,6 +3008,98 @@ impl Lower<'_, '_> {
                 })?;
                 self.set(results[0]);
             }
+            Opcode::ICmp => {
+                let Extra::IntPred(pred) = extra else { return Err("an icmp".into()) };
+                let from = self.ty(args[0]);
+                let shape = simd_shape(from)?;
+                let name = match pred {
+                    IntPred::Eq => "eq",
+                    IntPred::Ne => "ne",
+                    IntPred::Slt | IntPred::Ult => "lt",
+                    IntPred::Sgt | IntPred::Ugt => "gt",
+                    IntPred::Sle | IntPred::Ule => "le",
+                    IntPred::Sge | IntPred::Uge => "ge",
+                };
+                let signed =
+                    matches!(pred, IntPred::Slt | IntPred::Sgt | IntPred::Sle | IntPred::Sge);
+                let unsigned = !signed && !matches!(pred, IntPred::Eq | IntPred::Ne);
+                // There is no unsigned compare of `i64x2` lanes. With the sign bit of each lane
+                // turned over, the signed compare gives the answer of the unsigned one.
+                let flip = unsigned && from.bits() == 64;
+                for &value in &args[..2] {
+                    self.push(value)?;
+                    if flip {
+                        self.v128_const(&[0, 0, 0, 0, 0, 0, 0, 0x80].repeat(2));
+                        self.simd("v128.xor")?;
+                    }
+                }
+                let suffix = match (signed || flip, unsigned && !flip) {
+                    (true, _) => "_s",
+                    (_, true) => "_u",
+                    _ => "",
+                };
+                self.simd(&format!("{shape}.{name}{suffix}"))?;
+                self.set(results[0]);
+            }
+            Opcode::FCmp => {
+                let Extra::FloatPred(pred) = extra else { return Err("an fcmp".into()) };
+                let shape = simd_shape(self.ty(args[0]))?;
+                let name = match pred {
+                    FloatPred::Oeq => "eq",
+                    FloatPred::Une => "ne",
+                    FloatPred::Olt => "lt",
+                    FloatPred::Ogt => "gt",
+                    FloatPred::Ole => "le",
+                    FloatPred::Oge => "ge",
+                    _ => return Err(format!("an fcmp {pred:?} of vectors")),
+                };
+                self.push(args[0])?;
+                self.push(args[1])?;
+                self.simd(&format!("{shape}.{name}"))?;
+                self.set(results[0]);
+            }
+            Opcode::SExt | Opcode::ZExt if self.ty(args[0]).lane() == Type::I1 => {
+                let ty = self.ty(results[0]);
+                simd_shape(ty)?;
+                if self.ty(args[0]).lanes() != ty.lanes() {
+                    return Err(format!("a {} from a {}", ty, self.ty(args[0])));
+                }
+                self.push(args[0])?;
+                if opcode == Opcode::ZExt {
+                    let width = (ty.bits() / 8) as usize;
+                    let mut one = vec![0u8; width];
+                    one[0] = 1;
+                    self.v128_const(&one.repeat(16 / width));
+                    self.simd("v128.and")?;
+                }
+                self.set(results[0]);
+            }
+            Opcode::Shl | Opcode::LShr | Opcode::AShr => {
+                let ty = self.ty(results[0]);
+                let shape = simd_shape(ty)?;
+                let name = match opcode {
+                    Opcode::Shl => "shl",
+                    Opcode::LShr => "shr_u",
+                    _ => "shr_s",
+                };
+                match self.uniform(args[1]) {
+                    Some(Uniform::Imm(bits)) => {
+                        self.push(args[0])?;
+                        self.code.i32_const((bits & u64::from(ty.bits() - 1)) as i32);
+                        self.simd(&format!("{shape}.{name}"))?;
+                    }
+                    Some(Uniform::Value(count)) => {
+                        self.push(args[0])?;
+                        self.push(count)?;
+                        if ty.bits() == 64 {
+                            self.code.op(emit::I32_WRAP_I64);
+                        }
+                        self.simd(&format!("{shape}.{name}"))?;
+                    }
+                    None => self.shift_lanes(opcode, args[0], args[1], ty)?,
+                }
+                self.set(results[0]);
+            }
             Opcode::Splat => {
                 let ty = self.ty(results[0]);
                 simd_shape(ty)?;
@@ -2994,10 +3110,7 @@ impl Lower<'_, '_> {
                 for (at, byte) in bytes.iter_mut().enumerate() {
                     *byte = lane[at % width];
                 }
-                self.code.simd(emit::V128_CONST);
-                for byte in bytes {
-                    self.code.op(byte);
-                }
+                self.v128_const(&bytes);
                 self.set(results[0]);
             }
             Opcode::ExtractLane => {
@@ -3070,6 +3183,76 @@ impl Lower<'_, '_> {
                     "the operation {opcode:?} on a vector is not translated for wasm yet"
                 ));
             }
+        }
+        Ok(())
+    }
+
+    /// A `v128.const` of these sixteen bytes.
+    fn v128_const(&mut self, bytes: &[u8]) {
+        self.code.simd(emit::V128_CONST);
+        for &byte in bytes {
+            self.code.op(byte);
+        }
+    }
+
+    /// The count of a vector shift when each lane of it is the same: a `splat`, or a chain of
+    /// `insertlane` that puts one value in each lane.
+    fn uniform(&self, count: Value) -> Option<Uniform> {
+        let lanes = self.ty(count).lanes() as usize;
+        let mut seen = vec![false; lanes];
+        let mut value = None;
+        let mut at = count;
+        loop {
+            let (inst, _) = self.def(at)?;
+            let data = &self.func[inst];
+            match (data.opcode, data.extra) {
+                (Opcode::InsertLane, Extra::Lane(lane)) => {
+                    let &[into, lane_value] = &self.args(inst)[..] else { return None };
+                    // An insert that a later one replaced does not count.
+                    if !std::mem::replace(&mut seen[usize::from(lane)], true) {
+                        if value.is_some_and(|v| v != lane_value) {
+                            return None;
+                        }
+                        value = Some(lane_value);
+                    }
+                    at = into;
+                }
+                (Opcode::Splat, Extra::Imm(imm)) => {
+                    let bits = self.func[imm].bits() as u64;
+                    return match value {
+                        None => Some(Uniform::Imm(bits)),
+                        Some(v) if seen.iter().all(|&s| s) => Some(Uniform::Value(v)),
+                        Some(_) => None,
+                    };
+                }
+                _ => return None,
+            }
+        }
+    }
+
+    /// A vector shift whose count is not the same in each lane, which wasm has no instruction for.
+    /// Each lane is taken out, shifted as a scalar and put back.
+    fn shift_lanes(&mut self, opcode: Opcode, of: Value, by: Value, ty: Type) -> Result<()> {
+        let shape = simd_shape(ty)?;
+        let wide = ty.bits() == 64;
+        let (take, op) = match opcode {
+            Opcode::Shl => ("_u", emit::I32_SHL),
+            Opcode::LShr => ("_u", emit::I32_SHR_U),
+            _ => ("_s", emit::I32_SHR_S),
+        };
+        let take = if ty.bits() < 32 { take } else { "" };
+        let count = if ty.bits() < 32 { "_u" } else { "" };
+        self.push(of)?;
+        for lane in 0..ty.lanes() as u8 {
+            self.push(of)?;
+            self.simd(&format!("{shape}.extract_lane{take}"))?;
+            self.code.op(lane);
+            self.push(by)?;
+            self.simd(&format!("{shape}.extract_lane{count}"))?;
+            self.code.op(lane);
+            self.code.op(int_op(op, wide));
+            self.simd(&format!("{shape}.replace_lane"))?;
+            self.code.op(lane);
         }
         Ok(())
     }

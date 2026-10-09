@@ -177,10 +177,15 @@ impl Lower<'_, '_> {
         }
         let mut trees = Trees::default();
         // The `ptr_add` instructions with no use, and then the ones that they were the only use of.
+        // The same for the `splat` and `insertlane` that build the count of a vector shift, which
+        // the shift does not read when the count is the same in each lane.
+        let pure = |inst: Inst| {
+            matches!(func[inst].opcode, Opcode::PtrAdd | Opcode::Splat | Opcode::InsertLane)
+        };
         let mut dead: Vec<Inst> = func
             .blocks()
             .flat_map(|block| func.insts(block))
-            .filter(|&inst| func[inst].opcode == Opcode::PtrAdd)
+            .filter(|&inst| pure(inst))
             .filter(|&inst| self.results(inst).iter().all(|v| uses.get(v).is_none_or(|&n| n == 0)))
             .collect();
         while let Some(inst) = dead.pop() {
@@ -192,7 +197,7 @@ impl Lower<'_, '_> {
                 let Some(count) = uses.get_mut(&value) else { continue };
                 *count -= 1;
                 let Some((def, _)) = self.def(value) else { continue };
-                if *count == 0 && func[def].opcode == Opcode::PtrAdd {
+                if *count == 0 && pure(def) {
                     dead.push(def);
                 }
             }
@@ -332,6 +337,13 @@ impl Lower<'_, '_> {
                 args.iter().enumerate().map(|(i, &v)| (v, place(i))).collect()
             }
             _ if pairs => Vec::new(),
+            // A vector shift whose count is not the same in each lane pushes both operands once
+            // for each lane. `inputs` gives a scalar count, or none, for the other shifts.
+            Opcode::Shl | Opcode::LShr | Opcode::AShr
+                if args.len() == 2 && self.ty(args[1]).is_vector() =>
+            {
+                Vec::new()
+            }
             Opcode::Add
             | Opcode::Sub
             | Opcode::Mul

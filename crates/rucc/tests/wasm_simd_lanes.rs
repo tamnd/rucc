@@ -1,7 +1,8 @@
 //! The lanewise operators of GNU vectors on wasm32 with `-msimd128`. An add, a subtract, a multiply,
-//! a divide of floats and the bitwise operators on a vector of sixteen bytes are each one SIMD
-//! instruction, which is what clang writes. wasm has no multiply of sixteen `char` lanes, so that
-//! one stays a lane at a time, and without `-msimd128` each operator is a lane at a time.
+//! a divide of floats, the bitwise operators, the compares and a shift by a scalar on a vector of
+//! sixteen bytes are each one SIMD instruction, which is what clang writes. wasm has no multiply of
+//! sixteen `char` lanes, so that one stays a lane at a time, and without `-msimd128` each operator is
+//! a lane at a time.
 
 use std::io::Write as _;
 use std::path::{Path, PathBuf};
@@ -11,8 +12,10 @@ use std::process::{Command, Output, Stdio};
 const OPERATORS: &str = "\
 typedef unsigned char v16qu __attribute__((vector_size(16)));
 typedef short v8hi __attribute__((vector_size(16)));
+typedef unsigned short v8hu __attribute__((vector_size(16)));
 typedef int v4si __attribute__((vector_size(16)));
 typedef long long v2di __attribute__((vector_size(16)));
+typedef unsigned long long v2du __attribute__((vector_size(16)));
 typedef float v4sf __attribute__((vector_size(16)));
 typedef double v2df __attribute__((vector_size(16)));
 v16qu add16(v16qu a, v16qu b) { return a + b; }
@@ -23,6 +26,16 @@ v4si mul4(v4si a, v4si b) { return a * b; }
 v2di bits2(v2di a, v2di b) { return (a & b) | (a ^ b); }
 v4sf fdiv4(v4sf a, v4sf b) { return a / b; }
 v2df fmul2(v2df a, v2df b) { return a * b + a; }
+v4si lt4(v4si a, v4si b) { return a < b; }
+v16qu eq16(v16qu a, v16qu b) { return (v16qu)(a == b); }
+v8hi ge8u(v8hi a, v8hi b) { return (v8hu)a >= (v8hu)b; }
+v2di gt2u(v2di a, v2di b) { return (v2du)a > (v2du)b; }
+v4si ne4f(v4sf a, v4sf b) { return a != b; }
+v2di le2f(v2df a, v2df b) { return a <= b; }
+v4si shl4(v4si a, int n) { return a << n; }
+v8hi sar8(v8hi a) { return a >> 3; }
+v16qu shr16(v16qu a, int n) { return a >> n; }
+v2di shl2(v2di a, int n) { return a << n; }
 ";
 
 /// The output of rucc for `source` on stdin, with `-S` to stdout at `-O2` on wasm32-wasip1.
@@ -64,11 +77,22 @@ fn with_simd128_each_operator_is_one_instruction() {
         ("bits2", &["v128.and", "v128.xor", "v128.or"]),
         ("fdiv4", &["f32x4.div"]),
         ("fmul2", &["f64x2.mul", "f64x2.add"]),
+        ("lt4", &["i32x4.lt_s"]),
+        ("eq16", &["i8x16.eq"]),
+        ("ge8u", &["i16x8.ge_u"]),
+        ("gt2u", &["v128.xor", "i64x2.gt_s"]),
+        ("ne4f", &["f32x4.ne"]),
+        ("le2f", &["f64x2.le"]),
+        ("shl4", &["i32x4.shl"]),
+        ("sar8", &["i32.const\t3", "i16x8.shr_s"]),
+        ("shr16", &["i8x16.shr_u"]),
+        ("shl2", &["i32.wrap_i64", "i64x2.shl"]),
     ] {
         let code = body(&text, name);
         for op in want {
             assert!(code.contains(op), "no `{op}` in {name}:\n{}", code.join("\n"));
         }
+        assert!(!code.iter().any(|op| op.contains("replace_lane")), "{name}:\n{}", code.join("\n"));
     }
     let code = body(&text, "mul16");
     assert_eq!(code.iter().filter(|op| **op == "i32.mul").count(), 16, "{}", code.join("\n"));
@@ -85,7 +109,9 @@ fn without_simd128_each_operator_is_a_lane_at_a_time() {
 
 /// A program that does each operator on vectors of edge values, and the same operator on each
 /// lane as a scalar, and exits with 1 if a lane differs. The scalar side is in a function that is
-/// not inlined, so it is plain scalar code.
+/// not inlined, so it is plain scalar code. A compare gives -1 or 0 in each lane. Every second lane
+/// of `c` is the lane of `a`, so that each compare has equal lanes too. The shift count is less than
+/// the width of the lane, and it comes from a `volatile`, so that it is not a constant.
 const CHECK: &str = "\
 #include <string.h>
 #define V(n, t) typedef t n __attribute__((vector_size(16)));
@@ -98,32 +124,60 @@ static void fill(void *p, int k) {
     for (int i = 0; i < 16; i++) b[i] = edge[(i * 3 + k) & 7] ^ (unsigned char)(i * k);
 }
 static int bad;
+static volatile int count = 13;
 #define SCALAR(n, t, op) \\
     __attribute__((noinline)) static void n(t *r, const t *a, const t *b, int lanes) { \\
         for (int i = 0; i < lanes; i++) r[i] = (t)(a[i] op b[i]); }
-#define INT(v, t) \\
+#define COMPARE(n, t, m, op) \\
+    __attribute__((noinline)) static void n(m *r, const t *a, const t *b, int lanes) { \\
+        for (int i = 0; i < lanes; i++) r[i] = a[i] op b[i] ? -1 : 0; }
+#define COMPARES(v, t, m) \\
+    COMPARE(eq_##v, t, m, ==) COMPARE(ne_##v, t, m, !=) COMPARE(lt_##v, t, m, <) \\
+    COMPARE(gt_##v, t, m, >) COMPARE(le_##v, t, m, <=) COMPARE(ge_##v, t, m, >=) \\
+    static void compare_##v(v a, v b) { \\
+        v c = a; __typeof__(a < b) r, s; int n = 16 / sizeof(t); \\
+        for (int i = 0; i < n; i += 2) c[i + 1] = b[i + 1]; \\
+        r = a == c; eq_##v((m *)&s, (t *)&a, (t *)&c, n); bad |= memcmp(&r, &s, 16) != 0; \\
+        r = a != c; ne_##v((m *)&s, (t *)&a, (t *)&c, n); bad |= memcmp(&r, &s, 16) != 0; \\
+        r = a < c; lt_##v((m *)&s, (t *)&a, (t *)&c, n); bad |= memcmp(&r, &s, 16) != 0; \\
+        r = a > c; gt_##v((m *)&s, (t *)&a, (t *)&c, n); bad |= memcmp(&r, &s, 16) != 0; \\
+        r = a <= c; le_##v((m *)&s, (t *)&a, (t *)&c, n); bad |= memcmp(&r, &s, 16) != 0; \\
+        r = a >= c; ge_##v((m *)&s, (t *)&a, (t *)&c, n); bad |= memcmp(&r, &s, 16) != 0; }
+#define SHIFT(n, t, u, op) \\
+    __attribute__((noinline)) static void n(t *r, const t *a, int k, int lanes) { \\
+        for (int i = 0; i < lanes; i++) r[i] = (t)((u)a[i] op k); }
+#define INT(v, t, m) \\
     SCALAR(add_##v, t, +) SCALAR(sub_##v, t, -) SCALAR(mul_##v, t, *) \\
     SCALAR(and_##v, t, &) SCALAR(or_##v, t, |) SCALAR(xor_##v, t, ^) \\
+    COMPARES(v, t, m) SHIFT(shl_##v, t, unsigned long long, <<) SHIFT(shr_##v, t, t, >>) \\
     static void check_##v(void) { \\
         v a, b, r, s; fill(&a, 1); fill(&b, 2); int n = 16 / sizeof(t); \\
+        int k = count % (8 * sizeof(t)); compare_##v(a, b); \\
+        r = a << k; shl_##v((t *)&s, (t *)&a, k, n); bad |= memcmp(&r, &s, 16) != 0; \\
+        r = a >> k; shr_##v((t *)&s, (t *)&a, k, n); bad |= memcmp(&r, &s, 16) != 0; \\
+        r = a << 3; shl_##v((t *)&s, (t *)&a, 3, n); bad |= memcmp(&r, &s, 16) != 0; \\
+        r = a >> 3; shr_##v((t *)&s, (t *)&a, 3, n); bad |= memcmp(&r, &s, 16) != 0; \\
         r = a + b; add_##v((t *)&s, (t *)&a, (t *)&b, n); bad |= memcmp(&r, &s, 16) != 0; \\
         r = a - b; sub_##v((t *)&s, (t *)&a, (t *)&b, n); bad |= memcmp(&r, &s, 16) != 0; \\
         r = a * b; mul_##v((t *)&s, (t *)&a, (t *)&b, n); bad |= memcmp(&r, &s, 16) != 0; \\
         r = a & b; and_##v((t *)&s, (t *)&a, (t *)&b, n); bad |= memcmp(&r, &s, 16) != 0; \\
         r = a | b; or_##v((t *)&s, (t *)&a, (t *)&b, n); bad |= memcmp(&r, &s, 16) != 0; \\
         r = a ^ b; xor_##v((t *)&s, (t *)&a, (t *)&b, n); bad |= memcmp(&r, &s, 16) != 0; }
-#define FLT(v, t) \\
+#define FLT(v, t, m) \\
     SCALAR(add_##v, t, +) SCALAR(sub_##v, t, -) SCALAR(mul_##v, t, *) SCALAR(div_##v, t, /) \\
+    COMPARES(v, t, m) \\
     static void check_##v(void) { \\
         v a, b, r, s; int n = 16 / sizeof(t); \\
         for (int i = 0; i < n; i++) { a[i] = (t)(i * 7 - 9) / 3; b[i] = (t)(5 - i * 11) / 7; } \\
+        compare_##v(a, b); b[0] = __builtin_nan(\"\"); compare_##v(a, b); compare_##v(b, a); \\
         r = a + b; add_##v((t *)&s, (t *)&a, (t *)&b, n); bad |= memcmp(&r, &s, 16) != 0; \\
         r = a - b; sub_##v((t *)&s, (t *)&a, (t *)&b, n); bad |= memcmp(&r, &s, 16) != 0; \\
         r = a * b; mul_##v((t *)&s, (t *)&a, (t *)&b, n); bad |= memcmp(&r, &s, 16) != 0; \\
         r = a / b; div_##v((t *)&s, (t *)&a, (t *)&b, n); bad |= memcmp(&r, &s, 16) != 0; }
-INT(v16s, signed char) INT(v16u, unsigned char) INT(v8s, short) INT(v8u, unsigned short)
-INT(v4s, int) INT(v4u, unsigned) INT(v2s, long long) INT(v2u, unsigned long long)
-FLT(v4f, float) FLT(v2d, double)
+INT(v16s, signed char, signed char) INT(v16u, unsigned char, signed char)
+INT(v8s, short, short) INT(v8u, unsigned short, short) INT(v4s, int, int) INT(v4u, unsigned, int)
+INT(v2s, long long, long long) INT(v2u, unsigned long long, long long)
+FLT(v4f, float, int) FLT(v2d, double, long long)
 int main(void) {
     check_v16s(); check_v16u(); check_v8s(); check_v8u(); check_v4s(); check_v4u();
     check_v2s(); check_v2u(); check_v4f(); check_v2d();

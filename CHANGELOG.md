@@ -8,6 +8,10 @@ All notable changes are recorded here. The format follows [Keep a Changelog](htt
 
 - Stack slot sharing works out where each local is written and read one loop at a time instead of revisiting every block until nothing changes, so quickjs.c at -O2 runs 65 percent fewer instructions with the same output (#3474).
 
+### Added
+
+- With `-msimd128`, a compare of two vectors of 16 bytes is one wasm SIMD compare, and a shift of a vector of 16 bytes by a scalar is one wasm SIMD shift. The mask of a compare has each lane all ones or zero, as in C. wasm has no unsigned compare of `i64x2` lanes, so rucc turns over the sign bit of each lane and uses the signed compare. A shift with a different count in each lane is done one lane at a time (#3475).
+
 ### Fixed
 
 - A call to a maths function such as `fabs` only carries the `library` mark when it has the library function's type, so `int fabs(int)` is the program's own function again, as gcc reads it. The usage text is back under one screen, with `-ftls-model=` sharing the line of `-fvisibility=` (#3471).
