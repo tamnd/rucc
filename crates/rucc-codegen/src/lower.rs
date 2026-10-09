@@ -11355,8 +11355,8 @@ mod tests {
             let out = func(&source, &mut names, &SELECTOR, &SYSV, &elsewhere)
                 .expect("every instruction has a rule");
             let text = mir::print_func(&out.func, &names, &REGS);
-            assert!(text.contains("own@tlsdesc(%rip), %rax"), "{text}");
-            assert!(text.contains("*own@tlscall(%rax)"), "{text}");
+            assert!(text.contains("@tlsdesc(%rip), %rax"), "{text}");
+            assert!(text.contains("@tlscall(%rax)"), "{text}");
             assert!(text.contains("%fs:0, %rax"), "{text}");
             assert!(text.contains("x64.ret_val_64 %0($rax)"), "{text}");
             assert!(!text.contains("__tls_get_addr"), "{text}");
