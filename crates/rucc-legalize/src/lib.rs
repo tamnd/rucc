@@ -14,6 +14,6 @@
 //! here. The other rewrites of the lowering group in `rucc-codegen` move here when the wasm back
 //! end needs them.
 
-#![doc(html_root_url = "https://docs.rs/rucc-legalize/0.29.5")]
+#![doc(html_root_url = "https://docs.rs/rucc-legalize/0.29.6")]
 
 pub mod switch;
