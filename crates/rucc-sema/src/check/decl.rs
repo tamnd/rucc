@@ -1021,7 +1021,7 @@ impl Checker<'_> {
             self.check_nonstring(&[specs.attrs, item.attrs], merged);
         }
         let holder = match (kind, duration) {
-            (DeclKind::Object, StorageDuration::Thread) => Holder::Thread,
+            (DeclKind::Object, StorageDuration::Thread) => Holder::Thread(id),
             (DeclKind::Object, _) => Holder::NotThread,
             _ => Holder::NotVariable,
         };

@@ -33,7 +33,8 @@ use std::str::FromStr;
 use rucc_base::Interner;
 use rucc_diag::{Diagnostic, Severity, SourceMap};
 use rucc_target::{
-    Arch, BranchProtection, CodeModel, Env, Isa, Os, Speculation, TargetInfo, Triple, wasm,
+    Arch, BranchProtection, CodeModel, Env, Isa, Os, Speculation, TargetInfo, TlsModel, Triple,
+    wasm,
 };
 
 /// An optimisation level.
@@ -2156,6 +2157,10 @@ pub struct Options {
     /// Where the code and static data are promised to be, which is `-mcmodel=`. The kernel model is
     /// x86-64 ELF only and only beside `-fno-pic`, which the driver checks. tamnd/rucc#2275.
     pub code_model: CodeModel,
+    /// The model a thread-local variable with no `tls_model` attribute asks for, which is
+    /// `-ftls-model=`. The general dynamic one, the default, asks for nothing, so the code
+    /// generator picks the fastest model the link allows.
+    pub tls_model: TlsModel,
     /// The boundary in bytes the stack pointer is kept on at every call, from
     /// `-mpreferred-stack-boundary=`, or `None` for the convention's own.
     ///
@@ -2882,6 +2887,7 @@ impl Options {
             leaf_frame_pointer: true,
             red_zone: true,
             code_model: CodeModel::Small,
+            tls_model: TlsModel::GlobalDynamic,
             stack_boundary: None,
             vector: true,
             x87: true,

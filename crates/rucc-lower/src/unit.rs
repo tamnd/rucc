@@ -285,6 +285,9 @@ pub struct Context<'a> {
     /// travels in it, and a nested function under the flag is refused rather than allowed to
     /// write over whatever the build keeps there.
     pub fixed_x18: bool,
+    /// The model a thread-local variable with no `tls_model` attribute asks for, which is
+    /// `-ftls-model=`. The general dynamic model asks for nothing faster than the link allows.
+    pub tls_model: TlsModel,
     /// Whether the objects are laid out newest first, which is what gcc does when it optimizes.
     /// See `Module::reverse_globals`.
     pub reorder: bool,
@@ -330,6 +333,7 @@ impl fmt::Debug for Context<'_> {
             .field("share", &self.share)
             .field("in_place", &self.in_place)
             .field("fixed_x18", &self.fixed_x18)
+            .field("tls_model", &self.tls_model)
             .field("reorder", &self.reorder)
             .field("isa", &self.isa)
             .finish_non_exhaustive()
@@ -410,6 +414,7 @@ pub fn lower(name: &str, cx: Context<'_>) -> Lowered {
         share,
         in_place,
         fixed_x18,
+        tls_model,
         reorder,
         isa,
         read,
@@ -444,6 +449,7 @@ pub fn lower(name: &str, cx: Context<'_>) -> Lowered {
         share,
         in_place,
         fixed_x18,
+        tls_model,
         reorder,
         isa,
         read,
@@ -523,6 +529,8 @@ pub(crate) struct Unit<'a> {
     pub(crate) in_place: bool,
     /// Whether `x18` is kept for something else. See [`Context::fixed_x18`].
     fixed_x18: bool,
+    /// What a thread-local with no attribute asks for. See [`Context::tls_model`].
+    tls_model: TlsModel,
     /// Whether the objects are laid out newest first. See [`Context::reorder`].
     reorder: bool,
     /// The extensions the command line builds for. See [`Context::isa`].
@@ -1013,7 +1021,9 @@ impl Unit<'_> {
         if duration == StorageDuration::Static {
             global.dll = self.dll(decl, state != Definition::Declared);
         }
-        global.tls = (duration == StorageDuration::Thread).then_some(TlsModel::GlobalDynamic);
+        // What the program asked for, and the code generator may still pick a faster model.
+        global.tls = (duration == StorageDuration::Thread)
+            .then(|| self.tast.tls_model(decl).unwrap_or(self.tls_model));
         global.constant = repr::is_read_only(self.types, ty);
         global.section = self.section_of(decl, false);
         // A `static` object is the optimizer's to take away once nothing names it, which is what

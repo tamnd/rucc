@@ -3,24 +3,26 @@
 //!
 //! glibc writes `initial-exec` on nearly every thread-local variable it has, through
 //! `attribute_tls_model_ie`, and a library meant to be loaded early writes it to keep the call to
-//! `__tls_get_addr` out of every access. The initial exec sequence is the one this compiler writes
-//! for every thread-local variable, which `thread_address` in the code generator explains, so what
-//! glibc asks for is what it gets. `local-exec` is a shorter sequence for the same thing, and the
-//! initial exec one is right wherever that one is. The two dynamic models are the sequence that
-//! calls `__tls_get_addr`, which this compiler does not write yet for any variable (issue #1104),
-//! so a variable written with one is reached the way every other one is.
+//! `__tls_get_addr` out of every access. The allocators need it most, because `__tls_get_addr` may
+//! call `malloc` the first time a thread touches a block that `dlopen` added.
 //!
-//! So nothing about the attribute changes the code, and what is here is gcc 13's checking of it,
-//! in its words and in its order: the argument count first, then whether it is written on a
-//! thread-local variable at all, which is a warning and drops it, and then the string.
+//! The model is recorded on the variable, and the lowering puts it on the IR global. The code
+//! generator then uses it or the fastest model the link allows, whichever is faster, as gcc does.
+//! A variable with no attribute takes `-ftls-model=` instead.
+//!
+//! What is here is gcc 13's checking of the attribute, in its words and in its order: the argument
+//! count first, then whether it is written on a thread-local variable at all, which is a warning
+//! and drops it, and then the string.
 
 use rucc_ast::{AttrArg, AttrList};
 use rucc_base::Symbol;
 use rucc_diag::Diagnostic;
 
 use rucc_lex::Encoding;
+use rucc_target::TlsModel;
 
 use crate::check::Checker;
+use crate::decl::DeclId;
 use crate::expr::ExprKind;
 
 /// What a `tls_model` attribute was written on.
@@ -30,12 +32,10 @@ pub(in crate::check) enum Holder {
     NotVariable,
     /// A variable without thread storage duration.
     NotThread,
-    /// A thread-local variable, the one thing the attribute is for.
-    Thread,
+    /// A thread-local variable, the one thing the attribute is for, and the model is recorded on
+    /// it.
+    Thread(DeclId),
 }
-
-/// The four models gcc knows, in the order its message lists them.
-const MODELS: [&str; 4] = ["local-exec", "initial-exec", "local-dynamic", "global-dynamic"];
 
 impl Checker<'_> {
     /// Checks each `tls_model` in `lists`, written on `name`, the way gcc 13 does.
@@ -67,7 +67,7 @@ impl Checker<'_> {
                     Holder::NotThread => {
                         Some(format!("'{spelled}' does not have thread storage duration"))
                     }
-                    Holder::Thread => None,
+                    Holder::Thread(_) => None,
                 };
                 if let Some(why) = why {
                     let what = format!("'tls_model' attribute ignored because {why}");
@@ -94,10 +94,14 @@ impl Checker<'_> {
                     self.report(Diagnostic::error(what, attr.span).with_code("E0814"));
                     continue;
                 };
-                if !MODELS.contains(&model.as_str()) {
+                let Some(model) = TlsModel::from_gcc(&model) else {
                     let what = "'tls_model' argument must be one of 'local-exec', 'initial-exec', \
                                 'local-dynamic', or 'global-dynamic'";
                     self.report(Diagnostic::error(what, attr.span).with_code("E0814"));
+                    continue;
+                };
+                if let Holder::Thread(decl) = holder {
+                    self.tast.record_tls_model(decl, model);
                 }
             }
         }
