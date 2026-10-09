@@ -47,6 +47,12 @@ pub static SELECTOR: super::Selector = super::Selector {
             add: "lea_64",
         }),
         teb: None,
+        dynamic: Some(super::Dynamic {
+            general: "data16\tleaq\t{}@tlsgd(%rip), %rdi\n.value\t0x6666\nrex64\n\
+                      call\t__tls_get_addr@PLT",
+            local: "leaq\t{}@tlsld(%rip), %rdi\ncall\t__tls_get_addr@PLT\n\
+                    leaq\t{}@dtpoff(%rax), %rax",
+        }),
     },
     jumps: &super::Jumps {
         near: "lea_64",

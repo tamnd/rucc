@@ -40,7 +40,9 @@
 
 use rucc_base::Symbol;
 use rucc_base::hash::{Map, Set};
-use rucc_ir::{AttrSet, Datum, Dll, Extra, Linkage, Module, Opcode, Pic, Visibility};
+use rucc_ir::{
+    AttrSet, Datum, Dll, Extra, Global, Linkage, Module, Opcode, Pic, TlsModel, Visibility,
+};
 use rucc_target::ObjectFormat;
 
 /// The names whose address only the linker knows.
@@ -74,7 +76,7 @@ use rucc_target::ObjectFormat;
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct Elsewhere {
     names: Set<Symbol>,
-    threads: Set<Symbol>,
+    threads: Map<Symbol, TlsModel>,
     twice: Set<Symbol>,
     jumps_back: Set<Symbol>,
     cold: Set<Symbol>,
@@ -136,8 +138,10 @@ impl Elsewhere {
     pub fn of(module: &Module, pic: Pic, format: ObjectFormat, copies: bool) -> Self {
         let threads = module
             .globals()
-            .filter(|&id| module[id].tls.is_some())
-            .map(|id| module[id].name)
+            .filter_map(|id| {
+                let global = &module[id];
+                Some((global.name, global.tls?.max(Self::fastest(global, pic, format))))
+            })
             .collect();
         let twice = module
             .funcs()
@@ -173,6 +177,33 @@ impl Elsewhere {
             referred,
             aligned,
             ..Self::table(module, pic, format, copies)
+        }
+    }
+
+    /// The fastest model a thread-local variable can be reached by in this link, which is the one
+    /// it gets unless it asked for a faster one still.
+    ///
+    /// A shared library may be opened with `dlopen` once the program is running, and then its
+    /// variables are in a block no offset from the thread pointer reaches. So a variable in one is
+    /// reached through `__tls_get_addr`: the general call for one another object may define, and
+    /// the local call for one that is in this library and nowhere else, which is a `static` or a
+    /// hidden one. That is what gcc 13 does. gcc also makes the general call for a protected one,
+    /// which binds in the library all the same and gets the local call here.
+    ///
+    /// Everything else is in the program or in a library loaded with it, whose blocks are at
+    /// fixed offsets from the thread pointer, so the offset is read out of a slot, which is
+    /// initial exec. gcc writes local exec for a variable the program defines, which saves the
+    /// read, and the linker makes the same change itself when it sees the slot is for one. Only
+    /// ELF has these models. Mach-O and COFF reach every thread-local their own way.
+    fn fastest(global: &Global, pic: Pic, format: ObjectFormat) -> TlsModel {
+        if format != ObjectFormat::Elf || pic != Pic::Library {
+            return TlsModel::InitialExec;
+        }
+        let outside = global.is_declaration() && global.visibility == Visibility::Default;
+        if outside || pic.replaceable(global.linkage, global.visibility) {
+            TlsModel::GlobalDynamic
+        } else {
+            TlsModel::LocalDynamic
         }
     }
 
@@ -553,7 +584,14 @@ impl Elsewhere {
     /// question of whose copy is answered by the segment register rather than by the link.
     #[must_use]
     pub fn thread(&self, name: Symbol) -> bool {
-        self.threads.contains(&name)
+        self.threads.contains_key(&name)
+    }
+
+    /// The model that name is reached by, when it is a thread-local variable. See
+    /// [`Self::fastest`].
+    #[must_use]
+    pub fn model(&self, name: Symbol) -> Option<TlsModel> {
+        self.threads.get(&name).copied()
     }
 
     /// Whether a call to that name may come back more than once, because a declaration of it said
@@ -619,6 +657,13 @@ impl Elsewhere {
     /// The same set with those names said to be thread-local, for a test that lowers one function.
     #[must_use]
     pub fn with_threads<T: IntoIterator<Item = Symbol>>(mut self, threads: T) -> Self {
+        self.threads = threads.into_iter().map(|name| (name, TlsModel::InitialExec)).collect();
+        self
+    }
+
+    /// The same with each name reached by the model beside it.
+    #[must_use]
+    pub fn with_models<T: IntoIterator<Item = (Symbol, TlsModel)>>(mut self, threads: T) -> Self {
         self.threads = threads.into_iter().collect();
         self
     }
@@ -701,6 +746,50 @@ mod tests {
         for name in ["kept", "away", "quiet", "shy", "here"] {
             assert!(!elsewhere.thread(names.intern(name)), "{name} was called thread-local");
         }
+    }
+
+    /// In a shared library a thread-local is found by a call, the general one unless it is in this
+    /// library and nowhere else, and a faster model it asked for is kept. In a program, and on a
+    /// format with no such models, the offset is read out of a slot.
+    #[test]
+    fn a_thread_local_in_a_shared_library_is_found_by_a_call() {
+        let mut names = Interner::new();
+        let target = TargetInfo::new(Triple::new(Arch::X86_64, Os::Linux, Env::Gnu));
+        let mut module = Module::new(names.intern("test.c"), &target);
+        let mut add = |name: &str, linkage, visibility, defined: bool, tls| {
+            let mut global = Global::new(names.intern(name), 4, 4);
+            if defined {
+                global.init = Some(module.push_data(&[]));
+            }
+            global.linkage = linkage;
+            global.visibility = visibility;
+            global.tls = Some(tls);
+            module.add_global(global);
+        };
+        let general = TlsModel::GlobalDynamic;
+        add("away", Linkage::External, Visibility::Default, false, general);
+        add("own", Linkage::External, Visibility::Default, true, general);
+        add("quiet", Linkage::Internal, Visibility::Default, true, general);
+        add("shy", Linkage::External, Visibility::Hidden, false, general);
+        add("kept", Linkage::External, Visibility::Protected, true, general);
+        add("fast", Linkage::External, Visibility::Default, true, TlsModel::InitialExec);
+        let library = Elsewhere::of(&module, Pic::Library, ObjectFormat::Elf, true);
+        let program = Elsewhere::of(&module, Pic::Executable, ObjectFormat::Elf, true);
+        let wanted = [
+            ("away", TlsModel::GlobalDynamic),
+            ("own", TlsModel::GlobalDynamic),
+            ("quiet", TlsModel::LocalDynamic),
+            ("shy", TlsModel::LocalDynamic),
+            ("kept", TlsModel::LocalDynamic),
+            ("fast", TlsModel::InitialExec),
+        ];
+        for (name, model) in wanted {
+            let name = names.intern(name);
+            assert_eq!(library.model(name), Some(model));
+            assert_eq!(program.model(name), Some(TlsModel::InitialExec));
+        }
+        let apple = Elsewhere::of(&module, Pic::Library, ObjectFormat::MachO, true);
+        assert_eq!(apple.model(names.intern("away")), Some(TlsModel::InitialExec));
     }
 
     #[test]

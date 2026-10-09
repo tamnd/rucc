@@ -84,7 +84,7 @@ use rucc_cost::heuristics;
 use rucc_diag::Span;
 use rucc_ir::{
     Abi, AsmOperand, AsmOperands, AttrSet, Block, Def, Extra, Flags, FloatPred, Func, Inst,
-    Linkage, MemOrder, Opcode, Param, PrefetchHint, RmwOp, Type, Value, Visibility,
+    Linkage, MemOrder, Opcode, Param, PrefetchHint, RmwOp, TlsModel, Type, Value, Visibility,
 };
 use rucc_mir as mir;
 use rucc_target::template::{template_name, template_reg};
@@ -3994,6 +3994,17 @@ impl<'a> Lowering<'a> {
         if self.elsewhere.indexed() {
             return self.thread_indexed(inst, symbol, result);
         }
+        if let Some(dynamic) = &self.selector.symbols.dynamic {
+            let text = match self.elsewhere.model(symbol) {
+                Some(TlsModel::GlobalDynamic) => Some(dynamic.general),
+                Some(TlsModel::LocalDynamic) => Some(dynamic.local),
+                _ => None,
+            };
+            if let Some(text) = text {
+                self.thread_call(inst, symbol, result, text);
+                return Ok(());
+            }
+        }
         let block = self.at.expect("a block is being filled");
         let span = self.source.span(inst);
         let gpr = self.gpr;
@@ -4028,6 +4039,43 @@ impl<'a> Lowering<'a> {
             .operand(mir::Operand::read(pointer, gpr))
             .finish();
         Ok(())
+    }
+
+    /// The address of a thread-local variable in a shared library, which the call to
+    /// `__tls_get_addr` in `text` gives back. See [`crate::select::Dynamic`].
+    ///
+    /// The template is one instruction as far as the allocator is concerned, so it is told what
+    /// the call inside it does: the address comes back in the first register a call returns in,
+    /// and every register the convention does not keep is written. The function makes a call, so
+    /// its frame is aligned for one and nothing is kept under the stack pointer.
+    fn thread_call(&mut self, inst: Inst, symbol: Symbol, result: Value, text: &str) {
+        let block = self.at.expect("a block is being filled");
+        let span = self.source.span(inst);
+        let gpr = self.gpr;
+        let conv = self.conv;
+        let name = template_name(self.names.resolve(symbol));
+        let text = self.names.intern(&text.replace("{}", &name));
+        let opcode = self.named(x86_64::TEMPLATE);
+        let returned = conv.int_returns[0];
+        let reg = self.new_reg(result);
+        let mut build = self
+            .out
+            .build(block, opcode)
+            .at(span)
+            .symbol(text)
+            .operand(mir::Operand::write(reg, gpr).with(Constraint::Fixed(returned)));
+        for &at in conv.int_order {
+            if !conv.preserves_int(at) && at != returned {
+                build = build.operand(mir::Operand::write(mir::Reg::physical(at), conv.int_class));
+            }
+        }
+        for &at in conv.sse_order {
+            if !conv.preserves_sse(at) {
+                build = build.operand(mir::Operand::write(mir::Reg::physical(at), conv.sse_class));
+            }
+        }
+        build.finish();
+        self.stack.call(0);
     }
 
     /// A thread-local variable on Mach-O, which is a call.
@@ -11170,6 +11218,31 @@ mod tests {
              %1:gpr = x64.mov_rm_64 [fs:0]\n    %2:gpr(reuse 1) = x64.add_rr_64 %0, %1\n    \
              x64.ret_val_64 %2($rax)\n}\n"
         );
+    }
+
+    /// The same in a shared library, which is a call to `__tls_get_addr` kept as one template so
+    /// that the linker can still rewrite it. The address comes back in `%rax`, and the registers
+    /// the call does not keep are written, `%rdi` among them.
+    #[test]
+    fn a_thread_local_in_a_shared_library_is_found_by_a_call_the_linker_can_rewrite() {
+        let cases = [
+            (TlsModel::GlobalDynamic, "@tlsgd(%rip), %rdi"),
+            (TlsModel::LocalDynamic, "@dtpoff(%rax), %rax"),
+        ];
+        for (model, wanted) in cases {
+            let (mut names, mut source, block, _) = blank(&[]);
+            let own = address_of(&mut source, block, &mut names, "own");
+            Builder::new(&mut source, block).ret(&[own]);
+            let elsewhere = Elsewhere::default().with_models([(names.intern("own"), model)]);
+            let out = func(&source, &mut names, &SELECTOR, &SYSV, &elsewhere)
+                .expect("every instruction has a rule");
+            let text = mir::print_func(&out.func, &names, &REGS);
+            assert!(text.contains(wanted), "{text}");
+            assert!(text.contains("__tls_get_addr@PLT"), "{text}");
+            assert!(text.contains("$rdi"), "{text}");
+            assert!(text.contains("x64.ret_val_64 %0($rax)"), "{text}");
+            assert!(!text.contains("[thread @own]") && !text.contains("fs:0"), "{text}");
+        }
     }
 
     /// The same load with nothing added to it, which is the whole of `__builtin_thread_pointer`.
