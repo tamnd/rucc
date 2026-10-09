@@ -30,6 +30,7 @@ All notable changes are recorded here. The format follows [Keep a Changelog](htt
 - `-fsafety=detect` refuses a read of bytes that `__builtin_alloca` or a variable length array took and nothing wrote. The bytes are marked unwritten where they are taken and forgotten when the scope gives them back, at a `stackrestore` or a return, and an address the optimizer steps round a loop no longer hides the local. Juliet's CWE-457 cases at -O2 go from 300 to 408 of 540 detected at every tier with no false positives (#3446).
 - On wasm32, each lane of a GNU vector is a parameter of its own, and a vector of more than one lane comes back through a hidden pointer, as clang does without `-msimd128`. A structure that holds only one vector goes the same way. Before, a vector was the address of a copy, and a call between rucc code and clang code with a vector argument gave wrong values. A vector past the `...` is not changed (#3453). (#3454)
 - On wasm32, a union that holds one GNU vector and nothing else goes the same way as the vector, as clang does. Before, rucc passed it as the address of a copy (#3461).
+- On wasm32, a GNU vector past the `...` is its own bytes in the variadic area, on a boundary of its alignment, as clang's `va_arg` reads it. Before, the caller put the address of a copy there (#3462).
 
 ## 0.29.5
 
