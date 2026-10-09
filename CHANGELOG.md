@@ -19,6 +19,7 @@ All notable changes are recorded here. The format follows [Keep a Changelog](htt
 - A shift of a `long long` on i386, or a `__int128` on x86-64, by a count in a register asks whether the count reached a whole word after the shifts rather than before them, so both words are picked with `cmov` on one test instead of a byte kept through `setne` (#3499).
 - The inliner points the readers of an inlined call's results at the copy without walking the whole caller, which takes a quarter off the compile of quickjs.c at `-O2` (#3500).
 - On i386 at `-O2` the blocks of a function that only lead to a cold call go in `.text.unlikely` as `foo.cold`, as gcc does for `-m32`, where only x86-64 split them. The hot part of `md_do_sync` in the 32 bit kernel goes from 7684 bytes to 2459 (#3501).
+- Slot sharing numbers only the locals with lifetime ends in the rows of its walk for them, which takes an eighth off the compile of quickjs.c at `-O2` (#3503).
 
 ### Added
 
