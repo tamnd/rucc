@@ -8,11 +8,13 @@
 //! It is the wrong question to ask afresh in six passes, so this is the answer computed once:
 //! the predecessors, both adjacency lists, a postorder, and which blocks the entry reaches.
 //!
-//! Everything here is recomputed from nothing after any change to the shape of the function.
-//! There is no incremental update and section 6.3 of the design says why: a CFG edit already
-//! invalidates almost every other analysis, so a graph that survived one would be the single
-//! survivor of a clearing that took the rest, and a stale dominator tree is the hardest kind of
-//! compiler bug to find.
+//! Everything here is recomputed from nothing after any change to the shape of the function, with
+//! one exception. Section 6.3 of the design says why: a CFG edit already invalidates almost every
+//! other analysis, so a graph that survived one would be the single survivor of a clearing that took
+//! the rest, and a stale dominator tree is the hardest kind of compiler bug to find. The exception is
+//! [`Cfg::merged`], for a block folded into the one block that reached it, which the loop forest and
+//! the early return table already survive, and which a debug build checks against the graph built
+//! again each time.
 
 use rucc_ir::{Block, Func};
 
@@ -155,6 +157,96 @@ impl Cfg {
         self.rank[block.index()].is_some()
     }
 
+    /// The graph after the blocks in `gone` went away and `into`, the one block that reached each of
+    /// them, took over their edges, worked out from the graph as it was rather than read out of the
+    /// whole function again. Answers false and leaves the graph alone when the function is not that,
+    /// and the graph then has to be built again.
+    ///
+    /// Each block in `gone` had only `into` and the others in `gone` as ways in, and `into` now goes
+    /// where it went before with each block of `gone` replaced by where that block went, in order and
+    /// each block once. That is checked against the terminator `into` has now, which is the one
+    /// block whose edges are read. The walk that orders the blocks then goes the same way through the
+    /// same blocks, since it only ever went into a block of `gone` from `into` and came back out to
+    /// where `into` went next, so the order is the one there was with `gone` taken out. A block's
+    /// predecessors are in the order the blocks are laid out, which is the order of their numbers,
+    /// since a block is only ever added at the end.
+    ///
+    /// Phiopt and short-circuit fold the arms of a diamond into its head and then ask about the
+    /// next head, and on lz4hc.c at `-O2` building the graph again for that was four percent of the
+    /// compile.
+    pub(crate) fn merged(&mut self, func: &Func, into: Block, gone: &[Block]) -> bool {
+        let capacity = self.capacity();
+        if gone.is_empty() || func.counts().blocks != capacity || gone.contains(&into) {
+            return false;
+        }
+        let entered = |block: Block| {
+            self.predecessors(block).iter().all(|pred| *pred == into || gone.contains(pred))
+        };
+        if gone.iter().any(|&block| {
+            Some(block) == self.entry || func.terminator(block).is_some() || !entered(block)
+        }) {
+            return false;
+        }
+        // Where `into` should go now, and how many blocks of `gone` that went through.
+        let mut wanted: Vec<Block> = Vec::new();
+        let mut through: Vec<Block> = Vec::new();
+        let mut work: Vec<Block> = self.successors(into).iter().rev().copied().collect();
+        while let Some(block) = work.pop() {
+            if gone.contains(&block) {
+                if !through.contains(&block) {
+                    through.push(block);
+                    work.extend(self.successors(block).iter().rev().copied());
+                }
+            } else if !wanted.contains(&block) {
+                wanted.push(block);
+            }
+        }
+        if through.len() != gone.len() {
+            return false;
+        }
+        let mut now: Vec<Block> = Vec::new();
+        if let Some(term) = func.terminator(into) {
+            for call in func.successors(term) {
+                if !now.contains(&call.block) {
+                    now.push(call.block);
+                }
+            }
+        }
+        if now != wanted {
+            return false;
+        }
+        let arriving: Vec<(Block, Vec<Block>)> = wanted
+            .iter()
+            .map(|&to| {
+                let mut list: Vec<Block> = self
+                    .predecessors(to)
+                    .iter()
+                    .copied()
+                    .filter(|pred| *pred != into && !gone.contains(pred))
+                    .collect();
+                let at = list.partition_point(|pred| pred.index() < into.index());
+                list.insert(at, into);
+                (to, list)
+            })
+            .collect();
+        self.succs.set(into, &wanted);
+        for (to, list) in &arriving {
+            self.preds.set(*to, list);
+        }
+        for &block in gone {
+            self.succs.set(block, &[]);
+            self.preds.set(block, &[]);
+        }
+        self.postorder.retain(|block| !gone.contains(block));
+        for &block in gone {
+            self.rank[block.index()] = None;
+        }
+        for (index, &block) in self.postorder.iter().rev().enumerate() {
+            self.rank[block.index()] = Some(index as u32);
+        }
+        true
+    }
+
     /// How many blocks the function has room for, counting the removed ones.
     ///
     /// This is the length of every array indexed by block number, and is what somebody sizing
@@ -166,10 +258,14 @@ impl Cfg {
 }
 
 /// A list of blocks for each block number, laid end to end.
-#[derive(Clone, Debug, PartialEq, Eq)]
+///
+/// Each list says where it starts and stops rather than stopping where the next one starts, so
+/// that [`Cfg::merged`] can give one block a new list without moving everyone else's. A list that
+/// grows goes on the end and leaves its old place empty.
+#[derive(Clone, Debug)]
 struct Lists {
-    /// Where each block's list starts, with one more on the end for where the last one stops.
-    at: Vec<u32>,
+    /// Where each block's list starts and stops.
+    spans: Vec<(u32, u32)>,
     /// The lists.
     blocks: Vec<Block>,
 }
@@ -194,13 +290,41 @@ impl Lists {
             blocks[next[under.index()] as usize] = block;
             next[under.index()] += 1;
         }
-        Self { at: sizes, blocks }
+        let spans = sizes.windows(2).map(|pair| (pair[0], pair[1])).collect();
+        Self { spans, blocks }
     }
 
     fn of(&self, block: Block) -> &[Block] {
-        &self.blocks[self.at[block.index()] as usize..self.at[block.index() + 1] as usize]
+        let (start, stop) = self.spans[block.index()];
+        &self.blocks[start as usize..stop as usize]
+    }
+
+    /// Gives one block a new list, in its old place when it fits there and on the end when not.
+    fn set(&mut self, block: Block, list: &[Block]) {
+        let (mut start, stop) = self.spans[block.index()];
+        let len = list.len() as u32;
+        if len > stop - start {
+            start = self.blocks.len() as u32;
+            self.blocks.extend_from_slice(list);
+        } else {
+            self.blocks[start as usize..(start + len) as usize].copy_from_slice(list);
+        }
+        self.spans[block.index()] = (start, start + len);
     }
 }
+
+/// The same lists for every block, wherever they are kept.
+impl PartialEq for Lists {
+    fn eq(&self, other: &Self) -> bool {
+        self.spans.len() == other.spans.len()
+            && (0..self.spans.len()).all(|index| {
+                let block = Block::from_usize(index);
+                self.of(block) == other.of(block)
+            })
+    }
+}
+
+impl Eq for Lists {}
 
 /// Every block the entry reaches, children before parents.
 ///

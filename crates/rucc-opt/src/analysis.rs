@@ -574,16 +574,25 @@ impl Analyses {
             .touching(Arc::clone(&self.modref));
     }
 
-    /// Forgets everything as [`Analyses::clear`] does, except the loop forest and the early return
-    /// table when they are here, which are told about each block that went away and the block
-    /// that took over its edges.
+    /// Forgets everything as [`Analyses::clear`] does, except the graph, the loop forest and the
+    /// early return table when they are here, which are told about each block that went away and the
+    /// block that took over its edges.
     ///
     /// For a pass that has just folded blocks into the one block that reached each of them, under
     /// the terms [`Loops::merged`] gives, and will ask about a branch again before it returns.
     pub(crate) fn clear_merging(&mut self, func: &Func, merges: &[(Block, Block)]) {
+        let cfg = self.cfg.take();
         let loops = self.loops.take();
         let early = self.early.take();
         self.clear();
+        if let (Some(mut cfg), Some(&(_, into))) = (cfg, merges.first()) {
+            let gone: Vec<Block> = merges.iter().map(|&(gone, _)| gone).collect();
+            if merges.iter().all(|&(_, it)| it == into) && cfg.merged(func, into, &gone) {
+                #[cfg(debug_assertions)]
+                assert_eq!(cfg, Cfg::new(func), "the graph kept is the one built");
+                self.cfg = OnceCell::from(cfg);
+            }
+        }
         if let Some(mut early) = early {
             for &(gone, into) in merges {
                 early.merged(gone, into);

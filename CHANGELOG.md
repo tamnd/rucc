@@ -10,6 +10,7 @@ All notable changes are recorded here. The format follows [Keep a Changelog](htt
 - Short-circuit and phiopt keep the early return table, and phiopt keeps the loop forest, across each fold instead of building them again for the next branch, which makes lz4hc.c at -O2 run 14 percent fewer instructions (#3417).
 - LICM now works out liveness and register pressure again only over the blocks a hoist changed, instead of over the whole function for each loop, so lz4hc.c at -O2 runs 1.5 percent fewer instructions (#3418).
 - Jump threading now repairs each copy with the cached graph, dominator tree and frontier and keeps them for the next edge, and finds every value to repair in one walk, so lz4hc.c at -O2 runs 4.5 percent fewer instructions (#3422).
+- Phiopt and short-circuit now update the cached graph in place when they fold the arms of a diamond into its head, rather than building it again for the next head, so lz4hc.c at -O2 runs 3.4 percent fewer instructions (#3425).
 
 ### Fixed
 
