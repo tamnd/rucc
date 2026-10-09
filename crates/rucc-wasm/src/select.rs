@@ -1177,7 +1177,9 @@ impl Lower<'_, '_> {
         if shift && args.len() == 2 && self.ty(args[1]).is_vector() {
             match self.uniform(args[1]) {
                 Some(Uniform::Imm(_)) => args.truncate(1),
-                Some(Uniform::Value(count)) => args[1] = count,
+                Some(Uniform::Value(count)) => {
+                    args[1] = self.lane_count(count, self.ty(args[0]).bits());
+                }
                 None => {}
             }
         }
@@ -3401,9 +3403,10 @@ impl Lower<'_, '_> {
                         self.simd(&format!("{shape}.{name}"))?;
                     }
                     Some(Uniform::Value(count)) => {
+                        let count = self.lane_count(count, ty.bits());
                         self.push(args[0])?;
                         self.push(count)?;
-                        if ty.bits() == 64 {
+                        if self.ty(count).bits() == 64 {
                             self.code.op(emit::I32_WRAP_I64);
                         }
                         self.simd(&format!("{shape}.{name}"))?;
@@ -3700,6 +3703,34 @@ impl Lower<'_, '_> {
                 }
                 _ => return None,
             }
+        }
+    }
+
+    /// The value that a vector shift with lanes of `bits` bits pushes for its count `count`. A
+    /// vector shift reads its count modulo the width of a lane, so an `and` that keeps those low
+    /// bits and a change of the integer width are not done. clang drops them too. The value is at
+    /// least 8 bits wide, so its low bits are correct in the local even when its high bits are
+    /// not.
+    fn lane_count(&self, count: Value, bits: u32) -> Value {
+        if !self.unit.optimize {
+            return count;
+        }
+        let low = u128::from(bits - 1);
+        let keeps = |value: Value| self.constant(value).is_some_and(|mask| mask & low == low);
+        let mut at = count;
+        loop {
+            let Some((def, _)) = self.def(at) else { return at };
+            let under = match (self.func[def].opcode, &self.args(def)[..]) {
+                (Opcode::Trunc | Opcode::ZExt | Opcode::SExt, &[value]) => value,
+                (Opcode::And, &[value, mask]) if keeps(mask) => value,
+                (Opcode::And, &[mask, value]) if keeps(mask) => value,
+                _ => return at,
+            };
+            let ty = self.ty(under);
+            if ty.is_vector() || !(8..=64).contains(&ty.bits()) {
+                return at;
+            }
+            at = under;
         }
     }
 

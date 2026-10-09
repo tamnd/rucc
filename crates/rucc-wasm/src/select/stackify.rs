@@ -185,7 +185,8 @@ impl Lower<'_, '_> {
         // the shift does not read when the count is the same in each lane, and for the ones and
         // the `bitcast` under them that a vector built from its lanes does not read. The same for
         // the not that a `v128.andnot` does not read, the extends that an `extmul` does not read,
-        // the `extractlane` that a store of a lane does not read, and the load that a SIMD
+        // the mask and the change of width that a vector shift does not do to its count, the
+        // `extractlane` that a store of a lane does not read, and the load that a SIMD
         // instruction does itself.
         let absorbed: Set<Inst> = self.absorbed.values().copied().collect();
         let pure = |inst: Inst| {
@@ -193,6 +194,11 @@ impl Lower<'_, '_> {
             match func[inst].opcode {
                 Opcode::PtrAdd | Opcode::Splat | Opcode::InsertLane | Opcode::Bitcast => true,
                 Opcode::Xor => vector,
+                Opcode::And | Opcode::Trunc | Opcode::ZExt | Opcode::SExt => {
+                    let scalar =
+                        self.results(inst).first().is_some_and(|&v| self.ty(v).bits() <= 64);
+                    self.unit.optimize && scalar && !vector
+                }
                 Opcode::ExtractLane => true,
                 Opcode::Load => absorbed.contains(&inst),
                 Opcode::Call => self.extend_builtin(inst).is_some(),

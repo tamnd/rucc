@@ -4652,6 +4652,9 @@ impl<'u> Body<'_, 'u> {
             // already converted it to the lane type, so there is nothing to convert here.
             ExprKind::Convert { kind: Conversion::Broadcast, operand } => {
                 let value = self.value(operand);
+                if self.whole_broadcast(value, lane, lanes, at, span) {
+                    return;
+                }
                 for index in 0..lanes {
                     let into = self.lane_place(at, index, stride, lane, span);
                     self.write(into, value, span);
@@ -5137,6 +5140,39 @@ impl<'u> Body<'_, 'u> {
         };
         let value = build.binary(opcode, a, b, Flags::NONE);
         build.store(value, at, info, Flags::NONE);
+        true
+    }
+
+    /// The scalar beside a vector of sixteen bytes of integer lanes written as one vector, on
+    /// wasm32 with `-msimd128`, and whether it was. A write of each lane is sixteen writes for
+    /// lanes of one byte, which is more pieces than sroa takes, so the local stays in memory. The
+    /// one vector is a piece that sroa takes, and the back end writes it as one `splat`.
+    fn whole_broadcast(
+        &mut self,
+        value: Value,
+        lane: TypeId,
+        lanes: u64,
+        at: Value,
+        span: Span,
+    ) -> bool {
+        if !self.target().simd128 {
+            return false;
+        }
+        let one = self.value_type(lane, span);
+        let int = one.is_int() && matches!(one.bits(), 8 | 16 | 32 | 64);
+        if !int || u64::from(one.bits()) * lanes != 128 || self.func[value].ty != one {
+            return false;
+        }
+        let whole = Type::vector(one, u32::try_from(lanes).unwrap_or(0));
+        let info = untyped(repr::align_of(self.types(), self.target(), lane));
+        let zero = self.func.add_imm(Imm::int(0, one));
+        let mut build = self.build(span);
+        let data = InstData { extra: Extra::Imm(zero), ..InstData::new(Opcode::Splat) };
+        let mut vector = build.value(data, whole);
+        for index in 0..lanes {
+            vector = build.insert_lane(vector, value, index as u8);
+        }
+        build.store(vector, at, info, Flags::NONE);
         true
     }
 
