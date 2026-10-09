@@ -86,7 +86,7 @@ fn with_simd128_each_operator_is_one_instruction() {
         ("shl4", &["i32x4.shl"]),
         ("sar8", &["i32.const\t3", "i16x8.shr_s"]),
         ("shr16", &["i8x16.shr_u"]),
-        ("shl2", &["i32.wrap_i64", "i64x2.shl"]),
+        ("shl2", &["i64x2.shl"]),
     ] {
         let code = body(&text, name);
         for op in want {
@@ -1113,6 +1113,117 @@ fn an_extmul_multiplies_each_lane() {
     std::fs::write(dir.join("check.c"), EXTMULED).unwrap();
     let rucc = PathBuf::from(env!("CARGO_BIN_EXE_rucc"));
     // On the host first, where each multiply is a lane at a time.
+    for level in ["-O0", "-O2"] {
+        run(&rucc, &[level, "check.c", "-o", "check"], &dir);
+        let status = Command::new(dir.join("check")).status().unwrap();
+        assert!(status.success(), "{level}: {status}");
+    }
+    let wasmtime = on_path("wasmtime");
+    if std::env::var_os("WASI_SDK_PATH").is_none() || wasmtime.is_none() {
+        eprintln!("WASI_SDK_PATH is not set or there is no wasmtime, so wasm was not run");
+        std::fs::remove_dir_all(dir).unwrap();
+        return;
+    }
+    for flags in [&["-O0"][..], &["-O2"], &["-O0", "-msimd128"], &["-O2", "-msimd128"]] {
+        let link = ["--target=wasm32-wasip1", "-fno-builtins-lib", "check.c", "-o", "check.wasm"];
+        run(&rucc, &[&link[..], flags].concat(), &dir);
+        let status =
+            Command::new(wasmtime.as_ref().unwrap()).arg(dir.join("check.wasm")).status().unwrap();
+        assert!(status.success(), "{flags:?}: {status}");
+    }
+    std::fs::remove_dir_all(dir).unwrap();
+}
+
+/// Shifts by a count that the header masks to the width of a lane, and shifts in a program by a
+/// count that is masked, made wider or made narrower.
+const COUNTS: &str = "\
+#include <wasm_simd128.h>
+typedef signed char v16s __attribute__((vector_size(16)));
+typedef long long v2s __attribute__((vector_size(16)));
+v128_t shl8(v128_t a, uint32_t b) { return wasm_i8x16_shl(a, b); }
+v128_t shr16u(v128_t a, uint32_t b) { return wasm_u16x8_shr(a, b); }
+v128_t shl32(v128_t a, uint32_t b) { return wasm_i32x4_shl(a, b); }
+v128_t shr64(v128_t a, uint32_t b) { return wasm_i64x2_shr(a, b); }
+v16s own8(v16s a, int b) { return a >> (b & 15); }
+v2s own64(v2s a, long long b) { return a << (int)b; }
+v16s kept(v16s a, int b) { return a << (b & 5); }
+";
+
+/// With `-msimd128 -O2`, a shift in [`COUNTS`] is two `local.get` and the shift, as clang 23
+/// writes it. A mask that keeps the bits the shift reads, and a change of the width of the count,
+/// are not done, because the shift reads the count modulo the width of a lane. There is no stack
+/// frame. A mask that clears some of those bits stays.
+#[test]
+fn with_simd128_a_shift_reads_its_count_as_it_is() {
+    let out = assembly(COUNTS, &["-msimd128", "-O2"]);
+    assert!(out.status.success(), "{}", String::from_utf8_lossy(&out.stderr));
+    let text = String::from_utf8(out.stdout).unwrap();
+    let want = [
+        ("shl8", "i8x16.shl"),
+        ("shr16u", "i16x8.shr_u"),
+        ("shl32", "i32x4.shl"),
+        ("shr64", "i64x2.shr_s"),
+        ("own8", "i8x16.shr_s"),
+    ];
+    for (name, op) in want {
+        let code: Vec<&str> = body(&text, name)
+            .into_iter()
+            .filter(|op| !op.starts_with('.') && *op != "return")
+            .collect();
+        assert_eq!(code, ["local.get\t0", "local.get\t1", op], "{name}");
+    }
+    let own64 = body(&text, "own64");
+    assert!(own64.contains(&"i32.wrap_i64"), "{own64:?}");
+    assert!(own64.contains(&"i64x2.shl"), "{own64:?}");
+    let kept = body(&text, "kept");
+    assert!(kept.contains(&"i32.const\t5"), "{kept:?}");
+    assert!(kept.contains(&"i8x16.shl"), "{kept:?}");
+}
+
+/// A program that compares each vector shift by a scalar with a shift of each lane, for counts
+/// past the width of a lane that a mask brings back, counts made wider or narrower first, and a
+/// mask that clears bits the shift reads.
+const SHIFTED: &str = "\
+#define V(n, t) typedef t n __attribute__((vector_size(16)));
+V(v16s, signed char) V(v16u, unsigned char) V(v8s, short) V(v8u, unsigned short)
+V(v4s, int) V(v4u, unsigned) V(v2s, long long) V(v2u, unsigned long long)
+static const long long edge[] = {0, 1, -1, 127, -128, 255, 32767, -32768, 65535, 2147483647,
+                                 -2147483647 - 1, 4294967295, -7, 42, 0x123456789abcdef};
+static int bad;
+#define LANES(v) ((int)(sizeof (v) / sizeof (v)[0]))
+#define CHECK(name, vt, t, ct, count, op) \\
+    __attribute__((noinline)) static vt name(vt a, ct n) { return a op (count); } \\
+    static void check_##name(void) { \\
+        for (ct n = 0; n < 200; n += 7) { \\
+            vt a; for (int i = 0; i < LANES(a); i++) a[i] = (t)edge[(i * 5 + __LINE__) % 15]; \\
+            vt r = name(a, n); \\
+            for (int i = 0; i < LANES(r); i++) bad |= r[i] != (t)(a[i] op (count)); } }
+CHECK(shl8, v16u, unsigned char, unsigned, n & 7, <<)
+CHECK(shr8, v16s, signed char, int, n & 15 & 7, >>)
+CHECK(shr8u, v16u, unsigned char, unsigned, n & 0xff07, >>)
+CHECK(shl16, v8u, unsigned short, int, n & 15, <<)
+CHECK(shr16u, v8u, unsigned short, unsigned, n & 15, >>)
+CHECK(shr32, v4s, int, unsigned, n & 31, >>)
+CHECK(shl32u, v4u, unsigned, long long, (int)(n & 31), <<)
+CHECK(shr64, v2s, long long, unsigned, n & 63, >>)
+CHECK(shl64u, v2u, unsigned long long, int, (long long)(n & 63), <<)
+CHECK(narrow64, v2s, long long, long long, (int)n & 63, >>)
+CHECK(kept8, v16u, unsigned char, int, n & 5, <<)
+CHECK(kept32, v4u, unsigned, unsigned, n & 0x13, >>)
+int main(void) {
+    check_shl8(); check_shr8(); check_shr8u(); check_shl16(); check_shr16u(); check_shr32();
+    check_shl32u(); check_shr64(); check_shl64u(); check_narrow64(); check_kept8(); check_kept32();
+    return bad;
+}
+";
+
+#[test]
+fn a_vector_shift_by_a_scalar_shifts_each_lane() {
+    let dir = std::env::temp_dir().join(format!("rucc-wasm-shift-{}", std::process::id()));
+    std::fs::create_dir_all(&dir).unwrap();
+    std::fs::write(dir.join("check.c"), SHIFTED).unwrap();
+    let rucc = PathBuf::from(env!("CARGO_BIN_EXE_rucc"));
+    // On the host first, where each shift is a lane at a time.
     for level in ["-O0", "-O2"] {
         run(&rucc, &[level, "check.c", "-o", "check"], &dir);
         let status = Command::new(dir.join("check")).status().unwrap();

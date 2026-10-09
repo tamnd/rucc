@@ -1265,13 +1265,18 @@ impl<'a> Rewrite<'a> {
                 } else {
                     let (lanes, lane) = shape(at, size, ty);
                     let vector = convert(func, inst, value, whole, lanes);
-                    let args = func.push_values(&[vector]);
-                    let data = InstData {
-                        args,
-                        extra: Extra::Lane(lane),
-                        ..InstData::new(Opcode::ExtractLane)
+                    let one = match inserted(func, vector, lane) {
+                        Some(one) => one,
+                        None => {
+                            let args = func.push_values(&[vector]);
+                            let data = InstData {
+                                args,
+                                extra: Extra::Lane(lane),
+                                ..InstData::new(Opcode::ExtractLane)
+                            };
+                            emit(func, inst, data, lanes.lane())
+                        }
                     };
-                    let one = emit(func, inst, data, lanes.lane());
                     convert(func, inst, one, lanes.lane(), ty)
                 };
                 forward.insert(result, read);
@@ -1509,6 +1514,23 @@ fn store(func: &mut Func, before: Inst, value: Value, address: Value, align: u32
 }
 
 /// Puts an instruction in front of another one and gives back the value it produces.
+/// The value that a chain of `insertlane` put in lane `lane` of `vector`, when the chain has an
+/// insert of that lane. A read of a lane that was just written is then the value written, as a
+/// read of a scalar piece is. A broadcast of a scalar on wasm is such a chain, and a vector shift
+/// reads its count from lane 0 of it.
+fn inserted(func: &Func, mut vector: Value, lane: u8) -> Option<Value> {
+    loop {
+        let rucc_ir::Def::Result { inst, .. } = func[vector].def else { return None };
+        let data = &func[inst];
+        let &[into, one] = &func[data.args] else { return None };
+        match (data.opcode, data.extra) {
+            (Opcode::InsertLane, Extra::Lane(at)) if at == lane => return Some(one),
+            (Opcode::InsertLane, _) => vector = into,
+            _ => return None,
+        }
+    }
+}
+
 fn emit(func: &mut Func, before: Inst, data: InstData, ty: Type) -> Value {
     let span = func.span(before);
     let inst = func.create_inst(data, &[ty], span);
@@ -2211,6 +2233,33 @@ block2:
         let (module, _) =
             on_sse2(&wrap("(ptr) -> i32", &BYTES.replace("iconst.i32", "iconst.i64")));
         assert_eq!(count_of(body(&module), Opcode::Alloca), 1);
+    }
+
+    /// A broadcast of a scalar to sixteen `char` lanes, as `rucc-lower` writes it on wasm with
+    /// `-msimd128`, then one lane read that the chain wrote and one that it did not.
+    const BROADCAST: &str = "block0(%0: ptr, %1: i8):
+    %2 = alloca, size 16, align 16
+    %3 = splat.i8x16 0
+    %4 = insertlane %3, %1, lane 0
+    %5 = insertlane %4, %1, lane 1
+    store %5 -> %2, align 16
+    %6 = load.i8 %2, align 1
+    %7 = iconst.i32 5
+    %8 = ptr_add %2, %7
+    %9 = load.i8 %8, align 1
+    %10 = add %6, %9
+    return %10
+";
+
+    #[test]
+    fn a_read_of_a_lane_that_an_insertlane_wrote_is_the_value_written() {
+        let (module, stats) = on_simd128("(ptr, i8) -> i8", BROADCAST);
+        assert_eq!(stats.count(Kind::Optimized, SCALARIZED), 1);
+        let func = body(&module);
+        assert_eq!(count_of(func, Opcode::Alloca), 0);
+        // Lane 5 is read out of the vector, and lane 0 is the scalar itself.
+        assert_eq!(count_of(func, Opcode::ExtractLane), 1);
+        assert_eq!(count_of(func, Opcode::InsertLane), 2);
     }
 
     /// A float vector set with `memset` is a splat of the integer lanes with the same bits, since a
