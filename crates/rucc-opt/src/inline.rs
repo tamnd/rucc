@@ -3017,8 +3017,8 @@ fn reached(
             let args = &callee[data.args];
             if !values.is_empty() && args.iter().any(|arg| values.contains_key(arg)) {
                 // A `__builtin_constant_p` is left for `constant-p` to answer, as it was before.
-                if data.opcode != Opcode::IsConstant
-                    && let Some(result) = data.results().next()
+                if let Some(result) =
+                    data.results().next().filter(|_| data.opcode != Opcode::IsConstant)
                 {
                     let operand = |arg: Value| {
                         values.get(&arg).copied().or_else(|| crate::fold::constant(callee, arg))
@@ -3027,11 +3027,11 @@ fn reached(
                         values.insert(result, found);
                     }
                 }
-                if callee.is_terminator(inst)
-                    && let Some(to) = args
-                        .first()
-                        .and_then(|arg| values.get(arg))
-                        .and_then(|&(value, _)| goes_to(callee, data, value))
+                if let Some(to) = args
+                    .first()
+                    .filter(|_| callee.is_terminator(inst))
+                    .and_then(|arg| values.get(arg))
+                    .and_then(|&(value, _)| goes_to(callee, data, value))
                 {
                     decided.insert(inst, to);
                     if !live[to.block.index()] {
