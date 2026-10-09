@@ -16,6 +16,7 @@ All notable changes are recorded here. The format follows [Keep a Changelog](htt
 - Phiopt and short-circuit predict the one branch they ask about instead of building the block frequencies of the whole function again after each change, and the early return predictor walks the post-dominator tree from the blocks it asks about instead of binding every block. On lz4hc.c at `-O2` the compile runs 12.4 percent fewer instructions (#3404).
 - Inlining keeps the largest restrict clique of the caller from one splice to the next instead of walking the whole caller for each splice. blake2b-ref.c at `-O2` runs 7.6 percent fewer instructions (#3405).
 - The release archive carries `librucc_builtins.a` for `i686-linux-gnu`, so a link with `--target=i686-linux-gnu` or `-m32` works from the archive, as the README says (#3408).
+- The post-dominator tree lays its reverse graph out in one flat array instead of one list per block, which was most of what rebuilding it after each collapse in short-circuit and phiopt cost. lz4hc.c at `-O2` runs 2.2 percent fewer instructions (#3411).
 
 ## 0.29.3
 
