@@ -52,6 +52,7 @@ All notable changes are recorded here. The format follows [Keep a Changelog](htt
 - A loop over a `const` table of one entry is unrolled, so a sum over it folds. Its test is `i + 1 == 0` by the time the unroller sees it, and the trip count solver had no answer for a loop that goes on while its counter equals the limit. net/core/skbuff.c on a 32 bit defconfig sums such a table in `BUILD_BUG_ON(skb_ext_total_length() > 255)`, and the error call stayed in (#3476).
 - reassoc no longer turns `(a - a) + a` into `a + a`. A term whose count went back to zero and up again was listed twice. Most widths fold `a - a` before reassoc sees it, but a `__int128` at -O2 and -Os did not, so random `__int128` programs gave wrong answers (#3485).
 - A function with the kernel's `_THIS_IP_` in it gets its locals split into values again. The label takes its own address and nothing jumps to it, but SROA refused any function with a `block_addr`, so with lockdep on every local of a function that took a lock stayed in memory. On 6.12.111 that left `scoped_seqlock_read` in `do_task_stat` calling `__scoped_seqlock_bug`, and the arm64 allmodconfig link failed on it (#3496).
+- A `long long` add or subtract on i386 where one low half is zero no longer works out a carry, and a high half that is zero no longer adds a zero. The kernel's `readq` there is `low + ((u64)high << 32)`, and it is now the two loads, where it was a `cmp`, a `setb`, a `movzbl` and two adds. `a - ((u64)b << 32)` is one `subl` (#3518).
 
 ## 0.29.6
 

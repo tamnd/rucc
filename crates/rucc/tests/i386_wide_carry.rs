@@ -87,6 +87,13 @@ u64 xda(u64 b)
 }
 ";
 
+const ZERO_HALF: &str = "\
+typedef unsigned long long u64; typedef unsigned u32;
+u64 join(u32 low, u32 high) { return low + ((u64)high << 32); }
+u64 high_first(u32 low, u32 high) { return ((u64)high << 32) + low; }
+u64 less(u64 a, u32 b) { return a - ((u64)b << 32); }
+";
+
 fn assembly(name: &str, target: &str, source: &str, level: &str) -> String {
     let dir = std::env::temp_dir()
         .join(format!("rucc-wide-carry-{}-{name}-{target}{level}", std::process::id()));
@@ -225,5 +232,20 @@ fn a_long_long_bit_row_keeps_its_zeros_out_of_the_stack() {
         let stored =
             text.lines().filter(|line| line.starts_with("\tmovl\t%") && line.ends_with("(%esp)"));
         assert_eq!(stored.count(), 0, "{level}: a store nothing reads back\n{text}");
+    }
+}
+
+/// The kernel's `readq` on i386 is `low + ((u64)high << 32)`, a sum where one low half and the
+/// other high half are zero. Nothing carries out of a low half that is zero, so the words are the
+/// two that went in, where it was a `cmp`, a `setb`, a `movzbl` and an add for a carry of nothing.
+#[test]
+fn a_long_long_sum_with_a_zero_half_carries_nothing() {
+    for level in ["-O1", "-O2", "-Os"] {
+        let text = assembly("zero-half", "i686-unknown-linux-gnu", ZERO_HALF, level);
+        assert!(!text.contains("\tset"), "{level}: a carry is still worked out\n{text}");
+        assert!(!text.contains("\tadcl\t"), "{level}\n{text}");
+        assert!(!text.contains("\tsbbl\t"), "{level}\n{text}");
+        assert!(!text.contains("\tcmpl\t"), "{level}\n{text}");
+        assert_eq!(text.matches("\tsubl\t").count(), 1, "{level}\n{text}");
     }
 }
