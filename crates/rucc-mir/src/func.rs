@@ -454,6 +454,12 @@ pub struct Func {
     /// instructions, and read by the debugging information, which finds where the register is
     /// first written.
     pub arrived: Vec<(u32, Where)>,
+    /// The parameters among [`Func::arrived`] that the program never assigns to, by declaration.
+    ///
+    /// Such a parameter has the value it arrived with at every address of the function, so where
+    /// it is in no register of its own it is still the value its argument register had on entry. A
+    /// debugger finds that value in the caller, through what [`Func::calls`] says there.
+    pub unassigned: Vec<u32>,
     /// Where each of those registers ended up, once the allocator has said, and over which of the
     /// function's instructions the answer holds.
     ///
@@ -545,6 +551,7 @@ impl Func {
             starts: Vec::new(),
             entries: Vec::new(),
             arrived: Vec::new(),
+            unassigned: Vec::new(),
             kept: Vec::new(),
             calls: Vec::new(),
             tables: Vec::new(),

@@ -348,3 +348,32 @@ fn a_call_says_what_its_arguments_were() {
     assert!(text.contains("DW_OP_breg"), "{text}");
     assert!(text.contains("DW_OP_lit5") || text.contains("DW_OP_constu: 5"), "{text}");
 }
+
+/// A function that never assigns its parameter and needs it in no register after the call.
+#[cfg(target_os = "linux")]
+const ENTERED: &str = "\
+int g(int);
+int f(int a) {
+    return g(a) + 1;
+}
+";
+
+/// A parameter the program never assigns is the value its register had on entry wherever it is in
+/// no register of its own, which a debugger reads in the caller.
+#[cfg(target_os = "linux")]
+#[test]
+fn a_parameter_that_is_never_assigned_is_its_entry_value() {
+    let dir = fixture("entry-values");
+    std::fs::write(dir.join("one.c"), ENTERED).expect("the fixture can be written");
+    build(&dir, &["-g", "-O2"], "one.o");
+    let out = Command::new("readelf")
+        .arg("--debug-dump=loc")
+        .arg(dir.join("one.o"))
+        .output()
+        .expect("readelf starts");
+    let _ = std::fs::remove_dir_all(&dir);
+    let text = String::from_utf8_lossy(&out.stdout);
+
+    assert!(text.contains("DW_OP_entry_value"), "{text}");
+    assert!(text.contains("DW_OP_stack_value"), "{text}");
+}

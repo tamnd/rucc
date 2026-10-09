@@ -443,6 +443,13 @@ pub enum Held {
     /// Written as `DW_OP_WASM_location 0x0` and the index, then `DW_OP_stack_value`, which is what
     /// clang writes: the operation gives the value of the local and not an address.
     Local(u32),
+    /// The value this register had when the function started, by the target's DWARF number.
+    ///
+    /// Written as `DW_OP_entry_value` over the register, then `DW_OP_stack_value`, which is what
+    /// gcc writes for a parameter that is in no register of its own. A debugger reads the value in
+    /// the caller, through the [`Call`] there that returns to it, and says the parameter is not
+    /// available when the caller does not say.
+    Entry(u16),
     /// Nowhere, because the value is this number, which the back end writes where it is used.
     ///
     /// A constant has no local and no register of its own on wasm at `-O0`, and a debugger still

@@ -1199,6 +1199,22 @@ impl Func {
         }
     }
 
+    /// Whether that value is the one value the declaration is ever given, which is a variable the
+    /// program does not assign after it gets its first value.
+    ///
+    /// A value a pass took out still counts, because the declaration was given it all the same. So
+    /// does a value that went to the declaration from a place, through [`Func::rename_value`]. A
+    /// parameter that is here has the value it arrived with at every address of the function.
+    pub fn only_value(&self, decl: u32, value: Value) -> bool {
+        let unplaced = self.unplaced.values().flatten();
+        self.value_decls.iter().all(|&(held, at)| at != decl || held == value)
+            && self
+                .value_starts
+                .iter()
+                .chain(unplaced)
+                .all(|&(held, start)| start.decl != decl || held == value)
+    }
+
     /// Every declaration a value is a value of, in the order the front end numbered them.
     ///
     /// Empty for a value no declaration in the source is behind, which is most of them: every
@@ -2678,6 +2694,26 @@ mod tests {
         func.append_inst(block, second);
         assert_eq!(func.value_decls(moved).collect::<Vec<_>>(), [5]);
         assert_eq!(func.value_starts(moved).count(), 0);
+    }
+
+    /// A parameter the program never assigns has one value, and one it assigns has two, even when
+    /// the instruction of the second is gone.
+    #[test]
+    fn a_parameter_given_no_other_value_is_its_only_value() {
+        let mut func = Func::new(Symbol::from_raw(0), Signature::new());
+        let block = func.create_block();
+        let kept = func.append_param(block, Type::int(32));
+        let changed = func.append_param(block, Type::int(32));
+        func.declare_value(kept, 4);
+        func.declare_value(changed, 5);
+        let other = Builder::new(&mut func, block).iconst(Type::int(32), 1);
+        func.declare_value(other, 5);
+        assert!(func.only_value(4, kept));
+        assert!(!func.only_value(5, changed));
+
+        let inst = func.insts(block).next().expect("one");
+        func.remove_inst(inst);
+        assert!(!func.only_value(5, changed), "a start is a value too");
     }
 
     /// Renaming a value into one computed earlier leaves the declaration starting where the one

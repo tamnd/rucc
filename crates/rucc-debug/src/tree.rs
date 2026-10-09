@@ -573,7 +573,7 @@ fn sites<'a>(
             match held {
                 Held::Reg(number) => value.op_breg(gimli::Register(number), 0),
                 Held::Constant(number) => value.op_constu(number),
-                Held::Frame(_) | Held::Local(_) => continue,
+                Held::Frame(_) | Held::Local(_) | Held::Entry(_) => continue,
             }
             let mut location = gimli::write::Expression::new();
             location.op_reg(gimli::Register(reg));
@@ -833,6 +833,12 @@ fn saying(held: Held) -> gimli::write::Expression {
         }
         Held::Constant(number) => {
             expr.op_constu(number);
+            expr.op(gimli::DW_OP_stack_value);
+        }
+        Held::Entry(number) => {
+            let mut entry = gimli::write::Expression::new();
+            entry.op_reg(gimli::Register(number));
+            expr.op_entry_value(entry);
             expr.op(gimli::DW_OP_stack_value);
         }
     }
