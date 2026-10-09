@@ -255,6 +255,8 @@ pub enum Keyword {
     BuiltinHasAttribute,
     /// `__builtin_va_arg`.
     BuiltinVaArg,
+    /// `__builtin_convertvector`, whose second argument is a vector type.
+    BuiltinConvertvector,
     /// `__builtin_va_list`, the target's type for a variable argument list.
     BuiltinVaList,
     /// `__builtin_va_start`.
@@ -639,6 +641,7 @@ static KEYWORDS: &[Entry] = &[
     // an argument any function could take.
     e("__builtin_has_attribute", Keyword::BuiltinHasAttribute, ALWAYS),
     e("__builtin_va_arg", Keyword::BuiltinVaArg, ALWAYS),
+    e("__builtin_convertvector", Keyword::BuiltinConvertvector, ALWAYS),
     // The rest of the variable argument family. `__builtin_va_list` names a type, and the other
     // three are handed the list object rather than its value, since what they do is write it.
     // gcc declares those three as functions taking the address of a list and has its own header

@@ -1329,6 +1329,15 @@ impl<'a> Printer<'a> {
                 self.type_name(b);
                 self.token(")");
             }
+            Expr::ConvertVector { operand, ty } => {
+                self.token("__builtin_convertvector");
+                self.token("(");
+                self.expr_at(operand, ASSIGN);
+                self.token(",");
+                self.space();
+                self.type_name(ty);
+                self.token(")");
+            }
             Expr::VaArg { list, ty } => {
                 self.token("__builtin_va_arg");
                 self.token("(");

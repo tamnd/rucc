@@ -64,6 +64,7 @@ mod bswap;
 mod classify;
 mod complex;
 mod constant;
+mod convertvector;
 mod count;
 pub(in crate::check) mod cpu;
 mod ctype;

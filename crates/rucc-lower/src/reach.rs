@@ -352,6 +352,7 @@ impl Reach<'_> {
             | ExprKind::VaEnd { list: base }
             | ExprKind::Convert { operand: base, .. }
             | ExprKind::Abs { operand: base }
+            | ExprKind::ConvertVector { operand: base }
             | ExprKind::Prefetch { address: base, .. }
             | ExprKind::ObjectSize { address: base, .. }
             | ExprKind::ConstantP { value: base }

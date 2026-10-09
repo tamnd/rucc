@@ -277,6 +277,10 @@ fn the_gnu_expression_extensions_are_here() {
         Expr::TypesCompatible { .. }
     ));
     assert!(matches!(expression("_Generic(1, int: 2, default: 3)"), Expr::Generic { .. }));
+    assert!(matches!(
+        expression("__builtin_convertvector(v, int __attribute__((vector_size(16))))"),
+        Expr::ConvertVector { .. }
+    ));
 }
 
 #[test]

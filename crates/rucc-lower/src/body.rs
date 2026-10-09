@@ -4719,6 +4719,24 @@ impl<'u> Body<'_, 'u> {
                 }
             }
             ExprKind::Shuffle { lhs, rhs, mask } => self.shuffle(at, lhs, rhs, mask, ty, span),
+            // `__builtin_convertvector`, which is the cast of each lane. The two vectors have the
+            // same number of lanes, and the lanes can have different sizes.
+            ExprKind::ConvertVector { operand } => {
+                let vector = self.tast()[operand].ty;
+                let from = rucc_types::element(self.types(), vector).expect("a vector");
+                let width = repr::size_of(self.types(), self.target(), from);
+                let source = self.vector_addr(operand, span);
+                let align = self.place_align(Place::new(Where::Addr(source), vector));
+                if self.whole_convert(from, lane, lanes, at, (source, align), span) {
+                    return;
+                }
+                for index in 0..lanes {
+                    let value = self.lane(source, index, width, from, span);
+                    let value = self.coerce(value, from, lane, span);
+                    let into = self.lane_place(at, index, stride, lane, span);
+                    self.write(into, value, span);
+                }
+            }
             ExprKind::Elementwise { op, lhs, rhs } => {
                 let left = self.vector_addr(lhs, span);
                 let right = rhs.map(|rhs| self.vector_addr(rhs, span));
@@ -5106,6 +5124,75 @@ impl<'u> Body<'_, 'u> {
         let call = self.atomic_call(&format!("__builtin_wasm_{name}"), &args, &[whole], span);
         let value = self.func[call].first_result.expect("one result was asked for");
         self.build(span).store(value, at, info, Flags::NONE);
+        true
+    }
+
+    /// A `__builtin_convertvector` done as one SIMD instruction, on wasm32 with `-msimd128`, and
+    /// whether it was.
+    ///
+    /// These are the conversions that clang writes as one instruction. Four lanes of `int` to
+    /// four of `float` is `f32x4.convert_i32x4`, and four of `float` to four of `int` is
+    /// `i32x4.trunc_sat_f32x4`, which is the answer of a cast for each value that a cast can
+    /// convert. A vector of 8 bytes to a vector of 16 bytes is an extend, `f64x2.convert_low` or
+    /// `f64x2.promote_low`, on the 8 bytes loaded into the low half of a `v128`. Two lanes of
+    /// `double` to two of `float` is `f32x4.demote_f64x2_zero`, and the low half of the answer is
+    /// stored. A change of sign only, and a vector converted to its own type, are a copy.
+    ///
+    /// `source` is the address of the operand and how aligned it is, which is the alignment of
+    /// the vector type unless the operand is in something packed.
+    fn whole_convert(
+        &mut self,
+        from: TypeId,
+        lane: TypeId,
+        lanes: u64,
+        at: Value,
+        (source, align): (Value, u32),
+        span: Span,
+    ) -> bool {
+        if !self.target().simd128 {
+            return false;
+        }
+        let (a, b) = (self.value_type(from, span), self.value_type(lane, span));
+        let (size, wide) = (u64::from(a.bits()) * lanes, u64::from(b.bits()) * lanes);
+        let sign = if repr::is_signed(self.types(), self.target(), from) { "s" } else { "u" };
+        let into = if repr::is_signed(self.types(), self.target(), lane) { "s" } else { "u" };
+        let (int, float) = (a.is_int() && b.is_int(), a.is_float() && b.is_float());
+        let (to_float, to_int) = (a.is_int() && b.is_float(), a.is_float() && b.is_int());
+        let name = match (size, wide, a.bits(), b.bits()) {
+            (128, 128, x, y) if x == y && (int || float) => {
+                let into = untyped(repr::align_of(self.types(), self.target(), lane));
+                let whole = Type::vector(b, u32::try_from(lanes).unwrap_or(0));
+                let mut build = self.build(span);
+                let value = build.load(whole, source, untyped(align), Flags::NONE);
+                build.store(value, at, into, Flags::NONE);
+                return true;
+            }
+            (128, 128, 32, 32) if to_float => format!("convert_{sign}_i32x4_f32x4"),
+            (128, 128, 32, 32) if to_int => format!("trunc_saturate_{into}_i32x4_f32x4"),
+            (64, 128, x, y) if int && y == 2 * x => {
+                format!("extend_low_{sign}_i{x}x{}_i{y}x{lanes}", 2 * lanes)
+            }
+            (64, 128, 32, 64) if to_float => format!("convert_low_{sign}_i32x4_f64x2"),
+            (64, 128, 32, 64) if float => "promote_low_f32x4_f64x2".to_owned(),
+            (128, 64, 64, 32) if float => "demote_zero_f64x2_f32x4".to_owned(),
+            _ => return false,
+        };
+        let into_align = repr::align_of(self.types(), self.target(), lane);
+        // A vector of 8 bytes is a `v128` on wasm with its lanes in the low half, which is the
+        // half that the instruction reads.
+        let whole = Type::vector(a, u32::try_from(lanes).unwrap_or(0));
+        let operand = self.build(span).load(whole, source, untyped(align), Flags::NONE);
+        let out = Type::vector(b, 128 / b.bits());
+        let call = self.atomic_call(&format!("__builtin_wasm_{name}"), &[operand], &[out], span);
+        let value = self.func[call].first_result.expect("one result was asked for");
+        let mut build = self.build(span);
+        if wide == 64 {
+            let halves = build.unary(Opcode::Bitcast, value, Type::vector(Type::int(64), 2));
+            let low = build.extract_lane(halves, 0);
+            build.store(low, at, untyped(into_align), Flags::NONE);
+        } else {
+            build.store(value, at, untyped(into_align), Flags::NONE);
+        }
         true
     }
 
@@ -6767,6 +6854,10 @@ impl<'u> Body<'_, 'u> {
             ExprKind::Sign { op, lhs, rhs } => Some(self.sign(op, lhs, rhs, span)),
             ExprKind::Abs { operand } => Some(self.abs(operand, span)),
             // A vector is built where one would live, as a shuffle is below.
+            ExprKind::ConvertVector { .. } => {
+                let place = self.place(expr);
+                self.read(place, span)
+            }
             ExprKind::Elementwise { .. } if rucc_types::is_vector(self.types(), ty) => {
                 let place = self.place(expr);
                 self.read(place, span)
@@ -11199,6 +11290,7 @@ impl<'a> Scan<'a> {
                 self.expr(mask);
             }
             ExprKind::Abs { operand }
+            | ExprKind::ConvertVector { operand }
             | ExprKind::ByteSwap { operand }
             | ExprKind::BitCount { operand, .. } => self.expr(operand),
             // The third operand is a pointer the program worked out for itself, so nothing here

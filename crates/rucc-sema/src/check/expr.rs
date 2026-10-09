@@ -133,6 +133,7 @@ impl Checker<'_> {
                 self.has_attribute_expr(operand, attr, span)
             }
             ast::Expr::HasAttributeType { ty, attr } => self.has_attribute_type(ty, attr, span),
+            ast::Expr::ConvertVector { operand, ty } => self.convert_vector(operand, ty, span),
             ast::Expr::VaArg { list, ty } => self.va_arg(list, ty, span),
             ast::Expr::VaStart { list, last } => self.va_start(list, last, span),
             ast::Expr::VaEnd { list } => self.va_end(list, span),

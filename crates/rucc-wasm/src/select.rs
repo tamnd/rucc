@@ -1197,6 +1197,11 @@ impl Lower<'_, '_> {
                 (None, None) => {}
             }
         }
+        if opcode == Opcode::Call
+            && let Some(&load) = self.absorbed.get(&inst)
+        {
+            return self.inputs(load);
+        }
         if let Some((value, not)) = self.andnot(inst) {
             return vec![value, not];
         }
@@ -1285,7 +1290,11 @@ impl Lower<'_, '_> {
             for inst in func.insts(block) {
                 before.insert(inst, effects);
                 effects += u32::from(self.effects(inst).0);
-                let Some(load) = self.lane_load(inst, &uses) else { continue };
+                let Some(load) =
+                    self.lane_load(inst, &uses).or_else(|| self.half_load(inst, &uses))
+                else {
+                    continue;
+                };
                 if before.get(&load).is_some_and(|&count| count == before[&inst]) {
                     absorbed.insert(inst, load);
                 }
@@ -1319,6 +1328,20 @@ impl Lower<'_, '_> {
         let data = &self.func[def];
         let plain = data.opcode == Opcode::Load && !data.flags.contains(Flags::VOLATILE);
         (plain && self.ty(value) == ty.lane() && uses.get(&value) == Some(&(count as u32)))
+            .then_some(def)
+    }
+
+    /// The load of 8 bytes that the extend `inst` of the low half of a vector can do itself, as
+    /// `i16x8.load8x8_s` up to `i64x2.load32x2_u`, when the loaded value has no other use. See
+    /// [`Self::absorb`].
+    fn half_load(&self, inst: Inst, uses: &Map<Value, u32>) -> Option<Inst> {
+        self.extending_load(inst)?;
+        let &[value] = &self.args(inst)[..] else { return None };
+        let (def, _) = self.def(value)?;
+        let data = &self.func[def];
+        let plain = data.opcode == Opcode::Load && !data.flags.contains(Flags::VOLATILE);
+        let ty = self.ty(value);
+        (plain && ty.is_vector() && ty.bits() * ty.lanes() == 64 && uses.get(&value) == Some(&1))
             .then_some(def)
     }
 
@@ -2832,7 +2855,13 @@ impl Lower<'_, '_> {
                         }
                         self.code.op(op);
                     }
-                    (None, _) => self.builtin(name, &args)?,
+                    (None, _) => match self.absorbed.get(&inst) {
+                        Some(&load) => {
+                            let op = self.extending_load(inst).ok_or("an extending load")?;
+                            self.load_into(load, &op, None)?;
+                        }
+                        None => self.builtin(name, &args)?,
+                    },
                 }
                 if tail {
                     self.epilogue();
@@ -3583,7 +3612,8 @@ impl Lower<'_, '_> {
     fn load_into(&mut self, load: Inst, name: &str, into: Option<(Value, u8)>) -> Result<()> {
         let op = simd_op(name)?;
         let address = self.args(load)[0];
-        let natural = self.ty(self.results(load)[0]).bits() / 8;
+        let ty = self.ty(self.results(load)[0]);
+        let natural = ty.bits() * ty.lanes() / 8;
         let align = self.mem_info(load).map_or(natural, |m| m.align);
         let folded = self.folded(load);
         self.push_base(folded.as_ref(), address)?;

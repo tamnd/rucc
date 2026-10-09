@@ -5,7 +5,8 @@
 //! call reaches the backend as a call to the name, and the selector writes the instruction in its
 //! place, as clang does. No object has a symbol of the name, so a call that the selector did not
 //! see would not link. The vector builtins of [`VECTOR`] are written the same way, with `-msimd128`,
-//! and so are the calls of [`ELEMENTWISE`] that `rucc-lower` makes for the generic builtins.
+//! and so are the calls of [`ELEMENTWISE`] and [`CONVERT`] that `rucc-lower` makes for the
+//! generic builtins.
 //! The builtins of the other groups (reference types, atomics, exceptions) have no row yet, so a
 //! call to one of them is a call to an undeclared function.
 //!
@@ -147,6 +148,24 @@ const ELEMENTWISE: &[(&str, &str)] = &[
     ("popcnt_i8x16", "i8x16.popcnt"),
 ];
 
+/// The calls that `rucc-lower` makes for `__builtin_convertvector` with `-msimd128`, each with the
+/// SIMD instruction that it is. The names have the shape of the names of [`VECTOR`]: the operation,
+/// the sign, the operand and the answer.
+const CONVERT: &[(&str, &str)] = &[
+    ("convert_s_i32x4_f32x4", "f32x4.convert_i32x4_s"),
+    ("convert_u_i32x4_f32x4", "f32x4.convert_i32x4_u"),
+    ("convert_low_s_i32x4_f64x2", "f64x2.convert_low_i32x4_s"),
+    ("convert_low_u_i32x4_f64x2", "f64x2.convert_low_i32x4_u"),
+    ("promote_low_f32x4_f64x2", "f64x2.promote_low_f32x4"),
+    ("demote_zero_f64x2_f32x4", "f32x4.demote_f64x2_zero"),
+    ("extend_low_s_i8x16_i16x8", "i16x8.extend_low_i8x16_s"),
+    ("extend_low_u_i8x16_i16x8", "i16x8.extend_low_i8x16_u"),
+    ("extend_low_s_i16x8_i32x4", "i32x4.extend_low_i16x8_s"),
+    ("extend_low_u_i16x8_i32x4", "i32x4.extend_low_i16x8_u"),
+    ("extend_low_s_i32x4_i64x2", "i64x2.extend_low_i32x4_s"),
+    ("extend_low_u_i32x4_i64x2", "i64x2.extend_low_i32x4_u"),
+];
+
 /// What the builtin `name` writes, or nothing when `name` is not a builtin of clang.
 ///
 /// The opcodes are those of the Wasm 3.0 binary format, section 5.4. The 8 trapping conversions
@@ -155,7 +174,9 @@ const ELEMENTWISE: &[(&str, &str)] = &[
 /// `0xfc 0` to `0xfc 7` in the same order.
 fn write(name: &str) -> Option<Write> {
     let name = name.strip_prefix("__builtin_wasm_")?;
-    if let Some(&(_, op)) = VECTOR.iter().chain(ELEMENTWISE).find(|&&(form, _)| form == name) {
+    if let Some(&(_, op)) =
+        VECTOR.iter().chain(ELEMENTWISE).chain(CONVERT).find(|&&(form, _)| form == name)
+    {
         let feature = match name.starts_with("relaxed_") {
             true => Feature::RelaxedSimd,
             false => Feature::Simd128,
@@ -255,6 +276,18 @@ impl Lower<'_, '_> {
     /// cannot trap.
     pub(super) fn simd_builtin(&self, inst: Inst) -> bool {
         matches!(self.written(inst), Some(Write::Simd(..)))
+    }
+
+    /// The extending load that does the load of 8 bytes and the call `inst` together, when the
+    /// call is the extend of the low half of a vector: `i16x8.load8x8_s` for
+    /// `i16x8.extend_low_i8x16_s`, up to `i64x2.load32x2_u`.
+    pub(super) fn extending_load(&self, inst: Inst) -> Option<String> {
+        let Some(Write::Simd(op, _)) = self.written(inst) else { return None };
+        let (shape, rest) = op.split_once('.')?;
+        let sign = rest.strip_prefix("extend_low_")?.rsplit('_').next()?;
+        let (lane, count) = shape.strip_prefix('i')?.split_once('x')?;
+        let half = lane.parse::<u32>().ok()? / 2;
+        Some(format!("{shape}.load{half}x{count}_{sign}"))
     }
 
     /// The opcode of the instruction that the call `inst` to a maths function is written as, or

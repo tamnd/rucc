@@ -9,7 +9,9 @@
  * computes is what the instruction computes. For that reason the header does not need
  * `-msimd128`, and a module from it runs on an engine with no SIMD. With `-msimd128`, a function
  * that clang writes as a `__builtin_wasm_*` or a `__builtin_elementwise_*` builtin calls the same
- * builtin, which is one instruction, as in clang.
+ * builtin, which is one instruction, as in clang. The conversions of `int` lanes to `float` lanes
+ * and the extending loads are a `__builtin_convertvector`, as in clang, with or without
+ * `-msimd128`.
  *
  * Without `-mrelaxed-simd`, each relaxed function gives one of the answers that the relaxed-simd
  * proposal allows, and the same one on every engine: the multiply add is not fused, the lane
@@ -83,46 +85,34 @@ static __inline__ v128_t wasm_v128_load64_splat(const void *__mem) {
   return (v128_t)(__u64x2){__v, __v};
 }
 static __inline__ v128_t wasm_i16x8_load8x8(const void *__mem) {
-  int8_t __v[8];
-  __builtin_memcpy(__v, __mem, sizeof __v);
-  __i16x8 __r;
-  for (int __i = 0; __i < 8; __i++) __r[__i] = __v[__i];
-  return (v128_t)__r;
+  struct __wasm_i16x8_load8x8_struct { __i8x8 __v; } __attribute__((__packed__, __may_alias__));
+  return (v128_t)__builtin_convertvector(((const struct __wasm_i16x8_load8x8_struct *)__mem)->__v,
+      __i16x8);
 }
 static __inline__ v128_t wasm_u16x8_load8x8(const void *__mem) {
-  uint8_t __v[8];
-  __builtin_memcpy(__v, __mem, sizeof __v);
-  __u16x8 __r;
-  for (int __i = 0; __i < 8; __i++) __r[__i] = __v[__i];
-  return (v128_t)__r;
+  struct __wasm_u16x8_load8x8_struct { __u8x8 __v; } __attribute__((__packed__, __may_alias__));
+  return (v128_t)__builtin_convertvector(((const struct __wasm_u16x8_load8x8_struct *)__mem)->__v,
+      __u16x8);
 }
 static __inline__ v128_t wasm_i32x4_load16x4(const void *__mem) {
-  int16_t __v[4];
-  __builtin_memcpy(__v, __mem, sizeof __v);
-  __i32x4 __r;
-  for (int __i = 0; __i < 4; __i++) __r[__i] = __v[__i];
-  return (v128_t)__r;
+  struct __wasm_i32x4_load16x4_struct { __i16x4 __v; } __attribute__((__packed__, __may_alias__));
+  return (v128_t)__builtin_convertvector(((const struct __wasm_i32x4_load16x4_struct *)__mem)->__v,
+      __i32x4);
 }
 static __inline__ v128_t wasm_u32x4_load16x4(const void *__mem) {
-  uint16_t __v[4];
-  __builtin_memcpy(__v, __mem, sizeof __v);
-  __u32x4 __r;
-  for (int __i = 0; __i < 4; __i++) __r[__i] = __v[__i];
-  return (v128_t)__r;
+  struct __wasm_u32x4_load16x4_struct { __u16x4 __v; } __attribute__((__packed__, __may_alias__));
+  return (v128_t)__builtin_convertvector(((const struct __wasm_u32x4_load16x4_struct *)__mem)->__v,
+      __u32x4);
 }
 static __inline__ v128_t wasm_i64x2_load32x2(const void *__mem) {
-  int32_t __v[2];
-  __builtin_memcpy(__v, __mem, sizeof __v);
-  __i64x2 __r;
-  for (int __i = 0; __i < 2; __i++) __r[__i] = __v[__i];
-  return (v128_t)__r;
+  struct __wasm_i64x2_load32x2_struct { __i32x2 __v; } __attribute__((__packed__, __may_alias__));
+  return (v128_t)__builtin_convertvector(((const struct __wasm_i64x2_load32x2_struct *)__mem)->__v,
+      __i64x2);
 }
 static __inline__ v128_t wasm_u64x2_load32x2(const void *__mem) {
-  uint32_t __v[2];
-  __builtin_memcpy(__v, __mem, sizeof __v);
-  __u64x2 __r;
-  for (int __i = 0; __i < 2; __i++) __r[__i] = __v[__i];
-  return (v128_t)__r;
+  struct __wasm_u64x2_load32x2_struct { __u32x2 __v; } __attribute__((__packed__, __may_alias__));
+  return (v128_t)__builtin_convertvector(((const struct __wasm_u64x2_load32x2_struct *)__mem)->__v,
+      __u64x2);
 }
 static __inline__ v128_t wasm_v128_load32_zero(const void *__mem) {
   uint32_t __v;
@@ -1291,16 +1281,10 @@ static __inline__ v128_t wasm_f64x2_pmax(v128_t __a, v128_t __b) {
 
 /* Conversions, narrowing and widening. */
 static __inline__ v128_t wasm_f32x4_convert_i32x4(v128_t __a) {
-  __i32x4 __x = (__i32x4)__a;
-  __f32x4 __r;
-  for (int __i = 0; __i < 4; __i++) __r[__i] = __x[__i];
-  return (v128_t)__r;
+  return (v128_t)__builtin_convertvector((__i32x4)__a, __f32x4);
 }
 static __inline__ v128_t wasm_f32x4_convert_u32x4(v128_t __a) {
-  __u32x4 __x = (__u32x4)__a;
-  __f32x4 __r;
-  for (int __i = 0; __i < 4; __i++) __r[__i] = __x[__i];
-  return (v128_t)__r;
+  return (v128_t)__builtin_convertvector((__u32x4)__a, __f32x4);
 }
 static __inline__ v128_t wasm_f64x2_convert_low_i32x4(v128_t __a) {
   __i32x4 __x = (__i32x4)__a;

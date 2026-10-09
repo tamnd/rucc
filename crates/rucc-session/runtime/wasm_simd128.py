@@ -296,7 +296,9 @@ INTRO = """
  * computes is what the instruction computes. For that reason the header does not need
  * `-msimd128`, and a module from it runs on an engine with no SIMD. With `-msimd128`, a function
  * that clang writes as a `__builtin_wasm_*` or a `__builtin_elementwise_*` builtin calls the same
- * builtin, which is one instruction, as in clang.
+ * builtin, which is one instruction, as in clang. The conversions of `int` lanes to `float` lanes
+ * and the extending loads are a `__builtin_convertvector`, as in clang, with or without
+ * `-msimd128`.
  *
  * Without `-mrelaxed-simd`, each relaxed function gives one of the answers that the relaxed-simd
  * proposal allows, and the same one on every engine: the multiply add is not fused, the lane
@@ -384,12 +386,16 @@ def emit():
     for e in ("i16", "u16", "i32", "u32", "i64", "u64"):
         n = narrow(e)
         k = lanes(e)
+        # As clang writes them: the half vector read through a packed structure, which need not
+        # be aligned, and converted. That is one extending load with `-msimd128`.
+        nm, half = f"{vname(e)}_load{BY[n][2]}x{k}", f"__{n}x{k}"
         fn(
             "v128_t",
-            f"{vname(e)}_load{BY[n][2]}x{k}",
+            nm,
             "const void *mem",
-            f"{ct(n)} v[{k}]; __builtin_memcpy(v, mem, sizeof v); {vt(e)} r; "
-            f"for (int i = 0; i < {k}; i++) r[i] = v[i]; return (v128_t)r;",
+            f"struct __{nm}_struct {{ {half} v; }} __attribute__((__packed__, __may_alias__)); "
+            f"return (v128_t)__builtin_convertvector(((const struct __{nm}_struct *)mem)->v, "
+            f"{vt(e)});",
         )
     for bits, e in ((32, "u32"), (64, "u64")):
         c = ct(e)
@@ -588,8 +594,13 @@ def emit():
         lanewise(e, f"{vname(e)}_pmax", "v128_t a, v128_t b", two(e), "x[i] < y[i] ? y[i] : x[i]")
 
     section("Conversions, narrowing and widening.")
-    lanewise("f32", "wasm_f32x4_convert_i32x4", "v128_t a", one("i32"), "x[i]")
-    lanewise("f32", "wasm_f32x4_convert_u32x4", "v128_t a", one("u32"), "x[i]")
+    for e in ("i32", "u32"):
+        fn(
+            "v128_t",
+            f"wasm_f32x4_convert_{e}x4",
+            "v128_t a",
+            f"return (v128_t)__builtin_convertvector(({vt(e)})a, {vt('f32')});",
+        )
     lanewise("f64", "wasm_f64x2_convert_low_i32x4", "v128_t a", one("i32"), "x[i]")
     lanewise("f64", "wasm_f64x2_convert_low_u32x4", "v128_t a", one("u32"), "x[i]")
     for e, sign in (("i32", "s"), ("u32", "u")):
