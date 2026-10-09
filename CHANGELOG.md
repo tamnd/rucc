@@ -25,6 +25,7 @@ All notable changes are recorded here. The format follows [Keep a Changelog](htt
 
 ### Added
 
+- wasm: with `-msimd128`, a vector shift pushes its count as it is, with no mask and no change of width, and a shift of `i8x16` has no stack frame (#3513).
 - wasm: with `-msimd128 -O2`, a multiply of two extends of the same half with the same sign is one `extmul` instruction, and `wasm_simd128.h` writes the extmul functions so, as clang does (#3509).
 - wasm: with `-msimd128`, a `__builtin_convertvector` of the low or the high half of a vector is one instruction, and `wasm_simd128.h` writes the extends, `convert_low`, `promote_low` and `demote_f64x2_zero` with it (#3506).
 - `__builtin_shufflevector`, checked with the rules and the words of gcc 16, and the wasm builtin `__builtin_wasm_shuffle_i8x16` of clang. With `-msimd128` on wasm32, a shuffle of vectors of 8 or 16 bytes is one `i8x16.shuffle`, and so are the shuffle macros of `wasm_simd128.h` (#3505).
