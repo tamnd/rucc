@@ -71,7 +71,7 @@
 // modules that carry the same attribute of their own carry it for vector types instead, which is a
 // separate question and one they answer where they ask it.
 #![allow(improper_ctypes_definitions)]
-#![doc(html_root_url = "https://docs.rs/rucc-builtins/0.29.6")]
+#![doc(html_root_url = "https://docs.rs/rucc-builtins/0.30.0")]
 
 pub mod atomic;
 pub mod convert;

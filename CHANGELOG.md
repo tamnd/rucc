@@ -4,6 +4,10 @@ All notable changes are recorded here. The format follows [Keep a Changelog](htt
 
 ## Unreleased
 
+## 0.30.0
+
+Milestone WA8 (#3456) is done, and a finished milestone gets a minor release. With `-msimd128`, a GNU vector of 16 bytes stays a `v128` value on wasm32. The compares and the shifts of vectors, the clang builtins for wasm SIMD, `__builtin_convertvector`, `__builtin_shufflevector` and the `__builtin_elementwise_*` integer builtins are SIMD instructions. Each of the 302 functions of `wasm_simd128.h` has the SIMD instructions that clang 23 writes for it at `-O2 -mrelaxed-simd`, and the rucc-corpus review on wasm gives no new failure with the flag. The release also makes i386 `long long` code and x86-64 `__int128` code closer to gcc, and makes the optimizer faster on quickjs.c and zstd_compress.c.
+
 ### Changed
 
 - Stack slot sharing works out where each local is written and read one loop at a time instead of revisiting every block until nothing changes, so quickjs.c at -O2 runs 65 percent fewer instructions with the same output (#3474).
@@ -12,7 +16,7 @@ All notable changes are recorded here. The format follows [Keep a Changelog](htt
 - On i386 a `long long` add or subtract is `addl` and `adcl`, or `subl` and `sbbl`, and on x86-64 a `__int128` one is `addq` and `adcq`. The carry between the halves used to be a `cmp`, a `setb`, a `movzbl` and one more add. A new pass after selection finds the comparison that asks whether the low add wrapped and uses the flag that add left instead. `__builtin_bswap64` on i386 is two `bswapl` now, where it was 48 shifts and masks, which shrinks `sha512_transform` and `gf128mul_lle` in the 32 bit kernel (#3483).
 - A static function whose one line calls an `always_inline` body is weighed with that body in it, as gcc's early inliner does, so it is no longer copied into every caller as a function no larger than the call. zstd's `HUF_DGEN` wrappers are that shape, and the 32 bit kernel had the Huffman decoder copied into each of their callers, about 18KB a copy where gcc's callers are 64 bytes (#3487).
 - On i386 a `long long` negation is `negl`, `adcl $0` and `negl` as gcc writes it, and on x86-64 a `__int128` one is the same with `negq` and `adcq`. The borrow between the halves was a zero in a register, a `cmp`, a `setb`, a `movzbl` and a subtract (#3489).
-- - Jump threading finds the loop forest again over only the loop a thread changed, which takes a fifth off the compile of zstd_compress.c at `-O2` (#3490).
+- Jump threading finds the loop forest again over only the loop a thread changed, which takes a fifth off the compile of zstd_compress.c at `-O2` (#3490).
 - A `long long` compared with a constant whose low word is zero or all ones, as in `x < 0`, `x >= 0` or `x <= 0xffffffff`, is one compare of the high words on i386, and the same for `__int128` on x86-64. It was a compare of each half, a compare of the high halves for equality and two bits put together (#3491).
 - A shift of a `long long` by a constant on i386 fills the word the bits move into with `shldl` or `shrdl`, as gcc does, where it was a copy, two shifts and an or. A rotate is one of them per word, and a `__int128` shift on x86-64 is `shldq` or `shrdq` the same way (#3493).
 - A `long long` shift by a count in a register on i386, and a `__int128` one on x86-64, fills the word the bits cross into with `shld` or `shrd` by `%cl`, and the count is no longer masked first, since the machine masks it. A shift of a word by a count masked to the word drops the mask as well (#3498).
