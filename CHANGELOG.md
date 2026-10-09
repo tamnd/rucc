@@ -4,6 +4,10 @@ All notable changes are recorded here. The format follows [Keep a Changelog](htt
 
 ## Unreleased
 
+### Added
+
+- `-fsafety-leaks` reports, at exit and under detect or kernel, every live block nothing the program can still reach points at, under its own banner `rucc: memory leak` with up to eight blocks listed and the total. The roots are the writable segments and static TLS of every loaded object, plus the stack and saved registers when the program leaves through a call to `exit`, and none of the stack when it returned from `main`. The edges are conservative for now. Juliet's CWE-401 at -O2 goes from 0 to 576 of 698 detected with no false positives (#3426).
+
 ### Changed
 
 - Short-circuit keeps the loop forest across a collapse instead of rebuilding it for the next branch, which makes lz4hc.c at -O2 run 3.6 percent fewer instructions (#3416).
