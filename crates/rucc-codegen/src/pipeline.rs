@@ -958,7 +958,8 @@ pub fn compile_recording(
         machine.shapes,
         names,
         &mut pending,
-        flags.code_model,
+        flags.code_model == CodeModel::Kernel
+            || (std::ptr::eq(machine.shapes, &x86::MACHINE) && !elsewhere.based()),
     );
 
     // After that fold rather than before it, because what this puts inside an arithmetic

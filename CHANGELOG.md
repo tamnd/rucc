@@ -8,6 +8,7 @@ All notable changes are recorded here. The format follows [Keep a Changelog](htt
 
 - The nofree summary pushes parameter sets along def-use edges instead of rescanning every value until nothing changes, which was 4% of compiling lvm.c: lvm.c -4.7% and quickjs.c -3.9% instructions at -O2 with byte-identical output (#3530).
 - On i386, a value the register allocator sent to the stack gets a short-lived copy in each block that reads it twice or more, and the allocator is asked again. The copies are kept only when the second answer costs less. `super_90_sync` in drivers/md/md.c used to reload the device and superblock pointers before every store and now loads each once. The kernel's `md.c` has 6% fewer stack references at `-O2` (#3531).
+- On i386 code that is not position independent, a static array read with an index is one instruction, `movl off(,%ecx,4), %ebx`, rather than a `leal` of the name and a load through it. The kernel's per-cpu reads of `__per_cpu_offset[cpu]` were all the second shape (#3532).
 
 ## 0.30.0
 
