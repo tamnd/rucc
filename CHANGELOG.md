@@ -22,6 +22,7 @@ All notable changes are recorded here. The format follows [Keep a Changelog](htt
 
 ### Added
 
+- `__builtin_convertvector`, checked with the words of clang. On wasm32 with `-msimd128`, the conversions that clang writes as one SIMD instruction are one instruction, and an extend of 8 loaded bytes is one extending load. `<wasm_simd128.h>` uses it as clang does (#3502).
 - The clang builtins `__builtin_elementwise_min`, `max`, `add_sat`, `sub_sat` and `popcount`, on integers and vectors of integers. With `-msimd128` on wasm32, a vector of 16 bytes is one SIMD instruction where wasm has one, and `<wasm_simd128.h>` uses the builtins as clang does (#3494).
 - With `-msimd128` at -O2, a load of one lane, a splat of a loaded value, a loaded value in lane 0 with zero in the others, and a store of one lane are each one SIMD load or store, and `a & ~b` on vectors is `v128.andnot`, as clang 23 writes them. Of the 302 functions of `<wasm_simd128.h>`, 237 now have the SIMD instructions of clang and 215 have the same body (#3492).
 - With `-msimd128`, the 71 vector builtins of clang for wasm, such as `__builtin_wasm_abs_i8x16` and `__builtin_wasm_all_true_i8x16`, are each one SIMD instruction, and the relaxed ones need `-mrelaxed-simd`. Without the flag a call is an error with the words of clang. `<wasm_simd128.h>` calls these builtins when the flag is on, so 222 of its 302 functions now have the SIMD instructions of clang 23 at -O2, and 200 have the same body (#3488).

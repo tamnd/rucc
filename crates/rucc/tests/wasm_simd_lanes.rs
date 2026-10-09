@@ -594,3 +594,146 @@ fn the_elementwise_builtins_have_the_value_of_each_lane() {
     }
     std::fs::remove_dir_all(dir).unwrap();
 }
+
+const CONVERT: &str = "\
+#include <wasm_simd128.h>
+typedef int v4s __attribute__((vector_size(16)));
+typedef unsigned v4u __attribute__((vector_size(16)));
+typedef float v4f __attribute__((vector_size(16)));
+typedef double v2d __attribute__((vector_size(16)));
+typedef unsigned short v8u __attribute__((vector_size(16)));
+typedef unsigned char v8b __attribute__((vector_size(8)));
+v4f fromu(v4u a) { return __builtin_convertvector(a, v4f); }
+v4s trunc(v4f a) { return __builtin_convertvector(a, v4s); }
+v4u same(v4s a) { return __builtin_convertvector(a, v4u); }
+v8u widen(const v8b *p) { return __builtin_convertvector(*p, v8u); }
+v128_t froms(v128_t a) { return wasm_f32x4_convert_i32x4(a); }
+v128_t load8(const void *p) { return wasm_u16x8_load8x8(p); }
+v128_t load16(const void *p) { return wasm_i32x4_load16x4(p); }
+v128_t load32(const void *p) { return wasm_u64x2_load32x2(p); }
+";
+
+/// With `-msimd128`, a conversion of [`CONVERT`] that wasm has an instruction for is that
+/// instruction, and an extend of eight bytes that are loaded is one extending load, as clang 23
+/// writes them, with the alignment of the vector or of the packed structure in the header. A
+/// conversion that keeps the bits of each lane is no instruction at all.
+#[test]
+fn with_simd128_a_convertvector_is_one_instruction() {
+    let out = assembly(CONVERT, &["-msimd128"]);
+    assert!(out.status.success(), "{}", String::from_utf8_lossy(&out.stderr));
+    let text = String::from_utf8(out.stdout).unwrap();
+    let want: [(&str, &[&str]); 8] = [
+        ("fromu", &["local.get\t0", "f32x4.convert_i32x4_u"]),
+        ("trunc", &["local.get\t0", "i32x4.trunc_sat_f32x4_s"]),
+        ("same", &["local.get\t0"]),
+        ("widen", &["local.get\t0", "i16x8.load8x8_u\t0"]),
+        ("froms", &["local.get\t0", "f32x4.convert_i32x4_s"]),
+        ("load8", &["local.get\t0", "i16x8.load8x8_u\t0:p2align=0"]),
+        ("load16", &["local.get\t0", "i32x4.load16x4_s\t0:p2align=0"]),
+        ("load32", &["local.get\t0", "i64x2.load32x2_u\t0:p2align=0"]),
+    ];
+    for (name, ops) in want {
+        let code: Vec<&str> = body(&text, name)
+            .into_iter()
+            .filter(|op| !op.starts_with('.') && *op != "return")
+            .collect();
+        assert_eq!(code, ops, "{name}");
+    }
+}
+
+/// The words of clang 23 for an operand that is not a vector, for a type that is not a vector
+/// type, and for two vectors with a different number of lanes. Each error is at the start of the
+/// call.
+#[test]
+fn convertvector_is_checked_in_the_words_of_clang() {
+    let source = "\
+typedef int v4si __attribute__((vector_size(16)));
+typedef float v2sf __attribute__((vector_size(8)));
+v4si f(int a) { return __builtin_convertvector(a, v4si); }
+int g(v4si a) { return __builtin_convertvector(a, int); }
+v2sf h(v4si a) { return __builtin_convertvector(a, v2sf); }
+";
+    let out = assembly(source, &[]);
+    let errors = String::from_utf8_lossy(&out.stderr);
+    let want = [
+        "<stdin>:3:24: error: first argument to __builtin_convertvector must be a vector [E0685]",
+        "<stdin>:4:24: error: second argument to __builtin_convertvector must be of vector type [E0685]",
+        "<stdin>:5:25: error: first two arguments to __builtin_convertvector must have the same number of elements [E0685]",
+    ];
+    let said: Vec<&str> = errors.lines().filter(|line| line.contains("error:")).collect();
+    assert_eq!(said, want, "{errors}");
+}
+
+/// A program that compares `__builtin_convertvector` with a cast of each lane, for each pair of
+/// lane types that wasm has an instruction for and for some that it does not. Each value fits in
+/// the type that it is converted to, so that each cast has a value in C.
+const CONVERTED: &str = "\
+#define V(n, t, s) typedef t n __attribute__((vector_size(s)));
+V(v16s, signed char, 16) V(v8sb, signed char, 8) V(v8ub, unsigned char, 8) V(v4sb, signed char, 4)
+V(v8s, short, 16) V(v8u, unsigned short, 16) V(v4sh, short, 8) V(v4uh, unsigned short, 8)
+V(v4s, int, 16) V(v4u, unsigned, 16) V(v2si, int, 8) V(v2ui, unsigned, 8)
+V(v2s, long long, 16) V(v2u, unsigned long long, 16)
+V(v4f, float, 16) V(v2f, float, 8) V(v2d, double, 16)
+static const int edge[] = {0, 1, -1, 127, -128, 255, 32767, -32768, 65535, 100000, -7, 42};
+static int bad;
+#define CHECK(name, from, into, lanes, t, k) \\
+    __attribute__((noinline)) static into name(from a) { return __builtin_convertvector(a, into); } \\
+    static void check_##name(void) { \\
+        from a; for (int i = 0; i < lanes; i++) a[i] = (t)(edge[(i * 5 + __LINE__) % 12] k); \\
+        into r = name(a); \\
+        for (int i = 0; i < lanes; i++) bad |= r[i] != (__typeof__(r[0]))a[i]; }
+CHECK(s8s16, v8sb, v8s, 8, signed char, +0)
+CHECK(u8u16, v8ub, v8u, 8, unsigned char, +0)
+CHECK(s16s32, v4sh, v4s, 4, short, +0)
+CHECK(u16u32, v4uh, v4u, 4, unsigned short, +0)
+CHECK(s32s64, v2si, v2s, 2, int, +0)
+CHECK(u32u64, v2ui, v2u, 2, unsigned, +0)
+CHECK(s32f32, v4s, v4f, 4, int, *3)
+CHECK(u32f32, v4u, v4f, 4, unsigned, *3)
+CHECK(f32s32, v4f, v4s, 4, float, +1)
+CHECK(s32f64, v2si, v2d, 2, int, *9)
+CHECK(u32f64, v2ui, v2d, 2, unsigned, *9)
+CHECK(f32f64, v2f, v2d, 2, float, +2)
+CHECK(f64f32, v2d, v2f, 2, double, +3)
+CHECK(s32s8, v4s, v4sb, 4, int, %100)
+CHECK(f64s64, v2d, v2s, 2, double, -5)
+CHECK(s32u32, v4s, v4u, 4, int, +4)
+__attribute__((noinline)) static v8s load(const void *p) { return __builtin_convertvector(*(const v8sb *)p, v8s); }
+int main(void) {
+    check_s8s16(); check_u8u16(); check_s16s32(); check_u16u32(); check_s32s64(); check_u32u64();
+    check_s32f32(); check_u32f32(); check_f32s32(); check_s32f64(); check_u32f64();
+    check_f32f64(); check_f64f32(); check_s32s8(); check_f64s64(); check_s32u32();
+    signed char raw[9] = {9, -1, -2, 3, 4, -128, 127, 0, 9};
+    v8s w = load(raw + 1);
+    for (int i = 0; i < 8; i++) bad |= w[i] != raw[i + 1];
+    return bad;
+}
+";
+
+#[test]
+fn convertvector_casts_each_lane() {
+    let dir = std::env::temp_dir().join(format!("rucc-wasm-convert-{}", std::process::id()));
+    std::fs::create_dir_all(&dir).unwrap();
+    std::fs::write(dir.join("check.c"), CONVERTED).unwrap();
+    let rucc = PathBuf::from(env!("CARGO_BIN_EXE_rucc"));
+    // On the host first, where each conversion is a lane at a time.
+    for level in ["-O0", "-O2"] {
+        run(&rucc, &[level, "check.c", "-o", "check"], &dir);
+        let status = Command::new(dir.join("check")).status().unwrap();
+        assert!(status.success(), "{level}: {status}");
+    }
+    let wasmtime = on_path("wasmtime");
+    if std::env::var_os("WASI_SDK_PATH").is_none() || wasmtime.is_none() {
+        eprintln!("WASI_SDK_PATH is not set or there is no wasmtime, so wasm was not run");
+        std::fs::remove_dir_all(dir).unwrap();
+        return;
+    }
+    for flags in [&["-O0"][..], &["-O2"], &["-O0", "-msimd128"], &["-O2", "-msimd128"]] {
+        let link = ["--target=wasm32-wasip1", "-fno-builtins-lib", "check.c", "-o", "check.wasm"];
+        run(&rucc, &[&link[..], flags].concat(), &dir);
+        let status =
+            Command::new(wasmtime.as_ref().unwrap()).arg(dir.join("check.wasm")).status().unwrap();
+        assert!(status.success(), "{flags:?}: {status}");
+    }
+    std::fs::remove_dir_all(dir).unwrap();
+}

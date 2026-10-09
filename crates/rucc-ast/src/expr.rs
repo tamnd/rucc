@@ -201,6 +201,14 @@ pub enum Expr {
         /// The second type.
         b: TypeNameId,
     },
+    /// `__builtin_convertvector(operand, ty)`, which converts each lane of a vector to the lane
+    /// type of the vector type `ty`.
+    ConvertVector {
+        /// The vector that is converted.
+        operand: ExprId,
+        /// The vector type of the answer.
+        ty: TypeNameId,
+    },
     /// `__builtin_va_arg(list, ty)`.
     VaArg {
         /// The argument list.

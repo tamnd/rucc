@@ -288,6 +288,13 @@ pub enum ExprKind {
         /// a sign from anywhere other than nowhere.
         rhs: Option<ExprId>,
     },
+    /// `__builtin_convertvector(operand, T)`, whose answer has the vector type `T` and is each lane
+    /// of `operand` converted to the lane type of `T`. The two have the same number of lanes. See
+    /// `check/builtin/convertvector.rs`.
+    ConvertVector {
+        /// The vector that is converted.
+        operand: ExprId,
+    },
     /// One of the `__builtin_elementwise_*` builtins of clang, which does an operation on each
     /// lane of a vector, or on one integer. The operands and the answer have one type. See
     /// `check/builtin/elementwise.rs`.

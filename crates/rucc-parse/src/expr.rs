@@ -453,6 +453,7 @@ impl Parser<'_> {
             Keyword::BuiltinClassifyType => self.builtin_classify_type(),
             Keyword::BuiltinHasAttribute => self.builtin_has_attribute(),
             Keyword::BuiltinVaArg => self.builtin_va_arg(),
+            Keyword::BuiltinConvertvector => self.builtin_convertvector(),
             Keyword::BuiltinVaStart => self.builtin_va_start(),
             Keyword::BuiltinVaEnd => self.builtin_va_end(),
             Keyword::BuiltinVaCopy => self.builtin_va_copy(),
@@ -583,6 +584,21 @@ impl Parser<'_> {
         self.expect_punct(Punct::RParen);
         let span = self.span_from(start);
         self.add_expr(Expr::TypesCompatible { a, b }, span)
+    }
+
+    /// `__builtin_convertvector(vector, type)`.
+    fn builtin_convertvector(&mut self) -> ExprId {
+        let start = self.cursor.span();
+        self.cursor.bump();
+        if !self.expect_punct(Punct::LParen) {
+            return self.poison_expr(start);
+        }
+        let operand = self.assign_expr();
+        self.expect_punct(Punct::Comma);
+        let ty = self.type_name();
+        self.expect_punct(Punct::RParen);
+        let span = self.span_from(start);
+        self.add_expr(Expr::ConvertVector { operand, ty }, span)
     }
 
     /// `__builtin_classify_type(type)` or `__builtin_classify_type(expr)`.

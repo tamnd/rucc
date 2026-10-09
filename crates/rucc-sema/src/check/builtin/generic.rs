@@ -770,6 +770,7 @@ mod tests {
             "__builtin_has_attribute",
             "__builtin_choose_expr",
             "__builtin_offsetof",
+            "__builtin_convertvector",
             "__builtin_va_list",
             "__builtin_va_start",
             "__builtin_va_arg",

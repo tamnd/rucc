@@ -607,6 +607,7 @@ impl<'a> Printer<'a> {
             ExprKind::Classify { op, .. } => format!("classify {}", op.as_str()),
             ExprKind::FpClassify { .. } => "fpclassify".to_owned(),
             ExprKind::Sign { op, .. } => format!("sign {}", op.as_str()),
+            ExprKind::ConvertVector { .. } => "convertvector".to_owned(),
             ExprKind::Elementwise { op, .. } => format!("elementwise {}", op.as_str()),
             ExprKind::Abs { .. } => "abs".to_owned(),
             ExprKind::Complex { .. } => "complex".to_owned(),
@@ -695,6 +696,7 @@ impl<'a> Printer<'a> {
             | ExprKind::VaEnd { list: base }
             | ExprKind::Convert { operand: base, .. }
             | ExprKind::Abs { operand: base }
+            | ExprKind::ConvertVector { operand: base }
             | ExprKind::Prefetch { address: base, .. }
             | ExprKind::ObjectSize { address: base, .. }
             | ExprKind::ConstantP { value: base }

@@ -4036,6 +4036,15 @@ signature = ""
 used_by = ["ffmpeg"]
 tests = ["rucc-sema::the_name_is_a_row_of_the_table_and_is_answered_not_called", "rucc-driver::a_shuffle_picks_each_lane_by_the_low_bits_of_the_mask"]
 
+[[feature]]
+name = "__builtin_convertvector"
+kind = "builtin"
+gcc_version = "9"
+status = "implemented"
+used_by = ["wasi-sdk"]
+tests = ["rucc-parse::the_gnu_expression_extensions_are_here", "rucc::convertvector_is_checked_in_the_words_of_clang", "rucc::convertvector_casts_each_lane", "rucc::with_simd128_a_convertvector_is_one_instruction"]
+notes = "Syntax and not a call, because the second argument is a vector type. Each lane of the vector is converted to the lane type of the type, as a cast does it, and the two have the same number of lanes. With `-msimd128` on wasm32, the conversions that clang writes as one instruction are one instruction: `f32x4.convert_i32x4`, `i32x4.trunc_sat_f32x4`, the extends, `f64x2.convert_low_i32x4`, `f64x2.promote_low_f32x4` and `f32x4.demote_f64x2_zero`."
+
 # The `__builtin_elementwise_*` builtins of clang that do an integer operation on each lane. No
 # signature, because the type of the answer is the type of the operands. clang 23 refuses an
 # operand that is not an integer or a vector of integers, and two operands of different types.
