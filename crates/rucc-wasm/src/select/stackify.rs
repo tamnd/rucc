@@ -155,6 +155,10 @@ fn pure(opcode: Opcode) -> bool {
             | Opcode::LifetimeEnd
             | Opcode::MemEntry
             | Opcode::Prefetch
+            | Opcode::Splat
+            | Opcode::InsertLane
+            | Opcode::ExtractLane
+            | Opcode::Shuffle
     )
 }
 
@@ -179,12 +183,19 @@ impl Lower<'_, '_> {
         // The `ptr_add` instructions with no use, and then the ones that they were the only use of.
         // The same for the `splat` and `insertlane` that build the count of a vector shift, which
         // the shift does not read when the count is the same in each lane, and for the ones and
-        // the `bitcast` under them that a vector built from its lanes does not read.
+        // the `bitcast` under them that a vector built from its lanes does not read. The same for
+        // the not that a `v128.andnot` does not read, the `extractlane` that a store of a lane
+        // does not read, and the load that a SIMD instruction does itself.
+        let absorbed: Set<Inst> = self.absorbed.values().copied().collect();
         let pure = |inst: Inst| {
-            matches!(
-                func[inst].opcode,
-                Opcode::PtrAdd | Opcode::Splat | Opcode::InsertLane | Opcode::Bitcast
-            )
+            let vector = self.results(inst).first().is_some_and(|&v| self.ty(v).is_vector());
+            match func[inst].opcode {
+                Opcode::PtrAdd | Opcode::Splat | Opcode::InsertLane | Opcode::Bitcast => true,
+                Opcode::Xor => vector,
+                Opcode::ExtractLane => true,
+                Opcode::Load => absorbed.contains(&inst),
+                _ => false,
+            }
         };
         let mut dead: Vec<Inst> = func
             .blocks()
@@ -470,6 +481,7 @@ impl Lower<'_, '_> {
             | Opcode::FPToSI
             | Opcode::FPToUI
             | Opcode::Load => Some(Kind::Read),
+            _ if self.absorbed.contains_key(&inst) => Some(Kind::Read),
             // A maths function or a vector builtin that is written as its instruction, which
             // cannot trap.
             Opcode::Call if self.libm(inst).is_some() || self.simd_builtin(inst) => {
@@ -488,12 +500,13 @@ impl Lower<'_, '_> {
 
     /// Whether `inst` has an effect, reads memory, and can trap, as a moved instruction sees it.
     /// An instruction that this does not know has an effect.
-    fn effects(&self, inst: Inst) -> (bool, bool, bool) {
+    pub(super) fn effects(&self, inst: Inst) -> (bool, bool, bool) {
         let data = &self.func[inst];
         let args = self.args(inst);
         let pairs = args.iter().chain(&self.results(inst)).any(|&v| is_pair(self.ty(v)));
         match data.opcode {
             _ if pairs => (true, true, true),
+            _ if self.absorbed.contains_key(&inst) => (false, true, true),
             Opcode::Alloca if args.is_empty() => (false, false, false),
             Opcode::Call if self.libm(inst).is_some() || self.simd_builtin(inst) => {
                 (false, false, false)

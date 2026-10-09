@@ -136,6 +136,13 @@ fn simd_shape(ty: Type) -> Result<String> {
     Ok(format!("{kind}{}x{}", ty.bits(), ty.lanes()))
 }
 
+/// The opcode of the SIMD instruction `name`.
+fn simd_op(name: &str) -> Result<u32> {
+    let (op, _) =
+        simd::by_name(name).ok_or_else(|| format!("wasm has no SIMD instruction `{name}`"))?;
+    Ok(op)
+}
+
 /// The opcode of a load into a value of type `ty`, and the natural alignment of the access.
 fn load_op(ty: Type) -> Result<(u8, u32)> {
     if !ty.is_ptr() && ty.is_int() && ty.bits() <= 16 {
@@ -252,6 +259,7 @@ pub(crate) fn function(unit: &mut Unit<'_>, id: FuncId, symbol: u32) -> Result<F
         large: func.blocks().map(|block| func.insts(block).count()).sum::<usize>() > LARGE,
         annotate: None,
         trees: Trees::default(),
+        absorbed: Map::default(),
         pushed: Set::default(),
         root: None,
         inverted: None,
@@ -273,6 +281,7 @@ pub(crate) fn function(unit: &mut Unit<'_>, id: FuncId, symbol: u32) -> Result<F
         lower.annotate = Some(Annotate { notes: Notes::default(), values, blocks });
     }
     if lower.unit.optimize {
+        lower.absorbed = lower.absorb();
         lower.trees = lower.stackify();
         lower.signed = lower.signed_loads();
     }
@@ -363,6 +372,9 @@ struct Lower<'u, 'a> {
     /// instructions that make them, which are written where the value is pushed. See
     /// `stackify.rs`.
     trees: Trees,
+    /// The loads that a SIMD instruction does itself, keyed by that instruction. See
+    /// [`Self::absorb`].
+    absorbed: Map<Inst, Inst>,
     /// The values of `trees` that are pushed already.
     pushed: Set<Value>,
     /// The instruction of the block that is written now and keeps its place.
@@ -1171,11 +1183,25 @@ impl Lower<'_, '_> {
         }
         // A vector built lane by lane reads the values of its lanes and not the vector before.
         // A negation and a bitwise not do not read the vector of zeros or of ones.
+        // A load that the instruction does itself reads the address of the load instead.
         if opcode == Opcode::InsertLane {
             let built = self.results(inst).first().and_then(|&vector| self.built(vector));
-            if let Some(lanes) = built {
-                return pushed(&lanes);
+            match (built, self.absorbed.get(&inst)) {
+                (Some(_), Some(&load)) => return self.inputs(load),
+                (Some(lanes), None) => return pushed(&lanes),
+                (None, Some(&load)) => {
+                    let mut address = self.inputs(load);
+                    address.push(args[0]);
+                    return address;
+                }
+                (None, None) => {}
             }
+        }
+        if let Some((value, not)) = self.andnot(inst) {
+            return vec![value, not];
+        }
+        if let Some((vector, _)) = self.stored_lane(inst) {
+            args[0] = vector;
         }
         if opcode == Opcode::Sub && args.len() == 2 && self.zeros(args[0]) {
             args.remove(0);
@@ -1188,6 +1214,112 @@ impl Lower<'_, '_> {
             }
         }
         args
+    }
+
+    /// The operands of a `v128.andnot` for an `and` of two vectors where one operand is the
+    /// bitwise not of a value: the other operand, and the value under the not. clang writes
+    /// `a & ~b` so. The not is then not read, and when it has no other use it is not written.
+    fn andnot(&self, inst: Inst) -> Option<(Value, Value)> {
+        if !self.unit.optimize || self.func[inst].opcode != Opcode::And {
+            return None;
+        }
+        let &[a, b] = &self.args(inst)[..] else { return None };
+        simd_shape(self.ty(a)).ok()?;
+        let not = |value: Value| {
+            let (def, _) = self.def(value)?;
+            let &[x, y] = &self.args(def)[..] else { return None };
+            match self.func[def].opcode {
+                Opcode::Xor if self.ones(y) => Some(x),
+                Opcode::Xor if self.ones(x) => Some(y),
+                _ => None,
+            }
+        };
+        not(b).map(|b| (a, b)).or_else(|| not(a).map(|a| (b, a)))
+    }
+
+    /// The vector and the lane of a store of one lane of a vector, which is one
+    /// `v128.store8_lane` up to `v128.store64_lane`, as clang writes it. The `extractlane` is then
+    /// not read, and when it has no other use it is not written.
+    fn stored_lane(&self, inst: Inst) -> Option<(Value, u8)> {
+        if !self.unit.optimize || self.func[inst].opcode != Opcode::Store {
+            return None;
+        }
+        let (def, _) = self.def(*self.args(inst).first()?)?;
+        let (Opcode::ExtractLane, Extra::Lane(lane)) =
+            (self.func[def].opcode, self.func[def].extra)
+        else {
+            return None;
+        };
+        let vector = self.args(def)[0];
+        simd_shape(self.ty(vector)).ok()?;
+        Some((vector, lane))
+    }
+
+    /// The loads that a SIMD instruction does itself, keyed by that instruction, as clang writes
+    /// them. A vector with one loaded value in each lane is `v128.load8_splat` up to
+    /// `v128.load64_splat`. A vector with one loaded value in lane 0 and zero in the other lanes
+    /// is `v128.load32_zero` or `v128.load64_zero`. A loaded value written into one lane of a
+    /// vector is `v128.load8_lane` up to `v128.load64_lane`. The load then moves to the place of
+    /// that instruction, so it is taken only when the instruction is its only use, the two are in
+    /// one block, and no instruction between them writes memory or has another effect. The
+    /// instruction then reads memory, and stackify moves it as it moves a load.
+    fn absorb(&self) -> Map<Inst, Inst> {
+        let func = self.func;
+        let mut absorbed = Map::default();
+        if !self.unit.features.has(Feature::Simd128) {
+            return absorbed;
+        }
+        let mut uses: Map<Value, u32> = Map::default();
+        for block in func.blocks() {
+            for inst in func.insts(block) {
+                let edges = func.successors(inst).flat_map(|call| func[call.args].iter().copied());
+                for value in self.args(inst).into_iter().chain(edges) {
+                    *uses.entry(value).or_default() += 1;
+                }
+            }
+        }
+        for block in func.blocks() {
+            // The count of the instructions with an effect before each instruction of the block.
+            let mut before: Map<Inst, u32> = Map::default();
+            let mut effects = 0;
+            for inst in func.insts(block) {
+                before.insert(inst, effects);
+                effects += u32::from(self.effects(inst).0);
+                let Some(load) = self.lane_load(inst, &uses) else { continue };
+                if before.get(&load).is_some_and(|&count| count == before[&inst]) {
+                    absorbed.insert(inst, load);
+                }
+            }
+        }
+        absorbed
+    }
+
+    /// The load that the `insertlane` `inst` can do itself, when its value has no other use. See
+    /// [`Self::absorb`].
+    fn lane_load(&self, inst: Inst, uses: &Map<Value, u32>) -> Option<Inst> {
+        if self.func[inst].opcode != Opcode::InsertLane {
+            return None;
+        }
+        let ty = self.ty(*self.results(inst).first()?);
+        simd_shape(ty).ok()?;
+        let (value, count) = match self.built(self.results(inst)[0]) {
+            Some(lanes) => {
+                let Lane::Value(value) = lanes[0] else { return None };
+                let count = lanes.iter().filter(|&&lane| lane == Lane::Value(value)).count();
+                let zero = matches!(ty.bits(), 32 | 64)
+                    && lanes[1..].iter().all(|&lane| lane == Lane::Bits(0));
+                if count != lanes.len() && !zero {
+                    return None;
+                }
+                (value, count)
+            }
+            None => (self.args(inst)[1], 1),
+        };
+        let (def, _) = self.def(value)?;
+        let data = &self.func[def];
+        let plain = data.opcode == Opcode::Load && !data.flags.contains(Flags::VOLATILE);
+        (plain && self.ty(value) == ty.lane() && uses.get(&value) == Some(&(count as u32)))
+            .then_some(def)
     }
 
     /// Whether `vector` is a vector with every bit zero.
@@ -1936,6 +2068,18 @@ impl Lower<'_, '_> {
         {
             self.push(value)?;
             self.set(results[0]);
+            return Ok(());
+        }
+        if let Some((vector, lane)) = self.stored_lane(inst) {
+            let value = args[0];
+            let natural = self.ty(value).bits() / 8;
+            let align = self.mem_info(inst).map_or(natural, |m| m.align);
+            let folded = self.folded(inst);
+            self.push_base(folded.as_ref(), args[1])?;
+            self.push(vector)?;
+            let op = simd_op(&format!("v128.store{}_lane", natural * 8))?;
+            self.access(MemOp::Simd(op), align_field(align, natural), folded)?;
+            self.code.op(lane);
             return Ok(());
         }
         if args.iter().chain(&results).any(|&v| self.ty(v).is_vector()) {
@@ -3056,7 +3200,32 @@ impl Lower<'_, '_> {
             }
             Opcode::InsertLane if self.built(results[0]).is_some() => {
                 let lanes = self.built(results[0]).ok_or("a vector built lane by lane")?;
-                self.vector_of(self.ty(results[0]), &lanes)?;
+                match self.absorbed.get(&inst) {
+                    Some(&load) => {
+                        let bits = self.ty(results[0]).bits();
+                        let form = if lanes.iter().all(|&lane| lane == lanes[0]) {
+                            "splat"
+                        } else {
+                            "zero"
+                        };
+                        self.load_into(load, &format!("v128.load{bits}_{form}"), None)?;
+                    }
+                    None => self.vector_of(self.ty(results[0]), &lanes)?,
+                }
+                self.set(results[0]);
+            }
+            Opcode::InsertLane if self.absorbed.contains_key(&inst) => {
+                let Extra::Lane(lane) = extra else { return Err("an insertlane".into()) };
+                let load = self.absorbed[&inst];
+                let bits = self.ty(results[0]).bits();
+                self.load_into(load, &format!("v128.load{bits}_lane"), Some((args[0], lane)))?;
+                self.set(results[0]);
+            }
+            Opcode::And if self.andnot(inst).is_some() => {
+                let (value, not) = self.andnot(inst).ok_or("an andnot")?;
+                self.push(value)?;
+                self.push(not)?;
+                self.simd("v128.andnot")?;
                 self.set(results[0]);
             }
             Opcode::Add
@@ -3408,6 +3577,26 @@ impl Lower<'_, '_> {
         Ok(())
     }
 
+    /// The load `load` done by the SIMD instruction `name`, which reads the bytes of one lane.
+    /// For a `load_lane`, `into` is the vector that it writes the lane of, which is pushed after
+    /// the address, and the lane, which comes after the memory argument.
+    fn load_into(&mut self, load: Inst, name: &str, into: Option<(Value, u8)>) -> Result<()> {
+        let op = simd_op(name)?;
+        let address = self.args(load)[0];
+        let natural = self.ty(self.results(load)[0]).bits() / 8;
+        let align = self.mem_info(load).map_or(natural, |m| m.align);
+        let folded = self.folded(load);
+        self.push_base(folded.as_ref(), address)?;
+        if let Some((vector, _)) = into {
+            self.push(vector)?;
+        }
+        self.access(MemOp::Simd(op), align_field(align, natural), folded)?;
+        if let Some((_, lane)) = into {
+            self.code.op(lane);
+        }
+        Ok(())
+    }
+
     /// A `v128.const` of these sixteen bytes.
     fn v128_const(&mut self, bytes: &[u8]) {
         self.code.simd(emit::V128_CONST);
@@ -3480,8 +3669,7 @@ impl Lower<'_, '_> {
 
     /// The SIMD instruction with this name, which is its name in the dialect of `llvm-mc`.
     fn simd(&mut self, name: &str) -> Result<()> {
-        let (op, _) =
-            simd::by_name(name).ok_or_else(|| format!("wasm has no SIMD instruction `{name}`"))?;
+        let op = simd_op(name)?;
         self.code.simd(op);
         Ok(())
     }

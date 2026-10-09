@@ -270,6 +270,59 @@ fn with_simd128_a_function_of_the_header_is_the_builtin_of_clang() {
     assert_eq!(madd, ["local.get\t0", "local.get\t1", "f32x4.mul", "local.get\t2", "f32x4.add"]);
 }
 
+/// Functions that load or store one lane, and `wasm_v128_andnot`. `keep` stores between the
+/// load and the vector, so its load stays where it is.
+const MEMORY: &str = "\
+#include <wasm_simd128.h>
+typedef int v4si __attribute__((vector_size(16)));
+v128_t splat8(const void *p) { return wasm_v128_load8_splat(p); }
+v128_t zero64(const void *p) { return wasm_v128_load64_zero(p); }
+v128_t lane16(const void *p, v128_t v) { return wasm_v128_load16_lane(p, v, 1); }
+void store32(void *p, v128_t v) { wasm_v128_store32_lane(p, v, 3); }
+v128_t andnot(v128_t a, v128_t b) { return wasm_v128_andnot(a, b); }
+v4si at(const int *p) { return (v4si){p[2], p[2], p[2], p[2]}; }
+v4si keep(int *p, int *q) { int x = *p; *q = 0; return (v4si){x, x, x, x}; }
+";
+
+/// Each function of [`MEMORY`] but `keep` is the instructions that clang 23 writes for it at
+/// `-O2` with `-msimd128`. The load of a lane, of a splat and of lane 0 with zero in the others
+/// is one SIMD load, the store of one lane is one SIMD store, and `a & ~b` is `v128.andnot`. In
+/// `keep` the load is not moved past the store.
+#[test]
+fn with_simd128_a_load_or_a_store_of_a_lane_is_one_instruction() {
+    let out = assembly(MEMORY, &["-msimd128"]);
+    assert!(out.status.success(), "{}", String::from_utf8_lossy(&out.stderr));
+    let text = String::from_utf8(out.stdout).unwrap();
+    let want: [(&str, &[&str]); 7] = [
+        ("splat8", &["local.get\t0", "v128.load8_splat\t0"]),
+        ("zero64", &["local.get\t0", "v128.load64_zero\t0:p2align=0"]),
+        ("lane16", &["local.get\t0", "local.get\t1", "v128.load16_lane\t0:p2align=0, 1"]),
+        ("store32", &["local.get\t0", "local.get\t1", "v128.store32_lane\t0:p2align=0, 3"]),
+        ("andnot", &["local.get\t0", "local.get\t1", "v128.andnot"]),
+        ("at", &["local.get\t0", "v128.load32_splat\t8"]),
+        (
+            "keep",
+            &[
+                "local.get\t0",
+                "i32.load\t0",
+                "local.set\t0",
+                "local.get\t1",
+                "i32.const\t0",
+                "i32.store\t0",
+                "local.get\t0",
+                "i32x4.splat",
+            ],
+        ),
+    ];
+    for (name, ops) in want {
+        let code: Vec<&str> = body(&text, name)
+            .into_iter()
+            .filter(|op| !op.starts_with('.') && *op != "return")
+            .collect();
+        assert_eq!(code, ops, "{name}");
+    }
+}
+
 /// A program that does each operator on vectors of edge values, and the same operator on each
 /// lane as a scalar, and exits with 1 if a lane differs. The scalar side is in a function that is
 /// not inlined, so it is plain scalar code. A compare gives -1 or 0 in each lane. Every second lane
