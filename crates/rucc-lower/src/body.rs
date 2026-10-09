@@ -4792,6 +4792,12 @@ impl<'u> Body<'_, 'u> {
     /// on the whole register and the answer is written whole. The accesses name no type, because
     /// the lanes around them are written through the lane's type and the two have to be seen to
     /// overlap.
+    ///
+    /// On wasm32 with `-msimd128`, each vector of sixteen bytes, under an add, a subtract, a
+    /// multiply, a divide of floats or a bitwise operator, which is one SIMD instruction each.
+    /// wasm has no multiply of sixteen `char` lanes, so that one stays a lane at a time. A `char`
+    /// or a `short` lane is done at its own width, which gives the bits that the lane by lane code
+    /// gives, because each of these operations wraps.
     #[allow(clippy::too_many_arguments)]
     fn whole_vector(
         &mut self,
@@ -4811,9 +4817,16 @@ impl<'u> Body<'_, 'u> {
             BinaryOp::BitOr => Opcode::Or,
             BinaryOp::BitXor => Opcode::Xor,
             BinaryOp::Mul => Opcode::Mul,
+            BinaryOp::Div => Opcode::FDiv,
             _ => return false,
         };
-        if self.target().tuple.arch() != Arch::X86_64 || counts != lane {
+        if counts != lane {
+            return false;
+        }
+        if self.target().simd128 {
+            return self.whole_simd128(opcode, lane, lanes, at, left, right, span);
+        }
+        if self.target().tuple.arch() != Arch::X86_64 || opcode == Opcode::FDiv {
             return false;
         }
         // The vector has to have a register to be in, which `-mno-sse` takes away. A function's
@@ -4831,6 +4844,49 @@ impl<'u> Body<'_, 'u> {
         if opcode == Opcode::Mul && one.bits() != 32 {
             return false;
         }
+        let whole = Type::vector(one, u32::try_from(lanes).unwrap_or(0));
+        let info = untyped(repr::align_of(self.types(), self.target(), lane));
+        let mut build = self.build(span);
+        let a = build.load(whole, left, info, Flags::NONE);
+        let b = build.load(whole, right, info, Flags::NONE);
+        let value = build.binary(opcode, a, b, Flags::NONE);
+        build.store(value, at, info, Flags::NONE);
+        true
+    }
+
+    /// The wasm32 case of [`Self::whole_vector`], with `opcode` the operation on integer lanes,
+    /// or `fdiv` for a divide.
+    #[allow(clippy::too_many_arguments)]
+    fn whole_simd128(
+        &mut self,
+        opcode: Opcode,
+        lane: TypeId,
+        lanes: u64,
+        at: Value,
+        left: Value,
+        right: Value,
+        span: Span,
+    ) -> bool {
+        let one = self.value_type(lane, span);
+        if u64::from(one.bits()) * lanes != 128 {
+            return false;
+        }
+        let opcode = if one.is_float() {
+            match opcode {
+                Opcode::Add => Opcode::FAdd,
+                Opcode::Sub => Opcode::FSub,
+                Opcode::Mul => Opcode::FMul,
+                Opcode::FDiv => Opcode::FDiv,
+                _ => return false,
+            }
+        } else if one.is_int() && matches!(one.bits(), 8 | 16 | 32 | 64) {
+            if opcode == Opcode::FDiv || opcode == Opcode::Mul && one.bits() == 8 {
+                return false;
+            }
+            opcode
+        } else {
+            return false;
+        };
         let whole = Type::vector(one, u32::try_from(lanes).unwrap_or(0));
         let info = untyped(repr::align_of(self.types(), self.target(), lane));
         let mut build = self.build(span);

@@ -19,6 +19,7 @@ use rucc_target::wasm::Feature;
 use crate::emit::{self, Code, MemOp};
 use crate::irreducible::Node;
 use crate::rules;
+use crate::simd;
 use crate::structure::Shape;
 use crate::{Kept, Lines, Notes, Unit, functype, is_pair, valtype};
 
@@ -109,6 +110,16 @@ fn va_layout(extra: impl Iterator<Item = (Type, Abi)>) -> Result<(Vec<u32>, u32,
         most = most.max(align);
     }
     Ok((offsets, at, most))
+}
+
+/// How the SIMD instructions of wasm name a vector type of sixteen bytes: `i32x4` for four `i32`
+/// lanes, and `f64x2` for two `f64` lanes.
+fn simd_shape(ty: Type) -> Result<String> {
+    if ty.bits() * ty.lanes() != 128 || !matches!(ty.bits(), 8 | 16 | 32 | 64) {
+        return Err(format!("a {ty} is not one `v128`, so wasm has no SIMD instruction for it"));
+    }
+    let kind = if ty.lane().is_float() { 'f' } else { 'i' };
+    Ok(format!("{kind}{}x{}", ty.bits(), ty.lanes()))
 }
 
 /// The opcode of a load into a value of type `ty`, and the natural alignment of the access.
@@ -2929,12 +2940,102 @@ impl Lower<'_, '_> {
         Ok(())
     }
 
-    /// An instruction with a vector operand or result. A vector is one `v128`, and only a call, a
-    /// load and a store of one are translated so far, which is what passing a vector takes.
+    /// An instruction with a vector operand or result. A vector is one `v128`.
+    ///
+    /// A call, a load and a store take a vector of any size up to sixteen bytes. The other
+    /// operations take a vector of sixteen bytes, and each is the one SIMD instruction that clang
+    /// writes for it. An integer operation on `i8x16` or `i16x8` lanes is done at the width of the
+    /// lane, which gives the same bits as the scalar code for an add, a subtract, a multiply and the
+    /// bitwise operations, because those wrap. Each lane of a `v128` holds its value in the low bits,
+    /// so an `extractlane` of a narrow lane gives a value whose high bits are zero, which is a valid
+    /// form of a narrow value here.
     fn vector(&mut self, inst: Inst, args: &[Value], results: &[Value]) -> Result<()> {
         let opcode = self.func[inst].opcode;
+        let extra = self.func[inst].extra;
         match opcode {
             Opcode::Call | Opcode::CallIndirect => self.call(inst, false)?,
+            Opcode::Add
+            | Opcode::Sub
+            | Opcode::Mul
+            | Opcode::FAdd
+            | Opcode::FSub
+            | Opcode::FMul
+            | Opcode::FDiv => {
+                let shape = simd_shape(self.ty(results[0]))?;
+                let name = match opcode {
+                    Opcode::Add | Opcode::FAdd => "add",
+                    Opcode::Sub | Opcode::FSub => "sub",
+                    Opcode::Mul | Opcode::FMul => "mul",
+                    _ => "div",
+                };
+                self.push(args[0])?;
+                self.push(args[1])?;
+                self.simd(&format!("{shape}.{name}"))?;
+                self.set(results[0]);
+            }
+            Opcode::And | Opcode::Or | Opcode::Xor => {
+                simd_shape(self.ty(results[0]))?;
+                self.push(args[0])?;
+                self.push(args[1])?;
+                self.simd(match opcode {
+                    Opcode::And => "v128.and",
+                    Opcode::Or => "v128.or",
+                    _ => "v128.xor",
+                })?;
+                self.set(results[0]);
+            }
+            Opcode::Splat => {
+                let ty = self.ty(results[0]);
+                simd_shape(ty)?;
+                let Extra::Imm(imm) = extra else { return Err("a splat".into()) };
+                let width = (ty.bits() / 8) as usize;
+                let lane = self.func[imm].bits().to_le_bytes();
+                let mut bytes = [0u8; 16];
+                for (at, byte) in bytes.iter_mut().enumerate() {
+                    *byte = lane[at % width];
+                }
+                self.code.simd(emit::V128_CONST);
+                for byte in bytes {
+                    self.code.op(byte);
+                }
+                self.set(results[0]);
+            }
+            Opcode::ExtractLane => {
+                let Extra::Lane(lane) = extra else { return Err("an extractlane".into()) };
+                let shape = simd_shape(self.ty(args[0]))?;
+                let narrow = if self.ty(args[0]).bits() < 32 { "_u" } else { "" };
+                self.push(args[0])?;
+                self.simd(&format!("{shape}.extract_lane{narrow}"))?;
+                self.code.op(lane);
+                self.set(results[0]);
+            }
+            Opcode::InsertLane => {
+                let Extra::Lane(lane) = extra else { return Err("an insertlane".into()) };
+                let shape = simd_shape(self.ty(results[0]))?;
+                self.push(args[0])?;
+                self.push(args[1])?;
+                self.simd(&format!("{shape}.replace_lane"))?;
+                self.code.op(lane);
+                self.set(results[0]);
+            }
+            Opcode::Shuffle => {
+                let Extra::Shuffle(picks) = extra else { return Err("a shuffle".into()) };
+                let from = self.ty(args[0]);
+                simd_shape(from)?;
+                let width = (from.bits() / 8) as usize;
+                self.push(args[0])?;
+                self.push(args[0])?;
+                self.simd("i8x16.shuffle")?;
+                // A lane of the answer past the lanes of the shuffle is not read, and it takes the
+                // first byte.
+                for at in 0..16 / width {
+                    let lane = if at < picks.len() { usize::from(picks.lane(at)) } else { 0 };
+                    for byte in 0..width {
+                        self.code.op(u8::try_from(lane * width + byte).unwrap_or(0));
+                    }
+                }
+                self.set(results[0]);
+            }
             Opcode::Load => {
                 let ty = self.ty(results[0]);
                 let (op, _, natural) = vector_access(ty)?;
@@ -2970,6 +3071,14 @@ impl Lower<'_, '_> {
                 ));
             }
         }
+        Ok(())
+    }
+
+    /// The SIMD instruction with this name, which is its name in the dialect of `llvm-mc`.
+    fn simd(&mut self, name: &str) -> Result<()> {
+        let (op, _) =
+            simd::by_name(name).ok_or_else(|| format!("wasm has no SIMD instruction `{name}`"))?;
+        self.code.simd(op);
         Ok(())
     }
 
