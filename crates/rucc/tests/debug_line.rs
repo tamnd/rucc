@@ -185,3 +185,29 @@ fn the_end_of_each_prologue_is_marked_where_the_body_starts() {
     }
     assert_eq!(marks, 2, "{text}");
 }
+
+/// A body the optimizer inlined still says the lines it came from. Each copy has positions of its
+/// own, past the last file, and the table is written from what the source map says about them, so
+/// a copy it could not place would leave its rows out.
+#[cfg(target_os = "linux")]
+#[test]
+fn an_inlined_body_says_the_lines_it_came_from() {
+    let dir = fixture("inlined");
+    build(&dir, &["-g", "-O2"], "one.o");
+    let out = Command::new("readelf")
+        .arg("--debug-dump=decodedline")
+        .arg(dir.join("one.o"))
+        .output()
+        .expect("readelf starts");
+    let _ = std::fs::remove_dir_all(&dir);
+    let text = String::from_utf8_lossy(&out.stdout);
+
+    let lines: Vec<u32> = text
+        .lines()
+        .filter(|line| line.starts_with("one.c"))
+        .filter_map(|line| line.split_whitespace().nth(1)?.parse().ok())
+        .collect();
+    assert!(lines.iter().all(|&line| (1..=6).contains(&line)), "{text}");
+    // Once for `twice` itself and once for the copy of it in the loop.
+    assert!(lines.iter().filter(|&&line| line == 1).count() >= 2, "{text}");
+}

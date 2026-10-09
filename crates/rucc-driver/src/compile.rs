@@ -573,7 +573,14 @@ pub fn compile(opts: &Options, name: &str, fs: &dyn FileSystem) -> Compiled {
                             diagnostics.extend(complaints);
                         } else if let Err(complaints) = clock
                             .time("optimize", || {
-                                optimize(
+                                // Each body the inliner copies gets positions of its own, past
+                                // the last file, so that the debug information can tell the copy
+                                // apart from the function. The source map is told of them after,
+                                // and answers for them as for the body. See `rucc_ir::Copies`.
+                                if opts.debug_info {
+                                    lowered.module.copies.next = Some(sess.sources.used());
+                                }
+                                let done = optimize(
                                     &mut lowered.module,
                                     &mut sess.interner,
                                     &sess.target,
@@ -581,7 +588,11 @@ pub fn compile(opts: &Options, name: &str, fs: &dyn FileSystem) -> Compiled {
                                     name,
                                     &mut dumps,
                                     &mut remarks,
-                                )
+                                );
+                                for site in lowered.module.copies.sites() {
+                                    sess.sources.copied(site.at, site.of, site.call);
+                                }
+                                done
                             })
                             .map(|times| {
                                 passes = times;
@@ -2147,7 +2158,8 @@ fn describe(
         // block stops being one of the function's own. The numbers the walk over the tree handed out
         // are over the whole unit, and what goes on an entry is a place in this function's table, so
         // the two are joined here.
-        let (scopes, at) = nests(&wants, &origin.meaning.scopes, extent.len as u64, rows);
+        let (scopes, at) =
+            nests(&wants, &origin.meaning.scopes, extent.len as u64, rows, origin.map);
         for (local, want) in locals.iter_mut().zip(&wants) {
             local.scope = want.and_then(|want| at.get(&want).copied());
         }
@@ -2372,7 +2384,8 @@ fn describe_wasm(
                 tags: named.tags.clone(),
             });
         }
-        let (scopes, at) = nests(&wants, &origin.meaning.scopes, u64::from(lines.len), &lines.rows);
+        let (scopes, at) =
+            nests(&wants, &origin.meaning.scopes, u64::from(lines.len), &lines.rows, origin.map);
         for (local, want) in locals.iter_mut().zip(&wants) {
             local.scope = want.and_then(|want| at.get(&want).copied());
         }
@@ -2611,6 +2624,7 @@ fn nests<R: Located>(
     scopes: &[crate::shapes::Scope],
     len: u64,
     rows: &[R],
+    map: &SourceMap,
 ) -> (Vec<rucc_debug::Scope>, Map<usize, usize>) {
     let mut needed: Vec<usize> = Vec::new();
     for &want in wants {
@@ -2635,7 +2649,7 @@ fn nests<R: Located>(
             let scope = &scopes[which];
             rucc_debug::Scope {
                 parent: scope.parent.and_then(|parent| at.get(&parent).copied()),
-                over: spread(scope.span, &ends, rows),
+                over: spread(scope.span, &ends, rows, map),
             }
         })
         .collect();
@@ -2649,10 +2663,18 @@ fn nests<R: Located>(
 /// which is what almost all of a scope is: the rows of a block are next to each other unless
 /// something moved them, and a block the back end split into pieces is exactly the case a list is
 /// for.
-fn spread<R: Located>(span: Span, ends: &[u64], rows: &[R]) -> Vec<rucc_debug::Reach> {
+///
+/// A row of a body the inliner copied in is where the call was, which is inside the block the
+/// call was written in. `map` says where that is.
+fn spread<R: Located>(
+    span: Span,
+    ends: &[u64],
+    rows: &[R],
+    map: &SourceMap,
+) -> Vec<rucc_debug::Reach> {
     let mut out: Vec<rucc_debug::Reach> = Vec::new();
     for (which, row) in rows.iter().enumerate() {
-        let have = row.span();
+        let have = map.outside(row.span());
         if have.is_dummy() || have.lo < span.lo || have.hi > span.hi {
             continue;
         }
@@ -13470,7 +13492,10 @@ away:
         let rows = [row(0, 0, 4), row(4, 10, 14), row(8, 14, 18), row(12, 40, 44)];
         let ends = ends(16, &rows);
         let scope = Span::new(8, 20);
-        assert_eq!(spread(scope, &ends, &rows), vec![rucc_debug::Reach { from: 4, len: 8 }]);
+        assert_eq!(
+            spread(scope, &ends, &rows, &SourceMap::new()),
+            vec![rucc_debug::Reach { from: 4, len: 8 }]
+        );
     }
 
     #[test]
@@ -13478,7 +13503,7 @@ away:
         let rows = [row(0, 10, 14), row(4, 40, 44), row(8, 14, 18)];
         let ends = ends(12, &rows);
         let scope = Span::new(8, 20);
-        let over = spread(scope, &ends, &rows);
+        let over = spread(scope, &ends, &rows, &SourceMap::new());
         assert_eq!(
             over,
             vec![rucc_debug::Reach { from: 0, len: 4 }, rucc_debug::Reach { from: 8, len: 4 }]
@@ -13491,7 +13516,10 @@ away:
         let rows = [rucc_asm::Row { at: 0, span: Span::DUMMY, inst: None }, row(4, 10, 14)];
         let ends = ends(8, &rows);
         let scope = Span::new(0, 20);
-        assert_eq!(spread(scope, &ends, &rows), vec![rucc_debug::Reach { from: 4, len: 4 }]);
+        assert_eq!(
+            spread(scope, &ends, &rows, &SourceMap::new()),
+            vec![rucc_debug::Reach { from: 4, len: 4 }]
+        );
     }
 
     /// A scope of the unit, written short because these tests are about nothing else.
@@ -13505,7 +13533,7 @@ away:
         // Two functions' worth of scopes in one table, and this one is in the second pair.
         let scopes = [scope(None, 0, 10), scope(None, 20, 30), scope(Some(1), 22, 26)];
         let rows = [row(0, 22, 24), row(4, 26, 28)];
-        let (out, at) = nests(&[Some(2)], &scopes, 8, &rows);
+        let (out, at) = nests(&[Some(2)], &scopes, 8, &rows, &SourceMap::new());
         // The one the local is in and the one that is inside, numbered from zero for this
         // function, with the parent named by the entry it became rather than by where it was.
         assert_eq!(at.get(&1), Some(&0));
@@ -13522,7 +13550,7 @@ away:
     fn a_local_written_straight_into_the_body_pulls_no_scope_in() {
         let scopes = [scope(None, 20, 30)];
         let rows = [row(0, 22, 24)];
-        let (out, at) = nests(&[None], &scopes, 4, &rows);
+        let (out, at) = nests(&[None], &scopes, 4, &rows, &SourceMap::new());
         assert_eq!(out, Vec::new());
         assert!(at.is_empty());
     }
@@ -13534,7 +13562,7 @@ away:
         // function and make it answer to a name it was not declared under.
         let scopes = [scope(None, 20, 30)];
         let rows = [row(0, 40, 44)];
-        let (out, at) = nests(&[Some(0)], &scopes, 4, &rows);
+        let (out, at) = nests(&[Some(0)], &scopes, 4, &rows, &SourceMap::new());
         assert_eq!(at.get(&0), Some(&0));
         assert_eq!(out.len(), 1);
         assert_eq!(out[0].over, Vec::new());

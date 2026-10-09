@@ -109,10 +109,12 @@ use rucc_cost::heuristics::{
     INLINE_INSNS_AUTO_O3, INLINE_INSNS_SINGLE, INLINE_INSNS_SINGLE_O3, INLINE_LARGE_FRAME,
     INLINE_LARGE_FRAME_CONSERVE,
 };
+use rucc_diag::Span;
 use rucc_ir::{
-    Abi, AsmInfo, AttrSet, Block, BlockCall, BlockCallList, CallInfo, DataLayout, Datum, Def,
-    Drains, Extra, Flags, Float, Func, FuncId, GlobalId, Imm, Inst, InstData, Linkage, MemInfo,
-    MemOrder, Module, Opcode, Pic, Restrict, Signature, SwitchInfo, Type, VaInfo, Value, ValueList,
+    Abi, AsmInfo, AttrSet, Block, BlockCall, BlockCallList, CallInfo, Copies, DataLayout, Datum,
+    Def, Drains, Extra, Flags, Float, Func, FuncId, GlobalId, Imm, Inst, InstData, Linkage,
+    MemInfo, MemOrder, Module, Opcode, Pic, Restrict, Signature, SwitchInfo, Type, VaInfo, Value,
+    ValueList,
 };
 use rucc_target::{Isa, TargetInfo};
 
@@ -2168,10 +2170,13 @@ fn splice(
     // before this.
     let stand_in = Func::new(module[caller].name, Signature::new());
     let mut func = std::mem::replace(&mut module[caller], stand_in);
+    let mut copies = std::mem::take(&mut module.copies);
     let scalar = crate::sroa::scalarizable(&module[callee], module.datalayout);
-    let result = check(&func, call, &module[callee], convention, kind)
-        .map(|plan| copy(&mut func, call, &module[callee], &plan, pool, &scalar));
+    let result = check(&func, call, &module[callee], convention, kind).map(|plan| {
+        copy(&mut func, call, &module[callee], &plan, pool, &scalar, &mut copies);
+    });
     module[caller] = func;
+    module.copies = copies;
     result
 }
 
@@ -2522,6 +2527,53 @@ fn forwardable(
     }
 }
 
+/// What [`moved`] needs to know about the copy it is moving spans into.
+struct Moving {
+    /// Where the call being replaced is.
+    call: Span,
+    /// The copy, or `None` when copies are not told apart and the body keeps its spans.
+    site: Option<usize>,
+    /// The copy made here of each copy that was already in the callee, by which one it was.
+    inner: Map<usize, Option<usize>>,
+}
+
+/// Where a span of the callee's is in the copy of it.
+///
+/// A span of a statement in the body is moved into the copy's own positions. A span in a copy
+/// that was already in the callee, which is a body inlined into it before, is moved into a copy
+/// of that copy, made once for each one and inside this copy, so that the nesting of the calls
+/// is kept. What is left is the prologue, which says the call, as it always did.
+fn moved(copies: &mut Copies, moving: &mut Moving, callee: &Func, span: Span) -> Span {
+    let body = callee.declared;
+    if span.is_dummy() || body.is_dummy() {
+        return span;
+    }
+    if span != body && body.contains(span.lo) {
+        return match moving.site {
+            Some(site) => copies.shift(site, body.lo, span),
+            None => span,
+        };
+    }
+    if moving.site.is_some()
+        && let Some(was) = copies.site_at(span.lo)
+    {
+        let made = match moving.inner.get(&was) {
+            Some(&made) => made,
+            None => {
+                let old = copies.sites()[was];
+                let call = moved(copies, moving, callee, old.call);
+                let made = copies.make(old.of, call, old.callee);
+                moving.inner.insert(was, made);
+                made
+            }
+        };
+        if let Some(made) = made {
+            return copies.shift(made, copies.sites()[was].at, span);
+        }
+    }
+    moving.call
+}
+
 /// Splices the callee in where the call is, which [`check`] has said it can be. The locals in
 /// `scalar` are ones that scalar replacement makes values of, which are not put in the [`Pool`].
 fn copy(
@@ -2531,6 +2583,7 @@ fn copy(
     plan: &Plan,
     pool: &mut Pool,
     scalar: &Set<Value>,
+    copies: &mut Copies,
 ) {
     let block = func.block_of(call).expect("a call being inlined is in a block");
     let entry = func.entry().expect("a function with a call in it has a body");
@@ -2605,14 +2658,10 @@ fn copy(
     // function. What those instructions do in the caller is take the arguments of the call, so
     // they say the call instead, which is what gcc says for them. Every statement in the callee
     // keeps its own place, and a callee with no body span, which is one the IR parser built, keeps
-    // every span it has.
-    let at = func.span(call);
-    let body = callee.declared;
-    let spliced = |inst: Inst| {
-        let span = callee.span(inst);
-        let prologue = span == body || !body.contains(span.lo);
-        if span.is_dummy() || body.is_dummy() || !prologue { span } else { at }
-    };
+    // every span it has. When the driver asked for copies to be told apart, the place is in the
+    // copy rather than in the body. See `moved`.
+    let mut moving = Moving { call: func.span(call), site: None, inner: Map::default() };
+    moving.site = copies.make(callee.declared, moving.call, callee.name);
     // A `musttail` call in the callee is in tail position there and is not here, unless the call
     // being replaced was one too, which is where gcc keeps the promise as well.
     let dropped =
@@ -2666,7 +2715,7 @@ fn copy(
                 // A slot joins the caller's frame, so it says what the caller's own slots say.
                 func.span(first)
             } else {
-                spliced(inst)
+                moved(copies, &mut moving, callee, callee.span(inst))
             };
             let new = func.create_inst(shell, &types, span);
             for (old, value) in data.results().zip(func[new].results().collect::<Vec<Value>>()) {
@@ -3912,6 +3961,100 @@ block0(%0: i32):
         assert!(seen.iter().all(|&(opcode, span)| opcode != Opcode::Alloca || span == frame));
         assert!(seen.contains(&(Opcode::Store, call)), "{seen:?}");
         assert!(seen.contains(&(Opcode::Load, statement)), "{seen:?}");
+    }
+
+    /// With copies told apart, each copy of a body has positions of its own, and a body inlined
+    /// into a body that is then inlined twice is two copies, each inside its own copy of the
+    /// outer body and each naming the call in it.
+    #[test]
+    fn each_inlined_copy_has_positions_of_its_own() {
+        let text = format!(
+            r#"{HEAD}
+func @inner(i32) -> i32, linkage(internal), attrs(always_inline) {{
+block0(%0: i32):
+    %1 = mul.i32 %0, %0
+    return %1
+}}
+
+func @mid(i32) -> i32, linkage(internal), attrs(always_inline) {{
+block0(%0: i32):
+    %1 = call @inner(%0) : (i32) -> i32
+    %2 = add.i32 %1, %0
+    return %2
+}}
+
+func @g(i32) -> i32, linkage(external) {{
+block0(%0: i32):
+    %1 = call @mid(%0) : (i32) -> i32
+    %2 = call @mid(%1) : (i32) -> i32
+    return %2
+}}
+"#
+        );
+        let mut names = Interner::new();
+        let mut module = rucc_ir::parse(&text, &mut names).expect("the fixture parses");
+        let inner_body = Span::new(10, 20);
+        let mid_body = Span::new(30, 50);
+        let calls = [Span::new(62, 66), Span::new(70, 74)];
+        let g = names.intern("g");
+        let mid = names.intern("mid");
+        for id in module.funcs().collect::<Vec<FuncId>>() {
+            let func = &mut module[id];
+            if func.name == g {
+                func.declared = Span::new(60, 100);
+                respan(func, &[calls[0], calls[1], Span::new(80, 84)]);
+            } else if func.name == mid {
+                func.declared = mid_body;
+                respan(func, &[Span::new(32, 36), Span::new(38, 42), Span::new(44, 48)]);
+            } else {
+                func.declared = inner_body;
+                respan(func, &[Span::new(12, 15), Span::new(16, 18)]);
+            }
+        }
+        module.copies.next = Some(1000);
+        run(
+            &mut module,
+            &names,
+            None,
+            true,
+            Isa::baseline(),
+            Growth::DEFAULT,
+            false,
+            Pic::Executable,
+            false,
+            None,
+        );
+        let copies = &module.copies;
+        let id = module.funcs().find(|&id| module[id].name == g).expect("g is there");
+        let func = &module[id];
+        let mut outer = Vec::new();
+        for block in func.blocks() {
+            for inst in func.insts(block) {
+                let span = func.span(inst);
+                match func[inst].opcode {
+                    Opcode::Mul => {
+                        let site = copies.site_at(span.lo).expect("the product is in a copy");
+                        let site = copies.sites()[site];
+                        assert_eq!(site.of, inner_body);
+                        assert_eq!(span, Span::new(site.at + 2, site.at + 5));
+                        let up = copies.site_at(site.call.lo).expect("the call is in a copy");
+                        let up = copies.sites()[up];
+                        assert_eq!(up.of, mid_body);
+                        assert_eq!(site.call, Span::new(up.at + 2, up.at + 6));
+                        outer.push(up.call);
+                    }
+                    Opcode::Add => {
+                        let site = copies.site_at(span.lo).expect("the sum is in a copy");
+                        let site = copies.sites()[site];
+                        assert_eq!(site.of, mid_body);
+                        assert_eq!(span, Span::new(site.at + 8, site.at + 12));
+                    }
+                    _ => {}
+                }
+            }
+        }
+        outer.sort_by_key(|span| span.lo);
+        assert_eq!(outer, calls);
     }
 
     /// The anonymous arguments of the outer call are what the pack stands for, and the out of line
