@@ -76,6 +76,17 @@ u128 shr(u128 x, unsigned n) { return x >> n; }
 __int128 sar(__int128 x, unsigned n) { return x >> n; }
 ";
 
+const BITS: &str = "\
+typedef unsigned long long u64;
+u64 xda(u64 b)
+{
+	b &= 0xff;
+	return (b & 0x80 ? 0xe100 : 0) ^ (b & 0x40 ? 0x7080 : 0) ^ (b & 0x20 ? 0x3840 : 0) ^
+	       (b & 0x10 ? 0x1c20 : 0) ^ (b & 0x08 ? 0x0e10 : 0) ^ (b & 0x04 ? 0x0708 : 0) ^
+	       (b & 0x02 ? 0x0384 : 0) ^ (b & 0x01 ? 0x01c2 : 0);
+}
+";
+
 fn assembly(name: &str, target: &str, source: &str, level: &str) -> String {
     let dir = std::env::temp_dir()
         .join(format!("rucc-wide-carry-{}-{name}-{target}{level}", std::process::id()));
@@ -188,5 +199,25 @@ fn a_long_long_shift_by_a_register_fills_a_word_from_the_other() {
         assert_eq!(text.matches("\tshrdq\t%cl,").count(), 2, "{level}\n{text}");
         assert!(!text.contains("\tandq\t$63,"), "{level}: the count is still masked\n{text}");
         assert!(!text.contains("\torq\t"), "{level}\n{text}");
+    }
+}
+
+/// The kernel's `xda_le` from `gf128mul.c`, a row of `?:` on the bits of a `u64` that is known to
+/// fit in a byte. Each bit is a `test` and a `cmov` on its own zero, where it was an `and` of a
+/// copy, the high words asked about with `xorl $0` and an `or`, and a zero shared by all eight that
+/// went to the stack and was loaded back for each of them.
+#[test]
+fn a_long_long_bit_row_keeps_its_zeros_out_of_the_stack() {
+    for level in ["-O1", "-O2", "-Os"] {
+        let text = assembly("bits", "i686-unknown-linux-gnu", BITS, level);
+        assert_eq!(text.matches("\ttestl\t$").count(), 8, "{level}\n{text}");
+        assert_eq!(text.matches("\tcmovnel\t").count(), 8, "{level}\n{text}");
+        assert!(
+            !text.contains("xorl\t$0,"),
+            "{level}: a half known to be zero is asked about\n{text}"
+        );
+        assert!(!text.contains("\torl\t"), "{level}\n{text}");
+        // The two words of the argument and nothing else read from the frame.
+        assert_eq!(text.matches("(%esp), %").count(), 2, "{level}\n{text}");
     }
 }

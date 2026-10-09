@@ -140,8 +140,14 @@ mod tests {
     fn a_comparison_against_a_constant_is_written_for_every_one_against_a_register() {
         let mut against_register = Vec::new();
         let mut against_constant = Vec::new();
+        let mut tests = 0;
         for rule in TABLE.rules {
             let Some(rest) = rule.pattern.strip_prefix("(icmp_") else { continue };
+            // A comparison against zero of an `and`, which is a `test` and is counted on its own.
+            if rest.contains(".i1 (and.") {
+                tests += 1;
+                continue;
+            }
             if rest.contains("(iconst.") {
                 against_constant.push(rest.replace("(iconst.", "(value."));
             } else {
@@ -152,6 +158,7 @@ mod tests {
         against_constant.sort_unstable();
         assert_eq!(against_register, against_constant);
         assert_eq!(against_register.len(), 30, "ten conditions at three widths");
+        assert_eq!(tests, 6, "equal and not equal at three widths");
     }
 
     /// Everything the frame, the branches and the lowering name by hand is on this machine too.
