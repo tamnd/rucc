@@ -162,7 +162,6 @@ use rucc_base::hash::{Map, Set};
 use rucc_cost::heuristics;
 use rucc_ir::{Block, BlockCall, Builder, Def, Extra, Func, Inst, Opcode, Start, Value, ValueList};
 
-use crate::frontier::Frontiers;
 use crate::header_copy::{clone_into, repeatable};
 use crate::loops::LoopId;
 use crate::simplify_cfg::{Bindings, Edges, incoming, sweep, taken};
@@ -313,6 +312,7 @@ impl Pass for Thread {
                 } else {
                     (carried(func, block, call, &subst), WOULD_COPY_CARRIED)
                 };
+                let copies_it = free.is_none();
                 let path = if free.is_some() {
                     0
                 } else {
@@ -356,7 +356,7 @@ impl Pass for Thread {
                     edges.entry(call.block).or_default().push((from, at));
                     stats.optimized(THREADED);
                 } else {
-                    let (copy, out) = copy(func, block, at, call, &subst);
+                    let (copy, out) = copy(func, an, block, at, call, &subst);
                     edges.entry(call.block).or_default().push((copy, out));
                     edges.entry(copy).or_default().push((from, at));
                     paths.insert(copy, path);
@@ -377,8 +377,11 @@ impl Pass for Thread {
                     && around
                         .flatten()
                         .is_some_and(|root| rebuild(func, an, &edges, &mut stranded, root, entry));
+                // A copy left the cache with the graph it made, which nothing has moved since.
                 if !kept && !rebuilt {
-                    an.clear();
+                    if !copies_it {
+                        an.clear();
+                    }
                     stranded.clear();
                 }
                 threaded = true;
@@ -780,8 +783,11 @@ fn back_edge(loops: &Loops, from: Block, into: Block) -> bool {
 /// `at` pointed at it, and every read of `block`'s values from below given the one that reaches it.
 ///
 /// Returns the copy and the slot of the edge out of it, which the caller's record of edges needs.
+/// The cache is cleared once the edge has moved, so what it builds after is of the graph there is
+/// now, and the merges only add parameters, which move no edge.
 fn copy(
     func: &mut Func,
+    an: &mut Analyses,
     block: Block,
     at: Idx<BlockCall>,
     call: BlockCall,
@@ -800,7 +806,17 @@ fn copy(
     let out = func.target_list(jump).iter().next().expect("a jump has one edge");
     let edge = func[at];
     func.set_block_call(at, BlockCall { block: copy, args: ValueList::EMPTY, ..edge });
-    repair(func, block, copy, &map);
+    an.clear();
+    repair(func, an, block, copy, &map);
+    #[cfg(debug_assertions)]
+    {
+        let cfg = Cfg::new(func);
+        assert!(*an.cfg(func) == cfg, "the merges moved an edge");
+        assert!(
+            *an.dominators(func) == Dominators::new(&cfg),
+            "the merges moved a block's dominator"
+        );
+    }
     (copy, out)
 }
 
@@ -808,15 +824,16 @@ fn copy(
 /// reaches it now that `copy` defines the value as well.
 ///
 /// The frontier and the dominator tree are of the graph with the edge already moved, and they are
-/// shared by every value, since the merges only add parameters and a parameter moves no edge.
-fn repair(func: &mut Func, block: Block, copy: Block, map: &Bindings) {
+/// shared by every value, since the merges only add parameters and a parameter moves no edge. They
+/// are the cache's, so the next edge asks the same graph for its loops rather than building it again,
+/// which after each of the 92 copies in lz4hc.c at `-O2` was a graph and tree of a function of
+/// nineteen thousand instructions built twice.
+fn repair(func: &mut Func, an: &Analyses, block: Block, copy: Block, map: &Bindings) {
     let values = read_outside(func, block, copy);
     if values.is_empty() {
         return;
     }
-    let cfg = Cfg::new(func);
-    let dom = Dominators::new(&cfg);
-    let frontiers = Frontiers::new(&cfg, &dom);
+    let (cfg, dom, frontiers) = (an.cfg(func), an.dominators(func), an.frontiers(func));
     let mut joins: Set<Block> = Set::default();
     let mut work = vec![block, copy];
     while let Some(at) = work.pop() {
@@ -826,10 +843,10 @@ fn repair(func: &mut Func, block: Block, copy: Block, map: &Bindings) {
             }
         }
     }
-    for value in values {
+    for (value, readers) in values {
         let copied = map.get(&value).copied().expect("the copy defines every value the block does");
         let mut reaching = Reaching {
-            dom: &dom,
+            dom,
             block,
             copy,
             value,
@@ -837,22 +854,33 @@ fn repair(func: &mut Func, block: Block, copy: Block, map: &Bindings) {
             params: Map::default(),
             memo: Map::default(),
         };
-        merge(func, &cfg, &joins, &mut reaching);
+        merge(func, cfg, &joins, &readers, &mut reaching);
     }
 }
 
-/// The values `block` defines that something outside it and outside its copy reads.
-fn read_outside(func: &Func, block: Block, copy: Block) -> Vec<Value> {
-    let mut seen = Set::default();
-    let mut out = Vec::new();
+/// The values `block` defines that something outside it and outside its copy reads, each with the
+/// blocks that read it in the order the function has them.
+///
+/// One walk for all of them. Repairing one value only rewrites reads of that value and gives edges
+/// what reaches them of it, so the blocks that read the next one are the ones that did here.
+fn read_outside(func: &Func, block: Block, copy: Block) -> Vec<(Value, Vec<Block>)> {
+    let mut seen: Map<Value, usize> = Map::default();
+    let mut out: Vec<(Value, Vec<Block>)> = Vec::new();
     for other in func.blocks() {
         if other == block || other == copy {
             continue;
         }
         for inst in func.insts(other) {
             uses::operands(func, inst, |value| {
-                if defined_in(func, value) == Some(block) && seen.insert(value) {
-                    out.push(value);
+                if defined_in(func, value) == Some(block) {
+                    let at = *seen.entry(value).or_insert_with(|| {
+                        out.push((value, Vec::new()));
+                        out.len() - 1
+                    });
+                    let readers = &mut out[at].1;
+                    if readers.last() != Some(&other) {
+                        readers.push(other);
+                    }
                 }
             });
         }
@@ -923,25 +951,18 @@ impl Reaching<'_> {
 
 /// Puts the parameters one value needs where its two definitions meet, and points every read of it
 /// at the definition that reaches the read.
-fn merge(func: &mut Func, cfg: &Cfg, joins: &Set<Block>, reaching: &mut Reaching<'_>) {
+fn merge(
+    func: &mut Func,
+    cfg: &Cfg,
+    joins: &Set<Block>,
+    readers: &[Block],
+    reaching: &mut Reaching<'_>,
+) {
     let (block, copy, value) = (reaching.block, reaching.copy, reaching.value);
     // Where the value is still wanted at the start of a block. A read is where it starts, and it
     // goes up through predecessors until it meets one of the two definitions.
-    let mut readers = Vec::new();
-    for other in func.blocks() {
-        if other == block || other == copy {
-            continue;
-        }
-        let mut reads = false;
-        for inst in func.insts(other) {
-            uses::operands(func, inst, |used| reads |= used == value);
-        }
-        if reads {
-            readers.push(other);
-        }
-    }
     let mut live: Set<Block> = readers.iter().copied().collect();
-    let mut work = readers.clone();
+    let mut work = readers.to_vec();
     while let Some(at) = work.pop() {
         for &pred in cfg.predecessors(at) {
             if pred != block && pred != copy && live.insert(pred) {
@@ -964,7 +985,7 @@ fn merge(func: &mut Func, cfg: &Cfg, joins: &Set<Block>, reaching: &mut Reaching
         }
         reaching.params.insert(place, param);
     }
-    for &reader in &readers {
+    for &reader in readers {
         let now = reaching.start(reader);
         if now == value {
             continue;
@@ -979,7 +1000,8 @@ fn merge(func: &mut Func, cfg: &Cfg, joins: &Set<Block>, reaching: &mut Reaching
     }
     // The edges into a merge carry what reached the end of the block they leave. This comes after
     // the reads are rewritten so that what it appends is not rewritten a second time.
-    for other in func.blocks().collect::<Vec<Block>>() {
+    let edges = if places.is_empty() { Vec::new() } else { func.blocks().collect::<Vec<Block>>() };
+    for other in edges {
         let Some(term) = func.terminator(other) else { continue };
         for at in func.target_list(term).iter() {
             let call = func[at];
