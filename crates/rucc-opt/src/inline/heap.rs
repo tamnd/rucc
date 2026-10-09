@@ -447,19 +447,28 @@ impl Heap<'_> {
 
     /// Fills in [`Heap::at`] and [`Heap::spent`] for a function the first time they are asked
     /// about it.
+    ///
+    /// From [`Heap::profile`], which is the same walk kept for the function as it is now, since a
+    /// function learned about is very often one weighed as a callee before it changes, and working
+    /// it out twice was a sixth of what the pass cost on lz4hc.c at `-O2`. tamnd/rucc#3052.
     fn learn(&mut self, module: &Module, id: FuncId) {
         if self.spent.contains_key(&id) {
             return;
         }
         let func = &module[id];
-        let found = profile(func, self.how.names);
-        for call in direct(func) {
-            let Some(block) = func.block_of(call) else { continue };
-            let frequency = found.frequency.get(&block).copied().unwrap_or(1.0);
-            let depth = found.depth.get(&block).copied().unwrap_or(0);
-            self.at.insert((id, call), (frequency, depth));
-        }
-        self.spent.insert(id, found.time);
+        let found = self.profile(module, id);
+        let time = found.time;
+        let at: Vec<_> = direct(func)
+            .into_iter()
+            .filter_map(|call| {
+                let block = func.block_of(call)?;
+                let frequency = found.frequency.get(&block).copied().unwrap_or(1.0);
+                let depth = found.depth.get(&block).copied().unwrap_or(0);
+                Some(((id, call), (frequency, depth)))
+            })
+            .collect();
+        self.at.extend(at);
+        self.spent.insert(id, time);
     }
 
     /// What a call comes to, or nothing when it is not one this pass weighs.

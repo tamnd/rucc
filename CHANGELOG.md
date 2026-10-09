@@ -10,6 +10,7 @@ All notable changes are recorded here. The format follows [Keep a Changelog](htt
 - The memory walk in reload keeps the incoming values of each join and whether each def stops it, so lz4hc.c at -O2 runs 5 percent fewer instructions with the same output (#3445).
 - Licm works out which locals escape once per function instead of once per loop, so lz4hc.c at -O2 runs 1.8 percent fewer instructions with the same output (#3447).
 - Register allocation stops at the first value in the way when all a register is asked is whether anything is, so lz4hc.c at -O2 runs 4.2 percent fewer instructions with the same output (#3449).
+- The inliner learns about a function from the profile it keeps for it instead of walking it again, so lz4hc.c at -O2 runs 1.2 percent fewer instructions with the same output (#3451).
 
 ### Added
 
