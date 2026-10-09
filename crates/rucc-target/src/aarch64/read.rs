@@ -517,6 +517,8 @@ fn reference(text: &str, symbol: &mut Named) -> Result<Operator, Error> {
                 "gottprel_lo12" => Operator::GotTprelLo12,
                 "tprel_hi12" => Operator::TprelHi12,
                 "tprel_lo12_nc" => Operator::TprelLo12Nc,
+                "tlsdesc" => Operator::Tlsdesc,
+                "tlsdesc_lo12" => Operator::TlsdescLo12,
                 "secrel_hi12" => Operator::SecrelHi12,
                 "secrel_lo12" => Operator::SecrelLo12,
                 other => wide(other).ok_or_else(|| error(text))?,

@@ -230,6 +230,8 @@ fn reference(line: &mut String, operator: Operator, named: Named<'_>) {
             Operator::GotTprelLo12 => Some("@TLVPPAGEOFF"),
             Operator::TprelHi12
             | Operator::TprelLo12Nc
+            | Operator::Tlsdesc
+            | Operator::TlsdescLo12
             | Operator::SecrelHi12
             | Operator::SecrelLo12
             | Operator::Abs(_)
@@ -250,6 +252,8 @@ fn reference(line: &mut String, operator: Operator, named: Named<'_>) {
         Operator::GotTprelLo12 => ":gottprel_lo12:",
         Operator::TprelHi12 => ":tprel_hi12:",
         Operator::TprelLo12Nc => ":tprel_lo12_nc:",
+        Operator::Tlsdesc => ":tlsdesc:",
+        Operator::TlsdescLo12 => ":tlsdesc_lo12:",
         Operator::SecrelHi12 => ":secrel_hi12:",
         Operator::SecrelLo12 => ":secrel_lo12:",
         Operator::Abs(group) => {

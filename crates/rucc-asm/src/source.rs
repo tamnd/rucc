@@ -2074,6 +2074,7 @@ impl Reader {
 
             "incbin" => self.incbin(&args)?,
             "reloc" => self.reloc(&args)?,
+            "tlsdesccall" if self.aarch64 => self.tlsdesccall(&args)?,
 
             "space" | "skip" | "zero" => {
                 if args.is_empty() || args.len() > 2 {
@@ -2978,6 +2979,34 @@ impl Reader {
             branch: None,
             jump: false,
             field: None,
+            leb: None,
+            line: self.line,
+        });
+        Ok(())
+    }
+
+    /// `.tlsdesccall x`, which says that the `blr` after it calls the function in the descriptor of
+    /// the thread-local variable `x`.
+    ///
+    /// It writes no bytes. It puts an `R_AARCH64_TLSDESC_CALL` on the next instruction. A linker
+    /// that makes an executable knows where the variable is, and this is how it finds the call to
+    /// rewrite along with the three instructions before it.
+    fn tlsdesccall(&mut self, args: &[String]) -> Result<(), Trouble> {
+        let [name] = args else {
+            return Err(self.bad(".tlsdesccall wants the name of one thread-local variable"));
+        };
+        let name = self.named(name.trim())?;
+        self.sym(&name);
+        self.fixups.push(Fixup {
+            part: self.here,
+            at: self.at(),
+            width: 4,
+            sum: Sum { constant: 0, terms: vec![Term { coeff: 1, what: What::Symbol(name) }] },
+            reach: Reach::Near,
+            slot: Reference::Data,
+            branch: None,
+            jump: false,
+            field: Some(aarch64::Fixup::TlsdescCall),
             leb: None,
             line: self.line,
         });
@@ -6420,6 +6449,36 @@ _tls$tlv$init:
                 (4, "g", Reference::Field(aarch64::Fixup::Call26), 0),
                 (8, "table", Reference::Field(aarch64::Fixup::AdrPage21), 8),
                 (12, "table", Reference::Field(aarch64::Fixup::AddLo12), 8),
+            ]
+        );
+    }
+
+    #[test]
+    fn an_aarch64_thread_local_descriptor_call_is_the_four_relocations_gas_writes() {
+        let read = aarch64(concat!(
+            "f:\tadrp x0, :tlsdesc:counter\n",
+            "\tldr x1, [x0, :tlsdesc_lo12:counter]\n",
+            "\tadd x0, x0, :tlsdesc_lo12:counter\n",
+            "\t.tlsdesccall counter\n",
+            "\tblr x1\n",
+            "\tmrs x1, tpidr_el0\n",
+            "\tadd x0, x1, x0\n",
+        ));
+        // The bytes gas writes for the same lines, with zeros where the linker fills in.
+        assert_eq!(
+            words(&read, ".text"),
+            [0x9000_0000, 0xf940_0001, 0x9100_0000, 0xd63f_0020, 0xd53b_d041, 0x8b00_0020]
+        );
+        let text = read.parts.iter().find(|part| part.name == ".text").unwrap();
+        let relocs: Vec<_> =
+            text.relocs.iter().map(|r| (r.at, r.symbol.as_str(), r.kind, r.addend)).collect();
+        assert_eq!(
+            relocs,
+            [
+                (0, "counter", Reference::Field(aarch64::Fixup::TlsdescAdrPage21), 0),
+                (4, "counter", Reference::Field(aarch64::Fixup::TlsdescLd64Lo12), 0),
+                (8, "counter", Reference::Field(aarch64::Fixup::TlsdescAddLo12), 0),
+                (12, "counter", Reference::Field(aarch64::Fixup::TlsdescCall), 0),
             ]
         );
     }

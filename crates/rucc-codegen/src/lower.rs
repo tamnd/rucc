@@ -3972,8 +3972,9 @@ impl<'a> Lowering<'a> {
     /// the loader has to find room in that block for the library's variables. glibc keeps a little
     /// spare room for this, and a library that does not fit fails to load.
     ///
-    /// So in a shared library on x86-64 ELF, a variable is reached through a call to
-    /// `__tls_get_addr` instead, which is [`Self::thread_call`]. That is the general dynamic model,
+    /// So in a shared library on ELF, a variable is reached through a call instead, which is
+    /// [`Self::thread_call`]. On x86-64 that is a call to `__tls_get_addr`, and on AArch64 it is a
+    /// call through the variable's descriptor. That is the general dynamic model,
     /// or the local dynamic one for a variable that only this library can define. A variable that
     /// asked for initial exec, as glibc's own do, still comes here. [`Elsewhere::model`] decides.
     /// Everywhere else this is the model gcc writes under `-ftls-model=initial-exec`.
@@ -4041,13 +4042,16 @@ impl<'a> Lowering<'a> {
         Ok(())
     }
 
-    /// The address of a thread-local variable in a shared library, which the call to
-    /// `__tls_get_addr` in `text` gives back. See [`crate::select::Dynamic`].
+    /// The address of a thread-local variable in a shared library, which the call in `text` gives
+    /// back. See [`crate::select::Dynamic`].
     ///
     /// The template is one instruction as far as the allocator is concerned, so it is told what
     /// the call inside it does: the address comes back in the first register a call returns in,
     /// and every register the convention does not keep is written. The function makes a call, so
     /// its frame is aligned for one and nothing is kept under the stack pointer.
+    ///
+    /// The descriptor call on AArch64 keeps every register but `x0`, `x1` and `x30`, so taking all
+    /// the others as written costs speed and nothing else. gcc knows the fewer registers.
     fn thread_call(&mut self, inst: Inst, symbol: Symbol, result: Value, text: &str) {
         let block = self.at.expect("a block is being filled");
         let span = self.source.span(inst);
@@ -11242,6 +11246,28 @@ mod tests {
             assert!(text.contains("$rdi"), "{text}");
             assert!(text.contains("x64.ret_val_64 %0($rax)"), "{text}");
             assert!(!text.contains("[thread @own]") && !text.contains("fs:0"), "{text}");
+        }
+    }
+
+    /// The same on AArch64, which is a call through the variable's descriptor for both models, as
+    /// gcc writes it. The address comes back in `x0`, and `x1` is written on the way.
+    #[test]
+    fn a_thread_local_in_a_shared_library_on_aarch64_is_found_through_its_descriptor() {
+        for model in [TlsModel::GlobalDynamic, TlsModel::LocalDynamic] {
+            let (mut names, mut source, block, _) = blank(&[]);
+            let own = address_of(&mut source, block, &mut names, "own");
+            Builder::new(&mut source, block).ret(&[own]);
+            let elsewhere = Elsewhere::default().with_models([(names.intern("own"), model)]);
+            let conv = &aarch64::AAPCS64;
+            let selector = &crate::select::aarch64::SELECTOR;
+            let out = super::func(&source, &mut names, selector, conv, &elsewhere)
+                .expect("every instruction has a rule");
+            let text = mir::print_func(&out.func, &names, &aarch64::REGS);
+            assert!(text.contains(":tlsdesc:"), "{text}");
+            assert!(text.contains(".tlsdesccall"), "{text}");
+            assert!(text.contains("tpidr_el0"), "{text}");
+            assert!(text.contains("$x1"), "{text}");
+            assert!(!text.contains("gottprel"), "{text}");
         }
     }
 
