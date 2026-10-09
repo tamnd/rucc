@@ -181,6 +181,13 @@ pub enum Frame {
 /// a capability it will yield whether or not any check is left in it, and a caller that cleared
 /// instead of publishing would never read it. That is row T4 once the optimizer has taken out every
 /// check in the function, which in the usual shape of the bug it has.
+///
+/// And a function that hands a pointer it was given on to a call that gets a frame counts one,
+/// because the capability it hands on is the one its caller put in its own frame. Without that,
+/// `void fill(char *to, ...) { memcpy(to, ...); }` has no check left, its callers clear, and the
+/// wrapper judges a caller's local against planes that know nothing about the stack. Whether a
+/// call gets a frame depends on this table, so the count is found again until nothing changes,
+/// which it stops doing because a count only ever goes from nothing to one.
 #[must_use]
 pub fn remaining(module: &Module, names: &Interner) -> Map<Symbol, usize> {
     // Found rather than interned, since a wrapper this unit never names is one no call goes to.
@@ -193,7 +200,61 @@ pub fn remaining(module: &Module, names: &Interner) -> Map<Symbol, usize> {
         let func = &module[id];
         (func.name, checks_left(func) + usize::from(returns_a_local(func)))
     });
-    wrappers.chain(defined).collect()
+    let mut left: Map<Symbol, usize> = wrappers.chain(defined).collect();
+    loop {
+        let mut more = Vec::new();
+        for id in module.funcs() {
+            let func = &module[id];
+            let none = left.get(&func.name).is_none_or(|&n| n == 0);
+            if !func.is_declaration() && none && forwards(func, &left) {
+                more.push(func.name);
+            }
+        }
+        if more.is_empty() {
+            return left;
+        }
+        left.extend(more.into_iter().map(|name| (name, 1)));
+    }
+}
+
+/// Whether `func` hands one of its own pointer parameters, or a pointer into what one points at,
+/// to a call that gets a frame.
+///
+/// Only the first [`ARGS`] parameters, since those are the ones a frame has room for. A tail call
+/// is left out for the reason [`one`] leaves it alone.
+fn forwards(func: &Func, left: &Map<Symbol, usize>) -> bool {
+    let given = positions(func);
+    if given.is_empty() {
+        return false;
+    }
+    all(func).into_iter().any(|inst| {
+        func[inst].opcode != Opcode::TailCall
+            && matches!(
+                wanted(func, inst, left),
+                Some(Frame::Checked | Frame::Outside | Frame::Unknown)
+            )
+            && pointers(func, inst).any(|value| given.contains_key(&origin::root(func, value)))
+    })
+}
+
+/// The pointer parameters a function that takes its frame can read capabilities for, and the width
+/// of the index a `cap_arg` names one with.
+struct Given {
+    /// Where each parameter is in the frame. Empty for a function that does not take it.
+    at: Map<Value, usize>,
+    /// The module's `size_t`.
+    word: Type,
+}
+
+/// Each pointer parameter of `func` that the frame has room for, and where in the frame it is.
+fn positions(func: &Func) -> Map<Value, usize> {
+    let mut position = Map::default();
+    let Some(entry) = func.entry() else { return position };
+    let pointers = func[entry].params.iter().filter(|&&param| func[param].ty.is_ptr());
+    for (at, &param) in pointers.take(ARGS).enumerate() {
+        position.insert(param, at);
+    }
+    position
 }
 
 /// Whether some `return` in `func` gives back the address of a local.
@@ -326,9 +387,14 @@ pub fn arrange(module: &mut Module, names: &Interner) -> usize {
 /// is the same value at each step and travels the whole way as a frame read however this is ordered.
 /// Writing it in the order the values flow is for the reader.
 fn one(func: &mut Func, left: &Map<Symbol, usize>, word: Type) -> usize {
-    if checks_left(func) > 0 {
+    let reads = checks_left(func) > 0 || forwards(func, left);
+    if reads {
         from_the_frame(func, word);
     }
+    // The parameters a publish below may read out of this function's own frame, for a pointer
+    // parameter nothing here made a capability for.
+    let at = if reads { positions(func) } else { Map::default() };
+    let given = Given { at, word };
     let held = origin::existing(func);
     let Some(doms) = func.entry().map(|_| Doms::new(func)) else { return 0 };
     let mut joins = Map::default();
@@ -341,7 +407,7 @@ fn one(func: &mut Func, left: &Map<Symbol, usize>, word: Type) -> usize {
         }
         match wanted(func, inst, left) {
             Some(Frame::Checked) => {
-                if over(func, inst, &held, &doms, &mut joins, true) {
+                if over(func, inst, &held, &doms, &mut joins, &given, true) {
                     published += 1;
                     from_the_call(func, inst);
                 }
@@ -351,7 +417,7 @@ fn one(func: &mut Func, left: &Map<Symbol, usize>, word: Type) -> usize {
             // one the caller recovers a pointer the callee could have described exactly, and for
             // a pointer to one of the callee's own locals that is the whole of row T4.
             Some(Frame::Pointerless) if returning(func, inst) && reads_frame(func, inst, left) => {
-                if over(func, inst, &held, &doms, &mut joins, true) {
+                if over(func, inst, &held, &doms, &mut joins, &given, true) {
                     published += 1;
                     from_the_call(func, inst);
                 }
@@ -361,7 +427,7 @@ fn one(func: &mut Func, left: &Map<Symbol, usize>, word: Type) -> usize {
                 // frame names the address it was written for and a function that is not that one
                 // leaves it alone. What it does not get is a frame for its answer alone, since most
                 // of these are the C library and a publish for each would be paid for nothing.
-                if over(func, inst, &held, &doms, &mut joins, false) {
+                if over(func, inst, &held, &doms, &mut joins, &given, false) {
                     published += 1;
                 }
             }
@@ -383,18 +449,7 @@ fn one(func: &mut Func, left: &Map<Symbol, usize>, word: Type) -> usize {
 /// answers by recovering, and asking it to do that through a frame read is a call in front of the
 /// walk rather than instead of it.
 fn from_the_frame(func: &mut Func, word: Type) -> usize {
-    let Some(entry) = func.entry() else { return 0 };
-    let mut position: Map<Value, usize> = Map::default();
-    let mut at = 0;
-    for &param in &func[entry].params {
-        if !func[param].ty.is_ptr() {
-            continue;
-        }
-        if at < ARGS {
-            position.insert(param, at);
-        }
-        at += 1;
-    }
+    let position = positions(func);
     if position.is_empty() {
         return 0;
     }
@@ -508,18 +563,26 @@ fn giving_back(func: &mut Func, held: &Map<Value, Value>, doms: &Doms) -> usize 
 /// A pointer that arrives at a block parameter is a local too when every edge into the block passes
 /// one or a null, and [`joined`] makes its capability. `joins` keeps the ones already made, so that
 /// two calls handing over the same parameter share one.
+///
+/// And a pointer parameter of a function that takes its frame gets the `cap_arg` that reads its
+/// capability out of that frame, made at the top of the function so that every call in it can
+/// share the one.
 fn made(
     func: &mut Func,
     pointer: Value,
     inst: Inst,
     joins: &mut Map<Value, Value>,
+    given: &Given,
 ) -> Option<Value> {
     let base = origin::root(func, pointer);
     if !local(func, base) {
         if let Some(&cap) = joins.get(&base) {
             return Some(cap);
         }
-        let cap = joined(func, base)?;
+        let cap = match given.at.get(&base) {
+            Some(&nth) => argument(func, base, nth, given.word)?,
+            None => joined(func, base)?,
+        };
         joins.insert(base, cap);
         return Some(cap);
     }
@@ -527,6 +590,20 @@ fn made(
     let data = InstData { args, ..InstData::new(Opcode::CapOf) };
     let cap = func.create_inst(data, &[Type::CAP], func.span(inst));
     func.insert_before(cap, inst);
+    func[cap].results().next()
+}
+
+/// A `cap_arg` for the pointer parameter `param`, which is at `nth` in the frame, at the top of the
+/// function.
+fn argument(func: &mut Func, param: Value, nth: usize, word: Type) -> Option<Value> {
+    let entry = func.entry()?;
+    let first = func.insts(entry).next()?;
+    let nth = i128::try_from(nth).ok()?;
+    let index = slot::konst(func, first, Imm::int(nth, word), word);
+    let args = func.push_values(&[param, index]);
+    let data = InstData { args, ..InstData::new(Opcode::CapArg) };
+    let cap = func.create_inst(data, &[Type::CAP], func.span(first));
+    func.insert_before(cap, first);
     func[cap].results().next()
 }
 
@@ -621,6 +698,7 @@ fn over(
     held: &Map<Value, Value>,
     doms: &Doms,
     joins: &mut Map<Value, Value>,
+    given: &Given,
     answered: bool,
 ) -> bool {
     let carried: Vec<Value> = pointers(func, inst).take(ARGS).collect();
@@ -628,7 +706,7 @@ fn over(
     for &value in &carried {
         let cap = match seen(func, held, doms, value, inst) {
             Some(cap) => Some(cap),
-            None => made(func, value, inst, joins),
+            None => made(func, value, inst, joins, given),
         };
         found.push(cap);
     }
@@ -887,6 +965,54 @@ mod tests {
     }
 
     /// The signature every caller above calls under, which names two of its three as pointers.
+    /// A function named `name` that calls `callee` with a pointer it read out of memory, twice,
+    /// rather than with its own parameters.
+    ///
+    /// A caller with no capability for anything it hands over: none of it came through its frame,
+    /// and it checks none of it.
+    fn holding_nothing(names: &mut Interner, name: &str, callee: &str) -> Func {
+        let mut func = Func::new(names.intern(name), three());
+        let entry = func.create_block();
+        let p = func.append_param(entry, Type::PTR);
+        let n = func.append_param(entry, Type::int(64));
+        func.append_param(entry, Type::PTR);
+        let sig = func.add_signature(three());
+        let callee = Some(names.intern(callee));
+        let varargs = func.push_abis(&[]);
+        let info = func.add_call(CallInfo { callee, signature: sig, varargs });
+        let mut b = Builder::new(&mut func, entry);
+        let read = loaded(&mut b, p);
+        let args = b.func().push_values(&[read, n, read]);
+        b.inst(InstData { args, extra: Extra::Call(info), ..InstData::new(Opcode::Call) }, &[]);
+        b.ret(&[]);
+        func
+    }
+
+    /// A pointer read out of what `from` points at.
+    fn loaded(b: &mut Builder<'_>, from: Value) -> Value {
+        let info = MemInfo {
+            size: 8,
+            align: 8,
+            order: MemOrder::NotAtomic,
+            tbaa: None,
+            owns: 0,
+            restrict: Restrict::NONE,
+        };
+        let extra = Extra::Mem(b.func().add_mem(info));
+        let args = b.func().push_values(&[from]);
+        b.value(InstData { args, extra, ..InstData::new(Opcode::Load) }, Type::PTR)
+    }
+
+    /// Whether the `cap_arg`s in `func` read the capabilities of exactly `want`, in any order.
+    fn reads_from_the_frame(func: &Func, want: &[Value]) -> bool {
+        let read: Vec<Value> = all(func)
+            .into_iter()
+            .filter(|&inst| func[inst].opcode == Opcode::CapArg)
+            .map(|inst| func[func[inst].args][0])
+            .collect();
+        read.len() == want.len() && want.iter().all(|each| read.contains(each))
+    }
+
     fn three() -> Signature {
         Signature::new().with_params(&[Type::PTR, Type::int(64), Type::PTR])
     }
@@ -925,10 +1051,11 @@ mod tests {
         arrange(&mut module, &names);
         let func = &module[module.funcs().next().expect("the module defines one")];
         assert_eq!(count(func, Opcode::CapOf), 0);
-        assert_eq!(count(func, Opcode::CapArg), 1);
         let args = operands(func, Opcode::CapArg);
         assert_eq!(args.len(), 2);
-        assert_eq!(args[0], func[func.entry().expect("an entry")].params[0]);
+        // And one for the second pointer as well, which it does not check but hands on to `g`.
+        let params = &func[func.entry().expect("an entry")].params;
+        assert!(reads_from_the_frame(func, &[params[0], params[2]]));
     }
 
     #[test]
@@ -948,7 +1075,7 @@ mod tests {
     fn a_call_into_something_this_unit_does_not_define_holding_nothing_says_there_is_no_frame() {
         let mut names = Interner::new();
         let mut module = unit(&mut names);
-        module.add_func(caller(&mut names, "f", Some("g"), three(), false));
+        module.add_func(holding_nothing(&mut names, "f", "g"));
         assert_eq!(arrange(&mut module, &names), 0);
         let func = &module[module.funcs().next().expect("the module defines one")];
         assert_eq!(count(func, Opcode::CapClear), 1);
@@ -969,10 +1096,53 @@ mod tests {
     }
 
     #[test]
+    fn a_function_that_hands_on_what_it_was_given_reads_its_frame() {
+        // `void fill(char *to, ...) { memcpy(to, ...); }` has nothing left to check, but what it
+        // hands the copy is what its caller put in its frame. So it counts as a reader, and what it
+        // publishes is read out of its own frame.
+        let mut names = Interner::new();
+        let mut module = unit(&mut names);
+        module.add_func(caller(&mut names, "fill", Some("sink"), three(), false));
+        let fill = names.intern("fill");
+        assert_eq!(remaining(&module, &names).get(&fill), Some(&1));
+        assert_eq!(arrange(&mut module, &names), 1);
+        let func = &module[module.funcs().next().expect("the module defines one")];
+        let caps = operands(func, Opcode::CapPublish);
+        assert_eq!(caps.len(), 2);
+        for cap in caps {
+            let Def::Result { inst, .. } = func[cap].def else { panic!("a capability is made") };
+            assert_eq!(func[inst].opcode, Opcode::CapArg);
+        }
+    }
+
+    #[test]
+    fn a_function_that_hands_on_to_one_that_hands_on_reads_its_frame_too() {
+        // Found again until nothing changes, since `g` only counts once `h` does.
+        let mut names = Interner::new();
+        let mut module = unit(&mut names);
+        module.add_func(caller(&mut names, "g", Some("h"), three(), false));
+        module.add_func(caller(&mut names, "h", Some("sink"), three(), false));
+        let (g, h) = (names.intern("g"), names.intern("h"));
+        let left = remaining(&module, &names);
+        assert_eq!((left.get(&g), left.get(&h)), (Some(&1), Some(&1)));
+    }
+
+    #[test]
+    fn a_local_handed_to_a_function_that_hands_it_on_travels() {
+        let mut names = Interner::new();
+        let mut module = unit(&mut names);
+        let (func, local) = handing_a_local(&mut names, "fill", false);
+        module.add_func(func);
+        module.add_func(caller(&mut names, "fill", Some("sink"), three(), false));
+        // `f` hands `fill` its local, and `fill` hands both pointers on to `sink`.
+        assert_eq!(arrange(&mut module, &names), 2);
+        publishes_the_local(&module, local);
+    }
+
+    #[test]
     fn a_caller_hands_over_the_capability_it_already_had() {
         // The callee is defined here and checks something, so it wants the frame, and the caller
         // has a capability for the first of the two pointers because it checks through it itself.
-        // The second is one it knows nothing about, and the list stops rather than describing it.
         let mut names = Interner::new();
         let mut module = unit(&mut names);
         module.add_func(caller(&mut names, "f", Some("g"), three(), true));
@@ -983,10 +1153,16 @@ mod tests {
         assert_eq!(count(func, Opcode::CapPublish), 1);
         assert_eq!(count(func, Opcode::CapClear), 0);
         let caps = operands(func, Opcode::CapPublish);
-        assert_eq!(caps.len(), 1);
-        // And what travels is the one the caller was handed itself, so a buffer passed down a chain
-        // of functions asks the plane at the top of it and nowhere else.
-        assert_eq!(caps[0], produced(func, Opcode::CapArg));
+        assert_eq!(caps.len(), 2);
+        // And what travels is what the caller was handed itself, so a buffer passed down a chain
+        // of functions asks the plane at the top of it and nowhere else. That goes for the second
+        // pointer too, which the caller does not check but was handed all the same.
+        for cap in caps {
+            let Def::Result { inst, .. } = func[cap].def else { panic!("a capability is made") };
+            assert_eq!(func[inst].opcode, Opcode::CapArg);
+        }
+        let params = &func[func.entry().expect("an entry")].params;
+        assert!(reads_from_the_frame(func, &[params[0], params[2]]));
     }
 
     #[test]
@@ -994,6 +1170,8 @@ mod tests {
         // The shape sinking leaves behind: the call comes first and the only `cap_of` of the
         // pointer it passes is in the block after it. Publishing that one would copy a slot nothing
         // has written yet, so the call says it has nothing, as it would for an unchecked pointer.
+        // The pointer is one it read out of memory, since one of its own parameters would have a
+        // capability waiting in its frame from the start.
         let mut names = Interner::new();
         let mut module = unit(&mut names);
         let mut func = Func::new(names.intern("f"), three());
@@ -1001,17 +1179,18 @@ mod tests {
         let later = func.create_block();
         let p = func.append_param(entry, Type::PTR);
         let n = func.append_param(entry, Type::int(64));
-        let q = func.append_param(entry, Type::PTR);
+        func.append_param(entry, Type::PTR);
         let sig = func.add_signature(three());
         let varargs = func.push_abis(&[]);
         let callee = Some(names.intern("g"));
         let info = func.add_call(CallInfo { callee, signature: sig, varargs });
         let mut b = Builder::new(&mut func, entry);
-        let args = b.func().push_values(&[p, n, q]);
+        let read = loaded(&mut b, p);
+        let args = b.func().push_values(&[read, n, read]);
         b.inst(InstData { args, extra: Extra::Call(info), ..InstData::new(Opcode::Call) }, &[]);
         b.jump(later, &[]);
         let mut b = Builder::new(&mut func, later);
-        checked(&mut b, p);
+        checked(&mut b, read);
         b.ret(&[]);
         module.add_func(func);
         module.add_func(caller(&mut names, "g", Some("h"), three(), true));
@@ -1020,7 +1199,7 @@ mod tests {
         let func = &module[module.funcs().next().expect("the module defines two")];
         assert_eq!(count(func, Opcode::CapPublish), 0);
         assert_eq!(count(func, Opcode::CapClear), 1);
-        assert_eq!(count(func, Opcode::CapArg), 1);
+        assert_eq!(count(func, Opcode::CapArg), 0);
     }
 
     #[test]
@@ -1028,7 +1207,7 @@ mod tests {
         // The two say the same thing to the callee and the clear is the cheap way to say it.
         let mut names = Interner::new();
         let mut module = unit(&mut names);
-        module.add_func(caller(&mut names, "f", Some("g"), three(), false));
+        module.add_func(holding_nothing(&mut names, "f", "g"));
         module.add_func(caller(&mut names, "g", Some("h"), three(), true));
         // And `g` hands `h` what it holds, though nothing here defines `h`.
         assert_eq!(arrange(&mut module, &names), 1);
@@ -1043,7 +1222,8 @@ mod tests {
         let mut names = Interner::new();
         let mut module = unit(&mut names);
         module.add_func(caller(&mut names, "f", Some("g"), three(), true));
-        module.add_func(caller(&mut names, "g", Some("h"), three(), false));
+        // And `g` hands `h` only what it read out of memory, so it has no use for a frame either.
+        module.add_func(holding_nothing(&mut names, "g", "h"));
         assert_eq!(arrange(&mut module, &names), 0);
         let func = &module[module.funcs().next().expect("the module defines two")];
         assert_eq!(count(func, Opcode::CapPublish), 0);
@@ -1211,7 +1391,11 @@ mod tests {
         let func = &module[module.funcs().next().expect("the module defines two")];
         assert_eq!(count(func, Opcode::CapResult), 0);
         assert_eq!(count(func, Opcode::CapYield), 0);
-        assert_eq!(count(func, Opcode::CapPublish), 0);
+        // What `f` does publish is its parameter going on to `g`, read out of its own frame, and
+        // that is no frame for the answer.
+        let params = &func[func.entry().expect("an entry")].params;
+        assert_eq!(operands(func, Opcode::CapPublish), [produced(func, Opcode::CapArg)]);
+        assert!(reads_from_the_frame(func, &[params[0]]));
     }
 
     /// A function `f` that asks `g` for a pointer, handing it nothing, and checks what comes back.
