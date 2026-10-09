@@ -376,10 +376,19 @@ impl Readers {
 /// save and not the one the local held when the jump was taken. gcc keeps every local of such a
 /// function in its slot across the save for the same reason, and gcc.c-torture/execute/pr60003.c
 /// sets a local in a loop and then jumps back to read it.
+///
+/// A label that takes its own address is fine, which is the kernel's `_THIS_IP_`: lockdep hands
+/// it to `lock_acquire` as a number and nothing jumps to it. The `indirect_br` that could is not
+/// an edge the renaming can walk and is refused above, and a block an image names can be jumped
+/// to from where the image is read, so a function with either keeps its locals. Before this a
+/// function that took a lock with lockdep on kept every local in memory, and
+/// `scoped_seqlock_read` in 6.12's `do_task_stat` left a call to `__scoped_seqlock_bug` the
+/// kernel never defines.
 fn shaped(func: &Func, cfg: &Cfg, entry: Block) -> bool {
     if !cfg.predecessors(entry).is_empty() {
         return false;
     }
+    let imaged = func.named_blocks().next().is_some();
     for block in func.blocks() {
         if !cfg.reaches(block) {
             return false;
@@ -403,7 +412,11 @@ fn shaped(func: &Func, cfg: &Cfg, entry: Block) -> bool {
                     return false;
                 }
             } else if func.successors(inst).next().is_some() {
-                return false;
+                let own = func[inst].opcode == Opcode::BlockAddr
+                    && func.successors(inst).all(|call| call.block == block);
+                if !own || imaged {
+                    return false;
+                }
             }
         }
     }
@@ -1612,6 +1625,65 @@ block1:
 block2:
     %6 = load.i32 %1, align 4
     return %6
+",
+        );
+        let (module, stats) = run(&text);
+        assert_eq!(stats.count(Kind::Optimized, SCALARIZED), 0);
+        assert_eq!(count_of(body(&module), Opcode::Alloca), 1);
+    }
+
+    #[test]
+    fn a_local_in_a_function_whose_label_takes_its_own_address_becomes_values() {
+        // The kernel's `_THIS_IP_`, which lockdep passes to `lock_acquire` from inside the
+        // `scoped_seqlock_read` loop of 6.12's `do_task_stat`. Nothing jumps to the label, and the
+        // counter has to become a parameter of the very block that takes it.
+        let text = wrap(
+            "(i32) -> i32",
+            "block0(%0: i32):
+    %1 = alloca, size 4, align 4
+    %2 = iconst.i32 0
+    store %2 -> %1, align 4
+    jump block1
+
+block1:
+    %3 = block_addr block1
+    call @g(%3) : (ptr)
+    %4 = load.i32 %1, align 4
+    %5 = iconst.i32 1
+    %6 = add %4, %5
+    store %6 -> %1, align 4
+    %7 = icmp slt %6, %0
+    br_if %7, block1, block2
+
+block2:
+    %8 = load.i32 %1, align 4
+    return %8
+",
+        );
+        let (module, stats) = run(&text);
+        assert_eq!(stats.count(Kind::Optimized, SCALARIZED), 1);
+        assert_eq!(count_of(body(&module), Opcode::Alloca), 0);
+        assert_eq!(count_of(body(&module), Opcode::BlockAddr), 1);
+        assert_eq!(params(body(&module), 1), 1);
+    }
+
+    #[test]
+    fn a_local_in_a_function_that_takes_another_labels_address_stays_in_memory() {
+        // The address of a label somewhere else is one a `goto *` could be meant for, and the
+        // verifier counts it as an edge from where it was taken.
+        let text = wrap(
+            "(i32) -> i32",
+            "block0(%0: i32):
+    %1 = alloca, size 4, align 4
+    %2 = iconst.i32 0
+    store %2 -> %1, align 4
+    %3 = block_addr block1
+    call @g(%3) : (ptr)
+    jump block1
+
+block1:
+    %4 = load.i32 %1, align 4
+    return %4
 ",
         );
         let (module, stats) = run(&text);
