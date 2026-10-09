@@ -3,7 +3,8 @@
 //! one more add, and the 32 bit kernel does that on every `u64`. A `__builtin_bswap64` on i386 is
 //! two `bswapl` now as well, where it was forty eight shifts and masks, and a negation is `negl`,
 //! `adcl $0` and `negl`, and `s64 < 0` asks the high word alone. A shift by a constant fills the
-//! word it moves bits into with `shldl` or `shrdl`, where it was two shifts and an or.
+//! word it moves bits into with `shldl` or `shrdl`, where it was two shifts and an or, and a shift
+//! by a count in a register does the same with the count in `cl`.
 
 use std::process::Command;
 
@@ -57,6 +58,21 @@ const QUAD_SHIFT: &str = "\
 typedef unsigned __int128 u128;
 u128 shl5(u128 x) { return x << 5; }
 u128 shr5(u128 x) { return x >> 5; }
+";
+
+const VAR_SHIFT: &str = "\
+typedef unsigned long long u64;
+u64 shl(u64 x, unsigned n) { return x << n; }
+u64 shr(u64 x, unsigned n) { return x >> n; }
+long long sar(long long x, unsigned n) { return x >> n; }
+unsigned word(unsigned x, unsigned n) { return x << (n & 31); }
+";
+
+const QUAD_VAR_SHIFT: &str = "\
+typedef unsigned __int128 u128;
+u128 shl(u128 x, unsigned n) { return x << n; }
+u128 shr(u128 x, unsigned n) { return x >> n; }
+__int128 sar(__int128 x, unsigned n) { return x >> n; }
 ";
 
 fn assembly(name: &str, target: &str, source: &str, level: &str) -> String {
@@ -152,4 +168,22 @@ fn a_long_long_shift_by_a_constant_fills_a_word_from_the_other() {
     assert_eq!(text.matches("\tshldq\t$5,").count(), 1, "{text}");
     assert_eq!(text.matches("\tshrdq\t$5,").count(), 1, "{text}");
     assert!(!text.contains("\torq\t"), "{text}");
+}
+
+/// gcc's `shldl %cl` for the word the bits cross into, and the count used as it is, since the
+/// machine masks a count to the word before it shifts.
+#[test]
+fn a_long_long_shift_by_a_register_fills_a_word_from_the_other() {
+    for level in ["-O1", "-O2", "-Os"] {
+        let text = assembly("var-shift", "i686-unknown-linux-gnu", VAR_SHIFT, level);
+        assert_eq!(text.matches("\tshldl\t%cl,").count(), 1, "{level}\n{text}");
+        assert_eq!(text.matches("\tshrdl\t%cl,").count(), 2, "{level}\n{text}");
+        assert!(!text.contains("\tandl\t$31,"), "{level}: the count is still masked\n{text}");
+        assert!(!text.contains("\torl\t"), "{level}\n{text}");
+        let text = assembly("quad-var-shift", "x86_64-unknown-linux-gnu", QUAD_VAR_SHIFT, level);
+        assert_eq!(text.matches("\tshldq\t%cl,").count(), 1, "{level}\n{text}");
+        assert_eq!(text.matches("\tshrdq\t%cl,").count(), 2, "{level}\n{text}");
+        assert!(!text.contains("\tandq\t$63,"), "{level}: the count is still masked\n{text}");
+        assert!(!text.contains("\torq\t"), "{level}\n{text}");
+    }
 }
