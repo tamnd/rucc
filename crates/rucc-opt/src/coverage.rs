@@ -122,6 +122,7 @@ pub struct Counted {
 /// A function marked `no_profile_instrument_function` gets none. Nothing is added to a module with
 /// no function left to count, which is what gcc does too.
 pub fn run(module: &mut Module, names: &mut Interner, coverage: &Coverage) -> Vec<Counted> {
+    let word = Type::int(module.datalayout.pointer_bits);
     let mut counted = Vec::new();
     for id in module.funcs().collect::<Vec<FuncId>>() {
         let func = &module[id];
@@ -137,7 +138,7 @@ pub fn run(module: &mut Module, names: &mut Interner, coverage: &Coverage) -> Ve
         if module.lookup(array).is_some() {
             continue;
         }
-        let (count, cfg_checksum, graph) = instrument(&mut module[id], array, coverage.count);
+        let (count, cfg_checksum, graph) = instrument(&mut module[id], array, word, coverage.count);
         let ident = u32::try_from(counted.len() + 1).unwrap_or(u32::MAX);
         let lineno_checksum = crc32(spelled.as_bytes(), 0);
         counted.push(Counted {
@@ -239,7 +240,7 @@ struct Edge {
 
 /// Counts the edges of one function, and says how many counters it took, a hash of its graph and
 /// the graph.
-fn instrument(func: &mut Func, array: Symbol, bumps: bool) -> (u32, u32, Graph) {
+fn instrument(func: &mut Func, array: Symbol, word: Type, bumps: bool) -> (u32, u32, Graph) {
     // A node for each block, numbered in layout order from two, after the entry and exit nodes.
     let blocks: Vec<Block> = func.blocks().collect();
     let mut node = vec![usize::MAX; blocks.iter().map(|b| b.index() + 1).max().unwrap_or(0)];
@@ -365,16 +366,16 @@ fn instrument(func: &mut Func, array: Symbol, bumps: bool) -> (u32, u32, Graph) 
         let term =
             func.terminator(source).expect("a block with an edge out of it ends in a branch");
         if edge.to == EXIT || outs[edge.from] == 1 {
-            bump(func, array, slot, term);
+            bump(func, array, word, slot, term);
         } else if ins[edge.to] == 1 || edge.kind == Kind::Fixed {
             // An edge out of an `indirect_br` has nowhere else to go, since the branch reaches its
             // blocks by address. Counting it at the top of a block with other ways in counts those
             // too, which is the best there is and the case the tree avoids by taking it first.
             let first = func.insts(blocks[edge.to - 2]).next().expect("a block holds its branch");
-            bump(func, array, slot, first);
+            bump(func, array, word, slot, first);
         } else {
             for &at in &edge.calls {
-                split(func, array, slot, term, at);
+                split(func, array, word, slot, term, at);
             }
         }
     }
@@ -398,20 +399,22 @@ fn find(sets: &mut [usize], mut n: usize) -> usize {
 }
 
 /// Puts an edge's increment in a block of its own, between the branch and where it went.
-fn split(func: &mut Func, array: Symbol, slot: u64, term: Inst, at: Idx<BlockCall>) {
+fn split(func: &mut Func, array: Symbol, word: Type, slot: u64, term: Inst, at: Idx<BlockCall>) {
     let list = func.target_list(term);
     let call = func[list][at.index() - list.as_usize_range().start];
     let args: Vec<Value> = func[call.args].to_vec();
     let span = func.span(term);
     let between = func.create_block();
     let jump = rucc_ir::Builder::new(func, between).at(span).jump(call.block, &args);
-    bump(func, array, slot, jump);
+    bump(func, array, word, slot, jump);
     let args = func.push_values(&[]);
     func.set_block_call(at, BlockCall { block: between, args, hint: call.hint });
 }
 
-/// Adds one to a counter, just before an instruction.
-fn bump(func: &mut Func, array: Symbol, slot: u64, before: Inst) {
+/// Adds one to a counter, just before an instruction. The offset of the counter is as wide as a
+/// pointer, since on i386 a `ptr_add` of a sixty four bit offset is not something the step that
+/// splits wide numbers knows, and the counter itself would be left whole for the backend.
+fn bump(func: &mut Func, array: Symbol, word: Type, slot: u64, before: Inst) {
     let span = func.span(before);
     let place = |func: &mut Func, data: InstData, ty: Option<Type>| -> Option<Value> {
         let results: &[Type] = match &ty {
@@ -425,9 +428,9 @@ fn bump(func: &mut Func, array: Symbol, slot: u64, before: Inst) {
     let base = InstData { extra: Extra::Symbol(array), ..InstData::new(Opcode::GlobalAddr) };
     let mut addr = place(func, base, Some(Type::PTR)).expect("an address");
     if slot > 0 {
-        let at = func.add_imm(Imm::int(i128::from(8 * slot), Type::int(64)));
+        let at = func.add_imm(Imm::int(i128::from(8 * slot), word));
         let by = InstData { extra: Extra::Imm(at), ..InstData::new(Opcode::IConst) };
-        let by = place(func, by, Some(Type::int(64))).expect("a constant");
+        let by = place(func, by, Some(word)).expect("a constant");
         let args = func.push_values(&[addr, by]);
         let moved = InstData { args, ..InstData::new(Opcode::PtrAdd) };
         addr = place(func, moved, Some(Type::PTR)).expect("an address");
