@@ -25,6 +25,7 @@ All notable changes are recorded here. The format follows [Keep a Changelog](htt
 
 ### Added
 
+- wasm: with `-msimd128`, a `__builtin_convertvector` of the low or the high half of a vector is one instruction, and `wasm_simd128.h` writes the extends, `convert_low`, `promote_low` and `demote_f64x2_zero` with it (#3506).
 - `__builtin_shufflevector`, checked with the rules and the words of gcc 16, and the wasm builtin `__builtin_wasm_shuffle_i8x16` of clang. With `-msimd128` on wasm32, a shuffle of vectors of 8 or 16 bytes is one `i8x16.shuffle`, and so are the shuffle macros of `wasm_simd128.h` (#3505).
 - `__builtin_convertvector`, checked with the words of clang. On wasm32 with `-msimd128`, the conversions that clang writes as one SIMD instruction are one instruction, and an extend of 8 loaded bytes is one extending load. `<wasm_simd128.h>` uses it as clang does (#3502).
 - The clang builtins `__builtin_elementwise_min`, `max`, `add_sat`, `sub_sat` and `popcount`, on integers and vectors of integers. With `-msimd128` on wasm32, a vector of 16 bytes is one SIMD instruction where wasm has one, and `<wasm_simd128.h>` uses the builtins as clang does (#3494).

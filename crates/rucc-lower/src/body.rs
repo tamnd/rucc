@@ -4723,6 +4723,9 @@ impl<'u> Body<'_, 'u> {
             // `__builtin_convertvector`, which is the cast of each lane. The two vectors have the
             // same number of lanes, and the lanes can have different sizes.
             ExprKind::ConvertVector { operand } => {
+                if self.half_convert(operand, lane, at, span) {
+                    return;
+                }
                 let vector = self.tast()[operand].ty;
                 let from = rucc_types::element(self.types(), vector).expect("a vector");
                 let width = repr::size_of(self.types(), self.target(), from);
@@ -5295,6 +5298,112 @@ impl<'u> Body<'_, 'u> {
             build.store(value, at, untyped(into_align), Flags::NONE);
         }
         true
+    }
+
+    /// A `__builtin_convertvector` of a `__builtin_shufflevector` done as one conversion of a
+    /// whole vector of 16 bytes, on wasm32 with `-msimd128`, and whether it was.
+    ///
+    /// The shuffle picks the low or the high half of one vector, in order, and the conversion
+    /// makes each lane twice as wide. wasm has one instruction for each such conversion that reads
+    /// the half from the whole vector: the extends of the low and the high half, and
+    /// `convert_low` and `promote_low` of the low half. The shuffle can also put two zeros after
+    /// two `double` lanes, and the conversion to four `float` lanes is then
+    /// `f32x4.demote_f64x2_zero`, which writes the zeros itself. clang's `<wasm_simd128.h>` writes
+    /// the demote so, and the header here writes the others so too.
+    fn half_convert(&mut self, operand: ExprId, lane: TypeId, at: Value, span: Span) -> bool {
+        if !self.target().simd128 {
+            return false;
+        }
+        let tast = self.tast();
+        let ExprKind::ShuffleVector { operands } = tast[operand].kind else { return false };
+        let (lhs, rhs) = (tast[operands][0], tast[operands][1]);
+        let picks: Option<Vec<i128>> = tast[operands][2..]
+            .iter()
+            .map(|&pick| match tast[pick].kind {
+                ExprKind::Const(id) => match tast[id] {
+                    Const::Int(index) => Some(index),
+                    _ => None,
+                },
+                _ => None,
+            })
+            .collect();
+        let Some(picks) = picks else { return false };
+        let vector = tast[lhs].ty;
+        if repr::size_of(self.types(), self.target(), vector) != 16 {
+            return false;
+        }
+        let whole = self.lanes(vector);
+        let count = u64::try_from(picks.len()).unwrap_or(0);
+        let start = picks.first().copied().unwrap_or(-1);
+        if !picks.iter().zip(start..).all(|(&pick, at)| pick == at) {
+            return false;
+        }
+        let from = rucc_types::element(self.types(), vector).expect("a vector");
+        let (a, b) = (self.value_type(from, span), self.value_type(lane, span));
+        let sign = if repr::is_signed(self.types(), self.target(), from) { "s" } else { "u" };
+        let (int, float) = (a.is_int() && b.is_int(), a.is_float() && b.is_float());
+        let low = start == 0;
+        let half = if low { "low" } else { "high" };
+        let name = if 2 * count == whole && (low || start == i128::from(count)) {
+            match (a.bits(), b.bits()) {
+                (x, y) if int && y == 2 * x => {
+                    format!("extend_{half}_{sign}_i{x}x{whole}_i{y}x{count}")
+                }
+                (32, 64) if low && a.is_int() && b.is_float() => {
+                    format!("convert_low_{sign}_i32x4_f64x2")
+                }
+                (32, 64) if low && float => "promote_low_f32x4_f64x2".to_owned(),
+                _ => return false,
+            }
+        } else if count == 2 * whole
+            && low
+            && float
+            && (a.bits(), b.bits()) == (64, 32)
+            && self.lanes(tast[rhs].ty) == whole
+            && self.zero_vector(rhs)
+        {
+            "demote_zero_f64x2_f32x4".to_owned()
+        } else {
+            return false;
+        };
+        let source = self.vector_addr(lhs, span);
+        // The other operand is not read, but what it does still happens.
+        self.vector_addr(rhs, span);
+        let align = self.place_align(Place::new(Where::Addr(source), vector));
+        let whole = Type::vector(a, u32::try_from(whole).unwrap_or(0));
+        let value = self.build(span).load(whole, source, untyped(align), Flags::NONE);
+        let out = Type::vector(b, 128 / b.bits());
+        let call = self.atomic_call(&format!("__builtin_wasm_{name}"), &[value], &[out], span);
+        let value = self.func[call].first_result.expect("one result was asked for");
+        let into = untyped(repr::align_of(self.types(), self.target(), lane));
+        self.build(span).store(value, at, into, Flags::NONE);
+        true
+    }
+
+    /// Whether `expr` is a compound literal whose lanes are each a zero with no sign.
+    fn zero_vector(&self, expr: ExprId) -> bool {
+        let tast = self.tast();
+        let literal = match tast[expr].kind {
+            ExprKind::Convert { kind: Conversion::Lvalue, operand } => tast[operand].kind,
+            kind => kind,
+        };
+        let ExprKind::CompoundLiteral(decl) = literal else { return false };
+        let Some(init) = tast[decl].init else { return false };
+        tast[init].iter().all(|entry| {
+            let mut value = entry.value;
+            while let ExprKind::Convert { operand, .. } | ExprKind::Cast(operand) = tast[value].kind
+            {
+                value = operand;
+            }
+            match tast[value].kind {
+                ExprKind::Const(id) => match tast[id] {
+                    Const::Int(0) => true,
+                    Const::Float(zero) => zero.is_zero() && !zero.is_negative(),
+                    _ => false,
+                },
+                _ => false,
+            }
+        })
     }
 
     /// A `__builtin_elementwise_*` builtin on one integer, which is one lane of a vector or the

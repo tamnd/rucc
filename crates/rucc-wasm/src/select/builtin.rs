@@ -167,6 +167,12 @@ const CONVERT: &[(&str, &str)] = &[
     ("extend_low_u_i16x8_i32x4", "i32x4.extend_low_i16x8_u"),
     ("extend_low_s_i32x4_i64x2", "i64x2.extend_low_i32x4_s"),
     ("extend_low_u_i32x4_i64x2", "i64x2.extend_low_i32x4_u"),
+    ("extend_high_s_i8x16_i16x8", "i16x8.extend_high_i8x16_s"),
+    ("extend_high_u_i8x16_i16x8", "i16x8.extend_high_i8x16_u"),
+    ("extend_high_s_i16x8_i32x4", "i32x4.extend_high_i16x8_s"),
+    ("extend_high_u_i16x8_i32x4", "i32x4.extend_high_i16x8_u"),
+    ("extend_high_s_i32x4_i64x2", "i64x2.extend_high_i32x4_s"),
+    ("extend_high_u_i32x4_i64x2", "i64x2.extend_high_i32x4_u"),
 ];
 
 /// What the builtin `name` writes, or nothing when `name` is not a builtin of clang.
