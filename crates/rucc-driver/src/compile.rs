@@ -1555,7 +1555,7 @@ fn generate(
     let i386 = target.tuple.arch() == Arch::X86;
     let copies = target.tuple.arch() == Arch::X86_64 || pic == IrPic::Absolute;
     let elsewhere = Elsewhere::of(module, pic, target.object_format, copies)
-        .with_descriptors(opts.tls_descriptors);
+        .with_descriptor_calls(opts.tls_descriptors);
     let elsewhere = if target.tuple.arch() == Arch::Aarch64 && pic == IrPic::Absolute {
         elsewhere.weak_from_table(module)
     } else {

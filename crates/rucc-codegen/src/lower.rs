@@ -4037,7 +4037,7 @@ impl<'a> Lowering<'a> {
             return self.thread_indexed(inst, symbol, result);
         }
         if let Some(dynamic) = &self.selector.symbols.dynamic {
-            let described = dynamic.descriptor.filter(|_| self.elsewhere.descriptors());
+            let described = dynamic.descriptor.filter(|_| self.elsewhere.descriptor_calls());
             let text = match self.elsewhere.model(symbol) {
                 Some(TlsModel::GlobalDynamic) => Some(described.unwrap_or(dynamic.general)),
                 Some(TlsModel::LocalDynamic) => Some(described.unwrap_or(dynamic.local)),
@@ -11351,7 +11351,7 @@ mod tests {
             Builder::new(&mut source, block).ret(&[own]);
             let elsewhere = Elsewhere::default()
                 .with_models([(names.intern("own"), model)])
-                .with_descriptors(true);
+                .with_descriptor_calls(true);
             let out = func(&source, &mut names, &SELECTOR, &SYSV, &elsewhere)
                 .expect("every instruction has a rule");
             let text = mir::print_func(&out.func, &names, &REGS);

@@ -82,7 +82,7 @@ pub struct Elsewhere {
     cold: Set<Symbol>,
     described: bool,
     indexed: bool,
-    descriptors: bool,
+    descriptor_calls: bool,
     imported: Set<Symbol>,
     referred: Set<Symbol>,
     based: bool,
@@ -648,15 +648,15 @@ impl Elsewhere {
     /// and keeps every register but the one it returns in, and when the variable is in the
     /// program the linker turns the call into a load of the offset or a constant.
     #[must_use]
-    pub const fn descriptors(&self) -> bool {
-        self.descriptors
+    pub const fn descriptor_calls(&self) -> bool {
+        self.descriptor_calls
     }
 
     /// The same names, with a thread-local variable reached through its descriptor when `on`. See
     /// [`Self::descriptors`].
     #[must_use]
-    pub fn with_descriptors(mut self, on: bool) -> Self {
-        self.descriptors = on;
+    pub fn with_descriptor_calls(mut self, on: bool) -> Self {
+        self.descriptor_calls = on;
         self
     }
 }
