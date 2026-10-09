@@ -445,6 +445,12 @@ pub unsafe fn deriv(
         return;
     }
     let (base, derived) = (base as usize, derived as usize);
+    // SAFETY: as above.
+    if unsafe { leaves(capability, base) } {
+        // SAFETY: as below.
+        unsafe { crate::fail::report_from(descriptor, Some(derived), Some(base)) }
+        return;
+    }
     let Some(region) = alloc::covering(base) else { return };
     let instance = owner(&region, base);
     if !plane::owned(instance) {
@@ -1496,6 +1502,27 @@ unsafe fn stays(capability: *const Cap, derived: usize, stride: usize) -> bool {
     derived.wrapping_sub(held.lo) <= held.ext
         || (derived < held.lo
             && derived.wrapping_add(stride as u64).wrapping_sub(held.lo) < held.ext)
+}
+
+/// Whether `capability` is one the compiler made for the object `base` is in, so that [`stays`]
+/// saying no is an answer [`deriv`] believes.
+///
+/// [`refuses`] is the same question for [`bounds`], and it is what catches a derivation from a
+/// local or a variable, which no plane covers. `p = buf - 8` on a local array went unjudged, and so
+/// did the string walk from `p` that found a zero below the array before it got there. The base has
+/// to be inside the capability as well, one past its end counting, because a pointer that already
+/// left is one [`Cap::beside`] would no longer believe the capability about.
+///
+/// # Safety
+///
+/// `capability` is null or the address of a filled capability slot.
+unsafe fn leaves(capability: *const Cap, base: usize) -> bool {
+    if capability.is_null() {
+        return false;
+    }
+    // SAFETY: the caller's contract, and a slot is `Cap::BYTES` of storage the frame owns.
+    let held = unsafe { core::ptr::read(capability) };
+    held.is_named() && (base as u64).wrapping_sub(held.lo) <= held.ext
 }
 
 /// Whether the capability names an instance other than the one that owns the address now.
@@ -3083,6 +3110,32 @@ mod tests {
         assert!(!travelled.is_named());
         assert!(!refused(|| within(at(first, 16), 4, &travelled)));
         assert!(named.beside(at(first, 16) as u64).is_named());
+    }
+
+    #[test]
+    fn a_derivation_out_of_an_object_the_compiler_named_is_refused_where_no_plane_covers_it() {
+        let _turn = turn();
+        // Document 03's S5 on a local, `data = buf - 8`, which the planes cannot see because no
+        // region covers the stack. The window is the one the heap gets.
+        let mut pair = [0u8; 32];
+        let first = pair.as_mut_ptr().cast::<c_void>();
+        let named = recover::object(at(first, 8), 16, Class::Automatic);
+        let base = at(first, 8);
+        assert!(!refused(|| carried(base, at(first, 24), 1, &named)));
+        assert!(!refused(|| carried(base, at(first, 7), 1, &named)));
+        assert!(refused(|| carried(base, at(first, 6), 1, &named)));
+        assert!(refused(|| carried(base, first, 1, &named)));
+        assert!(refused(|| carried(base, at(first, 25), 1, &named)));
+        assert!(!refused(|| carried(base, at(first, 4), 4, &named)));
+        assert!(refused(|| carried(base, first, 4, &named)));
+        // A base that already left is one the capability may not be about, and a capability that
+        // travelled beside a pointer outside it no longer says no.
+        assert!(!refused(|| carried(at(first, 7), first, 1, &named)));
+        let travelled = named.beside(at(first, 30) as u64);
+        assert!(!refused(|| carried(at(first, 30), first, 1, &travelled)));
+        // Nor does what recovery says about the address.
+        let recovered = recover::recover(base);
+        assert!(!refused(|| carried(base, first, 1, &recovered)));
     }
 
     #[test]
