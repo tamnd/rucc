@@ -1930,6 +1930,14 @@ impl Lower<'_, '_> {
             self.set(results[0]);
             return Ok(());
         }
+        // The answer of `all_true` or `any_true` is 0 or 1 already, as clang knows.
+        if let Some((value, IntPred::Ne)) = self.zero_compare(inst)
+            && self.boolean_builtin(value)
+        {
+            self.push(value)?;
+            self.set(results[0]);
+            return Ok(());
+        }
         if args.iter().chain(&results).any(|&v| self.ty(v).is_vector()) {
             return self.vector(inst, &args, &results);
         }

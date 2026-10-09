@@ -296,9 +296,18 @@ fn check_signature(signature: &str, name: &str, line: usize) {
         if ty.is_empty() {
             panic!("features.toml:{line}: `{name}` has an empty type in its signature");
         }
+        let last = ty.split_whitespace().last();
         for word in ty.split_whitespace() {
             let word = word.trim_end_matches('*');
             if word.is_empty() {
+                continue;
+            }
+            // The number of lanes of a GNU vector of 16 bytes, which comes last and only after
+            // the lane type, as in `signed char x16`.
+            if matches!(word, "x2" | "x4" | "x8" | "x16") {
+                if Some(word) != last || ty.contains('*') || ty.split_whitespace().count() < 2 {
+                    panic!("features.toml:{line}: `{name}` has `{word}` in a place it can not be");
+                }
                 continue;
             }
             if !WORDS.contains(&word) {

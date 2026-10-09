@@ -341,6 +341,7 @@ impl Lower<'_, '_> {
                 args.iter().enumerate().map(|(i, &v)| (v, place(i))).collect()
             }
             _ if pairs => Vec::new(),
+            Opcode::Call if self.builtin_pushes_once(inst) => all(Place::Any),
             // A vector shift whose count is not the same in each lane pushes both operands once
             // for each lane. `inputs` gives a scalar count, or none, for the other shifts.
             Opcode::Shl | Opcode::LShr | Opcode::AShr
@@ -469,8 +470,11 @@ impl Lower<'_, '_> {
             | Opcode::FPToSI
             | Opcode::FPToUI
             | Opcode::Load => Some(Kind::Read),
-            // A maths function that is written as its instruction, which cannot trap.
-            Opcode::Call if self.libm(inst).is_some() => Some(Kind::Pure),
+            // A maths function or a vector builtin that is written as its instruction, which
+            // cannot trap.
+            Opcode::Call if self.libm(inst).is_some() || self.simd_builtin(inst) => {
+                Some(Kind::Pure)
+            }
             Opcode::Call | Opcode::CallIndirect => {
                 let Extra::Call(info) = data.extra else { return None };
                 let sig = &self.func[self.func[info].signature];
@@ -491,7 +495,9 @@ impl Lower<'_, '_> {
         match data.opcode {
             _ if pairs => (true, true, true),
             Opcode::Alloca if args.is_empty() => (false, false, false),
-            Opcode::Call if self.libm(inst).is_some() => (false, false, false),
+            Opcode::Call if self.libm(inst).is_some() || self.simd_builtin(inst) => {
+                (false, false, false)
+            }
             Opcode::SDiv
             | Opcode::SRem
             | Opcode::UDiv

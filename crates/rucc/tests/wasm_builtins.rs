@@ -1,7 +1,8 @@
-//! The scalar `__builtin_wasm_*` functions of clang on the wasm rows, and what gcc says about them
-//! on the other rows. The facts come from clang 23 from wasi-sdk 34: each call is one instruction
-//! in place of the call, a saturating conversion needs the feature `nontrapping-fptoint`, and the
-//! memory index is the constant 0.
+//! The scalar and vector `__builtin_wasm_*` functions of clang on the wasm rows, and what gcc says
+//! about them on the other rows. The facts come from clang 23 from wasi-sdk 34: each call is one
+//! instruction in place of the call, a saturating conversion needs the feature
+//! `nontrapping-fptoint`, a vector builtin needs `simd128` or `relaxed-simd`, and the memory index
+//! is the constant 0.
 //!
 //! Design: #2865, and section 11.5 of the WebAssembly notes.
 
@@ -92,6 +93,163 @@ fn the_scalar_wasm_builtins_are_one_instruction_each() {
         "unsigned long f(void) { return __builtin_wasm_memory_size(1); }\n",
     );
     assert!(index.contains("the memory index of `__builtin_wasm_memory_size`"), "{index}");
+}
+
+/// The vector types of the signatures of [`VECTOR`], in the words of the table.
+const LANES: &str = "\
+    typedef signed char sc16 __attribute__((vector_size(16)));\n\
+    typedef unsigned char uc16 __attribute__((vector_size(16)));\n\
+    typedef short s8 __attribute__((vector_size(16)));\n\
+    typedef unsigned short us8 __attribute__((vector_size(16)));\n\
+    typedef int i4 __attribute__((vector_size(16)));\n\
+    typedef unsigned int ui4 __attribute__((vector_size(16)));\n\
+    typedef long long ll2 __attribute__((vector_size(16)));\n\
+    typedef float f4 __attribute__((vector_size(16)));\n\
+    typedef double d2 __attribute__((vector_size(16)));\n";
+
+/// Each vector builtin of clang 23 with a type of its own, the type that clang gives it, and the
+/// instruction that clang writes for it. The types come from `-Xclang -ast-dump` of clang 23.
+const VECTOR: &[(&str, &str, &str)] = &[
+    ("abs_f32x4", "f4(f4)", "f32x4.abs"),
+    ("abs_f64x2", "d2(d2)", "f64x2.abs"),
+    ("abs_i16x8", "s8(s8)", "i16x8.abs"),
+    ("abs_i32x4", "i4(i4)", "i32x4.abs"),
+    ("abs_i64x2", "ll2(ll2)", "i64x2.abs"),
+    ("abs_i8x16", "sc16(sc16)", "i8x16.abs"),
+    ("all_true_i16x8", "int(s8)", "i16x8.all_true"),
+    ("all_true_i32x4", "int(i4)", "i32x4.all_true"),
+    ("all_true_i64x2", "int(ll2)", "i64x2.all_true"),
+    ("all_true_i8x16", "int(sc16)", "i8x16.all_true"),
+    ("any_true_v128", "int(sc16)", "v128.any_true"),
+    ("avgr_u_i16x8", "us8(us8, us8)", "i16x8.avgr_u"),
+    ("avgr_u_i8x16", "uc16(uc16, uc16)", "i8x16.avgr_u"),
+    ("bitmask_i16x8", "unsigned(s8)", "i16x8.bitmask"),
+    ("bitmask_i32x4", "unsigned(i4)", "i32x4.bitmask"),
+    ("bitmask_i64x2", "unsigned(ll2)", "i64x2.bitmask"),
+    ("bitmask_i8x16", "unsigned(sc16)", "i8x16.bitmask"),
+    ("bitselect", "i4(i4, i4, i4)", "v128.bitselect"),
+    ("ceil_f32x4", "f4(f4)", "f32x4.ceil"),
+    ("ceil_f64x2", "d2(d2)", "f64x2.ceil"),
+    ("dot_s_i32x4_i16x8", "i4(s8, s8)", "i32x4.dot_i16x8_s"),
+    ("extadd_pairwise_i16x8_s_i32x4", "i4(s8)", "i32x4.extadd_pairwise_i16x8_s"),
+    ("extadd_pairwise_i16x8_u_i32x4", "ui4(us8)", "i32x4.extadd_pairwise_i16x8_u"),
+    ("extadd_pairwise_i8x16_s_i16x8", "s8(sc16)", "i16x8.extadd_pairwise_i8x16_s"),
+    ("extadd_pairwise_i8x16_u_i16x8", "us8(uc16)", "i16x8.extadd_pairwise_i8x16_u"),
+    ("floor_f32x4", "f4(f4)", "f32x4.floor"),
+    ("floor_f64x2", "d2(d2)", "f64x2.floor"),
+    ("max_f32x4", "f4(f4, f4)", "f32x4.max"),
+    ("max_f64x2", "d2(d2, d2)", "f64x2.max"),
+    ("min_f32x4", "f4(f4, f4)", "f32x4.min"),
+    ("min_f64x2", "d2(d2, d2)", "f64x2.min"),
+    ("narrow_s_i16x8_i32x4", "s8(i4, i4)", "i16x8.narrow_i32x4_s"),
+    ("narrow_s_i8x16_i16x8", "sc16(s8, s8)", "i8x16.narrow_i16x8_s"),
+    ("narrow_u_i16x8_i32x4", "us8(i4, i4)", "i16x8.narrow_i32x4_u"),
+    ("narrow_u_i8x16_i16x8", "uc16(s8, s8)", "i8x16.narrow_i16x8_u"),
+    ("nearest_f32x4", "f4(f4)", "f32x4.nearest"),
+    ("nearest_f64x2", "d2(d2)", "f64x2.nearest"),
+    ("pmax_f32x4", "f4(f4, f4)", "f32x4.pmax"),
+    ("pmax_f64x2", "d2(d2, d2)", "f64x2.pmax"),
+    ("pmin_f32x4", "f4(f4, f4)", "f32x4.pmin"),
+    ("pmin_f64x2", "d2(d2, d2)", "f64x2.pmin"),
+    ("q15mulr_sat_s_i16x8", "s8(s8, s8)", "i16x8.q15mulr_sat_s"),
+    (
+        "relaxed_dot_i8x16_i7x16_add_s_i32x4",
+        "i4(sc16, sc16, i4)",
+        "i32x4.relaxed_dot_i8x16_i7x16_add_s",
+    ),
+    ("relaxed_dot_i8x16_i7x16_s_i16x8", "s8(sc16, sc16)", "i16x8.relaxed_dot_i8x16_i7x16_s"),
+    ("relaxed_laneselect_i16x8", "s8(s8, s8, s8)", "i16x8.relaxed_laneselect"),
+    ("relaxed_laneselect_i32x4", "i4(i4, i4, i4)", "i32x4.relaxed_laneselect"),
+    ("relaxed_laneselect_i64x2", "ll2(ll2, ll2, ll2)", "i64x2.relaxed_laneselect"),
+    ("relaxed_laneselect_i8x16", "sc16(sc16, sc16, sc16)", "i8x16.relaxed_laneselect"),
+    ("relaxed_madd_f32x4", "f4(f4, f4, f4)", "f32x4.relaxed_madd"),
+    ("relaxed_madd_f64x2", "d2(d2, d2, d2)", "f64x2.relaxed_madd"),
+    ("relaxed_max_f32x4", "f4(f4, f4)", "f32x4.relaxed_max"),
+    ("relaxed_max_f64x2", "d2(d2, d2)", "f64x2.relaxed_max"),
+    ("relaxed_min_f32x4", "f4(f4, f4)", "f32x4.relaxed_min"),
+    ("relaxed_min_f64x2", "d2(d2, d2)", "f64x2.relaxed_min"),
+    ("relaxed_nmadd_f32x4", "f4(f4, f4, f4)", "f32x4.relaxed_nmadd"),
+    ("relaxed_nmadd_f64x2", "d2(d2, d2, d2)", "f64x2.relaxed_nmadd"),
+    ("relaxed_q15mulr_s_i16x8", "s8(s8, s8)", "i16x8.relaxed_q15mulr_s"),
+    ("relaxed_swizzle_i8x16", "sc16(sc16, sc16)", "i8x16.relaxed_swizzle"),
+    ("relaxed_trunc_s_i32x4_f32x4", "i4(f4)", "i32x4.relaxed_trunc_f32x4_s"),
+    ("relaxed_trunc_s_zero_i32x4_f64x2", "i4(d2)", "i32x4.relaxed_trunc_f64x2_s_zero"),
+    ("relaxed_trunc_u_i32x4_f32x4", "ui4(f4)", "i32x4.relaxed_trunc_f32x4_u"),
+    ("relaxed_trunc_u_zero_i32x4_f64x2", "ui4(d2)", "i32x4.relaxed_trunc_f64x2_u_zero"),
+    ("sqrt_f32x4", "f4(f4)", "f32x4.sqrt"),
+    ("sqrt_f64x2", "d2(d2)", "f64x2.sqrt"),
+    ("swizzle_i8x16", "sc16(sc16, sc16)", "i8x16.swizzle"),
+    ("trunc_f32x4", "f4(f4)", "f32x4.trunc"),
+    ("trunc_f64x2", "d2(d2)", "f64x2.trunc"),
+    ("trunc_sat_s_zero_f64x2_i32x4", "i4(d2)", "i32x4.trunc_sat_f64x2_s_zero"),
+    ("trunc_sat_u_zero_f64x2_i32x4", "ui4(d2)", "i32x4.trunc_sat_f64x2_u_zero"),
+    ("trunc_saturate_s_i32x4_f32x4", "i4(f4)", "i32x4.trunc_sat_f32x4_s"),
+    ("trunc_saturate_u_i32x4_f32x4", "i4(f4)", "i32x4.trunc_sat_f32x4_u"),
+];
+
+/// A function for each builtin of [`VECTOR`] that gives its operands to the builtin.
+fn vector_calls() -> String {
+    let mut source = String::from(LANES);
+    for (name, signature, _) in VECTOR {
+        let (ret, params) = signature.split_once('(').unwrap();
+        let params: Vec<&str> = params.trim_end_matches(')').split(", ").collect();
+        let list: Vec<String> =
+            params.iter().enumerate().map(|(i, p)| format!("{p} a{i}")).collect();
+        let args: Vec<String> = (0..params.len()).map(|i| format!("a{i}")).collect();
+        source.push_str(&format!(
+            "{ret} f_{name}({}) {{ return __builtin_wasm_{name}({}); }}\n",
+            list.join(", "),
+            args.join(", ")
+        ));
+    }
+    source
+}
+
+/// Each vector builtin is its operands and then one SIMD instruction, which is the whole body that
+/// clang 23 writes for the same function at `-O2`.
+#[test]
+fn the_vector_wasm_builtins_are_one_simd_instruction_each() {
+    let out = rucc(
+        "wasm32-wasip1",
+        &["-O2", "-S", "-o", "-", "-msimd128", "-mrelaxed-simd"],
+        &vector_calls(),
+    );
+    assert!(out.status.success(), "{}", String::from_utf8_lossy(&out.stderr));
+    let text = String::from_utf8(out.stdout).unwrap();
+    for (name, signature, op) in VECTOR {
+        let label = format!("f_{name}:");
+        let body: Vec<String> = text
+            .lines()
+            .skip_while(|line| *line != label)
+            .skip(1)
+            .take_while(|line| line.starts_with('\t'))
+            .filter(|line| !line.starts_with("\t."))
+            .map(|line| line.trim().replace('\t', " "))
+            .filter(|line| line != "return")
+            .collect();
+        let count = signature.matches(',').count() + 1;
+        let mut want: Vec<String> = (0..count).map(|i| format!("local.get {i}")).collect();
+        want.push(op.to_string());
+        want.push("end_function".to_string());
+        assert_eq!(body, want, "for `__builtin_wasm_{name}`");
+    }
+}
+
+/// clang refuses a vector builtin without `-msimd128`, and a relaxed one without
+/// `-mrelaxed-simd`, in these words.
+#[test]
+fn a_vector_wasm_builtin_needs_its_feature() {
+    let source = format!("{LANES}sc16 f(sc16 a) {{ return __builtin_wasm_abs_i8x16(a); }}\n");
+    let plain = refusal("wasm32-wasip1", &[], &source);
+    assert!(plain.contains("`__builtin_wasm_abs_i8x16` needs target feature simd128"), "{plain}");
+    let source = format!(
+        "{LANES}sc16 f(sc16 a, sc16 b) {{ return __builtin_wasm_relaxed_swizzle_i8x16(a, b); }}\n"
+    );
+    let simd = refusal("wasm32-wasip1", &["-msimd128"], &source);
+    assert!(
+        simd.contains("`__builtin_wasm_relaxed_swizzle_i8x16` needs target feature relaxed-simd"),
+        "{simd}"
+    );
 }
 
 #[test]

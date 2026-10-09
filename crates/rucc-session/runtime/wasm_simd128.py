@@ -131,6 +131,96 @@ def fill(text, indent):
     return lines + [cur]
 
 
+# The functions that are one builtin of clang with `-msimd128`, or with `-mrelaxed-simd` for a
+# relaxed one, as clang 23 writes them: the builtin, and the lane type of the vector that each
+# operand is given as. The C over the lanes after them is the function without the feature.
+SIMD = {
+    "wasm_v128_any_true": ("any_true_v128", "i8"),
+    "wasm_v128_bitselect": ("bitselect", "i32"),
+    "wasm_i8x16_abs": ("abs_i8x16", "i8"),
+    "wasm_i8x16_all_true": ("all_true_i8x16", "i8"),
+    "wasm_i8x16_bitmask": ("bitmask_i8x16", "i8"),
+    "wasm_u8x16_avgr": ("avgr_u_i8x16", "u8"),
+    "wasm_i16x8_abs": ("abs_i16x8", "i16"),
+    "wasm_i16x8_all_true": ("all_true_i16x8", "i16"),
+    "wasm_i16x8_bitmask": ("bitmask_i16x8", "i16"),
+    "wasm_u16x8_avgr": ("avgr_u_i16x8", "u16"),
+    "wasm_i32x4_abs": ("abs_i32x4", "i32"),
+    "wasm_i32x4_all_true": ("all_true_i32x4", "i32"),
+    "wasm_i32x4_bitmask": ("bitmask_i32x4", "i32"),
+    "wasm_i32x4_dot_i16x8": ("dot_s_i32x4_i16x8", "i16"),
+    "wasm_i64x2_abs": ("abs_i64x2", "i64"),
+    "wasm_i64x2_all_true": ("all_true_i64x2", "i64"),
+    "wasm_i64x2_bitmask": ("bitmask_i64x2", "i64"),
+    "wasm_f32x4_abs": ("abs_f32x4", "f32"),
+    "wasm_f32x4_sqrt": ("sqrt_f32x4", "f32"),
+    "wasm_f32x4_ceil": ("ceil_f32x4", "f32"),
+    "wasm_f32x4_floor": ("floor_f32x4", "f32"),
+    "wasm_f32x4_trunc": ("trunc_f32x4", "f32"),
+    "wasm_f32x4_nearest": ("nearest_f32x4", "f32"),
+    "wasm_f32x4_min": ("min_f32x4", "f32"),
+    "wasm_f32x4_max": ("max_f32x4", "f32"),
+    "wasm_f32x4_pmin": ("pmin_f32x4", "f32"),
+    "wasm_f32x4_pmax": ("pmax_f32x4", "f32"),
+    "wasm_f64x2_abs": ("abs_f64x2", "f64"),
+    "wasm_f64x2_sqrt": ("sqrt_f64x2", "f64"),
+    "wasm_f64x2_ceil": ("ceil_f64x2", "f64"),
+    "wasm_f64x2_floor": ("floor_f64x2", "f64"),
+    "wasm_f64x2_trunc": ("trunc_f64x2", "f64"),
+    "wasm_f64x2_nearest": ("nearest_f64x2", "f64"),
+    "wasm_f64x2_min": ("min_f64x2", "f64"),
+    "wasm_f64x2_max": ("max_f64x2", "f64"),
+    "wasm_f64x2_pmin": ("pmin_f64x2", "f64"),
+    "wasm_f64x2_pmax": ("pmax_f64x2", "f64"),
+    "wasm_i32x4_trunc_sat_f32x4": ("trunc_saturate_s_i32x4_f32x4", "f32"),
+    "wasm_u32x4_trunc_sat_f32x4": ("trunc_saturate_u_i32x4_f32x4", "f32"),
+    "wasm_i32x4_trunc_sat_f64x2_zero": ("trunc_sat_s_zero_f64x2_i32x4", "f64"),
+    "wasm_u32x4_trunc_sat_f64x2_zero": ("trunc_sat_u_zero_f64x2_i32x4", "f64"),
+    "wasm_i8x16_swizzle": ("swizzle_i8x16", "i8"),
+    "wasm_i8x16_narrow_i16x8": ("narrow_s_i8x16_i16x8", "i16"),
+    "wasm_u8x16_narrow_i16x8": ("narrow_u_i8x16_i16x8", "i16"),
+    "wasm_i16x8_narrow_i32x4": ("narrow_s_i16x8_i32x4", "i32"),
+    "wasm_u16x8_narrow_i32x4": ("narrow_u_i16x8_i32x4", "i32"),
+    "wasm_i16x8_extadd_pairwise_i8x16": ("extadd_pairwise_i8x16_s_i16x8", "i8"),
+    "wasm_u16x8_extadd_pairwise_u8x16": ("extadd_pairwise_i8x16_u_i16x8", "u8"),
+    "wasm_i32x4_extadd_pairwise_i16x8": ("extadd_pairwise_i16x8_s_i32x4", "i16"),
+    "wasm_u32x4_extadd_pairwise_u16x8": ("extadd_pairwise_i16x8_u_i32x4", "u16"),
+    "wasm_i16x8_q15mulr_sat": ("q15mulr_sat_s_i16x8", "i16"),
+    "wasm_f32x4_relaxed_madd": ("relaxed_madd_f32x4", "f32"),
+    "wasm_f32x4_relaxed_nmadd": ("relaxed_nmadd_f32x4", "f32"),
+    "wasm_f64x2_relaxed_madd": ("relaxed_madd_f64x2", "f64"),
+    "wasm_f64x2_relaxed_nmadd": ("relaxed_nmadd_f64x2", "f64"),
+    "wasm_i8x16_relaxed_laneselect": ("relaxed_laneselect_i8x16", "i8"),
+    "wasm_i16x8_relaxed_laneselect": ("relaxed_laneselect_i16x8", "i16"),
+    "wasm_i32x4_relaxed_laneselect": ("relaxed_laneselect_i32x4", "i32"),
+    "wasm_i64x2_relaxed_laneselect": ("relaxed_laneselect_i64x2", "i64"),
+    "wasm_i8x16_relaxed_swizzle": ("relaxed_swizzle_i8x16", "i8"),
+    "wasm_f32x4_relaxed_min": ("relaxed_min_f32x4", "f32"),
+    "wasm_f32x4_relaxed_max": ("relaxed_max_f32x4", "f32"),
+    "wasm_f64x2_relaxed_min": ("relaxed_min_f64x2", "f64"),
+    "wasm_f64x2_relaxed_max": ("relaxed_max_f64x2", "f64"),
+    "wasm_i32x4_relaxed_trunc_f32x4": ("relaxed_trunc_s_i32x4_f32x4", "f32"),
+    "wasm_u32x4_relaxed_trunc_f32x4": ("relaxed_trunc_u_i32x4_f32x4", "f32"),
+    "wasm_i32x4_relaxed_trunc_f64x2_zero": ("relaxed_trunc_s_zero_i32x4_f64x2", "f64"),
+    "wasm_u32x4_relaxed_trunc_f64x2_zero": ("relaxed_trunc_u_zero_i32x4_f64x2", "f64"),
+    "wasm_i16x8_relaxed_q15mulr": ("relaxed_q15mulr_s_i16x8", "i16"),
+    "wasm_i16x8_relaxed_dot_i8x16_i7x16": ("relaxed_dot_i8x16_i7x16_s_i16x8", "i8"),
+    "wasm_i32x4_relaxed_dot_i8x16_i7x16_add": ("relaxed_dot_i8x16_i7x16_add_s_i32x4", "i8 i8 i32"),
+}
+SEEN = set()
+
+
+def builtin(ret, nm, params):
+    """The statement that calls the builtin of nm, with each operand as the vector that clang
+    gives it."""
+    name, casts = SIMD[nm]
+    names = [p.split()[-1] for p in params.split(", ")]
+    casts = casts.split() if " " in casts else [casts] * len(names)
+    args = ", ".join(f"({vt(c)}){n}" for c, n in zip(casts, names))
+    call = f"__builtin_wasm_{name}({args})"
+    return f"return (v128_t){call};" if ret == "v128_t" else f"return {call};"
+
+
 def fn(ret, nm, params, body, attrs=""):
     NAMES.append(nm)
     if attrs:
@@ -140,9 +230,18 @@ def fn(ret, nm, params, body, attrs=""):
         head = f"static __inline__ {ret} {nm}({reserve(params)}) {{"
     for line in fill(head, ""):
         w(line)
+    simd = nm in SIMD and not attrs
+    if simd:
+        SEEN.add(nm)
+        w("#ifdef __wasm_relaxed_simd__" if "_relaxed_" in nm else "#ifdef __wasm_simd128__")
+        for line in wrap(reserve(builtin(ret, nm, params)), "  "):
+            w(line)
+        w("#else")
     for stmt in body if isinstance(body, list) else statements(body):
         for line in wrap(reserve(stmt), "  "):
             w(line)
+    if simd:
+        w("#endif")
     w("}")
 
 
@@ -183,14 +282,17 @@ INTRO = """
  * The names, the types and what each function computes are those of the `<wasm_simd128.h>` of
  * clang 23, for the instructions of the simd128 and relaxed-simd proposals. Every function is C
  * over the lanes of a GNU vector, the same way `<arm_neon.h>` is written, so what a program
- * computes is what the instruction computes and what it compiles to is one lane at a time until
- * rucc writes v128 instructions. For that reason the header does not need `-msimd128`, and a
- * module from it runs on an engine with no SIMD.
+ * computes is what the instruction computes. For that reason the header does not need
+ * `-msimd128`, and a module from it runs on an engine with no SIMD. With `-msimd128`, a function
+ * that clang writes as a `__builtin_wasm_*` builtin calls the same builtin, which is one
+ * instruction, as in clang.
  *
- * Each relaxed function gives one of the answers that the relaxed-simd proposal allows, and the
- * same one on every engine: the multiply add is not fused, the lane select is a bit select, the
- * swizzle, the minimum, the maximum, the truncation and the rounding multiply are those of
- * simd128, and the dot products take the second operand as signed.
+ * Without `-mrelaxed-simd`, each relaxed function gives one of the answers that the relaxed-simd
+ * proposal allows, and the same one on every engine: the multiply add is not fused, the lane
+ * select is a bit select, the swizzle, the minimum, the maximum, the truncation and the rounding
+ * multiply are those of simd128, and the dot products take the second operand as signed. With
+ * `-mrelaxed-simd`, each one is the relaxed instruction, as in clang, and the engine chooses
+ * which of the answers it gives.
  *
  * The rounding of a float lane to an integer is exact C, with no call to the library. The square
  * root is `__builtin_sqrtf` and `__builtin_sqrt`, which call `sqrtf` and `sqrt`, so a program for
@@ -448,7 +550,7 @@ def emit():
         v, u = vt(e), vt("u" + e[1:])
         sign = "0x80000000u" if e == "f32" else "0x8000000000000000ull"
         fn("v128_t", f"{vname(e)}_abs", "v128_t a", f"return (v128_t)(({u})a & ~{sign});")
-        fn("v128_t", f"{vname(e)}_neg", "v128_t a", f"return (v128_t)(({u})a ^ {sign});")
+        fn("v128_t", f"{vname(e)}_neg", "v128_t a", f"return (v128_t)(-({vt(e)})a);")
         root = "__builtin_sqrtf" if e == "f32" else "__builtin_sqrt"
         lanewise(e, f"{vname(e)}_sqrt", "v128_t a", one(e), f"{root}(x[i])")
         # Each builtin is the wasm instruction of the same name, and `rint` is `nearest`.
@@ -697,6 +799,7 @@ def emit():
 
     w("")
     w("#endif")
+    assert SEEN == set(SIMD), sorted(set(SIMD) - SEEN)
     return NAMES[helpers:]
 
 

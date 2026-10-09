@@ -218,6 +218,58 @@ fn with_simd128_a_vector_built_from_its_lanes_is_what_clang_writes() {
     }
 }
 
+/// Functions of `<wasm_simd128.h>` that clang writes as a `__builtin_wasm_*` builtin, and the
+/// negation of a float vector.
+const BUILTIN: &str = "\
+#include <wasm_simd128.h>
+v128_t abs8(v128_t a) { return wasm_i8x16_abs(a); }
+bool all16(v128_t a) { return wasm_i16x8_all_true(a); }
+int any(v128_t a) { return wasm_v128_any_true(a) ? 7 : 9; }
+uint32_t bits(v128_t a) { return wasm_i32x4_bitmask(a); }
+v128_t fneg(v128_t a) { return wasm_f32x4_neg(a); }
+v128_t dmin(v128_t a, v128_t b) { return wasm_f64x2_min(a, b); }
+v128_t narrow(v128_t a, v128_t b) { return wasm_u8x16_narrow_i16x8(a, b); }
+v128_t pick(v128_t a, v128_t b, v128_t m) { return wasm_v128_bitselect(a, b, m); }
+v128_t madd(v128_t a, v128_t b, v128_t c) { return wasm_f32x4_relaxed_madd(a, b, c); }
+";
+
+/// Each function of [`BUILTIN`] is the instructions that clang 23 writes for it at `-O2` with
+/// `-msimd128 -mrelaxed-simd`. The answer of `all_true` and `any_true` is 0 or 1, so it is not
+/// compared with 0 again. Without `-mrelaxed-simd`, the relaxed multiply add is a multiply and an
+/// add, which is one of the answers that the relaxed instruction allows.
+#[test]
+fn with_simd128_a_function_of_the_header_is_the_builtin_of_clang() {
+    let out = assembly(BUILTIN, &["-msimd128", "-mrelaxed-simd"]);
+    assert!(out.status.success(), "{}", String::from_utf8_lossy(&out.stderr));
+    let text = String::from_utf8(out.stdout).unwrap();
+    let want: [(&str, &[&str]); 9] = [
+        ("abs8", &["local.get\t0", "i8x16.abs"]),
+        ("all16", &["local.get\t0", "i16x8.all_true"]),
+        ("any", &["i32.const\t7", "i32.const\t9", "local.get\t0", "v128.any_true", "i32.select"]),
+        ("bits", &["local.get\t0", "i32x4.bitmask"]),
+        ("fneg", &["local.get\t0", "f32x4.neg"]),
+        ("dmin", &["local.get\t0", "local.get\t1", "f64x2.min"]),
+        ("narrow", &["local.get\t0", "local.get\t1", "i8x16.narrow_i16x8_u"]),
+        ("pick", &["local.get\t0", "local.get\t1", "local.get\t2", "v128.bitselect"]),
+        ("madd", &["local.get\t0", "local.get\t1", "local.get\t2", "f32x4.relaxed_madd"]),
+    ];
+    for (name, ops) in want {
+        let code: Vec<&str> = body(&text, name)
+            .into_iter()
+            .filter(|op| !op.starts_with('.') && *op != "return")
+            .collect();
+        assert_eq!(code, ops, "{name}");
+    }
+    let out = assembly(BUILTIN, &["-msimd128"]);
+    assert!(out.status.success(), "{}", String::from_utf8_lossy(&out.stderr));
+    let text = String::from_utf8(out.stdout).unwrap();
+    let madd: Vec<&str> = body(&text, "madd")
+        .into_iter()
+        .filter(|op| !op.starts_with('.') && *op != "return")
+        .collect();
+    assert_eq!(madd, ["local.get\t0", "local.get\t1", "f32x4.mul", "local.get\t2", "f32x4.add"]);
+}
+
 /// A program that does each operator on vectors of edge values, and the same operator on each
 /// lane as a scalar, and exits with 1 if a lane differs. The scalar side is in a function that is
 /// not inlined, so it is plain scalar code. A compare gives -1 or 0 in each lane. Every second lane
