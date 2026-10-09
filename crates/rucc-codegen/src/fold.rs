@@ -141,7 +141,7 @@
 use rucc_base::Interner;
 use rucc_base::hash::{Map, Set};
 use rucc_mir as mir;
-use rucc_target::{CodeModel, FrameInsts, MachineInsts, Role};
+use rucc_target::{FrameInsts, MachineInsts, Role};
 
 use crate::changes::{Changes, Plan, Reads};
 use crate::elsewhere::Elsewhere;
@@ -296,6 +296,10 @@ fn move_entries<T: Copy>(list: &mut Vec<(mir::Inst, T)>, from: mir::Inst, into: 
 /// stays where it is and the frame's offset is added to it later, which is why that write is an
 /// addition rather than an assignment.
 ///
+/// `absolute` is whether the address of a name is a number a register can go beside, which it is
+/// under the kernel code model and in i386 code that is not position independent. Elsewhere a name
+/// is reached from the instruction pointer and a reader's index has nowhere to go.
+///
 /// Run after lowering and before allocation, and run once. Running it twice can find more than
 /// running it once in principle: folding a `lea` into a second `lea` leaves that second one foldable
 /// in turn, and the walk below takes those in the one pass since it goes forwards, but it does not
@@ -313,9 +317,8 @@ pub fn addresses(
     machine: &MachineInsts,
     names: &mut Interner,
     pending: &mut Pending<'_>,
-    model: CodeModel,
+    absolute: bool,
 ) -> usize {
-    let absolute = model == CodeModel::Kernel;
     let lea = mir::Opcode::new(names.join(insts.prefix, insts.lea));
     let sum = mir::Opcode::new(names.join(insts.prefix, insts.sum));
     let step = mir::Opcode::new(names.join(insts.prefix, insts.add));
@@ -1294,6 +1297,7 @@ fn candidate(
 
 #[cfg(test)]
 mod tests {
+    use rucc_target::CodeModel;
     use rucc_target::x86_64::{FRAME, GPR, MACHINE, RDI, RSP};
 
     use super::*;
@@ -1327,7 +1331,7 @@ mod tests {
                 arguments: &mut arguments,
                 dynamic: &mut growable,
             },
-            model,
+            model == CodeModel::Kernel,
         )
     }
 
@@ -2154,10 +2158,7 @@ mod tests {
         let (mut locals, mut arguments, mut growable) = (vec![(local, 3)], Vec::new(), Vec::new());
         let mut pending =
             Pending { addresses: &mut locals, arguments: &mut arguments, dynamic: &mut growable };
-        assert_eq!(
-            addresses(&mut func, &FRAME, &MACHINE, &mut names, &mut pending, CodeModel::Small),
-            1
-        );
+        assert_eq!(addresses(&mut func, &FRAME, &MACHINE, &mut names, &mut pending, false), 1);
 
         let left = shape(&func, &names, block);
         assert_eq!(left.len(), 1, "the address is worked out twice: {left:?}");
@@ -2194,8 +2195,7 @@ mod tests {
         let (mut locals, mut arguments, mut growable) = (Vec::new(), vec![(local, 7)], Vec::new());
         let mut pending =
             Pending { addresses: &mut locals, arguments: &mut arguments, dynamic: &mut growable };
-        let folded =
-            addresses(&mut func, &FRAME, &MACHINE, &mut names, &mut pending, CodeModel::Small);
+        let folded = addresses(&mut func, &FRAME, &MACHINE, &mut names, &mut pending, false);
         assert!(locals.is_empty(), "an argument is owed off the other list");
         (folded, func.insts(block).collect(), arguments)
     }
