@@ -276,14 +276,14 @@ impl Predictions {
     /// For a pass that asks about one branch, changes the function and asks about the next. Asking
     /// [`Predictions::of`] after each change predicted the whole function each time, and on
     /// lz4hc.c at `-O2` that was a fifth of the compile, from phiopt and short-circuit alone. The
-    /// post-dominator tree is asked for only when the branch gets as far as the early return
-    /// predictor and a `return` is marked, so a caller that keeps one hands over the one it has.
+    /// early return table is asked for only when the branch gets as far as the early return
+    /// predictor, so a caller that keeps one hands over the one it has.
     #[must_use]
-    pub fn one<'a>(
+    pub(crate) fn one<'a>(
         func: &Func,
         cfg: &Cfg,
         loops: &Loops,
-        post: &dyn Fn() -> &'a PostDominators,
+        early: &dyn Fn() -> &'a Early,
         callees: &Callees,
         block: Block,
         index: usize,
@@ -292,12 +292,7 @@ impl Predictions {
         let returns = returning(func, cfg);
         let succs = cfg.successors(block);
         let edges = if succs.len() == 2 && func[term].opcode == Opcode::BrIf {
-            let any = OnceCell::new();
-            let ends = |at: Block, from: Block| {
-                *any.get_or_init(|| cfg.postorder().iter().any(|&block| marked(func, block)))
-                    && Early::bound(func, cfg, post(), at)
-                        .is_some_and(|ret| Early::bound(func, cfg, post(), from) != Some(ret))
-            };
+            let ends = |at: Block, from: Block| early().ends(at, from);
             let (taken, _) = branch(func, cfg, loops, callees, &returns, &ends, block);
             vec![taken, taken.complement()]
         } else {
@@ -449,14 +444,14 @@ fn marked(func: &Func, block: Block) -> bool {
 /// its paths part before they reach one. An edge from a block bound to nothing, or to another
 /// `return`, into a block bound to a marked one enters the part of the function that `return`
 /// post-dominates, which is the edge gcc's `predict_paths_leading_to` guesses is not taken.
-#[derive(Debug)]
-struct Early {
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) struct Early {
     bound: Vec<Option<Block>>,
 }
 
 impl Early {
     /// Binds every block, or none when no `return` is marked, which costs no post-dominator tree.
-    fn of(func: &Func, cfg: &Cfg) -> Self {
+    pub(crate) fn of(func: &Func, cfg: &Cfg) -> Self {
         let marked = |block: Block| marked(func, block);
         let mut bound = vec![None; cfg.capacity()];
         if !cfg.postorder().iter().any(|&block| marked(block)) {
@@ -485,17 +480,22 @@ impl Early {
         Self { bound }
     }
 
-    /// The marked `return` one block is bound to, found by walking up the tree from it, which is
-    /// what [`Early::of`] works out for that block without working it out for every other.
-    fn bound(func: &Func, cfg: &Cfg, pdoms: &PostDominators, block: Block) -> Option<Block> {
-        if !cfg.reaches(block) {
-            return None;
+    /// Folds the block that went away into the one that took over its edges, which is all a
+    /// table has to hear when a block was merged into the one block that reached it.
+    ///
+    /// Every path through the block that went away went through the one it was merged into first,
+    /// so every block reaches the same `return`s it did and no path parts where it did not. The
+    /// one thing that moves is a marked `return` that was itself merged, which now ends the block
+    /// it went into, and every block bound to it is bound to that one.
+    pub(crate) fn merged(&mut self, gone: Block, into: Block) {
+        if let Some(slot) = self.bound.get_mut(gone.index()) {
+            *slot = None;
         }
-        let mut at = block;
-        while let Some(up) = pdoms.immediate_post_dominator(at) {
-            at = up;
+        for slot in &mut self.bound {
+            if *slot == Some(gone) {
+                *slot = Some(into);
+            }
         }
-        marked(func, at).then_some(at)
     }
 
     /// Whether the edge from `from` to `at` enters the part of the function a marked `return`
@@ -809,9 +809,9 @@ mod tests {
         Type,
     };
 
-    use super::{Callees, Predictions, Predictor};
+    use super::{Callees, Early, Predictions, Predictor};
     use crate::cfg::Cfg;
-    use crate::dom::{Dominators, PostDominators};
+    use crate::dom::Dominators;
     use crate::loops::Loops;
     use crate::profile::{Probability, Quality};
 
@@ -830,10 +830,10 @@ mod tests {
         let seen = Predictions::of(func, &cfg, &loops, &Callees::nothing());
         for block in func.blocks() {
             for index in 0..=cfg.successors(block).len() {
-                let post = std::cell::OnceCell::new();
-                let post = || post.get_or_init(|| PostDominators::new(&cfg));
+                let early = std::cell::OnceCell::new();
+                let early = || early.get_or_init(|| Early::of(func, &cfg));
                 let one =
-                    Predictions::one(func, &cfg, &loops, &post, &Callees::nothing(), block, index);
+                    Predictions::one(func, &cfg, &loops, &early, &Callees::nothing(), block, index);
                 assert_eq!(one, seen.taken(block, index), "{block:?} edge {index}");
             }
         }
