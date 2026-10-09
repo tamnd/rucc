@@ -516,6 +516,11 @@ struct Reader {
     /// asking the linker, the way `.lcomm` does. Every name is local until something says
     /// otherwise, so the binding alone cannot tell these apart.
     said_local: Set<usize>,
+    /// The local names set to a name no file here defines, with that name and what was added to
+    /// it. A reference to one is a reference to the other name, and the set name itself is left
+    /// out of the table, as gas does. Linux 6.12's `header.S` sets `pecompat_fstart` to
+    /// `setup_size`, which only the linker script gives a value.
+    equated: Map<usize, (String, i64)>,
     /// The local commons given room in each part, by name and alignment, in the order the file
     /// wrote them. See [`Reader::join_subsections`].
     pooled: Map<usize, Vec<(usize, u64)>>,
@@ -3843,7 +3848,8 @@ impl Reader {
             // resolved to a number in the bytes by now, and gas writes no symbol for one either, so
             // an object this assembles has the same table as an object gas assembles from the same
             // file rather than a table with a made up name in it.
-            if sym.numbered && !self.relocated.contains(&index) {
+            if sym.numbered && !self.relocated.contains(&index) || self.equated.contains_key(&index)
+            {
                 continue;
             }
             let at = match sym.at {
@@ -4306,7 +4312,7 @@ impl Reader {
             let mut done = Vec::new();
             for (at, (sym, sum, line)) in self.sets.iter().enumerate() {
                 if let Ok(residue) = self.reduce(sum) {
-                    done.push((at, *sym, self.settled(&residue, *line)?));
+                    done.push((at, *sym, self.settled(*sym, &residue, *line)?));
                 }
             }
             if done.is_empty() {
@@ -4317,8 +4323,13 @@ impl Reader {
                 );
                 return Err(Trouble { line: *line, why });
             }
-            for (_, sym, held) in &done {
-                self.syms[*sym].at = *held;
+            for (_, sym, settled) in done.iter_mut() {
+                match std::mem::replace(settled, Settled::At(Held::Undefined)) {
+                    Settled::At(held) => self.syms[*sym].at = held,
+                    Settled::Outside(name, offset) => {
+                        self.equated.insert(*sym, (name, offset));
+                    }
+                }
             }
             // Backwards, so that removing one does not move the next one out from under its index.
             for (at, _, _) in done.iter().rev() {
@@ -4329,13 +4340,21 @@ impl Reader {
     }
 
     /// What one `.set` came out as.
-    fn settled(&self, residue: &Residue, line: usize) -> Result<Held, Trouble> {
+    fn settled(&self, sym: usize, residue: &Residue, line: usize) -> Result<Settled, Trouble> {
         match residue.left.as_slice() {
-            [] => Ok(Held::Absolute(residue.constant as u64)),
+            [] => Ok(Settled::At(Held::Absolute(residue.constant as u64))),
             // `.set alias, real`, which is how a file gives something a second name without a
             // second copy of it. The two end up at the same place in the same section.
-            [Left { coeff: 1, at: Some((part, offset)), .. }] => {
-                Ok(Held::In { part: *part, offset: (*offset + residue.constant) as u64 })
+            [Left { coeff: 1, at: Some((part, offset)), .. }] => Ok(Settled::At(Held::In {
+                part: *part,
+                offset: (*offset + residue.constant) as u64,
+            })),
+            // A name the linker has to find, which this one stands in for. A name another file can
+            // see would have to be in the table with a value, and there is none to give it.
+            [Left { coeff: 1, what: What::Symbol(name), at: None }]
+                if self.syms[sym].binding == Binding::Local =>
+            {
+                Ok(Settled::Outside(name.clone(), residue.constant))
             }
             _ => Err(Trouble {
                 line,
@@ -4981,6 +5000,11 @@ impl Reader {
                     let Some(&at) = self.known.get(name) else {
                         return Err(format!("'{name}' is named and never said"));
                     };
+                    if let Some((real, offset)) = self.equated.get(&at) {
+                        constant += term.coeff * offset;
+                        outside.push((term.coeff, real.clone()));
+                        continue;
+                    }
                     match self.syms[at].at {
                         Held::Absolute(value) => constant += term.coeff * value as i64,
                         Held::In { part, offset } => placed.entry(part).or_default().push((
@@ -5024,6 +5048,14 @@ impl Reader {
         }
         Ok(Residue { constant, left })
     }
+}
+
+/// What a `.set` came out as: a place or a number, or another name with something added to it
+/// when that name is not defined here.
+#[derive(Debug)]
+enum Settled {
+    At(Held),
+    Outside(String, i64),
 }
 
 /// What an expression came out as: a number, and the names that would not cancel.
@@ -7194,6 +7226,23 @@ _tls$tlv$init:
         assert_eq!(marked("\tret\n", true), 1);
         let said = "\tret\n\t.section .note.GNU-stack,\"\",@progbits\n";
         assert_eq!((marked(said, false), marked(said, true)), (1, 1));
+    }
+
+    #[test]
+    fn a_name_set_to_a_name_from_elsewhere_stands_for_it() {
+        // Linux 6.12's `arch/x86/boot/header.S` without EFI mixed mode sets `pecompat_fstart` to
+        // `setup_size`, which the linker script defines, and uses it on a line above. gas and
+        // `llvm-mc` write both uses against `setup_size` and leave the set name out of the table.
+        let out = assembled(
+            "\t.long pecompat_fstart - 0x1000\n\t.set pecompat_fstart, setup_size + 8\n\t.set \
+             second, pecompat_fstart - 2\n\t.quad second\n",
+        );
+        let relocs = relocated(&out, ".text");
+        let addends: Vec<(usize, &str, i64)> =
+            relocs.iter().map(|(at, name, _, addend)| (*at, name.as_str(), *addend)).collect();
+        assert_eq!(addends, [(0, "setup_size", 8 - 0x1000), (4, "setup_size", 6)]);
+        assert!(out.names.iter().all(|n| n.name != "pecompat_fstart" && n.name != "second"));
+        assert_eq!(name(&out, "setup_size").at, Held::Undefined);
     }
 
     #[test]
