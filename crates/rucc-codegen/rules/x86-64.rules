@@ -531,6 +531,32 @@
       (x64.shrd_ri_64 x y j)
       (spec (= (bvor (bvlshr x j) (bvshl y k)) (result))))
 
+;; A count masked to the width is what the machine does with one anyway.
+
+(rule (lower (shl.i32 (value.i32 x) (and.i32 (value.i32 n) (iconst.i32 31))))
+      (x64.shl_rcl_32 x n)
+      (spec (= (bvshl x (bvand n 31)) (result))))
+
+(rule (lower (lshr.i32 (value.i32 x) (and.i32 (value.i32 n) (iconst.i32 31))))
+      (x64.shr_rcl_32 x n)
+      (spec (= (bvlshr x (bvand n 31)) (result))))
+
+(rule (lower (ashr.i32 (value.i32 x) (and.i32 (value.i32 n) (iconst.i32 31))))
+      (x64.sar_rcl_32 x n)
+      (spec (= (bvashr x (bvand n 31)) (result))))
+
+(rule (lower (shl.i64 (value.i64 x) (and.i64 (value.i64 n) (iconst.i64 63))))
+      (x64.shl_rcl_64 x n)
+      (spec (= (bvshl x (bvand n 63)) (result))))
+
+(rule (lower (lshr.i64 (value.i64 x) (and.i64 (value.i64 n) (iconst.i64 63))))
+      (x64.shr_rcl_64 x n)
+      (spec (= (bvlshr x (bvand n 63)) (result))))
+
+(rule (lower (ashr.i64 (value.i64 x) (and.i64 (value.i64 n) (iconst.i64 63))))
+      (x64.sar_rcl_64 x n)
+      (spec (= (bvashr x (bvand n 63)) (result))))
+
 ;; Byte reversals. Two widths are `bswap` and the sixteen bit one is a rotate by eight, which
 ;; is the same answer and the instruction gcc writes for it.
 (rule (lower (bswap.i16 (value.i16 x)))

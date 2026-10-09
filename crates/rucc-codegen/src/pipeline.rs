@@ -46,6 +46,7 @@ use crate::combine;
 use crate::compare;
 use crate::copies;
 use crate::coverage::Fired;
+use crate::double;
 use crate::elsewhere::Elsewhere;
 use crate::expand;
 use crate::finish::{Convention, Padding, Probing, Protect, Tracing, far, finish};
@@ -910,6 +911,8 @@ pub fn compile_recording(
     // name. See [`crate::carry`].
     if machine.shapes.prefix == "x64." {
         carry::carries(&mut func, machine.shapes, names);
+        // The same moment for the same reason. See [`crate::double`].
+        double::doubles(&mut func, machine.shapes, names);
     }
     bits::dead(&mut func, machine.bits, machine.shapes, names);
     // A `cset` has already cleared everything above the bit it wrote, so the `and` that widens

@@ -49,10 +49,10 @@ use Form::{
     ConvertFromVec, ConvertToVec, ConvertVec, CpuId, CtrlX87, DivQuo, DivRem, DivWide, Exchange,
     Jcc, Jmp, JmpAway, JmpMem, JmpReg, Landing, Lea, Literal, Load, LoadImm, LoadVec, Move,
     MoveVec, MulHigh, MulRi, MulWide, Nop, Pop, PopX87, Prefetch, Push, PushX87, Ret, RetPop,
-    RetVal, RetVal2, RetVal2Vec, RetValVec, Rmw, Scan, Search, Set, ShiftCl, ShiftDouble, ShiftRi,
-    ShiftVec, ShuffleVec, Spin, Store, StoreImm, StoreVec, StrCompare, StrCompareRep, StrLoad,
-    StrMove, StrMoveRep, StrScan, StrScanRep, StrStore, StrStoreRep, Swap, SwapHalves, Template,
-    Test, TestCmov, TestRi, Trap, UnaryM, UnaryR, UnaryX87,
+    RetVal, RetVal2, RetVal2Vec, RetValVec, Rmw, Scan, Search, Set, ShiftCl, ShiftDouble,
+    ShiftDoubleCl, ShiftRi, ShiftVec, ShuffleVec, Spin, Store, StoreImm, StoreVec, StrCompare,
+    StrCompareRep, StrLoad, StrMove, StrMoveRep, StrScan, StrScanRep, StrStore, StrStoreRep, Swap,
+    SwapHalves, Template, Test, TestCmov, TestRi, Trap, UnaryM, UnaryR, UnaryX87,
 };
 
 /// The operand vector one machine instruction has.
@@ -180,6 +180,9 @@ pub enum Form {
     /// is `shld` and `shrd`. The pair of words a `long long` shift on i386 is put back together
     /// with one of these where it was two shifts and an or.
     ShiftDouble,
+    /// The same by a count in `cl`, which is how the words of a `long long` shifted by a variable
+    /// are put together.
+    ShiftDoubleCl,
     /// A comparison and the byte it sets, which writes a destination unrelated to either
     /// source rather than destroying one of them.
     CmpSet,
@@ -984,6 +987,13 @@ static SHIFT_CL: [OperandDesc; 3] = [
     OperandDesc::read(GPR),
     OperandDesc::read(GPR).with(Constraint::Fixed(RCX)),
 ];
+// `SHIFT_CL` with the register the vacated bits come from in front of the count.
+static SHIFT_DOUBLE_CL: [OperandDesc; 4] = [
+    OperandDesc::write(GPR).with(Constraint::Reuse(1)),
+    OperandDesc::read(GPR),
+    OperandDesc::read(GPR),
+    OperandDesc::read(GPR).with(Constraint::Fixed(RCX)),
+];
 static LOAD_IMM: [OperandDesc; 1] = [OperandDesc::write(GPR)];
 static ONE_TO_ONE: [OperandDesc; 2] = [OperandDesc::write(GPR), OperandDesc::read(GPR)];
 static SCAN: [OperandDesc; 3] =
@@ -1277,6 +1287,7 @@ impl Form {
             SwapHalves => &SWAP_HALVES,
             Exchange => &EXCHANGE,
             ShiftCl => &SHIFT_CL,
+            ShiftDoubleCl => &SHIFT_DOUBLE_CL,
             CmpSet => &TWO_TO_ONE,
             CmpSetRi | CmpSetRm | MulRi => &ONE_TO_ONE,
             Cmp => &CMP,
@@ -1811,6 +1822,10 @@ pub static INSTS: &[(&str, Form)] = &[
     ("shld_ri_64", ShiftDouble),
     ("shrd_ri_32", ShiftDouble),
     ("shrd_ri_64", ShiftDouble),
+    ("shld_rcl_32", ShiftDoubleCl),
+    ("shld_rcl_64", ShiftDoubleCl),
+    ("shrd_rcl_32", ShiftDoubleCl),
+    ("shrd_rcl_64", ShiftDoubleCl),
     // Shifts by a register, which is `cl` and nothing else.
     ("shl_rcl_8", ShiftCl),
     ("shl_rcl_16", ShiftCl),
@@ -2720,7 +2735,7 @@ mod tests {
         // Every head in the model file, which is what the rule set may write and what
         // `rucc-verify` has an answer for. The two lists are checked against each other by
         // `rucc-codegen`, which is the crate that can read the rule set.
-        assert_eq!(described, 821);
+        assert_eq!(described, 825);
     }
 
     #[test]
@@ -2807,7 +2822,7 @@ mod tests {
 
     #[test]
     fn a_two_address_form_ties_its_destination_to_its_first_source() {
-        for form in [AluRr, AluRi, UnaryR, ShiftRi, ShiftCl, ShiftDouble, AluVec] {
+        for form in [AluRr, AluRi, UnaryR, ShiftRi, ShiftCl, ShiftDouble, ShiftDoubleCl, AluVec] {
             assert_eq!(form.operands()[0].constraint, Constraint::Reuse(1));
         }
         // The float arithmetic is in the other class throughout, which is the whole reason it is a
@@ -2906,6 +2921,8 @@ mod tests {
         assert!(!ShiftCl.takes_imm());
         assert!(ShiftRi.takes_imm());
         assert!(ShiftDouble.takes_imm() && ShiftDouble.operands().len() == 3);
+        assert_eq!(ShiftDoubleCl.operands()[3].constraint, Constraint::Fixed(RCX));
+        assert!(!ShiftDoubleCl.takes_imm());
     }
 
     #[test]

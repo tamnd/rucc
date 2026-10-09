@@ -109,7 +109,7 @@ fn plain(form: Form) -> Timing {
         ShiftCl => (2, Unit::Int),
         // A shift that reads two registers and fills one from the other, which is three cycles on
         // the cores of this family that do it in one step and about that on the ones that do not.
-        ShiftDouble => (3, Unit::Int),
+        ShiftDouble | ShiftDoubleCl => (3, Unit::Int),
         // A search for a set bit and the counts spelled the same way, which are the slowest
         // instructions on this side that are not divides. Three cycles is what every core in this
         // family has published for all four of them, and it is three rather than one because what

@@ -515,6 +515,11 @@ mod tests {
         "sbb_ri_64",
     ];
 
+    /// The shifts of one word by `cl` that fill it from a second, which `crate::double` writes
+    /// after selection out of the shifts and the `or` that `crate::wide` puts a two word shift
+    /// together with. The pattern is four levels deep and a rule reaches one.
+    const DOUBLE: &[&str] = &["shld_rcl_32", "shld_rcl_64", "shrd_rcl_32", "shrd_rcl_64"];
+
     const CONDITIONAL: &[&str] = &[
         "cmov_e_16",
         "cmov_e_32",
@@ -1091,7 +1096,7 @@ mod tests {
             if CONDITIONAL.contains(&opcode) {
                 continue;
             }
-            if CARRY.contains(&opcode) {
+            if CARRY.contains(&opcode) || DOUBLE.contains(&opcode) {
                 continue;
             }
             if COMPARE.contains(&opcode) || TEMPLATE.contains(&opcode) {
