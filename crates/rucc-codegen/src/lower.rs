@@ -11260,7 +11260,7 @@ mod tests {
             let elsewhere = Elsewhere::default().with_models([(names.intern("own"), model)]);
             let conv = &aarch64::AAPCS64;
             let selector = &crate::select::aarch64::SELECTOR;
-            let out = super::func(&source, &mut names, selector, conv, &elsewhere)
+            let out = func(&source, &mut names, selector, conv, &elsewhere)
                 .expect("every instruction has a rule");
             let text = mir::print_func(&out.func, &names, &aarch64::REGS);
             assert!(text.contains(":tlsdesc:"), "{text}");
