@@ -94,6 +94,9 @@ pub fn before(func: &Func) -> Vec<Inst> {
 /// declaration, how far the bytes are from the call frame address and where the local is wanted.
 /// Each of them is in the frame over that area and nowhere outside it, which is the same question
 /// as a spilled value and gets the same answer.
+///
+/// `unread` is the spill slots whose stores went because nothing read them back, and a value the
+/// allocator put in one of those is nowhere a debugger can read it.
 #[must_use]
 pub fn of(
     func: &Func,
@@ -101,6 +104,7 @@ pub fn of(
     allocation: &Allocation,
     frame: &Frame,
     framed: &[(u32, i32, &[Range])],
+    unread: &[u32],
 ) -> Vec<Kept> {
     if func.named.is_empty() && func.starts.is_empty() && framed.is_empty() {
         return Vec::new();
@@ -108,7 +112,7 @@ pub fn of(
     let line = line(func, before, allocation);
     let mut out = Vec::new();
     for &(decl, reg) in &func.named {
-        let Some(at) = place(func, allocation, frame, reg) else { continue };
+        let Some(at) = place(func, allocation, frame, unread, reg) else { continue };
         let Some(area) = allocation.live.area(reg) else { continue };
         let held = |run: &Run, piece: Range| !other(func, decl, reg, run, piece);
         over(decl, at, area.pieces(), &line, held, &mut out);
@@ -121,7 +125,7 @@ pub fn of(
     let mut tree: Option<Tree> = None;
     for &(decl, reg, first) in &func.starts {
         let Some(block) = func.block_of(first) else { continue };
-        let Some(at) = place(func, allocation, frame, reg) else { continue };
+        let Some(at) = place(func, allocation, frame, unread, reg) else { continue };
         let Some(area) = allocation.live.area(reg) else { continue };
         let tree = tree.get_or_insert_with(|| Tree::of(func));
         for piece in area.pieces() {
@@ -144,10 +148,17 @@ pub fn of(
 
 /// Where the allocator put a register, as a place a debugger can read, or `None` for a register
 /// it put nowhere or in a slot this frame cannot name.
-fn place(func: &Func, allocation: &Allocation, frame: &Frame, reg: Reg) -> Option<Where> {
+fn place(
+    func: &Func,
+    allocation: &Allocation,
+    frame: &Frame,
+    unread: &[u32],
+    reg: Reg,
+) -> Option<Where> {
     let class = func.class_of(reg)?;
     match allocation.assignment.place(reg)? {
         Place::Reg(reg) => Some(Where::Reg { reg, class }),
+        Place::Slot(slot) if unread.contains(&slot) => None,
         Place::Slot(slot) => frame.slot_from_frame_base(slot).map(Where::Frame),
     }
 }
@@ -496,7 +507,7 @@ mod tests {
         let env = Env::new().with(GPR, &SYSV.int_order[..4], &SYSV.int_order[4..]);
         let allocation = rucc_regalloc::run(func, &env, "test", true);
         let frame = Frame::of(func, &allocation, &Layout::new(&SYSV, REGS));
-        of(func, line, &allocation, &frame, &[])
+        of(func, line, &allocation, &frame, &[], &[])
     }
 
     #[test]
@@ -601,7 +612,7 @@ mod tests {
         // and the third is where whatever it shares them with may have written over it.
         let order = &allocation.order;
         let area = [Range { start: order.early(line[0]), end: order.late(line[1]) }];
-        let kept = of(&func, &line, &allocation, &frame, &[(41, -24, &area)]);
+        let kept = of(&func, &line, &allocation, &frame, &[(41, -24, &area)], &[]);
         assert_eq!(kept, [Kept { decl: 41, at: Where::Frame(-24), from: line[1], to: line[1] }]);
     }
 
@@ -662,7 +673,7 @@ mod tests {
         // register holds it over the third only, and the first is before it was written.
         func.remove_inst(line[0]);
         func.insert_after(line[1], line[0]);
-        let kept = of(&func, &line, &allocation, &frame, &[]);
+        let kept = of(&func, &line, &allocation, &frame, &[], &[]);
         assert_eq!(kept.len(), 1, "one stretch: {kept:?}");
         assert_eq!((kept[0].from, kept[0].to), (line[2], line[2]));
     }
@@ -681,7 +692,7 @@ mod tests {
         let block = func.blocks().next().expect("one block");
         let (start, end) = allocation.order.bounds(block).expect("laid out");
         let area = [Range { start, end }];
-        let kept = of(&func, &line, &allocation, &frame, &[(41, -8, &area)]);
+        let kept = of(&func, &line, &allocation, &frame, &[(41, -8, &area)], &[]);
         assert_eq!(kept, [Kept { decl: 41, at: Where::Frame(-8), from: line[1], to: line[2] }]);
     }
 }

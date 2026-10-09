@@ -205,7 +205,9 @@ fn a_long_long_shift_by_a_register_fills_a_word_from_the_other() {
 /// The kernel's `xda_le` from `gf128mul.c`, a row of `?:` on the bits of a `u64` that is known to
 /// fit in a byte. Each bit is a `test` and a `cmov` on its own zero, where it was an `and` of a
 /// copy, the high words asked about with `xorl $0` and an `or`, and a zero shared by all eight that
-/// went to the stack and was loaded back for each of them.
+/// went to the stack and was loaded back for each of them. Once that zero stayed in a register the
+/// byte itself still went to the frame at the top, written for reads the cleanup had all served out
+/// of `esi`, and nothing is written there now.
 #[test]
 fn a_long_long_bit_row_keeps_its_zeros_out_of_the_stack() {
     for level in ["-O1", "-O2", "-Os"] {
@@ -219,5 +221,8 @@ fn a_long_long_bit_row_keeps_its_zeros_out_of_the_stack() {
         assert!(!text.contains("\torl\t"), "{level}\n{text}");
         // The two words of the argument and nothing else read from the frame.
         assert_eq!(text.matches("(%esp), %").count(), 2, "{level}\n{text}");
+        let stored =
+            text.lines().filter(|line| line.starts_with("\tmovl\t%") && line.ends_with("(%esp)"));
+        assert_eq!(stored.count(), 0, "{level}: a store nothing reads back\n{text}");
     }
 }

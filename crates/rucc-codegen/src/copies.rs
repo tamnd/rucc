@@ -154,7 +154,7 @@
 //! Nothing crosses a block, on either half.
 
 use rucc_base::Interner;
-use rucc_base::hash::Map;
+use rucc_base::hash::{Map, Set};
 use rucc_mir::{Block, Constraint, Func, Inst, Opcode, Operand, Reg};
 use rucc_regalloc::assign::Place;
 use rucc_regalloc::rewrite::Edit;
@@ -247,6 +247,54 @@ pub fn clean(
         }
     }
     cleaned
+}
+
+/// Takes out every store of the allocator's into a slot that none of its moves reads any more, and
+/// gives back those slots.
+///
+/// [`clean`] takes out a read of a slot whose word a register still holds, and when it has taken
+/// out every read of a slot the stores into it are left writing a word nobody asks for. A row of
+/// `cmov`s on i386 that ran short of registers for a moment kept one of its values in `esi` the
+/// whole way and still wrote it to the frame at the top, because the allocator had planned to read
+/// it back from there and the cleanup found every one of those reads already in `esi`.
+///
+/// A spill slot is read by nothing but the allocator's own moves, which is the argument [`clean`]
+/// is built on, so a slot none of them reads is one nothing reads. An operand the allocator was
+/// told has to be on the stack is the exception, since the instruction reads the slot itself, and
+/// a function with one is left as it is. The slots come back for the debug information, which
+/// would otherwise say a value is in a slot nothing wrote.
+pub fn unread(func: &mut Func, moves: &Moves) -> Vec<u32> {
+    let mut read: Set<u32> = Set::default();
+    let mut stores: Vec<(Inst, u32)> = Vec::new();
+    for block in func.blocks() {
+        for inst in func.insts(block) {
+            let Some(edit) = moves.at(inst) else {
+                if func[func[inst].operands]
+                    .iter()
+                    .any(|operand| operand.constraint == Constraint::Stack)
+                {
+                    return Vec::new();
+                }
+                continue;
+            };
+            if let Place::Slot(slot) = edit.mov.from {
+                read.insert(slot);
+            }
+            if let Place::Slot(slot) = edit.mov.to {
+                stores.push((inst, slot));
+            }
+        }
+    }
+    let mut gone: Vec<u32> = Vec::new();
+    for (inst, slot) in stores {
+        if !read.contains(&slot) {
+            func.remove_inst(inst);
+            gone.push(slot);
+        }
+    }
+    gone.sort_unstable();
+    gone.dedup();
+    gone
 }
 
 /// Takes out every copy of a register into itself, and gives back how many it took out.
@@ -731,6 +779,38 @@ mod tests {
         assert_eq!(gone(&mut func, &moves, &mut names), 1);
         assert_eq!(left(&func, block), 1, "the spill went too, or the reload stayed");
         assert_eq!(func.insts(block).next(), Some(spill));
+    }
+
+    /// The spill of that pair once its reload has gone, since nothing reads the slot after that.
+    #[test]
+    fn a_spill_whose_every_reload_went_goes_after_them() {
+        let (mut names, mut func, block) = empty();
+        let spill = store(&mut func, &mut names, block, R10, 16);
+        let reload = load(&mut func, &mut names, block, R10, 16);
+        let mut moves = Moves::default();
+        moves.record(spill, out(block, 0, R10));
+        moves.record(reload, back(block, 0, R10));
+        gone(&mut func, &moves, &mut names);
+
+        assert_eq!(unread(&mut func, &moves), [0]);
+        assert_eq!(left(&func, block), 0);
+    }
+
+    /// A spill whose slot is still read back somewhere stays, and so does every other store into
+    /// that slot.
+    #[test]
+    fn a_spill_of_a_slot_still_read_stays() {
+        let (mut names, mut func, block) = empty();
+        let spill = store(&mut func, &mut names, block, R10, 16);
+        add(&mut func, &mut names, block, R10, RAX);
+        let reload = load(&mut func, &mut names, block, R10, 16);
+        let mut moves = Moves::default();
+        moves.record(spill, out(block, 0, R10));
+        moves.record(reload, back(block, 0, R10));
+        gone(&mut func, &moves, &mut names);
+
+        assert!(unread(&mut func, &moves).is_empty());
+        assert_eq!(left(&func, block), 3);
     }
 
     /// Two reads of one word, which is one spill and two reloads, and the second is as dead as the
