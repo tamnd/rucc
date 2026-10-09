@@ -38,8 +38,8 @@ pub struct Call {
     /// Whether this is a call to a variadic function under [`Variadic::IntegersOnly`], where every
     /// argument is classified as though the vector registers were not there.
     integers_only: bool,
-    /// Whether the argument asked about now is past the `...`, which only [`Test::Vector`] and
-    /// [`Test::WholeVector`] read.
+    /// Whether the argument asked about now is past the `...`, which only [`Test::Vector`],
+    /// [`Test::WholeVector`] and [`Test::VariadicVector`] read.
     past_dots: bool,
 }
 
@@ -313,6 +313,7 @@ impl Call {
                 None
             }
             Test::WholeVector { .. } => Some(vector_slots(shape.size)),
+            Test::VariadicVector => (self.past_dots && shape.vector).then(Vec::new),
             Test::ComplexFloat => {
                 (shape.complex && shape.is_all_of(Format::Single) && shape.size == 8).then(Vec::new)
             }

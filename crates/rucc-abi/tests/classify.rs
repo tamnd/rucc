@@ -973,11 +973,12 @@ fn wasm_passes_each_lane_of_a_vector_as_its_own_scalar() {
     let lanes = Pass::Pieces(vec![fpr(0, Format::Double), fpr(8, Format::Double)]);
     assert_eq!(wasm().argument(&Arg::Aggregate(vector)), lanes);
 
-    // Past the `...` clang reads the bytes of a vector and not its lanes. This classifier gives
-    // the address of a copy there, the same as for any other aggregate.
+    // Past the `...` clang reads the bytes of a vector and not its lanes, so the bytes are in the
+    // variadic area. Any other aggregate there is the address of a copy.
     let members = pieces(&[int(4), int(4)]);
     let vector = Shape { vector: true, ..record(&members) };
-    assert_eq!(wasm().variadic_argument(&Arg::Aggregate(vector)), Pass::Reference);
+    assert_eq!(wasm().variadic_argument(&Arg::Aggregate(vector)), Pass::Memory);
+    assert_eq!(wasm().variadic_argument(&Arg::Aggregate(record(&members))), Pass::Reference);
 }
 
 #[test]
@@ -1010,13 +1011,13 @@ fn wasm_with_simd128_passes_a_vector_as_v128_values() {
     assert_eq!(simd().returns(&Arg::Aggregate(vector)), Pass::Reference);
 
     // A scalar and a structure of one scalar are the same as without the feature, and so is a
-    // vector past the `...`, which is tamnd/rucc#3453.
+    // vector past the `...`, whose bytes are in the variadic area.
     assert_eq!(simd().argument(&Arg::Scalar(int(4))), Pass::Direct);
     let members = pieces(&[int(4)]);
     assert_eq!(simd().argument(&Arg::Aggregate(record(&members))), Pass::Pieces(vec![gpr(0, 4)]));
     let members = pieces(&[int(4); 4]);
     let vector = Shape { vector: true, ..record(&members) };
-    assert_eq!(simd().variadic_argument(&Arg::Aggregate(vector)), Pass::Reference);
+    assert_eq!(simd().variadic_argument(&Arg::Aggregate(vector)), Pass::Memory);
 }
 
 #[test]

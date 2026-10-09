@@ -782,8 +782,10 @@ impl Convention {
 /// else, which travels as that scalar. A GNU vector is each of its lanes, because clang passes it
 /// as a vector value and LLVM splits that value into its lanes when `simd128` is off. That is the
 /// whole of clang's `WebAssemblyABIInfo` for C.
-/// The same goes for one past the `...`: the variadic area holds the address of the copy and not
-/// the bytes, which is what clang's `va_arg` on wasm reads back. A return value that is not one
+/// The same goes for an aggregate past the `...`: the variadic area holds the address of the copy
+/// and not the bytes, which is what clang's `va_arg` on wasm reads back. A vector past the `...` is
+/// different. Its bytes are in the area, on a boundary of its alignment, because clang's `va_arg`
+/// reads them there. A return value that is not one
 /// scalar comes back through a hidden first parameter, which is the address the caller wants it
 /// written to.
 ///
@@ -811,6 +813,7 @@ pub static WASM32_BASIC_C: AbiDescription = AbiDescription {
     ],
     arguments: &[
         Rule::new(Test::Empty, Travel::Ignore),
+        Rule::new(Test::VariadicVector, Travel::InMemory),
         Rule::new(Test::SingleScalar, Travel::AsFound),
         Rule::new(Test::Vector, Travel::AsFound),
         Rule::new(Test::Anything, Travel::ByReference),
@@ -845,6 +848,7 @@ pub static WASM32_SIMD128: AbiDescription = AbiDescription {
     ],
     arguments: &[
         Rule::new(Test::Empty, Travel::Ignore),
+        Rule::new(Test::VariadicVector, Travel::InMemory),
         Rule::new(Test::WholeVector { limit: u64::MAX }, Travel::AsFound),
         Rule::new(Test::SingleScalar, Travel::AsFound),
         Rule::new(Test::Anything, Travel::ByReference),

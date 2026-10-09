@@ -5,6 +5,7 @@
 //! vector and nothing else goes the same way as the vector.
 
 use std::io::Write as _;
+use std::path::{Path, PathBuf};
 use std::process::{Command, Output, Stdio};
 
 /// The output of rucc for `source` on stdin, with `-S` to stdout at `-O2` on wasm32-wasip1.
@@ -97,4 +98,108 @@ fn with_simd128_a_vector_is_one_v128_for_each_sixteen_bytes() {
     ] {
         assert!(text.contains(line), "no {line:?} in\n{text}");
     }
+}
+
+#[test]
+fn past_the_dots_the_bytes_of_a_vector_are_in_the_variadic_area() {
+    let source = "typedef int v4si __attribute__((vector_size(16)));\n\
+                  void take(int n, ...);\n\
+                  void give(v4si v) { take(1, 5, v, 7); }\n";
+    for flags in [&[][..], &["-msimd128"]] {
+        let out = assembly_with(source, flags);
+        assert!(out.status.success(), "{}", String::from_utf8_lossy(&out.stderr));
+        let text = String::from_utf8(out.stdout).unwrap();
+        // The `5` at 0, the sixteen bytes at 16, which is the alignment of the vector, and the
+        // `7` after them at 32, as clang puts them.
+        for line in
+            ["\ti32.store\t0\n", "\ti64.store\t16\n", "\ti64.store\t24\n", "\ti32.store\t32\n"]
+        {
+            assert!(text.contains(line), "{flags:?}: no {line:?} in\n{text}");
+        }
+    }
+}
+
+/// The callee of the run test, which reads a vector of 16 bytes and one of 32 past the `...`.
+const TAKE: &str = "\
+#include <stdarg.h>
+typedef int v4si __attribute__((vector_size(16)));
+typedef int v8si __attribute__((vector_size(32)));
+int take(int n, ...) {
+    va_list ap;
+    va_start(ap, n);
+    int a = va_arg(ap, int);
+    v4si v = va_arg(ap, v4si);
+    int b = va_arg(ap, int);
+    v8si w = va_arg(ap, v8si);
+    int c = va_arg(ap, int);
+    va_end(ap);
+    return a == 5 && v[0] == 1 && v[3] == 4 && b == 7 && w[0] == 10 && w[7] == 80 && c == 9 ? 0 : 1;
+}
+";
+
+/// The caller of the run test.
+const GIVE: &str = "\
+typedef int v4si __attribute__((vector_size(16)));
+typedef int v8si __attribute__((vector_size(32)));
+int take(int n, ...);
+int main(void) {
+    v4si v = {1, 2, 3, 4};
+    v8si w = {10, 20, 30, 40, 50, 60, 70, 80};
+    return take(0, 5, v, 7, w, 9);
+}
+";
+
+fn on_path(program: &str) -> Option<PathBuf> {
+    let path = std::env::var_os("PATH")?;
+    std::env::split_paths(&path).map(|dir| dir.join(program)).find(|file| file.is_file())
+}
+
+fn run(program: &Path, args: &[&str], dir: &Path) {
+    let out = Command::new(program)
+        .env("LC_ALL", "C")
+        .current_dir(dir)
+        .args(args)
+        .output()
+        .expect("the program starts");
+    assert!(out.status.success(), "{args:?}: {}", String::from_utf8_lossy(&out.stderr));
+}
+
+#[test]
+fn a_vector_past_the_dots_reaches_a_callee_from_rucc_or_clang() {
+    let Some(sdk) = std::env::var_os("WASI_SDK_PATH").map(PathBuf::from) else {
+        eprintln!("WASI_SDK_PATH is not set, so the program was not linked");
+        return;
+    };
+    let Some(wasmtime) = on_path("wasmtime") else {
+        eprintln!("there is no wasmtime on PATH, so the program was not run");
+        return;
+    };
+    let dir = std::env::temp_dir().join(format!("rucc-wasm-vectors-{}", std::process::id()));
+    std::fs::create_dir_all(&dir).unwrap();
+    std::fs::write(dir.join("take.c"), TAKE).unwrap();
+    std::fs::write(dir.join("give.c"), GIVE).unwrap();
+    let rucc = PathBuf::from(env!("CARGO_BIN_EXE_rucc"));
+    let clang = sdk.join("bin/clang");
+    let sysroot = format!("--sysroot={}", sdk.join("share/wasi-sysroot").display());
+    let target = "--target=wasm32-wasip1";
+    for flags in [&[][..], &["-msimd128"]] {
+        let compile = |out: &'static str, file: &'static str| {
+            [&[target, "-O2", "-c", file, "-o", out], flags].concat()
+        };
+        run(&rucc, &compile("give.o", "give.c"), &dir);
+        run(&rucc, &compile("take.o", "take.c"), &dir);
+        let mut callees = vec!["take.o"];
+        if clang.exists() {
+            let mut args = compile("clang.o", "take.c");
+            args.push(&sysroot);
+            run(&clang, &args, &dir);
+            callees.push("clang.o");
+        }
+        for callee in callees {
+            run(&rucc, &[target, "give.o", callee, "-o", "t.wasm"], &dir);
+            let status = Command::new(&wasmtime).arg(dir.join("t.wasm")).status().unwrap();
+            assert!(status.success(), "{flags:?} with {callee}: {status}");
+        }
+    }
+    std::fs::remove_dir_all(dir).unwrap();
 }

@@ -81,17 +81,34 @@ fn va_slot(ty: Type) -> Result<(u32, u32)> {
     }
 }
 
-/// The offset of each extra argument in the buffer, and the size of the buffer.
-fn va_layout(types: impl Iterator<Item = Type>) -> Result<(Vec<u32>, u32)> {
+/// The same for an extra argument that the ABI of the call says something about. An object that
+/// travels by value is its own bytes, which is a GNU vector past the `...` (tamnd/rucc#3453). Its
+/// slot is its size rounded up to 4, on a boundary of its alignment, which is where clang's
+/// `va_arg` reads it.
+fn va_extra(ty: Type, abi: Abi) -> Result<(u32, u32)> {
+    match abi {
+        Abi::ByVal { size, align, .. } => {
+            let size = u32::try_from(size).map_err(|_| "a huge variadic argument".to_owned())?;
+            Ok((size.next_multiple_of(4), align.max(4)))
+        }
+        _ => va_slot(ty),
+    }
+}
+
+/// The offset of each extra argument in the buffer, the size of the buffer, and the alignment
+/// the buffer needs.
+fn va_layout(extra: impl Iterator<Item = (Type, Abi)>) -> Result<(Vec<u32>, u32, u32)> {
     let mut offsets = Vec::new();
     let mut at = 0u32;
-    for ty in types {
-        let (size, align) = va_slot(ty)?;
+    let mut most = 16;
+    for (ty, abi) in extra {
+        let (size, align) = va_extra(ty, abi)?;
         at = at.next_multiple_of(align);
         offsets.push(at);
         at += size;
+        most = most.max(align);
     }
-    Ok((offsets, at))
+    Ok((offsets, at, most))
 }
 
 /// The opcode of a load into a value of type `ty`, and the natural alignment of the access.
@@ -493,6 +510,7 @@ impl Lower<'_, '_> {
     fn plan(&mut self) -> Result<()> {
         let func = self.func;
         let mut va = 0u32;
+        let mut va_align = 16;
         let mut scratch = false;
         let mut allocas = Vec::new();
         for block in self.blocks() {
@@ -516,8 +534,13 @@ impl Lower<'_, '_> {
                             let args = self.args(inst);
                             let skip = usize::from(func[info].callee.is_none());
                             let fixed = sig.params.iter().filter(|p| !p.ty.is_mem()).count();
-                            let extra = args[skip + fixed..].iter().map(|&v| func[v].ty);
-                            va = va.max(va_layout(extra)?.1);
+                            let abis = &func[func[info].varargs];
+                            let extra = args[skip + fixed..].iter().enumerate().map(|(i, &v)| {
+                                (func[v].ty, abis.get(i).copied().unwrap_or(Abi::Plain))
+                            });
+                            let (_, size, align) = va_layout(extra)?;
+                            va = va.max(size);
+                            va_align = va_align.max(align);
                         }
                     }
                     _ => {}
@@ -529,7 +552,7 @@ impl Lower<'_, '_> {
             self.frame.scratch = Some(at);
             at += 32;
         }
-        let mut align = 16;
+        let mut align = va_align;
         for (inst, size, a) in allocas {
             at = at.next_multiple_of(a);
             self.frame.slots.insert(inst, at);
@@ -2612,9 +2635,17 @@ impl Lower<'_, '_> {
             if extra.is_empty() {
                 self.code.i32_const(0);
             } else {
-                let (offsets, _) = va_layout(extra.iter().map(|&v| func[v].ty))?;
+                let abis = &func[info.varargs];
+                let abi = |i: usize| abis.get(i).copied().unwrap_or(Abi::Plain);
+                let (offsets, ..) =
+                    va_layout(extra.iter().enumerate().map(|(i, &v)| (func[v].ty, abi(i))))?;
                 let fp = self.frame_pointer();
-                for (&value, offset) in extra.iter().zip(offsets) {
+                for (index, (&value, offset)) in extra.iter().zip(offsets).enumerate() {
+                    if let Abi::ByVal { size, align, .. } = abi(index) {
+                        let size = u32::try_from(size).map_err(|_| "a huge argument".to_owned())?;
+                        self.copy_to_frame(fp, offset, value, size, align)?;
+                        continue;
+                    }
                     let ty = self.ty(value);
                     if is_pair(ty) {
                         self.store_pair_at(value, offset, 16, |s| {
@@ -2841,6 +2872,35 @@ impl Lower<'_, '_> {
             self.push(from)?;
             self.code.mem(load, field, at);
             self.code.mem(store, field, at);
+            at += width;
+        }
+        Ok(())
+    }
+
+    /// Copy `size` bytes from the address `from` to the offset `offset` of the frame, whose
+    /// address is in the local `fp`. Both are aligned to `align`.
+    fn copy_to_frame(
+        &mut self,
+        fp: u32,
+        offset: u32,
+        from: Value,
+        size: u32,
+        align: u32,
+    ) -> Result<()> {
+        let mut at = 0;
+        while at < size {
+            let width = Self::piece(size - at);
+            let (load, store) = match width {
+                8 => (emit::I64_LOAD, emit::I64_STORE),
+                4 => (emit::I32_LOAD, emit::I32_STORE),
+                2 => (emit::I32_LOAD16_U, emit::I32_STORE16),
+                _ => (emit::I32_LOAD8_U, emit::I32_STORE8),
+            };
+            let field = Self::piece_field(align, at, width);
+            self.code.local_get(fp);
+            self.push(from)?;
+            self.code.mem(load, field, at);
+            self.code.mem(store, field, offset + at);
             at += width;
         }
         Ok(())
