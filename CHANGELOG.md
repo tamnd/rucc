@@ -7,6 +7,7 @@ All notable changes are recorded here. The format follows [Keep a Changelog](htt
 ### Changed
 
 - Stack slot sharing works out where each local is written and read one loop at a time instead of revisiting every block until nothing changes, so quickjs.c at -O2 runs 65 percent fewer instructions with the same output (#3474).
+- The discharge pass no longer walks lifetime ends in a function with no lifetime check to find, so quickjs.c at -O2 runs 63 percent fewer instructions with the same output (#3477).
 
 ### Added
 
