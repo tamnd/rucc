@@ -46,7 +46,7 @@
 use rucc_base::hash::{Map, Set};
 use rucc_base::{Interner, Symbol};
 use rucc_ir::{
-    AttrSet, CallInfo, Datum, Extra, Flags, Func, Global, Imm, Inst, InstData, Linkage, Meta,
+    AttrSet, CallInfo, Datum, Def, Extra, Flags, Func, Global, Imm, Inst, InstData, Linkage, Meta,
     Module, Opcode, Signature, Type, Value,
 };
 
@@ -392,6 +392,11 @@ fn freed(func: &mut Func, names: &mut Interner, table: &mut Vec<Descriptor>, ins
 /// lifetime plane costs more than the region lookup it saves, which is the resurrection [`keeps`]
 /// is a whitelist to prevent. So `CheckDeriv` stays off that list and reads a capability for free
 /// or not at all.
+///
+/// Except one made for a local or a global, which [`named`] picks out. That one costs a few stores
+/// rather than a walk of a plane, and it is the only thing that can refuse a derivation out of the
+/// object at all, since no plane covers the stack or the data segment. Handing over a null there let
+/// `data - 8` on a local array through whenever elimination had taken out every other reader.
 fn deriv(
     func: &mut Func,
     names: &mut Interner,
@@ -403,11 +408,26 @@ fn deriv(
     let [capability, base, derived, stride] = func[func[inst].args] else { return };
     let row = Descriptor { judgement: DERIVE, class: 0, size: 0 };
     let desc = record(func, names, table, inst, row);
-    let capability =
-        if kept.contains(&capability) { capability } else { nothing(func, inst, word) };
+    let capability = if kept.contains(&capability) || named(func, capability) {
+        capability
+    } else {
+        nothing(func, inst, word)
+    };
     let params = &[Type::PTR, Type::PTR, word, Type::PTR, Type::PTR];
     let args = &[base, derived, stride, capability, desc];
     call(func, names, inst, "__rucc_check_deriv", params, &[], args);
+}
+
+/// Whether `capability` is the `cap_of` of a local or a global, which `crate::slot` makes out of
+/// the object's own address and size rather than out of the planes.
+fn named(func: &Func, capability: Value) -> bool {
+    let Def::Result { inst, .. } = func[capability].def else { return false };
+    if func[inst].opcode != Opcode::CapOf {
+        return false;
+    }
+    let &[base] = &func[func[inst].args] else { return false };
+    let Def::Result { inst: made, .. } = func[base].def else { return false };
+    matches!(func[made].opcode, Opcode::Alloca | Opcode::GlobalAddr)
 }
 
 /// The capabilities something that [`keeps`] one reads, taken before any of them is rewritten.
@@ -1193,8 +1213,7 @@ fn emit(module: &mut Module, names: &mut Interner, index: usize, row: Descriptor
 #[cfg(test)]
 mod tests {
     use rucc_ir::{
-        Builder, Def, MemInfo, MemOrder, MetaNode, Restrict, RmwOp, TbaaNode, print_func,
-        verify_func,
+        Builder, MemInfo, MemOrder, MetaNode, Restrict, RmwOp, TbaaNode, print_func, verify_func,
     };
     use rucc_target::{Arch, Env, Os, TargetInfo, Triple};
 
@@ -2200,16 +2219,31 @@ mod tests {
     }
 
     /// A derivation from `p` by `n` with its check, and a lifetime check at the result when `live`
-    /// says so, lowered, with what the derivation call was handed for a capability.
-    fn derived(live: bool) -> (Func, Value) {
+    /// says so, lowered, with what the derivation call was handed for a capability. `p` is a
+    /// sixteen byte local when `local` says so and a parameter otherwise.
+    fn derived(live: bool, local: bool) -> (Func, Value) {
         let mut names = Interner::new();
         let word = Type::int(64);
         let mut func =
             Func::new(names.intern("walk"), Signature::new().with_params(&[Type::PTR, word]));
         let entry = func.create_block();
-        let p = func.append_param(entry, Type::PTR);
+        let param = func.append_param(entry, Type::PTR);
         let n = func.append_param(entry, word);
         let mut b = Builder::new(&mut func, entry);
+        let p = if local {
+            let slot = MemInfo {
+                size: 16,
+                align: 8,
+                order: MemOrder::NotAtomic,
+                tbaa: None,
+                owns: 0,
+                restrict: Restrict::NONE,
+            };
+            let extra = Extra::Mem(b.func().add_mem(slot));
+            b.value(InstData { extra, ..InstData::new(Opcode::Alloca) }, Type::PTR)
+        } else {
+            param
+        };
         let args = b.func().push_values(&[p]);
         let cap = b.value(InstData { args, ..InstData::new(Opcode::CapOf) }, Type::CAP);
         let args = b.func().push_values(&[p, n]);
@@ -2233,7 +2267,7 @@ mod tests {
 
     #[test]
     fn a_derivation_check_is_handed_the_capability_another_check_reads_anyway() {
-        let (func, handed) = derived(true);
+        let (func, handed) = derived(true, false);
         let Def::Result { inst: made, .. } = func[handed].def else { panic!("a slot address") };
         assert_ne!(func[made].opcode, Opcode::IntToPtr);
     }
@@ -2242,7 +2276,7 @@ mod tests {
     fn a_derivation_check_that_is_the_only_reader_is_handed_a_null() {
         // Handing it over would keep a `cap_of` alive that nothing else wants, and its walk of the
         // lifetime plane is dearer than what the capability saves the derivation check.
-        let (func, handed) = derived(false);
+        let (func, handed) = derived(false, false);
         let Def::Result { inst: made, .. } = func[handed].def else { panic!("a cast") };
         assert_eq!(func[made].opcode, Opcode::IntToPtr);
         assert!(
@@ -2251,6 +2285,15 @@ mod tests {
                 .all(|inst| func[inst].opcode != Opcode::CapOf),
             "nothing reads the capability, so its producer is gone"
         );
+    }
+
+    #[test]
+    fn a_derivation_check_from_a_local_is_handed_its_capability_with_no_other_reader() {
+        // No plane covers the stack, so the capability is the only thing that can say `p - 8` has
+        // left the local, and making it is a few stores rather than a walk.
+        let (func, handed) = derived(false, true);
+        let Def::Result { inst: made, .. } = func[handed].def else { panic!("a slot address") };
+        assert_ne!(func[made].opcode, Opcode::IntToPtr);
     }
 
     #[test]
