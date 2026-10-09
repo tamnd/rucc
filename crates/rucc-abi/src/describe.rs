@@ -439,6 +439,17 @@ pub enum Test {
     /// a parameter of its own. It does not match past the `...`, where clang reads the bytes of
     /// the vector from the variadic area and not each lane.
     Vector,
+    /// A GNU vector, or a structure that holds only one, of at most `limit` bytes. It finds one
+    /// [`crate::Slot::Vector`] for each sixteen bytes of it, so it travels as that many `v128`.
+    ///
+    /// The wasm rule for a vector when `simd128` is on, which is what clang does: a `v4si` is one
+    /// `v128` parameter, a `v8si` is two, and a `v2hi` is one too, with the lanes past its four
+    /// bytes undefined. As a return value the limit is sixteen, so a `v8si` comes back through the
+    /// hidden pointer. Like [`Test::Vector`] it does not match past the `...`.
+    WholeVector {
+        /// The largest vector that travels this way.
+        limit: u64,
+    },
     /// A `_Complex` of any kind, or an aggregate gcc gives a floating point machine mode, which is
     /// what [`crate::Shape::floating`] says.
     ///

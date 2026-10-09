@@ -82,7 +82,9 @@ pub fn annotate(module: &mut Module, graph: &CallGraph) -> Vec<(FuncId, Stats)> 
             let mut spoke = false;
             for (index, &param) in params.iter().enumerate() {
                 let ty = module[id][param].ty;
-                if !ty.is_int() {
+                // A fact is one interval, and a vector has one for each lane. A vector parameter
+                // is what a wasm unit built with `simd128` passes.
+                if !ty.is_int() || ty.is_vector() {
                     continue;
                 }
                 let mut union = Range::empty(ty.bits());

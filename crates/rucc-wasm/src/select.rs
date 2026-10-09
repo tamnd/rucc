@@ -16,7 +16,7 @@ use rucc_ir::{
 use rucc_object::wasm::{FuncType, Function, RelocKind, ValType};
 use rucc_target::wasm::Feature;
 
-use crate::emit::{self, Code};
+use crate::emit::{self, Code, MemOp};
 use crate::irreducible::Node;
 use crate::rules;
 use crate::structure::Shape;
@@ -119,6 +119,22 @@ fn store_op(ty: Type) -> Result<(u8, u32)> {
         ValType::F32 => (emit::F32_STORE, 4),
         ValType::F64 => (emit::F64_STORE, 8),
         ValType::V128 => return Err(format!("a store of a {ty} is not translated for wasm yet")),
+    })
+}
+
+/// A load or a store of a vector, which is one `v128`.
+///
+/// The SIMD opcode of the load and of the store, and the natural alignment. A vector of sixteen
+/// bytes is `v128.load` and `v128.store`. A narrower one
+/// touches only its own bytes, so it is a load that sets the other lanes to zero, or a load into
+/// lane zero of a zero vector, and a store of lane zero. clang does the same.
+fn vector_access(ty: Type) -> Result<(u32, u32, u32)> {
+    Ok(match ty.bits() * ty.lanes() {
+        128 => (emit::V128_LOAD, emit::V128_STORE, 16),
+        64 => (emit::V128_LOAD64_ZERO, emit::V128_STORE64_LANE, 8),
+        32 => (emit::V128_LOAD32_ZERO, emit::V128_STORE32_LANE, 4),
+        16 => (emit::V128_LOAD16_LANE, emit::V128_STORE16_LANE, 2),
+        _ => return Err(format!("a load or a store of a {ty} is not translated for wasm yet")),
     })
 }
 
@@ -1276,7 +1292,7 @@ impl Lower<'_, '_> {
     /// The bits of a narrow integer, or nothing for a value of 32 bits or more.
     fn narrow(&self, value: Value) -> Option<u32> {
         let ty = self.ty(value);
-        (ty.is_int() && !ty.is_ptr() && ty.bits() < 32).then(|| ty.bits())
+        (ty.is_int() && !ty.is_ptr() && !ty.is_vector() && ty.bits() < 32).then(|| ty.bits())
     }
 
     /// Take a value off the operand stack into its local, or into its two locals for a pair,
@@ -1714,7 +1730,7 @@ impl Lower<'_, '_> {
 
     /// The instruction of a load or a store with its offset field, which is the address of a
     /// global plus a number when the address was folded that way.
-    fn access(&mut self, op: u8, align: u32, folded: Option<Folded>) -> Result<()> {
+    fn access(&mut self, op: impl Into<MemOp>, align: u32, folded: Option<Folded>) -> Result<()> {
         match folded {
             Some(Folded { symbol: Some(symbol), offset, .. }) => {
                 let (_, target) = self.unit.address(symbol)?;
@@ -1804,6 +1820,9 @@ impl Lower<'_, '_> {
             self.code.op(if wide { emit::I64_EQZ } else { emit::I32_EQZ });
             self.set(results[0]);
             return Ok(());
+        }
+        if args.iter().chain(&results).any(|&v| self.ty(v).is_vector()) {
+            return self.vector(inst, &args, &results);
         }
         if rules::tried(data.opcode) && self.inverted != Some(inst) && self.by_rule(inst)? {
             return Ok(());
@@ -2846,6 +2865,50 @@ impl Lower<'_, '_> {
                 self.code.mem(store, field, at);
             }
             at += width;
+        }
+        Ok(())
+    }
+
+    /// An instruction with a vector operand or result. A vector is one `v128`, and only a call, a
+    /// load and a store of one are translated so far, which is what passing a vector takes.
+    fn vector(&mut self, inst: Inst, args: &[Value], results: &[Value]) -> Result<()> {
+        let opcode = self.func[inst].opcode;
+        match opcode {
+            Opcode::Call | Opcode::CallIndirect => self.call(inst, false)?,
+            Opcode::Load => {
+                let ty = self.ty(results[0]);
+                let (op, _, natural) = vector_access(ty)?;
+                let align = self.mem_info(inst).map_or(natural, |m| m.align);
+                let folded = self.folded(inst);
+                let lane = op == emit::V128_LOAD16_LANE;
+                self.push_base(folded.as_ref(), args[0])?;
+                if lane {
+                    self.code.v128_zero();
+                }
+                self.access(MemOp::Simd(op), align_field(align, natural), folded)?;
+                if lane {
+                    self.code.op(0);
+                }
+                self.set(results[0]);
+            }
+            Opcode::Store => {
+                let ty = self.ty(args[0]);
+                let (_, op, natural) = vector_access(ty)?;
+                let lane = op != emit::V128_STORE;
+                let align = self.mem_info(inst).map_or(natural, |m| m.align);
+                let folded = self.folded(inst);
+                self.push_base(folded.as_ref(), args[1])?;
+                self.push(args[0])?;
+                self.access(MemOp::Simd(op), align_field(align, natural), folded)?;
+                if lane {
+                    self.code.op(0);
+                }
+            }
+            _ => {
+                return Err(format!(
+                    "the operation {opcode:?} on a vector is not translated for wasm yet"
+                ));
+            }
         }
         Ok(())
     }

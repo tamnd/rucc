@@ -38,7 +38,8 @@ pub struct Call {
     /// Whether this is a call to a variadic function under [`Variadic::IntegersOnly`], where every
     /// argument is classified as though the vector registers were not there.
     integers_only: bool,
-    /// Whether the argument asked about now is past the `...`, which only [`Test::Vector`] reads.
+    /// Whether the argument asked about now is past the `...`, which only [`Test::Vector`] and
+    /// [`Test::WholeVector`] read.
     past_dots: bool,
 }
 
@@ -306,6 +307,12 @@ impl Call {
             Test::Vector => {
                 Some(shape.pieces.iter().map(|piece| slot(piece.scalar, piece.offset)).collect())
             }
+            Test::WholeVector { limit }
+                if self.past_dots || !shape.vector || shape.size > limit =>
+            {
+                None
+            }
+            Test::WholeVector { .. } => Some(vector_slots(shape.size)),
             Test::ComplexFloat => {
                 (shape.complex && shape.is_all_of(Format::Single) && shape.size == 8).then(Vec::new)
             }
@@ -395,6 +402,19 @@ impl Call {
             u32::try_from(slots.iter().filter(|slot| slot.is_float()).count()).unwrap_or(u32::MAX);
         (count - float, float)
     }
+}
+
+/// A vector of this size as a run of `v128`, the last one holding only what is left.
+///
+/// A vector of fewer than sixteen bytes is one slot of its own size. A wider one is a whole
+/// number of sixteen byte slots, because the size of a GNU vector is a power of two.
+fn vector_slots(size: u64) -> Vec<Slot> {
+    (0..size.div_ceil(16))
+        .map(|index| Slot::Vector {
+            offset: index * 16,
+            size: u32::try_from((size - index * 16).min(16)).unwrap_or(16),
+        })
+        .collect()
 }
 
 /// How many registers of this width a value of this size takes, which is at least one.

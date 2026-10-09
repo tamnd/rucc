@@ -98,6 +98,31 @@ const PREFIX_FC: u8 = 0xfc;
 pub(crate) const MEMORY_COPY: u32 = 10;
 pub(crate) const MEMORY_FILL: u32 = 11;
 
+/// The prefix of the SIMD instructions, see `simd.rs` for all of them.
+const PREFIX_FD: u8 = 0xfd;
+pub(crate) const V128_LOAD: u32 = 0x00;
+pub(crate) const V128_STORE: u32 = 0x0b;
+pub(crate) const V128_CONST: u32 = 0x0c;
+pub(crate) const V128_LOAD16_LANE: u32 = 0x55;
+pub(crate) const V128_STORE16_LANE: u32 = 0x59;
+pub(crate) const V128_STORE32_LANE: u32 = 0x5a;
+pub(crate) const V128_STORE64_LANE: u32 = 0x5b;
+pub(crate) const V128_LOAD32_ZERO: u32 = 0x5c;
+pub(crate) const V128_LOAD64_ZERO: u32 = 0x5d;
+
+/// The opcode of a load or a store, which is one byte or a SIMD opcode behind the `0xfd` prefix.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum MemOp {
+    Byte(u8),
+    Simd(u32),
+}
+
+impl From<u8> for MemOp {
+    fn from(op: u8) -> Self {
+        Self::Byte(op)
+    }
+}
+
 /// One function body as it is written, and the fields in it that the linker patches.
 #[derive(Default)]
 pub(crate) struct Code {
@@ -300,15 +325,15 @@ impl Code {
     }
 
     /// A load or a store, with the alignment as a power of two and the offset.
-    pub(crate) fn mem(&mut self, op: u8, align: u32, offset: u32) {
-        self.bytes.push(op);
+    pub(crate) fn mem(&mut self, op: impl Into<MemOp>, align: u32, offset: u32) {
+        self.mem_op(op.into());
         self.uleb(u64::from(align));
         self.uleb(u64::from(offset));
     }
 
     /// A load or a store whose offset field is the address of data, which the linker writes.
-    pub(crate) fn mem_at(&mut self, op: u8, align: u32, symbol: u32, addend: i32) {
-        self.bytes.push(op);
+    pub(crate) fn mem_at(&mut self, op: impl Into<MemOp>, align: u32, symbol: u32, addend: i32) {
+        self.mem_op(op.into());
         self.uleb(u64::from(align));
         self.reloc(RelocKind::MemoryAddrLeb, symbol, addend);
     }
@@ -337,6 +362,25 @@ impl Code {
     pub(crate) fn address(&mut self, kind: RelocKind, symbol: u32, addend: i32) {
         self.bytes.push(0x41);
         self.reloc(kind, symbol, addend);
+    }
+
+    fn mem_op(&mut self, op: MemOp) {
+        match op {
+            MemOp::Byte(op) => self.bytes.push(op),
+            MemOp::Simd(op) => self.simd(op),
+        }
+    }
+
+    /// One instruction behind the `0xfd` prefix, with no immediate.
+    pub(crate) fn simd(&mut self, op: u32) {
+        self.bytes.push(PREFIX_FD);
+        self.uleb(u64::from(op));
+    }
+
+    /// A `v128.const` with every lane zero.
+    pub(crate) fn v128_zero(&mut self) {
+        self.simd(V128_CONST);
+        self.bytes.extend([0; 16]);
     }
 
     /// One instruction behind the `0xfc` prefix.

@@ -1087,9 +1087,15 @@ fn scalar_width(ty: Type) -> Result<usize, String> {
 }
 
 /// The value type that holds a value of the IR type `ty`.
+///
+/// A vector of sixteen bytes or less is one `v128`, and the lanes past its size are undefined.
+/// Only a unit built with `simd128` has one, because only then does the ABI pass a vector whole.
 pub(crate) fn valtype(ty: Type) -> Result<ValType, String> {
     if ty.is_ptr() {
         return Ok(ValType::I32);
+    }
+    if ty.is_vector() && ty.bits() * ty.lanes() <= 128 {
+        return Ok(ValType::V128);
     }
     if ty.is_int() && !ty.is_vector() {
         return match ty.bits() {

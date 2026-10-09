@@ -12,7 +12,7 @@
 
 use rucc_abi::abis::{
     AAPCS64, DARWIN_ARM64, I386_MINGW, I386_MSVC, I386_SYSV, I386_SYSV_REG_STRUCT, RISCV_LP64D,
-    SYSV_AMD64, WASM32_BASIC_C, WIN64, WINDOWS_ARM64,
+    SYSV_AMD64, WASM32_BASIC_C, WASM32_SIMD128, WIN64, WINDOWS_ARM64,
 };
 use rucc_abi::{Arg, Call, Format, Kind, Pass, Piece, Scalar, Shape, Slot, pieces, record};
 
@@ -978,6 +978,45 @@ fn wasm_passes_each_lane_of_a_vector_as_its_own_scalar() {
     let members = pieces(&[int(4), int(4)]);
     let vector = Shape { vector: true, ..record(&members) };
     assert_eq!(wasm().variadic_argument(&Arg::Aggregate(vector)), Pass::Reference);
+}
+
+#[test]
+fn wasm_with_simd128_passes_a_vector_as_v128_values() {
+    let simd = || WASM32_SIMD128.call();
+    let v128 = |offset, size| Slot::Vector { offset, size };
+
+    // A `vector_size(16)` of `int` is one `v128` going in and coming back. A structure of the
+    // same four `int`s is still the address of a copy.
+    let members = pieces(&[int(4), int(4), int(4), int(4)]);
+    let vector = Shape { vector: true, ..record(&members) };
+    assert_eq!(simd().argument(&Arg::Aggregate(vector)), Pass::Pieces(vec![v128(0, 16)]));
+    assert_eq!(simd().returns(&Arg::Aggregate(vector)), Pass::Pieces(vec![v128(0, 16)]));
+    assert_eq!(simd().argument(&Arg::Aggregate(record(&members))), Pass::Reference);
+
+    // A vector of fewer than sixteen bytes is one `v128` too, and a `v1di` is not an `i64`.
+    let members = pieces(&[int(2), int(2)]);
+    let vector = Shape { vector: true, ..record(&members) };
+    assert_eq!(simd().argument(&Arg::Aggregate(vector)), Pass::Pieces(vec![v128(0, 4)]));
+    let members = pieces(&[int(8)]);
+    let vector = Shape { vector: true, ..record(&members) };
+    assert_eq!(simd().returns(&Arg::Aggregate(vector)), Pass::Pieces(vec![v128(0, 8)]));
+    assert_eq!(wasm().returns(&Arg::Aggregate(vector)), Pass::Pieces(vec![gpr(0, 8)]));
+
+    // A `vector_size(32)` is two `v128` going in and comes back through the hidden pointer.
+    let members = pieces(&[int(4); 8]);
+    let vector = Shape { vector: true, ..record(&members) };
+    let two = Pass::Pieces(vec![v128(0, 16), v128(16, 16)]);
+    assert_eq!(simd().argument(&Arg::Aggregate(vector)), two);
+    assert_eq!(simd().returns(&Arg::Aggregate(vector)), Pass::Reference);
+
+    // A scalar and a structure of one scalar are the same as without the feature, and so is a
+    // vector past the `...`, which is tamnd/rucc#3453.
+    assert_eq!(simd().argument(&Arg::Scalar(int(4))), Pass::Direct);
+    let members = pieces(&[int(4)]);
+    assert_eq!(simd().argument(&Arg::Aggregate(record(&members))), Pass::Pieces(vec![gpr(0, 4)]));
+    let members = pieces(&[int(4); 4]);
+    let vector = Shape { vector: true, ..record(&members) };
+    assert_eq!(simd().variadic_argument(&Arg::Aggregate(vector)), Pass::Reference);
 }
 
 #[test]

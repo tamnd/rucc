@@ -1033,7 +1033,7 @@ impl<'a> Verifier<'a> {
         let size = func[object.mem].size;
         for &slot in &func[object.slots] {
             let width = match slot {
-                Slot::Integer { size, .. } => u64::from(size),
+                Slot::Integer { size, .. } | Slot::Vector { size, .. } => u64::from(size),
                 Slot::Float { format, .. } => u64::from(format.width()).div_ceil(8),
             };
             if slot.offset() + width > size {

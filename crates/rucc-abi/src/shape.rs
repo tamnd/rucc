@@ -124,8 +124,8 @@ pub struct Shape<'a> {
     /// two `float`s. Only i386 `fastcall` reads this, and the caller works it out from the type,
     /// since the pieces have already lost what it depends on.
     pub floating: bool,
-    /// Whether it is a GNU vector, or a structure whose one member is one, through any number of
-    /// structures and arrays of one element.
+    /// Whether it is a GNU vector, or a structure or a union whose one member is one, through any
+    /// number of structures, unions and arrays of one element.
     ///
     /// Only the wasm rule reads this. clang calls such a structure a single element structure and
     /// passes it as the vector it holds, and a vector of more than one lane as each of its lanes.
@@ -188,6 +188,17 @@ pub enum Slot {
         /// What is read out of them.
         format: Format,
     },
+    /// The bytes of a vector, at most sixteen of them, which is one wasm `v128`.
+    ///
+    /// Only the wasm rule with `simd128` makes one, see [`crate::Test::WholeVector`]. A vector of
+    /// fewer than sixteen bytes is still one `v128`, and the lanes past its size are undefined, so
+    /// the size is what a load or a store of the slot touches.
+    Vector {
+        /// Where its bytes start in the object.
+        offset: u64,
+        /// How many of them there are.
+        size: u32,
+    },
 }
 
 impl Slot {
@@ -195,14 +206,16 @@ impl Slot {
     #[must_use]
     pub const fn offset(self) -> u64 {
         match self {
-            Self::Integer { offset, .. } | Self::Float { offset, .. } => offset,
+            Self::Integer { offset, .. }
+            | Self::Float { offset, .. }
+            | Self::Vector { offset, .. } => offset,
         }
     }
 
     /// Whether it is a vector register rather than a general purpose one.
     #[must_use]
     pub const fn is_float(self) -> bool {
-        matches!(self, Self::Float { .. })
+        matches!(self, Self::Float { .. } | Self::Vector { .. })
     }
 }
 

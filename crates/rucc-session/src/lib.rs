@@ -3086,6 +3086,7 @@ impl Session {
         if let Some(version) = opts.os_version {
             target.tuple = target.tuple.with_os_version(version);
         }
+        target = target.with_simd128(opts.wasm.has(wasm::Feature::Simd128));
         if let Some(signed) = opts.char_signed {
             target.char_is_signed = signed;
         }

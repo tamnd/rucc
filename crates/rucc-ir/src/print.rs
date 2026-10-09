@@ -927,6 +927,9 @@ impl<'a> Printer<'a> {
             Slot::Float { offset, format } => {
                 let _ = write!(self.out, "float {} at {offset}", format.name());
             }
+            Slot::Vector { offset, size } => {
+                let _ = write!(self.out, "vector {size} at {offset}");
+            }
         }
     }
 
