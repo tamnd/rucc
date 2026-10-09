@@ -77,6 +77,8 @@ pub enum ValType {
     I64,
     F32,
     F64,
+    /// The 128-bit vector of the SIMD proposal.
+    V128,
 }
 
 impl ValType {
@@ -88,6 +90,7 @@ impl ValType {
             ValType::I64 => 0x7e,
             ValType::F32 => 0x7d,
             ValType::F64 => 0x7c,
+            ValType::V128 => 0x7b,
         }
     }
 }
@@ -99,6 +102,7 @@ impl fmt::Display for ValType {
             ValType::I64 => "i64",
             ValType::F32 => "f32",
             ValType::F64 => "f64",
+            ValType::V128 => "v128",
         })
     }
 }

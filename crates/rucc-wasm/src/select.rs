@@ -77,6 +77,7 @@ fn va_slot(ty: Type) -> Result<(u32, u32)> {
     match valtype(ty)? {
         ValType::I32 | ValType::F32 => Ok((4, 4)),
         ValType::I64 | ValType::F64 => Ok((8, 8)),
+        ValType::V128 => Ok((16, 16)),
     }
 }
 
@@ -103,6 +104,7 @@ fn load_op(ty: Type) -> Result<(u8, u32)> {
         ValType::I64 => (emit::I64_LOAD, 8),
         ValType::F32 => (emit::F32_LOAD, 4),
         ValType::F64 => (emit::F64_LOAD, 8),
+        ValType::V128 => return Err(format!("a load of a {ty} is not translated for wasm yet")),
     })
 }
 
@@ -116,6 +118,7 @@ fn store_op(ty: Type) -> Result<(u8, u32)> {
         ValType::I64 => (emit::I64_STORE, 8),
         ValType::F32 => (emit::F32_STORE, 4),
         ValType::F64 => (emit::F64_STORE, 8),
+        ValType::V128 => return Err(format!("a store of a {ty} is not translated for wasm yet")),
     })
 }
 

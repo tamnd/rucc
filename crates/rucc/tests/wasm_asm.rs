@@ -77,3 +77,24 @@ fn a_line_that_the_reader_does_not_take_is_an_error_at_that_line() {
     assert!(stderr.contains("t.s:4: error: the instruction `bogus`"), "{stderr}");
     std::fs::remove_dir_all(dir).unwrap();
 }
+
+#[test]
+fn a_simd_instruction_assembles_to_its_bytes() {
+    let dir = scratch("simd");
+    let text = "\t.functype\tf (i32, i32) -> (i32)\n\t.section\t.text.f,\"\",@\n\t.globl\tf\n\
+                \t.type\tf,@function\nf:\n\t.functype\tf (i32, i32) -> (i32)\n\t.local\tv128\n\
+                \tlocal.get\t0\n\ti32x4.splat\n\tlocal.get\t1\n\ti32x4.splat\n\ti32x4.add\n\
+                \tlocal.tee\t2\n\tlocal.get\t2\n\
+                \ti8x16.shuffle\t4, 5, 6, 7, 0, 1, 2, 3, 12, 13, 14, 15, 8, 9, 10, 11\n\
+                \ti32x4.extract_lane\t2\n\tend_function\n";
+    std::fs::write(dir.join("t.s"), text).unwrap();
+    ok(&rucc(&["--target=wasm32-wasip1", "-msimd128", "-c", "t.s", "-o", "t.o"], &dir));
+    let object = std::fs::read(dir.join("t.o")).unwrap();
+    // One `v128` local, then the code as `llvm-mc` 23 encodes it.
+    let mut code = vec![0x01, 0x01, 0x7b, 0x20, 0x00, 0xfd, 0x11, 0x20, 0x01, 0xfd, 0x11];
+    code.extend_from_slice(&[0xfd, 0xae, 0x01, 0x22, 0x02, 0x20, 0x02, 0xfd, 0x0d]);
+    code.extend_from_slice(&[4, 5, 6, 7, 0, 1, 2, 3, 12, 13, 14, 15, 8, 9, 10, 11]);
+    code.extend_from_slice(&[0xfd, 0x1b, 0x02, 0x0b]);
+    assert!(object.windows(code.len()).any(|w| w == code), "{object:x?}");
+    std::fs::remove_dir_all(dir).unwrap();
+}
