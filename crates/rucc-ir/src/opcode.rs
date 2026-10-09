@@ -426,6 +426,15 @@ pub enum Opcode {
     /// access says nothing about a free, so it stays where the pass put it and the cost is one
     /// check per free rather than one per access.
     CheckFree,
+    /// The `i1` it is given is true: the local it stands for was written before this read of it.
+    ///
+    /// Judgement Y6 for a local held in a register, which has no bytes for the init plane to keep
+    /// and so gets the answer carried beside it as a value instead, by the front end's SSA
+    /// construction. Nothing about memory: the operand is the whole question, so it touches no
+    /// plane and no program byte, and the one thing that keeps it is that it can refuse. One whose
+    /// operand is a constant true asks nothing and is deleted, which is what happens to every one
+    /// in a function that writes its locals before it reads them.
+    CheckWritten,
     /// A storage instance begins here, over a range, with a class.
     ///
     /// Judgement J4. This is the `alloca` for an automatic instance and the allocator's report
@@ -845,6 +854,7 @@ impl Opcode {
             Self::CheckRestrictRead => "check_restrict_read",
             Self::CheckRestrictWrite => "check_restrict_write",
             Self::CheckFree => "check_free",
+            Self::CheckWritten => "check_written",
             Self::MetaBegin => "meta_begin",
             Self::MetaEnd => "meta_end",
             Self::MetaType => "meta_type",
@@ -1100,6 +1110,8 @@ impl Opcode {
                 | Self::Return
                 | Self::Unreachable
                 | Self::UnreachableHint
+                // A question about a value it is handed, whose answer was carried in a register.
+                | Self::CheckWritten
         )
     }
 
@@ -1270,6 +1282,7 @@ impl Opcode {
             | Self::CheckRestrictRead
             | Self::CheckRestrictWrite
             | Self::CheckFree
+            | Self::CheckWritten
             | Self::MetaBegin
             | Self::MetaEnd
             | Self::MetaType
@@ -1602,6 +1615,7 @@ static ALL: &[Opcode] = &[
     Opcode::CheckRestrictRead,
     Opcode::CheckRestrictWrite,
     Opcode::CheckFree,
+    Opcode::CheckWritten,
     Opcode::MetaBegin,
     Opcode::MetaEnd,
     Opcode::MetaType,

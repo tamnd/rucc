@@ -258,6 +258,10 @@ pub static HAND: &[(Opcode, &str)] = &[
         Opcode::CheckFree,
         "`rucc_safety::lower`, the same call in front of the free rather than the access",
     ),
+    (
+        Opcode::CheckWritten,
+        "`rucc_safety::lower`, into a call carrying the row, with the flag as its argument",
+    ),
     // The five plane writes the same pass emits, which become calls the same way. A judgement
     // decides nothing, so none of the calls carries a descriptor row, and neither do the two
     // edges below them.

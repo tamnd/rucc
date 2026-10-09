@@ -141,6 +141,8 @@ block0(%0: ptr, %1: i64):
     check_free %2, %0
     check_restrict_read %0, size 4, align 4, restrict(1, 2)
     check_restrict_write %0, size 4, align 4, restrict(1, 2)
+    %10 = iconst.i1 -1
+    check_written %10
     meta_begin %0, %1, class allocated
     meta_type %0, %1, tbaa !2
     meta_init %0, %1
