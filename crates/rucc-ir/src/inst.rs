@@ -594,7 +594,8 @@ pub enum Extra {
     /// Which question an `object_size` asks, from zero to three.
     Question(u8),
     /// How many bytes long the member is whose address a `ptr_add` is, which is the answer to the
-    /// `object_size` questions about the closest member. A `ptr_add` carries this or nothing, and
+    /// `object_size` questions about the closest member, or zero for a member that may run past
+    /// its end, which leaves them to the whole object. A `ptr_add` carries this or nothing, and
     /// nothing after `rucc_opt::objsize` sees it.
     Member(u32),
     /// Which lane, for `extractlane` and `insertlane`.
