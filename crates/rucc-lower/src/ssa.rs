@@ -114,6 +114,12 @@ pub struct Ssa {
     /// Which named variable was given each value first, so that the second variable to be written
     /// the same value is not given it again. See [`Ssa::write`].
     owned: Map<Value, u32>,
+    /// For each variable a read of which asks whether anything wrote it, the variable that holds
+    /// the answer. See [`Ssa::watch`].
+    flags: Map<Var, Var>,
+    /// The one `true` every write of a watched variable records, so that two paths that both wrote
+    /// it hand the join the same value and no parameter is made for them.
+    truth: Option<Value>,
 }
 
 impl Ssa {
@@ -139,6 +145,8 @@ impl Ssa {
             holds: Vec::new(),
             starts: Vec::new(),
             owned: Map::default(),
+            flags: Map::default(),
+            truth: None,
         }
     }
 
@@ -177,6 +185,59 @@ impl Ssa {
     pub fn assign(&mut self, var: Var, block: Block, value: Value, after: Option<Inst>) {
         self.written(var, value, Some(Start { decl: 0, block, after }));
         self.defs.insert((var, block), value);
+        if let (Some(&flag), Some(truth)) = (self.flags.get(&var), self.truth) {
+            self.defs.insert((flag, block), truth);
+        }
+    }
+
+    /// Starts keeping, from here in `block`, whether `var` has been written since, in `flag`.
+    ///
+    /// The flag is an ordinary variable of this construction, false here and true after every
+    /// [`Ssa::assign`] of `var`, so a read of it is a block parameter only where some paths wrote
+    /// `var` and others did not, and the one constant wherever they all agree. That is the whole
+    /// of the analysis: what is left once the construction has finished is a question only where
+    /// the answer depends on the way control came. A block nothing reaches reads the flag as the
+    /// zero any variable nothing wrote reads as, which is false, and is right for a declaration a
+    /// `goto` or a `switch` jumped past. Asked again when the declaration is reached again, as one
+    /// in a loop is, it starts from false again, because each time round is a new object and
+    /// what the last one held is not this one's. A declaration in code nothing reaches has no block
+    /// to say it in, and needs none: wherever a label after it lets control in, the flag reads as
+    /// that same zero.
+    ///
+    /// # Panics
+    ///
+    /// If the function has no block yet, since the one `true` goes at the top of its entry.
+    pub fn watch(&mut self, func: &mut Func, var: Var, flag: Var, block: Option<Block>) {
+        self.flags.insert(var, flag);
+        if self.truth.is_none() {
+            let entry = func.entry().expect("a function with a block in it");
+            let first = func.insts(entry).next();
+            let imm = func.add_imm(Imm::int(1, Type::I1.lane()));
+            let inst = func.create_inst(
+                InstData { extra: Extra::Imm(imm), ..InstData::new(Opcode::IConst) },
+                &[Type::I1],
+                Span::DUMMY,
+            );
+            place(func, entry, first, inst);
+            self.truth = func[inst].first_result;
+        }
+        if let Some(block) = block {
+            let unwritten = self.undefined(func, Type::I1);
+            self.defs.insert((flag, block), unwritten);
+        }
+    }
+
+    /// The variable [`Ssa::watch`] keeps the answer for `var` in, if it was asked to keep one.
+    #[must_use]
+    pub fn flag_of(&self, var: Var) -> Option<Var> {
+        self.flags.get(&var).copied()
+    }
+
+    /// Whether `var` has been written on the way to here in `block`, as an `i1`, or nothing for a
+    /// variable [`Ssa::watch`] was never told about.
+    pub fn was_written(&mut self, func: &mut Func, var: Var, block: Block) -> Option<Value> {
+        let flag = *self.flags.get(&var)?;
+        Some(self.read(func, flag, block, Type::I1))
     }
 
     /// The name half of a write: the value is the variable's from where it was computed if nobody
@@ -549,7 +610,7 @@ fn place(func: &mut Func, entry: Block, first: Option<Inst>, inst: Inst) {
 #[cfg(test)]
 mod tests {
     use rucc_base::Interner;
-    use rucc_ir::{Builder, Flags, IntPred, Module, Signature, print_func, verify_func};
+    use rucc_ir::{Builder, Def, Flags, IntPred, Module, Signature, print_func, verify_func};
     use rucc_target::{Arch, Env, Os, TargetInfo, Triple};
 
     use super::*;
@@ -1010,6 +1071,75 @@ mod tests {
         Builder::new(&mut func, entry).ret(&[first]);
         ssa.finish(&mut func);
         assert_eq!(checked(func, &mut names), UNWRITTEN);
+    }
+
+    /// A diamond whose arms assign `x` or not, as `wrote` says, and the flag read below it.
+    fn watched(wrote: [bool; 2]) -> (Func, Option<Value>, Block, Value) {
+        let mut names = Interner::new();
+        let (mut func, mut ssa, entry, cond) = start(&mut names);
+        let (x, flag) = (Var::new(0), Var::new(1));
+        ssa.watch(&mut func, x, flag, Some(entry));
+
+        let then = func.create_block();
+        let otherwise = func.create_block();
+        let join = func.create_block();
+
+        let branch = Builder::new(&mut func, entry).br_if(cond, then, &[], otherwise, &[]);
+        ssa.branch(&func, branch);
+        ssa.seal(&mut func, then);
+        ssa.seal(&mut func, otherwise);
+
+        for (block, wrote) in [then, otherwise].into_iter().zip(wrote) {
+            if wrote {
+                let one = Builder::new(&mut func, block).iconst(I32, 1);
+                ssa.assign(x, block, one, None);
+            }
+            let jump = Builder::new(&mut func, block).jump(join, &[]);
+            ssa.branch(&func, jump);
+        }
+
+        ssa.seal(&mut func, join);
+        let written = ssa.was_written(&mut func, x, join).expect("x is watched");
+        let zero = Builder::new(&mut func, join).iconst(I32, 0);
+        Builder::new(&mut func, join).ret(&[zero]);
+        let truth = ssa.truth;
+        ssa.finish(&mut func);
+        (func, truth, join, written)
+    }
+
+    #[test]
+    fn a_variable_written_on_one_arm_only_has_its_flag_carried_by_a_block_parameter() {
+        let (func, _, join, written) = watched([true, false]);
+        assert_eq!(func[join].params.len(), 1);
+        assert_eq!(func[join].params[0], written);
+        assert_eq!(func[written].ty, Type::I1);
+    }
+
+    #[test]
+    fn a_variable_written_on_both_arms_has_a_flag_that_is_the_one_true() {
+        let (func, truth, join, written) = watched([true, true]);
+        assert!(func[join].params.is_empty(), "both arms agreed, so nothing is carried");
+        assert_eq!(Some(written), truth);
+        let Def::Result { inst, .. } = func[written].def else { panic!("a constant") };
+        let Extra::Imm(imm) = func[inst].extra else { panic!("an immediate") };
+        assert_eq!(func[imm].unsigned(), 1);
+    }
+
+    #[test]
+    fn a_variable_written_on_neither_arm_has_a_flag_that_is_false() {
+        let (func, truth, join, written) = watched([false, false]);
+        assert!(func[join].params.is_empty());
+        assert_ne!(Some(written), truth);
+        let Def::Result { inst, .. } = func[written].def else { panic!("a constant") };
+        let Extra::Imm(imm) = func[inst].extra else { panic!("an immediate") };
+        assert_eq!(func[imm].unsigned(), 0);
+    }
+
+    #[test]
+    fn a_variable_nobody_watched_has_no_flag_to_read() {
+        let mut names = Interner::new();
+        let (mut func, mut ssa, entry, _) = start(&mut names);
+        assert_eq!(ssa.was_written(&mut func, Var::new(0), entry), None);
     }
 
     /// Two arms with different values, so the block below them takes a parameter.

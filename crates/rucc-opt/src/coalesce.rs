@@ -354,6 +354,8 @@ pub(crate) fn crossed(opcode: Opcode, kind: Opcode) -> bool {
                 | Opcode::CheckRestrictRead
                 | Opcode::CheckRestrictWrite
                 | Opcode::CheckFree
+                // Asks a flag in a register and no plane at all.
+                | Opcode::CheckWritten
                 // The epoch plane, which neither of these two writes and which does not read them.
                 | Opcode::MetaEpoch
         )

@@ -1544,6 +1544,14 @@ impl<'a> Verifier<'a> {
                 self.takes(opcode, arity, 0);
                 self.targets(func, inst, 1);
             }
+            Opcode::CheckWritten => {
+                if self.takes(opcode, arity, 1) && arg(0) != Type::I1 {
+                    self.error(format!(
+                        "check_written asks about an i1 and this one about {}",
+                        arg(0)
+                    ));
+                }
+            }
             Opcode::BrIf => {
                 if self.takes(opcode, arity, 1) && arg(0) != Type::I1 {
                     self.error(format!("br_if branches on an i1 and this one on {}", arg(0)));

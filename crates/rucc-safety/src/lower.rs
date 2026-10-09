@@ -171,6 +171,7 @@ fn calls(
             Opcode::CheckBounds => bounds(func, names, word, table, inst),
             Opcode::CheckLive => live(func, names, table, inst),
             Opcode::CheckFree => freed(func, names, table, inst),
+            Opcode::CheckWritten => unwritten(func, names, table, inst),
             Opcode::CheckDeriv => deriv(func, names, word, table, &kept, inst),
             Opcode::CheckType => {
                 typed(func, names, word, numbers, table, inst, pairs.get(&inst).copied());
@@ -377,6 +378,33 @@ fn freed(func: &mut Func, names: &mut Interner, table: &mut Vec<Descriptor>, ins
     let desc = record(func, names, table, inst, row);
     let params = &[Type::PTR; 3];
     call(func, names, inst, "__rucc_check_free", params, &[], &[capability, pointer, desc]);
+}
+
+/// `check_written` becomes `__rucc_check_written(flag, descriptor)`, or nothing when the flag is a
+/// constant that says the variable was written.
+///
+/// Row Y6 for a local that never had a slot, which is most of them: the front end carried a flag
+/// beside the variable in its SSA form and this is where the program asks it. A flag that is true
+/// on every path is a constant by the time this runs, and the optimizer takes those out at -O2, but
+/// at -O0 nothing has, so the constant case is answered here rather than by a call that cannot fail.
+///
+/// The flag goes through as an `int` rather than an `i1`, because the runtime is a C function and C
+/// has no one bit argument for the back end to agree with it about.
+fn unwritten(func: &mut Func, names: &mut Interner, table: &mut Vec<Descriptor>, inst: Inst) {
+    let [flag] = func[func[inst].args] else { return };
+    if let Def::Result { inst: made, .. } = func[flag].def {
+        if let (Opcode::IConst, Extra::Imm(at)) = (func[made].opcode, func[made].extra) {
+            if func[at].unsigned() != 0 {
+                func.remove_inst(inst);
+                return;
+            }
+        }
+    }
+    let row = Descriptor { judgement: ACCESS, class: 0, size: 0 };
+    let desc = record(func, names, table, inst, row);
+    let flag = fitted(func, inst, flag, Type::int(32));
+    let params = &[Type::int(32), Type::PTR];
+    call(func, names, inst, "__rucc_check_written", params, &[], &[flag, desc]);
 }
 
 /// `check_deriv` becomes `__rucc_check_deriv(base, derived, stride, capability, descriptor)`.

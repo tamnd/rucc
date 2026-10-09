@@ -659,6 +659,7 @@ fn holds(opcode: Opcode) -> bool {
             | Opcode::CheckRestrictRead
             | Opcode::CheckRestrictWrite
             | Opcode::CheckFree
+            | Opcode::CheckWritten
     )
 }
 

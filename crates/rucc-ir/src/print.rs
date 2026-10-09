@@ -1196,6 +1196,11 @@ mod tests {
         let named = Restrict { clique: 1, base: 2 };
         check(Opcode::CheckRestrictRead, Some(MemInfo { restrict: named, ..four }), &[p]);
         check(Opcode::CheckRestrictWrite, Some(MemInfo { restrict: named, ..four }), &[p]);
+        // The one check about a value rather than an address, which the front end writes for a
+        // local held in a register.
+        let written = b.iconst(Type::I1, 1);
+        let args = b.func().push_values(&[written]);
+        b.inst(InstData { args, ..InstData::new(Opcode::CheckWritten) }, &[]);
 
         let mut plane = |opcode, extra| {
             let args = b.func().push_values(&[p, off]);

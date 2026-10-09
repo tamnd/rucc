@@ -388,6 +388,23 @@ pub unsafe fn freeing(addr: *const c_void, capability: *const Cap, descriptor: *
     unsafe { crate::fail::report(descriptor, Some(addr)) }
 }
 
+/// Judgement J1 for a local that has no bytes to ask about, which is one the compiler kept in a
+/// register.
+///
+/// Whether it was written is a flag the compiler carried beside it, and `written` is that flag:
+/// zero when the read is of a variable no path to it wrote. There is no address to name in the
+/// report, because the variable never had one.
+///
+/// # Safety
+///
+/// `descriptor` is null or one the compiler wrote, as for [`bounds`].
+pub unsafe fn unwritten(written: u32, descriptor: *const Descriptor) {
+    if written == 0 {
+        // SAFETY: this function's contract about `descriptor`, passed straight on.
+        unsafe { crate::fail::report(descriptor, None) }
+    }
+}
+
 /// Judgement J2: a pointer computed from another pointer did not leave the object it came from.
 ///
 /// Caught where the arithmetic is rather than at whatever line eventually reads through the
@@ -1655,6 +1672,15 @@ pub mod exports {
     ) {
         // SAFETY: as above, and a null capability is one of the two this takes.
         unsafe { super::freeing(addr, capability, descriptor) };
+    }
+
+    /// # Safety
+    ///
+    /// As [`super::unwritten`], whose arguments these are.
+    #[unsafe(no_mangle)]
+    pub unsafe extern "C" fn __rucc_check_written(written: u32, descriptor: *const Descriptor) {
+        // SAFETY: this wrapper's contract is the one it calls, passed straight on.
+        unsafe { super::unwritten(written, descriptor) };
     }
 
     /// # Safety
@@ -3520,6 +3546,15 @@ mod tests {
         // SAFETY: `ptr` is a live instance.
         unsafe { dealloc(ptr) };
         assert_eq!(extent(at(ptr, 0), 1024), 0);
+    }
+
+    #[test]
+    fn a_read_of_a_register_local_is_refused_only_when_nothing_wrote_it() {
+        let _turn = turn();
+        // SAFETY: the address of a `static`, as in `bounds`.
+        let ask = |written| unsafe { unwritten(written, &raw const ROW) };
+        assert!(refused(|| ask(0)));
+        assert!(!refused(|| ask(1)));
     }
 
     #[test]

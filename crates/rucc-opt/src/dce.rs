@@ -238,7 +238,21 @@ fn does_nothing(func: &Func, inst: Inst, facts: &Facts) -> bool {
 /// looking at is used by something else in that loop, so a count driven to zero is not the
 /// question there and this is.
 pub(crate) fn removable(func: &Func, inst: Inst, facts: &Facts) -> bool {
-    !func[inst].opcode.has_effects() || reads_only(func, inst) || does_nothing(func, inst, facts)
+    !func[inst].opcode.has_effects()
+        || reads_only(func, inst)
+        || does_nothing(func, inst, facts)
+        || answered(func, inst)
+}
+
+/// Whether this is a `check_written` the program already answered, because every way here wrote
+/// the local and the flag beside it is the constant true. That is what the flag is of a local
+/// written before it is read, which is nearly every local, and it is how the question goes away.
+fn answered(func: &Func, inst: Inst) -> bool {
+    func[inst].opcode == Opcode::CheckWritten
+        && func[func[inst].args]
+            .first()
+            .and_then(|&flag| crate::fold::constant(func, flag))
+            .is_some_and(|(imm, _)| imm.unsigned() != 0)
 }
 
 /// What to do with this instruction.

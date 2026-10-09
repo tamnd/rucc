@@ -4013,6 +4013,8 @@ impl<'u> Body<'_, 'u> {
         let tast = self.tast();
         let ty = tast[decl].ty;
         let Some(init) = tast[decl].init else {
+            // First, so that what `-ftrivial-auto-var-init=` writes counts as a write.
+            self.watch(decl);
             self.trivial_init(decl);
             return;
         };
@@ -4068,6 +4070,30 @@ impl<'u> Body<'_, 'u> {
         for entry in entries {
             self.store_entry(place, entry, span);
         }
+    }
+
+    /// Has every read of a local held in a register ask whether anything wrote it first, in a build
+    /// with the safety instrumentation, when its declaration gives it no value.
+    ///
+    /// C 6.3.2.1p2 makes reading one of these before anything wrote it undefined, because it could
+    /// have been declared `register` and its address was never taken, and that is document 03's Y6
+    /// for an object with no bytes for the init plane to keep. So the answer is kept the way the
+    /// value is, as a variable of the SSA construction, and [`Ssa::watch`] is where that is argued.
+    /// A local in memory needs none of this: its reads ask the plane, and `meta_begin` is what
+    /// says it starts out unwritten.
+    fn watch(&mut self, decl: DeclId) {
+        if !self.unit.begins {
+            return;
+        }
+        let node = &self.tast()[decl];
+        // A register variable with a name holds what the register held, which `seed_register`
+        // has already written.
+        if node.duration != StorageDuration::Automatic || node.register.is_some() {
+            return;
+        }
+        let Some(Local::Value(var)) = self.vars.get(&decl).copied() else { return };
+        let flag = self.ssa.flag_of(var).unwrap_or_else(|| self.temp());
+        self.ssa.watch(self.func, var, flag, self.at);
     }
 
     /// What `-ftrivial-auto-var-init=` writes into a local that has no initializer, where the
@@ -6005,7 +6031,13 @@ impl<'u> Body<'_, 'u> {
         match place.at {
             Where::Var(var) => {
                 let block = self.block();
-                Some(self.ssa.read(self.func, var, block, ty))
+                let value = self.ssa.read(self.func, var, block, ty);
+                if let Some(written) = self.ssa.was_written(self.func, var, block) {
+                    let mut build = self.build(span);
+                    let args = build.func().push_values(&[written]);
+                    build.inst(InstData { args, ..InstData::new(Opcode::CheckWritten) }, &[]);
+                }
+                Some(value)
             }
             Where::Addr(addr) => {
                 // Without the padding, which is a thing a store records and a read has no use
@@ -6336,6 +6368,22 @@ impl<'u> Body<'_, 'u> {
         if rucc_types::is_complex(self.types(), tast[expr].ty) {
             self.place(expr);
             return;
+        }
+        // `(void)x;` for a local held in a register, which is how a program says it means not to
+        // use one. Reading it would do nothing but ask whether anything wrote it, and the program
+        // just said it does not care.
+        let mut at = expr;
+        loop {
+            match tast[at].kind {
+                ExprKind::Cast(operand)
+                | ExprKind::Convert { kind: Conversion::Void | Conversion::Lvalue, operand } => {
+                    at = operand;
+                }
+                ExprKind::Decl(decl) if matches!(self.vars.get(&decl), Some(Local::Value(_))) => {
+                    return;
+                }
+                _ => break,
+            }
         }
         self.eval(expr);
     }

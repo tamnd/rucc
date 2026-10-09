@@ -332,7 +332,7 @@ pub fn summarize(
                 Opcode::CheckFree => summary.free.remaining += 1,
                 Opcode::CheckDeriv => summary.derivation.remaining += 1,
                 Opcode::CheckType => summary.effective_type.remaining += 1,
-                Opcode::CheckInit => summary.initialization.remaining += 1,
+                Opcode::CheckInit | Opcode::CheckWritten => summary.initialization.remaining += 1,
                 Opcode::CheckRestrictRead | Opcode::CheckRestrictWrite => {
                     summary.restrict.remaining += 1;
                 }
