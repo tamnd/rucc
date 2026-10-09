@@ -35,6 +35,7 @@ pub mod legalize;
 pub mod live;
 pub mod moves;
 pub mod order;
+pub mod pieces;
 pub mod pressure;
 pub mod rewrite;
 pub mod spill;
@@ -161,7 +162,7 @@ pub fn run_either(
     verify: bool,
     allocator: Allocator,
 ) -> Allocation {
-    run_first(func, &[wide], env, called, verify, allocator).0
+    run_first(func, &[wide], env, called, verify, allocator, None).0
 }
 
 /// Allocates registers with the first of `tried` whose answer [`rewrite::fits`], and with `env`
@@ -188,12 +189,13 @@ pub fn run_first<'a>(
     called: &str,
     verify: bool,
     allocator: Allocator,
+    copy: Option<pieces::Copy<'_>>,
 ) -> (Allocation, &'a assign::Env) {
-    let order = order::Order::of(func);
-    let live = live::Live::of(func, &order);
-    let facts = assign::Facts::of(func, &order);
+    let mut order = order::Order::of(func);
+    let mut live = live::Live::of(func, &order);
+    let mut facts = assign::Facts::of(func, &order);
     for &wide in tried {
-        let assignment = decide(func, &order, &live, wide, allocator, &facts);
+        let assignment = settle(func, &mut order, &mut live, &mut facts, wide, allocator, copy);
         // Turned round before the question, since which operand an answer is written over is part
         // of how many scratch registers an instruction wants, and back again when the answer is no.
         commute(func, &assignment);
@@ -201,10 +203,53 @@ pub fn run_first<'a>(
             return (write(func, assignment, wide, order, live, called, verify), wide);
         }
         commute(func, &assignment);
+        // Any copies this try kept stay for the next one. Taking them out again cost md.c 22
+        // instructions and ohci-hcd.c 37 on i386, since the next try spills much the same values
+        // and is weighed over the copies as well.
     }
-    let assignment = decide(func, &order, &live, env, allocator, &facts);
+    let assignment = settle(func, &mut order, &mut live, &mut facts, env, allocator, copy);
     commute(func, &assignment);
     (write(func, assignment, env, order, live, called, verify), env)
+}
+
+/// Where every value goes, and when some went to the stack, where they go once each block that
+/// reads one of those twice has a copy of its own. See [`pieces`].
+///
+/// The second answer is kept only when it costs less, and the function, its line and its liveness
+/// are then the ones it was decided over. Otherwise the copies come out again and everything is as
+/// it was for the first.
+fn settle(
+    func: &mut rucc_mir::Func,
+    order: &mut order::Order,
+    live: &mut live::Live,
+    facts: &mut assign::Facts,
+    env: &assign::Env,
+    allocator: Allocator,
+    copy: Option<pieces::Copy<'_>>,
+) -> assign::Assignment {
+    let first = decide(func, order, live, env, allocator, facts);
+    let Some(copy) = copy else { return first };
+    if allocator != Allocator::Backtracking || first.spilled() == 0 {
+        return first;
+    }
+    let before = backtrack::cost(func, order, &first);
+    let made = pieces::split(func, &first, &facts.forced, copy);
+    if made.is_empty() {
+        return first;
+    }
+    let split = order::Order::of(func);
+    let lives = live::Live::of(func, &split);
+    let known = assign::Facts::of(func, &split);
+    let second = decide(func, &split, &lives, env, allocator, &known);
+    let after = backtrack::cost(func, &split, &second) - made.overcounted(func, &second);
+    if after < before {
+        *order = split;
+        *live = lives;
+        *facts = known;
+        return second;
+    }
+    made.undo(func);
+    first
 }
 
 /// Where every value goes, with the allocator asked for.
@@ -368,7 +413,7 @@ mod tests {
         let middle = assign::Env::new().with(GPR, &SYSV.int_order[..2], &SYSV.int_order[2..3]);
         let env = assign::Env::new().with(GPR, &SYSV.int_order[..1], &SYSV.int_order[1..3]);
         let (allocation, used) =
-            run_first(&mut func, &[&wide, &middle], &env, "test", true, Allocator::Single);
+            run_first(&mut func, &[&wide, &middle], &env, "test", true, Allocator::Single, None);
 
         assert!(std::ptr::eq(used, &middle));
         assert_eq!(allocation.assignment.spilled(), 1);
@@ -388,7 +433,7 @@ mod tests {
         let middle = assign::Env::new().with(GPR, &SYSV.int_order[..1], &SYSV.int_order[1..2]);
         let env = assign::Env::new().with(GPR, &SYSV.int_order[..1], &SYSV.int_order[1..3]);
         let (allocation, used) =
-            run_first(&mut func, &[&middle], &env, "test", true, Allocator::Single);
+            run_first(&mut func, &[&middle], &env, "test", true, Allocator::Single, None);
 
         assert!(std::ptr::eq(used, &env));
         assert_eq!(allocation.assignment.spilled(), 2);
