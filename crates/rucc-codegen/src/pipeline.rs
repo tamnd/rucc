@@ -963,6 +963,11 @@ pub fn compile_recording(
     // the same run written a second way.
     combine::stores(&mut func, machine.shapes, machine.flags, names, &mut pending);
     combine::loads(&mut func, machine.shapes, names, &mut pending);
+    // After both, which may have taken a read of an argument into the instruction that wanted it.
+    // Not at `-O0`, whose arguments are all stored to their slots and so all read.
+    if flags.reloads {
+        fold::unread_arguments(&mut func, &mut pending);
+    }
     // Last of the three, so that a name read or written directly is still read from the
     // instruction pointer and only an address wanted as a value is written as a number.
     if flags.code_model == CodeModel::Kernel {
