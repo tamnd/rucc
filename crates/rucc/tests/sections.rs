@@ -456,3 +456,26 @@ int bump(void) { take(escaped); return counter++; }
     assert_eq!(under(&plain, "empty_ops"), ".section\t.rodata");
     assert_eq!(under(&plain, "names"), ".data");
 }
+
+/// A constant holding an address in a section the program named, which is how the kernel writes
+/// `module_param` and its `__initconst` tables. Under `-fno-pic` the static linker is the only one
+/// that writes the address, so gcc and clang leave the section read only, and only position
+/// independent code needs it writable.
+#[test]
+fn a_named_constant_holding_an_address_is_read_only_without_pic() {
+    let source = "\
+struct kp { const char *name; int (*fn)(void); int perm; };
+static int f(void) { return 1; }
+static const struct kp p1 __attribute__((used, section(\"__param\"))) = { \"x\", f, 0644 };
+";
+    let dir = fixture("param", source);
+    for target in [LINUX, "i686-unknown-linux-gnu"] {
+        let absolute = String::from_utf8(run(&dir, target, &["-S", "-O2", "-fno-pic"], "one.s"))
+            .expect("a listing is text");
+        let moved = String::from_utf8(run(&dir, target, &["-S", "-O2", "-fpic"], "pic.s"))
+            .expect("a listing is text");
+        assert!(absolute.contains(".section\t__param,\"a\",@progbits"), "{target}: {absolute}");
+        assert!(moved.contains(".section\t__param,\"aw\",@progbits"), "{target}: {moved}");
+    }
+    let _ = std::fs::remove_dir_all(&dir);
+}

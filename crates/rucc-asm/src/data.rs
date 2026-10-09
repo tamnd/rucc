@@ -329,18 +329,28 @@ impl Globals {
 /// on Mach-O, and is neither on COFF, so which of them is being written decides whether there is
 /// anything to write.
 ///
+/// The link is an argument for a question of the same kind. Under `-fno-pic` nothing loads the file
+/// at an address it does not already know, so a constant holding an address has nobody to write it
+/// but the static linker and is as read only as any other constant, which is gcc's answer through
+/// `reloc_rw_mask`. The kernel's `__param` and `.init.rodata` are two sections that ask it.
+///
 /// # Errors
 ///
 /// [`Error::Thread`] for a thread-local variable on a format that does not spell one this way,
 /// which is a program this compiler is behind on rather than a mistake, and [`Error::Image`] for a
 /// piece of an initializer nothing here can write down. See [`Error`].
-pub fn globals(module: &Module, names: &Interner, format: ObjectFormat) -> Result<Globals, Error> {
+pub fn globals(
+    module: &Module,
+    names: &Interner,
+    format: ObjectFormat,
+    pic: ir::Pic,
+) -> Result<Globals, Error> {
     let mut out = Globals::default();
     for id in module.globals() {
         if module[id].is_declaration() {
             continue;
         }
-        out.vars.push(variable(module, names, id, format)?);
+        out.vars.push(variable(module, names, id, format, pic)?);
     }
     // The other half, which is names and no bytes. A declaration is not a variable and has no
     // image, so it is skipped above and picked up here, and only the weak ones are: an ordinary
@@ -471,6 +481,7 @@ fn variable(
     names: &Interner,
     id: GlobalId,
     format: ObjectFormat,
+    pic: ir::Pic,
 ) -> Result<Variable, Error> {
     let global = &module[id];
     let name = names.resolve(global.name).to_owned();
@@ -555,7 +566,9 @@ fn variable(
         pieces.push(Piece::Zero(global.size - written));
     }
 
-    let place = match place(module, names, id, &pieces, &addrs) {
+    // The addresses only the loader can write, which under `-fno-pic` are none of them.
+    let loaded = if pic == ir::Pic::Absolute { &[][..] } else { &addrs[..] };
+    let place = match place(module, names, id, &pieces, loaded) {
         // A Windows image has no zeroed half of its thread-local template. Every thread gets a copy
         // of the one `.tls` section, zeros included, which is what gcc writes there too.
         Place::Thread { .. } if format == ObjectFormat::Coff => Place::Thread { zero: false },
@@ -741,8 +754,9 @@ mod tests {
         let mut module = module(&mut names);
         module.add_global(Global::new(names.intern("x"), 4, 4));
         defined(&mut module, &mut names, "y", &[Datum::Zero(4)]);
-        let vars =
-            globals(&module, &names, ObjectFormat::Elf).expect("a module of two globals").vars;
+        let vars = globals(&module, &names, ObjectFormat::Elf, ir::Pic::Executable)
+            .expect("a module of two globals")
+            .vars;
         assert_eq!(vars.iter().map(|var| var.name.as_str()).collect::<Vec<_>>(), ["y"]);
     }
 
@@ -762,7 +776,8 @@ mod tests {
             let mut module = module(&mut names);
             let id = defined(&mut module, &mut names, "x", &[Datum::Zero(4)]);
             module[id].visibility = asked;
-            let out = globals(&module, &names, ObjectFormat::Elf).expect("a module of one global");
+            let out = globals(&module, &names, ObjectFormat::Elf, ir::Pic::Executable)
+                .expect("a module of one global");
             assert_eq!(out.vars[0].visibility, wanted, "{asked:?}");
             assert_eq!(out.image().objects[0].visibility, wanted, "{asked:?} through the image");
         }
@@ -774,8 +789,9 @@ mod tests {
         let mut module = module(&mut names);
         let value = module.add_imm(Imm::int(258, Type::int(32)));
         defined(&mut module, &mut names, "x", &[Datum::Scalar { ty: Type::int(32), value }]);
-        let vars =
-            globals(&module, &names, ObjectFormat::Elf).expect("a module of one global").vars;
+        let vars = globals(&module, &names, ObjectFormat::Elf, ir::Pic::Executable)
+            .expect("a module of one global")
+            .vars;
         assert_eq!(vars[0].pieces, [Piece::Scalar(vec![2, 1, 0, 0])]);
         // The low byte first, which is what this machine reads and is a fact about the module
         // rather than about the variable.
@@ -798,7 +814,8 @@ mod tests {
         literal(&mut module, "two", b"a\0b\0");
         literal(&mut module, "wide", &[b'a', 0, 0, 0, 0, 0, 0, 0]);
         let places = |format| -> Vec<Place> {
-            let vars = globals(&module, &names, format).expect("three literals").vars;
+            let vars =
+                globals(&module, &names, format, ir::Pic::Executable).expect("three literals").vars;
             vars.into_iter().map(|var| var.place).collect()
         };
         assert_eq!(
@@ -827,8 +844,9 @@ mod tests {
         let merged = defined(&mut module, &mut names, "merged", &[Datum::Zero(4)]);
         module[merged].linkage = Linkage::Common;
 
-        let vars =
-            globals(&module, &names, ObjectFormat::Elf).expect("a module of five globals").vars;
+        let vars = globals(&module, &names, ObjectFormat::Elf, ir::Pic::Executable)
+            .expect("a module of five globals")
+            .vars;
         let places: Vec<&Place> = vars.iter().map(|var| &var.place).collect();
         assert_eq!(
             places,
@@ -886,8 +904,9 @@ mod tests {
         module[both].constant = true;
         module[both].size = 16;
 
-        let vars =
-            globals(&module, &names, ObjectFormat::Elf).expect("a module of five globals").vars;
+        let vars = globals(&module, &names, ObjectFormat::Elf, ir::Pic::Executable)
+            .expect("a module of five globals")
+            .vars;
         let places: Vec<(&str, &Place)> =
             vars.iter().map(|var| (var.name.as_str(), &var.place)).collect();
         assert_eq!(
@@ -900,6 +919,12 @@ mod tests {
                 ("both", &Place::RelocReadOnly { local: false }),
             ]
         );
+        let absolute = globals(&module, &names, ObjectFormat::Elf, ir::Pic::Absolute)
+            .expect("a module of five globals")
+            .vars;
+        let places: Vec<&Place> = absolute.iter().map(|var| &var.place).collect();
+        let read_only = &Place::ReadOnly;
+        assert_eq!(places, [&Place::Zero, read_only, read_only, read_only, read_only]);
     }
 
     /// A variable in a section the program named keeps its bytes and gets the flags gcc gives it.
@@ -933,8 +958,9 @@ mod tests {
         module[merged].linkage = Linkage::Common;
         module[merged].section = Some(mine);
 
-        let vars =
-            globals(&module, &names, ObjectFormat::Elf).expect("a module of six globals").vars;
+        let vars = globals(&module, &names, ObjectFormat::Elf, ir::Pic::Executable)
+            .expect("a module of six globals")
+            .vars;
         let places: Vec<(&str, &Place)> =
             vars.iter().map(|var| (var.name.as_str(), &var.place)).collect();
         let named = |name: &str, holds| Place::Named(name.to_owned(), holds);
@@ -949,6 +975,13 @@ mod tests {
                 ("merged", &named(".mine", Holds::Written)),
             ]
         );
+        // Under `-fno-pic` the table is as read only as the constant beside it, since the static
+        // linker writes the address and nothing writes it after.
+        let absolute = globals(&module, &names, ObjectFormat::Elf, ir::Pic::Absolute)
+            .expect("a module of six globals")
+            .vars;
+        assert_eq!(absolute[2].place, named(".initcall", Holds::ReadOnly));
+        assert_eq!(absolute[0].place, named(".mine", Holds::Written));
         let data = Globals { vars, ..Globals::default() }.image();
         assert_eq!(data.objects[0].bytes, [0; 4], "zeros in a named section are bytes");
         assert!(data.objects[3].bytes.is_empty(), "zeros in .bss..page_aligned are not");
@@ -962,8 +995,9 @@ mod tests {
         let id =
             defined(&mut module, &mut names, "x", &[Datum::Scalar { ty: Type::int(8), value }]);
         module[id].size = 4;
-        let vars =
-            globals(&module, &names, ObjectFormat::Elf).expect("a module of one global").vars;
+        let vars = globals(&module, &names, ObjectFormat::Elf, ir::Pic::Executable)
+            .expect("a module of one global")
+            .vars;
         assert_eq!(vars[0].pieces, [Piece::Scalar(vec![7]), Piece::Zero(3)]);
         assert_eq!(vars[0].size, 4);
     }
@@ -975,8 +1009,9 @@ mod tests {
         let reloc = module.add_reloc(IrReloc { symbol: names.intern("y"), addend: 16, size: 8 });
         let id = defined(&mut module, &mut names, "p", &[Datum::Addr(reloc)]);
         module[id].size = 8;
-        let vars =
-            globals(&module, &names, ObjectFormat::Elf).expect("a module of one global").vars;
+        let vars = globals(&module, &names, ObjectFormat::Elf, ir::Pic::Executable)
+            .expect("a module of one global")
+            .vars;
         assert_eq!(vars[0].pieces, [Piece::Addr { symbol: "y".to_owned(), addend: 16, bytes: 8 }]);
 
         let data = Globals { vars, ..Globals::default() }.image();
@@ -1003,8 +1038,9 @@ mod tests {
         // Read only rather than relocated at load time, which is the point of writing a table of
         // distances: what is in the four bytes is the same number wherever the file is loaded.
         module[id].constant = true;
-        let vars =
-            globals(&module, &names, ObjectFormat::Elf).expect("a module of one global").vars;
+        let vars = globals(&module, &names, ObjectFormat::Elf, ir::Pic::Executable)
+            .expect("a module of one global")
+            .vars;
         assert_eq!(vars[0].pieces, [Piece::Away { symbol: "y".to_owned(), addend: 1 }]);
         assert_eq!(vars[0].place, Place::ReadOnly);
 
@@ -1023,7 +1059,8 @@ mod tests {
         let reloc = module.add_reloc(IrReloc { symbol: names.intern("y"), addend: 0, size: 8 });
         let id = defined(&mut module, &mut names, "d", &[Datum::Away(reloc)]);
         module[id].size = 8;
-        let failed = globals(&module, &names, ObjectFormat::Elf).expect_err("a distance that wide");
+        let failed = globals(&module, &names, ObjectFormat::Elf, ir::Pic::Executable)
+            .expect_err("a distance that wide");
         assert_eq!(
             failed,
             Error::Image { name: "d".to_owned(), why: "a distance 8 bytes wide".to_owned() }
@@ -1036,8 +1073,9 @@ mod tests {
         let mut module = module(&mut names);
         let id = defined(&mut module, &mut names, "x", &[Datum::Zero(4096)]);
         module[id].size = 4096;
-        let data =
-            globals(&module, &names, ObjectFormat::Elf).expect("a module of one global").image();
+        let data = globals(&module, &names, ObjectFormat::Elf, ir::Pic::Executable)
+            .expect("a module of one global")
+            .image();
         assert_eq!(data.objects[0].place, Place::Zero);
         assert_eq!(data.objects[0].size, 4096);
         // The point of the section: a program with a large zeroed array is a small file.
@@ -1051,8 +1089,9 @@ mod tests {
         let id = defined(&mut module, &mut names, "x", &[Datum::Zero(64)]);
         module[id].size = 64;
         module[id].constant = true;
-        let data =
-            globals(&module, &names, ObjectFormat::Elf).expect("a module of one global").image();
+        let data = globals(&module, &names, ObjectFormat::Elf, ir::Pic::Executable)
+            .expect("a module of one global")
+            .image();
         assert_eq!(data.objects[0].place, Place::ReadOnly);
         assert_eq!(data.objects[0].bytes, vec![0; 64]);
     }
@@ -1073,8 +1112,9 @@ mod tests {
             let name = format!("x{index}");
             let id = defined(&mut module, &mut names, &name, &[Datum::Zero(4)]);
             module[id].linkage = linkage;
-            let vars =
-                globals(&module, &names, ObjectFormat::Elf).expect("a module of globals").vars;
+            let vars = globals(&module, &names, ObjectFormat::Elf, ir::Pic::Executable)
+                .expect("a module of globals")
+                .vars;
             assert_eq!(vars[index].binding, binding, "{linkage:?}");
         }
     }
@@ -1139,7 +1179,9 @@ mod tests {
         let zeroed = defined(&mut module, &mut names, "empty", &[Datum::Zero(4)]);
         module[zeroed].tls = Some(TlsModel::GlobalDynamic);
 
-        let vars = globals(&module, &names, ObjectFormat::Elf).expect("two thread-locals").vars;
+        let vars = globals(&module, &names, ObjectFormat::Elf, ir::Pic::Executable)
+            .expect("two thread-locals")
+            .vars;
         assert_eq!(vars[0].place, Place::Thread { zero: false }, ".tdata");
         assert_eq!(vars[1].place, Place::Thread { zero: true }, ".tbss");
     }
@@ -1155,7 +1197,9 @@ mod tests {
         module[id].tls = Some(TlsModel::GlobalDynamic);
         module[id].constant = true;
 
-        let vars = globals(&module, &names, ObjectFormat::Elf).expect("a thread-local").vars;
+        let vars = globals(&module, &names, ObjectFormat::Elf, ir::Pic::Executable)
+            .expect("a thread-local")
+            .vars;
         assert_eq!(vars[0].place, Place::Thread { zero: false });
     }
 
@@ -1176,7 +1220,9 @@ mod tests {
         let zeroed = defined(&mut module, &mut names, "empty", &[Datum::Zero(4)]);
         module[zeroed].tls = Some(TlsModel::GlobalDynamic);
 
-        let data = globals(&module, &names, ObjectFormat::Elf).expect("two thread-locals").image();
+        let data = globals(&module, &names, ObjectFormat::Elf, ir::Pic::Executable)
+            .expect("two thread-locals")
+            .image();
         assert_eq!(data.objects[0].bytes, [2, 1, 0, 0]);
         assert_eq!(data.objects[0].size, 4);
         assert!(data.objects[1].bytes.is_empty(), "a zeroed one carries its size and no bytes");
@@ -1191,7 +1237,8 @@ mod tests {
         let id = defined(&mut module, &mut names, "x", &[Datum::Zero(4)]);
         module[id].tls = Some(TlsModel::GlobalDynamic);
         let format = ObjectFormat::Wasm;
-        let error = globals(&module, &names, format).expect_err("a thread-local variable");
+        let error = globals(&module, &names, format, ir::Pic::Executable)
+            .expect_err("a thread-local variable");
         assert_eq!(error, Error::Thread { name: "x".to_owned(), format: format.as_str() });
     }
 
@@ -1203,7 +1250,8 @@ mod tests {
         let mut module = module(&mut names);
         let id = defined(&mut module, &mut names, "x", &[Datum::Zero(4)]);
         module[id].tls = Some(TlsModel::GlobalDynamic);
-        let vars = globals(&module, &names, ObjectFormat::Coff).expect("a thread-local variable");
+        let vars = globals(&module, &names, ObjectFormat::Coff, ir::Pic::Executable)
+            .expect("a thread-local variable");
         let data = vars.image();
         assert_eq!(data.objects[0].place, Place::Thread { zero: false });
         assert_eq!(data.objects[0].bytes, [0, 0, 0, 0]);
