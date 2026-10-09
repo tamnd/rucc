@@ -82,6 +82,7 @@ pub struct Elsewhere {
     cold: Set<Symbol>,
     described: bool,
     indexed: bool,
+    descriptor_calls: bool,
     imported: Set<Symbol>,
     referred: Set<Symbol>,
     based: bool,
@@ -639,6 +640,24 @@ impl Elsewhere {
     #[must_use]
     pub const fn indexed(&self) -> bool {
         self.indexed
+    }
+
+    /// Whether a thread-local variable in one of the two dynamic models is reached through a TLS
+    /// descriptor, on a machine where that is not the only way. This is `-mtls-dialect=gnu2` on
+    /// x86-64. The descriptor's function gives back the variable's offset from the thread pointer
+    /// and keeps every register but the one it returns in, and when the variable is in the
+    /// program the linker turns the call into a load of the offset or a constant.
+    #[must_use]
+    pub const fn descriptor_calls(&self) -> bool {
+        self.descriptor_calls
+    }
+
+    /// The same names, with a thread-local variable reached through its descriptor when `on`. See
+    /// [`Self::descriptors`].
+    #[must_use]
+    pub fn with_descriptor_calls(mut self, on: bool) -> Self {
+        self.descriptor_calls = on;
+        self
     }
 }
 

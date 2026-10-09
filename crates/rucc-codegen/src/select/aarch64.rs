@@ -32,7 +32,7 @@ pub static SELECTOR: super::Selector = super::Selector {
         teb: Some(super::Teb { index: "ldr_sym_32", array: "teb_64", block: "secrel_64" }),
         // gcc writes the descriptor call for both models here, and so does this. A linker that
         // makes an executable rewrites all four instructions, so they stay together as text.
-        dynamic: Some(super::Dynamic { general: TLSDESC, local: TLSDESC }),
+        dynamic: Some(super::Dynamic { general: TLSDESC, local: TLSDESC, descriptor: None }),
     },
     jumps: &super::Jumps {
         near: "adr_64",

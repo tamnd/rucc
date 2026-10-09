@@ -34,7 +34,7 @@ use rucc_base::hash::{Map, Set};
 use rucc_mir::CfiOp;
 use rucc_object::{
     Array, Assembled, Binding, Extent, Group, Held, Keep, Name, Part, Reference, Reloc, Shape,
-    Sort, Visibility,
+    Sort, Tls, Visibility,
 };
 use rucc_target::aarch64::{self, AAPCS64};
 use rucc_target::x86;
@@ -1251,6 +1251,16 @@ impl Reader {
     /// among the ones the instruction already has in the order gas puts them.
     fn instruction(&mut self, word: &str, rest: &str, prefixes: &[u8]) -> Result<(), Trouble> {
         self.after_data.remove(&self.section_of(self.here));
+        // `call *x@tlscall(%rax)` is the call through the TLS descriptor of `x`. gas writes it as
+        // the call through `(%rax)`, and puts `R_X86_64_TLSDESC_CALL` on its first byte.
+        let called = descriptor_call(rest);
+        let rest = match &called {
+            Some((through, _)) if self.mode() == Mode::Bits64 && word.starts_with("call") => {
+                through.as_str()
+            }
+            Some(_) => return Err(self.bad("'@tlscall' outside an x86-64 'call *x@tlscall(%rax)'")),
+            None => rest,
+        };
         let mut args = if rest.is_empty() { Vec::new() } else { split(rest, ',') };
         for arg in &mut args {
             if let Some(value) = self.fixed_now(arg) {
@@ -1351,6 +1361,23 @@ impl Reader {
                 slot,
                 branch,
                 jump,
+                field: None,
+                leb: None,
+                line: self.line,
+            });
+        }
+        if let Some((_, name)) = called {
+            let name = self.named(&name)?;
+            self.sym(&name);
+            self.fixups.push(Fixup {
+                part,
+                at,
+                width: 0,
+                sum: Sum { constant: 0, terms: vec![Term { coeff: 1, what: What::Symbol(name) }] },
+                reach: Reach::Tls(Tls::DescriptorCall),
+                slot,
+                branch: None,
+                jump: false,
                 field: None,
                 leb: None,
                 line: self.line,
@@ -5629,6 +5656,15 @@ impl Reader {
 }
 
 /// How far to shift by, which has to be a count and not a number that happens to be negative.
+/// The operand of `call *x@tlscall(%rax)` as the plain `*(%rax)` and the name, or `None` for any
+/// other operand.
+fn descriptor_call(rest: &str) -> Option<(String, String)> {
+    let body = rest.trim().strip_prefix('*')?;
+    let (displacement, base) = body.split_at(body.find('(')?);
+    let (name, how) = displacement.split_once('@')?;
+    how.trim().eq_ignore_ascii_case("tlscall").then(|| (format!("*{base}"), name.trim().to_owned()))
+}
+
 /// `nop` on AArch64, which is what the padding in front of an instruction is made of there.
 const A64_NOP: u32 = 0xd503_201f;
 
@@ -9016,6 +9052,35 @@ nop
         assert_eq!(name(&read, "ex").sort, Sort::Thread);
         // An i386 suffix that has no x86-64 relocation is still refused.
         assert!(refused("\tleaq x@ntpoff(%rax), %rax\n").why.contains("@ntpoff"));
+    }
+
+    /// The x86-64 call through a TLS descriptor, which gcc writes under `-mtls-dialect=gnu2`, with
+    /// the bytes and relocations gas 2.42 writes for it. The call relocation covers no bytes and
+    /// is on the first byte of the call.
+    #[test]
+    fn the_x86_64_descriptor_call_is_the_one_gas_writes() {
+        let read = assembled(concat!(
+            "\t.text\n",
+            "\tleaq ex@tlsdesc(%rip), %rax\n",
+            "\tcall *ex@tlscall(%rax)\n",
+            "\taddq %fs:0, %rax\n",
+        ));
+        #[rustfmt::skip]
+        let gas: [u8; 18] = [
+            0x48, 0x8d, 0x05, 0, 0, 0, 0,
+            0xff, 0x10,
+            0x64, 0x48, 0x03, 0x04, 0x25, 0, 0, 0, 0,
+        ];
+        assert_eq!(bytes(&read, ".text"), gas);
+        assert_eq!(
+            relocs(&read, ".text"),
+            [
+                (3, "ex", Reference::Tls(Tls::Descriptor), -4),
+                (7, "ex", Reference::Tls(Tls::DescriptorCall), 0),
+            ]
+        );
+        assert_eq!(name(&read, "ex").sort, Sort::Thread);
+        assert!(refused("\tjmp *ex@tlscall(%rax)\n").why.contains("@tlscall"));
     }
 
     /// An address with no registers in it is four bytes the linker fills with the address, and a

@@ -2161,6 +2161,10 @@ pub struct Options {
     /// `-ftls-model=`. The general dynamic one, the default, asks for nothing, so the code
     /// generator picks the fastest model the link allows.
     pub tls_model: TlsModel,
+    /// Whether a thread-local variable in one of the two dynamic models is reached through a TLS
+    /// descriptor and not a call to `__tls_get_addr`, which is `-mtls-dialect=gnu2` on x86-64.
+    /// AArch64 always uses a descriptor, as gcc does by default there.
+    pub tls_descriptors: bool,
     /// The boundary in bytes the stack pointer is kept on at every call, from
     /// `-mpreferred-stack-boundary=`, or `None` for the convention's own.
     ///
@@ -2888,6 +2892,7 @@ impl Options {
             red_zone: true,
             code_model: CodeModel::Small,
             tls_model: TlsModel::GlobalDynamic,
+            tls_descriptors: false,
             stack_boundary: None,
             vector: true,
             x87: true,

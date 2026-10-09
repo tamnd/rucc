@@ -5,7 +5,8 @@
 //! must fit in the small room glibc keeps in each thread's first block. 64 KB does not fit, so
 //! `dlopen` refuses it with "cannot allocate memory in static TLS block". The cases here check that
 //! the library rucc builds with `-fPIC` loads and gives each thread its own copy, at `-O0` and at
-//! `-O2`, and that `-ftls-model=initial-exec` still gives the old model.
+//! `-O2`, and that `-ftls-model=initial-exec` still gives the old model. On x86-64 the same library
+//! is built under `-mtls-dialect=gnu2` too.
 
 #![cfg(all(
     target_os = "linux",
@@ -164,4 +165,16 @@ fn the_initial_exec_model_still_asks_for_static_tls() {
     let (said, fixed) = opened("ie", &["-O2", "-ftls-model=initial-exec"]);
     assert!(fixed, "the library does not ask for static TLS");
     assert!(said.contains("cannot allocate memory in static TLS block"), "{said}");
+}
+
+/// `-mtls-dialect=gnu2` reaches each variable through its TLS descriptor and not through
+/// `__tls_get_addr`. The library still loads, and each thread still has its own copy.
+#[cfg(target_arch = "x86_64")]
+#[test]
+fn the_descriptor_dialect_opens_and_each_thread_has_its_own() {
+    for level in ["-O0", "-O2"] {
+        let (said, fixed) = opened(&format!("gnu2{level}"), &[level, "-mtls-dialect=gnu2"]);
+        assert_eq!(said, RIGHT, "{level}");
+        assert!(!fixed, "{level}: the library asks for static TLS");
+    }
 }

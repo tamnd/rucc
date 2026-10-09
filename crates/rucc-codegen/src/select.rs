@@ -130,15 +130,28 @@ pub struct Symbols {
 /// ```
 ///
 /// When the variable turns out to be in the program, the linker rewrites the call into a read of
-/// the thread pointer. This is true on both machines. It knows the call only by its exact bytes, and the prefixes on the first
-/// one are there to make it as long as what the linker puts in its place, so the instructions
-/// are kept together as text and not given to the allocator one at a time.
+/// the thread pointer. This is true on both machines. It knows the call only by its exact bytes,
+/// and the prefixes on the first one are there to make it as long as what the linker puts in its
+/// place, so the instructions are kept together as text and not given to the allocator one at a
+/// time.
+///
+/// x86-64 has a descriptor call too, which `-mtls-dialect=gnu2` asks for. It is the AArch64 one in
+/// other instructions, and it is used for both models:
+///
+/// ```text
+/// leaq x@tlsdesc(%rip), %rax
+/// call *x@tlscall(%rax)
+/// addq %fs:0, %rax
+/// ```
 #[derive(Debug)]
 pub struct Dynamic {
     /// The general call, for a variable another object may define.
     pub general: &'static str,
     /// The local call, for one that is in this library and nowhere else.
     pub local: &'static str,
+    /// The call through a descriptor, for either model, when the machine has one that is not
+    /// already `general`. See [`crate::elsewhere::Elsewhere::descriptor_calls`].
+    pub descriptor: Option<&'static str>,
 }
 
 /// The instructions a thread-local variable is reached with on Windows on AArch64.

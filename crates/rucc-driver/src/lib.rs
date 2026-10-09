@@ -275,9 +275,9 @@ options:
   -fprofile-use[=<path>] -fprofile-dir=<dir> --coverage   read, and counted for gcov
   -f[no-]stack-protector[-strong|-all|-explicit], -f[no-]stack-clash-protection, -fcf-protection=<edges>, -fhardened
   -ffunction-sections -fdata-sections, -fno-plt   a section per function or variable, for --gc-sections, calls through the GOT
-  -fvisibility=<what>, -ftls-model=<model>   gcc's visibility and TLS model for a name the source said none for
+  -fvisibility=<what>, -ftls-model=<model>, -mtls-dialect=<d>   gcc's visibility and TLS model for a name the source said none for, gnu2 for TLS descriptors
   -l<name>, -L <dir>, -B <dir>, --gcc-toolchain=<dir>, -specs=<file>   a library, where to look for one, our tools, the GCC, the flags of a dpkg or Red Hat spec file
-  -fPIC -fpic -fPIE -fpie, -pipe, -mtls-dialect=   what it does anyway, and -f[no-]common as the target's cc
+  -fPIC -fpic -fPIE -fpie, -pipe   what it does anyway, and -f[no-]common as the target's cc
   -f[no-]strict-aliasing, -f[no-]delete-null-pointer-checks   what it assumes anyway
   -static -shared -pie -no-pie -nostdlib -nostartfiles -nodefaultlibs -rdynamic -s   how to link
   -Wl,<arg> -Xlinker <arg> -fuse-ld=<name>, -Wa,<arg> -Xassembler <arg>   the linker, the assembler
@@ -2746,10 +2746,9 @@ pub fn parse_args(args: &[String]) -> Result<Action, CliError> {
             }
             // How a thread-local variable in one of the two dynamic models is reached: through
             // `__tls_get_addr`, or through a TLS descriptor. Fedora passes `gnu2` on each x86-64
-            // compile. On x86-64 this compiler writes the `__tls_get_addr` call under either value
-            // (`thread_call` in the code generator). The linker takes both forms, so a `gnu2` build
-            // is only a little slower than gcc's. AArch64 writes the initial exec sequence, which
-            // neither value changes. So the value is checked and there is nothing more to do.
+            // compile, and then the code generator writes the descriptor call gcc writes. AArch64
+            // always writes the descriptor call, which is gcc's default `desc` there, so `trad` is
+            // checked and changes nothing.
             _ if arg.starts_with("-mtls-dialect=")
                 && (x86 || arch == rucc_target::Arch::Aarch64) =>
             {
@@ -2761,6 +2760,7 @@ pub fn parse_args(args: &[String]) -> Result<Action, CliError> {
                         choices.join(" or ")
                     )));
                 }
+                opts.tls_descriptors = x86 && value == "gnu2";
             }
             // Whether a `switch` may become a table, which the kernel turns off beside the thunks
             // because a jump through a table is an indirect branch that goes through no thunk.
@@ -7769,12 +7769,14 @@ mod tests {
     }
 
     /// The Fedora line passes `-mtls-dialect=gnu2` on x86-64. Each target takes the values that
-    /// gcc takes for it, and refuses the others.
+    /// gcc takes for it, and refuses the others. Only `gnu2` asks for the descriptor call, and the
+    /// last one wins.
     #[test]
     fn the_tls_dialect_is_checked_for_the_target() {
         for value in ["gnu", "gnu2"] {
             let flag = format!("-mtls-dialect={value}");
-            compile(&["--target=x86_64-linux-gnu", &flag, "-c", "a.c"]);
+            let (opts, _) = compile(&["--target=x86_64-linux-gnu", &flag, "-c", "a.c"]);
+            assert_eq!(opts.tls_descriptors, value == "gnu2");
             compile(&["--target=i686-linux-gnu", &flag, "-c", "a.c"]);
             let why = refused(&["--target=aarch64-linux-gnu", &flag, "-c", "a.c"]);
             assert!(why.contains("desc or trad"), "{why}");
@@ -7785,6 +7787,14 @@ mod tests {
             let why = refused(&["--target=x86_64-linux-gnu", &flag, "-c", "a.c"]);
             assert!(why.contains("gnu or gnu2"), "{why}");
         }
+        let (opts, _) = compile(&[
+            "--target=x86_64-linux-gnu",
+            "-mtls-dialect=gnu2",
+            "-mtls-dialect=gnu",
+            "-c",
+            "a.c",
+        ]);
+        assert!(!opts.tls_descriptors);
     }
 
     /// `-ftls-model=` takes gcc's four spellings, and the last one wins.

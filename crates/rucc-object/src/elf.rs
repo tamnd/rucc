@@ -51,6 +51,8 @@ pub(crate) fn r_type(reference: Reference) -> Option<elf::RelocationType> {
         Reference::Tls(Tls::Module) => elf::R_X86_64_TLSLD,
         Reference::Tls(Tls::InModule) => elf::R_X86_64_DTPOFF32,
         Reference::Tls(Tls::Offset) => elf::R_X86_64_TPOFF32,
+        Reference::Tls(Tls::Descriptor) => elf::R_X86_64_GOTPC32_TLSDESC,
+        Reference::Tls(Tls::DescriptorCall) => elf::R_X86_64_TLSDESC_CALL,
         Reference::AwayWide => elf::R_X86_64_PC64,
         Reference::Address { bytes: 8 } => elf::R_X86_64_64,
         Reference::Address { bytes: 4 } => elf::R_X86_64_32,
@@ -126,7 +128,8 @@ pub(crate) fn r_type_i386(reference: Reference) -> Option<elf::RelocationType> {
         | Reference::Address { .. }
         | Reference::Image
         | Reference::Section
-        | Reference::Field(_) => return None,
+        | Reference::Field(_)
+        | Reference::Tls(Tls::Descriptor | Tls::DescriptorCall) => return None,
     })
 }
 
