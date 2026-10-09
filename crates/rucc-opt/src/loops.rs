@@ -191,6 +191,9 @@ impl Loops {
     /// already reached, and nothing else may have changed since the forest was built. The edges
     /// now are what `successors` and `predecessors` say, `reached` says whether a block outside
     /// the loop is one control reaches, and `capacity` is one past the highest block number.
+    /// `added` are blocks made since, each standing in for a block of the loop on an edge out of
+    /// one of its blocks and going only to blocks that block went to. They count as blocks of the
+    /// loop, and the ones its header gets to stay in it.
     ///
     /// No cycle goes through a block outside the loop that did not before, because the edges that
     /// moved went to blocks the loop got to anyway, so a cycle that took a new edge was a cycle
@@ -219,9 +222,11 @@ impl Loops {
         successors: impl Fn(Block) -> Vec<Block>,
         predecessors: impl Fn(Block) -> Vec<Block>,
         reached: impl Fn(Block) -> bool,
+        added: &[Block],
     ) -> Vec<Block> {
         let header = self.header(root);
-        let old = std::mem::take(&mut self.loops[root.index()].blocks);
+        let mut old = std::mem::take(&mut self.loops[root.index()].blocks);
+        old.extend_from_slice(added);
         let capacity = capacity.max(self.innermost.len());
         let mut member = vec![false; capacity];
         for &block in &old {
@@ -1005,6 +1010,7 @@ mod tests {
                 |block| cfg.successors(block).to_vec(),
                 |block| cfg.predecessors(block).to_vec(),
                 |block| cfg.reaches(block),
+                &[],
             )
             .iter()
             .map(|b| b.index())
