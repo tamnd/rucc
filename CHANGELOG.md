@@ -13,6 +13,7 @@ All notable changes are recorded here. The format follows [Keep a Changelog](htt
 ### Fixed
 
 - A loop that becomes a call to memset, memcpy or memmove on i686 starts the call at an offset as wide as a pointer, and a length that is a number is that wide too. Loop idiom recognition wrote both in sixty four bits whatever the target, and a `ptr_add` of a sixty four bit offset is something the step that splits wide values on i386 does not take, so the backend stopped with "no rule lowers `trunc.i64.i32`" on the kernel's perf uncore driver and ohci-hcd for X32. A walk that starts at an `int` index the caller hands in now becomes a call on i686 as well (#3419).
+- `-fsafety=detect` refuses a pointer made below or past a local or a global where it is made, as J2. The derivation check only asked the planes, which cover the heap and nothing else, so `data - 8` on a local array went through, and a string walk from there that met a zero below the array copied nothing that could be judged. Juliet's CWE-124 and CWE-127 cases at -O2 go from 570 and 494 detected to 710 each, which is every case not set aside, with no false positives (#3421).
 
 ## 0.29.4
 
