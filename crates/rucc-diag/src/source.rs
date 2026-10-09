@@ -361,11 +361,36 @@ impl fmt::Display for SourceMapFull {
 
 impl std::error::Error for SourceMapFull {}
 
+/// A run of the coordinate space past the last file that stands for a copy of some source.
+///
+/// The inliner makes one for each body it splices into a caller. The copy says the same lines
+/// as the body it came from, and it is still a place of its own: a debugger has to be able to
+/// tell the copy in one caller from the copy in another, and from the function itself, and a
+/// span that pointed at the body could not say which. See [`SourceMap::copied`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Copied {
+    /// Where the copy starts.
+    pub at: BytePos,
+    /// The bytes it is a copy of, which are in a file.
+    pub of: Span,
+    /// The call the copy took the place of, which may itself be in a copy.
+    pub call: Span,
+}
+
+impl Copied {
+    /// Whether `pos` is in the copy. The position one past the end is, as it is for a file.
+    fn holds(&self, pos: BytePos) -> bool {
+        pos >= self.at && pos - self.at <= self.of.hi - self.of.lo
+    }
+}
+
 /// Every file of one translation unit, laid end to end.
 #[derive(Debug, Default)]
 pub struct SourceMap {
     files: Vec<SourceFile>,
     next: BytePos,
+    /// The copies, in increasing order of where they start, all of them past `next`.
+    copies: Vec<Copied>,
 }
 
 impl SourceMap {
@@ -470,6 +495,7 @@ impl SourceMap {
     /// False for a position in no file, because a diagnostic nobody can point at is one nothing
     /// should be suppressing.
     pub fn is_system(&self, pos: BytePos) -> bool {
+        let pos = self.real(pos);
         self.lookup_file(pos).is_some_and(|id| self.file(id).system_from.is_some_and(|f| pos >= f))
     }
 
@@ -493,6 +519,7 @@ impl SourceMap {
         if pos == BytePos::MAX {
             return None;
         }
+        let pos = self.real(pos);
         // Files are laid out in increasing order and never overlap, so the candidate is the
         // last one starting at or before `pos`. It is a candidate rather than the answer
         // because `pos` may be in the padding byte after that file.
@@ -503,6 +530,7 @@ impl SourceMap {
 
     /// The file, line and column of `pos`.
     pub fn lookup(&self, pos: BytePos) -> Option<Loc> {
+        let pos = self.real(pos);
         self.file(self.lookup_file(pos)?).position(pos)
     }
 
@@ -514,6 +542,7 @@ impl SourceMap {
     /// to use when the bytes are wanted, which is reading the text of a line to draw a caret
     /// under it.
     pub fn presumed(&self, pos: BytePos) -> Option<PresumedLoc<'_>> {
+        let pos = self.real(pos);
         self.file(self.lookup_file(pos)?).presumed_position(pos)
     }
 
@@ -523,6 +552,7 @@ impl SourceMap {
     /// write the marker the directive turns into, and asking it here rather than reading the
     /// directive again is what keeps one answer about where anything is.
     pub fn presumed_after(&self, at: BytePos) -> Option<PresumedLoc<'_>> {
+        let at = self.real(at);
         let file = self.file(self.lookup_file(at)?);
         file.presumed_position(file.line_span(at)?.hi)
     }
@@ -591,6 +621,7 @@ impl SourceMap {
     /// comparing the positions does not, since a header's bytes are placed after the whole of
     /// the file that includes it.
     pub fn reading_order(&self, pos: BytePos) -> Vec<BytePos> {
+        let pos = self.real(pos);
         let mut order: Vec<BytePos> =
             self.include_stack(pos).iter().rev().map(|from| from.lo).collect();
         order.push(pos);
@@ -600,6 +631,66 @@ impl SourceMap {
     /// How much of the coordinate space is used, which is where the next file will start.
     pub fn used(&self) -> BytePos {
         self.next
+    }
+
+    /// Records that the positions from `at` on are a copy of `of`, made for the call at `call`.
+    ///
+    /// From then on every question asked about a position in the copy is answered for the
+    /// position it is a copy of, so a line table, a diagnostic and a `#pragma GCC diagnostic`
+    /// all see the line the copy came from. A copy that would start inside a file, or overlap a
+    /// copy already recorded, is left out, since then a position would be two places at once.
+    pub fn copied(&mut self, at: BytePos, of: Span, call: Span) {
+        let copy = Copied { at, of, call };
+        if of.is_dummy() || of.hi < of.lo || at < self.next || at == BytePos::MAX {
+            return;
+        }
+        let after = self.copies.partition_point(|c| c.at <= at);
+        let clash = after.checked_sub(1).is_some_and(|before| self.copies[before].holds(at))
+            || self.copies.get(after).is_some_and(|next| copy.holds(next.at));
+        if !clash {
+            self.copies.insert(after, copy);
+        }
+    }
+
+    /// Every copy recorded by [`SourceMap::copied`], in the order of where they start.
+    pub fn copies(&self) -> &[Copied] {
+        &self.copies
+    }
+
+    /// The copy `pos` is in, or `None` for a position in a file or in nothing.
+    pub fn copy_at(&self, pos: BytePos) -> Option<&Copied> {
+        if pos < self.next || pos == BytePos::MAX {
+            return None;
+        }
+        let at = self.copies.partition_point(|c| c.at <= pos);
+        self.copies.get(at.checked_sub(1)?).filter(|copy| copy.holds(pos))
+    }
+
+    /// The position in a file that `pos` is a copy of, or `pos` itself when it is not in a copy.
+    ///
+    /// A copy of a copy is followed down to the file. The inliner never makes one, since it
+    /// points each copy at the body in the file, and the walk is bounded all the same.
+    pub fn real(&self, pos: BytePos) -> BytePos {
+        let mut pos = pos;
+        for _ in 0..=self.copies.len() {
+            let Some(copy) = self.copy_at(pos) else { break };
+            pos = copy.of.lo + (pos - copy.at);
+        }
+        pos
+    }
+
+    /// The span in a file that holds `span`, which is the call the outermost copy it is in was
+    /// made for. A span that is not in a copy is its own answer.
+    ///
+    /// This is where the code of an inlined body is in the caller's own source: inside whatever
+    /// block the call was written in.
+    pub fn outside(&self, span: Span) -> Span {
+        let mut span = span;
+        for _ in 0..=self.copies.len() {
+            let Some(copy) = self.copy_at(span.lo) else { break };
+            span = copy.call;
+        }
+        span
     }
 }
 
@@ -872,5 +963,61 @@ mod tests {
         let at = start_of(&map, 3);
         assert_eq!(map.lookup(at).expect("in the file").line, 3);
         assert_eq!(map.file(ids[0]).line_bytes(3), Some(&b"three"[..]));
+    }
+
+    #[test]
+    fn a_copy_answers_for_the_bytes_it_is_a_copy_of() {
+        let (mut map, ids) = map_with(&[("a.c", "int f(void)\n{\n    return 1;\n}\nint g;\n")]);
+        let start = map.file(ids[0]).start;
+        // The body of `f`, from its brace to the end of the closing one.
+        let body = Span::new(start + 12, start + 29);
+        let call = Span::new(start + 34, start + 35);
+        let at = map.used() + 100;
+        map.copied(at, body, call);
+        let ret = at + 6;
+        assert_eq!(map.real(ret), start + 18);
+        assert_eq!(map.render_position(ret), "a.c:3:5");
+        assert_eq!(map.lookup_file(ret), Some(ids[0]));
+        assert_eq!(map.lookup(ret).map(|loc| loc.line), Some(3));
+        assert_eq!(map.copy_at(ret).map(|copy| copy.of), Some(body));
+        // One past the end is still the copy, and the byte after that is nothing.
+        assert_eq!(map.real(at + 17), start + 29);
+        assert_eq!(map.copy_at(at + 18), None);
+        assert_eq!(map.render_position(at + 18), "<unknown>");
+    }
+
+    #[test]
+    fn the_span_outside_a_copy_in_a_copy_is_the_first_call() {
+        let (mut map, ids) = map_with(&[(
+            "a.c",
+            "int f(void) { return 1; }\nint g(void) { return f(); }\nint h(void) { return g(); }\n",
+        )]);
+        let start = map.file(ids[0]).start;
+        let f = Span::new(start + 12, start + 25);
+        let g = Span::new(start + 38, start + 53);
+        let call_g = Span::new(start + 75, start + 78);
+        let outer = map.used();
+        map.copied(outer, g, call_g);
+        // The call to `f` in the copy of `g`, which is where the inner copy was made for.
+        let call_f = Span::new(outer + 9, outer + 12);
+        let inner = outer + 20;
+        map.copied(inner, f, call_f);
+        assert_eq!(map.outside(Span::new(inner + 2, inner + 8)), call_g);
+        assert_eq!(map.outside(call_g), call_g);
+        assert_eq!(map.render_position(inner + 2), "a.c:1:15");
+        assert_eq!(map.render_position(call_f.lo), "a.c:2:22");
+    }
+
+    #[test]
+    fn a_copy_that_would_overlap_is_left_out() {
+        let (mut map, ids) = map_with(&[("a.c", "int f(void) { return 1; }\n")]);
+        let start = map.file(ids[0]).start;
+        let body = Span::new(start + 12, start + 25);
+        let at = map.used();
+        map.copied(at, body, Span::DUMMY);
+        map.copied(at + 5, body, Span::DUMMY);
+        map.copied(start, body, Span::DUMMY);
+        assert_eq!(map.copies().len(), 1);
+        assert_eq!(map.real(start + 3), start + 3);
     }
 }

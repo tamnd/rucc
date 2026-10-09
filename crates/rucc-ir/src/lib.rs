@@ -61,8 +61,9 @@ pub use inst::{
     ValueData, ValueList, ValueRef,
 };
 pub use module::{
-    Alias, AliasId, AliasKind, Byte, ByteRange, DataLayout, DataList, Datum, Dll, FuncId, Global,
-    GlobalId, Linkage, Module, ModuleCounts, Pic, Reloc, SymbolRef, TlsModel, Visibility,
+    Alias, AliasId, AliasKind, Byte, ByteRange, Copies, DataLayout, DataList, Datum, Dll, FuncId,
+    Global, GlobalId, Linkage, Module, ModuleCounts, Pic, Reloc, Site, SymbolRef, TlsModel,
+    Visibility,
 };
 pub use opcode::{ExtraKind, FloatPred, IntPred, Opcode};
 pub use parse::{Joiner, ParseError, parse};

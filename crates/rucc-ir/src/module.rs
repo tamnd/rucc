@@ -31,6 +31,7 @@ use std::ops::{Index, IndexMut};
 use rucc_base::float::Format;
 use rucc_base::hash::{Map, Set};
 use rucc_base::{Idx, IdxRange, Interner, Symbol};
+use rucc_diag::{BytePos, Span};
 use rucc_target::TargetInfo;
 pub use rucc_target::TlsModel;
 use rucc_tuple::TargetTuple;
@@ -632,6 +633,80 @@ fn number(text: &str) -> Option<u32> {
     text.parse().ok()
 }
 
+/// The bodies the inliner copied into their callers, each with source positions of its own.
+///
+/// A copy says the lines of the body it came from, and a debugger still has to tell it apart
+/// from the function and from every other copy, which is what `DW_TAG_inlined_subroutine` is
+/// for. So each copy is given a fresh run of positions, past the last file of the source map,
+/// and a span of the body is moved into that run. The source map is told of each run after the
+/// optimizer is done, and from then on it answers for a position in a copy as for the position
+/// the copy came from.
+#[derive(Debug, Default, Clone)]
+pub struct Copies {
+    /// Where the positions of the next copy start, or `None` to give every copy the spans of the
+    /// body it came from. The driver sets it to the end of the source map before the optimizer
+    /// runs. A module read from text, and a test, leave it alone.
+    pub next: Option<BytePos>,
+    /// Every copy so far, in increasing order of where its positions start.
+    sites: Vec<Site>,
+}
+
+/// One body the inliner copied into a caller.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Site {
+    /// Where the positions of the copy start. A position `pos` of the body is at
+    /// `at + (pos - of.lo)` in the copy.
+    pub at: BytePos,
+    /// The body it is a copy of, which is in a file.
+    pub of: Span,
+    /// The call it took the place of, which is in another copy when the call was.
+    pub call: Span,
+    /// The function whose body it is.
+    pub callee: Symbol,
+}
+
+impl Copies {
+    /// Every copy so far, in increasing order of where its positions start.
+    #[must_use]
+    pub fn sites(&self) -> &[Site] {
+        &self.sites
+    }
+
+    /// Which copy `pos` is in. The position one past the end of a copy is in it, so that the end
+    /// of a span is in the same copy as its start.
+    #[must_use]
+    pub fn site_at(&self, pos: BytePos) -> Option<usize> {
+        let at = self.sites.partition_point(|site| site.at <= pos).checked_sub(1)?;
+        let site = &self.sites[at];
+        (pos - site.at <= site.of.hi - site.of.lo).then_some(at)
+    }
+
+    /// A copy of `of` for the call at `call`, or `None` when copies are not told apart or the
+    /// positions have run out. The copy after it starts one past its end, so that no position is
+    /// in two copies.
+    pub fn make(&mut self, of: Span, call: Span, callee: Symbol) -> Option<usize> {
+        let at = self.next?;
+        if of.is_dummy() || of.hi < of.lo {
+            return None;
+        }
+        let end = at.checked_add(of.hi - of.lo)?;
+        self.next = Some(end.checked_add(1).filter(|&next| next < BytePos::MAX)?);
+        self.sites.push(Site { at, of, call, callee });
+        Some(self.sites.len() - 1)
+    }
+
+    /// Where `span`, which starts at or after `from`, lands in `site` when `from` is where the
+    /// bytes it was copied from start. A span longer than the copy stops at its end.
+    #[must_use]
+    pub fn shift(&self, site: usize, from: BytePos, span: Span) -> Span {
+        let site = &self.sites[site];
+        let len = site.of.hi - site.of.lo;
+        let lo = span.lo.saturating_sub(from).min(len);
+        let hi = span.hi.saturating_sub(from).clamp(lo, len);
+        Span::new(site.at + lo, site.at + hi)
+    }
+}
+
 /// One translation unit, or after LTO the several that were linked into one.
 #[derive(Debug)]
 pub struct Module {
@@ -667,6 +742,9 @@ pub struct Module {
     /// The functions whose bodies the source wrote, in the order it wrote them. See
     /// [`Module::wrote`].
     written: Vec<FuncId>,
+
+    /// The bodies the inliner copied into their callers. See [`Copies`].
+    pub copies: Copies,
 }
 
 impl Module {
@@ -689,6 +767,7 @@ impl Module {
             file_asm: Vec::new(),
             linker_options: Vec::new(),
             written: Vec::new(),
+            copies: Copies::default(),
         }
     }
 
