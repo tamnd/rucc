@@ -133,7 +133,8 @@ pub(crate) fn describe(
         let Some(sig) = &func.sig else { continue };
         let (said, at, nests) = defined(dwarf, func, sig, index, files, &ids, frames)?;
         tagged.extend(said);
-        copies(dwarf, func, at, &nests, index, files, &origins)?;
+        let refs = Refs { files, ids: &ids, frames: frames || func.frame_local.is_some() };
+        tagged.extend(copies(dwarf, func, (at, &nests), index, &refs, &origins)?);
     }
     for (index, global) in globals.iter().enumerate() {
         let at = held_at(dwarf, global, funcs.len() + index, files, &ids)?;
@@ -174,6 +175,11 @@ fn wanted(
         signature(sig, &mut work);
         let frames = frames || func.frame_local.is_some();
         let said = func.locals.iter().filter(|local| sayable(&local.spot, frames));
+        work.extend(said.filter_map(|local| local.ty));
+        // And the locals of a copy that gets an entry, which is a copy with addresses left.
+        let copied = func.inlined.iter().filter(|copy| !copy.over.is_empty());
+        let said =
+            copied.flat_map(|copy| &copy.locals).filter(|local| sayable(&local.spot, frames));
         work.extend(said.filter_map(|local| local.ty));
     }
     for one in abstracts {
@@ -398,6 +404,21 @@ fn defined<'a>(
 /// What [`defined`] hands back.
 type Defined<'a> = (Tagged<'a>, UnitEntryId, Vec<Option<UnitEntryId>>);
 
+/// What an entry of a function refers to outside itself: the files, the entries of the types, and
+/// whether a place in the frame can be said, which [`sayable`] explains.
+struct Refs<'a> {
+    files: &'a [FileId],
+    ids: &'a [Option<UnitEntryId>],
+    frames: bool,
+}
+
+/// The entry [`abstracted`] wrote for a function, and the entries of its parameters, which the
+/// parameters of each copy name as their origin.
+struct Origin {
+    at: UnitEntryId,
+    params: Vec<UnitEntryId>,
+}
+
 /// The entry each function the inliner copied gets, which every copy of it names as its origin.
 ///
 /// A subprogram with no addresses and `DW_AT_inline`, which is what gcc writes. Its parameters have
@@ -407,7 +428,7 @@ fn abstracted(
     abstracts: &[Abstract],
     files: &[FileId],
     ids: &[Option<UnitEntryId>],
-) -> Result<Vec<UnitEntryId>, Error> {
+) -> Result<Vec<Origin>, Error> {
     let root = dwarf.unit.root();
     let mut out = Vec::with_capacity(abstracts.len());
     for one in abstracts {
@@ -417,10 +438,10 @@ fn abstracted(
             flag(dwarf, at, gimli::DW_AT_external);
         }
         came_from(dwarf, at, &one.name, one.decl, files)?;
-        takes(dwarf, at, &one.sig, ids, None, false)?;
+        let params = takes(dwarf, at, &one.sig, ids, None, false)?;
         let inline = AttributeValue::Inline(gimli::DW_INL_inlined);
         dwarf.unit.get_mut(at).set(gimli::DW_AT_inline, inline);
-        out.push(at);
+        out.push(Origin { at, params });
     }
     Ok(out)
 }
@@ -432,15 +453,20 @@ fn abstracted(
 /// in it. It names its origin, says where the call was, and covers the addresses the copy ended up
 /// at. A copy whose code all went away gets no entry, and a copy inside it goes where it would
 /// have gone.
-fn copies(
+///
+/// The parameters of a copy that are somewhere name the parameters of the origin, and its locals
+/// are entries of their own inside it. The entries of the locals are what it hands back, each with
+/// its tags.
+fn copies<'a>(
     dwarf: &mut gimli::write::DwarfUnit,
-    func: &Function,
-    at: UnitEntryId,
-    nests: &[Option<UnitEntryId>],
+    func: &'a Function,
+    (at, nests): (UnitEntryId, &[Option<UnitEntryId>]),
     which: usize,
-    files: &[FileId],
-    origins: &[UnitEntryId],
-) -> Result<(), Error> {
+    refs: &Refs<'_>,
+    origins: &[Origin],
+) -> Result<Tagged<'a>, Error> {
+    let files = refs.files;
+    let mut tagged: Tagged<'a> = Vec::new();
     let mut made: Vec<UnitEntryId> = Vec::with_capacity(func.inlined.len());
     for copy in &func.inlined {
         let under = match copy.parent {
@@ -452,7 +478,7 @@ fn copies(
             made.push(under);
             continue;
         }
-        let Some(&origin) = origins.get(copy.of) else {
+        let Some(origin) = origins.get(copy.of) else {
             let why = format!("a copy in {} names origin {}, which is not one", func.name, copy.of);
             return Err(Error::Refused { why });
         };
@@ -465,7 +491,7 @@ fn copies(
         dwarf
             .unit
             .get_mut(child)
-            .set(gimli::DW_AT_abstract_origin, AttributeValue::UnitRef(origin));
+            .set(gimli::DW_AT_abstract_origin, AttributeValue::UnitRef(origin.at));
         covers(dwarf, child, &copy.over, which)?;
         let entry = dwarf.unit.get_mut(child);
         entry.set(gimli::DW_AT_call_file, AttributeValue::FileIndex(Some(file)));
@@ -473,9 +499,25 @@ fn copies(
         if copy.column > 0 {
             entry.set(gimli::DW_AT_call_column, AttributeValue::Udata(u64::from(copy.column)));
         }
+        for (spot, &param) in copy.params.iter().zip(&origin.params) {
+            let Some(spot) = spot.as_ref().filter(|spot| sayable(spot, refs.frames)) else {
+                continue;
+            };
+            let named = dwarf.unit.add(child, gimli::DW_TAG_formal_parameter);
+            dwarf
+                .unit
+                .get_mut(named)
+                .set(gimli::DW_AT_abstract_origin, AttributeValue::UnitRef(param));
+            somewhere(dwarf, named, &func.name, spot, which, refs.frames)?;
+        }
+        for local in &copy.locals {
+            if let Some(entry) = kept(dwarf, child, local, files, refs.ids, which, refs.frames)? {
+                tagged.push((entry, &local.tags[..]));
+            }
+        }
         made.push(child);
     }
-    Ok(())
+    Ok(tagged)
 }
 
 /// A `DW_TAG_lexical_block` for each of a function's inner scopes that has something to hold, and
@@ -1712,6 +1754,8 @@ mod tests {
             call: Place { file: 0, line },
             column: 12,
             over,
+            params: Vec::new(),
+            locals: Vec::new(),
         };
         unit.funcs[0].inlined = vec![
             copy(None, 4, vec![Reach { from: 4, len: 8 }]),
@@ -1769,6 +1813,40 @@ mod tests {
         unit.funcs[0].inlined[0].scope = Some(0);
         let info = write(&unit).expect("sections");
         assert_eq!(asked(&info, ".debug_info"), vec![0, 4, 4, 6]);
+    }
+
+    /// A parameter of a copy names the parameter of the origin and says where it is, and a local
+    /// of a copy is an entry inside the copy.
+    #[test]
+    fn a_copy_says_where_its_parameters_and_locals_are() {
+        let mut unit = inlined();
+        let copy = &mut unit.funcs[0].inlined[0];
+        copy.params = vec![Some(Spot::Over(vec![Span { from: 4, len: 4, held: Held::Reg(5) }]))];
+        copy.locals = vec![Local {
+            name: "half".to_owned(),
+            ty: Some(0),
+            decl: Some(Place { file: 0, line: 2 }),
+            spot: Spot::Always(Held::Reg(3)),
+            scope: None,
+            tags: Vec::new(),
+        }];
+        let info = write(&unit).expect("sections");
+        assert_eq!(
+            asked(&info, ".debug_loclists"),
+            vec![4],
+            "the parameter is not in its register"
+        );
+        assert!(named(&info).contains(&"half".to_owned()), "the local is not there");
+        assert_eq!(pointed(&info, "n"), 2, "a parameter of a copy takes its name from the origin");
+    }
+
+    /// A parameter of a copy that is nowhere gets no entry, since the origin already names it.
+    #[test]
+    fn a_parameter_of_a_copy_that_is_nowhere_gets_no_entry() {
+        let mut unit = inlined();
+        unit.funcs[0].inlined[0].params = vec![None];
+        let info = write(&unit).expect("sections");
+        assert!(asked(&info, ".debug_loclists").is_empty());
     }
 
     /// A copy that names an origin the unit does not have is refused.

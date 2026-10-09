@@ -352,6 +352,16 @@ pub struct Inlined {
     pub column: u32,
     /// The stretches of the function's addresses the copy ended up at.
     pub over: Vec<Reach>,
+    /// Where each parameter of the function is in this copy, in the order of the parameters of
+    /// its abstract entry, and [`None`] for one that is nowhere. A list shorter than the
+    /// parameters says nothing about the rest.
+    ///
+    /// The name and the type are on the abstract entry, so a parameter here says only where it is.
+    /// A parameter with nothing here still has a name a debugger can show, from that entry.
+    pub params: Vec<Option<Spot>>,
+    /// The locals of this copy. They are children of the copy whatever scope of the body they were
+    /// declared in, and [`Local::scope`] is not read.
+    pub locals: Vec<Local>,
 }
 
 /// One stretch of a function's addresses, with nothing said about what is at it.
