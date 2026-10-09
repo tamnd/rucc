@@ -99,6 +99,16 @@ fn without_the_flag_only_the_attribute_counts() {
     assert!(body(&bodies, "made").contains("ret\t$4"), "{bodies:?}");
 }
 
+/// An argument on the stack the function never reads is not loaded. `third` wants only `c`, and
+/// `after` only `d`, so each reads one word off the stack.
+#[test]
+fn an_argument_nothing_reads_is_left_on_the_stack() {
+    let cdecl = bodies(&[]);
+    assert_eq!(body(&cdecl, "third").matches("(%esp)").count(), 1, "{cdecl:?}");
+    let registers = bodies(&["-mregparm=3"]);
+    assert_eq!(body(&registers, "after").matches("(%esp)").count(), 1, "{registers:?}");
+}
+
 /// What gcc refuses, refused in its words.
 #[test]
 fn a_count_above_three_or_a_machine_without_the_flag_is_refused() {

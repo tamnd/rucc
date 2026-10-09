@@ -219,8 +219,9 @@ fn a_long_long_bit_row_keeps_its_zeros_out_of_the_stack() {
             "{level}: a half known to be zero is asked about\n{text}"
         );
         assert!(!text.contains("\torl\t"), "{level}\n{text}");
-        // The two words of the argument and nothing else read from the frame.
-        assert_eq!(text.matches("(%esp), %").count(), 2, "{level}\n{text}");
+        // The low word of the argument and nothing else read from the frame. The high word is
+        // never wanted, so it is not read either.
+        assert_eq!(text.matches("(%esp), %").count(), 1, "{level}\n{text}");
         let stored =
             text.lines().filter(|line| line.starts_with("\tmovl\t%") && line.ends_with("(%esp)"));
         assert_eq!(stored.count(), 0, "{level}: a store nothing reads back\n{text}");

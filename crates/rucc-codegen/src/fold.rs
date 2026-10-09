@@ -679,6 +679,40 @@ fn named_alone(address: mir::Amode) -> bool {
         && address.table.is_none()
 }
 
+/// Takes out every read of an argument the caller passed on the stack whose answer nothing reads,
+/// and gives back how many.
+///
+/// The lowering reads every argument that arrived on the stack in the entry block, whether or not
+/// the function wants it. A `u64` on i386 is two of them, and one whose high word was known not to
+/// matter, `b & 0xff`, still had it read into a register at the top of the function and left there.
+/// So did a callback that ignores its fourth argument under `-mregparm=3`. A load has no effect
+/// past the register it writes, and a word of the caller's argument area is always there to read,
+/// so one that writes a register nothing reads can go.
+///
+/// The entry comes off the list as well, through [`Pending::moved`] with no readers, since the
+/// frame layout would otherwise write an offset into an instruction that is not there.
+pub fn unread_arguments(func: &mut mir::Func, pending: &mut Pending<'_>) -> usize {
+    let reads = Reads::of(func);
+    let mut gone = Vec::new();
+    for &(inst, _) in pending.arguments.iter() {
+        if func.block_of(inst).is_none() {
+            continue;
+        }
+        let operands = &func[func[inst].operands];
+        let unread = operands.iter().all(|operand| {
+            operand.role == Role::Use || (operand.reg.is_virtual() && reads.count(operand.reg) == 0)
+        });
+        if unread && operands.iter().any(|operand| operand.role != Role::Use) {
+            gone.push(inst);
+        }
+    }
+    for &inst in &gone {
+        func.remove_inst(inst);
+        pending.moved(inst, &[]);
+    }
+    gone.len()
+}
+
 /// Marks what is left of the addresses of names as numbers, under the kernel code model, and gives
 /// back how many.
 ///
