@@ -153,6 +153,9 @@ pub(crate) struct Known {
     /// The strings of its `btf_decl_tag`s, over all its declarations, in the order gcc chains
     /// them.
     pub tags: Vec<Vec<u8>>,
+    /// The source bytes of its body, brace to brace, which is what a copy of the body the inliner
+    /// made says it is a copy of.
+    pub body: Span,
 }
 
 /// What is known about one local the program declared.
@@ -254,6 +257,7 @@ pub(crate) fn collect(
                     params: described.map(|(_, params)| params).unwrap_or_default(),
                     external,
                     tags: tast.btf_decl_tags(id).to_vec(),
+                    body: decl.body.map_or(Span::DUMMY, |body| tast.stmt_span(body)),
                 };
                 funcs.insert(symbol, known);
             }

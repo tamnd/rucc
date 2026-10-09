@@ -59,8 +59,8 @@ mod tree;
 
 pub use crate::line::{Error, Function, Row, Unit, Version, write};
 pub use crate::shape::{
-    Bits, Constant, Encoding, Global, Held, Local, Member, Param, Place, Qualifier, Reach, Scope,
-    Shape, Sig, Span, Spot,
+    Abstract, Bits, Constant, Encoding, Global, Held, Inlined, Local, Member, Param, Place,
+    Qualifier, Reach, Scope, Shape, Sig, Span, Spot,
 };
 
 /// The milestone in `spec/17-milestones.md` that fills this crate in.

@@ -230,3 +230,27 @@ fn an_inlined_body_says_the_lines_it_came_from() {
     // The call to `g` is on line 3, and only the copy of `twice` in the loop is left to make it.
     assert!(lines.contains(&3), "{text}");
 }
+
+/// Each body the optimizer inlined is a `DW_TAG_inlined_subroutine` that names the function it is
+/// a copy of and the line the call was on, which is what a debugger reads to show the call in a
+/// backtrace and to stop there on a breakpoint on the function.
+#[cfg(target_os = "linux")]
+#[test]
+fn an_inlined_body_is_an_entry_that_names_the_call() {
+    let dir = fixture("inlined-entry");
+    std::fs::write(dir.join("one.c"), INLINED).expect("the fixture can be written");
+    build(&dir, &["-g", "-O2"], "one.o");
+    let out = Command::new("readelf")
+        .arg("--debug-dump=info")
+        .arg(dir.join("one.o"))
+        .output()
+        .expect("readelf starts");
+    let _ = std::fs::remove_dir_all(&dir);
+    let text = String::from_utf8_lossy(&out.stdout);
+
+    assert!(text.contains("DW_TAG_inlined_subroutine"), "{text}");
+    assert!(text.contains("DW_AT_abstract_origin"), "{text}");
+    assert!(text.contains("DW_AT_inline"), "{text}");
+    let line = text.lines().find(|line| line.contains("DW_AT_call_line")).expect("a call line");
+    assert!(line.trim_end().ends_with(": 7"), "{line}");
+}
