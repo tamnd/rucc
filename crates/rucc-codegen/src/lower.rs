@@ -3970,13 +3970,13 @@ impl<'a> Lowering<'a> {
     /// It is not the most general model. A library loaded by `dlopen` gets its storage after the
     /// program is already running, and the block this reaches was laid out before it started, so
     /// the loader has to find room in that block for the library's variables. glibc keeps a little
-    /// spare room for exactly this and a library that fits in it loads and runs; one that does not
-    /// fails to load, with a message saying so. The model with no such limit calls `__tls_get_addr`
-    /// and is what gcc writes under `-fPIC` by default, and it is issue #1104.
+    /// spare room for this, and a library that does not fit fails to load.
     ///
-    /// So this is the model gcc writes under `-ftls-model=initial-exec`: right for an executable,
-    /// right for a library the program is linked against, and a load that either works or is
-    /// refused out loud for a library something opens later. What it is never is quietly wrong.
+    /// So in a shared library on x86-64 ELF, a variable is reached through a call to
+    /// `__tls_get_addr` instead, which is [`Self::thread_call`]. That is the general dynamic model,
+    /// or the local dynamic one for a variable that only this library can define. A variable that
+    /// asked for initial exec, as glibc's own do, still comes here. [`Elsewhere::model`] decides.
+    /// Everywhere else this is the model gcc writes under `-ftls-model=initial-exec`.
     ///
     /// AArch64 Linux is the same three steps. The slot is reached with `adrp` and `ldr` against
     /// `:gottprel:`, the thread pointer is `tpidr_el0` read with `mrs`, and the add has three
