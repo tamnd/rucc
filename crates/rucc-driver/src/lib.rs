@@ -2947,7 +2947,7 @@ pub fn parse_args(args: &[String]) -> Result<Action, CliError> {
                 }
                 isa.read(&arg["-m".len()..]).map_err(|_| err(format!("unknown option `{arg}`")))?;
                 isa_flag.get_or_insert(arg);
-                if on {
+                if on && !matches!(arg, "-msse" | "-msse2") {
                     isa_on.get_or_insert(arg);
                 }
             }
@@ -3339,6 +3339,10 @@ pub fn parse_args(args: &[String]) -> Result<Action, CliError> {
     // option too, so it is refused the same way it would have been had it not looked like an x86
     // flag. On i386 every one of them is already off, which is what the kernel's `-mno-sse` and
     // the rest ask for, and turning one on is refused, since there is no code here that uses it.
+    // `-msse` and `-msse2` are the exception, because they ask for what the i386 backend does
+    // anyway: it builds for the Pentium 4 and does `float` and `double` arithmetic in SSE2, and the
+    // macros say so (see `rucc_pp::predef`). The kernel turns both back on for its floating point
+    // units after `-mno-sse`, 69 of them in amdgpu's display code for i386 and `test_fpu_impl.c`.
     //
     // `-march=native` is the machine running the compiler, so it means something only when that
     // machine is the target's. Anywhere else gcc is a cross compiler, which has no way to ask the
@@ -10252,8 +10256,14 @@ mod tests {
         let i386 = [KERNEL_X86, "-m32", "-fno-pic", "-msoft-float", "-mno-sse", "-mno-mmx"];
         let i386 = [&i386[..], &["-mno-sse2", "-mno-3dnow", "-mno-avx"]].concat();
         assert_eq!(files(&i386), (true, false));
-        let said = refused(&[KERNEL_X86, "-m32", "-msse2", "-c", "a.c"]);
-        assert!(said.contains("-msse2: this compiler builds i386 code"), "{said}");
+        // The flags the i386 kernel builds a floating point unit with, which ask for the SSE2 the
+        // backend does its arithmetic in and so are taken, and an extension after them that is not.
+        let fpu = [&i386[..], &["-msse", "-msse2", "-mhard-float"]].concat();
+        assert_eq!(files(&fpu), (true, true));
+        let (opts, _) = compile(&[&fpu[..], &["-c", "a.c"]].concat());
+        assert_eq!(opts.isa, rucc_target::Isa::NONE);
+        let said = refused(&[KERNEL_X86, "-m32", "-msse2", "-msse3", "-c", "a.c"]);
+        assert!(said.contains("-msse3: this compiler builds i386 code"), "{said}");
     }
 
     /// The canary moved to where a kernel keeps it, which is `%gs:40` up to 6.12 and a symbol read
