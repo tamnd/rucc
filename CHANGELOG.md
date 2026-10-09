@@ -23,6 +23,7 @@ All notable changes are recorded here. The format follows [Keep a Changelog](htt
 - A row of `x & bit ? k : 0` on a `long long` on i386 is a `test` and a `cmov` on its own zero for each bit. The high words known to be zero are no longer asked about with `xorl $0` and an `or`, the `and` is folded into a `test` as it is on x86-64, and a constant a two address instruction overwrites is written again in front of it, so the shared zero is not spilled and loaded back for each bit. `gf128mul_lle` goes from 2572 bytes to 2337 (#3504).
 - A spill store whose slot is never read back is gone. When the cleanup after allocation serves every reload of a slot from a register that still holds the value, the stores into that slot are dropped too, and a local the debug info placed in such a slot gets no location there. On the 32 bit kernel this takes 44 stores out of `md.c` and a few out of most other files (#3507).
 - An argument passed on the stack that the function never reads is no longer loaded. A `u64` on i386 whose high word is not wanted reads only its low word, and a callback that ignores an argument under `-mregparm=3` reads nothing for it (#3510).
+- The heap inliner grows its bound on a caller's frame by what the callee's own frame adds rather than every local the copy made, which takes an eighth off the compile of zstd_compress.c at `-O2` (#3511).
 
 ### Added
 
