@@ -80,6 +80,7 @@ mod libcall;
 mod read;
 mod rules;
 mod select;
+mod simd;
 mod sjlj;
 mod structure;
 mod switch;

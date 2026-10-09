@@ -28,6 +28,7 @@
 use std::collections::HashMap;
 
 use crate::asm::{MEMORY, NUMERIC, SATURATING, float32, float64};
+use crate::simd::{self, Simd};
 use rucc_object::wasm::{
     Custom, EXPORTED, Fixup, FuncType, Function, HIDDEN, Import, LOCAL, Module, NO_STRIP, Place,
     Producers, RETAIN, RelocKind, STRINGS, Segment, SymbolKind, TLS, TLS_SEGMENT, ValType, WEAK,
@@ -602,7 +603,9 @@ impl Reader {
                 }
             }
             "drop" => code.push(0x1a),
-            "i32.select" | "i64.select" | "f32.select" | "f64.select" => code.push(0x1b),
+            "i32.select" | "i64.select" | "f32.select" | "f64.select" | "v128.select" => {
+                code.push(0x1b);
+            }
             "local.get" | "local.set" | "local.tee" => {
                 code.push(match op {
                     "local.get" => 0x20,
@@ -701,26 +704,12 @@ impl Reader {
             }
             _ => {
                 if let Some(at) = MEMORY.iter().position(|&(name, ..)| name == op) {
-                    let (offset, align) = match rest.split_once(":p2align=") {
-                        Some((offset, align)) => (offset, unsigned(align)?),
-                        None => (rest, u64::from(MEMORY[at].1)),
-                    };
                     code.push(0x28 + u8::try_from(at).expect("23 loads and stores"));
-                    uleb(&mut code, align);
-                    if let Ok(value) = integer(offset) {
-                        let value = u32::try_from(value).map_err(|_| "a wrong offset")?;
-                        uleb(&mut code, u64::from(value));
-                    } else {
-                        let (symbol, addend) = self.address(offset)?;
-                        if !matches!(
-                            self.out.symbols[symbol as usize].kind,
-                            SymbolKind::Data { .. }
-                        ) {
-                            return Err(format!("`{offset}` is not an address"));
-                        }
-                        fixups.push((code.len(), RelocKind::MemoryAddrLeb, symbol, addend));
-                        code.extend_from_slice(&uleb_padded(0));
-                    }
+                    self.memarg(&mut code, &mut fixups, rest, MEMORY[at].1)?;
+                } else if let Some((opcode, form)) = simd::by_name(op) {
+                    code.push(0xfd);
+                    uleb(&mut code, u64::from(opcode));
+                    self.simd(&mut code, &mut fixups, rest, form)?;
                 } else if let Some(at) = NUMERIC.iter().position(|&name| name == op) {
                     code.push(0x45 + u8::try_from(at).expect("128 numeric instructions"));
                 } else if let Some(at) = SATURATING.iter().position(|&name| name == op) {
@@ -749,6 +738,83 @@ impl Reader {
             return Err(format!("`{op}` closes the function, which `end_function` does"));
         }
         body.constant = kept.map(|value| (start, value));
+        Ok(())
+    }
+
+    /// The memory argument of a load or a store: the alignment, from `:p2align=` or the natural one
+    /// of the access, and the offset, which is a number or a data address.
+    fn memarg(
+        &mut self,
+        code: &mut Vec<u8>,
+        fixups: &mut Vec<(usize, RelocKind, u32, i32)>,
+        text: &str,
+        natural: u32,
+    ) -> Result<(), String> {
+        let (offset, align) = match text.split_once(":p2align=") {
+            Some((offset, align)) => (offset, unsigned(align)?),
+            None => (text, u64::from(natural)),
+        };
+        uleb(code, align);
+        if let Ok(value) = integer(offset) {
+            let value = u32::try_from(value).map_err(|_| "a wrong offset")?;
+            uleb(code, u64::from(value));
+        } else {
+            let (symbol, addend) = self.address(offset)?;
+            if !matches!(self.out.symbols[symbol as usize].kind, SymbolKind::Data { .. }) {
+                return Err(format!("`{offset}` is not an address"));
+            }
+            fixups.push((code.len(), RelocKind::MemoryAddrLeb, symbol, addend));
+            code.extend_from_slice(&uleb_padded(0));
+        }
+        Ok(())
+    }
+
+    /// The immediates of a SIMD instruction of this form, after its opcode.
+    fn simd(
+        &mut self,
+        code: &mut Vec<u8>,
+        fixups: &mut Vec<(usize, RelocKind, u32, i32)>,
+        text: &str,
+        form: Simd,
+    ) -> Result<(), String> {
+        let operands: Vec<&str> =
+            if text.is_empty() { Vec::new() } else { text.split(',').map(str::trim).collect() };
+        let lane = |operand: &str| {
+            u8::try_from(unsigned(operand)?).map_err(|_| format!("the lane `{operand}`"))
+        };
+        match (form, &operands[..]) {
+            (Simd::Load(natural) | Simd::Store(natural), [memory]) => {
+                self.memarg(code, fixups, memory, natural)?;
+            }
+            (Simd::LoadLane(natural) | Simd::StoreLane(natural), [memory, index]) => {
+                self.memarg(code, fixups, memory, natural)?;
+                code.push(lane(index)?);
+            }
+            (Simd::Extract(_) | Simd::Replace, [index]) => code.push(lane(index)?),
+            (Simd::Shuffle, lanes) if lanes.len() == 16 => {
+                for index in lanes {
+                    code.push(lane(index)?);
+                }
+            }
+            (Simd::Const, lanes) if [2, 4, 8, 16].contains(&lanes.len()) => {
+                let width = 16 / lanes.len();
+                for value in lanes {
+                    let value = integer(value)?;
+                    let bits = 8 * width as u32;
+                    let low = -(1i128 << (bits - 1));
+                    if value < low || value >= 1i128 << bits {
+                        return Err(format!("the lane `{value}` does not fit in {bits} bits"));
+                    }
+                    code.extend_from_slice(&(value as u128).to_le_bytes()[..width]);
+                }
+            }
+            (Simd::Const | Simd::Shuffle | Simd::Load(_) | Simd::Store(_), _)
+            | (Simd::LoadLane(_) | Simd::StoreLane(_) | Simd::Extract(_) | Simd::Replace, _) => {
+                return Err(format!("the operands `{text}`"));
+            }
+            (_, []) => {}
+            (_, _) => return Err("the instruction takes no operand".into()),
+        }
         Ok(())
     }
 
@@ -923,6 +989,7 @@ fn takes_operand(op: &str) -> bool {
             | "f32.const"
             | "f64.const"
     ) || MEMORY.iter().any(|&(name, ..)| name == op)
+        || simd::by_name(op).is_some()
 }
 
 /// `name@TLSREL` and the offset after it, as the name and the text of the offset.
@@ -937,6 +1004,7 @@ fn valtype(text: &str) -> Result<ValType, String> {
         "i64" => ValType::I64,
         "f32" => ValType::F32,
         "f64" => ValType::F64,
+        "v128" => ValType::V128,
         _ => return Err(format!("`{text}` is not a value type")),
     })
 }
@@ -1148,6 +1216,92 @@ mod tests {
         assert!(text.contains("\t.section\t.debug_str,\"S\",@\n.Ldebug_str:\n"), "{text}");
         assert!(text.contains("\t.int32\t.Ldebug_str+6\n\t.int32\tf+2\n"), "{text}");
         assert_eq!(read(&text), Ok(m));
+    }
+
+    /// A function that takes a `v128` and has a `v128` local, and whose body is every SIMD
+    /// instruction once, with its immediates, then a block of type `v128`, and one load from a data
+    /// address.
+    fn every_simd_instruction() -> Module {
+        let mut m = Module::default();
+        let ty = m.intern(FuncType { params: vec![ValType::V128], results: vec![] });
+        let f = m.symbol("f", SymbolKind::Function { ty, import: None }, HIDDEN);
+        m.segments.push(Segment {
+            name: ".bss.v".into(),
+            align: 4,
+            bytes: vec![0; 16],
+            ..Segment::default()
+        });
+        let place = Some(Place { segment: 0, offset: 0, size: 16 });
+        let v = m.symbol("v", SymbolKind::Data { place }, LOCAL);
+        let mut code = Vec::new();
+        for &(_, opcode, form) in &simd::SIMD {
+            code.push(0xfd);
+            uleb(&mut code, u64::from(opcode));
+            if let Some(natural) = form.memory() {
+                // The natural alignment for a load, and one less for a store where there is one.
+                let store = matches!(form, Simd::Store(_) | Simd::StoreLane(_));
+                code.push(u8::try_from(natural).unwrap() - u8::from(store && natural > 0));
+                code.push(16);
+            }
+            match form {
+                Simd::Const => code.extend((0..16).map(|lane: u8| lane.wrapping_mul(37))),
+                Simd::Shuffle => code.extend((0..16).map(|lane: u8| 31 - lane)),
+                _ if form.lane() => code.push(1),
+                _ => {}
+            }
+        }
+        // A block of type `v128` with a `select` of the two `v128` locals, which is `v128.select`.
+        code.extend_from_slice(&[0x02, 0x7b, 0x20, 0, 0x20, 1, 0x41, 0, 0x1b, 0x0b, 0x1a]);
+        code.extend_from_slice(&[0xfd, 0x00, 4]);
+        let at = u32::try_from(code.len()).unwrap();
+        code.extend_from_slice(&uleb_padded(0));
+        code.push(0x0b);
+        let fixups = vec![Fixup { at, kind: RelocKind::MemoryAddrLeb, target: v, addend: 4 }];
+        m.functions.push(Function {
+            symbol: f,
+            locals: vec![(1, ValType::V128)],
+            code,
+            fixups,
+            ..Function::default()
+        });
+        m
+    }
+
+    #[test]
+    fn every_simd_instruction_reads_back() {
+        let m = every_simd_instruction();
+        let text = crate::asm::print(&m).unwrap();
+        for line in [
+            "\t.functype\tf (v128) -> ()\n",
+            "\t.local\tv128\n",
+            "\tv128.load\t16\n",
+            "\tv128.store\t16:p2align=3\n",
+            "\tv128.load8_lane\t16, 1\n",
+            "\tv128.store64_lane\t16:p2align=2, 1\n",
+            "\tv128.const\t1867130112, 64928148, -1754116824, 721871292\n",
+            "\ti32x4.extract_lane\t1\n",
+            "\ti32x4.add\n",
+            "\tblock\tv128\n",
+            "\tv128.select\n",
+            "\tv128.load\tv+4\n",
+        ] {
+            assert!(text.contains(line), "no {line:?} in\n{text}");
+        }
+        assert_eq!(read(&text), Ok(m));
+    }
+
+    #[test]
+    fn a_simd_instruction_with_wrong_operands_is_refused() {
+        let start = "\t.functype\tf () -> ()\n\t.section\t.text.f,\"\",@\n\t.globl\tf\n\t.type\tf,@function\nf:\n\t.functype\tf () -> ()\n";
+        let wrong = |line: &str| read(&format!("{start}\t{line}\n\tend_function\n")).unwrap_err();
+        assert_eq!(wrong("i32x4.add\t1"), (7, "the instruction takes no operand".into()));
+        assert_eq!(wrong("i8x16.shuffle\t1, 2"), (7, "the operands `1, 2`".into()));
+        assert_eq!(wrong("v128.const\t1, 2, 3"), (7, "the operands `1, 2, 3`".into()));
+        assert_eq!(
+            wrong("v128.const\t256, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0").1,
+            "the lane `256` does not fit in 8 bits"
+        );
+        assert_eq!(wrong("i32x4.extract_lane\t256").1, "the lane `256`");
     }
 
     #[test]

@@ -32,6 +32,7 @@
 use std::fmt::Write as _;
 
 use crate::Notes;
+use crate::simd::{self, Simd};
 use rucc_object::wasm::{
     Custom, EXPORTED, FuncType, Function, HIDDEN, LOCAL, Module, NO_STRIP, RETAIN, RelocKind,
     STRINGS, Segment, SymbolKind, TLS_SEGMENT, ValType, WEAK,
@@ -205,6 +206,7 @@ impl Body<'_> {
             0x7e => Some(ValType::I64),
             0x7d => Some(ValType::F32),
             0x7c => Some(ValType::F64),
+            0x7b => Some(ValType::V128),
             byte => return Err(format!("a block type of {byte:#04x} is not one that rucc writes")),
         };
         if kind == Kind::If {
@@ -688,9 +690,57 @@ impl Printer<'_> {
                 }
                 sub => return Err(format!("the instruction 0xfc {sub} is not one rucc writes")),
             },
+            0xfd => {
+                let opcode = body.u32()?;
+                let Some((name, form)) = simd::by_opcode(opcode) else {
+                    return Err(format!("the instruction 0xfd {opcode} is not one rucc writes"));
+                };
+                body.pops(form.pops());
+                if let Some(ty) = form.result() {
+                    body.push(ty);
+                }
+                self.simd(body, name, form)?
+            }
             _ => return Err(format!("the opcode {op:#04x} at {start} is not one rucc writes")),
         };
         Ok(text)
+    }
+
+    /// The text of a SIMD instruction and its immediates, which come after the opcode.
+    ///
+    /// A `v128.const` is written as four `i32` lanes. The reader of `llvm-mc` takes the width of a
+    /// lane from the number of lanes, so the text gives the same sixteen bytes back.
+    fn simd(&self, body: &mut Body<'_>, name: &str, form: Simd) -> Result<String, String> {
+        let mut operands = Vec::new();
+        if let Some(natural) = form.memory() {
+            let align = body.u32()?;
+            let offset = match body.fixup()? {
+                Some((RelocKind::MemoryAddrLeb, symbol, addend)) => self.address(symbol, addend),
+                Some(_) => return Err("the offset of a load or store is relocated wrongly".into()),
+                None => body.u32()?.to_string(),
+            };
+            operands.push(match align == natural {
+                true => offset,
+                false => format!("{offset}:p2align={align}"),
+            });
+        }
+        match form {
+            Simd::Const => {
+                let bytes = body.fixed::<16>()?;
+                operands.extend(bytes.chunks(4).map(|lane| {
+                    i32::from_le_bytes(lane.try_into().expect("four bytes")).to_string()
+                }));
+            }
+            Simd::Shuffle => {
+                operands.extend(body.fixed::<16>()?.iter().map(ToString::to_string));
+            }
+            _ if form.lane() => operands.push(body.byte()?.to_string()),
+            _ => {}
+        }
+        Ok(match operands.is_empty() {
+            true => name.to_owned(),
+            false => format!("{name}\t{}", operands.join(", ")),
+        })
     }
 
     /// A data address: the symbol and the offset from it.
