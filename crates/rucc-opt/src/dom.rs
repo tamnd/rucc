@@ -373,18 +373,27 @@ impl Dominators {
 /// as many blocks with no successors as it has `return` statements and a dominator computation
 /// wants one root. Every block with no successors gets an edge to it, and so does every
 /// infinite loop, through [`Reverse::connect`].
-struct Reverse {
-    /// Where control comes from, by node, which is where it goes in the real graph.
-    succs: Vec<Vec<Node>>,
-    /// Where control goes, by node, which is where it comes from in the real graph.
-    preds: Vec<Vec<Node>>,
+struct Reverse<'a> {
+    /// The graph being turned around, which already knows where control goes from each block.
+    cfg: &'a Cfg,
+    /// Where control comes from, every block's laid end to end, which is where it goes in the
+    /// real graph. Laid out flat for the same reason the tree's predecessors are, since one
+    /// list per block was most of what building this cost.
+    succs: Vec<Node>,
+    /// Where each block's list above starts, with one more on the end.
+    succ_at: Vec<u32>,
+    /// The blocks the exit leads to, which are the ones with no successors and the far ends
+    /// [`Reverse::connect`] attaches.
+    ends: Vec<Node>,
+    /// The blocks [`Reverse::connect`] gave an edge to the exit.
+    fake: Vec<bool>,
     /// The added node, numbered one past the last block.
     exit: Node,
 }
 
-impl Graph for Reverse {
+impl Graph for Reverse<'_> {
     fn nodes(&self) -> usize {
-        self.succs.len()
+        self.fake.len()
     }
 
     fn root(&self) -> Node {
@@ -392,32 +401,57 @@ impl Graph for Reverse {
     }
 
     fn preds(&self, node: Node) -> impl Iterator<Item = Node> {
-        self.preds[node as usize].iter().copied()
+        let real: &[Block] = if node == self.exit {
+            &[]
+        } else {
+            self.cfg.successors(Block::from_usize(node as usize))
+        };
+        let exit = node != self.exit && (real.is_empty() || self.fake[node as usize]);
+        real.iter().map(|next| next.index() as Node).chain(exit.then_some(self.exit))
     }
 
     fn succs(&self, node: Node) -> impl Iterator<Item = Node> {
-        self.succs[node as usize].iter().copied()
+        self.list(node).iter().copied()
     }
 }
 
-impl Reverse {
+impl<'a> Reverse<'a> {
     /// Turns the graph around, keeping only the blocks control reaches.
-    fn new(cfg: &Cfg) -> Self {
+    fn new(cfg: &'a Cfg) -> Self {
         let exit = cfg.capacity() as Node;
-        let mut succs: Vec<Vec<Node>> = vec![Vec::new(); cfg.capacity() + 1];
-        let mut preds: Vec<Vec<Node>> = vec![Vec::new(); cfg.capacity() + 1];
+        let mut succ_at = vec![0u32; cfg.capacity() + 1];
+        let mut ends = Vec::new();
         for &block in cfg.postorder() {
-            let from = block.index() as Node;
             for &next in cfg.successors(block) {
-                succs[next.index()].push(from);
-                preds[from as usize].push(next.index() as Node);
+                succ_at[next.index() + 1] += 1;
             }
             if cfg.successors(block).is_empty() {
-                succs[exit as usize].push(from);
-                preds[from as usize].push(exit);
+                ends.push(block.index() as Node);
             }
         }
-        Self { succs, preds, exit }
+        for index in 1..succ_at.len() {
+            succ_at[index] += succ_at[index - 1];
+        }
+        let mut fill = succ_at.clone();
+        let mut succs = vec![0; succ_at[cfg.capacity()] as usize];
+        for &block in cfg.postorder() {
+            for &next in cfg.successors(block) {
+                let at = &mut fill[next.index()];
+                succs[*at as usize] = block.index() as Node;
+                *at += 1;
+            }
+        }
+        Self { cfg, succs, succ_at, ends, fake: vec![false; cfg.capacity() + 1], exit }
+    }
+
+    /// Where control comes from at this node, in the real graph's terms.
+    fn list(&self, node: Node) -> &[Node] {
+        if node == self.exit {
+            &self.ends
+        } else {
+            &self.succs
+                [self.succ_at[node as usize] as usize..self.succ_at[node as usize + 1] as usize]
+        }
     }
 
     /// Adds an edge to the exit from every region that has no path to one.
@@ -440,7 +474,7 @@ impl Reverse {
         let mut round = 0;
         loop {
             while let Some(node) = stack.pop() {
-                for &next in &self.succs[node as usize] {
+                for &next in self.list(node) {
                     if !arrives[next as usize] {
                         arrives[next as usize] = true;
                         stack.push(next);
@@ -456,8 +490,8 @@ impl Reverse {
             };
             let end = far_end(cfg, stranded, &mut stamp, round).index() as Node;
             round += 1;
-            self.succs[self.exit as usize].push(end);
-            self.preds[end as usize].push(self.exit);
+            self.ends.push(end);
+            self.fake[end as usize] = true;
             fake.push(Block::from_usize(end as usize));
             arrives[end as usize] = true;
             stack.push(end);
