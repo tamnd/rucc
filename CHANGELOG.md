@@ -4,6 +4,10 @@ All notable changes are recorded here. The format follows [Keep a Changelog](htt
 
 ## Unreleased
 
+## 0.29.4
+
+The release archive now carries the builtins for `i686-linux-gnu`, which the Linux probes of milestone L0 found missing in 0.29.3, and the workspace builds with Rust 1.85 again. rucc now takes the `btf_decl_tag` and `btf_type_tag` attributes of GCC 16. The release also makes the compiler faster on large files: the hasher, the heap, branch prediction in phiopt, the post-dominator tree and the inliner do less work for each compile.
+
 ### Added
 
 - `btf_decl_tag` and `btf_type_tag`, gcc 16's tags for BPF's type format, are taken and checked with gcc's rules and messages: one argument, which is a narrow string literal, a `btf_decl_tag` on a structure, union or enumeration is ignored with a warning, and so is a `btf_type_tag` on a function. `__has_attribute` answers 1 for both, and under `-fgnuc-version=15` they are directives gcc 15 ignores. They are not written into the DWARF yet.
