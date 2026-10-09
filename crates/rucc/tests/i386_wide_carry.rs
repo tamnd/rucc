@@ -2,7 +2,8 @@
 //! or a `sub` and an `sbb`. The halves used to pass the carry as a `cmp`, a `setb`, a `movzbl` and
 //! one more add, and the 32 bit kernel does that on every `u64`. A `__builtin_bswap64` on i386 is
 //! two `bswapl` now as well, where it was forty eight shifts and masks, and a negation is `negl`,
-//! `adcl $0` and `negl`, and `s64 < 0` asks the high word alone.
+//! `adcl $0` and `negl`, and `s64 < 0` asks the high word alone. A shift by a constant fills the
+//! word it moves bits into with `shldl` or `shrdl`, where it was two shifts and an or.
 
 use std::process::Command;
 
@@ -42,6 +43,20 @@ int big(u64 x) { return x >= 0x100000000ULL; }
 
 const SWAP: &str = "\
 unsigned long long swap(unsigned long long x) { return __builtin_bswap64(x); }
+";
+
+const SHIFT: &str = "\
+typedef unsigned long long u64;
+u64 shl5(u64 x) { return x << 5; }
+u64 shr5(u64 x) { return x >> 5; }
+long long sar5(long long x) { return x >> 5; }
+u64 rol13(u64 x) { return (x << 13) | (x >> 51); }
+";
+
+const QUAD_SHIFT: &str = "\
+typedef unsigned __int128 u128;
+u128 shl5(u128 x) { return x << 5; }
+u128 shr5(u128 x) { return x >> 5; }
 ";
 
 fn assembly(name: &str, target: &str, source: &str, level: &str) -> String {
@@ -117,4 +132,24 @@ fn a_long_long_byte_swap_is_two_word_swaps() {
         assert_eq!(text.matches("\tbswapl\t").count(), 2, "{level}\n{text}");
         assert!(!text.contains("16711935"), "{level}: the masks are still there\n{text}");
     }
+}
+
+/// gcc's `shldl $5` and `shll $5` for `x << 5`, and `shrdl` the other way. A rotate is two of
+/// them, one for each word.
+#[test]
+fn a_long_long_shift_by_a_constant_fills_a_word_from_the_other() {
+    for level in ["-O1", "-O2", "-Os"] {
+        let text = assembly("shift", "i686-unknown-linux-gnu", SHIFT, level);
+        assert_eq!(text.matches("\tshldl\t$5,").count(), 1, "{level}\n{text}");
+        assert_eq!(text.matches("\tshrdl\t$5,").count(), 2, "{level}\n{text}");
+        assert_eq!(text.matches("\tshldl\t$13,").count(), 2, "{level}\n{text}");
+        assert!(
+            !text.contains("\torl\t"),
+            "{level}: the words are still put together by hand\n{text}"
+        );
+    }
+    let text = assembly("quad-shift", "x86_64-unknown-linux-gnu", QUAD_SHIFT, "-O2");
+    assert_eq!(text.matches("\tshldq\t$5,").count(), 1, "{text}");
+    assert_eq!(text.matches("\tshrdq\t$5,").count(), 1, "{text}");
+    assert!(!text.contains("\torq\t"), "{text}");
 }

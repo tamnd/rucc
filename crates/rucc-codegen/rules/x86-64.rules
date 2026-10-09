@@ -506,6 +506,31 @@
       (x64.rol_ri_64 x k)
       (spec (= (bvor (bvlshr x j) (bvshl x k)) (result))))
 
+;; Two different registers, the one shifted left giving the high bits and the other the low
+;; ones, which is how a shift of a value two words wide puts each word of its answer together.
+;; The register that keeps its place is the one written, so `shld` when it is the one shifted
+;; left and `shrd` when it is the one shifted right.
+
+(rule (lower (or.i32 (shl.i32 (value.i32 x) (iconst.i32 k)) (lshr.i32 (value.i32 y) (iconst.i32 j))))
+      (if (and (and (> k 0) (< k 32)) (= (+ k j) 32)))
+      (x64.shld_ri_32 x y k)
+      (spec (= (bvor (bvshl x k) (bvlshr y j)) (result))))
+
+(rule (lower (or.i32 (lshr.i32 (value.i32 x) (iconst.i32 j)) (shl.i32 (value.i32 y) (iconst.i32 k))))
+      (if (and (and (> j 0) (< j 32)) (= (+ k j) 32)))
+      (x64.shrd_ri_32 x y j)
+      (spec (= (bvor (bvlshr x j) (bvshl y k)) (result))))
+
+(rule (lower (or.i64 (shl.i64 (value.i64 x) (iconst.i64 k)) (lshr.i64 (value.i64 y) (iconst.i64 j))))
+      (if (and (and (> k 0) (< k 64)) (= (+ k j) 64)))
+      (x64.shld_ri_64 x y k)
+      (spec (= (bvor (bvshl x k) (bvlshr y j)) (result))))
+
+(rule (lower (or.i64 (lshr.i64 (value.i64 x) (iconst.i64 j)) (shl.i64 (value.i64 y) (iconst.i64 k))))
+      (if (and (and (> j 0) (< j 64)) (= (+ k j) 64)))
+      (x64.shrd_ri_64 x y j)
+      (spec (= (bvor (bvlshr x j) (bvshl y k)) (result))))
+
 ;; Byte reversals. Two widths are `bswap` and the sixteen bit one is a rotate by eight, which
 ;; is the same answer and the instruction gcc writes for it.
 (rule (lower (bswap.i16 (value.i16 x)))

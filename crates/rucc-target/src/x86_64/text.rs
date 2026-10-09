@@ -702,6 +702,10 @@ static TEXT: &[(&str, &[Written])] = &[
     ("sar_ri_16", &[spell("sarw", &[Imm, Reg(0, Word)])]),
     ("sar_ri_32", &[spell("sarl", &[Imm, Reg(0, Long)])]),
     ("sar_ri_64", &[spell("sarq", &[Imm, Reg(0, Quad)])]),
+    ("shld_ri_32", &[spell("shldl", &[Imm, Reg(2, Long), Reg(0, Long)])]),
+    ("shld_ri_64", &[spell("shldq", &[Imm, Reg(2, Quad), Reg(0, Quad)])]),
+    ("shrd_ri_32", &[spell("shrdl", &[Imm, Reg(2, Long), Reg(0, Long)])]),
+    ("shrd_ri_64", &[spell("shrdq", &[Imm, Reg(2, Quad), Reg(0, Quad)])]),
     // Shifts by a register, which is `cl` and nothing else, so the count is a byte however wide
     // the thing being shifted is.
     ("shl_rcl_8", &[spell("shlb", &[Reg(2, Byte), Reg(0, Byte)])]),
