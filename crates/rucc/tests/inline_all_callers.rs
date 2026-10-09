@@ -130,3 +130,36 @@ int k(int x) { return wrap(x * 2); }
     assert_eq!(calls.count(), 3, "{asm}");
     assert!(!said.contains(ALL), "{said}");
 }
+
+/// Four tests of the argument are eleven to gcc with the call they go with, as each branch holds
+/// its compare, so the five copies would grow the program and gcc 16 keeps the five calls at
+/// `-O1`. This is `control-flow.many-returns` in the corpus (tamnd/rucc#3379).
+#[test]
+fn a_chain_of_four_tests_stays_a_call_in_its_five_callers_at_o1() {
+    let src = "\
+extern void use(int);
+static int classify(int value)
+{
+    if (value < 0) return 1;
+    if (value == 0) return 2;
+    if (value < 10) return 3;
+    if (value < 100) return 4;
+    return 5;
+}
+void all(int seed)
+{
+    use(classify(-seed));
+    use(classify(0));
+    use(classify(seed));
+    use(classify(seed * 7));
+    use(classify(seed * 100));
+}
+";
+    let (asm, said) = compiled("classify", "-O1", src);
+    let calls = asm.lines().filter(|line| {
+        let line = line.trim();
+        line.starts_with("call") && line.ends_with("classify")
+    });
+    assert_eq!(calls.count(), 5, "{asm}");
+    assert!(!said.contains(ALL), "{said}");
+}
