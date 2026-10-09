@@ -1263,11 +1263,14 @@ impl<'a> Rewrite<'a> {
     fn pattern(&self, func: &mut Func, before: Inst, piece: Piece, byte: u8) -> Value {
         let bits = (0..piece.size).fold(0u128, |bits, _| bits << 8 | u128::from(byte));
         if piece.ty.is_vector() {
-            // Every byte the same, so every lane is the low one.
-            let lane = piece.ty.lane();
+            // Every byte the same, so every lane is the low one. A float lane is the same bits as
+            // an integer lane, and a splat of a float vector takes no integer immediate.
+            let lane = Type::int(piece.ty.lane().bits());
+            let ints = Type::vector(lane, piece.ty.lanes());
             let at = func.add_imm(Imm::int(i128::from_ne_bytes(bits.to_ne_bytes()), lane));
             let data = InstData { extra: Extra::Imm(at), ..InstData::new(Opcode::Splat) };
-            return emit(func, before, data, piece.ty);
+            let value = emit(func, before, data, ints);
+            return convert(func, before, value, ints, piece.ty);
         }
         if piece.ty.is_float() {
             let at = func.add_imm(Imm::from_bits(bits));
@@ -2091,6 +2094,36 @@ block2:
         let (module, _) =
             on_sse2(&wrap("(ptr) -> i32", &BYTES.replace("iconst.i32", "iconst.i64")));
         assert_eq!(count_of(body(&module), Opcode::Alloca), 1);
+    }
+
+    /// A float vector set with `memset` is a splat of the integer lanes with the same bits, since a
+    /// splat of float lanes takes no integer immediate.
+    #[test]
+    fn on_wasm_a_float_vector_filled_with_bytes_is_a_splat_of_its_bits() {
+        let text = "block0(%0: ptr):
+    %1 = alloca, size 16, align 16
+    %2 = iconst.i8 63
+    memset %1, %2, size 16, align 16
+    %3 = load.f32x4 %1, align 16
+    %4 = fadd %3, %3
+    store %4 -> %0, align 16
+    return
+";
+        let (module, stats) = on_simd128("(ptr)", text);
+        assert_eq!(stats.count(Kind::Optimized, SCALARIZED), 1);
+        let func = body(&module);
+        assert_eq!(count_of(func, Opcode::Alloca), 0);
+        assert_eq!(count_of(func, Opcode::Splat), 1);
+        assert_eq!(count_of(func, Opcode::Bitcast), 1);
+        let splat = func
+            .blocks()
+            .flat_map(|block| func.insts(block))
+            .find(|&inst| func[inst].opcode == Opcode::Splat)
+            .expect("one splat");
+        let Extra::Imm(imm) = func[splat].extra else { panic!("a splat has an immediate") };
+        assert_eq!(func[imm].bits(), 0x3f3f_3f3f);
+        let result = func[splat].first_result.expect("a splat produces its value");
+        assert_eq!(func[result].ty, Type::vector(Type::int(32), 4));
     }
 
     /// wasm has no register for the sixteen byte float, so a vector copied as one stays in memory.
