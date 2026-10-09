@@ -6,12 +6,19 @@
 //! place, as clang does. No object has a symbol of the name, so a call that the selector did not
 //! see would not link. The builtins of the other groups (reference types, atomics, exceptions,
 //! SIMD) have no row yet, so a call to one of them is a call to an undeclared function.
+//!
+//! The maths functions of the C library that wasm has an instruction for are written the same way,
+//! as clang does. That is `sqrt`, `ceil`, `floor`, `trunc`, `rint`, `nearbyint`, `fabs` and
+//! `copysign`, and the `float` form of each. These have a symbol in the library, so the call stays
+//! a call when the selector cannot write the instruction. See [`Lower::libm`].
 
-use rucc_ir::Value;
-use rucc_object::wasm::ValType;
+use rucc_base::Symbol;
+use rucc_ir::{Extra, Flags, Inst, SymbolRef, Value};
+use rucc_object::wasm::{FuncType, ValType};
 use rucc_target::wasm::Feature;
 
 use super::{Lower, Result};
+use crate::{emit, valtype};
 
 /// What one builtin writes after its arguments are on the stack.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -74,12 +81,106 @@ fn write(name: &str) -> Option<Write> {
     })
 }
 
+/// The instruction of the maths function `name` of the C library, the type of its operands and
+/// its result, and the number of its operands. Nothing when wasm has no instruction for it.
+///
+/// `rint` and `nearbyint` are both `nearest`, because wasm has one rounding mode, which is to the
+/// nearest even value, and no inexact flag. `round` is not here, because it rounds a half away
+/// from zero, and no instruction does that.
+fn libm(name: &str) -> Option<(u8, ValType, usize)> {
+    Some(match name {
+        "fabsf" => (0x8b, ValType::F32, 1),
+        "ceilf" => (0x8d, ValType::F32, 1),
+        "floorf" => (0x8e, ValType::F32, 1),
+        "truncf" => (0x8f, ValType::F32, 1),
+        "rintf" | "nearbyintf" => (0x90, ValType::F32, 1),
+        "sqrtf" => (0x91, ValType::F32, 1),
+        "copysignf" => (0x98, ValType::F32, 2),
+        "fabs" => (0x99, ValType::F64, 1),
+        "ceil" => (0x9b, ValType::F64, 1),
+        "floor" => (0x9c, ValType::F64, 1),
+        "trunc" => (0x9d, ValType::F64, 1),
+        "rint" | "nearbyint" => (0x9e, ValType::F64, 1),
+        "sqrt" => (0x9f, ValType::F64, 1),
+        "copysign" => (0xa6, ValType::F64, 2),
+        _ => return None,
+    })
+}
+
 /// Whether a call to `name` is one that [`Lower::builtin`] writes in place.
 pub(super) fn is_builtin(name: &str) -> bool {
     write(name).is_some()
 }
 
 impl Lower<'_, '_> {
+    /// The opcode of the instruction that the call `inst` to a maths function is written as, or
+    /// nothing when it stays a call or when it is the checked `sqrt` of [`Lower::maths`].
+    pub(super) fn libm(&self, inst: Inst) -> Option<u8> {
+        self.maths(inst).and_then(|(op, checked)| (!checked).then_some(op))
+    }
+
+    /// The opcode of the instruction that the call `inst` to a maths function is written as, and
+    /// whether the answer of the instruction must be checked, or nothing when it stays a call.
+    ///
+    /// It stays a call when the call does not have [`Flags::LIBRARY`], when the module defines the
+    /// function, and when the call does not have the type of the C library's function. Under `-fmath-errno`, the answer of `sqrt` and `sqrtf` is checked,
+    /// because the instruction does not set `errno`. [`Lower::checked_sqrt`] writes it.
+    pub(super) fn maths(&self, inst: Inst) -> Option<(u8, bool)> {
+        let Extra::Call(info) = self.func[inst].extra else { return None };
+        let info = self.func[info];
+        let callee = info.callee?;
+        let name = self.unit.names.resolve(callee);
+        let (op, ty, count) = libm(name)?;
+        if !self.func[inst].flags.contains(Flags::LIBRARY)
+            || matches!(self.unit.ir.lookup(callee),
+                Some(SymbolRef::Func(f)) if !self.unit.ir[f].is_declaration())
+        {
+            return None;
+        }
+        let sig = &self.func[info.signature];
+        let typed = |params: &[rucc_ir::Param], count| {
+            params.len() == count && params.iter().all(|p| valtype(p.ty) == Ok(ty))
+        };
+        let fits = !sig.variadic
+            && typed(&sig.params, count)
+            && typed(&sig.returns, 1)
+            && self.args(inst).len() == count
+            && self.args(inst).iter().all(|&arg| valtype(self.ty(arg)) == Ok(ty));
+        fits.then_some((op, self.unit.math_errno && name.starts_with("sqrt")))
+    }
+
+    /// The square root `op` of `arg` that calls the function `callee` only when the answer is a
+    /// NaN, which leaves the answer on the stack. This is what clang writes under `-fmath-errno`.
+    /// The answer is a NaN when the operand is a NaN or less than zero, and only the function
+    /// sets `errno` for those.
+    pub(super) fn checked_sqrt(&mut self, op: u8, arg: Value, callee: Symbol) -> Result<()> {
+        let ty = valtype(self.ty(arg))?;
+        let eq = if ty == ValType::F32 { 0x5b } else { 0x61 };
+        let operand = self.new_local(ty);
+        let answer = self.new_local(ty);
+        self.push(arg)?;
+        self.code.local_set(operand);
+        self.code.open(emit::BLOCK, None);
+        self.code.local_get(operand);
+        self.code.op(op);
+        self.code.local_tee(answer);
+        self.code.local_get(answer);
+        self.code.op(eq);
+        self.code.br_if(0);
+        self.code.local_get(operand);
+        let (symbol, _) = self.unit.function(callee).or_else(|_| {
+            let name = self.unit.name(callee);
+            Ok::<_, String>(
+                self.unit.libcall(&name, FuncType { params: vec![ty], results: vec![ty] }),
+            )
+        })?;
+        self.code.call(symbol, false);
+        self.code.local_set(answer);
+        self.code.end(true);
+        self.code.local_get(answer);
+        Ok(())
+    }
+
     /// The instruction of the builtin `name` in place of a call, which leaves the answer on the
     /// stack.
     pub(super) fn builtin(&mut self, name: &str, args: &[Value]) -> Result<()> {

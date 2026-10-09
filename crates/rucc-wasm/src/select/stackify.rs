@@ -442,6 +442,8 @@ impl Lower<'_, '_> {
             | Opcode::FPToSI
             | Opcode::FPToUI
             | Opcode::Load => Some(Kind::Read),
+            // A maths function that is written as its instruction, which cannot trap.
+            Opcode::Call if self.libm(inst).is_some() => Some(Kind::Pure),
             Opcode::Call | Opcode::CallIndirect => {
                 let Extra::Call(info) = data.extra else { return None };
                 let sig = &self.func[self.func[info].signature];
@@ -462,6 +464,7 @@ impl Lower<'_, '_> {
         match data.opcode {
             _ if pairs => (true, true, true),
             Opcode::Alloca if args.is_empty() => (false, false, false),
+            Opcode::Call if self.libm(inst).is_some() => (false, false, false),
             Opcode::SDiv
             | Opcode::SRem
             | Opcode::UDiv

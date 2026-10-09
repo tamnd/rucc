@@ -32,8 +32,8 @@ use rucc_base::{Idx, Interner, Symbol, dfp};
 use rucc_diag::{Diagnostic, Span};
 use rucc_ir::{
     Abi, AsmInfo, AttrSet, Block, BlockCall, Builder, CallInfo, Def, Extra, Flags, FloatPred, Func,
-    Inst, InstData, IntPred, MemInfo, MemOrder, Opcode, Param, PrefetchHint, Restrict, RmwOp,
-    Signature, StorageClass, Type, VaInfo, Value, twice_by_name,
+    Inst, InstData, IntPred, MATH_BUILTINS, MemInfo, MemOrder, Opcode, Param, PrefetchHint,
+    Restrict, RmwOp, Signature, StorageClass, Type, VaInfo, Value, twice_by_name,
 };
 use rucc_sema::{
     AtomicOp, BitCount, Classify, Const, Conversion, CpuTest, DeclFlags, DeclId, DeclKind, Eval,
@@ -9895,8 +9895,12 @@ impl<'u> Body<'_, 'u> {
                     settled.signature.params.push(Param::with_abi(Type::PTR, Abi::Chain));
                 }
                 let variadic = settled.signature.variadic;
+                let library = self.maths_library(callee, symbol);
                 let sig = self.func.add_signature(settled.signature);
                 let inst = self.build(span).call_varargs(symbol, sig, &values, &settled.varargs);
+                if library {
+                    self.func[inst].flags |= Flags::LIBRARY;
+                }
                 if variadic && self.always_inlined(callee) {
                     starts.push(values.len());
                     let first = usize::from(destination.is_some());
@@ -10262,6 +10266,19 @@ impl<'u> Body<'_, 'u> {
             return None;
         }
         Some(self.unit.names.resolve(tast[decl].name?))
+    }
+
+    /// Whether a direct call to `symbol` through `callee` is a call to one of the maths functions
+    /// of [`MATH_BUILTINS`] that means the function of the C library, which is what
+    /// [`Flags::LIBRARY`] says. The `__builtin_` spelling always means it, and the plain one means
+    /// it where `-fno-builtin` does not turn it off. A declaration that renamed the symbol does
+    /// not.
+    fn maths_library(&self, callee: ExprId, symbol: Symbol) -> bool {
+        let Some(spelled) = self.builtin_named(callee) else { return false };
+        let name = spelled.strip_prefix("__builtin_").unwrap_or(spelled);
+        MATH_BUILTINS.contains(&name)
+            && self.unit.means_the_library(spelled)
+            && self.unit.names.resolve(symbol) == name
     }
 
     /// Reports a construct the walk does not build IR for yet.

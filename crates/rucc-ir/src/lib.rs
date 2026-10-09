@@ -52,7 +52,7 @@ mod verify;
 pub use asm::{AsmOperand, AsmOperands, AsmRole};
 pub use attrs::{AllocSize, AttrSet, Attrs, FpContract, twice_by_name};
 pub use facts::{Bounds, Facts};
-pub use flags::{Flags, MemOrder, Owner, PrefetchHint, RmwOp, StorageClass};
+pub use flags::{Flags, MATH_BUILTINS, MemOrder, Owner, PrefetchHint, RmwOp, StorageClass};
 pub use func::{Builder, Counts, Func, Notices, Start, WasmNames};
 pub use inst::{
     Abi, AbiList, AsmInfo, Block, BlockCall, BlockCallList, BlockData, Bulk, CallInfo, Def, Drains,

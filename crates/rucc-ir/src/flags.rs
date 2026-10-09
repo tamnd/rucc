@@ -228,6 +228,14 @@ impl Flags {
     /// on a `return` alone.
     pub const EARLY: Self = Self(1 << 25);
 
+    /// A direct call to one of the maths functions of [`MATH_BUILTINS`] that means the
+    /// function of the C library, because it was written with the `__builtin_` spelling or because
+    /// `-fno-builtin` does not turn the plain spelling off. A fact from the front end, which the
+    /// wasm code generator reads to write the instruction of the function in place of the call.
+    /// A pass that drops it leaves a call, which is still correct. Legal on the two direct
+    /// spellings of a call.
+    pub const LIBRARY: Self = Self(1 << 26);
+
     /// Every flag that tells the optimizer to leave an access exactly where it is.
     pub const KEEP: Self = Self(Self::VOLATILE.0 | Self::SEG_FS.0 | Self::SEG_GS.0);
 
@@ -327,12 +335,20 @@ impl Flags {
             // that could ever be inside it.
             //
             // `NOTRACK` is on all three, which its own comment says why.
+            //
+            // `LIBRARY` is on the two direct spellings, because it is about the name the call names.
             Opcode::Call => Self::NOFREE
                 .union(Self::HEAP)
+                .union(Self::LIBRARY)
                 .union(Self::NOTRACK)
                 .union(Self::INDIRECT_RETURN)
                 .union(Self::MUST_TAIL),
-            Opcode::TailCall | Opcode::CallIndirect => Self::NOFREE
+            Opcode::TailCall => Self::NOFREE
+                .union(Self::NOTRACK)
+                .union(Self::INDIRECT_RETURN)
+                .union(Self::MUST_TAIL)
+                .union(Self::LIBRARY),
+            Opcode::CallIndirect => Self::NOFREE
                 .union(Self::NOTRACK)
                 .union(Self::INDIRECT_RETURN)
                 .union(Self::MUST_TAIL),
@@ -425,6 +441,28 @@ static NAMED: &[(Flags, &str)] = &[
     (Flags::MUST_TAIL, "musttail"),
     (Flags::COUNTED, "counted"),
     (Flags::EARLY, "early"),
+    (Flags::LIBRARY, "library"),
+];
+
+/// The maths functions that [`Flags::LIBRARY`] is about, each with its `float` form. A
+/// target that has an instruction for one writes the instruction in place of the call.
+pub const MATH_BUILTINS: &[&str] = &[
+    "sqrt",
+    "sqrtf",
+    "ceil",
+    "ceilf",
+    "floor",
+    "floorf",
+    "trunc",
+    "truncf",
+    "rint",
+    "rintf",
+    "nearbyint",
+    "nearbyintf",
+    "fabs",
+    "fabsf",
+    "copysign",
+    "copysignf",
 ];
 
 /// How strongly an atomic operation is ordered against everything around it.

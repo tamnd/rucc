@@ -250,43 +250,6 @@ def emit():
         n = lanes(e) // 2
         w(f"typedef {BY[e][1]} __{e}x{n} __attribute__((__vector_size__(8), __aligned__(8)));")
 
-    section(
-        "A float rounded to an integer in C. Wasm rounds each operation to the nearest even, so "
-        "adding\n * 2^23 to a float below it and taking it away again leaves the nearest integer, "
-        "ties to even.\n * The other roundings start from that one. The sign of the answer is "
-        "the sign of the operand,\n * which keeps -0.0 and the negative numbers that round to "
-        "zero. A NaN comes back quiet."
-    )
-    for e, f, big in (("f32", "f", "0x1p23f"), ("f64", "", "0x1p52")):
-        c = BY[e][1]
-        cs = f"__builtin_copysign{f}"
-        fn(
-            c,
-            f"__rucc_wasm_nearest_{e}",
-            f"{c} x",
-            f"{c} a = __builtin_fabs{f}(x); if (a < {big}) return {cs}((a + {big}) - {big}, x); "
-            "return x != x ? x + x : x;",
-        )
-        one_ = "1.0f" if e == "f32" else "1.0"
-        fn(
-            c,
-            f"__rucc_wasm_floor_{e}",
-            f"{c} x",
-            f"{c} r = __rucc_wasm_nearest_{e}(x); return {cs}(r > x ? r - {one_} : r, x);",
-        )
-        fn(
-            c,
-            f"__rucc_wasm_ceil_{e}",
-            f"{c} x",
-            f"{c} r = __rucc_wasm_nearest_{e}(x); return {cs}(r < x ? r + {one_} : r, x);",
-        )
-        fn(
-            c,
-            f"__rucc_wasm_trunc_{e}",
-            f"{c} x",
-            f"{c} a = __builtin_fabs{f}(x); {c} r = __rucc_wasm_nearest_{e}(a); "
-            f"return {cs}(r > a ? r - {one_} : r, x);",
-        )
     helpers = len(NAMES)
 
     section("Loads and stores. Through memcpy, since none of them has to be aligned.")
@@ -488,8 +451,11 @@ def emit():
         fn("v128_t", f"{vname(e)}_neg", "v128_t a", f"return (v128_t)(({u})a ^ {sign});")
         root = "__builtin_sqrtf" if e == "f32" else "__builtin_sqrt"
         lanewise(e, f"{vname(e)}_sqrt", "v128_t a", one(e), f"{root}(x[i])")
-        for op in ("ceil", "floor", "trunc", "nearest"):
-            lanewise(e, f"{vname(e)}_{op}", "v128_t a", one(e), f"__rucc_wasm_{op}_{e}(x[i])")
+        # Each builtin is the wasm instruction of the same name, and `rint` is `nearest`.
+        f = "f" if e == "f32" else ""
+        rounding = {"ceil": "ceil", "floor": "floor", "trunc": "trunc", "nearest": "rint"}
+        for op, libm in rounding.items():
+            lanewise(e, f"{vname(e)}_{op}", "v128_t a", one(e), f"__builtin_{libm}{f}(x[i])")
         for op, sym in (("add", "+"), ("sub", "-"), ("mul", "*"), ("div", "/")):
             fn(
                 "v128_t",

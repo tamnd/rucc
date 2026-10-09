@@ -320,6 +320,19 @@ struct Lower<'u, 'a> {
     span: Span,
 }
 
+/// What the selector writes for the sign masks of `fabs` and `copysign`. See [`Lower::sign_bits`].
+#[derive(Clone, Copy)]
+enum SignOp {
+    /// `fabs` of the value.
+    Abs(Value),
+    /// `-fabs` of the value, which is `copysign` with a negative constant.
+    NegatedAbs(Value),
+    /// `copysign` of the first value with the sign of the second.
+    Copysign(Value, Value),
+    /// `copysign` of the float with these bits, which has no sign, with the sign of the value.
+    Signed(u128, Value),
+}
+
 /// A load or a store whose address is split as [`Lower::folded`] splits it.
 struct Folded {
     /// The index of the address among the arguments.
@@ -395,7 +408,7 @@ impl Lower<'_, '_> {
         blocks.collect()
     }
 
-    fn new_local(&mut self, ty: ValType) -> u32 {
+    pub(super) fn new_local(&mut self, ty: ValType) -> u32 {
         let index = self.params + u32::try_from(self.locals.len()).expect("fewer locals");
         self.locals.push(ty);
         index
@@ -1466,6 +1479,73 @@ impl Lower<'_, '_> {
         Ok(())
     }
 
+    /// What the selector writes for `bits`, which a bitcast makes into the float `float`, when
+    /// they are the bits that the front end writes for `fabs` or `copysign`, and nothing when they
+    /// are not. That is the value with its sign bit cleared for `fabs`, and that value with the
+    /// sign bit of the second operand put in for `copysign`. See `sign` in
+    /// `rucc-lower/src/body.rs`. clang writes `f64.abs` and `f64.copysign` for them, and the `f32`
+    /// forms, and so does the selector. A `copysign` whose first operand is a constant, and one
+    /// whose second operand is a negative constant, are folded before they get here, and the
+    /// selector knows those two shapes too.
+    ///
+    /// Each instruction between the bitcast and the operands must stay on the stack, because the
+    /// selector does not write them. Only the order that the front end writes is taken for
+    /// `copysign`, which is the magnitude before the sign, so that the operands are pushed in the
+    /// order that the stackify pass checked. The values that the selector does not write come
+    /// back last.
+    fn sign_bits(&self, bits: Value, float: Value) -> Option<(SignOp, Vec<Value>)> {
+        let width = match valtype(self.ty(float)) {
+            Ok(ValType::F32) => 32,
+            Ok(ValType::F64) => 64,
+            _ => return None,
+        };
+        let top = 1u128 << (width - 1);
+        // The operands of `inst` with this opcode when its value stays on the stack.
+        let stacked = |lower: &Self, value: Value, opcode: Opcode| {
+            let (inst, _) = lower.def(value)?;
+            (lower.func[inst].opcode == opcode && lower.trees.stacked.contains(&value))
+                .then(|| lower.args(inst))
+        };
+        // The float whose bits `value` is, masked with `mask`.
+        let masked = |lower: &Self, value: Value, mask: u128| {
+            let args = stacked(lower, value, Opcode::And)?;
+            let number = match args[..] {
+                [number, other] if lower.constant(other) == Some(mask) => number,
+                [other, number] if lower.constant(other) == Some(mask) => number,
+                _ => return None,
+            };
+            let args = stacked(lower, number, Opcode::Bitcast)?;
+            (lower.ty(args[0]) == lower.ty(float)).then_some((number, args[0]))
+        };
+        if let Some((number, value)) = masked(self, bits, top - 1) {
+            return Some((SignOp::Abs(value), vec![bits, number]));
+        }
+        let args = stacked(self, bits, Opcode::Or)?;
+        if let Some((number, value)) = masked(self, args[0], top - 1) {
+            if let Some((other, sign)) = masked(self, args[1], top) {
+                let skipped = vec![bits, args[0], number, args[1], other];
+                return Some((SignOp::Copysign(value, sign), skipped));
+            }
+        }
+        // The two folded shapes, each with one operand that is a constant, which can be on either
+        // side.
+        let (constant, other) = match args[..] {
+            [other, constant] | [constant, other] if self.constant(constant).is_some() => {
+                (self.constant(constant)?, other)
+            }
+            _ => return None,
+        };
+        if constant == top {
+            let (number, value) = masked(self, other, top - 1)?;
+            return Some((SignOp::NegatedAbs(value), vec![bits, other, number]));
+        }
+        if constant & top == 0 {
+            let (number, sign) = masked(self, other, top)?;
+            return Some((SignOp::Signed(constant, sign), vec![bits, other, number]));
+        }
+        None
+    }
+
     /// Push a value zero extended to the width of its value type.
     /// Push the condition `cond`, or its negation when `negate` is set. A compare of integers
     /// that stays on the stack gives its negation with the inverse predicate, and any other
@@ -1869,6 +1949,42 @@ impl Lower<'_, '_> {
                     self.push_z(arg(0))?
                 }
                 self.resize(self.wide(arg(0)), self.wide(results[0]), signed);
+                self.set(results[0]);
+            }
+            Opcode::Bitcast if self.sign_bits(arg(0), results[0]).is_some() => {
+                let (op, skipped) = self.sign_bits(arg(0), results[0]).expect("checked above");
+                self.pushed.extend(skipped);
+                let single = valtype(self.ty(results[0]))? == ValType::F32;
+                let (abs, neg, copysign) = if single {
+                    (emit::F32_ABS, emit::F32_NEG, emit::F32_COPYSIGN)
+                } else {
+                    (emit::F64_ABS, emit::F64_NEG, emit::F64_COPYSIGN)
+                };
+                match op {
+                    SignOp::Abs(value) => {
+                        self.push(value)?;
+                        self.code.op(abs);
+                    }
+                    SignOp::NegatedAbs(value) => {
+                        self.push(value)?;
+                        self.code.op(abs);
+                        self.code.op(neg);
+                    }
+                    SignOp::Copysign(value, sign) => {
+                        self.push(value)?;
+                        self.push(sign)?;
+                        self.code.op(copysign);
+                    }
+                    SignOp::Signed(bits, sign) => {
+                        if single {
+                            self.code.f32_const(bits as u32);
+                        } else {
+                            self.code.f64_const(bits as u64);
+                        }
+                        self.push(sign)?;
+                        self.code.op(copysign);
+                    }
+                }
                 self.set(results[0]);
             }
             Opcode::FPTrunc | Opcode::FPExt | Opcode::Bitcast => {
@@ -2410,10 +2526,20 @@ impl Lower<'_, '_> {
         {
             return Err("a call to `setjmp` that `rucc_wasm::prepare` did not change".into());
         }
-        if let Some(name) = callee.filter(|&name| builtin::is_builtin(name)) {
+        let maths = self.maths(inst);
+        if let Some(name) = callee.filter(|&name| maths.is_some() || builtin::is_builtin(name)) {
             if !info.callee.is_some_and(defined) {
                 let args = self.args(inst);
-                self.builtin(name, &args)?;
+                match (maths, info.callee) {
+                    (Some((op, true)), Some(callee)) => self.checked_sqrt(op, args[0], callee)?,
+                    (Some((op, _)), _) => {
+                        for &arg in &args {
+                            self.push(arg)?;
+                        }
+                        self.code.op(op);
+                    }
+                    (None, _) => self.builtin(name, &args)?,
+                }
                 if tail {
                     self.epilogue();
                     self.code.stop(emit::RETURN);
