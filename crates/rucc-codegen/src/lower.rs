@@ -892,6 +892,18 @@ fn bare_constant(
     false
 }
 
+/// Whether a clobber names the x87 stack, `st` or `st(1)`, or one of the MMX registers over it.
+fn x87_named(entry: &str) -> bool {
+    let digit = |rest: &str| rest.len() == 1 && rest.as_bytes()[0].is_ascii_digit() && rest < "8";
+    if entry == "st" {
+        return true;
+    }
+    if let Some(depth) = entry.strip_prefix("st(").and_then(|rest| rest.strip_suffix(')')) {
+        return digit(depth);
+    }
+    entry.strip_prefix("mm").is_some_and(digit)
+}
+
 fn vector_named(entry: &str) -> Option<PhysReg> {
     let entry = entry.trim().trim_matches('"');
     let entry = entry.strip_prefix('%').unwrap_or(entry);
@@ -7142,6 +7154,13 @@ impl<'a> Lowering<'a> {
             if entry.is_empty() || matches!(entry, "memory" | "cc" | "flags") {
                 continue;
             }
+            // The x87 stack and the MMX registers, which are the same eight registers. Nothing is
+            // left in them from one instruction to the next, since a `long double` is loaded,
+            // worked on and stored again each time, so a template that ruins them ruins nothing
+            // this has put there. The RAID code in lib/raid6 lists them around its MMX loops.
+            if x87_named(entry) {
+                continue;
+            }
             let (reg, _) = x86_64::gpr_named(entry).ok_or_else(refused)?;
             if !named.contains(&reg) {
                 named.push(reg);
@@ -11338,6 +11357,24 @@ mod tests {
             failed.to_string(),
             "this `asm` says it destroys a register this has no name for"
         );
+    }
+
+    /// The x87 stack and the MMX registers hold nothing between two instructions, so a clobber
+    /// naming them is read and leaves every register free. One past the eighth is still refused.
+    #[test]
+    fn a_clobber_of_the_x87_stack_or_an_mmx_register_is_nothing_to_keep_clear() {
+        let (mut names, mut source, block, _) = blank(&[]);
+        clobbering(&mut source, block, &mut names, "emms", "", "st, st(7), mm0, %mm7", &[], &[]);
+        Builder::new(&mut source, block).ret(&[]);
+        let text = lower(&mut names, &source);
+        assert!(!text.contains("$rcx") && !text.contains("$rsi"), "{text}");
+        for wrong in ["st(8)", "mm8", "mm", "st(", "mm07"] {
+            let (mut names, mut source, block, _) = blank(&[]);
+            clobbering(&mut source, block, &mut names, "emms", "", wrong, &[], &[]);
+            Builder::new(&mut source, block).ret(&[]);
+            let failed = func(&source, &mut names, &SELECTOR, &SYSV, &Elsewhere::default());
+            assert!(failed.is_err(), "{wrong}");
+        }
     }
 
     #[test]

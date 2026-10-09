@@ -99,6 +99,11 @@ pub enum Kind {
     Debug,
     /// A segment register, which a move reads and writes and a push and a pop save and restore.
     Seg,
+    /// An MMX register, `mm0` to `mm7`.
+    ///
+    /// Its own kind because `movq %mm0, (%eax)` and `movq %xmm0, (%eax)` are the same mnemonic
+    /// with the same kinds of argument otherwise, and two different instructions.
+    Mmx,
 }
 
 impl Kind {
@@ -864,6 +869,16 @@ static SEG_R: [Kind; 2] = [Kind::Seg, Kind::Reg];
 static R_SEG: [Kind; 2] = [Kind::Reg, Kind::Seg];
 static SEG_M: [Kind; 2] = [Kind::Seg, Kind::Mem];
 static M_SEG: [Kind; 2] = [Kind::Mem, Kind::Seg];
+// An MMX register with another of them, with memory either side, with a general purpose register
+// either side, and with a count or a shuffle written down.
+static PP: [Kind; 2] = [Kind::Mmx, Kind::Mmx];
+static MP: [Kind; 2] = [Kind::Mem, Kind::Mmx];
+static PM: [Kind; 2] = [Kind::Mmx, Kind::Mem];
+static RP: [Kind; 2] = [Kind::Reg, Kind::Mmx];
+static PR: [Kind; 2] = [Kind::Mmx, Kind::Reg];
+static IP: [Kind; 2] = [Kind::Imm, Kind::Mmx];
+static IPP: [Kind; 3] = [Kind::Imm, Kind::Mmx, Kind::Mmx];
+static IMP: [Kind; 3] = [Kind::Imm, Kind::Mem, Kind::Mmx];
 
 /// Every instruction [`crate::x86_64::written`] can name, and the bytes it comes out as.
 ///
@@ -2544,6 +2559,12 @@ static ENCODINGS: &[Encoding] = &[
     bytes("xaddw", &RM, Word, &[0x0F, 0xC1], pair(1, 0), NO_IMM),
     bytes("xaddl", &RM, Long, &[0x0F, 0xC1], pair(1, 0), NO_IMM),
     bytes("xaddq", &RM, Quad, &[0x0F, 0xC1], pair(1, 0), NO_IMM),
+    // And the add and exchange between two registers, which KVM's instruction emulator writes to
+    // work out the flags an `xadd` leaves.
+    bytes("xaddb", &RR, Byte, &[0x0F, 0xC0], pair(1, 0), NO_IMM),
+    bytes("xaddw", &RR, Word, &[0x0F, 0xC1], pair(1, 0), NO_IMM),
+    bytes("xaddl", &RR, Long, &[0x0F, 0xC1], pair(1, 0), NO_IMM),
+    bytes("xaddq", &RR, Quad, &[0x0F, 0xC1], pair(1, 0), NO_IMM),
     // The vector moves, which are the same three shapes as the general purpose ones and are one
     // opcode apart the same way.
     bytes("movaps", &VV, Long, &[0x0F, 0x28], pair(0, 1), NO_IMM),
@@ -2721,6 +2742,140 @@ static ENCODINGS: &[Encoding] = &[
     // bytes rather than in bits because that is the only thing moving a register sideways can mean.
     bytes("pslldq", &IV, Word, &[0x0F, 0x73], ext(1, 7), ImmSize::Ib),
     bytes("psrldq", &IV, Word, &[0x0F, 0x73], ext(1, 3), ImmSize::Ib),
+    // The MMX registers, `mm0` to `mm7`, which are the x87 stack under another name and which no
+    // compiler has written to for a long time. The kernel still does by hand on i386: the RAID
+    // checksums in lib/raid6 and the xor routines for the processors that came before SSE. Each
+    // is the integer vector instruction above with no `0x66` in front, which is what says the
+    // register is the eight byte one rather than the sixteen byte one.
+    bytes("movq", &PP, Long, &[0x0F, 0x6F], pair(0, 1), NO_IMM),
+    bytes("movq", &MP, Long, &[0x0F, 0x6F], pair(0, 1), NO_IMM),
+    bytes("movq", &PM, Long, &[0x0F, 0x7F], pair(1, 0), NO_IMM),
+    bytes("movd", &RP, Long, &[0x0F, 0x6E], pair(0, 1), NO_IMM),
+    bytes("movd", &MP, Long, &[0x0F, 0x6E], pair(0, 1), NO_IMM),
+    bytes("movd", &PR, Long, &[0x0F, 0x7E], pair(1, 0), NO_IMM),
+    bytes("movd", &PM, Long, &[0x0F, 0x7E], pair(1, 0), NO_IMM),
+    bytes("movntq", &PM, Long, &[0x0F, 0xE7], pair(1, 0), NO_IMM),
+    bytes("pmovmskb", &PR, Long, &[0x0F, 0xD7], pair(0, 1), NO_IMM),
+    bytes("pshufw", &IPP, Long, &[0x0F, 0x70], pair(1, 2), ImmSize::Ib),
+    bytes("pshufw", &IMP, Long, &[0x0F, 0x70], pair(1, 2), ImmSize::Ib),
+    bytes("paddb", &PP, Long, &[0x0F, 0xFC], pair(0, 1), NO_IMM),
+    bytes("paddb", &MP, Long, &[0x0F, 0xFC], pair(0, 1), NO_IMM),
+    bytes("paddw", &PP, Long, &[0x0F, 0xFD], pair(0, 1), NO_IMM),
+    bytes("paddw", &MP, Long, &[0x0F, 0xFD], pair(0, 1), NO_IMM),
+    bytes("paddd", &PP, Long, &[0x0F, 0xFE], pair(0, 1), NO_IMM),
+    bytes("paddd", &MP, Long, &[0x0F, 0xFE], pair(0, 1), NO_IMM),
+    bytes("paddq", &PP, Long, &[0x0F, 0xD4], pair(0, 1), NO_IMM),
+    bytes("paddq", &MP, Long, &[0x0F, 0xD4], pair(0, 1), NO_IMM),
+    bytes("paddsb", &PP, Long, &[0x0F, 0xEC], pair(0, 1), NO_IMM),
+    bytes("paddsb", &MP, Long, &[0x0F, 0xEC], pair(0, 1), NO_IMM),
+    bytes("paddsw", &PP, Long, &[0x0F, 0xED], pair(0, 1), NO_IMM),
+    bytes("paddsw", &MP, Long, &[0x0F, 0xED], pair(0, 1), NO_IMM),
+    bytes("paddusb", &PP, Long, &[0x0F, 0xDC], pair(0, 1), NO_IMM),
+    bytes("paddusb", &MP, Long, &[0x0F, 0xDC], pair(0, 1), NO_IMM),
+    bytes("paddusw", &PP, Long, &[0x0F, 0xDD], pair(0, 1), NO_IMM),
+    bytes("paddusw", &MP, Long, &[0x0F, 0xDD], pair(0, 1), NO_IMM),
+    bytes("psubb", &PP, Long, &[0x0F, 0xF8], pair(0, 1), NO_IMM),
+    bytes("psubb", &MP, Long, &[0x0F, 0xF8], pair(0, 1), NO_IMM),
+    bytes("psubw", &PP, Long, &[0x0F, 0xF9], pair(0, 1), NO_IMM),
+    bytes("psubw", &MP, Long, &[0x0F, 0xF9], pair(0, 1), NO_IMM),
+    bytes("psubd", &PP, Long, &[0x0F, 0xFA], pair(0, 1), NO_IMM),
+    bytes("psubd", &MP, Long, &[0x0F, 0xFA], pair(0, 1), NO_IMM),
+    bytes("psubq", &PP, Long, &[0x0F, 0xFB], pair(0, 1), NO_IMM),
+    bytes("psubq", &MP, Long, &[0x0F, 0xFB], pair(0, 1), NO_IMM),
+    bytes("psubsb", &PP, Long, &[0x0F, 0xE8], pair(0, 1), NO_IMM),
+    bytes("psubsb", &MP, Long, &[0x0F, 0xE8], pair(0, 1), NO_IMM),
+    bytes("psubsw", &PP, Long, &[0x0F, 0xE9], pair(0, 1), NO_IMM),
+    bytes("psubsw", &MP, Long, &[0x0F, 0xE9], pair(0, 1), NO_IMM),
+    bytes("psubusb", &PP, Long, &[0x0F, 0xD8], pair(0, 1), NO_IMM),
+    bytes("psubusb", &MP, Long, &[0x0F, 0xD8], pair(0, 1), NO_IMM),
+    bytes("psubusw", &PP, Long, &[0x0F, 0xD9], pair(0, 1), NO_IMM),
+    bytes("psubusw", &MP, Long, &[0x0F, 0xD9], pair(0, 1), NO_IMM),
+    bytes("pand", &PP, Long, &[0x0F, 0xDB], pair(0, 1), NO_IMM),
+    bytes("pand", &MP, Long, &[0x0F, 0xDB], pair(0, 1), NO_IMM),
+    bytes("pandn", &PP, Long, &[0x0F, 0xDF], pair(0, 1), NO_IMM),
+    bytes("pandn", &MP, Long, &[0x0F, 0xDF], pair(0, 1), NO_IMM),
+    bytes("por", &PP, Long, &[0x0F, 0xEB], pair(0, 1), NO_IMM),
+    bytes("por", &MP, Long, &[0x0F, 0xEB], pair(0, 1), NO_IMM),
+    bytes("pxor", &PP, Long, &[0x0F, 0xEF], pair(0, 1), NO_IMM),
+    bytes("pxor", &MP, Long, &[0x0F, 0xEF], pair(0, 1), NO_IMM),
+    bytes("pcmpeqb", &PP, Long, &[0x0F, 0x74], pair(0, 1), NO_IMM),
+    bytes("pcmpeqb", &MP, Long, &[0x0F, 0x74], pair(0, 1), NO_IMM),
+    bytes("pcmpeqw", &PP, Long, &[0x0F, 0x75], pair(0, 1), NO_IMM),
+    bytes("pcmpeqw", &MP, Long, &[0x0F, 0x75], pair(0, 1), NO_IMM),
+    bytes("pcmpeqd", &PP, Long, &[0x0F, 0x76], pair(0, 1), NO_IMM),
+    bytes("pcmpeqd", &MP, Long, &[0x0F, 0x76], pair(0, 1), NO_IMM),
+    bytes("pcmpgtb", &PP, Long, &[0x0F, 0x64], pair(0, 1), NO_IMM),
+    bytes("pcmpgtb", &MP, Long, &[0x0F, 0x64], pair(0, 1), NO_IMM),
+    bytes("pcmpgtw", &PP, Long, &[0x0F, 0x65], pair(0, 1), NO_IMM),
+    bytes("pcmpgtw", &MP, Long, &[0x0F, 0x65], pair(0, 1), NO_IMM),
+    bytes("pcmpgtd", &PP, Long, &[0x0F, 0x66], pair(0, 1), NO_IMM),
+    bytes("pcmpgtd", &MP, Long, &[0x0F, 0x66], pair(0, 1), NO_IMM),
+    bytes("pmullw", &PP, Long, &[0x0F, 0xD5], pair(0, 1), NO_IMM),
+    bytes("pmullw", &MP, Long, &[0x0F, 0xD5], pair(0, 1), NO_IMM),
+    bytes("pmulhw", &PP, Long, &[0x0F, 0xE5], pair(0, 1), NO_IMM),
+    bytes("pmulhw", &MP, Long, &[0x0F, 0xE5], pair(0, 1), NO_IMM),
+    bytes("pmulhuw", &PP, Long, &[0x0F, 0xE4], pair(0, 1), NO_IMM),
+    bytes("pmulhuw", &MP, Long, &[0x0F, 0xE4], pair(0, 1), NO_IMM),
+    bytes("pmuludq", &PP, Long, &[0x0F, 0xF4], pair(0, 1), NO_IMM),
+    bytes("pmuludq", &MP, Long, &[0x0F, 0xF4], pair(0, 1), NO_IMM),
+    bytes("pmaddwd", &PP, Long, &[0x0F, 0xF5], pair(0, 1), NO_IMM),
+    bytes("pmaddwd", &MP, Long, &[0x0F, 0xF5], pair(0, 1), NO_IMM),
+    bytes("punpcklbw", &PP, Long, &[0x0F, 0x60], pair(0, 1), NO_IMM),
+    bytes("punpcklbw", &MP, Long, &[0x0F, 0x60], pair(0, 1), NO_IMM),
+    bytes("punpcklwd", &PP, Long, &[0x0F, 0x61], pair(0, 1), NO_IMM),
+    bytes("punpcklwd", &MP, Long, &[0x0F, 0x61], pair(0, 1), NO_IMM),
+    bytes("punpckldq", &PP, Long, &[0x0F, 0x62], pair(0, 1), NO_IMM),
+    bytes("punpckldq", &MP, Long, &[0x0F, 0x62], pair(0, 1), NO_IMM),
+    bytes("punpckhbw", &PP, Long, &[0x0F, 0x68], pair(0, 1), NO_IMM),
+    bytes("punpckhbw", &MP, Long, &[0x0F, 0x68], pair(0, 1), NO_IMM),
+    bytes("punpckhwd", &PP, Long, &[0x0F, 0x69], pair(0, 1), NO_IMM),
+    bytes("punpckhwd", &MP, Long, &[0x0F, 0x69], pair(0, 1), NO_IMM),
+    bytes("punpckhdq", &PP, Long, &[0x0F, 0x6A], pair(0, 1), NO_IMM),
+    bytes("punpckhdq", &MP, Long, &[0x0F, 0x6A], pair(0, 1), NO_IMM),
+    bytes("packsswb", &PP, Long, &[0x0F, 0x63], pair(0, 1), NO_IMM),
+    bytes("packsswb", &MP, Long, &[0x0F, 0x63], pair(0, 1), NO_IMM),
+    bytes("packuswb", &PP, Long, &[0x0F, 0x67], pair(0, 1), NO_IMM),
+    bytes("packuswb", &MP, Long, &[0x0F, 0x67], pair(0, 1), NO_IMM),
+    bytes("packssdw", &PP, Long, &[0x0F, 0x6B], pair(0, 1), NO_IMM),
+    bytes("packssdw", &MP, Long, &[0x0F, 0x6B], pair(0, 1), NO_IMM),
+    bytes("psllw", &PP, Long, &[0x0F, 0xF1], pair(0, 1), NO_IMM),
+    bytes("psllw", &MP, Long, &[0x0F, 0xF1], pair(0, 1), NO_IMM),
+    bytes("pslld", &PP, Long, &[0x0F, 0xF2], pair(0, 1), NO_IMM),
+    bytes("pslld", &MP, Long, &[0x0F, 0xF2], pair(0, 1), NO_IMM),
+    bytes("psllq", &PP, Long, &[0x0F, 0xF3], pair(0, 1), NO_IMM),
+    bytes("psllq", &MP, Long, &[0x0F, 0xF3], pair(0, 1), NO_IMM),
+    bytes("psrlw", &PP, Long, &[0x0F, 0xD1], pair(0, 1), NO_IMM),
+    bytes("psrlw", &MP, Long, &[0x0F, 0xD1], pair(0, 1), NO_IMM),
+    bytes("psrld", &PP, Long, &[0x0F, 0xD2], pair(0, 1), NO_IMM),
+    bytes("psrld", &MP, Long, &[0x0F, 0xD2], pair(0, 1), NO_IMM),
+    bytes("psrlq", &PP, Long, &[0x0F, 0xD3], pair(0, 1), NO_IMM),
+    bytes("psrlq", &MP, Long, &[0x0F, 0xD3], pair(0, 1), NO_IMM),
+    bytes("psraw", &PP, Long, &[0x0F, 0xE1], pair(0, 1), NO_IMM),
+    bytes("psraw", &MP, Long, &[0x0F, 0xE1], pair(0, 1), NO_IMM),
+    bytes("psrad", &PP, Long, &[0x0F, 0xE2], pair(0, 1), NO_IMM),
+    bytes("psrad", &MP, Long, &[0x0F, 0xE2], pair(0, 1), NO_IMM),
+    bytes("pavgb", &PP, Long, &[0x0F, 0xE0], pair(0, 1), NO_IMM),
+    bytes("pavgb", &MP, Long, &[0x0F, 0xE0], pair(0, 1), NO_IMM),
+    bytes("pavgw", &PP, Long, &[0x0F, 0xE3], pair(0, 1), NO_IMM),
+    bytes("pavgw", &MP, Long, &[0x0F, 0xE3], pair(0, 1), NO_IMM),
+    bytes("pminub", &PP, Long, &[0x0F, 0xDA], pair(0, 1), NO_IMM),
+    bytes("pminub", &MP, Long, &[0x0F, 0xDA], pair(0, 1), NO_IMM),
+    bytes("pmaxub", &PP, Long, &[0x0F, 0xDE], pair(0, 1), NO_IMM),
+    bytes("pmaxub", &MP, Long, &[0x0F, 0xDE], pair(0, 1), NO_IMM),
+    bytes("pminsw", &PP, Long, &[0x0F, 0xEA], pair(0, 1), NO_IMM),
+    bytes("pminsw", &MP, Long, &[0x0F, 0xEA], pair(0, 1), NO_IMM),
+    bytes("pmaxsw", &PP, Long, &[0x0F, 0xEE], pair(0, 1), NO_IMM),
+    bytes("pmaxsw", &MP, Long, &[0x0F, 0xEE], pair(0, 1), NO_IMM),
+    bytes("psadbw", &PP, Long, &[0x0F, 0xF6], pair(0, 1), NO_IMM),
+    bytes("psadbw", &MP, Long, &[0x0F, 0xF6], pair(0, 1), NO_IMM),
+    bytes("psllw", &IP, Long, &[0x0F, 0x71], ext(1, 6), ImmSize::Ib),
+    bytes("psrlw", &IP, Long, &[0x0F, 0x71], ext(1, 2), ImmSize::Ib),
+    bytes("psraw", &IP, Long, &[0x0F, 0x71], ext(1, 4), ImmSize::Ib),
+    bytes("pslld", &IP, Long, &[0x0F, 0x72], ext(1, 6), ImmSize::Ib),
+    bytes("psrld", &IP, Long, &[0x0F, 0x72], ext(1, 2), ImmSize::Ib),
+    bytes("psrad", &IP, Long, &[0x0F, 0x72], ext(1, 4), ImmSize::Ib),
+    bytes("psllq", &IP, Long, &[0x0F, 0x73], ext(1, 6), ImmSize::Ib),
+    bytes("psrlq", &IP, Long, &[0x0F, 0x73], ext(1, 2), ImmSize::Ib),
     // What a file gcc wrote reads from SSE and this compiler does not write itself. Most of it is
     // a form above with the source in memory, which gcc uses wherever a constant or a spilled value
     // is read once, and the rest is instructions gcc reaches for and this compiler does without.
@@ -2980,6 +3135,8 @@ static ENCODINGS: &[Encoding] = &[
     // The store the other way, which goes around the cache, and is how lib/raid6 writes the
     // parity it worked out.
     bytes("movntdq", &VM, Word, &[0x0F, 0xE7], pair(1, 0), NO_IMM),
+    bytes("movntps", &VM, Long, &[0x0F, 0x2B], pair(1, 0), NO_IMM),
+    bytes("movntpd", &VM, Word, &[0x0F, 0x2B], pair(1, 0), NO_IMM),
     // The non-temporal store from a general purpose register, which the kernel's uncached user
     // copy writes. The width comes from the register, so the letter is found the way it is for
     // any other mnemonic written without one.
@@ -4402,6 +4559,12 @@ static ONLY32: &[Encoding] = &[
     bytes("sidtl", &M, Long, &[0x0F, 0x01], ext(0, 1), NO_IMM),
     bytes("lgdtl", &M, Long, &[0x0F, 0x01], ext(0, 2), NO_IMM),
     bytes("lidtl", &M, Long, &[0x0F, 0x01], ext(0, 3), NO_IMM),
+    // The VMX field moves, which are as wide as the mode, so thirty two bits here. KVM on i386
+    // writes them with `eax` and the like.
+    bytes("vmreadl", &RR, Long, &[0x0F, 0x78], pair(1, 0), NO_IMM),
+    bytes("vmreadl", &RM, Long, &[0x0F, 0x78], pair(1, 0), NO_IMM),
+    bytes("vmwritel", &RR, Long, &[0x0F, 0x79], pair(0, 1), NO_IMM),
+    bytes("vmwritel", &MR, Long, &[0x0F, 0x79], pair(0, 1), NO_IMM),
 ];
 
 /// The mnemonics of the shared table that move eight bytes in sixty four bit mode without a size
@@ -4560,6 +4723,8 @@ pub enum Value {
     Debug(u8),
     /// A segment register.
     Seg(Segment),
+    /// An MMX register, `mm0` to `mm7`, by number.
+    Mmx(u8),
 }
 
 impl Value {
@@ -4570,6 +4735,7 @@ impl Value {
             Value::Control(_) => Kind::Control,
             Value::Debug(_) => Kind::Debug,
             Value::Seg(_) => Kind::Seg,
+            Value::Mmx(_) => Kind::Mmx,
             Value::Reg(_, _) | Value::High(_) => Kind::Reg,
             Value::Xmm(_) | Value::Vector(_, _) => Kind::Vec,
             Value::Mask(_) => Kind::Mask,
@@ -5226,7 +5392,7 @@ impl Writer<'_> {
                 }
                 Ok(number & 7)
             }
-            Some(&Value::Mask(number)) if number < 8 => Ok(number),
+            Some(&(Value::Mask(number) | Value::Mmx(number))) if number < 8 => Ok(number),
             // A control or debug register is numbered to fifteen the way a general purpose one is,
             // with the top bit in the REX byte, which is how `%cr8` is reached at all.
             Some(&(Value::Control(number) | Value::Debug(number))) if number < 16 => {
@@ -7121,6 +7287,7 @@ mod tests {
             Kind::Control => Value::Control(0),
             Kind::Debug => Value::Debug(0),
             Kind::Seg => Value::Seg(Segment::Es),
+            Kind::Mmx => Value::Mmx(3),
         };
         let mut compared = 0;
         for row in ENCODINGS {
