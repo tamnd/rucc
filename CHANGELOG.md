@@ -31,6 +31,7 @@ All notable changes are recorded here. The format follows [Keep a Changelog](htt
 - On wasm32, each lane of a GNU vector is a parameter of its own, and a vector of more than one lane comes back through a hidden pointer, as clang does without `-msimd128`. A structure that holds only one vector goes the same way. Before, a vector was the address of a copy, and a call between rucc code and clang code with a vector argument gave wrong values. A vector past the `...` is not changed (#3453). (#3454)
 - On wasm32, a union that holds one GNU vector and nothing else goes the same way as the vector, as clang does. Before, rucc passed it as the address of a copy (#3461).
 - On wasm32, a GNU vector past the `...` is its own bytes in the variadic area, on a boundary of its alignment, as clang's `va_arg` reads it. Before, the caller put the address of a copy there (#3462).
+- `rucc-targets` names the two wasm vector rules of #3461 and #3462, so the workspace builds again (#3463).
 
 ## 0.29.5
 
