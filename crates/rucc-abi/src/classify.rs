@@ -38,6 +38,8 @@ pub struct Call {
     /// Whether this is a call to a variadic function under [`Variadic::IntegersOnly`], where every
     /// argument is classified as though the vector registers were not there.
     integers_only: bool,
+    /// Whether the argument asked about now is past the `...`, which only [`Test::Vector`] reads.
+    past_dots: bool,
 }
 
 impl AbiDescription {
@@ -49,6 +51,7 @@ impl AbiDescription {
             integer: self.banks.integer,
             float: self.banks.float,
             integers_only: false,
+            past_dots: false,
         }
     }
 }
@@ -140,7 +143,10 @@ impl Call {
     pub fn variadic_argument(&mut self, arg: &Arg<'_>) -> Pass {
         match self.abi.variadic {
             Variadic::SameAsFixed | Variadic::BothBanks | Variadic::IntegersOnly => {
-                self.argument(arg)
+                self.past_dots = true;
+                let pass = self.argument(arg);
+                self.past_dots = false;
+                pass
             }
             Variadic::AlwaysMemory => {
                 let shape = match arg {
@@ -296,6 +302,10 @@ impl Call {
             Test::LoneFloat => lone_float(shape),
             Test::FloatingMode => floating_mode(shape),
             Test::SingleScalar => single_scalar(shape),
+            Test::Vector if self.past_dots || !shape.vector => None,
+            Test::Vector => {
+                Some(shape.pieces.iter().map(|piece| slot(piece.scalar, piece.offset)).collect())
+            }
             Test::ComplexFloat => {
                 (shape.complex && shape.is_all_of(Format::Single) && shape.size == 8).then(Vec::new)
             }
@@ -498,10 +508,15 @@ fn single_scalar(shape: &Shape<'_>) -> Option<Vec<Slot>> {
     if shape.complex || piece.offset != 0 || piece.scalar.size != shape.size {
         return None;
     }
-    Some(vec![match piece.scalar.kind {
-        Kind::Float(format) => Slot::Float { offset: 0, format },
-        Kind::Integer => Slot::Integer { offset: 0, size: u32::try_from(shape.size).ok()? },
-    }])
+    Some(vec![slot(piece.scalar, 0)])
+}
+
+/// The slot that holds one scalar of an aggregate, at its offset.
+fn slot(scalar: Scalar, offset: u64) -> Slot {
+    match scalar.kind {
+        Kind::Float(format) => Slot::Float { offset, format },
+        Kind::Integer => Slot::Integer { offset, size: u32::try_from(scalar.size).unwrap_or(8) },
+    }
 }
 
 /// The class of one eightbyte, section 3.2.3 of the SysV psABI.

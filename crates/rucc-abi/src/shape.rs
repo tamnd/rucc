@@ -124,6 +124,14 @@ pub struct Shape<'a> {
     /// two `float`s. Only i386 `fastcall` reads this, and the caller works it out from the type,
     /// since the pieces have already lost what it depends on.
     pub floating: bool,
+    /// Whether it is a GNU vector, or a structure whose one member is one, through any number of
+    /// structures and arrays of one element.
+    ///
+    /// Only the wasm rule reads this. clang calls such a structure a single element structure and
+    /// passes it as the vector it holds, and a vector of more than one lane as each of its lanes.
+    /// The pieces of a vector are its lanes, but the pieces of a structure of four `int`s are the
+    /// same, and that structure travels as the address of a copy.
+    pub vector: bool,
 }
 
 impl Shape<'_> {

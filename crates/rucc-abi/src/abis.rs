@@ -779,7 +779,9 @@ impl Convention {
 /// asks everywhere else and always gets the answer that there is room.
 ///
 /// An aggregate is the address of a copy the caller made, unless it is one scalar and nothing
-/// else, which travels as that scalar. That is the whole of clang's `WebAssemblyABIInfo` for C.
+/// else, which travels as that scalar. A GNU vector is each of its lanes, because clang passes it
+/// as a vector value and LLVM splits that value into its lanes when `simd128` is off. That is the
+/// whole of clang's `WebAssemblyABIInfo` for C.
 /// The same goes for one past the `...`: the variadic area holds the address of the copy and not
 /// the bytes, which is what clang's `va_arg` on wasm reads back. A return value that is not one
 /// scalar comes back through a hidden first parameter, which is the address the caller wants it
@@ -810,6 +812,7 @@ pub static WASM32_BASIC_C: AbiDescription = AbiDescription {
     arguments: &[
         Rule::new(Test::Empty, Travel::Ignore),
         Rule::new(Test::SingleScalar, Travel::AsFound),
+        Rule::new(Test::Vector, Travel::AsFound),
         Rule::new(Test::Anything, Travel::ByReference),
     ],
     return_pointer: ReturnPointer::FirstArgument,
