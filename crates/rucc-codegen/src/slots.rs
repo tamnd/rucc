@@ -516,8 +516,8 @@ fn areas(func: &Func, reach: &Reach, live: &Live, order: &Order) -> Vec<Option<V
         }
     }
 
-    let written = spread(&behind, &touched, None, words, true);
-    let read = spread(&ahead, &touched, None, words, false);
+    let written = flowed(&behind, &touched, words);
+    let read = flowed(&ahead, &touched, words);
 
     let mut out = vec![None; count];
     for (local, pieces) in out.iter_mut().enumerate() {
@@ -655,7 +655,7 @@ fn ended(
         }
     }
 
-    let arriving = spread(behind, &leaving, Some(&passing), words, true);
+    let arriving = spread(behind, &leaving, &passing, words);
     for (at, row) in arriving.iter().enumerate() {
         let top = whole(at).start;
         for (word, &bits) in row.iter().enumerate() {
@@ -695,22 +695,131 @@ fn joined(pieces: &mut Vec<Range>, piece: Range) {
 
 /// Which locals a touch of can reach the start of each block, following the given edges.
 ///
-/// One walk stands for both directions. Handed the edges into each block it says which locals were
-/// touched somewhere above, and handed the edges out of each block it says which are touched
-/// somewhere below. Blocks are taken in [`settling`]'s order, so a block with no loop around it is
-/// looked at after everything it reads from is final and only once, and a block is only looked at
-/// again when a block it reads from changed.
+/// Handed the edges into each block it says which locals were touched somewhere above, and handed
+/// the edges out of each block it says which are touched somewhere below. Nothing stops a local on
+/// the way, so the answer for a block is what any block with a path of one edge or more to it
+/// touches, and every block of one loop gets the same answer: what the loop touches and what comes
+/// into it. So the blocks are taken a strongly connected piece at a time, in an order where every
+/// piece comes after the pieces it reads from, and each piece is worked out once from answers that
+/// are already final.
+///
+/// It used to be the walk in [`spread`], which looks at a block again whenever a block it reads
+/// from changed. Around a loop that is once for every time the answer grew anywhere in it. On
+/// quickjs's JS_CallInternal, 2632 blocks with a loop around its dispatch and 1500 locals, the walk
+/// took each block 800 times on average and these two questions were half the time of an optimized
+/// build of quickjs.c. tamnd/rucc#3052.
+///
+/// A piece of one block is a loop only when the block is its own neighbour, and then what it
+/// touches comes back round to it. tamnd/rucc#1207.
+fn flowed(edges: &[Vec<usize>], touched: &[Vec<u64>], words: usize) -> Vec<Vec<u64>> {
+    let (which, pieces) = components(edges);
+    let mut out = vec![vec![0u64; words]; edges.len()];
+    let mut row = vec![0u64; words];
+    for (piece, blocks) in pieces.iter().enumerate() {
+        row.fill(0);
+        let mut looped = false;
+        for &at in blocks {
+            for &from in &edges[at] {
+                if which[from] == piece {
+                    looped = true;
+                    continue;
+                }
+                for word in 0..words {
+                    row[word] |= out[from][word] | touched[from][word];
+                }
+            }
+        }
+        if looped {
+            for &at in blocks {
+                for word in 0..words {
+                    row[word] |= touched[at][word];
+                }
+            }
+        }
+        for &at in blocks {
+            out[at].copy_from_slice(&row);
+        }
+    }
+    out
+}
+
+/// The strongly connected pieces of a graph and which piece each block is in, the pieces in an
+/// order where every piece comes after every piece it has an edge to.
+///
+/// This is Tarjan's walk, which finishes a piece only after everything it can get to, kept on a
+/// stack of its own so that a long chain does not run out of the real one.
+fn components(edges: &[Vec<usize>]) -> (Vec<usize>, Vec<Vec<usize>>) {
+    const UNSEEN: usize = usize::MAX;
+    let count = edges.len();
+    let mut index = vec![UNSEEN; count];
+    let mut low = vec![0; count];
+    let mut open = vec![false; count];
+    let mut which = vec![UNSEEN; count];
+    let mut pieces: Vec<Vec<usize>> = Vec::new();
+    let mut held: Vec<usize> = Vec::new();
+    let mut walk: Vec<(usize, usize)> = Vec::new();
+    let mut next = 0;
+    for root in 0..count {
+        if index[root] != UNSEEN {
+            continue;
+        }
+        index[root] = next;
+        low[root] = next;
+        next += 1;
+        held.push(root);
+        open[root] = true;
+        walk.push((root, 0));
+        while let Some((at, edge)) = walk.last_mut() {
+            let at = *at;
+            if let Some(&to) = edges[at].get(*edge) {
+                *edge += 1;
+                if index[to] == UNSEEN {
+                    index[to] = next;
+                    low[to] = next;
+                    next += 1;
+                    held.push(to);
+                    open[to] = true;
+                    walk.push((to, 0));
+                } else if open[to] {
+                    low[at] = low[at].min(index[to]);
+                }
+                continue;
+            }
+            walk.pop();
+            if let Some(&(parent, _)) = walk.last() {
+                low[parent] = low[parent].min(low[at]);
+            }
+            if low[at] == index[at] {
+                let mut piece = Vec::new();
+                while let Some(top) = held.pop() {
+                    open[top] = false;
+                    which[top] = pieces.len();
+                    piece.push(top);
+                    if top == at {
+                        break;
+                    }
+                }
+                pieces.push(piece);
+            }
+        }
+    }
+    (which, pieces)
+}
+
+/// Which locals a touch of can reach the start of each block, following the given edges, where a
+/// local can be stopped on the way.
+///
+/// `passing` is which locals get through each block from top to bottom. A local reaching the start
+/// of a block it does not get through only goes on from there if the block touches it as well,
+/// which is what the end of a lifetime needs. See [`ended`]. Blocks are taken in [`settling`]'s
+/// order, so a block with no loop around it is looked at after everything it reads from is final
+/// and only once, and a block is only looked at again when a block it reads from changed.
 ///
 /// It used to be rounds over every block in the line's order until one changed nothing, which
 /// settles a straight stretch in one round only when the line runs the way the edges do. It does
 /// not have to: jtckdint's main has a chain a thousand blocks long laid out against its edges, and
 /// the rounds over its 16000 blocks took a thousand passes and five seconds to move the answer down
 /// it one block at a time.
-///
-/// `passing`, where there is one, is which locals get through each block from top to bottom. A
-/// local reaching the start of a block it does not get through only goes on from there if the
-/// block touches it as well, which is what the end of a lifetime needs and nothing else does. See
-/// [`ended`].
 ///
 /// A block is allowed to be its own neighbour, which is what a loop of one block is, and the row it
 /// is working on is a copy for that reason. Reading a block's own answer back is a no change either
@@ -719,9 +828,8 @@ fn joined(pieces: &mut Vec<Range>, piece: Range) {
 fn spread(
     edges: &[Vec<usize>],
     touched: &[Vec<u64>],
-    passing: Option<&[Vec<u64>]>,
+    passing: &[Vec<u64>],
     words: usize,
-    forward: bool,
 ) -> Vec<Vec<u64>> {
     let count = edges.len();
     let mut readers: Vec<Vec<usize>> = vec![Vec::new(); count];
@@ -730,7 +838,7 @@ fn spread(
             readers[from].push(at);
         }
     }
-    let order = settling(&readers, forward);
+    let order = settling(&readers);
     let mut rank = vec![0; count];
     for (place, &at) in order.iter().enumerate() {
         rank[at] = place;
@@ -747,8 +855,7 @@ fn spread(
         for &from in &edges[at] {
             for word in 0..words {
                 let had = row[word];
-                let passes = passing.map_or(!0, |passing| passing[from][word]);
-                row[word] |= (out[from][word] & passes) | touched[from][word];
+                row[word] |= (out[from][word] & passing[from][word]) | touched[from][word];
                 grew |= row[word] != had;
             }
         }
@@ -770,13 +877,12 @@ fn spread(
 /// That is reverse postorder of a walk along the way the answer flows, from every block in turn so
 /// that one nothing reaches is still in it. Any walk's reverse postorder puts a block after all its
 /// predecessors once the back edges are left out, whichever block it starts from.
-fn settling(readers: &[Vec<usize>], forward: bool) -> Vec<usize> {
+fn settling(readers: &[Vec<usize>]) -> Vec<usize> {
     let count = readers.len();
     let mut seen = vec![false; count];
     let mut post = Vec::with_capacity(count);
     let mut stack: Vec<(usize, usize)> = Vec::new();
-    let roots: Vec<usize> = if forward { (0..count).collect() } else { (0..count).rev().collect() };
-    for root in roots {
+    for root in 0..count {
         if seen[root] {
             continue;
         }
@@ -1653,5 +1759,45 @@ mod tests {
         assert_eq!(ending_before(&cell, 10), 1);
         assert_eq!(ending_before(&cell, 700), 35);
         assert_eq!(ending_before(&cell, 5000), 40);
+    }
+
+    #[test]
+    fn a_piece_at_a_time_finds_what_rounds_until_nothing_changes_find() {
+        // Graphs from a fixed run of numbers, with chains against the line, loops inside loops, a
+        // block that is its own neighbour and blocks nothing reaches.
+        let mut seed = 12345u64;
+        let mut next = |below: u64| {
+            seed = seed.wrapping_mul(6364136223846793005).wrapping_add(1442695040888963407);
+            usize::try_from((seed >> 33) % below).expect("small")
+        };
+        for size in [1usize, 2, 5, 17, 40, 90] {
+            let words = 2;
+            let mut edges: Vec<Vec<usize>> = vec![Vec::new(); size];
+            let mut touched = vec![vec![0u64; words]; size];
+            for at in 0..size {
+                for _ in 0..next(4) {
+                    edges[at].push(next(u64::try_from(size).expect("small")));
+                }
+                for _ in 0..next(3) {
+                    let local = next(128);
+                    touched[at][local / 64] |= 1 << (local % 64);
+                }
+            }
+            let mut rounds = vec![vec![0u64; words]; size];
+            let mut changed = true;
+            while changed {
+                changed = false;
+                for at in 0..size {
+                    for &from in &edges[at] {
+                        for word in 0..words {
+                            let grown = rounds[at][word] | rounds[from][word] | touched[from][word];
+                            changed |= grown != rounds[at][word];
+                            rounds[at][word] = grown;
+                        }
+                    }
+                }
+            }
+            assert_eq!(flowed(&edges, &touched, words), rounds, "{size} blocks, {edges:?}");
+        }
     }
 }
