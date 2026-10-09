@@ -181,7 +181,7 @@
 //! does not stop anything.
 
 #![no_std]
-#![doc(html_root_url = "https://docs.rs/rucc-safe-rt/0.29.6")]
+#![doc(html_root_url = "https://docs.rs/rucc-safe-rt/0.30.0")]
 
 // The tests format and compare, which `core` cannot do. The crate itself never sees this.
 #[cfg(test)]
