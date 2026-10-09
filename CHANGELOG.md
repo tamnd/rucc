@@ -27,6 +27,7 @@ All notable changes are recorded here. The format follows [Keep a Changelog](htt
 
 ### Fixed
 
+- The release check of thresholds passes again. The `-fsanitize-coverage=trace-cmp` pass selected the word type of an operand with a comparison against a bare literal, and the check refused it (#3497).
 - With `-msimd128`, a float vector local that is read before it is written, or after a `memset`, no longer stops rucc with "an integer immediate needs an integer type". sroa makes its byte pattern as a splat of integer lanes and a bitcast. `wasm_f32x4_relaxed_nmadd` at -O2 gave the crash (#3480).
 - A call to a maths function such as `fabs` only carries the `library` mark when it has the library function's type, so `int fabs(int)` is the program's own function again, as gcc reads it. The usage text is back under one screen, with `-ftls-model=` sharing the line of `-fvisibility=` (#3471).
 - `-fsafety=detect` refuses a read of a local that lives in a register when nothing wrote it on the path taken, as in `int data; if (argc > 5) data = 3; return data;`. Such a local has no bytes for the init plane, so the front end keeps a flag next to it in its SSA form, and the read asks the flag. Where every path agrees the flag is a constant and the check is removed, so only reads that depend on the path cost a call. Juliet's CWE-457 cases at -O2 go from 408 to 498 of 540 detected at every tier with no false positives (#3460).

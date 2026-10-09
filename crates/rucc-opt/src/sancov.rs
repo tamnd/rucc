@@ -203,7 +203,7 @@ fn comparisons(func: &mut Func, wants: &mut Wants<'_>) -> usize {
                 };
                 // Under a word, each side travels as a word, zero extended the way a caller hands
                 // over an `unsigned char` or an `unsigned short`.
-                let word = Type::int(if bytes == 8 { 64 } else { 32 });
+                let word = Type::int((bytes * 8).max(32));
                 let Some((callee, signature)) = wants.callee(&name, &[word, word], &[ty, ty])
                 else {
                     continue;
