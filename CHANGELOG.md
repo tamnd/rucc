@@ -29,6 +29,7 @@ All notable changes are recorded here. The format follows [Keep a Changelog](htt
 - A copy of a register into a scratch register, which the cleanup writes where a reload finds its word already in a register, is now gone. The instructions after it read the original register instead. That takes out more than half of the `movl %edi, %esi` copies in i386 output, saving 120 instructions in the 7.2.8 X32 md.c and 55 in zstd's huf_decompress.c (#3516).
 - A `long long` add or subtract on i386 where one low half is zero no longer works out a carry, and a high half that is zero no longer adds a zero. The kernel's `readq` there is `low + ((u64)high << 32)`, and it is now the two loads, where it was a `cmp`, a `setb`, a `movzbl` and two adds. `a - ((u64)b << 32)` is one `subl` (#3521).
 - An inline assembly operand in memory that is a constant past a pointer is read at that displacement from the pointer, as gcc writes it, rather than through a register the sum was put in first. The kernel's atomics and bit operations are `"+m" (v->counter)` and `"+m" (*(addr + nr / 8))`, and each one was an `add` of the offset in front of the `lock` (#3522).
+- The inliner copies only the blocks of a callee that the constants a call passes leave reachable, with each branch and switch they decide made a jump, which takes more than half off the compile of zstd_compress.c and zstd_lazy.c at `-O2` (#3525).
 
 ### Added
 
