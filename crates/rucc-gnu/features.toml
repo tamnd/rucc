@@ -1801,6 +1801,787 @@ signature = "size_t(void)"
 used_by = ["wasi-sdk"]
 tests = ["rucc::the_scalar_wasm_builtins_are_one_instruction_each", "rucc::the_wasm_builtins_are_unknown_on_the_other_rows"]
 notes = "The alignment of the thread-local block, which is `global.get __tls_align` of an immutable global that `wasm-ld` defines, as in clang 23. Written in place as `__builtin_wasm_memory_size` is."
+
+[[feature]]
+name = "__builtin_wasm_abs_f32x4"
+kind = "builtin"
+gcc_version = "none"
+status = "implemented"
+targets = ["wasm"]
+signature = "float x4(float x4)"
+used_by = ["wasi-sdk"]
+tests = ["rucc::the_vector_wasm_builtins_are_one_simd_instruction_each", "rucc::a_vector_wasm_builtin_needs_its_feature"]
+notes = "`f32x4.abs`, as in clang 23, with the type that clang gives it. Without `-msimd128` the call is an error in the words of clang, `needs target feature simd128`. Written in place as `__builtin_wasm_memory_size` is."
+
+[[feature]]
+name = "__builtin_wasm_abs_f64x2"
+kind = "builtin"
+gcc_version = "none"
+status = "implemented"
+targets = ["wasm"]
+signature = "double x2(double x2)"
+used_by = ["wasi-sdk"]
+tests = ["rucc::the_vector_wasm_builtins_are_one_simd_instruction_each", "rucc::a_vector_wasm_builtin_needs_its_feature"]
+notes = "`f64x2.abs`, as in clang 23, with the type that clang gives it. Without `-msimd128` the call is an error in the words of clang, `needs target feature simd128`. Written in place as `__builtin_wasm_memory_size` is."
+
+[[feature]]
+name = "__builtin_wasm_abs_i16x8"
+kind = "builtin"
+gcc_version = "none"
+status = "implemented"
+targets = ["wasm"]
+signature = "short x8(short x8)"
+used_by = ["wasi-sdk"]
+tests = ["rucc::the_vector_wasm_builtins_are_one_simd_instruction_each", "rucc::a_vector_wasm_builtin_needs_its_feature"]
+notes = "`i16x8.abs`, as in clang 23, with the type that clang gives it. Without `-msimd128` the call is an error in the words of clang, `needs target feature simd128`. Written in place as `__builtin_wasm_memory_size` is."
+
+[[feature]]
+name = "__builtin_wasm_abs_i32x4"
+kind = "builtin"
+gcc_version = "none"
+status = "implemented"
+targets = ["wasm"]
+signature = "int x4(int x4)"
+used_by = ["wasi-sdk"]
+tests = ["rucc::the_vector_wasm_builtins_are_one_simd_instruction_each", "rucc::a_vector_wasm_builtin_needs_its_feature"]
+notes = "`i32x4.abs`, as in clang 23, with the type that clang gives it. Without `-msimd128` the call is an error in the words of clang, `needs target feature simd128`. Written in place as `__builtin_wasm_memory_size` is."
+
+[[feature]]
+name = "__builtin_wasm_abs_i64x2"
+kind = "builtin"
+gcc_version = "none"
+status = "implemented"
+targets = ["wasm"]
+signature = "long long x2(long long x2)"
+used_by = ["wasi-sdk"]
+tests = ["rucc::the_vector_wasm_builtins_are_one_simd_instruction_each", "rucc::a_vector_wasm_builtin_needs_its_feature"]
+notes = "`i64x2.abs`, as in clang 23, with the type that clang gives it. Without `-msimd128` the call is an error in the words of clang, `needs target feature simd128`. Written in place as `__builtin_wasm_memory_size` is."
+
+[[feature]]
+name = "__builtin_wasm_abs_i8x16"
+kind = "builtin"
+gcc_version = "none"
+status = "implemented"
+targets = ["wasm"]
+signature = "signed char x16(signed char x16)"
+used_by = ["wasi-sdk"]
+tests = ["rucc::the_vector_wasm_builtins_are_one_simd_instruction_each", "rucc::a_vector_wasm_builtin_needs_its_feature"]
+notes = "`i8x16.abs`, as in clang 23, with the type that clang gives it. Without `-msimd128` the call is an error in the words of clang, `needs target feature simd128`. Written in place as `__builtin_wasm_memory_size` is."
+
+[[feature]]
+name = "__builtin_wasm_all_true_i16x8"
+kind = "builtin"
+gcc_version = "none"
+status = "implemented"
+targets = ["wasm"]
+signature = "int(short x8)"
+used_by = ["wasi-sdk"]
+tests = ["rucc::the_vector_wasm_builtins_are_one_simd_instruction_each", "rucc::a_vector_wasm_builtin_needs_its_feature"]
+notes = "`i16x8.all_true`, as in clang 23, with the type that clang gives it. Without `-msimd128` the call is an error in the words of clang, `needs target feature simd128`. Written in place as `__builtin_wasm_memory_size` is."
+
+[[feature]]
+name = "__builtin_wasm_all_true_i32x4"
+kind = "builtin"
+gcc_version = "none"
+status = "implemented"
+targets = ["wasm"]
+signature = "int(int x4)"
+used_by = ["wasi-sdk"]
+tests = ["rucc::the_vector_wasm_builtins_are_one_simd_instruction_each", "rucc::a_vector_wasm_builtin_needs_its_feature"]
+notes = "`i32x4.all_true`, as in clang 23, with the type that clang gives it. Without `-msimd128` the call is an error in the words of clang, `needs target feature simd128`. Written in place as `__builtin_wasm_memory_size` is."
+
+[[feature]]
+name = "__builtin_wasm_all_true_i64x2"
+kind = "builtin"
+gcc_version = "none"
+status = "implemented"
+targets = ["wasm"]
+signature = "int(long long x2)"
+used_by = ["wasi-sdk"]
+tests = ["rucc::the_vector_wasm_builtins_are_one_simd_instruction_each", "rucc::a_vector_wasm_builtin_needs_its_feature"]
+notes = "`i64x2.all_true`, as in clang 23, with the type that clang gives it. Without `-msimd128` the call is an error in the words of clang, `needs target feature simd128`. Written in place as `__builtin_wasm_memory_size` is."
+
+[[feature]]
+name = "__builtin_wasm_all_true_i8x16"
+kind = "builtin"
+gcc_version = "none"
+status = "implemented"
+targets = ["wasm"]
+signature = "int(signed char x16)"
+used_by = ["wasi-sdk"]
+tests = ["rucc::the_vector_wasm_builtins_are_one_simd_instruction_each", "rucc::a_vector_wasm_builtin_needs_its_feature"]
+notes = "`i8x16.all_true`, as in clang 23, with the type that clang gives it. Without `-msimd128` the call is an error in the words of clang, `needs target feature simd128`. Written in place as `__builtin_wasm_memory_size` is."
+
+[[feature]]
+name = "__builtin_wasm_any_true_v128"
+kind = "builtin"
+gcc_version = "none"
+status = "implemented"
+targets = ["wasm"]
+signature = "int(signed char x16)"
+used_by = ["wasi-sdk"]
+tests = ["rucc::the_vector_wasm_builtins_are_one_simd_instruction_each", "rucc::a_vector_wasm_builtin_needs_its_feature"]
+notes = "`v128.any_true`, as in clang 23, with the type that clang gives it. Without `-msimd128` the call is an error in the words of clang, `needs target feature simd128`. Written in place as `__builtin_wasm_memory_size` is."
+
+[[feature]]
+name = "__builtin_wasm_avgr_u_i16x8"
+kind = "builtin"
+gcc_version = "none"
+status = "implemented"
+targets = ["wasm"]
+signature = "unsigned short x8(unsigned short x8, unsigned short x8)"
+used_by = ["wasi-sdk"]
+tests = ["rucc::the_vector_wasm_builtins_are_one_simd_instruction_each", "rucc::a_vector_wasm_builtin_needs_its_feature"]
+notes = "`i16x8.avgr_u`, as in clang 23, with the type that clang gives it. Without `-msimd128` the call is an error in the words of clang, `needs target feature simd128`. Written in place as `__builtin_wasm_memory_size` is."
+
+[[feature]]
+name = "__builtin_wasm_avgr_u_i8x16"
+kind = "builtin"
+gcc_version = "none"
+status = "implemented"
+targets = ["wasm"]
+signature = "unsigned char x16(unsigned char x16, unsigned char x16)"
+used_by = ["wasi-sdk"]
+tests = ["rucc::the_vector_wasm_builtins_are_one_simd_instruction_each", "rucc::a_vector_wasm_builtin_needs_its_feature"]
+notes = "`i8x16.avgr_u`, as in clang 23, with the type that clang gives it. Without `-msimd128` the call is an error in the words of clang, `needs target feature simd128`. Written in place as `__builtin_wasm_memory_size` is."
+
+[[feature]]
+name = "__builtin_wasm_bitmask_i16x8"
+kind = "builtin"
+gcc_version = "none"
+status = "implemented"
+targets = ["wasm"]
+signature = "unsigned int(short x8)"
+used_by = ["wasi-sdk"]
+tests = ["rucc::the_vector_wasm_builtins_are_one_simd_instruction_each", "rucc::a_vector_wasm_builtin_needs_its_feature"]
+notes = "`i16x8.bitmask`, as in clang 23, with the type that clang gives it. Without `-msimd128` the call is an error in the words of clang, `needs target feature simd128`. Written in place as `__builtin_wasm_memory_size` is."
+
+[[feature]]
+name = "__builtin_wasm_bitmask_i32x4"
+kind = "builtin"
+gcc_version = "none"
+status = "implemented"
+targets = ["wasm"]
+signature = "unsigned int(int x4)"
+used_by = ["wasi-sdk"]
+tests = ["rucc::the_vector_wasm_builtins_are_one_simd_instruction_each", "rucc::a_vector_wasm_builtin_needs_its_feature"]
+notes = "`i32x4.bitmask`, as in clang 23, with the type that clang gives it. Without `-msimd128` the call is an error in the words of clang, `needs target feature simd128`. Written in place as `__builtin_wasm_memory_size` is."
+
+[[feature]]
+name = "__builtin_wasm_bitmask_i64x2"
+kind = "builtin"
+gcc_version = "none"
+status = "implemented"
+targets = ["wasm"]
+signature = "unsigned int(long long x2)"
+used_by = ["wasi-sdk"]
+tests = ["rucc::the_vector_wasm_builtins_are_one_simd_instruction_each", "rucc::a_vector_wasm_builtin_needs_its_feature"]
+notes = "`i64x2.bitmask`, as in clang 23, with the type that clang gives it. Without `-msimd128` the call is an error in the words of clang, `needs target feature simd128`. Written in place as `__builtin_wasm_memory_size` is."
+
+[[feature]]
+name = "__builtin_wasm_bitmask_i8x16"
+kind = "builtin"
+gcc_version = "none"
+status = "implemented"
+targets = ["wasm"]
+signature = "unsigned int(signed char x16)"
+used_by = ["wasi-sdk"]
+tests = ["rucc::the_vector_wasm_builtins_are_one_simd_instruction_each", "rucc::a_vector_wasm_builtin_needs_its_feature"]
+notes = "`i8x16.bitmask`, as in clang 23, with the type that clang gives it. Without `-msimd128` the call is an error in the words of clang, `needs target feature simd128`. Written in place as `__builtin_wasm_memory_size` is."
+
+[[feature]]
+name = "__builtin_wasm_bitselect"
+kind = "builtin"
+gcc_version = "none"
+status = "implemented"
+targets = ["wasm"]
+signature = "int x4(int x4, int x4, int x4)"
+used_by = ["wasi-sdk"]
+tests = ["rucc::the_vector_wasm_builtins_are_one_simd_instruction_each", "rucc::a_vector_wasm_builtin_needs_its_feature"]
+notes = "`v128.bitselect`, as in clang 23, with the type that clang gives it. Without `-msimd128` the call is an error in the words of clang, `needs target feature simd128`. Written in place as `__builtin_wasm_memory_size` is."
+
+[[feature]]
+name = "__builtin_wasm_ceil_f32x4"
+kind = "builtin"
+gcc_version = "none"
+status = "implemented"
+targets = ["wasm"]
+signature = "float x4(float x4)"
+used_by = ["wasi-sdk"]
+tests = ["rucc::the_vector_wasm_builtins_are_one_simd_instruction_each", "rucc::a_vector_wasm_builtin_needs_its_feature"]
+notes = "`f32x4.ceil`, as in clang 23, with the type that clang gives it. Without `-msimd128` the call is an error in the words of clang, `needs target feature simd128`. Written in place as `__builtin_wasm_memory_size` is."
+
+[[feature]]
+name = "__builtin_wasm_ceil_f64x2"
+kind = "builtin"
+gcc_version = "none"
+status = "implemented"
+targets = ["wasm"]
+signature = "double x2(double x2)"
+used_by = ["wasi-sdk"]
+tests = ["rucc::the_vector_wasm_builtins_are_one_simd_instruction_each", "rucc::a_vector_wasm_builtin_needs_its_feature"]
+notes = "`f64x2.ceil`, as in clang 23, with the type that clang gives it. Without `-msimd128` the call is an error in the words of clang, `needs target feature simd128`. Written in place as `__builtin_wasm_memory_size` is."
+
+[[feature]]
+name = "__builtin_wasm_dot_s_i32x4_i16x8"
+kind = "builtin"
+gcc_version = "none"
+status = "implemented"
+targets = ["wasm"]
+signature = "int x4(short x8, short x8)"
+used_by = ["wasi-sdk"]
+tests = ["rucc::the_vector_wasm_builtins_are_one_simd_instruction_each", "rucc::a_vector_wasm_builtin_needs_its_feature"]
+notes = "`i32x4.dot_i16x8_s`, as in clang 23, with the type that clang gives it. Without `-msimd128` the call is an error in the words of clang, `needs target feature simd128`. Written in place as `__builtin_wasm_memory_size` is."
+
+[[feature]]
+name = "__builtin_wasm_extadd_pairwise_i16x8_s_i32x4"
+kind = "builtin"
+gcc_version = "none"
+status = "implemented"
+targets = ["wasm"]
+signature = "int x4(short x8)"
+used_by = ["wasi-sdk"]
+tests = ["rucc::the_vector_wasm_builtins_are_one_simd_instruction_each", "rucc::a_vector_wasm_builtin_needs_its_feature"]
+notes = "`i32x4.extadd_pairwise_i16x8_s`, as in clang 23, with the type that clang gives it. Without `-msimd128` the call is an error in the words of clang, `needs target feature simd128`. Written in place as `__builtin_wasm_memory_size` is."
+
+[[feature]]
+name = "__builtin_wasm_extadd_pairwise_i16x8_u_i32x4"
+kind = "builtin"
+gcc_version = "none"
+status = "implemented"
+targets = ["wasm"]
+signature = "unsigned int x4(unsigned short x8)"
+used_by = ["wasi-sdk"]
+tests = ["rucc::the_vector_wasm_builtins_are_one_simd_instruction_each", "rucc::a_vector_wasm_builtin_needs_its_feature"]
+notes = "`i32x4.extadd_pairwise_i16x8_u`, as in clang 23, with the type that clang gives it. Without `-msimd128` the call is an error in the words of clang, `needs target feature simd128`. Written in place as `__builtin_wasm_memory_size` is."
+
+[[feature]]
+name = "__builtin_wasm_extadd_pairwise_i8x16_s_i16x8"
+kind = "builtin"
+gcc_version = "none"
+status = "implemented"
+targets = ["wasm"]
+signature = "short x8(signed char x16)"
+used_by = ["wasi-sdk"]
+tests = ["rucc::the_vector_wasm_builtins_are_one_simd_instruction_each", "rucc::a_vector_wasm_builtin_needs_its_feature"]
+notes = "`i16x8.extadd_pairwise_i8x16_s`, as in clang 23, with the type that clang gives it. Without `-msimd128` the call is an error in the words of clang, `needs target feature simd128`. Written in place as `__builtin_wasm_memory_size` is."
+
+[[feature]]
+name = "__builtin_wasm_extadd_pairwise_i8x16_u_i16x8"
+kind = "builtin"
+gcc_version = "none"
+status = "implemented"
+targets = ["wasm"]
+signature = "unsigned short x8(unsigned char x16)"
+used_by = ["wasi-sdk"]
+tests = ["rucc::the_vector_wasm_builtins_are_one_simd_instruction_each", "rucc::a_vector_wasm_builtin_needs_its_feature"]
+notes = "`i16x8.extadd_pairwise_i8x16_u`, as in clang 23, with the type that clang gives it. Without `-msimd128` the call is an error in the words of clang, `needs target feature simd128`. Written in place as `__builtin_wasm_memory_size` is."
+
+[[feature]]
+name = "__builtin_wasm_floor_f32x4"
+kind = "builtin"
+gcc_version = "none"
+status = "implemented"
+targets = ["wasm"]
+signature = "float x4(float x4)"
+used_by = ["wasi-sdk"]
+tests = ["rucc::the_vector_wasm_builtins_are_one_simd_instruction_each", "rucc::a_vector_wasm_builtin_needs_its_feature"]
+notes = "`f32x4.floor`, as in clang 23, with the type that clang gives it. Without `-msimd128` the call is an error in the words of clang, `needs target feature simd128`. Written in place as `__builtin_wasm_memory_size` is."
+
+[[feature]]
+name = "__builtin_wasm_floor_f64x2"
+kind = "builtin"
+gcc_version = "none"
+status = "implemented"
+targets = ["wasm"]
+signature = "double x2(double x2)"
+used_by = ["wasi-sdk"]
+tests = ["rucc::the_vector_wasm_builtins_are_one_simd_instruction_each", "rucc::a_vector_wasm_builtin_needs_its_feature"]
+notes = "`f64x2.floor`, as in clang 23, with the type that clang gives it. Without `-msimd128` the call is an error in the words of clang, `needs target feature simd128`. Written in place as `__builtin_wasm_memory_size` is."
+
+[[feature]]
+name = "__builtin_wasm_max_f32x4"
+kind = "builtin"
+gcc_version = "none"
+status = "implemented"
+targets = ["wasm"]
+signature = "float x4(float x4, float x4)"
+used_by = ["wasi-sdk"]
+tests = ["rucc::the_vector_wasm_builtins_are_one_simd_instruction_each", "rucc::a_vector_wasm_builtin_needs_its_feature"]
+notes = "`f32x4.max`, as in clang 23, with the type that clang gives it. Without `-msimd128` the call is an error in the words of clang, `needs target feature simd128`. Written in place as `__builtin_wasm_memory_size` is."
+
+[[feature]]
+name = "__builtin_wasm_max_f64x2"
+kind = "builtin"
+gcc_version = "none"
+status = "implemented"
+targets = ["wasm"]
+signature = "double x2(double x2, double x2)"
+used_by = ["wasi-sdk"]
+tests = ["rucc::the_vector_wasm_builtins_are_one_simd_instruction_each", "rucc::a_vector_wasm_builtin_needs_its_feature"]
+notes = "`f64x2.max`, as in clang 23, with the type that clang gives it. Without `-msimd128` the call is an error in the words of clang, `needs target feature simd128`. Written in place as `__builtin_wasm_memory_size` is."
+
+[[feature]]
+name = "__builtin_wasm_min_f32x4"
+kind = "builtin"
+gcc_version = "none"
+status = "implemented"
+targets = ["wasm"]
+signature = "float x4(float x4, float x4)"
+used_by = ["wasi-sdk"]
+tests = ["rucc::the_vector_wasm_builtins_are_one_simd_instruction_each", "rucc::a_vector_wasm_builtin_needs_its_feature"]
+notes = "`f32x4.min`, as in clang 23, with the type that clang gives it. Without `-msimd128` the call is an error in the words of clang, `needs target feature simd128`. Written in place as `__builtin_wasm_memory_size` is."
+
+[[feature]]
+name = "__builtin_wasm_min_f64x2"
+kind = "builtin"
+gcc_version = "none"
+status = "implemented"
+targets = ["wasm"]
+signature = "double x2(double x2, double x2)"
+used_by = ["wasi-sdk"]
+tests = ["rucc::the_vector_wasm_builtins_are_one_simd_instruction_each", "rucc::a_vector_wasm_builtin_needs_its_feature"]
+notes = "`f64x2.min`, as in clang 23, with the type that clang gives it. Without `-msimd128` the call is an error in the words of clang, `needs target feature simd128`. Written in place as `__builtin_wasm_memory_size` is."
+
+[[feature]]
+name = "__builtin_wasm_narrow_s_i16x8_i32x4"
+kind = "builtin"
+gcc_version = "none"
+status = "implemented"
+targets = ["wasm"]
+signature = "short x8(int x4, int x4)"
+used_by = ["wasi-sdk"]
+tests = ["rucc::the_vector_wasm_builtins_are_one_simd_instruction_each", "rucc::a_vector_wasm_builtin_needs_its_feature"]
+notes = "`i16x8.narrow_i32x4_s`, as in clang 23, with the type that clang gives it. Without `-msimd128` the call is an error in the words of clang, `needs target feature simd128`. Written in place as `__builtin_wasm_memory_size` is."
+
+[[feature]]
+name = "__builtin_wasm_narrow_s_i8x16_i16x8"
+kind = "builtin"
+gcc_version = "none"
+status = "implemented"
+targets = ["wasm"]
+signature = "signed char x16(short x8, short x8)"
+used_by = ["wasi-sdk"]
+tests = ["rucc::the_vector_wasm_builtins_are_one_simd_instruction_each", "rucc::a_vector_wasm_builtin_needs_its_feature"]
+notes = "`i8x16.narrow_i16x8_s`, as in clang 23, with the type that clang gives it. Without `-msimd128` the call is an error in the words of clang, `needs target feature simd128`. Written in place as `__builtin_wasm_memory_size` is."
+
+[[feature]]
+name = "__builtin_wasm_narrow_u_i16x8_i32x4"
+kind = "builtin"
+gcc_version = "none"
+status = "implemented"
+targets = ["wasm"]
+signature = "unsigned short x8(int x4, int x4)"
+used_by = ["wasi-sdk"]
+tests = ["rucc::the_vector_wasm_builtins_are_one_simd_instruction_each", "rucc::a_vector_wasm_builtin_needs_its_feature"]
+notes = "`i16x8.narrow_i32x4_u`, as in clang 23, with the type that clang gives it. Without `-msimd128` the call is an error in the words of clang, `needs target feature simd128`. Written in place as `__builtin_wasm_memory_size` is."
+
+[[feature]]
+name = "__builtin_wasm_narrow_u_i8x16_i16x8"
+kind = "builtin"
+gcc_version = "none"
+status = "implemented"
+targets = ["wasm"]
+signature = "unsigned char x16(short x8, short x8)"
+used_by = ["wasi-sdk"]
+tests = ["rucc::the_vector_wasm_builtins_are_one_simd_instruction_each", "rucc::a_vector_wasm_builtin_needs_its_feature"]
+notes = "`i8x16.narrow_i16x8_u`, as in clang 23, with the type that clang gives it. Without `-msimd128` the call is an error in the words of clang, `needs target feature simd128`. Written in place as `__builtin_wasm_memory_size` is."
+
+[[feature]]
+name = "__builtin_wasm_nearest_f32x4"
+kind = "builtin"
+gcc_version = "none"
+status = "implemented"
+targets = ["wasm"]
+signature = "float x4(float x4)"
+used_by = ["wasi-sdk"]
+tests = ["rucc::the_vector_wasm_builtins_are_one_simd_instruction_each", "rucc::a_vector_wasm_builtin_needs_its_feature"]
+notes = "`f32x4.nearest`, as in clang 23, with the type that clang gives it. Without `-msimd128` the call is an error in the words of clang, `needs target feature simd128`. Written in place as `__builtin_wasm_memory_size` is."
+
+[[feature]]
+name = "__builtin_wasm_nearest_f64x2"
+kind = "builtin"
+gcc_version = "none"
+status = "implemented"
+targets = ["wasm"]
+signature = "double x2(double x2)"
+used_by = ["wasi-sdk"]
+tests = ["rucc::the_vector_wasm_builtins_are_one_simd_instruction_each", "rucc::a_vector_wasm_builtin_needs_its_feature"]
+notes = "`f64x2.nearest`, as in clang 23, with the type that clang gives it. Without `-msimd128` the call is an error in the words of clang, `needs target feature simd128`. Written in place as `__builtin_wasm_memory_size` is."
+
+[[feature]]
+name = "__builtin_wasm_pmax_f32x4"
+kind = "builtin"
+gcc_version = "none"
+status = "implemented"
+targets = ["wasm"]
+signature = "float x4(float x4, float x4)"
+used_by = ["wasi-sdk"]
+tests = ["rucc::the_vector_wasm_builtins_are_one_simd_instruction_each", "rucc::a_vector_wasm_builtin_needs_its_feature"]
+notes = "`f32x4.pmax`, as in clang 23, with the type that clang gives it. Without `-msimd128` the call is an error in the words of clang, `needs target feature simd128`. Written in place as `__builtin_wasm_memory_size` is."
+
+[[feature]]
+name = "__builtin_wasm_pmax_f64x2"
+kind = "builtin"
+gcc_version = "none"
+status = "implemented"
+targets = ["wasm"]
+signature = "double x2(double x2, double x2)"
+used_by = ["wasi-sdk"]
+tests = ["rucc::the_vector_wasm_builtins_are_one_simd_instruction_each", "rucc::a_vector_wasm_builtin_needs_its_feature"]
+notes = "`f64x2.pmax`, as in clang 23, with the type that clang gives it. Without `-msimd128` the call is an error in the words of clang, `needs target feature simd128`. Written in place as `__builtin_wasm_memory_size` is."
+
+[[feature]]
+name = "__builtin_wasm_pmin_f32x4"
+kind = "builtin"
+gcc_version = "none"
+status = "implemented"
+targets = ["wasm"]
+signature = "float x4(float x4, float x4)"
+used_by = ["wasi-sdk"]
+tests = ["rucc::the_vector_wasm_builtins_are_one_simd_instruction_each", "rucc::a_vector_wasm_builtin_needs_its_feature"]
+notes = "`f32x4.pmin`, as in clang 23, with the type that clang gives it. Without `-msimd128` the call is an error in the words of clang, `needs target feature simd128`. Written in place as `__builtin_wasm_memory_size` is."
+
+[[feature]]
+name = "__builtin_wasm_pmin_f64x2"
+kind = "builtin"
+gcc_version = "none"
+status = "implemented"
+targets = ["wasm"]
+signature = "double x2(double x2, double x2)"
+used_by = ["wasi-sdk"]
+tests = ["rucc::the_vector_wasm_builtins_are_one_simd_instruction_each", "rucc::a_vector_wasm_builtin_needs_its_feature"]
+notes = "`f64x2.pmin`, as in clang 23, with the type that clang gives it. Without `-msimd128` the call is an error in the words of clang, `needs target feature simd128`. Written in place as `__builtin_wasm_memory_size` is."
+
+[[feature]]
+name = "__builtin_wasm_q15mulr_sat_s_i16x8"
+kind = "builtin"
+gcc_version = "none"
+status = "implemented"
+targets = ["wasm"]
+signature = "short x8(short x8, short x8)"
+used_by = ["wasi-sdk"]
+tests = ["rucc::the_vector_wasm_builtins_are_one_simd_instruction_each", "rucc::a_vector_wasm_builtin_needs_its_feature"]
+notes = "`i16x8.q15mulr_sat_s`, as in clang 23, with the type that clang gives it. Without `-msimd128` the call is an error in the words of clang, `needs target feature simd128`. Written in place as `__builtin_wasm_memory_size` is."
+
+[[feature]]
+name = "__builtin_wasm_relaxed_dot_i8x16_i7x16_add_s_i32x4"
+kind = "builtin"
+gcc_version = "none"
+status = "implemented"
+targets = ["wasm"]
+signature = "int x4(signed char x16, signed char x16, int x4)"
+used_by = ["wasi-sdk"]
+tests = ["rucc::the_vector_wasm_builtins_are_one_simd_instruction_each", "rucc::a_vector_wasm_builtin_needs_its_feature"]
+notes = "`i32x4.relaxed_dot_i8x16_i7x16_add_s`, as in clang 23, with the type that clang gives it. Without `-mrelaxed-simd` the call is an error in the words of clang, `needs target feature relaxed-simd`. Written in place as `__builtin_wasm_memory_size` is."
+
+[[feature]]
+name = "__builtin_wasm_relaxed_dot_i8x16_i7x16_s_i16x8"
+kind = "builtin"
+gcc_version = "none"
+status = "implemented"
+targets = ["wasm"]
+signature = "short x8(signed char x16, signed char x16)"
+used_by = ["wasi-sdk"]
+tests = ["rucc::the_vector_wasm_builtins_are_one_simd_instruction_each", "rucc::a_vector_wasm_builtin_needs_its_feature"]
+notes = "`i16x8.relaxed_dot_i8x16_i7x16_s`, as in clang 23, with the type that clang gives it. Without `-mrelaxed-simd` the call is an error in the words of clang, `needs target feature relaxed-simd`. Written in place as `__builtin_wasm_memory_size` is."
+
+[[feature]]
+name = "__builtin_wasm_relaxed_laneselect_i16x8"
+kind = "builtin"
+gcc_version = "none"
+status = "implemented"
+targets = ["wasm"]
+signature = "short x8(short x8, short x8, short x8)"
+used_by = ["wasi-sdk"]
+tests = ["rucc::the_vector_wasm_builtins_are_one_simd_instruction_each", "rucc::a_vector_wasm_builtin_needs_its_feature"]
+notes = "`i16x8.relaxed_laneselect`, as in clang 23, with the type that clang gives it. Without `-mrelaxed-simd` the call is an error in the words of clang, `needs target feature relaxed-simd`. Written in place as `__builtin_wasm_memory_size` is."
+
+[[feature]]
+name = "__builtin_wasm_relaxed_laneselect_i32x4"
+kind = "builtin"
+gcc_version = "none"
+status = "implemented"
+targets = ["wasm"]
+signature = "int x4(int x4, int x4, int x4)"
+used_by = ["wasi-sdk"]
+tests = ["rucc::the_vector_wasm_builtins_are_one_simd_instruction_each", "rucc::a_vector_wasm_builtin_needs_its_feature"]
+notes = "`i32x4.relaxed_laneselect`, as in clang 23, with the type that clang gives it. Without `-mrelaxed-simd` the call is an error in the words of clang, `needs target feature relaxed-simd`. Written in place as `__builtin_wasm_memory_size` is."
+
+[[feature]]
+name = "__builtin_wasm_relaxed_laneselect_i64x2"
+kind = "builtin"
+gcc_version = "none"
+status = "implemented"
+targets = ["wasm"]
+signature = "long long x2(long long x2, long long x2, long long x2)"
+used_by = ["wasi-sdk"]
+tests = ["rucc::the_vector_wasm_builtins_are_one_simd_instruction_each", "rucc::a_vector_wasm_builtin_needs_its_feature"]
+notes = "`i64x2.relaxed_laneselect`, as in clang 23, with the type that clang gives it. Without `-mrelaxed-simd` the call is an error in the words of clang, `needs target feature relaxed-simd`. Written in place as `__builtin_wasm_memory_size` is."
+
+[[feature]]
+name = "__builtin_wasm_relaxed_laneselect_i8x16"
+kind = "builtin"
+gcc_version = "none"
+status = "implemented"
+targets = ["wasm"]
+signature = "signed char x16(signed char x16, signed char x16, signed char x16)"
+used_by = ["wasi-sdk"]
+tests = ["rucc::the_vector_wasm_builtins_are_one_simd_instruction_each", "rucc::a_vector_wasm_builtin_needs_its_feature"]
+notes = "`i8x16.relaxed_laneselect`, as in clang 23, with the type that clang gives it. Without `-mrelaxed-simd` the call is an error in the words of clang, `needs target feature relaxed-simd`. Written in place as `__builtin_wasm_memory_size` is."
+
+[[feature]]
+name = "__builtin_wasm_relaxed_madd_f32x4"
+kind = "builtin"
+gcc_version = "none"
+status = "implemented"
+targets = ["wasm"]
+signature = "float x4(float x4, float x4, float x4)"
+used_by = ["wasi-sdk"]
+tests = ["rucc::the_vector_wasm_builtins_are_one_simd_instruction_each", "rucc::a_vector_wasm_builtin_needs_its_feature"]
+notes = "`f32x4.relaxed_madd`, as in clang 23, with the type that clang gives it. Without `-mrelaxed-simd` the call is an error in the words of clang, `needs target feature relaxed-simd`. Written in place as `__builtin_wasm_memory_size` is."
+
+[[feature]]
+name = "__builtin_wasm_relaxed_madd_f64x2"
+kind = "builtin"
+gcc_version = "none"
+status = "implemented"
+targets = ["wasm"]
+signature = "double x2(double x2, double x2, double x2)"
+used_by = ["wasi-sdk"]
+tests = ["rucc::the_vector_wasm_builtins_are_one_simd_instruction_each", "rucc::a_vector_wasm_builtin_needs_its_feature"]
+notes = "`f64x2.relaxed_madd`, as in clang 23, with the type that clang gives it. Without `-mrelaxed-simd` the call is an error in the words of clang, `needs target feature relaxed-simd`. Written in place as `__builtin_wasm_memory_size` is."
+
+[[feature]]
+name = "__builtin_wasm_relaxed_max_f32x4"
+kind = "builtin"
+gcc_version = "none"
+status = "implemented"
+targets = ["wasm"]
+signature = "float x4(float x4, float x4)"
+used_by = ["wasi-sdk"]
+tests = ["rucc::the_vector_wasm_builtins_are_one_simd_instruction_each", "rucc::a_vector_wasm_builtin_needs_its_feature"]
+notes = "`f32x4.relaxed_max`, as in clang 23, with the type that clang gives it. Without `-mrelaxed-simd` the call is an error in the words of clang, `needs target feature relaxed-simd`. Written in place as `__builtin_wasm_memory_size` is."
+
+[[feature]]
+name = "__builtin_wasm_relaxed_max_f64x2"
+kind = "builtin"
+gcc_version = "none"
+status = "implemented"
+targets = ["wasm"]
+signature = "double x2(double x2, double x2)"
+used_by = ["wasi-sdk"]
+tests = ["rucc::the_vector_wasm_builtins_are_one_simd_instruction_each", "rucc::a_vector_wasm_builtin_needs_its_feature"]
+notes = "`f64x2.relaxed_max`, as in clang 23, with the type that clang gives it. Without `-mrelaxed-simd` the call is an error in the words of clang, `needs target feature relaxed-simd`. Written in place as `__builtin_wasm_memory_size` is."
+
+[[feature]]
+name = "__builtin_wasm_relaxed_min_f32x4"
+kind = "builtin"
+gcc_version = "none"
+status = "implemented"
+targets = ["wasm"]
+signature = "float x4(float x4, float x4)"
+used_by = ["wasi-sdk"]
+tests = ["rucc::the_vector_wasm_builtins_are_one_simd_instruction_each", "rucc::a_vector_wasm_builtin_needs_its_feature"]
+notes = "`f32x4.relaxed_min`, as in clang 23, with the type that clang gives it. Without `-mrelaxed-simd` the call is an error in the words of clang, `needs target feature relaxed-simd`. Written in place as `__builtin_wasm_memory_size` is."
+
+[[feature]]
+name = "__builtin_wasm_relaxed_min_f64x2"
+kind = "builtin"
+gcc_version = "none"
+status = "implemented"
+targets = ["wasm"]
+signature = "double x2(double x2, double x2)"
+used_by = ["wasi-sdk"]
+tests = ["rucc::the_vector_wasm_builtins_are_one_simd_instruction_each", "rucc::a_vector_wasm_builtin_needs_its_feature"]
+notes = "`f64x2.relaxed_min`, as in clang 23, with the type that clang gives it. Without `-mrelaxed-simd` the call is an error in the words of clang, `needs target feature relaxed-simd`. Written in place as `__builtin_wasm_memory_size` is."
+
+[[feature]]
+name = "__builtin_wasm_relaxed_nmadd_f32x4"
+kind = "builtin"
+gcc_version = "none"
+status = "implemented"
+targets = ["wasm"]
+signature = "float x4(float x4, float x4, float x4)"
+used_by = ["wasi-sdk"]
+tests = ["rucc::the_vector_wasm_builtins_are_one_simd_instruction_each", "rucc::a_vector_wasm_builtin_needs_its_feature"]
+notes = "`f32x4.relaxed_nmadd`, as in clang 23, with the type that clang gives it. Without `-mrelaxed-simd` the call is an error in the words of clang, `needs target feature relaxed-simd`. Written in place as `__builtin_wasm_memory_size` is."
+
+[[feature]]
+name = "__builtin_wasm_relaxed_nmadd_f64x2"
+kind = "builtin"
+gcc_version = "none"
+status = "implemented"
+targets = ["wasm"]
+signature = "double x2(double x2, double x2, double x2)"
+used_by = ["wasi-sdk"]
+tests = ["rucc::the_vector_wasm_builtins_are_one_simd_instruction_each", "rucc::a_vector_wasm_builtin_needs_its_feature"]
+notes = "`f64x2.relaxed_nmadd`, as in clang 23, with the type that clang gives it. Without `-mrelaxed-simd` the call is an error in the words of clang, `needs target feature relaxed-simd`. Written in place as `__builtin_wasm_memory_size` is."
+
+[[feature]]
+name = "__builtin_wasm_relaxed_q15mulr_s_i16x8"
+kind = "builtin"
+gcc_version = "none"
+status = "implemented"
+targets = ["wasm"]
+signature = "short x8(short x8, short x8)"
+used_by = ["wasi-sdk"]
+tests = ["rucc::the_vector_wasm_builtins_are_one_simd_instruction_each", "rucc::a_vector_wasm_builtin_needs_its_feature"]
+notes = "`i16x8.relaxed_q15mulr_s`, as in clang 23, with the type that clang gives it. Without `-mrelaxed-simd` the call is an error in the words of clang, `needs target feature relaxed-simd`. Written in place as `__builtin_wasm_memory_size` is."
+
+[[feature]]
+name = "__builtin_wasm_relaxed_swizzle_i8x16"
+kind = "builtin"
+gcc_version = "none"
+status = "implemented"
+targets = ["wasm"]
+signature = "signed char x16(signed char x16, signed char x16)"
+used_by = ["wasi-sdk"]
+tests = ["rucc::the_vector_wasm_builtins_are_one_simd_instruction_each", "rucc::a_vector_wasm_builtin_needs_its_feature"]
+notes = "`i8x16.relaxed_swizzle`, as in clang 23, with the type that clang gives it. Without `-mrelaxed-simd` the call is an error in the words of clang, `needs target feature relaxed-simd`. Written in place as `__builtin_wasm_memory_size` is."
+
+[[feature]]
+name = "__builtin_wasm_relaxed_trunc_s_i32x4_f32x4"
+kind = "builtin"
+gcc_version = "none"
+status = "implemented"
+targets = ["wasm"]
+signature = "int x4(float x4)"
+used_by = ["wasi-sdk"]
+tests = ["rucc::the_vector_wasm_builtins_are_one_simd_instruction_each", "rucc::a_vector_wasm_builtin_needs_its_feature"]
+notes = "`i32x4.relaxed_trunc_f32x4_s`, as in clang 23, with the type that clang gives it. Without `-mrelaxed-simd` the call is an error in the words of clang, `needs target feature relaxed-simd`. Written in place as `__builtin_wasm_memory_size` is."
+
+[[feature]]
+name = "__builtin_wasm_relaxed_trunc_s_zero_i32x4_f64x2"
+kind = "builtin"
+gcc_version = "none"
+status = "implemented"
+targets = ["wasm"]
+signature = "int x4(double x2)"
+used_by = ["wasi-sdk"]
+tests = ["rucc::the_vector_wasm_builtins_are_one_simd_instruction_each", "rucc::a_vector_wasm_builtin_needs_its_feature"]
+notes = "`i32x4.relaxed_trunc_f64x2_s_zero`, as in clang 23, with the type that clang gives it. Without `-mrelaxed-simd` the call is an error in the words of clang, `needs target feature relaxed-simd`. Written in place as `__builtin_wasm_memory_size` is."
+
+[[feature]]
+name = "__builtin_wasm_relaxed_trunc_u_i32x4_f32x4"
+kind = "builtin"
+gcc_version = "none"
+status = "implemented"
+targets = ["wasm"]
+signature = "unsigned int x4(float x4)"
+used_by = ["wasi-sdk"]
+tests = ["rucc::the_vector_wasm_builtins_are_one_simd_instruction_each", "rucc::a_vector_wasm_builtin_needs_its_feature"]
+notes = "`i32x4.relaxed_trunc_f32x4_u`, as in clang 23, with the type that clang gives it. Without `-mrelaxed-simd` the call is an error in the words of clang, `needs target feature relaxed-simd`. Written in place as `__builtin_wasm_memory_size` is."
+
+[[feature]]
+name = "__builtin_wasm_relaxed_trunc_u_zero_i32x4_f64x2"
+kind = "builtin"
+gcc_version = "none"
+status = "implemented"
+targets = ["wasm"]
+signature = "unsigned int x4(double x2)"
+used_by = ["wasi-sdk"]
+tests = ["rucc::the_vector_wasm_builtins_are_one_simd_instruction_each", "rucc::a_vector_wasm_builtin_needs_its_feature"]
+notes = "`i32x4.relaxed_trunc_f64x2_u_zero`, as in clang 23, with the type that clang gives it. Without `-mrelaxed-simd` the call is an error in the words of clang, `needs target feature relaxed-simd`. Written in place as `__builtin_wasm_memory_size` is."
+
+[[feature]]
+name = "__builtin_wasm_sqrt_f32x4"
+kind = "builtin"
+gcc_version = "none"
+status = "implemented"
+targets = ["wasm"]
+signature = "float x4(float x4)"
+used_by = ["wasi-sdk"]
+tests = ["rucc::the_vector_wasm_builtins_are_one_simd_instruction_each", "rucc::a_vector_wasm_builtin_needs_its_feature"]
+notes = "`f32x4.sqrt`, as in clang 23, with the type that clang gives it. Without `-msimd128` the call is an error in the words of clang, `needs target feature simd128`. Written in place as `__builtin_wasm_memory_size` is."
+
+[[feature]]
+name = "__builtin_wasm_sqrt_f64x2"
+kind = "builtin"
+gcc_version = "none"
+status = "implemented"
+targets = ["wasm"]
+signature = "double x2(double x2)"
+used_by = ["wasi-sdk"]
+tests = ["rucc::the_vector_wasm_builtins_are_one_simd_instruction_each", "rucc::a_vector_wasm_builtin_needs_its_feature"]
+notes = "`f64x2.sqrt`, as in clang 23, with the type that clang gives it. Without `-msimd128` the call is an error in the words of clang, `needs target feature simd128`. Written in place as `__builtin_wasm_memory_size` is."
+
+[[feature]]
+name = "__builtin_wasm_swizzle_i8x16"
+kind = "builtin"
+gcc_version = "none"
+status = "implemented"
+targets = ["wasm"]
+signature = "signed char x16(signed char x16, signed char x16)"
+used_by = ["wasi-sdk"]
+tests = ["rucc::the_vector_wasm_builtins_are_one_simd_instruction_each", "rucc::a_vector_wasm_builtin_needs_its_feature"]
+notes = "`i8x16.swizzle`, as in clang 23, with the type that clang gives it. Without `-msimd128` the call is an error in the words of clang, `needs target feature simd128`. Written in place as `__builtin_wasm_memory_size` is."
+
+[[feature]]
+name = "__builtin_wasm_trunc_f32x4"
+kind = "builtin"
+gcc_version = "none"
+status = "implemented"
+targets = ["wasm"]
+signature = "float x4(float x4)"
+used_by = ["wasi-sdk"]
+tests = ["rucc::the_vector_wasm_builtins_are_one_simd_instruction_each", "rucc::a_vector_wasm_builtin_needs_its_feature"]
+notes = "`f32x4.trunc`, as in clang 23, with the type that clang gives it. Without `-msimd128` the call is an error in the words of clang, `needs target feature simd128`. Written in place as `__builtin_wasm_memory_size` is."
+
+[[feature]]
+name = "__builtin_wasm_trunc_f64x2"
+kind = "builtin"
+gcc_version = "none"
+status = "implemented"
+targets = ["wasm"]
+signature = "double x2(double x2)"
+used_by = ["wasi-sdk"]
+tests = ["rucc::the_vector_wasm_builtins_are_one_simd_instruction_each", "rucc::a_vector_wasm_builtin_needs_its_feature"]
+notes = "`f64x2.trunc`, as in clang 23, with the type that clang gives it. Without `-msimd128` the call is an error in the words of clang, `needs target feature simd128`. Written in place as `__builtin_wasm_memory_size` is."
+
+[[feature]]
+name = "__builtin_wasm_trunc_sat_s_zero_f64x2_i32x4"
+kind = "builtin"
+gcc_version = "none"
+status = "implemented"
+targets = ["wasm"]
+signature = "int x4(double x2)"
+used_by = ["wasi-sdk"]
+tests = ["rucc::the_vector_wasm_builtins_are_one_simd_instruction_each", "rucc::a_vector_wasm_builtin_needs_its_feature"]
+notes = "`i32x4.trunc_sat_f64x2_s_zero`, as in clang 23, with the type that clang gives it. Without `-msimd128` the call is an error in the words of clang, `needs target feature simd128`. Written in place as `__builtin_wasm_memory_size` is."
+
+[[feature]]
+name = "__builtin_wasm_trunc_sat_u_zero_f64x2_i32x4"
+kind = "builtin"
+gcc_version = "none"
+status = "implemented"
+targets = ["wasm"]
+signature = "unsigned int x4(double x2)"
+used_by = ["wasi-sdk"]
+tests = ["rucc::the_vector_wasm_builtins_are_one_simd_instruction_each", "rucc::a_vector_wasm_builtin_needs_its_feature"]
+notes = "`i32x4.trunc_sat_f64x2_u_zero`, as in clang 23, with the type that clang gives it. Without `-msimd128` the call is an error in the words of clang, `needs target feature simd128`. Written in place as `__builtin_wasm_memory_size` is."
+
+[[feature]]
+name = "__builtin_wasm_trunc_saturate_s_i32x4_f32x4"
+kind = "builtin"
+gcc_version = "none"
+status = "implemented"
+targets = ["wasm"]
+signature = "int x4(float x4)"
+used_by = ["wasi-sdk"]
+tests = ["rucc::the_vector_wasm_builtins_are_one_simd_instruction_each", "rucc::a_vector_wasm_builtin_needs_its_feature"]
+notes = "`i32x4.trunc_sat_f32x4_s`, as in clang 23, with the type that clang gives it. Without `-msimd128` the call is an error in the words of clang, `needs target feature simd128`. Written in place as `__builtin_wasm_memory_size` is."
+
+[[feature]]
+name = "__builtin_wasm_trunc_saturate_u_i32x4_f32x4"
+kind = "builtin"
+gcc_version = "none"
+status = "implemented"
+targets = ["wasm"]
+signature = "int x4(float x4)"
+used_by = ["wasi-sdk"]
+tests = ["rucc::the_vector_wasm_builtins_are_one_simd_instruction_each", "rucc::a_vector_wasm_builtin_needs_its_feature"]
+notes = "`i32x4.trunc_sat_f32x4_u`, as in clang 23, with the type that clang gives it. Without `-msimd128` the call is an error in the words of clang, `needs target feature simd128`. Written in place as `__builtin_wasm_memory_size` is."
 [[feature]]
 name = "deprecated"
 kind = "c-attribute"

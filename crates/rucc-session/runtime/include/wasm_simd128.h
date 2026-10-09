@@ -6,14 +6,17 @@
  * The names, the types and what each function computes are those of the `<wasm_simd128.h>` of
  * clang 23, for the instructions of the simd128 and relaxed-simd proposals. Every function is C
  * over the lanes of a GNU vector, the same way `<arm_neon.h>` is written, so what a program
- * computes is what the instruction computes and what it compiles to is one lane at a time until
- * rucc writes v128 instructions. For that reason the header does not need `-msimd128`, and a
- * module from it runs on an engine with no SIMD.
+ * computes is what the instruction computes. For that reason the header does not need
+ * `-msimd128`, and a module from it runs on an engine with no SIMD. With `-msimd128`, a function
+ * that clang writes as a `__builtin_wasm_*` builtin calls the same builtin, which is one
+ * instruction, as in clang.
  *
- * Each relaxed function gives one of the answers that the relaxed-simd proposal allows, and the
- * same one on every engine: the multiply add is not fused, the lane select is a bit select, the
- * swizzle, the minimum, the maximum, the truncation and the rounding multiply are those of
- * simd128, and the dot products take the second operand as signed.
+ * Without `-mrelaxed-simd`, each relaxed function gives one of the answers that the relaxed-simd
+ * proposal allows, and the same one on every engine: the multiply add is not fused, the lane
+ * select is a bit select, the swizzle, the minimum, the maximum, the truncation and the rounding
+ * multiply are those of simd128, and the dot products take the second operand as signed. With
+ * `-mrelaxed-simd`, each one is the relaxed instruction, as in clang, and the engine chooses
+ * which of the answers it gives.
  *
  * The rounding of a float lane to an integer is exact C, with no call to the library. The square
  * root is `__builtin_sqrtf` and `__builtin_sqrt`, which call `sqrtf` and `sqrt`, so a program for
@@ -428,11 +431,15 @@ static __inline__ v128_t wasm_i8x16_neg(v128_t __a) {
   return (v128_t)(-(__u8x16)__a);
 }
 static __inline__ v128_t wasm_i8x16_abs(v128_t __a) {
+#ifdef __wasm_simd128__
+  return (v128_t)__builtin_wasm_abs_i8x16((__i8x16)__a);
+#else
   __i8x16 __x = (__i8x16)__a;
   __u8x16 __y = (__u8x16)__a;
   __u8x16 __r;
   for (int __i = 0; __i < 16; __i++) __r[__i] = __x[__i] < 0 ? -__y[__i] : __y[__i];
   return (v128_t)__r;
+#endif
 }
 static __inline__ v128_t wasm_i8x16_shl(v128_t __a, uint32_t __b) {
   return (v128_t)((__u8x16)__a << (__b & 7));
@@ -444,15 +451,23 @@ static __inline__ v128_t wasm_u8x16_shr(v128_t __a, uint32_t __b) {
   return (v128_t)((__u8x16)__a >> (__b & 7));
 }
 static __inline__ bool wasm_i8x16_all_true(v128_t __a) {
+#ifdef __wasm_simd128__
+  return __builtin_wasm_all_true_i8x16((__i8x16)__a);
+#else
   __i8x16 __x = (__i8x16)__a;
   for (int __i = 0; __i < 16; __i++) if (__x[__i] == 0) return false;
   return true;
+#endif
 }
 static __inline__ uint32_t wasm_i8x16_bitmask(v128_t __a) {
+#ifdef __wasm_simd128__
+  return __builtin_wasm_bitmask_i8x16((__i8x16)__a);
+#else
   __i8x16 __x = (__i8x16)__a;
   uint32_t __m = 0;
   for (int __i = 0; __i < 16; __i++) __m |= (uint32_t)(__x[__i] < 0) << __i;
   return __m;
+#endif
 }
 static __inline__ v128_t wasm_i16x8_add(v128_t __a, v128_t __b) {
   return (v128_t)((__u16x8)__a + (__u16x8)__b);
@@ -467,11 +482,15 @@ static __inline__ v128_t wasm_i16x8_neg(v128_t __a) {
   return (v128_t)(-(__u16x8)__a);
 }
 static __inline__ v128_t wasm_i16x8_abs(v128_t __a) {
+#ifdef __wasm_simd128__
+  return (v128_t)__builtin_wasm_abs_i16x8((__i16x8)__a);
+#else
   __i16x8 __x = (__i16x8)__a;
   __u16x8 __y = (__u16x8)__a;
   __u16x8 __r;
   for (int __i = 0; __i < 8; __i++) __r[__i] = __x[__i] < 0 ? -__y[__i] : __y[__i];
   return (v128_t)__r;
+#endif
 }
 static __inline__ v128_t wasm_i16x8_shl(v128_t __a, uint32_t __b) {
   return (v128_t)((__u16x8)__a << (__b & 15));
@@ -483,15 +502,23 @@ static __inline__ v128_t wasm_u16x8_shr(v128_t __a, uint32_t __b) {
   return (v128_t)((__u16x8)__a >> (__b & 15));
 }
 static __inline__ bool wasm_i16x8_all_true(v128_t __a) {
+#ifdef __wasm_simd128__
+  return __builtin_wasm_all_true_i16x8((__i16x8)__a);
+#else
   __i16x8 __x = (__i16x8)__a;
   for (int __i = 0; __i < 8; __i++) if (__x[__i] == 0) return false;
   return true;
+#endif
 }
 static __inline__ uint32_t wasm_i16x8_bitmask(v128_t __a) {
+#ifdef __wasm_simd128__
+  return __builtin_wasm_bitmask_i16x8((__i16x8)__a);
+#else
   __i16x8 __x = (__i16x8)__a;
   uint32_t __m = 0;
   for (int __i = 0; __i < 8; __i++) __m |= (uint32_t)(__x[__i] < 0) << __i;
   return __m;
+#endif
 }
 static __inline__ v128_t wasm_i32x4_add(v128_t __a, v128_t __b) {
   return (v128_t)((__u32x4)__a + (__u32x4)__b);
@@ -506,11 +533,15 @@ static __inline__ v128_t wasm_i32x4_neg(v128_t __a) {
   return (v128_t)(-(__u32x4)__a);
 }
 static __inline__ v128_t wasm_i32x4_abs(v128_t __a) {
+#ifdef __wasm_simd128__
+  return (v128_t)__builtin_wasm_abs_i32x4((__i32x4)__a);
+#else
   __i32x4 __x = (__i32x4)__a;
   __u32x4 __y = (__u32x4)__a;
   __u32x4 __r;
   for (int __i = 0; __i < 4; __i++) __r[__i] = __x[__i] < 0 ? -__y[__i] : __y[__i];
   return (v128_t)__r;
+#endif
 }
 static __inline__ v128_t wasm_i32x4_shl(v128_t __a, uint32_t __b) {
   return (v128_t)((__u32x4)__a << (__b & 31));
@@ -522,15 +553,23 @@ static __inline__ v128_t wasm_u32x4_shr(v128_t __a, uint32_t __b) {
   return (v128_t)((__u32x4)__a >> (__b & 31));
 }
 static __inline__ bool wasm_i32x4_all_true(v128_t __a) {
+#ifdef __wasm_simd128__
+  return __builtin_wasm_all_true_i32x4((__i32x4)__a);
+#else
   __i32x4 __x = (__i32x4)__a;
   for (int __i = 0; __i < 4; __i++) if (__x[__i] == 0) return false;
   return true;
+#endif
 }
 static __inline__ uint32_t wasm_i32x4_bitmask(v128_t __a) {
+#ifdef __wasm_simd128__
+  return __builtin_wasm_bitmask_i32x4((__i32x4)__a);
+#else
   __i32x4 __x = (__i32x4)__a;
   uint32_t __m = 0;
   for (int __i = 0; __i < 4; __i++) __m |= (uint32_t)(__x[__i] < 0) << __i;
   return __m;
+#endif
 }
 static __inline__ v128_t wasm_i64x2_add(v128_t __a, v128_t __b) {
   return (v128_t)((__u64x2)__a + (__u64x2)__b);
@@ -545,11 +584,15 @@ static __inline__ v128_t wasm_i64x2_neg(v128_t __a) {
   return (v128_t)(-(__u64x2)__a);
 }
 static __inline__ v128_t wasm_i64x2_abs(v128_t __a) {
+#ifdef __wasm_simd128__
+  return (v128_t)__builtin_wasm_abs_i64x2((__i64x2)__a);
+#else
   __i64x2 __x = (__i64x2)__a;
   __u64x2 __y = (__u64x2)__a;
   __u64x2 __r;
   for (int __i = 0; __i < 2; __i++) __r[__i] = __x[__i] < 0 ? -__y[__i] : __y[__i];
   return (v128_t)__r;
+#endif
 }
 static __inline__ v128_t wasm_i64x2_shl(v128_t __a, uint32_t __b) {
   return (v128_t)((__u64x2)__a << (__b & 63));
@@ -561,15 +604,23 @@ static __inline__ v128_t wasm_u64x2_shr(v128_t __a, uint32_t __b) {
   return (v128_t)((__u64x2)__a >> (__b & 63));
 }
 static __inline__ bool wasm_i64x2_all_true(v128_t __a) {
+#ifdef __wasm_simd128__
+  return __builtin_wasm_all_true_i64x2((__i64x2)__a);
+#else
   __i64x2 __x = (__i64x2)__a;
   for (int __i = 0; __i < 2; __i++) if (__x[__i] == 0) return false;
   return true;
+#endif
 }
 static __inline__ uint32_t wasm_i64x2_bitmask(v128_t __a) {
+#ifdef __wasm_simd128__
+  return __builtin_wasm_bitmask_i64x2((__i64x2)__a);
+#else
   __i64x2 __x = (__i64x2)__a;
   uint32_t __m = 0;
   for (int __i = 0; __i < 2; __i++) __m |= (uint32_t)(__x[__i] < 0) << __i;
   return __m;
+#endif
 }
 static __inline__ v128_t wasm_i8x16_popcnt(v128_t __a) {
   __u8x16 __x = (__u8x16)__a;
@@ -726,20 +777,31 @@ static __inline__ v128_t wasm_u32x4_max(v128_t __a, v128_t __b) {
   return (v128_t)__r;
 }
 static __inline__ v128_t wasm_u8x16_avgr(v128_t __a, v128_t __b) {
+#ifdef __wasm_simd128__
+  return (v128_t)__builtin_wasm_avgr_u_i8x16((__u8x16)__a, (__u8x16)__b);
+#else
   __u8x16 __x = (__u8x16)__a;
   __u8x16 __y = (__u8x16)__b;
   __u8x16 __r;
   for (int __i = 0; __i < 16; __i++) __r[__i] = (__x[__i] + __y[__i] + 1) >> 1;
   return (v128_t)__r;
+#endif
 }
 static __inline__ v128_t wasm_u16x8_avgr(v128_t __a, v128_t __b) {
+#ifdef __wasm_simd128__
+  return (v128_t)__builtin_wasm_avgr_u_i16x8((__u16x8)__a, (__u16x8)__b);
+#else
   __u16x8 __x = (__u16x8)__a;
   __u16x8 __y = (__u16x8)__b;
   __u16x8 __r;
   for (int __i = 0; __i < 8; __i++) __r[__i] = (__x[__i] + __y[__i] + 1) >> 1;
   return (v128_t)__r;
+#endif
 }
 static __inline__ v128_t wasm_i16x8_q15mulr_sat(v128_t __a, v128_t __b) {
+#ifdef __wasm_simd128__
+  return (v128_t)__builtin_wasm_q15mulr_sat_s_i16x8((__i16x8)__a, (__i16x8)__b);
+#else
   __i16x8 __x = (__i16x8)__a;
   __i16x8 __y = (__i16x8)__b;
   int __s;
@@ -747,8 +809,12 @@ static __inline__ v128_t wasm_i16x8_q15mulr_sat(v128_t __a, v128_t __b) {
   for (int __i = 0; __i < 8; __i++)
     __r[__i] = (__s = (__x[__i] * __y[__i] + 0x4000) >> 15) > 32767 ? 32767 : __s;
   return (v128_t)__r;
+#endif
 }
 static __inline__ v128_t wasm_i32x4_dot_i16x8(v128_t __a, v128_t __b) {
+#ifdef __wasm_simd128__
+  return (v128_t)__builtin_wasm_dot_s_i32x4_i16x8((__i16x8)__a, (__i16x8)__b);
+#else
   __i16x8 __x = (__i16x8)__a;
   __i16x8 __y = (__i16x8)__b;
   __u32x4 __r;
@@ -756,6 +822,7 @@ static __inline__ v128_t wasm_i32x4_dot_i16x8(v128_t __a, v128_t __b) {
     __r[__i] = (unsigned)(__x[2 * __i] * __y[2 * __i]) + (unsigned)(__x[2 * __i
         + 1] * __y[2 * __i + 1]);
   return (v128_t)__r;
+#endif
 }
 
 /* Comparisons. A lane that holds is all ones and a lane that does not is zero. */
@@ -906,40 +973,64 @@ static __inline__ v128_t wasm_f64x2_ge(v128_t __a, v128_t __b) {
 
 /* Float arithmetic. */
 static __inline__ v128_t wasm_f32x4_abs(v128_t __a) {
+#ifdef __wasm_simd128__
+  return (v128_t)__builtin_wasm_abs_f32x4((__f32x4)__a);
+#else
   return (v128_t)((__u32x4)__a & ~0x80000000u);
+#endif
 }
 static __inline__ v128_t wasm_f32x4_neg(v128_t __a) {
-  return (v128_t)((__u32x4)__a ^ 0x80000000u);
+  return (v128_t)(-(__f32x4)__a);
 }
 static __inline__ v128_t wasm_f32x4_sqrt(v128_t __a) {
+#ifdef __wasm_simd128__
+  return (v128_t)__builtin_wasm_sqrt_f32x4((__f32x4)__a);
+#else
   __f32x4 __x = (__f32x4)__a;
   __f32x4 __r;
   for (int __i = 0; __i < 4; __i++) __r[__i] = __builtin_sqrtf(__x[__i]);
   return (v128_t)__r;
+#endif
 }
 static __inline__ v128_t wasm_f32x4_ceil(v128_t __a) {
+#ifdef __wasm_simd128__
+  return (v128_t)__builtin_wasm_ceil_f32x4((__f32x4)__a);
+#else
   __f32x4 __x = (__f32x4)__a;
   __f32x4 __r;
   for (int __i = 0; __i < 4; __i++) __r[__i] = __builtin_ceilf(__x[__i]);
   return (v128_t)__r;
+#endif
 }
 static __inline__ v128_t wasm_f32x4_floor(v128_t __a) {
+#ifdef __wasm_simd128__
+  return (v128_t)__builtin_wasm_floor_f32x4((__f32x4)__a);
+#else
   __f32x4 __x = (__f32x4)__a;
   __f32x4 __r;
   for (int __i = 0; __i < 4; __i++) __r[__i] = __builtin_floorf(__x[__i]);
   return (v128_t)__r;
+#endif
 }
 static __inline__ v128_t wasm_f32x4_trunc(v128_t __a) {
+#ifdef __wasm_simd128__
+  return (v128_t)__builtin_wasm_trunc_f32x4((__f32x4)__a);
+#else
   __f32x4 __x = (__f32x4)__a;
   __f32x4 __r;
   for (int __i = 0; __i < 4; __i++) __r[__i] = __builtin_truncf(__x[__i]);
   return (v128_t)__r;
+#endif
 }
 static __inline__ v128_t wasm_f32x4_nearest(v128_t __a) {
+#ifdef __wasm_simd128__
+  return (v128_t)__builtin_wasm_nearest_f32x4((__f32x4)__a);
+#else
   __f32x4 __x = (__f32x4)__a;
   __f32x4 __r;
   for (int __i = 0; __i < 4; __i++) __r[__i] = __builtin_rintf(__x[__i]);
   return (v128_t)__r;
+#endif
 }
 static __inline__ v128_t wasm_f32x4_add(v128_t __a, v128_t __b) {
   return (v128_t)((__f32x4)__a + (__f32x4)__b);
@@ -954,68 +1045,108 @@ static __inline__ v128_t wasm_f32x4_div(v128_t __a, v128_t __b) {
   return (v128_t)((__f32x4)__a / (__f32x4)__b);
 }
 static __inline__ v128_t wasm_f32x4_min(v128_t __a, v128_t __b) {
+#ifdef __wasm_simd128__
+  return (v128_t)__builtin_wasm_min_f32x4((__f32x4)__a, (__f32x4)__b);
+#else
   __f32x4 __x = (__f32x4)__a;
   __f32x4 __y = (__f32x4)__b;
   __f32x4 __r;
   for (int __i = 0; __i < 4; __i++) __r[__i] = __builtin_wasm_min_f32(__x[__i], __y[__i]);
   return (v128_t)__r;
+#endif
 }
 static __inline__ v128_t wasm_f32x4_max(v128_t __a, v128_t __b) {
+#ifdef __wasm_simd128__
+  return (v128_t)__builtin_wasm_max_f32x4((__f32x4)__a, (__f32x4)__b);
+#else
   __f32x4 __x = (__f32x4)__a;
   __f32x4 __y = (__f32x4)__b;
   __f32x4 __r;
   for (int __i = 0; __i < 4; __i++) __r[__i] = __builtin_wasm_max_f32(__x[__i], __y[__i]);
   return (v128_t)__r;
+#endif
 }
 static __inline__ v128_t wasm_f32x4_pmin(v128_t __a, v128_t __b) {
+#ifdef __wasm_simd128__
+  return (v128_t)__builtin_wasm_pmin_f32x4((__f32x4)__a, (__f32x4)__b);
+#else
   __f32x4 __x = (__f32x4)__a;
   __f32x4 __y = (__f32x4)__b;
   __f32x4 __r;
   for (int __i = 0; __i < 4; __i++) __r[__i] = __y[__i] < __x[__i] ? __y[__i] : __x[__i];
   return (v128_t)__r;
+#endif
 }
 static __inline__ v128_t wasm_f32x4_pmax(v128_t __a, v128_t __b) {
+#ifdef __wasm_simd128__
+  return (v128_t)__builtin_wasm_pmax_f32x4((__f32x4)__a, (__f32x4)__b);
+#else
   __f32x4 __x = (__f32x4)__a;
   __f32x4 __y = (__f32x4)__b;
   __f32x4 __r;
   for (int __i = 0; __i < 4; __i++) __r[__i] = __x[__i] < __y[__i] ? __y[__i] : __x[__i];
   return (v128_t)__r;
+#endif
 }
 static __inline__ v128_t wasm_f64x2_abs(v128_t __a) {
+#ifdef __wasm_simd128__
+  return (v128_t)__builtin_wasm_abs_f64x2((__f64x2)__a);
+#else
   return (v128_t)((__u64x2)__a & ~0x8000000000000000ull);
+#endif
 }
 static __inline__ v128_t wasm_f64x2_neg(v128_t __a) {
-  return (v128_t)((__u64x2)__a ^ 0x8000000000000000ull);
+  return (v128_t)(-(__f64x2)__a);
 }
 static __inline__ v128_t wasm_f64x2_sqrt(v128_t __a) {
+#ifdef __wasm_simd128__
+  return (v128_t)__builtin_wasm_sqrt_f64x2((__f64x2)__a);
+#else
   __f64x2 __x = (__f64x2)__a;
   __f64x2 __r;
   for (int __i = 0; __i < 2; __i++) __r[__i] = __builtin_sqrt(__x[__i]);
   return (v128_t)__r;
+#endif
 }
 static __inline__ v128_t wasm_f64x2_ceil(v128_t __a) {
+#ifdef __wasm_simd128__
+  return (v128_t)__builtin_wasm_ceil_f64x2((__f64x2)__a);
+#else
   __f64x2 __x = (__f64x2)__a;
   __f64x2 __r;
   for (int __i = 0; __i < 2; __i++) __r[__i] = __builtin_ceil(__x[__i]);
   return (v128_t)__r;
+#endif
 }
 static __inline__ v128_t wasm_f64x2_floor(v128_t __a) {
+#ifdef __wasm_simd128__
+  return (v128_t)__builtin_wasm_floor_f64x2((__f64x2)__a);
+#else
   __f64x2 __x = (__f64x2)__a;
   __f64x2 __r;
   for (int __i = 0; __i < 2; __i++) __r[__i] = __builtin_floor(__x[__i]);
   return (v128_t)__r;
+#endif
 }
 static __inline__ v128_t wasm_f64x2_trunc(v128_t __a) {
+#ifdef __wasm_simd128__
+  return (v128_t)__builtin_wasm_trunc_f64x2((__f64x2)__a);
+#else
   __f64x2 __x = (__f64x2)__a;
   __f64x2 __r;
   for (int __i = 0; __i < 2; __i++) __r[__i] = __builtin_trunc(__x[__i]);
   return (v128_t)__r;
+#endif
 }
 static __inline__ v128_t wasm_f64x2_nearest(v128_t __a) {
+#ifdef __wasm_simd128__
+  return (v128_t)__builtin_wasm_nearest_f64x2((__f64x2)__a);
+#else
   __f64x2 __x = (__f64x2)__a;
   __f64x2 __r;
   for (int __i = 0; __i < 2; __i++) __r[__i] = __builtin_rint(__x[__i]);
   return (v128_t)__r;
+#endif
 }
 static __inline__ v128_t wasm_f64x2_add(v128_t __a, v128_t __b) {
   return (v128_t)((__f64x2)__a + (__f64x2)__b);
@@ -1030,32 +1161,48 @@ static __inline__ v128_t wasm_f64x2_div(v128_t __a, v128_t __b) {
   return (v128_t)((__f64x2)__a / (__f64x2)__b);
 }
 static __inline__ v128_t wasm_f64x2_min(v128_t __a, v128_t __b) {
+#ifdef __wasm_simd128__
+  return (v128_t)__builtin_wasm_min_f64x2((__f64x2)__a, (__f64x2)__b);
+#else
   __f64x2 __x = (__f64x2)__a;
   __f64x2 __y = (__f64x2)__b;
   __f64x2 __r;
   for (int __i = 0; __i < 2; __i++) __r[__i] = __builtin_wasm_min_f64(__x[__i], __y[__i]);
   return (v128_t)__r;
+#endif
 }
 static __inline__ v128_t wasm_f64x2_max(v128_t __a, v128_t __b) {
+#ifdef __wasm_simd128__
+  return (v128_t)__builtin_wasm_max_f64x2((__f64x2)__a, (__f64x2)__b);
+#else
   __f64x2 __x = (__f64x2)__a;
   __f64x2 __y = (__f64x2)__b;
   __f64x2 __r;
   for (int __i = 0; __i < 2; __i++) __r[__i] = __builtin_wasm_max_f64(__x[__i], __y[__i]);
   return (v128_t)__r;
+#endif
 }
 static __inline__ v128_t wasm_f64x2_pmin(v128_t __a, v128_t __b) {
+#ifdef __wasm_simd128__
+  return (v128_t)__builtin_wasm_pmin_f64x2((__f64x2)__a, (__f64x2)__b);
+#else
   __f64x2 __x = (__f64x2)__a;
   __f64x2 __y = (__f64x2)__b;
   __f64x2 __r;
   for (int __i = 0; __i < 2; __i++) __r[__i] = __y[__i] < __x[__i] ? __y[__i] : __x[__i];
   return (v128_t)__r;
+#endif
 }
 static __inline__ v128_t wasm_f64x2_pmax(v128_t __a, v128_t __b) {
+#ifdef __wasm_simd128__
+  return (v128_t)__builtin_wasm_pmax_f64x2((__f64x2)__a, (__f64x2)__b);
+#else
   __f64x2 __x = (__f64x2)__a;
   __f64x2 __y = (__f64x2)__b;
   __f64x2 __r;
   for (int __i = 0; __i < 2; __i++) __r[__i] = __x[__i] < __y[__i] ? __y[__i] : __x[__i];
   return (v128_t)__r;
+#endif
 }
 
 /* Conversions, narrowing and widening. */
@@ -1084,30 +1231,46 @@ static __inline__ v128_t wasm_f64x2_convert_low_u32x4(v128_t __a) {
   return (v128_t)__r;
 }
 static __inline__ v128_t wasm_i32x4_trunc_sat_f32x4(v128_t __a) {
+#ifdef __wasm_simd128__
+  return (v128_t)__builtin_wasm_trunc_saturate_s_i32x4_f32x4((__f32x4)__a);
+#else
   __f32x4 __x = (__f32x4)__a;
   __i32x4 __r;
   for (int __i = 0; __i < 4; __i++) __r[__i] = __builtin_wasm_trunc_saturate_s_i32_f32(__x[__i]);
   return (v128_t)__r;
+#endif
 }
 static __inline__ v128_t wasm_i32x4_trunc_sat_f64x2_zero(v128_t __a) {
+#ifdef __wasm_simd128__
+  return (v128_t)__builtin_wasm_trunc_sat_s_zero_f64x2_i32x4((__f64x2)__a);
+#else
   __f64x2 __x = (__f64x2)__a;
   __i32x4 __r;
   for (int __i = 0; __i < 4; __i++)
     __r[__i] = __i < 2 ? __builtin_wasm_trunc_saturate_s_i32_f64(__x[__i]) : 0;
   return (v128_t)__r;
+#endif
 }
 static __inline__ v128_t wasm_u32x4_trunc_sat_f32x4(v128_t __a) {
+#ifdef __wasm_simd128__
+  return (v128_t)__builtin_wasm_trunc_saturate_u_i32x4_f32x4((__f32x4)__a);
+#else
   __f32x4 __x = (__f32x4)__a;
   __u32x4 __r;
   for (int __i = 0; __i < 4; __i++) __r[__i] = __builtin_wasm_trunc_saturate_u_i32_f32(__x[__i]);
   return (v128_t)__r;
+#endif
 }
 static __inline__ v128_t wasm_u32x4_trunc_sat_f64x2_zero(v128_t __a) {
+#ifdef __wasm_simd128__
+  return (v128_t)__builtin_wasm_trunc_sat_u_zero_f64x2_i32x4((__f64x2)__a);
+#else
   __f64x2 __x = (__f64x2)__a;
   __u32x4 __r;
   for (int __i = 0; __i < 4; __i++)
     __r[__i] = __i < 2 ? __builtin_wasm_trunc_saturate_u_i32_f64(__x[__i]) : 0;
   return (v128_t)__r;
+#endif
 }
 static __inline__ v128_t wasm_f32x4_demote_f64x2_zero(v128_t __a) {
   __f64x2 __x = (__f64x2)__a;
@@ -1122,6 +1285,9 @@ static __inline__ v128_t wasm_f64x2_promote_low_f32x4(v128_t __a) {
   return (v128_t)__r;
 }
 static __inline__ v128_t wasm_i8x16_narrow_i16x8(v128_t __a, v128_t __b) {
+#ifdef __wasm_simd128__
+  return (v128_t)__builtin_wasm_narrow_s_i8x16_i16x8((__i16x8)__a, (__i16x8)__b);
+#else
   __i16x8 __x = (__i16x8)__a;
   __i16x8 __y = (__i16x8)__b;
   int __s;
@@ -1129,8 +1295,12 @@ static __inline__ v128_t wasm_i8x16_narrow_i16x8(v128_t __a, v128_t __b) {
   for (int __i = 0; __i < 16; __i++)
     __r[__i] = (__s = __i < 8 ? __x[__i] : __y[__i - 8]) < -128 ? -128 : __s > 127 ? 127 : __s;
   return (v128_t)__r;
+#endif
 }
 static __inline__ v128_t wasm_u8x16_narrow_i16x8(v128_t __a, v128_t __b) {
+#ifdef __wasm_simd128__
+  return (v128_t)__builtin_wasm_narrow_u_i8x16_i16x8((__i16x8)__a, (__i16x8)__b);
+#else
   __i16x8 __x = (__i16x8)__a;
   __i16x8 __y = (__i16x8)__b;
   int __s;
@@ -1138,8 +1308,12 @@ static __inline__ v128_t wasm_u8x16_narrow_i16x8(v128_t __a, v128_t __b) {
   for (int __i = 0; __i < 16; __i++)
     __r[__i] = (__s = __i < 8 ? __x[__i] : __y[__i - 8]) < 0 ? 0 : __s > 255 ? 255 : __s;
   return (v128_t)__r;
+#endif
 }
 static __inline__ v128_t wasm_i16x8_narrow_i32x4(v128_t __a, v128_t __b) {
+#ifdef __wasm_simd128__
+  return (v128_t)__builtin_wasm_narrow_s_i16x8_i32x4((__i32x4)__a, (__i32x4)__b);
+#else
   __i32x4 __x = (__i32x4)__a;
   __i32x4 __y = (__i32x4)__b;
   int __s;
@@ -1148,8 +1322,12 @@ static __inline__ v128_t wasm_i16x8_narrow_i32x4(v128_t __a, v128_t __b) {
     __r[__i] = (__s = __i < 4 ? __x[__i] : __y[__i - 4]) < -32768 ? -32768 : __s > 32767 ? 32767
         : __s;
   return (v128_t)__r;
+#endif
 }
 static __inline__ v128_t wasm_u16x8_narrow_i32x4(v128_t __a, v128_t __b) {
+#ifdef __wasm_simd128__
+  return (v128_t)__builtin_wasm_narrow_u_i16x8_i32x4((__i32x4)__a, (__i32x4)__b);
+#else
   __i32x4 __x = (__i32x4)__a;
   __i32x4 __y = (__i32x4)__b;
   int __s;
@@ -1157,6 +1335,7 @@ static __inline__ v128_t wasm_u16x8_narrow_i32x4(v128_t __a, v128_t __b) {
   for (int __i = 0; __i < 8; __i++)
     __r[__i] = (__s = __i < 4 ? __x[__i] : __y[__i - 4]) < 0 ? 0 : __s > 65535 ? 65535 : __s;
   return (v128_t)__r;
+#endif
 }
 static __inline__ v128_t wasm_i16x8_extend_low_i8x16(v128_t __a) {
   __i8x16 __x = (__i8x16)__a;
@@ -1319,28 +1498,44 @@ static __inline__ v128_t wasm_u64x2_extmul_high_u32x4(v128_t __a, v128_t __b) {
   return (v128_t)__r;
 }
 static __inline__ v128_t wasm_i16x8_extadd_pairwise_i8x16(v128_t __a) {
+#ifdef __wasm_simd128__
+  return (v128_t)__builtin_wasm_extadd_pairwise_i8x16_s_i16x8((__i8x16)__a);
+#else
   __i8x16 __x = (__i8x16)__a;
   __i16x8 __r;
   for (int __i = 0; __i < 8; __i++) __r[__i] = __x[2 * __i] + __x[2 * __i + 1];
   return (v128_t)__r;
+#endif
 }
 static __inline__ v128_t wasm_u16x8_extadd_pairwise_u8x16(v128_t __a) {
+#ifdef __wasm_simd128__
+  return (v128_t)__builtin_wasm_extadd_pairwise_i8x16_u_i16x8((__u8x16)__a);
+#else
   __u8x16 __x = (__u8x16)__a;
   __u16x8 __r;
   for (int __i = 0; __i < 8; __i++) __r[__i] = __x[2 * __i] + __x[2 * __i + 1];
   return (v128_t)__r;
+#endif
 }
 static __inline__ v128_t wasm_i32x4_extadd_pairwise_i16x8(v128_t __a) {
+#ifdef __wasm_simd128__
+  return (v128_t)__builtin_wasm_extadd_pairwise_i16x8_s_i32x4((__i16x8)__a);
+#else
   __i16x8 __x = (__i16x8)__a;
   __i32x4 __r;
   for (int __i = 0; __i < 4; __i++) __r[__i] = __x[2 * __i] + __x[2 * __i + 1];
   return (v128_t)__r;
+#endif
 }
 static __inline__ v128_t wasm_u32x4_extadd_pairwise_u16x8(v128_t __a) {
+#ifdef __wasm_simd128__
+  return (v128_t)__builtin_wasm_extadd_pairwise_i16x8_u_i32x4((__u16x8)__a);
+#else
   __u16x8 __x = (__u16x8)__a;
   __u32x4 __r;
   for (int __i = 0; __i < 4; __i++) __r[__i] = __x[2 * __i] + __x[2 * __i + 1];
   return (v128_t)__r;
+#endif
 }
 
 /* Bitwise operations, the any test and the swizzle. */
@@ -1360,90 +1555,182 @@ static __inline__ v128_t wasm_v128_andnot(v128_t __a, v128_t __b) {
   return __a & ~__b;
 }
 static __inline__ bool wasm_v128_any_true(v128_t __a) {
+#ifdef __wasm_simd128__
+  return __builtin_wasm_any_true_v128((__i8x16)__a);
+#else
   __u64x2 __x = (__u64x2)__a;
   return (__x[0] | __x[1]) != 0;
+#endif
 }
 static __inline__ v128_t wasm_v128_bitselect(v128_t __a, v128_t __b, v128_t __m) {
+#ifdef __wasm_simd128__
+  return (v128_t)__builtin_wasm_bitselect((__i32x4)__a, (__i32x4)__b, (__i32x4)__m);
+#else
   return (__a & __m) | (__b & ~__m);
+#endif
 }
 static __inline__ v128_t wasm_i8x16_swizzle(v128_t __a, v128_t __b) {
+#ifdef __wasm_simd128__
+  return (v128_t)__builtin_wasm_swizzle_i8x16((__i8x16)__a, (__i8x16)__b);
+#else
   __u8x16 __x = (__u8x16)__a;
   __u8x16 __y = (__u8x16)__b;
   __u8x16 __r;
   for (int __i = 0; __i < 16; __i++) __r[__i] = __y[__i] < 16 ? __x[__y[__i]] : 0;
   return (v128_t)__r;
+#endif
 }
 
 /* The relaxed-simd functions. Each gives one of the answers the proposal allows, and the same
  * one on every engine. */
 static __inline__ v128_t wasm_i8x16_relaxed_swizzle(v128_t __a, v128_t __s) {
+#ifdef __wasm_relaxed_simd__
+  return (v128_t)__builtin_wasm_relaxed_swizzle_i8x16((__i8x16)__a, (__i8x16)__s);
+#else
   __u8x16 __x = (__u8x16)__a;
   __u8x16 __y = (__u8x16)__s;
   __u8x16 __r;
   for (int __i = 0; __i < 16; __i++) __r[__i] = __y[__i] < 16 ? __x[__y[__i]] : 0;
   return (v128_t)__r;
+#endif
 }
 static __inline__ v128_t wasm_i32x4_relaxed_trunc_f32x4(v128_t __a) {
+#ifdef __wasm_relaxed_simd__
+  return (v128_t)__builtin_wasm_relaxed_trunc_s_i32x4_f32x4((__f32x4)__a);
+#else
   return wasm_i32x4_trunc_sat_f32x4(__a);
+#endif
 }
 static __inline__ v128_t wasm_i32x4_relaxed_trunc_f64x2_zero(v128_t __a) {
+#ifdef __wasm_relaxed_simd__
+  return (v128_t)__builtin_wasm_relaxed_trunc_s_zero_i32x4_f64x2((__f64x2)__a);
+#else
   return wasm_i32x4_trunc_sat_f64x2_zero(__a);
+#endif
 }
 static __inline__ v128_t wasm_u32x4_relaxed_trunc_f32x4(v128_t __a) {
+#ifdef __wasm_relaxed_simd__
+  return (v128_t)__builtin_wasm_relaxed_trunc_u_i32x4_f32x4((__f32x4)__a);
+#else
   return wasm_u32x4_trunc_sat_f32x4(__a);
+#endif
 }
 static __inline__ v128_t wasm_u32x4_relaxed_trunc_f64x2_zero(v128_t __a) {
+#ifdef __wasm_relaxed_simd__
+  return (v128_t)__builtin_wasm_relaxed_trunc_u_zero_i32x4_f64x2((__f64x2)__a);
+#else
   return wasm_u32x4_trunc_sat_f64x2_zero(__a);
+#endif
 }
 static __inline__ v128_t wasm_f32x4_relaxed_madd(v128_t __a, v128_t __b, v128_t __c) {
+#ifdef __wasm_relaxed_simd__
+  return (v128_t)__builtin_wasm_relaxed_madd_f32x4((__f32x4)__a, (__f32x4)__b, (__f32x4)__c);
+#else
   return (v128_t)((__f32x4)__a * (__f32x4)__b + (__f32x4)__c);
+#endif
 }
 static __inline__ v128_t wasm_f32x4_relaxed_nmadd(v128_t __a, v128_t __b, v128_t __c) {
+#ifdef __wasm_relaxed_simd__
+  return (v128_t)__builtin_wasm_relaxed_nmadd_f32x4((__f32x4)__a, (__f32x4)__b, (__f32x4)__c);
+#else
   return (v128_t)(-((__f32x4)__a * (__f32x4)__b) + (__f32x4)__c);
+#endif
 }
 static __inline__ v128_t wasm_f32x4_relaxed_min(v128_t __a, v128_t __b) {
+#ifdef __wasm_relaxed_simd__
+  return (v128_t)__builtin_wasm_relaxed_min_f32x4((__f32x4)__a, (__f32x4)__b);
+#else
   return wasm_f32x4_min(__a, __b);
+#endif
 }
 static __inline__ v128_t wasm_f32x4_relaxed_max(v128_t __a, v128_t __b) {
+#ifdef __wasm_relaxed_simd__
+  return (v128_t)__builtin_wasm_relaxed_max_f32x4((__f32x4)__a, (__f32x4)__b);
+#else
   return wasm_f32x4_max(__a, __b);
+#endif
 }
 static __inline__ v128_t wasm_f64x2_relaxed_madd(v128_t __a, v128_t __b, v128_t __c) {
+#ifdef __wasm_relaxed_simd__
+  return (v128_t)__builtin_wasm_relaxed_madd_f64x2((__f64x2)__a, (__f64x2)__b, (__f64x2)__c);
+#else
   return (v128_t)((__f64x2)__a * (__f64x2)__b + (__f64x2)__c);
+#endif
 }
 static __inline__ v128_t wasm_f64x2_relaxed_nmadd(v128_t __a, v128_t __b, v128_t __c) {
+#ifdef __wasm_relaxed_simd__
+  return (v128_t)__builtin_wasm_relaxed_nmadd_f64x2((__f64x2)__a, (__f64x2)__b, (__f64x2)__c);
+#else
   return (v128_t)(-((__f64x2)__a * (__f64x2)__b) + (__f64x2)__c);
+#endif
 }
 static __inline__ v128_t wasm_f64x2_relaxed_min(v128_t __a, v128_t __b) {
+#ifdef __wasm_relaxed_simd__
+  return (v128_t)__builtin_wasm_relaxed_min_f64x2((__f64x2)__a, (__f64x2)__b);
+#else
   return wasm_f64x2_min(__a, __b);
+#endif
 }
 static __inline__ v128_t wasm_f64x2_relaxed_max(v128_t __a, v128_t __b) {
+#ifdef __wasm_relaxed_simd__
+  return (v128_t)__builtin_wasm_relaxed_max_f64x2((__f64x2)__a, (__f64x2)__b);
+#else
   return wasm_f64x2_max(__a, __b);
+#endif
 }
 static __inline__ v128_t wasm_i8x16_relaxed_laneselect(v128_t __a, v128_t __b, v128_t __m) {
+#ifdef __wasm_relaxed_simd__
+  return (v128_t)__builtin_wasm_relaxed_laneselect_i8x16((__i8x16)__a, (__i8x16)__b, (__i8x16)__m);
+#else
   return wasm_v128_bitselect(__a, __b, __m);
+#endif
 }
 static __inline__ v128_t wasm_i16x8_relaxed_laneselect(v128_t __a, v128_t __b, v128_t __m) {
+#ifdef __wasm_relaxed_simd__
+  return (v128_t)__builtin_wasm_relaxed_laneselect_i16x8((__i16x8)__a, (__i16x8)__b, (__i16x8)__m);
+#else
   return wasm_v128_bitselect(__a, __b, __m);
+#endif
 }
 static __inline__ v128_t wasm_i32x4_relaxed_laneselect(v128_t __a, v128_t __b, v128_t __m) {
+#ifdef __wasm_relaxed_simd__
+  return (v128_t)__builtin_wasm_relaxed_laneselect_i32x4((__i32x4)__a, (__i32x4)__b, (__i32x4)__m);
+#else
   return wasm_v128_bitselect(__a, __b, __m);
+#endif
 }
 static __inline__ v128_t wasm_i64x2_relaxed_laneselect(v128_t __a, v128_t __b, v128_t __m) {
+#ifdef __wasm_relaxed_simd__
+  return (v128_t)__builtin_wasm_relaxed_laneselect_i64x2((__i64x2)__a, (__i64x2)__b, (__i64x2)__m);
+#else
   return wasm_v128_bitselect(__a, __b, __m);
+#endif
 }
 static __inline__ v128_t wasm_i16x8_relaxed_q15mulr(v128_t __a, v128_t __b) {
+#ifdef __wasm_relaxed_simd__
+  return (v128_t)__builtin_wasm_relaxed_q15mulr_s_i16x8((__i16x8)__a, (__i16x8)__b);
+#else
   return wasm_i16x8_q15mulr_sat(__a, __b);
+#endif
 }
 static __inline__ v128_t wasm_i16x8_relaxed_dot_i8x16_i7x16(v128_t __a, v128_t __b) {
+#ifdef __wasm_relaxed_simd__
+  return (v128_t)__builtin_wasm_relaxed_dot_i8x16_i7x16_s_i16x8((__i8x16)__a, (__i8x16)__b);
+#else
   __i8x16 __x = (__i8x16)__a;
   __i8x16 __y = (__i8x16)__b;
   __i16x8 __r;
   for (int __i = 0; __i < 8; __i++)
     __r[__i] = __x[2 * __i] * __y[2 * __i] + __x[2 * __i + 1] * __y[2 * __i + 1];
   return (v128_t)__r;
+#endif
 }
 static __inline__ v128_t wasm_i32x4_relaxed_dot_i8x16_i7x16_add(v128_t __a, v128_t __b,
     v128_t __c) {
+#ifdef __wasm_relaxed_simd__
+  return (v128_t)__builtin_wasm_relaxed_dot_i8x16_i7x16_add_s_i32x4((__i8x16)__a, (__i8x16)__b,
+      (__i32x4)__c);
+#else
   __i8x16 __x = (__i8x16)__a;
   __i8x16 __y = (__i8x16)__b;
   __u32x4 __z = (__u32x4)__c;
@@ -1452,6 +1739,7 @@ static __inline__ v128_t wasm_i32x4_relaxed_dot_i8x16_i7x16_add(v128_t __a, v128
     __r[__i] = (unsigned)(__x[4 * __i] * __y[4 * __i] + __x[4 * __i + 1] * __y[4 * __i + 1]
         + __x[4 * __i + 2] * __y[4 * __i + 2] + __x[4 * __i + 3] * __y[4 * __i + 3]) + __z[__i];
   return (v128_t)__r;
+#endif
 }
 
 /* The shuffles, which pick each lane of the answer from the lanes of both operands. A lane index

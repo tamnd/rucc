@@ -305,7 +305,17 @@ impl Checker<'_> {
     }
 
     /// One type, written the way the table writes one.
+    ///
+    /// A type that ends in `x2`, `x4`, `x8` or `x16` is a GNU vector of that many lanes of the
+    /// type before it, which is how the vector builtins of clang for wasm are written. clang
+    /// writes `V16Sc` for the vector of 16 `signed char`, and the table writes `signed char x16`.
     fn written_type(&mut self, text: &str) -> Option<TypeId> {
+        if let Some((lane, count)) = text.trim().rsplit_once(' ')
+            && let Some(Ok(count)) = count.strip_prefix('x').map(str::parse::<u32>)
+        {
+            let lane = self.written_type(lane)?;
+            return Some(self.types.vector(lane, count));
+        }
         let stars = text.bytes().filter(|byte| *byte == b'*').count();
         let words = text.trim_end_matches(['*', ' ']).split_whitespace();
         let mut quals = Qualifiers::NONE;
@@ -509,6 +519,30 @@ mod tests {
             let ty = c.signature_type(signature).expect("a type");
             assert_eq!(spelled(&c, ty), written, "for {signature}");
         }
+    }
+
+    /// A lane type and then `x` and a count is a vector of that many lanes, as clang gives the
+    /// vector builtins of wasm.
+    #[test]
+    fn a_count_of_lanes_after_a_type_is_a_vector_of_that_type() {
+        let fixture = Fixture::new("wasm32-wasip1");
+        let mut c = fixture.checker();
+        let ty = c.signature_type("int(signed char x16)").expect("a type");
+        let TypeKind::Function(id) = c.types.kind(ty) else { panic!("a function") };
+        let param = c.types.signature(id).params[0];
+        let TypeKind::Vector { elem, len } = c.types.kind(param) else { panic!("a vector") };
+        assert_eq!(len, 16);
+        assert_eq!(spelled(&c, elem), "signed char");
+        let ty =
+            c.signature_type("unsigned short x8(unsigned short x8, short x8)").expect("a type");
+        let TypeKind::Function(id) = c.types.kind(ty) else { panic!("a function") };
+        let signature = c.types.signature(id);
+        let TypeKind::Vector { elem, len } = c.types.kind(signature.ret) else {
+            panic!("a vector")
+        };
+        assert_eq!((spelled(&c, elem), len), ("unsigned short".to_string(), 8));
+        let TypeKind::Vector { elem, .. } = c.types.kind(signature.params[1]) else { panic!() };
+        assert_eq!(spelled(&c, elem), "short");
     }
 
     /// `void` in a parameter list is a list with nothing in it rather than a parameter of no

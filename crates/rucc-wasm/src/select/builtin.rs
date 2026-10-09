@@ -4,8 +4,9 @@
 //! only, from their rows in `rucc-gnu/features.toml`, and gives each call the type of clang 23. The
 //! call reaches the backend as a call to the name, and the selector writes the instruction in its
 //! place, as clang does. No object has a symbol of the name, so a call that the selector did not
-//! see would not link. The builtins of the other groups (reference types, atomics, exceptions,
-//! SIMD) have no row yet, so a call to one of them is a call to an undeclared function.
+//! see would not link. The vector builtins of [`VECTOR`] are written the same way, with `-msimd128`.
+//! The builtins of the other groups (reference types, atomics, exceptions) have no row yet, so a
+//! call to one of them is a call to an undeclared function.
 //!
 //! The maths functions of the C library that wasm has an instruction for are written the same way,
 //! as clang does. That is `sqrt`, `ceil`, `floor`, `trunc`, `rint`, `nearbyint`, `fabs` and
@@ -33,9 +34,91 @@ enum Write {
     /// `global.get` of the global with this name, which `wasm-ld` makes, and whether the global is
     /// mutable.
     Global(&'static str, bool),
+    /// The SIMD instruction with this name, which needs this feature.
+    Simd(&'static str, Feature),
 }
 
-/// What the builtin `name` writes, or nothing when `name` is not a scalar builtin of clang.
+/// The vector builtins of clang 23 that have a type of their own, each with the SIMD instruction
+/// that it is. A name that starts with `relaxed_` is an instruction of relaxed SIMD.
+///
+/// `__builtin_wasm_shuffle_i8x16` is not here, because its 16 lanes must be constants. The other
+/// operations of `<wasm_simd128.h>` are plain C or generic builtins in clang, and not names of
+/// their own.
+const VECTOR: &[(&str, &str)] = &[
+    ("abs_i8x16", "i8x16.abs"),
+    ("abs_i16x8", "i16x8.abs"),
+    ("abs_i32x4", "i32x4.abs"),
+    ("abs_i64x2", "i64x2.abs"),
+    ("abs_f32x4", "f32x4.abs"),
+    ("abs_f64x2", "f64x2.abs"),
+    ("all_true_i8x16", "i8x16.all_true"),
+    ("bitmask_i8x16", "i8x16.bitmask"),
+    ("all_true_i16x8", "i16x8.all_true"),
+    ("bitmask_i16x8", "i16x8.bitmask"),
+    ("all_true_i32x4", "i32x4.all_true"),
+    ("bitmask_i32x4", "i32x4.bitmask"),
+    ("all_true_i64x2", "i64x2.all_true"),
+    ("bitmask_i64x2", "i64x2.bitmask"),
+    ("any_true_v128", "v128.any_true"),
+    ("bitselect", "v128.bitselect"),
+    ("avgr_u_i8x16", "i8x16.avgr_u"),
+    ("avgr_u_i16x8", "i16x8.avgr_u"),
+    ("ceil_f32x4", "f32x4.ceil"),
+    ("floor_f32x4", "f32x4.floor"),
+    ("trunc_f32x4", "f32x4.trunc"),
+    ("nearest_f32x4", "f32x4.nearest"),
+    ("sqrt_f32x4", "f32x4.sqrt"),
+    ("min_f32x4", "f32x4.min"),
+    ("max_f32x4", "f32x4.max"),
+    ("pmin_f32x4", "f32x4.pmin"),
+    ("pmax_f32x4", "f32x4.pmax"),
+    ("ceil_f64x2", "f64x2.ceil"),
+    ("floor_f64x2", "f64x2.floor"),
+    ("trunc_f64x2", "f64x2.trunc"),
+    ("nearest_f64x2", "f64x2.nearest"),
+    ("sqrt_f64x2", "f64x2.sqrt"),
+    ("min_f64x2", "f64x2.min"),
+    ("max_f64x2", "f64x2.max"),
+    ("pmin_f64x2", "f64x2.pmin"),
+    ("pmax_f64x2", "f64x2.pmax"),
+    ("dot_s_i32x4_i16x8", "i32x4.dot_i16x8_s"),
+    ("extadd_pairwise_i8x16_s_i16x8", "i16x8.extadd_pairwise_i8x16_s"),
+    ("extadd_pairwise_i8x16_u_i16x8", "i16x8.extadd_pairwise_i8x16_u"),
+    ("extadd_pairwise_i16x8_s_i32x4", "i32x4.extadd_pairwise_i16x8_s"),
+    ("extadd_pairwise_i16x8_u_i32x4", "i32x4.extadd_pairwise_i16x8_u"),
+    ("narrow_s_i8x16_i16x8", "i8x16.narrow_i16x8_s"),
+    ("narrow_u_i8x16_i16x8", "i8x16.narrow_i16x8_u"),
+    ("narrow_s_i16x8_i32x4", "i16x8.narrow_i32x4_s"),
+    ("narrow_u_i16x8_i32x4", "i16x8.narrow_i32x4_u"),
+    ("q15mulr_sat_s_i16x8", "i16x8.q15mulr_sat_s"),
+    ("swizzle_i8x16", "i8x16.swizzle"),
+    ("trunc_saturate_s_i32x4_f32x4", "i32x4.trunc_sat_f32x4_s"),
+    ("trunc_saturate_u_i32x4_f32x4", "i32x4.trunc_sat_f32x4_u"),
+    ("trunc_sat_s_zero_f64x2_i32x4", "i32x4.trunc_sat_f64x2_s_zero"),
+    ("trunc_sat_u_zero_f64x2_i32x4", "i32x4.trunc_sat_f64x2_u_zero"),
+    ("relaxed_swizzle_i8x16", "i8x16.relaxed_swizzle"),
+    ("relaxed_trunc_s_i32x4_f32x4", "i32x4.relaxed_trunc_f32x4_s"),
+    ("relaxed_trunc_u_i32x4_f32x4", "i32x4.relaxed_trunc_f32x4_u"),
+    ("relaxed_trunc_s_zero_i32x4_f64x2", "i32x4.relaxed_trunc_f64x2_s_zero"),
+    ("relaxed_trunc_u_zero_i32x4_f64x2", "i32x4.relaxed_trunc_f64x2_u_zero"),
+    ("relaxed_madd_f32x4", "f32x4.relaxed_madd"),
+    ("relaxed_nmadd_f32x4", "f32x4.relaxed_nmadd"),
+    ("relaxed_min_f32x4", "f32x4.relaxed_min"),
+    ("relaxed_max_f32x4", "f32x4.relaxed_max"),
+    ("relaxed_madd_f64x2", "f64x2.relaxed_madd"),
+    ("relaxed_nmadd_f64x2", "f64x2.relaxed_nmadd"),
+    ("relaxed_min_f64x2", "f64x2.relaxed_min"),
+    ("relaxed_max_f64x2", "f64x2.relaxed_max"),
+    ("relaxed_laneselect_i8x16", "i8x16.relaxed_laneselect"),
+    ("relaxed_laneselect_i16x8", "i16x8.relaxed_laneselect"),
+    ("relaxed_laneselect_i32x4", "i32x4.relaxed_laneselect"),
+    ("relaxed_laneselect_i64x2", "i64x2.relaxed_laneselect"),
+    ("relaxed_q15mulr_s_i16x8", "i16x8.relaxed_q15mulr_s"),
+    ("relaxed_dot_i8x16_i7x16_s_i16x8", "i16x8.relaxed_dot_i8x16_i7x16_s"),
+    ("relaxed_dot_i8x16_i7x16_add_s_i32x4", "i32x4.relaxed_dot_i8x16_i7x16_add_s"),
+];
+
+/// What the builtin `name` writes, or nothing when `name` is not a builtin of clang.
 ///
 /// The opcodes are those of the Wasm 3.0 binary format, section 5.4. The 8 trapping conversions
 /// start at `i32.trunc_f32_s` (0xa8) for `i32` and at `i64.trunc_f32_s` (0xae) for `i64`, in the
@@ -43,6 +126,13 @@ enum Write {
 /// `0xfc 0` to `0xfc 7` in the same order.
 fn write(name: &str) -> Option<Write> {
     let name = name.strip_prefix("__builtin_wasm_")?;
+    if let Some(&(_, op)) = VECTOR.iter().find(|&&(form, _)| form == name) {
+        let feature = match name.starts_with("relaxed_") {
+            true => Feature::RelaxedSimd,
+            false => Feature::Simd128,
+        };
+        return Some(Write::Simd(op, feature));
+    }
     Some(match name {
         "memory_size" => Write::Memory(0x3f),
         "memory_grow" => Write::Memory(0x40),
@@ -113,6 +203,31 @@ pub(super) fn is_builtin(name: &str) -> bool {
 }
 
 impl Lower<'_, '_> {
+    /// What the call `inst` writes, or nothing when it is not a call to a builtin.
+    fn written(&self, inst: Inst) -> Option<Write> {
+        let Extra::Call(info) = self.func[inst].extra else { return None };
+        write(self.unit.names.resolve(self.func[info].callee?))
+    }
+
+    /// Whether the call `inst` is a builtin whose code pushes each argument once, in order, and
+    /// then writes one instruction.
+    pub(super) fn builtin_pushes_once(&self, inst: Inst) -> bool {
+        matches!(self.written(inst), Some(Write::Op(_) | Write::Saturating(_) | Write::Simd(..)))
+    }
+
+    /// Whether `value` is the answer of `all_true` or `any_true`, which is 0 or 1.
+    pub(super) fn boolean_builtin(&self, value: Value) -> bool {
+        let Some((inst, _)) = self.def(value) else { return false };
+        matches!(self.written(inst),
+            Some(Write::Simd(op, _)) if op.ends_with(".all_true") || op.ends_with(".any_true"))
+    }
+
+    /// Whether the call `inst` is a vector builtin, which has no effect, reads no memory and
+    /// cannot trap.
+    pub(super) fn simd_builtin(&self, inst: Inst) -> bool {
+        matches!(self.written(inst), Some(Write::Simd(..)))
+    }
+
     /// The opcode of the instruction that the call `inst` to a maths function is written as, or
     /// nothing when it stays a call or when it is the checked `sqrt` of [`Lower::maths`].
     pub(super) fn libm(&self, inst: Inst) -> Option<u8> {
@@ -218,6 +333,16 @@ impl Lower<'_, '_> {
             Write::Global(global, mutable) => {
                 let symbol = self.unit.linker_global(global, ValType::I32, mutable);
                 self.code.global_get(symbol);
+            }
+            Write::Simd(op, feature) => {
+                // clang refuses the call in the same words.
+                if !self.unit.features.has(feature) {
+                    return Err(format!("`{name}` needs target feature {}", feature.name()));
+                }
+                for &arg in args {
+                    self.push(arg)?;
+                }
+                self.simd(op)?;
             }
         }
         Ok(())
