@@ -247,6 +247,17 @@
 (semantics (x64.sar_ri_16 l r) (bvashr l (bvand r 31)))
 (semantics (x64.sar_ri_32 l r) (bvashr l (bvand r 31)))
 (semantics (x64.sar_ri_64 l r) (bvashr l (bvand r 63)))
+;; A shift that fills the bits it opens from the other end of a second register, `shld` and
+;; `shrd`. A count of zero leaves the destination as it was, which the shift of the second
+;; register by the whole width says.
+(semantics (x64.shld_ri_32 l r k)
+           (bvor (bvshl l (bvand k 31)) (bvlshr r (bvsub 32 (bvand k 31)))))
+(semantics (x64.shld_ri_64 l r k)
+           (bvor (bvshl l (bvand k 63)) (bvlshr r (bvsub 64 (bvand k 63)))))
+(semantics (x64.shrd_ri_32 l r k)
+           (bvor (bvlshr l (bvand k 31)) (bvshl r (bvsub 32 (bvand k 31)))))
+(semantics (x64.shrd_ri_64 l r k)
+           (bvor (bvlshr l (bvand k 63)) (bvshl r (bvsub 64 (bvand k 63)))))
 (semantics (x64.shl_rcl_8 l r) (bvshl l (bvand r 31)))
 (semantics (x64.shl_rcl_16 l r) (bvshl l (bvand r 31)))
 (semantics (x64.shl_rcl_32 l r) (bvshl l (bvand r 31)))

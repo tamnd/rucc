@@ -49,10 +49,10 @@ use Form::{
     ConvertFromVec, ConvertToVec, ConvertVec, CpuId, CtrlX87, DivQuo, DivRem, DivWide, Exchange,
     Jcc, Jmp, JmpAway, JmpMem, JmpReg, Landing, Lea, Literal, Load, LoadImm, LoadVec, Move,
     MoveVec, MulHigh, MulRi, MulWide, Nop, Pop, PopX87, Prefetch, Push, PushX87, Ret, RetPop,
-    RetVal, RetVal2, RetVal2Vec, RetValVec, Rmw, Scan, Search, Set, ShiftCl, ShiftRi, ShiftVec,
-    ShuffleVec, Spin, Store, StoreImm, StoreVec, StrCompare, StrCompareRep, StrLoad, StrMove,
-    StrMoveRep, StrScan, StrScanRep, StrStore, StrStoreRep, Swap, SwapHalves, Template, Test,
-    TestCmov, TestRi, Trap, UnaryM, UnaryR, UnaryX87,
+    RetVal, RetVal2, RetVal2Vec, RetValVec, Rmw, Scan, Search, Set, ShiftCl, ShiftDouble, ShiftRi,
+    ShiftVec, ShuffleVec, Spin, Store, StoreImm, StoreVec, StrCompare, StrCompareRep, StrLoad,
+    StrMove, StrMoveRep, StrScan, StrScanRep, StrStore, StrStoreRep, Swap, SwapHalves, Template,
+    Test, TestCmov, TestRi, Trap, UnaryM, UnaryR, UnaryX87,
 };
 
 /// The operand vector one machine instruction has.
@@ -176,6 +176,10 @@ pub enum Form {
     ShiftRi,
     /// A two-address shift by a count, which this machine reads from `cl` and nowhere else.
     ShiftCl,
+    /// A two-address shift by a constant that fills the bits it opens from a second register, which
+    /// is `shld` and `shrd`. The pair of words a `long long` shift on i386 is put back together
+    /// with one of these where it was two shifts and an or.
+    ShiftDouble,
     /// A comparison and the byte it sets, which writes a destination unrelated to either
     /// source rather than destroying one of them.
     CmpSet,
@@ -1268,7 +1272,7 @@ impl Form {
     pub fn operands(self) -> &'static [OperandDesc] {
         match self {
             LoadImm => &LOAD_IMM,
-            AluRr | AluCarry => &TWO_ADDRESS_RR,
+            AluRr | AluCarry | ShiftDouble => &TWO_ADDRESS_RR,
             AluRi | AluCarryI | AluRm | UnaryR | ShiftRi | Swap => &TWO_ADDRESS_RI,
             SwapHalves => &SWAP_HALVES,
             Exchange => &EXCHANGE,
@@ -1349,6 +1353,7 @@ impl Form {
                 | AluCarryI
                 | AluMi
                 | ShiftRi
+                | ShiftDouble
                 | CmpSetRi
                 | CmpRi
                 | CmpSetMi
@@ -1801,6 +1806,11 @@ pub static INSTS: &[(&str, Form)] = &[
     ("sar_ri_16", ShiftRi),
     ("sar_ri_32", ShiftRi),
     ("sar_ri_64", ShiftRi),
+    // A shift by a constant that brings in the bits of a second register.
+    ("shld_ri_32", ShiftDouble),
+    ("shld_ri_64", ShiftDouble),
+    ("shrd_ri_32", ShiftDouble),
+    ("shrd_ri_64", ShiftDouble),
     // Shifts by a register, which is `cl` and nothing else.
     ("shl_rcl_8", ShiftCl),
     ("shl_rcl_16", ShiftCl),
@@ -2710,7 +2720,7 @@ mod tests {
         // Every head in the model file, which is what the rule set may write and what
         // `rucc-verify` has an answer for. The two lists are checked against each other by
         // `rucc-codegen`, which is the crate that can read the rule set.
-        assert_eq!(described, 817);
+        assert_eq!(described, 821);
     }
 
     #[test]
@@ -2797,7 +2807,7 @@ mod tests {
 
     #[test]
     fn a_two_address_form_ties_its_destination_to_its_first_source() {
-        for form in [AluRr, AluRi, UnaryR, ShiftRi, ShiftCl, AluVec] {
+        for form in [AluRr, AluRi, UnaryR, ShiftRi, ShiftCl, ShiftDouble, AluVec] {
             assert_eq!(form.operands()[0].constraint, Constraint::Reuse(1));
         }
         // The float arithmetic is in the other class throughout, which is the whole reason it is a
@@ -2895,6 +2905,7 @@ mod tests {
         assert_eq!(ShiftCl.operands()[2].constraint, Constraint::Fixed(RCX));
         assert!(!ShiftCl.takes_imm());
         assert!(ShiftRi.takes_imm());
+        assert!(ShiftDouble.takes_imm() && ShiftDouble.operands().len() == 3);
     }
 
     #[test]
