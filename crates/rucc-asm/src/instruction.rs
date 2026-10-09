@@ -1760,10 +1760,13 @@ fn address(text: &str, mode: Mode) -> Result<Operand, String> {
 
     // A name in an address that is not counted from the instruction is the name's address, which
     // the linker writes into four bytes of displacement however small the rest of it is. A suffix
-    // asks for a table slot or a thread's offset, which is only reached from the instruction.
+    // asks for a table slot or a thread's offset, which is only reached from the instruction. The
+    // two that are not are `@dtpoff` and `@tpoff`, which are a thread-local's offset in four bytes
+    // and are added to a register, as in `movl x@dtpoff(%rax), %eax` after `__tls_get_addr`.
     if let Some(named) = &named {
         if !addr.rip {
-            if let Some((_, how)) = named.name.split_once('@').filter(|_| mode == Mode::Bits64) {
+            let suffix = named.name.split_once('@').map(|(_, how)| how);
+            if let Some(how) = suffix.filter(|&how| mode == Mode::Bits64 && moved(how).is_none()) {
                 return Err(format!(
                     "'@{how}' in an address that is not counted from the instruction, which is \
                      not a way this compiler reaches anything"
