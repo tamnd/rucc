@@ -148,7 +148,13 @@ pub(crate) fn tries(
     let costs = costs(func);
     let weights = weights(func);
     let linear = assign::scan(func, live, env, facts);
-    let mut best = spent(func, &costs, &weights, &facts.reuses, &linear);
+    // The linear scan meets a register a value is barred from the way it meets one an instruction
+    // insists on, with a move either side of the instruction, and on i386 that move is an exchange
+    // around every instruction that names the byte. Nothing here counts those, so an answer that
+    // has any is never the one kept.
+    let barred = func.bars().iter().any(|&(reg, at)| linear.place(reg) == Some(Place::Reg(at)));
+    let mut best =
+        if barred { u128::MAX } else { spent(func, &costs, &weights, &facts.reuses, &linear) };
     let mut kept = linear;
     let pressure = Pressure::with(func, order, live, env, &facts.forced, &facts.blocked);
     let spilled = spill::with(func, live, &pressure, &costs, &facts.forced);

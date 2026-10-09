@@ -31,6 +31,7 @@ All notable changes are recorded here. The format follows [Keep a Changelog](htt
 - An inline assembly operand in memory that is a constant past a pointer is read at that displacement from the pointer, as gcc writes it, rather than through a register the sum was put in first. The kernel's atomics and bit operations are `"+m" (v->counter)` and `"+m" (*(addr + nr / 8))`, and each one was an `add` of the offset in front of the `lock` (#3522).
 - The inliner copies only the blocks of a callee that the constants a call passes leave reachable, with each branch and switch they decide made a jump, which takes more than half off the compile of zstd_compress.c and zstd_lazy.c at `-O2` (#3525).
 - i386 hands `esi` and `edi` to the register allocator where no reload needs them, the way x86-64 hands out `r10` and `r11`, and holds back `ebx` alone where one register is enough. A value an instruction names the low byte of is kept out of both, since neither has one. The kernel's `md.c` is 2% smaller at `-O2` (#3526).
+- The backtracking allocator no longer keeps the linear scan's answer when that answer puts a value in a register it is barred from. The scan handles a barred register with a move on each side of every instruction that names the byte, which is an `xchg` on i386, and the cost weighing never counted those moves. The kernel's `md.c` has 86 fewer `xchg` at `-O2` on i386 (#3528).
 
 ### Added
 
