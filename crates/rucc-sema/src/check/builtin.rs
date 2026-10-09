@@ -312,11 +312,11 @@ impl Checker<'_> {
     /// type before it, which is how the vector builtins of clang for wasm are written. clang
     /// writes `V16Sc` for the vector of 16 `signed char`, and the table writes `signed char x16`.
     fn written_type(&mut self, text: &str) -> Option<TypeId> {
-        if let Some((lane, count)) = text.trim().rsplit_once(' ')
-            && let Some(Ok(count)) = count.strip_prefix('x').map(str::parse::<u32>)
-        {
-            let lane = self.written_type(lane)?;
-            return Some(self.types.vector(lane, count));
+        if let Some((lane, count)) = text.trim().rsplit_once(' ') {
+            if let Some(Ok(count)) = count.strip_prefix('x').map(str::parse::<u32>) {
+                let lane = self.written_type(lane)?;
+                return Some(self.types.vector(lane, count));
+            }
         }
         let stars = text.bytes().filter(|byte| *byte == b'*').count();
         let words = text.trim_end_matches(['*', ' ']).split_whitespace();

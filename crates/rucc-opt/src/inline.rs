@@ -2621,9 +2621,7 @@ fn moved(copies: &mut Copies, moving: &mut Moving, callee: &Func, span: Span) ->
             None => span,
         };
     }
-    if moving.site.is_some()
-        && let Some(was) = copies.site_at(span.lo)
-    {
+    if let Some(was) = copies.site_at(span.lo).filter(|_| moving.site.is_some()) {
         let made = match moving.inner.get(&was) {
             Some(&made) => made,
             None => {
