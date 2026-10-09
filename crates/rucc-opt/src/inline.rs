@@ -2703,9 +2703,15 @@ fn copy(
             passed[at] = by_value(func, entry, call, passed[at], size, align);
         }
     }
+    let constants: Vec<Option<(Imm, Type)>> =
+        passed.iter().map(|&arg| crate::fold::constant(func, arg)).collect();
+    let (live, decided) = reached(callee, start, &constants);
     let mut blocks = Map::default();
     let mut values = Map::default();
     for from in callee.blocks() {
+        if !live[from.index()] {
+            continue;
+        }
         let to = func.create_block();
         if from == start {
             values.extend(callee[from].params.iter().copied().zip(passed.iter().copied()));
@@ -2752,6 +2758,9 @@ fn copy(
     let mut made = Vec::new();
     pool.site += 1;
     for from in callee.blocks() {
+        if !live[from.index()] {
+            continue;
+        }
         for inst in callee.insts(from) {
             let data = &callee[inst];
             if data.opcode == Opcode::VaArgPack {
@@ -2759,6 +2768,7 @@ fn copy(
             }
             let opcode = match data.opcode {
                 Opcode::Return => Opcode::Jump,
+                _ if decided.contains_key(&inst) => Opcode::Jump,
                 Opcode::VaArgPackLen => Opcode::IConst,
                 opcode => opcode,
             };
@@ -2816,6 +2826,13 @@ fn copy(
     let keep = func[call].results().count();
     for (inst, new) in made {
         let data = &callee[inst];
+        if let Some(&to) = decided.get(&inst) {
+            let args: Vec<Value> = callee[to.args].iter().map(|value| values[value]).collect();
+            let args = func.push_values(&args);
+            let call = BlockCall { block: blocks[&to.block], args, hint: to.hint };
+            func[new].extra = Extra::Targets(func.push_block_calls(&[call]));
+            continue;
+        }
         let mut args: Vec<Value> = callee[data.args]
             .iter()
             .filter(|value| values.contains_key(value))
@@ -2966,6 +2983,73 @@ fn copy(
             func.append_inst(block, branch);
         }
     }
+}
+
+/// The blocks of the callee a copy reaches when the call passes `constants` to its entry block, one
+/// flag for each block, with the place each `br_if` and `switch` those constants decide goes to.
+///
+/// A copy is all its callee's blocks otherwise, and the ones a constant argument rules out stayed
+/// in the caller until `prune` took them out, sixteen passes later. On zstd_compress.c at `-O2`
+/// that was seven copies of the switch in `ZSTD_CCtxParams_setParameter` in
+/// `ZSTD_CCtx_setCParams`, each on a constant `param`, and the module was five times the size it is
+/// after `prune` for every pass before it. tamnd/rucc#3052. A block is reached from one already
+/// reached, so every block that dominates it was walked first and what a constant works out to in
+/// it is known by then. A value defined in a block left out is only read in blocks it dominates,
+/// which are left out too.
+fn reached(
+    callee: &Func,
+    start: Block,
+    constants: &[Option<(Imm, Type)>],
+) -> (Vec<bool>, Map<Inst, BlockCall>) {
+    let mut values: Map<Value, (Imm, Type)> = callee[start]
+        .params
+        .iter()
+        .zip(constants)
+        .filter_map(|(&param, &constant)| Some((param, constant?)))
+        .collect();
+    let mut live = vec![false; callee.counts().blocks];
+    let mut decided = Map::default();
+    live[start.index()] = true;
+    let mut work = vec![start];
+    while let Some(block) = work.pop() {
+        for inst in callee.insts(block) {
+            let data = &callee[inst];
+            let args = &callee[data.args];
+            if !values.is_empty() && args.iter().any(|arg| values.contains_key(arg)) {
+                // A `__builtin_constant_p` is left for `constant-p` to answer, as it was before.
+                if data.opcode != Opcode::IsConstant
+                    && let Some(result) = data.results().next()
+                {
+                    let operand = |arg: Value| {
+                        values.get(&arg).copied().or_else(|| crate::fold::constant(callee, arg))
+                    };
+                    if let Some(found) = computed(callee, inst, &operand) {
+                        values.insert(result, found);
+                    }
+                }
+                if callee.is_terminator(inst)
+                    && let Some(to) = args
+                        .first()
+                        .and_then(|arg| values.get(arg))
+                        .and_then(|&(value, _)| goes_to(callee, data, value))
+                {
+                    decided.insert(inst, to);
+                    if !live[to.block.index()] {
+                        live[to.block.index()] = true;
+                        work.push(to.block);
+                    }
+                    continue;
+                }
+            }
+            for to in callee.successors(inst) {
+                if !live[to.block.index()] {
+                    live[to.block.index()] = true;
+                    work.push(to.block);
+                }
+            }
+        }
+    }
+    (live, decided)
 }
 
 /// The `unwound` behind a call with a pad, the branch on it that ends the call's block, and the
@@ -4298,6 +4382,47 @@ block0(%0: i64, %1: i32):
         assert!(!g.contains("call @node"), "{out}");
         let out = inlined_under(&body("%0"), Some(1));
         assert!(out.contains("call @node"), "{out}");
+    }
+
+    /// A copy is only the blocks the constants the call passes leave reachable, so an arm a constant
+    /// rules out never gets to the caller and the switch on it is a jump to the arm it picks.
+    #[test]
+    fn a_copy_leaves_out_what_a_constant_argument_rules_out() {
+        let body = |arg: u32| {
+            format!(
+                r#"
+func @pick(i32, i32) -> i32, linkage(internal), attrs(always_inline) {{
+block0(%0: i32, %1: i32):
+    switch %0, block1, [4 => block2]
+
+block1:
+    jump block3(%1)
+
+block2:
+    %2 = global_addr @numa_node
+    %3 = load.i32 %2, align 4
+    jump block3(%3)
+
+block3(%4: i32):
+    return %4
+}}
+
+func @g(i32) -> i32, linkage(external) {{
+block0(%0: i32):
+    %1 = iconst.i32 {arg}
+    %2 = call @pick(%1, %0) : (i32, i32) -> i32
+    return %2
+}}
+"#
+            )
+        };
+        let g = |out: &str| out[out.find("func @g").expect("g is there")..].to_string();
+        let out = inlined(&body(4));
+        assert!(!g(&out).contains("call @pick") && !g(&out).contains("switch"), "{out}");
+        assert!(g(&out).contains("@numa_node"), "{out}");
+        let out = inlined(&body(5));
+        assert!(!g(&out).contains("call @pick") && !g(&out).contains("switch"), "{out}");
+        assert!(!g(&out).contains("@numa_node"), "{out}");
     }
 
     /// A `static` function nobody declared `inline`, called from one place.
