@@ -469,6 +469,8 @@ pub struct Func {
     /// How many bytes of its register each virtual register's value takes, beside [`Func::vregs`],
     /// with nought for one nothing said, which is taken to be the whole register.
     widths: Vec<u8>,
+    /// The registers a virtual register's value is never to be put in, sorted.
+    barred: Vec<(Reg, PhysReg)>,
 
     first_block: Option<Block>,
     last_block: Option<Block>,
@@ -512,6 +514,7 @@ impl Func {
             amodes: Vec::new(),
             vregs: Vec::new(),
             widths: Vec::new(),
+            barred: Vec::new(),
             first_block: None,
             last_block: None,
         }
@@ -550,6 +553,33 @@ impl Func {
     pub fn width(&self, reg: Reg) -> Option<u8> {
         let width = *self.widths.get(usize::try_from(reg.number()?).ok()?)?;
         (width != 0).then_some(width)
+    }
+
+    /// Says a virtual register's value is never to be put in `at`, which the allocator takes as a
+    /// register an instruction insists on for the whole of the value's life.
+    ///
+    /// i386 says it of a value an instruction names the low byte of, since `esi` and `edi` have
+    /// none. Saying it of a physical register does nothing.
+    pub fn bar(&mut self, reg: Reg, at: PhysReg) {
+        if !reg.is_virtual() {
+            return;
+        }
+        if let Err(index) = self.barred.binary_search(&(reg, at)) {
+            self.barred.insert(index, (reg, at));
+        }
+    }
+
+    /// Whether a virtual register's value is never to be put in `at`.
+    #[must_use]
+    pub fn barred(&self, reg: Reg, at: PhysReg) -> bool {
+        self.barred.binary_search(&(reg, at)).is_ok()
+    }
+
+    /// Every virtual register [`Func::bar`] was told of, with the register it is kept out of,
+    /// sorted.
+    #[must_use]
+    pub fn bars(&self) -> &[(Reg, PhysReg)] {
+        &self.barred
     }
 
     /// How many virtual registers the function has, which is what the allocator sizes itself

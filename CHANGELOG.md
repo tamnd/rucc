@@ -30,6 +30,7 @@ All notable changes are recorded here. The format follows [Keep a Changelog](htt
 - A `long long` add or subtract on i386 where one low half is zero no longer works out a carry, and a high half that is zero no longer adds a zero. The kernel's `readq` there is `low + ((u64)high << 32)`, and it is now the two loads, where it was a `cmp`, a `setb`, a `movzbl` and two adds. `a - ((u64)b << 32)` is one `subl` (#3521).
 - An inline assembly operand in memory that is a constant past a pointer is read at that displacement from the pointer, as gcc writes it, rather than through a register the sum was put in first. The kernel's atomics and bit operations are `"+m" (v->counter)` and `"+m" (*(addr + nr / 8))`, and each one was an `add` of the offset in front of the `lock` (#3522).
 - The inliner copies only the blocks of a callee that the constants a call passes leave reachable, with each branch and switch they decide made a jump, which takes more than half off the compile of zstd_compress.c and zstd_lazy.c at `-O2` (#3525).
+- i386 hands `esi` and `edi` to the register allocator where no reload needs them, the way x86-64 hands out `r10` and `r11`, and holds back `ebx` alone where one register is enough. A value an instruction names the low byte of is kept out of both, since neither has one. The kernel's `md.c` is 2% smaller at `-O2` (#3526).
 
 ### Added
 
