@@ -320,6 +320,9 @@ fn understood(opcode: Opcode) -> bool {
             | Opcode::Memcpy
             | Opcode::Memmove
             | Opcode::Memset
+            | Opcode::PtrAdd
+            | Opcode::IntToPtr
+            | Opcode::PtrToInt
     )
 }
 
@@ -786,6 +789,8 @@ fn rewrite(
         }
         Opcode::Return if takes => flatten(func, halves, inst),
         Opcode::Memcpy | Opcode::Memmove | Opcode::Memset if takes => length(func, halves, inst),
+        Opcode::PtrAdd | Opcode::IntToPtr if takes => length(func, halves, inst),
+        Opcode::PtrToInt if produces => address(func, width, halves, inst),
         Opcode::Jump | Opcode::BrIf => edges(func, halves, inst),
         _ => {}
     }
@@ -2043,12 +2048,25 @@ fn flatten(func: &mut Func, halves: &Halves, inst: Inst) {
 /// or fill can be asked for, so the high half has nothing to say. Loop idiom recognition writes the
 /// length of a loop it turns into a `memset` at sixty four bits on every target, and without this a
 /// thirty two bit function with one in it was not split at all.
+///
+/// An offset added to an address and a number made into one are the same: an address is a half,
+/// and the high half of the number only says which multiple of the address space it went round.
+/// Many passes write an offset at sixty four bits whatever the target, and a function with one of
+/// those in it on i386 was not split, so its other wide values reached the backend whole.
 fn length(func: &mut Func, halves: &Halves, inst: Inst) {
     let args: Vec<Value> = func[func[inst].args]
         .iter()
         .map(|value| halves.get(value).map_or(*value, |&(low, _)| low))
         .collect();
     func[inst].args = func.push_values(&args);
+}
+
+/// An address read as a wide number, which is the address in the low half and nothing above it.
+fn address(func: &mut Func, width: Width, halves: &mut Halves, inst: Inst) {
+    let Some(&arg) = func[func[inst].args].first() else { return };
+    let low = ahead(func, width, inst, Opcode::PtrToInt, &[arg]);
+    let high = ahead_const(func, width, inst, 0);
+    replace(func, halves, inst, low, high);
 }
 
 /// A branch, whose arguments hang on the edge rather than on the instruction.
@@ -3170,6 +3188,28 @@ mod tests {
         let text = printed(&func, &mut names);
         assert!(!text.contains("i64"), "nothing that wide is left: {text}");
         assert!(text.contains("memset %0, %3, %1,"), "the length is the low half: {text}");
+    }
+
+    #[test]
+    fn at_thirty_two_bits_an_address_takes_the_low_half_of_a_long_long() {
+        // What gcov's counters and several loop passes left on i386: an offset worked out at sixty
+        // four bits, beside a wide value the function still had to split.
+        let mut names = Interner::new();
+        let (mut func, entry, params) = shell(&mut names, &[Type::PTR, Type::int(32)], &[long()]);
+        let mut build = Builder::new(&mut func, entry);
+        let offset = build.unary(Opcode::SExt, params[1], long());
+        let at = build.binary(Opcode::PtrAdd, params[0], offset, Flags::NONE);
+        let number = build.unary(Opcode::PtrToInt, at, long());
+        let back = build.unary(Opcode::IntToPtr, number, Type::PTR);
+        let value = build.load(long(), back, info(8, 8), Flags::NONE);
+        build.ret(&[value]);
+
+        assert!(narrow(&mut func, &mut names), "there is a width to split");
+        let text = printed(&func, &mut names);
+        assert!(!text.contains("i64"), "nothing that wide is left: {text}");
+        assert!(text.contains("ptr_add %0, %1"), "the offset is the low half: {text}");
+        assert!(text.contains("ptrtoint.i32"), "the address is the low half: {text}");
+        assert_eq!(text.matches(" = load.i32 ").count(), 2, "two reads: {text}");
     }
 
     #[test]
