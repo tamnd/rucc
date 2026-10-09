@@ -155,7 +155,7 @@
 
 use rucc_base::Interner;
 use rucc_base::hash::{Map, Set};
-use rucc_mir::{Block, Constraint, Func, Inst, Opcode, Operand, Reg};
+use rucc_mir::{Block, Constraint, Func, Inst, Opcode, Operand, Reg, Role};
 use rucc_regalloc::assign::Place;
 use rucc_regalloc::rewrite::Edit;
 use rucc_target::{CallRegs, FrameInsts, MachineInsts, PhysReg, RegClass};
@@ -414,6 +414,117 @@ pub fn reloads(
         }
     }
     done
+}
+
+/// Reads a scratch register's copy of another register out of that register, and takes the copy
+/// out.
+///
+/// [`clean`] turns a reload of a word another register holds into a copy of that register. That
+/// saves the memory access but still spends an instruction, and on i386 a spilled pointer used by
+/// two stores in a row comes out as a reload into `edi` for the first and `movl %edi, %esi` for
+/// the second. The second store can read `edi` itself, and so can every reader up to the next
+/// write of the scratch register, as long as nothing writes the register it was copied from first.
+///
+/// Only into a scratch register of the class, for the reason [`reloads`] gives: nothing lives in
+/// one into another block, so its readers are the rest of the block. A reader that writes the
+/// scratch register too, or insists on it, keeps the copy. So does a read behind a call or an
+/// instruction the target does not have, since what those read and write is not all in their
+/// operands.
+pub fn forward(
+    func: &mut Func,
+    machine: &MachineInsts,
+    frame: &FrameInsts,
+    scratch: (RegClass, &[PhysReg]),
+    names: &Interner,
+) -> usize {
+    let (class, held) = scratch;
+    let Some(moves) = frame.moves(class) else { return 0 };
+    let mov = format!("{}{}", frame.prefix, moves.mov);
+    let mut done = 0;
+    for block in func.blocks().collect::<Vec<_>>() {
+        let passed = func[block]
+            .succs
+            .iter()
+            .flat_map(|call| &call.args)
+            .any(|arg| arg.phys().is_some_and(|reg| held.contains(&reg)));
+        if passed {
+            continue;
+        }
+        let insts: Vec<Inst> = func.insts(block).collect();
+        for (at, &copy) in insts.iter().enumerate() {
+            let data = &func[copy];
+            if names.resolve(data.opcode.name()) != mov || data.mem.is_some() || data.imm.is_some()
+            {
+                continue;
+            }
+            let &[to, from] = &func[data.operands][..] else { continue };
+            let (Some(into), Some(out)) = (to.reg.phys(), from.reg.phys()) else { continue };
+            if !to.role.is_def()
+                || from.role.is_def()
+                || to.class != class
+                || from.class != class
+                || into == out
+                || !held.contains(&into)
+            {
+                continue;
+            }
+            let after = &insts[at + 1..];
+            let Some(found) = readers(func, machine, names, after, class, (into, out)) else {
+                continue;
+            };
+            for (inst, index) in found {
+                let list = func[inst].operands;
+                func[list][index].reg = Reg::physical(out);
+            }
+            func.remove_inst(copy);
+            done += 1;
+        }
+    }
+    done
+}
+
+/// Every operand behind a copy that reads the scratch register it went into, up to the next write
+/// of that register, or `None` where one of them cannot read the register the copy came from.
+fn readers(
+    func: &Func,
+    machine: &MachineInsts,
+    names: &Interner,
+    after: &[Inst],
+    class: RegClass,
+    (into, out): (PhysReg, PhysReg),
+) -> Option<Vec<(Inst, usize)>> {
+    let is =
+        |operand: &Operand, reg: PhysReg| operand.class == class && operand.reg.phys() == Some(reg);
+    let mut found = Vec::new();
+    // Whether the register the copy came from may hold something else by now.
+    let mut changed = false;
+    for &inst in after {
+        let operands = &func[func[inst].operands];
+        let name = names.resolve(func[inst].opcode.name());
+        let stop = machine.calls(name) || !machine.has(name);
+        let writes = operands.iter().any(|operand| operand.role.is_def() && is(operand, into));
+        let early =
+            operands.iter().any(|operand| operand.role == Role::EarlyDef && is(operand, out));
+        for (index, operand) in operands.iter().enumerate() {
+            if operand.role.is_def() || !is(operand, into) {
+                continue;
+            }
+            if changed
+                || stop
+                || writes
+                || early
+                || matches!(operand.constraint, Constraint::Fixed(_))
+            {
+                return None;
+            }
+            found.push((inst, index));
+        }
+        if writes {
+            return Some(found);
+        }
+        changed |= stop || operands.iter().any(|operand| operand.role.is_def() && is(operand, out));
+    }
+    Some(found)
 }
 
 /// The first instruction behind a load into that register that reads it, where everything before
@@ -1288,6 +1399,41 @@ mod tests {
         let mut moves = Moves::default();
         moves.record(reload, back(block, 0, R10));
         assert_eq!(reloads(&mut func, &moves, &mut names), 0);
+        assert_eq!(left(&func, block), 2);
+    }
+
+    fn forward(func: &mut Func, names: &Interner) -> usize {
+        super::forward(func, &MACHINE, &FRAME, (GPR, &[R10, R11]), names)
+    }
+
+    #[test]
+    fn a_copy_into_scratch_is_read_out_of_the_register_it_came_from() {
+        let (mut names, mut func, block) = empty();
+        copy(&mut func, &mut names, block, R10, RBX);
+        add(&mut func, &mut names, block, RAX, R10);
+        add(&mut func, &mut names, block, R13, R10);
+        assert_eq!(forward(&mut func, &names), 1);
+        assert_eq!(left(&func, block), 2);
+        assert_eq!(reads(&func, block, 0), [RBX]);
+        assert_eq!(reads(&func, block, 1), [RBX]);
+    }
+
+    #[test]
+    fn a_copy_stays_when_its_source_is_written_before_the_last_read() {
+        let (mut names, mut func, block) = empty();
+        copy(&mut func, &mut names, block, R10, RBX);
+        add(&mut func, &mut names, block, RBX, RAX);
+        add(&mut func, &mut names, block, R13, R10);
+        assert_eq!(forward(&mut func, &names), 0);
+        assert_eq!(reads(&func, block, 2), [R10]);
+    }
+
+    #[test]
+    fn a_copy_stays_when_a_reader_writes_the_scratch_register_too() {
+        let (mut names, mut func, block) = empty();
+        copy(&mut func, &mut names, block, R10, RBX);
+        add(&mut func, &mut names, block, R10, R10);
+        assert_eq!(forward(&mut func, &names), 0);
         assert_eq!(left(&func, block), 2);
     }
 }
