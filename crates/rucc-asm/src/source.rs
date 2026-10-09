@@ -4565,8 +4565,10 @@ impl Reader {
             // it put that word, so working the sum out here would answer a different question. The
             // sum is the one the instruction made two paragraphs up, which is the name minus the
             // end of the instruction, so the addend comes out the way it does for every other
-            // rip-relative reference and is minus four.
-            if matches!(fixup.reach, Reach::Table | Reach::Thread) {
+            // rip-relative reference and is minus four. The pair of slots `__tls_get_addr` takes
+            // is the same, and gas marks the name it is for as thread-local the way the i386
+            // suffixes below do.
+            if matches!(fixup.reach, Reach::Table | Reach::Thread | Reach::Dynamic(_)) {
                 let [
                     Term { coeff: 1, what: What::Symbol(name) },
                     Term { coeff: -1, what: What::Here { at: end, .. } },
@@ -4578,7 +4580,18 @@ impl Reader {
                             .to_owned(),
                     ));
                 };
-                let kind = if fixup.reach == Reach::Table { fixup.slot } else { Reference::Thread };
+                let kind = match fixup.reach {
+                    Reach::Table => fixup.slot,
+                    Reach::Dynamic(tls) => {
+                        if let Some(&sym) = self.known.get(name) {
+                            if matches!(self.syms[sym].sort, Sort::Untyped | Sort::Object) {
+                                self.syms[sym].sort = Sort::Thread;
+                            }
+                        }
+                        Reference::Tls(tls)
+                    }
+                    _ => Reference::Thread,
+                };
                 self.parts[fixup.part].relocs.push(Reloc {
                     at: fixup.at as usize,
                     symbol: name.clone(),
@@ -8869,6 +8882,69 @@ nop
         assert_eq!(name(&read, "ex").sort, Sort::Thread);
         assert!(i386_refused("\t.quad x@dtpoff\n").contains("four"));
         assert!(i386_refused("\tmovl $5@ntpoff, %eax\n").contains("thread"));
+    }
+
+    /// The x86-64 thread-local suffixes, with the bytes and relocations gas 2.42 writes for them:
+    /// the general dynamic call with the prefixes that let the linker rewrite it, the local dynamic
+    /// one with the offsets added to what it gives back, and the local exec forms from `%fs:0`.
+    #[test]
+    fn the_x86_64_thread_local_suffixes_are_the_ones_gas_writes() {
+        let read = assembled(concat!(
+            "\t.text\n",
+            "\tdata16 leaq ex@tlsgd(%rip), %rdi\n",
+            "\t.value 0x6666\n",
+            "\trex64\n",
+            "\tcall __tls_get_addr@PLT\n",
+            "\tleaq x@tlsld(%rip), %rdi\n",
+            "\tcall __tls_get_addr@PLT\n",
+            "\tleaq x@dtpoff(%rax), %rdx\n",
+            "\tmovl x@dtpoff+4(%rax), %edx\n",
+            "\tmovq %fs:0, %rax\n",
+            "\tleaq x@tpoff(%rax), %rax\n",
+            "\tmovl %fs:x@tpoff, %eax\n",
+            "\tmovq $x@tpoff, %rcx\n",
+            "\tmovq ex@gottpoff(%rip), %rax\n",
+            "\tleaq ex@TLSGD(%rip), %rdi\n",
+            "\t.section .tbss,\"awT\",@nobits\n",
+            "\t.type x, @object\n",
+            "x:\t.zero 8\n",
+        ));
+        #[rustfmt::skip]
+        let gas: [u8; 86] = [
+            0x66, 0x48, 0x8d, 0x3d, 0, 0, 0, 0,
+            0x66, 0x66, 0x48, 0xe8, 0, 0, 0, 0,
+            0x48, 0x8d, 0x3d, 0, 0, 0, 0,
+            0xe8, 0, 0, 0, 0,
+            0x48, 0x8d, 0x90, 0, 0, 0, 0,
+            0x8b, 0x90, 0, 0, 0, 0,
+            0x64, 0x48, 0x8b, 0x04, 0x25, 0, 0, 0, 0,
+            0x48, 0x8d, 0x80, 0, 0, 0, 0,
+            0x64, 0x8b, 0x04, 0x25, 0, 0, 0, 0,
+            0x48, 0xc7, 0xc1, 0, 0, 0, 0,
+            0x48, 0x8b, 0x05, 0, 0, 0, 0,
+            0x48, 0x8d, 0x3d, 0, 0, 0, 0,
+        ];
+        assert_eq!(bytes(&read, ".text"), gas);
+        assert_eq!(
+            relocs(&read, ".text"),
+            [
+                (4, "ex", Reference::Tls(Tls::General), -4),
+                (12, "__tls_get_addr", Reference::Call, -4),
+                (19, "x", Reference::Tls(Tls::Module), -4),
+                (24, "__tls_get_addr", Reference::Call, -4),
+                (31, "x", Reference::Tls(Tls::InModule), 0),
+                (37, "x", Reference::Tls(Tls::InModule), 4),
+                (53, "x", Reference::Tls(Tls::Offset), 0),
+                (61, "x", Reference::Tls(Tls::Offset), 0),
+                (68, "x", Reference::Tls(Tls::Offset), 0),
+                (75, "ex", Reference::Thread, -4),
+                (82, "ex", Reference::Tls(Tls::General), -4),
+            ]
+        );
+        assert_eq!(name(&read, "x").sort, Sort::Thread);
+        assert_eq!(name(&read, "ex").sort, Sort::Thread);
+        // An i386 suffix that has no x86-64 relocation is still refused.
+        assert!(refused("\tleaq x@ntpoff(%rax), %rax\n").why.contains("@ntpoff"));
     }
 
     /// An address with no registers in it is four bytes the linker fills with the address, and a

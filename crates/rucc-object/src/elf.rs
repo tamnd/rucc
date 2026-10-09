@@ -45,6 +45,12 @@ pub(crate) fn r_type(reference: Reference) -> Option<elf::RelocationType> {
         Reference::GotBare => elf::R_X86_64_GOTPCRELX,
         Reference::GotKept => elf::R_X86_64_GOTPCREL,
         Reference::Thread => elf::R_X86_64_GOTTPOFF,
+        // The models that are not one slot: the pair of slots `__tls_get_addr` takes for one
+        // variable or for its module, and the offsets added to what it gives back or to `%fs:0`.
+        Reference::Tls(Tls::General) => elf::R_X86_64_TLSGD,
+        Reference::Tls(Tls::Module) => elf::R_X86_64_TLSLD,
+        Reference::Tls(Tls::InModule) => elf::R_X86_64_DTPOFF32,
+        Reference::Tls(Tls::Offset) => elf::R_X86_64_TPOFF32,
         Reference::AwayWide => elf::R_X86_64_PC64,
         Reference::Address { bytes: 8 } => elf::R_X86_64_64,
         Reference::Address { bytes: 4 } => elf::R_X86_64_32,
@@ -57,13 +63,13 @@ pub(crate) fn r_type(reference: Reference) -> Option<elf::RelocationType> {
             return None;
         }
         // The i386 ways of reaching the global offset table, counted from a register holding it,
-        // and its thread-local storage. This machine counts from the instruction pointer instead
-        // and has kinds of its own above.
+        // and the slots of its thread-local storage. This machine counts from the instruction
+        // pointer instead and has kinds of its own above.
         Reference::GotOffset
         | Reference::GotFront
         | Reference::Slot
         | Reference::SlotKept
-        | Reference::Tls(_) => {
+        | Reference::Tls(Tls::Slot | Tls::SlotAddress | Tls::SlotNegated | Tls::Negated) => {
             return None;
         }
     })

@@ -914,7 +914,7 @@ pub struct Reloc {
 }
 
 /// Which of the i386 thread-local relocations a [`Reference::Tls`] is, named after what the four
-/// bytes end up holding.
+/// bytes end up holding. Four of them are x86-64 relocations too, and those say so.
 ///
 /// The suffix gcc writes for each is beside it. The linker may rewrite the instruction around the
 /// first three into a cheaper model once it knows where the variable ends up, which is why each
@@ -922,13 +922,14 @@ pub struct Reloc {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Tls {
     /// The pair of slots of the global offset table `___tls_get_addr` takes, as a distance from the
-    /// table. `@TLSGD`, `R_386_TLS_GD`.
+    /// table. `@TLSGD`, `R_386_TLS_GD`. On x86-64 it is the distance from the end of the
+    /// instruction, `@tlsgd(%rip)`, `R_X86_64_TLSGD`.
     General,
     /// The same pair for the module as a whole rather than one variable. `@TLSLDM`,
-    /// `R_386_TLS_LDM`.
+    /// `R_386_TLS_LDM`. On x86-64 `@tlsld(%rip)`, `R_X86_64_TLSLD`.
     Module,
     /// How far into its module's block a variable is, which is what goes with the address
-    /// [`Tls::Module`] found. `@DTPOFF`, `R_386_TLS_LDO_32`.
+    /// [`Tls::Module`] found. `@DTPOFF`, `R_386_TLS_LDO_32`, and `R_X86_64_DTPOFF32` on x86-64.
     InModule,
     /// A slot of the global offset table holding where the variable is from the thread pointer, as
     /// a distance from the table. `@GOTNTPOFF`, `R_386_TLS_GOTIE`.
@@ -940,7 +941,7 @@ pub enum Tls {
     /// pointer, as a distance from the table. `@GOTTPOFF`, `R_386_TLS_IE_32`.
     SlotNegated,
     /// Where the variable is from the thread pointer, which is below it and so negative.
-    /// `@NTPOFF`, `R_386_TLS_LE`.
+    /// `@NTPOFF`, `R_386_TLS_LE`. On x86-64 `@tpoff`, `R_X86_64_TPOFF32`.
     Offset,
     /// The same distance the other way round, which is positive. `@TPOFF`, `R_386_TLS_LE_32`.
     Negated,
