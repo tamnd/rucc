@@ -593,7 +593,14 @@ fn ended(
     behind: &[Vec<usize>],
 ) -> Vec<Vec<Range>> {
     let blocks = order.blocks();
-    let count = ending.len();
+    // The locals asked about, numbered from nothing, so that the rows are as long as they need to
+    // be for these and no longer. A function that hands the address of a few of its locals away has
+    // a row as long as all its locals otherwise. On quickjs's JS_CallInternal, 2632 blocks and close
+    // to 1500 locals, the walk in [`spread`] went over rows of 24 words when only some of those
+    // locals have ends, and it was most of the time [`areas`] took and a seventh of an optimized
+    // build of quickjs.c. tamnd/rucc#3052.
+    let ones: Vec<usize> = (0..ending.len()).filter(|&local| ending[local]).collect();
+    let count = ones.len();
     let words = count.div_ceil(64);
     let starts: Vec<u32> = blocks.iter().map(|&block| order.start(block)).collect();
     let holding = |point: u32| starts.partition_point(|&start| start <= point).saturating_sub(1);
@@ -602,8 +609,8 @@ fn ended(
     // Where each local ends in each block, and which locals get through each block without one.
     let mut kills: Vec<Vec<(usize, u32)>> = vec![Vec::new(); blocks.len()];
     let mut passing = vec![vec![!0u64; words]; blocks.len()];
-    for local in (0..count).filter(|&local| ending[local]) {
-        let Some(held) = reach.through[local].as_ref() else { continue };
+    for (local, &one) in ones.iter().enumerate() {
+        let Some(held) = reach.through[one].as_ref() else { continue };
         for &inst in &held.ends {
             let Some(block) = func.block_of(inst) else { continue };
             let at = place[block.index()];
@@ -628,8 +635,8 @@ fn ended(
     let mut out: Vec<Vec<Range>> = vec![Vec::new(); count];
     let mut inside: Vec<Vec<(usize, Range)>> = vec![Vec::new(); blocks.len()];
     let mut leaving = vec![vec![0u64; words]; blocks.len()];
-    for (local, spots) in spots_of.into_iter().enumerate() {
-        for spot in spots {
+    for (local, &one) in ones.iter().enumerate() {
+        for &spot in &spots_of[one] {
             let (first, last) = (holding(spot.start), holding(spot.end));
             for at in [first, last] {
                 let piece = Range {
@@ -670,10 +677,11 @@ fn ended(
             out[local].push(Range { start: piece.start, end: until(at, local, piece.end) });
         }
     }
-    for pieces in &mut out {
-        *pieces = merged(std::mem::take(pieces));
+    let mut settled: Vec<Vec<Range>> = vec![Vec::new(); ending.len()];
+    for (pieces, &one) in out.into_iter().zip(&ones) {
+        settled[one] = merged(pieces);
     }
-    out
+    settled
 }
 
 /// Adds a piece to a local's area, stretching the last one instead when the piece starts on the
