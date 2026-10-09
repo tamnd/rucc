@@ -152,3 +152,36 @@ fn a_dwarf_version_this_does_not_write_is_refused() {
     assert!(!out.status.success());
     assert!(String::from_utf8_lossy(&out.stderr).contains("DWARF 4 and 5"));
 }
+
+/// At `-O0` each function builds a frame, and the line table marks the end of its prologue where
+/// the body starts. GDB 13 and later put a breakpoint on the function there, which is past the
+/// moves out of the argument registers. The mark is never on the first row of a function, since
+/// that row covers the prologue.
+#[cfg(target_os = "linux")]
+#[test]
+fn the_end_of_each_prologue_is_marked_where_the_body_starts() {
+    let dir = fixture("prologue");
+    build(&dir, &["-g", "-O0"], "one.o");
+    let out = Command::new("readelf")
+        .arg("--debug-dump=rawline")
+        .arg(dir.join("one.o"))
+        .output()
+        .expect("readelf starts");
+    let _ = std::fs::remove_dir_all(&dir);
+    let text = String::from_utf8_lossy(&out.stdout);
+
+    // A sequence starts at its function, and a row is written by a special opcode or a copy.
+    let mut marks = 0;
+    let mut first = false;
+    for line in text.lines() {
+        if line.contains("set Address to") {
+            first = true;
+        } else if line.contains("prologue_end") {
+            assert!(!first, "the first row of a function is marked:\n{text}");
+            marks += 1;
+        } else if line.contains("Special opcode") || line.contains("Copy") {
+            first = false;
+        }
+    }
+    assert_eq!(marks, 2, "{text}");
+}

@@ -2044,6 +2044,18 @@ fn describe(
         if let Some(first) = out.first_mut() {
             first.at = 0;
         }
+        // And where the body starts, which is the first instruction that came from the source. The
+        // prologue and the moves out of the argument registers have no span, so this is past them.
+        // A debugger sets a breakpoint on the function there, as it does for gcc and clang, and the
+        // locations of the parameters cover that address. Without the mark GDB looks for the
+        // `push %rbp` that rucc does not write at -O2, and stops on the first byte instead. A
+        // function with no prologue starts its body at the first byte, and needs no mark.
+        let declared = rows.first().is_some_and(|row| row.inst.is_none());
+        let prologue_end = rows
+            .iter()
+            .find(|row| row.inst.is_some() && !row.span.is_dummy())
+            .map(|row| row.at as u64)
+            .filter(|&at| declared && at > 0 && out.iter().any(|row| row.at == at));
         // And what the function is, for the one this unit holds a definition of. A function the
         // walk above found and this did not is one whose name in the object is not the name the
         // declaration had, which `__asm__` on a declaration is the way to arrange, and one whose
@@ -2143,7 +2155,7 @@ fn describe(
             name: extent.name.clone(),
             symbol: None,
             len: extent.len as u64,
-            prologue_end: None,
+            prologue_end,
             rows: out,
             decl,
             sig,
