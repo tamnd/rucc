@@ -415,6 +415,11 @@ impl Reach<'_> {
                 }
                 self.expr(mask);
             }
+            ExprKind::ShuffleVector { operands } => {
+                let (lhs, rhs) = (self.tast[operands][0], self.tast[operands][1]);
+                self.expr(lhs);
+                self.expr(rhs);
+            }
             ExprKind::FpClassify { value, answers } => {
                 self.expr(value);
                 for index in 0..self.tast[answers].len() {

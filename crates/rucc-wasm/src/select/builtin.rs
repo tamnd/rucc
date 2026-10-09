@@ -38,13 +38,16 @@ enum Write {
     Global(&'static str, bool),
     /// The SIMD instruction with this name, which needs this feature.
     Simd(&'static str, Feature),
+    /// `i8x16.shuffle` of the first two arguments, with the next 16 arguments, which are
+    /// constants, as the lanes that it picks.
+    Shuffle,
 }
 
 /// The vector builtins of clang 23 that have a type of their own, each with the SIMD instruction
 /// that it is. A name that starts with `relaxed_` is an instruction of relaxed SIMD.
 ///
-/// `__builtin_wasm_shuffle_i8x16` is not here, because its 16 lanes must be constants. The other
-/// operations of `<wasm_simd128.h>` are plain C or generic builtins in clang, and not names of
+/// `__builtin_wasm_shuffle_i8x16` is not here, because its 16 lanes are constants and not values
+/// on the stack. It is [`Write::Shuffle`]. The other operations of `<wasm_simd128.h>` are plain C or generic builtins in clang, and not names of
 /// their own.
 const VECTOR: &[(&str, &str)] = &[
     ("abs_i8x16", "i8x16.abs"),
@@ -184,6 +187,7 @@ fn write(name: &str) -> Option<Write> {
         return Some(Write::Simd(op, feature));
     }
     Some(match name {
+        "shuffle_i8x16" => Write::Shuffle,
         "memory_size" => Write::Memory(0x3f),
         "memory_grow" => Write::Memory(0x40),
         "min_f32" => Write::Op(0x96),
@@ -262,7 +266,16 @@ impl Lower<'_, '_> {
     /// Whether the call `inst` is a builtin whose code pushes each argument once, in order, and
     /// then writes one instruction.
     pub(super) fn builtin_pushes_once(&self, inst: Inst) -> bool {
-        matches!(self.written(inst), Some(Write::Op(_) | Write::Saturating(_) | Write::Simd(..)))
+        matches!(
+            self.written(inst),
+            Some(Write::Op(_) | Write::Saturating(_) | Write::Simd(..) | Write::Shuffle)
+        )
+    }
+
+    /// Whether the call `inst` is `i8x16.shuffle`, which pushes its two vectors and writes its
+    /// 16 lanes as immediates.
+    pub(super) fn shuffle_builtin(&self, inst: Inst) -> bool {
+        matches!(self.written(inst), Some(Write::Shuffle))
     }
 
     /// Whether `value` is the answer of `all_true` or `any_true`, which is 0 or 1.
@@ -275,7 +288,7 @@ impl Lower<'_, '_> {
     /// Whether the call `inst` is a vector builtin, which has no effect, reads no memory and
     /// cannot trap.
     pub(super) fn simd_builtin(&self, inst: Inst) -> bool {
-        matches!(self.written(inst), Some(Write::Simd(..)))
+        matches!(self.written(inst), Some(Write::Simd(..) | Write::Shuffle))
     }
 
     /// The extending load that does the load of 8 bytes and the call `inst` together, when the
@@ -405,6 +418,29 @@ impl Lower<'_, '_> {
                     self.push(arg)?;
                 }
                 self.simd(op)?;
+            }
+            Write::Shuffle => {
+                // clang refuses the call in the same words.
+                if !self.unit.features.has(Feature::Simd128) {
+                    return Err(format!("`{name}` needs target feature simd128"));
+                }
+                let &[a, b, ref lanes @ ..] = args else { return Err(format!("`{name}`")) };
+                if lanes.len() != 16 {
+                    return Err(format!("`{name}` with {} lanes", lanes.len()));
+                }
+                let Some(lanes) =
+                    lanes.iter().map(|&lane| self.constant(lane)).collect::<Option<Vec<_>>>()
+                else {
+                    return Err(format!("argument to '{name}' must be a constant integer"));
+                };
+                self.push(a)?;
+                self.push(b)?;
+                self.simd("i8x16.shuffle")?;
+                // A lane past the 32 bytes of the two operands is a lane that clang leaves
+                // undefined, and it writes 0 there, as this does.
+                for lane in lanes {
+                    self.code.op(u8::try_from(lane).ok().filter(|&lane| lane < 32).unwrap_or(0));
+                }
             }
         }
         Ok(())

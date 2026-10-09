@@ -334,6 +334,16 @@ pub enum ExprKind {
         /// The integer vector of indices, one per lane of the answer.
         mask: ExprId,
     },
+    /// `__builtin_shufflevector`, a vector whose lanes are picked out of two others by indices
+    /// that are constants. The answer has one lane for each index, and the two operands have the
+    /// same lane type. See `check/builtin/shuffle.rs`.
+    ShuffleVector {
+        /// The two vectors, and then one integer constant for each lane of the answer, which is
+        /// the index of a lane of the two vectors laid end to end, or -1 for a lane whose value is
+        /// not specified. One list and not three fields, so that the node is no larger than the
+        /// others.
+        operands: ExprList,
+    },
     /// `abs`, `labs` and `llabs`, which are the magnitude of an integer.
     ///
     /// A node rather than a call because the names are the C library's and the compiler is allowed

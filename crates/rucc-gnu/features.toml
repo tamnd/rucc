@@ -2507,6 +2507,17 @@ tests = ["rucc::the_vector_wasm_builtins_are_one_simd_instruction_each", "rucc::
 notes = "`f64x2.sqrt`, as in clang 23, with the type that clang gives it. Without `-msimd128` the call is an error in the words of clang, `needs target feature simd128`. Written in place as `__builtin_wasm_memory_size` is."
 
 [[feature]]
+name = "__builtin_wasm_shuffle_i8x16"
+kind = "builtin"
+gcc_version = "none"
+status = "implemented"
+targets = ["wasm"]
+signature = "signed char x16(signed char x16, signed char x16, int, int, int, int, int, int, int, int, int, int, int, int, int, int, int, int)"
+used_by = ["wasi-sdk"]
+tests = ["rucc::with_simd128_a_shufflevector_is_one_instruction", "rucc::shufflevector_is_checked_in_the_words_of_gcc"]
+notes = "`i8x16.shuffle`, as in clang 23, with the type that clang gives it. Each of the 16 lanes is a constant, which is the index of a byte of the two operands laid end to end. A lane past 31 is 0, as clang writes it. Without `-msimd128` the call is an error in the words of clang, `needs target feature simd128`, and a lane that is not a constant is an error in the words of clang too, at the start of the call. The front end folds each lane, so `(c) * 4 + 1` is a constant at `-O0`."
+
+[[feature]]
 name = "__builtin_wasm_swizzle_i8x16"
 kind = "builtin"
 gcc_version = "none"
@@ -4044,6 +4055,16 @@ status = "implemented"
 used_by = ["wasi-sdk"]
 tests = ["rucc-parse::the_gnu_expression_extensions_are_here", "rucc::convertvector_is_checked_in_the_words_of_clang", "rucc::convertvector_casts_each_lane", "rucc::with_simd128_a_convertvector_is_one_instruction"]
 notes = "Syntax and not a call, because the second argument is a vector type. Each lane of the vector is converted to the lane type of the type, as a cast does it, and the two have the same number of lanes. With `-msimd128` on wasm32, the conversions that clang writes as one instruction are one instruction: `f32x4.convert_i32x4`, `i32x4.trunc_sat_f32x4`, the extends, `f64x2.convert_low_i32x4`, `f64x2.promote_low_f32x4` and `f32x4.demote_f64x2_zero`."
+
+[[feature]]
+name = "__builtin_shufflevector"
+kind = "builtin"
+gcc_version = "12"
+status = "implemented"
+signature = ""
+used_by = ["wasi-sdk"]
+tests = ["rucc-sema::the_name_is_a_row_of_the_table_and_is_answered_not_called", "rucc::shufflevector_is_checked_in_the_words_of_gcc", "rucc::shufflevector_picks_each_lane", "rucc::with_simd128_a_shufflevector_is_one_instruction"]
+notes = "Each index is an integer constant, and lane `k` of the answer is lane `ik` of the two operands laid end to end. The answer has one lane for each index. The rules and the words are those of gcc 16. With `-msimd128` on wasm32, a shuffle of vectors of 8 or 16 bytes is one `i8x16.shuffle`."
 
 # The `__builtin_elementwise_*` builtins of clang that do an integer operation on each lane. No
 # signature, because the type of the answer is the type of the operands. clang 23 refuses an

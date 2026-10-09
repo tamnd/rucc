@@ -4719,6 +4719,7 @@ impl<'u> Body<'_, 'u> {
                 }
             }
             ExprKind::Shuffle { lhs, rhs, mask } => self.shuffle(at, lhs, rhs, mask, ty, span),
+            ExprKind::ShuffleVector { operands } => self.shuffle_vector(at, operands, ty, span),
             // `__builtin_convertvector`, which is the cast of each lane. The two vectors have the
             // same number of lanes, and the lanes can have different sizes.
             ExprKind::ConvertVector { operand } => {
@@ -4814,6 +4815,106 @@ impl<'u> Body<'_, 'u> {
             let into = self.lane_place(at, index, stride, lane, span);
             self.write(into, value, span);
         }
+    }
+
+    /// `__builtin_shufflevector(a, b, ...)` built at `at`, which is the vector of type `ty`.
+    ///
+    /// Each lane is read before any lane is written, because `at` can be one of the operands. A
+    /// lane whose index is -1 has no value that C gives it, and it takes lane 0 of `a`.
+    fn shuffle_vector(&mut self, at: Value, operands: ExprList, ty: TypeId, span: Span) {
+        let lane = rucc_types::element(self.types(), ty).expect("a vector");
+        let stride = repr::size_of(self.types(), self.target(), lane);
+        let operands = &self.tast()[operands];
+        let (lhs, rhs) = (operands[0], operands[1]);
+        let first = self.lanes(self.tast()[lhs].ty);
+        let picks: Vec<u64> = operands[2..]
+            .iter()
+            .map(|&pick| match self.tast()[pick].kind {
+                ExprKind::Const(id) => match self.tast()[id] {
+                    Const::Int(index) => u64::try_from(index).unwrap_or(0),
+                    _ => 0,
+                },
+                _ => 0,
+            })
+            .collect();
+        let left = self.vector_addr(lhs, span);
+        let right = self.vector_addr(rhs, span);
+        if self.whole_shuffle((lhs, left), (rhs, right), &picks, at, ty, span) {
+            return;
+        }
+        let mut values = Vec::with_capacity(picks.len());
+        for &pick in &picks {
+            let (from, index) = if pick < first { (left, pick) } else { (right, pick - first) };
+            values.push(self.lane(from, index, stride, lane, span));
+        }
+        for (index, value) in (0..).zip(values) {
+            let into = self.lane_place(at, index, stride, lane, span);
+            self.write(into, value, span);
+        }
+    }
+
+    /// A `__builtin_shufflevector` done as one `i8x16.shuffle`, on wasm32 with `-msimd128`, and
+    /// whether it was.
+    ///
+    /// Each operand and the answer are vectors of 8 or 16 bytes, which are each one `v128` on
+    /// wasm. The call to `__builtin_wasm_shuffle_i8x16` picks the bytes of each lane, where the
+    /// bytes of `b` start at 16, and the selector writes it as one instruction. An answer of 8
+    /// bytes is the low half of the shuffle.
+    fn whole_shuffle(
+        &mut self,
+        (lhs, left): (ExprId, Value),
+        (rhs, right): (ExprId, Value),
+        picks: &[u64],
+        at: Value,
+        ty: TypeId,
+        span: Span,
+    ) -> bool {
+        if !self.target().simd128 {
+            return false;
+        }
+        let size = |this: &Self, ty| repr::size_of(this.types(), this.target(), ty);
+        let (a, b) = (self.tast()[lhs].ty, self.tast()[rhs].ty);
+        let sizes = [size(self, a), size(self, b), size(self, ty)];
+        if !sizes.iter().all(|&size| matches!(size, 8 | 16)) {
+            return false;
+        }
+        let lane = rucc_types::element(self.types(), ty).expect("a vector");
+        let width = size(self, lane);
+        let first = self.lanes(a);
+        let mut bytes = Vec::with_capacity(16);
+        for &pick in picks {
+            let start = if pick < first { pick * width } else { 16 + (pick - first) * width };
+            bytes.extend(start..start + width);
+        }
+        bytes.resize(16, 0);
+        let mut args = Vec::with_capacity(18);
+        // A vector of 8 bytes is a `v128` on wasm with its lanes in the low half. The loads name
+        // no type, for the reason in [`Self::whole_vector`].
+        for (vector, address) in [(a, left), (b, right)] {
+            let one = rucc_types::element(self.types(), vector).expect("a vector");
+            let one = self.value_type(one, span);
+            let whole = Type::vector(one, u32::try_from(self.lanes(vector)).unwrap_or(0));
+            let align = self.place_align(Place::new(Where::Addr(address), vector));
+            args.push(self.build(span).load(whole, address, untyped(align), Flags::NONE));
+        }
+        let mut build = self.build(span);
+        args.extend(bytes.iter().map(|&byte| build.iconst(Type::int(32), i128::from(byte))));
+        let out = Type::vector(Type::int(8), 16);
+        let call = self.atomic_call("__builtin_wasm_shuffle_i8x16", &args, &[out], span);
+        let value = self.func[call].first_result.expect("one result was asked for");
+        let ir = self.value_type(lane, span);
+        let align = repr::align_of(self.types(), self.target(), lane);
+        let mut build = self.build(span);
+        if sizes[2] == 8 {
+            let halves = build.unary(Opcode::Bitcast, value, Type::vector(Type::int(64), 2));
+            let low = build.extract_lane(halves, 0);
+            build.store(low, at, untyped(align), Flags::NONE);
+        } else {
+            let lanes = u32::try_from(picks.len()).unwrap_or(0);
+            let whole = build.unary(Opcode::Bitcast, value, Type::vector(ir, lanes));
+            build.store(whole, at, untyped(align), Flags::NONE);
+        }
+        true
     }
 
     /// `v op= w` performed lane by lane at the object `target` names.
@@ -6854,7 +6955,7 @@ impl<'u> Body<'_, 'u> {
             ExprKind::Sign { op, lhs, rhs } => Some(self.sign(op, lhs, rhs, span)),
             ExprKind::Abs { operand } => Some(self.abs(operand, span)),
             // A vector is built where one would live, as a shuffle is below.
-            ExprKind::ConvertVector { .. } => {
+            ExprKind::ConvertVector { .. } | ExprKind::ShuffleVector { .. } => {
                 let place = self.place(expr);
                 self.read(place, span)
             }
@@ -11288,6 +11389,12 @@ impl<'a> Scan<'a> {
                     self.expr(rhs);
                 }
                 self.expr(mask);
+            }
+            // The indices are constants, so there is nothing in them to walk.
+            ExprKind::ShuffleVector { operands } => {
+                let (lhs, rhs) = (self.tast[operands][0], self.tast[operands][1]);
+                self.expr(lhs);
+                self.expr(rhs);
             }
             ExprKind::Abs { operand }
             | ExprKind::ConvertVector { operand }

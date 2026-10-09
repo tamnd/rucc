@@ -906,6 +906,8 @@ impl Checker<'_> {
         if let Some(value) = self.object_size_builtin(function, &args, span) {
             return value;
         }
+        // The lanes of the wasm shuffle, which are immediates. In `check/builtin/shuffle.rs`.
+        self.wasm_shuffle_lanes(function, &mut args, span);
         let args = self.tast.add_expr_refs(&args);
         // The value of a call has the unqualified version of the return type, which is C17's
         // reading of DR 423 and what gcc does: `static const struct S f(void)` returns a

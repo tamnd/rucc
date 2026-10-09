@@ -612,6 +612,7 @@ impl<'a> Printer<'a> {
             ExprKind::Abs { .. } => "abs".to_owned(),
             ExprKind::Complex { .. } => "complex".to_owned(),
             ExprKind::Shuffle { .. } => "shuffle".to_owned(),
+            ExprKind::ShuffleVector { .. } => "shufflevector".to_owned(),
             ExprKind::ByteSwap { .. } => "bswap".to_owned(),
             ExprKind::BitCount { count, .. } => format!("count {}", count.as_str()),
             ExprKind::Overflow { op, at, stores, .. } => {
@@ -745,6 +746,12 @@ impl<'a> Printer<'a> {
                     self.expr(rhs);
                 }
                 self.expr(mask);
+            }
+            ExprKind::ShuffleVector { operands } => {
+                let operands = self.tast[operands].to_vec();
+                for operand in operands {
+                    self.expr(operand);
+                }
             }
             // The value first, the way the node holds it, and the five answers after it in the
             // order the call writes them rather than the order the call is written in.

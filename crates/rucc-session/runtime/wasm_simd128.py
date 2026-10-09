@@ -758,16 +758,31 @@ def emit():
     section(
         "The shuffles, which pick each lane of the answer from the lanes of both operands. A "
         "lane index\n * past the end of both picks from the start again, as `__builtin_shuffle` "
-        "does."
+        "does. With\n * `-msimd128`, each one is `__builtin_wasm_shuffle_i8x16`, as in clang, which "
+        "picks the bytes of\n * each lane."
     )
     for e in SIGNED:
         n = lanes(e)
         u = vt(ut(e))
         cs = ", ".join(f"__c{i}" for i in range(n))
+        size = 16 // n
+        if size == 1:
+            picks = cs
+        else:
+            picks = ", ".join(
+                f"(__c{i}) * {size}" + (f" + {b}" if b else "") for i in range(n) for b in range(size)
+            )
+        w("#ifdef __wasm_simd128__")
+        macro(
+            f"{vname(e)}_shuffle(__a, __b, {cs})",
+            f"((v128_t)__builtin_wasm_shuffle_i8x16(({vt('i8')})(__a), ({vt('i8')})(__b), {picks}))",
+        )
+        w("#else")
         macro(
             f"{vname(e)}_shuffle(__a, __b, {cs})",
             f"((v128_t)__builtin_shuffle(({u})(__a), ({u})(__b), ({u}){{{cs}}}))",
         )
+        w("#endif")
 
     section("The names of earlier versions of the proposal, which clang keeps as deprecated.")
     old = [
