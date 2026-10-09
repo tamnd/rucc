@@ -222,7 +222,7 @@ fn entry<'a>(text: &'a str, name: &str) -> &'a str {
 }
 
 #[test]
-fn each_declaration_has_a_location_at_o0() {
+fn each_declaration_has_a_location() {
     let Some(sdk) = sdk() else {
         eprintln!("WASI_SDK_PATH is not set, so the object was not read back");
         return;
@@ -252,6 +252,19 @@ fn each_declaration_has_a_location_at_o0() {
     // A declaration that the loop changes is in more than one local, so it has a location list.
     for name in ["s", "i"] {
         let have = entry(&text, name);
+        assert!(have.contains("DW_AT_location\t(0x") && have.contains(local), "{name}:\n{text}");
+    }
+    // At -O2 the coloring shares locals. The parameter is the only value in its local, so it is
+    // there all through, and the sum and the counter of the loop have stretches in locals.
+    let out = Command::new(&dwarfdump).arg("--debug-info").arg(dir.join("p-O2.o")).output();
+    let out = out.expect("llvm-dwarfdump starts");
+    ok(&out);
+    let text = String::from_utf8_lossy(&out.stdout);
+    let sum = &text[text.find("DW_AT_name\t(\"sum\")").unwrap_or_else(|| panic!("{text}"))..];
+    let n = entry(sum, "n");
+    assert!(n.contains(&format!("DW_AT_location\t({local}0x0, DW_OP_stack_value)")), "{text}");
+    for name in ["s", "i"] {
+        let have = entry(sum, name);
         assert!(have.contains("DW_AT_location\t(0x") && have.contains(local), "{name}:\n{text}");
     }
     std::fs::remove_dir_all(dir).unwrap();

@@ -197,12 +197,14 @@ pub(crate) fn function(unit: &mut Unit<'_>, id: FuncId, symbol: u32) -> Result<F
         signed: Set::default(),
         rows: None,
         marks: None,
+        entering: Set::default(),
         span: Span::DUMMY,
     };
     if lower.unit.lines.is_some() {
         lower.rows = Some(Vec::new());
-        if !lower.unit.optimize {
-            lower.marks = Some(Vec::new());
+        lower.marks = Some(Vec::new());
+        if lower.unit.optimize {
+            lower.code.writes = Some(Vec::new());
         }
     }
     if unit_notes {
@@ -314,8 +316,11 @@ struct Lower<'u, 'a> {
     /// the run comes from, when `-g` asks for the line table. See [`Self::at`].
     rows: Option<Vec<(u32, Span)>>,
     /// The offsets in the code that the places of the declarations are measured by, when `-g` asks
-    /// for the debug information at `-O0`. See `places.rs`.
+    /// for the debug information. See `places.rs`.
     marks: Option<Vec<(u32, Mark)>>,
+    /// Each block with each value that is live at its start, which the coloring found, when `-g`
+    /// asks for the debug information above `-O0`. See `places.rs`.
+    entering: Set<(Block, Value)>,
     /// The span of the IR instruction whose code is written now.
     span: Span,
 }
@@ -1281,12 +1286,18 @@ impl Lower<'_, '_> {
         let local = self.local[&value];
         if self.trees.teed.contains_key(&value) {
             self.code.local_tee(local);
+            if let Some(write) = self.code.writes.as_mut().and_then(|writes| writes.last_mut()) {
+                write.value = Some(value);
+            }
             return;
         }
         if is_pair(self.ty(value)) {
             self.code.local_set(local + 1);
         }
         self.code.local_set(local);
+        if let Some(write) = self.code.writes.as_mut().and_then(|writes| writes.last_mut()) {
+            write.value = Some(value);
+        }
     }
 
     fn def(&self, value: Value) -> Option<(Inst, usize)> {

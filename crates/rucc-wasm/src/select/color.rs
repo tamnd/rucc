@@ -262,6 +262,13 @@ impl Lower<'_, '_> {
                 }
             }
         }
+        if self.code.writes.is_some() {
+            for (b, live) in live_in.iter().enumerate() {
+                for d in live.iter() {
+                    self.entering.insert((blocks[b], nodes[d as usize]));
+                }
+            }
+        }
         // Which nodes interfere, between nodes of one type only.
         let mut adjacent: Vec<Vec<u32>> = vec![Vec::new(); n];
         for (b, events) in events.iter().enumerate() {
