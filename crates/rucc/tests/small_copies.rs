@@ -72,6 +72,23 @@ void m24(void *d, const void *s) { memmove(d, s, 24); }
     }
 }
 
+/// Postgres' item pointer, three two byte fields copied as one six byte block on every tuple a scan
+/// stores in a slot. The tail is two bytes of its own at 4, not four bytes at 2 that would read two
+/// fields written by two different stores, which is gcc's plan too (tamnd/rucc#1994).
+#[test]
+fn a_tail_that_is_a_move_of_its_own_does_not_overlap() {
+    let source = "\
+struct tid { unsigned short hi, lo, pos; };
+void c6(struct tid *d, const struct tid *s) { *d = *s; }
+void c12(void *d, const void *s) { memcpy(d, s, 12); }
+";
+    let text = asm("tail", &["-O2"], source);
+    let c6 = body(&text, "c6");
+    assert!(c6.contains("4(%rsi)") && !c6.contains("2(%rsi)"), "{c6}");
+    let c12 = body(&text, "c12");
+    assert!(c12.contains("8(%rsi)") && !c12.contains("4(%rsi)"), "{c12}");
+}
+
 /// `read_header` from tamnd/rucc#2298. The copy into `h` is an operation rather than a call, and
 /// once it is, scalar replacement takes `h` out of memory, so what is left is the load from `rec`
 /// and the call through `out`, which is gcc's two instructions.

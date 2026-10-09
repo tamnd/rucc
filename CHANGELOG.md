@@ -17,6 +17,7 @@ All notable changes are recorded here. The format follows [Keep a Changelog](htt
 - Inlining keeps the largest restrict clique of the caller from one splice to the next instead of walking the whole caller for each splice. blake2b-ref.c at `-O2` runs 7.6 percent fewer instructions (#3405).
 - The release archive carries `librucc_builtins.a` for `i686-linux-gnu`, so a link with `--target=i686-linux-gnu` or `-m32` works from the archive, as the README says (#3408).
 - The post-dominator tree lays its reverse graph out in one flat array instead of one list per block, which was most of what rebuilding it after each collapse in short-circuit and phiopt cost. lz4hc.c at `-O2` runs 2.2 percent fewer instructions (#3411).
+- A block copy or fill whose tail is a power of two writes the tail as one move of its own width instead of a full word overlapping the one before it, as gcc does. Postgres' six byte item pointer was copied as four bytes at 0 and four at 2, and the second load spanned two stores and could not be forwarded from them on every tuple a scan stored in a slot (#3407).
 
 ## 0.29.3
 
