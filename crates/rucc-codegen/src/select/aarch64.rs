@@ -30,7 +30,9 @@ pub static SELECTOR: super::Selector = super::Selector {
         pointer: super::Pointer::Own("thread_64"),
         indexed: None,
         teb: Some(super::Teb { index: "ldr_sym_32", array: "teb_64", block: "secrel_64" }),
-        dynamic: None,
+        // gcc writes the descriptor call for both models here, and so does this. A linker that
+        // makes an executable rewrites all four instructions, so they stay together as text.
+        dynamic: Some(super::Dynamic { general: TLSDESC, local: TLSDESC }),
     },
     jumps: &super::Jumps {
         near: "adr_64",
@@ -39,6 +41,18 @@ pub static SELECTOR: super::Selector = super::Selector {
         two_address: false,
     },
 };
+
+/// The call through the descriptor of a thread-local variable, which is how gcc and clang reach
+/// one in a shared library on AArch64. The function in the descriptor takes its address in `x0`
+/// and gives back the variable's offset from the thread pointer, and the last two instructions
+/// add that to the thread pointer.
+const TLSDESC: &str = "adrp\tx0, :tlsdesc:{}\n\
+                       ldr\tx1, [x0, :tlsdesc_lo12:{}]\n\
+                       add\tx0, x0, :tlsdesc_lo12:{}\n\
+                       .tlsdesccall\t{}\n\
+                       blr\tx1\n\
+                       mrs\tx1, tpidr_el0\n\
+                       add\tx0, x1, x0";
 
 #[cfg(test)]
 mod tests {

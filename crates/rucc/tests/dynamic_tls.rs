@@ -7,7 +7,11 @@
 //! the library rucc builds with `-fPIC` loads and gives each thread its own copy, at `-O0` and at
 //! `-O2`, and that `-ftls-model=initial-exec` still gives the old model.
 
-#![cfg(all(target_os = "linux", target_env = "gnu", target_arch = "x86_64"))]
+#![cfg(all(
+    target_os = "linux",
+    target_env = "gnu",
+    any(target_arch = "x86_64", target_arch = "aarch64")
+))]
 
 use std::path::{Path, PathBuf};
 use std::process::Command;

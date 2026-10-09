@@ -111,8 +111,10 @@ pub struct Symbols {
     pub dynamic: Option<Dynamic>,
 }
 
-/// The calls to `__tls_get_addr` that reach a thread-local variable in a shared library, each as
-/// the text of a template with `{}` where the variable's name goes.
+/// The calls that reach a thread-local variable in a shared library, each as the text of a template
+/// with `{}` where the variable's name goes. On x86-64 they are calls to `__tls_get_addr`, shown
+/// below. On AArch64 both are a call through the variable's descriptor, which gives back the
+/// offset from the thread pointer, and the template adds the thread pointer to it.
 ///
 /// A library may be loaded with `dlopen` after the program has started, and then its variables are
 /// in a block the loader made for it alone, which no offset from the thread pointer reaches. The
@@ -128,7 +130,7 @@ pub struct Symbols {
 /// ```
 ///
 /// When the variable turns out to be in the program, the linker rewrites the call into a read of
-/// the thread pointer. It knows the call only by its exact bytes, and the prefixes on the first
+/// the thread pointer. This is true on both machines. It knows the call only by its exact bytes, and the prefixes on the first
 /// one are there to make it as long as what the linker puts in its place, so the instructions
 /// are kept together as text and not given to the allocator one at a time.
 #[derive(Debug)]

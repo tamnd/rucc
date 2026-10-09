@@ -1017,7 +1017,11 @@ fn moved(
             | Fixup::GotTprelPage21
             | Fixup::GotTprelLo12Nc
             | Fixup::TprelHi12
-            | Fixup::TprelLo12Nc,
+            | Fixup::TprelLo12Nc
+            | Fixup::TlsdescAdrPage21
+            | Fixup::TlsdescLd64Lo12
+            | Fixup::TlsdescAddLo12
+            | Fixup::TlsdescCall,
         ) => false,
         _ if input.parts.get(part)?.shape.merge != 0 => !near && reloc.addend == 0,
         _ => true,

@@ -315,6 +315,12 @@ pub enum Operator {
     TprelHi12,
     /// The low twelve bits of it, `:tprel_lo12_nc:`.
     TprelLo12Nc,
+    /// The page of the pair of slots in the global offset table that is a thread-local variable's
+    /// descriptor, `:tlsdesc:`.
+    Tlsdesc,
+    /// The low twelve bits of that pair's address, `:tlsdesc_lo12:`, which both the load of the
+    /// function in the first slot and the add that makes the argument carry.
+    TlsdescLo12,
     /// Bits twelve to twenty three of the offset from the start of the section, `:secrel_hi12:`,
     /// which is how a Windows program finds a thread-local variable in its block once the block's
     /// address has been read out of the thread's slot for the image.
@@ -478,6 +484,16 @@ pub enum Fixup {
     TprelHi12,
     /// The low twelve bits of it, for `add`.
     TprelLo12Nc,
+    /// The page of a thread-local variable's descriptor in the global offset table, for `adrp`.
+    TlsdescAdrPage21,
+    /// The low twelve bits of the descriptor, as the offset of the eight byte load that reads the
+    /// function out of it.
+    TlsdescLd64Lo12,
+    /// The same bits for the `add` that makes the descriptor's address.
+    TlsdescAddLo12,
+    /// No bits at all. It marks the `blr` that calls the descriptor's function, so that a linker
+    /// that makes an executable can find the call and rewrite it.
+    TlsdescCall,
     /// Bits twelve to twenty three of the offset from the start of the section, for `add` with a
     /// shift.
     SecrelHigh12A,
@@ -520,6 +536,10 @@ impl Fixup {
             Fixup::GotTprelLo12Nc => 542,
             Fixup::TprelHi12 => 549,
             Fixup::TprelLo12Nc => 551,
+            Fixup::TlsdescAdrPage21 => 562,
+            Fixup::TlsdescLd64Lo12 => 563,
+            Fixup::TlsdescAddLo12 => 564,
+            Fixup::TlsdescCall => 569,
             Fixup::MovwUabs(group) => 263 + 2 * u32::from(group),
             Fixup::MovwUabsNc(group) => 264 + 2 * u32::from(group),
             Fixup::MovwSabs(group) => 270 + u32::from(group),
@@ -550,6 +570,10 @@ impl Fixup {
             Fixup::GotTprelLo12Nc => "R_AARCH64_TLSIE_LD64_GOTTPREL_LO12_NC",
             Fixup::TprelHi12 => "R_AARCH64_TLSLE_ADD_TPREL_HI12",
             Fixup::TprelLo12Nc => "R_AARCH64_TLSLE_ADD_TPREL_LO12_NC",
+            Fixup::TlsdescAdrPage21 => "R_AARCH64_TLSDESC_ADR_PAGE21",
+            Fixup::TlsdescLd64Lo12 => "R_AARCH64_TLSDESC_LD64_LO12",
+            Fixup::TlsdescAddLo12 => "R_AARCH64_TLSDESC_ADD_LO12",
+            Fixup::TlsdescCall => "R_AARCH64_TLSDESC_CALL",
             Fixup::MovwUabs(group) => MOVW_UABS[usize::from(group)],
             Fixup::MovwUabsNc(group) => MOVW_UABS_NC[usize::from(group)],
             Fixup::MovwSabs(group) => MOVW_SABS[usize::from(group)],
@@ -557,6 +581,22 @@ impl Fixup {
             Fixup::SecrelLow12A => "IMAGE_REL_ARM64_SECREL_LOW12A",
             Fixup::SecrelLow12L => "IMAGE_REL_ARM64_SECREL_LOW12L",
         }
+    }
+
+    /// Whether it reaches a thread-local variable, which makes the name it reaches one.
+    #[must_use]
+    pub fn thread(self) -> bool {
+        matches!(
+            self,
+            Fixup::GotTprelPage21
+                | Fixup::GotTprelLo12Nc
+                | Fixup::TprelHi12
+                | Fixup::TprelLo12Nc
+                | Fixup::TlsdescAdrPage21
+                | Fixup::TlsdescLd64Lo12
+                | Fixup::TlsdescAddLo12
+                | Fixup::TlsdescCall
+        )
     }
 
     /// The word with the number filled in, or `None` when the number does not fit.
@@ -575,13 +615,18 @@ impl Fixup {
             Fixup::CondBr19 | Fixup::Literal19 => Some(word | pc_relative(value, 19)? << 5),
             Fixup::TestBr14 => Some(word | pc_relative(value, 14)? << 5),
             Fixup::AdrLo21 => Some(word | adr_bits(value)?),
-            Fixup::AdrPage21 | Fixup::GotPage21 | Fixup::GotTprelPage21 => {
+            Fixup::AdrPage21
+            | Fixup::GotPage21
+            | Fixup::GotTprelPage21
+            | Fixup::TlsdescAdrPage21 => {
                 if value & 0xfff != 0 {
                     return None;
                 }
                 Some(word | adr_bits(value >> 12)?)
             }
-            Fixup::AddLo12 | Fixup::TprelLo12Nc | Fixup::SecrelLow12A => Some(word | low << 10),
+            Fixup::AddLo12 | Fixup::TprelLo12Nc | Fixup::TlsdescAddLo12 | Fixup::SecrelLow12A => {
+                Some(word | low << 10)
+            }
             Fixup::TprelHi12 | Fixup::SecrelHigh12A => {
                 let high = u32::try_from(value >> 12).ok().filter(|&high| high < 1 << 12)?;
                 (value >= 0).then_some(word | high << 10)
@@ -589,7 +634,9 @@ impl Fixup {
             Fixup::Ldst8Lo12 => Some(word | low << 10),
             Fixup::Ldst16Lo12 => scaled_low(word, low, 1),
             Fixup::Ldst32Lo12 => scaled_low(word, low, 2),
-            Fixup::Ldst64Lo12 | Fixup::GotLo12 | Fixup::GotTprelLo12Nc => scaled_low(word, low, 3),
+            Fixup::Ldst64Lo12 | Fixup::GotLo12 | Fixup::GotTprelLo12Nc | Fixup::TlsdescLd64Lo12 => {
+                scaled_low(word, low, 3)
+            }
             Fixup::Ldst128Lo12 => scaled_low(word, low, 4),
             Fixup::SecrelLow12L => scaled_low(word, low, access_scale(word)),
             Fixup::MovwUabs(group) => {
@@ -597,6 +644,7 @@ impl Fixup {
                 (above == 0).then(|| wide_bits(word, value, group))
             }
             Fixup::MovwUabsNc(group) => Some(wide_bits(word, value, group)),
+            Fixup::TlsdescCall => Some(word),
             Fixup::MovwSabs(group) => {
                 let half = 1i64 << (16 * u32::from(group) + 15);
                 if !(-2 * half..2 * half).contains(&value) {
@@ -1164,6 +1212,7 @@ impl At<'_> {
                         ("adrp", Operator::Plain) => Fixup::AdrPage21,
                         ("adrp", Operator::Got) => Fixup::GotPage21,
                         ("adrp", Operator::GotTprel) => Fixup::GotTprelPage21,
+                        ("adrp", Operator::Tlsdesc) => Fixup::TlsdescAdrPage21,
                         _ => return Err(self.unwritten()),
                     };
                     let page = u32::from(m == "adrp");
@@ -1490,6 +1539,7 @@ impl At<'_> {
                 let (fixup, high) = match (op, rest) {
                     (Operator::Lo12, []) => (Fixup::AddLo12, 0),
                     (Operator::TprelLo12Nc, []) => (Fixup::TprelLo12Nc, 0),
+                    (Operator::TlsdescLo12, []) if width == Width::X => (Fixup::TlsdescAddLo12, 0),
                     (Operator::TprelHi12, [Value::Shift(Shift::Lsl, 12)]) => (Fixup::TprelHi12, 1),
                     (Operator::SecrelLo12, []) => (Fixup::SecrelLow12A, 0),
                     // With the shift said or not, since clang writes it without and reads both.
@@ -2048,6 +2098,9 @@ impl At<'_> {
                     (Operator::GotLo12, 3) if m == "ldr" && access.v == 0 => Fixup::GotLo12,
                     (Operator::GotTprelLo12, 3) if m == "ldr" && access.v == 0 => {
                         Fixup::GotTprelLo12Nc
+                    }
+                    (Operator::TlsdescLo12, 3) if m == "ldr" && access.v == 0 => {
+                        Fixup::TlsdescLd64Lo12
                     }
                     (Operator::SecrelLo12, _) => Fixup::SecrelLow12L,
                     _ => return Err(self.unwritten()),

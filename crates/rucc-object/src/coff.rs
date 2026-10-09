@@ -121,6 +121,10 @@ pub(crate) fn arm64(reference: Reference) -> Option<pe::RelocationType> {
             | Fixup::GotTprelLo12Nc
             | Fixup::TprelHi12
             | Fixup::TprelLo12Nc
+            | Fixup::TlsdescAdrPage21
+            | Fixup::TlsdescLd64Lo12
+            | Fixup::TlsdescAddLo12
+            | Fixup::TlsdescCall
             | Fixup::MovwUabs(_)
             | Fixup::MovwUabsNc(_)
             | Fixup::MovwSabs(_),

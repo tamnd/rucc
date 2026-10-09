@@ -2074,6 +2074,7 @@ impl Reader {
 
             "incbin" => self.incbin(&args)?,
             "reloc" => self.reloc(&args)?,
+            "tlsdesccall" if self.aarch64 => self.tlsdesccall(&args)?,
 
             "space" | "skip" | "zero" => {
                 if args.is_empty() || args.len() > 2 {
@@ -2978,6 +2979,34 @@ impl Reader {
             branch: None,
             jump: false,
             field: None,
+            leb: None,
+            line: self.line,
+        });
+        Ok(())
+    }
+
+    /// `.tlsdesccall x`, which says that the `blr` after it calls the function in the descriptor of
+    /// the thread-local variable `x`.
+    ///
+    /// It writes no bytes. It puts an `R_AARCH64_TLSDESC_CALL` on the next instruction. A linker
+    /// that makes an executable knows where the variable is, and this is how it finds the call to
+    /// rewrite along with the three instructions before it.
+    fn tlsdesccall(&mut self, args: &[String]) -> Result<(), Trouble> {
+        let [name] = args else {
+            return Err(self.bad(".tlsdesccall wants the name of one thread-local variable"));
+        };
+        let name = self.named(name.trim())?;
+        self.sym(&name);
+        self.fixups.push(Fixup {
+            part: self.here,
+            at: self.at(),
+            width: 4,
+            sum: Sum { constant: 0, terms: vec![Term { coeff: 1, what: What::Symbol(name) }] },
+            reach: Reach::Near,
+            slot: Reference::Data,
+            branch: None,
+            jump: false,
+            field: Some(aarch64::Fixup::TlsdescCall),
             leb: None,
             line: self.line,
         });
@@ -4935,6 +4964,13 @@ impl Reader {
             }
         };
         if let Some(&sym) = self.known.get(&name) {
+            // gas marks a name a thread-local field reaches as thread-local, defined here or not,
+            // and a linker refuses a TLS definition that a plain name refers to. On Mach-O the
+            // slot holds the address of the variable's descriptor, which is a plain name there.
+            let thread = field.thread() && !self.macho;
+            if thread && matches!(self.syms[sym].sort, Sort::Untyped | Sort::Object) {
+                self.syms[sym].sort = Sort::Thread;
+            }
             if self.syms[sym].numbered && self.syms[sym].at != Held::Undefined {
                 self.relocated.insert(sym);
             } else if self.syms[sym].numbered {
@@ -6422,6 +6458,41 @@ _tls$tlv$init:
                 (12, "table", Reference::Field(aarch64::Fixup::AddLo12), 8),
             ]
         );
+    }
+
+    #[test]
+    fn an_aarch64_thread_local_descriptor_call_is_the_four_relocations_gas_writes() {
+        let read = aarch64(concat!(
+            "f:\tadrp x0, :tlsdesc:counter\n",
+            "\tldr x1, [x0, :tlsdesc_lo12:counter]\n",
+            "\tadd x0, x0, :tlsdesc_lo12:counter\n",
+            "\t.tlsdesccall counter\n",
+            "\tblr x1\n",
+            "\tmrs x1, tpidr_el0\n",
+            "\tadd x0, x1, x0\n",
+        ));
+        // The bytes gas writes for the same lines, with zeros where the linker fills in.
+        assert_eq!(
+            words(&read, ".text"),
+            [0x9000_0000, 0xf940_0001, 0x9100_0000, 0xd63f_0020, 0xd53b_d041, 0x8b00_0020]
+        );
+        let text = read.parts.iter().find(|part| part.name == ".text").unwrap();
+        let relocs: Vec<_> =
+            text.relocs.iter().map(|r| (r.at, r.symbol.as_str(), r.kind, r.addend)).collect();
+        assert_eq!(
+            relocs,
+            [
+                (0, "counter", Reference::Field(aarch64::Fixup::TlsdescAdrPage21), 0),
+                (4, "counter", Reference::Field(aarch64::Fixup::TlsdescLd64Lo12), 0),
+                (8, "counter", Reference::Field(aarch64::Fixup::TlsdescAddLo12), 0),
+                (12, "counter", Reference::Field(aarch64::Fixup::TlsdescCall), 0),
+            ]
+        );
+        // The name is thread-local though it is not defined here, as gas writes it, or a linker
+        // refuses the definition in another object. The same for the initial exec slot.
+        assert_eq!(name(&read, "counter").sort, Sort::Thread);
+        let read = aarch64("f:\tadrp x0, :gottprel:other\n\tldr x0, [x0, :gottprel_lo12:other]\n");
+        assert_eq!(name(&read, "other").sort, Sort::Thread);
     }
 
     #[test]
