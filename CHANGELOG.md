@@ -15,6 +15,7 @@ All notable changes are recorded here. The format follows [Keep a Changelog](htt
 ### Fixed
 
 - A constant that holds an address, in a section the program named, is read only under `-fno-pic` the way gcc and clang leave it, so the kernel's `__param` and `.init.rodata` are `"a"` and not `"aw"`. Only position independent code needs the loader to write the address. The decision for an unnamed constant moved from the driver into the same place (#3437).
+- A `__builtin_constant_p` answered yes because the ranges pin its operand to one number now puts that number in place of the operand in the blocks below the question, as gcc's value range propagation does. The kernel's `udelay(n)` tests `n / 20000` next to the question, and i2c-mux-pca9541 calls it under `if (timeout == 50)`, so the division stayed and `__bad_udelay` was left for modpost to refuse on arm64 (#3439).
 
 ## 0.29.5
 
