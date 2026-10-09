@@ -520,6 +520,10 @@ pub struct Flags {
     /// out of the frame by that instruction instead, which every level above `-O0` asks for. See
     /// [`crate::copies::reloads`].
     pub reloads: bool,
+    /// Whether the address of a name read with an index in a loop with no call in it is taken once
+    /// in front of the loop and held in a register, which every level above `-O0` asks for. See
+    /// [`crate::hoist`].
+    pub hold: bool,
     /// Whether the instructions of a block are put in the order the machine finishes soonest,
     /// which `-fschedule-insns2` asks for and every level from `-O2` turns on. See
     /// [`crate::schedule`].
@@ -616,6 +620,7 @@ impl Default for Flags {
             partition: false,
             reuse: false,
             reloads: false,
+            hold: false,
             schedule: false,
             align_loops: false,
             accurate: None,
@@ -835,8 +840,17 @@ pub fn compile_recording(
     let x87 = flags.x87 && !saves_all;
     let stacked = machine.conv.word == 4;
     lower::off_registers(source, vectors, x87, flags.x87_return, stacked)?;
-    let lowered =
-        lower::func_for(source, names, machine.selector, machine.conv, elsewhere, flags.debug)?;
+    let room = machine.env.order(machine.conv.int_class).len();
+    let hold = flags.hold.then(|| u32::try_from(room).unwrap_or(u32::MAX));
+    let lowered = lower::func_for(
+        source,
+        names,
+        machine.selector,
+        machine.conv,
+        elsewhere,
+        flags.debug,
+        hold,
+    )?;
     recording.fired.merge(&lowered.fired);
     let lower::Lowered { mut func, mut stack, blocks, .. } = lowered;
     // Straight after selection, because this is the last moment the machine blocks and the IR

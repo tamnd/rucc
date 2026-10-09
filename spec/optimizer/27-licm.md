@@ -184,6 +184,8 @@ No fixpoint needed for values; a fixpoint is needed only for memory, which is ha
 *Hoisting.* Move the instruction to the end of the preheader. In rucc's IR this is unlinking and
 relinking in a doubly linked list, which is why the IR has one.
 
+*The address of a name.* LICM gives the address of a global or static name a cost of 0 and never hoists it, because codegen rebuilds that address with one `lea` next to each reader, and holding it in a register for the whole function would cost a register everywhere. Inside a loop that trade flips: a loop that indexes `table[i]` with a 64-bit index would otherwise run the `lea` on every trip, which gcc 16 does not. So the decision lives in codegen, in `rucc_codegen::hoist`, where the register count is known. Above `-O0`, the address of a name is computed once at the end of a loop's preheader and held across the loop when the loop reads the name through a non-constant offset, the loop has no call or inline asm in it, and the integer pressure in every block of the loop, plus the addresses already held there, stays below the allocatable registers less `LOOP_RESERVED_REGS`. It picks the outermost loop that passes, and two addresses of one name held across one loop share a register (#3185).
+
 *Store motion, unconditional case.* Per 27.3.
 
 **And a note on GCM.** If document 12's arm B or C wins, global code motion already hoists a
