@@ -431,6 +431,14 @@ pub enum Test {
     /// member, padding after the one member, or a `_Complex` of any kind turns it back into an
     /// aggregate, which on wasm travels as the address of a copy.
     SingleScalar,
+    /// A GNU vector, or a structure that holds only one, as [`crate::Shape::vector`] says. It
+    /// finds each lane, so each lane travels as its own argument.
+    ///
+    /// The wasm rule for a vector when `simd128` is off, which is what clang does: a `v4si` is
+    /// four `i32` parameters, and a `v4qi` is four `i32` parameters too, because a `char` lane is
+    /// a parameter of its own. It does not match past the `...`, where clang reads the bytes of
+    /// the vector from the variadic area and not each lane.
+    Vector,
     /// A `_Complex` of any kind, or an aggregate gcc gives a floating point machine mode, which is
     /// what [`crate::Shape::floating`] says.
     ///

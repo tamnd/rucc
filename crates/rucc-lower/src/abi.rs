@@ -62,6 +62,8 @@ pub(crate) enum Shaped {
         complex: bool,
         /// Whether gcc gives it a floating point machine mode. See [`floating_mode`].
         floating: bool,
+        /// Whether it is a vector, or a structure that holds only one. See [`single_vector`].
+        vector: bool,
     },
 }
 
@@ -71,13 +73,16 @@ impl Shaped {
         match self {
             Self::Void => Arg::Void,
             Self::Scalar(scalar) => Arg::Scalar(*scalar),
-            Self::Aggregate { size, align, pieces, complex, floating } => Arg::Aggregate(Shape {
-                size: *size,
-                align: *align,
-                pieces,
-                complex: *complex,
-                floating: *floating,
-            }),
+            Self::Aggregate { size, align, pieces, complex, floating, vector } => {
+                Arg::Aggregate(Shape {
+                    size: *size,
+                    align: *align,
+                    pieces,
+                    complex: *complex,
+                    floating: *floating,
+                    vector: *vector,
+                })
+            }
         }
     }
 
@@ -415,6 +420,7 @@ pub(crate) fn va_slots(types: &Types, target: &TargetInfo, ty: TypeId) -> Vec<Sl
                 pieces: &halves,
                 complex: false,
                 floating: false,
+                vector: false,
             })
         }
         _ => shaped.arg(),
@@ -439,7 +445,11 @@ pub(crate) fn shape(types: &Types, target: &TargetInfo, ty: TypeId) -> Option<Sh
     }
     let size = repr::size_of(types, target, id);
     let align = u64::from(repr::align_of(types, target, id));
-    let mut flatten = Flatten { types, target, pieces: Vec::new(), capped: size > IN_REGISTERS };
+    // A vector is each of its lanes on wasm, however many there are, so its pieces are not cut
+    // there. Every other target reads no more than [`ENOUGH`] of them.
+    let vector = single_vector(types, target, id);
+    let capped = size > IN_REGISTERS && !(vector && target.tuple.arch() == Arch::Wasm32);
+    let mut flatten = Flatten { types, target, pieces: Vec::new(), capped };
     flatten.push(id, 0)?;
     let mut pieces = flatten.pieces;
     // Offset order is what every rule is written over, and a union is what puts two members at
@@ -449,7 +459,40 @@ pub(crate) fn shape(types: &Types, target: &TargetInfo, ty: TypeId) -> Option<Sh
     pieces.dedup();
     let complex = matches!(types.kind(id), TypeKind::Complex(_));
     let floating = floating_mode(types, target, id);
-    Some(Shaped::Aggregate { size, align, pieces, complex, floating })
+    Some(Shaped::Aggregate { size, align, pieces, complex, floating, vector })
+}
+
+/// Whether a type is a GNU vector, or a structure that clang passes as the vector it holds.
+///
+/// That is clang's single element structure: a `struct` whose one member with bytes in it fills it
+/// and is such a type itself, through any number of structures and arrays of one element. A
+/// `union` is not one. Only the wasm rule asks, see [`rucc_abi::Shape::vector`].
+fn single_vector(types: &Types, target: &TargetInfo, ty: TypeId) -> bool {
+    let id = types.canonical(ty);
+    match types.kind(id) {
+        TypeKind::Vector { .. } => true,
+        TypeKind::Array { elem, len: ArrayLen::Fixed(1) } => single_vector(types, target, elem),
+        TypeKind::Record(record) => {
+            let info = types.record_info(record);
+            if info.kind != RecordKind::Struct {
+                return false;
+            }
+            let size = repr::size_of(types, target, id);
+            let mut members = info.fields.iter().filter(|field| {
+                field.bits != Some(0) && repr::size_of(types, target, field.ty) > 0
+            });
+            match (members.next(), members.next()) {
+                (Some(field), None) => {
+                    field.bits.is_none()
+                        && field.offset == 0
+                        && repr::size_of(types, target, field.ty) == size
+                        && single_vector(types, target, field.ty)
+                }
+                _ => false,
+            }
+        }
+        _ => false,
+    }
 }
 
 /// Whether gcc gives a type a floating point machine mode, which is what i386 `fastcall` asks of a
@@ -521,7 +564,7 @@ fn chunks(types: &Types, target: &TargetInfo, id: TypeId) -> Option<Shaped> {
     let word = Scalar { kind: Kind::Integer, size: 8, align: 8 };
     let pieces = (0..size / 8).map(|at| Piece { offset: at * 8, scalar: word }).collect();
     let align = u64::from(repr::align_of(types, target, id));
-    Some(Shaped::Aggregate { size, align, pieces, complex: false, floating: false })
+    Some(Shaped::Aggregate { size, align, pieces, complex: false, floating: false, vector: false })
 }
 
 /// The scalar a C type is, and [`None`] for a type that is not one.

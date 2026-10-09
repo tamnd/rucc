@@ -43,8 +43,14 @@
 //! // architecture, different answer, which is the whole reason this is a property of the target
 //! // rather than a rule about C.
 //! let pieces = rucc_abi::pieces(&[Scalar::integer(8), Scalar::integer(8)]);
-//! let shape =
-//!     Arg::Aggregate(Shape { size: 16, align: 8, pieces: &pieces, complex: false, floating: false });
+//! let shape = Arg::Aggregate(Shape {
+//!     size: 16,
+//!     align: 8,
+//!     pieces: &pieces,
+//!     complex: false,
+//!     floating: false,
+//!     vector: false,
+//! });
 //!
 //! let mut call = abis::for_target(linux).unwrap().call();
 //! assert_eq!(
@@ -106,5 +112,5 @@ pub fn record(pieces: &[Piece]) -> Shape<'_> {
     let size = pieces.iter().map(Piece::end).max().unwrap_or(0).next_multiple_of(align);
     let floating =
         matches!(pieces, [piece] if piece.scalar.is_float() && piece.scalar.size == size);
-    Shape { size, align, pieces, complex: false, floating }
+    Shape { size, align, pieces, complex: false, floating, vector: false }
 }
