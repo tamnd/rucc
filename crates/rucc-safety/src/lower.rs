@@ -1063,6 +1063,10 @@ pub(crate) fn calling(
 /// The count is the one the call's signature names rather than the number of operands, because
 /// both ends have to be counted the same way and the callee only has a signature. A variadic one
 /// passes the count the runtime reads as any at all.
+///
+/// In front of the call's `cap_publish` or `cap_clear` when it has one, rather than between that
+/// and the call. A publish is tied to its call by being the instruction right before it, so one
+/// with this in the way would describe the wrong call.
 fn through(
     func: &mut Func,
     names: &mut Interner,
@@ -1074,9 +1078,14 @@ fn through(
     let Some(&target) = func[func[inst].args].first() else { return };
     let signature = &func[func[info].signature];
     let count = if signature.variadic { ANY } else { signature.params.len() as i128 };
+    // Found before anything goes in front of the call, since what goes in would be what is there.
+    let at = match func.prev_inst(inst) {
+        Some(frame) if matches!(func[frame].opcode, Opcode::CapPublish | Opcode::CapClear) => frame,
+        _ => inst,
+    };
     let row = Descriptor { judgement: ACCESS, class: 0, size: 0 };
-    let desc = record(func, names, table, inst, row);
-    let passed = konst(func, inst, Imm::int(count, word), word);
+    let desc = record(func, names, table, at, row);
+    let passed = konst(func, at, Imm::int(count, word), word);
     let made = calling(
         func,
         names,
@@ -1087,7 +1096,7 @@ fn through(
     );
     let span = func.span(inst);
     let made = func.create_inst(made, &[], span);
-    func.insert_before(made, inst);
+    func.insert_before(made, at);
 }
 
 /// The other end of [`through`]: `__rucc_call_entered(own, count, descriptor)` as the first thing
@@ -1502,6 +1511,33 @@ mod tests {
         // Nobody takes the address of `two`, so nothing a pointer does can arrive there.
         let two = printed(&module, &names, "two");
         assert!(!two.contains("__rucc_call_entered"), "{two}");
+    }
+
+    #[test]
+    fn a_call_through_a_pointer_is_judged_ahead_of_its_frame() {
+        // A frame instruction is tied to its call by being right in front of it, so the judgement
+        // goes in front of the frame instruction rather than between the two.
+        let mut names = Interner::new();
+        let mut module = pointed(&mut names, 0, false);
+        let id = module
+            .funcs()
+            .find(|&id| names.resolve(module[id].name) == "main")
+            .expect("the module has main");
+        let main = &mut module[id];
+        let entry = main.entry().expect("main has a body");
+        let call = main
+            .insts(entry)
+            .find(|&inst| main[inst].opcode == Opcode::CallIndirect)
+            .expect("main calls through a pointer");
+        let clear = main.create_inst(InstData::new(Opcode::CapClear), &[], main.span(call));
+        main.insert_before(clear, call);
+        lower(&mut module, &mut names);
+
+        let main = printed(&module, &names, "main");
+        let judged = main.find("__rucc_call_through").expect("the call was judged");
+        let cleared = main.find("__rucc_frame_clear").expect("the frame was cleared");
+        let called = main.find("call_indirect").expect("and is still there");
+        assert!(judged < cleared && cleared < called, "{main}");
     }
 
     #[test]
