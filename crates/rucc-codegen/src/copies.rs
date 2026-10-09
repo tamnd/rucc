@@ -503,6 +503,17 @@ fn readers(
         let name = names.resolve(func[inst].opcode.name());
         let stop = machine.calls(name) || !machine.has(name);
         let writes = operands.iter().any(|operand| operand.role.is_def() && is(operand, into));
+        // A two address form whose answer is the scratch register reads it too. The allocator met
+        // the form with the copy in front of it, and the use still names the register the copy
+        // came from, so no operand says that the scratch register is read.
+        let tied = operands.iter().any(|operand| {
+            operand.role.is_def()
+                && is(operand, into)
+                && matches!(operand.constraint, Constraint::Reuse(_))
+        });
+        if tied {
+            return None;
+        }
         let early =
             operands.iter().any(|operand| operand.role == Role::EarlyDef && is(operand, out));
         for (index, operand) in operands.iter().enumerate() {
@@ -1433,6 +1444,20 @@ mod tests {
         let (mut names, mut func, block) = empty();
         copy(&mut func, &mut names, block, R10, RBX);
         add(&mut func, &mut names, block, R10, R10);
+        assert_eq!(forward(&mut func, &names), 0);
+        assert_eq!(left(&func, block), 2);
+    }
+
+    /// `subq $1, %r10` behind `movq %rbx, %r10`, where the use of the subtract still names `rbx`
+    /// and only the constraint on its answer says it reads `r10`.
+    #[test]
+    fn a_copy_stays_in_front_of_a_two_address_form_that_writes_the_scratch_register() {
+        let (mut names, mut func, block) = empty();
+        copy(&mut func, &mut names, block, R10, RBX);
+        let sub = op(&mut names, "sub_ri_64");
+        let mut answer = Operand::write(Reg::physical(R10), GPR);
+        answer.constraint = Constraint::Reuse(1);
+        func.build(block, sub).operand(answer).uses(Reg::physical(RBX), GPR).imm(1).finish();
         assert_eq!(forward(&mut func, &names), 0);
         assert_eq!(left(&func, block), 2);
     }
