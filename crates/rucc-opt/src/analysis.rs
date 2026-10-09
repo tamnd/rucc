@@ -41,7 +41,7 @@ use crate::image::Images;
 use crate::machine::Machine;
 use crate::modref::Summaries;
 use crate::outside::Outside;
-use crate::predict::{Callees, Predictions};
+use crate::predict::{Callees, Early, Predictions};
 use crate::profile::Probability;
 use crate::purity::Facts;
 use crate::{
@@ -201,6 +201,10 @@ pub struct Analyses {
     cfg: OnceCell<Cfg>,
     doms: OnceCell<Dominators>,
     post: OnceCell<PostDominators>,
+    // The marked `return` each block is bound to, for the early return predictor when a pass asks
+    // about one branch. Not one of the nine: it is the post-dominator tree boiled down to what
+    // the predictor reads, and goes when that tree or the frequencies go.
+    early: OnceCell<Early>,
     loops: OnceCell<Loops>,
     frontiers: OnceCell<Frontiers>,
     control: OnceCell<ControlDependence>,
@@ -227,6 +231,7 @@ impl Analyses {
             cfg: OnceCell::new(),
             doms: OnceCell::new(),
             post: OnceCell::new(),
+            early: OnceCell::new(),
             loops: OnceCell::new(),
             frontiers: OnceCell::new(),
             control: OnceCell::new(),
@@ -423,12 +428,12 @@ impl Analyses {
         if let Some(frequencies) = self.frequencies.get() {
             return frequencies.taken(block, index);
         }
-        let post = || self.post_dominators(func);
+        let early = || self.early.get_or_init(|| Early::of(func, self.cfg(func)));
         Predictions::one(
             func,
             self.cfg(func),
             self.loops(func),
-            &post,
+            &early,
             &Callees::nothing(),
             block,
             index,
@@ -569,14 +574,24 @@ impl Analyses {
             .touching(Arc::clone(&self.modref));
     }
 
-    /// Forgets everything as [`Analyses::clear`] does, except the loop forest when it is here,
-    /// which is told about each block that went away and the block that took over its edges.
+    /// Forgets everything as [`Analyses::clear`] does, except the loop forest and the early return
+    /// table when they are here, which are told about each block that went away and the block
+    /// that took over its edges.
     ///
     /// For a pass that has just folded blocks into the one block that reached each of them, under
     /// the terms [`Loops::merged`] gives, and will ask about a branch again before it returns.
     pub(crate) fn clear_merging(&mut self, func: &Func, merges: &[(Block, Block)]) {
         let loops = self.loops.take();
+        let early = self.early.take();
         self.clear();
+        if let Some(mut early) = early {
+            for &(gone, into) in merges {
+                early.merged(gone, into);
+            }
+            #[cfg(debug_assertions)]
+            assert_eq!(early, Early::of(func, &Cfg::new(func)), "the table kept is the one built");
+            self.early = OnceCell::from(early);
+        }
         let Some(mut loops) = loops else { return };
         for &(gone, into) in merges {
             if !loops.merged(gone, into) {
@@ -609,6 +624,7 @@ impl Analyses {
             }
             Analysis::PostDominators => {
                 self.post.take();
+                self.early.take();
             }
             Analysis::Loops => {
                 self.loops.take();
@@ -621,6 +637,7 @@ impl Analyses {
             }
             Analysis::Frequencies => {
                 self.frequencies.take();
+                self.early.take();
             }
             Analysis::Liveness => {
                 self.live.take();

@@ -7,6 +7,7 @@ All notable changes are recorded here. The format follows [Keep a Changelog](htt
 ### Changed
 
 - Short-circuit keeps the loop forest across a collapse instead of rebuilding it for the next branch, which makes lz4hc.c at -O2 run 3.6 percent fewer instructions (#3416).
+- Short-circuit and phiopt keep the early return table, and phiopt keeps the loop forest, across each fold instead of building them again for the next branch, which makes lz4hc.c at -O2 run 14 percent fewer instructions (#3417).
 
 ## 0.29.4
 

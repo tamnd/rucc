@@ -519,8 +519,12 @@ impl Pass for PhiOpt {
             convert(func, &shape, &plan, store.as_ref(), &implied);
             frame = None;
             // The graph was about the function as it was a moment ago, and the manager clears the
-            // cache after the pass returns, which is too late for the next block.
-            an.clear();
+            // cache after the pass returns, which is too late for the next block. Each arm had the
+            // head as its only way in and went only to the join, which the head now goes to
+            // itself, so it was folded into the head as far as the loops and the returns can tell.
+            let merges: Vec<(Block, Block)> =
+                shape.arms.iter().flatten().map(|&arm| (arm, head)).collect();
+            an.clear_merging(func, &merges);
             for _ in plan.iter().flatten().flat_map(Factored::levels) {
                 stats.optimized(FACTORED);
             }
