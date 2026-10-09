@@ -502,24 +502,12 @@ impl<'a> State<'a, '_> {
     /// The values in `at` that are wanted while `value` is, leaving out the one a two address
     /// instruction lets it share the register with.
     fn clashes(&mut self, value: Value<'_>, at: PhysReg) -> Vec<usize> {
-        let Some(found) = self.held.iter().position(|(key, _)| *key == (value.class, at)) else {
+        let Some(found) = self.asked_in(value, at) else {
             return Vec::new();
         };
         let held = &self.held[found].1;
-        // Counted as a walk over every value in the register, so that the budget runs out at the
-        // same place whichever way the question is answered.
-        self.work += held.len() as u64;
         if held.len() > FEW {
-            let pieces = &mut self.pieces[found];
-            if !pieces.kept {
-                pieces.kept = true;
-                for other in held.iter().filter_map(|&(other, _)| self.values[other]) {
-                    for piece in other.area.pieces() {
-                        pieces.insert(piece, other.reg);
-                    }
-                }
-            }
-            if let Some(owners) = pieces.owners(value.area) {
+            if let Some(owners) = self.pieces[found].owners(value.area) {
                 let clash = owners.into_iter().filter(|&other| !self.shares(value.reg, other));
                 return clash.map(index).collect();
             }
@@ -540,6 +528,54 @@ impl<'a> State<'a, '_> {
         clashes
     }
 
+    /// Whether nothing in `at` is wanted while `value` is, which is [`State::clashes`] coming back
+    /// empty. Most of the times a register is asked about, that is all the asker wants to know, and
+    /// this stops at the first value in the way rather than listing, sorting and counting them all.
+    /// tamnd/rucc#3052.
+    fn clear(&mut self, value: Value<'_>, at: PhysReg) -> bool {
+        let Some(found) = self.asked_in(value, at) else {
+            return true;
+        };
+        let held = &self.held[found].1;
+        if held.len() > FEW {
+            let clash = |other: Reg| !self.shares(value.reg, other);
+            if let Some(any) = self.pieces[found].any_owner(value.area, clash) {
+                return !any;
+            }
+        }
+        for &(other, range) in held {
+            if !range.overlaps(value.range) {
+                continue;
+            }
+            let Some(held) = self.values[other] else { continue };
+            if held.area.overlaps(value.area) && !self.shares(value.reg, held.reg) {
+                return false;
+            }
+        }
+        true
+    }
+
+    /// Where the values in `at` of `value`'s class are in `held`, for the two questions above,
+    /// with the work they cost counted and the register's pieces listed once it holds enough to
+    /// be worth it.
+    fn asked_in(&mut self, value: Value<'_>, at: PhysReg) -> Option<usize> {
+        let found = self.held.iter().position(|(key, _)| *key == (value.class, at))?;
+        let held = &self.held[found].1;
+        // Counted as a walk over every value in the register, so that the budget runs out at the
+        // same place whichever way the question is answered.
+        self.work += held.len() as u64;
+        let pieces = &mut self.pieces[found];
+        if held.len() > FEW && !pieces.kept {
+            pieces.kept = true;
+            for other in held.iter().filter_map(|&(other, _)| self.values[other]) {
+                for piece in other.area.pieces() {
+                    pieces.insert(piece, other.reg);
+                }
+            }
+        }
+        Some(found)
+    }
+
     /// Whether two values that are both wanted at one instruction may still be in one register,
     /// which is when that instruction reads one for the last time and writes the other over it.
     fn shares(&self, one: Reg, two: Reg) -> bool {
@@ -557,7 +593,7 @@ impl<'a> State<'a, '_> {
     }
 
     fn free(&mut self, value: Value<'_>, at: PhysReg, want: Want) -> bool {
-        !self.insists(value, at, want) && self.clashes(value, at).is_empty()
+        !self.insists(value, at, want) && self.clear(value, at)
     }
 
     /// Whether an instruction insists on `at` where `value` would be in its way, from what was
@@ -760,7 +796,7 @@ impl<'a> State<'a, '_> {
             if spent >= spilled || best.as_ref().is_some_and(|&(least, _, _)| least <= spent) {
                 continue;
             }
-            if self.clashes(value, at).is_empty() {
+            if self.clear(value, at) {
                 best = Some((spent, at, insts));
             }
         }
