@@ -10,8 +10,8 @@
  * `-msimd128`, and a module from it runs on an engine with no SIMD. With `-msimd128`, a function
  * that clang writes as a `__builtin_wasm_*` or a `__builtin_elementwise_*` builtin calls the same
  * builtin, which is one instruction, as in clang. The conversions, the extends and the extending
- * loads are a `__builtin_convertvector`, as in clang, with or without `-msimd128`. A conversion
- * of a half reads the half with `__builtin_shufflevector`, where clang writes a vector of the
+ * loads are a `__builtin_convertvector`, as in clang, with or without `-msimd128`, and an extmul
+ * is a multiply of two extends, as in clang. A conversion of a half reads the half with `__builtin_shufflevector`, where clang writes a vector of the
  * lanes of the half, and the two give the same lanes.
  *
  * Without `-mrelaxed-simd`, each relaxed function gives one of the answers that the relaxed-simd
@@ -1447,92 +1447,66 @@ static __inline__ v128_t wasm_u64x2_extend_high_u32x4(v128_t __a) {
       __u64x2);
 }
 static __inline__ v128_t wasm_i16x8_extmul_low_i8x16(v128_t __a, v128_t __b) {
-  __i8x16 __x = (__i8x16)__a;
-  __i8x16 __y = (__i8x16)__b;
-  __i16x8 __r;
-  for (int __i = 0; __i < 8; __i++) __r[__i] = (short)__x[__i] * (short)__y[__i];
-  return (v128_t)__r;
+  return (v128_t)(__builtin_convertvector(__builtin_shufflevector((__i8x16)__a, (__i8x16)__a, 0, 1,
+      2, 3, 4, 5, 6, 7), __i16x8) * __builtin_convertvector(__builtin_shufflevector((__i8x16)__b,
+      (__i8x16)__b, 0, 1, 2, 3, 4, 5, 6, 7), __i16x8));
 }
 static __inline__ v128_t wasm_i16x8_extmul_high_i8x16(v128_t __a, v128_t __b) {
-  __i8x16 __x = (__i8x16)__a;
-  __i8x16 __y = (__i8x16)__b;
-  __i16x8 __r;
-  for (int __i = 0; __i < 8; __i++) __r[__i] = (short)__x[__i + 8] * (short)__y[__i + 8];
-  return (v128_t)__r;
+  return (v128_t)(__builtin_convertvector(__builtin_shufflevector((__i8x16)__a, (__i8x16)__a, 8, 9,
+      10, 11, 12, 13, 14, 15),
+      __i16x8) * __builtin_convertvector(__builtin_shufflevector((__i8x16)__b, (__i8x16)__b, 8, 9,
+      10, 11, 12, 13, 14, 15), __i16x8));
 }
 static __inline__ v128_t wasm_u16x8_extmul_low_u8x16(v128_t __a, v128_t __b) {
-  __u8x16 __x = (__u8x16)__a;
-  __u8x16 __y = (__u8x16)__b;
-  __u16x8 __r;
-  for (int __i = 0; __i < 8; __i++) __r[__i] = (unsigned short)__x[__i] * (unsigned short)__y[__i];
-  return (v128_t)__r;
+  return (v128_t)(__builtin_convertvector(__builtin_shufflevector((__u8x16)__a, (__u8x16)__a, 0, 1,
+      2, 3, 4, 5, 6, 7), __u16x8) * __builtin_convertvector(__builtin_shufflevector((__u8x16)__b,
+      (__u8x16)__b, 0, 1, 2, 3, 4, 5, 6, 7), __u16x8));
 }
 static __inline__ v128_t wasm_u16x8_extmul_high_u8x16(v128_t __a, v128_t __b) {
-  __u8x16 __x = (__u8x16)__a;
-  __u8x16 __y = (__u8x16)__b;
-  __u16x8 __r;
-  for (int __i = 0; __i < 8; __i++)
-    __r[__i] = (unsigned short)__x[__i + 8] * (unsigned short)__y[__i + 8];
-  return (v128_t)__r;
+  return (v128_t)(__builtin_convertvector(__builtin_shufflevector((__u8x16)__a, (__u8x16)__a, 8, 9,
+      10, 11, 12, 13, 14, 15),
+      __u16x8) * __builtin_convertvector(__builtin_shufflevector((__u8x16)__b, (__u8x16)__b, 8, 9,
+      10, 11, 12, 13, 14, 15), __u16x8));
 }
 static __inline__ v128_t wasm_i32x4_extmul_low_i16x8(v128_t __a, v128_t __b) {
-  __i16x8 __x = (__i16x8)__a;
-  __i16x8 __y = (__i16x8)__b;
-  __i32x4 __r;
-  for (int __i = 0; __i < 4; __i++) __r[__i] = (int)__x[__i] * (int)__y[__i];
-  return (v128_t)__r;
+  return (v128_t)(__builtin_convertvector(__builtin_shufflevector((__i16x8)__a, (__i16x8)__a, 0, 1,
+      2, 3), __i32x4) * __builtin_convertvector(__builtin_shufflevector((__i16x8)__b, (__i16x8)__b,
+      0, 1, 2, 3), __i32x4));
 }
 static __inline__ v128_t wasm_i32x4_extmul_high_i16x8(v128_t __a, v128_t __b) {
-  __i16x8 __x = (__i16x8)__a;
-  __i16x8 __y = (__i16x8)__b;
-  __i32x4 __r;
-  for (int __i = 0; __i < 4; __i++) __r[__i] = (int)__x[__i + 4] * (int)__y[__i + 4];
-  return (v128_t)__r;
+  return (v128_t)(__builtin_convertvector(__builtin_shufflevector((__i16x8)__a, (__i16x8)__a, 4, 5,
+      6, 7), __i32x4) * __builtin_convertvector(__builtin_shufflevector((__i16x8)__b, (__i16x8)__b,
+      4, 5, 6, 7), __i32x4));
 }
 static __inline__ v128_t wasm_u32x4_extmul_low_u16x8(v128_t __a, v128_t __b) {
-  __u16x8 __x = (__u16x8)__a;
-  __u16x8 __y = (__u16x8)__b;
-  __u32x4 __r;
-  for (int __i = 0; __i < 4; __i++) __r[__i] = (unsigned int)__x[__i] * (unsigned int)__y[__i];
-  return (v128_t)__r;
+  return (v128_t)(__builtin_convertvector(__builtin_shufflevector((__u16x8)__a, (__u16x8)__a, 0, 1,
+      2, 3), __u32x4) * __builtin_convertvector(__builtin_shufflevector((__u16x8)__b, (__u16x8)__b,
+      0, 1, 2, 3), __u32x4));
 }
 static __inline__ v128_t wasm_u32x4_extmul_high_u16x8(v128_t __a, v128_t __b) {
-  __u16x8 __x = (__u16x8)__a;
-  __u16x8 __y = (__u16x8)__b;
-  __u32x4 __r;
-  for (int __i = 0; __i < 4; __i++)
-    __r[__i] = (unsigned int)__x[__i + 4] * (unsigned int)__y[__i + 4];
-  return (v128_t)__r;
+  return (v128_t)(__builtin_convertvector(__builtin_shufflevector((__u16x8)__a, (__u16x8)__a, 4, 5,
+      6, 7), __u32x4) * __builtin_convertvector(__builtin_shufflevector((__u16x8)__b, (__u16x8)__b,
+      4, 5, 6, 7), __u32x4));
 }
 static __inline__ v128_t wasm_i64x2_extmul_low_i32x4(v128_t __a, v128_t __b) {
-  __i32x4 __x = (__i32x4)__a;
-  __i32x4 __y = (__i32x4)__b;
-  __i64x2 __r;
-  for (int __i = 0; __i < 2; __i++) __r[__i] = (long long)__x[__i] * (long long)__y[__i];
-  return (v128_t)__r;
+  return (v128_t)(__builtin_convertvector(__builtin_shufflevector((__i32x4)__a, (__i32x4)__a, 0,
+      1), __i64x2) * __builtin_convertvector(__builtin_shufflevector((__i32x4)__b, (__i32x4)__b, 0,
+      1), __i64x2));
 }
 static __inline__ v128_t wasm_i64x2_extmul_high_i32x4(v128_t __a, v128_t __b) {
-  __i32x4 __x = (__i32x4)__a;
-  __i32x4 __y = (__i32x4)__b;
-  __i64x2 __r;
-  for (int __i = 0; __i < 2; __i++) __r[__i] = (long long)__x[__i + 2] * (long long)__y[__i + 2];
-  return (v128_t)__r;
+  return (v128_t)(__builtin_convertvector(__builtin_shufflevector((__i32x4)__a, (__i32x4)__a, 2,
+      3), __i64x2) * __builtin_convertvector(__builtin_shufflevector((__i32x4)__b, (__i32x4)__b, 2,
+      3), __i64x2));
 }
 static __inline__ v128_t wasm_u64x2_extmul_low_u32x4(v128_t __a, v128_t __b) {
-  __u32x4 __x = (__u32x4)__a;
-  __u32x4 __y = (__u32x4)__b;
-  __u64x2 __r;
-  for (int __i = 0; __i < 2; __i++)
-    __r[__i] = (unsigned long long)__x[__i] * (unsigned long long)__y[__i];
-  return (v128_t)__r;
+  return (v128_t)(__builtin_convertvector(__builtin_shufflevector((__u32x4)__a, (__u32x4)__a, 0,
+      1), __u64x2) * __builtin_convertvector(__builtin_shufflevector((__u32x4)__b, (__u32x4)__b, 0,
+      1), __u64x2));
 }
 static __inline__ v128_t wasm_u64x2_extmul_high_u32x4(v128_t __a, v128_t __b) {
-  __u32x4 __x = (__u32x4)__a;
-  __u32x4 __y = (__u32x4)__b;
-  __u64x2 __r;
-  for (int __i = 0; __i < 2; __i++)
-    __r[__i] = (unsigned long long)__x[__i + 2] * (unsigned long long)__y[__i + 2];
-  return (v128_t)__r;
+  return (v128_t)(__builtin_convertvector(__builtin_shufflevector((__u32x4)__a, (__u32x4)__a, 2,
+      3), __u64x2) * __builtin_convertvector(__builtin_shufflevector((__u32x4)__b, (__u32x4)__b, 2,
+      3), __u64x2));
 }
 static __inline__ v128_t wasm_i16x8_extadd_pairwise_i8x16(v128_t __a) {
 #ifdef __wasm_simd128__

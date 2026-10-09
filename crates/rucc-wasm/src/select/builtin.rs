@@ -284,6 +284,15 @@ impl Lower<'_, '_> {
         matches!(self.written(inst), Some(Write::Shuffle))
     }
 
+    /// The instruction of the call `inst` when it is an extend of the low or the high half of a
+    /// vector of integers, as `i16x8.extend_low_i8x16_s`.
+    pub(super) fn extend_builtin(&self, inst: Inst) -> Option<&'static str> {
+        match self.written(inst) {
+            Some(Write::Simd(op, _)) if op.contains(".extend_") => Some(op),
+            _ => None,
+        }
+    }
+
     /// Whether `value` is the answer of `all_true` or `any_true`, which is 0 or 1.
     pub(super) fn boolean_builtin(&self, value: Value) -> bool {
         let Some((inst, _)) = self.def(value) else { return false };

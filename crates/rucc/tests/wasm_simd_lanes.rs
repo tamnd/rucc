@@ -1009,3 +1009,127 @@ fn a_conversion_of_a_half_casts_each_lane() {
     }
     std::fs::remove_dir_all(dir).unwrap();
 }
+
+/// Multiplies of two extends, from the header and written in a program, and one multiply of the
+/// two halves, which no instruction does.
+const EXTMULS: &str = "\
+#include <wasm_simd128.h>
+typedef short v8s __attribute__((vector_size(16)));
+typedef int v4s __attribute__((vector_size(16)));
+#define HALF(a, i) __builtin_convertvector(__builtin_shufflevector(a, a, i, i + 1, i + 2, i + 3), v4s)
+v128_t low8(v128_t a, v128_t b) { return wasm_i16x8_extmul_low_i8x16(a, b); }
+v128_t high8u(v128_t a, v128_t b) { return wasm_u16x8_extmul_high_u8x16(a, b); }
+v128_t low16(v128_t a, v128_t b) { return wasm_i32x4_extmul_low_i16x8(a, b); }
+v128_t high32u(v128_t a, v128_t b) { return wasm_u64x2_extmul_high_u32x4(a, b); }
+v4s own(v8s a, v8s b) { return HALF(a, 4) * HALF(b, 4); }
+v4s mixed(v8s a, v8s b) { return HALF(a, 0) * HALF(b, 4); }
+";
+
+/// With `-msimd128 -O2`, each multiply of two extends of the same half with the same sign in
+/// [`EXTMULS`] is one `extmul`, as clang 23 writes it, and a multiply of two different halves is
+/// two extends and a multiply.
+#[test]
+fn with_simd128_a_multiply_of_two_extends_is_one_extmul() {
+    let out = assembly(EXTMULS, &["-msimd128", "-O2"]);
+    assert!(out.status.success(), "{}", String::from_utf8_lossy(&out.stderr));
+    let text = String::from_utf8(out.stdout).unwrap();
+    let want = [
+        ("low8", "i16x8.extmul_low_i8x16_s"),
+        ("high8u", "i16x8.extmul_high_i8x16_u"),
+        ("low16", "i32x4.extmul_low_i16x8_s"),
+        ("high32u", "i64x2.extmul_high_i32x4_u"),
+        ("own", "i32x4.extmul_high_i16x8_s"),
+    ];
+    for (name, op) in want {
+        let code: Vec<&str> = body(&text, name)
+            .into_iter()
+            .filter(|op| !op.starts_with('.') && *op != "return")
+            .collect();
+        assert_eq!(code, ["local.get\t0", "local.get\t1", op], "{name}");
+    }
+    let mixed = body(&text, "mixed");
+    assert!(mixed.contains(&"i32x4.extend_low_i16x8_s"), "{mixed:?}");
+    assert!(mixed.contains(&"i32x4.extend_high_i16x8_s"), "{mixed:?}");
+    assert!(mixed.contains(&"i32x4.mul"), "{mixed:?}");
+}
+
+/// A program that compares each multiply of two extends with a multiply of each lane, at the
+/// edges of each lane type. It also has the shapes that are not one `extmul`: two different
+/// halves, two different signs, and an extend that has a use of its own. An extend of one vector
+/// times itself is one `extmul` of the vector with itself.
+const EXTMULED: &str = "\
+#define V(n, t, s) typedef t n __attribute__((vector_size(s)));
+V(v16s, signed char, 16) V(v16u, unsigned char, 16) V(v8s, short, 16) V(v8u, unsigned short, 16)
+V(v4s, int, 16) V(v4u, unsigned, 16) V(v2s, long long, 16) V(v2u, unsigned long long, 16)
+static const long long edge[] = {0, 1, -1, 127, -128, 255, 32767, -32768, 65535, 2147483647,
+                                 -2147483647 - 1, 4294967295, -7, 42};
+static int bad;
+#define LANES(v) ((int)(sizeof (v) / sizeof (v)[0]))
+#define HALF(v, into, ...) __builtin_convertvector(__builtin_shufflevector(v, v, __VA_ARGS__), into)
+#define P2(i) i, i + 1
+#define P4(i) P2(i), P2(i + 2)
+#define P8(i) P4(i), P4(i + 4)
+#define FILL(v, t, k) for (int i = 0; i < LANES(v); i++) v[i] = (t)edge[(i * k + __LINE__) % 14];
+#define CHECK(name, from, fromb, into, t, tb, P, ia, ib) \\
+    __attribute__((noinline)) static into name(from a, fromb b) { \\
+        return HALF(a, into, P(ia)) * HALF(b, into, P(ib)); } \\
+    static void check_##name(void) { \\
+        from a; fromb b; FILL(a, t, 5) FILL(b, tb, 3) \\
+        into r = name(a, b); \\
+        for (int i = 0; i < LANES(r); i++) \\
+            bad |= r[i] != (__typeof__(r[0]))((__typeof__(r[0]))a[ia + i] * (__typeof__(r[0]))b[ib + i]); }
+CHECK(low8, v16s, v16s, v8s, signed char, signed char, P8, 0, 0)
+CHECK(high8u, v16u, v16u, v8u, unsigned char, unsigned char, P8, 8, 8)
+CHECK(low16, v8s, v8s, v4s, short, short, P4, 0, 0)
+CHECK(high16u, v8u, v8u, v4u, unsigned short, unsigned short, P4, 4, 4)
+CHECK(low32, v4s, v4s, v2s, int, int, P2, 0, 0)
+CHECK(high32u, v4u, v4u, v2u, unsigned, unsigned, P2, 2, 2)
+CHECK(halves, v8s, v8s, v4s, short, short, P4, 0, 4)
+CHECK(signs, v8s, v8u, v4s, short, unsigned short, P4, 4, 4)
+__attribute__((noinline)) static v4s square(v8s a) { return HALF(a, v4s, P4(4)) * HALF(a, v4s, P4(4)); }
+static v4s kept;
+__attribute__((noinline)) static v4s shared(v8s a, v8s b) {
+    v4s e = HALF(a, v4s, P4(0));
+    kept = e;
+    return e * HALF(b, v4s, P4(0)); }
+int main(void) {
+    check_low8(); check_high8u(); check_low16(); check_high16u(); check_low32(); check_high32u();
+    check_halves(); check_signs();
+    v8s s = {1, -2, 3, -4, -32768, 32767, -7, 8};
+    v8s t = {5, 6, -7, 8, -32768, -32768, 2, 3};
+    v4s q = square(s);
+    bad |= q[0] != 1073741824 || q[1] != 1073676289 || q[2] != 49 || q[3] != 64;
+    q = shared(s, t);
+    bad |= q[0] != 5 || q[1] != -12 || q[2] != -21 || q[3] != -32;
+    bad |= kept[0] != 1 || kept[1] != -2 || kept[2] != 3 || kept[3] != -4;
+    return bad;
+}
+";
+
+#[test]
+fn an_extmul_multiplies_each_lane() {
+    let dir = std::env::temp_dir().join(format!("rucc-wasm-extmul-{}", std::process::id()));
+    std::fs::create_dir_all(&dir).unwrap();
+    std::fs::write(dir.join("check.c"), EXTMULED).unwrap();
+    let rucc = PathBuf::from(env!("CARGO_BIN_EXE_rucc"));
+    // On the host first, where each multiply is a lane at a time.
+    for level in ["-O0", "-O2"] {
+        run(&rucc, &[level, "check.c", "-o", "check"], &dir);
+        let status = Command::new(dir.join("check")).status().unwrap();
+        assert!(status.success(), "{level}: {status}");
+    }
+    let wasmtime = on_path("wasmtime");
+    if std::env::var_os("WASI_SDK_PATH").is_none() || wasmtime.is_none() {
+        eprintln!("WASI_SDK_PATH is not set or there is no wasmtime, so wasm was not run");
+        std::fs::remove_dir_all(dir).unwrap();
+        return;
+    }
+    for flags in [&["-O0"][..], &["-O2"], &["-O0", "-msimd128"], &["-O2", "-msimd128"]] {
+        let link = ["--target=wasm32-wasip1", "-fno-builtins-lib", "check.c", "-o", "check.wasm"];
+        run(&rucc, &[&link[..], flags].concat(), &dir);
+        let status =
+            Command::new(wasmtime.as_ref().unwrap()).arg(dir.join("check.wasm")).status().unwrap();
+        assert!(status.success(), "{flags:?}: {status}");
+    }
+    std::fs::remove_dir_all(dir).unwrap();
+}

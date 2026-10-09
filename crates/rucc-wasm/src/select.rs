@@ -1209,6 +1209,9 @@ impl Lower<'_, '_> {
         if let Some((value, not)) = self.andnot(inst) {
             return vec![value, not];
         }
+        if let Some((x, y, _)) = self.extmul(inst) {
+            return vec![x, y];
+        }
         if let Some((vector, _)) = self.stored_lane(inst) {
             args[0] = vector;
         }
@@ -1244,6 +1247,25 @@ impl Lower<'_, '_> {
             }
         };
         not(b).map(|b| (a, b)).or_else(|| not(a).map(|a| (b, a)))
+    }
+
+    /// The operands and the instruction of an `extmul` for a `mul` of two vectors that are each
+    /// the extend of the same half with the same sign, as `i16x8.extmul_low_i8x16_s`. clang
+    /// writes `wasm_i16x8_extmul_low_i8x16` so. The extends are then not read, and when they have
+    /// no other use they are not written.
+    fn extmul(&self, inst: Inst) -> Option<(Value, Value, String)> {
+        if !self.unit.optimize || self.func[inst].opcode != Opcode::Mul {
+            return None;
+        }
+        let &[a, b] = &self.args(inst)[..] else { return None };
+        let extend = |value: Value| {
+            let (def, _) = self.def(value)?;
+            let op = self.extend_builtin(def)?;
+            let &[operand] = &self.args(def)[..] else { return None };
+            Some((operand, op))
+        };
+        let ((x, op), (y, other)) = (extend(a)?, extend(b)?);
+        (op == other).then(|| (x, y, op.replacen(".extend_", ".extmul_", 1)))
     }
 
     /// The vector and the lane of a store of one lane of a vector, which is one
@@ -3259,6 +3281,13 @@ impl Lower<'_, '_> {
                 self.push(value)?;
                 self.push(not)?;
                 self.simd("v128.andnot")?;
+                self.set(results[0]);
+            }
+            Opcode::Mul if self.extmul(inst).is_some() => {
+                let (x, y, op) = self.extmul(inst).ok_or("an extmul")?;
+                self.push(x)?;
+                self.push(y)?;
+                self.simd(&op)?;
                 self.set(results[0]);
             }
             Opcode::Add
