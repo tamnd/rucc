@@ -59,7 +59,7 @@ use rucc_ir::{
 use crate::canon::route;
 use crate::cfg::Cfg;
 use crate::dom::Dominators;
-use crate::hoist::{anchored, fits, plain_enough, shaped, starting};
+use crate::hoist::{anchored, fits, largest, plain_enough, shaped, starting};
 use crate::loops::{LoopId, Loops};
 use crate::range::query::Ranges;
 use crate::scev::{Anchor, Evolution, Plain, Reading, Scev};
@@ -152,8 +152,9 @@ impl Pass for LoopIdiom {
         {
             let mut scev = Scev::new(func, cfg, loops);
             let mut ranges = Ranges::new(func, cfg, doms).knowing(loops);
+            let word = Type::int(an.machine().pointer_bits());
             for id in loops.all() {
-                match planned(func, cfg, doms, loops, &mut scev, &mut ranges, id) {
+                match planned(func, cfg, doms, loops, &mut scev, &mut ranges, id, word) {
                     Ok(Some(plan)) => plans.push(plan),
                     Ok(None) => {}
                     Err(why) => stats.missed(why),
@@ -196,6 +197,9 @@ struct Plan {
     align: u32,
     /// The store, and the load for a copy, which go.
     gone: Vec<Inst>,
+    /// An integer as wide as a pointer, which the length and the start are worked out in. Sixty
+    /// four bits was written here once, and on i686 that left a length no instruction takes.
+    word: Type,
 }
 
 /// What the call after the loop is given as its second operand.
@@ -223,6 +227,7 @@ enum Extent {
 }
 
 /// The plan for one loop, nothing for a loop with no store to think about, or why it stays.
+#[expect(clippy::too_many_arguments, reason = "four analyses, the loop and the width of a pointer")]
 fn planned(
     func: &Func,
     cfg: &Cfg,
@@ -231,6 +236,7 @@ fn planned(
     scev: &mut Scev<'_>,
     ranges: &mut Ranges<'_>,
     id: LoopId,
+    word: Type,
 ) -> Result<Option<Plan>, &'static str> {
     let insts: Vec<Inst> = loops.blocks(id).iter().flat_map(|&block| func.insts(block)).collect();
     let stores: Vec<Inst> =
@@ -284,7 +290,7 @@ fn planned(
             return Err(NOT_A_WALK);
         }
         let (anchor, start) = anchored(chrec.base).ok_or(NOT_A_WALK)?;
-        plain_enough(func, start).map_err(|_| NOT_A_WALK)?;
+        plain_enough(func, start, word).map_err(|_| NOT_A_WALK)?;
         Ok((anchor, start))
     };
     let dest = walk(scev, to)?;
@@ -306,7 +312,7 @@ fn planned(
             let span = around
                 .checked_mul(width)
                 .and_then(|far| far.checked_add(width))
-                .filter(|&span| span <= i128::from(i64::MAX))
+                .filter(|&span| span <= largest(word))
                 .ok_or(TOO_WIDE)?;
             Extent::Bytes(u64::try_from(span).map_err(|_| TOO_WIDE)?)
         }
@@ -315,7 +321,7 @@ fn planned(
             Extent::Computed { count, step: width, reach: width, reading }
         }
     };
-    Ok(Some(Plan { exit, kind, to: dest, with, span, align, gone }))
+    Ok(Some(Plan { exit, kind, to: dest, with, span, align, gone, word }))
 }
 
 /// The access an instruction makes, when it is an ordinary one this pass may take out of a loop.
@@ -419,7 +425,7 @@ fn apply(func: &mut Func, plan: &Plan, exit: Block) {
     let first = func.insts(exit).next().expect("a block ends in a terminator");
     let mut made = Vec::new();
     let mut build = Builder::new(func, exit);
-    let to = address(&mut build, &mut made, plan.to);
+    let to = address(&mut build, &mut made, plan.to, plan.word);
     let with = match plan.with {
         With::Byte(byte) => {
             let byte = build.iconst(Type::int(8), byte);
@@ -427,11 +433,11 @@ fn apply(func: &mut Func, plan: &Plan, exit: Block) {
             byte
         }
         With::Value(value) => value,
-        With::From(anchor, start) => address(&mut build, &mut made, (anchor, start)),
+        With::From(anchor, start) => address(&mut build, &mut made, (anchor, start), plan.word),
     };
     let length = match plan.span {
         Extent::Bytes(bytes) => {
-            let length = build.iconst(Type::int(64), i128::from(bytes));
+            let length = build.iconst(plan.word, i128::from(bytes));
             made.push(length);
             length
         }
@@ -469,6 +475,7 @@ fn address(
     build: &mut Builder<'_>,
     made: &mut Vec<Value>,
     (anchor, start): (Anchor, Plain),
+    word: Type,
 ) -> Value {
     let base = match anchor {
         Anchor::Value(value) => value,
@@ -480,7 +487,7 @@ fn address(
             at
         }
     };
-    starting(build, made, base, start)
+    starting(build, made, base, start, word)
 }
 
 #[cfg(test)]

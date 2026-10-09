@@ -77,7 +77,7 @@ use crate::cfg::Cfg;
 use crate::coalesce::crossed;
 use crate::discharge::{Question, yes};
 use crate::dom::Dominators;
-use crate::hoist::{anchored, fits, plain_enough, shaped, starting};
+use crate::hoist::{anchored, fits, largest, plain_enough, shaped, starting};
 use crate::loops::{LoopId, Loops};
 use crate::range::query::Ranges;
 use crate::rules::safety;
@@ -180,7 +180,9 @@ impl Pass for Sink {
             let mut scev = Scev::new(func, cfg, loops);
             let mut ranges = Ranges::new(func, cfg, doms).knowing(loops);
             for id in loops.all() {
-                sweep(func, cfg, doms, loops, &mut scev, &mut ranges, id, &mut plans, &mut stats);
+                let word = Type::int(an.machine().pointer_bits());
+                let ranges = &mut ranges;
+                sweep(func, cfg, doms, loops, &mut scev, ranges, id, word, &mut plans, &mut stats);
             }
         }
 
@@ -220,6 +222,8 @@ struct Plan {
     extra: Extra,
     /// The write being removed.
     write: Inst,
+    /// An integer as wide as a pointer, which the arithmetic after the loop is done in.
+    word: Type,
 }
 
 /// Where the one write after a loop goes, which is the front of a block only the loop reaches.
@@ -258,6 +262,7 @@ fn sweep(
     scev: &mut Scev<'_>,
     ranges: &mut Ranges<'_>,
     id: LoopId,
+    word: Type,
     plans: &mut Vec<Plan>,
     stats: &mut Stats,
 ) {
@@ -298,7 +303,7 @@ fn sweep(
         missed(stats, NOT_COUNTED, every);
         return;
     };
-    let loop_ = Loop { preheader, guard, exit, around };
+    let loop_ = Loop { preheader, guard, exit, around, word };
 
     for (kind, writes) in [(Opcode::MetaInit, inits), (Opcode::MetaType, types)] {
         if writes.is_empty() {
@@ -343,6 +348,8 @@ struct Loop {
     /// Where the write after it goes.
     exit: Exit,
     around: Around,
+    /// An integer as wide as a pointer, which the arithmetic after the loop is done in.
+    word: Type,
 }
 
 /// Whether a write to this plane may be moved past everything else in the loop.
@@ -396,7 +403,7 @@ fn planned(
         return Err(LEAVES_GAPS);
     }
     let (base, start) = anchored(chrec.base).ok_or(NOT_A_WALK)?;
-    plain_enough(func, start).map_err(|_| NOT_A_WALK)?;
+    plain_enough(func, start, loop_.word).map_err(|_| NOT_A_WALK)?;
     if !grown(step, reach) {
         return Err(TOO_WIDE);
     }
@@ -406,7 +413,7 @@ fn planned(
             let span = around
                 .checked_mul(step)
                 .and_then(|far| far.checked_add(reach))
-                .filter(|&span| span <= i128::from(i64::MAX))
+                .filter(|&span| span <= largest(loop_.word))
                 .ok_or(TOO_WIDE)?;
             Extent::Bytes(u64::try_from(span).map_err(|_| TOO_WIDE)?)
         }
@@ -417,7 +424,7 @@ fn planned(
         }
     };
     let extra = func[write].extra;
-    Ok(Plan { exit: loop_.exit, base, start, span, kind, extra, write })
+    Ok(Plan { exit: loop_.exit, base, start, span, kind, extra, write, word: loop_.word })
 }
 
 /// Whether a range that ends where the last write ended, and the next write, are one range.
@@ -464,10 +471,10 @@ fn apply(func: &mut Func, plan: &Plan, exit: Block) {
             at
         }
     };
-    let at = starting(&mut build, &mut made, base, plan.start);
+    let at = starting(&mut build, &mut made, base, plan.start, plan.word);
     let length = match plan.span {
         Extent::Bytes(bytes) => {
-            let length = build.iconst(Type::int(64), i128::from(bytes));
+            let length = build.iconst(plan.word, i128::from(bytes));
             made.push(length);
             length
         }

@@ -10,6 +10,10 @@ All notable changes are recorded here. The format follows [Keep a Changelog](htt
 - Short-circuit and phiopt keep the early return table, and phiopt keeps the loop forest, across each fold instead of building them again for the next branch, which makes lz4hc.c at -O2 run 14 percent fewer instructions (#3417).
 - LICM now works out liveness and register pressure again only over the blocks a hoist changed, instead of over the whole function for each loop, so lz4hc.c at -O2 runs 1.5 percent fewer instructions (#3418).
 
+### Fixed
+
+- A loop that becomes a call to memset, memcpy or memmove on i686 starts the call at an offset as wide as a pointer, and a length that is a number is that wide too. Loop idiom recognition wrote both in sixty four bits whatever the target, and a `ptr_add` of a sixty four bit offset is something the step that splits wide values on i386 does not take, so the backend stopped with "no rule lowers `trunc.i64.i32`" on the kernel's perf uncore driver and ohci-hcd for X32. A walk that starts at an `int` index the caller hands in now becomes a call on i686 as well (#3419).
+
 ## 0.29.4
 
 The release archive now carries the builtins for `i686-linux-gnu`, which the Linux probes of milestone L0 found missing in 0.29.3, and the workspace builds with Rust 1.85 again. rucc now takes the `btf_decl_tag` and `btf_type_tag` attributes of GCC 16. The release also makes the compiler faster on large files: the hasher, the heap, branch prediction in phiopt, the post-dominator tree and the inliner do less work for each compile.

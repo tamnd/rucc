@@ -354,7 +354,9 @@ impl Pass for Hoist {
                 // round is scalar evolution's answer and how large the value it stops at can be is
                 // the ranges' answer, and a counter as wide as the arithmetic needs both.
                 let mut ranges = Ranges::new(func, cfg, doms).knowing(loops);
-                let mut cx = Sweep { func, cfg, doms, loops, scev: &mut scev, ranges: &mut ranges };
+                let word = Type::int(an.machine().pointer_bits());
+                let mut cx =
+                    Sweep { func, cfg, doms, loops, scev: &mut scev, ranges: &mut ranges, word };
                 for id in loops.all() {
                     cx.sweep(id, fresh.as_deref(), &mut plans, &mut stats);
                 }
@@ -417,6 +419,8 @@ struct Plan {
     opcode: Opcode,
     /// The check being removed.
     check: Inst,
+    /// An integer as wide as a pointer, which the arithmetic in front of the loop is done in.
+    word: Type,
 }
 
 /// How many bytes the loop covers, which the pass has either as a number or as a recipe.
@@ -426,7 +430,7 @@ enum Extent {
     Bytes(u64),
     /// This many, worked out in the preheader, and handed to the check as an operand.
     ///
-    /// The recipe is `max(scale * value + offset, 0) * step + reach`, in sixty four bit arithmetic
+    /// The recipe is `max(scale * value + offset, 0) * step + reach`, in pointer wide arithmetic
     /// that [`fits`] has already established cannot wrap. The `max` is
     /// [`crate::scev::Assumption::Entered`] discharged rather than assumed: a count that comes
     /// out negative is a loop whose test failed the first time it ran, which is a loop that went
@@ -445,6 +449,8 @@ struct Sweep<'a, 's> {
     loops: &'a Loops,
     scev: &'s mut Scev<'a>,
     ranges: &'s mut Ranges<'a>,
+    /// An integer as wide as a pointer, which the arithmetic in front of a loop is done in.
+    word: Type,
 }
 
 impl Sweep<'_, '_> {
@@ -503,7 +509,18 @@ impl Sweep<'_, '_> {
                 stats.missed(why);
                 continue;
             }
-            match planned(func, doms, self.scev, self.ranges, id, preheader, guard, around, check) {
+            match planned(
+                func,
+                doms,
+                self.scev,
+                self.ranges,
+                id,
+                preheader,
+                guard,
+                around,
+                check,
+                self.word,
+            ) {
                 Ok(plan) => plans.push(plan),
                 Err(why) => stats.missed(why),
             }
@@ -738,6 +755,7 @@ fn planned(
     guard: Block,
     around: Around,
     check: Inst,
+    word: Type,
 ) -> Result<Plan, &'static str> {
     let block = func.block_of(check).ok_or(NOT_EVERY_TIME)?;
     if !doms.dominates(block, guard) {
@@ -780,7 +798,7 @@ fn planned(
             let Some((base, start)) = anchored(at) else {
                 return Err(NOT_A_SWEEP);
             };
-            plain_enough(func, start)?;
+            plain_enough(func, start, word)?;
             // A walk with gaps moves as it is, the same span and the same step from the same
             // address, since every iteration asks it about the same accesses.
             if let Some((span, step)) = columns {
@@ -806,12 +824,12 @@ fn planned(
             let Some((base, start)) = anchored(chrec.base) else {
                 return Err(NOT_A_SWEEP);
             };
-            plain_enough(func, start)?;
+            plain_enough(func, start, word)?;
             if step % i128::from(info.align) != 0 {
                 return Err(MISALIGNED);
             }
             let span = if let Some((span, down)) = columns {
-                let (span, width) = beside(span, down, reach, step, around)?;
+                let (span, width) = beside(span, down, reach, step, around, word)?;
                 if width < down {
                     stride = Some(down);
                 }
@@ -895,7 +913,7 @@ fn planned(
             return Err(NOT_ITS_CAPABILITY);
         }
     }
-    Ok(Plan { preheader, base, start, span, stride, info, opcode, check })
+    Ok(Plan { preheader, base, start, span, stride, info, opcode, check, word })
 }
 
 /// What a walk with gaps covers once the loop around it has moved it over, as a span and the width of
@@ -921,6 +939,7 @@ fn beside(
     width: i128,
     step: i128,
     around: Around,
+    word: Type,
 ) -> Result<(i128, i128), &'static str> {
     let Around::Number(around) = around else { return Err(NOT_BESIDE) };
     if step != width || down <= 0 || span < width {
@@ -929,7 +948,7 @@ fn beside(
     let last = (span - width) / down * down;
     let wide = around.checked_add(1).and_then(|n| n.checked_mul(width)).ok_or(TOO_WIDE)?;
     let span = last.checked_add(wide).ok_or(TOO_WIDE)?;
-    if span > i128::from(i64::MAX) {
+    if span > largest(word) {
         return Err(TOO_WIDE);
     }
     Ok((span, if wide >= down { span } else { wide }))
@@ -965,18 +984,18 @@ pub(crate) fn anchored(inv: Invariant) -> Option<(Anchor, Plain)> {
 
 /// Whether how far past the anchor the walk starts is arithmetic a preheader can be handed.
 ///
-/// A number always is. An expression is when it lands in sixty four bits, which is the width the
-/// address arithmetic is done at, either because the value is already that wide or because the
-/// invariant carries the widening that gets it there. Anything else is refused rather than
-/// truncated, since a start address worked out narrow and used wide is a check about the wrong
-/// bytes.
-pub(crate) fn plain_enough(func: &Func, start: Plain) -> Result<(), &'static str> {
+/// A number always is. An expression is when it lands in the `word`, an integer as wide as a
+/// pointer and so the width the address arithmetic is done at, either because the value is already
+/// that wide or because the invariant carries the widening that gets it there. Anything else is
+/// refused rather than truncated, since a start address worked out narrow and used wide is a check
+/// about the wrong bytes.
+pub(crate) fn plain_enough(func: &Func, start: Plain, word: Type) -> Result<(), &'static str> {
     let Some(value) = start.value.filter(|_| start.scale != 0) else { return Ok(()) };
     let ty = match start.read {
         Some(read) => read.to,
         None => func[value].ty,
     };
-    if ty.is_int() && ty.bits() == 64 { Ok(()) } else { Err(START_NOT_A_WORD) }
+    if ty == word { Ok(()) } else { Err(START_NOT_A_WORD) }
 }
 
 /// Establishes that the extent arithmetic stays inside sixty four bits whatever the count turns out
@@ -1066,6 +1085,11 @@ fn widest(
     }
 }
 
+/// The largest signed number the `word` holds, which is as far as a walk's arithmetic may reach.
+pub(crate) fn largest(word: Type) -> i128 {
+    (1i128 << (word.bits() - 1)) - 1
+}
+
 /// Whether one check over `span` bytes answers every access the loop makes.
 ///
 /// This function decides nothing. It builds the term the rule file is written about out of what the
@@ -1136,8 +1160,8 @@ pub(crate) fn starting(
     made: &mut Vec<Value>,
     base: Value,
     start: Plain,
+    word: Type,
 ) -> Value {
-    let word = Type::int(64);
     let past = match start.value.filter(|_| start.scale != 0) {
         None => {
             if start.offset == 0 {
@@ -1257,7 +1281,7 @@ fn operands(func: &mut Func, plan: &Plan, term: Inst) -> (u64, Vec<Value>) {
             at
         }
     };
-    let first = starting(&mut build, &mut made, base, plan.start);
+    let first = starting(&mut build, &mut made, base, plan.start, plan.word);
     let args = build.func().push_values(&[first]);
     let capability = build.value(InstData { args, ..InstData::new(Opcode::CapOf) }, Type::CAP);
     made.push(capability);
@@ -1278,7 +1302,7 @@ fn operands(func: &mut Func, plan: &Plan, term: Inst) -> (u64, Vec<Value>) {
     // where it is a number and the step goes in a fourth.
     let (size, operands) = match (plan.stride, extent) {
         (Some(step), extent) => {
-            let word = Type::int(64);
+            let word = plan.word;
             let span = match extent {
                 Some(bytes) => bytes,
                 None => {
@@ -2758,10 +2782,13 @@ mod tests {
         let short = func.append_param(entry, Type::int(32));
         Builder::new(&mut func, entry).ret(&[]);
         let narrow = super::Plain { value: Some(short), read: None, scale: 1, offset: 0 };
-        assert_eq!(super::plain_enough(&func, narrow), Err(super::START_NOT_A_WORD));
+        let word = Type::int(64);
+        assert_eq!(super::plain_enough(&func, narrow, word), Err(super::START_NOT_A_WORD));
         // The same value with nothing multiplying it is a number, and a number is always fine.
         let none = super::Plain { value: Some(short), read: None, scale: 0, offset: 8 };
-        assert_eq!(super::plain_enough(&func, none), Ok(()));
+        assert_eq!(super::plain_enough(&func, none, word), Ok(()));
+        // On a target whose pointers are thirty two bits the first one is a word.
+        assert_eq!(super::plain_enough(&func, narrow, Type::int(32)), Ok(()));
     }
 
     /// The instruction that produced a value.
