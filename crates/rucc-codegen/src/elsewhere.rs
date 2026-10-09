@@ -588,7 +588,7 @@ impl Elsewhere {
     }
 
     /// The model that name is reached by, when it is a thread-local variable. See
-    /// [`Self::fastest`].
+    /// `Self::fastest`.
     #[must_use]
     pub fn model(&self, name: Symbol) -> Option<TlsModel> {
         self.threads.get(&name).copied()
