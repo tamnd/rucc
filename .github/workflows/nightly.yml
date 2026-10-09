@@ -79,7 +79,7 @@ jobs:
     runs-on: ubuntu-24.04
     steps:
       - uses: actions/checkout@v7.0.1
-      - uses: taiki-e/install-action@v2.87.2
+      - uses: taiki-e/install-action@v2.87.24
         with:
           tool: cargo-deny
       # The per-commit job checks the advisory database as it stood when the commit landed.
@@ -155,7 +155,7 @@ jobs:
             | sort | uniq -c | tee -a "$GITHUB_STEP_SUMMARY" || true
       - name: keep what the suites said
         if: always()
-        uses: actions/upload-artifact@v4.6.2
+        uses: actions/upload-artifact@v7.0.1
         with:
           name: postgres-cassert
           path: |
@@ -191,7 +191,7 @@ jobs:
           tests/sqlite/windows.sh "$PWD/target/release/rucc" "$RUNNER_TEMP/sqlite-windows" | tee -a "$GITHUB_STEP_SUMMARY"
       - name: keep what the suites said
         if: always()
-        uses: actions/upload-artifact@v4.6.2
+        uses: actions/upload-artifact@v7.0.1
         with:
           name: sqlite-windows
           path: |
@@ -233,7 +233,7 @@ jobs:
           ARCH=aarch64 tests/sqlite/windows.sh "$PWD/target/release/rucc.exe" "$RUNNER_TEMP/sqlite-windows" | tee -a "$GITHUB_STEP_SUMMARY"
       - name: keep what the suites said
         if: always()
-        uses: actions/upload-artifact@v4.6.2
+        uses: actions/upload-artifact@v7.0.1
         with:
           name: sqlite-windows-arm
           path: |
