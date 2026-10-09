@@ -17,7 +17,7 @@
 //! `rucc_safe_rt::frame` is the other half and it was already finished. The magic word, the take
 //! that consumes the frame so that nothing further down the chain believes it twice, the outer
 //! link that makes frames nest the way calls do, and the clear that a call to an unknown callee
-//! needs are all there, with `__rucc_frame_publish`, `__rucc_frame_take`, `__rucc_frame_clear` and
+//! needs are all there, with `__rucc_frame_publish`, `__rucc_frame_take_as`, `__rucc_frame_clear` and
 //! `__rucc_frame_restore` as the names generated code is compiled against. What was missing was a
 //! way for the IR to say which capability belongs to which argument of which call, and that is
 //! [`Opcode::CapPublish`] and [`Opcode::CapClear`] on the writing side and [`Opcode::CapArg`] on the
@@ -71,7 +71,9 @@
 //! a callback entered from uninstrumented code holding capabilities that belong to a different
 //! call is worse than one entered holding none: the first reports on memory it was never about,
 //! and the second recovers its arguments and says so in the count. Document 10 section 10.8 is
-//! where that case is written down.
+//! where that case is written down. That is why the frame names the address the call goes to, and
+//! a callee takes it only when that address is its own: the callback is some other function, so it
+//! finds nothing and leaves the frame for the caller that published it to restore.
 //!
 //! Not publishing does not fix it either, because what is live at that point is whatever the frame
 //! held before, which after an instrumented function has taken its own is its caller's caller's.
@@ -83,7 +85,8 @@
 //!
 //! Nothing here. [`crate::handover`] is the rule: a callee defined in this unit with no checks left
 //! needs no frame, one that still checks something needs the capabilities, and a callee outside the
-//! unit or reached through a pointer is one nothing here can ask. That is a whole-unit question and
+//! unit or reached through a pointer gets what the caller holds in a frame that names it, since
+//! nothing here can ask whether it takes. That is a whole-unit question and
 //! this module is a lowering, so it lives there, where the census that has been counting those
 //! buckets since before anything emitted a frame reads it as well. `handover::arrange` is the pass
 //! that puts the instructions in, and it runs after the optimizer, since what the rule asks is what
@@ -97,7 +100,7 @@
 //! over. The same instruction is a gap on the back end's own list for the same kind of reason, and
 //! the frame is one more thing that will have to be unwound when it stops being one.
 
-use rucc_base::Interner;
+use rucc_base::{Interner, Symbol};
 use rucc_ir::{Extra, Func, Imm, Inst, InstData, MemInfo, MemOrder, Opcode, Restrict, Type, Value};
 
 use crate::slot;
@@ -116,7 +119,7 @@ pub const ARGS: usize = 8;
 /// down in both places and tested in both, the same way [`slot::BYTES`] is. It is the 64-bit shape:
 /// the trailing link is a pointer and the count below assumes eight bytes of it, which is every
 /// target this compiler has.
-pub const BYTES: u64 = OUTER + WORD;
+pub const BYTES: u64 = CALLEE + WORD;
 
 /// What the frame is aligned to, which is what its widest field needs.
 pub const ALIGN: u32 = 8;
@@ -147,6 +150,13 @@ const RET: u64 = HEAD + slot::BYTES * ARGS as u64;
 ///
 /// After the capabilities and after [`RET`], which is why the count below is one more than [`ARGS`].
 const OUTER: u64 = HEAD + slot::BYTES * (ARGS as u64 + 1);
+
+/// Where the address of the function the frame is for sits, which is the last thing in it.
+///
+/// What a callee compares with its own address before it believes the frame. It is what lets a call
+/// to a function this unit does not define publish at all, since a callback entered from a callee
+/// that never took is not the function named here and so finds nothing.
+const CALLEE: u64 = OUTER + WORD;
 
 /// The call a `cap_publish` or a `cap_clear` is about, which is the instruction after it.
 ///
@@ -240,6 +250,14 @@ pub(crate) fn hand_over(
     for step in 0..slot::BYTES / WORD {
         record(func, inst, word, empty, frame, RET + step * WORD, WORD);
     }
+    // And who the frame is for, which is the address the call goes to: the function a direct call
+    // names, or the pointer an indirect one goes through. A callee believes the frame only when this
+    // is its own address, which is what makes publishing to a function in another file safe.
+    let callee = match func[call].opcode {
+        Opcode::CallIndirect => func[func[call].args].first().copied(),
+        _ => crate::handover::callee(func, call).and_then(|name| address(func, inst, name)),
+    };
+    record(func, inst, word, callee.unwrap_or(empty), frame, CALLEE, WORD);
     for (at, &cap) in caps.iter().enumerate() {
         let to = slot::offset(func, inst, frame, HEAD + slot::BYTES * at as u64, word);
         let info = MemInfo {
@@ -351,7 +369,15 @@ pub(crate) fn reserve(func: &mut Func, inst: Inst) -> Option<Value> {
     func[slot].results().next()
 }
 
-/// Calls `__rucc_frame_take()` at the top of the entry block and gives back what it found.
+/// The address of the function or global `name`, made in front of `inst`.
+fn address(func: &mut Func, inst: Inst, name: Symbol) -> Option<Value> {
+    let data = InstData { extra: Extra::Symbol(name), ..InstData::new(Opcode::GlobalAddr) };
+    let made = func.create_inst(data, &[Type::PTR], func.span(inst));
+    func.insert_before(made, inst);
+    func[made].results().next()
+}
+
+/// Calls `__rucc_frame_take_as(own)` at the top of the entry block and gives back what it found.
 ///
 /// Once per function, at the very front, and both halves of that are load bearing rather than tidy.
 /// Once, because taking consumes the frame: a second take in the same body finds the magic word
@@ -359,14 +385,24 @@ pub(crate) fn reserve(func: &mut Func, inst: Inst) -> Option<Value> {
 /// for no reason. At the front, because any call this function makes either publishes a frame of its
 /// own or clears, and both of those are gone by the time a take after them runs.
 ///
+/// The function's own address goes with the question, because a frame is only this function's when
+/// the caller wrote that address into it. One written for some other function is a frame published
+/// to a callee that never took it, and this function was reached from inside that callee.
+///
 /// The answer is a pointer that may be null, and null is not an error. It is a call from code this
-/// build never compiled, a call whose caller could not vouch for this one, or a call this compiler
-/// decided needed no frame, and the runtime treats all three the same way, which is to work the
-/// capability out of the planes instead.
+/// build never compiled, a frame written for some other function, or a call this compiler decided
+/// needed no frame, and the runtime treats all three the same way, which is to work the capability
+/// out of the planes instead.
 pub(crate) fn taken(func: &mut Func, names: &mut Interner, inst: Inst) -> Option<Value> {
     let entry = func.entry()?;
     let first = func.insts(entry).next()?;
-    let data = crate::lower::calling(func, names, "__rucc_frame_take", &[], &[Type::PTR], &[]);
+    let own = InstData { extra: Extra::Symbol(func.name), ..InstData::new(Opcode::GlobalAddr) };
+    let own = func.create_inst(own, &[Type::PTR], func.span(inst));
+    func.insert_before(own, first);
+    let own = func[own].results().next()?;
+    let params = &[Type::PTR];
+    let data =
+        crate::lower::calling(func, names, "__rucc_frame_take_as", params, &[Type::PTR], &[own]);
     let made = func.create_inst(data, &[Type::PTR], func.span(inst));
     func.insert_before(made, first);
     func[made].results().next()
@@ -454,6 +490,7 @@ mod tests {
         assert_eq!(ARGC, 4);
         assert_eq!(FLAGS, 6);
         assert_eq!(OUTER, 8 + 32 * (ARGS as u64 + 1));
-        assert_eq!(BYTES, 8 + 32 * (ARGS as u64 + 1) + 8);
+        assert_eq!(CALLEE, OUTER + 8);
+        assert_eq!(BYTES, 8 + 32 * (ARGS as u64 + 1) + 16);
     }
 }

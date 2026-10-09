@@ -20,9 +20,13 @@
 //! A callee defined in this unit with no checks left never reads a frame, so the call needs none. A
 //! callee defined here that still checks something wants the capabilities. A callee this unit does
 //! not define is one nothing here can ask about, and so is a call through a pointer, and both of
-//! those get the frame emptied rather than left alone, for the reason the frame module spells out:
-//! what is live at that point is the previous call's, and a callee entered holding capabilities
-//! belonging to some other call is worse than one entered holding none.
+//! those get the capabilities the caller holds as well, in a frame that names the address the call
+//! goes to. Such a callee may be instrumented in another file, and then it takes the frame the way
+//! a callee in this one does. Or it may never take it, and then what it calls back into is not the
+//! function the frame names, so the callback finds nothing rather than capabilities belonging to
+//! some other call, which is the case the frame module spells out. When the caller holds nothing for
+//! any of the pointers it passes the frame is emptied instead, since what is live at that point is
+//! the previous call's.
 //!
 //! The one callee this unit does not define and still knows about is a wrapper `crate::wrap` sent a
 //! call to. `rucc-safe-rt` defines every one of them and every one of them takes its frame, so a
@@ -337,7 +341,7 @@ fn one(func: &mut Func, left: &Map<Symbol, usize>, word: Type) -> usize {
         }
         match wanted(func, inst, left) {
             Some(Frame::Checked) => {
-                if over(func, inst, &held, &doms, &mut joins) {
+                if over(func, inst, &held, &doms, &mut joins, true) {
                     published += 1;
                     from_the_call(func, inst);
                 }
@@ -347,12 +351,20 @@ fn one(func: &mut Func, left: &Map<Symbol, usize>, word: Type) -> usize {
             // one the caller recovers a pointer the callee could have described exactly, and for
             // a pointer to one of the callee's own locals that is the whole of row T4.
             Some(Frame::Pointerless) if returning(func, inst) && reads_frame(func, inst, left) => {
-                if over(func, inst, &held, &doms, &mut joins) {
+                if over(func, inst, &held, &doms, &mut joins, true) {
                     published += 1;
                     from_the_call(func, inst);
                 }
             }
-            Some(Frame::Outside | Frame::Unknown) => empty(func, inst),
+            Some(Frame::Outside | Frame::Unknown) => {
+                // A callee nothing here can ask about still gets what the caller holds, because the
+                // frame names the address it was written for and a function that is not that one
+                // leaves it alone. What it does not get is a frame for its answer alone, since most
+                // of these are the C library and a publish for each would be paid for nothing.
+                if over(func, inst, &held, &doms, &mut joins, false) {
+                    published += 1;
+                }
+            }
             Some(Frame::Elided | Frame::Pointerless) | None => {}
         }
     }
@@ -601,13 +613,15 @@ fn behind(func: &Func, inst: Inst) -> Option<Inst> {
 /// clear instead, which is the same saving taken all the way and is what the verifier asks for
 /// anyway: a publish describing nothing is a clear spelled at length, and the two mean opposite
 /// things. The exception is a call that gives back a pointer, whose frame is where the answer comes
-/// back, so that one publishes a single bottom capability rather than clearing.
+/// back, so that one publishes a single bottom capability rather than clearing when `answered` says
+/// the callee is one that writes an answer.
 fn over(
     func: &mut Func,
     inst: Inst,
     held: &Map<Value, Value>,
     doms: &Doms,
     joins: &mut Map<Value, Value>,
+    answered: bool,
 ) -> bool {
     let carried: Vec<Value> = pointers(func, inst).take(ARGS).collect();
     let mut found: Vec<Option<Value>> = Vec::with_capacity(carried.len());
@@ -623,7 +637,7 @@ fn over(
     // the same to the callee and keeps the publish one the verifier can tell from a clear.
     let given = match found.iter().rposition(Option::is_some) {
         Some(last) => last + 1,
-        None if returning(func, inst) => 0,
+        None if answered && returning(func, inst) => 0,
         None => {
             empty(func, inst);
             return false;
@@ -918,14 +932,40 @@ mod tests {
     }
 
     #[test]
-    fn a_call_into_something_this_unit_does_not_define_says_there_is_no_frame() {
+    fn a_call_into_something_this_unit_does_not_define_hands_over_what_the_caller_holds() {
+        // The callee may be instrumented in another file, and the frame names it, so a function
+        // that is not `g` will not believe it.
         let mut names = Interner::new();
         let mut module = unit(&mut names);
         module.add_func(caller(&mut names, "f", Some("g"), three(), true));
+        assert_eq!(arrange(&mut module, &names), 1);
+        let func = &module[module.funcs().next().expect("the module defines one")];
+        assert_eq!(count(func, Opcode::CapClear), 0);
+        assert_eq!(count(func, Opcode::CapPublish), 1);
+    }
+
+    #[test]
+    fn a_call_into_something_this_unit_does_not_define_holding_nothing_says_there_is_no_frame() {
+        let mut names = Interner::new();
+        let mut module = unit(&mut names);
+        module.add_func(caller(&mut names, "f", Some("g"), three(), false));
         assert_eq!(arrange(&mut module, &names), 0);
         let func = &module[module.funcs().next().expect("the module defines one")];
         assert_eq!(count(func, Opcode::CapClear), 1);
         assert_eq!(count(func, Opcode::CapPublish), 0);
+    }
+
+    #[test]
+    fn a_local_handed_to_a_function_in_another_file_travels() {
+        // Juliet's flow variant 51: the buffer is a local here and the copy into it is in the
+        // other file. Clearing here left the callee nothing but an address on the stack, which no
+        // plane can say the bounds of.
+        let mut names = Interner::new();
+        let mut module = unit(&mut names);
+        let (func, local) = handing_a_local(&mut names, "sink", false);
+        module.add_func(func);
+        assert_eq!(arrange(&mut module, &names), 1);
+        publishes_the_local(&module, local);
     }
 
     #[test]
@@ -937,7 +977,8 @@ mod tests {
         let mut module = unit(&mut names);
         module.add_func(caller(&mut names, "f", Some("g"), three(), true));
         module.add_func(caller(&mut names, "g", Some("h"), three(), true));
-        assert_eq!(arrange(&mut module, &names), 1);
+        // And `g` hands `h` what it holds, though nothing here defines `h`.
+        assert_eq!(arrange(&mut module, &names), 2);
         let func = &module[module.funcs().next().expect("the module defines two")];
         assert_eq!(count(func, Opcode::CapPublish), 1);
         assert_eq!(count(func, Opcode::CapClear), 0);
@@ -974,7 +1015,8 @@ mod tests {
         b.ret(&[]);
         module.add_func(func);
         module.add_func(caller(&mut names, "g", Some("h"), three(), true));
-        assert_eq!(arrange(&mut module, &names), 0);
+        // And `g` hands `h` what it holds, though nothing here defines `h`.
+        assert_eq!(arrange(&mut module, &names), 1);
         let func = &module[module.funcs().next().expect("the module defines two")];
         assert_eq!(count(func, Opcode::CapPublish), 0);
         assert_eq!(count(func, Opcode::CapClear), 1);
@@ -988,7 +1030,8 @@ mod tests {
         let mut module = unit(&mut names);
         module.add_func(caller(&mut names, "f", Some("g"), three(), false));
         module.add_func(caller(&mut names, "g", Some("h"), three(), true));
-        assert_eq!(arrange(&mut module, &names), 0);
+        // And `g` hands `h` what it holds, though nothing here defines `h`.
+        assert_eq!(arrange(&mut module, &names), 1);
         let func = &module[module.funcs().next().expect("the module defines two")];
         assert_eq!(count(func, Opcode::CapPublish), 0);
         assert_eq!(count(func, Opcode::CapNull), 0);
@@ -1118,7 +1161,8 @@ mod tests {
         // parameter and becomes a `cap_arg`, which is what leaves nothing of the opcode behind.
         let mut names = Interner::new();
         let mut module = both_ends(&mut names, true);
-        assert_eq!(arrange(&mut module, &names), 1);
+        // And `g` hands `h` what it holds, though nothing here defines `h`.
+        assert_eq!(arrange(&mut module, &names), 2);
         let func = &module[module.funcs().next().expect("the module defines two")];
         assert_eq!(count(func, Opcode::CapResult), 1);
         assert_eq!(count(func, Opcode::CapOf), 0);
@@ -1196,7 +1240,8 @@ mod tests {
         let mut module = unit(&mut names);
         module.add_func(asking(&mut names));
         module.add_func(passing_on(&mut names, "g", Some("h"), true));
-        assert_eq!(arrange(&mut module, &names), 1);
+        // And `g` hands `h` what it holds, though nothing here defines `h`.
+        assert_eq!(arrange(&mut module, &names), 2);
         let func = &module[module.funcs().next().expect("the module defines two")];
         assert_eq!(count(func, Opcode::CapPublish), 1);
         assert_eq!(operands(func, Opcode::CapPublish).len(), 1);
@@ -1280,7 +1325,8 @@ mod tests {
         let (func, local) = handing_a_local(&mut names, "g", false);
         module.add_func(func);
         module.add_func(caller(&mut names, "g", Some("h"), three(), true));
-        assert_eq!(arrange(&mut module, &names), 1);
+        // And `g` hands `h` what it holds, though nothing here defines `h`.
+        assert_eq!(arrange(&mut module, &names), 2);
         publishes_the_local(&module, local);
     }
 

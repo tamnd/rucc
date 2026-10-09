@@ -217,6 +217,7 @@ struct rucc_call_frame {
     struct cap args[8];     // first 8 pointer arguments
     struct cap ret;
     struct rucc_call_frame *outer;
+    const void *callee;     // the function the frame was written for
 };
 ```
 
@@ -245,6 +246,8 @@ A returned pointer is the one value that crosses a call in the other direction, 
 That write is the only one in this design that goes into a frame somebody else made, which is worth saying rather than assuming. It is allowed because the frame is the caller's stack, the caller is sitting in the call waiting for the callee to come back, and the callee's own stack is about to stop existing, so the caller's frame is the only storage alive at both ends. The alternative is a second frame pointing the other way, which is a second publish and a second take on every call that returns a pointer.
 
 The caller writes the bottom capability into that slot before it publishes, and that is what makes a callee which wrote nothing tell the truth. The frame is one reservation per function reused by every call site in it, so without the write the slot still holds the previous call's answer, and a capability belonging to some other pointer is worse than no capability at all, for the same reason the empty frame is an instruction rather than an absence. The reader is `recover::argument` again, so a callee that left the slot alone falls back to the plane walk.
+
+**A frame names its callee.** The caller writes the address the call goes to into `callee`, which for a call through a pointer is the pointer, and a callee takes the frame only when that is its own address or null. This is what lets a call to a function the unit does not define publish at all. Without it such a call has to clear, because the caller cannot tell a callee instrumented in another file from one that never takes, and a frame left for whatever an uninstrumented callee calls back into would hand a callback capabilities belonging to some other call. With it the callback is not the function the frame names, so it finds nothing and recovers, which is the answer document 10 section 10.8 wants, and the frame stays where it is for the caller to restore. A callee in another file takes it the way one in this file does. The cost is one more store per publish and the publishes that used to be clears,, and a call whose caller holds nothing for any pointer it passes still clears. Pointer equality is what the C standard already promises for function addresses across translation units, so the comparison is only as weak as a linker that breaks that promise, and what that weakness costs is a callee that recovers when it could have read the frame.
 
 One case is left open and is written down here rather than papered over. A callee that leaves by `longjmp` rather than by returning skips the restore, so the frame stays published over a stack that has been unwound past. Neither this section nor the runtime says what should happen then, and the frame is one more thing that will have to be unwound when it stops being one.
 

@@ -1758,7 +1758,8 @@ mod tests {
         // what is being moved is a slot the pass does not otherwise look inside. The last four are
         // what makes a callee that writes nothing believed: the frame is one reservation the
         // function reuses at every call site, so without them the slot holds the last call's answer.
-        assert_eq!(count(&func, Opcode::Store), 10);
+        // And one for the address of the function the frame is for.
+        assert_eq!(count(&func, Opcode::Store), 11);
         assert_eq!(count(&func, Opcode::Memcpy), 1);
         assert!(!any_capability(&func));
 
