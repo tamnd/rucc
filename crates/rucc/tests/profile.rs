@@ -337,6 +337,60 @@ fn the_object_lists_the_address_of_every_call() {
     }
 }
 
+/// On i386 the address is four bytes, a `.long` in the listing and an `R_386_32` in the object, as
+/// gcc writes for `-m32`. The listing said `.quad` there once, which the object writer had no
+/// relocation for, so every unit of a 32 bit kernel with ftrace in it stopped. Both spellings of the
+/// target take the flags, the one a kernel's `-m32` on an x86-64 compiler gives and i686's own.
+#[test]
+fn on_i386_every_hook_is_listed_as_four_bytes() {
+    let flags = ["-pg", "-mfentry", "-mrecord-mcount"];
+    for (what, target, extra) in
+        [("i386-m32", TARGET, &["-m32"][..]), ("i386-i686", "i686-unknown-linux-gnu", &[])]
+    {
+        let all: Vec<&str> = extra.iter().chain(&flags).copied().collect();
+        let (ok, text, err) = run(what, target, &all, THREE);
+        assert!(ok, "{what}: {err}");
+        for name in ["leaf", "calls", "deep"] {
+            let listed = format!("\t.long\t.Lmcount_{name}\n\t.previous");
+            assert!(text.contains(&listed), "{what} {name}:\n{text}");
+        }
+        assert!(!text.contains(".quad"), "{what}:\n{text}");
+
+        let path = fixture(what, THREE);
+        let object = path.with_extension("o");
+        let done = Command::new(env!("CARGO_BIN_EXE_rucc"))
+            .arg(format!("--target={target}"))
+            .args(extra)
+            .args(["-O2", "-fno-pic"])
+            .args(flags)
+            .args(["-c", "-o"])
+            .arg(&object)
+            .arg(&path)
+            .output()
+            .expect("the compiler is built before its own tests run");
+        assert!(done.status.success(), "{what}: {}", String::from_utf8_lossy(&done.stderr));
+        let bytes = std::fs::read(&object).expect("the object was written");
+        let _ = std::fs::remove_dir_all(path.parent().expect("the fixture is in a directory"));
+        assert_eq!(bytes[4], 1, "{what}: a 32 bit object");
+        assert_eq!(elf32_size(&bytes, "__mcount_loc"), Some(12), "{what}");
+    }
+}
+
+/// The size of a section of a 32 bit little endian ELF file, found by its name.
+fn elf32_size(bytes: &[u8], name: &str) -> Option<usize> {
+    let word = |at: usize, width: usize| {
+        bytes[at..at + width].iter().rev().fold(0, |sum, &byte| sum << 8 | usize::from(byte))
+    };
+    let (table, entry, count) = (word(0x20, 4), word(0x2e, 2), word(0x30, 2));
+    let header = |index: usize| table + index * entry;
+    let strings = word(header(word(0x32, 2)) + 16, 4);
+    (0..count).find_map(|index| {
+        let at = strings + word(header(index), 4);
+        let end = bytes[at..].iter().position(|&byte| byte == 0)?;
+        (&bytes[at..at + end] == name.as_bytes()).then(|| word(header(index) + 20, 4))
+    })
+}
+
 /// Just enough of a 64-bit little endian ELF file to find a section and read its relocations.
 struct Elf<'a>(&'a [u8]);
 

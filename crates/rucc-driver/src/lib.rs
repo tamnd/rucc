@@ -1396,22 +1396,23 @@ pub fn parse_args(args: &[String]) -> Result<Action, CliError> {
             // directory is a build system that would otherwise fail on every other directory.
             "-mfentry" => opts.hook = Hook::Early,
             "-mno-fentry" => opts.hook = Hook::Late,
-            // Only on x86-64, as with gcc, where they are the i386 back end's and unknown to the
-            // others. Taken on their own like `-mfentry`, and doing nothing without `-pg`.
-            "-mrecord-mcount" | "-mno-record-mcount" if arch == rucc_target::Arch::X86_64 => {
+            // Only on x86, as with gcc, where they are the i386 back end's and unknown to the
+            // others. That back end is both widths, so a 32 bit kernel asks for them too. Taken on
+            // their own like `-mfentry`, and doing nothing without `-pg`.
+            "-mrecord-mcount" | "-mno-record-mcount" if x86 => {
                 opts.record_mcount = arg == "-mrecord-mcount";
             }
-            "-mnop-mcount" | "-mno-nop-mcount" if arch == rucc_target::Arch::X86_64 => {
+            "-mnop-mcount" | "-mno-nop-mcount" if x86 => {
                 opts.nop_mcount = arg == "-mnop-mcount";
             }
             // The hook the call goes to and the section it is listed in, in place of the target's
-            // and `__mcount_loc`, on x86-64 where the others are. A function's own `fentry_name`
-            // and `fentry_section` win over them. Empty is the default again.
-            _ if arch == rucc_target::Arch::X86_64 && arg.starts_with("-mfentry-name=") => {
+            // and `__mcount_loc`, on x86 where the others are. A function's own `fentry_name` and
+            // `fentry_section` win over them. Empty is the default again.
+            _ if x86 && arg.starts_with("-mfentry-name=") => {
                 let name = &arg["-mfentry-name=".len()..];
                 opts.fentry_name = (!name.is_empty()).then(|| name.to_owned());
             }
-            _ if arch == rucc_target::Arch::X86_64 && arg.starts_with("-mfentry-section=") => {
+            _ if x86 && arg.starts_with("-mfentry-section=") => {
                 let section = &arg["-mfentry-section=".len()..];
                 opts.fentry_section = (!section.is_empty()).then(|| section.to_owned());
             }

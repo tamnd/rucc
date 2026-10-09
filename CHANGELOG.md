@@ -12,6 +12,7 @@ All notable changes are recorded here. The format follows [Keep a Changelog](htt
 
 ### Fixed
 
+- `-mrecord-mcount` on i386 lists each profiler call in `__mcount_loc` as a four byte address, a `.long` as gcc writes for `-m32`, where it wrote a `.quad` that the object writer had no relocation for. With `-m32` on an x86-64 compiler every unit of a 32 bit kernel with ftrace stopped there, 23473 of the X32 allmodconfig build of Linux 7.2.8. `-mrecord-mcount`, `-mnop-mcount`, `-mfentry-name=` and `-mfentry-section=` are now taken with `--target=i686-linux-gnu` as well, as gcc takes them for either width (#3420).
 - A loop that becomes a call to memset, memcpy or memmove on i686 starts the call at an offset as wide as a pointer, and a length that is a number is that wide too. Loop idiom recognition wrote both in sixty four bits whatever the target, and a `ptr_add` of a sixty four bit offset is something the step that splits wide values on i386 does not take, so the backend stopped with "no rule lowers `trunc.i64.i32`" on the kernel's perf uncore driver and ohci-hcd for X32. A walk that starts at an `int` index the caller hands in now becomes a call on i686 as well (#3419).
 
 ## 0.29.4
