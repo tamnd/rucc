@@ -635,7 +635,9 @@ impl Heap<'_> {
         }
     }
 
-    /// Why a call that was weighed is not inlined, if it is not.
+    /// Why a call that was weighed is not inlined, if it is not, and otherwise how many bytes the
+    /// copy adds to the caller's frame, the locals of the callee that are still in memory once it
+    /// has been cleaned up and that no slot the pool holds can take.
     fn refused(
         &mut self,
         module: &Module,
@@ -643,25 +645,25 @@ impl Heap<'_> {
         call: Inst,
         weighed: &Weighed,
         pool: &Pool,
-    ) -> Option<InlineFailure> {
+    ) -> Result<u64, InlineFailure> {
         if !self.wants(weighed) {
-            return Some(InlineFailure::TooLarge);
+            return Err(InlineFailure::TooLarge);
         }
         let func = &module[caller];
         let target = &module[weighed.callee];
         if let Some(wanted) = target.target {
             if !func.target.unwrap_or(self.how.isa).covers(wanted) {
-                return Some(InlineFailure::Target);
+                return Err(InlineFailure::Target);
             }
         }
         if calls_twice(module, target, self.how.names) {
-            return Some(InlineFailure::Setjmp);
+            return Err(InlineFailure::Setjmp);
         }
         let cold = func.attrs.set.contains(AttrSet::COLD)
             || target.attrs.set.contains(AttrSet::COLD)
             || target.attrs.set.contains(AttrSet::NORETURN);
         if cold && grows(func, call, target, weighed.body, self.how) {
-            return Some(InlineFailure::Unlikely);
+            return Err(InlineFailure::Unlikely);
         }
         // gcc takes a call that is not hot only when the program does not grow by it, which is
         // the last test in `want_inline_small_function_p`. A large function with a loop that only
@@ -671,11 +673,11 @@ impl Heap<'_> {
             && (weighed.growth >= as_i64(self.how.limit) || weighed.overall > 0)
             && !self.hot(weighed.callee)
         {
-            return Some(InlineFailure::Unlikely);
+            return Err(InlineFailure::Unlikely);
         }
         let growth = usize::try_from(weighed.growth).unwrap_or(0);
         if self.unit + growth > self.most {
-            return Some(InlineFailure::UnitGrowth);
+            return Err(InlineFailure::UnitGrowth);
         }
         // gcc's `caller_growth_limits`: a caller past `large-function-insns` may grow to twice the
         // larger of what it was and the callee, and no further.
@@ -686,7 +688,7 @@ impl Heap<'_> {
         let after = self.sizes.get(&caller).copied().unwrap_or(0) + growth;
         let large = usize::try_from(rucc_cost::param!(LARGE_FUNCTION_INSNS)).unwrap_or(usize::MAX);
         if after >= theirs && after > large && after > limit {
-            return Some(InlineFailure::FunctionGrowth);
+            return Err(InlineFailure::FunctionGrowth);
         }
         let layout = module.datalayout;
         let own = self.own.get(&caller).copied().unwrap_or_else(|| frame(func, layout));
@@ -696,10 +698,10 @@ impl Heap<'_> {
             let now = frame(func, layout);
             self.frames.insert(caller, now);
             if !fits(own, now, body, self.how.growth) {
-                return Some(InlineFailure::Frame);
+                return Err(InlineFailure::Frame);
             }
         }
-        None
+        Ok(body)
     }
 
     /// Inlines a call that came off the heap, or says why not, and puts what the copy brought on
@@ -718,18 +720,23 @@ impl Heap<'_> {
         pool.highest = None;
         let mut stats = self.stats.remove(&caller).unwrap_or_default();
         let mark = module[caller].counts().insts;
+        let mut body = 0;
         let outcome = match self.refused(module, caller, call, &weighed, &pool) {
-            Some(failure) => Err(failure),
-            None => splice(
-                module,
-                caller,
-                call,
-                weighed.callee,
-                self.how.convention,
-                weighed.kind,
-                &mut pool,
-            ),
+            Err(failure) => Err(failure),
+            Ok(bytes) => {
+                body = bytes;
+                splice(
+                    module,
+                    caller,
+                    call,
+                    weighed.callee,
+                    self.how.convention,
+                    weighed.kind,
+                    &mut pool,
+                )
+            }
         };
+        let copied = module[caller].counts().insts;
         match outcome {
             Ok(()) => {
                 stats.optimized(WEIGHED);
@@ -774,16 +781,27 @@ impl Heap<'_> {
                 }
                 // What the copies added is every instruction made since, which is all that has
                 // to be looked at to keep the sizes, the times, the frame and the call counts.
+                //
+                // The frame grows by what the callee's own frame adds, the way gcc adds a callee's
+                // `estimated_self_stack_size` at each copy, and not by every local the copy made.
+                // Most of those are ones scalar replacement makes values of, which `frame` leaves
+                // out again. On zstd_compress.c each copy of one callee made a 256 byte local of
+                // that kind, which took the bound past the 256 bytes any frame may have and made
+                // `frame` run over a caller of up to 135000 instructions 88 times to find 4 bytes,
+                // a tenth of the compile. tamnd/rucc#3052. The bodies the copy's `always_inline`
+                // calls brought were not weighed, so their locals still count in full.
                 let brought = self.profile(module, weighed.callee).calls.clone();
                 let func = &module[caller];
-                let mut grew = 0;
+                let mut grew = body;
                 let mut calls = Vec::new();
                 for inst in (mark..func.counts().insts).map(Inst::from_usize) {
                     if func.block_of(inst).is_none() {
                         continue;
                     }
                     match (func[inst].opcode, func[inst].extra) {
-                        (Opcode::Alloca, Extra::Mem(mem)) if func[inst].args.is_empty() => {
+                        (Opcode::Alloca, Extra::Mem(mem))
+                            if func[inst].args.is_empty() && inst.index() >= copied =>
+                        {
                             grew += func[mem].size;
                         }
                         (Opcode::Call, Extra::Call(info)) => {
