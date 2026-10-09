@@ -689,7 +689,7 @@ fn named_alone(address: mir::Amode) -> bool {
 /// past the register it writes, and a word of the caller's argument area is always there to read,
 /// so one that writes a register nothing reads can go.
 ///
-/// The entry comes off the list as well, through [`Pending::moved`] with no readers, since the
+/// The entry comes off the list as well, through `Pending::moved` with no readers, since the
 /// frame layout would otherwise write an offset into an instruction that is not there.
 pub fn unread_arguments(func: &mut mir::Func, pending: &mut Pending<'_>) -> usize {
     let reads = Reads::of(func);

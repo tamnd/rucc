@@ -653,7 +653,7 @@ impl Elsewhere {
     }
 
     /// The same names, with a thread-local variable reached through its descriptor when `on`. See
-    /// [`Self::descriptors`].
+    /// [`Self::descriptor_calls`].
     #[must_use]
     pub fn with_descriptor_calls(mut self, on: bool) -> Self {
         self.descriptor_calls = on;
