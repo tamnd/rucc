@@ -362,7 +362,7 @@ impl Access {
 /// [`keeps_address`] is a whitelist: an opcode it does not name lets the address out, and so
 /// does an opcode added to the IR after this was written. A blacklist would mean the next person
 /// to add an opcode introduces a miscompilation without touching this file.
-#[derive(Clone, Debug, Default)]
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct Escapes {
     escaped: Set<Inst>,
 }
@@ -529,6 +529,10 @@ impl Counts {
 /// builds one of these and then adds the summaries would walk the function twice and throw the
 /// first answer away, and licm builds one per loop, so on a function with hundreds of loops that
 /// was most of the time spent compiling it.
+///
+/// A pass that builds more than one of these over a function whose escapes cannot change between
+/// them can hand each the same cell with [`Alias::sharing`], and then the walk is done once for
+/// all of them rather than once for each.
 #[derive(Debug)]
 pub struct Alias<'a> {
     func: &'a Func,
@@ -536,6 +540,7 @@ pub struct Alias<'a> {
     summaries: Option<&'a Summaries>,
     options: Options,
     escapes: OnceCell<Escapes>,
+    shared: Option<&'a OnceCell<Escapes>>,
     counts: Counts,
 }
 
@@ -555,6 +560,7 @@ impl<'a> Alias<'a> {
             summaries: None,
             options,
             escapes: OnceCell::new(),
+            shared: None,
             counts: Counts::default(),
         }
     }
@@ -567,14 +573,29 @@ impl<'a> Alias<'a> {
     #[must_use]
     pub fn knowing(mut self, summaries: &'a Summaries) -> Self {
         self.escapes = OnceCell::new();
+        self.shared = None;
         self.summaries = Some(summaries);
+        self
+    }
+
+    /// The same, keeping the escape set in a cell the caller holds rather than in this.
+    ///
+    /// The cell is filled the first time a query needs it, as it would have been here, and every
+    /// other oracle handed the same cell reads the answer out of it. That is only right while the
+    /// answer is the one a fresh walk would give, so the caller promises the function's
+    /// instructions and their operands are what they were when the cell was filled, and that each
+    /// oracle sharing it knows the same summaries. Moving an instruction is allowed, since where
+    /// an instruction sits is not part of the question.
+    #[must_use]
+    pub fn sharing(mut self, cell: &'a OnceCell<Escapes>) -> Self {
+        self.shared = Some(cell);
         self
     }
 
     /// Which locals escaped, for a caller that wants the fact on its own.
     #[must_use]
     pub fn escapes(&self) -> &Escapes {
-        self.escapes.get_or_init(|| match self.summaries {
+        self.shared.unwrap_or(&self.escapes).get_or_init(|| match self.summaries {
             Some(summaries) => Escapes::knowing(self.func, summaries),
             None => Escapes::of(self.func),
         })
