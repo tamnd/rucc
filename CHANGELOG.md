@@ -9,6 +9,7 @@ All notable changes are recorded here. The format follows [Keep a Changelog](htt
 - Stack slot sharing works out where each local is written and read one loop at a time instead of revisiting every block until nothing changes, so quickjs.c at -O2 runs 65 percent fewer instructions with the same output (#3474).
 - The discharge pass no longer walks lifetime ends in a function with no lifetime check to find, so quickjs.c at -O2 runs 63 percent fewer instructions with the same output (#3477).
 - - Read one edge argument in place in nofree, discharge and split instead of copying the edge's whole argument list for each parameter, which takes 2.4% of the instructions off lvm.c at `-O2` (#3482).
+- On i386 a `long long` add or subtract is `addl` and `adcl`, or `subl` and `sbbl`, and on x86-64 a `__int128` one is `addq` and `adcq`. The carry between the halves used to be a `cmp`, a `setb`, a `movzbl` and one more add. A new pass after selection finds the comparison that asks whether the low add wrapped and uses the flag that add left instead. `__builtin_bswap64` on i386 is two `bswapl` now, where it was 48 shifts and masks, which shrinks `sha512_transform` and `gf128mul_lle` in the 32 bit kernel (#3483).
 
 ### Added
 

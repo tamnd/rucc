@@ -39,6 +39,7 @@ use rucc_tuple::Arch;
 use crate::abi;
 use crate::bits;
 use crate::bytes;
+use crate::carry;
 use crate::choice;
 use crate::cold;
 use crate::combine;
@@ -904,6 +905,12 @@ pub fn compile_recording(
     // out is one whose readers are sent to its source, and one of those readers may be an address
     // computation, so asking which bits are read first means the fold sees the addresses as they
     // will be rather than as they were.
+    // Before anything else looks at the instructions selection wrote, while the comparison that
+    // asks whether the low half of a wide sum wrapped can still be followed back to the add by
+    // name. See [`crate::carry`].
+    if machine.shapes.prefix == "x64." {
+        carry::carries(&mut func, machine.shapes, names);
+    }
     bits::dead(&mut func, machine.bits, machine.shapes, names);
     // A `cset` has already cleared everything above the bit it wrote, so the `and` that widens
     // the bit is a copy, and its readers can read the `cset` instead. The same goes for a `uxtw`

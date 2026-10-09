@@ -667,13 +667,41 @@ pub fn bytes(func: &mut Func, kept: &[u32]) {
     for inst in found {
         match func[inst].opcode {
             Opcode::Bswap if !kept.contains(&produced(func, inst).bits()) => {
-                swap(func, inst, u8::BITS);
+                let bits = produced(func, inst).bits();
+                if bits % 2 == 0 && kept.contains(&(bits / 2)) {
+                    halved(func, inst);
+                } else {
+                    swap(func, inst, u8::BITS);
+                }
             }
             // The smallest group a bit reversal exchanges is one bit.
             Opcode::Bitreverse => swap(func, inst, 1),
             _ => {}
         }
     }
+}
+
+/// A byte swap twice as wide as one the machine has, as that one over each half with the halves
+/// crossed.
+///
+/// A `__builtin_bswap64` on i386 is two `bswapl` and the two words handed back the other way
+/// round, which is what gcc writes. The run of shifts and masks below came to forty eight
+/// instructions over the pair, and the kernel's `be64_to_cpu` is in the middle of `sha512` and
+/// `gf128mul`, where it made both about three times the size gcc makes them.
+fn halved(func: &mut Func, inst: Inst) {
+    let ty = produced(func, inst);
+    let Some(&arg) = func[func[inst].args].first() else { return };
+    let half = Type::int(ty.bits() / 2);
+    let count = ahead_const(func, inst, Imm::int(i128::from(half.bits()), ty), ty);
+    let low = ahead(func, inst, Opcode::Trunc, &[arg], half);
+    let shifted = ahead(func, inst, Opcode::LShr, &[arg, count], ty);
+    let high = ahead(func, inst, Opcode::Trunc, &[shifted], half);
+    let low = ahead(func, inst, Opcode::Bswap, &[low], half);
+    let high = ahead(func, inst, Opcode::Bswap, &[high], half);
+    let wide = ahead(func, inst, Opcode::ZExt, &[low], ty);
+    let up = ahead(func, inst, Opcode::Shl, &[wide, count], ty);
+    let down = ahead(func, inst, Opcode::ZExt, &[high], ty);
+    becomes(func, inst, Opcode::Or, &[up, down]);
 }
 
 /// One byte swap, as a halving run of swaps of adjacent groups of bits.
@@ -3129,8 +3157,8 @@ mod tests {
         assert_eq!(printed(&func, &mut names), before);
     }
 
-    /// A width the target swaps in one instruction is left for the rule that picks it, and one it
-    /// does not is still written out, so a target that has only the narrow ones gets both.
+    /// A width the target swaps in one instruction is left for the rule that picks it, one twice
+    /// that is two of them, and anything else is still written out.
     #[test]
     fn a_swap_of_a_width_the_target_keeps_is_left_as_it_was() {
         let (mut names, mut func) = swapping(32);
@@ -3140,6 +3168,12 @@ mod tests {
 
         let (mut names, mut func) = swapping(64);
         bytes(&mut func, &[16, 32]);
+        let text = printed(&func, &mut names);
+        assert_eq!(text.matches(" = bswap ").count(), 2, "{text}");
+        assert_eq!(text.matches(" = shl ").count(), 1, "{text}");
+
+        let (mut names, mut func) = swapping(64);
+        bytes(&mut func, &[16]);
         let text = printed(&func, &mut names);
         assert!(!text.contains("bswap"), "{text}");
         assert_eq!(text.matches("shl").count(), 3, "{text}");
