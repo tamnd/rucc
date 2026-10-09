@@ -582,6 +582,18 @@ impl Func {
         &self.barred
     }
 
+    /// Forgets every virtual register numbered `count` or above, with what was said of each.
+    ///
+    /// For a pass that made registers and then took out everything that named them. Nothing may
+    /// still name one.
+    pub fn forget_vregs(&mut self, count: usize) {
+        self.vregs.truncate(count);
+        self.widths.truncate(count);
+        self.barred.retain(|&(reg, _)| {
+            reg.number().and_then(|number| usize::try_from(number).ok()).is_some_and(|n| n < count)
+        });
+    }
+
     /// How many virtual registers the function has, which is what the allocator sizes itself
     /// against.
     #[must_use]

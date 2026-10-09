@@ -1205,8 +1205,29 @@ pub fn compile_recording(
         .filter(|_| handed && allocator == Allocator::Backtracking)
         .map(|envs| &envs[which]);
     let tried: Vec<&Env> = wide.into_iter().chain(middle).collect();
-    let (allocation, used) =
-        rucc_regalloc::run_first(&mut func, &tried, env, &called, flags.verify, allocator);
+    // The move of each class, for the copies a block that reads a value off the stack more than
+    // once is given. See [`rucc_regalloc::pieces`]. Only on i386, since asking the allocator a
+    // second time is an eighth of the time sqlite3.c takes on x86-64, for 61 of its 209791
+    // instructions.
+    let movs: Vec<mir::Opcode> = machine
+        .insts
+        .classes
+        .iter()
+        .map(|moves| mir::Opcode::new(names.join(machine.insts.prefix, moves.mov)))
+        .collect();
+    let copy = |func: &mut mir::Func, into: mir::Operand, from: mir::Operand| {
+        let mov = *movs.get(usize::from(into.class.number()))?;
+        Some(func.build_loose(mov).operand(into).operand(from).finish())
+    };
+    let (allocation, used) = rucc_regalloc::run_first(
+        &mut func,
+        &tried,
+        env,
+        &called,
+        flags.verify,
+        allocator,
+        if i386 { Some(&copy) } else { None },
+    );
     recording.pressure.record(&called, Cost::of(&allocation));
 
     // After allocation, because the largest area in most frames is the spill slots and nothing
