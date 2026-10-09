@@ -318,6 +318,30 @@
       (x64.bswap_32 x)
       (spec (= (concat (extract 7 0 x) (concat (extract 15 8 x) (concat (extract 23 16 x) (extract 31 24 x)))) (result))))
 
+;; Bit counts at thirty two bits, for the reasons the x86-64 rules give: one instruction on a
+;; processor with the extension, and the search with a conditional move after it on one without,
+;; which is what `rucc_codegen::expand` writes the count as there. A sixty four bit count is two
+;; words here and is written out before it reaches a rule.
+(rule (lower (ctpop.i32 (value.i32 x)))
+      (x64.popcnt_32 x)
+      (spec (= (pop.i32 x) (result))))
+
+(rule (lower (ctlz.i32 (value.i32 x)))
+      (x64.lzcnt_32 x)
+      (spec (= (clz.i32 x) (result))))
+
+(rule (lower (cttz.i32 (value.i32 x)))
+      (x64.tzcnt_32 x)
+      (spec (= (ctz.i32 x) (result))))
+
+(rule (lower (select.i32 (icmp_eq.i1 (value.i32 x) (iconst.i32 0)) (iconst.i32 32) (ctlz.i32 (value.i32 x))))
+      (x64.clz_scan_32 x)
+      (spec (= (ite (= x 0) 32 (clz.i32 x)) (result))))
+
+(rule (lower (select.i32 (icmp_eq.i1 (value.i32 x) (iconst.i32 0)) (iconst.i32 32) (cttz.i32 (value.i32 x))))
+      (x64.ctz_scan_32 x)
+      (spec (= (ite (= x 0) 32 (ctz.i32 x)) (result))))
+
 ;; Division and remainder. A division at sixty four bits is a call to `__divdi3` and its
 ;; relatives, which `crate::wide` writes before selection, so the widest one here is thirty two
 ;; bits.

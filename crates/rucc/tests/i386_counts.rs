@@ -5,6 +5,14 @@
 
 use std::process::Command;
 
+const SEARCH: &str = "\
+typedef unsigned long long u64;
+int clz(unsigned a) { return __builtin_clz(a); }
+int ctz(unsigned a) { return __builtin_ctz(a); }
+int clzll(u64 a) { return __builtin_clzll(a); }
+int ctzll(u64 a) { return __builtin_ctzll(a); }
+";
+
 const SOURCE: &str = "\
 typedef unsigned long long u64;
 int pc(u64 a) { return __builtin_popcountll(a); }
@@ -17,10 +25,14 @@ int clrsb(long long a) { return __builtin_clrsbll(a); }
 ";
 
 fn listing(level: &str) -> String {
-    let dir = std::env::temp_dir().join(format!("rucc-i386-counts-{}-{level}", std::process::id()));
+    compiled("counts", SOURCE, level)
+}
+
+fn compiled(name: &str, source: &str, level: &str) -> String {
+    let dir = std::env::temp_dir().join(format!("rucc-i386-{name}-{}-{level}", std::process::id()));
     std::fs::create_dir_all(&dir).expect("a temporary directory can be created");
     let path = dir.join("one.c");
-    std::fs::write(&path, SOURCE).expect("the fixture can be written");
+    std::fs::write(&path, source).expect("the fixture can be written");
     let out = Command::new(env!("CARGO_BIN_EXE_rucc"))
         .args(["--target=i686-unknown-linux-gnu", level, "-fno-asynchronous-unwind-tables", "-S"])
         .args(["-o", "-"])
@@ -42,5 +54,21 @@ fn a_count_or_a_reversal_of_a_long_long_is_inline_code() {
         for name in ["pc", "clz", "ctz", "ffs", "bs", "par", "clrsb"] {
             assert!(listing.contains(&format!("\n{name}:\n")), "{level}: {name}");
         }
+    }
+}
+
+/// gcc's `bsrl` and `bsfl` for a zero count, with the conditional move x86-64 has after them for
+/// the zero, where it was a dozen shifts and masks and a multiply. A `long long` is a search of
+/// each word and a move that picks one, where the pair went through the same arithmetic at sixty
+/// four bits and came to some seventy instructions. zstd's `ZSTD_highbit32` is one of these in
+/// every Huffman table it reads.
+#[test]
+fn a_zero_count_on_i386_is_a_search() {
+    for level in ["-O1", "-O2"] {
+        let text = compiled("search", SEARCH, level);
+        assert_eq!(text.matches("\tbsrl\t").count(), 3, "{level}\n{text}");
+        assert_eq!(text.matches("\tbsfl\t").count(), 3, "{level}\n{text}");
+        assert!(!text.contains("16843009"), "{level}: the count is still written out\n{text}");
+        assert!(!text.contains("call"), "{level}\n{text}");
     }
 }

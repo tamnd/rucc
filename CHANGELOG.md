@@ -24,6 +24,7 @@ All notable changes are recorded here. The format follows [Keep a Changelog](htt
 - A spill store whose slot is never read back is gone. When the cleanup after allocation serves every reload of a slot from a register that still holds the value, the stores into that slot are dropped too, and a local the debug info placed in such a slot gets no location there. On the 32 bit kernel this takes 44 stores out of `md.c` and a few out of most other files (#3507).
 - An argument passed on the stack that the function never reads is no longer loaded. A `u64` on i386 whose high word is not wanted reads only its low word, and a callback that ignores an argument under `-mregparm=3` reads nothing for it (#3510).
 - The heap inliner grows its bound on a caller's frame by what the callee's own frame adds rather than every local the copy made, which takes an eighth off the compile of zstd_compress.c at `-O2` (#3511).
+- `__builtin_clz` and `__builtin_ctz` on i386 are `bsrl` or `bsfl` and a `cmov` for zero, as they already were on x86-64, where they were a dozen shifts and masks and a multiply. A `long long` count is one search per word and a `cmov` that picks one, down from about seventy instructions to seventeen. With `-mpopcnt`, `-mlzcnt` or `-mbmi`, i386 now uses `popcntl`, `lzcntl` and `tzcntl` too (#3512).
 
 ### Added
 

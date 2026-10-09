@@ -28,6 +28,7 @@
 //! general purpose registers have one on this machine and the allocator has no way to say so yet.
 
 use crate::branch::{BranchInsts, Fusion, Move};
+use crate::counts::{BitCount, CountInst};
 use crate::frame::{ClassMoves, FrameInsts, Thunks};
 use crate::machine::MachineInsts;
 use crate::operand::OperandDesc;
@@ -623,6 +624,49 @@ pub static MACHINE: MachineInsts = MachineInsts {
     scales: &[1, 2, 4, 8],
     index_and_disp: true,
 };
+
+/// The counts i386 has an instruction for, which are x86-64's at thirty two bits.
+///
+/// A sixty four bit count is two words here, so it has no instruction of its own and is written
+/// out. The searches are guarded for the reason [`crate::x86_64::COUNTS`] gives, and every
+/// processor this target builds for from the i686 on has the conditional move they end in.
+pub const COUNTS: &[CountInst] = &[
+    CountInst {
+        of: BitCount::Ones,
+        feature: "popcnt",
+        widths: &[32],
+        guarded: false,
+        vector: false,
+    },
+    CountInst {
+        of: BitCount::LeadingZeros,
+        feature: "lzcnt",
+        widths: &[32],
+        guarded: false,
+        vector: false,
+    },
+    CountInst {
+        of: BitCount::TrailingZeros,
+        feature: "bmi",
+        widths: &[32],
+        guarded: false,
+        vector: false,
+    },
+    CountInst {
+        of: BitCount::LeadingZeros,
+        feature: "",
+        widths: &[32],
+        guarded: true,
+        vector: false,
+    },
+    CountInst {
+        of: BitCount::TrailingZeros,
+        feature: "",
+        widths: &[32],
+        guarded: true,
+        vector: false,
+    },
+];
 
 /// The form of an opcode this machine has, or `None` if it has no such opcode or cannot write it.
 #[must_use]
