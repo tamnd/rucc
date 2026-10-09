@@ -842,11 +842,8 @@ impl Walk<'_> {
                             continue;
                         }
                         let arg = *self.func[call.args].get(index as usize).ok_or(())?;
-                        all = same(all, self.object(arg, ask, depth, seen));
                         // One way that is not known is enough, and the rest need not be walked.
-                        if all.is_err() {
-                            return all;
-                        }
+                        all = Ok(same(all, self.object(arg, ask, depth, seen))?);
                     }
                 }
                 all
