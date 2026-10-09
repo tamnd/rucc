@@ -421,6 +421,13 @@ fn rule_line(rule: &Rule) -> String {
         Test::LoneFloat => "one float or one double and nothing else".to_string(),
         Test::SingleScalar => "one scalar and nothing else, with no padding".to_string(),
         Test::Vector => "a vector, or a structure holding only one, outside the `...`".to_string(),
+        Test::WholeVector { limit } => format!(
+            "a vector of at most {limit} bytes, or a structure or a union holding only one, \
+             outside the `...`"
+        ),
+        Test::VariadicVector => {
+            "a vector, or a structure or a union holding only one, past the `...`".to_string()
+        }
         Test::ComplexFloat => "a _Complex float and nothing else".to_string(),
         Test::FloatingMode => {
             "a _Complex, or one floating point scalar that fills the aggregate".to_string()
