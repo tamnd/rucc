@@ -7,7 +7,9 @@
 //! any level that optimizes. `g` is the kernel's `min`, whose signedness check asks about
 //! `ret >= 0` after `ret < 0` has returned, which only the ranges answer. See tamnd/rucc#2265.
 //! `h` is lib/test_bitmap.c's `test_bitmap_const_eval`, which asks about `*bitmap` through
-//! `test_bit` after `bitmap_clear`, and gcc answers one there.
+//! `test_bit` after `bitmap_clear`, and gcc answers one there. `u` is i2c-mux-pca9541's
+//! `udelay(data->select_timeout)` under a test that the timeout is 50, where the ranges give the
+//! yes and the division by 20000 next to it has to read the 50 as well or `__bad_udelay` stays.
 
 use std::process::Command;
 
@@ -84,6 +86,23 @@ int h(void) {
     BUILD_BUG_ON(!__builtin_constant_p(res));
     return res;
 }
+extern void __bad_udelay(void);
+extern void __const_udelay(unsigned long);
+extern void __udelay(unsigned long);
+#define udelay(n) ({ if (__builtin_constant_p(n)) { \
+    if ((n) / 20000 >= 1) __bad_udelay(); else __const_udelay((n) * 0x10c7ul); } \
+    else __udelay(n); })
+struct mux { unsigned long select_timeout; };
+int arbitrate(void);
+int u(struct mux *data, unsigned long timeout, volatile unsigned long *jiffies) {
+    do {
+        int ret = arbitrate();
+        if (ret) return ret < 0 ? ret : 0;
+        if (data->select_timeout == 50) udelay(data->select_timeout);
+        else ok(data->select_timeout / 1000);
+    } while (*jiffies < timeout);
+    return -1;
+}
 "#;
 
 #[test]
@@ -100,7 +119,13 @@ fn no_call_a_constant_p_answer_rules_out_reaches_the_object() {
             .expect("the compiler is built before its own tests run");
         assert!(done.status.success(), "{level}: {}", String::from_utf8_lossy(&done.stderr));
         let bytes = std::fs::read(dir.join("one.o")).expect("the object was written");
-        for name in ["__bad_size_call_parameter", "__compiletime_assert_1", "__write_overflow"] {
+        let ruled_out = [
+            "__bad_size_call_parameter",
+            "__compiletime_assert_1",
+            "__write_overflow",
+            "__bad_udelay",
+        ];
+        for name in ruled_out {
             let named = bytes.windows(name.len()).any(|at| at == name.as_bytes());
             assert!(!named, "{level} left a call to {name}");
         }

@@ -61,6 +61,10 @@ pub const NAME: &str = "constant-p";
 
 const ANSWERED: &str = "__builtin_constant_p answered";
 
+/// Recorded for each value a yes was about that its readers below the question now read as the
+/// number the ranges pinned it to.
+const PINNED: &str = "value the ranges pin to one number replaced by it below the question";
+
 /// Recorded for each `select` whose readers were pointed at the arm its constant condition picks.
 const CHOSEN: &str = "select on a constant condition replaced by the arm it picks";
 
@@ -128,11 +132,12 @@ fn follow(func: &mut Func, an: &mut Analyses, stats: &mut Stats) {
         let mut fuel = Fuel::unlimited();
         let mut round = crate::fold::fold_in(func, &mut fuel);
         round.merge(&choose(func));
-        let known = known(func, an);
+        let (known, pins) = known(func, an);
         round.record(Kind::Optimized, ANSWERED, count(known.len()));
         let operands: Vec<Value> =
             known.into_iter().filter_map(|inst| write(func, inst, 1)).collect();
         bury(func, operands);
+        round.record(Kind::Optimized, PINNED, count(pin(func, an, &pins)));
         // The ranges again, for the branches on the value a yes was about. The kernel's
         // `statically_true(x)` is `__builtin_constant_p(x) && (x)`, and the second `x` is a branch
         // of its own that only the ranges settle when they are what settled the first.
@@ -249,20 +254,31 @@ enum Answering {
     Every,
 }
 
+/// A value the ranges pin to one number in a block, which is that number in every block the first
+/// one dominates.
+#[derive(Debug, Clone, Copy)]
+struct Pin {
+    value: Value,
+    block: Block,
+    number: u128,
+}
+
 /// The questions whose answer is one already, because the value is a constant or because the
-/// ranges say it can only be one number where the question is asked.
+/// ranges say it can only be one number where the question is asked, and the values the second
+/// kind were about.
 ///
 /// A comparison is asked about through [`Ranges::compare`] rather than as a range of its own,
 /// since that is the entry point that reads the branches above the question as well as the
 /// relations they recorded between the two sides.
-fn known(func: &Func, an: &Analyses) -> Vec<Inst> {
+fn known(func: &Func, an: &Analyses) -> (Vec<Inst>, Vec<Pin>) {
     let asked = asked(func);
+    let mut pins = Vec::new();
     if asked.is_empty() {
-        return asked;
+        return (asked, pins);
     }
     let cfg = an.cfg(func);
     let mut ranges = Ranges::cached(func, an);
-    asked
+    let known = asked
         .into_iter()
         .filter(|&inst| {
             let Some(&value) = func[func[inst].args].first() else { return false };
@@ -281,9 +297,58 @@ fn known(func: &Func, an: &Analyses) -> Vec<Inst> {
                     return ranges.compare(pred, a, b, block) != Truth::Either;
                 }
             }
-            ranges.at(value, block).singleton().is_some()
+            let Some(number) = ranges.at(value, block).singleton() else { return false };
+            pins.push(Pin { value, block, number });
+            true
         })
-        .collect()
+        .collect();
+    (known, pins)
+}
+
+/// Points the readers of each pinned value, in the block of the question and the blocks it
+/// dominates, at the number the ranges pinned it to, and says how many values it did that for.
+///
+/// gcc's value range propagation does this before the question is answered, so the arm a yes picks
+/// reads a constant where this compiler's read the value. The kernel's `udelay(n)` asks
+/// `__builtin_constant_p(n)` and then tests `n / 20000` to call `__bad_udelay`, a function nothing
+/// defines, for a delay too long to spin. pca9541 calls it under `if (timeout == 50)`, so the yes
+/// came from the ranges and the division stayed a division of the value nobody could fold, which
+/// left the call standing and the module unlinkable.
+fn pin(func: &mut Func, an: &Analyses, pins: &[Pin]) -> usize {
+    let mut pinned = 0;
+    for pin in pins {
+        let below: Vec<Block> = {
+            let doms = an.dominators(func);
+            func.blocks().filter(|&block| doms.dominates(pin.block, block)).collect()
+        };
+        let reads = |func: &Func, inst: Inst| {
+            let mut reads = false;
+            uses::operands(func, inst, |value| reads |= value == pin.value);
+            reads
+        };
+        let readers: Vec<Inst> = below
+            .iter()
+            .flat_map(|&block| func.insts(block).filter(|&inst| reads(func, inst)))
+            .collect();
+        let Some(&first) = readers.first() else { continue };
+        let Some(start) = func.insts(pin.block).next() else { continue };
+        let ty = func[pin.value].ty;
+        let imm = func.add_imm(Imm::int(pin.number as i128, ty));
+        let data = InstData { extra: Extra::Imm(imm), ..InstData::new(Opcode::IConst) };
+        let made = func.create_inst(data, &[ty], func.span(first));
+        func.insert_before(made, start);
+        let number = func[made].results().next().expect("a constant is one value");
+        let with = |value: Value| if value == pin.value { number } else { value };
+        for inst in readers {
+            let args = func[inst].args;
+            func.rewrite(args, with);
+            for call in func.successors(inst).collect::<Vec<_>>() {
+                func.rewrite(call.args, with);
+            }
+        }
+        pinned += 1;
+    }
+    pinned
 }
 
 /// Every `is_constant` in the function, in block order.
