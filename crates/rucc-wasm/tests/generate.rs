@@ -2744,3 +2744,64 @@ fn the_lanes_of_a_v128_are_put_in_moved_and_taken_out() {
         }
     }
 }
+
+/// A shift by a count that is not the same in each lane, and a mask that is widened with `zext`
+/// and `sext`. The shift is `[5, 1, 5, 5] << [2, 2, 2, 3]`, which is `[20, 4, 20, 40]`. The `or` has
+/// one use, so that the shift reads a value that is not in a local. The mask
+/// is `[5, 1, 5, 5] < 4`, which is lane 1 only. The result is 20 + 40 + 1 - -1, which is 62.
+const MASKS: &str = r#"; ModuleID = 'masks.c'
+; format 0
+target triple = "wasm32-unknown-wasip1"
+target datalayout = "e-p:32:32-i64:64-S128"
+
+func @main() -> i32, linkage(external) {
+block0:
+    %0 = splat.i32x4 5
+    %1 = iconst.i32 1
+    %2 = insertlane %0, %1, lane 1
+    %3 = splat.i32x4 2
+    %4 = iconst.i32 3
+    %5 = insertlane %3, %4, lane 3
+    %6 = splat.i32x4 0
+    %7 = or %2, %6
+    %8 = shl %7, %5
+    %9 = splat.i32x4 4
+    %10 = icmp ult %2, %9
+    %11 = zext.i32x4 %10
+    %12 = sext.i32x4 %10
+    %13 = extractlane.i32 %8, lane 0
+    %14 = extractlane.i32 %8, lane 3
+    %15 = extractlane.i32 %11, lane 1
+    %16 = extractlane.i32 %12, lane 1
+    %17 = add %13, %14
+    %18 = add %17, %15
+    %19 = sub %18, %16
+    return %19
+}
+"#;
+
+#[test]
+fn a_shift_by_lanes_and_a_widened_mask_give_the_lanes_of_the_scalar_code() {
+    let simd = Cpu::Lime1.features().with(Feature::Simd128);
+    let mut names = Interner::new();
+    let module = rucc_ir::parse(MASKS, &mut names).expect("the IR parses");
+    let options = rucc_wasm::Options {
+        features: simd,
+        optimize: true,
+        thread_context: false,
+        math_errno: false,
+    };
+    let object = rucc_wasm::translate(&module, &names, options).unwrap();
+    let optimized = rucc_wasm::assembly(&object).unwrap();
+    assert_eq!(optimized.matches("i32.shl").count(), 4, "{optimized}");
+    let text = assembly_for(MASKS, simd);
+    for want in ["i32x4.lt_u", "v128.and", "i32x4.extract_lane\t3", "i32x4.replace_lane\t3"] {
+        assert!(text.contains(want), "no `{want}` in\n{text}");
+    }
+    assert_eq!(text.matches("i32.shl").count(), 4, "{text}");
+    for assembled in [false, true] {
+        if let Some(status) = link_and_run_for("masks", MASKS, assembled, simd) {
+            assert_eq!(status, 62);
+        }
+    }
+}

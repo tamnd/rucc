@@ -32,7 +32,7 @@ use rucc_base::{Idx, Interner, Symbol, dfp};
 use rucc_diag::{Diagnostic, Span};
 use rucc_ir::{
     Abi, AsmInfo, AttrSet, Block, BlockCall, Builder, CallInfo, Def, Extra, Flags, FloatPred, Func,
-    Inst, InstData, IntPred, MATH_BUILTINS, MemInfo, MemOrder, Opcode, Param, PrefetchHint,
+    Imm, Inst, InstData, IntPred, MATH_BUILTINS, MemInfo, MemOrder, Opcode, Param, PrefetchHint,
     Restrict, RmwOp, Signature, StorageClass, Type, VaInfo, Value, twice_by_name,
 };
 use rucc_sema::{
@@ -4612,6 +4612,9 @@ impl<'u> Body<'_, 'u> {
                 let left = self.vector_addr(lhs, span);
                 let right = self.vector_addr(rhs, span);
                 let mask = self.value_type(lane, span);
+                if self.whole_compare(op, from, lanes, mask, at, left, right, span) {
+                    return;
+                }
                 // Widened to a word first where the lane is narrower, then truncated back, which
                 // is what the lane arithmetic above does and for the same reason: the rule sets
                 // are written at the widths a C expression actually computes in, and a mask lane
@@ -4634,7 +4637,7 @@ impl<'u> Body<'_, 'u> {
                 let counts = self.count_lane(rhs, lane);
                 let left = self.vector_addr(lhs, span);
                 let right = self.vector_addr(rhs, span);
-                if self.whole_vector(op, lane, lanes, counts, at, left, right, span) {
+                if self.whole_vector(op, lane, lanes, rhs, at, left, right, span) {
                     return;
                 }
                 for index in 0..lanes {
@@ -4796,7 +4799,7 @@ impl<'u> Body<'_, 'u> {
         let stride = repr::size_of(self.types(), self.target(), lane);
         let counts = self.count_lane(rhs, lane);
         let right = self.vector_addr(rhs, span);
-        if self.whole_vector(op, lane, lanes, counts, target, target, right, span) {
+        if self.whole_vector(op, lane, lanes, rhs, target, target, right, span) {
             return;
         }
         for index in 0..lanes {
@@ -4823,19 +4826,23 @@ impl<'u> Body<'_, 'u> {
     /// multiply, a divide of floats or a bitwise operator, which is one SIMD instruction each.
     /// wasm has no multiply of sixteen `char` lanes, so that one stays a lane at a time. A `char`
     /// or a `short` lane is done at its own width, which gives the bits that the lane by lane code
-    /// gives, because each of these operations wraps.
+    /// gives, because each of these operations wraps. A shift by a scalar is one instruction too,
+    /// and its count is the same in each lane. A shift by a count of the lane width or more is
+    /// undefined in C, and the count is taken modulo the lane width, as clang does.
     #[allow(clippy::too_many_arguments)]
     fn whole_vector(
         &mut self,
         op: BinaryOp,
         lane: TypeId,
         lanes: u64,
-        counts: TypeId,
+        rhs: ExprId,
         at: Value,
         left: Value,
         right: Value,
         span: Span,
     ) -> bool {
+        let counts = self.count_lane(rhs, lane);
+        let signed = repr::is_signed(self.types(), self.target(), lane);
         let opcode = match op {
             BinaryOp::Add => Opcode::Add,
             BinaryOp::Sub => Opcode::Sub,
@@ -4844,15 +4851,20 @@ impl<'u> Body<'_, 'u> {
             BinaryOp::BitXor => Opcode::Xor,
             BinaryOp::Mul => Opcode::Mul,
             BinaryOp::Div => Opcode::FDiv,
+            BinaryOp::Shl => Opcode::Shl,
+            BinaryOp::Shr if signed => Opcode::AShr,
+            BinaryOp::Shr => Opcode::LShr,
             _ => return false,
         };
         if counts != lane {
             return false;
         }
         if self.target().simd128 {
-            return self.whole_simd128(opcode, lane, lanes, at, left, right, span);
+            return self.whole_simd128(opcode, lane, lanes, rhs, at, left, right, span);
         }
-        if self.target().tuple.arch() != Arch::X86_64 || opcode == Opcode::FDiv {
+        if self.target().tuple.arch() != Arch::X86_64
+            || matches!(opcode, Opcode::FDiv | Opcode::Shl | Opcode::AShr | Opcode::LShr)
+        {
             return false;
         }
         // The vector has to have a register to be in, which `-mno-sse` takes away. A function's
@@ -4880,6 +4892,46 @@ impl<'u> Body<'_, 'u> {
         true
     }
 
+    /// A comparison of two vectors of sixteen bytes done on the whole vectors at once, on wasm32
+    /// with `-msimd128`, and whether it was. The compare gives one bit for each lane, and its
+    /// `sext` is the mask, which is one SIMD compare in the back end.
+    #[allow(clippy::too_many_arguments)]
+    fn whole_compare(
+        &mut self,
+        op: BinaryOp,
+        from: TypeId,
+        lanes: u64,
+        mask: Type,
+        at: Value,
+        left: Value,
+        right: Value,
+        span: Span,
+    ) -> bool {
+        if !self.target().simd128 {
+            return false;
+        }
+        let one = self.value_type(from, span);
+        let fits = if one.is_float() {
+            matches!(one.bits(), 32 | 64)
+        } else {
+            one.is_int() && matches!(one.bits(), 8 | 16 | 32 | 64)
+        };
+        if !fits || u64::from(one.bits()) * lanes != 128 || mask.bits() != one.bits() {
+            return false;
+        }
+        let count = u32::try_from(lanes).unwrap_or(0);
+        let whole = Type::vector(one, count);
+        let info = untyped(repr::align_of(self.types(), self.target(), from));
+        let mut build = self.build(span);
+        let a = build.load(whole, left, info, Flags::NONE);
+        let b = build.load(whole, right, info, Flags::NONE);
+        let bits = self.compare(op, a, b, from, span);
+        let mut build = self.build(span);
+        let value = build.unary(Opcode::SExt, bits, Type::vector(mask, count));
+        build.store(value, at, info, Flags::NONE);
+        true
+    }
+
     /// The wasm32 case of [`Self::whole_vector`], with `opcode` the operation on integer lanes,
     /// or `fdiv` for a divide.
     #[allow(clippy::too_many_arguments)]
@@ -4888,6 +4940,7 @@ impl<'u> Body<'_, 'u> {
         opcode: Opcode,
         lane: TypeId,
         lanes: u64,
+        rhs: ExprId,
         at: Value,
         left: Value,
         right: Value,
@@ -4913,11 +4966,36 @@ impl<'u> Body<'_, 'u> {
         } else {
             return false;
         };
+        let shift = matches!(opcode, Opcode::Shl | Opcode::AShr | Opcode::LShr);
+        // wasm shifts each lane by one scalar, so the count has to be one scalar in C too.
+        let broadcast =
+            matches!(self.tast()[rhs].kind, ExprKind::Convert { kind: Conversion::Broadcast, .. });
+        if shift && !broadcast {
+            return false;
+        }
         let whole = Type::vector(one, u32::try_from(lanes).unwrap_or(0));
         let info = untyped(repr::align_of(self.types(), self.target(), lane));
+        // The count of a shift is each lane of the vector, which is the form the back end knows
+        // as one count. It is read from the first lane of the broadcast, which is already written.
+        let count = shift.then(|| {
+            let stride = repr::size_of(self.types(), self.target(), lane);
+            self.lane(right, 0, stride, lane, span)
+        });
+        let zero = count.map(|_| self.func.add_imm(Imm::int(0, one)));
         let mut build = self.build(span);
         let a = build.load(whole, left, info, Flags::NONE);
-        let b = build.load(whole, right, info, Flags::NONE);
+        let b = match count {
+            Some(count) => {
+                let zero = zero.expect("made with the count");
+                let data = InstData { extra: Extra::Imm(zero), ..InstData::new(Opcode::Splat) };
+                let mut vector = build.value(data, whole);
+                for at in 0..lanes {
+                    vector = build.insert_lane(vector, count, at as u8);
+                }
+                vector
+            }
+            None => build.load(whole, right, info, Flags::NONE),
+        };
         let value = build.binary(opcode, a, b, Flags::NONE);
         build.store(value, at, info, Flags::NONE);
         true
