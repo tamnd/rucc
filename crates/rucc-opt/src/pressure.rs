@@ -97,47 +97,76 @@ impl Pressure {
     #[must_use]
     pub fn of(func: &Func, cfg: &Cfg, live: &Liveness) -> Self {
         let blocks = cfg.capacity();
-        let mut arriving = vec![[0; Class::COUNT]; blocks];
-        let mut most_in = vec![[0; Class::COUNT]; blocks];
-        let mut most = [0; Class::COUNT];
-
-        let classes: Groups<{ Class::COUNT }> =
-            Groups::of(func, |value| class_of(func[value].ty).map(Class::index));
+        let mut pressure = Self {
+            arriving: vec![[0; Class::COUNT]; blocks],
+            most_in: vec![[0; Class::COUNT]; blocks],
+            most: [0; Class::COUNT],
+        };
+        let classes = classes(func);
         for block in cfg.reverse_postorder() {
-            let at = block.index();
-            arriving[at] = live.grouped_in(block, &classes);
-            // The walk is backwards from the live-out, which is what gives the count just before
-            // each instruction without keeping a set per instruction.
-            let here = live.grouped_out(block, &classes);
-            most_in[at] = here;
-            // The count is carried along rather than taken again at each instruction. What an
-            // instruction changes is its results and its operands, and reading the whole set to
-            // count it instead is the size of the set per instruction, which on a large function
-            // is quadratic and was almost all of an optimized compile of one. tamnd/rucc#1015.
-            let mut counted = here;
-            live.changes(func, block, |_, change| {
-                for &value in &change.gone {
-                    if let Some(class) = class_of(func[value].ty) {
-                        counted[class.index()] -= 1;
-                    }
+            pressure.count(func, live, &classes, block);
+        }
+        pressure.most(cfg);
+        pressure
+    }
+
+    /// The same after the change [`Liveness::refresh`] was told about, counted again in those
+    /// blocks alone, with `live` refreshed over them already.
+    pub fn refresh(&mut self, func: &Func, cfg: &Cfg, live: &Liveness, blocks: &[Block]) {
+        let classes = classes(func);
+        for &block in blocks {
+            self.count(func, live, &classes, block);
+        }
+        self.most(cfg);
+    }
+
+    /// Counts what is live at every point of one block.
+    fn count(
+        &mut self,
+        func: &Func,
+        live: &Liveness,
+        classes: &Groups<{ Class::COUNT }>,
+        block: Block,
+    ) {
+        let at = block.index();
+        self.arriving[at] = live.grouped_in(block, classes);
+        // The walk is backwards from the live-out, which is what gives the count just before
+        // each instruction without keeping a set per instruction.
+        let here = live.grouped_out(block, classes);
+        let mut most = here;
+        // The count is carried along rather than taken again at each instruction. What an
+        // instruction changes is its results and its operands, and reading the whole set to
+        // count it instead is the size of the set per instruction, which on a large function
+        // is quadratic and was almost all of an optimized compile of one. tamnd/rucc#1015.
+        let mut counted = here;
+        live.changes(func, block, |_, change| {
+            for &value in &change.gone {
+                if let Some(class) = class_of(func[value].ty) {
+                    counted[class.index()] -= 1;
                 }
-                for &value in &change.arrived {
-                    if let Some(class) = class_of(func[value].ty) {
-                        counted[class.index()] += 1;
-                    }
+            }
+            for &value in &change.arrived {
+                if let Some(class) = class_of(func[value].ty) {
+                    counted[class.index()] += 1;
                 }
-                for class in Class::ALL {
-                    let index = class.index();
-                    most_in[at][index] = most_in[at][index].max(counted[index]);
-                }
-            });
+            }
             for class in Class::ALL {
                 let index = class.index();
-                most[index] = most[index].max(most_in[at][index]);
+                most[index] = most[index].max(counted[index]);
+            }
+        });
+        self.most_in[at] = most;
+    }
+
+    /// The most in the function, from the most in each block.
+    fn most(&mut self, cfg: &Cfg) {
+        self.most = [0; Class::COUNT];
+        for block in cfg.reverse_postorder() {
+            for class in Class::ALL {
+                let index = class.index();
+                self.most[index] = self.most[index].max(self.most_in[block.index()][index]);
             }
         }
-
-        Self { arriving, most_in, most }
     }
 
     /// How many are live when control arrives at the block.
@@ -209,6 +238,11 @@ impl Pressure {
         }
         problems
     }
+}
+
+/// Which class each value of the function is counted in.
+fn classes(func: &Func) -> Groups<{ Class::COUNT }> {
+    Groups::of(func, |value| class_of(func[value].ty).map(Class::index))
 }
 
 #[cfg(test)]

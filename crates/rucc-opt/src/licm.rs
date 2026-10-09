@@ -201,7 +201,7 @@ impl Pass for Licm {
 
         // Worked out the first time a loop asks, since a loop with nothing in it worth moving never
         // does, and a function where no loop does never needs the numbers at all. tamnd/rucc#3052.
-        let mut pressure: Option<Pressure> = None;
+        let mut pressure: Option<(Liveness, Pressure)> = None;
         // Blocks whose counts a hoist has changed since the numbers above were worked out. A hoist
         // takes instructions from inside one loop and puts them in its preheader, so no block
         // outside those can hold a different number afterwards, and a loop sharing none of them
@@ -211,7 +211,20 @@ impl Pass for Licm {
         let mut stale: Set<Block> = Set::default();
         for id in order {
             if loops.blocks(id).iter().any(|block| stale.contains(block)) {
-                pressure = None;
+                // For the same reason, a loop that does share one has the numbers worked out
+                // again over those blocks and nowhere else, rather than over the whole function
+                // for each loop that a loop inside it changed.
+                if let Some((live, counts)) = &mut pressure {
+                    let region: Vec<Block> = stale.iter().copied().collect();
+                    live.refresh(func, cfg, &region);
+                    counts.refresh(func, cfg, live, &region);
+                    #[cfg(debug_assertions)]
+                    {
+                        let fresh = Liveness::of(func, cfg);
+                        assert!(*live == fresh, "the liveness refreshed is the one built");
+                        assert!(*counts == Pressure::of(func, cfg, &fresh), "so are the counts");
+                    }
+                }
                 stale.clear();
             }
             let job = Job {
@@ -508,7 +521,7 @@ impl Job<'_> {
     fn run(
         &self,
         func: &mut Func,
-        pressure: &mut Option<Pressure>,
+        pressure: &mut Option<(Liveness, Pressure)>,
         id: LoopId,
         fuel: &mut Fuel,
         stats: &mut Stats,
@@ -545,7 +558,7 @@ impl Job<'_> {
     fn plan(
         &self,
         func: &Func,
-        pressure: &mut Option<Pressure>,
+        pressure: &mut Option<(Liveness, Pressure)>,
         id: LoopId,
         preheader: Block,
         fuel: &mut Fuel,
@@ -713,8 +726,10 @@ impl Job<'_> {
                     // Only a cheap one asks, since an expensive one is worth moving however full
                     // the loop is.
                     if cost < rucc_cost::param!(heuristics::LICM_EXPENSIVE) {
-                        let pressure = pressure.get_or_insert_with(|| {
-                            Pressure::of(func, self.cfg, &Liveness::of(func, self.cfg))
+                        let (_, pressure) = pressure.get_or_insert_with(|| {
+                            let live = Liveness::of(func, self.cfg);
+                            let pressure = Pressure::of(func, self.cfg, &live);
+                            (live, pressure)
                         });
                         if pressure.is_tight(self.loops, id, class, room[bank]) {
                             passengers.insert(inst);
