@@ -25,12 +25,19 @@
 //! function it calls afterwards finds nothing there and treats its own arguments as recovered.
 //! Without this a frame written once would be believed by every function down the chain.
 //!
-//! And a call whose callee might not be instrumented is preceded by [`clear`] rather than by
-//! [`publish`], which is the compiler's half. Publishing to a callee that never takes would leave
-//! the frame in place for whatever that callee calls back into, and a callback entered from
-//! uninstrumented code with somebody else's capabilities in hand is worse than one entered with
-//! none. Document 10 section 10.8 is where that case is written down, and its answer is that the
-//! callback recovers, which is what finding nothing here gets it.
+//! And the frame says which function it is for. The caller writes the address it is calling into
+//! `callee`, and a callee takes the frame only when that is its own address or null. A frame
+//! published to a function that never takes stays in place for whatever that function calls back
+//! into, and a callback entered from uninstrumented code with somebody else's capabilities in hand
+//! is worse than one entered with none. Document 10 section 10.8 is where that case is written
+//! down, and its answer is that the callback recovers. The address is what gets it that answer: the
+//! callback is not the function the frame was written for, so it finds nothing here and leaves the
+//! frame alone for the caller to restore.
+//!
+//! The address is what lets a caller publish to a function in another file at all. Before it, a
+//! call to anything this unit did not define was preceded by [`clear`], because the caller could
+//! not tell an instrumented callee from one that never takes, and a pointer to a local lost its
+//! bounds at every call that crossed a file.
 //!
 //! # Why the storage is a `pthread` key
 //!
@@ -76,6 +83,12 @@ pub struct Frame {
     pub ret: Cap,
     /// The frame this one was published over, restored when this one is taken.
     pub outer: *mut Frame,
+    /// The function the caller was calling, or null for a frame any callee may take.
+    ///
+    /// The address the call went to, which for a call through a pointer is the pointer. A callee
+    /// compares it with its own address, so a function entered some other way, which is a callback
+    /// from code that never takes, does not believe a frame written for somebody else.
+    pub callee: *const core::ffi::c_void,
 }
 
 impl Frame {
@@ -87,6 +100,7 @@ impl Frame {
         args: [Cap::BOTTOM; ARGS],
         ret: Cap::BOTTOM,
         outer: core::ptr::null_mut(),
+        callee: core::ptr::null(),
     };
 
     /// The capability for the argument at `at`, or the bottom one.
@@ -229,6 +243,33 @@ pub mod exports {
             return core::ptr::null_mut();
         }
         // SAFETY: as above.
+        unsafe {
+            (*frame).magic = 0;
+            super::restore((*frame).outer);
+        }
+        frame
+    }
+
+    /// The frame this call was given when it was written for `own`, or null.
+    ///
+    /// What a compiled function calls at its top, with its own address. A frame whose `callee` is
+    /// some other function was published for a call that has not reached this one, which is a
+    /// callback from code that never took it, so it is left where it is for that call's caller to
+    /// restore and this one recovers its arguments. A null `callee` is a frame any callee may take,
+    /// which is what the runtime's own frames are.
+    #[unsafe(no_mangle)]
+    pub extern "C" fn __rucc_frame_take_as(own: *const c_void) -> *mut Frame {
+        let frame = super::current();
+        if frame.is_null() {
+            return frame;
+        }
+        // SAFETY: a published frame is valid for the call it was published for, which is either
+        // this one or one still running further up this thread's stack.
+        let (magic, callee) = unsafe { ((*frame).magic, (*frame).callee) };
+        if magic != super::MAGIC || !(callee.is_null() || callee == own) {
+            return core::ptr::null_mut();
+        }
+        // SAFETY: as above, and the frame is this call's.
         unsafe {
             (*frame).magic = 0;
             super::restore((*frame).outer);
@@ -392,6 +433,39 @@ mod tests {
     }
 
     #[test]
+    fn a_frame_written_for_one_function_is_not_taken_by_another() {
+        // A callback entered from a function that never took the frame it was called with. The
+        // callback is not who the frame was for, so it gets nothing and the frame stays published
+        // for the function it was written for, which here takes it afterwards.
+        let wanted = core::ptr::without_provenance::<c_void>(0x1000);
+        let callback = core::ptr::without_provenance::<c_void>(0x2000);
+        let mut frame = Frame::EMPTY;
+        frame.argc = 1;
+        frame.args[0] = cap(4096, 2);
+        frame.callee = wanted;
+        // SAFETY: the frame is this test's local and outlives every read below.
+        unsafe { publish(&raw mut frame) };
+        assert!(exports::__rucc_frame_take_as(callback).is_null());
+        assert_eq!(current(), &raw mut frame);
+        let taken = exports::__rucc_frame_take_as(wanted);
+        assert!(!taken.is_null());
+        // SAFETY: what came back is the frame above.
+        assert_eq!(unsafe { (*taken).arg(0) }, cap(4096, 2));
+        assert!(current().is_null());
+    }
+
+    #[test]
+    fn a_frame_for_nobody_in_particular_is_taken_by_anybody() {
+        let mut frame = Frame::EMPTY;
+        frame.argc = 1;
+        frame.args[0] = cap(4096, 2);
+        // SAFETY: the frame is this test's local and outlives every read below.
+        unsafe { publish(&raw mut frame) };
+        assert!(!exports::__rucc_frame_take_as(core::ptr::without_provenance(0x3000)).is_null());
+        assert!(current().is_null());
+    }
+
+    #[test]
     fn a_callee_with_no_frame_gets_nothing() {
         // Entry from uninstrumented code, which is document 10 section 10.8's callback and is the
         // case the whole recovery path exists for.
@@ -541,6 +615,7 @@ mod tests {
         assert_eq!(core::mem::offset_of!(Frame, args), 8);
         assert_eq!(core::mem::offset_of!(Frame, ret), 8 + 32 * ARGS);
         assert_eq!(core::mem::offset_of!(Frame, outer), 8 + 32 * (ARGS + 1));
-        assert_eq!(size_of::<Frame>(), 8 + 32 * (ARGS + 1) + 8);
+        assert_eq!(core::mem::offset_of!(Frame, callee), 8 + 32 * (ARGS + 1) + 8);
+        assert_eq!(size_of::<Frame>(), 8 + 32 * (ARGS + 1) + 16);
     }
 }

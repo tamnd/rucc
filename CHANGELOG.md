@@ -20,6 +20,10 @@ All notable changes are recorded here. The format follows [Keep a Changelog](htt
 - A block copy or fill whose tail is a power of two writes the tail as one move of its own width instead of a full word overlapping the one before it, as gcc does. Postgres' six byte item pointer was copied as four bytes at 0 and four at 2, and the second load spanned two stores and could not be forwarded from them on every tuple a scan stored in a slot (#3407).
 - `crates/rucc-opt/src/objsize.rs` uses `?` where clippy asks for it, so `cargo xtask ci` passes again. The pass gives the same results (#3413).
 
+### Fixed
+
+- `-fsafety` hands a local's bounds to a function in another file. The frame that carries capabilities across a call names the function it is for, a caller publishes what it holds to a callee outside the module, and a function that only passes a parameter on, such as one that calls memcpy with it, reads its frame and passes the bounds along. A call through a pointer is judged ahead of its frame instruction, where it used to break slot lowering. Juliet CWE-121 goes from 1,707 to 1,982 detected at `-O2` and CWE-126 from 384 to 425, with no false positives (#3414).
+
 ## 0.29.3
 
 The release workflow for 0.29.2 stopped at the check of the tag and published nothing, so this release also carries the changes of 0.29.2 and of the three releases before it. The cause was a test that shared a temporary directory with another test, and #3399 fixes it and two more of the same kind. The release also reads each header from the disk once per run, and lays out a loop with its test at the end, as gcc does.

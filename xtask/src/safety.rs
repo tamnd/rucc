@@ -35,6 +35,11 @@
 //! that matters in practice is an instrumented program against libraries nobody rebuilt, and the
 //! only way to show that works is to link against one.
 //!
+//! A case can say `with: name` too, and `tests/safety/with/name.c` is then compiled by rucc the
+//! same way as the case and linked in beside it. That is a program in two files, both
+//! instrumented, which is what a pointer handed from a function in one file to a function in
+//! another needs to be tested at all.
+//!
 //! A case can also say `summary: text`, and it is then compiled a second time with
 //! `--emit=safety-summary` and the report has to contain that text. It is what holds the build's
 //! account of what it trusts to the same program the run is checking, so the two cannot drift.
@@ -133,6 +138,13 @@ struct Case {
     /// the result. A case with none of these is an ordinary program and links against the runtime
     /// alone.
     links: Vec<String>,
+    /// Files in `tests/safety/with` compiled by rucc, the same way as the case, and linked in
+    /// beside it.
+    ///
+    /// For a program in more than one translation unit, where a pointer crosses from a function
+    /// in one file to a function in another and both are instrumented. The other half of
+    /// `links`, which is a file nobody instrumented.
+    with: Vec<String>,
     /// A substring `--emit=safety-summary` has to print for this case.
     ///
     /// Section 10.2's artifact, held to something. A case that links against a library nobody
@@ -445,6 +457,7 @@ impl Case {
         let mut allow = false;
         let mut flags = Vec::new();
         let mut links = Vec::new();
+        let mut with = Vec::new();
         let mut summary = Vec::new();
         let mut gap = None;
         let mut blocked = None;
@@ -474,6 +487,7 @@ impl Case {
                     }
                 }
                 "links" => links.push(value.to_owned()),
+                "with" => with.push(value.to_owned()),
                 "summary" => summary.push(value.to_owned()),
                 "allow" => allow = true,
                 "gap" => gap = Some(value.to_owned()),
@@ -517,6 +531,7 @@ impl Case {
             verdict,
             flags,
             links,
+            with,
             summary,
             gap,
             blocked,
@@ -717,6 +732,7 @@ fn build(cases: &[Case], plan: &Plan) -> Result<PathBuf> {
         if case.blocked.is_some() {
             continue;
         }
+        problems.extend(companions(&rucc, case, plan, &work)?);
         if !case.links.is_empty() {
             std::fs::write(work.join(format!("{}.links", case.name)), case.links.join(" "))
                 .map_err(|e| Error::Io(format!("could not write {}'s links: {e}", case.name)))?;
@@ -732,6 +748,60 @@ fn build(cases: &[Case], plan: &Plan) -> Result<PathBuf> {
     std::fs::write(work.join("run.sh"), SCRIPT)
         .map_err(|e| Error::Io(format!("could not write the script: {e}")))?;
     Ok(work)
+}
+
+/// Compiles the files a case names in `with:` the way the case itself was compiled, and says which
+/// of them are not there or did not compile.
+///
+/// Their assembly goes under `with` rather than beside the case's own, because the script takes
+/// every `.s` at the top as a program of its own. A `.with` file beside the case lists them for
+/// the link, and each is named after the case as well as itself, since two cases can share a
+/// companion and be compiled with different flags.
+fn companions(rucc: &Path, case: &Case, plan: &Plan, work: &Path) -> Result<Vec<String>> {
+    if case.with.is_empty() {
+        return Ok(Vec::new());
+    }
+    let dir = root().join("tests").join("safety").join("with");
+    let into = work.join("with");
+    std::fs::create_dir_all(&into)
+        .map_err(|e| Error::Io(format!("could not make {}: {e}", into.display())))?;
+
+    let mut problems = Vec::new();
+    let mut assembly = Vec::new();
+    for name in &case.with {
+        let source = dir.join(format!("{name}.c"));
+        if !source.exists() {
+            problems.push(format!(
+                "{}: `with: {name}` and there is no {}",
+                case.name,
+                source.display()
+            ));
+            continue;
+        }
+        let file = format!("{}-{name}.s", case.name);
+        let out = Command::new(rucc)
+            .args(["-S", &format!("--target={TRIPLE}"), TIER, plan.level, crate::VERIFY])
+            .args(plan.without)
+            .args(&case.flags)
+            .arg("-o")
+            .arg(into.join(&file))
+            .arg(&source)
+            .current_dir(root())
+            .output()
+            .map_err(|e| Error::Io(format!("could not run the compiler: {e}")))?;
+        if !out.status.success() {
+            problems.push(format!(
+                "{}: {name}.c did not compile\n{}",
+                case.name,
+                indent(String::from_utf8_lossy(&out.stderr).trim_end())
+            ));
+            continue;
+        }
+        assembly.push(format!("with/{file}"));
+    }
+    std::fs::write(work.join(format!("{}.with", case.name)), assembly.join(" "))
+        .map_err(|e| Error::Io(format!("could not write {}'s companions: {e}", case.name)))?;
+    Ok(problems)
 }
 
 /// Lays out the sources of the uninstrumented libraries, and says which cases named one that is
@@ -829,6 +899,9 @@ fn summarised(rucc: &Path, case: &Case, work: &Path) -> Result<Vec<String>> {
 /// instrumented. That is deliberate and is the point of document 10 section 10.7: the library a
 /// case links against has to be one this project did not build, or the mixed link is not being
 /// tested. A case says which of them it wants in a `.links` file beside its assembly.
+///
+/// A `.with` file beside a case's assembly names the other files of the same program, which rucc
+/// compiled the same way and which go on the same link.
 pub(crate) const SCRIPT: &str = "\
 #!/bin/sh
 exec 2>/dev/null
@@ -851,7 +924,11 @@ for source in *.s; do
         done
         libs=\"-L$out -Wl,-rpath,$out$libs\"
     fi
-    if gcc -no-pie \"$source\" safe-rt.a $libs -o \"$out/$name\" >\"$out/$name.log\" 2>&1; then
+    with=
+    if [ -f \"$name.with\" ]; then
+        with=$(cat \"$name.with\")
+    fi
+    if gcc -no-pie \"$source\" $with safe-rt.a $libs -o \"$out/$name\" >\"$out/$name.log\" 2>&1; then
         \"$out/$name\" >\"$out/$name.out\" 2>&1
         status=$?
         cat \"$out/$name.out\"
@@ -1015,6 +1092,17 @@ mod tests {
         std::fs::write(&path, "/* row: S4 */\n/* flags: other.c */\n/* allow */\n").expect("write");
         let said = Case::read(&path).expect_err("not a flag").to_string();
         assert!(said.contains("is not a flag"), "{said}");
+    }
+
+    #[test]
+    fn a_case_can_name_the_other_files_of_its_program() {
+        let two = case(
+            "a-two-file-case",
+            "/* row: S8 */\n/* with: fill */\n/* with: more */\n/* allow */\n",
+        );
+        assert_eq!(two.with, ["fill", "more"]);
+        assert!(two.links.is_empty());
+        assert!(case("a-one-file-case", "/* row: S8 */\n/* allow */\n").with.is_empty());
     }
 
     #[test]
