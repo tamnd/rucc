@@ -1072,7 +1072,7 @@ fn settle(
     };
     let mut stats = Stats::new();
     let mut spliced = false;
-    let mut pool = Pool { on: how.share, ..Pool::default() };
+    let mut pool = Pool { on: how.share, results: Some(Results::default()), ..Pool::default() };
     let mut next = 0;
     while let Some(&(_, call, callee, kind)) = calls.get(next) {
         next += 1;
@@ -1921,6 +1921,73 @@ struct Pool {
     /// walked the whole caller each time, and blake2b.c at `-O2` inlines `rotr64` into one body
     /// close to four hundred times. Whoever edits the caller between splices empties it.
     highest: Option<u16>,
+    /// Who reads the results of the caller's calls, for a caller that nothing but its splices
+    /// edits. Without it a splice points the readers of the call's results at the block after
+    /// the copy by rewriting every run of operands the caller has.
+    results: Option<Results>,
+}
+
+/// The instructions that read the result of each call in a caller, kept up to date across the
+/// splices into it.
+///
+/// A splice points the readers of the call's results at the parameters of the block after the
+/// copy. Rewriting every run of operands to do that is a walk over all of the caller, and on
+/// quickjs.c at `-O2` the first pass splices into `JS_CallInternal` and its neighbours hundreds of
+/// times each, which was a fifth of the compile. The instructions are filed once and then only
+/// the ones each splice made are, which is everything that can come to read a call's result: a
+/// splice adds instructions and takes some out, and the one other edit, [`resolved`], gives a call
+/// a run of operands it already had less the pointer. An instruction removed since it was filed
+/// stays on the lists, and is skipped.
+#[derive(Debug, Default)]
+struct Results {
+    /// By value, for the values a call makes.
+    of: Map<Value, Vec<Inst>>,
+    /// How many instructions the caller had the last time this looked.
+    seen: usize,
+}
+
+impl Results {
+    /// Files the instructions made since the last look, which the first time is all of them.
+    fn catch_up(&mut self, func: &Func) {
+        let count = func.counts().insts;
+        for inst in (self.seen..count).map(Inst::from_usize) {
+            if func.block_of(inst).is_none() {
+                continue;
+            }
+            let runs =
+                std::iter::once(func[inst].args).chain(func.successors(inst).map(|to| to.args));
+            for run in runs {
+                for &value in &func[run] {
+                    let Def::Result { inst: def, .. } = func[value].def else { continue };
+                    if matches!(func[def].extra, Extra::Call(_)) {
+                        self.of.entry(value).or_default().push(inst);
+                    }
+                }
+            }
+        }
+        self.seen = count;
+    }
+
+    /// [`crate::uses::substitute_all`] over the instructions that read the values in the map.
+    fn substitute(&mut self, func: &mut Func, forward: &Map<Value, Value>) {
+        self.catch_up(func);
+        let with = |value: Value| crate::uses::chase(forward, value);
+        let mut runs = Vec::new();
+        for from in forward.keys() {
+            for inst in self.of.remove(from).unwrap_or_default() {
+                if func.block_of(inst).is_none() {
+                    continue;
+                }
+                runs.clear();
+                runs.push(func[inst].args);
+                runs.extend(func.successors(inst).map(|to| to.args));
+                for &run in &runs {
+                    func.rewrite(run, with);
+                }
+            }
+        }
+        crate::uses::rename(func, forward);
+    }
 }
 
 impl Pool {
@@ -2803,7 +2870,17 @@ fn copy(
         &[],
         span,
     );
-    crate::uses::substitute_all(func, &forward);
+    match pool.results.as_mut() {
+        Some(results) => {
+            results.substitute(func, &forward);
+            // The branch the pad's arm was on is out of its block already, and the arm is read
+            // again below for the calls of the body.
+            if let Some((_, _, pad, _)) = arms {
+                func.rewrite(pad.args, |value| crate::uses::chase(&forward, value));
+            }
+        }
+        None => crate::uses::substitute_all(func, &forward),
+    }
     func.remove_inst(call);
     func.append_inst(block, jump);
     // What the splice took out is the call and the branch on its unwind, none of which names a
