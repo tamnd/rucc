@@ -257,10 +257,12 @@ impl Tree {
                 constants += 1;
                 continue;
             }
-            let count = times.entry(value).or_insert(0);
-            if *count == 0 {
+            // Whether the term was met before, and not whether its count is zero, since `a - a + a`
+            // passes through zero and would list `a` twice.
+            let count = times.entry(value).or_insert_with(|| {
                 first.push(value);
-            }
+                0
+            });
             *count += if negated { -1 } else { 1 };
         }
         let constant = Imm::int(constant, self.ty).signed(self.ty);
@@ -727,6 +729,28 @@ block0(%0: i32, %1: i32):
 "#;
         let out = cleaned(body);
         assert!(out.contains("%4 = sub %3, %1"), "{out}");
+    }
+
+    /// `a - a + a` is `a`. The count of `a` goes back to zero on the way, which once made it two
+    /// terms and the answer `a + a`. Earlier passes fold `x - x` at most widths, but not on a
+    /// `__int128` at -O2.
+    #[test]
+    fn a_term_that_cancels_and_comes_back_is_one_term() {
+        for ty in ["i32", "i128"] {
+            let out = cleaned(&format!(
+                "
+func @f({ty}) -> {ty}, linkage(external) {{
+block0(%0: {ty}):
+    %1 = sub %0, %0
+    %2 = add %1, %0
+    return %2
+}}
+"
+            ));
+            assert_eq!(count(&out, "add"), 0, "{out}");
+            assert_eq!(count(&out, "sub"), 0, "{out}");
+            assert!(out.contains("return %0"), "{out}");
+        }
     }
 
     #[test]
