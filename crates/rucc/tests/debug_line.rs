@@ -238,6 +238,7 @@ fn an_inlined_body_says_the_lines_it_came_from() {
 #[test]
 fn an_inlined_body_is_an_entry_that_names_the_call() {
     let dir = fixture("inlined-entry");
+    std::fs::write(dir.join("one.c"), INLINED).expect("the fixture can be written");
     build(&dir, &["-g", "-O2"], "one.o");
     let out = Command::new("readelf")
         .arg("--debug-dump=info")
@@ -251,5 +252,5 @@ fn an_inlined_body_is_an_entry_that_names_the_call() {
     assert!(text.contains("DW_AT_abstract_origin"), "{text}");
     assert!(text.contains("DW_AT_inline"), "{text}");
     let line = text.lines().find(|line| line.contains("DW_AT_call_line")).expect("a call line");
-    assert!(line.trim_end().ends_with(": 4"), "{line}");
+    assert!(line.trim_end().ends_with(": 7"), "{line}");
 }
