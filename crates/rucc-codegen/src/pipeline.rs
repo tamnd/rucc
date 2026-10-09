@@ -122,6 +122,9 @@ pub struct Machine {
     /// which is what a function that spills is tried with before it is given neither. `None` where
     /// [`Machine::wide`] is. See [`rucc_regalloc::run_first`].
     pub middle: Option<[Env; 2]>,
+    /// What a function [`Machine::wide`] and [`Machine::middle`] are tried on is given when neither
+    /// fits, in place of [`Machine::env`] and [`Machine::spare`]. `None` where that is them.
+    pub last: Option<[Env; 2]>,
 }
 
 /// The scratch registers held back from the allocator on x86-64.
@@ -234,6 +237,7 @@ impl Machine {
             spare: Some(env(&spared)),
             wide: Some([wide(&every), wide(&spared_every)]),
             middle: Some([middle(&some), middle(&spared_some)]),
+            last: None,
         }
     }
 
@@ -268,6 +272,7 @@ impl Machine {
             spare: None,
             wide: None,
             middle: None,
+            last: None,
         }
     }
 
@@ -295,6 +300,13 @@ impl Machine {
         let held: &[PhysReg] =
             if order.contains(&x86::EBX) { &[x86::EBX] } else { &X86_SCRATCH[1..] };
         let some: Vec<PhysReg> = every.iter().copied().filter(|reg| !held.contains(reg)).collect();
+        // And where neither fits, `ebx` and `esi` held back rather than `esi` and `edi`, so that
+        // `edi` holds a value and what is read back for `cmpb` or `sete` is read into a register
+        // with a low byte. Each of those went through `esi` with an exchange either side. Not where
+        // `ebx` holds the address of the GOT.
+        let low = [x86::EBX, x86::ESI];
+        let rest: Vec<PhysReg> = every.iter().copied().filter(|reg| !low.contains(reg)).collect();
+        let last = order.contains(&x86::EBX).then(|| [env(&rest, &low), env(&rest, &low)]);
         Self {
             conv,
             file: x86::REGS,
@@ -311,6 +323,7 @@ impl Machine {
             spare: None,
             wide: Some([env(&every, &[]), env(&every, &[])]),
             middle: Some([env(&some, held), env(&some, held)]),
+            last,
         }
     }
 
@@ -1206,6 +1219,11 @@ pub fn compile_recording(
         .filter(|_| handed && allocator == Allocator::Backtracking)
         .map(|envs| &envs[which]);
     let tried: Vec<&Env> = wide.into_iter().chain(middle).collect();
+    let env = machine
+        .last
+        .as_ref()
+        .filter(|_| handed && allocator == Allocator::Backtracking)
+        .map_or(env, |envs| &envs[which]);
     // The move of each class, for the copies a block that reads a value off the stack more than
     // once is given. See [`rucc_regalloc::pieces`]. Only on i386, since asking the allocator a
     // second time is an eighth of the time sqlite3.c takes on x86-64, for 61 of its 209791
