@@ -113,8 +113,8 @@ use rucc_diag::Span;
 use rucc_ir::{
     Abi, AsmInfo, AttrSet, Block, BlockCall, BlockCallList, CallInfo, Copies, DataLayout, Datum,
     Def, Drains, Extra, Flags, Float, Func, FuncId, GlobalId, Imm, Inst, InstData, Linkage,
-    MemInfo, MemOrder, Module, Opcode, Pic, Restrict, Signature, SwitchInfo, Type, VaInfo, Value,
-    ValueList,
+    MemInfo, MemOrder, Module, Opcode, Pic, Restrict, Signature, Start, SwitchInfo, Type, VaInfo,
+    Value, ValueList,
 };
 use rucc_target::{Isa, TargetInfo};
 
@@ -2602,6 +2602,8 @@ struct Moving {
     site: Option<usize>,
     /// The copy made here of each copy that was already in the callee, by which one it was.
     inner: Map<usize, Option<usize>>,
+    /// The number each declaration of the callee has in the copy, by the number it had there.
+    decls: Map<u32, Option<u32>>,
 }
 
 /// Where a span of the callee's is in the copy of it.
@@ -2622,21 +2624,110 @@ fn moved(copies: &mut Copies, moving: &mut Moving, callee: &Func, span: Span) ->
         };
     }
     if let Some(was) = copies.site_at(span.lo).filter(|_| moving.site.is_some()) {
-        let made = match moving.inner.get(&was) {
-            Some(&made) => made,
-            None => {
-                let old = copies.sites()[was];
-                let call = moved(copies, moving, callee, old.call);
-                let made = copies.make(old.of, call, old.callee);
-                moving.inner.insert(was, made);
-                made
-            }
-        };
-        if let Some(made) = made {
+        if let Some(made) = inner(copies, moving, callee, was) {
             return copies.shift(made, copies.sites()[was].at, span);
         }
     }
     moving.call
+}
+
+/// The copy made here of the copy `was` that was already in the callee, made the first time it
+/// is asked for. Its call is the call of `was`, moved into this copy.
+fn inner(copies: &mut Copies, moving: &mut Moving, callee: &Func, was: usize) -> Option<usize> {
+    if let Some(&made) = moving.inner.get(&was) {
+        return made;
+    }
+    let old = copies.sites()[was];
+    let call = moved(copies, moving, callee, old.call);
+    let made = copies.make(old.of, call, old.callee);
+    moving.inner.insert(was, made);
+    made
+}
+
+/// The number a declaration of the callee has in the copy of it, given the first time it is
+/// asked for, or `None` when copies are not told apart.
+///
+/// A declaration of the body is one of this copy. One of a copy that was already in the callee
+/// is one of the copy made here of that copy, the way [`moved`] does it for a span.
+fn renamed(copies: &mut Copies, moving: &mut Moving, callee: &Func, decl: u32) -> Option<u32> {
+    let site = moving.site?;
+    if let Some(&made) = moving.decls.get(&decl) {
+        return made;
+    }
+    let made = match copies.named(decl) {
+        Some((was, decl)) => {
+            inner(copies, moving, callee, was).and_then(|made| copies.name(made, decl))
+        }
+        None => copies.name(site, decl),
+    };
+    moving.decls.insert(decl, made);
+    made
+}
+
+/// Gives the copy the declarations of the callee, each under the number [`renamed`] gives it, so
+/// that a debugger can find the parameters and locals of an inlined call.
+///
+/// A value or a slot of the callee is a value or a slot of the copy, and a start is at the same
+/// place in the copy. A start the copy has no place for is left out, which leaves the declaration
+/// without a value over those addresses rather than with a wrong one. A parameter whose bytes
+/// were in the argument area is in the slot the call's argument was copied to, since the copy has
+/// no argument area of its own. With copies not told apart, the copy has none of this, as before.
+fn carry(
+    func: &mut Func,
+    callee: &Func,
+    copies: &mut Copies,
+    moving: &mut Moving,
+    values: &Map<Value, Value>,
+    blocks: &Map<Block, Block>,
+    insts: &Map<Inst, Inst>,
+) {
+    if moving.site.is_none() {
+        return;
+    }
+    // The memory an address is the slot of, for an address an `alloca` gave.
+    let slot = |func: &Func, value: Value| {
+        let Def::Result { inst, .. } = func[value].def else { return None };
+        match func[inst].extra {
+            Extra::Mem(mem) if func[inst].opcode == Opcode::Alloca => Some(mem),
+            _ => None,
+        }
+    };
+    for old in callee.values() {
+        let Some(&new) = values.get(&old) else { continue };
+        for decl in callee.value_decls(old).collect::<Vec<u32>>() {
+            if let Some(decl) = renamed(copies, moving, callee, decl) {
+                func.declare_value(new, decl);
+            }
+        }
+        for start in callee.value_starts(old).collect::<Vec<Start>>() {
+            let Some((block, after)) = callee.start_place(start) else { continue };
+            let Some(&block) = blocks.get(&block) else { continue };
+            let after = match after {
+                None => None,
+                Some(inst) => match insts.get(&inst) {
+                    Some(&inst) if func.block_of(inst) == Some(block) => Some(inst),
+                    _ => continue,
+                },
+            };
+            if let Some(decl) = renamed(copies, moving, callee, start.decl) {
+                func.declare_value_from(new, Start { decl, block, after });
+            }
+        }
+        for decl in callee.param_decls(old).collect::<Vec<u32>>() {
+            if let (Some(mem), Some(decl)) =
+                (slot(func, new), renamed(copies, moving, callee, decl))
+            {
+                func.declare_mem(mem, decl);
+            }
+        }
+        if let (Some(mem), Some(held)) = (slot(callee, old), slot(func, new)) {
+            for decl in callee.mem_decls(mem).collect::<Vec<u32>>() {
+                if let Some(decl) = renamed(copies, moving, callee, decl) {
+                    func.declare_mem(held, decl);
+                }
+            }
+        }
+    }
 }
 
 /// Splices the callee in where the call is, which [`check`] has said it can be. The locals in
@@ -2725,7 +2816,8 @@ fn copy(
     // keeps its own place, and a callee with no body span, which is one the IR parser built, keeps
     // every span it has. When the driver asked for copies to be told apart, the place is in the
     // copy rather than in the body. See `moved`.
-    let mut moving = Moving { call: func.span(call), site: None, inner: Map::default() };
+    let mut moving =
+        Moving { call: func.span(call), site: None, inner: Map::default(), decls: Map::default() };
     moving.site = copies.make(callee.declared, moving.call, callee.name);
     // A `musttail` call in the callee is in tail position there and is not here, unless the call
     // being replaced was one too, which is where gcc keeps the promise as well.
@@ -2814,6 +2906,7 @@ fn copy(
         .collect();
 
     let keep = func[call].results().count();
+    let insts: Map<Inst, Inst> = made.iter().copied().collect();
     for (inst, new) in made {
         let data = &callee[inst];
         let mut args: Vec<Value> = callee[data.args]
@@ -2899,6 +2992,7 @@ fn copy(
         func[new].args = if args.is_empty() { ValueList::EMPTY } else { func.push_values(&args) };
         func[new].extra = extra;
     }
+    carry(func, callee, copies, &mut moving, &values, &blocks, &insts);
     for &exit in &exits {
         for slot in begun.iter().filter_map(|slot| values.get(slot).copied()) {
             let args = func.push_values(&[slot]);
@@ -4038,11 +4132,10 @@ block0(%0: i32):
         assert!(seen.contains(&(Opcode::Load, statement)), "{seen:?}");
     }
 
-    /// With copies told apart, each copy of a body has positions of its own, and a body inlined
-    /// into a body that is then inlined twice is two copies, each inside its own copy of the
-    /// outer body and each naming the call in it.
-    #[test]
-    fn each_inlined_copy_has_positions_of_its_own() {
+    /// `inner` inlined into `mid`, which is inlined twice into `g`, with copies told apart. With
+    /// `declared`, the product in `inner` is declaration 5 and its parameter 4, and the sum in `mid`
+    /// is declaration 9 and its parameter 8.
+    fn twice_nested(names: &mut Interner, declared: bool) -> Module {
         let text = format!(
             r#"{HEAD}
 func @inner(i32) -> i32, linkage(internal), attrs(always_inline) {{
@@ -4066,8 +4159,7 @@ block0(%0: i32):
 }}
 "#
         );
-        let mut names = Interner::new();
-        let mut module = rucc_ir::parse(&text, &mut names).expect("the fixture parses");
+        let mut module = rucc_ir::parse(&text, names).expect("the fixture parses");
         let inner_body = Span::new(10, 20);
         let mid_body = Span::new(30, 50);
         let calls = [Span::new(62, 66), Span::new(70, 74)];
@@ -4086,10 +4178,32 @@ block0(%0: i32):
                 respan(func, &[Span::new(12, 15), Span::new(16, 18)]);
             }
         }
+        if declared {
+            for id in module.funcs().collect::<Vec<FuncId>>() {
+                let func = &mut module[id];
+                let entry = func.entry().expect("a body");
+                let param = func[entry].params[0];
+                let insts: Vec<Inst> = func.insts(entry).collect();
+                for inst in insts {
+                    let (opcode, result) = (func[inst].opcode, func[inst].first_result);
+                    match (opcode, result) {
+                        (Opcode::Mul, Some(value)) => {
+                            func.declare_value(value, 5);
+                            func.declare_value(param, 4);
+                        }
+                        (Opcode::Add, Some(value)) => {
+                            func.declare_value(value, 9);
+                            func.declare_value(param, 8);
+                        }
+                        _ => {}
+                    }
+                }
+            }
+        }
         module.copies.next = Some(1000);
         run(
             &mut module,
-            &names,
+            names,
             None,
             true,
             Isa::baseline(),
@@ -4099,6 +4213,20 @@ block0(%0: i32):
             false,
             None,
         );
+        module
+    }
+
+    /// With copies told apart, each copy of a body has positions of its own, and a body inlined
+    /// into a body that is then inlined twice is two copies, each inside its own copy of the
+    /// outer body and each naming the call in it.
+    #[test]
+    fn each_inlined_copy_has_positions_of_its_own() {
+        let mut names = Interner::new();
+        let module = twice_nested(&mut names, false);
+        let inner_body = Span::new(10, 20);
+        let mid_body = Span::new(30, 50);
+        let calls = [Span::new(62, 66), Span::new(70, 74)];
+        let g = names.intern("g");
         let copies = &module.copies;
         let id = module.funcs().find(|&id| module[id].name == g).expect("g is there");
         let func = &module[id];
@@ -4130,6 +4258,56 @@ block0(%0: i32):
         }
         outer.sort_by_key(|span| span.lo);
         assert_eq!(outer, calls);
+    }
+
+    /// Each copy has the declarations of the body under numbers of its own, and a declaration of
+    /// a copy in the callee is one of the copy made of that copy, so that the names of each
+    /// inlined call can be told apart.
+    #[test]
+    fn each_inlined_copy_has_declarations_of_its_own() {
+        let mut names = Interner::new();
+        let module = twice_nested(&mut names, true);
+        let (inner_body, mid_body) = (Span::new(10, 20), Span::new(30, 50));
+        let copies = &module.copies;
+        let g = names.intern("g");
+        let id = module.funcs().find(|&id| module[id].name == g).expect("g is there");
+        let func = &module[id];
+        let named = |value: Value| -> Vec<(Span, u32)> {
+            func.value_decls(value)
+                .map(|decl| {
+                    let (site, decl) = copies.named(decl).expect("only copies have names in g");
+                    (copies.sites()[site].of, decl)
+                })
+                .collect()
+        };
+        let mut numbers = Vec::new();
+        for block in func.blocks() {
+            for inst in func.insts(block) {
+                let Some(value) = func[inst].first_result else { continue };
+                let want = match func[inst].opcode {
+                    Opcode::Mul => 5,
+                    Opcode::Add => 9,
+                    _ => continue,
+                };
+                // The sum of the first copy of `mid` is the argument of the second, so it is the
+                // parameters of that copy as well.
+                let site = copies.site_at(func.span(inst).lo).expect("in a copy");
+                let mine: Vec<u32> = func
+                    .value_decls(value)
+                    .filter(|&decl| copies.named(decl).is_some_and(|(_, decl)| decl == want))
+                    .collect();
+                assert_eq!(mine.len(), 1, "{mine:?}");
+                assert_eq!(copies.named(mine[0]), Some((site, want)));
+                numbers.push(mine[0]);
+            }
+        }
+        numbers.sort_unstable();
+        numbers.dedup();
+        assert_eq!(numbers.len(), 4, "two copies of each, each with its own number");
+        let entry = func.entry().expect("a body");
+        let mut first = named(func[entry].params[0]);
+        first.sort_unstable_by_key(|&(of, decl)| (of.lo, decl));
+        assert_eq!(first, [(inner_body, 4), (mid_body, 8)]);
     }
 
     /// The anonymous arguments of the outer call are what the pack stands for, and the out of line
