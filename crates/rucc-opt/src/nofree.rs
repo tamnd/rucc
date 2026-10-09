@@ -139,12 +139,7 @@
 
 use rucc_base::hash::{Map, Set};
 use rucc_base::{Interner, Symbol};
-use rucc_ir::{
-    AttrSet, Block, Def, Extra, Flags, Func, FuncId, Inst, Linkage, Module, Opcode, Pic, Value,
-};
-
-use crate::cfg::Cfg;
-use crate::copy;
+use rucc_ir::{AttrSet, Extra, Flags, Func, FuncId, Inst, Linkage, Module, Opcode, Pic, Value};
 
 /// A set of parameter positions.
 ///
@@ -304,7 +299,7 @@ impl Summaries {
             .iter()
             .copied()
             .filter(|&id| !module[id].is_declaration() && trusted(&module[id], pic))
-            .map(|id| (id, derived(&module[id], &Cfg::new(&module[id]))))
+            .map(|id| (id, derived(&module[id])))
             .collect();
         loop {
             let mut settled = true;
@@ -443,28 +438,52 @@ fn trusted(func: &Func, pic: Pic) -> bool {
 /// the bytes at that address rather than the parameter, and they are some other object's, so the
 /// walk stops there. That is what makes `free(p->next)` read as freeing something that is not `p`,
 /// which is both true and the answer that costs a check.
-fn derived(func: &Func, cfg: &Cfg) -> Map<Value, Params> {
+fn derived(func: &Func) -> Map<Value, Params> {
     let mut from: Map<Value, Params> = Map::default();
     let Some(entry) = func.entry() else { return from };
-    // Values come out in the order they were made, which is a definition before its uses, so a body
-    // with no loop in it settles in one pass and the loop is for the ones that have one.
-    loop {
-        let mut settled = true;
-        for value in func.values() {
-            let was = from.get(&value).copied().unwrap_or(Params::NONE);
-            let now = was.union(source(func, cfg, &from, entry, value));
-            if now != was {
-                from.insert(value, now);
-                settled = false;
+    // Where each value goes, so that a value that learns something hands it on to just those.
+    // Going round every value until nothing moved asked every block parameter about every edge into
+    // it once a round, and the block a big switch dispatches from has a lot of them: in lvm.c that
+    // was 4% of the whole compile.
+    let mut into: Vec<Vec<Value>> = vec![Vec::new(); func.values().count()];
+    for block in func.blocks() {
+        for inst in func.insts(block) {
+            for &of in followed(func, inst) {
+                into[of.index()].extend(func[inst].results());
+            }
+            for call in func.successors(inst) {
+                // The parameters of the entry block are the function's parameters, whatever a
+                // jump back to it carries.
+                if call.block == entry {
+                    continue;
+                }
+                for (&arg, &param) in func[call.args].iter().zip(&func[call.block].params) {
+                    into[arg.index()].push(param);
+                }
             }
         }
-        if settled {
-            return from;
+    }
+    // The index is the position, which is the whole of what this analysis is about.
+    let mut work = Vec::new();
+    for (index, &param) in func[entry].params.iter().enumerate() {
+        from.insert(param, Params::NONE.with(index));
+        work.push(param);
+    }
+    while let Some(value) = work.pop() {
+        let what = from.get(&value).copied().unwrap_or(Params::NONE);
+        for &to in &into[value.index()] {
+            let was = from.get(&to).copied().unwrap_or(Params::NONE);
+            let now = was.union(what);
+            if now != was {
+                from.insert(to, now);
+                work.push(to);
+            }
         }
     }
+    from
 }
 
-/// Where one value comes from, given what is known so far about the values it is built out of.
+/// The operands an instruction's result is built out of, as far as where an address came from goes.
 ///
 /// Everything that follows an operand here is on [`holds`], and it has to be: a pointer that goes
 /// into an instruction and comes out of it is a pointer this has to keep hold of, or the instruction
@@ -472,49 +491,28 @@ fn derived(func: &Func, cfg: &Cfg) -> Map<Value, Params> {
 /// that reason rather than because anybody subscripts with a pointer. `p - q` is a `ptr_to_int` on
 /// each side and a subtract, and if the subtract stopped the walk then storing the difference would
 /// be storing something this had lost track of.
-fn source(func: &Func, cfg: &Cfg, from: &Map<Value, Params>, entry: Block, value: Value) -> Params {
-    let known = |of: Value| from.get(&of).copied().unwrap_or(Params::NONE);
-    match func[value].def {
-        // The parameters of the entry block are the function's parameters, and the index is the
-        // position, which is the whole of what this analysis is about.
-        Def::Param { block, index } if block == entry => Params::NONE.with(index as usize),
-        Def::Param { block, index } => {
-            let mut out = Params::NONE;
-            for &pred in cfg.predecessors(block) {
-                let Some(term) = func.terminator(pred) else { continue };
-                if let Some(came) = copy::edge_arg(func, term, block, index as usize) {
-                    out = out.union(known(came));
-                }
-            }
-            out
+fn followed(func: &Func, inst: Inst) -> &[Value] {
+    let args = &func[func[inst].args];
+    match func[inst].opcode {
+        Opcode::PtrAdd | Opcode::PtrToInt | Opcode::IntToPtr | Opcode::Bitcast => {
+            args.get(..1).unwrap_or(&[])
         }
-        Def::Result { inst, .. } => {
-            let args = &func[func[inst].args];
-            match func[inst].opcode {
-                Opcode::PtrAdd | Opcode::PtrToInt | Opcode::IntToPtr | Opcode::Bitcast => {
-                    args.first().map_or(Params::NONE, |&of| known(of))
-                }
-                // The condition is not one of them, since which way it went is not where the
-                // address came from.
-                Opcode::Select => match (args.get(1), args.get(2)) {
-                    (Some(&one), Some(&two)) => known(one).union(known(two)),
-                    _ => Params::NONE,
-                },
-                Opcode::Add
-                | Opcode::Sub
-                | Opcode::Mul
-                | Opcode::Shl
-                | Opcode::LShr
-                | Opcode::AShr
-                | Opcode::And
-                | Opcode::Or
-                | Opcode::Xor
-                | Opcode::Trunc
-                | Opcode::SExt
-                | Opcode::ZExt => args.iter().fold(Params::NONE, |out, &of| out.union(known(of))),
-                _ => Params::NONE,
-            }
-        }
+        // The condition is not one of them, since which way it went is not where the address came
+        // from.
+        Opcode::Select => args.get(1..3).unwrap_or(&[]),
+        Opcode::Add
+        | Opcode::Sub
+        | Opcode::Mul
+        | Opcode::Shl
+        | Opcode::LShr
+        | Opcode::AShr
+        | Opcode::And
+        | Opcode::Or
+        | Opcode::Xor
+        | Opcode::Trunc
+        | Opcode::SExt
+        | Opcode::ZExt => args,
+        _ => &[],
     }
 }
 
@@ -604,7 +602,7 @@ fn reaches(func: &Func, from: &Map<Value, Params>, at: &Map<Symbol, Reach>) -> R
 /// what has to hold is that the pointer is still only where this function put it, and naming what
 /// is allowed makes an opcode added later read as leaving it somewhere until somebody looks at it.
 ///
-/// Anything on this list that produces a value has to be followed by [`source`] as well, or a
+/// Anything on this list that produces a value has to be in [`followed`] as well, or a
 /// pointer would go in one end of it and come out of the other with nothing said about where it
 /// went. A load is the exception that proves it: the value it produces is the bytes at the address
 /// rather than the address, so there is nothing to follow.
@@ -614,11 +612,11 @@ fn reaches(func: &Func, from: &Map<Value, Params>, at: &Map<Symbol, Reach>) -> R
 /// memory by something, and that something is where it was kept.
 ///
 /// The branches are here because the arguments an edge carries are where a block's parameters come
-/// from, which [`source`] reads off the edge, so a pointer going round a loop is a pointer this
+/// from, which [`derived`] reads off the edge, so a pointer going round a loop is a pointer this
 /// followed rather than one it lost.
 ///
 /// `cap_of` is the one to look at again the day anything writes a capability to memory. What it
-/// produces names the object the pointer is in, and [`source`] does not follow it, so a capability
+/// produces names the object the pointer is in, and [`followed`] does not follow it, so a capability
 /// left somewhere would be a pointer's worth of reach this did not account for. Nothing emits a
 /// `cap_store` today, and the instruction that would is the one to come back here with.
 fn holds(opcode: Opcode) -> bool {
