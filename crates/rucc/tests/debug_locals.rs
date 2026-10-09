@@ -351,3 +351,43 @@ fn a_structure_used_where_the_caller_left_it_is_placed_in_the_argument_area() {
         "the parameter is not placed at the bottom of the argument area"
     );
 }
+
+/// A function that keeps one of its arguments past a call, so it has a prologue at every level.
+const SAVED: &str = "\
+int other(int);
+int keep(int first, int second) {
+    return other(first) + second;
+}
+";
+
+/// Each parameter is in its argument register from the first byte of its function.
+///
+/// The prologue and the moves out of the argument registers run before the stretches the
+/// allocator gives a parameter. A debugger asks about those bytes for `break *keep`, and for a
+/// backtrace through a function that has not finished its prologue.
+#[cfg(target_os = "linux")]
+#[test]
+fn a_parameter_is_in_its_argument_register_from_the_first_byte() {
+    for level in ["-O0", "-O2"] {
+        let dir = fixture("arrived", SAVED);
+        build(&dir, &["-g", level], "arrived.o");
+        let out = Command::new("readelf")
+            .arg("--debug-dump=loc")
+            .arg(dir.join("arrived.o"))
+            .output()
+            .expect("readelf starts");
+        let _ = std::fs::remove_dir_all(&dir);
+        let text = String::from_utf8_lossy(&out.stdout);
+        let first = |reg: &str| {
+            text.lines().any(|line| line.contains(" 0000000000000000 ") && line.contains(reg))
+        };
+        assert!(
+            first("DW_OP_reg5 (rdi)"),
+            "{level}: first is not in rdi at the first byte\n{text}"
+        );
+        assert!(
+            first("DW_OP_reg4 (rsi)"),
+            "{level}: second is not in rsi at the first byte\n{text}"
+        );
+    }
+}

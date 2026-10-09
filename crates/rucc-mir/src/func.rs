@@ -405,6 +405,16 @@ pub struct Func {
     /// the assignments ran in rather than from the registers. A block not here has no answer, and
     /// then the stretches are left to disagree the way they did before.
     pub entries: Vec<(u32, Block, Reg)>,
+    /// The parameters that arrived in a register, as the declaration and the register the
+    /// convention put it in.
+    ///
+    /// A parameter is in that register from the first byte of the function, before the prologue
+    /// and the moves out of the argument registers have run, and [`Func::kept`] says nothing about
+    /// those bytes because the value has no register of its own until the moves are done. A
+    /// debugger stopped on the first byte asks there all the same. Written by whatever selects
+    /// instructions, and read by the debugging information, which finds where the register is
+    /// first written.
+    pub arrived: Vec<(u32, Where)>,
     /// Where each of those registers ended up, once the allocator has said, and over which of the
     /// function's instructions the answer holds.
     ///
@@ -488,6 +498,7 @@ impl Func {
             named: Vec::new(),
             starts: Vec::new(),
             entries: Vec::new(),
+            arrived: Vec::new(),
             kept: Vec::new(),
             tables: Vec::new(),
             heads: Vec::new(),

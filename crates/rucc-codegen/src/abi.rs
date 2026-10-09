@@ -353,6 +353,13 @@ pub struct Arrived {
     /// argument register rather than the spare ones, which is one holding `__builtin_apply_args`.
     /// Together with [`Arrived::spare`] it is every register an argument can arrive in.
     pub named: Vec<(usize, u32)>,
+    /// The parameters that arrived in a register as the value itself, as the position of each, the
+    /// register and its file.
+    ///
+    /// For the debugging information, which has each of them in its register from the first byte
+    /// of the function, before any instruction has moved it. A decimal that crossed as a word is
+    /// not here, because the word is not its value until it has been moved into a vector register.
+    pub held: Vec<(usize, PhysReg, RegClass)>,
 }
 
 /// Binds a function's parameters to where the convention says they arrive.
@@ -465,6 +472,9 @@ pub fn entry(
         let opcode = mir::Opcode::new(names.intern(head));
         let operand = mir::Operand::write(held, class).with(Constraint::Fixed(arrived_in));
         out.build(block, opcode).operand(operand).finish();
+        if crossed == ty {
+            arrived.held.push((index, arrived_in, class));
+        }
         let float = class == conv.sse_class;
         bound.push((arrived_in, float));
         if let Some(slot) = save.and_then(|area| slot_of(conv, area, arrived_in, float)) {
