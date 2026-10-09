@@ -62,6 +62,8 @@ The complication is that stack frames are recycled constantly and writing the ve
 
 Longjmp and unwinding bulk-end every frame between the throw and the catch, per document 03's mitigation table, which requires the unwinder to be an interposed boundary. The parent's document 12 already constrains the optimizer around `setjmp`.
 
+What is built is simpler than a plane over the stack. A frame with a named local gets one witness word, opened on entry and closed at every return, and a local's capability carries the address of that word and the serial it held. A pointer whose witness no longer holds its serial is to a frame that has returned, and an access through it is refused under J1. A local declared in a block has a witness of its own, shut where the block's lifetime ends and opened again where its declaration is reached. The interposed functions ask the same question of the capability they are handed, so `printf("%s", p)` with `p` the address of a buffer in a frame that has returned is refused inside the wrapper. And when the inliner copies a function into its caller, the callee's locals become slots of a frame that goes on after the copy has finished, so it ends each of their lifetimes where the copy returns, and each gets a witness that is shut there.
+
 ## 8.5 Reclamation, and the one thing a collector does that we cannot
 
 Under versioning, freed memory is reclaimed immediately and reused. A stale pointer to it fails the version check. Good.

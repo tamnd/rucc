@@ -314,6 +314,7 @@ pub fn range(site: &'static str, addr: *const c_void, len: usize, cap: Cap) {
         return;
     }
     let at = addr as usize;
+    returned(site, cap, at, len);
     if cap.is_named() && touches(cap, at, len) && !cap.covers(at as u64, len as u64) {
         crate::fail::refused_at(Judgement::Access, site, past(cap, at));
     }
@@ -364,6 +365,27 @@ fn asked(region: &alloc::Region, at: usize) -> usize {
 fn touches(cap: Cap, at: usize, len: usize) -> bool {
     let (at, lo) = (at as u64, cap.lo);
     at.wrapping_sub(lo) <= cap.ext || (at < lo && lo - at < len as u64)
+}
+
+/// Refuses a range that reaches a local whose frame has returned, which is row T4.
+///
+/// [`crate::check::live`] asks the same question of an ordinary access, and a wrapper has to ask it
+/// as well because the read happens inside the C library. `printf("%s", name)` with `name` the
+/// address of a buffer the function that filled it has returned from is the commonest way to read
+/// a dead frame, and no plane covers a stack, so the witness is the whole of the answer. A range
+/// wholly outside the object is the capability describing somebody else, as in [`range`].
+fn returned(site: &'static str, cap: Cap, at: usize, len: usize) {
+    if dead(cap, at, len) {
+        crate::fail::refused_at(Judgement::Access, site, at);
+    }
+}
+
+/// Whether `len` bytes from `at` reach a local whose frame has returned.
+fn dead(cap: Cap, at: usize, len: usize) -> bool {
+    // SAFETY: a named local's capability was made by `__rucc_cap_local` with its frame's witness,
+    // which is a word of a stack that is still mapped for as long as its thread runs, and `gone`
+    // reads nothing for any other capability.
+    touches(cap, at, len) && unsafe { crate::witness::gone(&cap) }
 }
 
 /// Where a walk from `start` has to stop to stay out of trouble with the object `cap` names, or
@@ -734,7 +756,10 @@ impl Watch {
             (region, unsafe { region.plane.version(start) })
         });
         let asked = watched.map_or(usize::MAX, |(region, _)| asked(&region, start));
-        Self { watched, start, end: asked.min(named_end(cap, start)) }
+        // A local whose frame has returned has no bytes left to walk, so the first step is
+        // refused, and a walk that takes no step, `strncmp(a, b, 0)`, touches nothing.
+        let end = if dead(cap, start, 1) { start } else { asked.min(named_end(cap, start)) };
+        Self { watched, start, end }
     }
 
     /// Judges one byte of the walk, if it is one the plane could have changed its answer at.

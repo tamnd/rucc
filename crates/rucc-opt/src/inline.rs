@@ -2610,6 +2610,24 @@ fn copy(
     // being replaced was one too, which is where gcc keeps the promise as well.
     let dropped =
         if func[call].flags.contains(Flags::MUST_TAIL) { Flags::NONE } else { Flags::MUST_TAIL };
+    // The callee's locals whose lifetimes the safety lowering marked where they begin. In the
+    // callee each one ended with the frame, which was what said a pointer to it had outlived it,
+    // and here the frame is the caller's and goes on. So each one ends where the callee returned
+    // as well, which is where its witness is shut. Nothing is marked when the build is not
+    // instrumented, so this is nothing then.
+    let mut begun: Vec<Value> = Vec::new();
+    for inst in callee.blocks().flat_map(|block| callee.insts(block)) {
+        if callee[inst].opcode != Opcode::MetaBegin {
+            continue;
+        }
+        let Some(&slot) = callee[callee[inst].args].first() else { continue };
+        let Def::Result { inst: def, .. } = callee[slot].def else { continue };
+        let fixed = callee[def].opcode == Opcode::Alloca && callee[def].args.is_empty();
+        if fixed && !begun.contains(&slot) {
+            begun.push(slot);
+        }
+    }
+    let mut exits = Vec::new();
     let mut made = Vec::new();
     pool.site += 1;
     for from in callee.blocks() {
@@ -2654,6 +2672,9 @@ fn copy(
                 func.insert_before(new, first);
             } else {
                 func.append_inst(blocks[&from], new);
+            }
+            if data.opcode == Opcode::Return {
+                exits.push(new);
             }
             made.push((inst, new));
         }
@@ -2756,6 +2777,14 @@ fn copy(
         };
         func[new].args = if args.is_empty() { ValueList::EMPTY } else { func.push_values(&args) };
         func[new].extra = extra;
+    }
+    for &exit in &exits {
+        for slot in begun.iter().filter_map(|slot| values.get(slot).copied()) {
+            let args = func.push_values(&[slot]);
+            let data = InstData { args, ..InstData::new(Opcode::LifetimeEnd) };
+            let end = func.create_inst(data, &[], func.span(exit));
+            func.insert_before(end, exit);
+        }
     }
 
     // And the call itself, which becomes a jump to the copy of the entry block.
@@ -4704,5 +4733,46 @@ block0(%0: ptr):
         assert_eq!(main.matches("restrict(1, 2)").count(), 2, "{out}");
         assert_eq!(main.matches("restrict(2, 1)").count(), 2, "{out}");
         assert_eq!(main.matches("restrict_leave").count(), 2, "{out}");
+    }
+
+    /// A local the safety lowering marked where it begins ends where each copy of its function
+    /// returns, since the frame that ended it there is the caller's now and goes on. Without the
+    /// marker there is nothing to end, which is every build that is not instrumented.
+    #[test]
+    fn a_marked_local_ends_where_each_inlined_copy_returns() {
+        let body = r#"
+func @use(ptr), linkage(external);
+
+func @part(i32) -> i32, linkage(internal), attrs(always_inline) {
+block0(%0: i32):
+    %1 = alloca, size 16, align 4
+    %2 = iconst.i64 16
+    meta_begin %1, %2, class automatic
+    store %0 -> %1, align 4
+    call @use(%1) : (ptr)
+    %3 = load.i32 %1, align 4
+    %4 = icmp eq %3, %0
+    br_if %4, block1, block2
+
+block1:
+    return %3
+
+block2:
+    return %0
+}
+
+func @f(i32) -> i32, linkage(external) {
+block0(%0: i32):
+    %1 = call @part(%0) : (i32) -> i32
+    return %1
+}
+"#;
+        let out = inlined(body);
+        let f = &out[out.find("func @f").expect("f is there")..];
+        assert!(!f.contains("call @part"), "{out}");
+        assert_eq!(f.matches("lifetime_end").count(), 2, "{out}");
+        let plain = inlined(&body.replace("    meta_begin %1, %2, class automatic\n", ""));
+        let f = &plain[plain.find("func @f").expect("f is there")..];
+        assert!(!f.contains("lifetime_end"), "{plain}");
     }
 }
