@@ -737,3 +737,152 @@ fn convertvector_casts_each_lane() {
     }
     std::fs::remove_dir_all(dir).unwrap();
 }
+
+/// Shuffles of vectors of 16 bytes, each written in a different way.
+const SHUFFLE: &str = "\
+#include <wasm_simd128.h>
+typedef int v4s __attribute__((vector_size(16)));
+typedef short v8s __attribute__((vector_size(16)));
+typedef double v2d __attribute__((vector_size(16)));
+typedef signed char v16 __attribute__((vector_size(16)));
+v4s pick(v4s a, v4s b) { return __builtin_shufflevector(a, b, 1, 4, 7, 2); }
+v8s reverse(v8s a) { return __builtin_shufflevector(a, a, 7, 6, 5, 4, 3, 2, 1, 0); }
+v2d high(v2d a, v2d b) { return __builtin_shufflevector(a, b, 1, 2); }
+v16 bytes(v16 a, v16 b) {
+    return __builtin_wasm_shuffle_i8x16(a, b, 0, 17, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 40);
+}
+v128_t header(v128_t a, v128_t b) { return wasm_i16x8_shuffle(a, b, 0, 8, 1, 9, 2, 10, 3, 11); }
+";
+
+/// With `-msimd128`, each shuffle of [`SHUFFLE`] is one `i8x16.shuffle` of its two operands, with
+/// the bytes of each lane, as clang 23 writes it. A lane of the wasm builtin past 31 is 0, as clang
+/// writes it.
+#[test]
+fn with_simd128_a_shufflevector_is_one_instruction() {
+    let out = assembly(SHUFFLE, &["-msimd128"]);
+    assert!(out.status.success(), "{}", String::from_utf8_lossy(&out.stderr));
+    let text = String::from_utf8(out.stdout).unwrap();
+    let want = [
+        ("pick", "1", "4, 5, 6, 7, 16, 17, 18, 19, 28, 29, 30, 31, 8, 9, 10, 11"),
+        ("reverse", "0", "14, 15, 12, 13, 10, 11, 8, 9, 6, 7, 4, 5, 2, 3, 0, 1"),
+        ("high", "1", "8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20, 21, 22, 23"),
+        ("bytes", "1", "0, 17, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 0"),
+        ("header", "1", "0, 1, 16, 17, 2, 3, 18, 19, 4, 5, 20, 21, 6, 7, 22, 23"),
+    ];
+    for (name, second, lanes) in want {
+        let code: Vec<&str> = body(&text, name)
+            .into_iter()
+            .filter(|op| !op.starts_with('.') && *op != "return")
+            .collect();
+        let shuffle = format!("i8x16.shuffle\t{lanes}");
+        let second = format!("local.get\t{second}");
+        assert_eq!(code, ["local.get\t0", &second, &shuffle], "{name}");
+    }
+}
+
+/// The words of gcc 16 for each call to `__builtin_shufflevector` that it refuses, in the order
+/// that gcc checks, and the words of clang 23 for a lane of `__builtin_wasm_shuffle_i8x16` that is
+/// not a constant. Each error is at the start of the call.
+#[test]
+fn shufflevector_is_checked_in_the_words_of_gcc() {
+    let source = "\
+typedef int v4si __attribute__((vector_size(16)));
+typedef short v8hi __attribute__((vector_size(16)));
+typedef signed char v16 __attribute__((vector_size(16)));
+v4si a(v4si a, v8hi b) { return __builtin_shufflevector(a, b, 0, 1, 2, 3); }
+v4si b(v4si a, int n) { return __builtin_shufflevector(a, a, n, 1, 2, 3); }
+v4si c(v4si a) { return __builtin_shufflevector(a, a, 0, 1, 2, 8); }
+v4si d(int a) { return __builtin_shufflevector(a, a, 0, 1, 2, 3); }
+v4si e(v4si a) { return __builtin_shufflevector(a); }
+v4si f(v4si a) { return __builtin_shufflevector(a, a, 0, 1, 2); }
+v4si g(v4si a) { return __builtin_shufflevector(a, a, 0, 1, 2, -2); }
+v16 h(v16 a, int n) { return __builtin_wasm_shuffle_i8x16(a, a, 0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, n, 15); }
+";
+    let out = assembly(source, &["-msimd128"]);
+    let errors = String::from_utf8_lossy(&out.stderr);
+    let want = [
+        "<stdin>:4:33: error: '__builtin_shufflevector' argument vectors must have the same element type [E0715]",
+        "<stdin>:5:32: error: invalid element index 'n' to '__builtin_shufflevector' [E0715]",
+        "<stdin>:6:25: error: invalid element index '8' to '__builtin_shufflevector' [E0715]",
+        "<stdin>:7:24: error: '__builtin_shufflevector' arguments must be vectors [E0715]",
+        "<stdin>:8:25: error: wrong number of arguments to '__builtin_shuffle' [E0511]",
+        "<stdin>:9:25: error: '__builtin_shufflevector' must specify a result with a power of two number of elements [E0715]",
+        "<stdin>:10:25: error: invalid element index '-2' to '__builtin_shufflevector' [E0715]",
+        "<stdin>:11:30: error: argument to '__builtin_wasm_shuffle_i8x16' must be a constant integer [E0715]",
+    ];
+    let said: Vec<&str> = errors.lines().filter(|line| line.contains("error:")).collect();
+    assert_eq!(said, want, "{errors}");
+}
+
+/// A program that compares each lane of `__builtin_shufflevector` with the lane that it picks, for
+/// operands and answers of 4, 8, 16 and 32 bytes, operands with a different number of lanes, a
+/// lane of -1, which has no value to compare, and an answer that is written over its operand.
+const SHUFFLED: &str = "\
+#define V(n, t, s) typedef t n __attribute__((vector_size(s)));
+V(v16, signed char, 16) V(v8b, signed char, 8) V(v8s, short, 16) V(v4s, int, 16) V(v2i, int, 8)
+V(v1i, int, 4) V(v8i, int, 32) V(v2s, long long, 16) V(v4f, float, 16) V(v2d, double, 16)
+static const int edge[] = {0, 1, -1, 127, -128, 100, 32767, -32768, 65535, 100000, -7, 42};
+static int bad;
+#define LANES(v) ((int)(sizeof (v) / sizeof (v)[0]))
+#define CHECK(name, ta, tb, tr, ...) \\
+    __attribute__((noinline)) static tr name(ta a, tb b) { return __builtin_shufflevector(a, b, __VA_ARGS__); } \\
+    static void check_##name(void) { \\
+        static const int pick[] = {__VA_ARGS__}; \\
+        ta a; tb b; \\
+        for (int i = 0; i < LANES(a); i++) a[i] = edge[(i + __LINE__) % 12]; \\
+        for (int i = 0; i < LANES(b); i++) b[i] = edge[(i * 7 + __LINE__) % 12] + 1; \\
+        tr r = name(a, b); \\
+        for (int i = 0; i < LANES(r); i++) \\
+            if (pick[i] >= 0) bad |= r[i] != (pick[i] < LANES(a) ? a[pick[i]] : b[pick[i] - LANES(a)]); }
+CHECK(ints, v4s, v4s, v4s, 1, 4, 7, 2)
+CHECK(shorts, v8s, v8s, v8s, 7, 6, 5, 4, 3, 2, 1, 0)
+CHECK(bytes, v16, v16, v16, 0, 17, 2, 19, 4, 21, 6, 23, 8, 25, 10, 27, 12, 29, 14, 31)
+CHECK(floats, v4f, v4f, v4f, 3, 3, 4, 0)
+CHECK(doubles, v2d, v2d, v2d, 1, 2)
+CHECK(longs, v2s, v2s, v2s, 3, 0)
+CHECK(half, v4s, v4s, v2i, 2, 7)
+CHECK(join, v2i, v2i, v4s, 0, 2, 1, 3)
+CHECK(mixed, v2i, v4s, v2i, 5, 1)
+CHECK(wide, v4s, v4s, v8i, 0, 4, 1, 5, 2, 6, 3, 7)
+CHECK(unknown, v4s, v4s, v4s, 0, -1, 5, -1)
+CHECK(one, v4s, v4s, v1i, 6)
+CHECK(small, v8b, v8b, v8b, 15, 0, 9, 1, 2, 3, 4, 5)
+__attribute__((noinline)) static void turn(v4s *p) { *p = __builtin_shufflevector(*p, *p, 3, 2, 1, 0); }
+int main(void) {
+    check_ints(); check_shorts(); check_bytes(); check_floats(); check_doubles(); check_longs();
+    check_half(); check_join(); check_mixed(); check_wide(); check_unknown(); check_one();
+    check_small();
+    v4s v = {10, 11, 12, 13};
+    turn(&v);
+    bad |= v[0] != 13 || v[1] != 12 || v[2] != 11 || v[3] != 10;
+    return bad;
+}
+";
+
+#[test]
+fn shufflevector_picks_each_lane() {
+    let dir = std::env::temp_dir().join(format!("rucc-wasm-shuffle-{}", std::process::id()));
+    std::fs::create_dir_all(&dir).unwrap();
+    std::fs::write(dir.join("check.c"), SHUFFLED).unwrap();
+    let rucc = PathBuf::from(env!("CARGO_BIN_EXE_rucc"));
+    // On the host first, where each shuffle is a lane at a time.
+    for level in ["-O0", "-O2"] {
+        run(&rucc, &[level, "check.c", "-o", "check"], &dir);
+        let status = Command::new(dir.join("check")).status().unwrap();
+        assert!(status.success(), "{level}: {status}");
+    }
+    let wasmtime = on_path("wasmtime");
+    if std::env::var_os("WASI_SDK_PATH").is_none() || wasmtime.is_none() {
+        eprintln!("WASI_SDK_PATH is not set or there is no wasmtime, so wasm was not run");
+        std::fs::remove_dir_all(dir).unwrap();
+        return;
+    }
+    for flags in [&["-O0"][..], &["-O2"], &["-O0", "-msimd128"], &["-O2", "-msimd128"]] {
+        let link = ["--target=wasm32-wasip1", "-fno-builtins-lib", "check.c", "-o", "check.wasm"];
+        run(&rucc, &[&link[..], flags].concat(), &dir);
+        let status =
+            Command::new(wasmtime.as_ref().unwrap()).arg(dir.join("check.wasm")).status().unwrap();
+        assert!(status.success(), "{flags:?}: {status}");
+    }
+    std::fs::remove_dir_all(dir).unwrap();
+}

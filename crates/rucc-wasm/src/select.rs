@@ -1183,7 +1183,8 @@ impl Lower<'_, '_> {
         }
         // A vector built lane by lane reads the values of its lanes and not the vector before.
         // A negation and a bitwise not do not read the vector of zeros or of ones.
-        // A load that the instruction does itself reads the address of the load instead.
+        // A load that the instruction does itself reads the address of the load instead. A shuffle
+        // reads its two vectors, and its lanes are immediates.
         if opcode == Opcode::InsertLane {
             let built = self.results(inst).first().and_then(|&vector| self.built(vector));
             match (built, self.absorbed.get(&inst)) {
@@ -1201,6 +1202,9 @@ impl Lower<'_, '_> {
             && let Some(&load) = self.absorbed.get(&inst)
         {
             return self.inputs(load);
+        }
+        if opcode == Opcode::Call && self.shuffle_builtin(inst) {
+            args.truncate(2);
         }
         if let Some((value, not)) = self.andnot(inst) {
             return vec![value, not];
