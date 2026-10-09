@@ -6,7 +6,8 @@
 //! and two adds for the high halves. That is correct on every machine, and on this one it is five
 //! instructions and a byte register where gcc writes `addl` and `adcl`. The add of the low halves
 //! has already left the bit the comparison works out in the carry flag, and `adc` is the
-//! instruction that adds it in. The subtract is the same with `sbb` and the borrow.
+//! instruction that adds it in. The subtract is the same with `sbb` and the borrow, and `0 - x` is
+//! gcc's `neg`, `adc $0` and `neg`, since the `neg` of the low word leaves the borrow as well.
 //!
 //! The kernel's 32 bit build is where this shows. Every `u64` in it is a pair, and `ktime_t`,
 //! `jiffies_64`, sector numbers and the scheduler's clocks are all sums of them.
@@ -92,6 +93,11 @@ pub fn carries(func: &mut mir::Func, shapes: &MachineInsts, names: &mut Interner
             }
             let adc = build.finish();
             func.insert_after(pair.low, adc);
+            if let Some((name, answer, read)) = pair.then {
+                let opcode = mir::Opcode::new(names.intern(&format!("{}{name}", shapes.prefix)));
+                let neg = func.build_loose(opcode).at(span).operand(answer).operand(read).finish();
+                func.insert_after(adc, neg);
+            }
             for gone in pair.gone {
                 func.remove_inst(gone);
             }
@@ -111,6 +117,9 @@ struct Pair {
     reads: Vec<mir::Operand>,
     imm: Option<i64>,
     gone: Vec<mir::Inst>,
+    /// A negation of what the `adc` came to, which is the high half of `0 - x` once the negation
+    /// of its high word is taken in: `-(h + borrow)` is `-h - borrow`.
+    then: Option<(String, mir::Operand, mir::Operand)>,
 }
 
 struct Walk<'a> {
@@ -198,6 +207,41 @@ impl Walk<'_> {
         }
         let (op, carrying) = if add { ("add", "adc") } else { ("sub", "sbb") };
         let mut gone = vec![compare, widen, high];
+        // The zero a borrow out of `0 - x` was asked against, when the comparison was all that
+        // read it.
+        if let Some(&[_, left, _]) = (!add).then(|| self.operands(compare)) {
+            let zero = self.alone(left.reg).filter(|&inst| {
+                self.name(inst) == Some(&format!("mov_ri_{width}")) && self.imm(inst) == Some(0)
+            });
+            gone.extend(zero);
+        }
+        // `0 - x` on a pair, which is `neg`, `adc $0` and `neg` as gcc writes it.
+        let negated = (!add)
+            .then(|| self.alone(other.reg))
+            .flatten()
+            .filter(|inst| !taken(inst) && self.name(*inst) == Some(&format!("neg_r_{width}")));
+        if let Some(inst) = negated {
+            let &[sum, word] = self.operands(inst) else { return None };
+            if word.role != Role::Use || !self.ready(word.reg, low) {
+                return None;
+            }
+            let name = format!("adc_ri_{width}");
+            let then = format!("neg_r_{width}");
+            (self.shapes.operands)(&name)?;
+            (self.shapes.operands)(&then)?;
+            gone.push(inst);
+            let read = mir::Operand::read(sum.reg, sum.class);
+            return Some(Pair {
+                low,
+                high,
+                name,
+                answer: sum,
+                reads: vec![word],
+                imm: Some(0),
+                gone,
+                then: Some((then, answer, read)),
+            });
+        }
         // The high halves themselves, when nothing else wants what they come to.
         let half = self.alone(other.reg).filter(|inst| !taken(inst)).filter(|&inst| {
             let name = self.name(inst);
@@ -219,7 +263,7 @@ impl Walk<'_> {
         }
         let name = format!("{carrying}_{form}_{width}");
         (self.shapes.operands)(&name)?;
-        Some(Pair { low, high, name, answer, reads, imm, gone })
+        Some(Pair { low, high, name, answer, reads, imm, gone, then: None })
     }
 
     /// The add or subtract of the low halves a comparison asks about, when the comparison asks
@@ -253,7 +297,19 @@ impl Walk<'_> {
                 return None;
             };
             let wanted = format!("sub_{form}_{width}");
-            let sources: Vec<mir::Reg> = ops[1..].iter().map(|operand| operand.reg).collect();
+            let mut sources: Vec<mir::Reg> = ops[1..].iter().map(|operand| operand.reg).collect();
+            // A borrow out of `0 - x` asks `0 < x` of a zero in a register, and the low half is
+            // the `neg` of `x`, which leaves the same carry.
+            let zero = k.is_none()
+                && self.writer.get(&sources[0]).is_some_and(|&by| {
+                    self.name(by) == Some(&format!("mov_ri_{width}")) && self.imm(by) == Some(0)
+                });
+            let wanted = if zero {
+                sources.remove(0);
+                format!("neg_r_{width}")
+            } else {
+                wanted
+            };
             let before = &self.order[..self.at[&compare]];
             before.iter().rev().copied().find(|&inst| {
                 self.name(inst) == Some(&wanted)

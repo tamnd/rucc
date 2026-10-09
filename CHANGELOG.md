@@ -11,6 +11,7 @@ All notable changes are recorded here. The format follows [Keep a Changelog](htt
 - Read one edge argument in place in nofree, discharge and split instead of copying the edge's whole argument list for each parameter, which takes 2.4% of the instructions off lvm.c at `-O2` (#3482).
 - On i386 a `long long` add or subtract is `addl` and `adcl`, or `subl` and `sbbl`, and on x86-64 a `__int128` one is `addq` and `adcq`. The carry between the halves used to be a `cmp`, a `setb`, a `movzbl` and one more add. A new pass after selection finds the comparison that asks whether the low add wrapped and uses the flag that add left instead. `__builtin_bswap64` on i386 is two `bswapl` now, where it was 48 shifts and masks, which shrinks `sha512_transform` and `gf128mul_lle` in the 32 bit kernel (#3483).
 - A static function whose one line calls an `always_inline` body is weighed with that body in it, as gcc's early inliner does, so it is no longer copied into every caller as a function no larger than the call. zstd's `HUF_DGEN` wrappers are that shape, and the 32 bit kernel had the Huffman decoder copied into each of their callers, about 18KB a copy where gcc's callers are 64 bytes (#3487).
+- On i386 a `long long` negation is `negl`, `adcl $0` and `negl` as gcc writes it, and on x86-64 a `__int128` one is the same with `negq` and `adcq`. The borrow between the halves was a zero in a register, a `cmp`, a `setb`, a `movzbl` and a subtract (#3489).
 
 ### Added
 

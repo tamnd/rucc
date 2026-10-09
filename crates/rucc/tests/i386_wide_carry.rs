@@ -1,7 +1,8 @@
 //! A `long long` add or subtract on i386, and a `__int128` one on x86-64, as an `add` and an `adc`
 //! or a `sub` and an `sbb`. The halves used to pass the carry as a `cmp`, a `setb`, a `movzbl` and
 //! one more add, and the 32 bit kernel does that on every `u64`. A `__builtin_bswap64` on i386 is
-//! two `bswapl` now as well, where it was forty eight shifts and masks.
+//! two `bswapl` now as well, where it was forty eight shifts and masks, and a negation is `negl`,
+//! `adcl $0` and `negl`.
 
 use std::process::Command;
 
@@ -18,6 +19,16 @@ const QUAD: &str = "\
 typedef unsigned __int128 u128;
 u128 add(u128 a, u128 b) { return a + b; }
 u128 sub(u128 a, u128 b) { return a - b; }
+";
+
+const NEG: &str = "\
+typedef unsigned long long u64;
+u64 neg(u64 a) { return -a; }
+u64 zero(u64 a) { u64 z = 0; return z - a; }
+";
+
+const QUAD_NEG: &str = "\
+unsigned __int128 neg(unsigned __int128 a) { return -a; }
 ";
 
 const SWAP: &str = "\
@@ -60,6 +71,23 @@ fn an_int128_sum_carries_in_the_flag() {
         assert_eq!(text.matches("\tadcq\t").count(), 1, "{level}\n{text}");
         assert_eq!(text.matches("\tsbbq\t").count(), 1, "{level}\n{text}");
     }
+}
+
+/// gcc's `negl`, `adcl $0` and `negl`, since the `neg` of the low word leaves the borrow in the
+/// carry flag.
+#[test]
+fn a_long_long_negation_carries_in_the_flag() {
+    for level in ["-O1", "-O2", "-Os"] {
+        let text = assembly("neg", "i686-unknown-linux-gnu", NEG, level);
+        assert!(!text.contains("setb"), "{level}: the borrow is still a byte\n{text}");
+        assert_eq!(text.matches("\tnegl\t").count(), 4, "{level}\n{text}");
+        assert_eq!(text.matches("\tadcl\t$0,").count(), 2, "{level}\n{text}");
+        assert!(!text.contains("movl\t$0,"), "{level}: the zero it was asked against\n{text}");
+    }
+    let text = assembly("quad-neg", "x86_64-unknown-linux-gnu", QUAD_NEG, "-O2");
+    assert!(!text.contains("setb"), "{text}");
+    assert_eq!(text.matches("\tnegq\t").count(), 2, "{text}");
+    assert_eq!(text.matches("\tadcq\t$0,").count(), 1, "{text}");
 }
 
 #[test]
