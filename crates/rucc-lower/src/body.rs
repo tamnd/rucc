@@ -5621,25 +5621,30 @@ impl<'u> Body<'_, 'u> {
             owns,
             restrict: place.restrict,
             reverse,
-            first: closest.filter(|_| byte == 0),
+            // A member that may run past its end at the start of its record has nothing a mark
+            // would change, since what is under it leaves it all the room it has.
+            first: closest.filter(|&size| byte == 0 && size != 0),
             ..Place::new(Where::Addr(addr), ty)
         }
     }
 
     /// How long a member is for the questions about the closest member, where its type says.
     ///
-    /// Not for a member of a union, nor for an array at the end of a structure, which a program
-    /// may allocate past the end of: which of those count is `-fstrict-flex-arrays` and the
-    /// member's own attribute, which the checker reads, so the IR is told nothing and answers
-    /// with the whole object. Nothing for a member with no bytes either, since the kernel puts
-    /// those in the middle of a structure as markers to copy from and up to. Nor for a record
-    /// that ends in a flexible array, which is how the program reaches past it.
+    /// Nothing for a member of a union, which leaves the question to whatever holds the union, and
+    /// nothing for a member with no bytes, since the kernel puts those in the middle of a structure
+    /// as markers to copy from and up to. An array at the end of a structure, which a program may
+    /// allocate past the end of, is zero: which of those count is `-fstrict-flex-arrays` and the
+    /// member's own attribute, which the checker reads, so the IR is told only that the member does
+    /// not bound the answer. A record that ends in a flexible array is zero for the same reason,
+    /// since that is how the program reaches past it. A zero is in the member under it where that
+    /// has room for it and is the whole object where it has none, which is what bcachefs's
+    /// `bkey_xattr_init` clears `v` through after `container_of` on the member before it.
     fn closest(&self, kind: RecordKind, last: bool, ty: TypeId) -> Option<u32> {
-        if kind == RecordKind::Union
-            || last && is_array(self.types(), ty)
-            || self.types().ends_flexible(ty)
-        {
+        if kind == RecordKind::Union {
             return None;
+        }
+        if last && is_array(self.types(), ty) || self.types().ends_flexible(ty) {
+            return Some(0);
         }
         let size = repr::size_of(self.types(), self.target(), ty);
         u32::try_from(size).ok().filter(|&size| size != 0)

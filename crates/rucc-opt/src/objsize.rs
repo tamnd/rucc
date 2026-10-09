@@ -56,7 +56,10 @@
 //! for stepping to a member says, as `Extra::Member`. An address the walk finds to be one of
 //! those, or one a constant further on, is in that member, which is how `strcpy (inst.buf, s)`
 //! asks about the sixteen bytes of `buf` once the fortified `strcpy` is inlined, where gcc asks
-//! the same. Where the walk gets to an object without passing one, the whole object is an answer
+//! the same. A member of zero is one that may run past its end, an array at the end of a structure
+//! or a record that ends in a flexible array. An address in one is in the member under it where
+//! that leaves any room, and is asked about as the whole object where it leaves none, which is
+//! what `container_of` on one member and a step to another gives. Where the walk gets to an object without passing one, the whole object is an answer
 //! no smaller than the member for the largest, so the first kind's answer stands for the second,
 //! and for the smallest it could be too big, so there the fourth kind is not known. A step whose
 //! count the program worked out, which lowering marks `counted`, is not taken off the member,
@@ -413,9 +416,24 @@ impl Walk<'_> {
                         both(then, self.left(other, ask, depth, on), largest)
                     }
                     // The start of a member, which is the closest object to an address in it.
-                    Opcode::PtrAdd if ask.closest && matches!(data.extra, Extra::Member(_)) => {
+                    Opcode::PtrAdd
+                        if ask.closest
+                            && matches!(data.extra, Extra::Member(size) if size != 0) =>
+                    {
                         let Extra::Member(size) = data.extra else { return Err(()) };
                         Ok(Some(u64::from(size)))
+                    }
+                    // A member that may run past its end is in the member under it where that
+                    // has room left for it. One that has none is not in it at all: the program
+                    // reached it from another member, as `container_of` does, and the closest
+                    // object is the whole one.
+                    Opcode::PtrAdd if ask.closest && data.extra == Extra::Member(0) => {
+                        match self.stepped(inst, ask, depth, on) {
+                            Ok(Some(0)) if largest => {
+                                self.stepped(inst, Ask { closest: false, ..ask }, depth, on)
+                            }
+                            other => other,
+                        }
                     }
                     // An object reached without passing the start of a member, which for the
                     // smallest answer about the closest member may be too big.
@@ -424,34 +442,7 @@ impl Walk<'_> {
                     {
                         Err(())
                     }
-                    Opcode::PtrAdd => {
-                        let base = *args.first().ok_or(())?;
-                        let count = *args.get(1).ok_or(())?;
-                        let (imm, ty) = self.number(count, 4).ok_or(())?;
-                        let step = u64::try_from(imm.signed(ty)).map_err(|_| ())?;
-                        // A count the program worked out, even one that comes to a constant, is
-                        // not known when gcc's early pass asks about the member, so it answers
-                        // with all of the member and the step is taken off only what is left of
-                        // the whole object. metronomefb clears `args + i` with `i` one and a size
-                        // that runs into the `csum` after it, and gcc says nothing.
-                        if ask.closest && largest && data.flags.contains(Flags::COUNTED) {
-                            let Some(member) = self.left(base, ask, depth, on)? else {
-                                return Ok(None);
-                            };
-                            let whole = Ask { closest: false, ..ask };
-                            return Ok(Some(match self.left(value, whole, depth, on) {
-                                Ok(Some(whole)) => member.min(whole),
-                                _ => member,
-                            }));
-                        }
-                        match self.left(base, ask, depth, on)? {
-                            Some(left) => Ok(Some(left.saturating_sub(step))),
-                            // A pointer moved forward each time round a loop may end up anywhere
-                            // further along, so there is no smallest.
-                            None if !largest && step != 0 => Err(()),
-                            None => Ok(None),
-                        }
-                    }
+                    Opcode::PtrAdd => self.stepped(inst, ask, depth, on),
                     Opcode::Alloca => match args.first() {
                         None => {
                             let Extra::Mem(mem) = data.extra else { return Err(()) };
@@ -495,6 +486,40 @@ impl Walk<'_> {
                     _ => Err(()),
                 }
             }
+        }
+    }
+
+    /// How many bytes are left in front of a `ptr_add` of a constant, which is what its base has
+    /// left less the step.
+    fn stepped(&self, inst: Inst, ask: Ask, depth: u32, on: &mut Vec<Value>) -> Left {
+        let largest = ask.largest;
+        let data = &self.func[inst];
+        let args = &self.func[data.args];
+        let value = data.results().next().ok_or(())?;
+        let base = *args.first().ok_or(())?;
+        let count = *args.get(1).ok_or(())?;
+        let (imm, ty) = self.number(count, 4).ok_or(())?;
+        let step = u64::try_from(imm.signed(ty)).map_err(|_| ())?;
+        // A count the program worked out, even one that comes to a constant, is not known when
+        // gcc's early pass asks about the member, so it answers with all of the member and the
+        // step is taken off only what is left of the whole object. metronomefb clears `args + i`
+        // with `i` one and a size that runs into the `csum` after it, and gcc says nothing.
+        if ask.closest && largest && data.flags.contains(Flags::COUNTED) {
+            let Some(member) = self.left(base, ask, depth, on)? else {
+                return Ok(None);
+            };
+            let whole = Ask { closest: false, ..ask };
+            return Ok(Some(match self.left(value, whole, depth, on) {
+                Ok(Some(whole)) => member.min(whole),
+                _ => member,
+            }));
+        }
+        match self.left(base, ask, depth, on)? {
+            Some(left) => Ok(Some(left.saturating_sub(step))),
+            // A pointer moved forward each time round a loop may end up anywhere further along,
+            // so there is no smallest.
+            None if !largest && step != 0 => Err(()),
+            None => Ok(None),
         }
     }
 
@@ -1455,6 +1480,43 @@ block0:
         answer(&mut module, &names, Some(&[]), Pic::Executable, true);
         let text = rucc_ir::print(&module, &names);
         assert!(!text.contains("member"), "{text}");
+    }
+
+    /// A member of zero may run past its end. Where the member under it has no room left for it
+    /// the program reached it from another member, and it is asked about as the whole object.
+    /// That is `&k->v` in bcachefs's `bkey_xattr_init`, where `k` is worked out from `&_k->k` and
+    /// `v` ends in a flexible array. Where there is room it is in that member, as an array at the
+    /// end of a nested structure is, and the smallest closest answer stays not known.
+    #[test]
+    fn a_member_that_may_run_past_its_end_is_the_whole_object() {
+        let body = "
+global @g : bytes 40 = { zero 40 }, align 8, linkage(external)
+
+func @f(), linkage(external) {
+block0:
+    %0 = global_addr @g
+    %1 = iconst.i64 0
+    %2 = ptr_add %0, %1, member 32
+    %3 = iconst.i64 32
+    %4 = ptr_add %2, %3, member 0
+    %5 = object_size.i64 %4, kind 1
+    call @use(%5) : (i64)
+    %6 = object_size.i64 %4, kind 0
+    call @use(%6) : (i64)
+    %7 = object_size.i64 %4, kind 3
+    call @use(%7) : (i64)
+    %8 = iconst.i64 2
+    %9 = ptr_add %4, %8
+    %10 = object_size.i64 %9, kind 1
+    call @use(%10) : (i64)
+    %11 = iconst.i64 8
+    %12 = ptr_add %2, %11, member 0
+    %13 = object_size.i64 %12, kind 1
+    call @use(%13) : (i64)
+    return
+}
+";
+        assert_eq!(answers(body, true), [8, 8, 0, 6, 24]);
     }
 
     /// A `ptr_add` whose count the program worked out leaves the closest kinds with all of the

@@ -9,6 +9,13 @@
 //! answer was what was left of the whole structure, and `lib/test_fortify` builds that the kernel
 //! expects to be refused went through.
 //!
+//! A member that may run past its end, an array at the end of a structure or a record that ends in
+//! a flexible array, is answered as the whole object even where the address it is in was worked
+//! out from another member. bcachefs's `bkey_xattr_init` takes `container_of` on `&_k->k` and
+//! clears the `v` after it, and when the answer was what was left of `k`, which is nothing, the
+//! fortified `memset` refused the build. pm8001 casts the address of a pointer member to a structure
+//! and copies into the flexible array at its end, which is the same question.
+//!
 //! Every answer below is what gcc 16 gives at `-O2` for the same source. Each one is checked by a
 //! call to a function declared with `error`, under a test the right answer makes false, so a
 //! wrong answer is a refused build that names it.
@@ -24,6 +31,14 @@ struct o *gp;
 struct fl { int n; char d[]; };
 struct mid { long a; struct fl in; };
 struct holder { int x; struct mid m; } *hp;
+struct key { long a, b, c; char t; };
+struct ki { struct key k; long v[]; } *kp;
+struct fx { char t, n; short l; char name[]; };
+struct kx { union { struct key k; struct ki k_i; }; struct fx v; };
+struct payload { int sig; short id; long *specific; };
+struct control { int ret, len; char buffer[]; };
+extern void *grab(size_t) __attribute__((alloc_size(1)));
+#define container_of(p, T, m) ((T *)((char *)(p) - __builtin_offsetof(T, m)))
 #define I static inline __attribute__((always_inline))
 I size_t q1(const void *p) { return __builtin_object_size(p, 1); }
 I size_t q3(const void *p) { return __builtin_object_size(p, 3); }
@@ -54,6 +69,15 @@ void f(int i) {
     WANT(wrong_counted, q1(gp->buf + k), 16);
     WANT(wrong_counted_object, q1(inst.buf + k), 16);
     WANT(wrong_counted_whole, q1((char *)&inst + 30 + k), 9);
+    struct kx *open = container_of(&kp->k, struct kx, k);
+    WANT(wrong_open_unknown, q1(&open->v), -1);
+    struct ki *heap = grab(64);
+    struct kx *held = container_of(&heap->k, struct kx, k);
+    WANT(wrong_open_heap, q1(&held->v), 32);
+    WANT(wrong_open_name, q1(held->v.name), 28);
+    struct payload *pay = grab(128);
+    struct control *ctl = (struct control *)&pay->specific;
+    WANT(wrong_cast_flex, q1(ctl->buffer), 112);
 }
 "#;
 
