@@ -2257,6 +2257,16 @@ pub fn parse_args(args: &[String]) -> Result<Action, CliError> {
                     "`{form}` is not a form of -fsafety-restrict. The flag takes no value."
                 )));
             }
+            // Row T9, from section 8.7 of document 08. A bare flag for the reason the one above
+            // is: there is one sweep, and it runs at exit.
+            "-fsafety-leaks" => opts.leaks = rucc_session::Leaks::Exit,
+            "-fno-safety-leaks" => opts.leaks = rucc_session::Leaks::Off,
+            _ if arg.starts_with("-fsafety-leaks=") => {
+                let form = &arg["-fsafety-leaks=".len()..];
+                return Err(err(format!(
+                    "`{form}` is not a form of -fsafety-leaks. The flag takes no value."
+                )));
+            }
             // Section 9.5's races, which take a value because the section gives them three modes
             // and the difference between two of them is which classes get reported rather than how
             // much is recorded. `-fno-` is the same as `=off` and is spelled out here for the same
@@ -6898,6 +6908,21 @@ mod tests {
         assert_eq!(opts.safety, rucc_session::Safety::Off);
 
         let e = parse_args(&args(&["-fsafety-restrict=blocks", "a.c"])).unwrap_err();
+        assert!(e.message.contains("takes no value"), "{}", e.message);
+    }
+
+    #[test]
+    fn safety_leaks_is_a_bare_flag_and_is_off_unless_asked_for() {
+        let (opts, _) = compile(&["a.c"]);
+        assert_eq!(opts.leaks, rucc_session::Leaks::Off);
+
+        let (opts, _) = compile(&["-fsafety=detect", "-fsafety-leaks", "a.c"]);
+        assert_eq!(opts.leaks, rucc_session::Leaks::Exit);
+
+        let (opts, _) = compile(&["-fsafety-leaks", "-fno-safety-leaks", "a.c"]);
+        assert_eq!(opts.leaks, rucc_session::Leaks::Off);
+
+        let e = parse_args(&args(&["-fsafety-leaks=exit", "a.c"])).unwrap_err();
         assert!(e.message.contains("takes no value"), "{}", e.message);
     }
 

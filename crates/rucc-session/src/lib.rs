@@ -450,6 +450,46 @@ impl fmt::Display for Promise {
     }
 }
 
+/// Whether the program looks for leaks when it exits, from `-fsafety-leaks`.
+///
+/// Row T9 of document 03 and section 8.7 of document 08. A leak is not an access that went wrong,
+/// it is a `free` that never happened, so nothing in the program is checked differently under this
+/// flag. What it changes is that the program asks the runtime to walk the heap once at exit and say
+/// which allocations nothing points at any more.
+///
+/// Off by default, as section 15 has it. A program that exits without freeing what it still holds
+/// is doing nothing wrong, and plenty of them are written that way on purpose, so a sweep that ran
+/// on every build would be reporting style rather than mistakes.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Default)]
+pub enum Leaks {
+    /// No `-fsafety-leaks`. Nothing is swept.
+    #[default]
+    Off,
+    /// `-fsafety-leaks`. The heap is swept once, when the program exits.
+    Exit,
+}
+
+impl Leaks {
+    /// The spelling this is asked for by, without the flag in front of it.
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Leaks::Off => "off",
+            Leaks::Exit => "exit",
+        }
+    }
+
+    /// Whether the program sweeps the heap at exit.
+    pub const fn sweeps(self) -> bool {
+        matches!(self, Leaks::Exit)
+    }
+}
+
+impl fmt::Display for Leaks {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str(self.as_str())
+    }
+}
+
 /// How far a name reaches outside a shared library when nothing in the source said.
 ///
 /// `-fvisibility=`, which is written on every cmake project that cares about its exports and is
@@ -2047,6 +2087,12 @@ pub struct Options {
     /// Means nothing unless `safety` asked for a tier. Off by default, and [`Races`] says why that
     /// one is not a cost argument like the others.
     pub races: Races,
+    /// Whether the program looks for leaks when it exits, from `-fsafety-leaks`.
+    ///
+    /// Means nothing unless `safety` asked for a tier that reports, which is detect or kernel.
+    /// Enforce has no row for T9 in document 03's matrix, since a leak is not something a running
+    /// program can be stopped in the middle of.
+    pub leaks: Leaks,
     /// What to produce.
     pub emit: EmitKind,
     /// Whether to emit debug information.
@@ -2815,6 +2861,7 @@ impl Options {
             subobject: Subobject::default(),
             promise: Promise::default(),
             races: Races::default(),
+            leaks: Leaks::default(),
             emit: EmitKind::default(),
             debug_info: false,
             switches: Vec::new(),

@@ -97,6 +97,10 @@ pub(crate) const NO_ELIMINATION: &[&str] = &[
 /// The line every report starts with, which is what says one happened at all.
 pub(crate) const BANNER: &str = "rucc: memory safety violation";
 
+/// The line a leak report starts with, which is not [`BANNER`] because a leak is not a violation:
+/// the program is told about it at exit and carries on leaving the way it was.
+pub(crate) const LEAK_BANNER: &str = "rucc: memory leak";
+
 /// What a case says should happen to it.
 #[derive(Debug)]
 enum Verdict {
@@ -104,6 +108,9 @@ enum Verdict {
     Refuse { judgement: u8, says: Vec<String> },
     /// Nothing at all, and an exit status of zero.
     Allow,
+    /// A leak report at exit with every one of these substrings in it, no violation, and the
+    /// status the program would have had anyway, which for every case here is zero.
+    Leak { says: Vec<String> },
 }
 
 /// One program and what it expects.
@@ -189,6 +196,7 @@ pub(crate) fn safety() -> Result<()> {
     let mut problems = Vec::new();
     let mut refused = 0;
     let mut silent = 0;
+    let mut leaked = 0;
     let mut gaps = 0;
     let mut blocked = 0;
     for case in &cases {
@@ -206,12 +214,13 @@ pub(crate) fn safety() -> Result<()> {
             Ok(()) => match case.verdict {
                 Verdict::Refuse { .. } => refused += 1,
                 Verdict::Allow => silent += 1,
+                Verdict::Leak { .. } => leaked += 1,
             },
         }
     }
     let counted = coverage(&cases);
     println!(
-        "safety: {refused} refused, {silent} silent, {gaps} known gaps, {blocked} not yet \
+        "safety: {refused} refused, {silent} silent, {leaked} leaks reported, {gaps} known gaps, {blocked} not yet \
          buildable, {counted} rows covered"
     );
     if problems.is_empty() {
@@ -455,6 +464,7 @@ impl Case {
         let mut judgement = None;
         let mut says = Vec::new();
         let mut allow = false;
+        let mut leak = false;
         let mut flags = Vec::new();
         let mut links = Vec::new();
         let mut with = Vec::new();
@@ -490,6 +500,7 @@ impl Case {
                 "with" => with.push(value.to_owned()),
                 "summary" => summary.push(value.to_owned()),
                 "allow" => allow = true,
+                "leak" => leak = true,
                 "gap" => gap = Some(value.to_owned()),
                 "blocked" => blocked = Some(value.to_owned()),
                 other => {
@@ -501,7 +512,13 @@ impl Case {
         let Some(row) = row else {
             return Err(Error::Io(format!("{name}: no `row:`, so nothing says what it is for")));
         };
+        if leak && (judgement.is_some() || allow) {
+            return Err(Error::Io(format!(
+                "{name}: `leak` with `refuse` or `allow`, and a case expects one thing"
+            )));
+        }
         let verdict = match (judgement, allow) {
+            (None, false) if leak => Verdict::Leak { says },
             (Some(judgement), false) => Verdict::Refuse { judgement, says },
             (None, true) if says.is_empty() => Verdict::Allow,
             (None, true) => {
@@ -511,10 +528,10 @@ impl Case {
                 return Err(Error::Io(format!("{name}: both `refuse` and `allow`")));
             }
             (None, false) => {
-                return Err(Error::Io(format!("{name}: neither `refuse` nor `allow`")));
+                return Err(Error::Io(format!("{name}: none of `refuse`, `allow` and `leak`")));
             }
         };
-        if gap.is_some() && matches!(verdict, Verdict::Allow) {
+        if gap.is_some() && matches!(verdict, Verdict::Allow | Verdict::Leak { .. }) {
             return Err(Error::Io(format!(
                 "{name}: a `gap` on a case that expects nothing to happen says nothing"
             )));
@@ -589,8 +606,36 @@ impl Case {
                 }
                 Ok(())
             }
-            Verdict::Allow => {
+            Verdict::Leak { says } => {
                 if reported {
+                    return Err(format!(
+                        "{name}: a violation where only a leak was expected\n{}",
+                        indent(&ran.output)
+                    ));
+                }
+                if !ran.output.contains(LEAK_BANNER) {
+                    return Err(format!(
+                        "{name}: no leak report, and it exited {status}\n{}",
+                        indent(&ran.output)
+                    ));
+                }
+                for want in says {
+                    if !ran.output.contains(want.as_str()) {
+                        return Err(format!(
+                            "{name}: the leak report does not say `{want}`\n{}",
+                            indent(&ran.output)
+                        ));
+                    }
+                }
+                // Reported and nothing else: a sweep that changed how the program left would be
+                // a sweep nobody could leave turned on.
+                if status != 0 {
+                    return Err(format!("{name}: reported a leak and then exited {status}"));
+                }
+                Ok(())
+            }
+            Verdict::Allow => {
+                if reported || ran.output.contains(LEAK_BANNER) {
                     return Err(format!(
                         "{name}: a false positive against a program doing nothing wrong\n{}",
                         indent(&ran.output)
@@ -997,7 +1042,7 @@ mod tests {
 
         std::fs::write(&path, "/* row: T1 */\nint main(void) { return 0; }\n").expect("write");
         let said = Case::read(&path).expect_err("no verdict").to_string();
-        assert!(said.contains("neither `refuse` nor `allow`"), "{said}");
+        assert!(said.contains("none of `refuse`, `allow` and `leak`"), "{said}");
     }
 
     #[test]
@@ -1073,6 +1118,34 @@ mod tests {
         assert!(quiet.judge(&Ran { output: String::new(), status: Some(0) }).is_ok());
         assert!(quiet.judge(&Ran { output: BANNER.to_owned(), status: Some(134) }).is_err());
         assert!(quiet.judge(&Ran { output: String::new(), status: Some(139) }).is_err());
+    }
+
+    #[test]
+    fn a_leak_case_wants_the_leak_report_and_nothing_else() {
+        let leaky = case(
+            "a-leak",
+            "/* row: T9 */\n/* flags: -fsafety-leaks */\n/* leak */\n/* says: 64 bytes */\n",
+        );
+        assert!(matches!(leaky.verdict, Verdict::Leak { .. }));
+        let ran = |output: &str, status| Ran { output: output.to_owned(), status: Some(status) };
+        assert!(leaky.judge(&ran("rucc: memory leak\n  64 bytes at 0x10", 0)).is_ok());
+        assert!(leaky.judge(&ran("rucc: memory leak\n  32 bytes at 0x10", 0)).is_err());
+        assert!(leaky.judge(&ran("", 0)).is_err());
+        assert!(leaky.judge(&ran("rucc: memory leak\n  64 bytes at 0x10", 1)).is_err());
+        let both = format!("{BANNER}\nrucc: memory leak\n  64 bytes");
+        assert!(leaky.judge(&ran(&both, 134)).is_err());
+
+        // A case that expects nothing is held to the leak banner too, so a sweep that calls a
+        // reachable block lost is a false positive like any other.
+        let quiet = case("a-kept", "/* row: T9 */\n/* flags: -fsafety-leaks */\n/* allow */\n");
+        assert!(quiet.judge(&ran("rucc: memory leak\n  8 bytes at 0x10", 0)).is_err());
+
+        let dir = std::env::temp_dir().join("rucc-safety-leak");
+        std::fs::create_dir_all(&dir).expect("a temporary directory");
+        let path = dir.join("a-confused-case.c");
+        std::fs::write(&path, "/* row: T9 */\n/* leak */\n/* allow */\n").expect("write");
+        let said = Case::read(&path).expect_err("two verdicts").to_string();
+        assert!(said.contains("`leak` with"), "{said}");
     }
 
     #[test]
