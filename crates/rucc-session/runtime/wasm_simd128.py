@@ -273,6 +273,12 @@ def one(e, name="x", of="a"):
     return f"{vt(e)} {name} = ({vt(e)}){of};"
 
 
+def lanes_of_half(e, first):
+    """The half of a with lanes of e that starts at lane first, as a vector of 8 bytes."""
+    picks = ", ".join(str(first + i) for i in range(lanes(e) // 2))
+    return f"__builtin_shufflevector(({vt(e)})a, ({vt(e)})a, {picks})"
+
+
 def two(e, f=None):
     f = f or e
     return f"{one(e)} {one(f, 'y', 'b')}"
@@ -296,9 +302,10 @@ INTRO = """
  * computes is what the instruction computes. For that reason the header does not need
  * `-msimd128`, and a module from it runs on an engine with no SIMD. With `-msimd128`, a function
  * that clang writes as a `__builtin_wasm_*` or a `__builtin_elementwise_*` builtin calls the same
- * builtin, which is one instruction, as in clang. The conversions of `int` lanes to `float` lanes
- * and the extending loads are a `__builtin_convertvector`, as in clang, with or without
- * `-msimd128`.
+ * builtin, which is one instruction, as in clang. The conversions, the extends and the extending
+ * loads are a `__builtin_convertvector`, as in clang, with or without `-msimd128`. A conversion
+ * of a half reads the half with `__builtin_shufflevector`, where clang writes a vector of the
+ * lanes of the half, and the two give the same lanes.
  *
  * Without `-mrelaxed-simd`, each relaxed function gives one of the answers that the relaxed-simd
  * proposal allows, and the same one on every engine: the multiply add is not fused, the lane
@@ -601,8 +608,13 @@ def emit():
             "v128_t a",
             f"return (v128_t)__builtin_convertvector(({vt(e)})a, {vt('f32')});",
         )
-    lanewise("f64", "wasm_f64x2_convert_low_i32x4", "v128_t a", one("i32"), "x[i]")
-    lanewise("f64", "wasm_f64x2_convert_low_u32x4", "v128_t a", one("u32"), "x[i]")
+    for e in ("i32", "u32"):
+        fn(
+            "v128_t",
+            f"wasm_f64x2_convert_low_{e}x4",
+            "v128_t a",
+            f"return (v128_t)__builtin_convertvector({lanes_of_half(e, 0)}, {vt('f64')});",
+        )
     for e, sign in (("i32", "s"), ("u32", "u")):
         lanewise(
             e,
@@ -618,10 +630,19 @@ def emit():
             one("f64"),
             f"i < 2 ? __builtin_wasm_trunc_saturate_{sign}_i32_f64(x[i]) : 0",
         )
-    lanewise(
-        "f32", "wasm_f32x4_demote_f64x2_zero", "v128_t a", one("f64"), "i < 2 ? (float)x[i] : 0"
+    fn(
+        "v128_t",
+        "wasm_f32x4_demote_f64x2_zero",
+        "v128_t a",
+        "return (v128_t)__builtin_convertvector(__builtin_shufflevector((__f64x2)a, "
+        f"(__f64x2){{0, 0}}, 0, 1, 2, 3), {vt('f32')});",
     )
-    lanewise("f64", "wasm_f64x2_promote_low_f32x4", "v128_t a", one("f32"), "x[i]")
+    fn(
+        "v128_t",
+        "wasm_f64x2_promote_low_f32x4",
+        "v128_t a",
+        f"return (v128_t)__builtin_convertvector({lanes_of_half('f32', 0)}, {vt('f64')});",
+    )
     for e in ("i8", "u8", "i16", "u16"):
         src = wide(st(e))
         lo, hi = bounds(e)
@@ -636,8 +657,13 @@ def emit():
     for e in ("i16", "u16", "i32", "u32", "i64", "u64"):
         n = narrow(e)
         k = lanes(e)
-        lanewise(e, f"{vname(e)}_extend_low_{n}x{lanes(n)}", "v128_t a", one(n), "x[i]")
-        lanewise(e, f"{vname(e)}_extend_high_{n}x{lanes(n)}", "v128_t a", one(n), f"x[i + {k}]")
+        for side, first in (("low", 0), ("high", k)):
+            fn(
+                "v128_t",
+                f"{vname(e)}_extend_{side}_{n}x{lanes(n)}",
+                "v128_t a",
+                f"return (v128_t)__builtin_convertvector({lanes_of_half(n, first)}, {vt(e)});",
+            )
     for e in ("i16", "u16", "i32", "u32", "i64", "u64"):
         n = narrow(e)
         k = lanes(e)

@@ -886,3 +886,126 @@ fn shufflevector_picks_each_lane() {
     }
     std::fs::remove_dir_all(dir).unwrap();
 }
+
+/// Conversions of a half of a vector, from the header and written in a program.
+const HALVES: &str = "\
+#include <wasm_simd128.h>
+typedef short v8s __attribute__((vector_size(16)));
+typedef int v4s __attribute__((vector_size(16)));
+v128_t high8(v128_t a) { return wasm_i16x8_extend_high_i8x16(a); }
+v128_t low16(v128_t a) { return wasm_u32x4_extend_low_u16x8(a); }
+v128_t high32(v128_t a) { return wasm_u64x2_extend_high_u32x4(a); }
+v128_t convert(v128_t a) { return wasm_f64x2_convert_low_u32x4(a); }
+v128_t promote(v128_t a) { return wasm_f64x2_promote_low_f32x4(a); }
+v128_t demote(v128_t a) { return wasm_f32x4_demote_f64x2_zero(a); }
+v4s own(v8s a) { return __builtin_convertvector(__builtin_shufflevector(a, a, 4, 5, 6, 7), v4s); }
+";
+
+/// With `-msimd128`, each conversion of a half in [`HALVES`] is one instruction on the whole
+/// vector, as clang 23 writes it.
+#[test]
+fn with_simd128_a_conversion_of_a_half_is_one_instruction() {
+    let out = assembly(HALVES, &["-msimd128"]);
+    assert!(out.status.success(), "{}", String::from_utf8_lossy(&out.stderr));
+    let text = String::from_utf8(out.stdout).unwrap();
+    let want = [
+        ("high8", "i16x8.extend_high_i8x16_s"),
+        ("low16", "i32x4.extend_low_i16x8_u"),
+        ("high32", "i64x2.extend_high_i32x4_u"),
+        ("convert", "f64x2.convert_low_i32x4_u"),
+        ("promote", "f64x2.promote_low_f32x4"),
+        ("demote", "f32x4.demote_f64x2_zero"),
+        ("own", "i32x4.extend_high_i16x8_s"),
+    ];
+    for (name, op) in want {
+        let code: Vec<&str> = body(&text, name)
+            .into_iter()
+            .filter(|op| !op.starts_with('.') && *op != "return")
+            .collect();
+        assert_eq!(code, ["local.get\t0", op], "{name}");
+    }
+}
+
+/// A program that compares each conversion of a half with a cast of each lane, for the shapes
+/// that wasm has an instruction for and for some near them that it does not: a half that is not
+/// in order, a `convert_low` of the high half, and a demote with lanes after the two `double`
+/// lanes that are not zero. The second operand of a shuffle that is not read still has its
+/// effect.
+const HALVED: &str = "\
+#define V(n, t, s) typedef t n __attribute__((vector_size(s)));
+V(v16s, signed char, 16) V(v16u, unsigned char, 16) V(v8s, short, 16) V(v8u, unsigned short, 16)
+V(v4s, int, 16) V(v4u, unsigned, 16) V(v2s, long long, 16) V(v2u, unsigned long long, 16)
+V(v4f, float, 16) V(v2d, double, 16) V(v4d, double, 32)
+static const int edge[] = {0, 1, -1, 127, -128, 255, 32767, -32768, 65535, 100000, -7, 42};
+static int bad, count;
+#define LANES(v) ((int)(sizeof (v) / sizeof (v)[0]))
+#define CHECK(name, from, into, t, ...) \\
+    __attribute__((noinline)) static into name(from a) { \\
+        return __builtin_convertvector(__builtin_shufflevector(a, a, __VA_ARGS__), into); } \\
+    static void check_##name(void) { \\
+        static const int pick[] = {__VA_ARGS__}; \\
+        from a; for (int i = 0; i < LANES(a); i++) a[i] = (t)edge[(i * 5 + __LINE__) % 12]; \\
+        into r = name(a); \\
+        for (int i = 0; i < LANES(r); i++) bad |= r[i] != (__typeof__(r[0]))a[pick[i]]; }
+CHECK(low8, v16s, v8s, signed char, 0, 1, 2, 3, 4, 5, 6, 7)
+CHECK(high8, v16s, v8s, signed char, 8, 9, 10, 11, 12, 13, 14, 15)
+CHECK(high8u, v16u, v8u, unsigned char, 8, 9, 10, 11, 12, 13, 14, 15)
+CHECK(low16, v8s, v4s, short, 0, 1, 2, 3)
+CHECK(high16u, v8u, v4u, unsigned short, 4, 5, 6, 7)
+CHECK(low32, v4s, v2s, int, 0, 1)
+CHECK(high32u, v4u, v2u, unsigned, 2, 3)
+CHECK(convert, v4s, v2d, int, 0, 1)
+CHECK(convertu, v4u, v2d, unsigned, 0, 1)
+CHECK(converthigh, v4s, v2d, int, 2, 3)
+CHECK(promote, v4f, v2d, float, 0, 1)
+CHECK(order, v8s, v4s, short, 1, 0, 3, 2)
+CHECK(narrow, v8s, v4u, short, 4, 5, 6, 7)
+__attribute__((noinline)) static v4f demote(v2d a) {
+    return __builtin_convertvector(__builtin_shufflevector(a, (v2d){0, 0}, 0, 1, 2, 3), v4f); }
+__attribute__((noinline)) static v4f demote_not_zero(v2d a) {
+    return __builtin_convertvector(__builtin_shufflevector(a, (v2d){0, 2}, 0, 1, 2, 3), v4f); }
+__attribute__((noinline)) static v4s effect(v8s a, v8s b) {
+    return __builtin_convertvector(__builtin_shufflevector(a, (count++, b), 4, 5, 6, 7), v4s); }
+int main(void) {
+    check_low8(); check_high8(); check_high8u(); check_low16(); check_high16u(); check_low32();
+    check_high32u(); check_convert(); check_convertu(); check_converthigh(); check_promote();
+    check_order(); check_narrow();
+    v2d d = {1.5, -2.25};
+    v4f f = demote(d);
+    bad |= f[0] != 1.5f || f[1] != -2.25f || f[2] != 0 || f[3] != 0;
+    f = demote_not_zero(d);
+    bad |= f[0] != 1.5f || f[1] != -2.25f || f[2] != 0 || f[3] != 2;
+    v8s s = {1, 2, 3, 4, -5, 6, -7, 8};
+    v4s w = effect(s, s);
+    bad |= w[0] != -5 || w[1] != 6 || w[2] != -7 || w[3] != 8 || count != 1;
+    return bad;
+}
+";
+
+#[test]
+fn a_conversion_of_a_half_casts_each_lane() {
+    let dir = std::env::temp_dir().join(format!("rucc-wasm-halves-{}", std::process::id()));
+    std::fs::create_dir_all(&dir).unwrap();
+    std::fs::write(dir.join("check.c"), HALVED).unwrap();
+    let rucc = PathBuf::from(env!("CARGO_BIN_EXE_rucc"));
+    // On the host first, where each conversion is a lane at a time.
+    for level in ["-O0", "-O2"] {
+        run(&rucc, &[level, "check.c", "-o", "check"], &dir);
+        let status = Command::new(dir.join("check")).status().unwrap();
+        assert!(status.success(), "{level}: {status}");
+    }
+    let wasmtime = on_path("wasmtime");
+    if std::env::var_os("WASI_SDK_PATH").is_none() || wasmtime.is_none() {
+        eprintln!("WASI_SDK_PATH is not set or there is no wasmtime, so wasm was not run");
+        std::fs::remove_dir_all(dir).unwrap();
+        return;
+    }
+    for flags in [&["-O0"][..], &["-O2"], &["-O0", "-msimd128"], &["-O2", "-msimd128"]] {
+        let link = ["--target=wasm32-wasip1", "-fno-builtins-lib", "check.c", "-o", "check.wasm"];
+        run(&rucc, &[&link[..], flags].concat(), &dir);
+        let status =
+            Command::new(wasmtime.as_ref().unwrap()).arg(dir.join("check.wasm")).status().unwrap();
+        assert!(status.success(), "{flags:?}: {status}");
+    }
+    std::fs::remove_dir_all(dir).unwrap();
+}
