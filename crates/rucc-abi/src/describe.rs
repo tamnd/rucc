@@ -450,6 +450,13 @@ pub enum Test {
         /// The largest vector that travels this way.
         limit: u64,
     },
+    /// A GNU vector, or a structure or a union that holds only one, past the `...`. It finds
+    /// nothing.
+    ///
+    /// The wasm rule for a vector in the variadic area, with `simd128` on or off. clang's `va_arg`
+    /// aligns the pointer up to the alignment of the vector and reads the bytes there, so the
+    /// bytes are in the area and not the address of a copy (tamnd/rucc#3453).
+    VariadicVector,
     /// A `_Complex` of any kind, or an aggregate gcc gives a floating point machine mode, which is
     /// what [`crate::Shape::floating`] says.
     ///
