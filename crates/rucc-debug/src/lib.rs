@@ -59,7 +59,7 @@ mod tree;
 
 pub use crate::line::{Error, Function, Row, Unit, Version, write};
 pub use crate::shape::{
-    Abstract, Bits, Constant, Encoding, Global, Held, Inlined, Local, Member, Param, Place,
+    Abstract, Bits, Call, Constant, Encoding, Global, Held, Inlined, Local, Member, Param, Place,
     Qualifier, Reach, Scope, Shape, Sig, Span, Spot,
 };
 

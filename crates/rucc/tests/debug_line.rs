@@ -310,3 +310,41 @@ fn an_inlined_body_says_where_its_parameters_and_locals_are() {
     assert!(inside.contains("half"), "{text}");
     assert!(inside.contains("DW_AT_location"), "{text}");
 }
+
+/// A function that calls `g` three times, twice with its parameter, which it keeps in a register
+/// the call does not change, and once with a constant.
+#[cfg(target_os = "linux")]
+const CALLING: &str = "\
+int g(int);
+int f(int a) {
+    int r = g(a);
+    return g(a) + g(5) + r;
+}
+";
+
+/// A call whose arguments the caller still knows is a `DW_TAG_call_site`, which says where the
+/// callee returns to and names it, with a `DW_TAG_call_site_parameter` for each argument that says
+/// its register and its value. The callee is not in the unit, so it gets a declaration.
+#[cfg(target_os = "linux")]
+#[test]
+fn a_call_says_what_its_arguments_were() {
+    let dir = fixture("call-sites");
+    std::fs::write(dir.join("one.c"), CALLING).expect("the fixture can be written");
+    build(&dir, &["-g", "-O2"], "one.o");
+    let out = Command::new("readelf")
+        .arg("--debug-dump=info")
+        .arg(dir.join("one.o"))
+        .output()
+        .expect("readelf starts");
+    let _ = std::fs::remove_dir_all(&dir);
+    let text = String::from_utf8_lossy(&out.stdout);
+
+    assert!(text.contains("DW_TAG_call_site"), "{text}");
+    assert!(text.contains("DW_AT_call_return_pc"), "{text}");
+    assert!(text.contains("DW_AT_call_origin"), "{text}");
+    assert!(text.contains("DW_AT_declaration"), "{text}");
+    assert!(text.contains("DW_TAG_call_site_parameter"), "{text}");
+    // The parameter, out of a register the call keeps, and the constant.
+    assert!(text.contains("DW_OP_breg"), "{text}");
+    assert!(text.contains("DW_OP_lit5") || text.contains("DW_OP_constu: 5"), "{text}");
+}

@@ -52,7 +52,7 @@
 //! order the source did not have. One per function costs a `DW_LNE_set_address` and a relocation
 //! each and is correct under every combination of flags there is.
 
-use crate::shape::{Abstract, Global, Inlined, Local, Place, Scope, Shape, Sig};
+use crate::shape::{Abstract, Call, Global, Inlined, Local, Place, Scope, Shape, Sig};
 use crate::tree;
 
 use rucc_object::{Chunk, Info, Reference, Reloc};
@@ -181,6 +181,10 @@ pub struct Function {
     pub tags: Vec<Vec<u8>>,
     /// The bodies the inliner copied into it, each after the copy it is inside. See [`Inlined`].
     pub inlined: Vec<Inlined>,
+    /// The calls it makes that a debugger can learn an argument from, in the order of their
+    /// addresses. See [`Call`]. Only DWARF 5 has a place for them, and with version 4 they are left
+    /// out.
+    pub calls: Vec<Call>,
 }
 
 /// One row of the table: an address, and where the code at it came from.

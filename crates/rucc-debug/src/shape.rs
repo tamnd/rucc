@@ -373,6 +373,26 @@ pub struct Reach {
     pub len: u64,
 }
 
+/// One call a function makes, and what the caller still knows about its arguments while the
+/// callee runs.
+///
+/// This is the other half of a parameter whose value is "what its register held when the function
+/// started". A debugger stopped in the callee reads that value in the caller: it finds the call by
+/// the address the callee returns to and reads the argument from where the caller still keeps it.
+/// It is written as a `DW_TAG_call_site`, which is what gcc writes.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Call {
+    /// How far into the function the callee returns to, which is the first byte after the call.
+    pub returns: u64,
+    /// The name of the function it calls. A debugger checks that the function it is stopped in is
+    /// this one before it believes anything here.
+    pub callee: String,
+    /// The arguments the caller still knows the value of: the register each was passed in, by the
+    /// target's DWARF number, and where the value is at the address the callee returns to. Only a
+    /// register and a constant say a value here.
+    pub args: Vec<(u16, Held)>,
+}
+
 /// Where a local is over the addresses of the function it is in.
 ///
 /// Which of the two a local gets is decided by what lowering did with it rather than by the
