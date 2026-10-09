@@ -111,11 +111,13 @@
 //! the call takes its writes out of the loop along with it, which is section 27.3's store motion
 //! and a different proof.
 
+use std::cell::OnceCell;
+
 use rucc_base::hash::Set;
 use rucc_cost::heuristics;
 use rucc_ir::{Block, Def, Flags, Func, Inst, Opcode, Value};
 
-use crate::alias::{Access, Alias};
+use crate::alias::{Access, Alias, Escapes};
 use crate::cfg::Cfg;
 use crate::dom::{Dominators, PostDominators};
 use crate::live::Liveness;
@@ -209,6 +211,11 @@ impl Pass for Licm {
         // for it anyway is a walk of the whole function, and a function with hundreds of loops
         // side by side in it used to pay that hundreds of times. tamnd/rucc#1015.
         let mut stale: Set<Block> = Set::default();
+        // Which locals escaped, kept for every loop's oracle rather than worked out again by each,
+        // which is a walk of the whole function per loop that asks. A hoist moves instructions and
+        // does nothing else to them, and the escape set is a question about what each instruction
+        // does with its operands, so every loop here would get the same answer. tamnd/rucc#3052.
+        let escapes = OnceCell::new();
         for id in order {
             if loops.blocks(id).iter().any(|block| stale.contains(block)) {
                 // For the same reason, a loop that does share one has the numbers worked out
@@ -237,6 +244,7 @@ impl Pass for Licm {
                 loops,
                 invented: &invented,
                 folded: &folded,
+                escapes: &escapes,
             };
             if job.run(func, &mut pressure, id, fuel, &mut stats) {
                 // The counts inside the loop just changed and the next loop out is about to be
@@ -273,6 +281,8 @@ struct Job<'a> {
     invented: &'a Set<Block>,
     /// What [`displacements`] found, which costs nothing where it is.
     folded: &'a Set<Inst>,
+    /// The escape set every loop's oracle shares. See [`Alias::sharing`].
+    escapes: &'a OnceCell<Escapes>,
 }
 
 /// Whether anything this loop writes can be what this instruction reads.
@@ -606,11 +616,16 @@ impl Job<'_> {
             .collect();
         let bounds = !boundaries.is_empty();
         let mut ranges = Ranges::new(func, self.cfg, self.dom).knowing(self.loops);
-        // One oracle for the loop, built only where there is something to ask about, since
-        // building one walks the whole body for the escape set. The count is shared by every
-        // load in the loop, so one loop cannot ask more than [`ALIAS_STEPS`] however many
-        // candidates it has.
-        let mut oracle = writes.then(|| Alias::new(func, self.outside).knowing(self.modref));
+        // One oracle for the loop, built only where there is something to ask about, with the
+        // escape set every other loop's oracle reads as well. The count is shared by every load in
+        // the loop, so one loop cannot ask more than [`ALIAS_STEPS`] however many candidates it
+        // has.
+        let mut oracle = writes
+            .then(|| Alias::new(func, self.outside).knowing(self.modref).sharing(self.escapes));
+        #[cfg(debug_assertions)]
+        if let Some(kept) = self.escapes.get() {
+            assert_eq!(*kept, Escapes::knowing(func, self.modref), "a hoist changed what escapes");
+        }
         let mut asked = 0usize;
         let mut plan = Vec::new();
         // The ones in the plan that are only in it because something after them might want them.
