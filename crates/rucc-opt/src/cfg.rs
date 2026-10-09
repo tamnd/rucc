@@ -12,7 +12,7 @@
 //! one exception. Section 6.3 of the design says why: a CFG edit already invalidates almost every
 //! other analysis, so a graph that survived one would be the single survivor of a clearing that took
 //! the rest, and a stale dominator tree is the hardest kind of compiler bug to find. The exception is
-//! [`Cfg::merged`], for a block folded into the one block that reached it, which the loop forest and
+//! `Cfg::merged`, for a block folded into the one block that reached it, which the loop forest and
 //! the early return table already survive, and which a debug build checks against the graph built
 //! again each time.
 
