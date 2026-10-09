@@ -44,6 +44,7 @@ All notable changes are recorded here. The format follows [Keep a Changelog](htt
 
 ### Fixed
 
+- The `doc` and `features` steps of the release gate pass again. Two doc links in `rucc-codegen` pointed at an item that does not exist and at a private one, and `docs/FEATURES.md` now has the builtins that came in with -msimd128 on wasm (#3519).
 - The let chains that came in after the last release gate are gone, so the `chains` step of the gate passes again. The workspace promises Rust 1.85, and a let chain needs 1.88 (#3517).
 - The release check of thresholds passes again. The `-fsanitize-coverage=trace-cmp` pass selected the word type of an operand with a comparison against a bare literal, and the check refused it (#3497).
 - With `-msimd128`, a float vector local that is read before it is written, or after a `memset`, no longer stops rucc with "an integer immediate needs an integer type". sroa makes its byte pattern as a splat of integer lanes and a bitcast. `wasm_f32x4_relaxed_nmadd` at -O2 gave the crash (#3480).
