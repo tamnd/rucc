@@ -45,9 +45,9 @@
 
 use std::collections::HashMap;
 
-use crate::line::{Error, Function};
+use crate::line::{Error, Function, Unit};
 use crate::shape::{
-    Constant, Encoding, Global, Held, Local, Member, Place, Qualifier, Reach, Scope, Shape, Sig,
+    Abstract, Constant, Encoding, Global, Held, Local, Member, Place, Qualifier, Reach, Shape, Sig,
     Spot,
 };
 
@@ -116,13 +116,11 @@ impl Annotations {
 /// built by this compiler, so that is a bug here rather than a program's mistake.
 pub(crate) fn describe(
     dwarf: &mut gimli::write::DwarfUnit,
-    shapes: &[Shape],
+    unit: &Unit,
     files: &[FileId],
-    funcs: &[Function],
-    globals: &[Global],
-    frames: bool,
 ) -> Result<(), Error> {
-    let wanted = wanted(shapes, funcs, globals, frames);
+    let (shapes, funcs, globals, frames) = (&unit.types, &unit.funcs, &unit.globals, unit.frames);
+    let wanted = wanted(shapes, funcs, &unit.abstracts, globals, frames);
     let ids = kinds(dwarf, shapes, &wanted);
     let mut tagged = Tagged::new();
     for (shape, &id) in shapes.iter().zip(&ids) {
@@ -130,9 +128,12 @@ pub(crate) fn describe(
             tagged.extend(fill(dwarf, shape, id, &ids, shapes)?);
         }
     }
+    let origins = abstracted(dwarf, &unit.abstracts, files, &ids)?;
     for (index, func) in funcs.iter().enumerate() {
         let Some(sig) = &func.sig else { continue };
-        tagged.extend(defined(dwarf, func, sig, index, files, &ids, frames)?);
+        let (said, at, nests) = defined(dwarf, func, sig, index, files, &ids, frames)?;
+        tagged.extend(said);
+        copies(dwarf, func, at, &nests, index, files, &origins)?;
     }
     for (index, global) in globals.iter().enumerate() {
         let at = held_at(dwarf, global, funcs.len() + index, files, &ids)?;
@@ -155,7 +156,13 @@ pub(crate) fn describe(
 ///
 /// An array of arrays is followed straight to its element, since [`elements`] writes it as one
 /// entry and the arrays in between have none of their own.
-fn wanted(shapes: &[Shape], funcs: &[Function], globals: &[Global], frames: bool) -> Vec<bool> {
+fn wanted(
+    shapes: &[Shape],
+    funcs: &[Function],
+    abstracts: &[Abstract],
+    globals: &[Global],
+    frames: bool,
+) -> Vec<bool> {
     let mut wanted = vec![false; shapes.len()];
     let mut work: Vec<usize> = Vec::new();
     let signature = |sig: &Sig, work: &mut Vec<usize>| {
@@ -168,6 +175,9 @@ fn wanted(shapes: &[Shape], funcs: &[Function], globals: &[Global], frames: bool
         let frames = frames || func.frame_local.is_some();
         let said = func.locals.iter().filter(|local| sayable(&local.spot, frames));
         work.extend(said.filter_map(|local| local.ty));
+    }
+    for one in abstracts {
+        signature(&one.sig, &mut work);
     }
     work.extend(globals.iter().filter_map(|global| global.ty));
     while let Some(at) = work.pop() {
@@ -334,7 +344,8 @@ fn fill<'a>(
 /// the subprogram, so that two blocks each declaring an `i` are two variables a reader can tell
 /// apart by where the program counter is. See [`nested`].
 ///
-/// What it hands back is the subprogram, its parameters and its locals, each with its tags.
+/// What it hands back is the subprogram, its parameters and its locals, each with its tags, and then
+/// the subprogram and its scopes again, which is where the copies inlined into it go.
 fn defined<'a>(
     dwarf: &mut gimli::write::DwarfUnit,
     func: &'a Function,
@@ -343,7 +354,7 @@ fn defined<'a>(
     files: &[FileId],
     ids: &[Option<UnitEntryId>],
     frames: bool,
-) -> Result<Tagged<'a>, Error> {
+) -> Result<Defined<'a>, Error> {
     let root = dwarf.unit.root();
     let at = dwarf.unit.add(root, gimli::DW_TAG_subprogram);
     title(dwarf, at, &func.name);
@@ -381,7 +392,90 @@ fn defined<'a>(
             tagged.push((child, &local.tags[..]));
         }
     }
-    Ok(tagged)
+    Ok((tagged, at, nests))
+}
+
+/// What [`defined`] hands back.
+type Defined<'a> = (Tagged<'a>, UnitEntryId, Vec<Option<UnitEntryId>>);
+
+/// The entry each function the inliner copied gets, which every copy of it names as its origin.
+///
+/// A subprogram with no addresses and `DW_AT_inline`, which is what gcc writes. Its parameters have
+/// names and types and nothing about where they are, since that is a question about one copy.
+fn abstracted(
+    dwarf: &mut gimli::write::DwarfUnit,
+    abstracts: &[Abstract],
+    files: &[FileId],
+    ids: &[Option<UnitEntryId>],
+) -> Result<Vec<UnitEntryId>, Error> {
+    let root = dwarf.unit.root();
+    let mut out = Vec::with_capacity(abstracts.len());
+    for one in abstracts {
+        let at = dwarf.unit.add(root, gimli::DW_TAG_subprogram);
+        title(dwarf, at, &one.name);
+        if one.external {
+            flag(dwarf, at, gimli::DW_AT_external);
+        }
+        came_from(dwarf, at, &one.name, one.decl, files)?;
+        takes(dwarf, at, &one.sig, ids, None, false)?;
+        let inline = AttributeValue::Inline(gimli::DW_INL_inlined);
+        dwarf.unit.get_mut(at).set(gimli::DW_AT_inline, inline);
+        out.push(at);
+    }
+    Ok(out)
+}
+
+/// A `DW_TAG_inlined_subroutine` for each body the inliner copied into a function.
+///
+/// Each one goes inside the copy it was copied into, or inside the scope the call was written in,
+/// or under the function itself, which is how a reader knows which frames to show for an address
+/// in it. It names its origin, says where the call was, and covers the addresses the copy ended up
+/// at. A copy whose code all went away gets no entry, and a copy inside it goes where it would
+/// have gone.
+fn copies(
+    dwarf: &mut gimli::write::DwarfUnit,
+    func: &Function,
+    at: UnitEntryId,
+    nests: &[Option<UnitEntryId>],
+    which: usize,
+    files: &[FileId],
+    origins: &[UnitEntryId],
+) -> Result<(), Error> {
+    let mut made: Vec<UnitEntryId> = Vec::with_capacity(func.inlined.len());
+    for copy in &func.inlined {
+        let under = match copy.parent {
+            Some(parent) => made.get(parent).copied(),
+            None => copy.scope.and_then(|scope| nests.get(scope).copied().flatten()),
+        }
+        .unwrap_or(at);
+        if copy.over.is_empty() {
+            made.push(under);
+            continue;
+        }
+        let Some(&origin) = origins.get(copy.of) else {
+            let why = format!("a copy in {} names origin {}, which is not one", func.name, copy.of);
+            return Err(Error::Refused { why });
+        };
+        let Some(&file) = files.get(copy.call.file) else {
+            let why =
+                format!("a copy in {} names file {}, which is not one", func.name, copy.call.file);
+            return Err(Error::Refused { why });
+        };
+        let child = dwarf.unit.add(under, gimli::DW_TAG_inlined_subroutine);
+        dwarf
+            .unit
+            .get_mut(child)
+            .set(gimli::DW_AT_abstract_origin, AttributeValue::UnitRef(origin));
+        covers(dwarf, child, &copy.over, which)?;
+        let entry = dwarf.unit.get_mut(child);
+        entry.set(gimli::DW_AT_call_file, AttributeValue::FileIndex(Some(file)));
+        entry.set(gimli::DW_AT_call_line, AttributeValue::Udata(u64::from(copy.call.line)));
+        if copy.column > 0 {
+            entry.set(gimli::DW_AT_call_column, AttributeValue::Udata(u64::from(copy.column)));
+        }
+        made.push(child);
+    }
+    Ok(())
 }
 
 /// A `DW_TAG_lexical_block` for each of a function's inner scopes that has something to hold, and
@@ -412,6 +506,13 @@ fn nested(
             }
         }
     }
+    // And a scope a call was inlined in, so that the copy can go inside it.
+    for copy in &func.inlined {
+        let Some(scope) = copy.scope.filter(|_| copy.parent.is_none()) else { continue };
+        if let Some(seen) = wanted.get_mut(scope) {
+            *seen = true;
+        }
+    }
     for index in (0..wanted.len()).rev() {
         if let (true, Some(parent)) = (wanted[index], func.scopes[index].parent) {
             if let Some(seen) = wanted.get_mut(parent) {
@@ -426,7 +527,7 @@ fn nested(
         }
         let under = scope.parent.and_then(|parent| nests[parent]).unwrap_or(at);
         let nest = dwarf.unit.add(under, gimli::DW_TAG_lexical_block);
-        covers(dwarf, nest, scope, which)?;
+        covers(dwarf, nest, &scope.over, which)?;
         nests[index] = Some(nest);
     }
     Ok(nests)
@@ -450,11 +551,11 @@ fn nested(
 fn covers(
     dwarf: &mut gimli::write::DwarfUnit,
     at: UnitEntryId,
-    scope: &Scope,
+    over: &[Reach],
     which: usize,
 ) -> Result<(), Error> {
-    let mut list = Vec::with_capacity(scope.over.len());
-    for reach in &scope.over {
+    let mut list = Vec::with_capacity(over.len());
+    for reach in over {
         list.push(gimli::write::Range::StartLength {
             begin: where_it_starts(reach, which)?,
             length: reach.len,
@@ -863,7 +964,9 @@ fn reading(encoding: Encoding) -> gimli::DwAte {
 #[cfg(test)]
 mod tests {
     use crate::line::{Row, Unit, write};
-    use crate::shape::{Held, Local, Member, Param, Place, Shape, Sig, Span, Spot};
+    use crate::shape::{
+        Abstract, Held, Inlined, Local, Member, Param, Place, Scope, Shape, Sig, Span, Spot,
+    };
 
     use rucc_object::{Info, Reference};
 
@@ -904,7 +1007,9 @@ mod tests {
                 frame_local: None,
                 scopes: Vec::new(),
                 tags: Vec::new(),
+                inlined: Vec::new(),
             }],
+            abstracts: Vec::new(),
             globals: Vec::new(),
             pointer: 8,
             frames: true,
@@ -1587,6 +1692,91 @@ mod tests {
         unit.funcs[0].locals[0].scope = Some(1);
         let info = write(&unit).expect("sections");
         assert_eq!(asked(&info, ".debug_info"), vec![0, 4, 8], "the outer nest is missing");
+    }
+
+    /// The unit of `one` with a function `twice` inlined into it twice over: once into the body, and
+    /// once more into that copy.
+    fn inlined() -> Unit {
+        let mut unit = one();
+        let sig = unit.funcs[0].sig.clone().expect("a signature");
+        unit.abstracts = vec![Abstract {
+            name: "twice".to_owned(),
+            decl: Some(Place { file: 0, line: 1 }),
+            sig,
+            external: false,
+        }];
+        let copy = |parent, line, over| Inlined {
+            of: 0,
+            parent,
+            scope: None,
+            call: Place { file: 0, line },
+            column: 12,
+            over,
+        };
+        unit.funcs[0].inlined = vec![
+            copy(None, 4, vec![Reach { from: 4, len: 8 }]),
+            copy(Some(0), 1, vec![Reach { from: 6, len: 2 }]),
+        ];
+        unit
+    }
+
+    /// The attribute and the form, as the abbreviation writes them.
+    fn pair(at: gimli::DwAt, form: gimli::DwForm) -> [u8; 2] {
+        [
+            u8::try_from(at.0).expect("a one byte attribute"),
+            u8::try_from(form.0).expect("a one byte form"),
+        ]
+    }
+
+    /// A body inlined into a function is an entry that names the function it is a copy of, says
+    /// where the call was and covers the addresses the copy ended up at.
+    #[test]
+    fn an_inlined_copy_names_its_origin_and_its_call() {
+        let info = write(&inlined()).expect("sections");
+        // The function, then each copy where it starts. The origin has no addresses.
+        assert_eq!(asked(&info, ".debug_info"), vec![0, 4, 6]);
+        assert!(named(&info).contains(&"twice".to_owned()), "the origin is not named");
+        let wants = [
+            pair(gimli::DW_AT_inline, gimli::DW_FORM_udata),
+            pair(gimli::DW_AT_abstract_origin, gimli::DW_FORM_ref4),
+            pair(gimli::DW_AT_call_file, gimli::DW_FORM_udata),
+            pair(gimli::DW_AT_call_line, gimli::DW_FORM_udata),
+            pair(gimli::DW_AT_call_column, gimli::DW_FORM_udata),
+        ];
+        for want in wants {
+            assert!(holds(&info, ".debug_abbrev", &want), "no {want:x?}");
+        }
+    }
+
+    /// A copy whose code all went away gets no entry, and the copy inside it still gets one.
+    #[test]
+    fn a_copy_with_no_addresses_left_gets_no_entry() {
+        let mut unit = inlined();
+        unit.funcs[0].inlined[0].over.clear();
+        let info = write(&unit).expect("sections");
+        assert_eq!(asked(&info, ".debug_info"), vec![0, 6]);
+    }
+
+    /// A scope a call was inlined in is written, so that the copy can go inside it, though nothing
+    /// was declared in it.
+    #[test]
+    fn a_scope_with_a_copy_in_it_gets_a_block() {
+        let mut unit = inside(vec![Reach { from: 4, len: 8 }]);
+        unit.funcs[0].locals[0].scope = None;
+        let copied = inlined();
+        unit.abstracts = copied.abstracts;
+        unit.funcs[0].inlined = copied.funcs[0].inlined.clone();
+        unit.funcs[0].inlined[0].scope = Some(0);
+        let info = write(&unit).expect("sections");
+        assert_eq!(asked(&info, ".debug_info"), vec![0, 4, 4, 6]);
+    }
+
+    /// A copy that names an origin the unit does not have is refused.
+    #[test]
+    fn a_copy_of_nothing_is_refused() {
+        let mut unit = inlined();
+        unit.funcs[0].inlined[0].of = 3;
+        assert!(matches!(write(&unit), Err(Error::Refused { .. })));
     }
 
     /// A scope over no addresses at all is a mistake here rather than something a program can write.

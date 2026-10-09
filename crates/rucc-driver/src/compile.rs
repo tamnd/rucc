@@ -2016,6 +2016,7 @@ fn describe(
     // in it twice over: once for the rows and once for the line the definition is declared on.
     let mut files: Vec<String> = Vec::new();
     let mut funcs = Vec::with_capacity(text.funcs.len());
+    let mut copying = Copying::new(origin.meaning);
     for ((extent, rows), built) in text.funcs.iter().zip(lines).zip(machine) {
         let mut out: Vec<rucc_debug::Row> = Vec::with_capacity(rows.len());
         for row in rows {
@@ -2158,10 +2159,17 @@ fn describe(
         // block stops being one of the function's own. The numbers the walk over the tree handed out
         // are over the whole unit, and what goes on an entry is a place in this function's table, so
         // the two are joined here.
+        // And the bodies the inliner copied in, each inside the scope its call was written in.
+        let (mut inlined, called) =
+            copies(extent.len as u64, rows, &origin, &mut copying, &mut files, &rewrite);
+        wants.extend(&called);
         let (scopes, at) =
             nests(&wants, &origin.meaning.scopes, extent.len as u64, rows, origin.map);
         for (local, want) in locals.iter_mut().zip(&wants) {
             local.scope = want.and_then(|want| at.get(&want).copied());
+        }
+        for (copy, scope) in inlined.iter_mut().zip(&called) {
+            copy.scope = scope.and_then(|scope| at.get(&scope).copied());
         }
         funcs.push(rucc_debug::Function {
             name: extent.name.clone(),
@@ -2176,6 +2184,7 @@ fn describe(
             frame_local: None,
             scopes,
             tags: known.map(|known| known.tags.clone()).unwrap_or_default(),
+            inlined,
         });
     }
     // And the file-scope variables, from the objects the back end laid out rather than from the
@@ -2207,6 +2216,7 @@ fn describe(
         files,
         types: origin.meaning.types.clone(),
         funcs,
+        abstracts: copying.abstracts,
         globals,
         pointer: u8::try_from(target.pointer_width / 8).unwrap_or(8),
         // Whether a function can say where its frame base is, which it can when the build writes a
@@ -2268,6 +2278,7 @@ fn describe_wasm(
     let rewrite = |path: &str| opts.prefix_map.debug.apply(path).into_owned();
     let mut files: Vec<String> = Vec::new();
     let mut funcs = Vec::with_capacity(object.functions.len());
+    let mut copying = Copying::new(origin.meaning);
     // The back end gives a `main` with no parameters or with two the name that the start code of
     // wasi-libc calls, as clang does, and the program and the declarations know it as `main`. A
     // `main` with one parameter or with three keeps its name, and the `__main_argc_argv` next to it
@@ -2384,10 +2395,16 @@ fn describe_wasm(
                 tags: named.tags.clone(),
             });
         }
+        let (mut inlined, called) =
+            copies(u64::from(lines.len), &lines.rows, &origin, &mut copying, &mut files, &rewrite);
+        wants.extend(&called);
         let (scopes, at) =
             nests(&wants, &origin.meaning.scopes, u64::from(lines.len), &lines.rows, origin.map);
         for (local, want) in locals.iter_mut().zip(&wants) {
             local.scope = want.and_then(|want| at.get(&want).copied());
+        }
+        for (copy, scope) in inlined.iter_mut().zip(&called) {
+            copy.scope = scope.and_then(|scope| at.get(&scope).copied());
         }
         funcs.push(rucc_debug::Function {
             name: name.to_owned(),
@@ -2402,6 +2419,7 @@ fn describe_wasm(
             frame_local: lines.frame,
             scopes,
             tags: known.map(|known| known.tags.clone()).unwrap_or_default(),
+            inlined,
         });
     }
     let mut globals = Vec::new();
@@ -2428,6 +2446,7 @@ fn describe_wasm(
         files,
         types: origin.meaning.types.clone(),
         funcs,
+        abstracts: copying.abstracts,
         globals,
         pointer: u8::try_from(target.pointer_width / 8).unwrap_or(4),
         frames: false,
@@ -2654,6 +2673,174 @@ fn nests<R: Located>(
         })
         .collect();
     (out, at)
+}
+
+/// What the bodies the inliner copied need from the whole unit, gathered once for all its functions.
+///
+/// The source map says where each copy is and what it is a copy of, as a run of source bytes. The
+/// rest is here: which function those bytes are the body of, the entry the unit writes for that
+/// function, and which scope a call was written in.
+struct Copying<'a> {
+    /// Which function each body is, by where the body starts.
+    bodies: Map<rucc_diag::BytePos, &'a str>,
+    /// The unit's scopes by where they start, which is how the one a call was written in is found.
+    starts: Vec<(rucc_diag::BytePos, usize)>,
+    /// The functions a copy was made of, as the unit describes them. See [`rucc_debug::Abstract`].
+    abstracts: Vec<rucc_debug::Abstract>,
+    /// Which of those each body is, by where the body starts, made the first time it is asked for.
+    made: Map<rucc_diag::BytePos, Option<usize>>,
+}
+
+impl<'a> Copying<'a> {
+    fn new(meaning: &'a crate::shapes::Meaning) -> Copying<'a> {
+        let bodies = meaning
+            .funcs
+            .iter()
+            .filter(|(_, known)| !known.body.is_dummy())
+            .map(|(name, known)| (known.body.lo, name.as_str()))
+            .collect();
+        let mut starts: Vec<(rucc_diag::BytePos, usize)> = meaning
+            .scopes
+            .iter()
+            .enumerate()
+            .filter(|(_, scope)| !scope.span.is_dummy())
+            .map(|(which, scope)| (scope.span.lo, which))
+            .collect();
+        starts.sort_unstable();
+        Copying { bodies, starts, abstracts: Vec::new(), made: Map::default() }
+    }
+
+    /// Which of [`Copying::abstracts`] the body at `of` is, made the first time it is asked for, and
+    /// [`None`] for a body this cannot say what function it is or what it takes.
+    fn origin(
+        &mut self,
+        of: Span,
+        meaning: &crate::shapes::Meaning,
+        files: &mut Vec<String>,
+        rewrite: &dyn Fn(&str) -> String,
+    ) -> Option<usize> {
+        if let Some(&made) = self.made.get(&of.lo) {
+            return made;
+        }
+        let made = self.bodies.get(&of.lo).and_then(|&name| {
+            let known = meaning.funcs.get(name)?;
+            let sig = known.sig.clone()?;
+            self.abstracts.push(rucc_debug::Abstract {
+                name: name.to_owned(),
+                decl: Some(rucc_debug::Place {
+                    file: interned(files, rewrite(&known.file)),
+                    line: known.line,
+                }),
+                sig,
+                external: known.external,
+            });
+            Some(self.abstracts.len() - 1)
+        });
+        self.made.insert(of.lo, made);
+        made
+    }
+
+    /// The innermost of the unit's scopes that holds `pos`, and [`None`] for a position written
+    /// straight into the body of a function.
+    ///
+    /// Scopes nest and never cross, so the last one to start at or before `pos` is either the one
+    /// or inside it, and walking out from there finds it.
+    fn scope(&self, scopes: &[crate::shapes::Scope], pos: rucc_diag::BytePos) -> Option<usize> {
+        let at = self.starts.partition_point(|&(lo, _)| lo <= pos).checked_sub(1)?;
+        let mut up = Some(self.starts[at].1);
+        while let Some(which) = up {
+            let span = scopes[which].span;
+            if span.lo <= pos && pos < span.hi {
+                return Some(which);
+            }
+            up = scopes[which].parent;
+        }
+        None
+    }
+}
+
+/// The bodies the inliner copied into one function, from its rows. See [`rucc_debug::Inlined`].
+///
+/// A row in a copy is a row in each copy that copy is inside as well, out to the function, so each
+/// of them covers its address. A copy gets its entry the first time a row of it is seen, which puts
+/// a copy after the copy it is inside. A copy of a body that cannot be described gets none, and a
+/// copy inside it goes inside whatever it was inside.
+///
+/// The scope a call was written in is said as one of the unit's scopes, beside the list, since the
+/// function's own table of them is not made until every scope it needs is known.
+fn copies<R: Located>(
+    len: u64,
+    rows: &[R],
+    origin: &Origin<'_>,
+    copying: &mut Copying<'_>,
+    files: &mut Vec<String>,
+    rewrite: &dyn Fn(&str) -> String,
+) -> (Vec<rucc_debug::Inlined>, Vec<Option<usize>>) {
+    let mut out: Vec<rucc_debug::Inlined> = Vec::new();
+    let mut scopes: Vec<Option<usize>> = Vec::new();
+    if origin.map.copies().is_empty() {
+        return (out, scopes);
+    }
+    let ends = ends(len, rows);
+    let mut seen: Map<rucc_diag::BytePos, Option<usize>> = Map::default();
+    let mut chain: Vec<rucc_diag::Copied> = Vec::new();
+    for (which, row) in rows.iter().enumerate() {
+        let (from, to) = (row.at(), ends[which]);
+        if row.span().is_dummy() || to <= from {
+            continue;
+        }
+        chain.clear();
+        let mut pos = row.span().lo;
+        while let Some(&copy) = origin.map.copy_at(pos) {
+            if chain.len() > origin.map.copies().len() {
+                break;
+            }
+            chain.push(copy);
+            pos = copy.call.lo;
+        }
+        let mut parent = None;
+        for copy in chain.iter().rev() {
+            let entry = match seen.get(&copy.at) {
+                Some(&entry) => entry,
+                None => {
+                    let of = copying.origin(copy.of, origin.meaning, files, rewrite);
+                    let call = origin.map.presumed(copy.call.lo);
+                    let entry = match (of, call) {
+                        (Some(of), Some(call)) => {
+                            out.push(rucc_debug::Inlined {
+                                of,
+                                parent,
+                                scope: None,
+                                call: rucc_debug::Place {
+                                    file: interned(files, rewrite(call.name)),
+                                    line: call.line,
+                                },
+                                column: call.column,
+                                over: Vec::new(),
+                            });
+                            let written = origin.map.outside(copy.call).lo;
+                            let scope = copying.scope(&origin.meaning.scopes, written);
+                            scopes.push(parent.is_none().then_some(scope).flatten());
+                            Some(out.len() - 1)
+                        }
+                        _ => parent,
+                    };
+                    seen.insert(copy.at, entry);
+                    entry
+                }
+            };
+            parent = entry;
+            let Some(entry) = entry else { continue };
+            let over = &mut out[entry].over;
+            match over.last_mut() {
+                Some(last) if last.from + last.len >= from => {
+                    last.len = to.saturating_sub(last.from).max(last.len);
+                }
+                _ => over.push(rucc_debug::Reach { from, len: to - from }),
+            }
+        }
+    }
+    (out, scopes)
 }
 
 /// Which of a function's addresses were built for a run of its source bytes.

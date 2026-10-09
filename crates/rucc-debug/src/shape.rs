@@ -312,6 +312,48 @@ pub struct Scope {
     pub over: Vec<Reach>,
 }
 
+/// A function some of whose code the inliner copied into other functions.
+///
+/// It is the entry every copy names as the function it is a copy of, and it says what all the
+/// copies have in common: the name, where it was declared and what it takes. It has no addresses,
+/// since it is about the source rather than about any one piece of code. gcc writes the same
+/// entry, with `DW_AT_inline` on it.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct Abstract {
+    /// Its name, as the C program spelled it.
+    pub name: String,
+    /// Where it was declared, and nothing when that is not known.
+    pub decl: Option<Place>,
+    /// What it takes and gives back.
+    pub sig: Sig,
+    /// Whether anything outside this unit can see it, which is the opposite of `static`.
+    pub external: bool,
+}
+
+/// One body the inliner copied into a function, which is a `DW_TAG_inlined_subroutine`.
+///
+/// This is what lets a debugger show a call that is no longer there. A backtrace from inside the
+/// copy has a frame for the function it is a copy of, a breakpoint on that function stops in the
+/// copy too, and `finish` and `up` work as if the call had been made.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Inlined {
+    /// Which of the unit's [`abstracts`](crate::Unit::abstracts) it is a copy of.
+    pub of: usize,
+    /// Which earlier entry of the function's list it was copied into, for a body inlined into a
+    /// body that was then inlined in turn, and [`None`] for one copied straight into the function.
+    pub parent: Option<usize>,
+    /// Which of the function's [`scopes`](crate::Function::scopes) the call was written in, for
+    /// one with no parent, and [`None`] for a call written straight into the body.
+    pub scope: Option<usize>,
+    /// Where the call was.
+    pub call: Place,
+    /// Which column of that line the call was at, counting from one, or zero when that is not
+    /// known.
+    pub column: u32,
+    /// The stretches of the function's addresses the copy ended up at.
+    pub over: Vec<Reach>,
+}
+
 /// One stretch of a function's addresses, with nothing said about what is at it.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct Reach {

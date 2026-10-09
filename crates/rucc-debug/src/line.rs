@@ -52,7 +52,7 @@
 //! order the source did not have. One per function costs a `DW_LNE_set_address` and a relocation
 //! each and is correct under every combination of flags there is.
 
-use crate::shape::{Global, Local, Place, Scope, Shape, Sig};
+use crate::shape::{Abstract, Global, Inlined, Local, Place, Scope, Shape, Sig};
 use crate::tree;
 
 use rucc_object::{Chunk, Info, Reference, Reloc};
@@ -79,6 +79,9 @@ pub struct Unit {
     pub types: Vec<Shape>,
     /// The functions, in the order the text section holds them.
     pub funcs: Vec<Function>,
+    /// The functions the inliner copied into others, which each copy names as its origin. See
+    /// [`Abstract`].
+    pub abstracts: Vec<Abstract>,
     /// The file-scope variables this unit defines, in the order the object file holds them.
     ///
     /// Only the ones it defines. A name this unit declares and another one defines is a name the
@@ -176,6 +179,8 @@ pub struct Function {
     /// The strings of the `btf_decl_tag`s on its declarations, the last written first, which is the order gcc
     /// chains them in.
     pub tags: Vec<Vec<u8>>,
+    /// The bodies the inliner copied into it, each after the copy it is inside. See [`Inlined`].
+    pub inlined: Vec<Inlined>,
 }
 
 /// One row of the table: an address, and where the code at it came from.
@@ -381,7 +386,7 @@ pub fn write(unit: &Unit) -> Result<Info, Error> {
         let zero = gimli::write::Address::Constant(0);
         root.set(gimli::DW_AT_low_pc, gimli::write::AttributeValue::Address(zero));
     }
-    tree::describe(&mut dwarf, &unit.types, &files, &unit.funcs, &unit.globals, unit.frames)?;
+    tree::describe(&mut dwarf, unit, &files)?;
     let mut sections = gimli::write::Sections::new(Section::default());
     dwarf.write(&mut sections).map_err(refused)?;
     let mut info = Info::default();
@@ -478,6 +483,7 @@ mod tests {
                 ],
                 ..Function::default()
             }],
+            abstracts: Vec::new(),
             globals: Vec::new(),
             pointer: 8,
             frames: true,
