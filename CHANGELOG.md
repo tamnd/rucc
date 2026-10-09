@@ -4,6 +4,10 @@ All notable changes are recorded here. The format follows [Keep a Changelog](htt
 
 ## Unreleased
 
+### Changed
+
+- The dominance frontiers are laid out end to end in one allocation and each pair is written once, so lz4hc.c at -O2 runs 0.7 percent fewer instructions (#3438).
+
 ### Added
 
 - `btf_decl_tag` is written into the debugging information the way gcc 16 writes it: a chain of `DW_TAG_GNU_annotation` entries under the unit, named `btf_decl_tag` and holding the tag's string, that a function, a variable, a parameter, a local or a member points at with `DW_AT_GNU_annotation`. A chain is written once for everything with the same tags, and a declaration seen again keeps the tags of every declaration in the order gcc's merge leaves them. pahole reads these into the kernel's BTF. gcc's own `dwarf-btf-decl-tag-*.c` counts are held against it. `btf_type_tag` is still checked and not written.
