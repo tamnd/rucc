@@ -368,49 +368,72 @@ fn joins(module: &Module, sites: &Map<FuncId, Sites>) -> Map<FuncId, Map<Value, 
 fn joined(func: &Func) -> Map<Value, Held> {
     let Some(entry) = func.entry() else { return Map::default() };
     let taken = addressed(func);
-    let mut held: Map<Value, Held> = Map::default();
+    // By number rather than in a map, since every edge asks about both ends. `None` is a value that
+    // is not a parameter this tracks.
+    let mut held: Vec<Option<Held>> = vec![None; func.values().count()];
+    let mut tracked = false;
     for block in func.blocks() {
         if block == entry {
             continue;
         }
         let at = if taken.contains(&block) { Held::Anything } else { Held::Nothing };
         for &param in &func[block].params {
-            held.insert(param, at);
+            held[param.index()] = Some(at);
+            tracked = true;
         }
     }
-    if held.is_empty() {
-        return held;
+    if !tracked {
+        return Map::default();
     }
-    loop {
-        let mut moved = false;
-        for block in func.blocks() {
-            let Some(term) = func.terminator(block) else { continue };
-            for call in func.target_list(term).iter() {
-                let call = &func[call];
-                let params = &func[call.block].params;
-                for (&param, &arg) in params.iter().zip(&func[call.args]) {
-                    let Some(&was) = held.get(&param) else { continue };
-                    let passes = if func[arg].ty == func[param].ty {
-                        reading(func, arg)
-                            .or_else(|| held.get(&arg).copied())
-                            .unwrap_or(Held::Anything)
-                    } else {
-                        Held::Anything
-                    };
-                    let now = was.and(passes);
-                    if now != was {
-                        held.insert(param, now);
-                        moved = true;
-                    }
+    // Every edge is read once. One that hands a tracked parameter on is remembered, so that when the
+    // parameter learns something it goes to just those. Reading every edge again until nothing
+    // moved was most of this pass in lvm.c, whose interpreter loop is one big caller.
+    let mut into: Vec<Vec<Value>> = vec![Vec::new(); held.len()];
+    let mut work = Vec::new();
+    for block in func.blocks() {
+        let Some(term) = func.terminator(block) else { continue };
+        for call in func.target_list(term).iter() {
+            let call = &func[call];
+            for (&param, &arg) in func[call.block].params.iter().zip(&func[call.args]) {
+                if held[param.index()].is_none() {
+                    continue;
                 }
+                let passes = if func[arg].ty != func[param].ty {
+                    Held::Anything
+                } else if let Some(reading) = reading(func, arg) {
+                    reading
+                } else if let Some(at) = held[arg.index()] {
+                    into[arg.index()].push(param);
+                    at
+                } else {
+                    Held::Anything
+                };
+                lower(&mut held, &mut work, param, passes);
             }
         }
-        if !moved {
-            break;
+    }
+    while let Some(param) = work.pop() {
+        let Some(what) = held[param.index()] else { continue };
+        for &to in &into[param.index()] {
+            lower(&mut held, &mut work, to, what);
         }
     }
-    held.retain(|_, held| matches!(held, Held::Number(..) | Held::Address(..)));
-    held
+    func.values()
+        .filter_map(|value| match held[value.index()] {
+            Some(held @ (Held::Number(..) | Held::Address(..))) => Some((value, held)),
+            _ => None,
+        })
+        .collect()
+}
+
+/// Meets what one edge passes into what a parameter holds, and queues the parameter if it moved.
+fn lower(held: &mut [Option<Held>], work: &mut Vec<Value>, param: Value, passes: Held) {
+    let Some(was) = held[param.index()] else { return };
+    let now = was.and(passes);
+    if now != was {
+        held[param.index()] = Some(now);
+        work.push(param);
+    }
 }
 
 /// Puts the constants into the bodies, and hands back the functions that changed.
