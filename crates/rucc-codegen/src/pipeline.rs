@@ -39,6 +39,7 @@ use rucc_tuple::Arch;
 use crate::abi;
 use crate::bits;
 use crate::bytes;
+use crate::called;
 use crate::carry;
 use crate::choice;
 use crate::cold;
@@ -1576,6 +1577,18 @@ pub fn compile_recording(
         Some(line) => kept::of(&func, &line, &allocation, &frame, &framed, &unread),
         None => Vec::new(),
     };
+    // And what is known about the arguments of each call, at the end for the same reason. Only
+    // with the debugging information, which is the one thing that reads it.
+    if flags.debug {
+        func.calls = called::sites(
+            &func,
+            machine.shapes,
+            machine.insts,
+            machine.conv,
+            machine.selector.abi.small,
+            names,
+        );
+    }
     Ok(func)
 }
 
@@ -1970,6 +1983,44 @@ mod tests {
         assert!(text.contains("$rbx = x64.pop_64"), "{text}");
         assert!(text.contains("x64.call $rdi($rdi), @g"), "{text}");
         assert!(!text.contains('%'), "{text}");
+    }
+
+    #[test]
+    fn a_call_says_where_the_caller_still_holds_its_arguments() {
+        // `int f(int a) { int r = g(a); return g(a) + g(5) + r; }`.
+        let i32 = Type::int(32);
+        let (mut names, mut source, block, args) = blank(&[i32]);
+        let sig = source.add_signature(Signature::new().with_params(&[i32]).with_returns(&[i32]));
+        let callee = names.intern("g");
+        let mut got = Vec::new();
+        for _ in 0..2 {
+            let call = Builder::new(&mut source, block).call(callee, sig, &[args[0]]);
+            got.push(source[call].first_result.expect("an integer comes back"));
+        }
+        let five = Builder::new(&mut source, block).iconst(i32, 5);
+        let call = Builder::new(&mut source, block).call(callee, sig, &[five]);
+        got.push(source[call].first_result.expect("an integer comes back"));
+        let mut build = Builder::new(&mut source, block);
+        let sum = build.binary(Opcode::Add, got[1], got[2], IrFlags::default());
+        let sum = build.binary(Opcode::Add, sum, got[0], IrFlags::default());
+        build.ret(&[sum]);
+
+        let machine = Machine::x86_64(&SYSV);
+        let flags = Flags { debug: true, ..Flags::default() };
+        let out = compile(&mut source, &mut names, &machine, &Elsewhere::default(), flags)
+            .expect("every instruction has a rule");
+        let text = mir::print_func(&out, &names, &REGS);
+
+        assert_eq!(out.calls.len(), 3, "{text}");
+        assert!(out.calls.iter().all(|call| call.callee == Some(callee)), "{text}");
+        // The second call copies the parameter back out of the register it was kept in.
+        let [arg] = out.calls[1].args.as_slice() else { panic!("{:?}\n{text}", out.calls[1]) };
+        assert_eq!(arg.reg, x86_64::RDI, "{text}");
+        let mir::Was::Reg { reg, .. } = arg.was else { panic!("{arg:?}\n{text}") };
+        assert!(SYSV.preserves_int(reg), "{text}");
+        // And the third is a constant.
+        let [arg] = out.calls[2].args.as_slice() else { panic!("{:?}\n{text}", out.calls[2]) };
+        assert_eq!(arg.was, mir::Was::Constant(5), "{text}");
     }
 
     /// `int f(int a, ...) { return g(a, ...); }` with that many arguments, compiled with sibling

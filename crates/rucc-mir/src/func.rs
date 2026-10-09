@@ -231,6 +231,45 @@ pub enum Where {
     Frame(i32),
 }
 
+/// One call a function makes, and what a debugger can still find out about its arguments while
+/// the callee runs. See [`Func::calls`].
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Call {
+    /// The call itself.
+    pub inst: Inst,
+    /// The function it calls, or `None` for a call through a register.
+    pub callee: Option<Symbol>,
+    /// The arguments in registers whose value is known after the call has started, in the order
+    /// the call reads them. An argument with no such answer is not here.
+    pub args: Vec<Arg>,
+}
+
+/// One argument of a [`Call`], as the register the convention put it in and where its value is.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Arg {
+    /// The register the argument is in when the call starts.
+    pub reg: PhysReg,
+    /// Which class that register is drawn from.
+    pub class: RegClass,
+    /// Where the same value is for as long as the call runs.
+    pub was: Was,
+}
+
+/// Where the value of an argument is while the callee runs, which is a place the callee cannot
+/// change or a number.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Was {
+    /// In a register the call keeps, which holds the same value from the call to the return.
+    Reg {
+        /// The register.
+        reg: PhysReg,
+        /// Which class it is drawn from.
+        class: RegClass,
+    },
+    /// This number, as the bits of the whole register.
+    Constant(u64),
+}
+
 /// A jump table: where a `switch` goes for each value from zero up, read by an indirect jump.
 ///
 /// Each cell is the place of an arm among the successors of the block the jump ends, rather than
@@ -434,6 +473,11 @@ pub struct Func {
     /// one, and read by the debugging information once the encoder has given every instruction an
     /// address. Empty until the first of those.
     pub kept: Vec<Kept>,
+    /// The calls the function makes, each with what is known about its arguments, for the call
+    /// site entries of the debugging information. Written at the very end of the back end for the
+    /// reason [`Func::kept`] is, and only when the debugging information is wanted. A tail call is
+    /// not here, since its arguments are gone by then.
+    pub calls: Vec<Call>,
     /// The jump tables, each one read by the address [`Mem::table`] names and written where the
     /// assembler puts a table on the target, which is `.rodata` on x86-64 ELF and after the
     /// function's last instruction everywhere else. See [`Table`].
@@ -502,6 +546,7 @@ impl Func {
             entries: Vec::new(),
             arrived: Vec::new(),
             kept: Vec::new(),
+            calls: Vec::new(),
             tables: Vec::new(),
             heads: Vec::new(),
             cold: None,

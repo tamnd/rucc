@@ -61,7 +61,8 @@ mod parse;
 mod print;
 
 pub use func::{
-    Binding, CfiOp, Func, InstBuilder, Kept, Mcount, Patch, Table, Visibility, Where, defs,
+    Arg, Binding, Call, CfiOp, Func, InstBuilder, Kept, Mcount, Patch, Table, Visibility, Was,
+    Where, defs,
 };
 pub use inst::{
     Amode, Block, BlockCall, BlockData, Flags, Imm, ImmRef, Inst, InstData, Mem, MemRef, Opcode,

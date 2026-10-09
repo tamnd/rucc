@@ -157,6 +157,7 @@
 pub mod abi;
 pub mod bits;
 pub mod bytes;
+pub mod called;
 pub mod capability;
 pub mod carry;
 pub mod changes;
