@@ -23,16 +23,25 @@ use std::ptr;
 
 /// The biggest block the lists hold. Anything bigger is rare enough that the system allocator is
 /// fast at it, and keeping it here would hold whole tables on a list after they are dropped.
+#[cfg(not(target_env = "musl"))]
 const LARGEST: usize = 32 << 10;
+
+/// The biggest block the lists hold on musl. musl maps each block of more than a few pages on its
+/// own and unmaps it again on free, so each one is a system call both ways and pages that fault
+/// in from zero. On sqlite3.c at `-O2` that was over 7000 maps, and the static binary was about
+/// 15 percent slower than the glibc one. tamnd/rucc#3276.
+#[cfg(target_env = "musl")]
+const LARGEST: usize = 256 << 10;
 
 /// How many sizes there are: sixteen steps of sixteen bytes up to 256, then four for each
 /// doubling up to [`LARGEST`].
-const CLASSES: usize = 16 + 4 * 7;
+const CLASSES: usize = 16 + 4 * (LARGEST.trailing_zeros() as usize - 8);
 
-/// How much is asked of the system at a time when a thread runs out, a mebibyte on a page.
-const REGION: Layout = match Layout::from_size_align(1 << 20, 4096) {
+/// How much is asked of the system at a time when a thread runs out, a page aligned block that
+/// is many times [`LARGEST`], so little is left over at the end of each one.
+const REGION: Layout = match Layout::from_size_align(LARGEST * 32, 4096) {
     Ok(layout) => layout,
-    Err(_) => panic!("a mebibyte on a page is a layout"),
+    Err(_) => panic!("a region on a page is a layout"),
 };
 
 /// The alignment of every block, which each class size is a multiple of.
@@ -122,7 +131,7 @@ impl Local {
         if region.is_null() {
             return region;
         }
-        // SAFETY: the region is a mebibyte and `bytes` is at most `LARGEST`, which is less.
+        // SAFETY: the region is bigger than `LARGEST`, and `bytes` is at most that.
         unsafe {
             self.next.set(region.add(bytes));
             self.end.set(region.add(REGION.size()));
