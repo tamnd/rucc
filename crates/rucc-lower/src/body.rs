@@ -36,9 +36,9 @@ use rucc_ir::{
     Restrict, RmwOp, Signature, StorageClass, Type, VaInfo, Value, twice_by_name,
 };
 use rucc_sema::{
-    AtomicOp, BitCount, Classify, Const, Conversion, CpuTest, DeclFlags, DeclId, DeclKind, Eval,
-    ExprId, ExprKind, ExprList, FrameAsk, InitEntry, JumpAsk, Linkage, Ordering, OverflowOp, Rmw,
-    Sign, Stmt, StmtId, StorageDuration, Tast,
+    AtomicOp, BitCount, Classify, Const, Conversion, CpuTest, DeclFlags, DeclId, DeclKind,
+    Elementwise, Eval, ExprId, ExprKind, ExprList, FrameAsk, InitEntry, JumpAsk, Linkage, Ordering,
+    OverflowOp, Rmw, Sign, Stmt, StmtId, StorageDuration, Tast,
 };
 use rucc_target::{Pass, TargetInfo};
 use rucc_tuple::Arch;
@@ -4719,6 +4719,20 @@ impl<'u> Body<'_, 'u> {
                 }
             }
             ExprKind::Shuffle { lhs, rhs, mask } => self.shuffle(at, lhs, rhs, mask, ty, span),
+            ExprKind::Elementwise { op, lhs, rhs } => {
+                let left = self.vector_addr(lhs, span);
+                let right = rhs.map(|rhs| self.vector_addr(rhs, span));
+                if self.whole_elementwise(op, lane, lanes, at, left, right, span) {
+                    return;
+                }
+                for index in 0..lanes {
+                    let a = self.lane(left, index, stride, lane, span);
+                    let b = right.map(|right| self.lane(right, index, stride, lane, span));
+                    let value = self.elementwise(op, a, b, lane, span);
+                    let into = self.lane_place(at, index, stride, lane, span);
+                    self.write(into, value, span);
+                }
+            }
             _ => self.unsupported("this vector expression", span),
         }
     }
@@ -5045,6 +5059,141 @@ impl<'u> Body<'_, 'u> {
         };
         build.store(value, at, info, Flags::NONE);
         true
+    }
+
+    /// A `__builtin_elementwise_*` builtin on a vector of sixteen bytes done as one SIMD
+    /// instruction, on wasm32 with `-msimd128`, and whether it was.
+    ///
+    /// wasm has `min` and `max` for lanes of 8, 16 and 32 bits, `add_sat` and `sub_sat` for lanes
+    /// of 8 and 16 bits, and `popcnt` for lanes of 8 bits, each signed and unsigned where the
+    /// sign is a part of the answer. The call is to the name that clang 13 gave the builtin of
+    /// each instruction, which the selector writes as the instruction.
+    #[allow(clippy::too_many_arguments)]
+    fn whole_elementwise(
+        &mut self,
+        op: Elementwise,
+        lane: TypeId,
+        lanes: u64,
+        at: Value,
+        left: Value,
+        right: Option<Value>,
+        span: Span,
+    ) -> bool {
+        if !self.target().simd128 {
+            return false;
+        }
+        let one = self.value_type(lane, span);
+        if !one.is_int() || u64::from(one.bits()) * lanes != 128 {
+            return false;
+        }
+        let sign = if repr::is_signed(self.types(), self.target(), lane) { "s" } else { "u" };
+        let shape = format!("i{}x{lanes}", one.bits());
+        let name = match (op, one.bits()) {
+            (Elementwise::Min, 8 | 16 | 32) => format!("min_{sign}_{shape}"),
+            (Elementwise::Max, 8 | 16 | 32) => format!("max_{sign}_{shape}"),
+            (Elementwise::AddSat, 8 | 16) => format!("add_sat_{sign}_{shape}"),
+            (Elementwise::SubSat, 8 | 16) => format!("sub_sat_{sign}_{shape}"),
+            (Elementwise::Popcount, 8) => format!("popcnt_{shape}"),
+            _ => return false,
+        };
+        let whole = Type::vector(one, u32::try_from(lanes).unwrap_or(0));
+        let info = untyped(repr::align_of(self.types(), self.target(), lane));
+        let mut build = self.build(span);
+        let mut args = vec![build.load(whole, left, info, Flags::NONE)];
+        if let Some(right) = right {
+            args.push(build.load(whole, right, info, Flags::NONE));
+        }
+        let call = self.atomic_call(&format!("__builtin_wasm_{name}"), &args, &[whole], span);
+        let value = self.func[call].first_result.expect("one result was asked for");
+        self.build(span).store(value, at, info, Flags::NONE);
+        true
+    }
+
+    /// A `__builtin_elementwise_*` builtin on one integer, which is one lane of a vector or the
+    /// whole of a scalar operand.
+    ///
+    /// A value narrower than an `int` is widened by its sign and the operation is done at `int`,
+    /// for the reason in [`Self::lane_arithmetic`]. The sum or the difference of two such values
+    /// fits in an `int`, so a saturating one is the exact answer clamped to the range of the
+    /// type. A wider value has no wider type to go to, so a saturating sum or difference is the
+    /// one that wraps, with the overflow found from the signs, as Hacker's Delight 2-13 does it.
+    /// A signed overflow gives the limit on the side of the sign of `a`, which is `a` shifted
+    /// right by one less than the width and then `^` the largest value.
+    fn elementwise(
+        &mut self,
+        op: Elementwise,
+        a: Value,
+        b: Option<Value>,
+        lane: TypeId,
+        span: Span,
+    ) -> Value {
+        let out = self.func[a].ty;
+        let bits = out.bits();
+        let signed = repr::is_signed(self.types(), self.target(), lane);
+        // A count of the bits of the value only, so the widening puts zeros above them.
+        let signed = signed && op != Elementwise::Popcount;
+        let wide = if bits < 32 { Type::int(32) } else { out };
+        let a = self.widen(a, signed, wide, span);
+        let b = b.map(|b| self.widen(b, signed, wide, span));
+        let lt = if signed { IntPred::Slt } else { IntPred::Ult };
+        // The limits of the type, which wrap at 128 bits to the bits that the constant keeps.
+        let top = 1i128 << (bits - 1);
+        let (min, max) = match signed {
+            true => (top.wrapping_neg(), top.wrapping_sub(1)),
+            false => (0, (top << 1).wrapping_sub(1)),
+        };
+        let mut build = self.build(span);
+        let value = match (op, b) {
+            (Elementwise::Popcount, _) | (_, None) => build.unary(Opcode::Ctpop, a, wide),
+            (Elementwise::Min, Some(b)) => {
+                let less = build.icmp(lt, a, b);
+                build.select(less, a, b)
+            }
+            (Elementwise::Max, Some(b)) => {
+                let less = build.icmp(lt, a, b);
+                build.select(less, b, a)
+            }
+            (Elementwise::AddSat | Elementwise::SubSat, Some(b)) => {
+                let add = op == Elementwise::AddSat;
+                let opcode = if add { Opcode::Add } else { Opcode::Sub };
+                let r = build.binary(opcode, a, b, Flags::NONE);
+                if bits < 32 {
+                    let high = build.iconst(wide, max);
+                    let over = build.icmp(IntPred::Sgt, r, high);
+                    let r = build.select(over, high, r);
+                    let low = build.iconst(wide, min);
+                    let under = build.icmp(IntPred::Slt, r, low);
+                    build.select(under, low, r)
+                } else if !signed && add {
+                    // The sum wrapped when it is less than one of the operands.
+                    let ones = build.iconst(wide, -1);
+                    let over = build.icmp(IntPred::Ult, r, a);
+                    build.select(over, ones, r)
+                } else if !signed {
+                    let zero = build.iconst(wide, 0);
+                    let under = build.icmp(IntPred::Ult, a, b);
+                    build.select(under, zero, r)
+                } else {
+                    // The answer has the wrong sign when the operands of the sum have the same
+                    // sign and the answer does not, or when the operands of the difference have
+                    // different signs and the answer does not have the sign of `a`.
+                    let x = build.binary(Opcode::Xor, a, r, Flags::NONE);
+                    let y = match add {
+                        true => build.binary(Opcode::Xor, b, r, Flags::NONE),
+                        false => build.binary(Opcode::Xor, a, b, Flags::NONE),
+                    };
+                    let both = build.binary(Opcode::And, x, y, Flags::NONE);
+                    let zero = build.iconst(wide, 0);
+                    let over = build.icmp(IntPred::Slt, both, zero);
+                    let top = build.iconst(wide, i128::from(bits) - 1);
+                    let side = build.binary(Opcode::AShr, a, top, Flags::NONE);
+                    let largest = build.iconst(wide, max);
+                    let limit = build.binary(Opcode::Xor, side, largest, Flags::NONE);
+                    build.select(over, limit, r)
+                }
+            }
+        };
+        self.widen(value, signed, out, span)
     }
 
     /// `++v`, `--v`, `v++` and `v--` performed lane by lane at the object `target` names.
@@ -6617,6 +6766,17 @@ impl<'u> Body<'_, 'u> {
             ExprKind::FpClassify { value, answers } => self.fpclassify(value, answers, ty, span),
             ExprKind::Sign { op, lhs, rhs } => Some(self.sign(op, lhs, rhs, span)),
             ExprKind::Abs { operand } => Some(self.abs(operand, span)),
+            // A vector is built where one would live, as a shuffle is below.
+            ExprKind::Elementwise { .. } if rucc_types::is_vector(self.types(), ty) => {
+                let place = self.place(expr);
+                self.read(place, span)
+            }
+            ExprKind::Elementwise { op, lhs, rhs } => {
+                let a = self.value(lhs);
+                let b = rhs.map(|rhs| self.value(rhs));
+                let lane = self.tast()[lhs].ty;
+                Some(self.elementwise(op, a, b, lane, span))
+            }
             // A vector, which has no value form, so it is built where one would live. What a read
             // of that gives is what a read of any other vector object gives.
             ExprKind::Shuffle { .. } => {
@@ -11023,7 +11183,9 @@ impl<'a> Scan<'a> {
                 self.expr(dst);
                 self.expr(src);
             }
-            ExprKind::Classify { lhs, rhs, .. } | ExprKind::Sign { lhs, rhs, .. } => {
+            ExprKind::Classify { lhs, rhs, .. }
+            | ExprKind::Sign { lhs, rhs, .. }
+            | ExprKind::Elementwise { lhs, rhs, .. } => {
                 self.expr(lhs);
                 if let Some(rhs) = rhs {
                     self.expr(rhs);

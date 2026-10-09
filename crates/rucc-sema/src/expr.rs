@@ -288,6 +288,17 @@ pub enum ExprKind {
         /// a sign from anywhere other than nowhere.
         rhs: Option<ExprId>,
     },
+    /// One of the `__builtin_elementwise_*` builtins of clang, which does an operation on each
+    /// lane of a vector, or on one integer. The operands and the answer have one type. See
+    /// `check/builtin/elementwise.rs`.
+    Elementwise {
+        /// The operation.
+        op: Elementwise,
+        /// The first operand.
+        lhs: ExprId,
+        /// The second operand, for each operation but `popcount`.
+        rhs: Option<ExprId>,
+    },
     /// `__builtin_complex`, a complex value whose halves are the two operands exactly as they
     /// are, which is how `complex.h` spells `CMPLX` and the two beside it.
     ///
@@ -1012,6 +1023,37 @@ impl Sign {
     #[must_use]
     pub const fn is_pair(self) -> bool {
         matches!(self, Sign::Of)
+    }
+}
+
+/// The operation of an `__builtin_elementwise_*` builtin. Each one is done on each lane by itself,
+/// and the signedness of the type says how a lane is read.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Elementwise {
+    /// `__builtin_elementwise_min`, the smaller operand.
+    Min,
+    /// `__builtin_elementwise_max`, the larger operand.
+    Max,
+    /// `__builtin_elementwise_add_sat`, the sum, held at the largest or the smallest value of
+    /// the type when it is past it.
+    AddSat,
+    /// `__builtin_elementwise_sub_sat`, the difference, held in the same way.
+    SubSat,
+    /// `__builtin_elementwise_popcount`, the number of bits that are one.
+    Popcount,
+}
+
+impl Elementwise {
+    /// How the operation is written in the typed tree's textual form.
+    #[must_use]
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Elementwise::Min => "min",
+            Elementwise::Max => "max",
+            Elementwise::AddSat => "add_sat",
+            Elementwise::SubSat => "sub_sat",
+            Elementwise::Popcount => "popcount",
+        }
     }
 }
 

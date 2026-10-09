@@ -4036,6 +4036,59 @@ signature = ""
 used_by = ["ffmpeg"]
 tests = ["rucc-sema::the_name_is_a_row_of_the_table_and_is_answered_not_called", "rucc-driver::a_shuffle_picks_each_lane_by_the_low_bits_of_the_mask"]
 
+# The `__builtin_elementwise_*` builtins of clang that do an integer operation on each lane. No
+# signature, because the type of the answer is the type of the operands. clang 23 refuses an
+# operand that is not an integer or a vector of integers, and two operands of different types.
+[[feature]]
+name = "__builtin_elementwise_min"
+kind = "builtin"
+gcc_version = "none"
+status = "implemented"
+signature = ""
+used_by = ["wasi-sdk"]
+tests = ["rucc-sema::every_name_in_the_family_is_a_row_of_the_table_and_is_answered_not_called", "rucc::the_elementwise_builtins_have_the_value_of_each_lane", "rucc::with_simd128_an_elementwise_builtin_is_one_instruction"]
+notes = "The smaller of the two operands, in each lane of a vector or for one integer. A `wasm_*_min` function of `<wasm_simd128.h>` is this builtin, and a vector of sixteen bytes with lanes of 8, 16 or 32 bits is one `min_s` or `min_u` instruction with `-msimd128`. The operands are as clang 23 asks: integers or vectors of integers, of the same type."
+
+[[feature]]
+name = "__builtin_elementwise_max"
+kind = "builtin"
+gcc_version = "none"
+status = "implemented"
+signature = ""
+used_by = ["wasi-sdk"]
+tests = ["rucc-sema::every_name_in_the_family_is_a_row_of_the_table_and_is_answered_not_called", "rucc::the_elementwise_builtins_have_the_value_of_each_lane", "rucc::with_simd128_an_elementwise_builtin_is_one_instruction"]
+notes = "The larger of the two operands, in each lane of a vector or for one integer. A `wasm_*_max` function of `<wasm_simd128.h>` is this builtin, and a vector of sixteen bytes with lanes of 8, 16 or 32 bits is one `max_s` or `max_u` instruction with `-msimd128`. The operands are as clang 23 asks: integers or vectors of integers, of the same type."
+
+[[feature]]
+name = "__builtin_elementwise_add_sat"
+kind = "builtin"
+gcc_version = "none"
+status = "implemented"
+signature = ""
+used_by = ["wasi-sdk"]
+tests = ["rucc-sema::every_name_in_the_family_is_a_row_of_the_table_and_is_answered_not_called", "rucc::the_elementwise_builtins_have_the_value_of_each_lane", "rucc::with_simd128_an_elementwise_builtin_is_one_instruction"]
+notes = "The sum of the two operands, held at the limits of the type when it is out of range, in each lane of a vector or for one integer. A vector of sixteen bytes with lanes of 8 or 16 bits is one `add_sat_s` or `add_sat_u` instruction with `-msimd128`. The operands are as clang 23 asks: integers or vectors of integers, of the same type."
+
+[[feature]]
+name = "__builtin_elementwise_sub_sat"
+kind = "builtin"
+gcc_version = "none"
+status = "implemented"
+signature = ""
+used_by = ["wasi-sdk"]
+tests = ["rucc-sema::every_name_in_the_family_is_a_row_of_the_table_and_is_answered_not_called", "rucc::the_elementwise_builtins_have_the_value_of_each_lane", "rucc::with_simd128_an_elementwise_builtin_is_one_instruction"]
+notes = "The difference of the two operands, held at the limits of the type when it is out of range, in each lane of a vector or for one integer. A vector of sixteen bytes with lanes of 8 or 16 bits is one `sub_sat_s` or `sub_sat_u` instruction with `-msimd128`. The operands are as clang 23 asks: integers or vectors of integers, of the same type."
+
+[[feature]]
+name = "__builtin_elementwise_popcount"
+kind = "builtin"
+gcc_version = "none"
+status = "implemented"
+signature = ""
+used_by = ["wasi-sdk"]
+tests = ["rucc-sema::every_name_in_the_family_is_a_row_of_the_table_and_is_answered_not_called", "rucc::the_elementwise_builtins_have_the_value_of_each_lane", "rucc::with_simd128_an_elementwise_builtin_is_one_instruction"]
+notes = "The number of bits that are set, in each lane of a vector or for one integer, with the type of the operand. A vector of sixteen `char` lanes is one `i8x16.popcnt` instruction with `-msimd128`. The operands are as clang 23 asks: integers or vectors of integers, of the same type."
+
 # The pair that passes on the arguments a function was called with without knowing what they
 # are. No signature, because the first reads registers and the second is a call built from a
 # block, and neither is a function anything could call.

@@ -68,6 +68,7 @@ mod count;
 pub(in crate::check) mod cpu;
 mod ctype;
 mod eflags;
+mod elementwise;
 mod entry;
 mod expect;
 mod frame;

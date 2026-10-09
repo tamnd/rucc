@@ -607,6 +607,7 @@ impl<'a> Printer<'a> {
             ExprKind::Classify { op, .. } => format!("classify {}", op.as_str()),
             ExprKind::FpClassify { .. } => "fpclassify".to_owned(),
             ExprKind::Sign { op, .. } => format!("sign {}", op.as_str()),
+            ExprKind::Elementwise { op, .. } => format!("elementwise {}", op.as_str()),
             ExprKind::Abs { .. } => "abs".to_owned(),
             ExprKind::Complex { .. } => "complex".to_owned(),
             ExprKind::Shuffle { .. } => "shuffle".to_owned(),
@@ -728,7 +729,9 @@ impl<'a> Printer<'a> {
                 self.expr(then);
                 self.expr(otherwise);
             }
-            ExprKind::Classify { lhs, rhs, .. } | ExprKind::Sign { lhs, rhs, .. } => {
+            ExprKind::Classify { lhs, rhs, .. }
+            | ExprKind::Sign { lhs, rhs, .. }
+            | ExprKind::Elementwise { lhs, rhs, .. } => {
                 self.expr(lhs);
                 if let Some(rhs) = rhs {
                     self.expr(rhs);

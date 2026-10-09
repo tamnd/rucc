@@ -114,8 +114,9 @@ pub use crate::decl::{
 };
 pub use crate::eval::{Eval, NotConstant};
 pub use crate::expr::{
-    AtomicOp, BitCount, Category, Classify, Conversion, CpuObject, CpuTest, Expr, ExprId, ExprKind,
-    ExprList, ExprRef, FrameAsk, JumpAsk, Ordering, OverflowOp, Rmw, Sign, reverse_ordered,
+    AtomicOp, BitCount, Category, Classify, Conversion, CpuObject, CpuTest, Elementwise, Expr,
+    ExprId, ExprKind, ExprList, ExprRef, FrameAsk, JumpAsk, Ordering, OverflowOp, Rmw, Sign,
+    reverse_ordered,
 };
 pub use crate::print::{Printer, print};
 pub use crate::scope::{Binding, Scopes, Tag, TagKind};

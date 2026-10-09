@@ -286,6 +286,10 @@ impl Checker<'_> {
         if let Some(answer) = self.shuffle_builtin_call(name, args, span) {
             return Some(answer);
         }
+        // An operation on each lane of a vector, from clang. In `check/builtin/elementwise.rs`.
+        if let Some(answer) = self.elementwise_builtin_call(name, args, span) {
+            return Some(answer);
+        }
         // The pair that passes on the arguments a function was called with, which is the
         // registers on the way in and a call built from them. In `check/builtin/apply.rs`.
         if let Some(answer) = self.apply_builtin_call(name, args, span) {
@@ -781,6 +785,7 @@ mod tests {
                 || crate::check::builtin::sign::is_family(feature.name)
                 || crate::check::builtin::parts::is_family(feature.name)
                 || crate::check::builtin::shuffle::is_family(feature.name)
+                || crate::check::builtin::elementwise::is_family(feature.name)
                 || crate::check::builtin::apply::is_family(feature.name)
                 || crate::check::annotate::is_family(feature.name)
                 || syntax.contains(&feature.name);
