@@ -811,13 +811,16 @@ pub(crate) struct Blocks {
     /// How many bytes of its register each virtual register's value takes, by number, which is
     /// what [`Blocked::reaches`] asks.
     widths: Vec<Option<u8>>,
+    /// The registers a value is never to be in, from [`Func::bars`].
+    barred: Vec<(Reg, PhysReg)>,
 }
 
 impl Blocks {
     /// Whether an instruction insists on `at` where a value over `area` would be in its way: at any
     /// point the value's range reaches when the register is wanted clear and the instruction wants
     /// it for a value of its own, and otherwise only at a point the value is live at. The value's
-    /// own operands never count.
+    /// own operands never count. A register [`Func::bar`] keeps the value out of is insisted on
+    /// everywhere.
     pub(crate) fn insists(
         &self,
         reg: Reg,
@@ -827,11 +830,12 @@ impl Blocks {
         at: PhysReg,
         want: Want,
     ) -> bool {
-        self.over(class, at, range).any(|one| {
-            one.by != Some(reg)
-                && one.reaches(self.width(reg))
-                && ((want == Want::Clear && one.by.is_some()) || area.covers(one.point))
-        })
+        self.barred(reg, at)
+            || self.over(class, at, range).any(|one| {
+                one.by != Some(reg)
+                    && one.reaches(self.width(reg))
+                    && ((want == Want::Clear && one.by.is_some()) || area.covers(one.point))
+            })
     }
 
     /// The points where an instruction destroys `at` while a value over `area` is in it, when those
@@ -851,6 +855,9 @@ impl Blocks {
         at: PhysReg,
         saveable: impl Fn(Point) -> bool,
     ) -> Option<Vec<Point>> {
+        if self.barred(reg, at) {
+            return None;
+        }
         let mut points = Vec::new();
         for one in self.over(class, at, range) {
             if one.by == Some(reg) || !one.reaches(self.width(reg)) || !area.covers(one.point) {
@@ -865,6 +872,11 @@ impl Blocks {
             }
         }
         Some(points)
+    }
+
+    /// Whether a value is never to be in `at`.
+    fn barred(&self, reg: Reg, at: PhysReg) -> bool {
+        !self.barred.is_empty() && self.barred.binary_search(&(reg, at)).is_ok()
     }
 
     /// How many bytes of its register a value takes, or `None` for all of it.
@@ -1174,7 +1186,7 @@ pub(crate) fn blocked(func: &Func, order: &Order) -> Blocks {
         .map(|number| func.width(Reg::virtual_reg(u32::try_from(number).ok()?)))
         .collect();
     let points = blocked.iter().map(|one| one.point).collect();
-    Blocks { all: blocked, points, spans, stride, widths }
+    Blocks { all: blocked, points, spans, stride, widths, barred: func.bars().to_vec() }
 }
 
 /// The register an operand has to be in, which is the one a constraint asks for or the one the

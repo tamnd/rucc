@@ -155,7 +155,8 @@ pub(crate) const AARCH64_SCRATCH: [PhysReg; 2] = [aarch64::X16, aarch64::X17];
 /// an instruction insists on: `eax` and `edx` are the result and the two halves of a division, and
 /// `ecx` is the count of a shift. So the two held back are `esi` and `edi`, which a call preserves
 /// and which [`crate::frame`] saves when a reload writes one. That leaves `eax`, `ecx`, `edx` and
-/// `ebx` to the allocator, which is also every register with a byte form on this machine.
+/// `ebx` to the allocator, which is also every register with a byte form on this machine, and
+/// the two are handed out as well where nothing needs them for a reload. See [`Machine::x86`].
 pub(crate) const X86_SCRATCH: [PhysReg; 2] = [x86::ESI, x86::EDI];
 
 /// How many of each class are held back.
@@ -281,6 +282,19 @@ impl Machine {
         let order: Vec<PhysReg> =
             conv.int_order.iter().copied().filter(|reg| !X86_SCRATCH.contains(reg)).collect();
         let (sse_order, sse_scratch) = held_back(conv);
+        let env = |order: &[PhysReg], scratch: &[PhysReg]| {
+            Env::new().with(x86::GPR, order, scratch).with(x86::XMM, &sse_order, &sse_scratch)
+        };
+        // Both scratch registers handed out after every other one, and then one register held
+        // back, which is the same pair of tries x86-64 makes. Neither of the two has a low byte,
+        // so a value named as one is kept out of both by [`crate::bytes::bar`]. The one held back
+        // is `ebx` rather than `edi`, since a value read back for `cmpb` or `sete` is read into it
+        // where `edi` would need an exchange on either side of the instruction. `edi` where `ebx`
+        // holds the address of the GOT.
+        let every: Vec<PhysReg> = order.iter().copied().chain(X86_SCRATCH).collect();
+        let held: &[PhysReg] =
+            if order.contains(&x86::EBX) { &[x86::EBX] } else { &X86_SCRATCH[1..] };
+        let some: Vec<PhysReg> = every.iter().copied().filter(|reg| !held.contains(reg)).collect();
         Self {
             conv,
             file: x86::REGS,
@@ -292,17 +306,11 @@ impl Machine {
             timing: &x86_64::TIMING,
             short: &x86_64::SHORT,
             selector: &select::x86::SELECTOR,
-            env: Env::new().with(x86::GPR, &order, &X86_SCRATCH).with(
-                x86::XMM,
-                &sse_order,
-                &sse_scratch,
-            ),
-            // Not on this machine. The four registers it allocates are the four with a byte form,
-            // and `ebp` has none.
+            env: env(&order, &X86_SCRATCH),
+            // Not on this machine. The kernel keeps `ebp` for its frame, and it has no byte form.
             spare: None,
-            // Nor this. Its scratch registers are two a call preserves.
-            wide: None,
-            middle: None,
+            wide: Some([env(&every, &[]), env(&every, &[])]),
+            middle: Some([env(&some, held), env(&some, held)]),
         }
     }
 
@@ -1176,7 +1184,18 @@ pub fn compile_recording(
     // placed is live.
     let handed = !naked && !saves_all && !layout.grows && guard.is_none();
     let which = usize::from(spare.is_some());
-    let wide = machine.wide.as_ref().filter(|_| handed).map(|envs| &envs[which]);
+    // On i386 only with the backtracking allocator, which is the one that keeps a value named as a
+    // byte out of the two registers that have none.
+    let i386 = std::ptr::eq(machine.shapes, &x86::MACHINE);
+    if i386 {
+        let fused = |inst| fusable.contains(&inst) || choosable.contains_key(&inst);
+        bytes::bar(&mut func, machine.insts.prefix, names, fused);
+    }
+    let wide = machine
+        .wide
+        .as_ref()
+        .filter(|_| handed && (!i386 || allocator == Allocator::Backtracking))
+        .map(|envs| &envs[which]);
     // And one of them handed out where both cannot be, which is a function that spills. Only with
     // the backtracking allocator, since the single pass one spills whatever it cannot place at once
     // and allocating such a function three times is time `-O0` is not asking to spend.

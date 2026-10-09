@@ -468,8 +468,8 @@ type Pins = [Option<(PhysReg, RegClass)>];
 
 /// Pins an i386 `q` output that would otherwise have no register with a low byte to go in.
 ///
-/// The allocator hands out only the four registers with a low byte on i386, since `esi` and `edi`
-/// are held back as scratch, so a `q` operand normally lands in one of them. It cannot when the
+/// The allocator keeps a `q` operand out of `esi` and `edi`, so it normally lands in one of the
+/// four registers with a low byte. It cannot when the
 /// statement takes all four itself, which is the kernel's `__arch_cmpxchg64`: `cmpxchg8b` wants
 /// `edx:eax` and `ecx:ebx`, and the flag output `CC_OUT(e)` is a `"=q"` written with `sete`. The
 /// output then went to the scratch register the allocator reloads through, and `sete %sil` is not
@@ -6319,6 +6319,23 @@ impl<'a> Lowering<'a> {
                     Some(fixed) => read.with(fixed),
                     None => read,
                 });
+            }
+        }
+        // A `q` operand left to the allocator is never put in `esi` or `edi`, which it hands out
+        // on i386 too and which have no low byte for `%b0` to name.
+        if !a64 && self.conv.word == 4 {
+            let constraints = self.names.resolve(self.source[asm].constraints).to_string();
+            for (index, entry) in constraints.split(',').enumerate() {
+                if !entry.contains(['q', 'Q']) {
+                    continue;
+                }
+                let def = def_of.get(index).copied().flatten().map(|at| defs[at].reg);
+                let used = use_of.get(index).copied().flatten().map(|at| uses[at].reg);
+                for reg in def.into_iter().chain(used) {
+                    for at in [rucc_target::x86::ESI, rucc_target::x86::EDI] {
+                        self.out.bar(reg, at);
+                    }
+                }
             }
         }
         // Every register a call may write is more than a template can give up when it has more

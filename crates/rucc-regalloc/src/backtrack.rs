@@ -1172,6 +1172,25 @@ mod tests {
     }
 
     #[test]
+    fn a_value_is_never_put_in_a_register_it_is_barred_from() {
+        let mut names = Interner::new();
+        let mut func = Func::new(names.intern("f"));
+        let opcode = Opcode::new(names.intern("x64.nop"));
+        let block = func.create_block();
+        let first = func.new_vreg(GPR);
+        let second = func.new_vreg(GPR);
+        func.build(block, opcode).def(first, GPR).finish();
+        func.build(block, opcode).uses(first, GPR).finish();
+        func.build(block, opcode).def(second, GPR).finish();
+        func.build(block, opcode).uses(second, GPR).finish();
+        func.bar(second, RAX);
+
+        let placed = places(&mut func, &env());
+        assert_eq!(placed[0], "rax");
+        assert_ne!(placed[1], "rax");
+    }
+
+    #[test]
     fn the_value_read_most_often_keeps_its_register_though_it_is_wanted_longest() {
         let mut names = Interner::new();
         let mut func = Func::new(names.intern("f"));
