@@ -2538,17 +2538,24 @@ fn ends_a_lifetime(func: &Func) -> bool {
 /// checks, a `meta_begin` where its declaration is reached, and the frame slot rule holds for it
 /// only between the two. So this is a walk forward from every `lifetime_end` that stops at a
 /// `meta_begin` of the same local, and a check it reaches is one the rule says nothing about.
-/// A function with no `lifetime_end`, which is every function in a build that does not check,
-/// answers at once with nothing.
+///
+/// A function with no `lifetime_end` or no `check_live` answers at once with nothing, since only a
+/// lifetime check is ever found. It used to answer at once only without a `lifetime_end`, but an
+/// optimized build that does not check has those too, for the stack slots to share, and on
+/// quickjs's JS_CallInternal the walk that could find nothing was half the compile of quickjs.c.
+/// tamnd/rucc#3052.
 fn out_of_scope(func: &Func) -> Set<(Inst, Value)> {
     let marked = |inst: Inst, opcode: Opcode| {
         (func[inst].opcode == opcode).then(|| func[func[inst].args].first().copied()).flatten()
     };
     let mut found: Set<(Inst, Value)> = Set::default();
-    let any = func
+    let ends = func
         .blocks()
         .any(|block| func.insts(block).any(|inst| marked(inst, Opcode::LifetimeEnd).is_some()));
-    if !any {
+    let checks = func
+        .blocks()
+        .any(|block| func.insts(block).any(|inst| func[inst].opcode == Opcode::CheckLive));
+    if !ends || !checks {
         return found;
     }
     // What has ended where each block starts, grown until nothing changes. A set only grows, so
