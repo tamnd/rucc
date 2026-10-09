@@ -482,7 +482,7 @@ fn source(func: &Func, cfg: &Cfg, from: &Map<Value, Params>, entry: Block, value
             let mut out = Params::NONE;
             for &pred in cfg.predecessors(block) {
                 let Some(term) = func.terminator(pred) else { continue };
-                if let Some(&came) = copy::edge_args(func, term, block).get(index as usize) {
+                if let Some(came) = copy::edge_arg(func, term, block, index as usize) {
                     out = out.union(known(came));
                 }
             }

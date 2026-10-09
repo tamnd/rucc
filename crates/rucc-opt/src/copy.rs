@@ -179,6 +179,13 @@ pub(crate) fn edge_args(func: &Func, term: Inst, to: Block) -> Vec<Value> {
     Vec::new()
 }
 
+/// One of the arguments [`edge_args`] would give, for a caller that wants the one and would copy
+/// the whole list for it once for every parameter of the block.
+pub(crate) fn edge_arg(func: &Func, term: Inst, to: Block, index: usize) -> Option<Value> {
+    let call = func.successors(term).find(|call| call.block == to)?;
+    func[call.args].get(index).copied()
+}
+
 #[cfg(test)]
 mod tests {
     use rucc_base::Interner;

@@ -1461,7 +1461,7 @@ fn round(func: &Func, loops: &Loops, id: LoopId, latch: Block, pointer: Value) -
         return None;
     }
     let term = func.terminator(latch)?;
-    copy::edge_args(func, term, block).get(index as usize).copied()
+    copy::edge_arg(func, term, block, index as usize)
 }
 
 /// Where a pointer with nothing on the front of it came from, said as one of the census rows.

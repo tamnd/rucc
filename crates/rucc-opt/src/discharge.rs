@@ -2188,7 +2188,7 @@ fn handed(
     let mut least = u64::MAX;
     for &pred in preds {
         let Some(term) = func.terminator(pred) else { return 0 };
-        let Some(&came) = copy::edge_args(func, term, block).get(index as usize) else {
+        let Some(came) = copy::edge_arg(func, term, block, index as usize) else {
             return 0;
         };
         least = least.min(joined(func, Some(cfg), aligns, came, inside, budget));
