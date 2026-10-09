@@ -105,17 +105,19 @@ pub(crate) enum Sort {
 ///
 /// A bare name is the datum itself. `@GOTPCREL` and `@GOTTPOFF` are the two suffixes this compiler
 /// writes for a load, and `@tlsgd` and `@tlsld` are the ones it writes in front of a call to
-/// `__tls_get_addr`. Reading them back is what lets a file it emitted be assembled by it. gas reads
+/// `__tls_get_addr`. `@tlsdesc` is the address of a TLS descriptor, which the call after it goes
+/// through. Reading them back is what lets a file it emitted be assembled by it. gas reads
 /// each in either case and gcc writes them in lower case, so the case is not looked at.
 fn reached(named: &str) -> Result<(String, Sort), String> {
     let Some((name, how)) = named.split_once('@') else {
         return Ok((named.to_owned(), Sort::Near));
     };
-    const SUFFIXES: [(&str, Sort); 4] = [
+    const SUFFIXES: [(&str, Sort); 5] = [
         ("GOTPCREL", Sort::Table),
         ("GOTTPOFF", Sort::Thread),
         ("TLSGD", Sort::Dynamic(Tls::General)),
         ("TLSLD", Sort::Dynamic(Tls::Module)),
+        ("TLSDESC", Sort::Dynamic(Tls::Descriptor)),
     ];
     match SUFFIXES.iter().find(|(suffix, _)| suffix.eq_ignore_ascii_case(how)) {
         Some(&(_, sort)) => Ok((name.to_owned(), sort)),

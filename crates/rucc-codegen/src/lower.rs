@@ -4013,8 +4013,9 @@ impl<'a> Lowering<'a> {
     /// spare room for this, and a library that does not fit fails to load.
     ///
     /// So in a shared library on ELF, a variable is reached through a call instead, which is
-    /// [`Self::thread_call`]. On x86-64 that is a call to `__tls_get_addr`, and on AArch64 it is a
-    /// call through the variable's descriptor. That is the general dynamic model,
+    /// [`Self::thread_call`]. On x86-64 that is a call to `__tls_get_addr`, or a call through the
+    /// variable's descriptor under `-mtls-dialect=gnu2`, and on AArch64 it is always a call
+    /// through the descriptor. That is the general dynamic model,
     /// or the local dynamic one for a variable that only this library can define. A variable that
     /// asked for initial exec, as glibc's own do, still comes here. [`Elsewhere::model`] decides.
     /// Everywhere else this is the model gcc writes under `-ftls-model=initial-exec`.
@@ -4036,9 +4037,10 @@ impl<'a> Lowering<'a> {
             return self.thread_indexed(inst, symbol, result);
         }
         if let Some(dynamic) = &self.selector.symbols.dynamic {
+            let described = dynamic.descriptor.filter(|_| self.elsewhere.descriptors());
             let text = match self.elsewhere.model(symbol) {
-                Some(TlsModel::GlobalDynamic) => Some(dynamic.general),
-                Some(TlsModel::LocalDynamic) => Some(dynamic.local),
+                Some(TlsModel::GlobalDynamic) => Some(described.unwrap_or(dynamic.general)),
+                Some(TlsModel::LocalDynamic) => Some(described.unwrap_or(dynamic.local)),
                 _ => None,
             };
             if let Some(text) = text {
@@ -11336,6 +11338,28 @@ mod tests {
             assert!(text.contains("tpidr_el0"), "{text}");
             assert!(text.contains("$x1"), "{text}");
             assert!(!text.contains("gottprel"), "{text}");
+        }
+    }
+
+    /// The same on x86-64 under `-mtls-dialect=gnu2`, which is the descriptor call gcc writes for
+    /// both models, and no call to `__tls_get_addr`.
+    #[test]
+    fn a_thread_local_in_a_shared_library_on_x86_64_can_be_found_through_its_descriptor() {
+        for model in [TlsModel::GlobalDynamic, TlsModel::LocalDynamic] {
+            let (mut names, mut source, block, _) = blank(&[]);
+            let own = address_of(&mut source, block, &mut names, "own");
+            Builder::new(&mut source, block).ret(&[own]);
+            let elsewhere = Elsewhere::default()
+                .with_models([(names.intern("own"), model)])
+                .with_descriptors(true);
+            let out = func(&source, &mut names, &SELECTOR, &SYSV, &elsewhere)
+                .expect("every instruction has a rule");
+            let text = mir::print_func(&out.func, &names, &REGS);
+            assert!(text.contains("own@tlsdesc(%rip), %rax"), "{text}");
+            assert!(text.contains("*own@tlscall(%rax)"), "{text}");
+            assert!(text.contains("%fs:0, %rax"), "{text}");
+            assert!(text.contains("x64.ret_val_64 %0($rax)"), "{text}");
+            assert!(!text.contains("__tls_get_addr"), "{text}");
         }
     }
 

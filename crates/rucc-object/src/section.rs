@@ -945,6 +945,13 @@ pub enum Tls {
     Offset,
     /// The same distance the other way round, which is positive. `@TPOFF`, `R_386_TLS_LE_32`.
     Negated,
+    /// The pair of slots of the global offset table that is the variable's TLS descriptor, as a
+    /// distance from the end of the instruction. `@tlsdesc(%rip)`, `R_X86_64_GOTPC32_TLSDESC`.
+    Descriptor,
+    /// The call through that descriptor, `call *x@tlscall(%rax)`, `R_X86_64_TLSDESC_CALL`. It
+    /// covers no bytes. It is there so that a linker that makes an executable can find the call
+    /// and rewrite it.
+    DescriptorCall,
 }
 
 /// What kind of thing a relocation is asking the linker for.

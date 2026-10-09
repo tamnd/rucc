@@ -52,6 +52,9 @@ pub static SELECTOR: super::Selector = super::Selector {
                       call\t__tls_get_addr@PLT",
             local: "leaq\t{}@tlsld(%rip), %rdi\ncall\t__tls_get_addr@PLT\n\
                     leaq\t{}@dtpoff(%rax), %rax",
+            descriptor: Some(
+                "leaq\t{}@tlsdesc(%rip), %rax\ncall\t*{}@tlscall(%rax)\naddq\t%fs:0, %rax",
+            ),
         }),
     },
     jumps: &super::Jumps {
