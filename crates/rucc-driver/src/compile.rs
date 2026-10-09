@@ -11002,13 +11002,15 @@ float through_a_union(union u *p) { p->i = 1; return p->f; }\n";
             "float r(float x) { return __builtin_sqrtf(x); }\n",
             "double s(void) { return __builtin_sqrt(4.0); }\n",
         ));
-        assert!(text.contains("call @ceil("), "{text}");
-        assert!(text.contains("call @floorf("), "{text}");
+        // Marked as the library's own, which is what lets wasm write the instruction in its place.
+        // `fmax` is not one of those, so its call carries no mark.
+        assert!(text.contains("call.library @ceil("), "{text}");
+        assert!(text.contains("call.library @floorf("), "{text}");
         assert!(text.contains("call @fmax("), "{text}");
         // The square roots are calls whatever they are handed, the constant included, until the
         // root of a constant is something the compiler works out.
-        assert!(text.contains("call @sqrtf("), "{text}");
-        assert!(text.contains("call @sqrt("), "{text}");
+        assert!(text.contains("call.library @sqrtf("), "{text}");
+        assert!(text.contains("call.library @sqrt("), "{text}");
 
         // The two the rounding mode decides are calls even when the argument is a constant, since
         // what they answer is not known until the program runs. gcc refuses a static initializer
@@ -11017,8 +11019,8 @@ float through_a_union(union u *p) { p->i = 1; return p->f; }\n";
             "double f(void) { return __builtin_rint(2.5); }\n",
             "double g(void) { return __builtin_nearbyint(2.5); }\n",
         ));
-        assert!(text.contains("call @rint("), "{text}");
-        assert!(text.contains("call @nearbyint("), "{text}");
+        assert!(text.contains("call.library @rint("), "{text}");
+        assert!(text.contains("call.library @nearbyint("), "{text}");
 
         // A nan operand is the library's rule rather than the machine's, 7.12.12.2 saying the
         // answer is the other operand, and gcc will not fold that one either.
