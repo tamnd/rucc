@@ -2,7 +2,7 @@
 //! or a `sub` and an `sbb`. The halves used to pass the carry as a `cmp`, a `setb`, a `movzbl` and
 //! one more add, and the 32 bit kernel does that on every `u64`. A `__builtin_bswap64` on i386 is
 //! two `bswapl` now as well, where it was forty eight shifts and masks, and a negation is `negl`,
-//! `adcl $0` and `negl`.
+//! `adcl $0` and `negl`, and `s64 < 0` asks the high word alone.
 
 use std::process::Command;
 
@@ -29,6 +29,15 @@ u64 zero(u64 a) { u64 z = 0; return z - a; }
 
 const QUAD_NEG: &str = "\
 unsigned __int128 neg(unsigned __int128 a) { return -a; }
+";
+
+const COMPARE: &str = "\
+typedef unsigned long long u64; typedef long long s64;
+int lt0(s64 x) { return x < 0; }
+int ge0(s64 x) { return x >= 0; }
+int gtm1(s64 x) { return x > -1; }
+int fits(u64 x) { return x <= 0xffffffffULL; }
+int big(u64 x) { return x >= 0x100000000ULL; }
 ";
 
 const SWAP: &str = "\
@@ -88,6 +97,17 @@ fn a_long_long_negation_carries_in_the_flag() {
     assert!(!text.contains("setb"), "{text}");
     assert_eq!(text.matches("\tnegq\t").count(), 2, "{text}");
     assert_eq!(text.matches("\tadcq\t$0,").count(), 1, "{text}");
+}
+
+/// A comparison with a constant whose low word is zero or all ones asks the low words a question
+/// with one answer, so it is one comparison of the high words.
+#[test]
+fn a_long_long_compared_at_a_word_boundary_is_one_compare() {
+    for level in ["-O1", "-O2"] {
+        let text = assembly("compare", "i686-unknown-linux-gnu", COMPARE, level);
+        assert_eq!(text.matches("\tcmpl\t").count(), 5, "{level}\n{text}");
+        assert!(!text.contains("sete"), "{level}: the high words are still asked if equal\n{text}");
+    }
 }
 
 #[test]

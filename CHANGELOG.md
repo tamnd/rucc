@@ -13,6 +13,7 @@ All notable changes are recorded here. The format follows [Keep a Changelog](htt
 - A static function whose one line calls an `always_inline` body is weighed with that body in it, as gcc's early inliner does, so it is no longer copied into every caller as a function no larger than the call. zstd's `HUF_DGEN` wrappers are that shape, and the 32 bit kernel had the Huffman decoder copied into each of their callers, about 18KB a copy where gcc's callers are 64 bytes (#3487).
 - On i386 a `long long` negation is `negl`, `adcl $0` and `negl` as gcc writes it, and on x86-64 a `__int128` one is the same with `negq` and `adcq`. The borrow between the halves was a zero in a register, a `cmp`, a `setb`, a `movzbl` and a subtract (#3489).
 - - Jump threading finds the loop forest again over only the loop a thread changed, which takes a fifth off the compile of zstd_compress.c at `-O2` (#3490).
+- A `long long` compared with a constant whose low word is zero or all ones, as in `x < 0`, `x >= 0` or `x <= 0xffffffff`, is one compare of the high words on i386, and the same for `__int128` on x86-64. It was a compare of each half, a compare of the high halves for equality and two bits put together (#3491).
 
 ### Added
 

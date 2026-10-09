@@ -1657,6 +1657,12 @@ fn compare(
         let both = ahead(func, width, inst, Opcode::Or, &[low, high]);
         let zero = ahead_const(func, width, inst, 0);
         compared(func, inst, pred, both, zero)
+    } else if let Some(settled) = settled(func, width, pred, b_low) {
+        // The low halves of `x < 0`, `x >= 0` and the like ask a question with one answer, so the
+        // high halves are the whole of it. `s64 < 0` is the sign of the high word, where it was
+        // three comparisons and two bits.
+        let pred = if settled { not_strict(pred) } else { strict(pred) };
+        compared(func, inst, pred, a_high, b_high)
     } else {
         let above = compared(func, inst, strict(pred), a_high, b_high);
         let below = compared(func, inst, unsigned(pred), a_low, b_low);
@@ -1668,6 +1674,32 @@ fn compare(
         forward.insert(result, answer);
     }
     func.remove_inst(inst);
+}
+
+/// What comparing the low halves answers whatever the left one is, when the right one is a constant
+/// at the end of the range: nothing is below zero and everything is at most all ones.
+fn settled(func: &Func, width: Width, pred: IntPred, low: Value) -> Option<bool> {
+    let bits = known(func, low)?;
+    let ones = u128::MAX >> (128 - width.half);
+    match unsigned(pred) {
+        IntPred::Ult if bits == 0 => Some(false),
+        IntPred::Uge if bits == 0 => Some(true),
+        IntPred::Ule if bits == ones => Some(true),
+        IntPred::Ugt if bits == ones => Some(false),
+        _ => None,
+    }
+}
+
+/// The same ordering with the equal case put in, which is what the high halves are asked when
+/// equal low halves would say yes.
+fn not_strict(pred: IntPred) -> IntPred {
+    match pred {
+        IntPred::Slt => IntPred::Sle,
+        IntPred::Sgt => IntPred::Sge,
+        IntPred::Ult => IntPred::Ule,
+        IntPred::Ugt => IntPred::Uge,
+        other => other,
+    }
 }
 
 /// The same ordering with the equal case taken out of it, which is what the high halves are asked.
