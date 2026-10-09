@@ -649,11 +649,33 @@ fn made(
         joins.insert(base, cap);
         return Some(cap);
     }
+    if let Some(&cap) = joins.get(&base) {
+        return Some(cap);
+    }
     let args = func.push_values(&[base]);
     let data = InstData { args, ..InstData::new(Opcode::CapOf) };
     let cap = func.create_inst(data, &[Type::CAP], func.span(inst));
-    func.insert_before(cap, inst);
-    func[cap].results().next()
+    // A local whose lifetime ends somewhere in the function has a witness of its own, which is
+    // shut where it ends, and a capability made after that records a witness that is not open and
+    // so describes nothing. A pointer to it handed on after its block closed, or after the copy of
+    // an inlined function it belonged to returned, is the case worth catching. So its capability is
+    // made where the local is, once, and every call shares it.
+    let ends = all(func).into_iter().any(|at| {
+        func[at].opcode == Opcode::LifetimeEnd && func[func[at].args].first() == Some(&base)
+    });
+    let def = match func[base].def {
+        Def::Result { inst, .. } if ends => Some(inst),
+        _ => None,
+    };
+    match def {
+        Some(def) => func.insert_after(cap, def),
+        None => func.insert_before(cap, inst),
+    }
+    let cap = func[cap].results().next()?;
+    if def.is_some() {
+        joins.insert(base, cap);
+    }
+    Some(cap)
 }
 
 /// A `cap_arg` for the pointer parameter `param`, which is at `nth` in the frame, at the top of the
