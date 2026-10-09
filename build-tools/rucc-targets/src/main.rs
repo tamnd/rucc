@@ -420,6 +420,7 @@ fn rule_line(rule: &Rule) -> String {
         Test::X87Stack => "one x87 long double, or two if it is a _Complex".to_string(),
         Test::LoneFloat => "one float or one double and nothing else".to_string(),
         Test::SingleScalar => "one scalar and nothing else, with no padding".to_string(),
+        Test::Vector => "a vector, or a structure holding only one, outside the `...`".to_string(),
         Test::ComplexFloat => "a _Complex float and nothing else".to_string(),
         Test::FloatingMode => {
             "a _Complex, or one floating point scalar that fills the aggregate".to_string()
