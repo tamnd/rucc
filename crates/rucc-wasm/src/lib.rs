@@ -250,10 +250,11 @@ pub struct Lines {
 /// Where one declaration of the source is, over the code of one function or over all of it.
 ///
 /// A declaration in the frame is there over all of the function. A declaration in a value is in
-/// the local of the value from where the value is given to it to where the next value is, and only
-/// at `-O0`, where each value has a local of its own and nothing else writes it. Above `-O0`, the
-/// coloring gives one local to many values, and the stretch where a local holds one value is not
-/// known here, so those declarations get no place.
+/// the local of the value from where the value is given to it to where the next value is. At `-O0`
+/// each value has a local of its own and nothing else writes it. Above `-O0`, the coloring gives one
+/// local to many values, so each stretch stops where the code writes another value to the local,
+/// and a stretch at the top of a block starts there only when the value is live there or is a
+/// parameter of the block.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct Kept {
     /// Which declaration, as the opaque number that the IR function carried.

@@ -5,6 +5,7 @@
 //! its full padded width, five bytes, with a [`Fixup`] that says where it is, which is the form
 //! the object writer and `wasm-ld` both expect.
 
+use rucc_ir::Value;
 use rucc_object::wasm::{self, Fixup, RelocKind, ValType};
 
 /// The block type of a block, a loop or an `if` that takes nothing and gives nothing.
@@ -106,6 +107,22 @@ pub(crate) struct Code {
     jump: Option<Jump>,
     /// Where the code after the last `return` or `unreachable` that [`Code::stop`] wrote starts.
     stop: Option<usize>,
+    /// Each `local.set` and `local.tee`, in the order of the code, when the places of the
+    /// declarations are asked for above `-O0`. [`Code::end`] removes only a `br` that has nothing
+    /// after it but `end`s, so it never moves a write.
+    pub(crate) writes: Option<Vec<Write>>,
+}
+
+/// One `local.set` or `local.tee` in the code.
+#[derive(Clone, Copy, Debug)]
+pub(crate) struct Write {
+    /// Where the instruction starts.
+    pub(crate) from: u32,
+    /// Where the instruction ends, which is where the local holds what it wrote.
+    pub(crate) to: u32,
+    pub(crate) local: u32,
+    /// The value that the local holds after it, when the selector knows it.
+    pub(crate) value: Option<Value>,
 }
 
 /// A `br` that can go when the code falls through to the same place.
@@ -251,13 +268,25 @@ impl Code {
     }
 
     pub(crate) fn local_set(&mut self, local: u32) {
+        let from = self.bytes.len();
         self.bytes.push(0x21);
         self.uleb(u64::from(local));
+        self.wrote(from, local);
     }
 
     pub(crate) fn local_tee(&mut self, local: u32) {
+        let from = self.bytes.len();
         self.bytes.push(0x22);
         self.uleb(u64::from(local));
+        self.wrote(from, local);
+    }
+
+    fn wrote(&mut self, from: usize, local: u32) {
+        let to = self.bytes.len();
+        if let Some(writes) = self.writes.as_mut() {
+            let offset = |at: usize| u32::try_from(at).expect("a function body under 4 GiB");
+            writes.push(Write { from: offset(from), to: offset(to), local, value: None });
+        }
     }
 
     pub(crate) fn global_get(&mut self, symbol: u32) {
