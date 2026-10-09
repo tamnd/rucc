@@ -449,7 +449,7 @@ fn bound(list: &[AsmOperand<'_>], reg: PhysReg, role: Role) -> Option<usize> {
 ///
 /// The sigil gcc allows in front of a name is taken off here, because what a name is written with
 /// is syntax and which register it means is this question.
-fn pinned(operand: &AsmOperand<'_>) -> Option<PhysReg> {
+pub(crate) fn pinned(operand: &AsmOperand<'_>) -> Option<PhysReg> {
     match operand.named {
         Some(name) => {
             let (reg, _) = x86_64::gpr_named(name.strip_prefix('%').unwrap_or(name))?;
@@ -697,7 +697,11 @@ fn vector_letter(constraint: &str) -> bool {
 /// The registers a template kept as text spells, written `%%rax` in an extended one, each with
 /// the file it is in. Anything after the sigils that is not a general purpose or a vector register,
 /// `%%cr3` or `%%gs`, is not one the allocator hands out and is left out.
-fn spelled_registers(template: &str, gpr: RegClass, sse: RegClass) -> Vec<(PhysReg, RegClass)> {
+pub(crate) fn spelled_registers(
+    template: &str,
+    gpr: RegClass,
+    sse: RegClass,
+) -> Vec<(PhysReg, RegClass)> {
     let mut found = Vec::new();
     for (_, after) in template.match_indices("%%").map(|(at, _)| template.split_at(at + 2)) {
         let end = after.find(|c: char| !c.is_ascii_alphanumeric()).unwrap_or(after.len());

@@ -44,10 +44,10 @@ use std::cmp::Ordering;
 use rucc_base::hash::Map;
 use rucc_base::{Idx, Interner};
 use rucc_ir::{
-    AttrSet, BlockCall, CallInfo, Def, Extra, Flags, FloatPred, Func, Imm, Inst, InstData, IntPred,
-    MemInfo, MemOrder, Opcode, Signature, Type, Value,
+    AsmInfo, AsmOperand, AsmOperands, AttrSet, BlockCall, CallInfo, Def, Extra, Flags, FloatPred,
+    Func, Imm, Inst, InstData, IntPred, MemInfo, MemOrder, Opcode, Signature, Type, Value,
 };
-use rucc_target::{BitCount, CountInst};
+use rucc_target::{BitCount, CallRegs, CountInst, PhysReg};
 
 use crate::capability;
 
@@ -1924,6 +1924,192 @@ fn write(func: &mut Func, inst: Inst, value: Value, into: Value, info: MemInfo) 
     let data = InstData { args, extra, ..InstData::new(Opcode::Store) };
     let made = func.create_inst(data, &[], span);
     func.insert_before(made, inst);
+}
+
+/// Hands an `asm` operand that may be in a register or in memory over in memory, when the
+/// statement has already taken every register the allocator could put it in.
+///
+/// The front end takes the register when a constraint such as `"rm"` or `"g"` gives the choice,
+/// which is what gcc does too until it runs out. The kernel's 32 bit `hv_do_hypercall` is where it
+/// runs out: `"=A"`, `"+c"`, `"b"`, `"D"` and `"S"` take `eax`, `edx`, `ecx`, `ebx`, `edi` and `esi`
+/// and the call target is `"rm"`. i386 gives the allocator `eax`, `ecx`, `edx` and `ebx` and holds
+/// `esi` and `edi` back to reload through, so the target had no register to go in and nothing was
+/// left to reload it through either, and the build stopped in the allocator. gcc writes the target
+/// from the stack, `call *8(%esp)`, and this does the same: the value is stored to a slot of the
+/// frame in front of the statement and the slot is the operand, under `"m"`.
+///
+/// An output is the same on the other side. dell-smm-hwmon's `i8k_smm_func` pins all six registers
+/// with `"+a"` up to `"+D"` and writes its carry flag to a `"=mr"`, which gcc writes to the frame
+/// and this does too, reading it back from the slot behind the statement.
+///
+/// Only the first such operand moves, and only when no operand is in memory already. One operand in
+/// memory is spelled from the stack pointer and needs no register, and a second needs one for its
+/// address, which is what moving it was meant to save.
+///
+/// `held` is the registers the allocator keeps back from operands nobody pinned.
+pub fn crowded(func: &mut Func, names: &mut Interner, conv: &CallRegs, held: &[PhysReg]) {
+    let found: Vec<Inst> = func
+        .blocks()
+        .flat_map(|block| func.insts(block))
+        .filter(|&inst| matches!(func[inst].extra, Extra::Asm(_)))
+        .collect();
+    for inst in found {
+        moved_to_memory(func, names, conv, held, inst);
+    }
+}
+
+/// The operand [`crowded`] moves, if this statement has one to move.
+fn moved_to_memory(
+    func: &mut Func,
+    names: &mut Interner,
+    conv: &CallRegs,
+    held: &[PhysReg],
+    inst: Inst,
+) {
+    let Extra::Asm(asm) = func[inst].extra else { return };
+    let info = func[asm];
+    let constraints = names.resolve(info.constraints).to_owned();
+    let results: Vec<Value> = func[inst].results().collect();
+    let args: Vec<Value> = func[func[inst].args].to_vec();
+    let Some(operands) = AsmOperands::read(&constraints, &results, &args) else { return };
+    let list: Vec<AsmOperand<'_>> = operands.iter().copied().collect();
+    if list.iter().any(|operand| operand.memory) {
+        return;
+    }
+
+    // What the statement holds while it reads: every operand with a value, and an output written
+    // early, since that one is written before the reads are done. A constant the text is handed as
+    // a number takes nothing. Then what it holds once it has written, which is every output in a
+    // register. Each side is the registers its operands are pinned to and the operands nothing
+    // pins, and the registers named in the clobber list and in the text are taken from both, the
+    // way the back end takes them.
+    let constant = |value: Value| match func[value].def {
+        Def::Result { inst, .. } => {
+            matches!(func[inst].opcode, Opcode::IConst | Opcode::GlobalAddr)
+        }
+        _ => false,
+    };
+    let mut reads: (Vec<PhysReg>, Vec<usize>) = (Vec::new(), Vec::new());
+    let mut writes: (Vec<PhysReg>, Vec<usize>) = (Vec::new(), Vec::new());
+    let hold = |side: &mut (Vec<PhysReg>, Vec<usize>), operand: &AsmOperand<'_>, index| {
+        match crate::lower::pinned(operand) {
+            Some(reg) if !side.0.contains(&reg) => side.0.push(reg),
+            Some(_) => {}
+            None => side.1.push(index),
+        }
+    };
+    for (index, operand) in list.iter().enumerate() {
+        if operand.result.is_some() {
+            hold(&mut writes, operand, index);
+        }
+        let read = operand.value.is_some_and(|value| !(operand.immediate && constant(value)));
+        let early = operand.early && operand.value.is_none();
+        if !read && !early {
+            continue;
+        }
+        // An input tied to an output is in the output's register, which an output written early
+        // has counted already.
+        match operand.tied.and_then(|output| list.get(output)) {
+            Some(output) if output.early => {}
+            Some(output) => hold(&mut reads, output, index),
+            None => hold(&mut reads, operand, index),
+        }
+    }
+    let template = names.resolve(info.template).to_owned();
+    let clobbers = names.resolve(info.clobbers).to_owned();
+    let named = clobbers
+        .split(',')
+        .map(|entry| entry.trim().trim_matches('"'))
+        .map(|entry| entry.strip_prefix('%').unwrap_or(entry))
+        .filter_map(rucc_target::x86_64::gpr_named)
+        .map(|(reg, _)| reg)
+        .chain(
+            crate::lower::spelled_registers(&template, conv.int_class, conv.sse_class)
+                .into_iter()
+                .filter(|&(_, class)| class == conv.int_class)
+                .map(|(reg, _)| reg),
+        )
+        .collect::<Vec<PhysReg>>();
+    let short = |(pinned, loose): &(Vec<PhysReg>, Vec<usize>)| {
+        let free = conv
+            .int_order
+            .iter()
+            .filter(|reg| !held.contains(reg) && !pinned.contains(reg) && !named.contains(reg))
+            .count();
+        loose.len() > free
+    };
+    let mut wanted = Vec::new();
+    for side in [&reads, &writes] {
+        if short(side) {
+            wanted.extend(side.1.iter().copied());
+        }
+    }
+
+    // The operand to move: one of those the constraint lets go in memory, that nothing pins and
+    // nothing is tied to, holding an integer or an address no wider than a register. An output only
+    // when the statement is not an `asm goto`, whose outputs arrive on more than one edge.
+    let entries: Vec<&str> = constraints.split(',').collect();
+    let word = conv.word;
+    let goto = !func[info.targets].is_empty();
+    let movable = |&index: &usize| {
+        let operand = &list[index];
+        let Some(value) = operand.result.or(operand.value) else { return false };
+        let ty = func[value].ty;
+        let bits = if ty.is_ptr() { word * 8 } else { ty.bits() };
+        (operand.result.is_none() || !goto)
+            && operand.tied.is_none()
+            && crate::lower::pinned(operand).is_none()
+            && !list.iter().any(|other| other.tied == Some(index))
+            && entries[index].contains(['m', 'o', 'V', 'g'])
+            && (ty.is_ptr() || ty.is_int())
+            && ty.is_scalar()
+            && matches!(bits, 8 | 16 | 32 | 64)
+            && bits <= word * 8
+    };
+    let Some(index) = wanted.into_iter().find(movable) else { return };
+    let operand = list[index];
+    let ty = func[operand.result.or(operand.value).expect("a movable operand has a value")].ty;
+    let size = if ty.is_ptr() { word } else { ty.bits() / 8 };
+    let at = list[..index].iter().filter(|operand| operand.value.is_some()).count();
+
+    // The slot, what the operand reads written to it in front of the statement, and the slot
+    // where the operand's value was among the statement's operands.
+    let extra = Extra::Mem(func.add_mem(local(u64::from(size), size)));
+    let slot = written(func, inst, InstData { extra, ..InstData::new(Opcode::Alloca) }, Type::PTR);
+    let mut args = args;
+    match operand.value {
+        Some(value) => {
+            write(func, inst, value, slot, local(u64::from(size), size));
+            args[at] = slot;
+        }
+        None => args.insert(at, slot),
+    }
+    let mut entries: Vec<String> = entries.iter().map(|&entry| entry.to_owned()).collect();
+    let kept: String = entries[index].chars().take_while(|c| "=+&".contains(*c)).collect();
+    entries[index] = format!("{kept}m");
+    let constraints = names.intern(&entries.join(","));
+    let moved = func.add_asm(AsmInfo { constraints, ..info });
+    let Some(result) = operand.result else {
+        func[inst].args = func.push_values(&args);
+        func[inst].extra = Extra::Asm(moved);
+        return;
+    };
+
+    // An output has one result fewer, so the statement is made again without it, and what the
+    // program reads of it is read back from the slot behind the statement.
+    let mut data = func[inst];
+    data.args = func.push_values(&args);
+    data.extra = Extra::Asm(moved);
+    let kept: Vec<Value> = results.iter().copied().filter(|&other| other != result).collect();
+    let types: Vec<Type> = kept.iter().map(|&value| func[value].ty).collect();
+    let span = func.span(inst);
+    let made = func.create_inst(data, &types, span);
+    func.insert_before(made, inst);
+    let mut forward: Map<Value, Value> = kept.into_iter().zip(func[made].results()).collect();
+    let loaded = read(func, inst, slot, local(u64::from(size), size), ty);
+    forward.insert(result, loaded);
+    func.remove_inst(inst);
+    substitute(func, &forward);
 }
 
 /// Puts every constant distance a pointer is stepped by at the width of an address.
