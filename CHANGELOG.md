@@ -48,6 +48,7 @@ All notable changes are recorded here. The format follows [Keep a Changelog](htt
 
 ### Fixed
 
+- The walk that finds the blocks a call's constants leave reachable has no let chains, so the workspace builds with Rust 1.85 again and `cargo xtask chains` passes (#3527).
 - The forward pass of the copy cleanup keeps a scratch copy in front of a two address form, such as `subq $1, %r10`, whose answer is the scratch register. Before, the pass removed the copy at `-O2` on x86_64, and the form started from a stale register (#3520).
 - The `doc` and `features` steps of the release gate pass again. Two doc links in `rucc-codegen` pointed at an item that does not exist and at a private one, and `docs/FEATURES.md` now has the builtins that came in with -msimd128 on wasm (#3519).
 - The let chains that came in after the last release gate are gone, so the `chains` step of the gate passes again. The workspace promises Rust 1.85, and a let chain needs 1.88 (#3517).
