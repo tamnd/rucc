@@ -7,6 +7,7 @@ All notable changes are recorded here. The format follows [Keep a Changelog](htt
 ### Fixed
 
 - A call to a maths function such as `fabs` only carries the `library` mark when it has the library function's type, so `int fabs(int)` is the program's own function again, as gcc reads it. The usage text is back under one screen, with `-ftls-model=` sharing the line of `-fvisibility=` (#3471).
+- `-fsafety=detect` refuses a read of a local that lives in a register when nothing wrote it on the path taken, as in `int data; if (argc > 5) data = 3; return data;`. Such a local has no bytes for the init plane, so the front end keeps a flag next to it in its SSA form, and the read asks the flag. Where every path agrees the flag is a constant and the check is removed, so only reads that depend on the path cost a call. Juliet's CWE-457 cases at -O2 go from 408 to 498 of 540 detected at every tier with no false positives (#3460).
 
 ## 0.29.6
 
@@ -45,7 +46,6 @@ The release workflow for 0.29.5 stopped at the check of the tag and published no
 - `cargo doc` with `-D warnings` passes again. Two public doc comments linked to private items, which stopped the gate of the v0.29.5 release, so that release published nothing (#3469).
 - An x86 `asm` operand written `"rm"`, `"=mr"` or `"g"` goes in a slot of the frame when the other operands have taken every register it could go in, as gcc does it. The kernel's 32 bit `hv_do_hypercall` pins `edx:eax`, `ecx`, `ebx`, `edi` and `esi` and hands the call target over as `"rm"`, and dell-smm-hwmon pins all six and writes its carry to `"=mr"`. The allocator stopped with "an instruction naming every register of its class at once" on both (#3466).
 - `%z` on an x86 `asm` operand in memory is the suffix for the object's width, `shrb` for a byte, as gcc writes it. net/rxrpc's `shiftr_adv_rotr` writes `shr%z1 %1` over a `u8` handed over as `"+m"`, and rucc refused the statement since the back end only has the address of a memory operand (#3467).
-- `-fsafety=detect` refuses a read of a local that lives in a register when nothing wrote it on the path taken, as in `int data; if (argc > 5) data = 3; return data;`. Such a local has no bytes for the init plane, so the front end keeps a flag next to it in its SSA form, and the read asks the flag. Where every path agrees the flag is a constant and the check is removed, so only reads that depend on the path cost a call. Juliet's CWE-457 cases at -O2 go from 408 to 498 of 540 detected at every tier with no false positives (#3460).
 
 ## 0.29.5
 
