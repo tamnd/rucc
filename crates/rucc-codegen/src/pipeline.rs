@@ -52,6 +52,7 @@ use crate::expand;
 use crate::finish::{Convention, Padding, Probing, Protect, Tracing, far, finish};
 use crate::fold;
 use crate::frame::{self, Frame, Layout};
+use crate::fresh;
 use crate::held;
 use crate::kept;
 use crate::layout;
@@ -913,6 +914,8 @@ pub fn compile_recording(
         carry::carries(&mut func, machine.shapes, names);
         // The same moment for the same reason. See [`crate::double`].
         double::doubles(&mut func, machine.shapes, names);
+        // After both, which write instructions of their own. See [`crate::fresh`].
+        fresh::constants(&mut func, machine.shapes, names);
     }
     bits::dead(&mut func, machine.bits, machine.shapes, names);
     // A `cset` has already cleared everything above the bit it wrote, so the `and` that widens

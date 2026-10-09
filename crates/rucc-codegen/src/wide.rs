@@ -1618,6 +1618,15 @@ fn half_bitwise(
         _ => None,
     };
     let identity = if opcode == Opcode::And { ones } else { 0 };
+    if let (Some(x), Some(y)) = (known(func, a), known(func, b)) {
+        let bits = match opcode {
+            Opcode::And => x & y,
+            Opcode::Or => x | y,
+            _ => x ^ y,
+        };
+        #[expect(clippy::cast_possible_wrap, reason = "a half is at most sixty four bits")]
+        return ahead_const(func, width, inst, (bits & ones) as i128);
+    }
     for (constant, other) in [(a, b), (b, a)] {
         let Some(bits) = known(func, constant) else { continue };
         if Some(bits & ones) == absorbing {
@@ -1658,9 +1667,9 @@ fn compare(
         return;
     };
     let answer = if matches!(pred, IntPred::Eq | IntPred::Ne) {
-        let low = ahead(func, width, inst, Opcode::Xor, &[a_low, b_low]);
-        let high = ahead(func, width, inst, Opcode::Xor, &[a_high, b_high]);
-        let both = ahead(func, width, inst, Opcode::Or, &[low, high]);
+        let low = half_bitwise(func, width, inst, Opcode::Xor, a_low, b_low);
+        let high = half_bitwise(func, width, inst, Opcode::Xor, a_high, b_high);
+        let both = half_bitwise(func, width, inst, Opcode::Or, low, high);
         let zero = ahead_const(func, width, inst, 0);
         compared(func, inst, pred, both, zero)
     } else if let Some(settled) = settled(func, width, pred, b_low) {
@@ -1743,9 +1752,27 @@ fn choose(func: &mut Func, width: Width, halves: &mut Halves, inst: Inst) {
     else {
         return;
     };
-    let low = ahead(func, width, inst, Opcode::Select, &[cond, then_low, other_low]);
-    let high = ahead(func, width, inst, Opcode::Select, &[cond, then_high, other_high]);
+    let low = half_choice(func, width, inst, cond, then_low, other_low);
+    let high = half_choice(func, width, inst, cond, then_high, other_high);
     replace(func, halves, inst, low, high);
+}
+
+/// One half of a choice, which is no choice when both sides are the same half. A choice between
+/// two small constants has a high half of zero on both sides, and the kernel's `u64` masks built
+/// out of `?:` are a row of those.
+fn half_choice(
+    func: &mut Func,
+    width: Width,
+    inst: Inst,
+    cond: Value,
+    then: Value,
+    other: Value,
+) -> Value {
+    let same = known(func, then).is_some_and(|bits| known(func, other) == Some(bits));
+    if then == other || same {
+        return then;
+    }
+    ahead(func, width, inst, Opcode::Select, &[cond, then, other])
 }
 
 /// Keeping the low bits of a wide value, which is the low half and then whatever is left to do.
