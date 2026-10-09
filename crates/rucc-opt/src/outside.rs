@@ -74,6 +74,8 @@ pub struct Outside {
     /// Whether a sixteen byte vector of four `int` or two `long` may be a value. See
     /// [`Self::with_vectors`].
     vectors: bool,
+    /// Whether any vector of sixteen bytes may be a value. See [`Self::with_simd128`].
+    simd128: bool,
     /// The functions a call to can come back twice, or nothing when this was built without the
     /// names. See [`Self::knowing_twice`].
     twice: Option<Set<Symbol>>,
@@ -95,7 +97,14 @@ impl Outside {
         }
         // In the order the module has them, so a node's own index is where its parent sits here.
         let parents = module.metadata().map(|node| module[node].parent()).collect();
-        Self { names, parents, layout: Some(module.datalayout), vectors: false, twice: None }
+        Self {
+            names,
+            parents,
+            layout: Some(module.datalayout),
+            vectors: false,
+            simd128: false,
+            twice: None,
+        }
     }
 
     /// The same facts, with the functions of the module that a call to can come back twice, which
@@ -131,6 +140,21 @@ impl Outside {
     #[must_use]
     pub fn vectors(&self) -> bool {
         self.vectors && self.pointer_bytes() == Some(8)
+    }
+
+    /// The same facts, saying the module is built for wasm32 with `-msimd128`, where the back end
+    /// keeps a vector of sixteen bytes in one `v128` and reads and writes its lanes. False is the
+    /// default.
+    #[must_use]
+    pub fn with_simd128(self, simd128: bool) -> Self {
+        Self { simd128, ..self }
+    }
+
+    /// Whether a vector of sixteen bytes with lanes of 8, 16, 32 or 64 bits may be a value rather
+    /// than bytes in memory, which is wasm32 with `-msimd128`.
+    #[must_use]
+    pub fn simd128(&self) -> bool {
+        self.simd128
     }
 
     /// Whether this symbol is a name for an object no other name in the module also names.

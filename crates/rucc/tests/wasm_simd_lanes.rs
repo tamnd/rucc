@@ -107,6 +107,54 @@ fn without_simd128_each_operator_is_a_lane_at_a_time() {
     assert!(!text.contains("x2.") && !text.contains("v128"), "{text}");
 }
 
+/// Vectors in local variables, read again as another lane type and at one lane.
+const LOCALS: &str = "\
+typedef unsigned char v16qu __attribute__((vector_size(16)));
+typedef int v4si __attribute__((vector_size(16)));
+typedef float v4sf __attribute__((vector_size(16)));
+v4si f(v4si a, v4si b) { v4si t = a * b; return t + a - (b << 2); }
+v4sf g(v4sf a, v4sf b) { v4sf t = a * b; t = t + a; return t / b; }
+int h(v16qu a) { v16qu t = a + a; v4si u = (v4si)t; return u[2]; }
+";
+
+/// With `-msimd128` a vector stays a `v128` value at `-O2`, as with clang, and the function has no
+/// frame on the stack. The cast between two vector types is no instruction, and a read of one lane
+/// is one `extract_lane`.
+#[test]
+fn with_simd128_a_vector_local_stays_a_value() {
+    let out = assembly(LOCALS, &["-msimd128"]);
+    assert!(out.status.success(), "{}", String::from_utf8_lossy(&out.stderr));
+    let text = String::from_utf8(out.stdout).unwrap();
+    let want = [
+        "local.get\t0",
+        "local.get\t1",
+        "i32x4.mul",
+        "local.get\t0",
+        "i32x4.add",
+        "local.get\t1",
+        "i32.const\t2",
+        "i32x4.shl",
+        "i32x4.sub",
+        "return",
+    ];
+    let code = body(&text, "f");
+    assert_eq!(code.iter().filter(|op| !op.starts_with('.')).copied().collect::<Vec<_>>(), want);
+    for name in ["f", "g", "h"] {
+        let code = body(&text, name);
+        assert!(
+            !code.iter().any(|op| op.contains("v128.store") || op.contains("__stack_pointer")),
+            "{name}:\n{}",
+            code.join("\n")
+        );
+    }
+    assert!(body(&text, "g").contains(&"f32x4.div"), "{text}");
+    assert_eq!(
+        body(&text, "h").iter().filter(|op| op.contains("extract_lane")).count(),
+        1,
+        "{text}"
+    );
+}
+
 /// A program that does each operator on vectors of edge values, and the same operator on each
 /// lane as a scalar, and exits with 1 if a lane differs. The scalar side is in a function that is
 /// not inlined, so it is plain scalar code. A compare gives -1 or 0 in each lane. Every second lane

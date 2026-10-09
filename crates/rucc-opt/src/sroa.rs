@@ -126,6 +126,7 @@ impl Pass for Sroa {
             pointer: an.outside().pointer_bytes(),
             little: an.outside().little_endian() == Some(true),
             vectors: an.outside().vectors() && an.outside().little_endian() == Some(true),
+            simd128: an.outside().simd128() && an.outside().little_endian() == Some(true),
         };
         let an = &*an;
         let cfg = an.cfg(func);
@@ -200,6 +201,7 @@ pub(crate) fn scalarizable(func: &Func, layout: DataLayout) -> Set<Value> {
         pointer: Some(u64::from(layout.pointer_bits).div_ceil(8)),
         little: layout.little_endian,
         vectors: false,
+        simd128: false,
     };
     let mut rpo = vec![0; func.counts().blocks];
     for (rank, block) in cfg.reverse_postorder().enumerate() {
@@ -226,6 +228,8 @@ struct Target {
     little: bool,
     /// Whether a vector of four `int` or two `long` may be one value, see the module docs.
     vectors: bool,
+    /// Whether any vector of sixteen bytes may be one value, which is wasm32 with `-msimd128`.
+    simd128: bool,
 }
 
 /// The analyses the rewrite reads, none of which it changes.
@@ -671,7 +675,8 @@ fn bulk(func: &Func, inst: Inst, offsets: &Map<Value, u64>, size: u64) -> Option
 /// How many bytes a value of the type is in memory, for the types the pass splits.
 fn width(ty: Type, target: Target) -> Option<u64> {
     if ty.is_vector() {
-        return (target.vectors && rucc_ir::term::vector_slot(ty).is_some()).then_some(16);
+        let sse2 = target.vectors && rucc_ir::term::vector_slot(ty).is_some();
+        return (sse2 || target.simd128 && is_v128(ty)).then_some(16);
     }
     if is_quad(ty) {
         return target.vectors.then_some(16);
@@ -697,6 +702,15 @@ fn width(ty: Type, target: Target) -> Option<u64> {
 /// piece here, see [`whole`].
 fn is_quad(ty: Type) -> bool {
     ty == Type::float(rucc_ir::Float::F128)
+}
+
+/// Whether the type is a vector of sixteen bytes that wasm holds in one `v128`: lanes of 8, 16,
+/// 32 or 64 bits, or float lanes of 32 or 64 bits.
+fn is_v128(ty: Type) -> bool {
+    let lane = ty.lane();
+    let fits = (lane.is_int() && matches!(lane.bits(), 8 | 16 | 32 | 64))
+        || (lane.is_float() && matches!(lane.bits(), 32 | 64));
+    fits && u64::from(lane.bits()) * u64::from(ty.lanes()) == 128
 }
 
 /// The integer type that many bytes wide.
@@ -1481,11 +1495,28 @@ target datalayout = \"e-p:64:64-i64:64-f80:128-S128\"
         built(text, &mut Fuel::unlimited(), true)
     }
 
+    /// The same on wasm32 with `-msimd128`, where any vector of sixteen bytes may be a value.
+    fn on_simd128(signature: &str, body: &str) -> (Module, Stats) {
+        let text = wrap(signature, body)
+            .replace("x86_64-unknown-linux-gnu", "wasm32-unknown-wasip1")
+            .replace("e-p:64:64-i64:64-f80:128-S128", "e-p:32:32-i64:64-S128");
+        let mut fuel = Fuel::unlimited();
+        built_with(&text, &mut fuel, |outside| outside.with_simd128(true))
+    }
+
     fn built(text: &str, fuel: &mut Fuel, vectors: bool) -> (Module, Stats) {
+        built_with(text, fuel, |outside| outside.with_vectors(vectors))
+    }
+
+    fn built_with(
+        text: &str,
+        fuel: &mut Fuel,
+        facts: impl Fn(Outside) -> Outside,
+    ) -> (Module, Stats) {
         let mut names = Interner::new();
         let mut module = parse(text, &mut names).expect("the text parses");
         let id = module.funcs().last().expect("one function");
-        let outside = Arc::new(Outside::of(&module).with_vectors(vectors));
+        let outside = Arc::new(facts(Outside::of(&module)));
         let mut an = crate::machine::fixtures::analyses().about(outside);
         let stats = Sroa.run(&mut module[id], &mut an, fuel);
         if let Err(errors) = verify_func(&module, &module[id], &names) {
@@ -2029,6 +2060,54 @@ block2:
         // The copy in is the one load left and the store of the other shape the one store.
         assert_eq!(count_of(func, Opcode::Load), 1);
         assert_eq!(count_of(func, Opcode::Store), 1);
+    }
+
+    /// A vector of sixteen `char` added whole, read as four `float` and read at one `int` lane. SSE2
+    /// keeps only four `int` or two `long` in a register here, and wasm keeps each shape in a
+    /// `v128`.
+    const BYTES: &str = "block0(%0: ptr):
+    %1 = alloca, size 16, align 16
+    memcpy %1, %0, size 16, align 16
+    %2 = load.i8x16 %1, align 16
+    %3 = add %2, %2
+    store %3 -> %1, align 16
+    %4 = load.f32x4 %1, align 16
+    store %4 -> %0, align 16
+    %5 = iconst.i32 8
+    %6 = ptr_add %1, %5
+    %7 = load.i32 %6, align 4
+    return %7
+";
+
+    #[test]
+    fn on_wasm_with_simd128_a_vector_of_any_lanes_becomes_one_value() {
+        let (module, stats) = on_simd128("(ptr) -> i32", BYTES);
+        assert_eq!(stats.count(Kind::Optimized, SCALARIZED), 1);
+        let func = body(&module);
+        assert_eq!(count_of(func, Opcode::Alloca), 0);
+        assert_eq!(count_of(func, Opcode::ExtractLane), 1);
+        assert_eq!(count_of(func, Opcode::Load), 1);
+        assert_eq!(count_of(func, Opcode::Store), 1);
+        let (module, _) =
+            on_sse2(&wrap("(ptr) -> i32", &BYTES.replace("iconst.i32", "iconst.i64")));
+        assert_eq!(count_of(body(&module), Opcode::Alloca), 1);
+    }
+
+    /// wasm has no register for the sixteen byte float, so a vector copied as one stays in memory.
+    #[test]
+    fn on_wasm_a_vector_copied_as_the_quad_float_stays_in_memory() {
+        let text = "block0(%0: ptr):
+    %1 = alloca, size 16, align 16
+    %2 = load.f128 %0, align 16
+    store %2 -> %1, align 16
+    %3 = load.i32x4 %1, align 16
+    %4 = add %3, %3
+    store %4 -> %0, align 16
+    return
+";
+        let (module, stats) = on_simd128("(ptr)", text);
+        assert!(!stats.changed());
+        assert_eq!(count_of(body(&module), Opcode::Alloca), 1);
     }
 
     #[test]

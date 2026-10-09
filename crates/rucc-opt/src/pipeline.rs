@@ -870,6 +870,9 @@ pub struct Options {
     /// [`crate::inline`] compares it against a callee that has one. None at all is the default,
     /// which is the answer that inlines least: a callee built for anything more stays a call.
     pub isa: Isa,
+    /// Whether the module is for wasm32 with `-msimd128`, where the back end keeps a vector of
+    /// sixteen bytes in one `v128`. False is the default.
+    pub simd128: bool,
     /// Whether `-fconserve-stack` asked for gcc's tighter limits on how far inlining may grow a
     /// frame. See [`inline::Growth`].
     pub conserve_stack: bool,
@@ -896,6 +899,7 @@ impl Default for Options {
             builtins: true,
             no_builtin: Vec::new(),
             isa: Isa::NONE,
+            simd128: false,
             conserve_stack: false,
             stack_reuse: false,
             rewriter: Rewriter::Default,
@@ -1202,7 +1206,12 @@ pub fn run(module: &mut Module, names: &mut Interner, opts: &Options) -> Report 
     // is correct against that.
     let outside = if passes.iter().any(|pass| READS_OUTSIDE.contains(&pass.name())) {
         let sse2 = rucc_target::Feature::named("sse2").is_some_and(|it| opts.isa.has(it));
-        Arc::new(outside::Outside::of(module).with_vectors(sse2).knowing_twice(module, names))
+        Arc::new(
+            outside::Outside::of(module)
+                .with_vectors(sse2)
+                .with_simd128(opts.simd128)
+                .knowing_twice(module, names),
+        )
     } else {
         Arc::default()
     };

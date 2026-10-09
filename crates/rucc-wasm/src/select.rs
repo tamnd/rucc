@@ -3100,6 +3100,22 @@ impl Lower<'_, '_> {
                 }
                 self.set(results[0]);
             }
+            // The same sixteen bytes seen as other lanes, which is nothing to do. A vector argument
+            // arrives as lanes of `i8` and is cast to the lanes of its C type, and the two are
+            // usually in one local.
+            Opcode::Bitcast if self.ty(args[0]).is_vector() => {
+                simd_shape(self.ty(args[0]))?;
+                simd_shape(self.ty(results[0]))?;
+                if let Some(local) = self.shared(args[0], results[0]) {
+                    self.code.renamed(local);
+                    if let Some(write) = self.code.writes.as_mut().and_then(|w| w.last_mut()) {
+                        write.value = Some(results[0]);
+                    }
+                } else {
+                    self.push(args[0])?;
+                    self.set(results[0]);
+                }
+            }
             Opcode::Splat => {
                 let ty = self.ty(results[0]);
                 simd_shape(ty)?;
@@ -3185,6 +3201,15 @@ impl Lower<'_, '_> {
             }
         }
         Ok(())
+    }
+
+    /// The local of `from` when `to` is in the same local and both are read and written there, so
+    /// that a move of `from` to `to` is no code.
+    fn shared(&self, from: Value, to: Value) -> Option<u32> {
+        let plain =
+            |value| !self.trees.stacked.contains(&value) && !self.trees.teed.contains_key(&value);
+        let local = *self.local.get(&from)?;
+        (plain(from) && plain(to) && self.local.get(&to) == Some(&local)).then_some(local)
     }
 
     /// A `v128.const` of these sixteen bytes.
