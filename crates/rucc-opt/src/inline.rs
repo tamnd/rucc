@@ -1778,7 +1778,16 @@ fn summed_time(
 /// line of its template, a `;` ending a line as much as a newline does, and one at most when it is
 /// written `asm inline`, which is what the kernel writes for the ones that only add to a section.
 /// `nl80211_chan_width_to_mhz` in net/wireless/chan.c is a switch of ten labels and two such
-/// annotations, which is thirty one to gcc and too large to copy without being asked.
+/// annotations, which is thirty one to gcc and too large to copy without being asked. A
+/// conditional branch is two, as a `GIMPLE_COND` holds its compare and gcc charges the compare on
+/// top of the branch, whether or not the compare is also read elsewhere. `classify` in the corpus
+/// case `control-flow.many-returns` is four tests of its argument, eleven to gcc with the call it
+/// goes with, and stays a call in its five callers at `-O1`, where counted one apiece it was copied
+/// into all of them (tamnd/rucc#3379). A branch on a block's parameter is one, as that is how
+/// `a && b` comes out of the front end, a join of the two tests where gcc branches on the second
+/// test straight away. The merge in the sorter of SQLite is a loop on `a && b` and comes to thirty
+/// three that way, as it does to gcc, where with the join at two it was over the limit wasm holds a
+/// call in a loop to.
 fn weight(func: &Func, inst: Inst, names: &Interner, read: bool) -> usize {
     let data = &func[inst];
     match (data.opcode, data.extra) {
@@ -1788,6 +1797,12 @@ fn weight(func: &Func, inst: Inst, names: &Interner, read: bool) -> usize {
             let passed = func[data.args].len() - usize::from(through);
             let call = if through { 3 } else { 1 };
             call + passed + usize::from(read)
+        }
+        (Opcode::BrIf, _) => {
+            let joined = func[data.args]
+                .first()
+                .is_some_and(|&test| matches!(func[test].def, Def::Param { .. }));
+            if joined { 1 } else { 2 }
         }
         (Opcode::Switch, Extra::Switch(at)) => {
             let info = func[at];

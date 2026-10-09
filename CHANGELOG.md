@@ -16,6 +16,7 @@ All notable changes are recorded here. The format follows [Keep a Changelog](htt
 - Jump threading now repairs each copy with the cached graph, dominator tree and frontier and keeps them for the next edge, and finds every value to repair in one walk, so lz4hc.c at -O2 runs 4.5 percent fewer instructions (#3422).
 - Phiopt and short-circuit now update the cached graph in place when they fold the arms of a diamond into its head, rather than building it again for the next head, so lz4hc.c at -O2 runs 3.4 percent fewer instructions (#3425).
 - The inliner no longer copies and cleans up a callee to measure it when the estimate puts it more than sixteen times past the most the call could take, so lz4hc.c at -O2 runs 12.7 percent fewer instructions (#3429).
+- The inliner weighs a conditional branch as two, as gcc does, where a compare that only a branch reads made it one, and a branch on the join the front end makes of `a && b` stays one. `classify` in the corpus case `control-flow.many-returns` stays five calls at `-O1`, as with gcc 16, and SQLite at `-O2` has 3 percent less text (#3430).
 
 ### Fixed
 
