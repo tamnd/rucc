@@ -12,6 +12,7 @@ All notable changes are recorded here. The format follows [Keep a Changelog](htt
 - Register allocation stops at the first value in the way when all a register is asked is whether anything is, so lz4hc.c at -O2 runs 4.2 percent fewer instructions with the same output (#3449).
 - The inliner learns about a function from the profile it keeps for it instead of walking it again, so lz4hc.c at -O2 runs 1.2 percent fewer instructions with the same output (#3451).
 - Above `-O0`, a loop that reads a global or static array through a variable index now takes the array's address once in front of the loop and holds it in a register, instead of running a `lea` on every trip. This happens only when the loop has no call in it and registers are free across the whole loop. (#3455)
+- Jump threading keeps the loops it finds again that no moved edge is in and keeps their edge lists flat, so zstd_compress.c at -O2 runs 30 percent fewer instructions with the same output (#3464).
 
 ### Added
 

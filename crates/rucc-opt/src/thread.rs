@@ -362,7 +362,7 @@ impl Pass for Thread {
                     } else {
                         outermost(loops, from, block).map(Some)
                     };
-                    let (copy, out) = copy(func, an, block, at, call, &subst, keep);
+                    let (copy, out) = copy(func, an, from, block, at, call, &subst, keep);
                     edges.entry(call.block).or_default().push((copy, out));
                     edges.entry(copy).or_default().push((from, at));
                     paths.insert(copy, path);
@@ -380,9 +380,9 @@ impl Pass for Thread {
                 let kept =
                     kept && (!alone || strand(func, an, &edges, &mut stranded, block, entry));
                 let rebuilt = !kept
-                    && around
-                        .flatten()
-                        .is_some_and(|root| rebuild(func, an, &edges, &mut stranded, root, entry));
+                    && around.flatten().is_some_and(|root| {
+                        rebuild(func, an, &edges, &mut stranded, root, from, entry)
+                    });
                 // A copy left the cache with the graph it made, which nothing has moved since.
                 if !kept && !rebuilt {
                     if !copies_it {
@@ -572,6 +572,7 @@ fn rebuild(
     edges: &Edges,
     stranded: &mut Set<Block>,
     root: LoopId,
+    from: Block,
     entry: Block,
 ) -> bool {
     let mut loops = an.take_loops(func);
@@ -584,14 +585,15 @@ fn rebuild(
         loops.rebuild(
             root,
             func.counts().blocks,
-            |block| targets(func, block),
-            |block| {
-                edges
-                    .get(&block)
-                    .map_or_else(Vec::new, |list| list.iter().map(|&(pred, _)| pred).collect())
+            |block, out| push_targets(func, block, out),
+            |block, out| {
+                if let Some(list) = edges.get(&block) {
+                    out.extend(list.iter().map(|&(pred, _)| pred));
+                }
             },
             |block| cfg.reaches(block) && !stranded.contains(&block),
             &[],
+            &[from],
         )
     };
     an.keep_loops(loops);
@@ -617,9 +619,16 @@ fn rebuild(
 
 /// Where control goes from a block, as the function has it now.
 fn targets(func: &Func, block: Block) -> Vec<Block> {
-    func.terminator(block).map_or_else(Vec::new, |term| {
-        func.target_list(term).iter().map(|slot| func[slot].block).collect()
-    })
+    let mut out = Vec::new();
+    push_targets(func, block, &mut out);
+    out
+}
+
+/// [`targets`] put on the end of a list rather than in one of its own.
+fn push_targets(func: &Func, block: Block, out: &mut Vec<Block>) {
+    if let Some(term) = func.terminator(block) {
+        out.extend(func.target_list(term).iter().map(|slot| func[slot].block));
+    }
 }
 
 /// The forest of a function built from nothing, for [`rebuild`] to check itself against.
@@ -809,9 +818,11 @@ fn back_edge(loops: &Loops, from: Block, into: Block) -> bool {
 /// of the build. Nearly all of them are of blocks in a loop that is most of its function, so
 /// finding the forest again over that loop costs most of what building all of it did, and the
 /// build is six in a thousand fewer instructions. tamnd/rucc#3052.
+#[allow(clippy::too_many_arguments)]
 fn copy(
     func: &mut Func,
     an: &mut Analyses,
+    from: Block,
     block: Block,
     at: Idx<BlockCall>,
     call: BlockCall,
@@ -849,10 +860,11 @@ fn copy(
             loops.rebuild(
                 root,
                 func.counts().blocks,
-                |block| targets(func, block),
-                |block| cfg.predecessors(block).to_vec(),
+                |block, out| push_targets(func, block, out),
+                |block, out| out.extend_from_slice(cfg.predecessors(block)),
                 |block| cfg.reaches(block),
                 &[copy],
+                &[from],
             );
         }
         if lost(func, cfg, &loops, block) {

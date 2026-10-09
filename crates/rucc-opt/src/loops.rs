@@ -24,7 +24,7 @@
 //! not. rucc requires a single latch as a canonical form instead, and the canonicalizer in
 //! document 26 creates one, which is an edit rather than a guess and is always right.
 
-use rucc_base::hash::Set;
+use rucc_base::hash::Map;
 use rucc_ir::{Block, Def, Func, Value};
 
 use crate::cfg::Cfg;
@@ -215,14 +215,22 @@ impl Loops {
     /// On lz4.c at `-O2` jump threading built the graph, the tree and the forest again over the
     /// whole function for every thread that took a block out of a loop, and the loops those were
     /// in were a sixth of the blocks of their functions. tamnd/rucc#3052.
+    ///
+    /// `moved` are the blocks the edges that moved leave. A loop found again with the blocks it had
+    /// and none of those in it has the edges inside it it had, and every way into it arrives at its
+    /// header, so what is nested in it is what was, and the old loops are kept rather than found
+    /// again. On zstd_compress.c at `-O2` one loop of 2670 blocks with hundreds nested in it was
+    /// found again after each of dozens of threads. tamnd/rucc#3052.
+    #[allow(clippy::too_many_arguments)]
     pub(crate) fn rebuild(
         &mut self,
         root: LoopId,
         capacity: usize,
-        successors: impl Fn(Block) -> Vec<Block>,
-        predecessors: impl Fn(Block) -> Vec<Block>,
+        successors: impl Fn(Block, &mut Vec<Block>),
+        predecessors: impl Fn(Block, &mut Vec<Block>),
         reached: impl Fn(Block) -> bool,
         added: &[Block],
+        moved: &[Block],
     ) -> Vec<Block> {
         let header = self.header(root);
         let mut old = std::mem::take(&mut self.loops[root.index()].blocks);
@@ -233,20 +241,22 @@ impl Loops {
             member[block.index()] = true;
         }
         let mut live = vec![false; capacity];
-        let mut edges = vec![Vec::new(); capacity];
+        let mut within = Within::default();
+        within.edges.resize(capacity, (0, 0));
+        within.ways.resize(capacity, (0, 0));
         live[header.index()] = true;
         let mut work = vec![header];
         while let Some(block) = work.pop() {
-            let next = successors(block);
-            for &to in &next {
+            let start = within.to.len();
+            successors(block, &mut within.to);
+            for &to in &within.to[start..] {
                 if member[to.index()] && !live[to.index()] {
                     live[to.index()] = true;
                     work.push(to);
                 }
             }
-            edges[block.index()] = next;
+            within.edges[block.index()] = (start as u32, within.to.len() as u32);
         }
-        let mut ways = vec![Vec::new(); capacity];
         let mut region = Vec::new();
         let mut gone = Vec::new();
         for &block in &old {
@@ -255,12 +265,18 @@ impl Loops {
                 continue;
             }
             region.push(block);
-            ways[block.index()] = predecessors(block)
-                .into_iter()
-                .filter(
-                    |&pred| if member[pred.index()] { live[pred.index()] } else { reached(pred) },
-                )
-                .collect();
+            let start = within.from.len();
+            predecessors(block, &mut within.from);
+            let mut kept = start;
+            for at in start..within.from.len() {
+                let pred = within.from[at];
+                if if member[pred.index()] { live[pred.index()] } else { reached(pred) } {
+                    within.from[kept] = pred;
+                    kept += 1;
+                }
+            }
+            within.from.truncate(kept);
+            within.ways[block.index()] = (start as u32, kept as u32);
         }
 
         // The forest without the loop. A loop is numbered after the loop around it, so one pass
@@ -268,12 +284,26 @@ impl Loops {
         let mut dropped = vec![false; self.loops.len()];
         let mut renumbered = vec![None; self.loops.len()];
         let mut loops = Vec::with_capacity(self.loops.len());
+        let mut kept = Kept {
+            loops: Vec::with_capacity(self.loops.len()),
+            heads: Map::default(),
+            innermost: Vec::new(),
+            irreducible: Vec::new(),
+            moved: moved.to_vec(),
+            now: vec![None; self.loops.len()],
+        };
         for (index, data) in std::mem::take(&mut self.loops).into_iter().enumerate() {
             dropped[index] =
                 index == root.index() || data.parent.is_some_and(|parent| dropped[parent.index()]);
             if !dropped[index] {
                 renumbered[index] = Some(LoopId(loops.len() as u32));
                 loops.push(data);
+                kept.loops.push(None);
+            } else if index == root.index() {
+                kept.loops.push(None);
+            } else {
+                kept.heads.insert(data.header, index);
+                kept.loops.push(Some(data));
             }
         }
         let renumber = |id: LoopId| renumbered[id.index()];
@@ -286,19 +316,25 @@ impl Loops {
         }
         let mut innermost = std::mem::take(&mut self.innermost);
         innermost.resize(capacity, None);
+        if !kept.heads.is_empty() {
+            kept.innermost.clone_from(&innermost);
+        }
         for slot in &mut innermost {
             *slot = slot.and_then(renumber);
         }
         let roots = self.roots.iter().filter_map(|&id| renumber(id)).collect();
         let mut irreducible = std::mem::take(&mut self.irreducible);
+        if !kept.heads.is_empty() {
+            kept.irreducible = irreducible.iter().copied().filter(|b| member[b.index()]).collect();
+        }
         irreducible.retain(|block| !member[block.index()]);
 
-        let within = Within { edges, ways };
         let mut build = Build::new(&within, capacity);
         build.loops = loops;
         build.innermost = innermost;
         build.roots = roots;
         build.irreducible = irreducible;
+        build.kept = (!kept.heads.is_empty()).then_some(kept);
         build.region(&region, None);
         *self = build.finish();
         gone
@@ -506,8 +542,9 @@ trait Shape<'a>: Copy {
     /// The blocks control goes to from this one.
     fn successors(self, block: Block) -> &'a [Block];
 
-    /// What a strongly connected component with a cycle in it is.
-    fn head(self, component: &[Block]) -> Head;
+    /// What a strongly connected component with a cycle in it is. `marks` is false for every
+    /// block and is left that way, for a shape that wants to mark the component's blocks.
+    fn head(self, component: &[Block], marks: &mut [bool]) -> Head;
 }
 
 /// What a component with a cycle in it turned out to be.
@@ -532,7 +569,7 @@ impl<'a> Shape<'a> for Whole<'a> {
         self.cfg.successors(block)
     }
 
-    fn head(self, component: &[Block]) -> Head {
+    fn head(self, component: &[Block], _: &mut [bool]) -> Head {
         // The nearest block dominating all of it. If it is one of the component's own blocks
         // then every path in arrives there, because a block outside the component that the
         // header dominates is a block the header reaches and that reaches back into the
@@ -552,31 +589,66 @@ impl<'a> Shape<'a> for Whole<'a> {
 
 /// The blocks of one loop after edges inside it moved, read off the edges as they are now. See
 /// [`Loops::rebuild`].
+///
+/// Each list is a span of one shared vector, by block number, and a block with nothing recorded
+/// has the empty span. A vector for each block of the function was a third of what jump threading
+/// spent finding a loop again on zstd_compress.c at `-O2`. tamnd/rucc#3052.
+#[derive(Default)]
 struct Within {
-    /// Where each block of the loop that control still reaches goes, by block number.
-    edges: Vec<Vec<Block>>,
-    /// Where control arrives at each of those blocks from, counting only blocks it reaches.
-    ways: Vec<Vec<Block>>,
+    /// Where each block of the loop that control still reaches goes, as a span of `to`.
+    edges: Vec<(u32, u32)>,
+    to: Vec<Block>,
+    /// Where control arrives at each of those blocks from, counting only blocks it reaches, as a
+    /// span of `from`.
+    ways: Vec<(u32, u32)>,
+    from: Vec<Block>,
 }
 
 impl<'a> Shape<'a> for &'a Within {
     fn successors(self, block: Block) -> &'a [Block] {
-        &self.edges[block.index()]
+        let (start, end) = self.edges[block.index()];
+        &self.to[start as usize..end as usize]
     }
 
-    fn head(self, component: &[Block]) -> Head {
+    fn head(self, component: &[Block], marks: &mut [bool]) -> Head {
         // The entry block is never branched to, so it is on no cycle and is never in one of these.
-        let inside: Set<Block> = component.iter().copied().collect();
-        let mut entered = component
-            .iter()
-            .copied()
-            .filter(|&block| self.ways[block.index()].iter().any(|pred| !inside.contains(pred)));
-        match (entered.next(), entered.next()) {
-            (Some(header), None) => Head::Loop(header),
-            (None, _) => Head::Unreached,
-            (Some(_), Some(_)) => Head::Irreducible,
+        for &block in component {
+            marks[block.index()] = true;
         }
+        let found = {
+            let marks = &*marks;
+            let mut entered = component.iter().copied().filter(|&block| {
+                let (start, end) = self.ways[block.index()];
+                self.from[start as usize..end as usize].iter().any(|pred| !marks[pred.index()])
+            });
+            match (entered.next(), entered.next()) {
+                (Some(header), None) => Head::Loop(header),
+                (None, _) => Head::Unreached,
+                (Some(_), Some(_)) => Head::Irreducible,
+            }
+        };
+        for &block in component {
+            marks[block.index()] = false;
+        }
+        found
     }
+}
+
+/// The loops of the forest a rebuild started from that were nested in the loop it finds again,
+/// for the ones found again with nothing in them changed. See [`Loops::rebuild`].
+struct Kept {
+    /// Each such loop by the number it had, and nothing for every other number.
+    loops: Vec<Option<LoopData>>,
+    /// The number of the one each block heads.
+    heads: Map<Block, usize>,
+    /// The innermost loop of each block by the numbers it had.
+    innermost: Vec<Option<LoopId>>,
+    /// The blocks of the loop found again that were irreducible.
+    irreducible: Vec<Block>,
+    /// The blocks an edge that moved leaves.
+    moved: Vec<Block>,
+    /// The number each one kept has now.
+    now: Vec<Option<LoopId>>,
 }
 
 /// The state of one construction, which recurses into what it finds.
@@ -598,6 +670,8 @@ struct Build<'a, S: Shape<'a>> {
     index: Vec<u32>,
     low: Vec<u32>,
     stacked: Vec<bool>,
+    /// What a rebuild may keep of the forest it started from.
+    kept: Option<Kept>,
 }
 
 /// A block Tarjan's walk has not numbered yet.
@@ -617,6 +691,7 @@ impl<'a, S: Shape<'a>> Build<'a, S> {
             index: vec![UNVISITED; blocks],
             low: vec![0; blocks],
             stacked: vec![false; blocks],
+            kept: None,
         }
     }
 
@@ -636,7 +711,9 @@ impl<'a, S: Shape<'a>> Build<'a, S> {
         }
 
         for component in components {
-            let header = match self.shape.head(&component) {
+            // `member` is only set while a loop is being recorded, so it is all false here.
+            let shape = self.shape;
+            let header = match shape.head(&component, &mut self.member) {
                 Head::Loop(header) => header,
                 Head::Irreducible => {
                     self.irreducible.extend_from_slice(&component);
@@ -644,6 +721,10 @@ impl<'a, S: Shape<'a>> Build<'a, S> {
                 }
                 Head::Unreached => continue,
             };
+            if let Some(at) = self.keeps(header, &component) {
+                self.graft(at, parent);
+                continue;
+            }
             let id = self.record(header, component, parent);
             let inner: Vec<Block> =
                 self.loops[id.index()].blocks.iter().copied().filter(|&b| b != header).collect();
@@ -651,6 +732,65 @@ impl<'a, S: Shape<'a>> Build<'a, S> {
                 self.region(&inner, Some(id));
             }
         }
+    }
+
+    /// The number the forest a rebuild started from had for a loop with this header and exactly
+    /// these blocks, when no edge out of any of them moved.
+    fn keeps(&mut self, header: Block, component: &[Block]) -> Option<usize> {
+        let Self { kept, member, .. } = self;
+        let kept = kept.as_ref()?;
+        let &at = kept.heads.get(&header)?;
+        let blocks = &kept.loops[at].as_ref()?.blocks;
+        if blocks.len() != component.len() {
+            return None;
+        }
+        for &block in blocks {
+            member[block.index()] = true;
+        }
+        let same = component.iter().all(|block| member[block.index()])
+            && !kept.moved.iter().any(|block| member[block.index()]);
+        for &block in blocks {
+            member[block.index()] = false;
+        }
+        same.then_some(at)
+    }
+
+    /// Puts back the loop the forest a rebuild started from numbered `at`, with every loop nested in
+    /// it, and gives its blocks the innermost loops and irreducible regions they had.
+    fn graft(&mut self, at: usize, parent: Option<LoopId>) {
+        let id = self.adopt(at, parent);
+        let kept = self.kept.as_ref().expect("only a rebuild grafts");
+        for &block in &self.loops[id.index()].blocks {
+            self.member[block.index()] = true;
+            let old = kept.innermost[block.index()].expect("a block of a loop is in one");
+            self.innermost[block.index()] = kept.now[old.index()];
+        }
+        let member = &self.member;
+        self.irreducible
+            .extend(kept.irreducible.iter().copied().filter(|block| member[block.index()]));
+        for &block in &self.loops[id.index()].blocks {
+            self.member[block.index()] = false;
+        }
+    }
+
+    /// Numbers one kept loop and the ones nested in it, outer before inner as they are found.
+    fn adopt(&mut self, at: usize, parent: Option<LoopId>) -> LoopId {
+        let id = LoopId(self.loops.len() as u32);
+        let kept = self.kept.as_mut().expect("only a rebuild grafts");
+        let mut data = kept.loops[at].take().expect("a loop is kept once");
+        kept.now[at] = Some(id);
+        let children = std::mem::take(&mut data.children);
+        data.parent = parent;
+        data.depth = parent.map_or(0, |parent| self.loops[parent.index()].depth + 1);
+        self.loops.push(data);
+        match parent {
+            Some(parent) => self.loops[parent.index()].children.push(id),
+            None => self.roots.push(id),
+        }
+        for child in children {
+            self.adopt(child.index(), Some(id));
+        }
+        id
     }
 
     /// Adds a loop, and says which blocks are in it.
@@ -999,6 +1139,8 @@ mod tests {
     fn rebuilt(before: &[&[usize]], after: &[&[usize]], block: usize) -> Vec<usize> {
         let (_, mut loops) = forest(before);
         let (cfg, fresh) = forest(after);
+        let moved: Vec<Block> =
+            (0..after.len()).filter(|&n| before[n] != after[n]).map(b).collect();
         let mut root = loops.innermost(b(block)).unwrap();
         while let Some(parent) = loops.parent(root) {
             root = parent;
@@ -1007,16 +1149,23 @@ mod tests {
             .rebuild(
                 root,
                 cfg.capacity(),
-                |block| cfg.successors(block).to_vec(),
-                |block| cfg.predecessors(block).to_vec(),
+                |block, out| out.extend_from_slice(cfg.successors(block)),
+                |block, out| out.extend_from_slice(cfg.predecessors(block)),
                 |block| cfg.reaches(block),
                 &[],
+                &moved,
             )
             .iter()
             .map(|b| b.index())
             .collect();
         gone.sort_unstable();
         assert_eq!(outline(&loops), outline(&fresh));
+        let doms = Dominators::new(&cfg);
+        assert_eq!(loops.problems(&cfg, &doms), Vec::<String>::new());
+        for block in (0..after.len()).map(b).filter(|&block| cfg.reaches(block)) {
+            let innermost = |loops: &Loops| loops.innermost(block).map(|id| loops.header(id));
+            assert_eq!(innermost(&loops), innermost(&fresh), "innermost loop of {block:?}");
+        }
         gone
     }
 
@@ -1036,6 +1185,15 @@ mod tests {
         let before: &[&[usize]] = &[&[1], &[2, 6], &[3], &[4, 5], &[2], &[1], &[]];
         let after: &[&[usize]] = &[&[1], &[2, 6], &[5], &[4, 5], &[2], &[1], &[]];
         assert_eq!(rebuilt(before, after, 2), [3, 4]);
+    }
+
+    #[test]
+    fn a_rebuild_over_a_loop_keeps_a_loop_inside_it_nothing_moved_in() {
+        // Two loops inside 1, 2 -> 3 -> 2 and 4 -> 5 -> 4, where 5 left through 6 and now goes
+        // past it to 7. The first is kept as it was.
+        let before: &[&[usize]] = &[&[1], &[2, 8], &[3], &[2, 4], &[5], &[4, 6], &[7], &[1], &[]];
+        let after: &[&[usize]] = &[&[1], &[2, 8], &[3], &[2, 4], &[5], &[4, 7], &[7], &[1], &[]];
+        assert_eq!(rebuilt(before, after, 5), [6]);
     }
 
     #[test]
