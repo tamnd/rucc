@@ -526,8 +526,15 @@ pub fn run(
     // line calling a tracepoint, and gcc has the tracepoint in each caller, each one an entry in
     // `__jump_table`. Settled first, that one line is the whole tracepoint and far larger than a
     // call.
+    //
+    // The early inliner takes the `always_inline` calls in a function before it weighs the small
+    // ones, and it works from the callees up, so a function whose one line calls an
+    // `always_inline` body is that body by the time a caller asks how large it is. zstd's
+    // `HUF_DGEN` wrappers are that shape, one line each around a `FORCE_INLINE_TEMPLATE` decoder,
+    // and gcc keeps them out of line where they were copied into every caller, about 18KB a copy
+    // on i386.
     let mut small = wanted.clone();
-    small.retain(|_, &mut (_, kind)| kind == Kind::Small);
+    small.retain(|_, &mut (_, kind)| matches!(kind, Kind::Small | Kind::Always));
     round(module, &small, &mut done, None);
     let mut wanted = small;
     wanted.extend(classify(module, &Set::default()));
