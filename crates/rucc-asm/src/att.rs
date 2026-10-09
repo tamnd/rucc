@@ -943,8 +943,8 @@ impl Writer<'_> {
     }
 
     /// The profiler's call, when `-mrecord-mcount` or `-mnop-mcount` asked for something to be done
-    /// with it, in gcc's spelling: a label on the call, or on the nop in its place, and a `.quad` of
-    /// the label in `__mcount_loc` straight after it, or in the section `fentry_section` or
+    /// with it, in gcc's spelling: a label on the call, or on the nop in its place, and the label's
+    /// address, a `.quad` or on i386 a `.long`, in `__mcount_loc` straight after it, or in the section `fentry_section` or
     /// `-mfentry-section=` named. See [`rucc_mir::Mcount`].
     fn mcount(
         &mut self,
@@ -967,7 +967,8 @@ impl Writer<'_> {
                 .section
                 .map_or(rucc_object::MCOUNT_LOC, |section| self.names.resolve(section));
             let _ = writeln!(self.out, "\t.section\t{section},\"a\",@progbits");
-            let _ = writeln!(self.out, "\t.quad\t{label}");
+            let address = if self.arch == Arch::X86 { ".long" } else { ".quad" };
+            let _ = writeln!(self.out, "\t{address}\t{label}");
             let _ = writeln!(self.out, "\t.previous");
         }
         Ok(())
