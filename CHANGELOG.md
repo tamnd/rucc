@@ -33,6 +33,7 @@ All notable changes are recorded here. The format follows [Keep a Changelog](htt
 - On wasm32, a union that holds one GNU vector and nothing else goes the same way as the vector, as clang does. Before, rucc passed it as the address of a copy (#3461).
 - On wasm32, a GNU vector past the `...` is its own bytes in the variadic area, on a boundary of its alignment, as clang's `va_arg` reads it. Before, the caller put the address of a copy there (#3462).
 - `rucc-targets` names the two wasm vector rules of #3461 and #3462, so the workspace builds again (#3463).
+- An x86 `asm` operand written `"rm"`, `"=mr"` or `"g"` goes in a slot of the frame when the other operands have taken every register it could go in, as gcc does it. The kernel's 32 bit `hv_do_hypercall` pins `edx:eax`, `ecx`, `ebx`, `edi` and `esi` and hands the call target over as `"rm"`, and dell-smm-hwmon pins all six and writes its carry to `"=mr"`. The allocator stopped with "an instruction naming every register of its class at once" on both (#3466).
 
 ## 0.29.5
 

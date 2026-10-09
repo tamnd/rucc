@@ -46,6 +46,7 @@ use crate::compare;
 use crate::copies;
 use crate::coverage::Fired;
 use crate::elsewhere::Elsewhere;
+use crate::expand;
 use crate::finish::{Convention, Padding, Probing, Protect, Tracing, far, finish};
 use crate::fold;
 use crate::frame::{self, Frame, Layout};
@@ -778,6 +779,14 @@ pub fn compile_recording(
         })
         .collect();
     let ran = lowering::group(source, names, machine.conv, switching, &counts, counting);
+    // An `asm` input that may go in memory goes there when the statement has taken every register
+    // it could go in. Only on x86, the one machine here that names an operand in the frame without a
+    // register for its address. See [`expand::crowded`].
+    if std::ptr::eq(machine.shapes, &x86::MACHINE) {
+        expand::crowded(source, names, machine.conv, &X86_SCRATCH);
+    } else if std::ptr::eq(machine.shapes, &x86_64::MACHINE) {
+        expand::crowded(source, names, machine.conv, &SCRATCH);
+    }
     if !ran.switches.is_empty() {
         let called = names.resolve(source.name).to_owned();
         recording.lowerings.switched(&called, &ran.switches);
