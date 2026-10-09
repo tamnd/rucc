@@ -254,3 +254,59 @@ fn an_inlined_body_is_an_entry_that_names_the_call() {
     let line = text.lines().find(|line| line.contains("DW_AT_call_line")).expect("a call line");
     assert!(line.trim_end().ends_with(": 7"), "{line}");
 }
+
+/// A body with a local of its own, which the optimizer inlines into the loop. The parameter is
+/// live across the call, so it is somewhere for the whole of the copy.
+#[cfg(target_os = "linux")]
+const HALVED: &str = "\
+int g(int);
+static int twice(int n) {
+    int half = n / 2;
+    return g(half) + n;
+}
+int total(const int *of, int many) {
+    int sum = 0;
+    for (int i = 0; i < many; i++) sum += twice(of[i]);
+    return sum;
+}
+";
+
+/// The parameters and the locals of an inlined body are children of its entry, so that a debugger
+/// stopped in the copy can print them. A parameter names the parameter of the origin and says where
+/// it is, and a local has a name and a place of its own.
+#[cfg(target_os = "linux")]
+#[test]
+fn an_inlined_body_says_where_its_parameters_and_locals_are() {
+    let dir = fixture("inlined-locals");
+    std::fs::write(dir.join("one.c"), HALVED).expect("the fixture can be written");
+    build(&dir, &["-g", "-O2"], "one.o");
+    let out = Command::new("readelf")
+        .arg("--debug-dump=info")
+        .arg(dir.join("one.o"))
+        .output()
+        .expect("readelf starts");
+    let _ = std::fs::remove_dir_all(&dir);
+    let text = String::from_utf8_lossy(&out.stdout);
+
+    // The lines of the copy's entry and of everything inside it, by the depth readelf prints.
+    // An attribute line starts with its offset in brackets as well, so only an entry has a depth.
+    let depth = |line: &str| {
+        if !line.contains("Abbrev Number") {
+            return None;
+        }
+        let rest = line.trim_start().strip_prefix('<')?;
+        rest[..rest.find('>')?].parse::<usize>().ok()
+    };
+    let mut lines = text.lines().skip_while(|line| !line.contains("DW_TAG_inlined_subroutine"));
+    let first = lines.next().expect("an inlined entry");
+    let top = depth(first).expect("a depth");
+    let inside: Vec<&str> =
+        lines.take_while(|line| depth(line).is_none_or(|at| at > top)).collect();
+    let inside = inside.join("\n");
+
+    assert!(inside.contains("DW_TAG_formal_parameter"), "{text}");
+    assert!(inside.contains("DW_AT_abstract_origin"), "{text}");
+    assert!(inside.contains("DW_TAG_variable"), "{text}");
+    assert!(inside.contains("half"), "{text}");
+    assert!(inside.contains("DW_AT_location"), "{text}");
+}

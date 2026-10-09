@@ -638,6 +638,9 @@ pub fn compile(opts: &Options, name: &str, fs: &dyn FileSystem) -> Compiled {
                                     opts,
                                 )
                             });
+                            // Out of the module, since the back end does not read them and the
+                            // debug information does, while the back end has the module.
+                            let copied = std::mem::take(&mut lowered.module.copies);
                             // The back end, which is every pass after the IR and which is
                             // where a construct nothing has a rule for is finally noticed.
                             let made = clock.time("generate", || {
@@ -653,7 +656,12 @@ pub fn compile(opts: &Options, name: &str, fs: &dyn FileSystem) -> Compiled {
                                         stack: &mut stack,
                                     },
                                     &mut temps.assembly,
-                                    Origin { map: &sess.sources, name, meaning: &meaning },
+                                    Origin {
+                                        map: &sess.sources,
+                                        name,
+                                        meaning: &meaning,
+                                        copies: &copied,
+                                    },
                                 )
                             });
                             match made {
@@ -881,7 +889,7 @@ pub(crate) fn joined(opts: &Options, units: &[rucc_lto::Unit<'_>]) -> Result<Vec
             stack: &mut StackUsage::new(),
         },
         &mut None,
-        Origin { map: &sess.sources, name, meaning: &meaning },
+        Origin { map: &sess.sources, name, meaning: &meaning, copies: &rucc_ir::Copies::default() },
     )
     .map_err(flat)?;
     match made {
@@ -1218,6 +1226,8 @@ struct Origin<'a> {
     name: &'a str,
     /// The types and the signatures, and empty where the build wanted no debug information.
     meaning: &'a crate::shapes::Meaning,
+    /// The bodies the inliner copied and the declarations of each copy. See [`rucc_ir::Copies`].
+    copies: &'a rucc_ir::Copies,
 }
 
 /// Why there is no code for this target, or `None` when there is a back end for it.
@@ -2098,6 +2108,19 @@ fn describe(
                 spots.push((decl, Vec::new()));
             }
         }
+        // And the declarations of the bodies the inliner copied in, which go on the entry of the
+        // copy rather than on the function. See `adopt`.
+        let copied: Vec<(u32, rucc_debug::Spot)> = taken(&mut placed)
+            .into_iter()
+            .map(|(decl, at)| {
+                (decl, rucc_debug::Spot::Always(rucc_debug::Held::Frame(i64::from(at))))
+            })
+            .chain(
+                taken(&mut spots)
+                    .into_iter()
+                    .map(|(decl, spans)| (decl, rucc_debug::Spot::Over(spans))),
+            )
+            .collect();
         if let (Some(sig), Some(known)) = (sig.as_mut(), known) {
             for (param, decl) in sig.params.iter_mut().zip(&known.params) {
                 let Some(decl) = *decl else { continue };
@@ -2160,8 +2183,9 @@ fn describe(
         // are over the whole unit, and what goes on an entry is a place in this function's table, so
         // the two are joined here.
         // And the bodies the inliner copied in, each inside the scope its call was written in.
-        let (mut inlined, called) =
+        let Found { mut inlined, called, own } =
             copies(extent.len as u64, rows, &origin, &mut copying, &mut files, &rewrite);
+        adopt(copied, &own, &mut inlined, &origin, &copying, &mut files, &rewrite);
         wants.extend(&called);
         let (scopes, at) =
             nests(&wants, &origin.meaning.scopes, extent.len as u64, rows, origin.map);
@@ -2367,6 +2391,8 @@ fn describe_wasm(
                 (_, None) => spots.push((kept.decl, rucc_debug::Spot::Always(held))),
             }
         }
+        // The declarations of the copies, as in `describe`.
+        let copied = taken(&mut spots);
         // A parameter goes on the entry that the signature wrote for it, as in `describe`.
         let mut sig = known.and_then(|known| known.sig.clone());
         if let (Some(sig), Some(known)) = (sig.as_mut(), known) {
@@ -2395,8 +2421,9 @@ fn describe_wasm(
                 tags: named.tags.clone(),
             });
         }
-        let (mut inlined, called) =
+        let Found { mut inlined, called, own } =
             copies(u64::from(lines.len), &lines.rows, &origin, &mut copying, &mut files, &rewrite);
+        adopt(copied, &own, &mut inlined, &origin, &copying, &mut files, &rewrite);
         wants.extend(&called);
         let (scopes, at) =
             nests(&wants, &origin.meaning.scopes, u64::from(lines.len), &lines.rows, origin.map);
@@ -2775,11 +2802,12 @@ fn copies<R: Located>(
     copying: &mut Copying<'_>,
     files: &mut Vec<String>,
     rewrite: &dyn Fn(&str) -> String,
-) -> (Vec<rucc_debug::Inlined>, Vec<Option<usize>>) {
+) -> Found {
     let mut out: Vec<rucc_debug::Inlined> = Vec::new();
     let mut scopes: Vec<Option<usize>> = Vec::new();
+    let mut own: Map<rucc_diag::BytePos, usize> = Map::default();
     if origin.map.copies().is_empty() {
-        return (out, scopes);
+        return Found { inlined: out, called: scopes, own };
     }
     let ends = ends(len, rows);
     let mut seen: Map<rucc_diag::BytePos, Option<usize>> = Map::default();
@@ -2817,7 +2845,10 @@ fn copies<R: Located>(
                                 },
                                 column: call.column,
                                 over: Vec::new(),
+                                params: Vec::new(),
+                                locals: Vec::new(),
                             });
+                            own.insert(copy.at, out.len() - 1);
                             let written = origin.map.outside(copy.call).lo;
                             let scope = copying.scope(&origin.meaning.scopes, written);
                             scopes.push(parent.is_none().then_some(scope).flatten());
@@ -2840,7 +2871,72 @@ fn copies<R: Located>(
             }
         }
     }
-    (out, scopes)
+    Found { inlined: out, called: scopes, own }
+}
+
+/// What [`copies`] finds in one function.
+struct Found {
+    /// The entries of the copies, each after the copy it is inside.
+    inlined: Vec<rucc_debug::Inlined>,
+    /// The scope of the unit each call was written in, beside the entries.
+    called: Vec<Option<usize>>,
+    /// Which of the entries each copy is, by where the positions of the copy start. A copy with no
+    /// entry of its own is not here.
+    own: Map<rucc_diag::BytePos, usize>,
+}
+
+/// Takes the declarations of the copies out of `from`, and keeps the order of the rest.
+fn taken<T>(from: &mut Vec<(u32, T)>) -> Vec<(u32, T)> {
+    let (copied, own) =
+        std::mem::take(from).into_iter().partition(|(decl, _)| *decl >= rucc_ir::COPIED);
+    *from = own;
+    copied
+}
+
+/// Puts each declaration of a copy on the entry of that copy, as a parameter or as a local. The
+/// numbers are the ones [`rucc_ir::Copies::name`] gave.
+///
+/// A declaration is left out when its copy has no entry, or when this cannot say what the body
+/// declared. A parameter in two places keeps the first, as a parameter of the function does.
+fn adopt(
+    mut copied: Vec<(u32, rucc_debug::Spot)>,
+    own: &Map<rucc_diag::BytePos, usize>,
+    inlined: &mut [rucc_debug::Inlined],
+    origin: &Origin<'_>,
+    copying: &Copying<'_>,
+    files: &mut Vec<String>,
+    rewrite: &dyn Fn(&str) -> String,
+) {
+    // In the order of the copies and then of the declarations in the body, so that the locals of a
+    // copy come out in the order the program declared them.
+    copied.sort_by_key(|(decl, _)| origin.copies.named(*decl));
+    for (decl, spot) in copied {
+        let Some((site, decl)) = origin.copies.named(decl) else { continue };
+        let Some(site) = origin.copies.sites().get(site) else { continue };
+        let Some(&entry) = own.get(&site.at) else { continue };
+        let Some(&name) = copying.bodies.get(&site.of.lo) else { continue };
+        let Some(known) = origin.meaning.funcs.get(name) else { continue };
+        let copy = &mut inlined[entry];
+        if let Some(which) = known.params.iter().position(|&param| param == Some(decl)) {
+            if copy.params.len() <= which {
+                copy.params.resize_with(which + 1, || None);
+            }
+            copy.params[which].get_or_insert(spot);
+            continue;
+        }
+        let Some(named) = origin.meaning.locals.get(&decl) else { continue };
+        copy.locals.push(rucc_debug::Local {
+            name: named.name.clone(),
+            ty: named.ty,
+            decl: Some(rucc_debug::Place {
+                file: interned(files, rewrite(&named.file)),
+                line: named.line,
+            }),
+            spot,
+            scope: None,
+            tags: named.tags.clone(),
+        });
+    }
 }
 
 /// Which of a function's addresses were built for a run of its source bytes.
