@@ -77,6 +77,10 @@ pub(crate) enum Sort {
     /// The offset of a thread-local variable from the thread pointer, which is what
     /// `message@GOTTPOFF(%rip)` is and is a relocation for the same reason.
     Thread,
+    /// The pair of slots `__tls_get_addr` takes on x86-64, for one variable or for its whole
+    /// module, which is what `x@tlsgd(%rip)` and `x@tlsld(%rip)` are. The bytes hold the distance
+    /// to the pair, so the end of the instruction is taken off as it is for [`Sort::Table`].
+    Dynamic(Tls),
     /// Somewhere to jump or call on i386 that the file did not mark `@PLT`. gas asks the linker for
     /// the plain distance to it there, `R_386_PC32`, and keeps the stub for a branch that asks.
     Plain,
@@ -100,15 +104,48 @@ pub(crate) enum Sort {
 /// The name in a displacement, and which of the three ways of reaching it the suffix asks for.
 ///
 /// A bare name is the datum itself. `@GOTPCREL` and `@GOTTPOFF` are the two suffixes this compiler
-/// writes, and reading them back is what lets a file it emitted be assembled by it.
+/// writes for a load, and `@tlsgd` and `@tlsld` are the ones it writes in front of a call to
+/// `__tls_get_addr`. Reading them back is what lets a file it emitted be assembled by it. gas reads
+/// each in either case and gcc writes them in lower case, so the case is not looked at.
 fn reached(named: &str) -> Result<(String, Sort), String> {
     let Some((name, how)) = named.split_once('@') else {
         return Ok((named.to_owned(), Sort::Near));
     };
-    match how {
-        "GOTPCREL" => Ok((name.to_owned(), Sort::Table)),
-        "GOTTPOFF" => Ok((name.to_owned(), Sort::Thread)),
-        _ => Err(format!("'@{how}' is not a way of reaching something this compiler reads")),
+    const SUFFIXES: [(&str, Sort); 4] = [
+        ("GOTPCREL", Sort::Table),
+        ("GOTTPOFF", Sort::Thread),
+        ("TLSGD", Sort::Dynamic(Tls::General)),
+        ("TLSLD", Sort::Dynamic(Tls::Module)),
+    ];
+    match SUFFIXES.iter().find(|(suffix, _)| suffix.eq_ignore_ascii_case(how)) {
+        Some(&(_, sort)) => Ok((name.to_owned(), sort)),
+        None => Err(format!("'@{how}' is not a way of reaching something this compiler reads")),
+    }
+}
+
+/// The same for an x86-64 address that is not counted from the instruction.
+///
+/// A bare name is the address of the name. `@dtpoff` is how far a variable is into its module's
+/// block, added to the address `__tls_get_addr` gave back, and `@tpoff` is where it is from the
+/// thread pointer, added to `%fs:0`.
+fn reached_x86_64(named: &str) -> Result<(String, Sort), String> {
+    let Some((name, how)) = named.split_once('@') else {
+        return Ok((named.to_owned(), Sort::Extended));
+    };
+    match moved(how) {
+        Some(tls) => Ok((name.to_owned(), Sort::Tls(tls))),
+        None => Err(format!("'@{how}' is not a way of reaching something this compiler reads")),
+    }
+}
+
+/// The x86-64 thread-local suffix that is a number and not a slot, when it is one.
+fn moved(how: &str) -> Option<Tls> {
+    if how.eq_ignore_ascii_case("DTPOFF") {
+        Some(Tls::InModule)
+    } else if how.eq_ignore_ascii_case("TPOFF") {
+        Some(Tls::Offset)
+    } else {
+        None
     }
 }
 
@@ -561,10 +598,9 @@ fn full(word: &str, args: &[String], mode: Mode) -> Result<Written, String> {
         }) else {
             return Err(format!("'{word}' left room for a name in an address and was given none"));
         };
-        // A suffix only gets this far on i386, where every address is counted from registers.
         let (name, sort) = match mode {
             Mode::Bits32 => reached_i386(&named.name)?,
-            Mode::Bits64 => (named.name, Sort::Extended),
+            Mode::Bits64 => reached_x86_64(&named.name)?,
         };
         wanted.push(Hole { at, width: 4, name, addend: named.addend, sort });
     }
@@ -588,11 +624,18 @@ fn full(word: &str, args: &[String], mode: Mode) -> Result<Written, String> {
         bytes[at..].fill(0);
         // On i386 the number may be a name's distance from the global offset table, or a slot of
         // it, which is `$message@GOTOFF` and is four bytes whatever the instruction. Or it may be
-        // where a thread-local variable is, `$x@ntpoff` added to the thread pointer.
-        if let Some((rest, how)) = unsuffixed(&text).filter(|_| mode == Mode::Bits32) {
-            let sort = match (how, threaded(how)) {
-                ("GOTOFF", _) => Sort::Offset,
-                ("GOT", _) => Sort::Slot,
+        // where a thread-local variable is, `$x@ntpoff` added to the thread pointer, which is
+        // `$x@tpoff` on x86-64.
+        let suffixed =
+            unsuffixed(&text).filter(|(_, how)| mode == Mode::Bits32 || moved(how).is_some());
+        if let Some((rest, how)) = suffixed {
+            let tls = match mode {
+                Mode::Bits32 => threaded(how),
+                Mode::Bits64 => moved(how),
+            };
+            let sort = match (how, tls) {
+                ("GOTOFF", _) if mode == Mode::Bits32 => Sort::Offset,
+                ("GOT", _) if mode == Mode::Bits32 => Sort::Slot,
                 (_, Some(tls)) => Sort::Tls(tls),
                 (_, None) => {
                     return Err(format!(
@@ -1091,7 +1134,8 @@ fn slotted(name: &str) -> bool {
 /// On i386 none does, and `movl foo@GOT, %eax` is a slot of the table at an address of its own,
 /// which gas takes and which only a program that has put the table at a fixed place would write.
 /// `movl x@indntpoff, %eax` is the same for a thread-local variable's slot, and is what gcc writes
-/// for one in code that is not position independent.
+/// for one in code that is not position independent. On x86-64 `movl %fs:x@tpoff, %eax` is the one
+/// suffix of that kind, where the four bytes are where the variable is from the thread pointer.
 fn outright(operand: &mut Operand, mode: Mode) {
     let Operand::Dest(Named { name, addend }) = operand else { return };
     if *addend == 0 {
@@ -1100,9 +1144,10 @@ fn outright(operand: &mut Operand, mode: Mode) {
             return;
         }
     }
-    let suffixed = mode == Mode::Bits32
-        && unsuffixed(name)
-            .is_some_and(|(_, how)| matches!(how, "GOT" | "GOTOFF") || threaded(how).is_some());
+    let suffixed = unsuffixed(name).is_some_and(|(_, how)| match mode {
+        Mode::Bits32 => matches!(how, "GOT" | "GOTOFF") || threaded(how).is_some(),
+        Mode::Bits64 => moved(how).is_some(),
+    });
     if number(name).is_ok() || name.contains('@') && !suffixed || name == "." {
         return;
     }
@@ -1715,10 +1760,13 @@ fn address(text: &str, mode: Mode) -> Result<Operand, String> {
 
     // A name in an address that is not counted from the instruction is the name's address, which
     // the linker writes into four bytes of displacement however small the rest of it is. A suffix
-    // asks for a table slot or a thread's offset, which is only reached from the instruction.
+    // asks for a table slot or a thread's offset, which is only reached from the instruction. The
+    // two that are not are `@dtpoff` and `@tpoff`, which are a thread-local's offset in four bytes
+    // and are added to a register, as in `movl x@dtpoff(%rax), %eax` after `__tls_get_addr`.
     if let Some(named) = &named {
         if !addr.rip {
-            if let Some((_, how)) = named.name.split_once('@').filter(|_| mode == Mode::Bits64) {
+            let suffix = named.name.split_once('@').map(|(_, how)| how);
+            if let Some(how) = suffix.filter(|&how| mode == Mode::Bits64 && moved(how).is_none()) {
                 return Err(format!(
                     "'@{how}' in an address that is not counted from the instruction, which is \
                      not a way this compiler reaches anything"
