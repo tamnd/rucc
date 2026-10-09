@@ -8,6 +8,10 @@ All notable changes are recorded here. The format follows [Keep a Changelog](htt
 
 - `btf_decl_tag` is written into the debugging information the way gcc 16 writes it: a chain of `DW_TAG_GNU_annotation` entries under the unit, named `btf_decl_tag` and holding the tag's string, that a function, a variable, a parameter, a local or a member points at with `DW_AT_GNU_annotation`. A chain is written once for everything with the same tags, and a declaration seen again keeps the tags of every declaration in the order gcc's merge leaves them. pahole reads these into the kernel's BTF. gcc's own `dwarf-btf-decl-tag-*.c` counts are held against it. `btf_type_tag` is still checked and not written.
 
+### Fixed
+
+- A constant that holds an address, in a section the program named, is read only under `-fno-pic` the way gcc and clang leave it, so the kernel's `__param` and `.init.rodata` are `"a"` and not `"aw"`. Only position independent code needs the loader to write the address. The decision for an unnamed constant moved from the driver into the same place (#3437).
+
 ## 0.29.5
 
 The release workflow for 0.29.4 stopped at the check of the tag and published nothing, so this release also carries the changes of 0.29.4. The cause was a constant in a test that clippy on Linux x86-64 found unused, and #3434 fixes it. The release also adds `-fsafety-leaks`, builds more of the i386 kernel (the MMX and port forms in the assembler, `-msse` and `-msse2`, wide offsets and gcov counters), and makes the optimizer faster on large files, because more passes keep the loop forest and the graph across their folds.

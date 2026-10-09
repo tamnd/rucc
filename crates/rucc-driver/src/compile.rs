@@ -1624,8 +1624,11 @@ fn generate(
     // nor a variable: an alias is an entry in the symbol table and no bytes of anything.
     let (globals, aliases) = match opts.emit {
         EmitKind::Asm | EmitKind::Object | EmitKind::Archive | EmitKind::Executable => {
+            // Under `-fno-pic` a constant holding an address goes where any other constant does,
+            // `.rodata` or a named section that is not writable, which is where gcc puts it.
+            let pic = replaceable(target, opts);
             let mut globals =
-                rucc_asm::globals(module, names, target.object_format).map_err(refused)?;
+                rucc_asm::globals(module, names, target.object_format, pic).map_err(refused)?;
             // The thunks `-mindirect-branch=thunk` and `-mfunction-return=thunk` have the unit carry,
             // which are text at file scope for the reason an `asm` there is: each is in a section
             // and a group of its own. See `rucc_codegen::thunks::bodies`.
@@ -1648,16 +1651,6 @@ fn generate(
                 let target = names.resolve(name).to_owned();
                 (Slot::Referred.name(&target), target)
             }));
-            // Under `-fno-pic` nothing loads the file at an address it does not already know, so
-            // a constant holding an address has nobody to write it but the linker and goes in
-            // `.rodata`, which is where gcc puts it. `.data.rel.ro` is for the loader's one write.
-            if replaceable(target, opts) == IrPic::Absolute {
-                for var in &mut globals.vars {
-                    if let rucc_object::Place::RelocReadOnly { .. } = var.place {
-                        var.place = rucc_object::Place::ReadOnly;
-                    }
-                }
-            }
             // gcc gives a literal of 31 bytes or more the alignment of a word on x86 unless it is
             // optimizing for size, which is what sends the long ones to `.rodata.str1.8`, and the
             // section a literal is in is one the kernel's section audit counts.
