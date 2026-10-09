@@ -17,6 +17,7 @@ All notable changes are recorded here. The format follows [Keep a Changelog](htt
 - A shift of a `long long` by a constant on i386 fills the word the bits move into with `shldl` or `shrdl`, as gcc does, where it was a copy, two shifts and an or. A rotate is one of them per word, and a `__int128` shift on x86-64 is `shldq` or `shrdq` the same way (#3493).
 - A `long long` shift by a count in a register on i386, and a `__int128` one on x86-64, fills the word the bits cross into with `shld` or `shrd` by `%cl`, and the count is no longer masked first, since the machine masks it. A shift of a word by a count masked to the word drops the mask as well (#3498).
 - A shift of a `long long` on i386, or a `__int128` on x86-64, by a count in a register asks whether the count reached a whole word after the shifts rather than before them, so both words are picked with `cmov` on one test instead of a byte kept through `setne` (#3499).
+- The inliner points the readers of an inlined call's results at the copy without walking the whole caller, which takes a quarter off the compile of quickjs.c at `-O2` (#3500).
 
 ### Added
 
