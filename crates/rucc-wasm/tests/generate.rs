@@ -555,6 +555,7 @@ fn link_and_run_for(name: &str, text: &str, assembled: bool, features: Features)
             "-mcpu=lime1".as_ref(),
             "-mexception-handling".as_ref(),
             "-mtail-call".as_ref(),
+            if features.has(Feature::Simd128) { "-msimd128" } else { "-mno-simd128" }.as_ref(),
             "-c".as_ref(),
             listing.as_os_str(),
             "-o".as_ref(),
@@ -2684,4 +2685,62 @@ fn the_dwarf_sections_go_in_the_object_with_their_relocations() {
     wrong.chunks[1].relocs[1].symbol = "nowhere".into();
     let error = rucc_wasm::describe(&mut object.clone(), &wrong).unwrap_err();
     assert!(error.why.contains("`nowhere`"), "{error}");
+}
+
+/// Lanes put in, moved and taken out of a `v128`. The narrow lanes check that a lane taken out
+/// with `extract_lane_u` is a value that a compare, a `sext` and a `zext` read correctly. `main`
+/// exits with 10 + 8 - 2 + 1 + 9, which is 26.
+const LANES: &str = r#"; ModuleID = 'lanes.c'
+; format 0
+target triple = "wasm32-unknown-wasip1"
+target datalayout = "e-p:32:32-i64:64-S128"
+
+func @main() -> i32, linkage(external) {
+block0:
+    %0 = splat.i32x4 5
+    %1 = iconst.i32 7
+    %2 = insertlane %0, %1, lane 2
+    %3 = splat.i32x4 3
+    %4 = add %2, %3
+    %5 = shuffle %4, lanes [2, 0, 1, 3]
+    %6 = extractlane.i32 %5, lane 0
+    %7 = extractlane.i32 %5, lane 1
+    %8 = splat.i16x8 -2
+    %9 = iconst.i16 9
+    %10 = insertlane %8, %9, lane 6
+    %11 = shuffle %10, lanes [6, 7, 0, 1, 2, 3, 4, 5]
+    %12 = extractlane.i16 %11, lane 0
+    %13 = extractlane.i16 %11, lane 1
+    %14 = sext.i32 %13
+    %15 = iconst.i16 -2
+    %16 = icmp eq %13, %15
+    %17 = zext.i32 %16
+    %18 = zext.i32 %12
+    %19 = add %6, %7
+    %20 = add %19, %14
+    %21 = add %20, %17
+    %22 = add %21, %18
+    return %22
+}
+"#;
+
+#[test]
+fn the_lanes_of_a_v128_are_put_in_moved_and_taken_out() {
+    let simd = Cpu::Lime1.features().with(Feature::Simd128);
+    let text = assembly_for(LANES, simd);
+    for want in [
+        "i32x4.replace_lane\t2",
+        "i32x4.add",
+        "i8x16.shuffle\t8, 9, 10, 11, 0, 1, 2, 3, 4, 5, 6, 7, 12, 13, 14, 15",
+        "i32x4.extract_lane\t1",
+        "i16x8.replace_lane\t6",
+        "i16x8.extract_lane_u\t0",
+    ] {
+        assert!(text.contains(want), "no `{want}` in\n{text}");
+    }
+    for assembled in [false, true] {
+        if let Some(status) = link_and_run_for("lanes", LANES, assembled, simd) {
+            assert_eq!(status, 26);
+        }
+    }
 }
