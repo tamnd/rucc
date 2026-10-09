@@ -2341,25 +2341,24 @@ pub fn parse_args(args: &[String]) -> Result<Action, CliError> {
             | "-fsanitize-address-use-after-scope"
             | "-fno-sanitize-address-use-after-scope" => {}
             _ if arg.starts_with("-fsanitize-sections=") => {}
-            // Counting which edges a run reached, which is how a fuzzer knows an input was worth
-            // keeping. Refused rather than dropped, because a fuzzer whose calls into
-            // `__sanitizer_cov_*` were never generated runs blind and reports coverage of nothing,
-            // and there is no point in the campaign where that announces itself.
+            // The calls a fuzzer learns from, the two gcc has and the kernel's kcov uses. Anything
+            // else is refused rather than dropped, because a fuzzer whose calls were never
+            // generated runs blind and nothing in the campaign says so.
             _ if arg.starts_with("-fsanitize-coverage=") => {
                 let how = &arg["-fsanitize-coverage=".len()..];
                 for one in how.split(',') {
-                    if !matches!(one, "trace-pc" | "trace-cmp") {
-                        return Err(err(format!(
-                            "`{one}` is not a coverage instrumentation, which is trace-pc or \
-                             trace-cmp"
-                        )));
+                    match one {
+                        "trace-pc" => opts.sanitize_coverage_pc = true,
+                        "trace-cmp" => opts.sanitize_coverage_cmp = true,
+                        _ => {
+                            return Err(err(format!(
+                                "`{one}` is not a coverage instrumentation this compiler \
+                                 generates, which is trace-pc or trace-cmp, see \
+                                 spec/04-driver-and-cli.md section 4.7"
+                            )));
+                        }
                     }
                 }
-                return Err(err(format!(
-                    "{arg}: this compiler generates no coverage callbacks, and a fuzzer built \
-                     with it would run without any feedback at all, see \
-                     spec/04-driver-and-cli.md section 4.7"
-                )));
             }
             // The optimizer's own flags, from section 9.10 of `spec/09-optimizer.md`. These come
             // after every `-f` the rest of the compiler answers to, so a pass can never take a
@@ -8976,10 +8975,15 @@ mod tests {
         }
         assert!(refused(&["-fsanitize-recover=bogus", "-c", "a.c"]).contains("is not a sanitizer"));
 
-        // Coverage instrumentation is refused rather than dropped, because a fuzzer with no
-        // feedback runs blind and never says so.
-        let failed = refused(&["-fsanitize-coverage=trace-pc", "-c", "a.c"]);
-        assert!(failed.contains("feedback"), "{failed}");
+        // The two kinds of coverage gcc has are taken, on one flag or two, and any other is
+        // refused rather than dropped, because a fuzzer with no feedback runs blind.
+        let (opts, _) = compile(&["-fsanitize-coverage=trace-pc", "-c", "a.c"]);
+        assert!(opts.sanitize_coverage_pc && !opts.sanitize_coverage_cmp);
+        let (opts, _) = compile(&["-fsanitize-coverage=trace-pc,trace-cmp", "-c", "a.c"]);
+        assert!(opts.sanitize_coverage_pc && opts.sanitize_coverage_cmp);
+        let line = ["-fsanitize-coverage=trace-cmp", "-fsanitize-coverage=trace-pc", "-c", "a.c"];
+        let (opts, _) = compile(&line);
+        assert!(opts.sanitize_coverage_pc && opts.sanitize_coverage_cmp);
         let failed = refused(&["-fsanitize-coverage=trace-pc-guard", "-c", "a.c"]);
         assert!(failed.contains("trace-pc or trace-cmp"), "gcc takes two of them: {failed}");
     }

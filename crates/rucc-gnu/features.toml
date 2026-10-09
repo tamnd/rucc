@@ -417,8 +417,8 @@ kind = "attribute"
 gcc_version = "12.0"
 status = "implemented"
 used_by = ["linux"]
-tests = ["rucc::the_promises_and_the_tool_hints_gcc_answers_yes_for_are_taken_without_a_word"]
-notes = "Takes a function out of `-fsanitize-coverage=`, which this compiler does not take either, so nothing is ever instrumented. When it is taken this has to be read."
+tests = ["rucc::the_promises_and_the_tool_hints_gcc_answers_yes_for_are_taken_without_a_word", "rucc::every_block_and_comparison_calls_the_runtime_gcc_names"]
+notes = "Takes a function out of `-fsanitize-coverage=trace-pc` and `trace-cmp`, so its body makes none of the `__sanitizer_cov_trace_*` calls. The kernel's `noinstr` code carries it. A body inlined into such a function gets no calls either, since the calls go in after the optimizer."
 
 [[feature]]
 name = "naked"

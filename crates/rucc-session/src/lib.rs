@@ -2582,6 +2582,13 @@ pub struct Options {
     /// Off unless asked for. A function declared `no_instrument_function` is left alone whatever
     /// this says, which is how the two hooks avoid calling themselves.
     pub instrument_functions: bool,
+    /// Whether every block starts with a call to `__sanitizer_cov_trace_pc`, from
+    /// `-fsanitize-coverage=trace-pc`. The kernel's kcov asks for it.
+    pub sanitize_coverage_pc: bool,
+    /// Whether every comparison of integers or floating point numbers and every `switch` calls
+    /// one of the `__sanitizer_cov_trace_cmp` functions first, from
+    /// `-fsanitize-coverage=trace-cmp`. A function declared `no_sanitize_coverage` gets neither.
+    pub sanitize_coverage_cmp: bool,
     /// Whether the object may end up in a shared library, from `-fPIC` and `-fPIE`, or is not
     /// position independent at all, from `-fno-pic` and `-fno-pie`.
     pub pic: Pic,
@@ -2949,6 +2956,8 @@ impl Options {
             visibility: Visibility::default(),
             align_functions: None,
             instrument_functions: false,
+            sanitize_coverage_pc: false,
+            sanitize_coverage_cmp: false,
             pic: Pic::default(),
             interposition: true,
             async_unwind_tables: true,

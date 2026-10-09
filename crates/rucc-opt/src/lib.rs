@@ -173,6 +173,7 @@ pub mod readonly;
 pub mod reassoc;
 pub mod reload;
 pub mod rules;
+pub mod sancov;
 pub mod sccp;
 pub mod scev;
 pub mod short_circuit;

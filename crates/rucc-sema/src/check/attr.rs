@@ -1835,6 +1835,7 @@ impl Checker<'_> {
                 "noipa" => flags |= DeclFlags::NOINLINE | DeclFlags::NOIPA,
                 "no_instrument_function" => flags |= DeclFlags::NO_INSTRUMENT,
                 "no_profile_instrument_function" => flags |= DeclFlags::NO_PROFILE,
+                "no_sanitize_coverage" => flags |= DeclFlags::NO_SANCOV,
                 "cf_check" if matches!(self.cx.target.tuple.arch().as_str(), "x86_64" | "i686") => {
                     flags |= DeclFlags::CF_CHECK;
                 }

@@ -89,11 +89,13 @@ fn asking_for_a_sanitizer_is_refused_by_name_and_writes_no_object() {
         assert!(!dir.join("never.o").exists(), "-fsanitize={asked} wrote an object anyway");
     }
 
-    // Coverage instrumentation, which is the same answer for the same reason: a fuzzer whose calls
-    // into the coverage runtime were never generated runs blind and reports nothing.
-    let (ok, said) = run(&dir, &["-fsanitize-coverage=trace-pc"], "never.o");
-    assert!(!ok, "coverage instrumentation is refused");
-    assert!(said.contains("feedback"), "{said}");
+    // A kind of coverage gcc does not have, which is the same answer for the same reason: a fuzzer
+    // whose calls into the coverage runtime were never generated runs blind and reports nothing.
+    // The two gcc has are taken, see `sancov.rs`.
+    let (ok, said) = run(&dir, &["-fsanitize-coverage=trace-pc-guard"], "never.o");
+    assert!(!ok, "trace-pc-guard is refused");
+    assert!(said.contains("trace-pc or trace-cmp"), "{said}");
+    assert!(!dir.join("never.o").exists(), "trace-pc-guard wrote an object anyway");
     let _ = std::fs::remove_dir_all(&dir);
 }
 
