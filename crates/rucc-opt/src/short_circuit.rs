@@ -291,8 +291,12 @@ impl Pass for ShortCircuit {
                     }
                 }
                 // The graph was about the function as it was a moment ago, and the manager clears
-                // the cache after the pass returns, which is too late for the next block.
-                an.clear();
+                // the cache after the pass returns, which is too late for the next block. Each arm
+                // had the head as its one way in and the head now goes where it went, so the loop
+                // forest is the one there was without them.
+                let merges: Vec<(Block, Block)> =
+                    shape.arms.iter().flatten().map(|&arm| (arm, shape.head)).collect();
+                an.clear_merging(func, &merges);
                 // The arm was the join's other way in, so the head now jumps to a block nothing
                 // else reaches, and the two are one block with a parameter and a jump in the middle
                 // of it. Taking those out is the other half of what lets a chain collapse all the

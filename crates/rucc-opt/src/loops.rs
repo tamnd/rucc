@@ -96,6 +96,93 @@ impl Loops {
         build.finish()
     }
 
+    /// The forest after a block went away and the one block that reached it took over its edges,
+    /// worked out without looking at the rest of the function.
+    ///
+    /// `gone` had `into` as its only way in, and whatever `gone` went to `into` goes to now. Every
+    /// cycle through `gone` came in from `into`, so it is the same cycle with one block fewer, and
+    /// every edge `into` gained stands for the path through `gone` it replaced. The components are
+    /// then the same at every level of nesting with `gone` taken out of them, and so are the blocks
+    /// that have a way in from outside one, which is what decides its header. A loop `gone` was in
+    /// loses it, the back edge it had becomes `into`'s, and so do the edges out of the loop it had.
+    ///
+    /// Answers false and leaves the forest alone when `gone` was a header, which a block with one
+    /// way in can only be when it is the entry, and the forest then has to be built again.
+    ///
+    /// Short-circuit folds a diamond and then the block below it, one at a time, and asks about the
+    /// next branch after each. On lz4hc.c at `-O2` building the forest again for that question was
+    /// a tenth of the compile.
+    pub(crate) fn merged(&mut self, gone: Block, into: Block) -> bool {
+        self.irreducible.retain(|&block| block != gone);
+        let Some(slot) = self.innermost.get_mut(gone.index()) else { return true };
+        let Some(inner) = slot.take() else { return true };
+        let mut walk = Some(inner);
+        while let Some(id) = walk {
+            if self.loops[id.index()].header == gone {
+                self.innermost[gone.index()] = Some(inner);
+                return false;
+            }
+            walk = self.loops[id.index()].parent;
+        }
+        let mut walk = Some(inner);
+        while let Some(id) = walk {
+            let data = &mut self.loops[id.index()];
+            data.blocks.retain(|&block| block != gone);
+            if let Some(at) = data.latches.iter().position(|&block| block == gone) {
+                data.latches.remove(at);
+                if !data.latches.contains(&into) {
+                    data.latches.push(into);
+                }
+            }
+            for exit in &mut data.exits {
+                if exit.from == gone {
+                    exit.from = into;
+                }
+            }
+            let mut seen = Vec::with_capacity(data.exits.len());
+            data.exits.retain(|&exit| {
+                let fresh = !seen.contains(&exit);
+                seen.push(exit);
+                fresh
+            });
+            walk = data.parent;
+        }
+        true
+    }
+
+    /// What the forest says, with the loops named by their headers and every list in block order,
+    /// so that two forests of one graph found in different orders compare equal.
+    #[cfg(debug_assertions)]
+    pub(crate) fn summary(&self, cfg: &Cfg) -> impl PartialEq + std::fmt::Debug + use<> {
+        let sorted = |mut blocks: Vec<Block>| {
+            blocks.sort_unstable();
+            blocks
+        };
+        let mut loops: Vec<_> = self
+            .loops
+            .iter()
+            .map(|data| {
+                let mut exits: Vec<(Block, Block)> =
+                    data.exits.iter().map(|exit| (exit.from, exit.to)).collect();
+                exits.sort_unstable();
+                (
+                    data.header,
+                    sorted(data.blocks.clone()),
+                    sorted(data.latches.clone()),
+                    exits,
+                    data.parent.map(|parent| self.loops[parent.index()].header),
+                    data.depth,
+                )
+            })
+            .collect();
+        loops.sort_unstable();
+        let innermost: Vec<(Block, Option<Block>)> = sorted(cfg.postorder().to_vec())
+            .into_iter()
+            .map(|block| (block, self.innermost(block).map(|id| self.header(id))))
+            .collect();
+        (loops, innermost, sorted(self.irreducible.clone()))
+    }
+
     /// The forest again after edges out of blocks of the outermost loop `root` moved, worked out
     /// over the blocks of that loop rather than over the function, and the blocks of it that
     /// control no longer reaches.

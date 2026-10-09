@@ -569,6 +569,35 @@ impl Analyses {
             .touching(Arc::clone(&self.modref));
     }
 
+    /// Forgets everything as [`Analyses::clear`] does, except the loop forest when it is here,
+    /// which is told about each block that went away and the block that took over its edges.
+    ///
+    /// For a pass that has just folded blocks into the one block that reached each of them, under
+    /// the terms [`Loops::merged`] gives, and will ask about a branch again before it returns.
+    pub(crate) fn clear_merging(&mut self, func: &Func, merges: &[(Block, Block)]) {
+        let loops = self.loops.take();
+        self.clear();
+        let Some(mut loops) = loops else { return };
+        for &(gone, into) in merges {
+            if !loops.merged(gone, into) {
+                return;
+            }
+        }
+        #[cfg(debug_assertions)]
+        {
+            let cfg = Cfg::new(func);
+            let fresh = Loops::new(&cfg, &Dominators::new(&cfg));
+            assert_eq!(
+                loops.summary(&cfg),
+                fresh.summary(&cfg),
+                "the forest kept is the one built"
+            );
+        }
+        #[cfg(not(debug_assertions))]
+        let _ = func;
+        self.loops = OnceCell::from(loops);
+    }
+
     /// Forgets one analysis and nothing else.
     fn drop(&mut self, analysis: Analysis) {
         match analysis {

@@ -1381,7 +1381,7 @@ pub(crate) fn merge_below(func: &mut Func, an: &mut Analyses, head: Block, into:
     let mut forward = Map::default();
     merge(func, head, into, &mut forward);
     uses::substitute(func, &forward);
-    an.clear();
+    an.clear_merging(func, &[(into, head)]);
     true
 }
 

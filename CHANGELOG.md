@@ -4,6 +4,10 @@ All notable changes are recorded here. The format follows [Keep a Changelog](htt
 
 ## Unreleased
 
+### Changed
+
+- Short-circuit keeps the loop forest across a collapse instead of rebuilding it for the next branch, which makes lz4hc.c at -O2 run 3.6 percent fewer instructions (#3416).
+
 ## 0.29.4
 
 The release archive now carries the builtins for `i686-linux-gnu`, which the Linux probes of milestone L0 found missing in 0.29.3, and the workspace builds with Rust 1.85 again. rucc now takes the `btf_decl_tag` and `btf_type_tag` attributes of GCC 16. The release also makes the compiler faster on large files: the hasher, the heap, branch prediction in phiopt, the post-dominator tree and the inliner do less work for each compile.
