@@ -72,6 +72,7 @@ mod aggregate_return;
 mod annotate;
 mod assume;
 mod attr;
+mod btf;
 mod builtin;
 mod clones;
 mod decl;
@@ -466,6 +467,7 @@ impl<'a> Checker<'a> {
         // it does not borrow the checker that each declaration is checked through.
         let ast = self.ast;
         self.refuse_unimplemented_attributes();
+        self.check_btf_tags();
         for &decl in ast.top_level() {
             // What a body's casts wrote is read by no declaration, and is dropped here rather
             // than carried to the end of the unit.
