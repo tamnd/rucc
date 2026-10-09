@@ -1436,10 +1436,10 @@ fn generate(
         // code walks down the screen.
         reorder: opts.reorder_blocks.unwrap_or_else(|| opts.opt_level.runs_optimizer()),
         // On at `-O2` and `-O3`, which is where gcc splits a function for x86, and not when the
-        // goal is size, which gcc's gate on the pass says. Only x86-64 ELF, which is the one
-        // target whose listing writes the second part, and not under `-g`, whose line and range
-        // tables are written for a function in one piece. See `rucc_codegen::cold`.
-        partition: target.tuple.arch() == Arch::X86_64
+        // goal is size, which gcc's gate on the pass says. Only x86-64 and i386 ELF, the targets
+        // whose listing writes the second part, and not under `-g`, whose line and range tables
+        // are written for a function in one piece. See `rucc_codegen::cold`.
+        partition: matches!(target.tuple.arch(), Arch::X86_64 | Arch::X86)
             && target.tuple.os().object_format() == Some(ObjectFormat::Elf)
             && !opts.debug_info
             && opts
@@ -5636,6 +5636,16 @@ decl #0 x : int object external static defined
         let object = run(&opts, source);
         let has = |name: &[u8]| object.artifact.bytes().windows(name.len()).any(|at| at == name);
         assert!(has(b".text.unlikely\0") && has(b"f.cold\0"));
+        // The same on i386, as gcc does it for `-m32`.
+        let mut i386 = opts.clone();
+        i386.target = "i686-linux-gnu".parse::<Triple>().unwrap();
+        let object = run(&i386, source);
+        let has = |name: &[u8]| object.artifact.bytes().windows(name.len()).any(|at| at == name);
+        assert!(has(b".text.unlikely\0") && has(b"f.cold\0"));
+        i386.emit = EmitKind::Asm;
+        let text = run(&i386, source).text().to_owned();
+        let cold = &text[text.find("f.cold:").expect(&text)..];
+        assert!(cold.contains("call\toops"), "{text}");
         opts.emit = EmitKind::Asm;
         for (level, asked) in [
             (rucc_session::OptLevel::Os, None),
