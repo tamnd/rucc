@@ -178,9 +178,13 @@ impl Lower<'_, '_> {
         let mut trees = Trees::default();
         // The `ptr_add` instructions with no use, and then the ones that they were the only use of.
         // The same for the `splat` and `insertlane` that build the count of a vector shift, which
-        // the shift does not read when the count is the same in each lane.
+        // the shift does not read when the count is the same in each lane, and for the ones and
+        // the `bitcast` under them that a vector built from its lanes does not read.
         let pure = |inst: Inst| {
-            matches!(func[inst].opcode, Opcode::PtrAdd | Opcode::Splat | Opcode::InsertLane)
+            matches!(
+                func[inst].opcode,
+                Opcode::PtrAdd | Opcode::Splat | Opcode::InsertLane | Opcode::Bitcast
+            )
         };
         let mut dead: Vec<Inst> = func
             .blocks()
@@ -385,6 +389,13 @@ impl Lower<'_, '_> {
             | Opcode::Expect
             | Opcode::Store => all(Place::Any),
             Opcode::Load if !data.flags.contains(Flags::VOLATILE) => all(Place::Any),
+            Opcode::ExtractLane => all(Place::Any),
+            // A lane write, or a vector built from its lanes when it pushes no value twice.
+            Opcode::InsertLane
+                if args.iter().all(|v| args.iter().filter(|&w| w == v).count() == 1) =>
+            {
+                all(Place::Any)
+            }
             // A short copy or fill is loads and stores that push the addresses again for each
             // piece, and one whose length is not a constant pushes the length twice. The other
             // ones push each operand once.
@@ -442,8 +453,12 @@ impl Lower<'_, '_> {
     fn movable(&self, inst: Inst) -> Option<Kind> {
         let data = &self.func[inst];
         // An address in the frame, as the one of a fixed `alloca`, is written again at each use
-        // and does not move. An instruction with no operands does not move either.
-        if self.rematerialized(inst) || self.operands(inst).is_empty() {
+        // and does not move. An instruction with no operands does not move either, but for a
+        // vector built from constant lanes, which is a `v128.const` that clang also writes at
+        // its use.
+        let built = data.opcode == Opcode::InsertLane
+            && self.results(inst).first().is_some_and(|&vector| self.built(vector).is_some());
+        if self.rematerialized(inst) || self.operands(inst).is_empty() && !built {
             return None;
         }
         match data.opcode {
