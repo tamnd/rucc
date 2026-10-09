@@ -20,6 +20,10 @@
 //! have. A local nobody else can name is written by this function's stores or not at all, so what
 //! the plane says about it is the truth.
 //!
+//! The bytes an `alloca` or a variable length array takes are begun the same way where they are
+//! taken, when their address stays in the function. Nothing keeps their size until they go back, so
+//! [`left`] is what ends them, everything below one address at once.
+//!
 //! The same decision leaves out a local whose bytes the frame layout may hand to another local
 //! once its block is left, which is one with a `lifetime_end`. Beginning that one at the top of the
 //! function would mark bytes unwritten under a neighbour that is live at the time.
@@ -198,6 +202,18 @@ pub unsafe fn end(base: *const c_void, size: usize) {
     unsafe { wrote(base as usize, size) };
 }
 
+/// Every byte of this thread's stack below `top` is gone, so the bits of what was begun there say
+/// nothing.
+///
+/// For the bytes an `alloca` or a variable length array took, which have no size anybody kept by
+/// the time they go back, and which go back together: below the pointer a `stackrestore` puts back,
+/// and below the frame of a function that returns. A `top` that is not on the stack says nothing.
+pub fn left(top: *const c_void) {
+    if let Some(stack) = current() {
+        stack.forget_below(top as usize);
+    }
+}
+
 /// Control came back to a `setjmp`, so every frame below this one has returned.
 ///
 /// After every `setjmp` and not only after one that came back from a `longjmp`, because the first
@@ -369,6 +385,12 @@ pub mod exports {
     pub extern "C" fn __rucc_local_landed() {
         super::landed();
     }
+
+    /// As [`super::left`].
+    #[unsafe(no_mangle)]
+    pub extern "C" fn __rucc_local_left(top: *const core::ffi::c_void) {
+        super::left(top);
+    }
 }
 
 #[cfg(all(test, target_os = "linux"))]
@@ -430,6 +452,21 @@ mod tests {
             assert!(allows(at, 64));
             assert!(!allows(mine, 16));
             end(mine as *const c_void, 16);
+        }
+    }
+
+    #[test]
+    fn what_was_taken_below_the_stack_left_says_nothing_and_what_is_above_it_still_does() {
+        let local = [0_u8; 64];
+        let at = core::hint::black_box(local.as_ptr()) as usize;
+        // SAFETY: a local of this test, which outlives every use below.
+        unsafe {
+            begin(at as *const c_void, 64);
+            assert!(!allows(at, 8));
+            left((at + 32) as *const c_void);
+            assert!(allows(at, 32));
+            assert!(!allows(at + 32, 8));
+            end(at as *const c_void, 64);
         }
     }
 
