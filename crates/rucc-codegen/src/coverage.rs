@@ -278,15 +278,12 @@ pub static X86_NAMES: &[(&str, &str, &str)] = &[
     ("xor.i32x4", "the same", "tamnd/rucc#2320"),
     ("xor.i64x2", "the same", "tamnd/rucc#2320"),
     (
-        "ctlz.i32",
-        "a bit count, which `expand::counts` writes out as arithmetic before selection on a \
-         machine with no rule for it",
+        "ctlz.i64",
+        "a bit count of a pair of words, which `expand::counts` writes as counts of each word or \
+         as arithmetic before selection",
         "tamnd/rucc#310",
     ),
-    ("ctlz.i64", "the same", "tamnd/rucc#310"),
-    ("ctpop.i32", "the same", "tamnd/rucc#310"),
     ("ctpop.i64", "the same", "tamnd/rucc#310"),
-    ("cttz.i32", "the same", "tamnd/rucc#310"),
     ("cttz.i64", "the same", "tamnd/rucc#310"),
 ];
 

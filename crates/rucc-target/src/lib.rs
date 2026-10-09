@@ -1469,6 +1469,7 @@ impl TargetInfo {
             counts: match target.arch() {
                 tuple::Arch::X86_64 => x86_64::COUNTS,
                 tuple::Arch::Aarch64 => aarch64::COUNTS,
+                tuple::Arch::X86 => x86::COUNTS,
                 tuple::Arch::Wasm32 => wasm::COUNTS,
                 _ => &[],
             },

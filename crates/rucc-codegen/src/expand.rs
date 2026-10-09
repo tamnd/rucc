@@ -838,6 +838,15 @@ pub fn counts(func: &mut Func, kept: &[CountInst]) {
     };
     let found: Vec<Inst> = func.blocks().flat_map(|block| func.insts(block)).collect();
     for inst in found {
+        let Some(of) = bit_count(func[inst].opcode) else { continue };
+        let word = kept.iter().any(|count| count.of == of && count.widths.contains(&32));
+        let whole = answered(func, inst, false) || answered(func, inst, true);
+        if of != BitCount::Ones && word && !whole && produced(func, inst).bits() == 64 {
+            worded(func, inst, of == BitCount::LeadingZeros);
+        }
+    }
+    let found: Vec<Inst> = func.blocks().flat_map(|block| func.insts(block)).collect();
+    for inst in found {
         if answered(func, inst, false) {
             continue;
         }
@@ -857,6 +866,34 @@ pub fn counts(func: &mut Func, kept: &[CountInst]) {
             counted(func, inst);
         }
     }
+}
+
+/// A zero count of a value two words wide, on a machine that counts a word and not two, as the
+/// count of the word the first set bit is in.
+///
+/// That is the high word for the leading zeros and the low one for the trailing ones, and when it
+/// is zero the answer is the other word's count and the thirty two bits of the first. A zero has
+/// both words empty and comes to sixty four, the width, as the count it was does. On i386, which
+/// is the machine this is for, each word is a `bsr` or a `bsf` and the choice is a `cmov`, where
+/// the count written out at sixty four bits was some seventy instructions.
+fn worded(func: &mut Func, inst: Inst, leading: bool) {
+    let ty = produced(func, inst);
+    let Some(&arg) = func[func[inst].args].first() else { return };
+    let word = Type::int(32);
+    let opcode = func[inst].opcode;
+    let low = ahead(func, inst, Opcode::Trunc, &[arg], word);
+    let by = ahead_const(func, inst, Imm::int(32, ty), ty);
+    let up = ahead(func, inst, Opcode::LShr, &[arg, by], ty);
+    let high = ahead(func, inst, Opcode::Trunc, &[up], word);
+    let (first, second) = if leading { (high, low) } else { (low, high) };
+    let zero = ahead_const(func, inst, Imm::int(0, word), word);
+    let empty = ahead_cmp(func, inst, Opcode::ICmp, Extra::IntPred(IntPred::Eq), &[first, zero]);
+    let near = ahead(func, inst, opcode, &[first], word);
+    let far = ahead(func, inst, opcode, &[second], word);
+    let width = ahead_const(func, inst, Imm::int(32, word), word);
+    let past = ahead(func, inst, Opcode::Add, &[far, width], word);
+    let count = ahead(func, inst, Opcode::Select, &[empty, past, near], word);
+    becomes(func, inst, Opcode::ZExt, &[count]);
 }
 
 /// A zero count as a choice between the width, for a zero, and the same count, for anything else.
@@ -3338,6 +3375,35 @@ mod tests {
         let (mut names, mut func) = counting(Opcode::Ctlz, 16);
         counts(&mut func, &kept);
         assert!(!printed(&func, &mut names).contains("select"), "no rule at sixteen bits");
+    }
+
+    /// A zero count at sixty four bits on a machine that counts thirty two, which is i386, is the
+    /// count of each word and a choice between them, and nothing is written out.
+    #[test]
+    fn a_wide_zero_count_on_a_machine_that_counts_a_word_is_a_count_of_each_word() {
+        let guarded =
+            |of| CountInst { of, feature: "", widths: &[32], guarded: true, vector: false };
+        let kept = [guarded(BitCount::LeadingZeros), guarded(BitCount::TrailingZeros)];
+        for (op, name) in [(Opcode::Ctlz, "ctlz"), (Opcode::Cttz, "cttz")] {
+            let (mut names, mut func) = counting(op, 64);
+            counts(&mut func, &kept);
+            let text = printed(&func, &mut names);
+            assert_eq!(
+                text.matches(&format!(" = {name} ")).count(),
+                2,
+                "one for each word: {text}"
+            );
+            assert_eq!(text.matches("trunc.i32").count(), 2, "of a word each: {text}");
+            assert!(text.contains("zext.i64"), "widened back: {text}");
+            assert!(!text.contains("ctpop"), "nothing written out: {text}");
+            let module = Module::new(names.intern("c.c"), &target());
+            rucc_ir::verify_func(&module, &func, &names)
+                .unwrap_or_else(|e| panic!("{op:?}: {e:?}"));
+        }
+        // With no count at a word there is nothing to split it into.
+        let (mut names, mut func) = counting(Opcode::Ctlz, 64);
+        counts(&mut func, &[]);
+        assert!(!printed(&func, &mut names).contains("ctlz"), "written out as before");
     }
 
     /// Nothing else is touched, for the same reason the other passes have that test.
