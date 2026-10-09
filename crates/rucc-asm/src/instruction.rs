@@ -204,6 +204,8 @@ enum Operand {
     Debug(u8),
     /// A segment register named on its own rather than in front of an address.
     Seg(Segment),
+    /// An MMX register, `mm0` to `mm7`.
+    Mmx(u8),
     /// An address, and the name in its displacement when it has one.
     Mem(Addr, Option<Named>),
     /// A number the instruction carries.
@@ -422,7 +424,8 @@ fn full(word: &str, args: &[String], mode: Mode) -> Result<Written, String> {
     if let Some(written) = absolute(word, &operands, mode) {
         return written;
     }
-    implied(word, &operands)?;
+    accumulated(word, &mut operands);
+    implied(word, &operands, mode)?;
     let predicated = predicated(word);
     let word = match &predicated {
         Some((name, which)) => {
@@ -736,6 +739,27 @@ fn is(operand: &Operand, reg: PhysReg, width: Width) -> bool {
     *operand == Operand::Reg(reg, width)
 }
 
+/// The accumulator a port instruction with one operand leaves out, put back the way gas puts it
+/// back: `inb %dx` is `inb %dx, %al` and `outl $0x80` is `outl %eax, $0x80`. vmw_balloon and
+/// dcdbas write them that way, and only with the letter, since without it nothing says how wide.
+fn accumulated(word: &str, operands: &mut Vec<Operand>) {
+    let width = match word {
+        "inb" | "outb" => Width::Byte,
+        "inw" | "outw" => Width::Word,
+        "inl" | "outl" => Width::Long,
+        _ => return,
+    };
+    if operands.len() != 1 {
+        return;
+    }
+    let value = Operand::Reg(RAX, width);
+    if word.starts_with("in") {
+        operands.push(value);
+    } else {
+        operands.insert(0, value);
+    }
+}
+
 /// The registers an instruction reads or writes without an addressing byte to say so, checked
 /// against the ones the line named.
 ///
@@ -743,7 +767,7 @@ fn is(operand: &Operand, reg: PhysReg, width: Width) -> bool {
 /// line names and the encoder's rows do not look at them. That makes this the only place a line
 /// that names the wrong one is caught, and a line that names the wrong one means something other
 /// than what the processor will do, so it is refused the way gas refuses it.
-fn implied(word: &str, operands: &[Operand]) -> Result<(), String> {
+fn implied(word: &str, operands: &[Operand], mode: Mode) -> Result<(), String> {
     let fixed: &[(PhysReg, Width)] = match word {
         "monitor" | "monitorx" => &[(RAX, Width::Quad), (RCX, Width::Long), (RDX, Width::Long)],
         "mwait" => &[(RAX, Width::Long), (RCX, Width::Long)],
@@ -756,8 +780,17 @@ fn implied(word: &str, operands: &[Operand]) -> Result<(), String> {
     if operands.is_empty() {
         return Ok(());
     }
+    // An address is as wide as a pointer, so the register that holds one is `eax` on i386, which
+    // is how KVM's SVM code names it in `invlpga`.
+    let fixed: Vec<(PhysReg, Width)> = fixed
+        .iter()
+        .map(|&(reg, width)| match (width, mode) {
+            (Width::Quad, Mode::Bits32) => (reg, Width::Long),
+            _ => (reg, width),
+        })
+        .collect();
     let named = operands.len() == fixed.len()
-        && operands.iter().zip(fixed).all(|(operand, &(reg, width))| is(operand, reg, width));
+        && operands.iter().zip(&fixed).all(|(operand, &(reg, width))| is(operand, reg, width));
     if !named {
         let names: Vec<String> = fixed
             .iter()
@@ -1362,6 +1395,7 @@ fn value(operand: &Operand, standing: i64) -> Value {
         Operand::Control(number) => Value::Control(*number),
         Operand::Debug(number) => Value::Debug(*number),
         Operand::Seg(segment) => Value::Seg(*segment),
+        Operand::Mmx(number) => Value::Mmx(*number),
         Operand::Mem(addr, _) => Value::Mem(*addr),
         Operand::Imm(number) => Value::Imm(*number),
         Operand::Expr(_) => Value::Imm(standing),
@@ -1520,6 +1554,11 @@ fn register(written: &str) -> Result<Operand, String> {
     }
     if let Some(segment) = Segment::named(name) {
         return Ok(Operand::Seg(segment));
+    }
+    if let Some(Ok(number)) = name.strip_prefix("mm").map(str::parse::<u8>) {
+        if number < 8 {
+            return Ok(Operand::Mmx(number));
+        }
     }
     // The control and debug registers, which only a move to or from a general purpose register
     // names. Sixteen of each have a number, though most of them are not there on any processor,
@@ -1980,6 +2019,62 @@ mod tests {
         assert_eq!(bytes("fprem"), [0xd9, 0xf8]);
         assert_eq!(bytes("fnstsw %ax"), [0xdf, 0xe0]);
         assert!(refused("fnstsw %bx").contains("ax"));
+    }
+
+    /// What the kernel writes by hand on i386 and gas reads: MMX in lib/raid6 and the old xor
+    /// routines, the port forms that leave the accumulator out, and KVM's VMX and SVM instructions
+    /// with thirty two bit registers. The bytes are what clang writes for each line.
+    #[test]
+    fn i386_reads_what_the_kernel_writes_for_mmx_ports_and_kvm() {
+        let bytes32 = |line: &str| {
+            let (word, rest) = line.split_once(' ').unwrap_or((line, ""));
+            let args = if rest.is_empty() { Vec::new() } else { crate::source::split(rest, ',') };
+            one_in(word, &args, Mode::Bits32).map(|written| written.bytes)
+        };
+        let cases: &[(&str, &[u8])] = &[
+            ("movq (%ecx), %mm1", &[0x0f, 0x6f, 0x09]),
+            ("movq %mm0, 8(%ecx)", &[0x0f, 0x7f, 0x41, 0x08]),
+            ("movq %mm0, %mm1", &[0x0f, 0x6f, 0xc8]),
+            ("movd %eax, %mm0", &[0x0f, 0x6e, 0xc0]),
+            ("movd %mm5, (%eax)", &[0x0f, 0x7e, 0x28]),
+            ("pxor %mm2, %mm3", &[0x0f, 0xef, 0xda]),
+            ("pxor 8(%esi), %mm3", &[0x0f, 0xef, 0x5e, 0x08]),
+            ("pcmpgtb %mm4, %mm5", &[0x0f, 0x64, 0xec]),
+            ("paddb %mm4, %mm4", &[0x0f, 0xfc, 0xe4]),
+            ("pand %mm7, %mm6", &[0x0f, 0xdb, 0xf7]),
+            ("psrlq $7, %mm2", &[0x0f, 0x73, 0xd2, 0x07]),
+            ("movntq %mm0, 8(%ecx)", &[0x0f, 0xe7, 0x41, 0x08]),
+            ("pshufw $0x1b, %mm1, %mm2", &[0x0f, 0x70, 0xd1, 0x1b]),
+            ("pmovmskb %mm1, %edx", &[0x0f, 0xd7, 0xd1]),
+            ("movq %xmm0, (%ecx)", &[0x66, 0x0f, 0xd6, 0x01]),
+            ("inb %dx", &[0xec]),
+            ("inl %dx", &[0xed]),
+            ("inw %dx", &[0x66, 0xed]),
+            ("inb $0x60", &[0xe4, 0x60]),
+            ("outb %dx", &[0xee]),
+            ("outl $0x80", &[0xe7, 0x80]),
+            ("xaddw %dx, %ax", &[0x66, 0x0f, 0xc1, 0xd0]),
+            ("xaddb %cl, %dl", &[0x0f, 0xc0, 0xca]),
+            ("vmread %eax, %edx", &[0x0f, 0x78, 0xc2]),
+            ("vmread %eax, (%ecx)", &[0x0f, 0x78, 0x01]),
+            ("vmwrite %eax, %edx", &[0x0f, 0x79, 0xd0]),
+            ("vmwrite (%ecx), %edx", &[0x0f, 0x79, 0x11]),
+            ("invlpga %eax, %ecx", &[0x0f, 0x01, 0xdf]),
+            ("vmrun %eax", &[0x0f, 0x01, 0xd8]),
+            ("movntps %xmm0, (%ecx)", &[0x0f, 0x2b, 0x01]),
+            ("movntpd %xmm1, 16(%ecx)", &[0x66, 0x0f, 0x2b, 0x49, 0x10]),
+        ];
+        for &(line, want) in cases {
+            assert_eq!(bytes32(line).as_deref(), Ok(want), "{line}");
+        }
+        assert!(bytes32("movq %mm8, %mm1").is_err());
+        assert!(bytes32("invlpga %ecx, %eax").is_err());
+        assert!(bytes32("inb %cx").is_err());
+        // Long mode keeps the sixty four bit registers for these, as gas does.
+        assert_eq!(bytes("invlpga %rax, %ecx"), [0x0f, 0x01, 0xdf]);
+        assert!(refused("invlpga %eax, %ecx").contains("%rax"));
+        assert!(!refused("vmread %eax, %edx").is_empty());
+        assert_eq!(bytes("movq %mm0, (%r9)"), [0x41, 0x0f, 0x7f, 0x01]);
     }
 
     #[test]
