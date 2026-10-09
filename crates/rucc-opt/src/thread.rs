@@ -163,7 +163,7 @@ use rucc_cost::heuristics;
 use rucc_ir::{Block, BlockCall, Builder, Def, Extra, Func, Inst, Opcode, Start, Value, ValueList};
 
 use crate::header_copy::{clone_into, repeatable};
-use crate::loops::LoopId;
+use crate::loops::{LoopId, Spare};
 use crate::simplify_cfg::{Bindings, Edges, incoming, sweep, taken};
 use crate::{Analyses, Cfg, Dominators, Fuel, Loops, Pass, Preserved, Stats, uses};
 
@@ -272,6 +272,8 @@ impl Pass for Thread {
         // The blocks a thread left with no way in since the graph in the cache was built, which
         // that graph still says are reached. See [`strand`].
         let mut stranded: Set<Block> = Set::default();
+        let mut spare = Spare::default();
+        let mut seen = Seen::default();
         'blocks: for block in func.blocks().collect::<Vec<Block>>() {
             if block == entry || func[block].params.is_empty() {
                 continue;
@@ -339,11 +341,16 @@ impl Pass for Thread {
                 // built on. A block on no cycle is asked about again once it has.
                 let alone = free.is_some() && acyclic(an.loops(func), block);
                 let kept = free.is_some()
-                    && (alone || settled(an, func, &edges, &stranded, from, block, at, call.block));
-                // The outermost loop the edge is in, when the forest is not kept as it is, which is
-                // what [`rebuild`] finds it again over.
-                let around =
-                    (free.is_some() && !kept).then(|| outermost(an.loops(func), from, block));
+                    && (alone
+                        || settled(
+                            an, func, &edges, &stranded, from, block, at, call.block, &mut seen,
+                        ));
+                // The loop [`rebuild`] finds the forest again over, when it is not kept as it is.
+                let around = (free.is_some() && !kept).then(|| {
+                    let loops = an.loops(func);
+                    nearest(loops, func, from, block, at, call.block, &mut seen)
+                        .or_else(|| outermost(loops, from, block))
+                });
                 // The record has to follow the edge, so that a block further down the walk sees the
                 // predecessor it now has. That is what lets one thread make the next one possible
                 // within the single walk this pass is.
@@ -362,7 +369,8 @@ impl Pass for Thread {
                     } else {
                         outermost(loops, from, block).map(Some)
                     };
-                    let (copy, out) = copy(func, an, from, block, at, call, &subst, keep);
+                    let (copy, out) =
+                        copy(func, an, from, block, at, call, &subst, keep, &mut spare);
                     edges.entry(call.block).or_default().push((copy, out));
                     edges.entry(copy).or_default().push((from, at));
                     paths.insert(copy, path);
@@ -381,7 +389,7 @@ impl Pass for Thread {
                     kept && (!alone || strand(func, an, &edges, &mut stranded, block, entry));
                 let rebuilt = !kept
                     && around.flatten().is_some_and(|root| {
-                        rebuild(func, an, &edges, &mut stranded, root, from, entry)
+                        rebuild(func, an, &edges, &mut stranded, root, from, entry, &mut spare)
                     });
                 // A copy left the cache with the graph it made, which nothing has moved since.
                 if !kept && !rebuilt {
@@ -479,10 +487,11 @@ fn settled(
     block: Block,
     at: Idx<BlockCall>,
     into: Block,
+    seen: &mut Seen,
 ) -> bool {
     let loops = an.loops(func);
     if together(loops, from, block) {
-        return within(loops, func, from, block, at, into);
+        return within(loops, func, from, block, at, into, seen);
     }
     let cfg = an.cfg(func);
     edges.get(&block).is_some_and(|list| {
@@ -556,8 +565,8 @@ fn outermost(loops: &Loops, from: Block, block: Block) -> Option<LoopId> {
     loops.contains(root, block).then_some(root)
 }
 
-/// Finds the forest again over the outermost loop `root` after a thread that copied nothing moved
-/// an edge out of one of its blocks, with every block nothing reaches any more put in `stranded`,
+/// Finds the forest again over the loop `root` after a thread that copied nothing moved an edge
+/// out of one of its blocks, with every block nothing reaches any more put in `stranded`,
 /// or says it could not.
 ///
 /// The edge went to a block the loop got to anyway, through the block threaded past, so
@@ -566,6 +575,7 @@ fn outermost(loops: &Loops, from: Block, block: Block) -> Option<LoopId> {
 /// [`strand`]'s walk, and a block on a cycle among those is the whole forest built again. The
 /// graph in the cache stays the one from before, which is right about what is reached once the
 /// blocks in `stranded` are taken out, and that is all anything here asks of it.
+#[allow(clippy::too_many_arguments)]
 fn rebuild(
     func: &Func,
     an: &mut Analyses,
@@ -574,12 +584,10 @@ fn rebuild(
     root: LoopId,
     from: Block,
     entry: Block,
+    spare: &mut Spare,
 ) -> bool {
     let mut loops = an.take_loops(func);
-    let mut inside = vec![false; func.counts().blocks];
-    for &block in loops.blocks(root) {
-        inside[block.index()] = true;
-    }
+    let mut inside = loops.blocks(root).to_vec();
     let gone = {
         let cfg = an.cfg(func);
         loops.rebuild(
@@ -594,6 +602,7 @@ fn rebuild(
             |block| cfg.reaches(block) && !stranded.contains(&block),
             &[],
             &[from],
+            spare,
         )
     };
     an.keep_loops(loops);
@@ -601,9 +610,14 @@ fn rebuild(
     // A block of the loop is one the rebuild said is reached or put in `gone`, so the walk only
     // has the ones outside it to look at, and [`strand`] would give up on the ones still reached
     // for being on a cycle.
+    if !gone.is_empty() {
+        inside.sort_unstable();
+    }
     for &block in &gone {
         for next in targets(func, block) {
-            if !inside[next.index()] && !strand(func, an, edges, stranded, next, entry) {
+            if inside.binary_search(&next).is_err()
+                && !strand(func, an, edges, stranded, next, entry)
+            {
                 return false;
             }
         }
@@ -712,6 +726,7 @@ fn within(
     block: Block,
     at: Idx<BlockCall>,
     into: Block,
+    seen: &mut Seen,
 ) -> bool {
     let around = || std::iter::successors(loops.innermost(from), |&id| loops.parent(id));
     let Some(both) = around().find(|&id| loops.contains(id, block)) else { return false };
@@ -724,11 +739,96 @@ fn within(
     if around().any(|id| loops.header(id) == into) {
         return false;
     }
-    if loops.contains(both, into) && reaches(loops, func, both, into, block, at) {
+    if loops.contains(both, into) && reaches(loops, func, seen, both, into, block, at) {
         return true;
     }
     let header = loops.header(both);
-    reaches(loops, func, both, header, block, at) && reaches(loops, func, both, from, header, at)
+    reaches(loops, func, seen, both, header, block, at)
+        && reaches(loops, func, seen, both, from, header, at)
+}
+
+/// The loop below which a thread that [`within`] could not show left the forest as it was changed
+/// it, for [`rebuild`] to find it again over, when that is not the outermost loop the edge is in.
+///
+/// Take a loop around both blocks, with no irreducible region in it, and say `from` still gets to
+/// its header without the edge, staying inside it. A block of the loop that control still reaches
+/// gets there by way of the header, since every path in arrives there and a path that went round
+/// the edge before is one with `block` taken out of it now. It gets back to the header the way it
+/// did, or if that way took the edge, by going on to `from` and from there round the edge. So the
+/// blocks of that loop control still reaches are on a cycle with its header as before, and as in
+/// [`within`] nothing joins it and its header stays its header. The same goes for every loop
+/// around it, since those paths stay inside it, and when `into` is in it and gets back to `block`
+/// there is a path round the edge anyway. The loops from there out then have the blocks they had,
+/// but for the ones nothing reaches now, which is what [`Loops::rebuild`] wants of a loop nested in
+/// them, and only the one below on the way in to the blocks has to be found again. A block the
+/// edge stops reaching outside that one is [`strand`]'s walk to find, as for the outermost loop.
+///
+/// On zstd_compress.c at `-O2` nearly every thread that built the forest again took a block out
+/// of a loop of about sixty blocks two levels inside one of 2670. tamnd/rucc#3052.
+fn nearest(
+    loops: &Loops,
+    func: &Func,
+    from: Block,
+    block: Block,
+    at: Idx<BlockCall>,
+    into: Block,
+    seen: &mut Seen,
+) -> Option<LoopId> {
+    let around = || std::iter::successors(loops.innermost(from), |&id| loops.parent(id));
+    let both = around().find(|&id| loops.contains(id, block))?;
+    if around().any(|id| loops.header(id) == into) {
+        return None;
+    }
+    let (mut below, mut id) = (both, both);
+    loop {
+        if loops.irreducible().iter().any(|&odd| loops.contains(id, odd)) {
+            return None;
+        }
+        if reaches(loops, func, seen, id, from, loops.header(id), at)
+            || (loops.contains(id, into) && reaches(loops, func, seen, id, into, block, at))
+        {
+            return Some(below);
+        }
+        below = id;
+        id = loops.parent(id)?;
+    }
+}
+
+/// The blocks a walk in [`reaches`] has been to, kept from one walk to the next, so that a walk
+/// costs the blocks it goes to and not a table made for each. A block is seen when it holds the
+/// number of the walk going on.
+///
+/// On zstd_compress.c at `-O2` hashing the blocks into a set made for each walk was a twentieth
+/// of the compile once the forest was found again over only the loops that changed.
+/// tamnd/rucc#3052.
+#[derive(Default)]
+struct Seen {
+    walk: u32,
+    marks: Vec<u32>,
+    work: Vec<Block>,
+}
+
+impl Seen {
+    /// Starts a walk over a function with this many blocks.
+    fn start(&mut self, blocks: usize) {
+        if self.walk == u32::MAX {
+            self.marks.fill(0);
+            self.walk = 0;
+        }
+        self.walk += 1;
+        if self.marks.len() < blocks {
+            self.marks.resize(blocks, 0);
+        }
+        self.work.clear();
+    }
+
+    /// Whether the walk had not been to the block yet, which it has now.
+    fn insert(&mut self, block: Block) -> bool {
+        let mark = &mut self.marks[block.index()];
+        let fresh = *mark != self.walk;
+        *mark = self.walk;
+        fresh
+    }
 }
 
 /// Whether `start` gets to `to` along the edges the function has now, staying inside the loop
@@ -736,6 +836,7 @@ fn within(
 fn reaches(
     loops: &Loops,
     func: &Func,
+    seen: &mut Seen,
     inside: LoopId,
     start: Block,
     to: Block,
@@ -744,10 +845,10 @@ fn reaches(
     if start == to {
         return true;
     }
-    let mut seen: Set<Block> = Set::default();
+    seen.start(func.counts().blocks);
     seen.insert(start);
-    let mut work = vec![start];
-    while let Some(next) = work.pop() {
+    seen.work.push(start);
+    while let Some(next) = seen.work.pop() {
         let Some(term) = func.terminator(next) else { continue };
         for slot in func.target_list(term).iter() {
             if slot == at {
@@ -758,7 +859,7 @@ fn reaches(
                 return true;
             }
             if loops.contains(inside, next) && seen.insert(next) {
-                work.push(next);
+                seen.work.push(next);
             }
         }
     }
@@ -828,6 +929,7 @@ fn copy(
     call: BlockCall,
     subst: &Bindings,
     keep: Option<Option<LoopId>>,
+    spare: &mut Spare,
 ) -> (Block, Idx<BlockCall>) {
     let loops = keep.map(|_| an.take_loops(func));
     let term = func.terminator(block).expect("the block was chosen for its terminator");
@@ -865,6 +967,7 @@ fn copy(
                 |block| cfg.reaches(block),
                 &[copy],
                 &[from],
+                spare,
             );
         }
         if lost(func, cfg, &loops, block) {
@@ -2223,7 +2326,8 @@ mod tests {
         let (from, join, out) = (Block::from_usize(2), Block::from_usize(4), Block::from_usize(6));
         let term = func.terminator(from).expect("every block here has one");
         let at = func.target_list(term).iter().next().expect("the edge into the join is first");
-        let kept = super::within(an.loops(&func), &func, from, join, at, out);
+        let kept =
+            super::within(an.loops(&func), &func, from, join, at, out, &mut super::Seen::default());
         let call = func[at];
         func.set_block_call(at, BlockCall { block: out, args: ValueList::EMPTY, ..call });
         let after = forest(crate::machine::fixtures::analyses().loops(&func));
