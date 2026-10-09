@@ -541,6 +541,11 @@ impl DeclFlags {
     /// Merged the way [`Self::RETAIN`] is. See `check::shared`.
     pub const SHARED: Self = Self(1 << 43);
 
+    /// `__attribute__((no_sanitize_coverage))` was written on a declaration of this function, so
+    /// none of the calls `-fsanitize-coverage=` asks for go in its body. The kernel's `noinstr`
+    /// says it. Merged the way [`Self::NO_INSTRUMENT`] is.
+    pub const NO_SANCOV: Self = Self(1 << 44);
+
     /// Whether `zero_call_used_regs("skip")` was written. See [`Self::ZERO_WIDE`] for why this is
     /// more than the one bit.
     #[must_use]

@@ -1107,10 +1107,22 @@ fn optimize(
     remarks.push_str(&rucc_opt::optinfo::render(file, &report, names, wants));
     let fired = report.fired();
     dumps.extend(report.dumps);
-    match report.broke.is_empty() {
-        true => Ok(crate::trace::Passes { time: report.time, fired }),
-        false => Err(report.broke.iter().map(|why| internal(why)).collect()),
+    if !report.broke.is_empty() {
+        return Err(report.broke.iter().map(|why| internal(why)).collect());
     }
+    // Last, where gcc puts it, so a block the optimizer merged away gets no call of its own. See
+    // `rucc_opt::sancov`.
+    let how =
+        rucc_opt::sancov::Sancov { pc: opts.sanitize_coverage_pc, cmp: opts.sanitize_coverage_cmp };
+    if rucc_opt::sancov::run(module, names, how) > 0 {
+        if let Err(errors) = rucc_ir::verify(module, names) {
+            return Err(errors
+                .iter()
+                .map(|e| internal(&format!("invalid IR after the coverage calls, {e}")))
+                .collect());
+        }
+    }
+    Ok(crate::trace::Passes { time: report.time, fired })
 }
 
 /// Runs the back end over every function in `module` and writes what came out.
@@ -1168,9 +1180,14 @@ fn replaceable(target: &TargetInfo, opts: &Options) -> IrPic {
 /// into a call through a table it is handed beside the module, and the counters are written out
 /// by code the module does not hold, so a link that generated either again from the module alone
 /// would get them wrong. Their objects link the code they hold, which is the program without the
-/// work across files and nothing worse.
+/// work across files and nothing worse. Nor when `-fsanitize-coverage=` put its calls in, since
+/// the optimizer the link runs would put them in a second time.
 fn keeps_module(opts: &Options) -> bool {
-    opts.lto.requested && !opts.safety.instruments() && opts.profile_data.counts.is_none()
+    opts.lto.requested
+        && !opts.safety.instruments()
+        && opts.profile_data.counts.is_none()
+        && !opts.sanitize_coverage_pc
+        && !opts.sanitize_coverage_cmp
 }
 
 /// Where the file being generated came from, which is what the debug information is about.

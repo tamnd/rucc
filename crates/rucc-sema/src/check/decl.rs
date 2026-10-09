@@ -1653,6 +1653,7 @@ impl Checker<'_> {
                 DeclFlags::NO_LOOP_IDIOM,
                 DeclFlags::NO_INSTRUMENT,
                 DeclFlags::NO_PROFILE,
+                DeclFlags::NO_SANCOV,
                 DeclFlags::COLD,
                 DeclFlags::HOT,
                 DeclFlags::NO_STACK_PROTECTOR,

@@ -277,6 +277,9 @@ impl AttrSet {
     /// point operation on constants that overflows to an infinity may be folded to it, which with
     /// the default it may not, since the overflow is the program's to see.
     pub const NO_TRAPPING_MATH: Self = Self(1 << 41);
+    /// `__attribute__((no_sanitize_coverage))`. None of the calls `-fsanitize-coverage=` asks for
+    /// go in this function, which is how the kernel's `noinstr` code stays out of kcov.
+    pub const NO_SANCOV: Self = Self(1 << 42);
 
     /// The underlying bits, for the printer and for hashing.
     #[must_use]
@@ -411,6 +414,7 @@ static NAMED: &[(AttrSet, &str)] = &[
     (AttrSet::NODIRECT, "nodirect_extern_access"),
     (AttrSet::ROUNDING_MATH, "rounding_math"),
     (AttrSet::NO_TRAPPING_MATH, "no_trapping_math"),
+    (AttrSet::NO_SANCOV, "no_sancov"),
 ];
 
 /// The pairs that cannot both be set, with their names for the message.
