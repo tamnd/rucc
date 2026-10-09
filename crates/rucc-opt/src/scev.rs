@@ -1311,6 +1311,20 @@ fn solve(chrec: Chrec, limit: Invariant, pred: IntPred) -> Option<Bound> {
     if step == 0 {
         return None;
     }
+    // A loop that goes on only while the counter is the limit goes round once at most, because a
+    // step that is not zero cannot bring the counter back to where it was in one step. So the test
+    // fails the first time when the counter does not start on the limit and the second time when
+    // it does, and neither answer rests on anything. `crate::canon` writes `i + 1 <u 1` as
+    // `i + 1 == 0`, which is the test of a loop over a table of one entry. net/core/skbuff.c sums
+    // such a table in a `BUILD_BUG_ON` on a 32 bit defconfig, where the sum has to fold.
+    if pred == IntPred::Eq {
+        let count = u128::from(chrec.base.as_number()? == limit.as_number()?);
+        return Some(Bound {
+            count: Count::Exact(count),
+            assumptions: Vec::new(),
+            reading: Reading::Unsigned,
+        });
+    }
     let signed = matches!(pred, IntPred::Slt | IntPred::Sle | IntPred::Sgt | IntPred::Sge);
 
     let mut assumptions = Vec::new();
@@ -2606,6 +2620,18 @@ mod tests {
         // The step divides the distance and both are numbers, so it was checked rather than
         // assumed and there is nothing left over.
         assert_eq!(found.proven(), Some(Count::Exact(10)));
+    }
+
+    #[test]
+    fn a_loop_that_goes_on_while_its_counter_is_the_limit_goes_round_once_at_most() {
+        // The counter starts on the limit, so the first test holds and the second, one step on,
+        // cannot. That is the loop over a table of one entry once canon has written its test.
+        let on = counted(Type::int(32), 0, 0, 1, IntPred::Eq, Flags::NONE);
+        assert_eq!(bound(&on.func).expect("it is counted").proven(), Some(Count::Exact(1)));
+        // Starting anywhere else, the test fails the first time and the body never runs. No
+        // promise about wrapping is needed for either, so the flags say nothing.
+        let off = counted(Type::int(32), 3, 0, -1, IntPred::Eq, Flags::NONE);
+        assert_eq!(bound(&off.func).expect("it is counted").proven(), Some(Count::Exact(0)));
     }
 
     #[test]
