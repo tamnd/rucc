@@ -207,6 +207,16 @@ SIMD = {
     "wasm_i16x8_relaxed_dot_i8x16_i7x16": ("relaxed_dot_i8x16_i7x16_s_i16x8", "i8"),
     "wasm_i32x4_relaxed_dot_i8x16_i7x16_add": ("relaxed_dot_i8x16_i7x16_add_s_i32x4", "i8 i8 i32"),
 }
+# The functions that clang 23 writes as a generic `__builtin_elementwise_*` builtin. That is one
+# instruction with `-msimd128` too.
+for _e, _v in (("i8", "i8x16"), ("u8", "u8x16"), ("i16", "i16x8"), ("u16", "u16x8")):
+    SIMD[f"wasm_{_v}_add_sat"] = ("elementwise_add_sat", _e)
+    SIMD[f"wasm_{_v}_sub_sat"] = ("elementwise_sub_sat", _e)
+for _e, _v in (("i8", "i8x16"), ("u8", "u8x16"), ("i16", "i16x8"), ("u16", "u16x8"),
+               ("i32", "i32x4"), ("u32", "u32x4")):
+    SIMD[f"wasm_{_v}_min"] = ("elementwise_min", _e)
+    SIMD[f"wasm_{_v}_max"] = ("elementwise_max", _e)
+SIMD["wasm_i8x16_popcnt"] = ("elementwise_popcount", "u8")
 SEEN = set()
 
 
@@ -217,7 +227,8 @@ def builtin(ret, nm, params):
     names = [p.split()[-1] for p in params.split(", ")]
     casts = casts.split() if " " in casts else [casts] * len(names)
     args = ", ".join(f"({vt(c)}){n}" for c, n in zip(casts, names))
-    call = f"__builtin_wasm_{name}({args})"
+    prefix = "__builtin_" if name.startswith("elementwise_") else "__builtin_wasm_"
+    call = f"{prefix}{name}({args})"
     return f"return (v128_t){call};" if ret == "v128_t" else f"return {call};"
 
 
@@ -284,8 +295,8 @@ INTRO = """
  * over the lanes of a GNU vector, the same way `<arm_neon.h>` is written, so what a program
  * computes is what the instruction computes. For that reason the header does not need
  * `-msimd128`, and a module from it runs on an engine with no SIMD. With `-msimd128`, a function
- * that clang writes as a `__builtin_wasm_*` builtin calls the same builtin, which is one
- * instruction, as in clang.
+ * that clang writes as a `__builtin_wasm_*` or a `__builtin_elementwise_*` builtin calls the same
+ * builtin, which is one instruction, as in clang.
  *
  * Without `-mrelaxed-simd`, each relaxed function gives one of the answers that the relaxed-simd
  * proposal allows, and the same one on every engine: the multiply add is not fused, the lane

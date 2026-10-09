@@ -399,7 +399,9 @@ impl Reach<'_> {
                     self.expr(arg);
                 }
             }
-            ExprKind::Classify { lhs, rhs, .. } | ExprKind::Sign { lhs, rhs, .. } => {
+            ExprKind::Classify { lhs, rhs, .. }
+            | ExprKind::Sign { lhs, rhs, .. }
+            | ExprKind::Elementwise { lhs, rhs, .. } => {
                 self.expr(lhs);
                 if let Some(rhs) = rhs {
                     self.expr(rhs);

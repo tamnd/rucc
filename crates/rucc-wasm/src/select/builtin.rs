@@ -4,7 +4,8 @@
 //! only, from their rows in `rucc-gnu/features.toml`, and gives each call the type of clang 23. The
 //! call reaches the backend as a call to the name, and the selector writes the instruction in its
 //! place, as clang does. No object has a symbol of the name, so a call that the selector did not
-//! see would not link. The vector builtins of [`VECTOR`] are written the same way, with `-msimd128`.
+//! see would not link. The vector builtins of [`VECTOR`] are written the same way, with `-msimd128`,
+//! and so are the calls of [`ELEMENTWISE`] that `rucc-lower` makes for the generic builtins.
 //! The builtins of the other groups (reference types, atomics, exceptions) have no row yet, so a
 //! call to one of them is a call to an undeclared function.
 //!
@@ -118,6 +119,34 @@ const VECTOR: &[(&str, &str)] = &[
     ("relaxed_dot_i8x16_i7x16_add_s_i32x4", "i32x4.relaxed_dot_i8x16_i7x16_add_s"),
 ];
 
+/// The names that `rucc-lower` calls for a `__builtin_elementwise_*` builtin on a vector of
+/// sixteen bytes, each with the SIMD instruction that it is. These are the names that clang 13
+/// gave the builtins, before clang wrote the header with the generic builtins. They have no row in
+/// `features.toml`, so a program cannot call one of them unless it declares it.
+const ELEMENTWISE: &[(&str, &str)] = &[
+    ("min_s_i8x16", "i8x16.min_s"),
+    ("min_u_i8x16", "i8x16.min_u"),
+    ("max_s_i8x16", "i8x16.max_s"),
+    ("max_u_i8x16", "i8x16.max_u"),
+    ("min_s_i16x8", "i16x8.min_s"),
+    ("min_u_i16x8", "i16x8.min_u"),
+    ("max_s_i16x8", "i16x8.max_s"),
+    ("max_u_i16x8", "i16x8.max_u"),
+    ("min_s_i32x4", "i32x4.min_s"),
+    ("min_u_i32x4", "i32x4.min_u"),
+    ("max_s_i32x4", "i32x4.max_s"),
+    ("max_u_i32x4", "i32x4.max_u"),
+    ("add_sat_s_i8x16", "i8x16.add_sat_s"),
+    ("add_sat_u_i8x16", "i8x16.add_sat_u"),
+    ("sub_sat_s_i8x16", "i8x16.sub_sat_s"),
+    ("sub_sat_u_i8x16", "i8x16.sub_sat_u"),
+    ("add_sat_s_i16x8", "i16x8.add_sat_s"),
+    ("add_sat_u_i16x8", "i16x8.add_sat_u"),
+    ("sub_sat_s_i16x8", "i16x8.sub_sat_s"),
+    ("sub_sat_u_i16x8", "i16x8.sub_sat_u"),
+    ("popcnt_i8x16", "i8x16.popcnt"),
+];
+
 /// What the builtin `name` writes, or nothing when `name` is not a builtin of clang.
 ///
 /// The opcodes are those of the Wasm 3.0 binary format, section 5.4. The 8 trapping conversions
@@ -126,7 +155,7 @@ const VECTOR: &[(&str, &str)] = &[
 /// `0xfc 0` to `0xfc 7` in the same order.
 fn write(name: &str) -> Option<Write> {
     let name = name.strip_prefix("__builtin_wasm_")?;
-    if let Some(&(_, op)) = VECTOR.iter().find(|&&(form, _)| form == name) {
+    if let Some(&(_, op)) = VECTOR.iter().chain(ELEMENTWISE).find(|&&(form, _)| form == name) {
         let feature = match name.starts_with("relaxed_") {
             true => Feature::RelaxedSimd,
             false => Feature::Simd128,

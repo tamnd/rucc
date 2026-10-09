@@ -322,6 +322,79 @@ fn with_simd128_a_load_or_a_store_of_a_lane_is_one_instruction() {
         assert_eq!(code, ops, "{name}");
     }
 }
+/// Functions of the header that clang 23 writes as a `__builtin_elementwise_*` builtin, the
+/// builtins on vectors with lanes of each width, and the builtins on one integer.
+const ELEMENTWISE: &str = "\
+#include <wasm_simd128.h>
+typedef unsigned char v16u __attribute__((vector_size(16)));
+typedef short v8s __attribute__((vector_size(16)));
+typedef unsigned v4u __attribute__((vector_size(16)));
+typedef long long v2s __attribute__((vector_size(16)));
+v128_t min8(v128_t a, v128_t b) { return wasm_i8x16_min(a, b); }
+v128_t max16(v128_t a, v128_t b) { return wasm_u16x8_max(a, b); }
+v128_t add8(v128_t a, v128_t b) { return wasm_u8x16_add_sat(a, b); }
+v128_t sub16(v128_t a, v128_t b) { return wasm_i16x8_sub_sat(a, b); }
+v128_t pop8(v128_t a) { return wasm_i8x16_popcnt(a); }
+v16u subu(v16u a, v16u b) { return __builtin_elementwise_sub_sat(a, b); }
+v8s adds(v8s a, v8s b) { return __builtin_elementwise_add_sat(a, b); }
+v4u minu(v4u a, v4u b) { return __builtin_elementwise_min(a, b); }
+v2s max2(v2s a, v2s b) { return __builtin_elementwise_max(a, b); }
+int maxi(int a, int b) { return __builtin_elementwise_max(a, b); }
+";
+
+/// With `-msimd128`, each function of [`ELEMENTWISE`] whose lanes have an instruction is that
+/// instruction, as clang 23 writes it. wasm has no `min` or `max` of 64-bit lanes, so `max2` is a
+/// lane at a time, and a builtin on one integer is a compare and a `select`.
+#[test]
+fn with_simd128_an_elementwise_builtin_is_one_instruction() {
+    let out = assembly(ELEMENTWISE, &["-msimd128"]);
+    assert!(out.status.success(), "{}", String::from_utf8_lossy(&out.stderr));
+    let text = String::from_utf8(out.stdout).unwrap();
+    let want: [(&str, &[&str]); 8] = [
+        ("min8", &["local.get\t0", "local.get\t1", "i8x16.min_s"]),
+        ("max16", &["local.get\t0", "local.get\t1", "i16x8.max_u"]),
+        ("add8", &["local.get\t0", "local.get\t1", "i8x16.add_sat_u"]),
+        ("sub16", &["local.get\t0", "local.get\t1", "i16x8.sub_sat_s"]),
+        ("pop8", &["local.get\t0", "i8x16.popcnt"]),
+        ("subu", &["local.get\t0", "local.get\t1", "i8x16.sub_sat_u"]),
+        ("adds", &["local.get\t0", "local.get\t1", "i16x8.add_sat_s"]),
+        ("minu", &["local.get\t0", "local.get\t1", "i32x4.min_u"]),
+    ];
+    for (name, ops) in want {
+        let code: Vec<&str> = body(&text, name)
+            .into_iter()
+            .filter(|op| !op.starts_with('.') && *op != "return")
+            .collect();
+        assert_eq!(code, ops, "{name}");
+    }
+    let max2 = body(&text, "max2");
+    assert!(max2.contains(&"i64.lt_s") && max2.contains(&"i64x2.replace_lane\t1"), "{max2:?}");
+    let maxi = body(&text, "maxi");
+    assert!(maxi.contains(&"i32.lt_s") && maxi.contains(&"i32.select"), "{maxi:?}");
+}
+
+/// The words of clang 23 for an operand that is not an integer, for two operands of different
+/// types, and for a wrong number of operands. clang takes `_Bool` and `char` operands as they are.
+#[test]
+fn the_elementwise_builtins_are_checked_in_the_words_of_clang() {
+    let source = "\
+int f(int a, long b) { return __builtin_elementwise_min(a, b); }
+float g(float a) { return __builtin_elementwise_add_sat(a, a); }
+int h(int a) { return __builtin_elementwise_max(a); }
+int *k(int *p) { return __builtin_elementwise_popcount(p); }
+int n(int a) { return __builtin_elementwise_popcount((_Bool)a) + __builtin_elementwise_add_sat((char)a, (char)1); }
+";
+    let out = assembly(source, &[]);
+    let errors = String::from_utf8_lossy(&out.stderr);
+    let want = [
+        "<stdin>:1:57: error: arguments are of different types ('int' vs 'long') [E0685]",
+        "<stdin>:2:57: error: 1st argument must be a scalar or vector of integer types (was 'float') [E0685]",
+        "<stdin>:3:23: error: too few arguments to function call, expected 2, have 1 [E0511]",
+        "<stdin>:4:56: error: 1st argument must be a scalar or vector of integer types (was 'int *') [E0685]",
+    ];
+    let said: Vec<&str> = errors.lines().filter(|line| line.contains("error:")).collect();
+    assert_eq!(said, want, "{errors}");
+}
 
 /// A program that does each operator on vectors of edge values, and the same operator on each
 /// lane as a scalar, and exits with 1 if a lane differs. The scalar side is in a function that is
@@ -436,6 +509,87 @@ fn each_lane_has_the_value_of_the_scalar_operator() {
         let args = [&link[..], flags].concat();
         run(&rucc, &args, &dir);
         let status = Command::new(&wasmtime).arg(dir.join("check.wasm")).status().unwrap();
+        assert!(status.success(), "{flags:?}: {status}");
+    }
+    std::fs::remove_dir_all(dir).unwrap();
+}
+
+/// A program that compares each `__builtin_elementwise_*` builtin with the same operation on one
+/// lane at a time, written in plain C, on vectors of each lane type and on each scalar.
+const SATURATE: &str = "\
+#include <limits.h>
+#define V(n, t) typedef t n __attribute__((vector_size(16)));
+V(v16s, signed char) V(v16u, unsigned char) V(v8s, short) V(v8u, unsigned short)
+V(v4s, int) V(v4u, unsigned) V(v2s, long long) V(v2u, unsigned long long)
+static const unsigned char edge[] = {0, 1, 0x7f, 0x80, 0xff, 0xfe, 0x55, 0xaa};
+static void fill(void *p, int k) {
+    unsigned char *b = p;
+    for (int i = 0; i < 16; i++) b[i] = edge[(i * 3 + k) & 7] ^ (unsigned char)(i * k);
+}
+static int bad;
+#define TYPE(v, t, lo, hi) \\
+    __attribute__((noinline)) static t add_##v(t a, t b) { \\
+        t r; return __builtin_add_overflow(a, b, &r) ? (lo < 0 && a < 0 ? lo : hi) : r; } \\
+    __attribute__((noinline)) static t sub_##v(t a, t b) { \\
+        t r; return __builtin_sub_overflow(a, b, &r) ? (lo == 0 || a < 0 ? lo : hi) : r; } \\
+    __attribute__((noinline)) static t pop_##v(t a) { \\
+        unsigned long long x = 0; __builtin_memcpy(&x, &a, sizeof a); \\
+        return (t)__builtin_popcountll(x); } \\
+    static void check_##v(int k) { \\
+        v a, b, r; fill(&a, k); fill(&b, k + 1); int n = 16 / sizeof(t); \\
+        for (int i = 0; i < n; i++) { \\
+            t x = a[i], y = b[i]; \\
+            bad |= __builtin_elementwise_min(x, y) != (x < y ? x : y); \\
+            bad |= __builtin_elementwise_max(x, y) != (x < y ? y : x); \\
+            bad |= __builtin_elementwise_add_sat(x, y) != add_##v(x, y); \\
+            bad |= __builtin_elementwise_sub_sat(x, y) != sub_##v(x, y); \\
+            bad |= __builtin_elementwise_popcount(x) != pop_##v(x); } \\
+        r = __builtin_elementwise_min(a, b); \\
+        for (int i = 0; i < n; i++) bad |= r[i] != (a[i] < b[i] ? a[i] : b[i]); \\
+        r = __builtin_elementwise_max(a, b); \\
+        for (int i = 0; i < n; i++) bad |= r[i] != (a[i] < b[i] ? b[i] : a[i]); \\
+        r = __builtin_elementwise_add_sat(a, b); \\
+        for (int i = 0; i < n; i++) bad |= r[i] != add_##v(a[i], b[i]); \\
+        r = __builtin_elementwise_sub_sat(a, b); \\
+        for (int i = 0; i < n; i++) bad |= r[i] != sub_##v(a[i], b[i]); \\
+        r = __builtin_elementwise_popcount(a); \\
+        for (int i = 0; i < n; i++) bad |= r[i] != pop_##v(a[i]); }
+TYPE(v16s, signed char, SCHAR_MIN, SCHAR_MAX) TYPE(v16u, unsigned char, 0, UCHAR_MAX)
+TYPE(v8s, short, SHRT_MIN, SHRT_MAX) TYPE(v8u, unsigned short, 0, USHRT_MAX)
+TYPE(v4s, int, INT_MIN, INT_MAX) TYPE(v4u, unsigned, 0, UINT_MAX)
+TYPE(v2s, long long, LLONG_MIN, LLONG_MAX) TYPE(v2u, unsigned long long, 0, ULLONG_MAX)
+int main(void) {
+    for (int k = 0; k < 8; k++) {
+        check_v16s(k); check_v16u(k); check_v8s(k); check_v8u(k);
+        check_v4s(k); check_v4u(k); check_v2s(k); check_v2u(k);
+    }
+    return bad;
+}
+";
+
+#[test]
+fn the_elementwise_builtins_have_the_value_of_each_lane() {
+    let dir = std::env::temp_dir().join(format!("rucc-wasm-elementwise-{}", std::process::id()));
+    std::fs::create_dir_all(&dir).unwrap();
+    std::fs::write(dir.join("check.c"), SATURATE).unwrap();
+    let rucc = PathBuf::from(env!("CARGO_BIN_EXE_rucc"));
+    // On the host first, where each builtin is a lane at a time.
+    for level in ["-O0", "-O2"] {
+        run(&rucc, &[level, "check.c", "-o", "check"], &dir);
+        let status = Command::new(dir.join("check")).status().unwrap();
+        assert!(status.success(), "{level}: {status}");
+    }
+    let wasmtime = on_path("wasmtime");
+    if std::env::var_os("WASI_SDK_PATH").is_none() || wasmtime.is_none() {
+        eprintln!("WASI_SDK_PATH is not set or there is no wasmtime, so wasm was not run");
+        std::fs::remove_dir_all(dir).unwrap();
+        return;
+    }
+    for flags in [&["-O0"][..], &["-O2"], &["-O0", "-msimd128"], &["-O2", "-msimd128"]] {
+        let link = ["--target=wasm32-wasip1", "-fno-builtins-lib", "check.c", "-o", "check.wasm"];
+        run(&rucc, &[&link[..], flags].concat(), &dir);
+        let status =
+            Command::new(wasmtime.as_ref().unwrap()).arg(dir.join("check.wasm")).status().unwrap();
         assert!(status.success(), "{flags:?}: {status}");
     }
     std::fs::remove_dir_all(dir).unwrap();
