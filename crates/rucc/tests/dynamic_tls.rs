@@ -5,7 +5,8 @@
 //! must fit in the small room glibc keeps in each thread's first block. 64 KB does not fit, so
 //! `dlopen` refuses it with "cannot allocate memory in static TLS block". The cases here check that
 //! the library rucc builds with `-fPIC` loads and gives each thread its own copy, at `-O0` and at
-//! `-O2`, and that `-ftls-model=initial-exec` still gives the old model. On x86-64 the same library is built under `-mtls-dialect=gnu2` too.
+//! `-O2`, and that `-ftls-model=initial-exec` still gives the old model. On x86-64 the same library
+//! is built under `-mtls-dialect=gnu2` too.
 
 #![cfg(all(
     target_os = "linux",
