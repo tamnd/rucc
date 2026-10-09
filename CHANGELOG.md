@@ -4,6 +4,10 @@ All notable changes are recorded here. The format follows [Keep a Changelog](htt
 
 ## Unreleased
 
+### Fixed
+
+- A call to a maths function such as `fabs` only carries the `library` mark when it has the library function's type, so `int fabs(int)` is the program's own function again, as gcc reads it. The usage text is back under one screen, with `-ftls-model=` sharing the line of `-fvisibility=` (#3471).
+
 ## 0.29.6
 
 The release workflow for 0.29.5 stopped at the check of the tag and published nothing, so this release also carries the changes of 0.29.5. The cause was two doc comments that linked to private items, and #3469 fixes it. The release also adds the SIMD128 ABI and the first SIMD instructions on wasm32 with `-msimd128`, makes rucc and clang agree about a GNU vector argument on wasm32 with and without the flag, writes `btf_decl_tag` for pahole, and makes the optimizer faster on lz4hc.c and zstd_compress.c.

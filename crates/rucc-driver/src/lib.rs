@@ -275,8 +275,7 @@ options:
   -fprofile-use[=<path>] -fprofile-dir=<dir> --coverage   read, and counted for gcov
   -f[no-]stack-protector[-strong|-all|-explicit], -f[no-]stack-clash-protection, -fcf-protection=<edges>, -fhardened
   -ffunction-sections -fdata-sections, -fno-plt   a section per function or variable, for --gc-sections, calls through the GOT
-  -fvisibility=<what>    default, hidden, internal or protected, when nothing in the source said
-  -ftls-model=<model>    global-dynamic, local-dynamic, initial-exec or local-exec, for a thread-local with no tls_model attribute
+  -fvisibility=<what>, -ftls-model=<model>   gcc's visibility and TLS model for a name the source said none for
   -l<name>, -L <dir>, -B <dir>, --gcc-toolchain=<dir>, -specs=<file>   a library, where to look for one, our tools, the GCC, the flags of a dpkg or Red Hat spec file
   -fPIC -fpic -fPIE -fpie, -pipe, -mtls-dialect=   what it does anyway, and -f[no-]common as the target's cc
   -f[no-]strict-aliasing, -f[no-]delete-null-pointer-checks   what it assumes anyway

@@ -9983,7 +9983,7 @@ impl<'u> Body<'_, 'u> {
                     settled.signature.params.push(Param::with_abi(Type::PTR, Abi::Chain));
                 }
                 let variadic = settled.signature.variadic;
-                let library = self.maths_library(callee, symbol);
+                let library = self.maths_library(callee, symbol, &settled.signature);
                 let sig = self.func.add_signature(settled.signature);
                 let inst = self.build(span).call_varargs(symbol, sig, &values, &settled.varargs);
                 if library {
@@ -10360,13 +10360,25 @@ impl<'u> Body<'_, 'u> {
     /// of [`MATH_BUILTINS`] that means the function of the C library, which is what
     /// [`Flags::LIBRARY`] says. The `__builtin_` spelling always means it, and the plain one means
     /// it where `-fno-builtin` does not turn it off. A declaration that renamed the symbol does
-    /// not.
-    fn maths_library(&self, callee: ExprId, symbol: Symbol) -> bool {
+    /// not, and neither does one of another type, such as `int fabs(int)`, which is the
+    /// program's own function and not the library's.
+    fn maths_library(&self, callee: ExprId, symbol: Symbol, signature: &Signature) -> bool {
         let Some(spelled) = self.builtin_named(callee) else { return false };
         let name = spelled.strip_prefix("__builtin_").unwrap_or(spelled);
+        // Each takes and answers a `double`, or a `float` for the `f` spelling, and `copysign`
+        // takes two.
+        let format = if name.ends_with('f') { rucc_ir::Float::F32 } else { rucc_ir::Float::F64 };
+        let ty = Type::float(format);
+        let count = if name.starts_with("copysign") { 2 } else { 1 };
+        let typed = |params: &[Param], count| {
+            params.len() == count && params.iter().all(|param| param.ty == ty)
+        };
         MATH_BUILTINS.contains(&name)
             && self.unit.means_the_library(spelled)
             && self.unit.names.resolve(symbol) == name
+            && !signature.variadic
+            && typed(&signature.params, count)
+            && typed(&signature.returns, 1)
     }
 
     /// Reports a construct the walk does not build IR for yet.
