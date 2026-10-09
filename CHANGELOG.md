@@ -4,6 +4,10 @@ All notable changes are recorded here. The format follows [Keep a Changelog](htt
 
 ## Unreleased
 
+## 0.29.5
+
+The release workflow for 0.29.4 stopped at the check of the tag and published nothing, so this release also carries the changes of 0.29.4. The cause was a constant in a test that clippy on Linux x86-64 found unused, and #3434 fixes it. The release also adds `-fsafety-leaks`, builds more of the i386 kernel (the MMX and port forms in the assembler, `-msse` and `-msse2`, wide offsets and gcov counters), and makes the optimizer faster on large files, because more passes keep the loop forest and the graph across their folds.
+
 ### Added
 
 - `-fsafety-leaks` reports, at exit and under detect or kernel, every live block nothing the program can still reach points at, under its own banner `rucc: memory leak` with up to eight blocks listed and the total. The roots are the writable segments and static TLS of every loaded object, plus the stack and saved registers when the program leaves through a call to `exit`, and none of the stack when it returned from `main`. The edges are conservative for now. Juliet's CWE-401 at -O2 goes from 0 to 576 of 698 detected with no false positives (#3426).
