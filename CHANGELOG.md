@@ -10,6 +10,7 @@ All notable changes are recorded here. The format follows [Keep a Changelog](htt
 
 ### Added
 
+- With `-msimd128`, a local GNU vector of 16 bytes stays a `v128` value at -O2 and the function has no stack frame for it, as with clang. sroa and the lanes pass now run on wasm32, and a cast between two vector types is no instruction. The 128 bit float stays in memory, because wasm has no register for it (#3479).
 - With `-msimd128`, a compare of two vectors of 16 bytes is one wasm SIMD compare, and a shift of a vector of 16 bytes by a scalar is one wasm SIMD shift. The mask of a compare has each lane all ones or zero, as in C. wasm has no unsigned compare of `i64x2` lanes, so rucc turns over the sign bit of each lane and uses the signed compare. A shift with a different count in each lane is done one lane at a time (#3475).
 
 ### Fixed
