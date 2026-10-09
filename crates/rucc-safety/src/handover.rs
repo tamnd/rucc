@@ -137,7 +137,7 @@
 //! is not so is a function with checks and no pointer parameters, which takes nothing, and it is a
 //! box on tamnd/rucc#1241 rather than something to paper over here.
 
-use rucc_base::hash::Map;
+use rucc_base::hash::{Map, Set};
 use rucc_base::{Interner, Symbol};
 use rucc_ir::{
     BlockCall, Def, Doms, Extra, Func, Imm, Inst, InstData, Module, Opcode, Type, Value,
@@ -257,12 +257,68 @@ fn positions(func: &Func) -> Map<Value, usize> {
     position
 }
 
-/// Whether some `return` in `func` gives back the address of a local.
+/// Whether some `return` in `func` gives back the address of a local, or a pointer into one.
 fn returns_a_local(func: &Func) -> bool {
     all(func).into_iter().any(|inst| {
         func[inst].opcode == Opcode::Return
-            && func[func[inst].args].iter().any(|&value| local(func, value))
+            && func[func[inst].args].iter().any(|&value| local(func, origin::root(func, value)))
     })
+}
+
+/// Puts a `cap_of` behind each call to a function in `yields` whose answer is handed on to a call
+/// that gets a frame, and adds it to `held`.
+///
+/// `yields` is the functions of this unit that return the address of one of their own locals. The
+/// capability such a function yields is the only thing that says the frame it points into has
+/// gone, and a caller reads it only when it has a capability for the call's result, which it has
+/// only when it checks something through it. `printLine(helper())` checks nothing and hands the
+/// pointer on, so the `printf` inside `printLine` read a dead frame with nothing to tell it so.
+/// Row T4 by way of a wrapper, which is tamnd/rucc#3272.
+///
+/// The `cap_of` is what [`from_the_call`] turns into the read, so this is the same shape a call
+/// whose result is checked already has. Only for these callees, because for any other a read with
+/// nothing yielded is a plane walk the caller was not paying for.
+fn asked_back(
+    func: &mut Func,
+    left: &Map<Symbol, usize>,
+    yields: &Set<Symbol>,
+    held: &mut Map<Value, Value>,
+) {
+    if yields.is_empty() {
+        return;
+    }
+    let calls = all(func);
+    let handed: Set<Value> = calls
+        .iter()
+        .filter(|&&inst| {
+            func[inst].opcode != Opcode::TailCall
+                && matches!(
+                    wanted(func, inst, left),
+                    Some(Frame::Checked | Frame::Outside | Frame::Unknown)
+                )
+        })
+        .flat_map(|&inst| pointers(func, inst).take(ARGS).collect::<Vec<_>>())
+        .map(|value| origin::root(func, value))
+        .collect();
+    for inst in calls {
+        let asked = callee(func, inst).is_some_and(|name| yields.contains(&name));
+        if func[inst].opcode != Opcode::Call || !asked {
+            continue;
+        }
+        let Some(result) = func[inst].results().next() else { continue };
+        if !func[result].ty.is_ptr() || !handed.contains(&result) || held.contains_key(&result) {
+            continue;
+        }
+        if returning(func, inst) {
+            continue;
+        }
+        let args = func.push_values(&[result]);
+        let data = InstData { args, ..InstData::new(Opcode::CapOf) };
+        let cap = func.create_inst(data, &[Type::CAP], func.span(inst));
+        func.insert_after(cap, inst);
+        let Some(cap) = func[cap].results().next() else { continue };
+        held.insert(result, cap);
+    }
 }
 
 /// Whether `value` is the address an `alloca` produced, which is the shape `crate::slot` builds a
@@ -363,12 +419,17 @@ pub fn arrange(module: &mut Module, names: &Interner) -> usize {
     // the callee side rewrites capabilities and the caller side adds them, and a check is neither.
     let left = remaining(module, names);
     let word = Type::int(module.datalayout.pointer_bits);
+    let yields: Set<Symbol> = module
+        .funcs()
+        .filter(|&id| !module[id].is_declaration() && returns_a_local(&module[id]))
+        .map(|id| module[id].name)
+        .collect();
     let mut published = 0;
     for id in module.funcs() {
         if module[id].is_declaration() {
             continue;
         }
-        published += one(&mut module[id], &left, word);
+        published += one(&mut module[id], &left, &yields, word);
     }
     published
 }
@@ -386,7 +447,7 @@ pub fn arrange(module: &mut Module, names: &Interner) -> usize {
 /// had, so a pointer that came in as a parameter, went down into a call and came back out of another
 /// is the same value at each step and travels the whole way as a frame read however this is ordered.
 /// Writing it in the order the values flow is for the reader.
-fn one(func: &mut Func, left: &Map<Symbol, usize>, word: Type) -> usize {
+fn one(func: &mut Func, left: &Map<Symbol, usize>, yields: &Set<Symbol>, word: Type) -> usize {
     let reads = checks_left(func) > 0 || forwards(func, left);
     if reads {
         from_the_frame(func, word);
@@ -395,7 +456,8 @@ fn one(func: &mut Func, left: &Map<Symbol, usize>, word: Type) -> usize {
     // parameter nothing here made a capability for.
     let at = if reads { positions(func) } else { Map::default() };
     let given = Given { at, word };
-    let held = origin::existing(func);
+    let mut held = origin::existing(func);
+    asked_back(func, left, yields, &mut held);
     let Some(doms) = func.entry().map(|_| Doms::new(func)) else { return 0 };
     let mut joins = Map::default();
     let mut published = 0;
@@ -525,10 +587,11 @@ fn giving_back(func: &mut Func, held: &Map<Value, Value>, doms: &Doms) -> usize 
         let Some(&pointer) = returned.iter().find(|&&value| func[value].ty.is_ptr()) else {
             continue;
         };
+        let base = origin::root(func, pointer);
         let cap = match seen(func, held, doms, pointer, inst) {
             Some(cap) => cap,
-            None if local(func, pointer) => {
-                let args = func.push_values(&[pointer]);
+            None if local(func, base) => {
+                let args = func.push_values(&[base]);
                 let data = InstData { args, ..InstData::new(Opcode::CapOf) };
                 let made = func.create_inst(data, &[Type::CAP], func.span(inst));
                 func.insert_before(made, inst);
@@ -586,11 +649,33 @@ fn made(
         joins.insert(base, cap);
         return Some(cap);
     }
+    if let Some(&cap) = joins.get(&base) {
+        return Some(cap);
+    }
     let args = func.push_values(&[base]);
     let data = InstData { args, ..InstData::new(Opcode::CapOf) };
     let cap = func.create_inst(data, &[Type::CAP], func.span(inst));
-    func.insert_before(cap, inst);
-    func[cap].results().next()
+    // A local whose lifetime ends somewhere in the function has a witness of its own, which is
+    // shut where it ends, and a capability made after that records a witness that is not open and
+    // so describes nothing. A pointer to it handed on after its block closed, or after the copy of
+    // an inlined function it belonged to returned, is the case worth catching. So its capability is
+    // made where the local is, once, and every call shares it.
+    let ends = all(func).into_iter().any(|at| {
+        func[at].opcode == Opcode::LifetimeEnd && func[func[at].args].first() == Some(&base)
+    });
+    let def = match func[base].def {
+        Def::Result { inst, .. } if ends => Some(inst),
+        _ => None,
+    };
+    match def {
+        Some(def) => func.insert_after(cap, def),
+        None => func.insert_before(cap, inst),
+    }
+    let cap = func[cap].results().next()?;
+    if def.is_some() {
+        joins.insert(base, cap);
+    }
+    Some(cap)
 }
 
 /// A `cap_arg` for the pointer parameter `param`, which is at `nth` in the frame, at the top of the
@@ -1559,6 +1644,50 @@ mod tests {
         assert_eq!(count(f, Opcode::CapResult), 1);
         let g = &module[funcs.next().expect("the module defines two")];
         assert_eq!(count(g, Opcode::CapOf), 1);
+        assert_eq!(count(g, Opcode::CapYield), 1);
+    }
+
+    #[test]
+    fn a_returned_local_handed_straight_on_to_a_wrapper_carries_its_capability() {
+        // `printf("%s", helper())` with `helper` returning a buffer of its own: nothing checks the
+        // pointer in `f`, so before this the call to `g` got no frame and the wrapper was handed
+        // the bottom capability for a dead frame.
+        let mut names = Interner::new();
+        let text = r#"; ModuleID = 't.c'
+; format 0
+target triple = "x86_64-unknown-linux-gnu"
+target datalayout = "e-p:64:64-i64:64-f80:128-S128"
+func @__rucc_wrap_strcpy(ptr, ptr) -> ptr, linkage(external);
+
+func @g() -> ptr, linkage(internal) {
+block0:
+    %0 = alloca, size 16, align 1
+    %1 = iconst.i64 1
+    %2 = ptr_add %0, %1
+    return %2
+}
+
+func @f(ptr), linkage(external) {
+block0(%0: ptr):
+    %1 = call @g() : () -> ptr
+    %2 = call @__rucc_wrap_strcpy(%0, %1) : (ptr, ptr) -> ptr
+    return
+}
+"#;
+        let mut module = rucc_ir::parse(text, &mut names).expect("the fixture parses");
+        arrange(&mut module, &names);
+        if let Err(errors) = rucc_ir::verify(&module, &names) {
+            panic!("the pass left invalid IR, {errors:?}\n{}", rucc_ir::print(&module, &names));
+        }
+        let f = names.find("f").expect("f is named");
+        let f = &module[module.funcs().find(|&id| module[id].name == f).expect("f")];
+        assert_eq!(count(f, Opcode::CapResult), 1);
+        assert_eq!(count(f, Opcode::CapPublish), 2);
+        let publishes = all(f).into_iter().filter(|&inst| f[inst].opcode == Opcode::CapPublish);
+        let caps: Vec<Value> = publishes.flat_map(|inst| f[f[inst].args].to_vec()).collect();
+        assert!(caps.contains(&produced(f, Opcode::CapResult)), "{caps:?}");
+        let g = names.find("g").expect("g is named");
+        let g = &module[module.funcs().find(|&id| module[id].name == g).expect("g")];
         assert_eq!(count(g, Opcode::CapYield), 1);
     }
 
