@@ -2843,6 +2843,38 @@ impl<'u> Body<'_, 'u> {
             }
             slot += 1;
         }
+        // `%z` on an operand in memory is the suffix an instruction takes for an object that wide,
+        // `shrb` for a byte. The back end is handed the address and not the type, so the suffix is
+        // written into the text here, where the type is known. `shiftr_adv_rotr` in net/rxrpc
+        // writes `shr%z1 %1` over a `u8` in memory. Only on x86, the one machine with the modifier.
+        let arch = self.target().tuple.arch();
+        if matches!(arch, Arch::X86_64 | Arch::X86) {
+            let mut suffixes = Vec::new();
+            for (list, outputs) in [(node.outputs, true), (node.inputs, false)] {
+                for index in 0..tast[list].len() {
+                    if outputs && spelled.contains(&index) {
+                        continue;
+                    }
+                    let operand = tast[list][index];
+                    let ty = tast[operand.value].ty;
+                    let types = self.types();
+                    let sized =
+                        rucc_types::is_integer(types, ty) || rucc_types::is_pointer(types, ty);
+                    let bytes = repr::size_of(types, self.target(), ty);
+                    suffixes.push(match bytes {
+                        _ if !operand.memory || !sized => None,
+                        1 => Some('b'),
+                        2 => Some('w'),
+                        4 => Some('l'),
+                        8 if arch == Arch::X86_64 => Some('q'),
+                        _ => None,
+                    });
+                }
+            }
+            if suffixes.iter().any(Option::is_some) {
+                template = suffixed(&template, &suffixes);
+            }
+        }
         let constraints = written.join(",");
         let mut clobbers = Vec::with_capacity(tast[node.clobbers].len());
         for index in 0..tast[node.clobbers].len() {
@@ -11076,6 +11108,47 @@ fn spell_operand(template: &str, dropped: usize, register: &str) -> Option<Strin
         text.push_str(&index.to_string());
     }
     Some(text)
+}
+
+/// An `asm` template with each `%z` naming an operand that has a suffix in `suffixes` written as
+/// that suffix. Everything else is left as it was.
+fn suffixed(template: &str, suffixes: &[Option<char>]) -> String {
+    let mut text = String::with_capacity(template.len());
+    let mut chars = template.chars().peekable();
+    while let Some(c) = chars.next() {
+        text.push(c);
+        if c != '%' {
+            continue;
+        }
+        match chars.peek().copied() {
+            Some('%') => {
+                chars.next();
+                text.push('%');
+                continue;
+            }
+            Some('z') => {}
+            _ => continue,
+        }
+        chars.next();
+        let mut digits = String::new();
+        while let Some(c) = chars.peek().copied().filter(char::is_ascii_digit) {
+            digits.push(c);
+            chars.next();
+        }
+        let suffix =
+            digits.parse::<usize>().ok().and_then(|at| suffixes.get(at).copied().flatten());
+        match suffix {
+            Some(suffix) => {
+                text.pop();
+                text.push(suffix);
+            }
+            None => {
+                text.push('z');
+                text.push_str(&digits);
+            }
+        }
+    }
+    text
 }
 
 /// An input's constraint with a number tying it to an output after `dropped` counted down by one,
