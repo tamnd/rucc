@@ -1199,6 +1199,24 @@ tests = ["rucc/tests/annotations.rs"]
 notes = "Checked with gcc 15's rules and messages: on a flexible array member only, naming an integer member of the same structure. `__builtin_counted_by_ref` reads it. `__builtin_dynamic_object_size` does not yet, so a fortified copy into the array is checked against what the layout says rather than against the count, which is the answer an unannotated array gets."
 
 [[feature]]
+name = "btf_decl_tag"
+kind = "attribute"
+gcc_version = "16.0"
+status = "implemented"
+used_by = ["linux"]
+tests = ["rucc/tests/btf_tags.rs"]
+notes = "A string to tag a declaration with in BPF's type format, which gcc writes into the debugging information and nothing else reads. Checked with gcc 16's rules and messages: one argument, a narrow string literal, and not on a structure, union or enumeration, which is a type. The tag is not written into the DWARF yet."
+
+[[feature]]
+name = "btf_type_tag"
+kind = "attribute"
+gcc_version = "16.0"
+status = "implemented"
+used_by = ["linux"]
+tests = ["rucc/tests/btf_tags.rs"]
+notes = "A string to tag a type with in BPF's type format, which is what the kernel's __user and __rcu are in a BTF build. Checked with gcc 16's rules and messages: one argument, a narrow string literal, and not on a function. The tag is not written into the DWARF yet."
+
+[[feature]]
 name = "fallthrough"
 kind = "attribute"
 gcc_version = "7.0"

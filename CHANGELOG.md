@@ -4,6 +4,10 @@ All notable changes are recorded here. The format follows [Keep a Changelog](htt
 
 ## Unreleased
 
+### Added
+
+- `btf_decl_tag` and `btf_type_tag`, gcc 16's tags for BPF's type format, are taken and checked with gcc's rules and messages: one argument, which is a narrow string literal, a `btf_decl_tag` on a structure, union or enumeration is ignored with a warning, and so is a `btf_type_tag` on a function. `__has_attribute` answers 1 for both, and under `-fgnuc-version=15` they are directives gcc 15 ignores. They are not written into the DWARF yet.
+
 ### Changed
 
 - `cargo xtask chains` finds a let chain whose `if let` has a struct pattern, and the one of that kind in `crates/rucc-driver/src/shapes.rs` is now `matches!` with a guard, so the workspace builds with Rust 1.85 again (#3401).

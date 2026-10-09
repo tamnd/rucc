@@ -720,6 +720,7 @@ impl Checker<'_> {
         self.record_body(id, kind, members, attrs, pragmas, span);
         self.read_deprecated_tag(ty, attrs, span);
         self.flag_enum_misplaced(&[attrs], ty);
+        self.btf_decl_tag_on_type(attrs);
         match again {
             Some(first) => self.redefined(first, ty, span),
             None => ty,
@@ -778,6 +779,7 @@ impl Checker<'_> {
         }
         self.read_deprecated_tag(ty, attrs, span);
         self.read_flag_enum(id, attrs);
+        self.btf_decl_tag_on_type(attrs);
         match again {
             Some(first) => self.redefined(first, ty, span),
             None => ty,

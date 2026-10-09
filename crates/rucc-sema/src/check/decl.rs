@@ -281,6 +281,7 @@ impl Checker<'_> {
         self.foreign_variadic(ty, span);
         let name = node.name?;
         let specs = self.ast[specs];
+        self.btf_type_tag_on_function(&[specs.attrs], ty);
         if specs.is_typedef() {
             self.report(
                 Diagnostic::error("function definition declared 'typedef'", span)
@@ -769,6 +770,7 @@ impl Checker<'_> {
         let span = node.name_span;
         let specs = self.ast[specs];
         self.flag_enum_misplaced(&[specs.attrs, item.attrs], ty);
+        self.btf_type_tag_on_function(&[specs.attrs, item.attrs], ty);
         if specs.is_typedef() {
             if self.scopes.at_file_scope() {
                 self.types.record_alias_prototypes(name, prototypes);
