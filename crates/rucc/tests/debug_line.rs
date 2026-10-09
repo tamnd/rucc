@@ -25,6 +25,21 @@ int total(const int *of, int many) {
 }
 ";
 
+/// A function the optimizer copies into its caller. It is static, so no body of its own is left,
+/// and it makes a call, which no pass can fold into the code around it. Every row on line 3 is
+/// then a row of the copy.
+const INLINED: &str = "\
+int g(int);
+static int twice(int n) {
+    return g(n) + 1;
+}
+int total(const int *of, int many) {
+    int sum = 0;
+    for (int i = 0; i < many; i++) sum += twice(of[i]);
+    return sum;
+}
+";
+
 /// The target the object is built for, written down rather than taken from the host, because an
 /// object is only produced for the one this compiler has a back end for.
 const TARGET: &str = "--target=x86_64-unknown-linux-gnu";
@@ -193,6 +208,7 @@ fn the_end_of_each_prologue_is_marked_where_the_body_starts() {
 #[test]
 fn an_inlined_body_says_the_lines_it_came_from() {
     let dir = fixture("inlined");
+    std::fs::write(dir.join("one.c"), INLINED).expect("the fixture can be written");
     build(&dir, &["-g", "-O2"], "one.o");
     let out = Command::new("readelf")
         .arg("--debug-dump=decodedline")
@@ -204,10 +220,13 @@ fn an_inlined_body_says_the_lines_it_came_from() {
 
     let lines: Vec<u32> = text
         .lines()
-        .filter(|line| line.starts_with("one.c"))
-        .filter_map(|line| line.split_whitespace().nth(1)?.parse().ok())
+        .filter_map(|line| {
+            let mut words = line.split_whitespace();
+            words.next().filter(|file| file.ends_with("one.c"))?;
+            words.next()?.parse().ok()
+        })
         .collect();
-    assert!(lines.iter().all(|&line| (1..=6).contains(&line)), "{text}");
-    // Once for `twice` itself and once for the copy of it in the loop.
-    assert!(lines.iter().filter(|&&line| line == 1).count() >= 2, "{text}");
+    assert!(lines.iter().all(|&line| (1..=9).contains(&line)), "{text}");
+    // The call to `g` is on line 3, and only the copy of `twice` in the loop is left to make it.
+    assert!(lines.contains(&3), "{text}");
 }
