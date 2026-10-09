@@ -98,6 +98,7 @@ pub mod ending;
 pub mod format;
 pub mod frame;
 pub mod handover;
+pub mod leaks;
 pub mod local;
 pub mod lower;
 pub mod origin;
@@ -115,7 +116,7 @@ pub use summary::{Frames, Summary, summarize};
 pub use wrap::{INTERPOSED, PREFIX, redirect};
 
 use rucc_ir::{Def, Extra, Func, Imm, Inst, InstData, Module, Opcode, Type, Value};
-pub use rucc_session::{Promise, Races, Subobject};
+pub use rucc_session::{Leaks, Promise, Races, Subobject};
 
 /// How many checks a run of [`insert`] put in.
 ///

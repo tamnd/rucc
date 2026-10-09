@@ -307,6 +307,46 @@ impl Arena {
         unsafe { self.plane.version(payload) }
     }
 
+    /// Every instance this arena has begun and not ended, as where its payload starts and how many
+    /// bytes were asked for, in address order.
+    ///
+    /// What the leak sweep of [`crate::leak`] counts and then traces. The arena keeps no list of
+    /// what it handed out, and does not need one: the plane already says which granules somebody
+    /// owns, and an owned granule whose header is a live header of this arena's carrying the same
+    /// version is the first granule of an instance. Anything else owned is a granule further into
+    /// one, which the walk has already stepped past, and the aux and header of a block are never
+    /// payload, since a block is only ever reused by its own size class at its own address.
+    ///
+    /// # Safety
+    ///
+    /// The region is still mapped, which it is for as long as the arena lives, and nothing begins
+    /// or ends an instance of this arena's while the walk runs.
+    pub unsafe fn each(&self, mut f: impl FnMut(usize, usize)) {
+        let mut at = (self.base + layout::HEADER).next_multiple_of(GRANULE);
+        while at < self.next {
+            // SAFETY: `at` is inside the region, which the plane covers.
+            let version = unsafe { self.plane.version(at) };
+            if plane::owned(version) {
+                // SAFETY: `at` is at least a header past the base, so the header in front of it
+                // is inside the region too.
+                let header = unsafe { (layout::header_of(at) as *const Header).read() };
+                let size = header.ext as usize;
+                if header.ver == version
+                    && header.meta.class() == Class::Allocated as u8
+                    && header.meta.state() == State::Live as u8
+                    && header.allocator == self.id
+                    && size == Self::sized(size)
+                    && at + size <= self.next
+                {
+                    f(at, header.asked() as usize);
+                    at += size;
+                    continue;
+                }
+            }
+            at += GRANULE;
+        }
+    }
+
     /// How large a payload of `n` bytes is actually given.
     ///
     /// Rounded up to a size class, so that every block on a free list is the same size as every
@@ -451,6 +491,13 @@ mod tests {
 
         fn begin(&mut self, n: usize) -> usize {
             self.arena.begin(n)
+        }
+
+        fn each(&self) -> std::vec::Vec<(usize, usize)> {
+            let mut found = std::vec::Vec::new();
+            // SAFETY: the region is a field of this struct and nothing else touches the arena.
+            unsafe { self.arena.each(|payload, asked| found.push((payload, asked))) };
+            found
         }
 
         fn end(&mut self, payload: usize) -> Result<(), Refusal> {
@@ -704,5 +751,31 @@ mod tests {
         assert_ne!(beside, payload, "two empty instances landed on the same address");
         assert_eq!(fake.end(payload), Ok(()));
         assert_eq!(fake.end(beside), Ok(()));
+    }
+
+    #[test]
+    fn the_walk_finds_every_live_instance_once_and_none_that_ended() {
+        let mut fake = Fake::new(1 << 16, 1);
+        let sizes = [1, 16, 17, 100, 0, 4000, 33];
+        let made: std::vec::Vec<usize> = sizes.iter().map(|&n| fake.begin(n)).collect();
+        assert!(made.iter().all(|&payload| payload != 0));
+        let want: std::vec::Vec<(usize, usize)> = made.iter().copied().zip(sizes).collect();
+        assert_eq!(fake.each(), want);
+
+        // An instance that ended is not found, and one that takes its block afterwards is, with
+        // what the new one asked for rather than what the old one did.
+        assert_eq!(fake.end(made[3]), Ok(()));
+        assert_eq!(fake.end(made[0]), Ok(()));
+        let mut left: std::vec::Vec<(usize, usize)> = want
+            .iter()
+            .copied()
+            .filter(|&(payload, _)| payload != made[3] && payload != made[0])
+            .collect();
+        assert_eq!(fake.each(), left);
+        let again = fake.begin(110);
+        assert_eq!(again, made[3], "the same class gives the same block back");
+        left.push((again, 110));
+        left.sort_unstable();
+        assert_eq!(fake.each(), left);
     }
 }

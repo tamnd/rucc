@@ -44,7 +44,7 @@ use std::sync::Mutex;
 use std::sync::atomic::{AtomicUsize, Ordering};
 
 use crate::runner::{Runner, TRIPLE};
-use crate::safety::BANNER;
+use crate::safety::{BANNER, LEAK_BANNER};
 use crate::{Error, Result, cost, target_dir};
 
 /// The variable that says where Juliet's `C` directory is.
@@ -97,6 +97,19 @@ const WEAKNESSES: &[Weakness] = &[
     Weakness { cwe: 761, what: "free of a pointer not at the start", rows: &["T3"] },
     Weakness { cwe: 843, what: "type confusion", rows: &["Y1", "Y2", "Y3", "Y4", "Y5"] },
 ];
+
+/// The CWE whose cases are built with `-fsafety-leaks` and judged by the leak report's banner.
+///
+/// One, because row T9 is the one row that is not a violation. Its cases are built with the sweep
+/// on, a half reported when the leak banner is in what it wrote, and the enforce tier is not run
+/// for them at all, since document 03's matrix gives T9 nothing to enforce: a leak is the absence
+/// of a `free`, and there is no moment in the middle of a run to stop the program at.
+const SWEPT: u32 = 401;
+
+/// Whether a case is built and run at a tier, which is every pair but [`SWEPT`] under enforce.
+fn applies(cwe: u32, tier: &str) -> bool {
+    cwe != SWEPT || tier != "enforce"
+}
 
 /// The CWEs the matrix names that Juliet 1.3 has no C cases for, so that their rows are not
 /// mistaken for rows that passed.
@@ -204,6 +217,13 @@ const EXCUSES: &[Excuse] = &[
         fault: Fault::Neither,
         why: "the bad half writes through what malloc gave it and checks it for null only after, \
               which goes wrong only when malloc fails, and here it does not",
+    },
+    Excuse {
+        prefixes: &["CWE401_Memory_Leak__malloc_realloc_"],
+        variant: None,
+        fault: Fault::Neither,
+        why: "the bad half loses its first block only when realloc fails, and here it does not, so \
+              realloc takes the block over and the bad half frees what it gives back",
     },
 ];
 
@@ -451,9 +471,10 @@ fn build<'a>(
         .map_err(|e| Error::Io(format!("could not write the driver: {e}")))?;
 
     let support = source.join("testcasesupport");
-    let compile = |tier: &str, file: &Path, out: &Path| -> Result<Option<String>> {
+    let compile = |tier: &str, file: &Path, out: &Path, swept: bool| -> Result<Option<String>> {
         let out = Command::new(&rucc)
             .args(["-c", &format!("--target={TRIPLE}"), &format!("-fsafety={tier}"), level])
+            .args(swept.then_some("-fsafety-leaks"))
             .arg(crate::VERIFY)
             .arg("-I")
             .arg(&support)
@@ -475,7 +496,7 @@ fn build<'a>(
             .map_err(|e| Error::Io(format!("could not make {}: {e}", dir.display())))?;
         for name in SUPPORT {
             let out = dir.join(name.replace(".c", ".o"));
-            if let Some(said) = compile(tier, &support.join(name), &out)? {
+            if let Some(said) = compile(tier, &support.join(name), &out, false)? {
                 problems.push(format!("{tier}: {name} did not compile: {said}"));
             }
         }
@@ -484,8 +505,11 @@ fn build<'a>(
         return Err(Error::Failed { task: "juliet", problems });
     }
 
-    let jobs: Vec<(&'static str, &Case)> =
-        TIERS.iter().flat_map(|tier| cases.iter().map(move |case| (*tier, case))).collect();
+    let jobs: Vec<(&'static str, &Case)> = TIERS
+        .iter()
+        .flat_map(|tier| cases.iter().map(move |case| (*tier, case)))
+        .filter(|(tier, case)| applies(case.cwe, tier))
+        .collect();
     let next = AtomicUsize::new(0);
     let built = Mutex::new(std::collections::BTreeSet::new());
     let failed = Mutex::new(Vec::new());
@@ -507,7 +531,8 @@ fn build<'a>(
                         if said.is_some() {
                             break;
                         }
-                        said = match compile(tier, file, &dir.join(format!("{n}.o"))) {
+                        let swept = case.cwe == SWEPT;
+                        said = match compile(tier, file, &dir.join(format!("{n}.o")), swept) {
                             Ok(said) => said,
                             Err(e) => Some(e.to_string()),
                         };
@@ -671,11 +696,15 @@ case $id in
 {low}) input=-1 seed={LOW_SEED} ;;
 *) input={HIGH} seed={HIGH_SEED} ;;
 esac
+case $id in
+CWE{SWEPT}_*) banner='{LEAK_BANNER}' ;;
+*) banner='{BANNER}' ;;
+esac
 half() {{
     printf '%s\\n' \"$input\" | {ENVIRONMENT}=\"$input\" {SEEDED}=\"$seed\" timeout {SECONDS} \"$program\" \"$1\" \\
         >\"$program.$1\" 2>&1
     status=$?
-    if grep -q '{BANNER}' \"$program.$1\"; then
+    if grep -q \"$banner\" \"$program.$1\"; then
         echo reported
     elif [ $status -eq 0 ]; then
         echo silent
@@ -750,6 +779,9 @@ fn report(
     let mut tallies: BTreeMap<(u32, &str), Tally> = BTreeMap::new();
     for case in cases {
         for tier in TIERS {
+            if !applies(case.cwe, tier) {
+                continue;
+            }
             let tally = tallies.entry((case.cwe, tier)).or_default();
             match outcomes.get(&(tier, case.id.as_str())) {
                 Some(Outcome::Ran { bad, good }) => {
@@ -819,6 +851,12 @@ fn report(
                 );
             }
         }
+    }
+    if chosen.iter().any(|weakness| weakness.cwe == SWEPT) {
+        let _ = writeln!(
+            summary,
+            "CWE-{SWEPT} enforce: not run, document 03 gives row T9 nothing to enforce"
+        );
     }
     for (cwe, rows) in ABSENT {
         let _ = writeln!(summary, "CWE-{cwe} ({rows}): Juliet 1.3 has no C cases for it");
@@ -902,7 +940,9 @@ mod tests {
     #[test]
     fn the_script_looks_for_the_banner_the_runtime_prints() {
         let one = one();
-        assert!(one.contains(&format!("grep -q '{BANNER}'")));
+        assert!(one.contains(&format!("*) banner='{BANNER}'")));
+        assert!(one.contains(&format!("CWE401_*) banner='{LEAK_BANNER}'")));
+        assert!(one.contains("grep -q \"$banner\""));
         assert!(one.contains("--defsym=juliet_bad=\"${id}_bad\""));
         assert!(one.contains("printf '<<<%s %s unlinked>>>\\n'"));
     }

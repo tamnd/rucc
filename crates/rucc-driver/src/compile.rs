@@ -967,6 +967,18 @@ fn instrument(
     // After the redirection, so that a call this build models with a wrapper is not also counted
     // as a crossing it did not model.
     let crossings = rucc_safety::witness(module, names);
+    // Last, so that neither the redirection nor the crossing count sees the two calls it adds, which
+    // are into the runtime and are neither. Detect and kernel only, as document 03's matrix has it:
+    // enforce has no row for a leak, since there is nothing in the middle of a run to stop.
+    if opts.leaks.sweeps()
+        && matches!(opts.safety, rucc_session::Safety::Detect | rucc_session::Safety::Kernel)
+    {
+        let section = match target.object_format {
+            rucc_target::ObjectFormat::Elf => Some(".init_array"),
+            _ => None,
+        };
+        rucc_safety::leaks::watch(module, names, section);
+    }
     match rucc_ir::verify(module, names) {
         Ok(()) => Ok(Instrumented { checks, interposed, crossings }),
         Err(errors) => Err(errors

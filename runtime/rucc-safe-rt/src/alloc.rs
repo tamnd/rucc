@@ -248,6 +248,21 @@ impl Heap {
     }
 }
 
+/// Every live instance on the heap, as where its payload starts and how many bytes were asked for.
+///
+/// With the heap's lock held throughout, so `f` must not allocate or free, and the arenas are walked
+/// in the order the table holds them rather than in address order. [`crate::leak`] is the caller and
+/// sorts what it is given.
+pub(crate) fn instances(mut f: impl FnMut(usize, usize)) {
+    HEAP.locked(|arenas| {
+        for arena in arenas.iter().flatten() {
+            // SAFETY: an arena in the table is over a region that is never unmapped, and the lock
+            // keeps every other thread from beginning or ending an instance while this walks.
+            unsafe { arena.each(&mut f) };
+        }
+    });
+}
+
 /// Where the heap is and where its shadow is, for a reader that holds no lock.
 ///
 /// The arena is behind a spin lock because a free list is a mutable structure. The plane is not:

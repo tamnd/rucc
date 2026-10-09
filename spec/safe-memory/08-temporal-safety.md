@@ -90,6 +90,8 @@ Document 03's T9, and the one place we are strictly worse than Fil-C, which gets
 
 This is LeakSanitizer's job and LeakSanitizer already does it, with conservative scanning. Ours is more precise for the same reason FUGC's tracing is more precise than Boehm's: the aux plane tells us exactly which words are pointers. Cheap, given everything else, and not a differentiator.
 
+What is built so far is less than that, and says so. The sweep runs once, at exit, from an `atexit` handler a constructor in the instrumented unit registers. The roots are the writable segments and static TLS of every loaded object, so that what the C library allocates through our `malloc` is reachable through its own data. The stack is a root only when the program leaves through a call to `exit`, which the compiler marks, and then only from that call up, with the callee saved registers saved at the mark. A program that returned from `main` has no frames left, and scanning the bytes those frames left behind would keep a leak alive, which is the same line Valgrind draws. The edges are every aligned word of a reached payload, which is conservative, because the aux plane is not written for every pointer store yet (#856), and a report gives each block's size and address but not where it was allocated. The sweep is skipped, with a note, when other threads are still running, since their stacks and registers are not roots it can read.
+
 ## 8.8 Cost, predicted
 
 Written down so document 13 can contradict it.

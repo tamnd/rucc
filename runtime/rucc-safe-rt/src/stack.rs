@@ -253,7 +253,7 @@ fn build() -> Option<*mut c_void> {
 
 /// Where this thread's stack is, as the C library sees it.
 #[cfg(target_os = "linux")]
-fn bounds() -> Option<(usize, usize)> {
+pub(crate) fn bounds() -> Option<(usize, usize)> {
     /// Room for a `pthread_attr_t`, which is fifty six or sixty four bytes on the targets there are.
     #[repr(C, align(16))]
     struct Attr([u8; 128]);
