@@ -1076,6 +1076,8 @@ fn optimize(
     // What a function with no `target` attribute is built for, which the inliner compares a
     // callee with one against.
     settings.isa = opts.isa;
+    // On wasm32 with `-msimd128` a vector of sixteen bytes may be a `v128` value.
+    settings.simd128 = target.simd128;
     settings.conserve_stack = opts.conserve_stack;
     settings.stack_reuse = shares_slots(opts);
     settings.rewriter = rucc_opt::pipeline::Rewriter::from_name(&opts.rewriter).unwrap_or_default();

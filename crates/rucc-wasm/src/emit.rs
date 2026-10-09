@@ -306,6 +306,12 @@ impl Code {
         self.wrote(from, local);
     }
 
+    /// A write of `local` that is no code, because the local already holds the bytes of the value
+    /// that it holds from here on.
+    pub(crate) fn renamed(&mut self, local: u32) {
+        self.wrote(self.bytes.len(), local);
+    }
+
     fn wrote(&mut self, from: usize, local: u32) {
         let to = self.bytes.len();
         if let Some(writes) = self.writes.as_mut() {

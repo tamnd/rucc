@@ -12,6 +12,8 @@
 //!
 //! Only on a build where the vector registers are there, the same question `crate::sroa` asks,
 //! since the shift and the shuffle are only worth having if the back end keeps the vector in one.
+//! That is x86-64 with SSE2, and wasm32 with `-msimd128`, where the shift is one `i32x4.shl` or
+//! its relatives and the shuffle is one `i8x16.shuffle`.
 //! A shift by the width of a lane or more is left as it is: C gives no answer for it and the
 //! machine gives zero, so the rewrite would be choosing one.
 
@@ -53,9 +55,11 @@ impl Pass for Lanes {
 
     fn run(&self, func: &mut Func, an: &mut Analyses, fuel: &mut Fuel) -> Stats {
         let mut stats = Stats::new();
-        if !an.outside().vectors() {
+        if !an.outside().vectors() && !an.outside().simd128() {
             return stats;
         }
+        // wasm has an arithmetic shift of `long` lanes, which SSE2 does not.
+        let long_ashr = an.outside().simd128();
         let mut inside: Set<Inst> = Set::default();
         let mut forward: Map<Value, Value> = Map::default();
         for block in func.blocks().collect::<Vec<Block>>() {
@@ -67,7 +71,7 @@ impl Pass for Lanes {
                 }
                 let Some((ty, lanes, chain)) = chain(func, inst) else { continue };
                 inside.extend(chain);
-                let Some(made) = Made::of(func, ty, &lanes) else { continue };
+                let Some(made) = Made::of(func, ty, &lanes, long_ashr) else { continue };
                 if !fuel.take() {
                     stats.missed(NO_FUEL);
                     continue;
@@ -158,12 +162,13 @@ enum Made {
 }
 
 impl Made {
-    fn of(func: &Func, ty: Type, lanes: &[Value]) -> Option<Self> {
-        Self::shift(func, ty, lanes).or_else(|| Self::shuffle(func, ty, lanes))
+    fn of(func: &Func, ty: Type, lanes: &[Value], long_ashr: bool) -> Option<Self> {
+        Self::shift(func, ty, lanes, long_ashr).or_else(|| Self::shuffle(func, ty, lanes))
     }
 
-    /// Lane `i` of the answer is lane `i` of one vector shifted by one constant.
-    fn shift(func: &Func, ty: Type, lanes: &[Value]) -> Option<Self> {
+    /// Lane `i` of the answer is lane `i` of one vector shifted by one constant. `long_ashr` is
+    /// whether the machine has an arithmetic shift of `long` lanes.
+    fn shift(func: &Func, ty: Type, lanes: &[Value], long_ashr: bool) -> Option<Self> {
         let bits = ty.lane().bits();
         let mut found: Option<(Opcode, Value, u128)> = None;
         for (at, &value) in lanes.iter().enumerate() {
@@ -184,9 +189,9 @@ impl Made {
             }
         }
         let (opcode, of, by) = found?;
-        // There is no arithmetic shift of a `long` lane before AVX-512.
+        // There is no arithmetic shift of a `long` lane on x86-64 before AVX-512.
         let long = ty.lane().bits() == 64;
-        if by >= u128::from(bits) || opcode == Opcode::AShr && long {
+        if by >= u128::from(bits) || opcode == Opcode::AShr && long && !long_ashr {
             return None;
         }
         Some(Self::Shift { opcode, of, by: u32::try_from(by).ok()? })
@@ -264,13 +269,28 @@ target triple = "x86_64-unknown-linux-gnu"
 target datalayout = "e-p:64:64-i64:64-f80:128-S128"
 "#;
 
+    /// The same module head for wasm32.
+    const WASM: &str = r#"; ModuleID = 't.c'
+; format 0
+target triple = "wasm32-unknown-wasip1"
+target datalayout = "e-p:32:32-i64:64-S128"
+"#;
+
     /// The module that text is, with the pass run over every function in it, on a build with the
     /// vector registers or without them.
     fn run(body: &str, vectors: bool) -> String {
+        built(&format!("{HEAD}{body}"), |outside| outside.with_vectors(vectors))
+    }
+
+    /// The same on wasm32 with `-msimd128`.
+    fn on_simd128(body: &str) -> String {
+        built(&format!("{WASM}{body}"), |outside| outside.with_simd128(true))
+    }
+
+    fn built(text: &str, facts: impl Fn(Outside) -> Outside) -> String {
         let mut names = Interner::new();
-        let text = format!("{HEAD}{body}");
-        let mut module = rucc_ir::parse(&text, &mut names).expect("the fixture parses");
-        let outside = Arc::new(Outside::of(&module).with_vectors(vectors));
+        let mut module = rucc_ir::parse(text, &mut names).expect("the fixture parses");
+        let outside = Arc::new(facts(Outside::of(&module)));
         let ids: Vec<_> = module.funcs().collect();
         for id in ids {
             if module[id].is_declaration() {
@@ -328,6 +348,14 @@ block0(%0: i32x4):
         let shift = out.lines().find(|line| line.contains("= shl %0,")).expect("one shift");
         let name = shift.trim().split(' ').next().expect("a name");
         assert_eq!(returned(&out).trim(), format!("return {name}"), "{out}");
+    }
+
+    #[test]
+    fn on_wasm_with_simd128_every_lane_shifted_by_one_constant_is_one_shift() {
+        let out = on_simd128(SHIFTED);
+        assert_eq!(count(&out, "splat.i32x4 7"), 1, "{out}");
+        assert!(returned(&out).trim() != "return %18", "{out}");
+        assert_eq!(returned(&built(&format!("{WASM}{SHIFTED}"), |it| it)).trim(), "return %18");
     }
 
     #[test]
@@ -416,5 +444,27 @@ block0(%0: i64x2):
             true,
         );
         assert!(logical.contains("= lshr %0,"), "{logical}");
+    }
+
+    /// wasm has `i64x2.shr_s`, so there the arithmetic shift of `long` lanes is one shift too.
+    #[test]
+    fn on_wasm_an_arithmetic_shift_of_long_lanes_is_one_shift() {
+        let out = on_simd128(
+            r"
+func @f(i64x2) -> i64x2, linkage(external) {
+block0(%0: i64x2):
+    %1 = splat.i64x2 0
+    %2 = iconst.i64 3
+    %3 = extractlane.i64 %0, lane 0
+    %4 = ashr %3, %2
+    %5 = insertlane %1, %4, lane 0
+    %6 = extractlane.i64 %0, lane 1
+    %7 = ashr %6, %2
+    %8 = insertlane %5, %7, lane 1
+    return %8
+}
+",
+        );
+        assert!(out.contains("= ashr %0,"), "{out}");
     }
 }
