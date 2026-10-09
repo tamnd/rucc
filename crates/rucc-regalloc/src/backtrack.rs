@@ -427,7 +427,7 @@ fn placed(
     if state.work > state.budget {
         return None;
     }
-    state.settle(&reused, passed, &received);
+    state.settle(func, &reused, &edges(func), &pins(func, env));
     if state.work > state.budget {
         return None;
     }
@@ -809,15 +809,41 @@ impl<'a> State<'a, '_> {
         best.map(|(_, at, insts)| (at, insts))
     }
 
-    /// Moves each value into the register the most values tied to it are in, of those that are free
-    /// for it and hold more of them than where it is now.
+    /// Moves each value into the register where the values tied to it weigh most, of those that are
+    /// free for it and weigh more than where it is now.
     ///
     /// A tie is a two address instruction or a block parameter, and each one met is a copy the
     /// rewrite does not have to write. Placing values in priority order can leave the two ends of a
     /// tie apart though the register one of them is in stayed free for the other, because the other
-    /// was placed first and had nothing yet to follow. Every move meets more ties than it breaks, so
+    /// was placed first and had nothing yet to follow.
+    ///
+    /// A tie weighs what its copy would, which is how often the place it would be written in runs:
+    /// the block of the instruction for a two address one and the edge for a parameter. Counted as one each, the two edges into a loop held its sum equally, so a sum that
+    /// came in through `rax` stayed there while each trip worked out the next one in another
+    /// register, and the edge back was a copy and a jump on every trip. tamnd/rucc#3187.
+    ///
+    /// An operand that insists on a register is weighed the same way, since a value somewhere else
+    /// is copied there in front of the instruction or out of it after. Without it the value a
+    /// function returns, which two edges hand the block that returns it, went with the edge that
+    /// runs more and was copied into `rax` on the way out for both of them.
+    ///
+    /// One value at a time can stop short of where a value and the answers written over it in the
+    /// same register would rather be together. Weighed alone, a loop's sum that two edges hand the
+    /// block it is added to in one register and the answer of the add in another weighed the same
+    /// either way, so it stayed with the answer, and the answer then went with the register a call
+    /// after the loop wanted it in, which was one copy in and one out on every trip. So when no one
+    /// value moves any more, [`State::regroup`] moves those together.
+    ///
+    /// A tie weighs the same from either end and every move meets more weight than it breaks, so
     /// this ends.
-    fn settle(&mut self, reused: &Answers, passed: &[Vec<Reg>], received: &[Vec<Reg>]) {
+    fn settle(
+        &mut self,
+        func: &Func,
+        reused: &Answers,
+        edges: &[Vec<(Reg, u128)>],
+        pins: &[Vec<(PhysReg, u128)>],
+    ) {
+        let heat = |inst: Inst| heat(func, inst);
         let mut moved = true;
         while moved && self.work <= self.budget {
             moved = false;
@@ -829,27 +855,34 @@ impl<'a> State<'a, '_> {
                 let source = reuse.and_then(|reuse| self.reg_of(reuse.source));
                 let second =
                     reuse.and_then(|reuse| reuse.second).and_then(|second| self.reg_of(second));
-                let mut wanted: Vec<PhysReg> = source.into_iter().chain(second).collect();
+                let own = reuse.map_or(1, |reuse| heat(reuse.inst));
+                let mut wanted: Vec<(PhysReg, u128)> =
+                    source.into_iter().chain(second).map(|at| (at, own)).collect();
                 for &answer in &reused[number] {
                     if self.commuted[answer].is_none() {
-                        wanted.extend(self.at[answer]);
+                        let weight = self.reuses[answer].map_or(1, |reuse| heat(reuse.inst));
+                        wanted.extend(self.at[answer].map(|at| (at, weight)));
                     }
                 }
-                let partners = passed[number].iter().chain(&received[number]);
-                wanted.extend(partners.filter_map(|&other| self.reg_of(other)));
-                let met = |at: PhysReg| wanted.iter().filter(|&&reg| reg == at).count();
+                for &(other, weight) in &edges[number] {
+                    wanted.extend(self.reg_of(other).map(|at| (at, weight)));
+                }
+                wanted.extend(pins[number].iter().copied());
+                let met = |at: PhysReg| -> u128 {
+                    wanted.iter().filter(|&&(reg, _)| reg == at).map(|&(_, weight)| weight).sum()
+                };
                 let here = met(now);
-                let mut better: Vec<(usize, PhysReg)> = Vec::new();
-                for &at in &wanted {
-                    let count = met(at);
-                    if count > here && !better.contains(&(count, at)) {
-                        better.push((count, at));
+                let mut better: Vec<(u128, PhysReg)> = Vec::new();
+                for &(at, _) in &wanted {
+                    let weight = met(at);
+                    if weight > here && !better.contains(&(weight, at)) {
+                        better.push((weight, at));
                     }
                 }
                 if better.is_empty() {
                     continue;
                 }
-                better.sort_by_key(|&(count, _)| Reverse(count));
+                better.sort_by_key(|&(weight, _)| Reverse(weight));
                 let index = self.slot(value.class, now);
                 self.remove(index, &[number]);
                 self.at[number] = None;
@@ -873,7 +906,124 @@ impl<'a> State<'a, '_> {
                 }
                 self.take(value, to);
             }
+            if !moved && self.work <= self.budget {
+                moved = self.regroup(func, reused, edges, pins);
+            }
         }
+    }
+
+    /// Moves each value whose answers are in its register, together with them, to where the ties
+    /// the group has with values outside it weigh most, if every one of them is free there and
+    /// that weighs more than where they are. Gives back whether anything moved.
+    ///
+    /// The ties inside the group are met wherever it goes, so they are left out. A value whose own
+    /// answer was written over its second source is left where it is, as is every answer written
+    /// that way, since moving them is moving which source the instruction writes over.
+    fn regroup(
+        &mut self,
+        func: &Func,
+        reused: &Answers,
+        edges: &[Vec<(Reg, u128)>],
+        pins: &[Vec<(PhysReg, u128)>],
+    ) -> bool {
+        let mut moved = false;
+        for number in 0..self.at.len() {
+            let (Some(value), Some(now)) = (self.values[number], self.at[number]) else {
+                continue;
+            };
+            if self.commuted[number].is_some() {
+                continue;
+            }
+            let mut group = vec![number];
+            for &answer in &reused[number] {
+                let alike = self.values[answer].is_some_and(|other| other.class == value.class);
+                if alike && self.at[answer] == Some(now) && self.commuted[answer].is_none() {
+                    group.push(answer);
+                }
+            }
+            if group.len() < 2 {
+                continue;
+            }
+            let inside = |reg: Reg| {
+                let number = reg.number().and_then(|number| usize::try_from(number).ok());
+                number.is_some_and(|number| group.contains(&number))
+            };
+            let mut wanted: Vec<(PhysReg, u128)> = Vec::new();
+            for &member in &group {
+                if let Some(reuse) = self.reuses[member] {
+                    if !inside(reuse.source) {
+                        let at = self.reg_of(reuse.source);
+                        wanted.extend(at.map(|at| (at, heat(func, reuse.inst))));
+                    }
+                }
+                for &answer in &reused[member] {
+                    if !group.contains(&answer) && self.commuted[answer].is_none() {
+                        let weight = self.reuses[answer].map_or(1, |reuse| heat(func, reuse.inst));
+                        wanted.extend(self.at[answer].map(|at| (at, weight)));
+                    }
+                }
+                for &(other, weight) in &edges[member] {
+                    if !inside(other) {
+                        wanted.extend(self.reg_of(other).map(|at| (at, weight)));
+                    }
+                }
+                wanted.extend(pins[member].iter().copied());
+            }
+            let met = |at: PhysReg| -> u128 {
+                wanted.iter().filter(|&&(reg, _)| reg == at).map(|&(_, weight)| weight).sum()
+            };
+            let here = met(now);
+            let mut better: Vec<(u128, PhysReg)> = Vec::new();
+            for &(at, _) in &wanted {
+                let weight = met(at);
+                if weight > here && !better.contains(&(weight, at)) {
+                    better.push((weight, at));
+                }
+            }
+            if better.is_empty() {
+                continue;
+            }
+            better.sort_by_key(|&(weight, _)| Reverse(weight));
+            let index = self.slot(value.class, now);
+            self.remove(index, &group);
+            for &member in &group {
+                self.at[member] = None;
+            }
+            let mut to = now;
+            for (_, at) in better {
+                let mut placed = Vec::new();
+                for &member in &group {
+                    let Some(each) = self.values[member] else { continue };
+                    if !self.free(each, at, Want::Allowed) {
+                        break;
+                    }
+                    self.take(each, at);
+                    placed.push(member);
+                }
+                if placed.len() == group.len() {
+                    to = at;
+                    break;
+                }
+                let index = self.slot(value.class, at);
+                self.remove(index, &placed);
+                for &member in &placed {
+                    self.at[member] = None;
+                }
+            }
+            if to == now {
+                for &member in &group {
+                    if let Some(each) = self.values[member] {
+                        self.take(each, now);
+                    }
+                }
+            } else {
+                moved = true;
+                for &member in &group {
+                    self.saves[member].clear();
+                }
+            }
+        }
+        moved
     }
 
     fn take(&mut self, value: Value<'_>, at: PhysReg) {
@@ -965,6 +1115,71 @@ fn received(func: &Func) -> Vec<Vec<Reg>> {
     received
 }
 
+/// How often the block an instruction is in runs, and once for one in no block.
+fn heat(func: &Func, inst: Inst) -> u128 {
+    func.block_of(inst).map_or(1, |block| u128::from(func[block].weight.raw().max(1)))
+}
+
+/// For each value, the values an edge ties it to, a block parameter to what the edges into its
+/// block pass it and the other way round, each with how often those edges run between them.
+///
+/// What [`State::settle`] weighs a tie across an edge by, since the copy for one that is left apart
+/// is written on the edge and runs as often as the edge is taken. The block the edge leaves would
+/// weigh the edge out of a loop as much as the edge back.
+fn edges(func: &Func) -> Vec<Vec<(Reg, u128)>> {
+    let mut edges: Vec<Vec<(Reg, u128)>> = vec![Vec::new(); func.vregs()];
+    let mut tie = |one: Reg, other: Reg, weight: u128| {
+        let number = one.number().and_then(|number| usize::try_from(number).ok());
+        let Some(list) = number.and_then(|number| edges.get_mut(number)) else { return };
+        match list.iter_mut().find(|(reg, _)| *reg == other) {
+            Some((_, total)) => *total += weight,
+            None => list.push((other, weight)),
+        }
+    };
+    for block in func.blocks() {
+        for call in &func[block].succs {
+            let weight = u128::from(call.weight.raw().max(1));
+            for (&arg, param) in call.args.iter().zip(&func[call.block].params) {
+                if arg != param.reg {
+                    tie(arg, param.reg, weight);
+                    tie(param.reg, arg, weight);
+                }
+            }
+        }
+    }
+    edges
+}
+
+/// For each value, the registers the operands naming it insist on, each with how often the
+/// instructions that insist on it run.
+///
+/// The same operands as [`assign::hints`] and only registers the class hands out, for the reason
+/// the hints are kept to them: an instruction that wants a scratch register is given the value by
+/// a copy wherever the value is.
+fn pins(func: &Func, env: &Env) -> Vec<Vec<(PhysReg, u128)>> {
+    let mut pins: Vec<Vec<(PhysReg, u128)>> = vec![Vec::new(); func.vregs()];
+    for block in func.blocks() {
+        let weight = u128::from(func[block].weight.raw().max(1));
+        for inst in func.insts(block) {
+            for operand in &func[func[inst].operands] {
+                let rucc_mir::Constraint::Fixed(at) = operand.constraint else { continue };
+                if func.class_of(operand.reg) != Some(operand.class)
+                    || !env.order(operand.class).contains(&at)
+                {
+                    continue;
+                }
+                let number = operand.reg.number().and_then(|number| usize::try_from(number).ok());
+                let Some(list) = number.and_then(|number| pins.get_mut(number)) else { continue };
+                match list.iter_mut().find(|(reg, _)| *reg == at) {
+                    Some((_, total)) => *total += weight,
+                    None => list.push((at, weight)),
+                }
+            }
+        }
+    }
+    pins
+}
+
 /// Lists of answers by value, in one buffer, with where each value's list starts in it.
 ///
 /// Most values have no list at all, and a list of its own for each one that does was one
@@ -1031,7 +1246,7 @@ fn index(reg: Reg) -> usize {
 mod tests {
     use rucc_base::Interner;
     use rucc_mir::{BlockCall, Constraint, Flags, Opcode, Operand, Param};
-    use rucc_target::x86_64::{GPR, RAX, RCX, REGS, SYSV};
+    use rucc_target::x86_64::{GPR, R8, R9, R10, R11, RAX, RCX, RDI, RDX, REGS, RSI, SYSV};
 
     use super::*;
     use crate::check;
@@ -1336,6 +1551,159 @@ mod tests {
         *func.succs_mut(head) = vec![BlockCall::with(head, vec![next]), BlockCall::to(out)];
 
         let places = places(&mut func, &env());
+        assert_eq!(places[3], places[1]);
+    }
+
+    #[test]
+    fn a_loop_sum_goes_where_the_edge_back_passes_it_rather_than_where_it_came_in() {
+        let mut names = Interner::new();
+        let mut func = Func::new(names.intern("f"));
+        let opcode = Opcode::new(names.intern("x64.nop"));
+        let entry = func.create_block();
+        let head = func.create_block();
+        let out = func.create_block();
+        let seed = func.new_vreg(GPR);
+        let total = func.new_vreg(GPR);
+        let scaled = func.new_vreg(GPR);
+        let element = func.new_vreg(GPR);
+        let next = func.new_vreg(GPR);
+        func.build(entry, opcode)
+            .operand(Operand::write(seed, GPR).with(Constraint::Fixed(RAX)))
+            .finish();
+        *func.succs_mut(entry) = vec![BlockCall::with(head, vec![seed])];
+        func.params_mut(head).push(Param { reg: total, class: GPR });
+        func.build(head, opcode).def(scaled, GPR).uses(total, GPR).finish();
+        func.build(head, opcode)
+            .operand(Operand::write(element, GPR).with(Constraint::Fixed(RAX)))
+            .finish();
+        func.build(head, opcode)
+            .operand(Operand::write(next, GPR).with(Constraint::Reuse(1)))
+            .uses(scaled, GPR)
+            .uses(element, GPR)
+            .finish();
+        let weight = |times: u64| rucc_mir::Weight::parts(times * rucc_mir::Weight::SCALE);
+        *func.succs_mut(head) = vec![
+            BlockCall::with(head, vec![next]).taken(weight(99)),
+            BlockCall::to(out).taken(weight(1)),
+        ];
+        func.set_weight(head, weight(100));
+
+        // The first value arrives in `rax` and the element is loaded there, so the sum cannot be in
+        // `rax`. The two edges into the loop pass the parameter a value each, and the one that runs
+        // on every trip is the one it follows: a copy in front of the loop instead of a copy and a
+        // jump at the bottom of it. tamnd/rucc#3187.
+        let places = places(&mut func, &env());
+        assert_eq!(places[3], "rax");
+        assert_eq!(places[1], places[4]);
+        assert_eq!(places[2], places[4]);
+    }
+
+    #[test]
+    fn a_returned_value_stays_where_it_is_returned_from_though_the_busier_edge_passes_it_elsewhere()
+    {
+        let mut names = Interner::new();
+        let mut func = Func::new(names.intern("f"));
+        let opcode = Opcode::new(names.intern("x64.nop"));
+        let entry = func.create_block();
+        let hot = func.create_block();
+        let cold = func.create_block();
+        let join = func.create_block();
+        let arrived = func.new_vreg(GPR);
+        let returned = func.new_vreg(GPR);
+        let result = func.new_vreg(GPR);
+        func.build(entry, opcode)
+            .operand(Operand::write(arrived, GPR).with(Constraint::Fixed(RCX)))
+            .finish();
+        let weight = |times: u64| rucc_mir::Weight::parts(times * rucc_mir::Weight::SCALE);
+        *func.succs_mut(entry) =
+            vec![BlockCall::to(hot).taken(weight(10)), BlockCall::to(cold).taken(weight(1))];
+        // Something that writes `rax` while what arrived is still wanted, so it cannot be there.
+        func.build(hot, opcode).operand(Operand::write(Reg::physical(RAX), GPR)).finish();
+        *func.succs_mut(hot) = vec![BlockCall::with(join, vec![arrived]).taken(weight(10))];
+        func.build(cold, opcode)
+            .operand(Operand::write(returned, GPR).with(Constraint::Fixed(RAX)))
+            .finish();
+        *func.succs_mut(cold) = vec![BlockCall::with(join, vec![returned])];
+        func.params_mut(join).push(Param { reg: result, class: GPR });
+        func.build(join, opcode)
+            .operand(Operand::read(result, GPR).with(Constraint::Fixed(RAX)))
+            .finish();
+        func.set_weight(hot, weight(10));
+        func.set_weight(join, weight(11));
+
+        // The edge that runs more passes the parameter what arrived in `rcx`, but the block it goes
+        // to returns it in `rax` and runs as often as both edges together, so `rcx` would be a copy
+        // on every return rather than one on the edge that runs less. tamnd/rucc#3187.
+        let places = places(&mut func, &env());
+        assert_eq!(places[0], "rcx");
+        assert_eq!(places[1], "rax");
+        assert_eq!(places[2], "rax");
+    }
+
+    #[test]
+    fn a_sum_and_the_answer_written_over_it_move_together_to_where_the_edges_want_them() {
+        let mut names = Interner::new();
+        let mut func = Func::new(names.intern("f"));
+        let opcode = Opcode::new(names.intern("x64.nop"));
+        let entry = func.create_block();
+        let head = func.create_block();
+        let skip = func.create_block();
+        let call = func.create_block();
+        let join = func.create_block();
+        let latch = func.create_block();
+        let out = func.create_block();
+        let zero = func.new_vreg(GPR);
+        let total = func.new_vreg(GPR);
+        let returned = func.new_vreg(GPR);
+        let added = func.new_vreg(GPR);
+        let joined = func.new_vreg(GPR);
+        let next = func.new_vreg(GPR);
+        let weight = |times: u64| rucc_mir::Weight::parts(times * rucc_mir::Weight::SCALE);
+        func.build(entry, opcode).def(zero, GPR).finish();
+        *func.succs_mut(entry) = vec![BlockCall::with(head, vec![zero])];
+        func.params_mut(head).push(Param { reg: total, class: GPR });
+        *func.succs_mut(head) =
+            vec![BlockCall::to(skip).taken(weight(50)), BlockCall::to(call).taken(weight(50))];
+        *func.succs_mut(skip) = vec![BlockCall::with(join, vec![total]).taken(weight(50))];
+        // A call, as far as the allocator can tell: it answers in `rax` and destroys every other
+        // register a callee does not keep.
+        let mut build = func.build(call, opcode);
+        build = build.operand(Operand::write(returned, GPR).with(Constraint::Fixed(RAX)));
+        for clobbered in [RCX, RDX, RSI, RDI, R8, R9, R10, R11] {
+            build = build.operand(Operand::write(Reg::physical(clobbered), GPR));
+        }
+        build.finish();
+        func.build(call, opcode)
+            .operand(Operand::write(added, GPR).with(Constraint::Reuse(1)))
+            .uses(total, GPR)
+            .uses(returned, GPR)
+            .finish();
+        *func.succs_mut(call) = vec![BlockCall::with(join, vec![added]).taken(weight(50))];
+        func.params_mut(join).push(Param { reg: joined, class: GPR });
+        func.build(join, opcode)
+            .operand(Operand::write(next, GPR).with(Constraint::Reuse(1)))
+            .uses(joined, GPR)
+            .finish();
+        *func.succs_mut(join) =
+            vec![BlockCall::to(latch).taken(weight(99)), BlockCall::to(out).taken(weight(1))];
+        *func.succs_mut(latch) = vec![BlockCall::with(head, vec![next]).taken(weight(99))];
+        func.build(out, opcode)
+            .operand(Operand::read(next, GPR).with(Constraint::Fixed(RSI)))
+            .finish();
+        func.set_weight(head, weight(100));
+        func.set_weight(skip, weight(50));
+        func.set_weight(call, weight(50));
+        func.set_weight(join, weight(100));
+        func.set_weight(latch, weight(99));
+
+        // The sum the two arms hand `joined` is in a register the call keeps, and `next` is added
+        // over `joined`. Weighed one at a time, `joined` meets as much by staying with `next` as by
+        // going with what the arms hand it, and `next` goes where the call after the loop wants it,
+        // so the two of them were in `rsi` and the loop copied the sum in and out of it on every
+        // trip. Moved together they go where the edges want them. tamnd/rucc#3187.
+        let places = places(&mut func, &env());
+        assert_eq!(places[4], places[1]);
+        assert_eq!(places[5], places[1]);
         assert_eq!(places[3], places[1]);
     }
 
