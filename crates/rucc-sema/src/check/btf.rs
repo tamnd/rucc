@@ -3,8 +3,10 @@
 //! `__percpu` are when it is built for BTF.
 //!
 //! gcc writes the tags into the debugging information, and the program it compiles is the same
-//! with them as without. This compiler does not write them yet, so what is left is what gcc
-//! checks of them, in its words:
+//! with them as without. The strings of the `btf_decl_tag`s on a function, an object, a
+//! parameter or a member are kept beside the tree for the debugging information, which writes
+//! them as gcc does. A `btf_type_tag` is not written, since a type here has no variant for each
+//! tag it was written with. What is left is what gcc checks of them, in its words:
 //!
 //! * Each takes exactly one argument, and is refused with gcc's count otherwise.
 //! * That argument is a string literal, of `char` or of `char8_t`. Anything else is refused, and
@@ -94,6 +96,37 @@ impl Checker<'_> {
         if matches!(self.types.kind(self.types.canonical(ty)), TypeKind::Function(_)) {
             self.btf_misplaced(lists, "btf_type_tag", "functions");
         }
+    }
+
+    /// The strings of the `btf_decl_tag`s in the lists whose arguments are right, in the order
+    /// gcc keeps them on the declaration: the lists are the attributes after the declarator and
+    /// then the specifiers', gcc puts each attribute it reads on the front, and a tag the
+    /// declaration already has is not put there again.
+    pub(in crate::check) fn btf_decl_tags(&self, lists: &[AttrList]) -> Vec<Vec<u8>> {
+        let ast = self.ast;
+        let mut tags: Vec<Vec<u8>> = Vec::new();
+        for &attrs in lists {
+            for attr in &ast[attrs] {
+                if self.btf_tag(attr) != Some("btf_decl_tag") || self.btf_fault(attr).is_some() {
+                    continue;
+                }
+                let [AttrArg::Expr(expr)] = ast[attr.args][..] else { continue };
+                let rucc_ast::Expr::Str(string) = ast[expr] else { continue };
+                // The string up to its first zero, which is all of it a reader of the debugging
+                // information sees.
+                let tag: Vec<u8> = ast[string]
+                    .elements
+                    .iter()
+                    .take_while(|&&element| element != 0)
+                    .map(|&element| element as u8)
+                    .collect();
+                if !tags.contains(&tag) {
+                    tags.push(tag);
+                }
+            }
+        }
+        tags.reverse();
+        tags
     }
 
     /// gcc's warning that the tag of that name does not apply to what it was written on, for

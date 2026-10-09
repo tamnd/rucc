@@ -1204,8 +1204,8 @@ kind = "attribute"
 gcc_version = "16.0"
 status = "implemented"
 used_by = ["linux"]
-tests = ["rucc/tests/btf_tags.rs"]
-notes = "A string to tag a declaration with in BPF's type format, which gcc writes into the debugging information and nothing else reads. Checked with gcc 16's rules and messages: one argument, a narrow string literal, and not on a structure, union or enumeration, which is a type. The tag is not written into the DWARF yet."
+tests = ["rucc/tests/btf_tags.rs", "rucc/tests/btf_decl_tags_dwarf.rs"]
+notes = "A string to tag a declaration with in BPF's type format, which gcc writes into the debugging information and nothing else reads. Checked with gcc 16's rules and messages: one argument, a narrow string literal, and not on a structure, union or enumeration, which is a type. Written into the DWARF as gcc writes it, a shared chain of DW_TAG_GNU_annotation entries that a function, variable, parameter, local or member points at, with the tags of every declaration merged the way gcc merges them."
 
 [[feature]]
 name = "btf_type_tag"

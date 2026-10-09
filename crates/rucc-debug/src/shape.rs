@@ -99,6 +99,9 @@ pub struct Member {
     pub at: u64,
     /// Which bits it is, for a bit-field, and [`None`] for an ordinary member.
     pub bits: Option<Bits>,
+    /// The strings of the `btf_decl_tag`s on it, the last written first, which is the order gcc
+    /// chains them in.
+    pub tags: Vec<Vec<u8>>,
 }
 
 /// One type, in the terms DWARF describes one.
@@ -224,6 +227,9 @@ pub struct Param {
     /// the same way every other local's place is. See [`Local::spot`]. A function type never has
     /// one, since a type is not a piece of code and has no frame or registers to be in.
     pub spot: Option<Spot>,
+    /// The strings of the `btf_decl_tag`s on it, and none in a function type, the last written first, which is the order gcc
+    /// chains them in.
+    pub tags: Vec<Vec<u8>>,
 }
 
 /// One variable the unit defines at file scope.
@@ -252,6 +258,9 @@ pub struct Global {
     pub decl: Option<Place>,
     /// Whether anything outside this unit can see it, which is the opposite of `static`.
     pub external: bool,
+    /// The strings of the `btf_decl_tag`s on its declarations, the last written first, which is the order gcc
+    /// chains them in.
+    pub tags: Vec<Vec<u8>>,
 }
 
 /// One local the program declared.
@@ -273,6 +282,9 @@ pub struct Local {
     /// Which of its function's [`scopes`](crate::Function::scopes) it was declared in, and [`None`]
     /// for one written directly in the body of the function.
     pub scope: Option<usize>,
+    /// The strings of the `btf_decl_tag`s on it, the last written first, which is the order gcc
+    /// chains them in.
+    pub tags: Vec<Vec<u8>>,
 }
 
 /// One inner scope of a function, which is a `{ ... }` the program declared something in.

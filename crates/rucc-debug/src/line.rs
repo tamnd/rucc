@@ -173,6 +173,9 @@ pub struct Function {
     /// above names is written down anyway and costs nothing: an entry is only made for one that has
     /// a local of its own or holds a scope that does.
     pub scopes: Vec<Scope>,
+    /// The strings of the `btf_decl_tag`s on its declarations, the last written first, which is the order gcc
+    /// chains them in.
+    pub tags: Vec<Vec<u8>>,
 }
 
 /// One row of the table: an address, and where the code at it came from.
@@ -601,7 +604,7 @@ mod tests {
         let mut unit = one();
         unit.funcs.clear();
         unit.globals =
-            vec![Global { name: "table".to_owned(), ty: None, decl: None, external: true }];
+            vec![Global { name: "table".to_owned(), external: true, ..Global::default() }];
         let info = write(&unit).expect("sections");
         let names: Vec<&str> = info.chunks.iter().map(|chunk| chunk.name.as_str()).collect();
         assert!(names.contains(&".debug_info"), "{names:?}");

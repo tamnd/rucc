@@ -22,7 +22,7 @@ use rucc_base::{Idx, IdxRange, Symbol};
 use rucc_diag::Span;
 use rucc_lex::StringLiteral;
 use rucc_target::Isa;
-use rucc_types::{Prototype, TypeId, VlaId};
+use rucc_types::{Prototype, RecordId, TypeId, VlaId};
 
 use crate::asm::{Asm, AsmId, AsmOperand, AsmOperandList, FileAsm, LabelList, StrList};
 use crate::decl::{Decl, DeclId, DeclList, InitEntry};
@@ -234,6 +234,8 @@ pub struct Tast {
     fentry_names: Map<DeclId, StrId>,
     fentry_sections: Map<DeclId, StrId>,
     symvers: Map<DeclId, Vec<(String, Span)>>,
+    btf_decl_tags: Map<DeclId, Vec<Vec<u8>>>,
+    member_tags: Map<(RecordId, Symbol), Vec<Vec<u8>>>,
     defined_at: Map<DeclId, Span>,
     notices: Map<DeclId, Notices>,
     extents: Map<DeclId, u64>,
@@ -652,6 +654,60 @@ impl Tast {
             self.symvers.iter().map(|(&decl, names)| (decl, names.clone())).collect();
         symvers.sort_by_key(|(decl, _)| decl.index());
         symvers
+    }
+
+    /// Records the strings the `btf_decl_tag`s on one declaration of this function, object or
+    /// parameter carry, in the order gcc keeps them, which is the last written first.
+    ///
+    /// A later declaration's tags are merged with the earlier ones the way gcc merges the
+    /// attributes of two declarations. Where one list has every tag of the other, it is what
+    /// stands. Otherwise the longer is kept and each tag of the shorter it lacks goes on its
+    /// front, one at a time, so the shorter list's tags end up reversed ahead of it. gcc counts
+    /// every attribute of the declaration and not only its tags, so a declaration with other
+    /// attributes beside its tags can come out in another order here, with the same tags.
+    pub fn record_btf_decl_tags(&mut self, decl: DeclId, new: Vec<Vec<u8>>) {
+        if new.is_empty() {
+            return;
+        }
+        let old = self.btf_decl_tags.entry(decl).or_default();
+        let holds = |list: &[Vec<u8>], all: &[Vec<u8>]| all.iter().all(|tag| list.contains(tag));
+        if holds(old, &new) {
+            return;
+        }
+        if holds(&new, old) {
+            *old = new;
+            return;
+        }
+        let (mut kept, other) =
+            if old.len() < new.len() { (new, old.clone()) } else { (old.clone(), new) };
+        for tag in other {
+            if !kept.contains(&tag) {
+                kept.insert(0, tag);
+            }
+        }
+        *old = kept;
+    }
+
+    /// The strings this declaration's `btf_decl_tag`s carry, the last written first, and nothing
+    /// for one without them.
+    #[must_use]
+    pub fn btf_decl_tags(&self, decl: DeclId) -> &[Vec<u8>] {
+        self.btf_decl_tags.get(&decl).map_or(&[], Vec::as_slice)
+    }
+
+    /// Records the strings the `btf_decl_tag`s on a member of a record carry, in the order
+    /// [`Tast::record_btf_decl_tags`] keeps them. A member is declared once, so there is nothing
+    /// to merge.
+    pub fn record_member_tags(&mut self, record: RecordId, member: Symbol, tags: Vec<Vec<u8>>) {
+        if !tags.is_empty() {
+            self.member_tags.insert((record, member), tags);
+        }
+    }
+
+    /// The strings the `btf_decl_tag`s on this member carry, and nothing for one without them.
+    #[must_use]
+    pub fn member_tags(&self, record: RecordId, member: Symbol) -> &[Vec<u8>] {
+        self.member_tags.get(&(record, member)).map_or(&[], Vec::as_slice)
     }
 
     /// Records that the second name this function's `alias` is for is its resolver, which
