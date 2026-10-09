@@ -4,6 +4,10 @@ All notable changes are recorded here. The format follows [Keep a Changelog](htt
 
 ## Unreleased
 
+### Changed
+
+- The nofree summary pushes parameter sets along def-use edges instead of rescanning every value until nothing changes, which was 4% of compiling lvm.c: lvm.c -4.7% and quickjs.c -3.9% instructions at -O2 with byte-identical output (#3530).
+
 ## 0.30.0
 
 Milestone WA8 (#3456) is done, and a finished milestone gets a minor release. With `-msimd128`, a GNU vector of 16 bytes stays a `v128` value on wasm32. The compares and the shifts of vectors, the clang builtins for wasm SIMD, `__builtin_convertvector`, `__builtin_shufflevector` and the `__builtin_elementwise_*` integer builtins are SIMD instructions. Each of the 302 functions of `wasm_simd128.h` has the SIMD instructions that clang 23 writes for it at `-O2 -mrelaxed-simd`, and the rucc-corpus review on wasm gives no new failure with the flag. The release also makes i386 `long long` code and x86-64 `__int128` code closer to gcc, and makes the optimizer faster on quickjs.c and zstd_compress.c.
