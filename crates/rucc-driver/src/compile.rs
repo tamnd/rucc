@@ -2446,7 +2446,8 @@ fn stretches(
 ) -> Vec<(u32, Vec<rucc_debug::Span>)> {
     // A target nobody has written a calling convention down for has no DWARF numbering either, so
     // there is no way to name the register a local is in and nothing to say.
-    let (false, Some(regs)) = (built.kept.is_empty(), target.call_regs) else {
+    let (false, Some(regs)) = (built.kept.is_empty() && built.arrived.is_empty(), target.call_regs)
+    else {
         return Vec::new();
     };
     let ends = ends(extent.len as u64, rows);
@@ -2479,11 +2480,62 @@ fn stretches(
             None => spots.push((kept.decl, vec![span])),
         }
     }
+    // And a parameter from the first byte, in the register it arrived in, up to the first stretch
+    // the back end gave it. The prologue and the moves out of the argument registers run before
+    // that, and a debugger stopped on the first byte of the function asks about those bytes.
+    for &(decl, at) in &built.arrived {
+        let rucc_mir::Where::Reg { reg, class } = at else { continue };
+        let Some(number) = regs.dwarf(class, reg) else { continue };
+        let first = spots.iter().find(|(at, _)| *at == decl);
+        let first = first.and_then(|(_, spans)| spans.iter().map(|span| span.from).min());
+        let end =
+            arrival(extent.len as u64, rows, built, reg, class).min(first.unwrap_or(u64::MAX));
+        if end == 0 {
+            continue;
+        }
+        let span = rucc_debug::Span { from: 0, len: end, held: rucc_debug::Held::Reg(number) };
+        match spots.iter_mut().find(|(at, _)| *at == decl) {
+            Some((_, spans)) => spans.push(span),
+            None => spots.push((decl, vec![span])),
+        }
+    }
     for (_, spans) in &mut spots {
         *spans = settle(std::mem::take(spans));
     }
     spots.retain(|(_, spans)| !spans.is_empty());
     spots
+}
+
+/// How far into a function an argument register still holds what the caller put in it.
+///
+/// Up to the first instruction that writes it, and no further than the end of the entry block,
+/// since a block after that may be reached from somewhere the register was written. The
+/// instruction that writes it is left out even though the register only changes once it has run,
+/// because a debugger asking about a caller asks at the address before the return address, which
+/// is inside the call, and a call writes every argument register. An instruction that encodes to
+/// nothing changes no register, and the one an argument arrives through is one of those.
+fn arrival(
+    len: u64,
+    rows: &[rucc_asm::Row],
+    built: &rucc_mir::Func,
+    reg: rucc_target::PhysReg,
+    class: rucc_target::RegClass,
+) -> u64 {
+    let entry = built.entry();
+    for (which, row) in rows.iter().enumerate() {
+        let Some(inst) = row.inst else { continue };
+        let next = rows.get(which + 1).map_or(len, |next| next.at as u64);
+        if next == row.at as u64 {
+            continue;
+        }
+        let writes = built[built[inst].operands].iter().any(|operand| {
+            operand.role.is_def() && operand.class == class && operand.reg.phys() == Some(reg)
+        });
+        if writes || built.block_of(inst) != entry {
+            return row.at as u64;
+        }
+    }
+    len
 }
 
 /// A row of a line table as [`ends`], [`nests`] and [`spread`] read it: how far into its function
@@ -13355,6 +13407,42 @@ away:
         let one = span(0, 4, rucc_debug::Held::Reg(3));
         let two = span(16, 4, rucc_debug::Held::Reg(3));
         assert_eq!(settle(vec![one, two]), vec![one, two]);
+    }
+
+    #[test]
+    fn an_argument_register_holds_its_parameter_until_something_writes_it() {
+        use rucc_mir::{BlockCall, Opcode, Reg};
+        use rucc_target::x86_64::{GPR, RBX, RDI, RSI};
+
+        let mut names = Interner::new();
+        let mut func = rucc_mir::Func::new(names.intern("f"));
+        let opcode = Opcode::new(names.intern("x64.nop"));
+        let head = func.create_block();
+        let tail = func.create_block();
+        let push = func.build(head, opcode).finish();
+        let arrive = func.build(head, opcode).def(Reg::physical(RDI), GPR).finish();
+        let save = func
+            .build(head, opcode)
+            .def(Reg::physical(RBX), GPR)
+            .uses(Reg::physical(RDI), GPR)
+            .finish();
+        let call = func.build(head, opcode).def(Reg::physical(RDI), GPR).finish();
+        *func.succs_mut(head) = vec![BlockCall::to(tail)];
+        let read = func.build(tail, opcode).uses(Reg::physical(RBX), GPR).finish();
+        let at = |at: usize, inst| rucc_asm::Row { at, span: Span::DUMMY, inst: Some(inst) };
+        let rows = [
+            rucc_asm::Row { at: 0, span: Span::DUMMY, inst: None },
+            at(0, push),
+            at(1, arrive),
+            at(1, save),
+            at(4, call),
+            at(9, read),
+        ];
+        // The instruction a parameter arrives through encodes to nothing and does not end it, and
+        // the call that writes the register does, from where the call starts.
+        assert_eq!(arrival(12, &rows, &func, RDI, GPR), 4);
+        // A register nothing writes holds its parameter to the end of the entry block.
+        assert_eq!(arrival(12, &rows, &func, RSI, GPR), 9);
     }
 
     /// A line table row at `at` built for the source bytes `lo` to `hi`.

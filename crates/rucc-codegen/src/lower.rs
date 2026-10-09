@@ -8238,6 +8238,14 @@ impl<'a> Lowering<'a> {
         for (&param, reg) in params.iter().zip(&arrived.regs) {
             self.regs[param.index()] = Some(*reg);
         }
+        // And which register each declaration arrived in, for a debugger stopped before the
+        // moves out of the argument registers have run. See [`mir::Func::arrived`].
+        for &(index, reg, class) in &arrived.held {
+            let Some(&param) = params.get(index) else { continue };
+            for decl in self.source.value_decls(param) {
+                self.out.arrived.push((decl, mir::Where::Reg { reg, class }));
+            }
+        }
         if applies {
             self.save_arguments(out, &arrived);
         }
