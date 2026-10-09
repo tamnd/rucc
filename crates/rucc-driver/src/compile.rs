@@ -1454,6 +1454,9 @@ fn generate(
         // instruction that wants it rather than into a register first. See
         // `rucc_codegen::copies::reloads`.
         reloads: opts.opt_level.runs_optimizer(),
+        // On at every level above `-O0`, where gcc takes the address of an array read in a loop
+        // once in front of the loop. See `rucc_codegen::hoist`.
+        hold: opts.opt_level.runs_optimizer(),
         // On from `-O2`, which is where gcc turns `-fschedule-insns2` on and what
         // `spec/optimizer/38-scheduling-and-layout.md` section 38.6 asks for. Not at `-O1`,
         // because a schedule is a whole dependence graph per block and `-O1` is the level whose

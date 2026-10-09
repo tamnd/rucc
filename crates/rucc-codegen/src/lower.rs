@@ -98,6 +98,7 @@ use crate::abi::{self, Missing, Refused};
 use crate::coverage::Fired;
 use crate::elsewhere::{Elsewhere, Slot};
 use crate::frame::{Layout, Local};
+use crate::hoist::Hoisted;
 use crate::select::{Match, Piece, Pointer, Reach, Rule, Selector};
 use crate::term::{MAX_ARGS, PLAIN, Plan, Shown, Term, Terms};
 use crate::varargs;
@@ -1456,12 +1457,16 @@ pub fn func(
     conv: &'static CallRegs,
     elsewhere: &Elsewhere,
 ) -> Result<Lowered, Unsupported> {
-    func_for(source, names, selector, conv, elsewhere, true)
+    func_for(source, names, selector, conv, elsewhere, true, None)
 }
 
 /// [`func`], for a build that says whether it writes debugging information. Without it the walk
 /// leaves out which value each declaration holds on the way into each block, since that is read
 /// only for the debugging information.
+///
+/// `hold` is how many general purpose registers the allocator hands out, when the address of a name
+/// read with an index in a loop is to be taken once in front of the loop rather than on every trip,
+/// and nothing when it is not. See [`crate::hoist`].
 ///
 /// # Errors
 ///
@@ -1473,8 +1478,9 @@ pub fn func_for(
     conv: &'static CallRegs,
     elsewhere: &Elsewhere,
     debug: bool,
+    hold: Option<u32>,
 ) -> Result<Lowered, Unsupported> {
-    Lowering::new(source, names, selector, conv, elsewhere, debug).run()
+    Lowering::new(source, names, selector, conv, elsewhere, debug, hold).run()
 }
 
 /// What the matcher settled on for one block, indexed the way the block's instructions are.
@@ -1542,6 +1548,15 @@ struct Lowering<'a> {
     uses: Vec<u32>,
     /// The block being filled.
     at: Option<mir::Block>,
+    /// The IR block being filled, which is the one [`Self::at`] came from.
+    filling: Option<Block>,
+    /// How many general purpose registers the allocator hands out, when an address may be held
+    /// across a loop at all. See [`crate::hoist`].
+    hold: Option<u32>,
+    /// The addresses of names held across a loop, once the walk has worked them out.
+    hoisted: Option<Hoisted>,
+    /// The register each address held across a loop was taken into, in front of the loop.
+    held_regs: Map<Value, mir::Reg>,
     /// The machine IR block each IR block became.
     blocks: Vec<Option<mir::Block>>,
     /// The class an address is in, which is the general purpose one and is not a question: every
@@ -1728,6 +1743,7 @@ impl<'a> Lowering<'a> {
         conv: &'static CallRegs,
         elsewhere: &'a Elsewhere,
         debug: bool,
+        hold: Option<u32>,
     ) -> Self {
         let counts = source.counts();
         let name = source.name;
@@ -1765,6 +1781,10 @@ impl<'a> Lowering<'a> {
             blocks: vec![None; counts.blocks],
             uses,
             at: None,
+            filling: None,
+            hold,
+            hoisted: None,
+            held_regs: Map::default(),
             gpr: selector.gpr,
             selector,
             conv,
@@ -1812,6 +1832,17 @@ impl<'a> Lowering<'a> {
         }
         self.counts = self.only_counts();
         (self.broadcasts, self.beneath) = self.broadcast_chains();
+        if let Some(room) = self.hold {
+            let names: Vec<Value> = self
+                .source
+                .blocks()
+                .flat_map(|block| self.source.insts(block))
+                .filter(|&inst| self.source[inst].opcode == Opcode::GlobalAddr)
+                .filter_map(|inst| self.source[inst].first_result)
+                .filter(|&value| matches!(self.rebuilt(value), Some(Rebuilt::Name(_))))
+                .collect();
+            self.hoisted = Hoisted::of(self.source, &names, room);
+        }
         // Every block before any of them is filled, because a block that jumps forward has to
         // name the block it jumps to and a machine IR block is named by a handle rather than by
         // the IR block it came from.
@@ -2053,6 +2084,7 @@ impl<'a> Lowering<'a> {
     fn block(&mut self, block: Block) -> Result<(), Unsupported> {
         let out = self.out_block(block);
         self.at = Some(out);
+        self.filling = Some(block);
         if self.source.entry() == Some(block) {
             self.arrive(block, out)?;
         } else {
@@ -2108,11 +2140,15 @@ impl<'a> Lowering<'a> {
         let wanted: Set<Option<Inst>> =
             self.marks.get(&block).into_iter().flatten().map(|&(after, _)| after).collect();
         let mut reached: Vec<(Option<Inst>, mir::Block, Option<mir::Inst>)> = Vec::new();
+        let last = self.source.terminator(block);
         for (index, (&inst, matched)) in insts.iter().zip(found).enumerate() {
             let before = index.checked_sub(1).map(|index| insts[index]);
             if wanted.contains(&before) {
                 let at = self.at.unwrap_or(out);
                 reached.push((before, at, self.out.terminator(at)));
+            }
+            if last == Some(inst) {
+                self.take_ahead(block)?;
             }
             if folded.contains(&inst)
                 || self.writes_nothing(inst)
@@ -9088,6 +9124,14 @@ impl<'a> Lowering<'a> {
     /// The address of a local and the address of a name are the same kind of value, and
     /// [`Rebuilt`] is the list and the reasons.
     fn reg_of(&mut self, value: Value) -> Result<mir::Reg, Unsupported> {
+        let held = self
+            .filling
+            .zip(self.hoisted.as_ref())
+            .and_then(|(block, hoisted)| hoisted.shared(value, block))
+            .and_then(|first| self.held_regs.get(&first).copied());
+        if let Some(reg) = held {
+            return Ok(reg);
+        }
         let rebuilt = self.rebuilt(value);
         let here = self.at.expect("a block is being filled");
         if let Some(reg) = self.regs[value.index()] {
@@ -9138,6 +9182,26 @@ impl<'a> Lowering<'a> {
             }
             None => Ok(self.new_reg(value)),
         }
+    }
+
+    /// Takes the addresses held across the loops this block is in front of, at its end, so that each
+    /// is in a register for the whole of the loop and nothing in the loop takes it again. See
+    /// [`crate::hoist`].
+    ///
+    /// The register is kept to one side rather than as the value's, since a reader outside the
+    /// loop writes its own as it would have, and [`Self::reg_of`] answers with this one only inside.
+    fn take_ahead(&mut self, block: Block) -> Result<(), Unsupported> {
+        let Some(hoisted) = &self.hoisted else { return Ok(()) };
+        let ahead = hoisted.ahead(block).to_vec();
+        for value in ahead {
+            let Def::Result { inst, .. } = self.source[value].def else { continue };
+            self.regs[value.index()] = None;
+            self.address_of(inst)?;
+            let reg = self.regs[value.index()].expect("an address is written into a register");
+            self.regs[value.index()] = None;
+            self.held_regs.insert(value, reg);
+        }
+        Ok(())
     }
 
     /// Whether a value is one [`Self::reg_of`] writes again where it is read rather than keeping
