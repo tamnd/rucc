@@ -7,6 +7,7 @@ All notable changes are recorded here. The format follows [Keep a Changelog](htt
 ### Changed
 
 - The dominance frontiers are laid out end to end in one allocation and each pair is written once, so lz4hc.c at -O2 runs 0.7 percent fewer instructions (#3438).
+- The memory walk in reload keeps the incoming values of each join and whether each def stops it, so lz4hc.c at -O2 runs 5 percent fewer instructions with the same output (#3445).
 
 ### Added
 

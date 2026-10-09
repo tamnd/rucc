@@ -537,6 +537,18 @@ pub struct Walk<'a> {
     /// The versions the walk under way has been to. Emptied for each walk rather than made again,
     /// so the room it grew to is used again.
     seen: Seen,
+    /// Where in `ways` what arrives at each memory parameter a walk has been to is, by value
+    /// number, worked out the first time. The function does not change while the walk borrows it,
+    /// so this is good for every load asked about.
+    arrivals: Vec<Option<(u32, u32)>>,
+    /// What arrives at those parameters laid end to end, in the order of the graph's predecessors
+    /// and of the edges out of each, with `None` for an edge that carries nothing for it.
+    ways: Vec<Option<Value>>,
+    /// Whether each def [`Self::settled`] has been to for the load it is asked about stops it,
+    /// which is the same answer every time it arrives there. Emptied for each load.
+    stopped: Map<Inst, bool>,
+    /// The joins [`Self::settle`] is still working out, by value number.
+    open: Vec<bool>,
 }
 
 /// A set of versions of memory, hashed with [`rucc_base::hash::Mix`] rather than SipHash.
@@ -564,6 +576,10 @@ impl<'a> Walk<'a> {
             limit,
             counts: Counts::default(),
             seen: Seen::default(),
+            arrivals: vec![None; func.counts().values],
+            ways: Vec::new(),
+            stopped: Map::default(),
+            open: vec![false; func.counts().values],
         }
     }
 
@@ -642,8 +658,8 @@ impl<'a> Walk<'a> {
         let reference = self.alias.reads(load)?;
         let version = self.func.mem_in(load)?;
         let mut budget = self.limit;
-        let mut open = Vec::new();
-        Some(self.settle(&reference, version, &mut budget, &mut open))
+        self.stopped.clear();
+        Some(self.settle(&reference, version, &mut budget))
     }
 
     /// One step of [`Self::settled`].
@@ -652,57 +668,47 @@ impl<'a> Walk<'a> {
     /// its ways in answered. So a loop whose body writes nothing relevant settles on the version
     /// before the loop, and one that writes something stops at its own header, since a way in that
     /// came back as some other version is a disagreement.
-    fn settle(
-        &mut self,
-        reference: &Access,
-        version: Value,
-        budget: &mut u32,
-        open: &mut Vec<Value>,
-    ) -> Value {
+    ///
+    /// The walk goes back over the same joins and defs once for every way down to them, and on
+    /// lz4hc.c at `-O2` it took fourteen steps for every version it saw. Each step asks the same
+    /// question it asked the last time it was there, so the answers are kept, and the steps and
+    /// the budget they spend are the ones there were. tamnd/rucc#3052.
+    fn settle(&mut self, reference: &Access, version: Value, budget: &mut u32) -> Value {
         let mut version = version;
         loop {
-            if open.contains(&version) || *budget == 0 {
+            if self.open[version.index()] || *budget == 0 {
                 return version;
             }
             *budget -= 1;
             match self.func[version].def {
                 Def::Param { block, index } => {
-                    open.push(version);
+                    self.open[version.index()] = true;
                     let mut agreed = None;
                     let mut split = false;
-                    let func = self.func;
-                    'preds: for at in 0..self.cfg.predecessors(block).len() {
-                        let pred = self.cfg.predecessors(block)[at];
-                        let Some(terminator) = func.terminator(pred) else { continue };
-                        for call in func.successors(terminator) {
-                            if call.block != block {
-                                continue;
-                            }
-                            let Some(&incoming) = func[call.args].get(index as usize) else {
-                                split = true;
-                                break 'preds;
-                            };
-                            let found = self.settle(reference, incoming, budget, open);
-                            if found == version {
-                                continue;
-                            }
-                            if agreed.is_some_and(|agreed| agreed != found) {
-                                split = true;
-                                break 'preds;
-                            }
-                            agreed = Some(found);
+                    let (start, end) = self.arrivals(version, block, index);
+                    for at in start..end {
+                        let Some(incoming) = self.ways[at] else {
+                            split = true;
+                            break;
+                        };
+                        let found = self.settle(reference, incoming, budget);
+                        if found == version {
+                            continue;
                         }
+                        if agreed.is_some_and(|agreed| agreed != found) {
+                            split = true;
+                            break;
+                        }
+                        agreed = Some(found);
                     }
-                    open.pop();
+                    self.open[version.index()] = false;
                     return match agreed {
                         Some(agreed) if !split => agreed,
                         _ => version,
                     };
                 }
                 Def::Result { inst, .. } => {
-                    if self.func[inst].opcode == Opcode::MemEntry
-                        || self.wrote(reference, inst).is_some()
-                    {
+                    if self.stops(reference, inst) {
                         return version;
                     }
                     let Some(next) = self.func.mem_in(inst) else { return version };
@@ -734,26 +740,15 @@ impl<'a> Walk<'a> {
             // that only one predecessor made.
             Def::Param { block, index } => {
                 let mut answer = None;
-                let func = self.func;
                 // By place rather than by copying the list out, since the walk below needs the
                 // walker and a phi is the step it takes most often.
-                for at in 0..self.cfg.predecessors(block).len() {
-                    let pred = self.cfg.predecessors(block)[at];
-                    let Some(terminator) = func.terminator(pred) else {
-                        continue;
-                    };
-                    for call in func.successors(terminator) {
-                        if call.block != block {
-                            continue;
-                        }
-                        let Some(&incoming) = self.func[call.args].get(index as usize) else {
-                            continue;
-                        };
-                        let one = self.back(reference, incoming, budget, seen, translate);
-                        answer = combine(answer, one);
-                        if answer == Some(Clobber::Unknown) {
-                            return answer;
-                        }
+                let (start, end) = self.arrivals(version, block, index);
+                for at in start..end {
+                    let Some(incoming) = self.ways[at] else { continue };
+                    let one = self.back(reference, incoming, budget, seen, translate);
+                    answer = combine(answer, one);
+                    if answer == Some(Clobber::Unknown) {
+                        return answer;
                     }
                 }
                 answer
@@ -794,6 +789,38 @@ impl<'a> Walk<'a> {
                 self.back(past, next, budget, seen, translate)
             }
         }
+    }
+
+    /// Where in `ways` what arrives at the memory parameter `version` is, which is parameter
+    /// `index` of `block`.
+    fn arrivals(&mut self, version: Value, block: Block, index: u32) -> (usize, usize) {
+        if let Some((start, end)) = self.arrivals[version.index()] {
+            return (start as usize, end as usize);
+        }
+        let start = self.ways.len();
+        for &pred in self.cfg.predecessors(block) {
+            let Some(terminator) = self.func.terminator(pred) else { continue };
+            for call in self.func.successors(terminator) {
+                if call.block == block {
+                    self.ways.push(self.func[call.args].get(index as usize).copied());
+                }
+            }
+        }
+        let span = (start, self.ways.len());
+        let narrow = |at: usize| u32::try_from(at).expect("fewer ways than a u32 counts");
+        self.arrivals[version.index()] = Some((narrow(span.0), narrow(span.1)));
+        span
+    }
+
+    /// Whether [`Self::settle`] stops at this def for the load it is asked about.
+    fn stops(&mut self, reference: &Access, inst: Inst) -> bool {
+        if let Some(&stops) = self.stopped.get(&inst) {
+            return stops;
+        }
+        let stops =
+            self.func[inst].opcode == Opcode::MemEntry || self.wrote(reference, inst).is_some();
+        self.stopped.insert(inst, stops);
+        stops
     }
 
     /// Whether this def wrote the reference, and how much of it.
