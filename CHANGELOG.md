@@ -25,6 +25,7 @@ All notable changes are recorded here. The format follows [Keep a Changelog](htt
 - An argument passed on the stack that the function never reads is no longer loaded. A `u64` on i386 whose high word is not wanted reads only its low word, and a callback that ignores an argument under `-mregparm=3` reads nothing for it (#3510).
 - The heap inliner grows its bound on a caller's frame by what the callee's own frame adds rather than every local the copy made, which takes an eighth off the compile of zstd_compress.c at `-O2` (#3511).
 - `__builtin_clz` and `__builtin_ctz` on i386 are `bsrl` or `bsfl` and a `cmov` for zero, as they already were on x86-64, where they were a dozen shifts and masks and a multiply. A `long long` count is one search per word and a `cmov` that picks one, down from about seventy instructions to seventeen. With `-mpopcnt`, `-mlzcnt` or `-mbmi`, i386 now uses `popcntl`, `lzcntl` and `tzcntl` too (#3512).
+- When a two address instruction reads a spilled value as the source it writes over, the value is now loaded straight into the answer's register. Before, it went into a scratch register first and was then copied over. On i386 that cuts zstd's huf_decompress.c from 12353 instructions to 12037 and its zstd_decompress_block.c from 17210 to 16944, and x86-64 gets smaller too (#3514).
 
 ### Added
 

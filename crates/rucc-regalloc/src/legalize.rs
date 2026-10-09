@@ -216,7 +216,10 @@ fn legalize(
                     None if operand.role.is_def() => {
                         taken.written_into(operand.class, &mut scratch)
                     }
-                    None => taken.read_into(operand.class, &mut scratch),
+                    None => match answer(&func[list], &places, index, &scratch.claimed) {
+                        Some(at) => at,
+                        None => taken.read_into(operand.class, &mut scratch),
+                    },
                 };
                 push(
                     &mut before,
@@ -588,6 +591,31 @@ impl<'a> Scratch<'a> {
     }
 }
 
+/// The register the answer tied to that operand lives in, when nothing else the instruction reads
+/// is there, so the spilled value it reads can be read straight into it.
+///
+/// The instruction writes its answer over the operand, so the answer's register is the one the
+/// value has to end up in anyway. Read into a scratch register it is copied there in front of the
+/// instruction, which is a load and a move for what one load does. The assignment only gave the
+/// answer that register because whatever was in it is not wanted past the instruction, and it is
+/// free from in front of the instruction as long as no other operand arrives in it.
+fn answer(
+    operands: &[Operand],
+    places: &[Place],
+    index: usize,
+    claimed: &Claimed,
+) -> Option<PhysReg> {
+    let source = operands[index];
+    operands.iter().zip(places).find_map(|(operand, place)| {
+        let Constraint::Reuse(other) = operand.constraint else { return None };
+        let Place::Reg(at) = *place else { return None };
+        (usize::from(other) == index
+            && operand.class == source.class
+            && !claimed.clashes(Role::Use, source.class, at))
+        .then_some(at)
+    })
+}
+
 /// Files a move in front of the instruction or behind it, and turns it round for a value the
 /// instruction writes, since that one travels the other way.
 fn push(before: &mut Moves, after: &mut Moves, operand: &Operand, mov: Move<Place>) {
@@ -716,6 +744,50 @@ mod tests {
         let legal = legal(&func, &mut assignment, inst);
         assert_eq!(regs(&legal), [RAX, RCX]);
         assert_eq!(legal.before, [(Move::new(Place::Reg(RAX), Place::Reg(RCX)), GPR)]);
+    }
+
+    #[test]
+    fn a_two_address_source_on_the_stack_is_read_into_the_answer() {
+        let (mut func, opcode, block) = func();
+        let source = func.new_vreg(GPR);
+        let answer = func.new_vreg(GPR);
+        let inst = func
+            .build(block, opcode)
+            .operand(Operand::write(answer, GPR).with(Constraint::Reuse(1)))
+            .uses(source, GPR)
+            .finish();
+        let mut assignment = Assignment::empty(func.vregs());
+        let slot = assignment.take_slot(GPR);
+        assignment.put(source, Place::Slot(slot));
+        assignment.put(answer, Place::Reg(RAX));
+
+        let legal = legal(&func, &mut assignment, inst);
+        assert_eq!(regs(&legal), [RAX, RAX]);
+        assert_eq!(legal.before, [(Move::new(Place::Reg(RAX), Place::Slot(slot)), GPR)]);
+    }
+
+    #[test]
+    fn a_two_address_source_goes_through_scratch_when_another_operand_is_in_the_answer() {
+        let (mut func, opcode, block) = func();
+        let source = func.new_vreg(GPR);
+        let other = func.new_vreg(GPR);
+        let answer = func.new_vreg(GPR);
+        let inst = func
+            .build(block, opcode)
+            .operand(Operand::write(answer, GPR).with(Constraint::Reuse(1)))
+            .uses(source, GPR)
+            .uses(other, GPR)
+            .finish();
+        let mut assignment = Assignment::empty(func.vregs());
+        let slot = assignment.take_slot(GPR);
+        assignment.put(source, Place::Slot(slot));
+        assignment.put(other, Place::Reg(RAX));
+        assignment.put(answer, Place::Reg(RAX));
+
+        let legal = legal(&func, &mut assignment, inst);
+        let scratch = env().scratch(GPR)[0];
+        assert_eq!(regs(&legal), [RAX, scratch, RAX]);
+        assert_eq!(legal.before[0], (Move::new(Place::Reg(scratch), Place::Slot(slot)), GPR));
     }
 
     #[test]
