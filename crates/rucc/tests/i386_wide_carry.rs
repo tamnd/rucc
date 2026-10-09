@@ -4,7 +4,8 @@
 //! two `bswapl` now as well, where it was forty eight shifts and masks, and a negation is `negl`,
 //! `adcl $0` and `negl`, and `s64 < 0` asks the high word alone. A shift by a constant fills the
 //! word it moves bits into with `shldl` or `shrdl`, where it was two shifts and an or, and a shift
-//! by a count in a register does the same with the count in `cl`.
+//! by a count in a register does the same with the count in `cl` and picks the words with two
+//! `cmov`s on one test.
 
 use std::process::Command;
 
@@ -171,7 +172,8 @@ fn a_long_long_shift_by_a_constant_fills_a_word_from_the_other() {
 }
 
 /// gcc's `shldl %cl` for the word the bits cross into, and the count used as it is, since the
-/// machine masks a count to the word before it shifts.
+/// machine masks a count to the word before it shifts. Whether the count reached a whole word is
+/// asked after the shifts, so the moves read the answer from the flags rather than from a byte.
 #[test]
 fn a_long_long_shift_by_a_register_fills_a_word_from_the_other() {
     for level in ["-O1", "-O2", "-Os"] {
@@ -179,6 +181,7 @@ fn a_long_long_shift_by_a_register_fills_a_word_from_the_other() {
         assert_eq!(text.matches("\tshldl\t%cl,").count(), 1, "{level}\n{text}");
         assert_eq!(text.matches("\tshrdl\t%cl,").count(), 2, "{level}\n{text}");
         assert!(!text.contains("\tandl\t$31,"), "{level}: the count is still masked\n{text}");
+        assert!(!text.contains("\tset"), "{level}: the word test is still a byte\n{text}");
         assert!(!text.contains("\torl\t"), "{level}\n{text}");
         let text = assembly("quad-var-shift", "x86_64-unknown-linux-gnu", QUAD_VAR_SHIFT, level);
         assert_eq!(text.matches("\tshldq\t%cl,").count(), 1, "{level}\n{text}");

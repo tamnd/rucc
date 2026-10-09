@@ -16,6 +16,7 @@ All notable changes are recorded here. The format follows [Keep a Changelog](htt
 - A `long long` compared with a constant whose low word is zero or all ones, as in `x < 0`, `x >= 0` or `x <= 0xffffffff`, is one compare of the high words on i386, and the same for `__int128` on x86-64. It was a compare of each half, a compare of the high halves for equality and two bits put together (#3491).
 - A shift of a `long long` by a constant on i386 fills the word the bits move into with `shldl` or `shrdl`, as gcc does, where it was a copy, two shifts and an or. A rotate is one of them per word, and a `__int128` shift on x86-64 is `shldq` or `shrdq` the same way (#3493).
 - A `long long` shift by a count in a register on i386, and a `__int128` one on x86-64, fills the word the bits cross into with `shld` or `shrd` by `%cl`, and the count is no longer masked first, since the machine masks it. A shift of a word by a count masked to the word drops the mask as well (#3498).
+- A shift of a `long long` on i386, or a `__int128` on x86-64, by a count in a register asks whether the count reached a whole word after the shifts rather than before them, so both words are picked with `cmov` on one test instead of a byte kept through `setne` (#3499).
 
 ### Added
 

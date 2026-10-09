@@ -1488,8 +1488,12 @@ fn shifted(func: &mut Func, width: Width, halves: &mut Halves, inst: Inst, opcod
     let one = ahead_const(func, width, inst, 1);
     let zero = ahead_const(func, width, inst, 0);
     let bit = ahead_const(func, width, inst, i128::from(width.half));
-    let reach = ahead(func, width, inst, Opcode::And, &[count, bit]);
-    let whole = compared(func, inst, IntPred::Ne, reach, zero);
+    // Asked after the shifts rather than before them, next to the selects that read it, so that
+    // the shifts by `cl` are not between the question and the moves on its answer.
+    let whole = |func: &mut Func| {
+        let reach = ahead(func, width, inst, Opcode::And, &[count, bit]);
+        compared(func, inst, IntPred::Ne, reach, zero)
+    };
 
     let (low, high) = if opcode == Opcode::Shl {
         let moved = ahead(func, width, inst, Opcode::Shl, &[a_low, places]);
@@ -1497,6 +1501,7 @@ fn shifted(func: &mut Func, width: Width, halves: &mut Halves, inst: Inst, opcod
         let across = ahead(func, width, inst, Opcode::LShr, &[edge, back]);
         let above = ahead(func, width, inst, Opcode::Shl, &[a_high, places]);
         let joined = ahead(func, width, inst, Opcode::Or, &[above, across]);
+        let whole = whole(func);
         let low = ahead(func, width, inst, Opcode::Select, &[whole, zero, moved]);
         let high = ahead(func, width, inst, Opcode::Select, &[whole, moved, joined]);
         (low, high)
@@ -1513,6 +1518,7 @@ fn shifted(func: &mut Func, width: Width, halves: &mut Halves, inst: Inst, opcod
         } else {
             zero
         };
+        let whole = whole(func);
         let low = ahead(func, width, inst, Opcode::Select, &[whole, moved, joined]);
         let high = ahead(func, width, inst, Opcode::Select, &[whole, spent, moved]);
         (low, high)
