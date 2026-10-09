@@ -1796,6 +1796,14 @@ fn widened(func: &mut Func, inst: Inst, value: Value) -> Value {
 /// at 5, which is gcc's plan, and a block narrower than a word starts at the widest power of two
 /// that fits in it. Writing the overlap twice is harmless for a copy and a fill, whose two sides
 /// do not overlap, and for a move, which reads all of it before writing any.
+///
+/// A tail that is itself a power of two is one move of its own width instead, which is one move
+/// either way and is what gcc writes. The overlapping word costs something the count does not
+/// show: it reads bytes that two different stores wrote, and a load that spans two stores waits
+/// for both to reach the cache rather than taking its bytes from the store buffer. Postgres' item
+/// pointer is six bytes written as three two byte fields, and copied as four bytes at 0 and four
+/// at 2 the second load straddled two of them on every tuple a scan stored in a slot, where four
+/// at 0 and two at 4 reads the last field from the one store that wrote it (tamnd/rucc#1994).
 fn chunks(info: MemInfo, word: u32, unaligned: bool) -> Option<Vec<(u64, u32)>> {
     if unaligned { overlapped(info.size, word) } else { plan(info.size, info.align, word) }
 }
@@ -1815,7 +1823,10 @@ fn overlapped(size: u64, word: u32) -> Option<Vec<(u64, u32)>> {
         plan.push((at, u32::try_from(width).ok()?));
         at += width;
     }
-    if at < size {
+    let tail = size - at;
+    if tail.is_power_of_two() {
+        plan.push((at, u32::try_from(tail).ok()?));
+    } else if tail > 0 {
         plan.push((size - width, u32::try_from(width).ok()?));
     }
     (plan.len() <= UNROLL).then_some(plan)
@@ -2609,16 +2620,20 @@ mod tests {
     }
 
     /// Where the machine moves a word at any address, the alignment does not narrow it, and a tail
-    /// is one more word that overlaps the one in front of it.
+    /// is one more word that overlaps the one in front of it, unless the tail is a move of its own.
     #[test]
     fn an_unaligned_machine_copies_words_and_overlaps_the_tail() {
         let plan = |size| chunks(access(size, 1), 8, true);
         assert_eq!(plan(13), Some(vec![(0, 8), (5, 8)]));
         assert_eq!(plan(16), Some(vec![(0, 8), (8, 8)]));
         assert_eq!(plan(7), Some(vec![(0, 4), (3, 4)]));
-        assert_eq!(plan(3), Some(vec![(0, 2), (1, 2)]));
+        assert_eq!(plan(3), Some(vec![(0, 2), (2, 1)]));
         assert_eq!(plan(1), Some(vec![(0, 1)]));
         assert_eq!(plan(0), Some(vec![]));
+        assert_eq!(plan(12), Some(vec![(0, 8), (8, 4)]));
+        assert_eq!(plan(10), Some(vec![(0, 8), (8, 2)]));
+        assert_eq!(plan(6), Some(vec![(0, 4), (4, 2)]));
+        assert_eq!(plan(5), Some(vec![(0, 4), (4, 1)]));
         assert_eq!(plan(64).map(|plan| plan.len()), Some(8));
         assert_eq!(plan(65).map(|plan| plan.len()), Some(9));
     }
@@ -2648,8 +2663,8 @@ mod tests {
         let text = printed(&func, &mut names);
         assert!(!text.contains("memcpy"), "{text}");
         let made = |number: &str| text.lines().any(|line| line.trim_end().ends_with(number));
-        assert!(made("iconst.i64 6"), "the source's second word is six past it: {text}");
-        assert!(made("iconst.i64 50"), "and the destination's is fifty: {text}");
+        assert!(made("iconst.i64 8"), "the source's second word is eight past it: {text}");
+        assert!(made("iconst.i64 52"), "and the destination's is fifty two: {text}");
         assert_eq!(text.matches("ptr_add").count(), 4, "{text}");
         valid(&func, &mut names);
     }
