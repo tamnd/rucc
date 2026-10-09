@@ -150,7 +150,7 @@ pub struct Dynamic {
     /// The local call, for one that is in this library and nowhere else.
     pub local: &'static str,
     /// The call through a descriptor, for either model, when the machine has one that is not
-    /// already `general`. See [`crate::Elsewhere::descriptors`].
+    /// already `general`. See [`crate::elsewhere::Elsewhere::descriptor_calls`].
     pub descriptor: Option<&'static str>,
 }
 
