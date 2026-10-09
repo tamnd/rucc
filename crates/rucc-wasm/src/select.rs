@@ -1200,9 +1200,7 @@ impl Lower<'_, '_> {
                 (None, None) => {}
             }
         }
-        if opcode == Opcode::Call
-            && let Some(&load) = self.absorbed.get(&inst)
-        {
+        if let Some(&load) = self.absorbed.get(&inst).filter(|_| opcode == Opcode::Call) {
             return self.inputs(load);
         }
         if opcode == Opcode::Call && self.shuffle_builtin(inst) {
@@ -2114,8 +2112,8 @@ impl Lower<'_, '_> {
             return Ok(());
         }
         // The answer of `all_true` or `any_true` is 0 or 1 already, as clang knows.
-        if let Some((value, IntPred::Ne)) = self.zero_compare(inst)
-            && self.boolean_builtin(value)
+        if let Some((value, IntPred::Ne)) =
+            self.zero_compare(inst).filter(|&(value, _)| self.boolean_builtin(value))
         {
             self.push(value)?;
             self.set(results[0]);

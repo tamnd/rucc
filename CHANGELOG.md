@@ -44,6 +44,7 @@ All notable changes are recorded here. The format follows [Keep a Changelog](htt
 
 ### Fixed
 
+- The let chains that came in after the last release gate are gone, so the `chains` step of the gate passes again. The workspace promises Rust 1.85, and a let chain needs 1.88 (#3517).
 - The release check of thresholds passes again. The `-fsanitize-coverage=trace-cmp` pass selected the word type of an operand with a comparison against a bare literal, and the check refused it (#3497).
 - With `-msimd128`, a float vector local that is read before it is written, or after a `memset`, no longer stops rucc with "an integer immediate needs an integer type". sroa makes its byte pattern as a splat of integer lanes and a bitcast. `wasm_f32x4_relaxed_nmadd` at -O2 gave the crash (#3480).
 - A call to a maths function such as `fabs` only carries the `library` mark when it has the library function's type, so `int fabs(int)` is the program's own function again, as gcc reads it. The usage text is back under one screen, with `-ftls-model=` sharing the line of `-fvisibility=` (#3471).
