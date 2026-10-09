@@ -416,6 +416,8 @@ impl Checker<'_> {
         };
         let id = self.merge(declared);
         self.record_section(id, section);
+        let tags = self.btf_decl_tags(&[specs.attrs]);
+        self.tast.record_btf_decl_tags(id, tags);
         // A function `ifunc` made an indirect function has its body in whatever the resolver
         // picks, so a body here defines it a second time, which is what gcc calls it, whether the
         // attribute is on this definition or on a declaration above it.
@@ -974,6 +976,8 @@ impl Checker<'_> {
         };
         let id = self.merge(declared);
         self.record_section(id, section);
+        let tags = self.btf_decl_tags(&[item.attrs, specs.attrs]);
+        self.tast.record_btf_decl_tags(id, tags);
         // Kept for the debug information, which names the typedef where the program did.
         if let Some((name, of)) = spelled {
             self.tast.record_spelling(id, name, of);

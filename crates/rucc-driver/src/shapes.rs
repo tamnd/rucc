@@ -150,6 +150,9 @@ pub(crate) struct Known {
     pub params: Vec<Option<u32>>,
     /// Whether anything outside the unit can see it.
     pub external: bool,
+    /// The strings of its `btf_decl_tag`s, over all its declarations, in the order gcc chains
+    /// them.
+    pub tags: Vec<Vec<u8>>,
 }
 
 /// What is known about one local the program declared.
@@ -169,6 +172,8 @@ pub(crate) struct Named {
     /// Which entry in [`Meaning::scopes`] it was declared in, and [`None`] for one written straight
     /// into the body of its function or into no function at all.
     pub scope: Option<usize>,
+    /// The strings of its `btf_decl_tag`s, in the order gcc chains them.
+    pub tags: Vec<Vec<u8>>,
 }
 
 /// What is known about one file-scope variable.
@@ -187,6 +192,9 @@ pub(crate) struct Held {
     pub ty: Option<usize>,
     /// Whether anything outside the unit can see it.
     pub external: bool,
+    /// The strings of its `btf_decl_tag`s, over all its declarations, in the order gcc chains
+    /// them.
+    pub tags: Vec<Vec<u8>>,
 }
 
 /// The types, the signatures and the file-scope variables of everything this unit defines.
@@ -245,6 +253,7 @@ pub(crate) fn collect(
                     sig: described.as_ref().map(|(sig, _)| sig.clone()),
                     params: described.map(|(_, params)| params).unwrap_or_default(),
                     external,
+                    tags: tast.btf_decl_tags(id).to_vec(),
                 };
                 funcs.insert(symbol, known);
             }
@@ -260,6 +269,7 @@ pub(crate) fn collect(
                     line: at.line,
                     ty: walk.declared(id, decl.ty),
                     external,
+                    tags: tast.btf_decl_tags(id).to_vec(),
                 };
                 objects.insert(symbol, held);
             }
@@ -299,7 +309,9 @@ pub(crate) fn collect(
         let ty = walk.declared(id, decl.ty);
         let name = walk.spelled(name);
         let scope = nests.which.get(&raw).copied();
-        locals.insert(raw, Named { name, file: at.name.to_owned(), line: at.line, ty, scope });
+        let tags = tast.btf_decl_tags(id).to_vec();
+        let file = at.name.to_owned();
+        locals.insert(raw, Named { name, file, line: at.line, ty, scope, tags });
     }
     // A typedef name nothing above was written with gets no entry, which is what gcc does. The
     // kernel's BTF is pahole's reading of this, and a name only one compiler describes is a
@@ -498,7 +510,9 @@ impl Walk<'_> {
                 None => self.told(ty)?,
             };
             let name = written.get(index).and_then(|&param| tast[param].name);
-            params.push(Param { name: name.map(|name| self.spelled(name)), ty, spot: None });
+            let name = name.map(|name| self.spelled(name));
+            let tags = written.get(index).map(|&param| tast.btf_decl_tags(param).to_vec());
+            params.push(Param { name, ty, spot: None, tags: tags.unwrap_or_default() });
             declared.push(written.get(index).map(|param| param.raw()));
         }
         let sig =
@@ -863,7 +877,7 @@ impl Walk<'_> {
             }?;
             // No place, because this is a function type rather than a function: nothing here is
             // code and there is no frame for a parameter of it to be in.
-            params.push(Param { name: None, ty, spot: None });
+            params.push(Param { name: None, ty, spot: None, tags: Vec::new() });
         }
         Some(Shape::Subroutine(Sig {
             returns,
@@ -926,7 +940,9 @@ impl Walk<'_> {
                 None => None,
             };
             let name = field.name.map(|name| self.spelled(name));
-            members.push(Member { name, ty, at: field.offset, bits });
+            let tags = field.name.map(|member| self.tast.member_tags(record, member).to_vec());
+            let tags = tags.unwrap_or_default();
+            members.push(Member { name, ty, at: field.offset, bits, tags });
         }
         if let Shape::Record { members: held, .. } = &mut self.out[at] {
             *held = Some(members);

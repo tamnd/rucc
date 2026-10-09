@@ -2091,6 +2091,7 @@ fn describe(
                 }),
                 spot: rucc_debug::Spot::Always(rucc_debug::Held::Frame(i64::from(at))),
                 scope: None,
+                tags: named.tags.clone(),
             });
         }
         // And the ones with no slot at all, which are the locals the front end kept in a value.
@@ -2109,6 +2110,7 @@ fn describe(
                 }),
                 spot: rucc_debug::Spot::Over(spans),
                 scope: None,
+                tags: named.tags.clone(),
             });
         }
         // And the scopes the locals were declared in, which is where a name declared in an inner
@@ -2131,6 +2133,7 @@ fn describe(
             locals,
             frame_local: None,
             scopes,
+            tags: known.map(|known| known.tags.clone()).unwrap_or_default(),
         });
     }
     // And the file-scope variables, from the objects the back end laid out rather than from the
@@ -2150,6 +2153,7 @@ fn describe(
                 line: held.line,
             }),
             external: held.external,
+            tags: held.tags.clone(),
         });
     }
     let unit = rucc_debug::Unit {
@@ -2335,6 +2339,7 @@ fn describe_wasm(
                 }),
                 spot,
                 scope: None,
+                tags: named.tags.clone(),
             });
         }
         let (scopes, at) = nests(&wants, &origin.meaning.scopes, u64::from(lines.len), &lines.rows);
@@ -2353,6 +2358,7 @@ fn describe_wasm(
             locals,
             frame_local: lines.frame,
             scopes,
+            tags: known.map(|known| known.tags.clone()).unwrap_or_default(),
         });
     }
     let mut globals = Vec::new();
@@ -2369,6 +2375,7 @@ fn describe_wasm(
                 line: held.line,
             }),
             external: held.external,
+            tags: held.tags.clone(),
         });
     }
     let unit = rucc_debug::Unit {

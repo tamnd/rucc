@@ -1317,6 +1317,10 @@ impl Checker<'_> {
             if let Some((name, of)) = named {
                 self.tast.record_spelling(decl, name, of);
             }
+            if let Some(specs) = param.specs {
+                let tags = self.btf_decl_tags(&[param.attrs, ast[specs].attrs]);
+                self.tast.record_btf_decl_tags(decl, tags);
+            }
             // Copied rather than taken, since they are a part of the declarator this prototype
             // is in as well.
             let inner = self.types.prototypes_since(mark);

@@ -32,7 +32,18 @@
 //! `DW_AT_type` is not a variable of type `void`, because there is no such thing, so it is a
 //! variable whose type was not recorded and the name and the address are still worth having.
 //!
+//! # Tags
+//!
+//! A `btf_decl_tag` on a function, a variable, a parameter or a member is a `DW_TAG_GNU_annotation`
+//! under the unit, named `btf_decl_tag` and holding the tag's string, and the entry it tags points
+//! at it with `DW_AT_GNU_annotation`. Several tags on one entry are a chain, the first the entry
+//! points at and each pointing at the next, and a chain is written once and shared by everything
+//! with the same tags, the way gcc writes them. These are gcc's own codes, which pahole reads into
+//! the BTF.
+//!
 //! [`Function::sig`]: crate::Function::sig
+
+use std::collections::HashMap;
 
 use crate::line::{Error, Function};
 use crate::shape::{
@@ -41,6 +52,54 @@ use crate::shape::{
 };
 
 use gimli::write::{AttributeValue, FileId, UnitEntryId};
+
+/// gcc's `DW_TAG_GNU_annotation`, one tag in a chain of them.
+const DW_TAG_GNU_ANNOTATION: gimli::DwTag = gimli::DwTag(0x6001);
+
+/// gcc's `DW_AT_GNU_annotation`, which points at the first tag of an entry's chain and, on a tag,
+/// at the next.
+const DW_AT_GNU_ANNOTATION: gimli::DwAt = gimli::DwAt(0x2139);
+
+/// What carries tags, as the entry it was written as and its tags.
+type Tagged<'a> = Vec<(UnitEntryId, &'a [Vec<u8>])>;
+
+/// The tags already written, by the string each holds and the tag it points at next, so that a
+/// chain is written once however many entries carry it.
+#[derive(Default)]
+struct Annotations {
+    made: HashMap<(Vec<u8>, Option<UnitEntryId>), UnitEntryId>,
+}
+
+impl Annotations {
+    /// Points the entry at the chain of these tags, written from its end so that each points at
+    /// the one after it, which is already there.
+    fn annotate(&mut self, dwarf: &mut gimli::write::DwarfUnit, at: UnitEntryId, tags: &[Vec<u8>]) {
+        let mut next = None;
+        for tag in tags.iter().rev() {
+            let key = (tag.clone(), next);
+            let id = match self.made.get(&key) {
+                Some(&id) => id,
+                None => {
+                    let root = dwarf.unit.root();
+                    let id = dwarf.unit.add(root, DW_TAG_GNU_ANNOTATION);
+                    title(dwarf, id, "btf_decl_tag");
+                    let value = AttributeValue::StringRef(dwarf.strings.add(tag.clone()));
+                    let entry = dwarf.unit.get_mut(id);
+                    entry.set(gimli::DW_AT_const_value, value);
+                    if let Some(next) = next {
+                        entry.set(DW_AT_GNU_ANNOTATION, AttributeValue::UnitRef(next));
+                    }
+                    self.made.insert(key, id);
+                    id
+                }
+            };
+            next = Some(id);
+        }
+        if let Some(first) = next {
+            dwarf.unit.get_mut(at).set(DW_AT_GNU_ANNOTATION, AttributeValue::UnitRef(first));
+        }
+    }
+}
 
 /// Everything a unit says about what its addresses mean, added to a unit that already has a line
 /// program.
@@ -65,17 +124,23 @@ pub(crate) fn describe(
 ) -> Result<(), Error> {
     let wanted = wanted(shapes, funcs, globals, frames);
     let ids = kinds(dwarf, shapes, &wanted);
+    let mut tagged = Tagged::new();
     for (shape, &id) in shapes.iter().zip(&ids) {
         if let Some(id) = id {
-            fill(dwarf, shape, id, &ids, shapes)?;
+            tagged.extend(fill(dwarf, shape, id, &ids, shapes)?);
         }
     }
     for (index, func) in funcs.iter().enumerate() {
         let Some(sig) = &func.sig else { continue };
-        defined(dwarf, func, sig, index, files, &ids, frames)?;
+        tagged.extend(defined(dwarf, func, sig, index, files, &ids, frames)?);
     }
     for (index, global) in globals.iter().enumerate() {
-        held_at(dwarf, global, funcs.len() + index, files, &ids)?;
+        let at = held_at(dwarf, global, funcs.len() + index, files, &ids)?;
+        tagged.push((at, &global.tags[..]));
+    }
+    let mut annotations = Annotations::default();
+    for (at, tags) in tagged {
+        annotations.annotate(dwarf, at, tags);
     }
     Ok(())
 }
@@ -161,14 +226,16 @@ fn tag(shape: &Shape) -> gimli::DwTag {
     }
 }
 
-/// The attributes and the children of one type's entry.
-fn fill(
+/// The attributes and the children of one type's entry, and the members among them that carry
+/// tags.
+fn fill<'a>(
     dwarf: &mut gimli::write::DwarfUnit,
-    shape: &Shape,
+    shape: &'a Shape,
     at: UnitEntryId,
     ids: &[Option<UnitEntryId>],
     shapes: &[Shape],
-) -> Result<(), Error> {
+) -> Result<Tagged<'a>, Error> {
+    let mut tagged = Tagged::new();
     match shape {
         Shape::Base { name, encoding, size } => {
             title(dwarf, at, name);
@@ -195,7 +262,8 @@ fn fill(
                 None => flag(dwarf, at, gimli::DW_AT_declaration),
                 Some(members) => {
                     for member in members {
-                        held(dwarf, at, member, ids)?;
+                        let child = held(dwarf, at, member, ids)?;
+                        tagged.push((child, &member.tags[..]));
                     }
                 }
             }
@@ -218,9 +286,11 @@ fn fill(
             points(dwarf, at, *of, ids)?;
         }
         Shape::Qualified { of, .. } => points(dwarf, at, *of, ids)?,
-        Shape::Subroutine(sig) => takes(dwarf, at, sig, ids, None, false)?,
+        Shape::Subroutine(sig) => {
+            takes(dwarf, at, sig, ids, None, false)?;
+        }
     }
-    Ok(())
+    Ok(tagged)
 }
 
 /// The entry for one function this unit defines.
@@ -263,15 +333,17 @@ fn fill(
 /// A local declared inside a `{ ... }` of its own hangs off a `DW_TAG_lexical_block` rather than off
 /// the subprogram, so that two blocks each declaring an `i` are two variables a reader can tell
 /// apart by where the program counter is. See [`nested`].
-fn defined(
+///
+/// What it hands back is the subprogram, its parameters and its locals, each with its tags.
+fn defined<'a>(
     dwarf: &mut gimli::write::DwarfUnit,
-    func: &Function,
-    sig: &Sig,
+    func: &'a Function,
+    sig: &'a Sig,
     index: usize,
     files: &[FileId],
     ids: &[Option<UnitEntryId>],
     frames: bool,
-) -> Result<(), Error> {
+) -> Result<Tagged<'a>, Error> {
     let root = dwarf.unit.root();
     let at = dwarf.unit.add(root, gimli::DW_TAG_subprogram);
     title(dwarf, at, &func.name);
@@ -296,16 +368,20 @@ fn defined(
     // A wasm function with a frame has a frame base of its own, so the offsets in it can be said
     // whether or not the unit writes a call frame table.
     let frames = frames || func.frame_local.is_some();
-    takes(dwarf, at, sig, ids, Some(index), frames)?;
+    let mut tagged: Tagged<'a> = vec![(at, &func.tags[..])];
+    let params = takes(dwarf, at, sig, ids, Some(index), frames)?;
+    tagged.extend(params.into_iter().zip(&sig.params).map(|(at, param)| (at, &param.tags[..])));
     let nests = nested(dwarf, func, at, index, frames)?;
     for local in &func.locals {
         // Under the scope it was declared in, or under the function itself for one written straight
         // into the body. A scope index nothing was made for is a local this build says nothing about
         // anyway, so the function is as good a parent as any and the entry is never written.
         let under = local.scope.and_then(|scope| nests.get(scope).copied().flatten()).unwrap_or(at);
-        kept(dwarf, under, local, files, ids, index, frames)?;
+        if let Some(child) = kept(dwarf, under, local, files, ids, index, frames)? {
+            tagged.push((child, &local.tags[..]));
+        }
     }
-    Ok(())
+    Ok(tagged)
 }
 
 /// A `DW_TAG_lexical_block` for each of a function's inner scopes that has something to hold, and
@@ -424,7 +500,8 @@ fn where_it_starts(reach: &Reach, which: usize) -> Result<gimli::write::Address,
 /// Nothing at all for a local a build with no frame base has nothing to say about, which is a
 /// local in the frame of a build that asked for no unwind table. See [`sayable`].
 ///
-/// A local with no type still gets an entry, for the reason [`held_at`] gives.
+/// A local with no type still gets an entry, for the reason [`held_at`] gives. The entry is what
+/// it hands back.
 fn kept(
     dwarf: &mut gimli::write::DwarfUnit,
     at: UnitEntryId,
@@ -433,15 +510,16 @@ fn kept(
     ids: &[Option<UnitEntryId>],
     which: usize,
     frames: bool,
-) -> Result<(), Error> {
+) -> Result<Option<UnitEntryId>, Error> {
     if !sayable(&local.spot, frames) {
-        return Ok(());
+        return Ok(None);
     }
     let child = dwarf.unit.add(at, gimli::DW_TAG_variable);
     title(dwarf, child, &local.name);
     came_from(dwarf, child, &local.name, local.decl, files)?;
     points(dwarf, child, local.ty, ids)?;
-    somewhere(dwarf, child, &local.name, &local.spot, which, frames)
+    somewhere(dwarf, child, &local.name, &local.spot, which, frames)?;
+    Ok(Some(child))
 }
 
 /// Whether anything can be said about where a local is in this build.
@@ -565,13 +643,15 @@ fn saying(held: Held) -> gimli::write::Expression {
 /// no such thing as a variable of type `void`, so a reader of a `DW_TAG_variable` with no
 /// `DW_AT_type` has nothing to be misled into believing, and the name and the address on their own
 /// are what lets a debugger resolve the name at all.
+///
+/// The entry is what it hands back.
 fn held_at(
     dwarf: &mut gimli::write::DwarfUnit,
     global: &Global,
     symbol: usize,
     files: &[FileId],
     ids: &[Option<UnitEntryId>],
-) -> Result<(), Error> {
+) -> Result<UnitEntryId, Error> {
     let root = dwarf.unit.root();
     let at = dwarf.unit.add(root, gimli::DW_TAG_variable);
     title(dwarf, at, &global.name);
@@ -583,7 +663,7 @@ fn held_at(
     let mut expr = gimli::write::Expression::new();
     expr.op_addr(gimli::write::Address::Symbol { symbol, addend: 0 });
     dwarf.unit.get_mut(at).set(gimli::DW_AT_location, AttributeValue::Exprloc(expr));
-    Ok(())
+    Ok(at)
 }
 
 /// `DW_AT_decl_file` and `DW_AT_decl_line`, for whatever knows where it was written.
@@ -615,6 +695,8 @@ fn came_from(
 /// A parameter that has a place carries where it is, written the same way a local's is and under
 /// the same condition. A function type's parameters never have one, so `which` is [`None`] there,
 /// since a type is not a piece of code and has no frame or registers to be in.
+///
+/// The parameters' entries are what it hands back, one for each, in order.
 fn takes(
     dwarf: &mut gimli::write::DwarfUnit,
     at: UnitEntryId,
@@ -622,13 +704,15 @@ fn takes(
     ids: &[Option<UnitEntryId>],
     which: Option<usize>,
     frames: bool,
-) -> Result<(), Error> {
+) -> Result<Vec<UnitEntryId>, Error> {
     if sig.prototyped {
         flag(dwarf, at, gimli::DW_AT_prototyped);
     }
     points(dwarf, at, sig.returns, ids)?;
+    let mut children = Vec::with_capacity(sig.params.len());
     for param in &sig.params {
         let child = dwarf.unit.add(at, gimli::DW_TAG_formal_parameter);
+        children.push(child);
         let name = param.name.clone().unwrap_or_default();
         if let Some(name) = &param.name {
             title(dwarf, child, name);
@@ -641,16 +725,16 @@ fn takes(
     if sig.variadic {
         dwarf.unit.add(at, gimli::DW_TAG_unspecified_parameters);
     }
-    Ok(())
+    Ok(children)
 }
 
-/// One member of a record, as a child of the record's own entry.
+/// One member of a record, as a child of the record's own entry, which is what it hands back.
 fn held(
     dwarf: &mut gimli::write::DwarfUnit,
     at: UnitEntryId,
     member: &Member,
     ids: &[Option<UnitEntryId>],
-) -> Result<(), Error> {
+) -> Result<UnitEntryId, Error> {
     let child = dwarf.unit.add(at, gimli::DW_TAG_member);
     if let Some(name) = &member.name {
         title(dwarf, child, name);
@@ -667,7 +751,7 @@ fn held(
         }
         None => entry.set(gimli::DW_AT_data_member_location, AttributeValue::Udata(member.at)),
     }
-    Ok(())
+    Ok(child)
 }
 
 /// One enumerator, which is a child of the enumeration rather than an attribute on it.
@@ -806,7 +890,12 @@ mod tests {
                 decl: Some(Place { file: 0, line: 3 }),
                 sig: Some(Sig {
                     returns: Some(0),
-                    params: vec![Param { name: Some("n".to_owned()), ty: 0, spot: None }],
+                    params: vec![Param {
+                        name: Some("n".to_owned()),
+                        ty: 0,
+                        spot: None,
+                        tags: Vec::new(),
+                    }],
                     variadic: false,
                     prototyped: true,
                 }),
@@ -814,6 +903,7 @@ mod tests {
                 locals: Vec::new(),
                 frame_local: None,
                 scopes: Vec::new(),
+                tags: Vec::new(),
             }],
             globals: Vec::new(),
             pointer: 8,
@@ -947,6 +1037,7 @@ mod tests {
             decl: Some(Place { file: 0, line: 4 }),
             spot: Spot::Always(Held::Frame(-16)),
             scope: None,
+            tags: Vec::new(),
         }];
         let info = write(&unit).expect("sections");
         assert!(holds(&info, ".debug_abbrev", &spot()), "no location on the local");
@@ -999,6 +1090,7 @@ mod tests {
                 Span { from: 8, len: 8, held: Held::Frame(-16) },
             ]),
             scope: None,
+            tags: Vec::new(),
         }];
         let info = write(&unit).expect("sections");
         assert!(holds(&info, ".debug_abbrev", &listed()), "the location is not a list");
@@ -1024,6 +1116,7 @@ mod tests {
                 Span { from: 8, len: 8, held: Held::Frame(-16) },
             ]),
             scope: None,
+            tags: Vec::new(),
         }];
         let info = write(&unit).expect("sections");
         assert!(holds(&info, ".debug_abbrev", &listed()), "the location is not a list");
@@ -1066,6 +1159,7 @@ mod tests {
                 Span { from: 8, len: 8, held: Held::Reg(4) },
             ]),
             scope: None,
+            tags: Vec::new(),
         }];
         let info = write(&unit).expect("sections");
         let list = info.chunks.iter().find(|chunk| chunk.name == ".debug_loclists");
@@ -1092,6 +1186,7 @@ mod tests {
             decl: None,
             spot: Spot::Over(Vec::new()),
             scope: None,
+            tags: Vec::new(),
         }];
         let info = write(&unit).expect("sections");
         assert!(!holds(&info, ".debug_abbrev", &listed()), "a list of nothing");
@@ -1113,6 +1208,7 @@ mod tests {
             decl: None,
             spot: Spot::Over(vec![Span { from: 0, len: 0, held: Held::Reg(3) }]),
             scope: None,
+            tags: Vec::new(),
         }];
         assert!(write(&unit).is_err());
     }
@@ -1130,6 +1226,7 @@ mod tests {
             decl: None,
             spot: fixed(-16),
             scope: None,
+            tags: Vec::new(),
         }];
         let info = write(&unit).expect("sections");
         assert!(!holds(&info, ".debug_abbrev", &spot()), "a location nothing can resolve");
@@ -1151,6 +1248,7 @@ mod tests {
             decl: None,
             spot: Spot::Over(vec![Span { from: 0, len: 8, held: Held::Reg(3) }]),
             scope: None,
+            tags: Vec::new(),
         }];
         let info = write(&unit).expect("sections");
         assert!(holds(&info, ".debug_abbrev", &listed()), "the register went with the frame base");
@@ -1177,6 +1275,7 @@ mod tests {
                 Span { from: 8, len: 8, held: Held::Frame(-16) },
             ]),
             scope: None,
+            tags: Vec::new(),
         }];
         let info = write(&unit).expect("sections");
         let start = gimli::DW_LLE_start_length.0;
@@ -1198,6 +1297,7 @@ mod tests {
             decl: None,
             spot: Spot::Over(vec![Span { from: 0, len: 8, held: Held::Frame(-16) }]),
             scope: None,
+            tags: Vec::new(),
         }];
         let info = write(&unit).expect("sections");
         assert!(!named(&info).contains(&"total".to_owned()), "a name with nowhere to be");
@@ -1219,6 +1319,7 @@ mod tests {
             decl: None,
             spot: Spot::Always(Held::Frame(8)),
             scope: None,
+            tags: Vec::new(),
         }];
         let info = write(&unit).expect("sections");
         let local = [4, 0xed, 0, 5, gimli::DW_OP_stack_value.0];
@@ -1240,6 +1341,7 @@ mod tests {
             decl: None,
             spot: Spot::Always(held),
             scope: None,
+            tags: Vec::new(),
         };
         unit.funcs[0].locals = vec![local("k", Held::Local(3)), local("i", Held::Constant(300))];
         let info = write(&unit).expect("sections");
@@ -1270,6 +1372,7 @@ mod tests {
                     ty: 1,
                     at: 0,
                     bits: None,
+                    tags: Vec::new(),
                 }]),
             },
             Shape::Pointer { to: Some(0), size: 8 },
@@ -1310,6 +1413,7 @@ mod tests {
             ty: Some(0),
             decl: Some(Place { file: 0, line: 1 }),
             external: true,
+            tags: Vec::new(),
         }];
         let info = write(&unit).expect("sections");
         let held = info.chunks.iter().find(|chunk| chunk.name == ".debug_info").expect("a unit");
@@ -1328,8 +1432,12 @@ mod tests {
     #[test]
     fn a_variable_with_no_type_still_gets_an_entry() {
         let mut unit = one();
-        unit.globals =
-            vec![Global { name: "opaque".to_owned(), ty: None, decl: None, external: false }];
+        unit.globals = vec![Global {
+            name: "opaque".to_owned(),
+            ty: None,
+            external: false,
+            ..Global::default()
+        }];
         let info = write(&unit).expect("sections");
         let held = info.chunks.iter().find(|chunk| chunk.name == ".debug_info").expect("a unit");
         assert!(held.relocs.iter().any(|reloc| reloc.symbol == "opaque"));
@@ -1341,8 +1449,12 @@ mod tests {
     fn an_enumeration_names_its_enumerators() {
         let mut unit = one();
         let at = unit.types.len();
-        unit.globals =
-            vec![Global { name: "paint".to_owned(), ty: Some(at), decl: None, external: true }];
+        unit.globals = vec![Global {
+            name: "paint".to_owned(),
+            ty: Some(at),
+            external: true,
+            ..Global::default()
+        }];
         unit.types.push(Shape::Enumeration {
             name: Some("color".to_owned()),
             of: Some(0),
@@ -1363,8 +1475,12 @@ mod tests {
     fn an_enumerator_too_wide_for_a_form_is_left_out() {
         let mut unit = one();
         let at = unit.types.len();
-        unit.globals =
-            vec![Global { name: "span".to_owned(), ty: Some(at), decl: None, external: true }];
+        unit.globals = vec![Global {
+            name: "span".to_owned(),
+            ty: Some(at),
+            external: true,
+            ..Global::default()
+        }];
         unit.types.push(Shape::Enumeration {
             name: Some("wide".to_owned()),
             of: Some(0),
@@ -1417,6 +1533,7 @@ mod tests {
             decl: Some(Place { file: 0, line: 5 }),
             spot: fixed(-16),
             scope: Some(0),
+            tags: Vec::new(),
         }];
         unit
     }
@@ -1477,5 +1594,90 @@ mod tests {
     fn a_scope_over_a_stretch_of_no_length_is_refused() {
         let over = vec![Reach { from: 4, len: 0 }];
         assert!(matches!(write(&inside(over)), Err(Error::Refused { .. })));
+    }
+
+    /// How many attributes in `.debug_info` hold this string, which is how many relocations
+    /// there point at it in `.debug_str`, since the table holds each string once.
+    fn pointed(info: &Info, text: &str) -> usize {
+        let strings = info.chunks.iter().find(|chunk| chunk.name == ".debug_str").expect("strings");
+        let mut offset = 0;
+        let mut at = None;
+        for part in strings.bytes.split(|&byte| byte == 0) {
+            if part == text.as_bytes() {
+                at = Some(offset);
+            }
+            offset += part.len() + 1;
+        }
+        let Some(at) = at else { return 0 };
+        let unit = info.chunks.iter().find(|chunk| chunk.name == ".debug_info").expect("a unit");
+        let at = i64::try_from(at).expect("a small table");
+        unit.relocs
+            .iter()
+            .filter(|reloc| reloc.symbol == ".debug_str" && reloc.addend == at)
+            .count()
+    }
+
+    /// The tags of the function, its parameter and a variable are chains of
+    /// `DW_TAG_GNU_annotation` under the unit, and a chain the same as another, or the same as the
+    /// end of another, is the one already written.
+    #[test]
+    fn a_tag_is_an_annotation_written_once_for_everything_carrying_it() {
+        let mut unit = one();
+        let tags = || vec![b"first".to_vec(), b"last".to_vec()];
+        unit.funcs[0].tags = tags();
+        unit.funcs[0].sig.as_mut().expect("a signature").params[0].tags = tags();
+        unit.globals = vec![Global {
+            name: "g".to_owned(),
+            ty: Some(0),
+            tags: vec![b"last".to_vec()],
+            ..Global::default()
+        }];
+        let info = write(&unit).expect("sections");
+        // Two tags, `last` with nothing after it and `first` with `last` after it, and everything
+        // points at one or the other.
+        assert_eq!(pointed(&info, "btf_decl_tag"), 2, "in {:?}", named(&info));
+        assert_eq!(pointed(&info, "first"), 1);
+        assert_eq!(pointed(&info, "last"), 1);
+        // The tag's code and the attribute's, as the LEB128 the abbreviation writes them in.
+        assert!(holds(&info, ".debug_abbrev", &[0x81, 0xc0, 0x01]), "no DW_TAG_GNU_annotation");
+        assert!(holds(&info, ".debug_abbrev", &[0xb9, 0x42]), "no DW_AT_GNU_annotation");
+    }
+
+    /// A member and a local are tagged the same way as everything else.
+    #[test]
+    fn a_member_and_a_local_carry_their_tags() {
+        let mut unit = one();
+        unit.types.push(Shape::Record {
+            union: false,
+            name: Some("s".to_owned()),
+            size: Some(4),
+            members: Some(vec![Member {
+                name: Some("x".to_owned()),
+                ty: 0,
+                at: 0,
+                bits: None,
+                tags: vec![b"member".to_vec()],
+            }]),
+        });
+        unit.funcs[0].locals = vec![Local {
+            name: "l".to_owned(),
+            ty: Some(1),
+            decl: None,
+            spot: fixed(-8),
+            scope: None,
+            tags: vec![b"local".to_vec(), b"member".to_vec()],
+        }];
+        let info = write(&unit).expect("sections");
+        assert_eq!(pointed(&info, "btf_decl_tag"), 2, "in {:?}", named(&info));
+        assert_eq!(pointed(&info, "member"), 1);
+        assert_eq!(pointed(&info, "local"), 1);
+    }
+
+    /// A unit with no tags says nothing about them.
+    #[test]
+    fn a_unit_with_no_tags_has_no_annotation() {
+        let info = write(&one()).expect("sections");
+        assert_eq!(pointed(&info, "btf_decl_tag"), 0);
+        assert!(!holds(&info, ".debug_abbrev", &[0x81, 0xc0, 0x01]));
     }
 }
