@@ -49,6 +49,7 @@ pub static SELECTOR: super::Selector = super::Selector {
             add: "lea_32",
         }),
         teb: None,
+        dynamic: None,
     },
     jumps: &super::Jumps { near: "lea_32", cell: "mov_rm_32", add: "add_rr_32", two_address: true },
 };

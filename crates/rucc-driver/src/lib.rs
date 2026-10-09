@@ -2735,12 +2735,6 @@ pub fn parse_args(args: &[String]) -> Result<Action, CliError> {
                 opts.speculation.after_return = after_return;
                 opts.speculation.after_jump = after_jump;
             }
-            // How a thread-local variable in one of the two dynamic models is reached: through
-            // `__tls_get_addr`, or through a TLS descriptor. Fedora passes `gnu2` on each x86-64
-            // compile. This compiler writes the initial exec sequence for each thread-local
-            // variable (`thread_address` in the code generator), and the dialect does not change
-            // that sequence, as in gcc with `-ftls-model=initial-exec`. So the value is checked and
-            // there is nothing more to do until the dynamic models come (#1104).
             // The model a thread-local variable with no `tls_model` attribute asks for. The code
             // generator uses it or the fastest model the link allows, whichever is faster, as gcc
             // does, so `-ftls-model=global-dynamic` changes nothing.
@@ -2751,6 +2745,12 @@ pub fn parse_args(args: &[String]) -> Result<Action, CliError> {
                 };
                 opts.tls_model = model;
             }
+            // How a thread-local variable in one of the two dynamic models is reached: through
+            // `__tls_get_addr`, or through a TLS descriptor. Fedora passes `gnu2` on each x86-64
+            // compile. On x86-64 this compiler writes the `__tls_get_addr` call under either value
+            // (`thread_call` in the code generator). The linker takes both forms, so a `gnu2` build
+            // is only a little slower than gcc's. AArch64 writes the initial exec sequence, which
+            // neither value changes. So the value is checked and there is nothing more to do.
             _ if arg.starts_with("-mtls-dialect=")
                 && (x86 || arch == rucc_target::Arch::Aarch64) =>
             {

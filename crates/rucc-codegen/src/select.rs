@@ -106,6 +106,37 @@ pub struct Symbols {
     /// The same on a machine that keeps the TEB in a register rather than a segment, which is
     /// AArch64. See [`Teb`].
     pub teb: Option<Teb>,
+    /// How a thread-local variable in a shared library is reached, where this machine has been
+    /// taught. See [`Dynamic`].
+    pub dynamic: Option<Dynamic>,
+}
+
+/// The calls to `__tls_get_addr` that reach a thread-local variable in a shared library, each as
+/// the text of a template with `{}` where the variable's name goes.
+///
+/// A library may be loaded with `dlopen` after the program has started, and then its variables are
+/// in a block the loader made for it alone, which no offset from the thread pointer reaches. The
+/// call asks the loader where this thread's copy is. The general one asks about the variable, and
+/// the local one asks where the library's block is and adds how far into it the variable is,
+/// which is all it needs for a variable that cannot be in another object.
+///
+/// ```text
+/// data16 leaq x@tlsgd(%rip), %rdi        leaq x@tlsld(%rip), %rdi
+/// .value 0x6666                          call __tls_get_addr@PLT
+/// rex64                                  leaq x@dtpoff(%rax), %rax
+/// call __tls_get_addr@PLT
+/// ```
+///
+/// When the variable turns out to be in the program, the linker rewrites the call into a read of
+/// the thread pointer. It knows the call only by its exact bytes, and the prefixes on the first
+/// one are there to make it as long as what the linker puts in its place, so the instructions
+/// are kept together as text and not given to the allocator one at a time.
+#[derive(Debug)]
+pub struct Dynamic {
+    /// The general call, for a variable another object may define.
+    pub general: &'static str,
+    /// The local call, for one that is in this library and nowhere else.
+    pub local: &'static str,
 }
 
 /// The instructions a thread-local variable is reached with on Windows on AArch64.
