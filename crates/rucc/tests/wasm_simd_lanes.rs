@@ -107,7 +107,8 @@ fn without_simd128_each_operator_is_a_lane_at_a_time() {
     assert!(!text.contains("x2.") && !text.contains("v128"), "{text}");
 }
 
-/// Vectors in local variables, read again as another lane type and at one lane.
+/// Vectors in local variables, read again as another lane type and at one lane. The negated float
+/// vector of `n` is the shape of `wasm_f32x4_relaxed_nmadd`, which stopped the compiler before #3480.
 const LOCALS: &str = "\
 typedef unsigned char v16qu __attribute__((vector_size(16)));
 typedef int v4si __attribute__((vector_size(16)));
@@ -115,6 +116,7 @@ typedef float v4sf __attribute__((vector_size(16)));
 v4si f(v4si a, v4si b) { v4si t = a * b; return t + a - (b << 2); }
 v4sf g(v4sf a, v4sf b) { v4sf t = a * b; t = t + a; return t / b; }
 int h(v16qu a) { v16qu t = a + a; v4si u = (v4si)t; return u[2]; }
+v4sf n(v4sf a, v4sf b, v4sf c) { return -(a * b) + c; }
 ";
 
 /// With `-msimd128` a vector stays a `v128` value at `-O2`, as with clang, and the function has no
