@@ -356,7 +356,13 @@ impl Pass for Thread {
                     edges.entry(call.block).or_default().push((from, at));
                     stats.optimized(THREADED);
                 } else {
-                    let (copy, out) = copy(func, an, block, at, call, &subst);
+                    let loops = an.loops(func);
+                    let keep = if acyclic(loops, block) {
+                        Some(None)
+                    } else {
+                        outermost(loops, from, block).map(Some)
+                    };
+                    let (copy, out) = copy(func, an, block, at, call, &subst, keep);
                     edges.entry(call.block).or_default().push((copy, out));
                     edges.entry(copy).or_default().push((from, at));
                     paths.insert(copy, path);
@@ -585,6 +591,7 @@ fn rebuild(
                     .map_or_else(Vec::new, |list| list.iter().map(|&(pred, _)| pred).collect())
             },
             |block| cfg.reaches(block) && !stranded.contains(&block),
+            &[],
         )
     };
     an.keep_loops(loops);
@@ -784,7 +791,24 @@ fn back_edge(loops: &Loops, from: Block, into: Block) -> bool {
 ///
 /// Returns the copy and the slot of the edge out of it, which the caller's record of edges needs.
 /// The cache is cleared once the edge has moved, so what it builds after is of the graph there is
-/// now, and the merges only add parameters, which move no edge.
+/// now, and the merges only add parameters, which move no edge. The loop forest is kept when
+/// `keep` says how and [`lost`] finds no cycle that stopped being reached. It is `Some(None)` for
+/// a block on no cycle and `Some(Some(root))` for a block in the outermost loop `root` the edge
+/// starts in.
+///
+/// A copy of a block on no cycle is on none either, since a way back to it from where it goes
+/// would have been one back to the block. So the cycles are the ones there were, and the ways
+/// into each are too, through the copy rather than the block, from every block still reached.
+/// That is [`strand`]'s argument for a thread that copies nothing, and the copy is in no loop,
+/// which is what the forest says of a block it has never seen. What it says of the edges out of a
+/// loop is stale, and nothing here asks it that. A copy of a block in `root` stands in for it on
+/// an edge out of a block of `root` and goes only where it went, which is what [`Loops::rebuild`]
+/// asks of a block it is given, so only that loop's part of the forest is found again.
+///
+/// On lz4hc.c at `-O2` building the forest again after each of the 92 copies was a thirty-sixth
+/// of the build. Nearly all of them are of blocks in a loop that is most of its function, so
+/// finding the forest again over that loop costs most of what building all of it did, and the
+/// build is six in a thousand fewer instructions. tamnd/rucc#3052.
 fn copy(
     func: &mut Func,
     an: &mut Analyses,
@@ -792,7 +816,9 @@ fn copy(
     at: Idx<BlockCall>,
     call: BlockCall,
     subst: &Bindings,
+    keep: Option<Option<LoopId>>,
 ) -> (Block, Idx<BlockCall>) {
+    let loops = keep.map(|_| an.take_loops(func));
     let term = func.terminator(block).expect("the block was chosen for its terminator");
     let mut map = subst.clone();
     let copy = func.create_block();
@@ -817,7 +843,50 @@ fn copy(
             "the merges moved a block's dominator"
         );
     }
+    if let Some(mut loops) = loops {
+        let cfg = an.cfg(func);
+        if let Some(root) = keep.flatten() {
+            loops.rebuild(
+                root,
+                func.counts().blocks,
+                |block| targets(func, block),
+                |block| cfg.predecessors(block).to_vec(),
+                |block| cfg.reaches(block),
+                &[copy],
+            );
+        }
+        if lost(func, cfg, &loops, block) {
+            return (copy, out);
+        }
+        an.keep_loops(loops);
+        #[cfg(debug_assertions)]
+        assert_eq!(
+            shape(an.loops(func)),
+            shape(&fresh(func)),
+            "the forest kept across a copy is not the forest of the function"
+        );
+    }
     (copy, out)
+}
+
+/// Whether a block on a cycle stopped being reached when the edge into `block` moved, which takes
+/// its loop with it.
+///
+/// `cfg` is of the function as it is now and `loops` of the function before the edge moved. Only
+/// what `block` went to can have stopped being reached, and only if `block` did.
+fn lost(func: &Func, cfg: &Cfg, loops: &Loops, block: Block) -> bool {
+    let mut seen: Set<Block> = Set::default();
+    let mut work = vec![block];
+    while let Some(at) = work.pop() {
+        if cfg.reaches(at) || !seen.insert(at) {
+            continue;
+        }
+        if !acyclic(loops, at) {
+            return true;
+        }
+        work.extend(targets(func, at));
+    }
+    false
 }
 
 /// Gives every read of a value `block` defines, from anywhere but `block`, the definition that
