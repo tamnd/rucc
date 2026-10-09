@@ -43,10 +43,15 @@ use crate::{Cfg, Dominators, PostDominators};
 /// Where each block stops dominating, by block number.
 ///
 /// The lists are sorted by block number and hold no duplicates, so two of these compare equal
-/// when they say the same thing, which is what the analysis cache needs of them.
+/// when they say the same thing, which is what the analysis cache needs of them. They are kept
+/// end to end in one list rather than one list each, since most blocks have a short one and on
+/// lz4hc.c at `-O2` growing them one at a time was half of building them. tamnd/rucc#3052.
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct Frontiers {
-    of: Vec<Vec<Block>>,
+    /// Where the list of each block starts in `all`, by block number, and one more where the last
+    /// one ends.
+    starts: Vec<usize>,
+    all: Vec<Block>,
 }
 
 impl Frontiers {
@@ -57,7 +62,11 @@ impl Frontiers {
     /// it takes writes one entry.
     #[must_use]
     pub fn new(cfg: &Cfg, doms: &Dominators) -> Self {
-        let mut of = vec![Vec::new(); cfg.capacity()];
+        // Which block each one last had put in its frontier. The walks for two predecessors of a
+        // block climb the same tree, so once one arrives where another has been the rest of the
+        // way up is written already.
+        let mut last = vec![None; cfg.capacity()];
+        let mut pairs: Vec<(Block, Block)> = Vec::new();
         for &block in cfg.postorder() {
             // A block with one way in is not a place two paths meet, and the entry is, because
             // control also arrives there from outside the function. Leaving that out is the one
@@ -75,8 +84,9 @@ impl Frontiers {
             let stop = doms.immediate_dominator(block);
             for pred in arriving() {
                 let mut runner = pred;
-                while Some(runner) != stop {
-                    of[runner.index()].push(block);
+                while Some(runner) != stop && last[runner.index()] != Some(block) {
+                    last[runner.index()] = Some(block);
+                    pairs.push((runner, block));
                     match doms.immediate_dominator(runner) {
                         Some(next) => runner = next,
                         // The entry, which happens when `stop` is `None` because `block` is the
@@ -87,11 +97,32 @@ impl Frontiers {
                 }
             }
         }
-        for list in &mut of {
-            list.sort_unstable_by_key(|b: &Block| b.index());
-            list.dedup();
+        Self::gather(cfg.capacity(), &pairs)
+    }
+
+    /// Lays the lists out end to end from the pairs of a block and one block in its list, which
+    /// hold no pair twice.
+    fn gather(capacity: usize, pairs: &[(Block, Block)]) -> Self {
+        let mut starts = vec![0; capacity + 1];
+        for &(block, _) in pairs {
+            starts[block.index()] += 1;
         }
-        Self { of }
+        let mut sum = 0;
+        for start in &mut starts {
+            let count = *start;
+            *start = sum;
+            sum += count;
+        }
+        let mut next = starts.clone();
+        let mut all = vec![Block::from_usize(0); pairs.len()];
+        for &(block, entry) in pairs {
+            all[next[block.index()]] = entry;
+            next[block.index()] += 1;
+        }
+        for span in starts.windows(2) {
+            all[span[0]..span[1]].sort_unstable_by_key(|b: &Block| b.index());
+        }
+        Self { starts, all }
     }
 
     /// The blocks control can first arrive at without having gone through this one.
@@ -100,7 +131,10 @@ impl Frontiers {
     /// below it, which is every block on a path with no branches.
     #[must_use]
     pub fn of(&self, block: Block) -> &[Block] {
-        self.of.get(block.index()).map_or(&[][..], Vec::as_slice)
+        match (self.starts.get(block.index()), self.starts.get(block.index() + 1)) {
+            (Some(&start), Some(&end)) => &self.all[start..end],
+            _ => &[],
+        }
     }
 }
 
