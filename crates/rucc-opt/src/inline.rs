@@ -1139,7 +1139,9 @@ fn settle(
         // The estimate above does not follow a constant through a block parameter or answer a
         // `__builtin_constant_p` about anything but a parameter, so where it would refuse, the
         // copy is made and cleaned up the way it would be once inlined, and that is measured.
+        // Not for a body so far past the limit that no cleanup brings it under. See [`TRIED`].
         if matches!(kind, Kind::Hinted | Kind::Asks | Kind::Auto)
+            && large <= most.saturating_mul(TRIED)
             && (large > most || cold_call && grows(&module[id], call, &module[callee], large, how))
         {
             let values = passed(&module[id], call, &module[callee]);
@@ -1818,6 +1820,17 @@ fn weight(func: &Func, inst: Inst, names: &Interner, read: bool) -> usize {
         _ => 1,
     }
 }
+
+/// How many times the limit a body the estimate weighs may be and still be copied and cleaned up to
+/// see whether the constants a call passes fold it under.
+///
+/// The most a cleanup took off the estimate on the corpus was nine tenths, for
+/// `is_rfc3986_uri_char` in libexpat's `xmlparse.c`, a switch over the characters a URI may hold
+/// that goes from 172 to 18. A body further past the limit than this is a large one no call ever
+/// fits, and on lz4hc.c at `-O2` copying and cleaning up `LZ4HC_compress_generic` and the bodies
+/// around it, each a hundred times the limit or more, was an eighth of the instructions of the
+/// build. tamnd/rucc#3052.
+const TRIED: usize = 16;
 
 /// How far [`passes_asked`] looks through arithmetic over constants for an argument that works out
 /// to one. A mask the kernel writes with `GENMASK` is a dozen shifts, ands and subtractions of

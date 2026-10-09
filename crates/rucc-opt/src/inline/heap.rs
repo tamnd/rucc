@@ -193,7 +193,7 @@ struct Profile {
 type Body = (u32, usize, f64, Hints, bool);
 
 /// What a body's measurement depends on. See [`Heap::measured`].
-type Measured = (FuncId, u32, Vec<(Value, Imm, Type)>, bool, usize);
+type Measured = (FuncId, u32, Vec<(Value, Imm, Type)>, bool, usize, usize);
 
 /// What the second pass knows as it goes.
 struct Heap<'a> {
@@ -227,9 +227,10 @@ struct Heap<'a> {
     /// change it was measured at.
     bodies: Map<(FuncId, Inst), Body>,
     /// What a body measured and how long its copy takes, by callee, the callee's change, the
-    /// constants it was given, whether it weighed and the limit past which it was cleaned up. A
-    /// callee called from hundreds of places with the same constants is copied and folded once
-    /// for all of them rather than once for each, and that copy was most of the pass.
+    /// constants it was given, whether it weighed, the limit past which it was cleaned up and the
+    /// largest body the call could take, past which it was not. A callee called from hundreds of
+    /// places with the same constants is copied and folded once for all of them rather than once
+    /// for each, and that copy was most of the pass.
     measured: Map<Measured, (usize, f64, bool)>,
     /// The parameters of each function that every call to it passes the same constant for, which
     /// give no hint. See [`Second::constants`].
@@ -482,30 +483,6 @@ impl Heap<'_> {
                     Kind::Auto => usize::try_from(self.how.auto).unwrap_or(0) + args,
                     _ => self.how.limit,
                 };
-                let mut passed: Vec<(Value, Imm, Type)> =
-                    values.iter().map(|(&param, &(imm, ty))| (param, imm, ty)).collect();
-                passed.sort_unstable_by_key(|&(param, ..)| param);
-                let key = (callee, version, passed, weighed.is_some(), plain);
-                let (body, copied, cut) = match self.measured.get(&key) {
-                    Some(&measured) => measured,
-                    None => {
-                        let profile = self.profile(module, callee);
-                        let (mut body, cut) =
-                            summed_size(&profile.summary, target, values.clone(), weighed);
-                        if body > plain {
-                            body = body.min(how.specialized_size(module, callee, &values, weighed));
-                        }
-                        let copied = summed_time(
-                            &profile.summary,
-                            target,
-                            values.clone(),
-                            names,
-                            &profile.frequency,
-                        );
-                        self.measured.insert(key, (body, copied, cut));
-                        (body, copied, cut)
-                    }
-                };
                 // What the call knows that the body out of line does not.
                 let fresh: Map<Value, (Imm, Type)> = match self.settled.get(&callee) {
                     Some(settled) => values
@@ -520,6 +497,33 @@ impl Heap<'_> {
                         || indirect_known(module, func, call, target),
                     asks: passes_asked(func, call, target),
                     declared: kind == Kind::Hinted,
+                };
+                let reach = self.reach(kind, hints, args);
+                let mut passed: Vec<(Value, Imm, Type)> =
+                    values.iter().map(|(&param, &(imm, ty))| (param, imm, ty)).collect();
+                passed.sort_unstable_by_key(|&(param, ..)| param);
+                let key = (callee, version, passed, weighed.is_some(), plain, reach);
+                let (body, copied, cut) = match self.measured.get(&key) {
+                    Some(&measured) => measured,
+                    None => {
+                        let profile = self.profile(module, callee);
+                        let (mut body, cut) =
+                            summed_size(&profile.summary, target, values.clone(), weighed);
+                        // Not for a body so far past what the call could take that no cleanup
+                        // brings it under. See [`super::TRIED`].
+                        if body > plain && body <= reach.saturating_mul(super::TRIED) {
+                            body = body.min(how.specialized_size(module, callee, &values, weighed));
+                        }
+                        let copied = summed_time(
+                            &profile.summary,
+                            target,
+                            values.clone(),
+                            names,
+                            &profile.frequency,
+                        );
+                        self.measured.insert(key, (body, copied, cut));
+                        (body, copied, cut)
+                    }
                 };
                 self.bodies.insert((caller, call), (version, body, copied, hints, cut));
                 (body, copied, hints, cut)
@@ -600,6 +604,25 @@ impl Heap<'_> {
                     || (!hinted && within(one) && weighed.speedup)
                     || (weighed.growth < as_i64(self.how.limit) && weighed.overall <= 0)
             }
+        }
+    }
+
+    /// The largest body [`Heap::wants`] lets through for a call of this kind with these hints and
+    /// this many arguments, past which what a cleanup takes off the body changes nothing about the
+    /// call. A target that hints at calls in loops may add a hint after the body is measured, so
+    /// that one is counted as given.
+    fn reach(&self, kind: Kind, hints: Hints, args: usize) -> usize {
+        let hints = Hints { enables: hints.enables || self.loop_hint, ..hints };
+        let percent = self.second.percent;
+        let one = Hints { enables: true, ..Hints::default() };
+        let most = |base: u32| {
+            let hinted = hints.enables || hints.asks;
+            let limit = if hinted { hints.limit(base, percent) } else { one.limit(base, percent) };
+            usize::try_from(limit).unwrap_or(usize::MAX)
+        };
+        match kind {
+            Kind::Hinted => most(u32::try_from(self.how.limit).unwrap_or(u32::MAX)),
+            _ => most(self.how.auto).max(self.how.limit).saturating_add(args),
         }
     }
 
