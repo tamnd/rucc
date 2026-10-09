@@ -970,6 +970,23 @@ fn carried(func: &mut Func, width: Width, halves: &mut Halves, inst: Inst, opcod
     let (Some(&(a_low, a_high)), Some(&(b_low, b_high))) = (halves.get(&a), halves.get(&b)) else {
         return;
     };
+    // A low half that is zero carries nothing, and a high half that is zero adds nothing. That is
+    // `low + ((u64)high << 32)`, which is how the kernel's `readq` on i386 puts two loads together,
+    // and it is the two loads with nothing in between.
+    let zero = |value: Value| known(func, value) == Some(0);
+    let adds = opcode == Opcode::Add;
+    if zero(b_low) || (adds && zero(a_low)) {
+        let low = if zero(b_low) { a_low } else { b_low };
+        let high = if zero(b_high) {
+            a_high
+        } else if adds && zero(a_high) {
+            b_high
+        } else {
+            ahead(func, width, inst, opcode, &[a_high, b_high])
+        };
+        replace(func, halves, inst, low, high);
+        return;
+    }
     let low = ahead(func, width, inst, opcode, &[a_low, b_low]);
     let carried = if opcode == Opcode::Add {
         compared(func, inst, IntPred::Ult, low, a_low)
