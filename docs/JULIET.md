@@ -21,20 +21,20 @@ Many cases take the value that goes wrong from outside, and with nothing there t
 | 121 | stack based buffer overflow | S2, S8 | 2,470 | 1,994 | 406 | 0 | 70 | 0 |
 | 122 | heap based buffer overflow | S1, S8 | 1,632 | 1,406 | 74 | 0 | 152 | 0 |
 | 124 | buffer underwrite | S8 | 720 | 715 | 0 | 0 | 5 | 0 |
-| 126 | buffer overread | S3, S8 | 562 | 423 | 95 | 0 | 44 | 0 |
+| 126 | buffer overread | S3, S8 | 562 | 424 | 94 | 0 | 44 | 0 |
 | 127 | buffer underread | S8 | 720 | 714 | 0 | 0 | 6 | 0 |
 | 401 | memory leak | T9 | 698 | 576 | 32 | 0 | 90 | 0 |
 | 415 | double free | T2 | 190 | 190 | 0 | 0 | 0 | 0 |
 | 416 | use after free | T1, T5, T6, C4 | 118 | 118 | 0 | 0 | 0 | 0 |
-| 457 | use of uninitialized variable | Y6, Y7 | 540 | 300 | 240 | 0 | 0 | 0 |
+| 457 | use of uninitialized variable | Y6, Y7 | 540 | 498 | 42 | 0 | 0 | 0 |
 | 476 | null pointer dereference | S6 | 234 | 211 | 0 | 0 | 23 | 0 |
 | 562 | return of stack variable address | T4 | 2 | 2 | 0 | 0 | 0 | 0 |
 | 590 | free of memory not on the heap | T3 | 510 | 510 | 0 | 0 | 0 | 0 |
 | 761 | free of a pointer not at the start | T3 | 190 | 152 | 0 | 0 | 38 | 0 |
 | 843 | type confusion | Y1 to Y5 | 68 | 0 | 16 | 0 | 52 | 0 |
-| | all of them | | 8,654 | 7,311 | 863 | 0 | 480 | 0 |
+| | all of them | | 8,654 | 7,510 | 664 | 0 | 480 | 0 |
 
-The numbers are the detect tier's. CWE-126 is the exception: at enforce and at kernel it detects 424 and misses 94, because `CWE170_char_strncpy_12` is caught there and not at detect. Whether it is caught depends on a byte of the frame nothing wrote, as the unterminated copies below say, and the frame is not laid out the same at every tier. CWE-401 is not run at enforce, because document 03 gives row T9 nothing to enforce. Not one good half reported at any tier, and every case built and linked at every tier.
+The numbers are the detect tier's. CWE-126 is the exception: at enforce it detects 425 and misses 93, and at kernel it detects 423 and misses 95, because the two `CWE170` variant 12 cases are caught at some tiers and not others. Whether one is caught depends on a byte of the frame nothing wrote, as the unterminated copies below say, and the frame is not laid out the same at every tier. CWE-401 is not run at enforce, because document 03 gives row T9 nothing to enforce. Not one good half reported at any tier, and every case built and linked at every tier.
 
 Juliet 1.3 has no C cases for CWE-125 (row S1), CWE-787 (rows S1 and S4), CWE-908 (row Y6) or CWE-362 (rows C1, C2 and C3), so those rows have no Juliet number, and that is not the same as passing.
 
@@ -58,9 +58,9 @@ Every missed case is in one of these, and each one is an open issue rather than 
 
 **A pointer to a local or a global that went through memory, 390 cases.** The capability of a local reaches a wrapper such as `memcpy` through the frame handover, across files too since tamnd/rucc#3414, and that only works when the pointer the wrapper is given can be traced back to the local through calls and returns. In the flow variants 34 (a union), 45 (a static global) and 63, 64 and 66 to 68 (a pointer to a pointer, a struct or an array passed across files) the pointer goes through memory and the trace ends there. Every stack family under CWE-121 but the wide string one below and the six `char` stack families under CWE-126 miss those variants, the three `CWE131` families miss variant 32 (a pointer to a pointer) as well, and the 16 CWE-843 misses are variants 32, 34, 45, 63, 64 and 66 to 68 of its two families. The heap families do not, because the heap planes find a heap object from its address alone. That is 332 under CWE-121, 42 under CWE-126 and 16 under CWE-843. tamnd/rucc#3269.
 
-**An unterminated copy that ends on a zero, 53 cases.** The `CWE170` families under CWE-126 copy 99 bytes into a buffer of 100 and print it without writing the last byte. The buffer's capability reaches the `printf` in Juliet's `printLine`, so when that byte is not zero the walk goes past the buffer and is refused. Here it is a zero left in the frame by an earlier call, so the walk stops inside the buffer, and what goes wrong is a read of a byte nothing wrote, which is row Y6 and is not asked inside a wrapper. Whether it is a zero depends on what ran before, which is why the two variant 12 cases are caught at some tiers and on some commits and not others. tamnd/rucc#3271.
+**An unterminated copy that ends on a zero, 52 cases.** The `CWE170` families under CWE-126 copy 99 bytes into a buffer of 100 and print it without writing the last byte. The buffer's capability reaches the `printf` in Juliet's `printLine`, so when that byte is not zero the walk goes past the buffer and is refused. Here it is a zero left in the frame by an earlier call, so the walk stops inside the buffer, and what goes wrong is a read of a byte nothing wrote, which is row Y6 and is not asked inside a wrapper. Whether it is a zero depends on what ran before, which is why the two variant 12 cases are caught at some tiers and on some commits and not others. tamnd/rucc#3271.
 
-**Reads of what nothing wrote, 240 cases.** The CWE-457 families read a scalar that was never written, or the contents of an `alloca` that were never filled, and neither is refused yet. tamnd/rucc#3271.
+**Reads of what nothing wrote, 42 cases.** Flow variants 63 and 64 of the CWE-457 families pass the address of the local to a sink in another file, which reads it there. Handing the address to a function the caller cannot see counts as letting the local go, so the stack plane is never told the local starts out unwritten and the read in the sink is not refused. Every other variant of every family is detected. tamnd/rucc#3271.
 
 **Wide strings, 76 cases.** The `CWE135` families under CWE-121 and CWE-122 measure a wide string with `strlen`, which stops at the first byte of its first character, size a buffer from that, and copy the whole string into it with `wcscpy`. The wide string functions are not interposed yet, so the copy is not judged. tamnd/rucc#3268.
 
@@ -68,9 +68,9 @@ Every missed case is in one of these, and each one is an open issue rather than 
 
 **Leaks kept in a global, 32 cases.** Flow variants 45 and 68 of every CWE-401 family keep the pointer to the lost block in a global, so the block is still reachable at exit, and LeakSanitizer and Valgrind would not call it lost either. Row T9 is a sweep for blocks nothing points at, so these stay counted as missed rather than set aside.
 
-### What the last four fixes did
+### What the fixes since the first run did
 
-The run before this one went with tamnd/rucc#3329 and missed 2,203 cases. tamnd/rucc#3414 hands a local's bounds to a function in another file, and took variants 41, 44, 51 to 54 and 65 off the misses, 275 under CWE-121, 41 under CWE-126 and 10 under CWE-843. tamnd/rucc#3421 refuses a pointer made below or past a local or a global where it is made, and took every miss off CWE-124 and CWE-127, 348 cases, the string walk that started below a local among them. tamnd/rucc#3426 adds the leak sweep of row T9, which detects 576 of the CWE-401 cases where it detected none, with 90 set aside. tamnd/rucc#3432 refuses a read of a returned frame inside a wrapper and after an inlined return, which detects both CWE-562 cases. Two `CWE170` variant 12 cases went the other way at detect, for the reason given above. That is 863 misses now, 1,340 fewer.
+The run before this one went with tamnd/rucc#3329 and missed 2,203 cases. tamnd/rucc#3414 hands a local's bounds to a function in another file, and took variants 41, 44, 51 to 54 and 65 off the misses, 275 under CWE-121, 41 under CWE-126 and 10 under CWE-843. tamnd/rucc#3421 refuses a pointer made below or past a local or a global where it is made, and took every miss off CWE-124 and CWE-127, 348 cases, the string walk that started below a local among them. tamnd/rucc#3426 adds the leak sweep of row T9, which detects 576 of the CWE-401 cases where it detected none, with 90 set aside. tamnd/rucc#3432 refuses a read of a returned frame inside a wrapper and after an inlined return, which detects both CWE-562 cases. tamnd/rucc#3446 refuses a read of bytes `__builtin_alloca` or a variable length array took and nothing wrote, and tamnd/rucc#3460 a read of a local held in a register that nothing wrote on the path taken, which together took 198 cases off CWE-457. The `CWE170` variant 12 cases moved at detect, for the reason given above. That is 664 misses now, 1,539 fewer.
 
 ## The runs
 
@@ -78,5 +78,6 @@ The run before this one went with tamnd/rucc#3329 and missed 2,203 cases. tamnd/
 | --- | --- | --- | ---: | ---: |
 | 2026-10-07 | tamnd/rucc#3329 | -O2 | 8,654 | 3,900 |
 | 2026-10-09 | tamnd/rucc#3432 | -O2 | 8,654 | 2,875 |
+| 2026-10-09 | tamnd/rucc#3460 | -O2 | 8,654 | not timed |
 
 Both runs were on the Linux box, with every case built once per tier and both halves run as many at a time as it has processors, on a machine shared with other work. In the first, whose load stayed between 12 and 19, building the three tiers took about 20 minutes and running them about 45. The excuse that sets aside the two variant 32 socket cases was fixed after that run, so its CWE-121 and CWE-126 rows came from a second run of only those two at the same commit. The second run is the one in the table above, made on the branch of tamnd/rucc#3432 just before it was merged. The full list of missed ids, case by case and tier by tier, is what `cargo xtask juliet` writes to `target/juliet/report.txt`, and `cargo xtask juliet 121 126` takes only the CWEs it is given when only those need another look.
