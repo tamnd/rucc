@@ -1359,6 +1359,9 @@ pub fn compile_recording(
     copies::itself(&mut func, machine.insts, names);
     let pointer = frame.frame_pointer();
     copies::clean(&mut func, &moves, machine.shapes, machine.insts, machine.conv, pointer, names);
+    // After the cleanup, which is what takes out the reads, and before the reloads below fold one
+    // into the instruction that wanted it, where it is no longer one of the allocator's moves.
+    let unread = if flags.reloads { copies::unread(&mut func, &moves) } else { Vec::new() };
 
     // After the cleanup, which takes out a reload whose register still has the word and would
     // otherwise find a register this had folded away. Before anything that orders or lays out
@@ -1543,7 +1546,7 @@ pub fn compile_recording(
     // as above, since a value the allocator spilled is in the frame over its stretch rather than in
     // a register, and it is the same distance from the call frame address the locals were given.
     func.kept = match line {
-        Some(line) => kept::of(&func, &line, &allocation, &frame, &framed),
+        Some(line) => kept::of(&func, &line, &allocation, &frame, &framed, &unread),
         None => Vec::new(),
     };
     Ok(func)
