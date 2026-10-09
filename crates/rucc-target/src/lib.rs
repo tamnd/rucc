@@ -333,6 +333,72 @@ impl CodeModel {
     }
 }
 
+/// How a thread-local variable is reached.
+///
+/// The models are ordered from the most general to the fastest, and a model may always be
+/// replaced by a more general one. The frontend puts the one the program asked for on the
+/// variable, which is `__attribute__((tls_model(...)))` or else `-ftls-model=`. The code generator
+/// uses that one or the fastest the link allows, whichever is faster, as gcc does. The linker may
+/// then relax a general one into a faster one when it turns out the definition is in the
+/// executable.
+///
+/// Here rather than in the IR because the session reads `-ftls-model=` and the checker reads the
+/// attribute, and neither of them knows the IR.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Default)]
+pub enum TlsModel {
+    /// Works for any variable in any object, at the cost of a call to `__tls_get_addr`.
+    #[default]
+    GlobalDynamic,
+    /// One call to `__tls_get_addr` for several variables that are known to share a module.
+    LocalDynamic,
+    /// The offset is loaded from the GOT. Needs the variable to be in a module loaded at
+    /// program start rather than by `dlopen`.
+    InitialExec,
+    /// The offset is a link-time constant. Only for a variable in the executable itself.
+    LocalExec,
+}
+
+impl TlsModel {
+    /// The spelling in the textual form.
+    #[must_use]
+    pub const fn name(self) -> &'static str {
+        match self {
+            Self::GlobalDynamic => "global_dynamic",
+            Self::LocalDynamic => "local_dynamic",
+            Self::InitialExec => "initial_exec",
+            Self::LocalExec => "local_exec",
+        }
+    }
+
+    /// The model that spelling names.
+    #[must_use]
+    pub fn from_name(name: &str) -> Option<Self> {
+        Self::all().find(|model| model.name() == name)
+    }
+
+    /// The spelling gcc gives it, in `-ftls-model=` and in `__attribute__((tls_model(...)))`.
+    #[must_use]
+    pub const fn gcc(self) -> &'static str {
+        match self {
+            Self::GlobalDynamic => "global-dynamic",
+            Self::LocalDynamic => "local-dynamic",
+            Self::InitialExec => "initial-exec",
+            Self::LocalExec => "local-exec",
+        }
+    }
+
+    /// The model gcc's spelling names.
+    #[must_use]
+    pub fn from_gcc(spelled: &str) -> Option<Self> {
+        Self::all().find(|model| model.gcc() == spelled)
+    }
+
+    /// Every model, from the most general to the fastest.
+    pub fn all() -> impl Iterator<Item = Self> {
+        [Self::GlobalDynamic, Self::LocalDynamic, Self::InitialExec, Self::LocalExec].into_iter()
+    }
+}
+
 /// Which functions sign the return address they were called with, which is the `pac-ret` part of
 /// `-mbranch-protection=` and the whole of `-msign-return-address=`. AArch64 only.
 ///

@@ -527,6 +527,7 @@ pub fn compile(opts: &Options, name: &str, fs: &dyn FileSystem) -> Compiled {
                             share: shares_slots(opts),
                             in_place: !opts.safety.instruments(),
                             fixed_x18: opts.fixed_x18,
+                            tls_model: opts.tls_model,
                             // gcc keeps the order the source wrote at `-O0` and under
                             // `-fno-toplevel-reorder`, and Mach-O is clang's, which keeps it
                             // always.
@@ -7345,6 +7346,37 @@ void f(unsigned long n) { use(alloca(n)); }
         let (_, rest) = text.split_once("{\n").expect("a function definition");
         let (body, _) = rest.rsplit_once("}\n").expect("a function definition");
         body.to_owned()
+    }
+
+    /// A `tls_model` attribute reaches the IR global, and `-ftls-model=` is the model of a
+    /// thread-local that has none. The attribute wins over the flag, as in gcc.
+    #[test]
+    fn the_tls_model_asked_for_is_on_the_global() {
+        let source = "__thread int plain;\n\
+                      __thread int fast __attribute__((tls_model(\"initial-exec\")));\n\
+                      static __thread int quiet __attribute__((tls_model(\"local-dynamic\")));\n\
+                      __thread int slow __attribute__((tls_model(\"global-dynamic\")));\n\
+                      int f(void) { return plain + fast + quiet + slow; }\n";
+        let model = |text: &str, name: &str| {
+            let head = format!("global @{name} ");
+            let line = text.lines().find(|line| line.starts_with(&head)).expect("the global");
+            let (_, rest) = line.split_once(", tls(").expect("a thread-local");
+            rest.split(')').next().unwrap().to_owned()
+        };
+        let text = ir(source);
+        assert_eq!(model(&text, "plain"), "global_dynamic", "{text}");
+        assert_eq!(model(&text, "fast"), "initial_exec", "{text}");
+        assert_eq!(model(&text, "quiet"), "local_dynamic", "{text}");
+        assert_eq!(model(&text, "slow"), "global_dynamic", "{text}");
+        let mut opts = options();
+        opts.emit = EmitKind::Ir;
+        opts.tls_model = rucc_target::TlsModel::LocalExec;
+        let result = run(&opts, source);
+        assert_eq!(result.messages, Vec::<String>::new());
+        let text = result.text();
+        assert_eq!(model(text, "plain"), "local_exec", "{text}");
+        assert_eq!(model(text, "fast"), "initial_exec", "{text}");
+        assert_eq!(model(text, "slow"), "global_dynamic", "{text}");
     }
 
     /// What `-fgnu89-inline` is for, seen at the only place it shows: whether a body reached the

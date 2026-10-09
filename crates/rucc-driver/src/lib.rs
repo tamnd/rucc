@@ -276,6 +276,7 @@ options:
   -f[no-]stack-protector[-strong|-all|-explicit], -f[no-]stack-clash-protection, -fcf-protection=<edges>, -fhardened
   -ffunction-sections -fdata-sections, -fno-plt   a section per function or variable, for --gc-sections, calls through the GOT
   -fvisibility=<what>    default, hidden, internal or protected, when nothing in the source said
+  -ftls-model=<model>    global-dynamic, local-dynamic, initial-exec or local-exec, for a thread-local with no tls_model attribute
   -l<name>, -L <dir>, -B <dir>, --gcc-toolchain=<dir>, -specs=<file>   a library, where to look for one, our tools, the GCC, the flags of a dpkg or Red Hat spec file
   -fPIC -fpic -fPIE -fpie, -pipe, -mtls-dialect=   what it does anyway, and -f[no-]common as the target's cc
   -f[no-]strict-aliasing, -f[no-]delete-null-pointer-checks   what it assumes anyway
@@ -2740,6 +2741,16 @@ pub fn parse_args(args: &[String]) -> Result<Action, CliError> {
             // variable (`thread_address` in the code generator), and the dialect does not change
             // that sequence, as in gcc with `-ftls-model=initial-exec`. So the value is checked and
             // there is nothing more to do until the dynamic models come (#1104).
+            // The model a thread-local variable with no `tls_model` attribute asks for. The code
+            // generator uses it or the fastest model the link allows, whichever is faster, as gcc
+            // does, so `-ftls-model=global-dynamic` changes nothing.
+            _ if arg.starts_with("-ftls-model=") => {
+                let value = &arg["-ftls-model=".len()..];
+                let Some(model) = rucc_target::TlsModel::from_gcc(value) else {
+                    return Err(err(format!("unknown TLS model `{value}`")));
+                };
+                opts.tls_model = model;
+            }
             _ if arg.starts_with("-mtls-dialect=")
                 && (x86 || arch == rucc_target::Arch::Aarch64) =>
             {
@@ -7775,6 +7786,20 @@ mod tests {
             let why = refused(&["--target=x86_64-linux-gnu", &flag, "-c", "a.c"]);
             assert!(why.contains("gnu or gnu2"), "{why}");
         }
+    }
+
+    /// `-ftls-model=` takes gcc's four spellings, and the last one wins.
+    #[test]
+    fn the_tls_model_is_read_in_gcc_spelling() {
+        let (opts, _) = compile(&["-c", "a.c"]);
+        assert_eq!(opts.tls_model, rucc_target::TlsModel::GlobalDynamic);
+        for model in rucc_target::TlsModel::all() {
+            let flag = format!("-ftls-model={}", model.gcc());
+            let (opts, _) = compile(&["-ftls-model=local-exec", &flag, "-c", "a.c"]);
+            assert_eq!(opts.tls_model, model);
+        }
+        let why = refused(&["-ftls-model=initial_exec", "-c", "a.c"]);
+        assert!(why.contains("unknown TLS model `initial_exec`"), "{why}");
     }
 
     /// The Ubuntu line: both frame pointer flags, and the leaf one is read in both directions.

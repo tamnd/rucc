@@ -21,7 +21,7 @@ use rucc_base::hash::{Map, Set};
 use rucc_base::{Idx, IdxRange, Symbol};
 use rucc_diag::Span;
 use rucc_lex::StringLiteral;
-use rucc_target::Isa;
+use rucc_target::{Isa, TlsModel};
 use rucc_types::{Prototype, RecordId, TypeId, VlaId};
 
 use crate::asm::{Asm, AsmId, AsmOperand, AsmOperandList, FileAsm, LabelList, StrList};
@@ -233,6 +233,7 @@ pub struct Tast {
     must_tail: Set<ExprId>,
     fentry_names: Map<DeclId, StrId>,
     fentry_sections: Map<DeclId, StrId>,
+    tls_models: Map<DeclId, TlsModel>,
     symvers: Map<DeclId, Vec<(String, Span)>>,
     btf_decl_tags: Map<DeclId, Vec<Vec<u8>>>,
     member_tags: Map<(RecordId, Symbol), Vec<Vec<u8>>>,
@@ -616,6 +617,18 @@ impl Tast {
     #[must_use]
     pub fn fentry_name(&self, decl: DeclId) -> Option<StrId> {
         self.fentry_names.get(&decl).copied()
+    }
+
+    /// Records the model `__attribute__((tls_model("...")))` asked for on a thread-local variable.
+    /// A later declaration replaces what an earlier one said, as in gcc.
+    pub fn record_tls_model(&mut self, decl: DeclId, model: TlsModel) {
+        self.tls_models.insert(decl, model);
+    }
+
+    /// The model this thread-local variable asked for, and nothing when `-ftls-model=` decides.
+    #[must_use]
+    pub fn tls_model(&self, decl: DeclId) -> Option<TlsModel> {
+        self.tls_models.get(&decl).copied()
     }
 
     /// Records the section `__attribute__((fentry_section("name")))` asked the address of the
