@@ -41,6 +41,7 @@ int f(int *p, int n) {
 /// A program whose exit status says whether the value came out of the loop right: the sum of the
 /// first three, then the sum of the first three times ten plus the negative fourth that took the
 /// label.
+#[cfg(target_arch = "aarch64")]
 const RUNS: &str = r#"
 __attribute__((noinline)) int f(int *p, int n) {
     int s = 0;
