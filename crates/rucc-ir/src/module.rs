@@ -649,7 +649,14 @@ pub struct Copies {
     pub next: Option<BytePos>,
     /// Every copy so far, in increasing order of where its positions start.
     sites: Vec<Site>,
+    /// The declarations of the copies, as the copy each one is in and the number it has in the
+    /// body the copy came from. See [`Copies::name`].
+    decls: Vec<(usize, u32)>,
 }
+
+/// Where the numbers [`Copies::name`] gives start. The front end numbers the declarations of a
+/// unit from zero, and no unit has this many.
+pub const COPIED: u32 = 1 << 31;
 
 /// One body the inliner copied into a caller.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -693,6 +700,27 @@ impl Copies {
         self.next = Some(end.checked_add(1).filter(|&next| next < BytePos::MAX)?);
         self.sites.push(Site { at, of, call, callee });
         Some(self.sites.len() - 1)
+    }
+
+    /// A number of its own for the declaration `decl` of the body in `site`, or `None` when the
+    /// numbers have run out.
+    ///
+    /// Each copy holds the names the body holds, and a debugger has to tell the `n` of one copy
+    /// apart from the `n` of another copy and of the function, so the copy does not keep the
+    /// number the front end gave. The number is past [`COPIED`], and [`Copies::named`] gives the
+    /// pair back.
+    pub fn name(&mut self, site: usize, decl: u32) -> Option<u32> {
+        let number = COPIED.checked_add(u32::try_from(self.decls.len()).ok()?)?;
+        self.decls.push((site, decl));
+        Some(number)
+    }
+
+    /// The copy and the declaration of its body that a number from [`Copies::name`] stands for,
+    /// and `None` for a number the front end gave.
+    #[must_use]
+    pub fn named(&self, number: u32) -> Option<(usize, u32)> {
+        let at = number.checked_sub(COPIED)?;
+        self.decls.get(usize::try_from(at).ok()?).copied()
     }
 
     /// Where `span`, which starts at or after `from`, lands in `site` when `from` is where the
@@ -1323,5 +1351,24 @@ mod tests {
         }));
         assert_eq!(module[int_node].parent(), Some(char_node));
         assert_eq!(module.metadata().count(), 2);
+    }
+
+    /// A declaration of a copy has a number of its own, and the number gives back the copy and
+    /// the declaration of the body. A number the front end gave is no copy's.
+    #[test]
+    fn a_declaration_of_a_copy_has_a_number_of_its_own() {
+        let mut names = Interner::new();
+        let mut copies = Copies { next: Some(100), ..Copies::default() };
+        let of = Span::new(10, 20);
+        let first = copies.make(of, Span::new(30, 31), names.intern("f")).expect("a copy");
+        let second = copies.make(of, Span::new(40, 41), names.intern("f")).expect("a copy");
+        let one = copies.name(first, 7).expect("a number");
+        let two = copies.name(second, 7).expect("a number");
+        assert_ne!(one, two);
+        assert!(one >= COPIED && two >= COPIED);
+        assert_eq!(copies.named(one), Some((first, 7)));
+        assert_eq!(copies.named(two), Some((second, 7)));
+        assert_eq!(copies.named(7), None);
+        assert_eq!(copies.named(two + 1), None);
     }
 }
