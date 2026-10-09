@@ -823,6 +823,35 @@ pub static WASM32_BASIC_C: AbiDescription = AbiDescription {
     cleanup: Cleanup::Caller,
 };
 
+/// The wasm32 Basic C ABI when the unit is built with `-msimd128`, which is what clang does then.
+///
+/// The same as [`WASM32_BASIC_C`] except for a vector, or a structure or a union that holds only
+/// one. Such a value is one `v128` for each sixteen bytes of it in place of one parameter for each
+/// lane, and a vector of sixteen bytes or less comes back as one `v128`. A wider one comes back
+/// through the hidden pointer, the same as any aggregate. clang 23 passes a `v8si` as two `v128`
+/// and returns it through the pointer, and it passes and returns a `v1di` and a `v2hi` as one
+/// `v128` each.
+///
+/// The rule changes the signature of a function with a vector parameter. So an object built with
+/// the flag and an object built without it do not agree about such a function, which is true of
+/// clang too.
+pub static WASM32_SIMD128: AbiDescription = AbiDescription {
+    name: "wasm32 Basic C simd128",
+    returns: &[
+        Rule::new(Test::Empty, Travel::Ignore),
+        Rule::new(Test::WholeVector { limit: 16 }, Travel::AsFound),
+        Rule::new(Test::SingleScalar, Travel::AsFound),
+        Rule::new(Test::Anything, Travel::ByReference),
+    ],
+    arguments: &[
+        Rule::new(Test::Empty, Travel::Ignore),
+        Rule::new(Test::WholeVector { limit: u64::MAX }, Travel::AsFound),
+        Rule::new(Test::SingleScalar, Travel::AsFound),
+        Rule::new(Test::Anything, Travel::ByReference),
+    ],
+    ..WASM32_BASIC_C
+};
+
 /// The ABI a function of that convention follows on this target, which is [`for_target`] for the
 /// target's own, the other description on x86-64 for the other one, and the `stdcall` or
 /// `fastcall` description of the same runtime on 32-bit x86. Outside Windows that is the one for a
@@ -894,6 +923,7 @@ pub static DESCRIBED: &[&AbiDescription] = &[
     &I386_MSVC_STDCALL,
     &I386_MSVC_FASTCALL,
     &WASM32_BASIC_C,
+    &WASM32_SIMD128,
 ];
 
 /// The ABI this target follows, and [`None`] for one whose ABI is not described yet.

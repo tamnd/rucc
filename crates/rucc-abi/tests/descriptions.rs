@@ -84,6 +84,7 @@ fn as_found_only_follows_a_test_that_finds_something() {
                             | Test::LoneFloat
                             | Test::SingleScalar
                             | Test::Vector
+                            | Test::WholeVector { .. }
                             | Test::Eightbytes { .. }
                     ),
                     "{}'s {which} list travels as found after {:?}, which finds nothing",

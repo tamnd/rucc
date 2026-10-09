@@ -374,6 +374,10 @@ fn travel(
 pub(crate) fn slot_type(slot: Slot) -> Type {
     match slot {
         Slot::Integer { size, .. } => Type::int(size.next_power_of_two().clamp(1, 16) * 8),
+        // A vector of `size` bytes, which the wasm backend holds in one `v128`. A vector of one
+        // byte is two lanes, because a type of one lane is a scalar, and the walk is what keeps
+        // the second lane from reaching past the object.
+        Slot::Vector { size, .. } => Type::vector(Type::int(8), size.max(2)),
         Slot::Float { format, .. } => match repr::ir_format(format) {
             Some(format) => Type::float(format),
             // A format the IR has no type for, which is `__bf16` in an aggregate. Sixteen bits
@@ -385,7 +389,8 @@ pub(crate) fn slot_type(slot: Slot) -> Type {
 
 /// How many bytes a load or a store of one slot touches.
 pub(crate) fn width(slot: Slot) -> u64 {
-    u64::from(slot_type(slot).bits().div_ceil(8))
+    let ty = slot_type(slot);
+    u64::from((ty.bits() * ty.lanes()).div_ceil(8))
 }
 
 /// The registers an object read off a variable argument list arrived in, which is empty for one
@@ -462,11 +467,13 @@ pub(crate) fn shape(types: &Types, target: &TargetInfo, ty: TypeId) -> Option<Sh
     Some(Shaped::Aggregate { size, align, pieces, complex, floating, vector })
 }
 
-/// Whether a type is a GNU vector, or a structure that clang passes as the vector it holds.
+/// Whether a type is a GNU vector, or a structure or a union that clang passes as the vector it
+/// holds.
 ///
-/// That is clang's single element structure: a `struct` whose one member with bytes in it fills it
-/// and is such a type itself, through any number of structures and arrays of one element. A
-/// `union` is not one. Only the wasm rule asks, see [`rucc_abi::Shape::vector`].
+/// That is clang's single element structure: a `struct` or a `union` whose one member with bytes
+/// in it fills it and is such a type itself, through any number of structures, unions and arrays
+/// of one element. A union of two vectors is not one, and clang 23 passes it as the address of a
+/// copy. Only the wasm rule asks, see [`rucc_abi::Shape::vector`].
 fn single_vector(types: &Types, target: &TargetInfo, ty: TypeId) -> bool {
     let id = types.canonical(ty);
     match types.kind(id) {
@@ -474,9 +481,6 @@ fn single_vector(types: &Types, target: &TargetInfo, ty: TypeId) -> bool {
         TypeKind::Array { elem, len: ArrayLen::Fixed(1) } => single_vector(types, target, elem),
         TypeKind::Record(record) => {
             let info = types.record_info(record);
-            if info.kind != RecordKind::Struct {
-                return false;
-            }
             let size = repr::size_of(types, target, id);
             let mut members = info.fields.iter().filter(|field| {
                 field.bits != Some(0) && repr::size_of(types, target, field.ty) > 0

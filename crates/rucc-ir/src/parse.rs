@@ -1394,6 +1394,11 @@ impl<'a, 'n> Parser<'a, 'n> {
                 self.expect("at")?;
                 Slot::Float { offset: self.u64()?, format }
             }
+            "vector" => {
+                let size = self.u32()?;
+                self.expect("at")?;
+                Slot::Vector { offset: self.u64()?, size }
+            }
             _ => return self.fail(format!("`{word}` is not how a slot is written")),
         };
         Ok(slot)

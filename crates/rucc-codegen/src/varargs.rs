@@ -557,6 +557,8 @@ fn in_a_register(slot: Slot) -> bool {
             format,
             Format::Half | Format::BFloat16 | Format::Single | Format::Double | Format::Quad
         ),
+        // Only the wasm rule with `simd128` makes one, and wasm has no register save area.
+        Slot::Vector { .. } => false,
     }
 }
 
@@ -771,6 +773,7 @@ fn width(slot: Slot) -> u64 {
     match slot {
         Slot::Integer { size, .. } => u64::from(size.next_power_of_two().clamp(1, 8)),
         Slot::Float { format, .. } => u64::from(format.width()).div_ceil(8),
+        Slot::Vector { size, .. } => u64::from(size),
     }
 }
 

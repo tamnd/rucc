@@ -1136,6 +1136,9 @@ pub struct TargetInfo {
     /// The callee's own copy is removed, so the unit grows by little. A native target keeps gcc's
     /// decisions.
     pub loop_hint: bool,
+    /// Whether the unit is built for wasm with `simd128`, which changes how a vector is passed.
+    /// See [`TargetInfo::with_simd128`].
+    pub simd128: bool,
 }
 
 /// The type a target's `__builtin_va_list` is.
@@ -1471,6 +1474,7 @@ impl TargetInfo {
             },
             selects_any: matches!(target.arch(), tuple::Arch::Wasm32),
             loop_hint: matches!(target.arch(), tuple::Arch::Wasm32),
+            simd128: false,
         }
     }
 
@@ -1485,6 +1489,17 @@ impl TargetInfo {
         self.call_regs = Some(x86::regparm(registers, self.reg_struct_return)?);
         self.regparm = registers;
         Some(self)
+    }
+
+    /// The same target built with `-msimd128` or without it.
+    ///
+    /// Only wasm32 changes. With the feature a vector travels as `v128` values and not as its
+    /// lanes, which is `rucc_abi::abis::WASM32_SIMD128`, and the backend may hold a vector of
+    /// sixteen bytes or less in one `v128`.
+    #[must_use]
+    pub fn with_simd128(mut self, on: bool) -> Self {
+        self.simd128 = on && self.tuple.arch() == tuple::Arch::Wasm32;
+        self
     }
 
     /// The same target with a structure of one, two, four or eight bytes returned in registers,

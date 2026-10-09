@@ -55,6 +55,9 @@ impl TargetInfo {
     /// `rucc_abi::abis::for_target` says nothing about at all.
     #[must_use]
     pub fn call(&self) -> Option<Call> {
+        if self.simd128 {
+            return Some(abis::WASM32_SIMD128.call());
+        }
         abis::for_target(self.tuple).map(AbiDescription::call)
     }
 
@@ -76,6 +79,9 @@ impl TargetInfo {
         let stdcall_with_registers = convention == Convention::Stdcall && self.regparm > 0;
         if self.reg_struct_return || stdcall_with_registers {
             return self.call_regs?.under(convention).map(|regs| regs.abi.call());
+        }
+        if convention == Convention::Target {
+            return self.call();
         }
         abis::for_convention(self.tuple, convention).map(AbiDescription::call)
     }
