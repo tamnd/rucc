@@ -1374,6 +1374,9 @@ pub fn compile_recording(
     // somebody reads a variable's slot out of in a debugger and expects to see read.
     if flags.reloads {
         copies::reloads(&mut func, &moves, machine.shapes, (int, held), names);
+        // After the reloads, which fold a load into the instruction that wanted it, where this
+        // only ever takes out a copy between two registers.
+        copies::forward(&mut func, machine.shapes, machine.insts, (int, held), names);
     }
 
     // After the allocator's moves are cleaned up, because a number written twice into one register

@@ -26,6 +26,7 @@ All notable changes are recorded here. The format follows [Keep a Changelog](htt
 - The heap inliner grows its bound on a caller's frame by what the callee's own frame adds rather than every local the copy made, which takes an eighth off the compile of zstd_compress.c at `-O2` (#3511).
 - `__builtin_clz` and `__builtin_ctz` on i386 are `bsrl` or `bsfl` and a `cmov` for zero, as they already were on x86-64, where they were a dozen shifts and masks and a multiply. A `long long` count is one search per word and a `cmov` that picks one, down from about seventy instructions to seventeen. With `-mpopcnt`, `-mlzcnt` or `-mbmi`, i386 now uses `popcntl`, `lzcntl` and `tzcntl` too (#3512).
 - When a two address instruction reads a spilled value as the source it writes over, the value is now loaded straight into the answer's register. Before, it went into a scratch register first and was then copied over. On i386 that cuts zstd's huf_decompress.c from 12353 instructions to 12037 and its zstd_decompress_block.c from 17210 to 16944, and x86-64 gets smaller too (#3514).
+- A copy of a register into a scratch register, which the cleanup writes where a reload finds its word already in a register, is now gone. The instructions after it read the original register instead. That takes out more than half of the `movl %edi, %esi` copies in i386 output, saving 120 instructions in the 7.2.8 X32 md.c and 55 in zstd's huf_decompress.c (#3516).
 
 ### Added
 
