@@ -65,10 +65,12 @@
 //! what the pass knows: nothing here has to know what the value is, only that a move of one place
 //! into another with the same number would write what is there.
 //!
-//! The map starts empty at the top of every block, because what a register holds on the way in is
-//! whatever the block before it left, and which block that is depends on the path. A map carried
-//! across edges would be worth something on a straight line of blocks and is a dataflow problem
-//! rather than a walk, which is section 37.4's own answer for why this is the cheap half.
+//! The map starts empty at the top of a block that more than one edge comes into, because what a
+//! register holds on the way in is whatever the block before it left, and which block that is
+//! depends on the path. A block with one edge into it starts with what that block left, when it has
+//! been walked already, since there is only the one path. Merging the maps where paths meet is a
+//! dataflow problem rather than a walk, which is section 37.4's own answer for why this is the
+//! cheap half.
 //!
 //! # What clears it
 //!
@@ -195,9 +197,18 @@ pub fn clean(
     // Whether each opcode is a call or one the target does not have, asked once per opcode rather
     // than by name for every instruction. tamnd/rucc#2233.
     let mut stops: Map<Opcode, bool> = Map::default();
+    let only = only_ways_in(func);
+    let mut left: Map<Block, Holds> = Map::default();
     for block in blocks {
         let insts: Vec<Inst> = func.insts(block).collect();
-        let mut holds = Holds::default();
+        // What the one block that comes here left, when there is one and it has been walked. See
+        // `only_ways_in`.
+        let mut holds = match only.get(&block) {
+            Some(from) if func[block].params.is_empty() => {
+                left.get(from).cloned().unwrap_or_default()
+            }
+            _ => Holds::default(),
+        };
         let mut gone: Vec<Inst> = Vec::new();
         for inst in insts {
             // One of the allocator's own moves, which is the only kind of instruction this edits
@@ -245,8 +256,32 @@ pub fn clean(
         for inst in gone {
             func.remove_inst(inst);
         }
+        left.insert(block, holds);
     }
     cleaned
+}
+
+/// The block that is the only way into each block that has one.
+///
+/// The map [`clean`] walks a block with starts empty because what a register holds on the way in
+/// depends on the path, and with one way in there is one path. A block the branch in front of it
+/// falls into is the common case, and a value the allocator read back before the branch is read
+/// back again after it: drivers/md/md.c on i386 had 114 loads of a slot into the register that
+/// already held it, one block after the first. Only the edges count, so a landing pad, which the
+/// unwinder reaches and nothing branches to, has no way in here and starts empty. So does the
+/// entry, which the caller comes into whatever edges lead back to it.
+fn only_ways_in(func: &Func) -> Map<Block, Block> {
+    let mut ways: Map<Block, (Block, usize)> = Map::default();
+    for block in func.blocks() {
+        for call in &func[block].succs {
+            ways.entry(call.block).or_insert((block, 0)).1 += 1;
+        }
+    }
+    let entry = func.entry();
+    ways.into_iter()
+        .filter(|&(to, (_, count))| count == 1 && Some(to) != entry)
+        .map(|(to, (from, _))| (to, from))
+        .collect()
 }
 
 /// Takes out every store of the allocator's into a slot that none of its moves reads any more, and
@@ -690,7 +725,7 @@ fn copy(
 /// A value is a number and nothing more. Where it came from and what it means are questions this
 /// does not ask, because the only thing a move is taken out over is two places holding the same
 /// one.
-#[derive(Debug, Default)]
+#[derive(Debug, Default, Clone)]
 struct Holds {
     /// What is in each place, by the class it is a place of and the place itself, hashed with
     /// [`rucc_base::hash::Mix`] because this is asked about every register every instruction
@@ -758,7 +793,7 @@ impl Holds {
 
 #[cfg(test)]
 mod tests {
-    use rucc_mir::{Constraint, Mem, Opcode, Operand, Reg};
+    use rucc_mir::{BlockCall, Constraint, Mem, Opcode, Operand, Reg};
     use rucc_regalloc::moves::Move;
     use rucc_regalloc::rewrite::{At, Edit};
     use rucc_target::x86_64::{FRAME, GPR, MACHINE, R13, RAX, RBX, SYSV, XMM};
@@ -1460,5 +1495,44 @@ mod tests {
         func.build(block, sub).operand(answer).uses(Reg::physical(RBX), GPR).imm(1).finish();
         assert_eq!(forward(&mut func, &names), 0);
         assert_eq!(left(&func, block), 2);
+    }
+
+    /// A block with one edge into it starts out knowing what the block in front of it left in its
+    /// registers, so a word that block read back is still there for a reload at the top of this one.
+    #[test]
+    fn a_reload_in_a_block_with_one_way_in_sees_the_block_before() {
+        let (mut names, mut func, top) = empty();
+        let next = func.create_block();
+        func.succs_mut(top).push(BlockCall::to(next));
+        let spill = store(&mut func, &mut names, top, R10, 16);
+        let reload = load(&mut func, &mut names, next, R10, 16);
+        add(&mut func, &mut names, next, RAX, R10);
+        let mut moves = Moves::default();
+        moves.record(spill, out(top, 0, R10));
+        moves.record(reload, back(next, 0, R10));
+
+        assert_eq!(gone(&mut func, &moves, &mut names), 1);
+        assert_eq!(left(&func, next), 1, "the reload stayed");
+    }
+
+    /// A block two edges come into could be arriving from either, and only one of them read the
+    /// word back, so the reload at its top stays.
+    #[test]
+    fn a_reload_in_a_block_with_two_ways_in_stays() {
+        let (mut names, mut func, top) = empty();
+        let side = func.create_block();
+        let join = func.create_block();
+        func.succs_mut(top).push(BlockCall::to(side));
+        func.succs_mut(top).push(BlockCall::to(join));
+        func.succs_mut(side).push(BlockCall::to(join));
+        let spill = store(&mut func, &mut names, top, R10, 16);
+        add(&mut func, &mut names, side, R10, RAX);
+        let reload = load(&mut func, &mut names, join, R10, 16);
+        let mut moves = Moves::default();
+        moves.record(spill, out(top, 0, R10));
+        moves.record(reload, back(join, 0, R10));
+
+        assert_eq!(gone(&mut func, &moves, &mut names), 0);
+        assert_eq!(left(&func, join), 1);
     }
 }
