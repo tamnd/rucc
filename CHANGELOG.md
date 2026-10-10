@@ -13,6 +13,7 @@ All notable changes are recorded here. The format follows [Keep a Changelog](htt
 - ipa-cp reads each edge once and pushes a block parameter's constant only to the parameters it is passed to, instead of rescanning every edge of a caller until nothing moves: the pass on lvm.c goes from 40.8ms to 17.2ms with byte-identical output (#3535).
 - An ordered comparison of two `long long` on i386, and of two `__int128` on x86-64, is now a `cmp` of the low halves and an `sbb` of the high ones into a copy, and a branch on it is the jump on the flags the `sbb` left, as gcc writes it. It was three comparisons, three `setcc`, an `andb` and an `orb`. The layout now folds a branch on a byte written by a lone `setcc` into the jump on that condition. drivers/md/md.c at `-O2` for X32 goes from 25224 instructions to 24439, ipc/sem.c from 4634 to 4617 and arch/x86/events/intel/uncore.c from 4034 to 4026 (#3536).
 - A 64-bit equality with all ones on i386, and a 128-bit one on x86-64, is the `and` of the two halves compared with all ones. It used to be an `xor` of each half with all ones and an `or`, which came out as two `notl` and an `orl` where gcc writes `andl` and `cmpl $-1` (#3537).
+- The inliner's size estimate for a call with constant arguments cleans up only the blocks those constants reach, instead of the whole callee: each of the 17 measurements of the switch in ZSTD_CCtxParams_setParameter goes from about 2ms to 0.75ms and zstd_compress.c runs 2.8% fewer instructions at -O2, with byte-identical output (#3538).
 
 ## 0.30.0
 
