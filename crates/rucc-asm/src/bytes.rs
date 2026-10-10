@@ -1033,6 +1033,17 @@ impl Assembler<'_> {
                     Arg::Through => {
                         Value::Reg(self.phys(operands[defs(operands)], spelled)?, Width::Quad)
                     }
+                    // An immediate that is the address of a name is i386's, which a listing takes
+                    // to the assembler. See `fold::named_stores`.
+                    Arg::Imm if data.symbol.is_some() => {
+                        return Err(Error::Encode {
+                            func: self.name.to_owned(),
+                            opcode: spelled.to_owned(),
+                            why: "an immediate that is the address of a name is i386's, and this \
+                                  writes x86-64"
+                                .to_owned(),
+                        });
+                    }
                     Arg::Imm => Value::Imm(data.imm.map_or(0, |imm| self.func[imm].0)),
                     // The address a call or a jump reads where it goes from is the same bytes as
                     // any other address, and the star in its text is nothing in them.

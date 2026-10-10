@@ -1002,6 +1002,11 @@ pub fn compile_recording(
         fold::absolute(&mut func, machine.insts, names);
         fold::tables(&mut func, machine.insts, names);
     }
+    // i386 outside position independent code, where the address of a name is a number a store
+    // can carry. After the three above for the same reason as the kernel's.
+    if std::ptr::eq(machine.shapes, &x86::MACHINE) && !elsewhere.based() {
+        fold::named_stores(&mut func, names, machine.shapes);
+    }
     // AArch64's loads and stores carry the low bits of a variable's address, so its `add` goes.
     // After the folds above, which have nothing to say about a symbol on this machine, and before
     // allocation, while each address is one register written once.

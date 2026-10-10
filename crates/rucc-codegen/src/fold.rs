@@ -744,6 +744,85 @@ pub fn absolute(func: &mut mir::Func, insts: &FrameInsts, names: &mut Interner) 
     marked
 }
 
+/// Writes the address of a name straight into each store of it on i386, and gives back how many
+/// addresses that took.
+///
+/// Outside position independent code the address of a name on i386 is a number the linker fills
+/// in, and a store can carry it as its immediate. gcc writes `s->ops = &md_ops` as one
+/// `movl $md_ops, 4(%eax)`, where the selector writes a `leal md_ops, %ecx` and a store of `%ecx`.
+/// With the kernel's flags that is 268 instructions fewer in drivers/md/md.c.
+///
+/// All the readers or none of them, as with [`pages`]: a reader that is not a store keeps the
+/// `lea`, and then the stores that took the name save nothing and are four bytes longer each. A
+/// reader is a store of the whole word whose address does not read the register too. Run last
+/// among the folds before allocation, after [`addresses`] has handed what it could to the loads
+/// and stores, so a name that is read or written directly is still read that way.
+pub fn named_stores(func: &mut mir::Func, names: &mut Interner, machine: &MachineInsts) -> usize {
+    let lea = mir::Opcode::new(names.intern("x64.lea_32"));
+    let store = mir::Opcode::new(names.intern("x64.mov_mr_32"));
+    let carry = mir::Opcode::new(names.intern("x64.mov_mi_32"));
+    let mut leas = Vec::new();
+    let mut reads: Map<mir::Reg, Vec<(mir::Inst, usize)>> = Map::default();
+    let mut writes: Map<mir::Reg, usize> = Map::default();
+    for block in func.blocks().collect::<Vec<_>>() {
+        for inst in func.insts(block).collect::<Vec<_>>() {
+            if func[inst].opcode == lea && func[inst].mem.is_some_and(|mem| named_alone(func[mem]))
+            {
+                leas.push(inst);
+            }
+            for (at, operand) in func[func[inst].operands].iter().enumerate() {
+                if operand.role == Role::Use {
+                    reads.entry(operand.reg).or_default().push((inst, at));
+                } else {
+                    *writes.entry(operand.reg).or_default() += 1;
+                }
+            }
+        }
+    }
+    let carried = carried(func);
+    let mut cache = Reads::of(func);
+    let mut folded = 0;
+    for inst in leas {
+        let Some(&written) = func[func[inst].operands].first() else { continue };
+        if writes.get(&written.reg) != Some(&1) || carried.contains(&written.reg) {
+            continue;
+        }
+        let Some(readers) = reads.get(&written.reg).filter(|readers| !readers.is_empty()) else {
+            continue;
+        };
+        let stores = readers.iter().all(|&(reader, at)| {
+            func[reader].opcode == store
+                && at == 0
+                && func[reader].symbol.is_none()
+                && readers.iter().filter(|&&(other, _)| other == reader).count() == 1
+        });
+        if !stores {
+            continue;
+        }
+        let Some(address) = func[inst].mem.map(|mem| func[mem]) else { continue };
+        let mut set = Changes::new();
+        for &(reader, _) in readers {
+            let mut plan = Plan::of(func, reader);
+            let Some(amode) = plan.amode else { continue };
+            plan.opcode = carry;
+            plan.operands.remove(0);
+            plan.amode = Some(mir::Amode {
+                base: amode.base.map(|at| at - 1),
+                index: amode.index.map(|at| at - 1),
+                ..amode
+            });
+            plan.imm = Some(i64::from(address.disp));
+            plan.symbol = address.symbol;
+            set.rewrite(reader, plan);
+        }
+        set.remove(inst);
+        if set.commit(func, &mut cache, names, machine).is_ok() {
+            folded += 1;
+        }
+    }
+    folded
+}
+
 /// Rewrites each jump table under the kernel code model into the shape gcc writes there, and gives
 /// back how many.
 ///
