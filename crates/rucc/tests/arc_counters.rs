@@ -29,7 +29,7 @@ fn run(dir: &Path, args: &[&str]) -> (bool, String) {
     (out.status.success(), String::from_utf8_lossy(&out.stderr).into_owned())
 }
 
-/// The runtime half, with the record laid out the way gcc 14 and later lay it out, and the
+/// The runtime half, with the record laid out the way gcc 15 and later lay it out, and the
 /// program it counts. `skip` is taken out by its attribute and the runtime takes itself out the
 /// same way, so the listing is the three functions below it.
 #[cfg(all(target_os = "linux", target_arch = "x86_64"))]
@@ -40,7 +40,7 @@ struct ctr { unsigned num; long long *values; };
 struct fn { void *key; unsigned ident, lineno, cfg; struct ctr c[1]; };
 struct info {
   unsigned version; struct info *next; unsigned stamp, checksum; const char *filename;
-  void *merge[9]; unsigned n; struct fn **fns;
+  void *merge[10]; unsigned n; struct fn **fns;
 };
 static struct info *head;
 QUIET void __gcov_merge_add(void *p, unsigned n) {}

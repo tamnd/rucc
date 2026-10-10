@@ -70,12 +70,13 @@ impl Coverage {
 
     /// How many merge functions the record holds, one per kind of counter the version knows.
     ///
-    /// gcc 14 added condition counters to the eight that 10 had. The ones before 10 had nine of a
-    /// different set, which only matters for the length here.
+    /// gcc 14 added condition counters to the eight that 10 had, and gcc 15 added path counters.
+    /// The ones before 10 had nine of a different set, which only matters for the length here.
     #[must_use]
     pub fn counters(&self) -> u64 {
         match self.gnuc.0 {
-            14.. => 9,
+            15.. => 10,
+            14 => 9,
             10..=13 => 8,
             _ => 9,
         }
@@ -829,7 +830,8 @@ mod tests {
     #[test]
     fn the_record_has_as_many_merge_slots_as_the_kernel_s_copy_of_it() {
         // The same ladder as `GCOV_COUNTERS` in the kernel's `gcc_4_7.c`.
-        assert_eq!(claiming(16, 0).counters(), 9);
+        assert_eq!(claiming(16, 0).counters(), 10);
+        assert_eq!(claiming(15, 2).counters(), 10);
         assert_eq!(claiming(14, 1).counters(), 9);
         assert_eq!(claiming(13, 2).counters(), 8);
         assert_eq!(claiming(10, 1).counters(), 8);
