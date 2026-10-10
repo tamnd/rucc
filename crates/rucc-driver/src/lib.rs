@@ -34,6 +34,7 @@ pub mod compile;
 pub mod deps;
 pub mod dlltool;
 pub mod fetch;
+mod gcov;
 mod glibc;
 pub mod host;
 pub mod install;
@@ -3632,6 +3633,22 @@ pub fn parse_args(args: &[String]) -> Result<Action, CliError> {
     if !std_given && opts.gnuc_given && opts.target.env != rucc_target::Env::Msvc {
         opts.std = opts.gnuc.default_std();
         opts.gnu_extensions = true;
+    }
+    // The release the record of a coverage build claims, which is the release of the `libgcov.a`
+    // the link takes. A freestanding unit and one with no system headers are left out. That is a
+    // kernel, which has its own runtime and picks the layout of the record by `__GNUC__`. A
+    // release that was written is the way to ask for a record of that release, so it is left out
+    // too.
+    let counted = opts.profile_data.arcs || opts.profile_data.notes;
+    if counted
+        && opts.hosted
+        && !nostdinc
+        && !opts.gnuc_given
+        && opts.target.os == rucc_target::Os::Linux
+    {
+        opts.gcov = link::gcov_archive(opts.target, &link)
+            .and_then(|path| std::fs::read(path).ok())
+            .and_then(|bytes| gcov::release(&bytes));
     }
     if let Some(query) = query {
         return Ok(Action::Print(answer(&query, &opts, &link)?));

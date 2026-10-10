@@ -29,7 +29,7 @@ fn run(dir: &Path, args: &[&str]) -> (bool, String) {
     (out.status.success(), String::from_utf8_lossy(&out.stderr).into_owned())
 }
 
-/// The runtime half, with the record laid out the way gcc 14 and later lay it out, and the
+/// The runtime half, with the record laid out the way gcc 15 and later lay it out, and the
 /// program it counts. `skip` is taken out by its attribute and the runtime takes itself out the
 /// same way, so the listing is the three functions below it.
 #[cfg(all(target_os = "linux", target_arch = "x86_64"))]
@@ -40,7 +40,7 @@ struct ctr { unsigned num; long long *values; };
 struct fn { void *key; unsigned ident, lineno, cfg; struct ctr c[1]; };
 struct info {
   unsigned version; struct info *next; unsigned stamp, checksum; const char *filename;
-  void *merge[9]; unsigned n; struct fn **fns;
+  void *merge[10]; unsigned n; struct fn **fns;
 };
 static struct info *head;
 QUIET void __gcov_merge_add(void *p, unsigned n) {}
@@ -76,11 +76,14 @@ fn a_counted_program_hands_its_counts_to_gcov_init() {
     let dir = dir("run");
     std::fs::write(dir.join("a.c"), PROGRAM).expect("the fixture can be written");
     for level in ["-O0", "-O2"] {
-        let (ok, said) = run(&dir, &[level, "-fprofile-arcs", "a.c", "-o", "prog"]);
+        // The release is written, because the program brings its own runtime. A line that does
+        // not say one takes the release of the `libgcov.a` on the machine.
+        let args = [level, "-fgnuc-version=16", "-fprofile-arcs", "a.c", "-o", "prog"];
+        let (ok, said) = run(&dir, &args);
         assert!(ok, "{level}: {said}");
         let out = Command::new(dir.join("prog")).output().expect("what was linked can be run");
         assert!(out.status.success(), "{level}: the program got the wrong answer");
-        // `B60*` is gcc 16.0, which is what a line that does not say is taken to be. `work` runs
+        // `B60*` is gcc 16.0, which is the release the line says. `work` runs
         // twice and goes round its loop thirteen times, seven of them on the odd branch. `pick`
         // takes the default twice and each case once, and `main` is entered once and goes round
         // five times. Every other edge is the sum of these, which is why it has no counter.
@@ -146,6 +149,61 @@ fn turning_the_counters_back_off_gives_the_object_nobody_asked_for() {
     for name in ["__gcov_init", "__gcov_merge_add", "__gcov0.f", ".init_array.00101"] {
         assert!(on.windows(name.len()).any(|w| w == name.as_bytes()), "no {name} in the object");
     }
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// A program for `gcov`, with a line run ten times and a line never run.
+#[cfg(all(target_os = "linux", target_arch = "x86_64"))]
+const COVERED: &str = "\
+int twice(int x) {
+    return x * 2;
+}
+int main(void) {
+    int s = 0;
+    for (int i = 0; i < 10; i++)
+        s += twice(i);
+    if (s == 0)
+        return 1;
+    return 0;
+}
+";
+
+/// A program built with `--coverage` and linked with the `libgcov.a` of the GCC on the machine
+/// writes its counts, and `gcov` reads them. The record has to have the release of that library,
+/// or the library writes nothing. The `gcov` is the one of the release that wrote the counts,
+/// since a machine can have the runtime of a newer GCC than its `gcov`. Left out on a machine with
+/// no `gcov`.
+#[cfg(all(target_os = "linux", target_arch = "x86_64"))]
+#[test]
+fn gcov_reads_the_counts_of_a_covered_program() {
+    if Command::new("gcov").arg("--version").output().is_err() {
+        return;
+    }
+    let dir = dir("gcov");
+    std::fs::write(dir.join("b.c"), COVERED).expect("the fixture can be written");
+    let (ok, said) = run(&dir, &["--coverage", "-c", "b.c", "-o", "b.o"]);
+    assert!(ok, "{said}");
+    let (ok, said) = run(&dir, &["--coverage", "b.o", "-o", "prog"]);
+    assert!(ok, "{said}");
+    let out = Command::new(dir.join("prog")).output().expect("what was linked can be run");
+    let said = String::from_utf8_lossy(&out.stderr);
+    assert!(out.status.success(), "the program got the wrong answer: {said}");
+    let counts = std::fs::read(dir.join("b.gcda")).expect("the counts were written");
+    // The version word after the magic, such as `B52*` for 15.2, gives the major release.
+    let word = words(&counts[..8])[1].to_be_bytes();
+    let major = u32::from(word[0] - b'A') * 10 + u32::from(word[1] - b'0');
+    let named = format!("gcov-{major}");
+    let gcov = match Command::new(&named).arg("--version").output() {
+        Ok(_) => named.as_str(),
+        Err(_) => "gcov",
+    };
+    let out = Command::new(gcov).arg("b.c").current_dir(&dir).output().expect("gcov starts");
+    let said = String::from_utf8_lossy(&out.stderr);
+    assert!(out.status.success(), "{gcov}: {said}");
+    let listing = std::fs::read_to_string(dir.join("b.c.gcov")).expect("gcov wrote a listing");
+    // The body of `twice` ran ten times, and the early return never ran.
+    assert!(listing.contains("10:    2:"), "{listing}");
+    assert!(listing.contains("#####:    9:"), "{listing}");
     let _ = std::fs::remove_dir_all(&dir);
 }
 
