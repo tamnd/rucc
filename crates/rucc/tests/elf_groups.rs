@@ -3,7 +3,8 @@
 //! The kernel's `ELFNOTE` wants `@note` to be `SHT_NOTE`, its linker script keeps sections that are
 //! declared and empty, `retpoline.S` puts every thunk in a COMDAT group of its own, and
 //! `__retain` wants `SHF_GNU_RETAIN`. Each is checked against what llvm-mc and gas write for the
-//! same file. See tamnd/rucc#2273.
+//! same file. See tamnd/rucc#2273. The probes of `sys/sdt.h` put their note in the group of the
+//! section they are in with the `?` flag.
 
 use std::path::PathBuf;
 use std::process::Command;
@@ -15,10 +16,16 @@ const SOURCE: &str = "\
 \t.section .text.__x86_indirect_thunk_rax,\"axG\",@progbits,__x86_indirect_thunk_rax,comdat
 \t.globl __x86_indirect_thunk_rax
 __x86_indirect_thunk_rax:
+\t.pushsection .note.stapsdt,\"?\",\"note\"
+\t.long 8, 4, 3
+\t.popsection
 \tret
 \t.section .data.plain,\"awG\",@progbits,grp
 \t.long 1
 \t.section .text.kept,\"axR\",@progbits
+\t.pushsection .note.stapsdt,\"?\",\"note\"
+\t.long 8, 4, 3
+\t.popsection
 \tret
 \t.section .gnu.linkonce.t.foo,\"ax\"
 \t.linkonce discard
@@ -121,5 +128,28 @@ fn each_group_holds_its_sections_and_only_comdat_ones_say_so() {
         assert_ne!(headers[at].flags & SHF_GROUP, 0, "{member}");
         let group = groups.iter().find(|g| g[1..].contains(&at)).expect(member);
         assert_eq!(group[0] == GRP_COMDAT, comdat, "{member}: {group:?}");
+    }
+}
+
+#[test]
+fn a_probe_note_goes_in_the_group_of_the_code_it_is_in() {
+    let bytes = object("probes");
+    let headers = headers(&bytes);
+    let thunk = headers.iter().position(|h| h.name == ".text.__x86_indirect_thunk_rax").unwrap();
+    let group = headers
+        .iter()
+        .filter(|h| h.kind == SHT_GROUP)
+        .map(|h| (0..h.size / 4).map(|n| word(&bytes, h.offset + n * 4, 4)).collect::<Vec<_>>())
+        .find(|g| g[1..].contains(&thunk))
+        .expect("the thunk is in a group");
+    let notes: Vec<usize> =
+        (0..headers.len()).filter(|&at| headers[at].name == ".note.stapsdt").collect();
+    assert_eq!(notes.len(), 2, "{headers:#?}");
+    let (grouped, plain): (Vec<usize>, Vec<usize>) =
+        notes.iter().partition(|&&at| headers[at].flags & SHF_GROUP != 0);
+    assert_eq!((grouped.len(), plain.len()), (1, 1), "{headers:#?}");
+    assert!(group[1..].contains(&grouped[0]), "{group:?}");
+    for at in notes {
+        assert_eq!(headers[at].kind, SHT_NOTE, "{:?}", headers[at]);
     }
 }
