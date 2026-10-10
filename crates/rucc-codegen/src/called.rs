@@ -12,6 +12,10 @@
 //! - A copy out of a register the call keeps, with nothing that writes that register between the
 //!   copy and the call. The register then holds the value until the call returns.
 //! - A constant written into the register.
+//! - The instruction an argument of the caller arrives through, or a copy of a register that
+//!   instruction wrote with nothing that writes it between. The value is then what that register
+//!   held when the caller started, and a debugger finds it at the call one level further out. This
+//!   is a parameter of the caller passed on unchanged, and GCC says the same thing for it.
 //!
 //! Anything else gives no answer for that argument, and a debugger then says the parameter is not
 //! available, as it does today. Only the block of the call is searched, since the layout and the
@@ -58,22 +62,31 @@ pub fn sites(
                     continue;
                 }
                 let class = operand.class;
-                let Some(&last) =
-                    insts[..at].iter().rev().find(|&&before| writes(func, before, class, reg))
+                let Some(wrote) =
+                    insts[..at].iter().rposition(|&before| writes(func, before, class, reg))
                 else {
                     continue;
                 };
+                let last = insts[wrote];
                 let data = &func[last];
-                let was = if moves.get(usize::from(class.number())) == Some(&data.opcode) {
+                let was = if arrives(func, last, shapes, names) {
+                    Was::Entry { reg, class }
+                } else if moves.get(usize::from(class.number())) == Some(&data.opcode) {
                     let Some(from) = read(func, last, class) else { continue };
-                    let mut after =
-                        insts[..at].iter().skip_while(|&&before| before != last).skip(1);
-                    if !keeps(conv, class, from)
-                        || after.any(|&between| writes(func, between, class, from))
+                    let written = |&between: &Inst| writes(func, between, class, from);
+                    if keeps(conv, class, from) && !insts[wrote + 1..at].iter().any(written) {
+                        Was::Reg { reg: from, class }
+                    } else if insts[..wrote]
+                        .iter()
+                        .rev()
+                        .find(|&before| written(before))
+                        .is_some_and(|&first| arrives(func, first, shapes, names))
                     {
+                        // The copy read the register before anything but the argument wrote it.
+                        Was::Entry { reg: from, class }
+                    } else {
                         continue;
                     }
-                    Was::Reg { reg: from, class }
                 } else if data.opcode == imm && class == conv.int_class {
                     let Some(number) = data.imm.map(|at| func[at].0) else { continue };
                     Was::Constant(number as u64)
@@ -97,6 +110,14 @@ pub fn sites(
 fn carries(conv: &CallRegs, class: RegClass, reg: PhysReg) -> bool {
     (class == conv.int_class && conv.int_args.contains(&reg))
         || (class == conv.sse_class && conv.sse_args.contains(&reg))
+}
+
+/// Whether that instruction is the one an argument arrives through.
+///
+/// It is at the top of the entry block and encodes to nothing, so the register it writes holds what
+/// it held when the function started until the next instruction that writes it.
+fn arrives(func: &Func, inst: Inst, shapes: &MachineInsts, names: &Interner) -> bool {
+    shapes.arrives(names.resolve(func[inst].opcode.name()))
 }
 
 /// Whether a call leaves that register as it found it.

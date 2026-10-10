@@ -2646,6 +2646,10 @@ fn sites(
                     None => continue,
                 },
                 rucc_mir::Was::Constant(value) => rucc_debug::Held::Constant(value),
+                rucc_mir::Was::Entry { reg, class } => match regs.dwarf(class, reg) {
+                    Some(from) => rucc_debug::Held::Entry(from),
+                    None => continue,
+                },
             };
             args.push((number, held));
         }

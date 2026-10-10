@@ -573,7 +573,13 @@ fn sites<'a>(
             match held {
                 Held::Reg(number) => value.op_breg(gimli::Register(number), 0),
                 Held::Constant(number) => value.op_constu(number),
-                Held::Frame(_) | Held::Local(_) | Held::Entry(_) => continue,
+                // The caller's own entry value, which a debugger reads at the call one further out.
+                Held::Entry(number) => {
+                    let mut entry = gimli::write::Expression::new();
+                    entry.op_reg(gimli::Register(number));
+                    value.op_entry_value(entry);
+                }
+                Held::Frame(_) | Held::Local(_) => continue,
             }
             let mut location = gimli::write::Expression::new();
             location.op_reg(gimli::Register(reg));
@@ -1207,6 +1213,21 @@ mod tests {
         // The first argument is in rdi and its value is what rbx holds.
         assert!(holds(&info, ".debug_info", &[1, gimli::DW_OP_reg5.0]));
         assert!(holds(&info, ".debug_info", &[2, gimli::DW_OP_breg3.0, 0]));
+    }
+
+    /// An argument that is the caller's own parameter passed on unchanged is the value its
+    /// register had when the caller started.
+    #[test]
+    fn a_call_can_pass_on_what_the_caller_was_given() {
+        let mut unit = calling("g");
+        unit.funcs[0].calls[0].args = vec![(5, Held::Entry(4))];
+        let info = write(&unit).expect("sections");
+        let entry = gimli::DW_OP_entry_value.0;
+        assert!(holds(
+            &info,
+            ".debug_info",
+            &[1, gimli::DW_OP_reg5.0, 3, entry, 1, gimli::DW_OP_reg4.0]
+        ));
     }
 
     /// A call to a function the unit defines names the entry of that function, and the unit gets
