@@ -70,7 +70,7 @@ pub use crate::abi::{
     Shape, Slot, Variadic,
 };
 pub use crate::bits::BitInsts;
-pub use crate::branch::{Bit, BranchInsts, Fusion, Move, Zero};
+pub use crate::branch::{Bit, BranchInsts, Fusion, Move, Reading, Zero};
 pub use crate::counts::{BitCount, CountInst};
 pub use crate::flags::{Compare, FlagInsts, Reader, Reads, Zeroing};
 pub use crate::frame::{

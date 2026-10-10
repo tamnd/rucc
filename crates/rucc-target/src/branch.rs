@@ -135,6 +135,11 @@ pub struct BranchInsts {
     ///
     /// Empty is a target that does not do this, and the layout then writes the test every time.
     pub fused: &'static [Fusion],
+    /// The bytes written from the condition state some instruction in front of them left, and the
+    /// two jumps a branch on such a byte becomes once the byte is taken out.
+    ///
+    /// Empty is a target that writes no such byte ahead of a branch, and the layout then tests it.
+    pub readings: &'static [Reading],
     /// The conditional moves a select on a comparison's answer can become.
     ///
     /// Empty is a target that does not do this, and every select keeps the test of its byte.
@@ -168,6 +173,21 @@ pub struct Fusion {
     /// Goes to the block's first successor when the comparison held.
     pub if_true: &'static str,
     /// Goes to the block's first successor when the comparison did not hold.
+    pub if_false: &'static str,
+}
+
+/// A byte written from the condition state, and the two jumps a branch on it becomes.
+///
+/// What wrote the state is whatever is in front of the byte, which is the difference from a
+/// [`Fusion`]: there is no comparison to keep, so the byte goes and the jump reads the state the
+/// instruction before it left.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Reading {
+    /// The instruction that writes the byte.
+    pub set: &'static str,
+    /// Goes to the block's first successor when the byte would have been one.
+    pub if_true: &'static str,
+    /// Goes to the block's first successor when the byte would have been nought.
     pub if_false: &'static str,
 }
 

@@ -38,6 +38,7 @@ use rucc_tuple::Arch;
 
 use crate::abi;
 use crate::bits;
+use crate::borrow;
 use crate::bytes;
 use crate::called;
 use crate::carry;
@@ -934,6 +935,8 @@ pub fn compile_recording(
     // name. See [`crate::carry`].
     if machine.shapes.prefix == "x64." {
         carry::carries(&mut func, machine.shapes, names);
+        // The same moment for the same reason. See [`crate::borrow`].
+        borrow::borrows(&mut func, machine.shapes, names);
         // The same moment for the same reason. See [`crate::double`].
         double::doubles(&mut func, machine.shapes, names);
         // After both, which write instructions of their own. See [`crate::fresh`].
