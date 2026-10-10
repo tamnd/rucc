@@ -319,6 +319,40 @@ pub fn addresses(
     pending: &mut Pending<'_>,
     absolute: bool,
 ) -> usize {
+    folds(func, insts, machine, names, pending, absolute, false)
+}
+
+/// Folds the address of a name into the one memory operand that reads it, where the address of a
+/// name is a number, and gives back how many.
+///
+/// The second run [`addresses`] says finds nothing does find these. `types[i].f` is a `lea` of
+/// `types`, a multiply and an addition of the two, and the load reads the addition. The first run
+/// folds the addition into the load, `8(%ecx,%eax,1)`, but the `lea` had already been read by the
+/// addition and left the table by then, so it stays: `leal types, %ecx` in front of the load where
+/// gcc writes `movl types+8(%eax), %ecx`. A second run of the whole fold also hands frame
+/// addresses and sums on to readers further along, which moves the allocation around: ipc/sem.c
+/// came out 12 instructions longer that way, and most of what the other files gained was the
+/// allocator picking differently rather than a fold. So this run only takes names.
+pub fn names(
+    func: &mut mir::Func,
+    insts: &FrameInsts,
+    machine: &MachineInsts,
+    names: &mut Interner,
+    pending: &mut Pending<'_>,
+) -> usize {
+    folds(func, insts, machine, names, pending, true, true)
+}
+
+/// The fold of [`addresses`] and of [`names`], the second when `named` is set.
+fn folds(
+    func: &mut mir::Func,
+    insts: &FrameInsts,
+    machine: &MachineInsts,
+    names: &mut Interner,
+    pending: &mut Pending<'_>,
+    absolute: bool,
+    named: bool,
+) -> usize {
     let lea = mir::Opcode::new(names.join(insts.prefix, insts.lea));
     let sum = mir::Opcode::new(names.join(insts.prefix, insts.sum));
     let step = mir::Opcode::new(names.join(insts.prefix, insts.add));
@@ -381,6 +415,9 @@ pub fn addresses(
             if func[inst].opcode == lea {
                 let room = if held.contains(&inst) { FRAME_READERS } else { usize::MAX };
                 let Some(address) = func[inst].mem.map(|mem| func[mem]) else { continue };
+                if named && !named_alone(address) {
+                    continue;
+                }
                 match folding_def(func, &reads, inst) {
                     Some((reg, wanted))
                         if wanted <= room && (wanted == 1 || fits_every_reader(address)) =>
@@ -389,6 +426,7 @@ pub fn addresses(
                     }
                     _ => {}
                 }
+            } else if named {
             } else if func[inst].opcode == sum {
                 let Some(address) = summed(func, inst) else { continue };
                 if let Some((reg, wanted)) = folding_def(func, &reads, inst) {
@@ -1369,7 +1407,14 @@ fn candidate(
     }
     if let Some((operand, _)) = scaled {
         operands.push(operand);
-        amode.index = Some(u8::try_from(operands.len() - 1).ok()?);
+        let at = Some(u8::try_from(operands.len() - 1).ok()?);
+        // An index at a scale of one with no base beside it is a base, which needs no index byte
+        // and is a byte shorter: `types+8(%eax)` rather than `types+8(,%eax,1)`, as gcc writes it.
+        if amode.base.is_none() && amode.scale == 1 && amode.widen.is_none() {
+            amode.base = at;
+        } else {
+            amode.index = at;
+        }
     }
     Some(Folding { into: inst, base, operands, amode })
 }

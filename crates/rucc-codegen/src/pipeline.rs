@@ -971,15 +971,14 @@ pub fn compile_recording(
         arguments: &mut stack.arguments,
         dynamic: &mut stack.dynamic,
     };
-    fold::addresses(
-        &mut func,
-        machine.insts,
-        machine.shapes,
-        names,
-        &mut pending,
-        flags.code_model == CodeModel::Kernel
-            || (std::ptr::eq(machine.shapes, &x86::MACHINE) && !elsewhere.based()),
-    );
+    let absolute = flags.code_model == CodeModel::Kernel
+        || (std::ptr::eq(machine.shapes, &x86::MACHINE) && !elsewhere.based());
+    fold::addresses(&mut func, machine.insts, machine.shapes, names, &mut pending, absolute);
+    // Where the address of a name is a number, the names the first run left behind a sum it
+    // folded, see `fold::names`.
+    if absolute {
+        fold::names(&mut func, machine.insts, machine.shapes, names, &mut pending);
+    }
 
     // After that fold rather than before it, because what this puts inside an arithmetic
     // instruction is a load's addressing mode and a load whose address is still a `lea` in front of
