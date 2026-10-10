@@ -45,7 +45,7 @@
 
 use std::collections::HashMap;
 
-use crate::line::{Error, Function, Unit};
+use crate::line::{Error, Function, Unit, Version};
 use crate::shape::{
     Abstract, Constant, Encoding, Global, Held, Local, Member, Place, Qualifier, Reach, Shape, Sig,
     Spot,
@@ -129,12 +129,23 @@ pub(crate) fn describe(
         }
     }
     let origins = abstracted(dwarf, &unit.abstracts, files, &ids)?;
+    let mut made: Vec<(usize, UnitEntryId)> = Vec::with_capacity(funcs.len());
     for (index, func) in funcs.iter().enumerate() {
         let Some(sig) = &func.sig else { continue };
         let (said, at, nests) = defined(dwarf, func, sig, index, files, &ids, frames)?;
         tagged.extend(said);
         let refs = Refs { files, ids: &ids, frames: frames || func.frame_local.is_some() };
         tagged.extend(copies(dwarf, func, (at, &nests), index, &refs, &origins)?);
+        made.push((index, at));
+    }
+    // And the calls, once every function has its entry, since a call names the entry of the
+    // function it calls and that can be further down. Only DWARF 5 has the tags.
+    if unit.version == Version::Five {
+        let mut named: HashMap<&str, UnitEntryId> =
+            made.iter().map(|&(index, at)| (funcs[index].name.as_str(), at)).collect();
+        for &(index, at) in &made {
+            sites(dwarf, &funcs[index], at, index, &mut named)?;
+        }
     }
     for (index, global) in globals.iter().enumerate() {
         let at = held_at(dwarf, global, funcs.len() + index, files, &ids)?;
@@ -518,6 +529,61 @@ fn copies<'a>(
         made.push(child);
     }
     Ok(tagged)
+}
+
+/// A `DW_TAG_call_site` for each call a function makes that a debugger can learn an argument from.
+///
+/// Each one says the address the callee returns to and names the function it calls: the entry of
+/// that function when the unit has one, and otherwise a declaration of it, made once for the unit,
+/// which is what gcc writes. A debugger finds the function by that name and checks it against the
+/// frame it is stopped in. Each argument is a `DW_TAG_call_site_parameter` that names the register
+/// it was passed in and says the value as an expression, which for a register is the register's
+/// contents and not the register.
+fn sites<'a>(
+    dwarf: &mut gimli::write::DwarfUnit,
+    func: &'a Function,
+    at: UnitEntryId,
+    which: usize,
+    named: &mut HashMap<&'a str, UnitEntryId>,
+) -> Result<(), Error> {
+    for call in &func.calls {
+        let Ok(addend) = i64::try_from(call.returns) else {
+            let why = format!("a call returns {} bytes into {}", call.returns, func.name);
+            return Err(Error::Refused { why });
+        };
+        let callee = match named.get(call.callee.as_str()) {
+            Some(&callee) => callee,
+            None => {
+                let root = dwarf.unit.root();
+                let callee = dwarf.unit.add(root, gimli::DW_TAG_subprogram);
+                title(dwarf, callee, &call.callee);
+                flag(dwarf, callee, gimli::DW_AT_external);
+                flag(dwarf, callee, gimli::DW_AT_declaration);
+                named.insert(&call.callee, callee);
+                callee
+            }
+        };
+        let site = dwarf.unit.add(at, gimli::DW_TAG_call_site);
+        let back = gimli::write::Address::Symbol { symbol: which, addend };
+        let entry = dwarf.unit.get_mut(site);
+        entry.set(gimli::DW_AT_call_return_pc, AttributeValue::Address(back));
+        entry.set(gimli::DW_AT_call_origin, AttributeValue::UnitRef(callee));
+        for &(reg, held) in &call.args {
+            let mut value = gimli::write::Expression::new();
+            match held {
+                Held::Reg(number) => value.op_breg(gimli::Register(number), 0),
+                Held::Constant(number) => value.op_constu(number),
+                Held::Frame(_) | Held::Local(_) => continue,
+            }
+            let mut location = gimli::write::Expression::new();
+            location.op_reg(gimli::Register(reg));
+            let param = dwarf.unit.add(site, gimli::DW_TAG_call_site_parameter);
+            let entry = dwarf.unit.get_mut(param);
+            entry.set(gimli::DW_AT_location, AttributeValue::Exprloc(location));
+            entry.set(gimli::DW_AT_call_value, AttributeValue::Exprloc(value));
+        }
+    }
+    Ok(())
 }
 
 /// A `DW_TAG_lexical_block` for each of a function's inner scopes that has something to hold, and
@@ -1007,7 +1073,7 @@ fn reading(encoding: Encoding) -> gimli::DwAte {
 mod tests {
     use crate::line::{Row, Unit, write};
     use crate::shape::{
-        Abstract, Held, Inlined, Local, Member, Param, Place, Scope, Shape, Sig, Span, Spot,
+        Abstract, Call, Held, Inlined, Local, Member, Param, Place, Scope, Shape, Sig, Span, Spot,
     };
 
     use rucc_object::{Info, Reference};
@@ -1050,13 +1116,14 @@ mod tests {
                 scopes: Vec::new(),
                 tags: Vec::new(),
                 inlined: Vec::new(),
+                calls: Vec::new(),
             }],
             abstracts: Vec::new(),
             globals: Vec::new(),
             pointer: 8,
             frames: true,
             mach_o: false,
-            version: crate::Version::Five,
+            version: Version::Five,
         }
     }
 
@@ -1105,6 +1172,63 @@ mod tests {
         let held = info.chunks.iter().find(|chunk| chunk.name == ".debug_info").expect("a unit");
         assert!(held.relocs.iter().all(|reloc| reloc.symbol != "f"));
         assert!(named(&info).is_empty());
+    }
+
+    /// `f` with one call to this function in it, returning five bytes in, with a register and a
+    /// constant for arguments.
+    fn calling(callee: &str) -> Unit {
+        let mut unit = one();
+        unit.funcs[0].calls = vec![Call {
+            returns: 5,
+            callee: callee.to_owned(),
+            args: vec![(5, Held::Reg(3)), (4, Held::Constant(7))],
+        }];
+        unit
+    }
+
+    /// A call says where it returns to, names a declaration of a function the unit does not
+    /// define, and says each argument as the register it went in and a value.
+    #[test]
+    fn a_call_says_where_it_returns_and_what_its_arguments_were() {
+        let info = write(&calling("g")).expect("sections");
+        let unit = info.chunks.iter().find(|chunk| chunk.name == ".debug_info").expect("a unit");
+        let back = unit.relocs.iter().find(|reloc| reloc.symbol == "f" && reloc.addend == 5);
+        assert!(back.is_some(), "no return address, {:?}", unit.relocs);
+        assert!(named(&info).contains(&"g".to_owned()), "no declaration of the callee");
+        let abbrev = ".debug_abbrev";
+        assert!(holds(&info, abbrev, &pair(gimli::DW_AT_declaration, gimli::DW_FORM_flag_present)));
+        assert!(holds(&info, abbrev, &pair(gimli::DW_AT_call_value, gimli::DW_FORM_exprloc)));
+        // The first argument is in rdi and its value is what rbx holds.
+        assert!(holds(&info, ".debug_info", &[1, gimli::DW_OP_reg5.0]));
+        assert!(holds(&info, ".debug_info", &[2, gimli::DW_OP_breg3.0, 0]));
+    }
+
+    /// A call to a function the unit defines names the entry of that function, and the unit gets
+    /// no declaration.
+    #[test]
+    fn a_call_to_a_function_the_unit_defines_names_its_entry() {
+        let info = write(&calling("f")).expect("sections");
+        let abbrev = ".debug_abbrev";
+        assert!(holds(&info, abbrev, &pair(gimli::DW_AT_call_origin, gimli::DW_FORM_ref4)));
+        assert!(!holds(
+            &info,
+            abbrev,
+            &pair(gimli::DW_AT_declaration, gimli::DW_FORM_flag_present)
+        ));
+    }
+
+    /// DWARF 4 has no tag for a call, so a unit of that version says nothing about one.
+    #[test]
+    fn a_dwarf_4_unit_says_nothing_about_calls() {
+        let mut unit = calling("g");
+        unit.version = Version::Four;
+        let info = write(&unit).expect("sections");
+        assert!(!named(&info).contains(&"g".to_owned()));
+        assert!(!holds(
+            &info,
+            ".debug_abbrev",
+            &pair(gimli::DW_AT_call_value, gimli::DW_FORM_exprloc)
+        ));
     }
 
     /// Whether a section holds these bytes, in this order, somewhere in it.
@@ -1253,7 +1377,7 @@ mod tests {
     #[test]
     fn a_dwarf_4_local_that_moves_is_listed_in_the_older_section() {
         let mut unit = one();
-        unit.version = crate::Version::Four;
+        unit.version = Version::Four;
         unit.funcs[0].locals = vec![Local {
             name: "total".to_owned(),
             ty: Some(0),

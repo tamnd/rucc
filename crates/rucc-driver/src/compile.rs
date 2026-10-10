@@ -1839,7 +1839,7 @@ fn generate(
                 let info = if opts.debug_info {
                     let assembled =
                         placed(&read, &funcs, names, target).map_err(|why| vec![internal(&why)])?;
-                    describe(&assembled, &globals.image(), &funcs, origin, opts, target)
+                    describe(&assembled, &globals.image(), &funcs, names, origin, opts, target)
                         .map_err(|why| vec![internal(&why)])?
                 } else {
                     rucc_object::Info::default()
@@ -1863,7 +1863,7 @@ fn generate(
             // build asked for no debug information, which is the case the rows above are not even
             // recorded in.
             let info = if opts.debug_info {
-                describe(&assembled, &data, &funcs, origin, opts, target)
+                describe(&assembled, &data, &funcs, names, origin, opts, target)
                     .map_err(|why| vec![internal(&why)])?
             } else {
                 rucc_object::Info::default()
@@ -2014,6 +2014,7 @@ fn describe(
     assembled: &rucc_asm::Assembled,
     data: &rucc_object::Data,
     machine: &[rucc_mir::Func],
+    names: &Interner,
     origin: Origin<'_>,
     opts: &Options,
     target: &TargetInfo,
@@ -2195,6 +2196,9 @@ fn describe(
         for (copy, scope) in inlined.iter_mut().zip(&called) {
             copy.scope = scope.and_then(|scope| at.get(&scope).copied());
         }
+        // And the calls a debugger can learn an argument from, for a parameter of the callee that
+        // is only known as the value its register had on entry.
+        let calls = sites(extent, rows, built, names, target);
         funcs.push(rucc_debug::Function {
             name: extent.name.clone(),
             symbol: None,
@@ -2209,6 +2213,7 @@ fn describe(
             scopes,
             tags: known.map(|known| known.tags.clone()).unwrap_or_default(),
             inlined,
+            calls,
         });
     }
     // And the file-scope variables, from the objects the back end laid out rather than from the
@@ -2447,6 +2452,7 @@ fn describe_wasm(
             scopes,
             tags: known.map(|known| known.tags.clone()).unwrap_or_default(),
             inlined,
+            calls: Vec::new(),
         });
     }
     let mut globals = Vec::new();
@@ -2563,6 +2569,54 @@ fn stretches(
     }
     spots.retain(|(_, spans)| !spans.is_empty());
     spots
+}
+
+/// The calls one function makes that a debugger can learn an argument from, as the debug writer
+/// wants them.
+///
+/// The back end says which register each argument went in and where the caller still keeps its
+/// value, and this turns the registers into the target's DWARF numbers and the call into the
+/// address it returns to, which is the end of its row. A call through a pointer has no name to
+/// check the callee against, and a call with no argument known says nothing, so neither is here.
+fn sites(
+    extent: &rucc_object::Extent,
+    rows: &[rucc_asm::Row],
+    built: &rucc_mir::Func,
+    names: &Interner,
+    target: &TargetInfo,
+) -> Vec<rucc_debug::Call> {
+    let (false, Some(regs)) = (built.calls.is_empty(), target.call_regs) else {
+        return Vec::new();
+    };
+    let ends = ends(extent.len as u64, rows);
+    let mut back = vec![None; built.inst_count()];
+    for (which, row) in rows.iter().enumerate() {
+        let Some(inst) = row.inst else { continue };
+        back[inst.index()] = Some(ends[which]);
+    }
+    let mut out = Vec::with_capacity(built.calls.len());
+    for call in &built.calls {
+        let (Some(callee), Some(returns)) = (call.callee, back[call.inst.index()]) else {
+            continue;
+        };
+        let mut args = Vec::with_capacity(call.args.len());
+        for arg in &call.args {
+            let Some(number) = regs.dwarf(arg.class, arg.reg) else { continue };
+            let held = match arg.was {
+                rucc_mir::Was::Reg { reg, class } => match regs.dwarf(class, reg) {
+                    Some(from) => rucc_debug::Held::Reg(from),
+                    None => continue,
+                },
+                rucc_mir::Was::Constant(value) => rucc_debug::Held::Constant(value),
+            };
+            args.push((number, held));
+        }
+        if !args.is_empty() {
+            out.push(rucc_debug::Call { returns, callee: names.resolve(callee).to_owned(), args });
+        }
+    }
+    out.sort_by_key(|call| call.returns);
+    out
 }
 
 /// How far into a function an argument register still holds what the caller put in it.
