@@ -226,9 +226,10 @@ pub struct Layout<'a> {
     /// prologue has to put back like any other when the convention preserves one.
     ///
     /// Nothing on x86-64 or AArch64, whose protector uses the scratch registers no call preserves.
-    /// i386 has none of those to spare, so its canary goes through `esi` on the way in and the
-    /// check reads the guard into `ecx`, and `esi` is one a call preserves. See
-    /// [`crate::pipeline`].
+    /// i386 has none of those to spare, so its canary goes in through a register a call preserves
+    /// and the check reads it back into `ecx`. Any such register the prologue saves anyway will do
+    /// for the way in, so the first of these is saved for it only in a function that saves none,
+    /// and [`Frame::through`] says which it was. See [`crate::pipeline`].
     pub guarded: &'a [PhysReg],
     /// Whether the function is written without a prologue or an epilogue, which
     /// `__attribute__((naked))` asks for.
@@ -344,6 +345,7 @@ pub struct Frame {
     widths: Vec<u32>,
     locals: Vec<i32>,
     canary: Option<i32>,
+    through: Option<PhysReg>,
     outgoing: u32,
     below: u32,
     size: u32,
@@ -379,6 +381,9 @@ impl Frame {
         let push = conv.push;
         let aligned = push % conv.stack_align == 0;
         let (saved_int, vectors) = saved(func, allocation, layout);
+        let through = (layout.protect && !layout.guarded.is_empty())
+            .then(|| saved_int.iter().copied().find(|at| conv.int_saved.contains(at)))
+            .flatten();
 
         // The vector registers are saved in the frame rather than pushed, because no machine here
         // has an instruction that pushes one. Each takes the part of it a call keeps, which on
@@ -602,6 +607,7 @@ impl Frame {
             widths: slot_widths,
             locals,
             canary,
+            through,
             outgoing,
             below: shifted,
             size,
@@ -717,6 +723,13 @@ impl Frame {
     #[must_use]
     pub fn canary(&self) -> Option<i32> {
         self.canary
+    }
+
+    /// The register the prologue brings the canary in through, where that is one the prologue
+    /// saves rather than a scratch register, which is on i386. See [`Layout::guarded`].
+    #[must_use]
+    pub fn through(&self) -> Option<PhysReg> {
+        self.through
     }
 
     /// How many bytes the prologue takes off the stack pointer, which is nothing for a function
@@ -914,12 +927,15 @@ fn saved(
         }
     }
 
+    let conv = layout.conv;
     if layout.protect {
-        for &at in layout.guarded {
-            note(layout.conv.int_class, at);
+        let int = conv.int_class;
+        let spare = |at: &PhysReg| !(layout.frame_pointer && *at == conv.frame_pointer);
+        let any = conv.int_saved.iter().filter(|at| spare(at)).any(|&at| used.contains(&(int, at)));
+        if let (false, Some(&at)) = (any, layout.guarded.first()) {
+            used.push((int, at));
         }
     }
-    let conv = layout.conv;
     let wanted = |class: RegClass, at: PhysReg| used.contains(&(class, at));
     // In the convention's order rather than the order the function happened to reach for them, so
     // that two functions saving the same registers get the same prologue.

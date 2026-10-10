@@ -69,7 +69,9 @@
 use rucc_base::hash::Map;
 use rucc_base::{Interner, Symbol};
 use rucc_diag::Span;
-use rucc_mir::{Block, BlockCall, CfiOp, Func, Inst, Mem, Opcode, Operand, Patch, Reg, Role};
+use rucc_mir::{
+    Block, BlockCall, CfiOp, Func, Inst, Mem, Opcode, Operand, Patch, Reg, Role, Weight,
+};
 use rucc_regalloc::Allocation;
 use rucc_regalloc::assign::Place;
 use rucc_regalloc::rewrite::{At, Edit};
@@ -97,6 +99,19 @@ pub struct Protect<'a> {
     pub branch: &'a BranchInsts,
     /// The two registers the check may use, which are two the allocator never handed out.
     pub scratch: [PhysReg; 2],
+}
+
+/// Whether the stack protector's check compares the canary with the guard where the guard lives,
+/// which needs one register at a return rather than two.
+///
+/// Where the machine has an instruction that compares a register with memory and one address
+/// reaches the guard, which is everywhere but AArch64 and a guard whose address comes out of the
+/// global offset table.
+#[must_use]
+pub fn in_place(insts: &FrameInsts, guard: &Guard) -> bool {
+    insts.differs_from.is_some()
+        && insts.canary.is_none()
+        && !(guard.symbol.is_some() && guard.table)
 }
 
 /// What a function that takes its stack a page at a time needs beyond the frame.
@@ -261,7 +276,8 @@ impl Moves {
 ///
 /// Hands back which instruction each of the allocator's moves became, for the one pass that is
 /// allowed to take one of them out again. Also hands back the comparison in each loop that walks
-/// the stack a page at a time. The layout may join each of these with the branch behind it, as it
+/// the stack a page at a time, and then the comparison in each stack protector check. The layout
+/// may join each of these with the branch behind it, as it
 /// does for a comparison the lowering wrote.
 ///
 /// # Panics
@@ -276,7 +292,7 @@ pub fn finish(
     stack: &Stack,
     convention: Convention<'_>,
     names: &mut Interner,
-) -> (Moves, Vec<Inst>) {
+) -> (Moves, Vec<Inst>, Vec<Inst>) {
     let Convention { regs: conv, insts, protect, probe, landing, trace, pad, hooked, sign } =
         convention;
     let entry = func.entry().expect("a function with a block in it");
@@ -345,8 +361,19 @@ pub fn finish(
     let landing = landing.filter(|&name| {
         !(signing.is_some() && first && insts.targets.is_some_and(|t| t.call == name))
     });
-    let mut writer =
-        Writer { func, conv, insts, names, base, ahead: None, hooked, signing, loops: Vec::new() };
+    let mut writer = Writer {
+        func,
+        conv,
+        insts,
+        names,
+        base,
+        ahead: None,
+        hooked,
+        signing,
+        loops: Vec::new(),
+        checks: Vec::new(),
+        failed: None,
+    };
 
     let mut cursors: Map<At, Inst> = Map::default();
     let mut moves = Moves::default();
@@ -402,6 +429,24 @@ pub fn finish(
             |block: &Block| writer.func[*block].succs.is_empty() && !writer.func[*block].dead_end;
         writer.func.blocks().filter(returns).collect()
     };
+    // A protected function returns from one block, which every block that used to return jumps
+    // to, so that the check and the epilogue are written once rather than at every return. That is
+    // what gcc writes, and the check is five instructions and a branch where a jump is one. The
+    // answer is already in the registers it goes back in, which is all a return block hands on.
+    let returns = match protect {
+        Some(_) if returns.len() > 1 => {
+            let exit = writer.func.create_block();
+            let mut weight = 0u64;
+            for block in returns {
+                let taken = writer.func[block].weight;
+                weight = weight.saturating_add(taken.raw());
+                *writer.func.succs_mut(block) = vec![BlockCall::to(exit).taken(taken)];
+            }
+            writer.func.set_weight(exit, Weight::parts(weight));
+            vec![exit]
+        }
+        _ => returns,
+    };
     for block in returns {
         // The check goes in front of the epilogue and takes the return with it. What is left in
         // the block the function used to return from is the check, and the block the epilogue then
@@ -426,7 +471,7 @@ pub fn finish(
         let order: Vec<Block> = ahead.into_iter().chain(rest).collect();
         writer.func.set_block_order(&order);
     }
-    (moves, writer.loops)
+    (moves, writer.loops, writer.checks)
 }
 
 /// Points every access to the frame that its instruction cannot carry the offset of at a scratch
@@ -606,6 +651,14 @@ struct Writer<'a> {
     /// comparison set the flags and jump on them. That is two instructions fewer in each loop, and
     /// it is the shape that gcc writes and that `hardening-check` looks for.
     loops: Vec<Inst>,
+    /// The comparison in each stack protector check, which only the branch behind it reads, for
+    /// the same reason as [`Writer::loops`]. Kept apart because the layout places the blocks of a
+    /// loop that walks the stack in an order of their own, and a check is not one of those.
+    checks: Vec<Inst>,
+    /// The block that calls the function that does not come back when a canary has changed. One
+    /// for the whole function, made by the first check and jumped to by every one, which is what
+    /// gcc writes.
+    failed: Option<Block>,
 }
 
 impl Writer<'_> {
@@ -852,7 +905,7 @@ impl Writer<'_> {
         // write a slot rather than save a register, and no unwinder wants to put a canary back.
         if let Some(protect) = protect {
             let at = frame.canary().expect("a protected function has a slot for its canary");
-            let [into, _] = protect.scratch;
+            let into = frame.through().unwrap_or(protect.scratch[0]);
             let read = self.read_guard(into, protect.guard);
             out.extend(read);
             out.push(self.store(self.conv.int_class, into, at));
@@ -1276,23 +1329,46 @@ impl Writer<'_> {
         let class = self.conv.int_class;
         let at = frame.canary().expect("a protected function has a slot for its canary");
         let [ours, theirs] = protect.scratch;
+        let ours = frame.through().unwrap_or(ours);
 
-        let inst = self.load(class, ours, at);
-        self.func.append_inst(block, inst);
-        for inst in self.read_guard(theirs, protect.guard) {
+        // The guard read where it lives, where an instruction can compare a register with it and
+        // it is somewhere one address reaches. The canary comes back into the second register,
+        // since on i386 that is `ecx`, which holds nothing at a return.
+        let from = self.insts.differs_from.zip(self.guard_at(protect.guard));
+        let inst = if let Some((name, mem)) = from {
+            let inst = self.load(class, theirs, at);
             self.func.append_inst(block, inst);
-        }
-        let differ = self.opcode(self.insts.differ);
-        let inst = self
-            .func
-            .build_loose(differ)
-            .def(Reg::physical(theirs), class)
-            .uses(Reg::physical(ours), class)
-            .uses(Reg::physical(theirs), class)
-            .finish();
+            let opcode = self.opcode(name);
+            let inst = self.func.build_loose(opcode).def(Reg::physical(theirs), class);
+            inst.uses(Reg::physical(theirs), class).mem(mem).finish()
+        } else {
+            let inst = self.load(class, ours, at);
+            self.func.append_inst(block, inst);
+            for inst in self.read_guard(theirs, protect.guard) {
+                self.func.append_inst(block, inst);
+            }
+            let differ = self.opcode(self.insts.differ);
+            self.func
+                .build_loose(differ)
+                .def(Reg::physical(theirs), class)
+                .uses(Reg::physical(ours), class)
+                .uses(Reg::physical(theirs), class)
+                .finish()
+        };
         self.func.append_inst(block, inst);
+        self.checks.push(inst);
 
-        let failed = self.func.create_block();
+        let failed = match self.failed {
+            Some(failed) => failed,
+            None => {
+                let failed = self.func.create_block();
+                let call = self.opcode(self.insts.call);
+                let symbol = self.names.intern(protect.guard.fail);
+                self.func.build(failed, call).symbol(symbol).finish();
+                self.failed = Some(failed);
+                failed
+            }
+        };
         let ok = self.func.create_block();
         let cond = Opcode::new(self.names.join(protect.branch.prefix, protect.branch.cond));
         let inst = self.func.build_loose(cond).uses(Reg::physical(theirs), class).finish();
@@ -1300,11 +1376,26 @@ impl Writer<'_> {
         // The first arm is the one taken when the condition held, and the condition is that the
         // two words differ, so the first arm is the one the canary was overwritten on.
         *self.func.succs_mut(block) = vec![BlockCall::to(failed), BlockCall::to(ok)];
-
-        let call = self.opcode(self.insts.call);
-        let symbol = self.names.intern(protect.guard.fail);
-        self.func.build(failed, call).symbol(symbol).finish();
         ok
+    }
+
+    /// Where the word the canary is a copy of lives, when one address reaches it, which is every
+    /// guard but one read out of the global offset table and every machine but AArch64.
+    fn guard_at(&mut self, guard: &Guard) -> Option<Mem> {
+        if self.insts.canary.is_some() {
+            return None;
+        }
+        match guard.symbol {
+            None => {
+                let segment = guard.segment.expect("a guard with no symbol is in a segment");
+                Some(Mem::in_segment(segment, guard.at))
+            }
+            Some(_) if guard.table => None,
+            Some(name) => {
+                let symbol = self.names.intern(name);
+                Some(Mem { segment: guard.segment, ..Mem::of(symbol).plus(guard.at) })
+            }
+        }
     }
 
     /// Reads the word the canary is a copy of into a register.
@@ -1343,23 +1434,16 @@ impl Writer<'_> {
             out.push(self.func.build_loose(load).def(Reg::physical(into), class).mem(mem).finish());
             return out;
         }
-        let mem = match guard.symbol {
-            None => {
-                let segment = guard.segment.expect("a guard with no symbol is in a segment");
-                Mem::in_segment(segment, guard.at)
-            }
-            Some(name) if guard.table => {
-                let symbol = self.names.intern(name);
+        let mem = match (self.guard_at(guard), guard.symbol) {
+            (Some(mem), _) => mem,
+            (None, name) => {
+                let symbol = self.names.intern(name.expect("only a named guard is in the table"));
                 let at = Mem::got(symbol);
                 out.push(
                     self.func.build_loose(load).def(Reg::physical(into), class).mem(at).finish(),
                 );
                 let base = Operand::read(Reg::physical(into), class);
                 Mem { segment: guard.segment, ..Mem::at(base).plus(guard.at) }
-            }
-            Some(name) => {
-                let symbol = self.names.intern(name);
-                Mem { segment: guard.segment, ..Mem::of(symbol).plus(guard.at) }
             }
         };
         out.push(self.func.build_loose(load).def(Reg::physical(into), class).mem(mem).finish());
@@ -2306,7 +2390,9 @@ mod tests {
         // The read of the word and the store into the slot come after the stack pointer has moved,
         // because there is no slot to store into until it has. The check is the last thing the
         // block that returned does and the epilogue is on the arm the canary was unchanged on, so
-        // a function whose canary changed never gives its frame back and never returns.
+        // a function whose canary changed never gives its frame back and never returns. The check
+        // compares the canary with the word where the runtime keeps it, as gcc does, so it reads
+        // nothing into a second register.
         assert_eq!(
             added(&lines),
             [
@@ -2317,9 +2403,8 @@ mod tests {
                 "x64.mov_mr_64 $rdx, [$rsp + 8]",
                 "$rdx = x64.mov_rm_64 [$rsp]",
                 "$rdx = x64.mov_rm_64 [$rsp + 8]",
-                "$r10 = x64.mov_rm_64 [$rsp + 16]",
-                "$r11 = x64.mov_rm_64 [fs:40]",
-                "$r11 = x64.cmp_set_ne_64 $r10, $r11",
+                "$r11 = x64.mov_rm_64 [$rsp + 16]",
+                "$r11 = x64.cmp_set_ne_rm_64 $r11, [fs:40]",
                 "x64.br_cond_8 $r11, block1, block2",
                 "x64.call @__stack_chk_fail",
                 "$rsp = x64.add_ri_64 $rsp, 24",
@@ -2336,23 +2421,32 @@ mod tests {
             let layout = Layout { leaf: false, protect: true, ..base };
             let protect = Protect { guard: &guard, branch: &BRANCH, scratch: [R10, R11] };
             let lines = with_protector(&mut func, &allocation, &layout, Some(protect), &mut names);
-            let added = added(&lines).into_iter().filter(|line| line.contains("$r11 = x64.mov"));
+            let added = added(&lines).into_iter().filter(|line| line.contains("$r11 = x64."));
             added.map(ToString::to_string).collect::<Vec<_>>()
         };
         let fail = "__stack_chk_fail";
         let symbol = Some("__ref_stack_chk_guard");
         let segment = Some(rucc_target::Segment::Gs);
-        // What 6.13 and later ask for, which is one load through the segment and the distance to
-        // the symbol from the instruction, like gcc's `%gs:__ref_stack_chk_guard(%rip)`.
+        // What 6.13 and later ask for, which is the word read through the segment at the distance
+        // to the symbol from the instruction, like gcc's `%gs:__ref_stack_chk_guard(%rip)`. The
+        // check compares with it there.
         assert_eq!(
             reads(Guard { segment, symbol, table: false, system: false, at: 0, fail }),
-            ["$r11 = x64.mov_rm_64 [gs:@__ref_stack_chk_guard]"]
+            [
+                "$r11 = x64.mov_rm_64 [$rsp + 16]",
+                "$r11 = x64.cmp_set_ne_rm_64 $r11, [gs:@__ref_stack_chk_guard]"
+            ]
         );
         // The same in code that may be in a shared library, where the address comes out of the
-        // table first and the load through the segment is from the register.
+        // table first and the load through the segment is from the register, so the check reads
+        // the word into the second register and compares the two.
         assert_eq!(
             reads(Guard { segment, symbol, table: true, system: false, at: 0, fail }),
-            ["$r11 = x64.mov_rm_64 [got @__ref_stack_chk_guard]", "$r11 = x64.mov_rm_64 [gs:$r11]",]
+            [
+                "$r11 = x64.mov_rm_64 [got @__ref_stack_chk_guard]",
+                "$r11 = x64.mov_rm_64 [gs:$r11]",
+                "$r11 = x64.cmp_set_ne_64 $r10, $r11",
+            ]
         );
     }
 

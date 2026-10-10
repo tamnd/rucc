@@ -581,6 +581,7 @@ pub static FRAME: FrameInsts = FrameInsts {
     iret: None,
     clear_direction: None,
     differ: "cmp_set_ne_32",
+    differs_from: Some("cmp_set_ne_rm_32"),
     not_below: "cmp_set_ae_32",
     away: Some("jmp_away"),
     call: "call",
