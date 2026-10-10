@@ -2512,6 +2512,7 @@ impl Reader {
         let named = Shape::unflagged(&name);
         let mut shape = named;
         let (mut merge, mut strings, mut grouped, mut linked) = (false, false, false, false);
+        let mut same = false;
         if let Some(flags) = args.get(1) {
             let letters = unquoted(flags.trim());
             shape = Shape {
@@ -2532,6 +2533,9 @@ impl Reader {
                     'R' => shape.retain = true,
                     // The section it goes with, which comes after the type and is read past below.
                     'o' => linked = true,
+                    // The group of the section this one follows, if that one is in a group, as in
+                    // the probes of `sys/sdt.h`.
+                    '?' => same = true,
                     // Excluded from the link, and a section of large data. Taking either as an
                     // ordinary section of the same bytes is correct and merely larger.
                     'e' | 'd' => {}
@@ -2599,6 +2603,7 @@ impl Reader {
                 Some(Group { symbol: unquoted(symbol.trim()), keep })
             }
             None if grouped => return Err(self.bad("a section group with no name")),
+            None if same => self.parts[self.here].group.clone(),
             None => None,
         };
         self.section_in(&name, shape, group, link);
@@ -8210,6 +8215,29 @@ g:
             Err(trouble) => trouble.why,
         };
         assert!(why.contains("defines no symbol"), "{why}");
+    }
+
+    /// The `?` flag of `sys/sdt.h` puts a probe note in the group of the section it follows, so the
+    /// note goes away with an inline function the link drops, and in no group outside one.
+    #[test]
+    fn a_question_mark_takes_the_group_of_the_section_before() {
+        let text = "\t.section\t.text.f,\"axG\",@progbits,f,comdat\nf:\n\tnop\n\
+                    \t.pushsection .note.stapsdt,\"?\",\"note\"\n\t.long 1\n\t.popsection\n\
+                    \tret\n\t.text\ng:\n\tnop\n\
+                    \t.pushsection .note.stapsdt,\"?\",\"note\"\n\t.long 2\n\t.popsection\n";
+        let done = match read(text, Arch::X86_64) {
+            Ok(done) => done,
+            Err(trouble) => panic!("line {}: {}", trouble.line, trouble.why),
+        };
+        let notes: Vec<_> = done
+            .parts
+            .iter()
+            .filter(|part| part.name == ".note.stapsdt")
+            .map(|part| (part.group.as_ref().map(|group| group.symbol.as_str()), part.shape.note))
+            .collect();
+        assert_eq!(notes.len(), 2, "{notes:?}");
+        assert!(notes.contains(&(Some("f"), true)), "{notes:?}");
+        assert!(notes.contains(&(None, true)), "{notes:?}");
     }
 
     /// What gcc writes for `stdcall` and `fastcall` on i686 Windows, where the `@` is part of the
