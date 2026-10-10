@@ -1419,9 +1419,13 @@ fn passed(func: &Func, call: Inst, callee: &Func) -> Map<Value, (Imm, Type)> {
 /// passes are in it and the passes that run right after inlining have folded it.
 ///
 /// What gcc weighs a call by is the body as the early passes left it, with what the call site
-/// knows applied on top, and a `__builtin_constant_p` it cannot answer yet counts as the arm that
-/// is taken once the answer is no. `efi_enabled` asks it about a bit number and then about the
-/// address of a field, and only a real fold sees the second one come out true.
+/// knows applied on top. `efi_enabled` asks `__builtin_constant_p` about a bit number and then
+/// about the address of a field, and only a real fold sees the second one come out true. A
+/// question about a value that is not a constant by then stays open, both arms of it counted,
+/// since gcc only answers no once it has inlined. The kernel's `test_bit` asks about the word it
+/// loads, and gcc counts the arm for a constant word as well as the one that tests it, which is
+/// why `export_rdev` in drivers/md/md.c is over the limit to gcc and stays a call at each of its
+/// twelve callers.
 fn specialized_size(
     callee: &Func,
     values: &Map<Value, (Imm, Type)>,
@@ -1472,7 +1476,7 @@ fn specialized_size(
         &crate::fold::Fold,
         &crate::simplify::Simplify,
         &crate::reassoc::Reassoc,
-        &crate::constant_p::ConstantP,
+        &crate::constant_p::ConstantYes,
         &crate::sccp::Sccp,
         &crate::simplify_cfg::SimplifyCfg,
         &crate::dce::Dce,
@@ -4619,6 +4623,52 @@ block0(%0: i32):
         let out = inlined(&body(5));
         assert!(!g(&out).contains("call @pick") && !g(&out).contains("switch"), "{out}");
         assert!(!g(&out).contains("@numa_node"), "{out}");
+    }
+
+    /// A body that asks `__builtin_constant_p` about a word it loads, the way the kernel's `test_bit`
+    /// does, with a long arm for a constant word and a call for the rest. Nothing can answer that
+    /// before inlining, so both arms count, which is how gcc weighs it, and a limit only the call
+    /// arm fits under keeps it a call. `export_rdev` in drivers/md/md.c is one.
+    #[test]
+    fn a_question_about_a_loaded_word_counts_both_arms() {
+        let body = r#"
+func @test(ptr) -> i32, linkage(external);
+
+func @bit(ptr) -> i32, linkage(external), attrs(inline_hint) {
+block0(%0: ptr):
+    %1 = load.i64 %0, align 8
+    %2 = is_constant.i32 %1
+    %3 = iconst.i32 0
+    %4 = icmp ne %2, %3
+    br_if %4, block1, block2
+
+block1:
+    %5 = iconst.i64 3
+    %6 = lshr %1, %5
+    %7 = and %6, %1
+    %8 = xor %7, %5
+    %9 = or %8, %6
+    %10 = mul %9, %7
+    %11 = trunc.i32 %10
+    return %11
+
+block2:
+    %12 = call @test(%0) : (ptr) -> i32
+    return %12
+}
+
+func @g(ptr) -> i32, linkage(external) {
+block0(%0: ptr):
+    %1 = call @bit(%0) : (ptr) -> i32
+    return %1
+}
+"#;
+        let kept = |limit| {
+            let out = inlined_under(body, Some(limit));
+            out[out.find("func @g").expect("g is there")..].contains("call @bit")
+        };
+        assert!(kept(4));
+        assert!(!kept(8));
     }
 
     /// A `static` function nobody declared `inline`, called from one place.
