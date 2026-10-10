@@ -256,7 +256,7 @@ pub struct Arg {
 }
 
 /// Where the value of an argument is while the callee runs, which is a place the callee cannot
-/// change or a number.
+/// change, a number, or the value a register of the caller had on entry.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Was {
     /// In a register the call keeps, which holds the same value from the call to the return.
@@ -268,6 +268,14 @@ pub enum Was {
     },
     /// This number, as the bits of the whole register.
     Constant(u64),
+    /// What the register had when the caller itself started, which is one of the caller's own
+    /// parameters passed on as it arrived. A debugger finds that value one call further out.
+    Entry {
+        /// The register.
+        reg: PhysReg,
+        /// Which class it is drawn from.
+        class: RegClass,
+    },
 }
 
 /// A jump table: where a `switch` goes for each value from zero up, read by an indirect jump.

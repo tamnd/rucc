@@ -2056,6 +2056,10 @@ mod tests {
 
         assert_eq!(out.calls.len(), 3, "{text}");
         assert!(out.calls.iter().all(|call| call.callee == Some(callee)), "{text}");
+        // The first call passes the parameter on in the register it arrived in.
+        let [arg] = out.calls[0].args.as_slice() else { panic!("{:?}\n{text}", out.calls[0]) };
+        let entry = mir::Was::Entry { reg: x86_64::RDI, class: SYSV.int_class };
+        assert_eq!(arg.was, entry, "{text}");
         // The second call copies the parameter back out of the register it was kept in.
         let [arg] = out.calls[1].args.as_slice() else { panic!("{:?}\n{text}", out.calls[1]) };
         assert_eq!(arg.reg, x86_64::RDI, "{text}");

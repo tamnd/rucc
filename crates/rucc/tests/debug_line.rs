@@ -347,6 +347,8 @@ fn a_call_says_what_its_arguments_were() {
     // The parameter, out of a register the call keeps, and the constant.
     assert!(text.contains("DW_OP_breg"), "{text}");
     assert!(text.contains("DW_OP_lit5") || text.contains("DW_OP_constu: 5"), "{text}");
+    // And the first call passes the parameter on as it arrived, which is its entry value.
+    assert!(text.contains("DW_OP_entry_value: (DW_OP_reg5"), "{text}");
 }
 
 /// A function that never assigns its parameter and needs it in no register after the call.

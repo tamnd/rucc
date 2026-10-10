@@ -111,6 +111,15 @@ impl MachineInsts {
         (self.operands)(self.bare(name)).is_some()
     }
 
+    /// Whether an instruction of that name is the one an argument arrives through, which writes
+    /// the register the argument is in and encodes to nothing.
+    ///
+    /// Every target that has one spells it `arg_val_` and the width, so this asks the name.
+    #[must_use]
+    pub fn arrives(&self, name: &str) -> bool {
+        self.bare(name).starts_with("arg_val_")
+    }
+
     /// Whether an instruction of that name is a call on this target.
     #[must_use]
     pub fn calls(&self, name: &str) -> bool {

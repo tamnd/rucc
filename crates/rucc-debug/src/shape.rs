@@ -389,7 +389,7 @@ pub struct Call {
     pub callee: String,
     /// The arguments the caller still knows the value of: the register each was passed in, by the
     /// target's DWARF number, and where the value is at the address the callee returns to. Only a
-    /// register and a constant say a value here.
+    /// register, a constant and an entry value of the caller say a value here.
     pub args: Vec<(u16, Held)>,
 }
 
