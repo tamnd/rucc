@@ -1429,7 +1429,25 @@ fn specialized_size(
 ) -> usize {
     use crate::Pass;
     let mut copy = callee.clone();
-    let Some(first) = copy.entry().and_then(|entry| copy.insts(entry).next()) else {
+    let Some(entry) = copy.entry() else { return size(callee) };
+    // Only the blocks the constants leave, the way a copy into the caller has them (see
+    // [`reached`]), so the cleanup below is not run over arms it would only take out again. On
+    // zstd_compress.c at `-O2` the switch of three thousand instructions in
+    // `ZSTD_CCtxParams_setParameter` was cleaned up whole once for each constant `param` it is
+    // called with, about 2ms each, to come out at twenty five. tamnd/rucc#3052.
+    if !values.is_empty() {
+        let constants: Vec<Option<(Imm, Type)>> =
+            callee[entry].params.iter().map(|param| values.get(param).copied()).collect();
+        let (live, decided) = reached(callee, entry, &constants);
+        for (term, to) in decided {
+            crate::simplify_cfg::jump_to(&mut copy, term, to);
+        }
+        let dead: Vec<Block> = copy.blocks().filter(|block| !live[block.index()]).collect();
+        for block in dead {
+            copy.remove_block(block);
+        }
+    }
+    let Some(first) = copy.insts(entry).next() else {
         return size(callee);
     };
     let mut forward = Map::default();
