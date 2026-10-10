@@ -113,6 +113,34 @@ impl Pass for ConstantP {
     }
 }
 
+/// [`ConstantP`] giving only the yes answers, which leaves a question about a value that has not
+/// become a constant open. That is what gcc's inliner sees, since gcc answers no only after it has
+/// inlined, so both arms of such a question are in the body it weighs.
+#[derive(Debug)]
+pub struct ConstantYes;
+
+impl Pass for ConstantYes {
+    fn name(&self) -> &'static str {
+        "constant-yes"
+    }
+
+    fn describe(&self) -> &'static str {
+        "__builtin_constant_p is one where the value has become a constant, and left open elsewhere"
+    }
+
+    fn preserves(&self) -> Preserved {
+        Preserved::NONE
+    }
+
+    fn run(&self, func: &mut Func, an: &mut Analyses, _fuel: &mut Fuel) -> Stats {
+        let mut stats = Stats::new();
+        if !asked(func).is_empty() {
+            follow_until(func, an, &mut stats, false);
+        }
+        stats
+    }
+}
+
 /// Answers the questions and follows the answers to the branches they decide, taking out what
 /// those branches no longer reach, round after round until a round changes nothing.
 ///
@@ -128,6 +156,12 @@ impl Pass for ConstantP {
 /// `if (ret < 0) return ret;` only because the ranges settle the comparison. The module documentation says why the rest of
 /// this is here rather than left to the passes behind.
 fn follow(func: &mut Func, an: &mut Analyses, stats: &mut Stats) {
+    follow_until(func, an, stats, true);
+}
+
+/// [`follow`], with the questions still open once nothing more folds answered zero only when
+/// `no` says to.
+fn follow_until(func: &mut Func, an: &mut Analyses, stats: &mut Stats, no: bool) {
     for _ in 0..ROUNDS {
         let mut fuel = Fuel::unlimited();
         let mut round = crate::fold::fold_in(func, &mut fuel);
@@ -157,6 +191,9 @@ fn follow(func: &mut Func, an: &mut Analyses, stats: &mut Stats) {
             an.clear();
         }
         if !round.changed() {
+            if !no {
+                return;
+            }
             // Nothing is going to become a constant now, so what is still asked is answered no,
             // and the next round follows those answers.
             let no = settle(func, Answering::Every);
@@ -169,6 +206,9 @@ fn follow(func: &mut Func, an: &mut Analyses, stats: &mut Stats) {
     }
     // Out of rounds, which the bound says should not happen. The questions still get their
     // answers, since nothing below this lowers one.
+    if !no {
+        return;
+    }
     stats.record(Kind::Optimized, ANSWERED, count(settle(func, Answering::Every)));
 }
 
