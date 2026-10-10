@@ -8333,6 +8333,9 @@ impl<'a> Lowering<'a> {
             let Some(&param) = params.get(index) else { continue };
             for decl in self.source.value_decls(param) {
                 self.out.arrived.push((decl, mir::Where::Reg { reg, class }));
+                if self.source.only_value(decl, param) {
+                    self.out.unassigned.push(decl);
+                }
             }
         }
         if applies {

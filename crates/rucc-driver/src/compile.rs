@@ -2099,7 +2099,7 @@ fn describe(
         // one name in one scope is a debugger's problem rather than a reader's.
         let mut sig = known.and_then(|known| known.sig.clone());
         let mut placed: Vec<(u32, i32)> = built.locals.clone();
-        let mut spots = stretches(extent, rows, built, target);
+        let mut spots = stretches(extent, rows, built, target, opts.dwarf_version != 4);
         // And a local in the frame that shares its bytes and has no stretch at all, which still
         // gets its entry so that a debugger says it is not available rather than that there is no
         // such name. That is a function whose instructions were scheduled, where no stretch can be
@@ -2503,11 +2503,16 @@ fn describe_wasm(
 ///
 /// Grouped by declaration on the way out, since one local is in one place over one stretch and
 /// somewhere else over the next, and that is the shape the debugging information wants.
+///
+/// With `entries`, a parameter the program never assigns to is also the value its register had on
+/// entry over every address nothing else covers, which is what gcc writes. DWARF 4 has no call
+/// site for a debugger to read that value from, so a build of that version is not asked.
 fn stretches(
     extent: &rucc_object::Extent,
     rows: &[rucc_asm::Row],
     built: &rucc_mir::Func,
     target: &TargetInfo,
+    entries: bool,
 ) -> Vec<(u32, Vec<rucc_debug::Span>)> {
     // A target nobody has written a calling convention down for has no DWARF numbering either, so
     // there is no way to name the register a local is in and nothing to say.
@@ -2566,6 +2571,39 @@ fn stretches(
     }
     for (_, spans) in &mut spots {
         *spans = settle(std::mem::take(spans));
+    }
+    if entries {
+        for &(decl, at) in &built.arrived {
+            // One register for the whole parameter, since the value of one of two is half of it.
+            let rucc_mir::Where::Reg { reg, class } = at else { continue };
+            let alone = built.arrived.iter().filter(|(other, _)| *other == decl).count() == 1;
+            if !alone || !built.unassigned.contains(&decl) {
+                continue;
+            }
+            let Some(number) = regs.dwarf(class, reg) else { continue };
+            let which = match spots.iter().position(|(at, _)| *at == decl) {
+                Some(which) => which,
+                None => {
+                    spots.push((decl, Vec::new()));
+                    spots.len() - 1
+                }
+            };
+            let spans = &mut spots[which].1;
+            let held = rucc_debug::Held::Entry(number);
+            let mut gaps = Vec::new();
+            let mut from = 0;
+            for span in spans.iter() {
+                if span.from > from {
+                    gaps.push(rucc_debug::Span { from, len: span.from - from, held });
+                }
+                from = from.max(span.from + span.len);
+            }
+            if extent.len as u64 > from {
+                gaps.push(rucc_debug::Span { from, len: extent.len as u64 - from, held });
+            }
+            spans.extend(gaps);
+            spans.sort_by_key(|span| span.from);
+        }
     }
     spots.retain(|(_, spans)| !spans.is_empty());
     spots
