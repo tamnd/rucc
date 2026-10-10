@@ -2666,6 +2666,13 @@ pub struct Options {
     /// `-target x86_64-pc-windows-msvc`: the SDK headers take a path for `__GNUC__` that they
     /// were never tested on with the MSVC runtime. The flag is the way to ask, as it is in clang.
     pub gnuc_given: bool,
+    /// The GCC release of the `libgcov.a` the link takes, as the major and the minor version, when
+    /// a coverage build found one.
+    ///
+    /// libgcov writes the counts of a record only when the record has its own release, and
+    /// [`Options::gnuc`] is the newest release while the GCC on the machine is often older. So the
+    /// record follows this when it is set, and follows [`Options::gnuc`] when it is not.
+    pub gcov: Option<(u32, u32)>,
     /// The GNU assembler release claimed, from `-fgnu-as-version=`, which is what
     /// `-Wa,--version` prints.
     pub gnu_as: GasVersion,
@@ -2977,6 +2984,7 @@ impl Options {
             data_sections: false,
             gnuc: GnucVersion::default(),
             gnuc_given: false,
+            gcov: None,
             gnu_as: GasVersion::default(),
             asm_fatal_warnings: false,
             asm_noexecstack: false,

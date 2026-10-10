@@ -2012,6 +2012,16 @@ pub fn runtime_dirs(target: Triple, sysroot: Option<&Path>) -> Vec<PathBuf> {
     newest(&gcc_dirs(target, sysroot, &bases))
 }
 
+/// The `libgcov.a` that a link for that target takes, which is in the GCC directory of the link.
+#[must_use]
+pub fn gcov_archive(target: Triple, opts: &LinkOptions) -> Option<PathBuf> {
+    let runtime = match distro_cross(target, opts) {
+        Some(distro) => distro.gcc,
+        None => gcc_runtime(target, opts),
+    };
+    find_file(&runtime, "libgcov.a")
+}
+
 /// The GCC directory of a native link: the one under `--gcc-toolchain=` when the command line
 /// named one, and the newest on the machine when it did not.
 fn gcc_runtime(target: Triple, opts: &LinkOptions) -> Vec<PathBuf> {

@@ -1020,7 +1020,7 @@ fn coverage(opts: &Options, target: &TargetInfo, counts: &str) -> rucc_opt::cove
     rucc_opt::coverage::Coverage {
         counts: counts.to_owned(),
         count: opts.profile_data.arcs,
-        gnuc: (opts.gnuc.major, opts.gnuc.minor),
+        gnuc: opts.gcov.unwrap_or((opts.gnuc.major, opts.gnuc.minor)),
         ctor: ctor.map(str::to_owned),
         dtor: dtor.map(str::to_owned),
     }
