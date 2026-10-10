@@ -110,15 +110,17 @@ mod tests {
     }
 
     /// A store binds the value first and the address second, and the address is thirty two bits.
-    /// See the test of the same name beside the x86-64 table for why the order matters.
+    /// See the test of the same name beside the x86-64 table for why the order matters. The value
+    /// is a register, or a constant the instruction carries.
     #[test]
     fn a_store_is_written_with_the_value_first_and_a_thirty_two_bit_address() {
-        let mut seen = 0;
+        let (mut registers, mut constants) = (0, 0);
         for rule in TABLE.rules {
             let Some(rest) = rule.pattern.strip_prefix("(store.") else { continue };
             let (width, operands) = rest.split_once(' ').expect("a store takes operands");
+            let constant = operands.starts_with(&format!("(iconst.{width} "));
             assert!(
-                operands.starts_with(&format!("(value.{width} ")),
+                constant || operands.starts_with(&format!("(value.{width} ")),
                 "line {}: {} binds something other than the value it is storing first",
                 rule.line,
                 rule.pattern
@@ -129,10 +131,16 @@ mod tests {
                 rule.line,
                 rule.pattern
             );
-            seen += 1;
+            if constant {
+                constants += 1;
+            } else {
+                registers += 1;
+            }
         }
-        // x86-64's sixteen less the two at sixty four bits.
-        assert_eq!(seen, 14, "the store rules moved and this test did not follow them");
+        // x86-64's sixteen less the two at sixty four bits, and the eight that store a constant at
+        // one, eight, sixteen and thirty two bits, at an address and at an address plus a number.
+        assert_eq!(registers, 14, "the store rules moved and this test did not follow them");
+        assert_eq!(constants, 8, "the store rules moved and this test did not follow them");
     }
 
     /// Every comparison against a register has its twin against a constant, at the three widths.
