@@ -15,6 +15,9 @@
 //! value can settle several points at once, and a later point may already be settled by the time
 //! it is reached.
 //!
+//! Then each value that went is weighed again against the values that would go in its place, by
+//! what they cost rather than by weight, and the cheaper side goes. See [`trade`].
+//!
 //! # What it promises
 //!
 //! It takes off each point no more values than the pressure model says have to go, and that
@@ -42,6 +45,7 @@ struct Candidate<'a> {
     reg: Reg,
     area: Area<'a>,
     weight: u128,
+    cost: u128,
     size: u32,
 }
 
@@ -81,7 +85,8 @@ pub(crate) fn with(
         }
         let size = backtrack::size(area);
         let weight = costs[number] * 1024 / u128::from(size + 8);
-        classes.entry(class).or_default().push(Candidate { reg, area, weight, size });
+        let cost = costs[number];
+        classes.entry(class).or_default().push(Candidate { reg, area, weight, cost, size });
     }
 
     let mut pressure = pressure.clone();
@@ -141,12 +146,88 @@ pub(crate) fn with(
                 let Some((_, _, one)) = here.pop_first() else { break };
                 gone[one] = true;
                 pressure.lift(class, candidates[one].area);
-                chosen.push(candidates[one].reg);
             }
         }
+        trade(class, &candidates, &mut gone, &mut pressure);
+        chosen.extend(
+            (candidates.iter().zip(&gone)).filter(|(_, gone)| **gone).map(|(one, _)| one.reg),
+        );
     }
     chosen
 }
+
+/// Gives back to a register each value sent to memory whose place there the values beside it can
+/// take for less, heaviest first.
+///
+/// Lightest first by weight is a guess, and it is wrong for a value read all through a function:
+/// it is long, so its weight is low next to its reads. On i386, `mddev` in drivers/md/md.c is
+/// read twenty times between calls, and it went to the stack while a `bool` and a word each read
+/// twice were kept in the three registers a call saves. So each value that went is put back, and
+/// at every point that is over again for it the values still in registers go instead, lightest
+/// first as before. Those stay in memory when the loads and stores they cost come to less than
+/// the value's own, and otherwise it goes back.
+fn trade(
+    class: RegClass,
+    candidates: &[Candidate<'_>],
+    gone: &mut [bool],
+    pressure: &mut Pressure,
+) {
+    let mut sent: Vec<usize> = (0..candidates.len()).filter(|&one| gone[one]).collect();
+    sent.sort_by_key(|&one| Reverse(candidates[one].cost));
+    // Every point of every value that went, and every value beside it at each, is a lot of work on
+    // a long function, so it stops once it has asked this many times whether a value covers a
+    // point.
+    let mut work: u64 = 0;
+    for one in sent {
+        let value = &candidates[one];
+        pressure.lower(class, value.area);
+        let over: Vec<Point> = (value.area.pieces())
+            .flat_map(|piece| piece.start..=piece.end)
+            .filter(|&point| pressure.excess(class, point) > 0)
+            .collect();
+        let mut beside: Vec<usize> = (0..candidates.len())
+            .filter(|&other| !gone[other] && candidates[other].area.overlaps(value.area))
+            .collect();
+        beside.sort_by_key(|&other| (candidates[other].weight, Reverse(candidates[other].size)));
+        let mut instead = Vec::new();
+        let mut spent = 0;
+        'points: for point in over {
+            while pressure.excess(class, point) > 0 {
+                work += beside.len() as u64;
+                let found = (beside.iter().copied()).find(|&other| {
+                    !instead.contains(&other) && candidates[other].area.covers(point)
+                });
+                let Some(other) = found else {
+                    spent = u128::MAX;
+                    break 'points;
+                };
+                instead.push(other);
+                pressure.lift(class, candidates[other].area);
+                spent += candidates[other].cost;
+                if spent >= value.cost {
+                    break 'points;
+                }
+            }
+        }
+        if spent < value.cost {
+            gone[one] = false;
+            for other in instead {
+                gone[other] = true;
+            }
+        } else {
+            for other in instead {
+                pressure.lower(class, candidates[other].area);
+            }
+            pressure.lift(class, value.area);
+        }
+        if work > TRADES {
+            break;
+        }
+    }
+}
+
+/// How many times [`trade`] may ask whether a value covers a point, for one class of one function.
+const TRADES: u64 = 1_000_000;
 
 fn index(reg: Reg) -> usize {
     usize::try_from(reg.number().expect("a virtual register")).expect("a register number")
@@ -252,5 +333,31 @@ mod tests {
         // Each short value meets the long one at a point with room for one. Sending the long one
         // away settles both, where sending the short ones would take two.
         assert_eq!(chosen(&func, &narrow(1)), [long]);
+    }
+
+    #[test]
+    fn a_long_value_read_often_stays_and_the_two_short_ones_beside_it_go() {
+        let mut names = Interner::new();
+        let mut func = Func::new(names.intern("f"));
+        let opcode = Opcode::new(names.intern("x64.nop"));
+        let block = func.create_block();
+        let long = func.new_vreg(GPR);
+        let first = func.new_vreg(GPR);
+        let second = func.new_vreg(GPR);
+        func.build(block, opcode).def(long, GPR).finish();
+        func.build(block, opcode).def(first, GPR).finish();
+        func.build(block, opcode).uses(first, GPR).finish();
+        for _ in 0..8 {
+            func.build(block, opcode).finish();
+        }
+        func.build(block, opcode).def(second, GPR).finish();
+        func.build(block, opcode).uses(second, GPR).finish();
+        for _ in 0..4 {
+            func.build(block, opcode).uses(long, GPR).finish();
+        }
+
+        // By weight the long one is the lightest at both points, since it is long. Its reads come
+        // to more than the two short ones' together, so they are the ones that go.
+        assert_eq!(chosen(&func, &narrow(1)), [first, second]);
     }
 }

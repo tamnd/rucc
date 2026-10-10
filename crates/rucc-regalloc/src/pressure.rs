@@ -180,6 +180,18 @@ impl Pressure {
             }
         }
     }
+
+    /// Puts a value back on every point it is live at, which undoes [`Self::lift`].
+    pub(crate) fn lower(&mut self, class: RegClass, area: Area<'_>) {
+        let Some(row) = self.wanted.get_mut(usize::from(class.number())) else { return };
+        for piece in area.pieces() {
+            let end = at(piece.end).saturating_add(1).min(row.len());
+            let start = at(piece.start).min(end);
+            for count in &mut row[start..end] {
+                *count += 1;
+            }
+        }
+    }
 }
 
 fn row(table: &[Vec<u32>], class: RegClass) -> &[u32] {
