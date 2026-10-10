@@ -429,23 +429,37 @@ pub fn finish(
             |block: &Block| writer.func[*block].succs.is_empty() && !writer.func[*block].dead_end;
         writer.func.blocks().filter(returns).collect()
     };
-    // A protected function returns from one block, which every block that used to return jumps
-    // to, so that the check and the epilogue are written once rather than at every return. That is
-    // what gcc writes, and the check is five instructions and a branch where a jump is one. The
-    // answer is already in the registers it goes back in, which is all a return block hands on.
-    let returns = match protect {
-        Some(_) if returns.len() > 1 => {
+    // The blocks that return jump to one block that returns for all of them, so that the check
+    // and the epilogue are written once rather than at every return. That is what gcc writes. The
+    // check is five instructions and a branch where a jump is one, and an epilogue that puts back
+    // two registers or more is three instructions or more, so a protected function always shares
+    // and any other one does when its epilogue is that long. The answer is already in the
+    // registers it goes back in, which is all a return block hands on. A block that ends in a call
+    // `crate::tail::jumps` may turn into a jump keeps its own epilogue, since the jump is written
+    // where the `ret` is.
+    let steps = writer.pushes(frame)
+        + i32::from(frame.size() > 0)
+        + i32::try_from(frame.saved_sse().len()).expect("a frame");
+    let returns = if protect.is_some() || steps >= 2 {
+        let tailed: Vec<Block> =
+            stack.tails.iter().filter_map(|tail| writer.func.block_of(tail.call)).collect();
+        let (own, shared): (Vec<Block>, Vec<Block>) =
+            returns.into_iter().partition(|block| tailed.contains(block));
+        if shared.len() > 1 {
             let exit = writer.func.create_block();
             let mut weight = 0u64;
-            for block in returns {
+            for block in shared {
                 let taken = writer.func[block].weight;
                 weight = weight.saturating_add(taken.raw());
                 *writer.func.succs_mut(block) = vec![BlockCall::to(exit).taken(taken)];
             }
             writer.func.set_weight(exit, Weight::parts(weight));
-            vec![exit]
+            own.into_iter().chain([exit]).collect()
+        } else {
+            own.into_iter().chain(shared).collect()
         }
-        _ => returns,
+    } else {
+        returns
     };
     for block in returns {
         // The check goes in front of the epilogue and takes the return with it. What is left in
