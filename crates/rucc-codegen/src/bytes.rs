@@ -15,9 +15,10 @@
 //! the function expects it when they trade back.
 
 use rucc_base::Interner;
-use rucc_mir::{Func, Inst, Opcode, Reg};
-use rucc_target::x86_64::{Arg, Width, written};
-use rucc_target::{PhysReg, RegClass, x86};
+use rucc_base::hash::Set;
+use rucc_mir::{Block, Func, Inst, Opcode, Reg};
+use rucc_target::x86_64::{Arg, FLAGS, Width, written};
+use rucc_target::{PhysReg, Reads, RegClass, x86};
 
 /// The registers with a low byte, in the order they are borrowed. `ebx` first, because nothing
 /// names it without saying so and an instruction that names a byte of `esi` or `edi` is often one
@@ -72,8 +73,15 @@ fn named(func: &Func, inst: Inst, prefix: &str, names: &Interner) -> Option<Vec<
 }
 
 /// Gives every instruction that names the low byte of `esi` or `edi` a register that has one.
+///
+/// A `testb` of one of them asks whether its low byte is zero, and `testl $255` asks the same of
+/// the whole register in one instruction where the exchanges make it three. The two leave the zero,
+/// the carry and the parity alike and differ in the sign, so it is only written where nothing reads
+/// the sign before the flags are written again. That is a `bool` kept across a call in one of the
+/// registers the call saves, and in drivers/md/md.c on i386 it was twenty `testb`s.
 pub fn reach(func: &mut Func, prefix: &str, class: RegClass, names: &mut Interner) {
     let exchange = Opcode::new(names.intern(&format!("{prefix}xchg_rr_32")));
+    let whole = Opcode::new(names.intern(&format!("{prefix}test_ri_32")));
     let all: Vec<Inst> = func.blocks().flat_map(|block| func.insts(block)).collect();
     for inst in all {
         let Some(bytes) = named(func, inst, prefix, names) else { continue };
@@ -85,6 +93,14 @@ pub fn reach(func: &mut Func, prefix: &str, class: RegClass, names: &mut Interne
             .collect();
         stuck.dedup();
         if stuck.is_empty() {
+            continue;
+        }
+        if names.resolve(func[inst].opcode.name()).strip_prefix(prefix) == Some("test_rr_8")
+            && zero_only(func, inst, prefix, names)
+        {
+            let imm = func.add_imm(0xff);
+            func[inst].opcode = whole;
+            func[inst].imm = Some(imm);
             continue;
         }
         let named: Vec<PhysReg> = func[operands].iter().filter_map(|op| op.reg.phys()).collect();
@@ -120,4 +136,59 @@ pub fn reach(func: &mut Func, prefix: &str, class: RegClass, names: &mut Interne
             func.insert_after(inst, after);
         }
     }
+}
+
+/// Whether everything that reads the flags an instruction leaves, up to the next instruction that
+/// writes them, asks only about the zero or about the carry with it.
+///
+/// The flags that reach the end of the block are followed into each block it goes to, which is
+/// where the branch a `testb` is for has left them, and on through any of those that writes no
+/// flags either, which is a block of moves the allocator put on an edge.
+fn zero_only(func: &Func, inst: Inst, prefix: &str, names: &Interner) -> bool {
+    let Some(block) = func.block_of(inst) else { return false };
+    let rest = func.insts(block).skip_while(|&at| at != inst).skip(1);
+    let mut seen: Set<Block> = Set::default();
+    let mut ahead = match read(func, rest, prefix, names) {
+        Some(answer) => return answer,
+        None => vec![block],
+    };
+    while let Some(block) = ahead.pop() {
+        for call in &func[block].succs {
+            if !seen.insert(call.block) {
+                continue;
+            }
+            match read(func, func.insts(call.block), prefix, names) {
+                Some(false) => return false,
+                Some(true) => {}
+                None => ahead.push(call.block),
+            }
+        }
+    }
+    true
+}
+
+/// Whether the instructions read the flags as [`zero_only`] asks, up to the first that writes
+/// them, or `None` when none of them does.
+fn read(
+    func: &Func,
+    insts: impl Iterator<Item = Inst>,
+    prefix: &str,
+    names: &Interner,
+) -> Option<bool> {
+    for inst in insts {
+        let Some(name) = names.resolve(func[inst].opcode.name()).strip_prefix(prefix) else {
+            return Some(false);
+        };
+        if (FLAGS.compares_itself)(name) {
+            return Some(true);
+        }
+        match FLAGS.reads(name) {
+            Some(Reads::Zero | Reads::Unsigned) | None => {}
+            Some(_) => return Some(false),
+        }
+        if (FLAGS.writes)(name) {
+            return Some(true);
+        }
+    }
+    None
 }
