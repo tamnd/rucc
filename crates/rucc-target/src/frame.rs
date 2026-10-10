@@ -250,6 +250,12 @@ pub struct FrameInsts {
     /// compared are the canary the prologue wrote and the one the runtime still holds, and neither
     /// of them is a value the program named.
     pub differ: &'static str,
+    /// [`FrameInsts::differ`] with the second word read straight out of memory, or `None` where no
+    /// instruction does that.
+    ///
+    /// The check reads the guard where it lives rather than into a second register, which is what
+    /// gcc writes, so it needs one register at a return and not two. See `rucc_codegen::finish`.
+    pub differs_from: Option<&'static str>,
     /// Compares two general purpose registers as unsigned numbers and writes whether the first is
     /// at or above the second into a third.
     ///

@@ -51,7 +51,7 @@ use crate::coverage::Fired;
 use crate::double;
 use crate::elsewhere::Elsewhere;
 use crate::expand;
-use crate::finish::{Convention, Padding, Probing, Protect, Tracing, far, finish};
+use crate::finish::{self, Convention, Padding, Probing, Protect, Tracing, far, finish};
 use crate::fold;
 use crate::frame::{self, Frame, Layout};
 use crate::fresh;
@@ -337,7 +337,9 @@ impl Machine {
     /// which a call preserves, and the registers a call does not preserve are the answer in `eax`
     /// and `edx`. So the canary goes in through `esi`, which the prologue saves for it, and the
     /// check reads the guard into `ecx`, which holds nothing at a return and has a low byte. `edx`
-    /// is never one of them, since it holds the top half of a `long long` answer.
+    /// is never one of them, since it holds the top half of a `long long` answer. Where the
+    /// prologue already saves a register for the body, the canary goes in through that one
+    /// instead and `esi` is left to the allocator, see `Frame::through`.
     #[must_use]
     pub fn guarded(&self) -> [PhysReg; 2] {
         if std::ptr::eq(self.selector, &select::x86::SELECTOR) {
@@ -1200,11 +1202,17 @@ pub fn compile_recording(
     // the pages of a frame that grows writes into one in the middle of the body. The rest of what
     // this file puts in a scratch register goes in the prologue, before anything the allocator
     // placed is live.
-    let handed = !naked && !saves_all && !layout.grows && guard.is_none();
+    //
+    // Not the check on i386, where it compares with the guard in place. It reads the canary back
+    // into `ecx`, which holds nothing at a return, and the canary goes in through a register the
+    // prologue saves, so neither scratch register is touched. Holding both back cost every such
+    // function two of its six registers, and `-fstack-protector-strong` protects most of a kernel.
+    let i386 = std::ptr::eq(machine.shapes, &x86::MACHINE);
+    let checked = guard.is_some_and(|guard| !(i386 && finish::in_place(machine.insts, guard)));
+    let handed = !naked && !saves_all && !layout.grows && !checked;
     let which = usize::from(spare.is_some());
     // On i386 only with the backtracking allocator, which is the one that keeps a value named as a
     // byte out of the two registers that have none.
-    let i386 = std::ptr::eq(machine.shapes, &x86::MACHINE);
     if i386 {
         let fused = |inst| fusable.contains(&inst) || choosable.contains_key(&inst);
         bytes::bar(&mut func, machine.insts.prefix, names, fused);
@@ -1412,10 +1420,11 @@ pub fn compile_recording(
         sign: flags.branch.sign,
         ..Convention::new(machine.conv, machine.insts)
     };
-    let (moves, loops) = finish(&mut func, &allocation, &frame, &stack, convention, names);
-    // The comparison in each loop that walks the stack is written after the question above was
-    // asked, and only the branch behind it reads its byte, so it can be joined with that branch.
-    fusable.extend(loops.iter().copied());
+    let (moves, loops, checks) = finish(&mut func, &allocation, &frame, &stack, convention, names);
+    // The comparison in each loop that walks the stack and in each stack protector check is written
+    // after the question above was asked, and only the branch behind it reads its byte, so it can
+    // be joined with that branch.
+    fusable.extend(loops.iter().chain(&checks).copied());
 
     // After the moves are written, because a spill and the reload of it are written by different
     // decisions of the allocator and what stands between the two is settled by the function they
