@@ -45,8 +45,10 @@
 //!   skips nothing that had to happen. That is the same predicate [`crate::dce`] deletes an
 //!   instruction under, which is the point: an instruction it would delete outright is one a path
 //!   can walk past.
-//! - Nothing outside B reads a value B defines. Those are the values the copy would have existed to
-//!   compute, and both the arm's arguments and the blocks further down are asking for them.
+//! - Nothing outside B reads a value B defines, or nothing that reads one can be got to from the arm
+//!   without coming back through B. Those are the values the copy would have existed to compute,
+//!   and both the arm's arguments and the blocks further down are asking for them, but a block
+//!   that only B's other arm leads to still has B on every path to it.
 //!
 //! The second condition has to be about the whole function and not just about the arm. An argument
 //! is how a value crosses into a block that B does not dominate, but a block B does dominate reads
@@ -309,7 +311,9 @@ impl Pass for Thread {
                 }
                 // The block's own values read below are what the leaky set is about, and the ones
                 // the arm carries are what `carried` is about. Either needs the copy.
-                let (free, why) = if leaks.get_or_insert_with(|| leaky(func)).contains(&block) {
+                let (free, why) = if leaks.get_or_insert_with(|| leaky(func)).contains(&block)
+                    && !behind(func, block, call.block)
+                {
                     (None, WOULD_COPY_READ_BELOW)
                 } else {
                     (carried(func, block, call, &subst), WOULD_COPY_CARRIED)
@@ -1416,6 +1420,51 @@ fn leaky(func: &Func) -> Set<Block> {
     out
 }
 
+/// Whether every read of a value `block` defines, from outside it, is somewhere `arm` cannot get to
+/// without going through `block` again.
+///
+/// Then an edge pointed past `block` at `arm` takes nothing away from those reads: whatever got to
+/// them got there through `block` before, and the only new path is the one into `arm`, which has
+/// to come back through `block` to reach them. `block` still dominates each of them, so they still
+/// read a value that was computed. The kernel's `for_each_cpu` is the case, where `find_next_bit`
+/// answers the size when no bit is left and the loop's test of the answer against the size is a
+/// block whose parameter the body reads. The edge carrying the size goes straight out of the loop,
+/// and the body is reached only through the test.
+///
+/// A walk that gets too far is a no, since a function that large is not worth the time.
+fn behind(func: &Func, block: Block, arm: Block) -> bool {
+    let mut readers = Set::default();
+    for other in func.blocks() {
+        if other == block {
+            continue;
+        }
+        let mut reads = false;
+        for inst in func.insts(other) {
+            uses::operands(func, inst, |value| {
+                reads |= defined_in(func, value) == Some(block);
+            });
+        }
+        if reads {
+            readers.insert(other);
+        }
+    }
+    let mut seen = Set::default();
+    let mut work = vec![arm];
+    while let Some(at) = work.pop() {
+        if at == block || !seen.insert(at) {
+            continue;
+        }
+        if readers.contains(&at) || seen.len() > BEHIND_WALK {
+            return false;
+        }
+        push_targets(func, at, &mut work);
+    }
+    true
+}
+
+/// The most blocks [`behind`] walks before it gives up.
+const BEHIND_WALK: usize = 4096;
+
 /// The block a value comes from, whether it is a parameter of one or a result computed in one.
 fn defined_in(func: &Func, value: Value) -> Option<Block> {
     match func[value].def {
@@ -1911,30 +1960,33 @@ mod tests {
         func
     }
 
+    /// The edge carrying 2 decides the arm that reads the parameter, so it needs the copy. The edge
+    /// carrying 1 decides the arm that returns 15, which gets nowhere near the read, so it is
+    /// pointed there with nothing copied.
     #[test]
     fn a_value_the_block_defines_and_something_below_it_reads_needs_the_copy() {
         let mut func = clamp();
         let stats = thread(&mut func);
-        assert_eq!(stats.count(Kind::Optimized, super::THREADED), 0);
-        assert_eq!(stats.count(Kind::Missed, super::WOULD_COPY_READ_BELOW), 2);
-        assert_eq!(goes_to(&func, 1), vec![3]);
+        assert_eq!(stats.count(Kind::Optimized, super::THREADED), 1);
+        assert_eq!(stats.count(Kind::Missed, super::WOULD_COPY_READ_BELOW), 1);
+        assert_eq!(goes_to(&func, 1), vec![4]);
         assert_eq!(goes_to(&func, 2), vec![3]);
     }
 
-    /// What the copy is for: both edges of the clamp are threaded, and the read below gets the
-    /// value that reached it along whichever one it came in by.
+    /// What the copy is for: both edges of the clamp are threaded, the one that needs it through a
+    /// copy, and the read below gets the value that reached it along whichever one it came in by.
     #[test]
     fn a_copy_threads_the_clamp_and_the_read_below_gets_a_merge() {
         let mut func = clamp();
         let stats = copying(&mut func);
-        assert_eq!(stats.count(Kind::Optimized, super::COPIED), 2, "{stats:?}");
+        assert_eq!(stats.count(Kind::Optimized, super::THREADED), 1, "{stats:?}");
+        assert_eq!(stats.count(Kind::Optimized, super::COPIED), 1, "{stats:?}");
         assert_eq!(stats.count(Kind::Missed, super::WOULD_COPY_READ_BELOW), 0);
-        // The join is gone, since both edges into it went to copies, and each arm goes to a copy
-        // that goes straight to the arm the value it carries decides.
+        // The join is gone, since one edge into it went straight to the arm it decides and the
+        // other to a copy that goes straight to the arm the value it carries decides.
         assert!(!blocks(&func).contains(&3), "{:?}", blocks(&func));
-        let first = goes_to(&func, 1)[0];
+        assert_eq!(goes_to(&func, 1), vec![4]);
         let second = goes_to(&func, 2)[0];
-        assert_eq!(goes_to(&func, first), vec![4]);
         assert_eq!(goes_to(&func, second), vec![5]);
         // What the false arm returns is what the arm that took it carried, which is 2. The merge
         // gave the false arm a parameter while the join still had an edge to it, and once the
@@ -1970,7 +2022,7 @@ mod tests {
     /// little shorter is.
     #[test]
     fn a_block_larger_than_the_budget_is_not_copied() {
-        for (adds, copied) in [(13, 2), (14, 0)] {
+        for (adds, copied) in [(13, 1), (14, 0)] {
             let mut func = clamp_with(|build, param| {
                 let mut sum = param;
                 for _ in 0..adds {
@@ -1981,7 +2033,7 @@ mod tests {
             let stats = copying(&mut func);
             assert_eq!(stats.count(Kind::Optimized, super::COPIED), copied, "{adds}: {stats:?}");
             if copied == 0 {
-                assert_eq!(stats.count(Kind::Missed, super::TOO_BIG), 2);
+                assert_eq!(stats.count(Kind::Missed, super::TOO_BIG), 1);
             }
         }
     }
