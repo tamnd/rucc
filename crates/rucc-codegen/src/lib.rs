@@ -156,6 +156,7 @@
 
 pub mod abi;
 pub mod bits;
+pub mod borrow;
 pub mod bytes;
 pub mod called;
 pub mod capability;

@@ -378,6 +378,7 @@ pub static BRANCH: BranchInsts = BranchInsts {
     goto: "template",
     conditional: &CONDITIONAL,
     fused: &FUSED,
+    readings: &[],
     moves: &MOVES,
     zero: &ZERO,
     bits: &ONE_BIT,

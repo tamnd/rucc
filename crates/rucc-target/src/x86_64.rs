@@ -58,7 +58,7 @@ pub use crate::x86_64::text::{
 pub use crate::x86_64::timing::{LOAD, MODEL, TIMING};
 
 use crate::bits::BitInsts;
-use crate::branch::{BranchInsts, Fusion, Move};
+use crate::branch::{BranchInsts, Fusion, Move, Reading};
 use crate::counts::{BitCount, CountInst};
 use crate::flags::{Compare, FlagInsts, Reader, Reads, Zeroing};
 use crate::frame::{ClassMoves, FrameInsts, Probe, SpillMove, Through, Thunks};
@@ -417,6 +417,7 @@ pub static BRANCH: BranchInsts = BranchInsts {
     goto: "template",
     conditional: &CONDITIONAL,
     fused: &FUSED,
+    readings: &READINGS,
     moves: &MOVES,
     zero: &[],
     bits: &[],
@@ -432,6 +433,22 @@ pub static BRANCH: BranchInsts = BranchInsts {
 static CONDITIONAL: [&str; 16] = [
     "jcc_e", "jcc_ne", "jcc_l", "jcc_le", "jcc_g", "jcc_ge", "jcc_b", "jcc_be", "jcc_a", "jcc_ae",
     "jcc_s", "jcc_ns", "jcc_o", "jcc_no", "jcc_p", "jcc_np",
+];
+
+/// The ten `setcc` and the jump on the same condition. `rucc_codegen::borrow` writes one behind
+/// the `sbb` of the high halves of an ordered comparison of pairs, and a branch on its byte is the
+/// jump on the flags the `sbb` left.
+static READINGS: [Reading; 10] = [
+    Reading { set: "set_e", if_true: "jcc_e", if_false: "jcc_ne" },
+    Reading { set: "set_ne", if_true: "jcc_ne", if_false: "jcc_e" },
+    Reading { set: "set_l", if_true: "jcc_l", if_false: "jcc_ge" },
+    Reading { set: "set_le", if_true: "jcc_le", if_false: "jcc_g" },
+    Reading { set: "set_g", if_true: "jcc_g", if_false: "jcc_le" },
+    Reading { set: "set_ge", if_true: "jcc_ge", if_false: "jcc_l" },
+    Reading { set: "set_b", if_true: "jcc_b", if_false: "jcc_ae" },
+    Reading { set: "set_be", if_true: "jcc_be", if_false: "jcc_a" },
+    Reading { set: "set_a", if_true: "jcc_a", if_false: "jcc_be" },
+    Reading { set: "set_ae", if_true: "jcc_ae", if_false: "jcc_b" },
 ];
 
 /// Every comparison the test in front of a branch can be taken off, which is all of them.

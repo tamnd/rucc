@@ -114,7 +114,7 @@ use std::collections::BinaryHeap;
 use rucc_base::Interner;
 use rucc_base::hash::{Map, Set};
 use rucc_mir as mir;
-use rucc_target::{BranchInsts, FlagInsts, Fusion, Role};
+use rucc_target::{BranchInsts, FlagInsts, Fusion, Reading, Role};
 
 /// The scale a weight is in, which is what a share of a block is worked out against.
 const SCALE: u128 = mir::Weight::SCALE as u128;
@@ -142,7 +142,6 @@ pub fn blocks(
     walks: &[mir::Inst],
     reorder: bool,
 ) {
-    let table = &fused.0;
     let near = near(func, insts, names);
     let mut walking = vec![false; func.block_count()];
     if !walks.is_empty() {
@@ -153,7 +152,7 @@ pub fn blocks(
     let mut order = if reorder { traces(func, &walking) } else { order(func) };
     let mut split = partition(func, &mut order);
     let cold = split.map_or_else(Set::default, |first| order[first..].iter().copied().collect());
-    let mut writer = Writer { func, insts, names, table, fusable, near, cold };
+    let mut writer = Writer { func, insts, names, fused, fusable, near, cold };
     let mut at = 0;
     while at < order.len() {
         // The last block of the first part falls into nothing, since what is after it in the
@@ -832,8 +831,12 @@ fn along(
 /// caller and handed to all three, and to the two in [`crate::choice`] that ask the same thing of
 /// selects, rather than built by each. The table is 176 names on x86-64, and interning all of them
 /// five times for every function was nearly five percent of compiling Duktape at `-O1`.
+///
+/// The second map is the target's [`BranchInsts::readings`], the bytes written from what some
+/// instruction in front of them left. [`fusable`] and [`blocks`] take those too, and [`sink`] and
+/// the selects do not, since there is no comparison in one to move or to keep.
 #[derive(Debug)]
-pub struct Fused(pub(crate) Map<mir::Opcode, &'static Fusion>);
+pub struct Fused(pub(crate) Map<mir::Opcode, &'static Fusion>, Map<mir::Opcode, &'static Reading>);
 
 impl Fused {
     /// The table for `insts`, with its names in `names`.
@@ -844,7 +847,12 @@ impl Fused {
             .iter()
             .map(|fusion| (mir::Opcode::new(names.join(insts.prefix, fusion.set)), fusion))
             .collect();
-        Fused(table)
+        let readings = insts
+            .readings
+            .iter()
+            .map(|reading| (mir::Opcode::new(names.join(insts.prefix, reading.set)), reading))
+            .collect();
+        Fused(table, readings)
     }
 }
 
@@ -926,14 +934,16 @@ pub fn fusable(
     fused: &Fused,
     names: &mut Interner,
 ) -> Set<mir::Inst> {
-    let table = &fused.0;
     let branch = mir::Opcode::new(names.join(insts.prefix, insts.cond));
     let reads = crate::changes::Reads::of(func);
     let mut found = Set::default();
     for block in func.blocks() {
         let insts: Vec<mir::Inst> = func.insts(block).collect();
         let [.., compare, last] = insts[..] else { continue };
-        if func[last].opcode != branch || !table.contains_key(&func[compare].opcode) {
+        let opcode = func[compare].opcode;
+        if func[last].opcode != branch
+            || !(fused.0.contains_key(&opcode) || fused.1.contains_key(&opcode))
+        {
             continue;
         }
         let operands = &func[func[compare].operands];
@@ -1046,12 +1056,19 @@ fn passes(
     })
 }
 
+/// What a branch is folded into: a comparison that keeps the flags, or a byte that goes.
+#[derive(Debug, Clone, Copy)]
+enum Folded {
+    Compare(&'static Fusion),
+    Reading(&'static Reading),
+}
+
 /// The one thing that writes an instruction here, over the function it writes into.
 struct Writer<'a> {
     func: &'a mut mir::Func,
     insts: &'a BranchInsts,
     names: &'a mut Interner,
-    table: &'a Map<mir::Opcode, &'static Fusion>,
+    fused: &'a Fused,
     fusable: &'a Set<mir::Inst>,
     /// Whether a jump on one bit reaches across the whole function. See [`near`].
     near: bool,
@@ -1146,7 +1163,8 @@ impl Writer<'_> {
         // condition is false for leaves the jump taken when it holds, and falling into the arm it
         // is true for leaves the other jump and the arms the other way round.
         let (if_true, if_false) = match fused {
-            Some((_, fusion)) => (fusion.if_true, fusion.if_false),
+            Some((_, Folded::Compare(fusion))) => (fusion.if_true, fusion.if_false),
+            Some((_, Folded::Reading(reading))) => (reading.if_true, reading.if_false),
             None => (self.insts.if_true, self.insts.if_false),
         };
         let arms: Vec<mir::Block> = self.func[block].succs.iter().map(|arm| arm.block).collect();
@@ -1160,9 +1178,17 @@ impl Writer<'_> {
         };
 
         let test = match fused {
-            Some((compare, fusion)) => {
+            Some((compare, Folded::Compare(fusion))) => {
                 self.keep_only_the_flags(compare, fusion);
                 compare
+            }
+            // The byte goes and the jump reads what the instruction in front of it left, which is
+            // nothing a jump that compares with zero could make itself.
+            Some((set, Folded::Reading(_))) => {
+                self.func.remove_inst(set);
+                let opcode = self.opcode(name);
+                self.func.build(block, opcode).finish();
+                return bridge;
             }
             None => {
                 let opcode = self.opcode(self.insts.test);
@@ -1251,13 +1277,18 @@ impl Writer<'_> {
     /// one, and that the byte the branch reads is the byte that comparison wrote, since the
     /// allocator has since given both of them a physical register and two registers that were
     /// different could have become the same one.
-    fn fused(&self, block: mir::Block) -> Option<(mir::Inst, &'static Fusion)> {
+    fn fused(&self, block: mir::Block) -> Option<(mir::Inst, Folded)> {
         let insts: Vec<mir::Inst> = self.func.insts(block).collect();
         let [.., compare, last] = insts[..] else { return None };
         if !self.fusable.contains(&compare) {
             return None;
         }
-        let fusion = *self.table.get(&self.func[compare].opcode)?;
+        let opcode = self.func[compare].opcode;
+        let fusion = match (self.fused.0.get(&opcode), self.fused.1.get(&opcode)) {
+            (Some(&fusion), _) => Folded::Compare(fusion),
+            (None, Some(&reading)) => Folded::Reading(reading),
+            (None, None) => return None,
+        };
         let byte = self.func[self.func[compare].operands].first()?.reg;
         (self.func[self.func[last].operands].first()?.reg == byte).then_some((compare, fusion))
     }
