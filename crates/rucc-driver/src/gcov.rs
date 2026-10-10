@@ -17,7 +17,7 @@
 /// The word that comes up most often is the answer. The archive has it several times, and a run of
 /// four bytes that only looks like one is not likely to come up as often.
 #[must_use]
-pub fn release(archive: &[u8]) -> Option<(u32, u32)> {
+pub(crate) fn release(archive: &[u8]) -> Option<(u32, u32)> {
     let mut seen: Vec<((u32, u32), usize)> = Vec::new();
     for quad in archive.windows(4) {
         let &[b'*', minor @ b'0'..=b'9', units @ b'0'..=b'9', tens @ b'A'..=b'Z'] = quad else {
