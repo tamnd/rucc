@@ -170,7 +170,9 @@ int main(void) {
 
 /// A program built with `--coverage` and linked with the `libgcov.a` of the GCC on the machine
 /// writes its counts, and `gcov` reads them. The record has to have the release of that library,
-/// or the library writes nothing. Left out on a machine with no `gcov`.
+/// or the library writes nothing. The `gcov` is the one of the release that wrote the counts,
+/// since a machine can have the runtime of a newer GCC than its `gcov`. Left out on a machine with
+/// no `gcov`.
 #[cfg(all(target_os = "linux", target_arch = "x86_64"))]
 #[test]
 fn gcov_reads_the_counts_of_a_covered_program() {
@@ -184,15 +186,20 @@ fn gcov_reads_the_counts_of_a_covered_program() {
     let (ok, said) = run(&dir, &["--coverage", "b.o", "-o", "prog"]);
     assert!(ok, "{said}");
     let out = Command::new(dir.join("prog")).output().expect("what was linked can be run");
-    assert!(out.status.success(), "the program got the wrong answer");
-    assert!(
-        dir.join("b.gcda").exists(),
-        "no counts were written: {}",
-        String::from_utf8_lossy(&out.stderr)
-    );
-    let out = Command::new("gcov").arg("b.c").current_dir(&dir).output().expect("gcov starts");
     let said = String::from_utf8_lossy(&out.stderr);
-    assert!(out.status.success(), "{said}");
+    assert!(out.status.success(), "the program got the wrong answer: {said}");
+    let counts = std::fs::read(dir.join("b.gcda")).expect("the counts were written");
+    // The version word after the magic, such as `B52*` for 15.2, gives the major release.
+    let word = words(&counts[..8])[1].to_be_bytes();
+    let major = u32::from(word[0] - b'A') * 10 + u32::from(word[1] - b'0');
+    let named = format!("gcov-{major}");
+    let gcov = match Command::new(&named).arg("--version").output() {
+        Ok(_) => named.as_str(),
+        Err(_) => "gcov",
+    };
+    let out = Command::new(gcov).arg("b.c").current_dir(&dir).output().expect("gcov starts");
+    let said = String::from_utf8_lossy(&out.stderr);
+    assert!(out.status.success(), "{gcov}: {said}");
     let listing = std::fs::read_to_string(dir.join("b.c.gcov")).expect("gcov wrote a listing");
     // The body of `twice` ran ten times, and the early return never ran.
     assert!(listing.contains("10:    2:"), "{listing}");
