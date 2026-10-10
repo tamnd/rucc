@@ -900,6 +900,55 @@
                       (bvadd (bvadd a k) 3) (extract 31 24 v))
                (result))))
 
+;; A constant written to memory, carried in the instruction rather than put in a register first,
+;; for the reason the x86-64 rules give. Without these every `movl $0, 4(%eax)` gcc writes was an
+;; `xorl` and a store here, and an i386 kernel stores constants to fields and to the outgoing
+;; argument area all the time. An address is thirty two bits, so every offset fits.
+
+(rule (lower (store.i8 (iconst.i8 k) (value.i32 a)))
+      (x64.mov_mi_8 (amode_base a) k)
+      (spec (= (store (mem) a k) (result))))
+
+(rule (lower (store.i1 (iconst.i1 k) (value.i32 a)))
+      (x64.mov_mi_8 (amode_base a) (zero_extend 1 8 k))
+      (spec (= (store (mem) a (zero_extend 1 8 k)) (result))))
+
+(rule (lower (store.i16 (iconst.i16 k) (value.i32 a)))
+      (x64.mov_mi_16 (amode_base a) k)
+      (spec (= (store (store (mem) a (extract 7 0 k))
+                      (bvadd a 1) (extract 15 8 k))
+               (result))))
+
+(rule (lower (store.i32 (iconst.i32 k) (value.i32 a)))
+      (x64.mov_mi_32 (amode_base a) k)
+      (spec (= (store (store (store (store (mem) a (extract 7 0 k))
+                                    (bvadd a 1) (extract 15 8 k))
+                             (bvadd a 2) (extract 23 16 k))
+                      (bvadd a 3) (extract 31 24 k))
+               (result))))
+
+(rule (lower (store.i8 (iconst.i8 j) (add.i32 (value.i32 a) (iconst.i32 k))))
+      (x64.mov_mi_8 (amode_base_offset a k) j)
+      (spec (= (store (mem) (bvadd a k) j) (result))))
+
+(rule (lower (store.i1 (iconst.i1 j) (add.i32 (value.i32 a) (iconst.i32 k))))
+      (x64.mov_mi_8 (amode_base_offset a k) (zero_extend 1 8 j))
+      (spec (= (store (mem) (bvadd a k) (zero_extend 1 8 j)) (result))))
+
+(rule (lower (store.i16 (iconst.i16 j) (add.i32 (value.i32 a) (iconst.i32 k))))
+      (x64.mov_mi_16 (amode_base_offset a k) j)
+      (spec (= (store (store (mem) (bvadd a k) (extract 7 0 j))
+                      (bvadd (bvadd a k) 1) (extract 15 8 j))
+               (result))))
+
+(rule (lower (store.i32 (iconst.i32 j) (add.i32 (value.i32 a) (iconst.i32 k))))
+      (x64.mov_mi_32 (amode_base_offset a k) j)
+      (spec (= (store (store (store (store (mem) (bvadd a k) (extract 7 0 j))
+                                    (bvadd (bvadd a k) 1) (extract 15 8 j))
+                             (bvadd (bvadd a k) 2) (extract 23 16 j))
+                      (bvadd (bvadd a k) 3) (extract 31 24 j))
+               (result))))
+
 ;; Giving a value back. Where it goes is the convention's business rather than this file's, so
 ;; the head is the pseudo instruction x86-64 uses and the call lowering decides the register.
 
