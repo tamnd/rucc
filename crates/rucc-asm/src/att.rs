@@ -1135,9 +1135,18 @@ impl Writer<'_> {
                         let operand = operands[defs(operands)];
                         format!("*{}", self.reg(operand, self.word(), func_name, spelled)?)
                     }
-                    Arg::Imm => match data.imm {
-                        Some(imm) => format!("${}", func[imm].0),
-                        None => "$0".to_owned(),
+                    // A store on i386 that carries the address of a name, which is the name and
+                    // the offset into it, `movl $md_ops+4, (%eax)`. See `fold::named_stores`.
+                    Arg::Imm => match (data.imm.map_or(0, |imm| func[imm].0), data.symbol) {
+                        (imm, Some(symbol)) => {
+                            let name = self.directives.spell(self.names.resolve(symbol));
+                            match imm {
+                                0 => format!("${name}"),
+                                imm if imm < 0 => format!("${name}{imm}"),
+                                imm => format!("${name}+{imm}"),
+                            }
+                        }
+                        (imm, None) => format!("${imm}"),
                     },
                     Arg::Mem => match data.mem {
                         Some(mem) => self.amode(operands, &func[mem], func_name, spelled)?,
