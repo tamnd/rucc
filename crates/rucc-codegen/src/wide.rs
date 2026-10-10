@@ -1683,7 +1683,14 @@ fn compare(
     let (Some(&(a_low, a_high)), Some(&(b_low, b_high))) = (halves.get(&a), halves.get(&b)) else {
         return;
     };
-    let answer = if matches!(pred, IntPred::Eq | IntPred::Ne) {
+    let ones = u128::MAX >> (128 - width.half);
+    let all = |half: Value| known(func, half).is_some_and(|bits| bits & ones == ones);
+    let answer = if matches!(pred, IntPred::Eq | IntPred::Ne) && all(b_low) && all(b_high) {
+        // `x == ~0ULL` is both halves all ones, which is their `and` all ones. The `xor` of each
+        // with all ones was a `notl` apiece and an `orl`, where this is an `andl` and a `cmpl $-1`.
+        let both = half_bitwise(func, width, inst, Opcode::And, a_low, a_high);
+        compared(func, inst, pred, both, b_low)
+    } else if matches!(pred, IntPred::Eq | IntPred::Ne) {
         let low = half_bitwise(func, width, inst, Opcode::Xor, a_low, b_low);
         let high = half_bitwise(func, width, inst, Opcode::Xor, a_high, b_high);
         let both = half_bitwise(func, width, inst, Opcode::Or, low, high);
