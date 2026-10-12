@@ -570,6 +570,10 @@ impl<'a> Run<'a> {
         let substituted = self.subst_list(def, args, &body, invocation);
         self.current = outer;
         let mut os = drop_placemarkers(substituted);
+        // The step each trace the tokens came with was last given, since a replacement list is
+        // mostly tokens of the body, which all came with the invocation's, and looking the same
+        // step up for each of them was a hash for every token. tamnd/rucc#3052.
+        let mut last = (invocation.trace, here);
         for tok in &mut os {
             tok.hides = self.hides.union(tok.hides, hs);
             // The outermost invocation wins, because substitution of the outer macro runs
@@ -580,7 +584,10 @@ impl<'a> Run<'a> {
             // the chain above this macro, so this records one step inside it, and the interning
             // means the whole replacement list usually shares one node.
             if let Some(name) = name {
-                tok.trace = self.traces.push(name, invocation.span, tok.trace);
+                if tok.trace != last.0 {
+                    last = (tok.trace, self.traces.push(name, invocation.span, tok.trace));
+                }
+                tok.trace = last.1;
             }
         }
         if let Some(first) = os.first_mut() {

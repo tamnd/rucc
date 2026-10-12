@@ -12,6 +12,7 @@ All notable changes are recorded here. The format follows [Keep a Changelog](htt
 - gcm no longer counts register pressure in functions without a loop, and the liveness solver reuses one buffer for its unions, which takes about 0.2% off compiling quickjs.c and duktape.c at `-O2` with the same output (#3565).
 - The inliner searches for indirect calls it can resolve only when a splice can have made one, instead of walking the whole caller after every splice, which halves the compile of blake2b.c with SSE and takes about 2% off quickjs.c and duktape.c (#3566).
 - Measuring a caller's frame finds where each instruction is in its block once instead of walking the same blocks again for every local, which takes 36% off compiling blake2b.c with SSE (#3567).
+- Macro expansion remembers what each hide set union and trace step answered instead of building and hashing the same set for every token of a replacement list, which takes 6% off duktape's small source files and 1.5% off lvm.c (#3568).
 
 ## 0.30.1
 
