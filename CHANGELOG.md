@@ -25,6 +25,7 @@ All notable changes are recorded here. The format follows [Keep a Changelog](htt
 - The inliner now counts both arms of a `__builtin_constant_p` it cannot answer yet when it weighs a callee, since gcc only answers no after inlining. The kernel's `test_bit` asks about the word it loads, so `export_rdev` in drivers/md/md.c stays a call at its twelve callers as it does with gcc. X32 instruction counts go from 23608 to 23447 for md, 3961 to 3935 for uncore and 6261 to 6247 for ohci-hcd, with sem unchanged at 4578 (#3551).
 - Jump threading now points an edge past a block whose values are read further down when those reads can only be reached through the block's other arm, with nothing copied. The kernel's `for_each_cpu` loop tests `find_next_bit`'s answer against the size, and the edge carrying the size now leaves the loop at once. X32 instruction counts go from 23445 to 23399 for md and 3934 to 3922 for uncore (#3552).
 - Jump threading's check for reads past a block now asks only the blocks its walk reaches, instead of scanning the whole function for every edge first: lvm.c runs 11.9% fewer instructions at -O2, with byte-identical output (#3555).
+- Loop canonicalization dedicates every exit of a loop that needs a block in one round instead of the first one per round, so the `switch` in duktape.c's executor no longer takes 44 rounds of building the loop forest: duktape.c runs 4.3% fewer instructions at -O2, with byte-identical output (#3558).
 
 ## 0.30.0
 

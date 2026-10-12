@@ -143,10 +143,10 @@ impl Pass for Canon {
 fn preheaders(func: &mut Func, an: &mut Analyses, fuel: &mut Fuel, stats: &mut Stats) -> bool {
     loop {
         let computed = computed(func);
-        let jobs = wanted(func, an, |loops, cfg, id| {
+        let jobs = wanted(func, an, |loops, cfg, id, jobs| {
             let header = loops.header(id);
             if loops.preheader(cfg, id).is_some() {
-                return None;
+                return;
             }
             let outside: Vec<Block> = cfg
                 .predecessors(header)
@@ -157,10 +157,9 @@ fn preheaders(func: &mut Func, an: &mut Analyses, fuel: &mut Fuel, stats: &mut S
             // All of them or none, since a header with one of these left on it is a header with a
             // predecessor from outside, so the block put on the others is not a preheader and the
             // round after this would ask for it again.
-            if outside.iter().any(|pred| computed.contains(pred)) {
-                return None;
+            if !outside.is_empty() && !outside.iter().any(|pred| computed.contains(pred)) {
+                jobs.push((header, outside));
             }
-            (!outside.is_empty()).then_some((header, outside))
         });
         if jobs.is_empty() {
             return true;
@@ -180,14 +179,16 @@ fn preheaders(func: &mut Func, an: &mut Analyses, fuel: &mut Fuel, stats: &mut S
 fn latches(func: &mut Func, an: &mut Analyses, fuel: &mut Fuel, stats: &mut Stats) -> bool {
     loop {
         let computed = computed(func);
-        let jobs = wanted(func, an, |loops, cfg, id| {
+        let jobs = wanted(func, an, |loops, cfg, id, jobs| {
             let header = loops.header(id);
             let from = loops.latches(id).to_vec();
             if from.iter().any(|latch| computed.contains(latch)) {
-                return None;
+                return;
             }
             let single = from.len() == 1 && cfg.successors(from[0]).len() == 1 && from[0] != header;
-            (!from.is_empty() && !single).then_some((header, from))
+            if !from.is_empty() && !single {
+                jobs.push((header, from));
+            }
         });
         if jobs.is_empty() {
             return true;
@@ -208,8 +209,12 @@ fn latches(func: &mut Func, an: &mut Analyses, fuel: &mut Fuel, stats: &mut Stat
 fn exits(func: &mut Func, an: &mut Analyses, fuel: &mut Fuel, stats: &mut Stats) -> bool {
     loop {
         let computed = computed(func);
-        let jobs = wanted(func, an, |loops, cfg, id| {
+        let jobs = wanted(func, an, |loops, cfg, id, jobs| {
             for exit in loops.exits(id) {
+                // Two edges out of the loop to one block are one job.
+                if jobs.iter().any(|&(to, _)| to == exit.to) {
+                    continue;
+                }
                 let outside: Vec<Block> = cfg
                     .predecessors(exit.to)
                     .iter()
@@ -228,10 +233,14 @@ fn exits(func: &mut Func, an: &mut Analyses, fuel: &mut Fuel, stats: &mut Stats)
                     if inside.iter().any(|pred| computed.contains(pred)) {
                         continue;
                     }
-                    return Some((exit.to, inside));
+                    // Every exit of the loop that wants a block of its own rather than the first,
+                    // since each is an edit to the edges into one block and none of them changes
+                    // what another finds. A `switch` inside a loop whose arms leave it had one arm
+                    // dedicated per round, and on duktape.c at `-O2` the executor took 44 rounds
+                    // and a forest of 13871 blocks for each. tamnd/rucc#3052.
+                    jobs.push((exit.to, inside));
                 }
             }
-            None
         });
         if jobs.is_empty() {
             return true;
@@ -668,9 +677,11 @@ fn close_from(
 
 /// The edits one step wants that do not tread on each other, from a forest it asks for itself.
 ///
-/// The closure gets the forest, the graph and one loop, and answers with a block and the
-/// predecessors of it to route through a new one, or nothing. It is asked about every loop and the
-/// answers come back together, less any whose blocks another answer already named.
+/// The closure gets the forest, the graph and one loop, and adds to the list it is given each block
+/// it wants and the predecessors of it to route through a new one. It is asked about every loop and
+/// the answers come back together, less any whose blocks another loop's answer already named. The
+/// answers for one loop are its own to keep apart, since the exits of one loop share the blocks
+/// they leave from.
 ///
 /// A round rather than one edit at a time, and the reason is what one edit costs. The forest, the
 /// graph and both trees are the size of the function and are thrown away after every edit, so a
@@ -693,20 +704,26 @@ fn close_from(
 fn wanted(
     func: &mut Func,
     an: &mut Analyses,
-    mut ask: impl FnMut(&Loops, &Cfg, LoopId) -> Option<(Block, Vec<Block>)>,
+    mut ask: impl FnMut(&Loops, &Cfg, LoopId, &mut Vec<(Block, Vec<Block>)>),
 ) -> Vec<(Block, Vec<Block>)> {
     let cfg = an.cfg(func);
     let loops = an.loops(func);
     let mut claimed: Set<Block> = Set::default();
     let mut jobs: Vec<(Block, Vec<Block>)> = Vec::new();
+    let mut asked = Vec::new();
     for id in loops.all() {
-        let Some((to, from)) = ask(loops, cfg, id) else { continue };
-        if claimed.contains(&to) || from.iter().any(|block| claimed.contains(block)) {
-            continue;
+        ask(loops, cfg, id, &mut asked);
+        let start = jobs.len();
+        for (to, from) in asked.drain(..) {
+            if claimed.contains(&to) || from.iter().any(|block| claimed.contains(block)) {
+                continue;
+            }
+            jobs.push((to, from));
         }
-        claimed.insert(to);
-        claimed.extend(from.iter().copied());
-        jobs.push((to, from));
+        for (to, from) in &jobs[start..] {
+            claimed.insert(*to);
+            claimed.extend(from.iter().copied());
+        }
     }
     jobs
 }
