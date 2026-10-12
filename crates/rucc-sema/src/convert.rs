@@ -41,7 +41,9 @@ use rucc_ast::UnaryOp;
 use rucc_base::Interner;
 use rucc_base::float::Status;
 use rucc_target::TargetInfo;
-use rucc_types::{TypeId, TypeKind, Types, is_arithmetic, is_floating, is_pointer, is_void};
+use rucc_types::{
+    Qualifiers, TypeId, TypeKind, Types, is_arithmetic, is_floating, is_pointer, is_void, pointee,
+};
 
 use crate::eval::{Eval, bare, int_shape};
 use crate::expr::{Category, Conversion, Expr, ExprId, ExprKind};
@@ -288,29 +290,49 @@ impl Conv<'_> {
     /// Whether an expression is a null pointer constant, 6.3.2.3p3.
     ///
     /// An integer constant expression with the value zero, or such an expression cast to `void
-    /// *`. The casts to a pointer are looked through because `(void *)0` is one, and below them
-    /// whatever has an integer type is folded, because the expression is any integer constant
-    /// expression and not only a literal: `(void *)((long)(x) * 0l)` is one exactly when `x` is
-    /// an integer constant expression, which is the whole of how the kernel's `__is_constexpr`
-    /// tells a constant from a variable. The folding is the strict one, so a `const` object is not
-    /// a constant here in any dialect, which is gcc's answer for it too.
+    /// *`. Only a cast of an integer to plain `void *` counts, so `(char *)0`, `(const void *)0`
+    /// and `(void *)(void *)0` are not null pointer constants, which is what gcc says too. The
+    /// kernel's `__is_const_zero` depends on it: `0 ? (void *)(long)(x) : (char *)0` has type
+    /// `char *` only when the left arm is a null pointer constant. Below the cast, whatever has
+    /// an integer type is folded, because the expression is any integer constant expression and
+    /// not only a literal: `(void *)((long)(x) * 0l)` is one exactly when `x` is an integer
+    /// constant expression, which is the whole of how the kernel's `__is_constexpr` tells a
+    /// constant from a variable. The folding is the strict one, so a `const` object is not a
+    /// constant here in any dialect, and `0 && x` is not one when `x` is not, which is gcc's
+    /// answer for both.
     #[must_use]
     pub fn is_null_pointer_constant(&self, expr: ExprId) -> bool {
+        let ty = self.tast[expr].ty;
         match self.tast[expr].kind {
             ExprKind::Const(value) => self.tast[value] == Const::Int(0),
-            ExprKind::Cast(inner) | ExprKind::Convert { operand: inner, .. }
-                if is_pointer(self.types, self.tast[expr].ty) =>
-            {
-                self.is_null_pointer_constant(inner)
+            // The conversion of a null pointer constant to a pointer type, which only a null
+            // pointer constant is given.
+            ExprKind::Convert { kind: Conversion::NullPointer, operand } => {
+                self.is_null_pointer_constant(operand)
             }
-            _ if int_shape(self.types, self.tast[expr].ty, self.target).is_some() => {
-                let mut eval = Eval::new(self.tast, self.types, self.target, self.names);
+            ExprKind::Cast(inner) | ExprKind::Convert { operand: inner, .. }
+                if is_pointer(self.types, ty) =>
+            {
+                self.is_plain_void_pointer(ty)
+                    && int_shape(self.types, self.tast[inner].ty, self.target).is_some()
+                    && self.is_null_pointer_constant(inner)
+            }
+            _ if int_shape(self.types, ty, self.target).is_some() => {
+                let mut eval =
+                    Eval::new(self.tast, self.types, self.target, self.names).strict(true);
                 // A `__builtin_constant_p` the optimizer has still to answer is not one, since
                 // its no is only the answer where a constant is required.
                 eval.integer(expr) == Ok(0) && !eval.deferred()
             }
             _ => false,
         }
+    }
+
+    /// Whether a type is `void *` with no qualifier on the `void`.
+    fn is_plain_void_pointer(&self, ty: TypeId) -> bool {
+        pointee(self.types, ty).is_some_and(|inner| {
+            is_void(self.types, inner) && self.types.object_quals(inner) == Qualifiers::NONE
+        })
     }
 
     /// Writes an arithmetic conversion, or nothing where the type is already the one wanted.

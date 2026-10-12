@@ -149,6 +149,50 @@ fn the_kernel_s_constant_test_compiles_quietly_under_werror() {
     assert!(String::from_utf8_lossy(&pedantic.stderr).contains("to a void type"));
 }
 
+/// `__is_constexpr` and `__is_const_zero` from `include/linux/compiler.h`, which read the answer
+/// off the type of a conditional with a `void *` arm. That arm is a null pointer constant only
+/// when the integer under the cast is an integer constant expression, and `0 && x` is not one when
+/// `x` is a variable, even though it folds to zero in an enumerator. gcc 16 gives these answers.
+#[test]
+fn the_kernel_s_constant_tests_tell_a_constant_from_a_variable() {
+    let source = "#define __is_constexpr(x) \\\n\
+        (sizeof(int) == sizeof(*(8 ? ((void *)((long)(x) * 0l)) : (int *)8)))\n\
+        #define __is_const_zero(x) \\\n\
+        _Generic(0 ? (void *)(long)(x) : (char *)0, char *: 1, void *: 0)\n\
+        #define IS(e, t) _Generic((e), t: 1, default: 0)\n\
+        static volatile unsigned seed; static unsigned word; static void *vp;\n\
+        static int i; static const int ci;\n\
+        _Static_assert(__is_const_zero(0), \"zero\");\n\
+        _Static_assert(!__is_const_zero(5), \"five\");\n\
+        _Static_assert(!__is_const_zero(seed), \"variable\");\n\
+        _Static_assert(__is_constexpr(3), \"three\");\n\
+        _Static_assert(!__is_constexpr(seed), \"variable\");\n\
+        _Static_assert(!__is_constexpr(0 && seed), \"and\");\n\
+        _Static_assert(!__is_constexpr(1 || seed), \"or\");\n\
+        _Static_assert(!__is_constexpr(0 ? seed : 1), \"arm\");\n\
+        enum { folded = 0 && seed };\n\
+        _Static_assert(IS(1 ? &word : vp, void *), \"void\");\n\
+        _Static_assert(IS(1 ? &word : (void *)(void *)0, void *), \"cast twice\");\n\
+        _Static_assert(IS(1 ? &word : (const void *)0, const void *), \"const void\");\n\
+        _Static_assert(IS(0 ? (void *)0 : (char *)0, char *), \"null\");\n\
+        _Static_assert(IS(1 ? &i : &ci, const int *), \"const\");\n\
+        _Static_assert(IS(1 ? &ci : (void *)&i, const void *), \"const void arm\");\n";
+    let out = run(&["--target=x86_64-unknown-linux-gnu", "-c", "-o", "/dev/null"], source);
+    assert!(out.status.success(), "{}", String::from_utf8_lossy(&out.stderr));
+    assert!(out.stderr.is_empty(), "{}", String::from_utf8_lossy(&out.stderr));
+}
+
+/// Two pointers to types that are not compatible, which gcc 16 calls a pointer type mismatch and
+/// takes as `void *`.
+#[test]
+fn a_conditional_of_two_unrelated_pointers_is_a_mismatch() {
+    let source = "int i; unsigned u;\n\
+        void *f(int c) { return c ? &i : &u; }\n";
+    let out = run(&["--target=x86_64-unknown-linux-gnu", "-c", "-o", "/dev/null"], source);
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert!(stderr.contains("pointer type mismatch in conditional expression"), "{stderr}");
+}
+
 /// Two more things in the headers every kernel unit includes that gcc takes without a word:
 /// `struct mm_struct`, whose only members before its flexible array are inside an anonymous
 /// `struct`, and `check_copy_size`, which keeps what `__builtin_object_size` answers in an `int`.
