@@ -16,7 +16,7 @@
 //! it is reached.
 //!
 //! Then each value that went is weighed again against the values that would go in its place, by
-//! what they cost rather than by weight, and the cheaper side goes. See [`trade`].
+//! what they cost rather than by weight, and the cheaper side goes. See `trade`.
 //!
 //! # What it promises
 //!

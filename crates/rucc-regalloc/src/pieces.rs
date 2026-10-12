@@ -33,6 +33,9 @@ use crate::assign::{Assignment, Place};
 /// says the target has none for their class.
 pub type Copy<'a> = &'a dyn Fn(&mut Func, Operand, Operand) -> Option<Inst>;
 
+/// The reads of one spilled value in one block, each an instruction and the index of its operand.
+type Reads = (Block, Reg, Vec<(Inst, usize)>);
+
 /// What one copy changed, so that it can be taken out again.
 #[derive(Debug)]
 struct Piece {
@@ -105,7 +108,7 @@ pub(crate) fn split(
     // the value again under another name, with a move it did not have.
     let mut writes: Map<Reg, (u32, Block)> = Map::default();
     let mut blocks: Map<Reg, (u32, Block)> = Map::default();
-    let mut reads: Vec<(Block, Reg, Vec<(Inst, usize)>)> = Vec::new();
+    let mut reads: Vec<Reads> = Vec::new();
     let mut at: Map<(Block, Reg), usize> = Map::default();
     for block in func.blocks() {
         for inst in func.insts(block) {
