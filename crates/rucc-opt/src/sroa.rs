@@ -168,7 +168,7 @@ impl Pass for Sroa {
                 if done.contains(&alloca) {
                     continue;
                 }
-                let Ok(Some(plan)) = plan(func, &rpo, &mut readers, alloca, target) else {
+                let Ok(Some(plan)) = plan(func, &rpo, &mut readers, alloca, target, None) else {
                     continue;
                 };
                 if !plan.vector || !fuel.take() {
@@ -184,7 +184,7 @@ impl Pass for Sroa {
             if done.contains(&alloca) {
                 continue;
             }
-            let plan = match plan(func, &rpo, &mut readers, alloca, target) {
+            let plan = match plan(func, &rpo, &mut readers, alloca, target, None) {
                 Ok(Some(plan)) => plan,
                 Ok(None) => continue,
                 Err(reason) => {
@@ -237,11 +237,13 @@ pub(crate) fn scalarizable(func: &Func, layout: DataLayout) -> Set<Value> {
         rpo[block.index()] = rank;
     }
     let mut readers = Readers::new(func);
+    // Nothing changes here, so where each instruction is in its block can be found once and kept.
+    let mut places = Places::default();
     for alloca in func.insts(entry) {
         if !local(alloca) {
             continue;
         }
-        if let Ok(Some(_)) = plan(func, &rpo, &mut readers, alloca, target) {
+        if let Ok(Some(_)) = plan(func, &rpo, &mut readers, alloca, target, Some(&mut places)) {
             out.extend(func[alloca].first_result);
         }
     }
@@ -507,6 +509,7 @@ fn plan(
     readers: &mut Readers,
     alloca: Inst,
     target: Target,
+    places: Option<&mut Places>,
 ) -> Result<Option<Plan>, &'static str> {
     if func[alloca].flags.contains(Flags::VOLATILE) {
         return Ok(None);
@@ -525,7 +528,7 @@ fn plan(
     // Reverse postorder puts every definition in front of its uses, so an address is known by the
     // time anything reads it.
     readers.catch_up(func);
-    for inst in reading(func, rpo, readers, base) {
+    for inst in reading(func, rpo, readers, base, places) {
         let named = func[func[inst].args].iter().any(|value| offsets.contains_key(value))
             || func
                 .successors(inst)
@@ -555,6 +558,38 @@ fn plan(
     Ok(Some(Plan { alloca, pieces, vector, uses, derived, ends }))
 }
 
+/// Where each instruction is in its block, found once walking blocks to order the readers of the
+/// locals has cost as much as finding it, which a function that does not change between locals
+/// can keep.
+///
+/// blake2b.c's SSE rounds are long blocks, and walking one again for each local was most of what
+/// measuring a frame there cost. Most functions walk little, and finding every place in each of
+/// them cost more than the walks did. tamnd/rucc#3052.
+#[derive(Default)]
+struct Places {
+    /// How many instructions the walks went past so far.
+    walked: usize,
+    /// By instruction, empty until it is found.
+    at: Vec<usize>,
+}
+
+impl Places {
+    /// Counts a walk past `steps` instructions, and finds every place once the walks come to as
+    /// many instructions as the function has made.
+    fn walk(&mut self, func: &Func, steps: usize) {
+        self.walked += steps;
+        if self.walked < func.counts().insts {
+            return;
+        }
+        self.at.resize(func.counts().insts, 0);
+        for block in func.blocks() {
+            for (place, inst) in func.insts(block).enumerate() {
+                self.at[inst.index()] = place;
+            }
+        }
+    }
+}
+
 /// Every instruction that might name an address into the local, in reverse postorder and in order
 /// within a block, which is the order a walk over the whole function would meet them in.
 ///
@@ -562,7 +597,16 @@ fn plan(
 /// makes, and so on down. It is more than [`plan`] wants, since a `ptr_add` can add the address to
 /// something rather than something to it, and [`plan`] asks each of them the question it would
 /// have asked on the walk.
-fn reading(func: &Func, rpo: &[usize], readers: &Readers, base: Value) -> Vec<Inst> {
+///
+/// `places` is where each instruction is in its block, when nothing changes from one call to the
+/// next.
+fn reading(
+    func: &Func,
+    rpo: &[usize],
+    readers: &Readers,
+    base: Value,
+    mut places: Option<&mut Places>,
+) -> Vec<Inst> {
     let mut found = Vec::new();
     let mut seen: Set<Inst> = Set::default();
     let mut work = vec![base];
@@ -585,16 +629,23 @@ fn reading(func: &Func, rpo: &[usize], readers: &Readers, base: Value) -> Vec<In
     while start < found.len() {
         let here = block(found[start]);
         let end = start + found[start..].iter().take_while(|&&inst| block(inst) == here).count();
-        if end - start > 1 {
-            let mut at = start;
+        if let Some(at) = places.as_ref().map(|places| &places.at).filter(|at| !at.is_empty()) {
+            found[start..end].sort_by_key(|inst| at[inst.index()]);
+        } else if end - start > 1 {
+            let mut next = start;
+            let mut walked = 0;
             for inst in func.insts(here) {
+                walked += 1;
                 if seen.contains(&inst) {
-                    found[at] = inst;
-                    at += 1;
-                    if at == end {
+                    found[next] = inst;
+                    next += 1;
+                    if next == end {
                         break;
                     }
                 }
+            }
+            if let Some(places) = places.as_mut() {
+                places.walk(func, walked);
             }
         }
         start = end;
