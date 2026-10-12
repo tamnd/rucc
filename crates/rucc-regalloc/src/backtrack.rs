@@ -177,10 +177,19 @@ pub(crate) fn tries(
 /// its block runs.
 ///
 /// A value on the stack costs a load or a store every time it is read or written. A two address
-/// instruction whose answer is not where its source is costs the copy between them, and so does a
-/// block parameter that is not where the value passed to it is. Moves the machine needs whatever
-/// the assignment, like those into the registers a call insists on, are left out, since they are
-/// the same for any answer.
+/// instruction whose answer is not where its source is costs the copy between them, a block
+/// parameter that is not where the value passed to it is costs one each time the edge is taken, and
+/// an operand insisting on a register its value is not in costs one each time the instruction runs.
+/// That last is the copy of an argument into the register a call reads it from, or of a parameter
+/// out of the one it came in, which an answer keeping the value there does without. A value the
+/// instruction reads from a register another of its operands insists on for a different value costs
+/// one too, since it has to be read out of the way first, and so does a value a load read its
+/// address from when the load's answer is read by an instruction insisting on that register for
+/// something else: a call through a table whose base is in the register an argument goes in loads
+/// the target into a register of its own before the arguments are moved, where with the base
+/// anywhere else the load is folded into a call through the table. Moves the machine needs whatever
+/// the assignment, like those of a register no value is ever given, come to the same for every
+/// answer.
 ///
 /// # Panics
 ///
@@ -214,6 +223,7 @@ fn spent(
     reuses: &[Option<Reuse>],
     assignment: &Assignment,
 ) -> u128 {
+    let two_address: Set<Inst> = reuses.iter().flatten().map(|reuse| reuse.inst).collect();
     let mut total = 0;
     for (reg, place) in assignment.placed() {
         if !matches!(place, Place::Reg(_)) {
@@ -221,11 +231,68 @@ fn spent(
         }
     }
     for block in func.blocks() {
-        let weight = u128::from(func[block].weight.raw().max(1));
         for call in &func[block].succs {
+            let weight = u128::from(call.weight.raw().max(1));
             for (&arg, param) in call.args.iter().zip(&func[call.block].params) {
                 if assignment.place(arg) != assignment.place(param.reg) {
                     total += weight;
+                }
+            }
+        }
+        // Each value a load in this block wrote, with the load.
+        let mut loaded: Map<Reg, Inst> = Map::default();
+        for inst in func.insts(block) {
+            let operands = &func[func[inst].operands];
+            let weight = weights.get(&inst).copied().unwrap_or(1);
+            // Whether an operand other than one for `reg` or `besides` insists on the register
+            // `reg` is in.
+            let insisted = |reg: Reg, besides: Reg| {
+                let place = assignment.place(reg);
+                operands.iter().any(|other| {
+                    other.role == rucc_mir::Role::Use
+                        && other.reg != reg
+                        && other.reg != besides
+                        && matches!(other.constraint, rucc_mir::Constraint::Fixed(at)
+                            if place == Some(Place::Reg(at)))
+                })
+            };
+            for operand in operands {
+                let ours =
+                    operand.reg.is_virtual() && func.class_of(operand.reg) == Some(operand.class);
+                if !ours {
+                    continue;
+                }
+                if let rucc_mir::Constraint::Fixed(at) = operand.constraint {
+                    if assignment.place(operand.reg) != Some(Place::Reg(at)) {
+                        total += weight;
+                    }
+                } else if operand.role == rucc_mir::Role::Use && insisted(operand.reg, operand.reg)
+                {
+                    total += weight;
+                }
+                if operand.role != rucc_mir::Role::Use || two_address.contains(&inst) {
+                    continue;
+                }
+                // A load the instruction reads the answer of straight from memory, as a call or
+                // a jump through a table does, cannot be folded into it when a register its
+                // address is in is one an argument has to be moved into first.
+                let Some(&load) = loaded.get(&operand.reg) else { continue };
+                for address in &func[func[load].operands] {
+                    if address.role == rucc_mir::Role::Use
+                        && address.reg.is_virtual()
+                        && insisted(address.reg, operand.reg)
+                    {
+                        total += weight;
+                    }
+                }
+            }
+            if func[inst].mem.is_some() {
+                let mut written =
+                    operands.iter().filter(|operand| operand.role == rucc_mir::Role::Def);
+                if let (Some(written), None) = (written.next(), written.next()) {
+                    if written.reg.is_virtual() {
+                        loaded.insert(written.reg, inst);
+                    }
                 }
             }
         }
@@ -831,8 +898,12 @@ impl<'a> State<'a, '_> {
     /// same register would rather be together. Weighed alone, a loop's sum that two edges hand the
     /// block it is added to in one register and the answer of the add in another weighed the same
     /// either way, so it stayed with the answer, and the answer then went with the register a call
-    /// after the loop wanted it in, which was one copy in and one out on every trip. So when no one
-    /// value moves any more, [`State::regroup`] moves those together.
+    /// after the loop wanted it in, which was one copy in and one out on every trip. Two block
+    /// parameters, one handed to the other, stop short the same way: the sum the arms of a chain of
+    /// rare branches hand the bottom of a loop and the one the bottom hands back were both in `rsi`
+    /// for a call after the loop, and each held the other there. So when no one value moves any
+    /// more, [`State::regroup`] moves those together, each with every value tied to it in its
+    /// register.
     ///
     /// A tie weighs the same from either end and every move meets more weight than it breaks, so
     /// this ends.
@@ -912,9 +983,10 @@ impl<'a> State<'a, '_> {
         }
     }
 
-    /// Moves each value whose answers are in its register, together with them, to where the ties
-    /// the group has with values outside it weigh most, if every one of them is free there and
-    /// that weighs more than where they are. Gives back whether anything moved.
+    /// Moves each value together with the values tied to it in its register, through the answers
+    /// written over it and the block parameters it is passed to or from and so on from those, to
+    /// where the ties the group has with values outside it weigh most, if every one of them is free
+    /// there and that weighs more than where they are. Gives back whether anything moved.
     ///
     /// The ties inside the group are met wherever it goes, so they are left out. A value whose own
     /// answer was written over its second source is left where it is, as is every answer written
@@ -927,19 +999,39 @@ impl<'a> State<'a, '_> {
         pins: &[Vec<(PhysReg, u128)>],
     ) -> bool {
         let mut moved = false;
+        let mut seen = vec![false; self.at.len()];
         for number in 0..self.at.len() {
             let (Some(value), Some(now)) = (self.values[number], self.at[number]) else {
                 continue;
             };
-            if self.commuted[number].is_some() {
+            if seen[number] || self.commuted[number].is_some() {
                 continue;
             }
             let mut group = vec![number];
-            for &answer in &reused[number] {
-                let alike = self.values[answer].is_some_and(|other| other.class == value.class);
-                if alike && self.at[answer] == Some(now) && self.commuted[answer].is_none() {
-                    group.push(answer);
+            let mut next = 0;
+            while let Some(&member) = group.get(next) {
+                next += 1;
+                let tied = edges[member].iter().filter_map(|&(other, _)| {
+                    other.number().and_then(|number| usize::try_from(number).ok())
+                });
+                for other in reused[member].iter().copied().chain(tied) {
+                    let alike = self
+                        .values
+                        .get(other)
+                        .copied()
+                        .flatten()
+                        .is_some_and(|other| other.class == value.class);
+                    if alike
+                        && !group.contains(&other)
+                        && self.at[other] == Some(now)
+                        && self.commuted[other].is_none()
+                    {
+                        group.push(other);
+                    }
                 }
+            }
+            for &member in &group {
+                seen[member] = true;
             }
             if group.len() < 2 {
                 continue;
@@ -1708,6 +1800,67 @@ mod tests {
     }
 
     #[test]
+    fn parameters_handed_one_to_the_next_move_together_to_where_the_loop_wants_them() {
+        let mut names = Interner::new();
+        let mut func = Func::new(names.intern("f"));
+        let opcode = Opcode::new(names.intern("x64.nop"));
+        let entry = func.create_block();
+        let head = func.create_block();
+        let rare = func.create_block();
+        let often = func.create_block();
+        let join = func.create_block();
+        let bottom = func.create_block();
+        let out = func.create_block();
+        let zero = func.new_vreg(GPR);
+        let total = func.new_vreg(GPR);
+        let added = func.new_vreg(GPR);
+        let joined = func.new_vreg(GPR);
+        let passed = func.new_vreg(GPR);
+        let weight = |parts: u64| rucc_mir::Weight::parts(parts * rucc_mir::Weight::SCALE / 100);
+        func.build(entry, opcode).def(zero, GPR).finish();
+        *func.succs_mut(entry) = vec![BlockCall::with(head, vec![zero])];
+        func.params_mut(head).push(Param { reg: total, class: GPR });
+        *func.succs_mut(head) =
+            vec![BlockCall::to(rare).taken(weight(91)), BlockCall::to(often).taken(weight(818))];
+        // A call, as far as the allocator can tell, on the rare arm only.
+        let mut build = func.build(rare, opcode);
+        for clobbered in [RAX, RCX, RDX, RSI, RDI, R8, R9, R10, R11] {
+            build = build.operand(Operand::write(Reg::physical(clobbered), GPR));
+        }
+        build.finish();
+        *func.succs_mut(rare) = vec![BlockCall::with(join, vec![total]).taken(weight(91))];
+        func.build(often, opcode)
+            .operand(Operand::write(added, GPR).with(Constraint::Reuse(1)))
+            .uses(total, GPR)
+            .finish();
+        *func.succs_mut(often) = vec![BlockCall::with(join, vec![added]).taken(weight(818))];
+        func.params_mut(join).push(Param { reg: joined, class: GPR });
+        *func.succs_mut(join) = vec![BlockCall::with(bottom, vec![joined]).taken(weight(909))];
+        func.params_mut(bottom).push(Param { reg: passed, class: GPR });
+        *func.succs_mut(bottom) = vec![
+            BlockCall::with(head, vec![passed]).taken(weight(809)),
+            BlockCall::to(out).taken(weight(100)),
+        ];
+        func.build(out, opcode)
+            .operand(Operand::read(passed, GPR).with(Constraint::Fixed(RSI)))
+            .finish();
+        func.set_weight(head, weight(909));
+        func.set_weight(rare, weight(91));
+        func.set_weight(often, weight(818));
+        func.set_weight(join, weight(909));
+        func.set_weight(bottom, weight(909));
+
+        // `passed` is wanted in `rsi` after the loop and `joined` is handed to it, so the two can
+        // end up there together. Then each meets as much in `rsi` from the other as it would meet
+        // with the sum in the loop, and alone neither moves, which was a copy into `rsi` on the
+        // way down every trip and one out of it on the way back. Moved together they go to the
+        // sum, and the copy is the one after the loop. tamnd/rucc#3187.
+        let places = places(&mut func, &env());
+        assert_eq!(places[3], places[1]);
+        assert_eq!(places[4], places[1]);
+    }
+
+    #[test]
     fn an_answer_whose_first_source_lives_on_goes_where_the_second_one_ends() {
         let mut names = Interner::new();
         let mut func = Func::new(names.intern("f"));
@@ -1887,6 +2040,128 @@ mod tests {
         let mut apart = chosen.clone();
         apart.put(sum, chosen.place(right).expect("a place for right"));
         assert_eq!(cost(&func, &order, &apart), u128::from(func[block].weight.raw()));
+    }
+
+    #[test]
+    fn a_value_not_in_the_register_an_operand_insists_on_costs_a_copy_there() {
+        let mut names = Interner::new();
+        let mut func = Func::new(names.intern("f"));
+        let opcode = Opcode::new(names.intern("x64.nop"));
+        let block = func.create_block();
+        let value = func.new_vreg(GPR);
+        func.build(block, opcode)
+            .operand(Operand::write(value, GPR).with(Constraint::Fixed(RAX)))
+            .finish();
+        func.build(block, opcode)
+            .operand(Operand::read(value, GPR).with(Constraint::Fixed(RAX)))
+            .finish();
+
+        // A value written where it came in and read by a call that wants it in the same register
+        // is a parameter passed straight on. Anywhere else it is copied out and copied back, and
+        // the state functions of a dispatch loop that ends in tail calls paid both every time
+        // they ran under the answer that counted neither. tamnd/rucc#3187.
+        let order = Order::of(&func);
+        let live = Live::of(&func, &order);
+        let mut chosen = assign(&func, &order, &live, &env());
+        chosen.put(value, Place::Reg(RAX));
+        assert_eq!(cost(&func, &order, &chosen), 0);
+        chosen.put(value, Place::Reg(RCX));
+        assert_eq!(cost(&func, &order, &chosen), 2 * u128::from(func[block].weight.raw()));
+    }
+
+    #[test]
+    fn a_value_in_the_register_another_operand_insists_on_costs_a_copy_out_of_the_way() {
+        let mut names = Interner::new();
+        let mut func = Func::new(names.intern("f"));
+        let opcode = Opcode::new(names.intern("x64.nop"));
+        let block = func.create_block();
+        let base = func.new_vreg(GPR);
+        let argument = func.new_vreg(GPR);
+        func.build(block, opcode).def(base, GPR).finish();
+        func.build(block, opcode).def(argument, GPR).finish();
+        func.build(block, opcode)
+            .operand(Operand::read(argument, GPR).with(Constraint::Fixed(RDX)))
+            .operand(Operand::read(base, GPR))
+            .finish();
+
+        // A call through a register whose target sat in `rdx`, where the last argument goes, had
+        // to move the target out of the way before the arguments could go in.
+        let order = Order::of(&func);
+        let live = Live::of(&func, &order);
+        let mut chosen = assign(&func, &order, &live, &env());
+        chosen.put(argument, Place::Reg(RDX));
+        chosen.put(base, Place::Reg(RCX));
+        assert_eq!(cost(&func, &order, &chosen), 0);
+        chosen.put(argument, Place::Reg(RSI));
+        chosen.put(base, Place::Reg(RDX));
+        assert_eq!(cost(&func, &order, &chosen), 2 * u128::from(func[block].weight.raw()));
+    }
+
+    #[test]
+    fn a_load_through_the_register_an_argument_goes_in_costs_the_load_it_cannot_fold() {
+        use rucc_mir::Mem;
+
+        let mut names = Interner::new();
+        let mut func = Func::new(names.intern("f"));
+        let opcode = Opcode::new(names.intern("x64.nop"));
+        let block = func.create_block();
+        let base = func.new_vreg(GPR);
+        let argument = func.new_vreg(GPR);
+        let target = func.new_vreg(GPR);
+        func.build(block, opcode).def(base, GPR).finish();
+        func.build(block, opcode).def(argument, GPR).finish();
+        func.build(block, opcode).def(target, GPR).mem(Mem::at(Operand::read(base, GPR))).finish();
+        func.build(block, opcode)
+            .operand(Operand::read(target, GPR).with(Constraint::Fixed(RAX)))
+            .operand(Operand::read(argument, GPR).with(Constraint::Fixed(RDX)))
+            .finish();
+
+        // The call through a table in a dispatch loop, with the table's address in `rdx` where
+        // the last argument goes, was a load of the target, the copies and a call through a
+        // register, where with the address anywhere else it was the copies and the call through
+        // the table. Uncounted, that answer looked the cheaper one. tamnd/rucc#3187.
+        let order = Order::of(&func);
+        let live = Live::of(&func, &order);
+        let mut chosen = assign(&func, &order, &live, &env());
+        chosen.put(argument, Place::Reg(RDX));
+        chosen.put(base, Place::Reg(RCX));
+        chosen.put(target, Place::Reg(RAX));
+        assert_eq!(cost(&func, &order, &chosen), 0);
+        chosen.put(argument, Place::Reg(RSI));
+        chosen.put(base, Place::Reg(RDX));
+        assert_eq!(cost(&func, &order, &chosen), 2 * u128::from(func[block].weight.raw()));
+    }
+
+    #[test]
+    fn a_parameter_not_where_it_is_passed_costs_as_often_as_the_edge_is_taken() {
+        let mut names = Interner::new();
+        let mut func = Func::new(names.intern("f"));
+        let opcode = Opcode::new(names.intern("x64.nop"));
+        let entry = func.create_block();
+        let seldom = func.create_block();
+        let often = func.create_block();
+        let value = func.new_vreg(GPR);
+        let param = func.new_vreg(GPR);
+        func.build(entry, opcode).def(value, GPR).finish();
+        *func.succs_mut(entry) = vec![
+            BlockCall::with(seldom, vec![value]).taken(rucc_mir::Weight::parts(1000)),
+            BlockCall::to(often).taken(rucc_mir::Weight::parts(9000)),
+        ];
+        func.params_mut(seldom).push(Param { reg: param, class: GPR });
+        func.build(seldom, opcode).uses(param, GPR).finish();
+
+        // The copy is on the edge, so it runs a tenth as often as the block it leaves. Counted at
+        // the block, the edge out of a loop cost a sum kept where the loop wants it as much as a
+        // turn of the loop did, and the dispatch loop of a state machine was given the cheaper
+        // looking linear scan, which copied the sum on every way out. tamnd/rucc#3187.
+        let order = Order::of(&func);
+        let live = Live::of(&func, &order);
+        let mut chosen = assign(&func, &order, &live, &env());
+        chosen.put(value, Place::Reg(RAX));
+        chosen.put(param, Place::Reg(RAX));
+        assert_eq!(cost(&func, &order, &chosen), 0);
+        chosen.put(param, Place::Reg(RCX));
+        assert_eq!(cost(&func, &order, &chosen), 1000);
     }
 
     /// A value written, then `calls` instructions that destroy both registers there are, then

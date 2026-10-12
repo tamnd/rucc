@@ -4,6 +4,10 @@ All notable changes are recorded here. The format follows [Keep a Changelog](htt
 
 ## Unreleased
 
+### Changed
+
+- The register allocator weighs a copy for a block parameter by how often its edge is taken, counts the copies a fixed register forces when it compares its answer with the linear scan, and moves values tied in one register together, so a dispatch loop ending in tail calls keeps its arguments in place and calls through its table in one instruction, 2.6% fewer instructions across the corpus and 0.5% on SQLite (#3562).
+
 ## 0.30.1
 
 This is a patch release. It makes the i386 code of the 32 bit kernel closer to gcc, it makes the optimizer faster on lvm.c and zstd_compress.c, and it fixes the kernel tests `__is_constexpr` and `__is_const_zero`. An enumerator in a function body can read a `const` object at `-O2`, as gcc allows. On i386, a `long long` compare, a constant store and a store of an address now use the instructions that gcc uses, and the register allocator can use more registers. A function that restores two or more registers returns from one block, and the stack protector check compares the canary in memory, as gcc does.
