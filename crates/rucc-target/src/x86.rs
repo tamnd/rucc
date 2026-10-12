@@ -759,9 +759,10 @@ const fn narrow_moves<const N: usize>(all: &[Move]) -> [Move; N] {
     out
 }
 
-/// Ten conditions at three widths, against a register, a constant and memory, and the test of a
-/// register and of memory against a constant for equal and not equal at the same three.
-static FUSED: [Fusion; 132] = narrow_fused(&crate::x86_64::FUSED);
+/// Ten conditions at three widths, against a register, a constant and memory, the test of a
+/// register and of memory against a constant for equal and not equal at the same three, and the
+/// compare and exchange at the same three.
+static FUSED: [Fusion; 135] = narrow_fused(&crate::x86_64::FUSED);
 
 /// Ten conditions at the three widths a select has here.
 static MOVES: [Move; 30] = narrow_moves(&crate::x86_64::MOVES);
@@ -1087,7 +1088,8 @@ mod tests {
                 .map(|&(name, _)| name)
                 .collect()
         };
-        let sets = here(&[Form::CmpSet, Form::CmpSetRi, Form::CmpSetRm, Form::CmpSetMi]);
+        let sets =
+            here(&[Form::CmpSet, Form::CmpSetRi, Form::CmpSetRm, Form::CmpSetMi, Form::CmpXchg]);
         let entries: Vec<&str> = BRANCH.fused.iter().map(|fusion| fusion.set).collect();
         assert_eq!(entries, sets);
         let selects = here(&[Form::TestCmov]);

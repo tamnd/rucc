@@ -45,10 +45,10 @@ use crate::x86_64::{GPR, RAX, RBX, RCX, RDI, RDX, RSI, XMM, xmm};
 use Form::{
     Align, AluCarry, AluCarryI, AluMi, AluMr, AluRi, AluRm, AluRr, AluVec, ArgVal, ArgValVec,
     ArithX87, Barrier, BrCond, Call, CallMem, Cmov, Cmp, CmpMi, CmpRi, CmpRm, CmpSet, CmpSetMi,
-    CmpSetRi, CmpSetRm, CmpSetVec, CmpSetVecBoth, CmpSetX87, CmpSetX87Both, CmpXchg, Convert,
-    ConvertFromVec, ConvertToVec, ConvertVec, CpuId, CtrlX87, DivQuo, DivRem, DivWide, Exchange,
-    Jcc, Jmp, JmpAway, JmpMem, JmpReg, Landing, Lea, Literal, Load, LoadImm, LoadVec, Move,
-    MoveVec, MulHigh, MulRi, MulWide, Nop, Pop, PopX87, Prefetch, Push, PushX87, Ret, RetPop,
+    CmpSetRi, CmpSetRm, CmpSetVec, CmpSetVecBoth, CmpSetX87, CmpSetX87Both, CmpXchg, CmpXchgFlags,
+    Convert, ConvertFromVec, ConvertToVec, ConvertVec, CpuId, CtrlX87, DivQuo, DivRem, DivWide,
+    Exchange, Jcc, Jmp, JmpAway, JmpMem, JmpReg, Landing, Lea, Literal, Load, LoadImm, LoadVec,
+    Move, MoveVec, MulHigh, MulRi, MulWide, Nop, Pop, PopX87, Prefetch, Push, PushX87, Ret, RetPop,
     RetVal, RetVal2, RetVal2Vec, RetValVec, Rmw, Scan, Search, Set, ShiftCl, ShiftDouble,
     ShiftDoubleCl, ShiftRi, ShiftVec, ShuffleVec, Spin, Store, StoreImm, StoreVec, StrCompare,
     StrCompareRep, StrLoad, StrMove, StrMoveRep, StrScan, StrScanRep, StrStore, StrStoreRep, Swap,
@@ -769,12 +769,21 @@ pub enum Form {
     /// is read and written and is not something the allocator picks, which is the same shape a
     /// division has and is written here the same way.
     ///
-    /// The second definition is the byte saying whether the exchange went through, which the `setz`
+    /// The first definition is the byte saying whether the exchange went through, which the `setz`
     /// behind the instruction writes. It is a definition rather than a fixed register so that the
     /// allocator places it, and it is a definition at all so that the allocator knows a value lands
     /// there: two definitions of one instruction are live at the same point, so the register this
-    /// gets is never `rax`, which is what keeps the `setz` from writing over the value.
+    /// gets is never `rax`, which is what keeps the `setz` from writing over the value. It is first
+    /// because that is where every comparison here keeps its byte, which is what lets the layout
+    /// take it off when a branch is the only thing that reads it.
     CmpXchg,
+    /// A compare and exchange whose answer only a branch wanted, which is the one above with the
+    /// byte taken off the front and nothing written behind it.
+    ///
+    /// The machine leaves whether the exchange went through in the zero flag, so a branch on it is
+    /// a jump on equal or not equal straight after the instruction. The layout writes this and no
+    /// rule does, the same way it writes a comparison that keeps nothing.
+    CmpXchgFlags,
     /// A read modify write of a whole object at an address, which is one instruction on this
     /// machine for the exchange and for the add and is a loop for everything else.
     ///
@@ -1114,13 +1123,20 @@ static DIV_WIDE: [OperandDesc; 5] = [
     OperandDesc::read(GPR),
 ];
 // A compare and exchange, whose first two entries are the two values it produces and whose last
-// two are the value it compares against and the value it puts there. `rax` is fixed at both ends
-// because the machine reads the expected value out of it and leaves what it found in it, and the
-// address is not here for the reason no address is: the builder appends the registers of the
-// addressing mode behind everything written down.
+// two are the value it compares against and the value it puts there. The byte saying whether it
+// went through is first and what was found is second. `rax` is fixed at both ends because the
+// machine reads the expected value out of it and leaves what it found in it, and the address is
+// not here for the reason no address is: the builder appends the registers of the addressing mode
+// behind everything written down.
 static CMPXCHG: [OperandDesc; 4] = [
-    OperandDesc::write(GPR).with(Constraint::Fixed(RAX)),
     OperandDesc::write(GPR),
+    OperandDesc::write(GPR).with(Constraint::Fixed(RAX)),
+    OperandDesc::read(GPR).with(Constraint::Fixed(RAX)),
+    OperandDesc::read(GPR),
+];
+// The same without the byte, for the one a branch reads the zero flag of.
+static CMPXCHG_FLAGS: [OperandDesc; 3] = [
+    OperandDesc::write(GPR).with(Constraint::Fixed(RAX)),
     OperandDesc::read(GPR).with(Constraint::Fixed(RAX)),
     OperandDesc::read(GPR),
 ];
@@ -1332,6 +1348,7 @@ impl Form {
             }
             Prefetch => &HINT,
             CmpXchg => &CMPXCHG,
+            CmpXchgFlags => &CMPXCHG_FLAGS,
             Rmw => &READ_MODIFY_WRITE,
             MoveVec => &VEC_TO_VEC,
             LoadVec => &LOAD_VEC,
@@ -1399,6 +1416,7 @@ impl Form {
                 | PopX87
                 | CtrlX87
                 | CmpXchg
+                | CmpXchgFlags
                 | Rmw
                 | Prefetch
                 | CallMem
@@ -1446,6 +1464,7 @@ impl Form {
                 | PopX87
                 | CtrlX87
                 | CmpXchg
+                | CmpXchgFlags
                 | Rmw
                 | Prefetch
                 | Push
@@ -2469,6 +2488,11 @@ pub static INSTS: &[(&str, Form)] = &[
     ("cmpxchg_16", CmpXchg),
     ("cmpxchg_32", CmpXchg),
     ("cmpxchg_64", CmpXchg),
+    // And the same four with no byte, which is what the layout leaves of one a branch reads.
+    ("cmpxchg_flags_8", CmpXchgFlags),
+    ("cmpxchg_flags_16", CmpXchgFlags),
+    ("cmpxchg_flags_32", CmpXchgFlags),
+    ("cmpxchg_flags_64", CmpXchgFlags),
     // The read modify writes the machine has a single instruction for. An exchange with memory is
     // indivisible without being asked, and an add has to be asked, which is why one of the two
     // carries the prefix in `crate::x86_64::text` and the other does not.
@@ -2735,7 +2759,7 @@ mod tests {
         // Every head in the model file, which is what the rule set may write and what
         // `rucc-verify` has an answer for. The two lists are checked against each other by
         // `rucc-codegen`, which is the crate that can read the rule set.
-        assert_eq!(described, 825);
+        assert_eq!(described, 829);
     }
 
     #[test]

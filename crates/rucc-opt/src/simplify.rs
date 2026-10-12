@@ -13,7 +13,7 @@
 //! # The rewrites
 //!
 //! Two kinds. The rules of `rules/`, one file per tier, which are matched against every
-//! instruction and are where anything new goes, and six rewrites written out by hand below them.
+//! instruction and are where anything new goes, and eight rewrites written out by hand below them.
 //!
 //! ## The rules
 //!
@@ -79,7 +79,7 @@
 //! rewrite that turns one written in the source into it, because the walk has already gone past
 //! the place it was built and would not come back to it.
 //!
-//! ## The six written by hand
+//! ## The eight written by hand
 //!
 //! Four are about comparisons, and those four are here rather than in `rules/` for the same
 //! reason: what each one is, is one statement quantified over the predicates, and the rule language
@@ -217,6 +217,19 @@
 //! clang writes one `i32x4.splat`. It is written by hand because the rule tables do not compare
 //! two types.
 //!
+//! ### A choice between what a compare and exchange expected and what it found
+//!
+//! `select ok, expected, found`, where `found` and `ok` are the two answers of one `cmpxchg` and
+//! `expected` is the value it was handed to compare, is `found`. The exchange goes through exactly
+//! when what it found was what it expected, so on the side the choice takes `expected` the two are
+//! the same value. Every `atomic_compare_exchange` makes one: the front end stores what was found
+//! back into the expected object when the exchange fails, and once that object is a register
+//! [`crate::phiopt`] turns the store on one side into this select. Left alone it keeps the byte
+//! the exchange wrote alive for a test and a conditional move, and a loop that retries until the
+//! exchange goes through then has two readers of the byte, so the back end cannot branch on the
+//! flag the exchange left. It is written by hand because the rule tables have no way to say that
+//! two operands are answers of one instruction.
+//!
 //! # Why it needs dead code elimination after it
 //!
 //! The rewrite turns the `xor` into the comparison and leaves the original comparison where it
@@ -285,6 +298,14 @@ const ROUND_TRIP: &str = "bitcast back to the type of the value it was cast from
 /// Recorded for one of those that would have folded if there had been fuel for it.
 const NO_FUEL_ROUND_TRIP: &str =
     "bitcast back to the first type left alone, the pass ran out of fuel";
+
+/// Recorded once for each choice between what a compare and exchange expected and what it found.
+const EXCHANGED: &str =
+    "choice between what a compare and exchange expected and found is what it found";
+
+/// Recorded for one of those that would have folded if there had been fuel for it.
+const NO_FUEL_EXCHANGED: &str =
+    "choice on whether a compare and exchange went through left alone, the pass ran out of fuel";
 
 /// Recorded once for each shift whose operand is a shift through a narrowing.
 const NARROWED: &str = "shift through a narrowing folded into the wide shift";
@@ -657,6 +678,9 @@ impl<'a> Finder<'a> {
         }
         if let Some(value) = round_trip(func, inst) {
             return Some((Found::Rule(Rewrite::Value(value)), ROUND_TRIP, NO_FUEL_ROUND_TRIP));
+        }
+        if let Some(value) = exchanged_choice(func, inst) {
+            return Some((Found::Rule(Rewrite::Value(value)), EXCHANGED, NO_FUEL_EXCHANGED));
         }
         let (rewrite, pattern) = identity(func, inst, self.address, &mut self.stacks)?;
         Some((Found::Rule(rewrite), pattern, NO_FUEL_RULE))
@@ -1362,6 +1386,28 @@ fn round_trip(func: &Func, inst: Inst) -> Option<Value> {
     let Def::Result { inst, .. } = func[from].def else { return None };
     let &[first] = &func[func[inst].args] else { return None };
     (func[inst].opcode == Opcode::Bitcast && func[first].ty == ty).then_some(first)
+}
+
+/// What a choice on whether a compare and exchange went through gives back, when it chooses
+/// between the value the exchange expected and the value it found.
+///
+/// The exchange goes through exactly when it found what it expected, so the arm taken when it did
+/// is the value found as well, and the choice is that value whichever way it goes. Only that order
+/// of the arms: the other one is what was expected when the exchange failed, which is a different
+/// value, and the value found when it went through.
+fn exchanged_choice(func: &Func, inst: Inst) -> Option<Value> {
+    let data = &func[inst];
+    if data.opcode != Opcode::Select {
+        return None;
+    }
+    let &[ok, expected, found] = &func[data.args] else { return None };
+    let Def::Result { inst: exchange, index: 1 } = func[ok].def else { return None };
+    if func[exchange].opcode != Opcode::Cmpxchg {
+        return None;
+    }
+    let Def::Result { inst: from, index: 0 } = func[found].def else { return None };
+    let handed = *func[func[exchange].args].get(1)?;
+    (from == exchange && handed == expected).then_some(found)
 }
 
 /// How many instructions the lane walk goes through before it gives up.
@@ -2967,6 +3013,54 @@ mod tests {
         simplify(&mut func);
         assert_ne!(returned(&func, block), x);
         assert_eq!(came_from(&func, returned(&func, block)).0, Opcode::Bitcast);
+    }
+
+    /// A choice on whether a compare and exchange went through, between what it expected and what
+    /// it found, is what it found. With the arms the other way round it is a different value and
+    /// stays, and so does a choice whose expected arm is some other value.
+    #[test]
+    fn a_choice_between_what_an_exchange_expected_and_found_is_what_it_found() {
+        let i32 = Type::int(32);
+        let exchange = |swapped: bool, other: bool| {
+            let mut names = Interner::new();
+            let name = names.intern("f");
+            let signature =
+                Signature::new().with_params(&[Type::PTR, i32, i32]).with_returns(&[i32]);
+            let mut func = Func::new(name, signature);
+            let block = func.create_block();
+            let addr = func.append_param(block, Type::PTR);
+            let want = func.append_param(block, i32);
+            let put = func.append_param(block, i32);
+            let info = rucc_ir::MemInfo {
+                size: 4,
+                align: 4,
+                order: rucc_ir::MemOrder::SeqCst,
+                tbaa: None,
+                owns: 0,
+                restrict: rucc_ir::Restrict::NONE,
+            };
+            let mut build = Builder::new(&mut func, block);
+            let (found, ok) = build.cmpxchg(addr, want, put, info, Flags::NONE);
+            let expected = if other { put } else { want };
+            let chosen = if swapped {
+                build.select(ok, found, expected)
+            } else {
+                build.select(ok, expected, found)
+            };
+            build.ret(&[chosen]);
+            (func, block, found)
+        };
+        let (mut func, block, found) = exchange(false, false);
+        assert!(simplify(&mut func));
+        assert_eq!(returned(&func, block), found);
+        let (mut func, block, found) = exchange(true, false);
+        simplify(&mut func);
+        assert_ne!(returned(&func, block), found);
+        assert_eq!(came_from(&func, returned(&func, block)).0, Opcode::Select);
+        let (mut func, block, found) = exchange(false, true);
+        simplify(&mut func);
+        assert_ne!(returned(&func, block), found);
+        assert_eq!(came_from(&func, returned(&func, block)).0, Opcode::Select);
     }
 
     /// `zext.i64 (lshr.i32 (trunc.i32 (lshr.i64 x inner)) outer)`, which is what

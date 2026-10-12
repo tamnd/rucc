@@ -190,7 +190,7 @@ fn plain(form: Form) -> Timing {
         // are tens of cycles and the number here is a floor on that rather than a measurement,
         // because what a scheduler needs to know about them is that they are expensive and that
         // nothing reorders around them, and the second is not this table's answer.
-        CmpXchg | Rmw => (20, Unit::Store),
+        CmpXchg | CmpXchgFlags | Rmw => (20, Unit::Store),
         // Floating point, register to register. Four cycles for an addition or a multiply is the
         // number this family has had since it stopped having separate adders and multipliers.
         // Divides are overridden in `slow`.

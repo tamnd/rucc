@@ -5539,7 +5539,7 @@ impl<'a> Lowering<'a> {
         let (span, flags) = (self.source.span(inst), self.carried(inst));
         let segment = self.segment(inst);
         let mut build = self.out.build(block, opcode).at(span).flags(flags);
-        for (desc, reg) in descs.iter().zip([got, flag, want, put]) {
+        for (desc, reg) in descs.iter().zip([flag, got, want, put]) {
             let operand = mir::Operand {
                 reg,
                 class: desc.class,
@@ -10892,11 +10892,11 @@ mod tests {
                 &[ty, Type::I1],
             );
 
-            // Two values out of one instruction, the first of them in the register the machine
-            // reads the expected value out of, the second free for the allocator to place. The
-            // address is the memory operand and neither of the two values is.
+            // Two values out of one instruction, the byte first and free for the allocator to
+            // place, then what was found in the register the machine reads the expected value
+            // out of. The address is the memory operand and neither of the two values is.
             let text = lower(&mut names, &source);
-            let written = format!("%3:gpr($rax), %4:gpr = x64.cmpxchg_{bits} %1($rax), %2, [%0]");
+            let written = format!("%3:gpr, %4:gpr($rax) = x64.cmpxchg_{bits} %1($rax), %2, [%0]");
             assert!(text.contains(&written), "{bits}: {text}");
         }
     }

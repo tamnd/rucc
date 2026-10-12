@@ -30,10 +30,16 @@ fn fixture(what: &str, source: &str) -> PathBuf {
 
 /// What the compiler wrote for that source, and whether it agreed to write anything.
 fn compile(what: &str, source: &str) -> (bool, String, String) {
+    compile_with(what, source, &[])
+}
+
+/// The same with more arguments ahead of the file.
+fn compile_with(what: &str, source: &str, args: &[&str]) -> (bool, String, String) {
     let path = fixture(what, source);
     let out = Command::new(env!("CARGO_BIN_EXE_rucc"))
         .arg(format!("--target={TARGET}"))
         .args(["-S", "-o", "-"])
+        .args(args)
         .arg(&path)
         .output()
         .expect("the compiler is built before its own tests run");
@@ -111,6 +117,25 @@ void multiply(int v) { g *= v; }
     );
     assert!(text.contains("cmpxchgl"), "{text}");
     assert!(text.contains("lock"), "{text}");
+}
+
+/// The loop goes round again when the exchange did not go through, and the machine says whether it
+/// did in the zero flag. So the branch at the bottom is a jump on that flag straight after the
+/// `cmpxchg`, and not a `sete` into a byte and a `testb` of the byte, which is what gcc writes too.
+#[test]
+fn the_loop_branches_on_the_flag_the_exchange_left() {
+    let (ok, text, said) = compile_with(
+        "loop-flag",
+        "\
+_Atomic int g;
+void multiply(int v) { g *= v; }
+",
+        &["-O2"],
+    );
+    assert!(ok, "the compiler refused the fixture:\n{said}");
+    assert!(text.contains("cmpxchgl"), "{text}");
+    assert!(!text.contains("sete"), "{text}");
+    assert!(!text.contains("testb"), "{text}");
 }
 
 /// A float has no locked arithmetic anywhere, so it is the loop as well, with the object
