@@ -26,6 +26,10 @@ All notable changes are recorded here. The format follows [Keep a Changelog](htt
 - Jump threading now points an edge past a block whose values are read further down when those reads can only be reached through the block's other arm, with nothing copied. The kernel's `for_each_cpu` loop tests `find_next_bit`'s answer against the size, and the edge carrying the size now leaves the loop at once. X32 instruction counts go from 23445 to 23399 for md and 3934 to 3922 for uncore (#3552).
 - Jump threading's check for reads past a block now asks only the blocks its walk reaches, instead of scanning the whole function for every edge first: lvm.c runs 11.9% fewer instructions at -O2, with byte-identical output (#3555).
 
+### Fixed
+
+- At `-O2`, an enumerator in a function body can read a `const` object, as in a case label, like gcc. `-pedantic` says that it is not an integer constant expression. A zero cast to any pointer type, such as `(char *)0`, is again a null pointer for the sentinel, nonnull, `%n` and `__atomic_always_lock_free` checks (#3560).
+
 ## 0.30.0
 
 Milestone WA8 (#3456) is done, and a finished milestone gets a minor release. With `-msimd128`, a GNU vector of 16 bytes stays a `v128` value on wasm32. The compares and the shifts of vectors, the clang builtins for wasm SIMD, `__builtin_convertvector`, `__builtin_shufflevector` and the `__builtin_elementwise_*` integer builtins are SIMD instructions. Each of the 302 functions of `wasm_simd128.h` has the SIMD instructions that clang 23 writes for it at `-O2 -mrelaxed-simd`, and the rucc-corpus review on wasm gives no new failure with the flag. The release also makes i386 `long long` code and x86-64 `__int128` code closer to gcc, and makes the optimizer faster on quickjs.c and zstd_compress.c.
