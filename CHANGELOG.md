@@ -4,6 +4,10 @@ All notable changes are recorded here. The format follows [Keep a Changelog](htt
 
 ## Unreleased
 
+## 0.30.1
+
+This is a patch release. It makes the i386 code of the 32 bit kernel closer to gcc, it makes the optimizer faster on lvm.c and zstd_compress.c, and it fixes the kernel tests `__is_constexpr` and `__is_const_zero`. An enumerator in a function body can read a `const` object at `-O2`, as gcc allows. On i386, a `long long` compare, a constant store and a store of an address now use the instructions that gcc uses, and the register allocator can use more registers. A function that restores two or more registers returns from one block, and the stack protector check compares the canary in memory, as gcc does.
+
 ### Changed
 
 - The nofree summary pushes parameter sets along def-use edges instead of rescanning every value until nothing changes, which was 4% of compiling lvm.c: lvm.c -4.7% and quickjs.c -3.9% instructions at -O2 with byte-identical output (#3530).
@@ -29,6 +33,8 @@ All notable changes are recorded here. The format follows [Keep a Changelog](htt
 
 ### Fixed
 
+- A cast to `void *` is a null pointer constant only when the target is plain `void *` and the operand is an integer constant expression with the value zero, and `0 && x` is not such an expression when `x` is a variable. A conditional of two pointers gets the qualifiers of both pointees, and it is a pointer to `void` when one arm points to `void` or when the pointees are not compatible. The kernel's `__is_constexpr` and `__is_const_zero` now give the same answers as with gcc 16 (#3053, #3054, #3554).
+- The cleanup after register allocation no longer carries what a scratch register holds into the next block. A later pass could fold away the reload into that register, and the next block then read a stale value. This broke the 128 bit signed division in `xtask wide` at `-O2` since #3547 (#3557).
 - At `-O2`, an enumerator in a function body can read a `const` object, as in a case label, like gcc. `-pedantic` says that it is not an integer constant expression. A zero cast to any pointer type, such as `(char *)0`, is again a null pointer for the sentinel, nonnull, `%n` and `__atomic_always_lock_free` checks (#3560).
 
 ## 0.30.0
