@@ -476,7 +476,12 @@ static READINGS: [Reading; 10] = [
 /// `rucc_codegen::combine` puts back together. That is the shape of the header bit itself, since
 /// `t_infomask` is a field that is read once to ask one bit of it, and what is left is gcc's
 /// `testb $8, 5(%rdi)`.
-pub(crate) static FUSED: [Fusion; 176] = [
+///
+/// The four at the end are not comparisons a program asked for. A compare and exchange leaves
+/// whether it went through in the zero flag and writes a byte from it, and a loop that retries
+/// until the exchange goes through branches on that byte, which is `sete`, `testb` and `je` where
+/// the jump alone would do.
+pub(crate) static FUSED: [Fusion; 180] = [
     Fusion { set: "cmp_set_e_8", cmp: "cmp_rr_8", if_true: "jcc_e", if_false: "jcc_ne" },
     Fusion { set: "cmp_set_e_16", cmp: "cmp_rr_16", if_true: "jcc_e", if_false: "jcc_ne" },
     Fusion { set: "cmp_set_e_32", cmp: "cmp_rr_32", if_true: "jcc_e", if_false: "jcc_ne" },
@@ -653,6 +658,10 @@ pub(crate) static FUSED: [Fusion; 176] = [
     Fusion { set: "test_set_ne_mi_16", cmp: "test_mi_16", if_true: "jcc_ne", if_false: "jcc_e" },
     Fusion { set: "test_set_ne_mi_32", cmp: "test_mi_32", if_true: "jcc_ne", if_false: "jcc_e" },
     Fusion { set: "test_set_ne_mi_64", cmp: "test_mi_64", if_true: "jcc_ne", if_false: "jcc_e" },
+    Fusion { set: "cmpxchg_8", cmp: "cmpxchg_flags_8", if_true: "jcc_e", if_false: "jcc_ne" },
+    Fusion { set: "cmpxchg_16", cmp: "cmpxchg_flags_16", if_true: "jcc_e", if_false: "jcc_ne" },
+    Fusion { set: "cmpxchg_32", cmp: "cmpxchg_flags_32", if_true: "jcc_e", if_false: "jcc_ne" },
+    Fusion { set: "cmpxchg_64", cmp: "cmpxchg_flags_64", if_true: "jcc_e", if_false: "jcc_ne" },
 ];
 
 /// What a select on a comparison's answer becomes, which is the move on the condition the
@@ -1933,7 +1942,10 @@ mod tests {
         let sets: Vec<&str> = INSTS
             .iter()
             .filter(|&&(_, shape)| {
-                matches!(shape, Form::CmpSet | Form::CmpSetRi | Form::CmpSetRm | Form::CmpSetMi)
+                matches!(
+                    shape,
+                    Form::CmpSet | Form::CmpSetRi | Form::CmpSetRm | Form::CmpSetMi | Form::CmpXchg
+                )
             })
             .map(|&(opcode, _)| opcode)
             .collect();
@@ -1966,7 +1978,9 @@ mod tests {
     /// was not opposite would send half the branches in the program the wrong way. Nothing about
     /// the names says they are opposite, so what this checks is that following one and then the
     /// other from every entry gets back to where it started, which is the whole of what being
-    /// opposite means and is a thing a table of ten cannot accidentally satisfy.
+    /// opposite means and is a thing a table of ten cannot accidentally satisfy. A compare and
+    /// exchange has one entry and no opposite of its own, so its opposite is looked for among the
+    /// comparisons.
     #[test]
     fn the_two_jumps_a_comparison_becomes_are_a_condition_and_its_opposite() {
         for fusion in BRANCH.fused {
@@ -1974,6 +1988,7 @@ mod tests {
                 .fused
                 .iter()
                 .find(|other| other.if_true == fusion.if_false && other.cmp == fusion.cmp)
+                .or_else(|| BRANCH.fused.iter().find(|other| other.if_true == fusion.if_false))
                 .unwrap_or_else(|| panic!("{} has no opposite", fusion.if_false));
             assert_eq!(back.if_false, fusion.if_true, "{} is not an opposite", fusion.if_true);
         }

@@ -15,6 +15,7 @@ All notable changes are recorded here. The format follows [Keep a Changelog](htt
 - Macro expansion remembers what each hide set union and trace step answered instead of building and hashing the same set for every token of a replacement list, which takes 6% off duktape's small source files and 1.5% off lvm.c (#3568).
 - The lexer looks past a token's first byte only when that can change the token, so identifiers no longer check for a string prefix unless they start with L, u or U and single byte punctuators no longer read three bytes ahead, which takes about 9% off duktape's small source files (#3569).
 - The checker keeps the GNU attribute names it has looked up in a list by symbol number rather than a map, so the readers asking about every attribute of every declaration index instead of hashing, which takes 2.4% off duktape's small source files (#3570).
+- A branch on whether a compare and exchange went through jumps on the flag the exchange left instead of testing a byte `sete` wrote, and the choice `atomic_compare_exchange` makes between what was expected and what was found is the value found, which takes the atomics listings from 4490 instructions to 4202 at `-O2` (#3571).
 
 ## 0.30.1
 

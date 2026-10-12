@@ -829,7 +829,7 @@ fn along(
 /// One entry per name the target's table holds, interned once for the function rather than once
 /// per block, since a block that ends in a branch is most of the blocks there are. Built by the
 /// caller and handed to all three, and to the two in [`crate::choice`] that ask the same thing of
-/// selects, rather than built by each. The table is 176 names on x86-64, and interning all of them
+/// selects, rather than built by each. The table is 180 names on x86-64, and interning all of them
 /// five times for every function was nearly five percent of compiling Duktape at `-O1`.
 ///
 /// The second map is the target's [`BranchInsts::readings`], the bytes written from what some
