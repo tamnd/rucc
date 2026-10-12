@@ -21,7 +21,7 @@ use rucc_codegen::pipeline::{self, Machine, Recording};
 use rucc_codegen::pressure::Pressure;
 use rucc_codegen::usage::StackUsage;
 use rucc_cost::Goal;
-use rucc_diag::{Diagnostic, SourceMap, Span};
+use rucc_diag::{Diagnostic, SourceFile, SourceMap, Span};
 use rucc_ir::{AttrSet, FpContract, Pic as IrPic, Visibility as IrVisibility};
 use rucc_lex::{Convert, Keywords, PpToken, TokenFlags, convert};
 use rucc_lower::Protector as LowerProtector;
@@ -289,13 +289,22 @@ pub fn compile(opts: &Options, name: &str, fs: &dyn FileSystem) -> Compiled {
         // from here on is the line that used the macro and the source map can no longer tell.
         // `-Wsystem-headers` is how somebody porting a header hears all of it, so it keeps
         // these as well.
+        // Consecutive tokens of an expansion are nearly always spelled in the same file, so the
+        // file the last one was in is tried before the search over every file.
         let quiet = !opts.system_header_warnings;
+        let mut last: Option<&SourceFile> = None;
         tokens
             .iter()
             .map(|token| {
                 let mut out = token.to_pp();
-                if quiet && !token.expansion.is_dummy() && sess.sources.is_system(token.span.lo) {
-                    out.flags = out.flags.with(TokenFlags::SYSTEM_MACRO);
+                if quiet && !token.expansion.is_dummy() {
+                    let pos = sess.sources.real(token.span.lo);
+                    if !last.is_some_and(|file| file.contains(pos)) {
+                        last = sess.sources.lookup_file(pos).map(|id| sess.sources.file(id));
+                    }
+                    if last.is_some_and(|file| file.system_from.is_some_and(|from| pos >= from)) {
+                        out.flags = out.flags.with(TokenFlags::SYSTEM_MACRO);
+                    }
                 }
                 out
             })
