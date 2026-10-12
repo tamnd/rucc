@@ -327,6 +327,12 @@ impl<'a> Lexer<'a> {
         } else {
             &self.cursor.bytes()[start as usize..end as usize]
         };
+        // Nearly every spelling is ASCII, and asking that is a few loads where the full UTF-8
+        // check was a call with its own setup for every token.
+        if bytes.is_ascii() {
+            // SAFETY: every byte is below 0x80, and any run of those is UTF-8.
+            return interner.intern(unsafe { std::str::from_utf8_unchecked(bytes) });
+        }
         // Interned as the text it is checked to be, since that is what interning the bytes
         // would check again before doing the same.
         if let Ok(text) = std::str::from_utf8(bytes) {
