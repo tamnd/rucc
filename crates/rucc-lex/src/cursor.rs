@@ -219,6 +219,21 @@ impl<'a> Cursor<'a> {
         self.step_at(at).map_or(0, |s| s.byte)
     }
 
+    /// The three logical bytes after the one under the head, each zero past the end, which is
+    /// `nth(1)`, `nth(2)` and `nth(3)` in one walk rather than three.
+    pub(crate) fn next_three(&self) -> [u8; 3] {
+        let mut out = [0; 3];
+        let Some(mut at) = self.step_at(self.pos).map(|s| s.next) else {
+            return out;
+        };
+        for byte in &mut out {
+            let Some(s) = self.step_at(at) else { break };
+            *byte = s.byte;
+            at = s.next;
+        }
+        out
+    }
+
     /// Consumes one logical byte and returns it, with whether it was clean.
     #[inline]
     pub(crate) fn bump(&mut self) -> Option<(u8, bool)> {
