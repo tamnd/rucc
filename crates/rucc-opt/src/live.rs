@@ -108,8 +108,9 @@ impl Set {
         had
     }
 
-    /// Adds everything in the other.
-    fn union_with(&mut self, other: &Self) {
+    /// Adds everything in the other, putting the two together in `both` and keeping what was in
+    /// the set there after, so a caller that unites many times allocates once.
+    fn union_using(&mut self, other: &Self, both: &mut Vec<(u32, u64)>) {
         if other.words.is_empty() {
             return;
         }
@@ -118,7 +119,7 @@ impl Set {
             return;
         }
         let (mine, theirs) = (&self.words, &other.words);
-        let mut both = Vec::with_capacity(mine.len() + theirs.len());
+        both.clear();
         let (mut left, mut right) = (0, 0);
         while left < mine.len() && right < theirs.len() {
             let ((at, word), (other_at, other_word)) = (mine[left], theirs[right]);
@@ -140,7 +141,7 @@ impl Set {
         }
         both.extend_from_slice(&mine[left..]);
         both.extend_from_slice(&theirs[right..]);
-        self.words = both;
+        std::mem::swap(&mut self.words, both);
     }
 
     /// Takes everything out.
@@ -289,6 +290,7 @@ impl Liveness {
             stale[block.index()] = true;
         }
         let mut set = Set::default();
+        let mut both = Vec::new();
         let mut again = true;
         while again {
             again = false;
@@ -299,7 +301,7 @@ impl Liveness {
                 }
                 set.clear();
                 for &successor in cfg.successors(block) {
-                    set.union_with(&self.live_in[successor.index()]);
+                    set.union_using(&self.live_in[successor.index()], &mut both);
                 }
                 self.live_out[at].clone_from(&set);
                 for &value in &writes[place] {
@@ -547,7 +549,7 @@ mod tests {
         second.insert(value(200));
         second.insert(value(201));
         second.insert(value(9000));
-        first.union_with(&second);
+        first.union_using(&second, &mut Vec::new());
         let all: Vec<u32> = first.iter().map(|value| value.raw()).collect();
         assert_eq!(all, [3, 64, 200, 201, 9000]);
         assert_eq!(first.len(), 5);
