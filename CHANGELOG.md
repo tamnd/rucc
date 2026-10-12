@@ -10,6 +10,7 @@ All notable changes are recorded here. The format follows [Keep a Changelog](htt
 - The backend no longer counts register pressure for held name addresses until a loop that could hold one asks, 2.9 percent fewer instructions on quickjs.c and 2.0 percent on lvm.c at `-O2` (#3563).
 - The register allocator settles values without taking each one out of its register and putting it back, and adds up what each register is worth in one pass, so lvm.c compiles in 7.1% fewer instructions at `-O2` and lz4hc.c in 5.4% fewer, with the same output (#3564).
 - gcm no longer counts register pressure in functions without a loop, and the liveness solver reuses one buffer for its unions, which takes about 0.2% off compiling quickjs.c and duktape.c at `-O2` with the same output (#3565).
+- The inliner searches for indirect calls it can resolve only when a splice can have made one, instead of walking the whole caller after every splice, which halves the compile of blake2b.c with SSE and takes about 2% off quickjs.c and duktape.c (#3566).
 
 ## 0.30.1
 
