@@ -14,6 +14,7 @@ All notable changes are recorded here. The format follows [Keep a Changelog](htt
 - Measuring a caller's frame finds where each instruction is in its block once instead of walking the same blocks again for every local, which takes 36% off compiling blake2b.c with SSE (#3567).
 - Macro expansion remembers what each hide set union and trace step answered instead of building and hashing the same set for every token of a replacement list, which takes 6% off duktape's small source files and 1.5% off lvm.c (#3568).
 - The lexer looks past a token's first byte only when that can change the token, so identifiers no longer check for a string prefix unless they start with L, u or U and single byte punctuators no longer read three bytes ahead, which takes about 9% off duktape's small source files (#3569).
+- The checker keeps the GNU attribute names it has looked up in a list by symbol number rather than a map, so the readers asking about every attribute of every declaration index instead of hashing, which takes 2.4% off duktape's small source files (#3570).
 
 ## 0.30.1
 

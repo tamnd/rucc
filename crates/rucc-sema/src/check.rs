@@ -389,8 +389,9 @@ pub struct Checker<'a> {
     /// A declaration is asked about its attributes a dozen times over, once by each reader that
     /// wants one of them, and every glibc prototype carries two or three. Finding the name in the
     /// table each time was most of the four percent the table took of compiling c4.c at `-O0`.
-    /// tamnd/rucc#3052.
-    pub(in crate::check) gnu_names: std::cell::RefCell<rucc_base::hash::Map<Symbol, &'static str>>,
+    /// tamnd/rucc#3052. It is by the number of the name rather than a map, since hashing the name
+    /// each time was still most of what asking cost on a duktape source file's headers.
+    pub(in crate::check) gnu_names: std::cell::RefCell<Vec<Option<&'static str>>>,
 }
 
 impl<'a> Checker<'a> {
