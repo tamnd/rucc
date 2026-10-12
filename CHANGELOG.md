@@ -7,6 +7,7 @@ All notable changes are recorded here. The format follows [Keep a Changelog](htt
 ### Changed
 
 - The register allocator weighs a copy for a block parameter by how often its edge is taken, counts the copies a fixed register forces when it compares its answer with the linear scan, and moves values tied in one register together, so a dispatch loop ending in tail calls keeps its arguments in place and calls through its table in one instruction, 2.6% fewer instructions across the corpus and 0.5% on SQLite (#3562).
+- The backend no longer counts register pressure for held name addresses until a loop that could hold one asks, 2.9 percent fewer instructions on quickjs.c and 2.0 percent on lvm.c at `-O2` (#3563).
 
 ## 0.30.1
 

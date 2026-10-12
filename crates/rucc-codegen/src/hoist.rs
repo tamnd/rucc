@@ -76,8 +76,11 @@ impl Hoisted {
                 })
             })
             .collect();
-        let live = Liveness::of(source, &cfg);
-        let pressure = Pressure::of(source, &cfg, &live);
+        // Counted the first time a loop is asked about that a name could be held across, since a
+        // function whose names are all taken outside loops, or only in loops that call, never
+        // reads it. Counting it for every function was about a hundredth of quickjs.c at `-O2`.
+        // tamnd/rucc#3052.
+        let mut pressure: Option<Pressure> = None;
         let limit = room.saturating_sub(rucc_cost::param!(heuristics::LOOP_RESERVED_REGS));
         // How many addresses are held across each block so far, which the pressure in it does not
         // count, since the IR has each of them live only from where it is taken to where it is
@@ -101,6 +104,13 @@ impl Hoisted {
             let mut chosen = None;
             let mut walk = loops.innermost(taken);
             while let Some(id) = walk {
+                if calls[id.index()] || loops.preheader(&cfg, id).is_none() {
+                    break;
+                }
+                let pressure = pressure.get_or_insert_with(|| {
+                    let live = Liveness::of(source, &cfg);
+                    Pressure::of(source, &cfg, &live)
+                });
                 let most = loops
                     .blocks(id)
                     .iter()
@@ -109,7 +119,7 @@ impl Hoisted {
                     })
                     .max()
                     .unwrap_or(0);
-                if calls[id.index()] || loops.preheader(&cfg, id).is_none() || most >= limit {
+                if most >= limit {
                     break;
                 }
                 chosen = Some(id);
