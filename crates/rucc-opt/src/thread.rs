@@ -1432,29 +1432,32 @@ fn leaky(func: &Func) -> Set<Block> {
 /// and the body is reached only through the test.
 ///
 /// A walk that gets too far is a no, since a function that large is not worth the time.
+///
+/// Each block is asked whether it reads one as the walk gets to it, rather than every block in the
+/// function first, since only the ones the walk gets to matter and the first one it finds ends it.
+/// Asking all of them up front was a walk of the whole function for every edge out of a leaky
+/// block, and on lvm.c at `-O2` that was an eighth of the instructions of the build.
+/// tamnd/rucc#3052.
 fn behind(func: &Func, block: Block, arm: Block) -> bool {
-    let mut readers = Set::default();
-    for other in func.blocks() {
-        if other == block {
-            continue;
-        }
+    let reads = |at: Block| {
         let mut reads = false;
-        for inst in func.insts(other) {
+        for inst in func.insts(at) {
             uses::operands(func, inst, |value| {
                 reads |= defined_in(func, value) == Some(block);
             });
+            if reads {
+                break;
+            }
         }
-        if reads {
-            readers.insert(other);
-        }
-    }
+        reads
+    };
     let mut seen = Set::default();
     let mut work = vec![arm];
     while let Some(at) = work.pop() {
         if at == block || !seen.insert(at) {
             continue;
         }
-        if readers.contains(&at) || seen.len() > BEHIND_WALK {
+        if seen.len() > BEHIND_WALK || reads(at) {
             return false;
         }
         push_targets(func, at, &mut work);
