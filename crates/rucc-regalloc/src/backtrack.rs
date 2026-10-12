@@ -915,6 +915,9 @@ impl<'a> State<'a, '_> {
         pins: &[Vec<(PhysReg, u128)>],
     ) {
         let heat = |inst: Inst| heat(func, inst);
+        let mut sums = vec![0; usize::from(u8::MAX) + 1];
+        let mut wanted: Vec<(PhysReg, u128)> = Vec::new();
+        let mut better: Vec<(u128, PhysReg)> = Vec::new();
         let mut moved = true;
         while moved && self.work <= self.budget {
             moved = false;
@@ -927,8 +930,8 @@ impl<'a> State<'a, '_> {
                 let second =
                     reuse.and_then(|reuse| reuse.second).and_then(|second| self.reg_of(second));
                 let own = reuse.map_or(1, |reuse| heat(reuse.inst));
-                let mut wanted: Vec<(PhysReg, u128)> =
-                    source.into_iter().chain(second).map(|at| (at, own)).collect();
+                wanted.clear();
+                wanted.extend(source.into_iter().chain(second).map(|at| (at, own)));
                 for &answer in &reused[number] {
                     if self.commuted[answer].is_none() {
                         let weight = self.reuses[answer].map_or(1, |reuse| heat(reuse.inst));
@@ -939,27 +942,17 @@ impl<'a> State<'a, '_> {
                     wanted.extend(self.reg_of(other).map(|at| (at, weight)));
                 }
                 wanted.extend(pins[number].iter().copied());
-                let met = |at: PhysReg| -> u128 {
-                    wanted.iter().filter(|&&(reg, _)| reg == at).map(|&(_, weight)| weight).sum()
-                };
-                let here = met(now);
-                let mut better: Vec<(u128, PhysReg)> = Vec::new();
-                for &(at, _) in &wanted {
-                    let weight = met(at);
-                    if weight > here && !better.contains(&(weight, at)) {
-                        better.push((weight, at));
-                    }
-                }
+                heavier(&wanted, now, &mut sums, &mut better);
                 if better.is_empty() {
                     continue;
                 }
-                better.sort_by_key(|&(weight, _)| Reverse(weight));
-                let index = self.slot(value.class, now);
-                self.remove(index, &[number]);
-                self.at[number] = None;
+                // Asked before the value leaves its register, since whether another register is
+                // free for it reads nothing about the one it is in, and taking it out and putting it
+                // back for each value that stays was most of what settling cost on lvm.c at `-O2`.
+                // tamnd/rucc#3052.
                 let was = self.commuted[number];
                 let mut to = now;
-                for (_, at) in better {
+                for &(_, at) in &better {
                     self.commuted[number] = match reuse {
                         Some(reuse) if second == Some(at) && source != Some(at) => Some(reuse.inst),
                         _ => None,
@@ -972,13 +965,15 @@ impl<'a> State<'a, '_> {
                 }
                 if to == now {
                     self.commuted[number] = was;
-                } else {
-                    self.saves[number].clear();
+                    continue;
                 }
+                let index = self.slot(value.class, now);
+                self.remove(index, &[number]);
+                self.saves[number].clear();
                 self.take(value, to);
             }
             if !moved && self.work <= self.budget {
-                moved = self.regroup(func, reused, edges, pins);
+                moved = self.regroup(func, reused, edges, pins, &mut sums);
             }
         }
     }
@@ -997,9 +992,16 @@ impl<'a> State<'a, '_> {
         reused: &Answers,
         edges: &[Vec<(Reg, u128)>],
         pins: &[Vec<(PhysReg, u128)>],
+        sums: &mut [u128],
     ) -> bool {
         let mut moved = false;
         let mut seen = vec![false; self.at.len()];
+        // Which values are in the group being built, by number. A group in luaV_execute ties
+        // hundreds of values through its block parameters, and searching the list for each tie
+        // was most of what settling cost there. tamnd/rucc#3052.
+        let mut inside = vec![false; self.at.len()];
+        let mut wanted: Vec<(PhysReg, u128)> = Vec::new();
+        let mut better: Vec<(u128, PhysReg)> = Vec::new();
         for number in 0..self.at.len() {
             let (Some(value), Some(now)) = (self.values[number], self.at[number]) else {
                 continue;
@@ -1008,6 +1010,7 @@ impl<'a> State<'a, '_> {
                 continue;
             }
             let mut group = vec![number];
+            inside[number] = true;
             let mut next = 0;
             while let Some(&member) = group.get(next) {
                 next += 1;
@@ -1022,10 +1025,11 @@ impl<'a> State<'a, '_> {
                         .flatten()
                         .is_some_and(|other| other.class == value.class);
                     if alike
-                        && !group.contains(&other)
+                        && !inside[other]
                         && self.at[other] == Some(now)
                         && self.commuted[other].is_none()
                     {
+                        inside[other] = true;
                         group.push(other);
                     }
                 }
@@ -1034,55 +1038,48 @@ impl<'a> State<'a, '_> {
                 seen[member] = true;
             }
             if group.len() < 2 {
+                inside[number] = false;
                 continue;
             }
-            let inside = |reg: Reg| {
+            let within = |reg: Reg| {
                 let number = reg.number().and_then(|number| usize::try_from(number).ok());
-                number.is_some_and(|number| group.contains(&number))
+                number.is_some_and(|number| inside.get(number).copied().unwrap_or(false))
             };
-            let mut wanted: Vec<(PhysReg, u128)> = Vec::new();
+            wanted.clear();
             for &member in &group {
                 if let Some(reuse) = self.reuses[member] {
-                    if !inside(reuse.source) {
+                    if !within(reuse.source) {
                         let at = self.reg_of(reuse.source);
                         wanted.extend(at.map(|at| (at, heat(func, reuse.inst))));
                     }
                 }
                 for &answer in &reused[member] {
-                    if !group.contains(&answer) && self.commuted[answer].is_none() {
+                    if !inside[answer] && self.commuted[answer].is_none() {
                         let weight = self.reuses[answer].map_or(1, |reuse| heat(func, reuse.inst));
                         wanted.extend(self.at[answer].map(|at| (at, weight)));
                     }
                 }
                 for &(other, weight) in &edges[member] {
-                    if !inside(other) {
+                    if !within(other) {
                         wanted.extend(self.reg_of(other).map(|at| (at, weight)));
                     }
                 }
                 wanted.extend(pins[member].iter().copied());
             }
-            let met = |at: PhysReg| -> u128 {
-                wanted.iter().filter(|&&(reg, _)| reg == at).map(|&(_, weight)| weight).sum()
-            };
-            let here = met(now);
-            let mut better: Vec<(u128, PhysReg)> = Vec::new();
-            for &(at, _) in &wanted {
-                let weight = met(at);
-                if weight > here && !better.contains(&(weight, at)) {
-                    better.push((weight, at));
-                }
+            for &member in &group {
+                inside[member] = false;
             }
+            heavier(&wanted, now, sums, &mut better);
             if better.is_empty() {
                 continue;
             }
-            better.sort_by_key(|&(weight, _)| Reverse(weight));
             let index = self.slot(value.class, now);
             self.remove(index, &group);
             for &member in &group {
                 self.at[member] = None;
             }
             let mut to = now;
-            for (_, at) in better {
+            for &(_, at) in &better {
                 let mut placed = Vec::new();
                 for &member in &group {
                     let Some(each) = self.values[member] else { continue };
@@ -1210,6 +1207,39 @@ fn received(func: &Func) -> Vec<Vec<Reg>> {
 /// How often the block an instruction is in runs, and once for one in no block.
 fn heat(func: &Func, inst: Inst) -> u128 {
     func.block_of(inst).map_or(1, |block| u128::from(func[block].weight.raw().max(1)))
+}
+
+/// Into `better`, each register `wanted` names that the weights it is named with add up to more in
+/// than they do in `now`, with that weight, heaviest first and in the order `wanted` first names
+/// them among equals. `sums` is one weight for each register number, zero on the way in and left
+/// that way.
+///
+/// Adding up the weights of each register as it came was a walk of `wanted` for every entry in it,
+/// and a group of block parameters wants hundreds. tamnd/rucc#3052.
+fn heavier(
+    wanted: &[(PhysReg, u128)],
+    now: PhysReg,
+    sums: &mut [u128],
+    better: &mut Vec<(u128, PhysReg)>,
+) {
+    let slot = |at: PhysReg| usize::from(at.number());
+    for &(at, weight) in wanted {
+        sums[slot(at)] += weight;
+    }
+    let here = sums[slot(now)];
+    better.clear();
+    for &(at, _) in wanted {
+        let weight = sums[slot(at)];
+        if weight > here {
+            better.push((weight, at));
+            // Named once, since every later entry for it meets the same weight.
+            sums[slot(at)] = 0;
+        }
+    }
+    for &(at, _) in wanted {
+        sums[slot(at)] = 0;
+    }
+    better.sort_by_key(|&(weight, _)| Reverse(weight));
 }
 
 /// For each value, the values an edge ties it to, a block parameter to what the edges into its
