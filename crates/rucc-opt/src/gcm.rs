@@ -139,11 +139,16 @@ impl Pass for Gcm {
         let machine = an.machine();
         let cfg = an.cfg(func);
         let order: Vec<Block> = cfg.reverse_postorder().collect();
+        let loops = an.loops(func);
+        // Only a value leaving a loop or going past one asks how full it is, so a function with no
+        // loop never reads the counts, and they are a walk of liveness over all of it.
+        // tamnd/rucc#3052.
+        let pressure = (loops.count() > 0).then(|| an.pressure(func));
         let mut job = Job {
             dom: an.dominators(func),
             post: an.post_dominators(func),
-            loops: an.loops(func),
-            pressure: an.pressure(func),
+            loops,
+            pressure,
             freq: an.frequencies(func),
             machine,
             at: Map::default(),
@@ -174,7 +179,8 @@ struct Job<'a> {
     dom: &'a Dominators,
     post: &'a PostDominators,
     loops: &'a Loops,
-    pressure: &'a Pressure,
+    /// None in a function with no loop, which never asks.
+    pressure: Option<&'a Pressure>,
     freq: &'a Frequencies,
     machine: Machine,
     /// The block each reachable instruction is in, kept up to date as instructions move.
@@ -430,7 +436,7 @@ impl Job<'_> {
             }
         }
         let room = self.machine.allocatable(class).unwrap_or(0);
-        let now = self.pressure.most_in_loop(self.loops, id, class);
+        let now = self.counts().most_in_loop(self.loops, id, class);
         let holds = u32::try_from(held.len()).unwrap_or(u32::MAX);
         let after = (now + holds).saturating_sub(freed);
         if after < room.saturating_sub(rucc_cost::param!(heuristics::LOOP_RESERVED_REGS)) {
@@ -489,7 +495,12 @@ impl Job<'_> {
         let Some(id) = self.loops.innermost(here) else { return false };
         let Some(class) = class_of(func[value].ty) else { return false };
         let room = self.machine.allocatable(class).unwrap_or(0);
-        self.pressure.is_tight(self.loops, id, class, room)
+        self.counts().is_tight(self.loops, id, class, room)
+    }
+
+    /// The pressure, which is there whenever there is a loop to ask about.
+    fn counts(&self) -> &Pressure {
+        self.pressure.expect("a function with a loop has its pressure counted")
     }
 }
 

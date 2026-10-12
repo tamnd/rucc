@@ -9,6 +9,7 @@ All notable changes are recorded here. The format follows [Keep a Changelog](htt
 - The register allocator weighs a copy for a block parameter by how often its edge is taken, counts the copies a fixed register forces when it compares its answer with the linear scan, and moves values tied in one register together, so a dispatch loop ending in tail calls keeps its arguments in place and calls through its table in one instruction, 2.6% fewer instructions across the corpus and 0.5% on SQLite (#3562).
 - The backend no longer counts register pressure for held name addresses until a loop that could hold one asks, 2.9 percent fewer instructions on quickjs.c and 2.0 percent on lvm.c at `-O2` (#3563).
 - The register allocator settles values without taking each one out of its register and putting it back, and adds up what each register is worth in one pass, so lvm.c compiles in 7.1% fewer instructions at `-O2` and lz4hc.c in 5.4% fewer, with the same output (#3564).
+- gcm no longer counts register pressure in functions without a loop, and the liveness solver reuses one buffer for its unions, which takes about 0.2% off compiling quickjs.c and duktape.c at `-O2` with the same output (#3565).
 
 ## 0.30.1
 
