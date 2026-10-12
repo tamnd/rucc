@@ -583,7 +583,7 @@ impl Checker<'_> {
     /// layout, the answer is as large as it can be, so that the alignment stops being part of the
     /// question and the size decides it alone.
     fn aligned_to(&mut self, object: ExprId) -> u64 {
-        if self.conv().is_null_pointer_constant(object) {
+        if self.conv().is_zero_pointer(object) {
             return u64::MAX;
         }
         let mut expr = object;

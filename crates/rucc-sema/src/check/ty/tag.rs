@@ -997,8 +997,25 @@ impl Checker<'_> {
             return None;
         }
         let ty = self.tast[value].ty;
-        match self.eval_integer(value) {
-            Ok(folded) => Some((folded, ty)),
+        // gcc folds the value first in a body when it optimizes, as it does for a case label, so
+        // `enum { A = n };` after `const unsigned n = 4u;` in a function is taken at `-O2`. Not at
+        // file scope. tamnd/rucc#3055.
+        let folded = if self.scopes.at_file_scope() {
+            self.eval_integer(value).map(|value| (value, false))
+        } else {
+            self.eval_folded_integer(value)
+        };
+        match folded {
+            Ok((folded, read_object)) => {
+                if read_object && self.cx.pedantic {
+                    let spelled = self.text(name).to_owned();
+                    let message = format!(
+                        "enumerator value for '{spelled}' is not an integer constant expression"
+                    );
+                    self.report(Diagnostic::warning(message, span).with_code("E0859"));
+                }
+                Some((folded, ty))
+            }
             Err(failure) => {
                 if !failure.poisoned {
                     let spelled = self.text(name).to_owned();

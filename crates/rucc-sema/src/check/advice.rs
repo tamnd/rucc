@@ -315,7 +315,7 @@ impl Checker<'_> {
         }
         let ty = self.types.canonical(self.tast[last].ty);
         let pointer = matches!(self.types.kind(ty), TypeKind::Pointer(_));
-        if !pointer || !self.conv().is_null_pointer_constant(last) {
+        if !pointer || !self.conv().is_zero_pointer(last) {
             let what = "missing sentinel in function call";
             self.report(Diagnostic::warning(what, span).with_code(SENTINEL));
         }
