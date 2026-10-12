@@ -234,7 +234,8 @@ impl Checker<'_> {
         if attr.namespace.is_some_and(|ns| self.text(ns) != "gnu") {
             return "";
         }
-        if let Some(&name) = self.gnu_names.borrow().get(&attr.name) {
+        let at = attr.name.raw() as usize;
+        if let Some(&Some(name)) = self.gnu_names.borrow().get(at) {
             return name;
         }
         let name = match rucc_gnu::lookup(Kind::Attribute, self.text(attr.name)) {
@@ -246,7 +247,11 @@ impl Checker<'_> {
             }
             _ => "",
         };
-        self.gnu_names.borrow_mut().insert(attr.name, name);
+        let mut names = self.gnu_names.borrow_mut();
+        if names.len() <= at {
+            names.resize(at + 1, None);
+        }
+        names[at] = Some(name);
         name
     }
 
