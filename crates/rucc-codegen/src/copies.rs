@@ -70,7 +70,10 @@
 //! depends on the path. A block with one edge into it starts with what that block left, when it has
 //! been walked already, since there is only the one path. Merging the maps where paths meet is a
 //! dataflow problem rather than a walk, which is section 37.4's own answer for why this is the
-//! cheap half.
+//! cheap half. What the scratch registers hold is not carried, because the passes after this one
+//! take it that nothing lives in a scratch register into another block. [`reloads`] folds a reload
+//! into a scratch register into the instruction that read it, and then the register is never
+//! written.
 //!
 //! # What clears it
 //!
@@ -183,6 +186,7 @@ pub struct Cleaned {
 /// Panics on a move of a class the target did not say how to move, which is the same frame
 /// description [`crate::finish`] wrote the move out of and so is the caller handing this a
 /// function and a target that were not worked out from each other.
+#[allow(clippy::too_many_arguments)]
 pub fn clean(
     func: &mut Func,
     moves: &Moves,
@@ -190,6 +194,7 @@ pub fn clean(
     frame: &FrameInsts,
     conv: &CallRegs,
     framed: bool,
+    scratch: (RegClass, &[PhysReg]),
     names: &mut Interner,
 ) -> Cleaned {
     let blocks: Vec<Block> = func.blocks().collect();
@@ -205,7 +210,11 @@ pub fn clean(
         // `only_ways_in`.
         let mut holds = match only.get(&block) {
             Some(from) if func[block].params.is_empty() => {
-                left.get(from).cloned().unwrap_or_default()
+                let mut holds = left.get(from).cloned().unwrap_or_default();
+                for &reg in scratch.1 {
+                    holds.wrote(scratch.0, Place::Reg(reg));
+                }
+                holds
             }
             _ => Holds::default(),
         };
@@ -817,7 +826,7 @@ mod tests {
 
     /// The pass, with the one target these tests are written against.
     fn clean(func: &mut Func, moves: &Moves, names: &mut Interner) -> Cleaned {
-        super::clean(func, moves, &MACHINE, &FRAME, &SYSV, true, names)
+        super::clean(func, moves, &MACHINE, &FRAME, &SYSV, true, (GPR, &[R10, R11]), names)
     }
 
     /// How many moves went, for a test about the half that removes.
@@ -1504,15 +1513,35 @@ mod tests {
         let (mut names, mut func, top) = empty();
         let next = func.create_block();
         func.succs_mut(top).push(BlockCall::to(next));
-        let spill = store(&mut func, &mut names, top, R10, 16);
-        let reload = load(&mut func, &mut names, next, R10, 16);
-        add(&mut func, &mut names, next, RAX, R10);
+        let spill = store(&mut func, &mut names, top, RBX, 16);
+        let reload = load(&mut func, &mut names, next, RBX, 16);
+        add(&mut func, &mut names, next, RAX, RBX);
         let mut moves = Moves::default();
-        moves.record(spill, out(top, 0, R10));
-        moves.record(reload, back(next, 0, R10));
+        moves.record(spill, out(top, 0, RBX));
+        moves.record(reload, back(next, 0, RBX));
 
         assert_eq!(gone(&mut func, &moves, &mut names), 1);
-        assert_eq!(left(&func, next), 1, "the reload stayed");
+        assert_eq!(left(&func, next), 1, "only the add is left");
+    }
+
+    /// What a scratch register holds is not carried into the next block, because a later pass can
+    /// fold the reload into it away, and then nothing writes the register. The 128 bit signed
+    /// division in `xtask wide` read a stale `r10` like that.
+    #[test]
+    fn a_scratch_register_is_not_carried_into_the_next_block() {
+        let (mut names, mut func, top) = empty();
+        let next = func.create_block();
+        func.succs_mut(top).push(BlockCall::to(next));
+        let early = load(&mut func, &mut names, top, R10, 16);
+        add(&mut func, &mut names, top, RAX, R10);
+        let late = load(&mut func, &mut names, next, RBX, 16);
+        add(&mut func, &mut names, next, RAX, RBX);
+        let mut moves = Moves::default();
+        moves.record(early, back(top, 0, R10));
+        moves.record(late, back(next, 0, RBX));
+
+        assert_eq!(clean(&mut func, &moves, &mut names), Cleaned::default());
+        assert_eq!(func.insts(next).next(), Some(late), "the reload is still a reload");
     }
 
     /// A block two edges come into could be arriving from either, and only one of them read the

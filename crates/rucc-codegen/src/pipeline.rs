@@ -1439,7 +1439,16 @@ pub fn compile_recording(
     // would take that as a new value and forget what it knew the register held.
     copies::itself(&mut func, machine.insts, names);
     let pointer = frame.frame_pointer();
-    copies::clean(&mut func, &moves, machine.shapes, machine.insts, machine.conv, pointer, names);
+    copies::clean(
+        &mut func,
+        &moves,
+        machine.shapes,
+        machine.insts,
+        machine.conv,
+        pointer,
+        (int, held),
+        names,
+    );
     // After the cleanup, which is what takes out the reads, and before the reloads below fold one
     // into the instruction that wanted it, where it is no longer one of the allocator's moves.
     let unread = if flags.reloads { copies::unread(&mut func, &moves) } else { Vec::new() };
