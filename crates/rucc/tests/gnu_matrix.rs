@@ -1017,3 +1017,25 @@ fn a_const_object_is_a_case_label_when_optimizing() {
         assert!(!out.status.success(), "the compiler took:\n{refused}");
     }
 }
+
+/// gcc folds a `const` object in an enumerator value in a body once it optimizes, the same as
+/// in a case label, and refuses it at `-O0`. `-pedantic` says so at each one (tamnd/rucc#3055).
+#[test]
+fn a_const_object_is_an_enumerator_in_a_body_when_optimizing() {
+    let source = "static const int n = 4;\n\
+                  int f(void) {\n\
+                      const int m = n + 1;\n\
+                      enum { a = n, b = m * 1000 };\n\
+                      return a + b;\n\
+                  }\n";
+    let got = ir("const-enum-o2", &["-O2"], source);
+    assert!(got.contains("5004"), "the folded sum is missing from:\n{got}");
+    let out = compile("const-enum-o0", &["--emit=ir", "-O0"], source);
+    assert!(!out.status.success(), "-O0 took the enumerators");
+    let said = said_with("const-enum-pedantic", &["-O2", "-pedantic"], source);
+    assert_eq!(
+        lines_with(&said, "is not an integer constant expression").len(),
+        2,
+        "the warnings are wrong:\n{said}"
+    );
+}
