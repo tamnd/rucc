@@ -1035,6 +1035,21 @@ fn settle(
     // takes an `always_inline` function to point at. Without one, walking the whole caller after
     // every splice to look for such a call finds nothing.
     let pointed = !optnone && how.wanted.values().any(|&(_, kind)| kind == Kind::Always);
+    // The calls through a pointer in the caller, which are the only ones [`resolved`] can find.
+    // One the caller had is found once a splice hands it the address, and one a splice brought is
+    // among the instructions it made, so asking these after each splice says whether walking the
+    // whole caller finds anything. blake2b.c in the SSE build of BLAKE2 splices thousands of
+    // intrinsics into its compression function, and the walk after each of them was nearly half
+    // of what compiling it cost. tamnd/rucc#3052.
+    let mut through: Vec<Inst> = Vec::new();
+    if pointed {
+        let func = &module[id];
+        through.extend(
+            func.blocks()
+                .flat_map(|block| func.insts(block))
+                .filter(|&inst| func[inst].opcode == Opcode::CallIndirect),
+        );
+    }
     let mut calls: Vec<(Block, Inst, FuncId, Kind)> = {
         let func = &module[id];
         func.blocks()
@@ -1204,7 +1219,21 @@ fn settle(
                 // which is `noinstr`, and a call left out of line there is a call out of the
                 // section objtool holds it to.
                 if pointed {
-                    calls.extend(resolved(module, id, how, false, None));
+                    let func = &module[id];
+                    through.extend(
+                        (mark..func.counts().insts)
+                            .map(Inst::from_usize)
+                            .filter(|&inst| func[inst].opcode == Opcode::CallIndirect),
+                    );
+                    through.retain(|&inst| {
+                        func.block_of(inst).is_some() && func[inst].opcode == Opcode::CallIndirect
+                    });
+                    let found = through
+                        .iter()
+                        .any(|&inst| pointed_at(module, func, inst, how, false).is_some());
+                    if found {
+                        calls.extend(resolved(module, id, how, false, None));
+                    }
                 }
                 // A loop the callee said must stay a loop is in the caller now, and the pass that
                 // would make it a call only knows functions. The whole caller keeps its loops,
@@ -1276,22 +1305,8 @@ fn resolved(
     let found: Vec<(Block, Inst, Symbol, FuncId, Kind)> = placed
         .into_iter()
         .filter_map(|(block, inst)| {
-            let data = &func[inst];
-            let Extra::Call(info) = data.extra else { return None };
-            if data.opcode != Opcode::CallIndirect {
-                return None;
-            }
-            let Def::Result { inst: made, .. } = func[*func[data.args].first()?].def else {
-                return None;
-            };
-            if func[made].opcode != Opcode::GlobalAddr {
-                return None;
-            }
-            let Extra::Symbol(name) = func[made].extra else { return None };
-            let &(callee, kind) = how.wanted.get(&name)?;
-            ((kind == Kind::Always || every)
-                && module[callee].signature() == &func[func[info].signature])
-                .then_some((block, inst, name, callee, kind))
+            let (name, callee, kind) = pointed_at(module, func, inst, how, every)?;
+            Some((block, inst, name, callee, kind))
         })
         .collect();
     let func = &mut module[id];
@@ -1309,6 +1324,32 @@ fn resolved(
         out.push((block, inst, callee, kind));
     }
     out
+}
+
+/// What a call through a pointer calls, when [`resolved`] would make it direct: the name, the
+/// function and how the step inlines it.
+fn pointed_at(
+    module: &Module,
+    func: &Func,
+    inst: Inst,
+    how: &How<'_>,
+    every: bool,
+) -> Option<(Symbol, FuncId, Kind)> {
+    let data = &func[inst];
+    let Extra::Call(info) = data.extra else { return None };
+    if data.opcode != Opcode::CallIndirect {
+        return None;
+    }
+    let Def::Result { inst: made, .. } = func[*func[data.args].first()?].def else {
+        return None;
+    };
+    if func[made].opcode != Opcode::GlobalAddr {
+        return None;
+    }
+    let Extra::Symbol(name) = func[made].extra else { return None };
+    let &(callee, kind) = how.wanted.get(&name)?;
+    ((kind == Kind::Always || every) && module[callee].signature() == &func[func[info].signature])
+        .then_some((name, callee, kind))
 }
 
 /// The parameters of a body that it asks `__builtin_constant_p` about, by position.
