@@ -1917,8 +1917,10 @@ impl Checker<'_> {
             let then = self.conv().to_type(then, right);
             (right, then, otherwise)
         } else if is_pointer(&self.types, left) && is_pointer(&self.types, right) {
-            let otherwise = self.conv().to_type(otherwise, left);
-            (left, then, otherwise)
+            let ty = self.pointer_arms(left, right, span);
+            let then = self.conv().to_type(then, ty);
+            let otherwise = self.conv().to_type(otherwise, ty);
+            (ty, then, otherwise)
         } else if is_pointer(&self.types, left) && is_integer(&self.types, right) {
             self.report(
                 Diagnostic::error("pointer/integer type mismatch in conditional expression", span)
@@ -2263,6 +2265,50 @@ impl Checker<'_> {
         if let Some(severity) = self.cx.promoted(Promoted::IncompatiblePointer) {
             self.report(Diagnostic::new(severity, message, span).with_code("E0512"));
         }
+    }
+
+    /// The type of a conditional whose arms are two pointers and neither is a null pointer
+    /// constant, 6.5.15p6.
+    ///
+    /// The result points at what both arms point at, with the qualifiers of both. Where one arm
+    /// points at `void` the result is a pointer to `void` with those qualifiers, and where the
+    /// two pointees are not compatible gcc says so and takes the same `void *`. The kernel's
+    /// `__is_const_zero` asks exactly this: `0 ? (void *)(long)(x) : (char *)0` is `char *` when
+    /// the left arm is a null pointer constant and `void *` when it is not, and `_Generic`
+    /// reads the answer off the type. Two address spaces have nothing in common, so that pair
+    /// keeps the type of the left arm.
+    fn pointer_arms(&mut self, left: TypeId, right: TypeId, span: Span) -> TypeId {
+        let (Some(a), Some(b)) = (pointee(&self.types, left), pointee(&self.types, right)) else {
+            return left;
+        };
+        let (a_quals, b_quals) = (self.types.object_quals(a), self.types.object_quals(b));
+        if a_quals.space() != b_quals.space() {
+            return left;
+        }
+        let quals = a_quals.with(b_quals);
+        let (a_bare, b_bare) = (self.types.unqualified_object(a), self.types.unqualified_object(b));
+        let pointee = if is_void(&self.types, a_bare) || is_void(&self.types, b_bare) {
+            self.types.void()
+        } else if let Some(both) = rucc_types::composite(&mut self.types, a_bare, b_bare) {
+            if both == a_bare && a_quals == quals {
+                return left;
+            }
+            both
+        } else {
+            if let Some(severity) = self.cx.promoted(Promoted::IncompatiblePointer) {
+                self.report(
+                    Diagnostic::new(
+                        severity,
+                        "pointer type mismatch in conditional expression",
+                        span,
+                    )
+                    .with_code("E0512"),
+                );
+            }
+            self.types.void()
+        };
+        let pointee = self.types.qualified(pointee, quals);
+        self.types.pointer(pointee)
     }
 
     /// Whether two pointee types are the same integer type written with a different sign.

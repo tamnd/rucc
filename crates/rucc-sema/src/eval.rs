@@ -117,6 +117,7 @@ pub struct Eval<'a> {
     objects: bool,
     optimized: bool,
     read_object: bool,
+    strict: bool,
     depth: u32,
 }
 
@@ -149,8 +150,23 @@ impl<'a> Eval<'a> {
             objects: false,
             optimized: false,
             read_object: false,
+            strict: false,
             depth: 0,
         }
+    }
+
+    /// The same folder, asking the operands that are not evaluated to be constants too.
+    ///
+    /// 6.6p3 lets an unevaluated operand be anything, so `0 && x` folds to zero wherever a
+    /// constant is wanted, and gcc 16 takes it in an enumerator, a case label and a static
+    /// assertion with only a `-Wpedantic` warning. It is still not an integer constant expression
+    /// by 6.6p6, which allows only constant operands, and gcc keeps to that in one place: a null
+    /// pointer constant. So `(void *)((long)(0 && x) * 0l)` is not one, and the kernel's
+    /// `__is_constexpr(0 && x)` is 0 under gcc and clang. This is that reading.
+    #[must_use]
+    pub fn strict(mut self, strict: bool) -> Eval<'a> {
+        self.strict = strict;
+        self
     }
 
     /// The same folder, reading a `const` object of integer type as the value it was initialized
@@ -291,8 +307,12 @@ impl<'a> Eval<'a> {
                 // `0 && f()` below, which is 6.6p3 saying the operands of an unevaluated
                 // subexpression do not have to be constants and is what both compilers do.
                 let cond = self.eval(cond)?;
-                let taken =
-                    if truth(cond).ok_or_else(|| self.stop(expr))? { then } else { otherwise };
+                let (taken, skipped) = if truth(cond).ok_or_else(|| self.stop(expr))? {
+                    (then, otherwise)
+                } else {
+                    (otherwise, then)
+                };
+                self.unevaluated(skipped)?;
                 self.eval(taken)
             }
             ExprKind::Classify { op, lhs, rhs } => self.classify(expr, op, lhs, rhs),
@@ -645,6 +665,18 @@ impl<'a> Eval<'a> {
         }
     }
 
+    /// An operand the language does not evaluate, which [`Self::strict`] still wants to be a
+    /// constant. Its value is not used, so what folding it has to say is dropped.
+    fn unevaluated(&mut self, expr: ExprId) -> Result<(), NotConstant> {
+        if !self.strict {
+            return Ok(());
+        }
+        let said = self.diagnostics.len();
+        let folded = self.eval(expr);
+        self.diagnostics.truncate(said);
+        folded.map(drop)
+    }
+
     /// A binary operator applied to folded operands.
     fn binary(
         &mut self,
@@ -658,6 +690,7 @@ impl<'a> Eval<'a> {
                 let wanted = matches!(op, BinaryOp::LogOr);
                 let left = self.eval(lhs)?;
                 if truth(left).ok_or_else(|| self.stop(expr))? == wanted {
+                    self.unevaluated(rhs)?;
                     return Ok(Const::Int(i128::from(wanted)));
                 }
                 let right = self.eval(rhs)?;
