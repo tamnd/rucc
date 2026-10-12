@@ -447,7 +447,12 @@ impl<'a> Lexer<'a> {
 
     fn ident_or_prefixed_literal(&mut self, b: u8, start: u32) -> PpTokenKind {
         // `L"x"` is one token rather than an identifier followed by a string, so the prefixes
-        // are checked before the identifier scan rather than unwound afterwards.
+        // are checked before the identifier scan rather than unwound afterwards. Only a name
+        // starting with one of the three letters can be one, so no other name looks two bytes on.
+        // tamnd/rucc#3052.
+        if !matches!(b, b'L' | b'u' | b'U') {
+            return self.identifier();
+        }
         let (n1, n2) = (self.cursor.nth(1), self.cursor.nth(2));
         match b {
             b'L' | b'u' | b'U' if n1 == b'"' => {
@@ -594,20 +599,29 @@ impl<'a> Lexer<'a> {
     /// Longest match over the punctuator set, measured in logical bytes.
     fn punctuator_kind(&self) -> Option<(Punct, usize, bool)> {
         let one = self.cursor.first();
-        let two = self.cursor.nth(1);
-        let three = self.cursor.nth(2);
-        let four = self.cursor.nth(3);
+        // Most punctuators are one byte no longer one starts with, and need nothing after it.
+        let alone = match one {
+            b'[' => Punct::LBracket,
+            b']' => Punct::RBracket,
+            b'(' => Punct::LParen,
+            b')' => Punct::RParen,
+            b'{' => Punct::LBrace,
+            b'}' => Punct::RBrace,
+            b'~' => Punct::Tilde,
+            b'?' => Punct::Question,
+            b';' => Punct::Semi,
+            b',' => Punct::Comma,
+            _ => {
+                let [two, three, four] = self.cursor.next_three();
+                return Self::longer(one, two, three, four);
+            }
+        };
+        Some((alone, 1, false))
+    }
+
+    /// The punctuator starting with `one` that the bytes after it make longest.
+    fn longer(one: u8, two: u8, three: u8, four: u8) -> Option<(Punct, usize, bool)> {
         let found = match one {
-            b'[' => (Punct::LBracket, 1, false),
-            b']' => (Punct::RBracket, 1, false),
-            b'(' => (Punct::LParen, 1, false),
-            b')' => (Punct::RParen, 1, false),
-            b'{' => (Punct::LBrace, 1, false),
-            b'}' => (Punct::RBrace, 1, false),
-            b'~' => (Punct::Tilde, 1, false),
-            b'?' => (Punct::Question, 1, false),
-            b';' => (Punct::Semi, 1, false),
-            b',' => (Punct::Comma, 1, false),
             b'.' if two == b'.' && three == b'.' => (Punct::Ellipsis, 3, false),
             b'.' => (Punct::Dot, 1, false),
             b'-' => match two {

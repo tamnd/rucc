@@ -13,6 +13,7 @@ All notable changes are recorded here. The format follows [Keep a Changelog](htt
 - The inliner searches for indirect calls it can resolve only when a splice can have made one, instead of walking the whole caller after every splice, which halves the compile of blake2b.c with SSE and takes about 2% off quickjs.c and duktape.c (#3566).
 - Measuring a caller's frame finds where each instruction is in its block once instead of walking the same blocks again for every local, which takes 36% off compiling blake2b.c with SSE (#3567).
 - Macro expansion remembers what each hide set union and trace step answered instead of building and hashing the same set for every token of a replacement list, which takes 6% off duktape's small source files and 1.5% off lvm.c (#3568).
+- The lexer looks past a token's first byte only when that can change the token, so identifiers no longer check for a string prefix unless they start with L, u or U and single byte punctuators no longer read three bytes ahead, which takes about 9% off duktape's small source files (#3569).
 
 ## 0.30.1
 
