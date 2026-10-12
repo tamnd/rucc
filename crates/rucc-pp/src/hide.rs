@@ -53,6 +53,11 @@ pub struct HideSets {
     sets: Vec<Box<[Symbol]>>,
     /// Lookup from contents to index.
     map: Map<Box<[Symbol]>, HideSet>,
+    /// What [`HideSets::add`] and [`HideSets::union`] answered before, by what they were asked.
+    /// Every token of a replacement list asks the same question, and each time the set was
+    /// built again and its members hashed to find the one already interned. tamnd/rucc#3052.
+    added: Map<(HideSet, Symbol), HideSet>,
+    unions: Map<(HideSet, HideSet), HideSet>,
 }
 
 impl Default for HideSets {
@@ -67,7 +72,7 @@ impl HideSets {
         let empty: Box<[Symbol]> = Box::new([]);
         let mut map = Map::default();
         map.insert(empty.clone(), HideSet::EMPTY);
-        Self { sets: vec![empty], map }
+        Self { sets: vec![empty], map, added: Map::default(), unions: Map::default() }
     }
 
     /// The members of a set, sorted.
@@ -109,6 +114,9 @@ impl HideSets {
     /// Panics if the set came from a different table, or if more than `u32::MAX` distinct
     /// sets are interned, which would need a translation unit no machine can hold.
     pub fn add(&mut self, set: HideSet, name: Symbol) -> HideSet {
+        if let Some(&found) = self.added.get(&(set, name)) {
+            return found;
+        }
         let current = &self.sets[set.0 as usize];
         let Err(at) = current.binary_search(&name) else {
             return set;
@@ -117,7 +125,9 @@ impl HideSets {
         next.extend_from_slice(&current[..at]);
         next.push(name);
         next.extend_from_slice(&current[at..]);
-        self.insert(next)
+        let found = self.insert(next);
+        self.added.insert((set, name), found);
+        found
     }
 
     /// The union of two sets.
@@ -136,8 +146,13 @@ impl HideSets {
         if a.is_empty() {
             return b;
         }
+        if let Some(&found) = self.unions.get(&(a, b)) {
+            return found;
+        }
         let merged = merge(&self.sets[a.0 as usize], &self.sets[b.0 as usize], Merge::Union);
-        self.insert(merged)
+        let found = self.insert(merged);
+        self.unions.insert((a, b), found);
+        found
     }
 
     /// The intersection of two sets.
