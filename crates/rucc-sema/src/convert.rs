@@ -328,6 +328,23 @@ impl Conv<'_> {
         }
     }
 
+    /// Whether a pointer is a zero cast to any pointer type, which is what gcc takes as the
+    /// sentinel of a call. `(char *)0` is one, and it is not a null pointer constant.
+    pub fn is_zero_pointer(&self, expr: ExprId) -> bool {
+        match self.tast[expr].kind {
+            ExprKind::Cast(inner) | ExprKind::Convert { operand: inner, .. }
+                if is_pointer(self.types, self.tast[expr].ty) =>
+            {
+                if is_pointer(self.types, self.tast[inner].ty) {
+                    self.is_zero_pointer(inner)
+                } else {
+                    self.is_null_pointer_constant(inner)
+                }
+            }
+            _ => self.is_null_pointer_constant(expr),
+        }
+    }
+
     /// Whether a type is `void *` with no qualifier on the `void`.
     fn is_plain_void_pointer(&self, ty: TypeId) -> bool {
         pointee(self.types, ty).is_some_and(|inner| {

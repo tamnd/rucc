@@ -892,7 +892,7 @@ impl Checker<'_> {
     fn written_badly(&mut self, arg: ExprId, index: usize, call: Span) -> bool {
         let ty = self.types.canonical(self.tast[arg].ty);
         let TypeKind::Pointer(pointee) = self.types.kind(ty) else { return false };
-        if self.conv().is_null_pointer_constant(arg) {
+        if self.conv().is_zero_pointer(arg) {
             let what = format!("writing through null pointer (argument {index})");
             self.report(Diagnostic::warning(what, call).with_code(FORMAT));
             return true;
