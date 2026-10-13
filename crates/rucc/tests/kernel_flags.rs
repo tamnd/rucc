@@ -476,3 +476,38 @@ fn each_read_of_a_global_is_relative_to_the_instruction_pointer_under_the_kernel
     assert!(!text.contains("$n"), "{text}");
     assert_eq!(text.matches("n(%rip)").count(), 2, "{text}");
 }
+
+/// `drm_exec_until_all_locked` stores the address of its own label and
+/// `drm_exec_retry_on_contention` jumps through it. gcc knows the address and writes a direct
+/// jump. Through the retpoline thunk it is a jump objtool reads as a sibling call out of a
+/// function with a frame, which it warns about four times in drm_exec_test.o.
+#[test]
+fn a_computed_goto_to_the_one_label_it_can_reach_is_a_direct_jump() {
+    let source = "int cleanup(void *); int work(void *); int contended(void *);\n\
+        void f(void *e) {\n\
+        again:\n\
+            for (void *ptr; ({ ptr = &&again; (void)ptr; cleanup(e); });) {\n\
+                work(e);\n\
+                if (__builtin_expect(contended(e), 0))\n\
+                    goto *ptr;\n\
+            }\n\
+        }\n";
+    let out = run(
+        &[
+            "--target=x86_64-unknown-linux-gnu",
+            "-O2",
+            "-mcmodel=kernel",
+            "-fno-PIE",
+            "-mindirect-branch=thunk-extern",
+            "-mindirect-branch-register",
+            "-S",
+            "-o",
+            "-",
+        ],
+        source,
+    );
+    assert!(out.status.success(), "{}", String::from_utf8_lossy(&out.stderr));
+    let text = String::from_utf8_lossy(&out.stdout);
+    assert!(!text.contains("__x86_indirect_thunk"), "{text}");
+    assert!(!text.contains("jmp\t*"), "{text}");
+}
