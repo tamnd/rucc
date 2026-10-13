@@ -669,6 +669,20 @@ pub(crate) fn taken(func: &Func, term: Inst, subst: &Bindings) -> Option<BlockCa
             let case = func[info.cases].iter().position(|it| *it == value);
             func[info.targets].get(case.map_or(0, |case| case + 1)).copied()
         }
+        // A `goto *p` whose `p` is known to be `&&label` goes to the label, which is what gcc
+        // makes of it. The kernel's `drm_exec_until_all_locked` stores the address of its own
+        // label in the loop condition and `drm_exec_retry_on_contention` jumps through it. Kept
+        // indirect, the jump goes through the retpoline thunk, and objtool reads a jump to a
+        // thunk out of a function with a frame as a sibling call it cannot follow.
+        Opcode::IndirectBr => {
+            let Def::Result { inst, .. } = func[resolve(subst, arg)].def else { return None };
+            if func[inst].opcode != Opcode::BlockAddr {
+                return None;
+            }
+            let label = func.successors(inst).next()?.block;
+            let Extra::Targets(targets) = data.extra else { return None };
+            func[targets].iter().find(|call| call.block == label).copied()
+        }
         _ => None,
     }
 }
@@ -2092,6 +2106,35 @@ block2:
         // that reaches the labelled block is now.
         assert_eq!(blocks(&func), [0, 1]);
         assert_eq!(goes_to(&func, 0), [1]);
+    }
+
+    #[test]
+    fn a_computed_goto_through_a_known_label_is_a_jump() {
+        // `drm_exec_until_all_locked`: the loop stores `&&label` and the retry is `goto *p`. The
+        // address can only be the one label, so the branch is a jump there and not a jump
+        // through a register, which is what gcc writes.
+        let mut names = Interner::new();
+        let mut func = Func::new(names.intern("f"), Signature::new());
+        let entry = func.create_block();
+        let labelled = func.create_block();
+        let retry = func.create_block();
+        let done = func.create_block();
+        let cond = func.append_param(entry, Type::int(1));
+        let mut build = Builder::new(&mut func, entry);
+        build.jump(labelled, &[]);
+        let mut build = Builder::new(&mut func, labelled);
+        let addr = build.block_addr(labelled);
+        build.br_if(cond, retry, &[], done, &[]);
+        let mut build = Builder::new(&mut func, retry);
+        build.indirect_br(addr, &[labelled, done]);
+        let mut build = Builder::new(&mut func, done);
+        build.ret(&[]);
+        assert!(simplify(&mut func).changed());
+        let indirect = func
+            .blocks()
+            .filter_map(|block| func.terminator(block))
+            .any(|term| func[term].opcode == Opcode::IndirectBr);
+        assert!(!indirect, "the computed goto is still there");
     }
 
     #[test]
