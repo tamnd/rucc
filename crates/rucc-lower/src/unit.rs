@@ -34,8 +34,9 @@ use rucc_base::{Interner, Symbol};
 use rucc_diag::{Diagnostic, Span};
 use rucc_ir::{
     Abi, Alias, AliasKind, AttrSet, Builder, CallInfo, DataList, Datum, Dll, Extra, FpContract,
-    Func, FuncId, Global, Imm, InstData, Linkage as IrLinkage, Meta, Module, Opcode, Param, Reloc,
-    Signature, SymbolRef, TlsModel, Type, Visibility as IrVisibility,
+    Func, FuncId, Global, Imm, InstData, LIBCALL_REPLACEMENTS, LIBCALL_UNCHECKED,
+    Linkage as IrLinkage, Meta, Module, Opcode, Param, Reloc, Signature, SymbolRef, TlsModel, Type,
+    Visibility as IrVisibility,
 };
 use rucc_sema::{
     Address, Base, Const, Conversion, DeclFlags, DeclId, DeclKind, Definition, Effects, Emission,
@@ -469,6 +470,7 @@ pub fn lower(name: &str, cx: Context<'_>) -> Lowered {
         renamed: Map::default(),
         reachable,
         named,
+        used: Set::default(),
         nest: Nest::default(),
     };
     unit.run();
@@ -605,8 +607,12 @@ pub(crate) struct Unit<'a> {
     /// internal linkage is emitted at all.
     reachable: Set<DeclId>,
     /// What an expression in something reached names, which is what a use of a name is. Only a
-    /// weakref asks, since whether its target stays weak is whether anything uses it by name.
+    /// weakref asks this directly, since whether its target stays weak is whether anything uses
+    /// it by name. The rest ask [`Unit::used`].
     named: Set<DeclId>,
+    /// The symbols [`Unit::named`] comes to, with the targets of the second names added, which is
+    /// what a use of a symbol is when a name may be declared more than once.
+    used: Set<Symbol>,
     /// The nested functions met so far and what each of them reaches. See [`crate::nest`].
     pub(crate) nest: Nest,
 }
@@ -652,12 +658,14 @@ impl Unit<'_> {
         let written = self.module.globals().count();
         self.find_aliased();
         self.find_renamed();
+        self.find_used();
         for index in 0..self.tast.top_level().len() {
             let decl = self.tast.top_level()[index];
             if !self.done.insert(decl) {
                 continue;
             }
             match self.tast[decl].kind {
+                DeclKind::Function if self.is_unused_prototype(decl) => {}
                 DeclKind::Function => self.function(decl),
                 DeclKind::Object => self.object(decl),
                 // A name for a type is only in the tree at block scope and nothing is emitted
@@ -885,6 +893,56 @@ impl Unit<'_> {
             let symbol = self.names.intern(&spelling);
             self.aliased.insert(symbol);
         }
+    }
+
+    /// Which symbols something in the file uses, before anything is emitted.
+    ///
+    /// By symbol rather than by declaration since a name may be declared more than once, and a
+    /// second name's target counts too. Not a `static` in a function, whose symbol is numbered the
+    /// first time it is asked for and so has to be asked in the order the walk meets it, and which
+    /// is never the symbol of a function declared at file scope anyway.
+    fn find_used(&mut self) {
+        let tast = self.tast;
+        let named: Vec<DeclId> = self.named.iter().copied().collect();
+        let mut used: Set<Symbol> = self.aliased.clone();
+        for decl in named {
+            let node = &tast[decl];
+            let numbered = node.linkage == Linkage::None && node.asm_label.is_none();
+            if node.kind != DeclKind::Type && !numbered {
+                used.insert(self.symbol_of(decl));
+            }
+        }
+        self.used = used;
+    }
+
+    /// Whether a declaration of a function is one nothing in the file uses, which writes nothing.
+    ///
+    /// gcc puts no symbol in the object for one of these, and a header declares thousands of
+    /// them: duktape's files declare about 3000 functions each and call a few dozen. Lowering
+    /// each one and then walking it in every pass over the module was most of what lowering and
+    /// optimizing cost such a file.
+    ///
+    /// What is kept is what something past this point reads off the declaration with no call to
+    /// it. A renamed one says what the library call folds call a standard name in this file, a
+    /// declaration of a name a fold may leave behind says the signature the call has to carry,
+    /// and a weakref, a second name or one the program asked to keep has work of its own below.
+    fn is_unused_prototype(&mut self, decl: DeclId) -> bool {
+        let node = &self.tast[decl];
+        let Some(name) = node.name else { return false };
+        if node.body.is_some()
+            || node.alias.is_some()
+            || node.asm_label.is_some()
+            || node.flags.contains(DeclFlags::RETAINED)
+            || node.flags.contains(DeclFlags::WEAKREF)
+        {
+            return false;
+        }
+        let spelled = self.names.resolve(name);
+        if LIBCALL_REPLACEMENTS.contains(&spelled) || LIBCALL_UNCHECKED.contains(&spelled) {
+            return false;
+        }
+        let symbol = self.symbol_of(decl);
+        !self.used.contains(&symbol)
     }
 
     /// Which names the file gave an assembler name of their own, before anything is emitted.
@@ -2152,14 +2210,7 @@ impl Unit<'_> {
     /// what [`Unit::weak_references`] counts, by symbol rather than by declaration since a name
     /// may be declared more than once, and a second name's target counts too.
     fn unused_weak(&mut self) {
-        let tast = self.tast;
-        let named: Vec<DeclId> = self.named.iter().copied().collect();
-        let mut used: Set<Symbol> = self.aliased.clone();
-        for decl in named {
-            if tast[decl].kind != DeclKind::Type {
-                used.insert(self.symbol_of(decl));
-            }
-        }
+        let used = &self.used;
         for id in self.module.funcs() {
             let func = &mut self.module[id];
             if func.is_declaration()

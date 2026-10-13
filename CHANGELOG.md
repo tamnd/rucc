@@ -4,6 +4,10 @@ All notable changes are recorded here. The format follows [Keep a Changelog](htt
 
 ## Unreleased
 
+### Changed
+
+- Skip lowering of function prototypes nothing uses, which takes 12% of the instructions off duk_replacements.c (294.5M to 259.3M) and lower and optimize from 23 ms to 1.2 ms with every object the same as before (#3601).
+
 ## 0.30.4
 
 This is a patch release. It fixes a regression in 0.30.3 that made the x86-64 Linux kernel fail to boot: an asm output that nothing reads could get the stack pointer, so the kernel's `sync_core` wrote the stack segment into `rsp` and the kernel took a triple fault. The 7.2.8 x86-64 kernel built by rucc boots again. rucc also uses less memory and makes fewer system calls on large headers.
