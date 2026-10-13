@@ -590,7 +590,8 @@ impl Images {
     fn bytes(&self, name: Symbol, offset: u64, size: u64) -> Option<Vec<u8>> {
         let object = self.objects.get(&name)?.as_ref()?;
         let end = offset.checked_add(size)?;
-        if size == 0 || size > 16 || end > object.size {
+        let too_wide = size > 16; // not a threshold: no scalar is wider than 16 bytes.
+        if size == 0 || too_wide || end > object.size {
             return None;
         }
         let mut out = Vec::with_capacity(usize::try_from(size).ok()?);

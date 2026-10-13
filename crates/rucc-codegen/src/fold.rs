@@ -786,7 +786,7 @@ pub fn absolute(func: &mut mir::Func, insts: &FrameInsts, names: &mut Interner) 
 /// the kernel code model, and gives back how many it wrote.
 ///
 /// [`addresses`] hands the address of a name to its readers only when there is one of them, for
-/// the size reason [`fits_every_reader`] gives, and a `lea` it leaves behind becomes `movq $sym` in
+/// the size reason `fits_every_reader` gives, and a `lea` it leaves behind becomes `movq $sym` in
 /// [`absolute`]. Under the kernel model that is not only a different instruction from gcc's, it is a
 /// different address when the code runs somewhere other than where it was linked. gcc reads and
 /// writes a name from the instruction pointer every time, and the kernel's early boot code depends
