@@ -4055,11 +4055,28 @@ impl<'u> Body<'_, 'u> {
         }
 
         let size = repr::size_of(self.types(), self.target(), ty);
-        let mut covered = 0;
+        // The bytes the entries write, each counted once. `{ [0] = v, [0] = w }` writes the first
+        // element twice and the second not at all, and adding the two up said the whole array was
+        // written and left the second element holding whatever the stack held.
+        let mut written: Vec<(u64, u64)> = Vec::new();
         for entry in &entries {
-            covered += self.stored_size(entry);
+            let stored = self.stored_size(entry);
+            if stored > 0 {
+                written.push((entry.offset, entry.offset + stored));
+            }
         }
-        if covered < size {
+        written.sort_unstable();
+        let mut covered = 0;
+        let mut end = 0;
+        for (start, stop) in written {
+            let start = start.max(end);
+            if stop > start {
+                covered += stop - start;
+                end = stop;
+            }
+        }
+        let zeroed = covered < size;
+        if zeroed {
             // What the initializer does not name is zero, and the padding between members is
             // zero as well, which is what makes a partly initialized structure comparable byte
             // for byte with another one.
@@ -4067,7 +4084,27 @@ impl<'u> Body<'_, 'u> {
             let align = repr::align_of(self.types(), self.target(), ty);
             self.memset(slot, 0, size, align, span);
         }
+        // How far into the object the entries so far have written.
+        let mut reached = 0;
         for entry in entries {
+            let (start, end) = self.reach(&entry);
+            let clear = reached <= start;
+            reached = reached.max(end);
+            // A zero written over the fill above writes what is already there. `= { 0 }` names
+            // the first member, and storing it again left a store of one member after a fill of
+            // the whole, which dead store elimination then answered by narrowing the fill to start
+            // past that member, at whatever alignment that left it (tamnd/rucc#3586). An entry an
+            // earlier one wrote over is stored, since `{ [1] = v, [1] = 0 }` keeps both and the
+            // zero is what is left. A volatile object is written as its initializer says.
+            if zeroed
+                && clear
+                && !entry.is_bit_field()
+                && self.zero(entry.value)
+                && !self.is_volatile(ty)
+                && !self.is_volatile(self.tast()[entry.value].ty)
+            {
+                continue;
+            }
             self.store_entry(place, entry, span);
         }
     }
@@ -4234,6 +4271,20 @@ impl<'u> Body<'_, 'u> {
             ExprKind::Str(id) => size.min(tast[id].bytes(self.unit.target).len() as u64),
             _ => size,
         }
+    }
+
+    /// The bytes of the object an entry writes, as a start and an end past it.
+    ///
+    /// A bit-field writes the bytes its bits fall in, and a string literal is counted at the whole
+    /// size of the array it initializes, which is more than it writes and never less.
+    fn reach(&mut self, entry: &InitEntry) -> (u64, u64) {
+        let size = if entry.is_bit_field() {
+            u64::from(entry.bit_offset + entry.bit_width).div_ceil(8)
+        } else {
+            let ty = self.tast()[entry.value].ty;
+            repr::size_of(self.types(), self.target(), ty)
+        };
+        (entry.offset, entry.offset + size)
     }
 
     /// One entry of an initializer, at its offset into the object.
@@ -5425,21 +5476,25 @@ impl<'u> Body<'_, 'u> {
         };
         let ExprKind::CompoundLiteral(decl) = literal else { return false };
         let Some(init) = tast[decl].init else { return false };
-        tast[init].iter().all(|entry| {
-            let mut value = entry.value;
-            while let ExprKind::Convert { operand, .. } | ExprKind::Cast(operand) = tast[value].kind
-            {
-                value = operand;
-            }
-            match tast[value].kind {
-                ExprKind::Const(id) => match tast[id] {
-                    Const::Int(0) => true,
-                    Const::Float(zero) => zero.is_zero() && !zero.is_negative(),
-                    _ => false,
-                },
+        tast[init].iter().all(|entry| self.zero(entry.value))
+    }
+
+    /// Whether `expr` is a constant whose every bit is zero, through any conversions of it, which
+    /// is an integer zero, a null pointer, or a floating zero with no sign.
+    fn zero(&self, expr: ExprId) -> bool {
+        let tast = self.tast();
+        let mut value = expr;
+        while let ExprKind::Convert { operand, .. } | ExprKind::Cast(operand) = tast[value].kind {
+            value = operand;
+        }
+        match tast[value].kind {
+            ExprKind::Const(id) => match tast[id] {
+                Const::Int(0) => true,
+                Const::Float(zero) => zero.is_zero() && !zero.is_negative(),
                 _ => false,
-            }
-        })
+            },
+            _ => false,
+        }
     }
 
     /// A `__builtin_elementwise_*` builtin on one integer, which is one lane of a vector or the

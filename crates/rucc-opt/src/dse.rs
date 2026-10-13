@@ -60,6 +60,10 @@ const TRIMMED: &str = "fill or copy narrowed to the bytes something may still re
 /// Recorded for a store kept because the walk from it reached its limit.
 const TOO_FAR: &str = "store kept, the walk for what reads it reached its limit";
 
+/// The most alignment a narrowed fill or copy keeps at its new start, in bytes, which is the widest
+/// move the block lowering writes one out with.
+const WORD: u32 = 8;
+
 /// Recorded for a store that would have gone or been narrowed if there had been fuel for it.
 const NO_FUEL: &str = "dead store kept, the pass ran out of fuel";
 
@@ -283,12 +287,31 @@ impl Walk<'_> {
         match needed {
             None => Fate::Dead,
             Some((start, end)) if store.bulk && (store.lo < start || end < store.hi) => {
+                // The new start keeps the alignment the old one had, up to a word, so the bytes
+                // the narrowing saves are whole words. A fill of a 64 byte block whose first byte
+                // a store overwrites would otherwise start at an odd address and be written as
+                // eight byte stores none of which is aligned, and a load that later reads across
+                // two of them waits for both to retire rather than taking what they wrote
+                // (tamnd/rucc#3586).
+                let keep = i128::from(self.align(store.inst).clamp(1, WORD));
+                let start = store.lo + (start - store.lo) / keep * keep;
+                if start == store.lo && end == store.hi {
+                    return Fate::Kept;
+                }
                 match (i64::try_from(start - store.lo), u64::try_from(end - start)) {
                     (Ok(skip), Ok(size)) => Fate::Trim { skip, size },
                     _ => Fate::Kept,
                 }
             }
             Some(_) => Fate::Kept,
+        }
+    }
+
+    /// The alignment a fill or a copy says its address has, which is one if it says none.
+    fn align(&self, inst: Inst) -> u32 {
+        match self.func[inst].extra {
+            Extra::Mem(mem) => self.func[mem].align,
+            _ => 1,
         }
     }
 
@@ -540,6 +563,46 @@ block0(%0: ptr):
         assert!(out.contains("size 8, align 8"), "{out}");
         assert!(out.contains("iconst.i64 8"), "eight bytes in, {out}");
         assert!(!out.contains("size 16"), "{out}");
+    }
+
+    /// A fill whose first byte is overwritten keeps its aligned start, since narrowing it by one
+    /// byte would leave every word of it misaligned, and one whose first twelve bytes are
+    /// overwritten loses the first eight and no more.
+    #[test]
+    fn a_fill_narrowed_keeps_its_start_aligned() {
+        let out = cleaned(
+            r#"
+func @f(ptr), linkage(external) {
+block0(%0: ptr):
+    %1 = iconst.i8 0
+    memset %0, %1, size 64, align 8
+    %2 = iconst.i8 7
+    store %2 -> %0, align 8
+    return
+}
+"#,
+        );
+        assert!(out.contains("memset %0, %1, size 64, align 8"), "{out}");
+        assert!(!out.contains("ptr_add"), "{out}");
+
+        let out = cleaned(
+            r#"
+func @f(ptr), linkage(external) {
+block0(%0: ptr):
+    %1 = iconst.i8 0
+    memset %0, %1, size 64, align 16
+    %2 = iconst.i64 7
+    store %2 -> %0, align 16
+    %3 = iconst.i64 4
+    %4 = ptr_add %0, %3
+    %5 = iconst.i64 9
+    store %5 -> %4, align 4
+    return
+}
+"#,
+        );
+        assert!(out.contains("size 56, align 8"), "{out}");
+        assert!(out.contains("iconst.i64 8"), "eight bytes in, {out}");
     }
 
     /// On a 32-bit target the distance is a 32-bit integer, since a 64-bit one is a value i386
