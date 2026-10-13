@@ -1213,8 +1213,8 @@ kind = "attribute"
 gcc_version = "16.0"
 status = "implemented"
 used_by = ["linux"]
-tests = ["rucc/tests/btf_tags.rs"]
-notes = "A string to tag a type with in BPF's type format, which is what the kernel's __user and __rcu are in a BTF build. Checked with gcc 16's rules and messages: one argument, a narrow string literal, and not on a function. The tag is not written into the DWARF yet."
+tests = ["rucc/tests/btf_tags.rs", "rucc/tests/btf_type_tags_dwarf.rs"]
+notes = "A string to tag a type with in BPF's type format, which is what the kernel's __user and __rcu are in a BTF build. Checked with gcc 16's rules and messages: one argument, a narrow string literal, and not on a function. Written into the DWARF as gcc 16 writes it, a tagged copy of each level a tag lands on pointing at a chain of DW_TAG_GNU_annotation entries, and ignored with gcc's warning on a structure, union or enumeration already defined. gcc writes the type of a declaration whose tag it ignored through a typedef without the typedef, and rucc keeps it."
 
 [[feature]]
 name = "fallthrough"

@@ -282,7 +282,7 @@ impl Checker<'_> {
         self.foreign_variadic(ty, span);
         let name = node.name?;
         let specs = self.ast[specs];
-        self.btf_type_tag_on_function(&[specs.attrs], ty);
+        let type_tags = self.btf_type_tags(&specs, node.derived, AttrList::EMPTY, ty);
         if specs.is_typedef() {
             self.report(
                 Diagnostic::error("function definition declared 'typedef'", span)
@@ -417,8 +417,11 @@ impl Checker<'_> {
         };
         let id = self.merge(declared);
         self.record_section(id, section);
-        let tags = self.btf_decl_tags(&[specs.attrs]);
+        let mut lists = self.btf_starred_decl_tags(node.derived);
+        lists.push(specs.attrs);
+        let tags = self.btf_decl_tags(&lists);
         self.tast.record_btf_decl_tags(id, tags);
+        self.tast.record_btf_type_tags(id, type_tags);
         // A function `ifunc` made an indirect function has its body in whatever the resolver
         // picks, so a body here defines it a second time, which is what gcc calls it, whether the
         // attribute is on this definition or on a declaration above it.
@@ -784,12 +787,11 @@ impl Checker<'_> {
         if may!(carried, "flag_enum") {
             self.flag_enum_misplaced(&[specs.attrs, item.attrs], ty);
         }
-        if may!(carried, "btf_type_tag") {
-            self.btf_type_tag_on_function(&[specs.attrs, item.attrs], ty);
-        }
+        let type_tags = self.btf_type_tags(&specs, node.derived, item.attrs, ty);
         if specs.is_typedef() {
             if self.scopes.at_file_scope() {
                 self.types.record_alias_prototypes(name, prototypes);
+                self.tast.record_alias_type_tags(name, type_tags);
             }
             return self.typedef(name, ty, &specs, item, span);
         }
@@ -1058,9 +1060,12 @@ impl Checker<'_> {
         let id = self.merge(declared);
         self.record_section(id, section);
         if may!(carried, "btf_decl_tag") {
-            let tags = self.btf_decl_tags(&[item.attrs, specs.attrs]);
+            let mut lists = self.btf_starred_decl_tags(node.derived);
+            lists.extend([item.attrs, specs.attrs]);
+            let tags = self.btf_decl_tags(&lists);
             self.tast.record_btf_decl_tags(id, tags);
         }
+        self.tast.record_btf_type_tags(id, type_tags);
         // Kept for the debug information, which names the typedef where the program did.
         if let Some((name, of)) = spelled {
             self.tast.record_spelling(id, name, of);

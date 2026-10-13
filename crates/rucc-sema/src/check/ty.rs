@@ -721,6 +721,7 @@ impl Checker<'_> {
         self.read_deprecated_tag(ty, attrs, span);
         self.flag_enum_misplaced(&[attrs], ty);
         self.btf_decl_tag_on_type(attrs);
+        self.btf_tagged_record(id, attrs);
         match again {
             Some(first) => self.redefined(first, ty, span),
             None => ty,
@@ -780,6 +781,7 @@ impl Checker<'_> {
         self.read_deprecated_tag(ty, attrs, span);
         self.read_flag_enum(id, attrs);
         self.btf_decl_tag_on_type(attrs);
+        self.btf_tagged_enum(id, attrs);
         match again {
             Some(first) => self.redefined(first, ty, span),
             None => ty,
@@ -1318,8 +1320,12 @@ impl Checker<'_> {
                 self.tast.record_spelling(decl, name, of);
             }
             if let Some(specs) = param.specs {
-                let tags = self.btf_decl_tags(&[param.attrs, ast[specs].attrs]);
+                let mut lists = self.btf_starred_decl_tags(declarator.derived);
+                lists.extend([param.attrs, ast[specs].attrs]);
+                let tags = self.btf_decl_tags(&lists);
                 self.tast.record_btf_decl_tags(decl, tags);
+                let tags = self.btf_type_tags(&ast[specs], declarator.derived, param.attrs, object);
+                self.tast.record_btf_type_tags(decl, tags);
             }
             // Copied rather than taken, since they are a part of the declarator this prototype
             // is in as well.
