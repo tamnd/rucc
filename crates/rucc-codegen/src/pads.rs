@@ -280,8 +280,19 @@ block3:
         let pad = &text[text.find("landing").expect("the pad is there")..];
         let entry = &text[..text.find("landing").expect("the pad is there")];
         assert!(entry.find("store").unwrap() < entry.find("call @deep").unwrap(), "{text}");
-        assert!(!pad.contains("(%0)") && !pad.contains("(%2)"), "{text}");
-        assert!(pad.contains("call @f(%1)"), "{text}");
+        // The printer numbers the values again, so the names are read from the text. Each call
+        // in the pad and after it reads a load, except the one that reads the constant.
+        let name = |line: &str| line.trim().split(' ').next().unwrap_or_default().to_owned();
+        let constant = text.lines().find(|l| l.contains("iconst")).map(name).unwrap();
+        let loads: Vec<String> = text.lines().filter(|l| l.contains("= load")).map(name).collect();
+        let read: Vec<&str> = pad
+            .lines()
+            .filter_map(|l| l.split("call @f(").nth(1))
+            .map(|rest| rest.split(')').next().unwrap_or_default())
+            .collect();
+        assert_eq!(read.len(), 3, "{text}");
+        assert_eq!(read.iter().filter(|&&r| r == constant).count(), 1, "{text}");
+        assert!(read.iter().all(|r| *r == constant || loads.iter().any(|l| l == r)), "{text}");
     }
 
     /// A function with no pad is left as it was.
