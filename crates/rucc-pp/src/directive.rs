@@ -443,7 +443,15 @@ impl Preprocessor {
                         body.push(header);
                     }
                 }
-                reader.line(cx.interner, &mut body);
+                // In a skipped group only a directive that can end the group reads its line,
+                // since `#elif` may have an expression to evaluate and `#else` and `#endif` may
+                // have extra tokens to warn about. Every other one is dropped by `directive`
+                // before it looks past its name.
+                if was_live || is_alternative(name, names) || name == Some(names.endif) {
+                    reader.line(cx.interner, &mut body);
+                } else {
+                    reader.skip_line(cx.interner);
+                }
                 // The poison line itself is exempt, since naming a poisoned name again is how
                 // a second header says the same thing and gcc lets it.
                 if was_live && !self.is_poison(&body, cx.interner, names) {
@@ -475,8 +483,8 @@ impl Preprocessor {
                 };
             } else {
                 body.clear();
-                reader.line(cx.interner, &mut body);
                 if self.live() {
+                    reader.line(cx.interner, &mut body);
                     // A run of text lines is expanded in one go, and a `_Pragma` is a directive
                     // wearing an operator's clothes: `pop_macro` changes what the names after it
                     // mean. So a line that spells one is expanded on its own, or the line after a
@@ -510,6 +518,9 @@ impl Preprocessor {
                             );
                         }
                     }
+                } else {
+                    // A line of text in a skipped group, which nothing reads.
+                    reader.skip_line(cx.interner);
                 }
                 // A token outside the guard is a token that would be produced twice.
                 if !matches!(scan, Scan::Inside(_)) {

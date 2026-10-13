@@ -143,6 +143,21 @@ impl<'a> Reader<'a> {
         }
     }
 
+    /// Passes over the rest of the current line, for a line in a skipped group whose tokens
+    /// nothing will look at.
+    pub(crate) fn skip_line(&mut self, interner: &mut Interner) {
+        loop {
+            let token = match self.pending.take() {
+                Some(token) => token,
+                None => self.lexer.skip_token(interner),
+            };
+            if token.is_eof() || token.flags.has(TokenFlags::START_OF_LINE) {
+                self.put_back(token);
+                return;
+            }
+        }
+    }
+
     /// Scans a header name here, which only an include directive may ask for.
     ///
     /// `None` when the line does not begin with `<` or `"`, which is the computed include

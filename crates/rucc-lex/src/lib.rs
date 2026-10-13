@@ -555,6 +555,31 @@ mod tests {
     }
 
     #[test]
+    fn a_skipped_token_is_scanned_but_only_interned_when_it_starts_a_line() {
+        // The comment hides the first line ending and the string hides the `/*`, so the line
+        // ends before `#endif` and nowhere earlier.
+        let src = b"skipped /* x\n */ \"/*\" name\n#endif";
+        let mut interner = Interner::new();
+        let mut lexer = Lexer::new(src, 0, Options::new());
+        let before = interner.len();
+        let mut values = Vec::new();
+        let hash = loop {
+            let token = lexer.skip_token(&mut interner);
+            if token.flags.has(TokenFlags::START_OF_LINE) && !values.is_empty() {
+                break token;
+            }
+            values.push((token.kind, token.value));
+        };
+        assert_eq!(values.len(), 3);
+        assert_eq!(values[2], (PpTokenKind::Ident, None));
+        assert_eq!(hash.punct(), Some(Punct::Hash));
+        // The first token started a line, so it was interned. Nothing after it was.
+        assert_eq!(interner.len(), before + 1);
+        let endif = lexer.next_token(&mut interner);
+        assert_eq!(interner.resolve(endif.value.unwrap()), "endif");
+    }
+
+    #[test]
     fn identifiers_are_interned_during_the_scan_and_repeat_for_free() {
         let mut interner = Interner::new();
         let before = interner.len();
