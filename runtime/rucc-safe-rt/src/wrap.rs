@@ -801,14 +801,17 @@ mod tests {
         // A caller whose frame describes a different object than the pointer it passed has either
         // gone wrong already or is describing somebody else, and a refusal must never come out of
         // the second. So the copy goes ahead the way a copy into a local always used to.
-        let mut small = [0_u8; 50];
-        let mut other = [0_u8; 8];
-        let to: *mut c_void = small.as_mut_ptr().cast();
-        let cap = crate::recover::object(
-            other.as_mut_ptr().cast_const().cast(),
-            8,
-            crate::layout::Class::Automatic,
-        );
+        //
+        // Both objects are carved from one array so that the distance between them is fixed. As
+        // two locals they are wherever rustc puts them, and a release build put the fifty bytes
+        // directly after the eight. Then the pointer is one past the end of the other object,
+        // which is still that object's, and the write is refused as one that ran off its end. Here
+        // the eight bytes are first and the fifty start sixteen bytes after them.
+        let mut room = [0_u8; 74];
+        let base: *mut u8 = room.as_mut_ptr();
+        let to: *mut c_void = base.wrapping_add(24).cast();
+        let cap =
+            crate::recover::object(base.cast_const().cast(), 8, crate::layout::Class::Automatic);
         assert!(!handed(&[cap], || {
             // SAFETY: twenty bytes into fifty.
             let _ = unsafe { memset(to, 0, 20) };
