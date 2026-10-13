@@ -15,16 +15,17 @@
 //!
 //! One step per macro traversed, each pointing at the step outside it, so the chain is a linked
 //! list running inwards out. Expansion goes the other way, outermost macro first, so a step is
-//! built pointing at the one already there. Steps are interned on their contents, and that is
-//! what makes this affordable: every token of one replacement list has the same name, the same
-//! invocation and the same chain above it, so they all intern to one step. A hundred token
-//! replacement list adds one node, not a hundred.
+//! built pointing at the one already there. What makes this affordable is that every token of one
+//! replacement list has the same name, the same invocation and the same chain above it, so the
+//! expansion gives them all one step. A hundred token replacement list adds one node, not a
+//! hundred. Steps are not shared between expansions: two with the same name, place and chain
+//! above them read the same in a diagnostic either way, and the table that found them cost a
+//! hash for every expansion in the translation unit. tamnd/rucc#3052.
 //!
 //! There is one table per translation unit, so a [`TraceId`] from one is meaningless in
 //! another, the same rule the hide sets follow.
 
 use rucc_base::Symbol;
-use rucc_base::hash::Map;
 use rucc_diag::Span;
 
 /// A pointer into a [`Traces`] table, or [`TraceId::NONE`] for a token the user wrote.
@@ -63,14 +64,13 @@ pub struct Step {
     pub outer: TraceId,
 }
 
-/// The interning table for expansion traces.
+/// The table of expansion traces.
 #[derive(Debug, Default)]
 pub struct Traces {
     /// Every distinct step. A [`TraceId`] of `n` is `steps[n - 1]`, so that zero can mean no
     /// expansion without a placeholder entry that has to be built out of a `Symbol` nobody
     /// has yet.
     steps: Vec<Step>,
-    map: Map<Step, TraceId>,
 }
 
 impl Traces {
@@ -82,13 +82,11 @@ impl Traces {
     /// Records that `macro_name`, invoked at `at`, was reached from `outer`.
     ///
     /// The result is the trace the tokens it produces should carry. Expansion works outermost
-    /// macro first, so the chain above a step is always already interned by the time the step
-    /// is, and the list grows inwards.
+    /// macro first, so the chain above a step is always already recorded by the time the step
+    /// is, and the list grows inwards. Every call makes a new step, so a caller that has the
+    /// same one to record for many tokens records it once and hands the result to all of them.
     pub fn push(&mut self, macro_name: Symbol, at: Span, outer: TraceId) -> TraceId {
         let step = Step { macro_name, at, outer };
-        if let Some(&found) = self.map.get(&step) {
-            return found;
-        }
         // Saturating rather than wrapping. A translation unit with four billion distinct
         // expansion steps has stopped being a translation unit, and reusing an index would
         // point a diagnostic at a macro that has nothing to do with it.
@@ -97,7 +95,6 @@ impl Traces {
         };
         let id = TraceId(next);
         self.steps.push(step);
-        self.map.insert(step, id);
         id
     }
 
@@ -109,7 +106,7 @@ impl Traces {
 
     /// The chain from the outermost macro inwards, which is the order a reader wants it.
     ///
-    /// The list points the other way, because a step can only be interned once the chain above
+    /// The list points the other way, because a step can only be recorded once the chain above
     /// it exists, so this walks it and reverses. Chains are a handful of steps long in the
     /// worst real case, so the allocation is not worth avoiding.
     #[must_use]
@@ -175,19 +172,18 @@ mod tests {
     }
 
     #[test]
-    fn the_same_step_twice_is_stored_once() {
-        // The reason this is affordable. Every token of one replacement list arrives here with
-        // the same name, the same invocation and the same chain above it.
+    fn the_same_step_twice_reads_the_same() {
+        // Two expansions of one macro at one place with one chain above, which is a header
+        // reached twice. They are two steps, and a diagnostic cannot tell them apart.
         let (_interner, cat_name, _) = names();
         let mut traces = Traces::new();
         let first = traces.push(cat_name, span(20), TraceId::NONE);
         let second = traces.push(cat_name, span(20), TraceId::NONE);
-        assert_eq!(first, second);
-        assert_eq!(traces.steps.len(), 1);
-        // A different chain above is a different step, even for the same macro at the same
+        assert_ne!(first, second);
+        assert_eq!(traces.chain(first), traces.chain(second));
+        // A different chain above reads differently, even for the same macro at the same
         // place, because the same header can be reached two ways.
         let third = traces.push(cat_name, span(20), first);
-        assert_ne!(third, first);
         assert_eq!(traces.chain(third).len(), 2);
     }
 

@@ -572,10 +572,13 @@ impl<'a> Run<'a> {
         let substituted = self.subst_list(def, args, &body, invocation);
         self.current = outer;
         let mut os = drop_placemarkers(substituted);
-        // The step each trace the tokens came with was last given, since a replacement list is
-        // mostly tokens of the body, which all came with the invocation's, and looking the same
-        // step up for each of them was a hash for every token. tamnd/rucc#3052.
-        let mut last = (invocation.trace, here);
+        // The steps this expansion has made, by the trace the tokens came with. The body has
+        // the invocation's, which is `here`, and each argument has its own, so a few cover an
+        // ordinary call, and `x * x` gives both uses of `x` the same step. Past the few a trace
+        // just gets another step that reads the same. tamnd/rucc#3052.
+        let mut made = [(invocation.trace, here); 8];
+        let mut len = 1;
+        let mut last = made[0];
         for tok in &mut os {
             tok.hides = self.hides.union(tok.hides, hs);
             // The outermost invocation wins, because substitution of the outer macro runs
@@ -583,11 +586,21 @@ impl<'a> Run<'a> {
             // wrote and the line a diagnostic should point at.
             tok.expansion = invocation.report_span();
             // The trace keeps what `expansion` throws away. Every token here already carries
-            // the chain above this macro, so this records one step inside it, and the interning
+            // the chain above this macro, so this records one step inside it, and `made`
             // means the whole replacement list usually shares one node.
             if let Some(name) = name {
                 if tok.trace != last.0 {
-                    last = (tok.trace, self.traces.push(name, invocation.span, tok.trace));
+                    last = match made[..len].iter().find(|m| m.0 == tok.trace) {
+                        Some(&m) => m,
+                        None => {
+                            let m = (tok.trace, self.traces.push(name, invocation.span, tok.trace));
+                            if len < made.len() {
+                                made[len] = m;
+                                len += 1;
+                            }
+                            m
+                        }
+                    };
                 }
                 tok.trace = last.1;
             }
