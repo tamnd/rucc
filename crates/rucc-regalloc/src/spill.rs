@@ -174,6 +174,11 @@ fn trade(
 ) {
     let mut sent: Vec<usize> = (0..candidates.len()).filter(|&one| gone[one]).collect();
     sent.sort_by_key(|&one| Reverse(candidates[one].cost));
+    // Every value lightest first, the order the values beside each one are taken in. Sorting the
+    // values beside each value that went was most of this on a long function, and the order of
+    // any of them is the order they have here. tamnd/rucc#3052.
+    let mut ranked: Vec<usize> = (0..candidates.len()).collect();
+    ranked.sort_by_key(|&other| (candidates[other].weight, Reverse(candidates[other].size)));
     // Every point of every value that went, and every value beside it at each, is a lot of work on
     // a long function, so it stops once it has asked this many times whether a value covers a
     // point.
@@ -185,10 +190,13 @@ fn trade(
             .flat_map(|piece| piece.start..=piece.end)
             .filter(|&point| pressure.excess(class, point) > 0)
             .collect();
-        let mut beside: Vec<usize> = (0..candidates.len())
-            .filter(|&other| !gone[other] && candidates[other].area.overlaps(value.area))
-            .collect();
-        beside.sort_by_key(|&other| (candidates[other].weight, Reverse(candidates[other].size)));
+        let beside: Vec<usize> = if over.is_empty() {
+            Vec::new()
+        } else {
+            (ranked.iter().copied())
+                .filter(|&other| !gone[other] && candidates[other].area.overlaps(value.area))
+                .collect()
+        };
         let mut instead = Vec::new();
         let mut spent = 0;
         'points: for point in over {
