@@ -12,6 +12,10 @@ rustflags = ["-C", "target-feature=+crt-static"]
 # A position dependent executable on x86_64 Linux, so that nothing is relocated when it starts.
 # As a position independent one the loader wrote all 1.8 MiB of `.data.rel.ro`, 61292 pointers,
 # before `main`, which was about 450 pages copied and more than half of what an empty file costs
-# to compile. tamnd/rucc#3052.
+# to compile. The static musl binary did the same to itself before `main`, so it is a plain static
+# executable rather than a static PIE. tamnd/rucc#3052.
 [target.x86_64-unknown-linux-gnu]
+rustflags = ["-C", "relocation-model=static"]
+
+[target.x86_64-unknown-linux-musl]
 rustflags = ["-C", "relocation-model=static"]
