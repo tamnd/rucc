@@ -2,9 +2,10 @@
 //!
 //! Design: `spec/08-ir.md` sections 8.1 and 8.6.
 //!
-//! One [`Func`] owns everything in it. Nothing is boxed and nothing is individually freed: the
-//! instructions are a flat vector, a reference to one is a four-byte index, and the whole
-//! function is dropped in one go. The same shape as the AST, for the same reasons.
+//! One [`Func`] owns everything in it. Nothing is individually freed: the instructions are a flat
+//! vector, a reference to one is a four-byte index, and the whole function is dropped in one go.
+//! The same shape as the AST, for the same reasons. The side tables are behind one pointer, so
+//! that a declaration does not carry them.
 //!
 //! Two things are not flat, and both for the same reason, which is that SSA construction
 //! finishes a loop header long after it has built the blocks inside the loop.
@@ -26,6 +27,7 @@
 //! the useful question is whether it still does when the pass that was building it says it has
 //! finished.
 
+use std::hash::BuildHasherDefault;
 use std::ops::{Index, IndexMut};
 
 use rucc_base::hash::{Map, Set};
@@ -178,11 +180,28 @@ pub struct Func {
     mem: Vec<MemInfo>,
     calls: Vec<CallInfo>,
     abis: Vec<Abi>,
+    signatures: Vec<Signature>,
+    /// The side tables, which a declaration has none of.
+    body: Lazy,
+
+    first_block: Option<Block>,
+    last_block: Option<Block>,
+}
+
+/// The side tables of a function's body, the ones a pass reaches for now and then rather than on
+/// every instruction, kept behind a pointer so that a declaration, which has none of them, is small.
+///
+/// A header like duktape's declares a few thousand functions a file calls none of, and each one
+/// is a [`Func`] in the module. With these inline that was about 900 bytes apiece, a few megabytes
+/// of fresh pages for a file with nothing in it. The tables every instruction touches stay inline,
+/// because a pointer in front of them cost a body-heavy file five percent more instructions.
+/// tamnd/rucc#3052.
+#[derive(Clone, Debug, Default)]
+struct Body {
     switches: Vec<SwitchInfo>,
     asms: Vec<AsmInfo>,
     slots: Vec<Slot>,
     va_objects: Vec<VaInfo>,
-    signatures: Vec<Signature>,
     facts: Vec<(Value, Facts)>,
     labels: Vec<(Block, Symbol)>,
     mem_decls: Vec<(Idx<MemInfo>, u32)>,
@@ -209,9 +228,53 @@ pub struct Func {
     /// Other instructions that compute a value, for instruction selection to choose from. See
     /// [`Func::forms`].
     forms: Map<Value, Vec<Inst>>,
+}
 
-    first_block: Option<Block>,
-    last_block: Option<Block>,
+/// What every declaration reads its tables from, all of them empty.
+static EMPTY: Body = Body {
+    switches: Vec::new(),
+    asms: Vec::new(),
+    slots: Vec::new(),
+    va_objects: Vec::new(),
+    facts: Vec::new(),
+    labels: Vec::new(),
+    mem_decls: Vec::new(),
+    value_decls: Vec::new(),
+    param_decls: Vec::new(),
+    value_starts: Vec::new(),
+    anchors: Set::with_hasher(BuildHasherDefault::new()),
+    unplaced: Map::with_hasher(BuildHasherDefault::new()),
+    arg_groups: Map::with_hasher(BuildHasherDefault::new()),
+    gone: Map::with_hasher(BuildHasherDefault::new()),
+    forms: Map::with_hasher(BuildHasherDefault::new()),
+};
+
+/// A [`Body`] that is only made when something is written to it. Reading one that was never made
+/// reads [`EMPTY`], so a declaration answers every question about its body the way an empty body
+/// would.
+#[derive(Clone, Default)]
+struct Lazy(Option<Box<Body>>);
+
+impl std::ops::Deref for Lazy {
+    type Target = Body;
+
+    #[inline]
+    fn deref(&self) -> &Body {
+        self.0.as_deref().unwrap_or(&EMPTY)
+    }
+}
+
+impl std::ops::DerefMut for Lazy {
+    #[inline]
+    fn deref_mut(&mut self) -> &mut Body {
+        self.0.get_or_insert_with(Box::default)
+    }
+}
+
+impl std::fmt::Debug for Lazy {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        Body::fmt(self, f)
+    }
 }
 
 impl Func {
@@ -251,22 +314,8 @@ impl Func {
             mem: Vec::new(),
             calls: Vec::new(),
             abis: Vec::new(),
-            switches: Vec::new(),
-            asms: Vec::new(),
-            slots: Vec::new(),
-            va_objects: Vec::new(),
             signatures: vec![signature],
-            facts: Vec::new(),
-            labels: Vec::new(),
-            mem_decls: Vec::new(),
-            value_decls: Vec::new(),
-            param_decls: Vec::new(),
-            value_starts: Vec::new(),
-            anchors: Set::default(),
-            unplaced: Map::default(),
-            arg_groups: Map::default(),
-            gone: Map::default(),
-            forms: Map::default(),
+            body: Lazy(None),
             first_block: None,
             last_block: None,
         }
@@ -486,7 +535,7 @@ impl Func {
         let data = &self[inst];
         match data.extra {
             Extra::Asm(info) => {
-                data.opcode.is_terminator() || !self.asms[info.index()].targets.is_empty()
+                data.opcode.is_terminator() || !self.body.asms[info.index()].targets.is_empty()
             }
             _ => data.opcode.is_terminator(),
         }
@@ -669,9 +718,9 @@ impl Func {
         // after the instruction that was in front of it for a pass that is deleting it, which is the
         // same place: nothing was between the two but this. Which of the two it is is not known
         // yet, so the second answer is kept and [`Func::start_place`] asks in that order.
-        if self.anchors.contains(&inst) {
-            self.gone.insert(inst, (block, at.prev));
-            self.anchors.extend(at.prev);
+        if self.body.anchors.contains(&inst) {
+            self.body.gone.insert(inst, (block, at.prev));
+            self.body.anchors.extend(at.prev);
         }
         // A declaration that held a result of this instruction was given it here, and once the
         // instruction is gone nothing else says where that was. So it becomes a start at the same
@@ -686,7 +735,7 @@ impl Func {
             }
         }
         if !made.is_empty() {
-            self.unplaced.insert(inst, made);
+            self.body.unplaced.insert(inst, made);
         }
     }
 
@@ -869,8 +918,8 @@ impl Func {
     pub fn target_list(&self, inst: Inst) -> BlockCallList {
         match self[inst].extra {
             Extra::Targets(targets) => targets,
-            Extra::Switch(info) => self.switches[info.index()].targets,
-            Extra::Asm(info) => self.asms[info.index()].targets,
+            Extra::Switch(info) => self.body.switches[info.index()].targets,
+            Extra::Asm(info) => self.body.asms[info.index()].targets,
             _ => BlockCallList::EMPTY,
         }
     }
@@ -952,15 +1001,15 @@ impl Func {
 
     /// Records where each eightbyte of an object travelled.
     pub fn push_slots(&mut self, slots: &[Slot]) -> SlotList {
-        let start = Idx::from_usize(self.slots.len());
-        self.slots.extend_from_slice(slots);
-        SlotList::new(start, Idx::from_usize(self.slots.len()))
+        let start = Idx::from_usize(self.body.slots.len());
+        self.body.slots.extend_from_slice(slots);
+        SlotList::new(start, Idx::from_usize(self.body.slots.len()))
     }
 
     /// Records an object read off a variable argument list.
     pub fn add_va_object(&mut self, info: VaInfo) -> Idx<VaInfo> {
-        self.va_objects.push(info);
-        Idx::from_usize(self.va_objects.len() - 1)
+        self.body.va_objects.push(info);
+        Idx::from_usize(self.body.va_objects.len() - 1)
     }
 
     /// Records what an access does.
@@ -994,7 +1043,7 @@ impl Func {
 
     /// Says how many of a call's arguments each C argument became, in order.
     pub fn set_arg_groups(&mut self, call: Inst, groups: Vec<u32>) {
-        self.arg_groups.insert(call, groups);
+        self.body.arg_groups.insert(call, groups);
     }
 
     /// How many of a call's arguments each C argument became, where the lowering said.
@@ -1003,19 +1052,19 @@ impl Func {
     /// might forward the arguments of. See [`Func::set_arg_groups`].
     #[must_use]
     pub fn arg_groups(&self, call: Inst) -> Option<&[u32]> {
-        self.arg_groups.get(&call).map(Vec::as_slice)
+        self.body.arg_groups.get(&call).map(Vec::as_slice)
     }
 
     /// Records a `switch`'s targets and case values.
     pub fn add_switch(&mut self, info: SwitchInfo) -> Idx<SwitchInfo> {
-        self.switches.push(info);
-        Idx::from_usize(self.switches.len() - 1)
+        self.body.switches.push(info);
+        Idx::from_usize(self.body.switches.len() - 1)
     }
 
     /// Records an inline assembly instruction's template and constraints.
     pub fn add_asm(&mut self, info: AsmInfo) -> Idx<AsmInfo> {
-        self.asms.push(info);
-        Idx::from_usize(self.asms.len() - 1)
+        self.body.asms.push(info);
+        Idx::from_usize(self.body.asms.len() - 1)
     }
 
     /// How many values, instructions and blocks there are, for a reader that wants to size
@@ -1032,8 +1081,8 @@ impl Func {
     /// the same size it was before facts existed.
     #[must_use]
     pub fn facts(&self, value: Value) -> Facts {
-        match self.facts.binary_search_by_key(&value.raw(), |&(at, _)| at.raw()) {
-            Ok(at) => self.facts[at].1,
+        match self.body.facts.binary_search_by_key(&value.raw(), |&(at, _)| at.raw()) {
+            Ok(at) => self.body.facts[at].1,
             Err(_) => Facts::NONE,
         }
     }
@@ -1043,18 +1092,18 @@ impl Func {
     /// Setting [`Facts::NONE`] takes the value back out of the table, which is what keeps the
     /// table empty in a function that has had facts put on and then taken off again.
     pub fn set_facts(&mut self, value: Value, facts: Facts) {
-        let found = self.facts.binary_search_by_key(&value.raw(), |&(at, _)| at.raw());
+        let found = self.body.facts.binary_search_by_key(&value.raw(), |&(at, _)| at.raw());
         match (found, facts.is_empty()) {
-            (Ok(at), true) => drop(self.facts.remove(at)),
-            (Ok(at), false) => self.facts[at].1 = facts,
+            (Ok(at), true) => drop(self.body.facts.remove(at)),
+            (Ok(at), false) => self.body.facts[at].1 = facts,
             (Err(_), true) => {}
-            (Err(at), false) => self.facts.insert(at, (value, facts)),
+            (Err(at), false) => self.body.facts.insert(at, (value, facts)),
         }
     }
 
     /// Every value something is known about, in value order.
     pub fn known(&self) -> impl Iterator<Item = (Value, Facts)> + '_ {
-        self.facts.iter().copied()
+        self.body.facts.iter().copied()
     }
 
     /// Records that an instruction computes the same value as the one that does, for instruction
@@ -1068,7 +1117,7 @@ impl Func {
     ///
     /// Says whether the form is new, since the same one may be found from more than one value.
     pub fn add_form(&mut self, value: Value, form: Inst) -> bool {
-        let forms = self.forms.entry(value).or_default();
+        let forms = self.body.forms.entry(value).or_default();
         let new = !forms.contains(&form);
         if new {
             forms.push(form);
@@ -1090,7 +1139,7 @@ impl Func {
             Def::Result { inst, .. } => Some(inst),
             Def::Param { .. } => None,
         };
-        let recorded = def.and_then(|_| self.forms.get(&value));
+        let recorded = def.and_then(|_| self.body.forms.get(&value));
         recorded
             .into_iter()
             .flatten()
@@ -1130,24 +1179,24 @@ impl Func {
     /// answer. Nothing outside this table ever sees the name, which is why it may be anything the
     /// object format lets a local symbol be called.
     pub fn name_block(&mut self, block: Block, name: Symbol) {
-        let found = self.labels.binary_search_by_key(&block.raw(), |&(at, _)| at.raw());
+        let found = self.body.labels.binary_search_by_key(&block.raw(), |&(at, _)| at.raw());
         if let Err(at) = found {
-            self.labels.insert(at, (block, name));
+            self.body.labels.insert(at, (block, name));
         }
     }
 
     /// The name a block was given, or `None` for a block nothing took the address of.
     #[must_use]
     pub fn block_name(&self, block: Block) -> Option<Symbol> {
-        match self.labels.binary_search_by_key(&block.raw(), |&(at, _)| at.raw()) {
-            Ok(at) => Some(self.labels[at].1),
+        match self.body.labels.binary_search_by_key(&block.raw(), |&(at, _)| at.raw()) {
+            Ok(at) => Some(self.body.labels[at].1),
             Err(_) => None,
         }
     }
 
     /// Every block that has a name, in block order.
     pub fn named_blocks(&self) -> impl Iterator<Item = (Block, Symbol)> + '_ {
-        self.labels.iter().copied()
+        self.body.labels.iter().copied()
     }
 
     /// Says which declaration in the source a piece of memory was made for, which is how a build
@@ -1168,18 +1217,21 @@ impl Func {
     /// name a debugger may ask about. They are kept in the order they were asked for, and asking
     /// twice for the same one records it once.
     pub fn declare_mem(&mut self, mem: Idx<MemInfo>, decl: u32) {
-        let end = self.mem_decls.partition_point(|&(at, _)| at.raw() <= mem.raw());
-        let start = self.mem_decls.partition_point(|&(at, _)| at.raw() < mem.raw());
-        if !self.mem_decls[start..end].iter().any(|&(_, known)| known == decl) {
-            self.mem_decls.insert(end, (mem, decl));
+        let end = self.body.mem_decls.partition_point(|&(at, _)| at.raw() <= mem.raw());
+        let start = self.body.mem_decls.partition_point(|&(at, _)| at.raw() < mem.raw());
+        if !self.body.mem_decls[start..end].iter().any(|&(_, known)| known == decl) {
+            self.body.mem_decls.insert(end, (mem, decl));
         }
     }
 
     /// The declarations a piece of memory was made for, which is none for memory no declaration in
     /// the source asked for, which is every temporary and every spill.
     pub fn mem_decls(&self, mem: Idx<MemInfo>) -> impl Iterator<Item = u32> + '_ {
-        let start = self.mem_decls.partition_point(|&(at, _)| at.raw() < mem.raw());
-        self.mem_decls[start..].iter().take_while(move |&&(at, _)| at == mem).map(|&(_, decl)| decl)
+        let start = self.body.mem_decls.partition_point(|&(at, _)| at.raw() < mem.raw());
+        self.body.mem_decls[start..]
+            .iter()
+            .take_while(move |&&(at, _)| at == mem)
+            .map(|&(_, decl)| decl)
     }
 
     /// Says which declaration in the source a value is a value of, which is the other half of
@@ -1200,9 +1252,10 @@ impl Func {
     /// knows and the IR does not.
     pub fn declare_value(&mut self, value: Value, decl: u32) {
         let key = (value.raw(), decl);
-        let found = self.value_decls.binary_search_by_key(&key, |&(at, decl)| (at.raw(), decl));
+        let found =
+            self.body.value_decls.binary_search_by_key(&key, |&(at, decl)| (at.raw(), decl));
         if let Err(at) = found {
-            self.value_decls.insert(at, (value, decl));
+            self.body.value_decls.insert(at, (value, decl));
         }
     }
 
@@ -1213,9 +1266,10 @@ impl Func {
     /// does a value that went to the declaration from a place, through [`Func::rename_value`]. A
     /// parameter that is here has the value it arrived with at every address of the function.
     pub fn only_value(&self, decl: u32, value: Value) -> bool {
-        let unplaced = self.unplaced.values().flatten();
-        self.value_decls.iter().all(|&(held, at)| at != decl || held == value)
+        let unplaced = self.body.unplaced.values().flatten();
+        self.body.value_decls.iter().all(|&(held, at)| at != decl || held == value)
             && self
+                .body
                 .value_starts
                 .iter()
                 .chain(unplaced)
@@ -1228,8 +1282,8 @@ impl Func {
     /// temporary an expression needed, every address computed on the way to a member, and every
     /// result of a rule the peephole applied.
     pub fn value_decls(&self, value: Value) -> impl Iterator<Item = u32> + '_ {
-        let at = self.value_decls.partition_point(|&(held, _)| held.raw() < value.raw());
-        self.value_decls[at..]
+        let at = self.body.value_decls.partition_point(|&(held, _)| held.raw() < value.raw());
+        self.body.value_decls[at..]
             .iter()
             .take_while(move |&&(held, _)| held == value)
             .map(|&(_, decl)| decl)
@@ -1247,17 +1301,18 @@ impl Func {
     /// turns the pair into a place in the frame.
     pub fn declare_param(&mut self, param: Value, decl: u32) {
         let key = (param.raw(), decl);
-        let found = self.param_decls.binary_search_by_key(&key, |&(at, decl)| (at.raw(), decl));
+        let found =
+            self.body.param_decls.binary_search_by_key(&key, |&(at, decl)| (at.raw(), decl));
         if let Err(at) = found {
-            self.param_decls.insert(at, (param, decl));
+            self.body.param_decls.insert(at, (param, decl));
         }
     }
 
     /// Every declaration that lives in the bytes a parameter points at, which is none for every
     /// parameter but the ones [`Func::declare_param`] was told about.
     pub fn param_decls(&self, param: Value) -> impl Iterator<Item = u32> + '_ {
-        let at = self.param_decls.partition_point(|&(held, _)| held.raw() < param.raw());
-        self.param_decls[at..]
+        let at = self.body.param_decls.partition_point(|&(held, _)| held.raw() < param.raw());
+        self.body.param_decls[at..]
             .iter()
             .take_while(move |&&(held, _)| held == param)
             .map(|&(_, decl)| decl)
@@ -1297,16 +1352,18 @@ impl Func {
                 }
             }
         }
-        let at = self.value_decls.partition_point(|&(held, _)| held.raw() < from.raw());
-        let end = at + self.value_decls[at..].iter().take_while(|&&(held, _)| held == from).count();
-        let moving: Vec<u32> = self.value_decls.drain(at..end).map(|(_, decl)| decl).collect();
+        let at = self.body.value_decls.partition_point(|&(held, _)| held.raw() < from.raw());
+        let end =
+            at + self.body.value_decls[at..].iter().take_while(|&&(held, _)| held == from).count();
+        let moving: Vec<u32> = self.body.value_decls.drain(at..end).map(|(_, decl)| decl).collect();
         for decl in moving {
             self.declare_value(to, decl);
         }
-        let at = self.value_starts.partition_point(|&(held, _)| held.raw() < from.raw());
+        let at = self.body.value_starts.partition_point(|&(held, _)| held.raw() < from.raw());
         let end =
-            at + self.value_starts[at..].iter().take_while(|&&(held, _)| held == from).count();
-        let moving: Vec<Start> = self.value_starts.drain(at..end).map(|(_, start)| start).collect();
+            at + self.body.value_starts[at..].iter().take_while(|&&(held, _)| held == from).count();
+        let moving: Vec<Start> =
+            self.body.value_starts.drain(at..end).map(|(_, start)| start).collect();
         for start in moving {
             self.declare_value_from(to, start);
         }
@@ -1325,23 +1382,23 @@ impl Func {
     /// taken out takes its starts with it, and the back end reads those as saying nothing rather
     /// than guess. See [`Func::start_place`].
     pub fn declare_value_from(&mut self, value: Value, start: Start) {
-        let at = self.value_starts.partition_point(|&(held, _)| held.raw() <= value.raw());
-        if !self.value_starts[..at]
+        let at = self.body.value_starts.partition_point(|&(held, _)| held.raw() <= value.raw());
+        if !self.body.value_starts[..at]
             .iter()
             .rev()
             .take_while(|&&(held, _)| held == value)
             .any(|&(_, have)| have == start)
         {
-            self.value_starts.insert(at, (value, start));
-            self.anchors.extend(start.after);
+            self.body.value_starts.insert(at, (value, start));
+            self.body.anchors.extend(start.after);
         }
     }
 
     /// Every place a declaration starts holding a value part of the way through, in the order they
     /// were said. See [`Func::declare_value_from`].
     pub fn value_starts(&self, value: Value) -> impl Iterator<Item = Start> + '_ {
-        let at = self.value_starts.partition_point(|&(held, _)| held.raw() < value.raw());
-        self.value_starts[at..]
+        let at = self.body.value_starts.partition_point(|&(held, _)| held.raw() < value.raw());
+        self.body.value_starts[at..]
             .iter()
             .take_while(move |&&(held, _)| held == value)
             .map(|&(_, start)| start)
@@ -1358,16 +1415,17 @@ impl Func {
         if from == into {
             return;
         }
-        let at = self.value_starts.partition_point(|&(held, _)| held.raw() < from.raw());
+        let at = self.body.value_starts.partition_point(|&(held, _)| held.raw() < from.raw());
         let end =
-            at + self.value_starts[at..].iter().take_while(|&&(held, _)| held == from).count();
+            at + self.body.value_starts[at..].iter().take_while(|&&(held, _)| held == from).count();
         let (moving, staying): (Vec<Start>, Vec<Start>) = self
+            .body
             .value_starts
             .drain(at..end)
             .map(|(_, start)| start)
             .partition(|start| which.contains(start));
-        let at = self.value_starts.partition_point(|&(held, _)| held.raw() < from.raw());
-        self.value_starts.splice(at..at, staying.into_iter().map(|start| (from, start)));
+        let at = self.body.value_starts.partition_point(|&(held, _)| held.raw() < from.raw());
+        self.body.value_starts.splice(at..at, staying.into_iter().map(|start| (from, start)));
         for start in moving {
             self.declare_value_from(into, start);
         }
@@ -1382,10 +1440,10 @@ impl Func {
     /// front of the definition or the top of the block, so what the declaration holds and from
     /// where is unchanged, and it now survives the value being renamed to one computed earlier.
     fn held_from(&mut self, value: Value, block: Block, after: Option<Inst>) -> Vec<u32> {
-        let at = self.value_decls.partition_point(|&(held, _)| held.raw() < value.raw());
+        let at = self.body.value_decls.partition_point(|&(held, _)| held.raw() < value.raw());
         let end =
-            at + self.value_decls[at..].iter().take_while(|&&(held, _)| held == value).count();
-        let moving: Vec<u32> = self.value_decls.drain(at..end).map(|(_, decl)| decl).collect();
+            at + self.body.value_decls[at..].iter().take_while(|&&(held, _)| held == value).count();
+        let moving: Vec<u32> = self.body.value_decls.drain(at..end).map(|(_, decl)| decl).collect();
         for &decl in &moving {
             self.declare_value_from(value, Start { decl, block, after });
         }
@@ -1395,20 +1453,20 @@ impl Func {
     /// Turns the starts [`Func::remove_inst`] made for an instruction back into names, now that it
     /// is in a block again.
     fn placed(&mut self, inst: Inst) {
-        if self.unplaced.is_empty() {
+        if self.body.unplaced.is_empty() {
             return;
         }
-        let Some(made) = self.unplaced.remove(&inst) else { return };
+        let Some(made) = self.body.unplaced.remove(&inst) else { return };
         for (value, start) in made {
-            let at = self.value_starts.partition_point(|&(held, _)| held.raw() < value.raw());
-            let found = self.value_starts[at..]
+            let at = self.body.value_starts.partition_point(|&(held, _)| held.raw() < value.raw());
+            let found = self.body.value_starts[at..]
                 .iter()
                 .take_while(|&&(held, _)| held == value)
                 .position(|&(_, have)| have == start);
             // Gone when a pass renamed the value away before putting the instruction back, and
             // then the name went with the readers and is not this value's to have back.
             if let Some(found) = found {
-                self.value_starts.remove(at + found);
+                self.body.value_starts.remove(at + found);
                 self.declare_value(value, start.decl);
             }
         }
@@ -1432,7 +1490,7 @@ impl Func {
             if let Some(now) = self.block_of(inst) {
                 return Some((now, Some(inst)));
             }
-            (block, after) = *self.gone.get(&inst)?;
+            (block, after) = *self.body.gone.get(&inst)?;
         }
     }
 
@@ -1443,18 +1501,19 @@ impl Func {
     /// have gone in behind it, or the top of `into` for `None`, and nothing else can say that,
     /// because the block the start was in is about to stop being one.
     pub fn carry_starts(&mut self, from: Block, into: Block, after: Option<Inst>) {
-        let unplaced = self.unplaced.values_mut().flatten().map(|(_, start)| start);
-        for start in self.value_starts.iter_mut().map(|(_, start)| start).chain(unplaced) {
+        let body = &mut *self.body;
+        let unplaced = body.unplaced.values_mut().flatten().map(|(_, start)| start);
+        for start in body.value_starts.iter_mut().map(|(_, start)| start).chain(unplaced) {
             if start.block == from && start.after.is_none() {
                 *start = Start { block: into, after, ..*start };
             }
         }
-        for place in self.gone.values_mut() {
+        for place in self.body.gone.values_mut() {
             if *place == (from, None) {
                 *place = (into, after);
             }
         }
-        self.anchors.extend(after);
+        self.body.anchors.extend(after);
     }
 
     fn add_value(&mut self, data: ValueData) -> Value {
@@ -1590,7 +1649,7 @@ impl Index<SlotList> for Func {
     type Output = [Slot];
 
     fn index(&self, list: SlotList) -> &[Slot] {
-        &self.slots[list.as_usize_range()]
+        &self.body.slots[list.as_usize_range()]
     }
 }
 
@@ -1598,7 +1657,7 @@ impl Index<Idx<VaInfo>> for Func {
     type Output = VaInfo;
 
     fn index(&self, at: Idx<VaInfo>) -> &VaInfo {
-        &self.va_objects[at.index()]
+        &self.body.va_objects[at.index()]
     }
 }
 
@@ -1614,7 +1673,7 @@ impl Index<Idx<SwitchInfo>> for Func {
     type Output = SwitchInfo;
 
     fn index(&self, at: Idx<SwitchInfo>) -> &SwitchInfo {
-        &self.switches[at.index()]
+        &self.body.switches[at.index()]
     }
 }
 
@@ -1622,7 +1681,7 @@ impl Index<Idx<AsmInfo>> for Func {
     type Output = AsmInfo;
 
     fn index(&self, at: Idx<AsmInfo>) -> &AsmInfo {
-        &self.asms[at.index()]
+        &self.body.asms[at.index()]
     }
 }
 

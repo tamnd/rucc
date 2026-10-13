@@ -4,6 +4,10 @@ All notable changes are recorded here. The format follows [Keep a Changelog](htt
 
 ## Unreleased
 
+### Changed
+
+- Keep the side tables of an IR function behind a pointer that is only filled when a pass writes to one, so each of the few thousand declarations a header like duktape's makes is about half its old size: duk_hstring_assert.c drops from 3873 to 3532 page faults with the same instructions, and every object is the same as before (#3595).
+
 ## 0.30.3
 
 This is a patch release. It replaces 0.30.2, whose tag failed its checks and was never published, so it has everything that 0.30.2 has. The i386 back end now compiles an asm that names every register the machine has, which is the C `memmove` in arch/x86/lib/memcpy_32.c up to Linux 6.1, so the 6.1 kernel builds for i386. rucc also starts faster on x86_64 Linux and compiles about 4% faster over the slowest corpus files.
