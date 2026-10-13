@@ -571,16 +571,24 @@ impl Preprocessor {
         if text.is_empty() {
             return;
         }
-        let taken = std::mem::take(text);
         self.expander.set_assembly(cx.lex.assembly);
-        let expanded = self.expander.expand_toks(taken, &self.macros, cx.interner, cx.sources);
+        let mark = out.len();
+        self.expander.expand_toks_into(text, out, &self.macros, cx.interner, cx.sources);
         self.diagnostics.append(&mut self.expander.take_diagnostics());
         // To GCC and clang the `__has_*` family are builtin macros rather than something the
         // conditional parser knows about, so they answer in ordinary text too. After expansion
         // and not before it, because a macro is allowed to expand to a call of one and because
-        // the operand is expanded first, which is what happens on a `#if` line as well.
-        let expanded = self.resolve_has(expanded, cx, names, Pass::Text);
-        self.pragma_operator(expanded, out, cx.interner, names);
+        // the operand is expanded first, which is what happens on a `#if` line as well. Nearly
+        // every run has neither that nor a pragma operator in it, and it stays where it is.
+        let special = out[mark..].iter().any(|t| {
+            t.ident().is_some_and(|n| names.has.op(n).is_some())
+                || self.is_pragma_operator(t.ident(), names)
+        });
+        if special {
+            let expanded = out.split_off(mark);
+            let expanded = self.resolve_has(expanded, cx, names, Pass::Text);
+            self.pragma_operator(expanded, out, cx.interner, names);
+        }
     }
 
     /// Dispatches one directive. `body` is the line after the `#`.

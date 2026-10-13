@@ -8,6 +8,7 @@ All notable changes are recorded here. The format follows [Keep a Changelog](htt
 
 - Skip lowering of function prototypes nothing uses, which takes 12% of the instructions off duk_replacements.c (294.5M to 259.3M) and lower and optimize from 23 ms to 1.2 ms with every object the same as before (#3601).
 - Skip attribute checkers whose names a declarator does not spell, which takes 9% of the instructions off duk_replacements.c (259.3M to 235.4M) with every object the same as before (#3602).
+- Text between directives is expanded straight onto the end of the translation unit instead of into a list of its own, which saves a copy of every token and a list per run (#3603).
 
 ## 0.30.4
 
