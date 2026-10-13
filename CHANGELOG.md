@@ -7,6 +7,7 @@ All notable changes are recorded here. The format follows [Keep a Changelog](htt
 ### Changed
 
 - Keep the side tables of an IR function behind a pointer that is only filled when a pass writes to one, so each of the few thousand declarations a header like duktape's makes is about half its old size: duk_hstring_assert.c drops from 3873 to 3532 page faults with the same instructions, and every object is the same as before (#3595).
+- Skip substitution for an object-like macro with no `##` and no `__VA_OPT__`, and keep an argument with nothing in it to expand as the argument itself rather than a copy, which takes 2.1% of the instructions off duk_hstring_misc.c with every object the same as before (#3596).
 
 ## 0.30.3
 
