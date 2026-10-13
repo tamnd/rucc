@@ -192,6 +192,40 @@ fn the_section_follows_the_directives() {
     assert!(!without.windows(9).any(|w| w == b".eh_frame"), "a section nothing asked for");
 }
 
+/// A `cleanup` variable whose cleanup function is inlined into the landing pad.
+///
+/// Once the function is inlined, the pad reads the argument and the sum made before the call
+/// rather than the address of a slot. The unwinder starts the pad with no machine edge into it, so
+/// these have to come through the frame. Before that, both targets refused the function at `-O1`
+/// and above.
+const CLEANUP: &str = "\
+int printf(const char *, ...);
+void deep(int k);
+static void note(int *p) { printf(\"%d\\n\", *p); }
+void layer(int k) {
+    int a __attribute__((cleanup(note))) = k;
+    int b __attribute__((cleanup(note))) = k + 100;
+    deep(k);
+}
+";
+
+#[test]
+fn a_pad_can_read_what_was_made_before_the_call() {
+    for target in [TARGET, "aarch64-unknown-linux-gnu"] {
+        for level in ["-O1", "-O2"] {
+            let what = format!("pad-{}{level}", &target[..3]);
+            let text = asm(&what, &[&format!("--target={target}"), level, "-fexceptions"], CLEANUP);
+            let lines = body(&text, "layer");
+            assert!(lines.iter().any(|l| l.starts_with(".cfi_lsda")), "{target} {level}:\n{text}");
+            assert_eq!(
+                lines.iter().filter(|l| l.contains("printf")).count(),
+                4,
+                "{target} {level}: the two cleanups on each path\n{text}"
+            );
+        }
+    }
+}
+
 /// The object the compiler produces for [`SHAPES`] under those flags.
 fn object(what: &str, flags: &[&str]) -> Vec<u8> {
     let dir = std::env::temp_dir().join(format!("rucc-unwind-obj-{}-{what}", std::process::id()));
