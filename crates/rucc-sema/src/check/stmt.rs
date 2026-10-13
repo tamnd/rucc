@@ -420,14 +420,15 @@ impl Checker<'_> {
         self.body.as_ref().and_then(|body| body.last_param)
     }
 
-    /// Whether the function being checked is a variadic one that is only reached by inlining it,
-    /// which is [`Enclosing::forwards`].
+    /// Whether the function being checked is only reached by inlining it, which is
+    /// [`Enclosing::forwards`].
     ///
-    /// That pairing is what the argument pack builtins need and the only thing they need, since
-    /// the inliner is what fills them in. False outside a function, where there is no argument
-    /// pack to talk about at all.
-    pub(in crate::check) fn in_forwarding_variadic_function(&self) -> bool {
-        self.body.as_ref().is_some_and(|body| body.variadic && body.forwards)
+    /// That is what the argument pack builtins need and the only thing they need, since the
+    /// inliner is what fills them in. A function with a fixed parameter list is one too, where
+    /// they stand for no arguments. False outside a function, where there is no argument pack
+    /// to talk about at all.
+    pub(in crate::check) fn in_forwarding_function(&self) -> bool {
+        self.body.as_ref().is_some_and(|body| body.forwards)
     }
 
     /// The string the `which`th spelling stands for in the function being checked, made on first

@@ -7,6 +7,7 @@ All notable changes are recorded here. The format follows [Keep a Changelog](htt
 ### Added
 
 - `__builtin_va_arg_pack` and `__builtin_va_arg_pack_len` are accepted in a `static` variadic function, which is how gcc's documentation writes them, in a `static inline` function marked `always_inline`. The inliner fills them in wherever it copies the body into a caller, as it already did for GNU's `extern inline`, and the copy out of line goes once nothing reaches it. A copy something still reaches, through its address or a call that could not be inlined, is refused after the optimizer with gcc's `invalid use of '__builtin_va_arg_pack ()'` (E0860), where before it became a declaration of a name nothing defines. A function with external linkage is still refused where the pack is written, as E0694 (#8).
+- `__builtin_va_arg_pack` and `__builtin_va_arg_pack_len` are accepted in a function with a fixed parameter list as well, as gcc accepts them, where every call has no anonymous arguments to forward: the pack stands for nothing and the length is zero. Both are now implemented, so `__has_builtin` answers yes for them as it does under gcc. A pack written where the inner call takes a named argument, which used to crash the inliner, is now left a call and refused with gcc's `invalid use of '__builtin_va_arg_pack ()'` (E0860) (#8).
 
 ### Changed
 

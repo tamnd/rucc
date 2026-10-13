@@ -2428,6 +2428,11 @@ fn check(
             let skip = usize::from(data.opcode == Opcode::CallIndirect);
             let named = &callee[callee[inner].signature].params;
             let written = &args[skip..at];
+            // What the pack stands for goes where the anonymous arguments of the inner call do,
+            // and one written where a named one goes is gcc's `invalid use` as well.
+            if written.len() < named.len() {
+                return Err(InlineFailure::Pack);
+            }
             let anonymous = expand(&callee[callee[inner].varargs], written.len() + 1 - named.len());
             let before: Vec<(Type, Abi)> = written
                 .iter()
@@ -2585,6 +2590,11 @@ fn forwardable(
     forwarded: &[(Type, Abi)],
     groups: Option<&[u32]>,
 ) -> Option<Vec<usize>> {
+    // A pack that stands for nothing has nothing to put anywhere, which is every pack in a
+    // function with a fixed parameter list.
+    if forwarded.is_empty() {
+        return Some(Vec::new());
+    }
     match convention {
         Convention::Slots => Some(Vec::new()),
         Convention::Other => {
@@ -4529,6 +4539,65 @@ block0(%0: i64, %1: f64):
         let g = &out[out.find("func @g").expect("g is there")..];
         assert!(g.contains("iconst.i32 2"), "{out}");
         assert!(!g.contains("call @wrap"), "{out}");
+    }
+
+    /// A pack written where the inner call takes a named argument is not something any copy can
+    /// fill in, so the call stays a call, which the driver then refuses as gcc does.
+    #[test]
+    fn a_pack_where_a_named_argument_goes_is_not_inlined() {
+        let out = inlined(
+            r#"
+func @inner(i32, ...) -> i32, linkage(external);
+
+func @wrap(i32, ...) -> i32, linkage(internal), attrs(always_inline) {
+block0(%0: i32):
+    %1 = va_arg_pack.i32
+    %2 = call @inner(%1) : (i32, ...) -> i32
+    return %2
+}
+
+func @g(i32) -> i32, linkage(external) {
+block0(%0: i32):
+    %1 = iconst.i32 7
+    %2 = call @wrap(%1, %0) : (i32, ...) -> i32
+    return %2
+}
+"#,
+        );
+        let g = &out[out.find("func @g").expect("g is there")..];
+        assert!(g.contains("call @wrap("), "{out}");
+    }
+
+    /// A function with a fixed parameter list has no anonymous arguments to forward, so the pack
+    /// stands for none of them and the length is zero.
+    #[test]
+    fn a_pack_in_a_function_with_fixed_parameters_is_nothing() {
+        let out = inlined(
+            r#"
+func @inner(i32, ...) -> i32, linkage(external);
+
+func @wrap(i32) -> i32, linkage(internal), attrs(always_inline) {
+block0(%0: i32):
+    %1 = va_arg_pack_len.i32
+    %2 = va_arg_pack.i32
+    %3 = call @inner(%1, %0, %2) : (i32, ...) -> i32
+    return %3
+}
+
+func @g() -> i32, linkage(external) {
+block0:
+    %0 = iconst.i32 7
+    %1 = call @wrap(%0) : (i32) -> i32
+    return %1
+}
+"#,
+        );
+        assert!(!out.contains("va_arg_pack"), "{out}");
+        let g = &out[out.find("func @g").expect("g is there")..];
+        assert!(g.contains("iconst.i32 0"), "{out}");
+        let call = g.lines().find(|line| line.contains("call @inner(")).expect("the call is in");
+        let args = &call[call.find("call @inner(").expect("it is a call")..];
+        assert_eq!(args[..args.find(')').expect("it ends")].matches('%').count(), 2, "{out}");
     }
 
     /// A `static` function holding a pack goes once every call to it is in, and stays as it is

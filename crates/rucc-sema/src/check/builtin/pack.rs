@@ -16,7 +16,8 @@
 //! lowering turns each into an instruction, `va_arg_pack` or `va_arg_pack_len`, and
 //! `rucc_opt::inline`, which runs at every level for an `always_inline` function, puts the
 //! anonymous arguments of the call it inlines in place of the first and their count in place of
-//! the second.
+//! the second. A function with a fixed parameter list is taken too, as gcc takes it, and there
+//! the pack stands for no arguments at all and the length is zero.
 //!
 //! What a copy that still holds either after that comes to depends on which of the two it is.
 //! The wrapper becomes a declaration again, so a call to it that could not be inlined goes to the
@@ -26,10 +27,11 @@
 //! to be compiled with nothing to fill the pack in with, and the driver refuses it in gcc's words,
 //! `invalid use of '__builtin_va_arg_pack ()'`, at the call to the builtin.
 //!
-//! So the rule here is the pairing: variadic, and only reached by inlining. Anywhere else the call
+//! So the rule here is that the function is only reached by inlining it. Anywhere else the call
 //! is refused, because anywhere else the body is emitted whatever the inliner does, and gcc
-//! refuses it too, once it compiles the body. gcc also takes them in a function with a fixed
-//! parameter list, where the length is zero, which this compiler does not.
+//! refuses it too, once it compiles the body. The pack written where the inner call takes a named
+//! argument is not refused here, since only the inliner knows what it is next to, and the call it
+//! is in is left a call and refused by the driver, as gcc refuses it.
 //!
 //! # What this gives
 //!
@@ -81,15 +83,15 @@ impl Checker<'_> {
         if spelled != PACK && spelled != LENGTH {
             return None;
         }
-        if self.in_forwarding_variadic_function() {
+        if self.in_forwarding_function() {
             return None;
         }
         let spelled = spelled.to_owned();
         self.report(
             Diagnostic::error(
                 format!(
-                    "'{spelled}' is only accepted in a variadic function that is 'static' or that \
-                     nothing is emitted for, which are the places it can be forwarded from"
+                    "'{spelled}' is only accepted in a function that is 'static' or that nothing \
+                     is emitted for, which are the places it can be forwarded from"
                 ),
                 span,
             )
@@ -160,30 +162,29 @@ mod tests {
         c.errors.diagnostics().iter().map(|d| d.message.clone()).collect()
     }
 
-    /// The pairing is the rule, so all four shapes of a body are worth asking about and so is being
-    /// outside one, where there is no argument pack to talk about at all. Both names answer the
-    /// same, since neither can be filled in for the same reason.
+    /// Whether the body forwards is the rule, so both answers are worth asking about whether or
+    /// not the function is variadic, and so is being outside a body, where there is no argument
+    /// pack to talk about at all. Both names answer the same, since neither can be filled in for
+    /// the same reason.
     #[test]
     fn the_argument_pack_stands_only_where_the_function_around_it_is_reached_by_inlining_it() {
         for name in [PACK, LENGTH] {
             let mut f = Fixture::new();
             let call = f.call(name);
 
-            assert!(
-                reported(&f, call, true, true).is_empty(),
-                "{name} in a variadic body only reached by inlining it"
-            );
-
-            for (variadic, forwards) in [(true, false), (false, true), (false, false)] {
-                let messages = reported(&f, call, variadic, forwards);
+            for variadic in [true, false] {
+                assert!(
+                    reported(&f, call, variadic, true).is_empty(),
+                    "{name} in a body only reached by inlining it, variadic {variadic}"
+                );
+                let messages = reported(&f, call, variadic, false);
                 assert_eq!(
                     messages,
                     vec![format!(
-                        "'{name}' is only accepted in a variadic function that is 'static' or \
-                         that nothing is emitted for, which are the places it can be forwarded \
-                         from"
+                        "'{name}' is only accepted in a function that is 'static' or that \
+                         nothing is emitted for, which are the places it can be forwarded from"
                     )],
-                    "{name} in a body with variadic {variadic} and forwards {forwards}"
+                    "{name} in a body that is emitted, variadic {variadic}"
                 );
             }
 
@@ -194,17 +195,16 @@ mod tests {
     }
 
     /// Both names have to be rows of the table carrying a signature, because the signature is what
-    /// the call is checked against before this is asked about it, and neither may be implemented,
-    /// because `__has_builtin` answering yes for one of these would tell a header it may write
-    /// something this compiler cannot do anything with.
+    /// the call is checked against before this is asked about it. Both are implemented, so
+    /// `__has_builtin` answers yes for them, as gcc does.
     #[test]
-    fn both_names_are_rows_of_the_table_that_carry_a_signature_and_are_not_done() {
+    fn both_names_are_rows_of_the_table_that_carry_a_signature_and_are_done() {
         for name in [PACK, LENGTH] {
             let Some(feature) = rucc_gnu::lookup(Kind::Builtin, name) else {
                 panic!("{name} is answered here and is not in features.toml");
             };
-            assert_eq!(feature.status, Status::Partial, "{name}");
-            assert!(!feature.status.is_available(), "{name}");
+            assert_eq!(feature.status, Status::Implemented, "{name}");
+            assert!(feature.status.is_available(), "{name}");
             assert_eq!(feature.signature, "int(void)", "{name}");
             assert!(feature.library.is_empty(), "{name} is not a call to anything");
         }
