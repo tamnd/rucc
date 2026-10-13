@@ -25,6 +25,7 @@ All notable changes are recorded here. The format follows [Keep a Changelog](htt
 ### Fixed
 
 - A pointer to a local or a global that is stored in a word of the stack or of a global and read back keeps its capability, so a check in the function that reads it still knows its bounds, and the -O2 hoisting and splitting of bounds checks no longer trade that capability for a wider one. At -O2 Juliet misses 165 fewer cases under CWE-121 and 12 fewer under CWE-126 (#3610).
+- A pointer to a local or a global read back out of memory and handed straight to a wrapper such as `memcpy` brings its capability along, so the wrapper judges the copy against the object's bounds. At -O2 Juliet misses 120 fewer cases under CWE-121 and 24 fewer under CWE-126 (#3617).
 - A function with thousands of locals live across thousands of `if` statements no longer stops with "index out of range" while it is lowered. A branch argument list that has to move now gets room to grow, and the SSA cleanup reads a parameter's position from its definition instead of searching for it. A generated file with 3000 such locals now builds at -O0 in 20s, and with 1000 it uses 509MB instead of 2.8GB (#3611).
 - A range query now walks past up to 1024 branches that don't mention the value, up from 64. The kernel's scoped_seqlock_read loop tests a state that can't happen and calls `__scoped_seqlock_bug`, which gcc folds away. With a long critical section full of other branches, rucc gave up before it reached the test that settles the state, so the call stayed and allmodconfig failed to link (#3612).
 
