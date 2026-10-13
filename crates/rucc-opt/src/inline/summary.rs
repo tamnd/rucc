@@ -29,6 +29,8 @@
 //! whose conditions would need more, or that has more than 64 parameters, has no exact summary,
 //! and its calls are weighed by walking the body as before.
 
+use std::cell::RefCell;
+
 use rucc_base::Interner;
 use rucc_base::hash::{Map, Set};
 use rucc_cost::heuristics::{INLINE_CALL_TIME, INLINE_SUMMARY_CLAUSES};
@@ -90,6 +92,23 @@ pub(super) struct Summary {
     entries: Vec<Entry>,
     /// Whether the summary gives [`super::folded`]'s answer. When not, it gives none.
     exact: bool,
+    /// What [`Summary::walked`] has worked out, and whether it weighed.
+    walked: RefCell<Map<(Walk, bool), usize>>,
+    /// What [`Summary::timed`] has worked out.
+    timed: RefCell<Map<Walk, f64>>,
+}
+
+/// What a walk of a body is kept under: how many values, instructions and blocks the body had
+/// made, and the constants it was given in the order of their parameters.
+type Walk = ((usize, usize, usize), Vec<(Value, Imm, Type)>);
+
+/// The [`Walk`] for a body and the constants a call passes it.
+fn walk(func: &Func, values: &Map<Value, (Imm, Type)>) -> Walk {
+    let mut passed: Vec<(Value, Imm, Type)> =
+        values.iter().map(|(&param, &(imm, ty))| (param, imm, ty)).collect();
+    passed.sort_unstable_by_key(|&(param, ..)| param);
+    let counts = func.counts();
+    ((counts.values, counts.insts, counts.blocks), passed)
 }
 
 impl Summary {
@@ -103,7 +122,51 @@ impl Summary {
             alone: Vec::new(),
             entries: Vec::new(),
             exact: false,
+            walked: RefCell::default(),
+            timed: RefCell::default(),
         }
+    }
+
+    /// [`super::folded_size`] for a body this has no exact answer for, walked once for each set of
+    /// constants and read back after that.
+    ///
+    /// A body is weighed again for every call to it, and most of its calls pass the constants an
+    /// earlier one did or none. On duktape.c at `-O2` two of every three walks were of a body and
+    /// constants already walked. Kept under the body's counts as well, as
+    /// [`super::How::specialized_size`] keeps its answers, so a body that has changed since is
+    /// walked again. tamnd/rucc#3052.
+    pub(super) fn walked(
+        &self,
+        func: &Func,
+        values: Map<Value, (Imm, Type)>,
+        weighed: Option<&Interner>,
+    ) -> usize {
+        let key = (walk(func, &values), weighed.is_some());
+        if let Some(&size) = self.walked.borrow().get(&key) {
+            return size;
+        }
+        let size = super::folded_size(func, Set::default(), values, weighed);
+        self.walked.borrow_mut().insert(key, size);
+        size
+    }
+
+    /// The time [`super::folded`] gives a body this has no exact answer for, walked once for each
+    /// set of constants, as [`Summary::walked`] is. `frequency` is the one the summary was made
+    /// with, which is the one every caller has beside it.
+    pub(super) fn timed(
+        &self,
+        func: &Func,
+        values: Map<Value, (Imm, Type)>,
+        names: &Interner,
+        frequency: &Map<Block, f64>,
+    ) -> f64 {
+        let key = walk(func, &values);
+        if let Some(&time) = self.timed.borrow().get(&key) {
+            return time;
+        }
+        let time = super::folded(func, Set::default(), values, Some(names), Some(frequency)).1;
+        self.timed.borrow_mut().insert(key, time);
+        time
     }
 
     /// The summary of a body, with the time each block takes weighed by how often `frequency`

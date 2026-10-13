@@ -1803,7 +1803,7 @@ fn summed_size(
     weighed: Option<&Interner>,
 ) -> (usize, bool) {
     let Some(estimate) = summary.estimate(callee, &values) else {
-        return (folded_size(callee, Set::default(), values, weighed), false);
+        return (summary.walked(callee, values, weighed), false);
     };
     let size = if weighed.is_some() { estimate.weighed } else { estimate.plain };
     debug_assert_eq!(
@@ -1825,7 +1825,7 @@ fn summed_time(
     frequency: &Map<Block, f64>,
 ) -> f64 {
     let Some(estimate) = summary.estimate(callee, &values) else {
-        return folded(callee, Set::default(), values, Some(names), Some(frequency)).1;
+        return summary.timed(callee, values, names, frequency);
     };
     if cfg!(debug_assertions) {
         let walked = folded(callee, Set::default(), values, Some(names), Some(frequency)).1;
