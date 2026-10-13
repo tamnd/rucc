@@ -6531,7 +6531,9 @@ decl #0 x : int object external static defined
         assert!(text.contains("\tcmpl\t$15, "), "{text}");
         assert!(text.contains("\tcmovbel\t"), "{text}");
         assert!(!text.contains("\tja\t"), "{text}");
-        assert!(text.contains("\taddl\t$1, %edi"), "{text}");
+        // The register allocator can write the addition as `leal` into another register.
+        let added = text.contains("\taddl\t$1, %edi") || text.contains("\tleal\t1(%rdi), ");
+        assert!(added, "{text}");
         assert_eq!(text.matches("\tcmp").count(), 1, "{text}");
     }
 
