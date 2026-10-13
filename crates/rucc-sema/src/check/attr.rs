@@ -91,6 +91,22 @@ const ALIAS_STRING: &str = "'alias' requires a string naming the symbol to alias
 /// to a definition, and the name is in a string that nothing resolves as a use.
 const RETAINING: [&str; 5] = ["used", "retain", "constructor", "destructor", "alias"];
 
+/// Every name [`Checker::convened`] and [`Checker::convened_pointee`] read.
+const CONVENED: Spelled = Spelled::of(&[
+    "ms_abi",
+    "sysv_abi",
+    "stdcall",
+    "cdecl",
+    "fastcall",
+    "thiscall",
+    "regparm",
+    "vectorcall",
+    "nocf_check",
+    "indirect_return",
+    "sseregparm",
+    "callee_pop_aggregate_return",
+]);
+
 /// The format archetypes gcc 16 knows on every target, which is what `format(archetype, ...)` may
 /// name without a warning.
 ///
@@ -219,7 +235,74 @@ fn is_vector_mode(name: &str, target: &TargetInfo) -> bool {
     lanes > 0 && named_mode(&rest[lanes..], target).is_some()
 }
 
+/// Which attribute names a declaration may carry, as one bit for each name hashed into 128.
+///
+/// A header declaration carries a handful of attributes and the checks that read them number
+/// about sixty, each walking the lists for a name of its own, so most of what checking such a
+/// declaration cost was finding nothing sixty times. A check for a name nothing on the declaration
+/// spells is left out instead. Two names may share a bit, which costs a check that finds
+/// nothing, and a name that is there is never missing, which is what lets a check be left out.
+#[derive(Clone, Copy)]
+pub(in crate::check) struct Spelled(u128);
+
+impl Spelled {
+    /// The bits for these names, which is what a check is asked about with.
+    pub(in crate::check) const fn of(names: &[&str]) -> Self {
+        let mut bits = 0;
+        let mut index = 0;
+        while index < names.len() {
+            bits |= spelled_bit(names[index]);
+            index += 1;
+        }
+        Self(bits)
+    }
+
+    /// Whether any of `names` may be on the declaration.
+    pub(in crate::check) const fn any(self, names: Self) -> bool {
+        self.0 & names.0 != 0
+    }
+
+    /// What either of the two may carry.
+    pub(in crate::check) const fn with(self, other: Self) -> Self {
+        Self(self.0 | other.0)
+    }
+}
+
+/// The bit for one name, an FNV-1a hash of its bytes taken down to 128.
+const fn spelled_bit(name: &str) -> u128 {
+    let bytes = name.as_bytes();
+    let mut hash: u32 = 0x811c_9dc5;
+    let mut index = 0;
+    while index < bytes.len() {
+        hash ^= bytes[index] as u32;
+        hash = hash.wrapping_mul(0x0100_0193);
+        index += 1;
+    }
+    1 << (hash % 128)
+}
+
 impl Checker<'_> {
+    /// The names attribute lists may carry, for leaving out the checks for the rest.
+    ///
+    /// Both the name the table gives an attribute and the name as written with its armour off,
+    /// since a check reads one or the other. An attribute in a namespace may be read under a
+    /// name of its own, `clang::flag_enum` as `flag_enum`, so a list with one is read as carrying
+    /// every name.
+    pub(in crate::check) fn spelled_in(&self, lists: &[AttrList]) -> Spelled {
+        let ast = self.ast;
+        let mut bits = 0;
+        for &attrs in lists {
+            for attr in &ast[attrs] {
+                if attr.namespace.is_some() {
+                    return Spelled(u128::MAX);
+                }
+                bits |= spelled_bit(self.gnu_name(attr));
+                bits |= spelled_bit(rucc_gnu::unarmour(self.text(attr.name)));
+            }
+        }
+        Spelled(bits)
+    }
+
     /// The name an attribute has in `crates/rucc-gnu/features.toml`, or an empty string when the
     /// checker does not read it.
     ///
@@ -2191,6 +2274,10 @@ impl Checker<'_> {
     /// type reads it through here, so none of them can be missed at one of the three places a type
     /// is declared.
     pub(in crate::check) fn retyped(&mut self, ty: TypeId, attrs: AttrList) -> TypeId {
+        const READ: Spelled = Spelled::of(&["mode", "hardbool", "vector_size"]);
+        if !self.spelled_in(&[attrs]).any(READ) {
+            return ty;
+        }
         let ty = self.moded(ty, attrs);
         let ty = self.hardened(ty, attrs);
         self.vectorized(ty, attrs)
@@ -2217,6 +2304,9 @@ impl Checker<'_> {
     /// [`FunctionType::sse_regparm`], and `callee_pop_aggregate_return` last, which is
     /// [`FunctionType::return_pointer_popped`].
     pub(in crate::check) fn convened(&mut self, ty: TypeId, attrs: AttrList) -> TypeId {
+        if !self.spelled_in(&[attrs]).any(CONVENED) {
+            return ty;
+        }
         let ty = match self.convention_in(attrs) {
             Some((convention, name, span)) => self.with_convention(ty, convention, &name, span),
             None => ty,
@@ -2243,6 +2333,9 @@ impl Checker<'_> {
         pointee: TypeId,
         attrs: AttrList,
     ) -> TypeId {
+        if !self.spelled_in(&[attrs]).any(CONVENED) {
+            return pointee;
+        }
         let mut pointee = pointee;
         if let Some((convention, name, span)) = self.convention_in(attrs) {
             match self.types.kind(self.types.canonical(pointee)) {

@@ -41,6 +41,7 @@ use rucc_types::{compatible, composite, is_complete, is_function, is_void, layou
 
 use crate::asm::FileAsm;
 use crate::check::Checker;
+use crate::check::attr::Spelled;
 use crate::check::noinit::Held;
 use crate::check::stmt::Enclosing;
 use crate::check::tls::Holder;
@@ -739,6 +740,13 @@ impl Checker<'_> {
         specs: ast::DeclSpecsId,
         item: ast::InitDeclarator,
     ) -> Option<DeclId> {
+        // Whether the declaration may carry any of these, which is what each check below for a
+        // name of its own is asked first. See [`Spelled`].
+        macro_rules! may {
+            ($spelled:expr, $($name:literal),+) => {
+                $spelled.any(const { Spelled::of(&[$($name),+]) })
+            };
+        }
         // A deduced type is not known until its initializer is checked, and until then the
         // declaration is made with `int` so that everything else about it is still checked.
         let deduces = self.ast[specs].deduces();
@@ -771,8 +779,13 @@ impl Checker<'_> {
         let name = node.name?;
         let span = node.name_span;
         let specs = self.ast[specs];
-        self.flag_enum_misplaced(&[specs.attrs, item.attrs], ty);
-        self.btf_type_tag_on_function(&[specs.attrs, item.attrs], ty);
+        let carried = self.spelled_in(&[specs.attrs, item.attrs]);
+        if may!(carried, "flag_enum") {
+            self.flag_enum_misplaced(&[specs.attrs, item.attrs], ty);
+        }
+        if may!(carried, "btf_type_tag") {
+            self.btf_type_tag_on_function(&[specs.attrs, item.attrs], ty);
+        }
         if specs.is_typedef() {
             if self.scopes.at_file_scope() {
                 self.types.record_alias_prototypes(name, prototypes);
@@ -792,14 +805,22 @@ impl Checker<'_> {
             Some(align) => self.alignment(align, ty, kind, name, span),
             None => None,
         };
-        let alignment = alignment.max(self.attribute_alignment(specs.attrs, item.attrs, ty));
-        let gnu_inline = self.gnu_inlined(specs.attrs) || self.gnu_inlined(item.attrs);
+        let alignment = if may!(carried, "aligned", "packed") {
+            alignment.max(self.attribute_alignment(specs.attrs, item.attrs, ty))
+        } else {
+            alignment
+        };
+        let gnu_inline = may!(carried, "gnu_inline")
+            && (self.gnu_inlined(specs.attrs) || self.gnu_inlined(item.attrs));
         // Checked and not kept, since nothing reads a format string yet. Both places, for the
         // reason `retained` below reads both, and a header writes it after the declarator.
-        self.format_archetypes(specs.attrs);
-        self.format_archetypes(item.attrs);
+        if may!(carried, "format") {
+            self.format_archetypes(specs.attrs);
+            self.format_archetypes(item.attrs);
+        }
         // `section` and `used` beside a star, which are the declaration's, as in [`Self::starred`].
         let starred = self.starred(item.declarator);
+        let carried = carried.with(self.spelled_in(&starred));
         // What is said about calling a function beside a star. Only a function takes it, since on
         // a pointer to one gcc says the attribute is ignored rather than giving it to the object.
         let beside = match kind {
@@ -809,19 +830,27 @@ impl Checker<'_> {
         // One string with two readings, so one call answers both and the string is looked at once.
         let (asm_label, register) = self.declared_asm(item, &specs, duration, name, span);
         // Read from both places for the reason `retained` below is.
-        let alias = self.aliased(specs.attrs).or_else(|| self.aliased(item.attrs));
+        let alias = if may!(carried, "alias") {
+            self.aliased(specs.attrs).or_else(|| self.aliased(item.attrs))
+        } else {
+            None
+        };
         // A weakref is a declaration whose assembler name is the target and whose references to it
         // are weak, and the alias that may have named the target is spent on that rather than
         // making this a second name for something the file defines. See
         // [`Checker::weak_reference`].
-        let weakref = self.weak_reference(
-            [specs.attrs, item.attrs],
-            alias,
-            linkage,
-            item.init.is_some(),
-            name,
-            span,
-        );
+        let weakref = if may!(carried, "weakref") {
+            self.weak_reference(
+                [specs.attrs, item.attrs],
+                alias,
+                linkage,
+                item.init.is_some(),
+                name,
+                span,
+            )
+        } else {
+            None
+        };
         let (asm_label, alias) = match weakref {
             Some(target) => (Some(target), None),
             None => (asm_label, alias),
@@ -829,8 +858,14 @@ impl Checker<'_> {
         // An indirect function is an alias whose target is the resolver, so the name goes where
         // the alias's does and the declaration is marked once it has an id. One declaration that
         // asks for both is gcc's error about a name defined twice. See [`Checker::resolver`].
-        let resolver = self.resolver(&[specs.attrs, item.attrs], kind, span);
-        self.warn_alignment_misplaced(&[specs.attrs, item.attrs], name);
+        let resolver = if may!(carried, "ifunc") {
+            self.resolver(&[specs.attrs, item.attrs], kind, span)
+        } else {
+            None
+        };
+        if may!(carried, "warn_if_not_aligned") {
+            self.warn_alignment_misplaced(&[specs.attrs, item.attrs], name);
+        }
         let (alias, ifunc) = match (alias, resolver) {
             (Some(_), Some(_)) => {
                 let spelled = self.text(name).to_owned();
@@ -852,7 +887,11 @@ impl Checker<'_> {
             local: duration == StorageDuration::Automatic,
             ty,
         });
-        let (reset, unsectioned) = self.reset_kept(&[specs.attrs, item.attrs], held, span);
+        let (reset, unsectioned) = if may!(carried, "noinit", "persistent") {
+            self.reset_kept(&[specs.attrs, item.attrs], held, span)
+        } else {
+            (DeclFlags::NONE, false)
+        };
         let mut declared = Declared {
             name,
             ty,
@@ -869,6 +908,15 @@ impl Checker<'_> {
             // A weakref is a reference and has nothing to keep, even when the `alias` that named
             // its target is one of the attributes that would otherwise keep it.
             retained: weakref.is_none()
+                && may!(
+                    carried,
+                    "used",
+                    "retain",
+                    "constructor",
+                    "destructor",
+                    "alias",
+                    "export_name"
+                )
                 && (self.retains(specs.attrs)
                     || self.retains(item.attrs)
                     || starred.iter().any(|&attrs| self.retains(attrs))),
@@ -884,17 +932,18 @@ impl Checker<'_> {
             // shared with the declarators beside this one, and after the declarator it is this
             // declaration's alone, and either place asks for the same thing.
             noreturn: specs.func.has(FuncSpecs::NORETURN)
-                || self.never_returns(specs.attrs)
-                || self.never_returns(item.attrs)
+                || may!(carried, "noreturn")
+                    && (self.never_returns(specs.attrs) || self.never_returns(item.attrs))
                 || beside.noreturn,
             // Both places, for the reason `noreturn` above reads both. A declaration is not where
             // a program usually writes this one, since the definition is, but a header that
             // declares an interrupt handler and defines it elsewhere writes it here.
-            naked: self.is_naked(specs.attrs) || self.is_naked(item.attrs),
+            naked: may!(carried, "naked")
+                && (self.is_naked(specs.attrs) || self.is_naked(item.attrs)),
             // Both places, for the reason `noreturn` above reads both. glibc writes it after the
             // declarator, as `extern int setjmp (jmp_buf __env) __THROWNL __returns_twice;`.
-            twice: self.returns_twice(specs.attrs)
-                || self.returns_twice(item.attrs)
+            twice: may!(carried, "returns_twice")
+                && (self.returns_twice(specs.attrs) || self.returns_twice(item.attrs))
                 || beside.twice,
             // Both places, for the reason `noreturn` above reads both.
             // And what `#pragma GCC optimize` has in effect, on a function only.
@@ -908,76 +957,109 @@ impl Checker<'_> {
                     ast::PragmaOptions::NONE
                 }))
                 .with(DeclFlags::DECLARED_INLINE, specs.func.has(FuncSpecs::INLINE))
-                | self.handler(
-                    &[specs.attrs, item.attrs],
-                    ty,
-                    self.is_naked(specs.attrs) || self.is_naked(item.attrs),
-                )
+                | if may!(carried, "interrupt", "no_caller_saved_registers") {
+                    let naked = self.is_naked(specs.attrs) || self.is_naked(item.attrs);
+                    self.handler(&[specs.attrs, item.attrs], ty, naked)
+                } else {
+                    DeclFlags::NONE
+                }
                 | reset
-                | self.extern_access(
-                    &[specs.attrs, item.attrs],
-                    Some(linkage == Linkage::External),
-                    specs.span,
-                )
-                | self.shared_section(&[specs.attrs, item.attrs], kind),
+                | if may!(carried, "nodirect_extern_access") {
+                    self.extern_access(
+                        &[specs.attrs, item.attrs],
+                        Some(linkage == Linkage::External),
+                        specs.span,
+                    )
+                } else {
+                    DeclFlags::NONE
+                }
+                | if may!(carried, "shared") {
+                    self.shared_section(&[specs.attrs, item.attrs], kind)
+                } else {
+                    DeclFlags::NONE
+                },
             // Both places, for the reason `noreturn` above reads both. `__declspec` is written
             // in front and the attribute spelling is as often written after the declarator.
-            dll: self.dll(specs.attrs) | self.dll(item.attrs),
+            dll: if may!(carried, "dllimport", "dllexport") {
+                self.dll(specs.attrs) | self.dll(item.attrs)
+            } else {
+                DeclFlags::NONE
+            },
             // Both places, for the reason `noreturn` above reads both. A header writing
             // `__attribute__((pure)) int look(const int *);` puts it on the specifiers and
             // one writing `int look(const int *) __attribute__((pure));` puts it after the
             // declarator, and both spellings are common in the same header.
-            effects: self
-                .promised_effects(specs.attrs)
-                .and(self.promised_effects(item.attrs))
-                .and(beside.effects),
+            effects: if may!(carried, "const", "pure") {
+                self.promised_effects(specs.attrs).and(self.promised_effects(item.attrs))
+            } else {
+                Effects::Any
+            }
+            .and(beside.effects),
             // Both places, for the reason `retained` above reads both.
-            visibility: self
-                .seen(specs.attrs)
-                .or_else(|| self.seen(item.attrs))
-                .or(pushed(specs.pushed)),
+            visibility: if may!(carried, "visibility") {
+                self.seen(specs.attrs).or_else(|| self.seen(item.attrs))
+            } else {
+                None
+            }
+            .or(pushed(specs.pushed)),
             // Both places, for the reason `retained` above reads both. The usual place a library
             // writes it is on the specifiers of a declaration in a header, which is where a hook
             // nobody has to define is offered.
-            weak: self.weak_here(
-                self.weakened(specs.attrs)
+            weak: if may!(carried, "weak", "selectany") {
+                let weak = self
+                    .weakened(specs.attrs)
                     .or_else(|| self.weakened(item.attrs))
-                    .or_else(|| starred.iter().find_map(|&attrs| self.weakened(attrs))),
-                linkage,
-                name,
-            ),
+                    .or_else(|| starred.iter().find_map(|&attrs| self.weakened(attrs)));
+                self.weak_here(weak, linkage, name)
+            } else {
+                None
+            },
             // Both places, for the reason `retained` above reads both. The kind and the duration
             // go with them because the attribute only means something on an object inside a block
             // and the warning for anything else is given where it was written.
-            cleanup: self
-                .cleanup(specs.attrs, kind, duration)
-                .or_else(|| self.cleanup(item.attrs, kind, duration)),
+            cleanup: if may!(carried, "cleanup") {
+                self.cleanup(specs.attrs, kind, duration)
+                    .or_else(|| self.cleanup(item.attrs, kind, duration))
+            } else {
+                None
+            },
             // Both places as well, and the kind goes with them because only a function can be in
             // either order and the warning for anything else is given where the attribute was
             // written rather than later.
-            startup: self.startup(specs.attrs, kind).or(self.startup(item.attrs, kind)),
+            startup: if may!(carried, "constructor", "destructor") {
+                self.startup(specs.attrs, kind).or(self.startup(item.attrs, kind))
+            } else {
+                Startup::default()
+            },
             takes_prior_linkage: takes_prior_linkage(&specs, kind),
             span,
         };
         // Both places, for the reason `retained` above reads both. The kernel's `__initdata` and
         // `__read_mostly` are written after the declarator and its `__init` in front of the name.
-        let section = match self.sectioned(specs.attrs, duration) {
-            Some(section) => Some(section),
-            None => self.sectioned(item.attrs, duration),
+        let section = if may!(carried, "section") {
+            let section = match self.sectioned(specs.attrs, duration) {
+                Some(section) => Some(section),
+                None => self.sectioned(item.attrs, duration),
+            };
+            section.or_else(|| starred.iter().find_map(|&attrs| self.sectioned(attrs, duration)))
+        } else {
+            None
         };
-        let section =
-            section.or_else(|| starred.iter().find_map(|&attrs| self.sectioned(attrs, duration)));
         let section = if unsectioned { None } else { section };
         // Both places, for the reason `retained` above reads both. The kernel writes `__copy` after
         // the declarator, between the parameter list and the `alias` it goes with.
-        let section = match self.copied(&[specs.attrs, item.attrs]) {
+        let copied =
+            if may!(carried, "copy") { self.copied(&[specs.attrs, item.attrs]) } else { None };
+        let section = match copied {
             Some((source, at)) => self.copy_onto(source, at, &mut declared, section),
             None => section,
         };
         let id = self.merge(declared);
         self.record_section(id, section);
-        let tags = self.btf_decl_tags(&[item.attrs, specs.attrs]);
-        self.tast.record_btf_decl_tags(id, tags);
+        if may!(carried, "btf_decl_tag") {
+            let tags = self.btf_decl_tags(&[item.attrs, specs.attrs]);
+            self.tast.record_btf_decl_tags(id, tags);
+        }
         // Kept for the debug information, which names the typedef where the program did.
         if let Some((name, of)) = spelled {
             self.tast.record_spelling(id, name, of);
@@ -985,7 +1067,11 @@ impl Checker<'_> {
         self.tast.record_prototypes(id, prototypes);
         // Both places, for the reason `noreturn` above reads both. gcc says nothing about the
         // attribute on an object beyond that it is ignored, and it is not read there at all.
-        let cloned = self.cloned(&[specs.attrs, item.attrs], kind);
+        let cloned = if may!(carried, "target_clones") {
+            self.cloned(&[specs.attrs, item.attrs], kind)
+        } else {
+            None
+        };
         if let Some(versions) = cloned {
             self.tast.record_versions(id, versions);
         } else if kind == DeclKind::Function {
@@ -995,38 +1081,84 @@ impl Checker<'_> {
         }
         // Both places, for the reason `noreturn` above reads both. The kernel writes it after the
         // declarator of a function declared inside the block that calls it.
-        self.record_notices(id, &[specs.attrs, item.attrs], kind);
-        self.cf_checked(&[specs.attrs, item.attrs], kind);
-        self.expected_throws(&[specs.attrs, item.attrs], kind);
-        self.force_aligned(&[specs.attrs, item.attrs], ty);
-        self.no_reordered(&[specs.attrs, item.attrs], true);
-        self.strict_flex_refused(&[specs.attrs, item.attrs], Some(name));
-        self.ms_hooked(&[specs.attrs, item.attrs], kind == DeclKind::Function);
-        self.record_patchable(id, &[specs.attrs, item.attrs], kind);
-        self.record_wasm_names(id, &[specs.attrs, item.attrs], kind);
-        self.record_fentry(Some(id), &[specs.attrs, item.attrs], kind);
-        self.record_symver(Some(id), &[specs.attrs, item.attrs], duration, span);
+        let lists = [specs.attrs, item.attrs];
+        if may!(carried, "error", "warning") {
+            self.record_notices(id, &lists, kind);
+        }
+        if may!(carried, "cf_check") {
+            self.cf_checked(&lists, kind);
+        }
+        if may!(carried, "expected_throw") {
+            self.expected_throws(&lists, kind);
+        }
+        if may!(carried, "force_align_arg_pointer") {
+            self.force_aligned(&lists, ty);
+        }
+        if may!(carried, "no_reorder") {
+            self.no_reordered(&lists, true);
+        }
+        if may!(carried, "strict_flex_array") {
+            self.strict_flex_refused(&lists, Some(name));
+        }
+        if may!(carried, "ms_hook_prologue") {
+            self.ms_hooked(&lists, kind == DeclKind::Function);
+        }
+        if may!(carried, "patchable_function_entry") {
+            self.record_patchable(id, &lists, kind);
+        }
+        if may!(carried, "export_name", "import_module", "import_name") {
+            self.record_wasm_names(id, &lists, kind);
+        }
+        if may!(carried, "fentry_name", "fentry_section") {
+            self.record_fentry(Some(id), &lists, kind);
+        }
+        if may!(carried, "symver") {
+            self.record_symver(Some(id), &lists, duration, span);
+        }
         if ifunc {
             self.tast.record_ifunc(id);
         }
         // Both places, for the reason `noreturn` above reads both. glibc writes it after the
         // declarator, as `extern void *malloc (size_t __size) __attr_alloc_size ((1));`.
         let merged = self.tast[id].ty;
-        self.record_alloc_size(id, &[specs.attrs, item.attrs], kind, merged);
-        self.string_arg(&[specs.attrs, item.attrs], merged);
-        let conditional = self.nonnull_if_nonzero(&[specs.attrs, item.attrs], merged);
-        self.read_nonnull(id, &[specs.attrs, item.attrs], conditional);
-        self.annotate_decl(id, &[specs.attrs, item.attrs]);
-        if kind == DeclKind::Object {
-            self.check_nonstring(&[specs.attrs, item.attrs], merged);
+        if may!(carried, "alloc_size") {
+            self.record_alloc_size(id, &lists, kind, merged);
+        }
+        if may!(carried, "null_terminated_string_arg") {
+            self.string_arg(&lists, merged);
+        }
+        let conditional = if may!(carried, "nonnull_if_nonzero") {
+            self.nonnull_if_nonzero(&lists, merged)
+        } else {
+            Vec::new()
+        };
+        if may!(carried, "nonnull") || !conditional.is_empty() {
+            self.read_nonnull(id, &lists, conditional);
+        }
+        self.annotate_decl(id, &lists);
+        if kind == DeclKind::Object && may!(carried, "nonstring") {
+            self.check_nonstring(&lists, merged);
         }
         let holder = match (kind, duration) {
             (DeclKind::Object, StorageDuration::Thread) => Holder::Thread(id),
             (DeclKind::Object, _) => Holder::NotThread,
             _ => Holder::NotVariable,
         };
-        self.check_tls_model(&[specs.attrs, item.attrs], Some(name), holder);
-        self.read_advice(id, &[specs.attrs, item.attrs]);
+        if may!(carried, "tls_model") {
+            self.check_tls_model(&lists, Some(name), holder);
+        }
+        if may!(
+            carried,
+            "deprecated",
+            "unavailable",
+            "warn_unused_result",
+            "nodiscard",
+            "format",
+            "format_arg",
+            "sentinel"
+        ) {
+            self.read_advice(id, &lists);
+        }
         // An initializer that did not work out leaves the object without a size, and saying so
         // a second time helps nobody, so what it did decides whether the size is asked about.
         let mut worked = true;
