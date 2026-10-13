@@ -67,7 +67,7 @@ fn an_asm_naming_every_register_is_allocated() {
 
 #[test]
 fn a_register_the_template_only_spells_goes_to_an_output_nothing_reads() {
-    for level in ["-O1", "-O2"] {
+    for level in ["-O0", "-O1", "-O2"] {
         let text = compile("spelled", SPELLED, level);
         assert!(text.contains("%dx"), "{level}: the asm is in the output\n{text}");
     }
