@@ -407,6 +407,11 @@ pub const INLINE_LARGE_FRAME_CONSERVE: u32 = 100;
 /// count or stride known, turn a call through a pointer into a direct one, or answer a
 /// `__builtin_constant_p` gets a limit twice the size. With both kinds of hint the limit is scaled
 /// by the square of this over a hundred, which is what gcc does.
+///
+/// The constant sweep found a hundred writing 43.69% less text over the 8 cases it changes, for
+/// 0.084% fewer instructions. On SQLite the same hundred writes 1.27% less text and is slower, 3.1%
+/// more cycles at its fastest run and 3.6% more at the median of fifteen, with 11% more branch
+/// misses, so it is a trade of speed for size and two hundred stays (tamnd/rucc#3158).
 pub const INLINE_HINT_PERCENT: u32 = 200;
 
 /// [`INLINE_HINT_PERCENT`] at `-O3`, per section 33.5, where gcc raises it to six hundred.
@@ -838,7 +843,12 @@ pub const ALLOCATOR_DEGRADATION_PERCENT: u32 = 10;
 /// GCC's `dse-max-alias-queries-per-store`, `Init(256)` in `gcc/params.opt`. A store whose
 /// overwriting store is further away than this is almost always one a call or a loop sits between,
 /// and the walk would end there anyway.
-pub const DSE_WALK_LIMIT: u32 = 256;
+///
+/// Five hundred and twelve, twice gcc's, because the constant sweep found the longer walk removing
+/// stores that 256 kept: 0.36% less text over the 21 corpus cases it changes and no more
+/// instructions. On SQLite it writes 128 bytes less text and retires 0.016% fewer instructions,
+/// prints the same answers, and compiles no slower, 10.71 seconds against 11.10 (tamnd/rucc#3165).
+pub const DSE_WALK_LIMIT: u32 = 512;
 
 /// How many intervals a set of values compared against has to be before a bit test is written for
 /// it rather than a comparison per interval, per section 19.4.
@@ -1574,11 +1584,11 @@ pub const ALL: &[Constant] = &[
     },
     Constant {
         name: "DSE_WALK_LIMIT",
-        value: 256,
+        value: 512,
         unit: "instructions",
         document: "17.3",
         gcc: "dse-max-alias-queries-per-store",
-        provenance: Provenance::Gcc,
+        provenance: Provenance::Measured,
     },
     Constant {
         name: "RANGE_TEST_BIT_INTERVALS",
