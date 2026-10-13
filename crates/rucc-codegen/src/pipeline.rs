@@ -973,6 +973,11 @@ pub fn compile_recording(
     };
     let absolute = flags.code_model == CodeModel::Kernel
         || (std::ptr::eq(machine.shapes, &x86::MACHINE) && !elsewhere.based());
+    // Under the kernel model each load and store of a name gets the name in its own address, the
+    // way gcc writes it, so that code running away from its link address still finds it.
+    if flags.code_model == CodeModel::Kernel {
+        fold::spread(&mut func, machine.insts, names);
+    }
     fold::addresses(&mut func, machine.insts, machine.shapes, names, &mut pending, absolute);
     // Where the address of a name is a number, the names the first run left behind a sum it
     // folded, see `fold::names`.

@@ -782,6 +782,77 @@ pub fn absolute(func: &mut mir::Func, insts: &FrameInsts, names: &mut Interner) 
     marked
 }
 
+/// Gives each load and store that reads through the address of a name a `lea` of its own, under
+/// the kernel code model, and gives back how many it wrote.
+///
+/// [`addresses`] hands the address of a name to its readers only when there is one of them, for
+/// the size reason [`fits_every_reader`] gives, and a `lea` it leaves behind becomes `movq $sym` in
+/// [`absolute`]. Under the kernel model that is not only a different instruction from gcc's, it is a
+/// different address when the code runs somewhere other than where it was linked. gcc reads and
+/// writes a name from the instruction pointer every time, and the kernel's early boot code depends
+/// on that: `__startup_64` runs at the physical address before the page tables map the kernel at
+/// its link address, and in 6.12 it reads `ptrs_per_p4d` twice with no `RIP_REL_REF` around it.
+/// Through `movq $ptrs_per_p4d` that is a read of an address that is not mapped yet, and the machine
+/// stops before it prints anything.
+///
+/// So each reader gets a copy of the `lea` in front of it, which [`addresses`] then folds as the
+/// one reader the copy has, and the first `lea` goes when nothing else reads it. A reader that the
+/// fold turns down keeps its copy, which is the `movq $sym` it had before. Run before
+/// [`addresses`].
+pub fn spread(func: &mut mir::Func, insts: &FrameInsts, names: &mut Interner) -> usize {
+    let lea = mir::Opcode::new(names.join(insts.prefix, insts.lea));
+    let mut named: Map<mir::Reg, (mir::Inst, mir::Operand)> = Map::default();
+    for block in func.blocks() {
+        for inst in func.insts(block) {
+            if func[inst].opcode != lea {
+                continue;
+            }
+            let Some(mem) = func[inst].mem else { continue };
+            if let [def] = func[func[inst].operands] {
+                if def.role != Role::Use && def.reg.is_virtual() && named_alone(func[mem]) {
+                    named.insert(def.reg, (inst, def));
+                }
+            }
+        }
+    }
+    if named.is_empty() {
+        return 0;
+    }
+    let reads = Reads::of(func);
+    let mut taken: Map<mir::Reg, usize> = Map::default();
+    for block in func.blocks().collect::<Vec<_>>() {
+        for inst in func.insts(block).collect::<Vec<_>>() {
+            let Some(reg) = base_reg(func, inst) else { continue };
+            let Some(&(from, def)) = named.get(&reg) else { continue };
+            if times_read(func, inst, reg) != 1 {
+                continue;
+            }
+            let copy = func.new_vreg(def.class);
+            let operands = func.push_operands(&[mir::Operand { reg: copy, ..def }]);
+            let mem = func[from].mem.map(|mem| func[mem]).map(|amode| func.add_amode(amode));
+            let data = mir::InstData { operands, mem, ..func[from] };
+            let span = func.span(inst);
+            let made = func.create_inst(data, span);
+            func.insert_before(inst, made);
+            let list = func[inst].operands;
+            for operand in &mut func[list] {
+                if operand.role == Role::Use && operand.reg == reg {
+                    operand.reg = copy;
+                }
+            }
+            *taken.entry(reg).or_insert(0) += 1;
+        }
+    }
+    let mut wrote = 0;
+    for (reg, count) in taken {
+        wrote += count;
+        if count == reads.count(reg) {
+            func.remove_inst(named[&reg].0);
+        }
+    }
+    wrote
+}
+
 /// Writes the address of a name straight into each store of it on i386, and gives back how many
 /// addresses that took.
 ///
@@ -1841,6 +1912,64 @@ mod tests {
             reaches,
             [mir::Reach::Absolute, mir::Reach::Table, mir::Reach::Itself, mir::Reach::Itself]
         );
+    }
+
+    /// Two loads of one name under the kernel model, the way `__startup_64` reads `ptrs_per_p4d`.
+    /// Each load reads the name from the instruction pointer and the shared `lea` goes, so nothing
+    /// is left for [`absolute`] to write as `movq $sym`.
+    #[test]
+    fn each_read_of_a_name_takes_the_name_under_the_kernel_model() {
+        let (mut names, mut func, block) = empty();
+        let lea = op(&mut names, FRAME.lea);
+        let load = op(&mut names, "mov_rm_32");
+        let count = names.intern("count");
+        let address = func.new_vreg(GPR);
+        func.build(block, lea).def(address, GPR).mem(mir::Mem::of(count)).finish();
+        for _ in 0..2 {
+            let value = func.new_vreg(GPR);
+            func.build(block, load)
+                .def(value, GPR)
+                .mem(mir::Mem::at(mir::Operand::read(address, GPR)))
+                .finish();
+        }
+
+        assert_eq!(spread(&mut func, &FRAME, &mut names), 2);
+        assert_eq!(folds_under(&mut func, &mut names, CodeModel::Kernel), 2);
+        assert_eq!(absolute(&mut func, &FRAME, &mut names), 0);
+        let shape = shape(&func, &names, block);
+        assert_eq!(shape.len(), 2, "{shape:?}");
+        for (opcode, amode) in shape {
+            assert!(opcode.ends_with("mov_rm_32"), "{opcode}");
+            assert_eq!(amode.reach, mir::Reach::Itself);
+            assert_eq!(amode.base, None);
+            assert_eq!(names.resolve(amode.symbol.expect("the name")), "count");
+        }
+    }
+
+    /// The address wanted as a value as well keeps its `lea`, and only the load takes the name.
+    #[test]
+    fn an_address_wanted_as_a_value_keeps_its_lea_beside_the_reads() {
+        let (mut names, mut func, block) = empty();
+        let lea = op(&mut names, FRAME.lea);
+        let load = op(&mut names, "mov_rm_32");
+        let store = op(&mut names, "mov_mr_64");
+        let count = names.intern("count");
+        let address = func.new_vreg(GPR);
+        let value = func.new_vreg(GPR);
+        func.build(block, lea).def(address, GPR).mem(mir::Mem::of(count)).finish();
+        func.build(block, load)
+            .def(value, GPR)
+            .mem(mir::Mem::at(mir::Operand::read(address, GPR)))
+            .finish();
+        func.build(block, store)
+            .uses(address, GPR)
+            .mem(mir::Mem::at(mir::Operand::read(mir::Reg::physical(RDI), GPR)))
+            .finish();
+
+        assert_eq!(spread(&mut func, &FRAME, &mut names), 1);
+        assert_eq!(folds_under(&mut func, &mut names, CodeModel::Kernel), 1);
+        assert_eq!(absolute(&mut func, &FRAME, &mut names), 1);
+        assert_eq!(shape(&func, &names, block).len(), 3);
     }
 
     /// Two readers and one of them is in another block, which is the same refusal as the single
