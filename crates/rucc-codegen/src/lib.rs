@@ -171,6 +171,7 @@ pub mod coverage;
 pub mod decimal;
 pub mod divide;
 pub mod double;
+pub mod edges;
 pub mod eight;
 pub mod elsewhere;
 pub mod expand;

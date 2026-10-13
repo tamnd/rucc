@@ -49,6 +49,7 @@ use crate::compare;
 use crate::copies;
 use crate::coverage::Fired;
 use crate::double;
+use crate::edges;
 use crate::elsewhere::Elsewhere;
 use crate::expand;
 use crate::finish::{self, Convention, Padding, Probing, Protect, Tracing, far, finish};
@@ -1521,6 +1522,16 @@ pub fn compile_recording(
     // to be empty once every pass that might put an instruction in it has run, and a block this
     // marks as one control never leaves is one nothing in between should take for a return.
     if flags.reorder {
+        // First, since an edge block it empties is one the forwarding then sends the branch past.
+        edges::lift(
+            &mut func,
+            machine.branch,
+            machine.insts,
+            machine.shapes,
+            machine.flags,
+            &moves,
+            names,
+        );
         layout::forward(&mut func, machine.branch, names);
     }
 
