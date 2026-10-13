@@ -26,7 +26,7 @@ All notable changes are recorded here. The format follows [Keep a Changelog](htt
 - The interner looks names up in an open addressed table over its own text instead of a map keyed by a boxed copy of each name, which takes 1.4% off a header heavy file like duk_hstring_assert.c at -O2 (#3577).
 - Under `-mcmodel=kernel` each load and store of a global reads the global from the instruction pointer, as gcc does, even when one address feeds several of them. Before, the shared address became `movq $sym`, which is the link address, and the 6.12 kernel stopped at boot because `__startup_64` reads `ptrs_per_p4d` before the kernel is mapped there (#3578).
 - Expansion trace steps are shared within one macro expansion instead of through a table over the whole translation unit, which takes 2.1% off the instructions of the header heavy duktape/src-separate/duk_hstring_assert.c (#3579).
-- A computed goto whose address can only be one label is a direct jump to that label, as gcc writes it. The kernel's `drm_exec_retry_on_contention` jumped through the retpoline thunk, and objtool warned four times in drm_exec_test.o that it was a sibling call from a function with a frame (#NNNN).
+- A computed goto whose address can only be one label is a direct jump to that label, as gcc writes it. The kernel's `drm_exec_retry_on_contention` jumped through the retpoline thunk, and objtool warned four times in drm_exec_test.o that it was a sibling call from a function with a frame (#3580).
 
 ## 0.30.1
 
