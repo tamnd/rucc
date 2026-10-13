@@ -111,7 +111,13 @@ const JOIN_EDGES: usize = 4;
 
 /// How many branches on something else one walk passes before it gives up, so that a query in a
 /// function that is one long chain of tests is not a walk to the top of it every time.
-const PASSED: u32 = 64;
+///
+/// It was 64, and the kernel's `scoped_seqlock_read` is a loop whose test says the state is not
+/// `ss_done` and whose step switches on the state with a call to `__scoped_seqlock_bug` for
+/// `ss_done`, a function nothing defines. A body with 64 branches in it put the test out of reach,
+/// so the call stayed and the link failed. Passing a branch costs a look at a few definitions,
+/// and a function of 3000 values each tested once below 3000 other tests took no longer at 1024.
+const PASSED: u32 = 1024;
 
 /// The limits, all three of which exist because the thing they bound is otherwise unbounded.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
