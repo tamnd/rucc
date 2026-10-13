@@ -228,7 +228,10 @@ mod tests {
 
     /// `layer` of a C file with a `cleanup` variable once the cleanup is inlined: the pad reads
     /// the sum made before the call, and the block the pad goes on to reads the argument.
-    const LAYER: &str = r#"target triple = "x86_64-unknown-linux-gnu"
+    const LAYER: &str = r#"; ModuleID = 't.c'
+; format 0
+target triple = "x86_64-unknown-linux-gnu"
+target datalayout = "e-p:64:64-i64:64-f80:128-S128"
 
 func @deep(i32), linkage(external);
 
@@ -284,7 +287,10 @@ block3:
     /// A function with no pad is left as it was.
     #[test]
     fn a_function_with_no_pad_is_left_alone() {
-        let text = r#"target triple = "x86_64-unknown-linux-gnu"
+        let text = r#"; ModuleID = 't.c'
+; format 0
+target triple = "x86_64-unknown-linux-gnu"
+target datalayout = "e-p:64:64-i64:64-f80:128-S128"
 
 func @f(i32) -> i32, linkage(external);
 
