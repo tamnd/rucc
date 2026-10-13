@@ -1,7 +1,8 @@
 //! An asm that spells `%%rsp` and asks for a register it does not read afterwards. rucc gave that
 //! register the stack pointer itself, since the text names it and the list does not, and the asm
 //! then wrote the stack segment into `rsp`. The kernel's `sync_core` is that asm. It runs from
-//! `text_poke_early` while the kernel boots, and the kernel 0.30.3 built took a triple fault there.
+//! `text_poke_early` while the kernel boots, and the kernel that rucc 0.30.3 built took a triple
+//! fault there.
 
 use std::process::Command;
 
@@ -26,7 +27,8 @@ void sync_core(void) {
 ";
 
 fn compile(level: &str, extra: &[&str]) -> String {
-    let dir = std::env::temp_dir().join(format!("rucc-asm-spelled-sp-{}{level}", std::process::id()));
+    let dir =
+        std::env::temp_dir().join(format!("rucc-asm-spelled-sp-{}{level}", std::process::id()));
     std::fs::create_dir_all(&dir).expect("a temporary directory can be created");
     let path = dir.join("one.c");
     std::fs::write(&path, SYNC_CORE).expect("the fixture can be written");

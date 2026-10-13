@@ -6242,7 +6242,9 @@ impl<'a> Lowering<'a> {
         let mut early = vec![false; list.len()];
         if !a64 {
             for &(reg, class) in &named[declared..] {
-                if class == self.gpr && (reg == self.conv.stack_pointer || reg == self.conv.frame_pointer) {
+                if class == self.gpr
+                    && (reg == self.conv.stack_pointer || reg == self.conv.frame_pointer)
+                {
                     continue;
                 }
                 if pins.iter().flatten().any(|&pin| pin == (reg, class)) {
