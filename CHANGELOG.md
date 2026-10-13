@@ -18,6 +18,10 @@ All notable changes are recorded here. The format follows [Keep a Changelog](htt
 - An include search lists a directory once a file has not been found in it and skips opening names the listing does not have, and the check for shipped headers compares bytes before walking path components, which took the failed opens on a duktape file from 529 to 16 (#3606).
 - A branch to two returns that hand back true and false now returns the condition itself, or the opposite comparison when the arms are the other way round, instead of a branch and two returns (#3607).
 
+### Fixed
+
+- A pointer to a local or a global that is stored in a word of the stack or of a global and read back keeps its capability, so a check in the function that reads it still knows its bounds, and the -O2 hoisting and splitting of bounds checks no longer trade that capability for a wider one. At -O2 Juliet misses 165 fewer cases under CWE-121 and 12 fewer under CWE-126 (#3610).
+
 ## 0.30.4
 
 This is a patch release. It fixes a regression in 0.30.3 that made the x86-64 Linux kernel fail to boot: an asm output that nothing reads could get the stack pointer, so the kernel's `sync_core` wrote the stack segment into `rsp` and the kernel took a triple fault. The 7.2.8 x86-64 kernel built by rucc boots again. rucc also uses less memory and makes fewer system calls on large headers.
