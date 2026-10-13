@@ -119,6 +119,16 @@
 //! where this earns anything: the loops it opens up are the ones whose bounds checks loop splitting
 //! has already taken care of.
 //!
+//! A capability that was read out of memory with the pointer, which is `cap_load` and what a check
+//! through `*where` carries, is the exception to taking it from the address. A `cap_of` of a pointer
+//! that came out of memory is a capability worked out again from the address alone, and for an
+//! address on the stack or in a global that is the capability that says nothing, so the check in
+//! front of the loop asked nothing and a walk past the end of a local reached through a pointer to
+//! a pointer went unreported (tamnd/rucc#3269). So when the check's capability was produced by
+//! something other than `cap_of`, names the pointer the walk starts at, and is already defined
+//! where the preheader can read it, the check in front reads that same capability, and it is the
+//! question every iteration was going to ask.
+//!
 //! # Loops inside loops
 //!
 //! A check that comes out of an inner loop lands in its preheader, which is in the body of the loop
@@ -421,6 +431,9 @@ struct Plan {
     check: Inst,
     /// An integer as wide as a pointer, which the arithmetic in front of the loop is done in.
     word: Type,
+    /// The check's own capability, when the one in front reads it rather than a `cap_of` of where
+    /// the walk starts. See the module documentation.
+    kept: Option<Value>,
 }
 
 /// How many bytes the loop covers, which the pass has either as a number or as a recipe.
@@ -905,6 +918,7 @@ fn planned(
     // preheader has to work out is a start further on, and further on is where another object may
     // be.
     let opcode = func[check].opcode;
+    let mut kept = None;
     if opcode == Opcode::CheckBounds {
         let Some(named) = named else { return Err(NOT_A_SWEEP) };
         let none_past = (start.value.is_none() || start.scale == 0) && start.offset == 0;
@@ -912,8 +926,13 @@ fn planned(
         if named != pointer && !at_it {
             return Err(NOT_ITS_CAPABILITY);
         }
+        if at_it && !made_by(func, capability, Opcode::CapOf) {
+            kept = home(func, capability)
+                .filter(|&at| doms.dominates(at, preheader))
+                .map(|_| capability);
+        }
     }
-    Ok(Plan { preheader, base, start, span, stride, info, opcode, check, word })
+    Ok(Plan { preheader, base, start, span, stride, info, opcode, check, word, kept })
 }
 
 /// What a walk with gaps covers once the loop around it has moved it over, as a span and the width of
@@ -952,6 +971,19 @@ fn beside(
         return Err(TOO_WIDE);
     }
     Ok((span, if wide >= down { span } else { wide }))
+}
+
+/// Whether a value is the result of an instruction with this opcode.
+fn made_by(func: &Func, value: Value, opcode: Opcode) -> bool {
+    matches!(func[value].def, Def::Result { inst, .. } if func[inst].opcode == opcode)
+}
+
+/// The block a value is defined in.
+fn home(func: &Func, value: Value) -> Option<Block> {
+    match func[value].def {
+        Def::Result { inst, .. } => func.block_of(inst),
+        Def::Param { block, .. } => Some(block),
+    }
 }
 
 /// What a value is, when it is a number written down.
@@ -1282,9 +1314,16 @@ fn operands(func: &mut Func, plan: &Plan, term: Inst) -> (u64, Vec<Value>) {
         }
     };
     let first = starting(&mut build, &mut made, base, plan.start, plan.word);
-    let args = build.func().push_values(&[first]);
-    let capability = build.value(InstData { args, ..InstData::new(Opcode::CapOf) }, Type::CAP);
-    made.push(capability);
+    let capability = match plan.kept {
+        Some(capability) => capability,
+        None => {
+            let args = build.func().push_values(&[first]);
+            let capability =
+                build.value(InstData { args, ..InstData::new(Opcode::CapOf) }, Type::CAP);
+            made.push(capability);
+            capability
+        }
+    };
 
     // Two shapes of operands, and which one is written is which of the two the extent came in. A
     // number goes in the payload, where the front end would have put it. An expression goes in the
@@ -2110,6 +2149,39 @@ mod tests {
         let stats = hoisted(&mut func);
         assert_eq!(stats.count(Kind::Optimized, HOISTED), 1);
         assert_eq!(checks(&func).len(), 1, "one check, and it is the one that was put in front");
+        sound(&func, &mut names);
+    }
+
+    #[test]
+    fn a_check_whose_capability_was_read_out_of_memory_reads_it_in_front_too() {
+        // A pointer read out of a slot comes with the capability read beside it, and a `cap_of`
+        // of the pointer is the capability worked out again from the address alone. For a local
+        // that is the one that says nothing, so the check in front has to read the one the check
+        // inside was reading (tamnd/rucc#3269).
+        let (mut names, mut func, blocks) = walking(16, WIDTH, 4, 4);
+        let (entry, head) = (blocks[0], blocks[1]);
+        let array = func[entry].params[0];
+        let term = func.terminator(entry).expect("the entry jumps into the loop");
+        let mut build = Builder::new(&mut func, entry);
+        let args = build.func().push_values(&[array]);
+        let slot = build.value(InstData { args, ..InstData::new(Opcode::CapOf) }, Type::CAP);
+        let args = build.func().push_values(&[slot, array, array]);
+        let loaded = build.value(InstData { args, ..InstData::new(Opcode::CapLoad) }, Type::CAP);
+        for value in [slot, loaded] {
+            let inst = inst_of(&func, value);
+            func.remove_inst(inst);
+            func.insert_before(inst, term);
+        }
+        let check = func
+            .insts(head)
+            .find(|&inst| func[inst].opcode == Opcode::CheckBounds)
+            .expect("the loop checks the address it works out");
+        let pointer = func[func[check].args][1];
+        func[check].args = func.push_values(&[loaded, pointer]);
+        let stats = hoisted(&mut func);
+        assert_eq!(stats.count(Kind::Optimized, HOISTED), 1);
+        let [(_, front)] = checks(&func)[..] else { panic!("one check, the one in front") };
+        assert_eq!(func[func[front].args][0], loaded, "it reads the capability that was loaded");
         sound(&func, &mut names);
     }
 

@@ -937,8 +937,8 @@ pub unsafe fn spread(dst: *const c_void, src: *const c_void, len: usize) {
 /// and the honest record of that is an empty slot and a refusal at the first access through it, not
 /// whatever was there before.
 ///
-/// Nothing at all when the destination is not an allocation this runtime laid out, since then there
-/// is no aux in front of it to write.
+/// When the destination is not an allocation this runtime laid out there is no aux in front of it
+/// to write, and `crate::aside::moved` does the same thing for the table that stands in for one.
 ///
 /// A destination word whose capability this call changed is stamped as well, which is `restamped`
 /// and is the epoch plane's half of a copy. A word whose slot ends up saying the same thing it said
@@ -956,6 +956,7 @@ pub unsafe fn relocate(dst: *const c_void, src: *const c_void, len: usize) {
     let (dst, src) = (dst as u64, src as u64);
     let into = recover::recover(dst as *const c_void);
     if into.meta.class() != Class::Allocated as u8 {
+        crate::aside::moved(dst, src, len as u64);
         return;
     }
     let from = recover::recover(src as *const c_void);

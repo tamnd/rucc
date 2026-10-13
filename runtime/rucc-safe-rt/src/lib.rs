@@ -191,6 +191,8 @@ extern crate std;
 pub mod adopt;
 #[cfg(unix)]
 pub mod alloc;
+#[cfg(unix)]
+pub mod aside;
 pub mod aux_slot;
 #[cfg(unix)]
 pub mod call;

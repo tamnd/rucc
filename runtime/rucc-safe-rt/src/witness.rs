@@ -144,6 +144,15 @@ pub unsafe fn version(witness: *const u64) -> u64 {
     (held & SERIALS) << SHIFT | (witness as u64 & ADDRESS) | 1
 }
 
+/// The address of the witness a local's version names, or `None` for a version that names none.
+#[must_use]
+pub const fn word(ver: u64) -> Option<usize> {
+    if ver == crate::plane::FOREIGN || ver & 1 == 0 {
+        return None;
+    }
+    Some((ver & ADDRESS & !1) as usize)
+}
+
 /// Whether `cap` is the capability of a local whose frame has returned.
 ///
 /// False for every other capability, which includes a local of a frame with no witness.

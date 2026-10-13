@@ -63,6 +63,15 @@
 //! left over is the ones in loops it refused for one of its own reasons, a second way out or a call
 //! inside, and those come back here.
 //!
+//! The query is handed a capability as well as an address, and it used to be a `cap_of` of the
+//! address every time. That is the wrong one for a check through a pointer read out of memory, whose
+//! capability is the `cap_load` read beside it. A `cap_of` of such a pointer is worked out again from
+//! the address alone, and for a local or a global that says nothing, so the window came out as
+//! everything and the loop that walked past the end of a local reached through `*where` ran with no
+//! check in it (tamnd/rucc#3269). So a check whose capability was made some other way than `cap_of`,
+//! outside the loop, hands that one to the query, and the window is measured in the object every
+//! iteration was going to be checked against.
+//!
 //! # A walk that goes the other way
 //!
 //! A loop whose address goes down each time round is the same transformation looked at from the
@@ -531,6 +540,9 @@ struct Sweep {
     /// the loop works out rather than one written here. Nothing on almost every sweep, because the
     /// two are the same address. See [`trailing`].
     ahead: Option<Plain>,
+    /// The check's own capability, when the query is handed that rather than a `cap_of` of the
+    /// address it asks about. See the module documentation.
+    kept: Option<Value>,
 }
 
 /// One loop to split, worked out before anything is written.
@@ -597,7 +609,14 @@ fn sweep(
             continue;
         }
         match walked(func, cfg, loops, scev, id, latch, check) {
-            Ok(sweep) => sweeps.push(sweep),
+            Ok(mut sweep) => {
+                // Made outside the loop, so it is there in the preheader where the query is asked.
+                let inside = |made: Value| home(func, made).is_none_or(|at| body.contains(&at));
+                if sweep.kept.is_some_and(inside) {
+                    sweep.kept = None;
+                }
+                sweeps.push(sweep);
+            }
             Err(why) => stats.missed(why),
         }
     }
@@ -953,7 +972,20 @@ fn walked(
     if !windowed(reach, walk.down()) {
         return Err(NOT_PROVED);
     }
-    Ok(Sweep { check, base, apart, walk, rebuild, reach, ahead })
+    let made_by_cap_of = matches!(
+        func[capability].def,
+        Def::Result { inst, .. } if func[inst].opcode == Opcode::CapOf
+    );
+    let kept = (!made_by_cap_of).then_some(capability);
+    Ok(Sweep { check, base, apart, walk, rebuild, reach, ahead, kept })
+}
+
+/// The block a value is defined in.
+fn home(func: &Func, value: Value) -> Option<Block> {
+    match func[value].def {
+        Def::Result { inst, .. } => func.block_of(inst),
+        Def::Param { block, .. } => Some(block),
+    }
 }
 
 /// Whether the first iteration's address is a given pointer rather than somewhere along from it.
@@ -2118,17 +2150,23 @@ fn spare(
         (Opcode::CapExtent, first)
     };
 
-    let extent = match asked.extent(query, at, want) {
+    let extent = match asked.extent(query, at, want, sweep.kept) {
         Some(had) => had,
         None => {
-            let args = build.func().push_values(&[at]);
-            let data = InstData::new(Opcode::CapOf);
-            let capability = build.value(InstData { args, ..data }, Type::CAP);
-            made.push(capability);
+            let capability = match sweep.kept {
+                Some(capability) => capability,
+                None => {
+                    let args = build.func().push_values(&[at]);
+                    let data = InstData::new(Opcode::CapOf);
+                    let capability = build.value(InstData { args, ..data }, Type::CAP);
+                    made.push(capability);
+                    capability
+                }
+            };
             let args = build.func().push_values(&[capability, at, want]);
             let extent = build.value(InstData { args, ..InstData::new(query) }, word);
             made.push(extent);
-            asked.extents.push(((query, at, want), extent));
+            asked.extents.push(((query, at, want, sweep.kept), extent));
             extent
         }
     };
@@ -2152,6 +2190,10 @@ fn spare(
     (short, zero, Some(above))
 }
 
+/// One extent query as [`Asked`] keeps it: which end, about which address, how far, and with which
+/// capability when it was not a `cap_of` of the address.
+type Query = (Opcode, Value, Value, Option<Value>);
+
 /// What the preheader has worked out already, so that one question is asked once.
 ///
 /// Association lists rather than maps, because a plan holds a handful of sweeps and the keys are
@@ -2165,8 +2207,9 @@ struct Asked {
     firsts: Vec<((Value, Plain), Value)>,
     /// The end of a first access, by where it starts and how many bytes it is.
     ends: Vec<((Value, i128), Value)>,
-    /// What the runtime answered, by which end was asked, about which address and how far.
-    extents: Vec<((Opcode, Value, Value), Value)>,
+    /// What the runtime answered, by which end was asked, about which address, how far, and with
+    /// which capability when it was not a `cap_of` of the address.
+    extents: Vec<(Query, Value)>,
 }
 
 impl Asked {
@@ -2192,8 +2235,9 @@ impl Asked {
     }
 
     /// What the runtime said about this address, if it has been asked.
-    fn extent(&self, query: Opcode, at: Value, want: Value) -> Option<Value> {
-        self.extents.iter().find(|&&(key, _)| key == (query, at, want)).map(|&(_, had)| had)
+    fn extent(&self, query: Opcode, at: Value, want: Value, kept: Option<Value>) -> Option<Value> {
+        let key = (query, at, want, kept);
+        self.extents.iter().find(|&&(seen, _)| seen == key).map(|&(_, had)| had)
     }
 }
 
@@ -3510,6 +3554,40 @@ mod tests {
         assert_eq!(stats.count(Kind::Optimized, SPLIT), 1);
         assert_eq!(stats.count(Kind::Missed, super::NOT_FROM_THE_START), 0);
         assert_eq!(all(&func, Opcode::CheckBounds).len(), 1, "the fast half lost its check");
+        sound(&func, &mut names);
+    }
+
+    #[test]
+    fn a_bounds_check_whose_capability_was_read_out_of_memory_hands_it_to_the_query() {
+        // A pointer read out of a slot comes with the capability read beside it, and a `cap_of`
+        // of the pointer is the capability worked out again from the address alone, which for a
+        // local says nothing and made the window everything (tamnd/rucc#3269). So the query is
+        // asked with the capability the check inside was going to be asked with.
+        let (mut names, mut func, blocks) = walking(Some(TRIPS), Flags::NSW);
+        let (entry, head) = (blocks[0], blocks[1]);
+        let (array, _) = arithmetic(&func, head);
+        let term = func.terminator(entry).expect("the entry jumps into the loop");
+        let mut build = Builder::new(&mut func, entry);
+        let args = build.func().push_values(&[array]);
+        let slot = build.value(InstData { args, ..InstData::new(Opcode::CapOf) }, Type::CAP);
+        let args = build.func().push_values(&[slot, array, array]);
+        let loaded = build.value(InstData { args, ..InstData::new(Opcode::CapLoad) }, Type::CAP);
+        for value in [slot, loaded] {
+            let inst = super::inst_of(&func, value);
+            func.remove_inst(inst);
+            func.insert_before(inst, term);
+        }
+        let check = func
+            .insts(head)
+            .find(|&inst| func[inst].opcode == Opcode::CheckBounds)
+            .expect("the loop checks the address it works out");
+        let pointer = func[func[check].args][1];
+        func[check].args = func.push_values(&[loaded, pointer]);
+
+        let stats = split_up(&mut func);
+        assert_eq!(stats.count(Kind::Optimized, SPLIT), 1);
+        let [(_, asked)] = all(&func, Opcode::CapExtent)[..] else { panic!("one question") };
+        assert_eq!(func[func[asked].args][0], loaded, "it is asked with the loaded capability");
         sound(&func, &mut names);
     }
 
