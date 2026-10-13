@@ -103,15 +103,20 @@ impl FileSystem for OsFileSystem {
         // header sits in one of a few directories, and on a file that includes the C library
         // that was 577 calls, every one of them for a component that was not a link. A header
         // that is a link itself is resolved in full. tamnd/rucc#3052.
+        //
+        // A bare name is in the current directory, and that is a directory like any other, so it
+        // is resolved once too rather than once per header found next to a source file. A path
+        // that is not there at all is not handed to `canonicalize`, which could only fail on it
+        // after a `getcwd` and a `readlink`, and that is every `<built-in>` and `<builtin>` name.
         let resolved = match (path.parent(), path.file_name()) {
-            (Some(dir), Some(name)) if !dir.as_os_str().is_empty() => {
-                match std::fs::symlink_metadata(path) {
-                    Ok(meta) if !meta.file_type().is_symlink() => {
-                        self.directory(dir).map(|dir| dir.join(name))
-                    }
-                    _ => None,
+            (Some(dir), Some(name)) => match std::fs::symlink_metadata(path) {
+                Ok(meta) if !meta.file_type().is_symlink() => {
+                    let dir = if dir.as_os_str().is_empty() { Path::new(".") } else { dir };
+                    self.directory(dir).map(|dir| dir.join(name))
                 }
-            }
+                Ok(_) => None,
+                Err(_) => return rucc_session::path_key(path),
+            },
             _ => None,
         };
         resolved
