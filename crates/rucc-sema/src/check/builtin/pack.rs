@@ -8,21 +8,28 @@
 //! written at the call site and the length becomes how many of them there were. Neither means
 //! anything in a function that was compiled on its own, and gcc refuses them there.
 //!
-//! This compiler accepts them in the same place glibc writes them, which is a variadic definition
-//! that nothing is emitted for. GNU's `extern inline` gives exactly that, and every use in glibc
-//! is in a wrapper declared `__extern_always_inline`. The lowering turns each into an instruction,
-//! `va_arg_pack` or `va_arg_pack_len`, and `rucc_opt::inline`, which runs at every level for an
-//! `always_inline` function, puts the anonymous arguments of the call it inlines in place of the
-//! first and their count in place of the second. A copy of the wrapper that still holds either
-//! after that, because some call to it could not be inlined, becomes a declaration again, so that
-//! call goes to the library's function of the same name, which is where it went before any of this
-//! was done.
+//! This compiler accepts them in the two places a variadic definition is only reached by inlining
+//! it. The first is where glibc writes them, a definition that nothing is emitted for. GNU's
+//! `extern inline` gives exactly that, and every use in glibc is in a wrapper declared
+//! `__extern_always_inline`. The second is a `static` definition, usually one marked
+//! `always_inline`, whose copy out of line is kept only where something still reaches it. The
+//! lowering turns each into an instruction, `va_arg_pack` or `va_arg_pack_len`, and
+//! `rucc_opt::inline`, which runs at every level for an `always_inline` function, puts the
+//! anonymous arguments of the call it inlines in place of the first and their count in place of
+//! the second.
 //!
-//! So the rule here is the pairing: variadic, and not emitted. Anywhere else the call is refused,
-//! because anywhere else it would reach the IR as a call to a name no object file defines, and a
-//! link error naming a builtin is a worse way to learn this than a diagnostic at the line that
-//! wrote it. gcc also takes them in a `static inline` function marked `always_inline`, which this
-//! compiler does not yet.
+//! What a copy that still holds either after that comes to depends on which of the two it is.
+//! The wrapper becomes a declaration again, so a call to it that could not be inlined goes to the
+//! library's function of the same name, which is where it went before any of this was done. A
+//! `static` function that nothing reaches any more goes, as it does under gcc. One that something
+//! still reaches, because its address was taken or a call to it stayed a call, is a body that has
+//! to be compiled with nothing to fill the pack in with, and the driver refuses it in gcc's words,
+//! `invalid use of '__builtin_va_arg_pack ()'`, at the call to the builtin.
+//!
+//! So the rule here is the pairing: variadic, and only reached by inlining. Anywhere else the call
+//! is refused, because anywhere else the body is emitted whatever the inliner does, and gcc
+//! refuses it too, once it compiles the body. gcc also takes them in a function with a fixed
+//! parameter list, where the length is zero, which this compiler does not.
 //!
 //! # What this gives
 //!
@@ -74,15 +81,15 @@ impl Checker<'_> {
         if spelled != PACK && spelled != LENGTH {
             return None;
         }
-        if self.in_unemitted_variadic_function() {
+        if self.in_forwarding_variadic_function() {
             return None;
         }
         let spelled = spelled.to_owned();
         self.report(
             Diagnostic::error(
                 format!(
-                    "'{spelled}' is only accepted in a variadic function nothing is emitted for, \
-                     which is the one place it can be forwarded from"
+                    "'{spelled}' is only accepted in a variadic function that is 'static' or that \
+                     nothing is emitted for, which are the places it can be forwarded from"
                 ),
                 span,
             )
@@ -140,10 +147,15 @@ mod tests {
     ///
     /// The body is opened by hand rather than by checking a definition, because the pairing these
     /// turn on is the whole of what a definition would be contributing.
-    fn reported(f: &Fixture, call: rucc_ast::ExprId, variadic: bool, emitted: bool) -> Vec<String> {
+    fn reported(
+        f: &Fixture,
+        call: rucc_ast::ExprId,
+        variadic: bool,
+        forwards: bool,
+    ) -> Vec<String> {
         let mut c = f.checker();
         let ret = c.types.int(IntKind::Int);
-        c.open_body(Enclosing { variadic, emitted, ..Enclosing::returning(ret) });
+        c.open_body(Enclosing { variadic, forwards, ..Enclosing::returning(ret) });
         c.check_expr(call);
         c.errors.diagnostics().iter().map(|d| d.message.clone()).collect()
     }
@@ -152,25 +164,26 @@ mod tests {
     /// outside one, where there is no argument pack to talk about at all. Both names answer the
     /// same, since neither can be filled in for the same reason.
     #[test]
-    fn the_argument_pack_stands_only_where_nothing_is_emitted_for_the_function_around_it() {
+    fn the_argument_pack_stands_only_where_the_function_around_it_is_reached_by_inlining_it() {
         for name in [PACK, LENGTH] {
             let mut f = Fixture::new();
             let call = f.call(name);
 
             assert!(
-                reported(&f, call, true, false).is_empty(),
-                "{name} in a variadic body nothing is emitted for"
+                reported(&f, call, true, true).is_empty(),
+                "{name} in a variadic body only reached by inlining it"
             );
 
-            for (variadic, emitted) in [(true, true), (false, false), (false, true)] {
-                let messages = reported(&f, call, variadic, emitted);
+            for (variadic, forwards) in [(true, false), (false, true), (false, false)] {
+                let messages = reported(&f, call, variadic, forwards);
                 assert_eq!(
                     messages,
                     vec![format!(
-                        "'{name}' is only accepted in a variadic function nothing is emitted for, \
-                         which is the one place it can be forwarded from"
+                        "'{name}' is only accepted in a variadic function that is 'static' or \
+                         that nothing is emitted for, which are the places it can be forwarded \
+                         from"
                     )],
-                    "{name} in a body with variadic {variadic} and emitted {emitted}"
+                    "{name} in a body with variadic {variadic} and forwards {forwards}"
                 );
             }
 

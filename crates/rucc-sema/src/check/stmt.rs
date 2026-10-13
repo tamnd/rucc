@@ -82,8 +82,8 @@ pub(in crate::check) struct Body {
     pub(in crate::check) params: DeclList,
     /// The name the definition was written with, which is what `__func__` answers.
     name: Option<Symbol>,
-    /// Whether a definition of this function is emitted, which is [`Enclosing::emitted`].
-    emitted: bool,
+    /// Whether the argument pack pair may stand in this body, which is [`Enclosing::forwards`].
+    forwards: bool,
     /// The string each of the three spellings was made into, so that every mention of one of them
     /// in a function is one object rather than one per use. They are three objects and not one,
     /// because gcc gives each spelling its own and a program is allowed to notice: comparing
@@ -178,13 +178,15 @@ pub(in crate::check) struct Enclosing {
     pub params: DeclList,
     /// The name the function was written with, absent for a body that is not a definition.
     pub name: Option<Symbol>,
-    /// Whether a definition of this function is emitted, which is false for the inline definition
-    /// GNU's `extern inline` gives and true for every other definition.
+    /// Whether a call to this function can only be reached by inlining it, unless something is
+    /// still left that reaches its body once the inliner is done. That is the inline definition
+    /// GNU's `extern inline` gives, which is never emitted, and a definition with internal
+    /// linkage, whose copy out of line is only kept where something still calls it.
     ///
-    /// What reads it is the argument pack pair in `check/builtin/pack.rs`, which stands only in a
-    /// body nothing is emitted for. True for a body that is not a definition, since a statement
-    /// being checked on its own is not somewhere either of them may stand either.
-    pub emitted: bool,
+    /// What reads it is the argument pack pair in `check/builtin/pack.rs`, which stands only in
+    /// such a body. False for every other definition, and for a body that is not a definition,
+    /// since a statement being checked on its own is not somewhere either of them may stand.
+    pub forwards: bool,
 }
 
 impl Enclosing {
@@ -198,7 +200,7 @@ impl Enclosing {
             last_param: None,
             params: DeclList::EMPTY,
             name: None,
-            emitted: true,
+            forwards: false,
         }
     }
 }
@@ -383,7 +385,7 @@ impl Checker<'_> {
             last_param: func.last_param,
             params: func.params,
             name: func.name,
-            emitted: func.emitted,
+            forwards: func.forwards,
             func_name: [None; FUNCTION_NAMES.len()],
             labels: Map::default(),
             outer: Vec::new(),
@@ -418,13 +420,14 @@ impl Checker<'_> {
         self.body.as_ref().and_then(|body| body.last_param)
     }
 
-    /// Whether the function being checked is a variadic one that nothing is emitted for.
+    /// Whether the function being checked is a variadic one that is only reached by inlining it,
+    /// which is [`Enclosing::forwards`].
     ///
-    /// That pairing is what the argument pack builtins need and the only thing they need, since a
-    /// body nothing emits is a body whose calls never reach the IR. False outside a function,
-    /// where there is no argument pack to talk about at all.
-    pub(in crate::check) fn in_unemitted_variadic_function(&self) -> bool {
-        self.body.as_ref().is_some_and(|body| body.variadic && !body.emitted)
+    /// That pairing is what the argument pack builtins need and the only thing they need, since
+    /// the inliner is what fills them in. False outside a function, where there is no argument
+    /// pack to talk about at all.
+    pub(in crate::check) fn in_forwarding_variadic_function(&self) -> bool {
+        self.body.as_ref().is_some_and(|body| body.variadic && body.forwards)
     }
 
     /// The string the `which`th spelling stands for in the function being checked, made on first
