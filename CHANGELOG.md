@@ -4,6 +4,10 @@ All notable changes are recorded here. The format follows [Keep a Changelog](htt
 
 ## Unreleased
 
+## 0.30.2
+
+This is a patch release. The 6.1 and 6.12 kernels built by rucc now boot on x86-64: under `-mcmodel=kernel` each load and store of a global uses `sym(%rip)`, as gcc does, so early boot code finds its data before the kernel is at its link address. A computed goto that can reach only one label is a direct jump, so objtool is clean on 6.12. The 7.2.8 allmodconfig and fedora-44 kernels build again, with new assembler and encoder support for the instructions they use. The register allocator, the lexer, the macro expander and the attribute checks are faster, and the compiler executes fewer instructions on duktape, quickjs.c and lvm.c.
+
 ### Changed
 
 - The register allocator weighs a copy for a block parameter by how often its edge is taken, counts the copies a fixed register forces when it compares its answer with the linear scan, and moves values tied in one register together, so a dispatch loop ending in tail calls keeps its arguments in place and calls through its table in one instruction, 2.6% fewer instructions across the corpus and 0.5% on SQLite (#3562).
