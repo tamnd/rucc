@@ -209,12 +209,28 @@ void layer(int k) {
 }
 ";
 
+/// Two cleanups of other types and two calls, so that the call in the first cleanup of the pad
+/// unwinds into a pad of its own, and the normal path after the second call does too.
+const MIXED: &str = "\
+int printf(const char *, ...);
+void deep(int k);
+static void wide(double *p) { printf(\"%g\\n\", *p); }
+static void long_one(long *p) { printf(\"%ld\\n\", *p); }
+void layer(int k, double x, long y) {
+    double a __attribute__((cleanup(wide))) = x * 2;
+    long b __attribute__((cleanup(long_one))) = y + k;
+    deep(k);
+    deep(k + 1);
+}
+";
+
 #[test]
 fn a_pad_can_read_what_was_made_before_the_call() {
     for target in [TARGET, "aarch64-unknown-linux-gnu"] {
         for level in ["-O1", "-O2"] {
-            let what = format!("pad-{}{level}", &target[..3]);
-            let text = asm(&what, &[&format!("--target={target}"), level, "-fexceptions"], CLEANUP);
+            let flags = [format!("--target={target}"), level.to_owned(), "-fexceptions".to_owned()];
+            let flags: Vec<&str> = flags.iter().map(String::as_str).collect();
+            let text = asm(&format!("pad-{}{level}", &target[..3]), &flags, CLEANUP);
             let lines = body(&text, "layer");
             assert!(lines.iter().any(|l| l.starts_with(".cfi_lsda")), "{target} {level}:\n{text}");
             assert_eq!(
@@ -222,6 +238,9 @@ fn a_pad_can_read_what_was_made_before_the_call() {
                 4,
                 "{target} {level}: the two cleanups on each path\n{text}"
             );
+            let text = asm(&format!("mixed-{}{level}", &target[..3]), &flags, MIXED);
+            let lines = body(&text, "layer");
+            assert!(lines.iter().any(|l| l.starts_with(".cfi_lsda")), "{target} {level}:\n{text}");
         }
     }
 }

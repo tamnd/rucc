@@ -12,9 +12,10 @@
 //! lowering refused the function. A C file with `-fexceptions`, a `cleanup` attribute and a cleanup
 //! function that can be inlined did not compile at `-O1` and above.
 //!
-//! So each such value is stored to a slot of its own in front of each call that unwinds into the
-//! pad, and the pad loads it back after its `landing`. A value read in a block that only the pad
-//! leads to is the same, since that block is reached from the pad alone. This is what gcc does with
+//! So each such value is stored to a slot of its own where it is made, and each block a pad leads
+//! to loads it back before it reads it. That covers a block after the pad, and a pad that a call
+//! in another pad unwinds into. The slot always holds the value wherever the value is defined, so
+//! a block that the normal path goes through as well can load it too. This is what gcc does with
 //! a value that is live into a landing pad and in no register a call keeps.
 
 use rucc_base::hash::{Map, Set};
@@ -32,44 +33,50 @@ pub fn spill(func: &mut Func, word: u32) {
             func.insts(block).next().is_some_and(|first| func[first].opcode == Opcode::Landing)
         })
         .collect();
-    for pad in pads {
-        spill_pad(func, pad, word);
-    }
-}
-
-/// The work of [`spill`] for one pad.
-fn spill_pad(func: &mut Func, pad: Block, word: u32) {
-    let calls = calls_into(func, pad);
-    if calls.is_empty() {
+    if pads.is_empty() {
         return;
     }
-    let region = region(func, pad);
+    let after = reach(func, &pads);
+    let calls: Set<Inst> = pads.iter().flat_map(|&pad| calls_into(func, pad)).collect();
     let mut wanted: Vec<Value> = Vec::new();
-    for &block in &region {
-        for inst in func.insts(block).collect::<Vec<Inst>>() {
-            let mut read: Vec<Value> = func[func[inst].args].to_vec();
-            for call in func.successors(inst).collect::<Vec<_>>() {
-                read.extend_from_slice(&func[call.args]);
+    let mut index: Map<Value, usize> = Map::default();
+    let mut readers: Vec<(Block, Vec<Value>)> = Vec::new();
+    for &block in &after.found {
+        let mut read = Vec::new();
+        for value in reads(func, block) {
+            if read.contains(&value) || !outside(func, value, &after.seen, &calls) {
+                continue;
             }
-            for value in read {
-                if !wanted.contains(&value) && outside(func, value, &region, &calls) {
-                    wanted.push(value);
-                }
-            }
+            index.entry(value).or_insert_with(|| {
+                wanted.push(value);
+                wanted.len() - 1
+            });
+            read.push(value);
+        }
+        if !read.is_empty() {
+            readers.push((block, read));
         }
     }
     if wanted.is_empty() {
         return;
     }
+    // Where each store goes, found before the slots are made so that a store of a parameter of
+    // the entry block comes after them.
+    let stores: Vec<Inst> = wanted
+        .iter()
+        .map(|&value| match func[value].def {
+            Def::Result { inst, .. } => {
+                func.next_inst(inst).expect("a value is not made by a terminator")
+            }
+            Def::Param { block, .. } => func.insts(block).next().expect("a block has a terminator"),
+        })
+        .collect();
     let entry = func.entry().expect("a function with a pad has a body");
     let top = func.insts(entry).next().expect("the entry block has a terminator");
-    let landing = func.insts(pad).next().expect("a pad starts with its landing");
-    let mut after = landing;
-    let mut loaded = Vec::with_capacity(wanted.len());
+    let mut slots = Vec::with_capacity(wanted.len());
     for &value in &wanted {
-        let ty = func[value].ty;
-        let info = slot(ty, word);
-        let span = func.span(landing);
+        let info = slot(func[value].ty, word);
+        let span = func.span(top);
         let extra = Extra::Mem(func.add_mem(info));
         let made = func.create_inst(
             InstData { extra, ..InstData::new(Opcode::Alloca) },
@@ -77,29 +84,40 @@ fn spill_pad(func: &mut Func, pad: Block, word: u32) {
             span,
         );
         func.insert_before(made, top);
-        let address = func[made].first_result.expect("an alloca has a result");
-        for &call in &calls {
-            let span = func.span(call);
+        slots.push((func[made].first_result.expect("an alloca has a result"), info));
+    }
+    for ((&value, &(address, info)), &before) in wanted.iter().zip(&slots).zip(&stores) {
+        let span = func.span(before);
+        let extra = Extra::Mem(func.add_mem(info));
+        let args = func.push_values(&[value, address]);
+        let store =
+            func.create_inst(InstData { args, extra, ..InstData::new(Opcode::Store) }, &[], span);
+        func.insert_before(store, before);
+    }
+    for (block, read) in readers {
+        let first = func.insts(block).next().expect("a block has a terminator");
+        let mut last = (func[first].opcode == Opcode::Landing).then_some(first);
+        let mut loaded: Vec<(Value, Value)> = Vec::with_capacity(read.len());
+        for value in read {
+            let (address, info) = slots[index[&value]];
+            let span = func.span(first);
             let extra = Extra::Mem(func.add_mem(info));
-            let args = func.push_values(&[value, address]);
-            let store = func.create_inst(
-                InstData { args, extra, ..InstData::new(Opcode::Store) },
-                &[],
+            let args = func.push_values(&[address]);
+            let load = func.create_inst(
+                InstData { args, extra, ..InstData::new(Opcode::Load) },
+                &[func[value].ty],
                 span,
             );
-            func.insert_before(store, call);
+            match last {
+                Some(at) => func.insert_after(load, at),
+                None => func.insert_before(load, first),
+            }
+            last = Some(load);
+            loaded.push((value, func[load].first_result.expect("a load has a result")));
         }
-        let extra = Extra::Mem(func.add_mem(info));
-        let args = func.push_values(&[address]);
-        let load =
-            func.create_inst(InstData { args, extra, ..InstData::new(Opcode::Load) }, &[ty], span);
-        func.insert_after(load, after);
-        after = load;
-        loaded.push(func[load].first_result.expect("a load has a result"));
-    }
-    let with =
-        |value: Value| wanted.iter().position(|&w| w == value).map_or(value, |at| loaded[at]);
-    for &block in &region {
+        let with = |value: Value| {
+            loaded.iter().find(|&&(from, _)| from == value).map_or(value, |&(_, to)| to)
+        };
         for inst in func.insts(block).collect::<Vec<Inst>>() {
             let args = func[inst].args;
             func.rewrite(args, with);
@@ -108,6 +126,18 @@ fn spill_pad(func: &mut Func, pad: Block, word: u32) {
             }
         }
     }
+}
+
+/// The values an instruction of the block reads, with the arguments it passes to a block.
+fn reads(func: &Func, block: Block) -> Vec<Value> {
+    let mut read = Vec::new();
+    for inst in func.insts(block) {
+        read.extend_from_slice(&func[func[inst].args]);
+        for call in func.successors(inst) {
+            read.extend_from_slice(&func[call.args]);
+        }
+    }
+    read
 }
 
 /// The calls whose unwind edge goes to the pad.
@@ -136,41 +166,38 @@ fn calls_into(func: &Func, pad: Block) -> Vec<Inst> {
     calls
 }
 
-/// The pad and every block that only the pad leads to.
-fn region(func: &Func, pad: Block) -> Vec<Block> {
-    let mut preds: Map<Block, Vec<Block>> = Map::default();
-    for block in func.blocks() {
-        let Some(term) = func.terminator(block) else { continue };
-        for call in func.successors(term) {
-            preds.entry(call.block).or_default().push(block);
-        }
-    }
-    let mut region = vec![pad];
-    let mut inside: Set<Block> = Set::default();
-    inside.insert(pad);
+/// The pads and every block a pad leads to, in the order they are found and as a set.
+struct Reach {
+    found: Vec<Block>,
+    seen: Set<Block>,
+}
+
+/// The pads and every block a pad leads to.
+fn reach(func: &Func, pads: &[Block]) -> Reach {
+    let mut found = pads.to_vec();
+    let mut seen: Set<Block> = pads.iter().copied().collect();
     let mut at = 0;
-    while at < region.len() {
-        let block = region[at];
+    while at < found.len() {
+        let block = found[at];
         at += 1;
         let Some(term) = func.terminator(block) else { continue };
         for call in func.successors(term).collect::<Vec<_>>() {
-            let next = call.block;
-            if inside.contains(&next) {
-                continue;
-            }
-            let only = preds.get(&next).is_some_and(|from| from.iter().all(|b| inside.contains(b)));
-            if only {
-                inside.insert(next);
-                region.push(next);
+            if seen.insert(call.block) {
+                found.push(call.block);
             }
         }
     }
-    region
+    Reach { found, seen }
 }
 
-/// Whether the pad reads this value from before the call, and the lowering cannot make it again
-/// inside the pad, and a slot can hold it.
-fn outside(func: &Func, value: Value, region: &[Block], calls: &[Inst]) -> bool {
+/// Whether a pad reads this value from before the call, the lowering cannot make it again in the
+/// pad, and a slot can hold it.
+///
+/// A value made in a block no pad leads to is live into a pad when a block a pad leads to reads it,
+/// since no path from the pad goes through where it is made. The result of a call that unwinds
+/// into a pad has no value there, and neither has a value made by a terminator or straight before
+/// an `unwound`, which a store cannot follow, so these are left as they were.
+fn outside(func: &Func, value: Value, after: &Set<Block>, calls: &Set<Inst>) -> bool {
     let block = match func[value].def {
         Def::Result { inst, .. } => {
             match func[inst].opcode {
@@ -178,14 +205,18 @@ fn outside(func: &Func, value: Value, region: &[Block], calls: &[Inst]) -> bool 
                 Opcode::Alloca if func[func[inst].args].is_empty() => return false,
                 _ => {}
             }
-            if calls.contains(&inst) {
+            if calls.contains(&inst) || func.is_terminator(inst) {
+                return false;
+            }
+            let next = func.next_inst(inst);
+            if next.is_none_or(|next| func[next].opcode == Opcode::Unwound) {
                 return false;
             }
             func.block_of(inst)
         }
         Def::Param { block, .. } => Some(block),
     };
-    block.is_some_and(|block| !region.contains(&block)) && fits(func[value].ty)
+    block.is_some_and(|block| !after.contains(&block)) && fits(func[value].ty)
 }
 
 /// Whether a slot of the frame holds a value of this type with one load and one store.
@@ -263,36 +294,115 @@ block3:
 }
 "#;
 
-    #[test]
-    fn a_pad_reads_what_it_needs_from_the_frame() {
+    /// `layer` of a C file with two `cleanup` variables once both cleanups are inlined: the
+    /// second call unwinds into a pad of its own, and so does the first cleanup in the first pad.
+    const NESTED: &str = r#"; ModuleID = 't.c'
+; format 0
+target triple = "x86_64-unknown-linux-gnu"
+target datalayout = "e-p:64:64-i64:64-f80:128-S128"
+
+func @deep(i32), linkage(external);
+
+func @f(i32) -> i32, linkage(external);
+
+func @_Unwind_Resume(ptr), linkage(external);
+
+func @layer(i32), linkage(external) {
+block0(%0: i32):
+    %1 = iconst.i32 2
+    %2 = add.nsw %0, %1
+    call @deep(%0) : (i32)
+    %3 = unwound.i1
+    br_if %3, block3, block1
+
+block1:
+    %4 = call @f(%0) : (i32) -> i32
+    %5 = unwound.i1
+    br_if %5, block4, block2
+
+block2:
+    return
+
+block3:
+    %6 = landing.ptr
+    %7 = call @f(%0) : (i32) -> i32
+    %8 = unwound.i1
+    br_if %8, block4, block5
+
+block4:
+    %9 = landing.ptr
+    %10 = call @f(%2) : (i32) -> i32
+    call @_Unwind_Resume(%9) : (ptr)
+    unreachable
+
+block5:
+    %11 = call @f(%2) : (i32) -> i32
+    call @_Unwind_Resume(%6) : (ptr)
+    unreachable
+}
+"#;
+
+    /// The fixture after the step, as text, once it is checked.
+    fn spilled(source: &str) -> String {
         let mut names = Interner::new();
-        let mut module = rucc_ir::parse(LAYER, &mut names).expect("the fixture is IR");
+        let mut module = rucc_ir::parse(source, &mut names).expect("the fixture is IR");
         let id = module.funcs().last().expect("the fixture has a function");
         spill(&mut module[id], 8);
         let func = &module[id];
         rucc_ir::verify_func(&module, func, &names).expect("the rewrite builds valid IR");
-        let text = rucc_ir::print_func(&module, func, &names);
-        // The sum and the argument, each with a slot, a store in front of the call and a load
-        // after the landing. The constant is made again in the pad, so it has none.
+        rucc_ir::print_func(&module, func, &names)
+    }
+
+    /// The names of the values the lines with `what` in them make.
+    ///
+    /// The printer numbers the values again, so the names are read from the text.
+    fn made<'a>(text: &'a str, what: &str) -> Vec<&'a str> {
+        text.lines()
+            .filter(|line| line.contains(what))
+            .filter_map(|line| line.trim().split(' ').next())
+            .collect()
+    }
+
+    /// What each call to `f` from the first pad on reads.
+    fn read_after_pads(text: &str) -> Vec<&str> {
+        text[text.find("landing").expect("the pad is there")..]
+            .lines()
+            .filter_map(|line| line.split("call @f(").nth(1))
+            .filter_map(|rest| rest.split(')').next())
+            .collect()
+    }
+
+    #[test]
+    fn a_pad_reads_what_it_needs_from_the_frame() {
+        let text = spilled(LAYER);
+        // The sum and the argument, each with a slot, a store where it is made and a load after
+        // the landing or at the top of the block after the pad. The constant is made again in the
+        // pad, so it has none.
         assert_eq!(text.matches("= alloca").count(), 2, "{text}");
         assert_eq!(text.matches("store").count(), 2, "{text}");
         assert_eq!(text.matches("= load").count(), 2, "{text}");
-        let pad = &text[text.find("landing").expect("the pad is there")..];
         let entry = &text[..text.find("landing").expect("the pad is there")];
-        assert!(entry.find("store").unwrap() < entry.find("call @deep").unwrap(), "{text}");
-        // The printer numbers the values again, so the names are read from the text. Each call
-        // in the pad and after it reads a load, except the one that reads the constant.
-        let name = |line: &str| line.trim().split(' ').next().unwrap_or_default().to_owned();
-        let constant = text.lines().find(|l| l.contains("iconst")).map(name).unwrap();
-        let loads: Vec<String> = text.lines().filter(|l| l.contains("= load")).map(name).collect();
-        let read: Vec<&str> = pad
-            .lines()
-            .filter_map(|l| l.split("call @f(").nth(1))
-            .map(|rest| rest.split(')').next().unwrap_or_default())
-            .collect();
+        assert!(entry.rfind("store").unwrap() < entry.find("call @deep").unwrap(), "{text}");
+        let constant = made(&text, "iconst")[0];
+        let loads = made(&text, "= load");
+        let read = read_after_pads(&text);
         assert_eq!(read.len(), 3, "{text}");
         assert_eq!(read.iter().filter(|&&r| r == constant).count(), 1, "{text}");
-        assert!(read.iter().all(|r| *r == constant || loads.iter().any(|l| l == r)), "{text}");
+        assert!(read.iter().all(|r| *r == constant || loads.contains(r)), "{text}");
+    }
+
+    /// A pad that a call in another pad unwinds into reads the slot as well, and the first pad
+    /// has nothing new to read.
+    #[test]
+    fn a_pad_that_a_pad_unwinds_into_reads_the_frame_too() {
+        let text = spilled(NESTED);
+        assert_eq!(text.matches("= alloca").count(), 2, "{text}");
+        assert_eq!(text.matches("store").count(), 2, "{text}");
+        assert_eq!(text.matches("= load").count(), 3, "{text}");
+        let loads = made(&text, "= load");
+        let read = read_after_pads(&text);
+        assert_eq!(read.len(), 3, "{text}");
+        assert!(read.iter().all(|r| loads.contains(r)), "{text}");
     }
 
     /// A function with no pad is left as it was.
