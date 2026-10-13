@@ -153,52 +153,9 @@ const ROUNDS: u32 = 8;
 /// does, gets the same treatment here.
 const SMALL: u64 = 64;
 
-/// The names a fold may leave behind, sorted.
-const REPLACEMENTS: [&str; 16] = [
-    "__memcpy_chk",
-    "ceilf",
-    "floorf",
-    "fputc",
-    "fputs",
-    "fwrite",
-    "memcpy",
-    "nearbyintf",
-    "putchar",
-    "puts",
-    "rintf",
-    "roundf",
-    "strchr",
-    "strcpy",
-    "strlen",
-    "truncf",
-];
-
-/// The names a checking call may become once its check cannot fail, sorted.
-///
-/// These are not in [`REPLACEMENTS`] because what a call to one of them looks like is read off the
-/// call it replaces rather than written down here. Half of them are variadic or take a `va_list`,
-/// and what a `va_list` is travels with the target, so the one signature that is right is the one
-/// the checking call already had with the checking arguments taken out of it.
-const UNCHECKED: [&str; 18] = [
-    "__memcpy_chk",
-    "__strcat_chk",
-    "__strcpy_chk",
-    "__strncpy_chk",
-    "memcpy",
-    "memmove",
-    "mempcpy",
-    "memset",
-    "snprintf",
-    "sprintf",
-    "stpcpy",
-    "stpncpy",
-    "strcat",
-    "strcpy",
-    "strncat",
-    "strncpy",
-    "vsnprintf",
-    "vsprintf",
-];
+// The names a fold may leave behind, and the names a checking call may become once its check
+// cannot fail. In the IR crate because lowering asks about them as well.
+use rucc_ir::{LIBCALL_REPLACEMENTS as REPLACEMENTS, LIBCALL_UNCHECKED as UNCHECKED};
 
 /// The names a fold reads, sorted.
 const SOURCES: [&str; 57] = [

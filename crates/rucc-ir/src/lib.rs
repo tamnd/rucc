@@ -81,6 +81,57 @@ pub const MILESTONE: &str = "M2";
 /// can act on rather than with a parse error twenty lines in.
 pub const FORMAT_VERSION: u32 = 0;
 
+/// The names a library call fold may leave behind, sorted.
+///
+/// Here rather than beside the folds because lowering asks as well. A declaration of one of these
+/// is what decides the signature a call the fold makes has to carry, so it stays in the module
+/// even where nothing in the file calls it by name.
+pub const LIBCALL_REPLACEMENTS: [&str; 16] = [
+    "__memcpy_chk",
+    "ceilf",
+    "floorf",
+    "fputc",
+    "fputs",
+    "fwrite",
+    "memcpy",
+    "nearbyintf",
+    "putchar",
+    "puts",
+    "rintf",
+    "roundf",
+    "strchr",
+    "strcpy",
+    "strlen",
+    "truncf",
+];
+
+/// The names a checking call may become once its check cannot fail, sorted.
+///
+/// These are not in [`LIBCALL_REPLACEMENTS`] because what a call to one of them looks like is read
+/// off the call it replaces rather than written down. Half of them are variadic or take a
+/// `va_list`, and what a `va_list` is travels with the target, so the one signature that is right
+/// is the one the checking call already had with the checking arguments taken out of it.
+pub const LIBCALL_UNCHECKED: [&str; 18] = [
+    "__memcpy_chk",
+    "__strcat_chk",
+    "__strcpy_chk",
+    "__strncpy_chk",
+    "memcpy",
+    "memmove",
+    "mempcpy",
+    "memset",
+    "snprintf",
+    "sprintf",
+    "stpcpy",
+    "stpncpy",
+    "strcat",
+    "strcpy",
+    "strncat",
+    "strncpy",
+    "vsnprintf",
+    "vsprintf",
+];
+
 /// The routine that runs a C function's landing pads, which is libgcc's. See [`Opcode::Landing`].
 pub const PERSONALITY: &str = "__gcc_personality_v0";
 

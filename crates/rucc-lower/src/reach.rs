@@ -211,6 +211,7 @@ impl Reach<'_> {
             self.stmt(body);
         }
         if let Some(handler) = cleanup {
+            self.named.insert(handler);
             self.mark(handler);
         }
     }
