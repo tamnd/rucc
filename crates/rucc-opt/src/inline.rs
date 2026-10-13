@@ -43,7 +43,9 @@
 //! What is left is the out of line copy of a function that still holds either of them, which is a
 //! function nothing can emit. It becomes a declaration, which is gcc's answer too: gcc emits nothing
 //! for an inline definition, so a call the inliner left goes to whatever the rest of the program
-//! defines under the name, which for a glibc wrapper is the library function. A function marked
+//! defines under the name, which for a glibc wrapper is the library function. A `static` one that
+//! nothing reaches goes the same way, and one that something still reaches is left for the driver
+//! to refuse, since nothing else defines the name and gcc refuses it too. A function marked
 //! `inline_only` goes the same way whatever it holds, because its body was only ever here to be
 //! inlined: it is an `extern inline` under GNU's reading, and its external definition is somewhere
 //! else in the program.
@@ -3714,21 +3716,38 @@ pub fn read_only(module: &mut Module) {
 
 /// Turns every function that still holds a `va_arg_pack` or a `va_arg_pack_len`, and every one
 /// marked `inline_only`, into a declaration of the same name.
+///
+/// Except a `static` one that holds either and that something still reaches, by a call that
+/// stayed a call or by its address. There is no definition elsewhere for a declaration of that
+/// to name, so it is left as it is, for the driver to refuse in gcc's words.
 fn withdraw(module: &mut Module) {
+    let (calls, elsewhere) = references(module);
     for id in module.funcs().collect::<Vec<FuncId>>() {
         let func = &module[id];
         if func.is_declaration() {
             continue;
         }
-        let holds = func
-            .blocks()
-            .flat_map(|block| func.insts(block))
-            .any(|inst| matches!(func[inst].opcode, Opcode::VaArgPack | Opcode::VaArgPackLen));
-        if !holds && !func.attrs.set.contains(AttrSet::INLINE_ONLY) {
+        let only = func.attrs.set.contains(AttrSet::INLINE_ONLY);
+        if !only && !holds_pack(func) {
+            continue;
+        }
+        let reached = func.attrs.set.contains(AttrSet::USED)
+            || calls.contains_key(&func.name)
+            || elsewhere.contains(&func.name);
+        if !only && func.linkage == Linkage::Internal && reached {
             continue;
         }
         module[id] = declaration(func);
     }
+}
+
+/// Whether the function holds a `va_arg_pack` or a `va_arg_pack_len`, which only an inlined copy
+/// of it can fill in.
+#[must_use]
+pub fn holds_pack(func: &Func) -> bool {
+    func.blocks()
+        .flat_map(|block| func.insts(block))
+        .any(|inst| matches!(func[inst].opcode, Opcode::VaArgPack | Opcode::VaArgPackLen))
 }
 
 /// A declaration of that function under the same name, with no body and nothing to emit.
@@ -4510,6 +4529,36 @@ block0(%0: i64, %1: f64):
         let g = &out[out.find("func @g").expect("g is there")..];
         assert!(g.contains("iconst.i32 2"), "{out}");
         assert!(!g.contains("call @wrap"), "{out}");
+    }
+
+    /// A `static` function holding a pack goes once every call to it is in, and stays as it is
+    /// while something still reaches it, since no declaration of it could name anything else.
+    #[test]
+    fn a_static_pack_is_dropped_once_nothing_reaches_it_and_kept_while_something_does() {
+        let body = r#"
+func @wrap(i32, ...) -> i32, linkage(internal), attrs(always_inline) {
+block0(%0: i32):
+    %1 = va_arg_pack_len.i32
+    return %1
+}
+
+func @g(i64) -> i32, linkage(external) {
+block0(%0: i64):
+    %1 = iconst.i32 7
+    %2 = call @wrap(%1, %0) : (i32, ...) -> i32
+    return %2
+}
+"#;
+        let out = inlined(body);
+        assert!(!out.contains("va_arg_pack"), "{out}");
+        assert!(!out.contains("call @wrap"), "{out}");
+        let taken = inlined(&format!(
+            "{body}\nfunc @h() -> ptr, linkage(external) {{\nblock0:\n    \
+             %0 = global_addr @wrap\n    return %0\n}}\n"
+        ));
+        let wrap = &taken[taken.find("func @wrap").expect("wrap is there")..];
+        assert!(wrap.contains("linkage(internal)"), "{taken}");
+        assert!(wrap.contains("va_arg_pack_len"), "{taken}");
     }
 
     /// A function declared `inline`, which is a call left alone at `-O0` and inlined above it.

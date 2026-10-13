@@ -1141,6 +1141,12 @@ fn optimize(
     if !report.broke.is_empty() {
         return Err(report.broke.iter().map(|why| internal(why)).collect());
     }
+    // Before the back end, which has nothing to make of either, and after the inliner has filled
+    // in every copy it could. See `crate::notice`.
+    let unfilled = crate::notice::unfilled_packs(module);
+    if !unfilled.is_empty() {
+        return Err(unfilled);
+    }
     // Last, where gcc puts it, so a block the optimizer merged away gets no call of its own. See
     // `rucc_opt::sancov`.
     let how =

@@ -14,14 +14,56 @@
 //! Only a function something can still reach is asked about. A `static` function every call to
 //! which was inlined is not emitted by gcc, and the call in its body is not a call the program
 //! makes, so reporting it would be a message about code that does not exist.
+//!
+//! The argument pack pair is asked about here as well, for the same reason: gcc refuses
+//! `__builtin_va_arg_pack ()` only in a body it compiles, so whether a `static` function holding
+//! one is an error is known once the inliner has filled in every copy of it that it could.
 
 use rucc_base::hash::Set;
 use rucc_base::{Interner, Symbol};
 use rucc_diag::Diagnostic;
-use rucc_ir::{AttrSet, Datum, Extra, Func, Linkage, Module, SymbolRef};
+use rucc_ir::{AttrSet, Datum, Extra, Func, Linkage, Module, Opcode, SymbolRef};
 
 /// The code both messages carry.
 const CODE: &str = "E0752";
+
+/// The code of a `va_arg_pack` or a `va_arg_pack_len` left in a body that is compiled.
+const UNFILLED: &str = "E0860";
+
+/// gcc's error for each `va_arg_pack` and `va_arg_pack_len` still in a definition once the
+/// optimizer is done, in the order the functions and their instructions are in.
+///
+/// `rucc_opt::inline` fills them in wherever it copies the body into a caller, and takes away the
+/// copy out of line where nothing else could reach it. One that is left is a `static` function
+/// whose address was taken or a call to which could not be inlined, and nothing could compile it,
+/// since what the pack stands for is the arguments of a call it is not in.
+pub(crate) fn unfilled_packs(module: &Module) -> Vec<Diagnostic> {
+    let mut said = Vec::new();
+    for id in module.funcs() {
+        let func = &module[id];
+        if func.is_declaration() || !rucc_opt::inline::holds_pack(func) {
+            continue;
+        }
+        let insts: Vec<_> = func.blocks().flat_map(|block| func.insts(block)).collect();
+        for &inst in &insts {
+            let (name, at) = match func[inst].opcode {
+                // gcc says it of the call the pack is an argument of, which is where it finds it.
+                Opcode::VaArgPack => {
+                    let pack: Vec<_> = func[inst].results().collect();
+                    let call = insts
+                        .iter()
+                        .find(|&&user| func[func[user].args].iter().any(|v| pack.contains(v)));
+                    ("__builtin_va_arg_pack", func.span(*call.unwrap_or(&inst)))
+                }
+                Opcode::VaArgPackLen => ("__builtin_va_arg_pack_len", func.span(inst)),
+                _ => continue,
+            };
+            let what = format!("invalid use of '{name} ()'");
+            said.push(Diagnostic::error(what, at).with_code(UNFILLED));
+        }
+    }
+    said
+}
 
 /// One diagnostic for each message a call still in the module asks for, in the order the
 /// functions and their calls are in.
@@ -105,7 +147,7 @@ mod tests {
     use rucc_base::Interner;
     use rucc_ir::SymbolRef;
 
-    use super::surviving_calls;
+    use super::{surviving_calls, unfilled_packs};
 
     const TEXT: &str = r#"; ModuleID = 't.c'
 ; format 0
@@ -163,6 +205,45 @@ block0:
             [
                 "call to 'meh' declared with attribute warning: no meh",
                 "call to 'bad' declared with attribute error: no bad",
+            ]
+        );
+    }
+
+    /// Each of the pair is refused where it is, in each body that still holds one, and a
+    /// declaration holds nothing to refuse.
+    #[test]
+    fn a_pack_left_in_a_body_is_refused_in_gccs_words() {
+        let text = r#"; ModuleID = 't.c'
+; format 0
+target triple = "x86_64-unknown-linux-gnu"
+target datalayout = "e-p:64:64-i64:64-f80:128-S128"
+
+func @sink(i32, ...) -> i32, linkage(external);
+
+func @say(i32, ...) -> i32, linkage(internal) {
+block0(%0: i32):
+    %1 = va_arg_pack_len.i32
+    %2 = va_arg_pack.i32
+    %3 = call @sink(%1, %2) : (i32, ...) -> i32
+    return %3
+}
+
+func @g() -> i32, linkage(external) {
+block0:
+    %0 = iconst.i32 1
+    %1 = call @say(%0) : (i32, ...) -> i32
+    return %1
+}
+"#;
+        let mut names = Interner::new();
+        let module = rucc_ir::parse(text, &mut names).expect("the fixture is IR");
+        let said: Vec<String> =
+            unfilled_packs(&module).into_iter().map(|diag| diag.message).collect();
+        assert_eq!(
+            said,
+            [
+                "invalid use of '__builtin_va_arg_pack_len ()'",
+                "invalid use of '__builtin_va_arg_pack ()'",
             ]
         );
     }

@@ -483,8 +483,9 @@ impl Checker<'_> {
         if emitted {
             self.sse_refused_definition(merged, name, span);
         }
+        let forwards = !emitted || self.tast[id].linkage == Linkage::Internal;
         let outer = self.defining.replace(id);
-        let (stmt, params) = self.function_body(ty, name, span, params, body, emitted);
+        let (stmt, params) = self.function_body(ty, name, span, params, body, forwards);
         self.defining = outer;
         let mut node = self.tast[id].clone();
         node.params = params;
@@ -576,9 +577,9 @@ impl Checker<'_> {
     /// not, so the body's own compound statement is walked here rather than through the statement
     /// that would open a scope of its own.
     ///
-    /// `emitted` says whether a definition of this function is emitted, which the body carries so
-    /// that the argument pack builtins can ask: they stand in a body nothing emits and nowhere
-    /// else.
+    /// `forwards` says whether a call to this function is only reached by inlining it, which the
+    /// body carries so that the argument pack builtins can ask: they stand in such a body and
+    /// nowhere else. See [`Enclosing::forwards`].
     fn function_body(
         &mut self,
         ty: TypeId,
@@ -586,7 +587,7 @@ impl Checker<'_> {
         span: Span,
         params: ast::ParamList,
         body: ast::StmtId,
-        emitted: bool,
+        forwards: bool,
     ) -> (crate::stmt::StmtId, DeclList) {
         let (ret, variadic) = match self.types.kind(self.types.canonical(ty)) {
             TypeKind::Function(signature) => {
@@ -614,7 +615,7 @@ impl Checker<'_> {
             last_param,
             params,
             name,
-            emitted,
+            forwards,
         });
         let stmt = self.body_block(body);
         self.close_body(previous);
