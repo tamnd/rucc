@@ -19,6 +19,10 @@ All notable changes are recorded here. The format follows [Keep a Changelog](htt
 - The lexer interns an ASCII spelling without the full UTF-8 check, and the driver tries the file the last expanded token came from before searching every file, which takes duktape's `duk_hstring_assert.c` at `-O2` from 465.4M to 453.7M instructions (#3572).
 - The macro expander emits arguments from where they are rather than from a copy, drops placemarkers in place, and keeps an invocation's arguments in one list, which takes duktape's `duk_hstring_assert.c` at `-O2` from 453.4M to 442.5M instructions (#3573).
 
+### Fixed
+
+- The 7.2.8 allmodconfig and fedora-44 kernels build again. The assembler reads `ljmp %cs:*(%eax)` from the Hyper-V crash trampoline, the encoder has `adcx`, `adox` and `mulx` for curve25519 and `vmovntdqa` for nft_set_pipapo_avx2, and the optimizer folds a load that covers two members of a `const` table, so the `BUILD_BUG_ON` on `x86_feature_cpuid` in KVM's svm/pmu.c is decided as gcc decides it (#3574).
+
 ## 0.30.1
 
 This is a patch release. It makes the i386 code of the 32 bit kernel closer to gcc, it makes the optimizer faster on lvm.c and zstd_compress.c, and it fixes the kernel tests `__is_constexpr` and `__is_const_zero`. An enumerator in a function body can read a `const` object at `-O2`, as gcc allows. On i386, a `long long` compare, a constant store and a store of an address now use the instructions that gcc uses, and the register allocator can use more registers. A function that restores two or more registers returns from one block, and the stack protector check compares the canary in memory, as gcc does.

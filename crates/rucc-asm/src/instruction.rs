@@ -1461,6 +1461,16 @@ fn operand(text: &str, mode: Mode) -> Result<Operand, String> {
             return operand(&joined, mode);
         }
     }
+    // gas also takes the star behind a segment override, so `%cs:*(%eax)` is `*%cs:(%eax)`. The
+    // kernel's Hyper-V crash trampoline writes `ljmp %cs:*(%eax)`.
+    if let Some((segment, rest)) = text.split_once(':') {
+        let segment = segment.trim();
+        if let Some(rest) = rest.trim_start().strip_prefix('*') {
+            if matches!(segment, "%cs" | "%ds" | "%es" | "%fs" | "%gs" | "%ss") {
+                return operand(&format!("*{segment}:{}", rest.trim_start()), mode);
+            }
+        }
+    }
     // A jump or a call through a register or through memory, which is the same operand as any
     // other and a different instruction from a jump to a name. The star is how AT&T says which.
     if let Some(rest) = text.strip_prefix('*') {
@@ -3345,6 +3355,13 @@ mod tests {
             ("lcallq *8(%rsp)", &[0x48, 0xff, 0x5c, 0x24, 0x08]),
             ("lcallw *(%rax)", &[0x66, 0xff, 0x18]),
             ("ljmpw *8(%rsp)", &[0x66, 0xff, 0x6c, 0x24, 0x08]),
+            ("ljmp %cs:*(%rax)", &[0x2e, 0xff, 0x28]),
+            ("call %fs:*8(%rax)", &[0x64, 0xff, 0x50, 0x08]),
+            ("adcx %r11, %rax", &[0x66, 0x49, 0x0f, 0x38, 0xf6, 0xc3]),
+            ("mulx %rcx, %rax, %rdx", &[0xc4, 0xe2, 0xfb, 0xf6, 0xd1]),
+            ("mulxq 8(%rsi), %rbx, %r13", &[0xc4, 0x62, 0xe3, 0xf6, 0x6e, 0x08]),
+            ("adox 8(%rsi), %r8", &[0xf3, 0x4c, 0x0f, 0x38, 0xf6, 0x46, 0x08]),
+            ("vmovntdqa (%rax), %ymm0", &[0xc4, 0xe2, 0x7d, 0x2a, 0x00]),
             ("lret", &[0xcb]),
             ("lretq", &[0x48, 0xcb]),
             ("lret $8", &[0xca, 0x08, 0x00]),

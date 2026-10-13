@@ -1535,6 +1535,14 @@ static ENCODINGS: &[Encoding] = &[
     third("sarxq", &RMR, SingleQuad, Map::Escape38, &[0xF7], 0, pair(1, 2)),
     third("shrxl", &RMR, Double, Map::Escape38, &[0xF7], 0, pair(1, 2)),
     third("shrxq", &RMR, DoubleQuad, Map::Escape38, &[0xF7], 0, pair(1, 2)),
+    // The multiply of BMI2, which reads `rdx` and the source and writes the high half and the low
+    // half to two registers of its own, with the flags left alone. AT&T writes the source, then
+    // the low half, then the high half, so the low half goes in the prefix and the high half in
+    // the addressing byte. The kernel's curve25519 writes it beside the two adds of ADX.
+    third("mulxl", &RRR, Double, Map::Escape38, &[0xF6], 1, pair(0, 2)),
+    third("mulxq", &RRR, DoubleQuad, Map::Escape38, &[0xF6], 1, pair(0, 2)),
+    third("mulxl", &MRR, Double, Map::Escape38, &[0xF6], 1, pair(0, 2)),
+    third("mulxq", &MRR, DoubleQuad, Map::Escape38, &[0xF6], 1, pair(0, 2)),
     // The comparison, which is the eighth of the ones that share an opcode column and is written
     // the same way round as the subtraction it is.
     bytes("cmpb", &RR, Byte, &[0x38], pair(1, 0), NO_IMM),
@@ -1825,6 +1833,18 @@ static ENCODINGS: &[Encoding] = &[
     bytes("popcntq", &RR, SingleQuad, &[0x0F, 0xB8], pair(0, 1), NO_IMM),
     bytes("popcntl", &MR, Single, &[0x0F, 0xB8], pair(0, 1), NO_IMM),
     bytes("popcntq", &MR, SingleQuad, &[0x0F, 0xB8], pair(0, 1), NO_IMM),
+    // The two adds of ADX, which add with the carry flag or with the overflow flag and change no
+    // other flag, so that two chains of adds can run at the same time. The prefix is what tells
+    // the two apart, `0x66` for the carry and `0xF3` for the overflow. The kernel's curve25519
+    // writes both.
+    bytes("adcxl", &RR, Word, &[0x0F, 0x38, 0xF6], pair(0, 1), NO_IMM),
+    bytes("adcxq", &RR, WordQuad, &[0x0F, 0x38, 0xF6], pair(0, 1), NO_IMM),
+    bytes("adcxl", &MR, Word, &[0x0F, 0x38, 0xF6], pair(0, 1), NO_IMM),
+    bytes("adcxq", &MR, WordQuad, &[0x0F, 0x38, 0xF6], pair(0, 1), NO_IMM),
+    bytes("adoxl", &RR, Single, &[0x0F, 0x38, 0xF6], pair(0, 1), NO_IMM),
+    bytes("adoxq", &RR, SingleQuad, &[0x0F, 0x38, 0xF6], pair(0, 1), NO_IMM),
+    bytes("adoxl", &MR, Single, &[0x0F, 0x38, 0xF6], pair(0, 1), NO_IMM),
+    bytes("adoxq", &MR, SingleQuad, &[0x0F, 0x38, 0xF6], pair(0, 1), NO_IMM),
     // One step of the CRC-32C checksum, which is SSE4.2 and is what `_mm_crc32_u8` and its three
     // wider siblings are. The destination is the running checksum and the source is the next one,
     // two, four or eight bytes of data, so the letter is the width of the source and not of the
@@ -3384,6 +3404,15 @@ static ENCODINGS: &[Encoding] = &[
     // A store that goes around the cache, which is VEX encoded for an `xmm` or a `ymm` below the
     // sixteenth and EVEX otherwise.
     evex("vmovntdq", &VM, Word, &[0xE7], pair(1, 0), Evex::new(Map::Escape, false).or_vex(false)),
+    // The load that goes around the cache, which is the same pair of encodings in the other map.
+    evex(
+        "vmovntdqa",
+        &MV,
+        Word,
+        &[0x2A],
+        pair(0, 1),
+        Evex::new(Map::Escape38, false).or_vex(false),
+    ),
     evex("vmovdqu8", &VV, Double, &[0x6F], pair(0, 1), Evex::new(Map::Escape, false)),
     evex("vmovdqu8", &MV, Double, &[0x6F], pair(0, 1), Evex::new(Map::Escape, false)),
     evex("vmovdqu8", &VM, Double, &[0x7F], pair(1, 0), Evex::new(Map::Escape, false)),
@@ -6429,6 +6458,23 @@ mod tests {
         assert_eq!(hex("crc32b", &[byte(RSI), long(RAX)]), "f2 40 0f 38 f0 c6");
         assert_eq!(hex("crc32w", &[word(RCX), long(RAX)]), "66 f2 0f 38 f1 c1");
         assert_eq!(hex("crc32w", &[word(R9), long(R10)]), "66 f2 45 0f 38 f1 d1");
+        // The multiply of BMI2, with two registers written and the source read from a register or
+        // from memory.
+        assert_eq!(hex("mulxq", &[quad(RAX), quad(R8), quad(R9)]), "c4 62 bb f6 c8");
+        assert_eq!(hex("mulxq", &[quad(RCX), quad(RAX), quad(RDX)]), "c4 e2 fb f6 d1");
+        assert_eq!(hex("mulxl", &[long(RCX), long(RAX), long(RDX)]), "c4 e2 7b f6 d1");
+        let from = Addr { base: Some(RSI), disp: 8, ..Addr::default() };
+        assert_eq!(hex("mulxq", &[Value::Mem(from), quad(RBX), quad(R13)]), "c4 62 e3 f6 6e 08");
+        assert_eq!(hex("mulxl", &[Value::Mem(counted), long(R10), long(R11)]), "c4 62 2b f6 1b");
+        // The two adds of ADX, which differ only in the prefix.
+        assert_eq!(hex("adcxl", &[long(RCX), long(RAX)]), "66 0f 38 f6 c1");
+        assert_eq!(hex("adcxq", &[quad(R11), quad(RAX)]), "66 49 0f 38 f6 c3");
+        let eight = Addr { base: Some(RSI), disp: 8, ..Addr::default() };
+        assert_eq!(hex("adcxq", &[Value::Mem(eight), quad(R8)]), "66 4c 0f 38 f6 46 08");
+        assert_eq!(hex("adcxq", &[Value::Mem(counted), quad(RAX)]), "66 48 0f 38 f6 03");
+        assert_eq!(hex("adoxl", &[long(RCX), long(RAX)]), "f3 0f 38 f6 c1");
+        assert_eq!(hex("adoxq", &[quad(RAX), quad(R9)]), "f3 4c 0f 38 f6 c8");
+        assert_eq!(hex("adoxq", &[Value::Mem(counted), quad(RAX)]), "f3 48 0f 38 f6 03");
         assert_eq!(hex("crc32l", &[long(RCX), long(RAX)]), "f2 0f 38 f1 c1");
         assert_eq!(hex("crc32l", &[long(R8), long(RDX)]), "f2 41 0f 38 f1 d0");
         assert_eq!(hex("crc32q", &[quad(RCX), quad(RAX)]), "f2 48 0f 38 f1 c1");
@@ -7043,6 +7089,13 @@ mod tests {
         assert_eq!(hex("vmovntdq", &[z(2), at(RAX, 0)]), "62 f1 7d 48 e7 10");
         assert_eq!(hex("vmovntdq", &[z(17), at(RDX, 64)]), "62 e1 7d 48 e7 4a 01");
         assert_eq!(hex("vmovntdq", &[y(20), at(RAX, 32)]), "62 e1 7d 28 e7 60 01");
+        // The load that goes around the cache, which nft_set_pipapo_avx2 writes.
+        assert_eq!(hex("vmovntdqa", &[at(RAX, 0), y(0)]), "c4 e2 7d 2a 00");
+        assert_eq!(hex("vmovntdqa", &[at(RSI, 0), x(1)]), "c4 e2 79 2a 0e");
+        assert_eq!(hex("vmovntdqa", &[at(R8, 32), y(9)]), "c4 42 7d 2a 48 20");
+        assert_eq!(hex("vmovntdqa", &[at(RAX, 0), z(2)]), "62 f2 7d 48 2a 10");
+        assert_eq!(hex("vmovntdqa", &[at(RDX, 64), z(17)]), "62 e2 7d 48 2a 4a 01");
+        assert_eq!(hex("vmovntdqa", &[at(RAX, 32), y(20)]), "62 e2 7d 28 2a 60 01");
         assert_eq!(hex("vpsraw", &[Value::Imm(7), y(2), y(3)]), "c5 e5 71 e2 07");
         assert_eq!(hex("vpsraw", &[Value::Imm(1), x(9), x(12)]), "c4 c1 19 71 e1 01");
         assert_eq!(hex("vpsraw", &[Value::Imm(3), z(2), z(3)]), "62 f1 65 48 71 e2 03");

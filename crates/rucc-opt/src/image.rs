@@ -93,9 +93,10 @@
 //! to some other type stays what it was. A call made directly is one the inliner can copy, and in
 //! the kernel it is a `call` rather than a call to a retpoline thunk.
 //!
-//! Neither does an access that crosses from one piece of the image into the next, since
-//! bytes spanning two of them are not a scalar either one holds, and neither does a `volatile`
-//! access or an atomic one, whose whole point is that the access happens.
+//! An access that crosses from one piece of the image into the next, or that reads part of an
+//! integer, is read as the bytes it covers. It is not answered when one of those bytes is part of
+//! a floating point number, an address or something else this cannot say. A `volatile` access or
+//! an atomic one is not answered either, since the whole point of one is that the access happens.
 //!
 //! # A copy out of the image
 //!
@@ -570,8 +571,62 @@ impl Images {
     #[must_use]
     pub fn read(&self, name: Symbol, ty: Type, offset: u64) -> Option<Imm> {
         let size = u64::from(ty.bits().div_ceil(8));
-        let (piece, into) = self.piece(name, offset, size)?;
-        piece.read(ty, into, size, self.little_endian)
+        let whole = self.piece(name, offset, size);
+        if let Some(value) =
+            whole.and_then(|(piece, into)| piece.read(ty, into, size, self.little_endian))
+        {
+            return Some(value);
+        }
+        // An access across pieces, or into part of a scalar, is read as the bytes it covers. A
+        // structure of twelve bytes returned by value comes back as an `i64` and an `i32`, so
+        // after inlining the first word of `reverse_cpuid[leaf]` in the kernel's KVM is one load
+        // of two `int` members, and gcc folds the `BUILD_BUG_ON` that reads them.
+        let bytes = self.bytes(name, offset, size)?;
+        Some(number(ty, assemble(&bytes, self.little_endian)))
+    }
+
+    /// The `size` bytes at `offset` into the image of that global, in the order the target keeps
+    /// them, or nothing when some of them are bytes this cannot say.
+    fn bytes(&self, name: Symbol, offset: u64, size: u64) -> Option<Vec<u8>> {
+        let object = self.objects.get(&name)?.as_ref()?;
+        let end = offset.checked_add(size)?;
+        if size == 0 || size > 16 || end > object.size {
+            return None;
+        }
+        let mut out = Vec::with_capacity(usize::try_from(size).ok()?);
+        let mut at = 0u64;
+        for piece in &object.pieces {
+            let width = piece.size();
+            let (from, to) = (at.max(offset), (at + width).min(end));
+            if from < to {
+                let (from, to) = (usize::try_from(from - at).ok()?, usize::try_from(to - at).ok()?);
+                match piece {
+                    Piece::Zero(_) => out.resize(out.len() + (to - from), 0),
+                    Piece::Bytes(bytes) => out.extend_from_slice(bytes.get(from..to)?),
+                    // An integer is held at its own width, so its bytes are its value. A floating
+                    // point number is not read this way, since how its value is held is a question
+                    // of its format.
+                    Piece::Scalar { ty, value }
+                        if ty.is_scalar()
+                            && ty.is_int()
+                            && matches!(ty.bits(), 8 | 16 | 32 | 64) =>
+                    {
+                        let mut held =
+                            value.bits().to_le_bytes()[..usize::try_from(width).ok()?].to_vec();
+                        if !self.little_endian {
+                            held.reverse();
+                        }
+                        out.extend_from_slice(&held[from..to]);
+                    }
+                    Piece::Scalar { .. } | Piece::Address { .. } | Piece::Opaque(_) => return None,
+                }
+            }
+            at += width;
+            if at >= end {
+                break;
+            }
+        }
+        (out.len() as u64 == size).then_some(out)
     }
 
     /// The symbol whose address lies `offset` bytes into the image of that global, for a read of
@@ -957,34 +1012,56 @@ mod tests {
         assert_eq!(read(&mut names, &images, Type::int(64), 8).map(Imm::unsigned), Some(0));
     }
 
-    /// Half of a scalar, which the image cannot answer because it does not hold the scalar as
-    /// bytes and the question is about bytes.
+    /// Part of an integer, which is read as the bytes the integer is held in.
     #[test]
-    fn a_part_of_a_scalar_is_not_read() {
+    fn a_part_of_an_integer_reads_its_bytes() {
         let (mut names, images) = images(|module| {
             vec![Datum::Scalar {
                 ty: Type::int(32),
                 value: module.add_imm(Imm::int(0x0403_0201, Type::int(32))),
             }]
         });
-        assert_eq!(read(&mut names, &images, Type::int(8), 0), None);
-        assert_eq!(read(&mut names, &images, Type::int(16), 2), None);
+        assert_eq!(read(&mut names, &images, Type::int(8), 0).map(Imm::unsigned), Some(1));
+        assert_eq!(read(&mut names, &images, Type::int(16), 2).map(Imm::unsigned), Some(0x0403));
         assert_eq!(
             read(&mut names, &images, Type::int(32), 0).map(Imm::unsigned),
             Some(0x0403_0201)
         );
     }
 
-    /// An access starting in one piece and ending in the next, which is a number neither of them
-    /// holds.
+    /// An access starting in one piece and ending in the next, which reads the bytes of both.
     #[test]
-    fn an_access_that_crosses_from_one_piece_into_the_next_is_not_read() {
+    fn an_access_that_crosses_from_one_piece_into_the_next_reads_both() {
         let (mut names, images) = images(|module| {
             vec![Datum::Bytes(module.push_bytes(&[1, 2])), Datum::Bytes(module.push_bytes(&[3, 4]))]
         });
-        assert_eq!(read(&mut names, &images, Type::int(32), 0), None);
+        assert_eq!(
+            read(&mut names, &images, Type::int(32), 0).map(Imm::unsigned),
+            Some(0x0403_0201)
+        );
         assert_eq!(read(&mut names, &images, Type::int(16), 0).map(Imm::unsigned), Some(0x0201));
         assert_eq!(read(&mut names, &images, Type::int(16), 2).map(Imm::unsigned), Some(0x0403));
+    }
+
+    /// Two `int` members read as one `i64`, which is the first word of a structure of twelve
+    /// bytes returned by value. A floating point member and an address are not read this way.
+    #[test]
+    fn two_integers_read_as_one_wider_load() {
+        let (mut names, images) = images(|module| {
+            let int = |module: &mut Module, value| Datum::Scalar {
+                ty: Type::int(32),
+                value: module.add_imm(Imm::int(value, Type::int(32))),
+            };
+            let float = Datum::Scalar {
+                ty: Type::float(rucc_ir::Float::F32),
+                value: module.add_imm(Imm::from_bits(0)),
+            };
+            vec![int(module, 0x8000_0022), int(module, 0), int(module, 5), float, Datum::Zero(4)]
+        });
+        let mut at = |offset| read(&mut names, &images, Type::int(64), offset).map(Imm::unsigned);
+        assert_eq!(at(0), Some(0x8000_0022));
+        assert_eq!(at(4), Some(0x5_0000_0000));
+        assert_eq!(at(8), None, "half of it is a float");
     }
 
     /// The address of another symbol, which has no value until the link.
