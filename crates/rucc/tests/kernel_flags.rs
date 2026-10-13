@@ -446,3 +446,33 @@ fn a_constant_passed_to_a_parameter_the_callee_asks_about_is_inlined() {
     let out = run(&["--target=x86_64-unknown-linux-gnu", "-O2", "-c", "-o", "/dev/null"], source);
     assert!(out.status.success(), "{}", String::from_utf8_lossy(&out.stderr));
 }
+
+/// `__startup_64` in 6.12 runs at the physical address and reads `ptrs_per_p4d` twice with no
+/// `RIP_REL_REF`, so each read has to come from the instruction pointer, as gcc writes it. An
+/// address kept in a register as `movq $ptrs_per_p4d` is the link address, which is not mapped
+/// yet, and the kernel stopped before it printed anything.
+#[test]
+fn each_read_of_a_global_is_relative_to_the_instruction_pointer_under_the_kernel_model() {
+    let source = "extern unsigned int n;\n\
+        void f(unsigned long *p, unsigned long i, unsigned long v) {\n\
+            p[(i + 0) % n] = v;\n\
+            p[(i + 1) % n] = v;\n\
+        }\n";
+    let out = run(
+        &[
+            "--target=x86_64-unknown-linux-gnu",
+            "-O2",
+            "-mcmodel=kernel",
+            "-fno-PIE",
+            "-fno-strict-aliasing",
+            "-S",
+            "-o",
+            "-",
+        ],
+        source,
+    );
+    assert!(out.status.success(), "{}", String::from_utf8_lossy(&out.stderr));
+    let text = String::from_utf8_lossy(&out.stdout);
+    assert!(!text.contains("$n"), "{text}");
+    assert_eq!(text.matches("n(%rip)").count(), 2, "{text}");
+}

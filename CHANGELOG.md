@@ -24,6 +24,7 @@ All notable changes are recorded here. The format follows [Keep a Changelog](htt
 - The 7.2.8 allmodconfig and fedora-44 kernels build again. The assembler reads `ljmp %cs:*(%eax)` from the Hyper-V crash trampoline, the encoder has `adcx`, `adox` and `mulx` for curve25519 and `vmovntdqa` for nft_set_pipapo_avx2, and the optimizer folds a load that covers two members of a `const` table, so the `BUILD_BUG_ON` on `x86_feature_cpuid` in KVM's svm/pmu.c is decided as gcc decides it (#3574).
 - The attribute checks read each list where it is in the tree rather than from a copy and match on the static name rather than an owned one, and the cached name lookup is inlined, which takes duktape's `duk_hstring_assert.c` at `-O2` from 453.4M to 426.1M instructions (#3576).
 - The interner looks names up in an open addressed table over its own text instead of a map keyed by a boxed copy of each name, which takes 1.4% off a header heavy file like duk_hstring_assert.c at -O2 (#3577).
+- Under `-mcmodel=kernel` each load and store of a global reads the global from the instruction pointer, as gcc does, even when one address feeds several of them. Before, the shared address became `movq $sym`, which is the link address, and the 6.12 kernel stopped at boot because `__startup_64` reads `ptrs_per_p4d` before the kernel is mapped there (#3578).
 
 ## 0.30.1
 
