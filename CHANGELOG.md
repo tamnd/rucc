@@ -28,6 +28,7 @@ All notable changes are recorded here. The format follows [Keep a Changelog](htt
 - Expansion trace steps are shared within one macro expansion instead of through a table over the whole translation unit, which takes 2.1% off the instructions of the header heavy duktape/src-separate/duk_hstring_assert.c (#3579).
 - A computed goto whose address can only be one label is a direct jump to that label, as gcc writes it. The kernel's `drm_exec_retry_on_contention` jumped through the retpoline thunk, and objtool warned four times in drm_exec_test.o that it was a sibling call from a function with a frame (#3580).
 - Lines in a group a conditional skipped are passed over without interning their tokens, which takes 0.8% off the instructions of duktape/src-separate/duk_hstring_assert.c and brings it under gcc (#3581).
+- The lexer inlines the common case of reading a byte, a byte that is itself, and keeps splices and trigraphs out of line, which takes 11.3% off the instructions of duktape/src-separate/duk_unicode_tables.c and 7.6% off duk_hstring_assert.c (#3582).
 
 ## 0.30.1
 

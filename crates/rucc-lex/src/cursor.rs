@@ -76,14 +76,29 @@ impl<'a> Cursor<'a> {
     }
 
     /// The logical byte at `at`, or `None` at end of file.
+    ///
+    /// Everything that is not one of the three interesting bytes is itself, and that is the
+    /// answer for almost every byte of a file, so it is the part inlined into every caller and
+    /// the rest is a call. Out of line as a whole, this was a call for every byte the lexer
+    /// looked at. tamnd/rucc#3052.
+    #[inline]
     pub(crate) fn step_at(&self, at: u32) -> Option<Step> {
+        let b = *self.src.get(at as usize)?;
+        if b != b'\\' && b != b'?' && b != b'\r' {
+            return Some(Step { byte: b, next: at + 1, clean: true });
+        }
+        self.step_slow(at)
+    }
+
+    /// [`Cursor::step_at`] for a byte that may not be itself.
+    #[inline(never)]
+    fn step_slow(&self, at: u32) -> Option<Step> {
         let mut p = at as usize;
         let mut clean = true;
         loop {
             let b = *self.src.get(p)?;
             match b {
-                // Fast path. Everything that is not one of the four interesting bytes is
-                // itself, and this is the branch that runs for almost every byte of a file.
+                // The byte a splice was in front of.
                 _ if b != b'\\' && b != b'?' && b != b'\r' => {
                     return Some(Step { byte: b, next: p as u32 + 1, clean });
                 }
