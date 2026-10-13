@@ -8,12 +8,12 @@
 //! here rather than in `rucc-session` is what keeps the layer rule true: a preprocessor test
 //! is a map from path to bytes and cannot accidentally read the machine it runs on.
 
-use std::ffi::OsString;
+use std::ffi::{OsStr, OsString};
 use std::io;
 use std::path::{Path, PathBuf};
 use std::sync::{Mutex, PoisonError};
 
-use rucc_base::hash::Map;
+use rucc_base::hash::{Map, Set};
 use rucc_diag::{Diagnostic, Severity, SourceBytes, SourceMap};
 use rucc_pp::{Context, Dependency, Predef, Preprocessor, PrintOptions};
 use rucc_session::{FileSystem, Options, Session};
@@ -38,6 +38,103 @@ pub struct OsFileSystem {
     /// Every directory [`OsFileSystem::directory`] has resolved, by the spelling it was asked
     /// about.
     directories: Mutex<Map<OsString, Option<PathBuf>>>,
+    /// What is in each directory a file was not found in, by its spelling.
+    ///
+    /// The cache above stops a path being asked about twice, but an include search asks about
+    /// a different path in every directory on the list, and most of them are not there. On a
+    /// duktape file that was 529 failed opens out of 704, and most of those were for names under
+    /// a directory that does not exist, such as `./bits/types/` once for every header glibc keeps
+    /// there. A directory that has missed once is read, and after that a name its listing does
+    /// not have is not there, and nor is anything under a directory it does not have.
+    listings: Mutex<Map<OsString, Listing>>,
+}
+
+/// What [`OsFileSystem`] knows about the names in one directory.
+///
+/// Every answer that a file is not there carries the error number a real open gave for the miss
+/// that led to it, so the message for it is the one the system would have given.
+#[derive(Debug)]
+enum Listing {
+    /// A file was not found in it once. Reading the whole directory is a few calls, which is
+    /// more than one failed open, so it waits for the second file looked for there.
+    Missed(i32),
+    /// The directory is not there, so nothing under it is.
+    Missing(i32),
+    /// A hash of each name in it, lowercased in ASCII so that a file system that ignores case
+    /// cannot make a name look absent when it is there. Two names with one hash only means an
+    /// open that finds nothing, and keeping hashes rather than names is one allocation a name
+    /// fewer for a directory that can have a thousand.
+    Names(Set<u64>, i32),
+    /// It could not be listed, so every file in it is asked about with an open.
+    Unlisted,
+}
+
+impl Listing {
+    /// Lists `dir`, which has had `code` from a file that was not found in it.
+    fn read(dir: &Path, code: i32) -> Listing {
+        match std::fs::read_dir(dir) {
+            Ok(entries) => {
+                let mut names = Set::default();
+                for entry in entries {
+                    let Ok(entry) = entry else { return Listing::Unlisted };
+                    names.insert(folded(entry.file_name().as_encoded_bytes()));
+                }
+                Listing::Names(names, code)
+            }
+            Err(e) if e.kind() == io::ErrorKind::NotFound => {
+                Listing::Missing(e.raw_os_error().unwrap_or(code))
+            }
+            Err(_) => Listing::Unlisted,
+        }
+    }
+
+    /// The error number for `name`, when this says it is not there.
+    ///
+    /// A name that is not ASCII is always looked for, since a file system may fold its case or
+    /// its normal form in ways a byte compare cannot follow.
+    fn lacks(&self, name: &OsStr) -> Option<i32> {
+        match self {
+            Listing::Missing(code) => Some(*code),
+            Listing::Names(names, code) => {
+                let name = name.as_encoded_bytes();
+                (name.is_ascii() && !names.contains(&folded(name))).then_some(*code)
+            }
+            Listing::Missed(_) | Listing::Unlisted => None,
+        }
+    }
+}
+
+/// A hash of a name with its ASCII letters lowercased.
+fn folded(name: &[u8]) -> u64 {
+    name.iter().fold(0xcbf2_9ce4_8422_2325, |hash, &b| {
+        (hash ^ u64::from(b.to_ascii_lowercase())).wrapping_mul(0x0100_0000_01b3)
+    })
+}
+
+/// The directory a path is in and its last component, with a bare name in `.`.
+///
+/// Cut at the last slash in the bytes rather than through [`Path::parent`] and
+/// [`Path::file_name`], which take the path apart into components from the end, and that was
+/// most of the cost of asking. Only called on Unix, where the slash is the one separator. A
+/// spelling that ends in a slash, a `.` or a `..` gives `None`, and is opened as it always was.
+fn split(path: &Path) -> Option<(&Path, &OsStr)> {
+    let bytes = path.as_os_str().as_encoded_bytes();
+    let (dir, name) = match bytes.iter().rposition(|&b| b == b'/') {
+        Some(0) => (&bytes[..1], &bytes[1..]),
+        Some(at) => (&bytes[..at], &bytes[at + 1..]),
+        None => (&b"."[..], bytes),
+    };
+    if matches!(name, b"" | b"." | b"..") {
+        return None;
+    }
+    // SAFETY: both halves come from cutting an encoded `OsStr` at an ASCII byte, or are ASCII
+    // themselves, which is what the encoding allows to be turned back into an `OsStr`.
+    unsafe {
+        Some((
+            Path::new(OsStr::from_encoded_bytes_unchecked(dir)),
+            OsStr::from_encoded_bytes_unchecked(name),
+        ))
+    }
 }
 
 impl OsFileSystem {
@@ -58,6 +155,51 @@ impl OsFileSystem {
         known.insert(dir.as_os_str().to_owned(), resolved.clone());
         resolved
     }
+
+    /// The error number opening `path` would fail with, when the directories already listed say
+    /// it is not there.
+    ///
+    /// Only on Unix, where a name in a directory is the bytes of the name. Elsewhere a name can
+    /// reach a file it does not spell, through a short name or a trailing dot, and every path is
+    /// opened.
+    fn absent(&self, path: &Path) -> Option<i32> {
+        if !cfg!(unix) {
+            return None;
+        }
+        let (dir, name) = split(path)?;
+        let mut listings = self.listings.lock().unwrap_or_else(PoisonError::into_inner);
+        match listings.get(dir.as_os_str()) {
+            Some(Listing::Missed(code)) => {
+                let listing = Listing::read(dir, *code);
+                listings.insert(dir.as_os_str().to_owned(), listing);
+            }
+            Some(_) => {}
+            None => {
+                // Nothing has been looked for here yet, but the directory above may already
+                // say this one is not there, which is every `bits` on the path but the one
+                // that has it.
+                let (up, below) = split(dir)?;
+                let code = listings.get(up.as_os_str())?.lacks(below)?;
+                listings.insert(dir.as_os_str().to_owned(), Listing::Missing(code));
+                return Some(code);
+            }
+        }
+        listings.get(dir.as_os_str())?.lacks(name)
+    }
+
+    /// Notes that a file was not found in its directory, with the error number it gave.
+    fn missed(&self, path: &Path, code: i32) {
+        if !cfg!(unix) {
+            return;
+        }
+        if let Some((dir, _)) = split(path) {
+            self.listings
+                .lock()
+                .unwrap_or_else(PoisonError::into_inner)
+                .entry(dir.as_os_str().to_owned())
+                .or_insert(Listing::Missed(code));
+        }
+    }
 }
 
 impl FileSystem for OsFileSystem {
@@ -75,11 +217,17 @@ impl FileSystem for OsFileSystem {
         {
             return known.clone().map_err(io::Error::from_raw_os_error);
         }
-        let read = crate::map::read(path);
+        let read = match self.absent(path) {
+            Some(code) => Err(io::Error::from_raw_os_error(code)),
+            None => crate::map::read(path),
+        };
         let known = match &read {
             Ok(bytes) => Ok(bytes.clone()),
             Err(e) if e.kind() == io::ErrorKind::NotFound => match e.raw_os_error() {
-                Some(code) => Err(code),
+                Some(code) => {
+                    self.missed(path, code);
+                    Err(code)
+                }
                 None => return read,
             },
             Err(_) => return read,
@@ -488,5 +636,32 @@ mod tests {
         opts.gnu_extensions = false;
         let result = run(&opts, &[("/main.c", "__STDC_VERSION__ __STRICT_ANSI__\n")]);
         assert_eq!(result.text, "# 1 \"/main.c\"\n199901L 1\n");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_listed_directory_answers_for_what_is_not_in_it_and_never_for_what_is() {
+        let dir = std::env::temp_dir().join(format!("rucc-listing-{}", std::process::id()));
+        std::fs::create_dir_all(dir.join("sub")).unwrap();
+        std::fs::write(dir.join("here.h"), "1").unwrap();
+        std::fs::write(dir.join("sub/deep.h"), "2").unwrap();
+        let fs = OsFileSystem::new();
+        let missing = |path: &Path| fs.read(path).unwrap_err().kind() == io::ErrorKind::NotFound;
+
+        // The first miss is an open, and it is what has the directory listed.
+        assert!(missing(&dir.join("gone.h")));
+        assert!(fs.absent(&dir.join("other.h")).is_some());
+        assert!(missing(&dir.join("other.h")));
+        assert_eq!(&*fs.read(&dir.join("here.h")).unwrap(), b"1");
+
+        // A directory the listing does not have has nothing in it, and one it has is opened.
+        assert!(fs.absent(&dir.join("nowhere/x.h")).is_some());
+        assert!(missing(&dir.join("nowhere/y.h")));
+        assert_eq!(fs.absent(&dir.join("sub/deep.h")), None);
+        assert_eq!(&*fs.read(&dir.join("sub/deep.h")).unwrap(), b"2");
+
+        // A name that differs only in case is looked for, since the file system may fold it.
+        assert_eq!(fs.absent(&dir.join("HERE.h")), None);
+        std::fs::remove_dir_all(&dir).unwrap();
     }
 }
