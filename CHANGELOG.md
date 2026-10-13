@@ -15,6 +15,7 @@ All notable changes are recorded here. The format follows [Keep a Changelog](htt
 - Text between directives is expanded straight onto the end of the translation unit instead of into a list of its own, which saves a copy of every token and a list per run (#3603).
 - A choice between two `long long` values on i386, the kernel's `max_t(u64, ...)` and `min_t(u64, ...)`, moves both halves on the borrow the `sbbl` of the high halves left, which is gcc's `cmpl`, `sbbl` and two `cmovb`. Before, the borrow went into a byte with `setb` and each move tested it again with `testb`. drivers/md/md.c is 27 instructions shorter and ipc/sem.c 8 (#3605).
 - An include search lists a directory once a file has not been found in it and skips opening names the listing does not have, and the check for shipped headers compares bytes before walking path components, which took the failed opens on a duktape file from 529 to 16 (#3606).
+- A branch to two returns that hand back true and false now returns the condition itself, or the opposite comparison when the arms are the other way round, instead of a branch and two returns (#3607).
 
 ## 0.30.4
 
