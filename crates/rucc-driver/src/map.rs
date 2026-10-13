@@ -84,12 +84,38 @@ pub(crate) fn read(path: &Path) -> io::Result<SourceBytes> {
 /// Reads the whole file into one allocation.
 ///
 /// The length from the metadata is a hint for the allocation and nothing more. A file can grow
-/// between the two calls, and `read_to_end` handles that by growing the vector, which is why the
-/// result is the vector's length rather than the metadata's.
+/// between the two calls, and a read past the hint catches that and hands the rest to
+/// `read_to_end`, which is why the result is the vector's length rather than the metadata's.
+///
+/// The loop is here rather than `read_to_end` from the start because that asks the file for its
+/// size and its position again before it reads, a `statx` and an `lseek` per header that the
+/// caller already has the answer to. tamnd/rucc#3052.
 fn slurp(mut file: &File, hint: u64) -> io::Result<SourceBytes> {
-    let hint = usize::try_from(hint).unwrap_or(0);
-    let mut bytes = Vec::with_capacity(hint);
-    file.read_to_end(&mut bytes)?;
+    let size = usize::try_from(hint).unwrap_or(0);
+    let mut bytes = vec![0; size];
+    let mut len = 0;
+    while len < bytes.len() {
+        match file.read(&mut bytes[len..]) {
+            Ok(0) => break,
+            Ok(n) => len += n,
+            Err(e) if e.kind() == io::ErrorKind::Interrupted => {}
+            Err(e) => return Err(e),
+        }
+    }
+    bytes.truncate(len);
+    if len == size {
+        let mut probe = [0; 64];
+        let n = loop {
+            match file.read(&mut probe) {
+                Err(e) if e.kind() == io::ErrorKind::Interrupted => {}
+                other => break other?,
+            }
+        };
+        if n > 0 {
+            bytes.extend_from_slice(&probe[..n]);
+            file.read_to_end(&mut bytes)?;
+        }
+    }
     Ok(SourceBytes::new(bytes))
 }
 
