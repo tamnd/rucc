@@ -4,6 +4,10 @@ All notable changes are recorded here. The format follows [Keep a Changelog](htt
 
 ## Unreleased
 
+## 0.30.3
+
+This is a patch release. It replaces 0.30.2, whose tag failed its checks and was never published, so it has everything that 0.30.2 has. The i386 back end now compiles an asm that names every register the machine has, which is the C `memmove` in arch/x86/lib/memcpy_32.c up to Linux 6.1, so the 6.1 kernel builds for i386. rucc also starts faster on x86_64 Linux and compiles about 4% faster over the slowest corpus files.
+
 ### Changed
 
 - Inline the small accessors in rucc-ir and rucc-base that rucc-opt calls per instruction, so `Func::terminator`, `Func::successors` and the rule walk stop running as cross crate calls, which takes 1.4% off the slowest corpus files (#3584).
@@ -13,6 +17,11 @@ All notable changes are recorded here. The format follows [Keep a Changelog](htt
 - Dead store elimination walks up to 512 instructions from a store before keeping it, up from gcc's 256, which writes 0.36% less text over the corpus cases it changes and 128 bytes less on SQLite for no more instructions or compile time. `inline-hint-percent` stays at 200, since at 100 SQLite takes 3% more cycles for 1.27% less text (#3588).
 - Link rucc position dependent on x86_64 Linux, so the loader no longer rewrites 1.8 MiB of pointers at every start: page faults for an empty compile drop from 728 to 260 and the smallest corpus files take about a quarter less CPU (#3590).
 - Link the static musl rucc position dependent on x86_64 as well, so it no longer relocates itself at every start: an empty compile drops from 672 to 205 page faults (#3591).
+
+### Fixed
+
+- An i386 asm that names `ecx`, `esi` and `edi` and asks for three more registers no longer makes the register allocator panic. A register that an answer is only moved into after the asm can now hold a spilled answer, and an output that nothing reads takes a register that the template writes without naming it, as gcc does (#3592).
+- The doc, thresholds and test gates that stopped the 0.30.2 tag pass again (#3593).
 
 ## 0.30.2
 
