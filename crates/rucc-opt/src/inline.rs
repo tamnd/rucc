@@ -2590,6 +2590,11 @@ fn forwardable(
     forwarded: &[(Type, Abi)],
     groups: Option<&[u32]>,
 ) -> Option<Vec<usize>> {
+    // A pack that stands for nothing has nothing to put anywhere, which is every pack in a
+    // function with a fixed parameter list.
+    if forwarded.is_empty() {
+        return Some(Vec::new());
+    }
     match convention {
         Convention::Slots => Some(Vec::new()),
         Convention::Other => {
@@ -4575,7 +4580,7 @@ func @wrap(i32) -> i32, linkage(internal), attrs(always_inline) {
 block0(%0: i32):
     %1 = va_arg_pack_len.i32
     %2 = va_arg_pack.i32
-    %3 = call @inner(%1, %2) : (i32, ...) -> i32
+    %3 = call @inner(%1, %0, %2) : (i32, ...) -> i32
     return %3
 }
 
