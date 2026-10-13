@@ -1365,7 +1365,7 @@ static READERS: [Reader; 248] = [
 /// subtractions and the negation set the carry and the overflow from what really happened, which
 /// is not what comparing the answer against zero would have said, so only the conditions about the
 /// zero may read them.
-static ZEROING: [Zeroing; 44] = [
+static ZEROING: [Zeroing; 64] = [
     Zeroing { name: "and_rr_8", signed: true, unsigned: true },
     Zeroing { name: "and_rr_16", signed: true, unsigned: true },
     Zeroing { name: "and_rr_32", signed: true, unsigned: true },
@@ -1410,6 +1410,29 @@ static ZEROING: [Zeroing; 44] = [
     Zeroing { name: "neg_r_16", signed: false, unsigned: false },
     Zeroing { name: "neg_r_32", signed: false, unsigned: false },
     Zeroing { name: "neg_r_64", signed: false, unsigned: false },
+    // The same arithmetic with the second source read out of memory. Where the source comes from
+    // makes no difference to what is left behind, and the kernel's loops over the possible cpus
+    // `and` the mask straight out of memory and test what they got.
+    Zeroing { name: "and_rm_8", signed: true, unsigned: true },
+    Zeroing { name: "and_rm_16", signed: true, unsigned: true },
+    Zeroing { name: "and_rm_32", signed: true, unsigned: true },
+    Zeroing { name: "and_rm_64", signed: true, unsigned: true },
+    Zeroing { name: "or_rm_8", signed: true, unsigned: true },
+    Zeroing { name: "or_rm_16", signed: true, unsigned: true },
+    Zeroing { name: "or_rm_32", signed: true, unsigned: true },
+    Zeroing { name: "or_rm_64", signed: true, unsigned: true },
+    Zeroing { name: "xor_rm_8", signed: true, unsigned: true },
+    Zeroing { name: "xor_rm_16", signed: true, unsigned: true },
+    Zeroing { name: "xor_rm_32", signed: true, unsigned: true },
+    Zeroing { name: "xor_rm_64", signed: true, unsigned: true },
+    Zeroing { name: "add_rm_8", signed: false, unsigned: false },
+    Zeroing { name: "add_rm_16", signed: false, unsigned: false },
+    Zeroing { name: "add_rm_32", signed: false, unsigned: false },
+    Zeroing { name: "add_rm_64", signed: false, unsigned: false },
+    Zeroing { name: "sub_rm_8", signed: false, unsigned: false },
+    Zeroing { name: "sub_rm_16", signed: false, unsigned: false },
+    Zeroing { name: "sub_rm_32", signed: false, unsigned: false },
+    Zeroing { name: "sub_rm_64", signed: false, unsigned: false },
 ];
 
 static SYSV_INT_ARGS: [PhysReg; 6] = [RDI, RSI, RDX, RCX, R8, R9];
@@ -2226,7 +2249,7 @@ mod tests {
         for entry in &ZEROING {
             let shape = form(entry.name).expect("a described instruction");
             assert!(
-                matches!(shape, Form::AluRr | Form::AluRi | Form::UnaryR),
+                matches!(shape, Form::AluRr | Form::AluRi | Form::AluRm | Form::UnaryR),
                 "{} is not arithmetic",
                 entry.name
             );
