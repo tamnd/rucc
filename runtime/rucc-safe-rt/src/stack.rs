@@ -80,6 +80,8 @@ pub(crate) struct Stack {
     low: Cell<usize>,
     /// The plane.
     init: Init,
+    /// Where [`crate::aside`]'s table starts, after the plane in the same mapping.
+    aside: usize,
 }
 
 impl Stack {
@@ -225,6 +227,16 @@ pub fn landed() {
     }
 }
 
+/// Where this thread's [`crate::aside`] table is, and the bounds of the stack it is kept for.
+///
+/// Made with the plane when `make` says so, since a thread that stores a pointer to a global
+/// without ever beginning a local still wants somewhere to write it down. A thread with no table and
+/// nothing asking for one gets `None`, which is what a load wants: nothing was ever kept.
+pub(crate) fn aside(make: bool) -> Option<(*mut c_void, usize, usize)> {
+    let stack = if make { made() } else { current() }?;
+    Some((stack.aside as *mut c_void, stack.lo, stack.hi))
+}
+
 /// This thread's stack and plane, made now if the thread has none yet.
 fn made() -> Option<&'static Stack> {
     let at = STACK.get();
@@ -248,13 +260,14 @@ fn build() -> Option<*mut c_void> {
     if hi <= lo {
         return None;
     }
-    let len = HEADER + init::shadow(hi - lo);
+    let table = (HEADER + init::shadow(hi - lo)).next_multiple_of(64);
+    let len = table + crate::aside::BYTES;
     let at = crate::alloc::map(len)?;
     let origin = (at + HEADER).wrapping_sub(lo / init::SPAN);
     // SAFETY: the shadow is the part of the mapping behind the header, and its first byte answers
     // for `lo` and its last for `hi - 1` by the arithmetic above.
     let init = unsafe { Init::new(origin) };
-    let stack = Stack { lo, hi, len, low: Cell::new(usize::MAX), init };
+    let stack = Stack { lo, hi, len, low: Cell::new(usize::MAX), init, aside: at + table };
     // SAFETY: the mapping is fresh, writable and longer than the header, and page aligned.
     unsafe { (at as *mut Stack).write(stack) };
     watch(at as *mut c_void);

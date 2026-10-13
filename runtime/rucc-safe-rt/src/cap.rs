@@ -32,11 +32,13 @@
 //! [`crate::layout::Meta::HANDED`] on the instance, and `nothing` below is the paragraph on why the
 //! answer is per instance rather than per word. That was tamnd/rucc#1081.
 //!
-//! The word has no slot at all, which today is every local and every global, since only the
-//! allocator lays out an aux. The answer is a recovery from the address, the same one a pointer
-//! that crossed the boundary gets, and it is counted with those: a capability that was never
-//! written down is exactly the situation document 10 section 10.1 is about, whether it got that way
-//! by crossing a boundary or by being stored somewhere with no aux to store it in.
+//! The word has no slot at all, which is every local and every global, since only the allocator
+//! lays out an aux. [`crate::aside`] is asked first, which is where a store into such a word wrote
+//! the capability down, and the answer is what it kept. When it kept nothing the answer is a
+//! recovery from the address, the same one a pointer that crossed the boundary gets, and it is
+//! counted with those: a capability that was never written down is exactly the situation document
+//! 10 section 10.1 is about, whether it got that way by crossing a boundary or by being stored
+//! somewhere with no aux to store it in.
 //!
 //! # What a store does with nowhere to write
 //!
@@ -115,6 +117,9 @@ pub unsafe fn store(dest: Cap, at: *const c_void, value: *const c_void, cap: Cap
     // class this runtime's allocator did not lay out for an address in anybody else's storage,
     // which is a case `aux_slot::address_of` turns away on its own.
     if !unsafe { aux_slot::store(recovered, at as u64, value as u64, cap) } {
+        // A word on the stack or in static storage, which has no aux, so the capability goes in the
+        // table kept for those instead.
+        crate::aside::keep(at as u64, value as u64, cap);
         return false;
     }
     // A bottom capability goes in as an empty slot, which reads back as a word holding no pointer,
@@ -154,6 +159,9 @@ fn handed(at: *const c_void) {
 pub unsafe fn load(dest: Cap, at: *const c_void, value: *const c_void) -> Cap {
     // SAFETY: as `store`.
     let Some(read) = (unsafe { aux_slot::load(dest, at as u64, value as u64) }) else {
+        if let Some(cap) = crate::aside::found(at as u64, value as u64) {
+            return cap;
+        }
         return recover::recover(value);
     };
     match read {
