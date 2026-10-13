@@ -468,8 +468,9 @@ impl Checker<'_> {
         let name = rucc_gnu::unarmour(self.text(asked.name)).to_owned();
         let wanted = self.values(asked);
         for &list in lists {
-            let written = self.ast[list].to_vec();
-            for attr in written {
+            let ast = self.ast;
+            let written = &ast[list];
+            for &attr in written {
                 if !self.is_named(&attr, &name) {
                     continue;
                 }

@@ -1117,7 +1117,8 @@ impl Checker<'_> {
         // A type is not something the linker places, so a section on one is refused the way gcc
         // refuses it rather than dropped.
         for attrs in [specs.attrs, item.attrs] {
-            let written = self.ast[attrs].to_vec();
+            let ast = self.ast;
+            let written = &ast[attrs];
             if let Some(attr) = written.iter().find(|attr| {
                 !attr.namespace.is_some_and(|ns| self.text(ns) != "gnu")
                     && rucc_gnu::unarmour(self.text(attr.name)) == "section"
