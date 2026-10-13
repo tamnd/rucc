@@ -194,6 +194,9 @@ pub fn run_first<'a>(
     let mut order = order::Order::of(func);
     let mut live = live::Live::of(func, &order);
     let mut facts = assign::Facts::of(func, &order);
+    // The cheapest try that fits once some instructions borrow a register, with the function and
+    // the line it was decided over, since the tries after it may add copies of their own.
+    let mut borrowing: Option<Borrowing<'a>> = None;
     for &wide in tried {
         let assignment = settle(func, &mut order, &mut live, &mut facts, wide, allocator, copy);
         // Turned round before the question, since which operand an answer is written over is part
@@ -202,6 +205,15 @@ pub fn run_first<'a>(
         if rewrite::fits(func, &assignment, wide) {
             return (write(func, assignment, wide, order, live, called, verify), wide);
         }
+        if rewrite::fits_borrowing(func, &assignment, wide) {
+            let cost = backtrack::cost(func, &order, &assignment)
+                + rewrite::borrowing(func, &assignment, wide);
+            if borrowing.as_ref().is_none_or(|kept| cost < kept.cost) {
+                let (func, order, live) = (func.clone(), order.clone(), live.clone());
+                let assignment = assignment.clone();
+                borrowing = Some(Borrowing { cost, func, assignment, env: wide, order, live });
+            }
+        }
         commute(func, &assignment);
         // Any copies this try kept stay for the next one. Taking them out again cost md.c 22
         // instructions and ohci-hcd.c 37 on i386, since the next try spills much the same values
@@ -209,7 +221,28 @@ pub fn run_first<'a>(
     }
     let assignment = settle(func, &mut order, &mut live, &mut facts, env, allocator, copy);
     commute(func, &assignment);
+    if let Some(kept) = borrowing {
+        if kept.cost < backtrack::cost(func, &order, &assignment) {
+            *func = kept.func;
+            let allocation =
+                write(func, kept.assignment, kept.env, kept.order, kept.live, called, verify);
+            return (allocation, kept.env);
+        }
+    }
     (write(func, assignment, env, order, live, called, verify), env)
+}
+
+/// A try that fits once some of its instructions borrow a register, kept to be weighed against
+/// the one that holds a second register back everywhere.
+struct Borrowing<'a> {
+    /// What the assignment costs with the borrowing counted in.
+    cost: u128,
+    /// The function as it was when the try was decided, its sources already turned round.
+    func: rucc_mir::Func,
+    assignment: assign::Assignment,
+    env: &'a assign::Env,
+    order: order::Order,
+    live: live::Live,
 }
 
 /// Where every value goes, and when some went to the stack, where they go once each block that
@@ -438,6 +471,43 @@ mod tests {
         assert!(std::ptr::eq(used, &env));
         assert_eq!(allocation.assignment.spilled(), 2);
         assert_eq!(allocation.assignment.slots().len(), 2, "{allocation:?}");
+    }
+
+    #[test]
+    fn a_register_borrowed_at_one_instruction_is_cheaper_than_holding_two_back_everywhere() {
+        let mut names = Interner::new();
+        let mut func = Func::new(names.intern("f"));
+        let opcode = Opcode::new(names.intern("x64.nop"));
+        let block = func.create_block();
+        let values = [(); 5].map(|()| func.new_vreg(GPR));
+        for value in values {
+            func.build(block, opcode).def(value, GPR).finish();
+        }
+        for _ in 0..3 {
+            for &value in &values[..3] {
+                func.build(block, opcode).uses(value, GPR).finish();
+            }
+        }
+        let reads = func.build(block, opcode).uses(values[2], GPR);
+        reads.uses(values[3], GPR).uses(values[4], GPR).finish();
+        for &value in &values[..3] {
+            func.build(block, opcode).uses(value, GPR).finish();
+        }
+
+        // Three to hand out and one held back puts the two values read once on the stack, and the
+        // instruction reading both borrows a register for the second. Two to hand out and two held
+        // back puts one of the three read four times on the stack as well, which costs more than
+        // the register borrowed once, so the middle answer is the one written.
+        let middle = assign::Env::new().with(GPR, &SYSV.int_order[..3], &SYSV.int_order[3..4]);
+        let env = assign::Env::new().with(GPR, &SYSV.int_order[..2], &SYSV.int_order[2..4]);
+        let (allocation, used) =
+            run_first(&mut func, &[&middle], &env, "test", true, Allocator::Backtracking, None);
+
+        assert!(std::ptr::eq(used, &middle), "{allocation:?}");
+        let place = |value| allocation.assignment.place(value);
+        let stacked = |value| matches!(place(value), Some(assign::Place::Slot(_)));
+        assert!(stacked(values[3]) && stacked(values[4]), "{allocation:?}");
+        assert!(values[..3].iter().all(|&value| !stacked(value)), "{allocation:?}");
     }
 
     #[test]
