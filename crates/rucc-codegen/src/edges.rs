@@ -24,7 +24,8 @@
 //! Every register a move writes must be dead where the other edge goes, which is what [`live`]
 //! works out. The branch and the comparison it is folded with stay at the end of the block, so the
 //! moves go in front of the two of them, and neither may read or write a register the moves write
-//! or write one they read. Only a copy between two registers, a number or an address put in a
+//! or write one they read. The byte of a comparison the layout folds into the branch is neither,
+//! since it is never written and the branch reads the flags. Only a copy between two registers, a number or an address put in a
 //! register, and the allocator's reload of a slot are moved. Any other load could fault on the
 //! path that did not want it and a store could write a slot that path still reads, and a reload
 //! is moved only past instructions that leave memory alone. Each of them has to leave the
@@ -36,6 +37,12 @@
 //! least as often as the other one. A back edge is taken far more often than the exit and a two
 //! way branch with no profile is an even split, and on an even split a jump costs more than a
 //! copy the renamer does for nothing.
+//!
+//! The block stays when it is one arm of a diamond inside a loop, where the other arm goes to the
+//! same place it does and that place comes back round to the branch. The layout puts the two arms
+//! of such a diamond so that each way round takes one jump, and once one arm is empty it does not
+//! find that order for what is left. The carry loop in `tests/loop_rotate.c` took two jumps on
+//! every turn without a carry that way. Outside a loop the arm that is left is the one jump.
 
 use crate::finish::Moves;
 use rucc_base::Interner;
@@ -46,6 +53,9 @@ use rucc_target::{BranchInsts, FlagInsts, FrameInsts, MachineInsts, RegClass};
 
 /// Moves the copies out of every block on a split edge that the block above it can take, and
 /// gives back how many blocks it emptied.
+///
+/// `joined` is the comparisons the layout folds into their branch. See [`crate::layout::joined`].
+#[allow(clippy::too_many_arguments)]
 pub fn lift(
     func: &mut mir::Func,
     branch: &BranchInsts,
@@ -53,6 +63,7 @@ pub fn lift(
     machine: &MachineInsts,
     flags: &FlagInsts,
     moves: &Moves,
+    joined: &rucc_base::hash::Set<mir::Inst>,
     names: &mut Interner,
 ) -> usize {
     let cond = mir::Opcode::new(names.join(branch.prefix, branch.cond));
@@ -101,6 +112,13 @@ pub fn lift(
         if taken.weight.raw() < other.weight.raw() {
             continue;
         }
+        // One arm of a diamond in a loop, whose other arm goes to the same place and that place
+        // comes back round to the branch. See `When it pays`.
+        if let [join] = &func[other.block].succs[..] {
+            if join.block == arm.block && reaches(func, arm.block, *above) {
+                continue;
+            }
+        }
         found.push((edge, *above, other.block));
     }
     if found.is_empty() {
@@ -129,9 +147,20 @@ pub fn lift(
         let tail: Vec<mir::Inst> =
             std::iter::successors(Some(at), |&inst| func.next_inst(inst)).collect();
         let loads = copies.iter().any(|(_, copy)| copy.load);
+        // The byte of a comparison the layout folds into the branch is never written, and the
+        // branch reads the flags instead. See `crate::layout::joined`.
+        let byte =
+            joined.contains(&at).then(|| func[func[at].operands].first().and_then(key)).flatten();
         let clash = tail.iter().any(|&inst| {
             let name = names.resolve(func[inst].opcode.name());
-            let (read, written) = (keys(func, inst, false), keys(func, inst, true));
+            let (mut read, mut written) = (keys(func, inst, false), keys(func, inst, true));
+            if let Some(byte) = byte {
+                if inst == at {
+                    written.retain(|&key| key != byte);
+                } else if inst == last {
+                    read.retain(|&key| key != byte);
+                }
+            }
             opaque(func, inst, machine, names)
                 || (loads && machine.touches_mem(name))
                 || copies.iter().any(|(_, copy)| {
@@ -247,6 +276,21 @@ fn keys(func: &mir::Func, inst: mir::Inst, written: bool) -> Vec<Key> {
 fn opaque(func: &mir::Func, inst: mir::Inst, machine: &MachineInsts, names: &Interner) -> bool {
     let name = names.resolve(func[inst].opcode.name());
     machine.calls(name) || !machine.has(name)
+}
+
+/// Whether some path of arms goes from one block to the other.
+fn reaches(func: &mir::Func, from: mir::Block, to: mir::Block) -> bool {
+    let mut seen = vec![false; func.block_count()];
+    let mut work = vec![from];
+    while let Some(block) = work.pop() {
+        if block == to {
+            return true;
+        }
+        if !std::mem::replace(&mut seen[block.index()], true) {
+            work.extend(func[block].succs.iter().map(|arm| arm.block));
+        }
+    }
+    false
 }
 
 /// The instruction in front of this one in its block.
@@ -418,7 +462,16 @@ mod tests {
 
     /// The pass, on the one target these tests are written against.
     fn lifted(func: &mut mir::Func, moves: &Moves, names: &mut Interner) -> usize {
-        lift(func, &BRANCH, &FRAME, &MACHINE, &FLAGS, moves, names)
+        lift(
+            func,
+            &BRANCH,
+            &FRAME,
+            &MACHINE,
+            &FLAGS,
+            moves,
+            &rucc_base::hash::Set::default(),
+            names,
+        )
     }
 
     /// The names of what is in a block, in order.
@@ -441,6 +494,66 @@ mod tests {
             opcodes(&func, made[0], &names),
             ["x64.mov_rr_64", "x64.cmp_set_l_32", "x64.br_cond_8"]
         );
+    }
+
+    /// A copy into the byte the comparison writes goes in front of it when the layout folds the
+    /// two, since the byte is then never written and the branch reads the flags. When they are not
+    /// folded the byte is written over the copy and the copy stays, and so does a copy into what
+    /// the comparison reads either way.
+    #[test]
+    fn a_copy_into_the_byte_of_a_folded_comparison_goes_in_front_of_it() {
+        for (folded, to, gone) in [(true, RDX, 1), (false, RDX, 0), (true, RAX, 0)] {
+            let mut names = Interner::new();
+            let (mut func, made) = looped(&mut names, None);
+            func.build(made[1], op(&mut names, "mov_rr_64"))
+                .def(Reg::physical(to), GPR)
+                .uses(Reg::physical(RSI), GPR)
+                .finish();
+            let compare = func.insts(made[0]).next().expect("the comparison");
+            let joined: rucc_base::hash::Set<mir::Inst> =
+                if folded { [compare].into_iter().collect() } else { Default::default() };
+
+            let moved = lift(
+                &mut func,
+                &BRANCH,
+                &FRAME,
+                &MACHINE,
+                &FLAGS,
+                &Moves::default(),
+                &joined,
+                &mut names,
+            );
+            assert_eq!(moved, gone, "folded: {folded}, into {to:?}");
+        }
+    }
+
+    /// The block on one arm of a diamond in a loop stays. The same block goes when the other arm
+    /// goes somewhere else, and when the diamond is not in a loop.
+    #[test]
+    fn a_copy_on_one_arm_of_a_diamond_in_a_loop_stays_on_it() {
+        // Where the edge block goes, where the other arm goes, and how many blocks are emptied.
+        for (edge, side, gone) in [(0, 0, 0), (0, 2, 1), (2, 2, 1)] {
+            let mut names = Interner::new();
+            let (mut func, made) = looped(&mut names, None);
+            func.build(made[1], op(&mut names, "mov_rr_64"))
+                .def(Reg::physical(RSI), GPR)
+                .uses(Reg::physical(RAX), GPR)
+                .finish();
+            *func.succs_mut(made[1]) = vec![BlockCall::to(made[edge])];
+            let other = func.create_block();
+            func.build(other, op(&mut names, "mov_rr_64"))
+                .def(Reg::physical(RCX), GPR)
+                .uses(Reg::physical(RAX), GPR)
+                .finish();
+            *func.succs_mut(other) = vec![BlockCall::to(made[side])];
+            *func.succs_mut(made[0]) = vec![
+                BlockCall::to(made[1]).taken(Weight::parts(1)),
+                BlockCall::to(other).taken(Weight::parts(1)),
+            ];
+
+            let moved = lifted(&mut func, &Moves::default(), &mut names);
+            assert_eq!(moved, gone, "edge to block{edge}, other arm to block{side}");
+        }
     }
 
     #[test]

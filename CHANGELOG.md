@@ -26,6 +26,7 @@ All notable changes are recorded here. The format follows [Keep a Changelog](htt
 - The copies on a split edge now go in front of the branch when the other way out has no use for them, so a loop back edge ends in one jump instead of a copy and a jump (#3619).
 - A load of an array element at the same index as one read in a block above now reuses that value instead of reading memory again (#3620).
 - The cleanup of the allocator's moves no longer takes the byte of a comparison the layout folds into its branch as a write, so a slot read back in front of the comparison is not read again in the block the branch goes to. drivers/md/md.c on i386 is 32 instructions shorter (#3621).
+- The copies on a split edge now go in front of a comparison the layout folds into its branch when they write the byte it would have set, and stay on one arm of a diamond inside a loop, which the layout lays out with one jump each way round only while both arms are there (#3623).
 
 ### Fixed
 

@@ -1532,6 +1532,7 @@ pub fn compile_recording(
             machine.shapes,
             machine.flags,
             &moves,
+            &joined,
             names,
         );
         layout::forward(&mut func, machine.branch, names);
