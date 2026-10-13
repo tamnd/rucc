@@ -1,0 +1,12 @@
+deep 0
+cleanup 0
+cleanup 100
+returned 1
+deep 1
+cleanup 1
+cleanup 101
+caught 1
+deep 2
+cleanup 2
+cleanup 102
+thread exited

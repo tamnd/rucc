@@ -61,6 +61,7 @@ use crate::layout;
 use crate::lifetimes;
 use crate::lower::{self, Unsupported};
 use crate::lowering::{self, Lowerings};
+use crate::pads;
 use crate::pairs;
 use crate::pressure::{Cost, Pressure};
 use crate::schedule;
@@ -806,6 +807,10 @@ pub fn compile_recording(
             count.on(isa) && (flags.cmov || !count.guarded) && (flags.vector || !count.vector)
         })
         .collect();
+    // A value a landing pad reads from before the call goes through the frame, which is the one
+    // way it reaches a block the unwinder starts. Before the lowerings, so that a load or a store
+    // at a width the machine does not have is rewritten with the rest. See [`pads`].
+    pads::spill(source, machine.conv.word);
     let ran = lowering::group(source, names, machine.conv, switching, &counts, counting);
     // An `asm` input that may go in memory goes there when the statement has taken every register
     // it could go in. Only on x86, the one machine here that names an operand in the frame without a
