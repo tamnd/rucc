@@ -833,10 +833,13 @@ fn along(
 /// five times for every function was nearly five percent of compiling Duktape at `-O1`.
 ///
 /// The second map is the target's [`BranchInsts::readings`], the bytes written from what some
-/// instruction in front of them left. [`fusable`] and [`blocks`] take those too, and [`sink`] and
-/// the selects do not, since there is no comparison in one to move or to keep.
+/// instruction in front of them left. [`fusable`], [`blocks`] and the selects take those too, and
+/// [`sink`] does not, since there is no comparison in one to move.
 #[derive(Debug)]
-pub struct Fused(pub(crate) Map<mir::Opcode, &'static Fusion>, Map<mir::Opcode, &'static Reading>);
+pub struct Fused(
+    pub(crate) Map<mir::Opcode, &'static Fusion>,
+    pub(crate) Map<mir::Opcode, &'static Reading>,
+);
 
 impl Fused {
     /// The table for `insts`, with its names in `names`.
