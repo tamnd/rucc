@@ -357,10 +357,18 @@ fn through(func: &Func, reference: &Access, inst: Inst) -> Option<Access> {
 /// read it from memory each time (tamnd/rucc#1994). So such an address is followed back only as
 /// far as the constant steps go, and two that reach the same value at the same distance past it
 /// are the same place.
+///
+/// Where the one step that is not a constant is the last one before the walk would reach where
+/// the address came from, the two are told apart by that step instead. `a[i]` on a local array
+/// read in one block and again in a block below it is the array's address plus `i` times four in
+/// each, and the multiply is one value across the function where the two additions are not.
+/// `uncore_pmu_event_add` in arch/x86/events/intel/uncore.c reads `assign[i]` twice like that.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 enum Place {
     /// So many bytes past where this came from.
     At(Origin, i64),
+    /// So many bytes past where this came from and this value further on.
+    Indexed(Origin, Value, i64),
     /// So many bytes past a value the address was a constant step from, where some step behind
     /// that value was not a constant.
     Past(Value, i64),
@@ -382,6 +390,11 @@ impl Place {
                         .and_then(|by| i64::try_from(by).ok())
                         .and_then(|by| offset.checked_add(by))
                     else {
+                        if let (from, Some(past)) = origin(func, from) {
+                            if let Some(offset) = offset.checked_add(past) {
+                                return Self::Indexed(from, by, offset);
+                            }
+                        }
                         break;
                     };
                     (base, offset) = (from, by);
@@ -1032,6 +1045,38 @@ block2:
     %13 = load.i16 %12, align 2
     %14 = sext.i32 %13
     return %14
+",
+        );
+        let (module, stats) = run(&text);
+        assert_eq!(stats.count(crate::stats::Kind::Optimized, REUSED), 1);
+        let func = one(&module);
+        off(func);
+        assert_eq!(count_of(func, Opcode::Load), 1);
+    }
+
+    #[test]
+    fn an_element_at_an_index_worked_out_again_below_is_read_once() {
+        // `assign[i]` read in one block and again in the block the first test falls through to.
+        // The shift is one value, but each block adds it to the array again, so the two addresses
+        // are two values that are the same distance past the same index.
+        let text = wrap(
+            "(ptr, i64) -> i32",
+            "block0(%0: ptr, %1: i64):
+    %2 = iconst.i64 2
+    %3 = shl %1, %2
+    %4 = ptr_add %0, %3
+    %5 = load.i32 %4, align 4
+    %6 = iconst.i32 1
+    %7 = icmp eq %5, %6
+    br_if %7, block1, block2
+
+block1:
+    return %6
+
+block2:
+    %8 = ptr_add %0, %3
+    %9 = load.i32 %8, align 4
+    return %9
 ",
         );
         let (module, stats) = run(&text);

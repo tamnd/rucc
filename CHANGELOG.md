@@ -24,6 +24,7 @@ All notable changes are recorded here. The format follows [Keep a Changelog](htt
 - `fold` answers `__builtin_constant_p` of a value that is already an integer constant, instead of leaving it for the `constant-p` pass, which runs after the last jump threading. `find_next_bit` over a constant size kept its `_find_next_bit` arm and a merge of the size with the bit found, so every loop over the possible cpus on i386 tested the size a miss returned once more. `is_mddev_idle` drops from 325 to 300 instructions and md.c from 23197 to 23168 (#3615).
 - The x86 forms of `and`, `or`, `xor`, `add` and `sub` that read their second source out of memory now stand in for a following test of the result against zero, as the register and immediate forms already did. The loops over the possible cpus on i386 `and` `__cpu_possible_mask` straight out of memory and tested what they got again. md.c drops from 23168 to 23134 instructions and uncore.c from 3895 to 3889 (#3616).
 - The copies on a split edge now go in front of the branch when the other way out has no use for them, so a loop back edge ends in one jump instead of a copy and a jump (#3619).
+- A load of an array element at the same index as one read in a block above now reuses that value instead of reading memory again (#3620).
 
 ### Fixed
 
