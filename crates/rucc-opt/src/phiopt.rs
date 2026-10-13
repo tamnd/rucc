@@ -778,6 +778,9 @@ fn refused(
         if implied.get(index).copied().flatten().is_some() {
             continue;
         }
+        if bit_choice(func, shape.args[0][index], shape.args[1][index]).is_some() {
+            continue;
+        }
         if !machine.selects(func[param].ty) {
             return Some(NO_SELECT_AT_THAT_WIDTH);
         }
@@ -802,6 +805,23 @@ fn agree(func: &Func, then: Value, other: Value) -> bool {
         return false;
     };
     lty == rty && left == right
+}
+
+/// Whether the two sides hand over the two different bits, and if so whether the answer is the
+/// condition itself, `c ? 1 : 0`, or the condition turned round, `c ? 0 : 1`.
+///
+/// Neither needs a select, which is as well since a select of bits is not one the machine lowers.
+/// The last test of a `bool` predicate written as a row of `if (...) return false;` is this, and
+/// gcc returns it as a `shrl`, an `andb` and an `xorb` where the branch and two returns were kept.
+fn bit_choice(func: &Func, then: Value, other: Value) -> Option<bool> {
+    let (Some((left, _)), Some((right, _))) = (constant(func, then), constant(func, other)) else {
+        return None;
+    };
+    if func[then].ty != Type::I1 || func[other].ty != Type::I1 {
+        return None;
+    }
+    let (left, right) = (left.unsigned() & 1 == 1, right.unsigned() & 1 == 1);
+    (left != right).then_some(left)
 }
 
 /// Whether doing this on a path that was not going to do it is harmless.
@@ -1520,6 +1540,21 @@ fn convert(
         }
         // The condition holds on the first side, which is the side `select` takes when the bit is
         // one, so the order the branch named its targets in is the order the arguments go in.
+        if let Some(straight) = bit_choice(build.func(), then, other) {
+            // Turned round, a comparison is the opposite comparison, which is one `setcc` where
+            // an `xor` of the bit was a second instruction and a register for the one.
+            let asked = asked(build.func(), shape.cond);
+            let bit = match (straight, asked) {
+                (true, _) => shape.cond,
+                (false, Some((pred, lhs, rhs))) => build.icmp(pred.inverse(), lhs, rhs),
+                (false, None) => {
+                    let one = build.iconst(Type::I1, -1);
+                    build.binary(Opcode::Xor, shape.cond, one, Flags::default())
+                }
+            };
+            args.push(bit);
+            continue;
+        }
         let same = agree(build.func(), then, other);
         args.push(if same { then } else { build.select(shape.cond, then, other) });
     }
@@ -1552,6 +1587,15 @@ fn convert(
     for &arm in shape.arms.iter().flatten() {
         func.remove_block(arm);
     }
+}
+
+/// The integer comparison a condition is, as its predicate and its two operands.
+fn asked(func: &Func, cond: Value) -> Option<(IntPred, Value, Value)> {
+    let Def::Result { inst, .. } = func[cond].def else { return None };
+    let (Extra::IntPred(pred), &[lhs, rhs]) = (func[inst].extra, &func[func[inst].args]) else {
+        return None;
+    };
+    (func[inst].opcode == Opcode::ICmp).then_some((pred, lhs, rhs))
 }
 
 /// Moves the compare the branch was on down to the end of the head, after the work the arms did,
@@ -1594,8 +1638,8 @@ fn write_factored(build: &mut Builder<'_>, cond: Value, one: &Factored) -> Value
 mod tests {
     use rucc_base::Interner;
     use rucc_ir::{
-        Block, Builder, Extra, Flags, Float, Func, InstData, IntPred, MemInfo, MemOrder, Opcode,
-        Restrict, Signature, Type, Value,
+        Block, Builder, Extra, Flags, Float, Func, Inst, InstData, IntPred, MemInfo, MemOrder,
+        Opcode, Restrict, Signature, Type, Value,
     };
 
     use super::PhiOpt;
@@ -1791,6 +1835,69 @@ mod tests {
         // The compare moved down past the arms' work to sit next to the select that reads it.
         let head = opcodes(&func, 0);
         assert_eq!(head[head.len() - 3..], [Opcode::ICmp, Opcode::Select, Opcode::Jump]);
+    }
+
+    /// `f(a, b)` returning a bit off a branch, where the head asks `a < b` or, when `compared` is
+    /// false, hands the branch its own bit as a parameter. The side the branch takes first returns
+    /// `first` and the other side returns the other bit.
+    fn returns_a_bit(compared: bool, first: bool) -> Func {
+        let mut names = Interner::new();
+        let signature = Signature::new()
+            .with_params(&[Type::int(32), Type::int(32), Type::I1])
+            .with_returns(&[Type::I1]);
+        let mut func = Func::new(names.intern("f"), signature);
+        let head = func.create_block();
+        let left = func.append_param(head, Type::int(32));
+        let right = func.append_param(head, Type::int(32));
+        let given = func.append_param(head, Type::I1);
+        let arms = [func.create_block(), func.create_block()];
+        let mut build = Builder::new(&mut func, head);
+        let test = if compared { build.icmp(IntPred::Slt, left, right) } else { given };
+        build.br_if(test, arms[0], &[], arms[1], &[]);
+        for (arm, bit) in arms.into_iter().zip([first, !first]) {
+            let mut build = Builder::new(&mut func, arm);
+            let value = build.iconst(Type::I1, if bit { -1 } else { 0 });
+            build.ret(&[value]);
+        }
+        func
+    }
+
+    /// `if (a < b) return true; return false;` is `return a < b`, with no select, since a select
+    /// of bits is not something the machine lowers and this one does not need to be.
+    #[test]
+    fn two_returns_of_the_two_bits_return_the_condition() {
+        let mut func = returns_a_bit(true, true);
+        let stats = phiopt(&mut func);
+        assert_eq!(stats.count(Kind::Optimized, super::CONVERTED), 1);
+        assert_eq!(goes_to(&func, 0), [3]);
+        let head = opcodes(&func, 0);
+        assert!(!head.contains(&Opcode::Select));
+        assert_eq!(head[head.len() - 2..], [Opcode::ICmp, Opcode::Jump]);
+    }
+
+    /// `if (a < b) return false; return true;` is `return a >= b`, the opposite comparison and not
+    /// an `xor` of the first one.
+    #[test]
+    fn two_returns_of_the_two_bits_turned_round_return_the_opposite_comparison() {
+        let mut func = returns_a_bit(true, false);
+        let stats = phiopt(&mut func);
+        assert_eq!(stats.count(Kind::Optimized, super::CONVERTED), 1);
+        let head: Vec<Inst> = func.insts(func.blocks().next().unwrap()).collect();
+        let asked = head[head.len() - 2];
+        assert_eq!(func[asked].opcode, Opcode::ICmp);
+        assert_eq!(func[asked].extra, Extra::IntPred(IntPred::Sge));
+        assert_eq!(carries(&func, 0), [func[asked].first_result.unwrap()]);
+    }
+
+    /// A condition that is not a comparison has no opposite to ask, so turning it round is an
+    /// `xor` with the true bit.
+    #[test]
+    fn a_bit_that_is_not_a_comparison_is_turned_round_with_an_xor() {
+        let mut func = returns_a_bit(false, false);
+        let stats = phiopt(&mut func);
+        assert_eq!(stats.count(Kind::Optimized, super::CONVERTED), 1);
+        let head = opcodes(&func, 0);
+        assert_eq!(head[head.len() - 3..], [Opcode::IConst, Opcode::Xor, Opcode::Jump]);
     }
 
     #[test]
