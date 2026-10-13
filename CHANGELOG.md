@@ -4,6 +4,10 @@ All notable changes are recorded here. The format follows [Keep a Changelog](htt
 
 ## Unreleased
 
+### Changed
+
+- Inline the small accessors in rucc-ir and rucc-base that rucc-opt calls per instruction, so `Func::terminator`, `Func::successors` and the rule walk stop running as cross crate calls, which takes 1.4% off the slowest corpus files (#3584).
+
 ## 0.30.2
 
 This is a patch release. The 6.1 and 6.12 kernels built by rucc now boot on x86-64: under `-mcmodel=kernel` each load and store of a global uses `sym(%rip)`, as gcc does, so early boot code finds its data before the kernel is at its link address. A computed goto that can reach only one label is a direct jump, so objtool is clean on 6.12. The 7.2.8 allmodconfig and fedora-44 kernels build again, with new assembler and encoder support for the instructions they use. The register allocator, the lexer, the macro expander and the attribute checks are faster, and the compiler executes fewer instructions on duktape, quickjs.c and lvm.c.
