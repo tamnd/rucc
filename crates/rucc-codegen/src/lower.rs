@@ -6185,6 +6185,8 @@ impl<'a> Lowering<'a> {
                 calls_out(template),
             )
         };
+        // The ones past this are only spelled, which the list says nothing about.
+        let declared = named.len();
         for reg in spelled {
             if !named.contains(&reg) {
                 named.push(reg);
@@ -6225,6 +6227,35 @@ impl<'a> Lowering<'a> {
             bytes_pinned(&mut pins, list, &constraints, &clobbered, self.gpr);
             byte_inputs_pinned(&mut pins, list, &constraints, &clobbered, self.gpr);
         }
+        // A register the text spells and the list does not name, given to an output nothing reads
+        // rather than taken away as a clobber. gcc reads no text, so it puts such an output in a
+        // register it has free, and a program may have needed it there. The C `memmove` in
+        // arch/x86/lib/memcpy_32.c up to Linux 6.1 names `ecx`, `esi` and `edi`, asks for three
+        // more registers it does not read afterwards, and writes `%%dx` and `%%bx` as well. With
+        // `ebp` holding the frame that is every register i386 has, and the two clobbers made it two
+        // more than that. The output is written early, so that no input shares the register the
+        // way none shares a clobber. An output something reads keeps a register of its own, since
+        // the text may write the spelled one over what it leaves there.
+        let mut early = vec![false; list.len()];
+        if !a64 {
+            for &(reg, class) in &named[declared..] {
+                if pins.iter().flatten().any(|&pin| pin == (reg, class)) {
+                    continue;
+                }
+                let free = (0..list.len()).find(|&index| {
+                    let operand = &list[index];
+                    operand.result.is_some_and(|result| self.uses[result.index()] == 0)
+                        && !operand.memory
+                        && pins[index].is_none()
+                        && files[index] == class
+                        && !list.iter().any(|other| other.tied == Some(index))
+                });
+                let Some(index) = free else { continue };
+                pins[index] = Some((reg, class));
+                early[index] = true;
+                clobbered.retain(|&had| had != (reg, class));
+            }
+        }
         // The operand in memory that is the instruction's own memory operand, which is one in this
         // function's frame when there is one, since that is spelled from the stack pointer rather
         // than from a register the text might write. Every other one on x86 is read through the
@@ -6259,7 +6290,7 @@ impl<'a> Lowering<'a> {
                     return Err(refused());
                 }
                 let reg = self.new_reg(result);
-                let written = if operand.early {
+                let written = if operand.early || early[index] {
                     mir::Operand::write_early(reg, file)
                 } else {
                     mir::Operand::write(reg, file)
