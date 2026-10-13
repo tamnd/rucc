@@ -512,6 +512,28 @@ mod tests {
         }
     }
 
+    /// The same with the mask read out of memory, which is how the loops over the possible cpus
+    /// read `__cpu_possible_mask` on i386. Where the second source came from changes nothing
+    /// about what the `and` left.
+    #[test]
+    fn a_comparison_against_zero_after_a_bitwise_operation_on_memory_goes() {
+        let (mut names, mut func, block) = empty();
+        let value = func.new_vreg(GPR);
+        let base = func.new_vreg(GPR);
+        let byte = func.new_vreg(GPR);
+        let and = op(&mut names, "and_rm_32");
+        let cmp = op(&mut names, "cmp_set_e_ri_32");
+        func.build(block, and)
+            .def(value, GPR)
+            .uses(value, GPR)
+            .mem(mir::Mem::at(mir::Operand::read(base, GPR)))
+            .finish();
+        func.build(block, cmp).def(byte, GPR).uses(value, GPR).imm(0).finish();
+
+        assert_eq!(takes(&mut func, &mut names), 1);
+        assert_eq!(shape(&func, &names, block), ["and_rm_32", "set_e"]);
+    }
+
     /// The same after a subtraction, which is the one that is only half true. The zero bit is what
     /// a comparison of the answer against zero would have set it to, and the overflow is not, so
     /// the conditions built out of the sign and the overflow together have to stay.
