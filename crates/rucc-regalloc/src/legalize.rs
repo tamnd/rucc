@@ -170,6 +170,9 @@ fn legalize(
             (Place::Reg(at), Constraint::Fixed(fixed)) if at != fixed && !operand.role.is_def() => {
                 claimed.passed(operand, at);
             }
+            (Place::Reg(at), Constraint::Fixed(fixed)) if at != fixed => {
+                claimed.landed(operand, at)
+            }
             (Place::Reg(at), _) => claimed.named(operand, at),
             _ => {}
         }
@@ -296,7 +299,13 @@ fn legalize(
         first.extend(before);
         first
     };
-    let mut last = after;
+    // An answer the instruction wrote into the fixed register it asked for is moved on to where it
+    // lives, and that register may have been handed out to carry another answer to the stack. So
+    // the stores go first and the moves into registers after them. Nothing behind the instruction
+    // writes a register except those moves, so no store reads a register they have written.
+    let (mut last, landing): (Moves, Moves) =
+        after.into_iter().partition(|(mov, _)| matches!(mov.to, Place::Slot(_)));
+    last.extend(landing);
     last.extend(restores);
     Legal { operands, before: first, after: last }
 }
@@ -408,6 +417,10 @@ struct Claimed {
     /// for. They clash the way `reads` do, but one can still be borrowed when nothing else is left,
     /// since the move out of it is made before anything is read into it.
     passed: Vec<(RegClass, PhysReg)>,
+    /// The registers an answer is moved into behind the instruction, out of the fixed register its
+    /// operand asked for. Nothing is live in one while the instruction runs, so it can carry a value
+    /// with nothing put away first.
+    landed: Vec<(RegClass, PhysReg)>,
 }
 
 impl Claimed {
@@ -420,6 +433,12 @@ impl Claimed {
     /// its operand asked for.
     fn passed(&mut self, operand: &Operand, at: PhysReg) {
         self.passed.push((operand.class, at));
+    }
+
+    /// Records a register an answer is moved into behind the instruction, out of the fixed register
+    /// its operand asked for.
+    fn landed(&mut self, operand: &Operand, at: PhysReg) {
+        self.landed.push((operand.class, at));
     }
 
     /// Records a register nothing may be handed for the rest of the instruction, which is one
@@ -441,6 +460,16 @@ impl Claimed {
         self.reads.contains(&(class, at))
             || self.writes.contains(&(class, at))
             || self.passed.contains(&(class, at))
+            || self.landed.contains(&(class, at))
+    }
+
+    /// Whether the instruction names that register only as one an answer is moved into behind it,
+    /// which is a register that can be handed out with nothing put away.
+    fn only_lands(&self, class: RegClass, at: PhysReg) -> bool {
+        self.landed.contains(&(class, at))
+            && !self.reads.contains(&(class, at))
+            && !self.writes.contains(&(class, at))
+            && !self.passed.contains(&(class, at))
     }
 
     /// Whether the instruction names that register only as one a value passes through on its way
@@ -543,6 +572,14 @@ impl<'a> Scratch<'a> {
     /// the two held back, and `eax` and `ecx`, with a fifth operand left that can be anywhere:
     /// `strncat` in arch/x86/lib/string_32.c is one.
     ///
+    /// A register an answer is only moved into behind the instruction comes before all of those,
+    /// because nothing is live in it while the instruction runs and so nothing is put away. The
+    /// value it carries in or out is moved before the answer arrives, since the stores behind the
+    /// instruction go ahead of the moves into registers. That is i386 inline assembly naming
+    /// `ecx`, `esi` and `edi` and asking for three more registers with the frame pointer in `ebp`,
+    /// when the allocator put the answer in `ecx` somewhere else: `memmove` in
+    /// arch/x86/lib/memcpy_32.c up to Linux 6.1 is one.
+    ///
     /// # Panics
     ///
     /// Panics if the class has no register the instruction has not already claimed, which is an
@@ -552,6 +589,10 @@ impl<'a> Scratch<'a> {
     fn borrow(&mut self, class: RegClass) -> PhysReg {
         let index = usize::from(class.number());
         let order = self.env.order(class);
+        if let Some(&at) = order.iter().find(|&&reg| self.claimed.only_lands(class, reg)) {
+            self.claimed.taken(class, at);
+            return at;
+        }
         let free = order
             .iter()
             .find(|&&reg| !self.claimed.names(class, reg))
@@ -640,7 +681,7 @@ pub(crate) fn phys(reg: Reg) -> PhysReg {
 mod tests {
     use rucc_base::Interner;
     use rucc_mir::Opcode;
-    use rucc_target::x86_64::{GPR, RAX, RCX, SYSV};
+    use rucc_target::x86_64::{GPR, RAX, RCX, RDX, RSI, SYSV};
 
     use super::*;
 
@@ -810,5 +851,41 @@ mod tests {
         assert_eq!(legal.before[0], (Move::new(spare, Place::Reg(borrowed)), GPR));
         assert_eq!(legal.after.last(), Some(&(Move::new(Place::Reg(borrowed), spare), GPR)));
         assert_eq!(assignment.spilled(), 4);
+    }
+
+    #[test]
+    fn a_register_an_answer_only_lands_in_carries_another_answer_to_the_stack() {
+        let (mut func, opcode, block) = func();
+        let values: Vec<Reg> = (0..4).map(|_| func.new_vreg(GPR)).collect();
+        // Both registers held back are fixed answers and both handed out are named, so the only
+        // register left is the one the first answer is moved into behind the instruction.
+        let inst = func
+            .build(block, opcode)
+            .operand(Operand::write(values[0], GPR).with(Constraint::Fixed(RDX)))
+            .operand(Operand::write(values[1], GPR).with(Constraint::Fixed(RSI)))
+            .operand(Operand::write(values[2], GPR))
+            .operand(Operand::write(values[3], GPR))
+            .finish();
+        let mut assignment = Assignment::empty(func.vregs());
+        assignment.put(values[0], Place::Reg(RAX));
+        let first = assignment.take_slot(GPR);
+        assignment.put(values[1], Place::Slot(first));
+        assignment.put(values[2], Place::Reg(RCX));
+        let last = assignment.take_slot(GPR);
+        assignment.put(values[3], Place::Slot(last));
+
+        let legal = legal(&func, &mut assignment, inst);
+        assert_eq!(regs(&legal), [RDX, RSI, RCX, RAX]);
+        // Nothing is put away, and the answer in `rax` is stored before the first one arrives.
+        assert!(legal.before.is_empty());
+        assert_eq!(
+            legal.after,
+            [
+                (Move::new(Place::Slot(first), Place::Reg(RSI)), GPR),
+                (Move::new(Place::Slot(last), Place::Reg(RAX)), GPR),
+                (Move::new(Place::Reg(RAX), Place::Reg(RDX)), GPR),
+            ]
+        );
+        assert_eq!(assignment.spilled(), 2);
     }
 }
