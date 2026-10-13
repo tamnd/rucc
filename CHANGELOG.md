@@ -25,6 +25,7 @@ All notable changes are recorded here. The format follows [Keep a Changelog](htt
 - The x86 forms of `and`, `or`, `xor`, `add` and `sub` that read their second source out of memory now stand in for a following test of the result against zero, as the register and immediate forms already did. The loops over the possible cpus on i386 `and` `__cpu_possible_mask` straight out of memory and tested what they got again. md.c drops from 23168 to 23134 instructions and uncore.c from 3895 to 3889 (#3616).
 - The copies on a split edge now go in front of the branch when the other way out has no use for them, so a loop back edge ends in one jump instead of a copy and a jump (#3619).
 - A load of an array element at the same index as one read in a block above now reuses that value instead of reading memory again (#3620).
+- The cleanup of the allocator's moves no longer takes the byte of a comparison the layout folds into its branch as a write, so a slot read back in front of the comparison is not read again in the block the branch goes to. drivers/md/md.c on i386 is 32 instructions shorter (#3621).
 
 ### Fixed
 

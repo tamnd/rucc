@@ -1445,6 +1445,7 @@ pub fn compile_recording(
     // would take that as a new value and forget what it knew the register held.
     copies::itself(&mut func, machine.insts, names);
     let pointer = frame.frame_pointer();
+    let joined = layout::joined(&func, machine.branch, &fused, &fusable, names);
     copies::clean(
         &mut func,
         &moves,
@@ -1453,6 +1454,7 @@ pub fn compile_recording(
         machine.conv,
         pointer,
         (int, held),
+        &joined,
         names,
     );
     // After the cleanup, which is what takes out the reads, and before the reloads below fold one
@@ -1537,6 +1539,9 @@ pub fn compile_recording(
 
     // Last, because everything before this finds the blocks a function returns from by looking
     // for the ones that go nowhere, and after this a block that falls through goes nowhere too.
+    // The cleanup took the byte each of these writes as never written. See `layout::joined`.
+    let still = layout::joined(&func, machine.branch, &fused, &fusable, names);
+    assert!(joined.is_subset(&still), "a comparison came apart from its branch after the cleanup");
     layout::blocks(&mut func, machine.branch, &fused, names, &fusable, &loops, flags.reorder);
 
     // After the layout for the reason the branches wait for it: a select that reads what a
