@@ -80,6 +80,15 @@
 //! beside it and a pointer an allocator returned has its in the header, a caller holds one for most
 //! of what it passes and this pass gets better without changing.
 //!
+//! A wrapper gets one more, which is the `cap_load` beside a pointer read out of memory when the
+//! container it was read from has a capability some kept check reads. Nothing reads that `cap_load`
+//! when the pointer goes straight to `memcpy`, so it is not in the table, and without it a pointer
+//! to a local that was stored in a variable and read back reaches the wrapper with nothing, which
+//! judges it against planes that know nothing about the stack. Taking it costs the call the
+//! `cap_load` lowers to and no walk, since its container is paid for already, and it is only taken
+//! for a wrapper because a wrapper judges every pointer it is given, where a callee in this unit
+//! may check none of them. That is `crate::origin::recalled`, and tamnd/rucc#3269.
+//!
 //! The callee side is the same restraint spelled the other way. A `cap_of` over a pointer parameter
 //! becomes a `cap_arg`, in place, so the plane walk it was going to lower to becomes a frame read
 //! with the same walk behind it as the fallback. Nothing new is made there either: a parameter no
@@ -190,12 +199,7 @@ pub enum Frame {
 /// which it stops doing because a count only ever goes from nothing to one.
 #[must_use]
 pub fn remaining(module: &Module, names: &Interner) -> Map<Symbol, usize> {
-    // Found rather than interned, since a wrapper this unit never names is one no call goes to.
-    let wrappers = crate::wrap::INTERPOSED
-        .iter()
-        .chain(crate::format::JUDGES)
-        .filter_map(|name| names.find(&[crate::wrap::PREFIX, name].concat()))
-        .map(|symbol| (symbol, 1));
+    let wrappers = wrappers(names).map(|symbol| (symbol, 1));
     let defined = module.funcs().filter(|&id| !module[id].is_declaration()).map(|id| {
         let func = &module[id];
         (func.name, checks_left(func) + usize::from(returns_a_local(func)))
@@ -215,6 +219,16 @@ pub fn remaining(module: &Module, names: &Interner) -> Map<Symbol, usize> {
         }
         left.extend(more.into_iter().map(|name| (name, 1)));
     }
+}
+
+/// The wrappers `crate::wrap` and `crate::format` send calls to, among the names this unit has.
+///
+/// Found rather than interned, since a wrapper this unit never names is one no call goes to.
+fn wrappers(names: &Interner) -> impl Iterator<Item = Symbol> + '_ {
+    crate::wrap::INTERPOSED
+        .iter()
+        .chain(crate::format::JUDGES)
+        .filter_map(|name| names.find(&[crate::wrap::PREFIX, name].concat()))
 }
 
 /// Whether `func` hands one of its own pointer parameters, or a pointer into what one points at,
@@ -239,11 +253,15 @@ fn forwards(func: &Func, left: &Map<Symbol, usize>) -> bool {
 
 /// The pointer parameters a function that takes its frame can read capabilities for, and the width
 /// of the index a `cap_arg` names one with.
-struct Given {
+struct Given<'a> {
     /// Where each parameter is in the frame. Empty for a function that does not take it.
     at: Map<Value, usize>,
     /// The module's `size_t`.
     word: Type,
+    /// The wrappers, whose calls are the ones that take what `recalled` holds.
+    wrappers: &'a Set<Symbol>,
+    /// [`origin::recalled`] for the function, or nothing when it calls no wrapper.
+    recalled: Map<Value, Value>,
 }
 
 /// Each pointer parameter of `func` that the frame has room for, and where in the frame it is.
@@ -424,12 +442,13 @@ pub fn arrange(module: &mut Module, names: &Interner) -> usize {
         .filter(|&id| !module[id].is_declaration() && returns_a_local(&module[id]))
         .map(|id| module[id].name)
         .collect();
+    let wrappers: Set<Symbol> = wrappers(names).collect();
     let mut published = 0;
     for id in module.funcs() {
         if module[id].is_declaration() {
             continue;
         }
-        published += one(&mut module[id], &left, &yields, word);
+        published += one(&mut module[id], &left, &yields, &wrappers, word);
     }
     published
 }
@@ -447,7 +466,13 @@ pub fn arrange(module: &mut Module, names: &Interner) -> usize {
 /// had, so a pointer that came in as a parameter, went down into a call and came back out of another
 /// is the same value at each step and travels the whole way as a frame read however this is ordered.
 /// Writing it in the order the values flow is for the reader.
-fn one(func: &mut Func, left: &Map<Symbol, usize>, yields: &Set<Symbol>, word: Type) -> usize {
+fn one(
+    func: &mut Func,
+    left: &Map<Symbol, usize>,
+    yields: &Set<Symbol>,
+    wrappers: &Set<Symbol>,
+    word: Type,
+) -> usize {
     let reads = checks_left(func) > 0 || forwards(func, left);
     if reads {
         from_the_frame(func, word);
@@ -455,7 +480,13 @@ fn one(func: &mut Func, left: &Map<Symbol, usize>, yields: &Set<Symbol>, word: T
     // The parameters a publish below may read out of this function's own frame, for a pointer
     // parameter nothing here made a capability for.
     let at = if reads { positions(func) } else { Map::default() };
-    let given = Given { at, word };
+    // Asked only of a function that calls a wrapper, since nothing else takes what it finds and
+    // working out which capabilities are kept is a walk of the whole function to a fixpoint.
+    let calls_one = all(func)
+        .into_iter()
+        .any(|inst| callee(func, inst).is_some_and(|name| wrappers.contains(&name)));
+    let recalled = if calls_one { origin::recalled(func) } else { Map::default() };
+    let given = Given { at, word, wrappers, recalled };
     let mut held = origin::existing(func);
     asked_back(func, left, yields, &mut held);
     let Some(doms) = func.entry().map(|_| Doms::new(func)) else { return 0 };
@@ -635,7 +666,7 @@ fn made(
     pointer: Value,
     inst: Inst,
     joins: &mut Map<Value, Value>,
-    given: &Given,
+    given: &Given<'_>,
 ) -> Option<Value> {
     let base = origin::root(func, pointer);
     if !local(func, base) {
@@ -783,7 +814,7 @@ fn over(
     held: &Map<Value, Value>,
     doms: &Doms,
     joins: &mut Map<Value, Value>,
-    given: &Given,
+    given: &Given<'_>,
     answered: bool,
 ) -> bool {
     let carried: Vec<Value> = pointers(func, inst).take(ARGS).collect();
@@ -791,7 +822,8 @@ fn over(
     for &value in &carried {
         let cap = match seen(func, held, doms, value, inst) {
             Some(cap) => Some(cap),
-            None => made(func, value, inst, joins, given),
+            None => made(func, value, inst, joins, given)
+                .or_else(|| loaded(func, doms, value, inst, given)),
         };
         found.push(cap);
     }
@@ -840,8 +872,14 @@ fn seen(
     inst: Inst,
 ) -> Option<Value> {
     let cap = origin::already(func, held, pointer)?;
-    let block = func.block_of(inst)?;
-    let visible = match func[cap].def {
+    visible(func, doms, cap, inst).then_some(cap)
+}
+
+/// Whether the capability `cap` is defined where `inst` can read it, which is in front of it in
+/// its own block or in a block that dominates it.
+fn visible(func: &Func, doms: &Doms, cap: Value, inst: Inst) -> bool {
+    let Some(block) = func.block_of(inst) else { return false };
+    match func[cap].def {
         Def::Param { block: from, .. } => doms.dominates(from, block),
         Def::Result { inst: made, .. } => match func.block_of(made) {
             Some(from) if from == block => {
@@ -850,8 +888,26 @@ fn seen(
             Some(from) => doms.dominates(from, block),
             None => false,
         },
-    };
-    visible.then_some(cap)
+    }
+}
+
+/// The `cap_load` [`origin::recalled`] found for `pointer`, when `inst` is a call to a wrapper and
+/// the `cap_load` is one it can read.
+///
+/// The exception the module doc makes for a wrapper. By the base, as [`origin::already`] answers,
+/// so a pointer into the middle of what was read out of memory carries the same capability.
+fn loaded(
+    func: &Func,
+    doms: &Doms,
+    pointer: Value,
+    inst: Inst,
+    given: &Given<'_>,
+) -> Option<Value> {
+    if !callee(func, inst).is_some_and(|name| given.wrappers.contains(&name)) {
+        return None;
+    }
+    let cap = *given.recalled.get(&origin::root(func, pointer))?;
+    visible(func, doms, cap, inst).then_some(cap)
 }
 
 /// Whether `inst` gives back a pointer the caller makes a capability for, which is what makes the
@@ -1124,6 +1180,72 @@ mod tests {
     /// What the one instruction of `opcode` gives back.
     fn produced(func: &Func, opcode: Opcode) -> Value {
         func[the(func, opcode)].results().next().expect("it gives something back")
+    }
+
+    /// A function named `name` that checks through its first parameter, reads a pointer out of
+    /// what it points at, and hands that pointer straight to `callee` twice.
+    ///
+    /// The `cap_load` beside the read is there, the way the insertion pass leaves one, and nothing
+    /// reads it. The capability of the word it was read from is kept by the check.
+    fn reading_through(names: &mut Interner, name: &str, callee: &str) -> Func {
+        let mut func = Func::new(names.intern(name), three());
+        let entry = func.create_block();
+        let p = func.append_param(entry, Type::PTR);
+        let n = func.append_param(entry, Type::int(64));
+        func.append_param(entry, Type::PTR);
+        let sig = func.add_signature(three());
+        let callee = Some(names.intern(callee));
+        let varargs = func.push_abis(&[]);
+        let info = func.add_call(CallInfo { callee, signature: sig, varargs });
+        let mut b = Builder::new(&mut func, entry);
+        let args = b.func().push_values(&[p]);
+        let cap = b.value(InstData { args, ..InstData::new(Opcode::CapOf) }, Type::CAP);
+        let args = b.func().push_values(&[cap, p]);
+        let info_mem = MemInfo {
+            size: 8,
+            align: 8,
+            order: MemOrder::NotAtomic,
+            tbaa: None,
+            owns: 0,
+            restrict: Restrict::NONE,
+        };
+        let extra = Extra::Mem(b.func().add_mem(info_mem));
+        b.inst(InstData { args, extra, ..InstData::new(Opcode::CheckLive) }, &[]);
+        let read = loaded(&mut b, p);
+        let args = b.func().push_values(&[cap, p, read]);
+        b.value(InstData { args, ..InstData::new(Opcode::CapLoad) }, Type::CAP);
+        let args = b.func().push_values(&[read, n, read]);
+        b.inst(InstData { args, extra: Extra::Call(info), ..InstData::new(Opcode::Call) }, &[]);
+        b.ret(&[]);
+        func
+    }
+
+    #[test]
+    fn a_wrapper_is_handed_the_capability_of_a_pointer_read_out_of_memory() {
+        // Juliet's flow variant 34 and its relatives: a pointer to a local goes through a word and
+        // is read back in the function that hands it to `memcpy`. Nothing checks it, so the
+        // `cap_load` beside the read is not one the caller pays for, but its container is, and the
+        // wrapper has no other way to learn how big the local is.
+        let mut names = Interner::new();
+        let mut module = unit(&mut names);
+        module.add_func(reading_through(&mut names, "f", "__rucc_wrap_memcpy"));
+        assert_eq!(arrange(&mut module, &names), 1);
+        let func = &module[module.funcs().next().expect("the module defines one")];
+        let cap = produced(func, Opcode::CapLoad);
+        assert_eq!(operands(func, Opcode::CapPublish), vec![cap, cap]);
+    }
+
+    #[test]
+    fn a_pointer_read_out_of_memory_is_not_handed_to_a_function_that_is_not_a_wrapper() {
+        // A callee in another file may check none of what it is given, and then the `cap_load`
+        // would be a call made for nothing.
+        let mut names = Interner::new();
+        let mut module = unit(&mut names);
+        module.add_func(reading_through(&mut names, "f", "g"));
+        assert_eq!(arrange(&mut module, &names), 0);
+        let func = &module[module.funcs().next().expect("the module defines one")];
+        assert_eq!(count(func, Opcode::CapPublish), 0);
+        assert_eq!(count(func, Opcode::CapClear), 1);
     }
 
     #[test]

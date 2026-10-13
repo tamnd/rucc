@@ -447,6 +447,48 @@ fn kept(func: &Func) -> Set<Value> {
     }
 }
 
+/// The `cap_load` beside each pointer read out of memory, keyed by the pointer, for the reads
+/// whose container's capability is kept anyway.
+///
+/// What [`existing`] leaves out on purpose, and for a wrapper the one thing worth taking back. A
+/// pointer read out of a word and handed straight to `memcpy` has a `cap_load` beside it that no
+/// check reads, so [`existing`] does not report it and the wrapper is handed nothing. For a pointer
+/// to a local stored somewhere and read back, that is the one capability that knows how big the
+/// local is, since no plane covers the stack. Reading it costs the `cap_load` alone when the
+/// container's capability is one some kept check reads, because that producer is paid for already,
+/// or when the container is a local or a global, whose capability is its address and its size and
+/// no walk. Those are the only cases this reports. tamnd/rucc#3269.
+pub(crate) fn recalled(func: &Func) -> Map<Value, Value> {
+    let alive = kept(func);
+    let mut found = Map::default();
+    for block in func.blocks() {
+        for inst in func.insts(block) {
+            if func[inst].opcode != Opcode::CapLoad {
+                continue;
+            }
+            let [container, _, value] = func[func[inst].args] else { continue };
+            if !alive.contains(&container) && !named(func, container) {
+                continue;
+            }
+            let Some(cap) = func[inst].results().next() else { continue };
+            found.entry(value).or_insert(cap);
+        }
+    }
+    found
+}
+
+/// Whether `cap` is the `cap_of` of a local or a global, which `crate::slot` makes from the
+/// object's address and size rather than by a walk.
+fn named(func: &Func, cap: Value) -> bool {
+    let Def::Result { inst, .. } = func[cap].def else { return false };
+    if func[inst].opcode != Opcode::CapOf {
+        return false;
+    }
+    let Some(&pointer) = func[func[inst].args].first() else { return false };
+    let Def::Result { inst: base, .. } = func[root(func, pointer)].def else { return false };
+    matches!(func[base].opcode, Opcode::Alloca | Opcode::GlobalAddr)
+}
+
 /// What [`existing`] found for `pointer`, if it found anything.
 ///
 /// The base's answer, for the reason [`Origins::of`] gives: a capability is about an object and a
