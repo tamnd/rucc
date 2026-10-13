@@ -143,6 +143,23 @@ impl Expander {
         self.run(tokens, macros, interner, sources, None)
     }
 
+    /// [`Expander::expand_toks`], appending the result to `out` and leaving `tokens` empty with
+    /// its room intact for the caller to fill again.
+    ///
+    /// The run of text between two directives is expanded this way, straight onto the end of
+    /// the translation unit. Returning a list of its own for that caller to copy over was one
+    /// more pass over every token in the file, and each new list was fresh memory to fault in.
+    pub fn expand_toks_into(
+        &mut self,
+        tokens: &mut Vec<Tok>,
+        out: &mut Vec<Tok>,
+        macros: &MacroTable,
+        interner: &mut Interner,
+        sources: &SourceMap,
+    ) {
+        self.run_into(tokens, out, macros, interner, sources, None);
+    }
+
     /// Expands the tokens of a `#if` or `#elif` line.
     ///
     /// The one difference from [`Expander::expand_toks`] is `defined`, which on such a line is an
@@ -162,12 +179,26 @@ impl Expander {
 
     fn run(
         &mut self,
-        tokens: Vec<Tok>,
+        mut tokens: Vec<Tok>,
         macros: &MacroTable,
         interner: &mut Interner,
         sources: &SourceMap,
         condition: Option<Condition>,
     ) -> Vec<Tok> {
+        let mut out = Vec::with_capacity(tokens.len());
+        self.run_into(&mut tokens, &mut out, macros, interner, sources, condition);
+        out
+    }
+
+    fn run_into(
+        &mut self,
+        tokens: &mut Vec<Tok>,
+        out: &mut Vec<Tok>,
+        macros: &MacroTable,
+        interner: &mut Interner,
+        sources: &SourceMap,
+        condition: Option<Condition>,
+    ) {
         let mut run = Run {
             hides: &mut self.hides,
             traces: &mut self.traces,
@@ -183,7 +214,7 @@ impl Expander {
             condition,
             steps: 0,
         };
-        run.expand(tokens)
+        run.expand_into(tokens, out);
     }
 }
 
@@ -239,11 +270,20 @@ impl<'a> Run<'a> {
     /// macro name left alone because no parenthesis followed it is a different matter: it may
     /// well be invoked later, once the tokens after it have been expanded and the parenthesis
     /// has appeared. `t(t(g)(0) + t)(1)` in the standard's own example depends on that.
-    fn expand(&mut self, input: Vec<Tok>) -> Vec<Tok> {
+    fn expand(&mut self, mut input: Vec<Tok>) -> Vec<Tok> {
+        let mut out = Vec::with_capacity(input.len());
+        self.expand_into(&mut input, &mut out);
+        out
+    }
+
+    /// [`Run::expand`], appending to `out` rather than to a list of its own and leaving
+    /// `pending` empty with its room intact, so that a caller with somewhere to put the result
+    /// already does not pay to copy it there, and one that comes back with more does not pay to
+    /// grow a new list.
+    fn expand_into(&mut self, pending: &mut Vec<Tok>, out: &mut Vec<Tok>) {
         let macros = self.macros;
-        let mut pending = input;
         pending.reverse();
-        let mut out: Vec<Tok> = Vec::with_capacity(pending.len());
+        out.reserve(pending.len());
 
         while let Some(tok) = pending.pop() {
             // A token the user wrote, reached outside any substitution, is past everything the
@@ -260,8 +300,8 @@ impl<'a> Run<'a> {
                 self.diagnostics.push(d);
                 out.push(tok);
                 pending.reverse();
-                out.append(&mut pending);
-                return out;
+                out.append(pending);
+                return;
             }
 
             let Some(name) = tok.ident() else {
@@ -275,7 +315,7 @@ impl<'a> Run<'a> {
             // replaced by whatever it is defined as and the question is about the wrong thing,
             // or about nothing at all when the macro is defined as empty.
             if self.condition.is_some_and(|c| c.defined == name) {
-                self.defined_operator(tok, &mut pending, &mut out);
+                self.defined_operator(tok, pending, out);
                 continue;
             }
             if self.hides.contains(tok.hides, name) {
@@ -301,7 +341,7 @@ impl<'a> Run<'a> {
                 let hs = self.hides.add(tok.hides, name);
                 let mut args = Args::none();
                 let replacement = self.subst(def, &mut args, hs, tok);
-                push_front(&mut pending, replacement, tok);
+                push_front(pending, replacement, tok);
                 continue;
             }
 
@@ -313,16 +353,15 @@ impl<'a> Run<'a> {
                 continue;
             }
 
-            let Some((mut args, rparen)) = self.collect_args(def, &mut pending, tok) else {
+            let Some((mut args, rparen)) = self.collect_args(def, pending, tok) else {
                 out.push(tok);
                 continue;
             };
             let shared = self.hides.intersect(tok.hides, rparen.hides);
             let hs = self.hides.add(shared, name);
             let replacement = self.subst(def, &mut args, hs, tok);
-            push_front(&mut pending, replacement, tok);
+            push_front(pending, replacement, tok);
         }
-        out
     }
 
     /// Whether [`Run::expand`] would give back `toks` as they are, which it does when no name in
