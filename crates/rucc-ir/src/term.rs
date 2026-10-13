@@ -266,6 +266,7 @@ impl<'a> Terms<'a> {
 impl Subject for Terms<'_> {
     type Node = Term;
 
+    #[inline]
     fn head(&self, node: Term) -> Option<(&str, usize)> {
         match node {
             Term::Root => self.root_head(),
@@ -288,6 +289,7 @@ impl Subject for Terms<'_> {
         }
     }
 
+    #[inline]
     fn arg(&self, node: Term, index: usize) -> Term {
         let index = u8::try_from(index).unwrap_or(u8::MAX);
         match node {

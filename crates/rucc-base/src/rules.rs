@@ -144,6 +144,7 @@ impl Node {
     /// the names at every step called `memcmp` at every step, and that was most of what finding a
     /// branch cost.
     #[must_use]
+    #[inline]
     pub fn branch(&self, head: &str, arity: usize) -> Option<u32> {
         // Most nodes have no branch on a head or only the one, two thirds and a fifth of the nodes
         // of the simplifier's table, and the walk asks every node it passes. For those, making the
@@ -154,6 +155,13 @@ impl Node {
             [(_, name, count, next)] => return (*count == arity && *name == head).then_some(*next),
             _ => {}
         }
+        self.search(head, arity)
+    }
+
+    /// [`Node::branch`] for a node with more than one, which is the search. Out of line so that
+    /// the two cases before it are what a walk in another crate inlines.
+    #[inline(never)]
+    fn search(&self, head: &str, arity: usize) -> Option<u32> {
         // The same number as `Node::key`, made with one copy rather than a byte at a time.
         let mut bytes = [0; 16];
         let take = head.len().min(16);

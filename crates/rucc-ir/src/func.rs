@@ -470,6 +470,7 @@ impl Func {
 
     /// The last instruction of a block, which is its terminator once it is finished.
     #[must_use]
+    #[inline]
     pub fn terminator(&self, block: Block) -> Option<Inst> {
         self.blocks[block.index()].last.filter(|&inst| self.is_terminator(inst))
     }
@@ -480,6 +481,7 @@ impl Func {
     /// the one case where the opcode is not enough: `asm goto` has labels and everything else
     /// does not, and the labels are in the function's table rather than on the instruction.
     #[must_use]
+    #[inline]
     pub fn is_terminator(&self, inst: Inst) -> bool {
         let data = &self[inst];
         match data.extra {
@@ -734,6 +736,7 @@ impl Func {
     /// or not memory has been threaded, and the only code that has to know about the extra
     /// operand is this accessor and the verifier.
     #[must_use]
+    #[inline]
     pub fn mem_in(&self, inst: Inst) -> Option<Value> {
         let args = &self[self[inst].args];
         args.last().copied().filter(|&arg| self[arg].ty.is_mem())
@@ -749,6 +752,7 @@ impl Func {
     /// memory result has no reader is not dead, and what decides whether it is dead is dead
     /// store elimination, which is document 17's.
     #[must_use]
+    #[inline]
     pub fn mem_out(&self, inst: Inst) -> Option<Value> {
         self[inst].results().last().filter(|&result| self[result].ty.is_mem())
     }
@@ -775,6 +779,7 @@ impl Func {
 
     /// Whether an instruction has been threaded onto the memory chain.
     #[must_use]
+    #[inline]
     pub fn carries_mem(&self, inst: Inst) -> bool {
         self.mem_in(inst).is_some() || self.mem_out(inst).is_some()
     }
@@ -848,6 +853,7 @@ impl Func {
     ///
     /// This is the one place that knows a `switch` keeps its targets in a side table and
     /// `asm goto` in another one, so nothing walking the CFG has to.
+    #[inline]
     pub fn successors(&self, inst: Inst) -> impl Iterator<Item = BlockCall> + use<'_> {
         self.block_calls[self.target_list(inst).as_usize_range()].iter().copied()
     }
@@ -859,6 +865,7 @@ impl Func {
     /// wants, because an edge that will grow an argument later has to be named by its place in
     /// the table rather than by the block it went to.
     #[must_use]
+    #[inline]
     pub fn target_list(&self, inst: Inst) -> BlockCallList {
         match self[inst].extra {
             Extra::Targets(targets) => targets,
