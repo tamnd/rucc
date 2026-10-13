@@ -470,6 +470,13 @@ impl SearchPath {
 /// first, so asking would be one failed open per header for a name nothing on disk can have,
 /// which on a file that includes the C library was 118 of them. tamnd/rucc#3052.
 fn open(fs: &dyn FileSystem, path: &Path) -> io::Result<SourceBytes> {
+    // Every path an include search tries comes through here, and a path under the shipped
+    // headers starts with their directory's name. Comparing the bytes first keeps the two
+    // component walks below for the paths that can be one, where they were most of the cost of
+    // a search that found its header on the disk.
+    if !path.as_os_str().as_encoded_bytes().starts_with(runtime::DIR.as_bytes()) {
+        return fs.read(path);
+    }
     match runtime::read(path) {
         Some(bytes) => Ok(bytes),
         None if path.starts_with(runtime::DIR) => Err(io::ErrorKind::NotFound.into()),
