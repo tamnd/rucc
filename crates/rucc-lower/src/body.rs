@@ -10495,7 +10495,7 @@ impl<'u> Body<'_, 'u> {
         };
         if let Some(opcode) = pack {
             // A stand-in for arguments this function has not been handed yet, or for how many
-            // there were, which sema only lets through inside a variadic inline definition.
+            // there were, which sema only lets through in a function only inlining reaches.
             // `rucc_opt::inline` replaces it with what the call it inlines passed, and a copy of
             // the function still holding one after that is not emitted, which is gcc's answer too.
             return Some(self.build(span).value(InstData::new(opcode), Type::int(32)));

@@ -166,10 +166,87 @@ say (const char *fmt, ...)
   return __builtin_va_arg_pack_len ();
 }
 ";
-    let error = "'__builtin_va_arg_pack_len' is only accepted in a variadic function that is \
-                 'static' or that nothing is emitted for, which are the places it can be \
-                 forwarded from";
+    let error = "'__builtin_va_arg_pack_len' is only accepted in a function that is 'static' or \
+                 that nothing is emitted for, which are the places it can be forwarded from";
     for level in ["-O0", "-O2"] {
         refused("external", source, level, "5:10", error);
+    }
+}
+
+/// gcc takes the pair in a function with a fixed parameter list too, `static` or GNU's `extern
+/// inline`, and there every call has no anonymous arguments: the pack stands for nothing and the
+/// length is zero.
+#[test]
+fn a_pack_in_a_function_with_fixed_parameters_stands_for_nothing() {
+    let sources = [
+        ("fixed-static", "static inline __attribute__((always_inline)) int"),
+        ("fixed-extern", "extern inline __attribute__((always_inline, gnu_inline)) int"),
+    ];
+    for (what, head) in sources {
+        let source = format!(
+            "int sink (int n, ...);
+{head}
+wrap (int x)
+{{
+  return sink (__builtin_va_arg_pack_len (), x, __builtin_va_arg_pack ());
+}}
+int g (void) {{ return wrap (5); }}
+"
+        );
+        for level in ["-O0", "-O2"] {
+            let text = ir(what, &source, level);
+            assert!(!text.contains("va_arg_pack"), "{what} at {level}:\n{text}");
+            assert!(!text.contains("call @wrap"), "{what} at {level}:\n{text}");
+            assert!(text.contains("call @sink("), "{what} at {level}:\n{text}");
+        }
+    }
+}
+
+/// The same, run: `printf` is handed the format and the one argument written beside it.
+#[cfg(all(target_os = "linux", target_arch = "x86_64"))]
+#[test]
+fn a_fixed_parameter_wrapper_around_printf_prints_what_it_was_handed() {
+    let source = r#"#include <stdio.h>
+
+static inline __attribute__((always_inline)) int
+say (const char *s)
+{
+  return printf ("%s\n", s, __builtin_va_arg_pack ()) + __builtin_va_arg_pack_len ();
+}
+
+int main (void)
+{
+  return say ("hi") != 3;
+}
+"#;
+    for level in ["-O0", "-O2"] {
+        let path = fixture(&format!("fixed-printf{level}"), source);
+        let prog = path.with_extension("");
+        let built = Command::new(env!("CARGO_BIN_EXE_rucc"))
+            .args([level, "-o"])
+            .arg(&prog)
+            .arg(&path)
+            .output()
+            .expect("the compiler is built before its own tests run");
+        assert!(built.status.success(), "{level}: {}", String::from_utf8_lossy(&built.stderr));
+        let ran = Command::new(&prog).output().expect("what was linked can be run");
+        let _ = std::fs::remove_dir_all(path.parent().expect("the fixture is in a directory"));
+        assert_eq!(String::from_utf8_lossy(&ran.stdout), "hi\n", "{level}");
+        assert_eq!(ran.status.code(), Some(0), "{level}");
+    }
+}
+
+/// The pack stands for anonymous arguments, so one written where the inner call takes a named one
+/// cannot be filled in. The call is not inlined and gcc refuses the copy at the inner call.
+#[test]
+fn a_pack_where_a_named_argument_goes_is_refused_in_gccs_words() {
+    let source = "int f (int, ...);
+static inline __attribute__((always_inline)) int g (int x, ...) \
+                  { return f (__builtin_va_arg_pack ()); }
+int h (void) { return g (1, 2); }
+";
+    let error = "invalid use of '__builtin_va_arg_pack ()'";
+    for level in ["-O0", "-O2"] {
+        refused("named", source, level, "2:74", error);
     }
 }
