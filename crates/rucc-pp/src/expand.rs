@@ -325,6 +325,45 @@ impl<'a> Run<'a> {
         out
     }
 
+    /// Whether [`Run::expand`] would give back `toks` as they are, which it does when no name in
+    /// them is a macro it would expand. Counts the steps the loop would have counted, so the
+    /// bound on a runaway expansion is reached at the same token either way, and says no when
+    /// it would be reached here, leaving the loop to report it.
+    ///
+    /// Most arguments are a name or a number, and this spares each of them two lists and a copy.
+    fn passes_through(&mut self, toks: &[Tok], current: TraceId) -> bool {
+        let mut steps = self.steps;
+        for (at, tok) in toks.iter().enumerate() {
+            if current == TraceId::NONE && tok.trace == TraceId::NONE {
+                steps = 0;
+            }
+            steps += 1;
+            if steps > MAX_STEPS {
+                return false;
+            }
+            let Some(name) = tok.ident() else {
+                continue;
+            };
+            if self.condition.is_some_and(|c| c.defined == name) {
+                return false;
+            }
+            if self.hides.contains(tok.hides, name) {
+                continue;
+            }
+            match self.macros.lookup(name) {
+                None => {}
+                Some(def) if def.function_like && def.builtin.is_none() => {
+                    if toks.get(at + 1).is_some_and(|t| t.is(Punct::LParen)) {
+                        return false;
+                    }
+                }
+                Some(_) => return false,
+            }
+        }
+        self.steps = steps;
+        true
+    }
+
     /// Copies a `defined` and the name it asks about through untouched.
     ///
     /// The tokens come out in the order they went in and with nothing added, so the line the
@@ -569,9 +608,21 @@ impl<'a> Run<'a> {
         // argument token already has that chain, having been substituted from the call site.
         let body: Vec<Tok> =
             def.body.iter().map(|&t| Tok { trace: invocation.trace, ..Tok::new(t) }).collect();
-        let substituted = self.subst_list(def, args, &body, invocation);
+        // An object-like macro has no parameters, so with no `##` and no `__VA_OPT__` in it every
+        // token of its body comes through `subst_list` as it is and none of them is a
+        // placemarker. That is nearly every object-like macro there is, and the body is its own
+        // substitution without a second list. tamnd/rucc#3052.
+        let va_opt = Some(self.va_opt);
+        let plain = |t: &PpToken| {
+            t.kind != PpTokenKind::Punct(Punct::HashHash)
+                && !(t.kind == PpTokenKind::Ident && t.value == va_opt)
+        };
+        let mut os = if !def.function_like && def.body.iter().all(plain) {
+            body
+        } else {
+            drop_placemarkers(self.subst_list(def, args, &body, invocation))
+        };
         self.current = outer;
-        let mut os = drop_placemarkers(substituted);
         // The steps this expansion has made, by the trace the tokens came with. The body has
         // the invocation's, which is `here`, and each argument has its own, so a few cover an
         // ordinary call, and `x * x` gives both uses of `x` the same step. Past the few a trace
@@ -1047,10 +1098,19 @@ struct Args {
     toks: Vec<Tok>,
     /// Where each argument ends in `toks`, and so where the next one starts.
     ends: Vec<u32>,
-    expanded: Vec<Option<Vec<Tok>>>,
+    expanded: Vec<Option<Expanded>>,
     /// The chain the invocation itself came out of, which is the chain the argument text is
     /// in as well, since the caller wrote it and the macro being called did not.
     outer: TraceId,
+}
+
+/// What expanding one argument gave.
+#[derive(Clone)]
+enum Expanded {
+    /// The argument as it was written, because nothing in it expands.
+    Same,
+    /// Anything else.
+    Made(Vec<Tok>),
 }
 
 impl Args {
@@ -1077,11 +1137,19 @@ impl Args {
             return &[];
         };
         if slot.is_none() {
-            let saved = std::mem::replace(&mut run.current, self.outer);
-            let expanded = run.expand(self.raw(idx).to_vec());
-            run.current = saved;
+            let expanded = if run.passes_through(self.raw(idx), self.outer) {
+                Expanded::Same
+            } else {
+                let saved = std::mem::replace(&mut run.current, self.outer);
+                let expanded = run.expand(self.raw(idx).to_vec());
+                run.current = saved;
+                Expanded::Made(expanded)
+            };
             self.expanded[idx] = Some(expanded);
         }
-        self.expanded[idx].as_deref().expect("just filled in")
+        match &self.expanded[idx] {
+            Some(Expanded::Made(expanded)) => expanded,
+            _ => self.raw(idx),
+        }
     }
 }
