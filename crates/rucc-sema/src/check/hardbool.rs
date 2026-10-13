@@ -28,9 +28,10 @@ impl Checker<'_> {
     /// Each one is applied to what the one before it made, which is the order gcc applies them
     /// in, so a second one is written on a type that is no longer an integer and is refused.
     pub(in crate::check) fn hardened(&mut self, ty: TypeId, attrs: AttrList) -> TypeId {
-        let written = self.ast[attrs].to_vec();
+        let ast = self.ast;
+        let written = &ast[attrs];
         let mut ty = ty;
-        for attr in written {
+        for &attr in written {
             if self.gnu_name(&attr) != "hardbool" {
                 continue;
             }

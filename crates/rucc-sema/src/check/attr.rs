@@ -230,7 +230,20 @@ impl Checker<'_> {
     /// answering no has already told the program. So does a row newer than the gcc the persona
     /// claims. `__packed__` is read as `packed`, and an attribute in some namespace other than
     /// `gnu` is not GCC's and is not read.
+    #[inline]
     pub(in crate::check) fn gnu_name(&self, attr: &Attribute) -> &'static str {
+        // Asked of every attribute by every check that reads a list, so the answer for a name
+        // already seen without a namespace is read here and everything else is out of line.
+        if attr.namespace.is_none() {
+            if let Some(&Some(name)) = self.gnu_names.borrow().get(attr.name.raw() as usize) {
+                return name;
+            }
+        }
+        self.gnu_name_slow(attr)
+    }
+
+    #[inline(never)]
+    fn gnu_name_slow(&self, attr: &Attribute) -> &'static str {
         if attr.namespace.is_some_and(|ns| self.text(ns) != "gnu") {
             return "";
         }
@@ -330,8 +343,9 @@ impl Checker<'_> {
         let mut packing = Packing::default();
         // Copied out because folding the argument of `aligned` checks an expression, which
         // borrows the checker that the tree is being read through.
-        let written = self.ast[attrs].to_vec();
-        for attr in written {
+        let ast = self.ast;
+        let written = &ast[attrs];
+        for &attr in written {
             if attr.namespace.is_some_and(|ns| self.text(ns) != "gnu") {
                 continue;
             }
@@ -386,8 +400,9 @@ impl Checker<'_> {
     /// ever asked, so an attribute written anywhere else is ignored rather than diagnosed, which is
     /// what this compiler does with every attribute it has no use for in that position.
     pub(in crate::check) fn storage_order(&mut self, attrs: AttrList) -> Option<bool> {
-        let written = self.ast[attrs].to_vec();
-        for attr in written {
+        let ast = self.ast;
+        let written = &ast[attrs];
+        for &attr in written {
             if attr.namespace.is_some_and(|ns| self.text(ns) != "gnu") {
                 continue;
             }
@@ -455,8 +470,9 @@ impl Checker<'_> {
             return None;
         }
         let mut chosen = None;
-        let written = self.ast[attrs].to_vec();
-        for attr in written {
+        let ast = self.ast;
+        let written = &ast[attrs];
+        for &attr in written {
             if attr.namespace.is_some_and(|ns| self.text(ns) != "gnu") {
                 continue;
             }
@@ -500,8 +516,9 @@ impl Checker<'_> {
     /// `printf`, `scanf` and `strftime` archetypes and their `gnu_` names. The others are accepted
     /// and read no further.
     pub(in crate::check) fn format_archetypes(&mut self, attrs: AttrList) {
-        let written = self.ast[attrs].to_vec();
-        for attr in written {
+        let ast = self.ast;
+        let written = &ast[attrs];
+        for &attr in written {
             if attr.namespace.is_some_and(|ns| self.text(ns) != "gnu") {
                 continue;
             }
@@ -569,8 +586,9 @@ impl Checker<'_> {
     /// [`Self::startup`]. `used` and `retain` ask for nothing else. On a wasm row `export_name`
     /// keeps the definition too, because the host calls it, which is what clang does.
     pub(in crate::check) fn retains(&mut self, attrs: AttrList) -> bool {
-        let written = self.ast[attrs].to_vec();
-        for attr in written {
+        let ast = self.ast;
+        let written = &ast[attrs];
+        for &attr in written {
             if attr.namespace.is_some_and(|ns| self.text(ns) != "gnu") {
                 continue;
             }
@@ -597,16 +615,15 @@ impl Checker<'_> {
     /// attribute was implemented and is the thing that made it hard to find: nothing runs and
     /// nothing is said, and the symptom lands a long way from the declaration.
     pub(in crate::check) fn startup(&mut self, attrs: AttrList, kind: DeclKind) -> Startup {
-        let written = self.ast[attrs].to_vec();
+        let ast = self.ast;
+        let written = &ast[attrs];
         let mut startup = Startup::default();
-        for attr in written {
+        for &attr in written {
             if attr.namespace.is_some_and(|ns| self.text(ns) != "gnu") {
                 continue;
             }
-            // Copied out because reading the priority folds an expression, which borrows the
-            // checker that the name was read through.
-            let name = self.gnu_name(&attr).to_owned();
-            let before = match name.as_str() {
+            let name = self.gnu_name(&attr);
+            let before = match name {
                 "constructor" => true,
                 "destructor" => false,
                 _ => continue,
@@ -618,7 +635,7 @@ impl Checker<'_> {
                 self.report(dropped.note(note, attr.span));
                 continue;
             }
-            let Some(priority) = self.priority(attr, &name) else { continue };
+            let Some(priority) = self.priority(attr, name) else { continue };
             let place = if before { &mut startup.before } else { &mut startup.after };
             if place.is_none() {
                 *place = Some(priority);
@@ -691,8 +708,9 @@ impl Checker<'_> {
     /// armoured. Two of them on one declaration is the first one, which is what a list is read
     /// as everywhere else here.
     pub(in crate::check) fn aliased(&mut self, attrs: AttrList) -> Option<StrId> {
-        let written = self.ast[attrs].to_vec();
-        for attr in written {
+        let ast = self.ast;
+        let written = &ast[attrs];
+        for &attr in written {
             if attr.namespace.is_some_and(|ns| self.text(ns) != "gnu") {
                 continue;
             }
@@ -847,8 +865,9 @@ impl Checker<'_> {
         let mut after_alias = false;
         let mut found = None;
         'lists: for list in lists {
-            let written = self.ast[list].to_vec();
-            for attr in written {
+            let ast = self.ast;
+            let written = &ast[list];
+            for &attr in written {
                 if attr.namespace.is_some_and(|ns| self.text(ns) != "gnu") {
                     continue;
                 }
@@ -950,8 +969,9 @@ impl Checker<'_> {
         attrs: AttrList,
         duration: StorageDuration,
     ) -> Option<(StrId, Span)> {
-        let written = self.ast[attrs].to_vec();
-        for attr in written {
+        let ast = self.ast;
+        let written = &ast[attrs];
+        for &attr in written {
             if attr.namespace.is_some_and(|ns| self.text(ns) != "gnu") {
                 continue;
             }
@@ -1058,8 +1078,9 @@ impl Checker<'_> {
         kind: DeclKind,
     ) {
         for &attrs in lists {
-            let written = self.ast[attrs].to_vec();
-            for attr in written {
+            let ast = self.ast;
+            let written = &ast[attrs];
+            for &attr in written {
                 if attr.namespace.is_some_and(|ns| self.text(ns) != "gnu") {
                     continue;
                 }
@@ -1126,8 +1147,9 @@ impl Checker<'_> {
         kind: DeclKind,
         duration: StorageDuration,
     ) -> Option<DeclId> {
-        let written = self.ast[attrs].to_vec();
-        for attr in written {
+        let ast = self.ast;
+        let written = &ast[attrs];
+        for &attr in written {
             if attr.namespace.is_some_and(|ns| self.text(ns) != "gnu") {
                 continue;
             }
@@ -1220,8 +1242,9 @@ impl Checker<'_> {
     /// writes does and which this does not, so an expression is refused with the rest.
     pub(in crate::check) fn copied(&mut self, lists: &[AttrList]) -> Option<(DeclId, Span)> {
         for &attrs in lists {
-            let written = self.ast[attrs].to_vec();
-            for attr in written {
+            let ast = self.ast;
+            let written = &ast[attrs];
+            for &attr in written {
                 if attr.namespace.is_some_and(|ns| self.text(ns) != "gnu") {
                     continue;
                 }
@@ -1271,8 +1294,9 @@ impl Checker<'_> {
         ty: TypeId,
     ) {
         for &attrs in lists {
-            let written = self.ast[attrs].to_vec();
-            for attr in written {
+            let ast = self.ast;
+            let written = &ast[attrs];
+            for &attr in written {
                 if self.gnu_name(&attr) != "alloc_size" {
                     continue;
                 }
@@ -1519,8 +1543,9 @@ impl Checker<'_> {
     /// it. Every program correct under the promise is correct without it, which is the one shape
     /// of ignoring an option that `spec/04-driver-and-cli.md` section 4.1 leaves room for.
     pub(in crate::check) fn seen(&mut self, attrs: AttrList) -> Option<Visibility> {
-        let written = self.ast[attrs].to_vec();
-        for attr in written {
+        let ast = self.ast;
+        let written = &ast[attrs];
+        for &attr in written {
             if attr.namespace.is_some_and(|ns| self.text(ns) != "gnu") {
                 continue;
             }
@@ -1833,8 +1858,8 @@ impl Checker<'_> {
             if attr.namespace.is_some_and(|ns| self.text(ns) != "gnu") {
                 continue;
             }
-            let name = self.gnu_name(&attr).to_string();
-            match name.as_str() {
+            let name = self.gnu_name(&attr);
+            match name {
                 "always_inline" => flags |= DeclFlags::ALWAYS_INLINE,
                 "noinline" => flags |= DeclFlags::NOINLINE,
                 "noipa" => flags |= DeclFlags::NOINLINE | DeclFlags::NOIPA,
@@ -1860,7 +1885,7 @@ impl Checker<'_> {
                 "uninitialized" => flags |= DeclFlags::UNINITIALIZED,
                 // The second of the two in one declaration is ignored with gcc's warning.
                 "common" | "nocommon" => {
-                    let (now, other) = match name.as_str() {
+                    let (now, other) = match name {
                         "common" => (DeclFlags::COMMON, "nocommon"),
                         _ => (DeclFlags::NO_COMMON, "common"),
                     };
@@ -2686,7 +2711,8 @@ impl Checker<'_> {
     /// `vectorcall` are ignored with a warning on x86-64 outside Windows. The same name twice is
     /// the one convention asked for twice, which is no conflict.
     fn convention_in(&mut self, attrs: AttrList) -> Option<(Convention, String, Span)> {
-        let written = self.ast[attrs].to_vec();
+        let ast = self.ast;
+        let written = &ast[attrs];
         let tuple = self.cx.target.tuple;
         let windows = tuple.os().as_str() == "windows";
         // Where gcc says the 32-bit Windows conventions are ignored. On 32-bit x86 they mean
@@ -2697,14 +2723,14 @@ impl Checker<'_> {
         // A `regparm` count is kept apart until the list is read, since outside Windows it goes
         // with `stdcall` rather than against it, and `fastcall` refuses it whichever comes first.
         let mut regparm: Option<(u8, Span)> = None;
-        for attr in written {
+        for &attr in written {
             if attr.namespace.is_some_and(|ns| self.text(ns) != "gnu") {
                 continue;
             }
-            let name = self.gnu_name(&attr).to_owned();
-            match name.as_str() {
+            let name = self.gnu_name(&attr);
+            match name {
                 "ms_abi" | "sysv_abi" => {
-                    let Some(convention) = Convention::asked(tuple, &name) else {
+                    let Some(convention) = Convention::asked(tuple, name) else {
                         let what = format!("'{name}' attribute ignored");
                         let note = "only x86-64 has a second calling convention to pick";
                         let dropped = Diagnostic::warning(what, attr.span).with_code("E0703");
@@ -2718,13 +2744,13 @@ impl Checker<'_> {
                             self.report(refused.with_code("E0740"));
                         }
                         Some(_) => {}
-                        None => asked = Some((convention, name, attr.span)),
+                        None => asked = Some((convention, name.to_owned(), attr.span)),
                     }
                 }
                 // The three 32-bit x86 has, where each is a convention of its own and `cdecl` is
                 // the target's. Two different ones in a list are refused as gcc refuses them.
-                "stdcall" | "cdecl" | "fastcall" if Convention::asked(tuple, &name).is_some() => {
-                    let convention = Convention::asked(tuple, &name).unwrap_or_default();
+                "stdcall" | "cdecl" | "fastcall" if Convention::asked(tuple, name).is_some() => {
+                    let convention = Convention::asked(tuple, name).unwrap_or_default();
                     match &asked {
                         Some((_, first, _)) if *first != name => {
                             let what =
@@ -2733,7 +2759,7 @@ impl Checker<'_> {
                             self.report(refused.with_code("E0740"));
                         }
                         Some(_) => {}
-                        None => asked = Some((convention, name, attr.span)),
+                        None => asked = Some((convention, name.to_owned(), attr.span)),
                     }
                 }
                 // How many words go in registers, which outside Windows is the only convention
@@ -2909,9 +2935,10 @@ impl Checker<'_> {
     /// Written twice the last one wins, which is what GCC does and is the reading under which the
     /// second is not applied to what the first produced.
     fn moded(&mut self, ty: TypeId, attrs: AttrList) -> TypeId {
-        let written = self.ast[attrs].to_vec();
+        let ast = self.ast;
+        let written = &ast[attrs];
         let mut moded = ty;
-        for attr in written {
+        for &attr in written {
             if attr.namespace.is_some_and(|ns| self.text(ns) != "gnu") {
                 continue;
             }
@@ -3025,9 +3052,10 @@ impl Checker<'_> {
     /// over the size of the element. Written twice the last one wins, which is what GCC does and
     /// is the only reading under which the two are not both applied to the same element type.
     pub(in crate::check) fn vectorized(&mut self, ty: TypeId, attrs: AttrList) -> TypeId {
-        let written = self.ast[attrs].to_vec();
+        let ast = self.ast;
+        let written = &ast[attrs];
         let mut vector = ty;
-        for attr in written {
+        for &attr in written {
             if attr.namespace.is_some_and(|ns| self.text(ns) != "gnu") {
                 continue;
             }

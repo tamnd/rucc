@@ -165,8 +165,9 @@ impl Checker<'_> {
     /// defines the function does not repeat it.
     pub(in crate::check) fn read_advice(&mut self, decl: DeclId, lists: &[AttrList]) {
         for &list in lists {
-            let written = self.ast[list].to_vec();
-            for attr in written {
+            let ast = self.ast;
+            let written = &ast[list];
+            for &attr in written {
                 let Some(which) = self.which(&attr) else { continue };
                 match which {
                     Which::Deprecated | Which::Unavailable => {
@@ -354,8 +355,9 @@ impl Checker<'_> {
     fn deprecation(&mut self, lists: &[AttrList]) -> Option<Notice> {
         let mut found: Option<Notice> = None;
         for &list in lists {
-            let written = self.ast[list].to_vec();
-            for attr in written {
+            let ast = self.ast;
+            let written = &ast[list];
+            for &attr in written {
                 let unavailable = match self.which(&attr) {
                     Some(Which::Deprecated) => false,
                     Some(Which::Unavailable) => true,
