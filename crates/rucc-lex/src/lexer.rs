@@ -163,12 +163,18 @@ impl<'a> Lexer<'a> {
     /// Both halves matter: a good deal of real code has a trailing space after a backslash in
     /// a macro definition and expects it to keep working, and the space is invisible in an
     /// editor, so the one time it does change the meaning nobody can see why.
+    #[inline]
     fn report_loose_splices(&mut self) {
         // Asked after every token, and almost every file has none, so the list is not taken
-        // and dropped for nothing.
-        if !self.cursor.has_loose_splices() {
-            return;
+        // and dropped for nothing, and only the question is inlined.
+        if self.cursor.has_loose_splices() {
+            self.report_loose_splices_now();
         }
+    }
+
+    #[cold]
+    #[inline(never)]
+    fn report_loose_splices_now(&mut self) {
         for at in self.cursor.take_loose_splices() {
             let span = Span::new(self.file_start + at, self.file_start + at + 1);
             self.diagnostics.push(Diagnostic::warning(
@@ -306,14 +312,27 @@ impl<'a> Lexer<'a> {
     }
 
     /// Consumes one logical byte, keeping the spelling buffer correct.
+    ///
+    /// Inlined, with the spelling buffer out of line, since a byte of a token with no splice
+    /// in it needs nothing but the step and that is nearly every byte. tamnd/rucc#3052.
+    #[inline]
     fn eat(&mut self) -> u8 {
         let before = self.cursor.pos();
         // Every caller has already established there is a byte here, through `at_end` or
         // through a lookahead that returned a non-zero byte.
         let (b, clean) = self.cursor.bump().expect("eat called at end of file");
+        if self.unclean || !clean {
+            self.eat_unclean(before, b);
+        }
+        b
+    }
+
+    /// The rest of [`Lexer::eat`], for a token whose spelling has been interrupted by now.
+    #[inline(never)]
+    fn eat_unclean(&mut self, before: u32, b: u8) {
         if self.unclean {
             self.scratch.push(b);
-        } else if !clean {
+        } else {
             // The first interruption in this token. Everything before it was contiguous, so
             // it copies as one slice, and only from here on does the scan pay per byte.
             let from = self.token_start as usize;
@@ -323,7 +342,6 @@ impl<'a> Lexer<'a> {
             self.scratch.push(b);
             self.unclean = true;
         }
-        b
     }
 
     /// Interns the spelling of the token that ran from `start` to `end`.
