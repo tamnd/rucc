@@ -1059,6 +1059,62 @@ fn passes(
     })
 }
 
+/// The comparisons [`blocks`] folds into the branch behind them, as the function stands now.
+///
+/// What one of those writes into its byte is never written, since the byte goes when the two are
+/// folded, so a pass after allocation may take the register as still holding what it held before
+/// the comparison. [`crate::copies::clean`] does: a loop on i386 that read a slot back into `%ebx`
+/// in front of `cmpl` and `setl %bl` read it back again in the block the branch went to, which is
+/// 32 loads in drivers/md/md.c. That only holds while nothing comes between the comparison and the
+/// branch, and the passes between allocation and the layout put nothing there: the schedule is
+/// told to leave the comparison where it is and the edge copies go in front of it. The pipeline
+/// asks again in front of [`blocks`] and stops when an answer it gave the cleanup no longer holds.
+pub fn joined(
+    func: &mir::Func,
+    insts: &BranchInsts,
+    fused: &Fused,
+    fusable: &Set<mir::Inst>,
+    names: &mut Interner,
+) -> Set<mir::Inst> {
+    let branch = mir::Opcode::new(names.join(insts.prefix, insts.cond));
+    func.blocks()
+        .filter(|&block| {
+            func[block].succs.len() == 2
+                && func.terminator(block).is_some_and(|last| func[last].opcode == branch)
+        })
+        .filter_map(|block| folded(func, fused, fusable, block).map(|(compare, _)| compare))
+        .collect()
+}
+
+/// The comparison the block's branch can be folded into, when there is one.
+///
+/// Three things have to hold and [`fusable`] has already answered the one that cannot be answered
+/// here. What is left is that the comparison is still the instruction in front of the branch,
+/// since allocation may have put a reload between them and the flags do not survive one, and that
+/// the byte the branch reads is the byte that comparison wrote, since the allocator has since given
+/// both of them a physical register and two registers that were different could have become the
+/// same one.
+fn folded(
+    func: &mir::Func,
+    fused: &Fused,
+    fusable: &Set<mir::Inst>,
+    block: mir::Block,
+) -> Option<(mir::Inst, Folded)> {
+    let insts: Vec<mir::Inst> = func.insts(block).collect();
+    let [.., compare, last] = insts[..] else { return None };
+    if !fusable.contains(&compare) {
+        return None;
+    }
+    let opcode = func[compare].opcode;
+    let fusion = match (fused.0.get(&opcode), fused.1.get(&opcode)) {
+        (Some(&fusion), _) => Folded::Compare(fusion),
+        (None, Some(&reading)) => Folded::Reading(reading),
+        (None, None) => return None,
+    };
+    let byte = func[func[compare].operands].first()?.reg;
+    (func[func[last].operands].first()?.reg == byte).then_some((compare, fusion))
+}
+
 /// What a branch is folded into: a comparison that keeps the flags, or a byte that goes.
 #[derive(Debug, Clone, Copy)]
 enum Folded {
@@ -1272,28 +1328,9 @@ impl Writer<'_> {
         low.is_power_of_two().then(|| self.opcode(entry.into))
     }
 
-    /// The comparison the block's branch can be folded into, when there is one.
-    ///
-    /// Three things have to hold and [`fusable`] has already answered the one that cannot be
-    /// answered here. What is left is that the comparison is still the instruction in front of the
-    /// branch, since allocation may have put a reload between them and the flags do not survive
-    /// one, and that the byte the branch reads is the byte that comparison wrote, since the
-    /// allocator has since given both of them a physical register and two registers that were
-    /// different could have become the same one.
+    /// The comparison the block's branch can be folded into, when there is one. See [`folded`].
     fn fused(&self, block: mir::Block) -> Option<(mir::Inst, Folded)> {
-        let insts: Vec<mir::Inst> = self.func.insts(block).collect();
-        let [.., compare, last] = insts[..] else { return None };
-        if !self.fusable.contains(&compare) {
-            return None;
-        }
-        let opcode = self.func[compare].opcode;
-        let fusion = match (self.fused.0.get(&opcode), self.fused.1.get(&opcode)) {
-            (Some(&fusion), _) => Folded::Compare(fusion),
-            (None, Some(&reading)) => Folded::Reading(reading),
-            (None, None) => return None,
-        };
-        let byte = self.func[self.func[compare].operands].first()?.reg;
-        (self.func[self.func[last].operands].first()?.reg == byte).then_some((compare, fusion))
+        folded(self.func, self.fused, self.fusable, block)
     }
 
     /// Turns a comparison that wrote a byte into the same comparison that writes nothing.
@@ -1895,6 +1932,27 @@ mod tests {
         assert!(text.contains("x64.cmp_set_l_32"), "{text}");
         assert!(text.contains("x64.test_rr_8"), "{text}");
         assert!(!text.contains("x64.cmp_rr_32"), "{text}");
+    }
+
+    /// [`joined`] gives the comparison [`blocks`] folds, and gives nothing once a reload comes
+    /// between it and its branch, which is the one [`blocks`] writes with its byte.
+    #[test]
+    fn a_comparison_is_joined_to_its_branch_until_something_comes_between() {
+        let (mut names, mut func, made) = blank(3);
+        compare(&mut func, &mut names, made[0], &[made[1], made[2]]);
+        let fused = Fused::new(&BRANCH, &mut names);
+        let fusable = fusable(&func, &BRANCH, &fused, &mut names);
+        assert_eq!(joined(&func, &BRANCH, &fused, &fusable, &mut names), fusable);
+
+        let branch = func.terminator(made[0]).expect("a block with two arms has a branch");
+        let opcode = Opcode::new(names.intern("x64.mov_rr_64"));
+        let reload = func
+            .build_loose(opcode)
+            .def(Reg::physical(RCX), GPR)
+            .operand(Operand::read(Reg::physical(RAX), GPR))
+            .finish();
+        func.insert_before(branch, reload);
+        assert!(joined(&func, &BRANCH, &fused, &fusable, &mut names).is_empty());
     }
 
     /// Puts an instruction of that name between the comparison at the end of a block and its

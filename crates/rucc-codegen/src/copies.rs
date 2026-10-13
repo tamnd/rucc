@@ -181,6 +181,9 @@ pub struct Cleaned {
 /// Takes out every move of the allocator's that puts a value where it is already, and reads the
 /// rest out of a register wherever one has the word the frame does.
 ///
+/// `joined` is the comparisons the layout folds into their branch, whose byte is never written and
+/// so leaves the register it is part of holding what it held. See [`crate::layout::joined`].
+///
 /// # Panics
 ///
 /// Panics on a move of a class the target did not say how to move, which is the same frame
@@ -195,6 +198,7 @@ pub fn clean(
     conv: &CallRegs,
     framed: bool,
     scratch: (RegClass, &[PhysReg]),
+    joined: &Set<Inst>,
     names: &mut Interner,
 ) -> Cleaned {
     let blocks: Vec<Block> = func.blocks().collect();
@@ -250,7 +254,10 @@ pub fn clean(
                 continue;
             }
             let mut addressing = false;
-            for operand in &func[func[inst].operands] {
+            // The byte a comparison the layout folds into its branch writes, which is never written.
+            // See `crate::layout::joined`.
+            let skip = usize::from(joined.contains(&inst));
+            for operand in func[func[inst].operands].iter().skip(skip) {
                 if !operand.role.is_def() {
                     continue;
                 }
@@ -826,7 +833,17 @@ mod tests {
 
     /// The pass, with the one target these tests are written against.
     fn clean(func: &mut Func, moves: &Moves, names: &mut Interner) -> Cleaned {
-        super::clean(func, moves, &MACHINE, &FRAME, &SYSV, true, (GPR, &[R10, R11]), names)
+        super::clean(
+            func,
+            moves,
+            &MACHINE,
+            &FRAME,
+            &SYSV,
+            true,
+            (GPR, &[R10, R11]),
+            &Set::default(),
+            names,
+        )
     }
 
     /// How many moves went, for a test about the half that removes.
@@ -1522,6 +1539,40 @@ mod tests {
 
         assert_eq!(gone(&mut func, &moves, &mut names), 1);
         assert_eq!(left(&func, next), 1, "only the add is left");
+    }
+
+    /// The byte of a comparison the layout folds into its branch is never written, so the register
+    /// it is part of still has the word read back in front of it when the branch gets to the next
+    /// block. A comparison the layout writes as it is does write the byte, and the reload stays.
+    #[test]
+    fn a_reload_behind_a_comparison_folded_into_its_branch_goes() {
+        for folded in [true, false] {
+            let (mut names, mut func, top) = empty();
+            let next = func.create_block();
+            let other = func.create_block();
+            func.succs_mut(top).push(BlockCall::to(next));
+            func.succs_mut(top).push(BlockCall::to(other));
+            let early = load(&mut func, &mut names, top, RBX, 16);
+            let compare = op(&mut names, "cmp_set_l_ri_64");
+            let rbx = Reg::physical(RBX);
+            let compare = func.build(top, compare).def(rbx, GPR).uses(rbx, GPR).imm(5).finish();
+            let branch = op(&mut names, "br_cond_8");
+            func.build(top, branch).uses(rbx, GPR).finish();
+            let late = load(&mut func, &mut names, next, RBX, 16);
+            add(&mut func, &mut names, next, RAX, RBX);
+            let mut moves = Moves::default();
+            moves.record(early, back(top, 0, RBX));
+            moves.record(late, back(next, 0, RBX));
+
+            let joined: Set<Inst> =
+                if folded { [compare].into_iter().collect() } else { Set::default() };
+            let scratch = (GPR, &[R10, R11][..]);
+            let cleaned = super::clean(
+                &mut func, &moves, &MACHINE, &FRAME, &SYSV, true, scratch, &joined, &mut names,
+            );
+            assert_eq!(cleaned.gone, usize::from(folded), "folded: {folded}");
+            assert_eq!(left(&func, next), if folded { 1 } else { 2 }, "folded: {folded}");
+        }
     }
 
     /// What a scratch register holds is not carried into the next block, because a later pass can
