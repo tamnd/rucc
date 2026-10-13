@@ -373,6 +373,20 @@ fn a_small_number_cast_to_a_pointer_and_back_is_that_number() {
     assert!(out.status.success(), "{}", String::from_utf8_lossy(&out.stderr));
 }
 
+/// KVM's svm/pmu.c checks `x86_feature_cpuid(X86_FEATURE_PERFMON_V2).function` in a
+/// `BUILD_BUG_ON`. The function returns a structure of twelve bytes from a `const` table, so after
+/// inlining the first two members are one `i64` load from the table. gcc folds the load.
+#[test]
+fn a_structure_returned_from_a_const_table_is_folded() {
+    let source = "extern void bad(void) __attribute__((error(\"BUILD_BUG_ON failed\")));\n\
+        struct cpuid_reg { unsigned int function; unsigned int index; int reg; };\n\
+        static const struct cpuid_reg tab[] = { { 1, 0, 3 }, { 0x80000001, 0, 3 }, { 0x80000022, 0, 0 } };\n\
+        static inline __attribute__((always_inline)) struct cpuid_reg get(unsigned int l) { return tab[l]; }\n\
+        void t(void) { if (get(2).function != 0x80000022 || get(2).index) bad(); }\n";
+    let out = run(&["--target=x86_64-unknown-linux-gnu", "-O2", "-c", "-o", "/dev/null"], source);
+    assert!(out.status.success(), "{}", String::from_utf8_lossy(&out.stderr));
+}
+
 /// ext4 writes `failed_mount8: __maybe_unused` on a label only some configurations jump to. gcc
 /// gives the attribute to the label, so there is nothing to warn about under `-Werror`.
 #[test]
