@@ -12,6 +12,7 @@ All notable changes are recorded here. The format follows [Keep a Changelog](htt
 - Rank the values beside a spilled one once per class in the register allocator instead of sorting them again for each value it sends to memory, which takes 1.6% off the slowest corpus files (#3589).
 - Dead store elimination walks up to 512 instructions from a store before keeping it, up from gcc's 256, which writes 0.36% less text over the corpus cases it changes and 128 bytes less on SQLite for no more instructions or compile time. `inline-hint-percent` stays at 200, since at 100 SQLite takes 3% more cycles for 1.27% less text (#3588).
 - Link rucc position dependent on x86_64 Linux, so the loader no longer rewrites 1.8 MiB of pointers at every start: page faults for an empty compile drop from 728 to 260 and the smallest corpus files take about a quarter less CPU (#3590).
+- Link the static musl rucc position dependent on x86_64 as well, so it no longer relocates itself at every start: an empty compile drops from 672 to 205 page faults (#3591).
 
 ## 0.30.2
 
