@@ -35,6 +35,14 @@ All notable changes are recorded here. The format follows [Keep a Changelog](htt
 - A function with thousands of locals live across thousands of `if` statements no longer stops with "index out of range" while it is lowered. A branch argument list that has to move now gets room to grow, and the SSA cleanup reads a parameter's position from its definition instead of searching for it. A generated file with 3000 such locals now builds at -O0 in 20s, and with 1000 it uses 509MB instead of 2.8GB (#3611).
 - A range query now walks past up to 1024 branches that don't mention the value, up from 64. The kernel's scoped_seqlock_read loop tests a state that can't happen and calls `__scoped_seqlock_bug`, which gcc folds away. With a long critical section full of other branches, rucc gave up before it reached the test that settles the state, so the call stayed and allmodconfig failed to link (#3612).
 
+## 0.30.5
+
+This is a patch release. It replaces 0.30.4, whose tag failed its checks and was never published. It has the same compiler as 0.30.4. Only the build of the doctests changed. It was cut from the 0.30.4 tag, so the changes under Unreleased are not in it.
+
+### Fixed
+
+- The doctests build position dependent on x86_64 Linux, as the libraries they link against have been since #3590. Before, a doctest was built as a PIE and did not link, and the release check of 0.30.4 failed (#3622).
+
 ## 0.30.4
 
 This is a patch release. It fixes a regression in 0.30.3 that made the x86-64 Linux kernel fail to boot: an asm output that nothing reads could get the stack pointer, so the kernel's `sync_core` wrote the stack segment into `rsp` and the kernel took a triple fault. The 7.2.8 x86-64 kernel built by rucc boots again. rucc also uses less memory and makes fewer system calls on large headers.
