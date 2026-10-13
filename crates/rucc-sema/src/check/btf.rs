@@ -206,11 +206,35 @@ impl Checker<'_> {
     }
 
     /// The strings of the `btf_decl_tag`s in the lists whose arguments are right, in the order
-    /// gcc keeps them on the declaration: the lists are the attributes after the declarator and
-    /// then the specifiers', gcc puts each attribute it reads on the front, and a tag the
-    /// declaration already has is not put there again.
+    /// gcc keeps them on the declaration: the lists are those on the stars of the declarator
+    /// that [`Self::btf_starred_decl_tags`] gives, the attributes after the declarator and then
+    /// the specifiers', gcc puts each attribute it reads on the front, and a tag the declaration
+    /// already has is not put there again.
     pub(in crate::check) fn btf_decl_tags(&self, lists: &[AttrList]) -> Vec<Vec<u8>> {
         self.btf_strings(lists, "btf_decl_tag")
+    }
+
+    /// The attributes on the stars of the declarator whose `btf_decl_tag`s gcc puts on the
+    /// declaration, from the specifiers in toward the name, with gcc's warning for each tag on a
+    /// star it does not.
+    ///
+    /// gcc hands a tag on a star to the declaration when what is inside the star is the name, a
+    /// function or an array, so `int * __attribute__((btf_decl_tag ("d"))) f (void)` tags `f`.
+    /// Inside another star, as in `int * T * p`, it says the tag does not apply to types.
+    pub(in crate::check) fn btf_starred_decl_tags(&mut self, derived: DerivedList) -> Vec<AttrList> {
+        let ast = self.ast;
+        let steps = &ast[derived];
+        let mut lists = Vec::new();
+        for (at, step) in steps.iter().enumerate().rev() {
+            let Derived::Pointer { attrs, .. } = *step else { continue };
+            let inside = at.checked_sub(1).map(|inner| &steps[inner]);
+            if matches!(inside, Some(Derived::Pointer { .. })) {
+                self.btf_misplaced(&[attrs], "btf_decl_tag", "types");
+            } else {
+                lists.push(attrs);
+            }
+        }
+        lists
     }
 
     /// The strings of the tags of that name in the lists whose arguments are right, the last

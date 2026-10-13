@@ -1320,7 +1320,9 @@ impl Checker<'_> {
                 self.tast.record_spelling(decl, name, of);
             }
             if let Some(specs) = param.specs {
-                let tags = self.btf_decl_tags(&[param.attrs, ast[specs].attrs]);
+                let mut lists = self.btf_starred_decl_tags(declarator.derived);
+                lists.extend([param.attrs, ast[specs].attrs]);
+                let tags = self.btf_decl_tags(&lists);
                 self.tast.record_btf_decl_tags(decl, tags);
                 let tags = self.btf_type_tags(&ast[specs], declarator.derived, param.attrs, object);
                 self.tast.record_btf_type_tags(decl, tags);

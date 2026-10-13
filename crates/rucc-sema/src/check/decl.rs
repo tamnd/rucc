@@ -417,7 +417,9 @@ impl Checker<'_> {
         };
         let id = self.merge(declared);
         self.record_section(id, section);
-        let tags = self.btf_decl_tags(&[specs.attrs]);
+        let mut lists = self.btf_starred_decl_tags(node.derived);
+        lists.push(specs.attrs);
+        let tags = self.btf_decl_tags(&lists);
         self.tast.record_btf_decl_tags(id, tags);
         self.tast.record_btf_type_tags(id, type_tags);
         // A function `ifunc` made an indirect function has its body in whatever the resolver
@@ -1058,7 +1060,9 @@ impl Checker<'_> {
         let id = self.merge(declared);
         self.record_section(id, section);
         if may!(carried, "btf_decl_tag") {
-            let tags = self.btf_decl_tags(&[item.attrs, specs.attrs]);
+            let mut lists = self.btf_starred_decl_tags(node.derived);
+            lists.extend([item.attrs, specs.attrs]);
+            let tags = self.btf_decl_tags(&lists);
             self.tast.record_btf_decl_tags(id, tags);
         }
         self.tast.record_btf_type_tags(id, type_tags);

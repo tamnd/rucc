@@ -2107,6 +2107,19 @@ mod tests {
         assert_eq!(pointed(&info, "local"), 1);
     }
 
+    /// A tagged type points at a chain of its own, named `btf_type_tag`, which is not the chain
+    /// of a `btf_decl_tag` with the same string.
+    #[test]
+    fn a_type_tag_is_a_chain_apart_from_a_decl_tag_with_the_same_string() {
+        let mut unit = one();
+        unit.type_tags = vec![(0, vec![b"user".to_vec()])];
+        unit.funcs[0].tags = vec![b"user".to_vec()];
+        let info = write(&unit).expect("sections");
+        assert_eq!(pointed(&info, "btf_type_tag"), 1, "in {:?}", named(&info));
+        assert_eq!(pointed(&info, "btf_decl_tag"), 1, "in {:?}", named(&info));
+        assert_eq!(pointed(&info, "user"), 2);
+    }
+
     /// A unit with no tags says nothing about them.
     #[test]
     fn a_unit_with_no_tags_has_no_annotation() {
