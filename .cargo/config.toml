@@ -8,3 +8,10 @@ xtask = "run --quiet --package xtask --"
 # start on a fresh Windows 11. The release workflow checks the imports of what it built.
 [target.'cfg(all(windows, target_env = "msvc"))']
 rustflags = ["-C", "target-feature=+crt-static"]
+
+# A position dependent executable on x86_64 Linux, so that nothing is relocated when it starts.
+# As a position independent one the loader wrote all 1.8 MiB of `.data.rel.ro`, 61292 pointers,
+# before `main`, which was about 450 pages copied and more than half of what an empty file costs
+# to compile. tamnd/rucc#3052.
+[target.x86_64-unknown-linux-gnu]
+rustflags = ["-C", "relocation-model=static"]
