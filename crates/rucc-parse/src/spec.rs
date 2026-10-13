@@ -579,6 +579,7 @@ impl Parser<'_> {
     /// them, decides, and hands them back here.
     pub(crate) fn decl_specs_with(&mut self, leading: AttrList, start: Span) -> DeclSpecsId {
         let mut specs = DeclSpecs::empty(start);
+        specs.first = self.cursor.span();
         specs.pushed = self.visibility_in_effect();
         specs.options = self.options_in_effect();
         let mut builtin = Builtin::NONE;

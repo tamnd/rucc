@@ -41,6 +41,9 @@
 //! with the same tags, the way gcc writes them. These are gcc's own codes, which pahole reads into
 //! the BTF.
 //!
+//! A `btf_type_tag` is the same on a type's entry, named `btf_type_tag`. A chain of one name is
+//! never shared with a chain of the other, since the name is part of what each tag says.
+//!
 //! [`Function::sig`]: crate::Function::sig
 
 use std::collections::HashMap;
@@ -63,26 +66,32 @@ const DW_AT_GNU_ANNOTATION: gimli::DwAt = gimli::DwAt(0x2139);
 /// What carries tags, as the entry it was written as and its tags.
 type Tagged<'a> = Vec<(UnitEntryId, &'a [Vec<u8>])>;
 
-/// The tags already written, by the string each holds and the tag it points at next, so that a
-/// chain is written once however many entries carry it.
+/// The tags already written, by their name, the string each holds and the tag it points at next,
+/// so that a chain is written once however many entries carry it.
 #[derive(Default)]
 struct Annotations {
-    made: HashMap<(Vec<u8>, Option<UnitEntryId>), UnitEntryId>,
+    made: HashMap<(&'static str, Vec<u8>, Option<UnitEntryId>), UnitEntryId>,
 }
 
 impl Annotations {
-    /// Points the entry at the chain of these tags, written from its end so that each points at
-    /// the one after it, which is already there.
-    fn annotate(&mut self, dwarf: &mut gimli::write::DwarfUnit, at: UnitEntryId, tags: &[Vec<u8>]) {
+    /// Points the entry at the chain of these tags of that name, written from its end so that
+    /// each points at the one after it, which is already there.
+    fn annotate(
+        &mut self,
+        dwarf: &mut gimli::write::DwarfUnit,
+        at: UnitEntryId,
+        name: &'static str,
+        tags: &[Vec<u8>],
+    ) {
         let mut next = None;
         for tag in tags.iter().rev() {
-            let key = (tag.clone(), next);
+            let key = (name, tag.clone(), next);
             let id = match self.made.get(&key) {
                 Some(&id) => id,
                 None => {
                     let root = dwarf.unit.root();
                     let id = dwarf.unit.add(root, DW_TAG_GNU_ANNOTATION);
-                    title(dwarf, id, "btf_decl_tag");
+                    title(dwarf, id, name);
                     let value = AttributeValue::StringRef(dwarf.strings.add(tag.clone()));
                     let entry = dwarf.unit.get_mut(id);
                     entry.set(gimli::DW_AT_const_value, value);
@@ -153,7 +162,12 @@ pub(crate) fn describe(
     }
     let mut annotations = Annotations::default();
     for (at, tags) in tagged {
-        annotations.annotate(dwarf, at, tags);
+        annotations.annotate(dwarf, at, "btf_decl_tag", tags);
+    }
+    for (index, tags) in &unit.type_tags {
+        if let Some(&Some(at)) = ids.get(*index) {
+            annotations.annotate(dwarf, at, "btf_type_tag", tags);
+        }
     }
     Ok(())
 }
@@ -1104,6 +1118,7 @@ mod tests {
                 encoding: Encoding::Signed,
                 size: 4,
             }],
+            type_tags: Vec::new(),
             funcs: vec![Function {
                 name: "f".to_owned(),
                 symbol: None,

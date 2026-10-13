@@ -22,7 +22,7 @@ use rucc_base::{Idx, IdxRange, Symbol};
 use rucc_diag::Span;
 use rucc_lex::StringLiteral;
 use rucc_target::{Isa, TlsModel};
-use rucc_types::{Prototype, RecordId, TypeId, VlaId};
+use rucc_types::{EnumId, Prototype, RecordId, TypeId, VlaId};
 
 use crate::asm::{Asm, AsmId, AsmOperand, AsmOperandList, FileAsm, LabelList, StrList};
 use crate::decl::{Decl, DeclId, DeclList, InitEntry};
@@ -201,6 +201,12 @@ pub struct Version {
     pub test: Option<(CpuObject, u8, u8)>,
 }
 
+/// The strings of the `btf_type_tag`s on the levels of one declaration's type, each level
+/// counted from the outside in: the type the declaration gives what it declares is level 0, what
+/// that points at, is an array of or returns is level 1, and so on. Each level's strings are the
+/// last written first, the order gcc chains them in.
+pub type TypeTags = Vec<(u32, Vec<Vec<u8>>)>;
+
 /// One typed translation unit.
 #[derive(Default)]
 pub struct Tast {
@@ -237,6 +243,11 @@ pub struct Tast {
     symvers: Map<DeclId, Vec<(String, Span)>>,
     btf_decl_tags: Map<DeclId, Vec<Vec<u8>>>,
     member_tags: Map<(RecordId, Symbol), Vec<Vec<u8>>>,
+    btf_type_tags: Map<DeclId, TypeTags>,
+    alias_type_tags: Map<Symbol, TypeTags>,
+    member_type_tags: Map<(RecordId, Symbol), TypeTags>,
+    record_type_tags: Map<RecordId, Vec<Vec<u8>>>,
+    enum_type_tags: Map<EnumId, Vec<Vec<u8>>>,
     defined_at: Map<DeclId, Span>,
     notices: Map<DeclId, Notices>,
     extents: Map<DeclId, u64>,
@@ -721,6 +732,77 @@ impl Tast {
     #[must_use]
     pub fn member_tags(&self, record: RecordId, member: Symbol) -> &[Vec<u8>] {
         self.member_tags.get(&(record, member)).map_or(&[], Vec::as_slice)
+    }
+
+    /// Records the `btf_type_tag`s on the levels of the type one declaration of this function,
+    /// object or parameter gave it. The first declaration with any is the one that stands, which
+    /// is the type the debugging information describes.
+    pub fn record_btf_type_tags(&mut self, decl: DeclId, tags: TypeTags) {
+        if !tags.is_empty() {
+            self.btf_type_tags.entry(decl).or_insert(tags);
+        }
+    }
+
+    /// The `btf_type_tag`s on the levels of this declaration's type, and nothing for one without
+    /// them. A function's own level is never tagged, so its tags are of what it returns and
+    /// further in.
+    #[must_use]
+    pub fn btf_type_tags(&self, decl: DeclId) -> &[(u32, Vec<Vec<u8>>)] {
+        self.btf_type_tags.get(&decl).map_or(&[], Vec::as_slice)
+    }
+
+    /// Records the `btf_type_tag`s on the levels of the type a file-scope typedef name stands
+    /// for, the first declaration of the name being the one that stands.
+    pub fn record_alias_type_tags(&mut self, name: Symbol, tags: TypeTags) {
+        if !tags.is_empty() {
+            self.alias_type_tags.entry(name).or_insert(tags);
+        }
+    }
+
+    /// The `btf_type_tag`s on the levels of the type this typedef name stands for.
+    #[must_use]
+    pub fn alias_type_tags(&self, name: Symbol) -> &[(u32, Vec<Vec<u8>>)] {
+        self.alias_type_tags.get(&name).map_or(&[], Vec::as_slice)
+    }
+
+    /// Records the `btf_type_tag`s on the levels of a member's type.
+    pub fn record_member_type_tags(&mut self, record: RecordId, member: Symbol, tags: TypeTags) {
+        if !tags.is_empty() {
+            self.member_type_tags.insert((record, member), tags);
+        }
+    }
+
+    /// The `btf_type_tag`s on the levels of this member's type.
+    #[must_use]
+    pub fn member_type_tags(&self, record: RecordId, member: Symbol) -> &[(u32, Vec<Vec<u8>>)] {
+        self.member_type_tags.get(&(record, member)).map_or(&[], Vec::as_slice)
+    }
+
+    /// Records the strings of the `btf_type_tag`s written after the body of a structure or a
+    /// union, which tag the record itself rather than a variant of it.
+    pub fn record_tagged_record(&mut self, record: RecordId, tags: Vec<Vec<u8>>) {
+        if !tags.is_empty() {
+            self.record_type_tags.insert(record, tags);
+        }
+    }
+
+    /// The strings of the `btf_type_tag`s this record was defined with.
+    #[must_use]
+    pub fn record_type_tags(&self, record: RecordId) -> &[Vec<u8>] {
+        self.record_type_tags.get(&record).map_or(&[], Vec::as_slice)
+    }
+
+    /// Records the strings of the `btf_type_tag`s written after the body of an enumeration.
+    pub fn record_tagged_enum(&mut self, which: EnumId, tags: Vec<Vec<u8>>) {
+        if !tags.is_empty() {
+            self.enum_type_tags.insert(which, tags);
+        }
+    }
+
+    /// The strings of the `btf_type_tag`s this enumeration was defined with.
+    #[must_use]
+    pub fn enum_type_tags(&self, which: EnumId) -> &[Vec<u8>] {
+        self.enum_type_tags.get(&which).map_or(&[], Vec::as_slice)
     }
 
     /// Records that the second name this function's `alias` is for is its resolver, which

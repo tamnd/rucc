@@ -77,6 +77,13 @@ pub struct Unit {
     /// A table of indices rather than a tree, so that a type naming itself is an ordinary entry.
     /// See [`Shape`] for what is in one and what is deliberately left out of one.
     pub types: Vec<Shape>,
+    /// The strings of the `btf_type_tag`s on each entry of [`Unit::types`] that has any, in the
+    /// order gcc chains them.
+    ///
+    /// Beside the table rather than in it, since a tagged type is an entry like any other and
+    /// the tags are only what its entry points at. An entry nothing names is not written and
+    /// neither are its tags.
+    pub type_tags: Vec<(usize, Vec<Vec<u8>>)>,
     /// The functions, in the order the text section holds them.
     pub funcs: Vec<Function>,
     /// The functions the inliner copied into others, which each copy names as its origin. See

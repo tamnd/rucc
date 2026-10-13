@@ -53,6 +53,11 @@ pub struct DeclSpecs {
     pub options: PragmaOptions,
     /// From the first specifier to the last.
     pub span: Span,
+    /// Where the specifiers proper start, after the `[[...]]` written in front of the
+    /// declaration. C23 has those appertain to what is declared and a `[[...]]` written after a
+    /// specifier to the type the specifiers name, and both are in [`DeclSpecs::attrs`], so this
+    /// is what tells them apart.
+    pub first: Span,
 }
 
 /// What `#pragma GCC visibility push(...)` asks for.
@@ -123,6 +128,7 @@ impl DeclSpecs {
             pushed: None,
             options: PragmaOptions::NONE,
             span,
+            first: span,
         }
     }
 

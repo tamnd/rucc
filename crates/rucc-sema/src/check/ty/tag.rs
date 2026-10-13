@@ -303,6 +303,11 @@ impl Checker<'_> {
                 self.types.record_member_prototypes(id, member, prototypes);
                 let tags = self.btf_decl_tags(&[field.attrs, self.ast[field.specs].attrs]);
                 self.tast.record_member_tags(id, member, tags);
+                let derived =
+                    field.declarator.map_or(ast::DerivedList::EMPTY, |at| self.ast[at].derived);
+                let specs = self.ast[field.specs];
+                let tags = self.btf_type_tags(&specs, derived, field.attrs, decl.ty);
+                self.tast.record_member_type_tags(id, member, tags);
             }
             self.annotate_member(id, field);
             if let Some(name) = decl.name {

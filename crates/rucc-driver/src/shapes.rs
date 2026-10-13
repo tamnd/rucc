@@ -52,6 +52,21 @@
 //! `size_type *p` at a pointer to it, the way gcc writes them, and a debugger printing any of
 //! them says `size_type`. A record member is the same, from a list the type table keeps beside
 //! the records rather than from the tree, since a member is not a declaration there.
+//!
+//! # Tagged types
+//!
+//! A `btf_type_tag` is on one level of a declaration's type, and the checker keeps which level
+//! beside the tree, since its types have no variant for each tag. The entry for that level is
+//! copied once the declaration's type has its entry, the copy carries the tags, and every level
+//! outside it is copied to point at the copy, the qualifiers included: `int * const __user p` is
+//! a const over a tagged copy of the pointer. That is gcc's tagged variant of the type, which is
+//! its own entry beside the plain one. A copy is made once for each entry and set of tags, so
+//! `int __a __b x` and `int __b __a y` share theirs, and it has the tags in the order the first
+//! of them was written with.
+//!
+//! A copy of a typedef name's entry carries the tags of the type the name stands for after its
+//! own, as gcc's does. A structure, a union or an enumeration is tagged only where it was
+//! defined, and that tags its own entry rather than a copy.
 
 use rucc_base::hash::{Map, Set};
 use rucc_base::{Interner, Symbol};
@@ -81,6 +96,9 @@ pub(crate) struct Meaning {
     /// hands over the objects it actually laid out and each of them is looked up here. A `static`
     /// nothing reads is not among them and so is never asked for.
     pub objects: Map<String, Held>,
+    /// The strings of the `btf_type_tag`s on each entry in [`Meaning::types`] that has any, in
+    /// the order gcc chains them.
+    pub type_tags: Vec<(usize, Vec<Vec<u8>>)>,
     /// What is known about each local the program declared, by the number the declaration has.
     ///
     /// Keyed by the number rather than by a name, because a name is not unique in a unit and is not
@@ -222,6 +240,9 @@ pub(crate) fn collect(
         aliases: Map::default(),
         through: Map::default(),
         context: Vec::new(),
+        variants: Map::default(),
+        rebuilt: Map::default(),
+        type_tags: Map::default(),
         members: types
             .member_spellings()
             .iter()
@@ -320,7 +341,9 @@ pub(crate) fn collect(
     // A typedef name nothing above was written with gets no entry, which is what gcc does. The
     // kernel's BTF is pahole's reading of this, and a name only one compiler describes is a
     // difference in it.
-    Meaning { types: walk.out, funcs, objects, locals, scopes: nests.out }
+    let mut type_tags: Vec<(usize, Vec<Vec<u8>>)> = walk.type_tags.into_iter().collect();
+    type_tags.sort_by_key(|&(at, _)| at);
+    Meaning { types: walk.out, type_tags, funcs, objects, locals, scopes: nests.out }
 }
 
 /// Which `{ ... }` each local in the unit was declared in.
@@ -480,6 +503,14 @@ struct Walk<'a> {
     /// rather than shared through [`Walk::memo`], since `void (*)(u32)` and
     /// `void (*)(unsigned int)` are one type and two entries, the way gcc writes them.
     context: Vec<Prototype>,
+    /// The tagged copy of each entry, by the entry and its tags in order of their bytes, so that
+    /// two lists of the same tags in another order are one copy.
+    variants: Map<(usize, Vec<Vec<u8>>), usize>,
+    /// The copy of each entry that points at a tagged entry in place of what it pointed at, by
+    /// the entry and what the copy points at.
+    rebuilt: Map<(usize, usize), usize>,
+    /// The strings of the `btf_type_tag`s on each entry that has any.
+    type_tags: Map<usize, Vec<Vec<u8>>>,
 }
 
 impl Walk<'_> {
@@ -498,6 +529,14 @@ impl Walk<'_> {
             Some(&(name, of)) => self.over_or_void(signature.ret, name, of),
             None => self.told_or_void(signature.ret),
         }?;
+        // The function's own level is never tagged, so the levels are counted from what it
+        // returns.
+        let levels: Vec<(u32, Vec<Vec<u8>>)> = tast
+            .btf_type_tags(id)
+            .iter()
+            .filter_map(|(level, tags)| Some((level.checked_sub(1)?, tags.clone())))
+            .collect();
+        let returns = returns.map(|at| self.tagged(at, &levels, 0));
         // The names off the definition's own parameter list and the types off the function type,
         // which is a pairing the checker already guarantees: a definition has one declaration per
         // parameter whether or not it was written with a prototype. A name is missing only where
@@ -527,10 +566,93 @@ impl Walk<'_> {
     /// Which entry a declaration's type is, going through the typedef name it was written with.
     fn declared(&mut self, id: DeclId, ty: TypeId) -> Option<usize> {
         let written = self.tast.prototypes(id).to_vec();
-        self.within(written, |walk| match walk.spellings.get(&id) {
+        let at = self.within(written, |walk| match walk.spellings.get(&id) {
             Some(&(name, of)) => walk.over(ty, name, of),
             None => walk.told(ty),
-        })
+        })?;
+        let tast = self.tast;
+        Some(self.tagged(at, tast.btf_type_tags(id), 0))
+    }
+
+    /// Which entry a type is once the `btf_type_tag`s on its levels are on it, the type's own
+    /// entry being the one given and its level the one given. See the module documentation.
+    fn tagged(&mut self, at: usize, levels: &[(u32, Vec<Vec<u8>>)], level: u32) -> usize {
+        if !levels.iter().any(|&(on, _)| on >= level) {
+            return at;
+        }
+        // A qualifier is not a level of its own: the tags go on what it qualifies.
+        let inside = match &self.out[at] {
+            Shape::Qualified { of: Some(of), .. } => {
+                let of = *of;
+                let tagged = self.tagged(of, levels, level);
+                return self.rebuild(at, of, tagged);
+            }
+            Shape::Pointer { to: Some(to), .. } => Some(*to),
+            Shape::Array { of, .. } => Some(*of),
+            Shape::Subroutine(sig) => sig.returns,
+            _ => None,
+        };
+        let at = match inside {
+            Some(inside) => {
+                let tagged = self.tagged(inside, levels, level + 1);
+                self.rebuild(at, inside, tagged)
+            }
+            None => at,
+        };
+        match levels.iter().find(|&&(on, _)| on == level) {
+            Some((_, tags)) => self.variant(at, tags),
+            None => at,
+        }
+    }
+
+    /// A copy of the entry pointing at the second entry where it pointed at the first, and the
+    /// entry itself where the two are the same.
+    fn rebuild(&mut self, at: usize, inside: usize, now: usize) -> usize {
+        if inside == now {
+            return at;
+        }
+        if let Some(&made) = self.rebuilt.get(&(at, now)) {
+            return made;
+        }
+        let mut shape = self.out[at].clone();
+        match &mut shape {
+            Shape::Qualified { of, .. } => *of = Some(now),
+            Shape::Pointer { to, .. } => *to = Some(now),
+            Shape::Array { of, .. } => *of = now,
+            Shape::Subroutine(sig) => sig.returns = Some(now),
+            _ => return at,
+        }
+        let made = self.out.len();
+        self.out.push(shape);
+        self.rebuilt.insert((at, now), made);
+        made
+    }
+
+    /// The copy of an entry carrying these tags, made the first time it is asked for.
+    fn variant(&mut self, at: usize, tags: &[Vec<u8>]) -> usize {
+        let mut tags = tags.to_vec();
+        // gcc's copy of a typedef name carries the tags of the type the name stands for after
+        // its own, qualifiers or not.
+        if let Shape::Alias { of: Some(mut under), .. } = self.out[at] {
+            while let Shape::Qualified { of: Some(of), .. } = self.out[under] {
+                under = of;
+            }
+            for tag in self.type_tags.get(&under).into_iter().flatten() {
+                if !tags.contains(tag) {
+                    tags.push(tag.clone());
+                }
+            }
+        }
+        let mut key = tags.clone();
+        key.sort();
+        if let Some(&made) = self.variants.get(&(at, key.clone())) {
+            return made;
+        }
+        let made = self.out.len();
+        self.out.push(self.out[at].clone());
+        self.variants.insert((at, key), made);
+        self.type_tags.insert(made, tags);
+        made
     }
 
     /// Walks with the prototypes one declaration wrote in hand, and puts back the ones the
@@ -683,10 +805,12 @@ impl Walk<'_> {
     /// so `typedef __u64 u64;` is `u64` over `__u64` over `long long unsigned int`, the chain gcc
     /// writes, and the type itself where there was not.
     fn under(&mut self, name: Symbol, of: TypeId) -> Option<Option<usize>> {
-        match self.chained.get(&name).copied() {
+        let under = match self.chained.get(&name).copied() {
             Some((over, stood)) => self.over_or_void(of, over, stood),
             None => self.told_or_void(of),
-        }
+        }?;
+        let tast = self.tast;
+        Some(under.map(|at| self.tagged(at, tast.alias_type_tags(name), 0)))
     }
 
     /// A type, where `void` is an answer rather than a failure.
@@ -755,6 +879,12 @@ impl Walk<'_> {
                 let shape = self.bare(id, kind)?;
                 let at = self.out.len();
                 self.out.push(shape);
+                if let TypeKind::Enum(which) = kind {
+                    let tags = self.tast.enum_type_tags(which);
+                    if !tags.is_empty() {
+                        self.type_tags.insert(at, tags.to_vec());
+                    }
+                }
                 Some(at)
             }
         }
@@ -907,6 +1037,10 @@ impl Walk<'_> {
         let at = self.out.len();
         self.out.push(Shape::Record { union, name, size, members: None });
         self.tags.insert(record, at);
+        let tagged = self.tast.record_type_tags(record);
+        if !tagged.is_empty() {
+            self.type_tags.insert(at, tagged.to_vec());
+        }
         if !placed {
             return Some(at);
         }
@@ -936,6 +1070,11 @@ impl Walk<'_> {
                 None => walk.told(field.ty),
             });
             let Some(ty) = ty else { continue };
+            let tast = self.tast;
+            let ty = match field.name {
+                Some(member) => self.tagged(ty, tast.member_type_tags(record, member), 0),
+                None => ty,
+            };
             let bits = match field.bits {
                 Some(width) => match u64::try_from(field.bit_offset()) {
                     Ok(start) => Some(Bits { at: start, width: u64::from(width) }),
