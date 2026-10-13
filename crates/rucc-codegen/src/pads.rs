@@ -26,6 +26,10 @@ use rucc_ir::{
 /// Puts each value a landing pad reads, and cannot make again, in a slot of the frame.
 ///
 /// `word` is the size of an address in bytes.
+///
+/// # Panics
+///
+/// If a block has no terminator, which a function has none of by the time it is lowered.
 pub fn spill(func: &mut Func, word: u32) {
     let pads: Vec<Block> = func
         .blocks()
