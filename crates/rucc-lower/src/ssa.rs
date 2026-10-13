@@ -40,7 +40,9 @@
 use rucc_base::Idx;
 use rucc_base::hash::Map;
 use rucc_diag::Span;
-use rucc_ir::{Block, BlockCall, Extra, Func, Imm, Inst, InstData, Opcode, Start, Type, Value};
+use rucc_ir::{
+    Block, BlockCall, Def, Extra, Func, Imm, Inst, InstData, Opcode, Start, Type, Value,
+};
 
 /// A variable, which is somewhere in the source that can be written more than once.
 ///
@@ -388,12 +390,14 @@ impl Ssa {
         // Which positions each block is losing. Read off the function rather than off the
         // edges this was told about, so that a branch nobody mentioned still comes out with
         // arguments that match the block it goes to.
-        let mut dropped: Vec<Vec<usize>> = vec![Vec::new(); func.counts().blocks];
+        // As a mark for each position rather than a list of them, since a join below a long run
+        // of tests loses thousands and each argument into it is asked about.
+        let mut dropped: Vec<Vec<bool>> = vec![Vec::new(); func.counts().blocks];
         for &block in &blocks {
-            for (index, &param) in func[block].params.iter().enumerate() {
-                if self.subst.contains_key(&param) {
-                    dropped[block.index()].push(index);
-                }
+            let going: Vec<bool> =
+                func[block].params.iter().map(|param| self.subst.contains_key(param)).collect();
+            if going.contains(&true) {
+                dropped[block.index()] = going;
             }
         }
 
@@ -410,7 +414,7 @@ impl Ssa {
                         .iter()
                         .copied()
                         .enumerate()
-                        .filter(|(index, _)| !going.contains(index))
+                        .filter(|&(index, _)| !going.get(index).copied().unwrap_or(false))
                         .map(|(_, value)| value)
                         .collect();
                     call.args = func.push_values(&kept);
@@ -433,10 +437,10 @@ impl Ssa {
     /// one before then would be a name on a value the function is about to lose. What is left after
     /// resolving is a value that is still there, which is the only kind worth naming.
     fn names(&mut self, func: &mut Func) {
-        for (value, decl) in std::mem::take(&mut self.holds) {
-            let value = self.resolve(value);
-            func.declare_value(value, decl);
-        }
+        let holds = std::mem::take(&mut self.holds);
+        let pairs: Vec<(Value, u32)> =
+            holds.into_iter().map(|(value, decl)| (self.resolve(value), decl)).collect();
+        func.declare_values(pairs);
         for (value, start) in std::mem::take(&mut self.starts) {
             let value = self.resolve(value);
             func.declare_value_from(value, start);
@@ -490,9 +494,14 @@ impl Ssa {
     /// walk of the function per removal into one walk of the function.
     fn trivial(&mut self, func: &mut Func, phi: Value) -> Value {
         let block = self.phis[&phi].block;
-        let Some(at) = func[block].params.iter().position(|&param| param == phi) else {
+        // From the definition rather than by looking for it among the parameters, since a join
+        // below a long run of tests has one parameter for every variable read under it, and
+        // looking made this cubic in the run.
+        let Def::Param { block: at_block, index } = func[phi].def else { return phi };
+        let at = index as usize;
+        if at_block != block || func[block].params.get(at) != Some(&phi) {
             return phi;
-        };
+        }
 
         let mut same: Option<Value> = None;
         for index in 0..self.preds[block.index()].len() {

@@ -228,6 +228,9 @@ struct Body {
     /// Other instructions that compute a value, for instruction selection to choose from. See
     /// [`Func::forms`].
     forms: Map<Value, Vec<Inst>>,
+    /// The room [`Func::append_arg`] left after a run it moved, as where the run ends and where
+    /// the room does.
+    room: Map<u32, u32>,
 }
 
 /// What every declaration reads its tables from, all of them empty.
@@ -247,6 +250,7 @@ static EMPTY: Body = Body {
     arg_groups: Map::with_hasher(BuildHasherDefault::new()),
     gone: Map::with_hasher(BuildHasherDefault::new()),
     forms: Map::with_hasher(BuildHasherDefault::new()),
+    room: Map::with_hasher(BuildHasherDefault::new()),
 };
 
 /// A [`Body`] that is only made when something is written to it. Reading one that was never made
@@ -936,19 +940,46 @@ impl Func {
     /// Adds one value to the end of a run, giving back the run it became.
     ///
     /// The run grows in place when nothing has been put after it, which is the case while a
-    /// list is being built. Otherwise it is copied to the end and the old space is left
-    /// behind, which is what makes adding a parameter to a loop header possible at all. That
-    /// happens once per value carried around a loop, so the copying is not what costs.
+    /// list is being built. Otherwise it is copied to the end, the old space is left behind, and
+    /// as much room again is left after the copy for it to grow into. Without the room, two runs
+    /// that grow by turns are copied on every turn. That is what building SSA does to the
+    /// branches into a join when many variables are read below it: each one gets a parameter,
+    /// so every edge in gets an argument, and a function with three thousand locals tested one
+    /// after another filled four billion slots and stopped.
+    ///
+    /// The room belongs to the run by where it ends, and taking a slot moves that on by one, so
+    /// a copy of the run kept from before cannot take the same slot. The room is filled with the
+    /// value just added, so that every slot in the pool is a value and [`Func::rewrite_all`] can
+    /// go over all of them.
+    ///
+    /// # Panics
+    ///
+    /// Panics if the pool would hold more than four billion values.
     pub fn append_arg(&mut self, list: ValueList, value: Value) -> ValueList {
         let range = list.as_usize_range();
         if range.end == self.value_pool.len() {
             self.value_pool.push(value);
             return ValueList::new(Idx::from_usize(range.start), Idx::from_usize(range.end + 1));
         }
+        let raw = |at: usize| u32::try_from(at).expect("index out of range");
+        let end = raw(range.end);
+        if let Some(room) = self.body.room.remove(&end) {
+            self.value_pool[range.end] = value;
+            if end + 1 < room {
+                self.body.room.insert(end + 1, room);
+            }
+            return ValueList::new(Idx::from_usize(range.start), Idx::from_usize(range.end + 1));
+        }
         let start = self.value_pool.len();
+        let len = range.len();
         self.value_pool.extend_from_within(range);
         self.value_pool.push(value);
-        ValueList::new(Idx::from_usize(start), Idx::from_usize(self.value_pool.len()))
+        let end = self.value_pool.len();
+        if len > 0 {
+            self.value_pool.resize(end + len + 1, value);
+            self.body.room.insert(raw(end), raw(self.value_pool.len()));
+        }
+        ValueList::new(Idx::from_usize(start), Idx::from_usize(end))
     }
 
     /// Replaces the values in a run, which is what substituting one definition for another is.
@@ -1257,6 +1288,16 @@ impl Func {
         if let Err(at) = found {
             self.body.value_decls.insert(at, (value, decl));
         }
+    }
+
+    /// [`Func::declare_value`] for many pairs at once, which is what SSA construction has at the
+    /// end. One at a time is a shift of the list for each, and a function with thousands of
+    /// variables live across thousands of joins has millions of pairs.
+    pub fn declare_values(&mut self, pairs: impl IntoIterator<Item = (Value, u32)>) {
+        let decls = &mut self.body.value_decls;
+        decls.extend(pairs);
+        decls.sort_unstable_by_key(|&(value, decl)| (value.raw(), decl));
+        decls.dedup();
     }
 
     /// Whether that value is the one value the declaration is ever given, which is a variable the
@@ -2479,6 +2520,41 @@ mod tests {
         assert_eq!(func[list], [a, a], "the old run is still readable");
         assert_eq!(func[behind], [b], "and so is what was behind it");
         assert_ne!(grown.as_usize_range().start, list.as_usize_range().start);
+    }
+
+    #[test]
+    fn two_lists_that_grow_by_turns_grow_into_room_rather_than_being_copied_each_time() {
+        // The branches into a join while SSA construction gives it a parameter for each variable
+        // read below it: every one grows by one, by turns.
+        let mut func = Func::new(Symbol::from_raw(0), Signature::new());
+        let block = func.create_block();
+        let a = func.append_param(block, Type::int(32));
+        let b = func.append_param(block, Type::int(32));
+        let (mut left, mut right) = (func.push_values(&[a]), func.push_values(&[b]));
+        for _ in 0..200 {
+            left = func.append_arg(left, a);
+            right = func.append_arg(right, b);
+        }
+        assert_eq!(func[left], [a; 201]);
+        assert_eq!(func[right], [b; 201]);
+        // Copying both on every turn would have been forty thousand.
+        assert!(func.value_pool.len() < 2000, "{}", func.value_pool.len());
+    }
+
+    #[test]
+    fn a_copy_of_a_list_kept_from_before_it_grew_does_not_take_its_room() {
+        let mut func = Func::new(Symbol::from_raw(0), Signature::new());
+        let block = func.create_block();
+        let a = func.append_param(block, Type::int(32));
+        let b = func.append_param(block, Type::int(32));
+        let list = func.push_values(&[a, a]);
+        func.push_values(&[b]);
+        let moved = func.append_arg(list, b);
+        let grown = func.append_arg(moved, a);
+        assert_eq!(grown.as_usize_range().start, moved.as_usize_range().start, "in the room");
+        let other = func.append_arg(moved, b);
+        assert_eq!(func[grown], [a, a, b, a]);
+        assert_eq!(func[other], [a, a, b, b]);
     }
 
     #[test]
