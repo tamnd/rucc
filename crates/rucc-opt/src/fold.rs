@@ -579,6 +579,12 @@ fn evaluate(func: &Func, inst: Inst) -> Option<Imm> {
             to_integer(value, ty, data.opcode == Opcode::FPToSI)
         }
         Opcode::PtrToInt => round_trip(func, *args.first()?, ty),
+        // A question about a value that is already a number has the answer `constant_p` would
+        // give it, and the answer cannot change by waiting. Answered there, it came after the last
+        // jump threading, so `find_next_bit` over a constant size kept its call to
+        // `_find_next_bit` and the merge of `size` with the bit found through both threadings,
+        // and every loop over the possible cpus on i386 tested the `size` a miss returned again.
+        Opcode::IsConstant => constant(func, *args.first()?).map(|_| Imm::int(1, ty)),
         Opcode::ICmp
             if func[*args.first()?].ty.is_ptr()
                 || args
@@ -1178,6 +1184,19 @@ mod tests {
         build.ret(&[number]);
         assert!(!fold(&mut func));
         assert_eq!(value_of(&func, number, Type::int(64)), None);
+    }
+
+    /// `__builtin_constant_p` of a value inlining has made a number is one, answered here rather
+    /// than left for `constant_p`, so the jump threading in front of that pass sees the branch.
+    #[test]
+    fn a_question_about_a_value_that_is_already_a_number_is_answered_yes() {
+        let (_, mut func, block) = blank();
+        let mut build = Builder::new(&mut func, block);
+        let size = build.iconst(Type::int(32), 8);
+        let asked = build.unary(Opcode::IsConstant, size, Type::int(32));
+        build.ret(&[asked]);
+        assert!(fold(&mut func));
+        assert_eq!(value_of(&func, asked, Type::int(32)), Some(1));
     }
 
     #[test]
