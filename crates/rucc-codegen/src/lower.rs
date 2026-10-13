@@ -6235,10 +6235,18 @@ impl<'a> Lowering<'a> {
         // `ebp` holding the frame that is every register i386 has, and the two clobbers made it two
         // more than that. The output is written early, so that no input shares the register the
         // way none shares a clobber. An output something reads keeps a register of its own, since
-        // the text may write the spelled one over what it leaves there.
+        // the text may write the spelled one over what it leaves there. The stack pointer and the
+        // frame pointer are never given to an output, since gcc never has them free. The kernel's
+        // `sync_core` spells `%%rsp` and asks for a register it does not read afterwards, and with
+        // that register in `rsp` the `mov %%ss, %0` it starts with lost the stack.
         let mut early = vec![false; list.len()];
         if !a64 {
             for &(reg, class) in &named[declared..] {
+                if class == self.gpr
+                    && (reg == self.conv.stack_pointer || reg == self.conv.frame_pointer)
+                {
+                    continue;
+                }
                 if pins.iter().flatten().any(|&pin| pin == (reg, class)) {
                     continue;
                 }
