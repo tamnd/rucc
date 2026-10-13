@@ -109,6 +109,9 @@ const NO_FUEL: &str = "computation left where it was, the pass ran out of fuel";
 /// would leave out of registers for less than it costs.
 const PAST: &str = "left in front of the loop, moving it past saves nothing and costs registers";
 
+/// Recorded for each address moved off a pointer that was a constant past another one.
+const REBASED: &str = "address counted from the pointer its base was a constant past";
+
 /// Global code motion.
 #[derive(Debug)]
 pub struct Gcm;
@@ -139,6 +142,7 @@ impl Pass for Gcm {
         let machine = an.machine();
         let cfg = an.cfg(func);
         let order: Vec<Block> = cfg.reverse_postorder().collect();
+        rebase(func, &order, fuel, &mut stats);
         let loops = an.loops(func);
         // Only a value leaving a loop or going past one asks how full it is, so a function with no
         // loop never reads the counts, and they are a walk of liveness over all of it.
@@ -570,6 +574,93 @@ pub(crate) fn movable(func: &Func, inst: Inst) -> bool {
             | Opcode::Bswap
             | Opcode::Bitreverse
     )
+}
+
+/// Counts from a pointer the constant past it rather than from an address a constant past that.
+///
+/// `struct hw_perf_event *hwc = &event->hw` is `event + 296`, and every `hwc->state` after it is
+/// `hwc + 108`. Each of those reads folds into one access either way, as `108(hwc)` or as
+/// `404(event)`, but only the second leaves `hwc` with nothing to read it. With `event` used again
+/// further down, the first keeps both in registers through the whole function. On i386 that is a
+/// third of what there is, and `uncore_pmu_event_add` spilled them both.
+///
+/// A sum is moved only when every reader of it is a constant past it and all of them move, since
+/// one left behind keeps the sum live and the pointer under it now is too. The total has to stay in
+/// the range [`licm::displacements`] calls small, which is what every target puts in an access.
+/// The blocks are walked in reverse postorder so a chain is moved from its root out, and each sum
+/// is looked at once its own base is final.
+fn rebase(func: &mut Func, order: &[Block], fuel: &mut Fuel, stats: &mut Stats) {
+    let step = |func: &Func, value: Value| {
+        let Def::Result { inst, .. } = func[value].def else { return None };
+        let &[base, by] = &func[func[inst].args] else { return None };
+        let by = crate::discharge::constant(func, by)?;
+        (func[inst].opcode == Opcode::PtrAdd).then_some((inst, base, by))
+    };
+    let mut readers: Map<Value, Vec<Inst>> = Map::default();
+    let mut other: Set<Value> = Set::default();
+    for &block in order {
+        for inst in func.insts(block) {
+            let first = func[func[inst].args].first().copied();
+            let stepped = first.filter(|_| {
+                let result = func[inst].results().next();
+                result.is_some_and(|result| step(func, result).is_some())
+            });
+            uses::operands(func, inst, |value| {
+                if Some(value) == stepped {
+                    readers.entry(value).or_default().push(inst);
+                } else {
+                    other.insert(value);
+                }
+            });
+        }
+    }
+    for &block in order {
+        let insts: Vec<Inst> = func.insts(block).collect();
+        for sum in insts {
+            let Some(value) = func[sum].results().next() else { continue };
+            let Some((_, base, by)) = step(func, value) else { continue };
+            let Some(reading) = readers.get(&value).filter(|_| !other.contains(&value)) else {
+                continue;
+            };
+            let flags = func[sum].flags;
+            let fits = |&reader: &Inst| {
+                let next = func[reader].results().next().and_then(|result| step(func, result));
+                next.is_some_and(|(_, _, more)| {
+                    func[reader].flags == flags && (-256..4096).contains(&(by + more))
+                })
+            };
+            if !reading.iter().all(fits) {
+                continue;
+            }
+            if !fuel.take() {
+                stats.missed(NO_FUEL);
+                return;
+            }
+            for reader in reading.clone() {
+                let result = func[reader].results().next().expect("a sum has a result");
+                let (_, _, more) = step(func, result).expect("checked above");
+                let ty = func[func[func[reader].args][1]].ty;
+                let at = func.add_imm(rucc_ir::Imm::int(by + more, ty));
+                let data = rucc_ir::InstData {
+                    extra: rucc_ir::Extra::Imm(at),
+                    ..rucc_ir::InstData::new(Opcode::IConst)
+                };
+                let span = func.span(reader);
+                let made = func.create_inst(data, &[ty], span);
+                func.insert_before(made, reader);
+                let total = func[made].first_result.expect("a constant has a result");
+                func[reader].args = func.push_values(&[base, total]);
+                if (by < 0) != (more < 0) {
+                    func[reader].flags =
+                        flags.without(rucc_ir::Flags::NUW.union(rucc_ir::Flags::NSW));
+                }
+                readers.entry(base).or_default().push(reader);
+                stats.optimized(REBASED);
+            }
+            readers.remove(&value);
+            func.remove_inst(sum);
+        }
+    }
 }
 
 #[cfg(test)]
@@ -1027,5 +1118,50 @@ block2:
         let out = run(ARM, &mut Fuel::of(1));
         assert_eq!(block_of(&out, "add"), "block1", "{out}");
         assert_eq!(block_of(&out, "mul"), "block0", "{out}");
+    }
+
+    /// `hwc = &event->hw`, two fields of it read, and `event` itself passed on after them.
+    fn fields(second: i64, call: &str) -> String {
+        format!(
+            r#"
+func @g(ptr), linkage(external);
+
+func @f(ptr) -> i32, linkage(external) {{
+block0(%0: ptr):
+    %1 = iconst.i64 296
+    %2 = ptr_add.nuw %0, %1
+    %3 = iconst.i64 44
+    %4 = ptr_add.nuw %2, %3
+    %5 = load.i32 %4, align 4
+    %6 = iconst.i64 {second}
+    %7 = ptr_add.nuw %2, %6
+    %8 = load.i32 %7, align 4
+    call @g({call}) : (ptr)
+    %9 = add %5, %8
+    return %9
+}}
+"#
+        )
+    }
+
+    #[test]
+    fn a_field_of_a_field_is_counted_from_the_structure() {
+        let out = moved(&fields(108, "%0"));
+        let sums: Vec<&str> = out.lines().filter(|line| line.contains("ptr_add")).collect();
+        assert_eq!(sums.len(), 2, "{out}");
+        assert!(sums.iter().all(|line| line.contains("ptr_add.nuw %0, ")), "{out}");
+        assert!(out.contains("iconst.i64 340") && out.contains("iconst.i64 404"), "{out}");
+    }
+
+    #[test]
+    fn a_sum_read_as_a_value_as_well_stays_where_the_fields_are_counted_from() {
+        let out = moved(&fields(108, "%2"));
+        assert!(out.contains("ptr_add.nuw %2, %3") && out.contains("ptr_add.nuw %2, %6"), "{out}");
+    }
+
+    #[test]
+    fn a_total_too_far_to_fold_into_an_access_leaves_every_field_where_it_was() {
+        let out = moved(&fields(3800, "%0"));
+        assert!(out.contains("ptr_add.nuw %2, %3") && out.contains("ptr_add.nuw %2, %6"), "{out}");
     }
 }
