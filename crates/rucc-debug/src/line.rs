@@ -485,6 +485,7 @@ mod tests {
             producer: "rucc".to_owned(),
             files: vec!["a.c".to_owned()],
             types: Vec::new(),
+            type_tags: Vec::new(),
             funcs: vec![Function {
                 name: "f".to_owned(),
                 len: 16,

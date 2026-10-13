@@ -221,7 +221,10 @@ impl Checker<'_> {
     /// gcc hands a tag on a star to the declaration when what is inside the star is the name, a
     /// function or an array, so `int * __attribute__((btf_decl_tag ("d"))) f (void)` tags `f`.
     /// Inside another star, as in `int * T * p`, it says the tag does not apply to types.
-    pub(in crate::check) fn btf_starred_decl_tags(&mut self, derived: DerivedList) -> Vec<AttrList> {
+    pub(in crate::check) fn btf_starred_decl_tags(
+        &mut self,
+        derived: DerivedList,
+    ) -> Vec<AttrList> {
         let ast = self.ast;
         let steps = &ast[derived];
         let mut lists = Vec::new();
@@ -242,9 +245,8 @@ impl Checker<'_> {
     fn btf_strings(&self, lists: &[AttrList], name: &str) -> Vec<Vec<u8>> {
         let ast = self.ast;
         let written = lists.iter().flat_map(|&attrs| &ast[attrs]);
-        let right = written.filter(|attr| {
-            self.btf_tag(attr) == Some(name) && self.btf_fault(attr).is_none()
-        });
+        let right = written
+            .filter(|attr| self.btf_tag(attr) == Some(name) && self.btf_fault(attr).is_none());
         last_first(right.filter_map(|attr| self.btf_string(attr)))
     }
 

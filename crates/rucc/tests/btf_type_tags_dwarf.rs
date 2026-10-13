@@ -258,7 +258,9 @@ fn type_of(all: &[Entry], name: &str) -> String {
 
 /// How many tags of that name there are.
 fn tags_named(all: &[Entry], name: &str) -> usize {
-    all.iter().filter(|entry| entry.tag == ANNOTATION && entry.name.as_deref() == Some(name)).count()
+    all.iter()
+        .filter(|entry| entry.tag == ANNOTATION && entry.name.as_deref() == Some(name))
+        .count()
 }
 
 /// `dwarf-btf-type-tag-1.c`: a tag after the star tags the pointer.
