@@ -4,6 +4,14 @@ All notable changes are recorded here. The format follows [Keep a Changelog](htt
 
 ## Unreleased
 
+## 0.30.5
+
+This is a patch release. It replaces 0.30.4, whose tag failed its checks and was never published. It has the same compiler as 0.30.4. Only the build of the doctests changed.
+
+### Fixed
+
+- The doctests build position dependent on x86_64 Linux, as the libraries they link against have been since #3590. Before, a doctest was built as a PIE and did not link, and the release check of 0.30.4 failed (#3622).
+
 ## 0.30.4
 
 This is a patch release. It fixes a regression in 0.30.3 that made the x86-64 Linux kernel fail to boot: an asm output that nothing reads could get the stack pointer, so the kernel's `sync_core` wrote the stack segment into `rsp` and the kernel took a triple fault. The 7.2.8 x86-64 kernel built by rucc boots again. rucc also uses less memory and makes fewer system calls on large headers.
