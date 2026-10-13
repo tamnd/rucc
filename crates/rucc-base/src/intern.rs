@@ -34,8 +34,9 @@
 //! and the object is what `resolve_bytes` is for.
 
 use std::fmt;
+use std::hash::Hasher;
 
-use crate::hash::Map;
+use crate::hash::{Map, Mix};
 use crate::index::Idx;
 
 /// Marker for the symbol table, so that `Idx<SymbolTable>` cannot be confused with any
@@ -131,9 +132,11 @@ pub struct Interner {
     buf: String,
     /// Where each symbol starts and ends in `buf`.
     spans: Vec<(u32, u32)>,
-    /// Lookup from text to symbol. The key is a span into `buf` rather than an owned
-    /// `String`, which is why the map is keyed by the string and rebuilt through `resolve`.
-    map: Map<Box<str>, Symbol>,
+    /// Lookup from text to symbol, open addressed. A slot is the high half of the text's hash
+    /// and the symbol's index plus one, and zero in the second half is a slot nothing is in. The
+    /// text itself is the span in `buf`, so a string is stored once rather than once there and
+    /// once more as a key, and growing the table needs the stored hash and not the text.
+    table: Vec<(u32, u32)>,
     /// The spelling of a symbol whose bytes are not UTF-8, which `buf` cannot hold because
     /// `buf` is a `String`. A map rather than a column beside `spans`, because a compilation
     /// has a handful of these at most and usually none: a raw byte in a string literal is the
@@ -167,7 +170,7 @@ impl Interner {
         let mut interner = Self {
             buf: String::with_capacity(cap * 8),
             spans: Vec::with_capacity(cap),
-            map: Map::with_capacity_and_hasher(cap, Default::default()),
+            table: vec![(0, 0); (cap * 2).next_power_of_two()],
             raw: Map::default(),
             raw_map: Map::default(),
             joined: Map::default(),
@@ -184,16 +187,58 @@ impl Interner {
     ///
     /// Panics if more than `Idx::MAX` distinct strings are interned.
     pub fn intern(&mut self, s: &str) -> Symbol {
-        if let Some(&sym) = self.map.get(s) {
-            return sym;
-        }
+        let tag = tag(s);
+        let at = match self.probe(s, tag) {
+            Ok(sym) => return sym,
+            Err(at) => at,
+        };
         let start = u32::try_from(self.buf.len()).expect("interner buffer overflow");
         self.buf.push_str(s);
         let end = u32::try_from(self.buf.len()).expect("interner buffer overflow");
         let sym = Symbol(Idx::from_usize(self.spans.len()));
         self.spans.push((start, end));
-        self.map.insert(s.into(), sym);
+        self.table[at] = (tag, u32::try_from(self.spans.len()).expect("interner overflow"));
+        if self.spans.len() * 2 > self.table.len() {
+            self.grow();
+        }
         sym
+    }
+
+    /// The symbol `s` is in the table as, or the empty slot it would go in.
+    #[inline]
+    fn probe(&self, s: &str, tag: u32) -> Result<Symbol, usize> {
+        let mask = self.table.len() - 1;
+        let mut at = slot(tag, mask);
+        loop {
+            let (seen, index) = self.table[at];
+            if index == 0 {
+                return Err(at);
+            }
+            if seen == tag {
+                let (start, end) = self.spans[index as usize - 1];
+                if &self.buf.as_bytes()[start as usize..end as usize] == s.as_bytes() {
+                    return Ok(Symbol(Idx::from_usize(index as usize - 1)));
+                }
+            }
+            at = (at + 1) & mask;
+        }
+    }
+
+    /// Doubles the table, which keeps it at most half full.
+    #[cold]
+    fn grow(&mut self) {
+        let size = self.table.len() * 2;
+        let old = std::mem::replace(&mut self.table, vec![(0, 0); size]);
+        let mask = self.table.len() - 1;
+        for (tag, index) in old {
+            if index != 0 {
+                let mut at = slot(tag, mask);
+                while self.table[at].1 != 0 {
+                    at = (at + 1) & mask;
+                }
+                self.table[at] = (tag, index);
+            }
+        }
     }
 
     /// Interns `prefix` followed by `name`, returning the existing symbol if it has been seen.
@@ -252,7 +297,7 @@ impl Interner {
     /// source without adding any of them to it.
     #[must_use]
     pub fn find(&self, s: &str) -> Option<Symbol> {
-        self.map.get(s).copied()
+        self.probe(s, tag(s)).ok()
     }
 
     /// The text behind a symbol.
@@ -295,6 +340,24 @@ impl Interner {
     pub fn bytes(&self) -> usize {
         self.buf.len()
     }
+}
+
+/// The high half of the hash of `s`, which is what the table keeps and where it starts looking.
+/// The length goes in after the text because the tail of a short string is read as one word,
+/// and that word does not say how long the tail was.
+#[inline]
+fn tag(s: &str) -> u32 {
+    let mut hasher = Mix::default();
+    hasher.write(s.as_bytes());
+    hasher.write_usize(s.len());
+    (hasher.finish() >> 32) as u32
+}
+
+/// Where a tag starts in a table of `mask + 1` slots. The top bits, because the hash is a
+/// product and its high bits are the ones every input bit reaches.
+#[inline]
+fn slot(tag: u32, mask: usize) -> usize {
+    ((u64::from(tag) * (mask as u64 + 1)) >> 32) as usize
 }
 
 impl fmt::Debug for Interner {
