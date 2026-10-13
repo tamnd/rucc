@@ -18,6 +18,7 @@ All notable changes are recorded here. The format follows [Keep a Changelog](htt
 - An include search lists a directory once a file has not been found in it and skips opening names the listing does not have, and the check for shipped headers compares bytes before walking path components, which took the failed opens on a duktape file from 529 to 16 (#3606).
 - A branch to two returns that hand back true and false now returns the condition itself, or the opposite comparison when the arms are the other way round, instead of a branch and two returns (#3607).
 - Global code motion now counts a field of a field from the structure itself. With `hwc = &event->hw` every `hwc->state` was `108(hwc)` and kept `hwc` in a register beside `event`. It is now `404(event)` when every reader of `hwc` can move that way and the total fits a displacement. This saves 24 to 34 instructions on each of md, sem, uncore and ohci-hcd for i386, and 14 on fs/proc/array.c for arm64 (#3613).
+- A function that spills on i386 is no longer sent straight to the allocation that holds two scratch registers back when some instruction would have to borrow one with only one held back. The borrowing answer is kept and weighed against the narrow one, with two memory accesses counted for each borrow, and the cheaper is written. The X32 md.c drops from 23379 to 23197 instructions, sem.c from 4612 to 4517, uncore.c from 3924 to 3903 and ohci-hcd.c from 6273 to 6261 (#3614).
 
 ### Fixed
 

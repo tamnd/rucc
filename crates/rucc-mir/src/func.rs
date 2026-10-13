@@ -303,7 +303,7 @@ pub struct Table {
 }
 
 /// One function, in machine instructions.
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub struct Func {
     /// The name it is called by, which is the name of the IR function it was lowered from.
     pub name: Symbol,

@@ -313,6 +313,14 @@ fn edge(assignment: &Assignment, env: &Env, params: &[Param], args: &[Reg], at: 
 /// keeping a value of a cycle.
 #[must_use]
 pub fn fits(func: &Func, assignment: &Assignment, env: &Env) -> bool {
+    fits_borrowing(func, assignment, env) && !borrows(func, assignment, env)
+}
+
+/// Whether the rewrite can write an assignment down with no more than the scratch registers `env`
+/// holds back and some registers borrowed, which is [`fits`] with the instructions that want a
+/// second register allowed to borrow one. See [`borrowing`] for what that costs.
+#[must_use]
+pub fn fits_borrowing(func: &Func, assignment: &Assignment, env: &Env) -> bool {
     let bare = |class: RegClass| env.scratch(class).is_empty();
     let short = |class: RegClass| env.scratch(class).len() < 2;
     let slots = assignment.slots();
@@ -359,7 +367,7 @@ pub fn fits(func: &Func, assignment: &Assignment, env: &Env) -> bool {
             }
         }
     }
-    !borrows(func, assignment, env)
+    true
 }
 
 /// Whether the place an edge's moves break cycles with holds a value at that move of their order,
@@ -370,16 +378,44 @@ fn busy(order: &[Move<Option<Place>>], index: usize, cycle: Option<Place>) -> bo
 }
 
 /// Whether some instruction would borrow a register of a class that holds only one back.
+fn borrows(func: &Func, assignment: &Assignment, env: &Env) -> bool {
+    let mut any = false;
+    borrowers(func, assignment, env, |_| {
+        any = true;
+        false
+    });
+    any
+}
+
+/// What the registers an assignment borrows cost, in the units `backtrack::cost` counts in.
+///
+/// A borrowed register is put away in front of the instruction and brought back behind it, so
+/// each instruction that borrows is two memory accesses each time its block runs. On i386 that is
+/// often the cheaper way: holding a second register back for the whole function, which is the
+/// other answer, leaves four for everything else, and `uncore_pmu_event_add` put thirteen values
+/// on the stack that way against seven.
+#[must_use]
+pub fn borrowing(func: &Func, assignment: &Assignment, env: &Env) -> u128 {
+    let mut total = 0;
+    borrowers(func, assignment, env, |block| {
+        total += 2 * u128::from(func[block].weight.raw().max(1));
+        true
+    });
+    total
+}
+
+/// Calls `each` with the block of every instruction that would borrow a register of a class that
+/// holds only one back, until it says to stop.
 ///
 /// Asked of [`legalize`] itself rather than worked out again here, since how many registers an
 /// instruction wants turns on which operands it names and which one its answer is written over,
 /// and a second count of that would be free to disagree with the first. Only an instruction that
 /// could want two is asked, which is one with two operands of such a class on the stack, or one on
 /// the stack and a register of the class named outright, which the one held back may be.
-fn borrows(func: &Func, assignment: &Assignment, env: &Env) -> bool {
+fn borrowers(func: &Func, assignment: &Assignment, env: &Env, mut each: impl FnMut(Block) -> bool) {
     let short = |class: RegClass| env.scratch(class).len() == 1;
     if !assignment.slots().iter().any(|&class| short(class)) {
-        return false;
+        return;
     }
     let mut copy: Option<Assignment> = None;
     for block in func.blocks() {
@@ -398,15 +434,14 @@ fn borrows(func: &Func, assignment: &Assignment, env: &Env) -> bool {
             if stacked == 0 || (stacked == 1 && !named) {
                 continue;
             }
-            // Borrowing takes a slot off the assignment, and the answer is no as soon as one is
-            // taken, so one copy serves every instruction asked about.
+            // Borrowing takes a slot off the assignment, and every instruction that borrows shares
+            // it, so one copy serves every instruction asked about.
             let copy = copy.get_or_insert_with(|| assignment.clone());
-            if legalize::probe(func, copy, env, &mut Spare::default(), inst) {
-                return true;
+            if legalize::probe(func, copy, env, &mut Spare::default(), inst) && !each(block) {
+                return;
             }
         }
     }
-    false
 }
 
 /// How many edges arrive in each block.
