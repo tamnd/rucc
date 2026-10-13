@@ -21,6 +21,7 @@ All notable changes are recorded here. The format follows [Keep a Changelog](htt
 ### Fixed
 
 - A pointer to a local or a global that is stored in a word of the stack or of a global and read back keeps its capability, so a check in the function that reads it still knows its bounds, and the -O2 hoisting and splitting of bounds checks no longer trade that capability for a wider one. At -O2 Juliet misses 165 fewer cases under CWE-121 and 12 fewer under CWE-126 (#3610).
+- A function with thousands of locals live across thousands of `if` statements no longer stops with "index out of range" while it is lowered. A branch argument list that has to move now gets room to grow, and the SSA cleanup reads a parameter's position from its definition instead of searching for it. A generated file with 3000 such locals now builds at -O0 in 20s, and with 1000 it uses 509MB instead of 2.8GB (#3611).
 
 ## 0.30.4
 
