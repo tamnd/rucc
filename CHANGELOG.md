@@ -4,11 +4,20 @@ All notable changes are recorded here. The format follows [Keep a Changelog](htt
 
 ## Unreleased
 
+## 0.30.4
+
+This is a patch release. It fixes a regression in 0.30.3 that made the x86-64 Linux kernel fail to boot: an asm output that nothing reads could get the stack pointer, so the kernel's `sync_core` wrote the stack segment into `rsp` and the kernel took a triple fault. The 7.2.8 x86-64 kernel built by rucc boots again. rucc also uses less memory and makes fewer system calls on large headers.
+
 ### Changed
 
 - Keep the side tables of an IR function behind a pointer that is only filled when a pass writes to one, so each of the few thousand declarations a header like duktape's makes is about half its old size: duk_hstring_assert.c drops from 3873 to 3532 page faults with the same instructions, and every object is the same as before (#3595).
 - Skip substitution for an object-like macro with no `##` and no `__VA_OPT__`, and keep an argument with nothing in it to expand as the argument itself rather than a copy, which takes 2.1% of the instructions off duk_hstring_misc.c with every object the same as before (#3596).
 - Read a header in one pass into a buffer of the size its metadata gave rather than through `read_to_end`, and resolve a header found in the current directory through the cached directory lookup, which takes duk_hstring_misc.c from 2227 system calls to 1809 with every object the same as before (#3598).
+
+### Fixed
+
+- An asm output that nothing reads no longer gets the stack pointer or the frame pointer when the template spells one of them. gcc never has these registers free. The kernel's `sync_core`, inlined into `text_poke_early`, spells `%%rsp`, and with its scratch output in `rsp` the 7.2.8 x86-64 kernel built by 0.30.3 took a triple fault while it booted (#3599).
+- The switch lowering test and the safe runtime test pass in a release build too (#3597).
 
 ## 0.30.3
 
