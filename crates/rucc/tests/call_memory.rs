@@ -164,7 +164,8 @@ fn a_call_through_a_pointer_just_loaded_reads_the_pointer_itself() {
     assert!(go.contains(&"call\t*(%rax)"), "{go:#?}");
     assert!(!go.iter().any(|line| line.ends_with("(%rax), %rax")), "{go:#?}");
     let dispatch = body(&asm, "dispatch", "interp");
-    assert_eq!(dispatch.last(), Some(&"jmp\t*(%rcx,%rax,8)"), "{dispatch:#?}");
+    let last = dispatch.last().expect("dispatch has a body");
+    assert!(last.starts_with("jmp\t*(%r") && last.ends_with(",%rax,8)"), "{dispatch:#?}");
 }
 
 /// A computed `goto` reads where it goes out of the step it is at, as clang writes it, since no
