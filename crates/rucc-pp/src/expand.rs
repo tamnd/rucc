@@ -313,13 +313,12 @@ impl<'a> Run<'a> {
                 continue;
             }
 
-            let Some((raw, rparen)) = self.collect_args(def, &mut pending, tok) else {
+            let Some((mut args, rparen)) = self.collect_args(def, &mut pending, tok) else {
                 out.push(tok);
                 continue;
             };
             let shared = self.hides.intersect(tok.hides, rparen.hides);
             let hs = self.hides.add(shared, name);
-            let mut args = Args::new(raw, tok.trace);
             let replacement = self.subst(def, &mut args, hs, tok);
             push_front(&mut pending, replacement, tok);
         }
@@ -454,10 +453,13 @@ impl<'a> Run<'a> {
         def: &MacroDef,
         pending: &mut Vec<Tok>,
         name: Tok,
-    ) -> Option<(Vec<Vec<Tok>>, Tok)> {
+    ) -> Option<(Args, Tok)> {
         let open = pending.pop().expect("the caller checked for an opening parenthesis");
-        let mut args: Vec<Vec<Tok>> = Vec::with_capacity(def.arity() + 1);
-        let mut current: Vec<Tok> = Vec::new();
+        // Every argument's tokens in one list, and where each argument ends in it, which is two
+        // allocations for the whole invocation rather than one for each argument and its growth.
+        let mut toks: Vec<Tok> = Vec::new();
+        let mut ends: Vec<u32> = Vec::with_capacity(def.arity() + 1);
+        let end = |toks: &Vec<Tok>| u32::try_from(toks.len()).expect("an argument list that fits");
         let mut depth = 1usize;
         let rparen = loop {
             let Some(tok) = pending.pop() else {
@@ -471,47 +473,47 @@ impl<'a> Run<'a> {
             match tok.punct() {
                 Some(Punct::LParen) => {
                     depth += 1;
-                    current.push(tok);
+                    toks.push(tok);
                 }
                 Some(Punct::RParen) => {
                     depth -= 1;
                     if depth == 0 {
                         break tok;
                     }
-                    current.push(tok);
+                    toks.push(tok);
                 }
                 // Once the named parameters are filled, a variadic macro's remaining commas
                 // are part of the last argument rather than separators.
                 Some(Punct::Comma)
-                    if depth == 1 && !(def.is_variadic() && args.len() >= def.arity()) =>
+                    if depth == 1 && !(def.is_variadic() && ends.len() >= def.arity()) =>
                 {
-                    args.push(std::mem::take(&mut current));
+                    ends.push(end(&toks));
                 }
-                _ => current.push(tok),
+                _ => toks.push(tok),
             }
         };
 
         // `F()` on a macro that takes nothing is no arguments. On a macro that takes one, the
         // same text is one empty argument, which is why this cannot be decided by looking at
         // the tokens alone.
-        let empty_invocation = args.is_empty() && current.is_empty();
+        let empty_invocation = ends.is_empty() && toks.is_empty();
         if !(empty_invocation && def.arity() == 0 && !def.is_variadic()) {
-            args.push(current);
+            ends.push(end(&toks));
         }
-        if def.is_variadic() && args.len() == def.arity() {
-            args.push(Vec::new());
+        if def.is_variadic() && ends.len() == def.arity() {
+            ends.push(end(&toks));
         }
 
         let expected = def.arity() + usize::from(def.is_variadic());
-        if args.len() != expected {
-            let word = if args.len() < expected { "few" } else { "many" };
+        if ends.len() != expected {
+            let word = if ends.len() < expected { "few" } else { "many" };
             let d = Diagnostic::error(
                 format!(
                     "too {word} arguments to macro `{}`, expected {}{}, got {}",
                     self.interner.resolve(def.name),
                     def.arity(),
                     if def.is_variadic() { " or more" } else { "" },
-                    args.len()
+                    ends.len()
                 ),
                 name.report_span(),
             )
@@ -521,7 +523,7 @@ impl<'a> Run<'a> {
             self.diagnostics.push(d);
             return None;
         }
-        Some((args, rparen))
+        Some((Args::new(toks, ends, name.trace), rparen))
     }
 
     /// Appends the chain of macros `trace` records to `d`, outermost first.
@@ -650,7 +652,7 @@ impl<'a> Run<'a> {
                 owed = false;
                 let param = next.ident().and_then(|s| def.param_index(s).map(|idx| (s, idx)));
                 if let Some((name, idx)) = param {
-                    let raw = args.raw(idx).to_vec();
+                    let raw = args.raw(idx);
                     // The GNU extension: in `, ## __VA_ARGS__` the paste is not a paste at
                     // all. It drops the comma when there are no variable arguments and does
                     // nothing at all when there are. An enormous amount of existing code
@@ -661,10 +663,10 @@ impl<'a> Run<'a> {
                         if raw.is_empty() {
                             os.pop();
                         } else {
-                            emit(&mut os, &raw, next, &mut owed);
+                            emit(&mut os, raw, next, &mut owed);
                         }
                     } else {
-                        self.glue(&mut os, &raw, next.span, tok.span);
+                        self.glue(&mut os, raw, next.span, tok.span);
                     }
                     at += 2;
                     continue;
@@ -698,13 +700,12 @@ impl<'a> Run<'a> {
             // fully expanded one.
             if let Some(idx) = tok.ident().and_then(|s| def.param_index(s)) {
                 if is.get(at + 1).is_some_and(|n| n.is(Punct::HashHash)) {
-                    let raw = args.raw(idx).to_vec();
+                    let raw = args.raw(idx);
                     let placemarker = [Tok::placemarker_at(tok.span)];
-                    let value = if raw.is_empty() { &placemarker[..] } else { &raw[..] };
+                    let value = if raw.is_empty() { &placemarker[..] } else { raw };
                     emit(&mut os, value, tok, &mut owed);
                 } else {
-                    let expanded = args.expanded(idx, self).to_vec();
-                    emit(&mut os, &expanded, tok, &mut owed);
+                    emit(&mut os, args.expanded(idx, self), tok, &mut owed);
                 }
                 at += 1;
                 continue;
@@ -934,17 +935,23 @@ fn emit_plain(os: &mut Vec<Tok>, tok: Tok, owed: &mut bool) {
 }
 
 /// Removes placemarkers, handing any whitespace they carried to the next real token.
-fn drop_placemarkers(toks: Vec<Tok>) -> Vec<Tok> {
-    let mut out = Vec::with_capacity(toks.len());
+///
+/// In place, since most lists have none and the copy into a second list was an allocation for
+/// every expansion.
+fn drop_placemarkers(mut toks: Vec<Tok>) -> Vec<Tok> {
     let mut owed = false;
-    for tok in toks {
+    toks.retain_mut(|tok| {
         if tok.is_placemarker() {
             owed = owed || tok.flags.has(TokenFlags::LEADING_SPACE);
-            continue;
+            return false;
         }
-        emit_plain(&mut out, tok, &mut owed);
-    }
-    out
+        if owed {
+            tok.flags = tok.flags.with(TokenFlags::LEADING_SPACE);
+            owed = false;
+        }
+        true
+    });
+    toks
 }
 
 /// Finds the parenthesised group belonging to a `__VA_OPT__` at `at`.
@@ -1023,7 +1030,10 @@ fn carried_spacing(flags: TokenFlags) -> TokenFlags {
 /// `spec/02-the-goal.md` wants the same input to produce the same diagnostics, and expanding
 /// an argument twice would report anything wrong inside it twice.
 struct Args {
-    raw: Vec<Vec<Tok>>,
+    /// Every argument's tokens, one after another.
+    toks: Vec<Tok>,
+    /// Where each argument ends in `toks`, and so where the next one starts.
+    ends: Vec<u32>,
     expanded: Vec<Option<Vec<Tok>>>,
     /// The chain the invocation itself came out of, which is the chain the argument text is
     /// in as well, since the caller wrote it and the macro being called did not.
@@ -1031,18 +1041,22 @@ struct Args {
 }
 
 impl Args {
-    fn new(raw: Vec<Vec<Tok>>, outer: TraceId) -> Args {
-        let count = raw.len();
-        Args { raw, expanded: vec![None; count], outer }
+    fn new(toks: Vec<Tok>, ends: Vec<u32>, outer: TraceId) -> Args {
+        let count = ends.len();
+        Args { toks, ends, expanded: vec![None; count], outer }
     }
 
     /// The argument list of an object-like macro, which has none.
     fn none() -> Args {
-        Args { raw: Vec::new(), expanded: Vec::new(), outer: TraceId::NONE }
+        Args { toks: Vec::new(), ends: Vec::new(), expanded: Vec::new(), outer: TraceId::NONE }
     }
 
     fn raw(&self, idx: usize) -> &[Tok] {
-        self.raw.get(idx).map_or(&[][..], |a| a.as_slice())
+        let Some(&end) = self.ends.get(idx) else {
+            return &[];
+        };
+        let start = idx.checked_sub(1).map_or(0, |before| self.ends[before]);
+        &self.toks[start as usize..end as usize]
     }
 
     fn expanded(&mut self, idx: usize, run: &mut Run<'_>) -> &[Tok] {
@@ -1051,7 +1065,7 @@ impl Args {
         };
         if slot.is_none() {
             let saved = std::mem::replace(&mut run.current, self.outer);
-            let expanded = run.expand(self.raw[idx].clone());
+            let expanded = run.expand(self.raw(idx).to_vec());
             run.current = saved;
             self.expanded[idx] = Some(expanded);
         }

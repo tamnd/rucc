@@ -17,6 +17,7 @@ All notable changes are recorded here. The format follows [Keep a Changelog](htt
 - The checker keeps the GNU attribute names it has looked up in a list by symbol number rather than a map, so the readers asking about every attribute of every declaration index instead of hashing, which takes 2.4% off duktape's small source files (#3570).
 - A branch on whether a compare and exchange went through jumps on the flag the exchange left instead of testing a byte `sete` wrote, and the choice `atomic_compare_exchange` makes between what was expected and what was found is the value found, which takes the atomics listings from 4490 instructions to 4202 at `-O2` (#3571).
 - The lexer interns an ASCII spelling without the full UTF-8 check, and the driver tries the file the last expanded token came from before searching every file, which takes duktape's `duk_hstring_assert.c` at `-O2` from 465.4M to 453.7M instructions (#3572).
+- The macro expander emits arguments from where they are rather than from a copy, drops placemarkers in place, and keeps an invocation's arguments in one list, which takes duktape's `duk_hstring_assert.c` at `-O2` from 453.4M to 442.5M instructions (#3573).
 
 ## 0.30.1
 
