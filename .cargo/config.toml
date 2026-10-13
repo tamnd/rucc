@@ -14,8 +14,14 @@ rustflags = ["-C", "target-feature=+crt-static"]
 # before `main`, which was about 450 pages copied and more than half of what an empty file costs
 # to compile. The static musl binary did the same to itself before `main`, so it is a plain static
 # executable rather than a static PIE. tamnd/rucc#3052.
+#
+# rustdoc does not read `rustflags`, so a doctest was built as a PIE and failed to link against
+# the libraries built here: "relocation R_X86_64_32 cannot be used against symbol". The same
+# flag in `rustdocflags` builds the doctests position dependent too.
 [target.x86_64-unknown-linux-gnu]
 rustflags = ["-C", "relocation-model=static"]
+rustdocflags = ["-C", "relocation-model=static"]
 
 [target.x86_64-unknown-linux-musl]
 rustflags = ["-C", "relocation-model=static"]
+rustdocflags = ["-C", "relocation-model=static"]
