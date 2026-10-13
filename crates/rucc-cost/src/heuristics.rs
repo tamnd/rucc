@@ -165,6 +165,11 @@ pub const IF_CONVERSION_BLOCK_LIMIT: u32 = 10;
 /// question is the total. This is per arm and the work it counts is work that will be done on both
 /// paths afterwards, so the number is the answer to how much speculation is worth one branch. An
 /// arm of two cheap operations is a value being worked out. An arm of ten is a program.
+///
+/// The constant sweep found one retiring 4.9% fewer instructions over the 122 cases it changes, and
+/// timed they say otherwise: an arm of two that is left as a branch is a branch on data, and the
+/// two if-conversion cases that gained most took three times the cycles at one, with ten million
+/// branch misses where two did five thousand (tamnd/rucc#3157).
 pub const PHIOPT_ARM_INSTRUCTIONS: u32 = 2;
 
 /// How many levels deep phiopt factors a chain of operations both arms of a diamond share, per
@@ -466,6 +471,10 @@ pub const HOT_BLOCK_FRACTION: u32 = 1000;
 /// GCC's `param_builtin_expect_probability`. Ninety rather than a hundred because the hint is a
 /// statement about the common case and not a promise, and a hint treated as a promise turns the
 /// other arm into dead code that still has to run correctly.
+///
+/// The constant sweep found 180, a hint taken as a promise, ahead by a little. Measured again it
+/// retires 5.95% more instructions over the 17 cases it changes and writes 0.26% more text
+/// (tamnd/rucc#3159).
 pub const PREDICT_EXPECT: u32 = 90;
 
 /// How often the arm that does not come back is the one not taken, in percent, per section 11.2.
@@ -502,6 +511,10 @@ pub const PREDICT_LOOP_GUARD_TAKEN: u32 = 73;
 ///
 /// GCC's `PRED_POINTER`. A pointer that is tested is usually a pointer that is about to be used,
 /// and the test is there for the case that does not happen.
+///
+/// The constant sweep found 35 saving 0.60% of text over the 74 cases it changes. It does that by
+/// calling the test even, and 41 of those cases retire more instructions against 24 that retire
+/// fewer, so this stays at gcc's number (tamnd/rucc#3160).
 pub const PREDICT_POINTER_NOT_NULL: u32 = 70;
 
 /// How often the arm that returns a negative constant is the one not taken, in percent, per
@@ -524,6 +537,11 @@ pub const PREDICT_NULL_RETURN: u32 = 71;
 /// on code no other predictor recognises. Section 11.2 drops everything below sixty five percent,
 /// on the grounds that a predictor at fifty nine moves a probability by nine points and no
 /// decision downstream of it changes.
+///
+/// The constant sweep found 33 saving 0.50% of instructions over 188 cases, 94 of them better and
+/// 68 worse. The 24 that moved most took 0.71% fewer cycles at 33, which is inside the noise of
+/// programs that small, and at 33 the predictor says the opposite of gcc's and sits under the line
+/// section 11.2 drops one at (tamnd/rucc#3161).
 pub const PREDICT_CALL_NOT_TAKEN: u32 = 67;
 
 /// How often a `continue` is the edge taken, in percent, per section 11.2.
@@ -569,6 +587,10 @@ pub const PROFILE_SUM_TOLERANCE_PERCENT: u32 = 1;
 /// is inside the loop while the computation it replaced might not have been. The margin is what
 /// stops the pass from walking up to the edge and stepping off it. It is the allocator's own
 /// parameter, which is the right place for it to come from, since the allocator is what pays.
+///
+/// The constant sweep found four ahead by a little, mostly in `crc32c`. Measured again it retires
+/// 7.35% more instructions over the 98 cases it changes, 95 of them worse, and writes 0.10% more
+/// text (tamnd/rucc#3162).
 pub const LOOP_RESERVED_REGS: u32 = 2;
 
 /// What a computation has to cost before it is worth hoisting out of a loop under pressure, per
@@ -741,6 +763,10 @@ pub const SCHEDULER_READY_LIST_BOUND: usize = 100;
 /// cells and not of twenty five. What it bounds is the data a `switch` costs, since the holes are
 /// cells nothing reads, and gcc's number is taken as it is because the cost it weighs is the same
 /// here.
+///
+/// The constant sweep found sixteen saving 15.64% of the text of the two cases it changes. Measured
+/// again those two go from 392 bytes of text to 1536 for 0.026% fewer instructions, so it stays at
+/// gcc's number (tamnd/rucc#3163).
 pub const SWITCH_CONVERSION_MAX_GROWTH: u32 = 8;
 
 /// How many targets a switch needs before a jump table beats a walk of compares, per section 40.10.
@@ -755,6 +781,11 @@ pub const SWITCH_CONVERSION_MAX_GROWTH: u32 = 8;
 /// ratios crosses one, which is between ten arms (1.02) and eleven (0.90). gcc 16 builds a table
 /// from five cases, and at five arms on this machine that is 8 percent slower in order and 58
 /// percent slower at random than the walk. tamnd/rucc#1759 has the table of numbers.
+///
+/// The constant sweep found five retiring 14.89% fewer instructions over the 30 cases it changes,
+/// which is what gcc's number looks like when only instructions are counted. Timed, the same cases
+/// took 174% more cycles, nearly all of it in the unpredictable interpreter, whose branch misses
+/// went from 1.2 million to 7.9 million, which is the timing above again (tamnd/rucc#3164).
 pub const JUMP_TABLE_MIN_TARGETS: u32 = 11;
 
 /// How often, in percent, a hint has to say one case of a `switch` is taken before that case is

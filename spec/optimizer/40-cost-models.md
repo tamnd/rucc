@@ -471,6 +471,8 @@ A row is flat when neither end moves instructions retired or text by more than 0
 
 Three of the items above have a first answer here. The if-conversion budgets are flat, since no case moves at half or at double either of them, so the units they are counted in do not matter yet on this corpus. The LICM pressure margin, `loop-reserved-regs`, is wrong at both ends by a little, mostly in `crc32c`. The jump table threshold, `jump-table-min-targets`, is wrong at half: at 5 the cases it changed retire 14.88% fewer instructions, which goes against the timing of tamnd/rucc#1759 that set it at 11, and tamnd/rucc#3164 has to settle which of the two rucc follows. Each change is over the cases that move changed, not over the whole corpus.
 
+Seven of the nine wrong rows keep their values. Each was measured again on 13 October 2026 on the main of that day, at the value its issue named and over the cases that value changed, and the ones that save instructions were timed with `perf stat` as well. For three of them instructions retired is the wrong yardstick. At 1, `phiopt-arm-instructions` retires 4.9% fewer instructions over 122 cases, but an arm of two left as a branch is a branch on data, and the two if-conversion cases that gain most took three times the cycles, with ten million branch misses where they had five thousand (tamnd/rucc#3157). At 5, `jump-table-min-targets` retires 14.89% fewer instructions over 30 cases and takes 174% more cycles, nearly all of it in the unpredictable interpreter, whose branch misses go from 1.2 million to 7.9 million. That is the timing of tamnd/rucc#1759 again, and it settles tamnd/rucc#3164 for 11. At 33, `predict-call-not-taken` saves 0.50% of instructions over 188 cases, 94 better and 68 worse, and the 24 cases that move most take 0.71% fewer cycles, which is inside the noise of programs this small, while a predictor at 33 says the opposite of gcc's and is under the sixty five percent below which section 11.2 drops one (tamnd/rucc#3161). The other four moved with the compiler. At 180, `predict-expect` now retires 5.95% more instructions over 17 cases and writes 0.26% more text (tamnd/rucc#3159). At 4, `loop-reserved-regs` retires 7.35% more instructions over 98 cases, 95 of them worse, and writes 0.10% more text (tamnd/rucc#3162). At 35, `predict-pointer-not-null` saves 0.60% of text over 74 cases, but 41 of them retire more instructions against 24 that retire fewer, so it stays at gcc's 70 (tamnd/rucc#3160). At 16, `switch-conversion-max-growth` changes 2 cases, and their text goes from 392 bytes to 1536 for 0.026% fewer instructions, where the sweep had it saving 15.64% (tamnd/rucc#3163). The last two, `inline-hint-percent` and `dse-walk-limit`, still beat their defaults on the corpus and wait on SQLite, tamnd/rucc#3158 and tamnd/rucc#3165.
+
 | row | default | at half | at double | call |
 |---|---:|---|---|---|
 | `branch-cost-for-size` | 2 | no case | no case | flat |
@@ -479,7 +481,7 @@ Three of the items above have a first answer here. The if-conversion budgets are
 | `if-conversion-budget-predictable` | 20 | no case | no case | flat |
 | `if-conversion-budget-unpredictable` | 40 | no case | no case | flat |
 | `if-conversion-block-limit` | 10 | no case | no case | flat |
-| `phiopt-arm-instructions` | 2 | 116 cases, -6.34% instructions, +0.04% text | 45 cases, +24.07% instructions, +0.57% text | wrong, tamnd/rucc#3157 |
+| `phiopt-arm-instructions` | 2 | 116 cases, -6.34% instructions, +0.04% text | 45 cases, +24.07% instructions, +0.57% text | wrong, kept, tamnd/rucc#3157 |
 | `phiopt-factor-depth` | 4 | no case | no case | flat |
 | `phiopt-arm-scan-instructions` | 16 | no case | no case | flat |
 | `phiopt-unpredictable-margin-percent` | 3 | 2 cases, +0.28% instructions, -0.77% text | no case | worth tuning |
@@ -518,18 +520,18 @@ Three of the items above have a first answer here. The if-conversion budgets are
 | `large-function-growth` | 100 | no case | no case | flat |
 | `inline-call-time` | 10 | no case | no case | flat |
 | `hot-block-fraction` | 1000 | no case | no case | flat |
-| `predict-expect` | 90 | 8 cases, +11.04% instructions, -0.14% text | 17 cases, -0.24% instructions, +0.09% text | wrong, tamnd/rucc#3159 |
+| `predict-expect` | 90 | 8 cases, +11.04% instructions, -0.14% text | 17 cases, -0.24% instructions, +0.09% text | wrong, kept, tamnd/rucc#3159 |
 | `predict-never-returns` | 99 | 96 cases, -0.00% instructions, -0.02% text | no case | flat |
 | `predict-cold-call` | 99 | no case | no case | flat |
 | `predict-loop-exit-not-taken` | 89 | 448 cases, -0.06% instructions, -0.03% text | 482 cases, +5.83% instructions, +0.42% text | worth tuning |
 | `predict-loop-guard-taken` | 73 | 335 cases, +0.12% instructions, +0.29% text | 87 cases, -0.08% instructions, +0.19% text | worth tuning |
-| `predict-pointer-not-null` | 70 | 74 cases, +0.09% instructions, -0.48% text | 24 cases, +0.00% instructions, -0.02% text | wrong, tamnd/rucc#3160 |
+| `predict-pointer-not-null` | 70 | 74 cases, +0.09% instructions, -0.48% text | 24 cases, +0.00% instructions, -0.02% text | wrong, kept, tamnd/rucc#3160 |
 | `predict-negative-return` | 98 | no case | no case | flat |
 | `predict-null-return` | 71 | no case | no case | flat |
-| `predict-call-not-taken` | 67 | 198 cases, -0.32% instructions, -0.03% text | 46 cases, -0.00% instructions, -0.07% text | wrong, tamnd/rucc#3161 |
+| `predict-call-not-taken` | 67 | 198 cases, -0.32% instructions, -0.03% text | 46 cases, -0.00% instructions, -0.07% text | wrong, kept, tamnd/rucc#3161 |
 | `predict-continue-taken` | 67 | no case | no case | flat |
 | `max-predicted-iterations` | 100 | 4 cases, -0.00% instructions, +0.00% text | 6 cases, -0.00% instructions, +0.00% text | flat |
-| `loop-reserved-regs` | 2 | 71 cases, -0.05% instructions, +0.07% text | 71 cases, -0.03% instructions, -0.26% text | wrong, tamnd/rucc#3162 |
+| `loop-reserved-regs` | 2 | 71 cases, -0.05% instructions, +0.07% text | 71 cases, -0.03% instructions, -0.26% text | wrong, kept, tamnd/rucc#3162 |
 | `licm-expensive` | 20 | no case | no case | flat |
 | `unroll-max-times` | 16 | 164 cases, +9.92% instructions, -8.10% text | 76 cases, -1.34% instructions, +37.23% text | worth tuning |
 | `unroll-max-insns` | 200 | 58 cases, +2.99% instructions, -7.49% text | 48 cases, -5.20% instructions, +33.02% text | worth tuning |
@@ -546,8 +548,8 @@ Three of the items above have a first answer here. The if-conversion budgets are
 | `ivopts-new-variable-bias` | 3 | 484 cases, -0.38% instructions, +1.19% text | 203 cases, +5.70% instructions, +0.12% text | worth tuning |
 | `ivopts-set-penalty` | 10 | no case | no case | flat |
 | `scheduler-ready-list-bound` | 100 | no case | no case | flat |
-| `switch-conversion-max-growth` | 8 | no case | 2 cases, -0.02% instructions, -15.64% text | wrong, tamnd/rucc#3163 |
-| `jump-table-min-targets` | 11 | 29 cases, -14.88% instructions, -1.53% text | 1 case, +35.76% instructions, +35.31% text | wrong, tamnd/rucc#3164 |
+| `switch-conversion-max-growth` | 8 | no case | 2 cases, -0.02% instructions, -15.64% text | wrong, kept, tamnd/rucc#3163 |
+| `jump-table-min-targets` | 11 | 29 cases, -14.88% instructions, -1.53% text | 1 case, +35.76% instructions, +35.31% text | wrong, kept, tamnd/rucc#3164 |
 | `jump-table-min-targets-for-size` | 6 | no case | no case | flat |
 | `switch-peel-percent` | 66 | no case | 4 cases, +11.04% instructions, +0.00% text | worth tuning |
 | `wasm-jump-table-min-targets` | 24 | no case | no case | flat |
