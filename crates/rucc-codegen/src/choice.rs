@@ -44,6 +44,13 @@
 //! since what a call does to registers is not in its operands, nor past anything that reads the
 //! condition state the comparison left, and one that reads memory does not move at all.
 //!
+//! A byte written from what something in front of it left is read the same way, and that is the
+//! `sbbl` of the high halves [`crate::borrow`] writes for `a < b` on a `long long` on i386. The
+//! byte goes and the moves read the borrow, which is gcc's `cmpl`, `sbbl` and two `cmovb` for the
+//! kernel's `max_t(u64, ...)`, where it was a `setb` and a `testb` in front of each move. Such a
+//! byte reads the condition state, so it is never moved down, and a select it does not reach with
+//! nothing in between that writes the condition state keeps the byte.
+//!
 //! A comparison of floats is not in the table and is left alone. What it leaves in the condition
 //! state is two answers, one for whether the operands were ordered at all, and a move can read only
 //! one of them.
@@ -51,7 +58,7 @@
 use rucc_base::Interner;
 use rucc_base::hash::Map;
 use rucc_mir::{self as mir, Role};
-use rucc_target::{BranchInsts, FlagInsts, Fusion, MachineInsts};
+use rucc_target::{BranchInsts, FlagInsts, MachineInsts};
 
 use crate::changes::{self, Changes, Plan};
 use crate::layout::Fused;
@@ -72,7 +79,6 @@ pub fn fusable(
     fused: &Fused,
     names: &mut Interner,
 ) -> Map<mir::Inst, usize> {
-    let compares = &fused.0;
     let selects = selects(insts, names);
     let reads = changes::Reads::of(func);
     let mut found = Map::default();
@@ -87,7 +93,7 @@ pub fn fusable(
                     entry.1 += 1;
                 }
             }
-            if compares.contains_key(&data.opcode) {
+            if fused.0.contains_key(&data.opcode) || fused.1.contains_key(&data.opcode) {
                 let byte = operands.first().filter(|operand| operand.role != Role::Use);
                 if let Some(byte) = byte.filter(|byte| byte.reg.is_virtual()) {
                     waiting.insert(byte.reg, (inst, 0));
@@ -121,7 +127,6 @@ pub fn moves(
     }
     // Every name the rewrite could want, before the walk rather than inside it, for the reason the
     // compare pass gives: the walk reads names out of the interner while it edits the function.
-    let compares = &fused.0;
     let kept: Map<&str, mir::Opcode> =
         insts.fused.iter().map(|fusion| (fusion.cmp, opcode(insts, names, fusion.cmp))).collect();
     let chosen: Map<(mir::Opcode, &str), mir::Opcode> = insts
@@ -139,25 +144,39 @@ pub fn moves(
         let sequence: Vec<mir::Inst> = func.insts(block).collect();
         for compare in sequence {
             let Some(&wanted) = fusable.get(&compare) else { continue };
-            let Some(&fusion) = compares.get(&func[compare].opcode) else { continue };
+            let opcode = func[compare].opcode;
+            // A comparison keeps only the flags, and a byte read off them has nothing left to do.
+            let (when, cmp) = match (fused.0.get(&opcode), fused.1.get(&opcode)) {
+                (Some(&fusion), _) => (fusion.if_true, Some(fusion.cmp)),
+                (None, Some(&reading)) => (reading.if_true, None),
+                (None, None) => continue,
+            };
             // What follows it now rather than what followed it before the walk began, because a
             // comparison in front of this one may have been moved down past it.
             let after: Vec<mir::Inst> =
                 func.insts(block).skip_while(|&inst| inst != compare).skip(1).collect();
-            let Reached { found, before } = reached(func, &walk, fusion, compare, &after);
+            let Reached { found, before } =
+                reached(func, &walk, when, cmp.is_some(), compare, &after);
             if found.len() != wanted {
                 continue;
             }
-            let Some(&cmp) = kept.get(fusion.cmp) else { continue };
             let mut set = Changes::new();
-            set.rewrite(compare, flags_only(func, compare, cmp));
+            if let Some(cmp) = cmp {
+                let Some(&cmp) = kept.get(cmp) else { continue };
+                set.rewrite(compare, flags_only(func, compare, cmp));
+            }
             for (select, cmov) in found {
                 let mut plan = Plan::of(func, select);
                 plan.operands.truncate(3);
                 set.rewrite(select, Plan { opcode: cmov, ..plan });
             }
             if set.commit(func, &mut counts, walk.names, machine).is_ok() {
-                if let Some(select) = before {
+                // A byte read off the flags has no form that keeps nothing, and every select that
+                // read it reads the flags now. Taken out here rather than proposed with the rest,
+                // since after allocation its register has other readers the set cannot tell apart.
+                if cmp.is_none() {
+                    func.remove_inst(compare);
+                } else if let Some(select) = before {
                     func.remove_inst(compare);
                     func.insert_before(select, compare);
                 }
@@ -199,10 +218,14 @@ struct Reached {
 /// state was reading what something in front of it left, and the comparison has to be moved down
 /// past that one, or the reader would get the new answer. Behind the first select there is nowhere
 /// to move it to, and a reader there ends the walk with nothing found.
+///
+/// A byte that is not a comparison's own, `movable` false, reads what was left in front of it and
+/// does not move at all. `when` is the jump taken on the condition the byte says.
 fn reached(
     func: &mir::Func,
     walk: &Walk<'_>,
-    fusion: &Fusion,
+    when: &str,
+    movable: bool,
     compare: mir::Inst,
     after: &[mir::Inst],
 ) -> Reached {
@@ -217,7 +240,7 @@ fn reached(
         .collect();
     // A comparison that reads memory stays where it is, since what it would read further down is
     // a question about every store on the way.
-    let mut movable = func[compare].mem.is_none();
+    let mut movable = movable && func[compare].mem.is_none();
     let wrote = walk
         .names
         .resolve(func[compare].opcode.name())
@@ -231,7 +254,7 @@ fn reached(
         let writes = operands
             .iter()
             .any(|operand| operand.role != Role::Use && (operand.class, operand.reg) == place);
-        if let Some(&cmov) = walk.chosen.get(&(data.opcode, fusion.if_true)) {
+        if let Some(&cmov) = walk.chosen.get(&(data.opcode, when)) {
             let [_, false_arm, true_arm, condition] = operands else { break };
             let arms = [false_arm, true_arm];
             if (condition.class, condition.reg) == place
@@ -590,5 +613,61 @@ mod tests {
         assert_eq!(shape(&func, &names, block), ["cmp_rm_32", "cmov_l_32"]);
         let mode = func[func[compare].mem.expect("the address")];
         assert_eq!((mode.base, mode.disp), (Some(1), 8));
+    }
+
+    /// The `cmpl` and `sbbl` of an ordered comparison of pairs, a `setb` of what they left, and
+    /// the instruction of that name between it and two selects on the byte, which are the two
+    /// halves of a choice between two `long long` on i386.
+    fn borrow_and_selects(
+        names: &mut Interner,
+        func: &mut mir::Func,
+        block: mir::Block,
+        name: &str,
+    ) {
+        let [low, high, k, j, copy, byte, other] = [(); 7].map(|()| func.new_vreg(GPR));
+        func.build(block, op(names, "cmp_rr_32")).uses(low, GPR).uses(k, GPR).finish();
+        let sbb = op(names, "sbb_rr_32");
+        func.build(block, sbb).operand(tied(copy)).uses(high, GPR).uses(j, GPR).finish();
+        func.build(block, op(names, "set_b")).def(byte, GPR).finish();
+        if !name.is_empty() {
+            func.build(block, op(names, name))
+                .def(other, GPR)
+                .uses(other, GPR)
+                .uses(k, GPR)
+                .finish();
+        }
+        for (t, f) in [(low, k), (high, j)] {
+            func.build(block, op(names, "test_cmov_ne_32"))
+                .operand(tied(f))
+                .uses(f, GPR)
+                .uses(t, GPR)
+                .uses(byte, GPR)
+                .finish();
+        }
+    }
+
+    /// `max_t(u64, a, b)` on i386. The byte goes and both halves move on the borrow the `sbbl`
+    /// left, which is gcc's two `cmovb` where there was a `setb` and a `testb` in front of each.
+    #[test]
+    fn a_byte_read_off_a_borrow_becomes_moves_on_the_borrow() {
+        let (mut names, mut func, block) = empty();
+        borrow_and_selects(&mut names, &mut func, block, "");
+
+        assert_eq!(fuse(&mut func, &mut names), 1);
+        let expected = ["cmp_rr_32", "sbb_rr_32", "cmov_b_32", "cmov_b_32"];
+        assert_eq!(shape(&func, &names, block), expected);
+    }
+
+    /// Arithmetic between the byte and the selects writes the condition state, and the byte reads
+    /// what was there before it, so it cannot be moved down and the tests stay.
+    #[test]
+    fn arithmetic_between_a_borrow_byte_and_the_selects_keeps_the_tests() {
+        let (mut names, mut func, block) = empty();
+        borrow_and_selects(&mut names, &mut func, block, "add_rr_32");
+
+        assert_eq!(fuse(&mut func, &mut names), 0);
+        let expected =
+            ["cmp_rr_32", "sbb_rr_32", "set_b", "add_rr_32", "test_cmov_ne_32", "test_cmov_ne_32"];
+        assert_eq!(shape(&func, &names, block), expected);
     }
 }
