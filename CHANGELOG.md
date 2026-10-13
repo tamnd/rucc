@@ -17,6 +17,7 @@ All notable changes are recorded here. The format follows [Keep a Changelog](htt
 - A choice between two `long long` values on i386, the kernel's `max_t(u64, ...)` and `min_t(u64, ...)`, moves both halves on the borrow the `sbbl` of the high halves left, which is gcc's `cmpl`, `sbbl` and two `cmovb`. Before, the borrow went into a byte with `setb` and each move tested it again with `testb`. drivers/md/md.c is 27 instructions shorter and ipc/sem.c 8 (#3605).
 - An include search lists a directory once a file has not been found in it and skips opening names the listing does not have, and the check for shipped headers compares bytes before walking path components, which took the failed opens on a duktape file from 529 to 16 (#3606).
 - A branch to two returns that hand back true and false now returns the condition itself, or the opposite comparison when the arms are the other way round, instead of a branch and two returns (#3607).
+- Global code motion now counts a field of a field from the structure itself. With `hwc = &event->hw` every `hwc->state` was `108(hwc)` and kept `hwc` in a register beside `event`. It is now `404(event)` when every reader of `hwc` can move that way and the total fits a displacement. This saves 24 to 34 instructions on each of md, sem, uncore and ohci-hcd for i386, and 14 on fs/proc/array.c for arm64 (#3613).
 
 ### Fixed
 
