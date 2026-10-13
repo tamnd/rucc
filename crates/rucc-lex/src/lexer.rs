@@ -102,6 +102,8 @@ pub struct Lexer<'a> {
     /// Whether the dialect has already been told about a `//`, since gcc says it once a file
     /// and a file written with line comments has one on every other line.
     reported_line_comment: bool,
+    /// Set by [`Lexer::skip_token`] for the one token it asks for.
+    skipping: bool,
     diagnostics: Vec<Diagnostic>,
 }
 
@@ -119,6 +121,7 @@ impl<'a> Lexer<'a> {
             unclean: false,
             options: opts,
             reported_line_comment: false,
+            skipping: false,
             diagnostics: Vec::new(),
         }
     }
@@ -138,6 +141,19 @@ impl<'a> Lexer<'a> {
     pub fn next_token(&mut self, interner: &mut Interner) -> PpToken {
         let token = self.scan(interner);
         self.report_loose_splices();
+        token
+    }
+
+    /// The next token of a line in a group a conditional skipped, which is read only to find
+    /// where the line ends.
+    ///
+    /// The token is scanned as [`Lexer::next_token`] scans it, so a comment or a literal hides a
+    /// line ending here exactly where it does there, but its spelling is not interned and its
+    /// value is `None`, unless it starts a line and so may be the next directive. tamnd/rucc#3052.
+    pub fn skip_token(&mut self, interner: &mut Interner) -> PpToken {
+        self.skipping = true;
+        let token = self.next_token(interner);
+        self.skipping = false;
         token
     }
 
@@ -217,6 +233,10 @@ impl<'a> Lexer<'a> {
         };
 
         let end = self.cursor.pos();
+        if self.skipping && !flags.has(TokenFlags::START_OF_LINE) {
+            let span = Span::new(self.file_start + start, self.file_start + end);
+            return PpToken { kind, flags, value: None, span };
+        }
         let value = Some(self.intern_spelling(interner, kind, start, end));
         let mut flags = flags;
         if self.unclean {
