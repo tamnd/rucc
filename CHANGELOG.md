@@ -6,7 +6,7 @@ All notable changes are recorded here. The format follows [Keep a Changelog](htt
 
 ### Fixed
 
-- On i386 an `asm goto` no longer borrows a register when the allocator weighs borrowing against holding a second register back. The borrowed register comes back behind the instruction, and an `asm goto` has only the fall through behind it, so the reload was left past the end of the block and rucc stopped with "a block with two arms whose last instruction is not the branch". The 7.2.8 i386 kernel failed to build in fs/readdir.c, net/core/scm.c and sound/core/pcm_native.c, where `unsafe_put_user` is an `asm goto` (#3614).
+- On i386 an `asm goto` no longer borrows a register when the allocator weighs borrowing against holding a second register back. The borrowed register comes back behind the instruction, and an `asm goto` has only the fall through behind it, so the reload was left past the end of the block and rucc stopped with "a block with two arms whose last instruction is not the branch". The 7.2.8 i386 kernel failed to build in fs/readdir.c, net/core/scm.c and sound/core/pcm_native.c, where `unsafe_put_user` is an `asm goto` (#3652).
 
 ## 0.30.7
 
