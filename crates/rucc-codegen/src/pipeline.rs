@@ -483,6 +483,10 @@ pub struct Flags {
     /// Whether a leaf function keeps one too when [`Flags::frame_pointer`] is on. This is
     /// `-mno-omit-leaf-frame-pointer`, and `-momit-leaf-frame-pointer` turns it off.
     pub leaf_frame_pointer: bool,
+    /// Whether a leaf that keeps one only because of [`Flags::frame_pointer`] may give it back
+    /// once it turns out to need no frame at all, which gcc does on x86 unless the command line
+    /// said `-mno-omit-leaf-frame-pointer` itself. See [`crate::frame::Layout::spare_frame_pointer`].
+    pub spare_frame_pointer: bool,
     /// Whether the red zone may be used, which `-mno-red-zone` and every kernel turns off.
     pub red_zone: bool,
     /// Where the code and static data are promised to be, which `-mcmodel=` says. Under the kernel
@@ -631,6 +635,7 @@ impl Default for Flags {
         Self {
             frame_pointer: false,
             leaf_frame_pointer: true,
+            spare_frame_pointer: true,
             red_zone: true,
             code_model: CodeModel::Small,
             stack_clash: false,
@@ -1070,6 +1075,8 @@ pub fn compile_recording(
     // function has not put anything in yet, and a leaf that keeps its locals down there stays a
     // leaf. gcc leaves it alone too.
     let leaf = base.leaf && guard.is_none() && profile != Profile::Late;
+    let asked = flags.frame_pointer && (flags.leaf_frame_pointer || !leaf);
+    let needed = profile == Profile::Late || stack.walks_frames || stack.saves_place;
     let layout = Layout {
         // The later hook reads the frame pointer to find out who called this function, so a
         // function that calls it is given one whether or not anything else asked. A function that
@@ -1083,11 +1090,15 @@ pub fn compile_recording(
         //
         // `-momit-leaf-frame-pointer` takes back what `-fno-omit-frame-pointer` asked for, in a
         // leaf only. A leaf calls nothing, so no frame below it has to find this one.
-        frame_pointer: !naked
-            && ((flags.frame_pointer && (flags.leaf_frame_pointer || !leaf))
-                || profile == Profile::Late
-                || stack.walks_frames
-                || stack.saves_place),
+        frame_pointer: !naked && (asked || needed),
+        // A leaf the flags alone gave one to may hand it back once it turns out to have no frame,
+        // which gcc does on x86. Not on a machine whose call leaves the return address in a
+        // register, where the frame record is also where that register is put away.
+        spare_frame_pointer: flags.spare_frame_pointer
+            && asked
+            && !needed
+            && leaf
+            && machine.conv.link.is_none(),
         // And not in a naked function either, which is not about what the red zone costs but about
         // what the refusal below has to be able to see. A local small enough to live below the
         // stack pointer takes no bytes off it, so the frame comes out empty and a function that
@@ -3025,14 +3036,21 @@ mod tests {
 
         let machine = Machine::x86_64(&SYSV);
         let flags = Flags { frame_pointer: true, profile: Profile::No, ..Flags::default() };
-        let out = compile(&mut source, &mut names, &machine, &Elsewhere::default(), flags)
+        let kept = Flags { spare_frame_pointer: false, ..flags };
+        let out = compile(&mut source.clone(), &mut names, &machine, &Elsewhere::default(), kept)
             .expect("every instruction has a rule");
 
         // A function that keeps a frame pointer keeps it whether it needed one or not, which is
-        // what `-fno-omit-frame-pointer` is for and is the only thing this test is about.
+        // what `-fno-omit-frame-pointer -mno-omit-leaf-frame-pointer` is for.
         let text = mir::print_func(&out, &names, &REGS);
         assert!(text.contains("x64.push_64 $rbp"), "{text}");
         assert!(text.contains("$rbp = x64.mov_rr_64 $rsp"), "{text}");
+
+        // Without the second flag a leaf with nothing in its frame gives it back, as with gcc.
+        let out = compile(&mut source, &mut names, &machine, &Elsewhere::default(), flags)
+            .expect("every instruction has a rule");
+        let text = mir::print_func(&out, &names, &REGS);
+        assert!(!text.contains("$rbp"), "{text}");
     }
 
     /// A function written in the other convention gets a machine of the same kind under that

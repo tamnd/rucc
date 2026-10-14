@@ -2145,7 +2145,11 @@ pub struct Options {
     ///
     /// Kept by default, which is what gcc does on x86-64 at `-O0`. gcc on AArch64 omits it by
     /// default. A distribution that wants `perf` to walk each stack passes the flag anyway.
-    pub leaf_frame_pointer: bool,
+    ///
+    /// `None` is a command line that said neither, which keeps it in every leaf but one with
+    /// nothing in its frame on x86 when optimizing, as gcc does. An explicit
+    /// `-mno-omit-leaf-frame-pointer` keeps it there too.
+    pub leaf_frame_pointer: Option<bool>,
     /// Whether the red zone may be used, from `-mno-red-zone` turned around.
     ///
     /// The 128 bytes below the stack pointer that the System V psABI promises no signal handler
@@ -2895,7 +2899,7 @@ impl Options {
             lto: Lto::default(),
             profile_data: Profile::default(),
             frame_pointer: None,
-            leaf_frame_pointer: true,
+            leaf_frame_pointer: None,
             red_zone: true,
             code_model: CodeModel::Small,
             tls_model: TlsModel::GlobalDynamic,

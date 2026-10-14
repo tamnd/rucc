@@ -206,6 +206,15 @@ pub struct Layout<'a> {
     /// Whether the function keeps a frame pointer, which `-fno-omit-frame-pointer` asks for and
     /// which a realigned or a dynamically grown frame requires whatever the flags say.
     pub frame_pointer: bool,
+    /// Whether that frame pointer was asked for by the flags alone, so a leaf that turns out to
+    /// need no frame at all may go without it.
+    ///
+    /// This is what gcc does on x86 under `-fno-omit-frame-pointer`. Once a leaf is allocated and
+    /// has no bytes of frame, saves no register and never names the stack or the frame pointer,
+    /// the push and the pop are all that would be left of its frame, so gcc drops them. Nothing
+    /// below a leaf walks the chain, and the caller's link is still in the register. See
+    /// `ix86_finalize_stack_frame_flags`.
+    pub spare_frame_pointer: bool,
     /// Whether the function moves the stack pointer while it runs, which is what a variable length
     /// array does and what the rest of the frame then has to be reached around.
     ///
@@ -318,6 +327,7 @@ impl<'a> Layout<'a> {
             outgoing: 0,
             leaf: true,
             frame_pointer: false,
+            spare_frame_pointer: false,
             grows: false,
             red_zone: true,
             protect: false,
@@ -528,7 +538,19 @@ impl Frame {
         // register is a third. The call writes over that register, so the prologue has to put it
         // away, and it goes with the frame pointer as the one frame record the machine's unwinders
         // and `__builtin_frame_address` expect to find.
-        let frame_pointer = layout.frame_pointer
+        // And one the flags asked for is given back by a leaf with nothing in its frame. See
+        // [`Layout::spare_frame_pointer`].
+        let spare = layout.spare_frame_pointer
+            && layout.leaf
+            && realign.is_none()
+            && !layout.grows
+            && body == 0
+            && saved_int.is_empty()
+            && vectors.is_empty()
+            && layout.home == 0
+            && layout.interrupt.is_none()
+            && !touches_stack(func, conv);
+        let frame_pointer = (layout.frame_pointer && !spare)
             || realign.is_some()
             || layout.grows
             || (!layout.leaf && conv.link.is_some());
@@ -878,6 +900,19 @@ impl Frame {
     pub fn usage(&self) -> u32 {
         self.usage
     }
+}
+
+/// Whether anything in the function names the stack pointer or the frame pointer, which a local,
+/// an argument the caller passed on the stack and an `asm` reading `current_stack_pointer` all do.
+fn touches_stack(func: &Func, conv: &CallRegs) -> bool {
+    func.blocks().flat_map(|block| func.insts(block)).any(|inst| {
+        func[func[inst].operands].iter().any(|operand| {
+            operand
+                .reg
+                .phys()
+                .is_some_and(|at| at == conv.stack_pointer || at == conv.frame_pointer)
+        })
+    })
 }
 
 /// The registers a call preserves that this function writes anyway, so the prologue has to put
@@ -1250,6 +1285,25 @@ mod tests {
         assert_eq!(named(dropped.saved_int()), ["rbp"]);
         assert_eq!(named(kept.saved_int()), Vec::<&str>::new());
         assert!(kept.frame_pointer());
+    }
+
+    #[test]
+    fn a_leaf_with_nothing_in_its_frame_gives_back_the_frame_pointer_the_flags_asked_for() {
+        let base = Layout { red_zone: false, frame_pointer: true, ..Layout::new(&SYSV, REGS) };
+        let spare = Layout { spare_frame_pointer: true, ..base };
+        let kept = |values: usize, count: usize, layout: &Layout<'_>| {
+            let (func, allocation) = pressure(&SYSV, values, count);
+            Frame::of(&func, &allocation, layout).frame_pointer()
+        };
+
+        // Nothing spilled and nothing saved, so the push and the pop would be the whole frame.
+        assert!(!kept(2, 4, &spare));
+        assert!(kept(2, 4, &base), "only when the layout says the flags alone asked for it");
+        // A spill is bytes of frame, and a register the convention keeps is a save.
+        assert!(kept(4, 2, &spare));
+        assert!(kept(13, 13, &spare));
+        // And a function that calls something is no leaf.
+        assert!(kept(2, 4, &Layout { leaf: false, ..spare }));
     }
 
     #[test]

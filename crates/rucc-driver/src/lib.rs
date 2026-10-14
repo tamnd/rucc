@@ -1331,8 +1331,8 @@ pub fn parse_args(args: &[String]) -> Result<Action, CliError> {
             "-fomit-frame-pointer" => opts.frame_pointer = Some(false),
             // Ubuntu, Fedora and Arch pass the negative with `-fno-omit-frame-pointer`, so that
             // `perf` can walk each stack.
-            "-mno-omit-leaf-frame-pointer" => opts.leaf_frame_pointer = true,
-            "-momit-leaf-frame-pointer" => opts.leaf_frame_pointer = false,
+            "-mno-omit-leaf-frame-pointer" => opts.leaf_frame_pointer = Some(true),
+            "-momit-leaf-frame-pointer" => opts.leaf_frame_pointer = Some(false),
             // Both directions again, for the same reason, and a third answer for a command line
             // that wrote neither: see `reorder_blocks` in `rucc_session`.
             "-freorder-blocks" => opts.reorder_blocks = Some(true),
@@ -7832,7 +7832,7 @@ mod tests {
     #[test]
     fn the_leaf_frame_pointer_flag_is_read_in_both_directions() {
         let (opts, _) = compile(&["-c", "a.c"]);
-        assert!(opts.leaf_frame_pointer, "a leaf keeps it unless the command line said not to");
+        assert_eq!(opts.leaf_frame_pointer, None, "nothing said either way");
 
         let (opts, _) = compile(&[
             "-c",
@@ -7841,13 +7841,13 @@ mod tests {
             "-mno-omit-leaf-frame-pointer",
             "a.c",
         ]);
-        assert!(opts.keeps_frame_pointer() && opts.leaf_frame_pointer);
+        assert!(opts.keeps_frame_pointer() && opts.leaf_frame_pointer == Some(true));
 
         let (opts, _) = compile(&["-c", "-momit-leaf-frame-pointer", "a.c"]);
-        assert!(!opts.leaf_frame_pointer);
+        assert_eq!(opts.leaf_frame_pointer, Some(false));
         let (opts, _) =
             compile(&["-c", "-momit-leaf-frame-pointer", "-mno-omit-leaf-frame-pointer", "a.c"]);
-        assert!(opts.leaf_frame_pointer, "the last one wins");
+        assert_eq!(opts.leaf_frame_pointer, Some(true), "the last one wins");
     }
 
     /// A call goes through the PLT unless the line says `-fno-plt`, and the last one wins.

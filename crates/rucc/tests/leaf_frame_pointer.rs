@@ -59,7 +59,10 @@ fn a_leaf_keeps_the_frame_pointer_unless_the_flag_says_not_to() {
         for (what, flags) in [("default", &[][..]), ("keep", &["-mno-omit-leaf-frame-pointer"][..])]
         {
             let text = asm(target, what, flags);
-            assert!(body(&text, "leaf").contains(setup), "{target} {what}:\n{text}");
+            // Except that gcc on x86 gives it back in a leaf with nothing in its frame, which
+            // this one is, unless the command line asked for it in leaves outright.
+            let kept = what == "keep" || setup == "x29";
+            assert_eq!(body(&text, "leaf").contains(setup), kept, "{target} {what}:\n{text}");
             assert!(body(&text, "caller").contains(setup), "{target} {what}:\n{text}");
         }
         let text = asm(target, "omit", &["-momit-leaf-frame-pointer"]);
