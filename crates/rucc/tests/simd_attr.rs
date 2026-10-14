@@ -258,9 +258,11 @@ fn the_versions_give_each_lane_its_call() {
     let _ = std::fs::remove_dir_all(&dir);
 }
 
+/// No while the AVX versions are missing, which is the answer a partial row gives. The versions
+/// that are built are built all the same, and only on x86-64 ELF.
 #[test]
-fn has_attribute_answers_yes_only_where_it_is_built() {
-    let source = "#if __has_attribute(simd)\nint built;\n#endif\n\
+fn has_attribute_answers_no_until_every_version_is_built() {
+    let source = "#if __has_attribute(simd) || __has_attribute(__simd__)\nint asked;\n#endif\n\
                   __attribute__((simd)) double h(double x) { return x; }\n";
     for (target, built) in
         [(TARGET, true), ("x86_64-w64-mingw32", false), ("aarch64-unknown-linux-gnu", false)]
@@ -268,7 +270,7 @@ fn has_attribute_answers_yes_only_where_it_is_built() {
         let (ok, out, err) = assembly("asked", target, source);
         assert!(ok, "{target}: {err}");
         assert_eq!(err, "", "{target}");
-        assert_eq!(out.contains("built"), built, "{target}:\n{out}");
+        assert!(!out.contains("asked"), "{target}:\n{out}");
         assert_eq!(!versions(&out).is_empty(), built, "{target}:\n{out}");
     }
 }

@@ -179,19 +179,25 @@ impl Checker<'_> {
                 node.body.filter(|_| built).map(|body| (decl, body, branches))
             })
             .collect();
-        // The last definition first, which is the order gcc reports them in.
+        // The lanes are found last definition first, which is the order gcc warns in, and the
+        // versions are built in the order of the definitions, which is the order they go out in.
         asked.sort_by_key(|&(_, body, _)| std::cmp::Reverse(body.index()));
-        for (decl, _, branches) in asked {
-            self.simd_clones(decl, branches);
+        let mut shapes: Vec<(DeclId, Branches, Shape)> = asked
+            .into_iter()
+            .filter_map(|(decl, _, branches)| Some((decl, branches, self.simd_shape(decl)?)))
+            .collect();
+        shapes.reverse();
+        for (decl, branches, shape) in shapes {
+            self.simd_clones(decl, branches, &shape);
         }
     }
 
-    /// The vector versions of one function, or the warning saying why it has none.
-    fn simd_clones(&mut self, decl: DeclId, branches: Branches) {
+    /// The lanes of one function's vector versions, or the warning saying why it has none.
+    fn simd_shape(&mut self, decl: DeclId) -> Option<Shape> {
         let at = self.tast.definition_span(decl);
-        let node = self.tast[decl].clone();
+        let node = &self.tast[decl];
         let TypeKind::Function(function) = self.types.kind(self.types.canonical(node.ty)) else {
-            return;
+            return None;
         };
         let signature = self.types.signature(function).clone();
         let params: Vec<TypeId> =
@@ -206,7 +212,7 @@ impl Checker<'_> {
                     let what =
                         format!("unsupported return type '{}' for simd", self.spell(signature.ret));
                     self.report(Diagnostic::warning(what, at).with_code(UNSUPPORTED));
-                    return;
+                    return None;
                 }
             }
         };
@@ -218,25 +224,30 @@ impl Checker<'_> {
                     let what =
                         format!("unsupported argument type '{}' for simd", self.spell(param));
                     self.report(Diagnostic::warning(what, at).with_code(UNSUPPORTED));
-                    return;
+                    return None;
                 }
                 Err(Refused::Atomic) => {
                     let what = "ignoring '#pragma omp declare simd' on function with '_Atomic' \
                                 qualified non-'uniform' argument";
                     self.report(Diagnostic::warning(what, at).with_code(ATOMIC));
-                    return;
+                    return None;
                 }
             }
         }
         // `int` when there is neither a return value nor a parameter, which is gcc's choice.
         let characteristic = ret.or(lanes.first().copied()).map_or(32, |lane| lane.bits);
-        let shape = Shape { params, lanes, ret, count: BITS / characteristic, characteristic };
+        Some(Shape { params, lanes, ret, count: BITS / characteristic, characteristic })
+    }
+
+    /// The vector versions of one function, `notinbranch` first, as gcc puts them out.
+    fn simd_clones(&mut self, decl: DeclId, branches: Branches, shape: &Shape) {
+        let at = self.tast.definition_span(decl);
         let mut clones = Vec::new();
         for (masked, wanted) in [(false, branches.notinbranch), (true, branches.inbranch)] {
             if !wanted {
                 continue;
             }
-            let clone = self.simd_clone(decl, &shape, masked, at);
+            let clone = self.simd_clone(decl, shape, masked, at);
             let letter = if masked { 'M' } else { 'N' };
             let mut prefix = format!("_ZGVb{letter}{}", shape.count);
             prefix.extend(shape.params.iter().map(|_| 'v'));
