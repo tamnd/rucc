@@ -75,8 +75,11 @@ impl Symbol {
 /// The names every interner is built with, in the order they are interned.
 ///
 /// The list is short on purpose. A name belongs here when the compiler has to write it down and
-/// the source is not the place it comes from, which so far is the target's type for a variable
-/// argument list and nothing else.
+/// the source is not the place it comes from, which is the target's type for a variable argument
+/// list, the parameter a `...` in a macro stands for, and the `0` and `1` a `defined` comes to.
+/// `__VA_OPT__` is here with `__VA_ARGS__` because the preprocessor asks about both for every
+/// macro it defines, and finding them by their text each time was more than one percent of
+/// compiling a duktape source file.
 pub const RESERVED: &[&str] = &[
     "__va_list_tag",
     "gp_offset",
@@ -89,6 +92,10 @@ pub const RESERVED: &[&str] = &[
     "__vr_top",
     "__gr_offs",
     "__vr_offs",
+    "__VA_ARGS__",
+    "__VA_OPT__",
+    "0",
+    "1",
 ];
 
 /// The symbols for the names in [`RESERVED`].
@@ -120,6 +127,14 @@ pub mod sym {
     pub const GR_OFFS: Symbol = Symbol::from_raw(9);
     /// `__vr_offs`, the same for `__vr_top`.
     pub const VR_OFFS: Symbol = Symbol::from_raw(10);
+    /// `__VA_ARGS__`, the parameter a `...` in a macro's parameter list declares.
+    pub const VA_ARGS: Symbol = Symbol::from_raw(11);
+    /// `__VA_OPT__`, which a variadic macro's body may use and no other may.
+    pub const VA_OPT: Symbol = Symbol::from_raw(12);
+    /// `0`, the number a false `defined` comes to.
+    pub const ZERO: Symbol = Symbol::from_raw(13);
+    /// `1`, the number a true one comes to.
+    pub const ONE: Symbol = Symbol::from_raw(14);
 }
 
 /// An append-only set of strings, each mapped to a [`Symbol`].
@@ -446,6 +461,10 @@ mod tests {
         assert_eq!(i.resolve(sym::VR_TOP), "__vr_top");
         assert_eq!(i.resolve(sym::GR_OFFS), "__gr_offs");
         assert_eq!(i.resolve(sym::VR_OFFS), "__vr_offs");
+        assert_eq!(i.resolve(sym::VA_ARGS), "__VA_ARGS__");
+        assert_eq!(i.resolve(sym::VA_OPT), "__VA_OPT__");
+        assert_eq!(i.resolve(sym::ZERO), "0");
+        assert_eq!(i.resolve(sym::ONE), "1");
     }
 
     #[test]
@@ -461,7 +480,7 @@ mod tests {
         let small = Interner::new();
         let large = Interner::with_capacity(4096);
         for (at, name) in RESERVED.iter().enumerate() {
-            let sym = Symbol::from_raw(u32::try_from(at).expect("eleven names fit in a u32"));
+            let sym = Symbol::from_raw(u32::try_from(at).expect("fifteen names fit in a u32"));
             assert_eq!(small.resolve(sym), *name);
             assert_eq!(large.resolve(sym), *name);
         }

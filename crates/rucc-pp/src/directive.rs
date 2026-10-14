@@ -17,7 +17,7 @@
 use std::path::{Path, PathBuf};
 
 use rucc_base::hash::{Map, Set};
-use rucc_base::{Interner, Symbol};
+use rucc_base::{Interner, Symbol, sym};
 use rucc_diag::{Diagnostic, FileId, SourceMap, SourceMapFull, Span};
 use rucc_gnu::Kind;
 use rucc_lex::{Options, PpToken, PpTokenKind, Punct, TokenFlags, tokenize};
@@ -397,7 +397,10 @@ impl Preprocessor {
 
         loop {
             let was_live = self.live();
-            let first = reader.next(cx.interner);
+            // A line in a skipped group is asked only whether it starts with `#`, so its first
+            // token is not interned.
+            let first =
+                if was_live { reader.next(cx.interner) } else { reader.next_skipped(cx.interner) };
             if first.is_eof() {
                 break;
             }
@@ -1397,7 +1400,7 @@ impl Preprocessor {
         // and the expansion below leaves such a one alone for this second pass to answer. It
         // goes first of all because `defined(__has_include)` is a question about the operator
         // rather than a use of it.
-        let line = self.resolve_defined(line, cx.interner, names);
+        let line = self.resolve_defined(line, names);
         // `__has_include` is resolved before expansion too, and for a stronger reason: its
         // operand is a header name, so expanding `<linux/version.h>` would turn `linux` into
         // `1` on a target where that macro is predefined. The rest of the family take an
@@ -1407,7 +1410,7 @@ impl Preprocessor {
         let line =
             self.expander.expand_condition(line, &self.macros, cx.interner, cx.sources, condition);
         self.diagnostics.append(&mut self.expander.take_diagnostics());
-        let line = self.resolve_defined(line, cx.interner, names);
+        let line = self.resolve_defined(line, names);
         let line = self.resolve_has(line, cx, names, Pass::Rest);
         cond::evaluate(&line, cx.interner, &mut self.diagnostics, hash, self.chars)
     }
@@ -1582,12 +1585,7 @@ impl Preprocessor {
     }
 
     /// Replaces `defined X` and `defined(X)` with `1` or `0`.
-    fn resolve_defined(
-        &mut self,
-        line: Vec<Tok>,
-        interner: &mut Interner,
-        names: &Names,
-    ) -> Vec<Tok> {
+    fn resolve_defined(&mut self, line: Vec<Tok>, names: &Names) -> Vec<Tok> {
         if !line.iter().any(|t| t.ident() == Some(names.defined)) {
             return line;
         }
@@ -1627,7 +1625,7 @@ impl Preprocessor {
             // newer than some of the compilers it has to build under. It is not a macro, but
             // the question being asked is whether the name means something, and it does.
             let value = self.macros.is_defined(name) || names.has.op(name).is_some();
-            out.push(number(value, tok.flags, tok.report_span(), interner));
+            out.push(number(value, tok.flags, tok.report_span()));
         }
         out
     }
@@ -2181,9 +2179,9 @@ fn decimal(tok: &PpToken, interner: &Interner) -> Option<u32> {
 }
 
 /// A synthetic `1` or `0`.
-fn number(value: bool, flags: TokenFlags, span: Span, interner: &mut Interner) -> Tok {
-    let sym = interner.intern(if value { "1" } else { "0" });
-    Tok::synthetic(PpTokenKind::Number, Some(sym), flags, span)
+fn number(value: bool, flags: TokenFlags, span: Span) -> Tok {
+    let number = if value { sym::ONE } else { sym::ZERO };
+    Tok::synthetic(PpTokenKind::Number, Some(number), flags, span)
 }
 
 /// Spells a directive's tokens back for an `#error` message.

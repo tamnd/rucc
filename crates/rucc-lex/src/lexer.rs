@@ -149,12 +149,76 @@ impl<'a> Lexer<'a> {
     ///
     /// The token is scanned as [`Lexer::next_token`] scans it, so a comment or a literal hides a
     /// line ending here exactly where it does there, but its spelling is not interned and its
-    /// value is `None`, unless it starts a line and so may be the next directive. tamnd/rucc#3052.
+    /// value is `None`. That holds for the token that starts a line as well: in a skipped group
+    /// the only thing asked of it is whether it is the `#` of a directive, and the name after
+    /// that `#` is read by [`Lexer::next_token`]. tamnd/rucc#3052.
     pub fn skip_token(&mut self, interner: &mut Interner) -> PpToken {
         self.skipping = true;
         let token = self.next_token(interner);
         self.skipping = false;
         token
+    }
+
+    /// Passes over the rest of a line in a group a conditional skipped, and answers whether it
+    /// got to the end of the line.
+    ///
+    /// [`Lexer::skip_token`] reads such a line a token at a time to find where it ends, and
+    /// nearly a quarter of the tokens scanned for a duktape source file are in such lines.
+    /// This jumps to the next byte that could matter instead, which is a line ending, a comment,
+    /// a quote or a byte phases 1 and 2 may rewrite. A comment is passed over as the scan passes
+    /// it, so one that runs onto later lines still hides them. tamnd/rucc#3052.
+    ///
+    /// Anything else stops it, at the last place before that byte that is certainly between two
+    /// tokens, and then the answer is `false` and the rest of the line is the token scan's to
+    /// read. A quote is one of these because where a literal starts is the token scan's call:
+    /// `1'000` is one number in C23, and starting a literal at its quote would read the line to
+    /// its end as a character constant.
+    pub fn skip_line(&mut self) -> bool {
+        let bytes = self.cursor.bytes();
+        // Where the run being jumped started, which is between two tokens: the start, or just
+        // after a comment or a slash.
+        let mut boundary = self.cursor.pos();
+        loop {
+            self.cursor.skip_plain(b"/\"'");
+            let at = self.cursor.pos();
+            match bytes.get(at as usize) {
+                None => return true,
+                // A carriage return is a line ending once phase 1 is done with it, and a splice
+                // in front of it would have stopped the jump at its backslash.
+                Some(b'\n' | b'\r') => {
+                    self.cursor.bump();
+                    self.at_line_start = true;
+                    self.leading_space = false;
+                    return true;
+                }
+                Some(b'/') => {
+                    match self.cursor.nth(1) {
+                        b'*' => self.block_comment(),
+                        b'/' => self.line_comment(),
+                        _ => {
+                            self.cursor.bump();
+                        }
+                    }
+                    boundary = self.cursor.pos();
+                }
+                Some(b'"' | b'\'' | b'\\') => return self.stop_skipping(boundary, at),
+                Some(b'?') if self.options.trigraphs => return self.stop_skipping(boundary, at),
+                // The jump may stop short on a byte that is none of these.
+                Some(_) => {
+                    self.cursor.bump();
+                }
+            }
+        }
+    }
+
+    /// Goes back from `at` to the last blank after `boundary`, which nothing between could have
+    /// hidden, so that the token scan starts the rest of the line between two tokens.
+    #[cold]
+    fn stop_skipping(&mut self, boundary: u32, at: u32) -> bool {
+        let run = &self.cursor.bytes()[boundary as usize..at as usize];
+        let blank = run.iter().rposition(|&b| matches!(b, b' ' | b'\t' | b'\x0b' | b'\x0c'));
+        self.cursor.back_to(blank.map_or(boundary, |i| boundary + i as u32 + 1));
+        false
     }
 
     /// Turns the splices the cursor flagged into warnings.
@@ -239,7 +303,7 @@ impl<'a> Lexer<'a> {
         };
 
         let end = self.cursor.pos();
-        if self.skipping && !flags.has(TokenFlags::START_OF_LINE) {
+        if self.skipping {
             let span = Span::new(self.file_start + start, self.file_start + end);
             return PpToken { kind, flags, value: None, span };
         }
@@ -466,10 +530,10 @@ impl<'a> Lexer<'a> {
         self.cursor.bump();
         self.cursor.bump();
         loop {
-            // Same trade as the line comment, with `*` added because that is what can end this
-            // one. A license block is a couple of thousand bytes of nothing, and this walks it
-            // in a few dozen steps rather than a few thousand.
-            self.cursor.skip_plain(b"*");
+            // Same trade as the line comment, except that a newline cannot end this one and a
+            // `*` can. A license block is a couple of thousand bytes of nothing, and this walks
+            // it in a few dozen steps rather than a few thousand.
+            self.cursor.skip_block_comment();
             if self.cursor.at_end() {
                 let span = Span::new(self.file_start + start, self.file_start + self.cursor.pos());
                 self.diagnostics.push(Diagnostic::error("unterminated comment", span));

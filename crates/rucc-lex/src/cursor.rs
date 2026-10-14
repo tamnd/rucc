@@ -331,12 +331,21 @@ impl<'a> Cursor<'a> {
     ///
     /// Vertical tab and form feed are left to the caller. They are whitespace too, and they
     /// occur about as often as they deserve to.
+    ///
+    /// The first two bytes are looked at one at a time before any word is. This is asked before
+    /// every token, and before most of them there is no blank or there is one space, where
+    /// setting up the word scan cost thirty instructions to move one byte or none. The scan was
+    /// nearly five percent of compiling a duktape source file. tamnd/rucc#3052.
     #[inline]
     pub(crate) fn skip_blanks(&mut self) -> bool {
+        let blank = |at: usize| matches!(self.src.get(at), Some(b' ' | b'\t'));
         let from = self.pos as usize;
-        let to = swar::run_of_blanks(self.src, from);
+        if !blank(from) {
+            return false;
+        }
+        let to = if blank(from + 1) { swar::run_of_blanks(self.src, from + 2) } else { from + 1 };
         self.pos = to as u32;
-        to > from
+        true
     }
 
     /// Advances to the next byte the caller has to look at, over the ones it certainly does not.
@@ -353,16 +362,43 @@ impl<'a> Cursor<'a> {
     /// May stop on a byte that is in neither set, since the underlying scan is allowed to be
     /// conservative. The caller looks at whatever it lands on anyway, so the worst case is a
     /// little less progress and never a wrong answer.
-    pub(crate) fn skip_plain(&mut self, stops: &[u8]) {
+    #[inline]
+    pub(crate) fn skip_plain<const N: usize>(&mut self, stops: &[u8; N]) {
         // The bytes that are never safe to jump over, then the caller's.
-        let mut set = [b'\n', b'\r', b'\\', b'?', 0, 0, 0, 0];
-        let mut n = if self.trigraphs { 4 } else { 3 };
-        debug_assert!(n + stops.len() <= set.len());
-        for &s in stops {
-            set[n] = s;
-            n += 1;
-        }
-        self.pos = swar::first_of(self.src, self.pos as usize, &set[..n]) as u32;
+        let at = self.pos as usize;
+        let to = if self.trigraphs {
+            swar::first_of_either(self.src, at, b"\n\r\\?", stops)
+        } else {
+            swar::first_of_either(self.src, at, b"\n\r\\", stops)
+        };
+        self.pos = to as u32;
+    }
+
+    /// [`Cursor::skip_plain`] for the inside of a block comment, which goes past newlines and
+    /// carriage returns as well.
+    ///
+    /// Nothing in a block comment cares where its lines end, and a carriage return is only a
+    /// newline to phase 1, so neither has anything to record. What is left is the `*` that may
+    /// end the comment and the backslash or trigraph that may splice one onto a `/`. A comment
+    /// written with a `*` down its left side then stops once a line rather than twice.
+    #[inline]
+    pub(crate) fn skip_block_comment(&mut self) {
+        let at = self.pos as usize;
+        let to = if self.trigraphs {
+            swar::first_of(self.src, at, b"*\\?")
+        } else {
+            swar::first_of(self.src, at, b"*\\")
+        };
+        self.pos = to as u32;
+    }
+
+    /// Moves the head back to `at`, over bytes it has already passed.
+    ///
+    /// Only for going back over a run [`Cursor::skip_plain`] jumped, which has no splice, trigraph
+    /// or carriage return in it, so nothing it recorded on the way is recorded twice.
+    pub(crate) fn back_to(&mut self, at: u32) {
+        debug_assert!(at <= self.pos);
+        self.pos = at;
     }
 
     /// Records any splice in `from .. to` that had whitespace after its backslash.
@@ -382,6 +418,24 @@ impl<'a> Cursor<'a> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn blanks_are_skipped_to_the_first_byte_that_is_not_one() {
+        for (src, moved, at) in [
+            ("", false, 0),
+            ("x", false, 0),
+            (" x", true, 1),
+            ("\tx", true, 1),
+            ("  x", true, 2),
+            (" \t \t \t \t \t \tx", true, 12),
+            ("   ", true, 3),
+            (" \nx", true, 1),
+        ] {
+            let mut c = Cursor::new(src.as_bytes(), false);
+            assert_eq!(c.skip_blanks(), moved, "{src:?}");
+            assert_eq!(c.pos(), at, "{src:?}");
+        }
+    }
 
     fn logical(src: &str, trigraphs: bool) -> String {
         let mut c = Cursor::new(src.as_bytes(), trigraphs);

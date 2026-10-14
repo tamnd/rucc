@@ -16,7 +16,7 @@
 
 use std::borrow::Cow;
 
-use rucc_base::{Interner, Symbol};
+use rucc_base::{Interner, Symbol, sym};
 use rucc_diag::{BytePos, Diagnostic, SourceMap, Span};
 use rucc_lex::{Options, PpToken, PpTokenKind, Punct, TokenFlags, tokenize};
 use rucc_session::PrefixMap;
@@ -205,7 +205,7 @@ impl Expander {
             current: TraceId::NONE,
             diagnostics: &mut self.diagnostics,
             macros,
-            va_opt: interner.intern("__VA_OPT__"),
+            va_opt: sym::VA_OPT,
             interner,
             sources,
             counter: &mut self.counter,

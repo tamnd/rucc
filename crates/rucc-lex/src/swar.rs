@@ -94,11 +94,31 @@ fn word(bytes: &[u8], at: usize) -> Option<u64> {
 /// is also what the caller wants, since there is nothing left to look at either way.
 ///
 /// `needles` is expected to be short. Every call site has between two and five.
-pub(crate) fn first_of(bytes: &[u8], at: usize, needles: &[u8]) -> usize {
+#[inline]
+pub(crate) fn first_of<const N: usize>(bytes: &[u8], at: usize, needles: &[u8; N]) -> usize {
+    first_of_either(bytes, at, needles, &[])
+}
+
+/// [`first_of`] for the needles of two sets, which is the set the cursor never skips and the
+/// set its caller wants on top.
+///
+/// The sets are arrays and this is inlined so that every needle is a constant where it is
+/// used. With a slice the needles were a loop inside the loop over the words, and each one was
+/// multiplied out again for every word. tamnd/rucc#3052.
+#[inline]
+pub(crate) fn first_of_either<const A: usize, const B: usize>(
+    bytes: &[u8],
+    at: usize,
+    some: &[u8; A],
+    others: &[u8; B],
+) -> usize {
     let mut i = at;
     while let Some(w) = word(bytes, i) {
         let mut found = 0;
-        for &n in needles {
+        for &n in some {
+            found |= eq_or_just_above(w, n);
+        }
+        for &n in others {
             found |= eq_or_just_above(w, n);
         }
         if let Some(k) = lowest(found) {
@@ -107,7 +127,7 @@ pub(crate) fn first_of(bytes: &[u8], at: usize, needles: &[u8]) -> usize {
         i += STEP;
     }
     while i < bytes.len() {
-        if needles.contains(&bytes[i]) {
+        if some.contains(&bytes[i]) || others.contains(&bytes[i]) {
             return i;
         }
         i += 1;
@@ -121,6 +141,10 @@ pub(crate) fn first_of(bytes: &[u8], at: usize, needles: &[u8]) -> usize {
 /// feed are whitespace too and are left to the caller: they occur in real code about as often
 /// as they occur in this sentence, and putting them in here would cost a mask on every word to
 /// buy nothing.
+///
+/// Out of line, so that a caller that usually finds a short run before it gets here does not
+/// load the word masks every time it is entered.
+#[inline(never)]
 pub(crate) fn run_of_blanks(bytes: &[u8], at: usize) -> usize {
     let mut i = at;
     while let Some(w) = word(bytes, i) {

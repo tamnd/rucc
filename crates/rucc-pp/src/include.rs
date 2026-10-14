@@ -125,6 +125,15 @@ impl<'a> Reader<'a> {
         }
     }
 
+    /// The next token of a line in a skipped group, which has no spelling, since nothing reads
+    /// one there.
+    pub(crate) fn next_skipped(&mut self, interner: &mut Interner) -> PpToken {
+        match self.pending.take() {
+            Some(token) => token,
+            None => self.lexer.skip_token(interner),
+        }
+    }
+
     /// Puts a token back, so the next call to [`Reader::next`] returns it again.
     pub(crate) fn put_back(&mut self, token: PpToken) {
         self.pending = Some(token);
@@ -146,6 +155,9 @@ impl<'a> Reader<'a> {
     /// Passes over the rest of the current line, for a line in a skipped group whose tokens
     /// nothing will look at.
     pub(crate) fn skip_line(&mut self, interner: &mut Interner) {
+        if self.pending.is_none() && self.lexer.skip_line() {
+            return;
+        }
         loop {
             let token = match self.pending.take() {
                 Some(token) => token,
