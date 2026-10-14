@@ -10143,6 +10143,8 @@ mod tests {
             "-fno-var-tracking-assignments",
             "-fno-partial-inlining",
             "-fmerge-constants",
+            "-fmerge-all-constants",
+            "-fno-merge-all-constants",
             "-fno-allow-store-data-races",
             "-fzero-init-padding-bits=all",
             "-fno-stack-check",
