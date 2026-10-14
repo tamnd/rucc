@@ -30,7 +30,7 @@ tests/
   litmus/      memory model litmus tests for PostgreSQL's barriers and atomics, run on
                AArch64 hardware                                                        PG4
   tools/       the GDB and perf checks, which build Lua with GCC and with rucc and
-               compare what the two tools read                                         L5
+               compare what the two tools read, and the glibc header check             L5
   corpus/      checkouts and build recipes for the target ladder projects              M5
   fuzz/        cargo-fuzz targets against the driver, the parser and the IR            M3
 ```
@@ -151,3 +151,5 @@ An emulator is no use for these, since the emulated machine is only as weak as i
 `perf.sh` records `perf.lua` with `--call-graph=fp` and `--call-graph=dwarf`. The rucc stacks must reach `main` as often as the GCC stacks, within 2 points, and have no more `[unknown]` frames, within 1 point. With `dwarf`, the mean number of frames must be within 1 of the GCC mean, because `perf` shows each inlined call as a frame.
 
 CI runs both on the x86-64 runner and on the arm runner.
+
+`tests/tools/glibc-headers.sh <rucc> <glibc>` is the glibc header check of milestone #3281. It builds glibc with GCC, then runs glibc's own `check-installed-headers-c` test in each subdirectory with rucc as `TEST_CC`. That test compiles each installed header alone, under each `-std` and each feature test macro that glibc supports, and with `_FORTIFY_SOURCE` at 1, 2 and 3. Each subdirectory that installs headers must say PASS. With glibc 2.42 all 38 pass. The `glibc` workflow runs it once a week, because a glibc build takes most of an hour.
