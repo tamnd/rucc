@@ -3167,6 +3167,9 @@ impl Session {
     /// dropped here too, which is what `-Wsystem-headers` turns off, and dropping it before the
     /// promotion is what keeps `-Werror` from stopping a build on somebody else's header.
     pub fn emit(&mut self, mut diag: Diagnostic) {
+        if !self.opts.named_warnings.permit(&mut diag) {
+            return;
+        }
         if rucc_diag::dropped(
             &diag,
             &self.sources,
