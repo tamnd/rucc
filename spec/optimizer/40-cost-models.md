@@ -220,6 +220,8 @@ count of bytes, because the number of moves depends on the known alignment. The 
 
 - **The move-count threshold.** GCC's `move_ratio` is typically 6 for size and larger for speed. rucc
   should start at 8 for speed and 4 for size, and measure.
+
+  Measured on 13 October 2026 as experiment 61 of section 42.5, tamnd/rucc#2971. `cargo xtask stringop` builds a copy and a fill of every size from 1 to 256 bytes at every alignment up to 16 that the size allows, each alone in a function, once with the thresholds high enough that all of them are moves and once with them at nought so that all of them call glibc, and times both sides alternately. On both AMD EPYC machines rucc is measured on, the moves were faster for every size up to 96 bytes, for a copy and for a fill alike, by 15% to 29% in the stretch from 81 to 96 bytes. From 97 to 112 the two were level or the call was ahead, and at 256 bytes the call was 1.7 times as fast. So `BLOCK_COPY_MOVES_FOR_SPEED` and the new `BLOCK_CLEAR_MOVES_FOR_SPEED` are both 12 eight byte moves. The size rows take gcc's x86 values, 3 moves for a copy and 2 for a fill, since a call is five bytes and the three registers it is passed in, and that is smaller than the moves from the third word on. A copy and a fill now ask the cost table for these rows by the goal of the function they are in, where before a copy or a fill the lowering made stopped at a fixed 32 moves and a call to `memcpy` or `memset` was only written out up to 64 bytes, whatever the goal. A copy of a structure into the argument area still uses the speed row, because nothing that far down knows the goal.
 - **The move width** is the block's known alignment and no wider, per spec 10.2, and this is a
   correctness rule on targets that fault on unaligned access, not a cost rule.
 - **The trimming rule of document 21.** A partially dead store may be narrowed to the live part only
@@ -452,7 +454,7 @@ Document 42 owes, from this document specifically:
 
 - **The jump table mispredict threshold**, on an interpreter dispatch loop, per 40.10.
 - **The block-copy move threshold**, both directions, on a corpus with realistic structure sizes, with
-  a measurement harness in the repository per 40.4's `test_stringop` precedent.
+  a measurement harness in the repository per 40.4's `test_stringop` precedent. Done: 40.7 has the result, `cargo xtask stringop` is the harness, and the `block-copy` facet of rucc-corpus is the corpus.
 - **The if-conversion budgets**, since GCC's 20 and 40 are tuned for GCC's cost units and rucc's
   differ.
 - **The LICM pressure margin**, which GCC sets at 2 and which is the constant most likely to be wrong

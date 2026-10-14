@@ -97,6 +97,7 @@
 //! widest call in the function asked for and cannot know that until every call has been seen.
 
 use rucc_base::{Interner, Symbol};
+use rucc_cost::Goal;
 use rucc_diag::Span;
 use rucc_ir::{Abi, Drains, Param, Type};
 use rucc_mir as mir;
@@ -861,8 +862,10 @@ pub fn call(
             };
             // Nothing here refuses a plan it did not get, because a copy the words give up on is
             // a call to the runtime below. What the byte count has to fit in is the immediate the
-            // call passes it as, and an object that large is what is left of the old refusal.
-            let plan = crate::expand::plan(u64::from(size), align, conv.word);
+            // call passes it as, and an object that large is what is left of the old refusal. The
+            // limit is the one for speed, since nothing this far down knows the goal.
+            let most = crate::expand::copies(Goal::Speed);
+            let plan = crate::expand::plan(u64::from(size), align, conv.word, most);
             let count = i32::try_from(size).map_err(|_| refused(Missing::TooBig))?;
             as_bytes.push((reg, up, count, plan));
             continue;

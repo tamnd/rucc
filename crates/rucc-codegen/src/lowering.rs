@@ -353,7 +353,7 @@ impl Step {
             Self::Maths => maths::calls(func, names, conv.abi),
             Self::Quads => quad::calls(func, names, conv.abi),
             Self::Floats => expand::floats(func, conv.word),
-            Self::Bulk => expand::bulk(func, names, conv.word, conv.unaligned),
+            Self::Bulk => expand::bulk(func, names, conv.word, conv.unaligned, goal),
             Self::Rounds => expand::rounds(func, conv.stack_align, conv.word),
             Self::Varargs => varargs::lists(func, conv),
             Self::Forks if !cmov => forks::branches(func),

@@ -41,6 +41,7 @@ mod runner;
 mod safety;
 mod sides;
 mod size;
+mod stringop;
 mod stubs;
 mod tail;
 mod unwind;
@@ -75,6 +76,8 @@ tasks:
   builtins          compile the C runtime support routines into a static library for a target
   builtins-diff     hold the C runtime routines against the Rust reference over the same cases
   builtins-bench    time the four block routines against the C library's own
+  stringop          time block copies and fills of every size as moves and as a call, or with
+                    --count count the sizes the files given copy
   bench             time the throughput floor workload against the reference compiler
   size              measure the distribution against the budget in document 13.1
   disasm            check every instruction we encode against an independent decoder
@@ -145,6 +148,7 @@ fn main() -> ExitCode {
         Some("builtins-bench") => {
             builtins_bench::builtins_bench(&std::env::args().skip(2).collect::<Vec<_>>())
         }
+        Some("stringop") => stringop::stringop(&std::env::args().skip(2).collect::<Vec<_>>()),
         Some("bench") => bench::bench(&std::env::args().skip(2).collect::<Vec<_>>()),
         Some("disasm") => disasm::disasm(),
         Some("stubs") => stubs::stubs(),
