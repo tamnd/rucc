@@ -281,6 +281,11 @@ impl Checker<'_> {
         if let Some(answer) = self.parts_builtin_call(name, args, span) {
             return Some(answer);
         }
+        // The call `<tgmath.h>` makes for each of its macros, to the function the arguments pick.
+        // In `check/builtin/tgmath.rs`.
+        if let Some(answer) = self.tgmath_builtin_call(name, args, span) {
+            return Some(answer);
+        }
         // A vector made of the lanes of others, which has no function behind it to call. In
         // `check/builtin/shuffle.rs`.
         if let Some(answer) = self.shuffle_builtin_call(name, args, span) {
@@ -785,6 +790,7 @@ mod tests {
                 || crate::check::builtin::classify::is_family(feature.name)
                 || crate::check::builtin::sign::is_family(feature.name)
                 || crate::check::builtin::parts::is_family(feature.name)
+                || crate::check::builtin::tgmath::is_family(feature.name)
                 || crate::check::builtin::shuffle::is_family(feature.name)
                 || crate::check::builtin::elementwise::is_family(feature.name)
                 || crate::check::builtin::apply::is_family(feature.name)

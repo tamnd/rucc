@@ -11510,6 +11510,103 @@ float through_a_union(union u *p) { p->i = 1; return p->f; }\n";
         assert!(text.contains("global @yes : i32 = 1,"), "{text}");
     }
 
+    /// The functions `__builtin_tgmath` is tested with, named so that no library rule knows them:
+    /// `a` takes one argument and `b` two, each for every type, and `n` narrows to `float`.
+    const TGMATH: &str = concat!(
+        "float af(float); double a(double); long double al(long double);\n",
+        "float _Complex caf(float _Complex); double _Complex ca(double _Complex);\n",
+        "long double _Complex cal(long double _Complex);\n",
+        "float bf(float, float); double b(double, double); long double bl(long double, long double);\n",
+        "_Float32 bf32(_Float32, _Float32); _Float64 bf64(_Float64, _Float64);\n",
+        "_Float128 bf128(_Float128, _Float128); _Float32x bf32x(_Float32x, _Float32x);\n",
+        "float g(float); double gd(double); float cg(float _Complex); double cgd(double _Complex);\n",
+        "float n(double, double); float nl(long double, long double);\n",
+        "#define A(x) __builtin_tgmath(af, a, al, caf, ca, cal, x)\n",
+        "#define B(x, y) __builtin_tgmath(bf, b, bl, bf32, bf64, bf128, bf32x, x, y)\n",
+        "#define G(x) __builtin_tgmath(g, gd, cg, cgd, x)\n",
+        "#define N(x, y) __builtin_tgmath(n, nl, x, y)\n",
+    );
+
+    /// `__builtin_tgmath` calls the function whose type is the common type of the arguments, as
+    /// gcc 13 does. glibc's `<tgmath.h>` writes each macro with it.
+    ///
+    /// An integer counts as `double`, and as `_Float32x` beside a `_Float32x`. A complex argument
+    /// picks a complex function. A narrowing function is picked by range and precision when no
+    /// type is the same.
+    #[test]
+    fn tgmath_calls_the_function_the_arguments_pick() {
+        let cases = [
+            ("float x", "A(x)", "af"),
+            ("int x", "A(x)", "a"),
+            ("long double x", "A(x)", "al"),
+            ("double _Complex x", "A(x)", "ca"),
+            ("float _Complex x", "B(x, 1.0f)", ""),
+            ("float x, int y", "B(x, y)", "b"),
+            ("float x, float y", "B(x, y)", "bf"),
+            ("_Float32x x, int y", "B(x, y)", "bf32x"),
+            ("_Float32x x, _Float64 y", "B(x, y)", "bf64"),
+            ("double x, _Float128 y", "B(x, y)", "bf128"),
+            ("const double x", "G(x)", "gd"),
+            ("float _Complex x", "G(x)", "cg"),
+            ("float x, float y", "N(x, y)", "n"),
+            ("int x, int y", "N(x, y)", "n"),
+            ("long double x, double y", "N(x, y)", "nl"),
+        ];
+        for (params, call, wanted) in cases {
+            let source = format!("{TGMATH}void f({params}) {{ {call}; }}\n");
+            if wanted.is_empty() {
+                // The two argument family has no complex function.
+                let messages = errors(&source);
+                assert!(messages[0].contains("no matching function"), "{messages:?}");
+                continue;
+            }
+            let text = body(&source);
+            assert!(text.contains(&format!("call @{wanted}(")), "{call} with {params}:\n{text}");
+        }
+        // The answer has the type of the function called.
+        let text = ir(&format!("{TGMATH}float x; int s = sizeof A(x), t = sizeof A(1);\n"));
+        assert!(text.contains("global @s : i32 = 4,"), "{text}");
+        assert!(text.contains("global @t : i32 = 8,"), "{text}");
+        let text = ir("int yes = __has_builtin(__builtin_tgmath);\n");
+        assert!(text.contains("global @yes : i32 = 1,"), "{text}");
+    }
+
+    /// `__builtin_tgmath` refuses a set of functions or an argument the way gcc does.
+    #[test]
+    fn tgmath_refuses_what_gcc_refuses() {
+        let cases = [
+            ("__builtin_tgmath(af, a)", "too few arguments to '__builtin_tgmath'"),
+            (
+                "__builtin_tgmath(i, a, 1.0)",
+                "argument 1 of '__builtin_tgmath' is not a function pointer",
+            ),
+            (
+                "__builtin_tgmath(af, af, 1.0)",
+                "function arguments of '__builtin_tgmath' all have the same type",
+            ),
+            (
+                "__builtin_tgmath(af, b, 1.0)",
+                "argument 2 of '__builtin_tgmath' has wrong number of arguments",
+            ),
+            (
+                "__builtin_tgmath(u, a, 1.0)",
+                "invalid type-generic return type for argument 1 of '__builtin_tgmath'",
+            ),
+            (
+                "__builtin_tgmath(af, a, (void *)0)",
+                "invalid type of argument 1 of type-generic function",
+            ),
+            ("__builtin_tgmath(af, a, 1.0L)", "no matching function for type-generic call"),
+            ("N(1.0f128, 1.0)", "no matching function for type-generic call"),
+        ];
+        for (call, wanted) in cases {
+            let source = format!("{TGMATH}int i; int u(int);\nvoid f(void) {{ {call}; }}\n");
+            let messages = errors(&source);
+            assert_eq!(messages.len(), 1, "{call}: {messages:?}");
+            assert!(messages[0].contains(wanted), "{call}: {messages:?}");
+        }
+    }
+
     /// A math library builtin handed a constant is the answer, and is not a call.
     ///
     /// This is the reason the family is answered in the front end at all. `double x =
