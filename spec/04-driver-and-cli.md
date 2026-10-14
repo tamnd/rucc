@@ -378,6 +378,7 @@ Taken because what they ask for is what happens:
 | `-fdiagnostics-show-context`, `-fdiagnostics-show-context=*` | How much source a diagnostic quotes. |
 | `-fpartial-inlining`, `-fno-partial-inlining` | A gcc pass this compiler does not have. |
 | `-fmerge-constants`, `-fno-merge-constants` | Whether equal constants from different units share storage, which the standard leaves open. |
+| `-fmerge-all-constants`, `-fno-merge-all-constants` | It lets gcc merge equal const variables too. This compiler keeps each one apart, which the flag allows. glibc builds with it. |
 | `-fno-allow-store-data-races`, `-fallow-store-data-races` | No pass writes memory on a path that did not write it. Loop invariant motion moves no store, and the one store phiopt merges is one both arms made. |
 | `-fzero-init-padding-bits=all`, `-fzero-init-padding-bits=unions`, `-fzero-init-padding-bits=standard` | An automatic object whose initializer does not cover every byte, padding and the rest of a union included, is zeroed whole before its members are stored. |
 | `-fno-stack-check` | Nothing probes the stack unless something asked. |

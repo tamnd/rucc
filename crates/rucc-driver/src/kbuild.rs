@@ -122,6 +122,12 @@ pub(crate) const TABLE: &[Row] = &[
     ),
     same("-fno-merge-constants", "the same question, and the standard allows either answer"),
     same(
+        "-fmerge-all-constants",
+        "it also lets gcc merge equal const variables, whose addresses the standard says differ, \
+         and this compiler keeps each one apart, which the flag allows",
+    ),
+    same("-fno-merge-all-constants", "each const variable keeps its own storage here"),
+    same(
         "-fno-allow-store-data-races",
         "it forbids writing to memory on a path that did not write to it, and no pass here does: \
          loop invariant motion moves no store, and the one store phiopt merges is one both arms \
