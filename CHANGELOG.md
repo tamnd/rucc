@@ -8,6 +8,7 @@ All notable changes are recorded here. The format follows [Keep a Changelog](htt
 
 - `__attribute__((simd))` builds the SSE2 vector versions of a function as gcc 16 does on x86-64 ELF, under the vector function ABI names `_ZGVbN2v_h` and `_ZGVbM2v_h` that a loop gcc vectorized against glibc's `<bits/math-vector.h>` calls: each version takes its lanes in `xmm` registers, calls the function once a lane and, for `inbranch`, only where the mask is set. The flag is checked in gcc's words, a type with no lane is warned of as gcc warns of it, and the AVX, AVX2 and AVX-512 versions are not built yet.
 - `cargo xtask budget` measures `-O2` compile time against clang and splits it across the seven phases of spec 42.7, and `-frucc-trace` now adds up the time per phase and keeps the writing out apart from the machine passes (#3665).
+- `__attribute__((no_callee_saved_registers))` and `__attribute__((preserve_none))` are gcc's calling conventions that keep nothing across a call, built on x86-64 ELF as gcc 16 builds them: the function writes `rbx` and `r12` to `r15` without saving them, a caller keeps its own values across a call to one, and `preserve_none` passes its integers in `r12`, `r13`, `r14`, `r15`, `rdi` and `rsi`. Both are part of the function type, a variadic definition of either is built, gcc's diagnostics are given in its words, and on other targets, or beside `ms_abi`, they are refused rather than dropped.
 
 ### Changed
 
