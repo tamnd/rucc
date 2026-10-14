@@ -21,7 +21,7 @@
 //!
 //! # When it is safe
 //!
-//! Every register a move writes must be dead where the other edge goes, which is what [`live`]
+//! Every register a move writes must be dead where the other edge goes, which is what `live`
 //! works out. The branch and the comparison it is folded with stay at the end of the block, so the
 //! moves go in front of the two of them, and neither may read or write a register the moves write
 //! or write one they read. The byte of a comparison the layout folds into the branch is neither,
