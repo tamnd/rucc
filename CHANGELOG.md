@@ -4,6 +4,10 @@ All notable changes are recorded here. The format follows [Keep a Changelog](htt
 
 ## Unreleased
 
+## 0.30.7
+
+This is a patch release. It has the changes on main since 0.30.4. The copies on a split edge now go in front of the branch when the other way out has no use for them, and a fix to that pass makes the 7.2.8 x86-64 kernel boot again: three runs of boot, smoke and KUnit pass 2837 of 2837 graded units. `btf_type_tag` is written the way gcc 16 writes it, so pahole carries `__user` and `__rcu` into the kernel's BTF. The i386 back end makes shorter code for the kernel, and rucc spends less time on large headers.
+
 ### Added
 
 - `__builtin_va_arg_pack` and `__builtin_va_arg_pack_len` are accepted in a `static` variadic function, which is how gcc's documentation writes them, in a `static inline` function marked `always_inline`. The inliner fills them in wherever it copies the body into a caller, as it already did for GNU's `extern inline`, and the copy out of line goes once nothing reaches it. A copy something still reaches, through its address or a call that could not be inlined, is refused after the optimizer with gcc's `invalid use of '__builtin_va_arg_pack ()'` (E0860), where before it became a declaration of a name nothing defines. A function with external linkage is still refused where the pack is written, as E0694 (#8).
