@@ -346,7 +346,9 @@ fn travel(
             // it is used rather than here, and a pointer keeps the shape of the walk.
             None => vec![Type::PTR],
         },
-        Pass::Pieces(slots) => slots.iter().map(|slot| slot_type(*slot)).collect(),
+        Pass::Pieces(slots) => {
+            slots.iter().map(|slot| piece_type(types, target, ty, *slot)).collect()
+        }
         Pass::Reference | Pass::Memory => vec![Type::PTR],
     };
     // An object that went to memory and took every register of a kind with it is AAPCS64's
@@ -384,6 +386,65 @@ pub(crate) fn slot_type(slot: Slot) -> Type {
             // of it travel in whatever holds sixteen bits.
             None => Type::float(Float::F16),
         },
+    }
+}
+
+/// [`slot_type`] for one register of an object of type `ty`, which is a pointer where the
+/// register holds one pointer member and nothing else.
+///
+/// clang does the same, and it is the same register either way, so where the bytes go does not
+/// change. What changes is what the IR knows about them. `struct { char *data; }` handed to a
+/// function is then a pointer at both ends, so the read of the member on the way in is forwarded
+/// from the store that wrote it, and the safety handover, which numbers what it hands over by the
+/// pointer parameters a signature names, hands the callee the bounds of what the member points
+/// at the way it does for a bare `char *`. As an `i64` the member arrived with no bounds and the
+/// callee judged every access through it against planes that know nothing about the caller's
+/// stack, which is tamnd/rucc#3269.
+fn piece_type(types: &Types, target: &TargetInfo, ty: TypeId, slot: Slot) -> Type {
+    let Slot::Integer { offset, size } = slot else { return slot_type(slot) };
+    if size * 8 == target.pointer_width && pointer_at(types, target, ty, offset) {
+        return Type::PTR;
+    }
+    slot_type(slot)
+}
+
+/// Whether the pointer wide bytes at `at` in an object of type `ty` are one pointer member and
+/// nothing else.
+///
+/// Only a `struct` or an array, and only when one member reaches into those bytes. A union is
+/// left as an integer even when one of its members is a pointer, since the bytes are whichever
+/// member was written last, and so is a pointer that shares its bytes with a bit-field.
+fn pointer_at(types: &Types, target: &TargetInfo, ty: TypeId, at: u64) -> bool {
+    let id = types.canonical(ty);
+    match types.kind(id) {
+        TypeKind::Pointer(_) => at == 0,
+        TypeKind::Array { elem, len: ArrayLen::Fixed(_) } => {
+            let stride = repr::size_of(types, target, elem);
+            stride > 0 && pointer_at(types, target, elem, at % stride)
+        }
+        TypeKind::Record(record) => {
+            let info = types.record_info(record);
+            if info.kind != RecordKind::Struct {
+                return false;
+            }
+            let end = at + u64::from(target.pointer_width / 8);
+            let mut inside = info.fields.iter().filter(|field| {
+                let size = match field.bits {
+                    Some(bits) => (u64::from(field.bit) + u64::from(bits)).div_ceil(8),
+                    None => repr::size_of(types, target, field.ty),
+                };
+                field.offset < end && field.offset + size > at
+            });
+            match (inside.next(), inside.next()) {
+                (Some(field), None) => {
+                    field.bits.is_none()
+                        && field.offset <= at
+                        && pointer_at(types, target, field.ty, at - field.offset)
+                }
+                _ => false,
+            }
+        }
+        _ => false,
     }
 }
 
@@ -799,6 +860,45 @@ mod tests {
         assert_eq!(plan.ret.types, vec![Type::int(64), Type::float(Float::F64)]);
         assert!(!plan.returns_through_memory());
         assert_eq!(plan.signature.params.len(), 2);
+    }
+
+    /// tamnd/rucc#3269. A register holding one pointer member is a pointer going in and coming back,
+    /// the way clang has it, and one holding anything else beside it, or a union with a pointer in
+    /// it, is still an integer.
+    #[test]
+    fn a_register_holding_one_pointer_member_is_a_pointer() {
+        let mut types = Types::new();
+        let x86 = target("x86_64-unknown-linux-gnu");
+        let char_ty = types.int(IntKind::Char);
+        let int = types.int(IntKind::Int);
+        let long = types.int(IntKind::Long);
+        let pointer = types.pointer(char_ty);
+        let one = record(&mut types, &x86, &[pointer]);
+        let two = record(&mut types, &x86, &[long, pointer]);
+        let pair = types.array(pointer, ArrayLen::Fixed(2));
+        let wrapped = record(&mut types, &x86, &[pair]);
+        let shared = record(&mut types, &x86, &[int, int, pointer]);
+        let either = union(&mut types, &x86, &[pointer, long]);
+        let cases = [
+            (one, vec![Type::PTR]),
+            (two, vec![Type::int(64), Type::PTR]),
+            (wrapped, vec![Type::PTR, Type::PTR]),
+            (shared, vec![Type::int(64), Type::PTR]),
+            (either, vec![Type::int(64)]),
+        ];
+        for (id, want) in cases {
+            let planned =
+                plan(&types, &x86, Convention::Target, id, &[id], &[], false).expect("a plan");
+            assert_eq!(planned.args[0].types, want);
+            assert_eq!(planned.ret.types, want);
+        }
+
+        // The same on AArch64, where a structure of sixteen bytes or fewer travels in general
+        // purpose registers as well.
+        let arm = target("aarch64-unknown-linux-gnu");
+        let planned =
+            plan(&types, &arm, Convention::Target, two, &[two], &[], false).expect("a plan");
+        assert_eq!(planned.args[0].types, vec![Type::int(64), Type::PTR]);
     }
 
     /// tamnd/rucc#1140. A sixteen byte vector is SSE and SSEUP on x86-64, one xmm register going

@@ -820,6 +820,7 @@ fn over(
     let carried: Vec<Value> = pointers(func, inst).take(ARGS).collect();
     let mut found: Vec<Option<Value>> = Vec::with_capacity(carried.len());
     for &value in &carried {
+        let value = forwarded(func, value);
         let cap = match seen(func, held, doms, value, inst) {
             Some(cap) => Some(cap),
             None => made(func, value, inst, joins, given)
@@ -854,6 +855,41 @@ fn over(
     let made = func.create_inst(data, &[], func.span(inst));
     func.insert_before(made, inst);
     true
+}
+
+/// The pointer a store wrote, when `pointer` reads it straight back.
+///
+/// The optimizer forwards a store to the load behind it, and without the monitor it does here: a
+/// structure of one pointer passed by value is the pointer written into the structure and read
+/// back out of it, and at `-O2` the call is handed the pointer itself. The monitor's own records of
+/// the structure take its address, so the structure stays and so do the store and the load. What
+/// that costs is the capability, since the load has none any check reads, and the callee is handed
+/// nothing for a pointer to the caller's own buffer. So the load is looked through here, to the
+/// pointer the store in front of it wrote, when the two are in one block and nothing between them
+/// writes memory the program can see. The records the monitor keeps on the side, the planes and
+/// the slot a `cap_store` writes, are not that, so they do not stop it. tamnd/rucc#3269.
+fn forwarded(func: &Func, pointer: Value) -> Value {
+    let Def::Result { inst: load, .. } = func[pointer].def else { return pointer };
+    if func[load].opcode != Opcode::Load {
+        return pointer;
+    }
+    let (Some(&from), Some(block)) = (func[func[load].args].first(), func.block_of(load)) else {
+        return pointer;
+    };
+    let before: Vec<Inst> = func.insts(block).take_while(|&at| at != load).collect();
+    for &at in before.iter().rev() {
+        let opcode = func[at].opcode;
+        if opcode == Opcode::Store {
+            return match func[func[at].args] {
+                [value, to] if to == from && func[value].ty.is_ptr() => value,
+                _ => pointer,
+            };
+        }
+        if opcode.writes_memory() && !opcode.touches_only_planes() && opcode != Opcode::CapStore {
+            return pointer;
+        }
+    }
+    pointer
 }
 
 /// The capability [`origin::existing`] found for `pointer`, when it is one `inst` can read.
@@ -1691,6 +1727,39 @@ mod tests {
         (func, local)
     }
 
+    /// A function `f` that stores the address of a local into a word of another, reads it back and
+    /// hands what it read to `callee` twice, which is a structure of one pointer passed by value.
+    fn handing_a_stored_local(names: &mut Interner, callee: &str) -> (Func, Value) {
+        let mut func = Func::new(names.intern("f"), Signature::new());
+        let entry = func.create_block();
+        let sig = func.add_signature(three());
+        let varargs = func.push_abis(&[]);
+        let callee = Some(names.intern(callee));
+        let info = func.add_call(CallInfo { callee, signature: sig, varargs });
+        let mem = MemInfo {
+            size: 8,
+            align: 8,
+            order: MemOrder::NotAtomic,
+            tbaa: None,
+            owns: 0,
+            restrict: Restrict::NONE,
+        };
+        let extra = Extra::Mem(func.add_mem(mem));
+        let mut b = Builder::new(&mut func, entry);
+        let local = b.value(InstData { extra, ..InstData::new(Opcode::Alloca) }, Type::PTR);
+        let word = b.value(InstData { extra, ..InstData::new(Opcode::Alloca) }, Type::PTR);
+        let args = b.func().push_values(&[local, word]);
+        b.inst(InstData { args, extra, ..InstData::new(Opcode::Store) }, &[]);
+        let eight = b.iconst(Type::int(64), 8);
+        let args = b.func().push_values(&[word, eight]);
+        b.inst(InstData { args, ..InstData::new(Opcode::MetaInit) }, &[]);
+        let read = loaded(&mut b, word);
+        let args = b.func().push_values(&[read, eight, read]);
+        b.inst(InstData { args, extra: Extra::Call(info), ..InstData::new(Opcode::Call) }, &[]);
+        b.ret(&[]);
+        (func, local)
+    }
+
     /// Whether the first function of `module` publishes the capability of `local` for both of the
     /// pointers it hands over, and clears nothing.
     fn publishes_the_local(module: &Module, local: Value) {
@@ -1718,6 +1787,20 @@ mod tests {
         module.add_func(caller(&mut names, "g", Some("h"), three(), true));
         // And `g` hands `h` what it holds, though nothing here defines `h`.
         assert_eq!(arrange(&mut module, &names), 2);
+        publishes_the_local(&module, local);
+    }
+
+    #[test]
+    fn a_local_stored_into_a_word_and_read_straight_back_travels_as_the_local() {
+        // tamnd/rucc#3269. The monitor's records of the word keep the store and the load the
+        // optimizer would have forwarded, and the load has no capability anything reads. The
+        // plane write between the two is not a write the program can see, so the pointer read
+        // back is the local and travels with its bounds.
+        let mut names = Interner::new();
+        let mut module = unit(&mut names);
+        let (func, local) = handing_a_stored_local(&mut names, "sink");
+        module.add_func(func);
+        assert_eq!(arrange(&mut module, &names), 1);
         publishes_the_local(&module, local);
     }
 
