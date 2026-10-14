@@ -31,6 +31,7 @@ All notable changes are recorded here. The format follows [Keep a Changelog](htt
 - The layout keeps its hot and cold traces apart while it grows them: a trace does not run from a block that is not cold into one that is, a cold block is not a seed while a block that is not cold is waiting, and `connect` does not put a cold trace behind a hot one, so the block a branch should fall into is not left behind a cold one that `partition` then takes away (#3632).
 - On x86, a leaf that keeps a frame pointer only because of `-fno-omit-frame-pointer` now drops it when it turns out to have no frame bytes, no saved registers and no use of the stack or frame pointer, as gcc does when optimizing. An explicit `-mno-omit-leaf-frame-pointer` still keeps it (#3634).
 - `-mindirect-branch=`, `-mfunction-return=`, `-mindirect-branch-cs-prefix` and `-mharden-sls=` are now read on i386 as well as x86-64, as in gcc. The 32 bit kernel's `CC_HAS_RETPOLINE` check no longer fails, so an X32 build with rucc keeps `MITIGATION_RETPOLINE` (#3635).
+- The simplifier turns `(a << s) - (b << s)` into `(a - b) << s`, and the same for `+`, `&`, `|` and `^` (the bitwise three through a right shift too), when nothing else reads either shift. On i386 this is about ten instructions fewer in the perf uncore counter update (#3636).
 
 ### Fixed
 
