@@ -6327,18 +6327,16 @@ decl #0 x : int object external static defined
     /// type is what makes the message say anything at all in the cases that happen. The span is
     /// the instruction's own, so the message lands on the line rather than on the file.
     ///
-    /// The width of the float is what keeps the program refused. Everything else here is split into
-    /// halves by `rucc_codegen::wide`, including the divisions and the conversions to a `float` and
-    /// a `double`, which became calls into the compiler runtime. A `long double` is the eighty bit
-    /// float on this target, the runtime has no conversion at that width because the back end has no
-    /// register that holds one, which is tamnd/rucc#326, so a function converting to it is left with
-    /// its wide values and reaches the selector the way every function of this width used to.
+    /// The inline assembly is what keeps the program refused. `rucc_codegen::wide` splits the rest
+    /// of a function at this width into halves, but an operand of 128 bits in one register is
+    /// something it does not split. So the function keeps its wide values and reaches the selector
+    /// the way every function of this width used to.
     #[test]
     fn an_opcode_with_no_name_in_the_rule_language_is_named_by_its_own_spelling() {
         let mut opts = options();
         opts.emit = EmitKind::MirFinal;
-        let source =
-            "long double f(int a) {\n  __int128 wide = a;\n  return (long double) wide;\n}\n";
+        let source = "int f(int a) {\n  __int128 wide = a;\n  __asm__(\"\" : \"+r\"(wide));\n  \
+                      return (int) wide;\n}\n";
         let result = run(&opts, source);
         assert!(result.failed());
         assert!(
@@ -6349,12 +6347,34 @@ decl #0 x : int object external static defined
         assert!(!result.messages[0].contains("this instruction"), "{result:?}");
     }
 
+    /// A conversion between `long double` and a 128-bit integer calls libgcc's routine for it.
+    ///
+    /// The machine converts the eighty bit float to and from sixty four bits and no further, so the
+    /// four conversions at 128 bits are `__floattixf`, `__floatuntixf`, `__fixxfti` and
+    /// `__fixunsxfti`, the names gcc calls. A `_BitInt` of 65 to 128 bits is held in 128 bits and
+    /// takes the same calls.
+    #[test]
+    fn a_long_double_converts_to_and_from_128_bits_through_libgcc() {
+        for (source, routine) in [
+            ("long double f(__int128 a) { return a; }\n", "__floattixf"),
+            ("long double f(unsigned __int128 a) { return a; }\n", "__floatuntixf"),
+            ("__int128 f(long double a) { return a; }\n", "__fixxfti"),
+            ("unsigned __int128 f(long double a) { return a; }\n", "__fixunsxfti"),
+            ("long double f(unsigned _BitInt(100) a) { return a; }\n", "__floatuntixf"),
+            ("_BitInt(77) f(long double a) { return a; }\n", "__fixxfti"),
+        ] {
+            let text = mir(source);
+            assert!(text.contains(routine), "{routine} for {source}{text}");
+        }
+    }
+
     /// The note names the issue tracker, which is where a reader finds out whether it is known.
     #[test]
     fn the_note_on_unfinished_work_points_at_the_issues_rather_than_at_the_plan() {
         let mut opts = options();
         opts.emit = EmitKind::MirFinal;
-        let source = "long double f(int a) { __int128 wide = a; return (long double) wide; }\n";
+        let source =
+            "int f(int a) { __int128 wide = a; __asm__(\"\" : \"+r\"(wide)); return wide; }\n";
         let result = run(&opts, source);
         assert!(result.failed());
         let note = result.messages.iter().find(|line| line.contains("note:")).expect("a note");
