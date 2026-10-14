@@ -31,7 +31,7 @@
 
 use rucc_ir as ir;
 use rucc_mir as mir;
-use rucc_opt::{Callees, Cfg, Dominators, Frequencies, Loops};
+use rucc_opt::{Callees, Cfg, Dominators, Frequencies, Loops, Predictions};
 
 /// Writes onto a machine function how often each of its blocks runs and each of its arms is
 /// taken, worked out from the IR function it was selected from.
@@ -39,7 +39,17 @@ use rucc_opt::{Callees, Cfg, Dominators, Frequencies, Loops};
 /// `blocks` is [`crate::lower::Lowered::blocks`], which is the machine block each IR block
 /// became. A function nothing was lowered from is left alone, and so is every machine block that
 /// came from no IR block, which is what a block some later pass added looks like from here.
-pub fn carry(source: &ir::Func, blocks: &[Option<mir::Block>], func: &mut mir::Func) {
+///
+/// `cold` is [`crate::cold::blocks`], and every branch with one arm into a block it names and one
+/// out of it is taken to go the other way, which is the part of gcc's `determine_unlikely_bbs`
+/// that the frequencies see. Without it a pointer test in front of an error message, which the
+/// predictor says is taken, has the trunk of the function walk into the message.
+pub fn carry(
+    source: &ir::Func,
+    blocks: &[Option<mir::Block>],
+    func: &mut mir::Func,
+    cold: &[bool],
+) {
     let cfg = Cfg::new(source);
     if cfg.entry().is_none() {
         return;
@@ -51,7 +61,9 @@ pub fn carry(source: &ir::Func, blocks: &[Option<mir::Block>], func: &mut mir::F
     // directly, which is an `unreachable` after a call. That is where most of it comes from
     // anyway, since C error handling is a call to `abort` and the front end writes the
     // `unreachable` behind it.
-    let freqs = Frequencies::of(source, &cfg, &loops, &Callees::nothing());
+    let mut told = Predictions::of(source, &cfg, &loops, &Callees::nothing());
+    told.avoid(&cfg, cold);
+    let freqs = Frequencies::from_told(told, &cfg, &loops);
     for block in source.blocks() {
         let Some(&Some(out)) = blocks.get(block.index()) else { continue };
         let weight = freqs.get(block);
@@ -89,6 +101,11 @@ mod tests {
 
     /// Lowers a function and carries its weights down, and gives back the machine function.
     fn lowered(source: &mut Func, names: &mut Interner) -> mir::Func {
+        lowered_with(source, names, &[])
+    }
+
+    /// The same, with `cold` naming the IR blocks [`crate::cold::blocks`] would have.
+    fn lowered_with(source: &mut Func, names: &mut Interner, cold: &[bool]) -> mir::Func {
         let out = lower::func(
             source,
             names,
@@ -98,7 +115,7 @@ mod tests {
         )
         .expect("it lowers");
         let lower::Lowered { mut func, blocks, .. } = out;
-        carry(source, &blocks, &mut func);
+        carry(source, &blocks, &mut func, cold);
         func
     }
 
@@ -198,5 +215,37 @@ mod tests {
         let head = func.blocks().next().expect("an entry");
         let arms: Vec<u64> = func[head].succs.iter().map(|call| call.weight.raw()).collect();
         assert!(arms[0] < arms[1], "{arms:?}");
+    }
+
+    /// A branch with nothing to predict it by is even, and with one arm into a block that is cold
+    /// it goes the other way, as far as a call to a cold function says.
+    #[test]
+    fn a_branch_into_a_block_marked_unlikely_takes_the_other_arm() {
+        let int = Type::int(32);
+        let mut names = Interner::new();
+        let mut source =
+            Func::new(names.intern("f"), Signature::new().with_params(&[Type::int(1)]));
+        let entry = source.create_block();
+        let cond = source.append_param(entry, Type::int(1));
+        let yes = source.create_block();
+        let no = source.create_block();
+        Builder::new(&mut source, entry).br_if(cond, yes, &[], no, &[]);
+        for block in [yes, no] {
+            let mut build = Builder::new(&mut source, block);
+            let zero = build.iconst(int, 0);
+            build.ret(&[zero]);
+        }
+        let mut cold = vec![false; 3];
+        cold[yes.index()] = true;
+
+        let even = lowered(&mut source.clone(), &mut names);
+        let func = lowered_with(&mut source, &mut names, &cold);
+
+        let arms = |func: &mir::Func| -> Vec<u64> {
+            let head = func.blocks().next().expect("an entry");
+            func[head].succs.iter().map(|call| call.weight.raw()).collect()
+        };
+        assert_eq!(arms(&even)[0], arms(&even)[1]);
+        assert_eq!(arms(&func), [100, 9_900]);
     }
 }

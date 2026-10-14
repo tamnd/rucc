@@ -895,11 +895,13 @@ pub fn compile_recording(
     // blocks still stand one for one, and the pass that reads the numbers is the very last one
     // there is. See `crate::weights`.
     if flags.reorder {
-        weights::carry(source, &blocks, &mut func);
-    }
-    // At the same moment and for the same reason, and read by the same pass. See `crate::cold`.
-    if flags.reorder && flags.partition {
-        cold::mark(source, &blocks, &mut func, elsewhere);
+        let unlikely = cold::blocks(source, elsewhere);
+        weights::carry(source, &blocks, &mut func, &unlikely);
+        // At the same moment and for the same reason, and read by the same pass. See
+        // `crate::cold`.
+        if flags.partition {
+            cold::mark(&unlikely, &blocks, &mut func);
+        }
     }
     // What the refusal before selection missed, which would be a rule that reaches for a vector
     // register on its own to do something that is not about a float at all. None does now, and
