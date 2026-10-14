@@ -129,7 +129,20 @@ impl MacroDef {
 /// Every macro currently defined.
 #[derive(Debug, Default)]
 pub struct MacroTable {
-    by_name: Map<Symbol, MacroDef>,
+    /// Where the definition of each symbol is in `defs`, plus one, or zero for a name with none.
+    ///
+    /// Indexed by the symbol rather than hashed, because the expander asks this of every
+    /// identifier it reads. A slot is four bytes and a definition about eighty, so the
+    /// definitions are kept apart in the order they were made, and a name nobody defined costs
+    /// its slot and nothing else. In a hash table every definition was moved again each time the
+    /// table doubled, and the C library and a large header define thousands.
+    slots: Vec<u32>,
+    /// The definitions. Every place a slot points at holds one.
+    defs: Vec<Option<MacroDef>>,
+    /// The places in `defs` an `#undef` emptied, for the next new name to take.
+    free: Vec<u32>,
+    /// How many names are defined.
+    len: usize,
     /// What `#pragma push_macro` put aside, innermost last, one stack per name.
     ///
     /// A name with nothing saved has no entry, so the common case of a file that never uses the
@@ -148,23 +161,65 @@ impl MacroTable {
     /// The definition of `name`, if it has one.
     #[inline]
     pub fn lookup(&self, name: Symbol) -> Option<&MacroDef> {
-        self.by_name.get(&name)
+        self.place(name).and_then(|at| self.defs[at].as_ref())
     }
 
     /// Whether `name` is defined, which is what `#ifdef` and `defined` ask.
     #[inline]
     pub fn is_defined(&self, name: Symbol) -> bool {
-        self.by_name.contains_key(&name)
+        self.place(name).is_some()
     }
 
     /// How many macros are defined.
     pub fn len(&self) -> usize {
-        self.by_name.len()
+        self.len
     }
 
     /// Whether no macros are defined.
     pub fn is_empty(&self) -> bool {
-        self.by_name.is_empty()
+        self.len == 0
+    }
+
+    /// Where the definition of `name` is in `defs`.
+    #[inline]
+    fn place(&self, name: Symbol) -> Option<usize> {
+        match self.slots.get(name.raw() as usize) {
+            Some(&slot) if slot != 0 => Some(slot as usize - 1),
+            _ => None,
+        }
+    }
+
+    /// Makes `def` the definition of its name, in the place of any it had.
+    fn insert(&mut self, def: MacroDef) {
+        if let Some(at) = self.place(def.name) {
+            self.defs[at] = Some(def);
+            return;
+        }
+        let name = def.name.raw() as usize;
+        let at = match self.free.pop() {
+            Some(at) => {
+                self.defs[at as usize] = Some(def);
+                at
+            }
+            None => {
+                self.defs.push(Some(def));
+                u32::try_from(self.defs.len() - 1).expect("fewer macros than symbols")
+            }
+        };
+        if self.slots.len() <= name {
+            self.slots.resize(name + 1, 0);
+        }
+        self.slots[name] = at + 1;
+        self.len += 1;
+    }
+
+    /// Takes the definition of `name` away.
+    fn remove(&mut self, name: Symbol) -> Option<MacroDef> {
+        let at = self.place(name)?;
+        self.slots[name.raw() as usize] = 0;
+        self.free.push(u32::try_from(at).expect("fewer macros than symbols"));
+        self.len -= 1;
+        self.defs[at].take()
     }
 
     /// Adds a definition, returning a warning if it replaces a different one.
@@ -175,12 +230,12 @@ impl MacroTable {
     /// because rejecting it would break real builds.
     pub fn define(&mut self, def: MacroDef, interner: &Interner) -> Option<Diagnostic> {
         let complaint =
-            self.by_name.get(&def.name).filter(|old| !old.same_definition_as(&def)).map(|old| {
+            self.lookup(def.name).filter(|old| !old.same_definition_as(&def)).map(|old| {
                 Diagnostic::warning(format!("`{}` redefined", interner.resolve(def.name)), def.span)
                     .with_code("W0301")
                     .note("previous definition was here", old.span)
             });
-        self.by_name.insert(def.name, def);
+        self.insert(def);
         complaint
     }
 
@@ -198,12 +253,12 @@ impl MacroTable {
             span,
             builtin: Some(builtin),
         };
-        self.by_name.insert(name, def);
+        self.insert(def);
     }
 
     /// Removes a definition. Undefining a macro that is not defined is legal and silent.
     pub fn undef(&mut self, name: Symbol) -> Option<MacroDef> {
-        self.by_name.remove(&name)
+        self.remove(name)
     }
 
     /// Puts the current definition of `name` aside, per `#pragma push_macro`.
@@ -213,7 +268,7 @@ impl MacroTable {
     /// pushes a name, defines it for its own use, and pops it, and the caller gets back exactly
     /// what it had whether that was a definition or nothing.
     pub fn push_macro(&mut self, name: Symbol) {
-        let current = self.by_name.get(&name).cloned();
+        let current = self.lookup(name).cloned();
         self.saved.entry(name).or_default().push(current);
     }
 
@@ -233,21 +288,19 @@ impl MacroTable {
             self.saved.remove(&name);
         }
         match was {
-            Some(def) => {
-                self.by_name.insert(name, def);
-            }
+            Some(def) => self.insert(def),
             None => {
-                self.by_name.remove(&name);
+                self.remove(name);
             }
         }
     }
 
     /// Every defined macro, sorted by symbol.
     ///
-    /// Sorted because `-dM` output has to be byte identical across runs and hash order is
-    /// not, per `spec/02-the-goal.md`.
+    /// Sorted because `-dM` output has to be byte identical across runs and the order the
+    /// definitions were made in is not the order of their names, per `spec/02-the-goal.md`.
     pub fn sorted(&self) -> Vec<&MacroDef> {
-        let mut all: Vec<&MacroDef> = self.by_name.values().collect();
+        let mut all: Vec<&MacroDef> = self.defs.iter().flatten().collect();
         all.sort_by_key(|m| m.name);
         all
     }
@@ -641,6 +694,28 @@ mod tests {
         let warning = table.define(def.expect("should parse"), &i).expect("should warn");
         assert_eq!(warning.code, Some("W0301"));
         assert!(table.lookup(name).expect("still defined").builtin.is_none());
+    }
+
+    #[test]
+    fn a_name_undefined_and_another_defined_after_it_each_answer_for_themselves() {
+        let mut i = Interner::new();
+        let mut table = MacroTable::new();
+        let (a, _) = define("A 1", &mut i);
+        let (b, _) = define("B 2 2", &mut i);
+        let (c, _) = define("C 3 3 3", &mut i);
+        table.define(a.expect("should parse"), &i);
+        table.define(b.expect("should parse"), &i);
+        assert!(table.undef(i.intern("A")).is_some());
+        assert!(table.undef(i.intern("A")).is_none(), "gone once it is undefined");
+        // C takes the place A left, and neither A nor B sees it.
+        table.define(c.expect("should parse"), &i);
+        assert!(!table.is_defined(i.intern("A")));
+        assert_eq!(table.lookup(i.intern("B")).expect("still defined").body.len(), 2);
+        assert_eq!(table.lookup(i.intern("C")).expect("defined").body.len(), 3);
+        assert!(!table.is_defined(i.intern("never_seen_by_the_table")));
+        assert_eq!(table.len(), 2);
+        let names: Vec<Symbol> = table.sorted().iter().map(|d| d.name).collect();
+        assert_eq!(names, [i.intern("B"), i.intern("C")]);
     }
 
     #[test]

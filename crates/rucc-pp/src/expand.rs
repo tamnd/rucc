@@ -669,8 +669,15 @@ impl<'a> Run<'a> {
         let mut made = [(invocation.trace, here); 8];
         let mut len = 1;
         let mut last = made[0];
+        // The set each token came with and what it comes out with, for the last one asked.
+        // Every token of the body has none, and those of an argument have that argument's, so
+        // most tokens are hidden the same as the one before. The body's have `hs` alone.
+        let mut hidden = (HideSet::EMPTY, hs);
         for tok in &mut os {
-            tok.hides = self.hides.union(tok.hides, hs);
+            if tok.hides != hidden.0 {
+                hidden = (tok.hides, self.hides.union(tok.hides, hs));
+            }
+            tok.hides = hidden.1;
             // The outermost invocation wins, because substitution of the outer macro runs
             // after substitution of the inner ones, and the outer call is the line the user
             // wrote and the line a diagnostic should point at.
