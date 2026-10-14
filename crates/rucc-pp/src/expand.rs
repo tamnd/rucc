@@ -70,6 +70,8 @@ pub struct Expander {
     /// make one token is an error in C and not in assembly, where gcc leaves the two halves
     /// next to each other and `L__sym_size_\name` in a `.macro` body relies on that.
     assembly: bool,
+    /// Lists an expansion has finished with, kept for the next one to fill.
+    spare: Spare,
 }
 
 impl Expander {
@@ -82,6 +84,7 @@ impl Expander {
             counter: 0,
             prefix_map: PrefixMap::new(),
             assembly: false,
+            spare: Spare::default(),
         }
     }
 
@@ -213,6 +216,7 @@ impl Expander {
             assembly: self.assembly,
             condition,
             steps: 0,
+            spare: &mut self.spare,
         };
         run.expand_into(tokens, out);
     }
@@ -259,6 +263,47 @@ struct Run<'a> {
     /// What the line being expanded is, when it is a `#if` line and not an ordinary one.
     condition: Option<Condition>,
     steps: usize,
+    spare: &'a mut Spare,
+}
+
+/// The lists one invocation of a function-like macro needs, kept from the last one to finish.
+///
+/// Each invocation read its arguments into lists of its own, copied the replacement list into
+/// another and substituted into a third, and grew most of them from nothing as it went, which
+/// on a duktape source file was tens of thousands of trips through the allocator. A list given
+/// back here already has the room the next one wants. tamnd/rucc#3052.
+#[derive(Debug, Default)]
+struct Spare {
+    lists: Vec<Vec<Tok>>,
+    args: Vec<Args>,
+}
+
+impl Spare {
+    /// An empty list, with whatever room it was given back with.
+    fn list(&mut self) -> Vec<Tok> {
+        self.lists.pop().unwrap_or_default()
+    }
+
+    fn give(&mut self, mut list: Vec<Tok>) {
+        list.clear();
+        self.lists.push(list);
+    }
+
+    /// Arguments with nothing in them, whose lists have room in them.
+    fn args(&mut self) -> Args {
+        self.args.pop().unwrap_or_else(Args::none)
+    }
+
+    fn give_args(&mut self, mut args: Args) {
+        for expanded in args.expanded.drain(..) {
+            if let Some(Expanded::Made(list)) = expanded {
+                self.give(list);
+            }
+        }
+        args.toks.clear();
+        args.ends.clear();
+        self.args.push(args);
+    }
 }
 
 impl<'a> Run<'a> {
@@ -270,16 +315,10 @@ impl<'a> Run<'a> {
     /// macro name left alone because no parenthesis followed it is a different matter: it may
     /// well be invoked later, once the tokens after it have been expanded and the parenthesis
     /// has appeared. `t(t(g)(0) + t)(1)` in the standard's own example depends on that.
-    fn expand(&mut self, mut input: Vec<Tok>) -> Vec<Tok> {
-        let mut out = Vec::with_capacity(input.len());
-        self.expand_into(&mut input, &mut out);
-        out
-    }
-
-    /// [`Run::expand`], appending to `out` rather than to a list of its own and leaving
-    /// `pending` empty with its room intact, so that a caller with somewhere to put the result
-    /// already does not pay to copy it there, and one that comes back with more does not pay to
-    /// grow a new list.
+    ///
+    /// Appends to `out` rather than to a list of its own and leaves `pending` empty with its
+    /// room intact, so that a caller with somewhere to put the result already does not pay to
+    /// copy it there, and one that comes back with more does not pay to grow a new list.
     fn expand_into(&mut self, pending: &mut Vec<Tok>, out: &mut Vec<Tok>) {
         let macros = self.macros;
         pending.reverse();
@@ -359,13 +398,14 @@ impl<'a> Run<'a> {
             let shared = self.hides.intersect(tok.hides, rparen.hides);
             let hs = self.hides.add(shared, name);
             self.subst_onto(def, &mut args, hs, tok, pending);
+            self.spare.give_args(args);
         }
     }
 
-    /// Whether [`Run::expand`] would give back `toks` as they are, which it does when no name in
-    /// them is a macro it would expand. Counts the steps the loop would have counted, so the
-    /// bound on a runaway expansion is reached at the same token either way, and says no when
-    /// it would be reached here, leaving the loop to report it.
+    /// Whether [`Run::expand_into`] would give back `toks` as they are, which it does when no
+    /// name in them is a macro it would expand. Counts the steps the loop would have counted, so
+    /// the bound on a runaway expansion is reached at the same token either way, and says no
+    /// when it would be reached here, leaving the loop to report it.
     ///
     /// Most arguments are a name or a number, and this spares each of them two lists and a copy.
     fn passes_through(&mut self, toks: &[Tok], current: TraceId) -> bool {
@@ -532,10 +572,11 @@ impl<'a> Run<'a> {
     ) -> Option<(Args, Tok)> {
         let open = pending.pop().expect("the caller checked for an opening parenthesis");
         // Every argument's tokens in one list, and where each argument ends in it, which is two
-        // allocations for the whole invocation rather than one for each argument and its growth.
-        let mut toks: Vec<Tok> = Vec::new();
-        let mut ends: Vec<u32> = Vec::with_capacity(def.arity() + 1);
-        let end = |toks: &Vec<Tok>| u32::try_from(toks.len()).expect("an argument list that fits");
+        // lists for the whole invocation rather than one for each argument and its growth.
+        let mut args = self.spare.args();
+        let Args { toks, ends, .. } = &mut args;
+        ends.reserve(def.arity() + 1);
+        let end = |len: usize| u32::try_from(len).expect("an argument list that fits");
         let mut depth = 1usize;
         let rparen = loop {
             let Some(tok) = pending.pop() else {
@@ -544,6 +585,7 @@ impl<'a> Run<'a> {
                     .note("this macro was invoked here", name.report_span());
                 let d = self.in_expansions(d, name.trace, name.span);
                 self.diagnostics.push(d);
+                self.spare.give_args(args);
                 return None;
             };
             match tok.punct() {
@@ -563,7 +605,7 @@ impl<'a> Run<'a> {
                 Some(Punct::Comma)
                     if depth == 1 && !(def.is_variadic() && ends.len() >= def.arity()) =>
                 {
-                    ends.push(end(&toks));
+                    ends.push(end(toks.len()));
                 }
                 _ => toks.push(tok),
             }
@@ -574,10 +616,10 @@ impl<'a> Run<'a> {
         // the tokens alone.
         let empty_invocation = ends.is_empty() && toks.is_empty();
         if !(empty_invocation && def.arity() == 0 && !def.is_variadic()) {
-            ends.push(end(&toks));
+            ends.push(end(toks.len()));
         }
         if def.is_variadic() && ends.len() == def.arity() {
-            ends.push(end(&toks));
+            ends.push(end(toks.len()));
         }
 
         let expected = def.arity() + usize::from(def.is_variadic());
@@ -597,9 +639,12 @@ impl<'a> Run<'a> {
             .note("defined here", def.span);
             let d = self.in_expansions(d, name.trace, name.span);
             self.diagnostics.push(d);
+            self.spare.give_args(args);
             return None;
         }
-        Some((Args::new(toks, ends, name.trace), rparen))
+        args.expanded.resize(args.ends.len(), None);
+        args.outer = name.trace;
+        Some((args, rparen))
     }
 
     /// Appends the chain of macros `trace` records to `d`, outermost first.
@@ -674,14 +719,17 @@ impl<'a> Run<'a> {
             return;
         }
         let outer = std::mem::replace(&mut self.current, here);
-        let body: Vec<Tok> = def.body.iter().map(body).collect();
-        let mut os = drop_placemarkers(self.subst_list(def, args, &body, invocation));
+        let mut list = self.spare.list();
+        list.extend(def.body.iter().map(body));
+        let mut os = drop_placemarkers(self.subst_list(def, args, &list, invocation));
+        self.spare.give(list);
         self.current = outer;
         self.mark(&mut os, hs, invocation, here);
         if let Some(first) = os.first_mut() {
             first.flags = carried_spacing(invocation.flags);
         }
-        push_front(pending, os, invocation);
+        push_front(pending, &mut os, invocation);
+        self.spare.give(os);
     }
 
     /// Gives the tokens a substitution made the hide set, the place and the chain they come
@@ -738,7 +786,8 @@ impl<'a> Run<'a> {
         is: &[Tok],
         invocation: Tok,
     ) -> Vec<Tok> {
-        let mut os: Vec<Tok> = Vec::with_capacity(is.len());
+        let mut os = self.spare.list();
+        os.reserve(is.len());
         let mut at = 0;
         // Whitespace owed to the output because the thing that carried it substituted to
         // nothing. `#define f(a, ...) [a __VA_ARGS__]` invoked as `f(1)` produces `[1 ]`, not
@@ -1114,7 +1163,7 @@ fn va_opt_group(is: &[Tok], at: usize) -> Option<std::ops::Range<usize>> {
 }
 
 /// Pushes a replacement onto the front of the pushback stack, preserving its order.
-fn push_front(pending: &mut Vec<Tok>, mut replacement: Vec<Tok>, invocation: Tok) {
+fn push_front(pending: &mut Vec<Tok>, replacement: &mut Vec<Tok>, invocation: Tok) {
     // An expansion that came to nothing still leaves its spacing behind. `#define E` used as
     // `int a E;` preprocesses to `int a ;` and not to `int a;`, in GCC and in clang both. On
     // the glibc headers that is most of the difference between agreeing with the reference and
@@ -1136,7 +1185,7 @@ fn push_front(pending: &mut Vec<Tok>, mut replacement: Vec<Tok>, invocation: Tok
         return;
     }
     replacement.reverse();
-    pending.append(&mut replacement);
+    pending.append(replacement);
 }
 
 /// Hands the spacing of an invocation that came to nothing on to the token rescanned after it.
@@ -1167,6 +1216,7 @@ fn carried_spacing(flags: TokenFlags) -> TokenFlags {
 /// An argument used twice in a replacement list is expanded once. That is not just a saving:
 /// `spec/02-the-goal.md` wants the same input to produce the same diagnostics, and expanding
 /// an argument twice would report anything wrong inside it twice.
+#[derive(Debug)]
 struct Args {
     /// Every argument's tokens, one after another.
     toks: Vec<Tok>,
@@ -1179,7 +1229,7 @@ struct Args {
 }
 
 /// What expanding one argument gave.
-#[derive(Clone)]
+#[derive(Debug, Clone)]
 enum Expanded {
     /// The argument as it was written, because nothing in it expands.
     Same,
@@ -1188,11 +1238,6 @@ enum Expanded {
 }
 
 impl Args {
-    fn new(toks: Vec<Tok>, ends: Vec<u32>, outer: TraceId) -> Args {
-        let count = ends.len();
-        Args { toks, ends, expanded: vec![None; count], outer }
-    }
-
     /// The argument list of an object-like macro, which has none.
     fn none() -> Args {
         Args { toks: Vec::new(), ends: Vec::new(), expanded: Vec::new(), outer: TraceId::NONE }
@@ -1215,7 +1260,11 @@ impl Args {
                 Expanded::Same
             } else {
                 let saved = std::mem::replace(&mut run.current, self.outer);
-                let expanded = run.expand(self.raw(idx).to_vec());
+                let mut input = run.spare.list();
+                input.extend_from_slice(self.raw(idx));
+                let mut expanded = run.spare.list();
+                run.expand_into(&mut input, &mut expanded);
+                run.spare.give(input);
                 run.current = saved;
                 Expanded::Made(expanded)
             };
