@@ -79,10 +79,11 @@
 //! split into. Those are the eight names `runtime/builtins/convert.c` defines, one for each of a
 //! signed and an unsigned integer against a `float` and a `double` in each direction, and the four
 //! `runtime/builtins/quad.c` defines for a `_Float128`, which has no instruction of its own at any
-//! width and so is a call here for both reasons at once. An eighty bit float is not among them,
-//! because this machine has no register that holds one and the back end says so, which is
-//! tamnd/rucc#326, so a function converting at that width is left alone here and refused below the
-//! way every function of this width used to be.
+//! width and so is a call here for both reasons at once. The eighty bit float has the same four,
+//! `__floattixf`, `__floatuntixf`, `__fixxfti` and `__fixunsxfti`, which libgcc and compiler-rt
+//! define and the runtime does not. A function converting at a width with no routine, such as
+//! `_Float16`, is left alone here and refused below the way every function of this width used to
+//! be.
 //!
 //! The call is asked for with the halves already in it, four parameters of sixty four bits for the
 //! two operands of a divide and two results for the answer, or two parameters and a float, or a
@@ -360,10 +361,10 @@ fn can_split(
     if data.opcode == Opcode::SExt && reads.iter().any(|&value| func[value].ty.bits() < 8) {
         return false;
     }
-    // The runtime has a conversion for a `float`, for a `double` and for a `_Float128`, and at
-    // sixty four bits for the eighty bit float too, which is `long double` on i386. Every other
-    // format and width is refused here rather than turned into a call to a name nothing defines.
-    // An eighty bit float split at a hundred and twenty eight bits is tamnd/rucc#326.
+    // The runtime has a conversion for a `float`, for a `double` and for a `_Float128`. The eighty
+    // bit float has one at both widths, from libgcc or compiler-rt rather than from the runtime.
+    // Every other format and width is refused here rather than turned into a call to a name
+    // nothing defines.
     // A reading of a float's bits as an integer, or of an integer's as a float, goes through a
     // slot, and a slot is only somewhere a scalar float can be stored and loaded again. That is a
     // `double` on a machine of thirty two bits, and a `__float128` is left alone.
@@ -2678,14 +2679,15 @@ mod tests {
 
     /// Each conversion between this width and a float becomes a call to the routine of that name.
     ///
-    /// Twelve of them, which is a signed and an unsigned integer against a `float`, a `double` and a
-    /// `_Float128` in each direction, and the table is here rather than in a comment because the
-    /// names are the whole of what this has to get right.
+    /// Sixteen of them, which is a signed and an unsigned integer against a `float`, a `double`, the
+    /// eighty bit float and a `_Float128` in each direction, and the table is here rather than in a
+    /// comment because the names are the whole of what this has to get right.
     #[test]
     fn each_conversion_between_this_width_and_a_float_calls_the_routine_of_that_name() {
         let double = Type::float(Float::F64);
         let single = Type::float(Float::F32);
         let quad = Type::float(Float::F128);
+        let extended = Type::float(Float::F80);
         for (opcode, float, routine) in [
             (Opcode::SIToFP, double, "__floattidf"),
             (Opcode::SIToFP, single, "__floattisf"),
@@ -2693,6 +2695,8 @@ mod tests {
             (Opcode::UIToFP, single, "__floatuntisf"),
             (Opcode::SIToFP, quad, "__floattitf"),
             (Opcode::UIToFP, quad, "__floatuntitf"),
+            (Opcode::SIToFP, extended, "__floattixf"),
+            (Opcode::UIToFP, extended, "__floatuntixf"),
         ] {
             let mut names = Interner::new();
             let (mut func, entry, params) = shell(&mut names, &[wide()], &[float]);
@@ -2712,6 +2716,8 @@ mod tests {
             (Opcode::FPToUI, single, "__fixunssfti"),
             (Opcode::FPToSI, quad, "__fixtfti"),
             (Opcode::FPToUI, quad, "__fixunstfti"),
+            (Opcode::FPToSI, extended, "__fixxfti"),
+            (Opcode::FPToUI, extended, "__fixunsxfti"),
         ] {
             let mut names = Interner::new();
             let (mut func, entry, params) = shell(&mut names, &[float], &[wide()]);
@@ -2791,13 +2797,12 @@ mod tests {
 
     /// A conversion at a float width the runtime has no routine for leaves the function alone.
     ///
-    /// `long double` is the eighty bit float on this target and the runtime has no conversion for
-    /// it, because the back end has no register that holds one, which is tamnd/rucc#326. So the
-    /// function keeps its wide values and is refused below by name, rather than being turned into a
-    /// call to a routine nothing defines.
+    /// `_Float16` has no conversion against this width in the runtime or in libgcc. So the function
+    /// keeps its wide values and is refused below by name, rather than being turned into a call to a
+    /// routine nothing defines.
     #[test]
     fn a_conversion_at_a_width_the_runtime_has_no_routine_for_is_left_alone() {
-        let long = Type::float(Float::F80);
+        let long = Type::float(Float::F16);
         let mut names = Interner::new();
         let (mut func, entry, params) = shell(&mut names, &[wide()], &[long]);
         let mut build = Builder::new(&mut func, entry);

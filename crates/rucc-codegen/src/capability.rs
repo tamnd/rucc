@@ -433,6 +433,12 @@ pub static LIBCALLS: &[(Opcode, &str, &str)] = &[
     (Opcode::FPToUI, "f32.i128", "__fixunssfti"),
     (Opcode::FPToUI, "f64.i128", "__fixunsdfti"),
     (Opcode::FPToUI, "f128.i128", "__fixunstfti"),
+    // The eighty bit float against the same width. The runtime does not define these four, and
+    // libgcc and compiler-rt do, the same as the `i64.f80` rows of `PAIR_LIBCALLS` on i686.
+    (Opcode::SIToFP, "i128.f80", "__floattixf"),
+    (Opcode::UIToFP, "i128.f80", "__floatuntixf"),
+    (Opcode::FPToSI, "f80.i128", "__fixxfti"),
+    (Opcode::FPToUI, "f80.i128", "__fixunsxfti"),
     // The bulk operations, which are the C library rather than the compiler runtime. A copy the
     // lowering will not take on is one whose size is not a constant or is above the threshold, and
     // a move is always a call because the two regions may overlap.
