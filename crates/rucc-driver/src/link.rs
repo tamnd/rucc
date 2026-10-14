@@ -1957,6 +1957,14 @@ fn startfile(opts: &LinkOptions, pie: bool) -> Option<&'static str> {
 /// A dynamic link needs no group, because the shared `libc` resolves its own references inside
 /// itself. `libgcc_s` is asked for `--as-needed` there, the way gcc asks for it, so a program that
 /// never unwinds does not acquire a dependency on it.
+///
+/// A dynamic link also takes the atomic routines from the machine's `libatomic` when its gcc has
+/// one, ahead of ours and `--as-needed`. The two differ on the one point that matters: libatomic
+/// does a 16-byte access with `cmpxchg16b` or a register pair and no lock, and ours takes a lock
+/// from a table of its own. A process with both has two ways to reach one object, and neither
+/// stops the other. A rucc program that opens a GCC library built with `-latomic` lost updates
+/// to an object they both changed. With libatomic first, the process has one copy. A static
+/// link keeps ours, because the program is then the one copy there is.
 fn runtime_items(opts: &LinkOptions, runtime: &[PathBuf], ours: Option<&Path>) -> Vec<String> {
     let mut args = Vec::new();
     if !opts.wants_defaultlibs() && !opts.wants_runtime() {
@@ -1974,6 +1982,11 @@ fn runtime_items(opts: &LinkOptions, runtime: &[PathBuf], ours: Option<&Path>) -
         args.push("-lc".to_owned());
     }
     if opts.wants_runtime() {
+        if !opts.is_static && find_file(runtime, "libatomic.so").is_some() {
+            args.push("--as-needed".to_owned());
+            args.push("-latomic".to_owned());
+            args.push("--no-as-needed".to_owned());
+        }
         if let Some(path) = ours {
             args.push(path.display().to_string());
         }
@@ -3137,6 +3150,31 @@ mod tests {
         let at = args.iter().position(|a| a == "-lgcc_s").expect("the shared half");
         assert_eq!(args[at - 1], "--as-needed", "{args:?}");
         assert_eq!(args[at + 1], "--no-as-needed", "{args:?}");
+    }
+
+    #[test]
+    fn a_dynamic_link_takes_the_atomic_routines_from_the_machines_libatomic_first() {
+        let gcc = a_gcc_dir("atomic");
+        fs::write(gcc.join("libatomic.so"), b"not really a library").expect("a file in it");
+        let ours = PathBuf::from("/somewhere/librucc_builtins.a");
+        let args = runtime_items(&LinkOptions::default(), std::slice::from_ref(&gcc), Some(&ours));
+        let at = args.iter().position(|a| a == "-latomic").expect("libatomic");
+        assert_eq!(args[at - 1], "--as-needed", "{args:?}");
+        assert_eq!(args[at + 1], "--no-as-needed", "{args:?}");
+        let at_ours = args.iter().position(|a| a.ends_with("librucc_builtins.a")).expect("ours");
+        assert!(at < at_ours, "{args:?}");
+        // A static program is the one copy of the routines, so it keeps ours.
+        let opts = LinkOptions { is_static: true, ..LinkOptions::default() };
+        let args = runtime_items(&opts, std::slice::from_ref(&gcc), Some(&ours));
+        assert!(!args.contains(&"-latomic".to_owned()), "{args:?}");
+        fs::remove_dir_all(&gcc).expect("clean up");
+    }
+
+    #[test]
+    fn a_gcc_with_no_libatomic_leaves_the_atomic_routines_to_ours() {
+        let gcc = a_gcc_dir("no-atomic");
+        let args = runtime_items(&LinkOptions::default(), &[gcc], None);
+        assert!(!args.contains(&"-latomic".to_owned()), "{args:?}");
     }
 
     #[test]
