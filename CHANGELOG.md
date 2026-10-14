@@ -28,6 +28,7 @@ All notable changes are recorded here. The format follows [Keep a Changelog](htt
 - The cleanup of the allocator's moves no longer takes the byte of a comparison the layout folds into its branch as a write, so a slot read back in front of the comparison is not read again in the block the branch goes to. drivers/md/md.c on i386 is 32 instructions shorter (#3621).
 - The copies on a split edge now go in front of a comparison the layout folds into its branch when they write the byte it would have set, and stay on one arm of a diamond inside a loop, which the layout lays out with one jump each way round only while both arms are there (#3623).
 - The layout's weights now treat a branch with one arm into a cold block as the cold call predictor would, which is what gcc's `determine_unlikely_bbs` does with the same answer, so a pointer test in front of a `pr_err` no longer walks the trunk of the function into the message and leaves a jump behind (#3627).
+- The layout keeps its hot and cold traces apart while it grows them: a trace does not run from a block that is not cold into one that is, a cold block is not a seed while a block that is not cold is waiting, and `connect` does not put a cold trace behind a hot one, so the block a branch should fall into is not left behind a cold one that `partition` then takes away (#3632).
 
 ### Fixed
 
