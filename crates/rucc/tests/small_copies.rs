@@ -114,15 +114,17 @@ fn reaches(body: &str, name: &str) -> bool {
     body.contains(&format!("call\t{name}")) || body.contains(&format!("jmp\t{name}"))
 }
 
+/// Past 96 bytes a copy is a call, which is where `cargo xtask stringop` found the call stops losing
+/// to the moves (tamnd/rucc#2971).
 #[test]
 fn a_longer_one_is_still_a_call() {
     let source = "\
-void c65(void *d, const void *s) { memcpy(d, s, 65); }
+void c97(void *d, const void *s) { memcpy(d, s, 97); }
 void f4k(void *d) { memset(d, 0, 4096); }
 void cn(void *d, const void *s, size_t n) { memcpy(d, s, n); }
 ";
     let text = asm("long", &["-O2"], source);
-    assert!(reaches(body(&text, "c65"), "memcpy"), "{text}");
+    assert!(reaches(body(&text, "c97"), "memcpy"), "{text}");
     assert!(reaches(body(&text, "f4k"), "memset"), "{text}");
     assert!(reaches(body(&text, "cn"), "memcpy"), "{text}");
 }
