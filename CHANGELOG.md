@@ -4,6 +4,10 @@ All notable changes are recorded here. The format follows [Keep a Changelog](htt
 
 ## Unreleased
 
+## 0.30.8
+
+This is a patch release. It fixes a regression in 0.30.7 that stopped the i386 Linux kernel from building: an `asm goto` could borrow a register and leave the reload past the end of its block. The 7.2.8 i386 kernel builds again. rucc also takes `-fmerge-all-constants` and builds musl's x86-64 math assembly. The release of 0.30.7 did not publish its binaries, because three doc comments linked to private items and the doc gate failed. 0.30.8 removes those links.
+
 ### Fixed
 
 - On i386 an `asm goto` no longer borrows a register when the allocator weighs borrowing against holding a second register back. The borrowed register comes back behind the instruction, and an `asm goto` has only the fall through behind it, so the reload was left past the end of the block and rucc stopped with "a block with two arms whose last instruction is not the branch". The 7.2.8 i386 kernel failed to build in fs/readdir.c, net/core/scm.c and sound/core/pcm_native.c, where `unsafe_put_user` is an `asm goto` (#3652).
