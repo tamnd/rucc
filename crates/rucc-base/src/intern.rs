@@ -216,7 +216,7 @@ impl Interner {
             }
             if seen == tag {
                 let (start, end) = self.spans[index as usize - 1];
-                if &self.buf.as_bytes()[start as usize..end as usize] == s.as_bytes() {
+                if same(&self.buf.as_bytes()[start as usize..end as usize], s.as_bytes()) {
                     return Ok(Symbol(Idx::from_usize(index as usize - 1)));
                 }
             }
@@ -353,6 +353,28 @@ fn tag(s: &str) -> u32 {
     (hasher.finish() >> 32) as u32
 }
 
+/// Whether two spellings are the same bytes.
+///
+/// Nearly every identifier is under seventeen bytes, and comparing those as two words that may
+/// overlap is a few instructions where the slice comparison is a call into the C library for
+/// every probe that finds its tag.
+#[inline]
+fn same(a: &[u8], b: &[u8]) -> bool {
+    let len = a.len();
+    if len != b.len() {
+        return false;
+    }
+    let word = |s: &[u8], at: usize| u64::from_le_bytes(s[at..at + 8].try_into().expect("eight"));
+    let half = |s: &[u8], at: usize| u32::from_le_bytes(s[at..at + 4].try_into().expect("four"));
+    match len {
+        8..=16 => word(a, 0) == word(b, 0) && word(a, len - 8) == word(b, len - 8),
+        4..=7 => half(a, 0) == half(b, 0) && half(a, len - 4) == half(b, len - 4),
+        // The first, middle and last byte, which are all the bytes there are.
+        1..=3 => a[0] == b[0] && a[len / 2] == b[len / 2] && a[len - 1] == b[len - 1],
+        _ => a == b,
+    }
+}
+
 /// Where a tag starts in a table of `mask + 1` slots. The top bits, because the hash is a
 /// product and its high bits are the ones every input bit reaches.
 #[inline]
@@ -374,6 +396,21 @@ impl fmt::Debug for Interner {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn spellings_of_every_length_are_told_apart_by_every_byte() {
+        let text = b"abcdefghijklmnopqrstuvwxyz";
+        for len in 0..=text.len() {
+            let a = &text[..len];
+            assert!(same(a, a));
+            for at in 0..len {
+                let mut b = a.to_vec();
+                b[at] = b'_';
+                assert!(!same(a, &b), "{len} bytes, differing at {at}");
+            }
+            assert!(!same(a, &text[..len.saturating_sub(1)]) || len == 0);
+        }
+    }
 
     #[test]
     fn the_same_string_gets_the_same_symbol() {
