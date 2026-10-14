@@ -510,6 +510,45 @@ mod tests {
         assert!(values[..3].iter().all(|&value| !stacked(value)), "{allocation:?}");
     }
 
+    /// The same reads, with the instruction that reads all three at the end of a block that goes
+    /// two ways, which is where an `asm goto` is. The register it would borrow comes back behind
+    /// it, where only the fall through goes, so the middle answer does not fit and the last one,
+    /// which holds two back, is written.
+    #[test]
+    fn an_instruction_that_ends_a_block_with_two_ways_out_does_not_borrow() {
+        let mut names = Interner::new();
+        let mut func = Func::new(names.intern("f"));
+        let opcode = Opcode::new(names.intern("x64.nop"));
+        let [block, left, right] = [(); 3].map(|()| func.create_block());
+        let values = [(); 5].map(|()| func.new_vreg(GPR));
+        for value in values {
+            func.build(block, opcode).def(value, GPR).finish();
+        }
+        for _ in 0..3 {
+            for &value in &values[..3] {
+                func.build(block, opcode).uses(value, GPR).finish();
+            }
+        }
+        let reads = func.build(block, opcode).uses(values[2], GPR);
+        reads.uses(values[3], GPR).uses(values[4], GPR).finish();
+        *func.succs_mut(block) = vec![BlockCall::to(left), BlockCall::to(right)];
+        for arm in [left, right] {
+            for &value in &values[..3] {
+                func.build(arm, opcode).uses(value, GPR).finish();
+            }
+        }
+
+        let middle = assign::Env::new().with(GPR, &SYSV.int_order[..3], &SYSV.int_order[3..4]);
+        let env = assign::Env::new().with(GPR, &SYSV.int_order[..2], &SYSV.int_order[2..4]);
+        let (allocation, used) =
+            run_first(&mut func, &[&middle], &env, "test", true, Allocator::Backtracking, None);
+
+        assert!(std::ptr::eq(used, &env), "{allocation:?}");
+        // Nothing comes after the reads, which a register brought back would.
+        let last = func.terminator(block).expect("the block still has its instructions");
+        assert_eq!(func[func[last].operands].len(), 3, "{allocation:?}");
+    }
+
     #[test]
     fn two_values_swapping_on_an_edge_are_allocated_with_the_scratch_registers_held_back() {
         let mut names = Interner::new();

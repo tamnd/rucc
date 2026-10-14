@@ -4,6 +4,10 @@ All notable changes are recorded here. The format follows [Keep a Changelog](htt
 
 ## Unreleased
 
+### Fixed
+
+- On i386 an `asm goto` no longer borrows a register when the allocator weighs borrowing against holding a second register back. The borrowed register comes back behind the instruction, and an `asm goto` has only the fall through behind it, so the reload was left past the end of the block and rucc stopped with "a block with two arms whose last instruction is not the branch". The 7.2.8 i386 kernel failed to build in fs/readdir.c, net/core/scm.c and sound/core/pcm_native.c, where `unsafe_put_user` is an `asm goto` (#3614).
+
 ## 0.30.7
 
 This is a patch release. It has the changes on main since 0.30.4. The copies on a split edge now go in front of the branch when the other way out has no use for them, and a fix to that pass makes the 7.2.8 x86-64 kernel boot again: three runs of boot, smoke and KUnit pass 2837 of 2837 graded units. `btf_type_tag` is written the way gcc 16 writes it, so pahole carries `__user` and `__rcu` into the kernel's BTF. The i386 back end makes shorter code for the kernel, and rucc spends less time on large headers.

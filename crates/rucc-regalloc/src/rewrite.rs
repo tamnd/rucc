@@ -313,14 +313,34 @@ fn edge(assignment: &Assignment, env: &Env, params: &[Param], args: &[Reg], at: 
 /// keeping a value of a cycle.
 #[must_use]
 pub fn fits(func: &Func, assignment: &Assignment, env: &Env) -> bool {
-    fits_borrowing(func, assignment, env) && !borrows(func, assignment, env)
+    fits_on_edges(func, assignment, env) && !borrows(func, assignment, env)
 }
 
 /// Whether the rewrite can write an assignment down with no more than the scratch registers `env`
 /// holds back and some registers borrowed, which is [`fits`] with the instructions that want a
 /// second register allowed to borrow one. See [`borrowing`] for what that costs.
+///
+/// The borrowed register comes back behind the instruction. An instruction that ends a block with
+/// more than one way out, which is an `asm goto`, has only the fall through behind it, so it may
+/// not borrow. The `asm goto` in the kernel's `unsafe_put_user` reads two values, and on i386 one
+/// that borrowed left its reload behind the template. The layout then found a block with two arms
+/// that did not end in its branch.
 #[must_use]
 pub fn fits_borrowing(func: &Func, assignment: &Assignment, env: &Env) -> bool {
+    if !fits_on_edges(func, assignment, env) {
+        return false;
+    }
+    let mut ends = false;
+    borrowers(func, assignment, env, |block, inst| {
+        ends = func[block].succs.len() > 1 && func.terminator(block) == Some(inst);
+        !ends
+    });
+    !ends
+}
+
+/// Whether nothing is on the stack in a class that holds no register back, and every edge's moves
+/// can be made with the registers held back. This is all of [`fits`] but the borrowing.
+fn fits_on_edges(func: &Func, assignment: &Assignment, env: &Env) -> bool {
     let bare = |class: RegClass| env.scratch(class).is_empty();
     let short = |class: RegClass| env.scratch(class).len() < 2;
     let slots = assignment.slots();
@@ -380,7 +400,7 @@ fn busy(order: &[Move<Option<Place>>], index: usize, cycle: Option<Place>) -> bo
 /// Whether some instruction would borrow a register of a class that holds only one back.
 fn borrows(func: &Func, assignment: &Assignment, env: &Env) -> bool {
     let mut any = false;
-    borrowers(func, assignment, env, |_| {
+    borrowers(func, assignment, env, |_, _| {
         any = true;
         false
     });
@@ -397,22 +417,27 @@ fn borrows(func: &Func, assignment: &Assignment, env: &Env) -> bool {
 #[must_use]
 pub fn borrowing(func: &Func, assignment: &Assignment, env: &Env) -> u128 {
     let mut total = 0;
-    borrowers(func, assignment, env, |block| {
+    borrowers(func, assignment, env, |block, _| {
         total += 2 * u128::from(func[block].weight.raw().max(1));
         true
     });
     total
 }
 
-/// Calls `each` with the block of every instruction that would borrow a register of a class that
-/// holds only one back, until it says to stop.
+/// Calls `each` with every instruction that would borrow a register of a class that holds only one
+/// back, and its block, until it says to stop.
 ///
 /// Asked of [`legalize`] itself rather than worked out again here, since how many registers an
 /// instruction wants turns on which operands it names and which one its answer is written over,
 /// and a second count of that would be free to disagree with the first. Only an instruction that
 /// could want two is asked, which is one with two operands of such a class on the stack, or one on
 /// the stack and a register of the class named outright, which the one held back may be.
-fn borrowers(func: &Func, assignment: &Assignment, env: &Env, mut each: impl FnMut(Block) -> bool) {
+fn borrowers(
+    func: &Func,
+    assignment: &Assignment,
+    env: &Env,
+    mut each: impl FnMut(Block, Inst) -> bool,
+) {
     let short = |class: RegClass| env.scratch(class).len() == 1;
     if !assignment.slots().iter().any(|&class| short(class)) {
         return;
@@ -437,7 +462,7 @@ fn borrowers(func: &Func, assignment: &Assignment, env: &Env, mut each: impl FnM
             // Borrowing takes a slot off the assignment, and every instruction that borrows shares
             // it, so one copy serves every instruction asked about.
             let copy = copy.get_or_insert_with(|| assignment.clone());
-            if legalize::probe(func, copy, env, &mut Spare::default(), inst) && !each(block) {
+            if legalize::probe(func, copy, env, &mut Spare::default(), inst) && !each(block, inst) {
                 return;
             }
         }
