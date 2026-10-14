@@ -718,10 +718,13 @@ fn switches(args: &[String]) -> Vec<String> {
     const SEPARATE: &str = "-o -I -D -U -include -imacros -idirafter -iprefix -iwithprefix \
         -iwithprefixbefore -isystem -iquote -isysroot -imultilib -MF -MT -MQ -x -Xlinker \
         -Xassembler -Xpreprocessor -L -l -u -T -z -B -e -aux-info --sysroot -arch -target";
-    // The `-f` flags that name a path or that are about the diagnostics, as prefixes.
+    // The `-f` flags that name a path or that are about the diagnostics, as prefixes. The trace
+    // names a file, and the fuel is there to find the pass that broke an object by comparing it
+    // with the object built without the fuel, which only works if the fuel leaves no mark of its own.
     const NOT_RECORDED: &str = "-ffile-prefix-map= -fdebug-prefix-map= -fmacro-prefix-map= \
         -fprofile-prefix-map= -fdiagnostics- -fno-diagnostics- -fmessage-length= -fmax-errors= \
-        -fdump- -fopt-info -fuse-ld= -fcolor-diagnostics -fno-color-diagnostics";
+        -fdump- -fopt-info -fuse-ld= -fcolor-diagnostics -fno-color-diagnostics -frucc-trace= \
+        -fpass-fuel";
     let mut out = Vec::new();
     let mut words = args.iter();
     while let Some(arg) = words.next() {
@@ -7973,6 +7976,16 @@ mod tests {
         assert_eq!(opts.switches, ["-O2"], "the last one wins, and neither is recorded");
         let (opts, _) = compile(&["-c", "-g", "-gz=none", "a.c"]);
         assert_eq!(opts.switches, ["-g"], "-gz does not change the code and is not recorded");
+        let (opts, _) = compile(&[
+            "-c",
+            "-g",
+            "-O2",
+            "-frucc-trace=/tmp/t.jsonl",
+            "-fpass-fuel-global=4",
+            "-fpass-fuel=fold=3",
+            "a.c",
+        ]);
+        assert_eq!(opts.switches, ["-g", "-O2"], "the trace and the fuel are not recorded");
     }
 
     /// Five flags rather than one with an argument, which is how gcc spells them, and the negative
