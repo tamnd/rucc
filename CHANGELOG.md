@@ -4,6 +4,14 @@ All notable changes are recorded here. The format follows [Keep a Changelog](htt
 
 ## Unreleased
 
+## 0.30.6
+
+This is a patch release. It replaces 0.30.5, whose tag failed its checks and was never published. It has the same compiler as 0.30.4 and 0.30.5. Only two tests changed.
+
+### Fixed
+
+- The two i386 tests in `i386_handed_scratch.rs` no longer share a temporary directory. They run at the same time, and one could remove the directory while the other still compiled in it, which failed the release check of 0.30.5 (#3628).
+
 ## 0.30.5
 
 This is a patch release. It replaces 0.30.4, whose tag failed its checks and was never published. It has the same compiler as 0.30.4. Only the build of the doctests changed.
