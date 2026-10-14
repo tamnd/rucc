@@ -427,8 +427,6 @@ block0(%0: i32):
 
 func @bail(i32), linkage(external), attrs(noreturn);
 
-func @give_up(i32), linkage(external), attrs(noreturn);
-
 func @stops_here(i32), linkage(external) {
 block0(%0: i32):
     call @bail(%0) : (i32)
