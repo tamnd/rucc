@@ -463,6 +463,9 @@ fn full(word: &str, args: &[String], mode: Mode) -> Result<Written, String> {
     if let Some(written) = absolute(word, &operands, mode) {
         return written;
     }
+    if let Some(bytes) = stacked(word, &operands)? {
+        return Ok(Written { bytes, holes: Vec::new() });
+    }
     accumulated(word, &mut operands);
     implied(word, &operands, mode)?;
     let predicated = predicated(word);
@@ -503,24 +506,6 @@ fn full(word: &str, args: &[String], mode: Mode) -> Result<Written, String> {
         }
         Err(why) => return Err(why),
     };
-    let named: Vec<u8> = operands
-        .iter()
-        .filter_map(|op| match op {
-            Operand::Stack(depth) => Some(*depth),
-            _ => None,
-        })
-        .collect();
-    // The row has one depth in its opcode, and every other depth of the same place is the same
-    // opcode with the depth added to its last byte. The other place is always the top.
-    let row_depths = depths(&mnemonic);
-    let which = row_depths.iter().position(|&depth| depth != 0).unwrap_or(0);
-    let fits = named.len() == row_depths.len()
-        && named.iter().zip(row_depths).enumerate().all(|(at, (n, r))| at == which || n == r);
-    if !named.is_empty() && !fits {
-        return Err(format!(
-            "'{word}' at those depths of the x87 stack is not one this compiler has"
-        ));
-    }
     if mnemonic == "fnstsw"
         && operands.iter().any(|op| matches!(op, Operand::Reg(reg, _) if *reg != RAX))
     {
@@ -533,11 +518,6 @@ fn full(word: &str, args: &[String], mode: Mode) -> Result<Written, String> {
         .map_err(|why| why.to_string())?;
     if mode == Mode::Bits32 && moffs(&mut bytes, &operands) {
         holes.disp = holes.disp.map(|at| at - 1);
-    }
-    if !named.is_empty() {
-        if let Some(last) = bytes.last_mut() {
-            *last = last.wrapping_add(named[which]).wrapping_sub(row_depths[which]);
-        }
     }
     if holes.dest.is_none() {
         shorter(&mut bytes, &operands, mode);
@@ -1535,17 +1515,105 @@ fn stack(text: &str) -> Option<u8> {
     (depth < 8).then_some(depth)
 }
 
-/// The depths an x87 instruction of that mnemonic is encoded with.
+/// How an x87 instruction names the places on the stack it works on.
+#[derive(Clone, Copy)]
+enum Places {
+    /// `%st(i), %st` with the first opcode byte, and `%st, %st(i)` with the second. One place on
+    /// its own is the first form. These are the arithmetic that keeps both values.
+    Either(u8, u8),
+    /// `%st, %st(i)`, or `%st(i)` on its own, or nothing at all for `%st(1)`. These pop.
+    Popped(u8),
+    /// `%st(i)` on its own, or nothing at all for `%st(1)` when the flag says so.
+    One(u8, bool),
+    /// `%st(i), %st`, or `%st(i)` on its own when the flag says so.
+    Into(u8, bool),
+}
+
+/// The x87 instructions that name places on the stack, with the first opcode byte and the second
+/// byte for a depth of nought. The depth is added to the second byte.
 ///
-/// The encoder has no depth in its arguments: each row is the one pair of places the compiler
-/// writes that instruction with, and the depth is part of its opcode. So a line naming any other
-/// depth is refused here rather than written as the one the row has.
-fn depths(mnemonic: &str) -> &'static [u8] {
-    match mnemonic {
-        "faddp" | "fsubp" | "fsubrp" | "fmulp" | "fdivp" | "fdivrp" => &[0, 1],
-        "fucomip" => &[1, 0],
-        "fstp" => &[0],
-        _ => &[],
+/// The bytes are what gas writes. Its subtraction and division with `%st(i)` as the destination
+/// are the other way round from Intel's names for the same bytes, which is the old System V
+/// spelling gas has always kept, and the table follows gas.
+const PLACES: &[(&str, Places, u8)] = &[
+    ("fadd", Places::Either(0xD8, 0xDC), 0xC0),
+    ("fmul", Places::Either(0xD8, 0xDC), 0xC8),
+    ("fsub", Places::Either(0xD8, 0xDC), 0xE0),
+    ("fsubr", Places::Either(0xD8, 0xDC), 0xE8),
+    ("fdiv", Places::Either(0xD8, 0xDC), 0xF0),
+    ("fdivr", Places::Either(0xD8, 0xDC), 0xF8),
+    ("faddp", Places::Popped(0xDE), 0xC0),
+    ("fmulp", Places::Popped(0xDE), 0xC8),
+    ("fsubp", Places::Popped(0xDE), 0xE0),
+    ("fsubrp", Places::Popped(0xDE), 0xE8),
+    ("fdivp", Places::Popped(0xDE), 0xF0),
+    ("fdivrp", Places::Popped(0xDE), 0xF8),
+    ("fld", Places::One(0xD9, false), 0xC0),
+    ("fxch", Places::One(0xD9, true), 0xC8),
+    ("fst", Places::One(0xDD, false), 0xD0),
+    ("fstp", Places::One(0xDD, false), 0xD8),
+    ("ffree", Places::One(0xDD, false), 0xC0),
+    ("fucom", Places::One(0xDD, true), 0xE0),
+    ("fucomp", Places::One(0xDD, true), 0xE8),
+    ("fcom", Places::One(0xD8, true), 0xD0),
+    ("fcomp", Places::One(0xD8, true), 0xD8),
+    ("fucomi", Places::Into(0xDB, true), 0xE8),
+    ("fucomip", Places::Into(0xDF, true), 0xE8),
+    ("fcomi", Places::Into(0xDB, true), 0xF0),
+    ("fcomip", Places::Into(0xDF, true), 0xF0),
+    ("fcmovb", Places::Into(0xDA, false), 0xC0),
+    ("fcmove", Places::Into(0xDA, false), 0xC8),
+    ("fcmovbe", Places::Into(0xDA, false), 0xD0),
+    ("fcmovu", Places::Into(0xDA, false), 0xD8),
+    ("fcmovnb", Places::Into(0xDB, false), 0xC0),
+    ("fcmovne", Places::Into(0xDB, false), 0xC8),
+    ("fcmovnbe", Places::Into(0xDB, false), 0xD0),
+    ("fcmovnu", Places::Into(0xDB, false), 0xD8),
+];
+
+/// The bytes of an x87 instruction that names only places on the stack, or `None` when the line
+/// is not one.
+///
+/// The encoder has no depth in its arguments, so these are written here. A line with no operands
+/// is one only for the instructions that take `%st(1)` when they are given nothing, which is how
+/// musl's `src/math/x86_64` writes `faddp` and `fmulp`. Every other line with no operands goes to
+/// the encoder.
+///
+/// # Errors
+///
+/// A line that names a place on the stack in a way the instruction does not take.
+fn stacked(word: &str, operands: &[Operand]) -> Result<Option<Vec<u8>>, String> {
+    let depths: Vec<u8> = operands
+        .iter()
+        .filter_map(|op| match op {
+            Operand::Stack(depth) => Some(*depth),
+            _ => None,
+        })
+        .collect();
+    if depths.len() != operands.len() {
+        return Ok(None);
+    }
+    let Some(&(_, places, base)) = PLACES.iter().find(|(name, _, _)| *name == word) else {
+        if depths.is_empty() {
+            return Ok(None);
+        }
+        return Err(format!("'{word}' does not take a place on the x87 stack"));
+    };
+    let pair = match (places, depths.as_slice()) {
+        (Places::Either(first, _), &[depth] | &[depth, 0]) => Some((first, depth)),
+        (Places::Either(_, second), &[0, depth]) => Some((second, depth)),
+        (Places::Popped(first), &[]) => Some((first, 1)),
+        (Places::Popped(first), &[depth] | &[0, depth]) => Some((first, depth)),
+        (Places::One(first, true), &[]) => Some((first, 1)),
+        (Places::One(first, _), &[depth]) => Some((first, depth)),
+        (Places::Into(first, true), &[depth]) => Some((first, depth)),
+        (Places::Into(first, _), &[depth, 0]) => Some((first, depth)),
+        _ => None,
+    };
+    match pair {
+        Some((first, depth)) => Ok(Some(vec![first, base + depth])),
+        None if depths.is_empty() => Ok(None),
+        None => Err(format!("'{word}' at those depths of the x87 stack is not an instruction")),
     }
 }
 
@@ -2075,10 +2143,95 @@ mod tests {
         assert_eq!(bytes("faddp %st, %st(3)"), [0xde, 0xc3]);
         assert_eq!(bytes("fucomip %st(2), %st"), [0xdf, 0xea]);
         assert!(refused("faddp %st(1), %st(2)").contains("depths"));
+        assert!(refused("fld %st(1), %st").contains("depths"));
+        assert!(refused("fadd %st(1), %st(2)").contains("depths"));
+        assert!(refused("fchs %st(1)").contains("does not take"));
         // What gcc writes for `fmod`.
         assert_eq!(bytes("fprem"), [0xd9, 0xf8]);
         assert_eq!(bytes("fnstsw %ax"), [0xdf, 0xe0]);
         assert!(refused("fnstsw %bx").contains("ax"));
+    }
+
+    /// Every way gas takes of naming a place on the x87 stack, and the bytes gas writes for each
+    /// line. musl's `src/math/x86_64` is written with most of them.
+    #[test]
+    fn the_x87_stack_at_any_depth_is_what_gas_writes() {
+        let forms: &[(&str, [u8; 2])] = &[
+            ("fadd %st(3),%st", [0xd8, 0xc3]),
+            ("fadd %st,%st(3)", [0xdc, 0xc3]),
+            ("fadd %st(3)", [0xd8, 0xc3]),
+            ("fsub %st(3),%st", [0xd8, 0xe3]),
+            ("fsub %st,%st(3)", [0xdc, 0xe3]),
+            ("fsub %st(3)", [0xd8, 0xe3]),
+            ("fsubr %st(3),%st", [0xd8, 0xeb]),
+            ("fsubr %st,%st(3)", [0xdc, 0xeb]),
+            ("fsubr %st(3)", [0xd8, 0xeb]),
+            ("fmul %st(3),%st", [0xd8, 0xcb]),
+            ("fmul %st,%st(3)", [0xdc, 0xcb]),
+            ("fmul %st(3)", [0xd8, 0xcb]),
+            ("fdiv %st(3),%st", [0xd8, 0xf3]),
+            ("fdiv %st,%st(3)", [0xdc, 0xf3]),
+            ("fdiv %st(3)", [0xd8, 0xf3]),
+            ("fdivr %st(3),%st", [0xd8, 0xfb]),
+            ("fdivr %st,%st(3)", [0xdc, 0xfb]),
+            ("fdivr %st(3)", [0xd8, 0xfb]),
+            ("faddp", [0xde, 0xc1]),
+            ("faddp %st(3)", [0xde, 0xc3]),
+            ("faddp %st,%st(3)", [0xde, 0xc3]),
+            ("fsubp", [0xde, 0xe1]),
+            ("fsubp %st(3)", [0xde, 0xe3]),
+            ("fsubp %st,%st(3)", [0xde, 0xe3]),
+            ("fsubrp", [0xde, 0xe9]),
+            ("fsubrp %st(3)", [0xde, 0xeb]),
+            ("fsubrp %st,%st(3)", [0xde, 0xeb]),
+            ("fmulp", [0xde, 0xc9]),
+            ("fmulp %st(3)", [0xde, 0xcb]),
+            ("fmulp %st,%st(3)", [0xde, 0xcb]),
+            ("fdivp", [0xde, 0xf1]),
+            ("fdivp %st(3)", [0xde, 0xf3]),
+            ("fdivp %st,%st(3)", [0xde, 0xf3]),
+            ("fdivrp", [0xde, 0xf9]),
+            ("fdivrp %st(3)", [0xde, 0xfb]),
+            ("fdivrp %st,%st(3)", [0xde, 0xfb]),
+            ("fld %st(3)", [0xd9, 0xc3]),
+            ("fxch %st(3)", [0xd9, 0xcb]),
+            ("fst %st(3)", [0xdd, 0xd3]),
+            ("fstp %st(3)", [0xdd, 0xdb]),
+            ("ffree %st(3)", [0xdd, 0xc3]),
+            ("fucom %st(3)", [0xdd, 0xe3]),
+            ("fucomp %st(3)", [0xdd, 0xeb]),
+            ("fcom %st(3)", [0xd8, 0xd3]),
+            ("fcomp %st(3)", [0xd8, 0xdb]),
+            ("fxch", [0xd9, 0xc9]),
+            ("fucom", [0xdd, 0xe1]),
+            ("fucomp", [0xdd, 0xe9]),
+            ("fcom", [0xd8, 0xd1]),
+            ("fcomp", [0xd8, 0xd9]),
+            ("fucomi %st(3),%st", [0xdb, 0xeb]),
+            ("fucomi %st(3)", [0xdb, 0xeb]),
+            ("fucomip %st(3),%st", [0xdf, 0xeb]),
+            ("fucomip %st(3)", [0xdf, 0xeb]),
+            ("fcomi %st(3),%st", [0xdb, 0xf3]),
+            ("fcomi %st(3)", [0xdb, 0xf3]),
+            ("fcomip %st(3),%st", [0xdf, 0xf3]),
+            ("fcomip %st(3)", [0xdf, 0xf3]),
+            ("fcmovb %st(3),%st", [0xda, 0xc3]),
+            ("fcmove %st(3),%st", [0xda, 0xcb]),
+            ("fcmovbe %st(3),%st", [0xda, 0xd3]),
+            ("fcmovu %st(3),%st", [0xda, 0xdb]),
+            ("fcmovnb %st(3),%st", [0xdb, 0xc3]),
+            ("fcmovne %st(3),%st", [0xdb, 0xcb]),
+            ("fcmovnbe %st(3),%st", [0xdb, 0xd3]),
+            ("fcmovnu %st(3),%st", [0xdb, 0xdb]),
+            ("fucompp", [0xda, 0xe9]),
+            ("fcompp", [0xde, 0xd9]),
+            ("fdecstp", [0xd9, 0xf6]),
+            ("fincstp", [0xd9, 0xf7]),
+            ("fnop", [0xd9, 0xd0]),
+        ];
+        for (line, want) in forms {
+            assert_eq!(bytes(line), want, "{line}");
+        }
     }
 
     /// What the kernel writes by hand on i386 and gas reads: MMX in lib/raid6 and the old xor
