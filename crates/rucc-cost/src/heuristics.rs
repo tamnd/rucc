@@ -3,7 +3,7 @@
 //! Section 40.12 calls this "the deliverable this document exists to produce" and states the rule
 //! that goes with it: "A pass may not contain a bare numeric threshold; the coding standard test
 //! greps for one." So a pass that wants to know how many moves a block copy may expand to reads
-//! [`BLOCK_COPY_MOVES_FOR_SPEED`], and the number 8 appears in the compiler exactly once, here,
+//! [`BLOCK_COPY_MOVES_FOR_SPEED`], and the number 12 appears in the compiler exactly once, here,
 //! next to the document that argued for it.
 //!
 //! The section names the file `crates/rucc-opt/src/costs.rs`. It is here instead, one crate lower,
@@ -226,12 +226,37 @@ pub const SHORT_CIRCUIT_INSTRUCTIONS: u32 = 2;
 /// GCC's `MOVE_RATIO`. Above this the copy becomes a call to `memcpy`, which is written in assembly
 /// by somebody who measured, and below it the inline expansion wins because it avoids the call and
 /// lets the surrounding code see through it.
-pub const BLOCK_COPY_MOVES_FOR_SPEED: u32 = 8;
+///
+/// Twelve is where `cargo xtask stringop` found the two cross (tamnd/rucc#2971). On both of the AMD
+/// EPYC machines rucc is measured on, a copy of up to 96 bytes, which is twelve eight byte moves,
+/// ran faster as moves than as a call to glibc's `memcpy`, by 16% and 29% between 81 and 96 bytes.
+/// The two were level from 97 to 112, and from there the call pulled ahead until it was 1.7 times
+/// as fast at 256 bytes, the 32 moves the lowering used to stop at.
+pub const BLOCK_COPY_MOVES_FOR_SPEED: u32 = 12;
 
 /// The same when optimizing for size, per section 40.7.
 ///
-/// Half, because a call is five bytes and eight moves are not.
-pub const BLOCK_COPY_MOVES_FOR_SIZE: u32 = 4;
+/// GCC's `MOVE_RATIO` when it optimizes for size, which is three on x86. A move of a word is a load
+/// and a store of about eight bytes between them, and a call is five bytes plus the three registers
+/// it is passed in, so the call is the smaller from about the third word on.
+pub const BLOCK_COPY_MOVES_FOR_SIZE: u32 = 3;
+
+/// How many scalar stores a block fill may expand to when optimizing for speed, per section 40.7.
+///
+/// GCC's `CLEAR_RATIO`. A fill has no loads, but glibc's `memset` is cheaper than its `memcpy` for
+/// the same reason, and `cargo xtask stringop` found the same twelve for both (tamnd/rucc#2971):
+/// stores of up to 96 bytes beat the call on both machines, by 15% and 28% between 81 and 96 bytes,
+/// and from 97 bytes on one of them had the call ahead. That is a fill in the middle of a function.
+/// A first version of the harness let the call be a jump the function left by, which is cheaper,
+/// and had the stores behind from 80 bytes, but a fill that ends a function is the rarer case.
+pub const BLOCK_CLEAR_MOVES_FOR_SPEED: u32 = 12;
+
+/// The same when optimizing for size, per section 40.7.
+///
+/// GCC's `CLEAR_RATIO` when it optimizes for size, which is two on x86. A store of zero to a word is
+/// about seven bytes, and a call to `memset` is five bytes plus the three registers it is passed
+/// in, so the call is the smaller from the third word on.
+pub const BLOCK_CLEAR_MOVES_FOR_SIZE: u32 = 2;
 
 /// The most bytes of a local scalar replacement turns into values, per section 18.2.
 ///
@@ -1024,18 +1049,34 @@ pub const ALL: &[Constant] = &[
     },
     Constant {
         name: "BLOCK_COPY_MOVES_FOR_SPEED",
-        value: 8,
+        value: 12,
         unit: "moves",
         document: "40.7",
         gcc: "MOVE_RATIO",
-        provenance: Provenance::Gcc,
+        provenance: Provenance::Measured,
     },
     Constant {
         name: "BLOCK_COPY_MOVES_FOR_SIZE",
-        value: 4,
+        value: 3,
         unit: "moves",
         document: "40.7",
         gcc: "MOVE_RATIO when optimize_size",
+        provenance: Provenance::Gcc,
+    },
+    Constant {
+        name: "BLOCK_CLEAR_MOVES_FOR_SPEED",
+        value: 12,
+        unit: "moves",
+        document: "40.7",
+        gcc: "CLEAR_RATIO",
+        provenance: Provenance::Measured,
+    },
+    Constant {
+        name: "BLOCK_CLEAR_MOVES_FOR_SIZE",
+        value: 2,
+        unit: "moves",
+        document: "40.7",
+        gcc: "CLEAR_RATIO when optimize_size",
         provenance: Provenance::Gcc,
     },
     Constant {
@@ -1909,7 +1950,8 @@ macro_rules! param {
 #[cfg(test)]
 mod tests {
     use super::{
-        ALL, ALLOCATOR_DEGRADATION_PERCENT, BLOCK_COPY_MOVES_FOR_SIZE, BLOCK_COPY_MOVES_FOR_SPEED,
+        ALL, ALLOCATOR_DEGRADATION_PERCENT, BLOCK_CLEAR_MOVES_FOR_SIZE,
+        BLOCK_CLEAR_MOVES_FOR_SPEED, BLOCK_COPY_MOVES_FOR_SIZE, BLOCK_COPY_MOVES_FOR_SPEED,
         BRANCH_COST_FOR_SIZE, BRANCH_COST_PREDICTABLE, IF_CONVERSION_BUDGET_PREDICTABLE,
         IF_CONVERSION_BUDGET_UNPREDICTABLE, INLINE_FRAME_GROWTH_CONSERVE,
         INLINE_LARGE_FRAME_CONSERVE, JUMP_TABLE_MIN_TARGETS, JUMP_TABLE_MIN_TARGETS_FOR_SIZE,
@@ -1928,6 +1970,8 @@ mod tests {
         assert_eq!(by_name("BRANCH_COST_PREDICTABLE") * 100, BRANCH_COST_PREDICTABLE.raw());
         assert_eq!(by_name("BLOCK_COPY_MOVES_FOR_SPEED"), i64::from(BLOCK_COPY_MOVES_FOR_SPEED));
         assert_eq!(by_name("BLOCK_COPY_MOVES_FOR_SIZE"), i64::from(BLOCK_COPY_MOVES_FOR_SIZE));
+        assert_eq!(by_name("BLOCK_CLEAR_MOVES_FOR_SPEED"), i64::from(BLOCK_CLEAR_MOVES_FOR_SPEED));
+        assert_eq!(by_name("BLOCK_CLEAR_MOVES_FOR_SIZE"), i64::from(BLOCK_CLEAR_MOVES_FOR_SIZE));
         assert_eq!(by_name("JUMP_TABLE_MIN_TARGETS"), i64::from(JUMP_TABLE_MIN_TARGETS));
         assert_eq!(
             by_name("INLINE_FRAME_GROWTH_CONSERVE"),

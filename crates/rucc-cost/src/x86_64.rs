@@ -106,7 +106,7 @@ static SPEED: LazyLock<CostTable> = LazyLock::new(|| {
         // cycles for fifteen years, because it is the length of the pipeline in front of execute.
         .mispredict_penalty(Cycles::insns(20))
         .move_ratio(crate::param!(heuristics::BLOCK_COPY_MOVES_FOR_SPEED))
-        .clear_ratio(crate::param!(heuristics::BLOCK_COPY_MOVES_FOR_SPEED))
+        .clear_ratio(crate::param!(heuristics::BLOCK_CLEAR_MOVES_FOR_SPEED))
         .cheapest_store(CHEAPEST_STORE)
         // Two independent integer chains, because the machine has four ALU ports and a
         // reassociated tree needs a register per branch of it. Four would use the ports and lose
@@ -163,7 +163,7 @@ static SIZE: LazyLock<CostTable> = LazyLock::new(|| {
         // tables never disagree about what is possible, not that they disagree about everything.
         .mispredict_penalty(Cycles::insns(20))
         .move_ratio(crate::param!(heuristics::BLOCK_COPY_MOVES_FOR_SIZE))
-        .clear_ratio(crate::param!(heuristics::BLOCK_COPY_MOVES_FOR_SIZE))
+        .clear_ratio(crate::param!(heuristics::BLOCK_CLEAR_MOVES_FOR_SIZE))
         .cheapest_store(CHEAPEST_STORE)
         // No reassociation. A tree is the same instruction count as a chain, so it wins nothing
         // here, and it holds more values live, so it loses whatever the spills cost.

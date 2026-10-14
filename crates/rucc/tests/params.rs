@@ -87,6 +87,10 @@ const MOVED: &[(&str, &str, &[&str], u32)] = &[
         40,
     ),
     ("dse-walk-limit", "store-then-load", &["-O2"], 0),
+    ("block-copy-moves-for-speed", "copy-a-block", &["-O2"], 6),
+    ("block-copy-moves-for-size", "copy-a-small-block", &["-Os"], 1),
+    ("block-clear-moves-for-speed", "clear-a-block", &["-O2"], 6),
+    ("block-clear-moves-for-size", "clear-a-small-block", &["-Os"], 1),
     ("range-test-bit-intervals", "guard-keeps-the-index", &["-O2"], 1),
     ("range-switch-cases", "range-switch", &["-O2"], 4),
     ("cons-cascade", "inline-loops", &["-O2", "-Zrewriter=consed"], 0),
@@ -120,14 +124,6 @@ const UNREAD: &[(&str, &str)] = &[
     (
         "if-conversion-block-limit",
         "Written down for gcc's RTL if-conversion, which rucc does not have yet. phiopt is the one it has, and has rows of its own.",
-    ),
-    (
-        "block-copy-moves-for-speed",
-        "The cost table holds it as the move ratio, and the block copy lowering does not ask the table for that yet.",
-    ),
-    (
-        "block-copy-moves-for-size",
-        "The cost table holds it as the move ratio, and the block copy lowering does not ask the table for that yet.",
     ),
     (
         "reassoc-width-untuned",

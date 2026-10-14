@@ -43,6 +43,7 @@ use std::cmp::Ordering;
 
 use rucc_base::hash::Map;
 use rucc_base::{Idx, Interner};
+use rucc_cost::{Goal, heuristics};
 use rucc_ir::{
     AsmInfo, AsmOperand, AsmOperands, AttrSet, BlockCall, CallInfo, Def, Extra, Flags, FloatPred,
     Func, Imm, Inst, InstData, IntPred, MemInfo, MemOrder, Opcode, Signature, Type, Value,
@@ -1383,24 +1384,39 @@ fn lifts(func: &mut Func, inst: Inst, to: u32, ty: Type) {
     becomes(func, inst, Opcode::PtrAdd, &[raw, offset]);
 }
 
-/// The most moves a copy or a fill becomes before it is left alone for a call instead.
-///
-/// Thirty two, which is two hundred and fifty six bytes at a word a time and is a structure larger
-/// than almost every one a program writes. What the number is trading is code size against a call,
-/// and the exchange rate is a machine's rather than a language's, so the number lives here next to
-/// the code it bounds and not in a target description that would have to be right about it for
-/// every target at once.
+/// The most moves a copy becomes before it is left alone for a call to `memcpy` instead, which is
+/// gcc's `move_ratio`: [`heuristics::BLOCK_COPY_MOVES_FOR_SPEED`], or
+/// [`heuristics::BLOCK_COPY_MOVES_FOR_SIZE`] in a function built for size.
 ///
 /// It is a count of moves and not a count of bytes because that is what the cost is. A copy of
 /// sixty four bytes between two addresses aligned to eight is eight moves and a copy of the same
 /// sixty four bytes between two addresses aligned to one is sixty four, and the second is the
-/// expensive one whatever the size says.
-pub const UNROLL: usize = 32;
+/// expensive one whatever the size says. `cargo xtask stringop` times the two sides of it on the
+/// machine it runs on, and section 40.7 has what it found.
+pub fn copies(goal: Goal) -> usize {
+    let moves = match goal {
+        Goal::Speed => rucc_cost::param!(heuristics::BLOCK_COPY_MOVES_FOR_SPEED),
+        Goal::Size => rucc_cost::param!(heuristics::BLOCK_COPY_MOVES_FOR_SIZE),
+    };
+    moves as usize
+}
+
+/// The same for a fill and `memset`, which is gcc's `clear_ratio`:
+/// [`heuristics::BLOCK_CLEAR_MOVES_FOR_SPEED`], or [`heuristics::BLOCK_CLEAR_MOVES_FOR_SIZE`] in a
+/// function built for size.
+pub fn fills(goal: Goal) -> usize {
+    let moves = match goal {
+        Goal::Speed => rucc_cost::param!(heuristics::BLOCK_CLEAR_MOVES_FOR_SPEED),
+        Goal::Size => rucc_cost::param!(heuristics::BLOCK_CLEAR_MOVES_FOR_SIZE),
+    };
+    moves as usize
+}
 
 /// Rewrites every bulk copy and bulk fill, into moves when that is worth it and into a call to the
 /// runtime when it is not.
 ///
-/// A copy or a fill of more than [`UNROLL`] moves becomes a call. A fill whose byte is worked out
+/// A copy of more than [`copies`] moves for the goal becomes a call, and so does a fill of more than
+/// [`fills`]. A fill whose byte is worked out
 /// at runtime spreads it across a word with one multiply, which is what gcc writes. A `memmove` of
 /// no more than [`MOVE`] moves reads every word before it writes any, so it is right whichever way
 /// the two sides overlap, and a larger one is a call.
@@ -1412,10 +1428,11 @@ pub const UNROLL: usize = 32;
 /// which catches the sizes that were only constant once a function was inlined, unless the unit
 /// said those names are not the library's. See `small`. Where it may not, a load or store less
 /// aligned than its width is taken apart instead. See `pieces`.
-pub fn bulk(func: &mut Func, names: &mut Interner, word: u32, unaligned: bool) {
+pub fn bulk(func: &mut Func, names: &mut Interner, word: u32, unaligned: bool, goal: Goal) {
+    let most = (copies(goal), fills(goal));
     let found: Vec<Inst> = func.blocks().flat_map(|block| func.insts(block)).collect();
     if unaligned && !func.attrs.set.contains(AttrSet::NO_BUILTIN) {
-        small(func, names, &found, word);
+        small(func, names, &found, word, most);
     }
     if !unaligned {
         pieces(func, &found, word);
@@ -1423,8 +1440,8 @@ pub fn bulk(func: &mut Func, names: &mut Interner, word: u32, unaligned: bool) {
     let found: Vec<Inst> = func.blocks().flat_map(|block| func.insts(block)).collect();
     for inst in found {
         match func[inst].opcode {
-            Opcode::Memcpy => copy(func, names, inst, word, unaligned),
-            Opcode::Memset => fill(func, names, inst, word, unaligned),
+            Opcode::Memcpy => copy(func, names, inst, word, unaligned, most.0),
+            Opcode::Memset => fill(func, names, inst, word, unaligned, most.1),
             Opcode::Memmove => shift(func, names, inst, word, unaligned),
             _ => {}
         }
@@ -1529,15 +1546,8 @@ fn pieces(func: &mut Func, found: &[Inst], word: u32) {
     }
 }
 
-/// The most bytes a call to `memcpy` or `memset` may name for `small` to write it as moves.
-///
-/// Eight words on x86-64. gcc 16.2.0 with `-mno-sse`, which is how the kernel is built, writes
-/// the moves up to about there and a call or a string instruction above it, and a call costs less
-/// than the moves somewhere around the same place.
-pub const SMALL: u64 = 64;
-
-/// Calls to `memcpy` and `memset` of a constant size no larger than [`SMALL`], as the same bulk
-/// operation the front end writes for a structure copy.
+/// Calls to `memcpy` and `memset` of a constant size that [`copies`] or [`fills`] moves cover, as
+/// the same bulk operation the front end writes for a structure copy.
 ///
 /// The kernel writes these all the time, as `memcpy(&key, p, sizeof(key))` and as
 /// `memset(&req, 0, sizeof(req))`, and every one left a call where gcc leaves two or three moves.
@@ -1549,11 +1559,14 @@ pub const SMALL: u64 = 64;
 /// is worse than the call. A fill needs its byte to be a constant for the same reason [`fill`]
 /// does. The value the call gives back is its first argument, so where something reads it the
 /// call becomes that pointer and where nothing does it goes.
-fn small(func: &mut Func, names: &Interner, found: &[Inst], word: u32) {
+///
+/// `most` is how many moves a copy and a fill may be, in that order.
+fn small(func: &mut Func, names: &Interner, found: &[Inst], word: u32, most: (usize, usize)) {
     let mut answers: Map<Value, Value> = Map::default();
     for &inst in found {
         let Some((opcode, into, with, size)) = shrinkable(func, names, inst) else { continue };
-        if plan(size, word, word).is_none() {
+        let most = if opcode == Opcode::Memset { most.1 } else { most.0 };
+        if plan(size, word, word, most).is_none() {
             continue;
         }
         let access = MemInfo {
@@ -1612,7 +1625,7 @@ fn shrinkable(func: &Func, names: &Interner, inst: Inst) -> Option<(Opcode, Valu
         _ => return None,
     };
     let &[into, with, length] = &func[data.args] else { return None };
-    let size = u64::try_from(number(func, length)?).ok().filter(|&size| size <= SMALL)?;
+    let size = u64::try_from(number(func, length)?).ok()?;
     if opcode == Opcode::Memset {
         literal(func, with)?;
     }
@@ -1650,13 +1663,20 @@ pub const MOVE: usize = 8;
 /// what gcc writes: two loads next to each other and two stores next to each other, which AArch64
 /// does as one `ldp` and one `stp`. A word at a time would leave a store between every two loads,
 /// and nothing after allocation can move a load above a store.
-fn copy(func: &mut Func, names: &mut Interner, inst: Inst, word: u32, unaligned: bool) {
+fn copy(
+    func: &mut Func,
+    names: &mut Interner,
+    inst: Inst,
+    word: u32,
+    unaligned: bool,
+    most: usize,
+) {
     let Some(bulk) = func.bulk(inst) else { return };
     let (into, from) = (bulk.to, bulk.with);
     let Extra::Mem(mem) = func[inst].extra else { return };
     let info = func[mem];
     // A plan is a list of offsets, so there is none for a copy whose length the program works out.
-    let Some(plan) = chunks(info, word, unaligned).filter(|_| bulk.length.is_none()) else {
+    let Some(plan) = chunks(info, word, unaligned, most).filter(|_| bulk.length.is_none()) else {
         return library(func, names, inst, Opcode::Memcpy, word);
     };
     for two in plan.chunks(2) {
@@ -1682,14 +1702,21 @@ fn copy(func: &mut Func, names: &mut Interner, inst: Inst, word: u32, unaligned:
 /// an initialiser did not name, where the byte is always zero. Where the program works the byte out,
 /// as a call to `memset` with a small constant length may, the widest word is the byte times a word
 /// of ones, gcc's `movzbl` and `imul`, and each narrower one is the low part of it.
-fn fill(func: &mut Func, names: &mut Interner, inst: Inst, word: u32, unaligned: bool) {
+fn fill(
+    func: &mut Func,
+    names: &mut Interner,
+    inst: Inst,
+    word: u32,
+    unaligned: bool,
+    most: usize,
+) {
     let Some(bulk) = func.bulk(inst) else { return };
     let (into, byte) = (bulk.to, bulk.with);
     let Extra::Mem(mem) = func[inst].extra else { return };
     let info = func[mem];
     let spelled = literal(func, byte);
     // As in [`copy`]: a fill whose length the program works out has no list of offsets to write.
-    let Some(plan) = chunks(info, word, unaligned).filter(|_| bulk.length.is_none()) else {
+    let Some(plan) = chunks(info, word, unaligned, most).filter(|_| bulk.length.is_none()) else {
         return library(func, names, inst, Opcode::Memset, word);
     };
     let widest = plan.iter().map(|&(_, width)| width).max().unwrap_or(1);
@@ -1742,8 +1769,7 @@ fn shift(func: &mut Func, names: &mut Interner, inst: Inst, word: u32, unaligned
     let (into, from) = (bulk.to, bulk.with);
     let Extra::Mem(mem) = func[inst].extra else { return };
     let info = func[mem];
-    let plan =
-        chunks(info, word, unaligned).filter(|plan| bulk.length.is_none() && plan.len() <= MOVE);
+    let plan = chunks(info, word, unaligned, MOVE).filter(|_| bulk.length.is_none());
     let Some(plan) = plan else {
         return library(func, names, inst, Opcode::Memmove, word);
     };
@@ -1843,7 +1869,7 @@ fn widened(func: &mut Func, inst: Inst, value: Value) -> Value {
 }
 
 /// Where each word of a block of memory starts and how wide it is, or nothing for a block that is
-/// more words than [`UNROLL`].
+/// more words than `most`.
 ///
 /// The widest word is the smaller of what the machine moves at once and what the block is known to
 /// be aligned to, because a load wider than the alignment is a fault on a machine that checks and
@@ -1869,12 +1895,16 @@ fn widened(func: &mut Func, inst: Inst, value: Value) -> Value {
 /// pointer is six bytes written as three two byte fields, and copied as four bytes at 0 and four
 /// at 2 the second load straddled two of them on every tuple a scan stored in a slot, where four
 /// at 0 and two at 4 reads the last field from the one store that wrote it (tamnd/rucc#1994).
-fn chunks(info: MemInfo, word: u32, unaligned: bool) -> Option<Vec<(u64, u32)>> {
-    if unaligned { overlapped(info.size, word) } else { plan(info.size, info.align, word) }
+fn chunks(info: MemInfo, word: u32, unaligned: bool, most: usize) -> Option<Vec<(u64, u32)>> {
+    if unaligned {
+        overlapped(info.size, word, most)
+    } else {
+        plan(info.size, info.align, word, most)
+    }
 }
 
 /// The plan for a machine that moves a word at any address. See [`chunks`].
-fn overlapped(size: u64, word: u32) -> Option<Vec<(u64, u32)>> {
+fn overlapped(size: u64, word: u32, most: usize) -> Option<Vec<(u64, u32)>> {
     let mut width = u64::from(word.max(1));
     if !width.is_power_of_two() {
         return None;
@@ -1894,7 +1924,7 @@ fn overlapped(size: u64, word: u32) -> Option<Vec<(u64, u32)>> {
     } else if tail > 0 {
         plan.push((size - width, u32::try_from(width).ok()?));
     }
-    (plan.len() <= UNROLL).then_some(plan)
+    (plan.len() <= most).then_some(plan)
 }
 
 /// The same, as the two numbers rather than as an access, for the one caller that has no access to
@@ -1904,7 +1934,7 @@ fn overlapped(size: u64, word: u32) -> Option<Vec<(u64, u32)>> {
 /// `memcpy` in the IR: it is written straight into the machine IR, because where it goes is an
 /// offset the placement walk gives and nothing before this pass knows it. The plan has to be the
 /// same plan either way, so it is one function.
-pub(crate) fn plan(size: u64, align: u32, word: u32) -> Option<Vec<(u64, u32)>> {
+pub(crate) fn plan(size: u64, align: u32, word: u32, most: usize) -> Option<Vec<(u64, u32)>> {
     let widest = word.min(align).max(1);
     if !widest.is_power_of_two() {
         return None;
@@ -1918,7 +1948,7 @@ pub(crate) fn plan(size: u64, align: u32, word: u32) -> Option<Vec<(u64, u32)>> 
         }
         plan.push((at, u32::try_from(width).ok()?));
         at += width;
-        if plan.len() > UNROLL {
+        if plan.len() > most {
             return None;
         }
     }
@@ -2300,10 +2330,11 @@ mod tests {
     use rucc_ir::{Builder, Flags, Float, Func, Module, Opcode, Signature, Type};
     use rucc_target::{Arch, BitCount, CountInst, Env, Os, TargetInfo, Triple};
 
+    use rucc_cost::Goal;
     use rucc_ir::{Extra, InstData, MemInfo, MemOrder, Restrict};
 
     use super::{
-        SMALL, UNROLL, alternating, bulk, bytes, chunks, counts, every, floats, orderings,
+        alternating, bulk, bytes, chunks, copies, counts, every, fills, floats, orderings,
         overflows, rounds, spread,
     };
 
@@ -2729,14 +2760,19 @@ mod tests {
     /// The plan a copy of that size and alignment becomes, as widths, which is what the offsets
     /// follow from.
     fn widths(size: u64, align: u32) -> Option<Vec<u32>> {
-        Some(chunks(access(size, align), 8, false)?.into_iter().map(|(_, width)| width).collect())
+        Some(
+            chunks(access(size, align), 8, false, usize::MAX)?
+                .into_iter()
+                .map(|(_, width)| width)
+                .collect(),
+        )
     }
 
     /// `struct point { int x, y; } a, b; a = b;`, which is sixteen bytes aligned to eight.
     #[test]
     fn a_copy_becomes_a_load_and_a_store_for_each_word_of_it() {
         let (mut names, mut func) = copying(16, 8);
-        bulk(&mut func, &mut names, 8, false);
+        bulk(&mut func, &mut names, 8, false, Goal::Speed);
 
         let text = printed(&func, &mut names);
         assert!(!text.contains("memcpy"), "the copy is gone: {text}");
@@ -2772,7 +2808,9 @@ mod tests {
     /// access be written down as its width.
     #[test]
     fn every_word_starts_somewhere_it_is_aligned_for() {
-        for (at, width) in chunks(access(13, 8), 8, false).expect("a plan for thirteen bytes") {
+        for (at, width) in
+            chunks(access(13, 8), 8, false, usize::MAX).expect("a plan for thirteen bytes")
+        {
             assert_eq!(at % u64::from(width), 0, "{at} is a multiple of {width}");
         }
     }
@@ -2781,7 +2819,7 @@ mod tests {
     #[test]
     fn a_fill_is_the_byte_spread_across_each_word() {
         let (mut names, mut func) = filling(16, 8, 0);
-        bulk(&mut func, &mut names, 8, false);
+        bulk(&mut func, &mut names, 8, false, Goal::Speed);
 
         let text = printed(&func, &mut names);
         assert!(!text.contains("memset"), "the fill is gone: {text}");
@@ -2803,26 +2841,42 @@ mod tests {
     /// A copy larger than the threshold is a call to the runtime rather than a run of moves.
     #[test]
     fn a_copy_too_large_to_unroll_becomes_a_call_to_the_runtime() {
-        let size = u64::try_from(UNROLL).expect("a small threshold") + 1;
+        let size = u64::try_from(copies(Goal::Speed)).expect("a small threshold") + 1;
         let (mut names, mut func) = copying(size, 1);
-        bulk(&mut func, &mut names, 8, false);
+        bulk(&mut func, &mut names, 8, false, Goal::Speed);
         let text = printed(&func, &mut names);
         assert!(text.contains("call @memcpy"), "a call and not a bulk move: {text}");
 
         // And the one word under it is moves, because the threshold counts moves rather than
         // bytes and the whole point of the threshold is that a small copy does not pay for a call.
         let (mut names, mut func) = copying(size - 1, 1);
-        bulk(&mut func, &mut names, 8, false);
+        bulk(&mut func, &mut names, 8, false, Goal::Speed);
         assert!(!printed(&func, &mut names).contains("memcpy"), "one word under it is unrolled");
+    }
+
+    /// A function built for size has fewer moves to spend before a copy is a call, since the call
+    /// is the smaller of the two from a few words on.
+    #[test]
+    fn a_copy_built_for_size_becomes_a_call_sooner() {
+        assert!(copies(Goal::Size) < copies(Goal::Speed));
+        assert!(fills(Goal::Size) < fills(Goal::Speed));
+        let size = u64::try_from(copies(Goal::Size) + 1).expect("a small threshold") * 8;
+        let (mut names, mut func) = copying(size, 8);
+        bulk(&mut func, &mut names, 8, false, Goal::Size);
+        assert!(printed(&func, &mut names).contains("call @memcpy"), "a call for size");
+
+        let (mut names, mut func) = copying(size, 8);
+        bulk(&mut func, &mut names, 8, false, Goal::Speed);
+        assert!(!printed(&func, &mut names).contains("memcpy"), "moves for speed");
     }
 
     /// The call passes what C passes, which is not what the IR holds. The size lives beside the
     /// instruction in the IR and travels in a register in the call.
     #[test]
     fn the_call_passes_the_size_that_the_instruction_carried_beside_it() {
-        let size = u64::try_from(UNROLL).expect("a small threshold") + 1;
+        let size = u64::try_from(copies(Goal::Speed)).expect("a small threshold") + 1;
         let (mut names, mut func) = copying(size, 1);
-        bulk(&mut func, &mut names, 8, false);
+        bulk(&mut func, &mut names, 8, false, Goal::Speed);
         let text = printed(&func, &mut names);
         assert!(text.contains(&format!("{size}")), "the size is an argument now: {text}");
     }
@@ -2832,7 +2886,7 @@ mod tests {
     #[test]
     fn a_small_move_reads_everything_before_it_writes_anything() {
         let (mut names, mut func) = moving(Opcode::Memmove, 24, 8, None);
-        bulk(&mut func, &mut names, 8, false);
+        bulk(&mut func, &mut names, 8, false, Goal::Speed);
         let text = printed(&func, &mut names);
         assert!(!text.contains("memmove"), "a run of moves and not a call: {text}");
         let loads: Vec<usize> = text.match_indices("load.").map(|(at, _)| at).collect();
@@ -2841,7 +2895,7 @@ mod tests {
         assert!(loads.iter().max() < stores.iter().min(), "every read comes first: {text}");
 
         let (mut names, mut func) = moving(Opcode::Memmove, 72, 8, None);
-        bulk(&mut func, &mut names, 8, false);
+        bulk(&mut func, &mut names, 8, false, Goal::Speed);
         let text = printed(&func, &mut names);
         assert!(text.contains("call @memmove"), "nine words is a call: {text}");
     }
@@ -2861,7 +2915,7 @@ mod tests {
             build.inst(data, &[]);
             build.ret(&[]);
         });
-        bulk(&mut func, &mut names, 8, false);
+        bulk(&mut func, &mut names, 8, false, Goal::Speed);
         let text = printed(&func, &mut names);
         assert!(!text.contains("memset"), "a store and not a call: {text}");
         assert!(text.contains("zext.i64"), "the byte is widened to the word: {text}");
@@ -2874,7 +2928,7 @@ mod tests {
     /// is one more word that overlaps the one in front of it, unless the tail is a move of its own.
     #[test]
     fn an_unaligned_machine_copies_words_and_overlaps_the_tail() {
-        let plan = |size| chunks(access(size, 1), 8, true);
+        let plan = |size| chunks(access(size, 1), 8, true, usize::MAX);
         assert_eq!(plan(13), Some(vec![(0, 8), (5, 8)]));
         assert_eq!(plan(16), Some(vec![(0, 8), (8, 8)]));
         assert_eq!(plan(7), Some(vec![(0, 4), (3, 4)]));
@@ -2910,7 +2964,7 @@ mod tests {
             build.inst(data, &[]);
             build.ret(&[]);
         });
-        bulk(&mut func, &mut names, 8, true);
+        bulk(&mut func, &mut names, 8, true, Goal::Speed);
         let text = printed(&func, &mut names);
         assert!(!text.contains("memcpy"), "{text}");
         let made = |number: &str| text.lines().any(|line| line.trim_end().ends_with(number));
@@ -2945,7 +2999,7 @@ mod tests {
         {
             let byte = (opcode == Opcode::Memset).then_some(0);
             let (mut names, mut func) = computing(opcode, byte);
-            bulk(&mut func, &mut names, 8, false);
+            bulk(&mut func, &mut names, 8, false, Goal::Speed);
             let text = printed(&func, &mut names);
             assert!(text.contains(&format!("call @{name}")), "a call and not a plan: {text}");
             // The count is the operand it came in with rather than a constant made here, which is
@@ -2959,7 +3013,7 @@ mod tests {
         for opcode in [Opcode::Memcpy, Opcode::Memmove, Opcode::Memset] {
             let byte = (opcode == Opcode::Memset).then_some(0);
             let (mut names, mut func) = computing(opcode, byte);
-            bulk(&mut func, &mut names, 8, false);
+            bulk(&mut func, &mut names, 8, false, Goal::Speed);
             valid(&func, &mut names);
         }
     }
@@ -2968,14 +3022,14 @@ mod tests {
     /// however well aligned the block is.
     #[test]
     fn no_word_is_wider_than_the_machine_moves_at_once() {
-        assert_eq!(chunks(access(8, 8), 4, false).map(|plan| plan.len()), Some(2));
-        assert_eq!(chunks(access(8, 8), 8, false).map(|plan| plan.len()), Some(1));
+        assert_eq!(chunks(access(8, 8), 4, false, usize::MAX).map(|plan| plan.len()), Some(2));
+        assert_eq!(chunks(access(8, 8), 8, false, usize::MAX).map(|plan| plan.len()), Some(1));
     }
 
     #[test]
     fn what_a_copy_becomes_is_ir_that_verifies() {
         let (mut names, mut func) = copying(13, 8);
-        bulk(&mut func, &mut names, 8, false);
+        bulk(&mut func, &mut names, 8, false, Goal::Speed);
         let module = Module::new(names.intern("c.c"), &target());
         rucc_ir::verify_func(&module, &func, &names).expect("the rewrite builds valid IR");
     }
@@ -2983,16 +3037,16 @@ mod tests {
     #[test]
     fn what_a_fill_becomes_is_ir_that_verifies() {
         let (mut names, mut func) = filling(13, 8, 0xff);
-        bulk(&mut func, &mut names, 8, false);
+        bulk(&mut func, &mut names, 8, false, Goal::Speed);
         let module = Module::new(names.intern("f.c"), &target());
         rucc_ir::verify_func(&module, &func, &names).expect("the rewrite builds valid IR");
     }
 
     #[test]
     fn what_a_copy_too_large_to_unroll_becomes_is_ir_that_verifies() {
-        let size = u64::try_from(UNROLL).expect("a small threshold") + 1;
+        let size = u64::try_from(copies(Goal::Speed)).expect("a small threshold") + 1;
         let (mut names, mut func) = copying(size, 1);
-        bulk(&mut func, &mut names, 8, false);
+        bulk(&mut func, &mut names, 8, false, Goal::Speed);
         let module = Module::new(names.intern("c.c"), &target());
         rucc_ir::verify_func(&module, &func, &names).expect("the call is valid IR");
     }
@@ -3004,7 +3058,7 @@ mod tests {
             build.ret(&[args[0]]);
         });
         let before = printed(&func, &mut names);
-        bulk(&mut func, &mut names, 8, false);
+        bulk(&mut func, &mut names, 8, false, Goal::Speed);
         assert_eq!(printed(&func, &mut names), before);
     }
 
@@ -3889,7 +3943,7 @@ mod tests {
     #[test]
     fn a_small_memcpy_call_is_moves_where_a_word_may_be_moved_anywhere() {
         let (mut names, mut func) = calling("memcpy", None, 24, false);
-        bulk(&mut func, &mut names, 8, true);
+        bulk(&mut func, &mut names, 8, true, Goal::Speed);
         let text = printed(&func, &mut names);
         assert!(!text.contains("call"), "the call is gone: {text}");
         assert_eq!(text.matches("load.i64").count(), 3, "{text}");
@@ -3898,7 +3952,7 @@ mod tests {
         // Where a word may not be moved to any address the call stays, since nothing is known
         // about how the two pointers are aligned and a move per byte is worse than the call.
         let (mut names, mut func) = calling("memcpy", None, 24, false);
-        bulk(&mut func, &mut names, 8, false);
+        bulk(&mut func, &mut names, 8, false, Goal::Speed);
         assert!(printed(&func, &mut names).contains("call @memcpy"));
     }
 
@@ -3907,38 +3961,46 @@ mod tests {
     fn a_function_that_said_no_builtin_keeps_its_call() {
         let (mut names, mut func) = calling("memcpy", None, 24, false);
         func.attrs.set |= rucc_ir::AttrSet::NO_BUILTIN;
-        bulk(&mut func, &mut names, 8, true);
+        bulk(&mut func, &mut names, 8, true, Goal::Speed);
         assert!(printed(&func, &mut names).contains("call @memcpy"));
     }
 
     #[test]
     fn a_small_memset_call_is_stores_of_the_byte_and_a_large_one_stays_a_call() {
         let (mut names, mut func) = calling("memset", Some(0xff), 13, false);
-        bulk(&mut func, &mut names, 8, true);
+        bulk(&mut func, &mut names, 8, true, Goal::Speed);
         let text = printed(&func, &mut names);
         assert!(!text.contains("call"), "{text}");
         assert!(text.contains("iconst.i64 -1"), "{text}");
         assert_eq!(text.matches("store").count(), 2, "a word at 0 and one at 5: {text}");
 
-        let over = i128::from(SMALL) + 1;
-        let (mut names, mut func) = calling("memset", Some(0), over, false);
-        bulk(&mut func, &mut names, 8, true);
-        assert!(printed(&func, &mut names).contains("call @memset"), "over the limit");
+        // One byte past what a fill may be stays a call, and so does one past what a copy may be,
+        // where the size the call names is exactly as many words as each may be is moves.
+        let words = |moves: usize| i128::try_from(moves * 8).expect("a small threshold");
+        for (name, byte, most) in
+            [("memset", Some(0), fills(Goal::Speed)), ("memcpy", None, copies(Goal::Speed))]
+        {
+            let (mut names, mut func) = calling(name, byte, words(most) + 1, false);
+            bulk(&mut func, &mut names, 8, true, Goal::Speed);
+            assert!(printed(&func, &mut names).contains(&format!("call @{name}")), "over");
 
-        let (mut names, mut func) = calling("memcpy", None, over, false);
-        bulk(&mut func, &mut names, 8, true);
-        assert!(printed(&func, &mut names).contains("call @memcpy"), "over the limit");
+            let (mut names, mut func) = calling(name, byte, words(most), false);
+            bulk(&mut func, &mut names, 8, true, Goal::Speed);
+            let text = printed(&func, &mut names);
+            assert!(!text.contains("call"), "{name} of {} words: {text}", most);
+            assert_eq!(text.matches("store").count(), most, "{text}");
+        }
 
         // And a call to some other function of the same shape is left alone.
         let (mut names, mut func) = calling("memcpy_toio", None, 8, false);
-        bulk(&mut func, &mut names, 8, true);
+        bulk(&mut func, &mut names, 8, true, Goal::Speed);
         assert!(printed(&func, &mut names).contains("call @memcpy_toio"));
     }
 
     #[test]
     fn what_a_small_memcpy_gives_back_is_its_destination() {
         let (mut names, mut func) = calling("memcpy", None, 8, true);
-        bulk(&mut func, &mut names, 8, true);
+        bulk(&mut func, &mut names, 8, true, Goal::Speed);
         let text = printed(&func, &mut names);
         assert!(!text.contains("call"), "{text}");
         assert!(text.contains("return %0"), "{text}");
