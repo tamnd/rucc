@@ -2234,6 +2234,24 @@ mod tests {
         }
     }
 
+    /// The conversions that round in the current mode, with no suffix, as musl's `lrint` and
+    /// `lrintf` write them. The register written says how wide the answer is. The bytes are what
+    /// gas writes for each line.
+    #[test]
+    fn a_rounding_conversion_reads_its_width_off_the_register() {
+        let forms: &[(&str, &[u8])] = &[
+            ("cvtsd2si %xmm0,%rax", &[0xf2, 0x48, 0x0f, 0x2d, 0xc0]),
+            ("cvtss2si %xmm1,%eax", &[0xf3, 0x0f, 0x2d, 0xc1]),
+            ("cvtss2si %xmm9,%r10", &[0xf3, 0x4d, 0x0f, 0x2d, 0xd1]),
+            ("cvtsd2si (%rsi),%ecx", &[0xf2, 0x0f, 0x2d, 0x0e]),
+            ("cvtsd2si %xmm3,%r8d", &[0xf2, 0x44, 0x0f, 0x2d, 0xc3]),
+            ("cvtss2si 8(%rsp),%rdx", &[0xf3, 0x48, 0x0f, 0x2d, 0x54, 0x24, 0x08]),
+        ];
+        for (line, want) in forms {
+            assert_eq!(bytes(line), *want, "{line}");
+        }
+    }
+
     /// What the kernel writes by hand on i386 and gas reads: MMX in lib/raid6 and the old xor
     /// routines, the port forms that leave the accumulator out, and KVM's VMX and SVM instructions
     /// with thirty two bit registers. The bytes are what clang writes for each line.
