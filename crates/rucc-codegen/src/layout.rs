@@ -149,6 +149,7 @@ pub fn blocks(
             walking[block.index()] = func.insts(block).any(|inst| walks.contains(&inst));
         }
     }
+    spread(func);
     let mut order = if reorder { traces(func, &walking) } else { order(func) };
     let mut split = partition(func, &mut order);
     let cold = split.map_or_else(Set::default, |first| order[first..].iter().copied().collect());
@@ -282,20 +283,20 @@ pub fn forward(func: &mut mir::Func, insts: &BranchInsts, names: &mut Interner) 
     moved
 }
 
-/// Moves the cold blocks to the end of the order, keeping the order each part was in, and gives
-/// back where the cold part starts, or nothing when no block is cold. See [`crate::cold`].
+/// Marks cold the blocks [`crate::cold::mark`] did not and that only cold blocks reach.
 ///
 /// [`crate::cold::mark`] said which of the blocks selection made are cold, and the passes since
 /// have made more, mostly to split an edge. A block nothing marked is cold here when every way
 /// into it is from a cold block, which is where such a block came from. The entry block is never
-/// cold, so the first part is never empty.
-fn partition(func: &mut mir::Func, order: &mut Vec<mir::Block>) -> Option<usize> {
-    let entry = func.entry()?;
-    if func[entry].cold || !order.iter().any(|&block| func[block].cold) {
-        return None;
+/// cold. Run before the order is worked out, since [`traces`] reads it.
+fn spread(func: &mut mir::Func) {
+    let Some(entry) = func.entry() else { return };
+    if func[entry].cold || !func.blocks().any(|block| func[block].cold) {
+        return;
     }
+    let blocks: Vec<mir::Block> = func.blocks().collect();
     let mut preds = vec![Vec::new(); func.block_count()];
-    for &block in order.iter() {
+    for &block in &blocks {
         for succ in &func[block].succs {
             preds[succ.block.index()].push(block);
         }
@@ -303,7 +304,7 @@ fn partition(func: &mut mir::Func, order: &mut Vec<mir::Block>) -> Option<usize>
     let mut changed = true;
     while changed {
         changed = false;
-        for &block in order.iter() {
+        for &block in &blocks {
             let ways = &preds[block.index()];
             if block == entry || func[block].cold || ways.is_empty() {
                 continue;
@@ -313,6 +314,16 @@ fn partition(func: &mut mir::Func, order: &mut Vec<mir::Block>) -> Option<usize>
                 changed = true;
             }
         }
+    }
+}
+
+/// Moves the cold blocks to the end of the order, keeping the order each part was in, and gives
+/// back where the cold part starts, or nothing when no block is cold. See [`crate::cold`] and
+/// [`spread`]. The entry block is never cold, so the first part is never empty.
+fn partition(func: &mir::Func, order: &mut Vec<mir::Block>) -> Option<usize> {
+    let entry = func.entry()?;
+    if func[entry].cold || !order.iter().any(|&block| func[block].cold) {
+        return None;
     }
     let (hot, cold): (Vec<_>, Vec<_>) = order.iter().partition(|&&block| !func[block].cold);
     let first = hot.len();
@@ -571,6 +582,7 @@ fn traces(func: &mir::Func, walking: &[bool]) -> Vec<mir::Block> {
             .blocks()
             .filter(|&block| !seen[block.index()] && func[block].weight.raw() >= floor)
             .map(|block| Seed {
+                warm: !func[block].cold,
                 reached: reached[block.index()],
                 weight: func[block].weight,
                 place: Reverse(place[block.index()]),
@@ -601,6 +613,7 @@ fn traces(func: &mir::Func, walking: &[bool]) -> Vec<mir::Block> {
                     reached[to.index()] = call.weight.raw();
                     if func[to].weight.raw() >= floor {
                         queue.push(Seed {
+                            warm: !func[to].cold,
                             reached: call.weight.raw(),
                             weight: func[to].weight,
                             place: Reverse(place[to.index()]),
@@ -715,7 +728,8 @@ fn rotate(
 /// So the pieces are put back together. Each trace is followed by the unplaced trace its last block
 /// most often goes to, and that one by the trace its last block most often goes to, until there is
 /// none, and only then does the next trace in round order start a new run. The rounds still decide
-/// which trace is hot and comes first, and this decides what falls in behind it.
+/// which trace is hot and comes first, and this decides what falls in behind it. A trace that
+/// is cold is never put behind one that is not, or the other way, for the reason [`along`] says.
 fn connect(func: &mir::Func, traces: Vec<Vec<mir::Block>>) -> Vec<mir::Block> {
     // Which trace each block starts, for the blocks that start one. A trace may only be joined at
     // its first block, because joining it anywhere else would mean cutting it in half and the
@@ -741,7 +755,7 @@ fn connect(func: &mir::Func, traces: Vec<Vec<mir::Block>>) -> Vec<mir::Block> {
             let mut best: Option<(u64, usize)> = None;
             for call in &func[last].succs {
                 let to = head[call.block.index()];
-                if to == usize::MAX || used[to] {
+                if to == usize::MAX || used[to] || func[call.block].cold != func[last].cold {
                     continue;
                 }
                 let weight = call.weight.raw();
@@ -765,6 +779,11 @@ fn connect(func: &mir::Func, traces: Vec<Vec<mir::Block>>) -> Vec<mir::Block> {
 /// GCC asks them.
 #[derive(Debug, PartialEq, Eq, PartialOrd, Ord)]
 struct Seed {
+    /// Whether the block is not cold, first, so that every block of the first part has been
+    /// started from or reached before a cold one is. A cold block laid out early only takes a
+    /// trace's worth of seeds away from the blocks it would have left for, since [`partition`]
+    /// moves it behind them anyway.
+    warm: bool,
     /// How often the hottest edge into this block out of a block already laid out is taken, and
     /// zero while nothing laid out goes here. First, so that a block something reaches beats a
     /// block nothing reaches however hot the second one is.
@@ -800,6 +819,10 @@ fn next_seed(queue: &mut BinaryHeap<Seed>, seen: &[bool], reached: &[u64]) -> Op
 /// round's floor, and takes at least the round's share of the times the block runs. Ties go to
 /// the arm written first, which is the arm a conditional branch takes when its condition holds,
 /// so a function with no weights on it at all comes out following the true arm.
+///
+/// An arm from a block that is not cold to one that is, or the other way, is never followed,
+/// since [`partition`] would take the two apart again and the block that was to fall into the
+/// other falls into nothing.
 fn along(
     func: &mir::Func,
     block: mir::Block,
@@ -811,6 +834,7 @@ fn along(
     let mut best: Option<&mir::BlockCall> = None;
     for call in &func[block].succs {
         if seen[call.block.index()]
+            || func[call.block].cold != func[block].cold
             || call.weight.raw() < floor
             || call.weight.out_of(whole) < likely
         {
@@ -2186,6 +2210,26 @@ mod tests {
         runs(&mut func, made[3], 10_000, &[]);
 
         assert_eq!(order(&func), [made[0], made[1], made[2], made[3]]);
+
+        traced(&mut func, &mut names);
+
+        assert_eq!(order_of(&func), [0, 2, 3, 1]);
+    }
+
+    /// The trace out of a block that is not cold does not go into one that is, even when the
+    /// weights say the cold arm is the likelier, and neither the next seed nor the trace put
+    /// behind it is the cold one. The other arm comes next, and the cold block goes last.
+    #[test]
+    fn the_trunk_does_not_walk_into_a_cold_arm_whatever_the_weights_say() {
+        let (mut names, mut func, made) = blank(4);
+        branch(&mut func, &mut names, made[0], &[made[1], made[2]]);
+        *func.succs_mut(made[1]) = vec![BlockCall::to(made[3])];
+        *func.succs_mut(made[2]) = vec![BlockCall::to(made[3])];
+        runs(&mut func, made[0], 10_000, &[6_000, 4_000]);
+        runs(&mut func, made[1], 6_000, &[6_000]);
+        runs(&mut func, made[2], 4_000, &[4_000]);
+        runs(&mut func, made[3], 10_000, &[]);
+        func.set_cold(made[1]);
 
         traced(&mut func, &mut names);
 
