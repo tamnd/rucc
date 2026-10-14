@@ -281,6 +281,48 @@ const fn spelled_bit(name: &str) -> u128 {
     1 << (hash % 128)
 }
 
+/// The attribute names the checker has looked up, by the number of the name.
+///
+/// The numbers run through every identifier in the unit and only a few dozen of them are
+/// attribute names, so each number has two bytes saying where its answer is rather than the
+/// thirty two bytes of the answer itself.
+#[derive(Debug, Default)]
+pub(in crate::check) struct AttrNames {
+    /// One more than where each name's answer is in `names`, or zero for a name not looked up.
+    slots: Vec<u16>,
+    /// The name the table gives each, and its bits for [`Checker::spelled_in`] or zero when
+    /// they have not been asked for.
+    names: Vec<(&'static str, u128)>,
+}
+
+impl AttrNames {
+    /// What is known about the name numbered `at`.
+    #[inline]
+    fn get(&self, at: usize) -> Option<(&'static str, u128)> {
+        let slot = *self.slots.get(at)?;
+        let slot = usize::from(slot).checked_sub(1)?;
+        Some(self.names[slot])
+    }
+
+    /// Records the table's name for the name numbered `at`. Past sixty-five thousand names
+    /// nothing more is kept, and each is looked up every time it is asked about.
+    fn insert(&mut self, at: usize, name: &'static str) {
+        let Ok(slot) = u16::try_from(self.names.len() + 1) else { return };
+        if self.slots.len() <= at {
+            self.slots.resize(at + 1, 0);
+        }
+        self.slots[at] = slot;
+        self.names.push((name, 0));
+    }
+
+    /// Records the bits for the name numbered `at`, which has already been inserted.
+    fn set_spelled(&mut self, at: usize, bits: u128) {
+        if let Some(slot) = self.slots.get(at).and_then(|&slot| usize::from(slot).checked_sub(1)) {
+            self.names[slot].1 = bits;
+        }
+    }
+}
+
 impl Checker<'_> {
     /// The names attribute lists may carry, for leaving out the checks for the rest.
     ///
@@ -296,11 +338,26 @@ impl Checker<'_> {
                 if attr.namespace.is_some() {
                     return Spelled(u128::MAX);
                 }
-                bits |= spelled_bit(self.gnu_name(attr));
-                bits |= spelled_bit(rucc_gnu::unarmour(self.text(attr.name)));
+                bits |= self.spelled_by(attr);
             }
         }
         Spelled(bits)
+    }
+
+    /// The bits for one attribute written without a namespace, which are never zero since each
+    /// name sets one.
+    ///
+    /// Each answer is two hashes of the name, and a glibc prototype is asked about once by the
+    /// declarator and once for its calling convention, so the answer is kept with the name.
+    fn spelled_by(&self, attr: &Attribute) -> u128 {
+        let at = attr.name.raw() as usize;
+        if let Some((_, bits)) = self.gnu_names.borrow().get(at).filter(|&(_, bits)| bits != 0) {
+            return bits;
+        }
+        let bits = spelled_bit(self.gnu_name(attr))
+            | spelled_bit(rucc_gnu::unarmour(self.text(attr.name)));
+        self.gnu_names.borrow_mut().set_spelled(at, bits);
+        bits
     }
 
     /// The name an attribute has in `crates/rucc-gnu/features.toml`, or an empty string when the
@@ -318,7 +375,7 @@ impl Checker<'_> {
         // Asked of every attribute by every check that reads a list, so the answer for a name
         // already seen without a namespace is read here and everything else is out of line.
         if attr.namespace.is_none() {
-            if let Some(&Some(name)) = self.gnu_names.borrow().get(attr.name.raw() as usize) {
+            if let Some((name, _)) = self.gnu_names.borrow().get(attr.name.raw() as usize) {
                 return name;
             }
         }
@@ -331,7 +388,7 @@ impl Checker<'_> {
             return "";
         }
         let at = attr.name.raw() as usize;
-        if let Some(&Some(name)) = self.gnu_names.borrow().get(at) {
+        if let Some((name, _)) = self.gnu_names.borrow().get(at) {
             return name;
         }
         let name = match rucc_gnu::lookup(Kind::Attribute, self.text(attr.name)) {
@@ -343,11 +400,7 @@ impl Checker<'_> {
             }
             _ => "",
         };
-        let mut names = self.gnu_names.borrow_mut();
-        if names.len() <= at {
-            names.resize(at + 1, None);
-        }
-        names[at] = Some(name);
+        self.gnu_names.borrow_mut().insert(at, name);
         name
     }
 
@@ -364,15 +417,20 @@ impl Checker<'_> {
     pub(in crate::check) fn refuse_unimplemented_attributes(&mut self) {
         let ast = self.ast;
         let mut refused: Vec<Span> = Vec::new();
+        // The names that have nothing to say. Whether a name does depends on the name alone, and
+        // a header writes the same few names thousands of times, so the table is searched once
+        // for each of them rather than once for every attribute.
+        let mut fine: rucc_base::hash::Set<Symbol> = rucc_base::hash::Set::default();
         for attr in ast.attributes() {
             let gnu = match attr.namespace {
                 Some(ns) => self.text(ns) == "gnu",
                 None => attr.syntax == AttrSyntax::Gnu,
             };
-            if !gnu || refused.contains(&attr.span) {
+            if !gnu || fine.contains(&attr.name) || refused.contains(&attr.span) {
                 continue;
             }
             let Some(row) = rucc_gnu::lookup(Kind::Attribute, self.text(attr.name)) else {
+                fine.insert(attr.name);
                 continue;
             };
             // An attribute that came in a later gcc than the persona claims is one that gcc has
@@ -405,6 +463,7 @@ impl Checker<'_> {
             if row.answer != Answer::Error
                 || (matches!(row.status, Status::Implemented | Status::Partial) && !elsewhere)
             {
+                fine.insert(attr.name);
                 continue;
             }
             refused.push(attr.span);

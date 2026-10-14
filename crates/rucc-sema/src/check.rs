@@ -392,7 +392,7 @@ pub struct Checker<'a> {
     /// table each time was most of the four percent the table took of compiling c4.c at `-O0`.
     /// tamnd/rucc#3052. It is by the number of the name rather than a map, since hashing the name
     /// each time was still most of what asking cost on a duktape source file's headers.
-    pub(in crate::check) gnu_names: std::cell::RefCell<Vec<Option<&'static str>>>,
+    pub(in crate::check) gnu_names: std::cell::RefCell<attr::AttrNames>,
 }
 
 impl<'a> Checker<'a> {

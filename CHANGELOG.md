@@ -12,6 +12,7 @@ All notable changes are recorded here. The format follows [Keep a Changelog](htt
 ### Changed
 
 - Read identifiers through a byte table in the lexer and compare short spellings in the interner as words, which takes 3.9% of the instructions off duk_replacements.c (233.9M to 224.7M) with every object the same as before (#3668).
+- Skip the attribute checks for declarations and parameters that have no attributes, and keep what sema learns about each attribute name, which takes 6.2% of the instructions off duk_replacements.c (224.7M to 210.8M) with every object the same as before (#3669).
 
 ### Fixed
 
