@@ -236,7 +236,7 @@ impl Named {
         self.pedantic_errors = true;
     }
 
-    /// Applies what the command line said to one of the rules in [`PERMERRORS`] raised as an
+    /// Applies what the command line said to one of the rules in `PERMERRORS` raised as an
     /// error, and says whether there is anything left of it to report. Any other diagnostic is
     /// left as it is and kept.
     pub fn permit(&self, diag: &mut Diagnostic) -> bool {
