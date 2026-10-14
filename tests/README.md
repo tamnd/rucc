@@ -29,6 +29,8 @@ tests/
                in Node                                                                 WA5
   litmus/      memory model litmus tests for PostgreSQL's barriers and atomics, run on
                AArch64 hardware                                                        PG4
+  tools/       the GDB and perf checks, which build Lua with GCC and with rucc and
+               compare what the two tools read                                         L5
   corpus/      checkouts and build recipes for the target ladder projects              M5
   fuzz/        cargo-fuzz targets against the driver, the parser and the IR            M3
 ```
@@ -139,3 +141,13 @@ Programs that run the barriers and atomics PostgreSQL is built on a few million 
 Each shape also runs once with no barrier at all, where the forbidden outcome is allowed, and how often it happened is printed. A machine or a harness that never shows it there cannot show a missing barrier either. `LITMUS_ITERATIONS` and `LITMUS_SECONDS` bound each test, two million iterations or one second by default.
 
 An emulator is no use for these, since the emulated machine is only as weak as its host, so CI runs them on an `ubuntu-24.04-arm` runner and on the macOS arm64 one.
+
+## tools
+
+`tests/tools/gdb.sh <rucc> <lua>` and `tests/tools/perf.sh <rucc> <lua>` are the GDB and `perf` checks of milestone #3280. Each one builds Lua 5.4 with GCC and with rucc from the release directory it is given.
+
+`gdb.sh` stops once in each of six functions, first after the prologue and then on the first instruction, and counts the arguments that GDB can show. The rucc rate at `-O2` must be within 10 points of the GCC rate, the rucc rate at `-O0` must be 100%, and each rucc backtrace must reach `main` with a name on each frame.
+
+`perf.sh` records `perf.lua` with `--call-graph=fp` and `--call-graph=dwarf`. The rucc stacks must reach `main` as often as the GCC stacks, within 2 points, and have no more `[unknown]` frames, within 1 point. With `dwarf`, the mean number of frames must be within 1 of the GCC mean, because `perf` shows each inlined call as a frame.
+
+CI runs both on the x86-64 runner and on the arm runner.

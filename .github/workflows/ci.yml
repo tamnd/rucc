@@ -1012,6 +1012,63 @@ jobs:
       - name: run the check
         run: cargo xtask ${{ matrix.check }}
 
+  # The GDB and perf checks of milestone L5, #3280, on both hardware runners. GDB must show the
+  # arguments of a rucc build of Lua at -O2 about as well as it shows those of the GCC build, and
+  # perf must walk the rucc stacks as well as the GCC stacks. The programs in tests/exec whose
+  # other half is GCC's run here too: an unwinder goes up through rucc frames, constructors of the
+  # two compilers run in one order, and a GCC library built with -latomic shares a 16-byte object
+  # with a rucc program. On AArch64 these build with -mbranch-protection=standard, as the
+  # distributions do.
+  linux-tools:
+    name: linux gdb and perf on ${{ matrix.triple }}
+    needs: quick
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: ubuntu-24.04
+            triple: x86_64-linux-gnu
+            flags: ""
+          - os: ubuntu-24.04-arm
+            triple: aarch64-linux-gnu
+            flags: -mbranch-protection=standard
+    steps:
+      - uses: actions/checkout@v7.0.1
+      - uses: Swatinem/rust-cache@v2.9.2
+      - name: install gdb, perf and lld
+        run: |
+          sudo apt-get update || echo "at least one apt source is unhappy, carrying on"
+          sudo apt-get install -y gdb lld-19 linux-tools-common "linux-tools-$(uname -r)"
+          sudo sysctl -w kernel.perf_event_paranoid=1
+          gdb --version | head -1
+          perf --version
+      - name: build rucc and the runtime
+        run: |
+          cargo build --release --bin rucc
+          cargo xtask builtins --target ${{ matrix.triple }}
+      - name: fetch the lua sources
+        run: |
+          curl -fsSL -o lua.tar.gz https://www.lua.org/ftp/lua-5.4.8.tar.gz
+          echo "4f18ddae154e793e46eeab727c59ef1c0c0c2b744e7b94219710d76f530629ae  lua.tar.gz" | sha256sum -c -
+          tar xzf lua.tar.gz
+      - name: the gdb check
+        run: tests/tools/gdb.sh "$PWD/target/release/rucc" lua-5.4.8
+      - name: the perf check
+        run: tests/tools/perf.sh "$PWD/target/release/rucc" lua-5.4.8
+      - name: run tests/exec/unwind
+        run: tests/exec/unwind/run.sh "$PWD/target/release/rucc"
+        env:
+          FLAGS: ${{ matrix.flags }}
+      - name: run tests/exec/ctors
+        run: tests/exec/ctors/run.sh "$PWD/target/release/rucc"
+        env:
+          FLAGS: ${{ matrix.flags }}
+      - name: run tests/exec/atomic
+        run: tests/exec/atomic/run.sh "$PWD/target/release/rucc"
+        env:
+          FLAGS: ${{ matrix.flags }}
+
   audit:
     name: supply chain
     needs: quick
