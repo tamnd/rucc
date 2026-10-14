@@ -125,7 +125,7 @@ pub fn lift(
         return 0;
     }
 
-    let live = live(func, machine, names);
+    let mut live = live(func, machine, names);
     let mut emptied = 0;
     for (edge, above, other) in found {
         let copies: Option<Vec<(mir::Inst, Copy)>> = func
@@ -176,6 +176,11 @@ pub fn lift(
             func.remove_inst(inst);
             func.insert_before(at, inst);
         }
+        // The edge block is only its jump now, so it reads what the block it goes to reads. The
+        // other way out of the same branch is checked against that, or the copies on both edges
+        // would go in front of the branch and the second would overwrite the first.
+        let next = func[edge].succs[0].block;
+        live[edge.index()] = live[next.index()].clone();
         emptied += 1;
     }
     emptied
@@ -567,6 +572,45 @@ mod tests {
 
         assert_eq!(lifted(&mut func, &Moves::default(), &mut names), 0);
         assert_eq!(func.insts(made[1]).count(), 1);
+    }
+
+    /// A branch with an even split whose two edges both write `rsi`, which the block they join
+    /// reads. The copy on one edge goes in front of the branch. Then `rsi` is live on that edge,
+    /// so the copy on the other edge stays where it is. The kernel's `__jump_label_patch` picks
+    /// the bytes it expects this way, and with both copies in front of the branch it expected a
+    /// jump where the code had a nop.
+    #[test]
+    fn copies_on_both_edges_of_one_branch_do_not_both_go() {
+        let mut names = Interner::new();
+        let mut func = mir::Func::new(names.intern("f"));
+        let [above, left, right, join] =
+            [func.create_block(), func.create_block(), func.create_block(), func.create_block()];
+        func.build(above, op(&mut names, "cmp_set_l_32"))
+            .def(Reg::physical(RDX), GPR)
+            .operand(Operand::read(Reg::physical(RAX), GPR))
+            .operand(Operand::read(Reg::physical(RCX), GPR))
+            .finish();
+        func.build(above, op(&mut names, "br_cond_8"))
+            .operand(Operand::read(Reg::physical(RDX), GPR))
+            .finish();
+        *func.succs_mut(above) = vec![
+            BlockCall::to(left).taken(Weight::parts(1)),
+            BlockCall::to(right).taken(Weight::parts(1)),
+        ];
+        for (block, from) in [(left, RAX), (right, RCX)] {
+            func.build(block, op(&mut names, "mov_rr_64"))
+                .def(Reg::physical(RSI), GPR)
+                .uses(Reg::physical(from), GPR)
+                .finish();
+            *func.succs_mut(block) = vec![BlockCall::to(join)];
+        }
+        func.build(join, op(&mut names, "ret"))
+            .operand(Operand::read(Reg::physical(RSI), GPR))
+            .finish();
+
+        assert_eq!(lifted(&mut func, &Moves::default(), &mut names), 1);
+        assert_eq!(func.insts(left).count() + func.insts(right).count(), 1);
+        assert_eq!(opcodes(&func, above, &names).len(), 3);
     }
 
     #[test]
