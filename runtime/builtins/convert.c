@@ -9,8 +9,9 @@
  *
  * The widths here are float and double. The four at binary128 are the same conversions and are in
  * quad.c instead, because they are written out of that file's arithmetic rather than out of the
- * machine's. The eighty bit float is left out because this machine has no register that holds one
- * and the backend says so, which is tamnd/rucc#326, so __floattixf and __fixxfti arrive with that.
+ * machine's. The four at the eighty bit float, __floattixf, __floatuntixf, __fixxfti and
+ * __fixunsxfti, are not here. libgcc and compiler-rt define them, and the program links one of the
+ * two after this library.
  *
  * # What is not handled
  *
