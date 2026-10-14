@@ -166,8 +166,7 @@ impl Checker<'_> {
     /// whole unit has been read, since a declaration below the definition can still ask.
     pub(in crate::check) fn build_simd_clones(&mut self) {
         let tuple = &self.cx.target.tuple;
-        if tuple.arch().as_str() != "x86_64" || matches!(tuple.os().as_str(), "windows" | "macos")
-        {
+        if tuple.arch().as_str() != "x86_64" || matches!(tuple.os().as_str(), "windows" | "macos") {
             return;
         }
         let mut asked: Vec<(DeclId, StmtId, Branches)> = self
@@ -204,10 +203,8 @@ impl Checker<'_> {
             match self.simd_lane(signature.ret) {
                 Ok(lane) => Some(lane),
                 Err(_) => {
-                    let what = format!(
-                        "unsupported return type '{}' for simd",
-                        self.spell(signature.ret)
-                    );
+                    let what =
+                        format!("unsupported return type '{}' for simd", self.spell(signature.ret));
                     self.report(Diagnostic::warning(what, at).with_code(UNSUPPORTED));
                     return;
                 }

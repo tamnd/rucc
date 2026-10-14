@@ -139,7 +139,10 @@ fn only_an_emitted_external_definition_gets_versions() {
 fn what_gcc_refuses_is_refused_in_its_words() {
     for (written, error) in [
         ("1", "attribute 'simd' argument not a string"),
-        ("\"both\"", "only 'inbranch' and 'notinbranch' flags are allowed for '__simd__' attribute"),
+        (
+            "\"both\"",
+            "only 'inbranch' and 'notinbranch' flags are allowed for '__simd__' attribute",
+        ),
         (
             "\"notinbranch\", \"inbranch\"",
             "wrong number of arguments specified for 'simd' attribute",
