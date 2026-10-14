@@ -527,7 +527,15 @@ fn one_result(func: &Func, inst: Inst) -> Option<Value> {
 
 /// Whether this instruction's result is a function of its operands and nothing else, and it costs
 /// something to work out, which is what makes where it is worked out a question.
+///
+/// A division with an `unwound` after it does not move. Under `-fnon-call-exceptions` the code
+/// generator gives it the pad of that `unwound`, and it only does so for the instruction straight
+/// in front of it. Moved away, the division faults with no row, and the unwind then passes the
+/// frame by without running the pad.
 pub(crate) fn movable(func: &Func, inst: Inst) -> bool {
+    if func.unwinds_to_pad(inst) {
+        return false;
+    }
     matches!(
         func[inst].opcode,
         Opcode::Add
@@ -939,6 +947,33 @@ block2:
     fn a_division_that_may_trap_stays_in_the_loop() {
         let out = moved(&LOOP.replace("BODY", "sdiv %0, %1"));
         assert_eq!(block_of(&out, "sdiv"), "block1", "{out}");
+    }
+
+    #[test]
+    fn a_division_with_an_unwind_edge_stays_in_front_of_it() {
+        // Read only on the normal arm, so with no edge it would sink into block2.
+        let out = moved(
+            r#"
+func @_Unwind_Resume(ptr), linkage(external);
+
+func @f(i32, i32) -> i32, linkage(external) {
+block0(%0: i32, %1: i32):
+    %2 = sdiv %0, %1
+    %3 = unwound.i1
+    br_if %3, block1, block2
+
+block1:
+    %4 = landing.ptr
+    call @_Unwind_Resume(%4) : (ptr)
+    unreachable
+
+block2:
+    return %2
+}
+"#,
+        );
+        assert_eq!(block_of(&out, "sdiv"), "block0", "{out}");
+        assert!(out.contains("sdiv %0, %1\n    %3 = unwound.i1"), "{out}");
     }
 
     #[test]
