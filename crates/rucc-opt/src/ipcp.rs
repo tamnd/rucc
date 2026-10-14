@@ -121,6 +121,10 @@ const NO_FUEL: &str = "parameter left alone, the pass ran out of fuel";
 /// everywhere else.
 pub const NAME: &str = "ipa-cp";
 
+/// Which phase of section 42.7 the time this takes is counted under. See
+/// [`crate::Pass::phase`].
+pub const PHASE: crate::Phase = crate::Phase::Scalar;
+
 /// How many times the whole thing repeats, which is `ipa-cp-sweeps` at `gcc/params.opt:280`.
 ///
 /// A sweep past the first exists to read the arithmetic the sweep before it enabled, so the number

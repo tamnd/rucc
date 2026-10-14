@@ -48,7 +48,7 @@ use crate::analysis::Analysis;
 use crate::cfg::Cfg;
 use crate::loops::{LoopId, Loops};
 use crate::scev::{Chrec, Plain, Reading, Scev};
-use crate::{Analyses, Fuel, Pass, Preserved, Stats};
+use crate::{Analyses, Fuel, Pass, Phase, Preserved, Stats};
 
 const NO_TARGET: &str =
     "left alone, nobody has priced this machine and the answer is a fact about the machine";
@@ -71,6 +71,10 @@ impl Pass for Widen {
 
     fn describe(&self) -> &'static str {
         "gives a counter narrower than a pointer a sixty four bit twin to index memory with"
+    }
+
+    fn phase(&self) -> Phase {
+        Phase::Scalar
     }
 
     fn preserves(&self) -> Preserved {

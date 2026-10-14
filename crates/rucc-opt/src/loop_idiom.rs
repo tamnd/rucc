@@ -64,7 +64,7 @@ use crate::loops::{LoopId, Loops};
 use crate::range::query::Ranges;
 use crate::scev::{Anchor, Evolution, Plain, Reading, Scev};
 use crate::trip::{Around, counted, covered, inst_of};
-use crate::{Analyses, Fuel, Pass, Preserved, Stats};
+use crate::{Analyses, Fuel, Pass, Phase, Preserved, Stats};
 use rucc_base::hash::Map;
 
 /// What this pass is called, for the lists in [`crate::pipeline`] that name it.
@@ -128,6 +128,10 @@ impl Pass for LoopIdiom {
 
     fn describe(&self) -> &'static str {
         "a loop that fills or copies a range an element at a time becomes memset, memcpy or memmove"
+    }
+
+    fn phase(&self) -> Phase {
+        Phase::Scalar
     }
 
     fn preserves(&self) -> Preserved {

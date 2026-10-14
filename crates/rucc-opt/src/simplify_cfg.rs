@@ -167,7 +167,7 @@ use rucc_ir::{
 
 use crate::copy::addressed;
 use crate::fold::constant;
-use crate::{Analyses, Fuel, Pass, Preserved, Stats, uses};
+use crate::{Analyses, Fuel, Pass, Phase, Preserved, Stats, uses};
 
 /// Recorded once for each branch that turned into a jump.
 const FOLDED: &str = "branch on a condition that is always the same way replaced by a jump";
@@ -235,6 +235,10 @@ impl Pass for SimplifyCfg {
     fn describe(&self) -> &'static str {
         "unreachable blocks go, a branch that only goes one way becomes a jump, a block that only \
          jumps stops being in the way, and a block with one way in is merged into the one above it"
+    }
+
+    fn phase(&self) -> Phase {
+        Phase::Scalar
     }
 
     fn preserves(&self) -> Preserved {

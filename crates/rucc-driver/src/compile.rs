@@ -17,7 +17,7 @@ use rucc_base::{Interner, Symbol};
 use rucc_codegen::coverage::Fired;
 use rucc_codegen::elsewhere::{Elsewhere, Slot};
 use rucc_codegen::lowering::Lowerings;
-use rucc_codegen::pipeline::{self, Machine, Recording};
+use rucc_codegen::pipeline::{self, Machine, Recording, Spent};
 use rucc_codegen::pressure::Pressure;
 use rucc_codegen::usage::StackUsage;
 use rucc_cost::Goal;
@@ -225,6 +225,8 @@ pub fn compile(opts: &Options, name: &str, fs: &dyn FileSystem) -> Compiled {
     // since a row per function is nothing next to compiling the function, and written only if it
     // was.
     let mut stack = StackUsage::new();
+    // How long selection and allocation took, which the trace divides the back end's time by.
+    let mut spent = Spent::default();
     // Filled in by the optimizer, and only when `-fdump-ir=` asked for something.
     let mut dumps = Vec::new();
     let mut remarks = String::new();
@@ -663,6 +665,7 @@ pub fn compile(opts: &Options, name: &str, fs: &dyn FileSystem) -> Compiled {
                                         pressure: &mut pressure,
                                         lowerings: &mut lowerings,
                                         stack: &mut stack,
+                                        spent: &mut spent,
                                     },
                                     &mut temps.assembly,
                                     Origin {
@@ -770,6 +773,7 @@ pub fn compile(opts: &Options, name: &str, fs: &dyn FileSystem) -> Compiled {
     // Kept even when the compilation failed, because a rule that fired did fire and a report about
     // which rules a corpus reaches should not lose the ones a file with a mistake in it reached.
     clock.passes(passes);
+    clock.backend(spent);
     let timing = clock.finish();
     Compiled {
         artifact,
@@ -901,6 +905,7 @@ pub(crate) fn joined(opts: &Options, units: &[rucc_lto::Unit<'_>]) -> Result<Vec
             pressure: &mut Pressure::new(),
             lowerings: &mut Lowerings::new(),
             stack: &mut StackUsage::new(),
+            spent: &mut Spent::default(),
         },
         &mut None,
         Origin { map: &sess.sources, name, meaning: &meaning, copies: &rucc_ir::Copies::default() },
@@ -1164,7 +1169,12 @@ fn optimize(
                 .collect());
         }
     }
-    Ok(crate::trace::Passes { time: report.time, fired })
+    Ok(crate::trace::Passes {
+        time: report.time,
+        fired,
+        phase_of: report.phase_of,
+        budget: report.budget,
+    })
 }
 
 /// Runs the back end over every function in `module` and writes what came out.
@@ -1685,6 +1695,10 @@ fn generate(
     if !complaints.is_empty() {
         return Err(complaints);
     }
+    // Everything from here to the end is writing out, which the trace counts apart inside the
+    // machine phase. A guard rather than a lap, because there is more than one way out of what
+    // follows. See `rucc_codegen::pipeline::Spent`.
+    let _writing = recording.spent.emitting();
     // The variables the file defines, which go through the back end the way the functions did not:
     // there is nothing in a variable to select instructions for, so the module is what says what
     // one is right up to the point where it is written down.

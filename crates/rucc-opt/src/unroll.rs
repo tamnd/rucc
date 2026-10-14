@@ -99,7 +99,7 @@ use crate::copy;
 use crate::dom::Dominators;
 use crate::loops::{LoopId, Loops};
 use crate::scev::{Bound, Count, Evolution, Scev};
-use crate::{Analyses, Fuel, Pass, Preserved, Stats};
+use crate::{Analyses, Fuel, Pass, Phase, Preserved, Stats};
 
 const UNROLLED: &str = "loop copied out into a straight line, it runs a known number of times";
 const NO_COUNT: &str = "loop left as it was, how many times it runs is not a number known here";
@@ -127,6 +127,10 @@ impl Pass for Unroll {
 
     fn describe(&self) -> &'static str {
         "copies a loop that runs a known small number of times out into a straight line"
+    }
+
+    fn phase(&self) -> Phase {
+        Phase::Scalar
     }
 
     fn preserves(&self) -> Preserved {

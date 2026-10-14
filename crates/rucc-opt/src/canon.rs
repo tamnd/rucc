@@ -82,7 +82,7 @@ use crate::cfg::Cfg;
 use crate::dom::Dominators;
 use crate::frontier::Frontiers;
 use crate::loops::{LoopId, Loops};
-use crate::{Analyses, Analysis, Fuel, Pass, Preserved, Stats};
+use crate::{Analyses, Analysis, Fuel, Pass, Phase, Preserved, Stats};
 
 const PREHEADER: &str = "preheader made for a loop whose header several blocks outside it reach";
 const LATCH: &str = "back edges to one header routed through one latch";
@@ -101,6 +101,10 @@ impl Pass for Canon {
 
     fn describe(&self) -> &'static str {
         "gives every loop a preheader, one latch, exits of its own and loop closed form"
+    }
+
+    fn phase(&self) -> Phase {
+        Phase::Scalar
     }
 
     fn preserves(&self) -> Preserved {

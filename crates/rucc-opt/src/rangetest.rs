@@ -61,7 +61,7 @@ use rucc_ir::{
 };
 
 use crate::uses::{count, operands, substitute};
-use crate::{Analyses, Fuel, Pass, Preserved, Stats};
+use crate::{Analyses, Fuel, Pass, Phase, Preserved, Stats};
 
 /// What this pass is called, for the lists in [`crate::pipeline`] that name it.
 pub const NAME: &str = "rangetest";
@@ -92,6 +92,10 @@ impl Pass for RangeTest {
 
     fn describe(&self) -> &'static str {
         "comparisons of one value against constants become the fewest tests of the set that passes"
+    }
+
+    fn phase(&self) -> Phase {
+        Phase::Scalar
     }
 
     fn preserves(&self) -> Preserved {

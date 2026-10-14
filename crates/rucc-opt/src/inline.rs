@@ -135,6 +135,10 @@ pub use heap::Second;
 /// by.
 pub const NAME: &str = "inline";
 
+/// Which phase of section 42.7 the time this takes is counted under. See
+/// [`crate::Pass::phase`].
+pub const PHASE: crate::Phase = crate::Phase::Scalar;
+
 /// What `-finline-functions-called-once` and its `-fno-` form toggle, which is the called once half
 /// of this step alone. Not the name of a pass.
 pub const ONCE: &str = "inline-functions-called-once";

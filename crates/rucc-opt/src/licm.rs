@@ -127,7 +127,7 @@ use crate::modref::{Summaries, Summary};
 use crate::outside::Outside;
 use crate::pressure::{Class, Pressure, class_of};
 use crate::range::query::Ranges;
-use crate::{Analyses, Analysis, Fuel, Pass, Preserved, Stats, discharge, speculate};
+use crate::{Analyses, Analysis, Fuel, Pass, Phase, Preserved, Stats, discharge, speculate};
 
 const HOISTED: &str = "computation moved in front of the loop, nothing in the loop changes it";
 const SPECULATIVE: &str =
@@ -170,6 +170,10 @@ impl Pass for Licm {
 
     fn describe(&self) -> &'static str {
         "moves a computation whose operands do not change in a loop in front of the loop"
+    }
+
+    fn phase(&self) -> Phase {
+        Phase::Scalar
     }
 
     fn preserves(&self) -> Preserved {

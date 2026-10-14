@@ -326,7 +326,7 @@ use rucc_ir::{Block, Def, Extra, Flags, Func, Inst, Meta, Opcode, Type, Value};
 use crate::purity::{Callee, Facts};
 use crate::range::query::Ranges;
 use crate::rules::{Piece, Subject, Table, safety};
-use crate::{Analyses, Analysis, Cfg, Fuel, Pass, Preserved, Stats, copy, heap};
+use crate::{Analyses, Analysis, Cfg, Fuel, Pass, Phase, Preserved, Stats, copy, heap};
 
 /// Recorded once for each bounds check taken out.
 const REMOVED: &str = "bounds check removed, a dominating check covers the same bytes";
@@ -702,6 +702,10 @@ impl Pass for Discharge {
 
     fn describe(&self) -> &'static str {
         "a bounds, lifetime or derivation check whose answer is already known is removed"
+    }
+
+    fn phase(&self) -> Phase {
+        Phase::Scalar
     }
 
     fn preserves(&self) -> Preserved {

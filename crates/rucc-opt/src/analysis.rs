@@ -32,8 +32,9 @@
 //! turn the loop inside out in M4 and run every pass over one function before moving to the next,
 //! and the day that lands the map goes away and one of these lives on the stack of the loop.
 
-use std::cell::OnceCell;
+use std::cell::{Cell, OnceCell};
 use std::sync::Arc;
+use std::time::{Duration, Instant};
 
 use rucc_ir::{Block, Func};
 
@@ -211,6 +212,11 @@ pub struct Analyses {
     frequencies: OnceCell<Frequencies>,
     live: OnceCell<Liveness>,
     pressure: OnceCell<Pressure>,
+    // How long building what is in here has taken since the cache was made, and whether a build is
+    // under way, so that the graph a dominator tree asks for is not counted twice. See
+    // [`Analyses::spent`].
+    spent: Cell<Duration>,
+    building: Cell<bool>,
 }
 
 impl Analyses {
@@ -238,6 +244,8 @@ impl Analyses {
             frequencies: OnceCell::new(),
             live: OnceCell::new(),
             pressure: OnceCell::new(),
+            spent: Cell::new(Duration::ZERO),
+            building: Cell::new(false),
         }
     }
 
@@ -346,9 +354,33 @@ impl Analyses {
         &self.modref
     }
 
+    /// How long building the answers in this cache has taken, all of them since it was made.
+    ///
+    /// The pipeline reads it before and after each pass and counts the difference under
+    /// [`crate::Phase::Analyses`] rather than under the pass, which is how section 42.7 can give
+    /// the analyses a share of their own when every one of them is built on a pass's behalf.
+    #[must_use]
+    pub fn spent(&self) -> Duration {
+        self.spent.get()
+    }
+
+    /// Builds one answer and counts the time under [`Analyses::spent`], unless it is part of
+    /// building another one, which is already being counted.
+    pub(crate) fn timed<T>(&self, build: impl FnOnce() -> T) -> T {
+        if self.building.get() {
+            return build();
+        }
+        self.building.set(true);
+        let started = Instant::now();
+        let built = build();
+        self.spent.set(self.spent.get() + started.elapsed());
+        self.building.set(false);
+        built
+    }
+
     /// The control flow graph, computed if it is not already here.
     pub fn cfg(&self, func: &Func) -> &Cfg {
-        self.cfg.get_or_init(|| Cfg::new(func))
+        self.cfg.get_or_init(|| self.timed(|| Cfg::new(func)))
     }
 
     /// The dominator tree, computed if it is not already here.
@@ -358,7 +390,7 @@ impl Analyses {
     /// because the two are different cells, and a cell being filled in only refuses a second ask
     /// for itself.
     pub fn dominators(&self, func: &Func) -> &Dominators {
-        self.doms.get_or_init(|| Dominators::new(self.cfg(func)))
+        self.doms.get_or_init(|| self.timed(|| Dominators::new(self.cfg(func))))
     }
 
     /// The post-dominator tree, computed if it is not already here.
@@ -368,12 +400,12 @@ impl Analyses {
     /// Panics through [`PostDominators::new`], on a function with a block that control reaches
     /// and that has no path to any exit even after the fake edges have been added.
     pub fn post_dominators(&self, func: &Func) -> &PostDominators {
-        self.post.get_or_init(|| PostDominators::new(self.cfg(func)))
+        self.post.get_or_init(|| self.timed(|| PostDominators::new(self.cfg(func))))
     }
 
     /// The loop forest, computed if it is not already here.
     pub fn loops(&self, func: &Func) -> &Loops {
-        self.loops.get_or_init(|| Loops::new(self.cfg(func), self.dominators(func)))
+        self.loops.get_or_init(|| self.timed(|| Loops::new(self.cfg(func), self.dominators(func))))
     }
 
     /// The loop forest taken out of the cache, so that a pass can change it along with the
@@ -391,7 +423,8 @@ impl Analyses {
 
     /// The dominance frontier of every block, computed if it is not already here.
     pub fn frontiers(&self, func: &Func) -> &Frontiers {
-        self.frontiers.get_or_init(|| Frontiers::new(self.cfg(func), self.dominators(func)))
+        self.frontiers
+            .get_or_init(|| self.timed(|| Frontiers::new(self.cfg(func), self.dominators(func))))
     }
 
     /// Which branches decide whether each block runs, computed if it is not already here.
@@ -400,8 +433,9 @@ impl Analyses {
     ///
     /// Panics through [`PostDominators::new`], for the reason above it.
     pub fn control_dependence(&self, func: &Func) -> &ControlDependence {
-        self.control
-            .get_or_init(|| ControlDependence::new(self.cfg(func), self.post_dominators(func)))
+        self.control.get_or_init(|| {
+            self.timed(|| ControlDependence::new(self.cfg(func), self.post_dominators(func)))
+        })
     }
 
     /// How often each block runs and which way each branch goes, computed if it is not here.
@@ -414,7 +448,9 @@ impl Analyses {
     /// pass that wants the rest of the answer builds its own with [`Callees::of_module`].
     pub fn frequencies(&self, func: &Func) -> &Frequencies {
         self.frequencies.get_or_init(|| {
-            Frequencies::of(func, self.cfg(func), self.loops(func), &Callees::nothing())
+            self.timed(|| {
+                Frequencies::of(func, self.cfg(func), self.loops(func), &Callees::nothing())
+            })
         })
     }
 
@@ -428,21 +464,23 @@ impl Analyses {
         if let Some(frequencies) = self.frequencies.get() {
             return frequencies.taken(block, index);
         }
-        let early = || self.early.get_or_init(|| Early::of(func, self.cfg(func)));
-        Predictions::one(
-            func,
-            self.cfg(func),
-            self.loops(func),
-            &early,
-            &Callees::nothing(),
-            block,
-            index,
-        )
+        let early = || self.early.get_or_init(|| self.timed(|| Early::of(func, self.cfg(func))));
+        self.timed(|| {
+            Predictions::one(
+                func,
+                self.cfg(func),
+                self.loops(func),
+                &early,
+                &Callees::nothing(),
+                block,
+                index,
+            )
+        })
     }
 
     /// What is live at the edges of every block, computed if it is not here.
     pub fn live(&self, func: &Func) -> &Liveness {
-        self.live.get_or_init(|| Liveness::of(func, self.cfg(func)))
+        self.live.get_or_init(|| self.timed(|| Liveness::of(func, self.cfg(func))))
     }
 
     /// How many registers of each class the function needs where, computed if it is not here.
@@ -452,7 +490,8 @@ impl Analyses {
     /// disagree, and two passes making opposite decisions off different counts of the same thing
     /// is the failure that is hardest to see afterwards.
     pub fn pressure(&self, func: &Func) -> &Pressure {
-        self.pressure.get_or_init(|| Pressure::of(func, self.cfg(func), self.live(func)))
+        self.pressure
+            .get_or_init(|| self.timed(|| Pressure::of(func, self.cfg(func), self.live(func))))
     }
 
     /// Whether this one is here without computing it.
@@ -567,11 +606,15 @@ impl Analyses {
     /// direction, and a pass cannot make one do more. Neither is what they do to the memory they
     /// are handed, which is the same argument once more.
     pub fn clear(&mut self) {
+        let spent = self.spent.get();
         *self = Self::new(self.machine)
             .reading(Arc::clone(&self.images))
             .about(Arc::clone(&self.outside))
             .calling(Arc::clone(&self.purity))
             .touching(Arc::clone(&self.modref));
+        // Not an answer about the function, and the pipeline reads it on either side of a pass that
+        // may have cleared the cache in between.
+        self.spent.set(spent);
     }
 
     /// Forgets everything as [`Analyses::clear`] does, except the graph, the loop forest and the

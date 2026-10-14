@@ -167,7 +167,7 @@ use rucc_ir::{Block, BlockCall, Builder, Def, Extra, Func, Inst, Opcode, Start, 
 use crate::header_copy::{clone_into, repeatable};
 use crate::loops::{LoopId, Spare};
 use crate::simplify_cfg::{Bindings, Edges, incoming, sweep, taken};
-use crate::{Analyses, Cfg, Dominators, Fuel, Loops, Pass, Preserved, Stats, uses};
+use crate::{Analyses, Cfg, Dominators, Fuel, Loops, Pass, Phase, Preserved, Stats, uses};
 
 /// Recorded once for each edge that was pointed past a branch it decides.
 const THREADED: &str =
@@ -244,6 +244,10 @@ impl Pass for Thread {
             "an edge that already decides the branch it arrives at is pointed at the arm that \
              branch would have taken, through a copy of the block if the block's values are read"
         }
+    }
+
+    fn phase(&self) -> Phase {
+        Phase::Scalar
     }
 
     fn preserves(&self) -> Preserved {

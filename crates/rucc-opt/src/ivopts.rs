@@ -136,7 +136,7 @@ use crate::loops::{LoopId, Loops};
 use crate::machine::Machine;
 use crate::range::query::Ranges;
 use crate::scev::{Anchor, Assumption, Chrec, Count, Evolution, Invariant, Plain, Reading, Scev};
-use crate::{Analyses, Fuel, Pass, Preserved, Stats};
+use crate::{Analyses, Fuel, Pass, Phase, Preserved, Stats};
 
 const NO_TARGET: &str =
     "left alone, nobody has priced this machine and the answer is a fact about the machine";
@@ -192,6 +192,10 @@ impl Pass for Ivopts {
 
     fn describe(&self) -> &'static str {
         "chooses the induction variables a loop should keep, and gives a group of addresses one"
+    }
+
+    fn phase(&self) -> Phase {
+        Phase::Scalar
     }
 
     fn preserves(&self) -> Preserved {

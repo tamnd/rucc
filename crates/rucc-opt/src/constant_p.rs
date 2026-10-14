@@ -54,7 +54,7 @@ use crate::range::ops::Truth;
 use crate::range::query::Ranges;
 use crate::simplify_cfg::SimplifyCfg;
 use crate::stats::Kind;
-use crate::{Analyses, Fuel, Pass, Preserved, Stats, uses};
+use crate::{Analyses, Fuel, Pass, Phase, Preserved, Stats, uses};
 
 /// What the pass calls itself, which is what `-fdump-ir=after-constant-p` spells.
 pub const NAME: &str = "constant-p";
@@ -86,6 +86,10 @@ impl Pass for ConstantP {
 
     fn describe(&self) -> &'static str {
         "__builtin_constant_p is one where the value has become a constant and zero elsewhere"
+    }
+
+    fn phase(&self) -> Phase {
+        Phase::Scalar
     }
 
     fn preserves(&self) -> Preserved {
@@ -126,6 +130,10 @@ impl Pass for ConstantYes {
 
     fn describe(&self) -> &'static str {
         "__builtin_constant_p is one where the value has become a constant, and left open elsewhere"
+    }
+
+    fn phase(&self) -> Phase {
+        Phase::Scalar
     }
 
     fn preserves(&self) -> Preserved {

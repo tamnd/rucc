@@ -88,7 +88,7 @@ use crate::loops::{LoopId, Loops};
 use crate::machine::Machine;
 use crate::phiopt::speculatable;
 use crate::pressure::{Class, Pressure, class_of};
-use crate::{Analyses, Analysis, Fuel, Pass, Preserved, Stats, licm, uses};
+use crate::{Analyses, Analysis, Fuel, Pass, Phase, Preserved, Stats, licm, uses};
 
 /// The name the pipelines and `-fno-gcm` use.
 pub const NAME: &str = "gcm";
@@ -126,6 +126,10 @@ impl Pass for Gcm {
 
     fn describe(&self) -> &'static str {
         "moves a computation to the latest place in front of its reads at the least loop depth"
+    }
+
+    fn phase(&self) -> Phase {
+        Phase::Scalar
     }
 
     fn preserves(&self) -> Preserved {

@@ -66,7 +66,7 @@ use rucc_ir::{
 
 use crate::range::ops::{self, Truth};
 use crate::range::{Bits, Range};
-use crate::{Analyses, Analysis, Fuel, Pass, Preserved, Stats, uses};
+use crate::{Analyses, Analysis, Fuel, Pass, Phase, Preserved, Stats, uses};
 
 /// What the pass calls itself, which is what `-fdump-ir=after-sccp` spells.
 pub const NAME: &str = "sccp";
@@ -124,6 +124,10 @@ impl Pass for Sccp {
 
     fn describe(&self) -> &'static str {
         "a value that is the same on every path the function can take becomes a constant"
+    }
+
+    fn phase(&self) -> Phase {
+        Phase::Scalar
     }
 
     fn preserves(&self) -> Preserved {

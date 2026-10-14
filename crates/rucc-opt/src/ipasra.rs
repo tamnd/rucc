@@ -101,6 +101,10 @@ const NO_FUEL: &str = "parameter left alone, the pass ran out of fuel";
 /// everywhere else.
 pub const NAME: &str = "ipa-sra";
 
+/// Which phase of section 42.7 the time this takes is counted under. See
+/// [`crate::Pass::phase`].
+pub const PHASE: crate::Phase = crate::Phase::Scalar;
+
 /// How many times the whole thing repeats.
 ///
 /// A round past the first reads the bodies the round before it left dead arithmetic in, so the

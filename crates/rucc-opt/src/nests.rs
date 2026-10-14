@@ -60,7 +60,7 @@ use rucc_ir::{Func, Inst, Opcode, Value};
 
 use crate::loops::{LoopId, Loops};
 use crate::scev::{Evolution, Invariant, Scev};
-use crate::{Analyses, Fuel, Pass, Preserved, Stats};
+use crate::{Analyses, Fuel, Pass, Phase, Preserved, Stats};
 
 const POPULATION: &str =
     "loop nest two or more deep, perfectly nested, every address in it a straight line";
@@ -81,6 +81,10 @@ impl Pass for Nests {
 
     fn describe(&self) -> &'static str {
         "counts the loop nests, and changes nothing"
+    }
+
+    fn phase(&self) -> Phase {
+        Phase::Analyses
     }
 
     fn preserves(&self) -> Preserved {

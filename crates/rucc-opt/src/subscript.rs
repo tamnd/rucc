@@ -25,7 +25,7 @@
 use rucc_ir::{Def, Extra, Flags, Func, Imm, Inst, InstData, Opcode, Type, Value};
 
 use crate::uses::count;
-use crate::{Analyses, Analysis, Fuel, Pass, Preserved, Stats};
+use crate::{Analyses, Analysis, Fuel, Pass, Phase, Preserved, Stats};
 
 /// What this pass is called, for the lists in [`crate::pipeline`] that name it.
 pub const NAME: &str = "subscript";
@@ -49,6 +49,10 @@ impl Pass for Subscript {
 
     fn describe(&self) -> &'static str {
         "moves the constant of a narrow subscript out of its widening and into the address"
+    }
+
+    fn phase(&self) -> Phase {
+        Phase::Scalar
     }
 
     fn preserves(&self) -> Preserved {

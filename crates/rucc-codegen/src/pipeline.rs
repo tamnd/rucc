@@ -23,6 +23,8 @@
 //! than from block frequency. No scheduling, and the redundant moves a coalescer would take out
 //! are still in the output.
 
+use std::time::{Duration, Instant};
+
 use rucc_base::hash::Map;
 use rucc_base::{Interner, Symbol};
 use rucc_cost::Goal;
@@ -716,6 +718,7 @@ pub fn compile(
             pressure: &mut pressure,
             lowerings: &mut lowerings,
             stack: &mut stack,
+            spent: &mut Spent::default(),
         },
     )
 }
@@ -735,6 +738,47 @@ pub struct Recording<'a> {
     pub lowerings: &'a mut Lowerings,
     /// How much stack each function takes, for `-fstack-usage`.
     pub stack: &'a mut StackUsage,
+    /// How long selection and allocation took, for `-frucc-trace`.
+    pub spent: &'a mut Spent,
+}
+
+/// How long the back end spent choosing instructions and allocating registers, for `-frucc-trace`.
+///
+/// Section 42.7 of `spec/optimizer/42-measurement.md` gives each of the two a share of `-O2` time
+/// of its own and puts the rest of what the back end does in a third. Selection is everything up
+/// to the machine function [`lower::func_for`] hands back, the lowerings before it included, and
+/// allocation is [`rucc_regalloc::run_first`]. Added to across functions, like the rest of a
+/// [`Recording`].
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct Spent {
+    /// Lowering the IR to what the machine has rules for, and selecting instructions.
+    pub selection: Duration,
+    /// Allocating registers.
+    pub allocation: Duration,
+    /// Writing the functions and the variables out, as assembly or as an object. It is part of the
+    /// machine phase and kept apart so that the phase can say how much of it is the writing.
+    pub emission: Duration,
+}
+
+impl Spent {
+    /// Adds the time from now until the guard it hands back is dropped to [`Spent::emission`],
+    /// for the end of a function with more than one way out of it.
+    pub fn emitting(&mut self) -> Emitting<'_> {
+        Emitting { from: Instant::now(), into: &mut self.emission }
+    }
+}
+
+/// What [`Spent::emitting`] hands back.
+#[derive(Debug)]
+pub struct Emitting<'a> {
+    from: Instant,
+    into: &'a mut Duration,
+}
+
+impl Drop for Emitting<'_> {
+    fn drop(&mut self) {
+        *self.into += self.from.elapsed();
+    }
 }
 
 /// The same compilation, with what it did along the way recorded.
@@ -762,6 +806,8 @@ pub fn compile_recording(
     flags: Flags,
     recording: &mut Recording<'_>,
 ) -> Result<mir::Func, Unsupported> {
+    // Everything up to the machine function is selection, for the trace. See [`Spent`].
+    let started = Instant::now();
     // A function the program wrote in the platform's other calling convention is compiled against
     // that convention from the first pass to the last: its parameters arrive where it says, the
     // registers it owes back are the ones it says, and its frame has the room it says. The calls
@@ -901,6 +947,7 @@ pub fn compile_recording(
     )?;
     recording.fired.merge(&lowered.fired);
     let lower::Lowered { mut func, mut stack, blocks, .. } = lowered;
+    recording.spent.selection += started.elapsed();
     // Straight after selection, because this is the last moment the machine blocks and the IR
     // blocks still stand one for one, and the pass that reads the numbers is the very last one
     // there is. See `crate::weights`.
@@ -1278,6 +1325,7 @@ pub fn compile_recording(
         let mov = *movs.get(usize::from(into.class.number()))?;
         Some(func.build_loose(mov).operand(into).operand(from).finish())
     };
+    let allocating = Instant::now();
     let (allocation, used) = rucc_regalloc::run_first(
         &mut func,
         &tried,
@@ -1287,6 +1335,7 @@ pub fn compile_recording(
         allocator,
         if i386 { Some(&copy) } else { None },
     );
+    recording.spent.allocation += allocating.elapsed();
     recording.pressure.record(&called, Cost::of(&allocation));
 
     // After allocation, because the largest area in most frames is the spill slots and nothing
@@ -1988,6 +2037,7 @@ mod tests {
                 pressure: &mut Pressure::new(),
                 stack: &mut StackUsage::new(),
                 lowerings: &mut lowerings,
+                spent: &mut Spent::default(),
             },
         )
         .expect("every instruction has a rule");
@@ -2028,6 +2078,7 @@ mod tests {
                 pressure: &mut Pressure::new(),
                 stack: &mut StackUsage::new(),
                 lowerings: &mut Lowerings::asked(true),
+                spent: &mut Spent::default(),
             },
         )
         .expect("every instruction has a rule");
@@ -2058,6 +2109,7 @@ mod tests {
                 pressure: &mut Pressure::new(),
                 stack: &mut StackUsage::new(),
                 lowerings: &mut Lowerings::asked(true),
+                spent: &mut Spent::default(),
             },
         )
         .expect("every instruction has a rule");

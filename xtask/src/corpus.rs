@@ -49,6 +49,16 @@ pub(crate) fn passoff(args: &[String]) -> Result<()> {
     drive(args, "passoff")
 }
 
+/// Checks the corpus out at its pin, and says where and which commit.
+///
+/// For `cargo xtask budget`, which compiles the programs and does not run the corpus.
+pub(crate) fn pinned() -> Result<(std::path::PathBuf, String)> {
+    let pin = read_pin(&std::fs::read_to_string(root().join("xtask/corpus.toml"))?)?;
+    let dir = target_dir().join("corpus");
+    checkout(&pin, &dir)?;
+    Ok((dir, pin.rev))
+}
+
 /// Checks the corpus out at its pin, builds rucc, and runs one of the corpus's commands on it.
 fn drive(args: &[String], command: &str) -> Result<()> {
     let mut rev: Option<String> = None;
@@ -218,7 +228,7 @@ fn checkout(pin: &Pin, dir: &Path) -> Result<()> {
 }
 
 /// Whether a program is there and will answer.
-fn runnable(program: &str) -> bool {
+pub(crate) fn runnable(program: &str) -> bool {
     Command::new(program).arg("--version").output().is_ok_and(|out| out.status.success())
 }
 
@@ -257,7 +267,7 @@ fn git_says(dir: &Path, args: &[&str]) -> Result<String> {
 }
 
 /// Runs cargo in a directory, with its output left where the person watching can see it.
-fn cargo(dir: &Path, args: &[&str]) -> Result<()> {
+pub(crate) fn cargo(dir: &Path, args: &[&str]) -> Result<()> {
     let status = Command::new("cargo")
         .args(args)
         .current_dir(dir)

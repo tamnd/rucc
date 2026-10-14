@@ -35,7 +35,7 @@ use rucc_ir::{Block, BlockCall, Extra, Func, Hint, Imm, Inst, Opcode, SwitchInfo
 
 use crate::rangetest::{Read, complement, max, sweep};
 use crate::uses::count;
-use crate::{Analyses, Fuel, Pass, Preserved, Stats};
+use crate::{Analyses, Fuel, Pass, Phase, Preserved, Stats};
 
 /// What this pass is called, for the lists in [`crate::pipeline`] that name it.
 pub const NAME: &str = "rangeswitch";
@@ -57,6 +57,10 @@ impl Pass for RangeSwitch {
 
     fn describe(&self) -> &'static str {
         "a branch on comparisons of one value against scattered constants becomes a switch"
+    }
+
+    fn phase(&self) -> Phase {
+        Phase::Scalar
     }
 
     fn preserves(&self) -> Preserved {

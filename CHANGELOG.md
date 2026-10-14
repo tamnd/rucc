@@ -7,6 +7,7 @@ All notable changes are recorded here. The format follows [Keep a Changelog](htt
 ### Added
 
 - `__attribute__((simd))` builds the SSE2 vector versions of a function as gcc 16 does on x86-64 ELF, under the vector function ABI names `_ZGVbN2v_h` and `_ZGVbM2v_h` that a loop gcc vectorized against glibc's `<bits/math-vector.h>` calls: each version takes its lanes in `xmm` registers, calls the function once a lane and, for `inbranch`, only where the mask is set. The flag is checked in gcc's words, a type with no lane is warned of as gcc warns of it, and the AVX, AVX2 and AVX-512 versions are not built yet.
+- `cargo xtask budget` measures `-O2` compile time against clang and splits it across the seven phases of spec 42.7, and `-frucc-trace` now adds up the time per phase and keeps the writing out apart from the machine passes (#3665).
 
 ### Fixed
 

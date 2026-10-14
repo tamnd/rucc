@@ -44,7 +44,7 @@ use rucc_ir::{
 use crate::alias::{Access, Alias, Origin};
 use crate::cfg::Cfg;
 use crate::dom::Dominators;
-use crate::{Analyses, Analysis, Fuel, Pass, Preserved, Stats};
+use crate::{Analyses, Analysis, Fuel, Pass, Phase, Preserved, Stats};
 
 /// What this pass is called, which the pipeline matches on to decide whether to build the module
 /// facts the oracle asks for.
@@ -78,6 +78,10 @@ impl Pass for Dse {
 
     fn describe(&self) -> &'static str {
         "a store overwritten before anything reads it goes, and a fill half overwritten is narrowed"
+    }
+
+    fn phase(&self) -> Phase {
+        Phase::Scalar
     }
 
     fn preserves(&self) -> Preserved {

@@ -50,7 +50,7 @@
 use rucc_ir::{Extra, Func, Inst, InstData, Opcode, Type, Value};
 
 use crate::rules::safety;
-use crate::{Analyses, Analysis, Fuel, Pass, Preserved, Stats};
+use crate::{Analyses, Analysis, Fuel, Pass, Phase, Preserved, Stats};
 
 /// A run of writes to one plane became a single write.
 const MERGED: &str = "plane writes merged, a run over one range became one write over all of it";
@@ -81,6 +81,10 @@ impl Pass for Coalesce {
 
     fn describe(&self) -> &'static str {
         "writes to one plane that sit next to each other become one write over the whole range"
+    }
+
+    fn phase(&self) -> Phase {
+        Phase::Scalar
     }
 
     fn preserves(&self) -> Preserved {

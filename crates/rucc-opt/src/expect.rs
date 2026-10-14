@@ -43,7 +43,7 @@ use rucc_cost::heuristics::PREDICT_EXPECT;
 use rucc_ir::{Block, Def, Extra, Func, Hint, Imm, Inst, IntPred, Opcode, Type, Value};
 
 use crate::fold::{constant, convert};
-use crate::{Analyses, Analysis, Fuel, Pass, Preserved, Stats, uses};
+use crate::{Analyses, Analysis, Fuel, Pass, Phase, Preserved, Stats, uses};
 
 /// A branch now says which way the program expects it to go.
 const PLACED: &str = "branch weight written from a __builtin_expect on its condition";
@@ -65,6 +65,10 @@ impl Pass for Expect {
 
     fn describe(&self) -> &'static str {
         "what __builtin_expect said moves onto the arms of the branch it was said about"
+    }
+
+    fn phase(&self) -> Phase {
+        Phase::Scalar
     }
 
     fn preserves(&self) -> Preserved {

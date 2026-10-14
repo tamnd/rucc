@@ -120,7 +120,7 @@ use crate::loops::{LoopId, Loops};
 use crate::machine::Machine;
 use crate::purity::Facts;
 use crate::scev::{Assumption, Count, Invariant, Plain, Reading, Scev};
-use crate::{Analyses, Fuel, Pass, Preserved, Stats};
+use crate::{Analyses, Fuel, Pass, Phase, Preserved, Stats};
 
 mod walk;
 
@@ -149,6 +149,10 @@ impl Pass for LoopDelete {
 
     fn describe(&self) -> &'static str {
         "a loop that comes back and leaves nothing behind is taken out"
+    }
+
+    fn phase(&self) -> Phase {
+        Phase::Scalar
     }
 
     fn preserves(&self) -> Preserved {

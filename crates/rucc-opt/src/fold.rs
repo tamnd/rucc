@@ -94,7 +94,7 @@ use rucc_ir::{
     SymbolRef, Type, Value,
 };
 
-use crate::{Analyses, Analysis, Fuel, Pass, Preserved, Stats, uses};
+use crate::{Analyses, Analysis, Fuel, Pass, Phase, Preserved, Stats, uses};
 
 /// Recorded once for each instruction that became a constant.
 const FOLDED: &str = "instruction with constant operands folded to a constant";
@@ -117,6 +117,10 @@ impl Pass for Fold {
 
     fn describe(&self) -> &'static str {
         "an instruction whose operands are all constants becomes a constant"
+    }
+
+    fn phase(&self) -> Phase {
+        Phase::Scalar
     }
 
     fn preserves(&self) -> Preserved {

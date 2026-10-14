@@ -15,7 +15,7 @@
 
 use rucc_ir::{Func, Inst, InstData, Opcode, Value};
 
-use crate::{Analyses, Analysis, Fuel, Pass, Preserved, Stats};
+use crate::{Analyses, Analysis, Fuel, Pass, Phase, Preserved, Stats};
 
 /// What `-fenable-inject-fault=<function>` turns on.
 #[derive(Debug, Clone, Copy)]
@@ -31,6 +31,10 @@ impl Pass for InjectFault {
 
     fn describe(&self) -> &'static str {
         "the low bit of every integer the function stores is flipped, to test a bisection"
+    }
+
+    fn phase(&self) -> Phase {
+        Phase::Scalar
     }
 
     fn preserves(&self) -> Preserved {

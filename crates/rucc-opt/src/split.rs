@@ -253,7 +253,7 @@ use crate::loops::{LoopId, Loops};
 use crate::rules::safety;
 use crate::scev::{Anchor, Evolution, Plain, Reading, Scev};
 use crate::trip::inst_of;
-use crate::{Analyses, Fuel, Pass, Preserved, Stats};
+use crate::{Analyses, Fuel, Pass, Phase, Preserved, Stats};
 
 /// What is reported when a loop is split.
 const SPLIT: &str = "loop split, the iterations in front of the first one that could fail a check \
@@ -365,6 +365,10 @@ impl Pass for Split {
 
     fn describe(&self) -> &'static str {
         "a loop becomes a run of iterations with no checks in it and the rest of the loop with them"
+    }
+
+    fn phase(&self) -> Phase {
+        Phase::Scalar
     }
 
     fn preserves(&self) -> Preserved {

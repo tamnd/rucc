@@ -41,10 +41,10 @@ use rucc_session::OptLevel;
 use rucc_target::{Isa, TargetInfo};
 
 use crate::{
-    Analyses, CallGraph, Fuel, Gates, Machine, Pass, Preserved, Stats, adce, constant_p, dce, dse,
-    extents, heap, image, inline, ipasra, ipcp, ipvrp, lanes, libcall, load, loop_idiom, modref,
-    nofree, number, objsize, outside, params, pass, purity, readonly, reload, sroa, tailrec,
-    vectorize,
+    Analyses, Budget, CallGraph, Fuel, Gates, Machine, Pass, Phase, Preserved, Stats, adce,
+    constant_p, dce, dse, extents, heap, image, inline, ipasra, ipcp, ipvrp, lanes, libcall, load,
+    loop_idiom, modref, nofree, number, objsize, outside, params, pass, purity, readonly, reload,
+    sroa, tailrec, vectorize,
 };
 
 /// The passes that read a summary [`nofree::annotate`], [`extents::annotate`],
@@ -1023,18 +1023,30 @@ pub struct Report {
     /// first ran, which is what `-frucc-trace` writes. A pass the list names twice is one line
     /// with both runs added, the same as `spent`.
     pub time: Vec<(&'static str, Duration)>,
+    /// Which phase of section 42.7 each pass in [`Report::time`] is counted under, in the same
+    /// order.
+    pub phase_of: Vec<(&'static str, Phase)>,
+    /// The time in [`Report::time`] divided between the phases, with what the passes spent waiting
+    /// for an analysis to be built taken out of them and counted under [`Phase::Analyses`].
+    pub budget: Budget,
     /// What every pass said about every function, in the order the passes ran and then in the
     /// order the module holds its functions. This is what `-fopt-info` prints.
     pub remarks: Vec<Remark>,
 }
 
 impl Report {
-    /// Adds what one run of a pass took to that pass's line.
-    fn took(&mut self, pass: &'static str, time: Duration) {
+    /// Adds what one run of a pass took to that pass's line, and to its phase less what went on
+    /// building analyses.
+    fn took(&mut self, pass: &'static str, phase: Phase, time: Duration, analysed: Duration) {
         match self.time.iter_mut().find(|(it, _)| *it == pass) {
             Some((_, total)) => *total += time,
-            None => self.time.push((pass, time)),
+            None => {
+                self.time.push((pass, time));
+                self.phase_of.push((pass, phase));
+            }
         }
+        self.budget.add(phase, time.saturating_sub(analysed));
+        self.budget.add(Phase::Analyses, analysed.min(time));
     }
 
     /// Everything one pass said across the whole module, added up.
@@ -1134,7 +1146,7 @@ pub fn run(module: &mut Module, names: &mut Interner, opts: &Options) -> Report 
         auto,
         second,
     );
-    report.took(inline::NAME, started.elapsed());
+    report.took(inline::NAME, inline::PHASE, started.elapsed(), Duration::ZERO);
     for (id, stats) in inlined {
         if opts.verify {
             if let Err(errors) = rucc_ir::verify_func(module, &module[id], names) {
@@ -1262,7 +1274,7 @@ pub fn run(module: &mut Module, names: &mut Interner, opts: &Options) -> Report 
                 None => folded.push((id, stats)),
             }
         }
-        report.took(libcall::NAME, started.elapsed());
+        report.took(libcall::NAME, libcall::PHASE, started.elapsed(), Duration::ZERO);
         for (id, stats) in folded {
             if opts.verify {
                 if let Err(errors) = rucc_ir::verify_func(module, &module[id], names) {
@@ -1305,7 +1317,7 @@ pub fn run(module: &mut Module, names: &mut Interner, opts: &Options) -> Report 
         };
         let started = Instant::now();
         let changed = ipcp::propagate(module, graph, &mut fuel);
-        report.took(ipcp::NAME, started.elapsed());
+        report.took(ipcp::NAME, ipcp::PHASE, started.elapsed(), Duration::ZERO);
         for (id, stats) in changed {
             if opts.verify {
                 if let Err(errors) = rucc_ir::verify_func(module, &module[id], names) {
@@ -1337,7 +1349,7 @@ pub fn run(module: &mut Module, names: &mut Interner, opts: &Options) -> Report 
         };
         let started = Instant::now();
         let changed = ipasra::remove(module, graph, names, &mut fuel);
-        report.took(ipasra::NAME, started.elapsed());
+        report.took(ipasra::NAME, ipasra::PHASE, started.elapsed(), Duration::ZERO);
         for (id, stats) in changed {
             if opts.verify {
                 if let Err(errors) = rucc_ir::verify_func(module, &module[id], names) {
@@ -1365,7 +1377,7 @@ pub fn run(module: &mut Module, names: &mut Interner, opts: &Options) -> Report 
     if let (true, Some(graph)) = (wants_ipvrp, graph.as_ref()) {
         let started = Instant::now();
         let said = ipvrp::annotate(module, graph);
-        report.took(ipvrp::NAME, started.elapsed());
+        report.took(ipvrp::NAME, ipvrp::PHASE, started.elapsed(), Duration::ZERO);
         for (id, stats) in said {
             report.remarks.push(Remark { pass: ipvrp::NAME, func: module[id].name, stats });
         }
@@ -1419,6 +1431,9 @@ pub fn run(module: &mut Module, names: &mut Interner, opts: &Options) -> Report 
         // has to write. See `crate::switch_conv` too.
         let addresses = TargetInfo::for_tuple(module.tuple).absolute_tables;
         let started = Instant::now();
+        // How much of that went on building analyses, which is counted under its own phase. See
+        // `crate::budget`.
+        let mut analysed = Duration::ZERO;
         for id in module.funcs() {
             if module[id].is_declaration() {
                 continue;
@@ -1463,7 +1478,9 @@ pub fn run(module: &mut Module, names: &mut Interner, opts: &Options) -> Report 
             let mut data = readonly::ReadOnly::new(names, &taken, pointer_bits, tables)
                 .measuring(measures)
                 .addressing(addresses);
+            let before = an.spent();
             let stats = pass.run_emitting(&mut module[id], an, &mut fuel, &mut data);
+            analysed += an.spent().saturating_sub(before);
             tables = data.next();
             for table in data.into_tables() {
                 add_table(module, table);
@@ -1504,7 +1521,7 @@ pub fn run(module: &mut Module, names: &mut Interner, opts: &Options) -> Report 
             // why the pass cannot leave recording until later. See `crate::stats`.
             report.remarks.push(Remark { pass: name, func: module[id].name, stats });
         }
-        report.took(name, started.elapsed());
+        report.took(name, pass.phase(), started.elapsed(), analysed);
         // Added to rather than pushed, so a pass the list names twice is one line here with what
         // both of its runs spent. That is the number a bisection halves, and two lines under one
         // name would be two numbers where the flag takes one.
@@ -1569,7 +1586,7 @@ pub fn run(module: &mut Module, names: &mut Interner, opts: &Options) -> Report 
             }
             report.remarks.push(Remark { pass: ipcp::NAME, func: module[id].name, stats });
         }
-        report.took(ipcp::NAME, started.elapsed());
+        report.took(ipcp::NAME, ipcp::PHASE, started.elapsed(), Duration::ZERO);
         match report.spent.iter_mut().find(|(it, _)| *it == ipcp::NAME) {
             Some((_, total)) => *total += fuel.spent(),
             None => report.spent.push((ipcp::NAME, fuel.spent())),

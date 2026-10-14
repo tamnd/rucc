@@ -101,7 +101,7 @@ use rucc_ir::{
 
 use crate::range::query::Ranges;
 use crate::uses::count;
-use crate::{Analyses, Analysis, Fuel, Pass, Preserved, Stats};
+use crate::{Analyses, Analysis, Fuel, Pass, Phase, Preserved, Stats};
 
 /// Recorded once for each subtree redone at the narrow width.
 const NARROWED: &str = "arithmetic redone at the width the program truncates it to";
@@ -128,6 +128,10 @@ impl Pass for Narrow {
 
     fn describe(&self) -> &'static str {
         "arithmetic the program truncates is redone at the width it truncates to"
+    }
+
+    fn phase(&self) -> Phase {
+        Phase::Scalar
     }
 
     fn preserves(&self) -> Preserved {

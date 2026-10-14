@@ -43,7 +43,7 @@ use rucc_ir::{
 };
 
 use crate::uses::{count, substitute};
-use crate::{Analyses, Analysis, Fuel, Pass, Preserved, Stats};
+use crate::{Analyses, Analysis, Fuel, Pass, Phase, Preserved, Stats};
 
 /// What this pass is called, for the lists in [`crate::pipeline`] that name it.
 pub const NAME: &str = "bswap";
@@ -74,6 +74,10 @@ impl Pass for Bswap {
 
     fn describe(&self) -> &'static str {
         "a byte swap or a read of neighbouring bytes written out by hand becomes one instruction"
+    }
+
+    fn phase(&self) -> Phase {
+        Phase::Scalar
     }
 
     fn preserves(&self) -> Preserved {

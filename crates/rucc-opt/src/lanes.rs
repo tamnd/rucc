@@ -21,7 +21,7 @@ use rucc_base::hash::{Map, Set};
 use rucc_ir::{Block, Def, Extra, Func, Imm, Inst, InstData, Opcode, Shuffle, Type, Value};
 
 use crate::uses::substitute;
-use crate::{Analyses, Analysis, Fuel, Pass, Preserved, Stats};
+use crate::{Analyses, Analysis, Fuel, Pass, Phase, Preserved, Stats};
 
 /// What this pass is called, for the lists in [`crate::pipeline`] that name it.
 pub const NAME: &str = "lanes";
@@ -46,6 +46,10 @@ impl Pass for Lanes {
 
     fn describe(&self) -> &'static str {
         "a vector filled lane by lane from one other vector becomes one shift or shuffle of it"
+    }
+
+    fn phase(&self) -> Phase {
+        Phase::Scalar
     }
 
     fn preserves(&self) -> Preserved {

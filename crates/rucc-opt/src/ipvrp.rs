@@ -42,6 +42,10 @@ use crate::{CallGraph, Stats};
 /// What this is called, which is gcc's spelling so that `-fno-ipa-vrp` means the same thing.
 pub const NAME: &str = "ipa-vrp";
 
+/// Which phase of section 42.7 the time this takes is counted under. See
+/// [`crate::Pass::phase`].
+pub const PHASE: crate::Phase = crate::Phase::Scalar;
+
 /// What it says for a parameter every call keeps inside a range narrower than its type.
 const WRITTEN: &str = "range every call agrees on written on a parameter";
 

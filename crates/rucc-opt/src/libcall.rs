@@ -125,6 +125,10 @@ use crate::{Cfg, Fuel, Stats, uses};
 /// What the pass is called in `-fopt-info` and `-fpass-fuel=`.
 pub const NAME: &str = "libcall";
 
+/// Which phase of section 42.7 the time this takes is counted under. See
+/// [`crate::Pass::phase`].
+pub const PHASE: crate::Phase = crate::Phase::Scalar;
+
 /// How many block parameters deep the walk that answers "what string is this" goes.
 ///
 /// A conditional expression whose arms are two literals is one level, which is what
