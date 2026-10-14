@@ -488,9 +488,9 @@ mod tests {
         for each in [named, "puts"] {
             let symbol = names.intern(each);
             b.value(
-                rucc_ir::InstData {
+                InstData {
                     extra: Extra::Symbol(symbol),
-                    ..rucc_ir::InstData::new(Opcode::GlobalAddr)
+                    ..InstData::new(Opcode::GlobalAddr)
                 },
                 Type::PTR,
             );
@@ -521,7 +521,7 @@ mod tests {
         let own = names.intern("read");
         let mut global = rucc_ir::Global::new(own, 8, 8);
         let ty = Type::int(64);
-        let value = module.add_imm(rucc_ir::Imm::int(0, ty));
+        let value = module.add_imm(Imm::int(0, ty));
         global.init = Some(module.push_data(&[rucc_ir::Datum::Scalar { ty, value }]));
         module.add_global(global);
 

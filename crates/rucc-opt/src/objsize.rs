@@ -418,8 +418,7 @@ impl Walk<'_> {
                     }
                     // The start of a member, which is the closest object to an address in it.
                     Opcode::PtrAdd
-                        if ask.closest
-                            && data.extra.member().is_some_and(|size| size != 0) =>
+                        if ask.closest && data.extra.member().is_some_and(|size| size != 0) =>
                     {
                         let Some(size) = data.extra.member() else { return Err(()) };
                         Ok(Some(u64::from(size)))
@@ -858,9 +857,7 @@ impl Walk<'_> {
                         let then = self.object(then, ask, depth, seen);
                         same(then, self.object(other, ask, depth, seen))
                     }
-                    Opcode::PtrAdd if ask.closest && data.extra.member().is_some() => {
-                        Err(())
-                    }
+                    Opcode::PtrAdd if ask.closest && data.extra.member().is_some() => Err(()),
                     Opcode::PtrAdd => self.object(*args.first().ok_or(())?, ask, depth, seen),
                     Opcode::Alloca if args.is_empty() => Ok(Some(Object::Local(value))),
                     Opcode::GlobalAddr => {
