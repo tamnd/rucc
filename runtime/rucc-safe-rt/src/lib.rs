@@ -232,6 +232,8 @@ pub mod syscall;
 pub mod tls;
 pub mod types;
 #[cfg(unix)]
+pub mod wide;
+#[cfg(unix)]
 pub mod witness;
 #[cfg(unix)]
 pub mod wrap;
@@ -243,7 +245,7 @@ pub mod wrap;
 /// total, so the shape that keeps them apart is the shape it is going to ask for.
 #[cfg(unix)]
 pub static TABLES: &[&[effects::Row]] =
-    &[wrap::TABLE, syscall::TABLE, sync::TABLE, mapping::TABLE, format::TABLE];
+    &[wrap::TABLE, wide::TABLE, syscall::TABLE, sync::TABLE, mapping::TABLE, format::TABLE];
 
 /// The milestone in `spec/safe-memory/16-milestones.md` that fills this crate in.
 pub const MILESTONE: &str = "S1";

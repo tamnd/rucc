@@ -280,6 +280,18 @@ pub struct Row {
     pub group: Group,
     /// What it does to its pointer arguments, in the order the row names them.
     pub effects: &'static [Effect],
+    /// How many bytes one element of every extent the row names is, which is one for the `mem` and
+    /// `str` functions and the size of a `wchar_t` for the wide ones, whose counts and terminators
+    /// are in characters.
+    pub unit: usize,
+}
+
+/// How many bytes `count` elements of `unit` bytes each are, and as many as there can be when that
+/// does not fit, so that a count too large to mean anything is refused rather than wrapped.
+#[doc(hidden)]
+#[must_use]
+pub const fn bytes(count: usize, unit: usize) -> usize {
+    count.saturating_mul(unit)
 }
 
 /// Judgement J1 over a whole range, on behalf of an interposed function.
@@ -546,6 +558,32 @@ pub unsafe fn scan_within(
     limit: usize,
     cap: Cap,
 ) -> usize {
+    // SAFETY: this function's contract is the one below, a byte at a time.
+    unsafe { measure(site, addr, limit, 1, cap) }
+}
+
+/// The same, for a string of characters `unit` bytes wide.
+///
+/// The wide string functions, whose terminator is a whole character of zero bytes and whose counts
+/// are in characters. `limit` and the answer are in characters too, and every byte of a character
+/// is judged, so a string whose last character runs out of its object is refused at the byte that
+/// leaves it rather than at the start of the character.
+///
+/// # Panics
+///
+/// As [`range`].
+///
+/// # Safety
+///
+/// As [`scan`], except that no more than `limit` characters of `unit` bytes are read.
+#[must_use]
+pub unsafe fn measure(
+    site: &'static str,
+    addr: *const c_void,
+    limit: usize,
+    unit: usize,
+    cap: Cap,
+) -> usize {
     // A null string has nowhere to start. The C library's own `strlen` faults on one, which it
     // would have done here too, and a `%s` given one prints `(null)` in glibc, so the walk leaves
     // it to whatever the call is about to do with it.
@@ -556,17 +594,27 @@ pub unsafe fn scan_within(
     let watch = Watch::on(start, cap);
     let mut len = 0;
     while len < limit {
-        let at = start.wrapping_add(len);
-        watch.step(site, at);
-        // SAFETY: the byte is inside the instance the string started in, which the step above is
-        // what establishes, or outside the heap this monitor watches, where reading it is the
-        // program's own business and no worse than the call it asked for.
-        if unsafe { (at as *const u8).read() } == 0 {
+        let at = start.wrapping_add(len.wrapping_mul(unit));
+        watch.across(site, at, unit);
+        // SAFETY: the character is inside the instance the string started in, which the steps
+        // above are what establish, or outside the heap this monitor watches, where reading it is
+        // the program's own business and no worse than the call it asked for.
+        if unsafe { blank(at, unit) } {
             return len;
         }
         len += 1;
     }
     len
+}
+
+/// Whether the character of `unit` bytes at `at` is a terminator, which is every byte of it zero.
+///
+/// # Safety
+///
+/// The `unit` bytes at `at` are readable.
+unsafe fn blank(at: usize, unit: usize) -> bool {
+    // SAFETY: the caller's contract, one byte at a time, so no alignment is asked for.
+    (0..unit).all(|byte| unsafe { (at.wrapping_add(byte) as *const u8).read() } == 0)
 }
 
 /// Judgement J1 over a write whose length the call discovers as it runs.
@@ -598,9 +646,33 @@ pub unsafe fn copied(
     limit: usize,
     caps: [Cap; 2],
 ) -> usize {
+    // SAFETY: this function's contract is the one below, a byte at a time.
+    unsafe { copied_units(sites, dst, src, limit, 1, caps) }
+}
+
+/// The same, for strings of characters `unit` bytes wide, which is `wcscpy`.
+///
+/// `limit` and the answer are in characters, as in [`measure`].
+///
+/// # Panics
+///
+/// As [`range`].
+///
+/// # Safety
+///
+/// As [`copied`], reading the source a character at a time.
+#[must_use]
+pub unsafe fn copied_units(
+    sites: [&'static str; 2],
+    dst: *mut c_void,
+    src: *const c_void,
+    limit: usize,
+    unit: usize,
+    caps: [Cap; 2],
+) -> usize {
     // SAFETY: this function's contract is the one below, with the write starting where the caller
     // said the destination does.
-    unsafe { walk(sites, dst as usize, src as usize, limit, caps) }
+    unsafe { walk(sites, dst as usize, src as usize, limit, unit, caps) }
 }
 
 /// The same, for a function that writes after what the destination already holds.
@@ -630,12 +702,36 @@ pub unsafe fn appended(
     limit: usize,
     caps: [Cap; 2],
 ) -> usize {
+    // SAFETY: this function's contract is the one below, a byte at a time.
+    unsafe { appended_units(sites, dst, src, limit, 1, caps) }
+}
+
+/// The same, for strings of characters `unit` bytes wide, which is `wcscat`.
+///
+/// `limit` and the answer are in characters, as in [`measure`].
+///
+/// # Panics
+///
+/// As [`range`].
+///
+/// # Safety
+///
+/// As [`appended`], reading both strings a character at a time.
+#[must_use]
+pub unsafe fn appended_units(
+    sites: [&'static str; 2],
+    dst: *mut c_void,
+    src: *const c_void,
+    limit: usize,
+    unit: usize,
+    caps: [Cap; 2],
+) -> usize {
     // SAFETY: the destination is a string, which is what the call was handed.
-    let held = unsafe { scan(sites[0], dst.cast_const(), caps[0]) };
-    // SAFETY: as `copied`, from the byte the string already there ends at, which is still inside
-    // the object the destination's capability names.
-    let added =
-        unsafe { walk(sites, (dst as usize).wrapping_add(held), src as usize, limit, caps) };
+    let held = unsafe { measure(sites[0], dst.cast_const(), usize::MAX, unit, caps[0]) };
+    let from = (dst as usize).wrapping_add(held.wrapping_mul(unit));
+    // SAFETY: as `copied`, from the character the string already there ends at, which is still
+    // inside the object the destination's capability names.
+    let added = unsafe { walk(sites, from, src as usize, limit, unit, caps) };
     held.wrapping_add(added)
 }
 
@@ -649,26 +745,28 @@ unsafe fn walk(
     dst: usize,
     src: usize,
     limit: usize,
+    unit: usize,
     [dst_cap, src_cap]: [Cap; 2],
 ) -> usize {
     let to = Watch::on(dst, dst_cap);
     let from = Watch::on(src, src_cap);
     let mut len = 0;
     while len < limit {
-        let read = src.wrapping_add(len);
-        from.step(src_site, read);
-        to.step(dst_site, dst.wrapping_add(len));
-        // SAFETY: the byte is inside the instance the source started in, which the step above is
-        // what establishes, or outside the heap this monitor watches.
-        if unsafe { (read as *const u8).read() } == 0 {
+        let offset = len.wrapping_mul(unit);
+        let read = src.wrapping_add(offset);
+        from.across(src_site, read, unit);
+        to.across(dst_site, dst.wrapping_add(offset), unit);
+        // SAFETY: the character is inside the instance the source started in, which the steps
+        // above are what establish, or outside the heap this monitor watches.
+        if unsafe { blank(read, unit) } {
             return len;
         }
         len += 1;
     }
     // The terminator, which these functions write whether or not the source reached one. A
-    // destination with room for the bytes and not for the NUL is a real overflow of exactly one
-    // byte, and it is a common enough one to be worth the extra step.
-    to.step(dst_site, dst.wrapping_add(len));
+    // destination with room for the characters and not for the NUL is a real overflow of exactly
+    // one character, and it is a common enough one to be worth the extra step.
+    to.across(dst_site, dst.wrapping_add(len.wrapping_mul(unit)), unit);
     len
 }
 
@@ -787,6 +885,17 @@ impl Watch {
             crate::fail::refused_at(Judgement::Access, site, at);
         }
     }
+
+    /// Judges every byte of one character of `unit` bytes starting at `at`.
+    ///
+    /// # Panics
+    ///
+    /// As [`Watch::step`].
+    fn across(self, site: &'static str, at: usize, unit: usize) {
+        for byte in 0..unit {
+            self.step(site, at.wrapping_add(byte));
+        }
+    }
 }
 
 /// Turns rows of the interposition table into wrappers.
@@ -844,6 +953,12 @@ impl Watch {
 /// there so that the row still says in a line what it is for, and so that it lands in the table
 /// every other ordering row lands in.
 ///
+/// A group may say `unit: T;` after its name, and then every count and every terminator its rows
+/// name is in elements of `T` rather than in bytes. That is how the wide string functions are
+/// written: `wcscpy` is `copies(dst, src)` exactly as `strcpy` is, and `wmemcpy` is `moves(dst, src,
+/// n)` with `n` in characters, so no row multiplies by the size of a `wchar_t` itself and none can
+/// forget to. A group that names no unit is in bytes.
+///
 /// A row in the `Allocation` group has no clause at all. `mmap`, `munmap` and `mremap` begin and
 /// end instances rather than read or write a range an argument names, so there is nothing to judge
 /// before the call and the whole of the row is its body, which is where the planes are told.
@@ -894,6 +1009,7 @@ macro_rules! interpose {
                     wrapper: concat!("__rucc_wrap_", stringify!($name)),
                     group: $crate::effects::Group::Ordering,
                     effects: &[],
+                    unit: 1,
                 }
             ),+
         ];
@@ -952,6 +1068,7 @@ macro_rules! interpose {
                     wrapper: concat!("__rucc_wrap_", stringify!($name)),
                     group: $crate::effects::Group::Allocation,
                     effects: &[],
+                    unit: 1,
                 }
             ),+
         ];
@@ -982,6 +1099,7 @@ macro_rules! interpose {
     };
     (
         group: $group:ident;
+        unit: $unit:ty;
         $(
             $(#[$note:meta])*
             fn $name:ident($($arg:ident: $ty:ty),* $(,)?) -> $ret:ty
@@ -1011,7 +1129,7 @@ macro_rules! interpose {
                 // this can publish a frame and see it read.
                 let given = $crate::frame::take();
                 $(
-                    $crate::__judge!($kind, $name, given, $target, $($len),+);
+                    $crate::__judge!($kind, $name, given, $unit, $target, $($len),+);
                 )+
                 $body
             }
@@ -1028,6 +1146,7 @@ macro_rules! interpose {
                     wrapper: concat!("__rucc_wrap_", stringify!($name)),
                     group: $crate::effects::Group::$group,
                     effects: $crate::__effects!(@ [] $($kind($target, $($len),+))+),
+                    unit: ::core::mem::size_of::<$unit>(),
                 }
             ),+
         ];
@@ -1062,6 +1181,17 @@ macro_rules! interpose {
             )+
         }
     };
+    // A group that does not name a unit is in bytes, which is every group but the wide strings.
+    (
+        group: $group:ident;
+        $($rows:tt)+
+    ) => {
+        $crate::interpose! {
+            group: $group;
+            unit: u8;
+            $($rows)+
+        }
+    };
 }
 
 /// What the report calls one argument of one row.
@@ -1088,143 +1218,156 @@ macro_rules! __site {
 #[doc(hidden)]
 #[macro_export]
 macro_rules! __judge {
-    (reads, $name:ident, $frame:ident, $arg:ident, nul) => {
+    (reads, $name:ident, $frame:ident, $unit:ty, $arg:ident, nul) => {
         // SAFETY: the pointer is one the program passed to a string function, which is what this
         // reads it as.
         let _ = unsafe {
-            $crate::effects::scan(
+            $crate::effects::measure(
                 $crate::__site!($name, $arg),
                 $arg.cast(),
+                usize::MAX,
+                ::core::mem::size_of::<$unit>(),
                 $crate::__given!($frame, $arg),
             )
         };
     };
-    (reads, $name:ident, $frame:ident, $arg:ident, nul, $limit:tt) => {
+    (reads, $name:ident, $frame:ident, $unit:ty, $arg:ident, nul, $limit:tt) => {
         // SAFETY: as the unbounded arm, and reading fewer bytes than it would.
         let _ = unsafe {
-            $crate::effects::scan_within(
+            $crate::effects::measure(
                 $crate::__site!($name, $arg),
                 $arg.cast(),
                 $limit,
+                ::core::mem::size_of::<$unit>(),
                 $crate::__given!($frame, $arg),
             )
         };
     };
-    (reads, $name:ident, $frame:ident, $arg:ident, $len:tt) => {
+    (reads, $name:ident, $frame:ident, $unit:ty, $arg:ident, $len:tt) => {
         $crate::effects::range(
             $crate::__site!($name, $arg),
             $arg.cast(),
-            $len,
+            $crate::effects::bytes($len, ::core::mem::size_of::<$unit>()),
             $crate::__given!($frame, $arg),
         );
     };
-    (writes, $name:ident, $frame:ident, $arg:ident, nul $(, $limit:tt)?) => {
+    (writes, $name:ident, $frame:ident, $unit:ty, $arg:ident, nul $(, $limit:tt)?) => {
         compile_error!(
             "a written extent cannot be discovered from the destination, since the NUL that would \
              say where it ends is what the call is about to write. Use copies or appends."
         );
     };
-    (writes, $name:ident, $frame:ident, $arg:ident, $len:tt) => {
+    (writes, $name:ident, $frame:ident, $unit:ty, $arg:ident, $len:tt) => {
+        let bytes = $crate::effects::bytes($len, ::core::mem::size_of::<$unit>());
         $crate::effects::range(
             $crate::__site!($name, $arg),
             $arg.cast(),
-            $len,
+            bytes,
             $crate::__given!($frame, $arg),
         );
         // SAFETY: the range has just been judged, so it is inside one live instance or outside
         // this monitor's heap, and the plane write passes over an address no region covers.
-        unsafe { $crate::check::wrote($arg.cast(), $len) };
+        unsafe { $crate::check::wrote($arg.cast(), bytes) };
         // SAFETY: as above, and the type plane covers the same granules the init plane does.
-        unsafe { $crate::check::judge($arg.cast(), $len, $crate::types::CHARACTER) };
+        unsafe { $crate::check::judge($arg.cast(), bytes, $crate::types::CHARACTER) };
         // SAFETY: as above, over the aux, which described pointers these bytes have replaced.
-        unsafe { $crate::check::erase($arg.cast(), $len) };
+        unsafe { $crate::check::erase($arg.cast(), bytes) };
     };
-    (moves, $name:ident, $frame:ident, $dst:ident, $src:ident, $len:tt) => {
+    (moves, $name:ident, $frame:ident, $unit:ty, $dst:ident, $src:ident, $len:tt) => {
+        let bytes = $crate::effects::bytes($len, ::core::mem::size_of::<$unit>());
         $crate::effects::range(
             $crate::__site!($name, $dst),
             $dst.cast(),
-            $len,
+            bytes,
             $crate::__given!($frame, $dst),
         );
         $crate::effects::range(
             $crate::__site!($name, $src),
             $src.cast(),
-            $len,
+            bytes,
             $crate::__given!($frame, $src),
         );
         // SAFETY: both ranges have just been judged, as in the `writes` arm.
-        unsafe { $crate::check::spread($dst.cast(), $src.cast(), $len) };
+        unsafe { $crate::check::spread($dst.cast(), $src.cast(), bytes) };
         // SAFETY: as above, over the type plane, which is the one C names `memcpy` in.
-        unsafe { $crate::check::carry($dst.cast(), $src.cast(), $len) };
+        unsafe { $crate::check::carry($dst.cast(), $src.cast(), bytes) };
         // SAFETY: as above, over the aux, which holds the capability of every pointer being moved.
-        unsafe { $crate::check::relocate($dst.cast(), $src.cast(), $len) };
+        unsafe { $crate::check::relocate($dst.cast(), $src.cast(), bytes) };
     };
-    (copies, $name:ident, $frame:ident, $dst:ident, $src:ident) => {
+    (copies, $name:ident, $frame:ident, $unit:ty, $dst:ident, $src:ident) => {
         // SAFETY: both pointers are ones the program passed to a string function, which is what
         // this walks them as, and only the source is read.
         let written = unsafe {
-            $crate::effects::copied(
+            $crate::effects::copied_units(
                 [$crate::__site!($name, $dst), $crate::__site!($name, $src)],
                 $dst.cast(),
                 $src.cast(),
                 usize::MAX,
+                ::core::mem::size_of::<$unit>(),
                 [$crate::__given!($frame, $dst), $crate::__given!($frame, $src)],
             )
         };
-        // The terminator as well, which is the byte the walk judged past the length it returned.
+        // In bytes, and the terminator as well, which is the character the walk judged past the
+        // length it returned.
+        let bytes =
+            $crate::effects::bytes(written.wrapping_add(1), ::core::mem::size_of::<$unit>());
         // SAFETY: the destination has just been judged for every byte of that, as in `writes`.
-        unsafe { $crate::check::wrote($dst.cast(), written.wrapping_add(1)) };
+        unsafe { $crate::check::wrote($dst.cast(), bytes) };
         // SAFETY: as above, over the type plane, as in `writes`.
-        unsafe {
-            $crate::check::judge($dst.cast(), written.wrapping_add(1), $crate::types::CHARACTER)
-        };
+        unsafe { $crate::check::judge($dst.cast(), bytes, $crate::types::CHARACTER) };
         // SAFETY: as above, over the aux, as in `writes`.
-        unsafe { $crate::check::erase($dst.cast(), written.wrapping_add(1)) };
+        unsafe { $crate::check::erase($dst.cast(), bytes) };
     };
-    (appends, $name:ident, $frame:ident, $dst:ident, $src:ident) => {
+    (appends, $name:ident, $frame:ident, $unit:ty, $dst:ident, $src:ident) => {
         // SAFETY: as the `copies` arm, and the destination is a string as well.
         let written = unsafe {
-            $crate::effects::appended(
+            $crate::effects::appended_units(
                 [$crate::__site!($name, $dst), $crate::__site!($name, $src)],
                 $dst.cast(),
                 $src.cast(),
                 usize::MAX,
+                ::core::mem::size_of::<$unit>(),
                 [$crate::__given!($frame, $dst), $crate::__given!($frame, $src)],
             )
         };
+        // In bytes, and the terminator as well, which is the character the walk judged past the
+        // length it returned.
+        let bytes =
+            $crate::effects::bytes(written.wrapping_add(1), ::core::mem::size_of::<$unit>());
         // From the destination rather than from where the write starts, because the bytes of the
         // string already there were written by whatever put it there. Saying so again costs a
         // wider plane write and says nothing untrue.
         // SAFETY: as the `copies` arm.
-        unsafe { $crate::check::wrote($dst.cast(), written.wrapping_add(1)) };
+        unsafe { $crate::check::wrote($dst.cast(), bytes) };
         // SAFETY: as the `copies` arm.
-        unsafe {
-            $crate::check::judge($dst.cast(), written.wrapping_add(1), $crate::types::CHARACTER)
-        };
+        unsafe { $crate::check::judge($dst.cast(), bytes, $crate::types::CHARACTER) };
         // SAFETY: as the `copies` arm.
-        unsafe { $crate::check::erase($dst.cast(), written.wrapping_add(1)) };
+        unsafe { $crate::check::erase($dst.cast(), bytes) };
     };
-    (appends, $name:ident, $frame:ident, $dst:ident, $src:ident, $limit:tt) => {
+    (appends, $name:ident, $frame:ident, $unit:ty, $dst:ident, $src:ident, $limit:tt) => {
         // SAFETY: as the unbounded arm, and reading fewer bytes of the source than it would.
         let written = unsafe {
-            $crate::effects::appended(
+            $crate::effects::appended_units(
                 [$crate::__site!($name, $dst), $crate::__site!($name, $src)],
                 $dst.cast(),
                 $src.cast(),
                 $limit,
+                ::core::mem::size_of::<$unit>(),
                 [$crate::__given!($frame, $dst), $crate::__given!($frame, $src)],
             )
         };
+        // In bytes, and the terminator as well, which is the character the walk judged past the
+        // length it returned.
+        let bytes =
+            $crate::effects::bytes(written.wrapping_add(1), ::core::mem::size_of::<$unit>());
         // SAFETY: as the unbounded arm.
-        unsafe { $crate::check::wrote($dst.cast(), written.wrapping_add(1)) };
+        unsafe { $crate::check::wrote($dst.cast(), bytes) };
         // SAFETY: as the unbounded arm.
-        unsafe {
-            $crate::check::judge($dst.cast(), written.wrapping_add(1), $crate::types::CHARACTER)
-        };
+        unsafe { $crate::check::judge($dst.cast(), bytes, $crate::types::CHARACTER) };
         // SAFETY: as the unbounded arm.
-        unsafe { $crate::check::erase($dst.cast(), written.wrapping_add(1)) };
+        unsafe { $crate::check::erase($dst.cast(), bytes) };
     };
-    (scatters, $name:ident, $frame:ident, $arg:ident, $count:tt) => {
+    (scatters, $name:ident, $frame:ident, $unit:ty, $arg:ident, $count:tt) => {
         let site = $crate::__site!($name, $arg);
         // SAFETY: the pointer is the array the program is about to hand a syscall, and reading its
         // elements is what the kernel is about to do.
@@ -1238,7 +1381,7 @@ macro_rules! __judge {
             )
         };
     };
-    (gathers, $name:ident, $frame:ident, $arg:ident, $count:tt) => {
+    (gathers, $name:ident, $frame:ident, $unit:ty, $arg:ident, $count:tt) => {
         let site = $crate::__site!($name, $arg);
         // SAFETY: as the `scatters` arm, which is the same array read the same way.
         let _ = unsafe {

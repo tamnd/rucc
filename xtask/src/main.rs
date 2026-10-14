@@ -791,6 +791,7 @@ fn malformed() -> Result<()> {
 /// compiler's list has to spell them.
 const INTERPOSE_ROWS: &[&str] = &[
     "runtime/rucc-safe-rt/src/wrap.rs",
+    "runtime/rucc-safe-rt/src/wide.rs",
     "runtime/rucc-safe-rt/src/syscall.rs",
     "runtime/rucc-safe-rt/src/sync.rs",
     "runtime/rucc-safe-rt/src/mapping.rs",
