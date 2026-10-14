@@ -444,8 +444,8 @@ mod tests {
 
     #[test]
     fn a_block_comment_is_still_terminated_when_the_stars_are_a_long_way_in() {
-        // The body scan stops on `*` and on the newline, so this walks it in a few steps
-        // instead of a few hundred, and has to come out at the same place either way.
+        // The body scan stops on `*` and goes past the newline, so this walks it in a few
+        // steps instead of a few hundred, and has to come out at the same place either way.
         let body = "x".repeat(200);
         assert_eq!(spellings(&format!("a /*{body}*/ b")), vec!["a", "b"]);
         assert_eq!(spellings(&format!("a /*{body}\n{body}*/ b")), vec!["a", "b"]);
@@ -454,6 +454,31 @@ mod tests {
         // And an unterminated one is still reported once rather than run off the end.
         let (_, diagnostics) = scan(&format!("a /*{body}"));
         assert_eq!(diagnostics, vec!["unterminated comment".to_owned()]);
+    }
+
+    #[test]
+    fn a_block_comment_closer_spliced_across_lines_still_ends_it() {
+        // The body scan goes past newlines and carriage returns without looking, so the `*`
+        // before a splice is the only thing that can see the `/` after it. Long bodies, so the
+        // run is whole words and not just the tail.
+        let body = "x".repeat(40);
+        assert_eq!(spellings(&format!("a /*{body}\r\n{body}*\\\n/ b")), vec!["a", "b"]);
+        assert_eq!(spellings(&format!("a /*{body}\r\n{body}*\\\r\n/ b")), vec!["a", "b"]);
+        // A carriage return between the `*` and the `/` is a line ending, not a splice.
+        let (_, diagnostics) = scan(&format!("a /*{body}*\r/ b"));
+        assert_eq!(diagnostics, vec!["unterminated comment".to_owned()]);
+        // `??/` is a backslash only with trigraphs on, and then it splices the closer together.
+        let src = format!("a /*{body}*??/\n/ b */ c");
+        let mut interner = Interner::new();
+        let options = Options { trigraphs: true, ..Options::new() };
+        let (on, _) = tokenize(src.as_bytes(), 0, options, &mut interner);
+        let text: Vec<_> = on
+            .iter()
+            .filter(|t| !t.is_eof())
+            .filter_map(|t| t.value.map(|s| interner.resolve(s).to_owned()))
+            .collect();
+        assert_eq!(text[..2], ["a", "b"]);
+        assert_eq!(spellings(&src), vec!["a", "c"]);
     }
 
     #[test]
@@ -555,7 +580,7 @@ mod tests {
     }
 
     #[test]
-    fn a_skipped_token_is_scanned_but_only_interned_when_it_starts_a_line() {
+    fn a_skipped_token_is_scanned_but_not_interned() {
         // The comment hides the first line ending and the string hides the `/*`, so the line
         // ends before `#endif` and nowhere earlier.
         let src = b"skipped /* x\n */ \"/*\" name\n#endif";
@@ -571,12 +596,70 @@ mod tests {
             values.push((token.kind, token.value));
         };
         assert_eq!(values.len(), 3);
+        assert_eq!(values[0], (PpTokenKind::Ident, None));
         assert_eq!(values[2], (PpTokenKind::Ident, None));
         assert_eq!(hash.punct(), Some(Punct::Hash));
-        // The first token started a line, so it was interned. Nothing after it was.
-        assert_eq!(interner.len(), before + 1);
+        assert_eq!(interner.len(), before);
         let endif = lexer.next_token(&mut interner);
         assert_eq!(interner.resolve(endif.value.unwrap()), "endif");
+    }
+
+    /// Where each line of a skipped group starts and what was said reading it, found by the
+    /// token scan alone or with [`Lexer::skip_line`] in front of it.
+    fn skipped_lines(src: &[u8], opts: Options, jump: bool) -> (Vec<u32>, String) {
+        let mut interner = Interner::new();
+        let mut lexer = Lexer::new(src, 0, opts);
+        let mut starts = Vec::new();
+        // The first token of a line, which is the one a skipped group reads.
+        let mut first = lexer.next_token(&mut interner);
+        while !first.is_eof() {
+            starts.push(first.span.lo);
+            if jump && lexer.skip_line() {
+                first = lexer.next_token(&mut interner);
+                assert!(first.is_eof() || first.flags.has(TokenFlags::START_OF_LINE));
+                continue;
+            }
+            first = loop {
+                let token = lexer.skip_token(&mut interner);
+                if token.is_eof() || token.flags.has(TokenFlags::START_OF_LINE) {
+                    break token;
+                }
+            };
+        }
+        (starts, format!("{:?}", lexer.diagnostics()))
+    }
+
+    #[test]
+    fn jumping_a_skipped_line_finds_every_line_the_token_scan_finds() {
+        let lines: &[&[u8]] = &[
+            b"plain words (and) punct + - * = ; 0x10 1.5e+3\nnext",
+            b"a /* comment */ b\nnext",
+            b"a /* a comment\nrunning on */ b\nnext",
+            b"a // to the end /* not a comment\nnext",
+            b"a \"string with /* inside\" b\nnext",
+            b"don't stop here\nnext",
+            b"x = 1'000 /* comment\nhidden */ y\nnext",
+            b"x = u8'a' + L\"b\" /* c\n */\nnext",
+            b"spliced \\\ncontinues\nnext",
+            b"spliced loosely \\ \ncontinues\nnext",
+            b"crlf ending\r\nnext\r\n",
+            b"a / b /= c\nnext",
+            b"unterminated /* to the end",
+            b"trigraph ??/\ncontinues\nnext",
+            b"ends at the end of the file",
+        ];
+        for &src in lines {
+            for trigraphs in [false, true] {
+                let mut opts = Options::new();
+                opts.trigraphs = trigraphs;
+                let text = String::from_utf8_lossy(src);
+                assert_eq!(
+                    skipped_lines(src, opts, true),
+                    skipped_lines(src, opts, false),
+                    "{text:?} with trigraphs {trigraphs}",
+                );
+            }
+        }
     }
 
     #[test]

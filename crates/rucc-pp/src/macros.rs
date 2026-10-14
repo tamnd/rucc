@@ -8,7 +8,7 @@
 //! good and it can concentrate on the substitution rules.
 
 use rucc_base::hash::Map;
-use rucc_base::{Interner, Symbol};
+use rucc_base::{Interner, Symbol, sym};
 use rucc_diag::{Diagnostic, Span};
 use rucc_lex::{PpToken, PpTokenKind, Punct, TokenFlags};
 
@@ -373,7 +373,7 @@ pub(crate) fn parse_define_in(
         span,
         builtin: None,
     };
-    check_body(&def, assembly, interner, &mut diagnostics);
+    check_body(&def, assembly, &mut diagnostics);
     (Some(def), diagnostics)
 }
 
@@ -386,7 +386,7 @@ fn parse_params(
     interner: &mut Interner,
     diagnostics: &mut Vec<Diagnostic>,
 ) -> Option<(Vec<Symbol>, Option<Symbol>, usize)> {
-    let va_args = interner.intern("__VA_ARGS__");
+    let va_args = sym::VA_ARGS;
     let mut params: Vec<Symbol> = Vec::new();
     let mut variadic = None;
     let mut at = 0;
@@ -461,14 +461,9 @@ fn parse_params(
 }
 
 /// The constraint checks on a replacement list that do not need the expander to run.
-fn check_body(
-    def: &MacroDef,
-    assembly: bool,
-    interner: &mut Interner,
-    diagnostics: &mut Vec<Diagnostic>,
-) {
-    let va_opt = interner.intern("__VA_OPT__");
-    let va_args = interner.intern("__VA_ARGS__");
+fn check_body(def: &MacroDef, assembly: bool, diagnostics: &mut Vec<Diagnostic>) {
+    let va_opt = sym::VA_OPT;
+    let va_args = sym::VA_ARGS;
 
     if let Some(first) = def.body.first().filter(|t| t.punct() == Some(Punct::HashHash)) {
         diagnostics.push(
