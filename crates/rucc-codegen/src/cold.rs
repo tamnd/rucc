@@ -49,28 +49,29 @@ use crate::elsewhere::Elsewhere;
 /// function the layout cannot split is left alone: one the program put in a section, whose cold
 /// part would need a section the program did not name, and one with a landing pad, whose call site
 /// table is written for one stretch of code.
-pub fn mark(
-    source: &ir::Func,
-    blocks: &[Option<mir::Block>],
-    func: &mut mir::Func,
-    elsewhere: &Elsewhere,
-) {
-    if source.attrs.set.contains(AttrSet::COLD)
-        || func.section.is_some()
-        || func.retain
-        || !func.landings.is_empty()
-    {
+///
+/// `cold` is what [`blocks`] said about the IR function.
+pub fn mark(cold: &[bool], blocks: &[Option<mir::Block>], func: &mut mir::Func) {
+    if cold.is_empty() || func.section.is_some() || func.retain || !func.landings.is_empty() {
         return;
     }
-    let cold = unlikely(source, elsewhere);
-    for block in source.blocks() {
-        if !cold.get(block.index()).copied().unwrap_or(false) {
-            continue;
-        }
-        if let Some(&Some(out)) = blocks.get(block.index()) {
+    for (block, &out) in blocks.iter().enumerate() {
+        if let (true, Some(out)) = (cold.get(block).copied().unwrap_or(false), out) {
             func.set_cold(out);
         }
     }
+}
+
+/// Which IR blocks are cold, indexed by the block's own number, and nothing for a function that
+/// is `cold` itself, since all of it is.
+///
+/// Read twice: [`crate::weights::carry`] makes every branch into one of these unlikely, which is
+/// what gcc does with the same answer, and [`mark`] writes it on the machine blocks.
+pub fn blocks(source: &ir::Func, elsewhere: &Elsewhere) -> Vec<bool> {
+    if source.attrs.set.contains(AttrSet::COLD) {
+        return Vec::new();
+    }
+    unlikely(source, elsewhere)
 }
 
 /// Which IR blocks are cold, indexed by the block's own number. See the module documentation.

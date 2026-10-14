@@ -27,6 +27,7 @@ All notable changes are recorded here. The format follows [Keep a Changelog](htt
 - A load of an array element at the same index as one read in a block above now reuses that value instead of reading memory again (#3620).
 - The cleanup of the allocator's moves no longer takes the byte of a comparison the layout folds into its branch as a write, so a slot read back in front of the comparison is not read again in the block the branch goes to. drivers/md/md.c on i386 is 32 instructions shorter (#3621).
 - The copies on a split edge now go in front of a comparison the layout folds into its branch when they write the byte it would have set, and stay on one arm of a diamond inside a loop, which the layout lays out with one jump each way round only while both arms are there (#3623).
+- The layout's weights now treat a branch with one arm into a cold block as the cold call predictor would, which is what gcc's `determine_unlikely_bbs` does with the same answer, so a pointer test in front of a `pr_err` no longer walks the trunk of the function into the message and leaves a jump behind (#3627).
 
 ### Fixed
 

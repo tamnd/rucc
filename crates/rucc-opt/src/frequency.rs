@@ -74,7 +74,13 @@ impl Frequencies {
     /// empty answer rather than an error, because a pipeline is handed declarations.
     #[must_use]
     pub fn of(func: &Func, cfg: &Cfg, loops: &Loops, callees: &Callees) -> Self {
-        let told = Predictions::of(func, cfg, loops, callees);
+        Self::from_told(Predictions::of(func, cfg, loops, callees), cfg, loops)
+    }
+
+    /// Works out every block's frequency from predictions the caller already has, which is
+    /// [`Frequencies::of`] for a caller that changed some of them first.
+    #[must_use]
+    pub fn from_told(told: Predictions, cfg: &Cfg, loops: &Loops) -> Self {
         let width = cfg.capacity();
         let cyclic = cyclic_probabilities(cfg, loops, &told);
         let mut of = vec![Frequency::NEVER; width];

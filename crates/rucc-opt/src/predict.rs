@@ -301,6 +301,31 @@ impl Predictions {
         edges.get(index).copied().unwrap_or_else(Probability::never)
     }
 
+    /// Turns every branch that leads from a block not marked unlikely into one that is towards
+    /// the other arm, as the `cold` attribute does.
+    ///
+    /// Design: `gcc/predict.cc`, `determine_unlikely_bbs`, which gives every edge into a block it
+    /// finds will not run a probability of never. The cold call predictor here only asks whether
+    /// an arm calls a cold function itself, and the usual shape in the kernel is an arm that picks
+    /// an argument first, as in `pr_err("%s", name ? name : "none")`, whose first block calls
+    /// nothing. A caller that has worked out which blocks are unlikely, which is
+    /// `rucc_codegen::cold`, says so with `unlikely`, indexed by block number, and every two armed
+    /// branch with one arm in it and one out of it is then decided as the cold call predictor
+    /// would have decided it. A branch with more arms, and one whose arms are both in or both out,
+    /// keeps what it had.
+    pub fn avoid(&mut self, cfg: &Cfg, unlikely: &[bool]) {
+        let marked = |block: Block| unlikely.get(block.index()).copied().unwrap_or(false);
+        for block in cfg.reverse_postorder() {
+            let [first, second] = cfg.successors(block) else { continue };
+            if marked(block) || marked(*first) == marked(*second) {
+                continue;
+            }
+            let taken = toward(!marked(*first), rucc_cost::param!(PREDICT_COLD_CALL));
+            self.edges[block.index()] = vec![taken, taken.complement()];
+            self.by[block.index()] = Predictor::ColdCall;
+        }
+    }
+
     /// The probability of each edge out of this block, in [`Cfg::successors`] order.
     #[must_use]
     pub fn edges(&self, block: Block) -> &[Probability] {
@@ -1031,6 +1056,45 @@ mod tests {
         assert_eq!(seen.by(at[0]), Predictor::PointerNotNull);
         // The arm taken when the pointer is null, which is the thirty percent of the time.
         assert_eq!(seen.taken(at[0], 0), Probability::percent(70, Quality::Guessed).complement());
+    }
+
+    #[test]
+    fn a_branch_into_a_block_the_caller_says_is_unlikely_goes_the_other_way() {
+        let (_, mut func, at) = blank(3);
+        let mut build = Builder::new(&mut func, at[0]);
+        let seven = build.iconst(Type::int(64), 7);
+        let some = build.unary(Opcode::IntToPtr, seven, Type::PTR);
+        let zero = build.iconst(Type::int(64), 0);
+        let null = build.unary(Opcode::IntToPtr, zero, Type::PTR);
+        let cond = build.icmp(IntPred::Eq, some, null);
+        build.br_if(cond, at[1], &[], at[2], &[]);
+        for block in [at[1], at[2]] {
+            let mut build = Builder::new(&mut func, block);
+            let zero = build.iconst(Type::int(32), 0);
+            build.ret(&[zero]);
+        }
+
+        let (mut seen, cfg) = predict(&func);
+        let mut unlikely = vec![false; cfg.capacity()];
+        unlikely[at[2].index()] = true;
+        seen.avoid(&cfg, &unlikely);
+        assert_eq!(seen.by(at[0]), Predictor::ColdCall);
+        // The pointer is not null and the arm for that is the one said not to run, so the null arm
+        // is now the one taken, and by as much as a call to a cold function would say.
+        assert_eq!(seen.taken(at[0], 0), Probability::percent(99, Quality::Guessed));
+        assert_eq!(seen.taken(at[0], 1), Probability::percent(99, Quality::Guessed).complement());
+
+        // Both arms unlikely, or the block itself, and the branch keeps what it had.
+        let (mut both, cfg) = predict(&func);
+        unlikely[at[1].index()] = true;
+        both.avoid(&cfg, &unlikely);
+        assert_eq!(both.by(at[0]), Predictor::PointerNotNull);
+        let (mut inside, cfg) = predict(&func);
+        let mut unlikely = vec![false; cfg.capacity()];
+        unlikely[at[0].index()] = true;
+        unlikely[at[2].index()] = true;
+        inside.avoid(&cfg, &unlikely);
+        assert_eq!(inside.by(at[0]), Predictor::PointerNotNull);
     }
 
     #[test]
