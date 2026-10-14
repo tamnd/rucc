@@ -358,6 +358,14 @@ impl Checker<'_> {
             "_Decimal32" => return Some(self.types.float(FloatKind::Decimal32)),
             "_Decimal64" => return Some(self.types.float(FloatKind::Decimal64)),
             "_Decimal128" => return Some(self.types.float(FloatKind::Decimal128)),
+            // The interchange types, also only where the target has them. `_Float32`,
+            // `_Float64` and `_Float32x` are on every target, and the other three are not.
+            "_Float16" => return self.interchange(FloatKind::Float16),
+            "_Float32" => return self.interchange(FloatKind::Float32),
+            "_Float64" => return self.interchange(FloatKind::Float64),
+            "_Float128" => return self.interchange(FloatKind::Float128),
+            "_Float32x" => return self.interchange(FloatKind::Float32x),
+            "_Float64x" => return self.interchange(FloatKind::Float64x),
             // The complex types, which the conjugate family is written over and nothing else in
             // the table uses. The keyword comes first here because that is the order the table
             // writes it in, and a signature is not a declaration, so the order it would be
@@ -406,6 +414,32 @@ impl Checker<'_> {
             _ => return None,
         };
         Some(self.types.int(kind))
+    }
+
+    /// An interchange floating type, or nothing where the target does not have it.
+    fn interchange(&mut self, kind: FloatKind) -> Option<TypeId> {
+        self.has_float_kind(kind).then(|| self.types.float(kind))
+    }
+
+    /// Whether the target has a floating type. gcc declares a builtin written over a type only
+    /// where the type is, so `__builtin_inff128` on a target with no `_Float128` is a name that
+    /// nothing declared.
+    fn has_float_kind(&self, kind: FloatKind) -> bool {
+        let target = self.cx.target;
+        match kind {
+            FloatKind::Float16 => target.has_float16,
+            FloatKind::Float128 => target.has_float128,
+            FloatKind::Float64x => target.float64x_format.is_some(),
+            FloatKind::Decimal32 | FloatKind::Decimal64 | FloatKind::Decimal128 => {
+                target.has_decimal_float
+            }
+            FloatKind::Float
+            | FloatKind::Float32
+            | FloatKind::Double
+            | FloatKind::Float32x
+            | FloatKind::Float64
+            | FloatKind::LongDouble => true,
+        }
     }
 
     /// The unsigned integer type that is exactly this many bits wide on this target.

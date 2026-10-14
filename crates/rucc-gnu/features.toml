@@ -4036,6 +4036,99 @@ signature = ""
 used_by = ["sqlite", "ffmpeg", "glibc"]
 tests = ["rucc-sema::every_name_in_the_family_is_a_row_of_the_table_and_is_answered_not_called", "rucc-driver::a_sign_builtin_is_a_mask_over_the_bits_and_not_a_call"]
 
+# The sign family over the interchange types, which glibc's `bits/floatn.h` spells for
+# `fabsf128` and `copysignf128`. Not `_Float64x`, for the reason `check/builtin/sign.rs` gives.
+
+[[feature]]
+name = "__builtin_fabsf16"
+kind = "builtin"
+gcc_version = "7.0"
+status = "implemented"
+signature = ""
+used_by = ["glibc"]
+tests = ["rucc-sema::every_name_in_the_family_is_a_row_of_the_table_and_is_answered_not_called", "rucc-driver::an_interchange_sign_builtin_is_a_mask_and_not_a_call"]
+
+[[feature]]
+name = "__builtin_copysignf16"
+kind = "builtin"
+gcc_version = "7.0"
+status = "implemented"
+signature = ""
+used_by = ["glibc"]
+tests = ["rucc-sema::every_name_in_the_family_is_a_row_of_the_table_and_is_answered_not_called", "rucc-driver::an_interchange_sign_builtin_is_a_mask_and_not_a_call"]
+
+[[feature]]
+name = "__builtin_fabsf32"
+kind = "builtin"
+gcc_version = "7.0"
+status = "implemented"
+signature = ""
+used_by = ["glibc"]
+tests = ["rucc-sema::every_name_in_the_family_is_a_row_of_the_table_and_is_answered_not_called", "rucc-driver::an_interchange_sign_builtin_is_a_mask_and_not_a_call"]
+
+[[feature]]
+name = "__builtin_copysignf32"
+kind = "builtin"
+gcc_version = "7.0"
+status = "implemented"
+signature = ""
+used_by = ["glibc"]
+tests = ["rucc-sema::every_name_in_the_family_is_a_row_of_the_table_and_is_answered_not_called", "rucc-driver::an_interchange_sign_builtin_is_a_mask_and_not_a_call"]
+
+[[feature]]
+name = "__builtin_fabsf64"
+kind = "builtin"
+gcc_version = "7.0"
+status = "implemented"
+signature = ""
+used_by = ["glibc"]
+tests = ["rucc-sema::every_name_in_the_family_is_a_row_of_the_table_and_is_answered_not_called", "rucc-driver::an_interchange_sign_builtin_is_a_mask_and_not_a_call"]
+
+[[feature]]
+name = "__builtin_copysignf64"
+kind = "builtin"
+gcc_version = "7.0"
+status = "implemented"
+signature = ""
+used_by = ["glibc"]
+tests = ["rucc-sema::every_name_in_the_family_is_a_row_of_the_table_and_is_answered_not_called", "rucc-driver::an_interchange_sign_builtin_is_a_mask_and_not_a_call"]
+
+[[feature]]
+name = "__builtin_fabsf128"
+kind = "builtin"
+gcc_version = "7.0"
+status = "implemented"
+signature = ""
+used_by = ["glibc"]
+tests = ["rucc-sema::every_name_in_the_family_is_a_row_of_the_table_and_is_answered_not_called", "rucc-driver::an_interchange_sign_builtin_is_a_mask_and_not_a_call"]
+
+[[feature]]
+name = "__builtin_copysignf128"
+kind = "builtin"
+gcc_version = "7.0"
+status = "implemented"
+signature = ""
+used_by = ["glibc"]
+tests = ["rucc-sema::every_name_in_the_family_is_a_row_of_the_table_and_is_answered_not_called", "rucc-driver::an_interchange_sign_builtin_is_a_mask_and_not_a_call"]
+
+[[feature]]
+name = "__builtin_fabsf32x"
+kind = "builtin"
+gcc_version = "7.0"
+status = "implemented"
+signature = ""
+used_by = ["glibc"]
+tests = ["rucc-sema::every_name_in_the_family_is_a_row_of_the_table_and_is_answered_not_called", "rucc-driver::an_interchange_sign_builtin_is_a_mask_and_not_a_call"]
+
+[[feature]]
+name = "__builtin_copysignf32x"
+kind = "builtin"
+gcc_version = "7.0"
+status = "implemented"
+signature = ""
+used_by = ["glibc"]
+tests = ["rucc-sema::every_name_in_the_family_is_a_row_of_the_table_and_is_answered_not_called", "rucc-driver::an_interchange_sign_builtin_is_a_mask_and_not_a_call"]
+
 # A vector made of the lanes of one or two others, picked by a mask. No signature, for the
 # same reason as the sign family: there is no function to call and the answer is expanded.
 [[feature]]
@@ -5482,6 +5575,236 @@ gcc_version = "4.3"
 status = "implemented"
 signature = "_Decimal128(const char *)"
 tests = ["rucc-sema::every_name_answered_here_is_a_row_of_the_table_and_says_it_is_done"]
+
+# The infinities and nans of the interchange types. glibc's `bits/floatn-common.h` and
+# `bits/floatn.h` spell these for `HUGE_VAL_F128`, `INFINITY` and the rest once `__GNUC__` is 7
+# or more. The `_Float16` rows have no library, since glibc has no `nanf16` on any target.
+
+[[feature]]
+name = "__builtin_inff16"
+kind = "builtin"
+gcc_version = "7.0"
+status = "implemented"
+signature = "_Float16(void)"
+used_by = ["glibc"]
+tests = ["rucc-sema::every_name_answered_here_is_a_row_of_the_table_and_says_it_is_done", "rucc-driver::an_interchange_infinity_or_nan_is_a_constant_and_not_a_call"]
+
+[[feature]]
+name = "__builtin_huge_valf16"
+kind = "builtin"
+gcc_version = "7.0"
+status = "implemented"
+signature = "_Float16(void)"
+used_by = ["glibc"]
+tests = ["rucc-sema::every_name_answered_here_is_a_row_of_the_table_and_says_it_is_done", "rucc-driver::an_interchange_infinity_or_nan_is_a_constant_and_not_a_call"]
+
+[[feature]]
+name = "__builtin_nanf16"
+kind = "builtin"
+gcc_version = "7.0"
+status = "implemented"
+signature = "_Float16(const char *)"
+used_by = ["glibc"]
+tests = ["rucc-sema::every_name_answered_here_is_a_row_of_the_table_and_says_it_is_done", "rucc-driver::an_interchange_infinity_or_nan_is_a_constant_and_not_a_call"]
+
+[[feature]]
+name = "__builtin_nansf16"
+kind = "builtin"
+gcc_version = "7.0"
+status = "implemented"
+signature = "_Float16(const char *)"
+used_by = ["glibc"]
+tests = ["rucc-sema::every_name_answered_here_is_a_row_of_the_table_and_says_it_is_done", "rucc-driver::an_interchange_infinity_or_nan_is_a_constant_and_not_a_call"]
+
+[[feature]]
+name = "__builtin_inff32"
+kind = "builtin"
+gcc_version = "7.0"
+status = "implemented"
+signature = "_Float32(void)"
+used_by = ["glibc"]
+tests = ["rucc-sema::every_name_answered_here_is_a_row_of_the_table_and_says_it_is_done", "rucc-driver::an_interchange_infinity_or_nan_is_a_constant_and_not_a_call"]
+
+[[feature]]
+name = "__builtin_huge_valf32"
+kind = "builtin"
+gcc_version = "7.0"
+status = "implemented"
+signature = "_Float32(void)"
+used_by = ["glibc"]
+tests = ["rucc-sema::every_name_answered_here_is_a_row_of_the_table_and_says_it_is_done", "rucc-driver::an_interchange_infinity_or_nan_is_a_constant_and_not_a_call"]
+
+[[feature]]
+name = "__builtin_nanf32"
+kind = "builtin"
+gcc_version = "7.0"
+status = "implemented"
+signature = "_Float32(const char *)"
+library = "nanf32"
+used_by = ["glibc"]
+tests = ["rucc-sema::every_name_answered_here_is_a_row_of_the_table_and_says_it_is_done", "rucc-driver::an_interchange_infinity_or_nan_is_a_constant_and_not_a_call"]
+
+[[feature]]
+name = "__builtin_nansf32"
+kind = "builtin"
+gcc_version = "7.0"
+status = "implemented"
+signature = "_Float32(const char *)"
+library = "nansf32"
+used_by = ["glibc"]
+tests = ["rucc-sema::every_name_answered_here_is_a_row_of_the_table_and_says_it_is_done", "rucc-driver::an_interchange_infinity_or_nan_is_a_constant_and_not_a_call"]
+
+[[feature]]
+name = "__builtin_inff64"
+kind = "builtin"
+gcc_version = "7.0"
+status = "implemented"
+signature = "_Float64(void)"
+used_by = ["glibc"]
+tests = ["rucc-sema::every_name_answered_here_is_a_row_of_the_table_and_says_it_is_done", "rucc-driver::an_interchange_infinity_or_nan_is_a_constant_and_not_a_call"]
+
+[[feature]]
+name = "__builtin_huge_valf64"
+kind = "builtin"
+gcc_version = "7.0"
+status = "implemented"
+signature = "_Float64(void)"
+used_by = ["glibc"]
+tests = ["rucc-sema::every_name_answered_here_is_a_row_of_the_table_and_says_it_is_done", "rucc-driver::an_interchange_infinity_or_nan_is_a_constant_and_not_a_call"]
+
+[[feature]]
+name = "__builtin_nanf64"
+kind = "builtin"
+gcc_version = "7.0"
+status = "implemented"
+signature = "_Float64(const char *)"
+library = "nanf64"
+used_by = ["glibc"]
+tests = ["rucc-sema::every_name_answered_here_is_a_row_of_the_table_and_says_it_is_done", "rucc-driver::an_interchange_infinity_or_nan_is_a_constant_and_not_a_call"]
+
+[[feature]]
+name = "__builtin_nansf64"
+kind = "builtin"
+gcc_version = "7.0"
+status = "implemented"
+signature = "_Float64(const char *)"
+library = "nansf64"
+used_by = ["glibc"]
+tests = ["rucc-sema::every_name_answered_here_is_a_row_of_the_table_and_says_it_is_done", "rucc-driver::an_interchange_infinity_or_nan_is_a_constant_and_not_a_call"]
+
+[[feature]]
+name = "__builtin_inff128"
+kind = "builtin"
+gcc_version = "7.0"
+status = "implemented"
+signature = "_Float128(void)"
+used_by = ["glibc"]
+tests = ["rucc-sema::every_name_answered_here_is_a_row_of_the_table_and_says_it_is_done", "rucc-driver::an_interchange_infinity_or_nan_is_a_constant_and_not_a_call"]
+
+[[feature]]
+name = "__builtin_huge_valf128"
+kind = "builtin"
+gcc_version = "7.0"
+status = "implemented"
+signature = "_Float128(void)"
+used_by = ["glibc"]
+tests = ["rucc-sema::every_name_answered_here_is_a_row_of_the_table_and_says_it_is_done", "rucc-driver::an_interchange_infinity_or_nan_is_a_constant_and_not_a_call"]
+
+[[feature]]
+name = "__builtin_nanf128"
+kind = "builtin"
+gcc_version = "7.0"
+status = "implemented"
+signature = "_Float128(const char *)"
+library = "nanf128"
+used_by = ["glibc"]
+tests = ["rucc-sema::every_name_answered_here_is_a_row_of_the_table_and_says_it_is_done", "rucc-driver::an_interchange_infinity_or_nan_is_a_constant_and_not_a_call"]
+
+[[feature]]
+name = "__builtin_nansf128"
+kind = "builtin"
+gcc_version = "7.0"
+status = "implemented"
+signature = "_Float128(const char *)"
+library = "nansf128"
+used_by = ["glibc"]
+tests = ["rucc-sema::every_name_answered_here_is_a_row_of_the_table_and_says_it_is_done", "rucc-driver::an_interchange_infinity_or_nan_is_a_constant_and_not_a_call"]
+
+[[feature]]
+name = "__builtin_inff32x"
+kind = "builtin"
+gcc_version = "7.0"
+status = "implemented"
+signature = "_Float32x(void)"
+used_by = ["glibc"]
+tests = ["rucc-sema::every_name_answered_here_is_a_row_of_the_table_and_says_it_is_done", "rucc-driver::an_interchange_infinity_or_nan_is_a_constant_and_not_a_call"]
+
+[[feature]]
+name = "__builtin_huge_valf32x"
+kind = "builtin"
+gcc_version = "7.0"
+status = "implemented"
+signature = "_Float32x(void)"
+used_by = ["glibc"]
+tests = ["rucc-sema::every_name_answered_here_is_a_row_of_the_table_and_says_it_is_done", "rucc-driver::an_interchange_infinity_or_nan_is_a_constant_and_not_a_call"]
+
+[[feature]]
+name = "__builtin_nanf32x"
+kind = "builtin"
+gcc_version = "7.0"
+status = "implemented"
+signature = "_Float32x(const char *)"
+library = "nanf32x"
+used_by = ["glibc"]
+tests = ["rucc-sema::every_name_answered_here_is_a_row_of_the_table_and_says_it_is_done", "rucc-driver::an_interchange_infinity_or_nan_is_a_constant_and_not_a_call"]
+
+[[feature]]
+name = "__builtin_nansf32x"
+kind = "builtin"
+gcc_version = "7.0"
+status = "implemented"
+signature = "_Float32x(const char *)"
+library = "nansf32x"
+used_by = ["glibc"]
+tests = ["rucc-sema::every_name_answered_here_is_a_row_of_the_table_and_says_it_is_done", "rucc-driver::an_interchange_infinity_or_nan_is_a_constant_and_not_a_call"]
+
+[[feature]]
+name = "__builtin_inff64x"
+kind = "builtin"
+gcc_version = "7.0"
+status = "implemented"
+signature = "_Float64x(void)"
+used_by = ["glibc"]
+tests = ["rucc-sema::every_name_answered_here_is_a_row_of_the_table_and_says_it_is_done", "rucc-driver::an_interchange_infinity_or_nan_is_a_constant_and_not_a_call"]
+
+[[feature]]
+name = "__builtin_huge_valf64x"
+kind = "builtin"
+gcc_version = "7.0"
+status = "implemented"
+signature = "_Float64x(void)"
+used_by = ["glibc"]
+tests = ["rucc-sema::every_name_answered_here_is_a_row_of_the_table_and_says_it_is_done", "rucc-driver::an_interchange_infinity_or_nan_is_a_constant_and_not_a_call"]
+
+[[feature]]
+name = "__builtin_nanf64x"
+kind = "builtin"
+gcc_version = "7.0"
+status = "implemented"
+signature = "_Float64x(const char *)"
+library = "nanf64x"
+used_by = ["glibc"]
+tests = ["rucc-sema::every_name_answered_here_is_a_row_of_the_table_and_says_it_is_done", "rucc-driver::an_interchange_infinity_or_nan_is_a_constant_and_not_a_call"]
+
+[[feature]]
+name = "__builtin_nansf64x"
+kind = "builtin"
+gcc_version = "7.0"
+status = "implemented"
+signature = "_Float64x(const char *)"
+library = "nansf64x"
+used_by = ["glibc"]
+tests = ["rucc-sema::every_name_answered_here_is_a_row_of_the_table_and_says_it_is_done", "rucc-driver::an_interchange_infinity_or_nan_is_a_constant_and_not_a_call"]
 
 [[feature]]
 name = "__builtin_nansd128"

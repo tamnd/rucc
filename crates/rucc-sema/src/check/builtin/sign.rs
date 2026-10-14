@@ -93,6 +93,19 @@ const FAMILY: &[Row] = &[
         at: FloatKind::Float,
     },
     Row { name: "__builtin_copysignl", library: None, op: Sign::Of, at: FloatKind::LongDouble },
+    // The interchange types, which glibc's `bits/floatn.h` spells for `fabsf128` and
+    // `copysignf128`. Not `_Float64x`, which is the x87 format on x86-64 and so has the same
+    // trouble as the `long double` pair. The plain names stay calls, as for `long double`.
+    Row { name: "__builtin_fabsf16", library: None, op: Sign::Clear, at: FloatKind::Float16 },
+    Row { name: "__builtin_copysignf16", library: None, op: Sign::Of, at: FloatKind::Float16 },
+    Row { name: "__builtin_fabsf32", library: None, op: Sign::Clear, at: FloatKind::Float32 },
+    Row { name: "__builtin_copysignf32", library: None, op: Sign::Of, at: FloatKind::Float32 },
+    Row { name: "__builtin_fabsf64", library: None, op: Sign::Clear, at: FloatKind::Float64 },
+    Row { name: "__builtin_copysignf64", library: None, op: Sign::Of, at: FloatKind::Float64 },
+    Row { name: "__builtin_fabsf128", library: None, op: Sign::Clear, at: FloatKind::Float128 },
+    Row { name: "__builtin_copysignf128", library: None, op: Sign::Of, at: FloatKind::Float128 },
+    Row { name: "__builtin_fabsf32x", library: None, op: Sign::Clear, at: FloatKind::Float32x },
+    Row { name: "__builtin_copysignf32x", library: None, op: Sign::Of, at: FloatKind::Float32x },
 ];
 
 /// Whether the roster has a row for this name, which is what the test next door asks.
@@ -115,6 +128,10 @@ impl Checker<'_> {
     ) -> Option<ExprId> {
         let spelled = self.text(name);
         let row = *FAMILY.iter().find(|row| row.name == spelled)?;
+        // A name over a type the target does not have is a name nothing declared.
+        if !self.has_float_kind(row.at) {
+            return None;
+        }
         Some(self.sign_call(row, args, span))
     }
 
