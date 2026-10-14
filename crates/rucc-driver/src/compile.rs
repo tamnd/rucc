@@ -11042,8 +11042,10 @@ float through_a_union(union u *p) { p->i = 1; return p->f; }\n";
     /// 7 or more.
     #[test]
     fn an_interchange_sign_builtin_is_a_mask_and_not_a_call() {
+        // The mask is on the word at the top of the value, in memory, as for the x87 format.
         let text = body("_Float128 f(_Float128 x) { return __builtin_fabsf128(x); }\n");
-        assert!(text.contains("bitcast.i128 %0"), "{text}");
+        assert!(text.contains("iconst.i16 32767"), "{text}");
+        assert!(text.contains("load.f128"), "{text}");
         assert!(!text.contains("call"), "{text}");
 
         let text =
