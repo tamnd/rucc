@@ -42,8 +42,8 @@
 //! mingw-w64 has no per architecture split and [`crate::Sysroot::splits_by_arch`] says so, and the
 //! `lib` half is what differs.
 //!
-//! For musl, `bin/sysroot` builds musl 1.2.5 for x86_64, aarch64, riscv64 and armv7 hard float, and
-//! the release `sysroots-2026-09-23` has the four archives, each about 2 MiB and installing to between
+//! For musl, `bin/sysroot` builds musl 1.2.6 for x86_64, aarch64, riscv64 and armv7 hard float, and
+//! the release `sysroots-2026-10-14` has the four archives, each about 2 MiB and installing to between
 //! 7 and 13 MB. They hold musl's headers and its static libraries and start files, and not the Linux
 //! uapi headers, which are [`KERNEL_HEADERS`] and fetched once for every Linux target. Both runs that
 //! produced them, on two machines, packed the same bytes.
@@ -130,8 +130,8 @@ pub const PINNED: &[Pinned] = &[
     },
     Pinned {
         tuple: "aarch64-linux-musl",
-        url: "https://github.com/tamnd/rucc-cross/releases/download/sysroots-2026-09-23/rucc-sysroot-aarch64-linux-musl.tar.gz",
-        sha256: "098c24c0c27d264dceaee76141f0933845dcc8a7c3a4b473954987f731fecde5",
+        url: "https://github.com/tamnd/rucc-cross/releases/download/sysroots-2026-10-14/rucc-sysroot-aarch64-linux-musl.tar.gz",
+        sha256: "17db6aa2eab617f2ff43577b4afdd0b23457b676329cefe3667b2cc971022e5f",
     },
     Pinned {
         tuple: "aarch64-windows-gnu",
@@ -145,8 +145,8 @@ pub const PINNED: &[Pinned] = &[
     },
     Pinned {
         tuple: "armv7-linux-musleabihf",
-        url: "https://github.com/tamnd/rucc-cross/releases/download/sysroots-2026-09-23/rucc-sysroot-armv7-linux-musleabihf.tar.gz",
-        sha256: "645ceef60e0302b260ad804569243c3470f7545f1b135a143f9b7ec8408b6f78",
+        url: "https://github.com/tamnd/rucc-cross/releases/download/sysroots-2026-10-14/rucc-sysroot-armv7-linux-musleabihf.tar.gz",
+        sha256: "ba5bbe85a4e4609b06628b89511c020fbcfc33534d8f8a9dcfdd3c86b2cd9f96",
     },
     Pinned {
         tuple: "i686-linux-gnu",
@@ -175,8 +175,8 @@ pub const PINNED: &[Pinned] = &[
     },
     Pinned {
         tuple: "riscv64-linux-musl",
-        url: "https://github.com/tamnd/rucc-cross/releases/download/sysroots-2026-09-23/rucc-sysroot-riscv64-linux-musl.tar.gz",
-        sha256: "00fc00f996d0a9a3de1cabd95840d423de1562ed5345dd5c47f1bf89b30f0b99",
+        url: "https://github.com/tamnd/rucc-cross/releases/download/sysroots-2026-10-14/rucc-sysroot-riscv64-linux-musl.tar.gz",
+        sha256: "4d138cf2329c88e3e9c46b1c71078ee4f9635a41cbbf88120606a0314953743c",
     },
     Pinned {
         tuple: "s390x-linux-gnu",
@@ -205,8 +205,8 @@ pub const PINNED: &[Pinned] = &[
     },
     Pinned {
         tuple: "x86_64-linux-musl",
-        url: "https://github.com/tamnd/rucc-cross/releases/download/sysroots-2026-09-23/rucc-sysroot-x86_64-linux-musl.tar.gz",
-        sha256: "93b42df66c0a7547c3e96cd5512267790df1ca0227a0000ba4f1808eb214c376",
+        url: "https://github.com/tamnd/rucc-cross/releases/download/sysroots-2026-10-14/rucc-sysroot-x86_64-linux-musl.tar.gz",
+        sha256: "e009c42e3bee375682c176af347f98eb42825cbef328e709e65ea9bf3ca82822",
     },
     Pinned {
         tuple: "x86_64-windows-gnu",
