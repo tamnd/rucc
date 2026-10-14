@@ -23,6 +23,28 @@
 
 use crate::swar;
 
+/// The ASCII letters, digits and underscore, which are the bytes [`Cursor::skip_word`] steps
+/// over in any word.
+static WORD: [bool; 256] = {
+    let mut table = [false; 256];
+    let mut b = 0;
+    while b < 256 {
+        table[b] = (b as u8).is_ascii_alphanumeric() || b == b'_' as usize;
+        b += 1;
+    }
+    table
+};
+
+/// The bytes that may begin a splice, a trigraph or a carriage return, which is the question
+/// [`Cursor::step_at`] asks of every byte. One load where it was three comparisons.
+static SPECIAL: [bool; 256] = {
+    let mut table = [false; 256];
+    table[b'\\' as usize] = true;
+    table[b'?' as usize] = true;
+    table[b'\r' as usize] = true;
+    table
+};
+
 /// One logical byte, and what it cost to get it.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) struct Step {
@@ -84,7 +106,7 @@ impl<'a> Cursor<'a> {
     #[inline]
     pub(crate) fn step_at(&self, at: u32) -> Option<Step> {
         let b = *self.src.get(at as usize)?;
-        if b != b'\\' && b != b'?' && b != b'\r' {
+        if !SPECIAL[b as usize] {
             return Some(Step { byte: b, next: at + 1, clean: true });
         }
         self.step_slow(at)
@@ -270,17 +292,27 @@ impl<'a> Cursor<'a> {
     /// it is not a sign, a backslash, a question mark or a carriage return, since `1e+5` is one
     /// token and the caller is the one that knows how. Anything else stops it and is the
     /// caller's to look at.
+    ///
+    /// An identifier, which is most of what a header is made of, takes the loop that asks one
+    /// table per byte, and a number the one that also has to look at what follows.
     #[inline]
     pub(crate) fn skip_word(&mut self, number: bool) {
         let src = self.src;
         let mut p = self.pos as usize;
+        if !number {
+            while p < src.len() && WORD[src[p] as usize] {
+                p += 1;
+            }
+            self.pos = p as u32;
+            return;
+        }
         while let Some(&b) = src.get(p) {
             let plain = match b {
-                b'e' | b'E' | b'p' | b'P' if number => {
+                b'e' | b'E' | b'p' | b'P' => {
                     !matches!(src.get(p + 1), Some(b'+' | b'-' | b'\\' | b'?' | b'\r'))
                 }
-                b'.' => number,
-                _ => b.is_ascii_alphanumeric() || b == b'_',
+                b'.' => true,
+                _ => WORD[b as usize],
             };
             if !plain {
                 break;

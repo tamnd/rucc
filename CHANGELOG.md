@@ -9,6 +9,10 @@ All notable changes are recorded here. The format follows [Keep a Changelog](htt
 - `__attribute__((simd))` builds the SSE2 vector versions of a function as gcc 16 does on x86-64 ELF, under the vector function ABI names `_ZGVbN2v_h` and `_ZGVbM2v_h` that a loop gcc vectorized against glibc's `<bits/math-vector.h>` calls: each version takes its lanes in `xmm` registers, calls the function once a lane and, for `inbranch`, only where the mask is set. The flag is checked in gcc's words, a type with no lane is warned of as gcc warns of it, and the AVX, AVX2 and AVX-512 versions are not built yet.
 - `cargo xtask budget` measures `-O2` compile time against clang and splits it across the seven phases of spec 42.7, and `-frucc-trace` now adds up the time per phase and keeps the writing out apart from the machine passes (#3665).
 
+### Changed
+
+- Read identifiers through a byte table in the lexer and compare short spellings in the interner as words, which takes 3.9% of the instructions off duk_replacements.c (233.9M to 224.7M) with every object the same as before (#3668).
+
 ### Fixed
 
 - `wcscpy`, `wcscat`, `wmemcpy` and the other wide string functions are interposed under `-fsafety`, and their lengths are counted in characters, so a wide copy into a buffer too small for it is refused (row S8). Juliet's 76 `CWE135` cases under CWE-121 and CWE-122, which size a buffer for a wide string with `strlen`, are now detected (#3667).
