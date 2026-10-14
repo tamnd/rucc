@@ -7523,9 +7523,12 @@ impl<'a> Lowering<'a> {
     /// the outputs are popped into their slots from the top down. That leaves the stack as empty
     /// as it was found only when the template popped every input it was handed and pushed every
     /// output it says it leaves, and gcc's rule for these statements says when that is: an input
-    /// tied to an output or named in the clobber list is one the template pops. So a statement
-    /// with an input it leaves behind is refused, as is one with an operand anywhere other than
-    /// `st(0)` and `st(1)`, since nothing here would know what to do with the stack after it.
+    /// tied to an output or named in the clobber list is one the template pops. An input the
+    /// template does not pop is under the outputs once it is done, and it is thrown away after the
+    /// outputs are popped. gcc asks that an input the template pops be nearer the top than one it
+    /// leaves, and a statement that does not keep to that is refused, as is one with an operand
+    /// anywhere other than `st(0)` and `st(1)`, since nothing here would know what to do with the
+    /// stack after it.
     ///
     /// The other operands of the same statement are not on the stack, and they go the way of any
     /// template kept as text, between the pushes and the pops. See [`Self::kept`]. musl's `fmodl`
@@ -7583,8 +7586,10 @@ impl<'a> Lowering<'a> {
             }
         }
 
-        // The inputs, one per depth and from the top down with no gap, and each one popped.
+        // The inputs, one per depth and from the top down with no gap. The ones the template pops
+        // are above the ones it leaves.
         let mut inputs: Vec<Option<Value>> = vec![None; 2];
+        let mut left = [false; 2];
         let mut outputs: Vec<Option<Value>> = vec![None; 2];
         for (index, operand) in list.iter().enumerate() {
             let Some(depth) = depths[index] else { continue };
@@ -7595,17 +7600,14 @@ impl<'a> Lowering<'a> {
             }
             let Some(value) = operand.value else { continue };
             // An output written `+` is an input tied to itself.
-            let consumed = operand.result.is_some() || operand.tied.is_some() || popped[depth];
-            if !consumed {
-                return Err(refused());
-            }
+            left[depth] = operand.result.is_none() && operand.tied.is_none() && !popped[depth];
             if inputs[depth].replace(value).is_some() {
                 return Err(refused());
             }
         }
         let gapless =
             |held: &[Option<Value>]| held.iter().skip_while(|it| it.is_some()).all(Option::is_none);
-        if !gapless(&inputs) || !gapless(&outputs) {
+        if !gapless(&inputs) || !gapless(&outputs) || (left[0] && inputs[1].is_some() && !left[1]) {
             return Err(refused());
         }
 
@@ -7712,6 +7714,13 @@ impl<'a> Lowering<'a> {
             let into = self.x87_slot(*value);
             let into = self.through(into);
             self.x87_at("fstp_t", span, into);
+        }
+        // musl's `fmodl` leaves the divisor in `st(1)` under the remainder.
+        for _ in left.iter().filter(|&&left| left) {
+            let symbol = self.names.intern("fstp %st(0)");
+            let opcode = self.named(x86_64::TEMPLATE);
+            let block = self.at.expect("a block is being filled");
+            self.out.build(block, opcode).at(span).symbol(symbol).finish();
         }
         Ok(())
     }
