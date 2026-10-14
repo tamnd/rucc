@@ -13,7 +13,7 @@
 //! # The rewrites
 //!
 //! Two kinds. The rules of `rules/`, one file per tier, which are matched against every
-//! instruction and are where anything new goes, and eight rewrites written out by hand below them.
+//! instruction and are where anything new goes, and nine rewrites written out by hand below them.
 //!
 //! ## The rules
 //!
@@ -230,6 +230,18 @@
 //! flag the exchange left. It is written by hand because the rule tables have no way to say that
 //! two operands are answers of one instruction.
 //!
+//! ### Two shifts by one amount
+//!
+//! `(a << s) - (b << s)` is `(a - b) << s`, and the same goes for `+`, `&`, `|` and `^`. A left
+//! shift is a multiplication by a power of two, which distributes over an addition or a
+//! subtraction modulo the width, and every bit of a bitwise operation moves the same way under any
+//! shift, so for those three a right shift distributes too. The perf uncore driver works out how
+//! far a counter moved as `(new << shift) - (prev << shift)` on a 64 bit value, and on i386 each
+//! of those shifts is a pair of `shld` and `shl` with a test of the amount, so one shift where gcc
+//! writes one is about ten instructions fewer (tamnd/rucc-kernel#5). It only fires when nothing
+//! else reads either shift, because otherwise both stay and the rewrite adds an instruction. It
+//! is written by hand because the rule tables cannot say that two operands are the same value.
+//!
 //! # Why it needs dead code elimination after it
 //!
 //! The rewrite turns the `xor` into the comparison and leaves the original comparison where it
@@ -312,6 +324,13 @@ const NARROWED: &str = "shift through a narrowing folded into the wide shift";
 
 /// Recorded for one of those that would have folded if there had been fuel for it.
 const NO_FUEL_NARROWED: &str = "shift through a narrowing left alone, the pass ran out of fuel";
+
+/// Recorded once for each pair of shifts by one amount turned into one shift.
+const DISTRIBUTED: &str = "operation on two shifts by the same amount done before one shift";
+
+/// Recorded for one of those that would have folded if there had been fuel for it.
+const NO_FUEL_DISTRIBUTED: &str =
+    "pair of shifts by one amount left alone, the pass ran out of fuel";
 
 /// Recorded once for each floating point comparison a constant or a repeated operand settles.
 const BOUNDED: &str = "floating point comparison settled by a constant or by one operand twice";
@@ -626,6 +645,10 @@ pub(crate) struct Finder<'a> {
     cfg: &'a Cfg,
     /// The matcher's two stacks. See [`identity`].
     stacks: (Vec<Term>, Match<Term>),
+    /// How many readers each value had when the walk started, for the rewrites that only pay
+    /// when what they replace goes. A value made during the walk is past the end, and is taken as
+    /// read by more than one.
+    uses: Vec<u32>,
 }
 
 impl<'a> Finder<'a> {
@@ -645,7 +668,7 @@ impl<'a> Finder<'a> {
             .and_then(|bytes| u32::try_from(bytes * 8).ok())
             .unwrap_or(64);
         let stacks = (Vec::with_capacity(16), Match { rule: 0, bindings: Vec::with_capacity(8) });
-        Self { address, cfg: an.cfg(func), stacks }
+        Self { address, cfg: an.cfg(func), stacks, uses: count(func) }
     }
 
     /// The first rewrite that fires on the instruction, what it is called, and what is said in
@@ -681,6 +704,9 @@ impl<'a> Finder<'a> {
         }
         if let Some(value) = exchanged_choice(func, inst) {
             return Some((Found::Rule(Rewrite::Value(value)), EXCHANGED, NO_FUEL_EXCHANGED));
+        }
+        if let Some(rewrite) = distributed_shift(func, inst, &self.uses) {
+            return Some((Found::Rule(rewrite), DISTRIBUTED, NO_FUEL_DISTRIBUTED));
         }
         let (rewrite, pattern) = identity(func, inst, self.address, &mut self.stacks)?;
         Some((Found::Rule(rewrite), pattern, NO_FUEL_RULE))
@@ -1532,6 +1558,49 @@ fn narrowed_shift(func: &Func, inst: Inst) -> Option<Rewrite> {
         }
         _ => None,
     }
+}
+
+/// One shift of `a op b` by `s`, for an `op` of `a << s` and `b << s` that nothing else reads.
+///
+/// For `and`, `or` and `xor` the two shifts can be any one of the three, as long as both are the
+/// same one. An addition or a subtraction only goes through a left shift, because a right shift
+/// drops the bits a carry or a borrow would have come out of.
+fn distributed_shift(func: &Func, inst: Inst, uses: &[u32]) -> Option<Rewrite> {
+    let data = &func[inst];
+    let ty = func[data.first_result?].ty;
+    if !ty.is_int() || !ty.is_scalar() {
+        return None;
+    }
+    let op = data.opcode;
+    let [lhs, rhs] = func[data.args] else { return None };
+    let alone = |value: Value| uses.get(value.index()) == Some(&1);
+    if lhs == rhs || !alone(lhs) || !alone(rhs) {
+        return None;
+    }
+    let (shift, [a, s]) = producer(func, lhs)?;
+    let (other, [b, t]) = producer(func, rhs)?;
+    let fits = match op {
+        Opcode::Add | Opcode::Sub => shift == Opcode::Shl,
+        Opcode::And | Opcode::Or | Opcode::Xor => {
+            matches!(shift, Opcode::Shl | Opcode::LShr | Opcode::AShr)
+        }
+        _ => false,
+    };
+    if !fits || other != shift || s != t || func[a].ty != ty {
+        return None;
+    }
+    let inner = Nested {
+        opcode: op,
+        pred: None,
+        bits: ty.bits(),
+        args: vec![Operand::Value(a), Operand::Value(b)],
+    };
+    Some(Rewrite::Built {
+        opcode: shift,
+        pred: None,
+        lhs: Operand::Built(Box::new(inner)),
+        rhs: Operand::Value(s),
+    })
 }
 
 /// The value, the shift and the wide width of a `trunc.iN (lshr.iW x a)` with `a` at least
@@ -3119,6 +3188,65 @@ mod tests {
         let quotient = operands(&func, result)[0];
         assert_eq!(came_from(&func, quotient).0, Opcode::LShr);
         assert_ne!(operands(&func, quotient)[0], x);
+    }
+
+    /// `op (shift a s) (shift b s)` returned from a function of `a`, `b` and `s`, multiplied by
+    /// the first shift when `shared` so that the shift has a second reader.
+    fn two_shifts(op: Opcode, shift: Opcode, shared: bool) -> (Func, Block, [Value; 3]) {
+        let ty = Type::int(64);
+        let (_, mut func, block) = one_block(ty);
+        let a = func.append_param(block, ty);
+        let b = func.append_param(block, ty);
+        let s = func.append_param(block, ty);
+        let mut build = Builder::new(&mut func, block);
+        let left = build.binary(shift, a, s, Flags::NONE);
+        let right = build.binary(shift, b, s, Flags::NONE);
+        let both = build.binary(op, left, right, Flags::NONE);
+        let both = if shared { build.binary(Opcode::Mul, both, left, Flags::NONE) } else { both };
+        build.ret(&[both]);
+        (func, block, [a, b, s])
+    }
+
+    /// `(new << shift) - (prev << shift)` is `(new - prev) << shift`, which is what the perf
+    /// uncore driver works out a counter's movement as, and the bitwise three go through a right
+    /// shift as well.
+    #[test]
+    fn an_operation_on_two_shifts_by_one_amount_is_done_before_one_shift() {
+        let cases = [
+            (Opcode::Sub, Opcode::Shl),
+            (Opcode::Add, Opcode::Shl),
+            (Opcode::And, Opcode::LShr),
+            (Opcode::Or, Opcode::AShr),
+            (Opcode::Xor, Opcode::Shl),
+        ];
+        for (op, shift) in cases {
+            let (mut func, block, [a, b, s]) = two_shifts(op, shift, false);
+            assert!(simplify(&mut func), "{op:?} of two {shift:?}");
+            let result = returned(&func, block);
+            assert_eq!(came_from(&func, result).0, shift);
+            let args = operands(&func, result);
+            assert_eq!(args[1], s);
+            assert_eq!(came_from(&func, args[0]).0, op);
+            assert_eq!(operands(&func, args[0]), vec![a, b]);
+        }
+    }
+
+    /// A sum of two right shifts is not the shift of the sum, because the carry out of the bits
+    /// the shift drops would reach the ones it keeps, and a shift something else reads stays
+    /// whatever happens, so taking it would add an instruction.
+    #[test]
+    fn two_shifts_a_carry_crosses_or_another_reader_keeps_are_left_alone() {
+        for (op, shift, shared) in
+            [(Opcode::Add, Opcode::LShr, false), (Opcode::Sub, Opcode::Shl, true)]
+        {
+            let (mut func, block, _) = two_shifts(op, shift, shared);
+            simplify(&mut func);
+            let mut result = returned(&func, block);
+            if shared {
+                result = operands(&func, result)[0];
+            }
+            assert_eq!(came_from(&func, result).0, op, "{op:?} of two {shift:?}");
+        }
     }
 
     /// Truncating an extension back to the width it came from is the value that was there.
