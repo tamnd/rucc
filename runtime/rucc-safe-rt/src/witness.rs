@@ -163,17 +163,42 @@ pub const fn word(ver: u64) -> Option<usize> {
 /// frame still on a live thread's stack whether it has returned or not, which is the point.
 #[must_use]
 pub unsafe fn gone(cap: &Cap) -> bool {
+    // SAFETY: the caller's contract, passed straight on.
+    unsafe { held(cap) }.is_some_and(|held| held != MARK | cap.ver >> SHIFT)
+}
+
+/// Whether `cap` is the capability of a local whose block has been left while its frame runs on.
+///
+/// That is a reason for [`gone`] that cannot be a later frame made in the same place, because the
+/// witness still holds the serial the capability was made with and only the mark says the block is
+/// shut. So a pointer with this capability is a pointer to that very local after its lifetime, and
+/// not a pointer with the same value into somebody else's.
+///
+/// # Safety
+///
+/// As [`gone`].
+#[must_use]
+pub unsafe fn left(cap: &Cap) -> bool {
+    // SAFETY: the caller's contract, passed straight on.
+    unsafe { held(cap) }.is_some_and(|held| held == SHUT | cap.ver >> SHIFT)
+}
+
+/// What the witness `cap` names holds, or `None` when `cap` is not a named local's with one.
+///
+/// # Safety
+///
+/// As [`gone`].
+unsafe fn held(cap: &Cap) -> Option<u64> {
     if !cap.is_named()
         || cap.meta.class() != Class::Automatic as u8
         || cap.ver == crate::plane::FOREIGN
         || cap.ver & 1 == 0
     {
-        return false;
+        return None;
     }
     let witness = (cap.ver & ADDRESS & !1) as *const u64;
     // SAFETY: the caller's contract.
-    let held = unsafe { witness.read_volatile() };
-    held != MARK | cap.ver >> SHIFT
+    Some(unsafe { witness.read_volatile() })
 }
 
 /// The names generated code is compiled against.
@@ -271,8 +296,10 @@ mod tests {
             let cap = recover::local((&raw const local).cast(), 4, &raw const witness);
             reopen(&raw mut witness);
             assert!(!gone(&cap), "opening an open witness leaves it alone");
+            assert!(!left(&cap));
             shut(&raw mut witness);
             assert!(gone(&cap));
+            assert!(left(&cap));
             shut(&raw mut witness);
             assert!(gone(&cap));
             let late = recover::local((&raw const local).cast(), 4, &raw const witness);
@@ -280,6 +307,7 @@ mod tests {
             reopen(&raw mut witness);
             assert!(!gone(&cap), "the same serial");
             close(&raw mut witness);
+            assert!(!left(&cap), "the frame returned, which is not a block left");
             reopen(&raw mut witness);
             assert!(gone(&cap), "a closed frame is not opened by a block");
             assert_eq!(witness, 0);
