@@ -51,12 +51,15 @@
 //! For glibc, `bin/glibc-sysroot` puts together the merged header tree of every pinned release from
 //! 2.28 to 2.44 with glibc 2.44's start files and `libc_nonshared.a`, for x86_64, i686, aarch64,
 //! armv7 hard float, riscv64, powerpc64le, s390x and loongarch64, and the release
-//! `sysroots-2026-09-24b` has the eight archives, each under 600 KB. The seven whose ABI has a glibc
+//! `sysroots-2026-10-14b` has the eight archives, each about 600 KB. The seven whose ABI has a glibc
 //! older than 2.33 also carry `libc_nonshared_stat.a`, the `stat` family those releases kept in
 //! `libc_nonshared.a`, which [`crate::link::LinkLine::glibc`] adds for a pin before 2.33. There is no `libc.so` in them,
 //! because the driver writes the stubs itself, and one archive serves every release of its target,
-//! which is [`pinned_for_target`]. server2 and server3 built them from separate inputs and packed
-//! the same bytes.
+//! which is [`pinned_for_target`]. Each family's `gnu/stubs.h` has the `__stub_` names that Debian's
+//! build of each release lists, guarded by release, so `__stub_lchmod` is there for x86_64 before
+//! 2.34 and not after. server3 built the archives, and server1 built the same header trees and the
+//! same `libc_nonshared_stat.a`. Every file but the `gnu/stubs` ones is the same as in
+//! `sysroots-2026-09-24b`, which server2 and server3 built to the same bytes.
 //!
 //! For WASI, `bin/wasi-sysroot` takes the C part of one preview out of the sysroot of wasi-sdk 34, `wasi-sysroot-34.0.tar.gz`, which it fetches by its sha256 `9d813544`. rucc does not build wasi-libc, because the bytes clang users link against are the bytes a rucc object has to link against too. The upstream archive is 119 MB and holds libc++ for four targets and two exception models, so the C headers, the static archives and the three start files of each preview are packed on their own, and the release `sysroots-2026-10-05` has the three archives, each about 1.5 MB. Every file in them is upstream's byte for byte. server2 and server3 produced the same bytes.
 //!
@@ -125,8 +128,8 @@ impl Pinned {
 pub const PINNED: &[Pinned] = &[
     Pinned {
         tuple: "aarch64-linux-gnu",
-        url: "https://github.com/tamnd/rucc-cross/releases/download/sysroots-2026-09-24b/rucc-sysroot-aarch64-linux-gnu.tar.gz",
-        sha256: "7a3e54260de1a07d00c7b6a1d8c4a3868367885d4aa96351b804a3a4c14e1a3c",
+        url: "https://github.com/tamnd/rucc-cross/releases/download/sysroots-2026-10-14b/rucc-sysroot-aarch64-linux-gnu.tar.gz",
+        sha256: "a67ed17c461aa8b589a50ece0a2a39ac38f76ea8d67f7c4d049768276c91e26f",
     },
     Pinned {
         tuple: "aarch64-linux-musl",
@@ -140,8 +143,8 @@ pub const PINNED: &[Pinned] = &[
     },
     Pinned {
         tuple: "armv7-linux-gnueabihf",
-        url: "https://github.com/tamnd/rucc-cross/releases/download/sysroots-2026-09-24b/rucc-sysroot-armv7-linux-gnueabihf.tar.gz",
-        sha256: "f96e369bdbe1013a2d8d162fce9fb83444835098c606f5e200f181db63ab011f",
+        url: "https://github.com/tamnd/rucc-cross/releases/download/sysroots-2026-10-14b/rucc-sysroot-armv7-linux-gnueabihf.tar.gz",
+        sha256: "9d025bcc030d6cdbc1190c61db7b8b14607b4c32fc33e4e1bf34cdc0d5f75a48",
     },
     Pinned {
         tuple: "armv7-linux-musleabihf",
@@ -150,8 +153,8 @@ pub const PINNED: &[Pinned] = &[
     },
     Pinned {
         tuple: "i686-linux-gnu",
-        url: "https://github.com/tamnd/rucc-cross/releases/download/sysroots-2026-09-24b/rucc-sysroot-i686-linux-gnu.tar.gz",
-        sha256: "6860bcb60e2079d7ba40f29d8ce6344da202affe0a0f9462d12652bff773d513",
+        url: "https://github.com/tamnd/rucc-cross/releases/download/sysroots-2026-10-14b/rucc-sysroot-i686-linux-gnu.tar.gz",
+        sha256: "03bb24908c6090da01685f52550158564bf9cd71945cae03b0bdd75ebf72238e",
     },
     Pinned {
         tuple: "i686-windows-gnu",
@@ -160,18 +163,18 @@ pub const PINNED: &[Pinned] = &[
     },
     Pinned {
         tuple: "loongarch64-linux-gnu",
-        url: "https://github.com/tamnd/rucc-cross/releases/download/sysroots-2026-09-24b/rucc-sysroot-loongarch64-linux-gnu.tar.gz",
-        sha256: "67e0565d9acc6a768dd2ad6318fab716c34bcbfaeb005398e38d4ca8d7f5c3c2",
+        url: "https://github.com/tamnd/rucc-cross/releases/download/sysroots-2026-10-14b/rucc-sysroot-loongarch64-linux-gnu.tar.gz",
+        sha256: "f8b098fb57259980bca8706feac0397c257372e446808f445c4f4987636a14fc",
     },
     Pinned {
         tuple: "powerpc64le-linux-gnu",
-        url: "https://github.com/tamnd/rucc-cross/releases/download/sysroots-2026-09-24b/rucc-sysroot-powerpc64le-linux-gnu.tar.gz",
-        sha256: "c5262070d3de6f6a91d6df9ee0acf32088d7d03720ce2bb650cae1f865d2ba05",
+        url: "https://github.com/tamnd/rucc-cross/releases/download/sysroots-2026-10-14b/rucc-sysroot-powerpc64le-linux-gnu.tar.gz",
+        sha256: "33e37324413cd24e7baaf4728fd85752813e7c037ec8d07d0781e39173338a35",
     },
     Pinned {
         tuple: "riscv64-linux-gnu",
-        url: "https://github.com/tamnd/rucc-cross/releases/download/sysroots-2026-09-24b/rucc-sysroot-riscv64-linux-gnu.tar.gz",
-        sha256: "6157fb51fb66fac4fedfe5233d0a2857bcce346cd8f376c595db558e0470c42f",
+        url: "https://github.com/tamnd/rucc-cross/releases/download/sysroots-2026-10-14b/rucc-sysroot-riscv64-linux-gnu.tar.gz",
+        sha256: "a7d64d533a0c3fd6ed493b8078e5c1ae7c51dbc1f06eed3bd3df542c68bdf215",
     },
     Pinned {
         tuple: "riscv64-linux-musl",
@@ -180,8 +183,8 @@ pub const PINNED: &[Pinned] = &[
     },
     Pinned {
         tuple: "s390x-linux-gnu",
-        url: "https://github.com/tamnd/rucc-cross/releases/download/sysroots-2026-09-24b/rucc-sysroot-s390x-linux-gnu.tar.gz",
-        sha256: "ac73fa903ef8816f2eebb35d106bcf6aabdc3e5c22e94646af196df8d5615b56",
+        url: "https://github.com/tamnd/rucc-cross/releases/download/sysroots-2026-10-14b/rucc-sysroot-s390x-linux-gnu.tar.gz",
+        sha256: "7d849a4dffe5a7af1124df940630b0c6abeb9487e6bc5881d8a7c63a4473a311",
     },
     Pinned {
         tuple: "wasm32-wasip1",
@@ -200,8 +203,8 @@ pub const PINNED: &[Pinned] = &[
     },
     Pinned {
         tuple: "x86_64-linux-gnu",
-        url: "https://github.com/tamnd/rucc-cross/releases/download/sysroots-2026-09-24b/rucc-sysroot-x86_64-linux-gnu.tar.gz",
-        sha256: "a951b219c641ee0b17e228adc8e43f36eaa70ee255d3c6f7717ec39c41e8b5b8",
+        url: "https://github.com/tamnd/rucc-cross/releases/download/sysroots-2026-10-14b/rucc-sysroot-x86_64-linux-gnu.tar.gz",
+        sha256: "3a7dfa6ddac1ca1f4fcf43c5c9cc34ca5a4cdc092addf575b8036e98a1511d98",
     },
     Pinned {
         tuple: "x86_64-linux-musl",

@@ -10,6 +10,7 @@ All notable changes are recorded here. The format follows [Keep a Changelog](htt
 
 ### Fixed
 
+- The glibc sysroots now have the real `gnu/stubs.h`. It used to be glibc's prologue with no `__stub_` macro in it, because `make install-headers` cannot write the list, so a configure script that reads the header took every function as working. The sysroots in `sysroots-2026-10-14b` carry the list of each release and ABI, measured from Debian's libc6-dev packages by tamnd/rucc-cross#55, and `stubs.h` picks the file for the target the way glibc's does. `--target=x86_64-linux-gnu.2.28` now sees `__stub_lchmod` and `__stub_sstk`, and 2.44 sees neither. No other file in the archives changed (#941).
 - The glibc stubs no longer offer a default definition of a name that glibc keeps only for old programs, such as `xdr_opaque` or `__exp_finite`. A real glibc refuses a new link to these names, and rucc linked them before, because an abilist does not show them. `crates/rucc-stub/glibc/compat.txt` lists them with the first release where each one has no default. It is made from Debian's libc6 packages by `bin/glibc-compat` in tamnd/rucc-cross. At glibc 2.39 the stubs now agree with Ubuntu's libraries on every one of these names on seven architectures (#920).
 
 ## 0.30.8
