@@ -10995,6 +10995,69 @@ float through_a_union(union u *p) { p->i = 1; return p->f; }\n";
         assert!(text.contains("bitcast.i64 %1"), "{text}");
     }
 
+    /// The infinities and nans of the interchange types are constants, as for `double`.
+    ///
+    /// glibc's `math.h` writes `HUGE_VAL_F128` as `__builtin_huge_valf128 ()` once `__GNUC__` is
+    /// 7 or more, and a program that put it in a static initializer was refused. The encodings
+    /// are the ones gcc 13 gives on x86-64, where `_Float64x` is the x87 format.
+    #[test]
+    fn an_interchange_infinity_or_nan_is_a_constant_and_not_a_call() {
+        let text = ir(concat!(
+            "_Float128 a = __builtin_huge_valf128();\n",
+            "_Float32 b = __builtin_inff32();\n",
+            "_Float64 c = __builtin_nanf64(\"\");\n",
+            "_Float32x d = __builtin_nansf32x(\"\");\n",
+            "_Float64x e = __builtin_inff64x();\n",
+            "_Float128 f = __builtin_nanf128(\"0x1\");\n",
+            "_Float16 g = __builtin_inff16();\n",
+        ));
+        assert!(text.contains("global @a : f128 = 0x7fff0000000000000000000000000000,"), "{text}");
+        assert!(text.contains("global @b : f32 = 0x7f800000,"), "{text}");
+        assert!(text.contains("global @c : f64 = 0x7ff8000000000000,"), "{text}");
+        assert!(text.contains("global @d : f64 = 0x7ff4000000000000,"), "{text}");
+        assert!(text.contains("f80 0x7fff8000000000000000"), "{text}");
+        assert!(text.contains("global @f : f128 = 0x7fff8000000000000000000000000001,"), "{text}");
+        assert!(text.contains("global @g : f16 = 0x7c00,"), "{text}");
+        assert!(!text.contains("call"), "{text}");
+
+        // A payload that is not known until run time is the library's, as for `double`.
+        let text = ir("_Float128 f(const char *p) { return __builtin_nanf128(p); }\n");
+        assert_eq!(text.matches("call @nanf128(").count(), 1, "{text}");
+
+        // A target with no `_Float128` has no builtin over it either.
+        let mut opts = options();
+        opts.emit = EmitKind::Ir;
+        opts.target = "wasm32-wasip1".parse::<Triple>().unwrap();
+        let result = run(&opts, "double f(void) { return __builtin_inff128(); }\n");
+        assert!(
+            result.messages.iter().any(|m| m.contains("implicit declaration of function")),
+            "{:?}",
+            result.messages
+        );
+    }
+
+    /// The sign builtins of the interchange types are a mask over the bits, as for `double`.
+    ///
+    /// glibc's `bits/floatn.h` writes `fabsf128` and `copysignf128` with these once `__GNUC__` is
+    /// 7 or more.
+    #[test]
+    fn an_interchange_sign_builtin_is_a_mask_and_not_a_call() {
+        // The mask is on the word at the top of the value, in memory, as for the x87 format.
+        let text = body("_Float128 f(_Float128 x) { return __builtin_fabsf128(x); }\n");
+        assert!(text.contains("iconst.i16 32767"), "{text}");
+        assert!(text.contains("load.f128"), "{text}");
+        assert!(!text.contains("call"), "{text}");
+
+        let text =
+            body("_Float32 f(_Float32 x, _Float32 y) { return __builtin_copysignf32(x, y); }\n");
+        assert!(text.contains("bitcast.i32 %0"), "{text}");
+        assert!(!text.contains("call"), "{text}");
+
+        let text = body("_Float32x f(_Float32x x) { return __builtin_fabsf32x(x); }\n");
+        assert!(text.contains("bitcast.i64 %0"), "{text}");
+        assert!(!text.contains("call"), "{text}");
+    }
+
     /// A shuffle reads each lane of the answer out of a copy of its sources, at the index the mask
     /// lane gives with only its low bits kept, and is not a call.
     ///

@@ -101,6 +101,33 @@ const TABLE: &[(&str, Answer)] = &[
     ("__builtin_nansd32", Answer::Nan(FloatKind::Decimal32, false)),
     ("__builtin_nansd64", Answer::Nan(FloatKind::Decimal64, false)),
     ("__builtin_nansd128", Answer::Nan(FloatKind::Decimal128, false)),
+    // The `_FloatN` and `_FloatNx` names, which glibc's `bits/floatn-common.h` spells for
+    // `HUGE_VAL_F128`, `INFINITY` and the rest when the compiler says it is gcc 7 or later. A
+    // name for a type the target lacks is refused, as for the decimal names.
+    ("__builtin_inff16", Answer::Infinity(FloatKind::Float16)),
+    ("__builtin_huge_valf16", Answer::Infinity(FloatKind::Float16)),
+    ("__builtin_nanf16", Answer::Nan(FloatKind::Float16, true)),
+    ("__builtin_nansf16", Answer::Nan(FloatKind::Float16, false)),
+    ("__builtin_inff32", Answer::Infinity(FloatKind::Float32)),
+    ("__builtin_huge_valf32", Answer::Infinity(FloatKind::Float32)),
+    ("__builtin_nanf32", Answer::Nan(FloatKind::Float32, true)),
+    ("__builtin_nansf32", Answer::Nan(FloatKind::Float32, false)),
+    ("__builtin_inff64", Answer::Infinity(FloatKind::Float64)),
+    ("__builtin_huge_valf64", Answer::Infinity(FloatKind::Float64)),
+    ("__builtin_nanf64", Answer::Nan(FloatKind::Float64, true)),
+    ("__builtin_nansf64", Answer::Nan(FloatKind::Float64, false)),
+    ("__builtin_inff128", Answer::Infinity(FloatKind::Float128)),
+    ("__builtin_huge_valf128", Answer::Infinity(FloatKind::Float128)),
+    ("__builtin_nanf128", Answer::Nan(FloatKind::Float128, true)),
+    ("__builtin_nansf128", Answer::Nan(FloatKind::Float128, false)),
+    ("__builtin_inff32x", Answer::Infinity(FloatKind::Float32x)),
+    ("__builtin_huge_valf32x", Answer::Infinity(FloatKind::Float32x)),
+    ("__builtin_nanf32x", Answer::Nan(FloatKind::Float32x, true)),
+    ("__builtin_nansf32x", Answer::Nan(FloatKind::Float32x, false)),
+    ("__builtin_inff64x", Answer::Infinity(FloatKind::Float64x)),
+    ("__builtin_huge_valf64x", Answer::Infinity(FloatKind::Float64x)),
+    ("__builtin_nanf64x", Answer::Nan(FloatKind::Float64x, true)),
+    ("__builtin_nansf64x", Answer::Nan(FloatKind::Float64x, false)),
     ("__builtin_strlen", Answer::Length),
     ("__builtin_strcmp", Answer::Compare),
 ];
@@ -119,7 +146,7 @@ impl Checker<'_> {
         let spelled = self.text(name);
         let &(_, answer) = TABLE.iter().find(|(row, _)| *row == spelled)?;
         if let Answer::Infinity(kind) | Answer::Nan(kind, _) = answer {
-            if kind.is_decimal() && !self.cx.target.has_decimal_float {
+            if !self.has_float_kind(kind) {
                 return None;
             }
         }
