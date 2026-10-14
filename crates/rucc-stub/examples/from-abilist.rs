@@ -25,7 +25,7 @@
 
 use std::path::PathBuf;
 
-use rucc_stub::{Library, blob};
+use rucc_stub::{Library, blob, glibc};
 use rucc_tuple::TargetTuple;
 
 fn main() {
@@ -66,12 +66,20 @@ fn main() {
     // A dash asks for everything the description has, and a node asks for section 9.2's filtering,
     // which is how a ceiling taken from a real library reaches the symbol set.
     let found = if node == "-" { carried.exports(tuple) } else { carried.exports_at(tuple, node) };
-    let exports = match found {
+    let mut exports = match found {
         Ok(exports) => exports,
         Err(why) => die(&format!("the description has nothing for {tuple} at {node}: {why}")),
     };
     println!("ceiling={node}");
     println!("exported={}", exports.symbols.len());
+
+    // The names glibc keeps only for old programs, which the abilist marks as defaults like the rest.
+    // A dash has no release, so every name on the list counts.
+    let minor =
+        node.strip_prefix("GLIBC_2.").and_then(|minor| minor.parse().ok()).unwrap_or(u32::MAX);
+    if let Some(arch) = glibc::architecture(target) {
+        println!("compat={}", glibc::compat_only("libc", arch, minor, &mut exports.symbols));
+    }
 
     // `libc.so.6` because that is what the real library calls itself, and the comparison is against
     // the real library. The loader the description needs is not in an abilist and is not what this
