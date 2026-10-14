@@ -634,6 +634,14 @@ pub(crate) fn taken(func: &Func, term: Inst, subst: &Bindings) -> Option<BlockCa
     match data.opcode {
         Opcode::BrIf => {
             let Extra::Targets(targets) = data.extra else { return None };
+            // A branch on `unwound` is the call's row of the call site table, and its first arm
+            // is the pad. A jump in its place loses the row, and the unwind then passes the frame
+            // by without running the pad. The other arm is often a dead end, as after an inlined
+            // `_Unwind_Resume`, and the call can still unwind. So it stays a branch.
+            let def = func[resolve(subst, arg)].def;
+            if matches!(def, Def::Result { inst, .. } if func[inst].opcode == Opcode::Unwound) {
+                return None;
+            }
             if let Some(call) = one_place(func, &func[targets]) {
                 return Some(call);
             }
@@ -1682,6 +1690,43 @@ block2:
         });
         assert!(!looped, "{printed}");
         assert!(printed.contains("unreachable"), "{printed}");
+    }
+
+    #[test]
+    fn a_branch_on_unwound_keeps_its_pad_when_the_other_arm_is_a_dead_end() {
+        // The resume of a callee's pad after inlining. An unwind out of the resume has to reach
+        // the caller's pad, so the branch is kept even though the other arm is `unreachable`.
+        let text = "\
+; ModuleID = 't.c'
+; format 0
+target triple = \"x86_64-unknown-linux-gnu\"
+target datalayout = \"e-p:64:64-i64:64-f80:128-S128\"
+
+func @_Unwind_Resume(ptr), linkage(external);
+
+func @outer(ptr), linkage(external);
+
+func @f(ptr, ptr) {
+block0(%0: ptr, %1: ptr):
+    call @_Unwind_Resume(%0) : (ptr)
+    %2 = unwound.i1
+    br_if %2, block1, block2
+block1:
+    %3 = landing.ptr
+    call @outer(%1) : (ptr)
+    call @_Unwind_Resume(%3) : (ptr)
+    unreachable
+block2:
+    unreachable
+}
+";
+        let mut names = Interner::new();
+        let mut module = rucc_ir::parse(text, &mut names).expect("the fixture parses");
+        let id = module.funcs().last().expect("there is a function");
+        simplify(&mut module[id]);
+        let printed = rucc_ir::print(&module, &names);
+        assert!(printed.contains("br_if %2, block1, block2"), "{printed}");
+        assert!(printed.contains("landing.ptr"), "{printed}");
     }
 
     #[test]
