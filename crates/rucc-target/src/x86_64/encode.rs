@@ -3384,6 +3384,25 @@ static ENCODINGS: &[Encoding] = &[
     bytes("fldz", &NO_ARGS, Long, &[0xD9, 0xEE], NO_MODRM, NO_IMM),
     bytes("fnstsw", &R, Long, &[0xDF, 0xE0], NO_MODRM, NO_IMM),
     bytes("fnstsw", &M, Long, &[0xDD], ext(0, 7), NO_IMM),
+    // The stores that keep the value on the stack, the two byte integers and the conversions that
+    // cut toward zero whatever the control word says. The compiler writes none of these either.
+    // musl's `src/math/x86_64` writes `fsts` and `fistl` by hand, and the rest are the other
+    // widths of the same rows, so that a file which writes one width does not fail on the next.
+    bytes("fsts", &M, Long, &[0xD9], ext(0, 2), NO_IMM),
+    bytes("fstl", &M, Long, &[0xDD], ext(0, 2), NO_IMM),
+    bytes("fists", &M, Long, &[0xDF], ext(0, 2), NO_IMM),
+    bytes("fistl", &M, Long, &[0xDB], ext(0, 2), NO_IMM),
+    bytes("fistps", &M, Long, &[0xDF], ext(0, 3), NO_IMM),
+    bytes("filds", &M, Long, &[0xDF], ext(0, 0), NO_IMM),
+    bytes("fisttps", &M, Long, &[0xDF], ext(0, 1), NO_IMM),
+    bytes("fisttpl", &M, Long, &[0xDB], ext(0, 1), NO_IMM),
+    bytes("fisttpll", &M, Long, &[0xDD], ext(0, 1), NO_IMM),
+    // The comparisons that pop two, and the stack pointer moved by hand.
+    bytes("fucompp", &NO_ARGS, Long, &[0xDA, 0xE9], NO_MODRM, NO_IMM),
+    bytes("fcompp", &NO_ARGS, Long, &[0xDE, 0xD9], NO_MODRM, NO_IMM),
+    bytes("fdecstp", &NO_ARGS, Long, &[0xD9, 0xF6], NO_MODRM, NO_IMM),
+    bytes("fincstp", &NO_ARGS, Long, &[0xD9, 0xF7], NO_MODRM, NO_IMM),
+    bytes("fnop", &NO_ARGS, Long, &[0xD9, 0xD0], NO_MODRM, NO_IMM),
     // AVX-512, which is only what the intrinsics in the runtime headers write. Each row's size is
     // the mandatory prefix and the wide bit is on the `Evex`, since the two are separate bits in
     // the prefix and the element size is what the wide bit says here. A row that also has a VEX
@@ -6219,6 +6238,16 @@ mod tests {
         assert_eq!(hex("fildl", &[Value::Mem(frame)]), "db 45 f0");
         let stack = Addr { base: Some(RSP), disp: 8, ..Addr::default() };
         assert_eq!(hex("fistpll", &[Value::Mem(stack)]), "df 7c 24 08");
+        // The ones gas writes for musl's hand written `long double` functions.
+        assert_eq!(hex("fsts", &[Value::Mem(stack)]), "d9 54 24 08");
+        assert_eq!(hex("fstl", &[Value::Mem(stack)]), "dd 54 24 08");
+        assert_eq!(hex("fists", &[Value::Mem(stack)]), "df 54 24 08");
+        assert_eq!(hex("fistl", &[Value::Mem(stack)]), "db 54 24 08");
+        assert_eq!(hex("fistps", &[Value::Mem(stack)]), "df 5c 24 08");
+        assert_eq!(hex("filds", &[Value::Mem(stack)]), "df 44 24 08");
+        assert_eq!(hex("fisttps", &[Value::Mem(stack)]), "df 4c 24 08");
+        assert_eq!(hex("fisttpl", &[Value::Mem(stack)]), "db 4c 24 08");
+        assert_eq!(hex("fisttpll", &[Value::Mem(stack)]), "dd 4c 24 08");
     }
 
     /// The x87 arithmetic, which is two constant bytes each and nothing worked out from anything.
@@ -6251,6 +6280,11 @@ mod tests {
         assert_eq!(hex("fsqrt", &[]), "d9 fa");
         assert_eq!(hex("fldpi", &[]), "d9 eb");
         assert_eq!(hex("fldz", &[]), "d9 ee");
+        assert_eq!(hex("fucompp", &[]), "da e9");
+        assert_eq!(hex("fcompp", &[]), "de d9");
+        assert_eq!(hex("fdecstp", &[]), "d9 f6");
+        assert_eq!(hex("fincstp", &[]), "d9 f7");
+        assert_eq!(hex("fnop", &[]), "d9 d0");
         assert_eq!(hex("fnstsw", &[Value::Reg(RAX, Width::Word)]), "df e0");
     }
 
