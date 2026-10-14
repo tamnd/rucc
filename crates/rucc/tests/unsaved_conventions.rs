@@ -119,8 +119,8 @@ fn a_function_that_keeps_nothing_pushes_nothing_it_writes() {
          long plain(long a, long b) { TRASH; return a + b; }\n",
     );
     for name in ["n", "p"] {
-        let pushed: Vec<&&str> = body(&out, name)
-            .iter()
+        let pushed: Vec<&str> = body(&out, name)
+            .into_iter()
             .filter(|line| line.starts_with("push") && !line.contains("%rbp"))
             .collect();
         assert!(pushed.is_empty(), "{name} saves {pushed:?}:\n{out}");
@@ -153,25 +153,19 @@ fn what_gcc_says_of_the_unsaved_conventions_is_said_in_its_words() {
         ),
         (
             "__attribute__((preserve_none, no_callee_saved_registers)) void g(void);\n",
-            &[
-                "error: 'no_callee_saved_registers' and 'preserve_none' attributes are not \
-                 compatible",
-            ],
+            &["error: 'no_callee_saved_registers' and 'preserve_none' attributes are not \
+                 compatible"],
         ),
         (
             "__attribute__((preserve_none, no_caller_saved_registers)) void h(void);\n",
-            &[
-                "error: 'no_caller_saved_registers' and 'preserve_none' attributes are not \
-                 compatible",
-            ],
+            &["error: 'no_caller_saved_registers' and 'preserve_none' attributes are not \
+                 compatible"],
         ),
         (
             "__attribute__((no_callee_saved_registers)) void k(void) \
              __attribute__((no_caller_saved_registers));\n",
-            &[
-                "error: 'no_caller_saved_registers' and 'no_callee_saved_registers' attributes \
-                 are not compatible",
-            ],
+            &["error: 'no_caller_saved_registers' and 'no_callee_saved_registers' attributes \
+                 are not compatible"],
         ),
         (
             "typedef void (__attribute__((preserve_none)) *pn_t)(void);\n\
@@ -229,11 +223,8 @@ fn the_unsaved_conventions_are_there_on_x86_64_elf_alone() {
         assert!(ok && err.is_empty(), "{target}: {err}");
         assert!(!out.contains("asked"), "{target}:\n{out}");
         for name in ["preserve_none", "no_callee_saved_registers"] {
-            let (ok, _, err) = assembly(
-                "refused",
-                target,
-                &format!("__attribute__(({name})) void f(void);\n"),
-            );
+            let (ok, _, err) =
+                assembly("refused", target, &format!("__attribute__(({name})) void f(void);\n"));
             assert!(!ok, "{target}: {name}");
             assert!(err.contains(&format!("'{name}' attribute is not supported")), "{err}");
         }
