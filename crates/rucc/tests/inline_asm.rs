@@ -611,13 +611,15 @@ fn a_long_double_operand_is_pushed_onto_the_x87_stack_and_popped_off_it() {
 }
 
 #[test]
-fn an_x87_input_the_template_leaves_on_the_stack_is_refused() {
+fn an_x87_input_the_template_leaves_on_the_stack_is_popped_after_it() {
     // Nothing ties the input to an output and the clobber list does not say it is popped, so the
-    // template leaves it behind, and nothing here pops what a template left.
-    let source = "void f(long double x) { __asm__ volatile (\"fld %%st\" : : \"t\" (x)); }\n";
-    let (ok, _, said) = run("x87-left", source);
-    assert!(!ok, "a statement that leaves the stack deeper than it found it was accepted");
-    assert!(said.contains("operand"), "{said}");
+    // template leaves it behind. gcc pops it after the template, and so does rucc.
+    let source = "void f(long double x) { __asm__ volatile (\"fxam\" : : \"t\" (x)); }\n";
+    let body = body(&asm("x87-left", source), "f");
+    let push = body.find("fldt").unwrap_or_else(|| panic!("nothing was pushed:\n{body}"));
+    let run = body.find("fxam").unwrap_or_else(|| panic!("the template is missing:\n{body}"));
+    let pop = body[run..].find("fstp %st(0)").unwrap_or_else(|| panic!("nothing was popped:\n{body}"));
+    assert!(push < run && pop > 0, "{body}");
 }
 
 #[test]
