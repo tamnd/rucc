@@ -87,6 +87,7 @@ mod noinit;
 mod nonnull;
 mod nonnull_if;
 mod shared;
+mod simd;
 mod sse_regparm;
 mod stmt;
 mod string_arg;
@@ -476,6 +477,7 @@ impl<'a> Checker<'a> {
             self.check_decl(decl);
         }
         self.check_resolvers();
+        self.build_simd_clones();
     }
 
     /// Checks one expression and gives back the node it became.

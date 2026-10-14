@@ -703,6 +703,16 @@ tests = ["rucc::every_version_is_built_with_a_resolver_and_an_indirect_function"
 notes = "On x86-64 ELF, built the way gcc 16 builds it: a local function `f.<suffix>` for each version, `f.avx2` and `f.arch_x86_64_v3` and `f.default`, a resolver `f.resolver` that calls `__cpu_indicator_init` and picks the first version in gcc's priority order whose bit libgcc set, weak for an external function and local for a `static` one, and `f` itself an indirect function bound to it. The versions are the twenty extensions gcc dispatches on and the four psABI levels, strings are split on commas, a name written twice is built once and the last declaration's list stands. What gcc refuses is refused in its words with E0805 and what it drops, one name alone, a `target` or `always_inline` beside it, the attribute on an object, is dropped with its warnings under `-Wattributes`. `arch=` naming a processor rather than a level is refused with E0806, and every other target with E0807, Windows and macOS in gcc's words since neither has indirect functions, and `__has_attribute` answers no there. The code generator does not choose instructions by extension yet, so the versions are the same code and differ in what the inliner may copy into them."
 
 [[feature]]
+name = "simd"
+kind = "attribute"
+gcc_version = "6.0"
+status = "partial"
+targets = ["x86-64-elf"]
+used_by = ["glibc"]
+tests = ["rucc::the_sse2_versions_are_built_under_the_vector_abi_names", "rucc::the_lanes_follow_the_characteristic_type", "rucc::only_an_emitted_external_definition_gets_versions", "rucc::what_gcc_refuses_is_refused_in_its_words", "rucc::a_type_without_a_lane_is_warned_about_last_function_first", "rucc::the_versions_give_each_lane_its_call", "rucc::has_attribute_answers_yes_only_where_it_is_built"]
+notes = "On x86-64 ELF, a definition the unit emits with external linkage gets the SSE2 versions of gcc 16, under the vector function ABI names `_ZGVbN<lanes><v per parameter>_<symbol>` for `notinbranch` and `_ZGVbM...` for `inbranch`, both when the attribute has no argument, and every declaration adds to what is asked for. The lanes are as many as fit in sixteen bytes of the return type, or of the first parameter for a `void` function, or of `int`, a narrower parameter comes in one vector and a wider one in several, a pointer is a lane of `long`, and the mask is a vector of integers as wide as that type with a lane wanted when it is not zero. Each version calls the function once for each lane, and a lane the mask leaves out is zero. A structure, complex, `long double`, `__int128` or `_Float16` parameter or return type gets gcc's warning, E0863, last function first as gcc gives them, and no versions, and an `_Atomic` parameter gets gcc's `-Wopenmp` warning, E0864. What gcc refuses in the arguments is refused in its words with E0862, and the attribute on an object is dropped with its warning under `-Wattributes`. Not built: the AVX, AVX2 and AVX-512 versions, `_ZGVc`, `_ZGVd` and `_ZGVe`, since the code generator has no 32 or 64 byte registers to pass them in, so a loop gcc vectorized for one of those calls a name the link does not find. A `static` definition gets no versions, where gcc keeps local ones at `-O0`, and on other targets the attribute is read and nothing is built."
+
+[[feature]]
 name = "optimize"
 kind = "attribute"
 gcc_version = "4.4"

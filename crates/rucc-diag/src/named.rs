@@ -80,6 +80,7 @@ const OPTIONS: &[(&str, &str)] = &[
     ("E0854", "switch-default"),
     ("E0855", "switch-bool"),
     ("E0857", "maybe-musttail-local-addr"),
+    ("E0864", "openmp"),
     ("W0331", "cpp"),
     ("W0333", "invalid-memory-model"),
     ("W0334", "expansion-to-defined"),
