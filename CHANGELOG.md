@@ -15,6 +15,7 @@ All notable changes are recorded here. The format follows [Keep a Changelog](htt
 - Skip the attribute checks for declarations and parameters that have no attributes, and keep what sema learns about each attribute name, which takes 6.2% of the instructions off duk_replacements.c (224.7M to 210.8M) with every object the same as before (#3669).
 - Find macro definitions by symbol number rather than through a hash map, and reuse the last hide set union when marking a substitution, which takes 2.1% of the instructions off duk_replacements.c (210.8M to 206.3M) with every object the same as before (#3670).
 - Jump over the lines of a skipped group to the next byte that could matter, scan block comment bodies past newlines, look at the first two bytes before a blank run by hand, and reserve the symbols for __VA_ARGS__, __VA_OPT__, 0 and 1, which takes 10.4% of the instructions off duk_replacements.c (206.3M to 184.9M) with every object the same as before (#3671).
+- Write the body of an object-like macro with no operators or parameters straight onto the rescan list rather than through two lists of its own, which takes 2.1% of the instructions off duk_replacements.c (184.9M to 181.1M) with every object the same as before (#3672).
 
 ### Fixed
 
