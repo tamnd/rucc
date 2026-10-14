@@ -67,7 +67,7 @@ use rucc_ir::{Block, Def, Extra, Flags, Func, Inst, MemOrder, Opcode};
 
 use crate::purity::{Callee, Facts};
 use crate::uses::{count, operands};
-use crate::{Analyses, Analysis, Fuel, Pass, Preserved, Stats};
+use crate::{Analyses, Analysis, Fuel, Pass, Phase, Preserved, Stats};
 
 /// Recorded once for each instruction taken out.
 const REMOVED: &str = "instruction with no effects and no users removed";
@@ -109,6 +109,10 @@ impl Pass for Dce {
 
     fn describe(&self) -> &'static str {
         "an instruction with no effects whose results nothing uses is removed"
+    }
+
+    fn phase(&self) -> Phase {
+        Phase::Scalar
     }
 
     fn preserves(&self) -> Preserved {

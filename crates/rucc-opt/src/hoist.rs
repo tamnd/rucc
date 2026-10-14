@@ -229,7 +229,7 @@ use crate::range::query::Ranges;
 use crate::rules::safety;
 use crate::scev::{Anchor, Evolution, Invariant, Plain, Reading, Scev};
 use crate::trip::{Around, counted, covered, inst_of};
-use crate::{Analyses, Analysis, Fuel, Pass, Preserved, Stats};
+use crate::{Analyses, Analysis, Fuel, Pass, Phase, Preserved, Stats};
 
 // What is reported when a check stays where it is says "check" rather than naming which of the
 // three kinds it is, and that is deliberate. Every one of these reasons is about the loop or about
@@ -324,6 +324,10 @@ impl Pass for Hoist {
 
     fn describe(&self) -> &'static str {
         "a check in a counted loop becomes one check in front of the loop"
+    }
+
+    fn phase(&self) -> Phase {
+        Phase::Scalar
     }
 
     fn preserves(&self) -> Preserved {

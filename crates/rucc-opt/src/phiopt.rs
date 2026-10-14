@@ -351,7 +351,7 @@ use crate::profile::Probability;
 use crate::range::ops::Truth;
 use crate::range::query::Ranges;
 use crate::simplify_cfg::{self, Bindings};
-use crate::{Analyses, Fuel, Machine, Pass, Preserved, Stats};
+use crate::{Analyses, Fuel, Machine, Pass, Phase, Preserved, Stats};
 
 /// Recorded once for each diamond that became a select.
 const CONVERTED: &str =
@@ -417,6 +417,10 @@ impl Pass for PhiOpt {
 
     fn describe(&self) -> &'static str {
         "a branch whose two arms only work out a value becomes a select, and the branch goes"
+    }
+
+    fn phase(&self) -> Phase {
+        Phase::Scalar
     }
 
     fn preserves(&self) -> Preserved {

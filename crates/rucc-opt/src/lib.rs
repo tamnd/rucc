@@ -104,6 +104,7 @@ pub mod adce;
 pub mod alias;
 pub mod analysis;
 pub mod bswap;
+pub mod budget;
 pub mod callgraph;
 pub mod canon;
 pub mod cfg;
@@ -202,6 +203,7 @@ pub mod widen;
 // to the wrong place.
 pub use alias::{Access, Alias, Answer, Counts, Escapes, Origin, Reason};
 pub use analysis::{Analyses, Analysis, Preserved};
+pub use budget::{Budget, Phase};
 // `callgraph::Node` stays behind its module, because a bare `Node` at the top of an optimizer says
 // nothing about which graph it is a node of, and this crate has several graphs. [`callgraph::CallGraph`]
 // is the thing a caller would mean and is worth having here.

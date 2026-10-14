@@ -277,7 +277,7 @@ use crate::rules::{
     Match, Opening, Piece, Subject, Table, canonical, compare, identities, select, strength, width,
 };
 use crate::uses::{chase, count, substitute};
-use crate::{Analyses, Analysis, Fuel, Pass, Preserved, Stats};
+use crate::{Analyses, Analysis, Fuel, Pass, Phase, Preserved, Stats};
 
 /// Recorded once for each negation folded into the comparison under it.
 const FLIPPED: &str = "comparison negated by an exclusive or rewritten as the opposite comparison";
@@ -510,6 +510,10 @@ impl Pass for Fixpoint {
         "simplify, run again until a run changes nothing"
     }
 
+    fn phase(&self) -> Phase {
+        Phase::Rewriting
+    }
+
     fn preserves(&self) -> Preserved {
         // Whatever one run preserves, since this is nothing but runs of it.
         Simplify.preserves()
@@ -537,6 +541,10 @@ impl Pass for Simplify {
         "the identities, the strength reductions, the canonicalisations, the four comparison \
          rewrites written by hand, a lane read back out of a packed pair, and a bitcast back to \
          where it started"
+    }
+
+    fn phase(&self) -> Phase {
+        Phase::Rewriting
     }
 
     fn preserves(&self) -> Preserved {

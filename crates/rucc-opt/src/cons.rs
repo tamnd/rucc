@@ -72,7 +72,7 @@ use crate::gcm::movable;
 use crate::number::{Key, is_address, key, widened};
 use crate::simplify::{Finder, apply};
 use crate::uses::{chase, count, operands, substitute};
-use crate::{Analyses, Analysis, Fuel, Pass, Preserved, Stats};
+use crate::{Analyses, Analysis, Fuel, Pass, Phase, Preserved, Stats};
 
 /// What this pass is called, for the lists in [`crate::pipeline`] that name it.
 pub const NAME: &str = "cons";
@@ -103,6 +103,10 @@ impl Pass for Cons {
     fn describe(&self) -> &'static str {
         "the rewrite rules applied as each instruction is reached, again on what they leave, and \
          equal instructions made one value across the whole function"
+    }
+
+    fn phase(&self) -> Phase {
+        Phase::Rewriting
     }
 
     fn preserves(&self) -> Preserved {

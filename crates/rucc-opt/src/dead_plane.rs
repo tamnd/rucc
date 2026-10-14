@@ -58,7 +58,7 @@ use rucc_ir::{Func, Inst};
 
 use crate::coalesce::{Write, crossed, plane, read};
 use crate::discharge::{Fact, covers};
-use crate::{Analyses, Analysis, Fuel, Pass, Preserved, Stats};
+use crate::{Analyses, Analysis, Fuel, Pass, Phase, Preserved, Stats};
 
 /// A write nobody could have read went.
 const DEAD: &str = "plane write removed, a later write covers it and nothing in between reads it";
@@ -80,6 +80,10 @@ impl Pass for DeadPlane {
 
     fn describe(&self) -> &'static str {
         "a write to a plane that a later write covers, with nothing reading it in between, goes"
+    }
+
+    fn phase(&self) -> Phase {
+        Phase::Scalar
     }
 
     fn preserves(&self) -> Preserved {

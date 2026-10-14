@@ -79,7 +79,7 @@ use crate::cfg::Cfg;
 use crate::dom::Dominators;
 use crate::loops::{LoopId, Loops};
 use crate::range::query::Ranges;
-use crate::{Analyses, Fuel, Pass, Preserved, Stats, prune, simplify_cfg};
+use crate::{Analyses, Fuel, Pass, Phase, Preserved, Stats, prune, simplify_cfg};
 
 const COPIED: &str = "loop header copied in front of the loop so the test is at the bottom";
 const ENTERED: &str = "entry test removed, the value ranges say the loop runs";
@@ -127,6 +127,10 @@ impl Pass for HeaderCopy {
 
     fn describe(&self) -> &'static str {
         "copies a loop header in front of the loop, turning a while into a do-while"
+    }
+
+    fn phase(&self) -> Phase {
+        Phase::Scalar
     }
 
     fn preserves(&self) -> Preserved {

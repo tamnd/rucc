@@ -41,7 +41,7 @@ use rucc_ir::{Block, BlockCall, Builder, Def, Func, Inst, Opcode, Value};
 use crate::cfg::Cfg;
 use crate::dce::removable;
 use crate::frontier::ControlDependence;
-use crate::{Analyses, Fuel, Pass, Preserved, Stats};
+use crate::{Analyses, Fuel, Pass, Phase, Preserved, Stats};
 
 /// What this pass is called, for the lists in [`crate::pipeline`] that name it.
 pub const NAME: &str = "adce";
@@ -69,6 +69,10 @@ impl Pass for Adce {
 
     fn describe(&self) -> &'static str {
         "whatever nothing necessary depends on is removed, a branch included"
+    }
+
+    fn phase(&self) -> Phase {
+        Phase::Scalar
     }
 
     fn preserves(&self) -> Preserved {

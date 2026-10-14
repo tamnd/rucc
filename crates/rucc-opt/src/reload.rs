@@ -127,7 +127,7 @@ use crate::dom::Dominators;
 use crate::loops::Loops;
 use crate::memssa::{Clobber, Step, Walk};
 use crate::uses::substitute;
-use crate::{Analyses, Analysis, Fuel, Pass, Preserved, Stats, discharge, memssa};
+use crate::{Analyses, Analysis, Fuel, Pass, Phase, Preserved, Stats, discharge, memssa};
 
 /// What this pass is called, which the pipeline matches on to decide whether to build the module
 /// facts the oracle asks for.
@@ -176,6 +176,10 @@ impl Pass for RedundantLoad {
         "a load takes the value of the store it sees, wherever in the function that store is"
     }
 
+    fn phase(&self) -> Phase {
+        Phase::Scalar
+    }
+
     fn preserves(&self) -> Preserved {
         // The shape of the function, for the reason `crate::load` gives: no block is added, none
         // is removed, no edge moves, and the instructions that go are loads, which are never
@@ -186,7 +190,7 @@ impl Pass for RedundantLoad {
 
     fn run(&self, func: &mut Func, an: &mut Analyses, fuel: &mut Fuel) -> Stats {
         let mut stats = Stats::new();
-        if !memssa::build(func) {
+        if !an.timed(|| memssa::build(func)) {
             return stats;
         }
         // What each removed load's result is read as, applied to the whole function once at the

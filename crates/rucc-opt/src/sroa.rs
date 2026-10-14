@@ -62,7 +62,7 @@ use rucc_ir::{
 use crate::cfg::Cfg;
 use crate::dom::Dominators;
 use crate::frontier::Frontiers;
-use crate::{Analyses, Analysis, Fuel, Pass, Preserved, Stats};
+use crate::{Analyses, Analysis, Fuel, Pass, Phase, Preserved, Stats};
 
 /// What the pipelines and the flags call it.
 pub const NAME: &str = "sroa";
@@ -111,6 +111,10 @@ impl Pass for Sroa {
 
     fn describe(&self) -> &'static str {
         "a local whose address goes nowhere becomes one value for each piece of it that is used"
+    }
+
+    fn phase(&self) -> Phase {
+        Phase::Scalar
     }
 
     fn preserves(&self) -> Preserved {

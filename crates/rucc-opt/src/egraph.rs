@@ -53,7 +53,7 @@ use crate::gcm::movable;
 use crate::simplify::{Found, Rewrite, apply};
 use crate::stats::Kind;
 use crate::uses::{chase, substitute};
-use crate::{Analyses, Fuel, Pass, Preserved, Stats, cons};
+use crate::{Analyses, Fuel, Pass, Phase, Preserved, Stats, cons};
 
 /// What this pass is called, for the lists in [`crate::pipeline`] that name it.
 pub const NAME: &str = "egraph";
@@ -86,6 +86,10 @@ impl Pass for EGraph {
     fn describe(&self) -> &'static str {
         "the hash-consed rewriter with each rewrite added to a class rather than replacing what it \
          matched, and the cheapest form of each value extracted"
+    }
+
+    fn phase(&self) -> Phase {
+        Phase::Rewriting
     }
 
     fn preserves(&self) -> Preserved {

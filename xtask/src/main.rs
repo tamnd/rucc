@@ -14,6 +14,7 @@
 mod aux_plane;
 mod bench;
 mod bisect;
+mod budget;
 mod builtins_bench;
 mod builtins_diff;
 mod chains;
@@ -115,6 +116,8 @@ tasks:
   corpus            run the pinned C corpus against the compiler this tree builds
   sweep             run the corpus with each threshold at half and at double its value
   passoff           run the corpus with each pass of the -O2 pipeline off on its own
+  budget            compile the corpus with rucc and clang at -O2 and divide rucc's time
+                    between the phases of spec 42.7
   bless             rewrite the expectations in tests/golden from what the compiler produces now
   interpose         check the interposition table and the compiler's copy of it agree
   ci                run every check the per-commit CI job runs, as much of it at once as
@@ -179,6 +182,7 @@ fn main() -> ExitCode {
         Some("corpus") => corpus::corpus(&std::env::args().skip(2).collect::<Vec<_>>()),
         Some("sweep") => corpus::sweep(&std::env::args().skip(2).collect::<Vec<_>>()),
         Some("passoff") => corpus::passoff(&std::env::args().skip(2).collect::<Vec<_>>()),
+        Some("budget") => budget::budget(&std::env::args().skip(2).collect::<Vec<_>>()),
         Some("bless") => bless(),
         Some("ci") => gate::ci(),
         Some("help") | Some("--help") | Some("-h") | None => {

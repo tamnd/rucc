@@ -96,7 +96,7 @@ use rucc_ir::{Block, Flags, Func, Inst, Opcode, Type, Value};
 
 use crate::alias::{Access, Alias};
 use crate::uses::substitute;
-use crate::{Analyses, Analysis, Fuel, Pass, Preserved, Stats};
+use crate::{Analyses, Analysis, Fuel, Pass, Phase, Preserved, Stats};
 
 /// What this pass is called, which the pipeline matches on to decide whether to build the module
 /// facts the oracle asks for.
@@ -125,6 +125,10 @@ impl Pass for LoadForward {
 
     fn describe(&self) -> &'static str {
         "a load of an address the block has already read or written is that value"
+    }
+
+    fn phase(&self) -> Phase {
+        Phase::Scalar
     }
 
     fn preserves(&self) -> Preserved {

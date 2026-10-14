@@ -160,7 +160,7 @@ use rucc_cost::Goal;
 use rucc_cost::heuristics::SWITCH_CONVERSION_MAX_GROWTH;
 
 use crate::cfg::Cfg;
-use crate::{Analyses, Fuel, Pass, Preserved, ReadOnly, Stats};
+use crate::{Analyses, Fuel, Pass, Phase, Preserved, ReadOnly, Stats};
 
 /// What is reported when a `switch` becomes arithmetic.
 const CONVERTED: &str = "switch replaced by a range check and the arithmetic its arms were doing";
@@ -229,6 +229,10 @@ impl Pass for SwitchConv {
 
     fn describe(&self) -> &'static str {
         "a switch whose arms give constants becomes a range check and arithmetic or a table load"
+    }
+
+    fn phase(&self) -> Phase {
+        Phase::Scalar
     }
 
     fn preserves(&self) -> Preserved {

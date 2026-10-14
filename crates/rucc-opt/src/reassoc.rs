@@ -45,7 +45,7 @@ use rucc_ir::{Block, Def, Extra, Func, Imm, Inst, InstData, Opcode, Type, Value}
 
 use crate::cfg::Cfg;
 use crate::uses::{count, substitute};
-use crate::{Analyses, Analysis, Fuel, Pass, Preserved, Stats};
+use crate::{Analyses, Analysis, Fuel, Pass, Phase, Preserved, Stats};
 
 /// What this pass is called, for the lists in [`crate::pipeline`] that name it.
 pub const NAME: &str = "reassoc";
@@ -70,6 +70,10 @@ impl Pass for Reassoc {
 
     fn describe(&self) -> &'static str {
         "an integer tree of one operation is rebuilt in rank order with its terms combined"
+    }
+
+    fn phase(&self) -> Phase {
+        Phase::Scalar
     }
 
     fn preserves(&self) -> Preserved {

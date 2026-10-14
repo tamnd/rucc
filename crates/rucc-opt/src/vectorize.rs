@@ -61,7 +61,7 @@ use crate::alias::Alias;
 use crate::cfg::Cfg;
 use crate::loops::{LoopId, Loops};
 use crate::scev::{Bound, Count, Invariant, Scev};
-use crate::{Analyses, Analysis, Fuel, Pass, Preserved, Stats};
+use crate::{Analyses, Analysis, Fuel, Pass, Phase, Preserved, Stats};
 
 /// What this pass is called, for the lists in [`crate::pipeline`] that name it.
 pub const NAME: &str = "vectorize";
@@ -106,6 +106,10 @@ impl Pass for Vectorize {
 
     fn describe(&self) -> &'static str {
         "a loop over int arrays that runs a multiple of four times is done four at a time"
+    }
+
+    fn phase(&self) -> Phase {
+        Phase::Scalar
     }
 
     fn preserves(&self) -> Preserved {

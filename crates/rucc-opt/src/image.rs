@@ -115,7 +115,7 @@ use rucc_ir::{
 };
 
 use crate::extents::vouched;
-use crate::{Analyses, Analysis, Fuel, Pass, Preserved, Stats};
+use crate::{Analyses, Analysis, Fuel, Pass, Phase, Preserved, Stats};
 
 /// Recorded once for each load that became a constant.
 const FOLDED: &str = "load from a read only object folded to what it was initialized to";
@@ -161,6 +161,10 @@ impl Pass for Image {
 
     fn describe(&self) -> &'static str {
         "a load from an object nothing can write to becomes what the object was initialized to"
+    }
+
+    fn phase(&self) -> Phase {
+        Phase::Scalar
     }
 
     fn preserves(&self) -> Preserved {

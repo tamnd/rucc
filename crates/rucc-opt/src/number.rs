@@ -125,7 +125,7 @@ use rucc_ir::{Block, Def, Extra, Flags, FloatPred, Func, Inst, IntPred, Opcode, 
 
 use crate::purity::{Callee, Facts};
 use crate::uses::substitute;
-use crate::{Analyses, Analysis, Fuel, Pass, Preserved, Stats};
+use crate::{Analyses, Analysis, Fuel, Pass, Phase, Preserved, Stats};
 
 /// Recorded for a removed address computation, which is what the pass is here for.
 const ADDRESS: &str = "address removed, an earlier one in the block computes the same address";
@@ -159,6 +159,10 @@ impl Pass for Number {
 
     fn describe(&self) -> &'static str {
         "two instructions computing the same thing from the same things, the first dominating the second, are one value"
+    }
+
+    fn phase(&self) -> Phase {
+        Phase::Scalar
     }
 
     fn preserves(&self) -> Preserved {

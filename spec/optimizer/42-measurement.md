@@ -317,6 +317,28 @@ repetition.
 **The single number to watch is the analyses' share**, because analysis cost is what turns a compiler
 superlinear, and because it is the cost that grows silently as more passes want more precision.
 
+### The first run
+
+The budget was first measured on 14 October 2026, tamnd/rucc#2972, with `cargo xtask budget --sqlite --clang clang-18`. rucc 0.30.6 was a release build from main at `9200b329`, the reference was Ubuntu clang 18.1.3, and the machine was a shared 8 processor AMD EPYC under a load of about 60. The inputs were the 3623 files of rucc-corpus at `60c8fd16879c`, less 139 that one compiler or the other refused, and the SQLite 3.53.4 amalgamation on its own line. Both compilers ran with `-O2 -c -w`.
+
+The total is well inside spec 16.4. rucc took 86.76 s of CPU time on the corpus against 536.55 s for clang, which is 0.16x, and 21.27 s on SQLite against 96.45 s, which is 0.22x, where 1.5x is allowed.
+
+The shares are not. The seconds behind them are wall time from `-frucc-trace`, summed over files compiled several at a time on a loaded machine, so they add up to several times the CPU time and only the shares are worth reading.
+
+| Phase | Budget | Corpus | SQLite |
+|---|---:|---:|---:|
+| Front end and semantic analysis | 25% | 29.8%, over | 8.2% |
+| Analyses | 15% | 1.4% | 4.9% |
+| The e-graph and rewriting | 15% | 4.2% | 5.7% |
+| The remaining scalar and loop pipeline | 20% | 29.9%, over | 53.4%, over |
+| Selection and lowering | 8% | 9.0%, over | 5.2% |
+| Register allocation | 12% | 5.2% | 14.3%, over |
+| Scheduling, layout, machine-level passes | 5% | 20.4%, over | 8.4%, over |
+
+Each phase over its share has a name to go with it. On the corpus the front end is preprocessing first, 64.8 of its 147.8 s, then checking at 35.5 s, lowering at 18.1 s and reading the files at 12.8 s, which is what four thousand small files each including the C library headers costs and says little about a large program, where SQLite has the front end at 8.2%. The scalar pipeline is `inline` on both, 47.6 s of 147.8 s on the corpus and 20.5 s of 62.5 s on SQLite, with nothing else over 9 s. The machine phase on the corpus is about half writing the output, 48.2 s of emission against 52.7 s of machine passes, and on SQLite it is the machine passes, 8.5 s of 9.9 s. Selection on the corpus and allocation on SQLite are over by a little, and the trace has nothing finer to say about either yet.
+
+**The analyses' share, the number this section says to watch, is the smallest of the seven**, 1.4% on the corpus and 4.9% on SQLite against 15%. The overage is in `inline`, in the front end on small files, and in writing the output, and the first of those is the one to look at, since it is the largest single pass in the phase that is furthest over its share.
+
 ## 42.8 How this is wrong
 
 **The corpus is not the user's code.** Nine open-source C programs and a kernel are a sample, and

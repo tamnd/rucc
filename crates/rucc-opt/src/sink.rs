@@ -84,7 +84,7 @@ use crate::rules::safety;
 use crate::scev::{Anchor, Evolution, Plain, Reading, Scev};
 use crate::stats::Kind;
 use crate::trip::{Around, counted, covered, inst_of};
-use crate::{Analyses, Fuel, Pass, Preserved, Stats};
+use crate::{Analyses, Fuel, Pass, Phase, Preserved, Stats};
 use rucc_base::hash::Map;
 
 /// What is reported when an init write comes out of a loop.
@@ -153,6 +153,10 @@ impl Pass for Sink {
 
     fn describe(&self) -> &'static str {
         "a plane write in a counted loop becomes one write over the whole range after it"
+    }
+
+    fn phase(&self) -> Phase {
+        Phase::Scalar
     }
 
     fn preserves(&self) -> Preserved {

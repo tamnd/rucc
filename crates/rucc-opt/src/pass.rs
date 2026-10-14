@@ -2,7 +2,7 @@
 
 use rucc_ir::Func;
 
-use crate::{Analyses, Fuel, Preserved, ReadOnly, Stats};
+use crate::{Analyses, Fuel, Phase, Preserved, ReadOnly, Stats};
 
 /// One transformation over one function.
 ///
@@ -22,6 +22,16 @@ pub trait Pass: Sync {
     /// It says what the pass does to the code rather than how, because the reader of a pipeline
     /// listing is asking why their program came out the way it did.
     fn describe(&self) -> &'static str;
+
+    /// Which of the seven phases of section 42.7 of `spec/optimizer/42-measurement.md` the time
+    /// this pass takes is counted under, for `-frucc-trace` and `cargo xtask budget`.
+    ///
+    /// There is no default, for the reason [`Pass::preserves`] has none: the phase decides whose
+    /// share a slow pass is over, and a pass that took a default would be over somebody else's.
+    /// Almost every pass is [`Phase::Scalar`] and the rewriters are [`Phase::Rewriting`]. The time
+    /// a pass spends waiting for [`Analyses`] to build something is counted under
+    /// [`Phase::Analyses`] whatever the pass says here, which `crate::budget` has the reason for.
+    fn phase(&self) -> Phase;
 
     /// Which analyses still answer the same questions about the function this pass has finished
     /// with as they did about the one it was handed.

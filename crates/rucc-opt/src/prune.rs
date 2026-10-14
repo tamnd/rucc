@@ -130,7 +130,7 @@ use crate::fold::constant;
 use crate::range::ops::Truth;
 use crate::range::query::Ranges;
 use crate::simplify_cfg;
-use crate::{Analyses, Fuel, Pass, Preserved, Stats};
+use crate::{Analyses, Fuel, Pass, Phase, Preserved, Stats};
 
 /// Recorded once for each branch the ranges settled.
 const BRANCH_DECIDED: &str =
@@ -166,6 +166,10 @@ impl Pass for Prune {
 
     fn describe(&self) -> &'static str {
         "a branch the ranges settle becomes a jump, and a case they rule out leaves its switch"
+    }
+
+    fn phase(&self) -> Phase {
+        Phase::Scalar
     }
 
     fn preserves(&self) -> Preserved {

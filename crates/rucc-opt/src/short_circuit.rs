@@ -142,7 +142,7 @@ use rucc_ir::{Block, Builder, Def, Flags, Func, Imm, Opcode, Type, Value};
 use crate::fold::constant;
 use crate::phiopt::{Diamond, diamond, length, speculatable, unpredictable};
 use crate::simplify_cfg::{self, Bindings};
-use crate::{Analyses, Fuel, Pass, Preserved, Stats};
+use crate::{Analyses, Fuel, Pass, Phase, Preserved, Stats};
 
 /// Recorded once for each `&&` or `||` that stopped being a branch.
 const COLLAPSED: &str =
@@ -205,6 +205,10 @@ impl Pass for ShortCircuit {
 
     fn describe(&self) -> &'static str {
         self.describes
+    }
+
+    fn phase(&self) -> Phase {
+        Phase::Scalar
     }
 
     fn preserves(&self) -> Preserved {

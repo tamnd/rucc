@@ -42,7 +42,7 @@
 use rucc_base::hash::Map;
 use rucc_ir::{Abi, AttrSet, Block, Builder, Extra, Func, Inst, Opcode, Value};
 
-use crate::{Analyses, Fuel, Pass, Preserved, Stats, uses};
+use crate::{Analyses, Fuel, Pass, Phase, Preserved, Stats, uses};
 
 /// What `-fno-optimize-sibling-calls` turns off along with the jumps, and the name of the pass.
 pub const NAME: &str = "tail-recursion";
@@ -68,6 +68,10 @@ impl Pass for TailRecursion {
 
     fn describe(&self) -> &'static str {
         "a call a function makes to itself in tail position becomes a jump back to its top"
+    }
+
+    fn phase(&self) -> Phase {
+        Phase::Scalar
     }
 
     fn preserves(&self) -> Preserved {
