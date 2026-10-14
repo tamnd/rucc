@@ -4,6 +4,10 @@ All notable changes are recorded here. The format follows [Keep a Changelog](htt
 
 ## Unreleased
 
+### Fixed
+
+- The glibc stubs no longer offer a default definition of a name that glibc keeps only for old programs, such as `xdr_opaque` or `__exp_finite`. A real glibc refuses a new link to these names, and rucc linked them before, because an abilist does not show them. `crates/rucc-stub/glibc/compat.txt` lists them with the first release where each one has no default. It is made from Debian's libc6 packages by `bin/glibc-compat` in tamnd/rucc-cross. At glibc 2.39 the stubs now agree with Ubuntu's libraries on every one of these names on seven architectures (#920).
+
 ## 0.30.8
 
 This is a patch release. It fixes a regression in 0.30.7 that stopped the i386 Linux kernel from building: an `asm goto` could borrow a register and leave the reload past the end of its block. The 7.2.8 i386 kernel builds again. rucc also takes `-fmerge-all-constants` and builds musl's x86-64 math assembly. The release of 0.30.7 did not publish its binaries, because three doc comments linked to private items and the doc gate failed. 0.30.8 removes those links.

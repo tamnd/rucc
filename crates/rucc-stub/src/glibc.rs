@@ -24,6 +24,16 @@
 //! and the `SONAME`s inside them are what the loader will be asked for, which differ, and
 //! [`Library::file`] and [`Library::soname`] are the two columns.
 //!
+//! # What an abilist cannot say
+//!
+//! glibc keeps some symbols only for programs that were linked against them in the past. Such a
+//! symbol has a definition at a version node but no default definition, so a new link that names it
+//! fails with an undefined reference. The `abilist` line for it is the same as the line for any other
+//! symbol, so the blobs mark it as the default like the rest. `glibc/compat.txt` is the list of these
+//! names, with the first release where each one has no default, and [`compat_only`] reads it.
+//! `bin/glibc-compat` in `tamnd/rucc-cross` makes the list from real Debian libraries, one per
+//! release and architecture. It is run by hand and the list is committed, the same as the blobs.
+//!
 //! The loader is written under its `SONAME`, which is a different name on each port, and `ld.so`
 //! beside it is a linker script with the one line `INPUT ( AS_NEEDED ( <soname> ) )`. glibc's own
 //! `libc.so` names the loader in the same way. A program needs it for `__tls_get_addr`, and on
@@ -35,12 +45,13 @@
 //! own build and come with the fetched sysroot.
 
 use core::fmt;
+use std::collections::BTreeSet;
 
 use rucc_tuple::{Abi, Arch, DataModel, Env, Os, TargetTuple};
 
 use crate::blob::{self, Blob};
 use crate::compat::{Form, compat};
-use crate::describe::{self, Library as Stub};
+use crate::describe::{self, Library as Stub, Symbol};
 
 /// One glibc library this crate carries a description of.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -78,6 +89,13 @@ pub const LIBRARIES: &[Library] = &[
     },
     Library { name: "ld", file: "ld.so", soname: None, blob: include_bytes!("../glibc/ld.blob") },
 ];
+
+/// The names glibc keeps only for old programs, with the release each one stopped being a default.
+///
+/// Each line is `library name release [arch=release]...`. The release is a minor number, or a dash for
+/// never. The release after the name is the one for every architecture that the line does not name
+/// again.
+const COMPAT: &str = include_str!("../glibc/compat.txt");
 
 /// The architectures in every blob, spelled the way `bin/abilist` names its directories.
 pub const ARCHITECTURES: &[&str] =
@@ -147,6 +165,49 @@ pub fn loader(target: TargetTuple) -> Option<&'static str> {
     Some(name)
 }
 
+/// Takes the default away from every name that glibc 2.`minor` keeps only for old programs.
+///
+/// `library` is a [`Library::name`] and `arch` is one of [`ARCHITECTURES`]. Every definition of such a
+/// name becomes superseded, so a reference that names the version node still binds and an unversioned
+/// reference does not. That is what a real glibc does. Returns how many definitions changed.
+pub fn compat_only(library: &str, arch: &str, minor: u32, symbols: &mut [Symbol]) -> usize {
+    let mut names = BTreeSet::new();
+    for line in COMPAT.lines() {
+        let mut fields = line.split_whitespace();
+        let (Some(lib), Some(name), Some(mut since)) =
+            (fields.next(), fields.next(), fields.next())
+        else {
+            continue;
+        };
+        if lib != library {
+            continue;
+        }
+        for field in fields {
+            if let Some((other, release)) = field.split_once('=') {
+                if other == arch {
+                    since = release;
+                }
+            }
+        }
+        if since.parse::<u32>().is_ok_and(|since| since <= minor) {
+            names.insert(name);
+        }
+    }
+    let mut changed = 0;
+    for symbol in symbols {
+        if !names.contains(symbol.name.as_str()) {
+            continue;
+        }
+        if let Some(version) = symbol.version.as_mut() {
+            if version.default {
+                version.default = false;
+                changed += 1;
+            }
+        }
+    }
+    changed
+}
+
 /// One file of a glibc sysroot that this crate writes.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct File {
@@ -171,11 +232,12 @@ pub fn stubs(target: TargetTuple, minor: u32) -> Result<Vec<File>, Error> {
     let ceiling = format!("GLIBC_2.{minor}");
     let mut out = Vec::new();
     for library in LIBRARIES {
-        let exports = library
+        let mut exports = library
             .description()
             .and_then(|blob| blob.exports_at(arch, &ceiling))
             .map_err(|why| Error::Blob { library: library.name, why })?;
         let soname = library.soname.or_else(|| loader(target)).ok_or(Error::NoPort { target })?;
+        compat_only(library.name, arch, minor, &mut exports.symbols);
         let mut stub = Stub::new(soname);
         for symbol in exports.symbols {
             stub.export(symbol);
@@ -278,6 +340,62 @@ mod tests {
         };
         assert_eq!(default(12).as_deref(), Some("GLIBC_2.2.5"));
         assert_eq!(default(28).as_deref(), Some("GLIBC_2.14"));
+    }
+
+    /// Whether `name` has a default definition in `library` on `arch` at glibc 2.`minor`.
+    fn has_default(library: usize, arch: &str, name: &str, minor: u32) -> bool {
+        let blob = LIBRARIES[library].description().expect("the blob reads");
+        let mut exports = blob.exports_at(arch, &format!("GLIBC_2.{minor}")).expect("the arch");
+        compat_only(LIBRARIES[library].name, arch, minor, &mut exports.symbols);
+        exports
+            .symbols
+            .iter()
+            .any(|symbol| symbol.name == name && symbol.version.as_ref().is_some_and(|v| v.default))
+    }
+
+    /// glibc stopped offering the RPC functions to new programs. Debian built them as defaults up to
+    /// its 2.30 package.
+    #[test]
+    fn xdr_opaque_has_a_default_before_glibc_2_31_and_none_after() {
+        assert!(has_default(0, "x86_64", "xdr_opaque", 28));
+        assert!(!has_default(0, "x86_64", "xdr_opaque", 31));
+        assert!(!has_default(0, "aarch64", "xdr_opaque", 39));
+    }
+
+    /// The `__*_finite` entry points went in 2.31, and the old definitions stay behind for old
+    /// programs. The ordinary math function is not touched.
+    #[test]
+    fn the_finite_math_names_lose_the_default_in_glibc_2_31() {
+        assert!(has_default(1, "x86_64", "__exp_finite", 30));
+        assert!(!has_default(1, "x86_64", "__exp_finite", 31));
+        assert!(has_default(1, "x86_64", "exp", 44));
+    }
+
+    /// `__finitel` is the same function as `__finite` where `long double` is `double`, so only Arm
+    /// keeps it for old programs. The list names the architectures that differ.
+    #[test]
+    fn a_name_can_be_compat_only_on_one_architecture() {
+        assert!(!has_default(0, "arm", "__finitel", 44));
+        assert!(has_default(0, "x86_64", "__finitel", 44));
+    }
+
+    /// Every line of the list reads, and names a library and architectures that the blobs have.
+    #[test]
+    fn every_line_of_the_compat_list_reads() {
+        let release = |text: &str| text == "-" || text.parse::<u32>().is_ok();
+        let mut lines = 0;
+        for line in COMPAT.lines().filter(|line| !line.starts_with('#')) {
+            let fields: Vec<&str> = line.split_whitespace().collect();
+            assert!(fields.len() >= 3, "{line}");
+            assert!(LIBRARIES.iter().any(|library| library.name == fields[0]), "{line}");
+            assert!(release(fields[2]), "{line}");
+            for other in &fields[3..] {
+                let (arch, since) = other.split_once('=').expect("arch=release");
+                assert!(ARCHITECTURES.contains(&arch) && release(since), "{line}");
+            }
+            lines += 1;
+        }
+        assert!(lines > 400, "{lines}");
     }
 
     /// `sin` is in libm, which is the reason libm is carried rather than left empty.

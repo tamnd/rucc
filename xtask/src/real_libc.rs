@@ -136,11 +136,11 @@ pub(crate) fn real_libc(args: &[String]) -> Result<()> {
             problems.push(format!("{at} is {} here and {} there", ours.kind, real.kind));
         }
         // The two directions of this say different things. Ours default and theirs not is a symbol
-        // glibc keeps only for the programs already linked against it, and the abilist cannot say so:
-        // the line for a compat symbol is the same three fields as the line for any other, and which
-        // ones they are lives in glibc's C sources rather than in the file we read. So it is counted,
-        // like the binding below. Ours superseded and theirs default is the description being wrong
-        // about the definition a link will bind to, and that is a problem.
+        // glibc keeps only for the programs already linked against it, and the abilist cannot say so.
+        // The stub takes the default away from the names in `glibc/compat.txt` of rucc-stub, so one
+        // left here is a name that list does not have for this release. It is counted, like the
+        // binding below. Ours superseded and theirs default is the description being wrong about the
+        // definition a link will bind to, and that is a problem.
         if ours.default && !real.default {
             obsolete += 1;
         } else if !ours.default && real.default {
@@ -178,11 +178,11 @@ pub(crate) fn real_libc(args: &[String]) -> Result<()> {
         // What this costs is worth stating, because it is not nothing and it is not a broken program
         // either. A link against our stub binds one of these to the node the description names, the
         // loader finds the compat definition there and the program runs. A real toolchain would have
-        // refused the link instead, so we are the more permissive of the two, and the way to stop
-        // being is a recorded list of which names a real library keeps only for old binaries.
+        // refused the link instead, so we are the more permissive of the two. The fix is a new line
+        // in the list, from `bin/glibc-compat` in tamnd/rucc-cross.
         println!(
             "xtask: {obsolete} of them the real library keeps only for programs already linked \
-             against it, which an abilist has no way to say"
+             against it, and glibc/compat.txt does not list them for this release"
         );
     }
 
