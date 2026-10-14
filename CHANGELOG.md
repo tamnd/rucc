@@ -37,6 +37,14 @@ All notable changes are recorded here. The format follows [Keep a Changelog](htt
 - A function with thousands of locals live across thousands of `if` statements no longer stops with "index out of range" while it is lowered. A branch argument list that has to move now gets room to grow, and the SSA cleanup reads a parameter's position from its definition instead of searching for it. A generated file with 3000 such locals now builds at -O0 in 20s, and with 1000 it uses 509MB instead of 2.8GB (#3611).
 - A range query now walks past up to 1024 branches that don't mention the value, up from 64. The kernel's scoped_seqlock_read loop tests a state that can't happen and calls `__scoped_seqlock_bug`, which gcc folds away. With a long critical section full of other branches, rucc gave up before it reached the test that settles the state, so the call stayed and allmodconfig failed to link (#3612).
 
+## 0.30.6
+
+This is a patch release. It replaces 0.30.5, whose tag failed its checks and was never published. It has the same compiler as 0.30.4 and 0.30.5. Only two tests changed. It was cut from the 0.30.5 tag, so the changes under Unreleased are not in it.
+
+### Fixed
+
+- The two i386 tests in `i386_handed_scratch.rs` no longer share a temporary directory. They run at the same time, and one could remove the directory while the other still compiled in it, which failed the release check of 0.30.5 (#3628).
+
 ## 0.30.5
 
 This is a patch release. It replaces 0.30.4, whose tag failed its checks and was never published. It has the same compiler as 0.30.4. Only the build of the doctests changed. It was cut from the 0.30.4 tag, so the changes under Unreleased are not in it.
