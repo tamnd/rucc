@@ -29,6 +29,7 @@ All notable changes are recorded here. The format follows [Keep a Changelog](htt
 - The copies on a split edge now go in front of a comparison the layout folds into its branch when they write the byte it would have set, and stay on one arm of a diamond inside a loop, which the layout lays out with one jump each way round only while both arms are there (#3623).
 - The layout's weights now treat a branch with one arm into a cold block as the cold call predictor would, which is what gcc's `determine_unlikely_bbs` does with the same answer, so a pointer test in front of a `pr_err` no longer walks the trunk of the function into the message and leaves a jump behind (#3627).
 - The layout keeps its hot and cold traces apart while it grows them: a trace does not run from a block that is not cold into one that is, a cold block is not a seed while a block that is not cold is waiting, and `connect` does not put a cold trace behind a hot one, so the block a branch should fall into is not left behind a cold one that `partition` then takes away (#3632).
+- On x86, a leaf that keeps a frame pointer only because of `-fno-omit-frame-pointer` now drops it when it turns out to have no frame bytes, no saved registers and no use of the stack or frame pointer, as gcc does when optimizing. An explicit `-mno-omit-leaf-frame-pointer` still keeps it (#3634).
 
 ### Fixed
 
