@@ -11,8 +11,6 @@ func @make_mixed() -> (f64, i64), linkage(external);
 
 func @make_floats() -> (f64, f32), linkage(external);
 
-func @make_odd() -> i64, linkage(external);
-
 func @make_big(ptr sret(64, align 8)), linkage(external);
 
 func @make_empty(), linkage(external);
@@ -26,8 +24,6 @@ func @take_mixed(f64, i64) -> i32, linkage(external);
 func @take_floats(f64, f32) -> i32, linkage(external);
 
 func @take_odd(i64) -> i32, linkage(external);
-
-func @take_big(ptr byval(64, align 8)) -> i32, linkage(external);
 
 func @take_empty() -> i32, linkage(external);
 
