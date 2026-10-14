@@ -40,7 +40,11 @@
 //! [`crate::witness::gone`] is the question. An entry for a local whose frame has returned is thrown
 //! out at the load rather than handed on, because the pointer in the word may be a new pointer with
 //! the same value into a later frame, and a capability that called it dangling would be a refusal of
-//! a correct program.
+//! a correct program. An entry for a local whose block was left while its frame runs on is handed
+//! on, because the witness still holds the serial it was made with and so the pointer can only be
+//! that same local after its lifetime, which `check_live` then refuses as row T4. Throwing that one
+//! out too had the load recover bounds over everything, and a read through a union or a pointer to
+//! a pointer of a local from a closed block was let through (tamnd/rucc#3269).
 //!
 //! Only capabilities that can be believed this way are kept. A recovered one or a wide one says
 //! nothing the recovery at the load would not say again, a heap one is better answered by the heap's
@@ -153,7 +157,7 @@ pub(crate) fn found(at: u64, value: u64) -> Option<Cap> {
     }
     // SAFETY: a local's capability is only kept when its witness is on this thread's stack, which
     // stays mapped for as long as the thread that is asking runs.
-    if unsafe { crate::witness::gone(&entry.cap) } {
+    if unsafe { crate::witness::gone(&entry.cap) && !crate::witness::left(&entry.cap) } {
         return None;
     }
     Some(entry.cap.beside(value))
@@ -278,6 +282,29 @@ mod tests {
         keep(word, base as u64, cap);
         let back = found(word, base as u64).expect("the frame is still running");
         assert_eq!((back.lo, back.ext), (base as u64, 10));
+        // SAFETY: as above.
+        unsafe { crate::witness::close(&raw mut witness) };
+        assert_eq!(found(word, base as u64), None);
+    }
+
+    #[test]
+    fn a_local_of_a_block_left_while_its_frame_runs_comes_back_to_be_refused() {
+        let (word, _) = words();
+        let mut witness = 0_u64;
+        let local = 0_u8;
+        let base = core::hint::black_box(&raw const local);
+        // SAFETY: the witness is a word of this test's frame, and so is the local.
+        let cap = unsafe {
+            crate::witness::open(&raw mut witness);
+            crate::recover::local(base.cast(), 1, &raw const witness)
+        };
+        keep(word, base as u64, cap);
+        // SAFETY: as above.
+        unsafe { crate::witness::shut(&raw mut witness) };
+        let back = found(word, base as u64).expect("the frame still runs, so it is that local");
+        assert_eq!((back.lo, back.ext), (base as u64, 1));
+        // SAFETY: as above.
+        assert!(unsafe { crate::witness::gone(&back) });
         // SAFETY: as above.
         unsafe { crate::witness::close(&raw mut witness) };
         assert_eq!(found(word, base as u64), None);
