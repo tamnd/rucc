@@ -340,8 +340,7 @@ impl<'a> Run<'a> {
             if !def.function_like {
                 let hs = self.hides.add(tok.hides, name);
                 let mut args = Args::none();
-                let replacement = self.subst(def, &mut args, hs, tok);
-                push_front(pending, replacement, tok);
+                self.subst_onto(def, &mut args, hs, tok, pending);
                 continue;
             }
 
@@ -359,8 +358,7 @@ impl<'a> Run<'a> {
             };
             let shared = self.hides.intersect(tok.hides, rparen.hides);
             let hs = self.hides.add(shared, name);
-            let replacement = self.subst(def, &mut args, hs, tok);
-            push_front(pending, replacement, tok);
+            self.subst_onto(def, &mut args, hs, tok, pending);
         }
     }
 
@@ -624,12 +622,20 @@ impl<'a> Run<'a> {
         d
     }
 
-    /// Argument substitution over a replacement list.
+    /// Argument substitution over a replacement list, put on the front of `pending` to be
+    /// rescanned.
     ///
     /// The order of the cases matters and each one of them is a known source of bugs, so
     /// they are written out separately rather than folded together.
-    fn subst(&mut self, def: &MacroDef, args: &mut Args, hs: HideSet, invocation: Tok) -> Vec<Tok> {
-        // The name is always there: `subst` is only reached through an identifier that looked
+    fn subst_onto(
+        &mut self,
+        def: &MacroDef,
+        args: &mut Args,
+        hs: HideSet,
+        invocation: Tok,
+        pending: &mut Vec<Tok>,
+    ) {
+        // The name is always there: this is only reached through an identifier that looked
         // a macro up. The fallback keeps the trace merely incomplete rather than making this a
         // panic on a path the compiler is not supposed to be able to take.
         let name = invocation.ident();
@@ -641,27 +647,47 @@ impl<'a> Run<'a> {
             Some(name) => self.traces.push(name, invocation.span, invocation.trace),
             None => invocation.trace,
         };
-        let outer = std::mem::replace(&mut self.current, here);
         // Body tokens start with the chain of the invocation rather than with none, so that a
         // token written in this body comes out with the macros above this one on it. An
         // argument token already has that chain, having been substituted from the call site.
-        let body: Vec<Tok> =
-            def.body.iter().map(|&t| Tok { trace: invocation.trace, ..Tok::new(t) }).collect();
+        let body = |t: &PpToken| Tok { trace: invocation.trace, ..Tok::new(*t) };
         // An object-like macro has no parameters, so with no `##` and no `__VA_OPT__` in it every
         // token of its body comes through `subst_list` as it is and none of them is a
         // placemarker. That is nearly every object-like macro there is, and the body is its own
-        // substitution without a second list. tamnd/rucc#3052.
+        // substitution, written straight onto the front of what is rescanned rather than into a
+        // list of its own to be copied there. tamnd/rucc#3052.
         let va_opt = Some(self.va_opt);
         let plain = |t: &PpToken| {
             t.kind != PpTokenKind::Punct(Punct::HashHash)
                 && !(t.kind == PpTokenKind::Ident && t.value == va_opt)
         };
-        let mut os = if !def.function_like && def.body.iter().all(plain) {
-            body
-        } else {
-            drop_placemarkers(self.subst_list(def, args, &body, invocation))
-        };
+        if !def.function_like && def.body.iter().all(plain) {
+            let start = pending.len();
+            pending.extend(def.body.iter().rev().map(body));
+            // Every token of the body has the same chain and no hide set, so the order they are
+            // marked in makes no difference to what they are marked with.
+            self.mark(&mut pending[start..], hs, invocation, here);
+            match pending[start..].last_mut() {
+                Some(first) => first.flags = carried_spacing(invocation.flags),
+                None => carry_spacing(pending, invocation),
+            }
+            return;
+        }
+        let outer = std::mem::replace(&mut self.current, here);
+        let body: Vec<Tok> = def.body.iter().map(body).collect();
+        let mut os = drop_placemarkers(self.subst_list(def, args, &body, invocation));
         self.current = outer;
+        self.mark(&mut os, hs, invocation, here);
+        if let Some(first) = os.first_mut() {
+            first.flags = carried_spacing(invocation.flags);
+        }
+        push_front(pending, os, invocation);
+    }
+
+    /// Gives the tokens a substitution made the hide set, the place and the chain they come
+    /// out of it with.
+    fn mark(&mut self, os: &mut [Tok], hs: HideSet, invocation: Tok, here: TraceId) {
+        let name = invocation.ident();
         // The steps this expansion has made, by the trace the tokens came with. The body has
         // the invocation's, which is `here`, and each argument has its own, so a few cover an
         // ordinary call, and `x * x` gives both uses of `x` the same step. Past the few a trace
@@ -673,7 +699,7 @@ impl<'a> Run<'a> {
         // Every token of the body has none, and those of an argument have that argument's, so
         // most tokens are hidden the same as the one before. The body's have `hs` alone.
         let mut hidden = (HideSet::EMPTY, hs);
-        for tok in &mut os {
+        for tok in os {
             if tok.hides != hidden.0 {
                 hidden = (tok.hides, self.hides.union(tok.hides, hs));
             }
@@ -702,10 +728,6 @@ impl<'a> Run<'a> {
                 tok.trace = last.1;
             }
         }
-        if let Some(first) = os.first_mut() {
-            first.flags = carried_spacing(invocation.flags);
-        }
-        os
     }
 
     /// The recursive half of substitution, which `__VA_OPT__` re-enters for its contents.
@@ -1110,13 +1132,19 @@ fn push_front(pending: &mut Vec<Tok>, mut replacement: Vec<Tok>, invocation: Tok
     // sqlite3_version[] = ...` after a `#pragma pack` gets eaten by the pragma instead, and the
     // program is left without the declaration and with a complaint about junk on the pragma.
     if replacement.is_empty() {
-        if let Some(next) = pending.last_mut() {
-            next.flags = next.flags.with(carried_spacing(invocation.flags));
-        }
+        carry_spacing(pending, invocation);
         return;
     }
     replacement.reverse();
     pending.append(&mut replacement);
+}
+
+/// Hands the spacing of an invocation that came to nothing on to the token rescanned after it.
+/// See [`push_front`].
+fn carry_spacing(pending: &mut [Tok], invocation: Tok) {
+    if let Some(next) = pending.last_mut() {
+        next.flags = next.flags.with(carried_spacing(invocation.flags));
+    }
 }
 
 /// The flags a replacement's first token inherits from the invocation.
